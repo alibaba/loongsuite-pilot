@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
-import { mimeFromImagePath, normalizeLocalImagePath } from '../../../src/multimodal/resolve.js';
+import { mimeFromMediaPath, modalityFromMime, normalizeLocalMediaPath } from '../../../src/multimodal/resolve.js';
 import { MAX_MULTIMODAL_DATA_SIZE } from '../../../src/multimodal/types.js';
 import type { BlobToUriFn, PathToUriFn } from '../../../src/multimodal/types.js';
 
@@ -18,7 +18,7 @@ export const fakeBlobToUri: BlobToUriFn = (input) => {
 };
 
 export const fakePathToUri: PathToUriFn = async (filePath) => {
-    const resolved = normalizeLocalImagePath(filePath);
+    const resolved = normalizeLocalMediaPath(filePath);
   if (!resolved) return null;
   let st;
   try {
@@ -26,13 +26,14 @@ export const fakePathToUri: PathToUriFn = async (filePath) => {
   } catch {
     return null;
   }
-  const mime = mimeFromImagePath(resolved);
-  if (!st.isFile() || st.size <= 0 || st.size > MAX_MULTIMODAL_DATA_SIZE || !mime) return null;
+  const mime = mimeFromMediaPath(resolved);
+  const modality = mime ? modalityFromMime(mime) : undefined;
+  if (!st.isFile() || st.size <= 0 || st.size > MAX_MULTIMODAL_DATA_SIZE || !mime || !modality) return null;
   const bytes = fs.readFileSync(resolved);
   return {
     uri: `oss://test/${bytes.toString('utf8')}`,
     mime_type: mime,
-    modality: 'image',
+    modality,
     size: st.size,
     sha256: 'deadbeef',
   };

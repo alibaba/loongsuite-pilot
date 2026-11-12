@@ -21,6 +21,8 @@ const DEFAULT_SESSION_DIR = '~/.loongsuite-pilot/logs/dsh';
 const DEFAULT_FILE_PATTERN = 'dsh-*.jsonl';
 const DSH_STATE_VERSION = 1;
 const READ_BUDGET_BYTES = 8 * 1024 * 1024;
+// Allow one record to cross the normal poll budget, while bounding decoding.
+const MAX_RECORD_BYTES = 2 * READ_BUDGET_BYTES;
 const READ_CHUNK_BYTES = 256 * 1024;
 const LEGACY_SCAN_BYTES = 4 * 1024 * 1024;
 const logger = createLogger('DshLogInput');
@@ -31,6 +33,13 @@ interface DshFileRuntimeState {
   boundSessionId?: string;
   activeTurnStartOffset?: number;
   lastHeaderOffset?: number;
+  incompleteTail?: { size: number; mtimeMs: number; ctimeMs: number };
+}
+
+interface DshScanResult {
+  offset: number;
+  readEnd: number;
+  discardedLineStart?: number;
 }
 
 export interface DshLogInputOptions
@@ -167,35 +176,74 @@ export class DshLogInput extends BaseSessionInput {
         replaced,
       });
       offset = 0;
-      this.stateStore.setOffset(stateKey, 0);
       this.fileStates.delete(filePath);
-      this.updateCheckpoint(stateKey, inode, undefined);
+      this.updateCheckpoint(stateKey, 0, inode);
     }
 
+    const discardedLineStart = persisted.extra?.dshDiscardedLineStartOffset;
+    const discarding = !replaced && !truncated
+      && typeof discardedLineStart === 'number' && Number.isSafeInteger(discardedLineStart)
+      && discardedLineStart >= 0 && discardedLineStart < offset
+      ? discardedLineStart
+      : undefined;
     let runtime = this.fileStates.get(filePath);
     if (!runtime || runtime.inode !== inode) {
-      runtime = await this.restoreRuntime(filePath, stateKey, inode, offset);
+      // A skip cursor may sit inside a huge line. Replay only the completed
+      // records before that line, then resume the scan at the saved cursor.
+      runtime = await this.restoreRuntime(filePath, stateKey, inode, discarding ?? offset);
       this.fileStates.set(filePath, runtime);
     }
 
-    if (stat.size <= offset) {
-      this.updateCheckpoint(stateKey, inode, runtime);
+    const metrics = this.getInputRuntimeAccumulator();
+    metrics?.observeBacklog(stat.size - offset);
+    const tail = runtime.incompleteTail;
+    if (stat.size <= offset || (tail?.size === stat.size
+      && tail.mtimeMs === stat.mtimeMs && tail.ctimeMs === stat.ctimeMs)) {
+      this.updateCheckpoint(stateKey, offset, inode, runtime, discarding);
       return [];
     }
 
     const entries: AgentActivityEntry[] = [];
-    const end = Math.min(stat.size, offset + READ_BUDGET_BYTES);
-    const completeEnd = await this.forEachCompleteLine(filePath, offset, end, async (line, lineOffset) => {
-      try {
-        const record = JSON.parse(line) as Record<string, unknown>;
-        entries.push(...this.processRecord(record, filePath, lineOffset, runtime!));
-      } catch (err) {
-        logger.warn('invalid dsh session line', { file: filePath, error: String(err) });
-      }
-    });
-
-    this.stateStore.setOffset(stateKey, completeEnd);
-    this.updateCheckpoint(stateKey, inode, runtime);
+    const batch = { bytes: 0, records: 0, parseSuccessRecords: 0, parseFailedRecords: 0, maxRecordBytes: 0 };
+    runtime.incompleteTail = undefined;
+    const result = await this.scanLines(
+      filePath, offset, Math.min(stat.size, offset + READ_BUDGET_BYTES),
+      (line, lineOffset, recordBytes) => {
+        if (line !== undefined && !line.trim()) return;
+        batch.records++;
+        batch.maxRecordBytes = Math.max(batch.maxRecordBytes, recordBytes);
+        if (line === undefined) {
+          batch.parseFailedRecords++;
+          logger.warn('oversized dsh session line skipped', { file: filePath, recordBytes });
+          return;
+        }
+        let record: Record<string, unknown>;
+        try {
+          record = JSON.parse(line) as Record<string, unknown>;
+          if (!record || typeof record !== 'object' || Array.isArray(record)) {
+            batch.parseFailedRecords++;
+            return;
+          }
+          batch.parseSuccessRecords++;
+        } catch {
+          batch.parseFailedRecords++;
+          logger.warn('invalid dsh session JSON', { file: filePath, lineOffset });
+          return;
+        }
+        try {
+          entries.push(...this.processRecord(record, filePath, lineOffset, runtime));
+        } catch (err) {
+          logger.warn('invalid dsh session line', { file: filePath, error: String(err) });
+        }
+      },
+      { extendedEnd: Math.min(stat.size, offset + MAX_RECORD_BYTES), discardedLineStart: discarding },
+    );
+    if (result.readEnd === stat.size && result.offset < stat.size) {
+      runtime.incompleteTail = { size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs };
+    }
+    batch.bytes = result.offset - offset;
+    metrics?.observeCommittedBatch(batch);
+    this.updateCheckpoint(stateKey, result.offset, inode, runtime, result.discardedLineStart);
     return entries;
   }
 
@@ -251,7 +299,8 @@ export class DshLogInput extends BaseSessionInput {
     }
 
     if (replayStart !== undefined && replayStart >= 0 && replayStart < offset) {
-      await this.forEachCompleteLine(filePath, replayStart, offset, async (line, lineOffset) => {
+      await this.scanLines(filePath, replayStart, offset, (line, lineOffset) => {
+        if (!line?.trim()) return;
         try {
           const record = JSON.parse(line) as Record<string, unknown>;
           // Replay only rebuilds correlation state. Already checkpointed entries
@@ -301,18 +350,31 @@ export class DshLogInput extends BaseSessionInput {
 
   private updateCheckpoint(
     stateKey: string,
+    offset: number,
     inode: number,
     runtime?: DshFileRuntimeState,
+    discardedLineStart?: number,
   ): void {
-    this.stateStore.update(stateKey, {
-      extra: {
-        inode,
-        dshStateVersion: DSH_STATE_VERSION,
-        dshActiveTurnStartOffset: runtime?.activeTurnStartOffset ?? null,
-        dshLastHeaderOffset: runtime?.lastHeaderOffset ?? null,
-        dshBoundSessionId: runtime?.boundSessionId ?? null,
-      },
-    });
+    const current = this.stateStore.get(stateKey);
+    const extra = {
+      inode,
+      dshStateVersion: DSH_STATE_VERSION,
+      dshActiveTurnStartOffset: runtime?.activeTurnStartOffset ?? null,
+      dshLastHeaderOffset: runtime?.lastHeaderOffset ?? null,
+      dshBoundSessionId: runtime?.boundSessionId ?? null,
+      dshDiscardedLineStartOffset: discardedLineStart ?? null,
+    };
+    const previous = current.extra;
+    if ((current.lastOffset ?? 0) === offset
+      && previous?.inode === extra.inode
+      && previous.dshStateVersion === extra.dshStateVersion
+      && previous.dshActiveTurnStartOffset === extra.dshActiveTurnStartOffset
+      && previous.dshLastHeaderOffset === extra.dshLastHeaderOffset
+      && previous.dshBoundSessionId === extra.dshBoundSessionId
+      && (previous.dshDiscardedLineStartOffset ?? null) === extra.dshDiscardedLineStartOffset) {
+      return;
+    }
+    this.stateStore.update(stateKey, { lastOffset: offset, extra });
   }
 
   private restoreHeader(
@@ -338,30 +400,20 @@ export class DshLogInput extends BaseSessionInput {
     lineOffset: number,
     committedOffset: number,
   ): Promise<Record<string, unknown> | undefined> {
-    const length = Math.min(LEGACY_SCAN_BYTES, committedOffset - lineOffset);
-    if (length <= 0) return undefined;
-    const handle = await fs.open(filePath, 'r');
-    try {
-      const bytes = Buffer.alloc(length);
-      let bytesRead = 0;
-      while (bytesRead < length) {
-        const result = await handle.read(
-          bytes,
-          bytesRead,
-          length - bytesRead,
-          lineOffset + bytesRead,
-        );
-        if (result.bytesRead <= 0) break;
-        bytesRead += result.bytesRead;
-      }
-      const newline = bytes.subarray(0, bytesRead).indexOf(0x0a);
-      if (newline < 0) return undefined;
-      return JSON.parse(bytes.subarray(0, newline).toString('utf-8')) as Record<string, unknown>;
-    } catch {
-      return undefined;
-    } finally {
-      await handle.close();
-    }
+    let record: Record<string, unknown> | undefined;
+    await this.scanLines(filePath, lineOffset, Math.min(committedOffset, lineOffset + MAX_RECORD_BYTES),
+      line => {
+        if (line !== undefined) {
+          try {
+            const value: unknown = JSON.parse(line);
+            if (value && typeof value === 'object' && !Array.isArray(value)) {
+              record = value as Record<string, unknown>;
+            }
+          } catch { /* Ignore a malformed cached header. */ }
+        }
+        return false;
+      });
+    return record;
   }
 
   private async findLegacyLastHeader(
@@ -373,7 +425,7 @@ export class DshLogInput extends BaseSessionInput {
     const handle = await fs.open(filePath, 'r');
     try {
       const bytes = Buffer.alloc(offset - start);
-      const { bytesRead } = await handle.read(bytes, 0, bytes.length, start);
+      const bytesRead = await this.readChunk(handle, bytes, start);
       const data = bytes.subarray(0, bytesRead);
       let cursor = 0;
       if (start > 0) {
@@ -412,7 +464,7 @@ export class DshLogInput extends BaseSessionInput {
     const handle = await fs.open(filePath, 'r');
     try {
       const bytes = Buffer.alloc(offset - start);
-      const { bytesRead } = await handle.read(bytes, 0, bytes.length, start);
+      const bytesRead = await this.readChunk(handle, bytes, start);
       const data = bytes.subarray(0, bytesRead);
       let cursor = 0;
       if (start > 0) {
@@ -439,42 +491,72 @@ export class DshLogInput extends BaseSessionInput {
     }
   }
 
-  private async forEachCompleteLine(
+  private async readChunk(handle: fs.FileHandle, buffer: Buffer, position: number): Promise<number> {
+    const metrics = this.getInputRuntimeAccumulator();
+    const startedAt = metrics?.now();
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+    if (metrics && startedAt !== undefined) {
+      metrics.observeRead(bytesRead, buffer.length, metrics.now() - startedAt);
+    }
+    return bytesRead;
+  }
+
+  private async scanLines(
     filePath: string,
     start: number,
     end: number,
-    visit: (line: string, lineOffset: number) => Promise<void>,
-  ): Promise<number> {
-    if (end <= start) return start;
+    visit: (line: string | undefined, lineOffset: number, recordBytes: number) => boolean | void,
+    options: { extendedEnd?: number; discardedLineStart?: number } = {},
+  ): Promise<DshScanResult> {
     const handle = await fs.open(filePath, 'r');
-    let readPosition = start;
-    let carry = Buffer.alloc(0);
-    let carryOffset = start;
-    let completeEnd = start;
+    let readEnd = start;
+    let offset = start;
+    let discardedLineStart = options.discardedLineStart;
+    let lineStart = discardedLineStart ?? start;
+    let parts: Buffer[] = [];
     try {
-      while (readPosition < end) {
-        const length = Math.min(READ_CHUNK_BYTES, end - readPosition);
-        const chunk = Buffer.alloc(length);
-        const { bytesRead } = await handle.read(chunk, 0, length, readPosition);
-        if (bytesRead <= 0) break;
-        readPosition += bytesRead;
-        const combined = carry.length > 0
-          ? Buffer.concat([carry, chunk.subarray(0, bytesRead)])
-          : chunk.subarray(0, bytesRead);
+      while (readEnd < end) {
+        const chunk = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, end - readEnd));
+        const bytesRead = await this.readChunk(handle, chunk, readEnd);
+        if (bytesRead === 0) break;
+        const data = chunk.subarray(0, bytesRead);
+        const chunkStart = readEnd;
+        readEnd += bytesRead;
         let cursor = 0;
-        while (cursor < combined.length) {
-          const newline = combined.indexOf(0x0a, cursor);
-          if (newline < 0) break;
-          const lineOffset = carryOffset + cursor;
-          const line = combined.subarray(cursor, newline).toString('utf-8');
-          if (line.trim()) await visit(line, lineOffset);
-          cursor = newline + 1;
-          completeEnd = carryOffset + cursor;
+        while (cursor < bytesRead) {
+          const newline = data.indexOf(0x0a, cursor);
+          const segmentEnd = newline < 0 ? bytesRead : newline + 1;
+          const recordBytes = chunkStart + segmentEnd - lineStart;
+          if (discardedLineStart === undefined) {
+            if (recordBytes > MAX_RECORD_BYTES || (recordBytes === MAX_RECORD_BYTES && newline < 0)) {
+              discardedLineStart = lineStart;
+              parts = [];
+            } else {
+              parts.push(data.subarray(cursor, newline < 0 ? bytesRead : newline));
+            }
+          }
+          if (newline >= 0) {
+            const line = discardedLineStart === undefined
+              ? (parts.length === 1 ? parts[0] : Buffer.concat(parts)).toString('utf-8')
+              : undefined;
+            offset = chunkStart + segmentEnd;
+            if (visit(line, lineStart, recordBytes) === false) return { offset, readEnd };
+            lineStart = offset;
+            discardedLineStart = undefined;
+            parts = [];
+          } else if (discardedLineStart !== undefined) {
+            // Persist progress through the oversized line so the next poll or
+            // restart can resume discarding without re-reading its prefix.
+            offset = readEnd;
+          }
+          cursor = segmentEnd;
         }
-        carry = combined.subarray(cursor);
-        carryOffset = completeEnd;
+        if (readEnd === end && offset === start && options.extendedEnd !== undefined) {
+          // Finish a single line that blocked the normal read window.
+          end = options.extendedEnd;
+        }
       }
-      return completeEnd;
+      return { offset, readEnd, discardedLineStart };
     } finally {
       await handle.close();
     }

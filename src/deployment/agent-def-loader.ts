@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import type { AgentDefinition } from '../types/index.js';
 import { isReservedPiSdkAgentId, isValidPiSdkAgentId } from '../pi-sdk/pi-sdk-agent-identity.js';
 import { resolveHome } from '../utils/fs-utils.js';
+import { resolveDoubaoWorkPaths } from '../utils/doubao-work-paths.js';
 import { createLogger } from '../utils/logger.js';
 import { resolvePiCodingAgentDir, resolveGrokHome, resolveDshHome } from './env-agent-dirs.js';
 
@@ -100,6 +101,7 @@ export class AgentDefLoader {
       && mode !== 'directory-plugin'
       && mode !== 'detection-only'
       && mode !== 'dsh-yaml-patch'
+      && mode !== 'copilot-plugin'
     ) {
       logger.warn('invalid agent definition: unknown deployMode', { file: filePath, deployMode: mode });
       return false;
@@ -177,6 +179,7 @@ export class AgentDefLoader {
     let result = s
       .replace(/\$PILOT_DIR/g, this.pilotDir)
       .replace(/\$PILOT_DATA/g, this.dataDir)
+      .replace(/\$DOUBAO_WORK_DATA/g, () => resolveDoubaoWorkPaths().userDataRoot ?? '$DOUBAO_WORK_DATA')
       .replace(/\$HERMES_CLI/g, hermesCli)
       .replace(/\$HERMES_HOME/g, hermesHome)
       .replace(/\$PI_CODING_AGENT_DIR/g, piCodingAgentDir)

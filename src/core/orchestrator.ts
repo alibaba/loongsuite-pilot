@@ -64,6 +64,7 @@ import { GrokBuildLogInput } from '../inputs/grok-build-log/grok-build-log-input
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
 import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
+import { CopilotLogInput } from '../inputs/copilot-log/copilot-log-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
@@ -73,6 +74,7 @@ import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
+import { DoubaoWorkInput } from '../inputs/doubao-work/doubao-work-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -148,6 +150,7 @@ export class Orchestrator extends EventEmitter {
     'codex-transcript': 'codex',
     'kiro-cli-log': 'kiro-cli',
     'kiro-cli-session': 'kiro-cli',
+    'copilot-log': 'copilot',
     'opencode-log': 'opencode',
     'pi-coding-agent-log': 'pi-coding-agent',
     'mimo-code-log': 'mimo-code',
@@ -156,6 +159,7 @@ export class Orchestrator extends EventEmitter {
     'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
+    'doubao-work': 'doubao-work',
     'dsh-log': 'dsh',
   };
 
@@ -222,6 +226,23 @@ export class Orchestrator extends EventEmitter {
     );
     await this.agentControlManager.load();
 
+    // Journal replay during flusher startup must use the current privacy rules.
+    this.inputManager = new InputManager();
+    this.inputManager.setConfiguredUserId(this.config.userId);
+    const workspacePolicy = new WorkspacePolicy(
+      this.config.privacy?.excludeWorkspaces,
+      path.join(this.dataDir, 'state', 'workspace-exclusions'),
+    );
+    this.inputManager.setWorkspacePolicy(workspacePolicy);
+    this.inputManager.setAgentsConfig(this.config.agents);
+    this.inputManager.setMaskConfig(
+      this.config.mask ?? {
+        mode: 'none',
+        types: [],
+        replacementMode: 'placeholder',
+      },
+    );
+
     // 3. Build flushers
     this.globalAttributesProvider = new GlobalAttributesProvider(
       this.config.globalSpanAttributes ?? {},
@@ -233,23 +254,8 @@ export class Orchestrator extends EventEmitter {
     const version = readInstalledVersion(this.dataDir);
     this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userId: this.config.userId });
 
-    this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
-    this.inputManager.setConfiguredUserId(this.config.userId);
-    const workspacePolicy = new WorkspacePolicy(
-      this.config.privacy?.excludeWorkspaces,
-      path.join(this.dataDir, 'state', 'workspace-exclusions'),
-    );
-    this.inputManager.setWorkspacePolicy(workspacePolicy);
-    this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
-    this.inputManager.setMaskConfig(
-      this.config.mask ?? {
-        mode: 'none',
-        types: [],
-        replacementMode: 'placeholder',
-      },
-    );
     this.verdictStore = new ToolVerdictStore(interceptorToolVerdictPath(this.dataDir));
     this.verdictStore.restore();
     const interceptorConfig = await loadInterceptorConfig();
@@ -348,6 +354,7 @@ export class Orchestrator extends EventEmitter {
       ...this.buildGrokBuildInterceptTargets(),
       ...this.buildPluginInjectInterceptTargets(),
       ...this.buildDirectoryPluginInterceptTargets(),
+      ...this.buildCopilotPluginInterceptTargets(),
       ...this.buildDshYamlPatchInterceptTargets(),
     ];
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
@@ -572,6 +579,7 @@ export class Orchestrator extends EventEmitter {
     this.acpCorrelateRetentionService?.stop();
     await this.localWorkerActivationService?.stop();
     await this.deploymentManager?.stopWorkers();
+    this.inputManager?.cancelPendingOutputs();
     await this.agentDiscoveryService?.stop();
     await this.inputManager?.stopAll();
     // The final dataflow window must observe the last serialized collect and
@@ -868,6 +876,26 @@ export class Orchestrator extends EventEmitter {
     return targets;
   }
 
+  private buildCopilotPluginInterceptTargets(): InterceptCheckTarget[] {
+    if (process.platform === 'win32') return [];
+    return this.deploymentManager.getDefinitions()
+      .filter(def => def.deployMode === 'copilot-plugin' && def.copilotPlugin)
+      .map(def => ({
+        id: `copilot-plugin:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
+        precondition: () => this.deploymentManager.isAgentDetected(def),
+        check: async () => !(await this.deploymentManager.needsRedeploy(def)),
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          if (!result.success || result.skipped) throw new Error(result.error ?? 'Copilot disappeared before plugin repair');
+        },
+        cleanup: async () => {
+          if (!this.deploymentManager.hasRecord(def.id)) return;
+          if (!(await this.deploymentManager.undeployAgent(def))) throw new Error('Copilot plugin cleanup incomplete');
+        },
+      }));
+  }
+
   /** Self-heal managed native plugin directories, such as Hermes plugins. */
   private buildDirectoryPluginInterceptTargets(): InterceptCheckTarget[] {
     const defs = this.deploymentManager.getDefinitions();
@@ -971,13 +999,20 @@ export class Orchestrator extends EventEmitter {
       const otlpTraceCfg = buildOtlpTraceConfig(this.config);
       if (otlpTraceCfg?.enabled && otlpTraceCfg.endpoints.length > 0) {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
+        const { CodexTurnJournal } = await import('../flushers/codex-turn-journal.js');
         const r = new OtlpTraceFlusher(
           { ...otlpTraceCfg, dataDir: this.dataDir },
           this.globalAttributesProvider,
+          undefined,
+          new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns')),
+          entries => this.inputManager!.prepareRestoredEntries(entries),
         );
+        await r.start();
         flushers.push(r);
       }
     } catch (err) {
+      // Losing a retained Codex turn is not a malformed-config fallback.
+      if ((err as Error)?.name === 'CodexTurnJournalError') throw err;
       // Never let a malformed trace config take down the other flushers.
       logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
     }
@@ -1193,6 +1228,7 @@ export class Orchestrator extends EventEmitter {
     const qoderCnLogDir = path.join(this.dataDir, 'logs', 'qoder-cn', 'history');
     const qoderCnTraceInput = new QoderCnTraceInput({
       stateStore: this.stateStore,
+      dataDir: this.dataDir,
       logDir: qoderCnLogDir,
       pollIntervalMs: listenerCfg['qoder-cn-trace']?.pollInterval,
     });
@@ -1358,11 +1394,20 @@ export class Orchestrator extends EventEmitter {
 
     const qwenWorkCNLogDir = path.join(this.dataDir, 'logs', 'qwen-work-cn', 'history');
     const qwenWorkCNSegmentsRoot = resolveHome('~/.qwenworkcn/logs/sessions');
+    const qwenWorkCNAgentCfg = this.config.agents['qwen-work-cn'] ?? {};
+    const qwenWorkCNMultimodalEnabled = !!this.multimodalProcessor
+      && isAgentMultimodalEnabled('qwen-work-cn', qwenWorkCNAgentCfg);
     const qwenWorkCNTraceInput = new QwenWorkCNTraceInput({
       stateStore: this.stateStore,
       logDir: qwenWorkCNLogDir,
       segmentsRoot: qwenWorkCNSegmentsRoot,
       pollIntervalMs: listenerCfg['qwen-work-cn-trace']?.pollInterval,
+      multimodal: {
+        enabled: qwenWorkCNMultimodalEnabled,
+        uploadMode: qwenWorkCNAgentCfg.multimodal?.uploadMode ?? 'none',
+        allowedRootPaths: qwenWorkCNAgentCfg.multimodal?.allowedRootPaths,
+        ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+      },
     });
     this.inputManager.registerInput(qwenWorkCNTraceInput);
     const qwenWorkCNTraceEnabled = () =>
@@ -1430,6 +1475,8 @@ export class Orchestrator extends EventEmitter {
       && isAgentMultimodalEnabled('qoder', qoderAgentCfg);
     const qoderTraceInput = new QoderTraceInput({
       stateStore: this.stateStore,
+      resolveTraceContext: entries => this.inputManager.stampTraceContext(entries),
+      dataDir: this.dataDir,
       logDir: qoderCliLogDir,
       pollIntervalMs: listenerCfg['qoder-trace']?.pollInterval,
       multimodal: {
@@ -1603,6 +1650,26 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['codex-transcript']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['codex-transcript']?.pollInterval,
+      }),
+    );
+
+    // --- Copilot CLI (session events.jsonl polling) ---
+    const copilotLogInput = new CopilotLogInput({
+      stateStore: this.stateStore,
+      pollIntervalMs: listenerCfg['copilot-log']?.pollInterval,
+      dataDir: this.config.dataDir,
+    });
+    this.inputManager.registerInput(copilotLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(copilotLogInput, {
+        watchPaths: CopilotLogInput.getWatchPaths(),
+        isAvailable: CopilotLogInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['copilot-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'copilot-log',
+            listenerCfg['copilot-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['copilot-log']?.pollInterval,
       }),
     );
 
@@ -1809,6 +1876,22 @@ export class Orchestrator extends EventEmitter {
         pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
       }),
     );
+
+    // --- Doubao Work (passive frontend client-message lifecycle; no host injection) ---
+    const doubaoLogDir = listenerCfg['doubao-work']?.logDir;
+    const doubaoWorkInput = new DoubaoWorkInput({
+      stateStore: this.stateStore,
+      logDir: doubaoLogDir,
+      pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
+    });
+    this.inputManager.registerInput(doubaoWorkInput);
+    entries.push(this.inputManager.buildDetectionEntry(doubaoWorkInput, {
+      watchPaths: DoubaoWorkInput.getWatchPaths(doubaoLogDir),
+      isAvailable: () => DoubaoWorkInput.checkAvailability(doubaoLogDir),
+      enabled: () => this.isAgentGatedEnabled('doubao-work')
+        && this.agentControlManager.resolveEnabled('doubao-work', listenerCfg['doubao-work']?.enabled ?? true),
+      pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
+    }));
 
     return entries;
   }

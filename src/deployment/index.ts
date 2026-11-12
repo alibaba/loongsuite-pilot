@@ -4,5 +4,6 @@ export { HookStrategy } from './hook-strategy.js';
 export { PluginProbeStrategy } from './plugin-probe-strategy.js';
 export { PluginInjectStrategy } from './plugin-inject-strategy.js';
 export { DirectoryPluginStrategy } from './directory-plugin-strategy.js';
+export { CopilotPluginStrategy, buildPluginManifest, buildPluginHooksJson } from './copilot-plugin-strategy.js';
 export { writeDeployNotification, buildRcSnippet, readPendingNotifications } from './deploy-notification.js';
 export { detectAgent } from './detect-utils.js';

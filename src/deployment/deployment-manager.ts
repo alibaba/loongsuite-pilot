@@ -13,10 +13,11 @@ import { PluginInjectStrategy } from './plugin-inject-strategy.js';
 import { DirectoryPluginStrategy } from './directory-plugin-strategy.js';
 import { DetectionOnlyStrategy } from './detection-only-strategy.js';
 import { DshYamlPatchStrategy } from './dsh-yaml-patch-strategy.js';
+import { CopilotPluginStrategy } from './copilot-plugin-strategy.js';
 import { writeDeployNotification } from './deploy-notification.js';
 import { runPluginMigration } from './plugin-migration.js';
 import { HookManager } from '../hooks/hook-manager.js';
-import { readJsonFile, writeJsonFile } from '../utils/fs-utils.js';
+import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import {
   applyPersistedDeployTargets,
@@ -45,6 +46,7 @@ export class DeploymentManager {
   private readonly directoryPluginStrategy: DirectoryPluginStrategy;
   private readonly detectionOnlyStrategy: DetectionOnlyStrategy;
   private readonly dshYamlPatchStrategy: DshYamlPatchStrategy;
+  private readonly copilotPluginStrategy: CopilotPluginStrategy;
   private readonly loader: AgentDefLoader;
   private readonly stateFilePath: string;
   private state: DeployedAgentsState = {};
@@ -70,6 +72,7 @@ export class DeploymentManager {
     this.directoryPluginStrategy = new DirectoryPluginStrategy(opts.dataDir);
     this.detectionOnlyStrategy = new DetectionOnlyStrategy();
     this.dshYamlPatchStrategy = new DshYamlPatchStrategy(opts.dataDir);
+    this.copilotPluginStrategy = new CopilotPluginStrategy({ dataDir: opts.dataDir });
 
     const loaderOpts: AgentDefLoaderOptions = {
       builtinDir: opts.builtinAgentsDir ?? path.join(opts.pilotDir, 'agents.d'),
@@ -129,7 +132,7 @@ export class DeploymentManager {
    * no record, so we never touch its settings file (matching the "does not
    * detect or deploy disabled agents" contract).
    *
-   * Scope remains limited to hook and dsh-yaml-patch. Other deployment modes
+   * Scope includes hook, dsh-yaml-patch and copilot-plugin. Other deployment modes
    * retain their existing lifecycle behavior.
    *
    * The record is dropped only once cleanup succeeds. Hook uninstall is
@@ -148,7 +151,7 @@ export class DeploymentManager {
     };
 
     if (
-      (def.deployMode !== 'hook' && def.deployMode !== 'dsh-yaml-patch')
+      (def.deployMode !== 'hook' && def.deployMode !== 'dsh-yaml-patch' && def.deployMode !== 'copilot-plugin')
       || !this.state[def.id]
     ) {
       logger.debug('agent excluded from deployment', { agentId: def.id });
@@ -164,7 +167,9 @@ export class DeploymentManager {
       const target = applyPersistedDeployTargets(def, this.state[def.id]);
       ok = target.deployMode === 'hook'
         ? await this.hookStrategy.undeploy(target)
-        : await this.dshYamlPatchStrategy.undeploy(target, this.state[def.id]);
+        : target.deployMode === 'copilot-plugin'
+          ? await this.copilotPluginStrategy.undeploy(target)
+          : await this.dshYamlPatchStrategy.undeploy(target, this.state[def.id]);
     } catch (err) {
       logger.error('agent disable undeploy failed', { agentId: def.id, error: String(err) });
     }
@@ -487,6 +492,14 @@ export class DeploymentManager {
         newRecord.dshPatchPath = dshTarget.patchPath;
       }
 
+      if (def.copilotPlugin) {
+        newRecord.cleanupRequired = false;
+        newRecord.copilotPluginTargets = {
+          pluginRoot: resolveHome(def.copilotPlugin.pluginRoot),
+          settingsPath: resolveHome(def.copilotPlugin.settingsPath),
+          configPath: resolveHome(def.copilotPlugin.configPath ?? '~/.copilot/config.json'),
+        };
+      }
       Object.assign(newRecord, lifecycleFieldsForDeploy(def, result));
       if (def.id === 'grok-build') {
         const written = newRecord.hookSettingsPath ?? def.hook?.settingsPath;
@@ -497,6 +510,19 @@ export class DeploymentManager {
       this.state[def.id] = newRecord;
       this.touchedIds.add(def.id);
     } else if (!result.skipped) {
+      if (def.deployMode === 'copilot-plugin' && result.cleanupRequired && def.copilotPlugin) {
+        this.state[def.id] = {
+          ...record, deployMode: def.deployMode, deployedAt: record?.deployedAt ?? new Date().toISOString(),
+          cleanupRequired: true,
+          copilotPluginTargets: {
+            pluginRoot: resolveHome(def.copilotPlugin.pluginRoot),
+            settingsPath: resolveHome(def.copilotPlugin.settingsPath),
+            configPath: resolveHome(def.copilotPlugin.configPath ?? '~/.copilot/config.json'),
+          },
+          ...(this.installedBy ? { installedBy: this.installedBy } : {}),
+        };
+        this.touchedIds.add(def.id);
+      }
       // A strategy that RETURNS {success:false, error} used to vanish here: only a
       // thrown error was logged, and deployAll just added it to the `failed` tally.
       // So "deployAll complete {failed:1}" was the entire record of dsh failing every
@@ -527,6 +553,8 @@ export class DeploymentManager {
         return this.detectionOnlyStrategy;
       case 'dsh-yaml-patch':
         return this.dshYamlPatchStrategy;
+      case 'copilot-plugin':
+        return this.copilotPluginStrategy;
       default:
         throw new Error(`unknown deployMode: ${def.deployMode}`);
     }

@@ -104,6 +104,15 @@ await build({
   plugins: commonPlugins,
 });
 
+// Self-contained uninstall helper: JSONC edits stay available without node_modules.
+await build({
+  entryPoints: ['src/copilot-cleanup-cli.ts'],
+  outfile: 'dist/copilot-cleanup.cjs',
+  platform: 'node', target: 'es2022', format: 'cjs', bundle: true,
+  mainFields: ['module', 'main'], minifySyntax: true,
+  define: commonDefine, plugins: commonPlugins,
+});
+
 // Container hook CLI. No native-deps-guard banner and no node:sqlite: a
 // payload whose libc cannot load the daemon must still be able to install
 // hooks. postAlarm is the stub in this file; proprietary builds alias it.

@@ -3,6 +3,8 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { cleanupTempDir, createTempDir } from '../../../helpers/fixture-builder.js';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
+import { DEFAULT_JSONL_SEGMENT_BYTES, LOCAL_LOG_EMERGENCY_FILE_BYTES } from '../../../../src/utils/segmented-jsonl-writer.js';
+import { getTodayDateString } from '../../../../src/utils/fs-utils.js';
 
 function mockSpan() {
   return {
@@ -39,6 +41,34 @@ describe('OtlpTraceFlusher failed-log lifecycle', () => {
   afterEach(async () => {
     vi.useRealTimers();
     await cleanupTempDir(dataDir);
+  });
+
+  it.each(['debug', 'failed'] as const)('rotates %s evidence before appending past the normal segment size', async sink => {
+    const flusher = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318' }], protocol: 'http/protobuf', serviceName: 'test-pilot', dataDir });
+    const dir = path.join(dataDir, 'logs', `otlp-${sink}`); await fs.mkdir(dir, { recursive: true });
+    const name = `test-pilot-claude-code${sink === 'failed' ? '__primary' : ''}-${getTodayDateString()}.jsonl`;
+    const active = path.join(dir, name); await fs.writeFile(active, ''); await fs.truncate(active, DEFAULT_JSONL_SEGMENT_BYTES);
+    if (sink === 'failed') await (flusher as any).writeFailedLog('claude-code', 'primary', [mockSpan()], { code: 2, message: 'failure' });
+    else await (flusher as any).writeDebugLog('claude-code', [mockSpan()]);
+    const files = await fs.readdir(dir); expect(files).toHaveLength(2);
+    const closed = files.find(file => file.includes('.part-'))!;
+    expect((await fs.stat(path.join(dir, closed))).size).toBe(DEFAULT_JSONL_SEGMENT_BYTES);
+    const record = JSON.parse(await fs.readFile(active, 'utf8'));
+    expect(record.name).toBe('failed-span');
+    if (sink === 'failed') expect(record._error.message).toBe('failure');
+    await flusher.shutdown();
+  });
+
+  it.each(['debug', 'failed'] as const)('removes an over-3-GiB legacy %s active file before appending', async sink => {
+    const flusher = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318' }], protocol: 'http/protobuf', serviceName: 'test-pilot', dataDir });
+    const dir = path.join(dataDir, 'logs', `otlp-${sink}`); await fs.mkdir(dir, { recursive: true });
+    const name = `test-pilot-claude-code${sink === 'failed' ? '__primary' : ''}-${getTodayDateString()}.jsonl`;
+    const active = path.join(dir, name); await fs.writeFile(active, ''); await fs.truncate(active, LOCAL_LOG_EMERGENCY_FILE_BYTES + 1);
+    if (sink === 'failed') await (flusher as any).writeFailedLog('claude-code', 'primary', [mockSpan()], { code: 2, message: 'failure' });
+    else await (flusher as any).writeDebugLog('claude-code', [mockSpan()]);
+    expect(await fs.readdir(dir)).toEqual([name]);
+    expect(JSON.parse(await fs.readFile(active, 'utf8')).name).toBe('failed-span');
+    await flusher.shutdown();
   });
 
   it('writes the existing full span and _error to a safe daily file', async () => {

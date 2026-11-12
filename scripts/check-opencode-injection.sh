@@ -31,7 +31,7 @@ hdr()  { printf "\n${BLD}${BLU}== %s ==${RST}\n" "$1"; }
 PILOT_DATA="${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
 PLUGIN_FILE="$PILOT_DATA/plugins/opencode/plugin.mjs"
 LOG_DIR="$PILOT_DATA/logs/opencode"
-MARKERS='loongsuite-pilot-opencode|plugins/opencode/plugin.mjs'
+MARKERS='loongsuite-pilot-opencode|plugins/opencode'
 CFG_CANDIDATES=(
   "$HOME/.config/opencode/opencode.jsonc"
   "$HOME/.config/opencode/opencode.json"

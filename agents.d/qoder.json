@@ -8,7 +8,7 @@
   },
   "hook": {
     "settingsPath": "~/.qoder/settings.json",
-    "events": ["Stop"],
+    "events": ["Stop", "SubagentStart", "SubagentStop"],
     "hookCommand": "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",

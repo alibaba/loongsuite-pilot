@@ -2,13 +2,23 @@ import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } fr
 import { buildAgentActivityEntry } from '../../../src/normalization/entry-builder.js';
 import { ClientType, ActionType } from '../../../src/types/index.js';
 
-vi.mock('uuid', () => ({
-  v4: vi.fn().mockReturnValue('mock-uuid'),
+const uuidV4 = vi.hoisted(() => vi.fn(() => 'mock-uuid'));
+
+vi.mock('../../../src/utils/uuid.js', () => ({
+  uuidV4,
 }));
 
-import { v4 as mockUuidV4 } from 'uuid';
-
 describe('buildAgentActivityEntry', () => {
+  it.each(['llm.request', 'llm.response', 'tool.call', 'tool.result'] as const)(
+    'keeps the historical name %s without adding a standard-name copy', eventName => {
+      const entry = buildAgentActivityEntry({
+        'event.name': eventName,
+        'gen_ai.agent.type': ClientType.CodexCliHook,
+      });
+      expect(entry['event.name']).toBe(eventName);
+    },
+  );
+
   let nowSpy: MockInstance<[], number>;
 
   beforeEach(() => {
@@ -17,11 +27,12 @@ describe('buildAgentActivityEntry', () => {
 
   afterEach(() => {
     nowSpy.mockRestore();
-    vi.mocked(mockUuidV4).mockClear();
+    uuidV4.mockReset();
+    uuidV4.mockReturnValue('mock-uuid');
   });
 
   it('generates unique UUIDs per call', () => {
-    vi.mocked(mockUuidV4)
+    uuidV4
       .mockReturnValueOnce('uuid-aaa')
       .mockReturnValueOnce('uuid-bbb');
 

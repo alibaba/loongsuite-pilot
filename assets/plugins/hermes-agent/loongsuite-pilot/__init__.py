@@ -39,6 +39,8 @@ MAX_TURN_MESSAGES = 64
 MAX_PARTS = 64
 MAX_COLLECTION_ITEMS = 128
 MAX_CONTENT_CHARS = 32 * 1024
+MAX_PENDING_INPUT_RECORDS = 128
+MAX_PENDING_INPUT_BYTES = 2 * 1024 * 1024
 MAX_VALUE_DEPTH = 8
 MAX_RESOURCE_FIELD_VALUE_LENGTH = 512
 LOG_RETENTION_SECONDS = 7 * 24 * 60 * 60
@@ -60,6 +62,134 @@ _SESSIONS: Dict[str, Dict[str, Any]] = {}
 _EVICTED_TURNS: Dict[str, Any] = {}
 _TTFT_API: contextvars.ContextVar = contextvars.ContextVar("pilot_hermes_ttft", default=None)
 _ACTIVE_DELEGATION = contextvars.ContextVar("pilot_hermes_delegation", default=None)
+_NATIVE_RUN_SCOPE = contextvars.ContextVar("pilot_hermes_native_run", default=None)
+_NATIVE_RUN_OBSERVER_READY = False
+_NATIVE_RUN_OBSERVER_WARNED = False
+_NATIVE_RUN_RETRY_AFTER = 0.0
+
+
+def _bind_native_run(state: Dict[str, Any], turn: Dict[str, Any]) -> None:
+    scope = _NATIVE_RUN_SCOPE.get()
+    if scope is None or scope["closed"]:
+        return
+    session_id = turn["session_id"]
+    # Compression can rotate this same native agent's session in place. Keep
+    # its observed aliases, without adopting a different agent's session.
+    if session_id not in scope["sessions"] and session_id != getattr(scope["agent"], "session_id", None):
+        return
+    owned = scope["turns"]
+    key = turn["fallback_turn_id"]
+    if key not in owned and len(owned) >= MAX_ACTIVE_TURNS:
+        return
+    scope["sessions"].add(session_id)
+    owned[key] = (state, turn)
+    # Capability belongs to this covered invocation, not just this plugin
+    # version. Unwrapped calls and failed installation retain legacy fallback.
+    turn["native_run_observer"] = True
+
+
+def _finish_native_run(scope: Dict[str, Any], result: Any) -> None:
+    # Hermes v2026.6.5 has error/interrupt returns before on_session_end.
+    # The native call has actually returned here: no idle/finish-reason guess
+    # and no adoption of another foreground/background invocation by session.
+    with _STATE_LOCK:
+        scope["closed"] = True
+    payload = {}
+    if isinstance(result, dict):
+        if isinstance(result.get("messages"), list):
+            payload["conversation_history"] = result["messages"]
+        if isinstance(result.get("final_response"), str):
+            payload["assistant_response"] = result["final_response"]
+    with _STATE_LOCK:
+        for state, turn in scope["turns"].values():
+            if state["turns"].get(turn["fallback_turn_id"]) is turn:
+                _flush_turn(state, turn, payload)
+
+
+def _install_run_completion_observer() -> bool:
+    global _NATIVE_RUN_SCOPE, _NATIVE_RUN_OBSERVER_READY
+    # Plugin discovery can happen inside model_tools while run_agent.AIAgent
+    # is still undefined. v2026.6.5's class forwards to this native loop; wrap
+    # that boundary so the very first invocation is covered after cold import.
+    try:
+        owner = importlib.import_module("agent.conversation_loop")
+    except ImportError:
+        module = sys.modules.get("run_agent") or sys.modules.get("__main__")
+        owner = getattr(module, "AIAgent", None)
+    original = getattr(owner, "run_conversation", None)
+    if not callable(original) or inspect.iscoroutinefunction(original) or inspect.isgeneratorfunction(original):
+        return False
+    if hasattr(original, "_pilot_run_scope"):
+        # Re-registration must not nest wrappers or strand an in-flight token.
+        _NATIVE_RUN_SCOPE = original._pilot_run_scope
+        original._pilot_run_finish = _finish_native_run
+        _NATIVE_RUN_OBSERVER_READY = True
+        return True
+
+    @functools.wraps(original)
+    def observed(agent: Any, *args: Any, **kwargs: Any) -> Any:
+        context = observed._pilot_run_scope
+        try:
+            scope = {"agent": agent, "sessions": {getattr(agent, "session_id", None)},
+                     "turns": {}, "closed": False}
+            token = context.set(scope)
+        except Exception:
+            return original(agent, *args, **kwargs)
+        result = None
+        try:
+            # No telemetry lock spans the application call. Native hooks run
+            # normally, and results/exceptions/cancellation retain identity.
+            result = original(agent, *args, **kwargs)
+            return result
+        finally:
+            try:
+                observed._pilot_run_finish(scope, result)
+            except Exception as error:
+                _report_internal_error("native run completion", error)
+            finally:
+                try:
+                    with _STATE_LOCK:
+                        scope["closed"] = True
+                        scope["agent"] = None
+                        scope["turns"].clear()
+                        scope["sessions"].clear()
+                except Exception as error:
+                    _report_internal_error("native run scope cleanup", error)
+                finally:
+                    try:
+                        context.reset(token)
+                    except Exception as error:
+                        _report_internal_error("native run context restore", error)
+
+    observed._pilot_run_scope = _NATIVE_RUN_SCOPE
+    observed._pilot_run_finish = _finish_native_run
+    owner.run_conversation = observed
+    _NATIVE_RUN_OBSERVER_READY = True
+    return True
+
+
+def _try_install_run_completion_observer() -> None:
+    global _NATIVE_RUN_OBSERVER_READY, _NATIVE_RUN_OBSERVER_WARNED
+    error = RuntimeError("native entry unavailable")
+    _NATIVE_RUN_OBSERVER_READY = False
+    try:
+        if _install_run_completion_observer():
+            return
+    except Exception as failure:
+        error = failure
+    if not _NATIVE_RUN_OBSERVER_WARNED:
+        _NATIVE_RUN_OBSERVER_WARNED = True
+        _report_internal_error("native run observer unavailable; retaining legacy idle behavior", error)
+
+
+def _retry_run_completion_observer() -> None:
+    global _NATIVE_RUN_RETRY_AFTER
+    if _NATIVE_RUN_OBSERVER_READY or time.monotonic() < _NATIVE_RUN_RETRY_AFTER:
+        return
+    # Retry after cold discovery without repeatedly importing a broken host
+    # module on every event. The already-running unwrapped call stays unmarked.
+    _NATIVE_RUN_RETRY_AFTER = time.monotonic() + 5.0
+    _try_install_run_completion_observer()
 
 
 def _stream_api_for_agent(agent: Any) -> Optional[Dict[str, Any]]:
@@ -302,10 +432,14 @@ def _config() -> Dict[str, Any]:
 
 
 def _report_internal_error(operation: str, error: Exception) -> None:
-    print(
-        "[loongsuite-pilot] %s failed: %s" % (operation, type(error).__name__),
-        file=sys.stderr,
-    )
+    try:
+        print(
+            "[loongsuite-pilot] %s failed: %s" % (operation, type(error).__name__),
+            file=sys.stderr,
+        )
+    except Exception:
+        # A closed stderr must not replace an application result/exception.
+        pass
 
 
 def _hostname() -> str:
@@ -637,7 +771,6 @@ def _session(session_id: str) -> Dict[str, Any]:
 def _new_turn(
     session_id: str,
     user_message: Any = "",
-    history_length: int = 1,
     sender_id: Any = "",
     observer_turn_id: Any = "",
 ) -> Dict[str, Any]:
@@ -667,7 +800,9 @@ def _new_turn(
         "user_id_source": user_identity["source"],
         "sender_id": normalized_sender_id,
         "user_message": user_message if isinstance(user_message, str) else str(user_message or ""),
-        "history_length": max(1, history_length),
+        # None means the initial history boundary was not observed. Do not
+        # confuse an empty snapshot with a known first-message boundary.
+        "history_start": None,
         "apis": [],
         "tools": {},
     }
@@ -729,8 +864,12 @@ def _defer_evicted_turn(state: Dict[str, Any], turn: Dict[str, Any]) -> None:
 
 
 def _flush_turn(state: Dict[str, Any], turn: Dict[str, Any], payload: Dict[str, Any]) -> None:
-    if any(api.get("post_ns") is not None for api in turn["apis"]):
-        _write_new_records(turn, _build_records(turn, state, payload, final=True))
+    _capture_turn_input(turn, _current_turn_messages(turn, payload))
+    if not turn.get("input_content_hash"):
+        turn["input_resolution_closed"] = True
+    # Also drain requests without a response: input must not be required for
+    # collection at completion, eviction or process exit.
+    _write_new_records(turn, _build_records(turn, state, payload, final=True))
     if turn["apis"]:
         api = turn["apis"][-1]
         step_id, _ = _api_ids(turn, api)
@@ -859,10 +998,20 @@ def _current_turn_messages(turn: Dict[str, Any], payload: Dict[str, Any]) -> Lis
     history = payload.get("conversation_history")
     if not isinstance(history, list):
         history = []
-    start = max(0, int(turn.get("history_length") or 1) - 1)
-    current = [item for item in history[start:] if isinstance(item, dict)]
+    start = turn.get("history_start")
+    if start is None and history:
+        # The first request can carry the whole resumed conversation. Establish
+        # its current user boundary once, then retain it through tool retries.
+        start = next((i for i in range(len(history) - 1, -1, -1)
+                      if isinstance(history[i], dict) and history[i].get("role") == "user"), None)
+        if start is not None:
+            turn["history_start"] = start
+    current = [item for item in history[start:] if isinstance(item, dict)] if start is not None else []
     if not current:
-        current = [{"role": "user", "content": turn.get("user_message", "")}]
+        text = turn.get("user_message", "")
+        if not text and isinstance(payload.get("user_message"), str):
+            text = payload["user_message"]
+        current = [{"role": "user", "content": text}]
         response = payload.get("assistant_response")
         if response is not None:
             current.append({"role": "assistant", "content": response, "finish_reason": "stop"})
@@ -899,6 +1048,8 @@ def _common_fields(
         "gen_ai.agent.type": AGENT_TYPE,
         "agent.hermes.collection": "realtime-v1",
     }
+    if turn.get("native_run_observer") is True:
+        fields["agent.hermes.native_run_observer"] = True
     if turn.get("user_id_source") in ("invocation", "environment", "sender", "parent"):
         fields[INVOCATION_USER_ID_FIELD] = turn["user_id"]
     if turn.get("sender_id"):
@@ -990,16 +1141,106 @@ def _api_ids(turn: Dict[str, Any], api: Dict[str, Any]) -> Any:
     return api["step_id"], "%s:r" % api["step_id"]
 
 
-def _write_new_records(turn: Dict[str, Any], records: List[Dict[str, Any]]) -> None:
+def _record_key(record: Dict[str, Any]) -> Any:
+    return record["event.name"], record.get("gen_ai.step.id"), record.get("gen_ai.tool.call.id")
+
+
+def _append_record(turn: Dict[str, Any], record: Dict[str, Any]) -> None:
     emitted = turn.setdefault("emitted", set())
     event_ids = turn.setdefault("event_ids", {})
+    key = _record_key(record)
+    if key in emitted:
+        return
+    record["event.id"] = event_ids.setdefault(key, record["event.id"])
+    _write_records([record])
+    emitted.add(key)
+
+
+def _write_new_records(turn: Dict[str, Any], records: List[Dict[str, Any]]) -> None:
+    emitted = turn.setdefault("emitted", set())
+    pending = turn.setdefault("pending_records", {})
+    # Retry committed-to-release records before accepting more snapshots. A
+    # persistently failing writer must not grow staging on every later hook.
+    _drain_pending_records(turn)
     for record in records:
-        key = (record["event.name"], record["gen_ai.step.id"], record.get("gen_ai.tool.call.id"))
-        if key in emitted:
+        key = _record_key(record)
+        if key in emitted or key in pending:
             continue
-        record["event.id"] = event_ids.setdefault(key, record["event.id"])
-        _write_records([record])
-        emitted.add(key)
+        size = len(json.dumps(record, ensure_ascii=True, default=str).encode("utf-8"))
+        pending[key] = (record, size)
+        turn["pending_bytes"] = turn.get("pending_bytes", 0) + size
+        if not turn.get("input_content_hash") and not turn.get("input_resolution_closed"):
+            if len(pending) > MAX_PENDING_INPUT_RECORDS or turn["pending_bytes"] > MAX_PENDING_INPUT_BYTES:
+                # Once local export starts, late input cannot change this trace.
+                turn["input_resolution_closed"] = True
+        _drain_pending_records(turn)
+
+
+def _drain_pending_records(turn: Dict[str, Any]) -> None:
+    pending = turn.get("pending_records", {})
+    if not turn.get("input_content_hash") and not turn.get("input_resolution_closed"):
+        return
+    if pending and turn.get("input_content_hash") and not turn.get("input_resolution_closed"):
+        request = next((r for r, _ in pending.values() if r["event.name"] == "llm.request"), None)
+        if request is not None:
+            _write_turn_input(turn, request)
+    for key in list(pending):
+        record, size = pending[key]
+        _append_record(turn, record)
+        pending.pop(key)
+        turn["pending_bytes"] -= size
+
+
+def _capture_turn_input(turn: Dict[str, Any], messages: List[Dict[str, Any]]) -> None:
+    # Capture only this turn's first user message, before display truncation.
+    # Keep a bounded display value and the existing correlation protocol hash;
+    # gen_ai.input.messages_hash hashes a different (structured) representation.
+    if turn.get("input_content_hash") or turn.get("input_resolution_closed"):
+        return
+    message = next((item for item in messages if item.get("role") == "user"), {})
+    content = message.get("content")
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = "".join(str(item.get("text", item.get("content", "")) or "")
+                       for item in content if isinstance(item, dict)
+                       and item.get("type") in ("text", "input_text", "output_text"))
+    else:
+        text = ""
+    if text:
+        turn["input_text"] = _truncate(text)
+        turn["input_content_hash"] = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        if not turn.get("user_message"):
+            turn["user_message"] = turn["input_text"]
+        # Later hooks may omit history; retain the newly observed input for them.
+        turn["initial_messages"] = _bounded_value([message])
+
+
+def _write_turn_input(turn: Dict[str, Any], request: Dict[str, Any]) -> None:
+    # Wait until the first API request has bound the native turn/task id, then
+    # append input before any LLM record can be collected on a different trace.
+    # The input has no step id: it is once per turn and must not collide with
+    # the step-scoped turn_end marker or repeat on retries/lifecycle flushes.
+    if ("other", None, None) in turn.get("emitted", set()) or not turn.get("input_content_hash"):
+        return
+    if not turn.get("input_span_id"):
+        turn["input_span_id"] = _new_span_id()
+    first_api_ns = int(turn["apis"][0]["pre_ns"])
+    record = _common_fields(
+        turn, {}, "other", first_api_ns, "", turn["input_span_id"]
+    )
+    record.pop("gen_ai.step.id", None)
+    record.update({
+        "agent.hermes.hook": "turn_start",
+        "gen_ai.provider.name": request.get("gen_ai.provider.name", "unknown"),
+        "agent.pilot.correlation.content_hash": turn["input_content_hash"],
+        "gen_ai.input.messages_delta": [{"role": "user", "parts": [
+            {"type": "text", "content": turn["input_text"]}
+        ]}],
+    })
+    # Reuse stable event ids and append acknowledgement. If this write fails,
+    # leave the input retryable and do not let the request overtake it.
+    _append_record(turn, record)
 
 
 def _request_messages(turn: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1031,6 +1272,7 @@ def _request_messages(turn: Dict[str, Any], api: Dict[str, Any], payload: Dict[s
 def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> None:
     step_id, response_id = _api_ids(turn, api)
     messages = _request_messages(turn, api, payload)
+    _capture_turn_input(turn, messages)
     index = next(i for i, item in enumerate(turn["apis"]) if item is api)
     delta_start = 0
     if index:
@@ -1067,6 +1309,7 @@ def _build_records(
     if not apis:
         return []
     current_messages = _current_turn_messages(turn, payload)
+    _capture_turn_input(turn, current_messages)
     assistant_positions = [
         index for index, message in enumerate(current_messages)
         if message.get("role") == "assistant"
@@ -1315,18 +1558,24 @@ def _handle_pre_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
         return
     state = _session(session_id)
     history = payload.get("conversation_history")
-    history_length = len(history) if isinstance(history, list) else 1
     state["model"] = payload.get("model") or state.get("model")
     state["platform"] = payload.get("platform") or state.get("platform")
     turn = _new_turn(
         session_id,
         payload.get("user_message", ""),
-        history_length,
         payload.get("sender_id", ""),
         payload.get("turn_id", ""),
     )
-    turn["initial_messages"] = _bounded_value(_current_turn_messages(turn, payload))
+    if isinstance(history, list) and history:
+        # pre_llm_call observes the new turn boundary. A preceding assistant is
+        # already history; an empty snapshot leaves the boundary unknown.
+        last = history[-1]
+        turn["history_start"] = len(history) - 1 if isinstance(last, dict) and last.get("role") == "user" else len(history)
+    messages = _current_turn_messages(turn, payload)
+    _capture_turn_input(turn, messages)
+    turn["initial_messages"] = _bounded_value(messages)
     _remember_turn(state, turn, payload)
+    _bind_native_run(state, turn)
 
 
 def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
@@ -1338,17 +1587,16 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
     turn = _find_turn(state, payload)
     observer_turn_id = payload.get("turn_id")
     if turn is None:
-        history = payload.get("conversation_history")
-        history_length = len(history) if isinstance(history, list) else 1
         user_message = payload.get("user_message", "")
-        if not user_message and isinstance(history, list):
-            user_message = next((item.get("content", "") for item in reversed(history)
-                                 if isinstance(item, dict) and item.get("role") == "user"), "")
-        turn = _new_turn(session_id, user_message, history_length,
+        turn = _new_turn(session_id, user_message,
                          payload.get("sender_id", ""), observer_turn_id)
     elif isinstance(observer_turn_id, str) and observer_turn_id:
         turn["observer_turn_id"] = observer_turn_id
+    if not turn.get("user_message") and isinstance(payload.get("user_message"), str):
+        turn["user_message"] = payload["user_message"]
+        _capture_turn_input(turn, [{"role": "user", "content": payload["user_message"]}])
     _remember_turn(state, turn, payload)
+    _bind_native_run(state, turn)
     task_id = payload.get("task_id")
     state["model"] = payload.get("model") or state.get("model")
     state["platform"] = payload.get("platform") or state.get("platform")
@@ -1625,6 +1873,8 @@ _HANDLERS: Dict[str, Callable[[int, Dict[str, Any]], None]] = {
 def _safe_callback(hook_name: str) -> Callable[..., None]:
     def callback(**kwargs: Any) -> None:
         try:
+            if hook_name == "pre_llm_call":
+                _retry_run_completion_observer()
             with _STATE_LOCK:
                 _HANDLERS[hook_name](time.time_ns(), kwargs)
         except Exception as error:
@@ -1638,6 +1888,7 @@ def _safe_callback(hook_name: str) -> Callable[..., None]:
 def register(ctx: Any) -> None:
     """Register synchronous Hermes lifecycle callbacks."""
     _install_delegate_context()
+    _try_install_run_completion_observer()
     _purge_old_logs()
     for hook_name in HOOKS:
         try:

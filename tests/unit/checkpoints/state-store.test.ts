@@ -122,6 +122,44 @@ describe('StateStore', () => {
     });
   });
 
+  it('reports only successfully written per-input revisions without unrelated-input interference', async () => {
+    store.setOffset('qoder-trace', 1);
+    expect(store.isPersisted('qoder-trace')).toBe(false);
+    await store.save();
+    expect(store.isPersisted('qoder-trace')).toBe(true);
+    store.setOffset('other-input', 2);
+    expect(store.isPersisted('qoder-trace')).toBe(true);
+    expect(store.isPersisted('other-input')).toBe(false);
+    vi.mocked(writeJsonFile).mockRejectedValueOnce(new Error('synthetic disk failure'));
+    store.setOffset('qoder-trace', 3);
+    await expect(store.save()).rejects.toThrow('synthetic disk failure');
+    expect(store.isPersisted('qoder-trace')).toBe(false);
+    expect(store.saveFailed).toBe(false);
+    await store.save();
+    expect(store.isPersisted('qoder-trace')).toBe(true);
+    expect(store.isPersisted('other-input')).toBe(true);
+  });
+
+  it('distinguishes a durable native cursor from unrelated metadata and pending writes', async () => {
+    const native = { source: { offset: 10 } };
+    store.set('qoder-trace', { extra: { qoderTranscripts: native, other: 1 } });
+    await store.save();
+    store.update('qoder-trace', { extra: { other: 2 } });
+    expect(store.isPersisted('qoder-trace')).toBe(false);
+    expect(store.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(true);
+    store.update('qoder-trace', { extra: { qoderTranscripts: { source: { offset: 20 } } } });
+    expect(store.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(false);
+    await store.save();
+    expect(store.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(true);
+    const loaded = new StateStore(filePath);
+    await loaded.load();
+    expect(loaded.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(true);
+    loaded.delete('qoder-trace');
+    expect(loaded.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(false);
+    await loaded.save();
+    expect(loaded.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(true);
+  });
+
   describe('revision optimization', () => {
     it('should not write without a new revision', async () => {
       await store.load();
@@ -147,6 +185,103 @@ describe('StateStore', () => {
       await store.save();
       // Second save should be a no-op because the revision is persisted.
       await store.save();
+    });
+  });
+
+  describe('durable output holds', () => {
+    it('blocks shared checkpoint saves until every output hold is accepted', async () => {
+      let acceptCodex!: () => void;
+      let acceptLater!: () => void;
+      store.holdSaveUntil(new Promise<void>(resolve => { acceptCodex = resolve; }));
+      store.setOffset('codex', 10);
+      store.setOffset('other-input', 20);
+      const saving = store.save();
+      await Promise.resolve();
+      expect(writeJsonFile).not.toHaveBeenCalled();
+      store.holdSaveUntil(new Promise<void>(resolve => { acceptLater = resolve; }));
+      store.setOffset('codex', 30);
+      acceptCodex();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(writeJsonFile).not.toHaveBeenCalled();
+      acceptLater();
+      await saving;
+      expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual({
+        codex: { lastOffset: 30 }, 'other-input': { lastOffset: 20 },
+      });
+      await store.save();
+      expect(writeJsonFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('latches a rejected hold so subsequent shared saves keep the last durable cursor', async () => {
+      store.setOffset('codex', 1);
+      await store.save();
+      const failure = Object.assign(new Error('journal unavailable'), { name: 'CodexTurnJournalError' });
+      store.holdSaveUntil(Promise.reject(failure));
+      store.setOffset('codex', 2);
+      store.setOffset('other-input', 3);
+      await expect(store.save()).rejects.toBe(failure);
+      await expect(store.save()).rejects.toBe(failure);
+      expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual({ codex: { lastOffset: 1 } });
+      expect(writeJsonFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases settled holds during sustained output failure without unfreezing saves', async () => {
+      store.setOffset('codex', 1);
+      await store.save();
+      const firstFailure = new Error('first journal failure');
+      for (let attempt = 0; attempt < 100; attempt++) {
+        store.holdSaveUntil(Promise.reject(attempt === 0 ? firstFailure : new Error('still unavailable')));
+        store.setOffset('codex', attempt + 2);
+        await expect(store.save()).rejects.toBe(firstFailure);
+      }
+      expect((store as unknown as { saveHolds: Set<Promise<void>> }).saveHolds.size).toBe(0);
+      store.holdSaveUntil(Promise.resolve());
+      await Promise.resolve();
+      await expect(store.save()).rejects.toBe(firstFailure);
+      expect(writeJsonFile).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual({ codex: { lastOffset: 1 } });
+
+      const restarted = new StateStore(filePath);
+      await restarted.load();
+      restarted.holdSaveUntil(Promise.resolve());
+      restarted.setOffset('codex', 2);
+      await restarted.save();
+      expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual({ codex: { lastOffset: 2 } });
+    });
+
+    it('rejects a no-op save after a settled failed hold even without a new revision', async () => {
+      const failure = new Error('journal failure without state mutation');
+      store.holdSaveUntil(Promise.reject(failure));
+      await Promise.resolve();
+      await expect(store.save()).rejects.toBe(failure);
+      expect(writeJsonFile).not.toHaveBeenCalled();
+    });
+
+    it('honors a new hold before the next revision of an active write', async () => {
+      const actual = await vi.importActual<typeof import('../../../src/utils/fs-utils.js')>('../../../src/utils/fs-utils.js');
+      let releaseWrite!: () => void;
+      let startedWrite!: () => void;
+      const writing = new Promise<void>(resolve => { startedWrite = resolve; });
+      const release = new Promise<void>(resolve => { releaseWrite = resolve; });
+      vi.mocked(writeJsonFile).mockImplementationOnce(async (...args) => {
+        startedWrite();
+        await release;
+        await actual.writeJsonFile(...args);
+      });
+      store.setOffset('codex', 1);
+      const saving = store.save();
+      await writing;
+      let accept!: () => void;
+      store.holdSaveUntil(new Promise<void>(resolve => { accept = resolve; }));
+      store.setOffset('codex', 2);
+      releaseWrite();
+      await vi.waitFor(() => expect(writeJsonFile).toHaveBeenCalledTimes(1));
+      expect((vi.mocked(writeJsonFile).mock.calls[0]![1] as any).codex.lastOffset).toBe(1);
+      accept();
+      await saving;
+      expect(writeJsonFile).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(await fs.readFile(filePath, 'utf8')).codex.lastOffset).toBe(2);
     });
   });
 

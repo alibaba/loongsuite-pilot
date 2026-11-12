@@ -10,6 +10,7 @@ const PRELOAD = path.resolve(__dirname, '../../../../assets/hooks/claude-code-fe
 
 let DATA_DIR;
 let INTERCEPT_DIR;
+let FETCH_TRANSPORT = 'global';
 
 beforeEach(() => {
   DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-fetch-intercept-test-'));
@@ -45,6 +46,7 @@ function runScenario({
   rejectCancel = false,
   streamErrorAfterReads = 0,
   snapshotAfterReads = 0,
+  fetchTransport = FETCH_TRANSPORT,
 }) {
   const chunksJson = JSON.stringify(
     rawChunks !== undefined ? rawChunks
@@ -119,6 +121,35 @@ function runScenario({
       });
     };
 
+    // Claude Code 2.1.311 can dispatch directly through Bun.FetchSession,
+    // bypassing globalThis.fetch. Keep a separate native transport and require
+    // the original instance receiver, as the runtime's native method does.
+    const nativeFetch = globalThis.fetch;
+    class FetchSession {
+      constructor(options) {
+        this.options = options;
+        this.closed = false;
+        if (${JSON.stringify(fetchTransport)} === 'nonextensible-fetch-session') Object.preventExtensions(this);
+      }
+      close() { this.closed = true; }
+    }
+    Object.defineProperty(FetchSession.prototype, 'fetch', {
+      // The real runtime has a non-configurable getter without a setter.
+      get() { return function (input, init) {
+        assert(this instanceof FetchSession);
+        assert.equal(this.options.pilotNativeTransport, true);
+        return nativeFetch.call(this, input, init);
+      }; },
+      enumerable: true,
+      configurable: false,
+    });
+    if (${JSON.stringify(fetchTransport)} !== 'global') {
+      globalThis.Bun = { FetchSession };
+      if (${JSON.stringify(fetchTransport)} === 'locked-fetch-session') {
+        Object.freeze(globalThis.Bun);
+      }
+    }
+
     process.env.LOONGSUITE_PILOT_DATA_DIR = ${JSON.stringify(DATA_DIR)};
 
     (async () => {
@@ -130,11 +161,17 @@ function runScenario({
         : rawHeaders;
       const url = ${JSON.stringify(url)};
       const bodyText = ${JSON.stringify(bodyJson)};
+      const SessionType = ${JSON.stringify(fetchTransport)} === 'subclass-fetch-session'
+        ? class ProbeSession extends Bun.FetchSession {} : globalThis.Bun?.FetchSession;
+      const session = ${JSON.stringify(fetchTransport)} === 'global'
+        ? null : new SessionType({ pilotNativeTransport: true });
+      if (session) assert(session instanceof SessionType);
+      const dispatch = session ? session.fetch.bind(session) : globalThis.fetch;
       const res = ${JSON.stringify(inputAs)} === 'Request'
         // Exercise the Request-as-input path: method/body must survive our
         // headers-only override untouched.
-        ? await globalThis.fetch(new Request(url, { method: 'POST', headers, body: bodyText }))
-        : await globalThis.fetch(url, { method: 'POST', headers, body: bodyText });
+        ? await dispatch(new Request(url, { method: 'POST', headers, body: bodyText }))
+        : await dispatch(url, { method: 'POST', headers, body: bodyText });
 
       if (res.body) {
         const reader = res.body.getReader();
@@ -160,6 +197,10 @@ function runScenario({
             break;
           }
         }
+      }
+      if (session) {
+        session.close();
+        assert.equal(session.closed, true);
       }
       await new Promise(setImmediate);
     })().then(
@@ -216,7 +257,8 @@ function sseStream(opts = {}) {
   return events;
 }
 
-describe('claude-code-fetch-intercept preload', () => {
+describe.each(['global', 'fetch-session'])('claude-code-fetch-intercept preload (%s)', (transport) => {
+  beforeEach(() => { FETCH_TRANSPORT = transport; });
   test('captures system_instructions in spec format (text → content, filters billing header)', () => {
     const body = {
       model: 'claude-opus-4-7',
@@ -1039,5 +1081,31 @@ describe('claude-code-fetch-intercept preload', () => {
     expect(readAttempts(SESS)).toMatchObject([{
       outcome: 'success', error_type: null, response_id: MSG_ID,
     }]);
+  });
+});
+
+describe('optional native fetch instrumentation', () => {
+  test.each(['locked-fetch-session', 'nonextensible-fetch-session'])('keeps %s usable when instrumentation is unavailable', (fetchTransport) => {
+    const r = runScenario({
+      fetchTransport,
+      url: LLM_URL, sessionId: SESS,
+      body: { system: 'sys', messages: [] },
+      sseEvents: sseStream(),
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readIntercept(SESS)).toHaveLength(0);
+    expect(readAttempts(SESS)).toHaveLength(0);
+  });
+
+  test('preserves subclass construction and the native instance receiver', () => {
+    const r = runScenario({
+      fetchTransport: 'subclass-fetch-session',
+      url: LLM_URL, sessionId: SESS,
+      body: { system: 'sys', messages: [] },
+      sseEvents: sseStream(),
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readIntercept(SESS)[0].record.system_instructions).toEqual([{ type: 'text', content: 'sys' }]);
+    expect(readAttempts(SESS)).toMatchObject([{ outcome: 'success', response_id: MSG_ID }]);
   });
 });

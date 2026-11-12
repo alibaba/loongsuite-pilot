@@ -15,7 +15,9 @@ export interface IdlePrunable {
 
 /**
  * Cleans up stale correlation files/locks under `${dataDir}/acp-correlate/`.
- * Files older than `config.ttlMs` (by mtime) are removed. If a prunable is
+ * Files older than `config.ttlMs` (by mtime) are removed. Consumption claims
+ * remain until their source is also stale, so an active append-only file cannot
+ * make old records reusable after a collector restart. If a prunable is
  * given (the TraceLinker), its idle in-memory state is evicted on the same
  * cadence/TTL so the per-session maps stay bounded. Runs periodically with an
  * unref'd timer so it never keeps the process alive.
@@ -79,6 +81,15 @@ export class AcpCorrelateRetentionService {
       try {
         const stat = await fs.stat(full);
         if (!stat.isFile() || stat.mtimeMs >= cutoff) continue;
+        const claim = /^(.*)\.(?:turn-context-\d+-[a-f0-9]{64}|session-context)\.done$/.exec(file);
+        if (claim) {
+          try {
+            const source = await fs.stat(path.join(this.dir, `${claim[1]}.jsonl`));
+            if (source.mtimeMs >= cutoff) continue;
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+          }
+        }
         await fs.unlink(full);
         deleted++;
       } catch (err) {

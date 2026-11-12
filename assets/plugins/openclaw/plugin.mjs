@@ -1,8 +1,8 @@
 /**
  * loongsuite-pilot OpenClaw event_t plugin
  *
- * Runs inside the OpenClaw process (Node.js). Modern hosts register 16 hooks
- * (7 conversation-access + 9 default-active) via `api.on(hookName, handler)` and
+ * Runs inside the OpenClaw process (Node.js). Modern hosts register 15 hooks
+ * (6 conversation-access + 9 default-active) via `api.on(hookName, handler)` and
  * converts OpenClaw hook events into ARMS GenAI event_t JSONL records for
  * consumption by loongsuite-pilot's BaseHookInput pipeline. Hosts before
  * 2026.5.12 use the separate 9-hook legacy-adapter.mjs.
@@ -1428,24 +1428,6 @@ function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = tr
   // Skip writing them so they don't surface as standalone spans.
 }
 
-function handleBeforeAgentFinalize(event, ctx, userId, emit) {
-  const runId = event?.runId || ctx?.runId;
-  if (!runId) return;
-  const run = getRun(runId, event, ctx);
-  const record = {
-    ...buildCommonFields(run, run.sessionId, userId),
-    "event.name": "other",
-    "agent.openclaw.hook": "before_agent_finalize",
-    "agent.openclaw.transcript_path": event?.transcriptPath,
-    "agent.openclaw.stop_hook_active": event?.stopHookActive,
-    "agent.openclaw.last_assistant_message": event?.lastAssistantMessage
-      ? truncate(safeStringify(event.lastAssistantMessage), MAX_CONTENT_SIZE)
-      : undefined,
-    "agent.openclaw.cwd": event?.cwd || agentCwd,
-  };
-  emit(record);
-}
-
 function handleAgentEnd(event, ctx, userId, emit) {
   const runId = event?.runId || ctx?.runId;
   if (!runId) return;
@@ -1665,12 +1647,13 @@ export default {
       debugFailureOnce("first-token-observer", err);
     }
 
-    // 7 conversation-access hooks (OpenClaw CONVERSATION_HOOK_NAMES)
+    // Observe completion via agent_end. Merely registering before_agent_finalize
+    // enables the host's answer-revision gate and defers streaming delivery.
+    // 6 conversation-access hooks (OpenClaw CONVERSATION_HOOK_NAMES)
     on("before_model_resolve", handleBeforeModelResolve);
     on("before_agent_reply", handleBeforeAgentReply);
     on("llm_input", handleLlmInput);
     on("llm_output", handleLlmOutput);
-    on("before_agent_finalize", handleBeforeAgentFinalize);
     on("agent_end", handleAgentEnd);
     on("before_agent_run", handleBeforeAgentRun, {
       intercept: "before_agent_run",

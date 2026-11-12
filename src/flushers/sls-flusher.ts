@@ -1,7 +1,7 @@
 import ALY from '@alicloud/log';
 import * as os from 'node:os';
 import { Agent as UndiciAgent } from 'undici';
-import { BaseFlusher } from './base-flusher.js';
+import { BaseFlusher, CodexOutputDurabilityError } from './base-flusher.js';
 import {
   serialiseLogEntry,
   redactCodeGenerationFields,
@@ -202,6 +202,7 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   async send(entry: AgentActivityEntry): Promise<void> {
+    if (entry['gen_ai.agent.type'] === 'codex') return this.sendCodexBatch([entry]);
     const serialized = serialiseLogEntry(entry, { dropAgentScopedFields: true });
     serialized.version = this.pilotVersion;
     const agentType = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? 'unknown'));
@@ -214,10 +215,47 @@ export class SlsFlusher extends BaseFlusher {
     }
   }
 
-  async sendBatch(entries: AgentActivityEntry[]): Promise<void> {
+  async sendBatch(entries: AgentActivityEntry[], _logicalBytes?: readonly number[], signal?: AbortSignal): Promise<void> {
+    const codex: AgentActivityEntry[] = [];
     for (const entry of entries) {
-      await this.send(entry);
+      if (entry['gen_ai.agent.type'] === 'codex') codex.push(entry);
+      else await this.send(entry);
     }
+    if (codex.length) await this.sendCodexBatch(codex, signal);
+  }
+
+  private async sendCodexBatch(entries: AgentActivityEntry[], signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new CodexOutputDurabilityError('SLS');
+    const serialized = entries.map(entry => ({
+      ...serialiseLogEntry(entry, { dropAgentScopedFields: true }), version: this.pilotVersion,
+    }));
+    let failed = false;
+    await this.runWithConcurrency(this.config.endpoints.map(endpoint => async () => {
+      if (signal?.aborted) { failed = true; return; }
+      const logs = serialized.map(content => this.createQueuedLog(endpoint,
+        endpoint.redact ? redactCodeGenerationFields(content) : content, 'codex'));
+      const counter = this.endpointCounters.get(endpoint.name);
+      const startMs = Date.now();
+      try {
+        const outcome = await this.flushEndpoint(endpoint, logs, signal);
+        if (counter) {
+          counter.outEntries += outcome.sentEntries;
+          counter.outBytes += outcome.sentBytes;
+          counter.outFailed += outcome.failedEntries;
+          counter.totalDelayMs += Date.now() - startMs;
+          if (outcome.sentEntries > 0) counter.lastFlushTime = formatTime(new Date());
+        }
+        if (outcome.failedEntries > 0) failed = true;
+      } catch (error) {
+        failed = true;
+        if (counter) {
+          counter.outFailed += logs.length;
+          counter.totalDelayMs += Date.now() - startMs;
+        }
+        if (!signal?.aborted) logger.error('SLS endpoint flush failed', { endpoint: endpoint.name, error: String(error) });
+      }
+    }), this.resolvedFlushConcurrency);
+    if (failed || signal?.aborted) throw new CodexOutputDurabilityError('SLS');
   }
 
   async flush(): Promise<void> {
@@ -308,10 +346,11 @@ export class SlsFlusher extends BaseFlusher {
     return tags;
   }
 
-  private flushEndpoint(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushOutcome> {
-    if (endpoint.mode === 'ak') return this.flushViaAk(endpoint, logs);
-    if (endpoint.mode === 'apiKey') return this.flushViaApiKey(endpoint, logs);
-    return this.flushViaWebtracking(endpoint, logs);
+  private flushEndpoint(endpoint: SlsEndpoint, logs: QueuedLog[], signal?: AbortSignal): Promise<FlushOutcome> {
+    signal?.throwIfAborted();
+    if (endpoint.mode === 'ak') return this.flushViaAk(endpoint, logs, signal);
+    if (endpoint.mode === 'apiKey') return this.flushViaApiKey(endpoint, logs, signal);
+    return this.flushViaWebtracking(endpoint, logs, signal);
   }
 
   private buildWebtrackingTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string> {
@@ -328,7 +367,7 @@ export class SlsFlusher extends BaseFlusher {
     }
   }
 
-  private async flushViaAk(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushOutcome> {
+  private async flushViaAk(endpoint: SlsEndpoint, logs: QueuedLog[], signal?: AbortSignal): Promise<FlushOutcome> {
     this.warnIfMixedAgentTypes(logs);
     const now = Math.floor(Date.now() / 1000);
     const agentType = logs[0]?.agentType;
@@ -347,11 +386,14 @@ export class SlsFlusher extends BaseFlusher {
     let attempts = 0;
     for (let attempt = 0; attempt < this.resolvedRetryMaxAttempts; attempt++) {
       attempts = attempt + 1;
+      signal?.throwIfAborted();
       try {
         await client.postLogStoreLogs(
           endpoint.project,
           endpoint.logstore,
           logGroup,
+          // httpx exposes request options through this SDK hook, not a top-level signal.
+          signal ? { beforeRequest: (options: Record<string, unknown>) => ({ ...options, signal }) } : undefined,
         );
         logger.debug('batch sent via ak', {
           endpoint: endpoint.name,
@@ -361,6 +403,7 @@ export class SlsFlusher extends BaseFlusher {
         });
         return flushSucceeded(logs);
       } catch (err) {
+        signal?.throwIfAborted();
         lastErr = err;
         if (!isRetryable(err) || attempt === this.resolvedRetryMaxAttempts - 1) break;
         const delay = computeBackoff(this.resolvedRetryBaseDelayMs, attempt, this.resolvedRetryJitter);
@@ -370,7 +413,7 @@ export class SlsFlusher extends BaseFlusher {
           delayMs: delay,
           error: String(err),
         });
-        await this.sleep(delay);
+        await this.sleep(delay, signal);
       }
     }
 
@@ -400,10 +443,11 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   /** One batch, several requests: sum the per-chunk outcomes so a partial send counts as partial. */
-  private async flushViaWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushOutcome> {
+  private async flushViaWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[], signal?: AbortSignal): Promise<FlushOutcome> {
     const total: FlushOutcome = { sentEntries: 0, sentBytes: 0, failedEntries: 0 };
     for (const chunk of this.splitForWebtracking(logs)) {
-      const outcome = await this.postWebtracking(endpoint, chunk);
+      signal?.throwIfAborted();
+      const outcome = await this.postWebtracking(endpoint, chunk, signal);
       total.sentEntries += outcome.sentEntries;
       total.sentBytes += outcome.sentBytes;
       total.failedEntries += outcome.failedEntries;
@@ -411,7 +455,7 @@ export class SlsFlusher extends BaseFlusher {
     return total;
   }
 
-  private async flushViaApiKey(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushOutcome> {
+  private async flushViaApiKey(endpoint: SlsEndpoint, logs: QueuedLog[], signal?: AbortSignal): Promise<FlushOutcome> {
     this.warnIfMixedAgentTypes(logs);
     const now = Math.floor(Date.now() / 1000);
     const agentType = logs[0]?.agentType;
@@ -429,6 +473,7 @@ export class SlsFlusher extends BaseFlusher {
     let attempts = 0;
     for (let attempt = 0; attempt < this.resolvedRetryMaxAttempts; attempt++) {
       attempts = attempt + 1;
+      signal?.throwIfAborted();
       try {
         await postApiKeyLogStoreLogs(
           {
@@ -440,7 +485,7 @@ export class SlsFlusher extends BaseFlusher {
             maxRetries: 1,
           },
           logGroup,
-          { userAgent: this.userAgent },
+          { userAgent: this.userAgent, ...(signal ? { signal } : {}) },
         );
         logger.debug('batch sent via apiKey', {
           endpoint: endpoint.name,
@@ -450,6 +495,7 @@ export class SlsFlusher extends BaseFlusher {
         });
         return flushSucceeded(logs);
       } catch (err) {
+        signal?.throwIfAborted();
         lastErr = err;
         if (!isRetryable(err) || attempt === this.resolvedRetryMaxAttempts - 1) break;
         const delay = computeBackoff(this.resolvedRetryBaseDelayMs, attempt, this.resolvedRetryJitter);
@@ -459,7 +505,7 @@ export class SlsFlusher extends BaseFlusher {
           delayMs: delay,
           error: String(err),
         });
-        await this.sleep(delay);
+        await this.sleep(delay, signal);
       }
     }
 
@@ -514,7 +560,7 @@ export class SlsFlusher extends BaseFlusher {
     return chunks;
   }
 
-  private async postWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushOutcome> {
+  private async postWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[], signal?: AbortSignal): Promise<FlushOutcome> {
     this.warnIfMixedAgentTypes(logs);
     const agentType = logs[0]?.agentType;
     const body = {
@@ -534,6 +580,9 @@ export class SlsFlusher extends BaseFlusher {
     let attempts = 0;
     for (let attempt = 0; attempt < this.resolvedRetryMaxAttempts; attempt++) {
       attempts = attempt + 1;
+      signal?.throwIfAborted();
+      const timeout = new AbortController();
+      const timer = signal ? setTimeout(() => timeout.abort(new Error('TimeoutError')), this.resolvedTimeoutMs) : undefined;
       try {
         const fetchOptions: Record<string, unknown> = {
           method: 'POST',
@@ -544,7 +593,7 @@ export class SlsFlusher extends BaseFlusher {
             'user-agent': this.userAgent,
           },
           body: raw,
-          signal: AbortSignal.timeout(this.resolvedTimeoutMs),
+          signal: signal ? AbortSignal.any([signal, timeout.signal]) : AbortSignal.timeout(this.resolvedTimeoutMs),
         };
         if (this.dispatcher) {
           fetchOptions.dispatcher = this.dispatcher;
@@ -559,6 +608,8 @@ export class SlsFlusher extends BaseFlusher {
           }
           lastErr = err;
         } else {
+          // The status is the ACK; dispose its unused body before removing the timeout.
+          if (signal) await resp.body?.cancel();
           logger.debug('batch sent via webtracking', {
             project: endpoint.project,
             logstore: endpoint.logstore,
@@ -567,9 +618,12 @@ export class SlsFlusher extends BaseFlusher {
           return flushSucceeded(logs);
         }
       } catch (err) {
+        signal?.throwIfAborted();
         lastErr = err;
         if (err instanceof HttpError && !RETRYABLE_STATUS_CODES.has(err.status)) break;
         if (attempt === this.resolvedRetryMaxAttempts - 1) break;
+      } finally {
+        clearTimeout(timer);
       }
 
       const delay = computeBackoff(this.resolvedRetryBaseDelayMs, attempt, this.resolvedRetryJitter);
@@ -579,7 +633,7 @@ export class SlsFlusher extends BaseFlusher {
         delayMs: delay,
         error: String(lastErr),
       });
-      await this.sleep(delay);
+      await this.sleep(delay, signal);
     }
 
     logger.error('SLS webtracking send failed after retries', {
@@ -701,15 +755,7 @@ export class SlsFlusher extends BaseFlusher {
       bucket = [];
       this.queue.set(key, bucket);
     }
-    const byteSize = Buffer.byteLength(JSON.stringify(content));
-    bucket.push({ content, endpoint, agentType, byteSize });
-
-    const counter = this.endpointCounters.get(endpoint.name);
-    if (counter) {
-      counter.inEntries++;
-      counter.inBytes += byteSize;
-      if (!counter.startTime) counter.startTime = formatTime(new Date());
-    }
+    bucket.push(this.createQueuedLog(endpoint, content, agentType));
 
     const maxSize = this.config.batchMaxSize || BATCH_MAX_SIZE;
     if (bucket.length >= maxSize) {
@@ -717,7 +763,32 @@ export class SlsFlusher extends BaseFlusher {
     }
   }
 
-  private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  private createQueuedLog(endpoint: SlsEndpoint, content: Record<string, string>, agentType?: string): QueuedLog {
+    const byteSize = Buffer.byteLength(JSON.stringify(content));
+    const counter = this.endpointCounters.get(endpoint.name);
+    if (counter) {
+      counter.inEntries++;
+      counter.inBytes += byteSize;
+      if (!counter.startTime) counter.startTime = formatTime(new Date());
+    }
+
+    return { content, endpoint, agentType, byteSize };
+  }
+
+  private sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) return new Promise(resolve => setTimeout(resolve, ms));
+    signal.throwIfAborted();
+    return new Promise((resolve, reject) => {
+      const cancel = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', cancel);
+        reject(signal.reason);
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', cancel);
+        resolve();
+      }, ms);
+      signal.addEventListener('abort', cancel, { once: true });
+    });
   }
 }
