@@ -2279,57 +2279,57 @@
           "id": "main",
           "kind": "main",
           "version": "main",
-          "commit": "45f8dbcf8fcbddbf28843b948e80d51fbe93eecc",
-          "recorded_at": "2026-11-11T09:17:27.821603Z",
+          "commit": "75fa9ca6609c5929a958acd99c749ce868656cbf",
+          "recorded_at": "2026-11-12T07:14:50.876618Z",
           "status": "passed",
           "method_id": "github-full-pilot-qoder-native-v2",
-          "environment_id": "085462d3669f3b03c936fd3f5f1bb04d39efc53cf73f528283f0a7d47cb66d22",
+          "environment_id": "c8424ad78efa1d5fc62e8616fcae8cd16ff85dc811fa25265e35022a5d6511d9",
           "environment": {
             "cpu_model": "AMD EPYC 7763 64-Core Processor",
             "runner_os": "Linux",
             "runner_image": "ubuntu22/20261101.347.1",
-            "container_digest": "sha256:8700da48cc6592503feabf399d242414f932197c3b44f43970d2cbc5671e06b0",
+            "container_digest": "sha256:b774d993885c47eca14db241ba8cc7e5789235142f76e4a2a6a65ec350a1bac0",
             "cgroup_version": "v2",
             "kernel": "6.8.0-1070-azure",
             "architecture": "x86_64",
             "cpus": 4,
-            "node_version": "v22.23.4"
+            "node_version": "v22.23.5"
           },
-          "run_url": "https://github.com/Takuka0311/loongsuite-pilot/actions/runs/42993851952",
+          "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/43173345969",
           "workloads": {
             "idle": {
               "repeats": 3,
               "p95_ms": null,
               "poll_interval_ms": 10000,
               "cpu_percent": {
-                "median": 1.2956108779193873,
-                "min": 1.2587580513424088,
-                "max": 1.3057685149495464
+                "median": 1.3708809030507276,
+                "min": 1.2670226903544153,
+                "max": 1.373440631119263
               },
               "rss_mib": {
-                "median": 116.23046875,
-                "min": 113.82421875,
-                "max": 117.4375
+                "median": 115.94921875,
+                "min": 114.91796875,
+                "max": 117.31640625
               },
               "cpu_peak_percent": {
-                "median": 82.19213190812395,
-                "min": 80.85667465539936,
-                "max": 92.93669276528274
+                "median": 87.83395223296336,
+                "min": 81.00776529522939,
+                "max": 88.14536715604088
               },
               "rss_average_mib": {
-                "median": 110.2965956347847,
-                "min": 108.0154499897263,
-                "max": 111.77431722911027
+                "median": 110.14206514900735,
+                "min": 109.26406396445569,
+                "max": 111.67901654640954
               },
               "raw_input_bytes_per_second": {
-                "median": 0,
-                "min": 0,
-                "max": 0
+                "median": 0.0,
+                "min": 0.0,
+                "max": 0.0
               },
               "jsonl_output_bytes_per_second": {
-                "median": 0,
-                "min": 0,
-                "max": 0
+                "median": 0.0,
+                "min": 0.0,
+                "max": 0.0
               },
               "quality": {
                 "passed": true,
@@ -2340,40 +2340,40 @@
             "low": {
               "repeats": 3,
               "p95_ms": {
-                "median": 19045.519428,
-                "min": 19029.207737,
-                "max": 19067.780393
+                "median": 19067.078419,
+                "min": 19056.835009,
+                "max": 19141.048722
               },
               "poll_interval_ms": 10000,
               "cpu_percent": {
-                "median": 4.576060983640308,
-                "min": 4.507320333273166,
-                "max": 4.621342206155528
+                "median": 4.761204555423746,
+                "min": 4.6760442574230465,
+                "max": 4.880412696196951
               },
               "rss_mib": {
-                "median": 119.17578125,
-                "min": 117.28125,
-                "max": 119.57421875
+                "median": 126.33203125,
+                "min": 123.5859375,
+                "max": 127.734375
               },
               "cpu_peak_percent": {
-                "median": 173.48619215639724,
-                "min": 155.33367297923573,
-                "max": 193.21795786064047
+                "median": 166.05029315120882,
+                "min": 159.50142121693366,
+                "max": 174.69111828368216
               },
               "rss_average_mib": {
-                "median": 111.9940665426498,
-                "min": 109.1666152135957,
-                "max": 115.69158411923401
+                "median": 117.10802170931939,
+                "min": 116.12765479933462,
+                "max": 119.12272295687772
               },
               "raw_input_bytes_per_second": {
-                "median": 23299.05404364976,
-                "min": 23298.783060293074,
-                "max": 23299.473340257915
+                "median": 23299.027277260688,
+                "min": 23298.978509874883,
+                "max": 23299.124335030643
               },
               "jsonl_output_bytes_per_second": {
-                "median": 66392.23220756656,
-                "min": 66042.90717052917,
-                "max": 66393.00440197237
+                "median": 68056.05869357758,
+                "min": 67695.83203194497,
+                "max": 68056.34219765737
               },
               "quality": {
                 "passed": true,
@@ -2384,40 +2384,40 @@
             "high": {
               "repeats": 3,
               "p95_ms": {
-                "median": 3627.440867,
-                "min": 3449.305348,
-                "max": 3671.414936
+                "median": 4192.832261,
+                "min": 3848.66227,
+                "max": 4237.532245
               },
               "poll_interval_ms": 100,
               "cpu_percent": {
-                "median": 122.59208193621436,
-                "min": 122.48578730575113,
-                "max": 122.76772592097171
+                "median": 123.5297658948661,
+                "min": 123.09082697009661,
+                "max": 124.23008278645185
               },
               "rss_mib": {
-                "median": 166.1953125,
-                "min": 166.08984375,
-                "max": 168.5234375
+                "median": 165.0234375,
+                "min": 164.375,
+                "max": 169.83203125
               },
               "cpu_peak_percent": {
-                "median": 200.01040906268008,
-                "min": 196.61973890700725,
-                "max": 217.1197305125546
+                "median": 210.1088974403182,
+                "min": 202.73959111634917,
+                "max": 215.88426382525722
               },
               "rss_average_mib": {
-                "median": 136.5073861937761,
-                "min": 132.34497393618054,
-                "max": 136.83168648549488
+                "median": 136.39987113585087,
+                "min": 133.6792486670089,
+                "max": 138.74925285675636
               },
               "raw_input_bytes_per_second": {
-                "median": 465986.5601709604,
-                "min": 465985.67718463467,
-                "max": 465991.3176342368
+                "median": 465986.28181431675,
+                "min": 465984.11385598406,
+                "max": 465986.79416724667
               },
               "jsonl_output_bytes_per_second": {
-                "median": 1867063.5461479407,
-                "min": 1850926.6468063525,
-                "max": 1868729.8360503118
+                "median": 1874625.4128399838,
+                "min": 1854102.3556662914,
+                "max": 1914449.7666776676
               },
               "quality": {
                 "passed": true,
@@ -2431,17 +2431,13 @@
             "ref": "main"
           },
           "provenance": {
-            "entry_sha256": "24cd271298548ce87b2e4722772b56e57b95b99b1740e5b3b0db74b6f3d040ed",
+            "entry_sha256": "3a44f7e5d50f38a83f03fcd9d9edef63beb5bb0eba9926ba8aadeb630fad1765",
             "fixture_sha256": "85c62da98ebea1f07c04dcd37e37b2890a9544d68b44089e3833ade27f9a2d4a",
             "compiler": "v22.23.4"
           },
           "publication": {
-            "run_number": 29,
-            "run_id": "42993851952",
-            "run_repository": "Takuka0311/loongsuite-pilot",
-            "artifact_id": 13843875420,
-            "artifact_sha256": "f56164cf6c35664b5274bf1f16b19903e998c16439071bd143fa9ae13c74694d",
-            "workflow_commit": "d527c89b86053f32552fe2352d4b7b66454daa4a"
+            "run_number": 62,
+            "run_id": "43173345969"
           }
         },
         {
@@ -2611,7 +2607,7 @@
           }
         }
       ],
-      "updated_at": "2026-11-12T07:09:22.763423Z"
+      "updated_at": "2026-11-12T07:32:57.896327Z"
     },
     "github-full-pilot-codex-rollout-v2": {
       "method": {
