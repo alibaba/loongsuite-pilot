@@ -91,6 +91,8 @@ describe('international Qoder Desktop account metadata', () => {
     writeStatus(); installFakeCli(); writeTurn({ cli: true });
     run({ parent_business_info: { product: 'app' }, extra: { user: { name: 'hook-user', email: 'hook@example.com' } } });
     expectIdentity('desktop-user', 'desktop@example.com');
+    expect(history().every(record => record['gen_ai.agent.type'] === 'qoder-app'
+      && record['gen_ai.framework'] === 'qoder-app')).toBe(true);
     expect(fs.existsSync(cliCounter)).toBe(false);
   });
 
@@ -170,11 +172,13 @@ describe('international Qoder Desktop account metadata', () => {
     expect(records.every(r => r['user.id'] === os.hostname())).toBe(true);
   });
 
-  it('carries the Stop account metadata through the detached retry', async () => {
-    writeStatus(); writeTurn({ complete: false }); run();
+  it('retains the Stop account metadata while the collector settles the native tail', async () => {
+    writeStatus(); writeTurn({ cli: true, complete: false }); run();
     writeStatus({ name: 'next-user', email: 'next@example.com' });
     fs.appendFileSync(transcript, JSON.stringify({ type: 'last-prompt', sessionId: 'desktop-session', lastPrompt: 'hello a' }) + '\n');
     await vi.waitFor(() => expect(history().length).toBeGreaterThan(0), { timeout: 10_000, interval: 50 });
     expectIdentity('desktop-user', 'desktop@example.com');
+    expect(history().every(record => record['gen_ai.agent.type'] === 'qoder-app'
+      && record['gen_ai.framework'] === 'qoder-app')).toBe(true);
   });
 });

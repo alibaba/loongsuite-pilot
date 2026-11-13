@@ -1034,6 +1034,18 @@ function finalizeRecords(records, cwd, runtimeConfig) {
     Object.assign(record, spanAttributes, agentBaseFieldPatch(attributes),
       Object.keys(attributes).length > 0 ? { resourceAttributes: attributes } : {});
   }
+  return applyQoderProductIdentity(records, runtimeConfig?.hostProduct);
+}
+
+/** Product identity is local to the owning Hook observation, never a session cache. */
+export function applyQoderProductIdentity(records, hostProduct) {
+  if (hostProduct !== 'app') return records;
+  for (const record of records) {
+    if (record['gen_ai.agent.type'] === 'qoder-cli') {
+      record['gen_ai.agent.type'] = 'qoder-app';
+      record['gen_ai.framework'] = 'qoder-app';
+    }
+  }
   return records;
 }
 
