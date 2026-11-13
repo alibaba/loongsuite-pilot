@@ -1243,7 +1243,13 @@ function handleAfterToolCall(event, ctx, userId, emit) {
   const result = event?.result;
   if (["sessions_spawn", "sessions_send"].includes(event?.toolName) && event?.toolCallId) {
     const details = result?.details || result;
-    if (["accepted", "ok"].includes(details?.status) && typeof details.runId === "string" && run.toolSpanIds.has(event.toolCallId)) {
+    // Dispatch identity is independent of visible reply delivery. Native send
+    // can finish silently or fail after sending; a pre-dispatch error's runId
+    // alone is not evidence that the target actually received this work.
+    const dispatched = ["accepted", "ok"].includes(details?.status)
+      || (event.toolName === "sessions_send" && (details?.status === "no_reply"
+        || (details?.sentBeforeError === true && ["timeout", "error"].includes(details?.status))));
+    if (dispatched && typeof details.runId === "string" && run.toolSpanIds.has(event.toolCallId)) {
       const parent = {
         traceId: run.parentContext?.traceId || run.traceId,
         parentSpanId: run.toolSpanIds.get(event.toolCallId),

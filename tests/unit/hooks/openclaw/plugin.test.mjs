@@ -1502,6 +1502,57 @@ describe('OpenClaw plugin stateful pipeline', () => {
 });
 
 describe('subagent trace propagation', () => {
+  it.each([
+    { status: 'no_reply' },
+    { status: 'timeout', sentBeforeError: true },
+    { status: 'error', sentBeforeError: true },
+  ])('retains incoming for dispatched sessions_send work returning $status', async details => {
+    vi.useFakeTimers();
+    let h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'send-parent', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    const child = { runId: 'sent-child', sessionId: 'child-session', sessionKey: 'agent:main:subagent:worker' };
+    await h.before_agent_run({}, parent);
+    await h.before_tool_call({ toolName: 'sessions_send', toolCallId: 'send', params: { sessionKey: child.sessionKey, message: 'work' } }, parent);
+    await h.before_agent_run({}, child);
+    await h.model_call_started({ callId: 'child-call', model: 'test', provider: 'test' }, child);
+    await h.after_tool_call({ toolName: 'sessions_send', toolCallId: 'send', result: { details: { ...details, runId: child.runId, sessionKey: child.sessionKey } } }, parent);
+    await vi.advanceTimersByTimeAsync(30_001);
+    const invoke = readOutputRecords().find(row => row['event.name'] === 'gen_ai.agent.invoke');
+    let children = readOutputRecords().filter(row => row['gen_ai.session.id'] === child.sessionId);
+    expect(children.length).toBeGreaterThan(0);
+    expect(children.every(row => row['gen_ai.agent.parent.invocation.id'] === invoke['gen_ai.agent.invocation.id'])).toBe(true);
+    // A send retains its existing execution Trace, rather than reparenting it.
+    expect(children.every(row => row.parent_span_id === undefined)).toBe(true);
+    expect(readOutputRecords().filter(row => row['event.name'] === 'gen_ai.agent.result')
+      .every(row => row['error.type'])).toBe(true);
+    h = registerPlugin(await loadPlugin());
+    await h.before_agent_run({}, child);
+    await vi.advanceTimersByTimeAsync(30_001);
+    children = readOutputRecords().filter(row => row['gen_ai.session.id'] === child.sessionId);
+    expect(children.every(row => row['gen_ai.agent.parent.invocation.id'] === invoke['gen_ai.agent.invocation.id'])).toBe(true);
+  });
+
+  it.each([
+    { status: 'error' },
+    { status: 'timeout', sentBeforeError: false },
+    { status: 'error', sentBeforeError: 'true' },
+    { status: 'skipped', sentBeforeError: true },
+    { status: 'forbidden', sentBeforeError: true },
+  ])('does not infer a dispatched child from an unconfirmed $status result', async details => {
+    vi.useFakeTimers();
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'parent', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    const child = { runId: 'unconfirmed', sessionId: 'child-session', sessionKey: 'agent:main:subagent:worker' };
+    await h.before_agent_run({}, parent);
+    await h.before_tool_call({ toolName: 'sessions_send', toolCallId: 'send', params: { sessionKey: child.sessionKey, message: 'work' } }, parent);
+    await h.after_tool_call({ toolName: 'sessions_send', toolCallId: 'send', result: { details: { ...details, runId: child.runId, sessionKey: child.sessionKey } } }, parent);
+    await h.before_agent_run({}, child);
+    await vi.advanceTimersByTimeAsync(30_001);
+    const children = readOutputRecords().filter(row => row['gen_ai.session.id'] === child.sessionId);
+    expect(children.length).toBeGreaterThan(0);
+    expect(children.every(row => row['gen_ai.agent.parent.invocation.id'] === undefined)).toBe(true);
+  });
+
   it('records committed native steering in the active receiving turn without parsing a prompt', async () => {
     const h = registerPlugin(await loadPlugin());
     const parent = { runId: 'parent', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
