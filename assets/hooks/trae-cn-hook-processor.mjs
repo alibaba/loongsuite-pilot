@@ -198,47 +198,130 @@ function safeText(value, max = 32_000) {
 // form. We normalize both to gen_ai.usage.{input,output,total}_tokens.
 
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 const cjsRequire = createRequire(import.meta.url);
 
-function readTraeVscdbModelCatalogSync() {
+// P0 dual-path SQLite reader. Three layers, first hit wins; all fail → null.
+//   Path A: node:sqlite (Node 22+ built-in — ExperimentalWarning non-blocking).
+//   Path B: sqlite3 CLI -json (v3.26.0+).
+//   Path C: python3 sqlite3 stdlib fallback.
+// Split into per-path helpers so unit tests can exercise each path directly.
+function queryVscdbViaNodeSqlite(keyPattern, vscdbPath) {
+  try {
+    const { DatabaseSync } = cjsRequire('node:sqlite');
+    const db = new DatabaseSync(vscdbPath, { readOnly: true });
+    const row = db.prepare('SELECT value FROM ItemTable WHERE key LIKE ?').get(`%${keyPattern}%`);
+    db.close();
+    return row && row.value != null ? String(row.value) : null;
+  } catch { return null; }
+}
+function queryVscdbViaSqlite3Cli(keyPattern, vscdbPath) {
+  try {
+    // Default output mode: one value per line. -json needs sqlite3 >= 3.28;
+    // production CLI is 3.26.0, so we use plain SELECT ... LIMIT 1.
+    const raw = cjsRequire('child_process').execSync(
+      `sqlite3 "${vscdbPath}" "SELECT value FROM ItemTable WHERE key LIKE '%${keyPattern}%' LIMIT 1"`,
+      { encoding: 'utf-8', timeout: 2000 },
+    ).trim();
+    return raw || null;
+  } catch { return null; }
+}
+function queryVscdbViaPython3(keyPattern, vscdbPath) {
+  try {
+    // Pipe script via stdin to avoid fragile shell-escaping of '" and '%'.
+    // Parameterize via env vars so keyPattern/vscdbPath never touch SQL.
+    const script =
+      'import sqlite3, os\n' +
+      "c = sqlite3.connect(os.environ['TRAE_VSCDB_PATH'])\n" +
+      "r = c.execute(\"SELECT value FROM ItemTable WHERE key LIKE '%' || ? || '%'\", (os.environ['TRAE_KEY_PATTERN'],)).fetchone()\n" +
+      "print(r[0] if r else '')";
+    const out = cjsRequire('child_process').execSync('python3', {
+      input: script,
+      encoding: 'utf-8',
+      timeout: 2000,
+      env: { ...process.env, TRAE_VSCDB_PATH: vscdbPath, TRAE_KEY_PATTERN: keyPattern },
+    }).trim();
+    return out || null;
+  } catch { return null; }
+}
+function queryVscdbValueSync(keyPattern, vscdbPath) {
+  if (!vscdbPath || !fs.existsSync(vscdbPath)) return null;
+  return queryVscdbViaNodeSqlite(keyPattern, vscdbPath)
+    || queryVscdbViaSqlite3Cli(keyPattern, vscdbPath)
+    || queryVscdbViaPython3(keyPattern, vscdbPath);
+}
+
+// P1-1 vscdb path resolver. Priority: TRAES_USER_DATA_DIR env (exported by
+// start-trae-cn.sh, default /tmp/trae-ubuntu-vnc) → event.user_data_dir
+// (hook payload --user-data-dir) → ~/.trae-cn/User/globalStorage fallback.
+// Replaces the prior /tmp/trae-* scan (8 stale dirs) with a deterministic chain.
+function resolveVscdbPath(event) {
+  for (const d of [
+    process.env.TRAES_USER_DATA_DIR,
+    event?.user_data_dir,
+    path.join(os.homedir(), '.trae-cn', 'User', 'globalStorage'),
+  ]) {
+    if (d && typeof d === 'string') {
+      const p = path.join(d, 'state.vscdb');
+      if (fs.existsSync(p)) return p;
+    }
+  }
+  return null;
+}
+
+function readTraeVscdbModelCatalogSync(event) {
   if (readTraeVscdbModelCatalogSync._cache !== undefined) {
     return readTraeVscdbModelCatalogSync._cache;
   }
+  const vscdbPath = resolveVscdbPath(event);
   let result = null;
-  const home = os.homedir();
-  const vscdbPath = path.join(home, '.trae-cn', 'User', 'globalStorage', 'state.vscdb');
-  if (!fs.existsSync(vscdbPath)) {
-    readTraeVscdbModelCatalogSync._cache = null;
-    return null;
-  }
-  try {
-    const childProcess = cjsRequire('child_process');
-    const raw = childProcess.execSync(
-      `sqlite3 "${vscdbPath}" "SELECT value FROM ItemTable WHERE key LIKE '%AI.agent.model.model_list_map'"`,
-      { encoding: 'utf-8', timeout: 2000 },
-    );
-    result = JSON.parse(raw);
-  } catch {
-    result = null;
+  if (vscdbPath) {
+    const raw = queryVscdbValueSync('AI.agent.model.model_list_map', vscdbPath);
+    if (raw) { try { result = JSON.parse(raw); } catch { result = null; } }
   }
   readTraeVscdbModelCatalogSync._cache = result;
   return result;
 }
 
-function pickDefaultModelForAgentType(agentType) {
-  const catalog = readTraeVscdbModelCatalogSync();
-  if (!catalog || typeof catalog !== 'object') return null;
-  const list = catalog[agentType];
-  if (!Array.isArray(list) || list.length === 0) return null;
-  const def = list.find((m) => m && m.is_default === true)
-    || list.find((m) => m && m.is_preset === true)
-    || list[0];
-  if (!def || typeof def !== 'object') return null;
-  return {
-    name: def.name || def.display_name || null,
-    provider: def.provider || null,
-    display_name: def.display_name || def.name || null,
-  };
+// P1-2 agent_type normalization (architect APPROVED mapping). Trae internal
+// agent_type → canonical bucket. Custom(merge) → solo_coder (split on '(').
+const AGENT_TYPE_NORMALIZE = {
+  Builder: 'builder', BuilderWithMcp: 'builder', Chat: 'builder',
+  SoloCoder: 'solo_coder', SoloAgent: 'solo_coder',
+  UiBuilder: 'solo_builder', Custom: 'solo_coder',
+};
+function normalizeAgentType(agentType) {
+  if (typeof agentType !== 'string') return null;
+  return AGENT_TYPE_NORMALIZE[agentType.split('(')[0].trim()] || null;
+}
+
+function pickDefaultModelForAgentType(agentType, event) {
+  const catalog = readTraeVscdbModelCatalogSync(event);
+  const normalized = normalizeAgentType(agentType);
+  if (catalog && typeof catalog === 'object' && normalized) {
+    const list = catalog[normalized];
+    if (Array.isArray(list) && list.length > 0) {
+      const def = list.find((m) => m && m.is_default === true) || list[0];
+      if (def && typeof def === 'object') {
+        return {
+          name: def.name || def.display_name || null,
+          provider: def.provider || null,
+          display_name: def.display_name || def.name || null,
+        };
+      }
+    }
+  }
+  // Empty list or unknown agent_type → vscdb session_selected_model /
+  // ai_assistant.request.model config. NO solo_agent fallback heuristic
+  // (architect explicitly rejected).
+  const vscdbPath = resolveVscdbPath(event);
+  if (vscdbPath) {
+    const sel = queryVscdbValueSync('session_selected_model', vscdbPath);
+    if (sel) return { name: sel, provider: null, display_name: sel };
+    const cfg = queryVscdbValueSync('ai_assistant.request.model', vscdbPath);
+    if (cfg) return { name: cfg, provider: null, display_name: cfg };
+  }
+  return null;
 }
 
 function resolveModel(event, state) {
@@ -256,7 +339,7 @@ function resolveModel(event, state) {
   if (state?.model && state.model !== 'unknown') return state.model;
   const agentType = event?.agent_type || state?.agent_type;
   if (agentType) {
-    const pick = pickDefaultModelForAgentType(agentType);
+    const pick = pickDefaultModelForAgentType(agentType, event);
     if (pick?.name) return pick.name;
   }
   return state?.model || 'unknown';
@@ -272,7 +355,7 @@ function resolveProvider(event, state) {
   if (state?.provider && state.provider !== 'unknown') return state.provider;
   const agentType = event?.agent_type || state?.agent_type;
   if (agentType) {
-    const pick = pickDefaultModelForAgentType(agentType);
+    const pick = pickDefaultModelForAgentType(agentType, event);
     if (pick?.provider) return pick.provider;
   }
   const model = resolveModel(event, state).toLowerCase();
@@ -289,7 +372,7 @@ function resolveDisplayModel(event, state) {
   if (state?.display_model && state.display_model !== 'unknown') return state.display_model;
   const agentType = event?.agent_type || state?.agent_type;
   if (agentType) {
-    const pick = pickDefaultModelForAgentType(agentType);
+    const pick = pickDefaultModelForAgentType(agentType, event);
     if (pick?.display_name) return pick.display_name;
   }
   return resolveModel(event, state);
@@ -1501,19 +1584,24 @@ const DISPATCH = {
   'frida-enrich': cmdFridaEnrich,
 };
 
-const sub = process.argv[2] || 'unknown';
-const fn = DISPATCH[sub];
-if (fn) {
-  Promise.resolve(fn()).catch((err) => {
-    logHookError({
-      agentId: AGENT_ID,
-      stage: `dispatch_${sub}`,
-      errorType: 'unhandled',
-      errorMessage: err?.message || String(err),
-    });
-  }).finally(() => {
-    if (!emittedHookResponse) process.stdout.write('{}\n');
-  });
-} else {
-  process.stdout.write('{}\n');
+// Dispatcher runs only when invoked as CLI (argv[1] === this file). When
+// imported by unit tests for the vscdb reader / agent_type mapper, skip so
+// the test runner's argv doesn't trigger a hook subcommand.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const sub = process.argv[2] || 'unknown';
+  const fn = DISPATCH[sub];
+  if (fn) {
+    Promise.resolve(fn()).catch((err) => {
+      logHookError({ agentId: AGENT_ID, stage: `dispatch_${sub}`, errorType: 'unhandled', errorMessage: err?.message || String(err) });
+    }).finally(() => { if (!emittedHookResponse) process.stdout.write('{}\n'); });
+  } else {
+    process.stdout.write('{}\n');
+  }
 }
+
+// Test-only exports for the dual-path reader + agent_type mapper.
+export {
+  queryVscdbViaNodeSqlite, queryVscdbViaSqlite3Cli, queryVscdbViaPython3,
+  queryVscdbValueSync, resolveVscdbPath, readTraeVscdbModelCatalogSync,
+  normalizeAgentType, pickDefaultModelForAgentType,
+};
