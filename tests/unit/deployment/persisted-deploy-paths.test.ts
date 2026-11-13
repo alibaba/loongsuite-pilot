@@ -33,6 +33,7 @@ describe('persisted deploy paths', () => {
       },
     })).toEqual({
       hookSettingsPath: path.resolve('/custom/.grok/hooks/loongsuite-pilot.json'),
+      hookScope: 'user',
     });
 
     expect(lifecycleFieldsForDeploy({
