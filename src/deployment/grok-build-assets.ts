@@ -24,6 +24,8 @@ export const GROK_BUILD_HOOK_ASSETS = [
   'shared/decode-payload.mjs',
   'shared/error-logger.mjs',
   'shared/event-emitter.mjs',
+  'shared/raw-jsonl-writer.mjs',
+  'shared/raw-source-gate.mjs',
   'shared/sync-file-lock.mjs',
   'shared/workspace-policy.mjs',
   'shared/workspace-privacy.mjs',

@@ -1,10 +1,13 @@
 import * as fs from 'node:fs/promises';
+import { acquireRawSourceGate } from '../utils/raw-source-gate.js';
+import { fileIdentity, matchesFileIdentity } from '../utils/file-identity.js';
 import * as path from 'node:path';
 import type { LogRetentionConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { SLS_FAILURE_LOG_MAX_TOTAL_BYTES } from '../flushers/sls-failure-log-writer.js';
 import { parseOutputSegment } from '../utils/jsonl-output-file.js';
 import { LOCAL_LOG_EMERGENCY_FILE_BYTES, withJsonlFileLock } from '../utils/segmented-jsonl-writer.js';
+import type { StateStore } from '../checkpoints/state-store.js';
 
 const logger = createLogger('LogRetention');
 
@@ -14,6 +17,7 @@ export const LOCAL_MIRROR_PRESSURE_INTERVAL_MS = 60_000;
 const MEBIBYTE = 1024 * 1024;
 
 export const OUTPUT_RETENTION_MAX_TOTAL_BYTES = 2 * 1024 * MEBIBYTE;
+export const RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES = 2 * 1024 * MEBIBYTE;
 export const OUTPUT_RETENTION_LARGE_FILE_THRESHOLD_BYTES = 512 * MEBIBYTE;
 export const OUTPUT_RETENTION_LARGE_FILE_DAYS = 2;
 export const OUTPUT_RETENTION_PRESSURE_MIN_KEEP_DAYS = 1;
@@ -70,8 +74,9 @@ export class LogRetentionService {
   private pressureTimer: ReturnType<typeof setInterval> | null = null;
   private cleanupPromise: Promise<{ deleted: number; errors: number }> | null = null;
   private pressureOnlyCleanup = false;
+  private deletedBytes = 0;
 
-  constructor(dataDir: string, config: LogRetentionConfig) {
+  constructor(dataDir: string, config: LogRetentionConfig, private readonly stateStore?: StateStore) {
     this.logsDir = path.join(dataDir, 'logs');
     this.config = config;
   }
@@ -147,9 +152,16 @@ export class LogRetentionService {
   }
 
   private async runCleanupOnce(pressureOnly: boolean): Promise<{ deleted: number; errors: number }> {
+    this.deletedBytes = 0;
     const today = localDateString(new Date());
     let deleted = 0;
     let errors = 0;
+    const raw = await this.cleanRawHookSources(pressureOnly);
+    deleted += raw.deleted;
+    errors += raw.errors;
+    const sessions = await this.cleanRawSessionSources();
+    deleted += sessions.deleted;
+    errors += sessions.errors;
 
     try {
       const topEntries = await readdir(this.logsDir);
@@ -177,9 +189,164 @@ export class LogRetentionService {
     }
 
     if (deleted > 0 || errors > 0) {
-      logger.info('log retention complete', { deleted, errors });
+      logger.info('log retention complete', { deleted, deletedBytes: this.deletedBytes, errors });
     }
 
+    return { deleted, errors };
+  }
+
+  /**
+   * Raw input is not a diagnostic mirror. Only the input's durable cursor can
+   * authorize reclamation; age/pressure alone never authorizes data loss.
+   */
+  private async cleanRawHookSources(pressureOnly: boolean): Promise<{ deleted: number; errors: number }> {
+    let deleted = 0;
+    let errors = 0;
+    if (!this.stateStore) return { deleted, errors };
+    for (const id of this.stateStore.keys()) {
+      const extra = this.stateStore.get(id).extra;
+      const dir = extra?.hookLogDir;
+      const prefix = extra?.hookLogPrefix;
+      if (typeof dir !== 'string' || typeof prefix !== 'string'
+        || !this.isWithinLogs(dir) || !this.stateStore.isPersisted(id)) continue;
+      try {
+        // Never traverse a substituted symlink, even if the checkpoint names it.
+        if (await fs.realpath(dir) !== path.resolve(dir)) continue;
+        const files = (await fs.readdir(dir)).filter(file =>
+          file.startsWith(prefix + '-') && /\.jsonl$/.test(file));
+        let totalBytes = 0;
+        for (const file of files) totalBytes += (await safeLstat(path.join(dir, file)))?.size ?? 0;
+        for (const file of files.sort()) {
+          const date = /-(\d{4}-\d{2}-\d{2})(?:\.segment-\d{12}-[a-f0-9]{32})?\.jsonl$/.exec(file)?.[1];
+          const expired = date !== undefined && date < dateCutoff(this.config.hookHistoryDays);
+          if ((pressureOnly || !expired) && totalBytes <= RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES) continue;
+          const base = file.replace(/\.segment-\d{12}-[a-f0-9]{32}(?=\.jsonl$)/, '');
+          const fullPath = path.join(dir, file);
+          // The same OS transaction gate as Node/Python raw writers.
+          // No lockfile is unlinked; a busy writer is skipped.
+          const lock = acquireRawSourceGate(dir);
+          if (!lock) continue;
+          try {
+            const state = this.stateStore.get(id);
+            if (!this.stateStore.isPersisted(id)) continue;
+            const offsets = state.extra?.hookLogOffsets as Record<string, number> | undefined;
+            const identities = state.extra?.hookLogIdentities as Record<string, string> | undefined;
+            const blocked = state.extra?.hookLogRetentionBlocked as Record<string, boolean> | undefined;
+            if (blocked?.[file]) continue;
+            const stat = await safeLstat(fullPath);
+            if (!stat?.isFile() || offsets?.[file] !== stat.size
+              || !matchesFileIdentity(identities?.[file], stat)) continue;
+            const active = await fs.readFile(path.join(dir, base + '.active'), 'utf8').catch(error => {
+              if (error.code === 'ENOENT') return undefined;
+              throw error;
+            });
+            // Daily writers compute the date at every append. Keep two whole
+            // days for timezone skew/late writers before treating an old,
+            // quiet daily family as closed, including the final published
+            // segment: tomorrow's writer will use a different daily family.
+            const dailyClosed = date !== undefined
+              && ((!active && file === base) || (active === file && file !== base))
+              && date < dateCutoff(2) && localDateString(new Date(stat.mtimeMs)) < dateCutoff(2);
+            if (!dailyClosed && !isPublishedSuccessor(file, base, active)) continue;
+            await fs.unlink(fullPath);
+            deleted++;
+            totalBytes -= stat.size;
+            this.deletedBytes += stat.size;
+          } finally {
+            try { lock.release(); }
+            catch (error) {
+              errors++;
+              logger.warn('raw source retention gate release failed', { input: id, error: String(error) });
+            }
+          }
+        }
+        if (totalBytes > RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES) {
+          logger.warn('Raw input disk budget exceeded; preserving active or unconsumed source', {
+            input: id, bytes: totalBytes, maxBytes: RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES,
+          });
+        }
+      } catch (error) {
+        errors++;
+        logger.warn('raw source retention failed', { input: id, error: String(error) });
+      }
+    }
+    return { deleted, errors };
+  }
+
+  private async cleanRawSessionSources(): Promise<{ deleted: number; errors: number }> {
+    let deleted = 0;
+    let errors = 0;
+    if (!this.stateStore) return { deleted, errors };
+    for (const [input, family] of [['dsh-log', 'dsh'], ['hermes-agent-log', 'hermes-agent']]) {
+      const dir = path.join(this.logsDir, family);
+      const sources = this.stateStore.keys().filter(key => key.startsWith(input + ':'));
+      const stats = new Map<string, Awaited<ReturnType<typeof safeLstat>>>();
+      for (const key of sources) {
+        const file = key.slice(input.length + 1);
+        if (path.dirname(file) === dir) stats.set(file, await safeLstat(file));
+      }
+      let totalBytes = [...stats.values()].reduce((sum, stat) => sum + (stat?.size ?? 0), 0);
+      for (const [file, observed] of stats) {
+        if (!observed?.isFile() || !sources.length) continue;
+        if (observed.mtimeMs >= Date.now() - this.config.hookHistoryDays * 86400_000
+          && totalBytes <= RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES) continue;
+        const key = input + ':' + file;
+        const base = file.replace(/\.segment-\d{12}-[a-f0-9]{32}(?=\.jsonl$)/, '');
+        let lock: ReturnType<typeof acquireRawSourceGate> = null;
+        try {
+          if (await fs.realpath(dir) !== path.resolve(dir)) continue;
+          lock = acquireRawSourceGate(dir);
+          if (!lock) continue;
+          const current = await safeLstat(file);
+          const state = this.stateStore.get(key);
+          if (!current?.isFile() || !this.stateStore.isPersisted(key)
+            || fileIdentity(current) !== fileIdentity(observed)
+            || state.extra?.inode !== current.ino
+            || (state.extra?.sourceIdentity !== undefined
+              ? !matchesFileIdentity(state.extra.sourceIdentity, current)
+              : ((process.platform === 'darwin' || process.platform === 'win32') && state.extra?.sourceBirthtimeMs !== current.birthtimeMs))
+            || state.lastOffset !== current.size) continue;
+          const active = await fs.readFile(base + '.active', 'utf8').catch(error => {
+            if (error.code === 'ENOENT') return undefined;
+            throw error;
+          });
+          // Session age does not prove closure; DSH can resume an old session.
+          let processExited = false;
+          // The process token belongs to the entire file family, including
+          // the final segment still named by a pointer after its owner exits.
+          const pid = family === 'hermes-agent'
+            ? /^hermes-agent-(\d+)-\d+-[a-f0-9]+\.jsonl$/.exec(path.basename(base))?.[1] : undefined;
+          if (pid) {
+            try { process.kill(Number(pid), 0); }
+            catch (error) { processExited = (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+          }
+          if (!processExited && !isPublishedSuccessor(path.basename(file), path.basename(base), active)) continue;
+          await fs.unlink(file);
+          deleted++;
+          this.deletedBytes += current.size;
+          totalBytes -= current.size;
+        } catch (error) {
+          errors++;
+          logger.warn('raw session retention failed', { input, error: String(error) });
+        } finally {
+          if (lock) {
+            try {
+              lock.release();
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                errors++;
+                logger.warn('raw session retention lock release failed', { input, error: String(error) });
+              }
+            }
+          }
+        }
+      }
+      if (totalBytes > RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES) {
+        logger.warn('Raw session disk budget exceeded; preserving active or unconsumed source', {
+          input, bytes: totalBytes, maxBytes: RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES,
+        });
+      }
+    }
     return { deleted, errors };
   }
 
@@ -207,6 +374,12 @@ export class LogRetentionService {
     return { deleted, errors };
   }
 
+  private isWithinLogs(dir: string): boolean {
+    const relative = path.relative(path.resolve(this.logsDir), path.resolve(dir));
+    return relative !== '' && relative !== '..' && !relative.startsWith('..' + path.sep)
+      && !path.isAbsolute(relative);
+  }
+
   private async cleanDirectory(
     dir: string,
     category: Category,
@@ -214,6 +387,14 @@ export class LogRetentionService {
   ): Promise<{ deleted: number; errors: number }> {
     let deleted = 0;
     let errors = 0;
+
+    // History is an input source, including before discovery has registered a
+    // cursor. Generic age cleanup cannot establish consumption or closure.
+    if (category === 'history' || this.stateStore?.keys().some(id => {
+      const sourceDir = this.stateStore!.get(id).extra?.hookLogDir;
+      return typeof sourceDir === 'string' && this.isWithinLogs(sourceDir)
+        && path.resolve(sourceDir) === path.resolve(dir);
+    })) return { deleted, errors };
 
     const files = await readdir(dir);
     if (category === 'output' || category === 'otlp-debug') {
@@ -407,7 +588,7 @@ export class LogRetentionService {
     );
     deleted += regularResult.deleted;
     errors += regularResult.errors;
-    remaining = remaining.filter(file => !regularResult.attemptedPaths.has(file.fullPath));
+    remaining = await this.collectDatedOutputFiles(dir, await readdir(dir));
 
     const largeFileCutoff = dateCutoff(OUTPUT_RETENTION_LARGE_FILE_DAYS);
     const largeFileResult = await this.deleteDatedFiles(
@@ -418,7 +599,7 @@ export class LogRetentionService {
     );
     deleted += largeFileResult.deleted;
     errors += largeFileResult.errors;
-    remaining = remaining.filter(file => !largeFileResult.attemptedPaths.has(file.fullPath));
+    remaining = await this.collectDatedOutputFiles(dir, await readdir(dir));
 
     const pressureResult = await this.enforceOutputSizeLimit(remaining, today);
     deleted += pressureResult.deleted;
@@ -437,6 +618,7 @@ export class LogRetentionService {
           const stat = await safeLstat(file.fullPath);
           if (!stat?.isFile() || stat.size <= LOCAL_LOG_EMERGENCY_FILE_BYTES) return false;
           await fs.unlink(file.fullPath);
+          this.deletedBytes += stat.size;
           logger.warn('Deleted oversized local JSONL file', { file: file.fullPath, bytes: stat.size, discardedFailedData: failedData });
           return true;
         });
@@ -457,7 +639,7 @@ export class LogRetentionService {
       if (!stat?.isFile()) continue;
       const segment = parseOutputSegment(file);
       const dateStr = extractDate(file) ?? (segment?.date === 'all' ? localDateString(new Date(stat.mtimeMs))
-        : file.endsWith('-all.jsonl') ? localDateString(new Date()) : null);
+        : file.endsWith('-all.jsonl') ? localDateString(new Date(stat.mtimeMs)) : null);
       if (!dateStr) continue;
 
       result.push({
@@ -528,7 +710,11 @@ export class LogRetentionService {
 
   private async deleteFile(file: string): Promise<boolean> {
     try {
-      await withJsonlFileLock(file, () => fs.unlink(file));
+      await withJsonlFileLock(file, async () => {
+        const stat = await fs.lstat(file);
+        await fs.unlink(file);
+        this.deletedBytes += stat.size;
+      });
       return true;
     } catch (err) {
       logger.warn('failed to delete log file', { file, error: String(err) });
@@ -559,6 +745,13 @@ export function extractDate(filename: string): string | null {
   const [y, m, day] = parts;
   if (y < 2020 || y > 2099 || m < 1 || m > 12 || day < 1 || day > 31) return null;
   return d;
+}
+
+function isPublishedSuccessor(file: string, base: string, active: string | undefined): boolean {
+  if (!active || path.basename(active) !== active || !active.startsWith(base.slice(0, -6) + '.segment-')) return false;
+  const next = /\.segment-(\d{12})-[a-f0-9]{32}\.jsonl$/.exec(active);
+  const current = /\.segment-(\d{12})-[a-f0-9]{32}\.jsonl$/.exec(file);
+  return next !== null && Number(next[1]) > Number(current?.[1] ?? 0);
 }
 
 function dateCutoff(retentionDays: number): string {

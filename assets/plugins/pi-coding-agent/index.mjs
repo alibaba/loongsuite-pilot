@@ -9,6 +9,7 @@
  */
 
 import crypto from 'node:crypto';
+import { appendRawJsonl } from '../shared/raw-jsonl-writer.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -164,7 +165,8 @@ function writeError(source, error) {
 
 function writeRecord(record) {
   try {
-    appendLogFile(`${LOG_PREFIX}-${todayStamp()}.jsonl`, `${safeStringify(record)}\n`);
+    ensureLogDir();
+    appendRawJsonl(path.join(resolveLogDir(), `${LOG_PREFIX}-${todayStamp()}.jsonl`), `${safeStringify(record)}\n`);
   } catch (error) {
     writeError('writeRecord', error);
   }

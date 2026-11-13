@@ -14,6 +14,9 @@ async function installPlugin(pluginDir: string): Promise<string> {
     path.resolve('assets/plugins/shared/resource-context.mjs'),
     path.join(sharedDir, 'resource-context.mjs'),
   );
+  for (const file of ['raw-jsonl-writer.mjs', 'raw-source-gate.mjs']) {
+    await fs.copyFile(path.resolve('assets/plugins/shared', file), path.join(sharedDir, file));
+  }
   return pluginPath;
 }
 
@@ -77,6 +80,26 @@ describe('DSH plugin collection enabled marker', () => {
     expect(handlers.size).toBe(0);
     await expect(fs.stat(path.join(process.env.LOONGSUITE_PILOT_DATA_DIR!, 'logs', 'dsh')))
       .rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rotates at turn boundaries with the reusable header and never splits an active turn', async () => {
+    const { apply, pluginDir } = await loadPlugin();
+    await fs.writeFile(path.join(pluginDir, '.collection-enabled'), 'enabled\n');
+    const handlers = new Map<string, (...args: any[]) => void>();
+    apply({ on: (name: string, handler: (...args: any[]) => void) => handlers.set(name, handler), logger: () => ({ info() {} }) });
+    const emit = (type: string, data = {}) => handlers.get('session/event')!({ id: 'session-a' }, { seq: 1, time: 1, type, data });
+    emit('request/header', { header: { config: { model: 'test-model' } } });
+    emit('turn/end');
+    const dir = path.join(process.env.LOONGSUITE_PILOT_DATA_DIR!, 'logs', 'dsh');
+    const base = path.join(dir, 'dsh-session-a.jsonl');
+    await fs.truncate(base, 100 * 1024 * 1024);
+    emit('turn/start');
+    const active = path.join(dir, await fs.readFile(base + '.active', 'utf8'));
+    const records = (await fs.readFile(active, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    expect(records.map(record => record.type)).toEqual(['request/header', 'turn/start']);
+    await fs.truncate(active, 100 * 1024 * 1024);
+    emit('assistant/chunk');
+    expect(await fs.readFile(base + '.active', 'utf8')).toBe(path.basename(active));
   });
 });
 

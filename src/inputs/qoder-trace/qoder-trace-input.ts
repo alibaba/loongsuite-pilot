@@ -11,6 +11,8 @@ import { getTodayDateString } from '../../utils/fs-utils.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
+import { matchesFileIdentity } from '../../utils/file-identity.js';
+import { historyFileIdentity, historyRetentionExtra, migrateHistoryRetention, nextHistoryFile } from '../base/history-retention-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSegmentTokensForSession } from './segment-token-reader.js';
 import { readSqliteTokensForSession, isIdeaDbPath, resolveQoderAppRoot, type SqliteTokenResult } from './sqlite-token-reader.js';
@@ -347,10 +349,21 @@ export class QoderTraceInput extends BaseInput {
 
   // ─── Hook JSONL reading (adapted from BaseHookInput) ────────────────────────
 
+  private historyCursor?: string;
+  private historyPendingFile?: string;
+
   private async readHookJsonl(): Promise<AgentActivityEntry[]> {
+    const migrated = await migrateHistoryRetention(this.getState(), this.logDir, this.logPrefix);
+    if (migrated) this.setState({ extra: migrated });
+    const file = await nextHistoryFile(this.getState(), this.logDir, this.logPrefix, this.historyCursor, this.historyPendingFile);
+    if (!file) return [];
+    this.historyCursor = file;
+    this.historyPendingFile = undefined;
+    return this.readHookFile(file);
+  }
+
+  private async readHookFile(logFileName: string): Promise<AgentActivityEntry[]> {
     const runtime = this.getInputRuntimeAccumulator();
-    const today = getTodayDateString();
-    const logFileName = `${this.logPrefix}-${today}.jsonl`;
     const logFile = path.join(this.logDir, logFileName);
 
     let stat;
@@ -361,18 +374,31 @@ export class QoderTraceInput extends BaseInput {
     }
 
     const state = this.getState();
-    let offset = state.lastFile === logFileName ? (state.lastOffset ?? 0) : 0;
+    const identities = state.extra?.hookLogIdentities as Record<string, string> | undefined;
+    const offsets = state.extra?.hookLogOffsets as Record<string, number> | undefined;
+    let offset = matchesFileIdentity(identities?.[logFileName], stat)
+      ? offsets?.[logFileName] ?? 0 : 0;
 
     if (offset > 0 && stat.size < offset) {
       this.logger.info('file truncated, resetting offset', { file: logFile, recorded: offset, actual: stat.size });
       offset = 0;
     }
+    const observed = historyRetentionExtra(this.getState(), this.logDir, this.logPrefix, logFileName, stat, offset);
+    if (observed) this.setState({ extra: observed });
     if (stat.size <= offset) return [];
     runtime?.observeBacklog(stat.size - offset);
 
     let entries: AgentActivityEntry[] = [];
     {
       const batch = await this.legacyHookReader.read(logFile, offset, runtime);
+      if (historyFileIdentity(batch.stat) !== historyFileIdentity(stat)) {
+        this.legacyHookReader.reset();
+        throw new Error('legacy Hook source replaced before read');
+      }
+      const progress = historyRetentionExtra(this.getState(), this.logDir, this.logPrefix,
+        logFileName, batch.stat, batch.nextOffset, batch.quarantine.length > 0);
+      if (progress) this.setState({ extra: progress });
+      if (batch.scanPending) this.historyPendingFile = logFileName;
       const completeBytes = batch.buffer;
       const completeLength = batch.nextOffset - offset;
       const skipped = batch.quarantine.filter(record => record.to !== null);

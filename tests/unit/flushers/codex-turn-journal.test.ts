@@ -17,6 +17,49 @@ function entry(id: string, overrides: Partial<AgentActivityEntry> = {}): AgentAc
 }
 
 describe('CodexTurnJournal', () => {
+  it('applies disk backpressure without deleting pending turns and recovers capacity after ACK', async () => {
+    const first = entry('first');
+    const bytes = Buffer.byteLength(JSON.stringify(first) + '\n');
+    const journal = new CodexTurnJournal(directory, 100, bytes);
+    await journal.append([first]);
+    await expect(journal.append([entry('second')])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    expect((await readJournal(journal)).flat().map(e => e['event.id'])).toEqual(['first']);
+    const restarted = new CodexTurnJournal(directory, 100, bytes);
+    await expect(restarted.append([entry('second')])).rejects.toThrow('disk budget exceeded');
+    await restarted.acknowledge([first]);
+    await restarted.append([entry('third', { 'gen_ai.turn.id': 'new-turn' })]);
+    expect((await readJournal(restarted)).flat().map(e => e['event.id'])).toEqual(['third']);
+  });
+  it('shares the disk budget across delegated Agents and retains rejected work for retry after ACK', async () => {
+    const first = entry('hermes-work', { 'gen_ai.agent.type': 'hermes' });
+    const second = entry('openclaw-work', { 'gen_ai.agent.type': 'openclaw' });
+    const bytes = Buffer.byteLength(JSON.stringify(first) + '\n')
+      + Buffer.byteLength(JSON.stringify(second) + '\n') - 1;
+    const agents = ['codex', 'hermes', 'openclaw'];
+    const journal = new CodexTurnJournal(directory, 100, agents, bytes);
+    await journal.append([first]);
+    await expect(journal.append([second])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    const restarted = new CodexTurnJournal(directory, 100, agents, bytes);
+    expect((await readJournal(restarted)).flat()).toEqual([first]);
+    expect(await restarted.isAcknowledged(second)).toBe(false);
+    await restarted.acknowledge([first]);
+    await restarted.append([second]);
+    expect((await readJournal(restarted)).flat()).toEqual([second]);
+  });
+
+  it('honors explicit disk budgets for both constructor forms when the environment is invalid', () => {
+    const previous = process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
+    process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES = 'invalid';
+    try {
+      expect(() => new CodexTurnJournal(directory, 100, 1024)).not.toThrow();
+      expect(() => new CodexTurnJournal(directory, 100, ['codex', 'hermes'], 1024)).not.toThrow();
+      expect(() => new CodexTurnJournal(directory)).toThrow(RangeError);
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
+      else process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES = previous;
+    }
+  });
+
   let directory: string;
   beforeEach(async () => { directory = await createTempDir('codex-turn-journal-'); });
   afterEach(async () => { await cleanupTempDir(directory); });
@@ -136,7 +179,7 @@ describe('CodexTurnJournal', () => {
     expect(await restarted.isAcknowledged(record)).toBe(true);
   });
 
-  it('ignores residual pending content if acknowledgement was written before a crash', async () => {
+  it('reclaims residual pending content if acknowledgement was written before a crash', async () => {
     const record = entry('exported');
     await new CodexTurnJournal(directory).append([record]);
     const key = codexTurnJournalGroupKey(record);
@@ -145,9 +188,9 @@ describe('CodexTurnJournal', () => {
     expect(await restarted.isAcknowledged(record)).toBe(true);
     expect(await readJournal(restarted)).toEqual([]);
     expect(await readJournal(restarted, key)).toEqual([]);
-    const before = await fs.readFile(filename(directory, record), 'utf8');
+    await expect(fs.stat(filename(directory, record))).rejects.toMatchObject({ code: 'ENOENT' });
     await restarted.append([entry('source-replay')]);
-    expect(await fs.readFile(filename(directory, record), 'utf8')).toBe(before);
+    await expect(fs.stat(filename(directory, record))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('cleans residual pending content before evicting its oldest acknowledgement and retains ACK on cleanup failure', async () => {

@@ -17,6 +17,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { filterWorkspaceRecords } from './shared/workspace-privacy.mjs';
 import { decodePayload } from './shared/decode-payload.mjs';
+import { appendRawJsonl } from './shared/raw-jsonl-writer.mjs';
 import {
   applyHookContentPolicy,
   hashJson,
@@ -477,7 +478,8 @@ async function main() {
   if (process.env.LOONGSUITE_CURSOR_RAW_TRACE === '1') {
     try {
       const rawFile = path.join(dataDir, 'logs', 'cursor', 'raw', 'cursor-raw-trace.jsonl');
-      await appendJsonl(rawFile, { _captured_at: now.toISOString(), ...payload });
+      appendRawJsonl(rawFile, JSON.stringify({ _captured_at: now.toISOString(), ...payload }) + '\n',
+        10 * 1024 * 1024, { diagnosticMaxBytes: 100 * 1024 * 1024 });
     } catch {
       // best-effort
     }
