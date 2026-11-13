@@ -136,8 +136,8 @@ interface TurnBuffer {
   spilledRecords?: number;
   spilledEventIds?: Set<string>;
   residentBytes?: number;
-  // Copilot source event IDs are stable across legacy replays. This index
-  // intentionally leaves other producers' update semantics unchanged.
+  // Stable source IDs index resident replay records. Spilled durable turns
+  // retain their identities in spilledEventIds until payload rehydration.
   recordIndex: Map<string, number>;
   completed: boolean;
   /** All realtime producers can overlap turns in one session. */
@@ -911,21 +911,29 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const eventId = entry['gen_ai.agent.type'] === 'copilot'
       || (durable && (agentType === 'hermes' || agentType === 'openclaw'))
       ? (entry['event.id'] as string | undefined) : undefined;
-    if (typeof eventId === 'string' && eventId.length > 0) {
+    let residentDelta = residentSize;
+    if (buf.spilledRecords && durable) {
+      // The journal owns both the retained prefix and this appended suffix.
+      // Keep only identity metadata resident until the whole turn is restored.
+      buf.spilledEventIds!.add(entry['event.id']);
+      buf.spilledRecords = buf.spilledEventIds!.size;
+    } else if (typeof eventId === 'string' && eventId.length > 0) {
       const existingIdx = buf.recordIndex.get(eventId);
       if (existingIdx !== undefined) {
-        buf.records[existingIdx] = mergeRecordFields(buf.records[existingIdx], entry);
+        const previous = buf.records[existingIdx];
+        const merged = mergeRecordFields(previous, entry);
+        if (durable) {
+          residentDelta = Buffer.byteLength(JSON.stringify(merged)) - Buffer.byteLength(JSON.stringify(previous));
+        }
+        buf.records[existingIdx] = merged;
       } else {
         buf.recordIndex.set(eventId, buf.records.length);
         buf.records.push(entry);
       }
-    } else if (buf.spilledRecords && durable) {
-      buf.spilledEventIds!.add(entry['event.id']);
-      buf.spilledRecords++;
     } else {
       buf.records.push(entry);
     }
-    if (!buf.spilledRecords) buf.residentBytes = (buf.residentBytes ?? 0) + residentSize;
+    if (!buf.spilledRecords) buf.residentBytes = (buf.residentBytes ?? 0) + residentDelta;
     buf.lastActivityMs = Date.now();
     if (typeof logicalBytes === 'number' && Number.isFinite(logicalBytes) && logicalBytes >= 0) {
       buf.logicalBytes += logicalBytes;
@@ -1085,6 +1093,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     if (!restored.length) throw new Error('Retained Codex payload is unavailable; refusing to acknowledge its turn');
     buf.records = restored;
+    buf.recordIndex.clear();
+    restored.forEach((entry, index) => buf.recordIndex.set(entry['event.id'], index));
     buf.residentBytes = restored.reduce((sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry)), 0);
     buf.spilledRecords = 0;
     buf.spilledEventIds = undefined;
@@ -2646,7 +2656,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
             turnIdleTimeoutMs: timeout,
           });
         }
-        if (this.codexJournal?.acceptsAgent(buf.agentType)) {
+        // A legacy Hermes producer without native completion still relies on
+        // idle sealing. Journal durability must not disable that existing path.
+        if (this.codexJournal?.acceptsAgent(buf.agentType) && buf.agentType !== 'hermes') {
           this.turnBuffers.delete(buf.key);
           this.recordBufferRemoval(buf);
           continue;
