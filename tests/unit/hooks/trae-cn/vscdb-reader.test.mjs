@@ -23,6 +23,12 @@ beforeEach(async () => {
   origTraesUserDataDir = process.env.TRAES_USER_DATA_DIR;
   process.env.TRAES_USER_DATA_DIR = vscdbDir;
   mod = await import(PROCESSOR);
+  // readTraeVscdbModelCatalogSync memoises on the module; without clearing,
+  // the first picker test's catalog leaks into every later test. Reset so
+  // each test sees the vscdb it just built.
+  if (mod.readTraeVscdbModelCatalogSync._cache !== undefined) {
+    mod.readTraeVscdbModelCatalogSync._cache = undefined;
+  }
 });
 
 afterEach(() => {
@@ -42,19 +48,21 @@ function buildVscdb(rows) {
   db.close();
 }
 
-// Researcher round 2 fixture (dual-path-test.mjs output):
-//   solo_agent default = Doubao-Seed-2.1-Turbo
-//   agent/solo_coder default = Doubao-Seed-Code
-// Catalog keyed by normalized agent_type bucket.
+// Deployer-confirmed vscdb schema for AI.agent.model.model_list_map:
+//   { "<user_id>": { "<agent_type>": { modelId, mode, ... } } }
+// where agent_type keys are snake_case variants (solo_agent, builder, ...).
+// modelId carries a synthetic prefix `<agent_type>_<N>__<real_model_name>`
+// that the picker must strip before returning.
 const CATALOG_SOLO_AGENT_DEFAULT = {
-  solo_coder: [
-    { name: 'Doubao-Seed-Code', is_default: true, provider: 'doubao' },
-    { name: 'Qwen-Coder-32B', is_default: false, provider: 'qwen' },
-  ],
+  '6af6d570164695484f84f7f1': {
+    solo_agent: { modelId: 'solo_agent_1__Doubao-Seed-Code', mode: 1 },
+  },
 };
 
 const CATALOG_BUILDER_EMPTY = {
-  builder: [],
+  '6af6d570164695484f84f7f1': {
+    builder: {},
+  },
 };
 
 describe('Trae-CN vscdb reader — P0 dual-path', () => {
@@ -63,7 +71,7 @@ describe('Trae-CN vscdb reader — P0 dual-path', () => {
     const raw = mod.queryVscdbValueSync('AI.agent.model.model_list_map', vscdbPath);
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw);
-    expect(parsed.solo_coder[0].name).toBe('Doubao-Seed-Code');
+    expect(parsed['6af6d570164695484f84f7f1'].solo_agent.modelId).toBe('solo_agent_1__Doubao-Seed-Code');
   });
 
   it('Path A fail (file missing) → fallback B/C also fail → returns null', () => {
@@ -201,15 +209,18 @@ describe('Trae-CN agent_type mapper — P1-2 normalization', () => {
 });
 
 describe('Trae-CN pickDefaultModelForAgentType — end-to-end mapper', () => {
-  it('agent_type=SoloAgent with non-empty list → returns default Doubao-Seed-Code', () => {
+  it('agent_type=SoloAgent with solo_agent entry → strips prefix, returns Doubao-Seed-Code', () => {
     buildVscdb([{ key: 'someUserId_AI.agent.model.model_list_map', value: JSON.stringify(CATALOG_SOLO_AGENT_DEFAULT) }]);
     const pick = mod.pickDefaultModelForAgentType('SoloAgent', {});
     expect(pick).not.toBeNull();
     expect(pick.name).toBe('Doubao-Seed-Code');
-    expect(pick.provider).toBe('doubao');
+    // vscdb entry `{ modelId, mode }` has no provider field; picker returns
+    // null rather than fabricating one. Provider is resolved separately by
+    // resolveProvider.
+    expect(pick.provider).toBeNull();
   });
 
-  it('agent_type=Builder with empty list → falls back to session_selected_model', () => {
+  it('agent_type=Builder with empty entry → falls back to session_selected_model', () => {
     buildVscdb([
       { key: 'AI.agent.model.model_list_map', value: JSON.stringify(CATALOG_BUILDER_EMPTY) },
       { key: 'session_selected_model', value: 'Doubao-Seed-2.1-Turbo' },
@@ -219,7 +230,7 @@ describe('Trae-CN pickDefaultModelForAgentType — end-to-end mapper', () => {
     expect(pick.name).toBe('Doubao-Seed-2.1-Turbo');
   });
 
-  it('agent_type=Builder empty list + no session_selected_model → falls back to ai_assistant.request.model config', () => {
+  it('agent_type=Builder empty entry + no session_selected_model → falls back to ai_assistant.request.model config', () => {
     buildVscdb([
       { key: 'AI.agent.model.model_list_map', value: JSON.stringify(CATALOG_BUILDER_EMPTY) },
       { key: 'ai_assistant.request.model', value: 'Qwen-Coder-32B' },
@@ -229,7 +240,7 @@ describe('Trae-CN pickDefaultModelForAgentType — end-to-end mapper', () => {
     expect(pick.name).toBe('Qwen-Coder-32B');
   });
 
-  it('agent_type=Builder empty list + all vscdb fallbacks missing → returns null (NO solo_agent heuristic)', () => {
+  it('agent_type=Builder empty entry + all vscdb fallbacks missing → returns null (NO solo_agent heuristic)', () => {
     buildVscdb([{ key: 'AI.agent.model.model_list_map', value: JSON.stringify(CATALOG_BUILDER_EMPTY) }]);
     const pick = mod.pickDefaultModelForAgentType('Builder', {});
     expect(pick).toBeNull();
@@ -241,5 +252,68 @@ describe('Trae-CN pickDefaultModelForAgentType — end-to-end mapper', () => {
     // Unknown agent_type → normalizeAgentType returns null → no catalog lookup
     // → falls through to session_selected_model / config which are missing → null.
     expect(pick).toBeNull();
+  });
+});
+
+// P1-3 modelId extraction from vscdb nested schema. Deployer-confirmed
+// schema: { "<user_id>": { "<agent_type>": { modelId, mode, ... } } }.
+// modelId carries synthetic prefix `<agent_type>_<N>__` that must be stripped.
+describe('Trae-CN pickDefaultModelForAgentType — P1-3 modelId extraction', () => {
+  it('deployer sample: raw JSON → extracts Doubao-Seed-Code (prefix stripped)', () => {
+    const raw = '{"6af6d570164695484f84f7f1":{"solo_agent":{"modelId":"solo_agent_1__Doubao-Seed-Code","mode":1}}}';
+    buildVscdb([{ key: 'AI.agent.model.model_list_map', value: raw }]);
+    const pick = mod.pickDefaultModelForAgentType('SoloAgent', {});
+    expect(pick).not.toBeNull();
+    expect(pick.name).toBe('Doubao-Seed-Code');
+    expect(pick.display_name).toBe('Doubao-Seed-Code');
+  });
+
+  it('modelId without prefix (e.g. Qwen-Coder-32B) → returned as-is', () => {
+    const raw = '{"uid-1":{"solo_agent":{"modelId":"Qwen-Coder-32B","mode":1}}}';
+    buildVscdb([{ key: 'AI.agent.model.model_list_map', value: raw }]);
+    const pick = mod.pickDefaultModelForAgentType('SoloAgent', {});
+    expect(pick).not.toBeNull();
+    expect(pick.name).toBe('Qwen-Coder-32B');
+  });
+
+  it('JSON parse failure → falls through to session_selected_model / config → null when both missing', () => {
+    buildVscdb([{ key: 'AI.agent.model.model_list_map', value: 'not-valid-json{' }]);
+    const pick = mod.pickDefaultModelForAgentType('SoloAgent', {});
+    expect(pick).toBeNull();
+  });
+
+  it('empty catalog object → falls through → null', () => {
+    buildVscdb([{ key: 'AI.agent.model.model_list_map', value: '{}' }]);
+    const pick = mod.pickDefaultModelForAgentType('SoloAgent', {});
+    expect(pick).toBeNull();
+  });
+
+  it('multiple user_id keys → picks first one with matching agent_type', () => {
+    const raw = '{"uid-a":{"builder":{"modelId":"builder_1__Doubao-Seed-Turbo","mode":1}},'
+              + '"uid-b":{"solo_agent":{"modelId":"solo_agent_2__Doubao-Seed-Code","mode":1}}}';
+    buildVscdb([{ key: 'AI.agent.model.model_list_map', value: raw }]);
+    const pick = mod.pickDefaultModelForAgentType('SoloAgent', {});
+    expect(pick).not.toBeNull();
+    // Picker iterates Object.keys(catalog) in insertion order — uid-a first,
+    // but uid-a has no solo_agent entry, so picker continues to uid-b.
+    expect(pick.name).toBe('Doubao-Seed-Code');
+  });
+
+  it('stripModelIdPrefix: strips solo_agent_1__ prefix', () => {
+    expect(mod.stripModelIdPrefix('solo_agent_1__Doubao-Seed-Code')).toBe('Doubao-Seed-Code');
+  });
+
+  it('stripModelIdPrefix: no prefix → returns input unchanged', () => {
+    expect(mod.stripModelIdPrefix('Qwen-Coder-32B')).toBe('Qwen-Coder-32B');
+  });
+
+  it('stripModelIdPrefix: builder_2__ prefix stripped', () => {
+    expect(mod.stripModelIdPrefix('builder_2__Doubao-Seed-Turbo')).toBe('Doubao-Seed-Turbo');
+  });
+
+  it('stripModelIdPrefix: non-string → returns null', () => {
+    expect(mod.stripModelIdPrefix(null)).toBeNull();
+    expect(mod.stripModelIdPrefix(undefined)).toBeNull();
+    expect(mod.stripModelIdPrefix(42)).toBeNull();
   });
 });

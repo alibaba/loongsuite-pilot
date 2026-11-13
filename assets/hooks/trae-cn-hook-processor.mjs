@@ -295,29 +295,51 @@ function readTraeVscdbModelCatalogSync(event) {
 
 // P1-2 agent_type normalization (architect APPROVED mapping). Trae internal
 // agent_type → canonical bucket. Custom(merge) → solo_coder (split on '(').
+// Also covers snake_case variants used as inner keys in vscdb
+// model_list_map (e.g. `solo_agent`), so the picker can match entries by
+// canonical bucket regardless of which casing the producer used.
 const AGENT_TYPE_NORMALIZE = {
   Builder: 'builder', BuilderWithMcp: 'builder', Chat: 'builder',
   SoloCoder: 'solo_coder', SoloAgent: 'solo_coder',
   UiBuilder: 'solo_builder', Custom: 'solo_coder',
+  solo_agent: 'solo_coder', solo_coder: 'solo_coder',
+  builder: 'builder', chat: 'builder', ui_builder: 'solo_builder',
 };
 function normalizeAgentType(agentType) {
   if (typeof agentType !== 'string') return null;
   return AGENT_TYPE_NORMALIZE[agentType.split('(')[0].trim()] || null;
 }
 
+// Trae internal modelId format: `<agent_type>_<N>__<real_model_name>`
+// e.g. `solo_agent_1__Doubao-Seed-Code` → `Doubao-Seed-Code`.
+// Strip the synthetic prefix so the OTLP gen_ai.request.model field carries
+// the user-facing model name, not Trae's internal composite id.
+function stripModelIdPrefix(modelId) {
+  if (typeof modelId !== 'string') return null;
+  const m = modelId.match(/^[a-z_]+_\d+__(.+)$/);
+  return m ? m[1] : modelId;
+}
+
 function pickDefaultModelForAgentType(agentType, event) {
   const catalog = readTraeVscdbModelCatalogSync(event);
   const normalized = normalizeAgentType(agentType);
   if (catalog && typeof catalog === 'object' && normalized) {
-    const list = catalog[normalized];
-    if (Array.isArray(list) && list.length > 0) {
-      const def = list.find((m) => m && m.is_default === true) || list[0];
-      if (def && typeof def === 'object') {
-        return {
-          name: def.name || def.display_name || null,
-          provider: def.provider || null,
-          display_name: def.display_name || def.name || null,
-        };
+    // vscdb schema (deployer-confirmed):
+    //   { "<user_id>": { "<agent_type>": { modelId, mode, ... } } }
+    // The hook subprocess doesn't know the current user_id, so take the
+    // first user_id key (vscdb is single-user in practice). Inside, find
+    // the agent_type entry whose normalized bucket matches the requested
+    // agent_type, then read+clean its modelId.
+    for (const userId of Object.keys(catalog)) {
+      const userEntry = catalog[userId];
+      if (!userEntry || typeof userEntry !== 'object') continue;
+      for (const [vscdbKey, entry] of Object.entries(userEntry)) {
+        if (normalizeAgentType(vscdbKey) !== normalized) continue;
+        if (!entry || typeof entry !== 'object') continue;
+        const cleaned = stripModelIdPrefix(entry.modelId);
+        if (cleaned) {
+          return { name: cleaned, provider: null, display_name: cleaned };
+        }
       }
     }
   }
@@ -1613,5 +1635,5 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 export {
   queryVscdbViaNodeSqlite, queryVscdbViaSqlite3Cli, queryVscdbViaPython3,
   queryVscdbValueSync, resolveVscdbPath, readTraeVscdbModelCatalogSync,
-  normalizeAgentType, pickDefaultModelForAgentType,
+  normalizeAgentType, pickDefaultModelForAgentType, stripModelIdPrefix,
 };
