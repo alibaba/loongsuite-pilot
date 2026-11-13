@@ -1067,7 +1067,7 @@ impl OtlpInner {
             .journal
             .append(&pending)
             .await
-            .map_err(FlushError::codex_journal)
+            .map_err(FlushError::codex_append)
     }
 
     fn doubao_context(&self) -> Option<DoubaoJournalContext> {

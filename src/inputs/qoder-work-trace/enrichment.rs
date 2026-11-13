@@ -719,7 +719,13 @@ pub(super) async fn read_hook_lines(
     path: &Path,
     name: &str,
 ) -> anyhow::Result<Vec<String>> {
-    read_named_lines(rt, &rt.id, path, Some(name)).await
+    let key = format!("{}:{name}", rt.id);
+    let previous = rt.state_store.get(&key);
+    let aggregate = rt.state();
+    if previous.last_offset().is_none() && aggregate.last_file() == Some(name) {
+        rt.state_store.set(&key, aggregate);
+    }
+    read_named_lines(rt, &key, path, Some(name)).await
 }
 async fn read_lines(rt: &InputRuntime, key: &str, path: &Path) -> anyhow::Result<Vec<String>> {
     read_named_lines(rt, key, path, None).await
@@ -761,8 +767,8 @@ async fn read_named_lines(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
         };
-    let identity = format!("{}:{}:{}", id.dev, id.ino, id.birthtime_ms);
-    let changed = old.as_ref().is_some_and(|old| old != &identity)
+    let identity = id.checkpoint_key();
+    let changed = old.as_ref().is_some_and(|old| !id.matches_checkpoint(old))
         || (old.is_none() && old_inode.is_some_and(|ino| ino != id.ino));
     let reset = changed || offset > id.size;
     let saved_extra = previous.extra().unwrap_or(Value::Null);
@@ -791,6 +797,11 @@ async fn read_named_lines(
         extra.insert("inode".into(), json!(id.ino));
         extra.insert("fileIdentity".into(), identity.into());
         extra.insert("skippingLine".into(), batch.skipping_line.into());
+        if batch.began_skip {
+            extra.insert("retentionBlocked".into(), true.into());
+        } else if reset {
+            extra.remove("retentionBlocked");
+        }
         rt.state_store.update(
             key,
             crate::checkpoints::InputStatePatch {

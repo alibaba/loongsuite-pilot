@@ -63,6 +63,7 @@ pub struct LogRetentionService {
     interval: std::sync::Mutex<Option<JoinHandle<()>>>,
     pressure: std::sync::Mutex<Option<JoinHandle<()>>>,
     cleanup_gate: tokio::sync::Mutex<()>,
+    state_store: Option<std::sync::Arc<crate::checkpoints::StateStore>>,
 }
 
 impl LogRetentionService {
@@ -74,7 +75,16 @@ impl LogRetentionService {
             interval: std::sync::Mutex::new(None),
             pressure: std::sync::Mutex::new(None),
             cleanup_gate: tokio::sync::Mutex::new(()),
+            state_store: None,
         }
+    }
+
+    pub(crate) fn with_state_store(
+        mut self,
+        store: std::sync::Arc<crate::checkpoints::StateStore>,
+    ) -> Self {
+        self.state_store = Some(store);
+        self
     }
 
     pub fn start(self: &std::sync::Arc<Self>) {
@@ -138,8 +148,18 @@ impl LogRetentionService {
     async fn cleanup(&self, pressure_only: bool) -> (u64, u64) {
         let _guard = self.cleanup_gate.lock().await;
         let today = local_date_string(Local::now());
-        let mut deleted = 0;
-        let mut errors = 0;
+        let (mut deleted, mut errors, deleted_bytes) = if let Some(store) = &self.state_store {
+            let store = store.clone();
+            let logs = self.logs_dir.clone();
+            let expiry = date_cutoff(self.config.hook_history_days);
+            tokio::task::spawn_blocking(move || {
+                clean_raw_sources(&logs, &store, &expiry, pressure_only)
+            })
+            .await
+            .unwrap_or((0, 1, 0))
+        } else {
+            (0, 0, 0)
+        };
         let entries = read_dir(&self.logs_dir);
         for entry in entries {
             let path = self.logs_dir.join(&entry);
@@ -191,7 +211,7 @@ impl LogRetentionService {
             logger("LogRetention").info(
                 "log retention complete",
                 Some(&fields(
-                    serde_json::json!({ "deleted": deleted, "errors": errors }),
+                    serde_json::json!({ "deleted": deleted, "deletedBytes": deleted_bytes, "errors": errors }),
                 )),
             );
         }
@@ -206,6 +226,7 @@ impl LogRetentionService {
             Category::OtlpFailed | Category::MetricAlarm => {
                 self.clean_observability(dir, &files, category).await
             }
+            Category::History if raw_history_directory(dir) => (0, 0),
             _ => {
                 let cutoff = date_cutoff(self.retention_days(category));
                 let mut deleted = 0;
@@ -237,15 +258,15 @@ impl LogRetentionService {
         errors += e;
         remaining = collect_output_dated(dir, &read_dir(dir));
         let regular = date_cutoff(self.config.output_days);
-        let (d, e, attempted) = delete_matching(&remaining, |file| {
+        let (d, e, _) = delete_matching(&remaining, |file| {
             file.date_str != today && file.date_str < regular
         })
         .await;
         deleted += d;
         errors += e;
-        remaining.retain(|file| !attempted.contains(&file.full_path));
+        remaining = collect_output_dated(dir, &read_dir(dir));
         let large_cutoff = date_cutoff(OUTPUT_RETENTION_LARGE_FILE_DAYS);
-        let (d, e, attempted) = delete_matching(&remaining, |file| {
+        let (d, e, _) = delete_matching(&remaining, |file| {
             file.date_str != today
                 && file.date_str < large_cutoff
                 && file.size > OUTPUT_RETENTION_LARGE_FILE_THRESHOLD_BYTES
@@ -253,7 +274,7 @@ impl LogRetentionService {
         .await;
         deleted += d;
         errors += e;
-        remaining.retain(|file| !attempted.contains(&file.full_path));
+        remaining = collect_output_dated(dir, &read_dir(dir));
         let (d, e) = enforce_output_limit(&remaining, today).await;
         (deleted + d, errors + e)
     }
@@ -432,6 +453,311 @@ fn ordinary_directory(path: &Path) -> bool {
     crate::utils::runtime_paths::runtime_metadata(path).is_ok_and(|meta| meta.is_dir())
 }
 
+const RAW_BUDGET: u64 = 2 * 1024 * MEBIBYTE;
+
+fn raw_history_directory(dir: &Path) -> bool {
+    // These are collector inputs even before their first successful cycle.
+    let agent = dir
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str());
+    matches!(
+        agent,
+        Some(
+            "cursor"
+                | "cursor-hook"
+                | "cursor-cli"
+                | "qwen-work-cn"
+                | "qoder"
+                | "qoder-cn"
+                | "qoder-work"
+                | "qoder-work-cn"
+        )
+    )
+}
+
+fn clean_raw_sources(
+    logs: &Path,
+    store: &crate::checkpoints::StateStore,
+    expiry: &str,
+    pressure_only: bool,
+) -> (u64, u64, u64) {
+    use crate::utils::raw_source;
+    let Ok(logs) = std::fs::canonicalize(logs) else {
+        return (0, 0, 0);
+    };
+    let closed_before = date_cutoff(2);
+    let (mut deleted, mut errors, mut bytes) = (0, 0, 0_u64);
+    for input in store.keys() {
+        let Some(state) = store.persisted_input(&input) else {
+            continue;
+        };
+        let Some(extra) = state.extra() else { continue };
+        let (Some(dir), Some(prefix)) = (
+            extra["hookLogDir"].as_str(),
+            extra["hookLogPrefix"].as_str(),
+        ) else {
+            continue;
+        };
+        let path = Path::new(dir);
+        let Ok(dir) = std::fs::canonicalize(path) else {
+            continue;
+        };
+        if dir == logs
+            || !dir.starts_with(&logs)
+            || !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+        {
+            continue;
+        }
+        let mut names = read_dir(&dir);
+        names.sort();
+        let mut total = names
+            .iter()
+            .filter(|name| raw_source::day(name, prefix).is_some())
+            .filter_map(|name| std::fs::symlink_metadata(dir.join(name)).ok())
+            .filter(|meta| meta.is_file())
+            .fold(0_u64, |sum, meta| sum.saturating_add(meta.len()));
+        for name in names {
+            let Some(date) = raw_source::day(&name, prefix) else {
+                continue;
+            };
+            if total <= RAW_BUDGET && (pressure_only || date >= expiry) {
+                continue;
+            }
+            let Some(expected) = extra["hookLogIdentities"][&name].as_str() else {
+                continue;
+            };
+            let Some(offset) = extra["hookLogOffsets"][&name].as_f64() else {
+                continue;
+            };
+            if extra["hookLogRetentionBlocked"][&name] == true {
+                continue;
+            }
+            let Ok(_gate) = raw_source::gate(&dir, Duration::ZERO) else {
+                continue;
+            };
+            if std::fs::canonicalize(path).ok().as_ref() != Some(&dir)
+                || std::fs::canonicalize(&dir).ok().as_ref() != Some(&dir)
+            {
+                continue;
+            }
+            let file = dir.join(&name);
+            let base = raw_source::base_name(&name);
+            let Ok(active) = raw_source::active(&dir.join(&base)) else {
+                continue;
+            };
+            let seq = raw_source::segment(&name).map_or(0, |(_, n)| n);
+            let successor = active
+                .as_deref()
+                .and_then(raw_source::segment)
+                .is_some_and(|(_, active_seq)| active_seq > seq);
+            let daily_tail = active.as_deref().unwrap_or(&base) == name;
+            let meta = match crate::utils::runtime_paths::runtime_metadata(&file) {
+                Ok(meta) if meta.is_file() => meta,
+                _ => continue,
+            };
+            let old = daily_tail
+                && date < closed_before.as_str()
+                && meta.modified().is_ok_and(|mtime| {
+                    local_date_string(chrono::DateTime::<Local>::from(mtime)) < closed_before
+                });
+            if !successor && !old {
+                continue;
+            }
+            // The gate serializes this recheck with native and plugin writers.
+            let Ok(opened) = std::fs::File::open(&file) else {
+                continue;
+            };
+            let Ok(identity) = crate::utils::file_identity::identity_from_open(&opened) else {
+                continue;
+            };
+            if identity.size as f64 != offset || !identity.matches_checkpoint(expected) {
+                continue;
+            }
+            if std::fs::canonicalize(&file).ok().as_ref() != Some(&file)
+                || !crate::utils::file_identity::path_from_opened_file(&opened)
+                    .is_ok_and(|opened_path| opened_path == file)
+            {
+                continue;
+            }
+            drop(opened);
+            match std::fs::remove_file(&file) {
+                Ok(()) => {
+                    deleted += 1;
+                    total = total.saturating_sub(identity.size);
+                    bytes = bytes.saturating_add(identity.size);
+                }
+                Err(_) => errors += 1,
+            }
+        }
+        if total > RAW_BUDGET {
+            logger("LogRetention").warn(
+                "Raw input disk budget exceeded; retaining active or unconsumed files",
+                Some(&fields(
+                    serde_json::json!({"input":input,"bytes":total,"maxBytes":RAW_BUDGET}),
+                )),
+            );
+        }
+    }
+    let (session_deleted, session_errors, session_bytes) =
+        clean_raw_sessions(&logs, store, expiry, pressure_only);
+    (
+        deleted + session_deleted,
+        errors + session_errors,
+        bytes + session_bytes,
+    )
+}
+
+fn clean_raw_sessions(
+    logs: &Path,
+    store: &crate::checkpoints::StateStore,
+    expiry: &str,
+    pressure_only: bool,
+) -> (u64, u64, u64) {
+    use crate::utils::raw_source;
+    let (mut deleted, mut errors, mut bytes) = (0, 0, 0);
+    for (prefix, family) in [("hermes-agent-log:", "hermes-agent"), ("dsh-log:", "dsh")] {
+        let dir = logs.join(family);
+        if !ordinary_directory(&dir) || std::fs::canonicalize(&dir).ok().as_ref() != Some(&dir) {
+            continue;
+        }
+        let mut files: Vec<_> = read_dir(&dir)
+            .into_iter()
+            .filter(|name| name.ends_with(".jsonl"))
+            .filter_map(|name| {
+                let meta = std::fs::symlink_metadata(dir.join(&name)).ok()?;
+                meta.is_file()
+                    .then_some((name, meta.len(), meta.modified().ok()?))
+            })
+            .collect();
+        let mut total = files
+            .iter()
+            .fold(0_u64, |sum, (_, size, _)| sum.saturating_add(*size));
+        files.sort_by_key(|(_, _, date)| *date);
+        for (name, _, modified) in files {
+            if total <= RAW_BUDGET
+                && (pressure_only
+                    || local_date_string(chrono::DateTime::<Local>::from(modified)).as_str()
+                        >= expiry)
+            {
+                continue;
+            }
+            let file = dir.join(&name);
+            let key = format!("{prefix}{}", file.to_string_lossy());
+            let Some(state) = store.persisted_input(&key) else {
+                continue;
+            };
+            let Some(extra) = state.extra() else { continue };
+            let Some(identity) = extra["sourceIdentity"].as_str() else {
+                continue;
+            };
+            let Some(offset) = state.last_offset() else {
+                continue;
+            };
+            if extra["dshActiveTurnStartOffset"].is_number()
+                || extra["dshDiscardedLineStartOffset"].is_number()
+            {
+                continue;
+            }
+            let Ok(_gate) = raw_source::gate(&dir, Duration::ZERO) else {
+                continue;
+            };
+            let base = raw_source::base_name(&name);
+            let seq = raw_source::segment(&name).map_or(0, |(_, seq)| seq);
+            let Ok(active) = raw_source::active(&dir.join(&base)) else {
+                continue;
+            };
+            let successor = active
+                .as_deref()
+                .and_then(raw_source::segment)
+                .is_some_and(|(_, active)| active > seq);
+            // Old Hermes clients did not coordinate writes with this lock. A
+            // live or inaccessible PID therefore never proves a final file closed.
+            let exited = family == "hermes-agent" && hermes_process_exited(&base);
+            if !successor && !exited {
+                continue;
+            }
+            if !crate::utils::runtime_paths::runtime_metadata(&file)
+                .is_ok_and(|meta| meta.is_file())
+            {
+                continue;
+            }
+            let Ok(file_handle) = std::fs::File::open(&file) else {
+                continue;
+            };
+            let Ok(actual) = crate::utils::file_identity::identity_from_open(&file_handle) else {
+                continue;
+            };
+            if !actual.matches_checkpoint(identity) || actual.size as f64 != offset {
+                continue;
+            }
+            drop(file_handle);
+            match std::fs::remove_file(&file) {
+                Ok(()) => {
+                    deleted += 1;
+                    bytes += actual.size;
+                    total = total.saturating_sub(actual.size);
+                }
+                Err(_) => errors += 1,
+            }
+        }
+        if total > RAW_BUDGET {
+            logger("LogRetention").warn(
+                "Raw session disk budget exceeded; retaining active or unconsumed files",
+                Some(&fields(
+                    serde_json::json!({"family":family,"bytes":total,"maxBytes":RAW_BUDGET}),
+                )),
+            );
+        }
+    }
+    (deleted, errors, bytes)
+}
+
+fn hermes_process_exited(base: &str) -> bool {
+    let Some(pid) = base
+        .strip_prefix("hermes-agent-")
+        .and_then(|name| name.split_once('-'))
+        .and_then(|(pid, suffix)| {
+            let (at, nonce) = suffix.strip_suffix(".jsonl")?.split_once('-')?;
+            (!at.is_empty()
+                && at.bytes().all(|b| b.is_ascii_digit())
+                && !nonce.is_empty()
+                && nonce.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| pid.parse::<i32>().ok())
+            .flatten()
+        })
+        .filter(|pid| *pid > 0)
+    else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks existence of the process.
+        unsafe {
+            libc::kill(pid, 0) == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+        // SAFETY: the handle is checked, only queried, and closed on every live path.
+        unsafe {
+            let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid as u32);
+            if handle.is_null() {
+                return std::io::Error::last_os_error().raw_os_error()
+                    == Some(ERROR_INVALID_PARAMETER as i32);
+            }
+            let exited = WaitForSingleObject(handle, 0) == WAIT_OBJECT_0;
+            CloseHandle(handle);
+            exited
+        }
+    }
+}
+
 fn collect_output_dated(dir: &Path, files: &[String]) -> Vec<DatedLogFile> {
     files
         .iter()
@@ -448,7 +774,10 @@ fn collect_output_dated(dir: &Path, files: &[String]) -> Vec<DatedLogFile> {
                         .ok()
                         .map(|time| local_date_string(chrono::DateTime::<Local>::from(time)))
                 } else if file.ends_with("-all.jsonl") {
-                    Some(local_date_string(Local::now()))
+                    metadata
+                        .modified()
+                        .ok()
+                        .map(|time| local_date_string(chrono::DateTime::<Local>::from(time)))
                 } else {
                     None
                 }

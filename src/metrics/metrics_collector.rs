@@ -134,6 +134,8 @@ pub struct MetricJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_logs_bytes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_logs_by_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_dir_sampled_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_available: Option<String>,
@@ -552,6 +554,7 @@ impl MetricsCollector {
                 disk_dir_scan_ms: None,
                 disk_data_bytes: None,
                 disk_logs_bytes: None,
+                disk_logs_by_family: None,
                 disk_dir_sampled_at: None,
                 cpu_available: None,
                 mem_available: None,

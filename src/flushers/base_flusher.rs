@@ -5,10 +5,13 @@ use serde_json::{Map, Value};
 
 use crate::types::AgentActivityEntry;
 
+pub type QuotaAlarm = dyn Fn(&str, &FlushError) + Send + Sync;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushErrorKind {
     Other,
     CodexTurnJournal,
+    CodexJournalCapacity,
     CodexOutputDurability,
     PendingTraceJournal,
     OutputDurability,
@@ -33,6 +36,16 @@ impl FlushError {
             message: format!("Codex output was not durably accepted by {backend}"),
             kind: FlushErrorKind::CodexOutputDurability,
         }
+    }
+
+    pub(crate) fn codex_append(error: anyhow::Error) -> Self {
+        if error.is::<super::codex_turn_journal::CodexJournalCapacity>() {
+            return Self {
+                message: error.to_string(),
+                kind: FlushErrorKind::CodexJournalCapacity,
+            };
+        }
+        Self::codex_journal(error)
     }
 
     pub fn codex_journal(error: impl std::fmt::Display) -> Self {
@@ -157,6 +170,33 @@ pub trait BaseFlusher: Send + Sync {
     ) -> Result<(), FlushError> {
         let lengths = encoded.iter().map(|row| row.len() as f64).collect();
         self.send_batch(entries, Some(lengths)).await
+    }
+
+    /// Retry only this destination while the source holds its checkpoint.
+    async fn deliver_prepared_batch(
+        &self,
+        entries: Vec<AgentActivityEntry>,
+        encoded: Vec<Vec<u8>>,
+        quota_alarm: std::sync::Arc<QuotaAlarm>,
+    ) -> Result<(), FlushError> {
+        if !entries.iter().any(|entry| entry.agent_type == "codex") {
+            return self.send_prepared_batch(entries, encoded).await;
+        }
+        let mut alarmed = false;
+        loop {
+            let error = match self
+                .send_prepared_batch(entries.clone(), encoded.clone())
+                .await
+            {
+                Err(error) if error.kind == FlushErrorKind::CodexJournalCapacity => error,
+                result => return result,
+            };
+            if !alarmed {
+                quota_alarm(self.name(), &error);
+                alarmed = true;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
     }
 
     async fn flush(&self) -> Result<(), FlushError>;

@@ -8,6 +8,7 @@
 
 use crate::utils::create_logger;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,30 @@ mod fs_io;
 use fs_io::{Directory, FileSystem, Kind, NativeFileSystem, Node};
 
 pub const DISK_USAGE_STALE_MS: i64 = 20 * 60 * 1000;
+
+const LOG_FAMILIES: &[&str] = &[
+    "output",
+    "otlp-debug",
+    "otlp-failed",
+    "codex-pending-turns",
+    "metric_alarm",
+    "claude-code",
+    "opencode",
+    "openclaw",
+    "mimo-code",
+    "pi-coding-agent",
+    "kiro-cli",
+    "qwen-code-cli",
+    "grok-build",
+    "dsh",
+    "hermes-agent",
+    "cursor",
+    "cursor-hook",
+    "qoder",
+    "qoder-work",
+    "qwen-work-cn",
+    "codex",
+];
 
 const SCANNED_DATA_DIRECTORIES: &[&str] = &[
     "logs",
@@ -67,6 +92,8 @@ pub struct DiskUsageSnapshot {
     pub data_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logs_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs_by_family: Option<BTreeMap<String, u64>>,
 }
 
 impl Default for DiskUsageSnapshot {
@@ -77,6 +104,7 @@ impl Default for DiskUsageSnapshot {
             scan_ms: None,
             data_bytes: None,
             logs_bytes: None,
+            logs_by_family: None,
         }
     }
 }
@@ -298,6 +326,7 @@ impl DiskUsageSampler {
                 status: DiskUsageStatus::Ok,
                 data_bytes: Some(outcome.data_bytes),
                 logs_bytes: Some(outcome.logs_bytes),
+                logs_by_family: Some(outcome.logs_by_family),
                 sampled_at: Some((self.now_ms)()),
                 scan_ms: Some(scan_ms),
             };
@@ -370,6 +399,7 @@ struct WalkOutcome {
     status: DiskUsageStatus,
     data_bytes: u64,
     logs_bytes: u64,
+    logs_by_family: BTreeMap<String, u64>,
 }
 
 struct ScanGate {
@@ -516,6 +546,7 @@ async fn walk(sampler: &DiskUsageSampler, generation: u64, started: Instant) -> 
         status,
         data_bytes: 0,
         logs_bytes: 0,
+        logs_by_family: BTreeMap::new(),
     };
     let root = sampler
         .fs
@@ -554,6 +585,7 @@ async fn walk(sampler: &DiskUsageSampler, generation: u64, started: Instant) -> 
     let mut entries = 0u64;
     let mut data_bytes = 0u64;
     let mut logs_bytes = 0u64;
+    let mut logs_by_family = BTreeMap::new();
     let mut status = DiskUsageStatus::Ok;
     loop {
         if frames.is_empty() {
@@ -642,6 +674,18 @@ async fn walk(sampler: &DiskUsageSampler, generation: u64, started: Instant) -> 
                         break;
                     };
                     logs_bytes = total;
+                    let mut relative = path
+                        .strip_prefix(&root)
+                        .unwrap_or(&path)
+                        .components()
+                        .skip(1);
+                    let top = relative.next().and_then(|part| part.as_os_str().to_str());
+                    let family = match (top, relative.next()) {
+                        (_, None) => "_files",
+                        (Some(name), _) if LOG_FAMILIES.contains(&name) => name,
+                        _ => "_other",
+                    };
+                    *logs_by_family.entry(family.to_owned()).or_insert(0) += meta.bytes;
                 }
             }
             Kind::Directory => {
@@ -698,6 +742,7 @@ async fn walk(sampler: &DiskUsageSampler, generation: u64, started: Instant) -> 
         status,
         data_bytes,
         logs_bytes,
+        logs_by_family,
     }
 }
 fn is_local_worker_payload(directory: &Path, name: &str, root: &Path) -> bool {

@@ -69,6 +69,8 @@ const HOST_ASSETS: &[&str] = &[
     "plugins/opencode/v2.mjs",
     "plugins/pi-coding-agent/index.mjs",
     "plugins/shared/resource-context.mjs",
+    "plugins/shared/raw-jsonl-writer.mjs",
+    "plugins/shared/raw-source-gate.mjs",
     "plugins/openclaw/plugin.mjs",
     "plugins/openclaw/package.json",
     "plugins/openclaw/openclaw.plugin.json",

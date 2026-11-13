@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 
-use super::base_flusher::{BaseFlusher, FlushError, TraceRuntimeSnapshot};
+use super::base_flusher::{BaseFlusher, FlushError, QuotaAlarm, TraceRuntimeSnapshot};
 use crate::types::AgentActivityEntry;
 use crate::utils::create_logger;
 
@@ -38,6 +38,45 @@ impl BaseFlusher for MultiFlusher {
         self.flushers
             .iter()
             .any(|flusher| flusher.uses_prepared_batch())
+    }
+
+    async fn deliver_prepared_batch(
+        &self,
+        entries: Vec<AgentActivityEntry>,
+        encoded: Vec<Vec<u8>>,
+        quota_alarm: Arc<QuotaAlarm>,
+    ) -> Result<(), FlushError> {
+        if !entries.iter().any(|entry| entry.agent_type == "codex") {
+            return self.send_prepared_batch(entries, encoded).await;
+        }
+        // Each child owns its retry. Successful siblings, including nested
+        // fan-outs, cannot receive a second copy when one journal is full.
+        let mut tasks = tokio::task::JoinSet::new();
+        if let Some((last, others)) = self.flushers.split_last() {
+            for child in others {
+                let child = Arc::clone(child);
+                let entries = entries.clone();
+                let encoded = encoded.clone();
+                let quota_alarm = Arc::clone(&quota_alarm);
+                tasks.spawn(async move {
+                    (
+                        child.name().to_owned(),
+                        child
+                            .deliver_prepared_batch(entries, encoded, quota_alarm)
+                            .await,
+                    )
+                });
+            }
+            let last = Arc::clone(last);
+            tasks.spawn(async move {
+                (
+                    last.name().to_owned(),
+                    last.deliver_prepared_batch(entries, encoded, quota_alarm)
+                        .await,
+                )
+            });
+        }
+        finish_batch_tasks(tasks).await
     }
 
     async fn send_prepared_batch(

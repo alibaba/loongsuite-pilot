@@ -10,9 +10,9 @@ use crate::inputs::base::{
 };
 use crate::normalization::enrich_canonical_entry_with_git;
 use crate::types::{AgentActivityEntry, ClientType, CollectionMethod};
-use crate::utils::{
-    directory_exists, ensure_dir, get_today_date_string, resolve_home, DEFAULT_POLL_INTERVAL_MS,
-};
+#[cfg(test)]
+use crate::utils::get_today_date_string;
+use crate::utils::{directory_exists, ensure_dir, resolve_home, DEFAULT_POLL_INTERVAL_MS};
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde_json::{json, Value};
@@ -219,27 +219,89 @@ impl InputBody for QoderWorkTraceBody {
 }
 
 async fn read_hook(log_dir: &str, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
-    let today = get_today_date_string();
-    let name = format!("qoder-work-{today}.jsonl");
-    let path = Path::new(log_dir).join(&name);
-    let lines = read_hook_lines(rt, &path, &name).await?;
+    let dir = Path::new(log_dir);
+    let names = crate::utils::raw_source::daily_files(dir, "qoder-work").await?;
+    let previous = rt.state();
     let mut entries = Vec::new();
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
+    let mut offsets = serde_json::Map::new();
+    let mut identities = serde_json::Map::new();
+    let mut blocked = serde_json::Map::new();
+    let mut read_bytes = 0_u64;
+    let mut last = None;
+    let mut legacy = serde_json::Map::new();
+    for name in names {
+        let key = format!("{}:{name}", rt.id);
+        let before = rt.state_store.get_offset(&key).max(0.0) as u64;
+        let lines = if read_bytes < crate::utils::raw_source::CYCLE_BYTES {
+            read_hook_lines(rt, &dir.join(&name), &name).await?
+        } else {
+            Vec::new()
+        };
+        let cursor = rt.state_store.get(&key);
+        if let (Some(offset), Some(extra)) = (cursor.last_offset(), cursor.extra()) {
+            if let Some(identity) = extra["fileIdentity"].as_str() {
+                offsets.insert(name.clone(), serde_json::json!(offset));
+                identities.insert(name.clone(), identity.into());
+                if extra["retentionBlocked"] == true {
+                    blocked.insert(name.clone(), true.into());
+                }
+                let consumed = (offset as u64).saturating_sub(before);
+                read_bytes = read_bytes.saturating_add(consumed);
+                if consumed > 0 || (last.is_none() && previous.last_file() == Some(&name)) {
+                    for field in ["fileIdentity", "inode", "skippingLine", "retentionBlocked"] {
+                        legacy.remove(field);
+                        if let Some(value) = extra.get(field) {
+                            legacy.insert(field.to_owned(), value.clone());
+                        }
+                    }
+                    if consumed > 0 {
+                        last = Some((name, offset));
+                    }
+                }
+            }
         }
-        let Ok(mut value) = serde_json::from_str::<Value>(&line) else {
-            rt.warn("invalid JSONL line", None);
-            continue;
-        };
-        let Some(object) = value.as_object_mut() else {
-            continue;
-        };
-        object.remove("version");
-        if object.get("event.name").is_none() {
-            continue;
-        };
-        entries.push(entry_from(std::mem::take(object)));
+        for line in lines {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(mut value) = serde_json::from_str::<Value>(&line) else {
+                rt.warn("invalid JSONL line", None);
+                continue;
+            };
+            let Some(object) = value.as_object_mut() else {
+                continue;
+            };
+            object.remove("version");
+            if object.get("event.name").is_none() {
+                continue;
+            };
+            entries.push(entry_from(std::mem::take(object)));
+        }
+    }
+    legacy.extend([
+        ("hookLogDir".into(), log_dir.into()),
+        ("hookLogPrefix".into(), "qoder-work".into()),
+        ("hookLogOffsets".into(), Value::Object(offsets)),
+        ("hookLogIdentities".into(), Value::Object(identities)),
+        ("hookLogRetentionBlocked".into(), Value::Object(blocked)),
+    ]);
+    let extra = Value::Object(legacy);
+    if !extra["hookLogOffsets"]
+        .as_object()
+        .is_none_or(serde_json::Map::is_empty)
+        && (last.is_some()
+            || previous.extra().as_ref().is_none_or(|saved| {
+                [
+                    "hookLogOffsets",
+                    "hookLogIdentities",
+                    "hookLogRetentionBlocked",
+                ]
+                .iter()
+                .any(|key| saved[*key] != extra[*key])
+            }))
+    {
+        let (file, offset) = last.map_or((None, None), |(file, offset)| (Some(file), Some(offset)));
+        rt.set_state_fields(file, offset, Some(extra));
     }
     Ok(entries)
 }

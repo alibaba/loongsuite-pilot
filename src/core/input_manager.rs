@@ -313,6 +313,7 @@ impl InputManager {
 
     fn output_hold(
         &self,
+        input_id: &str,
         gate: &QueueGate,
     ) -> Result<Option<crate::checkpoints::CheckpointOutputHold>, String> {
         if gate.cancellation.lock().expect("cancellation").is_none() {
@@ -322,13 +323,13 @@ impl InputManager {
         let Some(store) = store else {
             return Ok(None);
         };
-        if store.save_failed() {
+        if store.save_failed_for(input_id) {
             return Err(format!(
                 "{} checkpoint is frozen after output failure",
                 gate.output_owner
             ));
         }
-        Ok(Some(store.begin_output()))
+        Ok(Some(store.begin_output_for(input_id)))
     }
 
     async fn queued_entries(
@@ -362,7 +363,7 @@ impl InputManager {
         let Some(gate) = self.queues.lock().expect("queues").get(input_id).cloned() else {
             return;
         };
-        let hold = match self.output_hold(&gate) {
+        let hold = match self.output_hold(input_id, &gate) {
             Ok(hold) => hold,
             Err(_) => return,
         };
@@ -398,7 +399,7 @@ impl InputManager {
             .get(input_id)
             .cloned()
             .ok_or_else(|| format!("unknown input {input_id}"))?;
-        let hold = self.output_hold(&gate)?;
+        let hold = self.output_hold(input_id, &gate)?;
         gate.inflight.fetch_add(1, Ordering::SeqCst);
         let activity = QueueActivity(Arc::clone(&gate));
         let result = self.queued_entries(input_id, entries, &gate).await;
@@ -784,7 +785,28 @@ impl InputManager {
             return Ok(());
         };
         let entry_count = entries.len();
-        match flusher.send_prepared_batch(entries, encoded).await {
+        let alarm_manager = self.alarm_manager.lock().expect("alarm").clone();
+        let alarm_input = input_id.to_owned();
+        let quota_alarm = Arc::new(move |endpoint: &str, error: &crate::flushers::FlushError| {
+            let message =
+                format!("Codex pending journal is full, retaining source checkpoint: {error}");
+            logger("InputManager").warn(&message, None);
+            if let Some(manager) = &alarm_manager {
+                manager.record(
+                    "FLUSH_QUOTA_ALARM",
+                    "3",
+                    &message,
+                    Some(AlarmContext {
+                        input_name: Some(alarm_input.clone()),
+                        endpoint_name: Some(endpoint.to_owned()),
+                    }),
+                );
+            }
+        });
+        match flusher
+            .deliver_prepared_batch(entries, encoded, quota_alarm)
+            .await
+        {
             Ok(()) => {
                 if let Some(counter) = self.counters.lock().expect("counters").get_mut(input_id) {
                     counter.out_events += entry_count as u64;

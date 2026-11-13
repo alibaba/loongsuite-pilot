@@ -338,6 +338,10 @@ impl Shared {
         {
             metrics.metric_json.disk_data_bytes = Some(data_bytes.to_string());
             metrics.metric_json.disk_logs_bytes = Some(logs_bytes.to_string());
+            metrics.metric_json.disk_logs_by_family = disk
+                .logs_by_family
+                .as_ref()
+                .and_then(|families| serde_json::to_string(families).ok());
             metrics.metric_json.disk_dir_sampled_at = Some(iso_millis(sampled_at));
         }
         {
@@ -1281,6 +1285,7 @@ mod tests {
             status,
             data_bytes: Some(bytes),
             logs_bytes: Some(gib.min(bytes)),
+            logs_by_family: None,
             sampled_at: Some(at),
             scan_ms: Some(2000),
         };

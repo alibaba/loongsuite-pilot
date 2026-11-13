@@ -12,6 +12,25 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufR
 use tokio::sync::Mutex;
 
 const MAX_ACKNOWLEDGED_TURNS: usize = 10_000;
+const DEFAULT_PENDING_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Debug)]
+pub(crate) struct CodexJournalCapacity;
+
+impl std::fmt::Display for CodexJournalCapacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Codex pending trace journal capacity exhausted")
+    }
+}
+impl std::error::Error for CodexJournalCapacity {}
+
+fn max_pending_bytes() -> u64 {
+    std::env::var("LOONGSUITE_CODEX_PENDING_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| (1..=9_007_199_254_740_991).contains(value))
+        .unwrap_or(DEFAULT_PENDING_BYTES)
+}
 const JOURNAL_BATCH_BYTES: usize = 1024 * 1024;
 const JOURNAL_SCAN_BYTES: usize = 64 * 1024;
 
@@ -48,6 +67,7 @@ struct JournalState {
 pub struct CodexTurnJournal {
     dir: PathBuf,
     acknowledgement_limit: usize,
+    max_pending_bytes: u64,
     state: Mutex<JournalState>,
 }
 
@@ -82,6 +102,7 @@ impl CodexTurnJournal {
         Self {
             dir: dir.into(),
             acknowledgement_limit: MAX_ACKNOWLEDGED_TURNS,
+            max_pending_bytes: max_pending_bytes(),
             state: Mutex::new(JournalState::default()),
         }
     }
@@ -175,7 +196,53 @@ impl CodexTurnJournal {
             return Ok(());
         }
         self.ensure_dir().await?;
+        let mut encoded = IndexMap::new();
+        let mut batch_bytes = 0_u64;
         for (key, group) in groups {
+            let mut bytes = Vec::new();
+            for entry in group {
+                serde_json::to_writer(&mut bytes, entry)?;
+                bytes.push(b'\n');
+            }
+            batch_bytes = batch_bytes.saturating_add(bytes.len() as u64);
+            encoded.insert(key, bytes);
+        }
+        let mut usage = 0_u64;
+        let mut old = false;
+        let mut files = tokio::fs::read_dir(&self.dir).await?;
+        while let Some(file) = files.next_entry().await? {
+            let name = file.file_name();
+            if !name
+                .to_str()
+                .and_then(|name| name.strip_prefix("codex-turn-"))
+                .and_then(|name| name.strip_suffix(".jsonl"))
+                .is_some_and(valid_key)
+            {
+                continue;
+            }
+            let metadata = match file.metadata().await {
+                Ok(metadata) if metadata.is_file() => metadata,
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            usage = usage.saturating_add(metadata.len());
+            old |= metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.elapsed().ok())
+                .is_some_and(|age| age.as_secs() > 7 * 86_400);
+        }
+        if usage.saturating_add(batch_bytes) > self.max_pending_bytes {
+            return Err(CodexJournalCapacity.into());
+        }
+        if old {
+            crate::utils::create_logger("CodexTurnJournal").warn(
+                "Codex pending journal backlog exceeds seven days; retaining pending events",
+                None,
+            );
+        }
+        for (key, bytes) in encoded {
             let file = self.file(&key);
             if !state.initialized.contains(&key) {
                 repair_tail(&file).await?;
@@ -190,11 +257,7 @@ impl CodexTurnJournal {
                     options.mode(0o600);
                 }
                 let mut handle = tokio::fs::OpenOptions::from(options).open(&file).await?;
-                for entry in group {
-                    let mut line = serde_json::to_vec(entry)?;
-                    line.push(b'\n');
-                    handle.write_all(&line).await?;
-                }
+                handle.write_all(&bytes).await?;
                 // Tokio File can buffer outstanding blocking writes; acceptance
                 // requires their result, not merely a scheduled write.
                 handle.flush().await?;
@@ -578,6 +641,33 @@ mod tests {
             codex_turn_journal_group_key(&record),
             "7a525c8b69b11423ef63b7dff7c01500ddb76ead8836fe4694f4f5c67e109381"
         );
+    }
+
+    #[tokio::test]
+    async fn codex_quota_rejects_a_whole_batch_and_recovers_after_capacity_returns() {
+        let root = tempfile::tempdir().unwrap();
+        let mut journal = CodexTurnJournal::new(root.path());
+        let first = entry("first", "first");
+        let second = entry("second", "second");
+        journal.max_pending_bytes = (serde_json::to_vec(&first)
+            .unwrap()
+            .len()
+            .max(serde_json::to_vec(&second).unwrap().len())
+            + 1) as u64;
+        journal.append(std::slice::from_ref(&first)).await.unwrap();
+        let failure = journal
+            .append(std::slice::from_ref(&second))
+            .await
+            .unwrap_err();
+        assert!(failure.is::<CodexJournalCapacity>());
+        assert!(!journal
+            .file(&codex_turn_journal_group_key(&second))
+            .exists());
+        journal
+            .acknowledge(std::slice::from_ref(&first))
+            .await
+            .unwrap();
+        journal.append(std::slice::from_ref(&second)).await.unwrap();
     }
 
     #[tokio::test]

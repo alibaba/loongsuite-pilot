@@ -22,18 +22,21 @@ pub struct LegacyHookBatch {
     pub quarantine: Vec<LegacyHookQuarantine>,
     pub bytes_read: u64,
     pub read_calls: u64,
+    pub(crate) identity: String,
+    pub(crate) started_at: u64,
 }
 #[derive(Clone)]
 struct Snapshot {
     dev: u64,
     ino: u64,
+    identity: String,
     size: u64,
     modified: Option<SystemTime>,
     changed: i128,
 }
 impl Snapshot {
     fn same_source(&self, other: &Self) -> bool {
-        self.dev == other.dev && self.ino == other.ino
+        self.dev == other.dev && self.ino == other.ino && self.identity == other.identity
     }
     fn same_stamp(&self, other: &Self) -> bool {
         self.modified == other.modified && self.changed == other.changed
@@ -55,6 +58,7 @@ pub struct QoderLegacyHookReader {
     scan_bytes: usize,
     record_bytes: usize,
     tail: Option<Tail>,
+    resume_file: Option<PathBuf>,
 }
 impl Default for QoderLegacyHookReader {
     fn default() -> Self {
@@ -67,10 +71,12 @@ impl QoderLegacyHookReader {
             scan_bytes,
             record_bytes,
             tail: None,
+            resume_file: None,
         }
     }
     pub fn reset(&mut self) {
         self.tail = None;
+        self.resume_file = None;
     }
     pub async fn read(
         &mut self,
@@ -96,7 +102,23 @@ impl QoderLegacyHookReader {
     where
         F: FnMut(u64, u64, f64) + Send,
     {
-        let result = self.read_inner(file, offset, &mut observer).await;
+        self.read_checkpointed(file, offset, None, &mut observer)
+            .await
+    }
+
+    pub(crate) async fn read_checkpointed<F>(
+        &mut self,
+        file: &Path,
+        offset: u64,
+        expected_identity: Option<&str>,
+        mut observer: F,
+    ) -> Result<LegacyHookBatch>
+    where
+        F: FnMut(u64, u64, f64) + Send,
+    {
+        let result = self
+            .read_inner(file, offset, expected_identity, &mut observer)
+            .await;
         if result.is_err() {
             self.reset();
         }
@@ -106,6 +128,7 @@ impl QoderLegacyHookReader {
         &mut self,
         path: &Path,
         offset: u64,
+        expected_identity: Option<&str>,
         observer: &mut F,
     ) -> Result<LegacyHookBatch>
     where
@@ -113,6 +136,13 @@ impl QoderLegacyHookReader {
     {
         let mut file = open_regular(path).await?;
         let before = snapshot(&file).await?;
+        let offset = if offset > before.size
+            || expected_identity.is_some_and(|expected| expected != before.identity)
+        {
+            0
+        } else {
+            offset
+        };
         let mut remaining = self.scan_bytes;
         let mut bytes_read = 0;
         let mut read_calls = 0;
@@ -246,8 +276,11 @@ impl QoderLegacyHookReader {
         {
             bail!("legacy Hook source changed during read");
         }
+        let identity = before.identity.clone();
         tail.snapshot = before;
         Ok(LegacyHookBatch {
+            identity,
+            started_at: offset,
             buffer: completed,
             next_offset: tail.committed,
             quarantine,
@@ -320,6 +353,7 @@ async fn snapshot(file: &tokio::fs::File) -> Result<Snapshot> {
         Ok(Snapshot {
             dev: identity.dev,
             ino: identity.ino,
+            identity: identity.checkpoint_key(),
             size: identity.size,
             modified: meta.modified().ok(),
             changed,
@@ -359,3 +393,131 @@ where
 #[cfg(test)]
 #[path = "legacy_hook_reader_533_tests.rs"]
 mod history_contract_tests;
+
+/// Advance each legacy daily file independently. The decoder receives only
+/// complete records; the source checkpoint is held by the caller's runtime.
+pub(crate) async fn read_daily(
+    log_dir: &str,
+    prefix: &str,
+    rt: &crate::inputs::base::InputRuntime,
+    reader: &mut QoderLegacyHookReader,
+    decode: impl for<'a> Fn(
+        &'a crate::inputs::base::InputRuntime,
+        LegacyHookBatch,
+        u64,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Vec<crate::types::AgentActivityEntry>> + Send + 'a>,
+    >,
+) -> Result<Vec<crate::types::AgentActivityEntry>> {
+    use serde_json::Value;
+    let state = rt.state();
+    let mut extra = state
+        .extra()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let mut offsets = extra
+        .get("hookLogOffsets")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut identities = extra
+        .get("hookLogIdentities")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut blocked = extra
+        .get("hookLogRetentionBlocked")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut previous = extra
+        .get("qoderLegacyQuarantine")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let (Some(name), Some(offset)) = (state.last_file(), state.last_offset()) {
+        offsets
+            .entry(name)
+            .or_insert_with(|| serde_json::json!(offset));
+    }
+    let mut names = crate::utils::raw_source::daily_files(Path::new(log_dir), prefix).await?;
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Some(resume) = reader.resume_file.take() {
+        if let Some(index) = names
+            .iter()
+            .position(|name| resume.file_name().and_then(|v| v.to_str()) == Some(name))
+        {
+            names.rotate_left(index);
+        }
+    }
+    let mut reads = 0_u64;
+    let mut entries = Vec::new();
+    let mut last = None;
+    for (index, name) in names.iter().enumerate() {
+        let path = Path::new(log_dir).join(name);
+        let offset = offsets
+            .get(name)
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0)
+            .max(0.0) as u64;
+        let identity = identities.get(name).and_then(Value::as_str);
+        let read = reader
+            .read_checkpointed(&path, offset, identity, |bytes, requested, duration| {
+                rt.with_accumulator(|a| a.observe_read(bytes, requested, duration))
+            })
+            .await?;
+        reads = reads.saturating_add(read.bytes_read);
+        if identity.is_some_and(|expected| expected != read.identity) {
+            blocked.remove(name);
+        }
+        if !read.quarantine.is_empty() {
+            blocked.insert(name.clone(), Value::Bool(true));
+            for range in &read.quarantine {
+                let mut value = serde_json::to_value(range)?;
+                value["file"] = serde_json::json!(name);
+                previous.push(value);
+                rt.warn("oversized legacy Hook record quarantined; source retained",
+                    serde_json::json!({"file":path,"from":range.from,"to":range.to,"bytes":range.bytes,"reason":range.reason}).as_object());
+            }
+        }
+        let committed = read.next_offset.saturating_sub(read.started_at);
+        offsets.insert(name.clone(), serde_json::json!(read.next_offset));
+        identities.insert(name.clone(), Value::String(read.identity.clone()));
+        if committed > 0 {
+            last = Some((name.clone(), read.next_offset as f64));
+        }
+        let current_reader_has_tail = read.bytes_read >= LEGACY_HOOK_SCAN_BYTES as u64;
+        entries.extend(decode(rt, read, committed).await);
+        if reads >= crate::utils::raw_source::CYCLE_BYTES || current_reader_has_tail {
+            // A record spanning several scan budgets retains its in-memory tail.
+            // Once it can no longer advance, the next sweep reaches later days.
+            reader.resume_file = Some(if current_reader_has_tail {
+                path
+            } else {
+                Path::new(log_dir).join(&names[(index + 1) % names.len()])
+            });
+            break;
+        }
+    }
+    let live: std::collections::HashSet<_> = names.iter().map(String::as_str).collect();
+    for fields in [&mut offsets, &mut identities, &mut blocked] {
+        fields.retain(|name, _| live.contains(name.as_str()));
+    }
+    previous.drain(..previous.len().saturating_sub(32));
+    extra.insert("hookLogDir".into(), log_dir.into());
+    extra.insert("hookLogPrefix".into(), prefix.into());
+    extra.insert("hookLogOffsets".into(), Value::Object(offsets));
+    extra.insert("hookLogIdentities".into(), Value::Object(identities));
+    extra.insert("hookLogRetentionBlocked".into(), Value::Object(blocked));
+    if !previous.is_empty() {
+        extra.insert("qoderLegacyQuarantine".into(), Value::Array(previous));
+    }
+    let extra = Value::Object(extra);
+    if last.is_some() || state.extra().as_ref() != Some(&extra) {
+        let (file, offset) = last.map_or((None, None), |(file, offset)| (Some(file), Some(offset)));
+        rt.set_state_fields(file, offset, Some(extra));
+    }
+    Ok(entries)
+}

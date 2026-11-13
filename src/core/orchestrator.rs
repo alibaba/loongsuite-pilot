@@ -515,10 +515,10 @@ impl Orchestrator {
         });
         discovery.start().await;
         *self.discovery.lock().expect("discovery") = Some(discovery);
-        let retention = Arc::new(LogRetentionService::new(
-            &self.data_dir,
-            self.config.retention.clone(),
-        ));
+        let retention = Arc::new(
+            LogRetentionService::new(&self.data_dir, self.config.retention.clone())
+                .with_state_store(Arc::clone(&state_store)),
+        );
         retention.start();
         *self.retention.lock().expect("retention") = Some(retention);
         if let Some(watchdog) = watchdog {

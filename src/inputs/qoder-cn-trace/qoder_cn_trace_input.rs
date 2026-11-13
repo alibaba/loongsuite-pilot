@@ -5,6 +5,9 @@
 //! IDE sessions use the CN SQLite candidates and never relabel agent type from
 //! the matched database path.
 
+#[cfg(test)]
+use crate::utils::get_today_date_string;
+
 use crate::inputs::base::{
     build_canonical_hook_entry, create_hook_history_startup_checkpoint,
     filter_bootstrap_history_turns, CanonicalHookRecordOptions, InputBody, InputRuntime,
@@ -21,9 +24,7 @@ use crate::inputs::qoder_trace::{
 };
 use crate::normalization::enrich_canonical_entry_with_git;
 use crate::types::{AgentActivityEntry, ClientType, CollectionMethod};
-use crate::utils::{
-    directory_exists, ensure_dir, get_today_date_string, resolve_home, DEFAULT_POLL_INTERVAL_MS,
-};
+use crate::utils::{directory_exists, ensure_dir, resolve_home, DEFAULT_POLL_INTERVAL_MS};
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use regex::Regex;
@@ -635,31 +636,23 @@ async fn read_today(
     rt: &InputRuntime,
     reader: &tokio::sync::Mutex<QoderLegacyHookReader>,
 ) -> anyhow::Result<Vec<AgentActivityEntry>> {
-    let name = format!("qoder-cn-{}.jsonl", get_today_date_string());
-    let path = Path::new(log_dir).join(&name);
-    let Ok(meta) = tokio::fs::metadata(&path).await else {
-        return Ok(Vec::new());
-    };
-    let state = rt.state();
-    let mut offset = if state.last_file() == Some(name.as_str()) {
-        state.last_offset().unwrap_or(0.0)
-    } else {
-        0.0
-    };
-    if offset > 0.0 && (meta.len() as f64) < offset {
-        offset = 0.0;
-    }
-    if (meta.len() as f64) <= offset {
-        return Ok(Vec::new());
-    }
-    rt.with_accumulator(|acc| acc.observe_backlog(meta.len().saturating_sub(offset as u64)));
-    let batch = reader
-        .lock()
-        .await
-        .read_observed(&path, offset as u64, |bytes, requested, duration| {
-            rt.with_accumulator(|acc| acc.observe_read(bytes, requested, duration));
-        })
-        .await?;
+    Ok(filter_bootstrap_history_turns(
+        crate::inputs::qoder_trace::legacy_hook_reader::read_daily(
+            log_dir,
+            "qoder-cn",
+            rt,
+            &mut *reader.lock().await,
+            |rt, read, bytes| Box::pin(decode_daily(rt, read, bytes)),
+        )
+        .await?,
+    ))
+}
+
+async fn decode_daily(
+    rt: &InputRuntime,
+    batch: crate::inputs::qoder_trace::legacy_hook_reader::LegacyHookBatch,
+    complete_length: u64,
+) -> Vec<AgentActivityEntry> {
     let skipped = batch
         .quarantine
         .iter()
@@ -669,41 +662,6 @@ async fn read_today(
     let mut failed = records;
     let mut success = 0;
     let mut max_record = skipped.iter().map(|range| range.bytes).max().unwrap_or(0);
-    if !batch.quarantine.is_empty() {
-        let mut previous = state
-            .extra()
-            .and_then(|value| {
-                value
-                    .get("qoderLegacyQuarantine")
-                    .and_then(Value::as_array)
-                    .cloned()
-            })
-            .unwrap_or_default();
-        for range in &batch.quarantine {
-            let mut record = serde_json::to_value(range)?.as_object().cloned().unwrap();
-            record.insert("file".into(), Value::String(name.clone()));
-            previous.push(Value::Object(record.clone()));
-            record.insert(
-                "file".into(),
-                Value::String(path.to_string_lossy().into_owned()),
-            );
-            rt.warn(
-                "oversized legacy Hook record quarantined; source retained",
-                Some(&record),
-            );
-        }
-        let keep = previous.len().saturating_sub(32);
-        previous.drain(..keep);
-        rt.set_state_fields(
-            None,
-            None,
-            Some(serde_json::json!({"qoderLegacyQuarantine":previous})),
-        );
-    }
-    let complete_length = batch.next_offset.saturating_sub(offset as u64);
-    if complete_length > 0 {
-        rt.set_state_fields(Some(name), Some(batch.next_offset as f64), None);
-    }
     let mut entries = Vec::new();
     for bytes in batch.buffer.split_inclusive(|b| *b == b'\n') {
         let line = String::from_utf8_lossy(bytes);
@@ -744,7 +702,7 @@ async fn read_today(
             })
         });
     }
-    Ok(filter_bootstrap_history_turns(entries))
+    entries
 }
 
 #[cfg(test)]

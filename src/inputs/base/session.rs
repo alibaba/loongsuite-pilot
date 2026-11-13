@@ -129,9 +129,13 @@ async fn process_file<T: SessionBody>(
         .as_ref()
         .and_then(|extra| extra.get("device"))
         .and_then(json_inode);
-    let identity_changed = previous_inode
-        .filter(|inode| *inode != 0)
-        .is_some_and(|inode| inode != identity.ino)
+    let saved_identity = extra
+        .as_ref()
+        .and_then(|extra| extra["sourceIdentity"].as_str());
+    let identity_changed = saved_identity.is_some_and(|saved| !identity.matches_checkpoint(saved))
+        || previous_inode
+            .filter(|inode| *inode != 0)
+            .is_some_and(|inode| inode != identity.ino)
         || previous_device.is_some_and(|device| device != identity.dev);
     let mut offset = previous.last_offset().unwrap_or(0.0);
     if identity_changed || (identity.size as f64) < offset {
@@ -142,13 +146,15 @@ async fn process_file<T: SessionBody>(
         offset = 0.0;
         rt.state_store.set_offset(&state_key, 0.0);
     }
-    let identity_changed_or_missing =
-        previous_inode != Some(identity.ino) || previous_device != Some(identity.dev);
+    let identity_changed_or_missing = previous_inode != Some(identity.ino)
+        || previous_device != Some(identity.dev)
+        || saved_identity.is_none_or(|saved| !identity.matches_checkpoint(saved));
     if identity_changed_or_missing && (identity.size > 0 || previous_inode.is_some()) {
         rt.state_store.update(
             &state_key,
             InputStatePatch {
-                extra: Some(json!({ "inode": identity.ino, "device": identity.dev })),
+                extra: Some(json!({ "inode": identity.ino, "device": identity.dev,
+                    "sourceIdentity": identity.checkpoint_key() })),
                 ..InputStatePatch::default()
             },
         );

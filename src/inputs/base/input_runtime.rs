@@ -723,7 +723,7 @@ impl<T: InputBody> HostedInput<T> {
     }
 
     fn begin_cycle(&self, rescan_after_collect: bool, only_running: bool) -> Option<CycleAction> {
-        if self.runtime.state_store.save_failed() {
+        if self.runtime.state_store.save_failed_for(&self.runtime.id) {
             return None;
         }
         let mut life = self
@@ -763,7 +763,7 @@ impl<T: InputBody> HostedInput<T> {
     async fn run_cycle_lead(self: &Arc<Self>, gate: Arc<CycleGate>) {
         loop {
             self.run_cycle_once().await;
-            let failed = self.runtime.state_store.save_failed();
+            let failed = self.runtime.state_store.save_failed_for(&self.runtime.id);
             let rescan = {
                 let mut life = self
                     .runtime
@@ -819,7 +819,7 @@ impl<T: InputBody> HostedInput<T> {
             let result = owner
                 .runtime
                 .state_store
-                .save()
+                .save_for(&owner.runtime.id)
                 .await
                 .map_err(|err| err.to_string());
             {
@@ -878,7 +878,7 @@ impl<T: InputBody> HostedInput<T> {
                 .collect_finished = true;
             // Another input can freeze shared progress while this collect
             // awaits IO. Reject before output or source acknowledgement.
-            if self.runtime.state_store.save_failed() {
+            if self.runtime.state_store.save_failed_for(&self.runtime.id) {
                 anyhow::bail!("input checkpoint is frozen after output failure");
             }
             let filtered = self.runtime.with_workspace_policy(|policy| {
@@ -919,7 +919,7 @@ impl<T: InputBody> HostedInput<T> {
         let cycle_result = async {
             produced?;
             let released = self.runtime.checkpoint_release.notified();
-            let waiting = self.runtime.state_store.waiting_for_output();
+            let waiting = self.runtime.state_store.waiting_for_input(&self.runtime.id);
             let (save, owns_save) = self.begin_checkpoint_save();
             // Startup readiness is collection readiness, independent of IO.
             // A write can acquire an output hold after it starts.

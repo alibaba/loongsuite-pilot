@@ -656,6 +656,10 @@ impl DshRuntime {
                 .get("dev")
                 .and_then(value_u64)
                 .is_none_or(|dev| dev == identity.dev)
+            && previous
+                .get("sourceIdentity")
+                .and_then(Value::as_str)
+                .is_some_and(|saved| identity.matches_checkpoint(saved))
             && previous.get("dshStateVersion").and_then(Value::as_i64) == Some(DSH_STATE_VERSION)
             && previous.get("dshActiveTurnStartOffset") == Some(&active)
             && previous.get("dshLastHeaderOffset") == Some(&header)
@@ -672,7 +676,7 @@ impl DshRuntime {
             InputStatePatch {
                 last_offset: Some(offset as f64),
                 extra: Some(serde_json::json!({
-                    "inode":identity.ino,"dev":identity.dev,"dshStateVersion":DSH_STATE_VERSION,
+                    "inode":identity.ino,"dev":identity.dev,"sourceIdentity":identity.checkpoint_key(),"dshStateVersion":DSH_STATE_VERSION,
                     "dshActiveTurnStartOffset":active,"dshLastHeaderOffset":header,
                     "dshBoundSessionId":session,"dshDiscardedLineStartOffset":discarded,
                 })),

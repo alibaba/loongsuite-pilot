@@ -9,6 +9,25 @@ pub(crate) struct OpenedFileIdentity {
     pub birthtime_ms: f64,
     pub size: u64,
 }
+impl OpenedFileIdentity {
+    pub(crate) fn checkpoint_key(&self) -> String {
+        if cfg!(any(target_os = "macos", windows)) {
+            format!("{}:{}:{}", self.dev, self.ino, self.birthtime_ms)
+        } else {
+            format!("{}:{}", self.dev, self.ino)
+        }
+    }
+
+    pub(crate) fn matches_checkpoint(&self, saved: &str) -> bool {
+        let key = self.checkpoint_key();
+        saved == key
+            || (!cfg!(any(target_os = "macos", windows))
+                && saved
+                    .strip_prefix(&key)
+                    .is_some_and(|tail| tail.starts_with(':')))
+    }
+}
+
 pub(crate) fn identity_from_open(file: &File) -> io::Result<OpenedFileIdentity> {
     let metadata = file.metadata()?;
     if !metadata.is_file() {

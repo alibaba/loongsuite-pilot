@@ -54,6 +54,7 @@ impl Harness {
             scan_ms: Some(2000),
             data_bytes: Some(bytes),
             logs_bytes: Some(bytes.min(GIB)),
+            logs_by_family: None,
         }
     }
     fn accept(&self, snapshot: DiskUsageSnapshot) {

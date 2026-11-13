@@ -57,6 +57,8 @@ pub(crate) fn registry(data: &Path, marker: bool) -> BTreeMap<String, PathBuf> {
     for relative in [
         "plugins/dsh/plugin.mjs",
         "plugins/shared/resource-context.mjs",
+        "plugins/shared/raw-jsonl-writer.mjs",
+        "plugins/shared/raw-source-gate.mjs",
     ] {
         paths.insert(key(relative), data.join(relative));
     }
@@ -80,7 +82,10 @@ fn source_relative(path: &str) -> Option<&str> {
             || qoder_cli_asset(relative)
             || matches!(
                 *relative,
-                "plugins/dsh/plugin.mjs" | "plugins/shared/resource-context.mjs"
+                "plugins/dsh/plugin.mjs"
+                    | "plugins/shared/resource-context.mjs"
+                    | "plugins/shared/raw-jsonl-writer.mjs"
+                    | "plugins/shared/raw-source-gate.mjs"
             )
     })
 }

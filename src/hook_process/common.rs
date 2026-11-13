@@ -10,6 +10,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type Obj = Map<String, Value>;
@@ -586,14 +587,7 @@ pub fn write_jsonl_records(
         );
         body.push('\n');
     }
-    with_file_lock(&path.with_extension("jsonl.lock"), 15_000, 10_000, || {
-        let _ = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .and_then(|mut file| file.write_all(body.as_bytes()));
-    });
-    Ok(())
+    crate::utils::raw_source::append(&path, body.as_bytes()).map_err(|error| error.to_string())
 }
 
 pub fn append_history_rows(env: &Env, agent_id: &str, log_prefix: &str, rows: &[String]) -> bool {
@@ -612,6 +606,14 @@ pub fn append_history_rows(env: &Env, agent_id: &str, log_prefix: &str, rows: &[
     }
     let mut body = rows.join("\n");
     body.push('\n');
+    // Legacy Qoder daily files are still read by older installed collectors.
+    // Share the reclamation gate without changing this compatibility filename.
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    let Ok(_gate) = crate::utils::raw_source::gate(dir, Duration::from_secs(15)) else {
+        return false;
+    };
     OpenOptions::new()
         .create(true)
         .append(true)

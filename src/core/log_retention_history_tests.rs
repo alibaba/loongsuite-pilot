@@ -95,7 +95,7 @@ fn old_mtime(path: &Path, days: i64) {
 }
 
 #[tokio::test]
-async fn history_l72_deletes_only_expired_history_files() {
+async fn history_l72_retains_raw_history_without_a_checkpoint() {
     let f = Fixture::new();
     let old = f.write(
         &format!("logs/cursor-hook/history/cursor-{}.jsonl", date(10)),
@@ -109,8 +109,8 @@ async fn history_l72_deletes_only_expired_history_files() {
         &format!("logs/cursor-hook/history/cursor-{}.jsonl", date(0)),
         b"{\"test\":3}\n",
     );
-    assert_eq!(f.service(config()).run_cleanup().await, (1, 0));
-    assert!(!old.exists());
+    assert_eq!(f.service(config()).run_cleanup().await, (0, 0));
+    assert!(old.exists());
     assert!(recent.exists());
     assert!(today.exists());
 }
@@ -864,4 +864,66 @@ async fn copilot_disk_stress_exact_three_giant_mirrors_and_128_today_closed_segm
     })
     .await
     .expect("original60000ms sparse emergency fixture budget exceeded");
+}
+
+#[tokio::test]
+async fn raw_source_retention_requires_durable_eof_and_the_same_file() {
+    use crate::checkpoints::{InputStatePatch, StateStore};
+    use crate::utils::{file_identity::identity_from_open, raw_source};
+    let f = Fixture::new();
+    let name = format!("cursor-{}.jsonl", date(14));
+    let file = f.write(&format!("logs/cursor/history/{name}"), b"complete\n");
+    let dir = file.parent().unwrap();
+    let successor = format!(
+        "cursor-{}.segment-000000000001-{}.jsonl",
+        date(14),
+        "a".repeat(32)
+    );
+    std::fs::write(dir.join(&successor), b"new\n").unwrap();
+    std::fs::write(dir.join(format!("{name}.active")), &successor).unwrap();
+    let identity = identity_from_open(&std::fs::File::open(&file).unwrap()).unwrap();
+    let store = Arc::new(StateStore::new(f.path("logs/input-state.json")));
+    let service = LogRetentionService::new(f.0.path(), config()).with_state_store(store.clone());
+    let save = |offset| {
+        store.update(
+            "cursor-hook",
+            InputStatePatch {
+                extra: Some(
+                    serde_json::json!({"hookLogDir":dir,"hookLogPrefix":"cursor",
+            "hookLogOffsets":{&name:offset},"hookLogIdentities":{&name:identity.checkpoint_key()}}),
+                ),
+                ..Default::default()
+            },
+        )
+    };
+    assert_eq!(service.run_cleanup().await, (0, 0));
+    save(identity.size - 1);
+    store.save().await.unwrap();
+    assert_eq!(service.run_cleanup().await, (0, 0));
+    save(identity.size);
+    assert_eq!(service.run_cleanup().await, (0, 0));
+    store.save().await.unwrap();
+    {
+        let _gate = raw_source::gate(dir, Duration::ZERO).unwrap();
+        assert_eq!(service.run_cleanup().await, (0, 0));
+    }
+    assert_eq!(service.run_cleanup().await, (1, 0));
+    assert!(!file.exists());
+    assert!(dir.join(successor).is_file());
+}
+
+#[tokio::test]
+async fn old_unsegmented_all_output_uses_its_modified_date() {
+    let f = Fixture::new();
+    let file = f.write("logs/output/qoder-all.jsonl", b"complete\n");
+    let modified = std::time::SystemTime::now() - Duration::from_secs(12 * 86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let service = LogRetentionService::new(f.0.path(), config());
+    assert_eq!(service.run_cleanup().await, (1, 0));
+    assert!(!file.exists());
 }

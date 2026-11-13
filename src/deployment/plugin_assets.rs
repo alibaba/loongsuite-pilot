@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const SHARED: &str = "shared/resource-context.mjs";
+const RAW_WRITER: &str = "shared/raw-jsonl-writer.mjs";
+const RAW_GATE: &str = "shared/raw-source-gate.mjs";
 
 pub(super) fn recovery_pending(data: &Path) -> bool {
     // 错误、链接和损坏记录均不能作为健康或可卸载状态。
@@ -221,7 +223,10 @@ impl PluginAssets {
             Err(err) => return Err(err.into()),
         };
         let mut loaded = Vec::new();
-        for relative in files {
+        let mut pending = files.to_vec();
+        let mut index = 0;
+        while let Some(&relative) = pending.get(index) {
+            index += 1;
             let source = format!("assets/plugins/{relative}");
             let bytes = std::fs::read(resource_file(pilot, &source)?)?;
             if let Some(manifest) = &manifest {
@@ -236,9 +241,18 @@ impl PluginAssets {
                     "插件资源摘要不匹配：{source}"
                 );
             }
+            // Historical plugin bundles never imported the shared raw writer.
+            // A current entry must carry both verified companion files.
+            if !pending.contains(&RAW_WRITER)
+                && bytes
+                    .windows(RAW_WRITER.len())
+                    .any(|part| part == RAW_WRITER.as_bytes())
+            {
+                pending.extend([RAW_WRITER, RAW_GATE]);
+            }
             destination(data, relative)?;
             loaded.push(Asset {
-                relative: (*relative).into(),
+                relative: relative.into(),
                 content: String::from_utf8(bytes)?,
             });
         }

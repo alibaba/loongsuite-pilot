@@ -321,8 +321,28 @@ struct StoreData {
     waiters: Vec<Waiter>,
     output_holds: usize,
     output_failure: Option<String>,
+    scoped_holds: HashMap<String, usize>,
+    scoped_failures: HashMap<String, String>,
+    persisted_codex: OrderedMap<InputState>,
     active_collects: Vec<ActiveCollect>,
     collect_sequence: u64,
+}
+
+fn codex_namespace(id: &str) -> Option<&'static str> {
+    ["codex-transcript", "codex-aborted-turn", "codex-log"]
+        .into_iter()
+        .find(|scope| {
+            id == *scope
+                || id
+                    .strip_prefix(scope)
+                    .is_some_and(|suffix| suffix.starts_with(':'))
+        })
+}
+
+fn scoped_blocked(data: &StoreData, id: &str) -> bool {
+    codex_namespace(id).is_some_and(|scope| {
+        data.scoped_holds.contains_key(scope) || data.scoped_failures.contains_key(scope)
+    })
 }
 
 fn extra_field<'a>(state: &'a InputState, key: &str) -> Option<&'a JVal> {
@@ -439,6 +459,7 @@ impl StateStore {
         data.persisted_revision = 0;
         data.input_revisions.clear();
         data.extra_revisions.clear();
+        data.persisted_codex.clear();
         let entries = match parsed {
             None => return,
             Some(JVal::Object(fields)) => fields,
@@ -451,6 +472,9 @@ impl StateStore {
         };
         for (id, value) in entries {
             if let Some(state) = InputState::from_jval(value) {
+                if codex_namespace(&id).is_some() {
+                    data.persisted_codex.insert(id.clone(), state.clone());
+                }
                 data.states.insert(id, state);
             }
         }
@@ -461,7 +485,8 @@ impl StateStore {
     }
 
     pub fn save_failed(&self) -> bool {
-        self.mu.lock().unwrap().output_failure.is_some()
+        let data = self.mu.lock().unwrap();
+        data.output_failure.is_some() || !data.scoped_failures.is_empty()
     }
 
     /// Reports whether the currently observed input (or one extra field) has
@@ -476,7 +501,21 @@ impl StateStore {
                 .and_then(|keys| keys.get(key)),
             None => data.input_revisions.get(input_id),
         };
-        data.output_failure.is_none() && revision.copied().unwrap_or(0) <= data.persisted_revision
+        data.output_failure.is_none()
+            && !scoped_blocked(&data, input_id)
+            && revision.copied().unwrap_or(0) <= data.persisted_revision
+            && (codex_namespace(input_id).is_none()
+                || data.input_revisions.get(input_id).copied().unwrap_or(0)
+                    <= data.persisted_revision)
+    }
+
+    pub(crate) fn persisted_input(&self, id: &str) -> Option<InputState> {
+        let data = self.mu.lock().unwrap();
+        (data.output_failure.is_none()
+            && !scoped_blocked(&data, id)
+            && data.input_revisions.get(id).copied().unwrap_or(0) <= data.persisted_revision)
+            .then(|| data.states.get(id).cloned())
+            .flatten()
     }
 
     /// Register before mutating source progress. A dropped acceptance guard
@@ -486,6 +525,13 @@ impl StateStore {
         self: &Arc<Self>,
         namespaces: Option<Vec<String>>,
     ) -> CollectOutputHold {
+        let owner = namespaces.as_ref().and_then(|ids| {
+            let scope = ids.first().and_then(|id| codex_namespace(id))?;
+            ids.iter()
+                .all(|id| codex_namespace(id) == Some(scope))
+                .then_some(scope)
+        });
+        let hold = owner.map_or_else(|| self.begin_output(), |id| self.begin_output_for(id));
         let token = {
             let mut data = self.mu.lock().unwrap();
             data.collect_sequence += 1;
@@ -501,7 +547,7 @@ impl StateStore {
         CollectOutputHold {
             store: self.clone(),
             token,
-            hold: Some(self.begin_output()),
+            hold: Some(hold),
         }
     }
     fn end_collect(&self, token: u64) -> bool {
@@ -517,11 +563,62 @@ impl StateStore {
         }
     }
     pub fn begin_output(self: &Arc<Self>) -> CheckpointOutputHold {
-        self.mu.lock().unwrap().output_holds += 1;
+        self.begin_output_with(None)
+    }
+
+    pub(crate) fn begin_output_for(self: &Arc<Self>, id: &str) -> CheckpointOutputHold {
+        self.begin_output_with(codex_namespace(id))
+    }
+
+    fn begin_output_with(self: &Arc<Self>, scope: Option<&'static str>) -> CheckpointOutputHold {
+        let mut data = self.mu.lock().unwrap();
+        if let Some(scope) = scope {
+            *data.scoped_holds.entry(scope.into()).or_default() += 1;
+        } else {
+            data.output_holds += 1;
+        }
         CheckpointOutputHold {
             store: Arc::clone(self),
+            scope,
             finished: false,
         }
+    }
+
+    pub(crate) fn save_failed_for(&self, id: &str) -> bool {
+        let data = self.mu.lock().unwrap();
+        data.output_failure.is_some()
+            || codex_namespace(id).is_some_and(|scope| data.scoped_failures.contains_key(scope))
+    }
+
+    pub(crate) fn waiting_for_input(&self, id: &str) -> bool {
+        let data = self.mu.lock().unwrap();
+        data.output_holds > 0
+            || codex_namespace(id).is_some_and(|scope| data.scoped_holds.contains_key(scope))
+    }
+
+    pub(crate) async fn save_for(&self, id: &str) -> anyhow::Result<()> {
+        if let Some(scope) = codex_namespace(id) {
+            loop {
+                let changed = self.output_changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                {
+                    let data = self.mu.lock().unwrap();
+                    if let Some(error) = data
+                        .output_failure
+                        .as_ref()
+                        .or_else(|| data.scoped_failures.get(scope))
+                    {
+                        anyhow::bail!("{error}");
+                    }
+                    if !data.scoped_holds.contains_key(scope) {
+                        break;
+                    }
+                }
+                changed.await;
+            }
+        }
+        self.save().await
     }
 
     pub fn hold_save_until<F>(self: &Arc<Self>, acceptance: F)
@@ -534,12 +631,42 @@ impl StateStore {
         });
     }
 
-    fn finish_output(&self, result: Result<(), String>) {
+    fn finish_output(&self, scope: Option<&str>, result: Result<(), String>) {
         let mut data = self.mu.lock().unwrap();
-        data.output_holds -= 1;
-        if let Err(error) = result {
-            if data.output_failure.is_none() {
-                data.output_failure = Some(error);
+        if let Some(scope) = scope {
+            if let Err(error) = result {
+                data.scoped_failures.entry(scope.into()).or_insert(error);
+            }
+            let holds = data.scoped_holds.get_mut(scope).expect("live scoped hold");
+            *holds -= 1;
+            if *holds == 0 {
+                data.scoped_holds.remove(scope);
+                // A different input may have saved while this one was held.
+                // Re-mark all scoped revisions before publishing new progress.
+                if !data.scoped_failures.contains_key(scope) {
+                    let keys: Vec<_> = data
+                        .input_revisions
+                        .keys()
+                        .map(String::as_str)
+                        .chain(
+                            data.persisted_codex
+                                .keys()
+                                .filter(|id| !data.states.contains(id)),
+                        )
+                        .filter(|id| codex_namespace(id) == Some(scope))
+                        .map(str::to_owned)
+                        .collect();
+                    for id in keys {
+                        record_input_revision(&mut data, &id, Vec::new());
+                    }
+                }
+            }
+        } else {
+            data.output_holds -= 1;
+            if let Err(error) = result {
+                if data.output_failure.is_none() {
+                    data.output_failure = Some(error);
+                }
             }
         }
         drop(data);
@@ -666,7 +793,7 @@ impl StateStore {
         enum Step {
             Wait,
             Done(Vec<Waiter>, Result<(), String>),
-            Write(u64, String),
+            Write(u64, String, OrderedMap<InputState>),
         }
         loop {
             let changed = self.output_changed.notified();
@@ -681,7 +808,26 @@ impl StateStore {
                     data.flushing = false;
                     Step::Done(std::mem::take(&mut data.waiters), Ok(()))
                 } else {
-                    Step::Write(data.revision, render_states(&data.states))
+                    let mut codex = OrderedMap::default();
+                    for (id, state) in data.states.iter() {
+                        if codex_namespace(id).is_some() && !scoped_blocked(&data, id) {
+                            codex.insert(id.to_owned(), state.clone());
+                        }
+                    }
+                    for (id, state) in data.persisted_codex.iter() {
+                        if scoped_blocked(&data, id) {
+                            codex.insert(id.to_owned(), state.clone());
+                        }
+                    }
+                    let fields = data
+                        .states
+                        .iter()
+                        .filter(|(id, _)| codex_namespace(id).is_none())
+                        .chain(codex.iter())
+                        .map(|(id, state)| (id.to_owned(), state.to_jval()))
+                        .collect();
+                    let text = format!("{}\n", json_file::to_pretty(&JVal::Object(fields)));
+                    Step::Write(data.revision, text, codex)
                 }
             };
             match step {
@@ -690,10 +836,11 @@ impl StateStore {
                     notify(waiters, result);
                     return;
                 }
-                Step::Write(revision, text) => match self.persist_text(&text).await {
+                Step::Write(revision, text, codex) => match self.persist_text(&text).await {
                     Ok(()) => {
                         let mut data = self.mu.lock().unwrap();
                         data.persisted_revision = revision;
+                        data.persisted_codex = codex;
                         prune_persisted_revision_keys(&mut data);
                     }
                     Err(error) => {
@@ -749,13 +896,14 @@ impl StateStore {
 
 pub struct CheckpointOutputHold {
     store: Arc<StateStore>,
+    scope: Option<&'static str>,
     finished: bool,
 }
 
 impl CheckpointOutputHold {
     pub fn finish(mut self, result: Result<(), String>) {
         self.finished = true;
-        self.store.finish_output(result);
+        self.store.finish_output(self.scope, result);
     }
 }
 
@@ -763,7 +911,7 @@ impl Drop for CheckpointOutputHold {
     fn drop(&mut self) {
         if !self.finished {
             self.store
-                .finish_output(Err("output acceptance was cancelled".into()));
+                .finish_output(self.scope, Err("output acceptance was cancelled".into()));
         }
     }
 }
@@ -1255,6 +1403,36 @@ mod output_acceptance_tests {
         let restored = StateStore::new(&path);
         restored.load().await;
         assert_eq!(restored.get("codex").last_offset(), Some(5.0));
+    }
+
+    #[tokio::test]
+    async fn codex_quota_hold_keeps_other_input_checkpoints_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input-state.json");
+        let store = Arc::new(StateStore::new(&path));
+        store.set_offset("codex-transcript:file", 8.0);
+        store.save().await.unwrap();
+        let hold = store.begin_output_for("codex-transcript");
+        store.set_offset("codex-transcript:file", 16.0);
+        store.set_offset("qoder-trace", 7.0);
+        store.save_for("qoder-trace").await.unwrap();
+        let disk = StateStore::new(&path);
+        disk.load().await;
+        assert_eq!(disk.get_offset("codex-transcript:file"), 8.0);
+        assert_eq!(disk.get_offset("qoder-trace"), 7.0);
+        hold.finish(Ok(()));
+        store.save_for("codex-transcript").await.unwrap();
+        disk.load().await;
+        assert_eq!(disk.get_offset("codex-transcript:file"), 16.0);
+        let hold = store.begin_output_for("codex-transcript");
+        store.set_offset("codex-transcript:file", 32.0);
+        hold.finish(Err("destination rejected".into()));
+        assert!(store.save_failed_for("codex-transcript"));
+        store.set_offset("qoder-trace", 12.0);
+        store.save_for("qoder-trace").await.unwrap();
+        disk.load().await;
+        assert_eq!(disk.get_offset("codex-transcript:file"), 16.0);
+        assert_eq!(disk.get_offset("qoder-trace"), 12.0);
     }
 
     #[tokio::test]

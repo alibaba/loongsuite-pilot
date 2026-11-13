@@ -24,9 +24,7 @@ use crate::inputs::base::{
 use crate::multimodal::{MultimodalProcessor, PathToUriOptions};
 use crate::normalization::enrich_canonical_entry_with_git;
 use crate::types::{AgentActivityEntry, ClientType, CollectionMethod, MultimodalUploadMode};
-use crate::utils::{
-    directory_exists, ensure_dir, get_today_date_string, resolve_home, DEFAULT_POLL_INTERVAL_MS,
-};
+use crate::utils::{directory_exists, ensure_dir, resolve_home, DEFAULT_POLL_INTERVAL_MS};
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde_json::{Map, Value};
@@ -674,62 +672,19 @@ async fn read_hook_jsonl(
     rt: &InputRuntime,
     reader: &mut QoderLegacyHookReader,
 ) -> anyhow::Result<Vec<AgentActivityEntry>> {
-    let today = get_today_date_string();
-    let name = format!("qoder-{today}.jsonl");
-    let path = Path::new(log_dir).join(&name);
-    let Ok(meta) = tokio::fs::metadata(&path).await else {
-        return Ok(Vec::new());
-    };
-    let state = rt.state();
-    let mut offset = if state.last_file() == Some(name.as_str()) {
-        state.last_offset().unwrap_or(0.0)
-    } else {
-        0.0
-    };
-    if offset > 0.0 && (meta.len() as f64) < offset {
-        rt.info(
-            "file truncated, resetting offset",
-            serde_json::json!({ "file": path, "recorded": offset, "actual": meta.len() })
-                .as_object(),
-        );
-        offset = 0.0;
-    }
-    if (meta.len() as f64) <= offset {
-        return Ok(Vec::new());
-    }
-    rt.with_accumulator(|acc| acc.observe_backlog(meta.len().saturating_sub(offset as u64)));
-    let read = reader
-        .read_observed(&path, offset as u64, |bytes, requested, duration| {
-            rt.with_accumulator(|a| a.observe_read(bytes, requested, duration))
+    Ok(filter_bootstrap_history_turns(
+        super::legacy_hook_reader::read_daily(log_dir, "qoder", rt, reader, |rt, read, bytes| {
+            Box::pin(decode_legacy_hook_batch(rt, read, bytes))
         })
-        .await?;
-    let committed = read.next_offset.saturating_sub(offset as u64);
-    if !read.quarantine.is_empty() {
-        let mut extra = rt
-            .state()
-            .extra()
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default();
-        let mut previous = extra
-            .get("qoderLegacyQuarantine")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        for range in &read.quarantine {
-            let mut value = serde_json::to_value(range)?;
-            value["file"] = serde_json::json!(name);
-            previous.push(value);
-            rt.warn("oversized legacy Hook record quarantined; source retained",serde_json::json!({"file":path,"from":range.from,"to":range.to,"bytes":range.bytes,"reason":range.reason}).as_object());
-        }
-        if previous.len() > 32 {
-            previous.drain(..previous.len() - 32);
-        }
-        extra.insert("qoderLegacyQuarantine".into(), Value::Array(previous));
-        rt.set_state_fields(None, None, Some(Value::Object(extra)));
-    }
-    if committed > 0 {
-        rt.set_state_fields(Some(name), Some(read.next_offset as f64), None);
-    }
+        .await?,
+    ))
+}
+
+async fn decode_legacy_hook_batch(
+    rt: &InputRuntime,
+    read: super::legacy_hook_reader::LegacyHookBatch,
+    committed: u64,
+) -> Vec<AgentActivityEntry> {
     let skipped = read
         .quarantine
         .iter()
@@ -768,7 +723,7 @@ async fn read_hook_jsonl(
         }
     }
     rt.with_accumulator(|acc| acc.observe_committed_batch(batch));
-    Ok(filter_bootstrap_history_turns(entries))
+    entries
 }
 
 async fn transform_record(record: &Map<String, Value>) -> Option<AgentActivityEntry> {

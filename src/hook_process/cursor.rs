@@ -94,14 +94,13 @@ pub fn run(request: &mut HookRequest<'_>) -> i32 {
     {
         let mut captured = payload.clone();
         captured.insert("_captured_at".into(), Value::String(now.clone()));
-        let _ = append_jsonl(
-            &root
-                .join("logs")
-                .join("cursor")
-                .join("raw")
-                .join("cursor-raw-trace.jsonl"),
-            &Value::Object(captured),
-        );
+        if let Ok(mut line) = serde_json::to_vec(&Value::Object(captured)) {
+            line.push(b'\n');
+            let _ = crate::utils::raw_source::append_diagnostic(
+                &root.join("logs/cursor/raw/cursor-raw-trace.jsonl"),
+                &line,
+            );
+        }
     }
     let hook_event = event
         .get("hook_event")
@@ -1007,13 +1006,7 @@ fn append_batch(path: &Path, records: &[Obj]) -> Result<(), String> {
         );
         body.push('\n');
     }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|err| err.to_string())?;
-    file.write_all(body.as_bytes())
-        .map_err(|err| err.to_string())
+    crate::utils::raw_source::append(path, body.as_bytes()).map_err(|err| err.to_string())
 }
 
 fn text<'a>(map: &'a Obj, key: &str) -> Option<&'a str> {
