@@ -9,9 +9,9 @@ use super::transcript_scanner::{
 };
 use crate::core::TraceLinker;
 use crate::hook_process::{
-    build_collected_transcript_turn, qoder_has_cn_terminal, qoder_is_control_user_row,
-    qoder_is_real_user_prompt, qoder_legacy_retry_lock_path, resolve_collected_qoder_user_id,
-    with_qoder_wakeup_lock, CollectedTranscriptTurnContext,
+    build_collected_transcript_turn, is_qoder_app_turn, qoder_has_cn_terminal,
+    qoder_is_control_user_row, qoder_is_real_user_prompt, qoder_legacy_retry_lock_path,
+    resolve_collected_qoder_user_id, with_qoder_wakeup_lock, CollectedTranscriptTurnContext,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use indexmap::{IndexMap, IndexSet};
@@ -1337,7 +1337,12 @@ impl Collector {
         rows.split(|byte| *byte == b'\n')
             .all(|line| {
                 serde_json::from_slice::<Value>(line).is_ok_and(|row| {
-                    qoder_is_control_user_row(&row) || terminal_events.contains(&event(&row))
+                    qoder_is_control_user_row(&row)
+                        || terminal_events.contains(&event(&row))
+                        || matches!(
+                            text(&row, "type"),
+                            "workspace-directories" | "runtime-config" | "active-leaf"
+                        )
                 })
             })
             .then_some(candidate.as_ref())
@@ -1771,6 +1776,18 @@ impl Collector {
                 terminal == "delegation-open",
                 &mut records,
             );
+        }
+        if is_qoder_app_turn(
+            &self.agent_id,
+            value.rows.iter().find(|row| qoder_is_real_user_prompt(row)),
+            context.is_some_and(|observation| flag(observation, "desktop")),
+        ) {
+            for record in &mut records {
+                if record["gen_ai.agent.type"] == "qoder-cli" {
+                    record["gen_ai.agent.type"] = json!("qoder-app");
+                    record["gen_ai.framework"] = json!("qoder-app");
+                }
+            }
         }
         if terminal != "delegation-open" {
             cp["recoveryReason"] = json!("incremental");

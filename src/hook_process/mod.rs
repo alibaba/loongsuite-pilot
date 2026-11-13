@@ -20,11 +20,11 @@ mod qwen_code_cli;
 mod qwen_work_cn;
 mod workbuddy;
 
-pub(crate) use qoder::resolve_collected_qoder_user_id;
 pub use qoder::{
     build_collected_transcript_turn, qoder_has_cn_terminal, qoder_is_control_user_row,
     qoder_is_real_user_prompt, qoder_legacy_retry_lock_path, CollectedTranscriptTurnContext,
 };
+pub(crate) use qoder::{is_qoder_app_turn, resolve_collected_qoder_user_id};
 pub use qoder::{
     resolve_qoder_collector_cli_identity, resolve_qoder_collector_cli_identity_with_env,
 };

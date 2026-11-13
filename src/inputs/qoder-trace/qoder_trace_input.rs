@@ -801,7 +801,7 @@ fn group_by_turn(entries: &[AgentActivityEntry]) -> IndexMap<String, Vec<usize>>
 fn infer_variant(entries: &[AgentActivityEntry], indexes: &[usize]) -> &'static str {
     for index in indexes {
         match entries[*index].agent_type.as_str() {
-            "qoder-cli" => return "qoder-cli",
+            "qoder-cli" | "qoder-app" => return "qoder-cli",
             "qoder-idea" => return "qoder-idea",
             "qoder" => return "qoder",
             _ => {}

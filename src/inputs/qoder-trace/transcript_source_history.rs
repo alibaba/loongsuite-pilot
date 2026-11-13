@@ -1481,3 +1481,26 @@ async fn source_shared_unchanged_reads_coalesce_by_full_value_and_keep_owned_ind
         );
     }
 }
+
+#[tokio::test]
+async fn qoder_app_identity_is_bound_to_each_native_turn() {
+    let mut f = Fixture::new("qoder").await;
+    let mut app = turn(1, true);
+    app[1]["businessIdentity"] = json!({"product":"app"});
+    f.append(&app);
+    f.wake("Stop", json!({"desktop":true}));
+    let app = f.settle().await;
+    assert!(!app.is_empty());
+    assert!(app.iter().all(
+        |row| row["gen_ai.agent.type"] == "qoder-app" && row["gen_ai.framework"] == "qoder-app"
+    ));
+
+    f.append(&turn(2, false));
+    f.restart().await;
+    f.wake("Stop", json!({}));
+    let cli = f.settle().await;
+    assert!(!cli.is_empty());
+    assert!(cli
+        .iter()
+        .all(|row| row["gen_ai.agent.type"] == "qoder-cli"));
+}

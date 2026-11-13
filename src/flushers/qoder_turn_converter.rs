@@ -8,7 +8,8 @@ use super::otlp_json_serializer::{ConvertOptions, ConvertResult, EventLogConvert
 use super::span_id_reservation::{valid_span_id, valid_trace_id};
 use crate::types::{AgentActivityEntry, AgentEventName};
 
-pub const QODER_TRANSCRIPT_AGENT_TYPES: &[&str] = &["qoder", "qoder-cli", "qoder-cn", "qoder-idea"];
+pub const QODER_TRANSCRIPT_AGENT_TYPES: &[&str] =
+    &["qoder", "qoder-cli", "qoder-app", "qoder-cn", "qoder-idea"];
 
 pub(super) fn is_qoder_transcript_agent(agent_type: &str) -> bool {
     QODER_TRANSCRIPT_AGENT_TYPES.contains(&crate::utils::normalize_agent_type(agent_type).as_str())

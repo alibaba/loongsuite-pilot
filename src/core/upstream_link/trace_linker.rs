@@ -305,11 +305,13 @@ fn extract_input_hash(entry: &AgentActivityEntry) -> Option<&str> {
 }
 
 fn is_qoder_child(entry: &AgentActivityEntry) -> bool {
-    matches!(entry.agent_type.as_str(), "qoder" | "qoder-cli")
-        && entry
-            .get("agent.qoder.subagent_id")
-            .and_then(Value::as_str)
-            .is_some()
+    matches!(
+        entry.agent_type.as_str(),
+        "qoder" | "qoder-cli" | "qoder-app"
+    ) && entry
+        .get("agent.qoder.subagent_id")
+        .and_then(Value::as_str)
+        .is_some()
 }
 
 fn has_delegated_parent(entry: &AgentActivityEntry) -> bool {

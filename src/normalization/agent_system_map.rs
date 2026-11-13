@@ -11,6 +11,7 @@ pub const AGENT_SYSTEM_MAP: &[(&str, &str)] = &[
     ("qoder-work-cn", "qoder"),
     ("qwen-work-cn", "qwen"),
     ("qoder-cli", "qoder"),
+    ("qoder-app", "qoder-app"),
     ("qoder-cli-hook", "qoder"),
     ("cursor", "cursor"),
     ("cursor-cli", "cursor"),
@@ -64,6 +65,7 @@ mod tests {
         assert_eq!(resolve_agent_system("qoder-work"), "qoder");
         assert_eq!(resolve_agent_system("qoder-work-cn"), "qoder");
         assert_eq!(resolve_agent_system("qoder-cli"), "qoder");
+        assert_eq!(resolve_agent_system("qoder-app"), "qoder-app");
         assert_eq!(resolve_agent_system("qoder-cli-hook"), "qoder");
     }
 

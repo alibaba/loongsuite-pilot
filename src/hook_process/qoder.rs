@@ -136,6 +136,7 @@ struct ProcessOpts {
     delay_applied: bool,
     range_reason: String,
     fixed_turn_window: bool,
+    desktop: bool,
     snapshot: Snapshot,
 }
 
@@ -360,6 +361,7 @@ fn run_normal(ctx: &HookCtx<'_>, stdin: &[u8]) {
             payload.cwd.as_deref(),
             range.end,
             identity.as_ref(),
+            payload.desktop_invocation,
         );
         return;
     }
@@ -384,6 +386,7 @@ fn run_normal(ctx: &HookCtx<'_>, stdin: &[u8]) {
             payload.cwd.as_deref(),
             range.end,
             identity.as_ref(),
+            payload.desktop_invocation,
         );
         return;
     }
@@ -414,6 +417,7 @@ fn run_normal(ctx: &HookCtx<'_>, stdin: &[u8]) {
             delay_applied: false,
             range_reason: locked_range.reason.to_string(),
             fixed_turn_window: false,
+            desktop: payload.desktop_invocation,
             snapshot: locked_snapshot,
         },
     );
@@ -430,6 +434,7 @@ fn run_normal(ctx: &HookCtx<'_>, stdin: &[u8]) {
             payload.cwd.as_deref(),
             range.end,
             identity.as_ref(),
+            payload.desktop_invocation,
         );
     }
 }
@@ -484,6 +489,7 @@ fn handle_empty_range(ctx: &HookCtx<'_>, payload: &Payload, identity: Option<&Us
             payload.cwd.as_deref(),
             locked_range.end,
             identity,
+            payload.desktop_invocation,
         );
     }
 }
@@ -502,6 +508,7 @@ fn run_retry(ctx: &HookCtx<'_>, args: &[String], stdin: &[u8]) {
         &format!("Retry: processing {transcript} for session {session}"),
     );
     let identity = read_retry_user_identity(stdin);
+    let desktop = args.iter().any(|arg| arg == "--desktop-product");
     let transcript_path = PathBuf::from(&transcript);
     let wait_started = Instant::now();
     if !acquire_retry_lock(ctx.env, &ctx.agent_id, &transcript_path, &session) {
@@ -517,6 +524,7 @@ fn run_retry(ctx: &HookCtx<'_>, args: &[String], stdin: &[u8]) {
             cwd.as_deref(),
             trigger_end.unwrap_or(0).max(0) as usize,
             identity.as_ref(),
+            desktop,
         );
         return;
     }
@@ -621,6 +629,7 @@ fn run_retry(ctx: &HookCtx<'_>, args: &[String], stdin: &[u8]) {
                 delay_applied: true,
                 range_reason: range.reason.to_string(),
                 fixed_turn_window: true,
+                desktop,
                 snapshot,
             },
         );
@@ -637,6 +646,7 @@ fn run_retry(ctx: &HookCtx<'_>, args: &[String], stdin: &[u8]) {
                 cwd.as_deref(),
                 trigger_end.max(0) as usize,
                 identity.as_ref(),
+                desktop,
             );
         }
         return;
@@ -663,6 +673,7 @@ fn run_retry(ctx: &HookCtx<'_>, args: &[String], stdin: &[u8]) {
             delay_applied: true,
             range_reason: range.reason.to_string(),
             fixed_turn_window: false,
+            desktop,
             snapshot,
         },
     );
@@ -679,6 +690,7 @@ fn run_retry(ctx: &HookCtx<'_>, args: &[String], stdin: &[u8]) {
             cwd.as_deref(),
             0,
             identity.as_ref(),
+            desktop,
         );
     }
 }
@@ -755,6 +767,18 @@ pub(crate) fn resolve_collected_qoder_user_id(data: &Path) -> String {
         }
     }
     load_runtime_config(&env).user_id
+}
+
+pub(crate) fn is_qoder_app_turn(agent: &str, prompt: Option<&Value>, desktop: bool) -> bool {
+    agent == "qoder"
+        && match prompt
+            .and_then(|row| row.pointer("/businessIdentity/product"))
+            .and_then(Value::as_str)
+        {
+            Some("app") => true,
+            Some("cli") => false,
+            _ => desktop,
+        }
 }
 
 pub fn qoder_is_real_user_prompt(row: &Value) -> bool {
@@ -887,6 +911,7 @@ fn process_transcript(
     );
     let mut records = Vec::new();
     for turn in &turns {
+        let start = records.len();
         let turn_id = uuid_v4();
         let boundaries = build_llm_boundaries(turn);
         log_debug(
@@ -908,6 +933,18 @@ fn process_transcript(
                 stamp: &ctx.stamp,
             },
         ));
+        if is_qoder_app_turn(
+            &ctx.agent_id,
+            turn.iter().find(|row| is_real_user_prompt(row)),
+            opts.desktop,
+        ) {
+            for record in &mut records[start..] {
+                if record.get("gen_ai.agent.type").and_then(Value::as_str) == Some("qoder-cli") {
+                    record.insert("gen_ai.agent.type".into(), json!("qoder-app"));
+                    record.insert("gen_ai.framework".into(), json!("qoder-app"));
+                }
+            }
+        }
     }
     let cursor_mode = if opts.range_reason == "incremental" {
         "incremental"
@@ -1079,6 +1116,7 @@ fn spawn_delayed_retry(
     cwd: Option<&str>,
     trigger_end_line: usize,
     identity: Option<&UserIdentity>,
+    desktop: bool,
 ) {
     let Ok(exe) = std::env::current_exe() else {
         return;
@@ -1098,6 +1136,9 @@ fn spawn_delayed_retry(
         .arg(session)
         .arg("--trigger-end-line")
         .arg(trigger_end_line.to_string());
+    if desktop {
+        command.arg("--desktop-product");
+    }
     if let Some(cwd) = cwd.filter(|value| !value.is_empty()) {
         command.arg("--cwd").arg(cwd);
     }
@@ -5240,3 +5281,19 @@ mod shared_privacy_history_tests;
 #[cfg(test)]
 #[path = "qoder_main522_identity_contract_tests.rs"]
 mod main522_identity_contract_tests;
+
+#[cfg(test)]
+mod product_identity_494_tests {
+    use super::*;
+
+    #[test]
+    fn native_prompt_product_precedes_the_owning_hook() {
+        let app = json!({"businessIdentity":{"product":"app"}});
+        let cli = json!({"businessIdentity":{"product":"cli"}});
+        assert!(is_qoder_app_turn("qoder", Some(&app), false));
+        assert!(!is_qoder_app_turn("qoder", Some(&cli), true));
+        assert!(is_qoder_app_turn("qoder", None, true));
+        assert!(!is_qoder_app_turn("qoder", None, false));
+        assert!(!is_qoder_app_turn("qoder-cn", Some(&app), true));
+    }
+}

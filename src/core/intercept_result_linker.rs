@@ -64,6 +64,7 @@ fn is_interceptor_agent(agent_type: &str) -> bool {
     const QODER: &[&str] = &[
         "qoder",
         "qoder-cli",
+        "qoder-app",
         "qodercli",
         "qoder-idea",
         "qoder-jetbrains",

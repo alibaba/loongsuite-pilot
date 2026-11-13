@@ -61,6 +61,7 @@ str_enum!(ClientType {
     KimiCodeCli = "kimi-code-cli",
     CodexSession = "codex-session",
     QoderCli = "qoder-cli",
+    QoderApp = "qoder-app",
     CursorCli = "cursor-cli",
     PiCodingAgent = "pi-coding-agent",
     ClaudeCliHook = "claude-code",

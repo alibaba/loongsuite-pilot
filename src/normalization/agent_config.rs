@@ -3,6 +3,7 @@ use crate::types::{AgentConfig, AgentsConfig, MULTIMODAL_SUPPORTED_AGENT_IDS};
 
 const AGENT_TYPE_TO_CONFIG_KEY: &[(&str, &str)] = &[
     ("qoder-cli", "qoder"),
+    ("qoder-app", "qoder"),
     ("qoder-cli-hook", "qoder"),
     ("cursor-hook", "cursor"),
     ("hermes", "hermes-agent"),
