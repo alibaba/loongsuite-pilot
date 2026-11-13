@@ -1458,8 +1458,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // user Ctrl+C, agent errored mid-step). The converter library would
         // otherwise still emit a span for the orphan request/call.
         const sanitized = dropOrphanPairs(traceConversionRecords);
-        toolSpanIds.prepare(sanitized);
-        llmSpanIds.prepare(sanitized);
+        // Clear parent_span_id on metadata-only "other" events (e.g. trae-cn's
+        // ENTRY/AGENT/STEP synthetic spans). The converter reads parent_span_id
+        // from "other" events to resolve the turn's upstream traceparent parent,
+        // and flags multiple different values as "Inconsistent parent_span_id
+        // within turn". But trae-cn emits a chain of ENTRY→AGENT→STEP "other"
+        // events with intra-trace parent pointers (AGENT.parent=ENTRY.span_id,
+        // STEP.parent=AGENT.span_id) — these are span-tree nodes, NOT upstream
+        // traceparent markers. The converter discards them anyway (they lack
+        // gen_ai.input.messages), so clearing parent_span_id here only
+        // suppresses the false inconsistency warning without affecting span
+        // tree construction. User-input "other" events (with
+        // gen_ai.input.messages) keep their parent_span_id.
+        const withCleanParents = stripIntraTraceParentSpanIds(sanitized);
+        toolSpanIds.prepare(withCleanParents);
+        llmSpanIds.prepare(withCleanParents);
         let result;
         const counters = this.getRuntimeCounters(agentType);
         const convertStarted = performance.now();
@@ -1467,10 +1480,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         let succeeded = false;
         let cleanup: (() => void) | undefined;
         try {
-          const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(sanitized, { handler, idGenerator })
-            : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(sanitized, { handler, idGenerator })
-            : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(sanitized, handler, idGenerator)
-            : { records: sanitized, handler, removedEntryCount: 0 };
+          const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(withCleanParents, { handler, idGenerator })
+            : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(withCleanParents, { handler, idGenerator })
+            : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(withCleanParents, handler, idGenerator)
+            : { records: withCleanParents, handler, removedEntryCount: 0 };
           cleanup = prepared.cleanup;
           const stream = planTurnStream(prepared.records, { handler: prepared.handler, passthroughKeys });
           if (stream) {
@@ -2733,5 +2746,30 @@ function dropOrphanPairs(records: AgentActivityEntry[]): AgentActivityEntry[] {
       return !callId || completedToolCallIds.has(callId);
     }
     return true;
+  });
+}
+
+/**
+ * Clear `parent_span_id` on metadata-only "other" events (those without
+ * gen_ai.input.messages(_delta)). The upstream converter library reads
+ * parent_span_id from "other" events to resolve a turn's upstream
+ * traceparent parent, and flags multiple distinct values within a turn as
+ * "Inconsistent parent_span_id within turn". trae-cn emits a chain of
+ * ENTRY→AGENT→STEP synthetic "other" events whose parent_span_id points
+ * up the span tree (AGENT.parent=ENTRY.span_id, STEP.parent=AGENT.span_id)
+ * — these are intra-trace span-tree pointers, NOT upstream traceparent
+ * markers. The converter discards these events anyway (they lack
+ * gen_ai.input.messages), so clearing parent_span_id here only suppresses
+ * the false inconsistency warning without affecting span tree construction.
+ * User-input "other" events (with gen_ai.input.messages) keep their
+ * parent_span_id so legitimate upstream parents are still captured.
+ */
+function stripIntraTraceParentSpanIds(records: AgentActivityEntry[]): AgentActivityEntry[] {
+  return records.map((r) => {
+    if (r['event.name'] !== 'other') return r;
+    if (!isMetadataOnlyOtherEvent(r)) return r;
+    const p = r['parent_span_id'];
+    if (p === undefined || p === '') return r;
+    return { ...r, parent_span_id: '' };
   });
 }
