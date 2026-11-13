@@ -1005,7 +1005,8 @@ export class Orchestrator extends EventEmitter {
           { ...otlpTraceCfg, dataDir: this.dataDir },
           this.globalAttributesProvider,
           undefined,
-          new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns')),
+          new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
+            ['codex', 'hermes', 'openclaw']),
           entries => this.inputManager!.prepareRestoredEntries(entries),
         );
         await r.start();

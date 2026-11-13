@@ -30,6 +30,36 @@ describe('CodexTurnJournal', () => {
     await restarted.append([entry('third', { 'gen_ai.turn.id': 'new-turn' })]);
     expect((await readJournal(restarted)).flat().map(e => e['event.id'])).toEqual(['third']);
   });
+  it('shares the disk budget across delegated Agents and retains rejected work for retry after ACK', async () => {
+    const first = entry('hermes-work', { 'gen_ai.agent.type': 'hermes' });
+    const second = entry('openclaw-work', { 'gen_ai.agent.type': 'openclaw' });
+    const bytes = Buffer.byteLength(JSON.stringify(first) + '\n')
+      + Buffer.byteLength(JSON.stringify(second) + '\n') - 1;
+    const agents = ['codex', 'hermes', 'openclaw'];
+    const journal = new CodexTurnJournal(directory, 100, agents, bytes);
+    await journal.append([first]);
+    await expect(journal.append([second])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    const restarted = new CodexTurnJournal(directory, 100, agents, bytes);
+    expect((await readJournal(restarted)).flat()).toEqual([first]);
+    expect(await restarted.isAcknowledged(second)).toBe(false);
+    await restarted.acknowledge([first]);
+    await restarted.append([second]);
+    expect((await readJournal(restarted)).flat()).toEqual([second]);
+  });
+
+  it('honors explicit disk budgets for both constructor forms when the environment is invalid', () => {
+    const previous = process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
+    process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES = 'invalid';
+    try {
+      expect(() => new CodexTurnJournal(directory, 100, 1024)).not.toThrow();
+      expect(() => new CodexTurnJournal(directory, 100, ['codex', 'hermes'], 1024)).not.toThrow();
+      expect(() => new CodexTurnJournal(directory)).toThrow(RangeError);
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
+      else process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES = previous;
+    }
+  });
+
   let directory: string;
   beforeEach(async () => { directory = await createTempDir('codex-turn-journal-'); });
   afterEach(async () => { await cleanupTempDir(directory); });

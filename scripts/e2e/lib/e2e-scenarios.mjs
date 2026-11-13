@@ -759,6 +759,7 @@ const COMMON_REQUIRED = [
   'gen_ai.session.id', 'gen_ai.agent.type', 'gen_ai.provider.name',
 ];
 const EVENT_NAME_ENUM = new Set([
+  'gen_ai.agent.invoke', 'gen_ai.agent.result',
   'llm.request', 'llm.response', 'tool.call', 'tool.result',
   'gen_ai.model.request', 'gen_ai.model.response', 'gen_ai.tool.call', 'gen_ai.tool.result',
   'gen_ai.agent.invoke', 'gen_ai.agent.result',
@@ -776,6 +777,7 @@ const CONDITIONAL_REQUIRED = {
 const COVERAGE_FIELDS = [
   ...COMMON_REQUIRED,
   'trace_id', 'span_id', 'gen_ai.turn.id', 'gen_ai.step.id',
+  'gen_ai.agent.invocation.id', 'gen_ai.agent.parent.invocation.id',
   'gen_ai.turn.start', 'gen_ai.turn.end',
   'gen_ai.request.id', 'gen_ai.request.model',
   'gen_ai.response.id', 'gen_ai.response.model', 'gen_ai.response.finish_reasons',
@@ -1037,6 +1039,7 @@ for (const toolRows of tools.values()) {
 const turns = new Map();
 for (const row of rows) {
   const entry = row.entry;
+  if (entry['event.name'] === 'gen_ai.agent.invoke' || entry['event.name'] === 'gen_ai.agent.result') continue;
   if (!hasValue(entry['gen_ai.turn.id'])) continue;
   if (entry['gen_ai.agent.scope'] === 'subagent'
     && normalizedAgentType(entry['gen_ai.agent.type']) !== 'codex') continue;
