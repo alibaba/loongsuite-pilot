@@ -9,6 +9,11 @@ import stat
 import sys
 import tempfile
 import zipfile
+from pathlib import Path
+
+QUERY_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "agentloop-audit-query" / "scripts"
+if str(QUERY_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(QUERY_SCRIPTS_DIR))
 
 from util.aliyun import (
     download_file,

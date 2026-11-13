@@ -1,7 +1,8 @@
 ﻿# Windows install entry. Same flags and stdout lines as scripts/install.py.
 $ErrorActionPreference = "Stop"
-. (Join-Path $PSScriptRoot "lib\config-record.ps1")
-. (Join-Path $PSScriptRoot "lib\aliyun.ps1")
+$queryScripts = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "agentloop-audit-query\scripts"
+. (Join-Path $queryScripts "lib\config-record.ps1")
+. (Join-Path $queryScripts "lib\aliyun.ps1")
 
 function Test-ConfValue([string]$Flag, [string]$Value) {
     if ($Value -match '[\x00-\x1f\x7f\\"$`]') {

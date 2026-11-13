@@ -6,8 +6,8 @@
 
 ## Data Source Bindings
 
-- **Project / Region**：报表目标 Project 及其所属 Region。本插件里取 `~/.loongsuite-pilot/audit/config-record.json` 的 `slsProject`、`regionId`。
-- **CLI profile**：调用方指定的已配置 profile。本插件里用插件自己保存的登录，不要传其他 profile。
+- **Project / Region**：报表目标 Project 及其所属 Region。使用这些 Skill 时取 `~/.loongsuite-pilot/audit/config-record.json` 的 `slsProject`、`regionId`。
+- **CLI profile**：调用方指定的已配置 profile。使用这些 Skill 时共用 Query Skill 保存的登录，不要传其他 profile。
 - **查询时间**：SLS 查询接口和各 chartQuery 使用相同时间窗口。
 - **SQL 表名**：含连字符的 Logstore 名使用双引号包裹，例如 `"agent-event"`。
 

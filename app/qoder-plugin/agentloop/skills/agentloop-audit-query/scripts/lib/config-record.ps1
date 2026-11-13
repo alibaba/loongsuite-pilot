@@ -11,7 +11,11 @@ $script:EXIT_CHOOSE_AGENT_SPACE = 7
 $script:DATA_DIR = Join-Path $env:USERPROFILE ".loongsuite-pilot\audit"
 $script:RECORD_PATH = Join-Path $script:DATA_DIR "config-record.json"
 $script:HISTORY_PATH = Join-Path $script:DATA_DIR "query-history.jsonl"
-$script:PLUGIN_ROOT = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$queryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$script:PLUGIN_ROOT = Split-Path -Parent (Split-Path -Parent $queryRoot)
+if (-not (Test-Path -LiteralPath (Join-Path $script:PLUGIN_ROOT ".qoder-plugin\plugin.json"))) {
+    $script:PLUGIN_ROOT = $queryRoot
+}
 $script:ALIYUN_HOME = Join-Path $script:PLUGIN_ROOT "aliyun"
 $script:ALIYUN_BIN = Join-Path $script:ALIYUN_HOME "bin\aliyun.exe"
 $script:ALIYUN_CONFIG = Join-Path $script:ALIYUN_HOME "config.json"

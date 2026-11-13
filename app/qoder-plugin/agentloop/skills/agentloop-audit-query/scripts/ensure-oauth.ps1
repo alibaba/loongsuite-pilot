@@ -12,7 +12,7 @@ function Quote-PsArgument([string]$Value) {
 function Show-AkGuide([string]$Profile) {
     $hint = Get-AliyunCommandHint
     $command = "& " + (Quote-PsArgument $hint) + " configure --mode AK --profile " + (Quote-PsArgument $Profile) + " --config-path " + (Quote-PsArgument (Get-AliyunConfigPath))
-    Write-Error ("AK is not configured. Ask the user to run this command in a local terminal and fill in the prompts.`n" + $command + "`nDo not run it for them, and do not ask them to paste the AccessKey into the chat. After they confirm it is configured, run powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File scripts/run.ps1 auth --auth-mode AK") -ErrorAction Continue
+    Write-Error ("AK is not configured. Ask the user to run this command in a local terminal and fill in the prompts.`n" + $command + "`nDo not run it for them, and do not ask them to paste the AccessKey into the chat. After they confirm it is configured, retry the original Skill auth entry with --auth-mode AK.") -ErrorAction Continue
     exit 1
 }
 

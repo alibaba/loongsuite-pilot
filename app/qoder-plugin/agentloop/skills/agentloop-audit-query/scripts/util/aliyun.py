@@ -1,4 +1,4 @@
-"""调用阿里云 CLI。安装和查询共用。CLI 与配置落在插件目录 aliyun/，不写入 ~/.aliyun。"""
+"""调用阿里云 CLI。安装和查询共用。插件共用原插件目录的 aliyun/；独立 Skill 使用 Query Skill 的 aliyun/，不写入 ~/.aliyun。"""
 
 import json
 import os
@@ -27,7 +27,10 @@ COMMAND_TIMEOUT_SECONDS = 60
 LONG_OPERATION_TIMEOUT_SECONDS = 600
 _ALIYUN_BIN = ""
 _CDN = "https://aliyuncli.alicdn.com"
-_PLUGIN_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_QUERY_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_PLUGIN_ROOT = os.path.abspath(os.path.join(_QUERY_ROOT, "..", ".."))
+if not os.path.isfile(os.path.join(_PLUGIN_ROOT, ".qoder-plugin", "plugin.json")):
+    _PLUGIN_ROOT = _QUERY_ROOT
 _ALIYUN_HOME = os.path.join(_PLUGIN_ROOT, "aliyun")
 _PLUGIN_ALIYUN_BIN = os.path.join(_ALIYUN_HOME, "bin", "aliyun")
 _PLUGIN_CONFIG = os.path.join(_ALIYUN_HOME, "config.json")

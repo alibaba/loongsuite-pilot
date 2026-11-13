@@ -21,7 +21,7 @@ description: 查询 AgentLoop 行为、Token、风险、意图、拦截和实体
 | [查询目录](references/catalog.md) | 八类核心面板与参考 SQL 索引 |
 | [schema](references/schema.md) | 数据模型、统计口径、公共构件与组织、账单外表关联 |
 | [SQL 写作技巧](references/sql-writing.md) | JSON、关联、时间窗口、分页与汇总的 SLS 注意事项 |
-| [执行说明](references/execution.md) | 插件命令、环境绑定与错误处理 |
+| [执行说明](references/execution.md) | Skill 脚本、环境绑定与错误处理 |
 | [接入交付](references/delivery.md) | SQL / CLI / SDK 参数与结果契约 |
 
 需要仪表盘或 HTML 预览时使用 [agentloop-audit-dashboard](../agentloop-audit-dashboard/SKILL.md)；控件与点击跳转见 Builder 的 [筛选器](../sls-dashboard-builder/references/filters-and-variables.md) 和 [交互事件](../sls-dashboard-builder/references/drill-down-events.md)。

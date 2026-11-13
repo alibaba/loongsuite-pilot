@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""准备名为 loongsuite-pilot 的阿里云 CLI Profile。凭证写入插件目录下的 aliyun/config.json。"""
+"""准备名为 loongsuite-pilot 的阿里云 CLI Profile。凭证写入插件或独立 Query Skill 的 aliyun/config.json。"""
 
 import argparse
 import json
@@ -64,7 +64,7 @@ def guide_ak(profile):
     print(
         "AK is not configured. Ask the user to run this command in a local terminal and fill in the prompts.\n"
         "%s\n"
-        "Do not run it for them, and do not ask them to paste the AccessKey into the chat. After they confirm it is configured, run python3 scripts/run.py auth --auth-mode AK. Use python if python3 is missing. On Windows run powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File scripts/run.ps1 auth --auth-mode AK"
+        "Do not run it for them, and do not ask them to paste the AccessKey into the chat. After they confirm it is configured, retry the original Skill auth entry with --auth-mode AK."
         % command,
         file=sys.stderr,
     )

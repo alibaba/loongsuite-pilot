@@ -12,6 +12,30 @@
 
 采集到的审计数据可在 [AgentLoop 控制台](https://agentloop.console.aliyun.com/agentloop/home) 查看。loongsuite-pilot 是面向 AI Agent 的本地采集器，项目与说明见 [alibaba/loongsuite-pilot](https://github.com/alibaba/loongsuite-pilot)。
 
+## 安装
+
+### Qoder 插件
+
+在 Qoder 扩展的“插件”页搜索 `agentloop`，安装 AgentLoop 插件。
+
+### npx
+
+在业务项目目录执行下列命令，将报表所需的三项 Skill 一起安装到 Codex：
+
+```bash
+npx skills add https://github.com/alibaba/loongsuite-pilot/tree/main/app/qoder-plugin/agentloop/skills --skill agentloop-audit-query agentloop-audit-dashboard sls-dashboard-builder -a codex
+```
+
+需要采集器安装能力时，再选择 `agentloop-collector-setup`；它与 `agentloop-audit-query` 共用授权和环境绑定。使用其他 Agent 时将 `-a codex` 改成相应标识，例如 `qoder`、`claude-code`、`qwen-code` 或 `openclaw`。默认安装到当前项目，加 `-g` 为用户级安装。
+
+npx 需要 Node.js 22.20 或以上版本。macOS / Linux 的执行脚本和各平台的 HTML 预览、仪表盘发布需要 Python 3.9 或以上版本；Windows 的查询、授权和采集器安装也提供原生 PowerShell 入口。
+
+### 手动复制
+
+从本仓库的 `app/qoder-plugin/agentloop/skills/` 取得所需的完整 Skill 目录，放到所用 Agent 的 Skill 目录并保持相邻。Codex 的项目级目录是 `.agents/skills/`，Qoder 是 `.qoder/skills/`。制作报表需要 Query、Dashboard 和 Builder 三项；生成采集器安装包需要 Collector Setup 和 Query 两项。重新加载 Agent 后即可使用。
+
+查询与 Builder 的 `scripts/`、`references/` 与各自的 `SKILL.md` 平级：Query 持有查询、授权和共用 CLI 模块，Builder 持有渲染与发布脚本，Collector Setup 持有采集器安装脚本。云端操作通过 `aliyun` CLI 完成，HTML 渲染、参数处理和目标记录在本地完成。
+
 ## 使用方式
 
 安装时在对话中输入「安装采集器」，或使用 `/agentloop-collector-setup`。安装会生成一个 zip，对话返回文件路径。可以本地解压后安装试用，也可以到管理市场下发。
@@ -38,29 +62,14 @@
 
 ## 身份凭证
 
-插件使用阿里云 CLI 中名为 `loongsuite-pilot` 的 Profile，与本机其他 Profile 相互独立。
+Query Skill 持有共用的阿里云 CLI、AgentLoop CLI 插件和名为 `loongsuite-pilot` 的 Profile。脚本会在需要时准备 CLI 3.3.0 及以上版本，不与终端默认 CLI 的登录配置混用。
 
-本机需安装阿里云 CLI 3.3.0 及以上版本。插件运行时若没有 aliyun，会自动尝试下载，并同时下载 AgentLoop CLI 插件。macOS 与 Linux 也可在终端执行：
+- Qoder 插件安装继续使用插件根目录的 `aliyun/`，目录调整后仍沿用原登录状态。
+- npx 或手动复制 Skill 时，使用 `agentloop-audit-query/aliyun/`；查询、报表和采集器安装共用这一个目录。更新 Skill 前保留本机授权目录，更新后可能需要重新登录，不要上传该目录。
 
-```bash
-/bin/bash -c "$(curl -fsSL https://aliyuncli.alicdn.com/install.sh)"
-```
+首次执行时按 [鉴权说明](skills/agentloop-audit-query/references/auth.md) 完成授权。通过 OAuth 登录时，授权范围为该阿里云账号可调用的全部 API。如需收敛权限，请创建专用 RAM 用户，仅授予下方策略，并使用该用户登录。使用 OAuth 前，请将官方 CLI 应用 `official-cli` 分配给该用户。
 
-Windows 请下载 [amd64](https://aliyuncli.alicdn.com/aliyun-cli-windows-latest-amd64.zip)，将其中的 `aliyun.exe` 加入 PATH。Windows ARM64 也使用该版本。安装后执行以下命令，确认版本不低于 3.3.0：
-
-```bash
-aliyun version
-```
-
-首次安装或查询时需要完成登录。通过 OAuth 登录时，授权范围为该阿里云账号可调用的全部 API。如需收敛权限，请创建专用 RAM 用户，仅授予下方策略，并使用该用户登录。使用 OAuth 前，请将官方 CLI 应用 `official-cli` 分配给该用户。
-
-同一 Profile 也可配置 AccessKey。在终端执行：
-
-```bash
-aliyun configure --mode AK --profile loongsuite-pilot
-```
-
-勿在对话中提供 AccessKey。
+采用 AccessKey 时，由本人在本机终端执行脚本提示的完整 `configure --mode AK` 命令，包括其 `--config-path`。不要在对话中提供 AccessKey，也不要让 Agent 读取凭证文件。
 
 ### 最小权限
 
