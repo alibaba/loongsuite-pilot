@@ -149,8 +149,64 @@ describe('DshYamlPatchStrategy', () => {
     expect(stat.size).toBe(0);
   });
 
-  it('rejects when an existing block reuses the marker but is not Pilot-managed', async () => {
-    const hostile = [
+  it('replaces a bare [] placeholder instead of appending a second YAML root', async () => {
+    // DSH serializes an empty patch list as `[]`; appending block rows after
+    // that flow sequence would produce two documents and crash DSH startup
+    // (js-yaml "document separator is expected").
+    await fs.writeFile(patchPath, '# dsh patches\n[]\n');
+    const def = makeDef();
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(true);
+    const content = await readPatch();
+    expect(content).toContain('# dsh patches\n');
+    expect(content).not.toMatch(/^\s*\[\]\s*$/m);
+    expect(content).toContain('- insert:');
+    expect(content).toContain('created-file: false');
+    // The composed file must read as a single block-sequence document.
+    const meaningful = content.split(/\r?\n/)
+      .map(l => l.trim())
+      .filter(l => l.length > 0 && !l.startsWith('#'));
+    expect(meaningful[0].startsWith('- ')).toBe(true);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+  });
+
+  it('self-heals a file already broken by a [] + block two-root append', async () => {
+    const def = makeDef();
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    // Simulate the corruption an older Pilot produced next to a DSH `[]`.
+    await fs.writeFile(patchPath, `[]\n${await readPatch()}`);
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(true);
+    const content = await readPatch();
+    expect(content).not.toMatch(/^\s*\[\]\s*$/m);
+    expect(content).toContain(`# BEGIN ${MARKER}`);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+  });
+
+  it('refuses to append when the existing root is not a YAML sequence', async () => {
+    const hostile = '{"insert": {"id": "other"}}\n';
+    await fs.writeFile(patchPath, hostile);
+    const def = makeDef();
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/not a YAML block sequence/);
+    expect(await readPatch()).toBe(hostile);
+  });
+
+  it('keeps the [] placeholder on undeploy of a replaced-placeholder file', async () => {
+    await fs.writeFile(patchPath, '# dsh patches\n[]\n');
+    const def = makeDef();
+    await strategy.deploy(def);
+    const ok = await strategy.undeploy(def);
+    expect(ok).toBe(true);
+    const content = await readPatch();
+    expect(content).not.toContain(`# BEGIN ${MARKER}`);
+    expect(content).toContain('# dsh patches');
+    expect(content).toMatch(/^\s*\[\]\s*$/m);
+  });
+
+  it('rejects when an existing block reuses the marker but is not Pilot-managed', async () => {    const hostile = [
       `# BEGIN ${MARKER}`,
       '- id: hostile-takeover',
       '  name: file:///tmp/hostile.mjs',

@@ -34,6 +34,16 @@ const STALE_LOCK_MS = 30_000;
  *   - Only the Pilot-managed BEGIN/END block is ever appended or removed.
  *     Non-Pilot bytes (user rows, comments, formatting) are preserved
  *     verbatim — no `js-yaml.dump` whole-file rewrite.
+ *   - Appending never creates a second YAML document. DSH parses the file as
+ *     a single document whose root must be a sequence, so appending is only
+ *     allowed when the existing root is a block sequence (`- ` rows) or the
+ *     file carries no meaningful content. A bare `[]` placeholder (how DSH
+ *     serializes an empty patch list) is dropped before appending: an empty
+ *     flow sequence followed by block-sequence rows would parse as two
+ *     documents and crash DSH at startup (js-yaml "document separator is
+ *     expected"). A non-sequence root refuses deployment instead of
+ *     corrupting the file, and a file already broken by an older append is
+ *     repaired on the next deploy cycle.
  *   - The block's BEGIN marker carries `created-file: true|false` so
  *     `undeploy(def)` — which only sees `AgentDefinition`, not in-memory
  *     deploy state — can decide whether to delete a now-empty file
@@ -85,7 +95,10 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     if (!this.hasMetadataLine(block, `# entryId=${cfg.entryId}`)) return true;
     if (!this.hasMetadataLine(block, `# pluginSource=${pluginUrl}`)) return true;
     if (!this.hasMetadataLine(block, `# pluginHash=${pluginHash}`)) return true;
-    return false;
+    // The block itself is up to date, but the surrounding file may still be a
+    // two-document YAML that an older Pilot appended next to a `[]` placeholder.
+    // That crashes DSH at startup, so flag it for repair via a fresh deploy.
+    return this.composedPatchInvalidReason(fileBytes) !== null;
   }
 
   async deploy(def: AgentDefinition, record?: DeployedAgentRecord): Promise<DeployResult> {
@@ -164,12 +177,45 @@ export class DshYamlPatchStrategy implements DeployStrategy {
         const newBlock = this.composePilotBlock(cfg, pluginHash, createdFileFlag);
         let nextBytes: Buffer;
         if (parsed.existingBlock) {
-          nextBytes = Buffer.concat([parsed.before, Buffer.from(newBlock), parsed.after]);
+          // A bare `[]` line outside the block can only be a leftover root
+          // placeholder (it would already form a second YAML document next to
+          // the block's sequence rows), so dropping it is always a repair.
+          nextBytes = Buffer.concat([
+            this.withoutBareEmptySeqLines(parsed.before),
+            Buffer.from(newBlock),
+            this.withoutBareEmptySeqLines(parsed.after),
+          ]);
         } else {
-          const sep = originalBytes.length > 0 && !originalBytes.toString('utf-8').endsWith('\n')
+          const rootKind = this.classifyExistingRoot(originalBytes);
+          if (rootKind === 'refuse') {
+            return {
+              success: false,
+              agentId: def.id,
+              deployMode: 'dsh-yaml-patch',
+              error: `refusing to append to ${patchPath}: existing root is not a YAML block sequence`
+                + ' (appending would produce two YAML documents and crash DSH at startup);'
+                + ' fix the file manually so its root is a sequence',
+            };
+          }
+          const base = rootKind === 'empty-flow-seq'
+            ? this.withoutBareEmptySeqLines(originalBytes)
+            : originalBytes;
+          const sep = base.length > 0 && !base.toString('utf-8').endsWith('\n')
             ? Buffer.from('\n')
             : Buffer.alloc(0);
-          nextBytes = Buffer.concat([originalBytes, sep, Buffer.from(newBlock)]);
+          nextBytes = Buffer.concat([base, sep, Buffer.from(newBlock)]);
+        }
+        // Final guard: never write a file DSH would fail to parse. This also
+        // covers the empty-flow-seq replacement above, which must yield a
+        // single block-sequence root.
+        const invalidReason = this.composedPatchInvalidReason(nextBytes);
+        if (invalidReason) {
+          return {
+            success: false,
+            agentId: def.id,
+            deployMode: 'dsh-yaml-patch',
+            error: `composed patch ${patchPath} would fail DSH patch parsing: ${invalidReason}`,
+          };
         }
 
         const wrote = await this.atomicWriteIfUnchanged(patchPath, nextBytes, h0, mode);
@@ -251,6 +297,22 @@ export class DshYamlPatchStrategy implements DeployStrategy {
           continue;
         }
 
+        // Deploy may have dropped the bare `[]` placeholder to make room for
+        // the block, so a pre-existing comments-only remainder would parse to
+        // a null root. Restore the empty-sequence placeholder DSH itself
+        // writes, keeping the file a valid single document. A truly empty
+        // (0-byte) pre-existing file stays empty, per the created-file
+        // contract above.
+        if (nextBytes.length > 0 && this.meaningfulLines(nextBytes).length === 0) {
+          const restored = nextBytes.toString('utf-8').endsWith('\n')
+            ? `${nextBytes.toString('utf-8')}[]\n`
+            : `${nextBytes.toString('utf-8')}\n[]\n`;
+          const wrote = await this.atomicWriteIfUnchanged(patchPath, Buffer.from(restored), h0, mode);
+          if (wrote) return true;
+          logger.warn('concurrent modification during undeploy restore, retrying', { path: patchPath, attempt });
+          continue;
+        }
+
         const wrote = await this.atomicWriteIfUnchanged(patchPath, nextBytes, h0, mode);
         if (wrote) return true;
         logger.warn('concurrent modification during undeploy, retrying', { path: patchPath, attempt });
@@ -262,6 +324,64 @@ export class DshYamlPatchStrategy implements DeployStrategy {
   }
 
   // ─── Block composition / parsing ───
+
+  /** Non-blank, non-comment lines (trimmed) — the YAML-meaningful content. */
+  private meaningfulLines(bytes: Buffer): string[] {
+    return bytes.toString('utf-8')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => line.length > 0 && !line.startsWith('#'));
+  }
+
+  /**
+   * Classify the root of existing non-Pilot content before appending our
+   * block-sequence entry:
+   *   - `empty`: only comments/blank lines — safe to append.
+   *   - `block-seq`: first meaningful line starts with `- ` — the existing
+   *     root is a block sequence, so our row continues it.
+   *   - `empty-flow-seq`: the only meaningful line is a bare `[]`, the
+   *     placeholder DSH writes for an empty patch list — drop it and append
+   *     (an empty flow sequence followed by block rows would parse as two
+   *     documents and crash DSH).
+   *   - `refuse`: any other root (flow sequence with content, mapping,
+   *     scalar) — appending would break the file, so deployment must fail.
+   */
+  private classifyExistingRoot(bytes: Buffer): 'empty' | 'block-seq' | 'empty-flow-seq' | 'refuse' {
+    const lines = this.meaningfulLines(bytes);
+    if (lines.length === 0) return 'empty';
+    if (lines[0].startsWith('- ')) return 'block-seq';
+    if (lines.length === 1 && lines[0] === '[]') return 'empty-flow-seq';
+    return 'refuse';
+  }
+
+  /** Remove column-0 bare `[]` lines, keeping every other byte verbatim. */
+  private withoutBareEmptySeqLines(bytes: Buffer): Buffer {
+    const text = bytes.toString('utf-8');
+    const lines = text.split('\n');
+    const kept = lines.filter(line => {
+      const trimmed = line.replace(/\r$/, '').trim();
+      return trimmed !== '[]';
+    });
+    if (kept.length === lines.length) return bytes;
+    return Buffer.from(kept.join('\n'));
+  }
+
+  /**
+   * Validate the composed patch file the way DSH reads it: a single YAML
+   * document whose root is a block sequence of patch rows. Returns a reason
+   * string when the bytes would crash `parsePatchList`, or null when valid.
+   */
+  private composedPatchInvalidReason(bytes: Buffer): string | null {
+    const lines = this.meaningfulLines(bytes);
+    if (lines.length === 0) return 'no patch rows';
+    if (!lines[0].startsWith('- ')) {
+      return `root is not a block sequence (${lines[0].slice(0, 40)})`;
+    }
+    for (const line of lines.slice(1)) {
+      if (line === '[]' || line === '{}') return `second document root (${line})`;
+    }
+    return null;
+  }
 
   private composePilotBlock(cfg: DshYamlPatchConfig, pluginHash: string, createdFile?: boolean): string {
     const pluginUrl = pathToFileURL(this.resolvePluginPath(cfg)).href;
