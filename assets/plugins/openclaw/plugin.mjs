@@ -30,6 +30,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { appendRawJsonl } from "../shared/raw-jsonl-writer.mjs";
 import { createSubagentContexts, stampSubagent } from "./subagent-context.mjs";
 import { invocationId, auditRecord, textMessages, deliveredText } from "./invocation-audit.mjs";
 import { MIN_OPENCLAW_VERSION } from "./compatibility.mjs";
@@ -382,7 +383,7 @@ function persistRecord(record) {
       _logDirReady = true;
     }
     const filePath = path.join(logDir(), `openclaw-${todayStamp()}.jsonl`);
-    appendPrivateFile(filePath, safeStringify(record) + "\n");
+    appendRawJsonl(filePath, safeStringify(record) + "\n");
     return true;
   } catch (err) {
     writeError("writeRecord", err);

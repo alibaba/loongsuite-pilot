@@ -1117,7 +1117,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
       await this.codexJournal.append(codex.filter(entry => !this.flushedTurnKeys.has(this.resolveGroupKey(entry).key)));
     } catch (cause) {
-      const error = new Error('Codex pending trace could not be persisted', { cause });
+      const error = new Error(`Codex pending trace could not be persisted: ${String(cause)}`, { cause });
       error.name = 'CodexTurnJournalError';
       throw error;
     }

@@ -10,6 +10,8 @@ export class MockStateStore {
   private _dirty = false;
   private _saveCount = 0;
 
+  hasSaveFailure(_id: string): boolean { return false; }
+
   get dirty(): boolean {
     return this._dirty;
   }

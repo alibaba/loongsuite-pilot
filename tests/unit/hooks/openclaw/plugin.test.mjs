@@ -1694,16 +1694,17 @@ describe('subagent trace propagation', () => {
     await restarted.before_agent_run({ prompt: 'unrelated work' }, unrelated);
     await restarted.before_message_write(delivery, unrelated);
     expect(readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
-    const append = fs.appendFileSync;
+    const write = fs.writeFileSync;
     let failAuditOnce = true;
-    vi.spyOn(fs, 'appendFileSync').mockImplementation((file, text, ...args) => {
-      if (failAuditOnce && String(text).includes('"event.name":"gen_ai.agent.result"')) {
+    vi.spyOn(fs, 'writeFileSync').mockImplementation((file, text, ...args) => {
+      if (failAuditOnce && typeof file === 'number' && String(text).includes('"event.name":"gen_ai.agent.result"')) {
         failAuditOnce = false;
         throw new Error('synthetic temporary audit write failure');
       }
-      return append(file, text, ...args);
+      return write(file, text, ...args);
     });
     await restarted.before_message_write(delivery, receiver);
+    expect(failAuditOnce).toBe(false);
     expect(readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
     await restarted.before_message_write(delivery, receiver);
     await restarted.before_message_write(delivery, receiver);

@@ -147,14 +147,20 @@ describe('BaseHookInput', () => {
       input.on('entries', batch => entries.push(...batch));
       await input.start();
       await input.stop();
-      expect(deltas[0].rawReadBytes).toBe(Buffer.byteLength(initial) + partialBytes);
+      expect(deltas[0].rawReadBytes).toBe(8 * 1024 * 1024);
       expect(stateStore.get(input.id).lastOffset).toBe(Buffer.byteLength(initial));
+
+      // The budgeted first poll stops before EOF. The next poll observes the
+      // whole incomplete record and caches its unchanged-tail signature.
+      await input.start();
+      await input.stop();
+      expect(deltas[1].rawReadBytes).toBe(partialBytes);
 
       for (let i = 0; i < 2; i++) {
         await input.start();
         await input.stop();
       }
-      expect(deltas.slice(1)).toEqual(Array.from({ length: 2 }, () => expect.objectContaining({
+      expect(deltas.slice(2)).toEqual(Array.from({ length: 2 }, () => expect.objectContaining({
         rawReadCalls: 0, rawReadBytes: 0, rawBacklogBytesMax: partialBytes,
       })));
 
