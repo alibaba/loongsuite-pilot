@@ -24,6 +24,7 @@ powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<ag
 
 - Qoder 插件使用插件根的 `aliyun/`。独立安装默认使用 Setup 根的 `aliyun/`；Setup 尚未配置且相邻 Query 的 `aliyun/config.json` 已存在时，脚本沿用该目录，不要求手动迁移。
 - 这些目录与终端默认 `~/.aliyun/` 分开，每个命名 Profile 独立保存凭证。Agent 不读取、复制或输出凭证文件；账户选择通过下述安全元数据完成。
+- npx 更新会重建所安装的 Skill 目录，独立安装时目录内的 CLI 与登录配置可能被清理；旧 Query 目录只有仍存在时才能沿用。更新后若提示未授权，重新执行 `auth`，再确认 Profile 与查询目标，不通过读取或复制凭证文件恢复。
 
 ## 查看可选账户
 

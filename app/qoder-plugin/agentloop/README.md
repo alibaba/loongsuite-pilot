@@ -69,6 +69,8 @@ Collector Setup 提供独立的阿里云 CLI、AgentLoop CLI 插件和多 Profil
 - Qoder 插件使用插件根目录的 `aliyun/`。
 - 独立安装默认使用 `agentloop-collector-setup/aliyun/`；该目录尚未配置且相邻 Query 的 `aliyun/config.json` 已存在时，脚本沿用 Query 的授权目录，不要求手动迁移。Agent 不读取、复制或输出凭证文件。
 
+npx 更新会重建所安装的 Skill 目录，独立安装时目录内的 CLI 与登录配置可能被清理；更新后若提示未授权，重新执行 `auth` 登录。旧 Query 授权目录只有在更新后仍存在时才能自动沿用。
+
 查询、报表和采集器安装共用当前选中的 Profile。用户要切换账户时，助手通过 `auth --list` 获取安全元数据；`configured` 只代表本地已配置，不代表云端授权已经验证。用户选定后完成授权，再确认查询目标。完整流程见 [账户与查询目标切换](skills/agentloop-collector-setup/references/auth.md)。
 
 通过 OAuth 登录时，授权范围为该阿里云账号可调用的全部 API。如需收敛权限，请创建专用 RAM 用户，仅授予下方策略，并使用该用户登录。使用 OAuth 前，请将官方 CLI 应用 `official-cli` 分配给该用户。
