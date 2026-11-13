@@ -17,6 +17,19 @@ function entry(id: string, overrides: Partial<AgentActivityEntry> = {}): AgentAc
 }
 
 describe('CodexTurnJournal', () => {
+  it('applies disk backpressure without deleting pending turns and recovers capacity after ACK', async () => {
+    const first = entry('first');
+    const bytes = Buffer.byteLength(JSON.stringify(first) + '\n');
+    const journal = new CodexTurnJournal(directory, 100, bytes);
+    await journal.append([first]);
+    await expect(journal.append([entry('second')])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    expect((await readJournal(journal)).flat().map(e => e['event.id'])).toEqual(['first']);
+    const restarted = new CodexTurnJournal(directory, 100, bytes);
+    await expect(restarted.append([entry('second')])).rejects.toThrow('disk budget exceeded');
+    await restarted.acknowledge([first]);
+    await restarted.append([entry('third', { 'gen_ai.turn.id': 'new-turn' })]);
+    expect((await readJournal(restarted)).flat().map(e => e['event.id'])).toEqual(['third']);
+  });
   let directory: string;
   beforeEach(async () => { directory = await createTempDir('codex-turn-journal-'); });
   afterEach(async () => { await cleanupTempDir(directory); });
@@ -136,7 +149,7 @@ describe('CodexTurnJournal', () => {
     expect(await restarted.isAcknowledged(record)).toBe(true);
   });
 
-  it('ignores residual pending content if acknowledgement was written before a crash', async () => {
+  it('reclaims residual pending content if acknowledgement was written before a crash', async () => {
     const record = entry('exported');
     await new CodexTurnJournal(directory).append([record]);
     const key = codexTurnJournalGroupKey(record);
@@ -145,9 +158,9 @@ describe('CodexTurnJournal', () => {
     expect(await restarted.isAcknowledged(record)).toBe(true);
     expect(await readJournal(restarted)).toEqual([]);
     expect(await readJournal(restarted, key)).toEqual([]);
-    const before = await fs.readFile(filename(directory, record), 'utf8');
+    await expect(fs.stat(filename(directory, record))).rejects.toMatchObject({ code: 'ENOENT' });
     await restarted.append([entry('source-replay')]);
-    expect(await fs.readFile(filename(directory, record), 'utf8')).toBe(before);
+    await expect(fs.stat(filename(directory, record))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('cleans residual pending content before evicting its oldest acknowledgement and retains ACK on cleanup failure', async () => {

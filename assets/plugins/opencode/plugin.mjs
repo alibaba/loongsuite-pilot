@@ -22,6 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { appendRawJsonl } from "../shared/raw-jsonl-writer.mjs";
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
@@ -229,7 +230,7 @@ function writeRecord(record) {
       _logDirReady = true;
     }
     const filePath = path.join(logDir(), `opencode-${todayStamp()}.jsonl`);
-    fs.appendFileSync(filePath, safeStringify(record) + "\n");
+    appendRawJsonl(filePath, safeStringify(record) + "\n");
   } catch (err) {
     writeError("writeRecord", err);
   }

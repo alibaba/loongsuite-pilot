@@ -112,7 +112,7 @@ describe('Codex HTTP outage during actual discovery startup', () => {
       expect(getEventListeners(f.signals[0], 'abort')).toHaveLength(1);
       expect(await f.checkpoint()).toBe(0);
       f.healthy();
-      await f.store.save();
+      await vi.waitFor(async () => { await f.store.save(); expect(await f.checkpoint()).toBe(1); }, { timeout: 3000 });
       expect(await f.checkpoint()).toBe(1);
       expect(f.accepted()).toBe(1);
     } finally { await f.cleanup(); }

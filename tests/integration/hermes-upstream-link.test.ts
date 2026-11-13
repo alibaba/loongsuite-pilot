@@ -105,7 +105,7 @@ for event in json.loads(pathlib.Path(sys.argv[2]).read_text()):
     });
     expect(run.status, run.stderr).toBe(0);
     const logDir = path.join(producerDir, 'logs', 'hermes-agent');
-    const files = await fs.readdir(logDir);
+    const files = (await fs.readdir(logDir)).filter(file => file.endsWith('.jsonl'));
     expect(files).toHaveLength(1);
     const lines = (await fs.readFile(path.join(logDir, files[0]), 'utf8')).trim().split('\n');
     const input = new HermesLogInput({
