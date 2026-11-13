@@ -1968,7 +1968,9 @@ async fn hook_reads_completed_replacement_and_replays_after_offset_rollback() {
     std::fs::remove_file(&path).unwrap();
     std::fs::rename(replacement, &path).unwrap();
     let rows = input.body.collect(&input.runtime).await.unwrap();
-    assert_eq!(entry_paths(&rows), vec!["/new"]);
+    // The new inode has no consumption receipt. Replaying its complete
+    // prefix also preserves a replacement whose prefix differs.
+    assert_eq!(entry_paths(&rows), vec!["/first", "/new"]);
     assert_eq!(
         store.get("test-hook").last_offset(),
         Some((complete.len() - 2) as f64)

@@ -128,7 +128,6 @@ async fn collect_hook<T: HookBody>(
         .as_object()
         .cloned()
         .unwrap_or_default();
-    let mut newest = None;
     let mut blocked = saved_extra["hookLogRetentionBlocked"]
         .as_object()
         .cloned()
@@ -170,9 +169,6 @@ async fn collect_hook<T: HookBody>(
         if file_entries.blocked {
             blocked.insert(log_file_name.clone(), Value::Bool(true));
         }
-        if file_entries.bytes > 0 || newest.is_none() && state.last_file().is_none() {
-            newest = Some(log_file_name.clone());
-        }
         entries.extend(file_entries.entries);
     }
     let live: std::collections::BTreeSet<&str> = file_names.iter().map(String::as_str).collect();
@@ -193,11 +189,8 @@ async fn collect_hook<T: HookBody>(
         })
     });
     let replay_value = serde_json::json!(replay_pending);
-    let newest = newest
-        .or_else(|| state.last_file().map(str::to_owned))
-        .or_else(|| candidates.last().cloned());
-    if let Some(newest) = newest {
-        let newest_offset = pruned.get(&newest).copied().unwrap_or(0.0);
+    if let Some(newest) = candidates.last() {
+        let newest_offset = pruned.get(newest).copied().unwrap_or(0.0);
         if should_persist
             || state.last_file() != Some(newest.as_str())
             || state.last_offset() != Some(newest_offset)

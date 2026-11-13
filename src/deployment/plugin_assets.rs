@@ -504,9 +504,11 @@ mod tests {
         let pilot = Path::new(env!("CARGO_MANIFEST_DIR"));
         for id in ["opencode", "mimo-code", "pi-coding-agent", "openclaw"] {
             let def = definition(id);
-            let (_, files) = bundle(&def).unwrap();
+            let data = tempfile::tempdir().unwrap();
+            let assets = PluginAssets::load(&def, pilot, data.path()).unwrap();
+            let files = assets.files.iter().map(|asset| asset.relative.as_str());
             let paths: std::collections::HashSet<_> = files
-                .iter()
+                .clone()
                 .map(|file| {
                     std::fs::canonicalize(
                         resource_file(pilot, &format!("assets/plugins/{file}")).unwrap(),
@@ -514,7 +516,7 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            for file in files.iter().filter(|file| file.ends_with(".mjs")) {
+            for file in files.filter(|file| file.ends_with(".mjs")) {
                 let source = resource_file(pilot, &format!("assets/plugins/{file}")).unwrap();
                 let content = std::fs::read_to_string(&source).unwrap();
                 for capture in imports.captures_iter(&content) {

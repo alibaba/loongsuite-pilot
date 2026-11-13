@@ -340,8 +340,15 @@ impl QwenWorkCnTraceBody {
             .and_then(|extra| extra["hookLogIdentities"].as_object().cloned())
             .unwrap_or_default();
         let mut entries = Vec::new();
-        for file_name in candidates {
+        let saved_extra = state.extra().unwrap_or(Value::Null);
+        let start = saved_extra["hookLogSweepNext"]
+            .as_str()
+            .and_then(|next| candidates.iter().position(|file| file == next))
+            .unwrap_or(0);
+        let mut resume = None;
+        for file_name in candidates.iter().cycle().skip(start).take(candidates.len()) {
             if remaining == 0 {
+                resume = Some(file_name.clone());
                 break;
             }
             let result = read_hook_file(
@@ -353,12 +360,12 @@ impl QwenWorkCnTraceBody {
                 rt,
             )
             .await?;
-            offsets.insert(file_name.clone(), result.0);
-            entries.extend(result.1);
-            if let Some(identity) = result.2 {
+            offsets.insert(file_name.clone(), result.offset);
+            entries.extend(result.entries);
+            if let Some(identity) = result.identity {
                 identities.insert(file_name.clone(), identity.into());
             }
-            remaining = remaining.saturating_sub(result.3);
+            remaining = remaining.saturating_sub(result.bytes);
         }
         let live: std::collections::BTreeSet<&str> =
             file_names.iter().map(String::as_str).collect();
@@ -371,6 +378,7 @@ impl QwenWorkCnTraceBody {
         if let Some(checkpoint_file) = checkpoint_file {
             let offset = offsets.get(&checkpoint_file).copied().unwrap_or(0.0);
             let changed = persisted.is_none()
+                || saved_extra["hookLogSweepNext"].as_str() != resume.as_deref()
                 || state.last_file() != Some(checkpoint_file.as_str())
                 || state.last_offset() != Some(offset)
                 || persisted
@@ -390,6 +398,7 @@ impl QwenWorkCnTraceBody {
                 extra.insert("hookLogDir".into(), self.log_dir.clone().into());
                 extra.insert("hookLogPrefix".into(), "qwen-work-cn".into());
                 extra.insert("hookLogIdentities".into(), identities.into());
+                extra.insert("hookLogSweepNext".into(), json!(resume));
                 rt.set_state_fields(
                     Some(checkpoint_file),
                     Some(offset),
@@ -1018,6 +1027,14 @@ fn same_offsets(left: &HashMap<String, f64>, right: &HashMap<String, f64>) -> bo
             .all(|(name, offset)| left.get(name) == Some(offset))
 }
 
+#[derive(Default)]
+struct HookRead {
+    offset: f64,
+    entries: Vec<AgentActivityEntry>,
+    identity: Option<String>,
+    bytes: u64,
+}
+
 async fn read_hook_file(
     log_dir: &str,
     file_name: &str,
@@ -1025,23 +1042,22 @@ async fn read_hook_file(
     previous_identity: Option<&str>,
     budget: u64,
     rt: &InputRuntime,
-) -> anyhow::Result<(f64, Vec<AgentActivityEntry>, Option<String>, u64)> {
+) -> anyhow::Result<HookRead> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let log_file = Path::new(log_dir).join(file_name);
     let (mut file, id) =
         match crate::inputs::qoder_work_log::open_log_file(&log_file.to_string_lossy()).await {
             Ok(opened) => opened,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((start_offset, Vec::new(), None, 0))
+                return Ok(HookRead {
+                    offset: start_offset,
+                    ..HookRead::default()
+                })
             }
             Err(error) => return Err(error.into()),
         };
-    let identity = if cfg!(any(target_os = "macos", windows)) {
-        format!("{}:{}:{}", id.dev, id.ino, id.birthtime_ms)
-    } else {
-        format!("{}:{}", id.dev, id.ino)
-    };
-    let offset = if previous_identity.is_some_and(|previous| previous != identity)
+    let identity = id.checkpoint_key();
+    let offset = if previous_identity.is_some_and(|previous| !id.matches_checkpoint(previous))
         || start_offset > id.size as f64
     {
         0
@@ -1049,17 +1065,33 @@ async fn read_hook_file(
         start_offset as u64
     };
     file.seek(std::io::SeekFrom::Start(offset)).await?;
-    let mut bytes = Vec::new();
     let requested = id.size.saturating_sub(offset);
-    file.take(requested.min(budget).min(MAX_HOOK_READ_BYTES))
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(requested.min(budget))
         .read_to_end(&mut bytes)
         .await?;
-    let physical = bytes.len() as u64;
+    while !bytes.contains(&b'\n') && (bytes.len() as u64) < requested.min(MAX_HOOK_READ_BYTES) {
+        let room = requested.min(MAX_HOOK_READ_BYTES) - bytes.len() as u64;
+        if (&mut file)
+            .take(room.min(64 * 1024))
+            .read_to_end(&mut bytes)
+            .await?
+            == 0
+        {
+            break;
+        }
+    }
+    let mut read = HookRead {
+        offset: offset as f64,
+        identity: Some(identity),
+        bytes: bytes.len() as u64,
+        ..HookRead::default()
+    };
     let Some(newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
-        return Ok((offset as f64, Vec::new(), Some(identity), physical));
+        return Ok(read);
     };
     let text = String::from_utf8_lossy(&bytes[..newline]);
-    let mut entries = Vec::new();
     for line in text.split('\n') {
         if line.trim().is_empty() {
             continue;
@@ -1076,14 +1108,10 @@ async fn read_hook_file(
             continue;
         }
         let map = std::mem::take(object);
-        entries.push(entry_from(map));
+        read.entries.push(entry_from(map));
     }
-    Ok((
-        offset as f64 + newline as f64 + 1.0,
-        entries,
-        Some(identity),
-        physical,
-    ))
+    read.offset += newline as f64 + 1.0;
+    Ok(read)
 }
 
 fn extract_usage(data: Option<&Value>) -> TokenUsage {
