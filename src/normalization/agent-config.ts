@@ -9,6 +9,7 @@ export function isMultimodalSupportedAgent(agentId: string): boolean {
 
 /** Map collector-facing agent.type aliases to config.json agents.<id> keys. */
 const AGENT_TYPE_TO_CONFIG_KEY: Record<string, string> = {
+  'qoder-app': 'qoder',
   'qoder-cli': 'qoder',
   'qoder-cli-hook': 'qoder',
   'cursor-hook': 'cursor',
