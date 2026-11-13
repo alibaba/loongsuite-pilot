@@ -11,12 +11,21 @@ $script:EXIT_CHOOSE_AGENT_SPACE = 7
 $script:DATA_DIR = Join-Path $env:USERPROFILE ".loongsuite-pilot\audit"
 $script:RECORD_PATH = Join-Path $script:DATA_DIR "config-record.json"
 $script:HISTORY_PATH = Join-Path $script:DATA_DIR "query-history.jsonl"
-$queryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$script:PLUGIN_ROOT = Split-Path -Parent (Split-Path -Parent $queryRoot)
-if (-not (Test-Path -LiteralPath (Join-Path $script:PLUGIN_ROOT ".qoder-plugin\plugin.json"))) {
-    $script:PLUGIN_ROOT = $queryRoot
+$setupRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$script:PLUGIN_ROOT = Split-Path -Parent (Split-Path -Parent $setupRoot)
+$isPlugin = Test-Path -LiteralPath (Join-Path $script:PLUGIN_ROOT ".qoder-plugin\plugin.json") -PathType Leaf
+if (-not $isPlugin) {
+    $script:PLUGIN_ROOT = $setupRoot
 }
 $script:ALIYUN_HOME = Join-Path $script:PLUGIN_ROOT "aliyun"
+if (-not $isPlugin) {
+    $legacyAliyunHome = Join-Path (Split-Path -Parent $setupRoot) "agentloop-audit-query\aliyun"
+    $newConfig = Join-Path $script:ALIYUN_HOME "config.json"
+    $legacyConfig = Join-Path $legacyAliyunHome "config.json"
+    if (-not (Test-Path -LiteralPath $newConfig -PathType Leaf) -and (Test-Path -LiteralPath $legacyConfig -PathType Leaf)) {
+        $script:ALIYUN_HOME = $legacyAliyunHome
+    }
+}
 $script:ALIYUN_BIN = Join-Path $script:ALIYUN_HOME "bin\aliyun.exe"
 $script:ALIYUN_CONFIG = Join-Path $script:ALIYUN_HOME "config.json"
 $script:DEFAULT_LOGSTORE = "agent-event"
@@ -249,6 +258,13 @@ function Get-Stamp {
 
 function Save-AuditProfile([string]$Profile) {
     $data = Read-AuditRecord
+    $previous = ""
+    if ($data.Keys -contains "profile") { $previous = [string]$data["profile"] }
+    if ($previous -cne $Profile) {
+        foreach ($name in @("agentSpace", "regionId", "slsProject", "slsLogstore", "updatedAt")) {
+            $data.Remove($name)
+        }
+    }
     $data["profile"] = $Profile
     Write-AuditRecord $data
 }

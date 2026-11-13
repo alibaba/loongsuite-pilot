@@ -7,6 +7,8 @@ description: 查询 AgentLoop 行为、Token、风险、意图、拦截和实体
 
 默认回答查询结果；用户要 SQL 时给完整可执行查询，要接入包时给模板、参数/结果契约与调用示例。
 
+查询执行依赖 [Setup](../agentloop-collector-setup/SKILL.md) 的共享 CLI、认证与目标绑定。用户仅要登录、切账户或切换查询目标时，先按 Setup 的[账户与查询目标切换](../agentloop-collector-setup/references/auth.md)处理，不要求日志时间或执行查询；目标就绪后再继续查询任务。
+
 ## 工作流程
 
 1. 确认时间与目标。缺少已确认时间时先询问，不先查数；追问沿用原范围，空结果不自动扩大时间。

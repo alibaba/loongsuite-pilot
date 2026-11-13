@@ -1,11 +1,19 @@
 ---
 name: agentloop-collector-setup
 description: |
-  安装采集器（loongsuite-pilot）。用户要安装、配置或重新获取 loongsuite-pilot 时使用。
-  Triggers: "安装 loongsuite-pilot", "安装 pilot", "安装采集器", "loongsuite-pilot", "配置 loongsuite-pilot".
+  准备 AgentLoop 云环境、登录与切换账户或查询目标，以及安装、配置或重新获取采集器（loongsuite-pilot）时使用。
+  Triggers: "登录 AgentLoop", "切换账户", "切换账号", "切换 AgentSpace", "切换查询目标", "切换 Project", "选择空间", "安装 loongsuite-pilot", "安装 pilot", "安装采集器", "loongsuite-pilot", "配置 loongsuite-pilot".
 ---
 
-# 安装 loongsuite-pilot
+# AgentLoop 环境与采集器准备
+
+## 意图分流
+
+- 只需登录、切换账户或切换查询目标：按[账户与查询目标切换](references/auth.md)执行，不询问 `user.id`，不生成安装包，不安装 Pilot。用户没有查询或报表任务时，不要求日志时间，也不查数。
+- 用户明确要安装或重新获取 Pilot：先按下文确认用户标识，再生成安装包。
+- 本技能独立提供共享 CLI、授权与采集器安装；切换查询目标和查询还需要相邻的 [Query Skill](../agentloop-audit-query/SKILL.md)，预览和发布由 [Builder](../sls-dashboard-builder/SKILL.md) 执行。用户只需描述目标，由 Agent 选择入口并补齐参数。
+
+## 安装采集器
 
 判断用户要安装之后，先在对话里请用户选一个用户标识，不要先执行脚本，也不要自己挑。安装会生成一个 zip。
 
@@ -18,7 +26,7 @@ description: |
 
 用户选定后再决定参数。主机名传 `--user-id-source hostname`，Qoder 用户名传 `--user-id-source username`，Qoder 邮箱传 `--user-id-source email`。选了不设置就不要传 `--user-id-source`。
 
-本技能与 [agentloop-audit-query](../agentloop-audit-query/SKILL.md) 相邻安装，安装与授权共用 Query Skill 的脚本。得到回复后，在当前项目目录调用该脚本，`<agentloop-audit-query目录>` 为 Query Skill 的安装路径。后续重试沿用同一入口，只改参数。用户标识一旦选过，后续命令都带上同一个 `--user-id-source`。
+得到回复后，在当前项目目录调用本技能的共享入口，`<agentloop-collector-setup目录>` 为本技能的安装路径。安装采集器无需 Query Skill。后续重试沿用同一入口，只改参数。用户标识一旦选过，后续命令都带上同一个 `--user-id-source`。
 
 ## 环境
 
@@ -29,7 +37,7 @@ description: |
 找不到 `python3` 时用 `python`。
 
 ```bash
-python3 "<agentloop-audit-query目录>/scripts/run.py" install [--user-id-source <hostname|username|email>]
+python3 "<agentloop-collector-setup目录>/scripts/run.py" install [--user-id-source <hostname|username|email>]
 ```
 
 ### Windows
@@ -37,10 +45,10 @@ python3 "<agentloop-audit-query目录>/scripts/run.py" install [--user-id-source
 参数名与 Linux 和 macOS 相同。
 
 ```powershell
-powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<agentloop-audit-query目录>/scripts/run.ps1" install [--user-id-source <hostname|username|email>]
+powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<agentloop-collector-setup目录>/scripts/run.ps1" install [--user-id-source <hostname|username|email>]
 ```
 
-不要自己做登录、查询、写配置或安装 Pilot。把脚本输出告诉用户，不要贴出 license key、API key 或 AccessKey。查日志用 `audit` 子命令，见查询技能。
+授权、目标绑定与安装均通过共享入口完成，不手工写配置或绕过脚本安装 Pilot。把脚本输出告诉用户，不要贴出 license key、API key 或 AccessKey。查日志用 `audit` 子命令，见查询技能。
 
 成功时，stdout 有一行 `enterprise_zip=<路径>`。先确认这个文件存在，再展示给用户。Linux 和 macOS 用 `ls -l`，Windows 用 `Get-Item`，记下真实大小和修改时间。文件不存在就直说，不要给打不开的链接。
 
@@ -60,13 +68,13 @@ powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<ag
 
 ## 报错
 
-登录没完成，或用户说明是国际站、要用 AccessKey 时，先读 [鉴权说明](../agentloop-audit-query/references/auth.md)。不要在这里重写鉴权步骤。授权完成后再执行原来的安装命令，只保留 `--user-id-source`、`--agent-space`、`--region`。没选用户标识时不要补 `--user-id-source`。
+登录没完成，或用户说明是国际站、要用 AccessKey 时，先读 [鉴权说明](references/auth.md)。不要在这里重写鉴权步骤。授权完成后再执行原来的安装命令，只保留 `--user-id-source`、`--agent-space`、`--region`。没选用户标识时不要补 `--user-id-source`。
 
 脚本提示缺少地域时，请用户填写 regionId，再带上 `--agent-space` 和 `--region` 执行。不要自己补 `cn-hangzhou` 或其他默认地域。
 
 ### 退出码 7
 
-这时才请用户选 AgentSpace。
+安装命令返回退出码 7 时，请用户选择 AgentSpace。仅切换查询目标时，按前述环境准备流程列举和选择目标。
 
 输出里这几行分别是：
 

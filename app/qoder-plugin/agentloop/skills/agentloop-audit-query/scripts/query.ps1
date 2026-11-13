@@ -1,7 +1,8 @@
 ﻿# Windows audit entry. Same flags and exit lines as scripts/query.py.
 $ErrorActionPreference = "Stop"
-. (Join-Path $PSScriptRoot "lib\config-record.ps1")
-. (Join-Path $PSScriptRoot "lib\aliyun.ps1")
+$setupScripts = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "agentloop-collector-setup\scripts"
+. (Join-Path $setupScripts "lib\config-record.ps1")
+. (Join-Path $setupScripts "lib\aliyun.ps1")
 
 $script:DEFAULT_LINE = 100
 
@@ -11,48 +12,54 @@ function Convert-Bound([string]$Text, [string]$Label) {
 }
 
 function Resolve-MergedTarget($Saved, $Values) {
-    # One passed field replaces that saved field. The other two stay.
+    # Only inherit fields within the same confirmed project and region.
+    $savedReady = $Saved["slsProject"] -and $Saved["slsLogstore"] -and $Saved["regionId"]
+    $projectChanged = $Values.project -and $Values.project -cne $Saved["slsProject"]
+    $regionChanged = $Values.region -and $Values.region -cne $Saved["regionId"]
+    if ((-not $savedReady -or $projectChanged -or $regionChanged) -and -not ($Values.project -and $Values.region -and $Values.logstore)) {
+        $missing = @()
+        foreach ($field in @("project", "region", "logstore")) {
+            if (-not $Values[$field]) { $missing += "--" + $field }
+        }
+        Fail ("Query target changed or incomplete. Missing explicit " + ($missing -join ", ") + ". Pass --project, --region, and --logstore together.")
+    }
     $project = $Values.project
     if (-not $project) { $project = $Saved["slsProject"] }
     $logstore = $Values.logstore
     if (-not $logstore) { $logstore = $Saved["slsLogstore"] }
     $region = $Values.region
     if (-not $region) { $region = $Saved["regionId"] }
-    $missing = @()
-    if (-not $project) { $missing += "project" }
-    if (-not $logstore) { $missing += "logstore" }
-    if (-not $region) { $missing += "region" }
-    if ($missing.Count -gt 0) {
-        Fail ("Query target is incomplete. Missing " + ($missing -join ", ") + ". project, logstore, and region are required.")
-    }
-    return (Save-AuditTarget $Saved["agentSpace"] $region $project $logstore)
+    $agentSpace = $Saved["agentSpace"]
+    if ($Values.project) { $agentSpace = "" }
+    return (Save-AuditTarget $agentSpace $region $project $logstore)
 }
 
 function Resolve-QueryContext([string]$Profile, $Values) {
     $saved = Get-SavedTarget
-    # A passed project, logstore, or region edits that field only.
-    # Region together with --agent-space still selects the space below.
-    if ($Values.project -or $Values.logstore -or ($Values.region -and -not $Values.agent_space)) {
-        return (Resolve-MergedTarget $saved $Values)
-    }
-    $savedReady = $saved["slsProject"] -and $saved["slsLogstore"] -and $saved["regionId"]
-    if ($Values.agent_space -or -not $savedReady) {
+    if ($Values.agent_space) {
+        if ($Values.project) { Fail "Cannot combine --agent-space with --project. Choose one query target." }
+        if (-not $Values.region) { Fail "Pass --region. Choosing an AgentSpace requires its region. Do not use a default region." }
         $name = $Values.agent_space
-        if (-not $name) { $name = $saved["agentSpace"] }
         $region = $Values.region
-        if (-not $region -and -not $Values.agent_space) {
-            $region = $saved["regionId"]
+    } else {
+        if ($Values.project -or $Values.logstore -or $Values.region) {
+            return (Resolve-MergedTarget $saved $Values)
         }
-        $space = Get-AgentSpace $Profile $name $region
-        $resolvedRegion = [string]$space.regionId
-        if (-not $resolvedRegion) { $resolvedRegion = $region }
-        $project = [string]$space.slsProject
-        $spaceName = [string]$space.agentSpace
-        if (-not $spaceName) { $spaceName = $name }
-        if (-not $project -or -not $resolvedRegion) { Fail "AgentSpace is missing slsProject or regionId" }
-        return (Save-AuditTarget $spaceName $resolvedRegion $project $script:DEFAULT_LOGSTORE)
+        $savedReady = $saved["slsProject"] -and $saved["slsLogstore"] -and $saved["regionId"]
+        if ($savedReady) { return $saved }
+        $name = $saved["agentSpace"]
+        $region = $saved["regionId"]
     }
-    return $saved
+    $space = Get-AgentSpace $Profile $name $region
+    $resolvedRegion = [string]$space.regionId
+    if (-not $resolvedRegion) { $resolvedRegion = $region }
+    $project = [string]$space.slsProject
+    $spaceName = [string]$space.agentSpace
+    if (-not $spaceName) { $spaceName = $name }
+    if (-not $project -or -not $resolvedRegion) { Fail "AgentSpace is missing slsProject or regionId" }
+    $logstore = $Values.logstore
+    if (-not $logstore) { $logstore = $script:DEFAULT_LOGSTORE }
+    return (Save-AuditTarget $spaceName $resolvedRegion $project $logstore)
 }
 
 function Get-QueryWindow($Values) {
@@ -77,7 +84,7 @@ function Get-QueryPage($Values) {
     return @($line, $offset)
 }
 
-$parsed = Get-CliMap $args @("agent-space", "region", "project", "logstore", "query", "from", "to", "line", "offset") @("list")
+$parsed = Get-CliMap $args @("agent-space", "region", "project", "logstore", "query", "from", "to", "line", "offset") @("list", "list-spaces")
 $values = @{
     agent_space = (Get-CliValue $parsed "agent-space")
     region = (Get-CliValue $parsed "region")
@@ -89,8 +96,24 @@ $values = @{
     line = (Get-CliValue $parsed "line")
     offset = (Get-CliValue $parsed "offset")
     list = [bool]($parsed.Switches.Keys -contains "list")
+    list_spaces = [bool]($parsed.Switches.Keys -contains "list-spaces")
 }
 $profile = Require-Profile
+if ($values.list_spaces) {
+    $spaces = @(Get-AgentSpaces $profile $values.region)
+    foreach ($err in @($script:AgentSpaceListErrors)) {
+        if ($err) { Write-Error $err -ErrorAction Continue }
+    }
+    $outputSpaces = @()
+    foreach ($item in $spaces) {
+        $outputSpaces += @{
+            agentSpace = [string]$item.agentSpace
+            regionId = [string]$item.regionId
+        }
+    }
+    Write-Output (ConvertTo-JsonObject @{} "spaces" $outputSpaces)
+    exit 0
+}
 $context = Resolve-QueryContext $profile $values
 if ($values.list -and -not $values.query) {
     $target = Get-SavedTarget

@@ -20,25 +20,27 @@
 
 ### npx
 
-在业务项目目录执行下列命令，将报表所需的三项 Skill 一起安装到 Codex：
+在业务项目目录执行下列命令，将报表所需的四项 Skill 一起安装到 Codex：
 
 ```bash
-npx skills add https://github.com/alibaba/loongsuite-pilot/tree/main/app/qoder-plugin/agentloop/skills --skill agentloop-audit-query agentloop-audit-dashboard sls-dashboard-builder -a codex
+npx skills add https://github.com/alibaba/loongsuite-pilot/tree/main/app/qoder-plugin/agentloop/skills --skill agentloop-collector-setup agentloop-audit-query agentloop-audit-dashboard sls-dashboard-builder -a codex
 ```
 
-需要采集器安装能力时，再选择 `agentloop-collector-setup`；它与 `agentloop-audit-query` 共用授权和环境绑定。使用其他 Agent 时将 `-a codex` 改成相应标识，例如 `qoder`、`claude-code`、`qwen-code` 或 `openclaw`。默认安装到当前项目，加 `-g` 为用户级安装。
+仅准备登录环境或生成采集器安装包时，安装 `agentloop-collector-setup` 即可；切换查询目标与查询还需要 `agentloop-audit-query`。使用其他 Agent 时将 `-a codex` 改成相应标识，例如 `qoder`、`claude-code`、`qwen-code` 或 `openclaw`。默认安装到当前项目，加 `-g` 为用户级安装。
 
 npx 需要 Node.js 22.20 或以上版本。macOS / Linux 的执行脚本和各平台的 HTML 预览、仪表盘发布需要 Python 3.9 或以上版本；Windows 的查询、授权和采集器安装也提供原生 PowerShell 入口。
 
 ### 手动复制
 
-从本仓库的 `app/qoder-plugin/agentloop/skills/` 取得所需的完整 Skill 目录，放到所用 Agent 的 Skill 目录并保持相邻。Codex 的项目级目录是 `.agents/skills/`，Qoder 是 `.qoder/skills/`。制作报表需要 Query、Dashboard 和 Builder 三项；生成采集器安装包需要 Collector Setup 和 Query 两项。重新加载 Agent 后即可使用。
+从本仓库的 `app/qoder-plugin/agentloop/skills/` 取得所需的完整 Skill 目录，放到所用 Agent 的 Skill 目录并保持相邻。Codex 的项目级目录是 `.agents/skills/`，Qoder 是 `.qoder/skills/`。制作报表需要 Collector Setup、Query、Dashboard 和 Builder 四项；登录环境与生成采集器安装包只需 Collector Setup，切换查询目标与查询需要再安装 Query。重新加载 Agent 后即可使用。
 
-查询与 Builder 的 `scripts/`、`references/` 与各自的 `SKILL.md` 平级：Query 持有查询、授权和共用 CLI 模块，Builder 持有渲染与发布脚本，Collector Setup 持有采集器安装脚本。云端操作通过 `aliyun` CLI 完成，HTML 渲染、参数处理和目标记录在本地完成。
+各 Skill 的 `scripts/`、`references/` 与 `SKILL.md` 平级：Collector Setup 持有共享 CLI、授权、环境准备、采集器安装与命令入口，Query 持有查询脚本，Builder 持有渲染与发布脚本。执行指南统一使用 Collector Setup 的 `scripts/run.py` 或 `scripts/run.ps1`。云端操作通过 `aliyun` CLI 完成，HTML 渲染、参数处理和目标记录在本地完成。
 
 ## 使用方式
 
-安装时在对话中输入「安装采集器」，或使用 `/agentloop-collector-setup`。安装会生成一个 zip，对话返回文件路径。可以本地解压后安装试用，也可以到管理市场下发。
+准备环境时直接说“登录 AgentLoop”“切换账户”或“切换查询目标”。目标可以是 AgentSpace，也可以是直接 SLS Project；助手会按需要列出账户或空间，补齐参数并完成绑定；只切换环境时，不询问机器用户标识或日志时间，也不安装 Pilot。
+
+需要安装采集器时，输入“安装采集器”或使用 `/agentloop-collector-setup`。助手会先确认用于审计的用户标识，再生成 zip。可以本地解压后安装试用，也可以到管理市场下发。
 
 查询时描述业务目标，或使用 `/agentloop-audit-query`。例如“查哪些用户消耗最高”，助手会先确认时间范围；“最近 7 天各 Agent 的 Token”会先窄窗验证新 SQL，再查询完整七天。追问“看其中某个 Agent 的会话”沿用已确认范围和原始 Agent 值。
 
@@ -62,12 +64,14 @@ npx 需要 Node.js 22.20 或以上版本。macOS / Linux 的执行脚本和各�
 
 ## 身份凭证
 
-Query Skill 持有共用的阿里云 CLI、AgentLoop CLI 插件和名为 `loongsuite-pilot` 的 Profile。脚本会在需要时准备 CLI 3.3.0 及以上版本，不与终端默认 CLI 的登录配置混用。
+Collector Setup 提供独立的阿里云 CLI、AgentLoop CLI 插件和多 Profile 登录环境。默认 Profile 为 `loongsuite-pilot`；其他命名 Profile 分别保存自己的凭证。脚本会在需要时准备 CLI 3.3.0 及以上版本，不与终端默认 CLI 的登录配置混用。
 
-- Qoder 插件安装继续使用插件根目录的 `aliyun/`，目录调整后仍沿用原登录状态。
-- npx 或手动复制 Skill 时，使用 `agentloop-audit-query/aliyun/`；查询、报表和采集器安装共用这一个目录。更新 Skill 前保留本机授权目录，更新后可能需要重新登录，不要上传该目录。
+- Qoder 插件使用插件根目录的 `aliyun/`。
+- 独立安装默认使用 `agentloop-collector-setup/aliyun/`；该目录尚未配置且相邻 Query 的 `aliyun/config.json` 已存在时，脚本沿用 Query 的授权目录，不要求手动迁移。Agent 不读取、复制或输出凭证文件。
 
-首次执行时按 [鉴权说明](skills/agentloop-audit-query/references/auth.md) 完成授权。通过 OAuth 登录时，授权范围为该阿里云账号可调用的全部 API。如需收敛权限，请创建专用 RAM 用户，仅授予下方策略，并使用该用户登录。使用 OAuth 前，请将官方 CLI 应用 `official-cli` 分配给该用户。
+查询、报表和采集器安装共用当前选中的 Profile。用户要切换账户时，助手通过 `auth --list` 获取安全元数据；`configured` 只代表本地已配置，不代表云端授权已经验证。用户选定后完成授权，再确认查询目标。完整流程见 [账户与查询目标切换](skills/agentloop-collector-setup/references/auth.md)。
+
+通过 OAuth 登录时，授权范围为该阿里云账号可调用的全部 API。如需收敛权限，请创建专用 RAM 用户，仅授予下方策略，并使用该用户登录。使用 OAuth 前，请将官方 CLI 应用 `official-cli` 分配给该用户。
 
 采用 AccessKey 时，由本人在本机终端执行脚本提示的完整 `configure --mode AK` 命令，包括其 `--config-path`。不要在对话中提供 AccessKey，也不要让 Agent 读取凭证文件。
 
@@ -123,7 +127,7 @@ Query Skill 持有共用的阿里云 CLI、AgentLoop CLI 插件和名为 `loongs
 
 本地配置、查询历史和安装包都放在 `~/.loongsuite-pilot/audit/`。
 
-`config-record.json` 保存已授权的 Profile 和当前查询目标：
+`config-record.json` 保存当前选中的 Profile 和目标元数据：
 
 ```json
 {
@@ -131,14 +135,12 @@ Query Skill 持有共用的阿里云 CLI、AgentLoop CLI 插件和名为 `loongs
   "regionId": "<地域，例如 cn-hangzhou>",
   "slsProject": "<SLS Project>",
   "slsLogstore": "agent-event",
-  "profile": "<已授权的阿里云 CLI Profile 名称>"
+  "profile": "<当前选中的阿里云 CLI Profile 名称>"
 }
 ```
 
-`profile` 是已授权的 Profile 名称。直接编辑查询目标时保留这一字段。
+`profile` 记录当前选中的 Profile，其他字段记录其当前目标。成功切换到不同 Profile 后，脚本清除旧目标，再按用户确认的 AgentSpace 或直接 SLS 目标重新绑定；授权失败时保留原状态。
 
-首次查询时，若该文件尚无查询目标，对话中会请你选择。回复 AgentSpace 名称和地域即可。插件会记下 `regionId`，并写入对应的 `slsProject` 与 `slsLogstore`。
-
-更换目标时，在对话中说明要查询的 AgentSpace 和地域。插件会用这两项重新获取 `slsProject` 与 `slsLogstore`，并更新 `regionId`。也可以只改 `slsProject`、`slsLogstore`、`regionId` 中的一项，另外两项沿用这个文件里已有的值。要看当前查询目标，读这个文件。该文件也可在本地直接编辑。
+首次需要目标或用户说“切换查询目标”时，助手保持当前 Profile：AgentLoop 场景用空间名称与地域解析目标，直接 SLS 场景确认 Project、Region 与 Logstore。缺项只补问必要信息，不要求用户手写命令。绑定不查询日志；没有查询或报表任务时，无需提供日志时间。目标确认后，再继续已提出的查询或发布任务。
 
 `query-history.jsonl` 保存最近的查询，每行一条，含时间和查询语句，不含日志正文。用户还没有给出检索或 SQL 时，助手可以参考这份文件来写查询语句。新记录追加在文件末尾，只保留最近 50 条，超出后自动删除最早的一条。需要去掉某条记录时，删除对应行即可。

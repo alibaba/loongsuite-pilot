@@ -82,6 +82,9 @@ def saved_space():
 
 def save_profile(profile):
     data = read_record()
+    if str(data.get("profile") or "") != profile:
+        for key in (*TARGET_KEYS, "updatedAt"):
+            data.pop(key, None)
     data["profile"] = profile
     write_record(data)
 

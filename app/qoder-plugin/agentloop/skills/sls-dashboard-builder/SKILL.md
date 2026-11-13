@@ -7,7 +7,11 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 
 创建或修改完整、可导入的阿里云 SLS dashboard JSON。
 
-业务口径由 [agentloop-audit-dashboard](../agentloop-audit-dashboard/SKILL.md) 决定，本技能负责图表 JSON、预览和发布。查询与授权脚本由相邻的 `agentloop-audit-query` 共用，`<agentloop-audit-query目录>` 为该 Skill 的安装路径。在当前项目目录执行 `python3 "<agentloop-audit-query目录>/scripts/run.py" report --dashboard <json>` 生成预览；路由器调用本技能的 `scripts/render_report.py`，沿用 Query Skill 已保存的登录和查询目标。发布使用同一入口的 `publish --dashboard <json> --remark "<修改原因>"`：不带 `--confirm` 时只读取线上状态并显示将创建还是覆盖；用户确认预览后再加 `--confirm` 执行写入。不要另建 `--profile test` 或改用另一套凭证。下文的 `aliyun sls create-dashboard` / `update-dashboard` / `get-dashboard` 是独立 CLI 的参考写法；使用这些 Skill 时采用上述脚本入口。
+业务口径由 [agentloop-audit-dashboard](../agentloop-audit-dashboard/SKILL.md) 决定，本技能持有图表渲染与发布脚本，依赖相邻 [Setup](../agentloop-collector-setup/SKILL.md) 的共享 CLI、认证与目标绑定。
+
+在当前项目目录执行 `python3 "<agentloop-collector-setup目录>/scripts/run.py" report --dashboard <json>` 生成预览；共享入口调用本技能的 `scripts/render_report.py`。发布使用同一入口的 `publish --dashboard <json> --remark "<修改原因>"`：不带 `--confirm` 时只读取线上状态并显示将创建还是覆盖，用户确认预览后再加 `--confirm` 写入。
+
+账户与查询目标切换按 Setup 的[账户与查询目标切换](../agentloop-collector-setup/references/auth.md)处理，沿用已选 Profile，不为报表临时另建 Profile 或换凭证。仅切换环境时不要求日志时间、不查数。下文的 `aliyun sls create-dashboard` / `update-dashboard` / `get-dashboard` 是独立 CLI 的参考写法；使用这些 Skill 时采用上述共享入口。
 
 **必备运维技能：** 若任务涉及真实 Project 或大盘，且需要查看或复用线上大盘，必须基于最新线上 JSON 操作。
 
@@ -166,10 +170,10 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 
 预览器按 dashboard JSON 中的查询配置取数并渲染。
 
-在当前项目目录执行，`<agentloop-audit-query目录>` 替换为 `agentloop-audit-query` Skill 的安装路径：
+在当前项目目录执行，`<agentloop-collector-setup目录>` 替换为 Setup Skill 的安装路径：
 
 ```bash
-python3 "<agentloop-audit-query目录>/scripts/run.py" report --dashboard output/audit/reports/<scenario>-dashboard.json
+python3 "<agentloop-collector-setup目录>/scripts/run.py" report --dashboard output/audit/reports/<scenario>-dashboard.json
 ```
 
 常用参数：
@@ -179,7 +183,7 @@ python3 "<agentloop-audit-query目录>/scripts/run.py" report --dashboard output
 - `--var key=value`：仅替换 SQL 中精确的 `${{key}}` token；高级模板与交互的预览范围见 [筛选器与变量替换](references/filters-and-variables.md#验证与本地预览)。
 - `--with-diff`：和 git HEAD 中同一路径 dashboard JSON 做 SQL / 结果 diff。
 
-查询、预览和发布共用 Query Skill 已保存的登录，通常不需要传 `--profile`。Windows 把 `python3 "<agentloop-audit-query目录>/scripts/run.py"` 换成 `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<agentloop-audit-query目录>/scripts/run.ps1"`，后面的参数不变。
+查询、预览和发布共用 Setup 当前选中的 Profile，通常不需要传 `--profile`。Windows 把 `python3 "<agentloop-collector-setup目录>/scripts/run.py"` 换成 `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<agentloop-collector-setup目录>/scripts/run.ps1"`，后面的参数不变。
 
 ## 参考文档索引
 

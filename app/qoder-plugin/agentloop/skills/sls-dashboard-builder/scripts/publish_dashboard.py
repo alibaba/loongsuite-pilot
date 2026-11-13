@@ -8,9 +8,9 @@ import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-QUERY_SCRIPTS_DIR = SCRIPT_DIR.parents[1] / "agentloop-audit-query" / "scripts"
-if str(QUERY_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(QUERY_SCRIPTS_DIR))
+SETUP_SCRIPTS_DIR = SCRIPT_DIR.parents[1] / "agentloop-collector-setup" / "scripts"
+if str(SETUP_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SETUP_SCRIPTS_DIR))
 
 from util.aliyun import SLS_VERSION, aliyun
 from util.config_record import DEFAULT_LOGSTORE, load_target, require_profile

@@ -1,6 +1,6 @@
 ﻿# Windows auth entry. Same flags and stdout lines as scripts/ensure_oauth.py.
 $ErrorActionPreference = "Stop"
-. (Join-Path $PSScriptRoot "lib\aliyun.ps1")
+. (Join-Path $PSScriptRoot "lib\config-record.ps1")
 
 # Unfinished browser login is rolled back when this limit is reached.
 $script:OAUTH_WAIT_SECONDS = 600
@@ -125,7 +125,7 @@ function Start-OAuth([string]$Binary, [string]$Profile, [string]$SiteType) {
     }
 }
 
-$parsed = Get-CliMap $args @("profile", "oauth-site-type", "auth-mode") @()
+$parsed = Get-CliMap $args @("profile", "oauth-site-type", "auth-mode") @("list")
 $profile = Get-CliValue $parsed "profile"
 if (-not $profile) {
     if ($env:LOONGSUITE_PILOT_ALIYUN_PROFILE) { $profile = $env:LOONGSUITE_PILOT_ALIYUN_PROFILE } else { $profile = "loongsuite-pilot" }
@@ -134,6 +134,24 @@ $siteType = Get-CliValue $parsed "oauth-site-type"
 $authMode = Get-CliValue $parsed "auth-mode"
 if ($siteType -and $siteType -ne "CN" -and $siteType -ne "INTL") { Fail "Invalid oauth-site-type" }
 if ($authMode -and $authMode -ne "OAuth" -and $authMode -ne "AK") { Fail "Auth mode must be OAuth or AK" }
+if ($parsed.Switches.Keys -contains "list") {
+    $record = Read-AuditRecord
+    $selected = ""
+    if ($record.Keys -contains "profile") { $selected = [string]$record["profile"] }
+    $profiles = @()
+    foreach ($item in @(Get-ProfileSummaries)) {
+        $profiles += @{
+            name = [string]$item.name
+            mode = [string]$item.mode
+            site_type = [string]$item.oauth_site_type
+            configured = [bool](Test-ProfileUsable $item)
+            selected = ([string]$item.name -ceq $selected)
+        }
+    }
+    Write-Output (ConvertTo-JsonObject @{ selected_profile = $selected } "profiles" $profiles)
+    exit 0
+}
+. (Join-Path $PSScriptRoot "lib\aliyun.ps1")
 $binary = Resolve-AliyunCli
 $existing = Resolve-Identity $profile $authMode $siteType
 if (-not $existing) {

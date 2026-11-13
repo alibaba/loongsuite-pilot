@@ -20,7 +20,7 @@
 
 ## CLI
 
-Skill 环境使用 [execution](execution.md) 的 `scripts/run.py audit`，显式传目标、范围和最终 query。已有 SLS CLI 时可使用其 GetLogsV2 入口，按当前 CLI 帮助确认参数/响应；不要求用户安装这些 Skill 才能消费 SQL。调用前后的 shell 转义不得改变 SQL 内的双引号，复杂 SQL 优先使用参数数组或请求文件。
+Skill 环境通过 Setup 共享入口执行 [execution](execution.md) 的 `scripts/run.py audit`，显式传目标、范围和最终 query。已有 SLS CLI 时可使用其 GetLogsV2 入口，按当前 CLI 帮助确认参数/响应；不要求用户安装这些 Skill 才能消费 SQL。调用前后的 shell 转义不得改变 SQL 内的双引号，复杂 SQL 优先使用参数数组或请求文件。
 
 GetLogsV2 结构包括 query、from、to；纯检索用 line/offset 分页，分析 SQL 用 `ORDER BY ... LIMIT offset,count`，不要用接口 line 或 offset 声称分析结果已取全。完成状态为 meta.progress；执行成功但 Incomplete 的结果不能标为准确全量；Complete 也不代表没有被 LIMIT 截断，行数检查与 SQL 分页见 [SQL 写作技巧](sql-writing.md#sql-分页)。
 

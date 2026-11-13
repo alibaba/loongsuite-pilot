@@ -174,10 +174,10 @@ WHERE ('${{dept_id|__all__}}' = '__all__'
 4. 动态候选：切换时间及其他筛选后，选项仍符合数据源与继承规则。
 5. 下钻：目标收到点击行的原始标识，保留所需时间范围，查询与结果确实缩小到目标对象。
 
-在当前项目中通过 Query Skill 的脚本生成预览，使用 Query Skill 已保存的登录。例如：
+在当前项目中通过 Setup 的共享入口生成预览，使用当前选中的 Profile。例如：
 
 ```bash
-python3 "<agentloop-audit-query目录>/scripts/run.py" report \
+python3 "<agentloop-collector-setup目录>/scripts/run.py" report \
   --dashboard output/audit/reports/overview-dashboard.json \
   --output output/audit/reports/overview-report.html \
   --var bucket_seconds=60

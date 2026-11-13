@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""准备名为 loongsuite-pilot 的阿里云 CLI Profile。凭证写入插件或独立 Query Skill 的 aliyun/config.json。"""
+"""准备名为 loongsuite-pilot 的阿里云 CLI Profile。凭证写入插件或独立 Setup Skill 的 aliyun/config.json。"""
 
 import argparse
 import json
@@ -23,8 +23,9 @@ def parse_args(argv):
     )
     parser.add_argument("--oauth-site-type", dest="site_type", default="", choices=("CN", "INTL"))
     parser.add_argument("--auth-mode", default="", choices=("OAuth", "AK"))
+    parser.add_argument("--list", action="store_true")
     args = parser.parse_args(argv)
-    return args.profile, args.site_type, args.auth_mode
+    return args.profile, args.site_type, args.auth_mode, args.list
 
 
 def profile_summaries():
@@ -216,8 +217,27 @@ def saved_profile():
     return ""
 
 
+def list_profiles():
+    selected = str(read_record().get("profile") or "")
+    return {
+        "selected_profile": selected,
+        "profiles": [
+            {
+                "name": str(item["name"]),
+                "mode": str(item["mode"]),
+                "site_type": str(item["oauth_site_type"]),
+                "configured": profile_usable(item),
+                "selected": str(item["name"]) == selected,
+            }
+            for item in profile_summaries()
+        ],
+    }
+
+
 def run(argv):
-    profile, site_type, auth_mode = parse_args(argv)
+    profile, site_type, auth_mode, list_only = parse_args(argv)
+    if list_only:
+        return list_profiles()
     binary = aliyun_bin()
     existing = resolve_identity(profile, auth_mode, site_type)
     if not existing:
@@ -228,4 +248,8 @@ def run(argv):
 
 
 if __name__ == "__main__":
-    print("oauth_profile=%s" % run(sys.argv[1:]))
+    result = run(sys.argv[1:])
+    if isinstance(result, dict):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print("oauth_profile=%s" % result)
