@@ -111,6 +111,68 @@ describe('Trae-CN vscdb reader — P1-1 path resolver', () => {
   });
 });
 
+// Trae's standard layout puts state.vscdb at
+// `<user-data-dir>/User/globalStorage/state.vscdb`. The previous resolver
+// only tried `<user-data-dir>/state.vscdb` for the env and event paths,
+// missing the standard layout (deployer-confirmed bug: /tmp/trae-p7 has
+// state.vscdb under User/globalStorage, not directly under the user-data-dir).
+describe('Trae-CN vscdb reader — P1-1 path resolver standard layout', () => {
+  let stdTmpDir;
+  let stdUserDataDir;
+  let stdVscdbPath;
+
+  beforeEach(() => {
+    stdTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'trae-cn-std-layout-'));
+    stdUserDataDir = path.join(stdTmpDir, 'user-data-dir');
+    fs.mkdirSync(path.join(stdUserDataDir, 'User', 'globalStorage'), { recursive: true });
+    stdVscdbPath = path.join(stdUserDataDir, 'User', 'globalStorage', 'state.vscdb');
+    origTraesUserDataDir = process.env.TRAES_USER_DATA_DIR;
+  });
+
+  afterEach(() => {
+    if (origTraesUserDataDir === undefined) delete process.env.TRAES_USER_DATA_DIR;
+    else process.env.TRAES_USER_DATA_DIR = origTraesUserDataDir;
+    fs.rmSync(stdTmpDir, { recursive: true, force: true });
+  });
+
+  it('TRAES_USER_DATA_DIR=<user-data-dir> → resolves User/globalStorage/state.vscdb', () => {
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(stdVscdbPath);
+    db.exec('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT, value TEXT)');
+    db.prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)').run('k', 'v');
+    db.close();
+    process.env.TRAES_USER_DATA_DIR = stdUserDataDir;
+    expect(mod.resolveVscdbPath({})).toBe(stdVscdbPath);
+  });
+
+  it('event.user_data_dir=<user-data-dir> (env unset) → resolves User/globalStorage/state.vscdb', () => {
+    delete process.env.TRAES_USER_DATA_DIR;
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(stdVscdbPath);
+    db.exec('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT, value TEXT)');
+    db.prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)').run('k', 'v');
+    db.close();
+    expect(mod.resolveVscdbPath({ user_data_dir: stdUserDataDir })).toBe(stdVscdbPath);
+  });
+
+  it('returns null when neither standard nor legacy layout has state.vscdb', () => {
+    delete process.env.TRAES_USER_DATA_DIR;
+    // No state.vscdb created anywhere.
+    expect(mod.resolveVscdbPath({ user_data_dir: stdUserDataDir })).toBeNull();
+  });
+
+  it('legacy direct layout (state.vscdb under user-data-dir) still resolves', () => {
+    delete process.env.TRAES_USER_DATA_DIR;
+    const legacyPath = path.join(stdUserDataDir, 'state.vscdb');
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(legacyPath);
+    db.exec('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT, value TEXT)');
+    db.prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)').run('k', 'v');
+    db.close();
+    expect(mod.resolveVscdbPath({ user_data_dir: stdUserDataDir })).toBe(legacyPath);
+  });
+});
+
 describe('Trae-CN agent_type mapper — P1-2 normalization', () => {
   it('maps Builder / BuilderWithMcp / Chat → builder', () => {
     expect(mod.normalizeAgentType('Builder')).toBe('builder');

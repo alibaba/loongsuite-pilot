@@ -255,15 +255,25 @@ function queryVscdbValueSync(keyPattern, vscdbPath) {
 // start-trae-cn.sh, default /tmp/trae-ubuntu-vnc) → event.user_data_dir
 // (hook payload --user-data-dir) → ~/.trae-cn/User/globalStorage fallback.
 // Replaces the prior /tmp/trae-* scan (8 stale dirs) with a deterministic chain.
+//
+// Trae's standard layout puts state.vscdb under
+// `<user-data-dir>/User/globalStorage/state.vscdb`, but older layouts placed
+// it directly under `<user-data-dir>/state.vscdb`. Try both candidates per
+// dir (standard first, then legacy direct) so the resolver survives either.
 function resolveVscdbPath(event) {
+  const candidatesFor = (d) => [
+    path.join(d, 'User', 'globalStorage', 'state.vscdb'),
+    path.join(d, 'state.vscdb'),
+  ];
   for (const d of [
     process.env.TRAES_USER_DATA_DIR,
     event?.user_data_dir,
-    path.join(os.homedir(), '.trae-cn', 'User', 'globalStorage'),
+    path.join(os.homedir(), '.trae-cn'),
   ]) {
     if (d && typeof d === 'string') {
-      const p = path.join(d, 'state.vscdb');
-      if (fs.existsSync(p)) return p;
+      for (const p of candidatesFor(d)) {
+        if (fs.existsSync(p)) return p;
+      }
     }
   }
   return null;
