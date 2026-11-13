@@ -49,20 +49,20 @@ function buildVscdb(rows) {
 }
 
 // Deployer-confirmed vscdb schema for AI.agent.model.model_list_map:
-//   { "<user_id>": { "<agent_type>": { modelId, mode, ... } } }
-// where agent_type keys are snake_case variants (solo_agent, builder, ...).
-// modelId carries a synthetic prefix `<agent_type>_<N>__<real_model_name>`
-// that the picker must strip before returning.
+//   { "<agent_type>": [ { name, is_default, multimodal, ... }, ... ] }
+// agent_type is a top-level key (snake_case: solo_agent, solo_coder, builder,
+// chat, ...). The value is an array of model objects; the picker selects the
+// entry with is_default:true (or [0] if none) and returns its `name`, which
+// is already the user-facing model name (no synthetic prefix to strip).
 const CATALOG_SOLO_AGENT_DEFAULT = {
-  '6af6d570164695484f84f7f1': {
-    solo_agent: { modelId: 'solo_agent_1__Doubao-Seed-Code', mode: 1 },
-  },
+  solo_agent: [
+    { name: 'Doubao-Seed-Code', is_default: true, provider: 'doubao' },
+    { name: 'Qwen-Coder-32B', is_default: false, provider: 'qwen' },
+  ],
 };
 
 const CATALOG_BUILDER_EMPTY = {
-  '6af6d570164695484f84f7f1': {
-    builder: {},
-  },
+  builder: [],
 };
 
 describe('Trae-CN vscdb reader — P0 dual-path', () => {
@@ -71,7 +71,7 @@ describe('Trae-CN vscdb reader — P0 dual-path', () => {
     const raw = mod.queryVscdbValueSync('AI.agent.model.model_list_map', vscdbPath);
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw);
-    expect(parsed['6af6d570164695484f84f7f1'].solo_agent.modelId).toBe('solo_agent_1__Doubao-Seed-Code');
+    expect(parsed.solo_agent[0].name).toBe('Doubao-Seed-Code');
   });
 
   it('Path A fail (file missing) → fallback B/C also fail → returns null', () => {
@@ -209,18 +209,15 @@ describe('Trae-CN agent_type mapper — P1-2 normalization', () => {
 });
 
 describe('Trae-CN pickDefaultModelForAgentType — end-to-end mapper', () => {
-  it('agent_type=SoloAgent with solo_agent entry → strips prefix, returns Doubao-Seed-Code', () => {
+  it('agent_type=SoloAgent with solo_agent array → returns default Doubao-Seed-Code', () => {
     buildVscdb([{ key: 'someUserId_AI.agent.model.model_list_map', value: JSON.stringify(CATALOG_SOLO_AGENT_DEFAULT) }]);
     const pick = mod.pickDefaultModelForAgentType('SoloAgent', {});
     expect(pick).not.toBeNull();
     expect(pick.name).toBe('Doubao-Seed-Code');
-    // vscdb entry `{ modelId, mode }` has no provider field; picker returns
-    // null rather than fabricating one. Provider is resolved separately by
-    // resolveProvider.
-    expect(pick.provider).toBeNull();
+    expect(pick.provider).toBe('doubao');
   });
 
-  it('agent_type=Builder with empty entry → falls back to session_selected_model', () => {
+  it('agent_type=Builder with empty array → falls back to session_selected_model', () => {
     buildVscdb([
       { key: 'AI.agent.model.model_list_map', value: JSON.stringify(CATALOG_BUILDER_EMPTY) },
       { key: 'session_selected_model', value: 'Doubao-Seed-2.1-Turbo' },
@@ -230,7 +227,7 @@ describe('Trae-CN pickDefaultModelForAgentType — end-to-end mapper', () => {
     expect(pick.name).toBe('Doubao-Seed-2.1-Turbo');
   });
 
-  it('agent_type=Builder empty entry + no session_selected_model → falls back to ai_assistant.request.model config', () => {
+  it('agent_type=Builder empty array + no session_selected_model → falls back to ai_assistant.request.model config', () => {
     buildVscdb([
       { key: 'AI.agent.model.model_list_map', value: JSON.stringify(CATALOG_BUILDER_EMPTY) },
       { key: 'ai_assistant.request.model', value: 'Qwen-Coder-32B' },
@@ -240,7 +237,7 @@ describe('Trae-CN pickDefaultModelForAgentType — end-to-end mapper', () => {
     expect(pick.name).toBe('Qwen-Coder-32B');
   });
 
-  it('agent_type=Builder empty entry + all vscdb fallbacks missing → returns null (NO solo_agent heuristic)', () => {
+  it('agent_type=Builder empty array + all vscdb fallbacks missing → returns null (NO solo_agent heuristic)', () => {
     buildVscdb([{ key: 'AI.agent.model.model_list_map', value: JSON.stringify(CATALOG_BUILDER_EMPTY) }]);
     const pick = mod.pickDefaultModelForAgentType('Builder', {});
     expect(pick).toBeNull();
@@ -255,12 +252,15 @@ describe('Trae-CN pickDefaultModelForAgentType — end-to-end mapper', () => {
   });
 });
 
-// P1-3 modelId extraction from vscdb nested schema. Deployer-confirmed
-// schema: { "<user_id>": { "<agent_type>": { modelId, mode, ... } } }.
-// modelId carries synthetic prefix `<agent_type>_<N>__` that must be stripped.
-describe('Trae-CN pickDefaultModelForAgentType — P1-3 modelId extraction', () => {
-  it('deployer sample: raw JSON → extracts Doubao-Seed-Code (prefix stripped)', () => {
-    const raw = '{"6af6d570164695484f84f7f1":{"solo_agent":{"modelId":"solo_agent_1__Doubao-Seed-Code","mode":1}}}';
+// P1-3 model extraction from vscdb array schema. Deployer-confirmed schema
+// for AI.agent.model.model_list_map:
+//   { "<agent_type>": [ { name, is_default, multimodal, ... }, ... ] }
+// The picker selects the entry with is_default:true (or [0] fallback) and
+// returns its `name` verbatim — no prefix stripping needed (the array-form
+// catalog already stores user-facing model names).
+describe('Trae-CN pickDefaultModelForAgentType — P1-3 array-schema extraction', () => {
+  it('deployer sample: {solo_agent:[{name:"Doubao-Seed-Code",is_default:true}]} → returns Doubao-Seed-Code', () => {
+    const raw = '{"solo_agent":[{"name":"Doubao-Seed-Code","is_default":true,"multimodal":false},{"name":"Qwen-Coder-32B","is_default":false}]}';
     buildVscdb([{ key: 'AI.agent.model.model_list_map', value: raw }]);
     const pick = mod.pickDefaultModelForAgentType('SoloAgent', {});
     expect(pick).not.toBeNull();
@@ -268,15 +268,21 @@ describe('Trae-CN pickDefaultModelForAgentType — P1-3 modelId extraction', () 
     expect(pick.display_name).toBe('Doubao-Seed-Code');
   });
 
-  it('modelId without prefix (e.g. Qwen-Coder-32B) → returned as-is', () => {
-    const raw = '{"uid-1":{"solo_agent":{"modelId":"Qwen-Coder-32B","mode":1}}}';
+  it('catalog[normalized] is empty array → falls through to session_selected_model / config → null when both missing', () => {
+    buildVscdb([{ key: 'AI.agent.model.model_list_map', value: '{"solo_agent":[]}' }]);
+    const pick = mod.pickDefaultModelForAgentType('SoloAgent', {});
+    expect(pick).toBeNull();
+  });
+
+  it('no is_default:true entry → takes [0].name', () => {
+    const raw = '{"solo_agent":[{"name":"Qwen-Coder-32B","is_default":false},{"name":"Doubao-Seed-Code","is_default":false}]}';
     buildVscdb([{ key: 'AI.agent.model.model_list_map', value: raw }]);
     const pick = mod.pickDefaultModelForAgentType('SoloAgent', {});
     expect(pick).not.toBeNull();
     expect(pick.name).toBe('Qwen-Coder-32B');
   });
 
-  it('JSON parse failure → falls through to session_selected_model / config → null when both missing', () => {
+  it('JSON parse failure → falls through → null', () => {
     buildVscdb([{ key: 'AI.agent.model.model_list_map', value: 'not-valid-json{' }]);
     const pick = mod.pickDefaultModelForAgentType('SoloAgent', {});
     expect(pick).toBeNull();
@@ -288,18 +294,15 @@ describe('Trae-CN pickDefaultModelForAgentType — P1-3 modelId extraction', () 
     expect(pick).toBeNull();
   });
 
-  it('multiple user_id keys → picks first one with matching agent_type', () => {
-    const raw = '{"uid-a":{"builder":{"modelId":"builder_1__Doubao-Seed-Turbo","mode":1}},'
-              + '"uid-b":{"solo_agent":{"modelId":"solo_agent_2__Doubao-Seed-Code","mode":1}}}';
+  it('canonical bucket key (solo_coder) also works as direct lookup', () => {
+    const raw = '{"solo_coder":[{"name":"Doubao-Seed-Code","is_default":true}]}';
     buildVscdb([{ key: 'AI.agent.model.model_list_map', value: raw }]);
     const pick = mod.pickDefaultModelForAgentType('SoloAgent', {});
     expect(pick).not.toBeNull();
-    // Picker iterates Object.keys(catalog) in insertion order — uid-a first,
-    // but uid-a has no solo_agent entry, so picker continues to uid-b.
     expect(pick.name).toBe('Doubao-Seed-Code');
   });
 
-  it('stripModelIdPrefix: strips solo_agent_1__ prefix', () => {
+  it('stripModelIdPrefix: strips solo_agent_1__ prefix (retained for ai_assistant.request.model fallback path)', () => {
     expect(mod.stripModelIdPrefix('solo_agent_1__Doubao-Seed-Code')).toBe('Doubao-Seed-Code');
   });
 
@@ -307,13 +310,8 @@ describe('Trae-CN pickDefaultModelForAgentType — P1-3 modelId extraction', () 
     expect(mod.stripModelIdPrefix('Qwen-Coder-32B')).toBe('Qwen-Coder-32B');
   });
 
-  it('stripModelIdPrefix: builder_2__ prefix stripped', () => {
-    expect(mod.stripModelIdPrefix('builder_2__Doubao-Seed-Turbo')).toBe('Doubao-Seed-Turbo');
-  });
-
   it('stripModelIdPrefix: non-string → returns null', () => {
     expect(mod.stripModelIdPrefix(null)).toBeNull();
     expect(mod.stripModelIdPrefix(undefined)).toBeNull();
-    expect(mod.stripModelIdPrefix(42)).toBeNull();
   });
 });

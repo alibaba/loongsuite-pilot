@@ -324,22 +324,26 @@ function pickDefaultModelForAgentType(agentType, event) {
   const catalog = readTraeVscdbModelCatalogSync(event);
   const normalized = normalizeAgentType(agentType);
   if (catalog && typeof catalog === 'object' && normalized) {
-    // vscdb schema (deployer-confirmed):
-    //   { "<user_id>": { "<agent_type>": { modelId, mode, ... } } }
-    // The hook subprocess doesn't know the current user_id, so take the
-    // first user_id key (vscdb is single-user in practice). Inside, find
-    // the agent_type entry whose normalized bucket matches the requested
-    // agent_type, then read+clean its modelId.
-    for (const userId of Object.keys(catalog)) {
-      const userEntry = catalog[userId];
-      if (!userEntry || typeof userEntry !== 'object') continue;
-      for (const [vscdbKey, entry] of Object.entries(userEntry)) {
-        if (normalizeAgentType(vscdbKey) !== normalized) continue;
-        if (!entry || typeof entry !== 'object') continue;
-        const cleaned = stripModelIdPrefix(entry.modelId);
-        if (cleaned) {
-          return { name: cleaned, provider: null, display_name: cleaned };
+    // vscdb schema for AI.agent.model.model_list_map (deployer-confirmed,
+    // matches researcher round 2's original description):
+    //   { "<agent_type>": [ { name, is_default, multimodal, ... }, ... ] }
+    // agent_type is a top-level key whose value is the model array. The key
+    // may be either the canonical bucket name (`solo_coder`) or a snake_case
+    // variant (`solo_agent`); try direct lookup first, then fall back to
+    // scanning keys by normalizeAgentType match.
+    let list = catalog[normalized];
+    if (!Array.isArray(list)) {
+      for (const k of Object.keys(catalog)) {
+        if (normalizeAgentType(k) === normalized && Array.isArray(catalog[k]) && catalog[k].length > 0) {
+          list = catalog[k];
+          break;
         }
+      }
+    }
+    if (Array.isArray(list) && list.length > 0) {
+      const def = list.find((m) => m && m.is_default === true) || list[0];
+      if (def && typeof def === 'object' && def.name) {
+        return { name: def.name, provider: def.provider || null, display_name: def.display_name || def.name };
       }
     }
   }
