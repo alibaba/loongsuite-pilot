@@ -7,6 +7,8 @@ description: 查询 AgentLoop 行为、Token、风险、意图、拦截和实体
 
 默认回答查询结果；用户要 SQL 时给完整可执行查询，要接入包时给模板、参数/结果契约与调用示例。
 
+查询执行依赖 [Setup](../agentloop-collector-setup/SKILL.md) 的共享 CLI、认证与目标绑定。用户仅要登录、切账户或切换查询目标时，先按 Setup 的[账户与查询目标切换](../agentloop-collector-setup/references/auth.md)处理，不要求日志时间或执行查询；目标就绪后再继续查询任务。
+
 ## 工作流程
 
 1. 确认时间与目标。缺少已确认时间时先询问，不先查数；追问沿用原范围，空结果不自动扩大时间。
@@ -21,7 +23,7 @@ description: 查询 AgentLoop 行为、Token、风险、意图、拦截和实体
 | [查询目录](references/catalog.md) | 八类核心面板与参考 SQL 索引 |
 | [schema](references/schema.md) | 数据模型、统计口径、公共构件与组织、账单外表关联 |
 | [SQL 写作技巧](references/sql-writing.md) | JSON、关联、时间窗口、分页与汇总的 SLS 注意事项 |
-| [执行说明](references/execution.md) | 插件命令、环境绑定与错误处理 |
+| [执行说明](references/execution.md) | Skill 脚本、环境绑定与错误处理 |
 | [接入交付](references/delivery.md) | SQL / CLI / SDK 参数与结果契约 |
 
 需要仪表盘或 HTML 预览时使用 [agentloop-audit-dashboard](../agentloop-audit-dashboard/SKILL.md)；控件与点击跳转见 Builder 的 [筛选器](../sls-dashboard-builder/references/filters-and-variables.md) 和 [交互事件](../sls-dashboard-builder/references/drill-down-events.md)。

@@ -11,10 +11,12 @@ description: |
 
 查询数据模型、枚举与 SQL 参考见 [agentloop-audit-query](../agentloop-audit-query/SKILL.md)。按本次需求组织指标、图表与交互，使用 [sls-dashboard-builder](../sls-dashboard-builder/SKILL.md) 生成 SLS 配置。事件与团队示例见 [examples/](examples/)。
 
+认证、账户与查询目标切换由 [Setup](../agentloop-collector-setup/SKILL.md) 处理，具体流程见[账户与查询目标切换](../agentloop-collector-setup/references/auth.md)。
+
 - 沿用 Query Skill 已确认的时间、范围、筛选与查询；用户没有确认时间时先询问。超过一天的新查询先窄窗验证，再按目标范围取数。
-- Project、Region 与登录使用插件本地环境绑定；组织、账单等外表的字段与关联键按用户目标确认。
-- 默认将 spec、dashboard JSON 和 HTML 写入当前项目的 `output/audit/reports/`；用户指定目录时使用指定目录。调用脚本时保留项目工作目录，使用插件脚本的绝对路径。
-- 执行 `python3 <插件目录>/scripts/run.py report --dashboard <json>` 生成预览，Windows 使用 `<插件目录>/scripts/run.ps1 report`。发布先运行 `python3 <插件目录>/scripts/run.py publish --dashboard <json> --remark "<修改原因>"` 查看将创建还是覆盖；用户确认预览后加 `--confirm`。
+- Project、Region 与登录使用 Setup 的共享环境绑定；组织、账单等外表的字段与关联键按用户目标确认。
+- 默认将 spec、dashboard JSON 和 HTML 写入当前项目的 `output/audit/reports/`；用户指定目录时使用指定目录。调用脚本时保留项目工作目录，使用 Setup 共享入口的绝对路径。
+- 执行 `python3 <agentloop-collector-setup目录>/scripts/run.py report --dashboard <json>` 生成预览，Windows 使用 `<agentloop-collector-setup目录>/scripts/run.ps1 report`。发布先运行 `python3 <agentloop-collector-setup目录>/scripts/run.py publish --dashboard <json> --remark "<修改原因>"` 查看将创建还是覆盖；用户确认预览后加 `--confirm`。
 - 临时查询、验证 SQL 或 SDK 接入材料走 Query Skill，不为这些任务生成 dashboard JSON。内置面板参考中的调用口径不能默默覆盖原报表模型响应口径。
 
 ## References
@@ -41,7 +43,7 @@ description: |
 3. 解析 spec，将自然语言需求转成视图清单：指标、SQL、图表类型、布局、筛选器和说明块。
 4. 使用 `sls-dashboard-builder` 生成或更新 dashboard JSON。
 5. 生成本地 HTML 预览，调用方式见 Preview。
-6. 用户确认预览没问题后，再按「在本插件里」的发布命令 create 或 update 线上 SLS 报表；不要跳过预览直接发布。
+6. 用户确认预览没问题后，再使用 Setup 共享入口的 `publish` create 或 update 线上 SLS 报表；不要跳过预览直接发布。
 
 ## Dashboard Spec
 
@@ -89,13 +91,13 @@ size: <w>x<h>
 
 ## Preview
 
-在当前项目目录调用插件脚本，路径含空格时加引号：
+在当前项目目录调用 Setup 的共享入口，`<agentloop-collector-setup目录>` 为 Setup Skill 的安装路径，路径含空格时加引号：
 
 ```bash
-python3 "<插件目录>/scripts/run.py" report --dashboard output/audit/reports/<scenario>-dashboard.json
+python3 "<agentloop-collector-setup目录>/scripts/run.py" report --dashboard output/audit/reports/<scenario>-dashboard.json
 ```
 
-Windows 用 `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<插件目录>/scripts/run.ps1" report`，参数相同。修改已有 dashboard 时带 `--with-diff` 生成 HTML SQL / 结果 diff；如报表 SQL 使用 token 参数，通过 `--var key=value` 传入本地预览值。`--var` 只替换精确的 `${{key}}`。图表 `project`、`logstore` 留空时用当前查询目标；要查别的表就写进该图的 `chartQueries[].logstore`。若查询失败，应修复查询、凭据或网络问题后重新生成预览。stdout 最后一行是 `report_html=<绝对路径>`。用浏览器打开。
+Windows 用 `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<agentloop-collector-setup目录>/scripts/run.ps1" report`，参数相同。修改已有 dashboard 时带 `--with-diff` 生成 HTML SQL / 结果 diff；如报表 SQL 使用 token 参数，通过 `--var key=value` 传入本地预览值。`--var` 只替换精确的 `${{key}}`。图表 `project`、`logstore` 留空时用当前查询目标；要查别的表就写进该图的 `chartQueries[].logstore`。若查询失败，应修复查询、凭据或网络问题后重新生成预览。stdout 最后一行是 `report_html=<绝对路径>`。用浏览器打开。
 
 ## Guardrails
 
