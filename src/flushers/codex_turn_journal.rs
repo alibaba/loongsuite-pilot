@@ -1172,17 +1172,24 @@ mod tests {
                 }
             })
             .await;
-            assert!(state.waiting_for_output());
+            assert!(!state.is_persisted(&key, None));
             state.set_offset("unrelated-input", 9.0);
+            within("unrelated checkpoint save", state.save())
+                .await
+                .unwrap();
+            let original: serde_json::Value = serde_json::from_slice(&before).unwrap();
+            let pending: serde_json::Value =
+                serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
+            assert_eq!(pending[key.as_str()], original[key.as_str()]);
+            assert_eq!(pending["unrelated-input"]["lastOffset"], 9.0);
             let saving = Arc::clone(&state);
-            let mut save = tokio::spawn(async move { saving.save().await });
+            let mut save = tokio::spawn(async move { saving.save_for("codex-transcript").await });
             assert!(
                 tokio::time::timeout(Duration::from_millis(25), &mut save)
                     .await
                     .is_err(),
-                "shared checkpoint saved before journal acceptance"
+                "Codex checkpoint saved before journal acceptance"
             );
-            assert_eq!(tokio::fs::read(&state_path).await.unwrap(), before);
             assert!(!cycle.is_finished());
             assert_eq!(exports.load(Ordering::SeqCst), 0);
             if delegated {
