@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
+DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-}"
+if [ -z "$DATA_DIR" ] && [ -f "$HOME/.loongsuite-pilot/data-dir" ]; then
+    DATA_DIR=$(cat "$HOME/.loongsuite-pilot/data-dir")
+fi
+DATA_DIR="${DATA_DIR:-$HOME/.loongsuite-pilot}"
 CACHE_DIR="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSIONS_DIR="$CACHE_DIR/versions"
@@ -2110,6 +2114,14 @@ PLISTEOF
 
 SYSTEMD_USER_UNIT_DIR="$HOME/.config/systemd/user"
 
+_systemd_escape_value() {
+    local value="$1"
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//%/%%}
+    printf '%s' "$value"
+}
+
 _write_systemd_user_unit() {
     mkdir -p "$SYSTEMD_USER_UNIT_DIR"
     cat > "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot.service" << UNITEOF
@@ -2120,8 +2132,9 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/loongsuite-pilot run
-WorkingDirectory=%h/.loongsuite-pilot
-Environment=AGENT_DATA_COLLECTION_CONFIG=%h/.loongsuite-pilot/config.json
+WorkingDirectory=${DATA_DIR//%/%%}
+Environment="LOONGSUITE_PILOT_DATA_DIR=$(_systemd_escape_value "$DATA_DIR")"
+Environment="AGENT_DATA_COLLECTION_CONFIG=$(_systemd_escape_value "$CONFIG_FILE")"
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=65536
@@ -2141,8 +2154,9 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/loongsuite-pilot run-updater
-WorkingDirectory=%h/.loongsuite-pilot
-Environment=AGENT_DATA_COLLECTION_CONFIG=%h/.loongsuite-pilot/config.json
+WorkingDirectory=${DATA_DIR//%/%%}
+Environment="LOONGSUITE_PILOT_DATA_DIR=$(_systemd_escape_value "$DATA_DIR")"
+Environment="AGENT_DATA_COLLECTION_CONFIG=$(_systemd_escape_value "$CONFIG_FILE")"
 KillMode=process
 Restart=on-failure
 RestartSec=60
@@ -2158,8 +2172,8 @@ _write_systemd_system_unit() {
     local target_home
     target_home=$(resolve_user_home "$target_user")
     local target_bin="$target_home/.local/bin/loongsuite-pilot"
-    local target_config="$target_home/.loongsuite-pilot/config.json"
-    local target_workdir="$target_home/.loongsuite-pilot"
+    local target_config="$CONFIG_FILE"
+    local target_workdir="$DATA_DIR"
     local unit_name="loongsuite-pilot-${target_user}.service"
     local unit_path="$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name"
 
@@ -2175,9 +2189,10 @@ Type=simple
 User=${target_user}
 Group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
 ExecStart=${target_bin} run
-WorkingDirectory=${target_workdir}
+WorkingDirectory=${target_workdir//%/%%}
 Environment=HOME=${target_home}
-Environment=AGENT_DATA_COLLECTION_CONFIG=${target_config}
+Environment="LOONGSUITE_PILOT_DATA_DIR=$(_systemd_escape_value "$target_workdir")"
+Environment="AGENT_DATA_COLLECTION_CONFIG=$(_systemd_escape_value "$target_config")"
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=65536
@@ -2232,8 +2247,8 @@ _write_systemd_system_updater_unit() {
     local target_home
     target_home=$(resolve_user_home "$target_user")
     local target_bin="$target_home/.local/bin/loongsuite-pilot"
-    local target_config="$target_home/.loongsuite-pilot/config.json"
-    local target_workdir="$target_home/.loongsuite-pilot"
+    local target_config="$CONFIG_FILE"
+    local target_workdir="$DATA_DIR"
     local unit_name="loongsuite-pilot-updater-${target_user}.service"
     local unit_path="$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name"
 
@@ -2249,9 +2264,10 @@ Type=simple
 User=${target_user}
 Group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
 ExecStart=${target_bin} run-updater
-WorkingDirectory=${target_workdir}
+WorkingDirectory=${target_workdir//%/%%}
 Environment=HOME=${target_home}
-Environment=AGENT_DATA_COLLECTION_CONFIG=${target_config}
+Environment="LOONGSUITE_PILOT_DATA_DIR=$(_systemd_escape_value "$target_workdir")"
+Environment="AGENT_DATA_COLLECTION_CONFIG=$(_systemd_escape_value "$target_config")"
 KillMode=process
 Restart=on-failure
 RestartSec=60
