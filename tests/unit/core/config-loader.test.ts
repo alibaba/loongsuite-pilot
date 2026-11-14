@@ -1477,7 +1477,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'none',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1490,7 +1490,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'none',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1506,7 +1506,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'all',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1531,7 +1531,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
         types: [
           'apiKey',
           'cloudAccessKey',
@@ -1557,7 +1557,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'none',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1570,7 +1570,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'custom',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1587,7 +1587,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'all',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1606,7 +1606,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
         types: [
           'cloudAccessKey',
           'databaseUrl',
@@ -1635,6 +1635,39 @@ describe('ConfigLoader', () => {
       });
     });
 
+    it('uses placeholder only when explicitly configured', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'all', replacementMode: 'placeholder' },
+      });
+
+      expect((await loadConfig()).mask.replacementMode).toBe('placeholder');
+    });
+
+    it('uses preview for an empty replacement mode in the config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'all', replacementMode: '' },
+      });
+
+      expect((await loadConfig()).mask.replacementMode).toBe('preview');
+    });
+
+    it.each([
+      false,
+      42,
+      {},
+      [],
+      null,
+    ])('uses preview for non-string replacement mode %j even when masking is off', async raw => {
+      for (const mode of ['all', 'none']) {
+        mockReadJsonFile.mockResolvedValueOnce({
+          mask: { mode, replacementMode: raw },
+        });
+        const config = await loadConfig();
+        expect(config.mask.mode).toBe(mode);
+        expect(config.mask.replacementMode).toBe('preview');
+      }
+    });
+
     it('uses replacement mode env over config file', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
@@ -1646,6 +1679,13 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.mask.replacementMode).toBe('preview');
+    });
+
+    it('accepts an explicit placeholder environment override', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ mask: { mode: 'all' } });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE', 'placeholder');
+
+      expect((await loadConfig()).mask.replacementMode).toBe('placeholder');
     });
 
     it('treats an empty replacement mode env as unset', async () => {
@@ -1661,7 +1701,7 @@ describe('ConfigLoader', () => {
       expect(config.mask.replacementMode).toBe('preview');
     });
 
-    it('falls back to placeholder for an invalid replacement mode', async () => {
+    it('falls back to preview for an invalid replacement mode', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
           mode: 'all',
@@ -1670,7 +1710,7 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask.replacementMode).toBe('placeholder');
+      expect(config.mask.replacementMode).toBe('preview');
     });
   });
 
