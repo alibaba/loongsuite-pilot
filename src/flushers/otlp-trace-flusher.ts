@@ -2341,46 +2341,49 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   /**
-   * Issue #578: surface DSH observed-boundary settlements on exported TOOL
-   * spans. A settled `tool.result` entry states the outcome of a tool call
-   * whose native result never arrived: `cancelled` from a native cancelled
-   * turn/end reason, or `unknown` when the turn provably ended without native
-   * terminal evidence (successor turn/start after a killed process tree).
-   * The converter pairs the settlement with its original `tool.call`, so the
-   * TOOL span exists and its end time is the observed boundary; these
-   * attributes make that uncertainty explicit instead of implying a native
-   * tool completion. Cancellation is not asserted as an error — the span
-   * status stays exactly as the converter built it, and the outcome is
-   * exposed as data. Records without the settlement marker (native results)
-   * and all other agents are untouched, so the orphan-pair drop protection
-   * keeps its existing behavior everywhere else.
+   * Keep observed closure intervals distinct from native tool timings. Only
+   * DSH's marked cancellation/recovery records participate; the common orphan
+   * guard and completed LLM/tool semantics remain unchanged.
    */
   private enrichDshSettledToolSpans(
     records: AgentActivityEntry[],
     spans: ReadableSpan[],
   ): void {
-    const settlementByCallId = new Map<string, { status?: string; settledBy: string }>();
+    const settlementByCallId = new Map<string, AgentActivityEntry>();
+    const terminal = records.find(record => record['agent.dsh.turn_status'] === 'cancelled');
     for (const record of records) {
       if (record['event.name'] !== 'tool.result') continue;
       const settledBy = record['agent.dsh.tool.settled_by'];
       if (typeof settledBy !== 'string' || settledBy.length === 0) continue;
       const callId = record['gen_ai.tool.call.id'];
       if (typeof callId !== 'string' || callId.length === 0) continue;
-      const status = record['tool.result.status'];
-      settlementByCallId.set(callId, {
-        status: typeof status === 'string' && status.length > 0 ? status : undefined,
-        settledBy,
-      });
+      settlementByCallId.set(callId, record);
     }
-    if (settlementByCallId.size === 0) return;
+    const turnStatus = terminal ? 'cancelled'
+      : [...settlementByCallId.values()].some(record => record['tool.result.status'] === 'unknown')
+        ? 'incomplete' : undefined;
     for (const span of spans) {
+      if (turnStatus && ['AGENT', 'ENTRY'].includes(String(span.attributes['gen_ai.span.kind']))) {
+        span.attributes['agent.dsh.turn_status'] = turnStatus;
+        if (turnStatus === 'cancelled') Object.assign(span.status, { code: SpanStatusCode.ERROR, message: 'DSH turn cancelled' });
+      }
       if (span.attributes['gen_ai.span.kind'] !== 'TOOL') continue;
       const callId = span.attributes['gen_ai.tool.call.id'];
       if (typeof callId !== 'string') continue;
       const settlement = settlementByCallId.get(callId);
       if (!settlement) continue;
-      if (settlement.status) span.attributes['tool.result.status'] = settlement.status;
-      span.attributes['agent.dsh.tool.settled_by'] = settlement.settledBy;
+      for (const key of ['tool.result.status', 'agent.dsh.tool.settled_by',
+        'agent.dsh.tool.end_time_known', 'agent.dsh.tool.timing', 'agent.dsh.tool.result_missing']) {
+        const value = settlement[key];
+        if (typeof value === 'string' || typeof value === 'boolean') span.attributes[key] = value;
+      }
+      if (settlement['agent.dsh.tool.end_time_known'] === false) {
+        delete span.attributes['gen_ai.tool.call.duration'];
+      }
+      if (settlement['tool.result.status'] === 'cancelled') {
+        Object.assign(span.status, { code: SpanStatusCode.ERROR, message: 'DSH tool call cancelled' });
+        if (settlement['agent.dsh.tool.settled_by'] === 'native-tool-result') span.attributes['error.type'] = 'AbortError';
+      }
     }
   }
 

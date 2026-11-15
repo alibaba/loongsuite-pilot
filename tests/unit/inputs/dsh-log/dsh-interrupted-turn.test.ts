@@ -33,7 +33,7 @@ import type { AgentActivityEntry } from '../../../../src/types/index.js';
 // entry time is the observed boundary and agent.dsh.tool.settled_by names it.
 
 const SID = 'session-interrupted-578';
-const BASE = 1_800_000_000_000; // ~2027-01-15, realistic epoch ms
+const BASE = Date.now() - 600_000;
 const TOOL_CALL_TIME = BASE + 8_000;
 const RESUME_TIME = BASE + 500_000;
 const CANCEL_TIME = BASE + 60_000;
@@ -171,7 +171,7 @@ describe('dsh-event-transform interrupted-turn settlement (issue #578)', () => {
     expect(entry['gen_ai.tool.call.arguments']).toBeUndefined();
   });
 
-  it.each(['cancelled', 'aborted', 'interrupted'])(
+  it.each(['cancelled', 'aborted'])(
     'settles in-flight tool calls as cancelled on a native turn/end reason %s',
     (kind) => {
       const state = newState();
@@ -202,6 +202,61 @@ describe('dsh-event-transform interrupted-turn settlement (issue #578)', () => {
       expect(marker[0]['gen_ai.input.messages_delta']).toBeUndefined();
     },
   );
+
+  it('keeps resume repair interrupted unknown and ignores its reused time', () => {
+    const state = newState();
+    for (const record of interruptedTurnRecords(SID, BASE)) transformDshRecordEntries(record, ClientType.Dsh, state);
+    const before = Date.now();
+    const entries = transformDshRecordEntries({ type: 'turn/end', sid: SID, time: TOOL_CALL_TIME,
+      data: { turn: 1, reason: { kind: 'interrupted' } } }, ClientType.Dsh, state);
+    const result = settlements(entries)[0];
+    expect(result['tool.result.status']).toBe('unknown');
+    expect(result['agent.dsh.tool.end_time_known']).toBe(false);
+    expect(Number(BigInt(result.time_unix_nano) / 1_000_000n)).toBeGreaterThanOrEqual(before);
+    expect(entries.some(entry => entry['gen_ai.response.finish_reasons']?.includes('cancelled'))).toBe(false);
+  });
+
+  it('does not settle or reset an active call for a duplicate start or stale end', () => {
+    const state = newState();
+    for (const record of interruptedTurnRecords(SID, BASE)) transformDshRecordEntries(record, ClientType.Dsh, state);
+    expect(transformDshRecordEntries({ type: 'turn/start', sid: SID, time: CANCEL_TIME,
+      data: { turn: 1 } }, ClientType.Dsh, state)).toEqual([]);
+    expect(transformDshRecordEntries({ type: 'turn/end', sid: SID, time: CANCEL_TIME,
+      data: { turn: 0, reason: { kind: 'aborted' } } }, ClientType.Dsh, state)).toEqual([]);
+    const result = transformDshRecordEntries({ type: 'turn/start', sid: SID, time: RESUME_TIME,
+      data: { turn: 2 } }, ClientType.Dsh, state);
+    expect(settlements(result)).toHaveLength(1);
+  });
+
+  it('does not fabricate a positive duration when the boundary is at the call', () => {
+    const entries = transformAll([...interruptedTurnRecords(SID, BASE),
+      { type: 'turn/end', sid: SID, time: TOOL_CALL_TIME,
+        data: { turn: 1, reason: { kind: 'aborted' } } }]);
+    expect(settlements(entries)).toEqual([]);
+  });
+
+  it('preserves native unknown recovery without treating its diagnostic as tool output', () => {
+    const records = [...interruptedTurnRecords(SID, BASE), {
+      type: 'tool/result', sid: SID, seq: 17, time: TOOL_CALL_TIME,
+      data: { turn: 1, step: 1, error: { name: 'ToolOutcomeUnknownError', code: 'TOOL_OUTCOME_UNKNOWN' },
+        message: { id: 'native-repair-id', isError: true, source: { callId: CALL_ID },
+          content: [{ type: 'text', text: 'The outcome is unknown.' }] } },
+    }];
+    const result = settlements(transformAll(records))[0];
+    expect(result['tool.result.status']).toBe('unknown');
+    expect(result['agent.dsh.tool.end_time_known']).toBe(false);
+    expect(result['gen_ai.tool.call.result']).toBeUndefined();
+    expect(result['event.id']).toBe('native-repair-id');
+    expect(BigInt(result.time_unix_nano)).toBeGreaterThan(BigInt(TOOL_CALL_TIME) * 1_000_000n);
+  });
+
+  it('keeps derived settlement IDs stable when replayed', () => {
+    const records = [...interruptedTurnRecords(SID, BASE), {
+      type: 'turn/start', sid: SID, time: RESUME_TIME, data: { turn: 2 },
+    }];
+    expect(settlements(transformAll(records))[0]['event.id'])
+      .toBe(settlements(transformAll(records))[0]['event.id']);
+  });
 
   it('settles as unknown when turn/end reports completed but a result never arrived', () => {
     const state = newState();
@@ -385,6 +440,8 @@ describe('DSH interrupted-turn OTLP export (issue #578)', () => {
     expect(tool.attributes['gen_ai.tool.name']).toBe('Shell');
     expect(tool.attributes['tool.result.status']).toBe('unknown');
     expect(tool.attributes['agent.dsh.tool.settled_by']).toBe('successor-turn-start');
+    expect(tool.attributes['agent.dsh.tool.end_time_known']).toBe(false);
+    expect(tool.attributes['agent.dsh.tool.timing']).toBe('observed_upper_bound');
     // Start is the native tool/call boundary; end is the observed resume
     // boundary — not a fabricated native completion time.
     expect(spanTimeMs(tool.startTime)).toBe(TOOL_CALL_TIME);
@@ -421,9 +478,30 @@ describe('DSH interrupted-turn OTLP export (issue #578)', () => {
     expect(captured.filter(span => span.attributes['gen_ai.span.kind'] === 'ENTRY').length).toBe(1);
     expect(captured.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT').length).toBe(1);
     // The marker itself is not smeared onto unrelated spans.
-    expect(captured.filter(span => span.attributes['agent.dsh.turn_status'] !== undefined).length).toBe(0);
+    expect(captured.filter(span => span.attributes['agent.dsh.turn_status'] === 'cancelled').length).toBe(2);
     // Settlement attributes stay on the TOOL span only.
     expect(captured.filter(span => span.attributes['tool.result.status'] !== undefined).length).toBe(1);
+  });
+
+  it('exports the real SDK ABORTED result as cancelled with native timing', async () => {
+    const entries = transformAll([...interruptedTurnRecords(SID, BASE), {
+      type: 'tool/result', sid: SID, time: CANCEL_TIME,
+      data: { turn: 1, step: 1, error: { name: 'AbortError', code: 'ABORTED' },
+        message: { role: 'tool', isError: true, source: { kind: 'tool', callId: CALL_ID },
+          content: [{ type: 'text', text: 'Tool execution aborted' }] } },
+    }, { type: 'turn/end', sid: SID, time: CANCEL_TIME + 1,
+      data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'disposed' } } } }]);
+    await flusher.sendBatch(entries);
+    await flusher.flush();
+    const tool = toolSpans(captured)[0];
+    expect(tool.attributes['tool.result.status']).toBe('cancelled');
+    expect(tool.attributes['agent.dsh.tool.end_time_known']).toBe(true);
+    expect(tool.attributes['agent.dsh.tool.timing']).toBe('native');
+    expect(tool.status.code).toBe(2);
+    expect(tool.attributes['error.type']).toBe('AbortError');
+    expect(spanTimeMs(tool.endTime)).toBe(CANCEL_TIME);
+    expect(captured.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT')[0].attributes['agent.dsh.turn_status']).toBe('cancelled');
+    expect(captured.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')[0].attributes['gen_ai.response.finish_reasons']).toEqual(['tool_calls']);
   });
 
   it('still drops an unmatched tool.call when no turn boundary was ever observed', async () => {

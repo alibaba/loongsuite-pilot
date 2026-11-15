@@ -121,7 +121,9 @@ function resetTurnState(state: DshEventAggregatorState): void {
 /** Turn-end reason kinds that natively prove the turn was cancelled. Any
  * other reason (including `completed` or a missing reason) leaves the outcome
  * of still-running tool calls unobserved, so it must not claim cancellation. */
-const CANCELLED_TURN_END_REASONS = new Set(['cancelled', 'aborted', 'interrupted']);
+// DSH resume repair uses `interrupted` for an unknown outcome and reuses the
+// last persisted timestamp. It proves neither cancellation nor an end time.
+const CANCELLED_TURN_END_REASONS = new Set(['cancelled', 'aborted']);
 
 /** Outcome vocabulary for a tool call whose native result never arrived:
  * - `cancelled`: a native turn/end reason in the cancelled family was seen.
@@ -154,14 +156,24 @@ function settlePendingToolCalls(
   if (state.pendingToolCalls.size === 0) return [];
   const entries: AgentActivityEntry[] = [];
   for (const [callId, pending] of state.pendingToolCalls) {
+    const boundaryNano = msToNano(boundaryTimeMs);
+    if (BigInt(boundaryNano) <= BigInt(pending.identity.time_unix_nano)) continue;
     entries.push(buildAgentActivityEntry({
       ...pending.identity,
-      'time_unix_nano': msToNano(boundaryTimeMs),
+      'time_unix_nano': boundaryNano,
+      'event.id': crypto.createHash('sha256').update(JSON.stringify([
+        pending.identity['gen_ai.session.id'], pending.identity['gen_ai.turn.id'],
+        pending.identity['gen_ai.step.id'], pending.identity.time_unix_nano,
+        callId, settledBy, outcome,
+      ])).digest('hex'),
       'event.name': 'tool.result',
       'gen_ai.tool.name': pending.name,
       'gen_ai.tool.call.id': callId,
       'tool.result.status': outcome,
       'agent.dsh.tool.settled_by': settledBy,
+      'agent.dsh.tool.end_time_known': false,
+      'agent.dsh.tool.timing': 'observed_upper_bound',
+      'agent.dsh.tool.result_missing': true,
     }));
   }
   state.pendingToolCalls.clear();
@@ -494,6 +506,7 @@ function transformDshRecordMulti(
       return [];
 
     case 'turn/start': {
+      if (state.currentTurn !== undefined && (turn === undefined || turn <= state.currentTurn)) return [];
       // A successor turn/start in the same session is the first reliable
       // evidence that the previous turn ended without native terminal
       // records (killed process tree, crash, lost producer). Settle its
@@ -507,6 +520,7 @@ function transformDshRecordMulti(
     }
 
     case 'turn/end': {
+      if (state.currentTurn === undefined || turn !== state.currentTurn) return [];
       // Preserve the native terminal reason instead of dropping it. A
       // cancelled-family reason is explicit cancellation evidence for calls
       // still in flight; any other reason (including `completed` with
@@ -517,7 +531,7 @@ function transformDshRecordMulti(
       const settled = settlePendingToolCalls(
         state,
         cancelled ? 'cancelled' : 'unknown',
-        time,
+        reasonKind === 'interrupted' ? Date.now() : time,
         'turn-end',
       );
       resetTurnState(state);
@@ -715,6 +729,10 @@ function transformDshRecordMulti(
       const source = asObject(message.source) ?? {};
       const callId = asString(source.callId);
       if (!callId) return [];
+      const pending = state.pendingToolCalls.get(callId);
+      const errorCode = asString(asObject(data.error)?.code);
+      const aborted = errorCode === 'ABORTED';
+      const recovery = errorCode === 'TOOL_OUTCOME_UNKNOWN' || errorCode === 'TOOL_NOT_STARTED';
       // A native result settles the call even when the entry itself cannot be
       // projected below (missing name), so it is never re-settled as unknown.
       state.pendingToolCalls.delete(callId);
@@ -728,15 +746,33 @@ function transformDshRecordMulti(
       // A nameless tool.result violates the public schema. Preserve the real
       // result in the next LLM input context, but do not emit a false name.
       if (!name) return [];
+      // Recovery messages describe an unobserved outcome, not tool output.
+      // Their stored time is a repair placeholder; use the observation upper
+      // bound, and never create a zero/negative or unstarted execution span.
+      const recoveryTime = recovery ? msToNano(Date.now()) : undefined;
+      if (recovery && (!pending || errorCode === 'TOOL_NOT_STARTED'
+        || BigInt(recoveryTime!) <= BigInt(pending.identity.time_unix_nano))) return [];
       return [buildAgentActivityEntry({
         ...common,
+        ...(recoveryTime ? { time_unix_nano: recoveryTime } : {}),
+        ...((aborted || recovery) ? { 'event.id': asString(message.id)
+          ?? crypto.createHash('sha256').update(JSON.stringify([
+            sid, common['gen_ai.turn.id'], common['gen_ai.step.id'], callId, errorCode, record.seq, time,
+          ])).digest('hex') } : {}),
         'event.name': 'tool.result',
         'gen_ai.tool.name': name,
         'gen_ai.tool.call.id': callId,
-        'gen_ai.tool.call.result': toJsonValue([{
+        'gen_ai.tool.call.result': recovery ? undefined : toJsonValue([{
           role: 'tool',
           parts: toolParts,
         }]),
+        ...((aborted || recovery) ? {
+          'tool.result.status': aborted ? 'cancelled' : 'unknown',
+          'agent.dsh.tool.settled_by': aborted ? 'native-tool-result' : 'native-recovery',
+          'agent.dsh.tool.end_time_known': aborted,
+          'agent.dsh.tool.timing': aborted ? 'native' : 'observed_upper_bound',
+          'agent.dsh.tool.result_missing': recovery,
+        } : {}),
       })];
     }
 
