@@ -258,6 +258,22 @@ describe('dsh-event-transform interrupted-turn settlement (issue #578)', () => {
       .toBe(settlements(transformAll(records))[0]['event.id']);
   });
 
+  it('does not consume a new turn call when an old result reuses its ID', () => {
+    const state = newState();
+    for (const record of interruptedTurnRecords(SID, BASE)) transformDshRecordEntries(record, ClientType.Dsh, state);
+    transformDshRecordEntries({ type: 'turn/start', sid: SID, time: RESUME_TIME,
+      data: { turn: 2 } }, ClientType.Dsh, state);
+    transformDshRecordEntries({ type: 'tool/call', sid: SID, time: RESUME_TIME + 1,
+      data: { turn: 2, step: 1, callId: CALL_ID, name: 'Shell' } }, ClientType.Dsh, state);
+    expect(transformDshRecordEntries({ type: 'tool/result', sid: SID, time: RESUME_TIME + 2,
+      data: { turn: 1, message: { source: { callId: CALL_ID }, content: [{ type: 'text', text: 'late' }] } } },
+    ClientType.Dsh, state)).toEqual([]);
+    const terminal = transformDshRecordEntries({ type: 'turn/end', sid: SID, time: RESUME_TIME + 3,
+      data: { turn: 2, reason: { kind: 'aborted' } } }, ClientType.Dsh, state);
+    expect(settlements(terminal)).toHaveLength(1);
+    expect(settlements(terminal)[0]['gen_ai.turn.id']).toBe(`${SID}:2`);
+  });
+
   it('settles as unknown when turn/end reports completed but a result never arrived', () => {
     const state = newState();
     for (const record of interruptedTurnRecords(SID, BASE)) {

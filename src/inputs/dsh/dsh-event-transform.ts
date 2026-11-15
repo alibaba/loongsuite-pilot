@@ -702,6 +702,7 @@ function transformDshRecordMulti(
     }
 
     case 'tool/call': {
+      if (state.currentTurn !== undefined && turn !== state.currentTurn) return [];
       const callId = asString(data.callId);
       const name = asString(data.name);
       if (!callId || !name) return [];
@@ -725,6 +726,7 @@ function transformDshRecordMulti(
     }
 
     case 'tool/result': {
+      if (state.currentTurn !== undefined && turn !== state.currentTurn) return [];
       const message = asObject(data.message) ?? {};
       const source = asObject(message.source) ?? {};
       const callId = asString(source.callId);
