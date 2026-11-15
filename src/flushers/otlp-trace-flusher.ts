@@ -1600,6 +1600,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     if (agentType === 'claude-code') this.enrichClaudeCodeLlmAttributes(records, spans);
     if (agentType === 'grok-build') this.enrichGrokBuildSpans(records, spans, grokMetadata);
+    if (agentType === 'dsh') this.enrichDshSettledToolSpans(records, spans);
     if (agentType === 'doubao-work') {
       this.enrichDoubaoWorkSpans(records, spans);
       enrichDoubaoClientRequest(records, spans);
@@ -2336,6 +2337,50 @@ export class OtlpTraceFlusher extends BaseFlusher {
       llmSpans[0].attributes['gen_ai.system_instructions'] = JSON.stringify(
         metadata.systemInstructions,
       );
+    }
+  }
+
+  /**
+   * Issue #578: surface DSH observed-boundary settlements on exported TOOL
+   * spans. A settled `tool.result` entry states the outcome of a tool call
+   * whose native result never arrived: `cancelled` from a native cancelled
+   * turn/end reason, or `unknown` when the turn provably ended without native
+   * terminal evidence (successor turn/start after a killed process tree).
+   * The converter pairs the settlement with its original `tool.call`, so the
+   * TOOL span exists and its end time is the observed boundary; these
+   * attributes make that uncertainty explicit instead of implying a native
+   * tool completion. Cancellation is not asserted as an error — the span
+   * status stays exactly as the converter built it, and the outcome is
+   * exposed as data. Records without the settlement marker (native results)
+   * and all other agents are untouched, so the orphan-pair drop protection
+   * keeps its existing behavior everywhere else.
+   */
+  private enrichDshSettledToolSpans(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+  ): void {
+    const settlementByCallId = new Map<string, { status?: string; settledBy: string }>();
+    for (const record of records) {
+      if (record['event.name'] !== 'tool.result') continue;
+      const settledBy = record['agent.dsh.tool.settled_by'];
+      if (typeof settledBy !== 'string' || settledBy.length === 0) continue;
+      const callId = record['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string' || callId.length === 0) continue;
+      const status = record['tool.result.status'];
+      settlementByCallId.set(callId, {
+        status: typeof status === 'string' && status.length > 0 ? status : undefined,
+        settledBy,
+      });
+    }
+    if (settlementByCallId.size === 0) return;
+    for (const span of spans) {
+      if (span.attributes['gen_ai.span.kind'] !== 'TOOL') continue;
+      const callId = span.attributes['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string') continue;
+      const settlement = settlementByCallId.get(callId);
+      if (!settlement) continue;
+      if (settlement.status) span.attributes['tool.result.status'] = settlement.status;
+      span.attributes['agent.dsh.tool.settled_by'] = settlement.settledBy;
     }
   }
 

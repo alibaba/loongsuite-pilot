@@ -33,6 +33,13 @@ export interface DshRequestHeader {
   tools?: unknown[];
 }
 
+/** Identity snapshot of an emitted `tool.call` entry, kept so an interrupted
+ * turn can settle the call at the next observed boundary (issue #578). */
+interface PendingToolCall {
+  name: string;
+  identity: NonNullable<ReturnType<typeof recordContext>>['common'];
+}
+
 export interface DshEventAggregatorState {
   /** stepKey → finish reason.kind from `assistant/chunk type=finish`. */
   pendingFinish: Map<string, string>;
@@ -57,6 +64,12 @@ export interface DshEventAggregatorState {
   firstOutputTimes: Map<string, number>;
   /** Native tool call id → tool name, used to complete tool.result events. */
   toolNames: Map<string, string>;
+  /** Native tool call id → emitted tool.call identity for calls whose native
+   * result has not arrived. Settled at the first reliable turn boundary
+   * (native turn/end, or a successor turn/start proving the previous turn
+   * ended without terminal records) so an interrupted execution stays
+   * observable instead of being silently dropped (issue #578). */
+  pendingToolCalls: Map<string, PendingToolCall>;
   /** Accumulated conversation messages for the next llm.request's
    * `gen_ai.input.messages`. Reset on `turn/start`. Pushed by
    * `user/message`, `assistant/message` (post-emit), and `tool/result`
@@ -83,6 +96,7 @@ export function newState(): DshEventAggregatorState {
     requestStartTimes: new Map(),
     firstOutputTimes: new Map(),
     toolNames: new Map(),
+    pendingToolCalls: new Map(),
     inputMessages: [],
     lastRequestInputMessageCount: 0,
     inputMessagesOverflowed: false,
@@ -98,9 +112,60 @@ function resetTurnState(state: DshEventAggregatorState): void {
   state.requestStartTimes.clear();
   state.firstOutputTimes.clear();
   state.toolNames.clear();
+  state.pendingToolCalls.clear();
   state.inputMessages = [];
   state.lastRequestInputMessageCount = 0;
   state.inputMessagesOverflowed = false;
+}
+
+/** Turn-end reason kinds that natively prove the turn was cancelled. Any
+ * other reason (including `completed` or a missing reason) leaves the outcome
+ * of still-running tool calls unobserved, so it must not claim cancellation. */
+const CANCELLED_TURN_END_REASONS = new Set(['cancelled', 'aborted', 'interrupted']);
+
+/** Outcome vocabulary for a tool call whose native result never arrived:
+ * - `cancelled`: a native turn/end reason in the cancelled family was seen.
+ * - `unknown`: the turn provably ended (successor turn/start, or an
+ *   inconsistent/unrecognized turn/end) without native terminal evidence for
+ *   the call — killed process tree, crash, or lost producer. */
+type UnmatchedToolOutcome = 'cancelled' | 'unknown';
+
+/**
+ * Observed-boundary settlement for tool calls still in flight when a turn
+ * provably ended (issue #578).
+ *
+ * Contract:
+ * - A completed tool keeps its native `tool/result` projection (unchanged).
+ * - A settled call never fabricates `gen_ai.tool.call.result`, a duration, or
+ *   a native completion timestamp: the entry time is the OBSERVED boundary
+ *   (the turn/end or successor turn/start record time) and
+ *   `agent.dsh.tool.settled_by` names that boundary so consumers do not read
+ *   the exported TOOL span end as the tool's real finish time.
+ * - The settlement keeps the interrupted turn's identity (turn/step/trace),
+ *   so the common OTLP flusher pairs it with the original `tool.call` and
+ *   exports the span inside the interrupted turn's trace.
+ */
+function settlePendingToolCalls(
+  state: DshEventAggregatorState,
+  outcome: UnmatchedToolOutcome,
+  boundaryTimeMs: number,
+  settledBy: 'turn-end' | 'successor-turn-start',
+): AgentActivityEntry[] {
+  if (state.pendingToolCalls.size === 0) return [];
+  const entries: AgentActivityEntry[] = [];
+  for (const [callId, pending] of state.pendingToolCalls) {
+    entries.push(buildAgentActivityEntry({
+      ...pending.identity,
+      'time_unix_nano': msToNano(boundaryTimeMs),
+      'event.name': 'tool.result',
+      'gen_ai.tool.name': pending.name,
+      'gen_ai.tool.call.id': callId,
+      'tool.result.status': outcome,
+      'agent.dsh.tool.settled_by': settledBy,
+    }));
+  }
+  state.pendingToolCalls.clear();
+  return entries;
 }
 
 function setBounded<K, V>(map: Map<K, V>, key: K, value: V): void {
@@ -390,8 +455,7 @@ export function transformDshRecordEntries(
       if (request) entries.push(request);
     }
   }
-  const entry = transformDshRecord(record, agentType, state);
-  if (entry) entries.push(entry);
+  entries.push(...transformDshRecordMulti(record, agentType, state));
   return entries;
 }
 
@@ -400,8 +464,22 @@ export function transformDshRecord(
   agentType: ClientType,
   state: DshEventAggregatorState = newState(),
 ): AgentActivityEntry | null {
+  return transformDshRecordMulti(record, agentType, state)[0] ?? null;
+}
+
+/**
+ * Canonical per-record transform. Turn-boundary records can emit several
+ * entries — a native turn/end may settle in-flight tool calls and add a
+ * turn-terminal marker (issue #578) — so the core returns an array and the
+ * legacy single-entry API projects its first entry.
+ */
+function transformDshRecordMulti(
+  record: Record<string, unknown>,
+  agentType: ClientType,
+  state: DshEventAggregatorState,
+): AgentActivityEntry[] {
   const context = recordContext(record, agentType, state);
-  if (!context) return null;
+  if (!context) return [];
   const { type, sid, time, data, turn, step, common } = context;
 
   switch (type) {
@@ -413,33 +491,66 @@ export function transformDshRecord(
     case 'session/title':
     case 'session/title-llm-request':
     case 'step/end':
-      return null;
+      return [];
 
-    case 'turn/start':
+    case 'turn/start': {
+      // A successor turn/start in the same session is the first reliable
+      // evidence that the previous turn ended without native terminal
+      // records (killed process tree, crash, lost producer). Settle its
+      // still-running tool calls as outcome-unknown at this observed
+      // boundary; the real outcome was never observed, so cancellation is
+      // not claimed and no result is fabricated.
+      const settled = settlePendingToolCalls(state, 'unknown', time, 'successor-turn-start');
       resetTurnState(state);
       state.currentTurn = turn;
-      return null;
+      return settled;
+    }
 
-    case 'turn/end':
+    case 'turn/end': {
+      // Preserve the native terminal reason instead of dropping it. A
+      // cancelled-family reason is explicit cancellation evidence for calls
+      // still in flight; any other reason (including `completed` with
+      // unmatched calls — inconsistent native data) leaves their outcome
+      // unknown and must not fabricate success either.
+      const reasonKind = asString(asObject(data.reason)?.kind);
+      const cancelled = reasonKind !== undefined && CANCELLED_TURN_END_REASONS.has(reasonKind);
+      const settled = settlePendingToolCalls(
+        state,
+        cancelled ? 'cancelled' : 'unknown',
+        time,
+        'turn-end',
+      );
       resetTurnState(state);
-      return null;
+      if (!cancelled) return settled;
+      // Turn-terminal marker so a cancelled turn exports without waiting for
+      // a successor turn (the common flusher treats `cancelled` as terminal).
+      // Message-less `other` records are ignored inside a turn by the
+      // converter, so the marker adds no phantom spans.
+      settled.push(buildAgentActivityEntry({
+        ...common,
+        'event.name': 'other',
+        'gen_ai.response.finish_reasons': ['cancelled'],
+        'agent.dsh.turn_status': 'cancelled',
+      }));
+      return settled;
+    }
 
     case 'step/start':
       state.currentStep = step;
       if (sid && turn !== undefined && step !== undefined) {
         setBounded(state.requestStartTimes, stepKey(sid, turn, step), time);
       }
-      return null;
+      return [];
 
     case 'request/header': {
       const header = parseDshRequestHeader(record);
-      if (!header) return null;
+      if (!header) return [];
       state.currentTurnHeader = header;
       state.lastKnownHeader = header;
       if (sid && turn !== undefined && step !== undefined) {
         setBounded(state.requestStartTimes, stepKey(sid, turn, step), time);
       }
-      return null;
+      return [];
     }
 
     case 'request/context': {
@@ -448,7 +559,7 @@ export function transformDshRecord(
         // intentionally overrides the earlier header / step-start fallback.
         setBounded(state.requestStartTimes, stepKey(sid, turn, step), time);
       }
-      return null;
+      return [];
     }
 
     case 'assistant/chunk': {
@@ -478,7 +589,9 @@ export function transformDshRecord(
       // this point all input for the step has landed (user/message for
       // step 1, prior step's assistant/message + tool/result for steps
       // 2+). The accumulator snapshot is the LLM's input context.
-      return key ? emitRequest(common, key, time, state) : null;
+      if (!key) return [];
+      const request = emitRequest(common, key, time, state);
+      return request ? [request] : [];
     }
 
     case 'user/message': {
@@ -492,9 +605,9 @@ export function transformDshRecord(
       // however, is a top-level ENTRY/AGENT input. Source-less records retain
       // the legacy behavior for JSONL captured before DSH exposed `source`.
       addInputMessage(state, { role: 'user', parts: userParts });
-      if (data.source !== undefined && sourceKind !== 'user') return null;
+      if (data.source !== undefined && sourceKind !== 'user') return [];
 
-      return buildAgentActivityEntry({
+      return [buildAgentActivityEntry({
         ...common,
         'event.name': 'other',
         'event.id': msgId,
@@ -502,7 +615,7 @@ export function transformDshRecord(
           role: 'user',
           parts: userParts,
         }]),
-      });
+      })];
     }
 
     case 'assistant/message': {
@@ -552,7 +665,7 @@ export function transformDshRecord(
       // step's llm.request sees it as part of the input context.
       addInputMessage(state, { role: 'assistant', parts: assistantParts });
 
-      return buildAgentActivityEntry({
+      return [buildAgentActivityEntry({
         ...common,
         'event.name': 'llm.response',
         'event.id': responseId,
@@ -571,32 +684,40 @@ export function transformDshRecord(
           role: 'assistant',
           parts: assistantParts,
         }]),
-      });
+      })];
     }
 
     case 'tool/call': {
       const callId = asString(data.callId);
       const name = asString(data.name);
-      if (!callId || !name) return null;
+      if (!callId || !name) return [];
       setBounded(state.toolNames, callId, name);
+      // Track the emitted call so an interrupted turn can settle it at the
+      // next observed boundary (issue #578). Bounded like every per-turn
+      // correlation map; an evicted call keeps the pre-existing behavior
+      // (the common flusher drops its unmatched tool.call).
+      setBounded(state.pendingToolCalls, callId, { name, identity: common });
       let args: unknown = data.arguments;
       if (typeof args === 'string') {
         try { args = JSON.parse(args); } catch { /* keep raw string */ }
       }
-      return buildAgentActivityEntry({
+      return [buildAgentActivityEntry({
         ...common,
         'event.name': 'tool.call',
         'gen_ai.tool.name': name,
         'gen_ai.tool.call.id': callId,
         'gen_ai.tool.call.arguments': toJsonValue(args),
-      });
+      })];
     }
 
     case 'tool/result': {
       const message = asObject(data.message) ?? {};
       const source = asObject(message.source) ?? {};
       const callId = asString(source.callId);
-      if (!callId) return null;
+      if (!callId) return [];
+      // A native result settles the call even when the entry itself cannot be
+      // projected below (missing name), so it is never re-settled as unknown.
+      state.pendingToolCalls.delete(callId);
       const name = state.toolNames.get(callId);
       state.toolNames.delete(callId);
       const content = message.content;
@@ -606,8 +727,8 @@ export function transformDshRecord(
       addInputMessage(state, { role: 'tool', parts: toolParts });
       // A nameless tool.result violates the public schema. Preserve the real
       // result in the next LLM input context, but do not emit a false name.
-      if (!name) return null;
-      return buildAgentActivityEntry({
+      if (!name) return [];
+      return [buildAgentActivityEntry({
         ...common,
         'event.name': 'tool.result',
         'gen_ai.tool.name': name,
@@ -616,10 +737,10 @@ export function transformDshRecord(
           role: 'tool',
           parts: toolParts,
         }]),
-      });
+      })];
     }
 
     default:
-      return null;
+      return [];
   }
 }
