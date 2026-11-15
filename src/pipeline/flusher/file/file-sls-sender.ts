@@ -5,7 +5,7 @@ import {
   type SlsTransportConfig,
 } from '../../../flushers/sls-transport.js';
 import { createLogger } from '../../../utils/logger.js';
-import { LOCAL_IP, buildUserAgent } from '../../../utils/network-utils.js';
+import { buildUserAgent } from '../../../utils/network-utils.js';
 import { estimateStringRecordBytes } from '../../../flushers/sls-failure-log-writer.js';
 
 const logger = createLogger('FileSlsSender');
@@ -100,7 +100,6 @@ export class FileSlsSender {
             tasks.map((t) =>
               postWebtracking(this.transportConfig, t.batch, {
                 topic: this.configName,
-                source: LOCAL_IP,
                 tags: { __path__: filePath },
                 userAgent: this.userAgent,
               }).then(() => ({ ok: true as const })),

@@ -11,7 +11,7 @@ import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
-import { LOCAL_IP, buildUserAgent } from '../utils/network-utils.js';
+import { buildUserAgent } from '../utils/network-utils.js';
 import { readInstalledVersion } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import { SlsFailureLogWriter } from './sls-failure-log-writer.js';
@@ -376,7 +376,6 @@ export class SlsFlusher extends BaseFlusher {
         timestamp: now,
         content: l.content,
       })),
-      source: LOCAL_IP,
       topic: endpoint.kind,
       tags: this.buildAkTags(endpoint, agentType),
     };
@@ -464,7 +463,6 @@ export class SlsFlusher extends BaseFlusher {
         timestamp: now,
         content: l.content,
       })),
-      source: LOCAL_IP,
       topic: endpoint.kind,
       tags: this.buildAkTags(endpoint, agentType),
     };
@@ -565,7 +563,6 @@ export class SlsFlusher extends BaseFlusher {
     const agentType = logs[0]?.agentType;
     const body = {
       __topic__: endpoint.kind ?? '',
-      __source__: LOCAL_IP,
       __logs__: logs.map(l => l.content),
       __tags__: this.buildWebtrackingTags(endpoint, agentType),
     };
@@ -701,7 +698,6 @@ export class SlsFlusher extends BaseFlusher {
           const client = this.getAkClient(endpoint);
           await client.postLogStoreLogs(endpoint.project, endpoint.logstore, {
             logs: [{ timestamp: Math.floor(Date.now() / 1000), content }],
-            source: LOCAL_IP,
             topic,
             tags: this.buildAkTags(endpoint),
           });
@@ -717,7 +713,6 @@ export class SlsFlusher extends BaseFlusher {
             },
             {
               logs: [{ timestamp: Math.floor(Date.now() / 1000), content }],
-              source: LOCAL_IP,
               topic,
               tags: this.buildAkTags(endpoint),
             },
@@ -733,7 +728,6 @@ export class SlsFlusher extends BaseFlusher {
             [content],
             {
               topic,
-              source: LOCAL_IP,
               tags: { __hostname__: HOSTNAME },
               userAgent: this.userAgent,
             },
