@@ -30,6 +30,9 @@ seed request history. Later steps append observed assistant messages and tool
 results in persistence order. The Trace converter inherits system instructions
 and tool definitions; it does not reuse the first snapshot as every later
 request. Older OpenClaw releases retain their existing inferred-timing adapter.
+When a model fallback reuses the same `runId`, the new cycle keeps bounded input
+state and emits updated full snapshots as assistant/tool results arrive. This
+prevents the previous cycle's history and prompt from accumulating again.
 
 Hermes prefers native Chat `request_messages`, falling back to the complete
 `conversation_history`. Its current-turn response window stays separate, so
@@ -49,8 +52,8 @@ not parse a truncated `preview`.
 Capture remains bounded; message character counts alone cannot prove complete
 coverage of billable model tokens:
 
-- OpenClaw seeds at most 1,024 messages and approximately 2 MiB, retaining the
-  current prompt and recent history on overflow. Existing 64 Ki-character text
+- OpenClaw seeds and fallback-cycle snapshots hold at most 1,024 messages and
+  approximately 2 MiB, retaining the current prompt and recent history on overflow. Existing 64 Ki-character text
   part/tool-result limits still apply.
 - Hermes captures at most 1,024 messages and approximately 2 MiB per LLM request,
   with 256 Ki characters per text part. The lifecycle window remains 64 messages.

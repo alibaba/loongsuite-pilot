@@ -27,6 +27,8 @@ OpenClaw 的 `llm_input.historyMessages` 用于保留之前的对话，再追加
 后续模型步骤按实际持久化顺序补入 assistant 消息和工具结果；system/tools 由 Trace
 转换器继承。不会把首步快照反复当成后续步骤的完整请求。此路径适用于提供这些 Hook
 的现代 OpenClaw；旧版本继续使用原有推定时序适配器。
+模型回退复用同一 `runId` 时，新调用周期独立维护有界输入状态，后续步骤发送随
+assistant/工具结果更新的完整快照，避免重复累计旧周期的历史和 prompt。
 
 Hermes 的 LLM 输入优先使用原生 Chat `request_messages`，否则保留完整的
 `conversation_history`。用于匹配当前轮响应的历史窗口仍然独立，避免把旧回复归到新请求。
@@ -39,7 +41,7 @@ Hermes 0.16.0 的 50,000 字符 Hook 载荷上限可能丢掉整个 `request.bod
 
 采集仍有容量边界，不能将消息字符数直接当作模型计费 Token 的完整性证明：
 
-- OpenClaw 首步输入最多 1,024 条消息、约 2 MiB，超限优先保留当前 prompt 与较近历史；
+- OpenClaw 首步输入及回退周期快照最多 1,024 条消息、约 2 MiB，超限优先保留当前 prompt 与较近历史；
   原有每文本 part / 工具结果 64 Ki 字符上限保持有效。
 - Hermes 每个 LLM 请求最多 1,024 条消息、约 2 MiB，每文本 part 最多 256 Ki 字符。
   当前轮生命周期窗口仍为 64 条；system/tools 保留原有每字符串 32 Ki 字符、128 项及深度限制，
