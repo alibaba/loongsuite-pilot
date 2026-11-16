@@ -703,7 +703,7 @@ function llmRequestRecord(state, base, runtimeConfig, timestamp, prompt) {
 }
 
 function llmResponseRecord(state, base, timestamp, lastAssistantMessage) {
-  const parts = [{ type: 'text', content: safeText(lastAssistantMessage) }];
+  const textPart = { type: 'text', content: safeText(lastAssistantMessage) };
   // Round 7: synthesize tool_call parts from state.pending_tool_calls so
   // validate-trace `semantic.tool_matches_llm_output` can match each TOOL
   // span against an LLM-declared tool_call. Production TRAE-CN Stop event
@@ -711,10 +711,19 @@ function llmResponseRecord(state, base, timestamp, lastAssistantMessage) {
   // PreToolUse-captured data. Fields `id` + `name` are what the validator
   // reads (part.id / part.name); `tool_name` + `arguments` are the OTel
   // GenAI spec fields the architect prescribed.
+  //
+  // Split: when tool_call parts exist, emit them in their own assistant
+  // message preceding the final text-only assistant message. This mirrors
+  // the LLM's chronological behavior (tool invocations during the turn,
+  // then the final answer) and keeps the final assistant message free of
+  // tool_call parts. Without the split, validate-trace
+  // `semantic.last_step_no_tool_call` flags the mixed-parts assistant
+  // message as ERROR.
+  const toolCallParts = [];
   const pendingCalls = state.pending_tool_calls || {};
   for (const [toolUseId, pending] of Object.entries(pendingCalls)) {
     if (!pending || !pending.name) continue;
-    parts.push({
+    toolCallParts.push({
       type: 'tool_call',
       id: toolUseId,
       name: pending.name,
@@ -722,12 +731,11 @@ function llmResponseRecord(state, base, timestamp, lastAssistantMessage) {
       arguments: pending.arguments !== undefined ? pending.arguments : {},
     });
   }
-  const outputMessages = [
-    {
-      role: 'assistant',
-      parts,
-    },
-  ];
+  const outputMessages = [];
+  if (toolCallParts.length > 0) {
+    outputMessages.push({ role: 'assistant', parts: toolCallParts });
+  }
+  outputMessages.push({ role: 'assistant', parts: [textPart] });
   const bounds = spanBounds(state, 'LLM', timestamp);
   // Round 5 #2: usage tokens emitted on llm.response (LLM span carries usage).
   const usage = state.usage || {};
