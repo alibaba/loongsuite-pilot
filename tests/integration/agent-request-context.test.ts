@@ -238,7 +238,8 @@ class Agent:
         self.calls += 1
         if self.failure: raise self.failure
         return self.result
-sys.modules['run_agent'] = types.SimpleNamespace(AIAgent=Agent)
+host = types.SimpleNamespace()
+sys.modules['run_agent'] = host
 spec = importlib.util.spec_from_file_location('pilot_metadata', os.environ['PILOT_CONTEXT_PLUGIN_PATH'])
 plugin = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plugin)
@@ -247,6 +248,11 @@ class Context:
     def register_hook(self, name, callback): self.hooks[name] = callback
 ctx = Context()
 plugin.register(ctx)
+# Native discovery can register Pilot before the host class is defined. The
+# first lifecycle hook must retry both delivery and metadata observers.
+host.AIAgent = Agent
+ctx.hooks['pre_llm_call'](session_id=Agent.session_id, user_message='question',
+                        conversation_history=[{'role': 'user', 'content': 'question'}])
 agent = Agent()
 body = {'messages': [{'role': 'system', 'content': 'native system'}, {'role': 'user', 'content': 'question'}],
         'tools': [{'type': 'function', 'function': {'name': 'fixture_' + str(i),

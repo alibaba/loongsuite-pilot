@@ -378,7 +378,7 @@ print(json.dumps({"hooks": sorted(ctx.hooks), "activeTurns": sum(len(state["turn
   if (!expectLogFile) {
     return { hooks, records: [], raw: '', root, logDir, stderr: run.stderr };
   }
-  const files = fs.readdirSync(logDir).filter(file => /^hermes-agent-.*\.jsonl$/.test(file));
+  const files = fs.readdirSync(logDir).filter(file => /^hermes-agent-\d+-\d+-[a-f0-9]+\.jsonl$/.test(file));
   expect(files).toHaveLength(1);
   const allRecords = fs.readFileSync(path.join(logDir, files[0]), 'utf8')
     .trim()
@@ -1005,7 +1005,7 @@ describe('Hermes Agent native plugin', () => {
     },
   );
 
-  it('creates private log directories and removes stale process logs', () => {
+  it('creates private log directories and preserves unconsumed stale process logs', () => {
     let stalePath;
     const { logDir } = replay(firstTurn(), {
       beforeSpawn(root) {
@@ -1018,7 +1018,7 @@ describe('Hermes Agent native plugin', () => {
       },
     });
 
-    expect(fs.existsSync(stalePath)).toBe(false);
+    expect(fs.existsSync(stalePath)).toBe(true);
     if (process.platform !== 'win32') {
       expect(fs.statSync(logDir).mode & 0o777).toBe(0o700);
     }

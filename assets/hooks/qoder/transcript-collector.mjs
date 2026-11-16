@@ -7,7 +7,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import {
-  buildLlmBoundaries, buildEventsFromBoundaries, isRealUserPrompt as isPlainUserPrompt, isControlUserRow,
+  buildLlmBoundaries, buildEventsFromBoundaries, applyQoderProductIdentity, isRealUserPrompt as isPlainUserPrompt, isControlUserRow,
   hasQoderCnTerminalMarker,
 } from '../qoder-hook-processor.mjs';
 import { loadHookRuntimeConfig } from '../agent-event-normalizer.mjs';
@@ -34,6 +34,7 @@ const LEGACY_LOCK_GRACE_MS = 1000;
 const LEGACY_LOCK_AGE_MS = 60_000;
 const MAX_TRAILING_CONTROL_BYTES = 64 * 1024;
 const TERMINAL_CONTEXT_EVENTS = new Set(['Stop', 'SessionEnd']);
+const TERMINAL_CONTEXT_METADATA = new Set(['workspace-directories', 'runtime-config', 'active-leaf']);
 const DEFERRED_CONTENT_ERRORS = new Set([
   'record-byte-limit', 'turn-byte-limit', 'turn-record-limit',
   'bootstrap-record-byte-limit', 'invalid-json-line',
@@ -981,7 +982,8 @@ export class QoderTranscriptCollector {
       for (const line of lines) {
         if (!line) return null;
         const row = JSON.parse(line);
-        if (!isControlUserRow(row) && !TERMINAL_CONTEXT_EVENTS.has(eventOf(row))) return null;
+        if (!isControlUserRow(row) && !TERMINAL_CONTEXT_EVENTS.has(eventOf(row))
+          && !TERMINAL_CONTEXT_METADATA.has(row.type)) return null;
       }
       return candidate;
     } catch {
@@ -1000,12 +1002,23 @@ export class QoderTranscriptCollector {
         && (item.event === 'UserPromptSubmit' || item.event === 'SessionStart'))));
   }
 
+  hostProductFor(context, prompt) {
+    if (this.agentId !== 'qoder') return undefined;
+    // New desktop runtimes carry the owning product on the native prompt,
+    // including sidechains whose lifecycle Hooks omit parent_business_info.
+    const product = prompt?.businessIdentity?.product;
+    if (product === 'app') return 'app';
+    if (product === 'cli') return undefined;
+    return context?.desktop === true ? 'app' : undefined;
+  }
+
   emitInvokes(source, contexts, checkpoint, value, records, endOffset, complete = false,
     context = this.contextFor(source, contexts, checkpoint, endOffset)) {
     if (!checkpoint.turnId || !checkpoint.traceContext) return;
     // A Hook may observe progress written after the tool line. Finish this
     // bounded scan before selecting its snapshot; never borrow a later turn's.
     if (!complete && !Number.isFinite(context?.observedSize)) return;
+    const hostProduct = this.hostProductFor(context, value.rows.find(isRealUserPrompt));
     context ??= { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
     for (const row of value.rows) {
       if (!Number.isFinite(Date.parse(row.timestamp))) continue;
@@ -1024,6 +1037,7 @@ export class QoderTranscriptCollector {
           ...(context.resourceAttributes ? { resourceAttributes: context.resourceAttributes } : {}),
           ...context.spanAttributes,
         };
+        applyQoderProductIdentity([record], hostProduct);
         records.push(...this.links.decorate(source, checkpoint, [row], [record])
           .filter(event => event['event.name'] === 'gen_ai.agent.invoke'));
         this.links.update(this.links.state[link.id], { invokeEmitted: true });
@@ -1041,8 +1055,13 @@ export class QoderTranscriptCollector {
     if (!context && terminalSource === 'last-prompt') {
       context = await this.trailingTerminalContext(source, contexts, endOffset);
     }
+    // Only this Turn's observation can label a product. source.desktop belongs
+    // to the first discovery and may describe an earlier App invocation.
+    const productContext = context;
+    const hostProduct = this.hostProductFor(productContext, value.rows.find(isRealUserPrompt));
     context ??= { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
     const config = { ...loadHookRuntimeConfig(this.dataDir),
+      hostProduct,
       userIdentity: context.userIdentity ?? source.userIdentity,
       resourceAttributes: context.resourceAttributes ?? {},
       spanAttributes: context.spanAttributes ?? {} };
@@ -1052,7 +1071,7 @@ export class QoderTranscriptCollector {
     // or leak into the next model request when a turn is still being drained.
     const content = value.rows.filter(row => (row.type === 'user' || row.type === 'assistant') && !isControlUserRow(row));
     await this.prepareWork(source, checkpoint, value.rows.find(isRealUserPrompt));
-    if (earlyRecords) this.emitInvokes(source, contexts, checkpoint, value, earlyRecords, endOffset, true, context);
+    if (earlyRecords) this.emitInvokes(source, contexts, checkpoint, value, earlyRecords, endOffset, true, productContext ?? null);
     const turnId = checkpoint.turnId;
     const boundaries = buildLlmBoundaries([], content);
     const records = buildEventsFromBoundaries(boundaries, content, value.rows, turnId,

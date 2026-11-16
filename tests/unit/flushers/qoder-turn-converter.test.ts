@@ -60,6 +60,11 @@ describe.each([...QODER_TRANSCRIPT_AGENT_TYPES])('%s roots through the real flus
     expect(entry).toHaveLength(1);
     expect(entry[0].parentSpanId).toBeUndefined();
     expect(spans.every(s => s.spanContext().traceId === TRACE)).toBe(true);
+    for (const span of spans) expect(span.resource.attributes).toMatchObject({
+      'gen_ai.agent.type': agentType,
+      'gen_ai.framework': agentType,
+      'gen_ai.agent.system': agentType === 'qoder-app' ? 'qoder-app' : 'qoder',
+    });
     const ids = new Set(spans.map(s => s.spanContext().spanId));
     expect(ids.size).toBe(spans.length);
     for (const span of spans.filter(s => s !== entry[0])) expect(ids.has(span.parentSpanId!)).toBe(true);

@@ -16,10 +16,10 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 
-SCRIPT_DIR = Path(__file__).parent
-PROJECT_DIR = SCRIPT_DIR.parents[3]
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+SCRIPT_DIR = Path(__file__).resolve().parent
+SETUP_SCRIPTS_DIR = SCRIPT_DIR.parents[1] / "agentloop-collector-setup" / "scripts"
+if str(SETUP_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SETUP_SCRIPTS_DIR))
 
 from util.aliyun import SLS_VERSION, aliyun
 from util.config_record import DEFAULT_LOGSTORE, load_target, require_profile
@@ -40,7 +40,7 @@ def parse_args():
     p.add_argument("--filter", "--var", dest="filters", type=str, action="append", default=[], help="变量 key=value（可多个），替换 SQL 中的 ${{key}}")
     p.add_argument("--with-diff", action="store_true", help="和 git HEAD 中的同一路径 dashboard JSON 做 SQL / 结果 diff")
     p.add_argument("--default-project", default="", help="chartQuery 未声明 project 时使用的默认 project")
-    p.add_argument("--profile", default="", help="阿里云 CLI profile，默认用插件已保存的登录")
+    p.add_argument("--profile", default="", help="阿里云 CLI profile，默认用 Setup Skill 已保存的登录")
     p.add_argument("--region", default="", help="aliyun CLI region override（默认使用 profile 配置）")
     return p.parse_args()
 

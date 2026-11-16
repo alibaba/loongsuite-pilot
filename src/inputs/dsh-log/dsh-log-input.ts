@@ -1,5 +1,6 @@
 import type { Dirent } from 'node:fs';
 import * as fs from 'node:fs/promises';
+import { fileIdentity, matchesFileIdentity } from '../../utils/file-identity.js';
 import * as path from 'node:path';
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
@@ -162,11 +163,17 @@ export class DshLogInput extends BaseSessionInput {
 
     const inode = Number((stat as { ino?: number }).ino ?? 0);
     const persisted = this.stateStore.get(stateKey);
+    if (persisted.extra?.sourceIdentity !== fileIdentity(stat)) {
+      this.stateStore.update(stateKey, { extra: { sourceIdentity: fileIdentity(stat), sourceBirthtimeMs: stat.birthtimeMs } });
+    }
     const persistedInode = typeof persisted.extra?.inode === 'number'
       ? persisted.extra.inode
       : undefined;
     let offset = this.stateStore.getOffset(stateKey);
-    const replaced = persistedInode !== undefined && persistedInode !== inode;
+    const replaced = (persistedInode !== undefined && persistedInode !== inode)
+      || (persisted.extra?.sourceIdentity !== undefined && !matchesFileIdentity(persisted.extra.sourceIdentity, stat))
+      || (persisted.extra?.sourceIdentity === undefined && (process.platform === 'darwin' || process.platform === 'win32')
+        && persisted.extra?.sourceBirthtimeMs !== undefined && persisted.extra.sourceBirthtimeMs !== stat.birthtimeMs);
     const truncated = offset > 0 && stat.size < offset;
     if (replaced || truncated) {
       logger.info('dsh event file replaced or truncated, resetting state', {

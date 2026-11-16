@@ -46,7 +46,12 @@ export abstract class BaseInput extends EventEmitter {
   setWorkspacePolicy(policy: WorkspacePolicy): void { this.workspacePolicy = policy; }
 
   /** InputManager uses this for the Codex trace journal's durable acceptance. */
-  holdCheckpointUntil(promise: Promise<void>): void { this.stateStore.holdSaveUntil(promise); }
+  private readonly pendingOutputs = new Set<Promise<void>>();
+  holdCheckpointUntil(promise: Promise<void>): void {
+    this.stateStore.holdSaveUntil(promise, this.id);
+    this.pendingOutputs.add(promise);
+    void promise.then(() => this.pendingOutputs.delete(promise), () => this.pendingOutputs.delete(promise));
+  }
   private startPromise: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
   private activeRuntimeAccumulator: InputRuntimeAccumulator | null = null;
@@ -64,7 +69,7 @@ export abstract class BaseInput extends EventEmitter {
     return this._running;
   }
 
-  get checkpointFailed(): boolean { return this.stateStore.saveFailed; }
+  get checkpointFailed(): boolean { return this.stateStore.hasSaveFailure(this.id); }
 
   start(): Promise<void> {
     // A restart must not create resources before the preceding stop has drained them.
@@ -158,6 +163,16 @@ export abstract class BaseInput extends EventEmitter {
         this.emit('entries', entries);
         await this.onEntriesQueued();
         this.logger.debug('cycle produced entries', { count: entries.length });
+      }
+      if (this.pendingOutputs.size) {
+        await Promise.race([
+          Promise.all([...this.pendingOutputs]),
+          new Promise<void>(resolve => {
+            this.releaseCheckpointWait = resolve;
+            this.releaseStartupWait?.();
+            if (!this._running) resolve();
+          }),
+        ]);
       }
       // A shared checkpoint may wait for another input's HTTP recovery. Stop
       // must still drain our collect/onStop without waiting for that network;

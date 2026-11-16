@@ -11,7 +11,7 @@ import type { ReservedSpanIdGenerator } from './span-id-reservation.js';
 import { prepareDelegatedTurn } from './delegated-turn-converter.js';
 
 const SYNTHETIC_PARENT = '0000000000000001';
-export const QODER_TRANSCRIPT_AGENT_TYPES = new Set(['qoder', 'qoder-cli', 'qoder-cn', 'qoder-idea']);
+export const QODER_TRANSCRIPT_AGENT_TYPES = new Set(['qoder', 'qoder-cli', 'qoder-app', 'qoder-cn', 'qoder-idea']);
 const WORK_KEYS = ['gen_ai.agent.id', 'gen_ai.agent.name', 'gen_ai.agent.scope',
   'gen_ai.agent.parent.id', 'gen_ai.agent.parent.invocation.id', 'gen_ai.subagent.parent_tool_call.id'] as const;
 const OUTGOING_KEYS = ['gen_ai.agent.invocation.id', 'gen_ai.agent.peer.id', 'gen_ai.agent.peer.name'] as const;

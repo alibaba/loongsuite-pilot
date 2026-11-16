@@ -18,6 +18,10 @@ export abstract class BaseFlusher {
 
   abstract send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void>;
   abstract sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): Promise<void>;
+  /** Retain the returned attempt for one dispatch so fan-out can track accepted targets across retries. */
+  createBatchDelivery(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): () => Promise<void> {
+    return () => signal ? this.sendBatch(entries, logicalBytes, signal) : this.sendBatch(entries, logicalBytes);
+  }
   abstract flush(): Promise<void>;
   abstract shutdown(): Promise<void>;
 

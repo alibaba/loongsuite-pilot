@@ -144,6 +144,23 @@ describe('DiskUsageSampler', () => {
     expect(onSample).toHaveBeenCalledTimes(1);
   });
 
+  it('reports bounded log families in the existing traversal without exposing arbitrary names', async () => {
+    installTree({
+      'logs/output/a.jsonl': 7, 'logs/dsh/session.jsonl': 11,
+      'logs/codex-pending-turns/pending.jsonl': 13, 'logs/secret-project/private.log': 17,
+      'logs/input-state.json': 19,
+    });
+    const instance = sampler();
+    await instance.sample();
+    expect(instance.getSnapshot().logsByFamily).toEqual({
+      output: 7, dsh: 11, 'codex-pending-turns': 13, _other: 17, _files: 19,
+    });
+    const snapshot = instance.getSnapshot();
+    expect(Object.values(snapshot.logsByFamily!).reduce((a, n) => a + n, 0)).toBe(snapshot.logsBytes);
+    snapshot.logsByFamily!.dsh = 0;
+    expect(instance.getSnapshot().logsByFamily!.dsh).toBe(11);
+  });
+
   it('recurses only into mutable root data directories while retaining root files', async () => {
     const mutableFiles: Record<string, number> = {
       'ordinary': 3,
