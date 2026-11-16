@@ -41,7 +41,14 @@
     const config = readOptional(configPath);
     if ((!env.LOONGSUITE_PILOT_ENABLED || !env.LOONGSUITE_PILOT_ENABLED.trim())
         && config.enabled === false) return;
-    if (config.agents && config.agents['claude-code']?.enabled === false) return;
+    const agent = config.agents && config.agents['claude-code'];
+    if (agent?.enabled === false) return;
+    // This optional interceptor writes system instructions to its local spool.
+    // Do not start it when content collection is disabled. TTFT enrichment is
+    // also skipped in this mode; regular Claude hooks continue to run.
+    const capture = agent?.captureMessageContent;
+    if (capture === false || (typeof capture === 'string' && capture.trim().toLowerCase() === 'false')
+        || config.otlpTrace?.captureMessageContent === false) return;
 
     const dataDir = expandHome(env.LOONGSUITE_PILOT_DATA_DIR || config.dataDir
       || path.join(home, '.loongsuite-pilot'));

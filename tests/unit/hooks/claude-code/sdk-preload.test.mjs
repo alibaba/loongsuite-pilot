@@ -89,6 +89,15 @@ describe('Claude SDK container preload', () => {
     expect(run()).toBe('');
   });
 
+  test.each([
+    { agents: { 'claude-code': { captureMessageContent: false } } },
+    { agents: { 'claude-code': { captureMessageContent: ' false ' } } },
+    { otlpTrace: { captureMessageContent: false } },
+  ])('does not write enrichment when content capture is disabled: %j', (config) => {
+    fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify(config));
+    expect(run()).toBe('');
+  });
+
   test('continues business startup when configuration or enrichment is broken', () => {
     fs.writeFileSync(path.join(tmp, 'config.json'), '{ broken');
     expect(run()).toBe('');
