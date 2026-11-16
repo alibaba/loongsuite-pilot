@@ -810,6 +810,162 @@ fn qoder_native_wakeup_transcript_and_checkpoint_share_the_dynamic_delivery_path
 }
 
 #[test]
+fn qoder_native_batch_preserves_activity_across_retry_ack_and_restart() {
+    use std::collections::BTreeMap;
+
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("transcripts");
+    std::fs::create_dir(&source).unwrap();
+    let file = source.join("native-session.jsonl");
+    let data = root.path().join("data");
+    let session = "qoder-sdk-batch-session";
+    let policy = json!({"agents":["qoder"],"hcd":{"agent_configs":{"qoder":{"collection":{
+        "enabled":true,"profile":"qoder_trace_v1","allowed_roots":[source],
+        "sources":[{"id":"native","type":"transcript","path":source}],"limits":{"poll_interval_ms":100}
+    }}}},"sdk_options":{"hooks":{"blocking_agents":[]},
+        "delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}});
+    let notify = |event| {
+        let payload = json!({"hook_event_name":event,"session_id":session,"transcript_path":file,
+            "cwd":root.path(),"parent_business_info":{"product":"cli","version":"sdk-fixture"}});
+        let output = hook_command(&data, "cloud", event, &payload)
+            .wait_with_output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+    };
+    let append_turn = |turn: u32| {
+        notify("UserPromptSubmit");
+        // Use the native CLI record shape from the public performance fixture.
+        let started = chrono::Utc::now();
+        let stamp = |offset| (started + chrono::Duration::milliseconds(offset)).to_rfc3339();
+        let progress = |event, offset| json!({"type":"progress","timestamp":stamp(offset),"data":{"hookEvent":event}});
+        let tool = format!("tool-{turn}");
+        let rows = [
+            progress("UserPromptSubmit", 0),
+            json!({"type":"user","entrypoint":"cli","uuid":format!("prompt-{turn}"),"timestamp":stamp(1),
+                "message":{"role":"user","content":format!("read fixture {turn}")}}),
+            json!({"type":"assistant","timestamp":stamp(2),"message":{
+                "id":format!("response-{turn}-call"),"role":"assistant","model":"synthetic-model",
+                "usage":{"input_tokens":35,"output_tokens":11},
+                "content":[{"type":"tool_use","id":tool,"name":"Read","input":{"path":"fixture.txt"}}],
+                "stop_reason":"tool_use"}}),
+            progress("PreToolUse", 3),
+            json!({"type":"user","timestamp":stamp(4),"message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":tool,"content":format!("fixture result {turn}")}]}}),
+            progress("PostToolUse", 5),
+            json!({"type":"assistant","timestamp":stamp(6),"message":{
+                "id":format!("response-{turn}-final"),"role":"assistant","model":"synthetic-model",
+                "usage":{"input_tokens":35,"output_tokens":11},
+                "content":[{"type":"text","text":format!("fixture answer {turn}")}],"stop_reason":"end_turn"}}),
+            progress("Stop", 7),
+            json!({"type":"last-prompt"}),
+        ];
+        let mut transcript = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file)
+            .unwrap();
+        for row in rows {
+            writeln!(transcript, "{row}").unwrap();
+        }
+        notify("Stop");
+    };
+    let deliveries = |context: &Context| {
+        let mut by_id = BTreeMap::<String, (Vec<u8>, usize)>::new();
+        for bytes in context.rows.lock().unwrap().iter() {
+            let row: Value = serde_json::from_slice(bytes).unwrap();
+            if !matches!(
+                row["event.name"].as_str(),
+                Some("llm.request" | "llm.response" | "tool.call" | "tool.result")
+            ) {
+                continue;
+            }
+            let id = row["event.id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .unwrap();
+            let (original, count) = by_id.entry(id.into()).or_insert((bytes.clone(), 0));
+            assert_eq!(
+                original.as_slice(),
+                bytes.as_slice(),
+                "retry changed the delivered JSON"
+            );
+            *count += 1;
+        }
+        by_id
+    };
+    let verify_turn = |turn: u32, delivered: &BTreeMap<String, (Vec<u8>, usize)>| {
+        let mut kinds = BTreeMap::<String, usize>::new();
+        for (bytes, _) in delivered.values() {
+            let row: Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(row["gen_ai.session.id"], session);
+            assert!(row["gen_ai.turn.id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty()));
+            let kind = row["event.name"].as_str().unwrap();
+            match kind {
+                "llm.request" => assert!(row["gen_ai.input.messages_delta"].is_array()),
+                "llm.response" => {
+                    assert_eq!(row["gen_ai.usage.input_tokens"], 35);
+                    assert_eq!(row["gen_ai.usage.output_tokens"], 11);
+                    assert!(row["gen_ai.output.messages"].is_array());
+                }
+                "tool.call" => {
+                    assert_eq!(row["gen_ai.tool.name"], "Read");
+                    assert!(row["gen_ai.tool.call.arguments"]
+                        .to_string()
+                        .contains("fixture.txt"));
+                }
+                "tool.result" => assert!(row["gen_ai.tool.call.result"]
+                    .to_string()
+                    .contains(&format!("fixture result {turn}"))),
+                _ => unreachable!(),
+            }
+            *kinds.entry(kind.into()).or_default() += 1;
+        }
+        assert_eq!(kinds["llm.request"], 2);
+        assert_eq!(kinds["llm.response"], 2);
+        assert_eq!(kinds["tool.call"], 1);
+        assert_eq!(kinds["tool.result"], 1);
+    };
+
+    let context = Box::<Context>::default();
+    context.retry.store(true, Ordering::SeqCst);
+    let mut first = Host::start(&data, policy.clone(), context);
+    first.ready();
+    append_turn(1);
+    until(|| {
+        let rows = deliveries(&first.ctx);
+        rows.len() >= 6 && rows.values().all(|(_, copies)| *copies >= 2)
+    });
+    first.stop();
+    let initial = deliveries(&first.ctx);
+    verify_turn(1, &initial);
+    drop(first);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| deliveries(&resumed.ctx).len() >= 6);
+    until(|| resumed.snapshot()["delivery"]["pending_events"] == 0);
+    let replayed = deliveries(&resumed.ctx);
+    assert_eq!(replayed.len(), 6);
+    for (id, (original, _)) in &initial {
+        assert_eq!(replayed.get(id), Some(&(original.clone(), 1)));
+    }
+
+    append_turn(2);
+    until(|| deliveries(&resumed.ctx).len() >= 12);
+    until(|| resumed.snapshot()["delivery"]["pending_events"] == 0);
+    resumed.stop();
+    let mut combined = deliveries(&resumed.ctx);
+    for (id, (original, _)) in initial {
+        assert_eq!(combined.remove(&id), Some((original, 1)));
+    }
+    assert!(combined.values().all(|(_, copies)| *copies == 1));
+    verify_turn(2, &combined);
+}
+
+#[test]
 fn real_library_reports_version_hook_and_durable_usage_without_host_mapping() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
