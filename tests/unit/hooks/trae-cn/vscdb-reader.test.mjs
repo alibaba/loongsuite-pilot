@@ -9,6 +9,17 @@ const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/trae-cn-hook-processor.mjs');
 
+// Path B shells out to the system `sqlite3` CLI binary; Path C shells out to
+// `python3`. CI runners may lack sqlite3 (Ubuntu ubuntu-latest does not ship
+// it by default). Skip the affected direct-invocation tests when the binary
+// is missing rather than reporting a false production regression.
+function hasBinary(name) {
+  try { require('child_process').execSync(`command -v ${name}`, { stdio: 'ignore' }); return true; }
+  catch { return false; }
+}
+const SQLITE3_AVAILABLE = hasBinary('sqlite3');
+const PYTHON3_AVAILABLE = hasBinary('python3');
+
 let tmpDir;
 let vscdbDir;
 let vscdbPath;
@@ -82,12 +93,14 @@ describe('Trae-CN vscdb reader — P0 dual-path', () => {
   });
 
   it('Path B (sqlite3 CLI) independently resolves value when called directly', () => {
+    if (!SQLITE3_AVAILABLE) return; // skip when system lacks sqlite3 binary
     buildVscdb([{ key: 'session_selected_model', value: 'Doubao-Seed-2.1-Turbo' }]);
     const val = mod.queryVscdbViaSqlite3Cli('session_selected_model', vscdbPath);
     expect(val).toBe('Doubao-Seed-2.1-Turbo');
   });
 
   it('Path C (python3 sqlite3) independently resolves value when called directly', () => {
+    if (!PYTHON3_AVAILABLE) return; // skip when system lacks python3 binary
     buildVscdb([{ key: 'ai_assistant.request.model', value: 'Qwen-Coder-32B' }]);
     const val = mod.queryVscdbViaPython3('ai_assistant.request.model', vscdbPath);
     expect(val).toBe('Qwen-Coder-32B');
