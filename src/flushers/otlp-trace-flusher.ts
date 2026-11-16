@@ -643,7 +643,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly resourceAttributeKeys: string[];
   private readonly spanAttributePassthroughPrefixes: string[];
   private readonly globalAttributesProvider?: GlobalAttributesProvider;
-  private readonly endpointCounters: Map<string, EndpointCounter> = new Map();
 
   private idleTimer?: ReturnType<typeof setInterval>;
   private inFlightExports = new Set<Promise<void>>();
