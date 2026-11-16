@@ -25,7 +25,11 @@ async fn hook(root: &Path, agent: &str, payload: &str) -> Output {
     let stdout = root.join("stdout");
     let stderr = root.join("stderr");
     fs::write(&input, payload).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot"));
+    let binary = match agent {
+        "qoder" | "qodercli" => env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"),
+        _ => env!("CARGO_BIN_EXE_loongsuite-pilot"),
+    };
+    let mut command = Command::new(binary);
     command
         .args(["interceptor", "hook", "--agent", agent])
         .current_dir(root)

@@ -937,6 +937,18 @@ resolve_pilot_bin() {
     return 1
 }
 
+# Container installations enter through this wrapper so the Hook runs inside
+# the pinned container. Select the same installed executable as native Hooks.
+prefer_shared_hook_bin() {
+    local pilot_bin="$1" hook_bin
+    hook_bin="${pilot_bin%/*}/loongsuite-pilot-sdk-hook"
+    if [ -f "$hook_bin" ] && [ ! -L "$hook_bin" ] && [ -x "$hook_bin" ]; then
+        printf '%s\n' "$hook_bin"
+    else
+        printf '%s\n' "$pilot_bin"
+    fi
+}
+
 resolve_script() {
     local script_name="$1"
     local version_dir
@@ -2816,6 +2828,19 @@ case "${1:-status}" in
     hook-process)
         shift
         pilot_bin=$(resolve_pilot_bin) || { printf '%s\n' '{}'; exit 0; }
+        if [ "${1:-}" = qoder ]; then
+            wakeup_only=false
+            explicit_data=false
+            for arg in "$@"; do
+                case "$arg" in
+                    --wakeup-only) wakeup_only=true ;;
+                    --data-dir) explicit_data=true ;;
+                esac
+            done
+            if [ "$wakeup_only" = true ] && [ "$explicit_data" = true ]; then
+                pilot_bin=$(prefer_shared_hook_bin "$pilot_bin")
+            fi
+        fi
         exec "$pilot_bin" hook-process "$@"
         ;;
     probe)
@@ -2826,6 +2851,9 @@ case "${1:-status}" in
     interceptor)
         shift
         pilot_bin=$(resolve_pilot_bin) || exit 0
+        if [ "${1:-}" = hook ]; then
+            pilot_bin=$(prefer_shared_hook_bin "$pilot_bin")
+        fi
         exec "$pilot_bin" interceptor "$@"
         ;;
     help|--help|-h) cmd_help ;;
