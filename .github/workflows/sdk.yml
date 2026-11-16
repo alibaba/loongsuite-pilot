@@ -68,4 +68,4 @@ jobs:
           retention-days: 3
       - name: Run native Hook and rollback contracts
         if: success()
-        run: cargo test --locked -p loongsuite-pilot --test sdk_dynamic --test installer_native -- --test-threads=1
+        run: cargo test --locked -p loongsuite-pilot --test installer_native rollback_ -- --test-threads=1

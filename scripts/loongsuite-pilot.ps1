@@ -229,6 +229,11 @@ function Test-NodeVersion {
         (Test-NativePath (Join-Path $Root "dist") $true) -and
         (Test-NativePath (Join-Path $Root "dist\index.js")) -and
         (Test-NativePath (Join-Path $Root "package.json")) -and
+        (Test-NativePath (Join-Path $Root "VERSION")) -and
+        (Test-NativePath (Join-Path $Root "node_modules") $true) -and
+        (Test-NativePath (Join-Path $Root "scripts") $true) -and
+        (Test-NativePath (Join-Path $Root "scripts\collector-daemon.js")) -and
+        (Test-NativePath (Join-Path $Root "scripts\loongsuite-pilot.ps1")) -and
         -not (Test-Path -LiteralPath $manifest))
 }
 
