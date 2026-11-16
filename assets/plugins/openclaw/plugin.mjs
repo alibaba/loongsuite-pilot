@@ -58,6 +58,8 @@ const MAX_RUNS = 200;
 const MAX_SESSIONS = 100;
 const MAX_RUN_STATE_ENTRIES = 512;
 const MAX_CONTENT_SIZE = 64 * 1024;
+const MAX_INPUT_MESSAGES = 1024;
+const MAX_INPUT_BYTES = 2 * 1024 * 1024;
 const MAX_TOOL_RESULT_SIZE = 64 * 1024;
 const PILOT_CONFIG_CACHE_TTL_MS = 5_000;
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, {
@@ -481,6 +483,7 @@ function getRun(runId, event, ctx) {
       modelSpanIds: new Map(),
       llmInputStash: null,
       llmInputPending: false,
+      cycleInputSnapshot: null,
       completed: false,
       sessionId: null,
       provider: null,
@@ -587,6 +590,7 @@ function resetCompletedRunState(run) {
   run.modelSpanIds.clear();
   run.llmInputStash = null;
   run.llmInputPending = false;
+  run.cycleInputSnapshot = null;
   run.userPromptText = null;
   run.systemPrompt = null;
   run.modelCallEnds.clear();
@@ -697,21 +701,85 @@ function inferProviderName(provider, model) {
 // Message format helpers (ARMS nested parts structure)
 // ---------------------------------------------------------------------------
 
-function buildUserInputMessages(systemPrompt, userPromptText) {
-  const messages = [];
+function historyInputMessage(message) {
+  if (!message || typeof message !== "object") return undefined;
+  if (Array.isArray(message.content)) message = { ...message, content: message.content.slice(0, 64) };
+  if (message.role === "assistant") {
+    return buildAssistantOutputMessagesFromOpenClawMessage(message)?.[0]
+      || (typeof message.content === "string"
+        ? { role: "assistant", parts: [{ type: "text", content: truncate(message.content, MAX_CONTENT_SIZE) }] }
+        : undefined);
+  }
+  if (message.role === "toolResult" || message.role === "tool") {
+    return buildToolResultInputMessage({ message, toolCallId: message.toolCallId || message.tool_call_id });
+  }
+  if (["user", "system", "developer"].includes(message.role)) {
+    const parts = typeof message.content === "string"
+      ? [{ type: "text", content: truncate(message.content, MAX_CONTENT_SIZE) }]
+      : (Array.isArray(message.content) ? message.content : []).slice(0, 64)
+          .filter(block => block?.type === "text" && typeof block.text === "string")
+          .map(block => ({ type: "text", content: truncate(block.text, MAX_CONTENT_SIZE) }));
+    if (parts.length) return { role: message.role, parts };
+  }
+  return undefined;
+}
+
+function buildUserInputMessages(systemPrompt, userPromptText, historyMessages) {
+  const prefix = [];
   if (systemPrompt) {
-    messages.push({
+    prefix.push({
       role: "system",
       parts: [{ type: "text", content: truncate(systemPrompt, MAX_CONTENT_SIZE) }],
     });
   }
+  const suffix = [];
   if (userPromptText) {
-    messages.push({
+    suffix.push({
       role: "user",
       parts: [{ type: "text", content: truncate(userPromptText, MAX_CONTENT_SIZE) }],
     });
   }
-  return messages.length > 0 ? messages : undefined;
+  // llm_input.historyMessages excludes the prompt being submitted. Snapshot
+  // the host's replay view now, retaining recent history within a byte budget
+  // rather than keeping the caller's mutable/unbounded objects in run state.
+  const history = Array.isArray(historyMessages) ? historyMessages : [];
+  const captured = [];
+  let bytes = Buffer.byteLength(safeStringify([...prefix, ...suffix]), "utf8");
+  let truncated = false;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history.length - 1 - i >= MAX_INPUT_MESSAGES
+        || captured.length >= MAX_INPUT_MESSAGES - prefix.length - suffix.length) { truncated = true; break; }
+    if (Array.isArray(history[i]?.content) && history[i].content.length > 64) truncated = true;
+    const message = historyInputMessage(history[i]);
+    if (!message) continue;
+    bytes += Buffer.byteLength(safeStringify(message), "utf8") + 1;
+    if (bytes > MAX_INPUT_BYTES) { truncated = true; break; }
+    captured.push(message);
+  }
+  const messages = [...prefix, ...captured.reverse(), ...suffix];
+  return { messages: messages.length ? messages : undefined, requiredMessages: [...prefix, ...suffix], truncated };
+}
+
+function appendCycleInputMessages(snapshot, delta) {
+  const messages = [...(snapshot.messages || []), ...delta];
+  // Reserve the cycle's system/prompt while retaining the most recent replay
+  // and tool inputs. Full snapshots must remain bounded as a tool loop grows.
+  const required = new Set(snapshot.requiredMessages);
+  const keep = new Set(required);
+  let bytes = Buffer.byteLength(safeStringify(snapshot.requiredMessages), "utf8");
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (required.has(message)) continue;
+    const size = Buffer.byteLength(safeStringify(message), "utf8") + 1;
+    if (keep.size >= MAX_INPUT_MESSAGES || bytes + size > MAX_INPUT_BYTES) {
+      snapshot.truncated = true;
+      break;
+    }
+    bytes += size;
+    keep.add(message);
+  }
+  // Do not mutate arrays already emitted on earlier requests.
+  snapshot.messages = messages.filter(message => keep.has(message));
 }
 
 function buildToolDefinitions(tools) {
@@ -1031,10 +1099,11 @@ function handleLlmInput(event, ctx, userId, emit, cfg) {
     bindSessionRun(sessionKey, runId);
   }
   run.llmInputStash = {
-    systemPrompt: event.systemPrompt,
-    tools: event.tools,
-    prompt: event.prompt,
-    imagesCount: event.imagesCount,
+    ...buildUserInputMessages(event.systemPrompt, event.prompt, event.historyMessages),
+    systemInstructions: event.systemPrompt
+      ? [{ type: "text", content: truncate(event.systemPrompt, MAX_CONTENT_SIZE) }]
+      : undefined,
+    toolDefinitions: safeJsonClone(buildToolDefinitions(event.tools)),
   };
   run.llmInputPending = true;
   if (event?.provider) run.provider = event.provider;
@@ -1074,19 +1143,34 @@ function handleModelCallStarted(event, ctx, userId, emit) {
   const startsAgentCycle = run.llmInputPending;
   run.llmInputPending = false;
   const stash = run.llmInputStash;
-  const inputMessages = startsAgentCycle && stash
-    ? buildUserInputMessages(stash.systemPrompt, stash.prompt)
-    : undefined;
-  const inputDelta = startsAgentCycle && stash?.prompt
-    ? [{ role: "user", parts: [{ type: "text", content: truncate(stash.prompt, MAX_CONTENT_SIZE) }] }]
+  if (startsAgentCycle) {
+    // The converter accumulates deltas across the entire turn and does not
+    // reset them on a full request. A same-runId fallback therefore needs an
+    // authoritative snapshot on every later step, not another history seed.
+    run.cycleInputSnapshot = run.callSeq > 1 && stash ? {
+      messages: stash.messages,
+      requiredMessages: stash.requiredMessages,
+      truncated: stash.truncated,
+    } : null;
+  }
+  const inputDelta = startsAgentCycle && stash
+    // The first cycle can use deltas; fallback cycles must not seed history
+    // again into that same accumulator. Keep normal tool loops incremental.
+    ? (run.cycleInputSnapshot ? undefined
+        : stash.messages?.filter(message => message.role !== "system" && message.role !== "developer"))
     : (run.pendingToolInputMessages.length > 0
         ? run.pendingToolInputMessages.splice(0)
         : undefined);
-  const systemInstructions = startsAgentCycle && stash?.systemPrompt
-    ? [{ type: "text", content: truncate(stash.systemPrompt, MAX_CONTENT_SIZE) }]
-    : undefined;
-  const toolDefinitions = startsAgentCycle ? buildToolDefinitions(stash?.tools) : undefined;
-  if (startsAgentCycle) run.llmInputStash = null;
+  if (!startsAgentCycle && run.cycleInputSnapshot && inputDelta) {
+    appendCycleInputMessages(run.cycleInputSnapshot, inputDelta);
+  }
+  const inputMessages = startsAgentCycle ? stash?.messages : run.cycleInputSnapshot?.messages;
+  const systemInstructions = startsAgentCycle ? stash?.systemInstructions : undefined;
+  const toolDefinitions = startsAgentCycle ? stash?.toolDefinitions : undefined;
+  if (startsAgentCycle) {
+    run.llmInputStash = null;
+    run.pendingToolInputMessages.length = 0;
+  }
 
   const record = {
     ...common,
@@ -1098,9 +1182,10 @@ function handleModelCallStarted(event, ctx, userId, emit) {
     "gen_ai.request.model": event?.model || run.model,
     "gen_ai.response.model": event?.model || run.model,
     "gen_ai.input.messages": truncateContent(inputMessages),
-    "gen_ai.input.messages_delta": inputDelta,
+    "gen_ai.input.messages_delta": run.cycleInputSnapshot ? undefined : inputDelta,
     "gen_ai.system_instructions": systemInstructions,
     "gen_ai.tool.definitions": truncateContent(toolDefinitions),
+    "agent.pilot.request_context.truncated": (run.cycleInputSnapshot?.truncated || (startsAgentCycle && stash?.truncated)) ? true : undefined,
     "agent.openclaw.hook": "model_call_started",
     "agent.openclaw.call_id": event?.callId,
     "agent.openclaw.api": event?.api,
@@ -1460,6 +1545,12 @@ function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = tr
       || (message.usage && typeof message.usage === "object")
       || typeof message.responseId === "string";
     if (!rawOutputMessages && !hasTerminalMetadata) return;
+    // The converter accumulates request deltas; it does not copy responses
+    // into the next request. Persisted assistant messages are observed input
+    // for the following model call, before the matching tool results.
+    if (rawOutputMessages) {
+      for (const output of rawOutputMessages) pushBounded(run.pendingToolInputMessages, safeJsonClone(output));
+    }
     const outputMessages = addFinishReason(rawOutputMessages, finishReason);
     const usage = normalizeUsage(message.usage);
     const ended = run.modelCallEnds.get(targetCallId);
