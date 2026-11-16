@@ -2436,8 +2436,8 @@ impl OtlpInner {
             row.pending_buffers += 1;
             let records = (buffer.records.len() + buffer.spilled_records) as u64;
             row.pending_records += records;
-            if row.resident_records.is_some() {
-                *row.resident_records.as_mut().expect("Codex gauge") += buffer.records.len() as u64;
+            if let Some(resident_records) = &mut row.resident_records {
+                *resident_records += buffer.records.len() as u64;
                 *row.resident_payload_bytes.as_mut().expect("Codex gauge") +=
                     buffer.resident_bytes as u64;
                 *row.spilled_buffers.as_mut().expect("Codex gauge") +=
