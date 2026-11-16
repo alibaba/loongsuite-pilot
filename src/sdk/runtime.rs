@@ -325,6 +325,21 @@ fn run_agent(
         .iter()
         .map(|s| super::policy::canonical_candidate(&s.path))
         .collect::<anyhow::Result<Vec<_>>>()?;
+    if let Some(state) = &plan.pilot_qoder {
+        for relative in [
+            "state/qoder-transcripts/qoder",
+            "logs/input-state.json",
+            "logs/qoder",
+            "state/workspace-exclusions",
+        ] {
+            let path = super::policy::canonical_candidate(&state.data_dir.join(relative))?;
+            anyhow::ensure!(
+                path.starts_with(&state.data_dir),
+                "Pilot source {relative} escapes its data directory"
+            );
+            roots.push(path);
+        }
+    }
     // Resource files and another source's SDK state are not collection
     // capabilities. Inputs only need their own checkpoint/wakeup namespace.
     roots.push(state_dir.canonicalize()?);
@@ -340,6 +355,9 @@ fn run_agent(
         .on_thread_stop(|| source_access::install(None))
         .build()?;
     let store = Arc::new(StateStore::new(&checkpoint));
+    if let Some(state) = &plan.pilot_qoder {
+        runtime.block_on(import_pilot_qoder_checkpoint(&state.data_dir, &checkpoint))?;
+    }
     runtime.block_on(store.load());
     let journal = queue.clone();
     let source = namespace.clone();
@@ -361,6 +379,34 @@ fn run_agent(
     let manager = Arc::new(InputManager::new());
     manager.set_state_store(store.clone());
     manager.set_mask_config(plan.mask.clone());
+    if let Some(state) = &plan.pilot_qoder {
+        manager.set_workspace_policy(
+            crate::core::WorkspacePolicy::new(
+                &state.exclude_workspaces,
+                Some(
+                    state
+                        .data_dir
+                        .join("state/workspace-exclusions")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            )
+            .map_err(anyhow::Error::msg)?,
+        );
+    }
+    if let Some(capture_message_content) = plan
+        .pilot_qoder
+        .as_ref()
+        .and_then(|state| state.capture_message_content)
+    {
+        manager.set_agents_config(&crate::types::AgentsConfig::from([(
+            "qoder".to_owned(),
+            crate::types::AgentConfig {
+                capture_message_content: Some(capture_message_content),
+                ..Default::default()
+            },
+        )]));
+    }
     manager.set_configured_user_id(init.user_id.clone());
     manager.set_flusher(flusher);
     manager.set_intercept_result_linker(Arc::new(crate::core::InterceptResultLinker::new(
@@ -436,9 +482,16 @@ fn run_agent(
             .filter(|s| s.kind == "sqlite")
             .map(|s| s.path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let resolver=Arc::new(crate::inputs::qoder_trace::prompt_ownership::NativeQoderPromptOwnershipResolver::with_paths(paths.clone()));
+        use crate::inputs::qoder_trace::prompt_ownership::NativeQoderPromptOwnershipResolver;
+        let standalone = plan.pilot_qoder.is_some();
+        let resolver = Arc::new(if standalone {
+            NativeQoderPromptOwnershipResolver::default()
+        } else {
+            NativeQoderPromptOwnershipResolver::with_paths(paths.clone())
+        });
         let readers = Arc::new(AuthorizedReaders {
             databases: paths,
+            standalone,
             segments: source_path("segments"),
             intercept: source_path("intercept"),
             intercept_index: Default::default(),
@@ -455,7 +508,9 @@ fn run_agent(
                     upload_mode: None,
                     allowed_root_paths: Vec::new(),
                 },
-                state_dir.clone(),
+                plan.pilot_qoder
+                    .as_ref()
+                    .map_or_else(|| state_dir.clone(), |state| state.data_dir.clone()),
                 readers,
                 resolver,
             ));
@@ -574,6 +629,25 @@ fn live<T: Send + Sync + 'static>(
     )
 }
 
+async fn import_pilot_qoder_checkpoint(data_dir: &Path, target: &Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(target) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let legacy_path = data_dir.join("logs/input-state.json");
+    let body = match source_access::read_to_string(&legacy_path).await {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let legacy: serde_json::Map<String, Value> = serde_json::from_str(&body)?;
+    if let Some(qoder) = legacy.get("qoder-trace") {
+        write_checkpoint(target, &json!({"qoder-trace":qoder}).to_string())?;
+    }
+    Ok(())
+}
+
 fn write_checkpoint(path: &Path, text: &str) -> anyhow::Result<()> {
     use std::io::Write;
     let parent = path
@@ -589,6 +663,7 @@ fn write_checkpoint(path: &Path, text: &str) -> anyhow::Result<()> {
 }
 struct AuthorizedReaders {
     databases: Vec<String>,
+    standalone: bool,
     segments: Option<String>,
     intercept: Option<String>,
     intercept_index: tokio::sync::Mutex<crate::inputs::qoder_trace::InterceptTokenIndex>,
@@ -633,6 +708,9 @@ impl QoderTraceReaders for AuthorizedReaders {
         &self,
         session: &str,
     ) -> crate::inputs::qoder_trace::SqliteTokenResult {
+        if self.standalone {
+            return crate::inputs::qoder_trace::read_sqlite_tokens_for_session(session).await;
+        }
         crate::inputs::qoder_trace::read_sqlite_tokens(session, &self.databases).await
     }
     async fn read_ide_images(
@@ -680,6 +758,7 @@ mod authorized_cache_binding_tests {
         source_access::install(Some(SourceScope::new(vec![dir.clone()], 1, 1024 * 1024)));
         let readers: Arc<dyn QoderTraceReaders> = Arc::new(AuthorizedReaders {
             databases: Vec::new(),
+            standalone: false,
             segments: None,
             intercept: Some(file.to_string_lossy().into_owned()),
             intercept_index: Default::default(),
@@ -867,6 +946,7 @@ mod authorized_cache_binding_tests {
         let readers = Arc::new(ObservedReaders {
             actual: AuthorizedReaders {
                 databases: Vec::new(),
+                standalone: false,
                 segments: None,
                 intercept: Some(intercept.to_string_lossy().into_owned()),
                 intercept_index: Default::default(),

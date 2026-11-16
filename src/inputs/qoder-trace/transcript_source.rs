@@ -1445,6 +1445,9 @@ impl Collector {
                 .iter()
                 .any(|row| subagents::notification(row).is_some());
         if !has_calls && child.is_none() && !has_notice && cp.get("delegationTrace").is_none() {
+            for record in records {
+                record["gen_ai.agent.id"] = json!(session);
+            }
             return;
         }
 

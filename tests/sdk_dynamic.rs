@@ -880,9 +880,13 @@ fn qoder_native_wakeup_transcript_and_checkpoint_share_the_dynamic_delivery_path
         .lock()
         .unwrap()
         .iter()
-        .any(|bytes| serde_json::from_slice::<Value>(bytes)
-            .is_ok_and(|v| v["gen_ai.session.id"] == "both-stops-session"
-                && v["event.name"] == "tool.call")));
+        .any(
+            |bytes| serde_json::from_slice::<Value>(bytes).is_ok_and(|v| v["gen_ai.session.id"]
+                == "both-stops-session"
+                && v["gen_ai.agent.id"] == v["gen_ai.session.id"]
+                && v["event.name"] == "tool.call"
+                && v["workspace.path"] == json!(root.path()))
+        ));
     until(|| host.snapshot()["delivery"]["pending_events"] == 0);
     host.stop();
 }

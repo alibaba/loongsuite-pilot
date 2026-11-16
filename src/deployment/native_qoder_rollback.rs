@@ -2,7 +2,7 @@
 
 use super::hook_assets::HookAssets;
 use super::hook_strategy::{
-    installed_qoder_hook_binary, pilot_binary_name, plan_qoder_exec_install,
+    installed_qoder_hook_binary, pilot_binary_name, plan_qoder_exec_install, sdk_hook_binary_name,
 };
 use super::native_install::read_pointer;
 use super::persisted_deploy_paths::definition_at_hook_settings;
@@ -32,12 +32,11 @@ pub(super) async fn restore_legacy_hooks(
     let Some(current) = read_pointer(&cache.join("current"))? else {
         return Ok(());
     };
-    let binary = cache
-        .join("versions")
-        .join(current)
-        .join("bin")
-        .join(pilot_binary_name());
-    let mut binaries = vec![binary];
+    let bin = cache.join("versions").join(current).join("bin");
+    let mut binaries = vec![
+        bin.join(pilot_binary_name()),
+        bin.join(sdk_hook_binary_name()),
+    ];
     if let Some(runtime) = super::runtime_launcher::RuntimeLauncher::read(cache, data)? {
         binaries.push(runtime.hook_path().to_owned());
     }
@@ -98,8 +97,14 @@ pub(super) async fn restore_legacy_hooks(
                 let original = String::from_utf8(bytes).context("Invalid Qoder settings UTF-8")?;
                 let mut raw = original.clone();
                 for binary in &binaries {
-                    if let Some(edited) = plan_qoder_legacy_restore(&raw, &definition, data, binary)
-                        .map_err(anyhow::Error::msg)?
+                    if let Some(edited) = plan_qoder_legacy_restore(
+                        &raw,
+                        &definition,
+                        data,
+                        binary,
+                        manifest.runtime == "node",
+                    )
+                    .map_err(anyhow::Error::msg)?
                     {
                         raw = edited;
                     }
@@ -196,6 +201,8 @@ mod tests {
         }
         fs::write(cache.join("current"), b"current\n").unwrap();
         fs::write(&executable, b"fixture native binary").unwrap();
+        let helper = executable.with_file_name(sdk_hook_binary_name());
+        fs::write(&helper, b"fixture shared hook").unwrap();
         let mut definition: serde_json::Value =
             serde_json::from_str(include_str!("../../agents.d/qoder.json")).unwrap();
         definition["hook"]["settingsPath"] = json!(settings);
@@ -222,9 +229,10 @@ mod tests {
             "Stop":[{"matcher":"*","hooks":[stop,custom]}],
             "PreToolUse":[{"matcher":"*","hooks":[intercept]}]
         }});
-        for path in [&settings, &alternate] {
-            fs::write(path, before.to_string()).unwrap();
-        }
+        fs::write(&settings, before.to_string()).unwrap();
+        let mut alternate_before = before.clone();
+        alternate_before["hooks"]["Stop"][0]["hooks"][0]["command"] = json!(helper);
+        fs::write(&alternate, alternate_before.to_string()).unwrap();
         restore_legacy_hooks(&previous, &manifest, &cache, &data)
             .await
             .unwrap();

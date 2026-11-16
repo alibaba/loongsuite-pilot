@@ -631,6 +631,63 @@ write_config
 }
 
 #[test]
+fn installer_rolls_back_only_to_the_installed_node_previous() {
+    let fixture = Fixture::new();
+    fixture.package();
+    let cache = fixture.root.path().join("cache");
+    let old = cache.join("versions/1.17.1_83fc84c");
+    for directory in ["dist", "node_modules", "scripts", "agents.d"] {
+        fs::create_dir_all(old.join(directory)).unwrap();
+    }
+    for (path, content) in [
+        ("VERSION", "version=1.17.1\n"),
+        (
+            "package.json",
+            r#"{"name":"loongsuite-pilot","version":"1.17.1"}"#,
+        ),
+        ("dist/index.js", "// installed Node entry"),
+        ("scripts/collector-daemon.js", "// collector"),
+        (
+            "scripts/loongsuite-pilot.sh",
+            "#!/bin/bash\n# Node service\n",
+        ),
+        ("scripts/loongsuite-pilot.ps1", "# Node service\n"),
+        (
+            "agents.d/qoder.json",
+            include_str!("../agents.d/qoder.json"),
+        ),
+    ] {
+        fs::write(old.join(path), content).unwrap();
+    }
+    fs::write(cache.join("current"), b"native\n").unwrap();
+    fs::write(cache.join("previous"), b"other\n").unwrap();
+    let options = fixture.runtime_options(&old);
+    assert!(!fixture
+        .helper("rollback-package", &options, true)
+        .status
+        .success());
+    assert_eq!(fs::read(cache.join("current")).unwrap(), b"native\n");
+
+    fs::write(cache.join("previous"), b"1.17.1_83fc84c\n").unwrap();
+    success(&fixture.helper("rollback-package", &options, true));
+    assert_eq!(
+        fs::read(cache.join("current")).unwrap(),
+        b"1.17.1_83fc84c\n"
+    );
+    assert_eq!(fs::read(cache.join("previous")).unwrap(), b"native\n");
+    let bin_dir = fixture.root.path().join(".local/bin");
+    let script = bin_dir.join(if cfg!(windows) {
+        "loongsuite-pilot-service.ps1"
+    } else {
+        "loongsuite-pilot"
+    });
+    assert!(fs::read_to_string(script)
+        .unwrap()
+        .contains("# Node service"));
+    assert_eq!(fixture.config(), json!({}));
+}
+
+#[test]
 fn native_staging_and_publication_preserve_versions_and_bind_service_paths() {
     let fixture = Fixture::new();
     fixture.package();

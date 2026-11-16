@@ -180,7 +180,16 @@ pub async fn enrich_canonical_entry_with_git(
 /// A failed probe is logged and skipped. Later entries in the batch still run.
 #[allow(clippy::unused_async)]
 pub async fn enrich_canonical_entries_with_git(entries: &mut [AgentActivityEntry]) {
-    enrich_canonical_entries_with_git_using(entries, |dir| Ok(infer_git_context_sync(dir)));
+    let has_source_scope = crate::utils::source_access::current().is_some();
+    enrich_canonical_entries_with_git_using(entries, |dir| {
+        Ok(if has_source_scope {
+            // The event already reports its workspace. Do not run Git against
+            // host paths when only the collection sources have been authorized.
+            GitContextResult::default()
+        } else {
+            infer_git_context_sync(dir)
+        })
+    });
 }
 
 /// Infer git repo, branch, domain, and root for a directory.

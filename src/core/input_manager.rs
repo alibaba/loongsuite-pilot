@@ -656,7 +656,7 @@ impl InputManager {
         if let Some(linker) = self.intercept_linker.lock().expect("intercept").clone() {
             linker.enrich(&mut entries);
         }
-        if crate::utils::source_access::current().is_none() {
+        if input_id == "qoder-trace" || crate::utils::source_access::current().is_none() {
             enrich_canonical_entries_with_git(&mut entries).await;
         }
         if let Some(counter) = self.counters.lock().expect("counters").get_mut(input_id) {
@@ -785,6 +785,53 @@ impl InputManager {
             .map(serde_json::to_vec)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?;
+        self.dispatch_encoded(input_id, entries, encoded).await
+    }
+
+    pub(super) async fn accept_sdk_batch(
+        &self,
+        input_id: &str,
+        entries: Vec<AgentActivityEntry>,
+        encoded: Vec<Vec<u8>>,
+    ) -> Result<(), String> {
+        if self.flusher.lock().expect("flusher").is_none() {
+            return Err("Pilot output is not configured".into());
+        }
+        if let Some(counter) = self.counters.lock().expect("counters").get_mut(input_id) {
+            counter.in_events += entries.len() as u64;
+            counter.in_bytes += encoded.iter().map(|row| row.len() as u64).sum::<u64>();
+            counter.last_poll_time = format_time(Local::now());
+            counter.last_active_time = now_ms();
+        }
+        self.dispatch_encoded(input_id, entries, encoded).await
+    }
+
+    pub(super) fn accept_sdk_alarm(&self, input_id: &str, row: &serde_json::Value) {
+        let alarm = self.alarm_manager.lock().expect("alarm").clone();
+        let (Some(alarm), Some(kind), Some(message)) = (
+            alarm,
+            row["alarm_type"].as_str(),
+            row["alarm_message"].as_str(),
+        ) else {
+            return;
+        };
+        alarm.record(
+            kind,
+            row["alarm_level"].as_str().unwrap_or("2"),
+            message,
+            Some(AlarmContext {
+                input_name: Some(input_id.to_owned()),
+                endpoint_name: None,
+            }),
+        );
+    }
+
+    async fn dispatch_encoded(
+        &self,
+        input_id: &str,
+        entries: Vec<AgentActivityEntry>,
+        encoded: Vec<Vec<u8>>,
+    ) -> Result<(), String> {
         let batch_bytes = encoded.iter().map(|row| row.len() as u64).sum();
         let flusher = self.flusher.lock().expect("flusher").clone();
         let Some(flusher) = flusher else {

@@ -69,19 +69,20 @@ pub(super) async fn run_with_retirement(
         paths.config_options.is_none() || !matches!(operation, "sync-service" | "rollback-package"),
         "服务同步不允许修改配置"
     );
-    let rollback_version = (operation == "rollback-package")
-        .then(|| rollback_source_version(&paths))
-        .transpose()?;
-    let manifest = validate_runtime(
-        &paths.source_dir,
-        rollback_version
-            .as_deref()
-            .unwrap_or(env!("CARGO_PKG_VERSION")),
-        build_target(),
-        build_edition(),
-    )?;
+    let manifest = if operation == "rollback-package" {
+        rollback_manifest(&paths)?
+    } else {
+        validate_runtime(
+            &paths.source_dir,
+            env!("CARGO_PKG_VERSION"),
+            build_target(),
+            build_edition(),
+        )?
+    };
     let prepared = PreparedConfig::load(&paths)?;
-    preflight(&paths, &manifest, prepared.as_ref()).await?;
+    if manifest.runtime == "rust" {
+        preflight(&paths, &manifest, prepared.as_ref()).await?;
+    }
     private_directory(&paths.cache_dir)?;
     let lock = paths.cache_dir.join("update.lock");
     super::with_deployed_state_lock(
@@ -122,13 +123,22 @@ pub(super) async fn run_with_retirement(
                                 );
                                 recover_runtime_files_with_data(&paths.cache_dir, targets.clone(), &paths.data_dir)?;
                                 let prepared = PreparedConfig::load(&paths)?;
-                                if operation == "rollback-package" {
-                                    ensure!(rollback_source_version(&paths)? == manifest.version,
-                                        "回滚目标在等待锁期间被修改");
-                                    validate_runtime(&paths.source_dir, &manifest.version,
-                                        build_target(), build_edition())?;
-                                }
-                                let qoder_direct_hooks = preflight(&paths, &manifest, prepared.as_ref()).await?;
+                                let checked;
+                                let manifest = if operation == "rollback-package" {
+                                    checked = rollback_manifest(&paths)?;
+                                    ensure!(
+                                        checked.version == manifest.version && checked.runtime == manifest.runtime,
+                                        "回滚目标在等待锁期间被修改"
+                                    );
+                                    &checked
+                                } else {
+                                    &manifest
+                                };
+                                let qoder_direct_hooks = if manifest.runtime == "rust" {
+                                    preflight(&paths, manifest, prepared.as_ref()).await?
+                                } else {
+                                    false
+                                };
                                 check_service_owner(
                                     &destination,
                                     &paths.cache_dir,
@@ -154,22 +164,22 @@ pub(super) async fn run_with_retirement(
                                 let resources = if publish {
                                     super::runtime_data_assets::recover_eager(&paths.data_dir).await?;
                                     let plan = super::runtime_data_assets::RuntimeDataAssets::load(
-                                        &paths.source_dir, &paths.data_dir, &paths.cache_dir, &manifest,
+                                        &paths.source_dir, &paths.data_dir, &paths.cache_dir, manifest,
                                     )?;
                                     targets.extend(plan.targets(&paths.data_dir, paths.deploy_hooks)?);
                                     Some(plan)
                                 } else { None };
                                 let mut transaction =
                                     ActivationTransaction::begin(&paths.cache_dir, targets)?;
+                                if let Some(plan) = &resources {
+                                    plan.install(&mut transaction, paths.deploy_hooks)?;
+                                }
                                 if operation == "rollback-package"
                                     || (operation == "publish-package" && !qoder_direct_hooks)
                                 {
                                     super::native_qoder_rollback::restore_legacy_hooks(
-                                        &paths.source_dir, &manifest, &paths.cache_dir, &paths.data_dir,
-                                    ).await.context("恢复旧版本 Qoder Hook 失败；保留当前版本")?;
-                                }
-                                if let Some(plan) = &resources {
-                                    plan.install(&mut transaction, paths.deploy_hooks)?;
+                                        &paths.source_dir, manifest, &paths.cache_dir, &paths.data_dir,
+                                    ).await.map_err(|error| anyhow::anyhow!("恢复旧版本 Qoder Hook 失败；保留当前版本：{error:#}"))?;
                                 }
                                 if let Some(prepared) = &prepared {
                                     ensure!(
@@ -182,7 +192,7 @@ pub(super) async fn run_with_retirement(
                                 let qoder_settings = if paths.deploy_hooks {
                                     let report = candidate_command(
                                         &paths,
-                                        &manifest,
+                                        manifest,
                                         &paths.config_path,
                                         &["hook", "install", "--json"],
                                     )
@@ -240,7 +250,7 @@ pub(super) async fn run_with_retirement(
                                     }
                                 }
                                 if let Some(plan) = &resources { plan.report(); }
-                                if publish {
+                                if publish && manifest.runtime == "rust" {
                                     if let Err(error) = super::runtime_retirement::cleanup_all(
                                         &paths.data_dir.to_string_lossy(), &retirement,
                                     ).await {
@@ -251,13 +261,15 @@ pub(super) async fn run_with_retirement(
                                         eprintln!("[runtime-retirement] post-commit cleanup failed; native publication remains committed; retry next watchdog/installer attempt: {error}");
                                     }
                                 }
-                                if let Err(error) = cleanup_legacy_windows_cli(
+                                if manifest.runtime == "rust" {
+                                    if let Err(error) = cleanup_legacy_windows_cli(
                                     &destination, &paths.cache_dir, &paths.data_dir,
                                 ) {
                                     crate::utils::create_logger("NativeInstall").warn(
                                         "legacy CLI cleanup failed; native publication remains committed",
                                         json!({"error":format!("{error:#}")}).as_object(),
                                     );
+                                }
                                 }
                                 Ok(String::new())
                             },
@@ -275,10 +287,9 @@ pub(super) async fn run_with_retirement(
     .await
 }
 
-/// Rollback uses the current helper's validation and container capability
-/// gates, while accepting the installed previous native version's own semver.
-/// No caller-supplied package can replace the guarded previous pointer.
-fn rollback_source_version(paths: &InstallPaths) -> Result<String> {
+/// The previous pointer authorizes the rollback target, including an installed
+/// Node release that predates native manifests.
+fn rollback_manifest(paths: &InstallPaths) -> Result<RuntimeManifest> {
     ensure!(
         paths.config_options.is_none() && !paths.deploy_hooks,
         "回滚不允许修改配置或重新部署 Hook"
@@ -294,6 +305,35 @@ fn rollback_source_version(paths: &InstallPaths) -> Result<String> {
         paths.source_dir == paths.cache_dir.join("versions").join(previous),
         "回滚目标与本安装 previous 指针不匹配"
     );
+    match fs::symlink_metadata(paths.source_dir.join("runtime-manifest.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            use super::runtime_data_assets::{installed_node_version, node_rollback_resources};
+            let version = installed_node_version(&paths.source_dir)?
+                .context("previous 不是已安装的 Node Pilot 包")?;
+            ensure!(
+                runtime_metadata(&paths.source_dir.join("node_modules"))?.is_dir(),
+                "previous 的 Node 依赖不可用"
+            );
+            resource_file(&paths.source_dir, "scripts/collector-daemon.js")?;
+            ensure!(
+                super::runtime_launcher::RuntimeLauncher::read(&paths.cache_dir, &paths.data_dir)?
+                    .is_none(),
+                "托管容器入口不能切换为 Node Pilot"
+            );
+            return Ok(RuntimeManifest {
+                schema: 1,
+                runtime: "node".into(),
+                version,
+                git_commit: String::new(),
+                target: build_target().into(),
+                edition: build_edition().into(),
+                binary: "dist/index.js".into(),
+                resources: node_rollback_resources(&paths.source_dir, &paths.data_dir)?,
+            });
+        }
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
     let manifest_path = resource_file(&paths.source_dir, "runtime-manifest.json")?;
     let mut bytes = Vec::new();
     fs::File::open(manifest_path)?
@@ -301,7 +341,12 @@ fn rollback_source_version(paths: &InstallPaths) -> Result<String> {
         .read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= 4 * 1024 * 1024, "回滚运行清单大小超限");
     let manifest: RuntimeManifest = serde_json::from_slice(&bytes).context("回滚运行清单无效")?;
-    Ok(manifest.version)
+    validate_runtime(
+        &paths.source_dir,
+        &manifest.version,
+        build_target(),
+        build_edition(),
+    )
 }
 
 pub(super) fn read_pointer(path: &Path) -> Result<Option<String>> {

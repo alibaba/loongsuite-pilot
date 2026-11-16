@@ -79,6 +79,28 @@ pub fn run_hook_process(agent: &str) -> i32 {
     dispatch(agent, terminal, &raw, &args, &env, &mut stdout, started)
 }
 
+/// Execute the Qoder publication mode used by installed native exec Hooks.
+pub(crate) fn run_qoder_wakeup_captured(args: &[String], stdin: &[u8]) -> (i32, String) {
+    let Some(data) = args
+        .windows(2)
+        .find(|pair| pair[0] == "--data-dir")
+        .map(|pair| &pair[1])
+        .filter(|path| std::path::Path::new(path).is_absolute())
+    else {
+        return (0, "{}\n".into());
+    };
+    let mut env: Env = std::env::vars().collect();
+    env.insert("LOONGSUITE_PILOT_DATA_DIR".into(), data.clone());
+    let mut stdout = Vec::new();
+    let code = qoder::run(&mut HookRequest {
+        args,
+        stdin,
+        env: &env,
+        stdout: &mut stdout,
+    });
+    (code, String::from_utf8(stdout).unwrap_or_default())
+}
+
 pub(crate) fn dispatch(
     agent: &str,
     terminal: bool,
