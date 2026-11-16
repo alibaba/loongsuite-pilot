@@ -87,6 +87,69 @@ it('preserves resumed OpenClaw history and assistant/tool inputs in every conver
   expect(spans.every(span => String(span.attributes['gen_ai.tool.definitions']).includes('read'))).toBe(true);
 });
 
+it.each([
+  { completed: false, limit: 'none' }, { completed: true, limit: 'none' },
+  { completed: true, limit: 'count' }, { completed: true, limit: 'bytes' },
+])('exports only the current OpenClaw fallback cycle after tools (completed=$completed, limit=$limit)', async ({ completed, limit }) => {
+  const root = await pilotRoot();
+  vi.stubEnv('LOONGSUITE_PILOT_DATA_DIR', root);
+  const pluginPath = process.env.PILOT_OPENCLAW_TEST_PLUGIN || path.resolve('assets/plugins/openclaw/plugin.mjs');
+  const plugin = (await import(`${pluginPath}?fallback-context=${Date.now()}-${completed}-${limit}`)).default;
+  const handlers: Record<string, (event: any, ctx: any) => unknown> = {};
+  plugin.register({ runtime: { version: '2026.6.10' }, on(name: string, handler: any) { handlers[name] = handler; } });
+  const ctx = { runId: 'fallback-run', sessionId: 'fallback-session', sessionKey: 'agent:main:fallback' };
+  const historyMessages = [{ role: 'user', content: 'old user' }, { role: 'assistant', content: 'old assistant' }];
+  if (limit !== 'none') historyMessages.unshift(...Array.from({ length: limit === 'count' ? 1020 : 34 }, (_, i) => ({
+    role: i % 2 ? 'assistant' : 'user', content: `history-${i}:` + (limit === 'bytes' ? 'x'.repeat(65_000) : 'earlier'),
+  })));
+  const toolResult = limit === 'bytes' ? 'r'.repeat(65_000) : 'file contents';
+  await handlers.llm_input({ ...ctx, prompt: 'original prompt', historyMessages }, ctx);
+  await handlers.model_call_started({ ...ctx, callId: 'native-1', provider: 'test', model: 'original-model' }, ctx);
+  await handlers.model_call_ended({ ...ctx, callId: 'native-1', outcome: 'error' }, ctx);
+  await handlers.before_message_write({ message: { role: 'assistant', content: [], stopReason: 'error',
+    usage: { input: 10, output: 0 }, responseId: 'original-error' } }, ctx);
+  if (completed) await handlers.llm_output({ ...ctx }, ctx);
+
+  await handlers.llm_input({ ...ctx, prompt: 'fallback prompt', historyMessages, systemPrompt: 'fallback rule' }, ctx);
+  // The host restarts its native call counter, while Pilot retains the trace.
+  await handlers.model_call_started({ ...ctx, callId: 'native-1', provider: 'test', model: 'fallback-model' }, ctx);
+  await handlers.model_call_ended({ ...ctx, callId: 'native-1' }, ctx);
+  await handlers.before_message_write({ message: { role: 'assistant', content: [
+    { type: 'toolCall', id: 'fallback-read', name: 'read', arguments: { path: 'fixture.txt' } },
+  ], stopReason: 'toolUse', usage: { input: 20, output: 2 }, responseId: 'fallback-tool' } }, ctx);
+  await handlers.before_tool_call({ ...ctx, toolName: 'read', toolCallId: 'fallback-read', params: { path: 'fixture.txt' } }, ctx);
+  await handlers.after_tool_call({ ...ctx, toolName: 'read', toolCallId: 'fallback-read', result: { content: toolResult } }, ctx);
+  await handlers.tool_result_persist({ toolCallId: 'fallback-read', message: {
+    role: 'toolResult', toolCallId: 'fallback-read', content: [{ type: 'text', text: toolResult }],
+  } }, ctx);
+  await handlers.model_call_started({ ...ctx, callId: 'native-2', provider: 'test', model: 'fallback-model' }, ctx);
+  await handlers.model_call_ended({ ...ctx, callId: 'native-2' }, ctx);
+  await handlers.before_message_write({ message: { role: 'assistant', content: [{ type: 'text', text: 'recovered' }],
+    stopReason: 'stop', usage: { input: 30, output: 3 }, responseId: 'fallback-final' } }, ctx);
+  await handlers.llm_output({ ...ctx }, ctx);
+
+  const spans: any[] = [];
+  const flusher = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318' }],
+    protocol: 'http/protobuf', serviceName: 'fallback-context' }, undefined, () => ({
+    export(batch, callback) { spans.push(...batch); callback({ code: 0 }); }, async shutdown() {},
+  }));
+  try { await flusher.sendBatch(await recordsIn(root, 'openclaw') as any); } finally { await flusher.shutdown(); }
+  const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+  expect(llms).toHaveLength(3);
+  expect(new Set(llms.map(span => span.spanContext().traceId)).size).toBe(1);
+  const final = llms.find(span => span.attributes['gen_ai.response.id'] === 'fallback-final')!;
+  const messages = JSON.parse(final.attributes['gen_ai.input.messages']);
+  if (limit === 'none') expect(messages.map((message: any) => message.role)).toEqual(['system', 'user', 'assistant', 'user', 'assistant', 'tool']);
+  expect(messages.slice(-5, -2).map((message: any) => message.parts[0].content)).toEqual(['old user', 'old assistant', 'fallback prompt']);
+  expect(messages[0]).toMatchObject({ role: 'system', parts: [{ content: 'fallback rule' }] });
+  expect(messages.at(-2).parts[0]).toMatchObject({ type: 'tool_call', id: 'fallback-read' });
+  expect(JSON.parse(messages.at(-2).parts[0].arguments)).toEqual({ path: 'fixture.txt' });
+  expect(messages.at(-1).parts[0]).toMatchObject({ type: 'tool_call_response', id: 'fallback-read', response: toolResult });
+  expect(messages.length).toBeLessThanOrEqual(1024);
+  expect(Buffer.byteLength(JSON.stringify(messages))).toBeLessThanOrEqual(2 * 1024 * 1024);
+  if (limit !== 'none') expect(final.attributes['agent.pilot.request_context.truncated']).toBe(true);
+});
+
 async function hermesRecords(history: any[], nativeMessages?: any[], request?: any) {
   const root = await pilotRoot();
   const plugin = process.env.PILOT_HERMES_TEST_PLUGIN || path.resolve('assets/plugins/hermes-agent/loongsuite-pilot/__init__.py');
@@ -159,6 +222,62 @@ it('retains Hermes request history beyond the lifecycle message and text limits'
   expect(JSON.stringify(request['gen_ai.input.messages'])).toContain('history-0');
   expect(JSON.stringify(request['gen_ai.input.messages'])).toContain('current question');
   expect(request['agent.pilot.request_context.truncated']).toBeUndefined();
+});
+
+it.each(['request', 'metadata'])('preserves escaped surrogates in Hermes %s without losing the live request or TTFT binding', async mode => {
+  const root = await pilotRoot();
+  const plugin = process.env.PILOT_HERMES_TEST_PLUGIN || path.resolve('assets/plugins/hermes-agent/loongsuite-pilot/__init__.py');
+  const run = spawnSync('python3', ['-c', `
+import importlib.util, json, os, pathlib, sys, types
+class Agent:
+    session_id = 'surrogate-session'
+    calls = 0
+    result = {'_truncated': True, 'preview': 'incomplete JSON'}
+    def _api_request_payload_for_hook(self, api_kwargs):
+        self.calls += 1
+        return self.result
+sys.modules['run_agent'] = types.SimpleNamespace(AIAgent=Agent)
+spec = importlib.util.spec_from_file_location('pilot_surrogate', os.environ['PILOT_CONTEXT_PLUGIN_PATH'])
+plugin = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(plugin)
+class Context:
+    hooks = {}
+    def register_hook(self, name, callback): self.hooks[name] = callback
+ctx = Context()
+plugin.register(ctx)
+value = os.fsdecode(b'filename-\\xff')
+metadata = sys.argv[1] == 'metadata'
+history = [{'role': 'user', 'content': 'question'},
+           {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'read-filename', 'type': 'function',
+              'function': {'name': 'read', 'arguments': '{}'}}]},
+           {'role': 'tool', 'tool_call_id': 'read-filename', 'content': 'ordinary result' if metadata else value}]
+ctx.hooks['pre_llm_call'](session_id=Agent.session_id, user_message='question', conversation_history=history)
+agent = Agent()
+body = {'messages': [{'role': 'system', 'content': value if metadata else 'ordinary rule'}, *history],
+        'tools': [{'type': 'function', 'function': {'name': 'read', 'description': value if metadata else 'read file',
+          'parameters': {'type': 'object', 'properties': {'path': {'type': 'string', 'default': value if metadata else 'fixture.txt'}}}}}]}
+request = agent._api_request_payload_for_hook(body)
+assert request is agent.result and agent.calls == 1
+ctx.hooks['pre_api_request'](session_id=Agent.session_id, task_id='surrogate-task', api_call_count=1,
+                           model='fixture-model', provider='openai', request=request, conversation_history=history)
+# Inspect before terminal/atexit recovery can conceal a missing live request.
+folder = pathlib.Path(os.environ['LOONGSUITE_PILOT_DATA_DIR']) / 'logs' / ('hermes' + '-agent')
+records = [json.loads(line) for file in folder.glob('*.jsonl') for line in file.read_text().splitlines() if line]
+print(json.dumps({'requests': sum(r.get('event.name') == 'llm.request' for r in records),
+                  'ttft_bound': plugin._TTFT_API.get() is not None}))
+`, mode], { env: { ...process.env, PILOT_CONTEXT_PLUGIN_PATH: plugin,
+    LOONGSUITE_PILOT_DATA_DIR: root, PYTHONDONTWRITEBYTECODE: '1' }, encoding: 'utf8' });
+  expect(run.status, run.error?.message || run.stderr || run.signal || '').toBe(0);
+  expect(JSON.parse(run.stdout.trim()), run.stderr).toEqual({ requests: 1, ttft_bound: true });
+  const request = (await recordsIn(root, 'hermes-agent')).find(record => record['event.name'] === 'llm.request')!;
+  const surrogate = 'filename-\udcff';
+  if (mode === 'request') {
+    expect(request['gen_ai.input.messages']?.at(-1)).toMatchObject({ role: 'tool', parts: [{ response: surrogate }] });
+  } else {
+    expect(request['gen_ai.system_instructions']).toEqual([{ type: 'text', content: surrogate }]);
+    expect(request['gen_ai.tool.definitions']?.[0]).toMatchObject({ description: surrogate,
+      parameters: { properties: { path: { default: surrogate } } } });
+  }
 });
 
 it('keeps normalized Hermes tool history when the native API uses provider-specific blocks', async () => {

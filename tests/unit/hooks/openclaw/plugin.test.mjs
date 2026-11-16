@@ -1094,8 +1094,9 @@ describe('OpenClaw plugin stateful pipeline', () => {
       'gen_ai.usage.input_tokens': 17,
       'gen_ai.usage.output_tokens': 2,
     });
-    expect(requests[1]['gen_ai.input.messages_delta'][0].role).toBe('user');
-    expect(requests[1]['gen_ai.input.messages_delta'][0].parts[0].content)
+    expect(requests[1]['gen_ai.input.messages_delta']).toBeUndefined();
+    expect(requests[1]['gen_ai.input.messages'][0].role).toBe('user');
+    expect(requests[1]['gen_ai.input.messages'][0].parts[0].content)
       .toBe('retry only with fallback provider');
     const terminals = records.filter((record) => record['agent.openclaw.hook'] === 'llm_output');
     expect(terminals.map((record) => record['agent.openclaw.per_call_usage.count'])).toEqual([0, 2]);
@@ -1130,11 +1131,13 @@ describe('OpenClaw plugin stateful pipeline', () => {
       `${runId}:model:2`,
       `${runId}:model:3`,
     ]);
-    expect(requests[2]['gen_ai.input.messages_delta']).toHaveLength(2);
-    expect(requests[2]['gen_ai.input.messages_delta'][0].parts[0]).toMatchObject({
+    expect(requests[2]['gen_ai.input.messages_delta']).toBeUndefined();
+    const inputs = requests[2]['gen_ai.input.messages'];
+    expect(inputs).toHaveLength(3);
+    expect(inputs[1].parts[0]).toMatchObject({
       type: 'tool_call', id: reusedToolCallId,
     });
-    expect(requests[2]['gen_ai.input.messages_delta'][1].parts[0]).toMatchObject({
+    expect(inputs[2].parts[0]).toMatchObject({
       id: reusedToolCallId,
       response: 'fresh-result',
     });

@@ -1086,7 +1086,8 @@ def _request_metadata(request: Any) -> Dict[str, Any]:
     for key, items in (("system_instructions", _system_instructions(request)),
                        ("tool_definitions", _tool_definitions(request))):
         for item in items:
-            size += len(json.dumps(item, ensure_ascii=False).encode("utf-8")) + 1
+            # Match the JSONL writer: escaped surrogates must round-trip too.
+            size += len(json.dumps(item, ensure_ascii=True)) + 1
             if size > MAX_REQUEST_BYTES:
                 output["truncated"] = True
                 break
@@ -1434,7 +1435,7 @@ def _request_inputs(messages: List[Any]) -> tuple:
         converted = _message(message, MAX_REQUEST_CONTENT_CHARS)
         if converted is None:
             continue
-        size += len(json.dumps(converted, ensure_ascii=False).encode("utf-8")) + 1
+        size += len(json.dumps(converted, ensure_ascii=True)) + 1
         if size > MAX_REQUEST_BYTES:
             truncated = True
             break

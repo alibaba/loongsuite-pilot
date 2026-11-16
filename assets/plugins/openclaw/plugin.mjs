@@ -483,6 +483,7 @@ function getRun(runId, event, ctx) {
       modelSpanIds: new Map(),
       llmInputStash: null,
       llmInputPending: false,
+      cycleInputSnapshot: null,
       completed: false,
       sessionId: null,
       provider: null,
@@ -589,6 +590,7 @@ function resetCompletedRunState(run) {
   run.modelSpanIds.clear();
   run.llmInputStash = null;
   run.llmInputPending = false;
+  run.cycleInputSnapshot = null;
   run.userPromptText = null;
   run.systemPrompt = null;
   run.modelCallEnds.clear();
@@ -750,12 +752,34 @@ function buildUserInputMessages(systemPrompt, userPromptText, historyMessages) {
     if (Array.isArray(history[i]?.content) && history[i].content.length > 64) truncated = true;
     const message = historyInputMessage(history[i]);
     if (!message) continue;
-    bytes += Buffer.byteLength(safeStringify(message), "utf8");
+    bytes += Buffer.byteLength(safeStringify(message), "utf8") + 1;
     if (bytes > MAX_INPUT_BYTES) { truncated = true; break; }
     captured.push(message);
   }
   const messages = [...prefix, ...captured.reverse(), ...suffix];
-  return { messages: messages.length ? messages : undefined, truncated };
+  return { messages: messages.length ? messages : undefined, requiredMessages: [...prefix, ...suffix], truncated };
+}
+
+function appendCycleInputMessages(snapshot, delta) {
+  const messages = [...(snapshot.messages || []), ...delta];
+  // Reserve the cycle's system/prompt while retaining the most recent replay
+  // and tool inputs. Full snapshots must remain bounded as a tool loop grows.
+  const required = new Set(snapshot.requiredMessages);
+  const keep = new Set(required);
+  let bytes = Buffer.byteLength(safeStringify(snapshot.requiredMessages), "utf8");
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (required.has(message)) continue;
+    const size = Buffer.byteLength(safeStringify(message), "utf8") + 1;
+    if (keep.size >= MAX_INPUT_MESSAGES || bytes + size > MAX_INPUT_BYTES) {
+      snapshot.truncated = true;
+      break;
+    }
+    bytes += size;
+    keep.add(message);
+  }
+  // Do not mutate arrays already emitted on earlier requests.
+  snapshot.messages = messages.filter(message => keep.has(message));
 }
 
 function buildToolDefinitions(tools) {
@@ -1119,14 +1143,28 @@ function handleModelCallStarted(event, ctx, userId, emit) {
   const startsAgentCycle = run.llmInputPending;
   run.llmInputPending = false;
   const stash = run.llmInputStash;
-  const inputMessages = startsAgentCycle ? stash?.messages : undefined;
+  if (startsAgentCycle) {
+    // The converter accumulates deltas across the entire turn and does not
+    // reset them on a full request. A same-runId fallback therefore needs an
+    // authoritative snapshot on every later step, not another history seed.
+    run.cycleInputSnapshot = run.callSeq > 1 && stash ? {
+      messages: stash.messages,
+      requiredMessages: stash.requiredMessages,
+      truncated: stash.truncated,
+    } : null;
+  }
   const inputDelta = startsAgentCycle && stash
-    // Seed the converter's delta accumulator with resumed history. System
-    // instructions already have their own inherited field.
-    ? inputMessages?.filter(message => message.role !== "system" && message.role !== "developer")
+    // The first cycle can use deltas; fallback cycles must not seed history
+    // again into that same accumulator. Keep normal tool loops incremental.
+    ? (run.cycleInputSnapshot ? undefined
+        : stash.messages?.filter(message => message.role !== "system" && message.role !== "developer"))
     : (run.pendingToolInputMessages.length > 0
         ? run.pendingToolInputMessages.splice(0)
         : undefined);
+  if (!startsAgentCycle && run.cycleInputSnapshot && inputDelta) {
+    appendCycleInputMessages(run.cycleInputSnapshot, inputDelta);
+  }
+  const inputMessages = startsAgentCycle ? stash?.messages : run.cycleInputSnapshot?.messages;
   const systemInstructions = startsAgentCycle ? stash?.systemInstructions : undefined;
   const toolDefinitions = startsAgentCycle ? stash?.toolDefinitions : undefined;
   if (startsAgentCycle) {
@@ -1144,10 +1182,10 @@ function handleModelCallStarted(event, ctx, userId, emit) {
     "gen_ai.request.model": event?.model || run.model,
     "gen_ai.response.model": event?.model || run.model,
     "gen_ai.input.messages": truncateContent(inputMessages),
-    "gen_ai.input.messages_delta": inputDelta,
+    "gen_ai.input.messages_delta": run.cycleInputSnapshot ? undefined : inputDelta,
     "gen_ai.system_instructions": systemInstructions,
     "gen_ai.tool.definitions": truncateContent(toolDefinitions),
-    "agent.pilot.request_context.truncated": startsAgentCycle && stash?.truncated ? true : undefined,
+    "agent.pilot.request_context.truncated": (run.cycleInputSnapshot?.truncated || (startsAgentCycle && stash?.truncated)) ? true : undefined,
     "agent.openclaw.hook": "model_call_started",
     "agent.openclaw.call_id": event?.callId,
     "agent.openclaw.api": event?.api,
