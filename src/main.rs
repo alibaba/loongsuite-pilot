@@ -12,6 +12,14 @@ fn main() {
     {
         hook_bin::run(args, started, Some(legacy_worker));
     }
+    let _sdk = match host_loader::library_path().and_then(|path| host_loader::Library::open(&path))
+    {
+        Ok(library) => library,
+        Err(error) => {
+            eprintln!("loongsuite-pilot: cannot load Pilot SDK: {error}");
+            std::process::exit(1);
+        }
+    };
     let result = (|| -> anyhow::Result<i32> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()

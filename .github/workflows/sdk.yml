@@ -24,7 +24,7 @@ jobs:
         include:
           - {os: ubuntu-22.04, target: x86_64-unknown-linux-gnu}
           - {os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu}
-          - {os: macos-15-intel, target: x86_64-apple-darwin, ui: x64}
+          - {os: macos-26-intel, target: x86_64-apple-darwin, ui: x64}
           - {os: macos-15, target: aarch64-apple-darwin, ui: arm64}
           - {os: windows-2022, target: x86_64-pc-windows-msvc}
           - {os: windows-11-arm, target: aarch64-pc-windows-msvc}
@@ -63,7 +63,7 @@ jobs:
           export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
           mkdir -p "$RUNNER_TEMP/pilot-sdk-home"
           HOME="$RUNNER_TEMP/pilot-sdk-home" USERPROFILE="$RUNNER_TEMP/pilot-sdk-home" \
-            cargo test --locked --test sdk_dynamic -- --test-threads=1
+            cargo test --locked --test sdk_dynamic --test interceptor_native -- --test-threads=1
       - name: Complete runtime native CPU and RSS
         run: cargo test --locked --test process_resources_native -- --test-threads=1
       - name: Compile and run the foreign C host on Windows

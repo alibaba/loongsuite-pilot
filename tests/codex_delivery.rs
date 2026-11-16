@@ -186,15 +186,12 @@ async fn native_codex_http_acceptance_blocks_disk_progress_and_restart_does_not_
     input.request_collection();
     eventually(|| receiver.requests.load(Ordering::SeqCst) >= 3).await;
     assert_eq!(disk_offset(&path, &key).await, 0.0);
-    assert!(store.waiting_for_output());
+    assert!(!store.is_persisted(&key, None));
     for _ in 0..100 {
         input.request_collection();
     }
     receiver.healthy.store(true, Ordering::SeqCst);
-    tokio::time::timeout(Duration::from_secs(3), store.save())
-        .await
-        .unwrap()
-        .unwrap();
+    eventually(|| store.get_offset(&key) > 0.0 && store.is_persisted(&key, None)).await;
     assert!(disk_offset(&path, &key).await > 0.0);
     let accepted: Vec<_> = receiver
         .accepted
@@ -273,7 +270,9 @@ async fn native_codex_hung_http_is_cancelled_and_failed_checkpoint_replays_after
         .unwrap();
     eventually(|| hanging.disconnected.load(Ordering::SeqCst) > 0).await;
     assert!(store.save_failed());
-    assert!(store.save().await.is_err());
+    // A failed source remains uncommitted while unrelated state can still save.
+    store.save().await.unwrap();
+    assert!(!store.is_persisted(&key, None));
     assert_eq!(disk_offset(&path, &key).await, 0.0);
     let receiver = Receiver::new(false).await;
     receiver.healthy.store(true, Ordering::SeqCst);
@@ -285,10 +284,7 @@ async fn native_codex_hung_http_is_cancelled_and_failed_checkpoint_replays_after
         .await
         .unwrap()
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), restored.save())
-        .await
-        .unwrap()
-        .unwrap();
+    eventually(|| restored.get_offset(&key) > 0.0 && restored.is_persisted(&key, None)).await;
     assert!(disk_offset(&path, &key).await > 0.0);
     assert!(!receiver.accepted.lock().unwrap().is_empty());
     manager.cancel_pending_outputs();
@@ -745,7 +741,7 @@ async fn native_codex_fresh_source_without_any_disk_key_replays_after_http_cance
     tokio::fs::write(&rollout, completed_turn()).await.unwrap();
     input.request_collection();
     eventually(|| hanging.requests.load(Ordering::SeqCst) > 0).await;
-    assert!(store.waiting_for_output());
+    assert!(!store.is_persisted(&key, None));
     assert!(!disk_has_source_key(&path, &key).await);
 
     // The ownership sidecar is metadata only and must exist before the request
@@ -782,7 +778,9 @@ async fn native_codex_fresh_source_without_any_disk_key_replays_after_http_cance
         .unwrap();
     eventually(|| hanging.disconnected.load(Ordering::SeqCst) > 0).await;
     assert!(store.save_failed());
-    assert!(store.save().await.is_err());
+    // A failed source remains uncommitted while unrelated state can still save.
+    store.save().await.unwrap();
+    assert!(!store.is_persisted(&key, None));
     assert!(!disk_has_source_key(&path, &key).await);
 
     let receiver = Receiver::new(false).await;
@@ -798,10 +796,7 @@ async fn native_codex_fresh_source_without_any_disk_key_replays_after_http_cance
         .await
         .unwrap()
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), restored.save())
-        .await
-        .unwrap()
-        .unwrap();
+    eventually(|| restored.get_offset(&key) > 0.0 && restored.is_persisted(&key, None)).await;
     assert_eq!(
         disk_offset(&path, &key).await,
         completed_turn().len() as f64
@@ -1004,7 +999,7 @@ async fn native_codex_historical_floor_recovers_checkpoint_loss_and_replays_only
         .unwrap();
     input.request_collection();
     eventually(|| hanging.requests.load(Ordering::SeqCst) > 0).await;
-    assert!(store.waiting_for_output());
+    assert!(!store.is_persisted(&key, None));
     assert!(!disk_has_source_key(&path, &key).await);
     assert_eq!(
         only_source_metadata(root.path())["baseline_floor"],
@@ -1020,7 +1015,9 @@ async fn native_codex_historical_floor_recovers_checkpoint_loss_and_replays_only
         .unwrap();
     eventually(|| hanging.disconnected.load(Ordering::SeqCst) > 0).await;
     assert!(store.save_failed());
-    assert!(store.save().await.is_err());
+    // A failed source remains uncommitted while unrelated state can still save.
+    store.save().await.unwrap();
+    assert!(!store.is_persisted(&key, None));
     assert!(!disk_has_source_key(&path, &key).await);
 
     let receiver = Receiver::new(false).await;
@@ -1034,10 +1031,7 @@ async fn native_codex_historical_floor_recovers_checkpoint_loss_and_replays_only
         .await
         .unwrap()
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), restored.save())
-        .await
-        .unwrap()
-        .unwrap();
+    eventually(|| restored.get_offset(&key) > 0.0 && restored.is_persisted(&key, None)).await;
     assert_eq!(
         disk_offset(&path, &key).await,
         (history.len() + fresh_tail().len()) as f64
