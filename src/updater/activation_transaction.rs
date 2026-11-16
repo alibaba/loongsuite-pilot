@@ -9,7 +9,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
-const MAX_TARGETS: usize = 32;
+// Thirty-one registered resource roles plus at most six activation targets.
+const MAX_TARGETS: usize = 37;
 const MAX_JOURNAL_BYTES: usize = MAX_TARGETS * MAX_SNAPSHOT_BYTES * 4 + 64 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

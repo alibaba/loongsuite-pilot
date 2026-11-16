@@ -134,7 +134,7 @@ mod resource_history_tests {
             ("runtime-resource:plugins/dsh/plugin.mjs".into(),data.join("plugins/dsh/plugin.mjs")),
         ]);
         assert!(ActivationTransaction::begin(&cache,duplicate).is_err());
-        let oversized=(0..33).map(|index|(format!("target-{index}"),data.join(format!("file-{index}")))).collect();
+        let oversized=(0..=MAX_TARGETS).map(|index|(format!("target-{index}"),data.join(format!("file-{index}")))).collect();
         assert!(ActivationTransaction::begin(&cache,oversized).is_err());
         assert!(!cache.join("update-recovery.json").exists());assert!(!data.join("plugins/dsh/plugin.mjs").exists());
     }
@@ -148,8 +148,15 @@ mod resource_history_tests {
             "hooks/qodercli-token-intercept.mjs",
         ];
         let qoder_cli_roles = if cfg!(unix) { qoder_cli_paths.len() } else { 0 };
-        assert_eq!(registry.len(), 24 + qoder_cli_roles);
-        for relative in ["plugins/shared/raw-jsonl-writer.mjs", "plugins/shared/raw-source-gate.mjs"] {
+        assert_eq!(registry.len(), 29 + qoder_cli_roles);
+        for relative in [
+            "plugins/shared/raw-jsonl-writer.mjs",
+            "plugins/shared/raw-source-gate.mjs",
+            "hooks/qoder-loongsuite-pilot-hook.sh",
+            "hooks/qoder-loongsuite-pilot-hook.ps1",
+            "hooks/interceptor-hook.sh",
+            "hooks/interceptor-hook.ps1",
+        ] {
             assert_eq!(registry.get(&format!("runtime-resource:{relative}")), Some(&root.path().join(relative)));
         }
         for relative in qoder_cli_paths {
@@ -165,9 +172,9 @@ mod resource_history_tests {
                 .unwrap().to_str().unwrap().replace('\\',"/")).collect();
         let registered:std::collections::BTreeSet<_>=crate::deployment::runtime_data_assets::SKILLS.iter().map(|path|path.to_string()).collect();
         assert!(actual.is_subset(&registered),"new resources require an explicit append-only recovery role");
-        // Budget for the four plugin files, their marker, the Unix Qoder pair,
-        // and the six other activation targets on every supported platform.
-        assert!(actual.len() + 4 + 1 + qoder_cli_paths.len() + 6 <= MAX_TARGETS);
+        // Allow recovery to bind every registered resource and the largest
+        // service layout, including its launcher, pointers, and config.
+        assert!(registry.len() + 6 <= MAX_TARGETS);
     }
 
     #[cfg(unix)]
