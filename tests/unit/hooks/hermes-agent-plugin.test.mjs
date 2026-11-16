@@ -288,6 +288,7 @@ function replay(events, {
   legacyEnvUser,
   spanAttributes,
   configUser = 'pilot-config-user',
+  configBom = false,
   dataDirSource = 'env',
   beforeSpawn,
   expectLogFile = true,
@@ -317,7 +318,7 @@ function replay(events, {
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     config.dataDir = root;
   }
-  fs.writeFileSync(configPath, JSON.stringify(config));
+  fs.writeFileSync(configPath, `${configBom ? '\uFEFF' : ''}${JSON.stringify(config)}`);
   beforeSpawn?.(root);
   const driver = `
 import importlib.util
@@ -986,6 +987,24 @@ describe('Hermes Agent native plugin', () => {
     expect(raw).not.toContain('approved files');
     expect(raw).not.toContain('wc -l /etc/hosts');
     expect(raw).not.toContain('17 /etc/hosts');
+    expect(records.find(record => record['event.name'] === 'tool.call'))
+      .not.toHaveProperty('gen_ai.tool.call.arguments');
+    expect(records.find(record => record['event.name'] === 'tool.result'))
+      .not.toHaveProperty('gen_ai.tool.call.result');
+  });
+
+  it('honors a BOM-prefixed content opt-out before writing messages and tools', () => {
+    const { records, raw } = replay(firstTurn(), {
+      captureMessageContent: false,
+      configBom: true,
+    });
+
+    expect(records.some(record => record['event.name'] === 'llm.request')).toBe(true);
+    expect(records.some(record => record['event.name'] === 'tool.call')).toBe(true);
+    expect(records.some(record => record['event.name'] === 'tool.result')).toBe(true);
+    for (const text of ['approved files', 'wc -l /etc/hosts', '17 /etc/hosts', 'The files have']) {
+      expect(raw).not.toContain(text);
+    }
     expect(records.find(record => record['event.name'] === 'tool.call'))
       .not.toHaveProperty('gen_ai.tool.call.arguments');
     expect(records.find(record => record['event.name'] === 'tool.result'))
