@@ -1,6 +1,5 @@
 //! Native loader only: no statically linked collector fallback.
-#[path = "abi.rs"]
-pub mod abi;
+use super::abi;
 
 use std::ffi::{c_char, c_void, CString};
 use std::path::{Path, PathBuf};

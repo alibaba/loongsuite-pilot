@@ -1,7 +1,9 @@
 //! Exercise the actual loadable SDK through its C table, without linking its core.
+#[path = "../src/sdk/abi.rs"]
+pub mod abi;
 #[path = "../src/sdk/host_loader.rs"]
 pub mod loader;
-use loader::abi::*;
+use abi::*;
 use serde_json::{json, Value};
 use std::ffi::c_void;
 use std::io::Write;

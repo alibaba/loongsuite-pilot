@@ -1,3 +1,5 @@
+#[path = "../sdk/abi.rs"]
+pub mod abi;
 #[path = "../sdk/hook_bin.rs"]
 mod hook_bin;
 #[path = "../sdk/host_hook_client.rs"]

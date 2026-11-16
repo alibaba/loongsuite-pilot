@@ -1,7 +1,8 @@
 //! Connect installed Hook invocations to the shared runtime ABI.
 
 pub fn run(args: &[String]) -> Option<String> {
-    use crate::host_loader::{self, abi::PilotJsonView, Library};
+    use crate::abi::PilotJsonView;
+    use crate::host_loader::{self, Library};
     use std::io::Read;
     let max_input = if args.first().is_some_and(|arg| arg == "hook-process")
         && args.get(1).is_some_and(|arg| arg == "qoder")

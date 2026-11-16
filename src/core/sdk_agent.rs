@@ -1,7 +1,8 @@
 //! Full Pilot's client for the same activity and lifecycle ABI used by embedders.
 use super::InputManager;
 use crate::checkpoints::StateStore;
-use crate::sdk::host_loader::{self, abi, Library};
+use crate::sdk::abi;
+use crate::sdk::host_loader::{self, Library};
 use crate::types::AgentActivityEntry;
 use serde_json::Value;
 use std::ffi::c_void;
