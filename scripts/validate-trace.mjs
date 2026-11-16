@@ -49,6 +49,49 @@ export function hasModelToolSpanForOutput(tools, expectedToolCall) {
   });
 }
 
+// Check semantic.last_step_no_tool_call: the LAST assistant message in the
+// last STEP's LLM `gen_ai.output.messages` must not contain a tool_call part.
+// Earlier assistant messages may legitimately carry tool_call parts (e.g.
+// trae-cn single-LLM-per-turn architecture). When no assistant message is
+// present, fall back to the last message in the array to avoid skipping the
+// check on degenerate payloads. Exported for unit testing.
+export function checkLastStepNoToolCall(spans, childrenMap) {
+  const stepSpans = spans.filter(s => s._kind === 'STEP');
+  if (stepSpans.length === 0) return [];
+  const sorted = [...stepSpans].sort((a, b) => {
+    const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
+    return d < 0n ? -1 : d > 0n ? 1 : 0;
+  });
+  const lastStep = sorted[sorted.length - 1];
+  const children = childrenMap.get(lastStep.spanId) || [];
+  const llm = children.find(c => c._kind === 'LLM');
+  if (!llm) return [];
+  const raw = llm.attributes?.['gen_ai.output.messages'];
+  if (!raw) return [pass('semantic.last_step_no_tool_call')];
+  try {
+    const msgs = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    let hasToolCall = false;
+    if (Array.isArray(msgs) && msgs.length > 0) {
+      const assistantMsgs = msgs.filter(m => m && m.role === 'assistant');
+      const lastAssistant = assistantMsgs.length > 0
+        ? assistantMsgs[assistantMsgs.length - 1]
+        : msgs[msgs.length - 1];
+      if (lastAssistant && Array.isArray(lastAssistant.parts)) {
+        for (const part of lastAssistant.parts) {
+          if (part.type === 'tool_call') hasToolCall = true;
+        }
+      }
+    }
+    return [hasToolCall
+      ? error('semantic.last_step_no_tool_call',
+          'last STEP LLM terminal assistant message contains tool_call, expected text-only final answer',
+          llm.spanId, llm.name)
+      : pass('semantic.last_step_no_tool_call')];
+  } catch {
+    return [pass('semantic.last_step_no_tool_call')];
+  }
+}
+
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 function parseCli() {
@@ -1020,49 +1063,16 @@ export function validateSemantic(trace, rules) {
     if (toolSpans.length === 0) checks.push(pass('semantic.tool_has_arguments'));
   }
 
-  // last_step_no_tool_call: last STEP's LLM output should not contain tool_call
+  // last_step_no_tool_call: last STEP's LLM terminal assistant message
+  // should be text-only (no tool_call). Earlier assistant messages may
+  // legitimately carry tool_call parts (e.g. trae-cn single-LLM-per-turn
+  // architecture: tool invocations during the turn precede the final
+  // answer). Only the LAST assistant message is checked — that is the
+  // model's terminal output for the STEP.
   if (!hasMessageContent) {
     checks.push(skipped('semantic.last_step_no_tool_call'));
   } else {
-    for (const { spans: executionSpans } of executions) {
-      const stepSpans = executionSpans.filter(s => s._kind === 'STEP');
-      if (stepSpans.length > 0) {
-        const sorted = [...stepSpans].sort((a, b) => {
-          const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
-          return d < 0n ? -1 : d > 0n ? 1 : 0;
-        });
-        const lastStep = sorted[sorted.length - 1];
-        const children = childrenMap.get(lastStep.spanId) || [];
-        const llm = children.find(c => c._kind === 'LLM');
-        if (llm) {
-          const raw = llm.attributes?.['gen_ai.output.messages'];
-          if (raw) {
-            try {
-              const msgs = typeof raw === 'string' ? JSON.parse(raw) : raw;
-              let hasToolCall = false;
-              if (Array.isArray(msgs)) {
-                for (const msg of msgs) {
-                  if (Array.isArray(msg.parts)) {
-                    for (const part of msg.parts) {
-                      if (part.type === 'tool_call') hasToolCall = true;
-                    }
-                  }
-                }
-              }
-              checks.push(hasToolCall
-                ? error('semantic.last_step_no_tool_call',
-                    'last STEP LLM output contains tool_call, expected final answer without tool calls',
-                    llm.spanId, llm.name)
-                : pass('semantic.last_step_no_tool_call'));
-            } catch {
-              checks.push(pass('semantic.last_step_no_tool_call'));
-            }
-          } else {
-            checks.push(pass('semantic.last_step_no_tool_call'));
-          }
-        }
-      }
-    }
+    checks.push(...checkLastStepNoToolCall(spans, childrenMap));
   }
 
   return checks;
