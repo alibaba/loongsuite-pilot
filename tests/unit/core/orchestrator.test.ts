@@ -248,6 +248,7 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       runtimeRefreshIntervalMs: 30_000,
     },
     dashboard: {
+      enabled: false,
       port: 8765,
     },
     agents: {},
@@ -330,9 +331,20 @@ describe('Orchestrator', () => {
       }
     });
 
+    it('keeps collection and metrics running with the dashboard disabled', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+      expect(mockDiscoveryStart).toHaveBeenCalledOnce();
+      expect(mockMetricsSummaryStart).toHaveBeenCalledOnce();
+      expect(mockDashboardConstructor).not.toHaveBeenCalled();
+      await orch.stop();
+      expect(mockMetricsSummaryStop).toHaveBeenCalledOnce();
+    });
+
     it('starts the metrics summary and dashboard even when the menu bar is disabled', async () => {
       const orch = new Orchestrator(makeConfig({
         dashboard: {
+          enabled: true,
           port: 19_001,
         },
         statusBar: {
@@ -363,6 +375,7 @@ describe('Orchestrator', () => {
       mockDashboardStart.mockRejectedValueOnce(new Error('dashboard exploded'));
       const events: string[] = [];
       const orch = new Orchestrator(makeConfig({
+        dashboard: { enabled: true, port: 8765 },
         statusBar: {
           enabled: true,
           metricsSummaryIntervalMs: 60_000,

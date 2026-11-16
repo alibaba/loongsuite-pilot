@@ -98,7 +98,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--system-service` | **Deprecated** — ignored. Init system is now auto-detected (systemd-user → systemd-system → init.d). |
 | `--lang <lang>` | Output language: `zh` or `en`. |
 
-For example, use port `9000` by appending `--dashboard-port 9000` (or `--dashboard-port=9000`) to the Linux/macOS install command, or `-DashboardPort 9000` to the Windows command. The installer writes `dashboard.port` to `config.json` before starting the service. Open `http://127.0.0.1:9000/` after installation. Invalid or missing port values stop installation before downloads or service changes.
+For example, use port `9000` by appending `--dashboard-port 9000` (or `--dashboard-port=9000`) to the Linux/macOS install command, or `-DashboardPort 9000` to the Windows command. The installer writes `dashboard.port` to `config.json` before starting the service. The port option alone does not enable the dashboard. Invalid or missing port values stop installation before downloads or service changes.
 
 ## Verify Installation
 
@@ -131,7 +131,18 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-The local dashboard starts and stops with the collector. Open the default address below, or use your configured port:
+The local dashboard is disabled by default. Start or stop it with:
+
+```bash
+loongsuite-pilot dashboard start       # use the saved port, or 8765 by default
+loongsuite-pilot dashboard start 9999  # save and use port 9999
+loongsuite-pilot dashboard stop
+```
+
+The commands save `dashboard.enabled` and the optional port in `config.json`.
+They restart a running collector so the change takes effect; `start` also starts
+the collector if it was stopped. `stop` leaves collection running. When enabled,
+open the default address below, or use your configured port:
 
 ```text
 http://127.0.0.1:8765/
@@ -148,7 +159,7 @@ To keep the menu bar closed from the first collector startup, add the option to 
 bash /tmp/loongsuite-pilot-installer.sh install --enable-status-bar-app false
 ```
 
-The installer writes `"enableStatusBarApp": false` to `config.json` before starting collection. Explicit `true` re-enables automatic startup; omission preserves the existing value. This option applies to `install`, including reinstall; `upgrade` preserves the saved configuration. Collection and the local Dashboard remain enabled. The runtime environment variable `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` still takes precedence over this setting.
+The installer writes `"enableStatusBarApp": false` to `config.json` before starting collection. Explicit `true` re-enables automatic startup; omission preserves the existing value. This option applies to `install`, including reinstall; `upgrade` preserves the saved configuration. Collection and the local Dashboard are unaffected. The runtime environment variable `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` still takes precedence over this setting.
 
 The menu bar app starts with the collector by default. Quitting it leaves collection running, so another `loongsuite-pilot start` does not reopen it. Use:
 

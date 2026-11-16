@@ -100,7 +100,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--prefer-system-node` | 优先使用系统已安装的 Node.js，仅当系统 Node.js 缺失或无法加载 `node:sqlite`（需要 22.13+ 或 23.4+）时才下载托管运行时（默认行为是始终下载并固定托管运行时）。 |
 | `--lang <lang>` | 输出语言：`zh` 或 `en`。 |
 
-例如要使用 `9000` 端口，在 Linux/macOS 安装命令末尾加 `--dashboard-port 9000`（也支持 `--dashboard-port=9000`）；Windows 则加 `-DashboardPort 9000`。安装器会在启动服务前，将端口写入 `config.json` 的 `dashboard.port`。安装完成后访问 `http://127.0.0.1:9000/`。传入非法端口或只写参数却没有提供值时，会在下载、修改服务之前报错退出。
+例如要使用 `9000` 端口，在 Linux/macOS 安装命令末尾加 `--dashboard-port 9000`（也支持 `--dashboard-port=9000`）；Windows 则加 `-DashboardPort 9000`。安装器会在启动服务前，将端口写入 `config.json` 的 `dashboard.port`，但只设置端口不会启用 Dashboard。传入非法端口或只写参数却没有提供值时，会在下载、修改服务之前报错退出。
 
 ## 托管 Node.js 运行时
 
@@ -175,7 +175,17 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-本地 Dashboard 会随采集服务一起启动和停止，默认地址如下；指定了其他端口时，请替换地址中的端口：
+本地 Dashboard 默认关闭。可用以下命令手动启停：
+
+```bash
+loongsuite-pilot dashboard start       # 使用已保存的端口，未设置时使用 8765
+loongsuite-pilot dashboard start 9999  # 保存并使用 9999 端口
+loongsuite-pilot dashboard stop
+```
+
+命令会把 `dashboard.enabled` 和可选端口写入 `config.json`，并重启正在运行的采集服务；
+`start` 在采集服务停止时也会启动它，`stop` 保留采集服务。启用后访问以下默认地址，
+指定了其他端口时请替换端口：
 
 ```text
 http://127.0.0.1:8765/
@@ -191,7 +201,7 @@ http://127.0.0.1:8765/
 bash /tmp/loongsuite-pilot-installer.sh install --enable-status-bar-app false
 ```
 
-安装器会在启动采集服务前将 `"enableStatusBarApp": false` 写入 `config.json`。显式传 `true` 可恢复自动启动，不传则保留已有值。该参数用于 `install`，也适用于覆盖安装；`upgrade` 保留已保存的配置。采集服务和本地 Dashboard 不受影响。运行时环境变量 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` 仍优先于此配置。
+安装器会在启动采集服务前将 `"enableStatusBarApp": false` 写入 `config.json`。显式传 `true` 可恢复自动启动，不传则保留已有值。该参数用于 `install`，也适用于覆盖安装；`upgrade` 保留已保存的配置。采集服务和本地 Dashboard 的开关不受影响。运行时环境变量 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` 仍优先于此配置。
 
 菜单栏默认随采集服务启动。菜单栏里的“退出”只会关闭菜单栏，采集服务继续运行；此时再次执行 `loongsuite-pilot start` 不会重新打开菜单栏。请执行：
 

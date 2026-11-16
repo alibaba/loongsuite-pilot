@@ -31,7 +31,7 @@ invocation 为 SHA-256(`['codex-delegation', parentSession, parentTurn, toolCall
 
 Codex 从派发工具参数的 `message`、`prompt` 或 `input` 读取可读内容，复用原生消息转换，写为 `[{role: "user", parts: [{type: "text", content: "任务内容"}]}]`；多段文本保留各自的 part。批量 `agents` / `tasks` 按原始工作序号分别填充，不复制整个批次、不串入其他工作。缺少可读内容时省略字段，不用父会话输入代替，不解密密文，也不补造隐式继承的上下文。
 
-原始工具参数仍在 `tool.call` 的 `gen_ai.tool.call.arguments`，invoke 不再重复携带这个工具内容字段。result 使用 assistant 消息。当前版本始终采集消息内容，脱敏策略同时作用于这些消息；invocation、event ID 和 Trace 身份不因字段映射变化而改变。历史已采集事件不自动回填。
+原始工具参数仍在 `tool.call` 的 `gen_ai.tool.call.arguments`，invoke 不再重复携带这个工具内容字段。result 使用 assistant 消息。消息内容产生时受脱敏策略处理；invocation、event ID 和 Trace 身份不因字段映射变化而改变。历史已采集事件不自动回填。
 
 ## 什么时候发送
 

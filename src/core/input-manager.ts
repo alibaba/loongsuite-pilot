@@ -14,6 +14,7 @@ import type { BaseFlusher } from '../flushers/base-flusher.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
+import { applyAgentContentPolicy } from '../normalization/agent-content-policy.js';
 import { enrichCanonicalEntriesWithGit } from '../normalization/enrich-git-context.js';
 import { maskAgentActivityEntry } from '../mask/entry-masker.js';
 import { loadMaskPlan } from '../mask/rule-loader.js';
@@ -124,8 +125,11 @@ export class InputManager extends EventEmitter {
     this.configuredUserId = userId;
   }
 
-  /** @deprecated Retained for callers; per-agent content opt-outs are ignored. */
-  setAgentsConfig(_config: AgentsConfig): void {}
+  private agentsConfig: AgentsConfig = {};
+
+  setAgentsConfig(config: AgentsConfig): void {
+    this.agentsConfig = config;
+  }
 
   setMaskConfig(config: MaskConfig): void {
     this.maskConfig = config;
@@ -436,7 +440,7 @@ export class InputManager extends EventEmitter {
       });
     }
 
-    const expandedEntries = expandAgentInputEvents(this.applyMask(entries));
+    const expandedEntries = expandAgentInputEvents(this.applyPolicyAndMask(entries));
     let outputBatchBytes = 0;
     // Reuse the existing serialization; only retain its numeric results.
     const logicalBytes = expandedEntries.map(entry => {
@@ -451,7 +455,7 @@ export class InputManager extends EventEmitter {
 
   /**
    * Flush entries that did not come from an Input. Reuses git enrichment,
-   * invocation identity, and mask, then the same flusher.
+   * invocation identity, content policy, and mask, then the same flusher.
    */
   async flushPreparedEntries(entries: AgentActivityEntry[]): Promise<void> {
     if (entries.length === 0) return;
@@ -466,7 +470,7 @@ export class InputManager extends EventEmitter {
     }
 
     this.applyIdentity(entries);
-    const prepared = this.applyMask(entries);
+    const prepared = this.applyPolicyAndMask(entries);
     let outputBatchBytes = 0;
     const logicalBytes = prepared.map(entry => {
       const bytes = Buffer.byteLength(JSON.stringify(entry));
@@ -485,14 +489,17 @@ export class InputManager extends EventEmitter {
 
   /** Recheck retained output against current workspace and mask rules without rewriting its identity. */
   prepareRestoredEntries(entries: AgentActivityEntry[]): AgentActivityEntry[] {
-    return this.applyMask(this.workspacePolicy.filter(entries));
+    return this.applyPolicyAndMask(this.workspacePolicy.filter(entries));
   }
 
-  private applyMask(entries: AgentActivityEntry[]): AgentActivityEntry[] {
+  private applyPolicyAndMask(entries: AgentActivityEntry[]): AgentActivityEntry[] {
+    const policyAppliedEntries = entries.map(entry =>
+      applyAgentContentPolicy(entry, this.agentsConfig),
+    );
     if (this.maskPlan.rules.length === 0 && this.maskPlan.piiTypes.size === 0) {
-      return entries;
+      return policyAppliedEntries;
     }
-    return entries.map(entry =>
+    return policyAppliedEntries.map(entry =>
       maskAgentActivityEntry(entry, this.maskConfig, this.maskPlan),
     );
   }

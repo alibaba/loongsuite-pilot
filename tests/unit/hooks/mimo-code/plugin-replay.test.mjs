@@ -233,6 +233,42 @@ describe('MiMo Code plugin — end-to-end fixture replay', () => {
     expect(userMsg.parts[0].content).toContain('List py files');
   });
 
+  it.each(['custom-path', 'bom'])('omits message and tool bodies with %s config', async (kind) => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-mimo-policy-'));
+    const previous = process.env.LOONGSUITE_PILOT_DATA_DIR;
+    const previousConfig = process.env.AGENT_DATA_COLLECTION_CONFIG;
+    const configPath = path.join(dataDir, kind === 'custom-path' ? 'custom.json' : 'config.json');
+    fs.writeFileSync(configPath, (kind === 'bom' ? '\uFEFF' : '') + JSON.stringify({
+      agents: { 'mimo-code': { captureMessageContent: false } },
+    }));
+    process.env.LOONGSUITE_PILOT_DATA_DIR = dataDir;
+    process.env.AGENT_DATA_COLLECTION_CONFIG = configPath;
+    try {
+      const records = [];
+      const configuredPlugin = await loadPlugin(records);
+      const configuredHooks = await configuredPlugin.server(
+        { sessionID: 'test', cwd: os.tmpdir() }, {},
+      );
+      for (const event of events) await configuredHooks.event({ event });
+      const parsed = records.map(({ data }) => parseRecord(data));
+      expect(parsed.filter(record => record['event.name'] === 'llm.request')).toHaveLength(5);
+      expect(parsed.filter(record => record['event.name'] === 'tool.call')).toHaveLength(4);
+      for (const record of parsed) {
+        for (const field of ['gen_ai.input.messages', 'gen_ai.input.messages_delta',
+          'gen_ai.output.messages', 'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result',
+          'gen_ai.system_instructions', 'error.message']) {
+          expect(record).not.toHaveProperty(field);
+        }
+      }
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
+      else process.env.LOONGSUITE_PILOT_DATA_DIR = previous;
+      if (previousConfig === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+      else process.env.AGENT_DATA_COLLECTION_CONFIG = previousConfig;
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it('preserves the first user message in later converted LLM spans', async () => {
     for (const e of events) {
       await hooks.event({ event: e });

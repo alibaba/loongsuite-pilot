@@ -7,8 +7,7 @@ English | [简体中文](zh-CN/multimodal.md)
 LoongSuite Pilot can convert media in agent messages or tool results (inline image base64, local image paths, or local video paths, read and encoded at write time) into object-storage `uri` parts, upload them asynchronously to OSS or SLS PutObject, and attach a short summary on normalized events. Use this when downstream analysis needs the media without embedding large base64 blobs in JSONL.
 
 `agents.<id>.multimodal.uploadMode` controls whether—and on which surfaces—media
-becomes `uri` parts. Legacy `captureMessageContent` settings do not disable
-message or multimodal content reporting.
+becomes `uri` parts.
 
 Multimodal also needs an explicit `config.multimodal.storage` block; a matching `config.sls` API Key can supply its auth. See [Configuration Guide](configuration.md#multimodal-object-storage). Event field shapes are in [Output Event Schema](output-event-schema.md#multimodal-message-parts).
 
