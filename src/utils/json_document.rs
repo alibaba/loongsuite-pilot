@@ -99,9 +99,13 @@ pub async fn read_json_document(path: &str, syntax: JsonSyntax) -> JsonDocumentR
 }
 
 pub fn detect_json_formatting(raw: &str) -> FormattingOptions {
+    formatting_options(raw, parse_cst(raw).ok().as_ref())
+}
+
+fn formatting_options(raw: &str, root: Option<&Cst>) -> FormattingOptions {
     let eol = if raw.contains("\r\n") { "\r\n" } else { "\n" }.to_string();
-    let indent = detect_indent(raw);
-    if indent.as_ref().is_some_and(|text| text.contains('\t')) {
+    let indent = root.and_then(|root| detect_indent(raw, root));
+    if indent.is_some_and(|text| text.contains('\t')) {
         return FormattingOptions {
             insert_spaces: false,
             tab_size: 1,
@@ -110,10 +114,7 @@ pub fn detect_json_formatting(raw: &str) -> FormattingOptions {
     }
     FormattingOptions {
         insert_spaces: true,
-        tab_size: indent
-            .map(|text| text.chars().count())
-            .filter(|count| *count > 0)
-            .unwrap_or(2),
+        tab_size: indent.map_or(2, str::len),
         eol,
     }
 }
@@ -124,28 +125,26 @@ pub fn edit_jsonc(
     value: Option<&Value>,
     options: JsonEditOptions,
 ) -> String {
-    let fmt = detect_json_formatting(raw);
     let Ok(tree) = parse_cst(raw) else {
         return raw.to_string();
     };
+    let fmt = formatting_options(raw, Some(&tree));
     edit_at(raw, &tree, path, value, options.is_array_insertion, &fmt, 0)
 }
 
-fn detect_indent(raw: &str) -> Option<String> {
-    for line in raw.split('\n') {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        let mut indent = String::new();
-        for ch in line.chars() {
-            if ch == ' ' || ch == '\t' {
-                indent.push(ch);
-            } else if !indent.is_empty() && (ch == '"' || ch == '}') {
-                return Some(indent);
-            } else {
-                break;
-            }
-        }
+fn detect_indent<'a>(raw: &'a str, root: &Cst) -> Option<&'a str> {
+    // Only a direct child shows the indentation unit. Edits to compact
+    // documents can introduce multiline values below an inline root key.
+    let line_indent = |offset| {
+        let prefix = raw[..offset].rsplit('\n').next()?;
+        (!prefix.is_empty() && prefix.bytes().all(|byte| matches!(byte, b' ' | b'\t')))
+            .then_some(prefix)
+    };
+    match &root.kind {
+        Kind::Object(fields) => fields.iter().find_map(|field| line_indent(field.key_start)),
+        Kind::Array(items) => items.iter().find_map(|item| line_indent(item.start)),
+        Kind::Leaf => None,
     }
-    None
 }
 
 fn strip_bom(text: &str) -> &str {
@@ -950,6 +949,89 @@ mod tests {
 
     fn with_bom(text: &str) -> String {
         format!("\u{feff}{text}")
+    }
+
+    #[test]
+    fn repeated_hook_config_edits_keep_compact_and_formatted_json_bounded() {
+        use serde_json::json;
+
+        let original = json!({
+            "theme": "user",
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher":"Bash","hooks":[{"type":"command","command":"user-hook"}]},
+                    {"matcher":"*","hooks":[{"type":"command","command":"third-party-hook"}]}
+                ],
+                "PostToolUse": [{"hooks":[{"type":"command","command":"other-hook"}]}]
+            }
+        });
+        let events = ["Stop", "SubagentStop", "UserPromptSubmit", "PreToolUse"];
+        let mut installed = original.clone();
+        let managed = json!({"matcher":"Bash","hooks":[{"type":"command","command":"pilot-hook","args":["--pilot-sdk-managed"]}]});
+        for event in events {
+            let group = installed["hooks"]
+                .as_object_mut()
+                .unwrap()
+                .entry(event)
+                .or_insert_with(|| json!([]));
+            group.as_array_mut().unwrap().push(managed.clone());
+        }
+
+        for (format, mut raw) in [
+            ("compact", original.to_string()),
+            (
+                "formatted",
+                serde_json::to_string_pretty(&original).unwrap(),
+            ),
+        ] {
+            let mut stable_sizes = None;
+            for round in 1..=6 {
+                let mut sizes = Vec::new();
+                for expected in [&installed, &original] {
+                    for event in events {
+                        raw = edit_jsonc(
+                            &raw,
+                            &[
+                                JsonPathSeg::Key("hooks".into()),
+                                JsonPathSeg::Key(event.into()),
+                            ],
+                            expected["hooks"].get(event),
+                            JsonEditOptions::default(),
+                        );
+                    }
+                    assert_eq!(
+                        parse_json_document(&raw, JsonSyntax::Json).unwrap(),
+                        *expected
+                    );
+                    assert!(
+                        raw.len() < 2048,
+                        "{format}, round {round}: {} bytes",
+                        raw.len()
+                    );
+                    sizes.push(raw.len());
+                }
+                if round == 2 {
+                    stable_sizes = Some(sizes);
+                } else if round > 2 {
+                    assert_eq!(
+                        Some(&sizes),
+                        stable_sizes.as_ref(),
+                        "{format}, round {round}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn infers_four_spaces_and_tabs_from_root_children() {
+        let spaces = "{\n    \"hooks\": {\"Stop\": [\n            {}\n        ]}\n}";
+        assert_eq!(detect_json_formatting(spaces).tab_size, 4);
+        let tabs = "\u{feff}[\r\n\t{\"hooks\": []}\r\n]";
+        let fmt = detect_json_formatting(tabs);
+        assert!(!fmt.insert_spaces);
+        assert_eq!(fmt.tab_size, 1);
+        assert_eq!(fmt.eol, "\r\n");
     }
 
     #[test]
