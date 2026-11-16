@@ -178,8 +178,13 @@ describe('trae-cn hook processor', () => {
     expect(llmReq['gen_ai.input.messages'][0].parts[0].content)
       .toContain('hello world');
     expect(llmRes['gen_ai.output.messages']).toBeTruthy();
-    expect(llmRes['gen_ai.output.messages'][0].parts[0].content)
-      .toContain('hello.js');
+    expect(llmRes['gen_ai.output.messages'].length).toBe(2);
+    // First assistant message carries the synthesized tool_call part only;
+    // the final assistant message carries the text answer.
+    const textMsg = llmRes['gen_ai.output.messages']
+      .find((m) => m.parts?.some((p) => p.type === 'text'));
+    expect(textMsg).toBeDefined();
+    expect(textMsg.parts[0].content).toContain('hello.js');
 
     // finish_reasons whitelist
     expect(llmRes['gen_ai.response.finish_reasons']).toEqual(['stop']);
@@ -769,17 +774,22 @@ describe('trae-cn hook processor', () => {
     expect(llmRes).toBeDefined();
     const output = llmRes['gen_ai.output.messages'];
     expect(Array.isArray(output)).toBe(true);
-    expect(output.length).toBe(1);
-    const parts = output[0].parts;
-    expect(Array.isArray(parts)).toBe(true);
-    // Text part + 1 synthesized tool_call part
-    const toolCallParts = parts.filter((p) => p.type === 'tool_call');
+    // Split: tool_call-only assistant message + text-only assistant message.
+    expect(output.length).toBe(2);
+    const toolCallMsg = output[0];
+    expect(toolCallMsg.role).toBe('assistant');
+    const toolCallParts = toolCallMsg.parts.filter((p) => p.type === 'tool_call');
     expect(toolCallParts.length).toBe(1);
     const tc = toolCallParts[0];
     expect(tc.id).toBe('toolu_r7_01');
     expect(tc.name).toBe('write_file');
     expect(tc.tool_name).toBe('write_file');
     expect(tc.arguments).toEqual({ path: '/tmp/hello.js', content: 'console.log("hi")' });
+    // Final assistant message is text-only (no tool_call parts).
+    const textMsg = output[output.length - 1];
+    expect(textMsg.role).toBe('assistant');
+    expect(textMsg.parts.some((p) => p.type === 'tool_call')).toBe(false);
+    expect(textMsg.parts.find((p) => p.type === 'text')?.content).toBe('done');
     // Cross-check: TOOL span has matching gen_ai.tool.call.id + gen_ai.tool.name
     const toolSpans = records.filter((r) => r['gen_ai.span.kind'] === 'TOOL');
     expect(toolSpans.length).toBeGreaterThan(0);
@@ -848,6 +858,127 @@ describe('trae-cn hook processor', () => {
       m.parts.some((p) =>
         p.type === 'tool_call' && p.id === 'toolu_r7_first'));
     expect(contaminated).toBe(false);
+  });
+
+  test('llmResponseRecord splits mixed tool_call+text parts into separate assistant messages', () => {
+    // Regression guard for validate-trace semantic.last_step_no_tool_call:
+    // trae-cn single-LLM-per-turn architecture means one LLM span covers the
+    // whole turn. The Stop event carries the final text answer, while tool
+    // invocations during the turn were captured in state.pending_tool_calls
+    // via PreToolUse. The hook-processor MUST NOT collapse both into one
+    // assistant message with mixed parts — emit tool_call parts in their
+    // own assistant message preceding the text-only final assistant message.
+    const sessionId = 'trae-cn-split-mixed';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T01:00:00.000Z',
+      prompt: 'mkdir + write + summarize',
+    });
+    // First tool: mkdir (RunCommand-style)
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T01:00:01.000Z',
+      tool_use_id: 'toolu_split_01',
+      tool_name: 'RunCommand',
+      tool_input: { command: 'mkdir -p /tmp/demo' },
+    });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T01:00:02.000Z',
+      tool_use_id: 'toolu_split_01',
+      tool_name: 'RunCommand',
+      tool_response: { exit_code: 0, success: true },
+    });
+    // Second tool: Write
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T01:00:03.000Z',
+      tool_use_id: 'toolu_split_02',
+      tool_name: 'Write',
+      tool_input: { path: '/tmp/demo/a.txt', content: 'a' },
+    });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T01:00:04.000Z',
+      tool_use_id: 'toolu_split_02',
+      tool_name: 'Write',
+      tool_response: { exit_code: 0, success: true },
+    });
+    // Stop with final text answer
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T01:00:10.000Z',
+      last_assistant_message: '已创建目录并写入文件，npm test 8 个用例全部通过。',
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    expect(llmRes).toBeDefined();
+    const output = llmRes['gen_ai.output.messages'];
+    expect(Array.isArray(output)).toBe(true);
+    // ≥2 assistant messages: tool_call-only msg(s) + text-only final msg
+    expect(output.length).toBeGreaterThanOrEqual(2);
+    // Every message has role assistant.
+    expect(output.every((m) => m.role === 'assistant')).toBe(true);
+    // The final assistant message MUST NOT contain any tool_call part.
+    const finalMsg = output[output.length - 1];
+    const finalHasToolCall = finalMsg.parts.some((p) => p.type === 'tool_call');
+    expect(finalHasToolCall).toBe(false);
+    const finalText = finalMsg.parts.find((p) => p.type === 'text');
+    expect(finalText).toBeDefined();
+    expect(finalText.content).toContain('npm test');
+    // The non-final assistant message(s) carry the synthesized tool_call parts.
+    const nonFinal = output.slice(0, -1);
+    const toolCallParts = nonFinal
+      .flatMap((m) => m.parts)
+      .filter((p) => p.type === 'tool_call');
+    expect(toolCallParts.length).toBe(2);
+    const ids = toolCallParts.map((p) => p.id).sort();
+    expect(ids).toEqual(['toolu_split_01', 'toolu_split_02']);
+    // No text part should leak into the tool_call-only assistant message.
+    const textInNonFinal = nonFinal.some((m) =>
+      m.parts.some((p) => p.type === 'text'));
+    expect(textInNonFinal).toBe(false);
+    // Span structure preserved: still 1 ENTRY + 1 AGENT + 1 STEP + 1 LLM resp + 2 TOOL call + 2 TOOL result.
+    const kinds = records.map((r) => r['gen_ai.span.kind']);
+    expect(kinds.filter((k) => k === 'ENTRY').length).toBe(1);
+    expect(kinds.filter((k) => k === 'AGENT').length).toBe(1);
+    expect(kinds.filter((k) => k === 'STEP').length).toBe(1);
+    expect(kinds.filter((k) => k === 'LLM').length).toBe(2); // request + response
+    expect(kinds.filter((k) => k === 'TOOL').length).toBe(4); // 2 call + 2 result
+  });
+
+  test('llmResponseRecord emits single text-only assistant message when no tool calls in turn', () => {
+    // No-tool turn: no PreToolUse events → pending_tool_calls empty.
+    // Output should be a single text-only assistant message (no split).
+    const sessionId = 'trae-cn-split-no-tools';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T02:00:00.000Z',
+      prompt: 'just answer',
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T02:00:05.000Z',
+      last_assistant_message: 'plain answer',
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    expect(llmRes).toBeDefined();
+    const output = llmRes['gen_ai.output.messages'];
+    expect(output.length).toBe(1);
+    expect(output[0].role).toBe('assistant');
+    expect(output[0].parts.some((p) => p.type === 'tool_call')).toBe(false);
+    expect(output[0].parts.find((p) => p.type === 'text')?.content).toBe('plain answer');
   });
 
   test('round 8 #1: OTLP span names follow ARMS GenAI semconv patterns', () => {
