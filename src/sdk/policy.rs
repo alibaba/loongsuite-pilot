@@ -447,6 +447,9 @@ impl Policy {
         // Internal collection context is compiled from validated HCD, never
         // accepted from the untrusted hook payload or sdk_options.
         hooks["collector_plans"] = serde_json::to_value(&agents)?;
+        for (id, plan) in &agents {
+            hooks["collector_plans"][id]["namespace"] = serde_json::json!(plan.namespace());
+        }
         hooks["data_dir"] = serde_json::json!(init.data_dir);
         hooks["user_id"] = serde_json::json!(init.user_id);
         hooks["mask"] = serde_json::to_value(&mask)?;
@@ -455,9 +458,9 @@ impl Policy {
         }
         if let Some(blocking) = hooks.get("blocking_agents") {
             anyhow::ensure!(
-                blocking
-                    .as_array()
-                    .is_some_and(|a| a.iter().all(|v| v == "qoder" || v == "qodercli")),
+                blocking.as_array().is_some_and(|a| a.iter().all(|v| v
+                    .as_str()
+                    .is_some_and(|id| super::agent_hooks::AgentHook::for_wire_id(id).is_some()))),
                 "unsupported blocking agent"
             );
         }

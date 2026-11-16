@@ -1,11 +1,10 @@
 use super::abi::{OnHook, PilotJsonView, OK};
+use super::agent_hooks::AgentHook;
 use super::hook_protocol::*;
 use super::outbox::Outbox;
 use crate::interceptor::{
-    adapters::parse_hook_request,
     build_interceptor_config_with, resolve_enabled_rule_ids,
     rules::{builtin_rules, RuleEngine},
-    InterceptorAgent,
 };
 use serde_json::{json, Value};
 use std::net::UdpSocket;
@@ -50,7 +49,7 @@ impl Hooks {
             settings: settings.clone(),
             instance: instance.clone(),
         };
-        for channel in ["cloud", "local"] {
+        for channel in ["cloud", "local", "observe"] {
             let workers = Arc::new(Mutex::new(Vec::new()));
             hooks.workers.push(workers.clone());
             let spool = root.join(format!("hook-requests-{channel}"));
@@ -132,6 +131,7 @@ impl Hooks {
                             let response=json!({"id":packet.id,"instance":instance,"action":result.0,"reason":result.1});
                             if let Ok(bytes)=serde_json::to_vec(&response){if bytes.len()<=MAX_REPLY && socket.send_to(&bytes,peer).is_ok(){record_native_verdict(&queue,&settings,&result);}}
                         }
+                        if channel == "observe" { return; }
                         // Record delivery is independent of the Agent verdict.
                         let activity=json!({"event.id":uuid::Uuid::new_v4().to_string(),"event.name":"other","time_unix_nano":chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string(),"gen_ai.agent.type":packet.agent,"gen_ai.session.id":result.2.as_ref().and_then(|r|r.session_id.as_deref()).unwrap_or(""),"gen_ai.provider.name":"pilot","event.kind":"interceptor.result","hook.channel":channel,"hook.request_id":packet.id,"hook.action":result.0,"hook.reason":result.1,"hook.late":Instant::now()>=deadline});
                         let mut activity=activity;
@@ -230,41 +230,38 @@ fn process(
         _ => return allow(),
     };
     let trusted = settings.read().unwrap().clone();
-    let agent_alias = if packet.agent == "qodercli" {
-        "qoder"
-    } else {
-        packet.agent.as_str()
+    let Some(adapter) = AgentHook::for_wire_id(&packet.agent) else {
+        return allow();
     };
     if !trusted
         .get("agents")
         .and_then(Value::as_array)
-        .is_some_and(|agents| agents.iter().any(|a| a == agent_alias))
+        .is_some_and(|agents| agents.iter().any(|a| a == adapter.policy_id()))
     {
         return allow();
     }
 
-    publish_authorized_wakeup(&packet.agent, &payload, &trusted, queue);
-    let blocking = matches!(
-        packet.event.as_str(),
-        "PreToolUse" | "PostToolUse" | "UserPromptSubmit"
-    ) && trusted
-        .get("sync_wait_enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-        && matches!(packet.agent.as_str(), "qoder" | "qodercli")
+    adapter.wakeup(&payload, &packet.event, &trusted, queue);
+    if channel == "observe" {
+        return allow();
+    }
+
+    let blocking = adapter.supports_blocking(&packet.event)
+        && trusted
+            .get("sync_wait_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
         && trusted
             .get("blocking_agents")
             .and_then(Value::as_array)
-            .map(|list| list.iter().any(|a| a == &packet.agent))
-            .unwrap_or(true);
+            .is_none_or(|list| list.iter().any(|a| a == &packet.agent));
+    let request = adapter.parse(&payload, &packet.event);
     let verdict = if channel == "cloud" {
         let Some(callback) = callback else {
             return allow();
         };
         let mut normalized = payload.clone();
-        let parsed = InterceptorAgent::parse(&packet.agent)
-            .and_then(|agent| parse_hook_request(&payload, agent, Some(&packet.event)));
-        if let Some(request) = parsed {
+        if let Some(request) = request.as_ref() {
             normalized.insert("session_id".into(), json!(request.session_id));
             normalized.insert("tool_name".into(), json!(request.tool_name));
             normalized.insert("tool_input".into(), json!(request.tool_input));
@@ -327,19 +324,13 @@ fn process(
             Err(_) => return allow(),
         }
     } else {
-        let Some(agent) = InterceptorAgent::parse(&packet.agent) else {
-            return allow();
-        };
-        let Some(request) = parse_hook_request(&payload, agent, Some(&packet.event)) else {
+        let Some(request) = request.as_ref() else {
             return allow();
         };
         let config = build_interceptor_config_with(trusted.get("local"), |_| None);
         let engine = RuleEngine::new(builtin_rules(), resolve_enabled_rule_ids(&config));
-        serde_json::to_value(engine.evaluate(&request))
-            .unwrap_or_else(|_| json!({"action":"allow"}))
+        serde_json::to_value(engine.evaluate(request)).unwrap_or_else(|_| json!({"action":"allow"}))
     };
-    let request = InterceptorAgent::parse(&packet.agent)
-        .and_then(|agent| parse_hook_request(&payload, agent, Some(&packet.event)));
     match reply_action(&verdict) {
         Some(("block", reason)) if blocking => {
             ("block", reason.chars().take(512).collect(), request)
@@ -357,91 +348,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         .zip(b)
         .fold(0u8, |difference, (a, b)| difference | (a ^ b))
         == 0
-}
-
-/// Publish only metadata through Qoder's existing wakeup protocol. Its existing
-/// collector remains the sole transcript parser and progress owner.
-fn publish_authorized_wakeup(
-    agent: &str,
-    payload: &serde_json::Map<String, Value>,
-    settings: &Value,
-    queue: &Outbox,
-) {
-    if !matches!(agent, "qoder" | "qodercli") {
-        return;
-    }
-    let Some(plan) = settings.pointer("/collector_plans/qoder") else {
-        return;
-    };
-    let Some(data) = settings.get("data_dir").and_then(Value::as_str) else {
-        return;
-    };
-    let Some(path) = payload
-        .get("transcript_path")
-        .or_else(|| payload.get("transcriptPath"))
-        .and_then(Value::as_str)
-    else {
-        return;
-    };
-    let path = match super::policy::canonical_candidate(Path::new(path)) {
-        Ok(path) => path,
-        Err(_) => return,
-    };
-    let sources = plan
-        .get("sources")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let roots: Vec<PathBuf> = sources
-        .iter()
-        .filter(|s| s["kind"] == "transcript")
-        .filter_map(|s| s["path"].as_str().map(PathBuf::from))
-        .collect();
-    if roots.is_empty() {
-        return;
-    }
-    let authorized = path.is_absolute() && roots.iter().any(|root| path.starts_with(root));
-    let scope = crate::utils::source_access::SourceScope::new(roots, 1, MAX_REQUEST);
-    // UserPromptSubmit can precede file creation. Authorize the resolved
-    // missing leaf and publish the existing zero-size native wakeup; actual
-    // transcript reads still validate their opened file later.
-    if !authorized || (path.exists() && scope.check(&path).is_err()) {
-        queue.alarm(
-            "SDK_HOOK_SOURCE_DENIED",
-            "Qoder hook transcript is outside the authorized source",
-        );
-        return;
-    }
-    let namespace = {
-        use sha2::{Digest, Sha256};
-        let bytes = serde_json::to_vec(&(
-            plan["agent"].clone(),
-            plan["profile"].clone(),
-            plan["sources"].clone(),
-            plan["allowed_roots"].clone(),
-        ))
-        .expect("validated source plan");
-        hex::encode(Sha256::digest(bytes))
-    };
-    let state = Path::new(data).join("sources").join(namespace);
-    if crate::utils::source_access::private_path(&state).is_err() {
-        return;
-    }
-    let mut value = Value::Object(payload.clone());
-    value["transcript_path"] = json!(path);
-    if !crate::hook_process::publish_qoder_wakeup(
-        &value,
-        &state,
-        "qoder",
-        None,
-        &serde_json::Map::new(),
-        &serde_json::Map::new(),
-    ) {
-        queue.alarm(
-            "SDK_HOOK_WAKEUP",
-            "Qoder wakeup was not accepted; source progress retained",
-        );
-    }
 }
 
 fn record_native_verdict(
@@ -480,7 +386,14 @@ fn record_native_verdict(
             queue.verdicts.put(&key, action, now);
         }
     }
-    if result.0 == "block" && request.event == HookEventName::UserPromptSubmit {
+    if result.0 == "block"
+        && matches!(
+            request.agent,
+            crate::interceptor::InterceptorAgent::Qoder
+                | crate::interceptor::InterceptorAgent::QoderCli
+        )
+        && request.event == HookEventName::UserPromptSubmit
+    {
         let mut entry = crate::interceptor::build_blocked_qoder_prompt_entry(request, None);
         entry.user_id = settings
             .read()

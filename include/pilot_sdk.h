@@ -57,9 +57,8 @@ typedef struct PilotApiV2 {
     int32_t (*destroy)(PilotHandle *);
     void (*string_free)(char *);
     int32_t (*dispatch)(PilotHandle *, uint32_t reserved_zero);
-    /* Reserved to the complete Pilot native command host, not cloud embedding.
-     * Synchronous process-wide command; do not mix with embedded instances.
-     * The native command host pins this library through process exit. */
+    /* Historical complete Pilot startup slot, reserved to keep v2 layout.
+     * The complete Pilot executable owns its command runtime. */
     int32_t (*host_main)(void);
     int32_t (*host_hook)(PilotJsonView args, PilotJsonView input, char **report, size_t *len);
 } PilotApiV2;

@@ -24,7 +24,7 @@ jobs:
         include:
           - {os: ubuntu-22.04, target: x86_64-unknown-linux-gnu}
           - {os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu}
-          - {os: macos-15-intel, target: x86_64-apple-darwin, ui: x64}
+          - {os: macos-26-intel, target: x86_64-apple-darwin, ui: x64}
           - {os: macos-15, target: aarch64-apple-darwin, ui: arm64}
           - {os: windows-2022, target: x86_64-pc-windows-msvc}
           - {os: windows-11-arm, target: aarch64-pc-windows-msvc}
@@ -52,7 +52,7 @@ jobs:
           key: ${{ matrix.target }}
           cache-on-failure: true
       - name: Build real library and native host
-        run: cargo build --locked --lib --bin loongsuite-pilot
+        run: cargo build --locked --lib --bin loongsuite-pilot --bin loongsuite-pilot-sdk-hook
       # Keep ordinary builds together before dev-dependency test features
       # change the library graph and would otherwise rebuild it a third time.
       - name: Build package tools
@@ -63,7 +63,7 @@ jobs:
           export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
           mkdir -p "$RUNNER_TEMP/pilot-sdk-home"
           HOME="$RUNNER_TEMP/pilot-sdk-home" USERPROFILE="$RUNNER_TEMP/pilot-sdk-home" \
-            cargo test --locked --test sdk_dynamic -- --test-threads=1
+            cargo test --locked --test sdk_dynamic --test interceptor_native -- --test-threads=1
       - name: Complete runtime native CPU and RSS
         run: cargo test --locked --test process_resources_native -- --test-threads=1
       - name: Compile and run the foreign C host on Windows
@@ -118,6 +118,8 @@ jobs:
             examples/pilot_sdk_host.c
             target/debug/loongsuite-pilot
             target/debug/loongsuite-pilot.exe
+            target/debug/loongsuite-pilot-sdk-hook
+            target/debug/loongsuite-pilot-sdk-hook.exe
             target/debug/libloongsuite_pilot.so
             target/debug/libloongsuite_pilot.dylib
             target/debug/loongsuite_pilot.dll

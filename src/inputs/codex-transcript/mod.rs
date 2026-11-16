@@ -10,6 +10,7 @@
 mod builder;
 mod checkpoint;
 mod discovery;
+pub(crate) use discovery::safe_wakeup_session_part;
 mod extractor;
 mod input;
 mod invocation_audit;

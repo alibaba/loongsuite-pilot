@@ -167,13 +167,3 @@ pub fn library_path() -> Result<PathBuf, String> {
     }
     Ok(development)
 }
-
-pub fn run() -> Result<i32, String> {
-    let library = Library::open(&library_path()?)?;
-    let code = library.run();
-    // The complete command owns the process. Keep process-global logging and
-    // host-plugin callbacks resident until OS exit; embedded handles instead
-    // use destroy and explicit unload through Library's normal Drop.
-    std::mem::forget(library);
-    Ok(code)
-}

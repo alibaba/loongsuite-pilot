@@ -2,7 +2,7 @@
 
 Pilot 提供同一份采集核心的两种使用方式：完整 Pilot 通过原生外壳加载动态库；嵌入宿主通过 C ABI 加载动态库，交接活动、监控和拦截裁决。现有完整模式的配置、部署、输出、服务、界面和更新入口继续保留。
 
-同一目标平台、版本类型和构建提交使用同一份动态库产物。Pilot 专用壳调用函数表的 `host_main` 进入完整运行模式；云壳调用 `start`、`dispatch`、`stop` 等嵌入接口，采集实现留在库内。`host_main` 是进程级同步入口，不与嵌入实例混用。
+同一目标平台、版本类型和构建提交使用同一份动态库产物。Pilot 专用壳承接完整命令及历史 Hook，云壳调用 `start`、`dispatch`、`stop` 等嵌入接口。`host_main` 保留在 v2 函数表中，完整命令由 Pilot 专用壳直接运行。
 
 ## 构建与文件
 
@@ -139,12 +139,12 @@ SDK 的自监控包括以下字段与口径：
 
 ## 两条 Hook 与截止
 
-SDK 分别发布 `sdk-hooks-cloud.json` 和 `sdk-hooks-local.json`，包含进程号、实际 loopback UDP 端口、实例标识和随机 token。两个入口各自最多同时运行 8 个裁决工作，互不占用对方的并发额度。
+SDK 分别发布 `sdk-hooks-cloud.json`、`sdk-hooks-local.json` 和 `sdk-hooks-observe.json`，包含进程号、实际 loopback UDP 端口、实例标识和随机 token。两个裁决入口各自最多同时运行 8 个裁决工作。观察入口只唤醒采集，有独立并发额度。
 
 可直接使用原生外壳作为短命 Hook 客户端，此命令不加载采集动态库：
 
 ```sh
-loongsuite-pilot sdk-hook --data-dir /var/lib/pilot-sdk/instance-a \
+loongsuite-pilot-sdk-hook sdk-hook --data-dir /var/lib/pilot-sdk/instance-a \
   --channel cloud --agent qoder --event PreToolUse
 ```
 
