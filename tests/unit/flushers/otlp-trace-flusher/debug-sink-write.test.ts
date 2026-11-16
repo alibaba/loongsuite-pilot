@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -6,6 +6,7 @@ import { ExportResultCode } from '@opentelemetry/core';
 import type { ExportResult } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
+import * as stream from '../../../../src/flushers/turn-stream.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
 import type { TraceExporterLike } from '../../../../src/flushers/otlp-trace-flusher.js';
 
@@ -141,6 +142,13 @@ describe('OtlpTraceFlusher - otlp-debug sink write via production sendBatch path
     tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'otlp-debug-sink-'));
     expectedDebugDir = path.join(tmpDataDir, 'logs', 'otlp-debug');
     captured = [];
+    // Force the convertEventLogToTrace fallback path. main's refactor routes
+    // trae-cn through planTurnStream → createTurnStreamSession, but the
+    // installed @loongsuite/otel-util-genai (v1.2.0) does not export
+    // createTurnStreamSession. Mirror main's turn-streaming.test.ts spy
+    // pattern to keep this regression test on the convert path it was
+    // authored against.
+    vi.spyOn(stream, 'planTurnStream').mockReturnValue(undefined);
     flusher = new OtlpTraceFlusher(
       {
         enabled: true,
@@ -156,6 +164,7 @@ describe('OtlpTraceFlusher - otlp-debug sink write via production sendBatch path
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await flusher.shutdown();
     fs.rmSync(tmpDataDir, { recursive: true, force: true });
   });
