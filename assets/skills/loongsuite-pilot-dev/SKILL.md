@@ -22,7 +22,7 @@ description: Develop, debug, test, and review the Rust LoongSuite Pilot runtime 
 
 ## 开发顺序
 
-1. 找到现有的同类入口，沿 Agent 定义、部署、采集、归一化、持久化、输出走一遍。定位哪些地方会影响完整 Pilot 与嵌入 SDK。
-2. 固定输入样本和输出契约后改最小范围。涉及 Hook、checkpoint、安装或 ABI 的改动，先把正常路径、失败路径和恢复路径写成可执行验收项。
+1. 沿 Agent 定义、部署、采集、归一化、持久化和输出定位改动。以完整 Pilot 的 `register_sdk_qoder` 为参考，让 SDK 持有受支持 Agent 的采集和进度。外壳负责宿主配置、生命周期及输出。
+2. 固定输入样本和输出契约后改最小范围。用同一版本的动态库和 `loongsuite-pilot-sdk-hook` 验收两个宿主。涉及 checkpoint、安装或 ABI 时，先写清启动、失败、恢复与交付的验收条件。
 3. 跑相关 Rust 测试及对应宿主契约。打包改动用实际 host 和动态库同版本组合验证。Qoder 数据质量是主要验收项，Codex 需要可用于开发验证。其他 Agent 按实际改动验证。
 4. 记录测试命令、提交 SHA、Agent 版本、结果和仍需实机验证的平台。临时压测产物和中间日志放工作区外，结束后清理自己创建的目录和 worktree。
