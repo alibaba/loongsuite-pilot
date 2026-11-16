@@ -476,21 +476,55 @@ fn real_codex_transcript_collects_through_the_same_dynamic_abi() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("sessions");
     std::fs::create_dir(&source).unwrap();
-    let policy = json!({"agents":["codex"],"hcd":{"agent_configs":{"codex":{"collection":{
+    let mut policy = json!({"agents":["codex"],"hcd":{"agent_configs":{"codex":{"collection":{
         "enabled":true,"profile":"codex_rollout_v1","allowed_roots":[source],
         "sources":[{"id":"rollout","type":"transcript","path":source}],"limits":{"poll_interval_ms":100}
     }}}},"sdk_options":{"delivery":{"flush_interval_ms":10}}});
-    let mut host = Host::start(&root.path().join("data"), policy, Box::default());
+    policy["sdk_options"]["hooks"]["local"]["mode"] = json!("all");
+    let data = root.path().join("data");
+    let mut host = Host::start(&data, policy.clone(), Box::default());
     host.ready();
     std::thread::sleep(Duration::from_millis(250));
     // Existing checked-in native Codex fixture, created after startup so old
     // history remains baselined according to the production collector contract.
     let fixture=include_str!("fixtures/codex-subagent/rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
-    std::fs::write(
-        source.join("rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"),
-        fixture,
-    )
-    .unwrap();
+    let session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let transcript = source.join(format!("rollout-2026-08-07T10-00-00-{session}.jsonl"));
+    std::fs::write(&transcript, fixture).unwrap();
+    let observe = |turn: &str| {
+        let payload = json!({"session_id":session,"turn_id":turn,"transcript_path":transcript,
+            "hook_event_name":"Stop"});
+        let result = sdk_hook_command(&data, "observe", "codex", "Stop", &payload)
+            .wait_with_output()
+            .unwrap();
+        assert!(result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(std::fs::read_dir(data.join("sources"))
+            .unwrap()
+            .flatten()
+            .any(|entry| {
+                entry
+                    .path()
+                    .join("wakeup")
+                    .join(format!("{session}.json"))
+                    .is_file()
+            }));
+    };
+    observe("parent-turn-1");
+    assert_eq!(host.ctx.hook_entered.load(Ordering::SeqCst), 0);
+    let tool = json!({"hook_event_name":"PreToolUse","session_id":session,
+        "tool_name":"Bash","tool_input":{"command":"export KEY=sk-1234567890abcdefghijklmnop"}});
+    for channel in ["cloud", "local"] {
+        let output = sdk_hook_command(&data, channel, "codex", "PreToolUse", &tool)
+            .wait_with_output()
+            .unwrap();
+        assert!(output.status.success());
+        let verdict: Value = serde_json::from_slice(&output.stdout).expect(channel);
+        assert_eq!(
+            verdict.pointer("/hookSpecificOutput/permissionDecision"),
+            Some(&json!("deny"))
+        );
+    }
     until(|| {
         host.ctx.rows.lock().unwrap().iter().any(|bytes| {
             serde_json::from_slice::<Value>(bytes).is_ok_and(|v| v["event.name"] == "llm.response")
@@ -499,7 +533,41 @@ fn real_codex_transcript_collects_through_the_same_dynamic_abi() {
     let rows = host.ctx.rows.lock().unwrap().clone();
     assert!(rows.iter().all(|b| serde_json::from_slice::<Value>(b)
         .is_ok_and(|v| v["event.id"].as_str().is_some_and(|s| !s.is_empty()))));
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
     host.stop();
+    drop(host);
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    let second_turn = fixture
+        .lines()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("parent-turn-1", "parent-turn-2")
+        .replace("call-subagent-", "new-call-");
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap(),
+        "{second_turn}"
+    )
+    .unwrap();
+    observe("parent-turn-2");
+    until(|| {
+        resumed.ctx.rows.lock().unwrap().iter().any(|bytes| {
+            serde_json::from_slice::<Value>(bytes)
+                .is_ok_and(|event| event["event.name"] == "llm.response")
+        })
+    });
+    resumed.stop();
+    assert!(resumed
+        .ctx
+        .rows
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|bytes| !rows.contains(bytes)));
 }
 
 #[test]
@@ -621,7 +689,17 @@ fn hard_killed_sdk_replays_its_durable_outbox_without_regenerating_ids() {
 }
 
 fn hook_command(data: &Path, channel: &str, event: &str, payload: &Value) -> std::process::Child {
-    let mut child = Command::new(bin())
+    sdk_hook_command(data, channel, "qoder", event, payload)
+}
+
+fn sdk_hook_command(
+    data: &Path,
+    channel: &str,
+    agent: &str,
+    event: &str,
+    payload: &Value,
+) -> std::process::Child {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"))
         .args([
             "sdk-hook",
             "--data-dir",
@@ -629,7 +707,7 @@ fn hook_command(data: &Path, channel: &str, event: &str, payload: &Value) -> std
             "--channel",
             channel,
             "--agent",
-            "qoder",
+            agent,
             "--event",
             event,
         ])
@@ -827,7 +905,7 @@ fn qoder_native_batch_preserves_activity_across_retry_ack_and_restart() {
     let notify = |event| {
         let payload = json!({"hook_event_name":event,"session_id":session,"transcript_path":file,
             "cwd":root.path(),"parent_business_info":{"product":"cli","version":"sdk-fixture"}});
-        let output = hook_command(&data, "cloud", event, &payload)
+        let output = hook_command(&data, "observe", event, &payload)
             .wait_with_output()
             .unwrap();
         assert!(output.status.success());

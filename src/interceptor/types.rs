@@ -41,6 +41,8 @@ impl HookEventName {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InterceptorAgent {
+    #[serde(rename = "codex")]
+    Codex,
     #[serde(rename = "qoder")]
     Qoder,
     #[serde(rename = "qodercli")]
@@ -57,6 +59,7 @@ impl InterceptorAgent {
             Self::Qoder => "qoder",
             Self::QoderCli => "qodercli",
             Self::OpenClaw => "openclaw",
+            Self::Codex => "codex",
             Self::QwenWorkCn => "qwen-work-cn",
         }
     }

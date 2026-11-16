@@ -27,16 +27,18 @@ fn descriptor(path: &Path) -> Option<Descriptor> {
     }
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
-fn worker(args: Vec<String>, started: Instant) -> Option<String> {
+pub type LegacyHook = fn(&[String]) -> Option<String>;
+
+fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Option<String> {
     if args.first().map(String::as_str) == Some("interceptor") {
-        return legacy_worker(&args[2..]);
+        return legacy?(&args[2..]);
     }
     let data = PathBuf::from(flag(&args, "--data-dir")?);
     if !data.is_absolute() {
         return None;
     }
     let channel = flag(&args, "--channel")?;
-    if !matches!(channel, "cloud" | "local") {
+    if !matches!(channel, "observe" | "local" | "cloud") {
         return None;
     }
     let agent = flag(&args, "--agent")?.to_owned();
@@ -190,7 +192,7 @@ fn worker(args: Vec<String>, started: Instant) -> Option<String> {
         first
     };
     let (action, reason) = reply_action(&reply)?;
-    if action == "block" {
+    if action == "block" && channel != "observe" {
         render_block(&agent, &event, reason)
     } else {
         None
@@ -199,7 +201,7 @@ fn worker(args: Vec<String>, started: Instant) -> Option<String> {
 
 /// Never return while a worker can still write to the Agent. Only this main
 /// thread owns stdout; process::exit terminates blocked stdin/socket workers.
-pub fn run(args: Vec<String>, started: Instant) -> ! {
+pub fn run(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> ! {
     let watchdog = std::thread::Builder::new()
         .name("pilot-hook-deadline".into())
         .spawn(move || {
@@ -215,7 +217,7 @@ pub fn run(args: Vec<String>, started: Instant) -> ! {
     let spawn = std::thread::Builder::new()
         .name("pilot-hook-io".into())
         .spawn(move || {
-            let _ = tx.send(worker(args, started));
+            let _ = tx.send(worker(args, started, legacy));
         });
     if spawn.is_ok() {
         if let Some(left) = Duration::from_millis(DEADLINE_MS).checked_sub(started.elapsed()) {
@@ -252,49 +254,6 @@ fn immediate_exit() -> ! {
             std::thread::park();
         }
     }
-}
-
-// Keep full Pilot's existing HTTP/Agent protocol, while covering cold library
-// loading and stdin with the same process-wide native deadline.
-fn legacy_worker(args: &[String]) -> Option<String> {
-    use crate::host_loader::{self, abi::PilotJsonView, Library};
-    let mut body = Vec::new();
-    std::io::stdin()
-        .take(5 * 1024 * 1024 + 1)
-        .read_to_end(&mut body)
-        .ok()?;
-    if body.len() > 5 * 1024 * 1024 {
-        return None;
-    }
-    let library = Library::open(&host_loader::library_path().ok()?).ok()?;
-    let argv = serde_json::to_vec(args).ok()?;
-    let mut report = std::ptr::null_mut();
-    let mut length = 0;
-    // SAFETY: buffers and library remain owned through the synchronous call.
-    let code = unsafe {
-        (library.api().host_hook)(
-            PilotJsonView::from_bytes(&argv),
-            PilotJsonView::from_bytes(&body),
-            &mut report,
-            &mut length,
-        )
-    };
-    if report.is_null() {
-        return None;
-    }
-    // SAFETY: SDK-owned output with explicit length, freed by the same library.
-    let result = serde_json::from_slice::<serde_json::Value>(unsafe {
-        std::slice::from_raw_parts(report.cast::<u8>(), length)
-    });
-    unsafe {
-        (library.api().string_free)(report);
-    }
-    // The hook process exits immediately; retain any process-global logger.
-    std::mem::forget(library);
-    if code != 0 {
-        return None;
-    }
-    result.ok()?.get("stdout")?.as_str().map(str::to_owned)
 }
 
 fn pid_alive(pid: u32) -> bool {

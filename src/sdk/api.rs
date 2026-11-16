@@ -414,28 +414,8 @@ unsafe extern "C" fn string_free(text: *mut c_char) {
     }
 }
 unsafe extern "C" fn host_main() -> i32 {
-    boundary(|| {
-        let result = (|| -> anyhow::Result<i32> {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            let result = runtime.block_on(crate::cli_main::run());
-            // The native process exits after this reserved command returns.
-            // Preserve its original process::exit behavior after the CLI has
-            // completed its own shutdown; background runtime jobs must not
-            // delay returning an installer result. The host pins this library
-            // through process exit. Embedded sessions use their own barriers.
-            runtime.shutdown_background();
-            result
-        })();
-        match result {
-            Ok(code) => code,
-            Err(error) => {
-                eprintln!("loongsuite-pilot: {error}");
-                1
-            }
-        }
-    })
+    // The slot remains in the v2 table for binary compatibility.
+    FAILURE
 }
 
 unsafe extern "C" fn host_hook(

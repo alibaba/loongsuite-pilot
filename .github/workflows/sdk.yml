@@ -52,7 +52,7 @@ jobs:
           key: ${{ matrix.target }}
           cache-on-failure: true
       - name: Build real library and native host
-        run: cargo build --locked --lib --bin loongsuite-pilot
+        run: cargo build --locked --lib --bin loongsuite-pilot --bin loongsuite-pilot-sdk-hook
       # Keep ordinary builds together before dev-dependency test features
       # change the library graph and would otherwise rebuild it a third time.
       - name: Build package tools
@@ -118,6 +118,8 @@ jobs:
             examples/pilot_sdk_host.c
             target/debug/loongsuite-pilot
             target/debug/loongsuite-pilot.exe
+            target/debug/loongsuite-pilot-sdk-hook
+            target/debug/loongsuite-pilot-sdk-hook.exe
             target/debug/libloongsuite_pilot.so
             target/debug/libloongsuite_pilot.dylib
             target/debug/loongsuite_pilot.dll

@@ -11,6 +11,7 @@ edition = "2021"
 license = "Apache-2.0"
 description = "Multi-agent AI coding data collection platform"
 rust-version = "1.99.1"
+default-run = "loongsuite-pilot"
 
 [lib]
 crate-type = ["rlib", "cdylib"]

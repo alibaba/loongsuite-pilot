@@ -7,6 +7,7 @@ mod runtime;
 
 mod outbox;
 
+mod agent_hooks;
 pub mod hook_protocol;
 mod hooks;
 

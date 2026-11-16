@@ -29,7 +29,7 @@ pub struct Datagram {
     pub want_receipt: bool,
 }
 pub fn render_block(agent: &str, event: &str, reason: &str) -> Option<String> {
-    if !matches!(agent, "qoder" | "qodercli") {
+    if !(matches!(agent, "qoder" | "qodercli") || (agent == "codex" && event == "PreToolUse")) {
         return None;
     }
     let reason = if reason.is_empty() {
