@@ -3073,20 +3073,40 @@ function dropOrphanPairs(records: AgentActivityEntry[]): AgentActivityEntry[] {
 
 /**
  * Clear `parent_span_id` on metadata-only "other" events (those without
- * gen_ai.input.messages(_delta)). The upstream converter library reads
- * parent_span_id from "other" events to resolve a turn's upstream
+ * gen_ai.input.messages(_delta)) ONLY when the turn has ≥2 distinct non-empty
+ * parent_span_id values among those events. The upstream converter library
+ * reads parent_span_id from "other" events to resolve a turn's upstream
  * traceparent parent, and flags multiple distinct values within a turn as
- * "Inconsistent parent_span_id within turn". trae-cn emits a chain of
- * ENTRY→AGENT→STEP synthetic "other" events whose parent_span_id points
- * up the span tree (AGENT.parent=ENTRY.span_id, STEP.parent=AGENT.span_id)
- * — these are intra-trace span-tree pointers, NOT upstream traceparent
- * markers. The converter discards these events anyway (they lack
- * gen_ai.input.messages), so clearing parent_span_id here only suppresses
- * the false inconsistency warning without affecting span tree construction.
- * User-input "other" events (with gen_ai.input.messages) keep their
+ * "Inconsistent parent_span_id within turn".
+ *
+ * trae-cn emits a chain of ENTRY→AGENT→STEP synthetic "other" events whose
+ * parent_span_id points up the span tree (AGENT.parent=ENTRY.span_id,
+ * STEP.parent=AGENT.span_id) — these are intra-trace span-tree pointers, NOT
+ * upstream traceparent markers. They produce ≥2 distinct values, so we clear
+ * them to suppress the false warning. The converter discards these events
+ * anyway (they lack gen_ai.input.messages), so clearing parent_span_id only
+ * suppresses the warning without affecting span tree construction.
+ *
+ * When the turn has only 0 or 1 distinct non-empty parent_span_id value
+ * among metadata-only "other" events (e.g. the shared upstream traceparent
+ * in a delegated subagent turn), the values are consistent and clearing is
+ * not needed — leaving them intact lets `prepareDelegatedTurn`'s marker
+ * detection (which requires all records to share the same trace_id +
+ * parent_span_id) succeed, keeping the child ENTRY transparent.
+ *
+ * User-input "other" events (with gen_ai.input.messages) always keep their
  * parent_span_id so legitimate upstream parents are still captured.
  */
 function stripIntraTraceParentSpanIds(records: AgentActivityEntry[]): AgentActivityEntry[] {
+  const distinct = new Set<string>();
+  for (const r of records) {
+    if (r['event.name'] !== 'other') continue;
+    if (!isMetadataOnlyOtherEvent(r)) continue;
+    const p = r['parent_span_id'];
+    if (p === undefined || p === '') continue;
+    distinct.add(String(p));
+  }
+  if (distinct.size < 2) return records;
   return records.map((r) => {
     if (r['event.name'] !== 'other') return r;
     if (!isMetadataOnlyOtherEvent(r)) return r;
