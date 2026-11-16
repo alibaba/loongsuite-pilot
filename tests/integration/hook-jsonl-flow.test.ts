@@ -258,6 +258,7 @@ describe('Hook JSONL integration flow', () => {
       path.resolve(process.cwd(), 'assets/hooks/shared/upstream-context.mjs'),
       path.join(sharedDir, 'upstream-context.mjs'),
     );
+    await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/shared/upstream-ingress.mjs'), path.join(sharedDir, 'upstream-ingress.mjs'));
     await fs.chmod(hookScript, 0o755);
     await fs.cp(path.resolve('assets/hooks/qoder'), path.join(hookDir, 'qoder'), { recursive: true });
 
@@ -391,6 +392,7 @@ describe('Hook JSONL integration flow', () => {
       path.resolve(process.cwd(), 'assets/hooks/shared/upstream-context.mjs'),
       path.join(sharedDir, 'upstream-context.mjs'),
     );
+    await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/shared/upstream-ingress.mjs'), path.join(sharedDir, 'upstream-ingress.mjs'));
     await fs.chmod(hookScript, 0o755);
     await fs.cp(path.resolve('assets/hooks/qoder'), path.join(hookDir, 'qoder'), { recursive: true });
 
@@ -761,6 +763,7 @@ describe('Hook JSONL integration flow', () => {
       path.resolve(process.cwd(), 'assets/hooks/shared/upstream-context.mjs'),
       path.join(sharedDir, 'upstream-context.mjs'),
     );
+    await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/shared/upstream-ingress.mjs'), path.join(sharedDir, 'upstream-ingress.mjs'));
     await fs.chmod(hookScript, 0o755);
     await fs.cp(path.resolve('assets/hooks/qoder'), path.join(hookDir, 'qoder'), { recursive: true });
 

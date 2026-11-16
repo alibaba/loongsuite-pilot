@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { contentHash } from '../../utils/content-hash.js';
 import { createLogger } from '../../utils/logger.js';
+import { readUpstreamSession, readUpstreamTurn, type UpstreamCarrier } from '../../../assets/hooks/shared/upstream-ingress.mjs';
 
 const logger = createLogger('correlation-store');
 
@@ -11,11 +12,13 @@ interface TurnRecord {
   contentHash?: string;
   contentPrefix?: string;
   traceparent: string;
+  tracestate?: string;
 }
 
 interface SessionRecord {
   type: 'session';
   traceparent: string;
+  tracestate?: string;
 }
 
 interface SessionState {
@@ -110,7 +113,8 @@ export class CorrelationStore {
     // Include record identity so replacing a file does not make a new context
     // collide with an old claim at the same append-only position. No prompt
     // text or upstream credentials are copied into the marker or its name.
-    const digest = createHash('sha256').update(JSON.stringify(record)).digest('hex');
+    const identity = { type: record.type, contentHash: record.contentHash, contentPrefix: record.contentPrefix, traceparent: record.traceparent };
+    const digest = createHash('sha256').update(JSON.stringify(identity)).digest('hex');
     const marker = path.join(this.dir, `${safeName(sessionId)}.turn-context-${index}-${digest}.done`);
     const temporary = path.join(this.dir, `.turn-claim-${randomUUID()}.tmp`);
     try {
@@ -143,7 +147,9 @@ export class CorrelationStore {
     try {
       stat = fs.statSync(file);
     } catch {
-      return null; // no records for this session
+      const session = readUpstreamSession(this.dir, sessionId);
+      if (!session) return null;
+      stat = fs.statSync(path.join(this.dir, `${safeName(sessionId)}.env.lock`));
     }
 
     const existing = this.states.get(sessionId);
@@ -171,14 +177,21 @@ export class CorrelationStore {
             contentHash: typeof r.contentHash === 'string' ? r.contentHash : undefined,
             contentPrefix: typeof r.contentPrefix === 'string' ? r.contentPrefix : undefined,
             traceparent: r.traceparent,
+            ...(typeof r.tracestate === 'string' ? { tracestate: r.tracestate } : {}),
           });
         } else if (r.type === 'session' && typeof r.traceparent === 'string') {
-          sessions.push({ type: 'session', traceparent: r.traceparent });
+          sessions.push({ type: 'session', traceparent: r.traceparent, ...(typeof r.tracestate === 'string' ? { tracestate: r.tracestate } : {}) });
         }
+      }
+      if (sessions.length === 0) {
+        const recovered = readUpstreamSession(this.dir, sessionId);
+        if (recovered) sessions.push({ type: 'session', ...recovered });
       }
     } catch (err) {
       logger.warn('failed to read correlation file', { sessionId, error: String(err) });
-      return existing ?? null;
+      const recovered = readUpstreamSession(this.dir, sessionId);
+      if (!recovered) return existing ?? null;
+      sessions.push({ type: 'session', ...recovered });
     }
 
     const state: SessionState = {
@@ -209,10 +222,18 @@ export class CorrelationStore {
    * UTF-8 algorithm before display truncation. Null if no match.
    */
   resolveTurn(sessionId: string, collectedText: string, turnId?: string, collectedHash?: string): string | null {
+    return this.resolveTurnContext(sessionId, collectedText, turnId, collectedHash)?.traceparent ?? null;
+  }
+
+  resolveNativeTurn(agentId: string, sessionId: string, nativeTurnId: string): UpstreamCarrier | null {
+    return readUpstreamTurn(this.dir, agentId, sessionId, nativeTurnId);
+  }
+
+  resolveTurnContext(sessionId: string, collectedText: string, turnId?: string, collectedHash?: string): UpstreamCarrier | null {
     const state = this.load(sessionId);
     if (!state || state.turns.length === 0) return null;
     const resolved = turnId ? state.resolvedTurns.get(turnId) : undefined;
-    if (resolved !== undefined) return state.turns[resolved].traceparent;
+    if (resolved !== undefined) return state.turns[resolved];
 
     // Exact path: advance the hash bucket cursor past already-consumed entries
     // (a bucket entry may have been consumed via the prefix fallback), then take
@@ -230,7 +251,7 @@ export class CorrelationStore {
         if (claim.turnId) state.resolvedTurns.set(claim.turnId, idx);
         if (!claim.claimed) continue;
         state.hashCursor.set(hash, c);
-        return state.turns[idx].traceparent;
+        return state.turns[idx];
       }
       state.hashCursor.set(hash, c);
     }
@@ -246,7 +267,7 @@ export class CorrelationStore {
         const claim = this.claimTurnContext(sessionId, i, t, turnId);
         if (claim.turnId) state.resolvedTurns.set(claim.turnId, i);
         if (!claim.claimed) continue;
-        return t.traceparent;
+        return t;
       }
     }
     return null;
@@ -257,11 +278,15 @@ export class CorrelationStore {
    * Intended to be applied only to the session's first collected turn.
    */
   resolveSessionFirst(sessionId: string): string | null {
+    return this.resolveSessionContext(sessionId)?.traceparent ?? null;
+  }
+
+  resolveSessionContext(sessionId: string): UpstreamCarrier | null {
     const state = this.load(sessionId);
     if (!state || state.sessions.length === 0 || state.sessionConsumed) return null;
     state.sessionConsumed = true;
     if (!this.claimSessionContext(sessionId)) return null;
-    return state.sessions[0].traceparent;
+    return state.sessions[0];
   }
 
   /**
@@ -287,7 +312,7 @@ export class CorrelationStore {
     try {
       return fs.statSync(path.join(this.dir, `${safeName(sessionId)}.jsonl`)).isFile();
     } catch {
-      return false;
+      return readUpstreamSession(this.dir, sessionId) !== null;
     }
   }
 

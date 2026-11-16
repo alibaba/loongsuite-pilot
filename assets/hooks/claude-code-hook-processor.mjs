@@ -1257,6 +1257,7 @@ function buildTurnRecords(
     // win over caller-supplied attributes; aligns with qoder's Object.assign order.
     ...SPAN_ATTRIBUTES,
     ...RESOURCE_ATTRIBUTE_FIELDS,
+    ...((turn.promptId || promptIdFallback) ? { 'agent.pilot.correlation.native_turn_id': turn.promptId || promptIdFallback } : {}),
   };
 
   // 用户输入: 做法 A (EVENT_LOG_TO_TRACE_SPEC §5.1, 0.1.0-beta.3+)
@@ -1609,6 +1610,12 @@ function buildTurnRecords(
 // ─── dispatcher ───
 
 const DISPATCH = {
+  'user-prompt-submit': async () => {
+    const event = tryReadStdin();
+    if (isCursorCaller(event)) return;
+    const sessionId = requireSessionId(event, 'cmd');
+    if (sessionId) recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  },
   'pre-tool-use': cmdPreToolUse,
   'stop': cmdStop,
   'stop-failure': cmdStopFailure,

@@ -114,7 +114,7 @@ writeTurnContext({
 
 Hermes 修复在首个 `llm.request` 前追加一次携带用户输入的 `other` 事件（`agent.hermes.hook=turn_start`），使用此时已确定的原生 turn/task ID。模型重试与后续 LLM 调用复用同一轮关联结果，不会重复写入该输入事件。这是逐轮关联文件的支持，不代表新增了 `TRACEPARENT` 环境变量接入。
 
-注意：当前逐轮关联使用 `traceparent` 中的 Trace ID 和 Parent Span ID，不完整透传采样标志和 `tracestate`；也不会自动把上下文注入 Agent 发出的网络请求。
+包含[通用入站能力](upstream-trace-ingress.md)的版本同时保留 `traceparent` 采样位和可选 `tracestate`，在创建 ENTRY 时恢复真实 remote parent Context；旧版只保留 Trace ID 和 Parent Span ID。本能力不会自动把上下文注入 Agent 发出的网络请求。存在可靠原生 turn ID 的 SDK/Plugin 推荐使用通用 API，避免重复输入并发时依赖文件顺序。
 
 ### Hermes 输入迟到与无输入兜底
 

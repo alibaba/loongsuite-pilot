@@ -1,10 +1,12 @@
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { createLogger } from '../../utils/logger.js';
 import type { CorrelationStore } from './correlation-store.js';
+import { trace } from '@opentelemetry/api';
+import { extractUpstreamContext } from './w3c-context.js';
+import type { UpstreamCarrier } from '../../../assets/hooks/shared/upstream-ingress.mjs';
 
 const logger = createLogger('trace-linker');
 
-const TRACEPARENT_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i;
 const ZERO_TRACE = '0'.repeat(32);
 const ZERO_SPAN = '0'.repeat(16);
 
@@ -12,6 +14,7 @@ interface ResolveState {
   resolved: boolean;
   traceId?: string;
   parentSpanId?: string;
+  carrier?: UpstreamCarrier;
 }
 
 interface TraceLinkerOptions {
@@ -20,13 +23,13 @@ interface TraceLinkerOptions {
   retryDelayMs?: number;
 }
 
-function parseTraceparent(tp: string): { traceId: string; spanId: string } | null {
-  const m = TRACEPARENT_RE.exec(tp.trim());
-  if (!m) return null;
-  const traceId = m[1].toLowerCase();
-  const spanId = m[2].toLowerCase();
-  if (traceId === ZERO_TRACE || spanId === ZERO_SPAN) return null;
-  return { traceId, spanId };
+function sessionKey(entry: AgentActivityEntry): string {
+  return JSON.stringify([entry['gen_ai.agent.type'] ?? '', entry['gen_ai.session.id']]);
+}
+
+function nativeTurnId(entry: AgentActivityEntry): string | undefined {
+  const value = entry['agent.pilot.correlation.native_turn_id'];
+  return typeof value === 'string' && value ? value : undefined;
 }
 
 function extractUserText(entry: AgentActivityEntry): string {
@@ -35,6 +38,7 @@ function extractUserText(entry: AgentActivityEntry): string {
   let text = '';
   for (const msg of delta) {
     if (!msg || typeof msg !== 'object' || Array.isArray(msg)) continue;
+    if ((msg as Record<string, JsonValue>).role !== 'user') continue;
     const parts = (msg as Record<string, JsonValue>).parts;
     if (!Array.isArray(parts)) continue;
     for (const part of parts) {
@@ -107,9 +111,10 @@ export class TraceLinker {
       const sessionId = entry['gen_ai.session.id'] as string | undefined;
       const turnId = entry['gen_ai.turn.id'] as string | undefined;
       if (!sessionId || !turnId || hasDelegatedParent(entry)) continue;
-      this.sessionLastAccess.set(sessionId, Date.now());
-      if (!this.firstTurnBySession.has(sessionId)) {
-        this.firstTurnBySession.set(sessionId, turnId);
+      const key = sessionKey(entry);
+      this.sessionLastAccess.set(key, Date.now());
+      if (!this.firstTurnBySession.has(key)) {
+        this.firstTurnBySession.set(key, turnId);
       }
     }
 
@@ -117,7 +122,7 @@ export class TraceLinker {
     // cannot escape with the local trace id or prematurely claim an env fallback.
     const inputEntries = new Set<AgentActivityEntry>();
     for (const entry of entries) {
-      if (entry['event.name'] !== 'other' || (!extractUserText(entry) && !extractInputHash(entry))) continue;
+      if (entry['event.name'] !== 'other' || (!extractUserText(entry) && !extractInputHash(entry) && !nativeTurnId(entry))) continue;
       inputEntries.add(entry);
       await this.tryStampEntry(entry, cacheMisses);
     }
@@ -142,7 +147,7 @@ export class TraceLinker {
     // A separate correlation file must not detach the child or consume a claim.
     if (!sessionId || !turnId || hasDelegatedParent(entry) || hasLockedQoderContext(entry)) return;
 
-    const key = `${sessionId}|${turnId}`;
+    const key = `${sessionKey(entry)}|${turnId}`;
     const cached = this.cache.get(key);
     if (cached && (cached.resolved || cacheMisses)) {
       if (cached.resolved) this.apply(entry, cached);
@@ -155,25 +160,31 @@ export class TraceLinker {
     const text = extractUserText(entry);
     const hash = extractInputHash(entry);
     // Metadata is not evidence of a user input, including for session fallback.
-    if (!text && !hash) return;
-    const isFirstTurn = this.firstTurnBySession.get(sessionId) === turnId;
-    const tp = await this.resolveWithRetry(sessionId, text, isFirstTurn, turnId, hash);
+    const nativeId = nativeTurnId(entry);
+    if (!text && !hash && !nativeId) return;
+    const isFirstTurn = this.firstTurnBySession.get(sessionKey(entry)) === turnId;
+    const agentId = entry['gen_ai.agent.type'];
+    const exact = typeof agentId === 'string' && nativeId
+      ? this.store.resolveNativeTurn(agentId, sessionId, nativeId) : null;
+    const carrier = exact ?? (text || hash ? await this.resolveWithRetry(sessionId, text, isFirstTurn, turnId, hash) : null);
+    if (exact && isFirstTurn) this.store.markSessionConsumed(sessionId);
 
-    if (!tp) {
+    if (!carrier) {
       if (cacheMisses) this.cache.set(key, { resolved: false });
       return;
     }
-    const parsed = parseTraceparent(tp);
+    const context = extractUpstreamContext(carrier);
+    const parsed = context && trace.getSpanContext(context);
     if (!parsed) {
       if (cacheMisses) this.cache.set(key, { resolved: false });
       return;
     }
-    const state: ResolveState = { resolved: true, traceId: parsed.traceId, parentSpanId: parsed.spanId };
+    const state: ResolveState = { resolved: true, traceId: parsed.traceId, parentSpanId: parsed.spanId, carrier };
     this.cache.set(key, state);
     this.apply(entry, state);
   }
 
-  private async resolveWithRetry(sessionId: string, text: string, isFirstTurn: boolean, turnId: string, hash?: string): Promise<string | null> {
+  private async resolveWithRetry(sessionId: string, text: string, isFirstTurn: boolean, turnId: string, hash?: string): Promise<UpstreamCarrier | null> {
     // No correlation file for this session → nothing was written for it, so there
     // is nothing to wait for. Short-circuit to avoid burning the retry budget
     // (retries × retryDelayMs) on the hot path — the common case when linking is
@@ -184,7 +195,7 @@ export class TraceLinker {
     if (text || hash) {
       // Turn-level record keeps priority through all retries (record may be slightly late).
       for (let attempt = 0; attempt <= this.retries; attempt += 1) {
-        const turnTp = this.store.resolveTurn(sessionId, text, turnId, hash);
+        const turnTp = this.store.resolveTurnContext(sessionId, text, turnId, hash);
         if (turnTp) {
           if (isFirstTurn) this.store.markSessionConsumed(sessionId);
           return turnTp;
@@ -193,7 +204,7 @@ export class TraceLinker {
       }
     }
     // Session-level (env) is the final fallback, first turn only.
-    if (isFirstTurn) return this.store.resolveSessionFirst(sessionId);
+    if (isFirstTurn) return this.store.resolveSessionContext(sessionId);
     return null;
   }
 
@@ -217,6 +228,11 @@ export class TraceLinker {
 
   private apply(entry: AgentActivityEntry, state: ResolveState): void {
     if (state.traceId) entry.trace_id = state.traceId;
+    if (state.carrier) {
+      entry['agent.pilot.upstream.traceparent'] = state.carrier.traceparent;
+      if (state.carrier.tracestate) entry['agent.pilot.upstream.tracestate'] = state.carrier.tracestate;
+      else delete entry['agent.pilot.upstream.tracestate'];
+    }
     if (entry['event.name'] === 'other' && state.parentSpanId) {
       entry.parent_span_id = state.parentSpanId;
     }
