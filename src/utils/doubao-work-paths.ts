@@ -4,6 +4,19 @@ import { resolveHome } from './fs-utils.js';
 
 export type DoubaoClient = 'doubao-work' | 'doubao';
 
+export function isDoubaoAgentType(agentType: string): boolean {
+  return agentType === 'doubao-work' || agentType === 'doubao';
+}
+
+export function resolveDoubaoAppEnabled(listeners?: Record<string, { client?: unknown; enabled?: boolean }>): boolean {
+  if (listeners?.doubao?.client !== undefined && listeners.doubao.client !== 'doubao') return false;
+  return listeners?.doubao?.enabled ?? (listeners?.['doubao-work']?.client === undefined);
+}
+
+export function doubaoAppUsesLegacySource(listeners?: Record<string, { client?: unknown; enabled?: boolean }>): boolean {
+  return listeners?.['doubao-work']?.client === 'doubao';
+}
+
 /** Shared source-only configuration for probing and the full config loader. */
 export function resolveDoubaoWorkSource(listener?: { client?: unknown; logDir?: unknown }): {
   client?: DoubaoClient; logDir?: string;

@@ -4,7 +4,7 @@ import { AgentDefLoader } from './deployment/agent-def-loader.js';
 import { probeAgentDefinitions } from './deployment/cli-probe-detector.js';
 import { readJsonFile, resolveHome } from './utils/fs-utils.js';
 import { configJsonPath } from './utils/data-dir.js';
-import { resolveDoubaoWorkSource } from './utils/doubao-work-paths.js';
+import { resolveDoubaoAppEnabled, resolveDoubaoWorkSource } from './utils/doubao-work-paths.js';
 
 // This file is always bundled as CJS (build.mjs), so __dirname is guaranteed.
 const __probe_dirname = __dirname;
@@ -30,24 +30,25 @@ async function main(): Promise<void> {
   const dataDir = resolveHome('~/.loongsuite-pilot');
   // Detection needs only the product source. Unrelated exporter/interceptor
   // validation must not prevent the installer from discovering other Agents.
-  const config = await readJsonFile<{ listeners?: Record<string, { client?: unknown; logDir?: unknown }> }>(configJsonPath());
+  const config = await readJsonFile<{ listeners?: Record<string, { client?: unknown; logDir?: unknown; enabled?: boolean }> }>(configJsonPath());
+  const listOnly = process.argv.includes('--list');
 
   const loader = new AgentDefLoader({
     builtinDir,
     localDir: path.join(dataDir, 'agents.d.local'),
     pilotDir,
     dataDir,
-    doubaoWork: resolveDoubaoWorkSource(config?.listeners?.['doubao-work']),
+    doubaoWork: listOnly ? undefined : { ...resolveDoubaoWorkSource(config?.listeners?.['doubao-work']), enabled: config?.listeners?.['doubao-work']?.enabled },
+    doubao: listOnly ? { enabled: true }
+      : { ...resolveDoubaoWorkSource(config?.listeners?.doubao), enabled: resolveDoubaoAppEnabled(config?.listeners) },
   });
 
-  // --list: enumerate the same set of agents as a normal probe, but skip the
-  // on-disk machine detection. Used by the installer when the user explicitly
+  // --list: enumerate all selectable agents regardless of source selection,
+  // skipping on-disk machine detection. Used by the installer when the user explicitly
   // picks agents (--agents), where the detection result is irrelevant — we only
   // need each id to write the enable/disable gate. Agents with no detection
   // rules (e.g. internal *-local-runtime runtimes) stay excluded here, exactly
   // as a normal probe excludes them — they are not user-selectable.
-  const listOnly = process.argv.includes('--list');
-
   const defs = await loader.load();
   const results = await probeAgentDefinitions(defs, { listOnly, installer: process.argv.includes('--installer') });
 
