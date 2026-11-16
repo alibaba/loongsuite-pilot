@@ -167,6 +167,7 @@ export class MetricsWriter {
       if (disk.sampledAt !== undefined && disk.dataBytes !== undefined && disk.logsBytes !== undefined) {
         metrics.metric_json.disk_data_bytes = String(disk.dataBytes);
         metrics.metric_json.disk_logs_bytes = String(disk.logsBytes);
+        if (disk.logsByFamily) metrics.metric_json.disk_logs_by_family = JSON.stringify(disk.logsByFamily);
         metrics.metric_json.disk_dir_sampled_at = new Date(disk.sampledAt).toISOString();
       }
 

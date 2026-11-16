@@ -6,6 +6,7 @@ export enum ClientType {
   // IDE tools
   Cursor = 'cursor',
   Qoder = 'qoder',
+  QoderApp = 'qoder-app',
   QoderCn = 'qoder-cn',
   QoderIdea = 'qoder-idea',
   QoderWork = 'qoder-work',

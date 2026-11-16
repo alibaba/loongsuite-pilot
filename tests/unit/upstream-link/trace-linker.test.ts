@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -59,6 +59,31 @@ describe('TraceLinker', () => {
     );
   }
   const linker = () => new TraceLinker(new CorrelationStore(dir), { retries: 0 });
+
+  it('leaves a pre-publication miss retryable when the record arrives later', async () => {
+    const store = new CorrelationStore(dir);
+    const tl = new TraceLinker(store, { retries: 0 });
+    const hasSession = vi.spyOn(store, 'hasSession');
+    await tl.stamp([otherEvent('late', 'late input')], { cacheMisses: false });
+    expect(hasSession).toHaveBeenCalledTimes(1);
+    writeTurn('late input', TP);
+    const final = otherEvent('late', 'late input');
+    await tl.stamp([final]);
+    expect(final.trace_id).toBe(UP_TRACE);
+    expect(final.parent_span_id).toBe(UP_SPAN);
+  });
+
+  it('allows an explicit pre-publication retry to replace an earlier cached miss', async () => {
+    const tl = linker();
+    await tl.stamp([otherEvent('retry', 'retry input')]);
+    writeTurn('retry input', TP);
+    const probe = otherEvent('retry', 'retry input');
+    await tl.stamp([probe], { cacheMisses: false });
+    expect(probe.trace_id).toBe(UP_TRACE);
+    const llm = llmEvent('retry');
+    await tl.stamp([llm]);
+    expect(llm.trace_id).toBe(UP_TRACE);
+  });
 
   it('stamps trace_id on all events and parent_span_id on the other event', async () => {
     writeTurn('do X', TP);

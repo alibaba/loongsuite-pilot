@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+vi.mock('../../../../assets/plugins/shared/raw-jsonl-writer.mjs', () => ({
+  appendRawJsonl: (file, data) => fs.appendFileSync(file, data),
+}));
 import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 
 const __dirname_test = path.dirname(fileURLToPath(import.meta.url));

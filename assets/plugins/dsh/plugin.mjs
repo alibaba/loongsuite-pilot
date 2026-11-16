@@ -15,11 +15,12 @@
  * Worker identity is captured here, inside the DSH process. The collector
  * reads the JSONL later and does not see this process environment.
  */
-import { appendFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
+import { mkdirSync, chmodSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { collectResourceAttributesFromEnv } from '../shared/resource-context.mjs';
+import { appendRawJsonl, RAW_SEGMENT_BYTES } from '../shared/raw-jsonl-writer.mjs';
 
 const AGENT = 'loongsuite-pilot-observability';
 const SENSITIVE_KEY_RE = /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE|API_KEY)([_.-]|$)/i;
@@ -52,9 +53,19 @@ function redact(value) {
 }
 function appendLine(file, obj) {
   if (!existsSync(file)) ensureDir(path.dirname(file));
-  appendFileSync(file, JSON.stringify(obj) + '\n');
-  if (process.platform !== 'win32') chmodSync(file, 0o600);
+  // A request header can be reused across turns. Rotate only at a turn
+  // boundary and carry it forward so each segment can recover independently.
+  if (obj.type === 'request/header') {
+    headers.delete(file);
+    headers.set(file, JSON.stringify(obj) + '\n');
+    if (headers.size > 1024) headers.delete(headers.keys().next().value);
+  }
+  appendRawJsonl(file, JSON.stringify(obj) + '\n', RAW_SEGMENT_BYTES, {
+    allowRotate: obj.type === 'turn/start' && headers.has(file),
+    prefix: headers.get(file),
+  });
 }
+const headers = new Map();
 function workerFields() {
   const resourceAttributes = collectResourceAttributesFromEnv(process.env, { agentId: 'dsh' });
   return Object.keys(resourceAttributes).length > 0 ? { resourceAttributes } : {};

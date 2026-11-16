@@ -33,6 +33,7 @@ export interface L1Metrics {
     // Cached logical file sizes; sampled_at identifies the last complete scan.
     disk_data_bytes?: string;
     disk_logs_bytes?: string;
+    disk_logs_by_family?: string;
     disk_dir_sampled_at?: string;
     disk_dir_scan_ms?: string;
     disk_dir_status?: string;

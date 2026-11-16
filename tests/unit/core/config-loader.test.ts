@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const mockReadJsonFile = vi.fn().mockResolvedValue(null);
+const mockLoggerWarn = vi.hoisted(() => vi.fn());
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
   readJsonFile: (...args: unknown[]) => mockReadJsonFile(...args),
@@ -9,7 +10,7 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
-    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    info: vi.fn(), debug: vi.fn(), warn: mockLoggerWarn, error: vi.fn(),
   }),
 }));
 
@@ -346,6 +347,23 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.listeners['doubao-work']).toEqual({ enabled: false, pollInterval: 1200, logDir: '/synthetic/doubao/logs' });
       expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('preserves the explicitly selected Doubao client without affecting other listeners', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'doubao' } } });
+      const config = await loadConfig();
+      expect(config.listeners['doubao-work']).toEqual({ enabled: true, pollInterval: 10_000, client: 'doubao' });
+      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('disables only the Doubao listener for an invalid client instead of collecting another product', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'typo' } } });
+      const config = await loadConfig();
+      expect(config.listeners['doubao-work'].enabled).toBe(false);
+      expect(config.listeners.workbuddy.enabled).toBe(true);
+      expect(mockLoggerWarn).toHaveBeenCalledWith('Invalid Doubao client; disabling this listener', {
+        valueType: 'string', allowedValues: ['doubao-work', 'doubao'],
+      });
     });
 
     it('merges file-level listener overrides', async () => {

@@ -10,6 +10,8 @@ export interface ListenerConfig {
   pollInterval: number;
   /** Read-only source log directory override for the doubao-work listener. */
   logDir?: string;
+  /** Product source for the doubao-work listener; defaults to Doubao Work. */
+  client?: 'doubao-work' | 'doubao';
 }
 
 /**

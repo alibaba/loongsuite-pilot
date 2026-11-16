@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import { ClientType } from '../types/index.js';
 import { WorkspacePolicy } from './workspace-policy.js';
 import type {
@@ -137,6 +138,14 @@ export class InputManager extends EventEmitter {
 
   setTraceLinker(linker: TraceLinker): void {
     this.traceLinker = linker;
+  }
+
+  /** Native delegation needs the final upstream context before a parent turn
+   * finishes. Reuse the same claims/cache as ordinary output processing. */
+  async stampTraceContext(entries: AgentActivityEntry[]): Promise<void> {
+    // Collection may be retried before its first output is accepted. A miss
+    // here must not seal the normal publication-time correlation window.
+    await this.traceLinker?.stamp(entries, { cacheMisses: false });
   }
 
   setInterceptResultLinker(linker: InterceptResultLinker): void {
@@ -516,13 +525,36 @@ export class InputManager extends EventEmitter {
     const counter = this.counters.get(inputId);
     try {
       const signal = this.entryAbortControllers.get(inputId)?.signal;
-      await (signal ? this.flusher.sendBatch(entries, logicalBytes, signal) : this.flusher.sendBatch(entries, logicalBytes));
+      const deliver = this.flusher.createBatchDelivery(entries, logicalBytes, signal);
+      let quotaAlarmed = false;
+      while (true) {
+        try {
+          await deliver();
+          break;
+        } catch (error) {
+          const quota = (error as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
+          if (!quota || signal?.aborted) throw error;
+          if (!quotaAlarmed) {
+            this.alarmManager?.record('FLUSH_QUOTA_ALARM', '3',
+              `Codex output capacity exhausted for ${inputId}; retrying without advancing its checkpoint`, { input_name: inputId });
+            quotaAlarmed = true;
+          }
+          await delay(1000, undefined, signal ? { signal } : undefined);
+        }
+      }
       if (counter) counter.outEvents += entries.length;
       this.emit('flushed', { count: entries.length, bytes: batchBytes });
     } catch (err) {
       if (counter) counter.outFailed += entries.length;
+      if (this.entryAbortControllers.get(inputId)?.signal.aborted) throw err;
       logger.error('dispatch failed', { count: entries.length, error: String(err) });
-      if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes((err as Error)?.name)) throw err;
+      if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes((err as Error)?.name)) {
+        const quota = (err as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
+        this.alarmManager?.record(quota ? 'FLUSH_QUOTA_ALARM' : 'FLUSH_SEND_ALARM', '3',
+          `Output durability blocked for ${inputId}; source checkpoint retained: ${String(err)}`,
+          { input_name: inputId });
+        throw err;
+      }
     }
   }
 }

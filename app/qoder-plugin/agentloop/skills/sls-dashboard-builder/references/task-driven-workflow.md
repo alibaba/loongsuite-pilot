@@ -24,7 +24,7 @@ If the task pack already names `source_dashboard`, treat that as a strong hint t
 
 If the task references live dashboards, do not guess their structure from screenshots alone.
 
-Fetch them first. In this plugin, `scripts/run.py publish` without `--confirm` tells whether the dashboard exists; the kebab-case commands below need the extra `aliyun-cli-sls` plugin and are not used here:
+Fetch them first. Use `python3 "<agentloop-collector-setup-directory>/scripts/run.py" publish --dashboard <json>` without `--confirm` to check whether the dashboard exists. Replace the directory placeholder with the adjacent Setup Skill installation path. The kebab-case commands below need the extra `aliyun-cli-sls` CLI plugin and are independent CLI references:
 - `aliyun sls list-dashboard --project <project> --region <region>`
 - `aliyun sls get-dashboard --project <project> --dashboard <name> --region <region>`
 
