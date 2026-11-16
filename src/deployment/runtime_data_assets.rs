@@ -3,7 +3,8 @@
 use crate::updater::activation_file_targets as binding;
 use crate::updater::ActivationTransaction;
 use crate::utils::runtime_paths::{
-    build_edition, build_target, resource_file, runtime_metadata, validate_runtime, RuntimeManifest,
+    build_edition, build_target, resource_file, runtime_metadata, sha256_file, validate_runtime,
+    RuntimeManifest, RuntimeResource,
 };
 use anyhow::{ensure, Context, Result};
 use sha2::{Digest, Sha256};
@@ -31,6 +32,13 @@ pub(crate) const SKILLS: &[&str] = &[
     "loongsuite-pilot-ops/references/updater-diagnostics.md",
     "loongsuite-pilot-ops/references/watchdog-diagnostics.md",
     "loongsuite-pilot-ops/references/wukong-diagnostics.md",
+];
+
+const NODE_HOOK_ASSETS: &[&str] = &[
+    "hooks/qoder-loongsuite-pilot-hook.sh",
+    "hooks/qoder-loongsuite-pilot-hook.ps1",
+    "hooks/interceptor-hook.sh",
+    "hooks/interceptor-hook.ps1",
 ];
 
 const QODER_CLI_WRAPPER: &str = "hooks/qodercli-runtime-wrapper.sh";
@@ -61,6 +69,9 @@ pub(crate) fn registry(data: &Path, marker: bool) -> BTreeMap<String, PathBuf> {
         "plugins/shared/raw-jsonl-writer.mjs",
         "plugins/shared/raw-source-gate.mjs",
     ] {
+        paths.insert(key(relative), data.join(relative));
+    }
+    for relative in NODE_HOOK_ASSETS {
         paths.insert(key(relative), data.join(relative));
     }
     if cfg!(unix) {
@@ -107,15 +118,94 @@ fn package_version(root: &Path) -> Result<String> {
     Ok(version.into())
 }
 
+// Released Node packages lack a Rust manifest. The current/previous installation
+// can establish provenance for existing assets by matching their original bytes.
+pub(super) fn installed_node_version(root: &Path) -> Result<Option<String>> {
+    if !root.join("package.json").is_file() || !root.join("dist/index.js").is_file() {
+        return Ok(None);
+    }
+    let package = resource_file(root, "package.json")?;
+    ensure!(
+        runtime_metadata(&package)?.len() <= 64 * 1024,
+        "Node 包说明超限"
+    );
+    let package: serde_json::Value = serde_json::from_slice(&std::fs::read(package)?)?;
+    let version = package_version(root)?;
+    ensure!(
+        package["name"] == "loongsuite-pilot"
+            && package["version"] == version
+            && semver::Version::parse(&version)?.major == 1,
+        "前序 Node Pilot 包身份无效"
+    );
+    resource_file(root, "dist/index.js")?;
+    Ok(Some(version))
+}
+
+fn node_release_resources(
+    root: &Path,
+    requested: &[RuntimeResource],
+) -> Result<Vec<RuntimeResource>> {
+    if installed_node_version(root)?.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut resources = Vec::new();
+    for entry in requested
+        .iter()
+        .filter(|entry| managed_relative(&entry.path).is_some())
+    {
+        let candidate = root.join(&entry.path);
+        match std::fs::symlink_metadata(candidate) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        let path = resource_file(root, &entry.path)?;
+        ensure!(
+            runtime_metadata(&path)?.len() <= 4 * 1024 * 1024,
+            "旧版资源文件超限"
+        );
+        resources.push(RuntimeResource {
+            path: entry.path.clone(),
+            sha256: sha256_file(&path)?,
+        });
+    }
+    Ok(resources)
+}
+
+fn managed_relative(path: &str) -> Option<&str> {
+    source_relative(path).or_else(|| {
+        path.strip_prefix("assets/")
+            .filter(|relative| NODE_HOOK_ASSETS.contains(relative))
+    })
+}
+
+pub(super) fn node_rollback_resources(root: &Path, data: &Path) -> Result<Vec<RuntimeResource>> {
+    let requested = registry(data, false)
+        .keys()
+        .filter_map(|key| key.strip_prefix(binding::RESOURCE_PREFIX))
+        .map(|relative| RuntimeResource {
+            path: format!("assets/{relative}"),
+            sha256: String::new(),
+        })
+        .collect::<Vec<_>>();
+    let mut resources = node_release_resources(root, &requested)?;
+    let qoder = resource_file(root, "agents.d/qoder.json")?;
+    resources.push(RuntimeResource {
+        path: "agents.d/qoder.json".into(),
+        sha256: sha256_file(&qoder)?,
+    });
+    Ok(resources)
+}
+
 fn trusted_hashes(
     pilot: &Path,
     cache: &Path,
     manifest: &RuntimeManifest,
 ) -> Result<BTreeMap<String, BTreeSet<String>>> {
     let mut trusted = BTreeMap::<String, BTreeSet<String>>::new();
-    let mut add = |source: &RuntimeManifest| {
-        for entry in &source.resources {
-            if source_relative(&entry.path).is_some() {
+    let mut add = |source: &[RuntimeResource]| {
+        for entry in source {
+            if managed_relative(&entry.path).is_some() {
                 trusted
                     .entry(entry.path.clone())
                     .or_default()
@@ -123,7 +213,7 @@ fn trusted_hashes(
             }
         }
     };
-    add(manifest);
+    add(&manifest.resources);
     for role in ["current", "previous"] {
         let pointer = cache.join(role);
         match std::fs::symlink_metadata(&pointer) {
@@ -140,18 +230,20 @@ fn trusted_hashes(
         );
         let root = cache.join("versions").join(name.trim());
         if !root.join("runtime-manifest.json").exists() {
+            if root.is_dir() {
+                ensure!(
+                    runtime_metadata(&cache.join("versions"))?.is_dir(),
+                    "前序安装 versions 不是普通目录"
+                );
+                add(&node_release_resources(&root, &manifest.resources)?);
+            }
             continue;
         }
         if std::fs::canonicalize(&root)? == std::fs::canonicalize(pilot)? {
             continue;
         }
         let version = package_version(&root)?;
-        add(&validate_runtime(
-            &root,
-            &version,
-            build_target(),
-            build_edition(),
-        )?);
+        add(&validate_runtime(&root, &version, build_target(), build_edition())?.resources);
     }
     Ok(trusted)
 }
@@ -260,7 +352,12 @@ impl RuntimeDataAssets {
         let roles = registry(data, false);
         let mut inputs = Vec::new();
         for entry in &manifest.resources {
-            let Some(relative) = source_relative(&entry.path) else {
+            let relative = if manifest.runtime == "node" {
+                managed_relative(&entry.path)
+            } else {
+                source_relative(&entry.path)
+            };
+            let Some(relative) = relative else {
                 continue;
             };
             if relative
@@ -417,7 +514,12 @@ impl RuntimeDataAssets {
         }
         for file in &self.files {
             if file.needs_write() {
-                if file.key == key(QODER_CLI_WRAPPER) {
+                if file.key == key(QODER_CLI_WRAPPER)
+                    || file
+                        .key
+                        .strip_prefix(binding::RESOURCE_PREFIX)
+                        .is_some_and(|path| NODE_HOOK_ASSETS.contains(&path))
+                {
                     transaction.write(&file.key, &file.bytes, 0o755)?;
                 } else {
                     transaction.write_preserving_mode(&file.key, &file.bytes, 0o644)?;
@@ -552,4 +654,58 @@ pub(crate) async fn prepare_eager(pilot: &Path, data: &Path) -> Result<()> {
         5000,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn accepts_unchanged_assets_from_the_installed_node_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let old = cache.join("versions/1.17.1_83fc84c");
+        let next = temp.path().join("candidate");
+        let data = temp.path().join("data");
+        let relative = "plugins/shared/pilot-config.mjs";
+        let resource = format!("assets/{relative}");
+        fs::create_dir_all(old.join("dist")).unwrap();
+        fs::write(old.join("dist/index.js"), b"// Node entry").unwrap();
+        fs::write(old.join("VERSION"), b"version=1.17.1\n").unwrap();
+        fs::write(
+            old.join("package.json"),
+            br#"{"name":"loongsuite-pilot","version":"1.17.1"}"#,
+        )
+        .unwrap();
+        fs::write(cache.join("current"), b"1.17.1_83fc84c\n").unwrap();
+        for (path, contents) in [
+            (old.join(&resource), b"// Node release asset".as_slice()),
+            (data.join(relative), b"// Node release asset".as_slice()),
+            (next.join(&resource), b"// Rust release asset".as_slice()),
+        ] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        let manifest = RuntimeManifest {
+            schema: 1,
+            runtime: "rust".into(),
+            version: "2.0.0".into(),
+            git_commit: "a".repeat(40),
+            target: build_target().into(),
+            edition: build_edition().into(),
+            binary: "bin/loongsuite-pilot".into(),
+            resources: vec![RuntimeResource {
+                path: resource.clone(),
+                sha256: sha256_file(&next.join(&resource)).unwrap(),
+            }],
+        };
+        let plan = RuntimeDataAssets::load(&next, &data, &cache, &manifest).unwrap();
+        assert_eq!(plan.files.len(), 1);
+        assert!(plan.files[0].needs_write());
+
+        fs::write(data.join(relative), b"// User edit").unwrap();
+        assert!(RuntimeDataAssets::load(&next, &data, &cache, &manifest).is_err());
+        assert_eq!(fs::read(data.join(relative)).unwrap(), b"// User edit");
+    }
 }

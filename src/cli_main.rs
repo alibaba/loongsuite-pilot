@@ -482,7 +482,7 @@ async fn run_collector() -> anyhow::Result<i32> {
         write_pid_file_sync(pid_file);
     }
     let outcome = async {
-        let orchestrator = Arc::new(Orchestrator::new(config.clone()));
+        let orchestrator = Arc::new(Orchestrator::standalone(config.clone()));
         orchestrator.start().await?;
         clear_startup_crash(&resolve_breadcrumb_data_dir());
         let enabled: Vec<&str> = ["sls", "jsonl", "http"].into_iter().filter(|name| flusher_enabled(&config, name)).collect();

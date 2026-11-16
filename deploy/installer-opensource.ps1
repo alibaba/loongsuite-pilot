@@ -2142,6 +2142,23 @@ function Assert-SingleSlsConfig {
     Invoke-InstallerHelper -Operation 'check-config' -Json (Get-InstallConfigJson) | Out-Null
 }
 
+function Restore-PilotAfterFailedPublication {
+    param([string]$ScriptPath, [string]$OldVersion)
+    if (-not $OldVersion -or -not (Test-Path -LiteralPath $ScriptPath)) { return $false }
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ScriptPath stop | Out-Host
+        if ($LASTEXITCODE -ne 0) { return $false }
+        & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ScriptPath rollback | Out-Host
+        if ($LASTEXITCODE -ne 0 -or (Get-InstalledVersion) -ne $OldVersion) { return $false }
+        $status = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ScriptPath status
+        return ($LASTEXITCODE -eq 0 -and [bool]($status -match "is running"))
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
 function Cmd-Install {
     $script:INSTALL_CONFIG = $true
     Msg "==> 开始安装 $PACKAGE_NAME ..." "==> Installing $PACKAGE_NAME ..."
@@ -2187,13 +2204,8 @@ function Cmd-Install {
         $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
         $started = Start-PilotAndWait -ScriptPath $ps1Path -PriorVersion $curVer
         if (-not $started) {
-            if ($curVer -and (Test-Path (Join-Path $CACHE_DIR "previous"))) {
-                Msg "⚠️  新安装未产生运行心跳，正在恢复 previous 版本..." `
-                    "⚠️  The new installation produced no runtime heartbeat; restoring the previous version..."
-                $prevEAP = $ErrorActionPreference
-                $ErrorActionPreference = "Continue"
-                & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ps1Path rollback 2>$null
-                $ErrorActionPreference = $prevEAP
+            if ($curVer -and (Restore-PilotAfterFailedPublication $ps1Path $curVer)) {
+                throw "New installation failed to start; restored and started v$curVer."
             }
             throw "Collector failed to produce a runtime heartbeat after installation."
         }
@@ -2275,13 +2287,11 @@ function Cmd-Upgrade {
         if (-not $started) {
             Write-Host ""
             Msg "⚠️  新版本启动失败，正在回滚..." "⚠️  New version failed to start, rolling back..."
-            if (Test-Path $ps1Path) {
-                $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ps1Path stop 2>$null
-                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ps1Path rollback 2>$null
-                $ErrorActionPreference = $prevEAP
+            if (Restore-PilotAfterFailedPublication $ps1Path $oldVer) {
+                Msg "❌ 升级失败，已恢复 v$oldVer 并启动服务" "❌ Upgrade failed; restored and started v$oldVer"
+            } else {
+                Msg "❌ 升级失败，未能确认旧版本已恢复" "❌ Upgrade failed; recovery of the previous version was not confirmed"
             }
-            Msg "❌ 升级失败，已回滚到 v${oldVer}" "❌ Upgrade failed, rolled back to v${oldVer}"
             Msg "   请检查日志: loongsuite-pilot log" "   Check logs: loongsuite-pilot log"
             exit 1
         }

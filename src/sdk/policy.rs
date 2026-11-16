@@ -104,17 +104,32 @@ pub struct AgentPlan {
     pub max_read_bytes: usize,
     pub poll_interval_ms: u64,
     pub mask: crate::types::MaskConfig,
+    pub pilot_qoder: Option<PilotQoderState>,
+}
+
+/// Established on-disk Qoder state owned by a standalone Pilot installation.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PilotQoderState {
+    pub data_dir: PathBuf,
+    pub capture_message_content: Option<bool>,
+    #[serde(default)]
+    pub exclude_workspaces: Vec<String>,
 }
 impl AgentPlan {
     pub fn namespace(&self) -> String {
         use sha2::{Digest, Sha256};
-        let bytes = serde_json::to_vec(&(
+        let mut bytes = serde_json::to_vec(&(
             &self.agent,
             &self.profile,
             &self.sources,
             &self.allowed_roots,
         ))
         .expect("source plan JSON");
+        if let Some(state) = &self.pilot_qoder {
+            bytes.extend_from_slice(b"standalone-qoder");
+            bytes.extend(serde_json::to_vec(&state.data_dir).expect("Pilot state directory"));
+        }
         hex::encode(Sha256::digest(bytes))
     }
 }
@@ -296,7 +311,13 @@ impl Policy {
                     .as_object()
                     .is_some_and(|o| o.keys().all(|k| matches!(
                         k.as_str(),
-                        "enabled" | "profile" | "allowed_roots" | "sources" | "limits" | "output"
+                        "enabled"
+                            | "profile"
+                            | "allowed_roots"
+                            | "sources"
+                            | "limits"
+                            | "output"
+                            | "pilot_qoder"
                     ))),
                 "unsupported collection option"
             );
@@ -323,6 +344,24 @@ impl Policy {
                 !allowed_roots.is_empty() && allowed_roots.len() <= 32,
                 "invalid allowed_roots count"
             );
+            let pilot_qoder = collection
+                .get("pilot_qoder")
+                .map(|value| -> anyhow::Result<PilotQoderState> {
+                    anyhow::ensure!(agent == "qoder", "pilot_qoder requires the Qoder profile");
+                    let mut state: PilotQoderState = serde_json::from_value(value.clone())?;
+                    state.data_dir = canonical_candidate(&platform_path(
+                        &serde_json::to_value(&state.data_dir)?,
+                        init,
+                    )?)?;
+                    anyhow::ensure!(
+                        allowed_roots
+                            .iter()
+                            .any(|root| state.data_dir.starts_with(root)),
+                        "Pilot state outside allowed_roots"
+                    );
+                    Ok(state)
+                })
+                .transpose()?;
             let sources = collection
                 .get("sources")
                 .and_then(Value::as_array)
@@ -357,7 +396,7 @@ impl Policy {
                         matches!(
                             kind,
                             "hook_jsonl" | "transcript" | "sqlite" | "segments" | "intercept"
-                        )
+                        ) || (pilot_qoder.is_some() && kind == "sqlite_root")
                     },
                     "unsupported source type"
                 );
@@ -424,6 +463,7 @@ impl Policy {
                 agent.into(),
                 AgentPlan {
                     mask: mask.clone(),
+                    pilot_qoder,
                     agent: agent.into(),
                     profile: profile.into(),
                     sources: parsed,

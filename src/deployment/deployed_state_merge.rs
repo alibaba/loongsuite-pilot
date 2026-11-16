@@ -2,7 +2,7 @@
 
 use crate::types::{DeployedAgentRecord, DeployedAgentsState};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::paths::node_resolve;
@@ -259,6 +259,68 @@ impl std::fmt::Display for LockTimeout {
 
 impl std::error::Error for LockTimeout {}
 
+// Node v1.x uses mkdir on these two paths. Keep Rust's kernel lock on
+// a separate, stable inode while holding the Node-compatible directory only
+// for the operation. A Rust process can recover its empty gate after a crash.
+fn node_compatible_lock(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    matches!(
+        name,
+        "deployed-agents.json.lock" | "last-hook-install.json.lock"
+    )
+    .then(|| path.with_file_name(format!("{name}.native")))
+}
+
+struct NodeLockDirectory<'a>(&'a Path);
+
+impl NodeLockDirectory<'_> {
+    const OWNER_FILE: &str = ".loongsuite-pilot-native-lock";
+
+    fn remove_if_owned(path: &Path) -> std::io::Result<()> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        let marker = path.join(Self::OWNER_FILE);
+        match std::fs::symlink_metadata(&marker) {
+            Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {
+                std::fs::remove_file(marker)?;
+                std::fs::remove_dir(path)
+            }
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn acquire(path: &Path) -> std::io::Result<Option<NodeLockDirectory<'_>>> {
+        Self::remove_if_owned(path)?;
+        match std::fs::create_dir(path) {
+            Ok(()) => {
+                if let Err(error) = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path.join(Self::OWNER_FILE))
+                {
+                    let _ = std::fs::remove_dir(path);
+                    return Err(error);
+                }
+                Ok(Some(NodeLockDirectory(path)))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for NodeLockDirectory<'_> {
+    fn drop(&mut self) {
+        let _ = Self::remove_if_owned(self.0);
+    }
+}
+
 pub async fn with_deployed_state_lock<T, Fut>(
     lock_path: &str,
     body: impl FnOnce() -> Fut,
@@ -270,14 +332,21 @@ where
     let started = tokio::time::Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
     let path = Path::new(lock_path);
+    let native_path = node_compatible_lock(path);
     loop {
-        if let Some(file) = open_state_lock(path)? {
+        if let Some(file) = open_state_lock(native_path.as_deref().unwrap_or(path))? {
             match fs2::FileExt::try_lock_exclusive(&file) {
                 Ok(()) => {
-                    // 包括错误、panic、取消和进程退出，均由文件句柄释放锁。
-                    let result = body().await;
-                    drop(file);
-                    return result;
+                    let gate = native_path
+                        .as_ref()
+                        .map(|_| NodeLockDirectory::acquire(path))
+                        .transpose()?;
+                    if native_path.is_none() || gate.as_ref().is_some_and(Option::is_some) {
+                        let result = body().await;
+                        drop(gate);
+                        drop(file);
+                        return result;
+                    }
                 }
                 Err(err) if err.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {}
                 Err(err) => return Err(err.into()),
@@ -296,6 +365,42 @@ mod tests {
     use super::*;
     use crate::types::{DeployMode, InstalledBy};
     use std::time::SystemTime;
+
+    #[tokio::test]
+    async fn released_node_runtime_can_reacquire_the_deployment_locks() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["last-hook-install.json.lock", "deployed-agents.json.lock"] {
+            let legacy = root.path().join(name);
+            let lock = legacy.to_str().unwrap();
+            // A live Node holder is an empty directory. Rust must wait for it.
+            std::fs::create_dir(&legacy).unwrap();
+            let blocked =
+                with_deployed_state_lock(lock, || async { panic!("Node holds lock") }, 5).await;
+            let blocked: anyhow::Result<()> = blocked;
+            assert_eq!(blocked.unwrap_err().to_string(), "lock-timeout");
+            std::fs::remove_dir(&legacy).unwrap();
+
+            // Emulate a Rust crash after it entered the guarded operation.
+            std::fs::create_dir(&legacy).unwrap();
+            std::fs::write(legacy.join(NodeLockDirectory::OWNER_FILE), b"").unwrap();
+            with_deployed_state_lock(
+                lock,
+                || async {
+                    assert!(legacy.is_dir());
+                    assert_eq!(
+                        std::fs::create_dir(&legacy).unwrap_err().kind(),
+                        std::io::ErrorKind::AlreadyExists
+                    );
+                    Ok(())
+                },
+                100,
+            )
+            .await
+            .unwrap();
+            // Node's next mkdir succeeds, including after a Rust crash/restart.
+            std::fs::create_dir(&legacy).unwrap();
+        }
+    }
 
     fn record(path: &str) -> DeployedAgentRecord {
         DeployedAgentRecord {

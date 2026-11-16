@@ -435,13 +435,20 @@ unsafe extern "C" fn host_hook(
             return BAD_ARGUMENT;
         }
         // SAFETY: borrowed readable input is retained by the native worker.
-        let input =
-            match std::str::from_utf8(unsafe { std::slice::from_raw_parts(stdin.data, stdin.len) })
-            {
-                Ok(text) => text.to_owned(),
-                Err(_) => return BAD_ARGUMENT,
-            };
+        let input = unsafe { std::slice::from_raw_parts(stdin.data, stdin.len) };
         crate::utils::logger::redirect_root_logger_to_stderr();
+        if args.first().is_some_and(|arg| arg == "hook-process")
+            && args.get(1).is_some_and(|arg| arg == "qoder")
+            && args[2..].iter().any(|arg| arg == "--wakeup-only")
+        {
+            let (code, stdout) = crate::hook_process::run_qoder_wakeup_captured(&args[2..], input);
+            return unsafe { output(&json!({"exit_code":code,"stdout":stdout}), report, len) }
+                .map_or_else(|e| e, |_| OK);
+        }
+        let input = match std::str::from_utf8(input) {
+            Ok(text) => text.to_owned(),
+            Err(_) => return BAD_ARGUMENT,
+        };
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

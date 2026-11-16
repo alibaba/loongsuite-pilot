@@ -53,18 +53,30 @@ fn checked_path(path: &Path) -> Result<PathBuf> {
     );
     Ok(std::fs::canonicalize(path)?)
 }
-fn target_supports_hermes(
-    root: &Path,
-    manifest: &crate::utils::runtime_paths::RuntimeManifest,
-) -> Result<bool> {
-    if !manifest
-        .resources
-        .iter()
-        .any(|resource| resource.path == "agents.d/hermes-agent.json")
-    {
+fn target_supports_hermes(root: &Path) -> Result<bool> {
+    const DEFINITION: &str = "agents.d/hermes-agent.json";
+    let supports_hermes = match std::fs::symlink_metadata(root.join("runtime-manifest.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ensure!(
+                super::runtime_data_assets::installed_node_version(root)?.is_some(),
+                "Rollback target is not an installed Node Pilot release"
+            );
+            match std::fs::symlink_metadata(root.join(DEFINITION)) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(error) => return Err(error.into()),
+        Ok(_) => package(root)?
+            .resources
+            .iter()
+            .any(|entry| entry.path == DEFINITION),
+    };
+    if !supports_hermes {
         return Ok(false);
     }
-    let file = resource_file(root, "agents.d/hermes-agent.json")?;
+    let file = resource_file(root, DEFINITION)?;
     ensure!(
         runtime_metadata(&file)?.len() <= 4 * 1024 * 1024,
         "Hermes definition is too large"
@@ -117,8 +129,7 @@ pub(super) async fn run(value: Value) -> Result<String> {
                 );
             }
             package(&outgoing)?;
-            let target_manifest = package(&target)?;
-            if target_supports_hermes(&target, &target_manifest)? {
+            if target_supports_hermes(&target)? {
                 return Ok(String::new());
             }
             let manager = DeploymentManager::new(DeploymentManagerOptions {
