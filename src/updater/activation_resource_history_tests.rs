@@ -148,7 +148,10 @@ mod resource_history_tests {
             "hooks/qodercli-token-intercept.mjs",
         ];
         let qoder_cli_roles = if cfg!(unix) { qoder_cli_paths.len() } else { 0 };
-        assert_eq!(registry.len(), 22 + qoder_cli_roles);
+        assert_eq!(registry.len(), 24 + qoder_cli_roles);
+        for relative in ["plugins/shared/raw-jsonl-writer.mjs", "plugins/shared/raw-source-gate.mjs"] {
+            assert_eq!(registry.get(&format!("runtime-resource:{relative}")), Some(&root.path().join(relative)));
+        }
         for relative in qoder_cli_paths {
             let role = format!("runtime-resource:{relative}");
             let target = root.path().join(relative);
@@ -162,9 +165,9 @@ mod resource_history_tests {
                 .unwrap().to_str().unwrap().replace('\\',"/")).collect();
         let registered:std::collections::BTreeSet<_>=crate::deployment::runtime_data_assets::SKILLS.iter().map(|path|path.to_string()).collect();
         assert!(actual.is_subset(&registered),"new resources require an explicit append-only recovery role");
-        // Budget for the two plugin files, their marker, the Unix Qoder pair,
+        // Budget for the four plugin files, their marker, the Unix Qoder pair,
         // and the six other activation targets on every supported platform.
-        assert!(actual.len() + 2 + 1 + qoder_cli_paths.len() + 6 <= MAX_TARGETS);
+        assert!(actual.len() + 4 + 1 + qoder_cli_paths.len() + 6 <= MAX_TARGETS);
     }
 
     #[cfg(unix)]

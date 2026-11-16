@@ -8,6 +8,7 @@ struct Fixture {
     agent: &'static str,
     rows: Vec<Value>,
     turns: usize,
+    last_stop_was_app: bool,
 }
 
 impl Fixture {
@@ -17,6 +18,7 @@ impl Fixture {
             agent,
             rows: Vec::new(),
             turns: 0,
+            last_stop_was_app: false,
         }
     }
 
@@ -107,6 +109,7 @@ impl Fixture {
 
     fn stop(&mut self, cli: bool, extra: Value, parent: Value) -> Vec<Value> {
         self.append_turn(cli);
+        self.last_stop_was_app = parent.get("product").and_then(Value::as_str) == Some("app");
         let (code, stdout) = invoke(self.root(), &["--agent-id", self.agent, "--log-prefix", self.agent],
             &json!({"session_id":"account-session","transcript_path":self.transcript(),"cwd":self.root(),
                 "extra":extra,"parent_business_info":parent}).to_string(),
@@ -143,7 +146,11 @@ impl Fixture {
             let agent_type = if self.agent == "qoder"
                 && self.rows.iter().any(|row| row["entrypoint"] == "cli")
             {
-                "qoder-cli"
+                if self.last_stop_was_app {
+                    "qoder-app"
+                } else {
+                    "qoder-cli"
+                }
             } else {
                 self.agent
             };

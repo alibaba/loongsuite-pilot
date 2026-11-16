@@ -30,6 +30,14 @@ fn pi_original_l664_relocated_record_is_consumed_by_the_whole_public_uninstall_s
             include_str!("../../assets/plugins/pi-coding-agent/index.mjs"),
         ),
         (
+            "assets/plugins/shared/raw-jsonl-writer.mjs",
+            include_str!("../../assets/plugins/shared/raw-jsonl-writer.mjs"),
+        ),
+        (
+            "assets/plugins/shared/raw-source-gate.mjs",
+            include_str!("../../assets/plugins/shared/raw-source-gate.mjs"),
+        ),
+        (
             "assets/plugins/shared/resource-context.mjs",
             include_str!("../../assets/plugins/shared/resource-context.mjs"),
         ),

@@ -257,6 +257,8 @@ fn package(root: &Path) -> PathBuf {
         "assets/plugins/mimo-code/package.json",
         "assets/plugins/pi-coding-agent/index.mjs",
         "assets/plugins/shared/resource-context.mjs",
+        "assets/plugins/shared/raw-jsonl-writer.mjs",
+        "assets/plugins/shared/raw-source-gate.mjs",
         "agents.d/cursor-cli.json",
         "agents.d/claude-code.json",
         "assets/hooks/claude-code-loongsuite-pilot-hook.sh",

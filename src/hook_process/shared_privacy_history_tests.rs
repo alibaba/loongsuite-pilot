@@ -71,7 +71,15 @@ fn privacy_bom_config_keeps_valid_public_history() {
         &[record(&root, "public-session", false)],
     )
     .unwrap();
-    assert_eq!(fs::read_dir(root.join("history")).unwrap().count(), 1);
+    let files = fs::read_dir(root.join("history"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .collect::<Vec<_>>();
+    assert_eq!(files.len(), 1);
+    assert!(fs::read_to_string(&files[0])
+        .unwrap()
+        .contains("public-session"));
 }
 #[test]
 fn privacy_invalid_policy_never_consumes_cursor_and_retries_after_repair() {

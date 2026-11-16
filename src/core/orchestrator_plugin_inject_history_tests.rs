@@ -647,6 +647,8 @@ async fn opencode_selfheal_integration_contract(mode: &str) {
         "opencode/plugin.mjs",
         "opencode/v2.mjs",
         "shared/resource-context.mjs",
+        "shared/raw-jsonl-writer.mjs",
+        "shared/raw-source-gate.mjs",
     ] {
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("assets/plugins")

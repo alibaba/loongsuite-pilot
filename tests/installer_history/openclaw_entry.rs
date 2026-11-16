@@ -90,6 +90,14 @@ fn package(f: &Fixture) {
             include_str!("../../assets/plugins/openclaw/steered-delivery.mjs"),
         ),
         (
+            "assets/plugins/shared/raw-jsonl-writer.mjs",
+            include_str!("../../assets/plugins/shared/raw-jsonl-writer.mjs"),
+        ),
+        (
+            "assets/plugins/shared/raw-source-gate.mjs",
+            include_str!("../../assets/plugins/shared/raw-source-gate.mjs"),
+        ),
+        (
             "assets/plugins/shared/resource-context.mjs",
             include_str!("../../assets/plugins/shared/resource-context.mjs"),
         ),

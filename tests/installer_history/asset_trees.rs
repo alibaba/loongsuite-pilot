@@ -28,6 +28,14 @@ fn minimal_asset_package(f: &Fixture, reference: &str) {
             include_str!("../../assets/plugins/dsh/plugin.mjs"),
         ),
         (
+            "assets/plugins/shared/raw-jsonl-writer.mjs",
+            include_str!("../../assets/plugins/shared/raw-jsonl-writer.mjs"),
+        ),
+        (
+            "assets/plugins/shared/raw-source-gate.mjs",
+            include_str!("../../assets/plugins/shared/raw-source-gate.mjs"),
+        ),
+        (
             "assets/plugins/shared/resource-context.mjs",
             include_str!("../../assets/plugins/shared/resource-context.mjs"),
         ),

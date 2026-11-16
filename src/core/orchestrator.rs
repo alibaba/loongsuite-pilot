@@ -5232,7 +5232,7 @@ mod tests {
                     include_str!("../../agents.d/opencode.json"),
                 )
                 .unwrap();
-                let assets: [(&str, &[u8]); 5] = [
+                let assets: [(&str, &[u8]); 7] = [
                     (
                         "opencode/index.js",
                         include_bytes!("../../assets/plugins/opencode/index.js"),
@@ -5252,6 +5252,14 @@ mod tests {
                     (
                         "shared/resource-context.mjs",
                         include_bytes!("../../assets/plugins/shared/resource-context.mjs"),
+                    ),
+                    (
+                        "shared/raw-jsonl-writer.mjs",
+                        include_bytes!("../../assets/plugins/shared/raw-jsonl-writer.mjs"),
+                    ),
+                    (
+                        "shared/raw-source-gate.mjs",
+                        include_bytes!("../../assets/plugins/shared/raw-source-gate.mjs"),
                     ),
                 ];
                 let mut entries = Vec::new();
