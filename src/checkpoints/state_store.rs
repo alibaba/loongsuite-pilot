@@ -323,24 +323,30 @@ struct StoreData {
     output_failure: Option<String>,
     scoped_holds: HashMap<String, usize>,
     scoped_failures: HashMap<String, String>,
-    persisted_codex: OrderedMap<InputState>,
+    persisted_journal_sources: OrderedMap<InputState>,
     active_collects: Vec<ActiveCollect>,
     collect_sequence: u64,
 }
 
-fn codex_namespace(id: &str) -> Option<&'static str> {
-    ["codex-transcript", "codex-aborted-turn", "codex-log"]
-        .into_iter()
-        .find(|scope| {
-            id == *scope
-                || id
-                    .strip_prefix(scope)
-                    .is_some_and(|suffix| suffix.starts_with(':'))
-        })
+fn journal_namespace(id: &str) -> Option<&'static str> {
+    [
+        "codex-transcript",
+        "codex-aborted-turn",
+        "codex-log",
+        "hermes-agent-log",
+        "openclaw-plugin-log",
+    ]
+    .into_iter()
+    .find(|scope| {
+        id == *scope
+            || id
+                .strip_prefix(scope)
+                .is_some_and(|suffix| suffix.starts_with(':'))
+    })
 }
 
 fn scoped_blocked(data: &StoreData, id: &str) -> bool {
-    codex_namespace(id).is_some_and(|scope| {
+    journal_namespace(id).is_some_and(|scope| {
         data.scoped_holds.contains_key(scope) || data.scoped_failures.contains_key(scope)
     })
 }
@@ -459,7 +465,7 @@ impl StateStore {
         data.persisted_revision = 0;
         data.input_revisions.clear();
         data.extra_revisions.clear();
-        data.persisted_codex.clear();
+        data.persisted_journal_sources.clear();
         let entries = match parsed {
             None => return,
             Some(JVal::Object(fields)) => fields,
@@ -472,8 +478,9 @@ impl StateStore {
         };
         for (id, value) in entries {
             if let Some(state) = InputState::from_jval(value) {
-                if codex_namespace(&id).is_some() {
-                    data.persisted_codex.insert(id.clone(), state.clone());
+                if journal_namespace(&id).is_some() {
+                    data.persisted_journal_sources
+                        .insert(id.clone(), state.clone());
                 }
                 data.states.insert(id, state);
             }
@@ -504,7 +511,7 @@ impl StateStore {
         data.output_failure.is_none()
             && !scoped_blocked(&data, input_id)
             && revision.copied().unwrap_or(0) <= data.persisted_revision
-            && (codex_namespace(input_id).is_none()
+            && (journal_namespace(input_id).is_none()
                 || data.input_revisions.get(input_id).copied().unwrap_or(0)
                     <= data.persisted_revision)
     }
@@ -526,9 +533,9 @@ impl StateStore {
         namespaces: Option<Vec<String>>,
     ) -> CollectOutputHold {
         let owner = namespaces.as_ref().and_then(|ids| {
-            let scope = ids.first().and_then(|id| codex_namespace(id))?;
+            let scope = ids.first().and_then(|id| journal_namespace(id))?;
             ids.iter()
-                .all(|id| codex_namespace(id) == Some(scope))
+                .all(|id| journal_namespace(id) == Some(scope))
                 .then_some(scope)
         });
         let hold = owner.map_or_else(|| self.begin_output(), |id| self.begin_output_for(id));
@@ -567,7 +574,7 @@ impl StateStore {
     }
 
     pub(crate) fn begin_output_for(self: &Arc<Self>, id: &str) -> CheckpointOutputHold {
-        self.begin_output_with(codex_namespace(id))
+        self.begin_output_with(journal_namespace(id))
     }
 
     fn begin_output_with(self: &Arc<Self>, scope: Option<&'static str>) -> CheckpointOutputHold {
@@ -587,17 +594,17 @@ impl StateStore {
     pub(crate) fn save_failed_for(&self, id: &str) -> bool {
         let data = self.mu.lock().unwrap();
         data.output_failure.is_some()
-            || codex_namespace(id).is_some_and(|scope| data.scoped_failures.contains_key(scope))
+            || journal_namespace(id).is_some_and(|scope| data.scoped_failures.contains_key(scope))
     }
 
     pub(crate) fn waiting_for_input(&self, id: &str) -> bool {
         let data = self.mu.lock().unwrap();
         data.output_holds > 0
-            || codex_namespace(id).is_some_and(|scope| data.scoped_holds.contains_key(scope))
+            || journal_namespace(id).is_some_and(|scope| data.scoped_holds.contains_key(scope))
     }
 
     pub(crate) async fn save_for(&self, id: &str) -> anyhow::Result<()> {
-        if let Some(scope) = codex_namespace(id) {
+        if let Some(scope) = journal_namespace(id) {
             loop {
                 let changed = self.output_changed.notified();
                 tokio::pin!(changed);
@@ -649,11 +656,11 @@ impl StateStore {
                         .keys()
                         .map(String::as_str)
                         .chain(
-                            data.persisted_codex
+                            data.persisted_journal_sources
                                 .keys()
                                 .filter(|id| !data.states.contains(id)),
                         )
-                        .filter(|id| codex_namespace(id) == Some(scope))
+                        .filter(|id| journal_namespace(id) == Some(scope))
                         .map(str::to_owned)
                         .collect();
                     for id in keys {
@@ -808,26 +815,26 @@ impl StateStore {
                     data.flushing = false;
                     Step::Done(std::mem::take(&mut data.waiters), Ok(()))
                 } else {
-                    let mut codex = OrderedMap::default();
+                    let mut journal_sources = OrderedMap::default();
                     for (id, state) in data.states.iter() {
-                        if codex_namespace(id).is_some() && !scoped_blocked(&data, id) {
-                            codex.insert(id.to_owned(), state.clone());
+                        if journal_namespace(id).is_some() && !scoped_blocked(&data, id) {
+                            journal_sources.insert(id.to_owned(), state.clone());
                         }
                     }
-                    for (id, state) in data.persisted_codex.iter() {
+                    for (id, state) in data.persisted_journal_sources.iter() {
                         if scoped_blocked(&data, id) {
-                            codex.insert(id.to_owned(), state.clone());
+                            journal_sources.insert(id.to_owned(), state.clone());
                         }
                     }
                     let fields = data
                         .states
                         .iter()
-                        .filter(|(id, _)| codex_namespace(id).is_none())
-                        .chain(codex.iter())
+                        .filter(|(id, _)| journal_namespace(id).is_none())
+                        .chain(journal_sources.iter())
                         .map(|(id, state)| (id.to_owned(), state.to_jval()))
                         .collect();
                     let text = format!("{}\n", json_file::to_pretty(&JVal::Object(fields)));
-                    Step::Write(data.revision, text, codex)
+                    Step::Write(data.revision, text, journal_sources)
                 }
             };
             match step {
@@ -836,22 +843,24 @@ impl StateStore {
                     notify(waiters, result);
                     return;
                 }
-                Step::Write(revision, text, codex) => match self.persist_text(&text).await {
-                    Ok(()) => {
-                        let mut data = self.mu.lock().unwrap();
-                        data.persisted_revision = revision;
-                        data.persisted_codex = codex;
-                        prune_persisted_revision_keys(&mut data);
+                Step::Write(revision, text, journal_sources) => {
+                    match self.persist_text(&text).await {
+                        Ok(()) => {
+                            let mut data = self.mu.lock().unwrap();
+                            data.persisted_revision = revision;
+                            data.persisted_journal_sources = journal_sources;
+                            prune_persisted_revision_keys(&mut data);
+                        }
+                        Err(error) => {
+                            let mut data = self.mu.lock().unwrap();
+                            data.flushing = false;
+                            let waiters = std::mem::take(&mut data.waiters);
+                            drop(data);
+                            notify(waiters, Err(error.to_string()));
+                            return;
+                        }
                     }
-                    Err(error) => {
-                        let mut data = self.mu.lock().unwrap();
-                        data.flushing = false;
-                        let waiters = std::mem::take(&mut data.waiters);
-                        drop(data);
-                        notify(waiters, Err(error.to_string()));
-                        return;
-                    }
-                },
+                }
             }
         }
     }

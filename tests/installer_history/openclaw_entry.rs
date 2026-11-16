@@ -82,6 +82,14 @@ fn package(f: &Fixture) {
             include_str!("../../assets/plugins/openclaw/first-token.mjs"),
         ),
         (
+            "assets/plugins/openclaw/invocation-audit.mjs",
+            include_str!("../../assets/plugins/openclaw/invocation-audit.mjs"),
+        ),
+        (
+            "assets/plugins/openclaw/steered-delivery.mjs",
+            include_str!("../../assets/plugins/openclaw/steered-delivery.mjs"),
+        ),
+        (
             "assets/plugins/shared/resource-context.mjs",
             include_str!("../../assets/plugins/shared/resource-context.mjs"),
         ),

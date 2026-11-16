@@ -19,7 +19,7 @@ pub(crate) struct CodexJournalCapacity;
 
 impl std::fmt::Display for CodexJournalCapacity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Codex pending trace journal capacity exhausted")
+        f.write_str("Native pending trace journal capacity exhausted")
     }
 }
 impl std::error::Error for CodexJournalCapacity {}
@@ -35,20 +35,28 @@ const JOURNAL_BATCH_BYTES: usize = 1024 * 1024;
 const JOURNAL_SCAN_BYTES: usize = 64 * 1024;
 
 pub fn codex_turn_journal_group_key(entry: &AgentActivityEntry) -> String {
-    let parts = (&entry.user_id, &entry.session_id, entry.turn_id.as_deref());
-    hex::encode(Sha256::digest(
-        serde_json::to_vec(&parts).expect("string tuple serializes"),
-    ))
+    let identity = (&entry.user_id, &entry.session_id, entry.turn_id.as_deref());
+    let bytes = if entry.agent_type == "codex" {
+        serde_json::to_vec(&identity)
+    } else {
+        serde_json::to_vec(&(&entry.agent_type, identity.0, identity.1, identity.2))
+    };
+    hex::encode(Sha256::digest(bytes.expect("string tuple serializes")))
 }
 
-pub fn is_journaled_codex_entry(entry: &AgentActivityEntry) -> bool {
-    entry.agent_type == "codex"
-        && !entry.session_id.is_empty()
+pub(super) const JOURNALED_AGENTS: &[&str] = &["codex", "hermes", "openclaw"];
+
+fn has_journal_identity(entry: &AgentActivityEntry) -> bool {
+    !entry.session_id.is_empty()
         && entry
             .turn_id
             .as_deref()
             .is_some_and(|turn| !turn.is_empty())
         && !entry.event_id.is_empty()
+}
+
+pub fn is_journaled_codex_entry(entry: &AgentActivityEntry) -> bool {
+    entry.agent_type == "codex" && has_journal_identity(entry)
 }
 
 fn valid_key(key: &str) -> bool {
@@ -68,6 +76,7 @@ pub struct CodexTurnJournal {
     dir: PathBuf,
     acknowledgement_limit: usize,
     max_pending_bytes: u64,
+    agent_types: &'static [&'static str],
     state: Mutex<JournalState>,
 }
 
@@ -103,8 +112,24 @@ impl CodexTurnJournal {
             dir: dir.into(),
             acknowledgement_limit: MAX_ACKNOWLEDGED_TURNS,
             max_pending_bytes: max_pending_bytes(),
+            agent_types: &["codex"],
             state: Mutex::new(JournalState::default()),
         }
+    }
+
+    pub(crate) fn with_delegated_agents(mut self) -> Self {
+        self.agent_types = JOURNALED_AGENTS;
+        self
+    }
+
+    pub(super) fn accepts_agent(&self, agent: &str) -> bool {
+        self.agent_types.contains(&agent)
+    }
+
+    pub(super) fn accepts(&self, entry: &AgentActivityEntry) -> bool {
+        self.accepts_agent(&entry.agent_type)
+            && has_journal_identity(entry)
+            && !super::trace_event_compat::is_agent_audit_event(entry)
     }
 
     /// Mirrors the source Number option: only positive JavaScript safe integers
@@ -178,10 +203,7 @@ impl CodexTurnJournal {
         let mut state = self.state.lock().await;
         self.load_acknowledgements(&mut state).await?;
         let mut groups: IndexMap<String, Vec<&AgentActivityEntry>> = IndexMap::new();
-        for entry in entries
-            .iter()
-            .filter(|entry| is_journaled_codex_entry(entry))
-        {
+        for entry in entries.iter().filter(|entry| self.accepts(entry)) {
             let key = codex_turn_journal_group_key(entry);
             if !state
                 .acknowledgements
@@ -323,7 +345,7 @@ impl CodexTurnJournal {
     }
 
     pub async fn is_acknowledged(&self, entry: &AgentActivityEntry) -> Result<bool> {
-        if !is_journaled_codex_entry(entry) {
+        if !self.accepts(entry) {
             return Ok(false);
         }
         let mut state = self.state.lock().await;
@@ -340,7 +362,7 @@ impl CodexTurnJournal {
         self.load_acknowledgements(&mut state).await?;
         let keys: IndexSet<_> = entries
             .iter()
-            .filter(|entry| is_journaled_codex_entry(entry))
+            .filter(|entry| self.accepts(entry))
             .map(codex_turn_journal_group_key)
             .collect();
         if keys.is_empty() {
@@ -398,7 +420,7 @@ impl CodexTurnJournal {
     pub async fn remove_entries(&self, entries: &[AgentActivityEntry]) -> Result<()> {
         let keys: IndexSet<_> = entries
             .iter()
-            .filter(|entry| is_journaled_codex_entry(entry))
+            .filter(|entry| self.accepts(entry))
             .map(codex_turn_journal_group_key)
             .collect();
         let mut state = self.state.lock().await;
@@ -520,7 +542,7 @@ impl CodexJournalBatchReplay {
                         let Ok(entry) = serde_json::from_str::<AgentActivityEntry>(&text) else {
                             continue;
                         };
-                        if !is_journaled_codex_entry(&entry)
+                        if !self.journal.accepts(&entry)
                             || codex_turn_journal_group_key(&entry) != active.key
                             || !active.seen.insert(entry.event_id.clone())
                         {

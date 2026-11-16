@@ -46,7 +46,9 @@ impl BaseFlusher for MultiFlusher {
         encoded: Vec<Vec<u8>>,
         quota_alarm: Arc<QuotaAlarm>,
     ) -> Result<(), FlushError> {
-        if !entries.iter().any(|entry| entry.agent_type == "codex") {
+        if !entries.iter().any(|entry| {
+            super::codex_turn_journal::JOURNALED_AGENTS.contains(&entry.agent_type.as_str())
+        }) {
             return self.send_prepared_batch(entries, encoded).await;
         }
         // Each child owns its retry. Successful siblings, including nested

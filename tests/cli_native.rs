@@ -247,6 +247,8 @@ fn package(root: &Path) -> PathBuf {
         "assets/plugins/openclaw/subagent-context.mjs",
         "assets/plugins/openclaw/interceptor.mjs",
         "assets/plugins/openclaw/first-token.mjs",
+        "assets/plugins/openclaw/invocation-audit.mjs",
+        "assets/plugins/openclaw/steered-delivery.mjs",
         "assets/plugins/opencode/plugin.mjs",
         "assets/plugins/opencode/index.js",
         "assets/plugins/opencode/package.json",

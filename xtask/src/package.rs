@@ -81,6 +81,8 @@ const HOST_ASSETS: &[&str] = &[
     "plugins/openclaw/subagent-context.mjs",
     "plugins/openclaw/interceptor.mjs",
     "plugins/openclaw/first-token.mjs",
+    "plugins/openclaw/invocation-audit.mjs",
+    "plugins/openclaw/steered-delivery.mjs",
 ];
 
 pub fn build(root: &Path, options: Options) -> Result<()> {

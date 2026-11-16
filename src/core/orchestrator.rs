@@ -1738,9 +1738,12 @@ impl Orchestrator {
                 match OtlpTraceFlusher::with_parts(trace, Some(attributes), None, None) {
                     Ok(flusher) => {
                         let manager = Arc::downgrade(&self.inputs);
-                        let journal = Arc::new(crate::flushers::CodexTurnJournal::new(
-                            self.data_dir_join("logs/codex-pending-turns"),
-                        ));
+                        let journal = Arc::new(
+                            crate::flushers::CodexTurnJournal::new(
+                                self.data_dir_join("logs/codex-pending-turns"),
+                            )
+                            .with_delegated_agents(),
+                        );
                         let flusher = flusher.with_codex_journal(journal, move |entries| {
                             manager
                                 .upgrade()

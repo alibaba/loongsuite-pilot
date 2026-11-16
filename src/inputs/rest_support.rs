@@ -144,10 +144,11 @@ impl HookJsonlInput {
 
     pub fn new(config: HookJsonlConfig) -> Self {
         let logger = create_logger(config.logger_name);
-        let poll = PollLoop::new(
+        let poll = PollLoop::with_source(
             config.poll_interval_ms,
             logger.clone(),
             Arc::clone(&config.state_store),
+            (config.id == "openclaw-plugin-log").then_some(config.id),
         );
         let inner = Arc::new(HookInner {
             id: config.id,
@@ -323,6 +324,7 @@ where
 
 struct PollInner {
     poll: Duration,
+    journal_source: Option<&'static str>,
     logger: BoundLogger,
     state_store: Arc<StateStore>,
     running: AtomicBool,
@@ -345,9 +347,19 @@ impl PollLoop {
     }
 
     pub fn new(poll_interval_ms: u64, logger: BoundLogger, state_store: Arc<StateStore>) -> Self {
+        Self::with_source(poll_interval_ms, logger, state_store, None)
+    }
+
+    fn with_source(
+        poll_interval_ms: u64,
+        logger: BoundLogger,
+        state_store: Arc<StateStore>,
+        journal_source: Option<&'static str>,
+    ) -> Self {
         Self {
             inner: Arc::new(PollInner {
                 poll: Duration::from_millis(poll_interval_ms),
+                journal_source,
                 logger,
                 state_store,
                 running: AtomicBool::new(false),
@@ -458,6 +470,19 @@ impl PollInner {
         let Some(collect) = collect else {
             return;
         };
+        let stopping = self.shutdown.notified();
+        tokio::pin!(stopping);
+        stopping.as_mut().enable();
+        if !self.running.load(Ordering::SeqCst)
+            || self
+                .journal_source
+                .is_some_and(|id| self.state_store.save_failed_for(id))
+        {
+            return;
+        }
+        let hold = self
+            .journal_source
+            .map(|id| self.state_store.begin_collect(Some(vec![id.into()])));
         match collect().await {
             Ok(entries) => {
                 if !entries.is_empty() {
@@ -467,7 +492,16 @@ impl PollInner {
                         Some(&string_meta(&[("count", entries.len().to_string())])),
                     );
                 }
-                if let Err(err) = self.state_store.save().await {
+                let result = if let Some(hold) = hold {
+                    hold.finish(Ok(()));
+                    tokio::select! {
+                        _ = stopping => return,
+                        result = self.state_store.save_for(self.journal_source.expect("scoped collection")) => result,
+                    }
+                } else {
+                    self.state_store.save().await
+                };
+                if let Err(err) = result {
                     self.logger.error(
                         "collection cycle failed",
                         Some(&string_meta(&[("error", err.to_string())])),
@@ -475,6 +509,9 @@ impl PollInner {
                 }
             }
             Err(err) => {
+                if let Some(hold) = hold {
+                    hold.finish(Err(err.clone()));
+                }
                 self.logger.error(
                     "collection cycle failed",
                     Some(&string_meta(&[("error", err)])),
@@ -553,15 +590,51 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
             .await
         }
     };
-    let candidates =
-        candidate_file_names(&inner.log_prefix, &file_names, state.last_file(), &today);
+    let candidates = if inner.id == "openclaw-plugin-log" {
+        file_names.clone()
+    } else {
+        candidate_file_names(&inner.log_prefix, &file_names, state.last_file(), &today)
+    };
     let mut entries = Vec::new();
-    for name in &candidates {
+    let raw = inner.id == "openclaw-plugin-log";
+    let previous = state.extra().unwrap_or(Value::Null);
+    let mut identities = previous["hookLogIdentities"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let next = previous["hookLogSweepNext"]
+        .as_str()
+        .and_then(|next| candidates.iter().position(|name| name == next))
+        .unwrap_or(0);
+    let mut resume = None;
+    let mut remaining = if raw {
+        crate::utils::raw_source::CYCLE_BYTES
+    } else {
+        u64::MAX
+    };
+    for name in candidates.iter().cycle().skip(next).take(candidates.len()) {
+        if remaining == 0 {
+            resume = Some(name.clone());
+            break;
+        }
         let path = Path::new(&inner.log_dir).join(name);
         let start = offsets.get(name).copied().unwrap_or(0);
-        let (file_entries, offset) = collect_hook_file(inner, &path, start).await?;
-        offsets.insert(name.clone(), offset);
-        entries.extend(file_entries);
+        let file = collect_hook_file(
+            inner,
+            &path,
+            start,
+            identities.get(name).and_then(Value::as_str),
+            remaining,
+        )
+        .await?;
+        offsets.insert(name.clone(), file.offset);
+        if raw {
+            remaining = remaining.saturating_sub(file.bytes);
+            if let Some(identity) = file.identity {
+                identities.insert(name.clone(), identity.into());
+            }
+        }
+        entries.extend(file.entries);
     }
     let live: std::collections::HashSet<&str> = file_names.iter().map(String::as_str).collect();
     let mut pruned = Map::new();
@@ -578,9 +651,23 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
                 .last_offset()
                 .map(|value| value != newest_offset as f64)
                 .unwrap_or(true);
-        if should_persist || last_changed || offset_map_changed(persisted.as_ref(), &pruned) {
+        identities.retain(|name, _| live.contains(name.as_str()));
+        let changed = raw
+            && (previous["hookLogIdentities"].as_object() != Some(&identities)
+                || previous["hookLogSweepNext"].as_str() != resume.as_deref());
+        if should_persist
+            || last_changed
+            || changed
+            || offset_map_changed(persisted.as_ref(), &pruned)
+        {
             let mut extra = Map::new();
             extra.insert(OFFSET_MAP_EXTRA_KEY.to_string(), Value::Object(pruned));
+            if raw {
+                extra.insert("hookLogDir".into(), inner.log_dir.clone().into());
+                extra.insert("hookLogPrefix".into(), inner.log_prefix.clone().into());
+                extra.insert("hookLogIdentities".into(), Value::Object(identities));
+                extra.insert("hookLogSweepNext".into(), serde_json::json!(resume));
+            }
             inner.state_store.update(
                 inner.id,
                 InputStatePatch {
@@ -616,18 +703,38 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
     Ok(entries)
 }
 
+#[derive(Default)]
+struct HookRead {
+    entries: Vec<AgentActivityEntry>,
+    offset: u64,
+    identity: Option<String>,
+    bytes: u64,
+}
+
 async fn collect_hook_file(
     inner: &HookInner,
     path: &Path,
     start_offset: u64,
-) -> Result<(Vec<AgentActivityEntry>, u64), String> {
-    let meta = match tokio::fs::metadata(path).await {
-        Ok(meta) => meta,
-        Err(_) => return Ok((Vec::new(), start_offset)),
+    previous_identity: Option<&str>,
+    budget: u64,
+) -> Result<HookRead, String> {
+    let (mut file, identity) = match open_session_file(&path.to_string_lossy()).await {
+        Ok(opened) => opened,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HookRead {
+                offset: start_offset,
+                ..HookRead::default()
+            });
+        }
+        Err(err) => return Err(err.to_string()),
     };
-    let mut offset = start_offset;
-    let size = meta.len();
-    if offset > 0 && size < offset {
+    let size = identity.size;
+    let mut offset = if previous_identity.is_some_and(|saved| !identity.matches_checkpoint(saved)) {
+        0
+    } else {
+        start_offset
+    };
+    if offset > size {
         inner.logger.info(
             "file truncated, resetting offset",
             Some(&string_meta(&[
@@ -638,38 +745,46 @@ async fn collect_hook_file(
         );
         offset = 0;
     }
+    let mut read = HookRead {
+        offset,
+        identity: Some(identity.checkpoint_key()),
+        ..HookRead::default()
+    };
     if size <= offset {
-        return Ok((Vec::new(), size));
+        return Ok(read);
     }
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|err| err.to_string())?;
     file.seek(std::io::SeekFrom::Start(offset))
         .await
         .map_err(|err| err.to_string())?;
-    let want = (size - offset) as usize;
-    let mut buf = vec![0_u8; want];
-    let mut filled = 0;
-    while filled < want {
-        let n = file
-            .read(&mut buf[filled..])
+    let mut buf = Vec::new();
+    let backlog = size - offset;
+    (&mut file)
+        .take(backlog.min(budget))
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|err| err.to_string())?;
+    let limit = backlog.min(32 * 1024 * 1024);
+    while !buf.contains(&b'\n') && (buf.len() as u64) < limit {
+        let chunk = (limit - buf.len() as u64).min(64 * 1024);
+        if (&mut file)
+            .take(chunk)
+            .read_to_end(&mut buf)
             .await
-            .map_err(|err| err.to_string())?;
-        if n == 0 {
+            .map_err(|err| err.to_string())?
+            == 0
+        {
             break;
         }
-        filled += n;
     }
-    buf.truncate(filled);
+    read.bytes = buf.len() as u64;
     let Some(last_nl) = buf.iter().rposition(|byte| *byte == b'\n') else {
-        return Ok((Vec::new(), offset));
+        return Ok(read);
     };
     let complete_len = last_nl + 1;
     let checkpoint = offset + complete_len as u64;
     let complete = &buf[..complete_len];
     let text = String::from_utf8_lossy(complete);
     let ascii = complete.iter().all(|byte| *byte < 128);
-    let mut entries = Vec::new();
     let mut record_start = 0usize;
     for line in text.split('\n') {
         if !ascii {
@@ -701,7 +816,7 @@ async fn collect_hook_file(
             continue;
         };
         match (inner.transform)(record).await {
-            Ok(Some(entry)) => entries.push(entry),
+            Ok(Some(entry)) => read.entries.push(entry),
             Ok(None) => {}
             Err(err) => {
                 inner.logger.warn(
@@ -714,7 +829,8 @@ async fn collect_hook_file(
             }
         }
     }
-    Ok((entries, checkpoint))
+    read.offset = checkpoint;
+    Ok(read)
 }
 
 async fn list_hook_log_files(log_dir: &str, prefix: &str) -> Vec<String> {
@@ -725,11 +841,16 @@ async fn list_hook_log_files(log_dir: &str, prefix: &str) -> Vec<String> {
     };
     while let Ok(Some(entry)) = dir.next_entry().await {
         let name = entry.file_name().to_string_lossy().to_string();
-        if is_hook_log_file(&name, prefix) {
+        if is_hook_log_file(&crate::utils::raw_source::base_name(&name), prefix) {
             names.push(name);
         }
     }
-    names.sort();
+    names.sort_by_cached_key(|name| {
+        (
+            crate::utils::raw_source::base_name(name),
+            crate::utils::raw_source::segment(name).map_or(0, |(_, seq)| seq),
+        )
+    });
     names
 }
 
@@ -807,6 +928,9 @@ async fn seed_offset_map(
 ) -> BTreeMap<String, u64> {
     let mut offsets = BTreeMap::new();
     for name in file_names {
+        if crate::utils::raw_source::segment(name).is_some() {
+            continue;
+        }
         let path = Path::new(log_dir).join(name);
         let size = tokio::fs::metadata(&path)
             .await
@@ -1352,7 +1476,12 @@ impl SessionJsonlInput {
             id,
             agent_type,
             tail,
-            poll: PollLoop::new(poll_ms, logger, state_store),
+            poll: PollLoop::with_source(
+                poll_ms,
+                logger,
+                state_store,
+                (id == "hermes-agent-log").then_some(id),
+            ),
             on_line,
         }
     }
@@ -1462,7 +1591,8 @@ impl SessionTail {
                 Ok(kind) => kind,
                 Err(_) => continue,
             };
-            if file_type.is_file() && glob_match(&self.file_pattern, &name) {
+            let base = crate::utils::raw_source::base_name(&name);
+            if file_type.is_file() && glob_match(&self.file_pattern, &base) {
                 files.push(
                     Path::new(&self.session_dir)
                         .join(name)
@@ -1619,6 +1749,9 @@ impl SessionTail {
         let mut extra = Map::new();
         extra.insert("inode".to_string(), Value::Number(identity.ino.into()));
         extra.insert("dev".to_string(), Value::Number(identity.dev.into()));
+        if self.id == "hermes-agent-log" {
+            extra.insert("sourceIdentity".into(), identity.checkpoint_key().into());
+        }
         self.state_store.update(
             state_key,
             InputStatePatch {
@@ -1708,7 +1841,14 @@ async fn open_session_file(
 )> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || {
-        let file = std::fs::File::open(path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+        }
+        let file = options.open(path)?;
         let identity = crate::utils::file_identity::identity_from_open(&file)?;
         Ok((tokio::fs::File::from_std(file), identity))
     })

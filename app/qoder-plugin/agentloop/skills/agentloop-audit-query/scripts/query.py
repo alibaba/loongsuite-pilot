@@ -5,8 +5,13 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 
-from util.aliyun import get_logs, get_space
+SETUP_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "agentloop-collector-setup" / "scripts"
+if str(SETUP_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SETUP_SCRIPTS_DIR))
+
+from util.aliyun import get_logs, get_space, list_spaces
 from util.config_record import (
     DEFAULT_LOGSTORE,
     append_history,
@@ -31,6 +36,7 @@ def parse_args(argv):
     parser.add_argument("--line", default="")
     parser.add_argument("--offset", default="")
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--list-spaces", action="store_true")
     args = parser.parse_args(argv)
     return {
         "agent_space": args.agent_space,
@@ -43,51 +49,56 @@ def parse_args(argv):
         "line": args.line,
         "offset": args.offset,
         "list": args.list,
+        "list_spaces": args.list_spaces,
     }
 
 
 def merged_target(saved, values):
-    """One passed field replaces that saved field. The other two stay."""
+    """Only inherit fields within the same confirmed project and region."""
+    saved_ready = saved.get("slsProject") and saved.get("slsLogstore") and saved.get("regionId")
+    project_changed = values["project"] and values["project"] != saved.get("slsProject")
+    region_changed = values["region"] and values["region"] != saved.get("regionId")
+    if (not saved_ready or project_changed or region_changed) and not (
+        values["project"] and values["region"] and values["logstore"]
+    ):
+        missing = ["--" + key for key in ("project", "region", "logstore") if not values[key]]
+        fail(
+            "Query target changed or incomplete. Missing explicit %s. "
+            "Pass --project, --region, and --logstore together." % ", ".join(missing)
+        )
     project = values["project"] or saved.get("slsProject") or ""
     logstore = values["logstore"] or saved.get("slsLogstore") or ""
     region_id = values["region"] or saved.get("regionId") or ""
-    missing = []
-    if not project:
-        missing.append("project")
-    if not logstore:
-        missing.append("logstore")
-    if not region_id:
-        missing.append("region")
-    if missing:
-        fail(
-            "Query target is incomplete. Missing %s. project, logstore, and region are required."
-            % ", ".join(missing)
-        )
-    return save_target(saved.get("agentSpace") or "", region_id, project, logstore)
+    agent_space = "" if values["project"] else (saved.get("agentSpace") or "")
+    return save_target(agent_space, region_id, project, logstore)
 
 
 def resolve_context(profile, values):
     saved = load_target()
-    # A passed project, logstore, or region edits that field only.
-    # Region together with --agent-space still selects the space below.
-    if values["project"] or values["logstore"] or (values["region"] and not values["agent_space"]):
-        return merged_target(saved, values)
-    saved_ready = saved.get("slsProject") and saved.get("slsLogstore") and saved.get("regionId")
-    # A named AgentSpace replaces the saved target and its region.
-    if values["agent_space"] or not saved_ready:
-        name = values["agent_space"] or saved.get("agentSpace") or ""
-        region = values["region"] or ("" if values["agent_space"] else (saved.get("regionId") or ""))
-        space = get_space(profile, name, region)
-        if not space.get("slsProject") or not (space.get("regionId") or region):
-            fail("AgentSpace is missing slsProject or regionId")
-        resolved_region = space.get("regionId") or region
-        return save_target(
-            space.get("agentSpace") or name,
-            resolved_region,
-            space.get("slsProject") or "",
-            DEFAULT_LOGSTORE,
-        )
-    return saved
+    if values["agent_space"]:
+        if values["project"]:
+            fail("Cannot combine --agent-space with --project. Choose one query target.")
+        if not values["region"]:
+            fail("Pass --region. Choosing an AgentSpace requires its region. Do not use a default region.")
+        name = values["agent_space"]
+        region = values["region"]
+    else:
+        if values["project"] or values["logstore"] or values["region"]:
+            return merged_target(saved, values)
+        saved_ready = saved.get("slsProject") and saved.get("slsLogstore") and saved.get("regionId")
+        if saved_ready:
+            return saved
+        name = saved.get("agentSpace") or ""
+        region = saved.get("regionId") or ""
+    space = get_space(profile, name, region)
+    if not space.get("slsProject") or not (space.get("regionId") or region):
+        fail("AgentSpace is missing slsProject or regionId")
+    return save_target(
+        space.get("agentSpace") or name,
+        space.get("regionId") or region,
+        space.get("slsProject") or "",
+        values["logstore"] or DEFAULT_LOGSTORE,
+    )
 
 
 def parse_bound(text, label):
@@ -125,6 +136,18 @@ def parse_page(values):
 def run(argv):
     values = parse_args(argv)
     profile = require_profile()
+    if values["list_spaces"]:
+        spaces, errors = list_spaces(profile, values["region"])
+        for error in errors:
+            if error:
+                print(error, file=sys.stderr)
+        print(json.dumps({
+            "spaces": [
+                {"agentSpace": str(item.get("agentSpace") or ""), "regionId": str(item.get("regionId") or "")}
+                for item in spaces
+            ],
+        }, ensure_ascii=False, indent=2))
+        return
     context = resolve_context(profile, values)
     if values["list"] and not values["query"]:
         print(json.dumps({"context": load_target()}, ensure_ascii=False, indent=2))

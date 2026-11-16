@@ -100,6 +100,7 @@ const HIERARCHY_KEYS: &[&str] = &[
     "gen_ai.agent.scope",
     "gen_ai.agent.depth",
     "gen_ai.agent.parent.id",
+    "gen_ai.agent.id",
     "gen_ai.agent.parent.invocation.id",
     "agent.qoder.subagent_id",
     "gen_ai.subagent.parent_tool_call.id",
@@ -745,7 +746,6 @@ impl BaseFlusher for OtlpTraceFlusher {
     }
 
     async fn flush(&self) -> Result<(), FlushError> {
-        let journaled = self.inner.codex_context().is_some();
         {
             let mut state = self
                 .inner
@@ -754,7 +754,7 @@ impl BaseFlusher for OtlpTraceFlusher {
                 .unwrap_or_else(|err| err.into_inner());
             for buffer in state.buffers.values_mut() {
                 if !buffer.completed
-                    && ((journaled && buffer.agent_type == "codex")
+                    && (buffer.journal_key.is_some()
                         || (self.inner.doubao_context().is_some()
                             && buffer.agent_type == "doubao-work"))
                 {
@@ -957,6 +957,16 @@ impl OtlpInner {
             })
             .map_err(FlushError::codex_journal)?;
         buffer.records = restored;
+        buffer.record_index.clear();
+        if matches!(buffer.agent_type.as_str(), "hermes" | "openclaw") {
+            buffer.record_index.extend(
+                buffer
+                    .records
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| (entry.event_id.clone(), index)),
+            );
+        }
         buffer.resident_bytes = bytes;
         buffer.spilled_records = 0;
         buffer.spilled_event_ids = None;
@@ -967,9 +977,7 @@ impl OtlpInner {
         let mut candidates: Vec<_> = state
             .buffers
             .iter()
-            .filter(|(_, buffer)| {
-                buffer.agent_type == "codex" && buffer.spillable && buffer.spilled_records == 0
-            })
+            .filter(|(_, buffer)| buffer.spillable && buffer.spilled_records == 0)
             .map(|(key, buffer)| (key.clone(), buffer.resident_bytes))
             .collect();
         let mut resident: usize = candidates.iter().map(|(_, bytes)| *bytes).sum();
@@ -1016,10 +1024,7 @@ impl OtlpInner {
         };
         let codex: Vec<_> = entries
             .iter()
-            .filter(|entry| {
-                normalize_agent_type(&entry.agent_type) == "codex"
-                    && !super::trace_event_compat::is_agent_audit_event(entry)
-            })
+            .filter(|entry| context.journal.accepts(entry))
             .collect();
         let mut checked = HashSet::new();
         for entry in &codex {
@@ -1204,7 +1209,6 @@ impl OtlpInner {
         self: &Arc<Self>,
         incoming_key: Option<&str>,
     ) -> Result<(), FlushError> {
-        let journaled = self.codex_context().is_some();
         let evicted = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.batch_depth > 0 || state.buffers.len() <= MAX_TURN_BUFFERS {
@@ -1225,7 +1229,7 @@ impl OtlpInner {
                 .collect::<Vec<_>>()
         };
         for mut buffer in evicted {
-            if (journaled && buffer.agent_type == "codex")
+            if buffer.journal_key.is_some()
                 || (buffer.agent_type == "doubao-work" && self.doubao_context().is_some())
             {
                 self.record_removal(&buffer);
@@ -1261,18 +1265,22 @@ impl OtlpInner {
                 .await;
             return Ok(());
         }
-        let durable_codex = self.codex_context().is_some()
-            && super::codex_turn_journal::is_journaled_codex_entry(&entry);
-        let resident_bytes = if agent_type == "codex" && self.codex_context().is_some() {
+        let journal = self.codex_context();
+        let journaled_agent = journal
+            .as_ref()
+            .is_some_and(|ctx| ctx.journal.accepts_agent(&agent_type));
+        let durable = journal
+            .as_ref()
+            .is_some_and(|ctx| ctx.journal.accepts(&entry));
+        let resident_bytes = if durable {
             serde_json::to_vec(&entry)
                 .map_err(FlushError::codex_journal)?
                 .len()
         } else {
             0
         };
-        let logical_bytes =
-            logical_bytes.or_else(|| durable_codex.then_some(resident_bytes as f64));
-        if agent_type == "codex" && !durable_codex {
+        let logical_bytes = logical_bytes.or_else(|| durable.then_some(resident_bytes as f64));
+        if journaled_agent && !durable {
             let displaced = {
                 let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
                 if state
@@ -1306,7 +1314,7 @@ impl OtlpInner {
             }
             let mut preempt = Vec::new();
             for (buf_key, buffer) in &state.buffers {
-                if agent_type == "codex" || agent_type == "doubao-work" {
+                if journaled_agent || agent_type == "codex" || agent_type == "doubao-work" {
                     break;
                 }
                 if buffer.agent_type != agent_type || buf_key == &key || buffer.completed {
@@ -1358,9 +1366,8 @@ impl OtlpInner {
                         session_id: incoming_session.clone(),
                         records: Vec::new(),
                         record_index: HashMap::new(),
-                        journal_key: durable_codex
-                            .then(|| super::codex_turn_journal_group_key(&entry)),
-                        spillable: durable_codex,
+                        journal_key: durable.then(|| super::codex_turn_journal_group_key(&entry)),
+                        spillable: durable,
                         spilled_records: 0,
                         spilled_event_ids: None,
                         resident_bytes: 0,
@@ -1386,57 +1393,55 @@ impl OtlpInner {
                         .and_then(Value::as_bool)
                         == Some(true);
                 }
-                if !durable_codex && agent_type == "codex" {
+                if durable {
+                    buffer
+                        .journal_key
+                        .get_or_insert_with(|| super::codex_turn_journal_group_key(&entry));
+                } else if journaled_agent {
                     buffer.spillable = false;
                 }
-                let duplicate_doubao = agent_type == "doubao-work"
-                    && !entry.event_id.is_empty()
-                    && buffer.record_index.contains_key(&entry.event_id);
-                if matches!(agent_type.as_str(), "copilot" | "doubao-work")
-                    && !entry.event_id.is_empty()
-                {
+                let keyed = matches!(agent_type.as_str(), "copilot" | "doubao-work")
+                    || (durable && matches!(agent_type.as_str(), "hermes" | "openclaw"));
+                let mut new_event = true;
+                if buffer.spilled_records > 0 && durable {
+                    let ids = buffer
+                        .spilled_event_ids
+                        .as_mut()
+                        .expect("spilled event ids");
+                    new_event = ids.insert(entry.event_id.clone());
+                    buffer.spilled_records = ids.len();
+                } else if keyed && !entry.event_id.is_empty() {
                     if let Some(index) = buffer.record_index.get(&entry.event_id).copied() {
-                        if agent_type == "doubao-work" {
-                            buffer.records[index] = super::doubao_turn_journal::merge_facts(
-                                &buffer.records[index],
-                                &entry,
-                            );
-                        } else {
-                            let mut existing = entry_to_object(&buffer.records[index]);
-                            for (key, value) in entry_to_object(&entry) {
-                                if value.is_null() || value.as_str() == Some("") {
-                                    continue;
-                                }
-                                if existing
-                                    .get(&key)
-                                    .is_none_or(|old| old.is_null() || old.as_str() == Some(""))
-                                {
-                                    existing.insert(key, value);
-                                }
-                            }
-                            buffer.records[index] = entry_from_map(existing);
+                        let previous = &buffer.records[index];
+                        let merged = super::doubao_turn_journal::merge_facts(previous, &entry);
+                        if durable {
+                            let old = serde_json::to_vec(previous)
+                                .map_err(FlushError::codex_journal)?
+                                .len();
+                            let new = serde_json::to_vec(&merged)
+                                .map_err(FlushError::codex_journal)?
+                                .len();
+                            buffer.resident_bytes = buffer
+                                .resident_bytes
+                                .saturating_sub(old)
+                                .saturating_add(new);
                         }
+                        buffer.records[index] = merged;
+                        new_event = false;
                     } else {
                         buffer
                             .record_index
                             .insert(entry.event_id.clone(), buffer.records.len());
                         buffer.records.push(entry.clone());
                     }
-                } else if buffer.spilled_records > 0 && durable_codex {
-                    buffer.spilled_records += 1;
-                    buffer
-                        .spilled_event_ids
-                        .as_mut()
-                        .expect("spilled event ids")
-                        .insert(entry.event_id.clone());
                 } else {
                     buffer.records.push(entry.clone());
                 }
-                if buffer.spilled_records == 0 {
+                if buffer.spilled_records == 0 && new_event {
                     buffer.resident_bytes = buffer.resident_bytes.saturating_add(resident_bytes);
                 }
                 buffer.last_activity_ms = now;
-                if !duplicate_doubao {
+                if new_event || agent_type == "copilot" {
                     if let Some(bytes) =
                         logical_bytes.filter(|bytes| bytes.is_finite() && *bytes >= 0.0)
                     {
@@ -1473,7 +1478,9 @@ impl OtlpInner {
         buffer: TurnBuffer,
         mark_flushed: bool,
     ) -> Result<(), FlushError> {
-        if matches!(buffer.agent_type.as_str(), "codex" | "doubao-work") {
+        if buffer.journal_key.is_some()
+            || matches!(buffer.agent_type.as_str(), "codex" | "doubao-work")
+        {
             return self.finish_buffer(buffer, mark_flushed).await;
         }
         let Some(scope) = self.ordinary_flushes.upgrade() else {
@@ -1540,7 +1547,7 @@ impl OtlpInner {
         mut buffer: TurnBuffer,
         mark_flushed: bool,
     ) -> Result<(), FlushError> {
-        let _serial = if buffer.agent_type == "codex" && self.codex_context().is_some() {
+        let _serial = if buffer.journal_key.is_some() {
             Some(self.codex_flush.lock().await)
         } else {
             None
@@ -1584,7 +1591,7 @@ impl OtlpInner {
             }
             return Ok(());
         }
-        if exported && buffer.completed && buffer.agent_type == "codex" {
+        if exported && buffer.completed && buffer.journal_key.is_some() {
             if let Some(context) = self.codex_context() {
                 context
                     .journal
@@ -1592,6 +1599,12 @@ impl OtlpInner {
                     .await
                     .map_err(FlushError::codex_journal)?;
             }
+        } else if !exported && buffer.journal_key.is_some() {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .flushed
+                .remove(&buffer.key);
         }
         Ok(())
     }
@@ -1726,7 +1739,7 @@ impl OtlpInner {
                 state.buffers.shift_remove(&key)
             };
             if let Some(mut buffer) = buffer {
-                if (buffer.agent_type == "codex" && self.codex_context().is_some())
+                if (buffer.journal_key.is_some() && buffer.agent_type != "hermes")
                     || (buffer.agent_type == "doubao-work" && self.doubao_context().is_some())
                 {
                     self.record_removal(&buffer);
@@ -2396,7 +2409,6 @@ impl OtlpInner {
     }
 
     fn snapshot_at(&self, now: Option<Instant>) -> Vec<TraceRuntimeSnapshot> {
-        let journaled = self.codex_context().is_some();
         let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         let now = now.unwrap_or_else(Instant::now);
         let mut rows: IndexMap<String, TraceRuntimeSnapshot> = IndexMap::new();
@@ -2406,12 +2418,14 @@ impl OtlpInner {
                 TraceRuntimeSnapshot::from_counters(agent_type, counters),
             );
         }
-        if journaled {
-            if let Some(row) = rows.get_mut("codex") {
-                row.resident_records = Some(0);
-                row.resident_payload_bytes = Some(0);
-                row.spilled_buffers = Some(0);
-                row.spilled_records = Some(0);
+        if let Some(context) = self.codex_context() {
+            for (agent, row) in &mut rows {
+                if context.journal.accepts_agent(agent) {
+                    row.resident_records = Some(0);
+                    row.resident_payload_bytes = Some(0);
+                    row.spilled_buffers = Some(0);
+                    row.spilled_records = Some(0);
+                }
             }
         }
         for buffer in state.buffers.values() {
@@ -2422,7 +2436,7 @@ impl OtlpInner {
             row.pending_buffers += 1;
             let records = (buffer.records.len() + buffer.spilled_records) as u64;
             row.pending_records += records;
-            if journaled && buffer.agent_type == "codex" {
+            if row.resident_records.is_some() {
                 *row.resident_records.as_mut().expect("Codex gauge") += buffer.records.len() as u64;
                 *row.resident_payload_bytes.as_mut().expect("Codex gauge") +=
                     buffer.resident_bytes as u64;
@@ -4545,6 +4559,85 @@ mod tests {
         assert_eq!(snapshot[0].pending_records, 1);
         assert_eq!(snapshot[0].pending_logical_bytes, 10.0);
         assert_eq!(snapshot[0].largest_buffer_turn_id.as_deref(), Some("t1"));
+    }
+
+    #[tokio::test]
+    async fn delegated_invocation_journal_spills_and_recovers_without_buffering_audit_events() {
+        for agent in ["openclaw", "hermes"] {
+            let dir = tempfile::tempdir().unwrap();
+            let journal_dir = dir.path().join("journal");
+            let journal = || {
+                Arc::new(
+                    crate::flushers::CodexTurnJournal::new(&journal_dir).with_delegated_agents(),
+                )
+            };
+            let record = |id: &str, name: &str, time: &str| {
+                json!({
+                    "event.id": id, "event.name": name, "time_unix_nano": time,
+                    "user.id": "fixture-user", "gen_ai.agent.type": agent,
+                    "gen_ai.session.id": "child-session", "gen_ai.turn.id": "child-turn",
+                    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "gen_ai.agent.id": "child-id", "gen_ai.agent.parent.invocation.id": "invocation",
+                    "gen_ai.response.id": "response", "gen_ai.request.model": "fixture-model",
+                    "agent.hermes.collection": "realtime-v1", "agent.hermes.native_run_observer": true
+                })
+            };
+            let mut request = record("request", "llm.request", "1000000000");
+            request["gen_ai.input.messages_delta"] = json!([{"role":"user","parts":[{
+                "type":"text","content":"x".repeat(super::MAX_CODEX_TURN_RESIDENT_BYTES + 1)
+            }]}]);
+            let request = entry(request);
+            let mut audit = record("audit", "gen_ai.agent.invoke", "2000000000");
+            audit["gen_ai.turn.end"] = json!(true);
+            let audit = entry(audit);
+            let (flusher, converter) = make_flusher();
+            let first_journal = journal();
+            let flusher = flusher.with_codex_journal(Arc::clone(&first_journal), Ok);
+            flusher
+                .send_batch(vec![request.clone(), request.clone(), audit.clone()], None)
+                .await
+                .unwrap();
+            let pending = &flusher.trace_runtime_snapshot()[0];
+            assert_eq!(pending.pending_records, 1);
+            assert_eq!(pending.spilled_records, Some(1));
+            assert_eq!(pending.resident_records, Some(0));
+            flusher.shutdown().await.unwrap();
+            assert!(converter.calls.lock().unwrap().is_empty());
+            assert!(!first_journal.is_acknowledged(&request).await.unwrap());
+            drop(flusher);
+
+            let (flusher, converter) = make_flusher();
+            let reopened = journal();
+            let flusher = flusher.with_codex_journal(Arc::clone(&reopened), Ok);
+            flusher.start().await.unwrap();
+            assert_eq!(flusher.trace_runtime_snapshot()[0].spilled_records, Some(1));
+            let mut response = record("response", "llm.response", "3000000000");
+            response["gen_ai.turn.end"] = json!(true);
+            response["agent.openclaw.hook"] = json!("llm_output");
+            flusher.send(entry(response), None).await.unwrap();
+            flusher.shutdown().await.unwrap();
+            {
+                let calls = converter.calls.lock().unwrap();
+                assert_eq!(calls.len(), 1);
+                let ids: Vec<_> = calls[0]
+                    .iter()
+                    .map(|record| record.event_id.as_str())
+                    .collect();
+                assert_eq!(ids, ["request", "response"]);
+                assert_eq!(
+                    calls[0][0].get("gen_ai.agent.parent.invocation.id"),
+                    Some(&json!("invocation"))
+                );
+            }
+            assert!(reopened.is_acknowledged(&request).await.unwrap());
+            assert!(!reopened.is_acknowledged(&audit).await.unwrap());
+            let mut same_ids_other_agent = request;
+            same_ids_other_agent.agent_type = "codex".into();
+            assert!(!reopened
+                .is_acknowledged(&same_ids_other_agent)
+                .await
+                .unwrap());
+        }
     }
 
     #[tokio::test]

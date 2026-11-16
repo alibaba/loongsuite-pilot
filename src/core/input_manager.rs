@@ -281,23 +281,20 @@ impl InputManager {
             input.id.clone(),
             empty_counter(&input.collection_method, &input.agent_type),
         );
+        let output_owner = match crate::utils::normalize_agent_type(&input.agent_type).as_str() {
+            "codex" => Some("Codex"),
+            "hermes" | "hermes-agent" => Some("Hermes"),
+            "openclaw" => Some("OpenClaw"),
+            "doubao-work" => Some("Doubao Work"),
+            _ => None,
+        };
         self.queues.lock().expect("queues").insert(
             input.id.clone(),
             Arc::new(QueueGate {
-                output_owner: if crate::utils::normalize_agent_type(&input.agent_type) == "codex" {
-                    "Codex"
-                } else {
-                    "Doubao Work"
-                },
+                output_owner: output_owner.unwrap_or("input"),
                 lock: AsyncMutex::new(()),
                 inflight: AtomicUsize::new(0),
-                cancellation: Mutex::new(
-                    matches!(
-                        crate::utils::normalize_agent_type(&input.agent_type).as_str(),
-                        "codex" | "doubao-work"
-                    )
-                    .then(|| watch::channel(false).0),
-                ),
+                cancellation: Mutex::new(output_owner.map(|_| watch::channel(false).0)),
             }),
         );
         let id = input.id.clone();
@@ -788,8 +785,9 @@ impl InputManager {
         let alarm_manager = self.alarm_manager.lock().expect("alarm").clone();
         let alarm_input = input_id.to_owned();
         let quota_alarm = Arc::new(move |endpoint: &str, error: &crate::flushers::FlushError| {
-            let message =
-                format!("Codex pending journal is full, retaining source checkpoint: {error}");
+            let message = format!(
+                "Native pending trace journal is full, retaining source checkpoint: {error}"
+            );
             logger("InputManager").warn(&message, None);
             if let Some(manager) = &alarm_manager {
                 manager.record(

@@ -50,7 +50,7 @@ impl FlushError {
 
     pub fn codex_journal(error: impl std::fmt::Display) -> Self {
         Self {
-            message: format!("Codex pending trace journal failed: {error}"),
+            message: format!("Native pending trace journal failed: {error}"),
             kind: FlushErrorKind::CodexTurnJournal,
         }
     }
@@ -179,7 +179,9 @@ pub trait BaseFlusher: Send + Sync {
         encoded: Vec<Vec<u8>>,
         quota_alarm: std::sync::Arc<QuotaAlarm>,
     ) -> Result<(), FlushError> {
-        if !entries.iter().any(|entry| entry.agent_type == "codex") {
+        if !entries.iter().any(|entry| {
+            super::codex_turn_journal::JOURNALED_AGENTS.contains(&entry.agent_type.as_str())
+        }) {
             return self.send_prepared_batch(entries, encoded).await;
         }
         let mut alarmed = false;

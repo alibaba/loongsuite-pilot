@@ -90,6 +90,8 @@ fn bundle(def: &AgentDefinition) -> Result<(&'static str, &'static [&'static str
                 "openclaw/subagent-context.mjs",
                 "openclaw/interceptor.mjs",
                 "openclaw/first-token.mjs",
+                "openclaw/invocation-audit.mjs",
+                "openclaw/steered-delivery.mjs",
                 SHARED,
             ],
         )),
