@@ -12,12 +12,15 @@ const EXTENSION_PATH = path.resolve(
 
 let tmpDir;
 let previousDataDir;
+let previousConfigPath;
 let previousResourceEnv;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-coding-agent-extension-'));
   previousDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
+  previousConfigPath = process.env.AGENT_DATA_COLLECTION_CONFIG;
   process.env.LOONGSUITE_PILOT_DATA_DIR = tmpDir;
+  process.env.AGENT_DATA_COLLECTION_CONFIG = path.join(tmpDir, 'config.json');
   previousResourceEnv = {
     AGENTTEAMS_WORKER_NAME: process.env.AGENTTEAMS_WORKER_NAME,
     AGENTTEAMS_INSTANCE_ID: process.env.AGENTTEAMS_INSTANCE_ID,
@@ -35,6 +38,8 @@ afterEach(() => {
   vi.useRealTimers();
   if (previousDataDir === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
   else process.env.LOONGSUITE_PILOT_DATA_DIR = previousDataDir;
+  if (previousConfigPath === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+  else process.env.AGENT_DATA_COLLECTION_CONFIG = previousConfigPath;
   for (const [key, value] of Object.entries(previousResourceEnv)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -856,10 +861,16 @@ describe('Pi Coding Agent extension', () => {
     expect(request['gen_ai.step.id']).toBe(`${request['gen_ai.turn.id']}:s1`);
   });
 
-  it('omits sensitive message and tool payloads when content capture is disabled', async () => {
-    const runtime = await createRuntime({
+  it.each(['default', 'custom-path', 'bom'])('omits sensitive message and tool payloads with %s config', async (kind) => {
+    const disabledConfig = {
       agents: { 'pi-coding-agent': { captureMessageContent: false } },
-    });
+    };
+    const runtime = await createRuntime(kind === 'default' ? disabledConfig : {});
+    if (kind !== 'default') {
+      const configPath = path.join(tmpDir, kind === 'custom-path' ? 'custom.json' : 'config.json');
+      fs.writeFileSync(configPath, (kind === 'bom' ? '\uFEFF' : '') + JSON.stringify(disabledConfig));
+      process.env.AGENT_DATA_COLLECTION_CONFIG = configPath;
+    }
     await startTurn(runtime);
     await runtime.emit('context', {
       messages: [{ role: 'user', content: 'secret prompt' }],

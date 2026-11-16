@@ -267,11 +267,11 @@ export function hashJson(value) {
 }
 
 export function loadHookRuntimeConfig(dataDir) {
-  const configPath = process.env.AGENT_DATA_COLLECTION_CONFIG
+  const configPath = process.env.AGENT_DATA_COLLECTION_CONFIG?.trim()
     || path.join(dataDir || path.join(os.homedir(), '.loongsuite-pilot'), 'config.json');
   let file = {};
   try {
-    if (fs.existsSync(configPath)) file = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    if (fs.existsSync(configPath)) file = JSON.parse(fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, ''));
   } catch {
     file = {};
   }

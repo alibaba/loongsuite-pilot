@@ -31,6 +31,7 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { appendRawJsonl } from "../shared/raw-jsonl-writer.mjs";
+import { pilotConfigPath, readPilotConfig } from "../shared/pilot-config.mjs";
 import { createSubagentContexts, stampSubagent } from "./subagent-context.mjs";
 import { invocationId, auditRecord, textMessages, deliveredText } from "./invocation-audit.mjs";
 import { MIN_OPENCLAW_VERSION } from "./compatibility.mjs";
@@ -244,7 +245,7 @@ function truncateContent(val) {
 let pilotConfigCache = { path: null, loadedAt: 0, value: {} };
 
 function loadPilotConfig() {
-  const cfgPath = path.join(resolveDataDir(), "config.json");
+  const cfgPath = pilotConfigPath();
   const now = Date.now();
   if (
     pilotConfigCache.path === cfgPath
@@ -253,11 +254,7 @@ function loadPilotConfig() {
     return pilotConfigCache.value;
   }
 
-  let value = {};
-  try {
-    const raw = fs.readFileSync(cfgPath, "utf-8");
-    value = JSON.parse(raw);
-  } catch {}
+  const value = readPilotConfig(cfgPath);
   pilotConfigCache = { path: cfgPath, loadedAt: now, value };
   return value;
 }

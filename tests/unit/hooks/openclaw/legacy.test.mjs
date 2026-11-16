@@ -13,6 +13,7 @@ const ctx = { agentId: 'main', sessionKey: 'agent:main:test', sessionId: 'sessio
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-oc-legacy-'));
   vi.stubEnv('LOONGSUITE_PILOT_DATA_DIR', root);
+  vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', path.join(root, 'config.json'));
   vi.stubEnv('LOONGSUITE_USER_ID', 'test');
   clock = Date.now();
   vi.spyOn(Date, 'now').mockImplementation(() => clock);

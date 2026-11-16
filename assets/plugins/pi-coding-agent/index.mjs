@@ -10,6 +10,7 @@
 
 import crypto from 'node:crypto';
 import { appendRawJsonl } from '../shared/raw-jsonl-writer.mjs';
+import { readPilotConfig } from '../shared/pilot-config.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -183,11 +184,7 @@ function safeHandler(name, handler) {
 }
 
 function loadPilotConfig() {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(resolveDataDir(), 'config.json'), 'utf8'));
-  } catch {
-    return {};
-  }
+  return readPilotConfig();
 }
 
 function resolveUserId(config) {

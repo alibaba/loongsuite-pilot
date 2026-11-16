@@ -204,13 +204,16 @@ describe('opencode plugin session turnSeq persistence', () => {
     expect(requests[1]['gen_ai.input.messages_delta']).toBeTruthy();
   });
 
-  it('omits message and tool bodies from plugin JSONL when configured off', async () => {
+  it.each(['custom-path', 'bom'])('omits message and tool bodies with %s config', async (kind) => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-opencode-policy-'));
     const previous = process.env.LOONGSUITE_PILOT_DATA_DIR;
-    fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
+    const previousConfig = process.env.AGENT_DATA_COLLECTION_CONFIG;
+    const configPath = path.join(dataDir, kind === 'custom-path' ? 'custom.json' : 'config.json');
+    fs.writeFileSync(configPath, (kind === 'bom' ? '\uFEFF' : '') + JSON.stringify({
       agents: { opencode: { captureMessageContent: false } },
     }));
     process.env.LOONGSUITE_PILOT_DATA_DIR = dataDir;
+    process.env.AGENT_DATA_COLLECTION_CONFIG = configPath;
     try {
       const records = await replayPluginFixture();
       expect(records.filter(record => record['event.name'] === 'llm.request')).toHaveLength(5);
@@ -224,6 +227,8 @@ describe('opencode plugin session turnSeq persistence', () => {
     } finally {
       if (previous === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
       else process.env.LOONGSUITE_PILOT_DATA_DIR = previous;
+      if (previousConfig === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+      else process.env.AGENT_DATA_COLLECTION_CONFIG = previousConfig;
       fs.rmSync(dataDir, { recursive: true, force: true });
     }
   });

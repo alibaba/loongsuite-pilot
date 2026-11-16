@@ -44,6 +44,7 @@ let tmpDir;
 let pilotDataDir;
 let pluginLoadSequence = 0;
 let previousWorkerName;
+let previousConfigPath;
 let observeStream;
 
 beforeEach(async () => {
@@ -54,6 +55,8 @@ beforeEach(async () => {
   tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-'));
   pilotDataDir = path.join(tmpDir, 'pilot-data');
   fs.mkdirSync(path.join(pilotDataDir, 'logs', 'openclaw'), { recursive: true });
+  previousConfigPath = process.env.AGENT_DATA_COLLECTION_CONFIG;
+  process.env.AGENT_DATA_COLLECTION_CONFIG = path.join(pilotDataDir, 'config.json');
   process.env.LOONGSUITE_PILOT_DATA_DIR = pilotDataDir;
   process.env.LOONGSUITE_USER_ID = 'test-user';
 });
@@ -64,6 +67,8 @@ afterEach(async () => {
   delete process.env.LOONGSUITE_USER_ID;
   delete process.env.LOONGSUITE_PILOT_DEBUG;
   delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  if (previousConfigPath === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+  else process.env.AGENT_DATA_COLLECTION_CONFIG = previousConfigPath;
   if (previousWorkerName === undefined) delete process.env.AGENTTEAMS_WORKER_NAME;
   else process.env.AGENTTEAMS_WORKER_NAME = previousWorkerName;
   vi.restoreAllMocks();
@@ -1235,10 +1240,12 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(records.find((r) => r['gen_ai.turn.id'] === 'run-b')['gen_ai.response.time_to_first_token']).toBeUndefined();
   });
 
-  it('redacts content before persistence while retaining token usage', async () => {
-    fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({
+  it.each(['default', 'custom-path', 'bom'])('redacts content before persistence with %s config while retaining token usage', async (kind) => {
+    const configPath = path.join(pilotDataDir, kind === 'custom-path' ? 'custom.json' : 'config.json');
+    fs.writeFileSync(configPath, (kind === 'bom' ? '\uFEFF' : '') + JSON.stringify({
       agents: { openclaw: { captureMessageContent: false } },
     }));
+    process.env.AGENT_DATA_COLLECTION_CONFIG = configPath;
     const plugin = await loadPlugin();
     const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'));
     const sensitiveFields = [

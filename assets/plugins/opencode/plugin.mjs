@@ -23,6 +23,7 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { appendRawJsonl } from "../shared/raw-jsonl-writer.mjs";
+import { readPilotConfig } from "../shared/pilot-config.mjs";
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
@@ -193,13 +194,7 @@ function truncateContent(val) {
 // ---------------------------------------------------------------------------
 
 function loadPilotConfig() {
-  try {
-    const cfgPath = path.join(resolveDataDir(), "config.json");
-    const raw = fs.readFileSync(cfgPath, "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
+  return readPilotConfig();
 }
 
 function resolveUserId(cfg) {

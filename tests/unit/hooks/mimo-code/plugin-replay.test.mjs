@@ -233,13 +233,16 @@ describe('MiMo Code plugin — end-to-end fixture replay', () => {
     expect(userMsg.parts[0].content).toContain('List py files');
   });
 
-  it('omits message and tool bodies from plugin JSONL when configured off', async () => {
+  it.each(['custom-path', 'bom'])('omits message and tool bodies with %s config', async (kind) => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-mimo-policy-'));
     const previous = process.env.LOONGSUITE_PILOT_DATA_DIR;
-    fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
+    const previousConfig = process.env.AGENT_DATA_COLLECTION_CONFIG;
+    const configPath = path.join(dataDir, kind === 'custom-path' ? 'custom.json' : 'config.json');
+    fs.writeFileSync(configPath, (kind === 'bom' ? '\uFEFF' : '') + JSON.stringify({
       agents: { 'mimo-code': { captureMessageContent: false } },
     }));
     process.env.LOONGSUITE_PILOT_DATA_DIR = dataDir;
+    process.env.AGENT_DATA_COLLECTION_CONFIG = configPath;
     try {
       const records = [];
       const configuredPlugin = await loadPlugin(records);
@@ -260,6 +263,8 @@ describe('MiMo Code plugin — end-to-end fixture replay', () => {
     } finally {
       if (previous === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
       else process.env.LOONGSUITE_PILOT_DATA_DIR = previous;
+      if (previousConfig === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+      else process.env.AGENT_DATA_COLLECTION_CONFIG = previousConfig;
       fs.rmSync(dataDir, { recursive: true, force: true });
     }
   });
