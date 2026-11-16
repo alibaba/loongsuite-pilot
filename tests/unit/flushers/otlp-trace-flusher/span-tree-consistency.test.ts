@@ -175,4 +175,57 @@ describe('OtlpTraceFlusher - span tree consistency (trae-cn ENTRY→AGENT→STEP
     const llmSpans = captured.filter((s) => s.attributes['gen_ai.span.kind'] === 'LLM');
     expect(llmSpans.length).toBe(2);
   });
+
+  // Scenario B regression guard: when a turn's metadata-only "other" events
+  // all share a SINGLE distinct non-empty parent_span_id (the legitimate
+  // upstream traceparent case, e.g. a delegated subagent turn), the
+  // conditional stripper must NOT clear parent_span_id. This lets
+  // prepareDelegatedTurn's marker detection (which requires all records to
+  // share trace_id + parent_span_id) succeed, keeping the child ENTRY
+  // transparent. The unconditional stripper previously cleared it, broke
+  // marker detection, and produced a phantom extra ENTRY span.
+  it('preserves single-distinct parent_span_id on metadata-only other events so prepareDelegatedTurn marker hits (Scenario B)', async () => {
+    const sharedParent = '1111111111111111';
+    const traceId = 'a'.repeat(32);
+    const base = {
+      trace_id: traceId,
+      'gen_ai.agent.type': 'openclaw',
+      'gen_ai.agent.name': 'openclaw',
+      'gen_ai.session.id': 'sb',
+      'gen_ai.turn.id': 'tb',
+      'user.id': 'test-user',
+      'gen_ai.provider.name': 'test',
+      'gen_ai.agent.scope': 'subagent',
+      parent_span_id: sharedParent,
+    };
+    const event = (name: string, id: string, fields: Record<string, unknown> = {}): AgentActivityEntry => ({
+      ...base,
+      'event.name': name,
+      'event.id': id,
+      time_unix_nano: '1700000000000000000',
+      ...fields,
+    } as AgentActivityEntry);
+    // Metadata-only "other" (turn.end) — single distinct parent_span_id
+    // shared with the rest of the turn. Must NOT be cleared.
+    const records: AgentActivityEntry[] = [
+      event('other', 'b-1', { 'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'task' }] }] }),
+      event('llm.request', 'b-2', { 'gen_ai.response.id': 'b-llm', 'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'task' }] }] }),
+      event('llm.response', 'b-3', {
+        'gen_ai.response.id': 'b-llm',
+        'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'done' }] }],
+        'gen_ai.usage.input_tokens': 5, 'gen_ai.usage.output_tokens': 3,
+        'gen_ai.response.finish_reasons': ['stop'],
+      }),
+      event('other', 'b-4', { 'gen_ai.turn.end': true, 'agent.openclaw.hook': 'llm_output' }),
+    ];
+
+    await flusher.sendBatch(records);
+    await flusher.flush();
+
+    // Scenario B: stripper did NOT clear parent_span_id → prepareDelegatedTurn
+    // marker hits → child ENTRY is transparent → only AGENT + STEP + LLM
+    // spans emitted, NO ENTRY span.
+    const entrySpans = captured.filter((s) => s.attributes['gen_ai.span.kind'] === 'ENTRY');
+    expect(entrySpans.length).toBe(0);
+  });
 });
