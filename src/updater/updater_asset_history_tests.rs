@@ -8,6 +8,7 @@ fn asset_history_package(root: &Path, version: &str, commit: &str, reference: &s
         ("assets/skills/loongsuite-pilot-ops/references/cursor-diagnostics.md", reference),
         ("assets/plugins/dsh/plugin.mjs", include_str!("../../assets/plugins/dsh/plugin.mjs")),
         ("assets/plugins/shared/resource-context.mjs", include_str!("../../assets/plugins/shared/resource-context.mjs")),
+        ("assets/plugins/shared/pilot-config.mjs", include_str!("../../assets/plugins/shared/pilot-config.mjs")),
     ] {
         let path = root.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

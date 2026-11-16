@@ -699,6 +699,10 @@ async fn find_missing_runtime_assets(data_dir: &str) -> Vec<String> {
             .join("plugins")
             .join("shared")
             .join("resource-context.mjs"),
+        Path::new(data_dir)
+            .join("plugins")
+            .join("shared")
+            .join("pilot-config.mjs"),
     ];
     let mut missing = Vec::new();
     for candidate in candidates {
@@ -903,6 +907,15 @@ mod tests {
                 .join("plugins")
                 .join("shared")
                 .join("resource-context.mjs"),
+            "export {}\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            data_dir
+                .join("plugins")
+                .join("shared")
+                .join("pilot-config.mjs"),
             "export {}\n",
         )
         .await

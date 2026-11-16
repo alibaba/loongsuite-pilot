@@ -57,6 +57,7 @@ pub(crate) fn registry(data: &Path, marker: bool) -> BTreeMap<String, PathBuf> {
     for relative in [
         "plugins/dsh/plugin.mjs",
         "plugins/shared/resource-context.mjs",
+        "plugins/shared/pilot-config.mjs",
         "plugins/shared/raw-jsonl-writer.mjs",
         "plugins/shared/raw-source-gate.mjs",
     ] {
@@ -84,6 +85,7 @@ fn source_relative(path: &str) -> Option<&str> {
                 *relative,
                 "plugins/dsh/plugin.mjs"
                     | "plugins/shared/resource-context.mjs"
+                    | "plugins/shared/pilot-config.mjs"
                     | "plugins/shared/raw-jsonl-writer.mjs"
                     | "plugins/shared/raw-source-gate.mjs"
             )

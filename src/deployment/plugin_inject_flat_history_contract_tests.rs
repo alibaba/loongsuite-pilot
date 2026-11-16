@@ -295,6 +295,7 @@ fn test_pilot(root: &Path, valid: bool, missing_companion: bool) -> PathBuf {
         "opencode/plugin.mjs",
         "opencode/v2.mjs",
         "shared/resource-context.mjs",
+        "shared/pilot-config.mjs",
         "shared/raw-jsonl-writer.mjs",
         "shared/raw-source-gate.mjs",
     ] {

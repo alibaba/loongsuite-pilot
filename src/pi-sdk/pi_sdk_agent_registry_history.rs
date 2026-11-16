@@ -16,6 +16,10 @@ async fn fixture() -> (tempfile::TempDir, PiSdkAgentRegistrationRequest) {
             "plugins/shared/resource-context.mjs",
             include_bytes!("../../assets/plugins/shared/resource-context.mjs").as_slice(),
         ),
+        (
+            "plugins/shared/pilot-config.mjs",
+            include_bytes!("../../assets/plugins/shared/pilot-config.mjs").as_slice(),
+        ),
     ] {
         let path = data.join(name);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -18,6 +18,10 @@ async fn history_json_mode_redirects_actual_operational_logs_in_an_isolated_proc
                 "plugins/shared/resource-context.mjs",
                 include_bytes!("../../assets/plugins/shared/resource-context.mjs").as_slice(),
             ),
+            (
+                "plugins/shared/pilot-config.mjs",
+                include_bytes!("../../assets/plugins/shared/pilot-config.mjs").as_slice(),
+            ),
         ] {
             let path = data.join(name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();

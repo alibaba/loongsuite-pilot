@@ -484,6 +484,10 @@ async fn register_sdk(
             "plugins/shared/resource-context.mjs",
             include_bytes!("../../assets/plugins/shared/resource-context.mjs").as_slice(),
         ),
+        (
+            "plugins/shared/pilot-config.mjs",
+            include_bytes!("../../assets/plugins/shared/pilot-config.mjs").as_slice(),
+        ),
     ] {
         let path = fixture.data.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -647,6 +651,7 @@ async fn opencode_selfheal_integration_contract(mode: &str) {
         "opencode/plugin.mjs",
         "opencode/v2.mjs",
         "shared/resource-context.mjs",
+        "shared/pilot-config.mjs",
         "shared/raw-jsonl-writer.mjs",
         "shared/raw-source-gate.mjs",
     ] {

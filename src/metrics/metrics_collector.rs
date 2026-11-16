@@ -1051,6 +1051,16 @@ fn read_proc_cpu() -> (i64, i64) {
     (utime * 10_000, stime * 10_000)
 }
 
+fn capture_disabled_agents(config: &AgentsConfig) -> String {
+    let mut agents: Vec<_> = config
+        .iter()
+        .filter(|(_, policy)| policy.capture_message_content == Some(false))
+        .map(|(agent, _)| agent.as_str())
+        .collect();
+    agents.sort_unstable();
+    agents.join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1560,14 +1570,4 @@ mod tests {
             pid_file_command_matched: None,
         }
     }
-}
-
-fn capture_disabled_agents(config: &AgentsConfig) -> String {
-    let mut agents: Vec<_> = config
-        .iter()
-        .filter(|(_, policy)| policy.capture_message_content == Some(false))
-        .map(|(agent, _)| agent.as_str())
-        .collect();
-    agents.sort_unstable();
-    agents.join(" ")
 }

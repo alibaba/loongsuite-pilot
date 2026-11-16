@@ -5232,7 +5232,7 @@ mod tests {
                     include_str!("../../agents.d/opencode.json"),
                 )
                 .unwrap();
-                let assets: [(&str, &[u8]); 7] = [
+                let assets: [(&str, &[u8]); 8] = [
                     (
                         "opencode/index.js",
                         include_bytes!("../../assets/plugins/opencode/index.js"),
@@ -5252,6 +5252,10 @@ mod tests {
                     (
                         "shared/resource-context.mjs",
                         include_bytes!("../../assets/plugins/shared/resource-context.mjs"),
+                    ),
+                    (
+                        "shared/pilot-config.mjs",
+                        include_bytes!("../../assets/plugins/shared/pilot-config.mjs"),
                     ),
                     (
                         "shared/raw-jsonl-writer.mjs",

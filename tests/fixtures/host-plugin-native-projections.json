@@ -4,27 +4,31 @@
     "assets": [
       {
         "path": "assets/plugins/mimo-code/plugin.mjs",
-        "sha256": "c8565217ff4e2c66c40233f5550f6be158652099b00c529246c20995c6a14f88"
+        "sha256": "b91577170f907b405262798f90b7d9d84ed9885022a441ea3424f59f1606a3a7"
       },
       {
         "path": "assets/plugins/pi-coding-agent/index.mjs",
-        "sha256": "d0a564f417bf3e4ca77735951eed459597f5e05b6c8814e9a82d75c5215805f4"
+        "sha256": "249d61bd259b9e2ed2edf1153a8a458ab1fff06cd99477409a275c0ea145248e"
       },
       {
         "path": "assets/plugins/shared/resource-context.mjs",
         "sha256": "131cae8ab76d94c84bee45931e7b096cdf758f4fc43563e0638f94bb2de2099f"
+      },
+      {
+        "path": "assets/plugins/shared/pilot-config.mjs",
+        "sha256": "fbdb41d4255a614d34963a6c06514a1ac0d63f5b133dba6465e0f3847ef0f5dc"
       }
     ],
     "records": [
       {
         "time_unix_nano": "1784188800000000000",
         "observed_time_unix_nano": "1784188800000000000",
-        "event.id": "b9bd62a3-84d3-45ec-b9ad-26e8a732a8c8",
-        "trace_id": "ca55bdcb41ec1cb876c89639aa80fa27",
-        "span_id": "31fad7d52bebee74",
-        "user.id": "5a03a7a34975",
+        "event.id": "b0afb367-707d-43cc-801c-732a603fb0dd",
+        "trace_id": "19edb99c6e2a7cfaa39299c76cf72396",
+        "span_id": "7f192e5f08abf2b9",
+        "user.id": "MacBook-Pro.local",
         "gen_ai.session.id": "pi-session-1",
-        "gen_ai.turn.id": "b6b4df3d-0fa2-426d-ae8d-3abb4f304108",
+        "gen_ai.turn.id": "8b8b2b97-a738-452c-baa1-387276a7d6d0",
         "gen_ai.agent.type": "pi-coding-agent",
         "gen_ai.agent.id": "pi-coding-agent",
         "gen_ai.agent.name": "Pi Coding Agent",
@@ -47,19 +51,19 @@
       {
         "time_unix_nano": "1784188800000000000",
         "observed_time_unix_nano": "1784188800000000000",
-        "event.id": "b2537fb6-ebd4-473d-951c-d074745e8884",
-        "trace_id": "ca55bdcb41ec1cb876c89639aa80fa27",
-        "span_id": "83a8e3cb25057208",
-        "user.id": "5a03a7a34975",
+        "event.id": "6e3002bd-dd57-4160-b345-c77147afd98f",
+        "trace_id": "19edb99c6e2a7cfaa39299c76cf72396",
+        "span_id": "7515f9132bee6d43",
+        "user.id": "MacBook-Pro.local",
         "gen_ai.session.id": "pi-session-1",
-        "gen_ai.turn.id": "b6b4df3d-0fa2-426d-ae8d-3abb4f304108",
+        "gen_ai.turn.id": "8b8b2b97-a738-452c-baa1-387276a7d6d0",
         "gen_ai.agent.type": "pi-coding-agent",
         "gen_ai.agent.id": "pi-coding-agent",
         "gen_ai.agent.name": "Pi Coding Agent",
         "gen_ai.agent.system": "pi",
         "gen_ai.framework": "pi-coding-agent",
         "agent.pi-coding-agent.cwd": "/workspace/example",
-        "gen_ai.step.id": "b6b4df3d-0fa2-426d-ae8d-3abb4f304108:s1",
+        "gen_ai.step.id": "8b8b2b97-a738-452c-baa1-387276a7d6d0:s1",
         "gen_ai.provider.name": "anthropic",
         "gen_ai.request.model": "claude-sonnet-4-5",
         "event.name": "llm.request",
@@ -102,19 +106,19 @@
       {
         "time_unix_nano": "1784188800001000000",
         "observed_time_unix_nano": "1784188800001000000",
-        "event.id": "db0d2730-a203-491f-a56b-94c2351494d3",
-        "trace_id": "ca55bdcb41ec1cb876c89639aa80fa27",
-        "span_id": "55e7af0f134c94b4",
-        "user.id": "5a03a7a34975",
+        "event.id": "2d125704-27b4-4e1c-a822-0fdf15317e37",
+        "trace_id": "19edb99c6e2a7cfaa39299c76cf72396",
+        "span_id": "3da976235a800c3c",
+        "user.id": "MacBook-Pro.local",
         "gen_ai.session.id": "pi-session-1",
-        "gen_ai.turn.id": "b6b4df3d-0fa2-426d-ae8d-3abb4f304108",
+        "gen_ai.turn.id": "8b8b2b97-a738-452c-baa1-387276a7d6d0",
         "gen_ai.agent.type": "pi-coding-agent",
         "gen_ai.agent.id": "pi-coding-agent",
         "gen_ai.agent.name": "Pi Coding Agent",
         "gen_ai.agent.system": "pi",
         "gen_ai.framework": "pi-coding-agent",
         "agent.pi-coding-agent.cwd": "/workspace/example",
-        "gen_ai.step.id": "b6b4df3d-0fa2-426d-ae8d-3abb4f304108:s1",
+        "gen_ai.step.id": "8b8b2b97-a738-452c-baa1-387276a7d6d0:s1",
         "gen_ai.provider.name": "anthropic",
         "gen_ai.request.model": "claude-sonnet-4-5",
         "event.name": "llm.response",
@@ -152,27 +156,31 @@
     "assets": [
       {
         "path": "assets/plugins/mimo-code/plugin.mjs",
-        "sha256": "c8565217ff4e2c66c40233f5550f6be158652099b00c529246c20995c6a14f88"
+        "sha256": "b91577170f907b405262798f90b7d9d84ed9885022a441ea3424f59f1606a3a7"
       },
       {
         "path": "assets/plugins/pi-coding-agent/index.mjs",
-        "sha256": "d0a564f417bf3e4ca77735951eed459597f5e05b6c8814e9a82d75c5215805f4"
+        "sha256": "249d61bd259b9e2ed2edf1153a8a458ab1fff06cd99477409a275c0ea145248e"
       },
       {
         "path": "assets/plugins/shared/resource-context.mjs",
         "sha256": "131cae8ab76d94c84bee45931e7b096cdf758f4fc43563e0638f94bb2de2099f"
+      },
+      {
+        "path": "assets/plugins/shared/pilot-config.mjs",
+        "sha256": "fbdb41d4255a614d34963a6c06514a1ac0d63f5b133dba6465e0f3847ef0f5dc"
       }
     ],
     "records": [
       {
         "time_unix_nano": "1784188800000000000",
         "observed_time_unix_nano": "1784188800000000000",
-        "event.id": "1a0d3790-c697-41f4-9fa9-0860d2bd062a",
-        "trace_id": "f8c78586ec1d09eeacbfa8b95eaf3410",
-        "span_id": "934b9eb96aa2a00c",
-        "user.id": "5a03a7a34975",
+        "event.id": "ec6cc561-7fc9-4186-bf9d-bac38a08c4dc",
+        "trace_id": "6ef7903a2d2f74e23d2cf60a56ec0350",
+        "span_id": "663950cc4791d34e",
+        "user.id": "MacBook-Pro.local",
         "gen_ai.session.id": "pi-session-1",
-        "gen_ai.turn.id": "1849240c-9559-46bb-be3b-6d40eeb592bf",
+        "gen_ai.turn.id": "657d9ec0-ca5d-4bdb-abf5-32e627abd5eb",
         "gen_ai.agent.type": "pi-coding-agent",
         "gen_ai.agent.id": "pi-coding-agent",
         "gen_ai.agent.name": "Pi Coding Agent",
@@ -204,19 +212,19 @@
       {
         "time_unix_nano": "1784188800000000000",
         "observed_time_unix_nano": "1784188800000000000",
-        "event.id": "c2ec8fa1-456f-4c4d-b7b9-6c9897cc177f",
-        "trace_id": "f8c78586ec1d09eeacbfa8b95eaf3410",
-        "span_id": "a9a13d56a7527608",
-        "user.id": "5a03a7a34975",
+        "event.id": "1cfe4e41-0aa5-4517-9b45-03988af33074",
+        "trace_id": "6ef7903a2d2f74e23d2cf60a56ec0350",
+        "span_id": "6f9db5a348af53b1",
+        "user.id": "MacBook-Pro.local",
         "gen_ai.session.id": "pi-session-1",
-        "gen_ai.turn.id": "1849240c-9559-46bb-be3b-6d40eeb592bf",
+        "gen_ai.turn.id": "657d9ec0-ca5d-4bdb-abf5-32e627abd5eb",
         "gen_ai.agent.type": "pi-coding-agent",
         "gen_ai.agent.id": "pi-coding-agent",
         "gen_ai.agent.name": "Pi Coding Agent",
         "gen_ai.agent.system": "pi",
         "gen_ai.framework": "pi-coding-agent",
         "agent.pi-coding-agent.cwd": "/workspace/example",
-        "gen_ai.step.id": "1849240c-9559-46bb-be3b-6d40eeb592bf:s1",
+        "gen_ai.step.id": "657d9ec0-ca5d-4bdb-abf5-32e627abd5eb:s1",
         "gen_ai.provider.name": "anthropic",
         "gen_ai.request.model": "claude-sonnet-4-5",
         "event.name": "llm.request",
@@ -324,19 +332,19 @@
       {
         "time_unix_nano": "1784188800001000000",
         "observed_time_unix_nano": "1784188800001000000",
-        "event.id": "67556a33-09e8-474d-a330-0924df7c1939",
-        "trace_id": "f8c78586ec1d09eeacbfa8b95eaf3410",
-        "span_id": "757ec5c961fd10db",
-        "user.id": "5a03a7a34975",
+        "event.id": "e0cb41aa-36e5-4811-900e-5d2f00befc36",
+        "trace_id": "6ef7903a2d2f74e23d2cf60a56ec0350",
+        "span_id": "d5ab14ae3ed7737e",
+        "user.id": "MacBook-Pro.local",
         "gen_ai.session.id": "pi-session-1",
-        "gen_ai.turn.id": "1849240c-9559-46bb-be3b-6d40eeb592bf",
+        "gen_ai.turn.id": "657d9ec0-ca5d-4bdb-abf5-32e627abd5eb",
         "gen_ai.agent.type": "pi-coding-agent",
         "gen_ai.agent.id": "pi-coding-agent",
         "gen_ai.agent.name": "Pi Coding Agent",
         "gen_ai.agent.system": "pi",
         "gen_ai.framework": "pi-coding-agent",
         "agent.pi-coding-agent.cwd": "/workspace/example",
-        "gen_ai.step.id": "1849240c-9559-46bb-be3b-6d40eeb592bf:s1",
+        "gen_ai.step.id": "657d9ec0-ca5d-4bdb-abf5-32e627abd5eb:s1",
         "gen_ai.provider.name": "anthropic",
         "gen_ai.request.model": "claude-sonnet-4-5",
         "event.name": "llm.response",
@@ -374,34 +382,38 @@
     "assets": [
       {
         "path": "assets/plugins/mimo-code/plugin.mjs",
-        "sha256": "c8565217ff4e2c66c40233f5550f6be158652099b00c529246c20995c6a14f88"
+        "sha256": "b91577170f907b405262798f90b7d9d84ed9885022a441ea3424f59f1606a3a7"
       },
       {
         "path": "assets/plugins/pi-coding-agent/index.mjs",
-        "sha256": "d0a564f417bf3e4ca77735951eed459597f5e05b6c8814e9a82d75c5215805f4"
+        "sha256": "249d61bd259b9e2ed2edf1153a8a458ab1fff06cd99477409a275c0ea145248e"
       },
       {
         "path": "assets/plugins/shared/resource-context.mjs",
         "sha256": "131cae8ab76d94c84bee45931e7b096cdf758f4fc43563e0638f94bb2de2099f"
+      },
+      {
+        "path": "assets/plugins/shared/pilot-config.mjs",
+        "sha256": "fbdb41d4255a614d34963a6c06514a1ac0d63f5b133dba6465e0f3847ef0f5dc"
       }
     ],
     "records": [
       {
         "time_unix_nano": "1784188800000000000",
         "observed_time_unix_nano": "1784188800000000000",
-        "event.id": "068fa047-3b01-4533-b36a-dfa248cea9c2",
-        "trace_id": "6132ee51362ea8ac0174e5373a093ff3",
-        "span_id": "dedb0f4d13125da8",
-        "user.id": "5a03a7a34975",
+        "event.id": "bcec5217-a4de-4559-89aa-65ce2c49a91c",
+        "trace_id": "6b69f77cbb9a46570ea0527308963470",
+        "span_id": "4a8dc46a6d8ca0bf",
+        "user.id": "MacBook-Pro.local",
         "gen_ai.session.id": "pi-session-1",
-        "gen_ai.turn.id": "18dc00fc-4a05-4451-8179-9666671e2afb",
+        "gen_ai.turn.id": "c8e7bb91-74e3-4b2b-a5d5-edbaa173e50d",
         "gen_ai.agent.type": "pi-coding-agent",
         "gen_ai.agent.id": "pi-coding-agent",
         "gen_ai.agent.name": "Pi Coding Agent",
         "gen_ai.agent.system": "pi",
         "gen_ai.framework": "pi-coding-agent",
         "agent.pi-coding-agent.cwd": "/workspace/example",
-        "gen_ai.step.id": "18dc00fc-4a05-4451-8179-9666671e2afb:s1",
+        "gen_ai.step.id": "c8e7bb91-74e3-4b2b-a5d5-edbaa173e50d:s1",
         "gen_ai.provider.name": "anthropic",
         "gen_ai.request.model": "claude-sonnet-4-5",
         "event.name": "tool.call",
@@ -414,19 +426,19 @@
       {
         "time_unix_nano": "1784188800001000000",
         "observed_time_unix_nano": "1784188800001000000",
-        "event.id": "63fc509a-ec14-41fd-9fe1-fdfaa550c553",
-        "trace_id": "6132ee51362ea8ac0174e5373a093ff3",
-        "span_id": "833916516cef3f96",
-        "user.id": "5a03a7a34975",
+        "event.id": "ee2e7cd3-0bd3-4def-aa8c-6546cfa9614d",
+        "trace_id": "6b69f77cbb9a46570ea0527308963470",
+        "span_id": "a1d2ba80c01d617d",
+        "user.id": "MacBook-Pro.local",
         "gen_ai.session.id": "pi-session-1",
-        "gen_ai.turn.id": "18dc00fc-4a05-4451-8179-9666671e2afb",
+        "gen_ai.turn.id": "c8e7bb91-74e3-4b2b-a5d5-edbaa173e50d",
         "gen_ai.agent.type": "pi-coding-agent",
         "gen_ai.agent.id": "pi-coding-agent",
         "gen_ai.agent.name": "Pi Coding Agent",
         "gen_ai.agent.system": "pi",
         "gen_ai.framework": "pi-coding-agent",
         "agent.pi-coding-agent.cwd": "/workspace/example",
-        "gen_ai.step.id": "18dc00fc-4a05-4451-8179-9666671e2afb:s1",
+        "gen_ai.step.id": "c8e7bb91-74e3-4b2b-a5d5-edbaa173e50d:s1",
         "gen_ai.provider.name": "anthropic",
         "gen_ai.request.model": "claude-sonnet-4-5",
         "event.name": "tool.result",
@@ -445,34 +457,38 @@
     "assets": [
       {
         "path": "assets/plugins/mimo-code/plugin.mjs",
-        "sha256": "c8565217ff4e2c66c40233f5550f6be158652099b00c529246c20995c6a14f88"
+        "sha256": "b91577170f907b405262798f90b7d9d84ed9885022a441ea3424f59f1606a3a7"
       },
       {
         "path": "assets/plugins/pi-coding-agent/index.mjs",
-        "sha256": "d0a564f417bf3e4ca77735951eed459597f5e05b6c8814e9a82d75c5215805f4"
+        "sha256": "249d61bd259b9e2ed2edf1153a8a458ab1fff06cd99477409a275c0ea145248e"
       },
       {
         "path": "assets/plugins/shared/resource-context.mjs",
         "sha256": "131cae8ab76d94c84bee45931e7b096cdf758f4fc43563e0638f94bb2de2099f"
+      },
+      {
+        "path": "assets/plugins/shared/pilot-config.mjs",
+        "sha256": "fbdb41d4255a614d34963a6c06514a1ac0d63f5b133dba6465e0f3847ef0f5dc"
       }
     ],
     "records": [
       {
         "time_unix_nano": "1784188800000000000",
         "observed_time_unix_nano": "1784188800000000000",
-        "event.id": "69c5bd31-ab2d-4a53-86db-3726f342cf27",
-        "trace_id": "cca01bf9d5ed85d2a04e9b138459a399",
-        "span_id": "bb23ad193210c277",
-        "user.id": "5a03a7a34975",
+        "event.id": "ead5c6f1-008b-4961-a3ff-82fb826e5bb1",
+        "trace_id": "a10f2c111c93a4b6d5797b13677ac0c0",
+        "span_id": "3d75296efbb0f328",
+        "user.id": "MacBook-Pro.local",
         "gen_ai.session.id": "pi-session-1",
-        "gen_ai.turn.id": "d48f56ca-cbdb-4652-a188-ba9af4dfec89",
+        "gen_ai.turn.id": "f9440f8b-6f3a-4d0d-8615-6c156d0cd64c",
         "gen_ai.agent.type": "pi-coding-agent",
         "gen_ai.agent.id": "pi-coding-agent",
         "gen_ai.agent.name": "Pi Coding Agent",
         "gen_ai.agent.system": "pi",
         "gen_ai.framework": "pi-coding-agent",
         "agent.pi-coding-agent.cwd": "/workspace/example",
-        "gen_ai.step.id": "d48f56ca-cbdb-4652-a188-ba9af4dfec89:s1",
+        "gen_ai.step.id": "f9440f8b-6f3a-4d0d-8615-6c156d0cd64c:s1",
         "gen_ai.provider.name": "anthropic",
         "gen_ai.request.model": "claude-sonnet-4-5",
         "event.name": "llm.request",
@@ -515,19 +531,19 @@
       {
         "time_unix_nano": "1784188800001000000",
         "observed_time_unix_nano": "1784188800001000000",
-        "event.id": "d8319b29-d503-4ff0-864f-f5114a7f4c38",
-        "trace_id": "cca01bf9d5ed85d2a04e9b138459a399",
-        "span_id": "123b510b267a8d20",
-        "user.id": "5a03a7a34975",
+        "event.id": "4141e5ce-7984-40e3-ab8e-ac3c4cbd5139",
+        "trace_id": "a10f2c111c93a4b6d5797b13677ac0c0",
+        "span_id": "5f10135d54b65613",
+        "user.id": "MacBook-Pro.local",
         "gen_ai.session.id": "pi-session-1",
-        "gen_ai.turn.id": "d48f56ca-cbdb-4652-a188-ba9af4dfec89",
+        "gen_ai.turn.id": "f9440f8b-6f3a-4d0d-8615-6c156d0cd64c",
         "gen_ai.agent.type": "pi-coding-agent",
         "gen_ai.agent.id": "pi-coding-agent",
         "gen_ai.agent.name": "Pi Coding Agent",
         "gen_ai.agent.system": "pi",
         "gen_ai.framework": "pi-coding-agent",
         "agent.pi-coding-agent.cwd": "/workspace/example",
-        "gen_ai.step.id": "d48f56ca-cbdb-4652-a188-ba9af4dfec89:s1",
+        "gen_ai.step.id": "f9440f8b-6f3a-4d0d-8615-6c156d0cd64c:s1",
         "gen_ai.provider.name": "anthropic",
         "gen_ai.request.model": "claude-sonnet-4-5",
         "event.name": "llm.response",
@@ -560,35 +576,39 @@
     "assets": [
       {
         "path": "assets/plugins/mimo-code/plugin.mjs",
-        "sha256": "c8565217ff4e2c66c40233f5550f6be158652099b00c529246c20995c6a14f88"
+        "sha256": "b91577170f907b405262798f90b7d9d84ed9885022a441ea3424f59f1606a3a7"
       },
       {
         "path": "assets/plugins/pi-coding-agent/index.mjs",
-        "sha256": "d0a564f417bf3e4ca77735951eed459597f5e05b6c8814e9a82d75c5215805f4"
+        "sha256": "249d61bd259b9e2ed2edf1153a8a458ab1fff06cd99477409a275c0ea145248e"
       },
       {
         "path": "assets/plugins/shared/resource-context.mjs",
         "sha256": "131cae8ab76d94c84bee45931e7b096cdf758f4fc43563e0638f94bb2de2099f"
+      },
+      {
+        "path": "assets/plugins/shared/pilot-config.mjs",
+        "sha256": "fbdb41d4255a614d34963a6c06514a1ac0d63f5b133dba6465e0f3847ef0f5dc"
       }
     ],
     "records": [
       {
-        "time_unix_nano": "1793599547973000000",
-        "event.id": "1e5c411a-ce81-4bdd-b217-bc47b5b3c88e",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "time_unix_nano": "1794820102688000000",
+        "event.id": "33f00987-16c5-4ea4-9dad-0741cb9eabdc",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
         "gen_ai.agent.type": "mimo-code",
         "gen_ai.agent.name": "build",
-        "agent.mimo-code.cwd": "/tmp",
+        "agent.mimo-code.cwd": "/var/folders/rw/0024lvj52tj7426fp5b732c40000gn/T",
         "gen_ai.framework": "mimo-code",
         "event.name": "other"
       },
       {
         "time_unix_nano": "1783504933421000000",
-        "event.id": "69f6a777-812a-4f9c-9acc-f4405c2d03bb",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "8fc7c43b-7314-41e9-a24e-adfc026dfe8a",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -625,8 +645,8 @@
       },
       {
         "time_unix_nano": "1783504934593000000",
-        "event.id": "03822dd2-9a4c-425f-a92f-85596ac0520a",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "00c79c79-7fef-4d05-bb17-203f38ce752b",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -643,8 +663,8 @@
       },
       {
         "time_unix_nano": "1783504934733000000",
-        "event.id": "1ac9c1a1-ba17-4f35-9343-fd2e4a703ac5",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "efd770b0-281f-44ae-a566-57dce74f17d4",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -662,8 +682,8 @@
       },
       {
         "time_unix_nano": "1783504934747000000",
-        "event.id": "94e4bc31-8d40-4e88-9684-4cade9252c8c",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "31b978c9-4a9e-4aea-9052-4785d77396b6",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -707,8 +727,8 @@
       },
       {
         "time_unix_nano": "1783504935500000000",
-        "event.id": "283f79c4-7dc7-4cc8-bccd-30e1d9d06ccd",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "8046dcef-df7f-4db1-85e2-5ab7147a15ac",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -750,8 +770,8 @@
       },
       {
         "time_unix_nano": "1783504936211000000",
-        "event.id": "31343c5c-34ce-49f9-8d1d-36587f9d7411",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "35aa2211-5cb0-495f-9b64-85447953f8b4",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -768,8 +788,8 @@
       },
       {
         "time_unix_nano": "1783504936250000000",
-        "event.id": "ae248842-67a7-4da7-a60f-b5fdf51ea04b",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "85f30e76-c447-46ac-a8b5-7cd89cf88aa1",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -787,8 +807,8 @@
       },
       {
         "time_unix_nano": "1783504936257000000",
-        "event.id": "d93c50e2-262e-48a0-8fc4-a7ae8520e7ea",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "1a98f70f-eee5-42b7-b3cf-a0f9e5afb953",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -832,8 +852,8 @@
       },
       {
         "time_unix_nano": "1783504937504000000",
-        "event.id": "c35ef432-ad64-4137-b295-bbb45d95d1ca",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "76928abc-209c-4064-9c5c-b24da4a2d020",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -875,8 +895,8 @@
       },
       {
         "time_unix_nano": "1783504938566000000",
-        "event.id": "2e0018f2-3c3b-41b1-8278-4b25b3c2e3dd",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "da7a3488-73d3-43b7-a05e-b5ac0149e696",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -893,8 +913,8 @@
       },
       {
         "time_unix_nano": "1783504938584000000",
-        "event.id": "221960ef-4b4d-4d0e-899d-8f850a985fac",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "9faee5e5-30ef-4e6d-a5fe-848b32b5d76b",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -912,8 +932,8 @@
       },
       {
         "time_unix_nano": "1783504938589000000",
-        "event.id": "3ee31289-a0de-44a2-9b3a-4bf4a933129b",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "f06e5d55-6592-4e51-bd00-590c1dd90a4a",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -957,8 +977,8 @@
       },
       {
         "time_unix_nano": "1783504940347000000",
-        "event.id": "aca90ea0-e515-4e70-a3b6-8a0669444591",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "8a9d7f1d-74ec-4286-846b-2e1182130871",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -1000,8 +1020,8 @@
       },
       {
         "time_unix_nano": "1783504941067000000",
-        "event.id": "afedd862-d582-49c9-9e5d-e7e4039ae59b",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "b8089021-ff39-4cdb-93ea-febd467791bd",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -1018,8 +1038,8 @@
       },
       {
         "time_unix_nano": "1783504941166000000",
-        "event.id": "eb0a5aef-419a-408b-8558-4c2fbf1ef35b",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "79755ba0-6fd4-4d46-a079-f099a3a2fcd6",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -1037,8 +1057,8 @@
       },
       {
         "time_unix_nano": "1783504941172000000",
-        "event.id": "3d8c9c2e-8920-4e7d-8776-b2c214c768ce",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "14f9905e-b3c2-4b78-8031-ddc669daf1dd",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -1082,8 +1102,8 @@
       },
       {
         "time_unix_nano": "1783504942274000000",
-        "event.id": "bd514ea5-961c-43c9-8780-114fe1a5a516",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "a00ef8c3-5fc5-45a3-aca1-6351f2b64c01",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",
@@ -1125,8 +1145,8 @@
       },
       {
         "time_unix_nano": "1783504944235000000",
-        "event.id": "d06b4b27-2c31-41c2-9223-345477fdd8ea",
-        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "event.id": "4bc12ace-13d3-450a-9a10-a9cc0b76bcd7",
+        "trace_id": "8a28a303b84860f70dc8f3830511b6a4",
         "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
         "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
         "user.id": "test-user",

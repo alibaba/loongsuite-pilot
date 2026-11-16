@@ -41,6 +41,10 @@ fn pi_original_l664_relocated_record_is_consumed_by_the_whole_public_uninstall_s
             "assets/plugins/shared/resource-context.mjs",
             include_str!("../../assets/plugins/shared/resource-context.mjs"),
         ),
+        (
+            "assets/plugins/shared/pilot-config.mjs",
+            include_str!("../../assets/plugins/shared/pilot-config.mjs"),
+        ),
     ]);
     copy_tree(&entry.f.candidate, &entry.installed);
     let shipped: Value = serde_json::from_slice(

@@ -5641,17 +5641,21 @@ mod tests {
                     entry(json!({
                         "event.name": event, "event.id": id, "gen_ai.agent.type": agent,
                         "gen_ai.session.id": "session", "gen_ai.turn.id": "turn", "gen_ai.step.id": "step",
+                    "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "gen_ai.response.id": "call", "gen_ai.turn.end": event == "llm.response",
                         "gen_ai.input.messages": [{"role":"user","content":"synthetic private text"}],
                         "agent.pilot.request_context.truncated": true,
                         "gen_ai.response.finish_reasons": ["stop"]
                     }))
                 };
                 flusher
-                    .send(record("llm.request", "request"), None)
-                    .await
-                    .unwrap();
-                flusher
-                    .send(record("llm.response", "response"), None)
+                    .send_batch(
+                        vec![
+                            record("llm.request", "request"),
+                            record("llm.response", "response"),
+                        ],
+                        None,
+                    )
                     .await
                     .unwrap();
                 flusher.shutdown().await.unwrap();

@@ -397,6 +397,12 @@ mod tests {
         )
         .await
         .unwrap();
+        tokio::fs::write(
+            data.join("plugins").join("shared").join("pilot-config.mjs"),
+            "export {}\n",
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

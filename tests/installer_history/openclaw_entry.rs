@@ -101,6 +101,10 @@ fn package(f: &Fixture) {
             "assets/plugins/shared/resource-context.mjs",
             include_str!("../../assets/plugins/shared/resource-context.mjs"),
         ),
+        (
+            "assets/plugins/shared/pilot-config.mjs",
+            include_str!("../../assets/plugins/shared/pilot-config.mjs"),
+        ),
     ]);
 }
 fn app(f: &Fixture, version: &str, child: bool) -> (PathBuf, PathBuf) {

@@ -257,6 +257,7 @@ fn package(root: &Path) -> PathBuf {
         "assets/plugins/mimo-code/package.json",
         "assets/plugins/pi-coding-agent/index.mjs",
         "assets/plugins/shared/resource-context.mjs",
+        "assets/plugins/shared/pilot-config.mjs",
         "assets/plugins/shared/raw-jsonl-writer.mjs",
         "assets/plugins/shared/raw-source-gate.mjs",
         "agents.d/cursor-cli.json",
@@ -1955,6 +1956,7 @@ fn packaged_openclaw_reconciles_versioned_config_and_stale_paths_without_runtime
     for resource in manifest.resources.iter().filter(|resource| {
         resource.path.starts_with("assets/plugins/openclaw/")
             || resource.path == "assets/plugins/shared/resource-context.mjs"
+            || resource.path == "assets/plugins/shared/pilot-config.mjs"
     }) {
         assert_eq!(
             fs::read(

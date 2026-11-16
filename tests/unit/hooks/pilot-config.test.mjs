@@ -3,17 +3,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pilotConfigPath, readPilotConfig } from '../../../assets/plugins/shared/pilot-config.mjs';
-import { configJsonPath } from '../../../src/utils/data-dir.ts';
 
 afterEach(() => vi.unstubAllEnvs());
 
 describe('native plugin config reader', () => {
-  it.each([undefined, '', '   ', '  ~/pilot-custom.json  '])(
-    'uses the collector config path for override %s', (override) => {
-      vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', override);
-      expect(pilotConfigPath()).toBe(configJsonPath());
-    },
-  );
+  it.each([
+    [undefined, '.loongsuite-pilot/config.json'],
+    ['', '.loongsuite-pilot/config.json'],
+    ['   ', '.loongsuite-pilot/config.json'],
+    ['  ~/pilot-custom.json  ', 'pilot-custom.json'],
+  ])('uses the collector config path for override %s', (override, relative) => {
+    const env = override === undefined ? {} : { AGENT_DATA_COLLECTION_CONFIG: override };
+    expect(pilotConfigPath(env)).toBe(path.join(os.homedir(), relative));
+  });
 
   it('reads a BOM-prefixed custom config', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-plugin-config-'));

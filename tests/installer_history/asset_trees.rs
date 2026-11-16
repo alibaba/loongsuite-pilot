@@ -40,6 +40,10 @@ fn minimal_asset_package(f: &Fixture, reference: &str) {
             include_str!("../../assets/plugins/shared/resource-context.mjs"),
         ),
         (
+            "assets/plugins/shared/pilot-config.mjs",
+            include_str!("../../assets/plugins/shared/pilot-config.mjs"),
+        ),
+        (
             "agents.d/cursor.json",
             include_str!("../../agents.d/cursor.json"),
         ),
@@ -162,6 +166,7 @@ async fn fresh_native_publication_materializes_the_exact_dsh_plugin_path_before_
     for relative in [
         "plugins/dsh/plugin.mjs",
         "plugins/shared/resource-context.mjs",
+        "plugins/shared/pilot-config.mjs",
     ] {
         assert_eq!(
             fs::read(f.data.join(relative)).unwrap(),
