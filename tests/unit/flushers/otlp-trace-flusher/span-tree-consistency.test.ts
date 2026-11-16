@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -6,6 +6,7 @@ import { ExportResultCode } from '@opentelemetry/core';
 import type { ExportResult } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
+import * as stream from '../../../../src/flushers/turn-stream.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
 import type { TraceExporterLike } from '../../../../src/flushers/otlp-trace-flusher.js';
 
@@ -64,6 +65,13 @@ describe('OtlpTraceFlusher - span tree consistency (trae-cn ENTRY→AGENT→STEP
 
   beforeEach(() => {
     captured = [];
+    // Force the convertEventLogToTrace fallback path. main's refactor routes
+    // trae-cn through planTurnStream → createTurnStreamSession, but the
+    // installed @loongsuite/otel-util-genai (v1.2.0) does not export
+    // createTurnStreamSession. Mirror main's turn-streaming.test.ts spy
+    // pattern to keep this regression test on the convert path it was
+    // authored against.
+    vi.spyOn(stream, 'planTurnStream').mockReturnValue(undefined);
     flusher = new OtlpTraceFlusher(
       makeConfig(),
       undefined,
@@ -71,7 +79,7 @@ describe('OtlpTraceFlusher - span tree consistency (trae-cn ENTRY→AGENT→STEP
     );
   });
 
-  afterEach(async () => { await flusher.shutdown(); });
+  afterEach(async () => { vi.restoreAllMocks(); await flusher.shutdown(); });
 
   it('preserves all 4 spans with chained parent_span_ids and emits no inconsistency warning', async () => {
     const entries = await loadFixtureEvents();
