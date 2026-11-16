@@ -147,7 +147,7 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-The local dashboard is off by default. Set `"dashboard": {"enabled": true}` in `config.json` and restart the collector to enable it. It then starts and stops with the collector at the default address below or your configured port.
+The local dashboard is off by default. Run `loongsuite-pilot dashboard start [port]` to enable it or `loongsuite-pilot dashboard stop` to disable it. Both commands restart a running collector. Without a port argument, the dashboard uses the existing configuration or defaults to 8765.
 
 ```text
 http://127.0.0.1:8765/

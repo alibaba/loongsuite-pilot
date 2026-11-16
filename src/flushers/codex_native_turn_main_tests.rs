@@ -210,7 +210,7 @@ async fn main_l54_both_startup_and_rehydrate_apply_current_workspace_exclusion_w
     }
 }
 #[tokio::test]
-async fn main_l74_legacy_opt_out_and_mask_replay_preserve_original_content_identity_and_topology() {
+async fn main_l74_content_policy_and_mask_replay_preserve_identity_and_topology() {
     for masked in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let manager = Arc::new(InputManager::new());
@@ -253,8 +253,9 @@ async fn main_l74_legacy_opt_out_and_mask_replay_preserve_original_content_ident
             assert!(!attrs.contains("sk-1234567890abcdefghijklmnop"));
             assert!(attrs.contains("[APIKEY_MASKED]"));
         } else {
-            assert!(attrs.contains("task"));
-            assert!(attrs.contains("sk-1234567890abcdefghijklmnop"));
+            assert!(!attrs.contains("sk-1234567890abcdefghijklmnop"));
+            assert!(!attrs.contains("gen_ai.input.messages"));
+            assert!(!attrs.contains("gen_ai.output.messages"));
         }
         assert_eq!(kind(&spans, "LLM")[0].span_id, "d".repeat(16));
         assert_eq!(

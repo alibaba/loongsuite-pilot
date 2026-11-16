@@ -151,6 +151,7 @@ pub struct InputManager {
     alarm_manager: Mutex<Option<Arc<AlarmManager>>>,
     user_id: Mutex<String>,
     configured_user_id: Mutex<String>,
+    content_policy: Mutex<AgentsConfig>,
     mask_config: Mutex<MaskConfig>,
     mask_plan: Mutex<MaskPlan>,
     trace_linker: Mutex<Option<Arc<TraceLinker>>>,
@@ -172,6 +173,7 @@ impl InputManager {
             alarm_manager: Mutex::new(None),
             user_id: Mutex::new(String::new()),
             configured_user_id: Mutex::new(String::new()),
+            content_policy: Mutex::new(AgentsConfig::new()),
             mask_config: Mutex::new(MaskConfig {
                 mode: MaskMode::None,
                 types: Vec::new(),
@@ -217,8 +219,17 @@ impl InputManager {
         *self.configured_user_id.lock().expect("configured") = user_id.into();
     }
 
-    /// Retained for callers. Per-agent content opt-outs are ignored.
-    pub fn set_agents_config(&self, _config: &AgentsConfig) {}
+    pub fn set_agents_config(&self, config: &AgentsConfig) {
+        let mut policy = self.content_policy.lock().expect("content policy");
+        if config
+            .values()
+            .any(|agent| agent.capture_message_content == Some(false))
+        {
+            *policy = config.clone();
+        } else {
+            policy.clear();
+        }
+    }
 
     pub fn set_mask_config(&self, config: MaskConfig) {
         *self.mask_plan.lock().expect("plan") = load_mask_plan(&config);
@@ -419,7 +430,7 @@ impl InputManager {
         &self,
         entries: Vec<AgentActivityEntry>,
     ) -> Vec<AgentActivityEntry> {
-        self.apply_mask(self.filter_workspace(entries, "codex"))
+        self.apply_policy_and_mask(self.filter_workspace(entries, "codex"))
     }
 
     pub fn record_runtime_delta(&self, input_id: &str, delta: &InputRuntimeDelta) {
@@ -622,7 +633,7 @@ impl InputManager {
             enrich_canonical_entries_with_git(&mut entries).await;
         }
         self.apply_identity(&mut entries);
-        let prepared = self.apply_mask(entries);
+        let prepared = self.apply_policy_and_mask(entries);
         self.dispatch_entries("interceptor", prepared).await
     }
 
@@ -667,7 +678,7 @@ impl InputManager {
         }
         self.apply_identity(&mut entries);
         self.enrich_turn_boundaries_fail_open(&mut entries);
-        let expanded = expand_agent_input_events(self.apply_mask(entries));
+        let expanded = expand_agent_input_events(self.apply_policy_and_mask(entries));
         logger("InputManager").info(
             "dispatching entries",
             Some(&fields(
@@ -733,7 +744,23 @@ impl InputManager {
         }
     }
 
-    fn apply_mask(&self, entries: Vec<AgentActivityEntry>) -> Vec<AgentActivityEntry> {
+    fn apply_policy_and_mask(
+        &self,
+        mut entries: Vec<AgentActivityEntry>,
+    ) -> Vec<AgentActivityEntry> {
+        {
+            let policy = self.content_policy.lock().expect("content policy");
+            if !policy.is_empty() {
+                for entry in &mut entries {
+                    let resolved = crate::normalization::resolve_agent_config(entry, &policy);
+                    if resolved.agent_config.capture_message_content == Some(false) {
+                        crate::normalization::agent_content_policy::strip_agent_message_content(
+                            entry,
+                        );
+                    }
+                }
+            }
+        }
         let plan = self.mask_plan.lock().expect("plan").clone();
         if plan.rules.is_empty() && plan.pii_types.is_empty() {
             return entries;
@@ -1357,7 +1384,7 @@ mod migration_pipeline_tests {
         register(&manager, "dual", "cursor");
         manager.set_mask_config(all_mask());
         let agents: AgentsConfig =
-            serde_json::from_value(json!({"cursor":{"captureMessageContent":false}})).unwrap();
+            serde_json::from_value(json!({"cursor":{"captureMessageContent":true}})).unwrap();
         manager.set_agents_config(&agents);
         let sinks = [Sink::new(), Sink::new(), Sink::new()];
         manager.set_flusher(Arc::new(MultiFlusher::new(
@@ -1589,7 +1616,7 @@ mod migration_content_mask_tests {
             register(&manager, "mask", "cursor");
             manager.set_mask_config(all_mask());
             let agents: AgentsConfig =
-                serde_json::from_value(json!({"cursor":{"captureMessageContent":false}})).unwrap();
+                serde_json::from_value(json!({"cursor":{"captureMessageContent":true}})).unwrap();
             manager.set_agents_config(&agents);
             let sinks = [Sink::new(), Sink::new(), Sink::new()];
             manager.set_flusher(Arc::new(MultiFlusher::new(
@@ -1849,7 +1876,7 @@ mod migration_remaining_contracts {
     }
 
     #[tokio::test]
-    async fn legacy_content_setting_preserves_every_legacy_field_across_inputs_and_destinations() {
+    async fn content_setting_controls_live_and_restored_delivery_across_destinations() {
         for configured in [None, Some(false), Some(true)] {
             let manager = InputManager::new();
             for id in ["cursor-hook", "cursor-sqlite"] {
@@ -1893,10 +1920,31 @@ mod migration_remaining_contracts {
                 source
                     .extra
                     .insert("inlineDiffMessage".into(), json!("synthetic diff"));
+                let restored = manager.prepare_restored_entries(vec![source.clone()]);
+                assert_eq!(
+                    restored[0].input_messages.is_none(),
+                    configured == Some(false)
+                );
                 manager.accept_entries(id, vec![source]).await.unwrap();
             }
             for sink in sinks {
                 let rows = flattened(&sink);
+                if configured == Some(false) {
+                    assert_eq!(rows.len(), 2);
+                    for row in rows {
+                        let serialized = serde_json::to_string(&row).unwrap();
+                        for key in [
+                            "messages",
+                            "tool.result.payload",
+                            "inlineDiffMessage",
+                            "content",
+                        ] {
+                            assert!(!serialized.contains(key), "{key}: {serialized}");
+                        }
+                        assert_eq!(row.agent_type, "cursor");
+                    }
+                    continue;
+                }
                 assert_eq!(rows.len(), 4);
                 for (pair, id) in rows
                     .as_chunks::<2>()
@@ -2002,9 +2050,9 @@ mod migration_remaining_contracts {
                 assert_eq!(rows[0].user_id, "configured-user");
                 assert_eq!(
                     rows[0].input_messages,
-                    Some(
+                    (!opted_out).then(|| {
                         json!([{"role":"user","parts":[{"type":"text","content":"token [APIKEY_MASKED]"}]}])
-                    )
+                    })
                 );
                 assert_eq!(rows[0].guardrail_action, Some(GuardrailAction::Block));
                 assert_eq!(rows[0].trace_id, None);

@@ -971,16 +971,19 @@ fn metric_metadata_keeps_init_defaults_legacy_capture_empty_and_project_deduplic
         );
     }
     let root = tempfile::tempdir().unwrap();
-    for agents in [
-        json!({}),
-        json!({"cursor":{"captureMessageContent":false},"claude-code":{"captureMessageContent":false},"codex":{"captureMessageContent":true}}),
-        json!({"cursor":{"captureMessageContent":true}}),
+    for (agents, disabled) in [
+        (json!({}), ""),
+        (
+            json!({"cursor":{"captureMessageContent":false},"claude-code":{"captureMessageContent":false},"codex":{"captureMessageContent":true}}),
+            "claude-code cursor",
+        ),
+        (json!({"cursor":{"captureMessageContent":true}}), ""),
     ] {
         let mut opts = options(root.path(), &clock);
         opts.agents_config = serde_json::from_value(agents).unwrap();
         let mut c = MetricsCollector::from_options(opts);
         let row = c.collect_l1(&DataflowSnapshot::default());
-        assert_eq!(row.capture_message_disabled_agents, "");
+        assert_eq!(row.capture_message_disabled_agents, disabled);
         assert_eq!(row.projects, "");
         assert_eq!(row.cms_workspace, "");
     }

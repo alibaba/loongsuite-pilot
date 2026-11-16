@@ -1820,6 +1820,37 @@ function Get-DashboardPort {
     return [int]$port
 }
 
+function Test-DashboardEnabled {
+    Invoke-Pilot -Arguments @("dashboard", "probe", "--enabled") *> $null
+    return $script:PilotExitCode -eq 0
+}
+
+function Cmd-Dashboard {
+    Invoke-Pilot -Arguments (@("dashboard") + $SubArgs)
+    if ($script:PilotExitCode -ne 0) { exit $script:PilotExitCode }
+    if ($SubArgs.Count -eq 0 -or $SubArgs[0] -cnotin @("start", "stop") -or
+        $SubArgs -contains "--help" -or $SubArgs -contains "-h") { return }
+    $action = $SubArgs[0]
+    if ((Get-CollectorRuntime) -or (Test-PidRunning $PID_FILE)) {
+        Cmd-Restart
+    } elseif ($action -eq "start") {
+        Cmd-Start
+    }
+    if ($action -eq "stop") {
+        Write-Host "Dashboard stopped."
+        return
+    }
+    $port = Get-DashboardPort
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        if (Test-DashboardAvailable) {
+            Write-Host "Dashboard started: http://127.0.0.1:$port/"
+            return
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "Dashboard did not become available on port $port."
+}
+
 function Test-DashboardAvailable {
     try {
         Invoke-Pilot -Arguments @("dashboard", "probe", "--available") *> $null
@@ -1870,7 +1901,9 @@ function Cmd-Status {
     }
     if ($collectorRunning) {
         $dashboardPort = Get-DashboardPort
-        if (Test-DashboardAvailable) {
+        if (-not (Test-DashboardEnabled)) {
+            Write-Host "   dashboard: disabled"
+        } elseif (Test-DashboardAvailable) {
             Write-Host "   dashboard: http://127.0.0.1:$dashboardPort/"
         } else {
             Write-Host "   dashboard: unavailable (http://127.0.0.1:$dashboardPort/)" -ForegroundColor Yellow
@@ -2219,6 +2252,7 @@ function Cmd-Help {
     Write-Host "                    --json           machine-readable result"
     Write-Host "  token-usage     Show token usage TUI"
     Write-Host "  tokens          Alias for token-usage"
+    Write-Host "  dashboard start [port] | stop  Manage the local Dashboard"
     Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     Write-Host "  agent ...       Register/list/diagnose PI SDK Agents"
     if (Test-OpenSourceBuild) {
@@ -2244,7 +2278,8 @@ switch ($Command.ToLower()) {
     "info"               { Cmd-Info }
     "log"                { Cmd-Log }
     "inject"             { Invoke-Pilot -Arguments (@("inject") + $SubArgs); exit $script:PilotExitCode }
-        { $_ -in "hook", "hook-process", "probe", "check", "interceptor", "dashboard", "--version" } {
+    "dashboard"          { Cmd-Dashboard }
+        { $_ -in "hook", "hook-process", "probe", "check", "interceptor", "--version" } {
             Invoke-Pilot -Arguments (@($Command) + $SubArgs)
             exit $script:PilotExitCode
         }

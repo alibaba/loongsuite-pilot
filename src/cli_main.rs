@@ -118,6 +118,9 @@ pub async fn dispatch(argv: &[String]) -> anyhow::Result<i32> {
         if let Some(probe) = args.subcommand_matches("probe") {
             return crate::cli::dashboard_probe::run(probe).await;
         }
+        if let Some((action @ ("start" | "stop"), options)) = args.subcommand() {
+            return crate::cli::dashboard_probe::configure(action, options).await;
+        }
     }
     let mut pi_io = PiSdkCliIo {
         log: Vec::new(),

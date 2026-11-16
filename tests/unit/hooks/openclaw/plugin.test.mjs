@@ -44,6 +44,7 @@ let tmpDir;
 let pilotDataDir;
 let pluginLoadSequence = 0;
 let previousWorkerName;
+let previousConfigPath;
 let observeStream;
 
 beforeEach(async () => {
@@ -54,6 +55,8 @@ beforeEach(async () => {
   tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-'));
   pilotDataDir = path.join(tmpDir, 'pilot-data');
   fs.mkdirSync(path.join(pilotDataDir, 'logs', 'openclaw'), { recursive: true });
+  previousConfigPath = process.env.AGENT_DATA_COLLECTION_CONFIG;
+  process.env.AGENT_DATA_COLLECTION_CONFIG = path.join(pilotDataDir, 'config.json');
   process.env.LOONGSUITE_PILOT_DATA_DIR = pilotDataDir;
   process.env.LOONGSUITE_USER_ID = 'test-user';
 });
@@ -64,6 +67,8 @@ afterEach(async () => {
   delete process.env.LOONGSUITE_USER_ID;
   delete process.env.LOONGSUITE_PILOT_DEBUG;
   delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  if (previousConfigPath === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+  else process.env.AGENT_DATA_COLLECTION_CONFIG = previousConfigPath;
   if (previousWorkerName === undefined) delete process.env.AGENTTEAMS_WORKER_NAME;
   else process.env.AGENTTEAMS_WORKER_NAME = previousWorkerName;
   vi.restoreAllMocks();
@@ -509,11 +514,12 @@ describe('OpenClaw plugin stateful pipeline', () => {
       .toEqual(requests[0]['gen_ai.system_instructions']);
     expect(Array.isArray(requests[0]['gen_ai.tool.definitions'])).toBe(true);
     expect(requests[0]['gen_ai.input.messages_delta'][0].role).toBe('user');
-    // Second request: the two prior parallel tool results are incremental input.
+    // Second request includes the observed assistant before its parallel results.
     expect(requests[1]['gen_ai.system_instructions']).toBeUndefined();
     expect(requests[1]['gen_ai.tool.definitions']).toBeUndefined();
-    expect(requests[1]['gen_ai.input.messages_delta']).toHaveLength(2);
-    for (const message of requests[1]['gen_ai.input.messages_delta']) {
+    expect(requests[1]['gen_ai.input.messages_delta']).toHaveLength(3);
+    expect(requests[1]['gen_ai.input.messages_delta'][0].role).toBe('assistant');
+    for (const message of requests[1]['gen_ai.input.messages_delta'].slice(1)) {
       expect(message.role).toBe('tool');
       expect(message.parts[0].type).toBe('tool_call_response');
       expect(message.parts[0].id).toMatch(/^call_/);
@@ -1093,8 +1099,9 @@ describe('OpenClaw plugin stateful pipeline', () => {
       'gen_ai.usage.input_tokens': 17,
       'gen_ai.usage.output_tokens': 2,
     });
-    expect(requests[1]['gen_ai.input.messages_delta'][0].role).toBe('user');
-    expect(requests[1]['gen_ai.input.messages_delta'][0].parts[0].content)
+    expect(requests[1]['gen_ai.input.messages_delta']).toBeUndefined();
+    expect(requests[1]['gen_ai.input.messages'][0].role).toBe('user');
+    expect(requests[1]['gen_ai.input.messages'][0].parts[0].content)
       .toBe('retry only with fallback provider');
     const terminals = records.filter((record) => record['agent.openclaw.hook'] === 'llm_output');
     expect(terminals.map((record) => record['agent.openclaw.per_call_usage.count'])).toEqual([0, 2]);
@@ -1129,8 +1136,13 @@ describe('OpenClaw plugin stateful pipeline', () => {
       `${runId}:model:2`,
       `${runId}:model:3`,
     ]);
-    expect(requests[2]['gen_ai.input.messages_delta']).toHaveLength(1);
-    expect(requests[2]['gen_ai.input.messages_delta'][0].parts[0]).toMatchObject({
+    expect(requests[2]['gen_ai.input.messages_delta']).toBeUndefined();
+    const inputs = requests[2]['gen_ai.input.messages'];
+    expect(inputs).toHaveLength(3);
+    expect(inputs[1].parts[0]).toMatchObject({
+      type: 'tool_call', id: reusedToolCallId,
+    });
+    expect(inputs[2].parts[0]).toMatchObject({
       id: reusedToolCallId,
       response: 'fresh-result',
     });
@@ -1235,14 +1247,28 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(records.find((r) => r['gen_ai.turn.id'] === 'run-b')['gen_ai.response.time_to_first_token']).toBeUndefined();
   });
 
-  it('ignores legacy Pilot captureMessageContent=false', async () => {
-    fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({
+  it.each(['default', 'custom-path', 'bom'])('redacts content before persistence with %s config while retaining token usage', async (kind) => {
+    const configPath = path.join(pilotDataDir, kind === 'custom-path' ? 'custom.json' : 'config.json');
+    fs.writeFileSync(configPath, (kind === 'bom' ? '\uFEFF' : '') + JSON.stringify({
       agents: { openclaw: { captureMessageContent: false } },
     }));
+    process.env.AGENT_DATA_COLLECTION_CONFIG = configPath;
     const plugin = await loadPlugin();
     const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'));
-    expect(records.some((r) => r['gen_ai.input.messages_delta'] !== undefined)).toBe(true);
-    expect(records.some((r) => r['gen_ai.output.messages'] !== undefined)).toBe(true);
+    const sensitiveFields = [
+      'gen_ai.input.messages',
+      'gen_ai.input.messages_delta',
+      'gen_ai.output.messages',
+      'gen_ai.tool.call.arguments',
+      'gen_ai.tool.call.result',
+      'gen_ai.system_instructions',
+      'gen_ai.tool.definitions',
+      'agent.openclaw.persisted_message',
+      'agent.openclaw.last_assistant_message',
+    ];
+    for (const record of records) {
+      for (const field of sensitiveFields) expect(record[field]).toBeUndefined();
+    }
     const response = records.find((r) => r['agent.openclaw.hook'] === 'before_message_write');
     expect(response['gen_ai.usage.input_tokens']).toBeGreaterThan(0);
     expect(response['gen_ai.usage.output_tokens']).toBeGreaterThan(0);
@@ -1266,13 +1292,13 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(configReads).toHaveLength(1);
   });
 
-  it('ignores the legacy OpenClaw plugin-level captureMessageContent=false setting', async () => {
+  it('honors the OpenClaw plugin-level captureMessageContent=false setting', async () => {
     const plugin = await loadPlugin();
     const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'), {
       pluginConfig: { captureMessageContent: false },
     });
-    expect(records.some((r) => r['gen_ai.input.messages_delta'] !== undefined)).toBe(true);
-    expect(records.some((r) => r['gen_ai.output.messages'] !== undefined)).toBe(true);
+    expect(records.some((r) => r['gen_ai.input.messages_delta'] !== undefined)).toBe(false);
+    expect(records.some((r) => r['gen_ai.output.messages'] !== undefined)).toBe(false);
   });
 
   it('writes the log directory and JSONL file with private permissions', async () => {
@@ -1414,7 +1440,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(responses[0]['gen_ai.response.time_to_first_token']).toBeUndefined();
   });
 
-  it.each([true, false])('keeps buffered content when legacy capture changes from %s while a response waits', async (capture) => {
+  it.each([true, false])('preserves privacy when content capture changes from %s while a response waits', async (capture) => {
     const configPath = path.join(pilotDataDir, 'config.json');
     const config = enabled => JSON.stringify({ agents: { openclaw: { captureMessageContent: enabled } } });
     fs.writeFileSync(configPath, config(capture));
@@ -1430,7 +1456,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
     handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 12 }, ctx);
     const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
     expect(responses).toHaveLength(1);
-    expect(JSON.stringify(responses[0]['gen_ai.output.messages'])).toContain('private-sentinel');
+    expect(responses[0]['gen_ai.output.messages']).toBeUndefined();
     expect(responses[0]['gen_ai.response.time_to_first_token']).toBe(12_000_000);
     expect(responses[0]['gen_ai.usage.input_tokens']).toBe(3);
   });
@@ -1822,7 +1848,7 @@ describe('subagent trace propagation', () => {
   });
 });
 
-it('keeps simultaneous spawns separate after plugin restart with legacy content-off config', async () => {
+it('keeps simultaneous spawns separate and recovers their identity after plugin restart with content off', async () => {
   delete process.env.LOONGSUITE_USER_ID;
   fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({ agents: { openclaw: { captureMessageContent: false } } }));
   const h = registerPlugin(await loadPlugin());
@@ -1850,7 +1876,7 @@ it('keeps simultaneous spawns separate after plugin restart with legacy content-
     expect(child.length).toBeGreaterThan(0);
     expect(child.every(r => r.trace_id === call.trace_id && r.parent_span_id === call.span_id && r['user.id'] === `user-${i}`)).toBe(true);
   }
-  expect(JSON.stringify(rows)).toContain('secret-task');
+  expect(JSON.stringify(rows)).not.toContain('secret-task');
   const dir = path.join(pilotDataDir, 'subagent-contexts', 'openclaw');
   expect(fs.readdirSync(dir).map(name => fs.readFileSync(path.join(dir, name), 'utf8')).join('')).not.toContain('secret-task');
 });

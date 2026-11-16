@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+const PILOT_CONFIG: &str = "shared/pilot-config.mjs";
 const SHARED: &str = "shared/resource-context.mjs";
 const RAW_WRITER: &str = "shared/raw-jsonl-writer.mjs";
 const RAW_GATE: &str = "shared/raw-source-gate.mjs";
@@ -67,15 +68,21 @@ fn bundle(def: &AgentDefinition) -> Result<(&'static str, &'static [&'static str
                 "opencode/plugin.mjs",
                 "opencode/v2.mjs",
                 SHARED,
+                PILOT_CONFIG,
             ],
         )),
         "mimo-code" => Ok((
             "mimo-code/plugin.mjs",
-            &["mimo-code/plugin.mjs", "mimo-code/package.json", SHARED],
+            &[
+                "mimo-code/plugin.mjs",
+                "mimo-code/package.json",
+                SHARED,
+                PILOT_CONFIG,
+            ],
         )),
         "pi-coding-agent" => Ok((
             "pi-coding-agent/index.mjs",
-            &["pi-coding-agent/index.mjs", SHARED],
+            &["pi-coding-agent/index.mjs", SHARED, PILOT_CONFIG],
         )),
         "openclaw" => Ok((
             "openclaw",
@@ -93,11 +100,12 @@ fn bundle(def: &AgentDefinition) -> Result<(&'static str, &'static [&'static str
                 "openclaw/invocation-audit.mjs",
                 "openclaw/steered-delivery.mjs",
                 SHARED,
+                PILOT_CONFIG,
             ],
         )),
         _ if def.pi_sdk.is_some() => Ok((
             "pi-coding-agent/index.mjs",
-            &["pi-coding-agent/index.mjs", SHARED],
+            &["pi-coding-agent/index.mjs", SHARED, PILOT_CONFIG],
         )),
         _ => anyhow::bail!("缺少宿主插件资源声明：{}", def.id),
     }

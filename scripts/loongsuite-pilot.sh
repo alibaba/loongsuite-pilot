@@ -1534,7 +1534,9 @@ cmd_status() {
         pid=$(cat "$PID_FILE")
         port=$(dashboard_port)
         echo "✅ loongsuite-pilot${ver_info} is running (PID $pid)"
-        if dashboard_is_available "$port"; then
+        if ! dashboard_probe --enabled; then
+            echo "   dashboard: disabled"
+        elif dashboard_is_available; then
             echo "   dashboard: http://127.0.0.1:${port}/"
         else
             echo "   dashboard: unavailable (http://127.0.0.1:${port}/)"
@@ -1700,9 +1702,38 @@ cmd_menubar() {
 cmd_dashboard() {
     # No bootstrap sync or collector lifecycle work; shortcut changes are explicit.
     case "${1:-}" in
+        start|stop)
+            local action="$1" port attempt arg
+            shift
+            for arg in "$@"; do
+                case "$arg" in
+                    --help|-h) dashboard_probe "$action" "$@"; return $? ;;
+                esac
+            done
+            dashboard_probe "$action" "$@" || return 1
+            if is_running; then
+                cmd_restart || return 1
+            elif [ "$action" = start ]; then
+                cmd_start || return 1
+            fi
+            if [ "$action" = stop ]; then
+                echo "Dashboard stopped."
+                return 0
+            fi
+            port=$(dashboard_port) || return 1
+            for attempt in {1..20}; do
+                if dashboard_is_available; then
+                    echo "Dashboard started: http://127.0.0.1:${port}/"
+                    return 0
+                fi
+                sleep 0.5
+            done
+            echo "Dashboard did not become available on port ${port}. Check $LOG_FILE" >&2
+            return 1
+            ;;
         shortcut) shift ;;
-        --help|-h) echo "Usage: loongsuite-pilot dashboard shortcut {install|status|uninstall}"; return 0 ;;
-        *) echo "Usage: loongsuite-pilot dashboard shortcut {install|status|uninstall}" >&2; return 2 ;;
+        --help|-h) echo "Usage: loongsuite-pilot dashboard start [port] | stop | shortcut {install|status|uninstall}"; return 0 ;;
+        *) echo "Usage: loongsuite-pilot dashboard start [port] | stop | shortcut {install|status|uninstall}" >&2; return 2 ;;
     esac
     case "${1:-}" in
         install|status|uninstall|--help|-h) ;;
@@ -2717,6 +2748,7 @@ cmd_help() {
     echo "  token-usage     Show token usage TUI"
     echo "  menubar start   Enable and start the macOS menu bar app without restarting the collector"
     echo "  menubar stop    Disable and stop only the macOS menu bar app (keep the collector running)"
+    echo "  dashboard start [port] | stop  Manage the local Dashboard"
     echo "  dashboard shortcut {install|status|uninstall}  Optional macOS Dock shortcut"
     echo "  agent ...       Register/list/diagnose PI SDK Agents"
     echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"

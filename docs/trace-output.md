@@ -337,8 +337,11 @@ This caveat applies to OTLP trace backends that aggregate across a span hierarch
 
 ## Content Capture In Traces
 
-Trace spans can carry sensitive content. Legacy `captureMessageContent` settings
-are ignored. For sensitive or team-managed setups, enable masking:
+Trace spans can carry sensitive content. Set `otlpTrace.captureMessageContent` to
+`false` to omit message and tool payloads from Trace output independently.
+`agents.<id>.captureMessageContent: false` omits those fields from that agent's
+activity and Trace outputs. Both settings default to enabled. To keep content
+while masking sensitive values, configure masking:
 
 ```json
 {
@@ -349,8 +352,6 @@ are ignored. For sensitive or team-managed setups, enable masking:
 ```
 
 See [Data Masking](masking.md) for supported rules and custom modes.
-
-Pilot sets its converter's `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` to `SPAN_ONLY` and includes `gen_ai_latest_experimental` in `OTEL_SEMCONV_STABILITY_OPT_IN`, preserving unrelated opt-ins. Inherited SDK settings such as `NO_CONTENT` no longer disable content in Pilot traces.
 
 ## Custom Span Attributes
 

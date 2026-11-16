@@ -320,7 +320,7 @@
   },
   {
     "id": "L553:C5",
-    "title": "ignores legacy per-agent captureMessageContent values",
+    "title": "restores per-agent captureMessageContent values",
     "user": {
       "agents": {
         "cursor": {
@@ -342,7 +342,9 @@
         ],
         "op": "toEqual",
         "negate": false,
-        "expected": {}
+        "expected": {
+          "captureMessageContent": false
+        }
       },
       {
         "base": "config",
@@ -352,7 +354,9 @@
         ],
         "op": "toEqual",
         "negate": false,
-        "expected": {}
+        "expected": {
+          "captureMessageContent": true
+        }
       },
       {
         "base": "config",
@@ -366,30 +370,13 @@
           "enabled": true,
           "pollInterval": 10000
         }
-      },
-      {
-        "base": "logs",
-        "path": [],
-        "op": "toHaveBeenCalledWith",
-        "negate": false,
-        "expected": [
-          {
-            "$stringContaining": "deprecated and ignored"
-          },
-          {
-            "locations": [
-              "agents.cursor.captureMessageContent",
-              "agents.qoder.captureMessageContent"
-            ]
-          }
-        ]
       }
     ],
     "group": "agents"
   },
   {
     "id": "L574:C5",
-    "title": "ignores legacy string captureMessageContent values",
+    "title": "restores string captureMessageContent values",
     "user": {
       "agents": {
         "cursor": {
@@ -411,7 +398,9 @@
         ],
         "op": "toEqual",
         "negate": false,
-        "expected": {}
+        "expected": {
+          "captureMessageContent": false
+        }
       },
       {
         "base": "config",
@@ -421,7 +410,9 @@
         ],
         "op": "toEqual",
         "negate": false,
-        "expected": {}
+        "expected": {
+          "captureMessageContent": true
+        }
       }
     ],
     "group": "agents"
@@ -489,7 +480,9 @@
         ],
         "op": "toEqual",
         "negate": false,
-        "expected": {}
+        "expected": {
+          "captureMessageContent": true
+        }
       }
     ],
     "group": "agents"
@@ -547,7 +540,8 @@
         "op": "toEqual",
         "negate": false,
         "expected": {
-          "enabled": true
+          "enabled": true,
+          "captureMessageContent": false
         }
       }
     ],
@@ -602,7 +596,8 @@
         "expected": {
           "multimodal": {
             "uploadMode": "all"
-          }
+          },
+          "captureMessageContent": true
         }
       },
       {
@@ -613,7 +608,9 @@
         ],
         "op": "toEqual",
         "negate": false,
-        "expected": {}
+        "expected": {
+          "captureMessageContent": true
+        }
       }
     ],
     "group": "agents"
@@ -2337,35 +2334,19 @@
           "otlpTrace"
         ],
         "op": "toHaveProperty",
-        "negate": true,
+        "negate": false,
         "property": "captureMessageContent",
-        "hasExpected": false,
-        "expected": null
+        "hasExpected": true,
+        "expected": false
       },
       {
         "base": "built",
         "path": [],
         "op": "toHaveProperty",
-        "negate": true,
-        "property": "captureMessageContent",
-        "hasExpected": false,
-        "expected": null
-      },
-      {
-        "base": "logs",
-        "path": [],
-        "op": "toHaveBeenCalledWith",
         "negate": false,
-        "expected": [
-          {
-            "$stringContaining": "deprecated and ignored"
-          },
-          {
-            "locations": [
-              "otlpTrace.captureMessageContent"
-            ]
-          }
-        ]
+        "property": "captureMessageContent",
+        "hasExpected": true,
+        "expected": false
       }
     ],
     "group": "otlp"

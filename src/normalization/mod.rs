@@ -8,6 +8,7 @@
 //! do not call `crate::utils`.
 
 mod agent_config;
+pub(crate) mod agent_content_policy;
 mod agent_input_dual_write;
 mod agent_system_map;
 mod enrich_git_context;

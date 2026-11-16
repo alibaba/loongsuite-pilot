@@ -167,7 +167,7 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-本地 Dashboard 默认关闭。在 `config.json` 中设置 `"dashboard": {"enabled": true}` 并重启采集服务即可启用。启用后随采集服务启动和停止，默认地址如下。
+本地 Dashboard 默认关闭。运行 `loongsuite-pilot dashboard start [port]` 启用，或运行 `loongsuite-pilot dashboard stop` 关闭。两个命令都会重启正在运行的采集服务。省略端口时保留已有配置，默认端口为 `8765`。
 
 ```text
 http://127.0.0.1:8765/

@@ -167,6 +167,11 @@ pub(crate) fn command() -> Command {
                 .about("本地 Dashboard 管理")
                 .subcommand_required(true)
                 .subcommand(
+                    Command::new("start")
+                        .arg(Arg::new("port").value_parser(clap::value_parser!(u16).range(1..))),
+                )
+                .subcommand(Command::new("stop"))
+                .subcommand(
                     Command::new("shortcut")
                         .about("显式管理 macOS Dashboard 快捷方式")
                         .subcommand_required(true)
@@ -177,7 +182,8 @@ pub(crate) fn command() -> Command {
                         .about("只读查询端口或检查本安装的 HTTP 服务")
                         .arg(flag("port").conflicts_with_all(["data-dir", "available"]))
                         .arg(flag("data-dir").conflicts_with("available"))
-                        .arg(flag("available")),
+                        .arg(flag("available"))
+                        .arg(flag("enabled").conflicts_with_all(["port", "data-dir", "available"])),
                 ),
         )
         .subcommand(

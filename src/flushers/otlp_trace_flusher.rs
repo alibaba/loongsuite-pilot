@@ -1858,11 +1858,16 @@ impl OtlpInner {
         let trace_records = super::trace_event_compat::prepare_trace_events(&prepared.records);
         // Doubao validates native pairs itself; retain incomplete/ambiguous facts so
         // transcript tools cannot bypass a rejected native observation.
-        let sanitized = if agent_type == "doubao-work" {
+        let mut sanitized = if agent_type == "doubao-work" {
             trace_records
         } else {
             drop_orphan_pairs(&trace_records)
         };
+        if self.cfg.capture_message_content == Some(false) {
+            for record in &mut sanitized {
+                crate::normalization::agent_content_policy::strip_agent_message_content(record);
+            }
+        }
         if converter.supports_streaming()
             && agent_type != "doubao-work"
             && !(agent_type == "qwen-code-cli"
@@ -2020,7 +2025,7 @@ impl OtlpInner {
                 });
             }
         }
-        let spans = self
+        let mut spans = self
             .enrichers
             .enrich(
                 spans,
@@ -2030,6 +2035,7 @@ impl OtlpInner {
                 },
             )
             .await;
+        self.apply_span_content_policy(&mut spans);
         if self.cfg.debug == Some(true) {
             self.write_debug_log(agent_type, &spans).await;
         }
@@ -2192,7 +2198,24 @@ impl OtlpInner {
         }
     }
 
-    async fn export_spans_for_agent(self: &Arc<Self>, agent_type: &str, spans: Vec<ReadableSpan>) {
+    fn apply_span_content_policy(&self, spans: &mut [ReadableSpan]) {
+        use crate::normalization::agent_content_policy::remove_message_content_fields;
+        if self.cfg.capture_message_content == Some(false) {
+            for span in spans {
+                remove_message_content_fields(&mut span.attributes);
+                for event in &mut span.events {
+                    remove_message_content_fields(&mut event.attributes);
+                }
+            }
+        }
+    }
+
+    async fn export_spans_for_agent(
+        self: &Arc<Self>,
+        agent_type: &str,
+        mut spans: Vec<ReadableSpan>,
+    ) {
+        self.apply_span_content_policy(&mut spans);
         if self.cfg.debug == Some(true) {
             self.write_debug_log(agent_type, &spans).await;
         }
@@ -2604,6 +2627,9 @@ fn prepare_records(
     }
     if super::qoder_turn_converter::is_qoder_transcript_agent(agent_type) {
         passthrough.push("agent.transcript_incomplete".into());
+    }
+    if matches!(agent_type, "openclaw" | "hermes") {
+        passthrough.push("agent.pilot.request_context.truncated".into());
     }
     if agent_type == "openclaw" {
         passthrough.extend(OPENCLAW_COMPAT_KEYS.iter().map(|key| (*key).to_string()));
@@ -5602,6 +5628,43 @@ mod tests {
             // The injected converter returns a warning and zero spans. No exporter is created.
             assert!(flusher.created_exporters().is_empty());
             flusher.shutdown().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn delegated_request_context_keeps_truncation_marker_with_content_disabled() {
+            for agent in ["openclaw", "hermes"] {
+                let dir = tempfile::tempdir().unwrap();
+                let mut config = configuration(dir.path());
+                config.capture_message_content = Some(false);
+                let (flusher, converter) = capture(config, None);
+                let record = |event: &str, id: &str| {
+                    entry(json!({
+                        "event.name": event, "event.id": id, "gen_ai.agent.type": agent,
+                        "gen_ai.session.id": "session", "gen_ai.turn.id": "turn", "gen_ai.step.id": "step",
+                        "gen_ai.input.messages": [{"role":"user","content":"synthetic private text"}],
+                        "agent.pilot.request_context.truncated": true,
+                        "gen_ai.response.finish_reasons": ["stop"]
+                    }))
+                };
+                flusher
+                    .send(record("llm.request", "request"), None)
+                    .await
+                    .unwrap();
+                flusher
+                    .send(record("llm.response", "response"), None)
+                    .await
+                    .unwrap();
+                flusher.shutdown().await.unwrap();
+                let calls = converter.calls.lock().unwrap();
+                assert_eq!(calls.len(), 1, "{agent}");
+                let (records, options) = &calls[0];
+                let marker = "agent.pilot.request_context.truncated";
+                assert!(options.passthrough_keys.iter().any(|key| key == marker));
+                assert!(records
+                    .iter()
+                    .any(|record| record.extra.get(marker) == Some(&json!(true))));
+                assert!(records.iter().all(|record| record.input_messages.is_none()));
+            }
         }
 
         #[tokio::test]

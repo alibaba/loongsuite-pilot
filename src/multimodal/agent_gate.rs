@@ -8,7 +8,7 @@ pub fn is_agent_multimodal_enabled(agent_id: Option<&str>, agent: &AgentConfig) 
     let Some(agent_id) = agent_id.filter(|id| !id.is_empty()) else {
         return false;
     };
-    if !is_multimodal_supported_agent(agent_id) {
+    if !is_multimodal_supported_agent(agent_id) || agent.capture_message_content == Some(false) {
         return false;
     }
     matches!(agent.multimodal.as_ref().map(|config| config.upload_mode), Some(mode) if mode != MultimodalUploadMode::None)
@@ -55,7 +55,7 @@ mod tests {
         assert!(!is_agent_multimodal_enabled(Some("cursor"), &all));
         let mut with_capture = all.clone();
         with_capture.capture_message_content = Some(false);
-        assert!(is_agent_multimodal_enabled(Some("codex"), &with_capture));
+        assert!(!is_agent_multimodal_enabled(Some("codex"), &with_capture));
         assert!(!is_agent_multimodal_enabled(
             Some("codex"),
             &enabled(MultimodalUploadMode::None)

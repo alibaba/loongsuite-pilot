@@ -534,7 +534,7 @@ impl MetricsCollector {
             mem: mem.to_string(),
             mem_heap: heap.to_string(),
             start_time: self.start_time.clone(),
-            capture_message_disabled_agents: String::new(),
+            capture_message_disabled_agents: capture_disabled_agents(&self.agents_config),
             projects: self.build_projects(),
             cms_workspace: self.cms_workspace.clone(),
             metric_json: MetricJson {
@@ -1560,4 +1560,14 @@ mod tests {
             pid_file_command_matched: None,
         }
     }
+}
+
+fn capture_disabled_agents(config: &AgentsConfig) -> String {
+    let mut agents: Vec<_> = config
+        .iter()
+        .filter(|(_, policy)| policy.capture_message_content == Some(false))
+        .map(|(agent, _)| agent.as_str())
+        .collect();
+    agents.sort_unstable();
+    agents.join(" ")
 }

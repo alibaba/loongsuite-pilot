@@ -125,7 +125,7 @@ async fn source_l119_l145_l394_l1_start_preserves_identity_fields_and_legacy_abs
     let entry = h.first("pilot-metrics");
     assert_fields(
         &entry,
-        json!({"version":"2.0.0","user_id":"u1","capture_message_disabled_agents":""}),
+        json!({"version":"2.0.0","user_id":"u1","capture_message_disabled_agents":"qoder"}),
     );
     assert_eq!(entry["metric_json"]["agent_count"], "1");
     for key in ["raw_in_records", "raw_in_bytes", "raw_in_max_batch_bytes"] {

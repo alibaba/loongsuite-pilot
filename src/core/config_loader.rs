@@ -135,9 +135,6 @@ pub fn assemble_config(
     inner: Option<&Value>,
     sources: &ConfigSources<'_>,
 ) -> anyhow::Result<AnalyticsConfig> {
-    if let Some(file) = file {
-        warn_ignored_capture(file);
-    }
     let data_dir = pick_data_dir(
         env_get(sources, "LOONGSUITE_PILOT_DATA_DIR").as_deref(),
         json_str(file.and_then(|value| value.get("dataDir"))),
@@ -409,7 +406,7 @@ pub fn build_otlp_trace_config_with(
         } else {
             Some(resource_attributes)
         },
-        capture_message_content: None,
+        capture_message_content: otlp.capture_message_content,
         debug: Some(otlp.debug.unwrap_or(config.cms.debug.unwrap_or(false))),
         turn_idle_timeout_ms: Some(otlp.turn_idle_timeout_ms.unwrap_or(0)),
         resource_attribute_keys: Some(unique_trimmed(otlp.resource_attribute_keys.as_deref())),
@@ -1309,7 +1306,12 @@ fn build_otlp_trace_raw(file: Option<&Value>) -> Option<OtlpTraceRawConfig> {
     // A malformed optional extension list must not disable trace destinations.
     // Resolve valid string paths later using the existing config/data roots.
     let mut raw = raw.clone();
-    raw.as_object_mut()?.remove("captureMessageContent");
+    if raw
+        .get("captureMessageContent")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        raw.as_object_mut()?.remove("captureMessageContent");
+    }
     if let Some(value) = raw.get("spanEnrichers").cloned() {
         let paths: Vec<_> = value
             .as_array()
@@ -1446,9 +1448,7 @@ fn build_agents(file: Option<&Value>, inner: Option<&Value>) -> AgentsConfig {
                 .unwrap_or_default();
             if let Some(object) = accepted.as_object() {
                 for (key, value) in object {
-                    if key != "captureMessageContent" {
-                        merged.insert(key.clone(), value.clone());
-                    }
+                    merged.insert(key.clone(), value.clone());
                 }
             }
             if multimodal.is_some_and(Value::is_object) {
@@ -1475,7 +1475,18 @@ fn build_agents(file: Option<&Value>, inner: Option<&Value>) -> AgentsConfig {
             agent_type,
             AgentConfig {
                 enabled: json_bool(policy.get("enabled")),
-                capture_message_content: None,
+                capture_message_content: policy.get("captureMessageContent").and_then(|value| {
+                    value.as_bool().or_else(|| {
+                        let text = value.as_str()?.trim();
+                        if text.eq_ignore_ascii_case("true") {
+                            Some(true)
+                        } else if text.eq_ignore_ascii_case("false") {
+                            Some(false)
+                        } else {
+                            None
+                        }
+                    })
+                }),
                 multimodal,
             },
         );
@@ -1948,33 +1959,6 @@ fn resolve_global_span_attributes(
         }
     }
     out
-}
-
-fn warn_ignored_capture(file: &Value) {
-    let mut locations = Vec::new();
-    if file
-        .get("otlpTrace")
-        .and_then(Value::as_object)
-        .is_some_and(|map| map.contains_key("captureMessageContent"))
-    {
-        locations.push("otlpTrace.captureMessageContent".to_string());
-    }
-    if let Some(agents) = file.get("agents").and_then(Value::as_object) {
-        for (agent, policy) in agents {
-            if policy
-                .as_object()
-                .is_some_and(|map| map.contains_key("captureMessageContent"))
-            {
-                locations.push(format!("agents.{agent}.captureMessageContent"));
-            }
-        }
-    }
-    if !locations.is_empty() {
-        logger("ConfigLoader").warn(
-            "captureMessageContent is deprecated and ignored; message content capture is always enabled",
-            Some(&fields(serde_json::json!({ "locations": locations }))),
-        );
-    }
 }
 
 fn decode_vec<T: for<'de> Deserialize<'de>>(value: Option<&Value>) -> Option<Vec<T>> {
