@@ -37,7 +37,7 @@ import { fileURLToPath } from 'node:url';
 
 // Flushers
 import { BaseFlusher } from '../flushers/base-flusher.js';
-import { SlsFlusher } from '../flushers/sls-flusher.js';
+import { SlsFlusher, type EndpointCounter } from '../flushers/sls-flusher.js';
 import { JsonlFlusher } from '../flushers/jsonl-flusher.js';
 import { HttpFlusher } from '../flushers/http-flusher.js';
 import { MultiFlusher } from '../flushers/multi-flusher.js';
