@@ -33,10 +33,11 @@ pub fn is_hook(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some("sdk-hook") => true,
         Some("interceptor") => args.get(1).is_some_and(|arg| arg == "hook"),
-        Some("hook-process") => {
-            args.get(1).is_some_and(|arg| arg == "qoder")
-                && args.iter().any(|arg| arg == "--wakeup-only")
-        }
+        Some("hook-process") => match args.get(1).map(String::as_str) {
+            Some("qoder") => args.iter().any(|arg| arg == "--wakeup-only"),
+            Some("codex") => true,
+            _ => false,
+        },
         _ => false,
     }
 }

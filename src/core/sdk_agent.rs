@@ -166,8 +166,14 @@ impl Context {
         );
         self.runtime.block_on(async {
             checkpoint.load().await;
-            if checkpoint.keys().iter().any(|id| id == self.input) {
-                legacy.set(self.input, checkpoint.get(self.input));
+            let mut imported = false;
+            for id in checkpoint.keys() {
+                if crate::checkpoints::key_in_namespace(&id, self.input) {
+                    legacy.set(&id, checkpoint.get(&id));
+                    imported = true;
+                }
+            }
+            if imported {
                 legacy.save().await.map_err(|error| error.to_string())?;
             }
             Ok(())

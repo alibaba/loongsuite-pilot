@@ -437,13 +437,18 @@ unsafe extern "C" fn host_hook(
         // SAFETY: borrowed readable input is retained by the native worker.
         let input = unsafe { std::slice::from_raw_parts(stdin.data, stdin.len) };
         crate::utils::logger::redirect_root_logger_to_stderr();
-        if args.first().is_some_and(|arg| arg == "hook-process")
-            && args.get(1).is_some_and(|arg| arg == "qoder")
-            && args[2..].iter().any(|arg| arg == "--wakeup-only")
-        {
-            let (code, stdout) = crate::hook_process::run_qoder_wakeup_captured(&args[2..], input);
-            return unsafe { output(&json!({"exit_code":code,"stdout":stdout}), report, len) }
-                .map_or_else(|e| e, |_| OK);
+        if let [command, agent, hook_args @ ..] = args.as_slice() {
+            if command == "hook-process" {
+                let (code, stdout) = match agent.as_str() {
+                    "qoder" if hook_args.iter().any(|arg| arg == "--wakeup-only") => {
+                        crate::hook_process::run_qoder_wakeup_captured(hook_args, input)
+                    }
+                    "codex" => crate::hook_process::run_codex_hook_captured(hook_args, input),
+                    _ => return BAD_ARGUMENT,
+                };
+                return unsafe { output(&json!({"exit_code":code,"stdout":stdout}), report, len) }
+                    .map_or_else(|e| e, |_| OK);
+            }
         }
         let input = match std::str::from_utf8(input) {
             Ok(text) => text.to_owned(),

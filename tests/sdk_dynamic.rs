@@ -770,6 +770,42 @@ fn shared_hook_binary_publishes_standalone_qoder_wakeup() {
 }
 
 #[test]
+fn shared_hook_binary_publishes_standalone_codex_wakeup() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    let home = root.path().join("codex");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"))
+        .args(["hook-process", "codex", "stop"])
+        .env("LOONGSUITE_PILOT_SDK_LIBRARY", library_path())
+        .env("LOONGSUITE_PILOT_DATA_DIR", &data)
+        .env("CODEX_HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    writeln!(
+        child.stdin.take().unwrap(),
+        "{}",
+        json!({"session_id":session,"turn_id":"fixture-turn"})
+    )
+    .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+        json!({})
+    );
+    let marker = data
+        .join("state/codex/transcript-wakeups")
+        .join(format!("{session}.json"));
+    let content: Value = serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
+    assert_eq!(content["recovery_turn_id"], "fixture-turn");
+    assert_eq!(content["hook_event"], "stop");
+    assert_eq!(content["session_dir"], json!(home.join("sessions")));
+}
+
+#[test]
 fn native_hook_fails_open_quickly_without_a_live_sdk_port() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");

@@ -3,6 +3,7 @@ use super::policy::{AgentPlan, Init, Policy};
 use crate::checkpoints::StateStore;
 use crate::core::{InputManager, LiveInput};
 use crate::inputs::base::{HostedInput, InputBody};
+use crate::inputs::codex_aborted_turn::{CodexAbortedTurnInput, CodexAbortedTurnInputOptions};
 use crate::inputs::codex_transcript::{CodexTranscriptInput, CodexTranscriptInputOptions};
 use crate::inputs::qoder_trace::{QoderTraceInput, QoderTraceOptions, QoderTraceReaders};
 use crate::types::AgentActivityEntry;
@@ -325,13 +326,25 @@ fn run_agent(
         .iter()
         .map(|s| super::policy::canonical_candidate(&s.path))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    if let Some(state) = &plan.pilot_qoder {
-        for relative in [
-            "state/qoder-transcripts/qoder",
-            "logs/input-state.json",
-            "logs/qoder",
-            "state/workspace-exclusions",
-        ] {
+    let checkpoint_key = match plan.profile.as_str() {
+        "codex_rollout_v1" => "codex-transcript",
+        "codex_aborted_turn_v1" => "codex-aborted-turn",
+        _ => "qoder-trace",
+    };
+    if let Some(state) = &plan.pilot_host {
+        let agent_roots: &[&str] = match plan.profile.as_str() {
+            "codex_rollout_v1" => &[
+                "state/codex/transcript-wakeups",
+                "state/codex/transcript-span-contexts",
+            ],
+            "codex_aborted_turn_v1" => &["state/codex/sessions", "logs/diagnostics"],
+            _ => &["state/qoder-transcripts/qoder", "logs/qoder"],
+        };
+        for relative in agent_roots
+            .iter()
+            .copied()
+            .chain(["logs/input-state.json", "state/workspace-exclusions"])
+        {
             let path = super::policy::canonical_candidate(&state.data_dir.join(relative))?;
             anyhow::ensure!(
                 path.starts_with(&state.data_dir),
@@ -355,8 +368,12 @@ fn run_agent(
         .on_thread_stop(|| source_access::install(None))
         .build()?;
     let store = Arc::new(StateStore::new(&checkpoint));
-    if let Some(state) = &plan.pilot_qoder {
-        runtime.block_on(import_pilot_qoder_checkpoint(&state.data_dir, &checkpoint))?;
+    if let Some(state) = &plan.pilot_host {
+        runtime.block_on(import_pilot_checkpoint(
+            &state.data_dir,
+            &checkpoint,
+            checkpoint_key,
+        ))?;
     }
     runtime.block_on(store.load());
     let journal = queue.clone();
@@ -379,7 +396,7 @@ fn run_agent(
     let manager = Arc::new(InputManager::new());
     manager.set_state_store(store.clone());
     manager.set_mask_config(plan.mask.clone());
-    if let Some(state) = &plan.pilot_qoder {
+    if let Some(state) = &plan.pilot_host {
         manager.set_workspace_policy(
             crate::core::WorkspacePolicy::new(
                 &state.exclude_workspaces,
@@ -395,12 +412,12 @@ fn run_agent(
         );
     }
     if let Some(capture_message_content) = plan
-        .pilot_qoder
+        .pilot_host
         .as_ref()
         .and_then(|state| state.capture_message_content)
     {
         manager.set_agents_config(&crate::types::AgentsConfig::from([(
-            "qoder".to_owned(),
+            plan.agent.clone(),
             crate::types::AgentConfig {
                 capture_message_content: Some(capture_message_content),
                 ..Default::default()
@@ -425,20 +442,102 @@ fn run_agent(
             .find(|s| s.kind == kind)
             .map(|s| s.path.to_string_lossy().into_owned())
     };
-    let input: Arc<LiveInput> = if plan.agent == "codex" {
-        let input = Arc::new(CodexTranscriptInput::new(CodexTranscriptInputOptions {
+    let input_workspace_policy = || {
+        plan.pilot_host.as_ref().map(|state| {
+            crate::inputs::base::WorkspacePolicy::new(
+                state.exclude_workspaces.clone(),
+                Some(state.data_dir.join("state/workspace-exclusions")),
+            )
+        })
+    };
+    let input: Arc<LiveInput> = if plan.profile == "codex_aborted_turn_v1" {
+        let state = plan.pilot_host.as_ref().expect("validated Codex profile");
+        let input = Arc::new(CodexAbortedTurnInput::new(CodexAbortedTurnInputOptions {
             state_store: store.clone(),
             session_dir: source_path("transcript"),
-            wakeup_dir: Some(state_dir.join("wakeup").to_string_lossy().into_owned()),
-            span_context_dir: Some(
-                state_dir
-                    .join("span-context")
+            hook_state_dir: Some(
+                state
+                    .data_dir
+                    .join("state/codex/sessions")
                     .to_string_lossy()
                     .into_owned(),
             ),
+            diagnostic_dir: Some(
+                state
+                    .data_dir
+                    .join("logs/diagnostics")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            hook_gap_grace_ms: None,
+            poll_interval_ms: Some(plan.poll_interval_ms),
+        }));
+        if let Some(policy) = input_workspace_policy() {
+            input.set_collector_workspace_policy(policy);
+        }
+        let captured = buffer.clone();
+        let capture_queue = queue.clone();
+        let delta_manager = Arc::downgrade(&manager);
+        input.bind_collector(
+            move |entries| {
+                capture(
+                    &captured,
+                    entries,
+                    capture_queue.options.read().unwrap().queue_memory_bytes,
+                )
+            },
+            move |delta| {
+                if let Some(manager) = delta_manager.upgrade() {
+                    manager.record_runtime_delta("codex-aborted-turn", delta);
+                }
+            },
+        );
+        bind(
+            &input.inner,
+            manager.clone(),
+            queue.clone(),
+            scope,
+            cancel.clone(),
+            global.clone(),
+            buffer,
+        );
+        live(
+            "codex-aborted-turn",
+            "codex",
+            input,
+            |input| input.collector_running(),
+            |input| Box::pin(async move { input.start().await }),
+            |input| {
+                Box::pin(async move {
+                    let _ = input.stop().await;
+                })
+            },
+        )
+    } else if plan.agent == "codex" {
+        let metadata_path = |host_path: &str, sdk_path: &str| {
+            plan.pilot_host
+                .as_ref()
+                .map_or_else(
+                    || state_dir.join(sdk_path),
+                    |state| state.data_dir.join(host_path),
+                )
+                .to_string_lossy()
+                .into_owned()
+        };
+        let input = Arc::new(CodexTranscriptInput::new(CodexTranscriptInputOptions {
+            state_store: store.clone(),
+            session_dir: source_path("transcript"),
+            wakeup_dir: Some(metadata_path("state/codex/transcript-wakeups", "wakeup")),
+            span_context_dir: Some(metadata_path(
+                "state/codex/transcript-span-contexts",
+                "span-context",
+            )),
             poll_interval_ms: Some(plan.poll_interval_ms),
             multimodal: None,
         }));
+        if let Some(policy) = input_workspace_policy() {
+            input.set_collector_workspace_policy(policy);
+        }
         let captured = buffer.clone();
         let capture_queue = queue.clone();
         input.on_entries(move |entries| {
@@ -483,7 +582,7 @@ fn run_agent(
             .map(|s| s.path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         use crate::inputs::qoder_trace::prompt_ownership::NativeQoderPromptOwnershipResolver;
-        let standalone = plan.pilot_qoder.is_some();
+        let standalone = plan.pilot_host.is_some();
         let resolver = Arc::new(if standalone {
             NativeQoderPromptOwnershipResolver::default()
         } else {
@@ -508,7 +607,7 @@ fn run_agent(
                     upload_mode: None,
                     allowed_root_paths: Vec::new(),
                 },
-                plan.pilot_qoder
+                plan.pilot_host
                     .as_ref()
                     .map_or_else(|| state_dir.clone(), |state| state.data_dir.clone()),
                 readers,
@@ -629,7 +728,11 @@ fn live<T: Send + Sync + 'static>(
     )
 }
 
-async fn import_pilot_qoder_checkpoint(data_dir: &Path, target: &Path) -> anyhow::Result<()> {
+async fn import_pilot_checkpoint(
+    data_dir: &Path,
+    target: &Path,
+    input: &str,
+) -> anyhow::Result<()> {
     match std::fs::symlink_metadata(target) {
         Ok(_) => return Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -641,9 +744,10 @@ async fn import_pilot_qoder_checkpoint(data_dir: &Path, target: &Path) -> anyhow
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    let legacy: serde_json::Map<String, Value> = serde_json::from_str(&body)?;
-    if let Some(qoder) = legacy.get("qoder-trace") {
-        write_checkpoint(target, &json!({"qoder-trace":qoder}).to_string())?;
+    let mut legacy: serde_json::Map<String, Value> = serde_json::from_str(&body)?;
+    legacy.retain(|key, _| crate::checkpoints::key_in_namespace(key, input));
+    if !legacy.is_empty() {
+        write_checkpoint(target, &Value::Object(legacy).to_string())?;
     }
     Ok(())
 }

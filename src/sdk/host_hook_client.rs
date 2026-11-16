@@ -3,7 +3,9 @@
 pub fn run(args: &[String]) -> Option<String> {
     use crate::host_loader::{self, abi::PilotJsonView, Library};
     use std::io::Read;
-    let max_input = if args.first().is_some_and(|arg| arg == "hook-process") {
+    let max_input = if args.first().is_some_and(|arg| arg == "hook-process")
+        && args.get(1).is_some_and(|arg| arg == "qoder")
+    {
         1024 * 1024
     } else {
         5 * 1024 * 1024

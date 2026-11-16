@@ -101,6 +101,29 @@ pub(crate) fn run_qoder_wakeup_captured(args: &[String], stdin: &[u8]) -> (i32, 
     (code, String::from_utf8(stdout).unwrap_or_default())
 }
 
+pub(crate) fn run_codex_hook_captured(args: &[String], stdin: &[u8]) -> (i32, String) {
+    let started = std::time::Instant::now();
+    let env: Env = std::env::vars().collect();
+    let mut stdout = Vec::new();
+    let code = codex::run(&mut HookRequest {
+        args,
+        stdin,
+        env: &env,
+        stdout: &mut stdout,
+    });
+    record_codex_hook_timing(&env, args, started);
+    (code, String::from_utf8(stdout).unwrap_or_default())
+}
+
+fn record_codex_hook_timing(env: &Env, args: &[String], started: std::time::Instant) {
+    crate::metrics::record_hook_timing(
+        &common::data_dir(env),
+        "codex",
+        args.first().map(|s| s.trim()).unwrap_or(""),
+        started.elapsed().as_secs_f64() * 1000.0,
+    );
+}
+
 pub(crate) fn dispatch(
     agent: &str,
     terminal: bool,
@@ -138,13 +161,7 @@ pub(crate) fn dispatch(
         }
     };
     if agent == "codex" {
-        let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
-        crate::metrics::record_hook_timing(
-            &common::data_dir(env),
-            "codex",
-            args.first().map(|s| s.trim()).unwrap_or(""),
-            duration_ms,
-        );
+        record_codex_hook_timing(env, args, started);
     }
     code
 }

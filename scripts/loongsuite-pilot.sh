@@ -870,7 +870,13 @@ native_version_root() {
 node_version_root() {
     local root="$1"
     [ -d "$root" ] && [ ! -L "$root" ] && [ ! -L "$root/dist" ] &&
-        [ -f "$root/package.json" ] && [ -f "$root/dist/index.js" ] &&
+        [ -d "$root/scripts" ] && [ ! -L "$root/scripts" ] &&
+        [ -d "$root/node_modules" ] && [ ! -L "$root/node_modules" ] &&
+        [ -f "$root/package.json" ] && [ ! -L "$root/package.json" ] &&
+        [ -f "$root/VERSION" ] && [ ! -L "$root/VERSION" ] &&
+        [ -f "$root/dist/index.js" ] && [ ! -L "$root/dist/index.js" ] &&
+        [ -f "$root/scripts/collector-daemon.js" ] && [ ! -L "$root/scripts/collector-daemon.js" ] &&
+        [ -f "$root/scripts/loongsuite-pilot.sh" ] && [ ! -L "$root/scripts/loongsuite-pilot.sh" ] &&
         [ ! -e "$root/runtime-manifest.json" ] && [ ! -L "$root/runtime-manifest.json" ]
 }
 
@@ -2840,6 +2846,8 @@ case "${1:-status}" in
             if [ "$wakeup_only" = true ] && [ "$explicit_data" = true ]; then
                 pilot_bin=$(prefer_shared_hook_bin "$pilot_bin")
             fi
+        elif [ "${1:-}" = codex ]; then
+            pilot_bin=$(prefer_shared_hook_bin "$pilot_bin")
         fi
         exec "$pilot_bin" hook-process "$@"
         ;;

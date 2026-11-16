@@ -15,6 +15,12 @@
 - 同步拦截是另一条链路，Qoder 由 `interceptor hook --agent qoder-auto` 进入原生判定。检查端点不可用、无效裁决、超时和关闭期间快速放行，Agent 侧只有一次有效响应。云壳裁决协议查 `include/pilot_sdk.h` 和 `src/sdk/hooks.rs`。验收使用无敏感内容的关键词和 Agent 正常运行的对照场景。
 - 先确认宿主确实支持二进制 Hook。逐项检查新旧路径、安装包资产、Hook 配置和真实事件字段。证明该路径不启动 Node/JS 后，才删除它专用的脚本和打包条目。其他宿主加载的插件有独立契约，按宿主逐一迁移。
 
+## 用同一路径接入 Codex
+
+- `register_sdk_codex` 让 SDK 分别管理 rollout 采集和中止回合补采，两个输入沿用各自的监听配置和 checkpoint 命名空间。默认读取 `~/.codex/sessions`，独立运行使用明确的 `CODEX_HOME`。上游 link 配置仍走兼容路径。
+- Codex 的 Hook 信任依赖已经部署的命令与配置。保留稳定命令和信任记录，由现有的 Unix 或 PowerShell 启动脚本选择同包的共享 Hook，再用原生适配器写唤醒及 span 上下文。卸载及回滚沿用原有的托管归属规则。
+- 兼容历史状态要同时处理监听器名称和 `监听器:rollout绝对路径` 的条目。用同一个真实 Codex 会话产出请求、响应、工具调用和结果。验证重启前后既有事件不重复，新回合能继续交付，真实 token 和工作区字段可用。
+
 ## 接入云壳 SDK Hook
 
 - 在 `src/sdk/agent_hooks.rs` 注册 Agent ID、兼容别名和支持裁决的事件，只连接所需的字段解析与唤醒函数。复用 `sdk-hook` 的传输、限时和 fail-open，实现时沿轻量函数检查链接依赖，两种壳复用一个 Hook 二进制，部署策略按各自入口配置。将完整 Pilot 已有的 Hook 命令作为兼容入口时，按正式 Node.js 回滚目标核对恢复的配置。
