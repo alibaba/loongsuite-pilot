@@ -163,11 +163,12 @@ jobs:
         working-directory: candidate
         run: |
           set -euo pipefail
-          cargo build --release --locked --lib --bin loongsuite-pilot
+          cargo build --release --locked --lib --bin loongsuite-pilot --bin loongsuite-pilot-sdk-hook
           echo "PILOT_BUILD_COMPILER=$(rustc --version)" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/pilot-runtime/bin"
           git archive HEAD | tar -x -C "$RUNNER_TEMP/pilot-runtime"
-          cp target/release/loongsuite-pilot target/release/libloongsuite_pilot.so "$RUNNER_TEMP/pilot-runtime/bin/"
+          cp target/release/loongsuite-pilot target/release/loongsuite-pilot-sdk-hook \
+            target/release/libloongsuite_pilot.so "$RUNNER_TEMP/pilot-runtime/bin/"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: steps.select.outputs.runtime == 'js'
         with:
