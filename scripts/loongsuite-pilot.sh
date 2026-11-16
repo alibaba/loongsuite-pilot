@@ -316,6 +316,21 @@ sync_bootstrap_scripts() {
     mkdir -p "$BOOTSTRAP_DIR"
     cp -f "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/"
     cp -f "$src_dir/updater-daemon.js"   "$BOOTSTRAP_DIR/" 2>/dev/null || true
+    cp -f "$src_dir/sync-hooks-assets.mjs" "$BOOTSTRAP_DIR/" 2>/dev/null || true
+}
+
+# Sync hook assets from versions/<current>/assets/hooks/ → data/hooks/.
+# Prevents stale hook-processor copies from running after a version upgrade
+# (the hook entry script references siblings in data/hooks/ via $SCRIPT_DIR).
+# Non-fatal: failures log to stderr but never block pilot startup.
+sync_hooks_assets() {
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || return 0
+    if [ ! -f "$BOOTSTRAP_DIR/sync-hooks-assets.mjs" ]; then
+        return 0
+    fi
+    "$node_bin" "$BOOTSTRAP_DIR/sync-hooks-assets.mjs" \
+        "$DATA_DIR" "$CACHE_DIR" "$CURRENT_FILE" 2>&1 | tee -a "$LOG_FILE" || true
 }
 
 sync_installed_scripts_from_version() {
@@ -905,6 +920,7 @@ resolve_script() {
 cmd_run() {
     ensure_dirs
     sync_bootstrap_scripts
+    sync_hooks_assets
 
     if [ ! -f "$BOOTSTRAP_DIR/collector-daemon.js" ]; then
         echo "❌ Bootstrap script missing" >&2
