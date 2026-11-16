@@ -165,6 +165,7 @@ export interface AnalyticsConfig {
  */
 export interface UpstreamLinkConfig {
   enabled: boolean;
+  sharedContext?: boolean;
   /** Propagate the linked context into supported downstream CLI tool calls. */
   propagateToTools: boolean;
   /** Propagate the linked context to the LLM gateway as a `traceparent` header. */

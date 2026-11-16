@@ -15,6 +15,8 @@ Pilot 按以下顺序解析配置：
 
 如需使用其他配置文件路径，可以设置 `AGENT_DATA_COLLECTION_CONFIG`。
 
+调用方 → Agent → 下游的统一透传见 [共享 W3C 上下文](trace-context-propagation.md)，通过 `upstreamLink.sharedContext` / `LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT` 显式开启。
+
 对多模态配置，用户的 `config.json` 始终优先于托管默认配置：
 
 - 全局 `multimodal` 按整块选择。用户写了该字段，就不从托管配置补存储目标或凭据；用户未写时才使用托管配置。选中用户块后，仍按下文规则判断能否复用用户自己的 SLS `apiKey` 目标。

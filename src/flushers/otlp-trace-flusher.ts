@@ -16,6 +16,7 @@ import {
 } from '@loongsuite/otel-util-genai';
 import { planTurnStream } from './turn-stream.js';
 import { prepareCodexTurn } from './codex-turn-converter.js';
+import { withTraceContextParent } from './trace-context-parent.js';
 import { prepareDelegatedTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
@@ -1473,6 +1474,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
             : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(sanitized, handler, idGenerator)
             : { records: sanitized, handler, removedEntryCount: 0 };
           cleanup = prepared.cleanup;
+          prepared.handler = withTraceContextParent(prepared.records, prepared.handler, idGenerator);
           const stream = planTurnStream(prepared.records, { handler: prepared.handler, passthroughKeys });
           if (stream) {
             streamedExportSucceeded = true;

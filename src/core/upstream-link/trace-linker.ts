@@ -1,6 +1,7 @@
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { createLogger } from '../../utils/logger.js';
 import type { CorrelationStore } from './correlation-store.js';
+import { TraceContextRuntime, bindingFields, inputHash as hashInput, type TraceBinding } from '../trace-context/runtime.js';
 
 const logger = createLogger('trace-linker');
 
@@ -12,12 +13,14 @@ interface ResolveState {
   resolved: boolean;
   traceId?: string;
   parentSpanId?: string;
+  binding?: TraceBinding;
 }
 
 interface TraceLinkerOptions {
   /** Retry count when an `other` event misses (record may be slightly late). */
   retries?: number;
   retryDelayMs?: number;
+  runtime?: TraceContextRuntime;
 }
 
 function parseTraceparent(tp: string): { traceId: string; spanId: string } | null {
@@ -35,6 +38,7 @@ function extractUserText(entry: AgentActivityEntry): string {
   let text = '';
   for (const msg of delta) {
     if (!msg || typeof msg !== 'object' || Array.isArray(msg)) continue;
+    if ((msg as Record<string, JsonValue>).role !== 'user') continue;
     const parts = (msg as Record<string, JsonValue>).parts;
     if (!Array.isArray(parts)) continue;
     for (const part of parts) {
@@ -91,11 +95,13 @@ export class TraceLinker {
   private readonly cache = new Map<string, ResolveState>();
   private readonly firstTurnBySession = new Map<string, string>();
   private readonly sessionLastAccess = new Map<string, number>();
+  private readonly runtime?: TraceContextRuntime;
 
   constructor(store: CorrelationStore, opts: TraceLinkerOptions = {}) {
     this.store = store;
     this.retries = opts.retries ?? 3;
     this.retryDelayMs = opts.retryDelayMs ?? 100;
+    this.runtime = opts.runtime;
   }
 
   /** Pre-publication probes may leave misses open; normal output keeps the
@@ -125,6 +131,17 @@ export class TraceLinker {
       if (inputEntries.has(entry)) continue;
       await this.tryStampEntry(entry, cacheMisses);
     }
+    const frozen = new Set<string>();
+    if (cacheMisses && this.runtime) for (const entry of entries) {
+      const sessionId = entry['gen_ai.session.id'];
+      const turnId = entry['gen_ai.turn.id'];
+      if (typeof sessionId !== 'string' || typeof turnId !== 'string' || hasDelegatedParent(entry) || hasLockedQoderContext(entry)) continue;
+      const key = this.turnKey(entry, sessionId, turnId);
+      if (!frozen.has(key) && !this.cache.get(key)?.binding) {
+        frozen.add(key);
+        this.runtime.freezeLocal({ agentType: String(entry['gen_ai.agent.type']), sessionId }, turnId);
+      }
+    }
   }
 
   private async tryStampEntry(entry: AgentActivityEntry, cacheMisses: boolean): Promise<void> {
@@ -142,11 +159,27 @@ export class TraceLinker {
     // A separate correlation file must not detach the child or consume a claim.
     if (!sessionId || !turnId || hasDelegatedParent(entry) || hasLockedQoderContext(entry)) return;
 
-    const key = `${sessionId}|${turnId}`;
+    const key = this.turnKey(entry, sessionId, turnId);
     const cached = this.cache.get(key);
     if (cached && (cached.resolved || cacheMisses)) {
       if (cached.resolved) this.apply(entry, cached);
       return; // already resolved or already attempted (miss)
+    }
+
+    if (this.runtime) {
+      const nativeTurn = entry['agent.pilot.correlation.native_turn_id'];
+      const bindingId = entry['agent.pilot.context.binding_id'];
+      const text = entry['event.name'] === 'other' ? extractUserText(entry) : '';
+      const binding = this.runtime.resolveTurn({ agentType: String(entry['gen_ai.agent.type']), sessionId,
+        turnId: typeof nativeTurn === 'string' ? nativeTurn : turnId,
+        ...(text || extractInputHash(entry) ? { inputHash: extractInputHash(entry) ?? hashInput(text) } : {}) }, turnId,
+        typeof bindingId === 'string' ? bindingId : undefined);
+      if (binding) {
+        const state = { resolved: true, traceId: binding.traceId, parentSpanId: binding.upstreamSpanId, binding };
+        this.cache.set(key, state);
+        this.apply(entry, state);
+        return;
+      }
     }
 
     // Other events may be metadata-only; their empty text is not a final miss.
@@ -207,18 +240,23 @@ export class TraceLinker {
       if (last >= cutoffMs) continue;
       this.sessionLastAccess.delete(sessionId);
       this.firstTurnBySession.delete(sessionId);
-      const prefix = `${sessionId}|`;
       for (const key of this.cache.keys()) {
-        if (key.startsWith(prefix)) this.cache.delete(key);
+        if ((JSON.parse(key) as string[])[1] === sessionId) this.cache.delete(key);
       }
     }
     this.store.pruneIdle(cutoffMs);
+    this.runtime?.pruneExpired();
   }
 
   private apply(entry: AgentActivityEntry, state: ResolveState): void {
+    if (state.binding) Object.assign(entry, bindingFields(state.binding));
     if (state.traceId) entry.trace_id = state.traceId;
     if (entry['event.name'] === 'other' && state.parentSpanId) {
       entry.parent_span_id = state.parentSpanId;
     }
+  }
+
+  private turnKey(entry: AgentActivityEntry, sessionId: string, turnId: string): string {
+    return JSON.stringify([entry['gen_ai.agent.type'], sessionId, turnId]);
   }
 }

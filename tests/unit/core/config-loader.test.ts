@@ -27,6 +27,14 @@ function clearSlsEnv() {
 }
 
 describe('ConfigLoader', () => {
+  it('keeps shared trace propagation opt-in and lets environment override the file', async () => {
+    expect((await loadConfig()).upstreamLink.sharedContext).toBe(false);
+    mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true, sharedContext: true } });
+    expect((await loadConfig()).upstreamLink.sharedContext).toBe(true);
+    vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT', 'false');
+    mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { sharedContext: true } });
+    expect((await loadConfig()).upstreamLink.sharedContext).toBe(false);
+  });
   it('loads workspace exclusions and rejects invalid privacy rules', async () => {
     mockReadJsonFile.mockResolvedValueOnce({ privacy: { excludeWorkspaces: ['/private-project'] } });
     expect((await loadConfig()).privacy?.excludeWorkspaces).toEqual(['/private-project']);

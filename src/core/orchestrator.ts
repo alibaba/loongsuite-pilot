@@ -79,6 +79,7 @@ import { DoubaoWorkInput } from '../inputs/doubao-work/doubao-work-input.js';
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
 import { TraceLinker } from './upstream-link/trace-linker.js';
+import { TraceContextRuntime } from './trace-context/runtime.js';
 import { AcpCorrelateRetentionService } from './upstream-link/acp-correlate-retention-service.js';
 import {
   anyAgentMultimodalEnabled,
@@ -272,7 +273,9 @@ export class Orchestrator extends EventEmitter {
       const correlateDir = path.join(this.dataDir, 'acp-correlate');
       await ensureDir(correlateDir);
       const store = new CorrelationStore(correlateDir);
-      const traceLinker = new TraceLinker(store);
+      const traceLinker = new TraceLinker(store, {
+        ...(this.config.upstreamLink.sharedContext ? { runtime: new TraceContextRuntime(this.dataDir) } : {}),
+      });
       this.inputManager.setTraceLinker(traceLinker);
       this.acpCorrelateRetentionService = new AcpCorrelateRetentionService(this.dataDir, this.config.upstreamLink, traceLinker);
       this.acpCorrelateRetentionService.start();
