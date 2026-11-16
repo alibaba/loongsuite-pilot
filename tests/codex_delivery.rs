@@ -1015,8 +1015,7 @@ async fn native_codex_historical_floor_recovers_checkpoint_loss_and_replays_only
         .unwrap();
     eventually(|| hanging.disconnected.load(Ordering::SeqCst) > 0).await;
     assert!(store.save_failed());
-    // A failed source remains uncommitted while unrelated state can still save.
-    store.save().await.unwrap();
+    // Keep the synthetic disk loss in place so restart must use the sidecar.
     assert!(!store.is_persisted(&key, None));
     assert!(!disk_has_source_key(&path, &key).await);
 
