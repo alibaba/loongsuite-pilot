@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -382,6 +382,7 @@ fn current_process_uid() -> Option<u32> {
 }
 
 pub type EntriesHandler = Arc<dyn Fn(&[AgentActivityEntry]) + Send + Sync>;
+type OwnedEntriesHandler = Box<dyn Fn(Vec<AgentActivityEntry>) + Send + Sync>;
 pub type ErrorHandler = Arc<dyn Fn(&str) + Send + Sync>;
 pub type DeltaHandler = Arc<dyn Fn(&InputRuntimeDelta) + Send + Sync>;
 
@@ -395,6 +396,7 @@ pub struct HostedInput<T: InputBody> {
     pub runtime: InputRuntime,
     pub body: T,
     entries_handlers: Mutex<Vec<EntriesHandler>>,
+    owned_entries_handler: OnceLock<OwnedEntriesHandler>,
     cycle_begin: Mutex<Option<CycleHook>>,
     cycle_accept: Mutex<Option<CycleHook>>,
     error_handlers: Mutex<Vec<ErrorHandler>>,
@@ -447,6 +449,7 @@ impl<T: InputBody> HostedInput<T> {
             },
             body,
             entries_handlers: Mutex::new(Vec::new()),
+            owned_entries_handler: OnceLock::new(),
             cycle_begin: Mutex::new(None),
             cycle_accept: Mutex::new(None),
             error_handlers: Mutex::new(Vec::new()),
@@ -481,6 +484,17 @@ impl<T: InputBody> HostedInput<T> {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .push(Arc::new(handler));
+    }
+
+    /// Transfer the filtered batch after the borrowed observers have received it.
+    pub(crate) fn set_owned_entries_handler(
+        &self,
+        handler: impl Fn(Vec<AgentActivityEntry>) + Send + Sync + 'static,
+    ) {
+        assert!(
+            self.owned_entries_handler.set(Box::new(handler)).is_ok(),
+            "owned entries handler already registered"
+        );
     }
 
     /// Optional SDK transaction boundaries; ordinary collectors keep their callbacks.
@@ -900,9 +914,17 @@ impl<T: InputBody> HostedInput<T> {
                         anyhow::bail!("entry queue callback rejected the batch");
                     }
                 }
+                let count = filtered.len();
+                if let Some(handler) = self.owned_entries_handler.get() {
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(filtered)))
+                        .is_err()
+                    {
+                        anyhow::bail!("entry queue callback rejected the batch");
+                    }
+                }
                 self.runtime.logger.debug(
                     "cycle produced entries",
-                    json!({ "count": filtered.len() }).as_object(),
+                    json!({ "count": count }).as_object(),
                 );
             }
             self.body.on_entries_queued(&self.runtime).await?;

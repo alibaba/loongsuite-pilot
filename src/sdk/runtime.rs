@@ -212,20 +212,28 @@ struct Cycle {
     estimated: usize,
     failure: Option<String>,
 }
+impl Cycle {
+    fn reserve_batch(&mut self, entries: &[AgentActivityEntry], limit: usize) -> bool {
+        // Bound the pre-serialization source buffer separately from the outbox.
+        let estimate = entries
+            .iter()
+            .map(|entry| entry.estimated_heap_bytes())
+            .sum::<usize>();
+        let estimated = self.estimated.saturating_add(estimate);
+        if estimated > limit {
+            self.failure = Some("source cycle memory limit exceeded; cursor retained".into());
+            return false;
+        }
+        self.estimated = estimated;
+        true
+    }
+}
+
 fn capture(buffer: &Mutex<Cycle>, entries: &[AgentActivityEntry], limit: usize) {
     let mut cycle = buffer.lock().unwrap();
-    // The actual byte limit is enforced on the one serialized representation
-    // in the flusher. Bound the pre-serialization source buffer independently.
-    let estimate = entries
-        .iter()
-        .map(|entry| entry.estimated_heap_bytes())
-        .sum::<usize>();
-    if cycle.estimated.saturating_add(estimate) > limit {
-        cycle.failure = Some("source cycle memory limit exceeded; cursor retained".into());
-        return;
+    if cycle.reserve_batch(entries, limit) {
+        cycle.entries.extend_from_slice(entries);
     }
-    cycle.estimated += estimate;
-    cycle.entries.extend_from_slice(entries);
 }
 
 fn bind<T: InputBody>(
@@ -454,20 +462,19 @@ fn run_agent(
         let captured = buffer.clone();
         let capture_queue = queue.clone();
         let delta_manager = Arc::downgrade(&manager);
-        input.bind_collector(
-            move |entries| {
-                capture(
-                    &captured,
-                    entries,
-                    capture_queue.options.read().unwrap().queue_memory_bytes,
-                )
-            },
-            move |delta| {
-                if let Some(manager) = delta_manager.upgrade() {
-                    manager.record_runtime_delta("qoder-trace", delta);
-                }
-            },
-        );
+        input.inner.set_owned_entries_handler(move |entries| {
+            let limit = capture_queue.options.read().unwrap().queue_memory_bytes;
+            let mut cycle = captured.lock().unwrap();
+            if cycle.reserve_batch(&entries, limit) {
+                // Qoder returns a single filtered batch per cycle.
+                cycle.entries = entries;
+            }
+        });
+        input.inner.on_runtime_delta(move |delta| {
+            if let Some(manager) = delta_manager.upgrade() {
+                manager.record_runtime_delta("qoder-trace", delta);
+            }
+        });
         bind(
             &input.inner,
             manager.clone(),
