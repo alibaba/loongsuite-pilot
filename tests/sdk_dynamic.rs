@@ -1009,18 +1009,40 @@ fn full_pilot_sdk_observe_preserves_qoder_wakeup_context() {
     host.ready();
 
     let traceparent = "00-00112233445566778899aabbccddeeff-0123456789abcdef-01";
-    let mut child = Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"))
-        .args([
-            "sdk-hook",
-            "--data-dir",
-            sdk.to_str().unwrap(),
-            "--channel",
-            "observe",
-            "--agent",
-            "qoder-auto",
-            "--event",
-            "Stop",
-        ])
+    #[cfg(unix)]
+    let mut command = {
+        let hooks = root.join("hooks");
+        std::fs::create_dir_all(hooks.join("shared")).unwrap();
+        for name in ["qoder-loongsuite-pilot-hook.sh", "shared/native.sh"] {
+            std::fs::copy(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets/hooks")
+                    .join(name),
+                hooks.join(name),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            hooks.join("pilot-bin"),
+            env!("CARGO_BIN_EXE_loongsuite-pilot"),
+        )
+        .unwrap();
+        let mut command = Command::new("/bin/bash");
+        command
+            .arg(hooks.join("qoder-loongsuite-pilot-hook.sh"))
+            .env("LOONGSUITE_PILOT_DATA_DIR", &data);
+        command
+    };
+    #[cfg(not(unix))]
+    let mut command = {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));
+        command
+            .args(["sdk-hook", "--channel", "observe", "--agent", "qoder-auto"])
+            .arg("--data-dir")
+            .arg(&sdk);
+        command
+    };
+    let mut child = command
         .env("TRACEPARENT", traceparent)
         .env("AGENTTEAMS_WORKER_NAME", "sdk-hook-worker")
         .env(
