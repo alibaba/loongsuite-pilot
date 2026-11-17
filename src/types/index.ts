@@ -10,6 +10,8 @@ export interface ListenerConfig {
   pollInterval: number;
   /** Read-only source log directory override for the doubao-work listener. */
   logDir?: string;
+  /** Product source for the doubao-work listener; defaults to Doubao Work. */
+  client?: 'doubao-work' | 'doubao';
 }
 
 /**
@@ -85,7 +87,6 @@ export interface OtlpTraceRawConfig {
   resourceAttributes?: Record<string, string>;
   serviceName?: string;
   debug?: boolean;
-  /** @deprecated Ignored. Message content capture is always enabled. */
   captureMessageContent?: boolean;
   turnIdleTimeoutMs?: number;
   resourceAttributeKeys?: string[];
@@ -244,7 +245,7 @@ export interface MultimodalRuntimeConfig {
 }
 
 /** Agent ids with multimodal extraction implemented. */
-export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder'] as const;
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder', 'qwen-work-cn'] as const;
 
 /** Experimental per-agent multimodal policy (`uploadMode: none` disables). */
 export interface AgentMultimodalConfig {
@@ -255,8 +256,7 @@ export interface AgentMultimodalConfig {
 
 export interface AgentConfig {
   enabled?: boolean;
-  /** @deprecated Ignored. Message content capture is always enabled. */
-  captureMessageContent?: boolean;
+  captureMessageContent: boolean;
   multimodal?: AgentMultimodalConfig;
 }
 
@@ -290,7 +290,6 @@ export interface OtlpTraceFlusherConfig {
   /** Legacy mode appends the normalized agent type to serviceName. Defaults to true. */
   appendAgentTypeToServiceName?: boolean;
   resourceAttributes?: Record<string, string>;
-  /** @deprecated Ignored. Message content capture is always enabled. */
   captureMessageContent?: boolean;
   debug?: boolean;
   turnIdleTimeoutMs?: number;
@@ -431,6 +430,7 @@ export interface StatusBarConfig {
 }
 
 export interface DashboardConfig {
+  enabled: boolean;
   port: number;
 }
 

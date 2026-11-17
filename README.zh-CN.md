@@ -191,9 +191,10 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-本地 Dashboard 会随采集服务一起启动和停止，直接打开
-`http://127.0.0.1:8765/`，无需单独的 monitor 命令。页面直接读取采集服务生成的
-`logs/metrics-summary.json`。
+本地 Dashboard 默认关闭。执行 `loongsuite-pilot dashboard start` 可使用默认端口
+`8765`，执行 `loongsuite-pilot dashboard start 9999` 可指定端口；
+`loongsuite-pilot dashboard stop` 会关闭页面服务，保留采集。这些命令会重启正在运行的
+采集服务。页面直接读取采集服务生成的 `logs/metrics-summary.json`。
 
 macOS 可按需执行 `loongsuite-pilot dashboard shortcut install`，创建带雷达图标的
 Dashboard 网页快捷方式（`.webloc`），并添加到程序坞的文件区。普通安装和升级不会自动添加。

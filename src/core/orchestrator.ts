@@ -23,7 +23,6 @@ import {
   isAgentGatedEnabled as isAgentGatedEnabledIn,
   resolvePilotDir as resolvePilotDirIn,
 } from '../deployment/deploy-command.js';
-import { detectAgent } from '../deployment/detect-utils.js';
 import {
   ensureRegisteredPiSdkWrappers,
   isPiSdkRegistryBusyError,
@@ -334,6 +333,7 @@ export class Orchestrator extends EventEmitter {
       dataDir: this.dataDir,
       pilotDir,
       installedBy: 'daemon',
+      doubaoWork: this.config.listeners['doubao-work'],
     });
     await this.deploymentManager.loadDefinitions();
     await this.refreshDeploymentScope();
@@ -382,7 +382,7 @@ export class Orchestrator extends EventEmitter {
     await this.agentDiscoveryService.start();
 
     // 9. Start log retention service
-    this.logRetentionService = new LogRetentionService(this.dataDir, this.config.retention);
+    this.logRetentionService = new LogRetentionService(this.dataDir, this.config.retention, this.stateStore);
     this.logRetentionService.start();
 
     // 10. Start hook watchdog (periodically restores hooks overwritten by other tools)
@@ -460,16 +460,18 @@ export class Orchestrator extends EventEmitter {
     );
     this.metricsSummaryWriter.start();
 
-    // The local dashboard shares the collector lifecycle and is non-fatal when
+    // The opt-in dashboard shares the collector lifecycle and is non-fatal when
     // its loopback port is unavailable. It never opens the system browser.
-    this.dashboardServer = new DashboardServer({
-      dataDir: this.dataDir,
-      assetPath: path.join(pilotDir, 'assets', 'dashboard', 'index.html'),
-      port: this.config.dashboard.port,
-    });
-    await this.dashboardServer.start().catch(err => {
-      logger.warn('dashboard start failed (non-fatal)', { error: String(err) });
-    });
+    if (this.config.dashboard.enabled) {
+      this.dashboardServer = new DashboardServer({
+        dataDir: this.dataDir,
+        assetPath: path.join(pilotDir, 'assets', 'dashboard', 'index.html'),
+        port: this.config.dashboard.port,
+      });
+      await this.dashboardServer.start().catch(err => {
+        logger.warn('dashboard start failed (non-fatal)', { error: String(err) });
+      });
+    }
 
     // Interceptor HTTP shares this process. A bind failure leaves hooks fail-open
     // and must not keep the collector from collecting.
@@ -488,7 +490,7 @@ export class Orchestrator extends EventEmitter {
       return null;
     });
 
-    // Only the native macOS menu bar app remains optional.
+    // The native macOS menu bar app has its own switch.
     if (this.config.statusBar.enabled) {
       if (process.platform === 'darwin') {
         this.statusBarAppManager = new StatusBarAppManager({ dataDir: this.dataDir, packageVersion });
@@ -920,10 +922,13 @@ export class Orchestrator extends EventEmitter {
         enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         precondition: async () =>
           (await directoryExists(def.directoryPlugin!.sourceDir))
-          && (await detectAgent(def.detection)),
+          && (await this.deploymentManager.isAgentDetected(def)),
         check: async () => !(await this.deploymentManager.needsRedeploy(def)),
         repair: async () => {
           const result = await this.deploymentManager.deploySingle(def);
+          if (result.skipped && result.reason === 'not-detected') {
+            throw new Error(`Agent disappeared before directory plugin repair for ${def.id}`);
+          }
           if (!result.success) {
             throw new Error(result.error ?? `directory plugin repair failed for ${def.id}`);
           }
@@ -1015,7 +1020,8 @@ export class Orchestrator extends EventEmitter {
           { ...otlpTraceCfg, dataDir: this.dataDir },
           this.globalAttributesProvider,
           undefined,
-          new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns')),
+          new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
+            ['codex', 'hermes', 'openclaw']),
           entries => this.inputManager!.prepareRestoredEntries(entries),
         );
         await r.start();
@@ -1405,11 +1411,20 @@ export class Orchestrator extends EventEmitter {
 
     const qwenWorkCNLogDir = path.join(this.dataDir, 'logs', 'qwen-work-cn', 'history');
     const qwenWorkCNSegmentsRoot = resolveHome('~/.qwenworkcn/logs/sessions');
+    const qwenWorkCNAgentCfg = this.config.agents['qwen-work-cn'] ?? {};
+    const qwenWorkCNMultimodalEnabled = !!this.multimodalProcessor
+      && isAgentMultimodalEnabled('qwen-work-cn', qwenWorkCNAgentCfg);
     const qwenWorkCNTraceInput = new QwenWorkCNTraceInput({
       stateStore: this.stateStore,
       logDir: qwenWorkCNLogDir,
       segmentsRoot: qwenWorkCNSegmentsRoot,
       pollIntervalMs: listenerCfg['qwen-work-cn-trace']?.pollInterval,
+      multimodal: {
+        enabled: qwenWorkCNMultimodalEnabled,
+        uploadMode: qwenWorkCNAgentCfg.multimodal?.uploadMode ?? 'none',
+        allowedRootPaths: qwenWorkCNAgentCfg.multimodal?.allowedRootPaths,
+        ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+      },
     });
     this.inputManager.registerInput(qwenWorkCNTraceInput);
     const qwenWorkCNTraceEnabled = () =>
@@ -1472,11 +1487,12 @@ export class Orchestrator extends EventEmitter {
     // --- Qoder Trace (sole Qoder collection path: merges hook JSONL, native
     // session segments and SQLite token usage into one turn-buffered trace) ---
     const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder', 'history');
-    const qoderAgentCfg = this.config.agents.qoder ?? {};
+    const qoderAgentCfg = this.config.agents.qoder ?? { captureMessageContent: true };
     const qoderMultimodalEnabled = !!this.multimodalProcessor
       && isAgentMultimodalEnabled('qoder', qoderAgentCfg);
     const qoderTraceInput = new QoderTraceInput({
       stateStore: this.stateStore,
+      resolveTraceContext: entries => this.inputManager.stampTraceContext(entries),
       dataDir: this.dataDir,
       logDir: qoderCliLogDir,
       pollIntervalMs: listenerCfg['qoder-trace']?.pollInterval,
@@ -1623,7 +1639,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Codex rollout transcript (completed and interrupted turns) ---
-    const codexAgentCfg = this.config.agents.codex ?? {};
+    const codexAgentCfg = this.config.agents.codex ?? { captureMessageContent: true };
     const codexMultimodalEnabled = !!this.multimodalProcessor
       && isAgentMultimodalEnabled('codex', codexAgentCfg);
     const codexWakeupDir = path.join(this.dataDir, 'state', 'codex', 'transcript-wakeups');
@@ -1880,15 +1896,17 @@ export class Orchestrator extends EventEmitter {
 
     // --- Doubao Work (passive frontend client-message lifecycle; no host injection) ---
     const doubaoLogDir = listenerCfg['doubao-work']?.logDir;
+    const doubaoClient = listenerCfg['doubao-work']?.client;
     const doubaoWorkInput = new DoubaoWorkInput({
       stateStore: this.stateStore,
       logDir: doubaoLogDir,
+      client: doubaoClient,
       pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
     });
     this.inputManager.registerInput(doubaoWorkInput);
     entries.push(this.inputManager.buildDetectionEntry(doubaoWorkInput, {
-      watchPaths: DoubaoWorkInput.getWatchPaths(doubaoLogDir),
-      isAvailable: () => DoubaoWorkInput.checkAvailability(doubaoLogDir),
+      watchPaths: DoubaoWorkInput.getWatchPaths(doubaoLogDir, doubaoClient),
+      isAvailable: () => DoubaoWorkInput.checkAvailability(doubaoLogDir, doubaoClient),
       enabled: () => this.isAgentGatedEnabled('doubao-work')
         && this.agentControlManager.resolveEnabled('doubao-work', listenerCfg['doubao-work']?.enabled ?? true),
       pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,

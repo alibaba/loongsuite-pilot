@@ -64,6 +64,8 @@ it('routes native first output and late execution snapshots through the masked p
     expect(native.spanContext().traceId).toBe(rootAgent.spanContext().traceId);
     expect(native.startTime).toEqual([Math.floor(execution.startedAtMs / 1000), (execution.startedAtMs % 1000) * 1_000_000]);
     const events = (await readFile(path.join(outputDir, 'doubao-work-all.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    expect(events.every(event => event['loongsuite.doubao_work.client'] === 'doubao-work')).toBe(true);
+    expect(spans.every(span => span.attributes['loongsuite.doubao_work.client'] === 'doubao-work')).toBe(true);
     expect(events).toHaveLength(10); expect(new Set(events.map(e => e['event.id'])).size).toBe(10);
     expect(events.filter(e => e['event.name'] === 'agent.input')).toHaveLength(3);
     expect(events.filter(e => e['gen_ai.turn.start'] === true)).toHaveLength(1);
@@ -157,7 +159,7 @@ it('routes watched native-shaped metadata through identity, mask, JSONL projecti
 });
 
 
-it('captures current I/O and masks exact tool content before TOOL span serialization', async () => {
+it.each([false, true])('captures current I/O and masks exact tool content before TOOL span serialization (native reuse=%s)', async reuse => {
   const root = await mkdtemp(path.join(tmpdir(), 'doubao-content-pipeline-'));
   const logs = path.join(root, 'source'), sessionsRoot = path.join(root, 'native'), outputDir = path.join(root, 'output');
   await mkdir(logs); const source = path.join(logs, DOUBAO_FILE); await writeFile(source, '');
@@ -173,13 +175,20 @@ it('captures current I/O and masks exact tool content before TOOL span serializa
   try {
     const clock = vi.spyOn(Date, 'now').mockReturnValue(DOUBAO_EPOCH - 1); await input.baseline(); clock.mockRestore();
     const dir = path.join(sessionsRoot, 'synthetic-conversation', 'agents', 'm_nativeMain', 'system'); await mkdir(dir, { recursive: true });
+    const demand = `CURRENT_INPUT ${secret}`;
     const rows = [
+      ...(reuse ? [{ role: 'user', content: 'OLD_INPUT' }, { role: 'assistant', content: 'OLD_ANSWER' },
+        { role: 'user', content: '\n\n' + demand }] : []),
       { role: 'assistant', tool_calls: [{ id: 'current-call', function: { name: 'Read', arguments: JSON.stringify({ file_path: 'synthetic-file', key: secret }) } }] },
       { role: 'tool', tool_call_id: 'current-call', content: 'CURRENT_TOOL ' + secret },
       { role: 'assistant', content: 'CURRENT_ANSWER ' + secret },
     ];
     await writeFile(path.join(dir, 'trajectory.jsonl'), rows.map(row => JSON.stringify(row)).join('\n') + '\n');
-    await writeFile(path.join(dir, 'assignment.md'), `## [${new Date(DOUBAO_EPOCH + 10).toISOString()}] 需求\nCURRENT_INPUT ${secret}\n`);
+    const header = `## [${new Date(DOUBAO_EPOCH + 10).toISOString()}] 需求\n`;
+    const task = reuse
+      ? `## [${new Date(DOUBAO_EPOCH - 1000).toISOString()}] 需求\nOLD_INPUT\n${header}<system-reminder>\nSynthetic execution mode.\n</system-reminder>\n\n${demand}\n${header}<system-reminder>\nSynthetic subagent result.\n</system-reminder>\n`
+      : header + demand + '\n';
+    await writeFile(path.join(dir, 'assignment.md'), task);
     await output.start(); await manager.startInput('doubao-work');
     await appendFile(source, doubaoLine('on_message_session_start', {}, 10)
       + doubaoToolLine({ tcid: 'current-call', name: 'Read' }, 100)

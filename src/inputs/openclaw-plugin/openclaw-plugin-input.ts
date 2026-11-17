@@ -63,7 +63,7 @@ export class OpenClawPluginInput extends BaseHookInput {
 
   protected override isHookLogFile(fileName: string): boolean {
     return super.isHookLogFile(fileName)
-      || (this.logPrefix === 'openclaw' && /^openclaw-\d{4}-\d{2}-\d{2}-uid\d+\.jsonl$/.test(fileName));
+      || (this.logPrefix === 'openclaw' && /^openclaw-\d{4}-\d{2}-\d{2}-uid\d+(?:\.segment-\d{12}-[a-f0-9]{32})?\.jsonl$/.test(fileName));
   }
 
   protected override isTodayHookLogFile(fileName: string, today: string): boolean {

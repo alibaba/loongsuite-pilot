@@ -1,8 +1,8 @@
 /**
  * loongsuite-pilot OpenClaw event_t plugin
  *
- * Runs inside the OpenClaw process (Node.js). Modern hosts register 16 hooks
- * (7 conversation-access + 9 default-active) via `api.on(hookName, handler)` and
+ * Runs inside the OpenClaw process (Node.js). Modern hosts register 15 hooks
+ * (6 conversation-access + 9 default-active) via `api.on(hookName, handler)` and
  * converts OpenClaw hook events into ARMS GenAI event_t JSONL records for
  * consumption by loongsuite-pilot's BaseHookInput pipeline. Hosts before
  * 2026.5.12 use the separate 9-hook legacy-adapter.mjs.
@@ -30,9 +30,13 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { appendRawJsonl } from "../shared/raw-jsonl-writer.mjs";
+import { pilotConfigPath, readPilotConfig } from "../shared/pilot-config.mjs";
 import { createSubagentContexts, stampSubagent } from "./subagent-context.mjs";
+import { invocationId, auditRecord, textMessages, deliveredText } from "./invocation-audit.mjs";
 import { MIN_OPENCLAW_VERSION } from "./compatibility.mjs";
 import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
+import { installSteeredDeliveryObserver } from "./steered-delivery.mjs";
 import { createLegacyHandlers } from "./legacy-adapter.mjs";
 import { createObservationClock } from "./legacy-utils.mjs";
 import {
@@ -63,6 +67,8 @@ const MAX_RUNS = 200;
 const MAX_SESSIONS = 100;
 const MAX_RUN_STATE_ENTRIES = 512;
 const MAX_CONTENT_SIZE = 64 * 1024;
+const MAX_INPUT_MESSAGES = 1024;
+const MAX_INPUT_BYTES = 2 * 1024 * 1024;
 const MAX_TOOL_RESULT_SIZE = 64 * 1024;
 const PILOT_CONFIG_CACHE_TTL_MS = 5_000;
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, {
@@ -250,7 +256,7 @@ function truncateContent(val) {
 let pilotConfigCache = { path: null, loadedAt: 0, value: {} };
 
 function loadPilotConfig() {
-  const cfgPath = path.join(resolveDataDir(), "config.json");
+  const cfgPath = pilotConfigPath();
   const now = Date.now();
   if (
     pilotConfigCache.path === cfgPath
@@ -259,11 +265,7 @@ function loadPilotConfig() {
     return pilotConfigCache.value;
   }
 
-  let value = {};
-  try {
-    const raw = fs.readFileSync(cfgPath, "utf-8");
-    value = JSON.parse(raw);
-  } catch {}
+  const value = readPilotConfig(cfgPath);
   pilotConfigCache = { path: cfgPath, loadedAt: now, value };
   return value;
 }
@@ -309,6 +311,17 @@ function resolveUserId(cfg) {
   return resolveUserIdentity(cfg).userId;
 }
 
+function isExplicitlyFalse(value) {
+  return value === false || (typeof value === "string" && value.trim().toLowerCase() === "false");
+}
+
+let openClawPluginConfig = {};
+
+function shouldCaptureContent(pilotConfig) {
+  return !isExplicitlyFalse(openClawPluginConfig?.captureMessageContent)
+    && !isExplicitlyFalse(pilotConfig?.agents?.openclaw?.captureMessageContent);
+}
+
 // Working directory of the OpenClaw instance, captured once at register().
 // Emitted as agent.openclaw.cwd so the pilot pipeline can enrich git context.
 let agentCwd;
@@ -340,6 +353,26 @@ function appendPrivateFile(filePath, content) {
   }
 }
 
+const CONTENT_RECORD_FIELDS = [
+  "gen_ai.input.messages",
+  "gen_ai.input.messages_delta",
+  "gen_ai.output.messages",
+  "gen_ai.tool.call.arguments",
+  "gen_ai.tool.call.result",
+  "gen_ai.system_instructions",
+  "gen_ai.tool.definitions",
+  "agent.openclaw.persisted_message",
+  "agent.openclaw.message",
+  "agent.openclaw.last_assistant_message",
+  "error.message",
+];
+
+function redactRecordContent(record) {
+  const redacted = { ...record };
+  for (const field of CONTENT_RECORD_FIELDS) delete redacted[field];
+  return redacted;
+}
+
 const childContexts = createSubagentContexts(resolveDataDir, writeError);
 
 function releasePendingChild(run, parent) {
@@ -350,20 +383,29 @@ function releasePendingChild(run, parent) {
   if (parent && !run.childUnlinked) run.parentContext = parent;
   else run.childUnlinked = true;
   for (const record of pending) persistRecord(run.parentContext ? stampSubagent(record, run.parentContext) : {
-    ...record, "agent.openclaw.subagent.collection": "parent_unresolved",
+    ...record,
+    ...(run.auditParentContext?.invocationId ? { "gen_ai.agent.parent.invocation.id": run.auditParentContext.invocationId } : {}),
+    "agent.openclaw.subagent.collection": "parent_unresolved",
   });
 }
 
-function writeRecord(record) {
+function writeRecord(record, captureContent = true) {
   const run = runs.get(record["agent.openclaw.run_id"] || record["gen_ai.turn.id"]);
-  if (run?.parentContext) return persistRecord(stampSubagent(record, run.parentContext));
+  const auditParent = run?.auditParentContext || run?.parentContext;
+  if (auditParent?.invocationId) record["gen_ai.agent.parent.invocation.id"] = auditParent.invocationId;
+  if (auditParent && run.sessionId && auditParent.childSessionId !== run.sessionId) {
+    auditParent.childSessionId = run.sessionId;
+    childContexts.write(run.runId, auditParent);
+  }
+  const safeRecord = captureContent ? record : redactRecordContent(record);
+  if (run?.parentContext) return persistRecord(stampSubagent(safeRecord, run.parentContext));
   // sessions_spawn may start its child before returning the native runId. Hold
   // that child's early records until the exact tool result supplies the join.
   // Never guess from an active tool, timestamps or task text under concurrency.
   if (isSessionKey(run?.sessionKey) && /:subagent:[^:]+$/.test(run.sessionKey) && !run.childUnlinked) {
     run.pendingChildRecords ||= [];
-    run.pendingChildRecords.push(record);
-    run.pendingChildBytes = (run.pendingChildBytes || 0) + Buffer.byteLength(safeStringify(record));
+    run.pendingChildRecords.push(safeRecord);
+    run.pendingChildBytes = (run.pendingChildBytes || 0) + Buffer.byteLength(safeStringify(safeRecord));
     if (!run.pendingChildTimer) {
       run.pendingChildTimer = setTimeout(() => releasePendingChild(run), 30_000);
       run.pendingChildTimer.unref?.();
@@ -372,7 +414,7 @@ function writeRecord(record) {
     if (run.pendingChildRecords.length >= 512 || run.pendingChildBytes >= 4 * 1024 * 1024) releasePendingChild(run);
     return;
   }
-  persistRecord(record);
+  return persistRecord(safeRecord);
 }
 
 function persistRecord(record) {
@@ -382,9 +424,11 @@ function persistRecord(record) {
       _logDirReady = true;
     }
     const filePath = path.join(logDir(), `openclaw-${todayStamp()}${sharedRootLogs ? writerSuffix() : ''}.jsonl`);
-    appendPrivateFile(filePath, safeStringify(record) + "\n");
+    appendRawJsonl(filePath, safeStringify(record) + "\n", undefined, { privateOwner: sharedRootLogs });
+    return true;
   } catch (err) {
     writeError("writeRecord", err);
+    return false;
   }
 }
 
@@ -464,10 +508,12 @@ function getRun(runId, event, ctx) {
   if (!runId) return null;
   let r = runs.get(runId);
   if (!r) {
+    const savedParent = childContexts.read(runId);
     r = {
       runId,
       traceId: generateTraceId(),
-      parentContext: childContexts.read(runId),
+      parentContext: savedParent?.auditOnly ? undefined : savedParent,
+      auditParentContext: savedParent,
       toolSpanIds: new Map(),
       callSeq: 0,
       currentStepCallId: null,
@@ -476,6 +522,7 @@ function getRun(runId, event, ctx) {
       modelSpanIds: new Map(),
       llmInputStash: null,
       llmInputPending: false,
+      cycleInputSnapshot: null,
       completed: false,
       sessionId: null,
       provider: null,
@@ -491,12 +538,33 @@ function getRun(runId, event, ctx) {
       pendingToolInputMessages: [],
       persistedToolCallIds: new Set(),
       perCallUsage: new Map(),
+      delegations: new Map(),
     };
   } else {
     // Refresh insertion order so the bounded Map behaves as an actual LRU.
     runs.delete(runId);
   }
   runs.set(runId, r);
+  const receiverSession = event?.sessionId || ctx?.sessionId || r.sessionId;
+  if (!r.announcedWork && receiverSession && runId.startsWith('announce:v1:')
+    && (r.announcementCheckedAt === undefined || Date.now() - r.announcementCheckedAt >= 25)) {
+    r.announcementCheckedAt = Date.now();
+    const candidates = childContexts.list().filter(work => work.invocationId
+      && work.sessionId === receiverSession
+      && runId === `announce:v1:${work.childSessionKey}:${work.runId}`);
+    if (candidates.length === 1) {
+      r.announcedWork = candidates[0];
+      // A descendant announcement can replace its waiting coordinator's
+      // native run id. Its exact submitting parent run is already persisted;
+      // follow that causal edge, never the latest work in the same session.
+      const incoming = candidates[0].parentRunId && childContexts.read(candidates[0].parentRunId);
+      if (!r.auditParentContext && incoming?.invocationId && incoming.childSessionId === receiverSession) {
+        r.auditParentContext = { ...incoming, runId };
+        if (!incoming.auditOnly && !r.childUnlinked) r.parentContext = r.auditParentContext;
+        childContexts.write(runId, r.auditParentContext);
+      }
+    }
+  }
   observeSessionKey(r, event, ctx);
   const sessionKey = event?.sessionKey || ctx?.sessionKey || r.sessionKey;
   if (sessionKey && !r.completed) {
@@ -561,6 +629,7 @@ function resetCompletedRunState(run) {
   run.modelSpanIds.clear();
   run.llmInputStash = null;
   run.llmInputPending = false;
+  run.cycleInputSnapshot = null;
   run.userPromptText = null;
   run.systemPrompt = null;
   run.modelCallEnds.clear();
@@ -636,8 +705,12 @@ function buildCommonFields(run, sessionId, userId) {
   if (run) {
     base.trace_id = run.traceId;
     base["gen_ai.turn.id"] = run.turnId || run.runId;
+    // The producer owns the start even if the collector restarts mid-run.
+    // An explicit false keeps suffix responses from becoming a second start.
+    base["gen_ai.turn.start"] = false;
     if (run.turnId) base["agent.openclaw.run_id"] = run.runId;
     base["gen_ai.session.id"] = run.sessionId || sessionId || "";
+    if (base["gen_ai.session.id"]) base["gen_ai.agent.id"] = base["gen_ai.session.id"];
     if (run.sessionKeyAmbiguous) base["agent.openclaw.session_key.ambiguous"] = true;
     else if (isSessionKey(run.telemetrySessionKey)) base["agent.openclaw.session_key"] = run.telemetrySessionKey;
     if (run.provider) base["gen_ai.provider.name"] = run.provider;
@@ -667,21 +740,85 @@ function inferProviderName(provider, model) {
 // Message format helpers (ARMS nested parts structure)
 // ---------------------------------------------------------------------------
 
-function buildUserInputMessages(systemPrompt, userPromptText) {
-  const messages = [];
+function historyInputMessage(message) {
+  if (!message || typeof message !== "object") return undefined;
+  if (Array.isArray(message.content)) message = { ...message, content: message.content.slice(0, 64) };
+  if (message.role === "assistant") {
+    return buildAssistantOutputMessagesFromOpenClawMessage(message)?.[0]
+      || (typeof message.content === "string"
+        ? { role: "assistant", parts: [{ type: "text", content: truncate(message.content, MAX_CONTENT_SIZE) }] }
+        : undefined);
+  }
+  if (message.role === "toolResult" || message.role === "tool") {
+    return buildToolResultInputMessage({ message, toolCallId: message.toolCallId || message.tool_call_id });
+  }
+  if (["user", "system", "developer"].includes(message.role)) {
+    const parts = typeof message.content === "string"
+      ? [{ type: "text", content: truncate(message.content, MAX_CONTENT_SIZE) }]
+      : (Array.isArray(message.content) ? message.content : []).slice(0, 64)
+          .filter(block => block?.type === "text" && typeof block.text === "string")
+          .map(block => ({ type: "text", content: truncate(block.text, MAX_CONTENT_SIZE) }));
+    if (parts.length) return { role: message.role, parts };
+  }
+  return undefined;
+}
+
+function buildUserInputMessages(systemPrompt, userPromptText, historyMessages) {
+  const prefix = [];
   if (systemPrompt) {
-    messages.push({
+    prefix.push({
       role: "system",
       parts: [{ type: "text", content: truncate(systemPrompt, MAX_CONTENT_SIZE) }],
     });
   }
+  const suffix = [];
   if (userPromptText) {
-    messages.push({
+    suffix.push({
       role: "user",
       parts: [{ type: "text", content: truncate(userPromptText, MAX_CONTENT_SIZE) }],
     });
   }
-  return messages.length > 0 ? messages : undefined;
+  // llm_input.historyMessages excludes the prompt being submitted. Snapshot
+  // the host's replay view now, retaining recent history within a byte budget
+  // rather than keeping the caller's mutable/unbounded objects in run state.
+  const history = Array.isArray(historyMessages) ? historyMessages : [];
+  const captured = [];
+  let bytes = Buffer.byteLength(safeStringify([...prefix, ...suffix]), "utf8");
+  let truncated = false;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history.length - 1 - i >= MAX_INPUT_MESSAGES
+        || captured.length >= MAX_INPUT_MESSAGES - prefix.length - suffix.length) { truncated = true; break; }
+    if (Array.isArray(history[i]?.content) && history[i].content.length > 64) truncated = true;
+    const message = historyInputMessage(history[i]);
+    if (!message) continue;
+    bytes += Buffer.byteLength(safeStringify(message), "utf8") + 1;
+    if (bytes > MAX_INPUT_BYTES) { truncated = true; break; }
+    captured.push(message);
+  }
+  const messages = [...prefix, ...captured.reverse(), ...suffix];
+  return { messages: messages.length ? messages : undefined, requiredMessages: [...prefix, ...suffix], truncated };
+}
+
+function appendCycleInputMessages(snapshot, delta) {
+  const messages = [...(snapshot.messages || []), ...delta];
+  // Reserve the cycle's system/prompt while retaining the most recent replay
+  // and tool inputs. Full snapshots must remain bounded as a tool loop grows.
+  const required = new Set(snapshot.requiredMessages);
+  const keep = new Set(required);
+  let bytes = Buffer.byteLength(safeStringify(snapshot.requiredMessages), "utf8");
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (required.has(message)) continue;
+    const size = Buffer.byteLength(safeStringify(message), "utf8") + 1;
+    if (keep.size >= MAX_INPUT_MESSAGES || bytes + size > MAX_INPUT_BYTES) {
+      snapshot.truncated = true;
+      break;
+    }
+    bytes += size;
+    keep.add(message);
+  }
+  // Do not mutate arrays already emitted on earlier requests.
+  snapshot.messages = messages.filter(message => keep.has(message));
 }
 
 function buildToolDefinitions(tools) {
@@ -960,6 +1097,7 @@ function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
     ...buildCommonFields(run, ctx?.sessionId, userId),
     "event.name": "other",
     "agent.openclaw.hook": "before_agent_run",
+    "gen_ai.turn.start": !run.turnStartEmitted,
     "gen_ai.input.messages_delta": run.userPromptText
       ? [{ role: "user", parts: [{ type: "text", content: truncate(run.userPromptText, MAX_CONTENT_SIZE) }] }]
       : undefined,
@@ -968,6 +1106,7 @@ function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
       : undefined,
   };
   emit(record);
+  run.turnStartEmitted = true;
 }
 
 function handleBeforeAgentReply(event, ctx, userId, emit) {
@@ -999,10 +1138,11 @@ function handleLlmInput(event, ctx, userId, emit, cfg) {
     bindSessionRun(sessionKey, runId);
   }
   run.llmInputStash = {
-    systemPrompt: event.systemPrompt,
-    tools: event.tools,
-    prompt: event.prompt,
-    imagesCount: event.imagesCount,
+    ...buildUserInputMessages(event.systemPrompt, event.prompt, event.historyMessages),
+    systemInstructions: event.systemPrompt
+      ? [{ type: "text", content: truncate(event.systemPrompt, MAX_CONTENT_SIZE) }]
+      : undefined,
+    toolDefinitions: safeJsonClone(buildToolDefinitions(event.tools)),
   };
   run.llmInputPending = true;
   if (event?.provider) run.provider = event.provider;
@@ -1028,25 +1168,48 @@ function handleModelCallStarted(event, ctx, userId, emit) {
   if (event?.sessionId) run.sessionId = run.sessionId || event.sessionId;
   if (event?.sessionKey) run.sessionKey = run.sessionKey || event.sessionKey;
 
+  if (run.announcedWork) {
+    // New OpenClaw can suppress the persisted user prompt for internal events.
+    // The native announcement's first model call proves actual consumption.
+    // Prefer the earlier before_message_write payload when it was available.
+    recordAgentDelivery(run, run.announcedWork,
+      { content: run.llmInputStash?.prompt ?? run.userPromptText }, userId, emit);
+  }
+
   const common = buildCommonFields(run, run.sessionId, userId);
   setBounded(run.modelCallStartedAtNanos, callId, common.time_unix_nano);
 
   const startsAgentCycle = run.llmInputPending;
   run.llmInputPending = false;
   const stash = run.llmInputStash;
-  const inputMessages = startsAgentCycle && stash
-    ? buildUserInputMessages(stash.systemPrompt, stash.prompt)
-    : undefined;
-  const inputDelta = startsAgentCycle && stash?.prompt
-    ? [{ role: "user", parts: [{ type: "text", content: truncate(stash.prompt, MAX_CONTENT_SIZE) }] }]
+  if (startsAgentCycle) {
+    // The converter accumulates deltas across the entire turn and does not
+    // reset them on a full request. A same-runId fallback therefore needs an
+    // authoritative snapshot on every later step, not another history seed.
+    run.cycleInputSnapshot = run.callSeq > 1 && stash ? {
+      messages: stash.messages,
+      requiredMessages: stash.requiredMessages,
+      truncated: stash.truncated,
+    } : null;
+  }
+  const inputDelta = startsAgentCycle && stash
+    // The first cycle can use deltas; fallback cycles must not seed history
+    // again into that same accumulator. Keep normal tool loops incremental.
+    ? (run.cycleInputSnapshot ? undefined
+        : stash.messages?.filter(message => message.role !== "system" && message.role !== "developer"))
     : (run.pendingToolInputMessages.length > 0
         ? run.pendingToolInputMessages.splice(0)
         : undefined);
-  const systemInstructions = startsAgentCycle && stash?.systemPrompt
-    ? [{ type: "text", content: truncate(stash.systemPrompt, MAX_CONTENT_SIZE) }]
-    : undefined;
-  const toolDefinitions = startsAgentCycle ? buildToolDefinitions(stash?.tools) : undefined;
-  if (startsAgentCycle) run.llmInputStash = null;
+  if (!startsAgentCycle && run.cycleInputSnapshot && inputDelta) {
+    appendCycleInputMessages(run.cycleInputSnapshot, inputDelta);
+  }
+  const inputMessages = startsAgentCycle ? stash?.messages : run.cycleInputSnapshot?.messages;
+  const systemInstructions = startsAgentCycle ? stash?.systemInstructions : undefined;
+  const toolDefinitions = startsAgentCycle ? stash?.toolDefinitions : undefined;
+  if (startsAgentCycle) {
+    run.llmInputStash = null;
+    run.pendingToolInputMessages.length = 0;
+  }
 
   const record = {
     ...common,
@@ -1058,9 +1221,10 @@ function handleModelCallStarted(event, ctx, userId, emit) {
     "gen_ai.request.model": event?.model || run.model,
     "gen_ai.response.model": event?.model || run.model,
     "gen_ai.input.messages": truncateContent(inputMessages),
-    "gen_ai.input.messages_delta": inputDelta,
+    "gen_ai.input.messages_delta": run.cycleInputSnapshot ? undefined : inputDelta,
     "gen_ai.system_instructions": systemInstructions,
     "gen_ai.tool.definitions": truncateContent(toolDefinitions),
+    "agent.pilot.request_context.truncated": (run.cycleInputSnapshot?.truncated || (startsAgentCycle && stash?.truncated)) ? true : undefined,
     "agent.openclaw.hook": "model_call_started",
     "agent.openclaw.call_id": event?.callId,
     "agent.openclaw.api": event?.api,
@@ -1155,6 +1319,16 @@ function handleBeforeToolCall(event, ctx, userId, emit) {
     "agent.openclaw.hook": "before_tool_call",
   };
   emit(record);
+  if (["sessions_spawn", "sessions_send"].includes(event?.toolName) && event?.toolCallId
+    && run.sessionId && !run.delegations.has(event.toolCallId)) {
+    // Each send is new work; polling/history/cancellation tools never enter here.
+    const work = {
+      invocationId: invocationId(run.sessionId, run.turnId || run.runId, event.toolCallId),
+      childSessionKey: event.params?.sessionKey,
+    };
+    setBounded(run.delegations, event.toolCallId, work);
+    emit(auditRecord(common, work, "invoke", textMessages(event.params?.task ?? event.params?.message, "user")));
+  }
 }
 
 function handleAfterToolCall(event, ctx, userId, emit) {
@@ -1192,18 +1366,39 @@ function handleAfterToolCall(event, ctx, userId, emit) {
     ? nextModelStartedAtNanos
     : observedBoundedCompletion;
   const result = event?.result;
-  if (event?.toolName === "sessions_spawn" && event?.toolCallId) {
+  if (["sessions_spawn", "sessions_send"].includes(event?.toolName) && event?.toolCallId) {
     const details = result?.details || result;
-    if (details?.status === "accepted" && typeof details.runId === "string" && run.toolSpanIds.has(event.toolCallId)) {
+    // Dispatch identity is independent of visible reply delivery. Native send
+    // can finish silently or fail after sending; a pre-dispatch error's runId
+    // alone is not evidence that the target actually received this work.
+    const dispatched = ["accepted", "ok"].includes(details?.status)
+      || (event.toolName === "sessions_send" && (details?.status === "no_reply"
+        || (details?.sentBeforeError === true && ["timeout", "error"].includes(details?.status))));
+    if (dispatched && typeof details.runId === "string" && run.toolSpanIds.has(event.toolCallId)) {
       const parent = {
         traceId: run.parentContext?.traceId || run.traceId,
         parentSpanId: run.toolSpanIds.get(event.toolCallId),
         sessionId: run.sessionId, turnId: run.turnId || run.runId,
+        parentRunId: run.runId,
         toolCallId: event.toolCallId, userId: run.parentContext?.userId || run.userId || userId,
+        invocationId: run.delegations.get(event.toolCallId)?.invocationId,
+        childSessionKey: details.childSessionKey || details.sessionKey || run.delegations.get(event.toolCallId)?.childSessionKey,
+        auditOnly: event.toolName === "sessions_send",
       };
-      childContexts.write(details.runId, parent);
+      const retained = childContexts.read(details.runId);
+      if (retained?.invocationId === parent.invocationId) {
+        parent.childSessionId = retained.childSessionId;
+        parent.resultIds = retained.resultIds;
+      }
       const child = runs.get(details.runId);
-      if (child) releasePendingChild(child, parent);
+      if (child?.sessionId) parent.childSessionId = child.sessionId;
+      const work = run.delegations.get(event.toolCallId);
+      if (work && parent.childSessionId) work.childSessionId = parent.childSessionId;
+      childContexts.write(details.runId, parent);
+      if (child) {
+        child.auditParentContext = parent;
+        if (!parent.auditOnly) releasePendingChild(child, parent);
+      }
     }
   }
   const nestedError = result && typeof result === "object" ? result.error : undefined;
@@ -1236,6 +1431,17 @@ function handleAfterToolCall(event, ctx, userId, emit) {
     "agent.openclaw.duration_clipped_to_next_model": completionOverlapsNextModel || undefined,
   };
   emit(record);
+  const work = run.delegations.get(event?.toolCallId);
+  const details = result?.details || result;
+  // A send may synchronously deliver a reply. Accepted/timeout is never success.
+  if (work && ((event.toolName === "sessions_send" && details?.status === "ok" && typeof details.reply === "string")
+    || isError || details?.status === "error" || details?.status === "forbidden")) {
+    const audit = auditRecord(common, work, "result", textMessages(details?.reply ?? errorMessage ?? details?.error, "assistant"), work.childSessionId);
+    if (isError || ["error", "forbidden"].includes(details?.status)) audit["error.type"] = "agent_dispatch_error";
+    if (!work.resultIds?.includes(audit["event.id"])) {
+      if (emit(audit) !== false) work.resultIds = [...(work.resultIds || []), audit["event.id"]].slice(-32);
+    }
+  }
 }
 
 function handleToolResultPersist(event, ctx, userId, emit) {
@@ -1290,9 +1496,72 @@ function buildAssistantOutputMessagesFromOpenClawMessage(message) {
   return [{ role: "assistant", parts }];
 }
 
+function recordAgentDelivery(receiver, work, message, userId, emit) {
+  const retained = childContexts.read(work.runId);
+  if (retained?.invocationId === work.invocationId) work = retained;
+  // One native child-run completion is one logical result, including when
+  // both persistence and model-consumption hooks observe the same receipt.
+  if (work.resultIds?.length) return;
+  const audit = auditRecord(buildCommonFields(receiver, receiver.sessionId, userId), work,
+    'result', textMessages(deliveredText(message), 'assistant'), work.childSessionId);
+  if (emit(audit) === false) return;
+  work.resultIds = [audit['event.id']];
+  childContexts.write(work.runId, work);
+}
+
+function prepareSteeredDelivery(params) {
+  const source = params?.sourceSessionKey;
+  const prefix = `announce:v1:${source}:`;
+  if (!isSessionKey(source) || !params.directIdempotencyKey?.startsWith(prefix)) return;
+  const work = childContexts.read(params.directIdempotencyKey.slice(prefix.length));
+  if (!work?.invocationId || work.childSessionKey !== source) return;
+  const receivers = [...runs.values()].filter(run => !run.completed && run.sessionId === work.sessionId
+    && run.sessionKey === params.targetRequesterSessionKey);
+  if (receivers.length !== 1) return;
+  const events = params.internalEvents?.filter(event => event.type === 'task_completion'
+    && event.source === 'subagent' && event.childSessionKey === source);
+  if (events?.length !== 1) return;
+  return { receiver: receivers[0], turnId: receivers[0].turnId, work, result: events[0].result };
+}
+
+function completeSteeredDelivery(receipt, delivery) {
+  if (!receipt || delivery?.delivered !== true || delivery.path !== 'steered'
+    || !Number.isFinite(delivery.deliveredAt)) return;
+  const { receiver, work, result } = receipt;
+  // The native queue targets the live receiver. A different or terminated
+  // receiver after its commit is ambiguous; retain ordinary independent data.
+  if (runs.get(receiver.runId) !== receiver || receiver.completed || receiver.turnId !== receipt.turnId) return;
+  recordAgentDelivery(receiver, work, { content: typeof result === 'string' ? result : undefined },
+    resolveUserId(loadPilotConfig()), emitRecord);
+}
+
 function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = true) {
   const message = event?.message;
   const role = message?.role;
+
+  // Observe the actual parent-side persisted delivery, not child agent_end or
+  // subagent_ended. Only native structured provenance is authoritative; never
+  // parse a user-authored prompt, task label, nickname, or nearest timestamp.
+  if (role === "user" && message.provenance?.kind === "inter_session"
+    && message.provenance.sourceTool === "subagent_announce") {
+    const receiver = resolveContextRun(event, ctx);
+    const source = message.provenance.sourceSessionKey;
+    if (!receiver?.sessionId || !isSessionKey(source)) return;
+    // OpenClaw's native announce idempotency key is derived from the exact
+    // child session/run pair. This disambiguates reused sessions without
+    // parsing prompt text or selecting whichever invocation is newest.
+    const prefix = `announce:v1:${source}:`;
+    const nativeWork = receiver.runId?.startsWith(prefix)
+      ? childContexts.read(receiver.runId.slice(prefix.length)) : undefined;
+    const candidates = receiver.runId?.startsWith(prefix)
+      ? (nativeWork ? [nativeWork] : []) : childContexts.list();
+    const matches = candidates.filter(work => work.invocationId && work.childSessionKey === source
+      && work.sessionId === receiver.sessionId);
+    // Older delivery paths lack this work key. Retain only unique provenance.
+    if (matches.length !== 1) return;
+    recordAgentDelivery(receiver, matches[0], message, userId, emit);
+    return;
+  }
 
   // AssistantMessage is the supported OpenClaw per-call completion contract:
   // it carries output, stopReason, provider responseId and usage together.
@@ -1315,6 +1584,12 @@ function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = tr
       || (message.usage && typeof message.usage === "object")
       || typeof message.responseId === "string";
     if (!rawOutputMessages && !hasTerminalMetadata) return;
+    // The converter accumulates request deltas; it does not copy responses
+    // into the next request. Persisted assistant messages are observed input
+    // for the following model call, before the matching tool results.
+    if (rawOutputMessages) {
+      for (const output of rawOutputMessages) pushBounded(run.pendingToolInputMessages, safeJsonClone(output));
+    }
     const outputMessages = addFinishReason(rawOutputMessages, finishReason);
     const usage = normalizeUsage(message.usage);
     const ended = run.modelCallEnds.get(targetCallId);
@@ -1359,9 +1634,10 @@ function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = tr
       return;
     }
     // A new call flushes the previous pending response, so this map is bounded
-    // by the existing per-run call lifecycle. Legacy content settings do not
-    // affect either buffered or immediately emitted responses.
-    setBounded(run.pendingAssistantResponses, targetCallId, record);
+    // by the existing per-run call lifecycle. Apply privacy at observation as
+    // well as emission so a later config change cannot expose withheld content.
+    setBounded(run.pendingAssistantResponses, targetCallId,
+      shouldCaptureContent(cfg) ? record : redactRecordContent(record));
     if (ended) emitPendingAssistantResponse(run, targetCallId, emit);
     return;
   }
@@ -1371,24 +1647,6 @@ function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = tr
   // gen_ai.input.messages inside a turn (converter.js:73), and the flusher
   // drops metadata-only ephemeral events to prevent phantom ENTRY+AGENT.
   // Skip writing them so they don't surface as standalone spans.
-}
-
-function handleBeforeAgentFinalize(event, ctx, userId, emit) {
-  const runId = event?.runId || ctx?.runId;
-  if (!runId) return;
-  const run = getRun(runId, event, ctx);
-  const record = {
-    ...buildCommonFields(run, run.sessionId, userId),
-    "event.name": "other",
-    "agent.openclaw.hook": "before_agent_finalize",
-    "agent.openclaw.transcript_path": event?.transcriptPath,
-    "agent.openclaw.stop_hook_active": event?.stopHookActive,
-    "agent.openclaw.last_assistant_message": event?.lastAssistantMessage
-      ? truncate(safeStringify(event.lastAssistantMessage), MAX_CONTENT_SIZE)
-      : undefined,
-    "agent.openclaw.cwd": event?.cwd || agentCwd,
-  };
-  emit(record);
 }
 
 function handleAgentEnd(event, ctx, userId, emit) {
@@ -1417,7 +1675,7 @@ function handleAgentEnd(event, ctx, userId, emit) {
 // ---------------------------------------------------------------------------
 
 function emitRecord(record) {
-  writeRecord(record);
+  return writeRecord(record, shouldCaptureContent(loadPilotConfig()));
 }
 
 function makeHandler(fn, interceptHook) {
@@ -1570,6 +1828,9 @@ export default {
     }
 
     agentCwd = process.cwd() || undefined;
+    openClawPluginConfig = api?.pluginConfig && typeof api.pluginConfig === "object"
+      ? api.pluginConfig
+      : {};
     try {
       ensureDir(logDir());
       _logDirReady = true;
@@ -1609,13 +1870,16 @@ export default {
     try { firstTokenObserver = installFirstTokenObserver(); } catch (err) {
       debugFailureOnce("first-token-observer", err);
     }
+    try { installSteeredDeliveryObserver({ prepare: prepareSteeredDelivery, complete: completeSteeredDelivery }); }
+    catch (err) { debugFailureOnce('steered-delivery-observer', err); }
 
-    // 7 conversation-access hooks (OpenClaw CONVERSATION_HOOK_NAMES)
+    // Observe completion via agent_end. Merely registering before_agent_finalize
+    // enables the host's answer-revision gate and defers streaming delivery.
+    // 6 conversation-access hooks (OpenClaw CONVERSATION_HOOK_NAMES)
     on("before_model_resolve", handleBeforeModelResolve);
     on("before_agent_reply", handleBeforeAgentReply);
     on("llm_input", handleLlmInput);
     on("llm_output", handleLlmOutput);
-    on("before_agent_finalize", handleBeforeAgentFinalize);
     on("agent_end", handleAgentEnd);
     on("before_agent_run", handleBeforeAgentRun, {
       intercept: "before_agent_run",

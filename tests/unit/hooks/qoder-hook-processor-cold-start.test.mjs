@@ -208,6 +208,32 @@ function userBoundaryPrompts(records) {
 }
 
 describe('qoder-hook-processor cold-start recovery', () => {
+  it('retains both IDE inputs and requests when prompt progress follows each user row', () => {
+    const progress = hookEvent => ({ type: 'progress', data: { hookEvent } });
+    const prompts = ['first IDE prompt', 'second IDE prompt'];
+    for (const [index, prompt] of prompts.entries()) {
+      const [user, assistant] = turnRows(index, prompt);
+      delete user.entrypoint;
+      const rows = [
+        progress('UserPromptSubmit'),
+        user,
+        progress('UserPromptSubmit'),
+        assistant,
+        progress('Stop'),
+        progress('SessionEnd'),
+      ];
+      fs.appendFileSync(transcriptPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+      const result = runProcessor('session-old', {}, { hook_event_name: 'Stop' });
+      expect(result.status, result.stderr).toBe(0);
+    }
+    const records = readHistory();
+    expect(userBoundaryPrompts(records)).toEqual(prompts);
+    expect(records.filter(row => row['event.name'] === 'llm.request').map(row =>
+      row['gen_ai.input.messages_delta'][0].parts[0].content)).toEqual(prompts);
+    expect(records.filter(row => row['event.name'] === 'llm.response')).toHaveLength(2);
+    expect(new Set(records.map(row => row['event.id'])).size).toBe(records.length);
+  });
+
   it('accepts invocation-scoped GenAI identity from env', () => {
     fs.writeFileSync(transcriptPath, [
       ...turnRows(1, 'identity prompt'),

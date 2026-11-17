@@ -517,12 +517,33 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
     if (stopLine < 0) return waiting('stop-not-found');
 
     // Resolve the start from the actual Stop instead of trusting a global
-    // cursor that may have been reset by redeployment.
+    // cursor that may have been reset by redeployment. A UserPromptSubmit
+    // progress row can also arrive after the user row in the same turn.
     let startLine = -1;
     for (let i = stopLine - 1; i >= 0; i--) {
       if (hookEventOf(rows[i]) === 'UserPromptSubmit') {
         startLine = i;
         break;
+      }
+    }
+    if (startLine >= 0) {
+      let hasCurrentUser = false;
+      for (let i = startLine; i < stopLine; i++) {
+        if (isRealUserPrompt(rows[i])) {
+          hasCurrentUser = true;
+          break;
+        }
+      }
+      if (!hasCurrentUser) {
+        for (let i = startLine - 1; i >= 0; i--) {
+          const event = hookEventOf(rows[i]);
+          if (rows[i]?.type === 'assistant' || rows[i]?.type === 'last-prompt'
+            || event === 'Stop' || event === 'SessionEnd') break;
+          if (isRealUserPrompt(rows[i])) {
+            startLine = i;
+            break;
+          }
+        }
       }
     }
     if (startLine < 0) {
@@ -879,6 +900,19 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     }
 
     if (outputParts.length > 0) {
+      // SDK/CLI native transcripts can carry per-response usage, including
+      // sidechains absent from the parent's token database. One closing usage
+      // belongs to one model boundary; never add repeated streaming snapshots.
+      const nativeUsage = [...content].reverse().find(row => row.type === 'assistant'
+        && row.message?.usage && typeof row.message.usage === 'object')?.message.usage;
+      const usageFields = {};
+      for (const [source, target] of [
+        ['input_tokens', 'gen_ai.usage.input_tokens'], ['output_tokens', 'gen_ai.usage.output_tokens'],
+        ['cache_read_input_tokens', 'gen_ai.usage.cache_read.input_tokens'],
+        ['cache_creation_input_tokens', 'gen_ai.usage.cache_creation.input_tokens'],
+      ]) {
+        if (Number.isFinite(nativeUsage?.[source]) && nativeUsage[source] >= 0) usageFields[target] = nativeUsage[source];
+      }
       records.push({
         'event.id': crypto.randomUUID(),
         'event.name': 'llm.response',
@@ -890,6 +924,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'gen_ai.request.model': stepModel,
         'gen_ai.response.model': stepModel,
         'gen_ai.response.id': responseId,
+        ...usageFields,
         ...(finishReason ? { 'gen_ai.response.finish_reasons': [finishReason] } : {}),
         'user.id': userId,
         'gen_ai.output.messages': [{
@@ -998,6 +1033,18 @@ function finalizeRecords(records, cwd, runtimeConfig) {
     record['user.email'] = userIdentity?.email || '';
     Object.assign(record, spanAttributes, agentBaseFieldPatch(attributes),
       Object.keys(attributes).length > 0 ? { resourceAttributes: attributes } : {});
+  }
+  return applyQoderProductIdentity(records, runtimeConfig?.hostProduct);
+}
+
+/** Product identity is local to the owning Hook observation, never a session cache. */
+export function applyQoderProductIdentity(records, hostProduct) {
+  if (hostProduct !== 'app') return records;
+  for (const record of records) {
+    if (record['gen_ai.agent.type'] === 'qoder-cli') {
+      record['gen_ai.agent.type'] = 'qoder-app';
+      record['gen_ai.framework'] = 'qoder-app';
+    }
   }
   return records;
 }

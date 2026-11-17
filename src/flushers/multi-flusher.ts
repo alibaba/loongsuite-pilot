@@ -40,21 +40,33 @@ export class MultiFlusher extends BaseFlusher {
   }
 
   async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): Promise<void> {
-    const results = await Promise.allSettled(
-      this.flushers.map(r => signal ? r.sendBatch(entries, logicalBytes, signal) : r.sendBatch(entries, logicalBytes)),
-    );
-    for (let i = 0; i < results.length; i++) {
-      if (results[i].status === 'rejected') {
-        const err = (results[i] as PromiseRejectedResult).reason;
-        logger.error('flusher sendBatch failed', {
-          flusher: this.flushers[i].name,
-          error: String(err),
-        });
+    await this.createBatchDelivery(entries, logicalBytes, signal)();
+  }
+
+  override createBatchDelivery(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): () => Promise<void> {
+    const targets = this.flushers.map(flusher => ({
+      flusher, accepted: false, deliver: flusher.createBatchDelivery(entries, logicalBytes, signal),
+    }));
+    return async () => {
+      const pending = targets.filter(target => !target.accepted);
+      const results = await Promise.allSettled(pending.map(target => target.deliver()));
+      const failures: unknown[] = [];
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i];
+        if (result.status === 'fulfilled') {
+          pending[i].accepted = true;
+          continue;
+        }
+        const error = result.reason as Error & { cause?: Error };
+        logger.error('flusher sendBatch failed', { flusher: pending[i].flusher.name, error: String(error) });
+        if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes(error?.name)) failures.push(error);
       }
-    }
-    const durableFailure = results.find(result => result.status === 'rejected'
-      && ['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes(result.reason?.name));
-    if (durableFailure?.status === 'rejected') throw durableFailure.reason;
+      // A terminal durability failure must not be hidden by another target's
+      // retryable quota error. Successful targets remain accepted in either case.
+      const fatal = failures.find(error => (error as Error & { cause?: Error }).cause?.name !== 'CodexTurnJournalCapacityError');
+      if (fatal) throw fatal;
+      if (failures.length) throw failures[0];
+    };
   }
 
   async flush(): Promise<void> {

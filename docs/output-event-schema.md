@@ -176,6 +176,8 @@ Required levels follow OpenTelemetry wording:
 | `workspace.path` | string | Recommended | Absolute working directory the agent ran in (process cwd), independent of git. Present even when the directory is not a git repository. |
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
 
+Qoder product identity: the legacy IDE emits `gen_ai.agent.type=qoder`, and terminal CLI emits `qoder-cli`. For CLI-format transcripts, the owning native user prompt's `businessIdentity.product` determines whether the host is `app` or `cli`; this also covers sidechains whose lifecycle Hooks omit product metadata. Older runtimes fall back to the current Turn's Hook `parent_business_info.product=app` marker. App events use `qoder-app`. The OTLP Resource uses the product type as `gen_ai.framework`; the new desktop App uses `gen_ai.agent.system=qoder-app`, while existing CLI/IDE variants retain `qoder`. Product identity is not cached across resumed Turns. The App reuses `agents.qoder` configuration and CLI transcript/token enrichment. Missing or unrecognized product evidence retains the original classification; paths and process names are not used to guess a product. Historical records retain their original system value, so cross-version queries should also inspect type/framework.
+
 Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. `workspace.*` and any inferred `git.*` fields are collected independently from message extraction.
 
 ## OpenClaw Session Key
@@ -254,6 +256,8 @@ Experimental `doubao-work` events and OTLP resources expose `loongsuite.doubao_w
 `loongsuite.doubao_work.business_outcome=unknown` and `loongsuite.doubao_work.client_outcome`
 (`received`, `ended`, `error` or `cancelled`). Client completion is not business success or a model finish reason.
 See [scope and configuration](doubao-work.md).
+
+New events and exported OTLP Spans include `loongsuite.doubao_work.client`, with only `doubao-work` (Doubao Work) or `doubao` (Doubao App work mode). This source-product label supplements the shared `gen_ai.agent.type=doubao-work`; it does not identify a model or provider call. Legacy records without the label remain unknown.
 
 Local tools produce paired `tool.call` / `tool.result` logs with unchanged source times. A uniquely correlated current trajectory reconstructs STEP → LLM / TOOL from assistant messages: inputs contain preceding visible messages; outputs include text/tool_calls; parallel tools share one STEP. LLM and untimed trajectory-tool timestamps are estimated from client submission, tool and completion anchors, with intermediate unknown boundaries linearly allocated. Default CMS LLM counts and latency can include these estimates, which are not precise model timing or actual provider request counts. Missing model, usage, provider response ID and model finish reasons are omitted.
 

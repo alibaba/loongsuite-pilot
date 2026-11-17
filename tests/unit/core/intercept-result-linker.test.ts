@@ -20,12 +20,13 @@ function storeWith(records: Array<Parameters<ToolVerdictStore['put']>[0] & { act
 }
 
 describe('InterceptResultLinker', () => {
-  it('maps tool.call to PreToolUse and tool.result to PostToolUse', () => {
+  it.each(['qoder', 'qoder-app'])('maps %s tool.call to PreToolUse and tool.result to PostToolUse', agentType => {
     const store = storeWith([
       { sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse', action: 'allow' },
       { sessionId: 's1', toolUseId: 'call-1', phase: 'PostToolUse', action: 'block' },
     ]);
-    const entries = [toolEntry('tool.call'), toolEntry('tool.result')];
+    const entries = [toolEntry('tool.call', { 'gen_ai.agent.type': agentType }),
+      toolEntry('tool.result', { 'gen_ai.agent.type': agentType })];
 
     new InterceptResultLinker(store, true).enrich(entries);
 

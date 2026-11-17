@@ -1512,19 +1512,30 @@ export class CodexTranscriptInput extends BaseInput {
     stat: fsSync.Stats,
     endOffset = stat.size,
   ): Promise<number | null> {
+    const stateKey = this.stateKey(filePath);
+    const version = sourceVersion(stat);
+    const key = filePath + '\0' + version + '\0' + endOffset;
+    const previous = this.ownerOffsetProbes.get(key);
+    const absentVersion = this.stateStore.get(stateKey).extra?.codexOwnerAbsentVersion;
+    // A full, stable negative result belongs to this file's checkpoint, not
+    // the shared LRU: inventories larger than the LRU otherwise evict every
+    // result before the next poll. This does not advance the collection cursor
+    // or bypass pending turn/fork recovery. Prefix probes remain independent.
+    if (endOffset === stat.size && typeof absentVersion === 'string'
+      && absentVersion.length <= 256 && absentVersion === version) return null;
     // Owner selection uses the rollout filename, so paths stay distinct even
     // for hard links. Different scan boundaries can coexist for one version.
     // NUL cannot occur in a filesystem path, so the tuple stays unambiguous
     // without allocating an intermediate array or running a JSON serializer.
-    const key = filePath + '\0' + sourceVersion(stat) + '\0' + endOffset;
-    const previous = this.ownerOffsetProbes.get(key);
     // Hits perform no content I/O. A same-size rewrite preserving both
     // timestamps is indistinguishable and can retain stale owner state until
     // another source-version component changes.
     // A shorter search cannot establish absence in the rest of the file, and
     // an owner found by a longer search may lie outside the requested prefix.
     if (previous !== undefined) return previous;
-    const offset = await findOwnerSessionMetaOffset(filePath, endOffset, this.getInputRuntimeAccumulator());
+    const { offset, completeAbsence } = await findOwnerSessionMetaOffset(
+      filePath, endOffset, this.getInputRuntimeAccumulator(),
+    );
     // Never cache a result observed while a writer changed or removed the file.
     try {
       if (!sameFileVersion(stat, await fs.stat(filePath))) return null;
@@ -1532,6 +1543,15 @@ export class CodexTranscriptInput extends BaseInput {
       return null;
     }
     this.ownerOffsetProbes.set(key, offset);
+    const current = this.stateStore.get(stateKey);
+    if (completeAbsence && endOffset === stat.size) {
+      // Separate from codexTranscript so a caller holding an older checkpoint
+      // cannot overwrite the evidence when it later saves its scan progress.
+      this.stateStore.update(stateKey, { extra: { ...current.extra, codexOwnerAbsentVersion: version } });
+    } else if (offset !== null && current.extra?.codexOwnerAbsentVersion !== undefined) {
+      const { codexOwnerAbsentVersion: _discarded, ...extra } = current.extra;
+      this.stateStore.set(stateKey, { ...current, extra });
+    }
     return offset;
   }
 
@@ -3258,20 +3278,23 @@ async function findOwnerSessionMetaOffset(
   filePath: string,
   endOffset: number,
   runtime?: InputRuntimeAccumulator | null,
-): Promise<number | null> {
+): Promise<{ offset: number | null; completeAbsence: boolean }> {
   let ownerOffset: number | null = null;
-  let sawSessionMeta = false;
-  await scanJsonLines(filePath, 0, endOffset, line => {
+  const scan = await scanJsonLines(filePath, 0, endOffset, line => {
     if (line.record.type !== 'session_meta') {
       // Codex writes the owning meta and any copied fork metadata as a header.
-      // Stop before scanning the potentially large inherited conversation.
-      return sawSessionMeta ? false : undefined;
+      // Only a valid owner closes that header. A malformed session_meta must
+      // not turn a partial probe into an uncacheable negative on every poll.
+      return ownerOffset !== null ? false : undefined;
     }
-    sawSessionMeta = true;
     ownerOffset = selectOwnerSessionMetaOffset(filePath, ownerOffset, line);
     return undefined;
   }, runtime);
-  return ownerOffset;
+  return {
+    offset: ownerOffset,
+    completeAbsence: ownerOffset === null && scan.nextOffset === endOffset
+      && !scan.quarantined && !scan.incompleteTail,
+  };
 }
 
 type ForkAnchorKind = 'initial-hook' | 'uuidv7' | 'terminal-recovery';

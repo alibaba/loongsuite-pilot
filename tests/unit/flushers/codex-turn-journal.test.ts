@@ -17,6 +17,49 @@ function entry(id: string, overrides: Partial<AgentActivityEntry> = {}): AgentAc
 }
 
 describe('CodexTurnJournal', () => {
+  it('applies disk backpressure without deleting pending turns and recovers capacity after ACK', async () => {
+    const first = entry('first');
+    const bytes = Buffer.byteLength(JSON.stringify(first) + '\n');
+    const journal = new CodexTurnJournal(directory, 100, bytes);
+    await journal.append([first]);
+    await expect(journal.append([entry('second')])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    expect((await readJournal(journal)).flat().map(e => e['event.id'])).toEqual(['first']);
+    const restarted = new CodexTurnJournal(directory, 100, bytes);
+    await expect(restarted.append([entry('second')])).rejects.toThrow('disk budget exceeded');
+    await restarted.acknowledge([first]);
+    await restarted.append([entry('third', { 'gen_ai.turn.id': 'new-turn' })]);
+    expect((await readJournal(restarted)).flat().map(e => e['event.id'])).toEqual(['third']);
+  });
+  it('shares the disk budget across delegated Agents and retains rejected work for retry after ACK', async () => {
+    const first = entry('hermes-work', { 'gen_ai.agent.type': 'hermes' });
+    const second = entry('openclaw-work', { 'gen_ai.agent.type': 'openclaw' });
+    const bytes = Buffer.byteLength(JSON.stringify(first) + '\n')
+      + Buffer.byteLength(JSON.stringify(second) + '\n') - 1;
+    const agents = ['codex', 'hermes', 'openclaw'];
+    const journal = new CodexTurnJournal(directory, 100, agents, bytes);
+    await journal.append([first]);
+    await expect(journal.append([second])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    const restarted = new CodexTurnJournal(directory, 100, agents, bytes);
+    expect((await readJournal(restarted)).flat()).toEqual([first]);
+    expect(await restarted.isAcknowledged(second)).toBe(false);
+    await restarted.acknowledge([first]);
+    await restarted.append([second]);
+    expect((await readJournal(restarted)).flat()).toEqual([second]);
+  });
+
+  it('honors explicit disk budgets for both constructor forms when the environment is invalid', () => {
+    const previous = process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
+    process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES = 'invalid';
+    try {
+      expect(() => new CodexTurnJournal(directory, 100, 1024)).not.toThrow();
+      expect(() => new CodexTurnJournal(directory, 100, ['codex', 'hermes'], 1024)).not.toThrow();
+      expect(() => new CodexTurnJournal(directory)).toThrow(RangeError);
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
+      else process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES = previous;
+    }
+  });
+
   let directory: string;
   beforeEach(async () => { directory = await createTempDir('codex-turn-journal-'); });
   afterEach(async () => { await cleanupTempDir(directory); });
@@ -136,7 +179,7 @@ describe('CodexTurnJournal', () => {
     expect(await restarted.isAcknowledged(record)).toBe(true);
   });
 
-  it('ignores residual pending content if acknowledgement was written before a crash', async () => {
+  it('reclaims residual pending content if acknowledgement was written before a crash', async () => {
     const record = entry('exported');
     await new CodexTurnJournal(directory).append([record]);
     const key = codexTurnJournalGroupKey(record);
@@ -145,37 +188,42 @@ describe('CodexTurnJournal', () => {
     expect(await restarted.isAcknowledged(record)).toBe(true);
     expect(await readJournal(restarted)).toEqual([]);
     expect(await readJournal(restarted, key)).toEqual([]);
-    const before = await fs.readFile(filename(directory, record), 'utf8');
+    await expect(fs.stat(filename(directory, record))).rejects.toMatchObject({ code: 'ENOENT' });
     await restarted.append([entry('source-replay')]);
-    expect(await fs.readFile(filename(directory, record), 'utf8')).toBe(before);
+    await expect(fs.stat(filename(directory, record))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('cleans residual pending content before evicting its oldest acknowledgement and retains ACK on cleanup failure', async () => {
+    // Exercise limit + 1 and cleanup ordering without 10,000 real ACK files.
+    // Production callers retain the default limit of 10,000.
+    const limit = 3;
     const crashed = entry('crashed-after-ack', { 'gen_ai.turn.id': 'old-crashed-turn' });
     const keys = [codexTurnJournalGroupKey(crashed),
-      ...Array.from({ length: 9999 }, (_, index) => index.toString(16).padStart(64, '0'))];
-    for (let index = 0; index < keys.length; index += 100) {
-      await Promise.all(keys.slice(index, index + 100).map(key =>
-        fs.writeFile(path.join(directory, `codex-done-${key}.json`), JSON.stringify({ version: 1, key }), { mode: 0o600 })));
-    }
+      ...Array.from({ length: limit - 1 }, (_, index) => index.toString(16).padStart(64, '0'))];
+    await Promise.all(keys.map(key => fs.writeFile(path.join(directory, `codex-done-${key}.json`),
+      JSON.stringify({ version: 1, key }), { mode: 0o600 })));
     const oldest = path.join(directory, `codex-done-${keys[0]}.json`);
     await fs.utimes(oldest, new Date(0), new Date(0));
     await fs.writeFile(filename(directory, crashed), JSON.stringify(crashed) + '\n', { mode: 0o600 });
     const record = entry('latest');
-    const journal = new CodexTurnJournal(directory);
+    const journal = new CodexTurnJournal(directory, limit);
     await journal.acknowledge([record]);
     expect(await journal.isAcknowledged(record)).toBe(true);
     await expect(fs.stat(oldest)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.stat(filename(directory, crashed))).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(await readJournal(new CodexTurnJournal(directory))).toEqual([]);
-    expect((await fs.readdir(directory)).filter(name => name.startsWith('codex-done-'))).toHaveLength(10_000);
+    expect(await readJournal(new CodexTurnJournal(directory, limit))).toEqual([]);
+    expect((await fs.readdir(directory)).filter(name => name.startsWith('codex-done-'))).toHaveLength(limit);
 
     // A non-file at the pending path causes a real unlink failure on every platform.
     const blockedAck = path.join(directory, `codex-done-${keys[1]}.json`);
     await fs.utimes(blockedAck, new Date(0), new Date(0));
     await fs.mkdir(path.join(directory, `codex-turn-${keys[1]}.jsonl`));
-    const restarted = new CodexTurnJournal(directory);
+    const restarted = new CodexTurnJournal(directory, limit);
     await expect(restarted.acknowledge([entry('next', { 'gen_ai.turn.id': 'next-turn' })])).rejects.toThrow();
     expect(JSON.parse(await fs.readFile(blockedAck, 'utf8'))).toEqual({ version: 1, key: keys[1] });
-  }, 30_000);
+  });
+
+  it.each([0, -1, 1.5, Number.POSITIVE_INFINITY])('rejects an invalid acknowledgement limit %s', limit => {
+    expect(() => new CodexTurnJournal(directory, limit)).toThrow(RangeError);
+  });
 });

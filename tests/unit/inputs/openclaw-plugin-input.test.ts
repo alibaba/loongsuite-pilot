@@ -110,7 +110,8 @@ describe('OpenClawPluginInput', () => {
 
   it('collects both legacy daily logs and separate uid files without replaying them', async () => {
     const date = new Date().toLocaleDateString('en-CA');
-    const names = [`openclaw-${date}.jsonl`, `openclaw-${date}-uid0.jsonl`, `openclaw-${date}-uid1000.jsonl`];
+    const names = [`openclaw-${date}.jsonl`, `openclaw-${date}-uid0.jsonl`, `openclaw-${date}-uid1000.jsonl`,
+      `openclaw-${date}-uid1000.segment-000000000001-${'a'.repeat(32)}.jsonl`];
     for (const [index, file] of names.entries()) {
       await fs.writeFile(path.join(tmpDir, file), JSON.stringify({
         time_unix_nano: String(BigInt(Date.now()) * 1000000n),
@@ -132,7 +133,7 @@ describe('OpenClawPluginInput', () => {
     resumed.on('entries', batch => entries.push(...batch));
     await resumed.start();
     await resumed.stop();
-    expect(entries).toHaveLength(3);
+    expect(entries).toHaveLength(4);
   });
 
   it('keeps late appends from every uid active across the daily boundary', async () => {

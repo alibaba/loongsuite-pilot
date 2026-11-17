@@ -248,6 +248,7 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       runtimeRefreshIntervalMs: 30_000,
     },
     dashboard: {
+      enabled: false,
       port: 8765,
     },
     agents: {},
@@ -330,9 +331,20 @@ describe('Orchestrator', () => {
       }
     });
 
+    it('keeps collection and metrics running with the dashboard disabled', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+      expect(mockDiscoveryStart).toHaveBeenCalledOnce();
+      expect(mockMetricsSummaryStart).toHaveBeenCalledOnce();
+      expect(mockDashboardConstructor).not.toHaveBeenCalled();
+      await orch.stop();
+      expect(mockMetricsSummaryStop).toHaveBeenCalledOnce();
+    });
+
     it('starts the metrics summary and dashboard even when the menu bar is disabled', async () => {
       const orch = new Orchestrator(makeConfig({
         dashboard: {
+          enabled: true,
           port: 19_001,
         },
         statusBar: {
@@ -363,6 +375,7 @@ describe('Orchestrator', () => {
       mockDashboardStart.mockRejectedValueOnce(new Error('dashboard exploded'));
       const events: string[] = [];
       const orch = new Orchestrator(makeConfig({
+        dashboard: { enabled: true, port: 8765 },
         statusBar: {
           enabled: true,
           metricsSummaryIntervalMs: 60_000,
@@ -530,6 +543,35 @@ describe('Orchestrator', () => {
         gate.mockReturnValue(false);
         expect(detection?.enabled()).toBe(false);
       } finally { await orch.stop(); }
+    });
+
+    it.each(['darwin', 'win32', 'linux'] as const)('uses the selected Doubao App source on %s', async target => {
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      Object.defineProperty(process, 'platform', { value: target, configurable: true });
+      const config = makeConfig();
+      config.listeners['doubao-work'] = { enabled: true, pollInterval: 1200, client: 'doubao' };
+      const orch = new Orchestrator(config);
+      try {
+        await orch.start();
+        const input = orch.getInputManager().getInput('doubao-work') as unknown as { logDir?: string; userDataRoot?: string };
+        const detection = discoveryEntries.find(entry => entry.id === 'doubao-work');
+        if (target === 'linux') {
+          expect(input.userDataRoot).toBeUndefined();
+          expect(input.logDir).toBeUndefined();
+          expect(detection?.watchPaths).toEqual([]);
+        } else {
+          const paths = target === 'win32' ? path.win32 : path.posix;
+          const expectedRoot = target === 'win32'
+            ? paths.join(process.env.LOCALAPPDATA!, 'Doubao', 'User Data')
+            : paths.join(homeDir, 'Library', 'Application Support', 'Doubao');
+          expect(input.userDataRoot).toBe(expectedRoot);
+          expect(input.logDir).toBe(paths.join(expectedRoot, 'sdk_storage', 'log'));
+          expect(detection?.watchPaths).toEqual([input.logDir]);
+        }
+      } finally {
+        try { await orch.stop(); }
+        finally { Object.defineProperty(process, 'platform', platform); }
+      }
     });
 
     it('uses the configured dataDir for QwenWorkCN Hook history and watches only native sources', async () => {

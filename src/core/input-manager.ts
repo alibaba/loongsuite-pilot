@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import { ClientType } from '../types/index.js';
 import { WorkspacePolicy } from './workspace-policy.js';
 import type {
@@ -13,6 +14,7 @@ import type { BaseFlusher } from '../flushers/base-flusher.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
+import { applyAgentContentPolicy } from '../normalization/agent-content-policy.js';
 import { enrichCanonicalEntriesWithGit } from '../normalization/enrich-git-context.js';
 import { maskAgentActivityEntry } from '../mask/entry-masker.js';
 import { loadMaskPlan } from '../mask/rule-loader.js';
@@ -123,8 +125,11 @@ export class InputManager extends EventEmitter {
     this.configuredUserId = userId;
   }
 
-  /** @deprecated Retained for callers; per-agent content opt-outs are ignored. */
-  setAgentsConfig(_config: AgentsConfig): void {}
+  private agentsConfig: AgentsConfig = {};
+
+  setAgentsConfig(config: AgentsConfig): void {
+    this.agentsConfig = config;
+  }
 
   setMaskConfig(config: MaskConfig): void {
     this.maskConfig = config;
@@ -133,6 +138,14 @@ export class InputManager extends EventEmitter {
 
   setTraceLinker(linker: TraceLinker): void {
     this.traceLinker = linker;
+  }
+
+  /** Native delegation needs the final upstream context before a parent turn
+   * finishes. Reuse the same claims/cache as ordinary output processing. */
+  async stampTraceContext(entries: AgentActivityEntry[]): Promise<void> {
+    // Collection may be retried before its first output is accepted. A miss
+    // here must not seal the normal publication-time correlation window.
+    await this.traceLinker?.stamp(entries, { cacheMisses: false });
   }
 
   setInterceptResultLinker(linker: InterceptResultLinker): void {
@@ -427,7 +440,7 @@ export class InputManager extends EventEmitter {
       });
     }
 
-    const expandedEntries = expandAgentInputEvents(this.applyMask(entries));
+    const expandedEntries = expandAgentInputEvents(this.applyPolicyAndMask(entries));
     let outputBatchBytes = 0;
     // Reuse the existing serialization; only retain its numeric results.
     const logicalBytes = expandedEntries.map(entry => {
@@ -442,7 +455,7 @@ export class InputManager extends EventEmitter {
 
   /**
    * Flush entries that did not come from an Input. Reuses git enrichment,
-   * invocation identity, and mask, then the same flusher.
+   * invocation identity, content policy, and mask, then the same flusher.
    */
   async flushPreparedEntries(entries: AgentActivityEntry[]): Promise<void> {
     if (entries.length === 0) return;
@@ -457,7 +470,7 @@ export class InputManager extends EventEmitter {
     }
 
     this.applyIdentity(entries);
-    const prepared = this.applyMask(entries);
+    const prepared = this.applyPolicyAndMask(entries);
     let outputBatchBytes = 0;
     const logicalBytes = prepared.map(entry => {
       const bytes = Buffer.byteLength(JSON.stringify(entry));
@@ -476,14 +489,17 @@ export class InputManager extends EventEmitter {
 
   /** Recheck retained output against current workspace and mask rules without rewriting its identity. */
   prepareRestoredEntries(entries: AgentActivityEntry[]): AgentActivityEntry[] {
-    return this.applyMask(this.workspacePolicy.filter(entries));
+    return this.applyPolicyAndMask(this.workspacePolicy.filter(entries));
   }
 
-  private applyMask(entries: AgentActivityEntry[]): AgentActivityEntry[] {
+  private applyPolicyAndMask(entries: AgentActivityEntry[]): AgentActivityEntry[] {
+    const policyAppliedEntries = entries.map(entry =>
+      applyAgentContentPolicy(entry, this.agentsConfig),
+    );
     if (this.maskPlan.rules.length === 0 && this.maskPlan.piiTypes.size === 0) {
-      return entries;
+      return policyAppliedEntries;
     }
-    return entries.map(entry =>
+    return policyAppliedEntries.map(entry =>
       maskAgentActivityEntry(entry, this.maskConfig, this.maskPlan),
     );
   }
@@ -509,13 +525,36 @@ export class InputManager extends EventEmitter {
     const counter = this.counters.get(inputId);
     try {
       const signal = this.entryAbortControllers.get(inputId)?.signal;
-      await (signal ? this.flusher.sendBatch(entries, logicalBytes, signal) : this.flusher.sendBatch(entries, logicalBytes));
+      const deliver = this.flusher.createBatchDelivery(entries, logicalBytes, signal);
+      let quotaAlarmed = false;
+      while (true) {
+        try {
+          await deliver();
+          break;
+        } catch (error) {
+          const quota = (error as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
+          if (!quota || signal?.aborted) throw error;
+          if (!quotaAlarmed) {
+            this.alarmManager?.record('FLUSH_QUOTA_ALARM', '3',
+              `Codex output capacity exhausted for ${inputId}; retrying without advancing its checkpoint`, { input_name: inputId });
+            quotaAlarmed = true;
+          }
+          await delay(1000, undefined, signal ? { signal } : undefined);
+        }
+      }
       if (counter) counter.outEvents += entries.length;
       this.emit('flushed', { count: entries.length, bytes: batchBytes });
     } catch (err) {
       if (counter) counter.outFailed += entries.length;
+      if (this.entryAbortControllers.get(inputId)?.signal.aborted) throw err;
       logger.error('dispatch failed', { count: entries.length, error: String(err) });
-      if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes((err as Error)?.name)) throw err;
+      if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes((err as Error)?.name)) {
+        const quota = (err as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
+        this.alarmManager?.record(quota ? 'FLUSH_QUOTA_ALARM' : 'FLUSH_SEND_ALARM', '3',
+          `Output durability blocked for ${inputId}; source checkpoint retained: ${String(err)}`,
+          { input_name: inputId });
+        throw err;
+      }
     }
   }
 }
