@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { ensurePrivateLogDir, appendPrivateFile } from '../../../assets/plugins/shared/private-log-dir.cjs';
 import { appendRawJsonl } from '../../../assets/plugins/shared/raw-jsonl-writer.mjs';
+import { acquireRawSourceGate } from '../../../assets/plugins/shared/raw-source-gate.mjs';
 
 const helper = pathToFileURL(path.resolve('assets/plugins/shared/private-log-dir.cjs')).href;
 const rawWriter = pathToFileURL(path.resolve('assets/plugins/shared/raw-jsonl-writer.mjs')).href;
@@ -123,6 +124,21 @@ describe.skipIf(process.platform !== 'linux' || process.getuid?.() !== 0)('actua
     expect(fs.statSync(path.join(logs, segment)).mode & 0o777).toBe(0o600);
     expect(fs.readFileSync(path.join(logs, segment), 'utf8')).toContain('"writer":1000');
     expect(fs.readFileSync(rootFile, 'utf8')).toBe('{"writer":0}\n');
+
+    const held = acquireRawSourceGate(logs);
+    expect(held).not.toBeNull();
+    try {
+      const blocked = spawnSync(process.execPath, ['--input-type=module', '-e',
+        `import {appendRawJsonl} from ${JSON.stringify(rawWriter)}; try { appendRawJsonl(${JSON.stringify(userFile)}, 'blocked\\n', 10, {privateOwner:true}); process.exit(21); } catch {}`],
+        { uid: 1000, gid: 1000, encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' } });
+      expect({ status: blocked.status, error: blocked.stderr }).toEqual({ status: 0, error: '' });
+    } finally {
+      held.release();
+    }
+    const python = spawnSync('python3', ['-c',
+      'import sqlite3,sys; db=sqlite3.connect(sys.argv[1],timeout=.025); db.execute("BEGIN IMMEDIATE"); db.rollback(); db.close()', gate],
+      { uid: 1000, gid: 1000, encoding: 'utf8' });
+    expect({ status: python.status, error: python.stderr }).toEqual({ status: 0, error: '' });
   });
 
   it('does not follow a substituted source gate', () => {

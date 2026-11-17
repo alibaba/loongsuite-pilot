@@ -45,6 +45,9 @@ Pilot and for packaging and calling these modules.
 On Linux, for OpenClaw, Hermes and DSH sharing their existing configuration roots, Pilot
 prepares sticky shared event directories while each writer keeps its files
 private (`0600`). The root collector must be permitted to read those files.
+The directory's root-owned SQLite coordination file is writable by the
+participating UIDs and contains no event data; it coordinates rotation and
+retention between writers and the collector.
 This does not discover independent per-user configuration roots or make a
 non-root collector capable of reading another UID's private files.
 The shared runtime/data path must also be traversable and readable by the

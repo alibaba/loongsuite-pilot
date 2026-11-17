@@ -128,7 +128,7 @@ describe('OpenClawPluginInput', () => {
     input.on('entries', batch => entries.push(...batch));
     await input.start();
     await input.stop();
-    expect(entries.map(entry => entry['event.id']).sort()).toEqual(['writer-0', 'writer-1', 'writer-2']);
+    expect(entries.map(entry => entry['event.id']).sort()).toEqual(['writer-0', 'writer-1', 'writer-2', 'writer-3']);
     const resumed = new OpenClawPluginInput({ stateStore: stateStore as never, logDir: tmpDir, pollIntervalMs: 60_000 });
     resumed.on('entries', batch => entries.push(...batch));
     await resumed.start();
