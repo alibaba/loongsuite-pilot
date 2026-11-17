@@ -195,6 +195,7 @@ vi.mock('../../../src/multimodal/index.js', async (importOriginal) => {
 
 import { InputManager } from '../../../src/core/input-manager.js';
 import { Orchestrator } from '../../../src/core/orchestrator.js';
+import * as interceptorWorker from '../../../src/interceptor/worker-service.js';
 
 function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
   return {
@@ -274,6 +275,28 @@ describe('Orchestrator', () => {
   });
 
   describe('startup sequence (T038)', () => {
+    it.each(['none', 'all'] as const)('gates Worker on startup mode %s even with cached rules', async mode => {
+      const dataDir = path.join(homeDir, 'pilot-data');
+      fs.mkdirSync(path.join(dataDir, 'configs', 'managed'), { recursive: true });
+      fs.writeFileSync(path.join(dataDir, 'configs', 'managed', 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
+        kind: 'pattern', id: 'cached', version: '1', agents: ['qodercli'], events: ['UserPromptSubmit'], match: 'substring', pattern: 'block',
+      }] } }));
+      const workerStart = vi.spyOn(interceptorWorker, 'startInterceptorWorker').mockResolvedValue({
+        port: 18791, managedActive: true, stop: vi.fn().mockResolvedValue(undefined),
+        reloadManaged: vi.fn().mockResolvedValue(undefined), syncVerdicts: vi.fn().mockResolvedValue(undefined),
+        flushEvents: vi.fn().mockResolvedValue(undefined),
+      } as unknown as interceptorWorker.InterceptorWorkerService);
+      const orch = new Orchestrator(makeConfig({ dataDir, interceptor: { mode, types: [] } }));
+      try {
+        await orch.start();
+        if (mode === 'all') expect(workerStart).toHaveBeenCalledOnce();
+        else expect(workerStart).not.toHaveBeenCalled();
+      } finally {
+        await orch.stop();
+        workerStart.mockRestore();
+      }
+    });
+
     it('creates a detected OpenCode config only inside the isolated home', async () => {
       const binDir = path.join(homeDir, 'bin');
       fs.mkdirSync(binDir);

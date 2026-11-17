@@ -2315,7 +2315,7 @@ describe('ConfigLoader', () => {
       expect(config.interceptor).toEqual({ mode: 'none', types: [] });
     });
 
-    it('loads all mode and custom types as a mask-type subset', async () => {
+    it('treats interceptor custom mode as none and does not expand mask', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         interceptor: {
           mode: 'custom',
@@ -2323,10 +2323,8 @@ describe('ConfigLoader', () => {
         },
       });
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({
-        mode: 'custom',
-        types: ['apiKey', 'cloudAccessKey'],
-      });
+      expect(config.interceptor).toEqual({ mode: 'none', types: [] });
+      expect(config.mask.mode).toBe('none');
     });
 
     it('uses interceptor env over config file', async () => {
@@ -2345,7 +2343,7 @@ describe('ConfigLoader', () => {
     it('leaves mask mode all unchanged when interceptor is enabled', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: { mode: 'all' },
-        interceptor: { mode: 'custom', types: ['apiKey'] },
+        interceptor: { mode: 'all' },
       });
       const config = await loadConfig();
       expect(config.mask.mode).toBe('all');

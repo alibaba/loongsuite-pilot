@@ -26,6 +26,9 @@ import {
   parseSpanAttributesFromEnv,
 } from './shared/resource-context.mjs';
 import { publishQoderWakeup, readQoderHookPayload } from './qoder/hook-wakeup.mjs';
+import { applyQoderProductIdentity } from './qoder/product-identity.mjs';
+
+export { applyQoderProductIdentity };
 
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: 'qoder' });
 // Caller-supplied span attributes (e.g. multica.*) stamped as top-level record
@@ -1035,18 +1038,6 @@ function finalizeRecords(records, cwd, runtimeConfig) {
       Object.keys(attributes).length > 0 ? { resourceAttributes: attributes } : {});
   }
   return applyQoderProductIdentity(records, runtimeConfig?.hostProduct);
-}
-
-/** Product identity is local to the owning Hook observation, never a session cache. */
-export function applyQoderProductIdentity(records, hostProduct) {
-  if (hostProduct !== 'app') return records;
-  for (const record of records) {
-    if (record['gen_ai.agent.type'] === 'qoder-cli') {
-      record['gen_ai.agent.type'] = 'qoder-app';
-      record['gen_ai.framework'] = 'qoder-app';
-    }
-  }
-  return records;
 }
 
 // Variants whose records are committed one complete turn at a time, so the

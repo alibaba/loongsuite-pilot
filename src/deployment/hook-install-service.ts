@@ -7,6 +7,7 @@ import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { withDeployedStateLock } from './deployed-state-merge.js';
 import { createLogger } from '../utils/logger.js';
 import { DeploymentManager } from './deployment-manager.js';
+import { resolveDeployInterceptorHooks } from '../interceptor/config.js';
 import { postAlarm } from '../internal/post-alarm.js';
 
 const logger = createLogger('HookInstall');
@@ -341,6 +342,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
     pilotDir: opts.pilotDir,
     builtinAgentsDir: opts.builtinAgentsDir,
     installedBy: opts.mode === 'status' ? undefined : 'hook-install',
+    deployInterceptorHooks: await resolveDeployInterceptorHooks(opts.dataDir),
   });
   const defs = await manager.loadDefinitions();
   const byId = new Map(defs.map(def => [def.id, def]));

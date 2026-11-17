@@ -182,6 +182,15 @@ await build({
   plugins: commonPlugins,
 });
 
+// HTTP listens directly in this worker, independently of the collector event loop.
+await build({
+  entryPoints: ['src/interceptor/worker.ts'],
+  outfile: 'dist/interceptor/worker.cjs',
+  platform: 'node', target: 'es2022', format: 'cjs', bundle: true,
+  mainFields: ['module', 'main'], minifySyntax: true,
+  define: commonDefine, plugins: commonPlugins,
+});
+
 await mkdir('dist', { recursive: true });
 await copyFile('src/mask/sensitive-rules.json', 'dist/sensitive-rules.json');
 

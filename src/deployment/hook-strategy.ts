@@ -117,11 +117,23 @@ function legacyHookCommands(
   ])].filter(command => command !== current);
 }
 
+export interface HookStrategyOptions {
+  /**
+   * Install agent-declared interceptor hooks.
+   * Default false: uninstall any already-installed interceptor hooks and do
+   * not install them. Collection hooks are unchanged. `undeploy` always
+   * removes interceptor hooks, whether or not this flag is set.
+   */
+  deployInterceptorHooks?: boolean;
+}
+
 export class HookStrategy implements DeployStrategy {
   private readonly hookManager: HookManager;
+  private readonly deployInterceptorHooks: boolean;
 
-  constructor(hookManager: HookManager) {
+  constructor(hookManager: HookManager, options?: HookStrategyOptions) {
     this.hookManager = hookManager;
+    this.deployInterceptorHooks = options?.deployInterceptorHooks ?? false;
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
@@ -137,11 +149,17 @@ export class HookStrategy implements DeployStrategy {
       return this.kiroAgentNeedsDeploy(def);
     }
 
-    const hookDefs = [
-      ...this.buildInterceptorDefinitions(def),
-      ...this.buildHookDefinitions(def),
-    ];
-    for (const hookDef of hookDefs) {
+    const interceptorDefs = this.buildInterceptorDefinitions(def);
+    for (const hookDef of interceptorDefs) {
+      // Off: any leftover command needs a deploy so it can be removed. The
+      // strict installed check would miss entries moved off head, retimed, or
+      // missing shell, and leave them in settings forever.
+      const needs = this.deployInterceptorHooks
+        ? !(await this.hookManager.isHookInstalled(hookDef))
+        : await this.hookManager.isHookPresent(hookDef);
+      if (needs) return true;
+    }
+    for (const hookDef of this.buildHookDefinitions(def)) {
       if (!(await this.hookManager.isHookInstalled(hookDef))) {
         return true;
       }
@@ -261,10 +279,32 @@ export class HookStrategy implements DeployStrategy {
         }
       }
 
-      const hookDefs = [
-        ...this.buildInterceptorDefinitions(def),
-        ...this.buildHookDefinitions(def),
-      ];
+      const interceptorDefs = this.buildInterceptorDefinitions(def);
+      if (this.deployInterceptorHooks) {
+        for (const hookDef of interceptorDefs) {
+          const installed = await this.hookManager.isHookInstalled(hookDef);
+          if (!installed) {
+            const ok = await this.hookManager.installHook(hookDef);
+            if (!ok) {
+              return { success: false, agentId: def.id, deployMode: 'hook', error: `failed to install hook for event` };
+            }
+          }
+        }
+      } else {
+        // A failed removal must not block the collection hook; needsDeploy keeps
+        // reporting the leftover, so the next deploy retries it.
+        for (const hookDef of interceptorDefs) {
+          if (!(await this.hookManager.isHookPresent(hookDef))) continue;
+          if (!(await this.hookManager.uninstallHook(hookDef))) {
+            logger.warn('failed to uninstall interceptor hook', {
+              agentId: def.id,
+              event: hookDef.hookJsonPath.at(-1),
+            });
+          }
+        }
+      }
+
+      const hookDefs = this.buildHookDefinitions(def);
       for (const hookDef of hookDefs) {
         const installed = await this.hookManager.isHookInstalled(hookDef);
         if (!installed) {

@@ -36,6 +36,7 @@ import {
 } from './deployment/persisted-deploy-paths.js';
 import { readJsonFile, writeJsonFile, resolveHome } from './utils/fs-utils.js';
 import { readConfigAgentsGate, resolveDataDir } from './utils/data-dir.js';
+import { resolveDeployInterceptorHooks } from './interceptor/config.js';
 import type { AgentDefinition, DeployedAgentsState } from './types/deployment.js';
 
 // This file is always bundled as CJS (build.mjs), so __dirname is guaranteed.
@@ -214,7 +215,9 @@ async function main(): Promise<number> {
     dataDir,
   });
   const hookManager = new HookManager(path.join(dataDir, 'hooks'), path.join(dataDir, 'logs'));
-  const hookStrategy = new HookStrategy(hookManager);
+  const hookStrategy = new HookStrategy(hookManager, {
+    deployInterceptorHooks: await resolveDeployInterceptorHooks(dataDir),
+  });
   const pluginInjectStrategy = new PluginInjectStrategy(dataDir, pilotDir);
 
   const defs = await loader.load();

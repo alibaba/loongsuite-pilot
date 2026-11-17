@@ -385,6 +385,10 @@ export class InputManager extends EventEmitter {
     // Join while entries still carry the agent-native session id.
     if (this.interceptResultLinker) {
       try {
+        // Only collection waits for the worker FIFO barrier; hook HTTP never waits for this thread.
+        await this.interceptResultLinker.sync(entries).catch(error => {
+          logger.warn('interceptor verdict sync failed; using available cache', { inputId, error: String(error) });
+        });
         this.interceptResultLinker.enrich(entries);
       } catch (err) {
         logger.warn('interceptor result linking failed (skipped)', {
@@ -457,8 +461,11 @@ export class InputManager extends EventEmitter {
    * Flush entries that did not come from an Input. Reuses git enrichment,
    * invocation identity, content policy, and mask, then the same flusher.
    */
-  async flushPreparedEntries(entries: AgentActivityEntry[]): Promise<void> {
+  async flushPreparedEntries(entries: AgentActivityEntry[], signal?: AbortSignal): Promise<void> {
+    // Apply privacy policy before invocation identity replaces native session/agent keys.
+    entries = this.workspacePolicy.filter(entries);
     if (entries.length === 0) return;
+    signal?.throwIfAborted();
     const inputId = 'interceptor';
     try {
       await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);
@@ -469,6 +476,7 @@ export class InputManager extends EventEmitter {
       });
     }
 
+    signal?.throwIfAborted();
     this.applyIdentity(entries);
     const prepared = this.applyPolicyAndMask(entries);
     let outputBatchBytes = 0;
@@ -478,7 +486,7 @@ export class InputManager extends EventEmitter {
       return bytes;
     });
     logger.info('dispatching entries', { inputId, count: prepared.length });
-    await this.dispatchEntries(inputId, prepared, outputBatchBytes, logicalBytes);
+    await this.dispatchEntries(inputId, prepared, outputBatchBytes, logicalBytes, signal);
   }
 
   private applyIdentity(entries: AgentActivityEntry[]): void {
@@ -511,7 +519,7 @@ export class InputManager extends EventEmitter {
     }
   }
 
-  private async dispatchEntries(inputId: string, entries: AgentActivityEntry[], batchBytes: number, logicalBytes?: readonly number[]): Promise<void> {
+  private async dispatchEntries(inputId: string, entries: AgentActivityEntry[], batchBytes: number, logicalBytes?: readonly number[], signalOverride?: AbortSignal): Promise<void> {
     if (!this.flusher) {
       logger.warn('no flusher set, dropping entries', { count: entries.length });
       this.alarmManager?.record(
@@ -523,8 +531,8 @@ export class InputManager extends EventEmitter {
     }
 
     const counter = this.counters.get(inputId);
+    const signal = signalOverride ?? this.entryAbortControllers.get(inputId)?.signal;
     try {
-      const signal = this.entryAbortControllers.get(inputId)?.signal;
       const deliver = this.flusher.createBatchDelivery(entries, logicalBytes, signal);
       let quotaAlarmed = false;
       while (true) {
@@ -546,7 +554,7 @@ export class InputManager extends EventEmitter {
       this.emit('flushed', { count: entries.length, bytes: batchBytes });
     } catch (err) {
       if (counter) counter.outFailed += entries.length;
-      if (this.entryAbortControllers.get(inputId)?.signal.aborted) throw err;
+      if (signal?.aborted) throw err;
       logger.error('dispatch failed', { count: entries.length, error: String(err) });
       if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes((err as Error)?.name)) {
         const quota = (err as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
