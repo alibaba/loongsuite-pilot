@@ -9,6 +9,12 @@ mod legacy_hook;
 fn main() {
     let started = std::time::Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "hook-process")
+        && args.get(1).is_some_and(|arg| arg == "qoder")
+        && args.iter().any(|arg| arg == "--wakeup-only")
+    {
+        std::process::exit(loongsuite_pilot::hook_process::run_hook_process("qoder"));
+    }
     if hook_bin::is_hook(&args) {
         hook_bin::run(legacy_hook::sdk_args(args), started, Some(legacy_hook::run));
     }
