@@ -2616,13 +2616,13 @@
           "id": "dev",
           "kind": "dev",
           "version": "dev",
-          "commit": "fcf1ffed13f4954a096846edf938ebdecd925091",
-          "recorded_at": "2026-11-17T02:54:47.010575Z",
+          "commit": "c4543bc6f683e5b2e551d3bb4568f8f21497858f",
+          "recorded_at": "2026-11-17T06:16:58.117101Z",
           "status": "passed",
           "method_id": "github-full-pilot-qoder-native-v2",
-          "environment_id": "69f4a146bdf5db1852a8ef573932e252248d3ec9965c93786badfde70ef701ea",
+          "environment_id": "a79751e6dd09f9d39b13575923c102a779e71cd99f31f19895d97097839ae28f",
           "environment": {
-            "cpu_model": "AMD EPYC 7763 64-Core Processor",
+            "cpu_model": "AMD EPYC 9V45 96-Core Processor",
             "runner_os": "Linux",
             "runner_image": "ubuntu22/20261111.360.2",
             "container_digest": "sha256:b774d993885c47eca14db241ba8cc7e5789235142f76e4a2a6a65ec350a1bac0",
@@ -2632,31 +2632,31 @@
             "cpus": 4,
             "node_version": "v22.23.5"
           },
-          "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/44005521368",
+          "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/44029333323",
           "workloads": {
             "idle": {
               "repeats": 3,
               "p95_ms": null,
               "poll_interval_ms": 10000,
               "cpu_percent": {
-                "median": 1.5994462428758356,
-                "min": 1.5808662867678254,
-                "max": 1.6306113866069696
+                "median": 0.5967794706175085,
+                "min": 0.585605906482509,
+                "max": 0.6029848644721942
               },
               "rss_mib": {
-                "median": 52.8671875,
-                "min": 52.4453125,
-                "max": 53.16015625
+                "median": 51.7734375,
+                "min": 51.20703125,
+                "max": 52.9453125
               },
               "cpu_peak_percent": {
-                "median": 109.55835367729583,
-                "min": 108.51956373114811,
-                "max": 119.45050686701987
+                "median": 78.98328613357168,
+                "min": 74.04969042892219,
+                "max": 80.98016365332987
               },
               "rss_average_mib": {
-                "median": 52.65186918793025,
-                "min": 52.12178488025374,
-                "max": 52.839176079630114
+                "median": 51.47831236234195,
+                "min": 51.01048646567716,
+                "max": 52.566535181281466
               },
               "raw_input_bytes_per_second": {
                 "median": 0.0,
@@ -2677,40 +2677,40 @@
             "low": {
               "repeats": 3,
               "p95_ms": {
-                "median": 18758.332469,
-                "min": 18755.292308,
-                "max": 18759.119761
+                "median": 18620.401593,
+                "min": 18617.897891,
+                "max": 18622.384094
               },
               "poll_interval_ms": 10000,
               "cpu_percent": {
-                "median": 2.998952377371179,
-                "min": 2.9837188632468163,
-                "max": 3.0328768383174203
+                "median": 1.0550536299864668,
+                "min": 1.0259140987743938,
+                "max": 1.122641858107573
               },
               "rss_mib": {
-                "median": 67.390625,
-                "min": 67.38671875,
-                "max": 67.5625
+                "median": 67.42578125,
+                "min": 67.32421875,
+                "max": 68.203125
               },
               "cpu_peak_percent": {
-                "median": 107.62058634170698,
-                "min": 106.67846063026865,
-                "max": 110.46895251325759
+                "median": 70.88212508097882,
+                "min": 67.57207215864356,
+                "max": 76.69716139235786
               },
               "rss_average_mib": {
-                "median": 58.423683164815756,
-                "min": 58.405503877916445,
-                "max": 58.477734872261934
+                "median": 58.27899451573093,
+                "min": 57.62082762238305,
+                "max": 59.11528262997709
               },
               "raw_input_bytes_per_second": {
-                "median": 23299.470531958545,
-                "min": 23298.87901559752,
-                "max": 23299.489164913255
+                "median": 23299.623478084595,
+                "min": 23299.344044247384,
+                "max": 23299.714568399995
               },
               "jsonl_output_bytes_per_second": {
-                "median": 66256.49435650255,
-                "min": 66254.81226675796,
-                "max": 66256.54734286791
+                "median": 66256.92928802271,
+                "min": 66256.13466453833,
+                "max": 66257.18832073163
               },
               "quality": {
                 "passed": true,
@@ -2721,40 +2721,40 @@
             "high": {
               "repeats": 3,
               "p95_ms": {
-                "median": 442.795381,
-                "min": 439.811796,
-                "max": 457.441802
+                "median": 408.935316,
+                "min": 395.416442,
+                "max": 427.918115
               },
               "poll_interval_ms": 100,
               "cpu_percent": {
-                "median": 70.49372941005484,
-                "min": 70.27951379452094,
-                "max": 70.90725185623842
+                "median": 21.332350333219935,
+                "min": 20.452850086947407,
+                "max": 21.457305475211257
               },
               "rss_mib": {
-                "median": 63.796875,
-                "min": 63.67578125,
-                "max": 63.86328125
+                "median": 61.46875,
+                "min": 61.45703125,
+                "max": 62.546875
               },
               "cpu_peak_percent": {
-                "median": 184.62878719207956,
-                "min": 184.39366061841363,
-                "max": 190.3840254205518
+                "median": 114.90834542850897,
+                "min": 108.12275958312235,
+                "max": 117.72284012142768
               },
               "rss_average_mib": {
-                "median": 57.778818298220926,
-                "min": 57.67131333914604,
-                "max": 58.08182680720312
+                "median": 56.80816689195543,
+                "min": 55.82216816703607,
+                "max": 56.98814840042614
               },
               "raw_input_bytes_per_second": {
-                "median": 465985.18193527276,
-                "min": 465983.53748506313,
-                "max": 465987.81103256345
+                "median": 465983.5979986619,
+                "min": 465980.8634706837,
+                "max": 465992.2161126213
               },
               "jsonl_output_bytes_per_second": {
-                "median": 2190861.5318447757,
-                "min": 2190853.800348486,
-                "max": 2196763.338675547
+                "median": 2190854.084857352,
+                "min": 2184951.8701445586,
+                "max": 2196784.105137986
               },
               "quality": {
                 "passed": true,
@@ -2768,18 +2768,18 @@
             "ref": "dev/v2.0.0"
           },
           "provenance": {
-            "entry_sha256": "9206c71b1522a03bbd8262039dc8cb04e72f3fcbc2bf81eaba49efa9d7f18868",
-            "library_sha256": "0f6c44a96fe1059ebea6df7e742994877faebc14e6827aa83909a79763b3df2d",
+            "entry_sha256": "9a49cb49db1d7c48826270aff234e41fa5fe8d7f8bed68779c4c3e2dd551315f",
+            "library_sha256": "56be089d8c3b0fb923096c5ef91e74075e17edb90883cb3dd497e3f891fc79ff",
             "fixture_sha256": "e9dd328f29f0f27249e2e8bc280210e0fbbeb2e291d43143f690e278768faedf",
             "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
           },
           "publication": {
-            "run_number": 87,
-            "run_id": "44005521368"
+            "run_number": 92,
+            "run_id": "44029333323"
           }
         }
       ],
-      "updated_at": "2026-11-17T03:02:43.957116Z"
+      "updated_at": "2026-11-17T06:27:35.294007Z"
     },
     "github-full-pilot-codex-rollout-v2": {
       "method": {
