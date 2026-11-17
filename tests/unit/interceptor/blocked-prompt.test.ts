@@ -43,6 +43,7 @@ describe('buildBlockedQoderPromptEntry', () => {
     expect(entry['agent.source']).toBe('interceptor');
     expect(entry['gen_ai.guardrail.triggered']).toBe(true);
     expect(entry['gen_ai.guardrail.action']).toBe('block');
+    expect(entry['gen_ai.guardrail.rule_id']).toBeUndefined();
     expect(entry['gen_ai.output.messages']).toBeUndefined();
     expect(entry['gen_ai.usage.input_tokens']).toBeUndefined();
     expect(entry['gen_ai.usage.output_tokens']).toBeUndefined();
@@ -62,5 +63,22 @@ describe('buildBlockedQoderPromptEntry', () => {
     expect(entry).not.toHaveProperty('gen_ai.input.messages_delta');
     expect(entry['workspace.path']).toBeUndefined();
     expect(entry['gen_ai.guardrail.action']).toBe('block');
+  });
+
+  it('copies the winning rule snapshot onto the synthetic event', () => {
+    const entry = buildBlockedQoderPromptEntry(request(), 1_700_000_000_000, {
+      action: 'block',
+      reason: 'flow-probe-v3',
+      ruleId: 'flow-probe',
+      ruleVersion: '3',
+      title: 'ak-leak',
+      message: '不要在对话里粘贴 AccessKey',
+      evaluatedRules: ['flow-probe'],
+    });
+    expect(entry['gen_ai.guardrail.rule_id']).toBe('flow-probe');
+    expect(entry['gen_ai.guardrail.rule_version']).toBe('3');
+    expect(entry['gen_ai.guardrail.reason']).toBe('flow-probe-v3');
+    expect(entry['gen_ai.guardrail.title']).toBe('ak-leak');
+    expect(entry['gen_ai.guardrail.message']).toBe('不要在对话里粘贴 AccessKey');
   });
 });

@@ -38,6 +38,11 @@ export interface DeploymentManagerOptions {
   doubaoWork?: AgentDefLoaderOptions['doubaoWork'];
   /** Set on records this manager writes. Omitted leaves any existing value. */
   installedBy?: 'hook-install' | 'daemon' | 'build';
+  /**
+   * Install interceptor hooks. Default false: the next deploy uninstalls any
+   * already-installed interceptor hooks and still installs collection hooks.
+   */
+  deployInterceptorHooks?: boolean;
 }
 
 export class DeploymentManager {
@@ -69,7 +74,9 @@ export class DeploymentManager {
       path.join(opts.dataDir, 'hooks'),
       path.join(opts.dataDir, 'logs'),
     );
-    this.hookStrategy = new HookStrategy(hookManager);
+    this.hookStrategy = new HookStrategy(hookManager, {
+      deployInterceptorHooks: opts.deployInterceptorHooks ?? false,
+    });
     this.pluginProbeStrategy = new PluginProbeStrategy(opts.dataDir, opts.pilotDir);
     this.pluginInjectStrategy = new PluginInjectStrategy(opts.dataDir, opts.pilotDir);
     this.directoryPluginStrategy = new DirectoryPluginStrategy(opts.dataDir);

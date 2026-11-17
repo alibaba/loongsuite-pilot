@@ -138,7 +138,10 @@ export interface AgentHookConfig {
     tools: string[];
   };
   /**
-   * Independent blocking hook, installed alongside the collection hook.
+   * Independent blocking hook, installed alongside the collection hook when
+   * interceptor mode is `all`.
+   * Otherwise deploy removes interceptor hooks already written to settings.
+   * Collection hooks are unchanged.
    * Events, command, timeout, and insertion order are owned by this block
    * so collection hookCommand stays a single string.
    */

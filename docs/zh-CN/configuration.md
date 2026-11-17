@@ -47,7 +47,7 @@ Pilot 按以下顺序解析配置：
 | `dashboard.port` | 启用后的本机端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
 | `serviceName` | 所有 Agent 和上报后端共用的唯一服务名，优先级高于所有服务名前缀配置。 |
 | `serviceNamePrefix` | 兼容原有行为的服务名基础值。未设置 `serviceName` 时，各 Agent 以 `<serviceNamePrefix>-<agentType>` 上报。 |
-| `interceptor` | 本地拦截。格式与 `mask` 相同（`mode` + `types`），`types` 为 mask 类型的密钥子集。详见 [本地拦截](interceptor.md)。 |
+| `interceptor` | 本地拦截。仅 `mode: "all"` 开启内置规则、本地文件规则、Worker、HTTP 监听和拦截 hook；`none` 或其他值关闭全部拦截，包括已缓存规则。详见 [本地拦截](interceptor.md)。 |
 
 对应环境变量：
 
@@ -63,8 +63,9 @@ Pilot 按以下顺序解析配置：
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | 覆盖 `serviceNamePrefix`。 |
 | `LOONGSUITE_PILOT_POLL_INTERVAL_MS` | 所有 Agent 采集器的轮询间隔，单位毫秒。默认 `10000`。覆盖 `listeners.*.pollInterval` 和 `QODER_ANALYTICS_POLL_INTERVAL`。只接受 `1000` 到 `2147483647` 的十进制整数，其余值会被忽略。未设置该变量时，Wukong 和 Kiro CLI session 仍使用各自 60 秒的内置间隔。 |
 | `LOG_LEVEL` | 运行日志级别：`debug`、`info`、`warn`、`error` 或 `silent`。 |
-| `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | 拦截模式：`all`、`none` 或 `custom`。 |
-| `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` | 逗号分隔的拦截类型，仅 `custom` 模式生效。 |
+| `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | 拦截模式：`all` 或 `none`，在 collector 启动时读取。 |
+
+旧的拦截 `custom` 模式与 `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` 不再支持。已有 `custom` 配置升级后会关闭拦截；如需继续拦截，请在重启 collector 前显式改为 `all`，此时会启用全部内置密钥类型。脱敏 `mask` 仍支持自己的 `custom` 模式。
 
 ## SLS 密钥配置
 
