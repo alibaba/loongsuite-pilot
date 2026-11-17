@@ -172,7 +172,7 @@ pub async fn dispatch(argv: &[String]) -> anyhow::Result<i32> {
         Some("hook") => {
             if let Ok(parsed) = crate::deployment::parse_hook_args(args) {
                 if parsed.help || parsed.subcommand == "help" {
-                    println!("Usage: loongsuite-pilot hook install [--agents <ids>] [--home <id>=<dir>]... [--config-dir PATH] [--json]\n       loongsuite-pilot hook status [--agents <ids>] [--json]");
+                    println!("{}", crate::deployment::hook_usage());
                     return Ok(0);
                 }
             }
