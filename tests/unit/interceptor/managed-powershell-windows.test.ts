@@ -71,8 +71,10 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     expect(version.code, JSON.stringify(version)).toBe(0);
     expect(version.stdout.trim()).toMatch(/^5\.1\./);
     const { pool, file, dir } = await poolFile(`if ((Get-ExecutionPolicy -Scope Process) -ne 'Bypass') { throw 'missing process policy' }; $r = $input | Out-String | ConvertFrom-Json; @{matched=$true;reason=$r.prompt} | ConvertTo-Json -Compress`);
-    const policies = await powerShellProbe(['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Restricted', '-Command',
-      '@{Effective=[string](Get-ExecutionPolicy);Process=[string](Get-ExecutionPolicy -Scope Process);CurrentUser=[string](Get-ExecutionPolicy -Scope CurrentUser);LocalMachine=[string](Get-ExecutionPolicy -Scope LocalMachine);MachinePolicy=[string](Get-ExecutionPolicy -Scope MachinePolicy);UserPolicy=[string](Get-ExecutionPolicy -Scope UserPolicy)} | ConvertTo-Json -Compress']);
+    // Restricted also blocks autoloading the Security module. Load its cmdlets
+    // before restricting this probe's process; no persisted policy is changed.
+    const policies = await powerShellProbe(['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+      'Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; Set-ExecutionPolicy Restricted -Scope Process -Force; @{Effective=[string](Get-ExecutionPolicy);Process=[string](Get-ExecutionPolicy -Scope Process);CurrentUser=[string](Get-ExecutionPolicy -Scope CurrentUser);LocalMachine=[string](Get-ExecutionPolicy -Scope LocalMachine);MachinePolicy=[string](Get-ExecutionPolicy -Scope MachinePolicy);UserPolicy=[string](Get-ExecutionPolicy -Scope UserPolicy)} | ConvertTo-Json -Compress']);
     expect(policies.code, JSON.stringify(policies)).toBe(0);
     const policySnapshot = JSON.parse(policies.stdout.trim());
     // This control script does not read $input, even if a higher policy overrides Restricted.
@@ -82,6 +84,7 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     const diagnostic = JSON.stringify({ policies: policySnapshot, probe: restricted });
     expect(restricted.timedOut, diagnostic).toBe(false);
     expect(restricted.code, diagnostic).not.toBe(0);
+    expect(restricted.stderr, diagnostic).toMatch(/PSSecurityException|UnauthorizedAccess/);
     expect(restricted.stdout, diagnostic).not.toContain('RESTRICTED_SCRIPT_EXECUTED');
     expect(policySnapshot.Effective, diagnostic).toBe('Restricted');
     const result = await pool.run(file, JSON.stringify({ prompt: '张三保密文本' }), 15_000);
