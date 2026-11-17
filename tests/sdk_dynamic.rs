@@ -478,102 +478,44 @@ fn c_header_and_real_host_example_match_the_exported_table() {
 }
 
 #[test]
-fn real_codex_transcript_collects_through_the_same_dynamic_abi() {
+fn cloud_sdk_rejects_codex_without_replacing_the_running_policy() {
     let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("sessions");
-    std::fs::create_dir(&source).unwrap();
-    let mut policy = json!({"agents":["codex"],"hcd":{"agent_configs":{"codex":{"collection":{
-        "enabled":true,"profile":"codex_rollout_v1","allowed_roots":[source],
-        "sources":[{"id":"rollout","type":"transcript","path":source}],"limits":{"poll_interval_ms":100}
-    }}}},"sdk_options":{"delivery":{"flush_interval_ms":10}}});
-    policy["sdk_options"]["hooks"]["local"]["mode"] = json!("all");
-    let data = root.path().join("data");
-    let mut host = Host::start(&data, policy.clone(), Box::default());
+    let mut host = Host::start(root.path(), empty_policy(), Box::default());
     host.ready();
-    std::thread::sleep(Duration::from_millis(250));
-    // Existing checked-in native Codex fixture, created after startup so old
-    // history remains baselined according to the production collector contract.
-    let fixture=include_str!("fixtures/codex-subagent/rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
-    let session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    let transcript = source.join(format!("rollout-2026-08-07T10-00-00-{session}.jsonl"));
-    std::fs::write(&transcript, fixture).unwrap();
-    let observe = |turn: &str| {
-        let payload = json!({"session_id":session,"turn_id":turn,"transcript_path":transcript,
-            "hook_event_name":"Stop"});
-        let result = sdk_hook_command(&data, "observe", "codex", "Stop", &payload)
-            .wait_with_output()
-            .unwrap();
-        assert!(result.status.success());
-        assert!(result.stdout.is_empty());
-        assert!(std::fs::read_dir(data.join("sources"))
-            .unwrap()
-            .flatten()
-            .any(|entry| {
-                entry
-                    .path()
-                    .join("wakeup")
-                    .join(format!("{session}.json"))
-                    .is_file()
-            }));
-    };
-    observe("parent-turn-1");
-    assert_eq!(host.ctx.hook_entered.load(Ordering::SeqCst), 0);
-    let tool = json!({"hook_event_name":"PreToolUse","session_id":session,
-        "tool_name":"Bash","tool_input":{"command":"export KEY=sk-1234567890abcdefghijklmnop"}});
-    for channel in ["cloud", "local"] {
-        let output = sdk_hook_command(&data, channel, "codex", "PreToolUse", &tool)
-            .wait_with_output()
-            .unwrap();
-        assert!(output.status.success());
-        let verdict: Value = serde_json::from_slice(&output.stdout).expect(channel);
-        assert_eq!(
-            verdict.pointer("/hookSpecificOutput/permissionDecision"),
-            Some(&json!("deny"))
-        );
-    }
-    until(|| {
-        host.ctx.rows.lock().unwrap().iter().any(|bytes| {
-            serde_json::from_slice::<Value>(bytes).is_ok_and(|v| v["event.name"] == "llm.response")
-        })
-    });
-    let rows = host.ctx.rows.lock().unwrap().clone();
-    assert!(rows.iter().all(|b| serde_json::from_slice::<Value>(b)
-        .is_ok_and(|v| v["event.id"].as_str().is_some_and(|s| !s.is_empty()))));
-    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
-    host.stop();
-    drop(host);
-    let mut resumed = Host::start(&data, policy, Box::default());
-    resumed.ready();
-    let second_turn = fixture
-        .lines()
-        .skip(1)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .replace("parent-turn-1", "parent-turn-2")
-        .replace("call-subagent-", "new-call-");
-    writeln!(
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&transcript)
-            .unwrap(),
-        "{second_turn}"
+    let policy = json!({"agents":["codex"],"hcd":{"agent_configs":{"codex":{"collection":{
+        "enabled":true,"profile":"codex_rollout_v1","allowed_roots":[root.path()],
+        "sources":[{"id":"rollout","type":"transcript","path":root.path()}]
+    }}}}});
+    assert_eq!(host.apply(policy).0, BAD_ARGUMENT);
+    assert_eq!(host.snapshot()["effective_version"], "original");
+
+    let output = sdk_hook_command(
+        root.path(),
+        "cloud",
+        "codex",
+        "PreToolUse",
+        &json!({
+            "hook_event_name":"PreToolUse","session_id":"not-an-sdk-agent"
+        }),
     )
+    .wait_with_output()
     .unwrap();
-    observe("parent-turn-2");
-    until(|| {
-        resumed.ctx.rows.lock().unwrap().iter().any(|bytes| {
-            serde_json::from_slice::<Value>(bytes)
-                .is_ok_and(|event| event["event.name"] == "llm.response")
-        })
-    });
-    resumed.stop();
-    assert!(resumed
-        .ctx
-        .rows
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|bytes| !rows.contains(bytes)));
+    assert!(output.status.success() && output.stdout.is_empty() && output.stderr.is_empty());
+    assert_eq!(host.ctx.hook_entered.load(Ordering::SeqCst), 0);
+
+    let mut report = std::ptr::null_mut();
+    let mut length = 0;
+    let status = unsafe {
+        (host.api().host_hook)(
+            PilotJsonView::from_bytes(br#"["hook-process","codex","stop"]"#),
+            PilotJsonView::from_bytes(b"{}"),
+            &mut report,
+            &mut length,
+        )
+    };
+    assert_eq!(status, BAD_ARGUMENT);
+    assert!(report.is_null() && length == 0);
+    host.stop();
 }
 
 #[test]
@@ -1115,11 +1057,12 @@ fn full_pilot_sdk_observe_preserves_qoder_wakeup_context() {
         "sdk-hook-worker"
     );
     assert_eq!(wakeup["spanAttributes"]["custom.origin"], "full-hook");
-    let trace = std::fs::read_to_string(data.join("acp-correlate/sdk-full-wakeup.jsonl")).unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(trace.trim()).unwrap()["traceparent"],
-        traceparent
-    );
+    assert!(host.ctx.hook_requests.lock().unwrap().iter().any(|row| {
+        row["kind"] == "qoder_upstream"
+            && row["session_id"] == "sdk-full-wakeup"
+            && row["traceparent"] == traceparent
+    }));
+    assert!(!data.join("acp-correlate").exists());
     host.stop();
 }
 

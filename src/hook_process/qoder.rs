@@ -220,7 +220,17 @@ fn publish_hook_notice(request: &HookRequest<'_>) {
     if !value.is_object() {
         return;
     }
-    publish_native_wakeup(request.env, &agent, &value);
+    if publish_native_wakeup(request.env, &agent, &value)
+        && value["hook_event_name"] != "SubagentStop"
+    {
+        if let Some(session) = value
+            .get("session_id")
+            .or_else(|| value.get("conversation_id"))
+            .and_then(Value::as_str)
+        {
+            record_upstream_context_once(request.env, &agent, session);
+        }
+    }
 }
 
 fn publish_native_wakeup(env: &Env, agent: &str, value: &Value) -> bool {
@@ -238,24 +248,14 @@ fn publish_native_wakeup(env: &Env, agent: &str, value: &Value) -> bool {
         .is_none_or(|event| matches!(event, "Stop" | "SessionEnd"));
     let identity = identity.or_else(|| terminal.then(|| json!({"name":"","email":""})));
     let stamp = build_stamp(env);
-    let accepted = super::qoder_wakeup::publish_qoder_wakeup(
+    super::qoder_wakeup::publish_qoder_wakeup(
         value,
         &data_dir(env),
         agent,
         identity.as_ref(),
         &stamp.resources,
         &stamp.span,
-    );
-    if accepted && value["hook_event_name"] != "SubagentStop" {
-        if let Some(session) = value
-            .get("session_id")
-            .or_else(|| value.get("conversation_id"))
-            .and_then(Value::as_str)
-        {
-            record_upstream_context_once(env, agent, session);
-        }
-    }
-    accepted
+    )
 }
 
 pub(crate) fn publish_sdk_host_wakeup(value: &Value, data: &Path, home: &Path) -> bool {

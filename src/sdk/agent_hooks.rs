@@ -14,7 +14,6 @@ impl AgentHook {
         Some(Self(match id {
             "qoder" => InterceptorAgent::Qoder,
             "qodercli" => InterceptorAgent::QoderCli,
-            "codex" => InterceptorAgent::Codex,
             _ => return None,
         }))
     }
@@ -28,7 +27,6 @@ impl AgentHook {
 
     pub(super) fn supports_blocking(self, event: &str) -> bool {
         match self.0 {
-            InterceptorAgent::Codex => event == "PreToolUse",
             InterceptorAgent::Qoder | InterceptorAgent::QoderCli => {
                 matches!(event, "PreToolUse" | "PostToolUse" | "UserPromptSubmit")
             }
@@ -48,18 +46,18 @@ impl AgentHook {
         channel: &str,
         settings: &Value,
         queue: &Outbox,
-    ) {
+    ) -> bool {
         let Some(plan) = settings["collector_plans"].get(self.policy_id()) else {
-            return;
+            return false;
         };
         let Some(data) = settings["data_dir"].as_str() else {
-            return;
+            return false;
         };
         let qoder_host = (self.policy_id() == "qoder")
             .then(|| plan.pointer("/pilot_host/data_dir").and_then(Value::as_str))
             .flatten();
         if qoder_host.is_some() && channel != "observe" {
-            return;
+            return false;
         }
         let Some(path) = payload
             .get("transcript_path")
@@ -68,7 +66,7 @@ impl AgentHook {
             .filter(|path| Path::new(path).is_absolute())
             .and_then(|path| super::policy::canonical_candidate(Path::new(path)).ok())
         else {
-            return;
+            return false;
         };
         let roots: Vec<PathBuf> = plan["sources"]
             .as_array()
@@ -78,7 +76,7 @@ impl AgentHook {
             .filter_map(|source| source["path"].as_str().map(PathBuf::from))
             .collect();
         if roots.is_empty() {
-            return;
+            return false;
         }
         let authorized = roots.iter().any(|root| path.starts_with(root));
         let scope = crate::utils::source_access::SourceScope::new(roots, 1, MAX_REQUEST);
@@ -88,18 +86,18 @@ impl AgentHook {
                 "SDK_HOOK_SOURCE_DENIED",
                 "Hook transcript is outside the authorized source",
             );
-            return;
+            return false;
         }
         let state = if let Some(host) = qoder_host {
             PathBuf::from(host)
         } else {
             let Some(namespace) = plan["namespace"].as_str() else {
-                return;
+                return false;
             };
             Path::new(data).join("sources").join(namespace)
         };
         if crate::utils::source_access::private_path(&state).is_err() {
-            return;
+            return false;
         }
         let accepted = match self.0 {
             InterceptorAgent::Qoder | InterceptorAgent::QoderCli => {
@@ -108,7 +106,7 @@ impl AgentHook {
                 value["hook_event_name"] = json!(event);
                 if qoder_host.is_some() {
                     let Some(home) = settings["home_dir"].as_str() else {
-                        return;
+                        return false;
                     };
                     crate::hook_process::publish_sdk_host_wakeup(&value, &state, Path::new(home))
                 } else {
@@ -122,7 +120,6 @@ impl AgentHook {
                     )
                 }
             }
-            InterceptorAgent::Codex => codex_wakeup(payload, event, &path, &state).is_ok(),
             _ => false,
         };
         if !accepted {
@@ -131,75 +128,6 @@ impl AgentHook {
                 "Hook wakeup was not accepted; source progress retained",
             );
         }
+        accepted
     }
-}
-
-fn codex_wakeup(
-    payload: &Map<String, Value>,
-    event: &str,
-    path: &Path,
-    state: &Path,
-) -> anyhow::Result<()> {
-    use std::sync::Mutex;
-    static MARKERS: Mutex<()> = Mutex::new(());
-    let hook_event = match event {
-        "UserPromptSubmit" => "user-prompt-submit",
-        "SubagentStart" => "subagent-start",
-        "Stop" => "stop",
-        "SubagentStop" => "subagent-stop",
-        "SessionStart" => "session-start",
-        "SessionEnd" => "session-end",
-        _ => return Ok(()),
-    };
-    let Some(session) = payload
-        .get("session_id")
-        .and_then(Value::as_str)
-        .filter(|s| {
-            !s.is_empty()
-                && s.len() <= 128
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
-        })
-    else {
-        return Ok(());
-    };
-    let directory = state.join("wakeup");
-    crate::utils::source_access::private_path(&directory)?;
-    std::fs::create_dir_all(&directory)?;
-    let file = directory.join(format!(
-        "{}.json",
-        crate::inputs::codex_transcript::safe_wakeup_session_part(session)
-    ));
-    let _guard = MARKERS.lock().unwrap();
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    let mut marker = crate::utils::source_access::open_under(&file, &directory)
-        .and_then(|file| file.take(8192).read_to_end(&mut bytes))
-        .ok()
-        .and_then(|_| serde_json::from_slice::<Map<String, Value>>(&bytes).ok())
-        .filter(|marker| marker.get("session_id").and_then(Value::as_str) == Some(session))
-        .unwrap_or_default();
-    marker.insert("session_id".into(), json!(session));
-    marker.insert("transcript_path".into(), json!(path));
-    marker.insert("hook_event".into(), json!(hook_event));
-    marker.insert("received_at".into(), json!(chrono::Utc::now().to_rfc3339()));
-    if let Some(turn) = payload
-        .get("turn_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty() && s.len() <= 128)
-    {
-        if matches!(hook_event, "user-prompt-submit" | "subagent-start")
-            && !marker.contains_key("recovery_turn_id")
-        {
-            marker
-                .entry("initial_turn_id")
-                .or_insert_with(|| json!(turn));
-        } else if matches!(hook_event, "stop" | "subagent-stop") {
-            marker.insert("recovery_turn_id".into(), json!(turn));
-        }
-    }
-    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-    serde_json::to_writer(&mut temporary, &marker)?;
-    temporary.persist(file)?;
-    Ok(())
 }

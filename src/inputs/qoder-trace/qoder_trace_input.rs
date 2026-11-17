@@ -200,7 +200,7 @@ impl QoderTraceInput {
         }
     }
 
-    pub(crate) fn set_trace_linker(&self, linker: Arc<crate::core::TraceLinker>) {
+    pub(crate) fn set_trace_linker(&self, linker: Arc<dyn crate::core::UpstreamTrace>) {
         self.inner.body.transcript_source.set_trace_linker(linker);
     }
 

@@ -30,6 +30,36 @@ pub struct TraceLinker {
     last_access: std::sync::Mutex<HashMap<String, u128>>,
 }
 
+// Each host opts in to upstream correlation. Native Qoder parent/child links
+// are still collected independently when upstream correlation is not configured.
+#[async_trait::async_trait]
+pub(crate) trait UpstreamTrace: Send + Sync {
+    async fn stamp(&self, entries: &mut [AgentActivityEntry]);
+
+    fn resolve_qoder_turn(
+        &self,
+        session: &str,
+        turn: &str,
+        prompt: &str,
+    ) -> Option<(String, String)>;
+}
+
+#[async_trait::async_trait]
+impl UpstreamTrace for TraceLinker {
+    async fn stamp(&self, entries: &mut [AgentActivityEntry]) {
+        TraceLinker::stamp(self, entries).await;
+    }
+
+    fn resolve_qoder_turn(
+        &self,
+        session: &str,
+        turn: &str,
+        prompt: &str,
+    ) -> Option<(String, String)> {
+        TraceLinker::resolve_qoder_turn(self, session, turn, prompt)
+    }
+}
+
 impl TraceLinker {
     pub fn new(store: CorrelationStore) -> Self {
         Self {

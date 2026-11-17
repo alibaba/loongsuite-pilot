@@ -299,7 +299,7 @@ unsafe extern "C" fn on_monitoring(
 
 /// Relay a native SDK decision into the full shell's legacy input linker when
 /// the shell owns Qoder's ACP or multimodal processing.
-unsafe extern "C" fn on_local_verdict(
+unsafe extern "C" fn on_host_hook_event(
     ctx: *mut c_void,
     row: abi::PilotJsonView,
     _remaining_ms: u32,
@@ -319,7 +319,17 @@ unsafe extern "C" fn on_local_verdict(
         // SAFETY: the SDK retains the buffer and the host context for this call.
         let ctx = unsafe { &*ctx.cast::<Context>() };
         let rows = unsafe { std::slice::from_raw_parts(row.data, row.len) };
-        let verdict = serde_json::from_slice::<Verdict>(rows).ok()?;
+        let row: Value = serde_json::from_slice(rows).ok()?;
+        if row["kind"] == "qoder_upstream" {
+            let data = ctx.sdk_data.parent()?.parent()?;
+            crate::hook_process::record_qoder_upstream_for_host(
+                data,
+                row["session_id"].as_str()?,
+                row["traceparent"].as_str()?,
+            );
+            return Some(());
+        }
+        let verdict = serde_json::from_value::<Verdict>(row).ok()?;
         let store = ctx.verdicts.as_ref()?;
         let key = ToolVerdictKey {
             session_id: verdict.session_id,
@@ -356,7 +366,7 @@ fn run(
     let on_hook = context
         .verdicts
         .as_ref()
-        .map(|_| on_local_verdict as abi::OnHook);
+        .map(|_| on_host_hook_event as abi::OnHook);
     let context_ptr = Box::into_raw(context);
     let ctx = context_ptr.cast::<c_void>();
     let mut handle = std::ptr::null_mut();

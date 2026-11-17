@@ -60,6 +60,7 @@ typedef struct PilotApiV2 {
     /* Historical complete Pilot startup slot, reserved to keep v2 layout.
      * The complete Pilot executable owns its command runtime. */
     int32_t (*host_main)(void);
+    /* Reserved historical command slot. The full Pilot executable owns legacy Hooks. */
     int32_t (*host_hook)(PilotJsonView args, PilotJsonView input, char **report, size_t *len);
 } PilotApiV2;
 

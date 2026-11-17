@@ -7,3 +7,4 @@ mod trace_linker;
 pub use correlation_store::CorrelationStore;
 pub use retention::AcpCorrelateRetentionService;
 pub use trace_linker::TraceLinker;
+pub(crate) use trace_linker::UpstreamTrace;

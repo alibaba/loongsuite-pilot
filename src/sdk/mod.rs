@@ -6,7 +6,7 @@ mod monitoring;
 mod policy;
 mod runtime;
 
-mod outbox;
+pub(crate) mod outbox;
 
 mod agent_hooks;
 pub mod hook_protocol;

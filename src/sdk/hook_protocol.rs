@@ -44,7 +44,7 @@ pub fn block_reason(reason: &str) -> &str {
 }
 
 pub fn render_block(agent: &str, event: &str, reason: &str) -> Option<String> {
-    if !(matches!(agent, "qoder" | "qodercli") || (agent == "codex" && event == "PreToolUse")) {
+    if !matches!(agent, "qoder" | "qodercli") {
         return None;
     }
     let reason = block_reason(reason);

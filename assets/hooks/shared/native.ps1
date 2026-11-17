@@ -73,10 +73,6 @@ function Invoke-PilotNative {
     }
     try {
         $binary = Resolve-PilotBinary -HookDir $HookDir
-        if ($Arguments.Count -ge 2 -and $Arguments[0] -ceq 'hook-process' -and $Arguments[1] -ceq 'codex' -and (Split-Path -Leaf $binary) -ieq 'loongsuite-pilot.exe') {
-            $hookBinary = Join-Path (Split-Path -Parent $binary) 'loongsuite-pilot-sdk-hook.exe'
-            if (Test-PilotBinary $hookBinary) { $binary = $hookBinary }
-        }
         if ($Arguments.Count -ge 1 -and $Arguments[0] -ceq 'sdk-hook') {
             $hookBinary = Join-Path (Split-Path -Parent $binary) 'loongsuite-pilot-sdk-hook.exe'
             if (Test-PilotBinary $hookBinary) { $binary = $hookBinary }

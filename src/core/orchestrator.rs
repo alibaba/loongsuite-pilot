@@ -505,10 +505,6 @@ impl Orchestrator {
         } else if let Some(config) = &interceptor_config {
             self.start_qoder_hooks(&pilot_dir, config, verdicts).await;
         }
-        if self.uses_sdk_codex() {
-            self.register_sdk_codex(&mut detection, &pilot_dir, &state_store)
-                .await;
-        }
         let deploy_entries = deployment
             .as_ref()
             .map(|deployment| self.deploy_detection_entries(deployment))
@@ -1914,7 +1910,12 @@ impl Orchestrator {
             CopilotLogInput::check_availability,
         )
         .await;
-        if !self.uses_sdk_codex() {
+        if self.prepare_codex_shell_state(state_store).await {
+            let session_dir = std::env::var_os("CODEX_HOME")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join("sessions").to_string_lossy().into_owned());
             let wakeup = self.data_dir_join("state/codex/transcript-wakeups");
             let spans = self.data_dir_join("state/codex/transcript-span-contexts");
             ensure_dir(&wakeup).await;
@@ -1929,19 +1930,24 @@ impl Orchestrator {
                 ),
                 CodexTranscriptInput::new(CodexTranscriptInputOptions {
                     state_store: Arc::clone(state_store),
-                    session_dir: None,
+                    session_dir: session_dir.clone(),
                     wakeup_dir: Some(wakeup.clone()),
                     span_context_dir: Some(spans),
                     poll_interval_ms: self.poll("codex-transcript"),
                     multimodal: None,
                 }),
-                CodexTranscriptInput::watch_paths(Some(&wakeup_for_watch), None),
+                CodexTranscriptInput::watch_paths(Some(&wakeup_for_watch), session_dir.as_deref()),
                 {
-                    let wakeup = wakeup.clone();
+                    let watch_sessions = session_dir.clone();
                     move || {
                         let wakeup = wakeup.clone();
+                        let sessions = watch_sessions.clone();
                         async move {
-                            CodexTranscriptInput::check_availability(Some(&wakeup), None).await
+                            CodexTranscriptInput::check_availability(
+                                Some(&wakeup),
+                                sessions.as_deref(),
+                            )
+                            .await
                         }
                     }
                 },
@@ -1957,14 +1963,24 @@ impl Orchestrator {
                 ),
                 CodexAbortedTurnInput::new(CodexAbortedTurnInputOptions {
                     state_store: Arc::clone(state_store),
-                    session_dir: None,
-                    hook_state_dir: None,
-                    diagnostic_dir: None,
+                    session_dir: session_dir.clone(),
+                    hook_state_dir: Some(self.data_dir_join("state/codex/sessions")),
+                    diagnostic_dir: Some(self.data_dir_join("logs/diagnostics")),
                     hook_gap_grace_ms: None,
                     poll_interval_ms: self.poll("codex-aborted-turn"),
                 }),
-                CodexAbortedTurnInput::watch_paths(),
-                CodexAbortedTurnInput::check_availability,
+                session_dir
+                    .clone()
+                    .map_or_else(CodexAbortedTurnInput::watch_paths, |path| vec![path]),
+                move || {
+                    let sessions = session_dir.clone();
+                    async move {
+                        match sessions {
+                            Some(path) => crate::utils::directory_exists(&path).await,
+                            None => CodexAbortedTurnInput::check_availability().await,
+                        }
+                    }
+                },
             )
             .await;
         }
@@ -2893,93 +2909,25 @@ impl Orchestrator {
         );
     }
 
-    fn uses_sdk_codex(&self) -> bool {
-        self.standalone && !self.config.upstream_link.enabled
-    }
-
-    async fn register_sdk_codex(
-        &self,
-        entries: &mut Vec<Arc<dyn AgentDetection>>,
-        pilot_dir: &str,
-        state_store: &Arc<StateStore>,
-    ) {
-        let home = resolve_home("~");
-        let session_dir = std::env::var_os("CODEX_HOME")
-            .filter(|value| !value.is_empty())
-            .map(std::path::PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .map_or_else(
-                || resolve_home("~/.codex/sessions"),
-                |path| path.join("sessions").to_string_lossy().into_owned(),
-            );
-        let wakeup = self.data_dir_join("state/codex/transcript-wakeups");
-        ensure_dir(&wakeup).await;
-        for (listener, profile) in [
-            ("codex-transcript", "codex_rollout_v1"),
-            ("codex-aborted-turn", "codex_aborted_turn_v1"),
-        ] {
-            let sdk_data = self.data_dir_join(&format!("state/standalone-{listener}-sdk"));
-            let init = serde_json::json!({
-                "data_dir": sdk_data,
-                "resource_dir": pilot_dir,
-                "home_dir": home,
-                "user_id": self.config.user_id,
-            });
-            let config = self.config.agents.get("codex");
-            let policy = serde_json::json!({
-                "agents": ["codex"],
-                "hcd": {"agent_configs": {"codex": {"collection": {
-                    "enabled": true,
-                    "profile": profile,
-                    "allowed_roots": [&session_dir, &self.data_dir],
-                    "sources": [{"id":"sessions", "type":"transcript", "path": session_dir}],
-                    "limits": {"poll_interval_ms": self.poll(listener)
-                        .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS)},
-                    "pilot_host": {
-                        "data_dir": self.data_dir,
-                        "capture_message_content": config.and_then(|agent| agent.capture_message_content),
-                        "exclude_workspaces": self.config.privacy.as_ref()
-                            .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
-                    },
-                }}}},
-                "sdk_options": {"mask": self.config.mask},
-            });
-            let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
-                listener,
-                init,
-                policy,
-                &self.inputs,
-                std::path::PathBuf::from(sdk_data),
-                state_store,
-            ));
-            let live = live_from_parts(
-                listener,
-                "codex",
-                "sdk-hosted",
-                sdk,
-                |input| input.running(),
-                |input| Box::pin(async move { input.start().await }),
-                |input| Box::pin(async move { input.stop().await }),
-            );
-            self.inputs.register_input(Arc::clone(&live));
-            let watch = CodexTranscriptInput::watch_paths(Some(&wakeup), Some(&session_dir));
-            let session = session_dir.clone();
-            let wakeup = wakeup.clone();
-            self.push_detection(
-                entries,
-                live,
-                watch,
-                move || {
-                    let session = session.clone();
-                    let wakeup = wakeup.clone();
-                    async move {
-                        CodexTranscriptInput::check_availability(Some(&wakeup), Some(&session))
-                            .await
-                    }
-                },
-                1,
-                None,
-            );
+    async fn prepare_codex_shell_state(&self, state: &StateStore) -> bool {
+        if !self.standalone {
+            return true;
+        }
+        match super::codex_sdk_migration::migrate(Path::new(&self.data_dir), state, &self.inputs)
+            .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                logger("Orchestrator").warn(
+                    "Codex SDK state migration failed; retained for retry",
+                    Some(&fields(serde_json::json!({"error":error.to_string()}))),
+                );
+                self.emit(OrchestratorEvent::ComponentFailure {
+                    component: "codex-sdk-migration".into(),
+                    error: error.to_string(),
+                });
+                false
+            }
         }
     }
 

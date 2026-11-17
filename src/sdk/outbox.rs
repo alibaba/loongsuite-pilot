@@ -426,6 +426,13 @@ impl Outbox {
         }
         Ok(())
     }
+    pub(crate) fn saved_checkpoints(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare("SELECT source,json FROM checkpoint")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn checkpoint(&self, source: &str, text: &str) -> anyhow::Result<()> {
         self.db.lock().unwrap().execute("INSERT INTO checkpoint VALUES(?1,?2) ON CONFLICT(source) DO UPDATE SET json=excluded.json",params![source,text])?;
         Ok(())
@@ -595,7 +602,7 @@ impl Outbox {
             }
         }
     }
-    fn read_batch(&self, options: &Delivery) -> anyhow::Result<(DeliveryRows, i64)> {
+    pub(crate) fn read_batch(&self, options: &Delivery) -> anyhow::Result<(DeliveryRows, i64)> {
         let db = self.db.lock().unwrap();
         let mut stmt = db.prepare(
             "SELECT seq,payload,created,length(payload) FROM event ORDER BY seq LIMIT ?1",
@@ -628,7 +635,7 @@ impl Outbox {
         }
         Ok((rows, oldest))
     }
-    fn ack(&self, rows: &[(i64, Vec<u8>)]) -> anyhow::Result<()> {
+    pub(crate) fn ack(&self, rows: &[(i64, Vec<u8>)]) -> anyhow::Result<()> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         let now = chrono::Utc::now().timestamp_millis();

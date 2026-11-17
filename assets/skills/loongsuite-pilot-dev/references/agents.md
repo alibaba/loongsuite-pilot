@@ -15,11 +15,11 @@
 - 同步拦截是另一条链路，完整版 Qoder 由 `sdk-hook --channel local --agent qoder-auto` 进入 SDK 本地裁决，云壳的宿主裁决使用 `--channel cloud`。Qoder IDE 和 CLI 可以共用设置，原生 Hook 按实际进程识别并使用对应输出契约。检查端点不可用、无效裁决、超时和关闭期间快速放行，Agent 侧只有一次有效响应。云壳裁决协议查 `include/pilot_sdk.h` 和 `src/sdk/hooks.rs`。验收用无敏感内容的关键词做允许和拒绝对照，检查真实 Qoder CLI 的目标工具是否执行。同步阻断使用退出码 2 和 stderr，验证直接命令和兼容包装器都能将退出码传给 Qoder。
 - 先确认宿主确实支持二进制 Hook。逐项检查新旧路径、安装包资产、Hook 配置和真实事件字段。证明该路径不启动 Node/JS 后，才删除它专用的脚本和打包条目。其他宿主加载的插件有独立契约，按宿主逐一迁移。
 
-## 用同一路径接入 Codex
+## 完整 Pilot 的 Codex 采集
 
-- `register_sdk_codex` 让 SDK 分别管理 rollout 采集和中止回合补采，两个输入沿用各自的监听配置和 checkpoint 命名空间。默认读取 `~/.codex/sessions`，独立运行使用明确的 `CODEX_HOME`。上游 link 配置仍走兼容路径。
-- Codex 的 Hook 信任依赖已经部署的命令与配置。保留稳定命令和信任记录，由现有的 Unix 或 PowerShell 启动脚本选择同包的共享 Hook，再用原生适配器写唤醒及 span 上下文。卸载及回滚沿用原有的托管归属规则。
-- 兼容历史状态要同时处理监听器名称和 `监听器:rollout绝对路径` 的条目。用同一个真实 Codex 会话产出请求、响应、工具调用和结果。验证重启前后既有事件不重复，新回合能继续交付，真实 token 和工作区字段可用。
+- 云壳 SDK 只承载 Qoder。完整版原生注册 Codex rollout 和中止回合补采，沿用现有监听和 `CODEX_HOME` 配置。
+- 保留 Codex 已注册的 Hook 命令与信任记录。Unix 和 PowerShell 启动脚本调用完整版入口，由原生处理器写唤醒和 span 上下文。
+- 从曾由 SDK 采集的版本迁移时，完整版用原事件 ID 补交上一实例的未确认批次，再按监听器命名空间接管进度。验证同一会话的续采、请求响应关联、真实 token 和工作区字段。
 
 ## 接入云壳 SDK Hook
 

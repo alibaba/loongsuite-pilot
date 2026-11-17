@@ -68,8 +68,8 @@ pub struct PilotApiV2 {
     pub dispatch: unsafe extern "C" fn(*mut PilotHandle, u32) -> i32,
     /// Complete Pilot command host. The embedded collector never calls this.
     pub host_main: unsafe extern "C" fn() -> i32,
-    /// Full Pilot Hook evaluation with captured Agent output. Called only by
-    /// the deadline worker; the native main thread alone writes stdout.
+    /// Historical command slot retained for the v2 layout. Legacy command
+    /// dispatch is owned by the full Pilot executable.
     pub host_hook:
         unsafe extern "C" fn(PilotJsonView, PilotJsonView, *mut *mut c_char, *mut usize) -> i32,
 }

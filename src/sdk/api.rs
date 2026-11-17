@@ -418,40 +418,14 @@ unsafe extern "C" fn host_main() -> i32 {
     FAILURE
 }
 
+// Reserved ABI slot. The full Pilot executable handles historical commands.
 unsafe extern "C" fn host_hook(
-    args: PilotJsonView,
-    stdin: PilotJsonView,
-    report: *mut *mut c_char,
-    len: *mut usize,
+    _args: PilotJsonView,
+    _stdin: PilotJsonView,
+    _report: *mut *mut c_char,
+    _len: *mut usize,
 ) -> i32 {
-    boundary(|| {
-        let args = match unsafe { json_input(args) }
-            .and_then(|v| serde_json::from_value::<Vec<String>>(v).map_err(|_| BAD_ARGUMENT))
-        {
-            Ok(args) => args,
-            Err(code) => return code,
-        };
-        if stdin.data.is_null() || stdin.len > 5 * 1024 * 1024 {
-            return BAD_ARGUMENT;
-        }
-        // SAFETY: borrowed readable input is retained by the native worker.
-        let input = unsafe { std::slice::from_raw_parts(stdin.data, stdin.len) };
-        crate::utils::logger::redirect_root_logger_to_stderr();
-        if let [command, agent, hook_args @ ..] = args.as_slice() {
-            if command == "hook-process" {
-                let (code, stdout) = match agent.as_str() {
-                    "qoder" if hook_args.iter().any(|arg| arg == "--wakeup-only") => {
-                        crate::hook_process::run_qoder_wakeup_captured(hook_args, input)
-                    }
-                    "codex" => crate::hook_process::run_codex_hook_captured(hook_args, input),
-                    _ => return BAD_ARGUMENT,
-                };
-                return unsafe { output(&json!({"exit_code":code,"stdout":stdout}), report, len) }
-                    .map_or_else(|e| e, |_| OK);
-            }
-        }
-        BAD_ARGUMENT
-    })
+    BAD_ARGUMENT
 }
 
 type MonitoringBatch = (Vec<Vec<u8>>, Vec<(String, String)>);

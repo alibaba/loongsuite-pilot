@@ -7,7 +7,7 @@ use super::subagents::{self, Link, Links};
 use super::transcript_scanner::{
     self as scanner, FileVersion, PendingLine, ScanBudget, ScanMetrics, ScanOptions,
 };
-use crate::core::TraceLinker;
+use crate::core::UpstreamTrace;
 use crate::hook_process::{
     build_collected_transcript_turn, is_qoder_app_turn, qoder_has_cn_terminal,
     qoder_is_control_user_row, qoder_is_real_user_prompt, qoder_legacy_retry_lock_path,
@@ -185,7 +185,7 @@ struct Collector {
     warned: IndexMap<String, i64>,
     cleanup_rotation: usize,
     links: Links,
-    linker: Arc<std::sync::OnceLock<Arc<TraceLinker>>>,
+    linker: Arc<std::sync::OnceLock<Arc<dyn UpstreamTrace>>>,
     discovery_epoch: u64,
     waiting: IndexMap<String, u64>,
     priority: IndexSet<PathBuf>,
@@ -215,7 +215,7 @@ struct Collector {
 }
 pub struct QoderTranscriptSource {
     inner: tokio::sync::Mutex<Collector>,
-    linker: Arc<std::sync::OnceLock<Arc<TraceLinker>>>,
+    linker: Arc<std::sync::OnceLock<Arc<dyn UpstreamTrace>>>,
     stopped: Arc<AtomicBool>,
     completed: AtomicU64,
 }
@@ -418,7 +418,7 @@ impl QoderTranscriptSource {
             completed: AtomicU64::new(0),
         }
     }
-    pub(crate) fn set_trace_linker(&self, linker: Arc<TraceLinker>) {
+    pub(crate) fn set_trace_linker(&self, linker: Arc<dyn UpstreamTrace>) {
         let _ = self.linker.set(linker);
     }
 

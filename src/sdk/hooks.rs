@@ -242,8 +242,32 @@ fn process(
         return allow();
     }
 
-    adapter.wakeup(&payload, &packet.event, channel, &trusted, queue);
+    let accepted = adapter.wakeup(&payload, &packet.event, channel, &trusted, queue);
     if channel == "observe" {
+        if accepted && packet.event != "SubagentStop" && trusted["relay_host_verdicts"] == true {
+            let session = payload
+                .get("session_id")
+                .or_else(|| payload.get("conversation_id"))
+                .and_then(Value::as_str);
+            let traceparent = payload
+                .get(QODER_OBSERVE_CONTEXT)
+                .and_then(|value| value["TRACEPARENT"].as_str());
+            if let (Some(callback), Some(session), Some(traceparent)) =
+                (callback, session, traceparent)
+            {
+                notify_shell(
+                    queue,
+                    callback,
+                    context,
+                    deadline,
+                    json!({
+                        "kind": "qoder_upstream",
+                        "session_id": session,
+                        "traceparent": traceparent,
+                    }),
+                );
+            }
+        }
         return allow();
     }
 
@@ -398,32 +422,36 @@ fn record_tool_verdict(
                 "phase": phase,
                 "action": action,
             });
-            if let Ok(bytes) = serde_json::to_vec(&verdict) {
-                let remaining = deadline
-                    .saturating_duration_since(Instant::now())
-                    .as_millis() as u32;
-                if remaining > 0 {
-                    // The full Pilot callback updates its in-memory verdict store.
-                    // This notification cannot alter the verdict or delay delivery via the outbox.
-                    queue.callbacks.fetch_add(1, Ordering::SeqCst);
-                    let mut reply = [0; 1];
-                    let mut length = 0;
-                    // SAFETY: all views and out parameters remain live until the callback returns.
-                    unsafe {
-                        callback(
-                            context as *mut _,
-                            PilotJsonView::from_bytes(&bytes),
-                            remaining,
-                            reply.as_mut_ptr(),
-                            reply.len(),
-                            &mut length,
-                        );
-                    }
-                    queue.callbacks.fetch_sub(1, Ordering::SeqCst);
-                }
-            }
+            notify_shell(queue, callback, context, deadline, verdict);
         }
     }
+}
+
+fn notify_shell(queue: &Outbox, callback: OnHook, context: usize, deadline: Instant, row: Value) {
+    let Ok(bytes) = serde_json::to_vec(&row) else {
+        return;
+    };
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis() as u32;
+    if remaining == 0 {
+        return;
+    }
+    queue.callbacks.fetch_add(1, Ordering::SeqCst);
+    let mut reply = [0; 1];
+    let mut length = 0;
+    // SAFETY: all buffers remain valid until the host callback returns.
+    unsafe {
+        callback(
+            context as *mut _,
+            PilotJsonView::from_bytes(&bytes),
+            remaining,
+            reply.as_mut_ptr(),
+            reply.len(),
+            &mut length,
+        );
+    }
+    queue.callbacks.fetch_sub(1, Ordering::SeqCst);
 }
 
 fn record_blocked_prompt(
