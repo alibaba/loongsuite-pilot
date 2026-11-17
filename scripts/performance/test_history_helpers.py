@@ -99,6 +99,16 @@ class Helpers(unittest.TestCase):
                 config = json.loads((fixture.data / "config.json").read_text())
                 self.assertEqual(config["listeners"]["qoder-trace"]["pollInterval"], poll_ms)
 
+    def test_native_fixture_notices_reference_transcripts_inside_sdk_home(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Fixture(temporary, sessions=1, native_subdir="home/.qoder/native")
+            fixture.append_turn(0, "warm-00")
+            source = next(fixture.sources.glob("*/source.json"))
+            notice = json.loads(source.read_text())
+            self.assertEqual(notice["transcriptPath"], "/bench/home/.qoder/native/session-00.jsonl")
+            self.assertEqual(notice["cwd"], "/bench/home/.qoder/native")
+            self.assertTrue(fixture.file(0).is_file())
+
     def test_standard_resource_statistics_use_actual_adjacent_elapsed_time(self):
         mib = 1_048_576
         samples = [

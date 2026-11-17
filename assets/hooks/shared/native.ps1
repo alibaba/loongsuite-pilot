@@ -73,6 +73,10 @@ function Invoke-PilotNative {
     }
     try {
         $binary = Resolve-PilotBinary -HookDir $HookDir
+        if ($Arguments.Count -ge 2 -and $Arguments[0] -ceq 'hook-process' -and $Arguments[1] -ceq 'codex' -and (Split-Path -Leaf $binary) -ieq 'loongsuite-pilot.exe') {
+            $hookBinary = Join-Path (Split-Path -Parent $binary) 'loongsuite-pilot-sdk-hook.exe'
+            if (Test-PilotBinary $hookBinary) { $binary = $hookBinary }
+        }
         $quoted = @($Arguments | ForEach-Object { ConvertTo-PilotNativeArgument $_ })
         # A standalone native invocation inherits the original byte handles.
         # Do not capture its output or put it in a PowerShell text pipeline.

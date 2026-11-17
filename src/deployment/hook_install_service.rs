@@ -1228,7 +1228,7 @@ mod tests {
         let lock = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(format!("{file}.lock"))
+            .open(format!("{file}.lock.native"))
             .unwrap();
         fs2::FileExt::lock_exclusive(&lock).unwrap();
         let next = report_fixture("second");

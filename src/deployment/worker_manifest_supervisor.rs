@@ -288,7 +288,13 @@ impl WorkerManifestSupervisor {
         let identity = match self.processes.identity(pid) {
             Ok(Some(identity)) => identity,
             result => {
-                if let Ok(Some(_)) = child.try_wait() {
+                // A fast exit can remove the process identity before wait
+                // publishes its exit status. Give that child a bounded reap
+                // window while still refusing unidentifiable live workers.
+                if matches!(
+                    tokio::time::timeout(Duration::from_millis(100), child.wait()).await,
+                    Ok(Ok(_))
+                ) {
                     if !write_status(&paths.status, &json!({"state":"running","name":manifest.name,"agentId":agent_id,"pid":pid,"runId":generation.id,"restartCount":generation.restarts})).await { return false; }
                     self.monitor(child.release(), pid, run);
                     return true;

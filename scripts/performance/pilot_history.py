@@ -414,7 +414,12 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
         poll_ms = QODER_FIXED_30S_POLL_MS
     warm_seconds = QODER_FIXED_30S_DRAIN_SECONDS if fixed_cadence else 25
     drain_seconds = QODER_FIXED_30S_DRAIN_SECONDS if fixed_cadence else DRAIN_SECONDS
-    fixture = (LegacyFixture if legacy else Fixture)(directory, sessions=SESSION_COUNT)
+    if legacy:
+        fixture = LegacyFixture(directory, sessions=SESSION_COUNT)
+    else:
+        # The hosted SDK only opens transcript paths inside configured roots.
+        native_subdir = "home/.qoder/native" if args.runtime == "rust" else "native"
+        fixture = Fixture(directory, sessions=SESSION_COUNT, native_subdir=native_subdir)
     output = Output(directory / "output")
     configure(fixture, output.directory, poll_ms)
     if legacy:

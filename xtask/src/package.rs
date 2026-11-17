@@ -159,6 +159,17 @@ pub fn build(root: &Path, options: Options) -> Result<()> {
         .context("SDK must be built alongside the native host")?;
     copy(&sdk, &staged.join("bin").join(sdk_name))?;
     executable(&staged.join(binary))?;
+    let hook_name = if options.target.contains("windows") {
+        "loongsuite-pilot-sdk-hook.exe"
+    } else {
+        "loongsuite-pilot-sdk-hook"
+    };
+    let hook = options.binary.with_file_name(hook_name);
+    validate_binary(&hook, &options.target)
+        .context("shared Hook executable must be built alongside the native host")?;
+    let packaged_hook = staged.join("bin").join(hook_name);
+    copy(&hook, &packaged_hook)?;
+    executable(&packaged_hook)?;
     if options.target.contains("apple") {
         let ui = options
             .status_bar_binary

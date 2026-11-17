@@ -489,17 +489,19 @@ fn dashboard_l252_both_wrappers_delegate_readonly_probe_and_print_only_validated
         assert!(ps.contains(expected), "{expected}");
     }
     assert!(!SHELL.contains("18765") && !ps.contains("18765"));
-    assert!(
-        section("cmd_status()", "cmd_info()").contains("if dashboard_is_available \"$port\"; then")
-    );
-    assert!(ps.contains("if (Test-DashboardAvailable) {"));
+    let status = section("cmd_status()", "cmd_info()");
+    assert!(status.contains("if ! dashboard_probe --enabled; then"));
+    assert!(status.contains("elif dashboard_is_available; then"));
+    assert!(ps.contains("if (-not (Test-DashboardEnabled)) {"));
+    assert!(ps.contains("elseif (Test-DashboardAvailable) {"));
     let f = Fixture::new();
     fs::write(f.data.join("loongsuite-pilot.pid"), "42").unwrap();
-    for available in [false, true] {
+    for (enabled, available) in [(false, true), (true, false), (true, true)] {
         let body = format!(
             r#"
 function is_running {{ true; }}
 function dashboard_port {{ printf 9000; }}
+function dashboard_probe {{ [[ "$1" == --enabled ]] && {enabled}; }}
 function dashboard_is_available {{ {available}; }}
 function is_pid_file_running {{ false; }}
 function interceptor_embedded_status {{ printf stopped; }}
@@ -512,12 +514,13 @@ cmd_status
         let output = String::from_utf8(out.stdout).unwrap();
         assert_eq!(
             output.contains("dashboard: http://127.0.0.1:9000/"),
-            available
+            enabled && available
         );
         assert_eq!(
             output.contains("dashboard: unavailable (http://127.0.0.1:9000/)"),
-            !available
+            enabled && !available
         );
+        assert_eq!(output.contains("dashboard: disabled"), !enabled);
     }
     let native = include_str!("../../src/cli/dashboard_probe.rs");
     for expected in [

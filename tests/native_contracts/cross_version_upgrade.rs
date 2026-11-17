@@ -309,7 +309,7 @@ fn rollback_rejects_legacy_corrupt_and_outside_targets_without_pointer_or_servic
         );
         assert!(
             !restarted.exists(),
-            "{mode}: rejection cannot restart services"
+            "{mode}: rejection cannot stop or restart services"
         );
         assert!(
             !fixture.root.path().join("target-executed").exists(),
@@ -322,7 +322,7 @@ fn rollback_command(fixture: &Fixture, marker: &Path) -> Command {
     #[cfg(unix)]
     let mut command = {
         let mut command = fixture.command(Path::new("/bin/bash"));
-        command.args(["-c", r#"source "$1"; cmd_restart(){ printf restart > "$PILOT_RESTART_MARKER"; }; cmd_rollback"#, "test"])
+        command.args(["-c", r#"source "$1"; cmd_restart(){ printf restart > "$PILOT_RESTART_MARKER"; }; cmd_stop(){ printf stop > "$PILOT_RESTART_MARKER"; }; cmd_rollback"#, "test"])
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/loongsuite-pilot.sh"))
             .env("PATH", "/usr/bin:/bin");
         command
@@ -332,7 +332,7 @@ fn rollback_command(fixture: &Fixture, marker: &Path) -> Command {
         let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
             .join("System32/WindowsPowerShell/v1.0/powershell.exe");
         let script = fixture.root.path().join("rollback-fixture.ps1");
-        fs::write(&script, "\u{feff}. $env:PILOT_TEST_SERVICE_SCRIPT\nfunction Cmd-Restart { Set-Content -LiteralPath $env:PILOT_RESTART_MARKER -Value restart }\nCmd-Rollback\n").unwrap();
+        fs::write(&script, "\u{feff}. $env:PILOT_TEST_SERVICE_SCRIPT\nfunction Cmd-Restart { Set-Content -LiteralPath $env:PILOT_RESTART_MARKER -Value restart }\nfunction Cmd-Stop { Set-Content -LiteralPath $env:PILOT_RESTART_MARKER -Value stop }\nCmd-Rollback\n").unwrap();
         let mut command = fixture.command(&shell);
         command
             .args([

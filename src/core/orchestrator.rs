@@ -202,6 +202,7 @@ type OrchestratorListener = Arc<dyn Fn(OrchestratorEvent) + Send + Sync>;
 
 pub struct Orchestrator {
     runtime_options: CollectorRuntimeOptions,
+    standalone: bool,
     config: AnalyticsConfig,
     data_dir: String,
     agents: Arc<crate::types::AgentsConfig>,
@@ -294,8 +295,15 @@ impl Orchestrator {
             #[cfg(test)]
             test_detection_entries: Mutex::new(Vec::new()),
             runtime_options: CollectorRuntimeOptions::default(),
+            standalone: false,
             config,
         }
+    }
+
+    pub(crate) fn standalone(config: AnalyticsConfig) -> Self {
+        let mut runtime = Self::new(config);
+        runtime.standalone = true;
+        runtime
     }
 
     /// Reuse the collector with explicit ownership of process services/output.
@@ -491,7 +499,14 @@ impl Orchestrator {
         } else {
             (None, None)
         };
-        let detection = self.register_all_inputs(&state_store).await;
+        let mut detection = self.register_all_inputs(&state_store).await;
+        if self.uses_sdk_qoder() {
+            self.register_sdk_qoder(&mut detection, &pilot_dir, &state_store);
+        }
+        if self.uses_sdk_codex() {
+            self.register_sdk_codex(&mut detection, &pilot_dir, &state_store)
+                .await;
+        }
         let deploy_entries = deployment
             .as_ref()
             .map(|deployment| self.deploy_detection_entries(deployment))
@@ -1931,53 +1946,60 @@ impl Orchestrator {
             CopilotLogInput::check_availability,
         )
         .await;
-        let wakeup = self.data_dir_join("state/codex/transcript-wakeups");
-        let spans = self.data_dir_join("state/codex/transcript-span-contexts");
-        ensure_dir(&wakeup).await;
-        let wakeup_for_watch = wakeup.clone();
-        self.add_hosted(
-            &mut entries,
-            HostedInputSpec::new("codex-transcript", "codex", CollectionMethod::SessionFilePolling.as_str(), 1),
-            CodexTranscriptInput::new(CodexTranscriptInputOptions {
-                state_store: Arc::clone(state_store),
-                session_dir: None,
-                wakeup_dir: Some(wakeup.clone()),
-                span_context_dir: Some(spans),
-                poll_interval_ms: self.poll("codex-transcript"),
-                multimodal: None,
-            }),
-            CodexTranscriptInput::watch_paths(Some(&wakeup_for_watch), None),
-            {
-                let wakeup = wakeup.clone();
-                move || {
+        if !self.uses_sdk_codex() {
+            let wakeup = self.data_dir_join("state/codex/transcript-wakeups");
+            let spans = self.data_dir_join("state/codex/transcript-span-contexts");
+            ensure_dir(&wakeup).await;
+            let wakeup_for_watch = wakeup.clone();
+            self.add_hosted(
+                &mut entries,
+                HostedInputSpec::new(
+                    "codex-transcript",
+                    "codex",
+                    CollectionMethod::SessionFilePolling.as_str(),
+                    1,
+                ),
+                CodexTranscriptInput::new(CodexTranscriptInputOptions {
+                    state_store: Arc::clone(state_store),
+                    session_dir: None,
+                    wakeup_dir: Some(wakeup.clone()),
+                    span_context_dir: Some(spans),
+                    poll_interval_ms: self.poll("codex-transcript"),
+                    multimodal: None,
+                }),
+                CodexTranscriptInput::watch_paths(Some(&wakeup_for_watch), None),
+                {
                     let wakeup = wakeup.clone();
-                    async move {
-                        CodexTranscriptInput::check_availability(Some(&wakeup), None).await
+                    move || {
+                        let wakeup = wakeup.clone();
+                        async move {
+                            CodexTranscriptInput::check_availability(Some(&wakeup), None).await
+                        }
                     }
-                }
-            },
-        )
-        .await;
-        self.add_hosted(
-            &mut entries,
-            HostedInputSpec::new(
-                "codex-aborted-turn",
-                "codex",
-                CollectionMethod::SessionFilePolling.as_str(),
-                1,
-            ),
-            CodexAbortedTurnInput::new(CodexAbortedTurnInputOptions {
-                state_store: Arc::clone(state_store),
-                session_dir: None,
-                hook_state_dir: None,
-                diagnostic_dir: None,
-                hook_gap_grace_ms: None,
-                poll_interval_ms: self.poll("codex-aborted-turn"),
-            }),
-            CodexAbortedTurnInput::watch_paths(),
-            CodexAbortedTurnInput::check_availability,
-        )
-        .await;
+                },
+            )
+            .await;
+            self.add_hosted(
+                &mut entries,
+                HostedInputSpec::new(
+                    "codex-aborted-turn",
+                    "codex",
+                    CollectionMethod::SessionFilePolling.as_str(),
+                    1,
+                ),
+                CodexAbortedTurnInput::new(CodexAbortedTurnInputOptions {
+                    state_store: Arc::clone(state_store),
+                    session_dir: None,
+                    hook_state_dir: None,
+                    diagnostic_dir: None,
+                    hook_gap_grace_ms: None,
+                    poll_interval_ms: self.poll("codex-aborted-turn"),
+                }),
+                CodexAbortedTurnInput::watch_paths(),
+                CodexAbortedTurnInput::check_availability,
+            )
+            .await;
+        }
         self.add_hosted(
             &mut entries,
             HostedInputSpec::new(
@@ -2432,44 +2454,46 @@ impl Orchestrator {
             },
         )
         .await;
-        let qoder_agent = self.config.agents.get("qoder").cloned().unwrap_or_default();
-        let qoder_multimodal = self.inputs_have_multimodal()
-            && is_agent_multimodal_enabled(Some("qoder"), &qoder_agent);
-        let qoder = QoderTraceInput::new_with_data_dir(
-            QoderTraceOptions {
-                state_store: Arc::clone(state_store),
-                log_dir: Some(self.data_dir_join("logs/qoder/history")),
-                poll_interval_ms: self.poll("qoder-trace"),
-                multimodal_enabled: qoder_multimodal,
-                upload_mode: qoder_agent.multimodal.as_ref().map(|item| item.upload_mode),
-                allowed_root_paths: qoder_agent
-                    .multimodal
-                    .as_ref()
-                    .and_then(|item| item.allowed_root_paths.clone())
-                    .unwrap_or_default(),
-            },
-            std::path::PathBuf::from(&self.data_dir),
-        );
-        if let Some(linker) = self.inputs.trace_linker() {
-            qoder.set_trace_linker(linker);
-        }
-        if qoder_multimodal {
-            if let Some(processor) = self.inputs.multimodal_processor() {
-                qoder.set_multimodal_processor(processor);
+        if !self.uses_sdk_qoder() {
+            let qoder_agent = self.config.agents.get("qoder").cloned().unwrap_or_default();
+            let qoder_multimodal = self.inputs_have_multimodal()
+                && is_agent_multimodal_enabled(Some("qoder"), &qoder_agent);
+            let qoder = QoderTraceInput::new_with_data_dir(
+                QoderTraceOptions {
+                    state_store: Arc::clone(state_store),
+                    log_dir: Some(self.data_dir_join("logs/qoder/history")),
+                    poll_interval_ms: self.poll("qoder-trace"),
+                    multimodal_enabled: qoder_multimodal,
+                    upload_mode: qoder_agent.multimodal.as_ref().map(|item| item.upload_mode),
+                    allowed_root_paths: qoder_agent
+                        .multimodal
+                        .as_ref()
+                        .and_then(|item| item.allowed_root_paths.clone())
+                        .unwrap_or_default(),
+                },
+                std::path::PathBuf::from(&self.data_dir),
+            );
+            if let Some(linker) = self.inputs.trace_linker() {
+                qoder.set_trace_linker(linker);
             }
+            if qoder_multimodal {
+                if let Some(processor) = self.inputs.multimodal_processor() {
+                    qoder.set_multimodal_processor(processor);
+                }
+            }
+            self.add_hosted(
+                entries,
+                HostedInputSpec::new("qoder-trace", "qoder", "hook-jsonl", 1),
+                qoder,
+                {
+                    let mut paths = QoderTraceInput::get_watch_paths();
+                    paths.push(self.data_dir_join("state/qoder-transcripts/qoder/sources"));
+                    paths
+                },
+                QoderTraceInput::check_availability,
+            )
+            .await;
         }
-        self.add_hosted(
-            entries,
-            HostedInputSpec::new("qoder-trace", "qoder", "hook-jsonl", 1),
-            qoder,
-            {
-                let mut paths = QoderTraceInput::get_watch_paths();
-                paths.push(self.data_dir_join("state/qoder-transcripts/qoder/sources"));
-                paths
-            },
-            QoderTraceInput::check_availability,
-        )
-        .await;
         let cursor_dir = self.data_dir_join("logs/cursor/history");
         self.attach_hook(
             entries,
@@ -2765,6 +2789,180 @@ impl Orchestrator {
             }
         }
         self.data_dir_join("logs/claude-code")
+    }
+
+    fn uses_sdk_qoder(&self) -> bool {
+        self.standalone
+            && !self.config.upstream_link.enabled
+            && !(self.inputs_have_multimodal()
+                && self
+                    .config
+                    .agents
+                    .get("qoder")
+                    .is_some_and(|agent| is_agent_multimodal_enabled(Some("qoder"), agent)))
+    }
+
+    fn register_sdk_qoder(
+        &self,
+        entries: &mut Vec<Arc<dyn AgentDetection>>,
+        pilot_dir: &str,
+        state_store: &Arc<StateStore>,
+    ) {
+        use crate::inputs::qoder_trace::{resolve_qoder_app_root, QODER_SEGMENTS_ROOT};
+        let home = resolve_home("~");
+        let qoder = resolve_home("~/.qoder");
+        let app = resolve_qoder_app_root();
+        let segments = resolve_home(QODER_SEGMENTS_ROOT);
+        let history = self.data_dir_join("logs/qoder/history");
+        let intercept = self.data_dir_join("logs/qodercli-intercept.jsonl");
+        let config = self.config.agents.get("qoder");
+        let sdk_data = self.data_dir_join("state/standalone-qoder-sdk");
+        let init = serde_json::json!({
+            "data_dir": sdk_data,
+            "resource_dir": pilot_dir,
+            "home_dir": home,
+            "user_id": self.config.user_id,
+        });
+        let policy = serde_json::json!({
+            "agents": ["qoder"],
+            "hcd": {"agent_configs": {"qoder": {"collection": {
+                "enabled": true,
+                "profile": "qoder_trace_v1",
+                "allowed_roots": [&home, &qoder, &app, &self.data_dir],
+                "sources": [
+                    {"id": "qoder-home", "type": "transcript", "path": home},
+                    {"id": "qoder-app", "type": "sqlite_root", "path": app},
+                    {"id": "qoder-history", "type": "hook_jsonl", "path": history},
+                    {"id": "qoder-segments", "type": "segments", "path": segments},
+                    {"id": "qoder-usage", "type": "intercept", "path": intercept},
+                ],
+                "limits": {"poll_interval_ms": self.poll("qoder-trace")
+                    .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS)},
+                "pilot_qoder": {
+                    "data_dir": self.data_dir,
+                    "capture_message_content": config.and_then(|agent| agent.capture_message_content),
+                    "exclude_workspaces": self.config.privacy.as_ref()
+                        .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
+                },
+            }}}},
+            "sdk_options": {"mask": self.config.mask},
+        });
+        let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
+            "qoder-trace",
+            init,
+            policy,
+            &self.inputs,
+            std::path::PathBuf::from(sdk_data),
+            state_store,
+        ));
+        let live = live_from_parts(
+            "qoder-trace",
+            "qoder",
+            "sdk-hosted",
+            sdk,
+            |input| input.running(),
+            |input| Box::pin(async move { input.start().await }),
+            |input| Box::pin(async move { input.stop().await }),
+        );
+        self.inputs.register_input(Arc::clone(&live));
+        self.push_detection(
+            entries,
+            live,
+            vec![qoder, history, segments],
+            || async { crate::utils::directory_exists(&resolve_home("~/.qoder")).await },
+            1,
+            None,
+        );
+    }
+
+    fn uses_sdk_codex(&self) -> bool {
+        self.standalone && !self.config.upstream_link.enabled
+    }
+
+    async fn register_sdk_codex(
+        &self,
+        entries: &mut Vec<Arc<dyn AgentDetection>>,
+        pilot_dir: &str,
+        state_store: &Arc<StateStore>,
+    ) {
+        let home = resolve_home("~");
+        let session_dir = std::env::var_os("CODEX_HOME")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .map_or_else(
+                || resolve_home("~/.codex/sessions"),
+                |path| path.join("sessions").to_string_lossy().into_owned(),
+            );
+        let wakeup = self.data_dir_join("state/codex/transcript-wakeups");
+        ensure_dir(&wakeup).await;
+        for (listener, profile) in [
+            ("codex-transcript", "codex_rollout_v1"),
+            ("codex-aborted-turn", "codex_aborted_turn_v1"),
+        ] {
+            let sdk_data = self.data_dir_join(&format!("state/standalone-{listener}-sdk"));
+            let init = serde_json::json!({
+                "data_dir": sdk_data,
+                "resource_dir": pilot_dir,
+                "home_dir": home,
+                "user_id": self.config.user_id,
+            });
+            let config = self.config.agents.get("codex");
+            let policy = serde_json::json!({
+                "agents": ["codex"],
+                "hcd": {"agent_configs": {"codex": {"collection": {
+                    "enabled": true,
+                    "profile": profile,
+                    "allowed_roots": [&session_dir, &self.data_dir],
+                    "sources": [{"id":"sessions", "type":"transcript", "path": session_dir}],
+                    "limits": {"poll_interval_ms": self.poll(listener)
+                        .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS)},
+                    "pilot_host": {
+                        "data_dir": self.data_dir,
+                        "capture_message_content": config.and_then(|agent| agent.capture_message_content),
+                        "exclude_workspaces": self.config.privacy.as_ref()
+                            .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
+                    },
+                }}}},
+                "sdk_options": {"mask": self.config.mask},
+            });
+            let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
+                listener,
+                init,
+                policy,
+                &self.inputs,
+                std::path::PathBuf::from(sdk_data),
+                state_store,
+            ));
+            let live = live_from_parts(
+                listener,
+                "codex",
+                "sdk-hosted",
+                sdk,
+                |input| input.running(),
+                |input| Box::pin(async move { input.start().await }),
+                |input| Box::pin(async move { input.stop().await }),
+            );
+            self.inputs.register_input(Arc::clone(&live));
+            let watch = CodexTranscriptInput::watch_paths(Some(&wakeup), Some(&session_dir));
+            let session = session_dir.clone();
+            let wakeup = wakeup.clone();
+            self.push_detection(
+                entries,
+                live,
+                watch,
+                move || {
+                    let session = session.clone();
+                    let wakeup = wakeup.clone();
+                    async move {
+                        CodexTranscriptInput::check_availability(Some(&wakeup), Some(&session))
+                            .await
+                    }
+                },
+                1,
+                None,
+            );
+        }
     }
 
     async fn add_hosted<T, A, Av>(

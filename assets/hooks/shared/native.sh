@@ -55,6 +55,10 @@ pilot_invoke_native() {
     [[ -z "$empty" ]] || printf '%s\n' "$empty"
     return 0
   fi
+  if [[ "${1:-}" == hook-process && "${2:-}" == codex && "${binary##*/}" == loongsuite-pilot ]]; then
+    local hook_binary="${binary%/*}/loongsuite-pilot-sdk-hook"
+    if pilot_binary_valid "$hook_binary"; then binary="$hook_binary"; fi
+  fi
   if result="$("$binary" "$@")"; then
     if [[ -n "$result" ]]; then printf '%s\n' "$result"
     elif [[ -n "$empty" ]]; then printf '%s\n' "$empty"; fi

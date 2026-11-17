@@ -15,6 +15,7 @@ mod legacy_sls_failed_log_cleanup;
 mod log_retention_service;
 mod orchestrator;
 mod runtime_options;
+mod sdk_agent;
 mod updater_watchdog;
 mod upstream_link;
 mod workspace_policy;

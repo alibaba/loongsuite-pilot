@@ -991,7 +991,7 @@ remove_claude_code_fetch_intercept() {
 # Common: read VERSION file fields
 # ============================================================
 get_installed_version() {
-    local cache_dir="$HOME/.loongsuite-pilot"
+    local cache_dir="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
     local current_file="$cache_dir/current"
     local versions_dir="$cache_dir/versions"
 
@@ -1258,6 +1258,35 @@ reject_multi_sls_config() {
     installer_config_operation check-config
 }
 
+wait_for_pilot_running() {
+    local attempt status
+    for ((attempt=0; attempt<6; attempt++)); do
+        if status="$(run_pilot_cli status 2>/dev/null)" && [[ "$status" == *"is running"* ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# A published package can pass its probes and still fail to start. Recover
+# the installed previous package through the service entry and verify it ran.
+rollback_failed_publication() {
+    local old_ver="$1"
+    msg "⚠️  新版本启动失败，正在回滚..." "⚠️  New version failed to start, rolling back..."
+    if run_pilot_cli stop && run_pilot_cli rollback &&
+        [ "$(get_installed_version)" = "$old_ver" ] &&
+        wait_for_pilot_running; then
+        PILOT_HELD_FOR_DEPLOY=0
+        msg "❌ 新版本启动失败，已恢复 v$old_ver 并启动服务" \
+            "❌ New version failed to start; restored and started v$old_ver"
+    else
+        msg "❌ 新版本启动失败，未能确认旧版本已恢复" \
+            "❌ New version failed to start; recovery of the previous version was not confirmed"
+    fi
+    return 1
+}
+
 cmd_install() {
     local INSTALL_CONFIG=1
     msg "==> 开始安装 $PACKAGE_NAME ..." \
@@ -1302,20 +1331,16 @@ cmd_install() {
     inject_claude_code_fetch_intercept
 
     msg "==> 启动服务..." "==> Starting service..."
-    if run_pilot_cli start; then
-        sleep 2
-        local _status_out
-        _status_out="$(run_pilot_cli status 2>/dev/null || true)"
-        if echo "$_status_out" | grep -q "is running"; then
-            PILOT_HELD_FOR_DEPLOY=0
-            msg "    ✅ 服务已启动" "    ✅ Service started"
-        else
-            msg "    ⚠️  服务可能尚未就绪，请检查: loongsuite-pilot status" \
-                "    ⚠️  Service may not be ready. Check: loongsuite-pilot status"
-        fi
+    if run_pilot_cli start && wait_for_pilot_running; then
+        PILOT_HELD_FOR_DEPLOY=0
+        msg "    ✅ 服务已启动" "    ✅ Service started"
+    elif [ -n "$cur_ver" ]; then
+        rollback_failed_publication "$cur_ver"
+        return 1
     else
-        msg "    ⚠️  服务启动失败，请手动运行: loongsuite-pilot start" \
-            "    ⚠️  Service failed to start, run manually: loongsuite-pilot start"
+        msg "    ❌ 服务启动失败，请检查日志: loongsuite-pilot log" \
+            "    ❌ Service failed to start; check: loongsuite-pilot log"
+        return 1
     fi
     echo ""
 
@@ -1398,52 +1423,19 @@ cmd_upgrade() {
 
     # Start the new version
     msg "==> 启动新版本..." "==> Starting new version..."
-    if run_pilot_cli start; then
-        sleep 2
-        local _status_out
-        _status_out="$(run_pilot_cli status 2>/dev/null || true)"
-        if echo "$_status_out" | grep -q "is running"; then
-            PILOT_HELD_FOR_DEPLOY=0
-            msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
-            echo ""
+    if run_pilot_cli start && wait_for_pilot_running; then
+        PILOT_HELD_FOR_DEPLOY=0
+        msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
 
-            # GC: remove old versions beyond current + previous
-            gc_old_versions
+        # GC: remove old versions beyond current + previous
+        gc_old_versions
 
-            print_summary "upgrade"
-            return 0
-        fi
+        print_summary "upgrade"
+        return 0
     fi
 
-    # --- Rollback via version pointer ---
-    echo ""
-    msg "⚠️  新版本启动失败，正在回滚..." \
-        "⚠️  New version failed to start, rolling back..."
-
-    run_pilot_cli stop 2>/dev/null || true
-
-    local _rb_ok=1
-    run_pilot_cli rollback 2>/dev/null || _rb_ok=0
-
-    if [ "$_rb_ok" -eq 1 ]; then
-        if run_pilot_cli start; then
-            PILOT_HELD_FOR_DEPLOY=0
-            msg "❌ 升级失败，已回滚到 v${old_ver:-unknown}" \
-                "❌ Upgrade failed, rolled back to v${old_ver:-unknown}"
-            msg "   请检查日志: loongsuite-pilot log" "   Check logs: loongsuite-pilot log"
-        else
-            msg "❌ 升级失败，已回滚但未能重启服务" \
-                "❌ Upgrade failed, rolled back but could not restart"
-            msg "   请手动运行: loongsuite-pilot start" \
-                "   Run manually: loongsuite-pilot start"
-        fi
-    else
-        msg "❌ 升级失败且回滚未成功，请手动恢复:" \
-            "❌ Upgrade failed and rollback did not succeed. Manual recovery:"
-        msg "   loongsuite-pilot rollback && loongsuite-pilot start" \
-            "   loongsuite-pilot rollback && loongsuite-pilot start"
-    fi
-    exit 1
+    rollback_failed_publication "$old_ver"
+    return 1
 }
 
 # ============================================================

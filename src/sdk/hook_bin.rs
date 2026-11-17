@@ -29,9 +29,25 @@ fn descriptor(path: &Path) -> Option<Descriptor> {
 }
 pub type LegacyHook = fn(&[String]) -> Option<String>;
 
+pub fn is_hook(args: &[String]) -> bool {
+    match args.first().map(String::as_str) {
+        Some("sdk-hook") => true,
+        Some("interceptor") => args.get(1).is_some_and(|arg| arg == "hook"),
+        Some("hook-process") => match args.get(1).map(String::as_str) {
+            Some("qoder") => args.iter().any(|arg| arg == "--wakeup-only"),
+            Some("codex") => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Option<String> {
     if args.first().map(String::as_str) == Some("interceptor") {
         return legacy?(&args[2..]);
+    }
+    if args.first().map(String::as_str) == Some("hook-process") {
+        return legacy?(&args);
     }
     let data = PathBuf::from(flag(&args, "--data-dir")?);
     if !data.is_absolute() {

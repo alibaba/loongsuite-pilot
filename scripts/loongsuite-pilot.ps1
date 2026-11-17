@@ -222,15 +222,30 @@ function Test-NativeVersion {
         (Test-NativePath (Join-Path $Root "runtime-manifest.json")))
 }
 
+function Test-NodeVersion {
+    param([string]$Root)
+    $manifest = Join-Path $Root "runtime-manifest.json"
+    return ((Test-NativePath $Root $true) -and
+        (Test-NativePath (Join-Path $Root "dist") $true) -and
+        (Test-NativePath (Join-Path $Root "dist\index.js")) -and
+        (Test-NativePath (Join-Path $Root "package.json")) -and
+        (Test-NativePath (Join-Path $Root "VERSION")) -and
+        (Test-NativePath (Join-Path $Root "node_modules") $true) -and
+        (Test-NativePath (Join-Path $Root "scripts") $true) -and
+        (Test-NativePath (Join-Path $Root "scripts\collector-daemon.js")) -and
+        (Test-NativePath (Join-Path $Root "scripts\loongsuite-pilot.ps1")) -and
+        -not (Test-Path -LiteralPath $manifest))
+}
+
 function Resolve-VersionPointer {
-    param([string]$Pointer)
+    param([string]$Pointer, [switch]$AllowNode)
     try {
         if (-not (Test-NativePath $CACHE_DIR $true) -or -not (Test-NativePath $VERSIONS_DIR $true) -or -not (Test-NativePath $Pointer)) { return $null }
         if ((Get-Item -LiteralPath $Pointer).Length -gt 1024) { return $null }
         $name = ([string](Get-Content -LiteralPath $Pointer -Raw -Encoding UTF8 -ErrorAction Stop)).Trim([char]0xFEFF).Trim()
         if ($name -notmatch '^[A-Za-z0-9._+-]{1,240}$' -or $name -in @(".", "..") -or $name.EndsWith(".")) { return $null }
         $root = Join-Path $VERSIONS_DIR $name
-        if (Test-NativeVersion $root) { return $root }
+        if ((Test-NativeVersion $root) -or ($AllowNode -and (Test-NodeVersion $root))) { return $root }
     } catch {}
     return $null
 }
@@ -254,7 +269,7 @@ function Test-OpenSourceBuild {
     return (Get-BuildEdition) -eq "opensource"
 }
 
-function Resolve-PreviousVersion { return (Resolve-VersionPointer $PREVIOUS_FILE) }
+function Resolve-PreviousVersion { return (Resolve-VersionPointer $PREVIOUS_FILE -AllowNode) }
 
 function Get-VersionInfo {
     param([string]$dir)
@@ -2103,7 +2118,7 @@ function Remove-HermesPluginForRollback {
 
 function Publish-RollbackVersion {
     param([string]$VersionDir)
-    if (-not (Test-NativeVersion $VersionDir)) { return $false }
+    if (-not (Test-NativeVersion $VersionDir) -and -not (Test-NodeVersion $VersionDir)) { return $false }
     $previousInput = $env:LOONGSUITE_PILOT_INSTALL_INPUT
     try {
         $env:LOONGSUITE_PILOT_INSTALL_INPUT = @{
@@ -2124,22 +2139,38 @@ function Publish-RollbackVersion {
 function Cmd-Rollback {
     $prevPath = Resolve-PreviousVersion
     if (-not $prevPath) {
-        Write-Error "Previous version is not a supported native installation; pointers unchanged"
+        Write-Error "Previous version cannot be resolved; pointers unchanged"
         exit 1
     }
     $prevDir = Split-Path $prevPath -Leaf
     $hermesCleanupHelper = Resolve-PilotBinary
     if (-not $hermesCleanupHelper) { throw "Cannot identify the outgoing native rollback helper" }
-    # Validate and publish through the current helper's durable native transaction.
-    # A rejected legacy artifact or failed service write cannot leave a pointer swap.
+    $restoreNode = Test-NodeVersion $prevPath
+    if ($restoreNode) { Cmd-Stop }
+    # Publish through the current helper before invoking the recovered entry.
     if (-not (Publish-RollbackVersion $prevPath)) {
+        if ($restoreNode) { Cmd-Start }
         Write-Error "Failed to publish rollback target: $prevDir; installation preserved"
         exit 1
     }
     Remove-HermesPluginForRollback $prevPath -NativeHelper $hermesCleanupHelper
     Write-Host "Rolled back to version: $prevDir"
     Write-Host "   Restarting service..."
-    Cmd-Restart
+    if ($restoreNode) {
+        $priorCache = $env:LOONGSUITE_PILOT_CACHE_DIR
+        $priorData = $env:LOONGSUITE_PILOT_DATA_DIR
+        try {
+            $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
+            $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
+            & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath start
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        } finally {
+            $env:LOONGSUITE_PILOT_CACHE_DIR = $priorCache
+            $env:LOONGSUITE_PILOT_DATA_DIR = $priorData
+        }
+    } else {
+        Cmd-Restart
+    }
 }
 
 # ============================================================

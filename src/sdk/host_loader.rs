@@ -1,6 +1,5 @@
 //! Native loader only: no statically linked collector fallback.
-#[path = "abi.rs"]
-pub mod abi;
+use super::abi;
 
 use std::ffi::{c_char, c_void, CString};
 use std::path::{Path, PathBuf};
@@ -117,12 +116,6 @@ impl Library {
     pub fn api(&self) -> &abi::PilotApiV2 {
         // SAFETY: validated immutable API remains live for this library borrow.
         unsafe { &*self.api }
-    }
-
-    pub fn run(&self) -> i32 {
-        // SAFETY: immutable validated API table and live library; this command
-        // owns its runtime until host_main returns.
-        unsafe { ((*self.api).host_main)() }
     }
 }
 

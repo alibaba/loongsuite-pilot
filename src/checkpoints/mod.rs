@@ -10,6 +10,7 @@ mod snapshot_store;
 pub(crate) mod source_ownership;
 mod state_json;
 mod state_store;
+pub(crate) use state_store::key_in_namespace;
 
 pub use snapshot_store::{SnapshotEntry, SnapshotStatus, SnapshotStore};
 pub use state_store::{CheckpointOutputHold, InputState, InputStatePatch, StateStore};

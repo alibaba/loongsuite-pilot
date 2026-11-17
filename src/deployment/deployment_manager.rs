@@ -1432,7 +1432,7 @@ mod tests {
             .read(true)
             .write(true)
             .create_new(true)
-            .open(format!("{}.lock", manager.state_file))
+            .open(format!("{}.lock.native", manager.state_file))
             .unwrap();
         fs2::FileExt::lock_exclusive(&lock).unwrap();
         assert!(tokio::time::timeout(

@@ -72,11 +72,12 @@ def begin_notice_transaction(connection, started, deadline):
 
 
 class Fixture:
-    def __init__(self, round_directory, container_root="/bench", sessions=64):
+    def __init__(self, round_directory, container_root="/bench", sessions=64, native_subdir="native"):
         self.root = Path(round_directory)
         self.container_root = container_root
         self.data = self.root / "home/.loongsuite-pilot"
-        self.native = self.root / "native"
+        self.native = self.root / native_subdir
+        self.native_container_path = container_root + "/" + native_subdir
         self.sources = self.data / "state/qoder-transcripts/qoder/sources"
         self.tokens = self.data / "logs/qodercli-intercept.jsonl"
         for path in (self.native, self.sources, self.tokens.parent,
@@ -95,7 +96,7 @@ class Fixture:
         return self.native / ("session-%02d.jsonl" % session)
 
     def container_path(self, session):
-        return "%s/native/session-%02d.jsonl" % (self.container_root, session)
+        return "%s/session-%02d.jsonl" % (self.native_container_path, session)
 
     def notice(self, session, event="Stop"):
         file = self.file(session)
@@ -109,7 +110,7 @@ class Fixture:
         value = {"schema": 1, "key": key, "agentId": "qoder", "sessionId": session_id,
                  "transcriptPath": path, "event": event, "observationId": str(uuid.uuid4()),
                  "observedSize": status.st_size, "observedAt": epoch_ms(),
-                 "inode": status.st_ino, "cwd": self.container_root + "/native",
+                 "inode": status.st_ino, "cwd": self.native_container_path,
                  "resourceAttributes": {}, "spanAttributes": {}}
         context = digest([value.get("cwd"), value.get("desktop"), value.get("userIdentity"),
                           value.get("agentName"), value["resourceAttributes"],

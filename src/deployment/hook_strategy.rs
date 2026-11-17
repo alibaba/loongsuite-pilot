@@ -395,13 +395,27 @@ pub(super) fn pilot_binary_name() -> &'static str {
     }
 }
 
+pub(super) fn sdk_hook_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "loongsuite-pilot-sdk-hook.exe"
+    } else {
+        "loongsuite-pilot-sdk-hook"
+    }
+}
+
 pub(super) fn installed_qoder_hook_binary(
     pilot: &Path,
     data: &Path,
     cache: &Path,
 ) -> Option<PathBuf> {
     use crate::utils::runtime_paths::resource_file;
-    let executable = resource_file(pilot, &format!("bin/{}", pilot_binary_name())).ok()?;
+    let hook = format!("bin/{}", sdk_hook_binary_name());
+    let executable = match std::fs::symlink_metadata(pilot.join(&hook)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            resource_file(pilot, &format!("bin/{}", pilot_binary_name())).ok()?
+        }
+        _ => resource_file(pilot, &hook).ok()?,
+    };
     let sdk = if cfg!(windows) {
         "bin/loongsuite_pilot.dll"
     } else if cfg!(target_os = "macos") {
@@ -546,9 +560,10 @@ fn qoder_version_binary(path: &Path, cache: &Path) -> bool {
         && components
             .next()
             .is_some_and(|value| value.as_os_str() == "bin")
-        && components
-            .next()
-            .is_some_and(|value| value.as_os_str() == pilot_binary_name())
+        && components.next().is_some_and(|value| {
+            let name = value.as_os_str();
+            name == pilot_binary_name() || name == sdk_hook_binary_name()
+        })
         && components.next().is_none()
 }
 
@@ -601,6 +616,7 @@ pub(crate) fn plan_qoder_legacy_restore(
     def: &AgentDefinition,
     data: &Path,
     binary: &Path,
+    restore_subagents: bool,
 ) -> Result<Option<String>, String> {
     let Some(hook) = def.hook.as_ref().filter(|_| def.id == "qoder") else {
         return Ok(None);
@@ -615,7 +631,7 @@ pub(crate) fn plan_qoder_legacy_restore(
         for definition in direct {
             document.apply_hook(&definition, true, false)?;
         }
-        if !qoder_subagent_hook(&legacy) {
+        if restore_subagents || !qoder_subagent_hook(&legacy) {
             document.apply_hook(&legacy, false, false)?;
         }
     }

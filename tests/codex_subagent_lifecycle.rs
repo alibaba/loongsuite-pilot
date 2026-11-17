@@ -154,6 +154,7 @@ struct Harness {
     emitted: Arc<Mutex<Vec<AgentActivityEntry>>>,
     running: Option<Running>,
     current_privacy: bool,
+    capture_content: bool,
     wire_endpoint: Option<String>,
 }
 type NativeExporterFactory =
@@ -170,6 +171,7 @@ impl Harness {
             emitted: Arc::new(Mutex::new(Vec::new())),
             running: None,
             current_privacy: false,
+            capture_content: true,
             wire_endpoint,
         };
         tokio::fs::create_dir(harness.root.path().join("sessions"))
@@ -187,9 +189,11 @@ impl Harness {
         manager.set_state_store(Arc::clone(&state));
         manager.set_user_id("synthetic-user");
         if self.current_privacy {
-            let legacy: loongsuite_pilot::types::AgentsConfig =
-                serde_json::from_value(json!({"codex":{"captureMessageContent":false}})).unwrap();
-            manager.set_agents_config(&legacy);
+            let agents: loongsuite_pilot::types::AgentsConfig = serde_json::from_value(
+                json!({"codex":{"captureMessageContent":self.capture_content}}),
+            )
+            .unwrap();
+            manager.set_agents_config(&agents);
             manager.set_mask_config(loongsuite_pilot::types::MaskConfig {
                 mode: loongsuite_pilot::types::MaskMode::All,
                 types: Vec::new(),
@@ -1132,11 +1136,11 @@ async fn native_codex_subagent_real_http_protobuf_matches_jsonl_operation_ids_an
 }
 
 #[tokio::test]
-async fn native_codex_legacy_optout_keeps_masked_subagent_invocation_tree_and_excludes_peer_workspace(
-) {
+async fn native_codex_optout_preserves_subagent_invocation_tree_and_excludes_peer_workspace() {
     let mut h = Harness::new().await;
     h.stop().await;
     h.current_privacy = true;
+    h.capture_content = false;
     h.start().await;
     let key = "sk-1234567890abcdefghijklmnop";
     let prompt = format!("child-a {key}");
@@ -1183,18 +1187,16 @@ async fn native_codex_legacy_optout_keeps_masked_subagent_invocation_tree_and_ex
     let logs = h.logs().await;
     let spans = h.captured();
     assert_child(&logs, &spans, CHILD, "c1", "spawn-a");
-    assert!(logs
-        .iter()
-        .any(|row| !row["gen_ai.input.messages"].is_null()
-            || !row["gen_ai.input.messages_delta"].is_null()));
     for field in [
+        "gen_ai.input.messages",
+        "gen_ai.input.messages_delta",
         "gen_ai.output.messages",
         "gen_ai.tool.call.arguments",
         "gen_ai.tool.call.result",
     ] {
         assert!(
-            logs.iter().any(|row| !row[field].is_null()),
-            "legacy switch removed {field}"
+            logs.iter().all(|row| row.get(field).is_none()),
+            "opt-out leaked {field}"
         );
     }
     for text in [
@@ -1207,8 +1209,8 @@ async fn native_codex_legacy_optout_keeps_masked_subagent_invocation_tree_and_ex
         )
         .unwrap(),
     ] {
-        for retained in ["child-a", "fixture-result", "[APIKEY_MASKED]"] {
-            assert!(text.contains(retained));
+        for omitted in ["child-a", "fixture-result", "[APIKEY_MASKED]"] {
+            assert!(!text.contains(omitted));
         }
         assert!(!text.contains(key));
         assert!(!text.contains("excluded-content-sentinel"));

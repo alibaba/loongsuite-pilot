@@ -86,7 +86,7 @@ async fn interrupted_pi_state_last_transaction_recovers_before_fresh_manager_loa
     let locks = [
         data.join(".plugin-assets.lock"),
         PathBuf::from(format!("{}.loongsuite-pilot.lock", current.display())),
-        data.join("deployed-agents.json.lock"),
+        data.join("deployed-agents.json.lock.native"),
     ]
     .map(|path| {
         let file = crate::deployment::deployed_state_merge::open_state_lock(&path)

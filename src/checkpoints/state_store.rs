@@ -293,17 +293,20 @@ struct ActiveCollect {
     namespaces: Option<Vec<String>>,
     dirty: bool,
 }
+pub(crate) fn key_in_namespace(key: &str, namespace: &str) -> bool {
+    key == namespace
+        || key
+            .strip_prefix(namespace)
+            .is_some_and(|suffix| suffix.starts_with(':'))
+}
+
 fn mark_collect_mutation(data: &mut StoreData, key: Option<&str>) {
     for active in &mut data.active_collects {
         if key.is_none()
             || active.namespaces.as_ref().is_none_or(|namespaces| {
-                namespaces.iter().any(|namespace| {
-                    let key = key.unwrap();
-                    key == namespace.as_str()
-                        || key
-                            .strip_prefix(namespace)
-                            .is_some_and(|suffix| suffix.starts_with(':'))
-                })
+                namespaces
+                    .iter()
+                    .any(|namespace| key_in_namespace(key.unwrap(), namespace))
             })
         {
             active.dirty = true;
@@ -337,12 +340,7 @@ fn journal_namespace(id: &str) -> Option<&'static str> {
         "openclaw-plugin-log",
     ]
     .into_iter()
-    .find(|scope| {
-        id == *scope
-            || id
-                .strip_prefix(scope)
-                .is_some_and(|suffix| suffix.starts_with(':'))
-    })
+    .find(|scope| key_in_namespace(id, scope))
 }
 
 fn scoped_blocked(data: &StoreData, id: &str) -> bool {

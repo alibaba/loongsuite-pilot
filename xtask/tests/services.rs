@@ -13,11 +13,24 @@ fn windows_service_entry_has_no_external_runtime_or_script_daemon() {
         "$NodeBin",
         "Resolve-Node",
         "$NODE_PIN_FILE",
-        "daemon.js",
         "require(\"node:",
     ] {
         assert!(!code.contains(forbidden), "仍有旧运行时入口：{forbidden}");
     }
+    let previous_node_validation = code
+        .split_once("function Test-NodeVersion {")
+        .unwrap()
+        .1
+        .split_once("function Resolve-VersionPointer")
+        .unwrap()
+        .0;
+    assert_eq!(code.matches("daemon.js").count(), 1);
+    assert!(previous_node_validation
+        .contains(r#"Test-NativePath (Join-Path $Root "scripts\collector-daemon.js")"#));
+    assert!(code.contains(
+        "function Resolve-CurrentVersion { return (Resolve-VersionPointer $CURRENT_FILE) }"
+    ));
+    assert!(code.contains("function Resolve-PreviousVersion { return (Resolve-VersionPointer $PREVIOUS_FILE -AllowNode) }"));
     assert!(code.contains("$global:LASTEXITCODE = 9009\n        & $Binary @nativeArgs"));
     assert!(code.contains("$script:PilotExitCode = $global:LASTEXITCODE"));
     assert!(!code.contains("$LASTEXITCODE = 9009"));
