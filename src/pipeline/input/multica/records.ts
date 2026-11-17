@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { JsonObject, MulticaInputConfig, MulticaRecord } from './types.js';
+import { logDiagnostics } from './log-diagnostics.js';
 
 export const SCALAR_FIELDS = new Set(`workspace_id project_id issue_id task_id agent_id runtime_id daemon_id
   status status_category priority assignee_type assignee_id parent_issue_id parent_task_id
@@ -15,7 +16,7 @@ export const SCALAR_FIELDS = new Set(`workspace_id project_id issue_id task_id a
   repo_maintenance_active repo_checkout_waiters cli_version cli_commit pid os uptime
   request_id comment_id task_phase phase_elapsed_ms total_elapsed_ms method route path http_status size_bytes
   claim_path outcome reason candidates running max_concurrent exit_code event_count invalid_event_count
-  tool_use_count saw_result result_is_error expires_at event version connected enabled
+  tool_use_count saw_result result_is_error expires_at event event_type handler_index handler_count total_duration_ms version connected enabled
   action used reserved total limit reached period_start period_end reset_at
   retry_of_task_id rerun_of_task_id delegated_by_task_id`.split(/\s+/));
 
@@ -60,6 +61,7 @@ export function classifyFailure(value: unknown, allowReasonCode = false): string
 export function snapshot(recordType: string, value: unknown, extra: MulticaRecord = {}): MulticaRecord {
   const row = object(value);
   const out: MulticaRecord = { record_type: recordType, source_type: 'api', ...selectFields(row), ...extra };
+  if (recordType === 'task_snapshot') Object.assign(out, logDiagnostics(row, ''));
   out.entity_id = safeScalar(row.id) ?? digest(JSON.stringify(out)).slice(0, 24);
   if (recordType === 'issue_status_snapshot') {
     out.status = safeScalar(row.key) ?? '';

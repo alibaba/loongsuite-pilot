@@ -6,6 +6,7 @@ import { FilePipeline } from './input/file/file-pipeline.js';
 import { QoderApiPipeline } from './input/qoder-api/qoder-api-pipeline.js';
 import { MulticaPipeline } from './input/multica/multica-pipeline.js';
 import { validateMulticaConfig } from './input/multica/types.js';
+import { resolveMulticaDestination } from './input/multica/destination.js';
 import { SleepDetector, type WakeEvent } from './sleep-detector.js';
 import { createLogger } from '../utils/logger.js';
 import { ensureDir } from '../utils/fs-utils.js';
@@ -296,14 +297,14 @@ export class PipelineManager {
 
     const input = config.inputs[0];
     const flusher = config.flushers[0];
-    if (!flusher.Endpoint || !flusher.Project || !flusher.Logstore) {
+    if (input.Type !== 'input_multica' && (!flusher.Endpoint || !flusher.Project || !flusher.Logstore)) {
       logger.warn('config flusher missing required fields', { file: fileName });
       return false;
     }
 
     switch (input.Type) {
       case 'input_multica': {
-        try { validateMulticaConfig(input); return true; }
+        try { validateMulticaConfig(input); resolveMulticaDestination(flusher); return true; }
         catch { logger.warn('invalid Multica input config', {file: fileName}); return false; }
       }
       case 'input_file': {

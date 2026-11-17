@@ -1,5 +1,6 @@
 import { classifyFailure, digest, object, safeScalar, selectFields } from './records.js';
 import type { MulticaRecord } from './types.js';
+import { logDiagnostics } from './log-diagnostics.js';
 
 const METRIC_LABELS = new Set('method route status terminal_status provider model model_alias outcome reason failure_reason claim_path phase result source kind type le quantile code handler runtime_mode operation op stage component decision action feature token_type direction stream transport query signup_source platform path cadence trigger_kind recoverable gate event_kind'.split(' '));
 
@@ -11,9 +12,7 @@ export function parsePrometheus(text: string): MulticaRecord[] {
     const labels: MulticaRecord = {};
     for (const label of (match[2] ?? '').matchAll(/([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"\\])*)"/g)) {
       if (!METRIC_LABELS.has(label[1])) continue;
-      const value = label[2].replace(/\\n/g, '\n').replace(/\\(["\\])/g, '$1');
-      // Match log path handling before serializing any labels for export.
-      labels[label[1]] = safeScalar(label[1] === 'path' ? value.split('?')[0] : value)!;
+      labels[label[1]] = safeScalar(label[2].replace(/\\n/g, '\n').replace(/\\(["\\])/g, '$1'))!;
     }
     const row: MulticaRecord = {record_type: 'prometheus_sample', source_type: 'prometheus', metric_name: match[1], metric_value: match[3], metric_labels: JSON.stringify(labels)};
     for (const key of ['method', 'route', 'provider', 'model', 'outcome', 'reason', 'failure_reason', 'runtime_mode', 'source', 'claim_path', 'le', 'token_type', 'decision', 'action', 'terminal_status', 'cadence', 'trigger_kind']) if (labels[key] !== undefined) row[key] = labels[key];
@@ -30,6 +29,7 @@ const MESSAGES = [
   'agent stream protocol summary', 'auth token renewed', 'auth token rejected by server',
   'task completed', 'task failed', 'task dispatched', 'task started',
   'terminal report', 'autopilot', 'wakeup',
+  'slow global event handler', 'slow event publish',
 ];
 
 export function parseDurationMs(value: string): number | undefined {
@@ -40,7 +40,7 @@ export function parseDurationMs(value: string): number | undefined {
   return parts.reduce((sum, part) => sum + Number(part[1]) * scales[part[2]], 0);
 }
 
-/** Keep known event names and scalar attributes, never arbitrary log bodies. */
+/** Preserve bounded, redacted diagnostics alongside canonical event names. */
 export function parseMulticaLog(line: string): MulticaRecord | undefined {
   let clean = line.replace(/\x1b\[[0-9;]*m/g, '');
   let sourceTime: string | undefined;
@@ -67,8 +67,10 @@ export function parseMulticaLog(line: string): MulticaRecord | undefined {
   }
   const template = MESSAGES.find(m => message.toLowerCase().includes(m));
   const failure = classifyFailure(String(fields.error ?? ''));
-  if (!template && (!failure || failure === 'unclassified')) return undefined;
-  const row: MulticaRecord = {record_type: 'server_log', source_type: 'log', ...selectFields(fields), message: template ?? 'provider failure'};
+  const diagnosticLevel = /^(?:WARN|WARNING|ERROR|WRN|ERR|FATAL)$/i.test(String(fields.level ?? ''));
+  if (!template && (!failure || failure === 'unclassified') && !diagnosticLevel) return undefined;
+  const row: MulticaRecord = {record_type: 'server_log', source_type: 'log', ...selectFields(fields),
+    ...logDiagnostics(fields, message), message: template ?? (failure && failure !== 'unclassified' ? 'provider failure' : 'diagnostic log')};
   if (fields.level) row.level = safeScalar(fields.level)!;
   if (sourceTime && Number.isFinite(Date.parse(sourceTime))) row.source_time = sourceTime;
   if (failure) row.failure_reason = failure;
