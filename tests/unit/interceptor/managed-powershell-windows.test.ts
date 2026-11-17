@@ -102,6 +102,31 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
 
+  it('keeps the Windows overlapped fd3 duplex while the lease read remains open', async () => {
+    const started = Date.now();
+    const child = spawn(process.execPath, ['-e', "const s=new(require('node:net').Socket)({fd:3,readable:true,writable:true});s.on('data',()=>s.write('CONTROL_ACK\\n'));s.on('end',()=>process.exit(0));"],
+      { stdio: ['ignore', 'ignore', 'pipe', 'overlapped'], windowsHide: true });
+    const lease = child.stdio[3] as Duplex;
+    const closed = new Promise(resolve => child.once('close', resolve));
+    let stderr = '', control = '';
+    child.stderr?.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-4096); });
+    lease.on('error', () => {});
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const ack = new Promise<void>((resolve, reject) => {
+        lease.on('data', chunk => { control += String(chunk); if (control.includes('CONTROL_ACK\n')) resolve(); });
+        timer = setTimeout(() => reject(new Error(JSON.stringify({ check: 'overlapped-fd3', control, stderr }))), 3000);
+      });
+      lease.write('KEEP_LEASE_OPEN\n');
+      await ack;
+      expect(lease.writableEnded).toBe(false);
+      console.log(JSON.stringify({ check: 'overlapped-fd3', elapsedMs: Date.now() - started, control, stderr }));
+    } finally {
+      if (timer) clearTimeout(timer);
+      lease.destroy(); child.kill('SIGKILL'); await closed;
+    }
+  }, 5000);
+
   it('loads native builtin modules in the same minimal environment as the guardian', async () => {
     const result = await powerShellProbe(['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
       '$ErrorActionPreference="Stop"; Import-Module Microsoft.PowerShell.Security,Microsoft.PowerShell.Utility,Microsoft.PowerShell.Management -ErrorAction Stop; @{Marker="NATIVE_MODULES_READY";Version=$PSVersionTable.PSVersion.ToString();Location=(Get-Location).ProviderPath;Policy=[string](Get-ExecutionPolicy)} | ConvertTo-Json -Compress']);

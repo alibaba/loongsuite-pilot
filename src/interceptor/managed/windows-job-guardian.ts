@@ -117,11 +117,12 @@ public static class PilotManagedScriptJob {
           }
         });
         watcher.IsBackground = true;
-        watcher.Start();
-        // Private readiness is separate from user stdout and precedes ResumeThread.
+        // This synchronous pipe must finish its only write before the blocking
+        // lease read starts; both the ready write and watcher precede ResumeThread.
         byte[] ready = new byte[5]; ready[0] = 1;
         Array.Copy(BitConverter.GetBytes(process.Pid), 0, ready, 1, 4);
         lease.Write(ready, 0, ready.Length); lease.Flush();
+        watcher.Start();
         Check(ResumeThread(process.Thread) != UInt32.MaxValue);
         resumed = true;
         Check(WaitForSingleObject(process.Process, UInt32.MaxValue) == 0);
@@ -177,7 +178,11 @@ let c;
 const lease = new Socket({fd:3, readable:true, writable:true});
 let child, server, jobLease, ending = false, timer, bytes = '', inputForwarded = false;
 let owned = false;
-function status(value) { try { lease.write(JSON.stringify(value)+'\n'); } catch {} }
+function status(value) {
+  try { lease.write(JSON.stringify(value)+'\n', error => {
+    if (error) { process.stderr.write('managed guardian control write failed\n'); end(); }
+  }); } catch { process.stderr.write('managed guardian control write failed\n'); end(); }
+}
 function end() {
   if (ending) return;
   ending = true;
@@ -257,7 +262,7 @@ if (c.pipeName) {
     socket.on('data', chunk => {
       readiness = Buffer.concat([readiness,chunk]);
       if (!owned && readiness.length >= 5 && readiness[0] === 1) {
-        owned = true; forwardInput(); status({owned:true,pid:readiness.readUInt32LE(1)});
+        owned = true; status({owned:true,pid:readiness.readUInt32LE(1)}); forwardInput();
       }
       if (readiness.length > 64) end();
     });
@@ -279,7 +284,11 @@ export function spawnPowerShellGuardian(command: string, args: string[], cwd: st
     config = { command: '', args: [], unavailable: true };
   }
   const child = spawn(process.execPath, ['-e', GUARDIAN_SOURCE], {
-    cwd, env: process.platform === 'win32' ? windowsPowerShellEnv() : scriptEnv(), stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+    cwd, env: process.platform === 'win32' ? windowsPowerShellEnv() : scriptEnv(),
+    // fd3 is duplex: the Node guardian reads lease frames while writing status.
+    // A synchronous Windows pipe can serialize that write behind its pending read.
+    // https://nodejs.org/api/child_process.html#optionsstdio
+    stdio: ['pipe', 'pipe', 'pipe', process.platform === 'win32' ? 'overlapped' : 'pipe'],
     detached: process.platform !== 'win32', windowsHide: true,
   });
   // Private initialization avoids duplicating a UTF-16/Base64 bootstrap inside
