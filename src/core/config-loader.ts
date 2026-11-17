@@ -94,8 +94,6 @@ export interface SlsSingleConfig {
   timeout?: import('../types/index.js').SlsTimeoutConfig;
   retry?: import('../types/index.js').SlsRetryConfig;
   flushConcurrency?: number;
-  /** Attach __mac__ and __sn__ log-group tags. Default true. */
-  hostIdentityTags?: boolean;
 }
 
 export interface InnerDataConfig {
@@ -118,6 +116,7 @@ export interface ConfigFile {
   dataDir?: string;
   userId?: string;
   'user.id'?: string;
+  hostSn?: string;
 
   sls?: SlsSingleConfig | SlsEndpointEntry[];
 
@@ -317,6 +316,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
   const innerDataConfig = await readJsonFile<InnerDataConfig>(innerDataConfigPath);
 
   const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
+  const hostSn = typeof file?.hostSn === 'string' ? file.hostSn.trim() : '';
 
   const serviceName = nonEmpty(env('LOONGSUITE_PILOT_SERVICE_NAME')) ?? nonEmpty(file?.serviceName);
   const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? 'loongsuite-pilot';
@@ -327,6 +327,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     autoStart: true,
     dataDir,
     userId,
+    hostSn,
     collectLog: envBool('LOONGSUITE_PILOT_COLLECT_LOG', file?.collectLog ?? true),
     collectTrace: envBool('LOONGSUITE_PILOT_COLLECT_TRACE', file?.collectTrace ?? true),
     serviceName,
@@ -1313,10 +1314,6 @@ function buildSlsConfig(
     timeout: single?.timeout,
     retry: single?.retry,
     flushConcurrency: single?.flushConcurrency,
-    hostIdentityTags: envBool(
-      'LOONGSUITE_PILOT_HOST_IDENTITY_TAGS',
-      single?.hostIdentityTags ?? true,
-    ),
   };
 }
 

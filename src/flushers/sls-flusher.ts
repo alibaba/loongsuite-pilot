@@ -12,7 +12,6 @@ import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { LOCAL_IP, LOCAL_MAC, buildUserAgent } from '../utils/network-utils.js';
-import { getLocalSn, startHostSerialCollection } from '../utils/host-asset.js';
 import { readInstalledVersion } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import { SlsFailureLogWriter } from './sls-failure-log-writer.js';
@@ -128,6 +127,7 @@ export class SlsFlusher extends BaseFlusher {
   private readonly resolvedRetryBaseDelayMs: number;
   private readonly resolvedRetryJitter: boolean;
   private readonly resolvedFlushConcurrency: number;
+  private readonly hostSn: string;
   private readonly dispatcher: UndiciAgent | undefined;
   private flushing = false;
 
@@ -135,9 +135,11 @@ export class SlsFlusher extends BaseFlusher {
     config: SlsFlusherConfig,
     dataDir: string,
     pilotVersion = readInstalledVersion(dataDir),
+    hostSn?: string,
   ) {
     super();
     this.config = config;
+    this.hostSn = hostSn?.trim() ?? '';
     this.failedLogWriter = new SlsFailureLogWriter(
       path.join(dataDir, 'logs', 'sls-failed-logs'),
     );
@@ -195,7 +197,6 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   async start(): Promise<void> {
-    if (this.config.hostIdentityTags !== false) void startHostSerialCollection();
     await this.failedLogWriter.start();
     this.flushTimer = setInterval(
       () => void this.flush(),
@@ -344,8 +345,8 @@ export class SlsFlusher extends BaseFlusher {
   private buildAkTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string>[] {
     const tags: Record<string, string>[] = [
       { __hostname__: HOSTNAME },
-      ...(this.config.hostIdentityTags !== false && LOCAL_MAC ? [{ __mac__: LOCAL_MAC }] : []),
-      ...(this.config.hostIdentityTags !== false && getLocalSn() ? [{ __sn__: getLocalSn() }] : []),
+      ...(LOCAL_MAC ? [{ __mac__: LOCAL_MAC }] : []),
+      ...(this.hostSn ? [{ __sn__: this.hostSn }] : []),
     ];
     const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags.push({ __service_name__: sn });
@@ -362,8 +363,8 @@ export class SlsFlusher extends BaseFlusher {
   private buildWebtrackingTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string> {
     const tags: Record<string, string> = {
       __hostname__: HOSTNAME,
-      ...(this.config.hostIdentityTags !== false && LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
-      ...(this.config.hostIdentityTags !== false && getLocalSn() ? { __sn__: getLocalSn() } : {}),
+      ...(LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
+      ...(this.hostSn ? { __sn__: this.hostSn } : {}),
     };
     const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags['__service_name__'] = sn;
@@ -746,8 +747,8 @@ export class SlsFlusher extends BaseFlusher {
               source: LOCAL_IP,
               tags: {
                 __hostname__: HOSTNAME,
-                ...(this.config.hostIdentityTags !== false && LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
-                ...(this.config.hostIdentityTags !== false && getLocalSn() ? { __sn__: getLocalSn() } : {}),
+                ...(LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
+                ...(this.hostSn ? { __sn__: this.hostSn } : {}),
               },
               userAgent: this.userAgent,
             },

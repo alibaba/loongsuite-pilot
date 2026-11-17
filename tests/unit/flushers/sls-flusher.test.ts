@@ -37,29 +37,19 @@ vi.mock('../../../src/utils/logger.js', () => ({
   }),
 }));
 
-vi.mock('../../../src/utils/host-asset.js', () => ({
-  startHostSerialCollection: vi.fn(() => Promise.resolve()),
-  getLocalSn: vi.fn(() => ''),
-}));
-
 import { SlsFlusher } from '../../../src/flushers/sls-flusher.js';
 import { LOCAL_MAC } from '../../../src/utils/network-utils.js';
-import { getLocalSn } from '../../../src/utils/host-asset.js';
 
 function expectHostIdentity(tags: Array<Record<string, string>> | Record<string, string>): void {
   if (Array.isArray(tags)) {
-    const mac = tags.find((tag) => '__mac__' in tag);
-    const sn = tags.find((tag) => '__sn__' in tag);
-    if (LOCAL_MAC) expect(mac).toEqual({ __mac__: LOCAL_MAC });
-    else expect(mac).toBeUndefined();
-    if (vi.mocked(getLocalSn)()) expect(sn).toEqual({ __sn__: vi.mocked(getLocalSn)() });
-    else expect(sn).toBeUndefined();
+    if (LOCAL_MAC) expect(tags).toContainEqual({ __mac__: LOCAL_MAC });
+    else expect(tags.some((tag) => '__mac__' in tag)).toBe(false);
+    expect(tags.some((tag) => '__sn__' in tag)).toBe(false);
     return;
   }
   if (LOCAL_MAC) expect(tags.__mac__).toBe(LOCAL_MAC);
   else expect(tags).not.toHaveProperty('__mac__');
-  if (vi.mocked(getLocalSn)()) expect(tags.__sn__).toBe(vi.mocked(getLocalSn)());
-  else expect(tags).not.toHaveProperty('__sn__');
+  expect(tags).not.toHaveProperty('__sn__');
 }
 
 function makeConfig(overrides: Partial<SlsFlusherConfig> = {}): SlsFlusherConfig {
@@ -608,31 +598,18 @@ describe('SlsFlusher', () => {
       vi.unstubAllGlobals();
     });
 
-    it('omits MAC and serial tags when host identity tags are disabled', async () => {
-      const config = makeConfig({ hostIdentityTags: false, serviceNamePrefix: 'pilot' });
-      flusher = new SlsFlusher(config, '/tmp/data');
+    it('writes the serial tag from config and the MAC of the selected IP', async () => {
+      const config = makeConfig({
+        serviceNamePrefix: 'pilot',
+      });
+      flusher = new SlsFlusher(config, '/tmp/data', undefined, 'C02XG0AHJG5H');
 
       await flusher.send(buildTestEntry());
       await flusher.flush();
 
       const tags = mockPostLogStoreLogs.mock.calls[0][2].tags as Array<Record<string, string>>;
-      expect(tags.some((tag) => '__mac__' in tag || '__sn__' in tag)).toBe(false);
-    });
-
-    it('writes the serial tag once collection has a value', async () => {
-      vi.mocked(getLocalSn).mockReturnValue('C02XG0AHJG5H');
-      try {
-        const config = makeConfig({ serviceNamePrefix: 'pilot' });
-        flusher = new SlsFlusher(config, '/tmp/data');
-
-        await flusher.send(buildTestEntry());
-        await flusher.flush();
-
-        const tags = mockPostLogStoreLogs.mock.calls[0][2].tags as Array<Record<string, string>>;
-        expect(tags).toContainEqual({ __sn__: 'C02XG0AHJG5H' });
-      } finally {
-        vi.mocked(getLocalSn).mockReturnValue('');
-      }
+      if (LOCAL_MAC) expect(tags).toContainEqual({ __mac__: LOCAL_MAC });
+      expect(tags).toContainEqual({ __sn__: 'C02XG0AHJG5H' });
     });
 
     it('webtracking appends agentType to serviceNamePrefix', async () => {

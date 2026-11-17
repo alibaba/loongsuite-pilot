@@ -34,6 +34,7 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
 | `enabled` | Master switch for the collector. |
 | `dataDir` | Local runtime and data directory. |
 | `userId` | User identity written to emitted events. Defaults to the machine hostname. |
+| `hostSn` | Hardware serial written at install time. When set, SLS log groups include `__tag__:__sn__`. |
 | `collectLog` | Enables SLS log reporting. JSONL and HTTP remain controlled by their own `enabled` flags. |
 | `collectTrace` | Enables OTLP trace export when a trace destination is configured. |
 | `dashboard.port` | Loopback dashboard port. Must be an integer from 1 through 65535; invalid values fall back to `8765`. |

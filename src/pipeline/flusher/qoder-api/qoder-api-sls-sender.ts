@@ -6,7 +6,6 @@ import {
   type SlsTransportConfig,
 } from '../../../flushers/sls-transport.js';
 import { LOCAL_MAC, buildUserAgent } from '../../../utils/network-utils.js';
-import { getLocalSn, startHostSerialCollection } from '../../../utils/host-asset.js';
 import { createLogger } from '../../../utils/logger.js';
 import { estimateStringRecordBytes } from '../../../flushers/sls-failure-log-writer.js';
 
@@ -24,7 +23,7 @@ export interface QoderApiSlsSenderOptions {
   configName: string;
   failedLogDir: string;
   dataDir: string;
-  hostIdentityTags?: boolean;
+  hostSn?: string;
 }
 
 /**
@@ -41,7 +40,7 @@ export class QoderApiSlsSender {
   private readonly userAgent: string;
   private readonly hostname: string;
   private readonly mac: string;
-  private readonly hostIdentityTags: boolean;
+  private readonly sn: string;
   private buffer: Record<string, string>[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private flushing = false;
@@ -61,12 +60,11 @@ export class QoderApiSlsSender {
     this.userAgent = buildUserAgent(opts.dataDir);
     this.hostname = os.hostname();
     this.mac = LOCAL_MAC;
-    this.hostIdentityTags = opts.hostIdentityTags !== false;
+    this.sn = opts.hostSn?.trim() ?? '';
   }
 
   start(): void {
     if (this.flushTimer) return;
-    if (this.hostIdentityTags) void startHostSerialCollection();
     this.flushTimer = setInterval(
       () => void this.flush(),
       DEFAULT_FLUSH_INTERVAL_MS,
@@ -111,8 +109,8 @@ export class QoderApiSlsSender {
               source: this.hostname,
               tags: {
                 __hostname__: this.hostname,
-                ...(this.hostIdentityTags && this.mac ? { __mac__: this.mac } : {}),
-                ...(this.hostIdentityTags && getLocalSn() ? { __sn__: getLocalSn() } : {}),
+                ...(this.mac ? { __mac__: this.mac } : {}),
+                ...(this.sn ? { __sn__: this.sn } : {}),
                 pipeline_type: 'qoder-api',
               },
               userAgent: this.userAgent,

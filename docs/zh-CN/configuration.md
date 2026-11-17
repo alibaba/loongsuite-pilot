@@ -41,6 +41,7 @@ Pilot 按以下顺序解析配置：
 | `enabled` | collector 总开关。 |
 | `dataDir` | 本地运行和数据目录。 |
 | `userId` | 写入输出事件的用户标识，默认使用机器 hostname。 |
+| `hostSn` | 安装时写入的硬件序列号。有值时 SLS 日志组带 `__tag__:__sn__`。 |
 | `collectLog` | 控制 SLS 日志上报。JSONL 和 HTTP 由各自的 `enabled` 控制。 |
 | `collectTrace` | 当配置了 Trace 目标时，控制 OTLP Trace 上报。 |
 | `dashboard.port` | 本机 Dashboard 端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |

@@ -1134,6 +1134,57 @@ migrate_legacy_layout() {
 # Common: write / merge config.json
 # ============================================================
 write_config() {
+    # Drop placeholders and values over 128 bytes. An empty result leaves the previous hostSn.
+    normalize_host_sn() {
+        local value lower bytes
+        value=$(printf '%s' "${1-}" | tr -d '\r')
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        [ -n "$value" ] || return 0
+        lower=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+        case "$lower" in
+            none|default\ string|to\ be\ filled\ by\ o.e.m.|system\ serial\ number|not\ specified|0)
+                return 0
+                ;;
+        esac
+        bytes=$(printf '%s' "$value" | wc -c | tr -d '[:space:]')
+        [ "$bytes" -le 128 ] || return 0
+        case "$value" in
+            *[!A-Za-z0-9._:-]*) return 0 ;;
+        esac
+        printf '%s' "$value"
+    }
+
+    read_host_sn() {
+        local uname_s raw candidate path
+        uname_s=$(uname -s 2>/dev/null || true)
+        if [ "$uname_s" = "Darwin" ]; then
+            raw=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null || true)
+            candidate=$(printf '%s\n' "$raw" | sed -n 's/.*"IOPlatformSerialNumber" *= *"\([^"]*\)".*/\1/p' | head -n 1 || true)
+            if [ "${#candidate}" -gt 128 ]; then
+                candidate=""
+            fi
+            normalize_host_sn "$candidate"
+            return 0
+        fi
+        if [ "$uname_s" = "Linux" ]; then
+            for path in \
+                /sys/class/dmi/id/product_serial \
+                /sys/class/dmi/id/board_serial \
+                /sys/class/dmi/id/chassis_serial
+            do
+                [ -r "$path" ] || continue
+                raw=$(tr -d '\r' < "$path" 2>/dev/null || true)
+                candidate=$(normalize_host_sn "$raw")
+                if [ -n "$candidate" ]; then
+                    printf '%s' "$candidate"
+                    return 0
+                fi
+            done
+        fi
+        return 0
+    }
+
     local config_file="$DATA_DIR/config.json"
     msg "==> 写入配置文件 $config_file ..." \
         "==> Writing config to $config_file ..."
@@ -1143,7 +1194,10 @@ write_config() {
     if [ "${#EXCLUDE_WORKSPACES[@]}" -gt 0 ]; then
         excluded_workspaces_json=$("$NODE_BIN" -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${EXCLUDE_WORKSPACES[@]}")
     fi
+    local host_sn=""
+    host_sn=$(read_host_sn 2>/dev/null || true)
     printf '%s' "$PROBE_RESULT" | \
+        LP_HOST_SN="$host_sn" \
         LP_EXCLUDE_WORKSPACES="$excluded_workspaces_json" \
         LP_SLS_API_KEY="$SLS_API_KEY" \
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
@@ -1227,6 +1281,9 @@ if (userId) {
   config.userId = userId;
   delete config.identity;
 }
+
+const hostSn = process.env.LP_HOST_SN || '';
+if (hostSn) config.hostSn = hostSn;
 
 const collectLog = '${COLLECT_LOG}';
 const collectTrace = '${COLLECT_TRACE}';

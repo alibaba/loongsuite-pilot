@@ -126,6 +126,7 @@ export interface AnalyticsConfig {
   autoStart: boolean;
   dataDir: string;
   userId: string;
+  hostSn?: string;
   collectLog: boolean;
   collectTrace: boolean;
   /** Exact service.name shared by every agent and backend. */
@@ -338,8 +339,6 @@ export interface SlsFlusherConfig {
   /** Exact __service_name__ shared by every agent and endpoint. */
   serviceName?: string;
   serviceNamePrefix: string;
-  /** Attach __mac__ and __sn__ log-group tags. Default true. */
-  hostIdentityTags?: boolean;
   /** Timeout configuration for SLS requests. */
   timeout?: SlsTimeoutConfig;
   /** Retry configuration for failed SLS requests. */
