@@ -25,7 +25,7 @@ use crate::types::{AgentActivityEntry, AgentsConfig, MaskConfig, MaskMode, MaskR
 use crate::utils::format_time;
 
 use super::intercept_result_linker::InterceptResultLinker;
-use super::upstream_link::TraceLinker;
+use super::upstream_link::{TraceLinker, UpstreamTrace};
 use super::workspace_policy::WorkspacePolicy;
 use super::{fields, logger};
 
@@ -154,7 +154,7 @@ pub struct InputManager {
     content_policy: Mutex<AgentsConfig>,
     mask_config: Mutex<MaskConfig>,
     mask_plan: Mutex<MaskPlan>,
-    trace_linker: Mutex<Option<Arc<TraceLinker>>>,
+    trace_linker: Mutex<Option<Arc<dyn UpstreamTrace>>>,
     intercept_linker: Mutex<Option<Arc<InterceptResultLinker>>>,
     multimodal: Mutex<Option<Arc<MultimodalProcessor>>>,
     turn_boundary: Mutex<TurnBoundaryProcessor>,
@@ -236,7 +236,7 @@ impl InputManager {
         *self.mask_config.lock().expect("mask") = config;
     }
 
-    pub(crate) fn trace_linker(&self) -> Option<Arc<TraceLinker>> {
+    pub(crate) fn trace_linker(&self) -> Option<Arc<dyn UpstreamTrace>> {
         self.trace_linker.lock().expect("trace").clone()
     }
 

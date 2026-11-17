@@ -3,8 +3,6 @@ use super::policy::{AgentPlan, Init, Policy};
 use crate::checkpoints::StateStore;
 use crate::core::{InputManager, LiveInput};
 use crate::inputs::base::{HostedInput, InputBody};
-use crate::inputs::codex_aborted_turn::{CodexAbortedTurnInput, CodexAbortedTurnInputOptions};
-use crate::inputs::codex_transcript::{CodexTranscriptInput, CodexTranscriptInputOptions};
 use crate::inputs::qoder_trace::{QoderTraceInput, QoderTraceOptions, QoderTraceReaders};
 use crate::types::AgentActivityEntry;
 use crate::utils::source_access::{self, SourceScope};
@@ -230,13 +228,6 @@ impl Cycle {
     }
 }
 
-fn capture(buffer: &Mutex<Cycle>, entries: &[AgentActivityEntry], limit: usize) {
-    let mut cycle = buffer.lock().unwrap();
-    if cycle.reserve_batch(entries, limit) {
-        cycle.entries.extend_from_slice(entries);
-    }
-}
-
 fn bind<T: InputBody>(
     input: &Arc<HostedInput<T>>,
     manager: Arc<InputManager>,
@@ -326,20 +317,9 @@ fn run_agent(
         .iter()
         .map(|s| super::policy::canonical_candidate(&s.path))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let checkpoint_key = match plan.profile.as_str() {
-        "codex_rollout_v1" => "codex-transcript",
-        "codex_aborted_turn_v1" => "codex-aborted-turn",
-        _ => "qoder-trace",
-    };
+    let checkpoint_key = "qoder-trace";
     if let Some(state) = &plan.pilot_host {
-        let agent_roots: &[&str] = match plan.profile.as_str() {
-            "codex_rollout_v1" => &[
-                "state/codex/transcript-wakeups",
-                "state/codex/transcript-span-contexts",
-            ],
-            "codex_aborted_turn_v1" => &["state/codex/sessions", "logs/diagnostics"],
-            _ => &["state/qoder-transcripts/qoder", "logs/qoder"],
-        };
+        let agent_roots = ["state/qoder-transcripts/qoder", "logs/qoder"];
         for relative in agent_roots
             .iter()
             .copied()
@@ -360,9 +340,11 @@ fn run_agent(
     scope.set_log(state_dir.join("collector.log"));
     let start_scope = scope.clone();
     source_access::install(Some(scope.clone()));
+    // Use only the timer driver. Enabling I/O on Unix initializes Tokio's
+    // process-wide signal socket pair, which survives runtime shutdown.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
-        .enable_all()
+        .enable_time()
         .thread_name("pilot-source-io")
         .on_thread_start(move || source_access::install(Some(start_scope.clone())))
         .on_thread_stop(|| source_access::install(None))
@@ -442,139 +424,7 @@ fn run_agent(
             .find(|s| s.kind == kind)
             .map(|s| s.path.to_string_lossy().into_owned())
     };
-    let input_workspace_policy = || {
-        plan.pilot_host.as_ref().map(|state| {
-            crate::inputs::base::WorkspacePolicy::new(
-                state.exclude_workspaces.clone(),
-                Some(state.data_dir.join("state/workspace-exclusions")),
-            )
-        })
-    };
-    let input: Arc<LiveInput> = if plan.profile == "codex_aborted_turn_v1" {
-        let state = plan.pilot_host.as_ref().expect("validated Codex profile");
-        let input = Arc::new(CodexAbortedTurnInput::new(CodexAbortedTurnInputOptions {
-            state_store: store.clone(),
-            session_dir: source_path("transcript"),
-            hook_state_dir: Some(
-                state
-                    .data_dir
-                    .join("state/codex/sessions")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            diagnostic_dir: Some(
-                state
-                    .data_dir
-                    .join("logs/diagnostics")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            hook_gap_grace_ms: None,
-            poll_interval_ms: Some(plan.poll_interval_ms),
-        }));
-        if let Some(policy) = input_workspace_policy() {
-            input.set_collector_workspace_policy(policy);
-        }
-        let captured = buffer.clone();
-        let capture_queue = queue.clone();
-        let delta_manager = Arc::downgrade(&manager);
-        input.bind_collector(
-            move |entries| {
-                capture(
-                    &captured,
-                    entries,
-                    capture_queue.options.read().unwrap().queue_memory_bytes,
-                )
-            },
-            move |delta| {
-                if let Some(manager) = delta_manager.upgrade() {
-                    manager.record_runtime_delta("codex-aborted-turn", delta);
-                }
-            },
-        );
-        bind(
-            &input.inner,
-            manager.clone(),
-            queue.clone(),
-            scope,
-            cancel.clone(),
-            global.clone(),
-            buffer,
-        );
-        live(
-            "codex-aborted-turn",
-            "codex",
-            input,
-            |input| input.collector_running(),
-            |input| Box::pin(async move { input.start().await }),
-            |input| {
-                Box::pin(async move {
-                    let _ = input.stop().await;
-                })
-            },
-        )
-    } else if plan.agent == "codex" {
-        let metadata_path = |host_path: &str, sdk_path: &str| {
-            plan.pilot_host
-                .as_ref()
-                .map_or_else(
-                    || state_dir.join(sdk_path),
-                    |state| state.data_dir.join(host_path),
-                )
-                .to_string_lossy()
-                .into_owned()
-        };
-        let input = Arc::new(CodexTranscriptInput::new(CodexTranscriptInputOptions {
-            state_store: store.clone(),
-            session_dir: source_path("transcript"),
-            wakeup_dir: Some(metadata_path("state/codex/transcript-wakeups", "wakeup")),
-            span_context_dir: Some(metadata_path(
-                "state/codex/transcript-span-contexts",
-                "span-context",
-            )),
-            poll_interval_ms: Some(plan.poll_interval_ms),
-            multimodal: None,
-        }));
-        if let Some(policy) = input_workspace_policy() {
-            input.set_collector_workspace_policy(policy);
-        }
-        let captured = buffer.clone();
-        let capture_queue = queue.clone();
-        input.on_entries(move |entries| {
-            capture(
-                &captured,
-                entries,
-                capture_queue.options.read().unwrap().queue_memory_bytes,
-            )
-        });
-        let delta_manager = Arc::downgrade(&manager);
-        input.inner.on_runtime_delta(move |delta| {
-            if let Some(manager) = delta_manager.upgrade() {
-                manager.record_runtime_delta("codex-transcript", delta);
-            }
-        });
-        bind(
-            &input.inner,
-            manager.clone(),
-            queue.clone(),
-            scope,
-            cancel.clone(),
-            global.clone(),
-            buffer,
-        );
-        live(
-            "codex-transcript",
-            "codex",
-            input.clone(),
-            |i| i.collector_running(),
-            |i| Box::pin(async move { i.start().await }),
-            |i| {
-                Box::pin(async move {
-                    let _ = i.stop().await;
-                })
-            },
-        )
-    } else {
+    let input: Arc<LiveInput> = {
         let paths = plan
             .sources
             .iter()

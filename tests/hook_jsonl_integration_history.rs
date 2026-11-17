@@ -392,9 +392,18 @@ async fn invoke(
 ) -> std::process::Output {
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
-    let mut c = tokio::process::Command::new("/bin/bash");
-    c.arg(hooks.join(format!("{agent}-loongsuite-pilot-hook.sh")))
-        .env_clear()
+    // The archived Qoder fixtures cover the pre-SDK wakeup command. The
+    // current wrapper requires a running SDK, exercised in sdk_dynamic.
+    let mut c = if agent == "qoder" {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot"));
+        command.args(["hook-process", "qoder", "--wakeup-only"]);
+        command
+    } else {
+        let mut command = tokio::process::Command::new("/bin/bash");
+        command.arg(hooks.join(format!("{agent}-loongsuite-pilot-hook.sh")));
+        command
+    };
+    c.env_clear()
         .env("HOME", root)
         .env("USERPROFILE", root)
         .env("APPDATA", root.join("appdata"))
@@ -444,7 +453,7 @@ fn disk_rows(logs: &Path, prefix: &str) -> Vec<Value> {
 }
 #[cfg(unix)]
 #[tokio::test]
-async fn l211_bound_qoder_shell_default_agent_native_processor_real_input_preserves_worker_resource(
+async fn l211_legacy_qoder_wakeup_default_agent_native_processor_real_input_preserves_worker_resource(
 ) {
     let root = root();
     let hooks = binding(root.path());
@@ -510,7 +519,7 @@ async fn l211_bound_qoder_shell_default_agent_native_processor_real_input_preser
 }
 #[cfg(unix)]
 #[tokio::test]
-async fn l344_bound_qoder_shell_retains_delayed_ide_tool_step_and_native_user_identity() {
+async fn l344_legacy_qoder_wakeup_retains_delayed_ide_tool_step_and_native_user_identity() {
     use std::collections::BTreeSet;
     let root = root();
     let hooks = binding(root.path());
@@ -563,7 +572,7 @@ async fn l344_bound_qoder_shell_retains_delayed_ide_tool_step_and_native_user_id
 }
 #[cfg(unix)]
 #[tokio::test]
-async fn l713_bound_qoder_shell_real_transcript_cursor_preserves_two_distinct_human_turns() {
+async fn l713_legacy_qoder_wakeup_real_transcript_cursor_preserves_two_distinct_human_turns() {
     use std::collections::BTreeSet;
     let root = root();
     let hooks = binding(root.path());

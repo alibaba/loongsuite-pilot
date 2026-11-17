@@ -2,16 +2,21 @@
 pub mod abi;
 #[path = "sdk/hook_bin.rs"]
 mod hook_bin;
-#[path = "sdk/host_hook_client.rs"]
-mod host_hook_client;
 #[path = "sdk/host_loader.rs"]
 pub mod host_loader;
+mod legacy_hook;
 
 fn main() {
     let started = std::time::Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if hook_bin::is_hook(&args) && args.first().is_some_and(|arg| arg != "hook-process") {
-        hook_bin::run(args, started, Some(host_hook_client::run));
+    if args.first().is_some_and(|arg| arg == "hook-process")
+        && args.get(1).is_some_and(|arg| arg == "qoder")
+        && args.iter().any(|arg| arg == "--wakeup-only")
+    {
+        std::process::exit(loongsuite_pilot::hook_process::run_hook_process("qoder"));
+    }
+    if hook_bin::is_hook(&args) {
+        hook_bin::run(legacy_hook::sdk_args(args), started, Some(legacy_hook::run));
     }
     let _sdk = match host_loader::library_path().and_then(|path| host_loader::Library::open(&path))
     {

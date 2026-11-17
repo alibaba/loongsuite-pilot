@@ -41,9 +41,10 @@ typedef int32_t (*PilotOnHook)(void *, PilotJsonView, uint32_t, uint8_t *, size_
  * Reports allocated by the SDK must be freed once, using string_free from the
  * SAME loaded SDK. NULL is accepted by string_free. Stop a failed start too.
  * After on_stop returns, retry destroy while BUSY. Unload only after OK.
- * For physical unload, prefer a dedicated host control thread for API calls,
- * dispatch and string_free. Join it after destroy succeeds, then close the
- * library. Caller-thread TLS or other references can keep loader mappings live.
+ * Prefer a dedicated control thread and join it before closing the library.
+ * On macOS dyld retains this library's image because it contains thread-local
+ * storage. Successful dlclose releases the handle, not the image mapping.
+ * Restart the host process to reclaim the image when changing SDK paths.
  */
 typedef struct PilotApiV2 {
     uint32_t abi_version;
@@ -60,6 +61,7 @@ typedef struct PilotApiV2 {
     /* Historical complete Pilot startup slot, reserved to keep v2 layout.
      * The complete Pilot executable owns its command runtime. */
     int32_t (*host_main)(void);
+    /* Reserved historical command slot. The full Pilot executable owns legacy Hooks. */
     int32_t (*host_hook)(PilotJsonView args, PilotJsonView input, char **report, size_t *len);
 } PilotApiV2;
 

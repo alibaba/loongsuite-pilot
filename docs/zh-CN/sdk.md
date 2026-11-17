@@ -39,6 +39,8 @@ JSON 输入和事件视图都是 UTF-8 地址加字节长度，不要求 NUL。�
 
 需要在宿主进程内卸载或切换 SDK 动态库时，建议由一个宿主专用控制线程串行执行实例的 `start`、`apply_policy`、`snapshot`、`stop`、`dispatch`、`destroy`，并在该线程完成 SDK 报告的复制与 `string_free`。其他业务线程把控制请求交给它；SDK 工作线程上的回调只处理约定业务或通知控制线程。停止受理后继续 `dispatch`，等停止完成通知、所有回调返回且 `destroy` 返回 OK，再退出并 join 控制线程；最后关闭动态库句柄并释放回调及 context。不得在回调尚未退出时卸载，也不能把“停止已受理”当成“停止已完成”。这是方便管理卸载边界的宿主接入方式，不改变接口已声明的线程安全范围。
 
+macOS 的 SDK 包含 Mach-O 线程本地存储，dyld 在 `dlclose` 成功后仍可保留镜像。控制线程退出和 `destroy` 成功表示本次实例已结束。需要在更换版本时收回旧镜像的地址空间时，在宿主进程重启后加载新版本。若宿主需要继续运行，可在独立进程中运行 SDK，并以进程退出作为版本切换边界。
+
 Linux 动态加载器可能因为外部调用线程上的线程局部存储（TLS）而暂时保留库映射。`destroy` 成功表示实例可以安全销毁；关闭库句柄成功不等于该时刻代码映射一定立即解除。退出并 join 专用控制线程可以结束该线程的 TLS 生命周期，但最终是否立即解除映射仍取决于平台加载器和其他引用。观察到映射保留时，应核查这些生命周期条件，不直接将其认定为 SDK 内存泄漏。
 
 ## 初始化和 HCD
@@ -62,7 +64,7 @@ Linux 动态加载器可能因为外部调用线程上的线程局部存储（TL
 {
   "version": "policy-1",
   "dynamic_observe_enabled": true,
-  "agents": ["qoder", "codex"],
+  "agents": ["qoder"],
   "hcd": {
     "agent_configs": {
       "qoder": {
@@ -77,14 +79,6 @@ Linux 动态加载器可能因为外部调用线程上的线程局部存储（TL
           "limits": {"max_files": 512, "max_read_bytes": 8388608, "poll_interval_ms": 1000},
           "output": {"schema": "aah.activity.v2", "mode": "async_observe"}
         }
-      },
-      "codex": {
-        "collection": {
-          "enabled": true,
-          "profile": "codex_rollout_v1",
-          "allowed_roots": ["/home/example/.codex"],
-          "sources": [{"id": "sessions", "type": "transcript", "path": "/home/example/.codex/sessions", "read_mode": "tail"}]
-        }
       }
     }
   },
@@ -98,7 +92,7 @@ Linux 动态加载器可能因为外部调用线程上的线程局部存储（TL
 
 路径也可按 `linux`、`darwin`、`windows` 提供平台对象。SDK 校验实际打开的文件和目录边界，拒绝采集中的符号链接或 reparse 跳转。资源目录不授予额外的采集权限。源暂时不存在时报告 waiting，不创建 Agent 的源目录；出现后继续启动。来源或 profile 改变会使用新的进度命名空间；限额、脱敏参数调整保留来源身份，只重建受影响的输入。
 
-云壳嵌入模式保证 Qoder 和 Codex 两个 profile；完整模式的其他 Agent 继续沿用原实现。Qoder 的 `hook_jsonl` 是现有 `qoder-YYYY-MM-DD.jsonl` 历史事件目录，最多一个；`transcript` 是授权的原生 transcript 目录，需通过 SDK Hook 发布现有 Qoder 唤醒元数据。还可显式提供 `sqlite`、`segments`、`intercept` Token 来源。Codex 使用一个原生 rollout 目录。未列出的默认目录不会作为兜底读取。
+云壳 SDK 只支持 Qoder。Codex 的 rollout 和中止回合补采由完整 Pilot 外壳运行，其他 Agent 的采集继续走外壳。Qoder 的 `hook_jsonl` 是现有 `qoder-YYYY-MM-DD.jsonl` 历史事件目录，最多一个；`transcript` 是授权的原生 transcript 目录，需通过 SDK Hook 发布现有 Qoder 唤醒元数据。还可显式提供 `sqlite`、`segments`、`intercept` Token 来源。未列出的默认目录不会作为兜底读取。
 
 启动普通版 Qoder CLI 时在进程环境中设置 `QODER_EXPOSE_TOKEN_USAGE=true`，SDK 直接从授权 transcript 的逐响应 `message.usage` 读取真实用量。Qoder CLI 1.1.76 已验证。完整 Pilot 的既有 Unix 启动入口会设置该变量，云壳管理 Qoder 进程时应在启动时传入。Qoder 设置文件里的 `env` 对该开关无效。没有正数用量的原生占位记录不作为计量来源。现有诊断 segments 和历史 sidecar 仍可用于兼容读取，Qoder IDE 沿用 SQLite。
 
@@ -145,12 +139,12 @@ SDK 分别发布 `sdk-hooks-cloud.json`、`sdk-hooks-local.json` 和 `sdk-hooks-
 
 ```sh
 loongsuite-pilot-sdk-hook sdk-hook --data-dir /var/lib/pilot-sdk/instance-a \
-  --channel cloud --agent qoder --event PreToolUse
+  --channel cloud --agent qodercli --event PreToolUse
 ```
 
-Qoder CLI 可以把 Pilot 可执行文件的绝对路径作为 `command`，并用 `args` 分别传入这些参数。Agent JSON 从 stdin 输入。`--channel local` 使用 SDK 本地规则，`cloud` 使用 `on_hook`。Qoder CLI 输出协议使用 `--agent qodercli`。完整 Pilot 的 `interceptor hook` 命令保留其 HTTP 和 Agent 协议，也经过同一原生硬截止外壳。
+Qoder CLI 在设置中用 `command` 指定 `loongsuite-pilot-sdk-hook` 的绝对路径，通过 `args` 分别传入参数。Agent JSON 从 stdin 输入。`--channel local` 使用 SDK 本地规则，`cloud` 使用 `on_hook`。完整版与云壳共用动态库和 Hook 二进制。完整版安装到共享的 Qoder IDE/CLI 配置时使用 `--agent qoder-auto`，Hook 按实际的调用进程选择响应协议。Qoder CLI 的 `PreToolUse` 拒绝通过退出码 2 和 stderr 交给 Agent。
 
-采集唤醒的 `Stop` Hook 可以直接调用同一个可执行文件，参数为 `hook-process qoder --wakeup-only --agent-id qoder --log-prefix qoder --data-dir /var/lib/pilot-sdk/instance-a`。它写入实例的有界唤醒元数据，采集器按 transcript 进度继续读取。
+采集唤醒在同一个二进制上使用 `sdk-hook --channel observe --agent qodercli --event Stop --data-dir /var/lib/pilot-sdk/instance-a`。SDK 检查 transcript 位于策略授权范围内，复用现有增量进度。
 
 大输入不直接塞进 UDP。客户端把最多 1 MiB JSON 放在实例私有的 `hook-requests-cloud/local` 目录，用最多 16 个跨进程租约限制未完成请求，再发小于 4096 字节的关联报文。SDK 校验 token、进程/实例关联、请求 ID、长度、期限及文件边界。回包不超过 32 KiB；需要自己实现客户端时，报文定义见 `src/sdk/hook_protocol.rs`，发送与租约处理见 `src/sdk/hook_bin.rs`。
 

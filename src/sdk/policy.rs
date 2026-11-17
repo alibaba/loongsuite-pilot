@@ -295,6 +295,7 @@ impl Policy {
             let agent = name
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("agent name must be a string"))?;
+            anyhow::ensure!(agent == "qoder", "unsupported SDK agent: {agent}");
             anyhow::ensure!(seen.insert(agent), "duplicate agent");
             let collection = configs
                 .get(agent)
@@ -328,11 +329,7 @@ impl Policy {
                 .and_then(Value::as_str)
                 .unwrap_or("");
             anyhow::ensure!(
-                matches!(
-                    (agent, profile),
-                    ("qoder", "qoder_trace_v1")
-                        | ("codex", "codex_rollout_v1" | "codex_aborted_turn_v1")
-                ),
+                profile == "qoder_trace_v1",
                 "unsupported agent/profile: {agent}/{profile}"
             );
             let roots = collection
@@ -349,11 +346,7 @@ impl Policy {
             );
             let pilot_host = collection
                 .get("pilot_host")
-                .or_else(|| {
-                    (agent == "qoder")
-                        .then(|| collection.get("pilot_qoder"))
-                        .flatten()
-                })
+                .or_else(|| collection.get("pilot_qoder"))
                 .map(|value| -> anyhow::Result<PilotHostState> {
                     let mut state: PilotHostState = serde_json::from_value(value.clone())?;
                     state.data_dir = canonical_candidate(&platform_path(
@@ -369,14 +362,6 @@ impl Policy {
                     Ok(state)
                 })
                 .transpose()?;
-            anyhow::ensure!(
-                collection.get("pilot_qoder").is_none() || agent == "qoder",
-                "pilot_qoder requires the Qoder profile"
-            );
-            anyhow::ensure!(
-                profile != "codex_aborted_turn_v1" || pilot_host.is_some(),
-                "the Codex aborted-turn profile requires authorized Pilot state"
-            );
             let sources = collection
                 .get("sources")
                 .and_then(Value::as_array)
@@ -405,14 +390,10 @@ impl Policy {
                 }
                 let kind = source.get("type").and_then(Value::as_str).unwrap_or("");
                 anyhow::ensure!(
-                    if agent == "codex" {
-                        kind == "transcript"
-                    } else {
-                        matches!(
-                            kind,
-                            "hook_jsonl" | "transcript" | "sqlite" | "segments" | "intercept"
-                        ) || (pilot_host.is_some() && kind == "sqlite_root")
-                    },
+                    matches!(
+                        kind,
+                        "hook_jsonl" | "transcript" | "sqlite" | "segments" | "intercept"
+                    ) || (pilot_host.is_some() && kind == "sqlite_root"),
                     "unsupported source type"
                 );
                 if let Some(mode) = source.get("read_mode") {
@@ -431,14 +412,10 @@ impl Policy {
                 });
             }
             anyhow::ensure!(
-                if agent == "qoder" {
-                    parsed.iter().filter(|s| s.kind == "hook_jsonl").count() <= 1
-                        && parsed
-                            .iter()
-                            .any(|s| matches!(s.kind.as_str(), "hook_jsonl" | "transcript"))
-                } else {
-                    parsed.len() == 1
-                },
+                parsed.iter().filter(|s| s.kind == "hook_jsonl").count() <= 1
+                    && parsed
+                        .iter()
+                        .any(|s| matches!(s.kind.as_str(), "hook_jsonl" | "transcript")),
                 "profile requires exactly one primary source"
             );
             let limits = collection
@@ -505,7 +482,43 @@ impl Policy {
         for (id, plan) in &agents {
             hooks["collector_plans"][id]["namespace"] = serde_json::json!(plan.namespace());
         }
+        // The standalone shell can keep its existing collector for host-only
+        // ACP/multimodal processing while using the SDK for Hook transport.
+        let use_host_collector = hooks
+            .as_object_mut()
+            .expect("validated hooks")
+            .remove("pilot_qoder_use_host_collector");
+        if let Some(value) = use_host_collector {
+            anyhow::ensure!(
+                agents.is_empty() && hooks["agents"] == serde_json::json!(["qoder"]),
+                "invalid standalone Qoder Hook policy"
+            );
+            let data = init
+                .data_dir
+                .parent()
+                .and_then(Path::parent)
+                .filter(|data| data.join(super::STANDALONE_QODER_DATA) == init.data_dir)
+                .ok_or_else(|| anyhow::anyhow!("invalid standalone Qoder Hook directory"))?;
+            let home = init
+                .home_dir
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("standalone Qoder Hook requires home_dir"))?;
+            let mut state: PilotHostState = serde_json::from_value(value)?;
+            anyhow::ensure!(
+                state.data_dir == data,
+                "invalid standalone Qoder Hook state"
+            );
+            state.data_dir = canonical_candidate(data)?;
+            hooks["collector_plans"]["qoder"] = serde_json::json!({
+                "pilot_host": state,
+                "sources": [{"kind": "transcript", "path": canonical_candidate(home)?}],
+            });
+            hooks["relay_host_verdicts"] = Value::Bool(true);
+        } else {
+            hooks["relay_host_verdicts"] = Value::Bool(false);
+        }
         hooks["data_dir"] = serde_json::json!(init.data_dir);
+        hooks["home_dir"] = serde_json::json!(init.home_dir);
         hooks["user_id"] = serde_json::json!(init.user_id);
         hooks["mask"] = serde_json::to_value(&mask)?;
         if let Some(sync) = hooks.get("sync_wait_enabled") {

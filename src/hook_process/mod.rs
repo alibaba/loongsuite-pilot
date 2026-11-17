@@ -24,7 +24,9 @@ pub use qoder::{
     build_collected_transcript_turn, qoder_has_cn_terminal, qoder_is_control_user_row,
     qoder_is_real_user_prompt, qoder_legacy_retry_lock_path, CollectedTranscriptTurnContext,
 };
-pub(crate) use qoder::{is_qoder_app_turn, resolve_collected_qoder_user_id};
+pub(crate) use qoder::{
+    is_qoder_app_turn, publish_sdk_host_wakeup, resolve_collected_qoder_user_id,
+};
 pub use qoder::{
     resolve_qoder_collector_cli_identity, resolve_qoder_collector_cli_identity_with_env,
 };
@@ -80,17 +82,35 @@ pub fn run_hook_process(agent: &str) -> i32 {
 }
 
 /// Execute the Qoder publication mode used by installed native exec Hooks.
-pub(crate) fn run_qoder_wakeup_captured(args: &[String], stdin: &[u8]) -> (i32, String) {
-    let Some(data) = args
-        .windows(2)
-        .find(|pair| pair[0] == "--data-dir")
-        .map(|pair| &pair[1])
-        .filter(|path| std::path::Path::new(path).is_absolute())
-    else {
-        return (0, "{}\n".into());
+#[doc(hidden)]
+pub fn run_legacy_host_hook(args: &[String], stdin: &[u8]) -> Option<String> {
+    let [command, agent, rest @ ..] = args else {
+        return None;
     };
+    if command != "hook-process" {
+        return None;
+    }
+    crate::utils::redirect_root_logger_to_stderr();
+    match agent.as_str() {
+        "qoder" if rest.iter().any(|arg| arg == "--wakeup-only") => {
+            Some(run_qoder_wakeup_captured(rest, stdin).1)
+        }
+        "codex" => Some(run_codex_hook_captured(rest, stdin).1),
+        _ => None,
+    }
+}
+
+fn run_qoder_wakeup_captured(args: &[String], stdin: &[u8]) -> (i32, String) {
     let mut env: Env = std::env::vars().collect();
-    env.insert("LOONGSUITE_PILOT_DATA_DIR".into(), data.clone());
+    if let Some(index) = args.iter().position(|arg| arg == "--data-dir") {
+        let Some(data) = args
+            .get(index + 1)
+            .filter(|path| std::path::Path::new(path).is_absolute())
+        else {
+            return (0, "{}\n".into());
+        };
+        env.insert("LOONGSUITE_PILOT_DATA_DIR".into(), data.clone());
+    }
     let mut stdout = Vec::new();
     let code = qoder::run(&mut HookRequest {
         args,
@@ -101,7 +121,22 @@ pub(crate) fn run_qoder_wakeup_captured(args: &[String], stdin: &[u8]) -> (i32, 
     (code, String::from_utf8(stdout).unwrap_or_default())
 }
 
-pub(crate) fn run_codex_hook_captured(args: &[String], stdin: &[u8]) -> (i32, String) {
+pub(crate) fn record_qoder_upstream_for_host(
+    data: &std::path::Path,
+    session: &str,
+    traceparent: &str,
+) {
+    let env = Env::from([
+        (
+            "LOONGSUITE_PILOT_DATA_DIR".into(),
+            data.to_string_lossy().into_owned(),
+        ),
+        ("TRACEPARENT".into(), traceparent.into()),
+    ]);
+    common::record_upstream_context_once(&env, "qoder", session);
+}
+
+fn run_codex_hook_captured(args: &[String], stdin: &[u8]) -> (i32, String) {
     let started = std::time::Instant::now();
     let env: Env = std::env::vars().collect();
     let mut stdout = Vec::new();

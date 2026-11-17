@@ -55,9 +55,12 @@ pilot_invoke_native() {
     [[ -z "$empty" ]] || printf '%s\n' "$empty"
     return 0
   fi
-  if [[ "${1:-}" == hook-process && "${2:-}" == codex && "${binary##*/}" == loongsuite-pilot ]]; then
-    local hook_binary="${binary%/*}/loongsuite-pilot-sdk-hook"
-    if pilot_binary_valid "$hook_binary"; then binary="$hook_binary"; fi
+  if [[ "${1:-}" == sdk-hook ]]; then
+    local sdk_hook="${binary%/*}/loongsuite-pilot-sdk-hook"
+    local data="${LOONGSUITE_PILOT_DATA_DIR:-$parent}"
+    if pilot_binary_valid "$sdk_hook"; then binary="$sdk_hook"; fi
+    "$binary" "$@" --data-dir "$data/state/standalone-qoder-sdk"
+    return $?
   fi
   if result="$("$binary" "$@")"; then
     if [[ -n "$result" ]]; then printf '%s\n' "$result"

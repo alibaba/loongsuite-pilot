@@ -1,6 +1,7 @@
 //! Full Pilot's client for the same activity and lifecycle ABI used by embedders.
 use super::InputManager;
 use crate::checkpoints::StateStore;
+use crate::interceptor::{ToolInterceptPhase, ToolVerdictAction, ToolVerdictKey, ToolVerdictStore};
 use crate::sdk::abi;
 use crate::sdk::host_loader::{self, Library};
 use crate::types::AgentActivityEntry;
@@ -20,6 +21,7 @@ pub(super) struct SdkAgent {
     manager: Weak<InputManager>,
     sdk_data: PathBuf,
     legacy_state: Weak<StateStore>,
+    verdicts: Option<Arc<ToolVerdictStore>>,
     running: Arc<AtomicBool>,
     session: tokio::sync::Mutex<Option<Session>>,
 }
@@ -45,6 +47,27 @@ impl SdkAgent {
             manager: Arc::downgrade(manager),
             sdk_data,
             legacy_state: Arc::downgrade(legacy_state),
+            verdicts: None,
+            running: Arc::new(AtomicBool::new(false)),
+            session: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    pub fn hook_only(
+        init: Value,
+        policy: Value,
+        manager: &Arc<InputManager>,
+        sdk_data: PathBuf,
+        verdicts: Arc<ToolVerdictStore>,
+    ) -> Self {
+        Self {
+            input: "qoder-trace",
+            init: init.to_string().into_bytes(),
+            policy: policy.to_string().into_bytes(),
+            manager: Arc::downgrade(manager),
+            sdk_data,
+            legacy_state: Weak::new(),
+            verdicts: Some(verdicts),
             running: Arc::new(AtomicBool::new(false)),
             session: tokio::sync::Mutex::new(None),
         }
@@ -70,6 +93,7 @@ impl SdkAgent {
             manager: self.manager.clone(),
             sdk_data: self.sdk_data.clone(),
             legacy_state: self.legacy_state.clone(),
+            verdicts: self.verdicts.clone(),
             start_result: AtomicI32::new(PENDING),
             stop_result: AtomicI32::new(PENDING),
         });
@@ -117,6 +141,7 @@ struct Context {
     manager: Weak<InputManager>,
     sdk_data: PathBuf,
     legacy_state: Weak<StateStore>,
+    verdicts: Option<Arc<ToolVerdictStore>>,
     start_result: AtomicI32,
     stop_result: AtomicI32,
 }
@@ -272,6 +297,58 @@ unsafe extern "C" fn on_monitoring(
     }
 }
 
+/// Relay a native SDK decision into the full shell's legacy input linker when
+/// the shell owns Qoder's ACP or multimodal processing.
+unsafe extern "C" fn on_host_hook_event(
+    ctx: *mut c_void,
+    row: abi::PilotJsonView,
+    _remaining_ms: u32,
+    _reply: *mut u8,
+    _capacity: usize,
+    _length: *mut usize,
+) -> i32 {
+    #[derive(serde::Deserialize)]
+    struct Verdict {
+        session_id: Option<String>,
+        tool_use_id: String,
+        phase: ToolInterceptPhase,
+        action: ToolVerdictAction,
+    }
+
+    let result = std::panic::catch_unwind(|| {
+        // SAFETY: the SDK retains the buffer and the host context for this call.
+        let ctx = unsafe { &*ctx.cast::<Context>() };
+        let rows = unsafe { std::slice::from_raw_parts(row.data, row.len) };
+        let row: Value = serde_json::from_slice(rows).ok()?;
+        if row["kind"] == "qoder_upstream" {
+            let data = ctx.sdk_data.parent()?.parent()?;
+            crate::hook_process::record_qoder_upstream_for_host(
+                data,
+                row["session_id"].as_str()?,
+                row["traceparent"].as_str()?,
+            );
+            return Some(());
+        }
+        let verdict = serde_json::from_value::<Verdict>(row).ok()?;
+        let store = ctx.verdicts.as_ref()?;
+        let key = ToolVerdictKey {
+            session_id: verdict.session_id,
+            tool_use_id: verdict.tool_use_id,
+            phase: verdict.phase,
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        if store.get(&key, now) != Some(ToolVerdictAction::Block) {
+            store.put(&key, verdict.action, now);
+        }
+        Some(())
+    });
+    if matches!(result, Ok(Some(()))) {
+        abi::OK
+    } else {
+        abi::FAILURE
+    }
+}
+
 fn run(
     context: Box<Context>,
     init: &[u8],
@@ -286,6 +363,10 @@ fn run(
     if api.capabilities & required != required {
         return Err("SDK is missing required host capabilities".into());
     }
+    let on_hook = context
+        .verdicts
+        .as_ref()
+        .map(|_| on_host_hook_event as abi::OnHook);
     let context_ptr = Box::into_raw(context);
     let ctx = context_ptr.cast::<c_void>();
     let mut handle = std::ptr::null_mut();
@@ -297,7 +378,7 @@ fn run(
             abi::PilotJsonView::from_bytes(policy),
             Some(on_activity),
             Some(on_monitoring),
-            None,
+            on_hook,
             Some(on_start),
             Some(on_stop),
             ctx,

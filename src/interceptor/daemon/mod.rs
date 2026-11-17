@@ -15,9 +15,6 @@ use runtime::read_installed_git_commit;
 use serde_json::{Map, Value};
 use std::io::Write;
 
-#[cfg(test)]
-pub(crate) use lifecycle::start_interceptor_service_at_port;
-
 pub use lifecycle::{
     start_interceptor_service, InterceptorService, StartInterceptorServiceOptions,
 };

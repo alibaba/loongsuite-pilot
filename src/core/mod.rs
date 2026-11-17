@@ -7,6 +7,7 @@
 mod agent_control_manager;
 mod agent_discovery_service;
 mod build_constants;
+mod codex_sdk_migration;
 mod config_loader;
 mod hook_watchdog;
 mod input_manager;
@@ -49,6 +50,7 @@ pub use runtime_options::CollectorRuntimeOptions;
 pub use updater_watchdog::{
     UpdaterWatchdog, UpdaterWatchdogOptions, UpdaterWatchdogResult, UpdaterWatchdogStatus,
 };
+pub(crate) use upstream_link::UpstreamTrace;
 pub use upstream_link::{AcpCorrelateRetentionService, CorrelationStore, TraceLinker};
 pub use workspace_policy::{validate_excluded_workspaces, WorkspacePolicy};
 

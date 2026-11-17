@@ -73,9 +73,12 @@ function Invoke-PilotNative {
     }
     try {
         $binary = Resolve-PilotBinary -HookDir $HookDir
-        if ($Arguments.Count -ge 2 -and $Arguments[0] -ceq 'hook-process' -and $Arguments[1] -ceq 'codex' -and (Split-Path -Leaf $binary) -ieq 'loongsuite-pilot.exe') {
+        if ($Arguments.Count -ge 1 -and $Arguments[0] -ceq 'sdk-hook') {
             $hookBinary = Join-Path (Split-Path -Parent $binary) 'loongsuite-pilot-sdk-hook.exe'
             if (Test-PilotBinary $hookBinary) { $binary = $hookBinary }
+            $data = $env:LOONGSUITE_PILOT_DATA_DIR
+            if (-not $data) { $data = Split-Path -Parent $HookDir }
+            $Arguments += @('--data-dir', (Join-Path $data 'state\standalone-qoder-sdk'))
         }
         $quoted = @($Arguments | ForEach-Object { ConvertTo-PilotNativeArgument $_ })
         # A standalone native invocation inherits the original byte handles.
@@ -95,6 +98,7 @@ function Invoke-PilotNative {
         } finally {
             $ErrorActionPreference = $previousErrorActionPreference
         }
+        if ($Arguments[0] -ceq 'sdk-hook' -and $nativeExit -eq 2) { exit 2 }
         if ($null -eq $nativeExit -or $nativeExit -ne 0) { throw 'native hook failed' }
     } catch {
         Write-Error '[loongsuite-pilot] native hook unavailable' -ErrorAction Continue

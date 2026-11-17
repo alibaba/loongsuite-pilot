@@ -5,6 +5,13 @@ pub const MAX_REQUEST: usize = 1024 * 1024;
 pub const MAX_REPLY: usize = 32 * 1024;
 pub const DEADLINE_MS: u64 = 3000;
 pub const RECEIPT_TIMEOUT_MS: u64 = 200;
+pub const QODER_OBSERVE_CONTEXT: &str = "_pilot_qoder_observe_context";
+pub const QODER_OBSERVE_ENV: [&str; 4] = [
+    "TRACEPARENT",
+    "AGENTTEAMS_WORKER_NAME",
+    "AGENTTEAMS_INSTANCE_ID",
+    "LOONGSUITE_PILOT_SPAN_ATTRIBUTES",
+];
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Descriptor {
     pub schema: u32,
@@ -28,15 +35,19 @@ pub struct Datagram {
     #[serde(default)]
     pub want_receipt: bool,
 }
-pub fn render_block(agent: &str, event: &str, reason: &str) -> Option<String> {
-    if !(matches!(agent, "qoder" | "qodercli") || (agent == "codex" && event == "PreToolUse")) {
-        return None;
-    }
-    let reason = if reason.is_empty() {
+pub fn block_reason(reason: &str) -> &str {
+    if reason.is_empty() {
         "Blocked by security policy"
     } else {
         reason
-    };
+    }
+}
+
+pub fn render_block(agent: &str, event: &str, reason: &str) -> Option<String> {
+    if !matches!(agent, "qoder" | "qodercli") {
+        return None;
+    }
+    let reason = block_reason(reason);
     let output = match event {
         "UserPromptSubmit" => {
             json!({"decision":if agent=="qoder"{"block"}else{"deny"},"reason":reason})

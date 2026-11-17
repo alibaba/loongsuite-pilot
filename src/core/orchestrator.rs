@@ -61,9 +61,6 @@ use crate::inputs::qwen_work_cn::{
 use crate::inputs::rest_support::{HookInputOptions, SessionInputOptions};
 use crate::inputs::workbuddy::{WorkBuddyInput, WorkBuddyInputOptions};
 use crate::inputs::wukong::{WukongInput, WukongInputOptions};
-use crate::interceptor::daemon::{
-    start_interceptor_service, InterceptorService, StartInterceptorServiceOptions,
-};
 use crate::interceptor::{
     load_interceptor_config, resolve_enabled_interceptor_types, ToolVerdictStore,
 };
@@ -229,7 +226,7 @@ pub struct Orchestrator {
     runtime_writer: Mutex<Option<RuntimeWriter>>,
     summary_writer: Mutex<Option<MetricsSummaryWriter>>,
     dashboard: Mutex<Option<dashboard::DashboardServer>>,
-    interceptor: Mutex<Option<InterceptorService>>,
+    qoder_hooks: Mutex<Option<super::sdk_agent::SdkAgent>>,
     multimodal_ready: Mutex<bool>,
     verdicts: Mutex<Option<Arc<ToolVerdictStore>>>,
     status_bar: Mutex<Option<StatusBarAppManager>>,
@@ -238,8 +235,6 @@ pub struct Orchestrator {
     relayed_alarms: Mutex<HashSet<String>>,
     running: Mutex<bool>,
     listeners: Mutex<Vec<OrchestratorListener>>,
-    #[cfg(test)]
-    test_interceptor_port: Option<u16>,
     #[cfg(test)]
     test_detection_entries: Mutex<Vec<Arc<dyn AgentDetection>>>,
 }
@@ -281,7 +276,7 @@ impl Orchestrator {
             runtime_writer: Mutex::new(None),
             summary_writer: Mutex::new(None),
             dashboard: Mutex::new(None),
-            interceptor: Mutex::new(None),
+            qoder_hooks: Mutex::new(None),
             multimodal_ready: Mutex::new(false),
             verdicts: Mutex::new(None),
             status_bar: Mutex::new(None),
@@ -290,8 +285,6 @@ impl Orchestrator {
             relayed_alarms: Mutex::new(HashSet::new()),
             running: Mutex::new(false),
             listeners: Mutex::new(Vec::new()),
-            #[cfg(test)]
-            test_interceptor_port: None,
             #[cfg(test)]
             test_detection_entries: Mutex::new(Vec::new()),
             runtime_options: CollectorRuntimeOptions::default(),
@@ -419,12 +412,14 @@ impl Orchestrator {
         ));
         verdicts.restore(chrono::Utc::now().timestamp_millis());
         *self.verdicts.lock().expect("verdicts") = Some(Arc::clone(&verdicts));
-        let interception_enabled = if self.runtime_options.manage_host_services {
-            let config = load_interceptor_config(None).await;
-            !resolve_enabled_interceptor_types(&config).is_empty()
+        let interceptor_config = if self.standalone && self.runtime_options.manage_host_services {
+            Some(load_interceptor_config(None).await)
         } else {
-            false
+            None
         };
+        let interception_enabled = interceptor_config
+            .as_ref()
+            .is_some_and(|config| !resolve_enabled_interceptor_types(config).is_empty());
         self.inputs
             .set_intercept_result_linker(Arc::new(InterceptResultLinker::new(
                 Arc::clone(&verdicts),
@@ -501,11 +496,14 @@ impl Orchestrator {
         };
         let mut detection = self.register_all_inputs(&state_store).await;
         if self.uses_sdk_qoder() {
-            self.register_sdk_qoder(&mut detection, &pilot_dir, &state_store);
-        }
-        if self.uses_sdk_codex() {
-            self.register_sdk_codex(&mut detection, &pilot_dir, &state_store)
-                .await;
+            self.register_sdk_qoder(
+                &mut detection,
+                &pilot_dir,
+                &state_store,
+                interceptor_config.as_ref(),
+            );
+        } else if let Some(config) = &interceptor_config {
+            self.start_qoder_hooks(&pilot_dir, config, verdicts).await;
         }
         let deploy_entries = deployment
             .as_ref()
@@ -667,39 +665,6 @@ impl Orchestrator {
                 }
                 *self.dashboard.lock().expect("dashboard") = Some(dashboard);
             }
-            let inputs_for_prompt = Arc::clone(&self.inputs);
-            match self
-                .start_collector_interceptor(StartInterceptorServiceOptions {
-                    data_dir: self.data_dir.clone(),
-                    version: package_version.clone(),
-                    git_commit: if package_git.is_empty() {
-                        None
-                    } else {
-                        Some(package_git)
-                    },
-                    verdict_store: Some(verdicts),
-                    emit_blocked_prompt: Some(Arc::new(move |entry| {
-                        let inputs = Arc::clone(&inputs_for_prompt);
-                        tokio::spawn(async move {
-                            if let Err(err) = inputs.flush_prepared_entries(vec![entry]).await {
-                                logger("Orchestrator").warn(
-                                    "blocked prompt flush failed",
-                                    Some(&fields(serde_json::json!({ "error": err }))),
-                                );
-                            }
-                        });
-                    })),
-                })
-                .await
-            {
-                Ok(service) => {
-                    *self.interceptor.lock().expect("interceptor") = Some(service);
-                }
-                Err(err) => logger("Orchestrator").warn(
-                    "interceptor start failed (non-fatal)",
-                    Some(&fields(serde_json::json!({ "error": err.to_string() }))),
-                ),
-            }
             if cfg!(target_os = "macos") && self.config.status_bar.enabled {
                 let status = StatusBarAppManager::new(
                     self.data_dir.clone(),
@@ -766,11 +731,12 @@ impl Orchestrator {
         if let Some(dashboard) = self.dashboard.lock().expect("dashboard").take() {
             dashboard.stop();
         }
-        let service = self.interceptor.lock().expect("interceptor").take();
-        if let Some(service) = service {
-            service.stop().await;
-        } else if let Some(verdicts) = self.verdicts.lock().expect("verdicts").clone() {
-            if let Err(err) = verdicts.dump(chrono::Utc::now().timestamp_millis()) {
+        let hooks = self.qoder_hooks.lock().expect("Qoder Hook SDK").take();
+        if let Some(hooks) = hooks {
+            hooks.stop().await;
+        }
+        if let Some(verdicts) = self.verdicts.lock().expect("verdicts").clone() {
+            if let Err(err) = verdicts.stop_checkpoint_loop(chrono::Utc::now().timestamp_millis()) {
                 logger("Orchestrator").warn(
                     "interceptor verdict checkpoint failed",
                     Some(&fields(serde_json::json!({ "error": err.to_string() }))),
@@ -913,18 +879,6 @@ impl Orchestrator {
     }
     pub fn alarm_manager(&self) -> Option<Arc<AlarmManager>> {
         self.alarm.lock().expect("alarm").clone()
-    }
-
-    async fn start_collector_interceptor(
-        &self,
-        options: StartInterceptorServiceOptions,
-    ) -> std::io::Result<InterceptorService> {
-        #[cfg(test)]
-        if let Some(port) = self.test_interceptor_port {
-            return crate::interceptor::daemon::start_interceptor_service_at_port(options, port)
-                .await;
-        }
-        start_interceptor_service(options).await
     }
 
     async fn start_multimodal(&self) {
@@ -1956,7 +1910,12 @@ impl Orchestrator {
             CopilotLogInput::check_availability,
         )
         .await;
-        if !self.uses_sdk_codex() {
+        if self.prepare_codex_shell_state(state_store).await {
+            let session_dir = std::env::var_os("CODEX_HOME")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join("sessions").to_string_lossy().into_owned());
             let wakeup = self.data_dir_join("state/codex/transcript-wakeups");
             let spans = self.data_dir_join("state/codex/transcript-span-contexts");
             ensure_dir(&wakeup).await;
@@ -1971,19 +1930,24 @@ impl Orchestrator {
                 ),
                 CodexTranscriptInput::new(CodexTranscriptInputOptions {
                     state_store: Arc::clone(state_store),
-                    session_dir: None,
+                    session_dir: session_dir.clone(),
                     wakeup_dir: Some(wakeup.clone()),
                     span_context_dir: Some(spans),
                     poll_interval_ms: self.poll("codex-transcript"),
                     multimodal: None,
                 }),
-                CodexTranscriptInput::watch_paths(Some(&wakeup_for_watch), None),
+                CodexTranscriptInput::watch_paths(Some(&wakeup_for_watch), session_dir.as_deref()),
                 {
-                    let wakeup = wakeup.clone();
+                    let watch_sessions = session_dir.clone();
                     move || {
                         let wakeup = wakeup.clone();
+                        let sessions = watch_sessions.clone();
                         async move {
-                            CodexTranscriptInput::check_availability(Some(&wakeup), None).await
+                            CodexTranscriptInput::check_availability(
+                                Some(&wakeup),
+                                sessions.as_deref(),
+                            )
+                            .await
                         }
                     }
                 },
@@ -1999,14 +1963,24 @@ impl Orchestrator {
                 ),
                 CodexAbortedTurnInput::new(CodexAbortedTurnInputOptions {
                     state_store: Arc::clone(state_store),
-                    session_dir: None,
-                    hook_state_dir: None,
-                    diagnostic_dir: None,
+                    session_dir: session_dir.clone(),
+                    hook_state_dir: Some(self.data_dir_join("state/codex/sessions")),
+                    diagnostic_dir: Some(self.data_dir_join("logs/diagnostics")),
                     hook_gap_grace_ms: None,
                     poll_interval_ms: self.poll("codex-aborted-turn"),
                 }),
-                CodexAbortedTurnInput::watch_paths(),
-                CodexAbortedTurnInput::check_availability,
+                session_dir
+                    .clone()
+                    .map_or_else(CodexAbortedTurnInput::watch_paths, |path| vec![path]),
+                move || {
+                    let sessions = session_dir.clone();
+                    async move {
+                        match sessions {
+                            Some(path) => crate::utils::directory_exists(&path).await,
+                            None => CodexAbortedTurnInput::check_availability().await,
+                        }
+                    }
+                },
             )
             .await;
         }
@@ -2812,11 +2786,61 @@ impl Orchestrator {
                     .is_some_and(|agent| is_agent_multimodal_enabled(Some("qoder"), agent)))
     }
 
+    async fn start_qoder_hooks(
+        &self,
+        pilot_dir: &str,
+        config: &crate::types::InterceptorConfig,
+        verdicts: Arc<ToolVerdictStore>,
+    ) {
+        let sdk_data = self.data_dir_join(crate::sdk::STANDALONE_QODER_DATA);
+        let init = serde_json::json!({
+            "data_dir": sdk_data,
+            "resource_dir": pilot_dir,
+            "home_dir": resolve_home("~"),
+            "user_id": self.config.user_id,
+        });
+        let policy = serde_json::json!({
+            "agents": ["qoder"],
+            "hcd": {"agent_configs":{"qoder":{"collection":{"enabled":false}}}},
+            "sdk_options": {"mask": self.config.mask, "hooks": {
+                "local": config,
+                "pilot_qoder_use_host_collector": {
+                    "data_dir": self.data_dir,
+                    "capture_message_content": self.config.agents.get("qoder")
+                        .and_then(|agent| agent.capture_message_content),
+                    "exclude_workspaces": self.config.privacy.as_ref()
+                        .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
+                },
+            }},
+        });
+        let sdk = super::sdk_agent::SdkAgent::hook_only(
+            init,
+            policy,
+            &self.inputs,
+            std::path::PathBuf::from(sdk_data),
+            Arc::clone(&verdicts),
+        );
+        if let Err(error) = sdk.start().await {
+            logger("Orchestrator").warn(
+                "Qoder Hook SDK start failed (non-fatal)",
+                Some(&fields(serde_json::json!({ "error": error }))),
+            );
+            self.emit(OrchestratorEvent::ComponentFailure {
+                component: "qoder-sdk-hook".into(),
+                error,
+            });
+        } else {
+            verdicts.start_checkpoint_loop(interceptor::TOOL_VERDICT_CHECKPOINT_INTERVAL_MS);
+            *self.qoder_hooks.lock().expect("Qoder Hook SDK") = Some(sdk);
+        }
+    }
+
     fn register_sdk_qoder(
         &self,
         entries: &mut Vec<Arc<dyn AgentDetection>>,
         pilot_dir: &str,
         state_store: &Arc<StateStore>,
+        interceptor_config: Option<&crate::types::InterceptorConfig>,
     ) {
         use crate::inputs::qoder_trace::{resolve_qoder_app_root, QODER_SEGMENTS_ROOT};
         let home = resolve_home("~");
@@ -2826,7 +2850,7 @@ impl Orchestrator {
         let history = self.data_dir_join("logs/qoder/history");
         let intercept = self.data_dir_join("logs/qodercli-intercept.jsonl");
         let config = self.config.agents.get("qoder");
-        let sdk_data = self.data_dir_join("state/standalone-qoder-sdk");
+        let sdk_data = self.data_dir_join(crate::sdk::STANDALONE_QODER_DATA);
         let init = serde_json::json!({
             "data_dir": sdk_data,
             "resource_dir": pilot_dir,
@@ -2855,7 +2879,7 @@ impl Orchestrator {
                         .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
                 },
             }}}},
-            "sdk_options": {"mask": self.config.mask},
+            "sdk_options": {"mask": self.config.mask, "hooks": {"local": interceptor_config}},
         });
         let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
             "qoder-trace",
@@ -2885,93 +2909,25 @@ impl Orchestrator {
         );
     }
 
-    fn uses_sdk_codex(&self) -> bool {
-        self.standalone && !self.config.upstream_link.enabled
-    }
-
-    async fn register_sdk_codex(
-        &self,
-        entries: &mut Vec<Arc<dyn AgentDetection>>,
-        pilot_dir: &str,
-        state_store: &Arc<StateStore>,
-    ) {
-        let home = resolve_home("~");
-        let session_dir = std::env::var_os("CODEX_HOME")
-            .filter(|value| !value.is_empty())
-            .map(std::path::PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .map_or_else(
-                || resolve_home("~/.codex/sessions"),
-                |path| path.join("sessions").to_string_lossy().into_owned(),
-            );
-        let wakeup = self.data_dir_join("state/codex/transcript-wakeups");
-        ensure_dir(&wakeup).await;
-        for (listener, profile) in [
-            ("codex-transcript", "codex_rollout_v1"),
-            ("codex-aborted-turn", "codex_aborted_turn_v1"),
-        ] {
-            let sdk_data = self.data_dir_join(&format!("state/standalone-{listener}-sdk"));
-            let init = serde_json::json!({
-                "data_dir": sdk_data,
-                "resource_dir": pilot_dir,
-                "home_dir": home,
-                "user_id": self.config.user_id,
-            });
-            let config = self.config.agents.get("codex");
-            let policy = serde_json::json!({
-                "agents": ["codex"],
-                "hcd": {"agent_configs": {"codex": {"collection": {
-                    "enabled": true,
-                    "profile": profile,
-                    "allowed_roots": [&session_dir, &self.data_dir],
-                    "sources": [{"id":"sessions", "type":"transcript", "path": session_dir}],
-                    "limits": {"poll_interval_ms": self.poll(listener)
-                        .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS)},
-                    "pilot_host": {
-                        "data_dir": self.data_dir,
-                        "capture_message_content": config.and_then(|agent| agent.capture_message_content),
-                        "exclude_workspaces": self.config.privacy.as_ref()
-                            .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
-                    },
-                }}}},
-                "sdk_options": {"mask": self.config.mask},
-            });
-            let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
-                listener,
-                init,
-                policy,
-                &self.inputs,
-                std::path::PathBuf::from(sdk_data),
-                state_store,
-            ));
-            let live = live_from_parts(
-                listener,
-                "codex",
-                "sdk-hosted",
-                sdk,
-                |input| input.running(),
-                |input| Box::pin(async move { input.start().await }),
-                |input| Box::pin(async move { input.stop().await }),
-            );
-            self.inputs.register_input(Arc::clone(&live));
-            let watch = CodexTranscriptInput::watch_paths(Some(&wakeup), Some(&session_dir));
-            let session = session_dir.clone();
-            let wakeup = wakeup.clone();
-            self.push_detection(
-                entries,
-                live,
-                watch,
-                move || {
-                    let session = session.clone();
-                    let wakeup = wakeup.clone();
-                    async move {
-                        CodexTranscriptInput::check_availability(Some(&wakeup), Some(&session))
-                            .await
-                    }
-                },
-                1,
-                None,
-            );
+    async fn prepare_codex_shell_state(&self, state: &StateStore) -> bool {
+        if !self.standalone {
+            return true;
+        }
+        match super::codex_sdk_migration::migrate(Path::new(&self.data_dir), state, &self.inputs)
+            .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                logger("Orchestrator").warn(
+                    "Codex SDK state migration failed; retained for retry",
+                    Some(&fields(serde_json::json!({"error":error.to_string()}))),
+                );
+                self.emit(OrchestratorEvent::ComponentFailure {
+                    component: "codex-sdk-migration".into(),
+                    error: error.to_string(),
+                });
+                false
+            }
         }
     }
 
@@ -4759,9 +4715,7 @@ mod tests {
                     "the fixture locator must reject commands absent from PATH"
                 );
             }
-            let mut collector = Orchestrator::new(config);
-            collector.test_interceptor_port = Some(0);
-            let orchestrator = Arc::new(collector);
+            let orchestrator = Arc::new(Orchestrator::new(config));
             let events = Arc::new(Mutex::new(Vec::new()));
             let received = events.clone();
             orchestrator.on_event(move |event| received.lock().unwrap().push(event));
@@ -5347,7 +5301,7 @@ mod tests {
             assert!(orchestrator.summary_task.lock().unwrap().is_none());
             assert!(orchestrator.signal_task.lock().unwrap().is_none());
             assert!(orchestrator.dashboard.lock().unwrap().is_none());
-            assert!(orchestrator.interceptor.lock().unwrap().is_none());
+            assert!(orchestrator.qoder_hooks.lock().unwrap().is_none());
             assert!(!data.join("logs/runtime.json").exists());
             assert!(data.join("logs/input-state.json").is_file());
             let saved: serde_json::Value =
