@@ -69,7 +69,7 @@ fn trace(root: &Path, spans: Arc<Mutex<Vec<ReadableSpan>>>) -> OtlpTraceFlusher 
         serde_json::from_value(json!({
             "enabled":true,"endpoints":[{"name":"controlled","endpoint":"http://127.0.0.1:1"}],
             "protocol":"http/protobuf","serviceName":"always-capture-test","dataDir":root,
-            "captureMessageContent":false,"turnIdleTimeoutMs":0
+            "captureMessageContent":true,"turnIdleTimeoutMs":0
         }))
         .unwrap(),
         None,
@@ -115,7 +115,7 @@ fn assert_spans(spans: &[ReadableSpan], sentinel: &str) {
         Some(3.0)
     );
 }
-async fn child(mode: Option<&str>, name: &str) {
+async fn child(mode: Option<&str>, name: &str, capture_content: bool) {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
@@ -123,6 +123,7 @@ async fn child(mode: Option<&str>, name: &str) {
     c.args(["--exact", name, "--nocapture"])
         .env_clear()
         .env("PILOT_CAPTURE_HISTORY_CHILD", "1")
+        .env("PILOT_CAPTURE_HISTORY_CONTENT", capture_content.to_string())
         .env("OTEL_SEMCONV_STABILITY_OPT_IN", "http")
         .env("HOME", &home)
         .env("USERPROFILE", &home)
@@ -180,7 +181,7 @@ async fn l81_all_seven_inherited_capture_modes_export_complete_real_trace_conten
             Some("SPAN_AND_EVENT"),
             Some("invalid"),
         ] {
-            child(mode, &name).await;
+            child(mode, &name, true).await;
         }
         return;
     }
@@ -199,15 +200,16 @@ async fn l81_all_seven_inherited_capture_modes_export_complete_real_trace_conten
     assert_spans(&spans.lock().unwrap(), "content-sentinel");
 }
 #[tokio::test]
-async fn l107_actual_manager_fanout_masks_secrets_but_keeps_content_in_jsonl_events_and_native_spans(
-) {
+async fn l107_actual_manager_fanout_enforces_capture_policy_and_masks_secrets() {
     if std::env::var_os("PILOT_CAPTURE_HISTORY_CHILD").is_none() {
         let name = std::thread::current().name().unwrap().to_owned();
-        child(Some("NO_CONTENT"), &name).await;
+        child(Some("NO_CONTENT"), &name, true).await;
+        child(Some("SPAN_AND_EVENT"), &name, false).await;
         return;
     }
     let root = tempfile::tempdir().unwrap();
     let spans = Arc::new(Mutex::new(Vec::new()));
+    let capture_content = std::env::var("PILOT_CAPTURE_HISTORY_CONTENT").unwrap() == "true";
     let trace = Arc::new(trace(root.path(), spans.clone()));
     let directory = root.path().join("output");
     let jsonl = Arc::new(JsonlFlusher::new(
@@ -227,7 +229,8 @@ async fn l107_actual_manager_fanout_masks_secrets_but_keeps_content_in_jsonl_eve
     output.start().await.unwrap();
     let manager = InputManager::new();
     manager.set_agents_config(
-        &serde_json::from_value(json!({"claude-code":{"captureMessageContent":false}})).unwrap(),
+        &serde_json::from_value(json!({"claude-code":{"captureMessageContent":capture_content}}))
+            .unwrap(),
     );
     manager.set_mask_config(
         serde_json::from_value(json!({"mode":"all","types":[],"replacementMode":"placeholder"}))
@@ -258,14 +261,23 @@ async fn l107_actual_manager_fanout_masks_secrets_but_keeps_content_in_jsonl_eve
         event_sets.push(serde_json::to_string(&*entries).unwrap());
     }
     for text in event_sets {
-        assert!(text.contains("ordinary-content"));
-        assert!(text.contains("[APIKEY_MASKED]"));
+        assert_eq!(text.contains("ordinary-content"), capture_content);
+        assert_eq!(text.contains("[APIKEY_MASKED]"), capture_content);
         assert!(!text.contains(api));
     }
     let spans = spans.lock().unwrap();
-    assert_spans(&spans, "ordinary-content");
+    assert!(spans.iter().any(|span| {
+        span.attributes
+            .get("gen_ai.usage.input_tokens")
+            .and_then(Value::as_f64)
+            == Some(5.0)
+    }));
+    if capture_content {
+        assert_spans(&spans, "ordinary-content");
+    }
     let text =
         serde_json::to_string(&spans.iter().map(|s| &s.attributes).collect::<Vec<_>>()).unwrap();
-    assert!(text.contains("[APIKEY_MASKED]"));
+    assert_eq!(text.contains("ordinary-content"), capture_content);
+    assert_eq!(text.contains("[APIKEY_MASKED]"), capture_content);
     assert!(!text.contains(api));
 }
