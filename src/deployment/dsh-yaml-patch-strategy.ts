@@ -368,28 +368,49 @@ export class DshYamlPatchStrategy implements DeployStrategy {
    *   - `empty`: only comments/blank lines — safe to append.
    *   - `block-seq`: first meaningful line starts with `- ` — the existing
    *     root is a block sequence, so our row continues it.
-   *   - `empty-flow-seq`: the only meaningful line is a bare `[]`, the
-   *     placeholder DSH writes for an empty patch list — drop it and append
-   *     (an empty flow sequence followed by block rows would parse as two
-   *     documents and crash DSH).
+   *   - `empty-flow-seq`: the only meaningful line is a column-0 bare `[]`,
+   *     the placeholder DSH writes for an empty patch list — drop it and
+   *     append (an empty flow sequence followed by block rows would parse as
+   *     two documents and crash DSH).
    *   - `refuse`: any other root (flow sequence with content, mapping,
    *     scalar) — appending would break the file, so deployment must fail.
+   *
+   * The placeholder check requires the `[]` to sit at column 0: block-scalar
+   * content is always indented deeper than its parent key, so an indented
+   * `[]` line is user data (e.g. the literal body of `value: |`) and must
+   * never be treated as the root placeholder.
    */
   private classifyExistingRoot(bytes: Buffer): 'empty' | 'block-seq' | 'empty-flow-seq' | 'refuse' {
-    const lines = this.meaningfulLines(bytes);
+    const lines = this.meaningfulRawLines(bytes);
     if (lines.length === 0) return 'empty';
     if (lines[0].startsWith('- ')) return 'block-seq';
-    if (lines.length === 1 && lines[0] === '[]') return 'empty-flow-seq';
+    if (lines.length === 1 && this.isColumn0EmptyFlowSeq(lines[0])) return 'empty-flow-seq';
     return 'refuse';
   }
 
-  /** Remove column-0 bare `[]` lines, keeping every other byte verbatim. */
+  /** A root placeholder is only proven when it is the entire line at column 0. */
+  private isColumn0EmptyFlowSeq(line: string): boolean {
+    return /^\[\][ \t]*$/.test(line);
+  }
+
+  /** Non-blank, non-comment raw lines with indentation preserved. */
+  private meaningfulRawLines(bytes: Buffer): string[] {
+    return bytes.toString('utf-8')
+      .split(/\r?\n/)
+      .map(line => line.replace(/\r$/, ''))
+      .filter(line => line.trim().length > 0 && !line.trimStart().startsWith('#'));
+  }
+
+  /**
+   * Remove column-0 bare `[]` lines, keeping every other byte verbatim.
+   * Indented `[]` lines are block-scalar content (user data) and survive.
+   */
   private withoutBareEmptySeqLines(bytes: Buffer): Buffer {
     const text = bytes.toString('utf-8');
     const lines = text.split('\n');
     const kept = lines.filter(line => {
-      const trimmed = line.replace(/\r$/, '').trim();
-      return trimmed !== '[]';
+      const raw = line.replace(/\r$/, '');
+      return !this.isColumn0EmptyFlowSeq(raw);
     });
     if (kept.length === lines.length) return bytes;
     return Buffer.from(kept.join('\n'));
@@ -399,15 +420,22 @@ export class DshYamlPatchStrategy implements DeployStrategy {
    * Validate the composed patch file the way DSH reads it: a single YAML
    * document whose root is a block sequence of patch rows. Returns a reason
    * string when the bytes would crash `parsePatchList`, or null when valid.
+   *
+   * Second-root detection is indentation-aware: only a column-0 `[]`/`{}`
+   * line can be a second document root. An indented one is block-scalar
+   * content inside a user row (e.g. `value: |` + `      []`), which is a
+   * perfectly valid single document and must not be rejected.
    */
   private composedPatchInvalidReason(bytes: Buffer): string | null {
-    const lines = this.meaningfulLines(bytes);
+    const lines = this.meaningfulRawLines(bytes);
     if (lines.length === 0) return 'no patch rows';
     if (!lines[0].startsWith('- ')) {
-      return `root is not a block sequence (${lines[0].slice(0, 40)})`;
+      return `root is not a block sequence (${lines[0].trim().slice(0, 40)})`;
     }
     for (const line of lines.slice(1)) {
-      if (line === '[]' || line === '{}') return `second document root (${line})`;
+      if (/^(?:\[\]|\{\})[ \t]*$/.test(line)) {
+        return `second document root (${line.trim()})`;
+      }
     }
     return null;
   }

@@ -222,6 +222,85 @@ describe('DshYamlPatchStrategy', () => {
     expect(await strategy.needsDeploy(def)).toBe(false);
   });
 
+  // ─── P1 review regression: indented []/{} inside block scalars ───
+  // A block-scalar body (`value: |` + indented `[]`) is a valid single
+  // document; only a column-0 `[]`/`{}` can be a root placeholder / second
+  // document root. These cases must never be rejected, stripped or repaired.
+
+  const USER_SCALAR_ROWS = [
+    '- insert:',
+    '    id: user-row',
+    '    value: |',
+    '      []',
+    '',
+  ].join('\n');
+
+  it('deploys next to a user block scalar containing a literal [] (P1 review fixture)', async () => {
+    await fs.writeFile(patchPath, USER_SCALAR_ROWS);
+    const def = makeDef();
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(true);
+    const content = await readPatch();
+    // The scalar bytes survive verbatim, before the pilot block.
+    expect(content.indexOf('      []')).toBeGreaterThan(-1);
+    expect(content.indexOf('      []')).toBeLessThan(content.indexOf(`# BEGIN ${MARKER}`));
+    expect(await strategy.needsDeploy(def)).toBe(false);
+  });
+
+  it('does not strip an indented [] when recomposing around an existing block', async () => {
+    const def = makeDef();
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    // Put a user row with a block-scalar [] before the pilot block, then
+    // change the plugin to force a full recompose (repair path runs
+    // withoutBareEmptySeqLines on the before/after chunks).
+    const current = await readPatch();
+    const beginIdx = current.indexOf(`# BEGIN ${MARKER}`);
+    await fs.writeFile(patchPath, USER_SCALAR_ROWS + current.slice(beginIdx));
+    await fs.writeFile(pluginPath, 'export default function apply() { /* v2 */ }\n');
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(true);
+    const content = await readPatch();
+    expect(content).toContain('    value: |');
+    expect(content).toContain('      []');
+    expect(await strategy.needsDeploy(def)).toBe(false);
+  });
+
+  it('undeploy preserves an indented [] inside a user block scalar', async () => {
+    await fs.writeFile(patchPath, USER_SCALAR_ROWS);
+    const def = makeDef();
+    await strategy.deploy(def);
+    const ok = await strategy.undeploy(def);
+    expect(ok).toBe(true);
+    const content = await readPatch();
+    expect(content).not.toContain(`# BEGIN ${MARKER}`);
+    expect(content).toContain('- insert:');
+    expect(content).toContain('      []');
+  });
+
+  it('needsDeploy stays false when a user block scalar contains a literal {}', async () => {
+    const rows = ['- insert:', '    id: user-row', '    value: |', '      {}', ''].join('\n');
+    await fs.writeFile(patchPath, rows);
+    const def = makeDef();
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    expect(await strategy.needsDeploy(def)).toBe(false);
+  });
+
+  it('still repairs a real column-0 second root next to block-scalar content', async () => {
+    const def = makeDef();
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    const current = await readPatch();
+    const beginIdx = current.indexOf(`# BEGIN ${MARKER}`);
+    // Indented scalar [] (keep) + a real column-0 second root (repair).
+    await fs.writeFile(patchPath, USER_SCALAR_ROWS + current + '[]\n');
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(true);
+    const content = await readPatch();
+    expect(content).toContain('      []');
+    expect(content).not.toMatch(/^\[\][ \t]*$/m);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+  });
+
   it('refuses to append when the existing root is not a YAML sequence', async () => {
     const hostile = '{"insert": {"id": "other"}}\n';
     await fs.writeFile(patchPath, hostile);
