@@ -231,6 +231,7 @@ export class CodexTranscriptInput extends BaseInput {
   private lastFullScanAt = -Infinity;
   private defaultScanComplete = false;
   private baselinePending = false;
+  private baselinePendingSince = 0;
   private readonly wakeupPaths = new Map<string, Set<string>>();
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
@@ -309,6 +310,7 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
+    const startedAt = Date.now();
     this.subagentLinker.restore(this.stateStore.get(this.id).extra?.codexDelegations);
     this.discardLegacyGlobalTurnRegistry();
     const discovered = await this.discoverSessionFiles();
@@ -338,10 +340,14 @@ export class CodexTranscriptInput extends BaseInput {
         }
       }
     }
+    this.baselinePending = !isBaselineInit && !this.defaultScanComplete;
+    if (this.baselinePending) {
+      if (this.baselinePendingSince === 0) this.baselinePendingSince = startedAt;
+    } else {
+      this.baselinePendingSince = 0;
+    }
     if (!isBaselineInit && this.defaultScanComplete) {
       this.stateStore.update(this.id, { extra: { isBaselineInit: true } });
-    } else if (!isBaselineInit) {
-      this.baselinePending = true;
     }
     await Promise.all([
       fs.mkdir(this.wakeupDir, { recursive: true }),
@@ -468,7 +474,7 @@ export class CodexTranscriptInput extends BaseInput {
         const neededByPendingFusion = meta?.depth === 1
           && meta.parentThreadId !== undefined
           && this.hasLegacyPendingFusionForParent(meta.parentThreadId);
-        if (!neededByPendingFusion && !this.readCheckpoint(key)) {
+        if (!neededByPendingFusion && !this.readCheckpoint(key) && await this.existedBeforeBaseline(filePath)) {
           if (hasCopiedHistoryPrefix(meta)) await this.parkForkBaseline(filePath, key);
           else await this.baselineFile(filePath, key);
           continue;
@@ -480,6 +486,7 @@ export class CodexTranscriptInput extends BaseInput {
       if (this.baselinePending && this.defaultScanComplete) {
         this.stateStore.update(this.id, { extra: { isBaselineInit: true } });
         this.baselinePending = false;
+        this.baselinePendingSince = 0;
       }
       emittedCount += await this.retryPendingAgentResults();
     }
@@ -566,6 +573,16 @@ export class CodexTranscriptInput extends BaseInput {
       return;
     }
     this.rolloutIdleSnapshot.set(filePath, { ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs });
+  }
+
+  private async existedBeforeBaseline(filePath: string): Promise<boolean> {
+    try {
+      const stat = await fs.stat(filePath);
+      const stamps = [stat.birthtimeMs, stat.mtimeMs].filter(ms => ms > 0);
+      return stamps.length > 0 && Math.min(...stamps) < this.baselinePendingSince;
+    } catch {
+      return false;
+    }
   }
 
   private async listDefaultRolloutFiles(): Promise<string[]> {

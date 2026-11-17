@@ -902,7 +902,10 @@ describe('CodexTranscriptInput', () => {
     const sessionDir = path.join(root, 'sessions');
     const dayDir = path.join(sessionDir, '2026', '06', '24');
     await fs.mkdir(dayDir, { recursive: true });
-    await fs.writeFile(path.join(dayDir, 'rollout-session-1.jsonl'), completedTurn().replaceAll('turn-1', 'turn-old'), 'utf8');
+    const oldTranscript = path.join(dayDir, 'rollout-session-1.jsonl');
+    await fs.writeFile(oldTranscript, completedTurn().replaceAll('turn-1', 'turn-old'), 'utf8');
+    const past = new Date('2020-01-01T00:00:00Z');
+    await fs.utimes(oldTranscript, past, past);
     const { input, entries, stateStore } = await createDormantInput(root);
     blockedReads.add(path.resolve(dayDir));
     try {
@@ -923,6 +926,65 @@ describe('CodexTranscriptInput', () => {
       await runInputCycle(input);
       expect(entries.some(entry => entry['gen_ai.turn.end'] === true
         && entry['agent.codex.transcript_turn_id'] === 'turn-fresh')).toBe(true);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('collects a session created after startup while another date directory stays unreadable', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-partial-new-session-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const blockedDir = path.join(sessionDir, '2026', '06', '23');
+    const readableDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(blockedDir, { recursive: true });
+    await fs.mkdir(readableDir, { recursive: true });
+    const { input, entries, stateStore } = await createDormantInput(root);
+    blockedReads.add(path.resolve(blockedDir));
+    try {
+      await input.start();
+      await fs.writeFile(
+        path.join(readableDir, 'rollout-session-new.jsonl'),
+        completedTurn().replaceAll('turn-1', 'turn-new'),
+        'utf8',
+      );
+      await runInputCycle(input);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
+      expect(responsesForTurn(entries, 'turn-new').length).toBeGreaterThan(0);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('collects a new session after the same input restarts from a partial scan', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-partial-restart-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const dayDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(dayDir, { recursive: true });
+    const oldTranscript = path.join(dayDir, 'rollout-session-1.jsonl');
+    await fs.writeFile(oldTranscript, completedTurn().replaceAll('turn-1', 'turn-old'), 'utf8');
+    const past = new Date('2020-01-01T00:00:00Z');
+    await fs.utimes(oldTranscript, past, past);
+    const { input, entries, stateStore } = await createDormantInput(root);
+    blockedReads.add(path.resolve(dayDir));
+    try {
+      await input.start();
+      expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
+      await input.stop();
+      blockedReads.delete(path.resolve(dayDir));
+      await input.start();
+      await runInputCycle(input);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).toBe(true);
+      expect(responsesForTurn(entries, 'turn-old')).toEqual([]);
+
+      await fs.writeFile(
+        path.join(dayDir, 'rollout-session-fresh.jsonl'),
+        completedTurn().replaceAll('turn-1', 'turn-fresh'),
+        'utf8',
+      );
+      await runInputCycle(input);
+      expect(responsesForTurn(entries, 'turn-fresh').length).toBeGreaterThan(0);
     } finally {
       await input.stop();
     }
