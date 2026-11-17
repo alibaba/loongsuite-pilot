@@ -1,7 +1,7 @@
 //! `loongsuite-pilot hook` argument parsing.
 
 use super::hook_install_service::{run_hook_install, to_public_report, HookInstallRunOptions};
-use crate::types::AnalyticsConfig;
+use crate::types::{AnalyticsConfig, HookScope};
 use crate::utils::{redirect_root_logger_to_stderr, resolve_home};
 use std::collections::HashMap;
 
@@ -16,6 +16,7 @@ pub struct ParsedHookArgs {
     pub json: bool,
     pub pilot_dir: Option<String>,
     pub help: bool,
+    pub deployment_scope: Option<HookScope>,
 }
 
 pub fn parse_hook_args(argv: &[String]) -> Result<ParsedHookArgs, String> {
@@ -27,6 +28,7 @@ pub fn parse_hook_args(argv: &[String]) -> Result<ParsedHookArgs, String> {
         json: false,
         pilot_dir: None,
         help: false,
+        deployment_scope: None,
     };
     let mut rest = argv.to_vec();
     let first = rest.first().cloned();
@@ -60,7 +62,7 @@ pub fn parse_hook_args(argv: &[String]) -> Result<ParsedHookArgs, String> {
         };
         if !matches!(
             key.as_str(),
-            "--agents" | "--home" | "--config-dir" | "--pilot-dir"
+            "--agents" | "--home" | "--config-dir" | "--pilot-dir" | "--scope"
         ) {
             return Err(format!("Unknown option: {arg}"));
         }
@@ -78,6 +80,13 @@ pub fn parse_hook_args(argv: &[String]) -> Result<ParsedHookArgs, String> {
             "--agents" => out.agents = Some(value),
             "--config-dir" => out.config_dir = Some(value),
             "--pilot-dir" => out.pilot_dir = Some(value),
+            "--scope" => {
+                out.deployment_scope = Some(match value.as_str() {
+                    "user" => HookScope::User,
+                    "system" => HookScope::System,
+                    _ => return Err("--scope must be user or system".into()),
+                })
+            }
             _ => {
                 let Some((id, dir)) = value.split_once('=') else {
                     return Err(format!("--home must be <agent-id>=<dir>, got {value}"));
@@ -90,11 +99,19 @@ pub fn parse_hook_args(argv: &[String]) -> Result<ParsedHookArgs, String> {
         }
         index += 1;
     }
+    if out.deployment_scope == Some(HookScope::System) {
+        if !cfg!(target_os = "linux") {
+            return Err("System hooks are supported only on Linux".into());
+        }
+        if !out.homes.is_empty() || out.config_dir.is_some() {
+            return Err("--scope system cannot be combined with --home or --config-dir".into());
+        }
+    }
     Ok(out)
 }
 
 pub fn hook_usage() -> &'static str {
-    "Usage: loongsuite-pilot hook install [--agents <ids>] [--home <id>=<dir>]... [--config-dir PATH] [--json]\n       loongsuite-pilot hook status [--agents <ids>] [--json]\n\nDetects every agent when --agents and LOONGSUITE_PILOT_AGENTS are unset.\nThe exact value none skips injection. The literal null is treated as unset."
+    "Usage: loongsuite-pilot hook install [--agents <ids>] [--home <id>=<dir>]... [--config-dir PATH] [--scope user|system] [--json]\n       loongsuite-pilot hook status [--agents <ids>] [--scope user|system] [--json]\n\nDetects every agent when --agents and LOONGSUITE_PILOT_AGENTS are unset.\nThe exact value none skips injection. The literal null is treated as unset."
 }
 
 pub async fn run_hook_command_with_config(
@@ -133,6 +150,7 @@ pub async fn run_hook_command_with_config(
             None
         },
         homes,
+        deployment_scope: parsed.deployment_scope,
         write_result: parsed.subcommand == "install",
         deploy_modes: None,
         enabled: Some(&|id| is_agent_gated_enabled(config, id)),
@@ -195,7 +213,8 @@ mod tests {
                     config_dir: None,
                     json: false,
                     pilot_dir: None,
-                    help: false
+                    help: false,
+                    deployment_scope: None,
                 })
                 .help
                 || parse_hook_args(&[]).unwrap().help

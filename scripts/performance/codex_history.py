@@ -26,6 +26,8 @@ from runtime_layout import resolve
 
 
 SESSIONS = 64
+STARTUP_SECONDS = 60
+WARMUP_SECONDS = 25
 TERMINAL_STATUS = "gen_ai.turn.end"
 
 
@@ -65,6 +67,32 @@ def await_input(fixture, container, deadline):
             raise RuntimeError("Pilot exited before the Codex input was ready")
         time.sleep(.1)
     raise RuntimeError("Codex input did not become ready within the warmup window")
+
+
+def await_sdk_source_baseline(fixture, container, deadline):
+    # SDK start acknowledges thread setup before Codex has recorded its
+    # first-install exclusion boundary for existing rollout files.
+    owners = fixture.markers / "source-owners"
+    pending = {}
+    for session, path, _ in fixture.sessions:
+        key = hashlib.sha256(fixture.container_path(path).encode()).hexdigest()
+        pending[owners / (key + ".json")] = fixture.source_offsets[session]
+    while pending:
+        for marker, offset in list(pending.items()):
+            try:
+                ownership = json.loads(marker.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                continue
+            if ownership.get("baseline_floor") != {"offset": offset, "copied": False}:
+                raise ValueError("Codex SDK baseline must end at the original rollout header")
+            del pending[marker]
+        if not pending:
+            return
+        if not docker_json("/containers/%s/json" % container)["State"]["Running"]:
+            raise RuntimeError("Pilot exited before the Codex SDK source baseline was ready")
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Codex SDK source baseline missing for %d rollout files" % len(pending))
+        time.sleep(.1)
 
 
 def await_turns(output, first_record, expected_turns, deadline, sample=None, allow_capacity=False):
@@ -182,11 +210,14 @@ def run_round(args, directory, load, repeat, smoke=False):
                     raise RuntimeError("native host did not map the exact adjacent SDK")
                 time.sleep(.05)
 
-        deadline = time.monotonic() + 25
-        await_input(fixture, container, deadline)
+        startup_deadline = time.monotonic() + STARTUP_SECONDS
+        await_input(fixture, container, startup_deadline)
+        if args.runtime == "rust":
+            await_sdk_source_baseline(fixture, container, startup_deadline)
         warm_turns = [fixture.append_turn(session) for session in range(SESSIONS)]
         write_json(directory / "expected.json", warm_turns)
-        await_turns(output, 0, {normalized_turn(turn) for turn in warm_turns}, deadline)
+        await_turns(output, 0, {normalized_turn(turn) for turn in warm_turns},
+                    time.monotonic() + WARMUP_SECONDS)
         validate_output((row for _, row in output.records), warm_turns)
         if smoke:
             observation = resources(container, cgroup, cpu=True, direct_cpu=True)

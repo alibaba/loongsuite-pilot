@@ -109,6 +109,12 @@ Codex collection is transcript-backed. Pilot uses the lightweight
 recent rollout files from that session root. `Stop` is retained as a
 best-effort wakeup and is not required for directory discovery.
 
+## Grok Build Linux system integration
+
+Pass `--scope system` to the POSIX installer or run `loongsuite-pilot hook install --scope system --agents grok-build`. Pilot registers a native hook in `/etc/grok/managed_config.toml` and uses the existing Grok collector. Without `--agents`, Pilot installs hooks for detected agents. Agents in a mixed list that lack system support keep their usual installation mode.
+
+The managed config, Pilot runtime, and collection directory must be accessible to the target processes running under the same Linux UID. Use `loongsuite-pilot hook status --agents grok-build --json` to inspect registration and runtime files. `collectionStatus=not-verified` means a real conversation has yet to verify output. To switch back, run `hook install --scope user --agents grok-build`, optionally with `--home grok-build=/path/to/.grok`. Upgrades, repairs, and removal follow the recorded target. Migration preserves administrator and third-party settings, and retains the original file if TOML key ownership is ambiguous.
+
 ## Grok Build Collection And Lifecycle
 
 Pilot detects Grok Build from Grok's `GROK_HOME` (default `~/.grok`) and

@@ -34,7 +34,7 @@ fn logger() -> crate::utils::BoundLogger {
     create_logger("HookStrategy")
 }
 
-fn event_to_subcommand(event: &str) -> String {
+pub(super) fn event_to_subcommand(event: &str) -> String {
     let mut out = String::new();
     let chars: Vec<char> = event.chars().collect();
     for (index, ch) in chars.iter().enumerate() {
@@ -844,6 +844,11 @@ fn remaining_hook_reference(value: &Value, needles: &[String]) -> bool {
     }
 }
 
+struct ScopeChange {
+    previous: Option<DeployedAgentRecord>,
+    retire: Vec<AgentDefinition>,
+}
+
 pub struct HookStrategy {
     hook_manager: HookManager,
     resource_roots: Option<(PathBuf, PathBuf)>,
@@ -914,6 +919,11 @@ impl HookStrategy {
             .is_some_and(|(pilot, data)| !super::hook_assets::healthy(def, pilot, data))
         {
             return true;
+        }
+        if super::system_toml_hooks::is_system(def) {
+            return !super::system_toml_hooks::read(def)
+                .and_then(|raw| super::system_toml_hooks::installed(&raw, def))
+                .unwrap_or(false);
         }
         if self.needs_settings_repair(def).await {
             return true;
@@ -1023,6 +1033,11 @@ impl HookStrategy {
         if hook.events.is_empty() || hook.hook_command.trim().is_empty() {
             return Err("Hook 声明缺少事件或命令".into());
         }
+        if super::system_toml_hooks::is_system(def) {
+            let raw = super::system_toml_hooks::read(def)?;
+            super::system_toml_hooks::installed(&raw, def)?;
+            return Ok(());
+        }
         let document =
             SettingsDocument::read(&resolve_home(&hook.settings_path), settings_syntax(hook))
                 .await?;
@@ -1122,7 +1137,7 @@ impl HookStrategy {
         if hook_config.events.is_empty() || hook_config.hook_command.trim().is_empty() {
             return fail(def, "Hook 声明缺少事件或命令");
         }
-        match self.configure(def, false).await {
+        match self.configure(def, false, None).await {
             Ok(()) => ok(def),
             Err(err) => fail(def, &err),
         }
@@ -1153,14 +1168,40 @@ impl HookStrategy {
         Ok(targets)
     }
 
-    async fn configure(&self, def: &AgentDefinition, uninstall: bool) -> Result<(), String> {
+    pub(super) async fn configure_scope(
+        &self,
+        def: &AgentDefinition,
+        previous: Option<DeployedAgentRecord>,
+        retire: Vec<AgentDefinition>,
+        uninstall: bool,
+    ) -> Result<(), String> {
+        self.configure(def, uninstall, Some(ScopeChange { previous, retire }))
+            .await
+    }
+
+    async fn configure(
+        &self,
+        def: &AgentDefinition,
+        uninstall: bool,
+        scope: Option<ScopeChange>,
+    ) -> Result<(), String> {
         // 待恢复时必须先恢复再读取；否则部分写入的配置会被误用为新基线。
         if !self.recovery_pending(def) {
             self.preflight(def).await?;
         } else if uninstall {
             return Err("Hook 事务待恢复，停止清理并保留配置与资源".into());
         }
-        let configs = self.config_targets(def)?;
+        let mut configs = self.config_targets(def)?;
+        if let Some(scope) = &scope {
+            for (index, old) in scope.retire.iter().enumerate() {
+                let path = &old
+                    .hook
+                    .as_ref()
+                    .ok_or("Missing retired Hook settings")?
+                    .settings_path;
+                configs.insert(format!("retire-{index}"), PathBuf::from(path));
+            }
+        }
         let settings = configs["config"].to_string_lossy().into_owned();
         let root = self.transaction_root(def)?;
         let assets = if uninstall {
@@ -1185,7 +1226,7 @@ impl HookStrategy {
                 (def.id == "claude-code").then_some(settings.as_str()),
                 uninstall,
                 |transaction| {
-                    self.plan_config_edits(def, transaction, uninstall)
+                    self.plan_config_edits(def, transaction, uninstall, scope.as_ref())
                         .map_err(anyhow::Error::msg)
                 },
             )
@@ -1198,6 +1239,7 @@ impl HookStrategy {
         def: &AgentDefinition,
         transaction: &ActivationTransaction,
         uninstall: bool,
+        scope: Option<&ScopeChange>,
     ) -> Result<BTreeMap<String, String>, String> {
         let snapshot = |key: &str| -> Result<Option<String>, String> {
             transaction
@@ -1212,10 +1254,71 @@ impl HookStrategy {
             return Err("Hook 声明缺少事件或命令".into());
         }
         let original = snapshot("config")?;
+        let mut edits = BTreeMap::new();
+        let mut retired_paths = Vec::new();
+        if let Some(scope) = scope {
+            let state = snapshot("state")?
+                .map(|raw| {
+                    serde_json::from_str::<crate::types::DeployedAgentsState>(
+                        raw.trim_start_matches('\u{feff}'),
+                    )
+                    .map_err(|_| {
+                        "Invalid Hook deployment state; original files preserved".to_string()
+                    })
+                })
+                .transpose()?
+                .unwrap_or_default();
+            if state.get(&def.id) != scope.previous.as_ref() {
+                return Err("Hook deployment state changed; retry the scope operation".into());
+            }
+            for (index, old) in scope.retire.iter().enumerate() {
+                let key = format!("retire-{index}");
+                let path = &old
+                    .hook
+                    .as_ref()
+                    .ok_or("Missing retired Hook settings")?
+                    .settings_path;
+                retired_paths.push(node_resolve(path));
+                if let Some(raw) = snapshot(&key)? {
+                    let next = if super::system_toml_hooks::is_system(old) {
+                        super::system_toml_hooks::plan(&raw, old, true)?
+                    } else {
+                        let old_hook = old.hook.as_ref().unwrap();
+                        let mut document =
+                            SettingsDocument::from_snapshot(Some(&raw), settings_syntax(old_hook))?;
+                        for hook in self
+                            .legacy_hook_definitions(old)
+                            .iter()
+                            .chain(&self.build_retired_hook_definitions(old))
+                        {
+                            document.apply_hook(hook, true, false)?;
+                        }
+                        document.changed().then_some(document.raw)
+                    };
+                    if let Some(next) = next {
+                        edits.insert(key, next);
+                    }
+                }
+            }
+        }
+        if super::system_toml_hooks::is_system(def) {
+            if let Some(next) =
+                super::system_toml_hooks::plan(original.as_deref().unwrap_or(""), def, uninstall)?
+            {
+                edits.insert("config".into(), next);
+            }
+            self.plan_state_edit(
+                def,
+                snapshot("state")?.as_deref(),
+                uninstall,
+                &retired_paths,
+                &mut edits,
+            )?;
+            return Ok(edits);
+        }
         let mut document =
             SettingsDocument::from_snapshot(original.as_deref(), settings_syntax(hook))?;
         let initial_raw = document.raw.clone();
-        let mut edits = BTreeMap::new();
         let retired = self.build_retired_hook_definitions(def);
         let events: Vec<_> = hook
             .events
@@ -1399,24 +1502,45 @@ impl HookStrategy {
             };
             edits.insert("config".into(), raw);
         }
+        if self.deployment_state.is_some() {
+            self.plan_state_edit(
+                def,
+                snapshot("state")?.as_deref(),
+                uninstall,
+                &retired_paths,
+                &mut edits,
+            )?;
+        }
+        Ok(edits)
+    }
+
+    fn plan_state_edit(
+        &self,
+        def: &AgentDefinition,
+        raw: Option<&str>,
+        uninstall: bool,
+        retired: &[String],
+        edits: &mut BTreeMap<String, String>,
+    ) -> Result<(), String> {
         if let Some((_, installed_by)) = &self.deployment_state {
             if let Some(state) = super::deployed_state_merge::plan_hook_state(
-                snapshot("state")?.as_deref(),
+                raw,
                 def,
                 *installed_by,
                 uninstall,
                 !edits.is_empty(),
+                retired,
             )
             .map_err(|err| err.to_string())?
             {
                 edits.insert("state".into(), state);
             }
         }
-        Ok(edits)
+        Ok(())
     }
 
     pub async fn undeploy_hooks(&self, def: &AgentDefinition) -> bool {
-        match self.configure(def, true).await {
+        match self.configure(def, true, None).await {
             Ok(()) => true,
             Err(err) => {
                 logger().error(
@@ -1985,7 +2109,7 @@ fn fail(def: &AgentDefinition, error: &str) -> DeployResult {
 #[async_trait]
 impl DeployStrategy for HookStrategy {
     async fn detect(&self, def: &AgentDefinition) -> bool {
-        detect_agent(&def.detection).await
+        super::system_toml_hooks::is_system(def) || detect_agent(&def.detection).await
     }
 
     async fn needs_deploy(
@@ -2225,6 +2349,8 @@ mod tests {
             hook: Some(AgentHookConfig {
                 settings_path: settings.into(),
                 settings_syntax: None,
+                scope: None,
+                system_settings_path: None,
                 events: vec!["Stop".into()],
                 hook_command: "/opt/hook.sh".into(),
                 format: HookFormat::Nested,
@@ -2732,7 +2858,7 @@ mod tests {
         let configs = HookAssets::prepare_configs(&strategy.config_targets(&def).unwrap()).unwrap();
         let mut transaction = assets.begin(&configs).unwrap();
         let edits = strategy
-            .plan_config_edits(&def, &transaction, false)
+            .plan_config_edits(&def, &transaction, false, None)
             .unwrap();
         assets.prepare(&mut transaction).unwrap();
         transaction

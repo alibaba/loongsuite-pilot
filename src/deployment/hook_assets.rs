@@ -168,6 +168,7 @@ pub(super) struct HookConfigTargets(BTreeMap<String, PathBuf>);
 pub(super) struct HookAssets {
     root: PathBuf,
     files: Vec<(String, PathBuf, String)>,
+    config_mode: u32,
 }
 
 impl HookAssets {
@@ -175,6 +176,7 @@ impl HookAssets {
         Self {
             root: root.into(),
             files: Vec::new(),
+            config_mode: 0o600,
         }
     }
 
@@ -202,6 +204,11 @@ impl HookAssets {
         Ok(Self {
             root: root.into(),
             files,
+            config_mode: if super::system_toml_hooks::is_system(def) {
+                0o644
+            } else {
+                0o600
+            },
         })
     }
 
@@ -224,6 +231,11 @@ impl HookAssets {
         Ok(Self {
             root: root.into(),
             files,
+            config_mode: if super::system_toml_hooks::is_system(def) {
+                0o644
+            } else {
+                0o600
+            },
         })
     }
 
@@ -307,6 +319,8 @@ impl HookAssets {
                         // 与外层状态写入者使用同一把锁；配置仍沿用跨安装共享锁。
                         lock.push(if key == "state" {
                             ".lock"
+                        } else if path == Path::new(super::system_toml_hooks::DEFAULT_PATH) {
+                            ".pilot-lock"
                         } else {
                             ".loongsuite-pilot.lock"
                         });
@@ -340,7 +354,11 @@ impl HookAssets {
                                     transaction.write_preserving_mode(
                                         &key,
                                         content.as_bytes(),
-                                        0o600,
+                                        if key == "config" {
+                                            self.config_mode
+                                        } else {
+                                            0o600
+                                        },
                                     )?;
                                 }
                                 transaction.commit()
@@ -404,11 +422,12 @@ fn pin_configuration_targets(
         .iter()
         .map(|(key, path)| {
             #[cfg(unix)]
-            let path = if key == "state" {
-                path.clone()
-            } else {
-                pin_configuration_parent(path)?
-            };
+            let path =
+                if key == "state" || path == Path::new(super::system_toml_hooks::DEFAULT_PATH) {
+                    path.clone()
+                } else {
+                    pin_configuration_parent(path)?
+                };
             #[cfg(not(unix))]
             let path = path.clone();
             Ok((key.clone(), path))
@@ -456,7 +475,17 @@ where
     let Some((path, remaining)) = paths.split_first() else {
         return body().await;
     };
-    private_directory(path.parent().context("Hook 配置缺少父目录")?)?;
+    let parent = path.parent().context("Hook 配置缺少父目录")?;
+    #[cfg(target_os = "linux")]
+    if path == Path::new(super::system_toml_hooks::LOCK_PATH) {
+        use std::os::unix::fs::DirBuilderExt;
+        match std::fs::DirBuilder::new().mode(0o755).create(parent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    private_directory(parent)?;
     super::with_deployed_state_lock(
         path.to_str().context("Hook 配置锁路径编码无效")?,
         || Box::pin(with_config_locks(remaining, body)),
@@ -552,6 +581,7 @@ mod tests {
         let assets = HookAssets {
             root: data.clone(),
             files: Vec::new(),
+            config_mode: 0o600,
         };
         let targets = BTreeMap::from([("config".into(), config.clone())]);
         let task = tokio::spawn(async move {
@@ -577,6 +607,7 @@ mod tests {
         HookAssets {
             root: data,
             files: Vec::new(),
+            config_mode: 0o600,
         }
         .apply(
             BTreeMap::from([("config".into(), config.clone())]),
@@ -602,6 +633,7 @@ mod tests {
         let assets = HookAssets {
             root: root.path().join("data"),
             files: Vec::new(),
+            config_mode: 0o600,
         };
         let targets = BTreeMap::from([("config".into(), config.clone())]);
         let result = assets

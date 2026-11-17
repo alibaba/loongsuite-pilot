@@ -161,6 +161,12 @@ fn overlay_record(
     if next.hook_settings_paths.is_some() {
         record.hook_settings_paths = next.hook_settings_paths.clone();
     }
+    if next.hook_scope.is_some() {
+        record.hook_scope = next.hook_scope;
+    }
+    if next.hook_pending_migration.is_some() {
+        record.hook_pending_migration = next.hook_pending_migration.clone();
+    }
     if next.installed_by.is_some() {
         record.installed_by = next.installed_by;
     }
@@ -177,6 +183,7 @@ pub(super) fn plan_hook_state(
     installed_by: Option<crate::types::InstalledBy>,
     uninstall: bool,
     configuration_changed: bool,
+    retired: &[String],
 ) -> anyhow::Result<Option<String>> {
     use crate::types::DeployMode;
     let mut state: DeployedAgentsState = match raw {
@@ -199,13 +206,21 @@ pub(super) fn plan_hook_state(
         .ok_or_else(|| anyhow::anyhow!("Hook 配置缺失"))?;
     let target = node_resolve(&crate::utils::resolve_home(&hook.settings_path));
     let before = serde_json::to_value(&state)?;
+    let cleaned = |path: &str| path == target || retired.iter().any(|item| path == item);
     if uninstall {
         if let Some(record) = state.get_mut(&def.id) {
             let remaining: Vec<_> = merge_hook_settings_paths(Some(record), None)
                 .into_iter()
-                .filter(|path| path != &target)
+                .filter(|path| !cleaned(path))
                 .collect();
-            if remaining.is_empty() {
+            if record
+                .hook_pending_migration
+                .as_ref()
+                .is_some_and(|pending| cleaned(&node_resolve(&pending.settings_path)))
+            {
+                record.hook_pending_migration = None;
+            }
+            if remaining.is_empty() && record.hook_pending_migration.is_none() {
                 state.remove(&def.id);
             } else {
                 record.hook_settings_path = remaining.last().cloned();
@@ -223,6 +238,8 @@ pub(super) fn plan_hook_state(
             dsh_patch_path: None,
             hook_settings_path: None,
             hook_settings_paths: None,
+            hook_scope: None,
+            hook_pending_migration: None,
             installed_by: None,
             plugin_inject_config_path: None,
         });
@@ -230,9 +247,21 @@ pub(super) fn plan_hook_state(
         if let Some(installed_by) = installed_by {
             record.installed_by = Some(installed_by);
         }
-        record.hook_settings_paths =
-            Some(merge_hook_settings_paths(previous.as_ref(), Some(&target)));
-        record.hook_settings_path = Some(target);
+        let mut paths = merge_hook_settings_paths(previous.as_ref(), None);
+        paths.retain(|path| !retired.contains(path));
+        if !paths.contains(&target) {
+            paths.push(target.clone());
+        }
+        record.hook_settings_paths = Some(paths);
+        record.hook_settings_path = Some(target.clone());
+        record.hook_scope = hook.scope.or(record.hook_scope);
+        if record
+            .hook_pending_migration
+            .as_ref()
+            .is_some_and(|pending| cleaned(&node_resolve(&pending.settings_path)))
+        {
+            record.hook_pending_migration = None;
+        }
         if configuration_changed
             || previous.as_ref().is_none_or(|old| {
                 serde_json::to_value(old).ok() != serde_json::to_value(&record).ok()
@@ -259,15 +288,17 @@ impl std::fmt::Display for LockTimeout {
 
 impl std::error::Error for LockTimeout {}
 
-// Node v1.x uses mkdir on these two paths. Keep Rust's kernel lock on
+// Node v1.x uses mkdir on these paths. Keep Rust's kernel lock on
 // a separate, stable inode while holding the Node-compatible directory only
 // for the operation. A Rust process can recover its empty gate after a crash.
 fn node_compatible_lock(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_str()?;
-    matches!(
-        name,
-        "deployed-agents.json.lock" | "last-hook-install.json.lock"
-    )
+    let legacy_config_lock = path == Path::new(super::system_toml_hooks::LOCK_PATH);
+    (legacy_config_lock
+        || matches!(
+            name,
+            "deployed-agents.json.lock" | "last-hook-install.json.lock"
+        ))
     .then(|| path.with_file_name(format!("{name}.native")))
 }
 
@@ -412,6 +443,8 @@ mod tests {
             dsh_patch_path: None,
             hook_settings_path: Some(path.into()),
             hook_settings_paths: None,
+            hook_scope: None,
+            hook_pending_migration: None,
             installed_by: Some(InstalledBy::Daemon),
             plugin_inject_config_path: None,
         }

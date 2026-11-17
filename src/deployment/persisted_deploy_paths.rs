@@ -192,6 +192,14 @@ pub fn apply_persisted_deploy_targets(
     {
         let path = absolute_path(Some(path))
             .ok_or_else(|| "持久化 Hook 路径必须是非空绝对路径".to_string())?;
+        if let Some(scope) = record
+            .hook_scope
+            .filter(|_| def.id == super::system_toml_hooks::GROK)
+        {
+            if let Some(hook) = &mut next.hook {
+                hook.scope = Some(scope);
+            }
+        }
         next = definition_at_hook_settings(&next, &path)?;
     }
     let preserve_plugin = opts.is_some_and(|opts| opts.preserve_plugin_config);
@@ -239,6 +247,8 @@ mod tests {
             hook: Some(AgentHookConfig {
                 settings_path: settings.into(),
                 settings_syntax: None,
+                scope: None,
+                system_settings_path: None,
                 events: vec!["stop".into()],
                 hook_command: "/pilot/hooks/grok.sh".into(),
                 format: HookFormat::Nested,

@@ -24,6 +24,7 @@ mod hook_command;
 mod hook_install_alarm;
 mod hook_install_service;
 mod hook_strategy;
+mod system_toml_hooks;
 pub(crate) use hook_strategy::plan_qoder_legacy_restore;
 mod inject_command;
 mod installer_config;

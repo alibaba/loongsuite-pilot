@@ -66,6 +66,7 @@ impl Fixture {
             agents_flag: agents.map(str::to_owned),
             env_agents: None,
             homes: HashMap::new(),
+            deployment_scope: None,
             write_result: true,
             deploy_modes: None,
             enabled: None,

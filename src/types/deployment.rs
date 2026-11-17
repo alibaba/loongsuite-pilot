@@ -141,6 +141,10 @@ pub struct KiroAgentSeed {
 #[serde(rename_all = "camelCase")]
 pub struct AgentHookConfig {
     pub settings_path: String,
+    #[serde(skip)]
+    pub scope: Option<HookScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_settings_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings_syntax: Option<SettingsSyntax>,
     pub events: Vec<String>,
@@ -353,6 +357,20 @@ pub trait DeployStrategy: Send + Sync {
     async fn undeploy(&self, def: &AgentDefinition) -> bool;
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HookScope {
+    User,
+    System,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HookPendingMigration {
+    pub scope: HookScope,
+    pub settings_path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DeployedAgentRecord {
@@ -370,6 +388,10 @@ pub struct DeployedAgentRecord {
     pub hook_settings_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_settings_paths: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_scope: Option<HookScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_pending_migration: Option<HookPendingMigration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_by: Option<InstalledBy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

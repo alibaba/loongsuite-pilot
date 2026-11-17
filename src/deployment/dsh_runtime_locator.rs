@@ -387,6 +387,8 @@ mod tests {
             dsh_patch_path: Some(persisted.to_string_lossy().into_owned()),
             hook_settings_path: None,
             hook_settings_paths: None,
+            hook_scope: None,
+            hook_pending_migration: None,
             installed_by: None,
             plugin_inject_config_path: None,
         };
