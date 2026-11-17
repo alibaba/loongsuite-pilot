@@ -229,6 +229,7 @@ export interface ConfigFile {
     enabled?: boolean;
     file?: { enabled?: boolean };
     qoderApi?: { enabled?: boolean };
+    multica?: { enabled?: boolean; mode?: 'on' | 'off' };
   };
 
   enableStatusBarApp?: boolean | string;
@@ -921,7 +922,19 @@ function buildPipelineConfig(file: ConfigFile | null): PipelineToggle {
     qoderApi: {
       enabled: envBool('LOONGSUITE_PILOT_PIPELINE_QODER_API_ENABLED', file?.pipeline?.qoderApi?.enabled ?? true),
     },
+    multica: {
+      enabled: envBool('LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED', file?.pipeline?.multica?.enabled ?? true),
+      mode: buildMulticaMode(file?.pipeline?.multica?.mode),
+    },
   };
+}
+
+function buildMulticaMode(value: unknown): 'on' | 'off' {
+  const raw = process.env.LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE ?? value ?? 'off';
+  const mode = typeof raw === 'string' ? raw.trim().toLowerCase() : raw;
+  if (mode === 'on' || mode === 'off') return mode;
+  logger.warn('Invalid Multica collection mode; collection disabled');
+  return 'off';
 }
 
 function buildStatusBarConfig(file: ConfigFile | null): StatusBarConfig {

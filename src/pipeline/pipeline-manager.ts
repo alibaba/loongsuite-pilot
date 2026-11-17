@@ -4,6 +4,8 @@ import * as path from 'node:path';
 import type { PipelineConfig, PipelineManagerOptions, PipelineToggle, Pipeline } from './types.js';
 import { FilePipeline } from './input/file/file-pipeline.js';
 import { QoderApiPipeline } from './input/qoder-api/qoder-api-pipeline.js';
+import { MulticaPipeline } from './input/multica/multica-pipeline.js';
+import { validateMulticaConfig } from './input/multica/types.js';
 import { SleepDetector, type WakeEvent } from './sleep-detector.js';
 import { createLogger } from '../utils/logger.js';
 import { ensureDir } from '../utils/fs-utils.js';
@@ -300,6 +302,10 @@ export class PipelineManager {
     }
 
     switch (input.Type) {
+      case 'input_multica': {
+        try { validateMulticaConfig(input); return true; }
+        catch { logger.warn('invalid Multica input config', {file: fileName}); return false; }
+      }
       case 'input_file': {
         if (!input.FilePaths || input.FilePaths.length === 0) {
           logger.warn('config input missing FilePaths', { file: fileName });
@@ -324,6 +330,7 @@ export class PipelineManager {
     const inputType = config.inputs[0].Type;
 
     // Check sub-switch
+    if (inputType === 'input_multica' && this.pipelineConfig.multica?.enabled === false) return;
     if (inputType === 'input_file' && !this.pipelineConfig.file.enabled) {
       logger.info('file pipeline disabled, skipping', { configName: config.configName });
       return;
@@ -344,6 +351,9 @@ export class PipelineManager {
       };
 
       switch (inputType) {
+        case 'input_multica':
+          pipeline = new MulticaPipeline(opts, this.pipelineConfig.multica?.mode);
+          break;
         case 'input_file':
           pipeline = new FilePipeline(opts);
           break;
