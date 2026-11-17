@@ -59,6 +59,9 @@ vi.mock('node:fs', () => ({
   writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
   renameSync: (...args: unknown[]) => mockRenameSync(...args),
   rmSync: vi.fn(),
+  existsSync: vi.fn(() => false),
+  readFileSync: vi.fn(() => ''),
+  statSync: vi.fn(),
 }));
 
 // --- Mock stream pipeline ---
@@ -70,6 +73,7 @@ vi.mock('node:stream/promises', () => ({
 const mockExecFile = vi.fn();
 vi.mock('node:child_process', () => ({
   execFile: (...args: any[]) => mockExecFile(...args),
+  spawn: vi.fn(),
 }));
 
 // --- Mock node:util promisify to wrap our mockExecFile ---
@@ -235,6 +239,15 @@ describe('Updater', () => {
   // ─── LIFECYCLE ─────────────────────────────────────────
 
   describe('lifecycle', () => {
+    it('clears a leftover hook upgrade marker on start', () => {
+      const updater = new Updater(makeConfig({ enabled: false }), tmpDir);
+      updater.start();
+      expect(mockFsRm).toHaveBeenCalledWith(
+        expect.stringContaining('hook-upgrade-in-progress'),
+        { force: true },
+      );
+    });
+
     it('does not start timer when disabled', () => {
       const updater = new Updater(makeConfig({ enabled: false }), tmpDir);
       updater.start();
@@ -555,6 +568,52 @@ describe('Updater', () => {
       // $HOME/.loongsuite-pilot, which is the wrong one for a custom data dir.
       const env = (call![2] as { env?: Record<string, string> }).env ?? {};
       expect(env.LOONGSUITE_PILOT_DATA_DIR).toBe(tmpDir);
+
+      const markerWrite = mockFsWriteFile.mock.calls.findIndex(([filePath]) =>
+        String(filePath).endsWith('hook-upgrade-in-progress'));
+      const postinstallCall = mockExecFile.mock.calls.findIndex((c: unknown[]) =>
+        Array.isArray(c[1]) && (c[1] as string[]).some(a => String(a).includes('postinstall.js')));
+      expect(markerWrite).toBeGreaterThanOrEqual(0);
+      expect(mockFsWriteFile.mock.invocationCallOrder[markerWrite]).toBeLessThan(
+        mockExecFile.mock.invocationCallOrder[postinstallCall],
+      );
+      const currentRename = mockFsRename.mock.calls.findIndex(([, dst]) => String(dst).endsWith('/current'));
+      const markerClear = mockFsRm.mock.calls.findIndex(([filePath]) =>
+        String(filePath).endsWith('hook-upgrade-in-progress'));
+      expect(markerClear).toBeGreaterThanOrEqual(0);
+      expect(mockFsRename.mock.invocationCallOrder[currentRename]).toBeLessThan(
+        mockFsRm.mock.invocationCallOrder[markerClear],
+      );
+    });
+
+    it('clears the hook upgrade marker when activation fails', async () => {
+      setupForDownload();
+      mockFsAccess.mockImplementation((p: string) => {
+        if (p.includes('package.json')) return Promise.resolve();
+        if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('scripts/collector-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/updater-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/loongsuite-pilot.sh')) return Promise.resolve();
+        if (p.includes('postinstall.js')) return Promise.resolve();
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsRename.mockImplementation((src: string) => {
+        if (String(src).endsWith('.candidate')) return Promise.reject(new Error('rename failed'));
+        return Promise.resolve();
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(mockFsRm).toHaveBeenCalledWith(
+        expect.stringContaining('hook-upgrade-in-progress'),
+        { force: true },
+      );
+      expect(mockFsWriteFile).not.toHaveBeenCalledWith(
+        expect.stringContaining('/current.tmp'),
+        '1.0.2_bbb\n',
+      );
     });
 
     it('adopts the managed node runtime + prebuilt modules and pins node-bin', async () => {

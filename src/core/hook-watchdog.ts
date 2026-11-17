@@ -15,23 +15,31 @@ const logger = createLogger('HookWatchdog');
 const STARTUP_DELAY_MS = 30_000;
 const REPAIR_TIMEOUT_MS = 30_000;
 const MAX_INTERCEPT_REPAIRS_PER_DAY = 3;
+const HOOK_UPGRADE_MAX_AGE_MS = 10 * 60 * 1000;
 
-async function versionCandidateInProgress(pilotDir: string): Promise<boolean> {
-  let entries;
-  try {
-    entries = await fs.readdir(path.dirname(pilotDir), { withFileTypes: true });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    return true;
-  }
-  return entries.some(entry => entry.name.endsWith('.candidate') && !entry.isSymbolicLink() && entry.isDirectory());
+export function hookUpgradeMarkerPath(controlDir: string): string {
+  return path.join(controlDir, 'hook-upgrade-in-progress');
 }
 
-export function readActiveVersionDir(dataDir: string): string | null {
+async function upgradeBlocksRepair(pilotDir: string, dataDir: string): Promise<boolean> {
+  // `current` and `versions/` live in the cache dir. pilotDir is versions/<name>.
+  const versionsDir = path.dirname(pilotDir);
+  const controlDir = path.basename(versionsDir) === 'versions' ? path.dirname(versionsDir) : dataDir;
   try {
-    const versionName = readFileSync(path.join(dataDir, 'current'), 'utf8').trim();
+    const started = Number((await fs.readFile(hookUpgradeMarkerPath(controlDir), 'utf8')).trim());
+    if (!Number.isFinite(started) || Date.now() - started < HOOK_UPGRADE_MAX_AGE_MS) return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return true;
+  }
+  const active = readActiveVersionDir(controlDir);
+  return active !== null && path.resolve(active) !== path.resolve(pilotDir);
+}
+
+export function readActiveVersionDir(controlDir: string): string | null {
+  try {
+    const versionName = readFileSync(path.join(controlDir, 'current'), 'utf8').trim();
     if (!versionName) return null;
-    const versionDir = path.join(dataDir, 'versions', versionName);
+    const versionDir = path.join(controlDir, 'versions', versionName);
     return existsSync(versionDir) ? versionDir : null;
   } catch {
     return null;
@@ -369,16 +377,9 @@ export class HookWatchdog {
     this.assetCheckInFlight = true;
     try {
       const { pilotDir, dataDir } = this.assetRoots;
-      // postinstall writes the new hooks while versions/<new>.candidate still
-      // exists, and before `current` moves. Once `current` names another
-      // version, this process must not put its own assets back.
-      if (await versionCandidateInProgress(pilotDir)) {
-        logger.info('hook-watchdog.skipped', { reason: 'version-candidate' });
-        return;
-      }
-      const active = readActiveVersionDir(dataDir);
-      if (active && path.resolve(active) !== path.resolve(pilotDir)) {
-        logger.info('hook-watchdog.skipped', { reason: 'pilot-dir-changed', active });
+      // Marker is set before postinstall and cleared after `current` is written.
+      if (await upgradeBlocksRepair(pilotDir, dataDir)) {
+        logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
         return;
       }
       await this.restoreDeployedHookAssets(pilotDir, dataDir);
@@ -419,6 +420,10 @@ export class HookWatchdog {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
     for (const relativePath of files) {
+      if (await upgradeBlocksRepair(pilotDir, dataDir)) {
+        logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
+        return;
+      }
       try {
         await this.restoreHookAsset(sourceRoot, targetRoot, relativePath);
       } catch (err) {

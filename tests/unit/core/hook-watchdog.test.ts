@@ -8,6 +8,7 @@ import {
   type PluginCheckTarget,
 } from '../../../src/core/hook-watchdog.js';
 import type { HookWatchdogConfig } from '../../../src/types/index.js';
+import * as fsUtils from '../../../src/utils/fs-utils.js';
 
 const mockLogger = vi.hoisted(() => ({
   info: vi.fn(),
@@ -843,19 +844,6 @@ describe('HookWatchdog', () => {
       expect((await fs.lstat(shared)).isSymbolicLink()).toBe(true);
     });
 
-    it('leaves hooks alone while a version candidate is present', async () => {
-      const { pilotDir, dataDir } = await installAssets();
-      const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
-      await fs.mkdir(path.dirname(deployed), { recursive: true });
-      await fs.writeFile(deployed, 'tampered\n');
-      await fs.mkdir(path.join(path.dirname(pilotDir), '1.2.0_abc.candidate'));
-      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
-
-      await wd.runCheck();
-
-      expect(await fs.readFile(deployed, 'utf8')).toBe('tampered\n');
-    });
-
     it('does not roll hooks back after current moves to another version', async () => {
       const { pilotDir, dataDir } = await installAssets();
       const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
@@ -868,6 +856,123 @@ describe('HookWatchdog', () => {
       await wd.runCheck();
 
       expect(await fs.readFile(deployed, 'utf8')).toBe('tampered\n');
+    });
+
+    async function installVersioned(
+      cacheDir: string,
+      version: string,
+    ): Promise<{ pilotDir: string }> {
+      const pilotDir = path.join(cacheDir, 'versions', version);
+      const sourceRoot = path.join(pilotDir, 'assets', 'hooks', 'shared');
+      await fs.mkdir(sourceRoot, { recursive: true });
+      await fs.writeFile(
+        path.join(pilotDir, 'assets', 'hooks', 'claude-code-loongsuite-pilot-hook.sh'),
+        scriptText,
+        { mode: 0o755 },
+      );
+      await fs.writeFile(path.join(sourceRoot, 'decode-payload.mjs'), processorText);
+      return { pilotDir };
+    }
+
+    it('leaves the new hooks alone after the candidate is renamed and before current moves', async () => {
+      const cacheDir = path.join(tmpDir, 'cache');
+      const dataDir = path.join(tmpDir, 'data');
+      const { pilotDir } = await installVersioned(cacheDir, 'v1');
+      await fs.writeFile(path.join(cacheDir, 'current'), 'v1\n');
+      await fs.writeFile(path.join(cacheDir, 'hook-upgrade-in-progress'), `${Date.now()}\n`);
+      const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, 'v2\n');
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(deployed, 'utf8')).toBe('v2\n');
+    });
+
+    it('reads current from the cache dir when the data dir is separate', async () => {
+      const cacheDir = path.join(tmpDir, 'cache');
+      const dataDir = path.join(tmpDir, 'data');
+      const { pilotDir } = await installVersioned(cacheDir, 'v1');
+      await fs.mkdir(path.join(cacheDir, 'versions', 'v2'), { recursive: true });
+      await fs.writeFile(path.join(cacheDir, 'current'), 'v2\n');
+      const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, 'v2\n');
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(deployed, 'utf8')).toBe('v2\n');
+    });
+
+    it('restores the previous hooks after a failed upgrade', async () => {
+      const cacheDir = path.join(tmpDir, 'cache');
+      const dataDir = path.join(tmpDir, 'data');
+      const { pilotDir } = await installVersioned(cacheDir, 'v1');
+      await fs.writeFile(path.join(cacheDir, 'current'), 'v1\n');
+      const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, 'v2\n');
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(deployed, 'utf8')).toBe(scriptText);
+    });
+
+    it('restores hooks when a leftover upgrade marker is stale', async () => {
+      const cacheDir = path.join(tmpDir, 'cache');
+      const dataDir = path.join(tmpDir, 'data');
+      const { pilotDir } = await installVersioned(cacheDir, 'v1');
+      await fs.writeFile(path.join(cacheDir, 'current'), 'v1\n');
+      await fs.writeFile(
+        path.join(cacheDir, 'hook-upgrade-in-progress'),
+        `${Date.now() - 11 * 60 * 1000}\n`,
+      );
+      const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, 'v2\n');
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(deployed, 'utf8')).toBe(scriptText);
+    });
+
+    it('stops a repair already in progress once the upgrade marker appears', async () => {
+      const cacheDir = path.join(tmpDir, 'cache');
+      const dataDir = path.join(tmpDir, 'data');
+      const { pilotDir } = await installVersioned(cacheDir, 'v1');
+      await fs.writeFile(path.join(cacheDir, 'current'), 'v1\n');
+      const script = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
+      const processor = path.join(dataDir, 'hooks', 'shared', 'decode-payload.mjs');
+      await fs.mkdir(path.dirname(processor), { recursive: true });
+      await fs.writeFile(script, 'tampered\n');
+      await fs.writeFile(processor, 'tampered\n');
+      const realWrite = fsUtils.writeTextFileAtomic;
+      let marked = false;
+      const spy = vi.spyOn(fsUtils, 'writeTextFileAtomic').mockImplementation(async (filePath, text, options) => {
+        await realWrite(filePath, text, options);
+        if (!marked && String(filePath).includes(`${path.sep}hooks${path.sep}`)) {
+          marked = true;
+          await fs.writeFile(path.join(cacheDir, 'hook-upgrade-in-progress'), `${Date.now()}\n`);
+        }
+      });
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      try {
+        await wd.runCheck();
+      } finally {
+        spy.mockRestore();
+      }
+
+      const contents = [
+        await fs.readFile(script, 'utf8'),
+        await fs.readFile(processor, 'utf8'),
+      ];
+      expect(contents.filter(text => text === 'tampered\n')).toHaveLength(1);
+      expect(contents.some(text => text === scriptText || text === processorText)).toBe(true);
     });
   });
 });

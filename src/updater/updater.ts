@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import type { AutoUpdateConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { hookUpgradeMarkerPath } from '../core/hook-watchdog.js';
 import {
   extractTarGz,
   makeTarStagingDir,
@@ -214,6 +215,10 @@ export class Updater {
   }
 
   start(): void {
+    // A crash between marking an upgrade and clearing it leaves the file behind.
+    // This process is not inside an upgrade yet, so the leftover belongs to the dead one.
+    void this.clearHookUpgradeMarker('failed to clear leftover hook upgrade marker');
+
     if (!this.config.enabled) {
       logger.debug('auto-update disabled');
       return;
@@ -544,6 +549,12 @@ export class Updater {
     let targetDir = path.join(versionsDir, dirName);
     const stagingDir = path.join(versionsDir, `${baseDirName}.candidate`);
     let activated = false;
+    let hookUpgradeMarked = false;
+    const releaseHookUpgrade = async () => {
+      if (!hookUpgradeMarked) return;
+      hookUpgradeMarked = false;
+      await this.clearHookUpgradeMarker();
+    };
     let oldCurrent: string | null = null;
     let oldPrevious: string | null = null;
 
@@ -646,6 +657,13 @@ export class Updater {
       const postinstallScript = path.join(stagingDir, 'scripts', 'postinstall.js');
       if (await fs.access(postinstallScript).then(() => true).catch(() => false)) {
         try {
+          await fs.mkdir(this.paths.cacheDir, { recursive: true });
+          await fs.writeFile(hookUpgradeMarkerPath(this.paths.cacheDir), `${Date.now()}\n`);
+          hookUpgradeMarked = true;
+        } catch (err) {
+          logger.warn('failed to mark hook upgrade', { error: String(err) });
+        }
+        try {
           const { stdout, stderr } = await execFileAsync(nodeBin, [postinstallScript], {
             cwd: stagingDir,
             env: {
@@ -697,6 +715,7 @@ export class Updater {
         }
 
         await this.writePointerFile(currentFile, dirName);
+        await releaseHookUpgrade();
         await this.syncInstalledScripts(targetDir);
         // Repoint the CLI wrapper at the managed runtime only after activation, so
         // the collector/updater restart (and any future launch) runs on it. Skipped
@@ -710,6 +729,7 @@ export class Updater {
         activated = true;
       } catch (err) {
         logger.warn('failed to finalize update, restoring previous installation', { error: String(err) });
+        await releaseHookUpgrade();
         await this.restorePointers(oldCurrent, oldPrevious);
         if (oldCurrent) {
           await this.syncInstalledScriptsForPointer(oldCurrent).catch((restoreErr) => {
@@ -723,8 +743,17 @@ export class Updater {
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
       if (!activated) {
+        await releaseHookUpgrade();
         await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
       }
+    }
+  }
+
+  private async clearHookUpgradeMarker(message = 'failed to clear hook upgrade marker'): Promise<void> {
+    try {
+      await fs.rm(hookUpgradeMarkerPath(this.paths.cacheDir), { force: true });
+    } catch (err) {
+      logger.warn(message, { error: String(err) });
     }
   }
 
