@@ -45,6 +45,7 @@ export class PiCodingAgentLogInput extends BaseHookInput {
       logDir: opts.logDir ?? resolvePiCodingAgentLogDir(opts.dataDir),
       logPrefix: opts.logPrefix ?? 'pi-coding-agent',
       pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+      historyReplay: opts.historyReplay ?? {},
     });
     this.agentEnabled = opts.agentEnabled ?? (() => true);
   }

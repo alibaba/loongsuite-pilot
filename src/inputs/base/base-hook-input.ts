@@ -6,6 +6,8 @@ import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, InputState } from '../../types/index.js';
 import { BaseInput, type InputOptions } from './base-input.js';
 import { getTodayDateString, ensureDir } from '../../utils/fs-utils.js';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
+import { HookReplayBudget, type HookReplayOptions, type HookWorkBudget } from './hook-replay-budget.js';
 
 const OFFSET_MAP_EXTRA_KEY = 'hookLogOffsets';
 const READ_BUDGET_BYTES = 8 * 1024 * 1024;
@@ -22,6 +24,8 @@ export interface HookInputOptions extends InputOptions {
   logDir: string;
   /** Prefix for JSONL files (e.g. "claude", "cursor"). */
   logPrefix: string;
+  /** Opt in to bounded background replay and per-cycle processing quanta. */
+  historyReplay?: HookReplayOptions;
 }
 
 /**
@@ -46,6 +50,10 @@ export abstract class BaseHookInput extends BaseInput {
   protected readonly logDir: string;
   protected readonly logPrefix: string;
   private readonly incompleteTails = new Map<string, IncompleteTail>();
+  private readonly replayBudget?: HookReplayBudget;
+  private initialFiles?: Set<string>;
+  private readonly replayThrough = new Map<string, { identity: string; end: number }>();
+  private readonly oversizedSources = new Map<string, { identity: string; size: number; mtimeMs: number }>();
 
   /**
    * Cold-start replay protection. When true and the input has no prior state
@@ -66,6 +74,7 @@ export abstract class BaseHookInput extends BaseInput {
     super(opts);
     this.logDir = opts.logDir;
     this.logPrefix = opts.logPrefix;
+    if (opts.historyReplay) this.replayBudget = new HookReplayBudget(opts.historyReplay);
   }
 
   protected override async onStart(): Promise<void> {
@@ -77,6 +86,7 @@ export abstract class BaseHookInput extends BaseInput {
     const entries: AgentActivityEntry[] = [];
     const state = this.getState();
     const fileNames = await this.listHookLogFiles();
+    if (this.replayBudget && !this.initialFiles) this.initialFiles = new Set(fileNames);
     if (fileNames.length === 0) {
       this.incompleteTails.clear();
       return entries;
@@ -87,8 +97,16 @@ export abstract class BaseHookInput extends BaseInput {
     const offsets: OffsetMap = persistedOffsets ? { ...persistedOffsets } : await this.seedOffsetMap(fileNames, state, today);
     const identities: Record<string, string> = { ...(state.extra?.hookLogIdentities as Record<string, string> ?? {}) };
     // Drain every retained source, including offline backlog and late writes.
-    const candidateFileNames = fileNames;
+    const candidateFileNames = this.replayBudget ? [...fileNames].sort((a, b) => {
+      const pending = (file: string): number => {
+        const frontier = this.replayThrough.get(file);
+        return this.initialFiles!.has(file) || (frontier && (offsets[file] ?? 0) < frontier.end)
+          || file.slice(this.logPrefix.length + 1, this.logPrefix.length + 11) < today ? 1 : 0;
+      };
+      return pending(a) - pending(b) || (a < b ? -1 : a > b ? 1 : 0);
+    }) : fileNames;
     let readBudget = READ_BUDGET_BYTES;
+    const work = this.replayBudget?.work();
     const replay = this.coldStartKeepLastTurnOnly
       ? await this.prepareColdStartReplay(state, fileNames, bytes => { readBudget -= bytes; })
       : undefined;
@@ -98,7 +116,7 @@ export abstract class BaseHookInput extends BaseInput {
     }
 
     for (const logFileName of candidateFileNames) {
-      if (readBudget <= 0) break;
+      if (readBudget <= 0 && !this.replayBudget) break;
       const logFile = path.join(this.logDir, logFileName);
       const stat = await fs.lstat(logFile).catch(() => null);
       if (!stat?.isFile()) continue;
@@ -107,19 +125,40 @@ export abstract class BaseHookInput extends BaseInput {
       if (replaced) this.incompleteTails.delete(logFile);
       const savedOffset = replaced ? 0 : offsets[logFileName] ?? 0;
       const startOffset = savedOffset > stat.size ? 0 : savedOffset;
+      let historical = false;
+      if (this.replayBudget) {
+        let frontier = this.replayThrough.get(logFileName);
+        if (!frontier || frontier.identity !== identity) {
+          const existing = this.initialFiles!.delete(logFileName);
+          const olderDay = logFileName.slice(this.logPrefix.length + 1, this.logPrefix.length + 11) < today;
+          frontier = { identity, end: existing || olderDay ? stat.size : 0 };
+          this.replayThrough.set(logFileName, frontier);
+        }
+        historical = startOffset < frontier.end;
+        // Register metadata even after the work/read budget is exhausted.
+        // Fully consumed files must not wait behind a large backlog to reclaim.
+        identities[logFileName] = identity;
+        offsets[logFileName] = startOffset;
+      }
+      const fileBudget = Math.min(readBudget, historical ? this.replayBudget!.available() : readBudget);
+      if (fileBudget <= 0 || (work && !work.canProcess())) continue;
       const initial = replay?.files[logFileName];
-      const fileEntries = await this.collectFile(logFile, startOffset, readBudget,
-        initial && matchesFileIdentity(initial.identity, stat) ? { turnId: replay!.turnId, through: initial.size } : undefined);
+      const fileEntries = await this.collectFile(logFile, startOffset, fileBudget,
+        initial && matchesFileIdentity(initial.identity, stat) ? { turnId: replay!.turnId, through: initial.size } : undefined, work);
+      if (historical) this.replayBudget!.charge(fileEntries.readBytes);
       identities[logFileName] = identity;
       offsets[logFileName] = fileEntries.offset;
       entries.push(...fileEntries.entries);
       readBudget -= fileEntries.readBytes;
-      if (readBudget <= 0) break;
+      if (readBudget <= 0 && !this.replayBudget) break;
     }
 
     // Prune offsets for files that no longer exist on disk so the persisted
     // map does not grow unbounded as daily files rotate away.
     const liveFileNames = new Set(fileNames);
+    for (const file of this.replayThrough.keys()) if (!liveFileNames.has(file)) this.replayThrough.delete(file);
+    for (const file of this.initialFiles ?? []) if (!liveFileNames.has(file)) this.initialFiles!.delete(file);
+    for (const file of this.oversizedSources.keys()) if (!candidates.has(file)) this.oversizedSources.delete(file);
     const prunedOffsets: OffsetMap = {};
     const prunedIdentities: Record<string, string> = {};
     for (const [fileName, offset] of Object.entries(offsets)) {
@@ -131,7 +170,7 @@ export abstract class BaseHookInput extends BaseInput {
       && (prunedIdentities[file] === undefined || prunedIdentities[file] === initial.identity));
     const nextReplay = replayPending ? replay : null;
 
-    const newestFileName = candidateFileNames[candidateFileNames.length - 1];
+    const newestFileName = fileNames[fileNames.length - 1];
     if (newestFileName && (
       shouldPersistOffsets ||
       state.lastFile !== newestFileName ||
@@ -236,6 +275,7 @@ export abstract class BaseHookInput extends BaseInput {
     startOffset: number,
     readBudget: number,
     coldStart?: { turnId: string; through: number },
+    work?: HookWorkBudget,
   ): Promise<{ entries: AgentActivityEntry[]; offset: number; readBytes: number }> {
     const entries: AgentActivityEntry[] = [];
     const runtime = this.getInputRuntimeAccumulator();
@@ -269,6 +309,17 @@ export abstract class BaseHookInput extends BaseInput {
     }
     this.incompleteTails.delete(logFile);
     if (stat.size <= offset) return { entries, offset: stat.size, readBytes: 0 };
+    const blocked = this.oversizedSources.get(logFile);
+    if (blocked && blocked.identity === fileIdentity(stat) && blocked.size === stat.size && blocked.mtimeMs === stat.mtimeMs) {
+      return { entries, offset, readBytes: 0 };
+    }
+    this.oversizedSources.delete(logFile);
+    const deferOversized = (at: number) => {
+      this.oversizedSources.set(logFile, { identity: fileIdentity(stat), size: stat.size, mtimeMs: stat.mtimeMs });
+      this.logger.warn('Hook record exceeds processing limit; preserving source and checkpoint', {
+        file: logFile, offset: at, maxBytes: work!.maxRecordBytes,
+      });
+    };
 
     const handle = await fs.open(logFile, 'r');
     let checkpointOffset = offset;
@@ -290,7 +341,12 @@ export abstract class BaseHookInput extends BaseInput {
         const parts = [snapshot];
         let position = offset + bytesRead;
         while (position < stat.size) {
-          const chunk = Buffer.alloc(Math.min(64 * 1024, stat.size - position));
+          if (work && position - offset >= work.maxRecordBytes) {
+            deferOversized(offset);
+            return { entries, offset, readBytes: totalReadBytes };
+          }
+          const chunk = Buffer.alloc(Math.min(64 * 1024, stat.size - position,
+            work ? work.maxRecordBytes - (position - offset) : Infinity));
           const startedAt = runtime?.now();
           const read = await handle.read(chunk, 0, chunk.length, position);
           totalReadBytes += read.bytesRead;
@@ -319,7 +375,7 @@ export abstract class BaseHookInput extends BaseInput {
         return { entries, offset, readBytes: totalReadBytes };
       }
       const completeLength = lastNewline + 1;
-      checkpointOffset = offset + completeLength;
+      checkpointOffset = work ? offset : offset + completeLength;
       const completeBytes = snapshot.subarray(0, completeLength);
       const completeText = completeBytes.toString('utf-8');
       const asciiBatch = completeText.length === completeBytes.length;
@@ -332,6 +388,8 @@ export abstract class BaseHookInput extends BaseInput {
       let lineEndOffset = offset;
 
       for (const line of lines) {
+        if (work && lineEndOffset >= offset + completeLength) break;
+        if (work && !work.canProcess()) break;
         let recordBytes = line.length + 1;
         if (!asciiBatch) {
           const newline = completeBytes.indexOf(0x0a, recordStartOffset);
@@ -339,7 +397,10 @@ export abstract class BaseHookInput extends BaseInput {
           recordBytes = newline - recordStartOffset + 1;
           recordStartOffset = newline + 1;
         }
+        if (work && recordBytes > work.maxRecordBytes) { deferOversized(lineEndOffset); break; }
         lineEndOffset += recordBytes;
+        if (work) checkpointOffset = lineEndOffset;
+        if (work && ++work.records % 32 === 0) await yieldToEventLoop();
         if (!line.trim()) continue;
         records++;
         maxRecordBytes = Math.max(maxRecordBytes, recordBytes);
@@ -369,7 +430,7 @@ export abstract class BaseHookInput extends BaseInput {
       }
       runtime?.observeCommittedBatch({
         records,
-        bytes: completeLength,
+        bytes: work ? checkpointOffset - offset : completeLength,
         parseSuccessRecords,
         parseFailedRecords,
         maxRecordBytes,
