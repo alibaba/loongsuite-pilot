@@ -315,8 +315,21 @@ export class CodexTranscriptInput extends BaseInput {
     this.discardLegacyGlobalTurnRegistry();
     const discovered = await this.discoverSessionFiles();
     await this.indexDiscoveredTranscriptOwners(discovered);
-    let isBaselineInit = this.stateStore.get(this.id).extra?.isBaselineInit === true;
-    if (!isBaselineInit) {
+    const extra = this.stateStore.get(this.id).extra;
+    let isBaselineInit = extra?.isBaselineInit === true;
+    const baselineUnfinished = extra?.baselineUnfinished === true;
+    const persistedSince = extra?.baselinePendingSince;
+    if (
+      baselineUnfinished
+      && this.baselinePendingSince === 0
+      && typeof persistedSince === 'number'
+      && persistedSince > 0
+    ) {
+      this.baselinePendingSince = persistedSince;
+    }
+    // Checkpoints written while this version's scan is still unfinished are not
+    // an old-version migration.
+    if (!isBaselineInit && !baselineUnfinished) {
       const prefix = `${this.id}:`;
       const legacy = this.stateStore.keys().some(key =>
         key.startsWith(prefix) && this.readCheckpoint(key) !== null);
@@ -325,13 +338,24 @@ export class CodexTranscriptInput extends BaseInput {
         isBaselineInit = true;
       }
     }
+    const pendingSinceAtEntry = this.baselinePendingSince;
+    if (!isBaselineInit && !this.defaultScanComplete) {
+      if (this.baselinePendingSince === 0) this.baselinePendingSince = startedAt;
+      if (!baselineUnfinished) {
+        this.stateStore.update(this.id, {
+          extra: { baselineUnfinished: true, baselinePendingSince: this.baselinePendingSince },
+        });
+      }
+    }
     for (const { filePath, baselineOnStart } of discovered) {
       const key = this.stateKey(filePath);
       const meta = this.transcriptMetaByPath.get(filePath);
       const neededByPendingFusion = meta?.depth === 1
         && meta.parentThreadId !== undefined
         && this.hasLegacyPendingFusionForParent(meta.parentThreadId);
-      if (baselineOnStart && !neededByPendingFusion && !this.readCheckpoint(key)) {
+      const createdAfterPending = pendingSinceAtEntry > 0
+        && !await this.existedBeforeBaseline(filePath);
+      if (baselineOnStart && !neededByPendingFusion && !this.readCheckpoint(key) && !createdAfterPending) {
         const hasCopiedPrefix = hasCopiedHistoryPrefix(meta);
         if (hasCopiedPrefix) {
           await this.parkForkBaseline(filePath, key);
@@ -341,13 +365,13 @@ export class CodexTranscriptInput extends BaseInput {
       }
     }
     this.baselinePending = !isBaselineInit && !this.defaultScanComplete;
-    if (this.baselinePending) {
-      if (this.baselinePendingSince === 0) this.baselinePendingSince = startedAt;
-    } else {
-      this.baselinePendingSince = 0;
-    }
+    if (!this.baselinePending) this.baselinePendingSince = 0;
     if (!isBaselineInit && this.defaultScanComplete) {
-      this.stateStore.update(this.id, { extra: { isBaselineInit: true } });
+      this.stateStore.update(this.id, {
+        extra: baselineUnfinished
+          ? { isBaselineInit: true, baselineUnfinished: false, baselinePendingSince: 0 }
+          : { isBaselineInit: true },
+      });
     }
     await Promise.all([
       fs.mkdir(this.wakeupDir, { recursive: true }),
@@ -484,7 +508,9 @@ export class CodexTranscriptInput extends BaseInput {
     }
     if (fullScan) {
       if (this.baselinePending && this.defaultScanComplete) {
-        this.stateStore.update(this.id, { extra: { isBaselineInit: true } });
+        this.stateStore.update(this.id, {
+          extra: { isBaselineInit: true, baselineUnfinished: false, baselinePendingSince: 0 },
+        });
         this.baselinePending = false;
         this.baselinePendingSince = 0;
       }
