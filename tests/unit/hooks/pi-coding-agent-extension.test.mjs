@@ -115,6 +115,12 @@ describe('Pi Coding Agent extension', () => {
     const installed = path.join(tmpDir, 'plugins', 'pi-coding-agent', 'index.mjs');
     fs.mkdirSync(path.dirname(installed), { recursive: true });
     fs.copyFileSync(EXTENSION_PATH, installed);
+    // Keep required shared modules while simulating the one optional helper missing.
+    const shared = path.join(tmpDir, 'plugins', 'shared');
+    fs.cpSync(path.resolve('assets/plugins/shared'), shared, {
+      recursive: true,
+      filter: source => path.basename(source) !== 'resource-context.mjs',
+    });
     process.env.AGENTTEAMS_WORKER_NAME = 'worker-with-missing-helper';
 
     const runtime = await createRuntime({}, undefined, installed);
