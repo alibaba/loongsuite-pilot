@@ -175,7 +175,7 @@ const {spawn} = require('node:child_process');
 const {Socket, createServer} = require('node:net');
 let c;
 const lease = new Socket({fd:3, readable:true, writable:true});
-let child, server, jobLease, ending = false, timer, bytes = '';
+let child, server, jobLease, ending = false, timer, bytes = '', inputForwarded = false;
 let owned = false;
 function status(value) { try { lease.write(JSON.stringify(value)+'\n'); } catch {} }
 function end() {
@@ -214,11 +214,18 @@ lease.on('data', chunk => {
   }
 });
 process.stdout.on('error', end);
+function forwardInput() {
+  if (inputForwarded || !child || ending) return;
+  inputForwarded = true;
+  process.stdin.pipe(child.stdin);
+}
 function start() {
   if (ending) return;
   child = spawn(c.command, c.args, {stdio:['pipe','pipe','pipe'], windowsHide:true});
   child.stdin.on('error', () => {});
-  process.stdin.pipe(child.stdin);
+  // Windows input belongs to the suspended executor, not its PowerShell Job
+  // helper. Do not expose it until the native private readiness handshake.
+  if (!c.pipeName) forwardInput();
   child.stdout.pipe(process.stdout, {end:false});
   child.stderr.resume();
   child.on('error', () => { if (!owned) status({error:'Windows Job Object unavailable'}); end(); });
@@ -250,7 +257,7 @@ if (c.pipeName) {
     socket.on('data', chunk => {
       readiness = Buffer.concat([readiness,chunk]);
       if (!owned && readiness.length >= 5 && readiness[0] === 1) {
-        owned = true; status({owned:true,pid:readiness.readUInt32LE(1)});
+        owned = true; forwardInput(); status({owned:true,pid:readiness.readUInt32LE(1)});
       }
       if (readiness.length > 64) end();
     });

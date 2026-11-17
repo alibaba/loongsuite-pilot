@@ -41,15 +41,23 @@ it('preserves allowed Windows runtime keys from a case-sensitive Worker copy', (
   expect(env.PRIVATE_API_KEY).toBeUndefined();
 });
 
-function powerShellProbe(args: string[]): Promise<{ code: number | string; stdout: string; stderr: string; timedOut: boolean }> {
+function powerShellProbe(args: string[], input = '', endAfterMs = 0): Promise<{ code: number | string; stdout: string; stderr: string; timedOut: boolean; elapsedMs: number }> {
   return new Promise(resolve => {
+    const started = Date.now();
+    let closeTimer: NodeJS.Timeout | undefined;
     const child = execFile('powershell.exe', args, {
       encoding: 'utf8', timeout: 10_000, maxBuffer: 8192, killSignal: 'SIGKILL', windowsHide: true, env: windowsPowerShellEnv(),
-    }, (error, stdout, stderr) => resolve({
-      code: error?.code ?? 0, stdout, stderr, timedOut: error?.killed === true,
-    }));
+    }, (error, stdout, stderr) => {
+      if (closeTimer) clearTimeout(closeTimer);
+      resolve({ code: error ? error.code ?? error.signal ?? 'error' : 0, stdout, stderr,
+        timedOut: error?.killed === true, elapsedMs: Date.now() - started });
+    });
     // execFile leaves stdin open by default. A probe must never wait for input EOF.
-    child.stdin?.end();
+    child.stdin?.on('error', () => {});
+    if (endAfterMs > 0) {
+      child.stdin?.write(input);
+      closeTimer = setTimeout(() => child.stdin?.end(), endAfterMs);
+    } else child.stdin?.end(input);
   });
 }
 
@@ -103,6 +111,69 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     expect(result.stdout.trim(), diagnostic).not.toBe('');
     expect(JSON.parse(result.stdout).Marker, diagnostic).toBe('NATIVE_MODULES_READY');
   }, 15_000);
+
+  it('reports direct PowerShell stream delivery with stdin open before EOF', async () => {
+    const result = await powerShellProbe(['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'],
+      "[Console]::Out.WriteLine('DIRECT_STREAM_READY'); 'DIRECT_PIPELINE_READY'\n", 1000);
+    console.log(JSON.stringify({ check: 'direct-powershell-stream', ...result }));
+    expect(result.code, JSON.stringify(result)).toBe(0);
+    expect(result.stdout, JSON.stringify(result)).toContain('DIRECT_STREAM_READY');
+    expect(result.stdout, JSON.stringify(result)).toContain('DIRECT_PIPELINE_READY');
+  }, 15_000);
+
+  it.each(['node', 'powershell'])('reports native guardian %s ownership and input delivery timing', async executor => {
+    const dir = await directory();
+    const command = executor === 'node' ? process.execPath : 'powershell.exe';
+    const args = executor === 'node'
+      ? ['-e', "require('node:readline').createInterface({input:process.stdin}).on('line', line=>console.log('OWNED_EXECUTOR:'+line))"]
+      : ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'];
+    const input = executor === 'node' ? 'NATIVE_INPUT_PROBE\n' : "[Console]::Out.WriteLine('NATIVE_INPUT_PROBE')\n";
+    const started = Date.now();
+    const guardian = spawnPowerShellGuardian(command, args, dir);
+    const lease = guardian.stdio[3] as Duplex;
+    lease.on('error', () => {});
+    const evidence: { ownedAtMs?: number; outputAtMs?: number; eofAtMs?: number; stdout: string; stderr: string; control: string } = {
+      stdout: '', stderr: '', control: '',
+    };
+    lease.on('data', chunk => {
+      evidence.control = (evidence.control + String(chunk)).slice(-4096);
+      if (evidence.ownedAtMs === undefined && evidence.control.includes('"owned":true')) evidence.ownedAtMs = Date.now() - started;
+    });
+    let outputResolve!: () => void;
+    const output = new Promise<void>(resolve => { outputResolve = resolve; });
+    guardian.stdout?.on('data', chunk => {
+      evidence.stdout = (evidence.stdout + String(chunk)).slice(-4096);
+      if (evidence.stdout.includes('NATIVE_INPUT_PROBE')) {
+        evidence.outputAtMs = Date.now() - started;
+        outputResolve();
+      }
+    });
+    guardian.stderr?.on('data', chunk => { evidence.stderr = (evidence.stderr + String(chunk)).slice(-4096); });
+    const closed = new Promise<number | null>(resolve => guardian.once('close', resolve));
+    let deadline: NodeJS.Timeout | undefined;
+    const eof = setTimeout(() => { evidence.eofAtMs = Date.now() - started; guardian.stdin?.end(); }, 1000);
+    try {
+      // Send immediately, before ownership is ready: the guardian must retain
+      // these bytes for the actual executor rather than its encoded helper.
+      lease.write('{"timeout":30000}\n');
+      guardian.stdin?.write(input);
+      await Promise.race([
+        output,
+        closed.then(code => { if (!evidence.outputAtMs) throw new Error(`guardian closed (${code}): ${JSON.stringify(evidence)}`); }),
+        new Promise<void>((_, reject) => { deadline = setTimeout(() => reject(new Error(`native input timed out: ${JSON.stringify(evidence)}`)), 30_000); }),
+      ]);
+      console.log(JSON.stringify({ check: `guardian-${executor}-stream`, ...evidence }));
+      expect(evidence.ownedAtMs, JSON.stringify(evidence)).toBeDefined();
+      expect(evidence.stdout, JSON.stringify(evidence)).toContain('NATIVE_INPUT_PROBE');
+    } finally {
+      clearTimeout(eof);
+      if (deadline) clearTimeout(deadline);
+      lease.end();
+      guardian.stdin?.end();
+      await Promise.race([closed, new Promise(resolve => setTimeout(resolve, 2000))]);
+      guardian.kill('SIGKILL');
+    }
+  }, 35_000);
 
   it('rejects a script under process Restricted and preserves Unicode request/path in the pool', async () => {
     const version = await powerShellProbe(['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()']);

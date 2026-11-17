@@ -38,4 +38,4 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - name: Verify real Windows PowerShell ownership and execution
-        run: npm exec -- vitest run tests/unit/interceptor/managed-powershell-windows.test.ts tests/unit/interceptor/managed-powershell-pool.test.ts --maxWorkers=1 --minWorkers=1
+        run: npm exec -- vitest run tests/unit/interceptor/managed-powershell-windows.test.ts tests/unit/interceptor/managed-powershell-pool.test.ts --maxWorkers=1 --minWorkers=1 --reporter=verbose
