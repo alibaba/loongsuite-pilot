@@ -355,12 +355,17 @@ fn source_l45_l55_l73_l84_l97_l112_l132_l190_real_installer_wiring_holds_before_
                 < body.find("\n    stop_pilot_for_deploy\n").unwrap()
         );
         assert!(body.contains("run_pilot_cli start"));
-        if name == "cmd_upgrade() {" {
-            assert!(body.contains("run_pilot_cli rollback"));
-            let failure = body.find("New version failed to start").unwrap();
-            assert!(body[failure..].contains("run_pilot_cli start"));
-        }
+        let start = body
+            .find("if run_pilot_cli start && wait_for_pilot_running")
+            .unwrap();
+        assert!(body[start..].contains("rollback_failed_publication"));
     }
+    let rollback = function(source, "rollback_failed_publication() {");
+    let stop = rollback.find("run_pilot_cli stop").unwrap();
+    let restore = rollback.find("run_pilot_cli rollback").unwrap();
+    let version = rollback.find("get_installed_version").unwrap();
+    let ready = rollback.find("wait_for_pilot_running").unwrap();
+    assert!(stop < restore && restore < version && version < ready);
     let deploy = function(source, "deploy_package() {");
     assert!(deploy.contains("publish-package deploy-hooks || return 1"));
     assert!(

@@ -286,7 +286,7 @@ fn identities(logs: &[Value], entries: &[Value]) {
         }
     }
 }
-async fn scenario(legacy: bool) {
+async fn scenario(capture_content: bool) {
     let root = tempfile::tempdir().unwrap();
     let receiver = Receiver::new().await;
     let jsonl = JsonlFlusher::new(
@@ -310,13 +310,15 @@ async fn scenario(legacy: bool) {
     rows.extend(native.clone());
     let manager = InputManager::new();
     let agents: AgentsConfig =
-        serde_json::from_value(json!({"codex":{"captureMessageContent":legacy}})).unwrap();
+        serde_json::from_value(json!({"codex":{"captureMessageContent":capture_content}})).unwrap();
     manager.set_agents_config(&agents);
     let entries = manager.prepare_restored_entries(rows.clone());
+    let original = serde_json::to_value(&rows[0]).unwrap();
+    let first = serde_json::to_value(&entries[0]).unwrap();
     for field in CONTENT {
-        assert!(
-            serde_json::to_value(&entries[0]).unwrap()[*field]
-                == serde_json::to_value(&rows[0]).unwrap()[*field],
+        assert_eq!(
+            first.get(*field),
+            original.get(*field).filter(|_| capture_content),
             "{field}"
         );
     }
@@ -347,33 +349,34 @@ async fn scenario(legacy: bool) {
     }
     let activity = &post.iter().find(|(name, _)| name == "activity").unwrap().1;
     let redacted = &post.iter().find(|(name, _)| name == "redacted").unwrap().1;
-    for field in CONTENT {
-        assert!(json_logs[0][*field] == prepared[0][*field], "{field}");
-        let decoded: Value = serde_json::from_str(http_logs[0][*field].as_str().unwrap()).unwrap();
-        assert!(decoded == prepared[0][*field], "{field}");
-        let decoded: Value = serde_json::from_str(&activity.logs[0].content[*field]).unwrap();
-        assert!(decoded == prepared[0][*field], "{field}");
+    for (index, row) in prepared.iter().enumerate() {
+        for field in CONTENT {
+            assert_eq!(json_logs[index].get(*field), row.get(*field), "{field}");
+            let http_value = http_logs[index]
+                .get(*field)
+                .map(|value| serde_json::from_str::<Value>(value.as_str().unwrap()).unwrap());
+            let sls_value = activity.logs[index]
+                .content
+                .get(*field)
+                .map(|value| serde_json::from_str::<Value>(value).unwrap());
+            assert_eq!(http_value.as_ref(), row.get(*field), "{field}");
+            assert_eq!(sls_value.as_ref(), row.get(*field), "{field}");
+        }
     }
     for entry in native {
-        let index = entries
+        let row = prepared
             .iter()
-            .position(|e| e.event_id == entry.event_id)
+            .find(|row| row["event.id"] == entry.event_id)
             .unwrap();
-        let field = if serde_json::to_value(&entry).unwrap()["event.name"] == "gen_ai.agent.invoke"
-        {
+        let field = if row["event.name"] == "gen_ai.agent.invoke" {
             "gen_ai.input.messages"
         } else {
             "gen_ai.output.messages"
         };
-        let value = serde_json::to_value(entry).unwrap();
-        assert!(json_logs[index][field] == value[field]);
-        assert!(
-            serde_json::from_str::<Value>(http_logs[index][field].as_str().unwrap()).unwrap()
-                == value[field]
-        );
-        assert!(
-            serde_json::from_str::<Value>(&activity.logs[index].content[field]).unwrap()
-                == value[field]
+        let original = serde_json::to_value(entry).unwrap();
+        assert_eq!(
+            row.get(field),
+            original.get(field).filter(|_| capture_content)
         );
     }
     for log in &redacted.logs {
@@ -390,11 +393,11 @@ async fn scenario(legacy: bool) {
     sls.shutdown().await.unwrap();
 }
 #[tokio::test]
-async fn main_codex_all_eight_standard_and_legacy_names_and_four_native_agent_facts_keep_exact_content_and_identity_on_jsonl_http_and_two_sls_routes(
+async fn main_codex_all_event_names_and_native_agent_facts_preserve_identity_and_honor_capture_policy(
 ) {
-    for legacy in [true, false] {
-        tokio::time::timeout(Duration::from_secs(15), scenario(legacy))
+    for capture_content in [true, false] {
+        tokio::time::timeout(Duration::from_secs(15), scenario(capture_content))
             .await
-            .expect("original project15s per legacy-content parameter");
+            .expect("15s per content capture setting");
     }
 }

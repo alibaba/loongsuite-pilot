@@ -226,7 +226,8 @@ fn postinstall_l25_missing_required_native_hook_assets_fails_without_success_or_
     fs::write(cache.join("previous"), "older\n").unwrap();
     options["sourceDir"] = json!(installed);
     options["deployHooks"] = json!(true);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // A debug host verifies the package's file hashes before checking Hook assets.
+    let deadline = Instant::now() + Duration::from_secs(15);
     let output = helper_at(
         &fixture,
         "publish-package",

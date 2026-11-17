@@ -206,7 +206,7 @@ fn shortcut_l108_old_open_and_url_are_rejected_before_any_installation_runtime_o
         let out = f.run(&["dashboard", action]);
         assert_eq!(out.status.code(), Some(2));
         assert!(String::from_utf8_lossy(&out.stderr)
-            .contains("dashboard shortcut {install|status|uninstall}"));
+            .contains("dashboard start [port] | stop | shortcut {install|status|uninstall}"));
         assert!(!f.cache.exists());
         assert!(f.records().is_empty());
         assert_eq!(fs::read(&f.config).unwrap(), before);
