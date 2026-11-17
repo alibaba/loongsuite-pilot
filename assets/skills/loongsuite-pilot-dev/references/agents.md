@@ -11,8 +11,8 @@
 ## 按 Qoder 将 Hook 改为原生入口
 
 - 参考 `src/deployment/hook_strategy.rs` 的 `qoder_exec_args` 和 `qoder_exec_definition`。让 Agent 用命令和独立参数调用安装后的 `loongsuite-pilot-sdk-hook`，检查空格、Unicode 路径和 Windows 参数处理。部署需要幂等，替换 Pilot 管理的旧条目并保留用户自己的 Hook。
-- 完整 Pilot 的 Qoder Stop、SubagentStart 和 SubagentStop 使用共享二进制的 `hook-process qoder --wakeup-only` 模式。`src/hook_process/qoder_wakeup.rs` 写入唤醒通知，`src/inputs/qoder-trace/transcript_source.rs` 和 `transcript_scanner.rs` 负责读取原生会话和轮询兜底。token 关联查同目录 `token_enricher.rs` 与各 reader。普通 Qoder CLI 的原生 usage 开关由宿主在启动进程时传入 `QODER_EXPOSE_TOKEN_USAGE=true`，详见 `docs/zh-CN/sdk.md`。处理完整字段和磁盘增量的工作留在 collector。
-- 同步拦截是另一条链路，Qoder 由 `interceptor hook --agent qoder-auto` 进入原生判定。检查端点不可用、无效裁决、超时和关闭期间快速放行，Agent 侧只有一次有效响应。云壳裁决协议查 `include/pilot_sdk.h` 和 `src/sdk/hooks.rs`。验收使用无敏感内容的关键词和 Agent 正常运行的对照场景。
+- 完整 Pilot 的 Qoder Stop、SubagentStart 和 SubagentStop 使用共享二进制的 `sdk-hook --channel observe` 模式。`src/hook_process/qoder_wakeup.rs` 写入唤醒通知，`src/inputs/qoder-trace/transcript_source.rs` 和 `transcript_scanner.rs` 负责读取原生会话和轮询兜底。token 关联查同目录 `token_enricher.rs` 与各 reader。普通 Qoder CLI 的原生 usage 开关由宿主在启动进程时传入 `QODER_EXPOSE_TOKEN_USAGE=true`，详见 `docs/zh-CN/sdk.md`。处理完整字段和磁盘增量的工作留在 collector。
+- 同步拦截是另一条链路，完整版 Qoder 由 `sdk-hook --channel local --agent qoder-auto` 进入 SDK 本地裁决，云壳的宿主裁决使用 `--channel cloud`。Qoder IDE 和 CLI 可以共用设置，原生 Hook 按实际进程识别并使用对应输出契约。检查端点不可用、无效裁决、超时和关闭期间快速放行，Agent 侧只有一次有效响应。云壳裁决协议查 `include/pilot_sdk.h` 和 `src/sdk/hooks.rs`。验收用无敏感内容的关键词做允许和拒绝对照，检查真实 Qoder CLI 的目标工具是否执行。同步阻断使用退出码 2 和 stderr，验证直接命令和兼容包装器都能将退出码传给 Qoder。
 - 先确认宿主确实支持二进制 Hook。逐项检查新旧路径、安装包资产、Hook 配置和真实事件字段。证明该路径不启动 Node/JS 后，才删除它专用的脚本和打包条目。其他宿主加载的插件有独立契约，按宿主逐一迁移。
 
 ## 用同一路径接入 Codex

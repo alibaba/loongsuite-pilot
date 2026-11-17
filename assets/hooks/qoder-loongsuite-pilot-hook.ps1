@@ -10,10 +10,7 @@ try {
     if ($EmptyResult) { $EmptyResult }
     exit 0
 }
-$NativeArgs = @('hook-process', 'qoder')
-$NativeArgs += '--wakeup-only'
-$AgentId = if ($args.Count -gt 0) { $args[0] } else { 'qoder' }
-$NativeArgs += @('--agent-id', $AgentId, '--log-prefix', $AgentId)
+$NativeArgs = @('sdk-hook', '--channel', 'observe', '--agent', 'qoder-auto')
 try {
     . (Join-Path $PSScriptRoot 'shared\native.ps1')
     Invoke-PilotNative -HookDir $PSScriptRoot -Arguments $NativeArgs -EmptyResult $EmptyResult

@@ -60,6 +60,23 @@ pub async fn run_cli(args: &[String]) -> i32 {
 }
 
 async fn run_status() -> i32 {
+    let sdk = Path::new(&default_pilot_data_dir())
+        .join(crate::sdk::STANDALONE_QODER_DATA)
+        .join("sdk-hooks-local.json");
+    if let Some(endpoint) = std::fs::read(&sdk).ok().and_then(|bytes| {
+        serde_json::from_slice::<crate::sdk::hook_protocol::Descriptor>(&bytes).ok()
+    }) {
+        if endpoint.schema == 2 && endpoint.port > 0 && crate::utils::is_process_alive(endpoint.pid)
+        {
+            let _ = writeln!(
+                io::stdout(),
+                "interceptor: ok pid={} port={} transport=sdk-hook",
+                endpoint.pid,
+                endpoint.port
+            );
+            return 0;
+        }
+    }
     let runtime_path = interceptor_runtime_path(None);
     let raw = match std::fs::read_to_string(&runtime_path) {
         Ok(raw) => raw,

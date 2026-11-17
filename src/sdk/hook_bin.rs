@@ -1,6 +1,8 @@
 //! Hard deadline belongs to the main thread. This module has no collector link.
 #[path = "hook_protocol.rs"]
 mod protocol;
+#[path = "hook_qoder.rs"]
+mod qoder;
 use protocol::*;
 use std::io::{Read, Write};
 use std::net::UdpSocket;
@@ -42,12 +44,17 @@ pub fn is_hook(args: &[String]) -> bool {
     }
 }
 
-fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Option<String> {
+enum HookOutput {
+    Json(String),
+    Block(String),
+}
+
+fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Option<HookOutput> {
     if args.first().map(String::as_str) == Some("interceptor") {
-        return legacy?(&args[2..]);
+        return legacy?(&args[2..]).map(HookOutput::Json);
     }
     if args.first().map(String::as_str) == Some("hook-process") {
-        return legacy?(&args);
+        return legacy?(&args).map(HookOutput::Json);
     }
     let data = PathBuf::from(flag(&args, "--data-dir")?);
     if !data.is_absolute() {
@@ -57,8 +64,11 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
     if !matches!(channel, "observe" | "local" | "cloud") {
         return None;
     }
-    let agent = flag(&args, "--agent")?.to_owned();
-    let event = flag(&args, "--event")?.to_owned();
+    let configured_agent = flag(&args, "--agent")?;
+    let configured_event = flag(&args, "--event");
+    if configured_event.is_none() && configured_agent != "qoder-auto" {
+        return None;
+    }
     let descriptor = descriptor(&data.join(format!("sdk-hooks-{channel}.json")))?;
     if descriptor.schema != 2 || descriptor.port == 0 || !pid_alive(descriptor.pid) {
         return None;
@@ -68,13 +78,51 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
         .take((MAX_REQUEST + 1) as u64)
         .read_to_end(&mut body)
         .ok()?;
-    if body.len() > MAX_REQUEST
-        || serde_json::from_slice::<serde_json::Value>(&body)
-            .ok()?
-            .as_object()
-            .is_none()
-    {
+    if body.len() > MAX_REQUEST {
         return None;
+    }
+    let mut payload = serde_json::from_slice::<serde_json::Value>(&body).ok()?;
+    let payload = payload.as_object_mut()?;
+    let event = configured_event
+        .or_else(|| {
+            payload
+                .get("hook_event_name")
+                .and_then(serde_json::Value::as_str)
+        })?
+        .to_owned();
+    let agent = if configured_agent == "qoder-auto" {
+        match payload
+            .get("parent_business_info")
+            .and_then(|parent| parent["product"].as_str())
+        {
+            Some("app") => "qoder",
+            Some("cli") => "qodercli",
+            _ => qoder::agent(),
+        }
+    } else {
+        configured_agent
+    }
+    .to_owned();
+    if channel == "observe" && configured_agent == "qoder-auto" {
+        let context: serde_json::Map<_, _> = QODER_OBSERVE_ENV
+            .into_iter()
+            .filter_map(|key| {
+                std::env::var(key)
+                    .ok()
+                    .map(|value| (key.into(), value.into()))
+            })
+            .collect();
+        if !context.is_empty() {
+            payload.insert(
+                QODER_OBSERVE_CONTEXT.into(),
+                serde_json::Value::Object(context),
+            );
+            if let Ok(encoded) = serde_json::to_vec(&payload) {
+                if encoded.len() <= MAX_REQUEST {
+                    body = encoded;
+                }
+            }
+        }
     }
     let left = Duration::from_millis(DEADLINE_MS).checked_sub(started.elapsed())?;
     if left.is_zero() {
@@ -208,15 +256,19 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
         first
     };
     let (action, reason) = reply_action(&reply)?;
-    if action == "block" && channel != "observe" {
-        render_block(&agent, &event, reason)
+    if action != "block" || channel == "observe" {
+        return None;
+    }
+    // Use the CLI's native blocking exit status and stderr reason for PreToolUse.
+    if agent == "qodercli" && event == "PreToolUse" {
+        Some(HookOutput::Block(block_reason(reason).to_owned()))
     } else {
-        None
+        render_block(&agent, &event, reason).map(HookOutput::Json)
     }
 }
 
 /// Never return while a worker can still write to the Agent. Only this main
-/// thread owns stdout; process::exit terminates blocked stdin/socket workers.
+/// thread owns output; process::exit terminates blocked stdin/socket workers.
 pub fn run(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> ! {
     let watchdog = std::thread::Builder::new()
         .name("pilot-hook-deadline".into())
@@ -239,8 +291,19 @@ pub fn run(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> !
         if let Some(left) = Duration::from_millis(DEADLINE_MS).checked_sub(started.elapsed()) {
             if let Ok(Some(output)) = rx.recv_timeout(left) {
                 if started.elapsed() < Duration::from_millis(DEADLINE_MS) {
-                    let _ = std::io::stdout().write_all(output.as_bytes());
-                    let _ = std::io::stdout().flush();
+                    match output {
+                        HookOutput::Json(output) => {
+                            let mut stdout = std::io::stdout().lock();
+                            let _ = stdout.write_all(output.as_bytes());
+                            let _ = stdout.flush();
+                        }
+                        HookOutput::Block(reason) => {
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = writeln!(stderr, "{reason}");
+                            let _ = stderr.flush();
+                            std::process::exit(2);
+                        }
+                    }
                 }
             }
         }

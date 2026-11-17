@@ -505,7 +505,43 @@ impl Policy {
         for (id, plan) in &agents {
             hooks["collector_plans"][id]["namespace"] = serde_json::json!(plan.namespace());
         }
+        // The standalone shell can keep its existing collector for host-only
+        // ACP/multimodal processing while using the SDK for Hook transport.
+        let use_host_collector = hooks
+            .as_object_mut()
+            .expect("validated hooks")
+            .remove("pilot_qoder_use_host_collector");
+        if let Some(value) = use_host_collector {
+            anyhow::ensure!(
+                agents.is_empty() && hooks["agents"] == serde_json::json!(["qoder"]),
+                "invalid standalone Qoder Hook policy"
+            );
+            let data = init
+                .data_dir
+                .parent()
+                .and_then(Path::parent)
+                .filter(|data| data.join(super::STANDALONE_QODER_DATA) == init.data_dir)
+                .ok_or_else(|| anyhow::anyhow!("invalid standalone Qoder Hook directory"))?;
+            let home = init
+                .home_dir
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("standalone Qoder Hook requires home_dir"))?;
+            let mut state: PilotHostState = serde_json::from_value(value)?;
+            anyhow::ensure!(
+                state.data_dir == data,
+                "invalid standalone Qoder Hook state"
+            );
+            state.data_dir = canonical_candidate(data)?;
+            hooks["collector_plans"]["qoder"] = serde_json::json!({
+                "pilot_host": state,
+                "sources": [{"kind": "transcript", "path": canonical_candidate(home)?}],
+            });
+            hooks["relay_host_verdicts"] = Value::Bool(true);
+        } else {
+            hooks["relay_host_verdicts"] = Value::Bool(false);
+        }
         hooks["data_dir"] = serde_json::json!(init.data_dir);
+        hooks["home_dir"] = serde_json::json!(init.home_dir);
         hooks["user_id"] = serde_json::json!(init.user_id);
         hooks["mask"] = serde_json::to_value(&mask)?;
         if let Some(sync) = hooks.get("sync_wait_enabled") {

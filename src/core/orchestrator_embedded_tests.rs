@@ -84,7 +84,7 @@ async fn embedded_runtime_reuses_collector_output_without_host_services() {
     assert!(runtime.signal_task.lock().unwrap().is_none());
     assert!(runtime.dashboard.lock().unwrap().is_none());
     assert!(runtime.status_bar.lock().unwrap().is_none());
-    assert!(runtime.interceptor.lock().unwrap().is_none());
+    assert!(runtime.qoder_hooks.lock().unwrap().is_none());
     assert!(runtime.metrics.lock().unwrap().is_none());
     assert!(runtime.pipeline.lock().unwrap().is_none());
     assert!(runtime.sls.lock().unwrap().is_none());

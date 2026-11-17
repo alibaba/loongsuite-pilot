@@ -450,21 +450,7 @@ unsafe extern "C" fn host_hook(
                     .map_or_else(|e| e, |_| OK);
             }
         }
-        let input = match std::str::from_utf8(input) {
-            Ok(text) => text.to_owned(),
-            Err(_) => return BAD_ARGUMENT,
-        };
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(_) => return FAILURE,
-        };
-        let (code, stdout) =
-            runtime.block_on(crate::interceptor::cli::run_hook_captured(&args, input));
-        unsafe { output(&json!({"exit_code":code,"stdout":stdout}), report, len) }
-            .map_or_else(|e| e, |_| OK)
+        BAD_ARGUMENT
     })
 }
 

@@ -10,8 +10,7 @@ try {
     if ($EmptyResult) { $EmptyResult }
     exit 0
 }
-$NativeArgs = @('hook-process', 'qoder-auto')
-$NativeArgs = @('interceptor', 'hook', '--agent', 'qoder-auto') + $args
+$NativeArgs = @('sdk-hook', '--channel', 'local', '--agent', 'qoder-auto')
 try {
     . (Join-Path $PSScriptRoot 'shared\native.ps1')
     Invoke-PilotNative -HookDir $PSScriptRoot -Arguments $NativeArgs -EmptyResult $EmptyResult

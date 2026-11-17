@@ -11,7 +11,11 @@ fn main() {
     let started = std::time::Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if hook_bin::is_hook(&args) && args.first().is_some_and(|arg| arg != "hook-process") {
-        hook_bin::run(args, started, Some(host_hook_client::run));
+        hook_bin::run(
+            host_hook_client::sdk_args(args),
+            started,
+            Some(host_hook_client::run),
+        );
     }
     let _sdk = match host_loader::library_path().and_then(|path| host_loader::Library::open(&path))
     {

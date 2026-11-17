@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 set -u
 EMPTY_RESULT=''
-NATIVE_ARGS=('hook-process' 'qoder')
-NATIVE_ARGS+=('--wakeup-only')
-AGENT_ID="${1:-qoder}"
-NATIVE_ARGS+=('--agent-id' "$AGENT_ID" '--log-prefix' "$AGENT_ID")
+NATIVE_ARGS=('sdk-hook' '--channel' 'observe' '--agent' 'qoder-auto')
 HOOK_DIR="${BASH_SOURCE[0]%/*}"
 [[ "$HOOK_DIR" != "${BASH_SOURCE[0]}" ]] || HOOK_DIR=.
 if HOOK_DIR="$(cd -- "$HOOK_DIR" && pwd -P)" && source "$HOOK_DIR/shared/native.sh"; then
   pilot_invoke_native "$HOOK_DIR" "$EMPTY_RESULT" "${NATIVE_ARGS[@]}"
+  result=$?
+  [[ "$result" != 2 ]] || exit 2
 else
   printf '%s\n' '[loongsuite-pilot] native hook bootstrap failed' >&2
   [[ -z "$EMPTY_RESULT" ]] || printf '%s\n' "$EMPTY_RESULT"

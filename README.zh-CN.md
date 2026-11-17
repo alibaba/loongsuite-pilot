@@ -53,6 +53,8 @@ Pilot 主要帮助回答这些问题：
 
 当前 Rust 版声明支持 Qoder IDE 和 Qoder CLI。其他 Agent 和 Qoder 变体先标为 `No`，由各自维护者完成真实 Agent 的安装态验收后，按验证过的能力和平台更新。
 
+完整版 Pilot 和云壳共用同一份 SDK 和原生 Hook 二进制。Rust 版支持 Qoder IDE 和 Qoder CLI 拦截，其他 Agent 的拦截暂不支持。
+
 | Agent | 集成方式 | Trace 上报 | 日志上报 | Token 用量 | 对话 / 工具调用 |
 |-------|----------|------------|----------|------------|----------------|
 | Claude Code | Hook | No | No | No | No |

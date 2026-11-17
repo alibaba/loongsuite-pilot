@@ -145,12 +145,12 @@ SDK 分别发布 `sdk-hooks-cloud.json`、`sdk-hooks-local.json` 和 `sdk-hooks-
 
 ```sh
 loongsuite-pilot-sdk-hook sdk-hook --data-dir /var/lib/pilot-sdk/instance-a \
-  --channel cloud --agent qoder --event PreToolUse
+  --channel cloud --agent qodercli --event PreToolUse
 ```
 
-Qoder CLI 可以把 Pilot 可执行文件的绝对路径作为 `command`，并用 `args` 分别传入这些参数。Agent JSON 从 stdin 输入。`--channel local` 使用 SDK 本地规则，`cloud` 使用 `on_hook`。Qoder CLI 输出协议使用 `--agent qodercli`。完整 Pilot 的 `interceptor hook` 命令保留其 HTTP 和 Agent 协议，也经过同一原生硬截止外壳。
+Qoder CLI 在设置中用 `command` 指定 `loongsuite-pilot-sdk-hook` 的绝对路径，通过 `args` 分别传入参数。Agent JSON 从 stdin 输入。`--channel local` 使用 SDK 本地规则，`cloud` 使用 `on_hook`。完整版与云壳共用动态库和 Hook 二进制。完整版安装到共享的 Qoder IDE/CLI 配置时使用 `--agent qoder-auto`，Hook 按实际的调用进程选择响应协议。Qoder CLI 的 `PreToolUse` 拒绝通过退出码 2 和 stderr 交给 Agent。
 
-采集唤醒的 `Stop` Hook 可以直接调用同一个可执行文件，参数为 `hook-process qoder --wakeup-only --agent-id qoder --log-prefix qoder --data-dir /var/lib/pilot-sdk/instance-a`。它写入实例的有界唤醒元数据，采集器按 transcript 进度继续读取。
+采集唤醒在同一个二进制上使用 `sdk-hook --channel observe --agent qodercli --event Stop --data-dir /var/lib/pilot-sdk/instance-a`。SDK 检查 transcript 位于策略授权范围内，复用现有增量进度。
 
 大输入不直接塞进 UDP。客户端把最多 1 MiB JSON 放在实例私有的 `hook-requests-cloud/local` 目录，用最多 16 个跨进程租约限制未完成请求，再发小于 4096 字节的关联报文。SDK 校验 token、进程/实例关联、请求 ID、长度、期限及文件边界。回包不超过 32 KiB；需要自己实现客户端时，报文定义见 `src/sdk/hook_protocol.rs`，发送与租约处理见 `src/sdk/hook_bin.rs`。
 

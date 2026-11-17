@@ -220,7 +220,11 @@ fn publish_hook_notice(request: &HookRequest<'_>) {
     if !value.is_object() {
         return;
     }
-    let identity = resolve_qoder_hook_user_identity(request.env, &agent, &value);
+    publish_native_wakeup(request.env, &agent, &value);
+}
+
+fn publish_native_wakeup(env: &Env, agent: &str, value: &Value) -> bool {
+    let identity = resolve_qoder_hook_user_identity(env, agent, value);
     let identity = identity
         .as_ref()
         .and_then(|id| serde_json::from_str::<Value>(&identity_json(id)).ok());
@@ -233,24 +237,43 @@ fn publish_hook_notice(request: &HookRequest<'_>) {
         .and_then(Value::as_str)
         .is_none_or(|event| matches!(event, "Stop" | "SessionEnd"));
     let identity = identity.or_else(|| terminal.then(|| json!({"name":"","email":""})));
-    let stamp = build_stamp(request.env);
-    if super::qoder_wakeup::publish_qoder_wakeup(
-        &value,
-        &data_dir(request.env),
-        &agent,
+    let stamp = build_stamp(env);
+    let accepted = super::qoder_wakeup::publish_qoder_wakeup(
+        value,
+        &data_dir(env),
+        agent,
         identity.as_ref(),
         &stamp.resources,
         &stamp.span,
-    ) && value["hook_event_name"] != "SubagentStop"
-    {
+    );
+    if accepted && value["hook_event_name"] != "SubagentStop" {
         if let Some(session) = value
             .get("session_id")
             .or_else(|| value.get("conversation_id"))
             .and_then(Value::as_str)
         {
-            record_upstream_context_once(request.env, &agent, session);
+            record_upstream_context_once(env, agent, session);
         }
     }
+    accepted
+}
+
+pub(crate) fn publish_sdk_host_wakeup(value: &Value, data: &Path, home: &Path) -> bool {
+    let mut env = Env::new();
+    env.insert(
+        "LOONGSUITE_PILOT_DATA_DIR".into(),
+        data.to_string_lossy().into_owned(),
+    );
+    env.insert("HOME".into(), home.to_string_lossy().into_owned());
+    env.insert("USERPROFILE".into(), home.to_string_lossy().into_owned());
+    if let Some(context) = value.get(crate::sdk::hook_protocol::QODER_OBSERVE_CONTEXT) {
+        for key in crate::sdk::hook_protocol::QODER_OBSERVE_ENV {
+            if let Some(attribute) = context[key].as_str() {
+                env.insert(key.into(), attribute.into());
+            }
+        }
+    }
+    publish_native_wakeup(&env, "qoder", value)
 }
 
 // Product metadata owns account selection. Transcript shape never selects an

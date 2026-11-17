@@ -15,6 +15,7 @@ enum Mode {
     Identity,
     FixedIdentity,
     Interceptor,
+    SdkHook(&'static str),
 }
 
 const HOOKS: &[Hook] = &[
@@ -76,8 +77,8 @@ const HOOKS: &[Hook] = &[
     },
     Hook {
         file: "qoder-loongsuite-pilot-hook",
-        agent: "qoder",
-        mode: Mode::Identity,
+        agent: "qoder-auto",
+        mode: Mode::SdkHook("observe"),
     },
     Hook {
         file: "qodercn-loongsuite-pilot-hook",
@@ -102,7 +103,7 @@ const HOOKS: &[Hook] = &[
     Hook {
         file: "interceptor-hook",
         agent: "qoder-auto",
-        mode: Mode::Interceptor,
+        mode: Mode::SdkHook("local"),
     },
     Hook {
         file: "interceptor-qwenworkcn-hook",
@@ -115,7 +116,7 @@ fn powershell(hook: &Hook) -> String {
     let agent = hook.agent;
     let empty = if matches!(
         hook.mode,
-        Mode::Identity | Mode::FixedIdentity | Mode::Interceptor
+        Mode::Identity | Mode::FixedIdentity | Mode::Interceptor | Mode::SdkHook(_)
     ) {
         ""
     } else {
@@ -123,7 +124,9 @@ fn powershell(hook: &Hook) -> String {
     };
     let mut script = format!("$ErrorActionPreference = 'Stop'\n$EmptyResult = '{empty}'\n");
     script.push_str("# Resolve signed built-in modules by their exact PSHOME manifests. Short-name\n# autoload can stall in isolated Windows PowerShell 5.1 environments.\ntry {\n    Import-Module -Name ($PSHOME + '\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop\n    Import-Module -Name ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1') -ErrorAction Stop\n} catch {\n    try { Microsoft.PowerShell.Utility\\Write-Error '[loongsuite-pilot] built-in PowerShell modules unavailable' -ErrorAction Continue } catch {}\n    if ($EmptyResult) { $EmptyResult }\n    exit 0\n}\n");
-    script.push_str(&format!("$NativeArgs = @('hook-process', '{agent}')\n"));
+    if !matches!(hook.mode, Mode::SdkHook(_)) {
+        script.push_str(&format!("$NativeArgs = @('hook-process', '{agent}')\n"));
+    }
     if matches!(agent, "qoder" | "qoder-cn") {
         script.push_str("$NativeArgs += '--wakeup-only'\n");
     }
@@ -151,6 +154,9 @@ fn powershell(hook: &Hook) -> String {
                 "$NativeArgs += @('--agent-id', '{agent}', '--log-prefix', '{agent}')\n"
             ));
         }
+        Mode::SdkHook(channel) => script.push_str(&format!(
+            "$NativeArgs = @('sdk-hook', '--channel', '{channel}', '--agent', '{agent}')\n"
+        )),
         Mode::Interceptor => {
             script.push_str(&format!(
                 "$NativeArgs = @('interceptor', 'hook', '--agent', '{agent}') + $args\n"
@@ -163,7 +169,10 @@ fn powershell(hook: &Hook) -> String {
 
 fn shell(hook: &Hook) -> String {
     let agent = hook.agent;
-    let empty = if matches!(hook.mode, Mode::Identity | Mode::Interceptor) {
+    let empty = if matches!(
+        hook.mode,
+        Mode::Identity | Mode::Interceptor | Mode::SdkHook(_)
+    ) {
         ""
     } else {
         "{}"
@@ -173,7 +182,10 @@ fn shell(hook: &Hook) -> String {
     } else {
         ""
     };
-    let mut script = format!("#!/usr/bin/env bash\n{bootstrap}set -u\nEMPTY_RESULT='{empty}'\nNATIVE_ARGS=('hook-process' '{agent}')\n");
+    let mut script = format!("#!/usr/bin/env bash\n{bootstrap}set -u\nEMPTY_RESULT='{empty}'\n");
+    if !matches!(hook.mode, Mode::SdkHook(_)) {
+        script.push_str(&format!("NATIVE_ARGS=('hook-process' '{agent}')\n"));
+    }
     if matches!(agent, "qoder" | "qoder-cn") {
         script.push_str("NATIVE_ARGS+=('--wakeup-only')\n");
     }
@@ -194,6 +206,9 @@ fn shell(hook: &Hook) -> String {
                 "NATIVE_ARGS+=('--agent-id' '{agent}' '--log-prefix' '{agent}')\n"
             ));
         }
+        Mode::SdkHook(channel) => script.push_str(&format!(
+            "NATIVE_ARGS=('sdk-hook' '--channel' '{channel}' '--agent' '{agent}')\n"
+        )),
         Mode::Interceptor => {
             script.push_str(&format!(
                 "NATIVE_ARGS=('interceptor' 'hook' '--agent' '{agent}' \"$@\")\n"
@@ -218,7 +233,13 @@ if HOOK_DIR="$(cd -- "$HOOK_DIR" && pwd -P)" && source "$HOOK_DIR/shared/native.
     }
     script.push_str(
         r#"  pilot_invoke_native "$HOOK_DIR" "$EMPTY_RESULT" "${NATIVE_ARGS[@]}"
-else
+"#,
+    );
+    if matches!(hook.mode, Mode::SdkHook(_)) {
+        script.push_str("  result=$?\n  [[ \"$result\" != 2 ]] || exit 2\n");
+    }
+    script.push_str(
+        r#"else
   printf '%s\n' '[loongsuite-pilot] native hook bootstrap failed' >&2
   [[ -z "$EMPTY_RESULT" ]] || printf '%s\n' "$EMPTY_RESULT"
 fi

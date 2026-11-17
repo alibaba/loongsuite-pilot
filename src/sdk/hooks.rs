@@ -128,8 +128,9 @@ impl Hooks {
                         let result=process(&packet,&spool,channel,&settings,callback,(context,&queue),deadline);
                         queue.record_hook(&packet.agent, &format!("{channel}:{}",packet.event),hook_started.elapsed().as_secs_f64()*1000.0);
                         if Instant::now()<deadline && !stop.load(Ordering::SeqCst){
+                            record_tool_verdict(&queue, &settings, &result, if channel == "local" { callback } else { None }, context, deadline);
                             let response=json!({"id":packet.id,"instance":instance,"action":result.0,"reason":result.1});
-                            if let Ok(bytes)=serde_json::to_vec(&response){if bytes.len()<=MAX_REPLY && socket.send_to(&bytes,peer).is_ok(){record_native_verdict(&queue,&settings,&result);}}
+                            if let Ok(bytes)=serde_json::to_vec(&response){if bytes.len()<=MAX_REPLY && Instant::now()<deadline && socket.send_to(&bytes,peer).is_ok(){record_blocked_prompt(&queue,&settings,&result);}}
                         }
                         if channel == "observe" { return; }
                         // Record delivery is independent of the Agent verdict.
@@ -241,7 +242,7 @@ fn process(
         return allow();
     }
 
-    adapter.wakeup(&payload, &packet.event, &trusted, queue);
+    adapter.wakeup(&payload, &packet.event, channel, &trusted, queue);
     if channel == "observe" {
         return allow();
     }
@@ -350,10 +351,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         == 0
 }
 
-fn record_native_verdict(
+fn record_tool_verdict(
     queue: &Outbox,
     settings: &RwLock<Value>,
     result: &(&str, String, Option<crate::interceptor::HookRequest>),
+    callback: Option<OnHook>,
+    context: usize,
+    deadline: Instant,
 ) {
     use crate::interceptor::{
         HookEventName, ToolInterceptPhase, ToolVerdictAction, ToolVerdictKey,
@@ -385,7 +389,52 @@ fn record_native_verdict(
         if queue.verdicts.get(&key, now) != Some(ToolVerdictAction::Block) {
             queue.verdicts.put(&key, action, now);
         }
+        if let Some(callback) =
+            callback.filter(|_| settings.read().unwrap()["relay_host_verdicts"] == true)
+        {
+            let verdict = json!({
+                "session_id": key.session_id,
+                "tool_use_id": key.tool_use_id,
+                "phase": phase,
+                "action": action,
+            });
+            if let Ok(bytes) = serde_json::to_vec(&verdict) {
+                let remaining = deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis() as u32;
+                if remaining > 0 {
+                    // The full Pilot callback updates its in-memory verdict store.
+                    // This notification cannot alter the verdict or delay delivery via the outbox.
+                    queue.callbacks.fetch_add(1, Ordering::SeqCst);
+                    let mut reply = [0; 1];
+                    let mut length = 0;
+                    // SAFETY: all views and out parameters remain live until the callback returns.
+                    unsafe {
+                        callback(
+                            context as *mut _,
+                            PilotJsonView::from_bytes(&bytes),
+                            remaining,
+                            reply.as_mut_ptr(),
+                            reply.len(),
+                            &mut length,
+                        );
+                    }
+                    queue.callbacks.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+        }
     }
+}
+
+fn record_blocked_prompt(
+    queue: &Outbox,
+    settings: &RwLock<Value>,
+    result: &(&str, String, Option<crate::interceptor::HookRequest>),
+) {
+    use crate::interceptor::HookEventName;
+    let Some(request) = result.2.as_ref() else {
+        return;
+    };
     if result.0 == "block"
         && matches!(
             request.agent,
@@ -395,19 +444,41 @@ fn record_native_verdict(
         && request.event == HookEventName::UserPromptSubmit
     {
         let mut entry = crate::interceptor::build_blocked_qoder_prompt_entry(request, None);
-        entry.user_id = settings
-            .read()
-            .unwrap()
-            .get("user_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-        let mask = settings
-            .read()
-            .unwrap()
-            .get("mask")
-            .cloned()
-            .and_then(|v| serde_json::from_value::<crate::types::MaskConfig>(v).ok());
+        let (host, mask) = {
+            let settings = settings.read().unwrap();
+            entry.user_id = settings["user_id"].as_str().unwrap_or("").to_owned();
+            (
+                settings
+                    .pointer("/collector_plans/qoder/pilot_host")
+                    .cloned(),
+                settings["mask"].clone(),
+            )
+        };
+        if let Some(host) = host
+            .and_then(|state| serde_json::from_value::<super::policy::PilotHostState>(state).ok())
+        {
+            let Ok(mut workspace) = crate::core::WorkspacePolicy::new(
+                &host.exclude_workspaces,
+                Some(
+                    host.data_dir
+                        .join("state/workspace-exclusions")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            ) else {
+                return;
+            };
+            if !workspace.allows(
+                &crate::normalization::entry_to_object(&entry),
+                "interceptor",
+            ) {
+                return;
+            }
+            if host.capture_message_content == Some(false) {
+                crate::normalization::agent_content_policy::strip_agent_message_content(&mut entry);
+            }
+        }
+        let mask = serde_json::from_value::<crate::types::MaskConfig>(mask).ok();
         let entry = mask
             .as_ref()
             .map(|mask| {

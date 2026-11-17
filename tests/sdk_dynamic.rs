@@ -144,8 +144,12 @@ struct Host {
 }
 impl Host {
     fn start(root: &Path, policy: Value, ctx: Box<Context>) -> Self {
+        Self::start_with_home(root, None, policy, ctx)
+    }
+
+    fn start_with_home(root: &Path, home: Option<&Path>, policy: Value, ctx: Box<Context>) -> Self {
         let library = loader::Library::open(&library_path()).unwrap();
-        let init = serde_json::to_vec(&json!({"data_dir":root,"resource_dir":env!("CARGO_MANIFEST_DIR"),"user_id":"sdk-acceptance"})).unwrap();
+        let init = serde_json::to_vec(&json!({"data_dir":root,"resource_dir":env!("CARGO_MANIFEST_DIR"),"user_id":"sdk-acceptance","home_dir":home})).unwrap();
         let policy = serde_json::to_vec(&policy).unwrap();
         let mut host = Self {
             library,
@@ -898,6 +902,127 @@ fn cloud_and_local_verdicts_use_trusted_capabilities_and_the_existing_qoder_prot
 }
 
 #[test]
+fn qoder_cli_pre_tool_block_exits_two_and_failed_verdicts_stay_open() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    let mut policy = json!({"agents":["qoder"],"hcd":{"agent_configs":{"qoder":{"collection":{"enabled":false}}}},
+        "sdk_options":{"hooks":{"local":{"mode":"all","types":[]}},"delivery":{"flush_interval_ms":10}}});
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    host.ready();
+    let payload = json!({"hook_event_name":"PreToolUse","session_id":"sdk-cli-permissions",
+        "tool_use_id":"tool-1","tool_name":"Bash","tool_input":{"command":"export KEY=sk-1234567890abcdefghijklmnop"}});
+    let run = |channel| {
+        sdk_hook_command(&data, channel, "qodercli", "PreToolUse", &payload)
+            .wait_with_output()
+            .unwrap()
+    };
+
+    for channel in ["cloud", "local"] {
+        let output = run(channel);
+        assert_eq!(output.status.code(), Some(2), "{channel}");
+        assert!(output.stdout.is_empty(), "{channel}");
+        assert!(!output.stderr.is_empty(), "{channel}");
+        if channel == "cloud" {
+            assert_eq!(output.stderr, b"SDK foreign host test\n");
+        }
+    }
+
+    let assert_allowed = |output: std::process::Output| {
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    };
+    assert_allowed(run("observe"));
+    host.ctx.hook_invalid.store(true, Ordering::SeqCst);
+    assert_allowed(run("cloud"));
+    host.ctx.hook_invalid.store(false, Ordering::SeqCst);
+    policy["sdk_options"]["hooks"]["blocking_agents"] = json!([]);
+    assert_eq!(host.apply(policy).0, OK);
+    assert_allowed(run("cloud"));
+    host.stop();
+    assert_allowed(run("cloud"));
+}
+
+#[test]
+fn qoder_auto_uses_native_ancestor_and_accepts_event_from_stdin() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    let policy = json!({"agents":["qoder"],"hcd":{"agent_configs":{"qoder":{"collection":{"enabled":false}}}}});
+    let mut host = Host::start(&data, policy, Box::default());
+    host.ready();
+
+    for (name, expected_status) in [("Qoder", "desktop"), ("qodercli-1.1.76", "cli")] {
+        let binary = root
+            .path()
+            .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        let current = std::env::current_exe().unwrap();
+        if std::fs::hard_link(&current, &binary).is_err() {
+            std::fs::copy(current, &binary).unwrap();
+        }
+        let mut command = Command::new(&binary);
+        command
+            .args(["--exact", "qoder_auto_ancestor_fixture", "--nocapture"])
+            .env("PILOT_TEST_QODER_AUTO_DATA", &data)
+            .env("PILOT_TEST_QODER_AUTO_SURFACE", expected_status);
+        // A parallel test can fork while the cross-device copy has its
+        // destination open. Retry only this transient exec race.
+        let mut races = 0;
+        let output = loop {
+            match command.output() {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy && races < 5 =>
+                {
+                    races += 1;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                result => break result.unwrap(),
+            }
+        };
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+    host.stop();
+}
+
+#[test]
+fn qoder_auto_ancestor_fixture() {
+    let Some(data) = std::env::var_os("PILOT_TEST_QODER_AUTO_DATA") else {
+        return;
+    };
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"))
+        .arg("sdk-hook")
+        .arg("--data-dir")
+        .arg(data)
+        .args(["--channel", "cloud", "--agent", "qoder-auto"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin.take().unwrap().write_all(
+        br#"{"hook_event_name":"PreToolUse","session_id":"auto","tool_name":"Bash","tool_input":{"command":"echo probe"}}"#,
+    ).unwrap();
+    let output = hook.wait_with_output().unwrap();
+    if std::env::var("PILOT_TEST_QODER_AUTO_SURFACE").as_deref() == Ok("cli") {
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(output.stderr, b"SDK foreign host test\n");
+        assert!(output.stdout.is_empty());
+    } else {
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let verdict: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            verdict.pointer("/hookSpecificOutput/permissionDecision"),
+            Some(&json!("deny"))
+        );
+    }
+}
+
+#[test]
 fn missing_sources_wait_without_creating_agent_directories_and_can_be_disabled() {
     let root = tempfile::tempdir().unwrap();
     let missing = root.path().join("missing-agent-source");
@@ -918,6 +1043,83 @@ fn missing_sources_wait_without_creating_agent_directories_and_can_be_disabled()
     assert_eq!(host.apply(empty_policy()).0, OK);
     assert_eq!(host.snapshot()["agents"], json!([]));
     assert!(!missing.exists());
+    host.stop();
+}
+
+#[test]
+fn full_pilot_sdk_observe_preserves_qoder_wakeup_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let data = root.join("pilot");
+    let home = root.join("home");
+    let sdk = data.join("state/standalone-qoder-sdk");
+    std::fs::create_dir_all(&home).unwrap();
+    let file = home.join("session.jsonl");
+    std::fs::write(&file, "{}\\n").unwrap();
+    let policy = json!({
+        "agents": ["qoder"],
+        "hcd": {"agent_configs":{"qoder":{"collection":{"enabled":false}}}},
+        "sdk_options": {"hooks":{"pilot_qoder_use_host_collector":{
+            "data_dir":data, "capture_message_content": false
+        }}}
+    });
+    let mut host = Host::start_with_home(&sdk, Some(&home), policy, Box::default());
+    host.ready();
+
+    let traceparent = "00-00112233445566778899aabbccddeeff-0123456789abcdef-01";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"))
+        .args([
+            "sdk-hook",
+            "--data-dir",
+            sdk.to_str().unwrap(),
+            "--channel",
+            "observe",
+            "--agent",
+            "qoder-auto",
+            "--event",
+            "Stop",
+        ])
+        .env("TRACEPARENT", traceparent)
+        .env("AGENTTEAMS_WORKER_NAME", "sdk-hook-worker")
+        .env(
+            "LOONGSUITE_PILOT_SPAN_ATTRIBUTES",
+            "custom.origin=full-hook",
+        )
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let payload = json!({
+        "session_id":"sdk-full-wakeup",
+        "transcript_path":file,
+        "hook_event_name":"Stop"
+    });
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+
+    let source = std::fs::read_dir(data.join("state/qoder-transcripts/qoder/sources"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let wakeup: Value =
+        serde_json::from_slice(&std::fs::read(source.join("source.json")).unwrap()).unwrap();
+    assert_eq!(wakeup["userIdentity"], json!({"name":"","email":""}));
+    assert_eq!(
+        wakeup["resourceAttributes"]["agentteams.worker.name"],
+        "sdk-hook-worker"
+    );
+    assert_eq!(wakeup["spanAttributes"]["custom.origin"], "full-hook");
+    let trace = std::fs::read_to_string(data.join("acp-correlate/sdk-full-wakeup.jsonl")).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(trace.trim()).unwrap()["traceparent"],
+        traceparent
+    );
     host.stop();
 }
 

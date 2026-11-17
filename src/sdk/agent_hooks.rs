@@ -45,6 +45,7 @@ impl AgentHook {
         self,
         payload: &Map<String, Value>,
         event: &str,
+        channel: &str,
         settings: &Value,
         queue: &Outbox,
     ) {
@@ -54,6 +55,12 @@ impl AgentHook {
         let Some(data) = settings["data_dir"].as_str() else {
             return;
         };
+        let qoder_host = (self.policy_id() == "qoder")
+            .then(|| plan.pointer("/pilot_host/data_dir").and_then(Value::as_str))
+            .flatten();
+        if qoder_host.is_some() && channel != "observe" {
+            return;
+        }
         let Some(path) = payload
             .get("transcript_path")
             .or_else(|| payload.get("transcriptPath"))
@@ -83,10 +90,14 @@ impl AgentHook {
             );
             return;
         }
-        let Some(namespace) = plan["namespace"].as_str() else {
-            return;
+        let state = if let Some(host) = qoder_host {
+            PathBuf::from(host)
+        } else {
+            let Some(namespace) = plan["namespace"].as_str() else {
+                return;
+            };
+            Path::new(data).join("sources").join(namespace)
         };
-        let state = Path::new(data).join("sources").join(namespace);
         if crate::utils::source_access::private_path(&state).is_err() {
             return;
         }
@@ -94,14 +105,22 @@ impl AgentHook {
             InterceptorAgent::Qoder | InterceptorAgent::QoderCli => {
                 let mut value = Value::Object(payload.clone());
                 value["transcript_path"] = json!(path);
-                crate::hook_process::publish_qoder_wakeup(
-                    &value,
-                    &state,
-                    "qoder",
-                    None,
-                    &Map::new(),
-                    &Map::new(),
-                )
+                value["hook_event_name"] = json!(event);
+                if qoder_host.is_some() {
+                    let Some(home) = settings["home_dir"].as_str() else {
+                        return;
+                    };
+                    crate::hook_process::publish_sdk_host_wakeup(&value, &state, Path::new(home))
+                } else {
+                    crate::hook_process::publish_qoder_wakeup(
+                        &value,
+                        &state,
+                        "qoder",
+                        None,
+                        &Map::new(),
+                        &Map::new(),
+                    )
+                }
             }
             InterceptorAgent::Codex => codex_wakeup(payload, event, &path, &state).is_ok(),
             _ => false,

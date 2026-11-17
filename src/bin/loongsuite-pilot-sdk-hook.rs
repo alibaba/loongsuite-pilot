@@ -12,6 +12,10 @@ fn main() {
     let started = std::time::Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if hook_bin::is_hook(&args) {
-        hook_bin::run(args, started, Some(host_hook_client::run));
+        hook_bin::run(
+            host_hook_client::sdk_args(args),
+            started,
+            Some(host_hook_client::run),
+        );
     }
 }

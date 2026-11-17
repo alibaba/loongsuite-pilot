@@ -61,9 +61,6 @@ use crate::inputs::qwen_work_cn::{
 use crate::inputs::rest_support::{HookInputOptions, SessionInputOptions};
 use crate::inputs::workbuddy::{WorkBuddyInput, WorkBuddyInputOptions};
 use crate::inputs::wukong::{WukongInput, WukongInputOptions};
-use crate::interceptor::daemon::{
-    start_interceptor_service, InterceptorService, StartInterceptorServiceOptions,
-};
 use crate::interceptor::{
     load_interceptor_config, resolve_enabled_interceptor_types, ToolVerdictStore,
 };
@@ -229,7 +226,7 @@ pub struct Orchestrator {
     runtime_writer: Mutex<Option<RuntimeWriter>>,
     summary_writer: Mutex<Option<MetricsSummaryWriter>>,
     dashboard: Mutex<Option<dashboard::DashboardServer>>,
-    interceptor: Mutex<Option<InterceptorService>>,
+    qoder_hooks: Mutex<Option<super::sdk_agent::SdkAgent>>,
     multimodal_ready: Mutex<bool>,
     verdicts: Mutex<Option<Arc<ToolVerdictStore>>>,
     status_bar: Mutex<Option<StatusBarAppManager>>,
@@ -238,8 +235,6 @@ pub struct Orchestrator {
     relayed_alarms: Mutex<HashSet<String>>,
     running: Mutex<bool>,
     listeners: Mutex<Vec<OrchestratorListener>>,
-    #[cfg(test)]
-    test_interceptor_port: Option<u16>,
     #[cfg(test)]
     test_detection_entries: Mutex<Vec<Arc<dyn AgentDetection>>>,
 }
@@ -281,7 +276,7 @@ impl Orchestrator {
             runtime_writer: Mutex::new(None),
             summary_writer: Mutex::new(None),
             dashboard: Mutex::new(None),
-            interceptor: Mutex::new(None),
+            qoder_hooks: Mutex::new(None),
             multimodal_ready: Mutex::new(false),
             verdicts: Mutex::new(None),
             status_bar: Mutex::new(None),
@@ -290,8 +285,6 @@ impl Orchestrator {
             relayed_alarms: Mutex::new(HashSet::new()),
             running: Mutex::new(false),
             listeners: Mutex::new(Vec::new()),
-            #[cfg(test)]
-            test_interceptor_port: None,
             #[cfg(test)]
             test_detection_entries: Mutex::new(Vec::new()),
             runtime_options: CollectorRuntimeOptions::default(),
@@ -419,12 +412,14 @@ impl Orchestrator {
         ));
         verdicts.restore(chrono::Utc::now().timestamp_millis());
         *self.verdicts.lock().expect("verdicts") = Some(Arc::clone(&verdicts));
-        let interception_enabled = if self.runtime_options.manage_host_services {
-            let config = load_interceptor_config(None).await;
-            !resolve_enabled_interceptor_types(&config).is_empty()
+        let interceptor_config = if self.standalone && self.runtime_options.manage_host_services {
+            Some(load_interceptor_config(None).await)
         } else {
-            false
+            None
         };
+        let interception_enabled = interceptor_config
+            .as_ref()
+            .is_some_and(|config| !resolve_enabled_interceptor_types(config).is_empty());
         self.inputs
             .set_intercept_result_linker(Arc::new(InterceptResultLinker::new(
                 Arc::clone(&verdicts),
@@ -501,7 +496,14 @@ impl Orchestrator {
         };
         let mut detection = self.register_all_inputs(&state_store).await;
         if self.uses_sdk_qoder() {
-            self.register_sdk_qoder(&mut detection, &pilot_dir, &state_store);
+            self.register_sdk_qoder(
+                &mut detection,
+                &pilot_dir,
+                &state_store,
+                interceptor_config.as_ref(),
+            );
+        } else if let Some(config) = &interceptor_config {
+            self.start_qoder_hooks(&pilot_dir, config, verdicts).await;
         }
         if self.uses_sdk_codex() {
             self.register_sdk_codex(&mut detection, &pilot_dir, &state_store)
@@ -667,39 +669,6 @@ impl Orchestrator {
                 }
                 *self.dashboard.lock().expect("dashboard") = Some(dashboard);
             }
-            let inputs_for_prompt = Arc::clone(&self.inputs);
-            match self
-                .start_collector_interceptor(StartInterceptorServiceOptions {
-                    data_dir: self.data_dir.clone(),
-                    version: package_version.clone(),
-                    git_commit: if package_git.is_empty() {
-                        None
-                    } else {
-                        Some(package_git)
-                    },
-                    verdict_store: Some(verdicts),
-                    emit_blocked_prompt: Some(Arc::new(move |entry| {
-                        let inputs = Arc::clone(&inputs_for_prompt);
-                        tokio::spawn(async move {
-                            if let Err(err) = inputs.flush_prepared_entries(vec![entry]).await {
-                                logger("Orchestrator").warn(
-                                    "blocked prompt flush failed",
-                                    Some(&fields(serde_json::json!({ "error": err }))),
-                                );
-                            }
-                        });
-                    })),
-                })
-                .await
-            {
-                Ok(service) => {
-                    *self.interceptor.lock().expect("interceptor") = Some(service);
-                }
-                Err(err) => logger("Orchestrator").warn(
-                    "interceptor start failed (non-fatal)",
-                    Some(&fields(serde_json::json!({ "error": err.to_string() }))),
-                ),
-            }
             if cfg!(target_os = "macos") && self.config.status_bar.enabled {
                 let status = StatusBarAppManager::new(
                     self.data_dir.clone(),
@@ -766,11 +735,12 @@ impl Orchestrator {
         if let Some(dashboard) = self.dashboard.lock().expect("dashboard").take() {
             dashboard.stop();
         }
-        let service = self.interceptor.lock().expect("interceptor").take();
-        if let Some(service) = service {
-            service.stop().await;
-        } else if let Some(verdicts) = self.verdicts.lock().expect("verdicts").clone() {
-            if let Err(err) = verdicts.dump(chrono::Utc::now().timestamp_millis()) {
+        let hooks = self.qoder_hooks.lock().expect("Qoder Hook SDK").take();
+        if let Some(hooks) = hooks {
+            hooks.stop().await;
+        }
+        if let Some(verdicts) = self.verdicts.lock().expect("verdicts").clone() {
+            if let Err(err) = verdicts.stop_checkpoint_loop(chrono::Utc::now().timestamp_millis()) {
                 logger("Orchestrator").warn(
                     "interceptor verdict checkpoint failed",
                     Some(&fields(serde_json::json!({ "error": err.to_string() }))),
@@ -913,18 +883,6 @@ impl Orchestrator {
     }
     pub fn alarm_manager(&self) -> Option<Arc<AlarmManager>> {
         self.alarm.lock().expect("alarm").clone()
-    }
-
-    async fn start_collector_interceptor(
-        &self,
-        options: StartInterceptorServiceOptions,
-    ) -> std::io::Result<InterceptorService> {
-        #[cfg(test)]
-        if let Some(port) = self.test_interceptor_port {
-            return crate::interceptor::daemon::start_interceptor_service_at_port(options, port)
-                .await;
-        }
-        start_interceptor_service(options).await
     }
 
     async fn start_multimodal(&self) {
@@ -2812,11 +2770,61 @@ impl Orchestrator {
                     .is_some_and(|agent| is_agent_multimodal_enabled(Some("qoder"), agent)))
     }
 
+    async fn start_qoder_hooks(
+        &self,
+        pilot_dir: &str,
+        config: &crate::types::InterceptorConfig,
+        verdicts: Arc<ToolVerdictStore>,
+    ) {
+        let sdk_data = self.data_dir_join(crate::sdk::STANDALONE_QODER_DATA);
+        let init = serde_json::json!({
+            "data_dir": sdk_data,
+            "resource_dir": pilot_dir,
+            "home_dir": resolve_home("~"),
+            "user_id": self.config.user_id,
+        });
+        let policy = serde_json::json!({
+            "agents": ["qoder"],
+            "hcd": {"agent_configs":{"qoder":{"collection":{"enabled":false}}}},
+            "sdk_options": {"mask": self.config.mask, "hooks": {
+                "local": config,
+                "pilot_qoder_use_host_collector": {
+                    "data_dir": self.data_dir,
+                    "capture_message_content": self.config.agents.get("qoder")
+                        .and_then(|agent| agent.capture_message_content),
+                    "exclude_workspaces": self.config.privacy.as_ref()
+                        .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
+                },
+            }},
+        });
+        let sdk = super::sdk_agent::SdkAgent::hook_only(
+            init,
+            policy,
+            &self.inputs,
+            std::path::PathBuf::from(sdk_data),
+            Arc::clone(&verdicts),
+        );
+        if let Err(error) = sdk.start().await {
+            logger("Orchestrator").warn(
+                "Qoder Hook SDK start failed (non-fatal)",
+                Some(&fields(serde_json::json!({ "error": error }))),
+            );
+            self.emit(OrchestratorEvent::ComponentFailure {
+                component: "qoder-sdk-hook".into(),
+                error,
+            });
+        } else {
+            verdicts.start_checkpoint_loop(interceptor::TOOL_VERDICT_CHECKPOINT_INTERVAL_MS);
+            *self.qoder_hooks.lock().expect("Qoder Hook SDK") = Some(sdk);
+        }
+    }
+
     fn register_sdk_qoder(
         &self,
         entries: &mut Vec<Arc<dyn AgentDetection>>,
         pilot_dir: &str,
         state_store: &Arc<StateStore>,
+        interceptor_config: Option<&crate::types::InterceptorConfig>,
     ) {
         use crate::inputs::qoder_trace::{resolve_qoder_app_root, QODER_SEGMENTS_ROOT};
         let home = resolve_home("~");
@@ -2826,7 +2834,7 @@ impl Orchestrator {
         let history = self.data_dir_join("logs/qoder/history");
         let intercept = self.data_dir_join("logs/qodercli-intercept.jsonl");
         let config = self.config.agents.get("qoder");
-        let sdk_data = self.data_dir_join("state/standalone-qoder-sdk");
+        let sdk_data = self.data_dir_join(crate::sdk::STANDALONE_QODER_DATA);
         let init = serde_json::json!({
             "data_dir": sdk_data,
             "resource_dir": pilot_dir,
@@ -2855,7 +2863,7 @@ impl Orchestrator {
                         .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
                 },
             }}}},
-            "sdk_options": {"mask": self.config.mask},
+            "sdk_options": {"mask": self.config.mask, "hooks": {"local": interceptor_config}},
         });
         let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
             "qoder-trace",
@@ -4759,9 +4767,7 @@ mod tests {
                     "the fixture locator must reject commands absent from PATH"
                 );
             }
-            let mut collector = Orchestrator::new(config);
-            collector.test_interceptor_port = Some(0);
-            let orchestrator = Arc::new(collector);
+            let orchestrator = Arc::new(Orchestrator::new(config));
             let events = Arc::new(Mutex::new(Vec::new()));
             let received = events.clone();
             orchestrator.on_event(move |event| received.lock().unwrap().push(event));
@@ -5347,7 +5353,7 @@ mod tests {
             assert!(orchestrator.summary_task.lock().unwrap().is_none());
             assert!(orchestrator.signal_task.lock().unwrap().is_none());
             assert!(orchestrator.dashboard.lock().unwrap().is_none());
-            assert!(orchestrator.interceptor.lock().unwrap().is_none());
+            assert!(orchestrator.qoder_hooks.lock().unwrap().is_none());
             assert!(!data.join("logs/runtime.json").exists());
             assert!(data.join("logs/input-state.json").is_file());
             let saved: serde_json::Value =
