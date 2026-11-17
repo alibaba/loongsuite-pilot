@@ -1135,6 +1135,7 @@ migrate_legacy_layout() {
 # ============================================================
 write_config() {
     # Drop placeholders and values over 128 bytes. An empty result leaves the previous hostSn.
+    # Spaces are kept: a VMware serial is "VMware-" plus hex bytes separated by spaces.
     normalize_host_sn() {
         local value lower bytes
         value=$(printf '%s' "${1-}" | tr -d '\r')
@@ -1150,16 +1151,44 @@ write_config() {
         bytes=$(printf '%s' "$value" | wc -c | tr -d '[:space:]')
         [ "$bytes" -le 128 ] || return 0
         case "$value" in
-            *[!A-Za-z0-9._:-]*) return 0 ;;
+            *[!A-Za-z0-9._:\ -]*) return 0 ;;
         esac
         printf '%s' "$value"
     }
 
+    # Run a command for at most N seconds. On expiry, kill it and return 1.
+    # A failed or expired read leaves hostSn unset, so the previous value stays.
+    run_bounded() {
+        local secs="$1" outfile="$2"
+        shift 2
+        "$@" >"$outfile" 2>/dev/null &
+        local pid=$!
+        local i=0
+        while [ "$i" -lt "$secs" ] && kill -0 "$pid" 2>/dev/null; do
+            sleep 1
+            i=$((i + 1))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+            kill -9 "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 1
+        fi
+        wait "$pid" 2>/dev/null || true
+        return 0
+    }
+
     read_host_sn() {
-        local uname_s raw candidate path
+        local uname_s raw candidate path raw_file
         uname_s=$(uname -s 2>/dev/null || true)
         if [ "$uname_s" = "Darwin" ]; then
-            raw=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null || true)
+            raw=""
+            raw_file=$(mktemp 2>/dev/null || printf '%s' "/tmp/lp-host-sn.$$")
+            if run_bounded 5 "$raw_file" ioreg -rd1 -c IOPlatformExpertDevice; then
+                raw=$(tr -d '\r' < "$raw_file" 2>/dev/null || true)
+            fi
+            rm -f "$raw_file"
             candidate=$(printf '%s\n' "$raw" | sed -n 's/.*"IOPlatformSerialNumber" *= *"\([^"]*\)".*/\1/p' | head -n 1 || true)
             if [ "${#candidate}" -gt 128 ]; then
                 candidate=""

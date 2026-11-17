@@ -127,6 +127,7 @@ export interface AnalyticsConfig {
   dataDir: string;
   userId: string;
   hostSn?: string;
+  hostIdentityTags: boolean;
   collectLog: boolean;
   collectTrace: boolean;
   /** Exact service.name shared by every agent and backend. */

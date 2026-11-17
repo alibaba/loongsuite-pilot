@@ -35,6 +35,7 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
 | `dataDir` | Local runtime and data directory. |
 | `userId` | User identity written to emitted events. Defaults to the machine hostname. |
 | `hostSn` | Hardware serial written at install time. When set, SLS log groups include `__tag__:__sn__`. |
+| `hostIdentityTags` | Set to `false` to omit `__mac__` and `__sn__` from both the main collector and Qoder SLS log groups. Defaults to `true`. |
 | `collectLog` | Enables SLS log reporting. JSONL and HTTP remain controlled by their own `enabled` flags. |
 | `collectTrace` | Enables OTLP trace export when a trace destination is configured. |
 | `dashboard.port` | Loopback dashboard port. Must be an integer from 1 through 65535; invalid values fall back to `8765`. |
@@ -50,6 +51,7 @@ Equivalent environment variables:
 | `LOONGSUITE_PILOT_ENABLED` | Set `false` or `0` to disable the collector. |
 | `LOONGSUITE_PILOT_DATA_DIR` | Override the data directory. |
 | `LOONGSUITE_PILOT_USER_ID` | Override `userId`. |
+| `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS` | Set to `false` or `0` to omit `__mac__` and `__sn__`. When unset, `hostIdentityTags` is used. |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | Set `false` or `0` to disable SLS log reporting. |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | Set `false` or `0` to disable trace reporting. |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | Override `serviceName` with one exact name for all agents and backends. |

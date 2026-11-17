@@ -1441,11 +1441,11 @@ function Get-HostSerial {
     try {
         $values = @()
         try {
-            $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction Stop
+            $bios = Get-CimInstance -ClassName Win32_BIOS -OperationTimeoutSec 5 -ErrorAction Stop
             if ($bios.SerialNumber) { $values += [string]$bios.SerialNumber }
         } catch {}
         try {
-            $product = Get-CimInstance -ClassName Win32_ComputerSystemProduct -ErrorAction Stop
+            $product = Get-CimInstance -ClassName Win32_ComputerSystemProduct -OperationTimeoutSec 5 -ErrorAction Stop
             if ($product.IdentifyingNumber) { $values += [string]$product.IdentifyingNumber }
         } catch {}
         foreach ($raw in $values) {
@@ -1456,7 +1456,7 @@ function Get-HostSerial {
             $byteLength = $value.Length
             try { $byteLength = [System.Text.Encoding]::UTF8.GetByteCount($value) } catch {}
             if ($byteLength -gt 128) { continue }
-            if ($value -notmatch '^[A-Za-z0-9._:-]{1,128}$') { continue }
+            if ($value -notmatch '^[A-Za-z0-9._: -]{1,128}$') { continue }
             return $value
         }
         return ""

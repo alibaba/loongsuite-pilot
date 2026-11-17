@@ -128,6 +128,7 @@ export class SlsFlusher extends BaseFlusher {
   private readonly resolvedRetryJitter: boolean;
   private readonly resolvedFlushConcurrency: number;
   private readonly hostSn: string;
+  private readonly hostIdentityTags: boolean;
   private readonly dispatcher: UndiciAgent | undefined;
   private flushing = false;
 
@@ -136,10 +137,12 @@ export class SlsFlusher extends BaseFlusher {
     dataDir: string,
     pilotVersion = readInstalledVersion(dataDir),
     hostSn?: string,
+    hostIdentityTags = true,
   ) {
     super();
     this.config = config;
     this.hostSn = hostSn?.trim() ?? '';
+    this.hostIdentityTags = hostIdentityTags;
     this.failedLogWriter = new SlsFailureLogWriter(
       path.join(dataDir, 'logs', 'sls-failed-logs'),
     );
@@ -345,8 +348,8 @@ export class SlsFlusher extends BaseFlusher {
   private buildAkTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string>[] {
     const tags: Record<string, string>[] = [
       { __hostname__: HOSTNAME },
-      ...(LOCAL_MAC ? [{ __mac__: LOCAL_MAC }] : []),
-      ...(this.hostSn ? [{ __sn__: this.hostSn }] : []),
+      ...(this.hostIdentityTags && LOCAL_MAC ? [{ __mac__: LOCAL_MAC }] : []),
+      ...(this.hostIdentityTags && this.hostSn ? [{ __sn__: this.hostSn }] : []),
     ];
     const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags.push({ __service_name__: sn });
@@ -363,8 +366,8 @@ export class SlsFlusher extends BaseFlusher {
   private buildWebtrackingTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string> {
     const tags: Record<string, string> = {
       __hostname__: HOSTNAME,
-      ...(LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
-      ...(this.hostSn ? { __sn__: this.hostSn } : {}),
+      ...(this.hostIdentityTags && LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
+      ...(this.hostIdentityTags && this.hostSn ? { __sn__: this.hostSn } : {}),
     };
     const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags['__service_name__'] = sn;
@@ -747,8 +750,8 @@ export class SlsFlusher extends BaseFlusher {
               source: LOCAL_IP,
               tags: {
                 __hostname__: HOSTNAME,
-                ...(LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
-                ...(this.hostSn ? { __sn__: this.hostSn } : {}),
+                ...(this.hostIdentityTags && LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
+                ...(this.hostIdentityTags && this.hostSn ? { __sn__: this.hostSn } : {}),
               },
               userAgent: this.userAgent,
             },

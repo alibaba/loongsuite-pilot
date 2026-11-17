@@ -59,6 +59,7 @@ export interface PipelineManagerOptions {
   dataDir: string;
   pipelineConfig: PipelineToggle;
   hostSn?: string;
+  hostIdentityTags?: boolean;
 }
 
 export interface PipelineToggle {
@@ -86,6 +87,7 @@ export interface QoderApiPipelineOptions {
   failedLogDir: string;
   dataDir: string;
   hostSn?: string;
+  hostIdentityTags?: boolean;
 }
 
 // --- File collection types (moved from file-collection/types.ts) ---

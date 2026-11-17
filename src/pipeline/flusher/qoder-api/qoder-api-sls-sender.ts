@@ -24,6 +24,7 @@ export interface QoderApiSlsSenderOptions {
   failedLogDir: string;
   dataDir: string;
   hostSn?: string;
+  hostIdentityTags?: boolean;
 }
 
 /**
@@ -41,6 +42,7 @@ export class QoderApiSlsSender {
   private readonly hostname: string;
   private readonly mac: string;
   private readonly sn: string;
+  private readonly hostIdentityTags: boolean;
   private buffer: Record<string, string>[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private flushing = false;
@@ -61,6 +63,7 @@ export class QoderApiSlsSender {
     this.hostname = os.hostname();
     this.mac = LOCAL_MAC;
     this.sn = opts.hostSn?.trim() ?? '';
+    this.hostIdentityTags = opts.hostIdentityTags !== false;
   }
 
   start(): void {
@@ -109,8 +112,8 @@ export class QoderApiSlsSender {
               source: this.hostname,
               tags: {
                 __hostname__: this.hostname,
-                ...(this.mac ? { __mac__: this.mac } : {}),
-                ...(this.sn ? { __sn__: this.sn } : {}),
+                ...(this.hostIdentityTags && this.mac ? { __mac__: this.mac } : {}),
+                ...(this.hostIdentityTags && this.sn ? { __sn__: this.sn } : {}),
                 pipeline_type: 'qoder-api',
               },
               userAgent: this.userAgent,

@@ -419,6 +419,7 @@ export class Orchestrator extends EventEmitter {
         pipelineConfig: this.config.pipeline,
         workspacePolicy,
         hostSn: this.config.hostSn,
+        hostIdentityTags: this.config.hostIdentityTags,
       });
       await this.pipelineManager.start();
     } else {
@@ -979,7 +980,7 @@ export class Orchestrator extends EventEmitter {
     const cfg = this.config.flushers;
 
     if (cfg.sls?.enabled && this.config.collectLog !== false) {
-      const r = new SlsFlusher(cfg.sls, this.dataDir, pilotVersion, this.config.hostSn);
+      const r = new SlsFlusher(cfg.sls, this.dataDir, pilotVersion, this.config.hostSn, this.config.hostIdentityTags);
       await r.start().catch(err => logger.warn('sls flusher start failed', { error: String(err) }));
       flushers.push(r);
     }

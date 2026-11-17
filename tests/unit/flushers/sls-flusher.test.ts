@@ -612,6 +612,17 @@ describe('SlsFlusher', () => {
       expect(tags).toContainEqual({ __sn__: 'C02XG0AHJG5H' });
     });
 
+    it('omits MAC and serial tags when host identity tags are disabled', async () => {
+      const config = makeConfig({ serviceNamePrefix: 'pilot' });
+      flusher = new SlsFlusher(config, '/tmp/data', undefined, 'C02XG0AHJG5H', false);
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const tags = mockPostLogStoreLogs.mock.calls[0][2].tags as Array<Record<string, string>>;
+      expect(tags.some((tag) => '__mac__' in tag || '__sn__' in tag)).toBe(false);
+    });
+
     it('webtracking appends agentType to serviceNamePrefix', async () => {
       const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '' });
       vi.stubGlobal('fetch', fetchSpy);

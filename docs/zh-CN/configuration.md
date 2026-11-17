@@ -42,6 +42,7 @@ Pilot 按以下顺序解析配置：
 | `dataDir` | 本地运行和数据目录。 |
 | `userId` | 写入输出事件的用户标识，默认使用机器 hostname。 |
 | `hostSn` | 安装时写入的硬件序列号。有值时 SLS 日志组带 `__tag__:__sn__`。 |
+| `hostIdentityTags` | 设为 `false` 时，主采集和 Qoder 的 SLS 日志组都不带 `__mac__` 和 `__sn__`。默认 `true`。 |
 | `collectLog` | 控制 SLS 日志上报。JSONL 和 HTTP 由各自的 `enabled` 控制。 |
 | `collectTrace` | 当配置了 Trace 目标时，控制 OTLP Trace 上报。 |
 | `dashboard.port` | 本机 Dashboard 端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
@@ -57,6 +58,7 @@ Pilot 按以下顺序解析配置：
 | `LOONGSUITE_PILOT_ENABLED` | 设置为 `false` 或 `0` 可关闭 collector。 |
 | `LOONGSUITE_PILOT_DATA_DIR` | 覆盖数据目录。 |
 | `LOONGSUITE_PILOT_USER_ID` | 覆盖 `userId`。 |
+| `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS` | 设为 `false` 或 `0` 时不带 `__mac__` 和 `__sn__`。未设置时使用 `hostIdentityTags`。 |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | 设置为 `false` 或 `0` 可关闭 SLS 日志上报。 |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | 设置为 `false` 或 `0` 可关闭 Trace 上报。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | 用一个唯一服务名覆盖所有 Agent 和上报后端的 `serviceName`。 |

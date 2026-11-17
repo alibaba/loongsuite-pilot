@@ -342,6 +342,7 @@ export class PipelineManager {
         failedLogDir: this.failedLogDir,
         dataDir: this.dataDir,
         hostSn: this.opts.hostSn,
+        hostIdentityTags: this.opts.hostIdentityTags,
       };
 
       switch (inputType) {
