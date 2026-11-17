@@ -3,7 +3,6 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import type { Duplex } from 'node:stream';
 import { createServer, type Socket } from 'node:net';
 import { randomBytes } from 'node:crypto';
@@ -11,10 +10,21 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { PowerShellPool } from '../../../src/interceptor/managed/powershell-pool.js';
 import { spawnPowerShellGuardian, windowsJobBootstrap } from '../../../src/interceptor/managed/windows-job-guardian.js';
 
-const execFileAsync = promisify(execFile);
 const quote = (s: string) => `'${s.replace(/'/g, "''")}'`;
 const pools: PowerShellPool[] = [];
 const dirs: string[] = [];
+
+function powerShellProbe(args: string[]): Promise<{ code: number | string; stdout: string; stderr: string; timedOut: boolean }> {
+  return new Promise(resolve => {
+    const child = execFile('powershell.exe', args, {
+      encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL', windowsHide: true,
+    }, (error, stdout, stderr) => resolve({
+      code: error?.code ?? 0, stdout, stderr, timedOut: error?.killed === true,
+    }));
+    // execFile leaves stdin open by default. A probe must never wait for input EOF.
+    child.stdin?.end();
+  });
+}
 
 it('keeps the native helper command within the Windows command-line limit', () => {
   const bootstrap = windowsJobBootstrap('pilot-script-job-1234567890', 'C:\\Program Files\\nodejs\\node.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-']);
@@ -56,13 +66,24 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
 
-  it('runs the same script rejected by process Restricted and preserves Unicode request/path', async () => {
-    const version = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()']);
+  it('rejects a script under process Restricted and preserves Unicode request/path in the pool', async () => {
+    const version = await powerShellProbe(['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()']);
+    expect(version.code, JSON.stringify(version)).toBe(0);
     expect(version.stdout.trim()).toMatch(/^5\.1\./);
-    const { pool, file } = await poolFile(`if ((Get-ExecutionPolicy -Scope Process) -ne 'Bypass') { throw 'missing process policy' }; $r = $input | Out-String | ConvertFrom-Json; @{matched=$true;reason=$r.prompt} | ConvertTo-Json -Compress`);
-    const restricted = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Restricted', '-File', file])
-      .then(() => false, () => true);
-    expect(restricted).toBe(true);
+    const { pool, file, dir } = await poolFile(`if ((Get-ExecutionPolicy -Scope Process) -ne 'Bypass') { throw 'missing process policy' }; $r = $input | Out-String | ConvertFrom-Json; @{matched=$true;reason=$r.prompt} | ConvertTo-Json -Compress`);
+    const policies = await powerShellProbe(['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Restricted', '-Command',
+      '@{Effective=[string](Get-ExecutionPolicy);Process=[string](Get-ExecutionPolicy -Scope Process);CurrentUser=[string](Get-ExecutionPolicy -Scope CurrentUser);LocalMachine=[string](Get-ExecutionPolicy -Scope LocalMachine);MachinePolicy=[string](Get-ExecutionPolicy -Scope MachinePolicy);UserPolicy=[string](Get-ExecutionPolicy -Scope UserPolicy)} | ConvertTo-Json -Compress']);
+    expect(policies.code, JSON.stringify(policies)).toBe(0);
+    const policySnapshot = JSON.parse(policies.stdout.trim());
+    // This control script does not read $input, even if a higher policy overrides Restricted.
+    const restrictedFile = join(dir, 'restricted-control.ps1');
+    await writeFile(restrictedFile, '\uFEFF"RESTRICTED_SCRIPT_EXECUTED"');
+    const restricted = await powerShellProbe(['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Restricted', '-File', restrictedFile]);
+    const diagnostic = JSON.stringify({ policies: policySnapshot, probe: restricted });
+    expect(restricted.timedOut, diagnostic).toBe(false);
+    expect(restricted.code, diagnostic).not.toBe(0);
+    expect(restricted.stdout, diagnostic).not.toContain('RESTRICTED_SCRIPT_EXECUTED');
+    expect(policySnapshot.Effective, diagnostic).toBe('Restricted');
     const result = await pool.run(file, JSON.stringify({ prompt: '张三保密文本' }), 15_000);
     expect(result.ok).toBe(true);
     if (result.ok) expect(JSON.parse(result.stdout)).toEqual({ matched: true, reason: '张三保密文本' });
