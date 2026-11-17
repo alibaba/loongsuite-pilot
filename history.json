@@ -4036,12 +4036,12 @@
           "kind": "dev",
           "version": "dev",
           "commit": "fcf1ffed13f4954a096846edf938ebdecd925091",
-          "recorded_at": "2026-11-17T03:00:11.514410+00:00",
+          "recorded_at": "2026-11-17T03:12:46.026584+00:00",
           "status": "failed",
           "method_id": "github-full-pilot-codex-rollout-v2",
           "environment_id": "unavailable",
           "environment": {},
-          "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/44005550153",
+          "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/44007306365",
           "workloads": {},
           "source": {
             "repository": "alibaba/loongsuite-pilot",
@@ -4050,12 +4050,12 @@
           "provenance": {},
           "failure_category": "infrastructure",
           "publication": {
-            "run_number": 88,
-            "run_id": "44005550153"
+            "run_number": 89,
+            "run_id": "44007306365"
           }
         }
       ],
-      "updated_at": "2026-11-17T03:02:10.044960Z"
+      "updated_at": "2026-11-17T03:13:23.102766Z"
     },
     "github-full-pilot-qoder-stop-30s-v1": {
       "method": {
