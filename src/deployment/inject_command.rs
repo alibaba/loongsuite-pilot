@@ -309,6 +309,8 @@ mod tests {
         AgentHookConfig {
             settings_path: "/tmp/settings.json".into(),
             settings_syntax: None,
+            scope: None,
+            system_settings_path: None,
             events: vec!["PreToolUse".into(), "Stop".into()],
             hook_command: "/opt/hooks/claude-code-loongsuite-pilot-hook.sh".into(),
             format: HookFormat::Nested,

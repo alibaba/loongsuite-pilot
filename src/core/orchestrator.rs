@@ -1468,8 +1468,12 @@ impl Orchestrator {
                 let pilot = pilot_dir.clone();
                 let data = data_dir.clone();
                 Box::pin(async move {
+                    let system = deployment.recorded_definition(&def).is_ok_and(|def| {
+                        def.hook
+                            .is_some_and(|hook| hook.scope == Some(crate::types::HookScope::System))
+                    });
                     !deployment.needs_redeploy(&def, None).await
-                        && are_grok_build_hook_assets_healthy(&pilot, &data).await
+                        && (system || are_grok_build_hook_assets_healthy(&pilot, &data).await)
                 })
             }),
             repair: Arc::new(move || {
@@ -1478,7 +1482,13 @@ impl Orchestrator {
                 let pilot = pilot_for_repair.clone();
                 let data = data_for_repair.clone();
                 Box::pin(async move {
-                    restore_grok_build_hook_assets(&pilot, &data).await?;
+                    let system = deployment.recorded_definition(&def).is_ok_and(|def| {
+                        def.hook
+                            .is_some_and(|hook| hook.scope == Some(crate::types::HookScope::System))
+                    });
+                    if !system {
+                        restore_grok_build_hook_assets(&pilot, &data).await?;
+                    }
                     let result = deployment.deploy_single(&def).await;
                     if !result.success {
                         return Err(result
@@ -1486,7 +1496,7 @@ impl Orchestrator {
                             .unwrap_or_else(|| "failed to restore Grok Build hook".into()));
                     }
                     if deployment.needs_redeploy(&def, None).await
-                        || !are_grok_build_hook_assets_healthy(&pilot, &data).await
+                        || (!system && !are_grok_build_hook_assets_healthy(&pilot, &data).await)
                     {
                         return Err("Grok Build hook remains unhealthy after repair".into());
                     }

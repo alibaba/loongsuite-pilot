@@ -92,6 +92,12 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 根目录下最近活跃的 rollout 文件。`Stop` 仅作为尽力而为的唤醒信号，
 目录发现不依赖它。
 
+## Grok Build Linux 系统接入
+
+安装时传入 `--scope system`，也可运行 `loongsuite-pilot hook install --scope system --agents grok-build`。Pilot 会在 `/etc/grok/managed_config.toml` 注册原生 Hook，再由现有的 Grok 采集器消费事件。省略 `--agents` 时只为已发现的 Agent 部署，混合列表中其他 Agent 继续使用各自的安装方式。
+
+系统配置、Pilot 运行文件和采集目录须对同一 Linux UID 下的目标进程可访问。使用 `loongsuite-pilot hook status --agents grok-build --json` 检查注册及运行文件，`collectionStatus=not-verified` 表示尚未用真实会话验证输出。使用 `hook install --scope user --agents grok-build` 切回用户安装，可同时指定 `--home grok-build=/path/to/.grok`。升级、修复和卸载沿用已登记的目标。迁移保留管理员和第三方配置，并在无法确认 TOML 键的归属时保留原文件。
+
 ## Grok Build 采集与生命周期
 
 Pilot 通过 Grok 官方的 `GROK_HOME`（默认 `~/.grok`）检测 Grok Build，并在

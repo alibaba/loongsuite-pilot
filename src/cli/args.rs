@@ -24,6 +24,7 @@ fn hook_action(name: &'static str) -> Command {
         .arg(value("home").action(ArgAction::Append))
         .arg(value("config-dir"))
         .arg(value("pilot-dir"))
+        .arg(value("scope").value_parser(["user", "system"]))
         .arg(flag("json"))
 }
 
@@ -307,6 +308,7 @@ mod tests {
             vec!["hook-process"],
             vec!["hook-process", "unknown"],
             vec!["hook", "instal"],
+            vec!["hook", "install", "--scope", "global"],
             vec!["probe", "--installer", "--build-edition"],
             vec!["deploy", "--require"],
             vec!["worker", "connect", "--typo"],
@@ -342,6 +344,16 @@ mod tests {
             parse_words(&["--version"]).unwrap_err().kind(),
             ErrorKind::DisplayVersion
         );
+    }
+
+    #[test]
+    fn hook_install_and_status_accept_explicit_scope() {
+        for action in ["install", "status"] {
+            let parsed = parse_words(&["hook", action, "--scope", "system"]).unwrap();
+            let hook = parsed.subcommand_matches("hook").unwrap();
+            let scope = hook.subcommand_matches(action).unwrap();
+            assert_eq!(scope.get_one::<String>("scope").unwrap(), "system");
+        }
     }
 
     #[test]

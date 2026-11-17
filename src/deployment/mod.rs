@@ -24,6 +24,7 @@ mod hook_command;
 mod hook_install_alarm;
 mod hook_install_service;
 mod hook_strategy;
+mod system_toml_hooks;
 pub(crate) use hook_strategy::plan_qoder_legacy_restore;
 mod inject_command;
 mod installer_config;
@@ -89,7 +90,7 @@ pub use env_agent_dirs::{
 pub use grok_build_assets::{
     are_grok_build_hook_assets_healthy, restore_grok_build_hook_assets, GROK_BUILD_HOOK_ASSETS,
 };
-pub use hook_command::{parse_hook_args, run_hook_command_with_config, ParsedHookArgs};
+pub use hook_command::{hook_usage, parse_hook_args, run_hook_command_with_config, ParsedHookArgs};
 pub use hook_install_alarm::{
     hook_install_alarm_key, should_relay_hook_install_alarm, HookInstallAlarmAgent,
     HookInstallAlarmReport,

@@ -44,6 +44,7 @@ impl World {
             agents_flag: Some("grok-build".into()),
             env_agents: None,
             homes: HashMap::from([("grok-build".into(), home.to_string_lossy().into_owned())]),
+            deployment_scope: None,
             write_result: true,
             deploy_modes: None,
             enabled: None,
@@ -181,4 +182,156 @@ async fn grok_l142_real_manager_repair_route_restores_every_recorded_settings_fi
             .unwrap()
             .contains("grok-build-loongsuite-pilot-hook"));
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn native_system_scope_migrates_registered_homes_and_preserves_toml_suffix_tables() {
+    use crate::types::HookScope;
+
+    let f = World::new();
+    let staged = f.root.join("managed.plain.toml");
+    let definition = f.defs.join("grok-build.json");
+    let mut raw = World::read(&definition);
+    raw["hook"]["systemSettingsPath"] = json!(staged);
+    std::fs::write(&definition, serde_json::to_vec(&raw).unwrap()).unwrap();
+    let user_hook = json!({"type": "command", "command": "/user/stop.sh"});
+    let old_home = f.root.join("user-a");
+    let new_home = f.root.join("user-b");
+    let old_settings = World::settings(&old_home);
+    std::fs::create_dir_all(old_settings.parent().unwrap()).unwrap();
+    std::fs::write(
+        &old_settings,
+        serde_json::to_vec(&json!({
+            "hooks": {"stop": [{"matcher": "", "hooks": [user_hook]}]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(f.install(&old_home).await.exit_code, 0);
+    let original = "[shared]\nmax_jobs = 2\n[[hooks.stop]]\nmatcher = \"other\"\nhooks = []\n";
+    std::fs::write(&staged, original).unwrap();
+    let scope = || {
+        let mut opts = f.options(&old_home);
+        opts.homes.clear();
+        opts.deployment_scope = Some(HookScope::System);
+        opts
+    };
+    let installed = run_hook_install(scope()).await;
+    assert_eq!(installed.exit_code, 0, "{:?}", installed.report);
+    assert!(
+        installed.report.agents[0]
+            .system
+            .as_ref()
+            .unwrap()
+            .runtime_healthy
+    );
+    let system = std::fs::read_to_string(&staged).unwrap();
+    assert!(system.starts_with(original));
+    assert!(system.contains("/bin/bash '"));
+    assert_eq!(
+        system
+            .matches("# BEGIN loongsuite-pilot:grok-build")
+            .count(),
+        1
+    );
+    assert!(!std::fs::read_to_string(&old_settings)
+        .unwrap()
+        .contains("grok-build-loongsuite-pilot"));
+    assert_eq!(
+        World::read(&old_settings)["hooks"]["stop"][0]["hooks"][0],
+        user_hook
+    );
+    assert_eq!(run_hook_install(scope()).await.exit_code, 0);
+    assert_eq!(std::fs::read_to_string(&staged).unwrap(), system);
+    let mut status = scope();
+    status.mode = "status";
+    status.write_result = false;
+    status.deployment_scope = None;
+    let report = run_hook_install(status).await;
+    assert_eq!(report.exit_code, 0, "{:?}", report.report);
+    let public = serde_json::to_value(to_public_report(&report.report)).unwrap();
+    assert_eq!(public["agents"][0]["hookScope"], "system");
+    assert_eq!(public["agents"][0]["collectionStatus"], "not-verified");
+
+    let mut migrate = f.options(&new_home);
+    migrate.deployment_scope = Some(HookScope::User);
+    let ambiguous = format!("{system}operator_key = true\n");
+    std::fs::write(&staged, &ambiguous).unwrap();
+    let failed = run_hook_install(migrate).await;
+    assert_eq!(failed.exit_code, 1);
+    assert!(failed.report.agents[0]
+        .hint
+        .as_ref()
+        .unwrap()
+        .contains("ownership"));
+    assert_eq!(std::fs::read_to_string(&staged).unwrap(), ambiguous);
+    assert!(!World::settings(&new_home).exists());
+
+    let suffix = "# administrator settings\n[other]\nkeep = true\n";
+    std::fs::write(&staged, format!("{system}{suffix}")).unwrap();
+    let mut migrate = f.options(&new_home);
+    migrate.deployment_scope = Some(HookScope::User);
+    assert_eq!(run_hook_install(migrate).await.exit_code, 0);
+    assert_eq!(
+        std::fs::read_to_string(&staged).unwrap(),
+        format!("{original}{suffix}")
+    );
+    assert!(World::settings(&new_home).is_file());
+    let state = World::read(&f.data.join("deployed-agents.json"));
+    assert_eq!(state["grok-build"]["hookScope"], "user");
+    assert_eq!(
+        state["grok-build"]["hookSettingsPaths"],
+        json!([World::settings(&new_home)])
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn autodetection_does_not_provision_absent_grok_and_pending_node_target_is_cleaned() {
+    use crate::types::HookScope;
+
+    let f = World::new();
+    let mut opts = f.options(&f.root);
+    opts.homes.clear();
+    opts.agents_flag = None;
+    opts.deployment_scope = Some(HookScope::System);
+    let absent = run_hook_install(opts).await;
+    assert_eq!(absent.exit_code, 0);
+    assert!(absent.report.agents.is_empty());
+
+    let def_path = f.defs.join("grok-build.json");
+    let managed = f.root.join("managed.toml");
+    let mut raw = World::read(&def_path);
+    raw["hook"]["systemSettingsPath"] = json!(managed);
+    std::fs::write(&def_path, serde_json::to_vec(&raw).unwrap()).unwrap();
+    let mut opts = f.options(&f.root);
+    opts.homes.clear();
+    opts.deployment_scope = Some(HookScope::System);
+    assert_eq!(run_hook_install(opts).await.exit_code, 0);
+
+    let state_path = f.data.join("deployed-agents.json");
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec(&json!({
+            "grok-build": {
+                "deployMode": "hook",
+                "deployedAt": "2026-11-17",
+                "hookPendingMigration": {"scope": "system", "settingsPath": managed}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let manager = super::super::DeploymentManager::new(super::super::DeploymentManagerOptions {
+        data_dir: f.data.to_string_lossy().into_owned(),
+        pilot_dir: env!("CARGO_MANIFEST_DIR").into(),
+        builtin_agents_dir: Some(f.defs.to_string_lossy().into_owned()),
+        installed_by: None,
+    });
+    let defs = manager.load_definitions().await;
+    let grok = defs.iter().find(|def| def.id == "grok-build").unwrap();
+    assert!(manager.undeploy_agent(grok).await);
+    assert!(std::fs::read_to_string(managed).unwrap().is_empty());
+    assert!(!manager.has_record("grok-build"));
 }

@@ -44,6 +44,16 @@ pub struct HookInstallAgentResult {
     pub hint: Option<String>,
     pub settings_path: Option<String>,
     pub deploy_mode: Option<String>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub system: Option<SystemHookStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemHookStatus {
+    pub hook_scope: crate::types::HookScope,
+    pub runtime_healthy: bool,
+    pub collection_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,7 +281,7 @@ pub fn classify_deploy_error(error: &str) -> &'static str {
     {
         "activation-failed"
     } else if error.contains("SyntaxError")
-        || regex::Regex::new(r"(?i)\binvalid JSONC?\b")
+        || regex::Regex::new(r"(?i)\binvalid (?:JSONC?|TOML)\b")
             .unwrap()
             .is_match(error)
         || error.contains("invalid settings")
@@ -290,6 +300,7 @@ pub struct HookInstallRunOptions<'a> {
     pub env_agents: Option<String>,
     pub homes: HashMap<String, String>,
     pub write_result: bool,
+    pub deployment_scope: Option<crate::types::HookScope>,
     pub deploy_modes: Option<HashSet<String>>,
     pub enabled: Option<&'a dyn Fn(&str) -> bool>,
     pub euid: Option<u32>,
@@ -317,6 +328,7 @@ fn failed(
         hint: Some(hint_for_reason(reason, Some(id))),
         settings_path,
         deploy_mode: deploy_mode.map(|value| value.to_string()),
+        system: None,
     }
 }
 
@@ -336,6 +348,7 @@ fn from_deploy(
             hint: None,
             settings_path,
             deploy_mode: Some(def.deploy_mode.as_str().into()),
+            system: None,
         };
     }
     if result.success
@@ -368,14 +381,20 @@ fn from_deploy(
             hint: None,
             settings_path,
             deploy_mode: Some(def.deploy_mode.as_str().into()),
+            system: None,
         };
     }
-    failed(
+    let error = result.error.as_deref().unwrap_or("");
+    let mut failure = failed(
         &def.id,
-        classify_deploy_error(result.error.as_deref().unwrap_or("")),
+        classify_deploy_error(error),
         Some(def.deploy_mode.as_str()),
         settings_path,
-    )
+    );
+    if !error.is_empty() && def.id == super::system_toml_hooks::GROK {
+        failure.hint = Some(error.replace(['\r', '\n'], " ").chars().take(350).collect());
+    }
+    failure
 }
 
 fn report_targets(file: &str) -> anyhow::Result<(PathBuf, BTreeMap<String, PathBuf>)> {
@@ -708,6 +727,8 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
             agents.push(failed("*", "invalid-deployment-state", None, None));
         }
     }
+    use super::system_toml_hooks::{self, GROK};
+    use crate::types::HookScope;
     let mut runtime_prepared = false;
     for def in &selected {
         if state_error.is_some() {
@@ -731,7 +752,42 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
             continue;
         }
         let home = opts.homes.get(&def.id).cloned();
-        let targeted = if let Some(home) = &home {
+        let scope = opts.deployment_scope.filter(|_| def.id == GROK);
+        let automatic = matches!(selection, AgentSelection::Detect { .. });
+        if scope.is_some() && automatic && !manager.is_agent_detected(def).await {
+            continue;
+        }
+        if def.id == GROK
+            && scope.is_none()
+            && home.is_some()
+            && manager
+                .recorded_definition(def)
+                .is_ok_and(|def| system_toml_hooks::is_system(&def))
+        {
+            let mut failure = failed(GROK, "deploy-failed", Some("hook"), None);
+            failure.hint = Some(
+                "An existing system registration requires explicit --scope user before --home"
+                    .into(),
+            );
+            agents.push(failure);
+            continue;
+        }
+        let targeted = if let Some(scope) = scope {
+            let scoped = match system_toml_hooks::definition(def, scope) {
+                Ok(scoped) => scoped,
+                Err(error) => {
+                    let mut failure = failed(&def.id, "deploy-failed", Some("hook"), None);
+                    failure.hint = Some(error);
+                    agents.push(failure);
+                    continue;
+                }
+            };
+            if let Some(home) = &home {
+                definition_at_install_home(&scoped, home)
+            } else {
+                Some(scoped)
+            }
+        } else if let Some(home) = &home {
             definition_at_install_home(def, home)
         } else {
             match manager.recorded_definition(def) {
@@ -809,7 +865,21 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
                 }
             }
         }
-        if let Some(file) = &settings_path {
+        if system_toml_hooks::is_system(&active) {
+            if let Err(error) = system_toml_hooks::read(&active)
+                .and_then(|raw| system_toml_hooks::installed(&raw, &active))
+            {
+                let mut failure = failed(
+                    &def.id,
+                    classify_deploy_error(&error),
+                    Some("hook"),
+                    settings_path.clone(),
+                );
+                failure.hint = Some(error);
+                agents.push(failure);
+                continue;
+            }
+        } else if let Some(file) = &settings_path {
             let syntax = active
                 .hook
                 .as_ref()
@@ -843,7 +913,7 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
             }
         }
         if status_only {
-            let detected = if home.is_some() {
+            let detected = if home.is_some() || scope.is_some() {
                 true
             } else {
                 manager.is_agent_detected(&active).await
@@ -862,7 +932,7 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
             let needs = manager
                 .needs_redeploy(
                     &active,
-                    if home.is_some() {
+                    if home.is_some() || scope.is_some() {
                         settings_path.as_deref()
                     } else {
                         None
@@ -877,6 +947,7 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
                     hint: None,
                     settings_path,
                     deploy_mode: Some(active.deploy_mode.as_str().into()),
+                    system: None,
                 });
                 continue;
             }
@@ -901,7 +972,7 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
         // Prepare only after a concrete target passes the same read-only
         // gates as deployment. Failed/unsupported targets must not publish
         // unrelated global runtime resources.
-        if home.is_none() && !manager.is_agent_detected(&active).await {
+        if home.is_none() && scope.is_none() && !manager.is_agent_detected(&active).await {
             if matches!(selection, AgentSelection::Named { .. }) {
                 agents.push(failed(
                     &def.id,
@@ -957,7 +1028,9 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
             }
             runtime_prepared = true;
         }
-        let result = if home.is_some() {
+        let result = if scope.is_some() {
+            manager.deploy_hook_scope(def, &active).await
+        } else if home.is_some() {
             manager.deploy_prepared(&active, true).await
         } else {
             manager.deploy_single(&active).await
@@ -969,6 +1042,31 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
             continue;
         }
         agents.push(from_deploy(def, &result, settings_path));
+    }
+    if let Some(base) = by_id.get(GROK) {
+        let effective = if opts.deployment_scope == Some(HookScope::System) {
+            system_toml_hooks::definition(base, HookScope::System).ok()
+        } else if opts.deployment_scope.is_none() {
+            manager
+                .recorded_definition(base)
+                .ok()
+                .filter(system_toml_hooks::is_system)
+        } else {
+            None
+        };
+        if let Some(effective) = effective {
+            if let Some(agent) = agents.iter_mut().find(|agent| agent.id == GROK) {
+                agent.system = Some(SystemHookStatus {
+                    hook_scope: HookScope::System,
+                    runtime_healthy: super::hook_assets::healthy(
+                        &effective,
+                        Path::new(&opts.pilot_dir),
+                        Path::new(&opts.data_dir),
+                    ),
+                    collection_status: "not-verified".into(),
+                });
+            }
+        }
     }
     let has_failure = agents.iter().any(|agent| agent.status == "failed");
     let alarm_sent = !has_failure;
@@ -1052,6 +1150,7 @@ mod tests {
                 hint: None,
                 settings_path: None,
                 deploy_mode: Some("hook".into()),
+                system: None,
             }],
             alarm_sent: Some(false),
         }
@@ -1468,6 +1567,7 @@ mod tests {
             hint: None,
             settings_path: Some("/a".into()),
             deploy_mode: Some("hook".into()),
+            system: None,
         };
         let failed = HookInstallAgentResult {
             id: "codex".into(),
@@ -1476,6 +1576,7 @@ mod tests {
             hint: None,
             settings_path: None,
             deploy_mode: Some("hook".into()),
+            system: None,
         };
         let merged = merge_installed_agents(
             Some(std::slice::from_ref(&previous)),
@@ -1548,6 +1649,8 @@ mod tests {
             hook: Some(crate::types::AgentHookConfig {
                 settings_path: "/root/.grok/hooks/loongsuite-pilot.json".into(),
                 settings_syntax: None,
+                scope: None,
+                system_settings_path: None,
                 events: vec!["stop".into()],
                 hook_command: "/pilot/hook.sh".into(),
                 format: crate::types::HookFormat::Nested,

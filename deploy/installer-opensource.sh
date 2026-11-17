@@ -65,6 +65,7 @@ CMS_ENDPOINT=""
 CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
 SELECTED_AGENTS=""
+HOOK_INSTALL_SCOPE=""
 AGENT_SELECTION_EXPLICIT=0
 ALL_AGENTS=1
 MULTIMODAL_MODE=""
@@ -176,6 +177,8 @@ while [[ $# -gt 0 ]]; do
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             require_option_value "$@"; SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; ALL_AGENTS=0; shift 2 ;;
         --agents=*)           SELECTED_AGENTS="${1#*=}"; AGENT_SELECTION_EXPLICIT=1; ALL_AGENTS=0; shift ;;
+        --scope)              require_option_value "$@"; HOOK_INSTALL_SCOPE="$2"; shift 2 ;;
+        --scope=*)            HOOK_INSTALL_SCOPE="${1#*=}"; [ -n "$HOOK_INSTALL_SCOPE" ] || { echo "--scope requires user or system" >&2; exit 1; }; shift ;;
 
         --multimodal-mode)    require_option_value "$@"; MULTIMODAL_MODE="${2-}"; MULTIMODAL_MODE_SET=1; shift 2 || shift ;;
         --multimodal-mode=*)  MULTIMODAL_MODE="${1#*=}"; MULTIMODAL_MODE_SET=1; shift ;;
@@ -204,6 +207,18 @@ done
 if [ "$AGENT_SELECTION_EXPLICIT" -eq 1 ] && [[ "$SELECTED_AGENTS" != *[![:space:]]* ]]; then
     echo "--agents requires a list of Agent IDs or none" >&2
     exit 1
+fi
+
+if [ -n "$HOOK_INSTALL_SCOPE" ]; then
+    case "$HOOK_INSTALL_SCOPE" in
+        user) ;;
+        system) [ "$(uname -s)" = Linux ] || { echo "System hooks are supported only on Linux" >&2; exit 1; } ;;
+        *) echo "--scope requires user or system" >&2; exit 1 ;;
+    esac
+    if [ "$COMMAND" != install ]; then
+        echo "--scope is only supported with install; upgrades preserve recorded hook scope" >&2
+        exit 1
+    fi
 fi
 
 if [ -n "$ENABLE_STATUS_BAR_APP" ] && [ "$COMMAND" != "install" ]; then
@@ -1287,6 +1302,20 @@ rollback_failed_publication() {
     return 1
 }
 
+apply_installation_scope() {
+    [ -n "$HOOK_INSTALL_SCOPE" ] || return 0
+    local args=(hook install --scope "$HOOK_INSTALL_SCOPE" --json)
+    if [ "$AGENT_SELECTION_EXPLICIT" -eq 1 ]; then
+        args+=(--agents "$SELECTED_AGENTS")
+    fi
+    if ! run_pilot_cli "${args[@]}"; then
+        PILOT_HELD_FOR_DEPLOY=0
+        msg "❌ Hook 安装未完成，已保留运行文件。请修复后重试 hook install。" \
+            "❌ Hook installation incomplete. Runtime retained. Resolve the error and retry hook install." >&2
+        return 1
+    fi
+}
+
 cmd_install() {
     local INSTALL_CONFIG=1
     msg "==> 开始安装 $PACKAGE_NAME ..." \
@@ -1329,6 +1358,7 @@ cmd_install() {
     inject_qodercli_token_intercept
     inject_qoderclicn_token_intercept
     inject_claude_code_fetch_intercept
+    apply_installation_scope || return 1
 
     msg "==> 启动服务..." "==> Starting service..."
     if run_pilot_cli start && wait_for_pilot_running; then

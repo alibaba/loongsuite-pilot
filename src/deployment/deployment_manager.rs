@@ -33,6 +33,41 @@ use super::plugin_inject_strategy::PluginInjectStrategy;
 use super::plugin_migration::run_plugin_migration;
 use super::plugin_probe_strategy::PluginProbeStrategy;
 
+use super::system_toml_hooks::{self, GROK};
+use crate::types::HookScope;
+
+fn scoped_hook_target(
+    base: &AgentDefinition,
+    path: &str,
+    scope: HookScope,
+) -> Result<AgentDefinition, String> {
+    if !Path::new(path).is_absolute() {
+        return Err("Invalid recorded scoped Hook settings path".into());
+    }
+    if scope == HookScope::System {
+        system_toml_hooks::validate_path(path)?;
+    }
+    let mut target = definition_at_hook_settings(base, path)?;
+    target
+        .hook
+        .as_mut()
+        .ok_or("Missing scoped Hook definition")?
+        .scope = Some(scope);
+    Ok(target)
+}
+
+fn scoped_hook_success(def: &AgentDefinition) -> DeployResult {
+    DeployResult {
+        success: true,
+        agent_id: def.id.clone(),
+        deploy_mode: DeployMode::Hook,
+        skipped: None,
+        reason: None,
+        error: None,
+        plugin_inject_config_path: None,
+    }
+}
+
 fn logger() -> crate::utils::BoundLogger {
     create_logger("DeploymentManager")
 }
@@ -272,6 +307,71 @@ impl DeploymentManager {
         self.finish_deploy(result).await
     }
 
+    pub(super) async fn deploy_hook_scope(
+        &self,
+        base: &AgentDefinition,
+        def: &AgentDefinition,
+    ) -> DeployResult {
+        let _guard = self.gate.lock().await;
+        self.configure_grok_scope(base, def, false)
+            .await
+            .map(|()| scoped_hook_success(def))
+            .unwrap_or_else(|error| failed(def, &error))
+    }
+
+    async fn configure_grok_scope(
+        &self,
+        base: &AgentDefinition,
+        target: &AgentDefinition,
+        uninstall: bool,
+    ) -> Result<(), String> {
+        self.load_state().await?;
+        let previous = self.state.lock().unwrap().get(GROK).cloned();
+        let hook = target
+            .hook
+            .as_ref()
+            .ok_or("Missing scoped Hook definition")?;
+        let target_path = node_resolve(&hook.settings_path);
+        let mut retired = Vec::new();
+        if let Some(record) = previous.as_ref() {
+            let old_scope = record.hook_scope.unwrap_or(HookScope::User);
+            let cross_scope = old_scope != hook.scope.unwrap_or(HookScope::User);
+            if uninstall || cross_scope {
+                let fallback = base
+                    .hook
+                    .as_ref()
+                    .map(|hook| hook.settings_path.as_str())
+                    .filter(|_| {
+                        record.hook_settings_path.is_none() && old_scope == HookScope::User
+                    });
+                for path in merge_hook_settings_paths(Some(record), fallback) {
+                    if path != target_path {
+                        retired.push(scoped_hook_target(base, &path, old_scope)?);
+                    }
+                }
+            }
+            if let Some(pending) = &record.hook_pending_migration {
+                let path = node_resolve(&pending.settings_path);
+                if !Path::new(&pending.settings_path).is_absolute() {
+                    return Err("Invalid pending Hook settings path".into());
+                }
+                if path != target_path
+                    && !retired.iter().any(|item| {
+                        item.hook
+                            .as_ref()
+                            .is_some_and(|hook| hook.settings_path == path)
+                    })
+                {
+                    retired.push(scoped_hook_target(base, &path, pending.scope)?);
+                }
+            }
+        }
+        self.hook
+            .configure_scope(target, previous, retired, uninstall)
+            .await?;
+        self.sync_committed_hook_state(GROK).await
+    }
+
     pub async fn deploy_prepared(
         &self,
         def: &AgentDefinition,
@@ -380,6 +480,20 @@ impl DeploymentManager {
         def: &AgentDefinition,
         record: Option<&DeployedAgentRecord>,
     ) -> bool {
+        if def.id == GROK
+            && record.is_some_and(|entry| {
+                entry.hook_scope == Some(HookScope::System)
+                    || entry.hook_pending_migration.is_some()
+            })
+        {
+            return match self.configure_grok_scope(def, def, true).await {
+                Ok(()) => true,
+                Err(error) => {
+                    logger().error(&error, None);
+                    false
+                }
+            };
+        }
         let mut paths = merge_hook_settings_paths(record, None);
         if paths.is_empty() {
             if let Some(hook) = &def.hook {
@@ -540,6 +654,13 @@ impl DeploymentManager {
             return true;
         }
         let record = self.state.lock().unwrap().get(&def.id).cloned();
+        if def.id == GROK
+            && record
+                .as_ref()
+                .is_some_and(|entry| entry.hook_pending_migration.is_some())
+        {
+            return true;
+        }
         let resolved = match (def.deploy_mode, settings_path) {
             (DeployMode::Hook, Some(path)) => definition_at_hook_settings(def, path),
             (DeployMode::PluginInject, Some(path)) => {
@@ -580,7 +701,7 @@ impl DeploymentManager {
             let paths = merge_hook_settings_paths(record.as_ref(), None);
             if !paths.is_empty() {
                 for path in paths {
-                    let target = match definition_at_hook_settings(def, &path) {
+                    let target = match definition_at_hook_settings(&target, &path) {
                         Ok(target) => target,
                         Err(err) => {
                             logger().error(&err, None);
@@ -631,14 +752,26 @@ impl DeploymentManager {
             preserve_plugin_config: false,
             assume_detected: false,
         });
-        if def.id == "grok-build" && !opts.preserve_hook_settings {
-            let paths = merge_hook_settings_paths(self.state.lock().unwrap().get(&def.id), None);
+        let record = self.state.lock().unwrap().get(&def.id).cloned();
+        if def.id == GROK
+            && record
+                .as_ref()
+                .is_some_and(|entry| entry.hook_pending_migration.is_some())
+        {
+            return Err(
+                "Hook scope installation is pending; rerun hook install with an explicit scope"
+                    .into(),
+            );
+        }
+        if def.id == GROK && !opts.preserve_hook_settings {
+            let effective = apply_persisted_deploy_targets(def, record.as_ref(), None)?;
+            let paths = merge_hook_settings_paths(record.as_ref(), None);
             if paths.len() > 1 {
                 let mut last = None;
                 for path in paths {
                     last = Some(
                         Box::pin(self.deploy_agent(
-                            &definition_at_hook_settings(def, &path)?,
+                            &definition_at_hook_settings(&effective, &path)?,
                             Some(DeployAgentOptions {
                                 preserve_hook_settings: true,
                                 preserve_plugin_config: false,
@@ -651,7 +784,6 @@ impl DeploymentManager {
                 return Ok(last.unwrap());
             }
         }
-        let record = self.state.lock().unwrap().get(&def.id).cloned();
         if !opts.preserve_plugin_config {
             if let Some(result) = self.relocate_missing_pi(def, record.as_ref()).await? {
                 return Ok(result);
@@ -753,6 +885,8 @@ impl DeploymentManager {
                     dsh_patch_path: None,
                     hook_settings_path: None,
                     hook_settings_paths: None,
+                    hook_scope: None,
+                    hook_pending_migration: None,
                     installed_by: self.installed_by,
                     plugin_inject_config_path: None,
                 });
@@ -783,6 +917,8 @@ impl DeploymentManager {
                 dsh_patch_path: None,
                 hook_settings_path: None,
                 hook_settings_paths: None,
+                hook_scope: None,
+                hook_pending_migration: None,
                 installed_by: None,
                 plugin_inject_config_path: None,
             });
