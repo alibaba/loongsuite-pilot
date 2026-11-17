@@ -1,5 +1,8 @@
 use super::*;
 
+// Debug-host package verification hashes the executable before it reaches Hook deployment.
+const PACKAGE_HELPER_TIMEOUT: Duration = Duration::from_secs(15);
+
 fn helper_at(
     fixture: &Fixture,
     operation: &str,
@@ -82,7 +85,7 @@ fn version_l44_l54_l63_l71_real_native_entry_uses_fresh_siblings_and_preserves_p
         &cwd,
         Instant::now() + Duration::from_secs(30),
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PACKAGE_HELPER_TIMEOUT;
     let first_manifest = fs::read(first.join("runtime-manifest.json")).unwrap();
     let second = stage(&fixture, &options, &cwd, deadline);
     assert_ne!(first, second);
@@ -113,7 +116,7 @@ fn version_l44_l54_l63_l71_real_native_entry_uses_fresh_siblings_and_preserves_p
 
     assert!(Instant::now() < deadline);
     // Original L63 is an independent historical declaration with its own budget.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PACKAGE_HELPER_TIMEOUT;
     let options = fixture.runtime_options(&first);
     success(&helper_at(
         &fixture,
@@ -129,7 +132,7 @@ fn version_l44_l54_l63_l71_real_native_entry_uses_fresh_siblings_and_preserves_p
     assert_eq!(fs::read(cache.join("previous")).unwrap(), b"live\n");
     assert!(Instant::now() < deadline);
     // L71 independently checks that republishing self cannot clobber previous.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PACKAGE_HELPER_TIMEOUT;
     success(&helper_at(
         &fixture,
         "publish-package",
@@ -176,7 +179,7 @@ fn postinstall_l16_actual_installed_native_hook_entry_ignores_caller_cwd_and_dec
     assert!(!installed.join("scripts/postinstall.js").exists());
     options["sourceDir"] = json!(installed);
     options["deployHooks"] = json!(true);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PACKAGE_HELPER_TIMEOUT;
     success(&helper_at(
         &fixture,
         "publish-package",
@@ -226,8 +229,7 @@ fn postinstall_l25_missing_required_native_hook_assets_fails_without_success_or_
     fs::write(cache.join("previous"), "older\n").unwrap();
     options["sourceDir"] = json!(installed);
     options["deployHooks"] = json!(true);
-    // A debug host verifies the package's file hashes before checking Hook assets.
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + PACKAGE_HELPER_TIMEOUT;
     let output = helper_at(
         &fixture,
         "publish-package",
