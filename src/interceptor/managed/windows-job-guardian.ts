@@ -272,7 +272,7 @@ export function spawnPowerShellGuardian(command: string, args: string[], cwd: st
     config = { command: '', args: [], unavailable: true };
   }
   const child = spawn(process.execPath, ['-e', GUARDIAN_SOURCE], {
-    cwd, env: scriptEnv(), stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+    cwd, env: process.platform === 'win32' ? windowsPowerShellEnv() : scriptEnv(), stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
     detached: process.platform !== 'win32', windowsHide: true,
   });
   // Private initialization avoids duplicating a UTF-16/Base64 bootstrap inside
@@ -281,6 +281,18 @@ export function spawnPowerShellGuardian(command: string, args: string[], cwd: st
   control.on('error', () => {});
   control.write(`${JSON.stringify({ initialize: config })}\n`);
   return child;
+}
+
+/** Let Windows PowerShell rebuild its module paths instead of inheriting PS7's. */
+export function windowsPowerShellEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = scriptEnv(source);
+  // PS7 only repairs PSModulePath when it launches powershell.exe directly;
+  // an intermediate Node process must remove it from the child environment.
+  // https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === 'psmodulepath') delete env[key];
+  }
+  return env;
 }
 
 function psQuote(value: string): string { return `'${value.replace(/'/g, "''")}'`; }

@@ -8,16 +8,25 @@ import { createServer, type Socket } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { PowerShellPool } from '../../../src/interceptor/managed/powershell-pool.js';
-import { spawnPowerShellGuardian, windowsJobBootstrap } from '../../../src/interceptor/managed/windows-job-guardian.js';
+import { spawnPowerShellGuardian, windowsJobBootstrap, windowsPowerShellEnv } from '../../../src/interceptor/managed/windows-job-guardian.js';
 
 const quote = (s: string) => `'${s.replace(/'/g, "''")}'`;
 const pools: PowerShellPool[] = [];
 const dirs: string[] = [];
 
+it('removes inherited PS7 module paths from the restricted Windows PowerShell environment', () => {
+  const source = { PATH: 'runtime-path', PSModulePath: 'C:\\Program Files\\PowerShell\\7\\Modules', PRIVATE_API_KEY: 'test-value' };
+  const env = windowsPowerShellEnv(source);
+  expect(env.PATH).toBe(source.PATH);
+  expect(Object.keys(env).some(key => key.toLowerCase() === 'psmodulepath')).toBe(false);
+  expect(env.PRIVATE_API_KEY).toBeUndefined();
+  expect(source.PSModulePath).toContain('PowerShell');
+});
+
 function powerShellProbe(args: string[]): Promise<{ code: number | string; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise(resolve => {
     const child = execFile('powershell.exe', args, {
-      encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL', windowsHide: true,
+      encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL', windowsHide: true, env: windowsPowerShellEnv(),
     }, (error, stdout, stderr) => resolve({
       code: error?.code ?? 0, stdout, stderr, timedOut: error?.killed === true,
     }));
@@ -142,7 +151,7 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     const marker = join(dir, 'must-not-run');
     const script = `$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage';\n${windowsJobBootstrap('unused-job-pipe', process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'unsafe')`])}`;
     const result = await new Promise<{ code: number | null; stderr: string }>(resolve => {
-      const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+      const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env: windowsPowerShellEnv() });
       let stderr = '';
       child.stderr.on('data', chunk => { stderr += String(chunk); });
       child.on('close', code => resolve({ code, stderr }));
@@ -194,7 +203,7 @@ async function nativeBootstrapProbe(dir: string, marker: string, mutate: (source
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(`\\\\.\\pipe\\${pipeName}`, resolve); });
   const source = mutate(windowsJobBootstrap(pipeName, process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'unsafe')`]));
-  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], { cwd: dir, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], { cwd: dir, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env: windowsPowerShellEnv() });
   let stderr = '';
   child.stderr.on('data', chunk => { stderr += String(chunk); });
   const closed = new Promise<number | null>(resolve => child.once('close', resolve));
