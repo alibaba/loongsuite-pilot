@@ -152,6 +152,25 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     expect(r.out).toContain('gen_ai.tool.call.id=2 (100.0%)');
   });
 
+  it('accepts an unfinished OpenClaw cron attempt until its explicit lifecycle end', () => {
+    const common = {
+      'gen_ai.agent.type': 'openclaw',
+      'gen_ai.turn.id': 'cron-turn',
+      'agent.openclaw.collection': 'cron-lifecycle-v1',
+    };
+    const records = [
+      goodEntry({ ...common, 'event.id': 'start', 'event.name': 'other', 'gen_ai.turn.start': true }),
+      goodEntry({ ...common, 'event.id': 'attempt', 'event.name': 'other', 'agent.openclaw.hook': 'llm_output' }),
+    ];
+    const validate = () => runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_AGENT_FILTER: 'openclaw', E2E_JSONL_STRICT: '1' });
+    writeJsonl('openclaw-cron.jsonl', records);
+    expect(validate().code).toBe(0);
+    records.push(goodEntry({ ...common, 'event.id': 'finish', 'event.name': 'other',
+      'agent.openclaw.hook': 'cron_finished', 'gen_ai.turn.end': true }));
+    writeJsonl('openclaw-cron.jsonl', records);
+    expect(validate().code).toBe(0);
+  });
+
   it('accepts projected WorkBuddy builder output after tools with no reliable name are dropped', async () => {
     const fixture = fs.readFileSync(
       new URL('../fixtures/workbuddy/multi-tool-wave.jsonl', import.meta.url),

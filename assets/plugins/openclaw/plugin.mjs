@@ -1,8 +1,8 @@
 /**
  * loongsuite-pilot OpenClaw event_t plugin
  *
- * Runs inside the OpenClaw process (Node.js). Modern hosts register 15 hooks
- * (6 conversation-access + 9 default-active) via `api.on(hookName, handler)` and
+ * Runs inside the OpenClaw process (Node.js). Modern hosts register lifecycle,
+ * conversation and default-active hooks via `api.on(hookName, handler)` and
  * converts OpenClaw hook events into ARMS GenAI event_t JSONL records for
  * consumption by loongsuite-pilot's BaseHookInput pipeline. Hosts before
  * 2026.5.12 use the separate 9-hook legacy-adapter.mjs.
@@ -33,6 +33,7 @@ import crypto from "node:crypto";
 import { appendRawJsonl } from "../shared/raw-jsonl-writer.mjs";
 import { pilotConfigPath, readPilotConfig } from "../shared/pilot-config.mjs";
 import { createSubagentContexts, stampSubagent } from "./subagent-context.mjs";
+import { createCronContexts } from "./cron-context.mjs";
 import { invocationId, auditRecord, textMessages, deliveredText } from "./invocation-audit.mjs";
 import { MIN_OPENCLAW_VERSION } from "./compatibility.mjs";
 import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
@@ -380,7 +381,11 @@ function releasePendingChild(run, parent) {
 }
 
 function writeRecord(record, captureContent = true) {
-  const run = runs.get(record["agent.openclaw.run_id"] || record["gen_ai.turn.id"]);
+  const candidate = runs.get(record["agent.openclaw.run_id"] || record["gen_ai.turn.id"]);
+  // A late terminal from an older incarnation must not inherit the identity
+  // or parent of a newer run that happens to reuse the same native ID.
+  const run = candidate && (candidate.turnId || candidate.runId) === record["gen_ai.turn.id"]
+    ? candidate : undefined;
   const auditParent = run?.auditParentContext || run?.parentContext;
   if (auditParent?.invocationId) record["gen_ai.agent.parent.invocation.id"] = auditParent.invocationId;
   if (auditParent && run.sessionId && auditParent.childSessionId !== run.sessionId) {
@@ -442,6 +447,113 @@ function writeError(source, err) {
 const runs = new Map();
 const sessions = new Map();
 const sessionRunIds = new Map();
+// Only fixed-session cron jobs with an observed native start are tracked here.
+// A provider fallback is another attempt inside the same cron execution.
+// Preserve this small bounded state when OpenClaw reloads a plugin in-process.
+const cronRegistryKey = Symbol.for("loongsuite-pilot.openclaw.cron-executions");
+const cronRegistry = globalThis[cronRegistryKey] ||= new Map();
+const cronDataDir = resolveDataDir();
+let cronState = cronRegistry.get(cronDataDir);
+if (!cronState) {
+  cronState = { executions: new Map(), runs: new Map() };
+  cronRegistry.set(cronDataDir, cronState);
+  if (cronRegistry.size > MAX_SESSIONS) {
+    for (const [key, value] of cronRegistry) {
+      if (key !== cronDataDir && value.executions.size === 0) cronRegistry.delete(key);
+      if (cronRegistry.size <= MAX_SESSIONS) break;
+    }
+  }
+}
+const cronExecutions = cronState.executions;
+const cronRuns = cronState.runs;
+const cronContexts = createCronContexts(resolveDataDir, writeError);
+
+function persistCronContext(run) {
+  const execution = run?.cronExecution;
+  if (!execution || !run.sessionId || !run.sessionKey) return false;
+  return cronContexts.write(execution.jobId, {
+    runAtMs: execution.runAtMs, sessionKey: run.sessionKey, sessionId: run.sessionId,
+    runId: run.runId, turnId: run.turnId, traceId: run.traceId,
+    terminalEventId: execution.terminalEventId,
+    userId: run.userId, userIdSource: run.userIdSource, senderId: run.senderId,
+    channel: run.channel, accountId: run.accountId, channelId: run.channelId,
+  });
+}
+
+function emitCronFinished(run, execution, userId, emit, incomplete = false) {
+  const written = emit({
+    ...buildCommonFields(run, run.sessionId, userId),
+    "event.id": execution.terminalEventId,
+    "event.name": "other",
+    "agent.openclaw.hook": "cron_finished",
+    "gen_ai.turn.end": true,
+    ...(incomplete ? { "agent.openclaw.collection.incomplete": true,
+      "agent.openclaw.collection.end_reason": "missing_cron_finished" } : {}),
+    ...(execution.ambiguous ? { "agent.openclaw.correlation.ambiguous": true } : {}),
+  });
+  if (written !== false) cronContexts.remove(execution.jobId, execution.runAtMs);
+  return written !== false;
+}
+
+function recoverCronFinished(snapshot, userId, emit, incomplete = false) {
+  const execution = { jobId: snapshot.jobId, runAtMs: snapshot.runAtMs,
+    terminalEventId: snapshot.terminalEventId };
+  const run = { ...snapshot, cronExecution: execution, telemetrySessionKey: snapshot.sessionKey };
+  return emitCronFinished(run, execution, userId, emit, incomplete);
+}
+
+function handleCronChanged(event, _ctx, userId, emit) {
+  const jobId = event?.jobId;
+  const runAtMs = event?.runAtMs;
+  if (typeof jobId !== "string" || !jobId || jobId.length > 1024
+    || typeof runAtMs !== "number" || !Number.isFinite(runAtMs)) return;
+  if (event.action === "started") {
+    const target = event.sessionTarget;
+    if (typeof target !== "string" || !target.startsWith("session:")
+      || !isSessionKey(target.slice("session:".length))) return;
+    const previous = cronExecutions.get(jobId);
+    if (previous?.runAtMs === runAtMs) return;
+    if (previous) {
+      // An overlapping execution of the same job cannot be correlated from
+      // hooks that omit jobId. Avoid claiming an unproven task identity.
+      previous.ambiguous = true;
+      return;
+    }
+    if (cronExecutions.size >= MAX_RUNS) return;
+    const saved = cronContexts.read(jobId);
+    if (saved && saved.runAtMs !== runAtMs && !recoverCronFinished(saved, userId, emit, true)) return;
+    cronExecutions.set(jobId, { jobId, runAtMs, sessionKey: target.slice("session:".length),
+      terminalEventId: crypto.randomUUID(), run: null });
+    return;
+  }
+  if (event.action !== "finished") return;
+  const execution = cronExecutions.get(jobId);
+  if (!execution) {
+    const saved = cronContexts.read(jobId);
+    if (saved?.runAtMs === runAtMs) recoverCronFinished(saved, userId, emit);
+    return;
+  }
+  if (execution.runAtMs !== runAtMs) return;
+  cronExecutions.delete(jobId);
+  if (!execution.run) return;
+  const run = execution.run;
+  if (!run.completed) {
+    // A blocked, cancelled, or failed job may finish without llm_output.
+    // Do not leave its native run active for the next fixed-session job.
+    flushUnmatchedModelResponses(run, userId, emit);
+    completeRun(run);
+  }
+  if (cronRuns.get(run.runId) === execution) cronRuns.delete(run.runId);
+  emitCronFinished(run, execution, userId, emit);
+}
+
+function observedCronExecution(runId, ctx) {
+  const execution = cronExecutions.get(ctx?.jobId);
+  if (!execution || execution.ambiguous || execution.disabled || ctx?.trigger !== "cron"
+    || !ctx?.sessionId || runId !== ctx.sessionId
+    || ctx?.sessionKey !== execution.sessionKey) return null;
+  return execution;
+}
 
 function setBounded(map, key, value) {
   if (map.has(key)) map.delete(key);
@@ -497,10 +609,25 @@ function observeSessionKey(run, event, ctx) {
 function getRun(runId, event, ctx) {
   if (!runId) return null;
   let r = runs.get(runId);
+  const cronExecution = observedCronExecution(runId, ctx)
+    || (!r ? cronRuns.get(runId) : null);
+  if (cronExecution?.run && (!r || r.cronExecution === cronExecution)) {
+    // Keep an observed execution stable if its tombstone left the LRU before
+    // a fallback attempt arrived; the job remains the ownership boundary.
+    r = cronExecution.run;
+  } else if (cronExecution && r?.completed && r.cronExecution !== cronExecution) {
+    r.onEvict?.();
+    runs.delete(runId);
+    r = undefined;
+  }
   if (!r) {
-    const savedParent = childContexts.read(runId);
+    // A scheduler-owned fixed-session execution is independent work. An old
+    // delegated child context keyed only by its reused native ID is not proof
+    // that this newly started cron invocation belongs to the former parent.
+    const savedParent = cronExecution ? undefined : childContexts.read(runId);
     r = {
       runId,
+      ...(cronExecution ? { turnId: crypto.randomUUID(), cronExecution } : {}),
       traceId: generateTraceId(),
       parentContext: savedParent?.auditOnly ? undefined : savedParent,
       auditParentContext: savedParent,
@@ -530,6 +657,20 @@ function getRun(runId, event, ctx) {
       perCallUsage: new Map(),
       delegations: new Map(),
     };
+    if (cronExecution) {
+      r.sessionId = ctx.sessionId;
+      r.sessionKey = ctx.sessionKey;
+      if (persistCronContext(r)) {
+        cronExecution.run = r;
+        cronRuns.set(runId, cronExecution);
+      } else {
+        // Without a durable ownership record a Gateway crash could leave the
+        // collector waiting forever. Preserve the old fail-open behavior.
+        cronExecution.disabled = true;
+        delete r.cronExecution;
+        delete r.turnId;
+      }
+    }
   } else {
     // Refresh insertion order so the bounded Map behaves as an actual LRU.
     runs.delete(runId);
@@ -699,6 +840,7 @@ function buildCommonFields(run, sessionId, userId) {
     // An explicit false keeps suffix responses from becoming a second start.
     base["gen_ai.turn.start"] = false;
     if (run.turnId) base["agent.openclaw.run_id"] = run.runId;
+    if (run.cronExecution) base["agent.openclaw.collection"] = "cron-lifecycle-v1";
     base["gen_ai.session.id"] = run.sessionId || sessionId || "";
     if (base["gen_ai.session.id"]) base["gen_ai.agent.id"] = base["gen_ai.session.id"];
     if (run.sessionKeyAmbiguous) base["agent.openclaw.session_key.ambiguous"] = true;
@@ -1082,6 +1224,7 @@ function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
   if (event?.systemPrompt) run.systemPrompt = event.systemPrompt;
   if (ctx?.sessionId) run.sessionId = ctx.sessionId;
   if (ctx?.sessionKey) run.sessionKey = ctx.sessionKey;
+  persistCronContext(run);
 
   const record = {
     ...buildCommonFields(run, ctx?.sessionId, userId),
@@ -1862,6 +2005,11 @@ export default {
     }
     try { installSteeredDeliveryObserver({ prepare: prepareSteeredDelivery, complete: completeSteeredDelivery }); }
     catch (err) { debugFailureOnce('steered-delivery-observer', err); }
+
+    // The hook is optional on older hosts. Failure leaves their prior producer
+    // and flusher behavior intact instead of disabling the plugin.
+    try { on("cron_changed", handleCronChanged); }
+    catch (err) { debugFailureOnce("cron-changed-register", err); }
 
     // Observe completion via agent_end. Merely registering before_agent_finalize
     // enables the host's answer-revision gate and defers streaming delivery.

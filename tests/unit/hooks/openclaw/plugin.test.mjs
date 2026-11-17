@@ -229,7 +229,8 @@ describe('OpenClaw plugin stateful pipeline', () => {
       on: (name) => registered.add(name),
     };
     plugin.register(api);
-    expect(registered.size).toBe(15);
+    expect(registered.size).toBe(16);
+    expect(registered.has('cron_changed')).toBe(true);
     expect(registered.has('session_start')).toBe(true);
     expect(registered.has('session_end')).toBe(true);
     expect(registered.has('before_agent_run')).toBe(true);
@@ -335,7 +336,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
         on: (name) => registered.add(name),
       });
 
-      expect(registered.size).toBe(15);
+      expect(registered.size).toBe(16);
     },
   );
 
@@ -1885,4 +1886,131 @@ it('keeps simultaneous spawns separate and recovers their identity after plugin 
   expect(JSON.stringify(rows)).not.toContain('secret-task');
   const dir = path.join(pilotDataDir, 'subagent-contexts', 'openclaw');
   expect(fs.readdirSync(dir).map(name => fs.readFileSync(path.join(dir, name), 'utf8')).join('')).not.toContain('secret-task');
+});
+
+describe('fixed-session cron ownership', () => {
+  const ctx = { runId: 'cron-session', sessionId: 'cron-session', sessionKey: 'agent:main:cron:bound',
+    agentId: 'main', trigger: 'cron', jobId: 'job-1' };
+  const started = (h, runAtMs) => h.cron_changed({ action: 'started', jobId: ctx.jobId,
+    runAtMs, sessionTarget: `session:${ctx.sessionKey}` }, {});
+  const finished = (h, runAtMs) => h.cron_changed({ action: 'finished', jobId: ctx.jobId,
+    runAtMs, sessionId: ctx.sessionId, sessionKey: ctx.sessionKey }, {});
+  const attempt = async (h, model) => {
+    await h.before_agent_reply({}, ctx);
+    await h.before_agent_run({ prompt: 'private task text' }, ctx);
+    await h.llm_input({ ...ctx, prompt: 'private task text', provider: 'test', model }, ctx);
+    await h.model_call_started({ ...ctx, callId: 'native-call', provider: 'test', model }, ctx);
+    await h.agent_end({ ...ctx, success: true }, ctx);
+    await h.llm_output({ ...ctx, provider: 'test', model }, ctx);
+  };
+
+  it('keeps one execution and call sequence across an in-process plugin reload', async () => {
+    const first = registerPlugin(await loadPlugin());
+    started(first, 100);
+    await attempt(first, 'primary');
+    const reloaded = registerPlugin(await loadPlugin());
+    await attempt(reloaded, 'fallback');
+    finished(reloaded, 100);
+    const rows = readOutputRecords();
+    const requests = rows.filter(row => row['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(2);
+    expect(new Set(requests.map(row => row['gen_ai.turn.id'])).size).toBe(1);
+    expect(new Set(requests.map(row => row.trace_id)).size).toBe(1);
+    expect(requests.map(row => row['gen_ai.step.id'])).toEqual(['cron-session:model:1', 'cron-session:model:2']);
+    expect(rows.filter(row => row['agent.openclaw.hook'] === 'cron_finished')).toHaveLength(1);
+  });
+
+  it('recovers a pending terminal after a Gateway restart without retaining prompt text', async () => {
+    const first = registerPlugin(await loadPlugin());
+    started(first, 100);
+    await attempt(first, 'primary');
+    const before = readOutputRecords().find(row => row['agent.openclaw.hook'] === 'before_agent_run');
+    const directory = path.join(pilotDataDir, 'cron-contexts', 'openclaw');
+    const stored = fs.readdirSync(directory).map(file => fs.readFileSync(path.join(directory, file), 'utf8')).join('');
+    expect(stored).not.toContain('private task text');
+    globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].delete(pilotDataDir);
+    const restarted = registerPlugin(await loadPlugin());
+    finished(restarted, 100);
+    const terminal = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]['gen_ai.turn.id']).toBe(before['gen_ai.turn.id']);
+    expect(terminal[0].trace_id).toBe(before.trace_id);
+    expect(fs.readdirSync(directory)).toHaveLength(0);
+    finished(restarted, 100);
+    expect(readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished')).toHaveLength(1);
+  });
+
+  it('seals a missed terminal as incomplete before the next execution and ignores an old finish', async () => {
+    const first = registerPlugin(await loadPlugin());
+    started(first, 100);
+    await attempt(first, 'primary');
+    globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].delete(pilotDataDir);
+    const restarted = registerPlugin(await loadPlugin());
+    started(restarted, 200);
+    await attempt(restarted, 'next');
+    finished(restarted, 100);
+    finished(restarted, 200);
+    const rows = readOutputRecords();
+    const starts = rows.filter(row => row['agent.openclaw.hook'] === 'before_agent_run');
+    const ends = rows.filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map(row => row['gen_ai.turn.id'])).size).toBe(2);
+    expect(ends).toHaveLength(2);
+    expect(ends[0]).toMatchObject({ 'gen_ai.turn.id': starts[0]['gen_ai.turn.id'],
+      'agent.openclaw.collection.incomplete': true, 'agent.openclaw.collection.end_reason': 'missing_cron_finished' });
+    expect(ends[1]['gen_ai.turn.id']).toBe(starts[1]['gen_ai.turn.id']);
+  });
+
+  it('starts fresh after a native job finishes without an llm_output hook', async () => {
+    const handlers = registerPlugin(await loadPlugin());
+    started(handlers, 100);
+    await handlers.before_agent_reply({}, ctx);
+    await handlers.before_agent_run({ prompt: 'first' }, ctx);
+    finished(handlers, 100);
+    started(handlers, 200);
+    await attempt(handlers, 'second');
+    finished(handlers, 200);
+    const starts = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'before_agent_run');
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map(row => row['gen_ai.turn.id'])).size).toBe(2);
+  });
+
+  it('keeps the original producer behavior if durable cron ownership cannot be written', async () => {
+    const handlers = registerPlugin(await loadPlugin());
+    const rename = fs.renameSync;
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (String(to).includes(`${path.sep}cron-contexts${path.sep}`)) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      return rename(from, to);
+    });
+    started(handlers, 100);
+    await attempt(handlers, 'primary');
+    finished(handlers, 100);
+    const rows = readOutputRecords();
+    const input = rows.find(row => row['agent.openclaw.hook'] === 'before_agent_run');
+    expect(input['gen_ai.turn.id']).toBe(ctx.runId);
+    expect(input['agent.openclaw.collection']).toBeUndefined();
+    expect(rows.some(row => row['agent.openclaw.hook'] === 'cron_finished')).toBe(false);
+  });
+
+  it('does not inherit a previous delegated parent or sender for an independent scheduled invocation', async () => {
+    delete process.env.LOONGSUITE_USER_ID;
+    const handlers = registerPlugin(await loadPlugin());
+    const parent = { runId: 'parent', sessionId: 'parent-session', sessionKey: 'agent:main:parent' };
+    await handlers.before_agent_run({ prompt: 'parent', senderId: 'user-a' }, parent);
+    await handlers.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn', params: { task: 'child' } }, parent);
+    await handlers.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn', result: {
+      details: { status: 'accepted', runId: ctx.runId, childSessionKey: ctx.sessionKey },
+    } }, parent);
+    await handlers.before_agent_run({ prompt: 'child' }, { ...ctx, jobId: undefined, trigger: undefined });
+    await handlers.llm_output({}, { ...ctx, jobId: undefined, trigger: undefined });
+    started(handlers, 100);
+    await handlers.before_agent_reply({}, ctx);
+    await handlers.before_agent_run({ prompt: 'scheduled', senderId: 'user-b' }, ctx);
+    finished(handlers, 100);
+    const scheduled = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'before_agent_run').at(-1);
+    expect(scheduled['agent.openclaw.run_id']).toBe(ctx.runId);
+    expect(scheduled['user.id']).toBe('user-b');
+    expect(scheduled['gen_ai.agent.parent.invocation.id']).toBeUndefined();
+    expect(scheduled.parent_span_id).toBeUndefined();
+  });
 });

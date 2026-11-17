@@ -66,6 +66,20 @@ describe('CodexTurnJournal', () => {
   const filename = (dir: string, record: AgentActivityEntry) =>
     path.join(dir, `codex-turn-${codexTurnJournalGroupKey(record)}.jsonl`);
 
+  it('keeps late OpenClaw cron sender identity in its execution while preserving older journal keys', async () => {
+    const early = entry('early', { 'gen_ai.agent.type': 'openclaw', 'agent.openclaw.collection': 'cron-lifecycle-v1' });
+    const later = entry('later', { ...early, 'event.id': 'later', 'user.id': 'native-sender' });
+    const next = entry('next', { ...later, 'event.id': 'next', 'gen_ai.turn.id': 'next-turn' });
+    const journal = new CodexTurnJournal(directory, 100, ['openclaw']);
+    await journal.append([early, later, next]);
+    const restored = await readJournal(new CodexTurnJournal(directory, 100, ['openclaw']));
+    expect(restored.map(group => group.map(e => e['event.id']).sort()).sort())
+      .toEqual([['early', 'later'], ['next']]);
+    const oldEarly = { ...early, 'agent.openclaw.collection': undefined };
+    const oldLater = { ...later, 'agent.openclaw.collection': undefined };
+    expect(codexTurnJournalGroupKey(oldEarly)).not.toBe(codexTurnJournalGroupKey(oldLater));
+  });
+
   it('restores separate users/sessions/turns and stable records after restart without duplicate event IDs', async () => {
     const records = [entry('a'), entry('b'), entry('c', { 'gen_ai.turn.id': 'turn-2' }),
       entry('d', { 'gen_ai.session.id': 'session-2' }), entry('e', { 'user.id': 'user-2' })];
