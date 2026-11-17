@@ -80,7 +80,7 @@ Unix uses `sh <file>` under a Node guardian that owns the process group. A priva
 
 PowerShell 5.1 script files containing non-ASCII source text must use UTF-8 with a BOM. Escaping the stdin request preserves its JSON content; it does not change how PowerShell decodes the script file itself.
 
-The Windows launcher removes inherited `PSModulePath` so PowerShell 5.1 reconstructs its own module search paths. This also supports a collector launched through Node from PowerShell 7; see [Microsoft's module-path guidance](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath#starting-windows-powershell-from-powershell-7).
+The Windows launcher removes inherited `PSModulePath` so PowerShell 5.1 reconstructs its own module search paths. Bootstrap commands explicitly import builtin module manifests from `$PSHOME` to avoid scanning unrelated modules during startup. This also supports a collector launched through Node from PowerShell 7; see [Microsoft's module-path guidance](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath#starting-windows-powershell-from-powershell-7).
 
 The local document also accepts optional `interceptor.scriptCache`, a 64-character lowercase hexadecimal namespace selecting `configs/managed/scripts/<scriptCache>/`. Without it, scripts live in the root scripts directory. A configuration provider must place all required scripts before publishing a document. The engine validates the namespace's format and file paths, without interpreting its origin.
 

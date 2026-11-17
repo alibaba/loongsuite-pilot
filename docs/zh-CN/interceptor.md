@@ -272,7 +272,7 @@ macOS/Linux 使用 `sh <file>`，由一次性 Node guardian 持有进程组，�
 
 PowerShell 5.1 的 `.ps1` 正文含非 ASCII 字符时，应使用带 BOM 的 UTF-8 编码。stdin 请求的 JSON 转义只保护请求内容，不会改变 PowerShell 对脚本文件自身的解码方式。
 
-Windows 启动器不继承 `PSModulePath`，由 PowerShell 5.1 重建自身模块路径，避免从 PowerShell 7 经 Node 启动 collector 时加载错误版本的模块。参见 [微软模块路径说明](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath#starting-windows-powershell-from-powershell-7)。
+Windows 启动器不继承 `PSModulePath`，由 PowerShell 5.1 重建自身模块路径，避免从 PowerShell 7 经 Node 启动 collector 时加载错误版本的模块。启动命令显式导入 `$PSHOME` 下的系统模块清单，避免启动时扫描无关模块。参见 [微软模块路径说明](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath#starting-windows-powershell-from-powershell-7)。
 
 本地文档还接受可选的 `interceptor.scriptCache`：64 位小写十六进制字符串，用于选择 `configs/managed/scripts/<scriptCache>/` 命名空间。不设置时使用根目录。生成命名空间的配置提供方需先放齐该目录的所有脚本，再发布规则文档。本地执行器只校验格式和路径，不解释命名空间的来源。
 
