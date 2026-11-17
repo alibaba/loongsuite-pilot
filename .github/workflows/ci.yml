@@ -37,7 +37,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Verify Windows private duplex control and native readiness
-        run: npm exec -- vitest run tests/unit/interceptor/managed-powershell-windows.test.ts --maxWorkers=1 --minWorkers=1 --reporter=verbose -t "overlapped fd3 duplex|reports direct PowerShell|reports native guardian"
+        run: npm exec -- vitest run tests/unit/interceptor/managed-powershell-windows.test.ts --maxWorkers=1 --minWorkers=1 --reporter=verbose -t "overlapped fd3 duplex|reports direct PowerShell|reports native bootstrap|reports native guardian"
 
   windows-interceptor:
     needs: windows-interceptor-protocol

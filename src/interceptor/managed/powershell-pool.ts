@@ -28,6 +28,8 @@ const DEFAULT_ARGS = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypa
 const BOOTSTRAP = [
   "$ErrorActionPreference = 'Continue'",
   "$ProgressPreference = 'SilentlyContinue'",
+  // Load builtin commands without discovering unrelated modules on PSModulePath.
+  ...['Utility', 'Management', 'Security'].map(name => `Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.${name}\\Microsoft.PowerShell.${name}.psd1') -ErrorAction Stop`),
   '$__pilotScripts = (Get-Location).ProviderPath',
   'try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}',
 ].join('; ');

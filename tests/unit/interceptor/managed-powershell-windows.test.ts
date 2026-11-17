@@ -146,6 +146,53 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     expect(result.stdout, JSON.stringify(result)).toContain('DIRECT_PIPELINE_READY');
   }, 15_000);
 
+  it.each([false, true])('reports native bootstrap phase timing with Utility preload=%s', async preload => {
+    const dir = await directory();
+    const pipeName = `pilot-phase-${process.pid}-${randomBytes(16).toString('hex')}`;
+    const sockets: Socket[] = [];
+    const server = createServer(socket => {
+      sockets.push(socket);
+      socket.on('error', () => {});
+      // The executor only writes a fixed marker and exits. Close its independent
+      // lease after readiness so a blocked helper can still finish cleanup.
+      socket.once('data', () => setTimeout(() => socket.end(), 100));
+    });
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(`\\\\.\\pipe\\${pipeName}`, resolve); });
+    let source = windowsJobBootstrap(pipeName, process.execPath, ['-e', "console.log('PHASE_EXECUTOR')"]);
+    // Preserve the original autoload baseline even when production preloads the
+    // builtin. Both variants compile and execute the same native Job source.
+    source = source.replace(/^Import-Module .*\n/m, '')
+      .replace('try {\nAdd-Type', `try {\n[Console]::Error.WriteLine('PHASE_HOST_READY')\n${preload ? "Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop\n[Console]::Error.WriteLine('PHASE_UTILITY_READY')\n" : ''}[Console]::Error.WriteLine('PHASE_COMPILE_START')\nAdd-Type`)
+      .replace("'@\nexit (", "'@\n[Console]::Error.WriteLine('PHASE_COMPILE_END')\nexit (")
+      .replace('lease.Connect(10000);', 'lease.Connect(10000); Console.Error.WriteLine("PHASE_LEASE_CONNECTED");')
+      .replace('Check(CreateProcessW(', 'Console.Error.WriteLine("PHASE_CREATE_START"); Check(CreateProcessW(')
+      .replace('var watcher = new Thread', 'Console.Error.WriteLine("PHASE_CREATE_END"); var watcher = new Thread')
+      .replace('lease.Flush();', 'lease.Flush(); Console.Error.WriteLine("PHASE_READY_WRITTEN");')
+      .replace('resumed = true;', 'resumed = true; Console.Error.WriteLine("PHASE_RESUMED");');
+    const started = Date.now();
+    const evidence: { elapsedMs: number; stream: string; value: string }[] = [];
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')],
+      { cwd: dir, env: windowsPowerShellEnv(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    for (const [stream, output] of [['stdout', child.stdout], ['stderr', child.stderr]] as const) {
+      output.on('data', chunk => evidence.push({ elapsedMs: Date.now() - started, stream, value: String(chunk).slice(-4096) }));
+    }
+    const closed = new Promise<number | null>(resolve => child.once('close', resolve));
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const code = await Promise.race([closed, new Promise<string>(resolve => { timer = setTimeout(() => resolve('timeout'), 40_000); })]);
+      const diagnostic = JSON.stringify({ check: 'native-bootstrap-phases', preload, code, evidence });
+      console.log(diagnostic);
+      expect(code, diagnostic).toBe(0);
+      expect(evidence.map(event => event.value).join(''), diagnostic).toContain('PHASE_READY_WRITTEN');
+    } finally {
+      if (timer) clearTimeout(timer);
+      child.kill('SIGKILL');
+      for (const socket of sockets) socket.destroy();
+      server.close();
+      await closed;
+    }
+  }, 45_000);
+
   it.each(['node', 'powershell'])('reports native guardian %s ownership and input delivery timing', async executor => {
     const dir = await directory();
     const command = executor === 'node' ? process.execPath : 'powershell.exe';

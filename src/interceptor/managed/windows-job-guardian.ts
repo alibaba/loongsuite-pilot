@@ -161,7 +161,9 @@ public static class PilotManagedScriptJob {
 /** Exported for Windows capability/CLM regression tests, never accepts rule text. */
 export function windowsJobBootstrap(pipeName: string, command: string, args: string[]): string {
   const commandLine = [command, ...args].map(windowsQuote).join(' ');
-  return `$ErrorActionPreference = 'Stop'\ntry {\nAdd-Type -ReferencedAssemblies 'System.Core.dll' -TypeDefinition @'\n${JOB_SOURCE}\n'@\nexit ([PilotManagedScriptJob]::Run(${psQuote(pipeName)}, ${psQuote(commandLine)}))\n} catch {\nWrite-Error 'managed Windows Job Object unavailable' -ErrorAction Continue\nexit 1\n}`;
+  // Resolve the builtin manifest directly: discovering Add-Type by scanning all
+  // user/system module directories can dominate a short hook's startup budget.
+  return `$ErrorActionPreference = 'Stop'\ntry {\nImport-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop\nAdd-Type -ReferencedAssemblies 'System.Core.dll' -TypeDefinition @'\n${JOB_SOURCE}\n'@\nexit ([PilotManagedScriptJob]::Run(${psQuote(pipeName)}, ${psQuote(commandLine)}))\n} catch {\nWrite-Error 'managed Windows Job Object unavailable' -ErrorAction Continue\nexit 1\n}`;
 }
 
 /*
