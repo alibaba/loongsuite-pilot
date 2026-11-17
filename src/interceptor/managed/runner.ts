@@ -43,10 +43,22 @@ const SCRIPT_ENV_KEYS = [
 ];
 
 /** Script rules get no collector credentials from the environment. */
-export function scriptEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function scriptEnv(source: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
+  // Windows Worker copies are case-sensitive JS objects, unlike the main
+  // thread's process.env. Keep one canonical spelling of each allowed key.
+  const windowsSource = platform === 'win32'
+    ? new Map(Object.entries(source).map(([key, value]) => [key.toLowerCase(), value]))
+    : null;
+  const copied = new Set<string>();
   for (const key of SCRIPT_ENV_KEYS) {
-    if (source[key] !== undefined) env[key] = source[key];
+    const lookup = key.toLowerCase();
+    if (windowsSource && copied.has(lookup)) continue;
+    const value = windowsSource ? windowsSource.get(lookup) : source[key];
+    if (value !== undefined) {
+      env[key] = value;
+      copied.add(lookup);
+    }
   }
   return env;
 }

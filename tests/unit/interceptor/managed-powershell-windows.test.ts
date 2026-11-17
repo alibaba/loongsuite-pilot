@@ -23,10 +23,28 @@ it('removes inherited PS7 module paths from the restricted Windows PowerShell en
   expect(source.PSModulePath).toContain('PowerShell');
 });
 
+it('preserves allowed Windows runtime keys from a case-sensitive Worker copy', () => {
+  const source = {
+    SYSTEMROOT: 'C:\\Windows', WINDIR: 'C:\\Windows', COMSPEC: 'C:\\Windows\\System32\\cmd.exe',
+    PROGRAMFILES: 'C:\\Program Files', 'PROGRAMFILES(X86)': 'C:\\Program Files (x86)',
+    PATH: 'runtime-path', PSMODULEPATH: 'inherited-PS7', PRIVATE_API_KEY: 'secret',
+  };
+  const env = windowsPowerShellEnv(source);
+  expect(env.SystemRoot).toBe(source.SYSTEMROOT);
+  expect(env.windir).toBe(source.WINDIR);
+  expect(env.ComSpec).toBe(source.COMSPEC);
+  expect(env.ProgramFiles).toBe(source.PROGRAMFILES);
+  expect(env['ProgramFiles(x86)']).toBe(source['PROGRAMFILES(X86)']);
+  expect(env.PATH).toBe(source.PATH);
+  expect(Object.keys(env).filter(key => key.toLowerCase() === 'path')).toHaveLength(1);
+  expect(Object.keys(env).some(key => key.toLowerCase() === 'psmodulepath')).toBe(false);
+  expect(env.PRIVATE_API_KEY).toBeUndefined();
+});
+
 function powerShellProbe(args: string[]): Promise<{ code: number | string; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise(resolve => {
     const child = execFile('powershell.exe', args, {
-      encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL', windowsHide: true, env: windowsPowerShellEnv(),
+      encoding: 'utf8', timeout: 10_000, maxBuffer: 8192, killSignal: 'SIGKILL', windowsHide: true, env: windowsPowerShellEnv(),
     }, (error, stdout, stderr) => resolve({
       code: error?.code ?? 0, stdout, stderr, timedOut: error?.killed === true,
     }));
@@ -55,8 +73,9 @@ async function poolFile(body: string): Promise<{ pool: PowerShellPool; file: str
   return { pool, file, dir };
 }
 
-async function waitFile(file: string): Promise<string> {
+async function waitFile(file: string, diagnostic = () => ''): Promise<string> {
   for (let i = 0; i < 1500 && !existsSync(file); i++) await new Promise(resolve => setTimeout(resolve, 10));
+  if (!existsSync(file)) throw new Error(`missing native test marker ${file}; ${diagnostic()}`);
   return (await readFile(file, 'utf8')).replace(/^\uFEFF/, '').trim();
 }
 
@@ -75,6 +94,16 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
 
+  it('loads native builtin modules in the same minimal environment as the guardian', async () => {
+    const result = await powerShellProbe(['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+      '$ErrorActionPreference="Stop"; Import-Module Microsoft.PowerShell.Security,Microsoft.PowerShell.Utility,Microsoft.PowerShell.Management -ErrorAction Stop; @{Marker="NATIVE_MODULES_READY";Version=$PSVersionTable.PSVersion.ToString();Location=(Get-Location).ProviderPath;Policy=[string](Get-ExecutionPolicy)} | ConvertTo-Json -Compress']);
+    const safeNames = /^(systemroot|windir|comspec|programfiles(?:\(x86\))?|programw6432|commonprogramfiles(?:\(x86\))?|commonprogramw6432|psmodulepath)$/i;
+    const diagnostic = JSON.stringify({ sourceKeys: Object.keys(process.env).filter(key => safeNames.test(key)), passedKeys: Object.keys(windowsPowerShellEnv()), result });
+    expect(result.code, diagnostic).toBe(0);
+    expect(result.stdout.trim(), diagnostic).not.toBe('');
+    expect(JSON.parse(result.stdout).Marker, diagnostic).toBe('NATIVE_MODULES_READY');
+  }, 15_000);
+
   it('rejects a script under process Restricted and preserves Unicode request/path in the pool', async () => {
     const version = await powerShellProbe(['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()']);
     expect(version.code, JSON.stringify(version)).toBe(0);
@@ -83,8 +112,9 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     // Restricted also blocks autoloading the Security module. Load its cmdlets
     // before restricting this probe's process; no persisted policy is changed.
     const policies = await powerShellProbe(['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
-      'Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; Set-ExecutionPolicy Restricted -Scope Process -Force; @{Effective=[string](Get-ExecutionPolicy);Process=[string](Get-ExecutionPolicy -Scope Process);CurrentUser=[string](Get-ExecutionPolicy -Scope CurrentUser);LocalMachine=[string](Get-ExecutionPolicy -Scope LocalMachine);MachinePolicy=[string](Get-ExecutionPolicy -Scope MachinePolicy);UserPolicy=[string](Get-ExecutionPolicy -Scope UserPolicy)} | ConvertTo-Json -Compress']);
+      '$ErrorActionPreference="Stop"; Import-Module Microsoft.PowerShell.Security,Microsoft.PowerShell.Utility -ErrorAction Stop; Set-ExecutionPolicy Restricted -Scope Process -Force; @{Effective=[string](Get-ExecutionPolicy);Process=[string](Get-ExecutionPolicy -Scope Process);CurrentUser=[string](Get-ExecutionPolicy -Scope CurrentUser);LocalMachine=[string](Get-ExecutionPolicy -Scope LocalMachine);MachinePolicy=[string](Get-ExecutionPolicy -Scope MachinePolicy);UserPolicy=[string](Get-ExecutionPolicy -Scope UserPolicy)} | ConvertTo-Json -Compress']);
     expect(policies.code, JSON.stringify(policies)).toBe(0);
+    expect(policies.stdout.trim(), JSON.stringify(policies)).not.toBe('');
     const policySnapshot = JSON.parse(policies.stdout.trim());
     // This control script does not read $input, even if a higher policy overrides Restricted.
     const restrictedFile = join(dir, 'restricted-control.ps1');
@@ -132,11 +162,13 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     const executor = join(dir, 'executor.cjs');
     await writeFile(executor, `const c=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',detached:true});require('node:fs').writeFileSync(process.argv[2],String(c.pid));process.stdin.resume();`);
     const guardian = spawnPowerShellGuardian(process.execPath, [executor, pidFile], dir);
-    guardian.stdout?.resume(); guardian.stderr?.resume();
+    guardian.stdout?.resume();
+    let stderr = '';
+    guardian.stderr?.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-4096); });
     const lease = guardian.stdio[3] as Duplex;
     lease.on('error', () => {});
-    const pid = Number(await waitFile(pidFile));
     try {
+      const pid = Number(await waitFile(pidFile, () => stderr));
       if (scenario === 'deadline') lease.write('{"timeout":100}\n');
       else if (scenario === 'lease') lease.end();
       else guardian.kill('SIGKILL');
@@ -205,7 +237,7 @@ async function nativeBootstrapProbe(dir: string, marker: string, mutate: (source
   const source = mutate(windowsJobBootstrap(pipeName, process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'unsafe')`]));
   const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], { cwd: dir, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env: windowsPowerShellEnv() });
   let stderr = '';
-  child.stderr.on('data', chunk => { stderr += String(chunk); });
+  child.stderr.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-4096); });
   const closed = new Promise<number | null>(resolve => child.once('close', resolve));
   let readyTimer: NodeJS.Timeout | undefined;
   try {

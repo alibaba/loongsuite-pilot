@@ -285,7 +285,15 @@ export function spawnPowerShellGuardian(command: string, args: string[], cwd: st
 
 /** Let Windows PowerShell rebuild its module paths instead of inheriting PS7's. */
 export function windowsPowerShellEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env = scriptEnv(source);
+  const env = scriptEnv(source, 'win32');
+  const values = new Map(Object.entries(source).map(([key, value]) => [key.toLowerCase(), value]));
+  // Windows PowerShell uses these non-secret runtime locations to rebuild its
+  // own module lookup when PSModulePath is absent. Do not inherit PS7's paths.
+  for (const key of ['ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432',
+    'CommonProgramFiles', 'CommonProgramFiles(x86)', 'CommonProgramW6432']) {
+    const value = values.get(key.toLowerCase());
+    if (value !== undefined) env[key] = value;
+  }
   // PS7 only repairs PSModulePath when it launches powershell.exe directly;
   // an intermediate Node process must remove it from the child environment.
   // https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath
