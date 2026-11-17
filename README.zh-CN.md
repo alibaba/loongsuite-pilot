@@ -107,11 +107,22 @@ Agent 定义位于 `agents.d/`。如需接入新的 Agent，请参考 [新 Agent
 - 能加载 `node:sqlite` 的 Node.js（22.13+、23.4+ 或更新版本）。受支持平台上安装器会下载托管 Node.js 22.22 运行时；系统 Node.js 只有在 `require('node:sqlite')` 成功时才会被接受。Node.js 18/20 以及 22.0–22.12 / 23.0–23.3 不够。
 - `npm`
 - `curl` 或 `wget`
+- Windows 下需要 PowerShell 5.1 或更高版本
 
-从公开包安装：
+在 Linux 或 macOS 上从公开包安装：
 
 ```bash
 curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && bash /tmp/loongsuite-pilot-installer.sh install
+```
+
+在 Windows 上从公开包安装：
+
+```powershell
+$installer = "$env:TEMP\loongsuite-pilot-installer.ps1"
+Invoke-WebRequest `
+  -Uri "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1" `
+  -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer install
 ```
 
 验证服务状态：
@@ -121,7 +132,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-默认会开启本地 JSONL 输出，路径为 `~/.loongsuite-pilot/logs/output/`。
+默认会开启本地 JSONL 输出，路径为 `~/.loongsuite-pilot/logs/output/`；Windows 下为 `%USERPROFILE%\.loongsuite-pilot\logs\output\`。
 
 安装参数、卸载命令和源码运行方式见 [安装指南](docs/zh-CN/installation.md)。
 

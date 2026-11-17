@@ -34,6 +34,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer install
 
 Windows 安装器默认下载 `loongsuite-pilot.zip`。数据目录默认在 `%USERPROFILE%\.loongsuite-pilot`，命令入口安装到 `%USERPROFILE%\.local\bin`。如果安装后当前窗口里找不到 `loongsuite-pilot` 命令，重新打开一个 PowerShell 窗口即可。
 
+如果安装停在 `Copy-Item : 对路径“...\loongsuite-pilot-service.ps1”的访问被拒绝`，说明当前账户对该命令目录没有写权限：有些工具会以管理员身份创建 `%USERPROFILE%\.local\bin`，并留下受限的 ACL。先用 `icacls` 查看，再在管理员窗口里给自己授权一次：
+
+```powershell
+icacls "$env:USERPROFILE\.local\bin"
+icacls "$env:USERPROFILE\.local\bin" /grant "$env:USERNAME:(OI)(CI)M"
+```
+
+之后用普通权限重跑安装器。不要整体用管理员权限跑安装器：安装出来的文件属主会变成 Administrators，下次升级会在同一步再失败。
+
 ## 带常用参数安装
 
 Linux/macOS：

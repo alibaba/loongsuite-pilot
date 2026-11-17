@@ -2206,12 +2206,12 @@ function Remove-GrokBuildHookConfig {
         try {
             $ErrorActionPreference = "Continue"
             $persisted = & $script:NODE_BIN -e @'
-const fs = require("fs");
-const path = require("path");
+const fs = require('fs');
+const path = require('path');
 try {
-  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  const value = state?.["grok-build"]?.hookSettingsPath;
-  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+  const state = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+  const value = state?.['grok-build']?.hookSettingsPath;
+  if (typeof value === 'string' && path.isAbsolute(value)) process.stdout.write(value);
 } catch {}
 '@ $stateFile 2>$null
         } finally {
@@ -2229,14 +2229,14 @@ try {
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     $result = & $script:NODE_BIN -e @'
-const fs = require("fs");
+const fs = require('fs');
 const cfg = process.argv[1];
-const owned = value => typeof value === "string"
-  && /(?:^|[\\/])grok-build-loongsuite-pilot-hook\.(?:sh|ps1)(?:"|\s|$)/i.test(value);
+const owned = value => typeof value === 'string'
+  && /(?:^|[\\/])grok-build-loongsuite-pilot-hook\.(?:sh|ps1)(?:\x22|\s|$)/i.test(value);
 try {
-  const data = JSON.parse(fs.readFileSync(cfg, "utf8"));
-  const hooks = data && typeof data.hooks === "object" && data.hooks ? data.hooks : null;
-  if (!hooks) { process.stdout.write("nochange"); process.exit(0); }
+  const data = JSON.parse(fs.readFileSync(cfg, 'utf8'));
+  const hooks = data && typeof data.hooks === 'object' && data.hooks ? data.hooks : null;
+  if (!hooks) { process.stdout.write('nochange'); process.exit(0); }
   let changed = false;
   for (const [event, entries] of Object.entries(hooks)) {
     if (!Array.isArray(entries)) continue;
@@ -2255,16 +2255,16 @@ try {
     if (kept.length === 0) delete hooks[event];
     else hooks[event] = kept;
   }
-  if (!changed) { process.stdout.write("nochange"); process.exit(0); }
+  if (!changed) { process.stdout.write('nochange'); process.exit(0); }
   if (Object.keys(hooks).length === 0) delete data.hooks;
   if (Object.keys(data).length === 0) {
     fs.unlinkSync(cfg);
   } else {
     const tmp = `${cfg}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
     fs.renameSync(tmp, cfg);
   }
-  process.stdout.write("cleaned");
+  process.stdout.write('cleaned');
 } catch (error) {
   process.stderr.write(error.message); process.exit(1);
 }
@@ -2422,12 +2422,12 @@ function Remove-PiCodingAgentExtension {
         try {
             $ErrorActionPreference = "Continue"
             $persisted = & $script:NODE_BIN -e @'
-const fs = require("fs");
-const path = require("path");
+const fs = require('fs');
+const path = require('path');
 try {
-  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  const value = state?.["pi-coding-agent"]?.pluginInjectConfigPath;
-  if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
+  const state = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+  const value = state?.['pi-coding-agent']?.pluginInjectConfigPath;
+  if (typeof value === 'string' && path.isAbsolute(value)) process.stdout.write(value);
 } catch {}
 '@ $stateFile 2>$null
         } finally {
@@ -2462,11 +2462,11 @@ const stripJsoncComments = text => {
       result += ch;
       if (escape) escape = false;
       else if (ch.charCodeAt(0) === 92) escape = true;
-      else if (ch === '"') inString = false;
+      else if (ch.charCodeAt(0) === 34) inString = false;
       index++;
       continue;
     }
-    if (ch === '"') {
+    if (ch.charCodeAt(0) === 34) {
       inString = true;
       result += ch;
       index++;
@@ -2803,9 +2803,9 @@ function Assert-SingleSlsConfig {
     try {
         $ErrorActionPreference = "Continue"
         $nodeOut = & $script:NODE_BIN -e @'
-const fs = require("fs");
+const fs = require('fs');
 try {
-  const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""));
+  const config = JSON.parse(fs.readFileSync(process.argv[1], 'utf8').replace(/^\uFEFF/, ''));
   process.exit(Array.isArray(config?.sls) ? 12 : 0);
 } catch { process.exit(13); }
 '@ $configFile 2>&1
