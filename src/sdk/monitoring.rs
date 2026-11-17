@@ -38,8 +38,9 @@ impl Monitoring {
         let _restore = RestoreScope(crate::utils::source_access::current());
         crate::utils::source_access::install(Some(scope.clone()));
         let thread_scope = scope.clone();
+        // Monitoring needs timers and blocking file work, like the source runtime.
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
+            .enable_time()
             .on_thread_start(move || {
                 crate::utils::source_access::install(Some(thread_scope.clone()))
             })

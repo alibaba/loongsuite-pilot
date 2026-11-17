@@ -340,9 +340,11 @@ fn run_agent(
     scope.set_log(state_dir.join("collector.log"));
     let start_scope = scope.clone();
     source_access::install(Some(scope.clone()));
+    // Use only the timer driver. Enabling I/O on Unix initializes Tokio's
+    // process-wide signal socket pair, which survives runtime shutdown.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
-        .enable_all()
+        .enable_time()
         .thread_name("pilot-source-io")
         .on_thread_start(move || source_access::install(Some(start_scope.clone())))
         .on_thread_stop(|| source_access::install(None))

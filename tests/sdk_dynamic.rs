@@ -1392,3 +1392,58 @@ fn real_library_reports_version_hook_and_durable_usage_without_host_mapping() {
     });
     resumed.stop();
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_foreign_host_releases_all_instance_sockets() {
+    let root = tempfile::tempdir().unwrap();
+    let probe = root.path().join("sdk-macos-lifecycle");
+    let build = Command::new("cc")
+        .args([
+            "-std=c11",
+            "-D_DARWIN_C_SOURCE",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+        ])
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/sdk_macos_lifecycle.c"
+        ))
+        .arg("-o")
+        .arg(&probe)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let source = root.path().join("transcripts");
+    let home = root.path().join("home");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    let library = library_path();
+    let copy = root.path().join("copied-sdk.dylib");
+    std::fs::copy(&library, &copy).unwrap();
+    let init = json!({"data_dir": root.path().join("data"),
+                     "resource_dir": env!("CARGO_MANIFEST_DIR"), "home_dir": home});
+    for args in [
+        vec!["--load-only".to_owned()],
+        vec![init.to_string(), qoder_policy(&source).to_string()],
+    ] {
+        let output = Command::new(&probe)
+            .args(args)
+            .args([&library, &library, &copy])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+}
