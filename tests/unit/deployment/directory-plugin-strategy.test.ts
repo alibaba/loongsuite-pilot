@@ -84,6 +84,114 @@ describe('DirectoryPluginStrategy', () => {
     expect(detectAgent).toHaveBeenCalledWith(def.detection);
   });
 
+  it('requires the activation executable even when the home directory detects Hermes', async () => {
+    const actual = await vi.importActual<typeof import('../../../src/deployment/detect-utils.js')>(
+      '../../../src/deployment/detect-utils.js',
+    );
+    vi.mocked(detectAgent).mockImplementation(actual.detectAgent);
+    const hermesHome = path.join(tmpDir, '.hermes');
+    await fs.mkdir(hermesHome);
+    const command = path.join(tmpDir, 'hermes-cli');
+    const def = withActivation(makeDef());
+    def.detection = { paths: [hermesHome], commands: ['hermes'] };
+    def.directoryPlugin!.activation!.command = command;
+
+    await expect(detectAgent(def.detection)).resolves.toBe(true);
+    await expect(strategy.detect(def)).resolves.toBe(false);
+    await fs.writeFile(command, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    await expect(strategy.detect(def)).resolves.toBe(true);
+
+    if (process.platform !== 'win32') {
+      await fs.chmod(command, 0o644);
+      await expect(strategy.detect(def)).resolves.toBe(false);
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('notices a CLI installed on PATH after an earlier miss', async () => {
+    vi.mocked(detectAgent).mockResolvedValue(true);
+    const command = `hermes-test-${path.basename(tmpDir)}`;
+    const def = withActivation(makeDef());
+    def.directoryPlugin!.activation!.command = command;
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${tmpDir}${path.delimiter}${previousPath ?? ''}`;
+    try {
+      await expect(strategy.detect(def)).resolves.toBe(false);
+      await fs.writeFile(path.join(tmpDir, command), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      await expect(strategy.detect(def)).resolves.toBe(true);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+
+  it('finds a later Hermes venv install outside PATH and uses it for activation', async () => {
+    const actual = await vi.importActual<typeof import('../../../src/deployment/detect-utils.js')>(
+      '../../../src/deployment/detect-utils.js',
+    );
+    vi.mocked(detectAgent).mockImplementation(actual.detectAgent);
+    const previous = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      USERPROFILE: process.env.USERPROFILE,
+      HERMES_CLI: process.env.HERMES_CLI,
+    };
+    const hermesHome = path.join(tmpDir, '.hermes');
+    const executable = process.platform === 'win32' ? 'hermes.exe' : 'hermes';
+    const cli = path.join(
+      hermesHome, 'hermes-agent', 'venv',
+      process.platform === 'win32' ? 'Scripts' : 'bin', executable,
+    );
+    const commands: string[] = [];
+    class RecordingStrategy extends DirectoryPluginStrategy {
+      protected override async runActivationCommand(command: string): Promise<{ stdout: string; stderr: string }> {
+        commands.push(command);
+        return { stdout: '', stderr: '' };
+      }
+    }
+    const recordingStrategy = new RecordingStrategy();
+    const def = withActivation(makeDef());
+    def.detection = { paths: [hermesHome], commands: [executable] };
+    def.directoryPlugin!.activation!.command = executable; // value resolved when the daemon started
+    process.env.PATH = tmpDir;
+    process.env.HOME = tmpDir;
+    process.env.USERPROFILE = tmpDir;
+    delete process.env.HERMES_CLI;
+    try {
+      await fs.mkdir(hermesHome);
+      await expect(recordingStrategy.detect(def)).resolves.toBe(false);
+
+      await fs.mkdir(path.dirname(cli), { recursive: true });
+      await fs.writeFile(cli, 'Hermes CLI fixture\n', { mode: 0o755 });
+      await expect(recordingStrategy.detect(def)).resolves.toBe(true);
+      await expect(recordingStrategy.deploy(def)).resolves.toMatchObject({ success: true });
+      expect(commands).toEqual([cli, cli]); // probe and enable
+
+      await expect(recordingStrategy.undeploy(def)).resolves.toBe(true);
+      expect(commands).toEqual([cli, cli, cli, cli]); // probe and disable
+
+      // An earlier load may also have frozen the now-removed venv path.
+      def.directoryPlugin!.activation!.command = process.platform === 'win32'
+        ? cli.replace(/\\/g, '/')
+        : cli;
+      await fs.rm(hermesHome, { recursive: true });
+      const userCli = path.join(tmpDir, '.local', 'bin', executable);
+      await fs.mkdir(path.dirname(userCli), { recursive: true });
+      await fs.writeFile(userCli, 'Hermes CLI fixture\n', { mode: 0o755 });
+      await expect(recordingStrategy.detect(def)).resolves.toBe(true);
+      await expect(recordingStrategy.deploy(def)).resolves.toMatchObject({ success: true });
+      expect(commands.slice(4)).toEqual([userCli, userCli]);
+
+      process.env.HERMES_CLI = path.join(tmpDir, 'missing-override');
+      def.directoryPlugin!.activation!.command = process.env.HERMES_CLI;
+      await expect(recordingStrategy.detect(def)).resolves.toBe(false);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it('copies a plugin directory and writes its ownership marker', async () => {
     const def = makeDef();
     await expect(strategy.needsDeploy(def)).resolves.toBe(true);
