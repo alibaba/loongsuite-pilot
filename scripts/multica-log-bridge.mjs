@@ -31,10 +31,14 @@ export async function readActivationPermit(file, now = Date.now()) {
 }
 
 // Kubernetes log timestamps retain the date missing from Multica's tint output.
-export function freshLines(body, cursor = { time: '', hashes: [] }) {
-  const hashes = new Set(cursor.hashes);
+export function freshLines(body, cursor = { time: '', counts: {} }) {
+  // Older checkpoints only establish one known occurrence per hash.
+  const previousCounts = new Map(cursor.counts
+    ? Object.entries(cursor.counts)
+    : (cursor.hashes ?? []).map(hash => [hash, 1]));
+  const seenCounts = new Map();
   let latest = cursor.time;
-  let latestHashes = new Set(cursor.hashes);
+  let latestCounts = new Map(previousCounts);
   const lines = [];
   // limitBytes may end in the middle of a record; leave that record for the next pull.
   const complete = body.slice(0, body.lastIndexOf('\n') + 1);
@@ -42,15 +46,18 @@ export function freshLines(body, cursor = { time: '', hashes: [] }) {
     const time = line.match(/^(\d{4}-\d{2}-\d{2}T\S+) /)?.[1];
     if (!time || !Number.isFinite(Date.parse(time)) || (cursor.time && Date.parse(time) < Date.parse(cursor.time))) continue;
     const hash = crypto.createHash('sha256').update(line).digest('hex');
-    if (time === cursor.time && hashes.has(hash)) continue;
-    lines.push(line);
+    const count = (seenCounts.get(hash) ?? 0) + 1;
+    seenCounts.set(hash, count);
     if (!latest || Date.parse(time) > Date.parse(latest) || (Date.parse(time) === Date.parse(latest) && time > latest)) {
       latest = time;
-      latestHashes = new Set();
+      latestCounts = new Map();
     }
-    if (time === latest) latestHashes.add(hash);
+    // A bounded replay may contain fewer old occurrences; never lower its checkpoint.
+    if (time === latest) latestCounts.set(hash, Math.max(latestCounts.get(hash) ?? 0, count));
+    if (time === cursor.time && count <= (previousCounts.get(hash) ?? 0)) continue;
+    lines.push(line);
   }
-  return { lines, cursor: { time: latest, hashes: [...latestHashes] } };
+  return { lines, cursor: { time: latest, counts: Object.fromEntries(latestCounts) } };
 }
 
 async function main() {

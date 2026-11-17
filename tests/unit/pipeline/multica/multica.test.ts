@@ -61,6 +61,16 @@ describe('Multica existing-data parsers', () => {
     expect(failures[0]).toMatchObject({failure_reason: 'rate_limit', runtime_mode: 'local'});
     expect(failures[0].entity_id).not.toBe(failures[1].entity_id);
   });
+  it('removes query content from metric path labels without merging distinct counter series', () => {
+    const rows = parsePrometheus('multica_http_request_total{path="/api/search?q=private-message&filter=private-filter"} 1\n'
+      + 'multica_http_request_total{path="/api/search?q=another-message"} 2\n'
+      + 'multica_http_request_total{path="/api/issues"} 3\n');
+    expect(rows).toHaveLength(3);
+    expect(rows.map(row => JSON.parse(row.metric_labels).path)).toEqual(['/api/search', '/api/search', '/api/issues']);
+    expect(rows[0].entity_id).not.toBe(rows[1].entity_id);
+    expect(rows.map(row => row.metric_value)).toEqual(['1', '2', '3']);
+    for (const content of ['private-message', 'private-filter', 'another-message']) expect(JSON.stringify(rows)).not.toContain(content);
+  });
   it('parses Kubernetes timestamp + tint duration, exports only known message templates', () => {
     const row = parseMulticaLog('2026-11-16T08:00:00.123Z \u001b[32mINF\u001b[0m http request method=POST path=/api/issues/i/comments?token=secret status=200 duration=1.25s request_id=req-1 token=secret');
     expect(row).toMatchObject({message: 'http request', source_time: '2026-11-16T08:00:00.123Z', level: 'INF', duration_ms: '1250', http_status: '200', path: '/api/issues/i/comments'});
