@@ -71,6 +71,7 @@ CMS_ENDPOINT=""
 CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
 SELECTED_AGENTS=""
+HOOK_INSTALL_SCOPE=""
 AGENT_SELECTION_EXPLICIT=0
 ALL_AGENTS=0
 MULTIMODAL_MODE=""
@@ -175,6 +176,10 @@ while [[ $# -gt 0 ]]; do
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; shift 2 ;;
         --agents=*)           SELECTED_AGENTS="${1#*=}"; AGENT_SELECTION_EXPLICIT=1; shift ;;
+        --scope)
+            [ "$#" -ge 2 ] || { echo "--scope requires user or system" >&2; exit 1; }
+            HOOK_INSTALL_SCOPE="$2"; shift 2 ;;
+        --scope=*)            HOOK_INSTALL_SCOPE="${1#*=}"; shift ;;
         --all-agents)         ALL_AGENTS=1; shift ;;
         --multimodal-mode)    MULTIMODAL_MODE="${2-}"; MULTIMODAL_MODE_SET=1; shift 2 || shift ;;
         --multimodal-mode=*)  MULTIMODAL_MODE="${1#*=}"; MULTIMODAL_MODE_SET=1; shift ;;
@@ -199,6 +204,17 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+if [ -n "$HOOK_INSTALL_SCOPE" ]; then
+    case "$HOOK_INSTALL_SCOPE" in
+        user|system) ;;
+        *) echo "--scope requires user or system" >&2; exit 1 ;;
+    esac
+    if [ "$COMMAND" != "install" ]; then
+        echo "--scope is only supported with install; upgrades preserve recorded hook scope" >&2
+        exit 1
+    fi
+fi
 
 if [ -n "$ENABLE_STATUS_BAR_APP" ] && [ "$COMMAND" != "install" ]; then
     echo "--enable-status-bar-app is only supported with install" >&2
@@ -769,14 +785,14 @@ select_agents() {
     fi
 
     # Non-interactive: auto-select all detected agents
-    if [ ! -t 0 ]; then
+    if [ ! -t 0 ] || [ "$HOOK_INSTALL_SCOPE" = system ]; then
         SELECTED_AGENTS=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "
 const r = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 const detected = r.filter(a => a.detected).map(a => a.id);
 process.stdout.write(detected.join(','));
 " 2>/dev/null || true)
-        msg "    (非交互模式) 自动选择已检测到的 Agent: $SELECTED_AGENTS" \
-            "    (non-interactive) Auto-selected detected agents: $SELECTED_AGENTS"
+        msg "    自动选择已检测到的 Agent: $SELECTED_AGENTS" \
+            "    Auto-selected detected agents: $SELECTED_AGENTS"
         echo ""
         return 0
     fi
@@ -2082,6 +2098,20 @@ try {
     return 1
 }
 
+apply_installation_scope() {
+    [ -n "$HOOK_INSTALL_SCOPE" ] || return 0
+    local scope_args=(hook install --scope "$HOOK_INSTALL_SCOPE" --json)
+    if [ -n "$SELECTED_AGENTS" ]; then scope_args+=(--agents "$SELECTED_AGENTS"); fi
+    if ! run_pilot_cli "${scope_args[@]}"; then
+        # A partial registration can require recovery. Keep its runtime and
+        # leave the collector stopped instead of the EXIT trap starting it.
+        PILOT_HELD_FOR_DEPLOY=0
+        msg "❌ Hook 安装未完成；已保留运行文件，请修复后重试 hook install" \
+            "❌ Hook installation incomplete; runtime retained. Resolve the error and retry hook install." >&2
+        return 1
+    fi
+}
+
 cmd_install() {
     msg "==> 开始安装 $PACKAGE_NAME ..." \
         "==> Installing $PACKAGE_NAME ..."
@@ -2126,6 +2156,7 @@ cmd_install() {
     inject_qodercli_token_intercept
     inject_qoderclicn_token_intercept
     inject_claude_code_fetch_intercept
+    apply_installation_scope
 
     msg "==> 启动服务..." "==> Starting service..."
     if run_pilot_cli start; then
@@ -2397,6 +2428,43 @@ try {
 # Grok Build uses a dedicated Pilot-owned hook file. Match the stable entry
 # script name instead of the data-dir path so custom LOONGSUITE_PILOT_DATA_DIR
 # installations uninstall correctly, while unrelated hooks in the file remain.
+remove_native_system_hooks() {
+    [ -f "$DATA_DIR/deployed-agents.json" ] || return 0
+    local cache="${PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
+    local version="$(cat "$cache/current" 2>/dev/null || true)"
+    local node_bin="${NODE_BIN:-}"
+    if [ ! -x "$node_bin" ] && [ -f "$DATA_DIR/node-bin" ]; then
+        node_bin=$(tr -d '\r\n' < "$DATA_DIR/node-bin")
+    fi
+    if [ ! -x "$node_bin" ]; then node_bin=$(command -v node) || node_bin=""; fi
+    if [ -z "$node_bin" ]; then
+        echo "System hook cleanup requires Node.js; Pilot assets retained for retry" >&2
+        return 1
+    fi
+    local candidate
+    for candidate in "$DATA_DIR/dist/scope-cleanup.cjs" "$cache/versions/$version/dist/scope-cleanup.cjs" "${PERMANENT_DIR:-$cache/package}/dist/scope-cleanup.cjs"; do
+        if [ -f "$candidate" ]; then
+            if ! "$node_bin" "$candidate" "$DATA_DIR"; then
+                echo "System hook cleanup failed; uninstall stopped and Pilot assets retained for retry" >&2
+                return 1
+            fi
+            return 0
+        fi
+    done
+    # Refuse to delete assets while recorded system hooks still reference them.
+    "$node_bin" - "$DATA_DIR/deployed-agents.json" <<'NODE'
+const fs = require('fs');
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+  if (Object.values(state).some(r => r?.hookScope === 'system' || r?.hookPendingMigration)) {
+    throw new Error('System hook cleanup helper missing; retain Pilot assets and retry with the installed package');
+  }
+} catch (error) {
+  if (error.code !== 'ENOENT') { console.error(error.message); process.exitCode = 1; }
+}
+NODE
+}
+
 remove_grok_build_hook_config() {
     local grok_home="${GROK_HOME:-$HOME/.grok}"
     local cfg="$grok_home/hooks/loongsuite-pilot.json"
@@ -3091,8 +3159,13 @@ cmd_uninstall() {
 
     # Remove hook entries from tool configs BEFORE removing install dir
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
+    if ! remove_native_system_hooks; then
+        return 1
+    fi
     remove_hook_configs
-    remove_grok_build_hook_config
+    if ! remove_grok_build_hook_config; then
+        return 1
+    fi
     remove_qodercli_token_intercept
     remove_qoderclicn_token_intercept
     retire_qoderwork_runtime_overrides

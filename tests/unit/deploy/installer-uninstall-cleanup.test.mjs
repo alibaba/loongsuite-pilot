@@ -797,6 +797,25 @@ describe('DSH uninstall smoke', () => {
 });
 
 describe('Grok Build uninstall smoke', () => {
+  it('stops uninstall and retains assets when the TOML-aware helper fails', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-grok-system-uninstall-'));
+    try {
+      const dataDir = join(root, 'pilot data');
+      mkdirSync(join(dataDir, 'dist'), { recursive: true });
+      writeFileSync(join(dataDir, 'dist/scope-cleanup.cjs'), 'process.exitCode = 1;\n');
+      writeFileSync(join(dataDir, 'deployed-agents.json'), JSON.stringify({
+        'grok-build': { deployMode: 'hook', hookScope: 'system', hookSettingsPath: join(root, 'managed_config.toml') },
+      }));
+      writeFileSync(join(dataDir, 'retain-me'), 'runtime needed by managed config');
+      const run = spawnSync('/bin/bash', [resolve('deploy/installer-opensource.sh'), 'uninstall', '--data-dir', dataDir, '--lang', 'en'], {
+        encoding: 'utf8', env: { ...process.env, HOME: root, USERPROFILE: root, PATH: `${dirname(process.execPath)}:/usr/bin:/bin` },
+      });
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain('System hook cleanup failed');
+      expect(readFileSync(join(dataDir, 'retain-me'), 'utf8')).toBe('runtime needed by managed config');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }, 20_000);
+
   it('honours GROK_HOME when cleaning the hook file', () => {
     expect(sh).toContain('GROK_HOME:-$HOME/.grok');
     expect(ps1).toContain('GROK_HOME');

@@ -11,16 +11,16 @@ vi.mock('../../../src/core/build-constants.js', () => ({
   PROPRIETARY_BUILD: false,
 }));
 
-vi.mock('../../../src/deployment/grok-build-assets.js', () => ({
-  areGrokBuildHookAssetsHealthy: vi.fn(),
-  restoreGrokBuildHookAssets: vi.fn(),
+vi.mock('../../../src/deployment/system-hook-assets.js', () => ({
+  areSystemHookAssetsHealthy: vi.fn(),
+  restoreSystemHookAssets: vi.fn(),
 }));
 
 import { Orchestrator } from '../../../src/core/orchestrator.js';
 import {
-  areGrokBuildHookAssetsHealthy,
-  restoreGrokBuildHookAssets,
-} from '../../../src/deployment/grok-build-assets.js';
+  areSystemHookAssetsHealthy,
+  restoreSystemHookAssets,
+} from '../../../src/deployment/system-hook-assets.js';
 
 const DATA_DIR = '/tmp/orchestrator-grok-watchdog';
 
@@ -74,6 +74,7 @@ describe('Grok Build watchdog target', () => {
     orchestrator = new Orchestrator({ dataDir: DATA_DIR } as never);
     (orchestrator as unknown as { deploymentManager: unknown }).deploymentManager = {
       getDefinitions: () => [grokDefinition()],
+      effectiveDefinition: (def: AgentDefinition) => def,
       isAgentDetected,
       needsRedeploy,
       repairHookSettings,
@@ -82,7 +83,7 @@ describe('Grok Build watchdog target', () => {
   });
 
   it('checks live detection, exact Hook config, and every Grok runtime asset', async () => {
-    vi.mocked(areGrokBuildHookAssetsHealthy).mockResolvedValue(true);
+    vi.mocked(areSystemHookAssetsHealthy).mockResolvedValue(true);
     const [target] = targets(orchestrator);
 
     expect(target.id).toBe('hook:grok-build');
@@ -91,17 +92,17 @@ describe('Grok Build watchdog target', () => {
     await expect(target.check()).resolves.toBe(true);
     expect(isAgentDetected).toHaveBeenCalledWith(expect.objectContaining({ id: 'grok-build' }));
     expect(needsRedeploy).toHaveBeenCalledWith(expect.objectContaining({ id: 'grok-build' }));
-    expect(areGrokBuildHookAssetsHealthy).toHaveBeenCalledWith(expect.any(String), DATA_DIR);
+    expect(areSystemHookAssetsHealthy).toHaveBeenCalledWith('grok-build', expect.any(String), DATA_DIR);
   });
 
   it('restores assets and a missing settings directory, then verifies health again', async () => {
     needsRedeploy.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
-    vi.mocked(areGrokBuildHookAssetsHealthy).mockResolvedValue(true);
+    vi.mocked(areSystemHookAssetsHealthy).mockResolvedValue(true);
     const [target] = targets(orchestrator);
 
     await expect(target.check()).resolves.toBe(false);
     await expect(target.repair()).resolves.toBeUndefined();
-    expect(restoreGrokBuildHookAssets).toHaveBeenCalledWith(expect.any(String), DATA_DIR);
+    expect(restoreSystemHookAssets).toHaveBeenCalledWith('grok-build', expect.any(String), DATA_DIR);
     expect(repairHookSettings).toHaveBeenCalledWith(expect.objectContaining({ id: 'grok-build' }));
     expect(needsRedeploy).toHaveBeenCalledTimes(2);
   });
