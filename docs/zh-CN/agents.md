@@ -51,6 +51,32 @@ Hermes 0.16.0 的 50,000 字符 Hook 载荷上限可能丢掉整个 `request.bod
 
 升级后需重启 OpenClaw / Hermes 宿主，使其重新加载插件。历史上已经丢失的内容不会自动补回。
 
+## 千问办公协作空间（实验性）
+
+除普通对话的 Stop Hook 外，Pilot 会只读轮询千问办公本地协作空间的 IM 快照。
+当数字员工的回复通过 `replyToMessageId` 指向同一空间中的用户消息，且关联卡片
+完成时，Pilot 将文本输入和卡片中的可见文本输出关联为一次 Agent 轮次。
+普通群消息、欢迎语、未完成或权限已撤销的卡片不会被当作轮次。只采集当前登录
+账号本人发起的消息，避免将其他成员的提问归属到本机用户；其他成员的轮次需要其
+账号对应的采集端采集。输出的原生用户身份来自消息发送者，用户配置的身份仍按
+Pilot 的通用优先级生效。同一账号在多台设备登录时，仍可能重复上报同一轮次，
+跨设备去重尚未验证。
+
+这是基于千问办公 2.x 私有本地格式的实验性适配；已在 macOS 千问办公 2.1.0 上
+通过手工安装的隔离测试服务验证真实协作空间，尚未验证官方安装器升级和其他平台。
+快照不证明内部模型或工具的调用，因此不会构造 LLM/TOOL Span 或填充模型、
+Provider 和 Token；事件标记为 `agent_turn` 观察范围，并省略缺失的 Provider。
+附件以及卡片中的非文本内容不在此采集范围。完成时间优先使用
+卡片的 `terminalAt`，缺失时使用 `updatedAt`，其来源标记为
+`loongsuite.qwenworkcn.completion_time_source`。这些时间表示客户端观察到的对话边界。
+首次启用时以当前时间为界，不回补之前已完成的历史对话。应用仍须将消息和卡片同步到本机；缺失、
+损坏或超出单文件 16 MiB 限制的快照会保留源状态并重试或记录警告。已处理身份
+保留 30 天，最多 50,000 个；达到上限时暂停新轮次并记录警告。单卡片原始内容
+超过 512 KiB 时不采集该卡片。输出与普通 Agent
+事件一样经过内容配置和脱敏；协作空间没有本地工作目录，目录排除规则不能按空间
+过滤。可通过 `listeners.qwen-work-cn-collaboration.includeConversationIds` 配置空间会话 ID 白名单；
+空数组或无效配置不采集任何空间。可通过 `listeners.qwen-work-cn-collaboration.enabled=false` 单独关闭此来源。
+
 ## 支持的 Agent ID
 
 这些 ID 用于标识受支持的集成。大多数 ID 可直接用于安装参数、
@@ -107,11 +133,33 @@ loongsuite-pilot hook status --json
 | Agent | 公共注册方式 | 已验证 CLI 版本 |
 | --- | --- | --- |
 | Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
+| Codex | `/etc/codex/config.toml` | 0.166.0 |
+| Pi | 现有 `$PI_CODING_AGENT_DIR/settings.json` 的 `extensions` | 0.73.1、1.5.0 |
+| DSH | 现有 `$DSH_HOME/cordis.patch.yml` 的 Pilot 标记块 | 0.2.1-rc.5 |
 
 `--agents` 仍可选填以限定范围，也支持 `--agents grok-build,claude-code` 这样的混合列表。
 首批支持同一 Linux UID 下多个身份 home；在 Agent 进程启动前初始化，后续新增身份无需
 重复安装 Pilot。系统配置、运行文件和采集目录必须对业务容器中的相应进程可见、可访问。
 此能力不提供租户授权隔离或跨容器自动注入。
+
+Codex 自身的 hooks 功能需保持启用。
+
+Pi 复用现有配置根 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）。后续会话只要仍读取
+这份配置，就会加载同一插件；会话文件放在子目录不影响该注册。另行选择独立
+`agentDir` 的身份不会继承。Pilot 不修改 `pi` 命令、业务启动参数或根目录环境变量。
+system 请求会报告实际共享配置路径；它表示当前配置根的覆盖范围，不是 Pi 原生机器级策略。
+
+DSH 同样复用现有 `DSH_HOME`（默认 `~/.dsh`），该 home 下的各个 profile 都读取
+这份公共 patch。新身份保留相同 `DSH_HOME` 就会继承插件；Pilot 报告实际 patch 路径，
+不修改 `dsh` 命令、启动参数或 `DSH_HOME`。Pi/DSH 从插件安装位置推导默认输出目录，
+新身份不需要额外继承 Pilot 数据目录环境变量；显式数据目录覆盖仍然生效。
+不传 `--scope` 时保持现有 home 注册行为。
+
+运行资产和 Pi 配置采用原子替换，写入失败保留原文件；Pi 配置清理未完成时停止卸载，
+保留运行资产供重试。这些保护同样适用于默认 home 安装。
+
+DSH 支持块序列 patch 和空 `[]` 根；卸载恢复原空根的完整字节。非空 flow 风格的
+patch 会保留原文件并明确报不支持，避免安装追加出第二个 YAML 根而影响业务启动。
 
 安装、修复、升级、禁用和卸载沿用已记录目标，保留第三方配置。显式迁移仅清理已登记
 的旧 Pilot 注册，不扫描未登记的 home。配置无效、所有权冲突、只读或外部挂载且需要
@@ -248,6 +296,13 @@ PATH/工作目录，不执行 CLI，也不使用用户传入的版本；明确�
   }
 }
 ```
+
+对于观察到原生开始和完成事件的固定 session 定时任务，即使宿主复用 run ID，Pilot 也会
+为每次执行分配独立的 `gen_ai.turn.id`。同一次执行内的 fallback 共用一轮，在任务完成时
+导出；`agent.openclaw.run_id` 保留原生 ID，session ID 不变。其他运行及未提供定时任务
+生命周期事件的旧宿主维持原有采集行为。
+若完成回调缺失，Pilot 仅在调度器确认相同执行已结束后收口，并标记采集不完整；运行中或
+状态未知的任务不会因为一次模型调用结束就被提前收口。
 
 Legacy 适配器以 `llm_input`、AssistantMessage 的 `before_message_write`、
 工具 Hook 和 `llm_output` 重建链路，保留真实输出、toolCallId 与逐次 Token。

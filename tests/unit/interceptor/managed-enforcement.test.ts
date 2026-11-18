@@ -37,6 +37,15 @@ describe('managed enforcement', () => {
       ] });
   });
 
+  it('preserves each severity and selects the blocking rule severity for the final verdict', async () => {
+    const result = await engine([
+      { ...pattern('observe', 'audit'), severity: 'HIGH' },
+      { ...pattern('block'), severity: 'CRITICAL' },
+    ]).evaluate(request);
+    expect(result).toMatchObject({ action: 'block', severity: 'CRITICAL',
+      matches: [{ ruleId: 'observe', severity: 'HIGH' }, { ruleId: 'block', severity: 'CRITICAL' }] });
+  });
+
   it('allows multiple audits, preserving all matches and the first representative', async () => {
     const result = await engine([pattern('first', 'audit'), pattern('second', 'audit')]).evaluate(request);
     expect(result).toMatchObject({ action: 'allow', matched: true, enforcement: 'audit', ruleId: 'first', evaluatedRules: ['first', 'second'] });

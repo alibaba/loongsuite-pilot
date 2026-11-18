@@ -4,6 +4,9 @@ import * as path from 'node:path';
 import type { PipelineConfig, PipelineManagerOptions, PipelineToggle, Pipeline } from './types.js';
 import { FilePipeline } from './input/file/file-pipeline.js';
 import { QoderApiPipeline } from './input/qoder-api/qoder-api-pipeline.js';
+import { MulticaPipeline } from './input/multica/multica-pipeline.js';
+import { validateMulticaConfig } from './input/multica/types.js';
+import { resolveMulticaDestination } from './input/multica/destination.js';
 import { SleepDetector, type WakeEvent } from './sleep-detector.js';
 import { createLogger } from '../utils/logger.js';
 import { ensureDir } from '../utils/fs-utils.js';
@@ -287,19 +290,23 @@ export class PipelineManager {
       logger.warn('config missing inputs', { file: fileName });
       return false;
     }
-    if (!config.flushers || config.flushers.length === 0) {
+    if (config.inputs[0].Type !== 'input_multica' && (!config.flushers || config.flushers.length === 0)) {
       logger.warn('config missing flushers', { file: fileName });
       return false;
     }
 
     const input = config.inputs[0];
-    const flusher = config.flushers[0];
-    if (!flusher.Endpoint || !flusher.Project || !flusher.Logstore) {
+    const flusher = config.flushers?.[0];
+    if (input.Type !== 'input_multica' && (!flusher.Endpoint || !flusher.Project || !flusher.Logstore)) {
       logger.warn('config flusher missing required fields', { file: fileName });
       return false;
     }
 
     switch (input.Type) {
+      case 'input_multica': {
+        try { validateMulticaConfig(input); resolveMulticaDestination(flusher, this.opts.sls); return true; }
+        catch { logger.warn('invalid Multica input config', {file: fileName}); return false; }
+      }
       case 'input_file': {
         if (!input.FilePaths || input.FilePaths.length === 0) {
           logger.warn('config input missing FilePaths', { file: fileName });
@@ -324,6 +331,7 @@ export class PipelineManager {
     const inputType = config.inputs[0].Type;
 
     // Check sub-switch
+    if (inputType === 'input_multica' && this.pipelineConfig.multica?.enabled === false) return;
     if (inputType === 'input_file' && !this.pipelineConfig.file.enabled) {
       logger.info('file pipeline disabled, skipping', { configName: config.configName });
       return;
@@ -344,6 +352,10 @@ export class PipelineManager {
       };
 
       switch (inputType) {
+        case 'input_multica':
+          pipeline = new MulticaPipeline({...opts, sls: this.opts.sls,
+            serviceNamePrefix: this.pipelineConfig.multica?.serviceNamePrefix}, this.pipelineConfig.multica?.mode);
+          break;
         case 'input_file':
           pipeline = new FilePipeline(opts);
           break;

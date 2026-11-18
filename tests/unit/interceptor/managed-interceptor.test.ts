@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startInterceptorService, type InterceptorService } from '../../../src/interceptor/daemon/lifecycle.js';
 import {
+  MAX_RULE_SEVERITY_CHARS,
   managedInterceptorPath,
   managedScriptFileName,
   managedScriptsDir,
@@ -69,6 +70,59 @@ describe('platformManagedShell', () => {
 });
 
 describe('parseManagedInterceptorConfig', () => {
+  it('only accepts a script cache namespace when local parsing is explicitly enabled', () => {
+    const scriptCache = 'a'.repeat(64);
+    const document = { interceptor: { rules: [], scriptCache } };
+    expect(parseManagedInterceptorConfig(document)).not.toHaveProperty('scriptCache');
+    expect(parseManagedInterceptorConfig(document, { allowLocalScriptCache: true }).scriptCache).toBe(scriptCache);
+    for (const invalid of ['../outside', 'a'.repeat(63), 'A'.repeat(64), '/absolute']) {
+      const malformed = { interceptor: { rules: [], scriptCache: invalid } };
+      expect(parseManagedInterceptorConfig(malformed)).not.toHaveProperty('scriptCache');
+      expect(() => parseManagedInterceptorConfig(malformed, { allowLocalScriptCache: true })).toThrow('SHA-256');
+    }
+  });
+
+  it.each([
+    { kind: 'pattern', match: 'regex', pattern: 'TOKEN', shell: 'future-shell' },
+    { kind: 'script', shell: 'sh', match: 'future-match' },
+    { kind: 'http', url: 'https://audit.example.com/', shell: 'future-shell' },
+  ])('ignores extensions at every document level for $kind rules', extra => {
+    const { kind } = extra;
+    const base = { id: 'future', version: '1', agents: ['qoder'], events: ['PreToolUse'], ...extra };
+    const parsed = parseManagedInterceptorConfig({
+      revision: 2,
+      interceptor: { agents: ['future-agent'], options: { enabled: true }, rules: [{
+        ...base, path: '/bin/x', metadata: { future: [null, 1] },
+      }] },
+    });
+    expect(parsed.rules[0]).toMatchObject({ id: 'future', kind, enforcement: 'enforce' });
+    expect(parsed).not.toHaveProperty('revision');
+    expect(parsed).not.toHaveProperty('options');
+    expect(parsed.rules[0]).not.toHaveProperty('path');
+    expect(parsed.rules[0]).not.toHaveProperty('metadata');
+    if (kind !== 'script') expect(parsed.rules[0]).not.toHaveProperty('shell');
+    if (kind !== 'pattern') expect(parsed.rules[0]).not.toHaveProperty('match');
+  });
+
+  it.each([
+    { kind: 'pattern', match: 'substring', pattern: 'TOKEN' },
+    { kind: 'script', shell: 'sh' },
+    { kind: 'http', url: 'https://audit.example.com/' },
+  ])('accepts optional severity metadata for $kind rules', extra => {
+    const base = { id: 'risk', version: '1', agents: ['qoder'], events: ['PreToolUse'], ...extra };
+    for (const severity of ['low', 'medium', 'high', 'critical', 'custom-risk', 'x'.repeat(MAX_RULE_SEVERITY_CHARS)]) {
+      const parsed = parseManagedInterceptorConfig({ interceptor: { rules: [{ ...base, severity: ` ${severity} ` }] } });
+      expect(parsed.rules[0]).toMatchObject({ ...base, severity, enforcement: 'enforce' });
+    }
+    expect(parseManagedInterceptorConfig({ interceptor: { rules: [base] } }).rules[0]).not.toHaveProperty('severity');
+  });
+
+  it.each([null, '', '   ', 1, false, {}, [], 'x'.repeat(MAX_RULE_SEVERITY_CHARS + 1)])('rejects invalid severity %j', severity => {
+    expect(() => parseManagedInterceptorConfig({
+      interceptor: { rules: [{ ...rule('risk', '1'), severity }] },
+    })).toThrow('interceptor.rules[0].severity');
+  });
+
   it.each([['prompt'], [], ['message'], null, 'prompt'].map(fields => ({ fields })))('accepts and discards the retired fields key: $fields', ({ fields }) => {
     const base = rule('legacy', '1');
     expect(parseManagedInterceptorConfig({ interceptor: { rules: [{ ...base, fields }] } })).toEqual({ rules: [base] });
@@ -103,8 +157,9 @@ describe('parseManagedInterceptorConfig', () => {
   });
 
   it.each([
-    ['unknown top-level key', { interceptor: { rules: [] }, mask: {} }],
-    ['unknown rule key', { interceptor: { rules: [{ ...rule('a', '1'), path: '/bin/x' }] } }],
+    ['missing interceptor', { rules: [] }],
+    ['missing rule list', { interceptor: { options: {} } }],
+    ['unknown rule kind', { interceptor: { rules: [{ ...rule('a', '1'), kind: 'future' }] } }],
     ['path in id', { interceptor: { rules: [rule('../x', '1')] } }],
     ['dot-dot id', { interceptor: { rules: [rule('..', '1')] } }],
     ['separator in version', { interceptor: { rules: [rule('a', '1@2')] } }],
@@ -114,7 +169,6 @@ describe('parseManagedInterceptorConfig', () => {
     ['empty title', { interceptor: { rules: [rule('a', '1', { title: '' })] } }],
     ['duplicate id', { interceptor: { rules: [rule('a', '1'), rule('a', '2')] } }],
     ['http without https', { interceptor: { rules: [{ kind: 'http', agents: ['qoder'], id: 'audit', version: '1', events: ['UserPromptSubmit'], url: 'http://audit.example.com' }] } }],
-    ['top-level agents', { interceptor: { agents: ['qoder'], rules: [rule('a', '1')] } }],
     ['missing rule agents', { interceptor: { rules: [{ ...rule('a', '1'), agents: undefined }] } }],
     ['empty rule agents', { interceptor: { rules: [rule('a', '1', { agents: [] })] } }],
     ['unknown agent', { interceptor: { rules: [rule('a', '1', { agents: ['cursor' as 'qoder'] })] } }],
@@ -176,7 +230,6 @@ describe('parseManagedInterceptorConfig', () => {
 
   it.each([
     ['unknown match', { match: 're', pattern: 'foo' }],
-    ['shell on a pattern rule', { match: 'regex', pattern: 'foo', shell: 'sh' }],
     ['missing match', { pattern: 'foo' }],
   ])('rejects pattern rule %s', (_name, extra) => {
     expect(() => parseManagedInterceptorConfig({
@@ -247,6 +300,31 @@ describe('ManagedInterceptor pattern rules', () => {
   const controllers: ManagedInterceptor[] = [];
   afterEach(() => {
     for (const c of controllers.splice(0)) c.stop();
+  });
+
+  it.each([
+    { pattern: String.raw`\.aliyun/config\.json`, hit: 'cat ~/.aliyun/config.json', miss: 'cat ~/.aliyun/configXjson' },
+    { pattern: String.raw`\bTOKEN\s*=\s*\d+\b`, hit: 'TOKEN = 123', miss: 'TOKEN = abc' },
+    { pattern: String.raw`C:\\Users\\[^\\]+\\\.kube\\config`, hit: String.raw`C:\Users\test\.kube\config`, miss: 'C:Userstest.kubeconfig' },
+    { pattern: String.raw`\\n`, hit: String.raw`literal \n`, miss: 'actual newline\n' },
+  ])('preserves regex $pattern through JSON persistence and evaluation', async ({ pattern, hit, miss }) => {
+    const dataDir = await makeDataDir();
+    const c = new ManagedInterceptor({ dataDir });
+    try {
+      const document = { interceptor: { rules: [{
+        kind: 'pattern', id: 'escaped', version: '1', agents: ['qoder'], events: ['UserPromptSubmit'],
+        match: 'regex', pattern,
+      }] } };
+      await writeFile(managedInterceptorPath(dataDir), JSON.stringify(document));
+      const stored = JSON.parse(await readFile(managedInterceptorPath(dataDir), 'utf8'));
+      expect(stored.interceptor.rules[0].pattern).toBe(pattern);
+      c.reload();
+      await expect(c.evaluate(request({ prompt: hit }))).resolves.toMatchObject({ action: 'block' });
+      await expect(c.evaluate(request({ prompt: miss }))).resolves.toMatchObject({ action: 'allow' });
+    } finally {
+      c.stop();
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 
   it('collects the aggregate once for all rules in one request', async () => {
@@ -397,17 +475,20 @@ describeUnix('ManagedInterceptor script execution', () => {
 
   it('runs audit script side effects and switches enforcement without replacing its body', async () => {
     const dataDir = await makeDataDir();
-    const r = rule('mode-switch', '1', { enforcement: 'audit' });
+    const r = rule('mode-switch', '1', { enforcement: 'audit', severity: 'HIGH' });
     const marker = join(dataDir, 'ran.txt');
     const file = await writeScript(dataDir, r, `printf 'ran' > '${marker}'; ${blockWith('observed')}`);
     const original = await readFile(file, 'utf8');
     await writeRules(dataDir, [r]);
     const c = controller(dataDir);
-    await expect(c.evaluate(request())).resolves.toMatchObject({ action: 'allow', matched: true, enforcement: 'audit', ruleId: r.id });
+    await expect(c.evaluate(request())).resolves.toMatchObject({ action: 'allow', matched: true, enforcement: 'audit', ruleId: r.id, severity: 'HIGH' });
     expect(await readFile(marker, 'utf8')).toBe('ran');
+    await writeRules(dataDir, [{ ...r, severity: 'CRITICAL' }]);
+    c.reload();
+    await expect(c.evaluate(request())).resolves.toMatchObject({ action: 'allow', enforcement: 'audit', severity: 'CRITICAL' });
     await writeRules(dataDir, [{ ...r, enforcement: 'enforce' }]);
     c.reload();
-    await expect(c.evaluate(request())).resolves.toMatchObject({ action: 'block', matched: true, enforcement: 'enforce', ruleId: r.id });
+    await expect(c.evaluate(request())).resolves.toMatchObject({ action: 'block', matched: true, enforcement: 'enforce', ruleId: r.id, severity: 'HIGH' });
     expect(await readFile(file, 'utf8')).toBe(original);
   });
 
@@ -733,7 +814,7 @@ describeUnix('ManagedInterceptor hot swap', () => {
     await writeRules(dataDir, [r]);
     const c = controller(dataDir);
 
-    await writeFile(managedInterceptorPath(dataDir), '{"interceptor":{"rules":[],"x":1}}');
+    await writeFile(managedInterceptorPath(dataDir), '{"interceptor":{"rules":null,"x":1}}');
     c.reload();
     await expect(c.evaluate(request())).resolves.toMatchObject({ action: 'block' });
 

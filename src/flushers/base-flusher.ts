@@ -27,6 +27,9 @@ export abstract class BaseFlusher {
 
   getTraceRuntimeSnapshot(): TraceRuntimeSnapshot[] { return []; }
 
+  /** Protect raw producer files while a recoverable Hermes turn still needs them. */
+  hasPendingHermesSource(_sourceToken: string): boolean { return false; }
+
   async start(): Promise<void> {
     // Subclasses can override to perform async initialisation.
   }

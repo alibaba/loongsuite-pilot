@@ -24,7 +24,7 @@ describe('interceptor daemon HTTP API', () => {
   it.each([undefined, null])('preserves observation and blocked prompt delivery when raw is %s', async raw => {
     const entries: AgentActivityEntry[] = [];
     const match = { matched: true as const, action: 'block' as const, enforcement: 'enforce' as const,
-      ruleId: 'managed-rule', ruleVersion: '1', reason: 'blocked' };
+      ruleId: 'managed-rule', ruleVersion: '1', reason: 'blocked', severity: 'CRITICAL' };
     const server = createInterceptorServer({
       port: 0,
       version: 'test',
@@ -45,6 +45,7 @@ describe('interceptor daemon HTTP API', () => {
       expect(await response.json()).toMatchObject({ action: 'block' });
       expect(entries.map(entry => entry['event.name'])).toEqual(['guardrail.evaluation', 'llm.request']);
       expect(entries.map(entry => entry['gen_ai.agent.type'])).toEqual(['qoder', 'qoder-cli']);
+      expect(entries.map(entry => entry['gen_ai.guardrail.severity'])).toEqual(['CRITICAL', 'CRITICAL']);
     } finally {
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));

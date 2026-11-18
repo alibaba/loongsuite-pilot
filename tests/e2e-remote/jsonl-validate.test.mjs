@@ -152,6 +152,25 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     expect(r.out).toContain('gen_ai.tool.call.id=2 (100.0%)');
   });
 
+  it('accepts an unfinished OpenClaw cron attempt until its explicit lifecycle end', () => {
+    const common = {
+      'gen_ai.agent.type': 'openclaw',
+      'gen_ai.turn.id': 'cron-turn',
+      'agent.openclaw.collection': 'cron-lifecycle-v1',
+    };
+    const records = [
+      goodEntry({ ...common, 'event.id': 'start', 'event.name': 'other', 'gen_ai.turn.start': true }),
+      goodEntry({ ...common, 'event.id': 'attempt', 'event.name': 'other', 'agent.openclaw.hook': 'llm_output' }),
+    ];
+    const validate = () => runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_AGENT_FILTER: 'openclaw', E2E_JSONL_STRICT: '1' });
+    writeJsonl('openclaw-cron.jsonl', records);
+    expect(validate().code).toBe(0);
+    records.push(goodEntry({ ...common, 'event.id': 'finish', 'event.name': 'other',
+      'agent.openclaw.hook': 'cron_finished', 'gen_ai.turn.end': true }));
+    writeJsonl('openclaw-cron.jsonl', records);
+    expect(validate().code).toBe(0);
+  });
+
   it('accepts projected WorkBuddy builder output after tools with no reliable name are dropped', async () => {
     const fixture = fs.readFileSync(
       new URL('../fixtures/workbuddy/multi-tool-wave.jsonl', import.meta.url),
@@ -187,6 +206,38 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     expect(r.out).toContain('FAIL codex-2026-05-11.jsonl');
     expect(r.out).toContain('missing_required=1');
     expect(r.out).toMatch(/category=missing_required fields=\[user\.id\]/);
+  });
+
+  it('allows a provider-less agent-turn observation but still requires it for model and tool data', () => {
+    const common = { 'gen_ai.agent.type': 'synthetic-agent', 'gen_ai.turn.id': 'turn-1',
+      'gen_ai.provider.name': undefined, 'loongsuite.observation.scope': 'agent_turn' };
+    const validate = () => runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_AGENT_FILTER: 'synthetic-agent', E2E_JSONL_STRICT: '1' });
+    const records = [
+      graphEntry('start', 'other', { ...common, 'gen_ai.turn.start': true }),
+      graphEntry('input', 'agent.input', common),
+      graphEntry('end', 'other', { ...common, 'gen_ai.turn.end': true }),
+    ];
+    writeJsonl('synthetic-agent.jsonl', records);
+    expect(validate().code).toBe(0);
+    for (const invalid of [
+      graphEntry('invalid', 'other', common),
+      graphEntry('invalid', 'other', { ...common, 'gen_ai.turn.start': true, 'loongsuite.observation.scope': undefined }),
+      graphEntry('invalid', 'llm.request', common),
+      graphEntry('invalid', 'tool.call', { ...common, 'gen_ai.tool.name': 'Read', 'gen_ai.tool.call.id': 'call' }),
+      graphEntry('invalid', 'other', { ...common, 'gen_ai.turn.start': true, 'gen_ai.request.model': 'fixture-model' }),
+      graphEntry('invalid', 'agent.input', { ...common, 'gen_ai.usage.input_tokens': 3 }),
+    ]) {
+      writeJsonl('synthetic-agent.jsonl', [invalid]);
+      const result = validate();
+      expect(result.code).toBe(1);
+      expect(result.out).toMatch(/category=missing_required fields=\[gen_ai\.provider\.name\]/);
+    }
+    writeJsonl('synthetic-agent.jsonl', [
+      graphEntry('invalid-scope', 'llm.request', { ...common, 'gen_ai.provider.name': 'fixture-provider' }),
+    ]);
+    const invalidScope = validate();
+    expect(invalidScope.code).toBe(1);
+    expect(invalidScope.out).toContain('invalid_observation_scope=1');
   });
 
   it('honors E2E_JSONL_AGENT_FILTER', () => {

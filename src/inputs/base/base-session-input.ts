@@ -1,3 +1,4 @@
+import { producerReadFlags } from '../../utils/producer-log-dir.js';
 import * as fs from 'node:fs/promises';
 import { fileIdentity, matchesFileIdentity } from '../../utils/file-identity.js';
 import type { FileHandle } from 'node:fs/promises';
@@ -86,7 +87,7 @@ export abstract class BaseSessionInput extends BaseInput {
 
     let handle: FileHandle;
     try {
-      handle = await fs.open(filePath, 'r');
+      handle = await fs.open(filePath, producerReadFlags());
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') return []; // rotated away between discovery and open

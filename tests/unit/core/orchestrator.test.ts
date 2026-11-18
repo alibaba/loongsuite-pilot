@@ -639,6 +639,25 @@ describe('Orchestrator', () => {
       await orch.stop();
     });
 
+    it('registers collaboration independently, with the Qwen Work agent and listener gates', async () => {
+      const config = makeConfig();
+      config.listeners['qwen-work-cn-trace'] = { enabled: false, pollInterval: 1000 };
+      config.listeners['qwen-work-cn-collaboration'] = { enabled: false, pollInterval: 2345 };
+      const orch = new Orchestrator(config);
+      await orch.start();
+      const input = orch.getInputManager().getInput('qwen-work-cn-collaboration') as any;
+      const detection = discoveryEntries.find(entry => entry.id === 'qwen-work-cn-collaboration');
+      expect(input.pollIntervalMs).toBe(2345);
+      (orch as any).isAgentGatedEnabled = (id: string) => id === 'qwen-work-cn';
+      (orch as any).agentControlManager.resolveEnabled = (_id: string, configured: boolean) => configured;
+      expect(detection?.enabled()).toBe(false);
+      config.listeners['qwen-work-cn-collaboration'].enabled = true;
+      expect(detection?.enabled()).toBe(true);
+      (orch as any).isAgentGatedEnabled = () => false;
+      expect(detection?.enabled()).toBe(false);
+      await orch.stop();
+    });
+
     it('registers the OpenClaw plugin JSONL input with the configured data directory', async () => {
       const config = makeConfig();
       config.listeners['openclaw-plugin-log'] = { enabled: true, pollInterval: 1234 };

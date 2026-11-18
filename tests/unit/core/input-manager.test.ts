@@ -167,6 +167,61 @@ describe('InputManager', () => {
     } finally { await manager.stopAll(); await cleanupTempDir(root); }
   });
 
+  it('holds the Hermes source checkpoint until its journal accepts the batch', async () => {
+    const root = await createTempDir('hermes-checkpoint-output-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    const input = new StubInput('hermes-checkpoint');
+    Object.defineProperty(input, 'agentType', { value: ClientType.Hermes });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling, input.id) });
+    manager.registerInput(input as any);
+    const key = `${input.id}:file`;
+    store.setOffset(key, 1);
+    await store.save();
+    store.setOffset(key, 2);
+    let accept!: () => void;
+    let started!: () => void;
+    const startedOutput = new Promise<void>(resolve => { started = resolve; });
+    const pending = new Promise<void>(resolve => { accept = resolve; });
+    vi.spyOn(flusher, 'sendBatch').mockImplementation(async () => { started(); await pending; });
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'hermes' })]);
+    try {
+      await startedOutput;
+      await store.save();
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[key].lastOffset).toBe(1);
+      accept();
+      await manager.stopAll();
+      await store.save();
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[key].lastOffset).toBe(2);
+    } finally { accept(); await cleanupTempDir(root); }
+  });
+
+  it('aborts a Hermes journal quota retry on shutdown without advancing the source checkpoint', async () => {
+    const root = await createTempDir('hermes-quota-stop-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    const input = new StubInput('hermes-quota');
+    Object.defineProperty(input, 'agentType', { value: ClientType.Hermes });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling, input.id) });
+    manager.registerInput(input as any);
+    const key = `${input.id}:file`;
+    store.setOffset(key, 1);
+    await store.save();
+    store.setOffset(key, 2);
+    let attempted!: () => void;
+    const first = new Promise<void>(resolve => { attempted = resolve; });
+    const quota = Object.assign(new Error('full'), { name: 'CodexTurnJournalCapacityError' });
+    const wrapped = Object.assign(new Error('journal', { cause: quota }), { name: 'CodexTurnJournalError' });
+    vi.spyOn(flusher, 'sendBatch').mockImplementation(async () => { attempted(); throw wrapped; });
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'hermes' })]);
+    try {
+      await first;
+      await manager.stopAll();
+      expect(store.hasSaveFailure(key)).toBe(true);
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[key].lastOffset).toBe(1);
+    } finally { await cleanupTempDir(root); }
+  });
+
   describe('registerInput and event dispatch (T030)', () => {
     it('counts raw input independently from normalized entry emission', () => {
       const input = new StubInput('raw-input');
@@ -728,6 +783,7 @@ describe('InputManager', () => {
         reason: `hit ${apiKey}`,
         ruleId: 'flow-probe',
         ruleVersion: '3',
+        severity: 'CRITICAL',
         title: `label ${apiKey}`,
         message: `不要粘贴 ${apiKey}`,
         evaluatedRules: ['flow-probe'],
@@ -744,6 +800,7 @@ describe('InputManager', () => {
       expect(dispatched['gen_ai.guardrail.action']).toBe('block');
       expect(dispatched['gen_ai.guardrail.rule_id']).toBe('flow-probe');
       expect(dispatched['gen_ai.guardrail.rule_version']).toBe('3');
+      expect(dispatched['gen_ai.guardrail.severity']).toBe('CRITICAL');
       expect(dispatched['gen_ai.guardrail.reason']).toBe('hit [APIKEY_MASKED]');
       expect(dispatched['gen_ai.guardrail.title']).toBe('label [APIKEY_MASKED]');
       expect(dispatched['gen_ai.guardrail.message']).toBe('不要粘贴 [APIKEY_MASKED]');

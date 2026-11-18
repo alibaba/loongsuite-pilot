@@ -30,7 +30,7 @@ export function openClawBindingProblem(host: OpenClawHost | null, detail?: strin
 
 /** In-process metadata lookup: never executes a CLI, shell or package manager.
  * An explicit entry wins, then the installer's persisted entry. Otherwise only
- * a unique package among fixed cwd/bundle/PATH candidates authorizes deployment.
+ * a unique package among fixed cwd/container/bundle/PATH candidates authorizes deployment.
  * No process inspection, recursive scan or cache: watchdog sees upgrades too.
  */
 export async function resolveOpenClawHost(
@@ -176,6 +176,19 @@ export async function resolveOpenClawHost(
   }
   if (unidentifiedParentEntry && !candidates.length) {
     return problem(`Unidentified parent package has no valid fixed OpenClaw child: ${JSON.stringify(cwd)}`);
+  }
+  // In the official Docker image the Gateway lives at /app/openclaw.mjs.
+  // An opted-in root initializer may start Pilot from / with a restricted PATH
+  // before dropping privileges. Include that fixed entry in the same ambiguity
+  // check; explicit/saved bindings above remain authoritative. No CLI execution.
+  if (process.platform !== 'win32'
+      && /^(1|true|yes|on)$/i.test(String(env.LOONGSUITE_PILOT_ROOT_TRIGGER || '').trim())) {
+    const entry = '/app/openclaw.mjs';
+    if (!await confirmedMissing(entry)) {
+      const host = await fromEntry(entry);
+      if (!host) return problem(`OpenClaw container entry unavailable or unsupported: ${JSON.stringify(entry)}`);
+      candidates.push(host);
+    }
   }
   const bundleRoot = env.OPENCLAW_BUNDLE_ROOT || (home ? path.join(home, '.openclaw-bundle') : undefined);
   if (bundleRoot) {

@@ -27,6 +27,41 @@ function clearSlsEnv() {
 }
 
 describe('ConfigLoader', () => {
+  it('keeps a collaboration conversation allowlist and fails closed for invalid scopes', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'qwen-work-cn-collaboration': { includeConversationIds: [' space-a ', 'space-a', 'space-b'] },
+    } });
+    expect((await loadConfig()).listeners['qwen-work-cn-collaboration'].includeConversationIds)
+      .toEqual(['space-a', 'space-b']);
+
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'qwen-work-cn-collaboration': { includeConversationIds: 'space-a' },
+    } });
+    expect((await loadConfig()).listeners['qwen-work-cn-collaboration'].includeConversationIds).toEqual([]);
+  });
+
+  it('defaults Multica collection to off', async () => {
+    expect((await loadConfig()).pipeline.multica).toEqual({enabled: true, mode: 'off'});
+  });
+
+  it('allows environment mode overrides while preserving the Multica hard disable', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({pipeline: {multica: {mode: 'off'}}});
+    vi.stubEnv('LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE', 'on');
+    vi.stubEnv('LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED', 'false');
+    expect((await loadConfig()).pipeline.multica).toEqual({enabled: false, mode: 'on'});
+  });
+
+  it('disables Multica when its collection mode is invalid', async () => {
+    vi.stubEnv('LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE', 'typo');
+    expect((await loadConfig()).pipeline.multica?.mode).toBe('off');
+    expect(mockLoggerWarn).toHaveBeenCalledWith('Invalid Multica collection mode; collection disabled');
+  });
+
+  it('reads the configured Multica mode', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({pipeline: {multica: {mode: 'off'}}});
+    expect((await loadConfig()).pipeline.multica?.mode).toBe('off');
+  });
+
   it('loads workspace exclusions and rejects invalid privacy rules', async () => {
     mockReadJsonFile.mockResolvedValueOnce({ privacy: { excludeWorkspaces: ['/private-project'] } });
     expect((await loadConfig()).privacy?.excludeWorkspaces).toEqual(['/private-project']);
@@ -343,6 +378,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qwen-work-cn-hook']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['qwen-work-cn-trace']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-collaboration']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
       expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 10_000 });
@@ -1736,7 +1772,13 @@ describe('ConfigLoader', () => {
       expect(config.collectTrace).toBe(true);
       expect(config.serviceName).toBeUndefined();
       expect(config.serviceNamePrefix).toBe('loongsuite-pilot');
+      expect(config.pipeline.multica?.serviceNamePrefix).toBeUndefined();
       expect(config.cms).toEqual({ enabled: false, licenseKey: '', endpoint: '', workspace: '', debug: false });
+    });
+
+    it('honors an explicit Multica environment even when it matches the built-in Pilot prefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ serviceNamePrefix: 'loongsuite-pilot' });
+      expect((await loadConfig()).pipeline.multica?.serviceNamePrefix).toBe('loongsuite-pilot');
     });
 
     it('reads values from config file', async () => {
@@ -1751,6 +1793,7 @@ describe('ConfigLoader', () => {
       expect(config.collectLog).toBe(false);
       expect(config.collectTrace).toBe(false);
       expect(config.serviceNamePrefix).toBe('my-team');
+      expect(config.pipeline.multica?.serviceNamePrefix).toBe('my-team');
       expect(config.cms).toEqual({
         enabled: true,
         licenseKey: 'key123',
@@ -1801,6 +1844,7 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.serviceNamePrefix).toBe('from-env');
+      expect(config.pipeline.multica?.serviceNamePrefix).toBe('from-env');
     });
 
     it('loads an exact serviceName from env over config and passes it to SLS', async () => {
