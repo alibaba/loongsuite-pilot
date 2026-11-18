@@ -140,6 +140,19 @@ fn private_directory(path: &Path) -> io::Result<()> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
+        // On Darwin sync_all issues F_FULLFSYNC, a drive-wide flush. Submit
+        // parent metadata first; the marker file's full flush below also
+        // commits these writes before rename. Keep the post-rename barrier.
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsRawFd;
+            let directory = File::open(parent)?;
+            // SAFETY: directory owns this descriptor until fsync returns.
+            if unsafe { libc::fsync(directory.as_raw_fd()) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
         sync_dir(parent)?;
     }
     Ok(())

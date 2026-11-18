@@ -2846,8 +2846,6 @@ case "${1:-status}" in
             if [ "$wakeup_only" = true ] && [ "$explicit_data" = true ]; then
                 pilot_bin=$(prefer_shared_hook_bin "$pilot_bin")
             fi
-        elif [ "${1:-}" = codex ]; then
-            pilot_bin=$(prefer_shared_hook_bin "$pilot_bin")
         fi
         exec "$pilot_bin" hook-process "$@"
         ;;
