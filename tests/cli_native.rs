@@ -826,7 +826,16 @@ fn packaged_codex_explicit_home_keeps_trust_and_hooks_together() {
         assert_eq!(config["userField"], "保留");
         assert!(config.get("version").is_none());
         let trust_entries = doc["hooks"]["state"].as_table().unwrap();
-        assert_eq!(trust_entries.len(), 5);
+        let expected_events = [
+            "SessionStart",
+            "UserPromptSubmit",
+            "SubagentStart",
+            "SubagentStop",
+            "Stop",
+            "PreToolUse",
+            "PostToolUse",
+        ];
+        assert_eq!(trust_entries.len(), expected_events.len());
         for (key, entry) in trust_entries {
             assert!(key.starts_with(settings.to_str().unwrap()));
             // 新 trust 仅记录摘要；enabled 是保留用户选择的可选字段。
@@ -836,13 +845,7 @@ fn packaged_codex_explicit_home_keeps_trust_and_hooks_together() {
                 .unwrap()
                 .starts_with("sha256:"));
         }
-        for event in [
-            "SessionStart",
-            "UserPromptSubmit",
-            "SubagentStart",
-            "SubagentStop",
-            "Stop",
-        ] {
+        for event in expected_events {
             let handlers: Vec<_> = config["hooks"][event]
                 .as_array()
                 .unwrap()
