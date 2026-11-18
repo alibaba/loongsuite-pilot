@@ -8,11 +8,21 @@ function object(value: unknown): Record<string, unknown> {
 // request payloads, prompts or tool results while retaining actionable errors.
 const PRIVATE_KEY = /^(?:authorization|proxy.authorization|cookie|set.cookie|.*(?:password|secret|api.?key|access.?token|refresh.?token)|token|credentials?|private_key|custom_env|env|prompt|system_prompt|instructions|messages|payload|body|content|arguments|result|input|output|request|response|request_body|response_body)$/i;
 
+function isPrivateKey(key: string): boolean {
+  if (PRIVATE_KEY.test(key)) return true;
+  const normalized = key.replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+  // A native error's bare message remains useful; prefixed message fields
+  // and other content-key segments can contain task/user/model payloads.
+  return normalized !== 'message'
+    && /(?:^|[_.-])(?:prompts?|instructions|messages?|payload|body|content|arguments|result|input|output|request|response)(?:$|[_.-])/.test(normalized);
+}
+
 function scrub(value: unknown, depth = 0): unknown {
   if (depth > 8) return '[DEPTH LIMIT]';
   if (Array.isArray(value)) return value.slice(0, 40).map(item => scrub(item, depth + 1));
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).slice(0, 80)
-    .map(([key, item]) => [key, PRIVATE_KEY.test(key) ? '[REDACTED]' : scrub(item, depth + 1)]));
+    .map(([key, item]) => [key, isPrivateKey(key) ? '[REDACTED]' : scrub(item, depth + 1)]));
   return typeof value === 'string' ? redactText(value) : value;
 }
 

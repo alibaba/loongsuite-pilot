@@ -37,6 +37,21 @@ describe('Multica diagnostic log content', () => {
     expect(serialized).toContain('[REDACTED]');
   });
 
+  it('recursively redacts prefixed content keys in native and serialized errors', () => {
+    const keys = ['task_prompt', 'userPrompt', 'LLMPrompt', 'system_prompt_text', 'chat_messages',
+      'user_message', 'modelMessage', 'requestPayload', 'task_payload', 'http.request.body',
+      'responseBody', 'tool_arguments', 'tool_result', 'model_input', 'model_output'];
+    const nested = Object.fromEntries(keys.map(key => [key, `private-value-for-${key}`]));
+    const error = {message: 'permission denied', code: 'EACCES', nested: [{...nested}]};
+    const expected = Object.fromEntries(keys.map(key => [key, '[REDACTED]']));
+    for (const value of [error, JSON.stringify(error)]) {
+      const row = parseMulticaLog(JSON.stringify({msg: 'task failed', error: value}));
+      expect(JSON.parse(row!.error_message)).toEqual({message: 'permission denied', code: 'EACCES', nested: [expected]});
+      expect(JSON.stringify(row)).not.toContain('private-value-for-');
+      const task = snapshot('task_snapshot', {id: 't1', status: 'failed', error: value});
+      expect(JSON.stringify(task)).not.toContain('private-value-for-');
+    }
+  });
   it('redacts before bounding UTF-8 diagnostic text and labels truncation', () => {
     const row = parseMulticaLog(JSON.stringify({msg: 'task failed', error: '失败'.repeat(6000), stack: '函'.repeat(10000)}));
     expect(Buffer.byteLength(row!.error_message)).toBeLessThanOrEqual(4096);

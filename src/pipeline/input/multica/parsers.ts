@@ -2,7 +2,7 @@ import { classifyFailure, digest, object, safeScalar, selectFields } from './rec
 import type { MulticaRecord } from './types.js';
 import { logDiagnostics } from './log-diagnostics.js';
 
-const METRIC_LABELS = new Set('method route status terminal_status provider model model_alias outcome reason failure_reason claim_path phase result source kind type le quantile code handler runtime_mode operation op stage component decision action feature token_type direction stream transport query signup_source platform path cadence trigger_kind recoverable gate event_kind'.split(' '));
+const METRIC_LABELS = new Set('method route status terminal_status provider model model_alias outcome reason failure_reason claim_path phase result source kind type le quantile code handler runtime_mode operation op stage component decision action feature token_type direction stream transport signup_source platform path cadence trigger_kind recoverable gate event_kind'.split(' '));
 
 export function parsePrometheus(text: string): MulticaRecord[] {
   const records: MulticaRecord[] = [];
