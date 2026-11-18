@@ -473,8 +473,18 @@ impl Outbox {
                         })? as usize;
                     if used.saturating_add(bytes) <= options.queue_disk_bytes {
                         let batch = uuid::Uuid::new_v4().to_string();
-                        for row in encoded {
-                            tx.execute("INSERT INTO event(source,batch,payload,created) VALUES(?1,?2,?3,?4)",params![source,batch,row,chrono::Utc::now().timestamp_millis()])?;
+                        {
+                            let mut insert = tx.prepare_cached(
+                                "INSERT INTO event(source,batch,payload,created) VALUES(?1,?2,?3,?4)",
+                            )?;
+                            for row in encoded {
+                                insert.execute(params![
+                                    source,
+                                    batch,
+                                    row,
+                                    chrono::Utc::now().timestamp_millis()
+                                ])?;
+                            }
                         }
                         for ((agent, day), totals) in &usage {
                             tx.execute("INSERT INTO token_usage VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(agent,day) DO UPDATE SET responses=CASE WHEN responses>9223372036854775807-excluded.responses THEN 9223372036854775807 ELSE responses+excluded.responses END,with_usage=CASE WHEN with_usage>9223372036854775807-excluded.with_usage THEN 9223372036854775807 ELSE with_usage+excluded.with_usage END,input=CASE WHEN input>9223372036854775807-excluded.input THEN 9223372036854775807 ELSE input+excluded.input END,output=CASE WHEN output>9223372036854775807-excluded.output THEN 9223372036854775807 ELSE output+excluded.output END,cache_read=CASE WHEN cache_read>9223372036854775807-excluded.cache_read THEN 9223372036854775807 ELSE cache_read+excluded.cache_read END,cache_creation=CASE WHEN cache_creation>9223372036854775807-excluded.cache_creation THEN 9223372036854775807 ELSE cache_creation+excluded.cache_creation END",
@@ -604,7 +614,7 @@ impl Outbox {
     }
     pub(crate) fn read_batch(&self, options: &Delivery) -> anyhow::Result<(DeliveryRows, i64)> {
         let db = self.db.lock().unwrap();
-        let mut stmt = db.prepare(
+        let mut stmt = db.prepare_cached(
             "SELECT seq,payload,created,length(payload) FROM event ORDER BY seq LIMIT ?1",
         )?;
         let mut found = stmt.query([options.max_events_per_batch as i64])?;
@@ -640,13 +650,13 @@ impl Outbox {
         let tx = db.transaction()?;
         let now = chrono::Utc::now().timestamp_millis();
         let mut delay = 0u64;
-        for (id, _) in rows {
-            let created: i64 = tx.query_row(
-                "DELETE FROM event WHERE seq=?1 RETURNING created",
-                [id],
-                |r| r.get(0),
-            )?;
-            delay = delay.saturating_add(now.saturating_sub(created).max(0) as u64);
+        {
+            let mut delete =
+                tx.prepare_cached("DELETE FROM event WHERE seq=?1 RETURNING created")?;
+            for (id, _) in rows {
+                let created: i64 = delete.query_row([id], |r| r.get(0))?;
+                delay = delay.saturating_add(now.saturating_sub(created).max(0) as u64);
+            }
         }
         tx.commit()?;
         self.total_delay_ms.fetch_add(delay, Ordering::SeqCst);
