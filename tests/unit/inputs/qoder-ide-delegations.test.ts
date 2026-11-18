@@ -132,6 +132,13 @@ describe('Qoder IDE native request delegation', () => {
       expect((await readIdeDelegation('parent', 'delegate-1'))?.diagnostic).toBe('tool-metadata-byte-limit');
       db.prepare('UPDATE chat_message SET tool_result=? WHERE id=?').run(JSON.stringify({ toolCallId: 'read-1' }), 'tool');
       expect((await readIdeDelegation('parent', 'delegate-1'))?.messages[1]?.tool_call_id).toBe('read-1');
+      const payload = JSON.stringify({ toolCallId: 'read-extra', payload: 'x'.repeat(2 * 1024 * 1024) });
+      db.exec('BEGIN');
+      for (let i = 0; i < 9; i++) insert.run(`tool-extra-${i}`, 'tool', epoch + i + 2, null, null, payload, 'child', 'request-1');
+      db.exec('COMMIT');
+      expect((await readIdeDelegation('parent', 'delegate-1'))?.diagnostic).toBe('tool-metadata-total-byte-limit');
+      db.exec("DELETE FROM chat_message WHERE id LIKE 'tool-extra-%'");
+      expect((await readIdeDelegation('parent', 'delegate-1'))?.complete).toBe(true);
     } finally { db.close(); }
   });
 

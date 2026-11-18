@@ -15,6 +15,7 @@ const MAX_MESSAGES = 4096;
 const MAX_METADATA_BYTES = 4 * 1024 * 1024;
 const INLINE_TOOL_METADATA_BYTES = 256 * 1024;
 const MAX_TOOL_METADATA_BYTES = 16 * 1024 * 1024;
+const MAX_TOOL_METADATA_TOTAL_BYTES = 16 * 1024 * 1024;
 const MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const id = (value: unknown): value is string => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,512}$/.test(value);
@@ -40,7 +41,8 @@ export interface IdeDelegation {
   tokens: Array<{ messageId?: string; gmtCreate: number; model?: string; inputTokens: number; outputTokens: number; cacheReadTokens: number }>;
   /** A known relationship may be emitted even when its message inventory is deferred. */
   complete?: boolean;
-  diagnostic?: 'message-limit' | 'metadata-byte-limit' | 'tool-metadata-byte-limit' | 'invalid-metadata' | 'metadata-query-failed';
+  diagnostic?: 'message-limit' | 'metadata-byte-limit' | 'tool-metadata-byte-limit' | 'tool-metadata-total-byte-limit'
+    | 'invalid-metadata' | 'metadata-query-failed';
 }
 
 /** Only native relationship/usage metadata is queried. Encrypted bodies stay untouched. */
@@ -72,25 +74,28 @@ export async function readIdeDelegation(session: string, call: string, search = 
         CASE WHEN length(CAST(cm.role AS BLOB)) <= 64 THEN cm.role END AS role, cm.gmt_create,
         CASE WHEN length(CAST(cm.token_info AS BLOB)) <= 16384 THEN cm.token_info END AS token_info,
         CASE WHEN length(CAST(cm.model_info AS BLOB)) <= 16384 THEN cm.model_info END AS model_info,
-        CASE WHEN length(CAST(cm.tool_result AS BLOB)) <= ? AND json_valid(cm.tool_result)
+        CASE WHEN cm.role='tool' AND length(CAST(cm.tool_result AS BLOB)) <= ? AND json_valid(cm.tool_result)
           THEN json_extract(cm.tool_result,'$.toolCallId') END AS tool_call_id,
         CASE WHEN length(CAST(cm.tool_result AS BLOB)) > ? THEN 1 ELSE 0 END AS tool_metadata_large,
-        CASE WHEN length(CAST(cm.tool_result AS BLOB)) > ? THEN 1 ELSE 0 END AS tool_metadata_oversized
+        CASE WHEN length(CAST(cm.tool_result AS BLOB)) > ? THEN 1 ELSE 0 END AS tool_metadata_oversized,
+        CASE WHEN cm.role='tool' THEN length(CAST(cm.tool_result AS BLOB)) ELSE 0 END AS tool_metadata_bytes
         FROM chat_message cm WHERE cm.session_id=? AND cm.request_id=? AND cm.rowid>?
         ORDER BY cm.rowid LIMIT ?`);
       const largeTool = db.prepare(`SELECT CASE WHEN json_valid(tool_result)
         THEN json_extract(tool_result,'$.toolCallId') END AS tool_call_id
         FROM chat_message WHERE rowid=? AND session_id=? AND request_id=?`);
       const messages: IdeMessage[] = []; const tokens: IdeDelegation['tokens'] = [];
-      let rowid = 0; let metadataBytes = 0;
+      let rowid = 0; let metadataBytes = 0; let toolMetadataBytes = 0;
       const recordModel = parseRecordModelKey(found.record_extra);
       for (;;) {
         const rows = stmt.all(INLINE_TOOL_METADATA_BYTES, INLINE_TOOL_METADATA_BYTES, MAX_TOOL_METADATA_BYTES,
           found.session_id, found.request_id, rowid, MESSAGE_PAGE_SIZE) as Array<IdeMessage & {
-            native_rowid: number; tool_metadata_large: number; tool_metadata_oversized: number }>;
+            native_rowid: number; tool_metadata_large: number; tool_metadata_oversized: number; tool_metadata_bytes?: number }>;
         for (const row of rows) {
           if (messages.length >= MAX_MESSAGES) return deferred('message-limit');
           if (row.tool_metadata_oversized && row.role === 'tool') return deferred('tool-metadata-byte-limit');
+          toolMetadataBytes += row.tool_metadata_bytes ?? 0;
+          if (toolMetadataBytes > MAX_TOOL_METADATA_TOTAL_BYTES) return deferred('tool-metadata-total-byte-limit');
           if (row.tool_metadata_large && row.role === 'tool') {
             const result = largeTool.all(row.native_rowid, found.session_id, found.request_id) as Array<{ tool_call_id?: string }>;
             row.tool_call_id = result[0]?.tool_call_id;
