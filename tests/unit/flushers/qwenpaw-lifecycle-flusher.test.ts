@@ -4,6 +4,7 @@ import { ExportResultCode } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher } from '../../../src/flushers/otlp-trace-flusher.js';
 import { TurnBoundaryProcessor } from '../../../src/normalization/turn-boundary-processor.js';
+import { InputManager } from '../../../src/core/input-manager.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 
 // Synthetic fixtures specifically test collector buffering; real runtime evidence is in the E2E harness.
@@ -77,6 +78,22 @@ describe('QwenPaw collector lifecycle isolation', () => {
     const exported = JSON.stringify(spans.map(span => ({ attributes: span.attributes, events: span.events })));
     expect(exported).not.toContain('private-message');
     expect(exported).not.toContain('private-answer');
+  });
+
+  it('keeps masked content masked after payload spill and span conversion', async () => {
+    const secret = 'AKIA' + 'QWERTYUIOPASDFGH';
+    const records = turn('session', 'masked');
+    records[0]['gen_ai.input.messages'] = [{ role: 'user', parts: [{ type: 'text', content: secret }] }];
+    records[3]['gen_ai.input.messages'] = [{ role: 'user', parts: [{ type: 'text', content: secret }] }];
+    records[4]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: secret }] }];
+    const manager = new InputManager();
+    manager.setFlusher(flusher);
+    manager.setMaskConfig({ mode: 'all', types: [] });
+    await manager.flushPreparedEntries(records);
+    expect(spans).toHaveLength(4);
+    const exported = JSON.stringify(spans.map(span => ({ attributes: span.attributes, events: span.events })));
+    expect(exported).not.toContain(secret);
+    expect(exported).toContain('[ACCESSKEY_MASKED]');
   });
 
   it('does not end an ENTRY on LLM stop, and preserves native request identity', async () => {
