@@ -47,6 +47,23 @@ describe('CodexTurnJournal', () => {
     expect((await readJournal(restarted)).flat()).toEqual([second]);
   });
 
+  it('allows Codex and Hermes to resume after a retained OpenClaw cron turn is acknowledged', async () => {
+    const cron = entry('pending-cron', { 'gen_ai.agent.type': 'openclaw', 'agent.openclaw.collection': 'cron-lifecycle-v1' });
+    const codex = entry('next-codex', { 'gen_ai.agent.type': 'codex', 'gen_ai.turn.id': 'next-codex' });
+    const hermes = entry('next-hermes', { 'gen_ai.agent.type': 'hermes', 'gen_ai.turn.id': 'next-hermes' });
+    const size = (item: AgentActivityEntry) => Buffer.byteLength(JSON.stringify(item) + '\n');
+    const limit = Math.max(size(cron), size(codex), size(hermes)) + 16;
+    const journal = new CodexTurnJournal(directory, 100, ['openclaw', 'codex', 'hermes'], limit);
+    await journal.append([cron]);
+    await expect(journal.append([codex])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    await expect(journal.append([hermes])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    await journal.acknowledge([cron]);
+    await journal.append([codex]);
+    await journal.acknowledge([codex]);
+    await journal.append([hermes]);
+    expect((await readJournal(journal)).flat().map(item => item['event.id'])).toEqual(['next-hermes']);
+  });
+
   it('honors explicit disk budgets for both constructor forms when the environment is invalid', () => {
     const previous = process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
     process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES = 'invalid';

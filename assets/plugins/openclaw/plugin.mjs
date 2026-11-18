@@ -34,6 +34,7 @@ import { appendRawJsonl } from "../shared/raw-jsonl-writer.mjs";
 import { pilotConfigPath, readPilotConfig } from "../shared/pilot-config.mjs";
 import { createSubagentContexts, stampSubagent } from "./subagent-context.mjs";
 import { createCronContexts } from "./cron-context.mjs";
+import { createCronRecovery, cronRunEndMs, hasFinishedCronRun } from "./cron-recovery.mjs";
 import { invocationId, auditRecord, textMessages, deliveredText } from "./invocation-audit.mjs";
 import { MIN_OPENCLAW_VERSION } from "./compatibility.mjs";
 import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
@@ -386,6 +387,10 @@ function writeRecord(record, captureContent = true) {
   // or parent of a newer run that happens to reuse the same native ID.
   const run = candidate && (candidate.turnId || candidate.runId) === record["gen_ai.turn.id"]
     ? candidate : undefined;
+  if (run?.cronExecution && /^\d{1,24}$/.test(String(record.time_unix_nano || ""))) {
+    const observed = String(record.time_unix_nano);
+    if (!run.lastObservedNanos || BigInt(observed) > BigInt(run.lastObservedNanos)) run.lastObservedNanos = observed;
+  }
   const auditParent = run?.auditParentContext || run?.parentContext;
   if (auditParent?.invocationId) record["gen_ai.agent.parent.invocation.id"] = auditParent.invocationId;
   if (auditParent && run.sessionId && auditParent.childSessionId !== run.sessionId) {
@@ -471,42 +476,116 @@ const cronContexts = createCronContexts(resolveDataDir, writeError);
 function persistCronContext(run) {
   const execution = run?.cronExecution;
   if (!execution || !run.sessionId || !run.sessionKey) return false;
-  return cronContexts.write(execution.jobId, {
+  const written = cronContexts.write(execution.jobId, {
     runAtMs: execution.runAtMs, sessionKey: run.sessionKey, sessionId: run.sessionId,
     runId: run.runId, turnId: run.turnId, traceId: run.traceId,
     terminalEventId: execution.terminalEventId,
+    lastObservedNanos: run.lastObservedNanos,
     userId: run.userId, userIdSource: run.userIdSource, senderId: run.senderId,
     channel: run.channel, accountId: run.accountId, channelId: run.channelId,
   });
+  if (written) cronState.recovery?.wake();
+  return written;
 }
 
-function emitCronFinished(run, execution, userId, emit, incomplete = false) {
+function emitCronFinished(run, execution, userId, emit, incomplete = false, nativeEndMs) {
+  let endNanos = nativeEndMs === undefined ? undefined : `${nativeEndMs}000000`;
+  let inferred = false;
+  // Recovery may run minutes after the real task ended. Never use that
+  // observation time as the task's end. If host/hook timestamps disagree,
+  // retain the latest actually observed record and mark the inference.
+  if (incomplete && run.lastObservedNanos
+    && (!endNanos || BigInt(endNanos) < BigInt(run.lastObservedNanos))) {
+    endNanos = run.lastObservedNanos;
+    inferred = true;
+  }
+  if (incomplete && !endNanos) return false;
   const written = emit({
     ...buildCommonFields(run, run.sessionId, userId),
+    ...(endNanos ? { time_unix_nano: endNanos } : {}),
     "event.id": execution.terminalEventId,
     "event.name": "other",
     "agent.openclaw.hook": "cron_finished",
     "gen_ai.turn.end": true,
     ...(incomplete ? { "agent.openclaw.collection.incomplete": true,
       "agent.openclaw.collection.end_reason": "missing_cron_finished" } : {}),
+    ...(inferred ? { "agent.openclaw.timing.inferred": true,
+      "agent.openclaw.timing.source": "last_observed_cron_hook" } : {}),
     ...(execution.ambiguous ? { "agent.openclaw.correlation.ambiguous": true } : {}),
   });
   if (written !== false) cronContexts.remove(execution.jobId, execution.runAtMs);
   return written !== false;
 }
 
-function recoverCronFinished(snapshot, userId, emit, incomplete = false) {
+function recoverCronFinished(snapshot, userId, emit, incomplete = false, nativeEndMs) {
   const execution = { jobId: snapshot.jobId, runAtMs: snapshot.runAtMs,
     terminalEventId: snapshot.terminalEventId };
   const run = { ...snapshot, cronExecution: execution, telemetrySessionKey: snapshot.sessionKey };
-  return emitCronFinished(run, execution, userId, emit, incomplete);
+  return emitCronFinished(run, execution, userId, emit, incomplete, nativeEndMs);
 }
 
-function handleCronChanged(event, _ctx, userId, emit) {
+function closeCronExecution(execution, userId, emit, incomplete = false, nativeEndMs) {
+  const run = execution.run;
+  if (run) {
+    if (!run.completed) {
+      // A blocked, cancelled, or failed job may finish without llm_output.
+      flushUnmatchedModelResponses(run, userId, emit);
+      completeRun(run);
+    }
+    // Keep ownership and the durable context if the terminal write fails so
+    // another native event or reconciliation can retry it.
+    if (!emitCronFinished(run, execution, userId, emit, incomplete, nativeEndMs)) return false;
+    if (cronRuns.get(run.runId) === execution) cronRuns.delete(run.runId);
+  }
+  if (cronExecutions.get(execution.jobId) === execution) cronExecutions.delete(execution.jobId);
+  return true;
+}
+
+function recoverStoredCron(snapshot, job, userId, emit) {
+  // A normal finish, newer execution or another recovery may have changed
+  // ownership while the asynchronous scheduler query was in flight.
+  const current = cronContexts.read(snapshot.jobId);
+  if (!current || current.runAtMs !== snapshot.runAtMs
+    || current.terminalEventId !== snapshot.terminalEventId) return true;
+  const execution = cronExecutions.get(snapshot.jobId);
+  const nativeEndMs = cronRunEndMs(snapshot.runAtMs, job?.state?.lastDurationMs);
+  if (execution?.runAtMs === snapshot.runAtMs && execution.run) {
+    return closeCronExecution(execution, userId, emit, true, nativeEndMs);
+  }
+  if (!recoverCronFinished(snapshot, userId, emit, true, nativeEndMs)) return false;
+  if (execution?.runAtMs === snapshot.runAtMs) cronExecutions.delete(snapshot.jobId);
+  return true;
+}
+
+function configureCronRecovery(ctx, userId, emit) {
+  if (typeof ctx?.getCron !== "function") return;
+  cronState.recovery ??= createCronRecovery(cronContexts, debugFailureOnce);
+  cronState.recovery.configure(ctx.getCron, (snapshot, job) => recoverStoredCron(snapshot, job, userId, emit));
+  cronState.recovery.wake();
+}
+
+function handleCronGatewayStart(_event, ctx, userId, emit) {
+  configureCronRecovery(ctx, userId, emit);
+}
+
+function handleCronGatewayStop() {
+  cronState.recovery?.stop();
+}
+
+function handleCronChanged(event, ctx, userId, emit) {
+  configureCronRecovery(ctx, userId, emit);
   const jobId = event?.jobId;
   const runAtMs = event?.runAtMs;
-  if (typeof jobId !== "string" || !jobId || jobId.length > 1024
-    || typeof runAtMs !== "number" || !Number.isFinite(runAtMs)) return;
+  if (typeof jobId !== "string" || !jobId || jobId.length > 1024) return;
+  // One-shot jobs may be removed immediately after completion, before a
+  // later scheduler scan can find them. The removal snapshot is usable only
+  // when it proves this exact run has already completed.
+  if (event.action === "removed") {
+    const saved = cronContexts.read(jobId);
+    if (saved && hasFinishedCronRun(event.job, saved)) recoverStoredCron(saved, event.job, userId, emit);
+    return;
+  }
+  if (typeof runAtMs !== "number" || !Number.isFinite(runAtMs)) return;
   if (event.action === "started") {
     const target = event.sessionTarget;
     if (typeof target !== "string" || !target.startsWith("session:")
@@ -514,14 +593,28 @@ function handleCronChanged(event, _ctx, userId, emit) {
     const previous = cronExecutions.get(jobId);
     if (previous?.runAtMs === runAtMs) return;
     if (previous) {
-      // An overlapping execution of the same job cannot be correlated from
-      // hooks that omit jobId. Avoid claiming an unproven task identity.
-      previous.ambiguous = true;
-      return;
+      const state = event.job?.state;
+      // A newer scheduler start can recover a missed finish only when the
+      // host's job snapshot identifies the earlier run as completed. A mere
+      // llm_output or a different timestamp is not proof: fallback and
+      // overlapping work must not be split by a guessed boundary.
+      if (!(runAtMs > previous.runAtMs && state?.runningAtMs === runAtMs
+        && hasFinishedCronRun({ id: jobId, state }, previous))) {
+        previous.ambiguous = true;
+        return;
+      }
+      if (!closeCronExecution(previous, userId, emit, true,
+        cronRunEndMs(previous.runAtMs, state.lastDurationMs))) return;
     }
     if (cronExecutions.size >= MAX_RUNS) return;
     const saved = cronContexts.read(jobId);
-    if (saved && saved.runAtMs !== runAtMs && !recoverCronFinished(saved, userId, emit, true)) return;
+    if (saved && saved.runAtMs !== runAtMs) {
+      const state = event.job?.state;
+      if (!(runAtMs > saved.runAtMs && state?.runningAtMs === runAtMs
+        && hasFinishedCronRun({ id: jobId, state }, saved))) return;
+      if (!recoverCronFinished(saved, userId, emit, true,
+        cronRunEndMs(saved.runAtMs, state.lastDurationMs))) return;
+    }
     cronExecutions.set(jobId, { jobId, runAtMs, sessionKey: target.slice("session:".length),
       terminalEventId: crypto.randomUUID(), run: null });
     return;
@@ -530,21 +623,13 @@ function handleCronChanged(event, _ctx, userId, emit) {
   const execution = cronExecutions.get(jobId);
   if (!execution) {
     const saved = cronContexts.read(jobId);
-    if (saved?.runAtMs === runAtMs) recoverCronFinished(saved, userId, emit);
+    if (saved?.runAtMs === runAtMs) recoverCronFinished(saved, userId, emit, false,
+      cronRunEndMs(runAtMs, event.durationMs ?? event.job?.state?.lastDurationMs));
     return;
   }
   if (execution.runAtMs !== runAtMs) return;
-  cronExecutions.delete(jobId);
-  if (!execution.run) return;
-  const run = execution.run;
-  if (!run.completed) {
-    // A blocked, cancelled, or failed job may finish without llm_output.
-    // Do not leave its native run active for the next fixed-session job.
-    flushUnmatchedModelResponses(run, userId, emit);
-    completeRun(run);
-  }
-  if (cronRuns.get(run.runId) === execution) cronRuns.delete(run.runId);
-  emitCronFinished(run, execution, userId, emit);
+  closeCronExecution(execution, userId, emit, false,
+    cronRunEndMs(runAtMs, event.durationMs ?? event.job?.state?.lastDurationMs));
 }
 
 function observedCronExecution(runId, ctx) {
@@ -1224,8 +1309,6 @@ function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
   if (event?.systemPrompt) run.systemPrompt = event.systemPrompt;
   if (ctx?.sessionId) run.sessionId = ctx.sessionId;
   if (ctx?.sessionKey) run.sessionKey = ctx.sessionKey;
-  persistCronContext(run);
-
   const record = {
     ...buildCommonFields(run, ctx?.sessionId, userId),
     "event.name": "other",
@@ -1239,6 +1322,7 @@ function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
       : undefined,
   };
   emit(record);
+  persistCronContext(run);
   run.turnStartEmitted = true;
 }
 
@@ -1423,6 +1507,7 @@ function handleLlmOutput(event, ctx, userId, emit) {
     "agent.openclaw.context_window_source": event?.contextWindowSource,
   };
   emit(record);
+  persistCronContext(run);
   completeRun(run);
 }
 
@@ -2010,6 +2095,8 @@ export default {
     // and flusher behavior intact instead of disabling the plugin.
     try { on("cron_changed", handleCronChanged); }
     catch (err) { debugFailureOnce("cron-changed-register", err); }
+    try { on("gateway_start", handleCronGatewayStart); on("gateway_stop", handleCronGatewayStop); }
+    catch (err) { debugFailureOnce("cron-gateway-register", err); }
 
     // Observe completion via agent_end. Merely registering before_agent_finalize
     // enables the host's answer-revision gate and defers streaming delivery.

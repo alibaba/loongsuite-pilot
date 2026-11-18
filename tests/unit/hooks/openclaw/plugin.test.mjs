@@ -229,7 +229,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
       on: (name) => registered.add(name),
     };
     plugin.register(api);
-    expect(registered.size).toBe(16);
+    expect(registered.size).toBe(18);
     expect(registered.has('cron_changed')).toBe(true);
     expect(registered.has('session_start')).toBe(true);
     expect(registered.has('session_end')).toBe(true);
@@ -336,7 +336,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
         on: (name) => registered.add(name),
       });
 
-      expect(registered.size).toBe(16);
+      expect(registered.size).toBe(18);
     },
   );
 
@@ -1891,8 +1891,9 @@ it('keeps simultaneous spawns separate and recovers their identity after plugin 
 describe('fixed-session cron ownership', () => {
   const ctx = { runId: 'cron-session', sessionId: 'cron-session', sessionKey: 'agent:main:cron:bound',
     agentId: 'main', trigger: 'cron', jobId: 'job-1' };
-  const started = (h, runAtMs) => h.cron_changed({ action: 'started', jobId: ctx.jobId,
-    runAtMs, sessionTarget: `session:${ctx.sessionKey}` }, {});
+  const started = (h, runAtMs, state) => h.cron_changed({ action: 'started', jobId: ctx.jobId,
+    runAtMs, sessionTarget: `session:${ctx.sessionKey}`,
+    ...(state ? { job: { id: ctx.jobId, state } } : {}) }, {});
   const finished = (h, runAtMs) => h.cron_changed({ action: 'finished', jobId: ctx.jobId,
     runAtMs, sessionId: ctx.sessionId, sessionKey: ctx.sessionKey }, {});
   const attempt = async (h, model) => {
@@ -1946,7 +1947,7 @@ describe('fixed-session cron ownership', () => {
     await attempt(first, 'primary');
     globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].delete(pilotDataDir);
     const restarted = registerPlugin(await loadPlugin());
-    started(restarted, 200);
+    started(restarted, 200, { runningAtMs: 200, lastRunAtMs: 100, lastRunStatus: 'error' });
     await attempt(restarted, 'next');
     finished(restarted, 100);
     finished(restarted, 200);
@@ -1958,7 +1959,138 @@ describe('fixed-session cron ownership', () => {
     expect(ends).toHaveLength(2);
     expect(ends[0]).toMatchObject({ 'gen_ai.turn.id': starts[0]['gen_ai.turn.id'],
       'agent.openclaw.collection.incomplete': true, 'agent.openclaw.collection.end_reason': 'missing_cron_finished' });
+    const lastOutput = rows.find(row => row['agent.openclaw.hook'] === 'llm_output');
+    expect(ends[0].time_unix_nano).toBe(lastOutput.time_unix_nano);
+    expect(ends[0]['agent.openclaw.timing.inferred']).toBe(true);
     expect(ends[1]['gen_ai.turn.id']).toBe(starts[1]['gen_ai.turn.id']);
+  });
+
+  it('uses the native finish time rather than the later recovery time', async () => {
+    vi.useFakeTimers();
+    const start = Date.now();
+    const h = registerPlugin(await loadPlugin());
+    started(h, start);
+    await attempt(h, 'first');
+    const next = start + 30_000;
+    vi.setSystemTime(next);
+    started(h, next, { runningAtMs: next, lastRunAtMs: start, lastRunStatus: 'ok', lastDurationMs: 500 });
+    const end = readOutputRecords().find(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(end.time_unix_nano).toBe(`${start + 500}000000`);
+    expect(end.observed_time_unix_nano).toBe(`${next}000000`);
+    expect(end['agent.openclaw.collection.incomplete']).toBe(true);
+    expect(end['agent.openclaw.timing.inferred']).toBeUndefined();
+  });
+
+  it('does not discard saved ownership on a newer start without native completion evidence', async () => {
+    const first = registerPlugin(await loadPlugin());
+    started(first, 100);
+    await attempt(first, 'primary');
+    globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].delete(pilotDataDir);
+    const restarted = registerPlugin(await loadPlugin());
+    started(restarted, 200);
+    expect(readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished')).toHaveLength(0);
+    const directory = path.join(pilotDataDir, 'cron-contexts', 'openclaw');
+    expect(fs.readdirSync(directory)).toHaveLength(1);
+  });
+
+  it('recovers a missed finish without restarting when the native job confirms the earlier execution ended', async () => {
+    const h = registerPlugin(await loadPlugin());
+    started(h, 100);
+    await attempt(h, 'first');
+    started(h, 200, { runningAtMs: 200, lastRunAtMs: 100, lastRunStatus: 'ok' });
+    await attempt(h, 'second');
+    finished(h, 100); // A late finish cannot close the new execution.
+    finished(h, 200);
+    const rows = readOutputRecords();
+    const starts = rows.filter(row => row['agent.openclaw.hook'] === 'before_agent_run');
+    const ends = rows.filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map(row => row['gen_ai.turn.id'])).size).toBe(2);
+    expect(ends).toHaveLength(2);
+    expect(ends[0]).toMatchObject({ 'gen_ai.turn.id': starts[0]['gen_ai.turn.id'],
+      'agent.openclaw.collection.incomplete': true, 'agent.openclaw.collection.end_reason': 'missing_cron_finished' });
+    expect(ends[1]['gen_ai.turn.id']).toBe(starts[1]['gen_ai.turn.id']);
+  });
+
+  it('does not infer completion from a later start without matching native completion evidence', async () => {
+    const h = registerPlugin(await loadPlugin());
+    started(h, 100);
+    await attempt(h, 'first');
+    started(h, 200, { runningAtMs: 100, lastRunAtMs: 50, lastRunStatus: 'ok' });
+    const rows = readOutputRecords();
+    expect(rows.filter(row => row['agent.openclaw.hook'] === 'cron_finished')).toHaveLength(0);
+  });
+
+  it('recovers a missing finish without another execution only after the native scheduler confirms completion', async () => {
+    const h = registerPlugin(await loadPlugin());
+    let state = { runningAtMs: 100 };
+    const list = vi.fn(async () => [{ id: ctx.jobId, state }]);
+    h.gateway_start({}, { getCron: () => ({ list }) });
+    started(h, 100);
+    await attempt(h, 'primary');
+    const recovery = globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].get(pilotDataDir).recovery;
+    expect(await recovery.reconcile()).toBe(true);
+    expect(readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished')).toHaveLength(0);
+    state = { lastRunAtMs: 100, lastRunStatus: 'ok' };
+    await recovery.reconcile();
+    finished(h, 100); // The delayed real hook must not duplicate the terminal.
+    const ends = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(ends).toHaveLength(1);
+    expect(ends[0]).toMatchObject({ 'agent.openclaw.collection.incomplete': true,
+      'agent.openclaw.collection.end_reason': 'missing_cron_finished' });
+    h.gateway_stop({}, {});
+  });
+
+  it('uses the scheduler to recover saved ownership after a Gateway restart without a later job', async () => {
+    const first = registerPlugin(await loadPlugin());
+    started(first, 100);
+    await attempt(first, 'primary');
+    const before = readOutputRecords().find(row => row['agent.openclaw.hook'] === 'before_agent_run');
+    globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].delete(pilotDataDir);
+    const restarted = registerPlugin(await loadPlugin());
+    restarted.gateway_start({}, { getCron: () => ({ list: async () => [
+      { id: ctx.jobId, state: { lastRunAtMs: 100, lastRunStatus: 'error' } },
+    ] }) });
+    const recovery = globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].get(pilotDataDir).recovery;
+    await recovery.reconcile();
+    const ends = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(ends).toHaveLength(1);
+    expect(ends[0]['gen_ai.turn.id']).toBe(before['gen_ai.turn.id']);
+    expect(ends[0].trace_id).toBe(before.trace_id);
+    restarted.gateway_stop({}, {});
+  });
+
+  it('recovers a deleted one-shot only when the native removal snapshot proves it finished', async () => {
+    const h = registerPlugin(await loadPlugin());
+    started(h, 100);
+    await attempt(h, 'primary');
+    h.cron_changed({ action: 'removed', jobId: ctx.jobId,
+      job: { id: ctx.jobId, state: { runningAtMs: 100 } } }, {});
+    expect(readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished')).toHaveLength(0);
+    h.cron_changed({ action: 'removed', jobId: ctx.jobId,
+      job: { id: ctx.jobId, state: { lastRunAtMs: 100, lastRunStatus: 'ok', lastDurationMs: 5 } } }, {});
+    const ends = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(ends).toHaveLength(1);
+    expect(ends[0]['agent.openclaw.collection.incomplete']).toBe(true);
+  });
+
+  it('does not duplicate a real finish that arrives while scheduler recovery is in flight', async () => {
+    const h = registerPlugin(await loadPlugin());
+    let release;
+    const list = vi.fn(() => new Promise(resolve => { release = resolve; }));
+    h.gateway_start({}, { getCron: () => ({ list }) });
+    started(h, 100);
+    await attempt(h, 'primary');
+    const recovery = globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].get(pilotDataDir).recovery;
+    const pending = recovery.reconcile();
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    finished(h, 100);
+    release([{ id: ctx.jobId, state: { lastRunAtMs: 100, lastRunStatus: 'ok' } }]);
+    await pending;
+    const ends = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(ends).toHaveLength(1);
+    expect(ends[0]['agent.openclaw.collection.incomplete']).toBeUndefined();
+    h.gateway_stop({}, {});
   });
 
   it('starts fresh after a native job finishes without an llm_output hook', async () => {

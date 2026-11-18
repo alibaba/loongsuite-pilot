@@ -9,6 +9,7 @@ import { CodexTurnJournal } from '../../src/flushers/codex-turn-journal.js';
 import { OpenClawPluginInput } from '../../src/inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { ClientType, type AgentActivityEntry } from '../../src/types/index.js';
 import { MockStateStore } from '../helpers/mock-state-store.js';
+import { buildTestEntry } from '../helpers/fixture-builder.js';
 
 describe('OpenClaw cron task and model attempt boundaries', () => {
   const directories: string[] = [];
@@ -18,7 +19,7 @@ describe('OpenClaw cron task and model attempt boundaries', () => {
     for (const directory of directories.splice(0)) await fs.rm(directory, { recursive: true, force: true });
   });
 
-  it.each(['in memory', 'collector restarted'])(
+  it.each(['in memory', 'collector restarted', 'missing finish', 'scheduler recovery'])(
     'keeps fallback attempts across batches together and separates subsequent cron executions (%s)', async mode => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-cron-boundaries-'));
     directories.push(root);
@@ -34,12 +35,16 @@ describe('OpenClaw cron task and model attempt boundaries', () => {
       export(batch, cb) { spans.push(...batch); cb({ code: 0 }); },
       shutdown: async () => {},
     };
+    let journal: CodexTurnJournal | undefined;
     const createFlusher = () => {
+      journal = mode === 'scheduler recovery'
+        ? new CodexTurnJournal(path.join(root, 'pending-turns'), 10_000, ['openclaw', 'codex', 'hermes'], 50_000)
+        : mode === 'collector restarted'
+          ? new CodexTurnJournal(path.join(root, 'pending-turns'), 10_000, ['openclaw']) : undefined;
       const instance = new OtlpTraceFlusher({
         enabled: true, protocol: 'http/protobuf', serviceName: 'openclaw-cron-test',
         endpoints: [{ name: 'test', endpoint: 'http://localhost:4318', headers: {} }],
-      }, undefined, () => exporter, mode === 'collector restarted'
-        ? new CodexTurnJournal(path.join(root, 'pending-turns'), 10_000, ['openclaw']) : undefined);
+      }, undefined, () => exporter, journal);
       const sendBatch = instance.sendBatch.bind(instance);
       instance.sendBatch = async (entries, sizes) => {
         canonicalEntries.push(...entries.map(entry => ({ ...entry })));
@@ -59,7 +64,10 @@ describe('OpenClaw cron task and model attempt boundaries', () => {
     const handlers: Record<string, (event: any, ctx: any) => unknown> = {};
     plugin.register({ runtime: { version: '2026.6.5' }, on(name: string, handler: (event: any, ctx: any) => unknown) { handlers[name] = handler; } });
     const ctx = { agentId: 'main', runId: 'same-session', sessionId: 'same-session', sessionKey: 'agent:main:cron:bound', trigger: 'cron' };
-    const started = (at: number, jobId = 'cron-job') => handlers.cron_changed({ action: 'started', jobId, runAtMs: at, sessionTarget: `session:${ctx.sessionKey}` }, {});
+    const started = (at: number, jobId = 'cron-job', state?: Record<string, unknown>) => handlers.cron_changed({
+      action: 'started', jobId, runAtMs: at, sessionTarget: `session:${ctx.sessionKey}`,
+      ...(state ? { job: { id: jobId, state } } : {}),
+    }, {});
     const finished = (at: number, jobId = 'cron-job') => handlers.cron_changed({ action: 'finished', jobId, runAtMs: at, sessionKey: ctx.sessionKey, sessionId: ctx.sessionId, status: 'ok' }, {});
     const collect = async () => { await manager.startInput(input.id); await manager.stopInput(input.id); };
     const attempt = async (model: string, response: string, failed = false, jobId = 'cron-job', senderId = 'sender-one') => {
@@ -101,17 +109,57 @@ describe('OpenClaw cron task and model attempt boundaries', () => {
       await attempt('fallback', 'recovered');
       await collect();
       expect(llms()).toHaveLength(0);
-      // Two jobs can share a session: the next job's hooks may arrive after
-      // llm_output but before the previous job's cron_finished callback.
-      started(200, 'cron-other');
-      await attempt('primary', 'next task', false, 'cron-other', 'sender-two');
-      await collect();
-      expect(llms()).toHaveLength(0);
-      finished(100);
-      await collect();
-      expect(llms()).toHaveLength(2);
-      expect(new Set(llms().map(span => span.spanContext().traceId)).size).toBe(1);
-      finished(200, 'cron-other');
+      const missingFinish = mode === 'missing finish' || mode === 'scheduler recovery';
+      if (mode === 'scheduler recovery') {
+        const directory = path.join(root, 'pending-turns');
+        const names = (await fs.readdir(directory)).filter(name => /^codex-turn-.*\.jsonl$/.test(name));
+        const used = (await Promise.all(names.map(name => fs.stat(path.join(directory, name))))).reduce((sum, stat) => sum + stat.size, 0);
+        expect(used).toBeGreaterThan(1000);
+        expect(used).toBeLessThan(48_000);
+        const codex = buildTestEntry({ 'event.id': 'quota-codex', 'gen_ai.agent.type': 'codex',
+          'gen_ai.turn.id': 'quota-codex-turn', 'gen_ai.session.id': 'quota-codex-session', 'user.id': 'quota-user' });
+        codex['test.padding'] = 'x'.repeat(50_000 - Math.floor(used / 2) - Buffer.byteLength(JSON.stringify(codex)) - 64);
+        expect(Buffer.byteLength(JSON.stringify(codex)) + 1).toBeLessThan(50_000);
+        await expect(journal!.append([codex])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+        handlers.gateway_start({}, { getCron: () => ({ list: async () => [
+          { id: 'cron-job', state: { lastRunAtMs: 100, lastRunStatus: 'ok' } },
+        ] }) });
+        const registry = (globalThis as any)[Symbol.for('loongsuite-pilot.openclaw.cron-executions')];
+        await registry.get(root).recovery.reconcile();
+        await collect();
+        expect(llms()).toHaveLength(2);
+        // A proven recovery must release the durable prefix as well as
+        // export spans; otherwise the shared journal can remain congested.
+        const pending = await fs.readdir(path.join(root, 'pending-turns'));
+        expect(pending.filter(name => /^codex-turn-.*\.jsonl$/.test(name))).toHaveLength(0);
+        await journal!.append([codex]);
+        await journal!.acknowledge([codex]);
+        const hermes = { ...codex, 'event.id': 'quota-hermes', 'gen_ai.agent.type': 'hermes',
+          'gen_ai.turn.id': 'quota-hermes-turn' };
+        await journal!.append([hermes]);
+        await journal!.acknowledge([hermes]);
+      }
+      if (missingFinish) {
+        started(200, 'cron-job', { runningAtMs: 200, lastRunAtMs: 100, lastRunStatus: 'ok' });
+        await collect();
+        expect(llms()).toHaveLength(2);
+        await attempt('primary', 'next task', false, 'cron-job', 'sender-two');
+        await collect();
+        expect(llms()).toHaveLength(2);
+        finished(100);
+        finished(200);
+      } else {
+        // Distinct jobs can overlap in one session; the old job's native
+        // finish, not its successor, owns the old turn's boundary.
+        started(200, 'cron-other');
+        await attempt('primary', 'next task', false, 'cron-other', 'sender-two');
+        await collect();
+        expect(llms()).toHaveLength(0);
+        finished(100);
+        await collect();
+        expect(llms()).toHaveLength(2);
+        finished(200, 'cron-other');
+      }
       await collect();
       expect(llms()).toHaveLength(3);
       expect(new Set(llms().map(span => span.spanContext().traceId)).size).toBe(2);
@@ -128,6 +176,7 @@ describe('OpenClaw cron task and model attempt boundaries', () => {
         expect(sameTurn.filter(entry => entry['gen_ai.turn.end'] === true)).toEqual([finish]);
       }
     } finally {
+      handlers.gateway_stop?.({}, {});
       await manager.stopInput(input.id);
       await flusher.shutdown();
     }

@@ -253,6 +253,8 @@ PATH/工作目录，不执行 CLI，也不使用用户传入的版本；明确�
 为每次执行分配独立的 `gen_ai.turn.id`。同一次执行内的 fallback 共用一轮，在任务完成时
 导出；`agent.openclaw.run_id` 保留原生 ID，session ID 不变。其他运行及未提供定时任务
 生命周期事件的旧宿主维持原有采集行为。
+若完成回调缺失，Pilot 仅在调度器确认相同执行已结束后收口，并标记采集不完整；运行中或
+状态未知的任务不会因为一次模型调用结束就被提前收口。
 
 Legacy 适配器以 `llm_input`、AssistantMessage 的 `before_message_write`、
 工具 Hook 和 `llm_output` 重建链路，保留真实输出、toolCallId 与逐次 Token。
