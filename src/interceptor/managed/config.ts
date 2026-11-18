@@ -23,6 +23,8 @@ interface ManagedRuleBase {
   agents: InterceptorAgent[];
   events: HookEventName[];
   enforcement: RuleEnforcement;
+  /** Optional risk label; does not affect matching or enforcement. */
+  severity?: string;
   /** Display label for telemetry. Not shown to the host. */
   title?: string;
   /** Reminder shown to the host/agent when this rule blocks. */
@@ -93,18 +95,17 @@ export class ManagedConfigError extends Error {
   }
 }
 
-/** Parses a local rule document at `configs/managed/interceptor.json`. */
+/** Parses known fields; unknown fields are ignored for forward compatibility. */
 export function parseManagedInterceptorConfig(
   value: unknown,
   opts: { allowLocalScriptCache?: boolean } = {},
 ): ManagedInterceptorConfig {
   const root = asRecord(value, 'document');
-  onlyKeys(root, ['interceptor'], 'document');
   const interceptor = asRecord(root.interceptor, 'interceptor');
-  onlyKeys(interceptor, opts.allowLocalScriptCache ? ['rules', 'scriptCache'] : ['rules'], 'interceptor');
   return {
     rules: parseRuleList(interceptor.rules, parseManagedRule),
-    ...(interceptor.scriptCache === undefined ? {} : { scriptCache: parseScriptCache(interceptor.scriptCache) }),
+    ...(opts.allowLocalScriptCache && interceptor.scriptCache !== undefined
+      ? { scriptCache: parseScriptCache(interceptor.scriptCache) } : {}),
   };
 }
 
@@ -116,6 +117,7 @@ function parseScriptCache(value: unknown): string {
 }
 
 export const MAX_RULE_TITLE_CHARS = 128;
+export const MAX_RULE_SEVERITY_CHARS = 128;
 export const MAX_RULE_MESSAGE_CHARS = 2000;
 export const MAX_RULE_PATTERN_CHARS = 2000;
 export const PATTERN_BLOCKED_REASON = '[PATTERN_BLOCKED]';
@@ -144,7 +146,6 @@ function parseManagedRule(value: unknown, where: string): ManagedRule {
 }
 
 function parseScriptRule(value: Record<string, unknown>, where: string): ManagedScriptRule {
-  onlyKeys(value, ['kind', 'id', 'version', 'shell', ...BASE_KEYS], where);
   if (value.shell !== 'sh' && value.shell !== 'powershell') {
     throw new ManagedConfigError(`${where}.shell must be "sh" or "powershell"`);
   }
@@ -152,7 +153,6 @@ function parseScriptRule(value: Record<string, unknown>, where: string): Managed
 }
 
 function parsePatternRule(value: Record<string, unknown>, where: string): ManagedPatternRule {
-  onlyKeys(value, ['kind', 'id', 'version', 'match', 'pattern', ...BASE_KEYS], where);
   if (value.match !== 'regex' && value.match !== 'substring') {
     throw new ManagedConfigError(`${where}.match must be "regex" or "substring"`);
   }
@@ -167,12 +167,8 @@ function parsePatternRule(value: Record<string, unknown>, where: string): Manage
 }
 
 function parseHttpRule(value: Record<string, unknown>, where: string): ManagedHttpRule {
-  onlyKeys(value, ['kind', 'id', 'version', 'url', ...BASE_KEYS], where);
   return { kind: 'http', ...parseRuleBase(value, where), url: parseHttpsUrl(value.url, `${where}.url`) };
 }
-
-// Accept the retired fields key from older documents, but never normalize or apply it.
-const BASE_KEYS = ['agents', 'events', 'fields', 'title', 'message', 'enforcement'];
 
 function parseRuleBase(value: Record<string, unknown>, where: string): ManagedRuleBase {
   const enforcement = value.enforcement === undefined ? 'enforce' : value.enforcement;
@@ -185,6 +181,7 @@ function parseRuleBase(value: Record<string, unknown>, where: string): ManagedRu
     agents: parseIdList(value.agents, `${where}.agents`, AGENT_SET) as InterceptorAgent[],
     events: parseIdList(value.events, `${where}.events`, HOOK_EVENT_SET) as HookEventName[],
     enforcement,
+    ...optionalText(value.severity, `${where}.severity`, MAX_RULE_SEVERITY_CHARS, 'severity'),
     ...optionalText(value.title, `${where}.title`, MAX_RULE_TITLE_CHARS, 'title'),
     ...optionalText(value.message, `${where}.message`, MAX_RULE_MESSAGE_CHARS, 'message'),
   };
@@ -194,10 +191,10 @@ function optionalText(
   value: unknown,
   where: string,
   maxChars: number,
-  key: 'title' | 'message',
-): { title: string } | { message: string } | Record<string, never> {
+  key: 'title' | 'message' | 'severity',
+): Partial<Record<'title' | 'message' | 'severity', string>> {
   const text = parseOptionalText(value, where, maxChars);
-  return text ? { [key]: text } as { title: string } | { message: string } : {};
+  return text ? { [key]: text } : {};
 }
 
 /** An empty list would make the rule silently never fire, so it is rejected like an unknown entry. */
@@ -296,9 +293,4 @@ function asRecord(value: unknown, where: string): Record<string, unknown> {
     throw new ManagedConfigError(`${where} must be an object`);
   }
   return value as Record<string, unknown>;
-}
-
-function onlyKeys(value: Record<string, unknown>, allowed: string[], where: string): void {
-  const unknown = Object.keys(value).filter(key => !allowed.includes(key));
-  if (unknown.length > 0) throw new ManagedConfigError(`${where} has unknown keys: ${unknown.join(', ')}`);
 }

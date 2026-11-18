@@ -856,6 +856,7 @@ function isTerminalTurnEntry(entry) {
   // Codex status applies to every record; only the native marker closes a turn.
   if (agentType === 'codex') return false;
   if (agentType === 'openclaw') {
+    if (entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') return false;
     return entry['agent.openclaw.hook'] === 'llm_output';
   }
   const reasons = entry['gen_ai.response.finish_reasons'];

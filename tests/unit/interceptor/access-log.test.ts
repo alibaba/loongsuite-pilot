@@ -68,6 +68,7 @@ describe('interceptor access log', () => {
         action: 'block',
         reason: secret,
         title: `label ${secret}`,
+        severity: secret,
         message: `不要粘贴 ${secret}`,
       },
     }));
@@ -75,6 +76,7 @@ describe('interceptor access log', () => {
     expect(JSON.parse(line).result).toMatchObject({
       reason: '[DATABASEURL_MASKED]',
       title: 'label [DATABASEURL_MASKED]',
+      severity: '[DATABASEURL_MASKED]',
       message: '不要粘贴 [DATABASEURL_MASKED]',
     });
   });

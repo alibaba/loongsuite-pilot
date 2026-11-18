@@ -13,6 +13,7 @@ export interface ManagedRuleMatch {
   action: VerdictAction;
   ruleId: string;
   ruleVersion: string;
+  severity?: string;
   reason: string;
   title?: string;
   message?: string;
@@ -63,6 +64,8 @@ export interface EvaluateHookResponse {
   ruleId?: string;
   /** Managed `rules[].version`. Builtin rules omit this. */
   ruleVersion?: string;
+  /** Optional risk label from managed `rules[].severity`. */
+  severity?: string;
   /** Managed `rules[].title`. */
   title?: string;
   /** Managed `rules[].message`. Shown to the host in preference to `reason`. */

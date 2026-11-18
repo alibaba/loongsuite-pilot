@@ -34,14 +34,14 @@ describe('guardrail evaluation event', () => {
     const request: HookRequest = { agent: 'qodercli', event: 'PostToolUse', sessionId: 'session', toolUseId: 'tool',
       toolName: 'Bash', prompt: 'private prompt', toolInput: { secret: 'private input' }, toolResponse: 'private output', raw: {} };
     const match: ManagedRuleMatch = { matched: true, action: 'allow', enforcement: 'audit', ruleId: 'audit', ruleVersion: '7',
-      reason: 'sk-1234567890abcdefghijklmnop', title: 'audit label', message: 'audit reminder' };
+      reason: 'sk-1234567890abcdefghijklmnop', title: 'audit label', message: 'audit reminder', severity: 'HIGH' };
     const entry = buildGuardrailEvaluationEntry(request, match, true);
     const masked = maskAgentActivityEntry(entry, { mode: 'all', types: [], replacementMode: 'placeholder' });
     expect(masked).toMatchObject({ 'event.name': 'guardrail.evaluation', 'gen_ai.agent.type': 'qoder-cli',
       'gen_ai.session.id': 'session', 'gen_ai.tool.call.id': 'tool', 'gen_ai.guardrail.phase': 'PostToolUse',
       'gen_ai.guardrail.triggered': true, 'gen_ai.guardrail.matched': true, 'gen_ai.guardrail.action': 'allow',
       'gen_ai.guardrail.enforcement': 'audit', 'gen_ai.guardrail.fail_open': true, 'gen_ai.guardrail.rule_id': 'audit',
-      'gen_ai.guardrail.rule_version': '7', 'gen_ai.guardrail.reason': '[APIKEY_MASKED]' });
+      'gen_ai.guardrail.rule_version': '7', 'gen_ai.guardrail.reason': '[APIKEY_MASKED]', 'gen_ai.guardrail.severity': 'HIGH' });
     expect(JSON.stringify(masked)).not.toContain('private prompt');
     expect(JSON.stringify(masked)).not.toContain('private input');
     expect(JSON.stringify(masked)).not.toContain('private output');
@@ -50,6 +50,7 @@ describe('guardrail evaluation event', () => {
     expect(serialized['event.name']).toBe('guardrail.evaluation');
     expect(serialized['gen_ai.guardrail.matched']).toBe('true');
     expect(serialized['gen_ai.guardrail.enforcement']).toBe('audit');
+    expect(serialized['gen_ai.guardrail.severity']).toBe('HIGH');
     const root = await mkdtemp(join(tmpdir(), 'guardrail-evaluation-'));
     const flusher = new JsonlFlusher({ outputDir: root, rotateDaily: false });
     try {

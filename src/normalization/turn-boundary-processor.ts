@@ -109,6 +109,9 @@ export function isTerminalTurnEntry(entry: AgentActivityEntry): boolean {
     return false;
   }
   if (agentType === 'openclaw') {
+    // A fixed-session cron execution can contain multiple llm_output hooks
+    // during fallback. Its producer owns the outer cron_finished boundary.
+    if (entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') return false;
     return entry['agent.openclaw.hook'] === 'llm_output';
   }
 

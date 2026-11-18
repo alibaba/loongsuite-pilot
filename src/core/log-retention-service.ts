@@ -218,7 +218,7 @@ export class LogRetentionService {
         let totalBytes = 0;
         for (const file of files) totalBytes += (await safeLstat(path.join(dir, file)))?.size ?? 0;
         for (const file of files.sort()) {
-          const date = /-(\d{4}-\d{2}-\d{2})(?:\.segment-\d{12}-[a-f0-9]{32})?\.jsonl$/.exec(file)?.[1];
+          const date = /-(\d{4}-\d{2}-\d{2})(?:-uid\d+)?(?:\.segment-\d{12}-[a-f0-9]{32})?\.jsonl$/.exec(file)?.[1];
           const expired = date !== undefined && date < dateCutoff(this.config.hookHistoryDays);
           if ((pressureOnly || !expired) && totalBytes <= RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES) continue;
           const base = file.replace(/\.segment-\d{12}-[a-f0-9]{32}(?=\.jsonl$)/, '');

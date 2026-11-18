@@ -86,6 +86,7 @@ const USER_IDENTITY_PASSTHROUGH_KEYS = [
   'user.email',
 ] as const;
 const OPENCLAW_COMPAT_PASSTHROUGH_KEYS = [
+  'agent.openclaw.run_id',
   'agent.openclaw.compatibility',
   'agent.openclaw.timing.inferred',
   'agent.openclaw.timing.source',
@@ -99,10 +100,14 @@ function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentA
   const key = (r: AgentActivityEntry) => JSON.stringify([r.trace_id, r['gen_ai.turn.id']]);
   const endings = new Map<string, Partial<AgentActivityEntry>>();
   for (const r of records) {
-    if (r['agent.openclaw.compatibility'] === 'legacy' && r['agent.openclaw.hook'] === 'legacy_cleanup') {
+    if ((r['agent.openclaw.compatibility'] === 'legacy' && r['agent.openclaw.hook'] === 'legacy_cleanup')
+      || (r['agent.openclaw.hook'] === 'cron_finished'
+        && (r['agent.openclaw.collection.incomplete'] === true || r['agent.openclaw.correlation.ambiguous'] === true))) {
       endings.set(key(r), {
-        'agent.openclaw.collection.incomplete': true,
-        'agent.openclaw.collection.end_reason': r['agent.openclaw.collection.end_reason'],
+        ...((r['agent.openclaw.compatibility'] === 'legacy' || r['agent.openclaw.collection.incomplete'] === true) ? {
+          'agent.openclaw.collection.incomplete': true,
+          'agent.openclaw.collection.end_reason': r['agent.openclaw.collection.end_reason'],
+        } : {}),
         ...(r['agent.openclaw.correlation.ambiguous'] === true
           ? { 'agent.openclaw.correlation.ambiguous': true } : {}),
       });
@@ -164,6 +169,8 @@ interface TurnBuffer {
   hermesDeadSinceMs?: number;
   hermesNextDrainMs?: number;
   hermesDrainFailures?: number;
+  /** A fixed-session cron execution has an explicit outer completion event. */
+  isObservedOpenClawCron?: boolean;
   lastActivityMs: number;
   activityVersion: number;
   logicalBytes: number;
@@ -670,6 +677,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private flushedTurnKeys = new Set<string>();
   private warnedHermesIdleTimeout = false;
   private warnedHermesLegacyIdleTimeout = false;
+  private warnedOpenClawCronIdleTimeout = false;
   private readonly convertLocks = new Map<string, Promise<void>>();
   private journalRestore?: Promise<void>;
   private codexFlushTail: Promise<void> = Promise.resolve();
@@ -936,6 +944,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       // their own explicit completion, so a successor is not an implicit end.
       if (agentType === 'hermes'
         && buf.isRealtimeHermes) continue;
+      // Another turn in the same session may overlap a cron task. Its native
+      // cron_finished event, not the successor, owns completion.
+      if (agentType === 'openclaw' && buf.isObservedOpenClawCron) continue;
       if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
       buf.completed = true;
       this.triggerFlush(buf, false);
@@ -986,6 +997,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
         buf.hermesOwner = owner;
         if (!buf.hermesOwnerUncertain) this.trackHermesSource(key, owner.sourceToken);
       }
+    }
+    if (agentType === 'openclaw' && entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') {
+      buf.isObservedOpenClawCron = true;
     }
     const durable = this.codexJournal?.accepts(entry) === true;
     const residentSize = durable ? Buffer.byteLength(JSON.stringify(entry)) : 0;
@@ -1320,11 +1334,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (turnStatus !== 'completed' && turnStatus !== 'interrupted') return false;
       return entry['gen_ai.turn.end'] === true;
     }
-    // OpenClaw emits one finish reason per ReAct model call. Those values close
-    // individual LLM spans, not the whole agent turn. Its llm_output hook is the
-    // stable successful-run boundary. Legacy failed attempts can terminate
-    // before llm_output; the adapter explicitly seals those at agent_end.
+    // A fixed-session cron can perform multiple provider attempts. Only its
+    // observed outer job completion closes that turn. Older producers and
+    // other OpenClaw runs retain their existing llm_output behavior.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'openclaw') {
+      if (entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') {
+        return entry['agent.openclaw.hook'] === 'cron_finished' && entry['gen_ai.turn.end'] === true;
+      }
       return entry['agent.openclaw.hook'] === 'llm_output'
         || (entry['agent.openclaw.compatibility'] === 'legacy'
           && (entry['agent.openclaw.hook'] === 'agent_end' || entry['agent.openclaw.hook'] === 'legacy_cleanup')
@@ -2895,6 +2911,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const now = Date.now();
     for (const [, buf] of this.turnBuffers) {
       if (!buf.completed && now - buf.lastActivityMs > timeout) {
+        if (buf.isObservedOpenClawCron) {
+          if (!this.warnedOpenClawCronIdleTimeout) {
+            this.warnedOpenClawCronIdleTimeout = true;
+            logger.warn('Ignoring idle timeout for observed OpenClaw cron turns; waiting for native job completion', {
+              turnIdleTimeoutMs: timeout,
+            });
+          }
+          continue;
+        }
         if (buf.hasHermesNativeRunObserver) {
           // Idleness does not prove native completion. Sealing here puts the
           // key in flushedTurnKeys and discards later tools/model responses.

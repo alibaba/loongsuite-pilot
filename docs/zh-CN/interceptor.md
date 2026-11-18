@@ -243,11 +243,14 @@ export LOONGSUITE_PILOT_INTERCEPTOR_MODE=all
 
 每条规则的 `id` 在列表内唯一，`id` 和 `version` 只允许 ASCII 字母、数字、点、下划线和连字符。`agents` 和 `events` 必须是非空数组。
 
+文档顶层、`interceptor` 和各条规则中的未知字段直接忽略，不参与执行、不保留到归一化后的本地配置，也不因这些扩展字段报错。已知字段仍校验类型、必填值与取值范围；未知 `kind` 或不支持的 agent/event 等属于已知字段的非法值，仍拒绝本次配置并保留上一份有效配置。
+
 | 字段 | 取值 |
 |------|------|
 | `agents` | `qoder`、`qodercli`、`openclaw`、`qwen-work-cn` |
 | `events` | `UserPromptSubmit`、`PreToolUse`、`PostToolUse` |
 | `enforcement` | 默认 `enforce`，命中后拦截并停止；`audit` 记录命中后放行，继续检查后续规则，不提示宿主 |
+| `severity` | 可选风险等级字符串，例如 `HIGH`、`CRITICAL`；去掉首尾空白后须为 1–128 个字符，不限定枚举、保留大小写。命中后上报为 `gen_ai.guardrail.severity`，不影响匹配或拦截决策 |
 | `kind` | `pattern`、`script`；`http` 仅保留格式占位，记录警告并跳过，不发请求 |
 | `match` | pattern 规则的 `substring` 或 `regex` |
 | `shell` | script 规则的 `sh` 或 `powershell`，本机仅执行平台匹配的脚本 |
@@ -255,6 +258,20 @@ export LOONGSUITE_PILOT_INTERCEPTOR_MODE=all
 规则固定按用户输入、工具名、工具输入、工具输出的顺序合并文本；对象递归提取字符串、数字和布尔叶子。`raw`、会话等元数据及规则的 title/message 不参与匹配。旧 `fields` 键兼容接受并忽略，不能缩小范围。
 
 子串采用字面匹配。正则使用 JavaScript RegExp 语法并拒绝前瞻和后顾，在独立 Worker 中执行。默认 200ms 预算包括排队时间；超时终止线程，确认退出后按需重建。终止失败时告警并停止后续正则检查，重启 collector 恢复。pattern 命中原因为 `[PATTERN_BLOCKED]`。
+
+### 正则与接口转义
+
+`pattern` 保存正则源文本，不包含 `/.../` 分隔符。配置生成端先构造对象，再用 `JSON.stringify`（或对应语言的 JSON 序列化库）编码整个配置，不手工替换反斜杠。例如正则源文本 `\.aliyun/config\.json` 在配置 JSON 中应写成：
+
+```json
+"pattern": "\\.aliyun/config\\.json"
+```
+
+本地落盘使用 `JSON.stringify` 编码配置，读取时用 `JSON.parse` 还原，随后将得到的 `pattern` 原样交给 `RegExp`。每次读写成对处理，正则源文本保持不变。
+
+若其他接口把配置 JSON 文档再放进外层 JSON 的字符串字段，外层序列化会再增加一层转义，这是正常的。读取方先解析外层响应，仅当协议定义 `content` 为 JSON 文档字符串时再解析该字段。调试时区分实际字段内容与日志中 `JSON.stringify` 后的展示，不能只数日志里的反斜杠。
+
+不要对 `pattern` 再做 `JSON.parse`、全局反斜杠替换或循环反转义。`\s`、`\b`、Windows 路径及匹配字面量 `\n` 的正则都有各自语义，客户端无法可靠猜测多出的反斜杠是传输问题还是作者本意。配置字段已被过度转义时，应修正生成端；不合法 JSON（例如 `\_`）同样需要在生成端修正，下划线无需转义。
 
 ### 脚本文件与缓存格式
 
@@ -282,7 +299,7 @@ Windows 启动器不继承 `PSModulePath`，由 PowerShell 5.1 重建自身模�
 
 先执行内置敏感类型规则，命中直接拦截；内置放行后按文件中的数组顺序执行。响应的 `matches` 保留全部已发生的 audit 与 enforce 命中。顶层元数据代表最终 enforce 拦截规则，或放行时的首条 audit 命中。完整检查无命中才有 `matched=false`；检查失败且没有已知命中时省略 matched。audit 命中后发生错误可同时有 `matched=true` 和 `failOpen=true`。
 
-每条命中产生一条 `event.name=guardrail.evaluation`，包含 session、tool call id（若有）、phase、规则 id/version、matched/enforcement/action 和脱敏后的原因、title/message，不复制业务正文。JSONL/SLS 可保存这些观察事件；OTLP 在 turn 分组入口及转换时过滤，避免生成额外执行 Span 或提前结束 turn。
+每条命中产生一条 `event.name=guardrail.evaluation`，包含 session、tool call id（若有）、phase、规则 id/version、matched/enforcement/action、可选的 `gen_ai.guardrail.severity` 和脱敏后的原因、title/message，不复制业务正文。关联工具事件和被拦截的 Qoder 提示词事件也携带代表规则的 severity；每条独立观察事件则保留各自规则的 severity。未声明该字段或没有命中时省略。JSONL/SLS 可保存这些观察事件；OTLP 在 turn 分组入口及转换时过滤，避免生成额外执行 Span 或提前结束 turn。
 
 脚本可能在 `reason` 中回显业务正文。该 Agent 的 `captureMessageContent=false` 时，采集输出会从观察事件、关联工具事件、被拒 Prompt 及 OTLP Span 属性和事件中裁掉 `gen_ai.guardrail.reason`，保留 action 和规则身份等结构化信息。返回宿主的阻断诊断原因仍然保留。
 
@@ -294,7 +311,7 @@ Hook 的 `parent_business_info.product=app` 时，Qoder 观察和被拒 Prompt �
 
 旧 `interceptor.mode=custom` 升级后按 `none` 处理，整个拦截功能关闭。继续使用需在重启 collector 前显式改为 `all`，这将开启全部内置密钥类型；不再支持 `--interceptor-types` 或对应环境变量。mask 的 custom 模式不受影响。
 
-旧客户端可能拒绝 enforcement 和 scriptCache 字段。回退前停止 Pilot，将规则改为旧版支持的格式；停用 audit 或明确改为默认 enforce 并移除新键，不能仅删除 audit 键后意外变成强制拦截。对不支持 scriptCache 的版本，需将正文移回根目录并移除该字段，或清空本地文件规则与脚本，再启动旧版。
+旧客户端可能拒绝 enforcement、severity 和 scriptCache 字段。回退前停止 Pilot，将规则改为旧版支持的格式；停用 audit 或明确改为默认 enforce 并移除新键，不能仅删除 audit 键后意外变成强制拦截。对不支持 severity 的版本，移除该元数据字段即可。对不支持 scriptCache 的版本，需将正文移回根目录并移除该字段，或清空本地文件规则与脚本，再启动旧版。
 
 ## 服务生命周期
 

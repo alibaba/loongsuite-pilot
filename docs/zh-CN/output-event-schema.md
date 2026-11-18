@@ -171,6 +171,7 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `gen_ai.guardrail.phase` | string | `guardrail.evaluation` Required | `UserPromptSubmit`、`PreToolUse` 或 `PostToolUse`。 |
 | `gen_ai.guardrail.rule_id` | string | 存在已知命中时 Recommended | 独立事件为该条命中；普通工具事件代表最终 enforce 拦截或首条 audit 命中。内置敏感类型为 `cloudAccessKey` 等。 |
 | `gen_ai.guardrail.rule_version` | string | 托管规则命中时 Recommended | `rules[].version`。内置规则省略。 |
+| `gen_ai.guardrail.severity` | string | 命中规则声明了 `severity` 时 Recommended | 风险等级，保留大小写，不参与拦截决策。独立命中事件取该条规则；关联工具事件和被拒提示词取代表规则。 |
 | `gen_ai.guardrail.reason` | string | 存在已知命中且规则给出 reason 时 Recommended | 脚本 stdout 的 reason，或 pattern / 内置替换 token。audit 放行也保留；采集前按 mask 规则脱敏。 |
 | `gen_ai.guardrail.title` | string | 规则声明了 `title` 时 Recommended | 规则展示名，不回给宿主。 |
 | `gen_ai.guardrail.message` | string | 规则声明了 `message` 时 Recommended | 规则提醒原文，audit 仅记录，enforce 拦截时可回给宿主；输出前脱敏。 |
