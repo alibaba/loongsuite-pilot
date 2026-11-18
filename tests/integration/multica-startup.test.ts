@@ -2,7 +2,7 @@ import { expect, it, vi } from 'vitest';
 import { build } from 'esbuild';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer, type ServerResponse } from 'node:http';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,13 +46,28 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
       .filter(name => name.endsWith('.json')).map(name => [name.slice(0, -5), {enabled: false}]));
     const configFile = path.join(root, 'config.json');
     await writeFile(configFile, JSON.stringify({enabled: true, dataDir, agents,
-      enableStatusBarApp: false, dashboard: {enabled: false}, autoUpdate: {enabled: false},
+      enableStatusBarApp: false, dashboard: {enabled: false}, autoUpdate: {enabled: false}, interceptor: {mode: 'all'},
       retention: {enabled: false}, hookWatchdog: {enabled: false},
       pipeline: {enabled: true, multica: {mode: 'on'}}}));
     await writeFile(path.join(configDir, 'lab.json'), JSON.stringify({configName: 'lab',
       inputs: [{Type: 'input_multica', CollectionMode: 'on', MetricsUrls: [endpoint], LogFiles: [log]}],
       flushers: [{Type: 'flusher_sls', Endpoint: 'http://sls.invalid', Project: 'test', Logstore: 'lab'}]}));
     const bundle = path.join(bundleDir, 'main.mjs');
+    const internalStubPlugin = {name: 'internal-stub', setup(b: import('esbuild').PluginBuild) {
+      b.onResolve({filter: /\.internal/}, args => ({path: args.path, namespace: 'internal-stub'}));
+      b.onLoad({filter: /.*/, namespace: 'internal-stub'}, () => ({
+        contents: 'export function sendAlarm() {} export function sendStatus() {} export function sendRunningStatus() {}',
+        loader: 'ts',
+      }));
+    }};
+    // The merge target runs the interceptor in a worker. Build its real entry
+    // when present so this test also exercises GitHub's merged PR checkout.
+    if (await access(path.join(repo, 'src/interceptor/worker.ts')).then(() => true, () => false)) {
+      await build({absWorkingDir: repo, entryPoints: ['src/interceptor/worker.ts'],
+        outfile: path.join(bundleDir, 'interceptor', 'worker.cjs'), bundle: true,
+        platform: 'node', target: 'node22', format: 'cjs', mainFields: ['module', 'main'],
+        define: {'__PROPRIETARY_BUILD__': 'false'}, plugins: [internalStubPlugin]});
+    }
     await build({absWorkingDir: repo, entryPoints: ['src/index.ts'], outfile: bundle,
       bundle: true, platform: 'node', target: 'node22', format: 'esm', packages: 'external',
       define: {'__PROPRIETARY_BUILD__': 'false'},
@@ -67,13 +82,7 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
           }
           return realFetch(url, opts);
         };`},
-      plugins: [{name: 'internal-stub', setup(b) {
-        b.onResolve({filter: /\.internal/}, args => ({path: args.path, namespace: 'internal-stub'}));
-        b.onLoad({filter: /.*/, namespace: 'internal-stub'}, () => ({
-          contents: 'export function sendAlarm() {} export function sendStatus() {} export function sendRunningStatus() {}',
-          loader: 'ts',
-        }));
-      }}],
+      plugins: [internalStubPlugin],
     });
     const env = {...process.env, ...agentHomeEnvironment(path.join(root, 'home'))};
     for (const key of Object.keys(env)) {
@@ -81,7 +90,7 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
     }
     child = spawn(process.execPath, ['--experimental-sqlite', bundle], {cwd: root,
       env: {...env, AGENT_DATA_COLLECTION_CONFIG: configFile, LOONGSUITE_PILOT_DATA_DIR: dataDir,
-        LOONGSUITE_PILOT_STDOUT: '1', LOG_LEVEL: 'info'},
+        LOONGSUITE_PILOT_STDOUT: '1', LOONGSUITE_PILOT_INTERCEPTOR_MODE: 'all', LOG_LEVEL: 'info'},
       stdio: ['ignore', 'pipe', 'pipe']});
     child.stdout!.on('data', chunk => { output += chunk; });
     child.stderr!.on('data', chunk => { output += chunk; });
