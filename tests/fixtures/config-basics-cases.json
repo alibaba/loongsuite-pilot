@@ -77,7 +77,7 @@
       "enabled": true,
       "flushers": {
         "jsonl": {
-          "enabled": true
+          "enabled": false
         }
       }
     }

@@ -6,6 +6,7 @@
 mod agent_def_loader;
 mod cli_probe_detector;
 mod codex_trust_writer;
+pub(crate) mod config_owner;
 mod copilot_plugin_strategy;
 mod deploy_command;
 mod deploy_notification;

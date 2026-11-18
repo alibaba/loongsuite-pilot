@@ -42,6 +42,7 @@ Pilot 按以下顺序解析配置：
 | `dataDir` | 本地运行和数据目录。 |
 | `userId` | 写入输出事件的用户标识，默认使用机器 hostname。 |
 | `collectLog` | 控制 SLS 日志上报。JSONL 和 HTTP 由各自的 `enabled` 控制。 |
+| `jsonl.enabled` | 控制 `logs/output/` 中规范化事件的本地输出，默认 `false`。 |
 | `collectTrace` | 当配置了 Trace 目标时，控制 OTLP Trace 上报。 |
 | `dashboard.enabled` | 本地 Dashboard 开关，默认 `false`。 |
 | `dashboard.port` | 本机 Dashboard 端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
@@ -58,6 +59,7 @@ Pilot 按以下顺序解析配置：
 | `LOONGSUITE_PILOT_DATA_DIR` | 覆盖数据目录。 |
 | `LOONGSUITE_PILOT_USER_ID` | 覆盖 `userId`。 |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | 设置为 `false` 或 `0` 可关闭 SLS 日志上报。 |
+| `JSONL_ENABLED` | 覆盖 `jsonl.enabled`。 |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | 设置为 `false` 或 `0` 可关闭 Trace 上报。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | 用一个唯一服务名覆盖所有 Agent 和上报后端的 `serviceName`。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | 覆盖 `serviceNamePrefix`。 |

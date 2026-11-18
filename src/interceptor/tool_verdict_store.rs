@@ -87,6 +87,40 @@ pub struct ToolVerdictKey {
     pub phase: ToolInterceptPhase,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuardrailMetadata {
+    pub rule_id: String,
+    pub rule_version: String,
+    pub severity: Option<String>,
+    pub enforcement: String,
+}
+
+impl GuardrailMetadata {
+    pub fn apply(&self, entry: &mut crate::types::AgentActivityEntry) {
+        entry.extra.insert(
+            "gen_ai.guardrail.rule_id".into(),
+            self.rule_id.clone().into(),
+        );
+        entry.extra.insert(
+            "gen_ai.guardrail.rule_version".into(),
+            self.rule_version.clone().into(),
+        );
+        entry.extra.insert(
+            "gen_ai.guardrail.enforcement".into(),
+            self.enforcement.clone().into(),
+        );
+        entry
+            .extra
+            .insert("gen_ai.guardrail.matched".into(), Value::Bool(true));
+        if let Some(severity) = &self.severity {
+            entry
+                .extra
+                .insert("gen_ai.guardrail.severity".into(), severity.clone().into());
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ToolVerdictRecordOut {
     #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
@@ -95,6 +129,8 @@ struct ToolVerdictRecordOut {
     tool_use_id: String,
     phase: ToolInterceptPhase,
     action: ToolVerdictAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guardrail: Option<GuardrailMetadata>,
     #[serde(rename = "recordedAt")]
     recorded_at: String,
 }
@@ -102,6 +138,7 @@ struct ToolVerdictRecordOut {
 #[derive(Clone)]
 struct StoredVerdict {
     action: ToolVerdictAction,
+    guardrail: Option<GuardrailMetadata>,
     recorded_at_ms: i64,
 }
 
@@ -129,21 +166,69 @@ impl ToolVerdictStore {
     }
 
     pub fn put(&self, key: &ToolVerdictKey, action: ToolVerdictAction, now_ms: i64) {
+        self.insert(key, action, None, now_ms, false);
+    }
+
+    pub fn put_sdk_verdict(
+        &self,
+        key: &ToolVerdictKey,
+        action: ToolVerdictAction,
+        guardrail: Option<GuardrailMetadata>,
+        now_ms: i64,
+    ) {
+        self.insert(key, action, guardrail, now_ms, true);
+    }
+
+    fn insert(
+        &self,
+        key: &ToolVerdictKey,
+        action: ToolVerdictAction,
+        guardrail: Option<GuardrailMetadata>,
+        now_ms: i64,
+        retain_block: bool,
+    ) {
         if key.tool_use_id.is_empty() {
             return;
         }
         let mut inner = self.inner.lock().expect("verdict store");
         inner.prune(now_ms);
+        let key = verdict_key(key);
+        // Decide and write under one lock so concurrent allow cannot erase a
+        // block from the SDK's other verdict channel.
+        if retain_block
+            && inner
+                .tool_verdicts
+                .get(&key)
+                .is_some_and(|value| value.action == ToolVerdictAction::Block)
+        {
+            return;
+        }
+        let guardrail = guardrail.or_else(|| {
+            retain_block
+                .then(|| inner.tool_verdicts.get(&key))
+                .flatten()
+                .filter(|value| value.action == action)
+                .and_then(|value| value.guardrail.clone())
+        });
         inner.tool_verdicts.insert(
-            verdict_key(key),
+            key,
             StoredVerdict {
                 action,
+                guardrail,
                 recorded_at_ms: now_ms,
             },
         );
     }
 
     pub fn get(&self, key: &ToolVerdictKey, now_ms: i64) -> Option<ToolVerdictAction> {
+        self.get_verdict(key, now_ms).map(|(action, _)| action)
+    }
+
+    pub fn get_verdict(
+        &self,
+        key: &ToolVerdictKey,
+        now_ms: i64,
+    ) -> Option<(ToolVerdictAction, Option<GuardrailMetadata>)> {
         if key.tool_use_id.is_empty() {
             return None;
         }
@@ -152,7 +237,7 @@ impl ToolVerdictStore {
         inner
             .tool_verdicts
             .get(&verdict_key(key))
-            .map(|value| value.action)
+            .map(|value| (value.action, value.guardrail.clone()))
     }
 
     pub fn restore(&self, now_ms: i64) {
@@ -188,6 +273,7 @@ impl ToolVerdictStore {
                 verdict_key(&key),
                 StoredVerdict {
                     action: record.action,
+                    guardrail: record.guardrail,
                     recorded_at_ms: record.recorded_at_ms,
                 },
             );
@@ -208,6 +294,7 @@ impl ToolVerdictStore {
                 tool_use_id: parsed.tool_use_id,
                 phase: parsed.phase,
                 action: value.action,
+                guardrail: value.guardrail.clone(),
                 recorded_at: iso_from_millis(value.recorded_at_ms),
             });
         }
@@ -290,6 +377,7 @@ struct ParsedRecord {
     tool_use_id: String,
     phase: ToolInterceptPhase,
     action: ToolVerdictAction,
+    guardrail: Option<GuardrailMetadata>,
     recorded_at_ms: i64,
 }
 
@@ -314,6 +402,9 @@ fn parse_record(value: &Value) -> Option<ParsedRecord> {
         tool_use_id,
         phase,
         action,
+        guardrail: record
+            .get("guardrail")
+            .and_then(|value| serde_json::from_value(value.clone()).ok()),
         recorded_at_ms,
     })
 }

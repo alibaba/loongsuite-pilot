@@ -22,6 +22,10 @@ Hermes 在 `pre_api_request` 中为本次 API 请求分配固定的 `span_id`，
 collector 以该标记结束 trace 聚合，避免重试中的 error/stop 或同会话并发回合提前截断 trace。
 旧版插件事件仍沿用原有结束判定。源 JSONL 追加不等待 collector 生成完整 trace 或上报完成。
 
+Hermes 压缩上下文时可能在同一次原生 turn 中更换 session。事件保留原生 turn ID，
+`gen_ai.step.id` 和 `gen_ai.response.id` 同时纳入 session 身份，collector 按
+session 与 turn 一起聚合，避免压缩前后的 trace 混合。旧插件产生的事件也按 session 分组。
+
 OpenClaw modern 插件在 `model_call_started` 中分配本次模型调用的 `span_id`，
 响应复用该 ID。尚未关联父上下文的子 Agent 事件仍使用有界缓冲，以维持父子 trace 关系；
 有拦截策略的工具事件也需先完成策略判定，不能承诺所有 hook 都在判定前写出。

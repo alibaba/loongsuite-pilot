@@ -38,6 +38,10 @@ fn pi_original_l664_relocated_record_is_consumed_by_the_whole_public_uninstall_s
             include_str!("../../assets/plugins/shared/raw-source-gate.mjs"),
         ),
         (
+            "assets/plugins/shared/private-log-dir.cjs",
+            include_str!("../../assets/plugins/shared/private-log-dir.cjs"),
+        ),
+        (
             "assets/plugins/shared/resource-context.mjs",
             include_str!("../../assets/plugins/shared/resource-context.mjs"),
         ),

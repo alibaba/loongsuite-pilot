@@ -3,7 +3,7 @@
 use std::io;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 #[cfg(unix)]
 struct Tree {
@@ -342,6 +342,15 @@ pub async fn output(
     timeout: Duration,
     limit: usize,
 ) -> io::Result<Output> {
+    output_with_input(command, timeout, limit, None).await
+}
+
+pub async fn output_with_input(
+    command: &mut tokio::process::Command,
+    timeout: Duration,
+    limit: usize,
+    input: Option<&[u8]>,
+) -> io::Result<Output> {
     if timeout.is_zero() || limit == 0 || limit == usize::MAX {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -349,7 +358,11 @@ pub async fn output(
         ));
     }
     command
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -380,7 +393,14 @@ pub async fn output(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("候选缺少 stderr"))?;
+    let stdin = scoped.child.stdin.take();
     let run = async {
+        let write = async {
+            if let (Some(mut stdin), Some(input)) = (stdin, input) {
+                stdin.write_all(input).await?;
+            }
+            Ok::<_, io::Error>(())
+        };
         let wait = async {
             #[cfg(unix)]
             while !scoped.tree.ready_to_reap(pid)? {
@@ -390,8 +410,8 @@ pub async fn output(
             scoped.tree.terminate()?;
             Ok::<_, io::Error>(status)
         };
-        let (status, stdout, stderr) =
-            tokio::try_join!(wait, limited(stdout, limit), limited(stderr, limit))?;
+        let (status, stdout, stderr, ()) =
+            tokio::try_join!(wait, limited(stdout, limit), limited(stderr, limit), write)?;
         Ok(Output {
             status,
             stdout,

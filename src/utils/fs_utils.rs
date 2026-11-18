@@ -125,8 +125,19 @@ pub async fn write_text_file_atomic(
     text: &str,
     options: &AtomicTextWriteOptions,
 ) -> Result<(), AtomicWriteError> {
+    write_text_file_atomic_with_owner(path, text, options, None).await
+}
+
+pub(crate) async fn write_text_file_atomic_with_owner(
+    path: &str,
+    text: &str,
+    options: &AtomicTextWriteOptions,
+    owner: Option<(u32, u32)>,
+) -> Result<(), AtomicWriteError> {
     let dir = parent_dir(path);
-    ensure_dir(&dir).await;
+    if owner.is_none() {
+        ensure_dir(&dir).await;
+    }
     if let Some(expected) = &options.expected {
         assert_expected_file_state(path, expected).await?;
     }
@@ -141,16 +152,16 @@ pub async fn write_text_file_atomic(
     }
 
     let tmp = atomic_tmp_path(path);
-    let failed = write_rename(path, &tmp, text, options).await;
+    let failed = write_rename(path, &tmp, text, options, owner).await;
     let Err(err) = failed else {
         return Ok(());
     };
     if let AtomicWriteError::Io(ref io_err) = err {
-        if is_enoent(io_err) {
+        if is_enoent(io_err) && owner.is_none() {
             let _ = tokio::fs::remove_file(&tmp).await;
             ensure_dir(&dir).await;
             let tmp2 = atomic_tmp_path(path);
-            return match write_rename(path, &tmp2, text, options).await {
+            return match write_rename(path, &tmp2, text, options, owner).await {
                 Ok(()) => Ok(()),
                 Err(retry) => {
                     let _ = tokio::fs::remove_file(&tmp2).await;
@@ -188,6 +199,7 @@ async fn write_rename(
     tmp: &str,
     text: &str,
     options: &AtomicTextWriteOptions,
+    owner: Option<(u32, u32)>,
 ) -> Result<(), AtomicWriteError> {
     #[cfg(unix)]
     let mode = match options.mode {
@@ -203,7 +215,7 @@ async fn write_rename(
     };
     #[cfg(not(unix))]
     let mode = options.mode;
-    write_tmp(tmp, text, mode)?;
+    write_tmp(tmp, text, mode, owner)?;
     if let Some(expected) = &options.expected {
         assert_expected_file_state(path, expected).await?;
     }
@@ -211,9 +223,14 @@ async fn write_rename(
     Ok(())
 }
 
-fn write_tmp(path: &str, text: &str, mode: Option<u32>) -> io::Result<()> {
+fn write_tmp(
+    path: &str,
+    text: &str,
+    mode: Option<u32>,
+    owner: Option<(u32, u32)>,
+) -> io::Result<()> {
     let mut opts = OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     if let Some(mode) = mode {
         use std::os::unix::fs::OpenOptionsExt;
@@ -223,6 +240,12 @@ fn write_tmp(path: &str, text: &str, mode: Option<u32>) -> io::Result<()> {
     let _ = mode;
     let mut file = opts.open(path)?;
     file.write_all(text.as_bytes())?;
+    #[cfg(target_os = "linux")]
+    if let Some((uid, gid)) = owner {
+        std::os::unix::fs::fchown(&file, Some(uid), Some(gid))?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = owner;
     #[cfg(unix)]
     if let Some(mode) = mode {
         use std::os::unix::fs::PermissionsExt;
@@ -670,7 +693,7 @@ mod tests {
                     let options = AtomicTextWriteOptions::default();
                     // 固定同一毫秒验证命名与实际 rename；另一路覆盖完整公开入口。
                     if let Some(tmp) = tmp {
-                        write_rename(&target_s, &tmp, &content, &options)
+                        write_rename(&target_s, &tmp, &content, &options, None)
                             .await
                             .unwrap();
                     } else {

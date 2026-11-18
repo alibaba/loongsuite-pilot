@@ -36,7 +36,14 @@ const JOURNAL_SCAN_BYTES: usize = 64 * 1024;
 
 pub fn codex_turn_journal_group_key(entry: &AgentActivityEntry) -> String {
     let identity = (&entry.user_id, &entry.session_id, entry.turn_id.as_deref());
-    let bytes = if entry.agent_type == "codex" {
+    let bytes = if entry.agent_type == "openclaw"
+        && entry
+            .get("agent.openclaw.collection")
+            .and_then(serde_json::Value::as_str)
+            == Some("cron-lifecycle-v1")
+    {
+        serde_json::to_vec(&("openclaw-cron-v1", identity.1, identity.2))
+    } else if entry.agent_type == "codex" {
         serde_json::to_vec(&identity)
     } else {
         serde_json::to_vec(&(&entry.agent_type, identity.0, identity.1, identity.2))

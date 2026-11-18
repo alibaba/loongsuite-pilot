@@ -1,25 +1,52 @@
-//! Grok's Linux managed config shares a TOML document with administrator settings.
+//! Linux managed Hook configuration shares a TOML document with administrator settings.
 use crate::types::{AgentDefinition, EventSubcommand, HookScope};
 use std::path::Path;
 
 pub(super) const GROK: &str = "grok-build";
 const OWNER: &str = "# pilot-hook: ";
 pub(super) const DEFAULT_PATH: &str = "/etc/grok/managed_config.toml";
-pub(super) const LOCK_PATH: &str = "/etc/grok/managed_config.toml.pilot-lock";
+const CODEX_PATH: &str = "/etc/codex/config.toml";
+const GROK_LOCK: &str = "/etc/grok/managed_config.toml.pilot-lock";
+const CODEX_LOCK: &str = "/etc/codex/config.toml.pilot-lock";
+
+fn default_path(id: &str) -> Option<&'static str> {
+    match id {
+        GROK => Some(DEFAULT_PATH),
+        "codex" => Some(CODEX_PATH),
+        _ => None,
+    }
+}
+
+pub(super) fn supports(id: &str) -> bool {
+    default_path(id).is_some()
+}
+
+pub(super) fn is_system_path(path: &Path) -> bool {
+    [DEFAULT_PATH, CODEX_PATH]
+        .iter()
+        .any(|candidate| path == Path::new(candidate))
+}
+
+pub(super) fn is_system_lock(path: &Path) -> bool {
+    [GROK_LOCK, CODEX_LOCK]
+        .iter()
+        .any(|candidate| path == Path::new(candidate))
+}
 
 pub(super) fn is_system(def: &AgentDefinition) -> bool {
-    def.id == GROK
+    supports(&def.id)
         && def
             .hook
             .as_ref()
             .is_some_and(|hook| hook.scope == Some(HookScope::System))
 }
 
-pub(super) fn validate_path(path: &str) -> Result<(), String> {
+pub(super) fn validate_path(id: &str, path: &str) -> Result<(), String> {
     if !cfg!(target_os = "linux") {
         return Err("System hooks are supported only on Linux".into());
     }
-    if !cfg!(test) && path != DEFAULT_PATH {
+    let expected = default_path(id).ok_or("This agent does not support Linux system hooks")?;
+    if !cfg!(test) && path != expected {
         return Err("Unexpected managed system config path".into());
     }
     if !Path::new(path).is_absolute() || path.chars().any(char::is_control) {
@@ -32,20 +59,20 @@ pub(super) fn definition(
     def: &AgentDefinition,
     scope: HookScope,
 ) -> Result<AgentDefinition, String> {
+    let default = default_path(&def.id).ok_or("This agent does not support Linux system hooks")?;
     let mut result = def.clone();
     let hook = result
         .hook
         .as_mut()
-        .filter(|_| def.id == GROK)
-        .ok_or("This agent does not support Linux system hooks")?;
+        .ok_or("Missing managed Hook definition")?;
     hook.scope = Some(scope);
     if scope == HookScope::System {
         let path = if cfg!(test) {
-            hook.system_settings_path.as_deref().unwrap_or(DEFAULT_PATH)
+            hook.system_settings_path.as_deref().unwrap_or(default)
         } else {
-            DEFAULT_PATH
+            default
         };
-        validate_path(path)?;
+        validate_path(&def.id, path)?;
         hook.settings_path = path.into();
     }
     Ok(result)
@@ -159,7 +186,7 @@ pub(super) fn read(def: &AgentDefinition) -> Result<String, String> {
         .as_ref()
         .ok_or("Missing managed Hook definition")?
         .settings_path;
-    validate_path(path)?;
+    validate_path(&def.id, path)?;
     match super::codex_trust_writer::read_config_snapshot(path) {
         Ok(raw) => Ok(raw.unwrap_or_default()),
         Err(error) => Err(format!("Cannot read managed system config: {error}")),
@@ -218,7 +245,7 @@ pub(super) fn plan(
         .as_ref()
         .ok_or("Missing managed Hook definition")?
         .settings_path;
-    validate_path(path)?;
+    validate_path(&def.id, path)?;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.is_file() || metadata.permissions().readonly() => {
             return Err(

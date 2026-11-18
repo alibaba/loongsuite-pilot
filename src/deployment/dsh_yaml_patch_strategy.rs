@@ -432,7 +432,7 @@ async fn atomic_write_if_unchanged(
     #[cfg(not(unix))]
     let _ = mode;
     if let Some(parent) = Path::new(target).parent() {
-        tokio::fs::create_dir_all(parent)
+        super::config_owner::ensure_directory(parent)
             .await
             .map_err(|err| err.to_string())?;
     }
@@ -456,6 +456,9 @@ async fn atomic_write_if_unchanged(
         let mut file = options.open(&tmp).map_err(|err| err.to_string())?;
         use std::io::Write;
         file.write_all(next).map_err(|err| err.to_string())?;
+        let owner =
+            super::config_owner::for_target(Path::new(target)).map_err(|err| err.to_string())?;
+        super::config_owner::preserve_file_owner(&file, owner).map_err(|err| err.to_string())?;
         file.sync_all().map_err(|err| err.to_string())?;
     }
     let final_bytes = read_bytes(target).await?;

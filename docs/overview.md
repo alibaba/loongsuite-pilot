@@ -89,7 +89,7 @@ Pilot can fan out the same normalized event stream to multiple destinations:
 | HTTP | Custom ingestion service or gateway. |
 | OTLP Trace | Trace backend, APM, or GenAI observability platform. |
 
-If no remote backend is configured, JSONL remains enabled by default so collected data is still visible locally.
+JSONL is disabled by default, including when no remote backend is configured. Set `jsonl.enabled` to `true` to write normalized events locally.
 
 ## Local Runtime
 

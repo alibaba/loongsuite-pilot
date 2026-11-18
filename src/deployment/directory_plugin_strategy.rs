@@ -11,7 +11,8 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::detect_utils::detect_agent;
+use super::agent_def_loader::hermes_cli_candidates;
+use super::detect_utils::{command_exists_uncached, detect_agent};
 use super::paths::{is_absolute, node_resolve};
 
 const DEFAULT_MARKER_FILE: &str = ".loongsuite-pilot-managed.json";
@@ -79,6 +80,36 @@ impl DirectoryPluginStrategy {
             .is_some_and(|id| !super::relocation_ownership::valid_install_id(id));
         self.install_id = install_id.filter(|_| !self.identity_invalid);
         self
+    }
+
+    async fn resolve_activation_command(def: &AgentDefinition) -> Option<String> {
+        let command = &def.directory_plugin.as_ref()?.activation.as_ref()?.command;
+        if def.id == "hermes-agent"
+            && std::env::var_os("HERMES_CLI").is_none_or(|value| value.is_empty())
+        {
+            let home = crate::utils::resolve_home("~");
+            let hermes_home = def
+                .detection
+                .paths
+                .first()
+                .map(String::as_str)
+                .unwrap_or("~/.hermes");
+            let candidates = hermes_cli_candidates(hermes_home, &home);
+            if candidates
+                .iter()
+                .any(|candidate| node_resolve(candidate) == node_resolve(command))
+            {
+                for candidate in candidates {
+                    if activation_command_available(&candidate).await {
+                        return Some(candidate);
+                    }
+                }
+                return None;
+            }
+        }
+        activation_command_available(command)
+            .await
+            .then(|| command.clone())
     }
 
     async fn inspect_for_deploy(
@@ -206,7 +237,7 @@ impl DirectoryPluginStrategy {
             let parent = Path::new(&target)
                 .parent()
                 .ok_or("targetDir has no parent")?;
-            tokio::fs::create_dir_all(parent)
+            super::config_owner::ensure_directory(parent)
                 .await
                 .map_err(|err| err.to_string())
         }
@@ -273,7 +304,7 @@ impl DirectoryPluginStrategy {
             .parent()
             .map(|path| path.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
-        tokio::fs::create_dir_all(&parent)
+        super::config_owner::ensure_directory(&parent)
             .await
             .map_err(|err| err.to_string())?;
         let staging_path = parent.join(format!(
@@ -305,6 +336,13 @@ impl DirectoryPluginStrategy {
                 activation_status: None,
             };
             write_marker(&staging_path, &marker_file, &def.id, &marker).await?;
+            #[cfg(target_os = "linux")]
+            if crate::utils::root_trigger::is_root_owner() {
+                use std::os::unix::fs::PermissionsExt;
+                tokio::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o755))
+                    .await
+                    .map_err(|err| err.to_string())?;
+            }
             if self
                 .inspect_for_deploy(&target_dir, &marker_file, &def.id, &source_dir)
                 .await?
@@ -333,7 +371,12 @@ impl DirectoryPluginStrategy {
             transaction.install()?;
             if let Some(activation) = &config.activation {
                 if let Some(activation_hash) = hash_activation(Some(activation)) {
-                    let status = match activate(activation).await {
+                    let mut resolved = activation.clone();
+                    if let Some(command) = Self::resolve_activation_command(def).await {
+                        resolved.command = command;
+                    }
+                    let owner = activation_owner(def, &target_dir)?;
+                    let status = match activate_as(&resolved, owner).await {
                         Ok(status) => status,
                         Err(error) => {
                             // Keep invalid configuration rejection unchanged. An
@@ -509,7 +552,16 @@ impl DirectoryPluginStrategy {
                         .as_ref()
                         .is_some_and(|args| !args.is_empty())
                 }) {
-                    if let Err(err) = deactivate(activation).await {
+                    let mut resolved = activation.clone();
+                    if let Some(command) = Self::resolve_activation_command(def).await {
+                        resolved.command = command;
+                    }
+                    let owner = activation_owner(def, &config.target_dir);
+                    let deactivated = match owner {
+                        Ok(owner) => deactivate_as(&resolved, owner).await,
+                        Err(error) => Err(error),
+                    };
+                    if let Err(err) = deactivated {
                         logger().warn(
                             "插件停用失败，保留目录与所有权记录以便重试",
                             json!({"agentId": def.id, "error": err}).as_object(),
@@ -812,8 +864,45 @@ fn hash_activation(config: Option<&DirectoryPluginActivationConfig>) -> Option<S
     Some(format!("sha256:{:x}", hasher.finalize()))
 }
 
-async fn activate(config: &DirectoryPluginActivationConfig) -> Result<String, String> {
-    let probe = probe_activation(config).await?;
+async fn activation_command_available(command: &str) -> bool {
+    if !is_absolute(command) && !command.contains(['/', '\\']) {
+        return command_exists_uncached(command).await;
+    }
+    let Ok(metadata) = tokio::fs::metadata(command).await else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    true
+}
+
+fn activation_owner(
+    def: &AgentDefinition,
+    target: &str,
+) -> Result<Option<super::config_owner::Owner>, String> {
+    let target = node_resolve(target);
+    if let Some(root) = def.detection.paths.iter().find_map(|root| {
+        let root = node_resolve(root);
+        (root != target && Path::new(&target).starts_with(&root)).then_some(root)
+    }) {
+        super::config_owner::for_target(Path::new(&root)).map_err(|err| err.to_string())
+    } else {
+        Ok(None)
+    }
+}
+
+async fn activate_as(
+    config: &DirectoryPluginActivationConfig,
+    owner: Option<super::config_owner::Owner>,
+) -> Result<String, String> {
+    let probe = probe_activation(config, owner).await?;
     let Some(probe) = probe else {
         return Ok("unsupported".into());
     };
@@ -826,16 +915,19 @@ async fn activate(config: &DirectoryPluginActivationConfig) -> Result<String, St
                 .cloned(),
         );
     }
-    run_command(&config.command, &args, timeout_ms(config)?).await?;
+    run_command(&config.command, &args, timeout_ms(config)?, owner).await?;
     Ok("activated".into())
 }
 
-async fn deactivate(config: &DirectoryPluginActivationConfig) -> Result<(), String> {
+async fn deactivate_as(
+    config: &DirectoryPluginActivationConfig,
+    owner: Option<super::config_owner::Owner>,
+) -> Result<(), String> {
     if config
         .disable_args
         .as_ref()
         .is_none_or(|args| args.is_empty())
-        || probe_activation(config).await?.is_none()
+        || probe_activation(config, owner).await?.is_none()
     {
         return Ok(());
     }
@@ -843,6 +935,7 @@ async fn deactivate(config: &DirectoryPluginActivationConfig) -> Result<(), Stri
         &config.command,
         config.disable_args.as_deref().unwrap_or(&[]),
         timeout_ms(config)?,
+        owner,
     )
     .await
     .map(|_| ())
@@ -850,11 +943,12 @@ async fn deactivate(config: &DirectoryPluginActivationConfig) -> Result<(), Stri
 
 async fn probe_activation(
     config: &DirectoryPluginActivationConfig,
+    owner: Option<super::config_owner::Owner>,
 ) -> Result<Option<String>, String> {
     let Some(args) = config.probe_args.as_ref().filter(|args| !args.is_empty()) else {
         return Ok(Some(String::new()));
     };
-    match run_command(&config.command, args, timeout_ms(config)?).await {
+    match run_command(&config.command, args, timeout_ms(config)?, owner).await {
         Ok(output) => Ok(Some(output)),
         Err(err) if is_unsupported(&err) => Ok(None),
         Err(err) => Err(err),
@@ -877,12 +971,19 @@ fn is_unsupported(err: &str) -> bool {
         .is_match(err)
 }
 
-async fn run_command(command: &str, args: &[String], timeout_ms: u64) -> Result<String, String> {
+async fn run_command(
+    command: &str,
+    args: &[String],
+    timeout_ms: u64,
+    owner: Option<super::config_owner::Owner>,
+) -> Result<String, String> {
     #[cfg(test)]
     if let Some(result) = history_test_hooks::command(command, args, timeout_ms) {
         return result;
     }
-    let child = tokio::process::Command::new(command)
+    let mut command_line = tokio::process::Command::new(command);
+    super::config_owner::configure_child(&mut command_line, owner);
+    let child = command_line
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .args(args)
@@ -1091,7 +1192,14 @@ fn fail(def: &AgentDefinition, error: &str) -> DeployResult {
 #[async_trait]
 impl DeployStrategy for DirectoryPluginStrategy {
     async fn detect(&self, def: &AgentDefinition) -> bool {
-        detect_agent(&def.detection).await
+        let has_activation = def
+            .directory_plugin
+            .as_ref()
+            .is_some_and(|config| config.activation.is_some());
+        if (def.id != "hermes-agent" || !has_activation) && !detect_agent(&def.detection).await {
+            return false;
+        }
+        !has_activation || Self::resolve_activation_command(def).await.is_some()
     }
     async fn needs_deploy(
         &self,
@@ -1136,6 +1244,33 @@ mod tests {
             disable_args: Some(vec!["--help".into()]),
             timeout_ms: Some(5000),
         }
+    }
+
+    #[tokio::test]
+    async fn hermes_detection_requires_a_live_activation_command() {
+        let root = tempfile::tempdir().unwrap();
+        let mut def = fixture(root.path());
+        let mut activation = native_activation(&["--help"]);
+        def.directory_plugin.as_mut().unwrap().activation = Some(activation.clone());
+        let strategy = DirectoryPluginStrategy::new(None);
+        assert!(
+            strategy.detect(&def).await,
+            "the CLI alone establishes availability"
+        );
+        let stale_home = root.path().join("stale-hermes-home");
+        std::fs::create_dir(&stale_home).unwrap();
+        def.detection.paths = vec![stale_home.to_string_lossy().into_owned()];
+        activation.command = root
+            .path()
+            .join("missing-hermes-cli")
+            .to_string_lossy()
+            .into_owned();
+        def.directory_plugin.as_mut().unwrap().activation = Some(activation);
+        assert!(
+            !strategy.detect(&def).await,
+            "the home directory can outlive the CLI"
+        );
+        assert!(!Path::new(&def.directory_plugin.unwrap().target_dir).exists());
     }
 
     #[tokio::test]

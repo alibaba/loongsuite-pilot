@@ -57,6 +57,8 @@ pub struct InputCounter {
     pub last_active_time: u128,
 }
 
+type HermesSourceProbe = Arc<dyn Fn(String) -> BoxFuture<bool> + Send + Sync>;
+
 pub struct LiveInput {
     pub id: String,
     pub agent_type: String,
@@ -65,6 +67,7 @@ pub struct LiveInput {
     start: Arc<dyn Fn() -> BoxFuture<Result<(), String>> + Send + Sync>,
     stop: Arc<dyn Fn() -> BoxFuture<()> + Send + Sync>,
     runtime_probe: Mutex<Option<RuntimeProbe>>,
+    hermes_source_probe: Mutex<Option<HermesSourceProbe>>,
 }
 
 impl LiveInput {
@@ -84,6 +87,7 @@ impl LiveInput {
             start: Arc::new(start),
             stop: Arc::new(stop),
             runtime_probe: Mutex::new(None),
+            hermes_source_probe: Mutex::new(None),
         })
     }
 
@@ -98,6 +102,28 @@ impl LiveInput {
         probe: impl Fn() -> crate::inputs::base::InputRuntimeInfo + Send + Sync + 'static,
     ) {
         *self.runtime_probe.lock().expect("runtime probe") = Some(Arc::new(probe));
+    }
+
+    pub(crate) fn set_hermes_source_probe(
+        &self,
+        probe: impl Fn(String) -> BoxFuture<bool> + Send + Sync + 'static,
+    ) {
+        *self
+            .hermes_source_probe
+            .lock()
+            .expect("Hermes source probe") = Some(Arc::new(probe));
+    }
+
+    pub(crate) async fn confirm_hermes_source_drained(&self, source: String) -> bool {
+        let probe = self
+            .hermes_source_probe
+            .lock()
+            .expect("Hermes source probe")
+            .clone();
+        match probe {
+            Some(probe) if self.running() => probe(source).await,
+            _ => false,
+        }
     }
 
     pub fn running(&self) -> bool {

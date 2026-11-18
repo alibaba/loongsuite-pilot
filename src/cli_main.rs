@@ -30,6 +30,11 @@ use crate::utils::{
     write_startup_crash, ReportedError, StartupCrashWrite, COLLECTOR_PROCESS_PATTERNS,
 };
 
+#[doc(hidden)]
+pub fn create_agent_config_directory(args: &[String]) -> i32 {
+    crate::deployment::config_owner::directory_helper(args)
+}
+
 pub async fn run() -> anyhow::Result<i32> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     dispatch(&argv).await
@@ -107,6 +112,10 @@ pub async fn dispatch(argv: &[String]) -> anyhow::Result<i32> {
             );
             return Ok(if alive { 0 } else { 1 });
         }
+    }
+    if let Some(args) = parsed.subcommand_matches("multica-collector") {
+        redirect_root_logger_to_stderr();
+        return crate::pipeline::input::multica::cli::run(args).await;
     }
     if let Some(args) = parsed.subcommand_matches("span-attr") {
         return crate::cli::span_attr::run(args).await;
@@ -408,6 +417,10 @@ async fn run_collector() -> anyhow::Result<i32> {
         Err(err) => return Ok(fatal_startup(err)),
     };
     let data_dir = resolve_home(&config.data_dir);
+    let spawn_lock = Path::new(&data_dir).join("daemon.spawn.lock");
+    if crate::utils::root_trigger::reuse_root_collector(&spawn_lock) {
+        return Ok(0);
+    }
     let log_path = Path::new(&data_dir)
         .join("logs")
         .join("loongsuite-pilot-service.log");
@@ -457,9 +470,11 @@ async fn run_collector() -> anyhow::Result<i32> {
             serde_json::json!({ "pid": std::process::id(), "lockPath": lock_path }),
         )),
     );
-    let spawn_lock = Path::new(&data_dir).join("daemon.spawn.lock");
-    if std::env::var_os("KUBERNETES_SERVICE_HOST").is_some() || spawn_lock.exists() {
-        if let Err(err) = std::fs::write(&spawn_lock, std::process::id().to_string()) {
+    if crate::utils::root_trigger::is_root_owner()
+        || std::env::var_os("KUBERNETES_SERVICE_HOST").is_some()
+        || spawn_lock.exists()
+    {
+        if let Err(err) = crate::utils::root_trigger::record_pid(&spawn_lock, std::process::id()) {
             logger.warn(
                 "cannot record daemon pid in spawn lock",
                 Some(&meta(
@@ -482,6 +497,7 @@ async fn run_collector() -> anyhow::Result<i32> {
         write_pid_file_sync(pid_file);
     }
     let outcome = async {
+        crate::utils::root_trigger::prepare_logs(Path::new(&data_dir))?;
         let orchestrator = Arc::new(Orchestrator::standalone(config.clone()));
         orchestrator.start().await?;
         clear_startup_crash(&resolve_breadcrumb_data_dir());
@@ -502,11 +518,11 @@ async fn run_collector() -> anyhow::Result<i32> {
         orchestrator.stop().await;
         Ok::<(), anyhow::Error>(())
     }.await;
-    lock.release();
     if let Some(pid_file) = &pid_file {
         remove_own_pid_file_sync(pid_file);
     }
     release_spawn_lock(&spawn_lock);
+    lock.release();
     flush_logs_sync();
     match outcome {
         Ok(()) => Ok(0),

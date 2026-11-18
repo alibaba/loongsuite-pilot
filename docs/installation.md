@@ -123,7 +123,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-Local JSONL output is enabled by default:
+Local JSONL output is disabled by default. To inspect local events, set `"jsonl": { "enabled": true }` in `config.json` as described in [Local JSONL Output](local-jsonl-output.md), restart Pilot, and then check:
 
 ```bash
 ls ~/.loongsuite-pilot/logs/output

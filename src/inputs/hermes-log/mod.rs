@@ -33,6 +33,21 @@ impl HermesLogInput {
         }
     }
 
+    pub(crate) async fn confirm_source_drained(&self, source: String) -> bool {
+        if !self.running() || !crate::flushers::hermes_process_identity::valid_source(&source) {
+            return false;
+        }
+        let dir = std::path::PathBuf::from(self.session_dir());
+        let store = Arc::clone(self.state_store());
+        let drained = tokio::task::spawn_blocking(move || source_drained(&dir, &store, &source))
+            .await
+            .is_ok_and(|result| result);
+        if !drained && !self.state_store().waiting_for_input(self.id()) {
+            self.request_collection();
+        }
+        drained && self.running() && !self.state_store().save_failed_for(self.id())
+    }
+
     pub async fn check_availability() -> bool {
         directory_exists(&resolve_home(DEFAULT_SESSION_DIR)).await
     }
@@ -47,6 +62,81 @@ impl std::ops::Deref for HermesLogInput {
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
+}
+
+fn source_drained(
+    directory: &std::path::Path,
+    store: &crate::checkpoints::StateStore,
+    source: &str,
+) -> bool {
+    use crate::utils::{file_identity, raw_source};
+    use std::fs;
+    use std::io;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn scan(directory: &std::path::Path, base: &str) -> io::Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_str().unwrap_or_default();
+            if name != base
+                && !raw_source::segment(name)
+                    .is_some_and(|(stem, _)| base.strip_suffix(".jsonl") == Some(stem))
+            {
+                continue;
+            }
+            if !entry.file_type()?.is_file() {
+                return Err(io::Error::other(
+                    "Hermes source segment is not a regular file",
+                ));
+            }
+            paths.push(entry.path());
+        }
+        paths.sort_unstable();
+        Ok(paths)
+    }
+
+    if !crate::utils::runtime_paths::runtime_metadata(directory).is_ok_and(|m| m.is_dir()) {
+        return false;
+    }
+    let Ok(_gate) = raw_source::gate(directory, Duration::ZERO) else {
+        return false;
+    };
+    let base = format!("hermes-agent-{source}.jsonl");
+    let Ok(paths) = scan(directory, &base) else {
+        return false;
+    };
+    if paths.is_empty() {
+        return false;
+    }
+    let consumed = paths.iter().all(|path| {
+        let key = format!("hermes-agent-log:{}", path.to_string_lossy());
+        let Some(state) = store.persisted_input(&key) else {
+            return false;
+        };
+        let Some(extra) = state.extra() else {
+            return false;
+        };
+        let Some(checkpoint) = extra.get("sourceIdentity").and_then(Value::as_str) else {
+            return false;
+        };
+        let mut open = fs::OpenOptions::new();
+        open.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        open.open(path)
+            .and_then(|file| file_identity::identity_from_open(&file))
+            .is_ok_and(|actual| {
+                state.last_offset() == Some(actual.size as f64)
+                    && actual.matches_checkpoint(checkpoint)
+            })
+    });
+    consumed && scan(directory, &base).is_ok_and(|after| paths == after)
 }
 
 fn hermes_lines() -> LineFn {
@@ -330,6 +420,39 @@ mod tests {
             value["resourceAttributes"],
             json!({ "agentteams.worker.name": "planner" })
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_requires_persisted_identity_and_eof_for_all_segments() {
+        let env = Env::new();
+        let source = "123-456-deadbeef";
+        let base = env.write(
+            &format!("hermes-agent-{source}.jsonl"),
+            &[make_record("base")],
+        );
+        let segment = env.write(
+            &format!(
+                "hermes-agent-{source}.segment-000000000001-{}.jsonl",
+                "a".repeat(32)
+            ),
+            &[make_record("rotated")],
+        );
+        let dir = base.parent().unwrap();
+        assert!(!super::source_drained(dir, &env.store, source));
+        let input = env.input(None, None);
+        input.collect_entries().await.unwrap();
+        assert!(!super::source_drained(dir, &env.store, source));
+        env.store.save().await.unwrap();
+        assert!(super::source_drained(dir, &env.store, source));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(segment)
+            .unwrap()
+            .write_all(b"{")
+            .unwrap();
+        input.collect_entries().await.unwrap();
+        env.store.save().await.unwrap();
+        assert!(!super::source_drained(dir, &env.store, source));
     }
 
     #[tokio::test]

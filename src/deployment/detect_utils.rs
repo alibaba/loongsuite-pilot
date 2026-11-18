@@ -47,8 +47,16 @@ pub async fn command_exists(command: &str) -> bool {
     {
         return cached;
     }
+    let exists = command_exists_uncached(command).await;
+    if let Ok(mut cache) = command_cache().lock() {
+        cache.insert(command.to_string(), exists);
+    }
+    exists
+}
+
+pub(super) async fn command_exists_uncached(command: &str) -> bool {
     let bin = if cfg!(windows) { "where.exe" } else { "which" };
-    let exists = match tokio::time::timeout(
+    match tokio::time::timeout(
         Duration::from_millis(COMMAND_EXISTS_TIMEOUT_MS),
         tokio::process::Command::new(bin)
             .arg(command)
@@ -61,11 +69,7 @@ pub async fn command_exists(command: &str) -> bool {
     {
         Ok(Ok(status)) => status.success(),
         _ => false,
-    };
-    if let Ok(mut cache) = command_cache().lock() {
-        cache.insert(command.to_string(), exists);
     }
-    exists
 }
 
 fn has_glob(path: &str) -> bool {

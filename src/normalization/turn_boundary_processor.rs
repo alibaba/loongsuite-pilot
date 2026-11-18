@@ -180,7 +180,8 @@ pub fn is_terminal_turn_entry(entry: &AgentActivityEntry) -> bool {
         return false;
     }
     if agent_type == "openclaw" {
-        return extra_str(entry, "agent.openclaw.hook") == Some("llm_output");
+        return extra_str(entry, "agent.openclaw.collection") != Some("cron-lifecycle-v1")
+            && extra_str(entry, "agent.openclaw.hook") == Some("llm_output");
     }
 
     entry.finish_reasons.as_ref().is_some_and(|reasons| {
@@ -195,6 +196,9 @@ fn turn_key(entry: &AgentActivityEntry) -> Option<String> {
     let agent_type =
         normalize_agent_type(non_empty(Some(entry.agent_type.as_str())).unwrap_or("unknown"));
     let session_id = non_empty(Some(entry.session_id.as_str())).unwrap_or("");
+    if agent_type == "hermes" {
+        return serde_json::to_string(&(agent_type, &entry.user_id, session_id, turn_id)).ok();
+    }
     Some(format!("{agent_type}\u{0000}{session_id}\u{0000}{turn_id}"))
 }
 

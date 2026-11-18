@@ -194,8 +194,11 @@ pub fn apply_persisted_deploy_targets(
             .ok_or_else(|| "持久化 Hook 路径必须是非空绝对路径".to_string())?;
         if let Some(scope) = record
             .hook_scope
-            .filter(|_| def.id == super::system_toml_hooks::GROK)
+            .filter(|_| super::system_toml_hooks::supports(&def.id))
         {
+            if scope == crate::types::HookScope::System {
+                super::system_toml_hooks::validate_path(&def.id, &path)?;
+            }
             if let Some(hook) = &mut next.hook {
                 hook.scope = Some(scope);
             }

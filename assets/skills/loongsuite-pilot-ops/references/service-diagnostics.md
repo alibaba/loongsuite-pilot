@@ -130,11 +130,11 @@ pilot 支持 4 种 Flusher，可同时启用多个：
 | Flusher | 配置位置 | 默认状态 |
 |---------|---------|---------|
 | **SLS** | `config.json` → `sls` 段 | 有合法 endpoint 时自动启用 |
-| **JSONL** | `config.json` → `jsonl` 段 | 默认启用，输出到 `~/.loongsuite-pilot/logs/output/` |
+| **JSONL** | `config.json` → `jsonl` 段 | 默认关闭。设置 \`jsonl.enabled: true\` 后输出到 `~/.loongsuite-pilot/logs/output/` |
 | **HTTP** | `config.json` → `http` 段 | 需显式配置 URL 才启用 |
 | **OTLP Trace** | `config.json` → `otlpTrace` / `cms` 段 | 需显式配置 endpoint 或 CMS trace 配置才启用 |
 
-若所有 Flusher 都未启用，pilot 会自动创建 JSONL fallback：
+查看实际启用的出口。所有 Flusher 关闭时，Pilot 不写本地活动 JSONL。
 
 ```bash
 # 搜索 flusher 相关日志

@@ -23,6 +23,7 @@ pub mod poll_interval;
 pub mod process_discovery;
 pub mod record_utils;
 pub mod restart_breadcrumb;
+pub(crate) mod root_trigger;
 pub mod runtime_paths;
 pub mod single_instance_lock;
 pub mod sync_file_lock;

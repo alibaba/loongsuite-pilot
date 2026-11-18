@@ -293,7 +293,7 @@ impl std::error::Error for LockTimeout {}
 // for the operation. A Rust process can recover its empty gate after a crash.
 fn node_compatible_lock(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_str()?;
-    let legacy_config_lock = path == Path::new(super::system_toml_hooks::LOCK_PATH);
+    let legacy_config_lock = super::system_toml_hooks::is_system_lock(path);
     (legacy_config_lock
         || matches!(
             name,
