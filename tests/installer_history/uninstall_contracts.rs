@@ -19,8 +19,9 @@ fn hook_resources() -> BTreeMap<String, String> {
     }
     result
 }
-#[test]
-fn cleanup_l173_l176_exact_ef_hook_manifest_settings_are_still_covered_by_native_definitions() {
+#[tokio::test]
+async fn cleanup_l173_l176_exact_ef_hook_manifest_settings_are_still_covered_by_native_definitions()
+{
     let index: Value = serde_json::from_str(include_str!(
         "../fixtures/history/installer-hook-settings-ef.json"
     ))
@@ -31,7 +32,9 @@ fn cleanup_l173_l176_exact_ef_hook_manifest_settings_are_still_covered_by_native
         let value: Value = serde_json::from_str(source).unwrap();
         let settings = value["hook"]["settingsPath"].as_str().unwrap();
         if !settings.contains('$') {
-            paths.push(settings.strip_prefix("~/").unwrap_or(settings).to_owned());
+            paths.push(PathBuf::from(
+                settings.strip_prefix("~/").unwrap_or(settings),
+            ));
         }
     }
     for value in index["baseline"]["resources"].as_array().unwrap() {
@@ -41,12 +44,23 @@ fn cleanup_l173_l176_exact_ef_hook_manifest_settings_are_still_covered_by_native
             "{id}: historical hook agent disappeared"
         );
     }
+    // The Codex declaration resolves its environment override at load time.
+    // Check that the default still targets the historical uninstall path.
+    let fixture = Fixture::new();
+    let codex = definition(&fixture, "codex", &actual).await;
+    let codex_settings = &codex.hook.as_ref().unwrap().settings_path;
+    paths.push(
+        Path::new(codex_settings)
+            .strip_prefix(fixture.root.path())
+            .unwrap()
+            .to_owned(),
+    );
     for value in index["baseline"]["legacyGenericSettings"]
         .as_array()
         .unwrap()
     {
         assert!(
-            paths.iter().any(|path| path == value.as_str().unwrap()),
+            paths.contains(&PathBuf::from(value.as_str().unwrap())),
             "{value}: historical setting target disappeared"
         );
     }
