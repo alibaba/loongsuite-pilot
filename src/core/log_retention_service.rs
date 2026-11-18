@@ -64,6 +64,7 @@ pub struct LogRetentionService {
     pressure: std::sync::Mutex<Option<JoinHandle<()>>>,
     cleanup_gate: tokio::sync::Mutex<()>,
     state_store: Option<std::sync::Arc<crate::checkpoints::StateStore>>,
+    hermes_trace: Option<std::sync::Weak<crate::flushers::OtlpTraceFlusher>>,
 }
 
 impl LogRetentionService {
@@ -76,6 +77,7 @@ impl LogRetentionService {
             pressure: std::sync::Mutex::new(None),
             cleanup_gate: tokio::sync::Mutex::new(()),
             state_store: None,
+            hermes_trace: None,
         }
     }
 
@@ -84,6 +86,14 @@ impl LogRetentionService {
         store: std::sync::Arc<crate::checkpoints::StateStore>,
     ) -> Self {
         self.state_store = Some(store);
+        self
+    }
+
+    pub(crate) fn with_hermes_trace(
+        mut self,
+        trace: Option<&std::sync::Arc<crate::flushers::OtlpTraceFlusher>>,
+    ) -> Self {
+        self.hermes_trace = trace.map(std::sync::Arc::downgrade);
         self
     }
 
@@ -152,8 +162,14 @@ impl LogRetentionService {
             let store = store.clone();
             let logs = self.logs_dir.clone();
             let expiry = date_cutoff(self.config.hook_history_days);
+            let trace = self.hermes_trace.clone();
             tokio::task::spawn_blocking(move || {
-                clean_raw_sources(&logs, &store, &expiry, pressure_only)
+                clean_raw_sources(&logs, &store, &expiry, pressure_only, |source| {
+                    trace
+                        .as_ref()
+                        .and_then(std::sync::Weak::upgrade)
+                        .is_some_and(|trace| trace.has_pending_hermes_source(source))
+                })
             })
             .await
             .unwrap_or((0, 1, 0))
@@ -481,6 +497,7 @@ fn clean_raw_sources(
     store: &crate::checkpoints::StateStore,
     expiry: &str,
     pressure_only: bool,
+    protects_hermes: impl Fn(&str) -> bool,
 ) -> (u64, u64, u64) {
     use crate::utils::raw_source;
     let Ok(logs) = std::fs::canonicalize(logs) else {
@@ -600,7 +617,7 @@ fn clean_raw_sources(
         }
     }
     let (session_deleted, session_errors, session_bytes) =
-        clean_raw_sessions(&logs, store, expiry, pressure_only);
+        clean_raw_sessions(&logs, store, expiry, pressure_only, protects_hermes);
     (
         deleted + session_deleted,
         errors + session_errors,
@@ -613,6 +630,7 @@ fn clean_raw_sessions(
     store: &crate::checkpoints::StateStore,
     expiry: &str,
     pressure_only: bool,
+    protects_hermes: impl Fn(&str) -> bool,
 ) -> (u64, u64, u64) {
     use crate::utils::raw_source;
     let (mut deleted, mut errors, mut bytes) = (0, 0, 0);
@@ -675,6 +693,15 @@ fn clean_raw_sessions(
             // live or inaccessible PID therefore never proves a final file closed.
             let exited = family == "hermes-agent" && hermes_process_exited(&base);
             if !successor && !exited {
+                continue;
+            }
+            if !successor
+                && exited
+                && base
+                    .strip_prefix("hermes-agent-")
+                    .and_then(|name| name.strip_suffix(".jsonl"))
+                    .is_some_and(&protects_hermes)
+            {
                 continue;
             }
             if !crate::utils::runtime_paths::runtime_metadata(&file)

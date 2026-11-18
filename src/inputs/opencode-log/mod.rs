@@ -93,6 +93,70 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
+    async fn replay_keeps_rotated_records_in_order_across_bounded_cycles() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(StateStore::new(root.path().join("state.json")));
+        let input = OpenCodeLogInput::new(HookInputOptions {
+            state_store: Arc::clone(&store),
+            log_dir: Some(root.path().to_string_lossy().into_owned()),
+            log_prefix: None,
+            poll_interval_ms: Some(60000),
+        });
+        let stem = format!("opencode-{}", crate::utils::get_today_date_string());
+        let base_name = format!("{stem}.jsonl");
+        let segment_name =
+            format!("{stem}.segment-000000000001-0123456789abcdef0123456789abcdef.jsonl");
+        let record = |index: usize| {
+            json!({
+                "event.id": format!("event-{index}"),
+                "event.name": "tool.result",
+                "user.id": "fixture-user",
+                "gen_ai.agent.type": "opencode",
+                "gen_ai.session.id": "s",
+                "gen_ai.turn.id": "t",
+                "gen_ai.tool.call.id": "tool",
+                "gen_ai.tool.name": "read",
+                "gen_ai.tool.call.result": "中文",
+                "time_unix_nano": "1793270000000000000",
+            })
+            .to_string()
+                + "\n"
+        };
+        let mut older: String = (0..300).map(record).collect();
+        let committed = older.len() as u64;
+        older.push_str("{\"partial\":");
+        std::fs::write(root.path().join(&base_name), older).unwrap();
+        std::fs::write(root.path().join(&segment_name), record(300)).unwrap();
+        std::fs::write(
+            root.path().join(format!("{base_name}.active")),
+            &segment_name,
+        )
+        .unwrap();
+        let mut seen = Vec::new();
+        for _ in 0..32 {
+            let entries = input.collect_entries().await.unwrap();
+            assert!(entries.len() <= 256);
+            seen.extend(entries.into_iter().map(|entry| entry.event_id));
+            if seen.len() == 301 {
+                break;
+            }
+        }
+        assert_eq!(
+            seen,
+            (0..301)
+                .map(|index| format!("event-{index}"))
+                .collect::<Vec<_>>()
+        );
+        let state = store.get("opencode-log");
+        let extra = state.extra().unwrap();
+        assert_eq!(
+            extra["hookLogOffsets"][&base_name].as_u64(),
+            Some(committed)
+        );
+        assert!(input.collect_entries().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn v1_and_v2_tool_payloads_have_one_canonical_shape_and_truncated_text_is_preserved() {
         let root = tempfile::tempdir().unwrap();
         let input = OpenCodeLogInput::new(HookInputOptions {

@@ -517,6 +517,10 @@ impl Policy {
         } else {
             hooks["relay_host_verdicts"] = Value::Bool(false);
         }
+        hooks["managed_host_rules"] = Value::Bool(
+            hooks.pointer("/collector_plans/qoder/pilot_host").is_some()
+                && hooks.pointer("/local/mode").and_then(Value::as_str) == Some("all"),
+        );
         hooks["data_dir"] = serde_json::json!(init.data_dir);
         hooks["home_dir"] = serde_json::json!(init.home_dir);
         hooks["user_id"] = serde_json::json!(init.user_id);

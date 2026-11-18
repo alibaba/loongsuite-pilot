@@ -28,6 +28,11 @@ record carries `event.name=other`, `agent.hermes.hook=turn_end` and
 overlapping turns in one session do not truncate a trace. Legacy records retain
 their existing boundary detection. Source appends do not wait for trace export.
 
+Hermes can rotate the session during one native turn when compressing context.
+Events retain the native turn ID; `gen_ai.step.id` and `gen_ai.response.id`
+include the session identity, and the collector groups by both session and turn.
+The collector also separates records written by older Hermes plugins by session.
+
 The modern OpenClaw plugin allocates a model SpanID at `model_call_started` and
 reuses it for the response. Child events awaiting parent context still use bounded
 buffering to preserve trace relationships. Tool events subject to interception

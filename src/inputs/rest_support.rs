@@ -12,7 +12,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 use serde_json::{Map, Value};
@@ -132,6 +132,7 @@ struct HookInner {
     private_log_dir: bool,
     cursor_first_run_guard: bool,
     transform: TransformFn,
+    history_replay: Option<Mutex<HookReplay>>,
 }
 
 impl HookJsonlInput {
@@ -161,6 +162,8 @@ impl HookJsonlInput {
             private_log_dir: config.private_log_dir,
             cursor_first_run_guard: config.cursor_first_run_guard,
             transform: config.transform,
+            history_replay: matches!(config.id, "opencode-log" | "pi-coding-agent-log")
+                .then(|| Mutex::new(HookReplay::new())),
         });
         Self { inner, poll }
     }
@@ -259,6 +262,9 @@ impl HookJsonlInput {
 
 impl HookInner {
     async fn on_start(&self) {
+        if let Some(replay) = &self.history_replay {
+            *replay.lock().expect("hook replay") = HookReplay::new();
+        }
         if self.private_log_dir {
             ensure_private_dir(&self.log_dir).await;
         } else {
@@ -567,11 +573,162 @@ async fn cursor_first_run_guard(inner: &HookInner) {
     }
 }
 
+const MAX_HOOK_RECORD_BYTES: u64 = 32 * 1024 * 1024;
+const REPLAY_BURST_BYTES: u64 = 1024 * 1024;
+
+struct HookReplay {
+    bytes_per_minute: u64,
+    max_record_bytes: u64,
+    credit: f64,
+    updated: Instant,
+    startup_files: Option<std::collections::HashSet<String>>,
+    frontiers: BTreeMap<String, (String, u64)>,
+}
+
+impl HookReplay {
+    fn new() -> Self {
+        let bytes_per_minute = hook_limit(
+            "LOONGSUITE_PILOT_HOOK_HISTORY_BYTES_PER_MINUTE",
+            0..=1024 * 1024 * 1024,
+            4 * 1024 * 1024,
+        );
+        Self {
+            bytes_per_minute,
+            max_record_bytes: hook_limit(
+                "LOONGSUITE_PILOT_HOOK_MAX_RECORD_BYTES",
+                1024 * 1024..=256 * 1024 * 1024,
+                MAX_HOOK_RECORD_BYTES,
+            ),
+            credit: bytes_per_minute.min(REPLAY_BURST_BYTES) as f64,
+            updated: Instant::now(),
+            startup_files: None,
+            frontiers: BTreeMap::new(),
+        }
+    }
+
+    fn begin(&mut self, names: &[String]) {
+        let live: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
+        self.frontiers
+            .retain(|name, _| live.contains(name.as_str()));
+        self.startup_files
+            .get_or_insert_with(|| names.iter().cloned().collect())
+            .retain(|name| live.contains(name.as_str()));
+    }
+
+    fn historical(
+        &mut self,
+        name: &str,
+        identity: &str,
+        older_day: bool,
+        size: u64,
+        offset: u64,
+    ) -> bool {
+        let startup = self
+            .startup_files
+            .as_mut()
+            .is_some_and(|files| files.remove(name));
+        let frontier = self.frontiers.entry(name.to_owned()).or_default();
+        if frontier.0 != identity {
+            *frontier = (
+                identity.to_owned(),
+                if startup || older_day { size } else { 0 },
+            );
+        }
+        offset < frontier.1
+    }
+
+    fn available(&mut self) -> u64 {
+        let now = Instant::now();
+        self.credit = (self.credit
+            + now.duration_since(self.updated).as_secs_f64() * self.bytes_per_minute as f64 / 60.0)
+            .min(REPLAY_BURST_BYTES as f64);
+        self.updated = now;
+        self.credit.max(0.0) as u64
+    }
+}
+
+fn hook_limit(name: &str, range: std::ops::RangeInclusive<u64>, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse().ok())
+        .filter(|value| range.contains(value))
+        .unwrap_or(default)
+}
+
+struct HookWork {
+    records: usize,
+    deadline: Option<Duration>,
+}
+
+impl HookWork {
+    fn can_process(&self) -> bool {
+        self.records < 256
+            && (self.records == 0
+                || self
+                    .deadline
+                    .zip(process_work_time())
+                    .is_none_or(|(limit, now)| now < limit))
+    }
+}
+
+#[cfg(unix)]
+fn process_work_time() -> Option<Duration> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: getrusage initializes the provided rusage on success.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let usage = unsafe { usage.assume_init() };
+    let elapsed = |time: libc::timeval| {
+        Duration::from_secs(time.tv_sec as u64) + Duration::from_micros(time.tv_usec as u64)
+    };
+    Some(elapsed(usage.ru_utime) + elapsed(usage.ru_stime))
+}
+
+#[cfg(windows)]
+fn process_work_time() -> Option<Duration> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let mut creation = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exit = creation;
+    let mut kernel = creation;
+    let mut user = creation;
+    // SAFETY: the pseudo-handle needs no close and each output is a FILETIME.
+    if unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
+    {
+        return None;
+    }
+    let nanos = |time: FILETIME| {
+        ((u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)).saturating_mul(100)
+    };
+    Some(Duration::from_nanos(
+        nanos(kernel).saturating_add(nanos(user)),
+    ))
+}
+
 async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>, String> {
     let today = get_today_date_string();
     let state = inner.state_store.get(inner.id);
     let cold_start = !has_last_file(&state);
     let file_names = list_hook_log_files(&inner.log_dir, &inner.log_prefix).await;
+    let mut work = inner.history_replay.as_ref().map(|budget| {
+        budget.lock().expect("hook replay").begin(&file_names);
+        HookWork {
+            records: 0,
+            deadline: process_work_time().map(|now| now + Duration::from_millis(50)),
+        }
+    });
     if file_names.is_empty() {
         return Ok(Vec::new());
     }
@@ -590,22 +747,26 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
             .await
         }
     };
-    let candidates = if inner.id == "openclaw-plugin-log" {
+    let raw = work.is_some() || inner.id == "openclaw-plugin-log";
+    let candidates = if raw {
         file_names.clone()
     } else {
         candidate_file_names(&inner.log_prefix, &file_names, state.last_file(), &today)
     };
     let mut entries = Vec::new();
-    let raw = inner.id == "openclaw-plugin-log";
     let previous = state.extra().unwrap_or(Value::Null);
     let mut identities = previous["hookLogIdentities"]
         .as_object()
         .cloned()
         .unwrap_or_default();
-    let next = previous["hookLogSweepNext"]
-        .as_str()
-        .and_then(|next| candidates.iter().position(|name| name == next))
-        .unwrap_or(0);
+    let next = if work.is_some() {
+        0
+    } else {
+        previous["hookLogSweepNext"]
+            .as_str()
+            .and_then(|next| candidates.iter().position(|name| name == next))
+            .unwrap_or(0)
+    };
     let mut resume = None;
     let mut remaining = if raw {
         crate::utils::raw_source::CYCLE_BYTES
@@ -625,6 +786,7 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
             start,
             identities.get(name).and_then(Value::as_str),
             remaining,
+            work.as_mut(),
         )
         .await?;
         offsets.insert(name.clone(), file.offset);
@@ -635,6 +797,9 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
             }
         }
         entries.extend(file.entries);
+        if work.is_some() && file.offset < file.size && !file.closed_partial_tail {
+            break;
+        }
     }
     let live: std::collections::HashSet<&str> = file_names.iter().map(String::as_str).collect();
     let mut pruned = Map::new();
@@ -709,6 +874,8 @@ struct HookRead {
     offset: u64,
     identity: Option<String>,
     bytes: u64,
+    size: u64,
+    closed_partial_tail: bool,
 }
 
 async fn collect_hook_file(
@@ -716,7 +883,8 @@ async fn collect_hook_file(
     path: &Path,
     start_offset: u64,
     previous_identity: Option<&str>,
-    budget: u64,
+    mut budget: u64,
+    mut work: Option<&mut HookWork>,
 ) -> Result<HookRead, String> {
     let (mut file, identity) = match open_session_file(&path.to_string_lossy()).await {
         Ok(opened) => opened,
@@ -745,14 +913,41 @@ async fn collect_hook_file(
         );
         offset = 0;
     }
+    let key = identity.checkpoint_key();
+    let mut historical = false;
+    let mut max_record_bytes = MAX_HOOK_RECORD_BYTES;
+    if let Some(replay) = &inner.history_replay {
+        let name = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .expect("validated hook filename");
+        let today = get_today_date_string();
+        let older_day = crate::utils::raw_source::day(name, &inner.log_prefix)
+            .is_some_and(|day| day < today.as_str());
+        let mut replay = replay.lock().expect("hook replay");
+        historical = replay.historical(name, &key, older_day, size, offset);
+        if historical {
+            budget = budget.min(replay.available());
+        }
+        max_record_bytes = replay.max_record_bytes;
+    }
     let mut read = HookRead {
         offset,
-        identity: Some(identity.checkpoint_key()),
+        size,
+        identity: Some(key),
         ..HookRead::default()
     };
-    if size <= offset {
+    if size <= offset || budget == 0 || work.as_ref().is_some_and(|work| !work.can_process()) {
         return Ok(read);
     }
+    let initial_modified = if work.is_some() {
+        file.metadata()
+            .await
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+    } else {
+        None
+    };
     file.seek(std::io::SeekFrom::Start(offset))
         .await
         .map_err(|err| err.to_string())?;
@@ -763,8 +958,10 @@ async fn collect_hook_file(
         .read_to_end(&mut buf)
         .await
         .map_err(|err| err.to_string())?;
-    let limit = backlog.min(32 * 1024 * 1024);
-    while !buf.contains(&b'\n') && (buf.len() as u64) < limit {
+    let limit = backlog.min(max_record_bytes);
+    let mut has_newline = buf.contains(&b'\n');
+    while !has_newline && (buf.len() as u64) < limit {
+        let previous = buf.len();
         let chunk = (limit - buf.len() as u64).min(64 * 1024);
         if (&mut file)
             .take(chunk)
@@ -775,31 +972,32 @@ async fn collect_hook_file(
         {
             break;
         }
+        has_newline = buf[previous..].contains(&b'\n');
     }
     read.bytes = buf.len() as u64;
-    let Some(last_nl) = buf.iter().rposition(|byte| *byte == b'\n') else {
-        return Ok(read);
-    };
-    let complete_len = last_nl + 1;
-    let checkpoint = offset + complete_len as u64;
-    let complete = &buf[..complete_len];
-    let text = String::from_utf8_lossy(complete);
-    let ascii = complete.iter().all(|byte| *byte < 128);
-    let mut record_start = 0usize;
-    for line in text.split('\n') {
-        if !ascii {
-            let Some(rel) = complete[record_start..]
-                .iter()
-                .position(|byte| *byte == b'\n')
-            else {
+    if let Some(replay) = inner.history_replay.as_ref().filter(|_| historical) {
+        replay.lock().expect("hook replay").credit -= read.bytes as f64;
+    }
+    let complete_len = buf
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |end| end + 1);
+    for raw_line in buf[..complete_len].split_inclusive(|byte| *byte == b'\n') {
+        if let Some(work) = work.as_deref_mut() {
+            if !work.can_process() || raw_line.len() as u64 > max_record_bytes {
                 break;
-            };
-            record_start += rel + 1;
+            }
+            work.records += 1;
+            if work.records.is_multiple_of(32) {
+                tokio::task::yield_now().await;
+            }
         }
+        read.offset += raw_line.len() as u64;
+        let line = String::from_utf8_lossy(&raw_line[..raw_line.len() - 1]);
         if line.trim().is_empty() {
             continue;
         }
-        let parsed: Value = match serde_json::from_str(line) {
+        let parsed: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(err) => {
                 inner.logger.warn(
@@ -829,8 +1027,65 @@ async fn collect_hook_file(
             }
         }
     }
-    read.offset = checkpoint;
+    if work.is_some()
+        && read.bytes == backlog
+        && read.offset == offset + complete_len as u64
+        && read.offset < size
+    {
+        read.closed_partial_tail =
+            closed_hook_tail(inner, path, file, &identity, initial_modified).await;
+    }
     Ok(read)
+}
+
+async fn closed_hook_tail(
+    inner: &HookInner,
+    path: &Path,
+    file: tokio::fs::File,
+    expected: &crate::utils::file_identity::OpenedFileIdentity,
+    modified: Option<std::time::SystemTime>,
+) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(modified) = modified else {
+        return false;
+    };
+    let base = path.with_file_name(crate::utils::raw_source::base_name(name));
+    let cutoff = chrono::Local::now().date_naive() - chrono::Days::new(2);
+    let source_day = crate::utils::raw_source::day(name, &inner.log_prefix)
+        .and_then(|day| chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok());
+    let old_file = source_day.is_some_and(|day| day < cutoff)
+        && chrono::DateTime::<chrono::Local>::from(modified).date_naive() < cutoff;
+    let name = name.to_owned();
+    let sequence = crate::utils::raw_source::segment(&name).map_or(0, |(_, seq)| seq);
+    let key = expected.checkpoint_key();
+    let size = expected.size;
+    let opened = file.into_std().await;
+    tokio::task::spawn_blocking(move || {
+        let Ok(active) = crate::utils::raw_source::active(&base) else {
+            return false;
+        };
+        let newer = active
+            .as_deref()
+            .and_then(crate::utils::raw_source::segment)
+            .is_some_and(|(_, seq)| seq > sequence);
+        let aged = old_file
+            && match active.as_deref() {
+                Some(active) => active == name,
+                None => sequence == 0,
+            };
+        (newer || aged)
+            && opened
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                == Some(modified)
+            && crate::utils::file_identity::identity_from_open(&opened)
+                .is_ok_and(|current| current.size == size && current.matches_checkpoint(&key))
+    })
+    .await
+    .unwrap_or(false)
 }
 
 async fn list_hook_log_files(log_dir: &str, prefix: &str) -> Vec<String> {
@@ -1496,6 +1751,10 @@ impl SessionJsonlInput {
 
     pub fn collection_method(&self) -> CollectionMethod {
         CollectionMethod::SessionFilePolling
+    }
+
+    pub(crate) fn request_collection(&self) {
+        self.poll.request_collection();
     }
 
     pub fn session_dir(&self) -> &str {

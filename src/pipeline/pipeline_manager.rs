@@ -8,6 +8,7 @@ use crate::utils::{create_logger, ensure_dir};
 use serde_json::{Map, Value};
 
 use super::input::file::file_pipeline::FilePipelineHandle;
+use super::input::multica::{self, MulticaPipeline};
 use super::input::qoder_api::qoder_api_pipeline::QoderApiPipeline;
 use super::sleep_detector::{SleepDetector, WakeEvent};
 use super::types::{
@@ -25,6 +26,7 @@ fn logger() -> crate::utils::BoundLogger {
 enum Running {
     File(Arc<FilePipelineHandle>),
     Qoder(Arc<QoderApiPipeline>),
+    Multica(Arc<MulticaPipeline>),
 }
 
 pub struct PipelineManager {
@@ -109,6 +111,7 @@ impl PipelineManager {
             match pipeline {
                 Running::File(pipeline) => pipeline.stop().await,
                 Running::Qoder(pipeline) => pipeline.stop_handle().await,
+                Running::Multica(pipeline) => pipeline.stop().await,
             }
             let _ = name;
         }
@@ -127,6 +130,7 @@ impl PipelineManager {
             match pipeline {
                 Running::File(pipeline) => pipeline.handle_wake(event).await,
                 Running::Qoder(pipeline) => pipeline.handle_wake_handle(event).await,
+                Running::Multica(_) => {}
             }
         }
         self.rescan_locked().await;
@@ -233,6 +237,12 @@ impl PipelineManager {
             }
             _ => {}
         }
+        if let PipelineInputConfig::Multica(value) = input {
+            if self.opts.pipeline_config.multica.enabled {
+                self.create_multica(&config, value).await;
+            }
+            return;
+        }
         let name = config.config_name.clone();
         let input_type = input.type_name().to_string();
         match input_type.as_str() {
@@ -277,12 +287,56 @@ impl PipelineManager {
         }
     }
 
+    async fn create_multica(&self, config: &PipelineConfig, input: &Value) {
+        let result = (|| {
+            let input = serde_json::from_value::<multica::config::Input>(input.clone())?;
+            let destination = multica::config::resolve_destination(
+                config
+                    .raw
+                    .get("flushers")
+                    .and_then(Value::as_array)
+                    .and_then(|flushers| flushers.first()),
+                self.opts.sls.as_ref(),
+            )?;
+            let mode = self
+                .opts
+                .pipeline_config
+                .multica
+                .mode
+                .as_deref()
+                .and_then(multica::config::CollectionMode::parse)
+                .unwrap_or_default();
+            MulticaPipeline::new(multica::Options {
+                name: &config.config_name,
+                input,
+                destination,
+                state_dir: Path::new(&self.opts.state_dir),
+                mode,
+                enabled: true,
+                prefix: &self.opts.service_name_prefix,
+                activation_path: None,
+            })
+        })();
+        match result {
+            Ok(pipeline) => {
+                let pipeline = Arc::new(pipeline);
+                pipeline.start().await;
+                self.pipelines
+                    .lock()
+                    .unwrap()
+                    .insert(config.config_name.clone(), Running::Multica(pipeline));
+            }
+            Err(_) => logger().warn("invalid Multica configuration", None),
+        }
+    }
+
     async fn destroy(&self, name: &str) {
         let pipeline = self.pipelines.lock().unwrap().remove(name);
         if let Some(pipeline) = pipeline {
             match pipeline {
                 Running::File(pipeline) => pipeline.stop().await,
                 Running::Qoder(pipeline) => pipeline.stop_handle().await,
+                Running::Multica(pipeline) => pipeline.stop().await,
             }
         }
         self.hashes.lock().unwrap().remove(name);
@@ -335,6 +389,24 @@ fn validate_config(value: &Value, file_name: &str) -> Option<PipelineConfig> {
         return None;
     }
     let inputs = object.get("inputs").and_then(Value::as_array)?;
+    if let Some(input) = inputs
+        .first()
+        .filter(|input| input["Type"] == "input_multica")
+    {
+        if object
+            .get("flushers")
+            .is_some_and(|flushers| !flushers.is_array())
+        {
+            logger().warn("invalid Multica flushers", None);
+            return None;
+        }
+        return Some(PipelineConfig {
+            config_name: config_name.to_owned(),
+            inputs: vec![PipelineInputConfig::Multica(Box::new(input.clone()))],
+            flushers: Vec::new(),
+            raw: value.clone(),
+        });
+    }
     let flushers = object.get("flushers").and_then(Value::as_array)?;
     if inputs.is_empty() || flushers.is_empty() {
         logger().warn(
@@ -525,7 +597,10 @@ mod tests {
                 enabled: true,
                 file_enabled: true,
                 qoder_api_enabled: true,
+                multica: Default::default(),
             },
+            sls: None,
+            service_name_prefix: String::new(),
         }
     }
 

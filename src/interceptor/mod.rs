@@ -37,3 +37,5 @@ pub use tool_verdict_store::{
     ToolVerdictStore, TOOL_VERDICT_CHECKPOINT_INTERVAL_MS, TOOL_VERDICT_TTL_MS,
 };
 pub use types::*;
+
+pub use tool_verdict_store::GuardrailMetadata;

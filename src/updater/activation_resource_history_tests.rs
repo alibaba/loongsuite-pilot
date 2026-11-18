@@ -148,10 +148,11 @@ mod resource_history_tests {
             "hooks/qodercli-token-intercept.mjs",
         ];
         let qoder_cli_roles = if cfg!(unix) { qoder_cli_paths.len() } else { 0 };
-        assert_eq!(registry.len(), 29 + qoder_cli_roles);
+        assert_eq!(registry.len(), 30 + qoder_cli_roles);
         for relative in [
             "plugins/shared/raw-jsonl-writer.mjs",
             "plugins/shared/raw-source-gate.mjs",
+            "plugins/shared/private-log-dir.cjs",
             "hooks/qoder-loongsuite-pilot-hook.sh",
             "hooks/qoder-loongsuite-pilot-hook.ps1",
             "hooks/interceptor-hook.sh",

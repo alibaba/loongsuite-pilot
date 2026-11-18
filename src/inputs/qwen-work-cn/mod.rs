@@ -1,6 +1,12 @@
 //! QwenWorkCN hook, SQLite, and trace inputs.
 
+mod collaboration_input;
+mod collaboration_parser;
 pub mod multimodal;
+
+pub(crate) use collaboration_input::{
+    resolve_root as resolve_collaboration_root, QwenWorkCnCollaborationInput,
+};
 mod qwen_work_cn_input;
 mod qwen_work_cn_sqlite_input;
 mod qwen_work_cn_trace_input;

@@ -346,7 +346,7 @@ impl BaseFlusher for SlsFlusher {
         _logical_bytes: Option<f64>,
     ) -> Result<(), FlushError> {
         let agent = normalize_agent_type(&entry.agent_type);
-        if matches!(agent.as_str(), "codex" | "doubao-work") {
+        if entry.is_qwen_collaboration() || matches!(agent.as_str(), "codex" | "doubao-work") {
             return self
                 .inner
                 .accept_tracked(std::slice::from_ref(&entry))
@@ -364,7 +364,7 @@ impl BaseFlusher for SlsFlusher {
         let mut tracked: IndexMap<String, Vec<AgentActivityEntry>> = IndexMap::new();
         for entry in entries {
             let agent = normalize_agent_type(&entry.agent_type);
-            if matches!(agent.as_str(), "codex" | "doubao-work") {
+            if entry.is_qwen_collaboration() || matches!(agent.as_str(), "codex" | "doubao-work") {
                 tracked.entry(agent).or_default().push(entry);
             } else {
                 Arc::clone(&self.inner).enqueue_entry(&entry).await;
@@ -407,7 +407,9 @@ impl SlsInner {
         entries: &[AgentActivityEntry],
     ) -> Result<(), FlushError> {
         let agent = normalize_agent_type(&entries[0].agent_type);
-        let owner = if agent == "codex" {
+        let owner = if entries[0].is_qwen_collaboration() {
+            "Qwen Work collaboration"
+        } else if agent == "codex" {
             "Codex"
         } else {
             "Doubao Work"

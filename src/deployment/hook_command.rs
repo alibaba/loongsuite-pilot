@@ -99,6 +99,19 @@ pub fn parse_hook_args(argv: &[String]) -> Result<ParsedHookArgs, String> {
         }
         index += 1;
     }
+    if out.deployment_scope.is_none() {
+        out.deployment_scope = match std::env::var("LOONGSUITE_PILOT_HOOK_SCOPE")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            None => None,
+            Some("user") => Some(HookScope::User),
+            Some("system") => Some(HookScope::System),
+            _ => return Err("LOONGSUITE_PILOT_HOOK_SCOPE must be user or system".into()),
+        };
+    }
     if out.deployment_scope == Some(HookScope::System) {
         if !cfg!(target_os = "linux") {
             return Err("System hooks are supported only on Linux".into());
@@ -111,7 +124,7 @@ pub fn parse_hook_args(argv: &[String]) -> Result<ParsedHookArgs, String> {
 }
 
 pub fn hook_usage() -> &'static str {
-    "Usage: loongsuite-pilot hook install [--agents <ids>] [--home <id>=<dir>]... [--config-dir PATH] [--scope user|system] [--json]\n       loongsuite-pilot hook status [--agents <ids>] [--scope user|system] [--json]\n\nDetects every agent when --agents and LOONGSUITE_PILOT_AGENTS are unset.\nThe exact value none skips injection. The literal null is treated as unset."
+    "Usage: loongsuite-pilot hook install [--agents <ids>] [--home <id>=<dir>]... [--config-dir PATH] [--scope user|system] [--json]\n       loongsuite-pilot hook status [--agents <ids>] [--scope user|system] [--json]\nLOONGSUITE_PILOT_HOOK_SCOPE supplies the scope when --scope is omitted.\n\nDetects every agent when --agents and LOONGSUITE_PILOT_AGENTS are unset.\nThe exact value none skips injection. The literal null is treated as unset."
 }
 
 pub async fn run_hook_command_with_config(

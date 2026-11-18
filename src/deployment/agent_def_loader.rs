@@ -379,23 +379,6 @@ impl AgentDefLoader {
         if let Some(cli) = self.env_get("HERMES_CLI").filter(|value| !value.is_empty()) {
             return cli;
         }
-        let executable = if cfg!(windows) {
-            "hermes.exe"
-        } else {
-            "hermes"
-        };
-        let scripts = if cfg!(windows) { "Scripts" } else { "bin" };
-        let bundled = resolve_home(
-            &Path::new(hermes_home)
-                .join("hermes-agent")
-                .join("venv")
-                .join(scripts)
-                .join(executable)
-                .to_string_lossy(),
-        );
-        if Path::new(&bundled).exists() {
-            return bundled;
-        }
         let home = if cfg!(windows) {
             self.env_get("USERPROFILE")
                 .filter(|value| !value.is_empty())
@@ -405,12 +388,31 @@ impl AgentDefLoader {
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| resolve_home("~"))
         };
-        let user_cli = Path::new(&home).join(".local").join("bin").join(executable);
-        if user_cli.exists() {
-            return user_cli.to_string_lossy().into_owned();
-        }
-        executable.to_string()
+        let [bundled, user_cli, executable] = hermes_cli_candidates(hermes_home, &home);
+        [bundled, user_cli]
+            .into_iter()
+            .find(|path| Path::new(path).exists())
+            .unwrap_or(executable)
     }
+}
+
+pub(super) fn hermes_cli_candidates(hermes_home: &str, home: &str) -> [String; 3] {
+    let (executable, scripts) = if cfg!(windows) {
+        ("hermes.exe", "Scripts")
+    } else {
+        ("hermes", "bin")
+    };
+    let bundled = Path::new(hermes_home)
+        .join("hermes-agent")
+        .join("venv")
+        .join(scripts)
+        .join(executable);
+    let user_cli = Path::new(home).join(".local").join("bin").join(executable);
+    [
+        resolve_home(&bundled.to_string_lossy()),
+        user_cli.to_string_lossy().into_owned(),
+        executable.into(),
+    ]
 }
 
 fn replace_first_shell_script(input: &str) -> String {

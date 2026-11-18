@@ -92,10 +92,12 @@ impl BaseFlusher for HttpFlusher {
         entry: AgentActivityEntry,
         _logical_bytes: Option<f64>,
     ) -> Result<(), FlushError> {
-        if matches!(
-            crate::utils::normalize_agent_type(&entry.agent_type).as_str(),
-            "codex" | "doubao-work"
-        ) {
+        if entry.is_qwen_collaboration()
+            || matches!(
+                crate::utils::normalize_agent_type(&entry.agent_type).as_str(),
+                "codex" | "doubao-work"
+            )
+        {
             return self.send_batch(vec![entry], None).await;
         }
         let serialized = serialise_log_entry(&entry, &SerialiseLogEntryOptions::default());
@@ -119,18 +121,21 @@ impl BaseFlusher for HttpFlusher {
         entries: Vec<AgentActivityEntry>,
         _logical_bytes: Option<Vec<f64>>,
     ) -> Result<(), FlushError> {
-        let mut codex = Vec::new();
+        let mut tracked = Vec::new();
+        let mut collaboration = Vec::new();
         let mut has_doubao = false;
         let mut ordinary = Vec::new();
         for entry in entries {
             let serialized = serialise_log_entry(&entry, &SerialiseLogEntryOptions::default());
-            if matches!(
+            if entry.is_qwen_collaboration() {
+                collaboration.push(serialized);
+            } else if matches!(
                 crate::utils::normalize_agent_type(&entry.agent_type).as_str(),
                 "codex" | "doubao-work"
             ) {
                 has_doubao |=
                     crate::utils::normalize_agent_type(&entry.agent_type) == "doubao-work";
-                codex.push(serialized);
+                tracked.push(serialized);
             } else {
                 ordinary.push(serialized);
             }
@@ -147,9 +152,14 @@ impl BaseFlusher for HttpFlusher {
         if should_flush {
             self.inner.flush_buffer().await;
         }
-        if !codex.is_empty() {
+        if !tracked.is_empty() {
             self.inner
-                .accept_tracked(codex, if has_doubao { "Doubao Work" } else { "Codex" })
+                .accept_tracked(tracked, if has_doubao { "Doubao Work" } else { "Codex" })
+                .await?;
+        }
+        if !collaboration.is_empty() {
+            self.inner
+                .accept_tracked(collaboration, "Qwen Work collaboration")
                 .await?;
         }
         Ok(())

@@ -13,6 +13,7 @@ import json
 import os
 import secrets
 import socket
+import stat
 import sys
 import threading
 import time
@@ -53,16 +54,33 @@ _RAW_WRITE_LOCK = threading.Lock()
 MANAGED_MARKER_FILE = ".loongsuite-pilot-managed.json"
 INVOCATION_USER_ID_FIELD = "agent.pilot.invocation.user.id"
 
-_PROCESS_FILE_TOKEN = "%s-%s-%s" % (
-    os.getpid(),
-    time.time_ns(),
-    secrets.token_hex(4),
-)
+def _new_process_file_token() -> str:
+    return "%s-%s-%s" % (os.getpid(), time.time_ns(), secrets.token_hex(4))
+
+
+_PROCESS_FILE_TOKEN = _new_process_file_token()
+_PROCESS_IDENTITY_CACHE: Any = None
 _STATE_LOCK = threading.RLock()
 # Never hold this lock during file I/O or native callbacks. Closing an API and
 # observing its first delta must be atomic without waiting for another turn's
 # synchronous JSONL append. Lock order is STATE -> TTFT, never the reverse.
 _TTFT_LOCK = threading.Lock()
+
+
+def _after_fork_child() -> None:
+    # A fork inherits the parent's source name, cached owner and locks. Give
+    # the child its own file family; never let its records advertise the
+    # parent's PID or wait on a lock held by a vanished parent thread.
+    global _PROCESS_FILE_TOKEN, _PROCESS_IDENTITY_CACHE, _RAW_WRITE_LOCK, _STATE_LOCK, _TTFT_LOCK
+    _PROCESS_FILE_TOKEN = _new_process_file_token()
+    _PROCESS_IDENTITY_CACHE = None
+    _RAW_WRITE_LOCK = threading.Lock()
+    _STATE_LOCK = threading.RLock()
+    _TTFT_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_child)
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
 # Detached retry snapshots retain no other active turns/session state.
 _EVICTED_TURNS: Dict[str, Any] = {}
@@ -1177,6 +1195,43 @@ def _new_event_id() -> str:
     return str(uuid.uuid4())
 
 
+def _process_identity() -> Dict[str, Any]:
+    """Identify this Linux process only when /proc uses its PID namespace."""
+    global _PROCESS_IDENTITY_CACHE
+    pid = os.getpid()
+    if _PROCESS_IDENTITY_CACHE and _PROCESS_IDENTITY_CACHE[0] == pid:
+        return _PROCESS_IDENTITY_CACHE[1]
+    identity: Dict[str, Any] = {}
+    try:
+        namespace = os.readlink("/proc/self/ns/pid")
+        # /proc/1/ns/pid may be unreadable to an unprivileged collector or
+        # plugin. NSpid contains one value per namespace between this procfs
+        # mount and the process: more than one means a parent-mounted /proc.
+        # Also compare /proc/self's PID with getpid() in the same process.
+        status = Path("/proc/self/status").read_text()
+        ns_pids = next((line.split()[1:] for line in status.splitlines()
+                        if line.startswith("NSpid:")), [])
+        if os.readlink("/proc/self") != str(pid) or ns_pids != [str(pid)]:
+            return identity
+        stat = Path("/proc/self/stat").read_text()
+        fields = stat[stat.rfind(")") + 2:].split()
+        start_ticks = fields[19]
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        if not start_ticks.isdigit() or not boot_id:
+            return identity
+        identity = {"agent.hermes.process": {
+            "pid": pid, "start_ticks": start_ticks,
+            "pid_namespace": namespace, "boot_id": boot_id,
+            "source_token": _PROCESS_FILE_TOKEN,
+        }}
+    except (OSError, ValueError, IndexError):
+        pass
+    # Do not cache an unavailable /proc: it may become accessible later.
+    if identity:
+        _PROCESS_IDENTITY_CACHE = (pid, identity)
+    return identity
+
+
 def _session(session_id: str) -> Dict[str, Any]:
     state = _SESSIONS.get(session_id)
     if state is None:
@@ -1231,6 +1286,7 @@ def _new_turn(
         _session(session_id)["sender_identity"] = dict(user_identity)
     return {
         "session_id": session_id,
+        "session_hash": hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32],
         "task_id": None,
         "thread_id": threading.get_ident(),
         "observer_turn_id": (
@@ -1520,6 +1576,7 @@ def _common_fields(
     }
     if turn.get("native_run_observer") is True:
         fields["agent.hermes.native_run_observer"] = True
+    fields.update(_process_identity())
     if turn.get("user_id_source") in ("invocation", "environment", "sender", "parent"):
         fields[INVOCATION_USER_ID_FIELD] = turn["user_id"]
     if turn.get("sender_id"):
@@ -1610,7 +1667,10 @@ def _api_ids(turn: Dict[str, Any], api: Dict[str, Any]) -> Any:
         api["span_id"] = _new_span_id()
     if not api.get("step_id"):
         index = next(i for i, item in enumerate(turn["apis"]) if item is api)
-        api["step_id"] = "%s:s%s" % (_turn_id(turn), index + 1)
+        # A source turn ID may be reused in another session even when its
+        # previous invocation is no longer resident. Scope response IDs to the
+        # session independently of whether rotation was observed in this run.
+        api["step_id"] = "%s:session:%s:s%s" % (_turn_id(turn), turn["session_hash"], index + 1)
     return api["step_id"], "%s:r" % api["step_id"]
 
 
@@ -2009,11 +2069,24 @@ def _write_records(records: List[Dict[str, Any]]) -> None:
         return
     directory = _data_dir() / "logs" / "hermes-agent"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    shared = False
     try:
-        os.chmod(directory, 0o700)
+        if str(os.environ.get('LOONGSUITE_PILOT_ROOT_TRIGGER', '')).strip().lower() in ('1', 'true', 'yes', 'on'):
+            info = directory.lstat()
+            shared = info.st_uid == 0 and (info.st_mode & 0o7777) == 0o1777
+        if not shared:
+            os.chmod(directory, 0o700)
     except OSError:
         pass
     path = directory / ("hermes-agent-%s.jsonl" % _PROCESS_FILE_TOKEN)
+    # Staged records may have been created before fork. Their source identity
+    # must describe the process that actually appends them to this file.
+    identity = _process_identity().get("agent.hermes.process")
+    for record in records:
+        if identity:
+            record["agent.hermes.process"] = identity
+        else:
+            record.pop("agent.hermes.process", None)
     payload = "".join(
         json.dumps(record, ensure_ascii=True, separators=(",", ":"), default=str) + "\n"
         for record in records
@@ -2048,8 +2121,17 @@ def _write_records(records: List[Dict[str, Any]]) -> None:
                     os.replace(str(temporary), str(pointer))
                 finally:
                     temporary.unlink(missing_ok=True)
-            descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+            if shared:
+                flags |= getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+            descriptor = os.open(str(target), flags, 0o600)
             try:
+                if shared:
+                    info = os.fstat(descriptor)
+                    if not stat.S_ISREG(info.st_mode) or (hasattr(os, 'getuid') and info.st_uid != os.getuid()):
+                        raise OSError('Pilot event file is not a private regular file')
+                if os.name != 'nt':
+                    os.fchmod(descriptor, 0o600)
                 offset = 0
                 while offset < len(payload):
                     written = os.write(descriptor, payload[offset:])

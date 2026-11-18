@@ -34,6 +34,15 @@ pub(crate) fn command() -> Command {
         .about("LoongSuite Pilot 原生采集与部署工具；无参数时启动 collector")
         .subcommand(Command::new("run").about("启动 collector"))
         .subcommand(Command::new("run-updater").about("启动原生更新服务"))
+        .subcommand(
+            Command::new("multica-collector")
+                .about("运行独立 Multica 采集")
+                .arg(value("config").required(true))
+                .arg(value("pilot-config"))
+                .arg(value("state-dir"))
+                .arg(value("activation-state-file"))
+                .arg(flag("once")),
+        )
         .subcommands(super::service::COMMANDS.iter().map(|&name| {
             let command = Command::new(name).about("调用本安装的平台服务入口");
             if name == "restart-collector" {

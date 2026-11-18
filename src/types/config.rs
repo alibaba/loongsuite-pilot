@@ -61,6 +61,8 @@ pub struct ListenerConfig {
     pub log_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<DoubaoClient>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_conversation_ids: Option<Vec<String>>,
 }
 
 str_enum!(CanaryPolicy {
@@ -664,6 +666,30 @@ pub struct PipelineToggle {
     pub file: PipelineSectionToggle,
     #[serde(rename = "qoderApi")]
     pub qoder_api: PipelineSectionToggle,
+    #[serde(default, skip_serializing_if = "MulticaPipelineToggle::is_default")]
+    pub multica: MulticaPipelineToggle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MulticaPipelineToggle {
+    pub enabled: bool,
+    pub mode: Option<String>,
+}
+
+impl Default for MulticaPipelineToggle {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: None,
+        }
+    }
+}
+
+impl MulticaPipelineToggle {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 pub type FileCollectionToggle = PipelineToggle;

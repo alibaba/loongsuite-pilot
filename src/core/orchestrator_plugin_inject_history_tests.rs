@@ -1,5 +1,6 @@
 //! Original plugin watchdog assertions through real Orchestrator target closures.
 use super::*;
+use crate::deployment::detect_agent;
 
 fn plugin(root: &Path, id: &str, spec: &str) -> Value {
     let mut def = declaration(id, "plugin-inject", &root.join("detected"));

@@ -42,7 +42,7 @@ impl InterceptResultLinker {
             } else {
                 Some(entry.session_id.clone())
             };
-            let action = self.verdict_store.get(
+            let action = self.verdict_store.get_verdict(
                 &ToolVerdictKey {
                     session_id,
                     tool_use_id,
@@ -50,12 +50,17 @@ impl InterceptResultLinker {
                 },
                 now,
             );
-            let Some(action) = action else { continue };
+            let Some((action, guardrail)) = action else {
+                continue;
+            };
             entry.guardrail_triggered = Some(true);
             entry.guardrail_action = Some(match action {
                 crate::interceptor::ToolVerdictAction::Allow => GuardrailAction::Allow,
                 crate::interceptor::ToolVerdictAction::Block => GuardrailAction::Block,
             });
+            if let Some(guardrail) = guardrail {
+                guardrail.apply(entry);
+            }
         }
     }
 }
