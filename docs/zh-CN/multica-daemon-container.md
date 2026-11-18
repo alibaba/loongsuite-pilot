@@ -17,7 +17,7 @@ ENTRYPOINT ["/app/multica", "daemon", "start", "--foreground", "--no-auto-update
 
 ```dockerfile
 FROM ghcr.io/multica-ai/multica-backend:v0.6.0
-RUN apk add --no-cache bash curl
+RUN apk add --no-cache bash curl npm
 COPY installer.sh /usr/local/share/loongsuite-pilot/installer.sh
 COPY start-multica-daemon.sh /usr/local/bin/start-multica-daemon
 RUN chmod +x /usr/local/bin/start-multica-daemon
@@ -44,7 +44,6 @@ if ! command -v loongsuite-pilot >/dev/null 2>&1; then
     --sls-endpoint "$SLS_ENDPOINT" --sls-project "$SLS_PROJECT" \
     --sls-logstore agent-event --sls-api-key "$SLS_API_KEY"
 fi
-export LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE=on
 loongsuite-pilot run &
 exec /app/multica "$@"
 ```
