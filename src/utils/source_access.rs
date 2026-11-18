@@ -66,6 +66,22 @@ impl SourceScope {
                 "source outside authorized roots",
             ));
         }
+        Self::check_components(path)
+    }
+
+    fn check_scanner_lexically(&self, path: &Path) -> bool {
+        // A canonical root prefix and ordinary components are sufficient when
+        // each component is checked for symlinks and the opened fd confirms
+        // that exact path. Fall back for relative or non-normalized spellings.
+        cfg!(target_os = "linux")
+            && path.is_absolute()
+            && self.roots.iter().any(|root| path.starts_with(root))
+            && path.as_os_str().as_encoded_bytes()[1..]
+                .split(|&byte| byte == b'/')
+                .all(|part| !matches!(part, b"" | b"." | b".."))
+    }
+
+    fn check_components(path: &Path) -> io::Result<()> {
         // Reject symlink/reparse traversal even if it currently resolves inside
         // the root: later retargeting cannot expand this capability.
         for parent in path.ancestors() {
@@ -89,7 +105,7 @@ impl SourceScope {
         }
         Ok(())
     }
-    fn check_file(&self, file: &File) -> io::Result<()> {
+    fn check_file(&self, file: &File, expected_path: Option<&Path>) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         let actual = {
             use std::os::fd::AsRawFd;
@@ -126,7 +142,9 @@ impl SourceScope {
             }
             PathBuf::from(std::ffi::OsString::from_wide(&buffer[..size]))
         };
-        if !self.roots.iter().any(|root| actual.starts_with(root)) {
+        if expected_path.is_some_and(|path| actual != path)
+            || !self.roots.iter().any(|root| actual.starts_with(root))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "opened source escaped authorized roots",
@@ -151,8 +169,25 @@ pub fn open(path: impl AsRef<Path>) -> io::Result<File> {
     open_scoped(path.as_ref(), current())
 }
 fn open_scoped(path: &Path, scope: Option<Arc<SourceScope>>) -> io::Result<File> {
-    if let Some(scope) = &scope {
-        scope.check(path)?;
+    open_source(path, scope.as_deref(), true)
+}
+
+// The transcript scanner charges its own bounded scan budget instead.
+pub(crate) fn open_scanner_file(path: &Path) -> io::Result<File> {
+    open_source(path, current().as_deref(), false)
+}
+
+fn open_source(path: &Path, scope: Option<&SourceScope>, charge_open: bool) -> io::Result<File> {
+    let lexical_scanner_path =
+        !charge_open && scope.is_some_and(|scope| scope.check_scanner_lexically(path));
+    if let Some(scope) = scope {
+        if lexical_scanner_path {
+            SourceScope::check_components(path)?;
+        } else {
+            scope.check(path)?;
+        }
+    }
+    if let Some(scope) = scope.filter(|_| charge_open) {
         let exhausted = {
             let mut seen = scope.opened.lock().unwrap();
             seen.insert(path.to_owned());
@@ -168,13 +203,20 @@ fn open_scoped(path: &Path, scope: Option<Arc<SourceScope>>) -> io::Result<File>
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    if scope.is_some() {
+    {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        if scope.is_some() {
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        } else if !charge_open {
+            options.custom_flags(libc::O_NONBLOCK);
+        }
     }
     let file = options.open(path)?;
     if let Some(scope) = scope {
-        scope.check_file(&file)?;
+        if !charge_open && !lexical_scanner_path {
+            scope.check(path)?;
+        }
+        scope.check_file(&file, lexical_scanner_path.then_some(path))?;
     }
     Ok(file)
 }
@@ -220,14 +262,6 @@ pub async fn read_dir_async(path: impl AsRef<Path>) -> io::Result<tokio::fs::Rea
     check(&path)?;
     tokio::fs::read_dir(path).await
 }
-pub fn verify_open(file: &File, path: &Path) -> io::Result<()> {
-    if let Some(scope) = current() {
-        scope.check(path)?;
-        scope.check_file(file)?;
-    }
-    Ok(())
-}
-
 /// Reject symlink/reparse components in SDK-owned writable paths. Missing leaf
 /// components are allowed; callers still use create_new/NOFOLLOW where possible.
 pub fn private_path(path: &Path) -> io::Result<()> {

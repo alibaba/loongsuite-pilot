@@ -182,8 +182,43 @@ pub fn project_encoded_log_entry(
     agent_type: &str,
     options: &SerialiseLogEntryOptions,
 ) -> serde_json::Result<Vec<u8>> {
-    let mut fields: indexmap::IndexMap<String, &serde_json::value::RawValue> =
-        serde_json::from_slice(encoded)?;
+    let fields = serde_json::from_slice(encoded)?;
+    project_raw_log_fields(fields, agent_type, options)
+}
+
+pub(crate) fn project_sdk_jsonl_entry(encoded: &[u8]) -> serde_json::Result<(String, Vec<u8>)> {
+    let fields: RawLogFields<'_> = serde_json::from_slice(encoded)?;
+    let agent_type: String = fields
+        .get("gen_ai.agent.type")
+        .map(|value| serde_json::from_str(value.get()))
+        .transpose()?
+        .unwrap_or_default();
+    let path_agent = if agent_type.is_empty() {
+        fields
+            .get("agent.type")
+            .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned())
+    } else {
+        agent_type.clone()
+    };
+    let row = project_raw_log_fields(
+        fields,
+        &agent_type,
+        &SerialiseLogEntryOptions {
+            drop_agent_scoped_fields: true,
+        },
+    )?;
+    Ok((path_agent, row))
+}
+
+type RawLogFields<'a> = indexmap::IndexMap<String, &'a serde_json::value::RawValue>;
+
+fn project_raw_log_fields(
+    mut fields: RawLogFields<'_>,
+    agent_type: &str,
+    options: &SerialiseLogEntryOptions,
+) -> serde_json::Result<Vec<u8>> {
     fields.retain(|key, value| {
         if value.get() == "null" || is_legacy_alias(key) {
             return false;

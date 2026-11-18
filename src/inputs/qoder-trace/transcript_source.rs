@@ -78,9 +78,10 @@ fn notice_attribute_version(path: &Path) -> std::io::Result<FileVersion> {
         // below remains the authority for receipt contents; no body is read.
         std::fs::OpenOptions::new().access_mode(0x80).open(path)?
     };
+    #[cfg(windows)]
+    return scanner::version(&file);
     #[cfg(not(windows))]
-    let file = scanner::open_regular(path)?;
-    scanner::version(&file)
+    scanner::open_versioned(path).map(|(_, version)| version)
 }
 fn directory_version(path: &Path, inspect_inventory: bool) -> std::io::Result<DirectoryVersion> {
     #[cfg(unix)]
@@ -296,8 +297,7 @@ fn inject_metadata_read_fault(f: impl FnMut(&Path) + 'static) -> MetadataReadFau
     MetadataReadFaultGuard
 }
 fn snapshot_bytes(path: &Path, limit: usize) -> anyhow::Result<(Vec<u8>, FileVersion)> {
-    let mut f = scanner::open_regular(path)?;
-    let version = scanner::version(&f)?;
+    let (mut f, version) = scanner::open_versioned(path)?;
     if version.size > limit as u64 {
         anyhow::bail!("Qoder metadata exceeds limit")
     };
@@ -829,7 +829,7 @@ impl Collector {
                     anyhow::bail!("invalid-source")
                 };
                 let file = PathBuf::from(text(&source, "transcriptPath"));
-                let stat = scanner::version(&scanner::open_regular(&file)?)?;
+                let (mut transcript, stat) = scanner::open_versioned(&file)?;
                 if self.legacy_worker_alive(&file, &key)? {
                     return Ok(());
                 }
@@ -865,12 +865,15 @@ impl Collector {
                     old.as_ref().is_some_and(|o| o.get("fingerprint").is_some())
                         && (cp.get("fileVersion") != Some(&serde_json::to_value(&stat)?)
                             || pending_stop);
+                let mut fingerprint_read = false;
                 let rewritten = if check_fingerprint {
                     let witness_bytes = number(&cp, "offset").min(128) * 2;
                     if budget.remaining < witness_bytes as i64 {
                         return Ok(());
                     }
-                    !self.matches_fingerprint(&file, &cp, &mut budget)?
+                    fingerprint_read = true;
+                    budget.metrics.source_files_opened += 1;
+                    !self.matches_fingerprint(&mut transcript, &cp, &mut budget)?
                 } else {
                     false
                 };
@@ -910,10 +913,16 @@ impl Collector {
                     || rewritten
                     || cp.get("fingerprint").is_none()
                 {
-                    cp["fingerprint"] =
-                        json!(self.fingerprint(&file, number(&cp, "offset"), &mut budget)?);
+                    if !fingerprint_read {
+                        budget.metrics.source_files_opened += 1;
+                    }
+                    cp["fingerprint"] = json!(self.fingerprint(
+                        &mut transcript,
+                        number(&cp, "offset"),
+                        &mut budget,
+                    )?);
                 }
-                let after = scanner::version(&scanner::open_regular(&file)?)?;
+                let (_, after) = scanner::open_versioned(&file)?;
                 if after.ino != stat.ino
                     || after.dev != stat.dev
                     || after.size < number(&cp, "offset")
@@ -1017,33 +1026,31 @@ impl Collector {
     }
     fn fingerprint(
         &self,
-        file: &Path,
+        file: &mut std::fs::File,
         offset: u64,
         budget: &mut ScanBudget,
     ) -> anyhow::Result<String> {
-        let mut f = scanner::open_regular(file)?;
-        budget.metrics.source_files_opened += 1;
-        let mut buffers = Vec::new();
+        let mut buffers = Vec::with_capacity(2);
+        let mut body = [0; 128];
+        let requested = offset.min(body.len() as u64) as usize;
         for at in [0, offset.saturating_sub(128)] {
-            let mut body = vec![0; 128.min(offset as usize)];
-            f.seek(SeekFrom::Start(at))?;
+            file.seek(SeekFrom::Start(at))?;
             let started = std::time::Instant::now();
-            let n = f.read(&mut body)?;
+            let n = file.read(&mut body[..requested])?;
             budget.metrics.reads.push(scanner::ReadObservation {
                 bytes: n as u64,
-                requested: body.len() as u64,
+                requested: requested as u64,
                 duration_ms: started.elapsed().as_secs_f64() * 1000.0,
             });
-            body.truncate(n);
             budget.metrics.bytes_read += n as u64;
             budget.remaining -= n as i64;
-            buffers.push(STANDARD.encode(body));
+            buffers.push(STANDARD.encode(&body[..n]));
         }
         Ok(digest(&json!(buffers)))
     }
     fn matches_fingerprint(
         &self,
-        file: &Path,
+        file: &mut std::fs::File,
         cp: &Value,
         budget: &mut ScanBudget,
     ) -> anyhow::Result<bool> {
@@ -1215,11 +1222,12 @@ impl Collector {
                     );
                 } else {
                     cp["offset"] = json!(start);
-                    let f = scanner::open_regular(Path::new(text(source, "transcriptPath")))?;
+                    let (_, version) =
+                        scanner::open_versioned(Path::new(text(source, "transcriptPath")))?;
                     let pending = PendingLine {
                         start,
                         position: end,
-                        version: scanner::version(&f)?,
+                        version,
                         witness: bytes[bytes.len().saturating_sub(64)..].to_vec(),
                         oversized: true,
                         final_tried: true,
@@ -2378,10 +2386,9 @@ stopped,
             Ok(v) => v,
             Err(_) => {
                 self.owner_pending.shift_remove(key);
-                let Ok(f) = scanner::open_regular(&lock) else {
+                let Ok((_, stat)) = scanner::open_versioned(&lock) else {
                     return Ok(false);
                 };
-                let stat = scanner::version(&f)?;
                 return Ok(self.time() as f64 - mtime(&stat) < 1000.0);
             }
         };

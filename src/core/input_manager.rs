@@ -788,6 +788,32 @@ impl InputManager {
         self.dispatch_encoded(input_id, entries, encoded).await
     }
 
+    pub(super) async fn accept_sdk_activity(
+        &self,
+        input_id: &str,
+        rows: &[&[u8]],
+    ) -> Result<(), String> {
+        let flusher = self
+            .flusher
+            .lock()
+            .expect("flusher")
+            .clone()
+            .ok_or("Pilot output is not configured")?;
+        if let Some(result) = flusher.send_sdk_activity(rows).await {
+            let entry_count = rows.len();
+            let batch_bytes = rows.iter().map(|row| row.len() as u64).sum();
+            self.record_sdk_input(input_id, entry_count, batch_bytes);
+            return self.finish_dispatch(input_id, entry_count, batch_bytes, result);
+        }
+        let entries = rows
+            .iter()
+            .map(|row| serde_json::from_slice::<AgentActivityEntry>(row))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "invalid SDK activity JSON")?;
+        let encoded = rows.iter().map(|row| row.to_vec()).collect();
+        self.accept_sdk_batch(input_id, entries, encoded).await
+    }
+
     pub(super) async fn accept_sdk_batch(
         &self,
         input_id: &str,
@@ -797,13 +823,18 @@ impl InputManager {
         if self.flusher.lock().expect("flusher").is_none() {
             return Err("Pilot output is not configured".into());
         }
+        let batch_bytes = encoded.iter().map(|row| row.len() as u64).sum();
+        self.record_sdk_input(input_id, entries.len(), batch_bytes);
+        self.dispatch_encoded(input_id, entries, encoded).await
+    }
+
+    fn record_sdk_input(&self, input_id: &str, entry_count: usize, batch_bytes: u64) {
         if let Some(counter) = self.counters.lock().expect("counters").get_mut(input_id) {
-            counter.in_events += entries.len() as u64;
-            counter.in_bytes += encoded.iter().map(|row| row.len() as u64).sum::<u64>();
+            counter.in_events += entry_count as u64;
+            counter.in_bytes += batch_bytes;
             counter.last_poll_time = format_time(Local::now());
             counter.last_active_time = now_ms();
         }
-        self.dispatch_encoded(input_id, entries, encoded).await
     }
 
     pub(super) fn accept_sdk_alarm(&self, input_id: &str, row: &serde_json::Value) {
@@ -875,10 +906,20 @@ impl InputManager {
                 );
             }
         });
-        match flusher
+        let result = flusher
             .deliver_prepared_batch(entries, encoded, quota_alarm)
-            .await
-        {
+            .await;
+        self.finish_dispatch(input_id, entry_count, batch_bytes, result)
+    }
+
+    fn finish_dispatch(
+        &self,
+        input_id: &str,
+        entry_count: usize,
+        batch_bytes: u64,
+        result: Result<(), crate::flushers::FlushError>,
+    ) -> Result<(), String> {
+        match result {
             Ok(()) => {
                 if let Some(counter) = self.counters.lock().expect("counters").get_mut(input_id) {
                     counter.out_events += entry_count as u64;

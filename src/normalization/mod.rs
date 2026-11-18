@@ -13,6 +13,7 @@ mod agent_input_dual_write;
 mod agent_system_map;
 mod enrich_git_context;
 mod entry_builder;
+pub(crate) use entry_builder::project_sdk_jsonl_entry;
 mod finish_reason;
 mod global_attributes;
 mod invocation_identity;

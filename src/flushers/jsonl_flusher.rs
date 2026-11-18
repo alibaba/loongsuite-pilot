@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use serde_json::{Map, Value};
 
 use super::base_flusher::{BaseFlusher, FlushError};
-use crate::normalization::{project_encoded_log_entry, SerialiseLogEntryOptions};
+use crate::normalization::{
+    project_encoded_log_entry, project_sdk_jsonl_entry, SerialiseLogEntryOptions,
+};
 use crate::types::{AgentActivityEntry, JsonlFlusherConfig};
 use crate::utils::append_segmented_jsonl_batch;
 use crate::utils::{
@@ -41,6 +43,34 @@ impl JsonlFlusher {
             .join(format!("{agent_type}-{date}.jsonl"))
             .to_string_lossy()
             .to_string()
+    }
+
+    async fn write_sdk_activity(&self, rows: &[&[u8]]) -> Result<(), FlushError> {
+        // Validate and project the complete batch before appending anything.
+        // Only projected rows leave the borrowed callback buffer.
+        let mut groups: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
+        for bytes in rows {
+            let (agent, mut row) = project_sdk_jsonl_entry(bytes)
+                .map_err(|error| FlushError::new(error.to_string()))?;
+            row.push(b'\n');
+            if let Some((_, records)) = groups.last_mut().filter(|(name, _)| *name == agent) {
+                records.push(row);
+            } else {
+                groups.push((agent, vec![row]));
+            }
+        }
+        let limit = self.max_file_bytes();
+        for (agent, records) in groups {
+            append_segmented_jsonl_batch(
+                Path::new(&self.resolve_file_path(&agent)),
+                records,
+                limit,
+                false,
+            )
+            .await
+            .map_err(|error| FlushError::new(error.to_string()))?;
+        }
+        Ok(())
     }
 
     fn max_file_bytes(&self) -> u64 {
@@ -143,6 +173,10 @@ impl BaseFlusher for JsonlFlusher {
         Ok(())
     }
 
+    async fn send_sdk_activity(&self, rows: &[&[u8]]) -> Option<Result<(), FlushError>> {
+        Some(self.write_sdk_activity(rows).await)
+    }
+
     async fn flush(&self) -> Result<(), FlushError> {
         Ok(())
     }
@@ -194,6 +228,44 @@ mod tests {
             config(dir, rotate_daily),
             Arc::new(|| "2026-04-27".to_string()),
         )
+    }
+
+    #[tokio::test]
+    async fn borrowed_sdk_batch_matches_typed_jsonl_and_validates_before_writing() {
+        let typed = tempfile::tempdir().unwrap();
+        let borrowed = tempfile::tempdir().unwrap();
+        let typed_flusher = flusher(typed.path().to_str().unwrap(), true);
+        let borrowed_flusher = flusher(borrowed.path().to_str().unwrap(), true);
+        let entry: AgentActivityEntry = serde_json::from_value(json!({
+            "event.id": "e1",
+            "gen_ai.agent.type": "qoder-cli",
+            "gen_ai.usage.input_tokens": 42,
+            "gen_ai.tool.call.arguments": {"quoted\"key": [1, 2, 3]},
+            "extension.future": {"flag": true},
+            "extension.null": null,
+        }))
+        .unwrap();
+        let bytes = serde_json::to_vec(&entry).unwrap();
+        assert!(borrowed_flusher
+            .send_sdk_activity(&[&bytes, b"invalid"])
+            .await
+            .unwrap()
+            .is_err());
+        let name = "qoder-cli-2026-04-27.jsonl";
+        assert!(!borrowed.path().join(name).exists());
+        typed_flusher
+            .send_prepared_batch(vec![entry], vec![bytes.clone()])
+            .await
+            .unwrap();
+        borrowed_flusher
+            .send_sdk_activity(&[&bytes])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::fs::read(typed.path().join(name)).unwrap(),
+            std::fs::read(borrowed.path().join(name)).unwrap()
+        );
     }
 
     #[tokio::test]
