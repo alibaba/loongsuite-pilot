@@ -12,7 +12,9 @@ export function parsePrometheus(text: string): MulticaRecord[] {
     const labels: MulticaRecord = {};
     for (const label of (match[2] ?? '').matchAll(/([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"\\])*)"/g)) {
       if (!METRIC_LABELS.has(label[1])) continue;
-      labels[label[1]] = safeScalar(label[2].replace(/\\n/g, '\n').replace(/\\(["\\])/g, '$1'))!;
+      const value = label[2].replace(/\\n/g, '\n').replace(/\\(["\\])/g, '$1');
+      // Strip user query content before serializing labels; hash the raw series below.
+      labels[label[1]] = safeScalar(label[1] === 'path' ? value.split('?')[0] : value)!;
     }
     const row: MulticaRecord = {record_type: 'prometheus_sample', source_type: 'prometheus', metric_name: match[1], metric_value: match[3], metric_labels: JSON.stringify(labels)};
     for (const key of ['method', 'route', 'provider', 'model', 'outcome', 'reason', 'failure_reason', 'runtime_mode', 'source', 'claim_path', 'le', 'token_type', 'decision', 'action', 'terminal_status', 'cadence', 'trigger_kind']) if (labels[key] !== undefined) row[key] = labels[key];

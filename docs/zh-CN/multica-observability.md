@@ -31,6 +31,8 @@
 
 `ApiBase` 可省略，`DaemonHealthUrls` 和 `StatFiles` 可按需添加。启用采集至少需要一个可识别的 metrics、daemon health 或公开 API 入口；仅配置日志或文件路径不能确认 Multica 正在运行。
 
+`MaxLogBytes`（默认 1 MiB）必须严格大于 `MaxLineBytes`（默认 16 KiB），为完整日志行及其换行符留出空间；不满足时拒绝加载配置。超过单行上限的日志会分块跳过，后续正常行继续采集。
+
 `flushers` 也可省略。继承安装器的 `--sls-api-key` 时，使用 SLS Protobuf/Bearer API Key 发送，无需开启 Webtracking。目标 `multica-logs` 需已创建，API Key 需具有其写入权限；采集器不负责创建云资源或复制仪表盘。沿用 `webtracking` 模式时，目标 logstore 才需要开启 Webtracking。本采集器支持 `apiKey` 和 `webtracking`，遇到 AK/SK 配置会拒绝启动，不会降级成无认证发送。
 
 配置规则：
@@ -56,6 +58,8 @@ export LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE=off  # 关闭
 开启后每轮检查已配置的目标：有效的 `multica_*` 指标、具有 Multica 结构特征的 daemon `/health`，或具有专用 capability/setup 字段的公开 `/api/config`。普通 HTTP 200、`go_*` 指标、文件名和已安装 CLI 都不算运行证据。旧版 API 缺少可辨识字段时，需要提供 metrics 或 daemon health。
 
 首次未识别时不采业务数据。识别成功后，连续未命中前两次继续采集以保留故障证据，默认第三次锁定停采；成功检测清零计数。`DetectionFailureThreshold` 可设为 1–30。超时、非成功 HTTP 响应和缺少特征均计为未命中，任一候选成功即可。每轮完成后等待 `IntervalSeconds`，默认 30 秒。
+
+标准 Pilot 的首轮检测与采集在后台执行，远端请求和 SLS 确认不会阻塞 runtime 与 interceptor 就绪。停止时取消后续定时任务，并等待正在执行的单轮结束；检查点仍只在 SLS 确认后推进。
 
 锁定后停止采集定时器、探测、采集和待发批次回放，不自动恢复。需要关闭再开启输入配置，或重启采集器。已经在执行的单轮工作会先结束。独立 sidecar 保持空闲存活，避免 Kubernetes 自动重启绕过停止状态。
 

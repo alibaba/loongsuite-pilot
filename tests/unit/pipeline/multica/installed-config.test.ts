@@ -121,11 +121,18 @@ async function installConfig(apiKey = 'test-installer-api-key', collectionMode?:
 
 async function collectInstalledConfig() {
   const config = await loadConfig();
+  logger.info.mockClear();
   manager = new PipelineManager({
     configDir, stateDir, failedLogDir: path.join(directory, 'failed'), dataDir: directory,
     pipelineConfig: config.pipeline, sls: config.flushers.sls,
   });
   await manager.start();
+  // Pipeline startup schedules collection in the background so it cannot
+  // block Pilot readiness. Wait for this cycle before stopping the manager.
+  await vi.waitFor(() => {
+    expect(logger.info.mock.calls.some(([message, state]) => message === 'collection cycle complete'
+      || (message === 'Multica collection activation' && state.enabled === false))).toBe(true);
+  }, {timeout: 5_000});
   await manager.stop();
   manager = undefined;
 }
