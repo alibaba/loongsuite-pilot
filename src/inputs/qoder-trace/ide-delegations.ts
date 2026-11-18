@@ -21,6 +21,8 @@ interface Work {
   file: string; cwd?: string; at: number; done?: boolean; invoke?: boolean; result?: boolean;
   peer?: string; request?: string;
   search?: { nextIndex: number };
+  actor?: string;
+  incoming?: Record<string, string>;
 }
 export interface IdeMessage {
   id: string; role: string; gmt_create: number; tool_call_id?: string;
@@ -76,7 +78,9 @@ export class QoderIdeDelegations {
     if (saved && typeof saved === 'object') for (const [key, value] of Object.entries(saved).slice(-MAX_WORK)) {
       const work = value as Work;
       if (work?.id === key && /^[0-9a-f]{32}$/.test(key) && id(work.session) && id(work.call)
-        && /^[0-9a-f]{32}$/.test(work.trace) && /^[0-9a-f]{16}$/.test(work.span)
+        && typeof work.turn === 'string' && work.turn.length > 0
+        && /^[0-9a-f]{32}$/.test(work.trace) && !/^0+$/.test(work.trace)
+        && /^[0-9a-f]{16}$/.test(work.span) && !/^0+$/.test(work.span)
         && typeof work.file === 'string' && path.isAbsolute(work.file)
         && Number.isFinite(work.at) && now - work.at < MAX_AGE) state[key] = { ...work, ...(work.search ? { search: { ...work.search } } : {}) };
     }
@@ -121,7 +125,12 @@ export class QoderIdeDelegations {
           }
           state[key] = { id: key, session, turn, call, trace: record.trace_id,
             span: hash(['qoder-tool', session, turn, call]).slice(0, 16), file,
-            cwd: record['agent.qoder.cwd'], at: now };
+            cwd: record['agent.qoder.cwd'], at: now,
+            ...(typeof record['user.id'] === 'string' ? { actor: record['user.id'] } : {}),
+            incoming: Object.fromEntries(['gen_ai.agent.scope', 'gen_ai.agent.name', 'gen_ai.agent.parent.id',
+              'gen_ai.agent.parent.invocation.id', 'gen_ai.subagent.parent_tool_call.id', 'agent.qoder.parent_turn_id', 'parent_span_id']
+              .filter(key => typeof record[key] === 'string' && record[key].length <= 512).map(key => [key, record[key]])),
+          };
         }
       }
     };
@@ -163,7 +172,7 @@ export class QoderIdeDelegations {
           ...(work.peer ? { 'gen_ai.agent.peer.id': work.peer } : {}),
           ...(call['gen_ai.tool.call.arguments']?.subagent_type ? { 'gen_ai.agent.peer.name': call['gen_ai.tool.call.arguments'].subagent_type } : {}) };
         for (const record of current) Object.assign(record, identity, { span_id: work.span });
-        const base = { ...call, ...identity, 'gen_ai.agent.type': 'qoder',
+        const base = { ...work.incoming, ...(work.actor ? { 'user.id': work.actor } : {}), ...call, ...identity, 'gen_ai.agent.type': 'qoder',
           'gen_ai.session.id': work.session, 'gen_ai.turn.id': work.turn, trace_id: work.trace,
           'gen_ai.tool.call.id': work.call, 'gen_ai.tool.name': 'Agent',
           ...(work.cwd ? { 'agent.qoder.cwd': work.cwd } : {}) };
@@ -193,7 +202,7 @@ export class QoderIdeDelegations {
         const directory = await fs.realpath(path.dirname(work.file));
         if (path.dirname(await fs.realpath(childPath)) !== directory) throw new Error('IDE child path escapes transcript directory');
         const native = await read(childPath);
-        const records = this.buildChild(work, peer, native, call, base);
+        const records = this.buildChild(work, peer, native, call, base, result);
         if (!records) continue;
         emitted.push(...records); available.push(...records); work.done = true;
         const oldKeys = new Set(Object.keys(state)); register(records);
@@ -207,7 +216,7 @@ export class QoderIdeDelegations {
     return { records: emitted, state, changed: JSON.stringify(state) !== before };
   }
 
-  private buildChild(work: Work, peer: IdeDelegation, native: RecordData[], call: RecordData, base: RecordData): RecordData[] | null {
+  private buildChild(work: Work, peer: IdeDelegation, native: RecordData[], call: RecordData, base: RecordData, result?: RecordData): RecordData[] | null {
     const tools = new Map<string, { call?: RecordData; result?: RecordData }>();
     for (const row of native) {
       if (row.sessionId !== peer.session) return null;
@@ -252,8 +261,9 @@ export class QoderIdeDelegations {
       resourceAttributes: base.resourceAttributes ?? {},
     }, work.cwd);
     // IDE child transcripts omit text-only responses. Their native SQLite
-    // assistant IDs/usage still prove the calls. Emit metadata without inventing
-    // response text or a provider finish reason (the Agent result is separate).
+    // assistant IDs/usage still prove the calls. For a successful foreground
+    // Agent, the delivered tool result is its final assistant reply. Do not
+    // reuse it for intermediate calls, failures or asynchronous receipts.
     const requests = records.filter(record => record['event.name'] === 'llm.request');
     if (requests.length !== assistants.length) return null;
     for (let i = 0; i < assistants.length; i++) {
@@ -267,6 +277,12 @@ export class QoderIdeDelegations {
         time_unix_nano: nano(Number(message.gmt_create)), 'agent.source': 'qoder-ide-sqlite-metadata' });
       const response = records[records.indexOf(request) + 1]!;
       delete response['gen_ai.input.messages_delta'];
+      const delivered = result?.['gen_ai.tool.call.result'];
+      if (i === assistants.length - 1 && result?.['tool.result.status'] === 'success'
+        && typeof delivered === 'string' && delivered.length) {
+        response['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: delivered }] }];
+        response['agent.source'] = 'qoder-ide-agent-result';
+      }
     }
     for (let i = 0; i < records.length; i++) {
       const record = records[i]!;

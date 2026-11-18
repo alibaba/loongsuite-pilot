@@ -48,7 +48,7 @@ beforeEach(async () => {
   root = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-ide-delegations-')), 'transcript');
   await fs.mkdir(root); await child();
 });
-afterEach(async () => { await fs.rm(path.dirname(root), { recursive: true, force: true }); });
+afterEach(async () => { vi.restoreAllMocks(); await fs.rm(path.dirname(root), { recursive: true, force: true }); });
 
 describe('Qoder IDE native request delegation', () => {
   it('preserves the child session/turn, exact model usage and incoming identity on every child event', async () => {
@@ -68,7 +68,8 @@ describe('Qoder IDE native request delegation', () => {
     const responses = children.filter(row => row['event.name'] === 'llm.response');
     expect(responses.map(row => row['gen_ai.response.id'])).toEqual(['model-request-1-1', 'model-request-1-2']);
     expect(responses.map(row => row['gen_ai.usage.input_tokens'])).toEqual([100, 200]);
-    expect(responses[1]!['gen_ai.output.messages']).toBeUndefined();
+    expect(responses[1]!['gen_ai.output.messages']).toEqual([{ role: 'assistant', parts: [{ type: 'text', content: 'delivered-native-result' }] }]);
+    expect(responses[1]!['agent.source']).toBe('qoder-ide-agent-result');
     expect(responses[1]!['gen_ai.response.finish_reasons']).toBeUndefined();
     expect(JSON.stringify(batch.state)).not.toContain(secret);
     expect(JSON.stringify(batch.state)).not.toContain('synthetic-file-result');
@@ -122,6 +123,33 @@ describe('Qoder IDE native request delegation', () => {
     const batch = await new QoderIdeDelegations(async () => detail('request-1', 'missing-native-tool')).collect(await parent(), {});
     expect(batch.records.some(row => row['gen_ai.session.id'] === 'child')).toBe(false);
     expect(Object.values(batch.state)[0]!.done).not.toBe(true);
+  });
+
+  it('does not use an Agent error as a successful final model reply', async () => {
+    const input = await parent(); input[1]!['tool.result.status'] = 'error';
+    const batch = await new QoderIdeDelegations(async () => detail()).collect(input, {});
+    const result = batch.records.find(row => row['event.name'] === 'gen_ai.agent.result')!;
+    expect(result['tool.result.status']).toBe('error');
+    const last = batch.records.filter(row => row['event.name'] === 'llm.response').at(-1)!;
+    expect(last['gen_ai.output.messages']).toBeUndefined();
+    expect(last['gen_ai.response.finish_reasons']).toBeUndefined();
+  });
+
+  it('waits for the final SQLite model row rather than committing an earlier tool-only snapshot', async () => {
+    const metadata = detail(); metadata.messages.pop(); metadata.tokens.pop();
+    const batch = await new QoderIdeDelegations(async () => metadata).collect(await parent(), {});
+    expect(batch.records.some(row => row['gen_ai.session.id'] === 'child')).toBe(false);
+    expect(Object.values(batch.state)[0]!.done).not.toBe(true);
+  });
+
+  it('rotates pending lookups beyond the per-cycle budget even as retries expire', async () => {
+    let clock = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const input = (await Promise.all(Array.from({ length: 24 }, (_, i) => parent(`queued-${i}`)))).flat();
+    const calls = new Set<string>();
+    const reader = new QoderIdeDelegations(async (_session, call) => { calls.add(call); return null; });
+    let batch = await reader.collect(input, {});
+    for (let i = 0; i < 5; i++) { clock += 6000; batch = await reader.collect([], batch.state); }
+    expect(calls.size).toBe(24);
   });
 
   it.each(['qoder-cli', 'qoder-app', 'qoder-cn', 'qoder-idea'])('preserves the separate %s protocol', async type => {

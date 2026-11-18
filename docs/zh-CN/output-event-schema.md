@@ -189,7 +189,7 @@ Qoder 产品入口：IDE 输出 `gen_ai.agent.type=qoder`，终端 CLI 输出 `q
 
 Qoder IDE 子运行使用独立 session，与 CLI 的共享 session sidechain 协议不同。IDE 适配通过只读 SQLite `chat_record.parent_session_id`、`parent_tool_call_id` 和 `request_id` 确认委派；父 `Agent` 工具产生稳定的 invoke/result 日志，子事件保留原生 session、独立 turn 和 incoming invocation，连接到立即父工具。复用 session 时按原生 request 分开，嵌套工作分别保留 incoming/outgoing invocation。缺少或冲突的关联证据保持待定，不按 Agent 名称或相近时间绑定。
 
-子工具参数和结果来自对应 transcript，通过 SQLite 的精确 `toolCallId` 归属到原生请求；模型调用 ID、模型和 usage 来自该请求的 SQLite 元数据。IDE 1.37 的子 transcript 可能省略纯文本模型响应，此时保留模型调用及 Token，省略不可见的响应正文和 finish reason；父工具实际交付的结果仍作为 Agent result。异步受理不作为成功 Agent result。该适配不读取或解密数据库中的会话正文，生成的事件与其他输入经过相同的内容开关和脱敏处理；checkpoint 仅保存关联 ID 和源定位，不保存正文。
+子工具参数和结果来自对应 transcript，通过 SQLite 的精确 `toolCallId` 归属到原生请求；模型调用 ID、模型和 usage 来自该请求的 SQLite 元数据。IDE 1.37 的子 transcript 可能省略纯文本模型响应：成功前台运行的最后一条子模型回复使用父 `Agent` 工具实际交付的原生回答，来源标记为 `qoder-ide-agent-result`；中间响应或失败运行缺少正文时保持缺失，不补造 finish reason。父工具实际交付的结果同时作为 Agent result，异步受理不作为成功结果。该适配不读取或解密数据库中的会话正文，生成的事件与其他输入经过相同的内容开关和脱敏处理；checkpoint 仅保存关联 ID 和源定位，不保存正文。
 
 工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
 
