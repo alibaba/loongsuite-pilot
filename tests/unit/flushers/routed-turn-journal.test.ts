@@ -33,3 +33,26 @@ it('keeps the QwenPaw capacity budget independent of Codex and routes replay and
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+it('isolates an unreadable QwenPaw recovery directory without accepting its new events', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'routed-journal-failure-'));
+  const broken = path.join(root, 'not-a-directory');
+  await fs.writeFile(broken, 'synthetic failure');
+  const codex = new CodexTurnJournal(path.join(root, 'codex'), 100, ['codex']);
+  const qwen = new CodexTurnJournal(broken, 100, ['qwenpaw']);
+  const journal = new RoutedTurnJournal([codex, qwen], [qwen]);
+  const event = (agent: string, id: string) => ({ 'user.id': 'user', 'gen_ai.agent.type': agent,
+    'gen_ai.session.id': `s-${id}`, 'gen_ai.turn.id': `t-${id}`, 'event.id': id,
+    'event.name': 'other', time_unix_nano: '1700000000000000000' }) as AgentActivityEntry;
+  try {
+    const first = event('codex', 'first');
+    await journal.append([first]);
+    const replayed: AgentActivityEntry[] = [];
+    for await (const batch of journal.loadBatches()) replayed.push(...batch.entries);
+    expect(replayed.map(row => row['event.id'])).toEqual(['first']);
+    await journal.append([event('codex', 'second')]);
+    await expect(journal.append([event('qwenpaw', 'blocked')])).rejects.toThrow();
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

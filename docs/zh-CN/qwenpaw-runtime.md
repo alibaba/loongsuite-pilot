@@ -67,7 +67,7 @@ QwenPaw 2.2.1b1 将 Dream 入口迁移到通用 `run_action("auto_dream", ...)`�
 
 每轮最多轮询四个进程文件、每文件读取 16 MiB，超过 16 MiB 的单条记录会告警并跳过；不完整尾行会等待后续写入。长轮次正文暂存在本机临时文件并按预算分批转换和导出，避免在内存中同时展开全部 Span。原始日志只有在消费进度已持久化、文件足够旧且写入进程已退出时才会回收；活动或未消费日志可能继续增长，请监控数据目录空间。
 
-启用 OTLP 时，未结束轮次保存在 `logs/qwenpaw-pending-turns/`，其容量与 Codex/Hermes/OpenClaw 的 journal 分开，默认上限为 512 MiB。`LOONGSUITE_CODEX_PENDING_MAX_BYTES` 可同时调整各 journal 的独立上限；达到上限时暂停推进对应输入的 checkpoint，保留来源等待恢复。journal 包含经内容策略和脱敏处理后的事件，并在完整导出成功后确认和清理；若 OTLP 内容捕获关闭，journal 不保留消息和工具内容。
+启用 OTLP 时，未结束轮次保存在 `logs/qwenpaw-pending-turns/`，其容量与 Codex/Hermes/OpenClaw 的 journal 分开，默认上限为 512 MiB。`LOONGSUITE_CODEX_PENDING_MAX_BYTES` 可同时调整各 journal 的独立上限；达到上限时暂停推进对应输入的 checkpoint，保留来源等待恢复。journal 包含经内容策略和脱敏处理后的事件，并在完整导出成功后确认和清理；若 OTLP 内容捕获关闭，journal 不保留消息和工具内容。启动时若 QwenPaw 的 journal 无法读取，该输入会保留 checkpoint 并等待修复后重启，其他 Agent 的 journal 不受影响。
 
 ## 兼容和验证
 

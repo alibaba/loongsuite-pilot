@@ -122,4 +122,39 @@ describe('QwenPaw turn across a collector restart', () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it('continues exporting Codex while a damaged QwenPaw recovery directory blocks only QwenPaw', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwenpaw-journal-isolation-'));
+    const broken = path.join(root, 'broken-qwenpaw-journal');
+    await fs.writeFile(broken, 'not a directory');
+    const codex = new CodexTurnJournal(path.join(root, 'codex-journal'), 10_000, ['codex']);
+    const qwen = new CodexTurnJournal(broken, 10_000, ['qwenpaw']);
+    const journal = new RoutedTurnJournal([codex, qwen], [qwen]);
+    const spans: ReadableSpan[] = [];
+    const flusher = new OtlpTraceFlusher({ enabled: true, serviceName: 'isolated', protocol: 'http/protobuf', dataDir: root,
+      endpoints: [{ endpoint: 'http://unused:4318' }] }, undefined,
+    () => ({ export: (batch, done) => { spans.push(...batch); done({ code: 0 }); }, shutdown: async () => {} }), journal);
+    const base = { 'user.id': 'tester', 'gen_ai.agent.type': 'codex', 'gen_ai.session.id': 'codex-session',
+      'gen_ai.turn.id': 'codex-turn', 'gen_ai.provider.name': 'openai', 'gen_ai.request.model': 'test-model' };
+    const codexRecords = [
+      { ...base, 'event.id': 'prompt', 'event.name': 'other', time_unix_nano: '1700000000000000000',
+        'gen_ai.input.messages': [{ role: 'user', parts: [{ type: 'text', content: 'task' }] }] },
+      { ...base, 'event.id': 'request', 'event.name': 'llm.request', time_unix_nano: '1700000000001000000' },
+      { ...base, 'event.id': 'response', 'event.name': 'llm.response', time_unix_nano: '1700000000002000000',
+        'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'answer' }] }],
+        'gen_ai.usage.input_tokens': 12, 'gen_ai.usage.output_tokens': 3 },
+      { ...base, 'event.id': 'end', 'event.name': 'other', time_unix_nano: '1700000000003000000',
+        'gen_ai.turn.end': true, 'agent.codex.turn_status': 'completed' },
+    ] as AgentActivityEntry[];
+    try {
+      await flusher.start();
+      await expect(flusher.sendBatch(turn().slice(0, 4))).rejects.toMatchObject({ name: 'CodexTurnJournalError' });
+      await flusher.sendBatch(codexRecords);
+      expect(spans.map(span => span.attributes['gen_ai.session.id'])).toContain('codex-session');
+      expect(await codex.isAcknowledged(codexRecords[0])).toBe(true);
+    } finally {
+      await flusher.shutdown();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
