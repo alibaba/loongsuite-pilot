@@ -16,6 +16,81 @@ fn settings() -> Delivery {
     }
 }
 
+impl Outbox {
+    async fn accept_fixture(
+        &self,
+        source: &str,
+        store: &StateStore,
+        rows: &[Vec<u8>],
+        cancelled: &AtomicBool,
+    ) -> anyhow::Result<()> {
+        let entries: Vec<AgentActivityEntry> = rows
+            .iter()
+            .filter_map(|row| serde_json::from_slice(row).ok())
+            .collect();
+        self.accept(source, store, rows, &usage_updates(&entries), cancelled)
+            .await
+    }
+}
+
+#[test]
+fn checkpoint_save_only_rewrites_when_source_progress_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let queue = Outbox::open(dir.path(), settings()).unwrap();
+    let progress = r#"{"qoder-trace":{"lastOffset":97}}"#;
+    queue.checkpoint("source", progress).unwrap();
+    let changes = queue.db.lock().unwrap().total_changes();
+
+    queue.checkpoint("source", progress).unwrap();
+    assert_eq!(queue.db.lock().unwrap().total_changes(), changes);
+
+    let advanced = r#"{"qoder-trace":{"lastOffset":101}}"#;
+    queue.checkpoint("source", advanced).unwrap();
+    assert_eq!(queue.db.lock().unwrap().total_changes(), changes + 1);
+    assert_eq!(
+        queue.saved_checkpoints().unwrap(),
+        vec![("source".into(), advanced.into())]
+    );
+}
+
+#[tokio::test]
+async fn partial_batch_waits_until_due_and_handles_clock_rollback() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = Delivery {
+        flush_interval_ms: 60_000,
+        ..settings()
+    };
+    let queue = Outbox::open(dir.path(), options.clone()).unwrap();
+    let store = StateStore::new(dir.path().join("state"));
+    let row = br#"{"event.id":"one"}"#.to_vec();
+    queue
+        .accept_fixture(
+            "source",
+            &store,
+            std::slice::from_ref(&row),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+
+    let (pending, wait) = queue.delivery_batch(&options).unwrap();
+    assert!(pending.is_empty() && !wait.is_zero());
+
+    queue
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE event SET created=?1",
+            [chrono::Utc::now().timestamp_millis() + 60_000],
+        )
+        .unwrap();
+    let (ready, wait) = queue.delivery_batch(&options).unwrap();
+    assert!(wait.is_zero());
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].1, row);
+}
+
 #[tokio::test]
 async fn transaction_recovers_original_bytes_and_checkpoint_without_json_save() {
     let dir = tempfile::tempdir().unwrap();
@@ -26,7 +101,7 @@ async fn transaction_recovers_original_bytes_and_checkpoint_without_json_save() 
         br#"{"event.id":"original","extension":{"integer":"18446744073709551615"}}"#.to_vec();
     let queue = Outbox::open(dir.path(), settings()).unwrap();
     queue
-        .accept(
+        .accept_fixture(
             "source",
             &store,
             std::slice::from_ref(&original),
@@ -35,6 +110,12 @@ async fn transaction_recovers_original_bytes_and_checkpoint_without_json_save() 
         .await
         .unwrap();
     assert!(!path.exists());
+    let text = Outbox::read_persisted_checkpoint(dir.path(), "source")
+        .unwrap()
+        .unwrap();
+    let committed = StateStore::new(&path);
+    committed.load_checkpoint_text(&text).unwrap();
+    assert_eq!(committed.get_offset("qoder-trace"), 97.0);
     drop(queue);
     let recovered = Outbox::open(dir.path(), settings()).unwrap();
     recovered.restore("source", &path).unwrap();
@@ -100,7 +181,7 @@ async fn retry_and_ack_loss_keep_original_bytes_and_event_ids() {
         br#"{"event.id":"two","unknown":[1,false,null]}"#.to_vec(),
     ];
     queue
-        .accept("source", &store, &original, &AtomicBool::new(false))
+        .accept_fixture("source", &store, &original, &AtomicBool::new(false))
         .await
         .unwrap();
     // A real SQLite write failure models ACK received before its durable removal.
@@ -151,14 +232,14 @@ async fn capacity_update_unblocks_acceptance_without_advancing_old_durable_curso
     let store = Arc::new(StateStore::new(dir.path().join("state")));
     store.set("input", InputState::new().with_last_offset(1.0));
     queue
-        .accept("source", &store, &[vec![b'x'; 48]], &AtomicBool::new(false))
+        .accept_fixture("source", &store, &[vec![b'x'; 48]], &AtomicBool::new(false))
         .await
         .unwrap();
     store.set("input", InputState::new().with_last_offset(2.0));
     let q = queue.clone();
     let s = store.clone();
     let task = tokio::spawn(async move {
-        q.accept("source", &s, &[vec![b'y'; 48]], &AtomicBool::new(false))
+        q.accept_fixture("source", &s, &[vec![b'y'; 48]], &AtomicBool::new(false))
             .await
     });
     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -205,7 +286,7 @@ async fn invalid_ack_is_retry_and_corrupt_outbox_is_never_replaced() {
     let queue = Outbox::open(dir.path(), settings()).unwrap();
     let store = StateStore::new(dir.path().join("state"));
     queue
-        .accept(
+        .accept_fixture(
             "source",
             &store,
             &[br#"{"event.id":"stable"}"#.to_vec()],
@@ -239,7 +320,7 @@ async fn token_totals_commit_with_progress_survive_ack_and_restart_without_count
     let queue = Outbox::open(&root.path().join("outbox"), Delivery::default()).unwrap();
     let encoded=serde_json::to_vec(&json!({"event.name":"llm.response","event.id":"usage-original","gen_ai.agent.type":"codex","time_unix_nano":"1794066484438000000","gen_ai.usage.input_tokens":64,"gen_ai.usage.output_tokens":32,"gen_ai.usage.cache_read.input_tokens":8})).unwrap();
     queue
-        .accept("source", &state, &[encoded], &AtomicBool::new(false))
+        .accept_fixture("source", &state, &[encoded], &AtomicBool::new(false))
         .await
         .unwrap();
     assert_eq!(queue.token_rows()[0]["input_tokens_total"], 64);
@@ -264,7 +345,7 @@ async fn token_counter_saturates_without_rolling_back_collection_progress() {
     let q = Outbox::open(&root.path().join("outbox"), Delivery::default()).unwrap();
     let row=serde_json::to_vec(&json!({"event.name":"llm.response","gen_ai.agent.type":"codex","time_unix_nano":"1794066484438000000","gen_ai.usage.input_tokens":i64::MAX})).unwrap();
     for _ in 0..2 {
-        q.accept(
+        q.accept_fixture(
             "source",
             &state,
             std::slice::from_ref(&row),
@@ -287,7 +368,7 @@ async fn trace_gauges_use_durable_queue_counters_and_do_not_fabricate_failed_rea
     let store = StateStore::new(root.path().join("state.json"));
     let q = Outbox::open(&root.path().join("outbox"), Delivery::default()).unwrap();
     let bytes = b"{\"event.name\":\"other\"}".to_vec();
-    q.accept(
+    q.accept_fixture(
         "source",
         &store,
         std::slice::from_ref(&bytes),

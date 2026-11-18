@@ -4,8 +4,11 @@ use super::json_file::JVal;
 use std::path::Path;
 
 pub(super) async fn read_json(path: &Path) -> Option<JVal> {
-    let text = tokio::fs::read_to_string(path).await.ok()?;
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    parse(&tokio::fs::read_to_string(path).await.ok()?)
+}
+
+pub(super) fn parse(text: &str) -> Option<JVal> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     serde_json::from_str(text)
         .ok()
         .or_else(|| recover_overflowing_numbers(text))

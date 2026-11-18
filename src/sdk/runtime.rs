@@ -1,4 +1,4 @@
-use super::outbox::{CallbackOutboxFlusher, Outbox};
+use super::outbox::{write_checkpoint, CallbackOutboxFlusher, Outbox};
 use super::policy::{AgentPlan, Init, Policy};
 use crate::checkpoints::StateStore;
 use crate::core::{InputManager, LiveInput};
@@ -360,18 +360,16 @@ fn run_agent(
     runtime.block_on(store.load());
     let journal = queue.clone();
     let source = namespace.clone();
-    store.set_write_hook(move |path, text| {
+    // The outbox is authoritative after an interruption. Keep the JSON
+    // mirror at activation and shutdown for existing recovery tooling.
+    store.set_write_hook(move |_, text| {
         let queue = journal.clone();
         let source = source.clone();
-        async move {
-            queue.checkpoint(&source, &text)?;
-            write_checkpoint(&path, &text)?;
-            Ok(())
-        }
+        async move { queue.checkpoint(&source, &text) }
     });
     let flusher = Arc::new(CallbackOutboxFlusher {
         queue: queue.clone(),
-        source: namespace,
+        source: namespace.clone(),
         store: store.clone(),
         cancelled: cancel.clone(),
     });
@@ -553,6 +551,7 @@ fn run_agent(
     });
     drop(runtime);
     source_access::install(None);
+    queue.restore(&namespace, &checkpoint)?;
     *report.lock().unwrap() = json!({"state":"stopped"});
     Ok(())
 }
@@ -602,19 +601,6 @@ async fn import_pilot_checkpoint(
     Ok(())
 }
 
-fn write_checkpoint(path: &Path, text: &str) -> anyhow::Result<()> {
-    use std::io::Write;
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("checkpoint parent"))?;
-    source_access::private_path(path)?;
-    std::fs::create_dir_all(parent)?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    temp.write_all(text.as_bytes())?;
-    temp.as_file().sync_all()?;
-    temp.persist(path)?;
-    Ok(())
-}
 struct AuthorizedReaders {
     databases: Vec<String>,
     standalone: bool,

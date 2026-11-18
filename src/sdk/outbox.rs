@@ -4,7 +4,7 @@ use super::abi::{OnBatch, PilotJsonView, ACK};
 use super::policy::Delivery;
 use crate::checkpoints::StateStore;
 use crate::flushers::{BaseFlusher, FlushError};
-use crate::types::AgentActivityEntry;
+use crate::types::{AgentActivityEntry, AgentEventName};
 use async_trait::async_trait;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -15,31 +15,15 @@ use std::time::{Duration, Instant};
 
 type DeliveryRows = Vec<(i64, Vec<u8>)>;
 
-#[derive(serde::Deserialize)]
-struct UsageProjection {
-    #[serde(rename = "event.name", default)]
-    event: String,
-    #[serde(rename = "gen_ai.agent.type", default)]
-    agent: String,
-    #[serde(default)]
-    time_unix_nano: String,
-    #[serde(rename = "gen_ai.usage.input_tokens")]
-    input: Option<i64>,
-    #[serde(rename = "gen_ai.usage.output_tokens")]
-    output: Option<i64>,
-    #[serde(rename = "gen_ai.usage.cache_read.input_tokens")]
-    cache_read: Option<i64>,
-    #[serde(rename = "gen_ai.usage.cache_creation.input_tokens")]
-    cache_creation: Option<i64>,
-}
+const SAVE_CHECKPOINT: &str = "INSERT INTO checkpoint VALUES(?1,?2)
+    ON CONFLICT(source) DO UPDATE SET json=excluded.json WHERE checkpoint.json<>excluded.json";
 
-fn usage_updates(rows: &[Vec<u8>]) -> std::collections::BTreeMap<(String, String), [i64; 6]> {
-    let mut totals = std::collections::BTreeMap::new();
-    for bytes in rows {
-        let Ok(row) = serde_json::from_slice::<UsageProjection>(bytes) else {
-            continue;
-        };
-        if row.event != "llm.response" || row.agent.is_empty() {
+type UsageUpdates = std::collections::BTreeMap<(String, String), [i64; 6]>;
+
+fn usage_updates<'a>(rows: impl IntoIterator<Item = &'a AgentActivityEntry>) -> UsageUpdates {
+    let mut totals = UsageUpdates::new();
+    for row in rows {
+        if row.event_name != Some(AgentEventName::LlmResponse) || row.agent_type.is_empty() {
             continue;
         }
         let Some(day) = row
@@ -52,15 +36,15 @@ fn usage_updates(rows: &[Vec<u8>]) -> std::collections::BTreeMap<(String, String
             continue;
         };
         let value = totals
-            .entry((row.agent, day.format("%Y-%m-%d").to_string()))
+            .entry((row.agent_type.clone(), day.format("%Y-%m-%d").to_string()))
             .or_insert([0i64; 6]);
         let delta = [
             1,
-            i64::from(row.input.is_some() || row.output.is_some()),
-            row.input.unwrap_or(0),
-            row.output.unwrap_or(0),
-            row.cache_read.unwrap_or(0),
-            row.cache_creation.unwrap_or(0),
+            i64::from(row.input_tokens.is_some() || row.output_tokens.is_some()),
+            row.input_tokens.unwrap_or(0),
+            row.output_tokens.unwrap_or(0),
+            row.cache_read_input_tokens.unwrap_or(0),
+            row.cache_creation_input_tokens.unwrap_or(0),
         ];
         for (sum, v) in value.iter_mut().zip(delta) {
             *sum = sum.saturating_add(v.max(0));
@@ -96,12 +80,7 @@ impl Outbox {
     pub fn open(root: &Path, options: Delivery) -> anyhow::Result<Arc<Self>> {
         crate::utils::source_access::private_path(root)?;
         std::fs::create_dir_all(root)?;
-        let path = root.join("delivery.sqlite");
-        for suffix in ["", "-wal", "-shm"] {
-            crate::utils::source_access::private_path(
-                &root.join(format!("delivery.sqlite{suffix}")),
-            )?;
-        }
+        let path = Self::database_path(root)?;
         let db = Connection::open_with_flags(
             &path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -404,25 +383,42 @@ impl Outbox {
             tokio::select! {_=notified=>{},_=tokio::time::sleep(Duration::from_millis(100))=>{}}
         }
     }
-    pub fn restore(&self, source: &str, path: &Path) -> anyhow::Result<()> {
+    fn database_path(root: &Path) -> anyhow::Result<PathBuf> {
+        for suffix in ["", "-wal", "-shm"] {
+            crate::utils::source_access::private_path(
+                &root.join(format!("delivery.sqlite{suffix}")),
+            )?;
+        }
+        Ok(root.join("delivery.sqlite"))
+    }
+
+    fn find_checkpoint(db: &Connection, source: &str) -> anyhow::Result<Option<String>> {
         use rusqlite::OptionalExtension;
-        let checkpoint = self
-            .db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT json FROM checkpoint WHERE source=?1",
-                [source],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?;
+        Ok(db
+            .prepare_cached("SELECT json FROM checkpoint WHERE source=?1")?
+            .query_row([source], |row| row.get(0))
+            .optional()?)
+    }
+
+    pub(crate) fn read_persisted_checkpoint(
+        root: &Path,
+        source: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let db = Connection::open_with_flags(
+            Self::database_path(root)?,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        db.busy_timeout(Duration::from_secs(1))?;
+        Self::find_checkpoint(&db, source)
+    }
+
+    pub fn restore(&self, source: &str, path: &Path) -> anyhow::Result<()> {
+        let checkpoint = Self::find_checkpoint(&self.db.lock().unwrap(), source)?;
         crate::utils::source_access::private_path(path)?;
         if let Some(text) = checkpoint {
-            std::fs::create_dir_all(
-                path.parent()
-                    .ok_or_else(|| anyhow::anyhow!("checkpoint parent"))?,
-            )?;
-            std::fs::write(path, text)?;
+            write_checkpoint(path, &text)?;
         }
         Ok(())
     }
@@ -434,7 +430,11 @@ impl Outbox {
     }
 
     pub fn checkpoint(&self, source: &str, text: &str) -> anyhow::Result<()> {
-        self.db.lock().unwrap().execute("INSERT INTO checkpoint VALUES(?1,?2) ON CONFLICT(source) DO UPDATE SET json=excluded.json",params![source,text])?;
+        self.db
+            .lock()
+            .unwrap()
+            .prepare_cached(SAVE_CHECKPOINT)?
+            .execute(params![source, text])?;
         Ok(())
     }
     async fn accept(
@@ -442,10 +442,10 @@ impl Outbox {
         source: &str,
         store: &StateStore,
         encoded: &[Vec<u8>],
+        usage: &UsageUpdates,
         cancelled: &AtomicBool,
     ) -> anyhow::Result<()> {
         let bytes = encoded.iter().map(Vec::len).sum::<usize>();
-        let usage = usage_updates(encoded);
         loop {
             let notified = self.capacity_changed.notified();
             anyhow::ensure!(
@@ -486,11 +486,12 @@ impl Outbox {
                                 ])?;
                             }
                         }
-                        for ((agent, day), totals) in &usage {
+                        for ((agent, day), totals) in usage {
                             tx.execute("INSERT INTO token_usage VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(agent,day) DO UPDATE SET responses=CASE WHEN responses>9223372036854775807-excluded.responses THEN 9223372036854775807 ELSE responses+excluded.responses END,with_usage=CASE WHEN with_usage>9223372036854775807-excluded.with_usage THEN 9223372036854775807 ELSE with_usage+excluded.with_usage END,input=CASE WHEN input>9223372036854775807-excluded.input THEN 9223372036854775807 ELSE input+excluded.input END,output=CASE WHEN output>9223372036854775807-excluded.output THEN 9223372036854775807 ELSE output+excluded.output END,cache_read=CASE WHEN cache_read>9223372036854775807-excluded.cache_read THEN 9223372036854775807 ELSE cache_read+excluded.cache_read END,cache_creation=CASE WHEN cache_creation>9223372036854775807-excluded.cache_creation THEN 9223372036854775807 ELSE cache_creation+excluded.cache_creation END",
                                 params![agent,day,totals[0],totals[1],totals[2],totals[3],totals[4],totals[5]])?;
                         }
-                        tx.execute("INSERT INTO checkpoint VALUES(?1,?2) ON CONFLICT(source) DO UPDATE SET json=excluded.json",params![source,store.snapshot_text()])?;
+                        tx.prepare_cached(SAVE_CHECKPOINT)?
+                            .execute(params![source, store.snapshot_text()])?;
                         tx.commit()?;
                         true
                     } else {
@@ -520,36 +521,16 @@ impl Outbox {
         let mut last_alarm = None;
         while !self.stopping.load(Ordering::SeqCst) {
             let options = self.options.read().unwrap().clone();
-            let selected = self.read_batch(&options);
-            let (rows, oldest) = match selected {
-                Ok(v) => v,
-                Err(e) => {
-                    self.alarm("SDK_OUTBOX_READ", &e.to_string());
-                    self.wait(Duration::from_millis(1000));
+            let (rows, wait) = match self.delivery_batch(&options) {
+                Ok(batch) => batch,
+                Err(error) => {
+                    self.alarm("SDK_OUTBOX_READ", &error.to_string());
+                    self.wait(Duration::from_secs(1));
                     continue;
                 }
             };
             if rows.is_empty() {
-                self.wait(Duration::from_millis(options.flush_interval_ms));
-                continue;
-            }
-            let bytes = rows.iter().map(|(_, row)| row.len()).sum::<usize>();
-            if rows[0].1.len() > options.max_event_bytes
-                || rows[0].1.len() > options.max_batch_bytes
-            {
-                self.alarm(
-                    "SDK_EVENT_OVERSIZE",
-                    "retained event exceeds current delivery limit",
-                );
-                self.wait(Duration::from_millis(1000));
-                continue;
-            }
-            let age = chrono::Utc::now().timestamp_millis().saturating_sub(oldest) as u64;
-            if rows.len() < options.max_events_per_batch
-                && bytes < options.max_batch_bytes
-                && age < options.flush_interval_ms
-            {
-                self.wait(Duration::from_millis(options.flush_interval_ms - age));
+                self.wait(wait);
                 continue;
             }
             let views: Vec<_> = rows
@@ -612,8 +593,53 @@ impl Outbox {
             }
         }
     }
-    pub(crate) fn read_batch(&self, options: &Delivery) -> anyhow::Result<(DeliveryRows, i64)> {
+    fn delivery_batch(&self, options: &Delivery) -> anyhow::Result<(DeliveryRows, Duration)> {
         let db = self.db.lock().unwrap();
+        let (events, bytes): (usize, usize) = db
+            .prepare_cached("SELECT events,bytes FROM queue_size WHERE singleton=1")?
+            .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let interval = Duration::from_millis(options.flush_interval_ms);
+        if events == 0 {
+            return Ok((Vec::new(), interval));
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        let remaining = |oldest| {
+            u64::try_from(now.saturating_sub(oldest)).map_or(Duration::ZERO, |age| {
+                interval.saturating_sub(Duration::from_millis(age))
+            })
+        };
+        if events < options.max_events_per_batch
+            && bytes < options.max_batch_bytes
+            && bytes <= options.max_event_bytes
+        {
+            // The aggregate size also rules out oversized individual events.
+            // A partial batch only needs its oldest timestamp to decide when to read.
+            let oldest: i64 = db
+                .prepare_cached("SELECT created FROM event ORDER BY seq LIMIT 1")?
+                .query_row([], |row| row.get(0))?;
+            let wait = remaining(oldest);
+            if !wait.is_zero() {
+                return Ok((Vec::new(), wait));
+            }
+        }
+
+        let (rows, oldest) = Self::select_batch(&db, options)?;
+        let bytes = rows.iter().map(|(_, row)| row.len()).sum::<usize>();
+        let wait = remaining(oldest);
+        if rows.len() < options.max_events_per_batch
+            && bytes < options.max_batch_bytes
+            && !wait.is_zero()
+        {
+            return Ok((Vec::new(), wait));
+        }
+        Ok((rows, Duration::ZERO))
+    }
+
+    pub(crate) fn read_batch(&self, options: &Delivery) -> anyhow::Result<(DeliveryRows, i64)> {
+        Self::select_batch(&self.db.lock().unwrap(), options)
+    }
+
+    fn select_batch(db: &Connection, options: &Delivery) -> anyhow::Result<(DeliveryRows, i64)> {
         let mut stmt = db.prepare_cached(
             "SELECT seq,payload,created,length(payload) FROM event ORDER BY seq LIMIT ?1",
         )?;
@@ -722,11 +748,14 @@ impl BaseFlusher for CallbackOutboxFlusher {
     }
     async fn send_prepared_batch(
         &self,
-        _: Vec<AgentActivityEntry>,
+        entries: Vec<AgentActivityEntry>,
         encoded: Vec<Vec<u8>>,
     ) -> Result<(), FlushError> {
+        let usage = usage_updates(&entries);
+        // Backpressure only needs the serialized payload and the small usage summary.
+        drop(entries);
         self.queue
-            .accept(&self.source, &self.store, &encoded, &self.cancelled)
+            .accept(&self.source, &self.store, &encoded, &usage, &self.cancelled)
             .await
             .map_err(|e| FlushError::output_durability("SDK", &e.to_string()))
     }
@@ -738,6 +767,19 @@ impl BaseFlusher for CallbackOutboxFlusher {
     }
 }
 
+pub(super) fn write_checkpoint(path: &Path, text: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("checkpoint parent"))?;
+    source_access::private_path(path)?;
+    std::fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(text.as_bytes())?;
+    temp.as_file().sync_all()?;
+    temp.persist(path)?;
+    Ok(())
+}
 #[cfg(test)]
 #[path = "outbox_tests.rs"]
 mod tests;

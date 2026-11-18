@@ -190,8 +190,20 @@ impl Context {
                 .join(namespace)
                 .join("input-state.json"),
         );
+        let persisted = crate::sdk::outbox::Outbox::read_persisted_checkpoint(
+            &self.sdk_data.join("outbox"),
+            namespace,
+        )
+        .map_err(|error| error.to_string())?;
         self.runtime.block_on(async {
-            checkpoint.load().await;
+            if let Some(text) = persisted.as_deref() {
+                checkpoint
+                    .load_checkpoint_text(text)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                // A fresh SDK source may only have imported the Node checkpoint.
+                checkpoint.load().await;
+            }
             let mut imported = false;
             for id in checkpoint.keys() {
                 if crate::checkpoints::key_in_namespace(&id, self.input) {
