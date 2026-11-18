@@ -2,6 +2,7 @@ import { gunzipSync } from 'node:zlib';
 import protobuf from 'protobufjs/light.js';
 import { SourceError } from './http.js';
 import { digest, safeScalar } from './records.js';
+import { podScopedSource, sourcePodLabels } from './pod-labels.js';
 import type { CollectionResult, MulticaInputConfig, MulticaRecord } from './types.js';
 
 // Wire-compatible subset of google/pprof proto/profile.proto (Apache-2.0).
@@ -219,7 +220,8 @@ export async function collectPprof(input: MulticaInputConfig, kind: PprofKind): 
   const raw = JSON.stringify(converted.profile).replace(/[\u0080-\uffff]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
   if (raw.length > MAX_FLAMEBEARER_BYTES) throw new SourceError('pprof_flamegraph_too_large');
   const sha = digest(raw);
-  const id = `${kind}-${digest(`${input.PprofBaseUrl}:${endedAt}:${sha}`).slice(0, 24)}`;
+  const source = podScopedSource(input.PprofBaseUrl!, sourcePodLabels(input, `pprof:${input.PprofBaseUrl}:${kind}`));
+  const id = `${kind}-${digest(`${source}:${endedAt}:${sha}`).slice(0, 24)}`;
   const count = Math.ceil(raw.length / 1800);
   const records: MulticaRecord[] = [];
   for (let i = 0; i < count; i++) records.push({record_type: 'pprof_profile_chunk', source_type: 'pprof',

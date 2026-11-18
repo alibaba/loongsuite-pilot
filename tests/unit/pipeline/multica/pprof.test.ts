@@ -32,10 +32,10 @@ async function server(handler: Parameters<typeof createServer>[0]): Promise<stri
   await new Promise<void>(resolve => s.listen(0, '127.0.0.1', resolve));
   return `http://127.0.0.1:${(s.address() as {port: number}).port}`;
 }
-function pipeline(config: MulticaInputConfig): MulticaPipeline {
+function pipeline(config: MulticaInputConfig, serviceNamePrefix?: string): MulticaPipeline {
   return new MulticaPipeline({config: {configName: 'pprof', inputs: [config],
     flushers: [{Type: 'flusher_sls', Endpoint: 'https://example.invalid', Project: 'p', Logstore: 'multica-logs'}]},
-    stateDir: dir, dataDir: dir, failedLogDir: dir});
+    stateDir: dir, dataDir: dir, failedLogDir: dir, serviceNamePrefix});
 }
 function verifyFlamebearer(profile: Flamebearer): void {
   const {levels, names, numTicks} = profile.flamebearer;
@@ -119,6 +119,15 @@ describe('profile HTTP reads and delivery', () => {
     }
     expect(urls).toEqual(['/debug/pprof/profile?seconds=30', '/debug/pprof/allocs?seconds=10']);
   });
+  it('separates identical CPU profiles from two local target Pods', async () => {
+    const cpu = await fixture('cpu');
+    const base = await server((_req, res) => { res.end(cpu); });
+    const a = await collectPprof({...input, PprofBaseUrl: base, PodUid: 'uid-a'}, 'cpu');
+    const b = await collectPprof({...input, PprofBaseUrl: base, PodUid: 'uid-b'}, 'cpu');
+    expect(a.records[0].profile_end_ms).toBe(b.records[0].profile_end_ms);
+    expect(a.records[0].profile_sha256).toBe(b.records[0].profile_sha256);
+    expect(a.records[0].profile_id).not.toBe(b.records[0].profile_id);
+  });
   it('rejects redirects and oversized binary responses', async () => {
     const base = await server((req, res) => {
       if (req.url!.includes('/profile')) { res.writeHead(302, {Location: 'http://example.invalid/'}); res.end(); }
@@ -143,14 +152,18 @@ describe('profile HTTP reads and delivery', () => {
       if (req.url === '/metrics') res.end('multica_test_total 1\n');
       else { captures++; res.end(cpu); }
     });
-    const config: MulticaInputConfig = {...input, CollectionMode: 'on', MetricsUrls: [`${base}/metrics`], PprofBaseUrl: base, PprofTypes: ['cpu']};
+    const config: MulticaInputConfig = {...input, Instance: 'legacy-instance', CollectionMode: 'on', MetricsUrls: [`${base}/metrics`], PprofBaseUrl: base, PprofTypes: ['cpu']};
     let failed = false;
     vi.mocked(postWebtracking).mockImplementation(async (_target, records) => {
       if (!failed && records.some(row => row.record_type === 'pprof_profile_chunk')) { failed = true; throw new Error('network down'); }
     });
-    const first = pipeline(config);
+    const first = pipeline(config, 'profile-env');
     expect((await first.collectOnce()).failedSources).toBe(1);
     const oldBatch = vi.mocked(postWebtracking).mock.calls.find(([, rows]) => rows.some(row => row.record_type === 'pprof_profile_chunk'))![1];
+    const chunks = oldBatch.filter(row => row.record_type === 'pprof_profile_chunk');
+    const profile = JSON.parse(chunks.map(row => row.profile_json_part).join('')) as Flamebearer;
+    expect(profile.metadata.name).toBe('profile-env cpu');
+    expect(chunks[0]).toMatchObject({multica_env: 'profile-env', instance: 'profile-env'});
     const second = pipeline(config);
     expect((await second.collectOnce()).failedSources).toBe(0);
     expect(captures).toBe(1);

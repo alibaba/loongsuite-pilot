@@ -353,7 +353,8 @@ export class PipelineManager {
 
       switch (inputType) {
         case 'input_multica':
-          pipeline = new MulticaPipeline({...opts, sls: this.opts.sls}, this.pipelineConfig.multica?.mode);
+          pipeline = new MulticaPipeline({...opts, sls: this.opts.sls,
+            serviceNamePrefix: this.pipelineConfig.multica?.serviceNamePrefix}, this.pipelineConfig.multica?.mode);
           break;
         case 'input_file':
           pipeline = new FilePipeline(opts);
