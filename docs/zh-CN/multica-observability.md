@@ -80,12 +80,10 @@ export LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE=off  # 关闭
 
 记录采用 `schema_version=multica.v1`，以 instance/workspace/entity 和 task/issue/agent/runtime ID 关联。SLS 字段按字符串发送，数值分析需配置 long/double 索引；`observed_at` 表示采集时间，来源时间另存。
 
-在 Kubernetes 中，给采集器容器注入以下环境变量。同一部署的副本共用稳定的 `Instance` 值，查询用 `pod_uid` 区分副本，用 `pod_name`、`pod_ip` 提供筛选。
+本地采集直接读取系统 hostname，写入 `pod_name` 供大盘筛选。Kubernetes 默认将 hostname 设为 Pod 名，同一部署的副本共用稳定的 `Instance` 值。查询优先用 `pod_uid` 区分副本，缺少 UID 时按 hostname 区分。若需要 UID 或 IP，可选用 Downward API 注入以下字段。
 
 ```yaml
 env:
-  - name: POD_NAME
-    valueFrom: {fieldRef: {fieldPath: metadata.name}}
   - name: POD_UID
     valueFrom: {fieldRef: {fieldPath: metadata.uid}}
   - name: POD_IP
@@ -126,7 +124,7 @@ Prometheus counter 要处理相邻采样差分与进程重启；histogram bucket
 
 每种 profile 默认 15 分钟一次，间隔可设 300–86400 秒；CPU 采样 1–60 秒，allocs 采样 1–30 秒。采样在常规业务采集后串行执行，采样当轮会增加约 40 秒耗时；不与另一采样轮重叠。失败后按 60/120/240/300 秒退避。端点有超时、压缩与解压后大小限制，默认各 16 MiB，可用 `PprofMaxBytes` 调低。只保留栈帧及权重，不上传 profile 的任意标签和注释；原始二进制不落盘。
 
-输出为 `pprof_profile_chunk`：每段最多 1800 ASCII 字节，按 `profile_id`、`profile_part_index` 拼接得到 Flamebearer JSON，可用于 SLS 火焰图。`profile_sha256` 校验完整性；查询应仅采用段数完整的 profile，并按 `profile_end_ms` 选择最新一次。`profile_total/profile_unit` 对 CPU 是采样次数，对 allocs 是采样窗口内估算分配字节；不代表存活内存或泄漏。`profile_metadata_source` 标明时间来自原生 pprof 或采集器时钟，版本来自显式配置，本地 profile 的 Pod 默认取自 Downward API，也可通过 `PprofPodName` 指定目标。
+输出为 `pprof_profile_chunk`：每段最多 1800 ASCII 字节，按 `profile_id`、`profile_part_index` 拼接得到 Flamebearer JSON，可用于 SLS 火焰图。`profile_sha256` 校验完整性；查询应仅采用段数完整的 profile，并按 `profile_end_ms` 选择最新一次。`profile_total/profile_unit` 对 CPU 是采样次数，对 allocs 是采样窗口内估算分配字节；不代表存活内存或泄漏。`profile_metadata_source` 标明时间来自原生 pprof 或采集器时钟，版本来自显式配置，本地 profile 的 Pod 默认取自系统 hostname，也可通过 `PprofPodName` 指定目标。
 
 成功送达 SLS 后持久化下次采样时间；发送失败复用已有批次，不重复抓取。同样需要持久化 StateDir。pprof 没有样本时如实报告零权重，不生成虚假栈；旧版端点不支持增量 allocs、没有采样时长时报告 `pprof_missing_interval`。启用后需要为 `profile_*`、`source_version`、`pod_name` 配置 SLS 字段索引。
 
@@ -154,4 +152,4 @@ node scripts/multica-log-bridge.mjs
 
 桥接器仅在启用状态未过期时拉取日志；缺失、关闭或过期时空闲。启用状态每 10 秒续约、有效期 30 秒，停采时立即关闭，在途请求可以结束。
 
-已有单个日志桥覆盖 namespace 时，可继续使用其 Pod selector。每个源 Pod 均部署了自己的日志桥时，可设置 `MULTICA_LOG_SCOPE=pod`，并给日志桥注入 `POD_NAME`，使它只读取本 Pod。若 daemon 独立部署，也需要由对应的日志桥覆盖。
+已有单个日志桥覆盖 namespace 时，可继续使用其 Pod selector。每个源 Pod 均部署了自己的日志桥时，可设置 `MULTICA_LOG_SCOPE=pod`，使日志桥按系统 hostname 只读取本 Pod。自定义 hostname 时，可用 `POD_NAME` 指定实际 Pod 名。若 daemon 独立部署，也需要由对应的日志桥覆盖。

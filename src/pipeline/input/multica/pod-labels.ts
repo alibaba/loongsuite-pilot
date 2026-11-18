@@ -1,10 +1,10 @@
 import { isIP } from 'node:net';
+import { hostname } from 'node:os';
 import type { MulticaInputConfig, MulticaRecord } from './types.js';
 
-// These values come from the Kubernetes Downward API or explicit input config.
 // A service DNS name does not identify the Pod serving an individual request.
 export function sourcePodLabels(input: MulticaInputConfig, source: string): MulticaRecord {
-  const name = podLabel(input.PodName ?? process.env.POD_NAME);
+  const name = podLabel(hostname());
   const uid = podLabel(input.PodUid ?? process.env.POD_UID);
   const ip = input.PodIp ?? process.env.POD_IP;
   const labels: MulticaRecord = {};

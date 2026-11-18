@@ -1,3 +1,4 @@
+import { hostname } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
@@ -7,6 +8,11 @@ import * as path from 'node:path';
 import { parse } from 'protobufjs';
 import { loadConfig, buildOtlpTraceConfig } from '../../../../src/core/config-loader.js';
 import { PipelineManager } from '../../../../src/pipeline/pipeline-manager.js';
+
+vi.mock('node:os', async (importOriginal) => {
+  const os = await importOriginal<typeof import('node:os')>();
+  return {...os, hostname: vi.fn(os.hostname)};
+});
 
 const logger = vi.hoisted(() => ({info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn()}));
 vi.mock('../../../../src/utils/logger.js', () => ({createLogger: () => logger}));
@@ -101,6 +107,7 @@ afterEach(async () => {
   await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   await rm(directory, {recursive: true, force: true});
   vi.unstubAllEnvs();
+  vi.mocked(hostname).mockReset();
 });
 
 async function installConfig(apiKey = 'test-installer-api-key', collectionMode?: 'on' | 'off') {
@@ -160,17 +167,18 @@ describe('Multica inherits installer SLS configuration', () => {
     await writeFile(inputFile, JSON.stringify(pipeline));
     vi.stubEnv('MULTICA_REPLICA_TEST_TOKEN', 'test-token');
     tasks = [{id: 'shared-task', status: 'running'}];
-    for (const [pod, ip] of [['backend-a', '10.1.1.3'], ['backend-b', '10.1.1.4']]) {
-      vi.stubEnv('POD_NAME', pod);
-      vi.stubEnv('POD_UID', pod + '-uid');
-      vi.stubEnv('POD_IP', ip);
+    for (const pod of ['backend-a', 'backend-b']) {
+      vi.mocked(hostname).mockReturnValue(pod);
+      vi.stubEnv('POD_NAME', 'same-unrelated-value');
+      vi.stubEnv('POD_UID', '');
+      vi.stubEnv('POD_IP', '');
       await collectInstalledConfig(path.join(stateDir, pod));
     }
     const delivered = records(writes);
     const samples = delivered.filter(row => row.metric_name === 'multica_task_total');
     expect(samples.map(row => [row.instance, row.pod_name, row.pod_uid, row.pod_ip])).toEqual([
-      ['multica-installer-test', 'backend-a', 'backend-a-uid', '10.1.1.3'],
-      ['multica-installer-test', 'backend-b', 'backend-b-uid', '10.1.1.4'],
+      ['multica-installer-test', 'backend-a', undefined, undefined],
+      ['multica-installer-test', 'backend-b', undefined, undefined],
     ]);
     const taskRows = delivered.filter(row => row.task_id === 'shared-task');
     expect(new Set(taskRows.map(row => row.collector_pod_name))).toEqual(new Set(['backend-a', 'backend-b']));

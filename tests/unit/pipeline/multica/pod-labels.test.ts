@@ -1,21 +1,31 @@
+import { hostname } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sourcePodLabels } from '../../../../src/pipeline/input/multica/pod-labels.js';
 import { digest, envelope } from '../../../../src/pipeline/input/multica/records.js';
 import type { MulticaInputConfig } from '../../../../src/pipeline/input/multica/types.js';
 
+vi.mock('node:os', async (importOriginal) => {
+  const os = await importOriginal<typeof import('node:os')>();
+  return {...os, hostname: vi.fn(os.hostname)};
+});
+
 const input: MulticaInputConfig = {Type: 'input_multica'};
 const metric = 'metrics:http://127.0.0.1:9090/metrics';
 const row = {record_type: 'prometheus_sample', entity_id: 'counter', metric_value: '100'};
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.mocked(hostname).mockReset();
+});
 
 describe('Multica replica identity', () => {
   it('assigns the same local source Pod to data and completion markers and keeps simultaneous replicas distinct', () => {
-    vi.stubEnv('POD_NAME', 'server-a');
+    vi.mocked(hostname).mockReturnValue('server-a');
     vi.stubEnv('POD_UID', 'uid-a');
     vi.stubEnv('POD_IP', '10.0.0.1');
     const replicaA = sourcePodLabels(input, metric);
-    const replicaB = sourcePodLabels({...input, PodName: 'server-b', PodUid: 'uid-b', PodIp: '10.0.0.2'}, metric);
+    vi.mocked(hostname).mockReturnValue('server-b');
+    const replicaB = sourcePodLabels({...input, PodUid: 'uid-b', PodIp: '10.0.0.2'}, metric);
     const a = envelope(input, metric, 1000, row, undefined, replicaA);
     const b = envelope(input, metric, 1000, row, undefined, replicaB);
     expect(a).toMatchObject({pod_name: 'server-a', pod_uid: 'uid-a', pod_ip: '10.0.0.1', instance: 'multica'});
@@ -26,7 +36,8 @@ describe('Multica replica identity', () => {
   });
 
   it('keeps the collector identity separate from a business workspace, a remote service or a bridged log source', () => {
-    const local = {...input, PodName: 'server-a', PodUid: 'uid-a', PodIp: '10.0.0.1'};
+    vi.mocked(hostname).mockReturnValue('server-a');
+    const local = {...input, PodUid: 'uid-a', PodIp: '10.0.0.1'};
     const observer = {collector_pod_name: 'server-a', collector_pod_uid: 'uid-a', collector_pod_ip: '10.0.0.1'};
     for (const source of ['api:w:issues', 'metrics:http://127.svc.cluster.local/metrics',
       'health:http://daemon.ns.svc:4317/health', 'log:/logs/backend.log']) {
@@ -43,8 +54,8 @@ describe('Multica replica identity', () => {
     expect(sourcePodLabels({...local, PodIp: 'fd00:0:0:0:0:0:0:1'}, 'metrics:http://[fd00::1]:9090/metrics')).toMatchObject({pod_uid: 'uid-a'});
   });
 
-  it('preserves historical ID derivation and omits the labels when no Pod metadata exists', () => {
-    vi.stubEnv('POD_NAME', ''); vi.stubEnv('POD_UID', ''); vi.stubEnv('POD_IP', '');
+  it('preserves historical ID derivation and omits the labels when the hostname and Pod metadata are unavailable', () => {
+    vi.mocked(hostname).mockReturnValue(''); vi.stubEnv('POD_UID', ''); vi.stubEnv('POD_IP', '');
     const labels = sourcePodLabels(input, metric);
     expect(labels).toEqual({});
     const sample = envelope(input, metric, 1000, row, undefined, labels);

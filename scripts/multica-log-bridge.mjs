@@ -1,6 +1,7 @@
 import https from 'node:https';
 import fs from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
+import { hostname } from 'node:os';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -72,11 +73,11 @@ export function podLogFormatter(pod, container) {
   };
 }
 
-export function podListPath(namespace, podSelector, scope, podName) {
+export function podListPath(namespace, podSelector, scope, podName = hostname()) {
   if (!namespace || !podSelector) throw new Error('NAMESPACE and POD_LABEL_SELECTOR are required for log collection');
   const query = new URLSearchParams({labelSelector: podSelector});
   if (scope === 'pod') {
-    if (!podName || !/^[a-z0-9][a-z0-9.-]*$/.test(podName)) throw new Error('Pod-scoped log collection requires POD_NAME');
+    if (!podName || !/^[a-z0-9][a-z0-9.-]*$/.test(podName)) throw new Error('Pod-scoped log collection requires a valid hostname or POD_NAME override');
     query.set('fieldSelector', `metadata.name=${podName}`);
   } else if (scope !== 'namespace') {
     throw new Error('MULTICA_LOG_SCOPE must be pod or namespace');

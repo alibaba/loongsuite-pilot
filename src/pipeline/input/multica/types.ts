@@ -28,8 +28,7 @@ export interface MulticaInputConfig {
   MaxLineBytes?: number;
   UsageDays?: number;
   Instance?: string;
-  /** Collector Pod identity. Defaults to POD_NAME, POD_UID, POD_IP from Kubernetes Downward API. */
-  PodName?: string;
+  /** Optional Pod metadata from the Kubernetes Downward API (POD_UID and POD_IP). */
   PodUid?: string;
   PodIp?: string;
   Environment?: string;

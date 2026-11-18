@@ -1,4 +1,4 @@
-import { it as test } from 'vitest';
+import { it as test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { freshLines, podListPath, podLogFormatter } from '../../../../scripts/multica-log-bridge.mjs';
@@ -7,6 +7,11 @@ import { collectLog } from '../../../../src/pipeline/input/multica/sources.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+vi.mock('node:os', async (importOriginal) => ({
+  ...await importOriginal<typeof import('node:os')>(),
+  hostname: () => 'backend-from-hostname',
+}));
 
 test('inclusive Kubernetes timestamps do not duplicate boundary records', () => {
   const first = freshLines('2026-11-16T10:00:00.123456789Z first\n2026-11-16T10:00:00.123456789Z second\n');
@@ -76,7 +81,8 @@ test('pod-scoped bridges select only their own Pod and never fall back to the fu
   assert.equal(list('pod', 'backend-b').searchParams.get('fieldSelector'), 'metadata.name=backend-b');
   assert.equal(list('pod', 'backend-b').searchParams.get('labelSelector'), selector);
   assert.equal(list('namespace').searchParams.has('fieldSelector'), false);
-  assert.throws(() => list('pod'), /POD_NAME/);
+  assert.equal(list('pod').searchParams.get('fieldSelector'), 'metadata.name=backend-from-hostname');
+  assert.throws(() => list('pod', ''), /POD_NAME/);
   assert.throws(() => list('pod', 'a,b'), /POD_NAME/);
   assert.throws(() => list('invalid'), /MULTICA_LOG_SCOPE/);
 });
