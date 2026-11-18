@@ -29,12 +29,23 @@ export function createCronRecovery(contexts, reportError, intervalMs = INTERVAL_
   let enabled = false;
   let generation = 0;
   let wakeRequested = false;
+  let scanHasPending = false;
 
   function configure(nextGetCron, nextOnRecovered) {
     if (typeof nextGetCron !== "function" || typeof nextOnRecovered !== "function") return;
     getCron = nextGetCron;
     onRecovered = nextOnRecovered;
     enabled = true;
+  }
+
+  function finishBatch(more, pending = false) {
+    // A scan spans several bounded batches. Remember unresolved work from
+    // earlier batches until the directory cursor reaches the end.
+    scanHasPending ||= pending;
+    if (more) return true;
+    const rescan = scanHasPending;
+    scanHasPending = false;
+    return rescan;
   }
 
   async function reconcile() {
@@ -44,23 +55,24 @@ export function createCronRecovery(contexts, reportError, intervalMs = INTERVAL_
       try {
         const { items, more } = await contexts.listBatch(32);
         if (!enabled || epoch !== generation) return false;
-        if (items.length === 0) return more;
+        if (items.length === 0) return finishBatch(more);
         const service = getCron?.();
-        if (typeof service?.list !== "function") return true;
+        if (typeof service?.list !== "function") return finishBatch(more, true);
         const jobs = await service.list({ includeDisabled: true });
         if (!enabled || epoch !== generation) return false;
-        if (!Array.isArray(jobs)) return true;
+        if (!Array.isArray(jobs)) return finishBatch(more, true);
         const wanted = new Set(items.map(item => item.jobId));
         const byId = new Map();
         for (const job of jobs) if (wanted.has(job?.id)) byId.set(job.id, job);
-        let pending = more;
+        let pending = false;
         for (const item of items) {
           const job = byId.get(item.jobId);
           if (!hasFinishedCronRun(job, item) || onRecovered(item, job) === false) pending = true;
         }
-        return pending;
+        return finishBatch(more, pending);
       } catch (err) {
         reportError("cron-recovery", err);
+        if (enabled && epoch === generation) scanHasPending = true;
         return enabled && epoch === generation;
       }
     })().finally(() => { inFlight = undefined; });
@@ -68,8 +80,10 @@ export function createCronRecovery(contexts, reportError, intervalMs = INTERVAL_
   }
 
   function wake() {
-    if (!enabled || timer) return;
-    if (inFlight) { wakeRequested = true; return; }
+    if (!enabled) return;
+    // A new snapshot may be added behind a cursor that is already open. A
+    // scheduled batch is not proof that it will see this newly written file.
+    if (timer || inFlight) { wakeRequested = true; return; }
     timer = setTimeout(() => {
       timer = undefined;
       void reconcile().then(pending => {
@@ -85,6 +99,7 @@ export function createCronRecovery(contexts, reportError, intervalMs = INTERVAL_
     enabled = false;
     generation++;
     wakeRequested = false;
+    scanHasPending = false;
     if (timer) clearTimeout(timer);
     timer = undefined;
     void contexts.closeScan();

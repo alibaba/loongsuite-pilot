@@ -72,4 +72,51 @@ describe('OpenClaw native cron recovery', () => {
     expect(recovered).toHaveBeenCalledTimes(2);
     recovery.stop();
   });
+
+  it.each(['running', 'unavailable'])(
+    'continues a paginated scan when an earlier batch was %s', async firstState => {
+      vi.useFakeTimers();
+      const later = { jobId: 'job-b', runAtMs: 200 };
+      const contexts = { listBatch: vi.fn()
+        .mockResolvedValueOnce({ items: [snapshot], more: true })
+        .mockResolvedValueOnce({ items: [later], more: false })
+        .mockResolvedValueOnce({ items: [snapshot], more: true })
+        .mockResolvedValueOnce({ items: [], more: false }), closeScan: vi.fn() };
+      const list = vi.fn();
+      if (firstState === 'unavailable') list.mockRejectedValueOnce(new Error('temporary'));
+      else list.mockResolvedValueOnce([{ id: 'job-a', state: { runningAtMs: 100 } }]);
+      list.mockResolvedValueOnce([{ id: 'job-b', state: { lastRunAtMs: 200, lastRunStatus: 'ok' } }]);
+      list.mockResolvedValueOnce([{ id: 'job-a', state: { lastRunAtMs: 100, lastRunStatus: 'ok' } }]);
+      const recovered = vi.fn();
+      const recovery = createCronRecovery(contexts, vi.fn(), 50);
+      recovery.configure(() => ({ list }), recovered);
+      recovery.wake();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(recovered.mock.calls.map(([item]) => item.jobId)).toEqual(['job-b', 'job-a']);
+      expect(contexts.listBatch).toHaveBeenCalledTimes(4);
+      recovery.stop();
+    },
+  );
+
+  it('rescans when a new context arrives while the next batch is scheduled', async () => {
+    vi.useFakeTimers();
+    const later = { jobId: 'job-b', runAtMs: 200 };
+    const contexts = { listBatch: vi.fn()
+      .mockResolvedValueOnce({ items: [snapshot], more: true })
+      .mockResolvedValueOnce({ items: [], more: false })
+      .mockResolvedValueOnce({ items: [later], more: false }), closeScan: vi.fn() };
+    const list = vi.fn(async () => [
+      { id: 'job-a', state: { lastRunAtMs: 100, lastRunStatus: 'ok' } },
+      { id: 'job-b', state: { lastRunAtMs: 200, lastRunStatus: 'ok' } },
+    ]);
+    const recovered = vi.fn();
+    const recovery = createCronRecovery(contexts, vi.fn(), 50);
+    recovery.configure(() => ({ list }), recovered);
+    recovery.wake();
+    await vi.advanceTimersByTimeAsync(50);
+    recovery.wake(); // A new context is written before the scheduled next batch.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(recovered.mock.calls.map(([item]) => item.jobId)).toEqual(['job-a', 'job-b']);
+    recovery.stop();
+  });
 });
