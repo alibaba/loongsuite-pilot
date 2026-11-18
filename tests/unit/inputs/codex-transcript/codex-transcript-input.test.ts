@@ -785,15 +785,17 @@ describe('CodexTranscriptInput', () => {
       expect(input.running).toBe(true);
 
       await fs.rm(sessionDir, { recursive: true });
-      await waitFor(() => !input.running);
-      expect(svc.getStates()[input.id]).toBe('idle');
+      await waitFor(() => svc.getStates()[input.id] === 'idle');
+      expect(input.running).toBe(false);
 
       await fs.mkdir(sessionDir, { recursive: true });
-      await waitFor(() => input.running);
+      await waitFor(() => svc.getStates()[input.id] === 'running');
+      // Drain the startup scan before writing so the rollout is neither
+      // baselined as history nor missed by a coalesced collection request.
+      await runInputCycle(input);
 
       await writeTranscript(sessionDir, completedTurn());
       await runInputCycle(input);
-      await waitFor(() => entries.some(entry => entry['gen_ai.turn.end'] === true));
       expect(entries.some(entry => entry['gen_ai.turn.end'] === true)).toBe(true);
       expect(responsesForTurn(entries, 'turn-1').length).toBeGreaterThan(0);
     } finally {
