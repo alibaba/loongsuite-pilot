@@ -89,6 +89,7 @@ import {
 } from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
+import { redownloadCurrentHookAssets } from '../updater/redownload-hook-assets.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
 import { PipelineManager } from '../pipeline/pipeline-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
@@ -361,7 +362,16 @@ export class Orchestrator extends EventEmitter {
       this.config.hookWatchdog,
       hookWatchdogTargets,
       interceptTargets,
-      { pilotDir, dataDir: this.dataDir },
+      {
+        pilotDir,
+        dataDir: this.dataDir,
+        redownloadHooks: (expected) => redownloadCurrentHookAssets({
+          pilotDir,
+          manifestUrl: this.config.autoUpdate?.manifestUrl,
+          packageUrl: this.config.autoUpdate?.packageUrl,
+          expected,
+        }),
+      },
     );
 
     this.localWorkerActivationService = new LocalWorkerActivationService({

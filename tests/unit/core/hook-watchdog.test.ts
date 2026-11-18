@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -7,6 +8,7 @@ import {
   HookWatchdog,
   type PluginCheckTarget,
 } from '../../../src/core/hook-watchdog.js';
+import { HOOK_ASSET_MANIFEST } from '../../../src/core/hook-asset-manifest.js';
 import type { HookWatchdogConfig } from '../../../src/types/index.js';
 import * as fsUtils from '../../../src/utils/fs-utils.js';
 
@@ -59,6 +61,12 @@ vi.mock('node:child_process', async () => {
   };
 });
 
+function setHookManifest(entries: Record<string, string>): void {
+  const manifest = HOOK_ASSET_MANIFEST as Record<string, string>;
+  for (const key of Object.keys(manifest)) delete manifest[key];
+  Object.assign(manifest, entries);
+}
+
 function makeConfig(overrides: Partial<HookWatchdogConfig> = {}): HookWatchdogConfig {
   return {
     enabled: true,
@@ -73,7 +81,8 @@ async function writeSettings(p: string, content: unknown): Promise<void> {
   await fs.writeFile(p, JSON.stringify(content, null, 2), 'utf-8');
 }
 
-async function makeBin(binPath: string): Promise<void> {
+async function makeBin(binPath: string | undefined): Promise<void> {
+  if (!binPath) throw new Error('makeBin requires binPath');
   await fs.mkdir(path.dirname(binPath), { recursive: true });
   await fs.writeFile(binPath, '#!/usr/bin/env node\n', { mode: 0o755 });
 }
@@ -114,6 +123,7 @@ describe('HookWatchdog', () => {
   });
 
   afterEach(async () => {
+    setHookManifest({});
     await cleanupTempDir(tmpDir);
   });
 
@@ -709,7 +719,7 @@ describe('HookWatchdog', () => {
 
     it('mixes command and repairFn targets independently', async () => {
       const commandTarget = makeClaudeTarget(tmpDir, { agentId: 'claude-code' });
-      await makeBin(commandTarget.binPath!);
+      await makeBin(commandTarget.binPath);
       const commandSettings = buildHealthySettings(commandTarget);
       delete (commandSettings.hooks as Record<string, unknown>).Stop;
       await writeSettings(commandTarget.settingsPath, commandSettings);
@@ -733,6 +743,14 @@ describe('HookWatchdog', () => {
     const scriptText = '#!/bin/sh\necho ok\n';
     const processorText = 'export const x = 1;\n';
 
+    function fixtureManifest(): Record<string, string> {
+      const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+      return {
+        'claude-code-loongsuite-pilot-hook.sh': hash(scriptText),
+        'shared/decode-payload.mjs': hash(processorText),
+      };
+    }
+
     async function installAssets(): Promise<{ pilotDir: string; dataDir: string }> {
       const pilotDir = path.join(tmpDir, 'pilot');
       const dataDir = path.join(tmpDir, 'data');
@@ -749,6 +767,7 @@ describe('HookWatchdog', () => {
 
     it('restores a missing script from the install tree', async () => {
       const { pilotDir, dataDir } = await installAssets();
+      setHookManifest(fixtureManifest());
       const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
 
       await wd.runCheck();
@@ -758,13 +777,14 @@ describe('HookWatchdog', () => {
       expect(await fs.readFile(path.join(dataDir, 'hooks', 'shared', 'decode-payload.mjs'), 'utf8')).toBe(processorText);
     });
 
-    it('overwrites a modified processor and leaves package-extra files', async () => {
+    it('overwrites a modified processor and leaves a file with no hash', async () => {
       const { pilotDir, dataDir } = await installAssets();
       const processor = path.join(dataDir, 'hooks', 'shared', 'decode-payload.mjs');
       const extra = path.join(dataDir, 'hooks', 'user-note.txt');
       await fs.mkdir(path.dirname(processor), { recursive: true });
       await fs.writeFile(processor, 'export const x = 2;\n');
       await fs.writeFile(extra, 'keep\n');
+      setHookManifest(fixtureManifest());
       const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
 
       await wd.runCheck();
@@ -784,6 +804,7 @@ describe('HookWatchdog', () => {
       const repairFn = vi.fn(async () => true);
       const target = makeClaudeTarget(tmpDir, { repairFn });
       await writeSettings(target.settingsPath, buildHealthySettings(target));
+      setHookManifest(fixtureManifest());
       const wd = new HookWatchdog(makeConfig(), [target], [], { pilotDir, dataDir });
 
       const summary = await wd.runCheck();
@@ -819,6 +840,7 @@ describe('HookWatchdog', () => {
       await fs.writeFile(outside, 'outside\n');
       await fs.mkdir(path.dirname(link), { recursive: true });
       await fs.symlink(outside, link);
+      setHookManifest(fixtureManifest());
       const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
 
       await wd.runCheck();
@@ -836,6 +858,7 @@ describe('HookWatchdog', () => {
       const shared = path.join(dataDir, 'hooks', 'shared');
       await fs.mkdir(path.dirname(shared), { recursive: true });
       await fs.symlink(outsideDir, shared);
+      setHookManifest(fixtureManifest());
       const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
 
       await wd.runCheck();
@@ -851,6 +874,7 @@ describe('HookWatchdog', () => {
       await fs.writeFile(deployed, 'tampered\n');
       await fs.mkdir(path.join(dataDir, 'versions', 'v2'), { recursive: true });
       await fs.writeFile(path.join(dataDir, 'current'), 'v2\n');
+      setHookManifest(fixtureManifest());
       const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
 
       await wd.runCheck();
@@ -883,6 +907,7 @@ describe('HookWatchdog', () => {
       const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
       await fs.mkdir(path.dirname(deployed), { recursive: true });
       await fs.writeFile(deployed, 'v2\n');
+      setHookManifest(fixtureManifest());
       const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
 
       await wd.runCheck();
@@ -899,6 +924,7 @@ describe('HookWatchdog', () => {
       const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
       await fs.mkdir(path.dirname(deployed), { recursive: true });
       await fs.writeFile(deployed, 'v2\n');
+      setHookManifest(fixtureManifest());
       const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
 
       await wd.runCheck();
@@ -914,6 +940,7 @@ describe('HookWatchdog', () => {
       const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
       await fs.mkdir(path.dirname(deployed), { recursive: true });
       await fs.writeFile(deployed, 'v2\n');
+      setHookManifest(fixtureManifest());
       const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
 
       await wd.runCheck();
@@ -933,6 +960,7 @@ describe('HookWatchdog', () => {
       const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
       await fs.mkdir(path.dirname(deployed), { recursive: true });
       await fs.writeFile(deployed, 'v2\n');
+      setHookManifest(fixtureManifest());
       const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
 
       await wd.runCheck();
@@ -959,6 +987,7 @@ describe('HookWatchdog', () => {
           await fs.writeFile(path.join(cacheDir, 'hook-upgrade-in-progress'), `${Date.now()}\n`);
         }
       });
+      setHookManifest(fixtureManifest());
       const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
 
       try {
@@ -973,6 +1002,150 @@ describe('HookWatchdog', () => {
       ];
       expect(contents.filter(text => text === 'tampered\n')).toHaveLength(1);
       expect(contents.some(text => text === scriptText || text === processorText)).toBe(true);
+    });
+
+    const scriptName = 'claude-code-loongsuite-pilot-hook.sh';
+
+    function hashText(text: string): string {
+      return createHash('sha256').update(text).digest('hex');
+    }
+
+    it('overwrites a listed script when the install copy still matches', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const deployed = path.join(dataDir, 'hooks', scriptName);
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, 'tampered\n');
+      setHookManifest({ [scriptName]: hashText(scriptText) });
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(deployed, 'utf8')).toBe(scriptText);
+    });
+
+    it('restores a missing listed script when the install copy still matches', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      setHookManifest({ [scriptName]: hashText(scriptText) });
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(path.join(dataDir, 'hooks', scriptName), 'utf8')).toBe(scriptText);
+    });
+
+    it('leaves a listed script in place when the install copy was also changed', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const asset = path.join(pilotDir, 'assets', 'hooks', scriptName);
+      const deployed = path.join(dataDir, 'hooks', scriptName);
+      await fs.writeFile(asset, 'changed-asset\n');
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, 'tampered\n');
+      setHookManifest({ [scriptName]: hashText(scriptText) });
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(deployed, 'utf8')).toBe('tampered\n');
+      expect(await fs.readFile(asset, 'utf8')).toBe('changed-asset\n');
+      expect(mockLogger.error).toHaveBeenCalledWith('hook-watchdog.repair-failed', expect.objectContaining({
+        action: 'hook-asset',
+        path: scriptName,
+        reason: 'asset-hash-mismatch',
+      }));
+    });
+
+    it('restores a listed script after the current package is downloaded again', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const asset = path.join(pilotDir, 'assets', 'hooks', scriptName);
+      const deployed = path.join(dataDir, 'hooks', scriptName);
+      await fs.writeFile(asset, 'changed-asset\n');
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, 'tampered\n');
+      const redownloadHooks = vi.fn(async () => {
+        await fs.writeFile(asset, scriptText);
+        return true;
+      });
+      setHookManifest({ [scriptName]: hashText(scriptText) });
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir, redownloadHooks });
+
+      await wd.runCheck();
+
+      expect(redownloadHooks).toHaveBeenCalledTimes(1);
+      expect(await fs.readFile(deployed, 'utf8')).toBe(scriptText);
+    });
+
+    it('does not copy a redownloaded script once an upgrade is in progress', async () => {
+      const cacheDir = path.join(tmpDir, 'cache');
+      const dataDir = path.join(tmpDir, 'data');
+      const { pilotDir } = await installVersioned(cacheDir, 'v1');
+      await fs.writeFile(path.join(cacheDir, 'current'), 'v1\n');
+      const asset = path.join(pilotDir, 'assets', 'hooks', scriptName);
+      const deployed = path.join(dataDir, 'hooks', scriptName);
+      await fs.writeFile(asset, 'changed-asset\n');
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, 'tampered\n');
+      const redownloadHooks = vi.fn(async () => {
+        await fs.writeFile(asset, scriptText);
+        await fs.writeFile(path.join(cacheDir, 'hook-upgrade-in-progress'), `${Date.now()}\n`);
+        return true;
+      });
+      setHookManifest({ [scriptName]: hashText(scriptText) });
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir, redownloadHooks });
+
+      await wd.runCheck();
+
+      expect(redownloadHooks).toHaveBeenCalledTimes(1);
+      expect(await fs.readFile(deployed, 'utf8')).toBe('tampered\n');
+    });
+
+    it('leaves a listed script when the current package cannot be downloaded', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const asset = path.join(pilotDir, 'assets', 'hooks', scriptName);
+      const deployed = path.join(dataDir, 'hooks', scriptName);
+      await fs.writeFile(asset, 'changed-asset\n');
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, 'tampered\n');
+      const redownloadHooks = vi.fn(async () => false);
+      setHookManifest({ [scriptName]: hashText(scriptText) });
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir, redownloadHooks });
+
+      await wd.runCheck();
+
+      expect(redownloadHooks).toHaveBeenCalledTimes(1);
+      expect(await fs.readFile(deployed, 'utf8')).toBe('tampered\n');
+      expect(await fs.readFile(asset, 'utf8')).toBe('changed-asset\n');
+    });
+
+    it('does not rewrite a listed script whose copy already matches', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const asset = path.join(pilotDir, 'assets', 'hooks', scriptName);
+      const deployed = path.join(dataDir, 'hooks', scriptName);
+      await fs.writeFile(asset, 'changed-asset\n');
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, scriptText, { mode: 0o644 });
+      setHookManifest({ [scriptName]: hashText(scriptText) });
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(deployed, 'utf8')).toBe(scriptText);
+      expect(await fs.readFile(asset, 'utf8')).toBe('changed-asset\n');
+      if (process.platform !== 'win32') {
+        expect((await fs.stat(deployed)).mode & 0o111).not.toBe(0);
+      }
+    });
+
+    it('leaves a deployed file that has no hash entry', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const processor = path.join(dataDir, 'hooks', 'shared', 'decode-payload.mjs');
+      await fs.mkdir(path.dirname(processor), { recursive: true });
+      await fs.writeFile(processor, 'export const x = 2;\n');
+      setHookManifest({ [scriptName]: hashText(scriptText) });
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(processor, 'utf8')).toBe('export const x = 2;\n');
     });
   });
 });

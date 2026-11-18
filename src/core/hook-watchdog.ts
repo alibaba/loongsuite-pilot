@@ -1,10 +1,12 @@
 import { spawn, execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { existsSync, readFileSync, statSync, type Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import type { HookWatchdogConfig } from '../types/index.js';
+import { HOOK_ASSET_MANIFEST } from './hook-asset-manifest.js';
 import { directoryExists, fileExists, writeTextFileAtomic } from '../utils/fs-utils.js';
 import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { createLogger } from '../utils/logger.js';
@@ -21,7 +23,7 @@ export function hookUpgradeMarkerPath(controlDir: string): string {
   return path.join(controlDir, 'hook-upgrade-in-progress');
 }
 
-async function upgradeBlocksRepair(pilotDir: string, dataDir: string): Promise<boolean> {
+export async function upgradeBlocksRepair(pilotDir: string, dataDir: string): Promise<boolean> {
   // `current` and `versions/` live in the cache dir. pilotDir is versions/<name>.
   const versionsDir = path.dirname(pilotDir);
   const controlDir = path.basename(versionsDir) === 'versions' ? path.dirname(versionsDir) : dataDir;
@@ -282,6 +284,8 @@ export class HookWatchdog {
   private readonly dailyRepairCount: Map<string, number> = new Map();
   private dailyRepairResetDate = '';
   private readonly assetRoots?: { pilotDir: string; dataDir: string };
+  private readonly redownloadHooks?: (expected: Readonly<Record<string, string>>) => Promise<boolean>;
+  private hookRedownloadAttempted = false;
   private assetCheckInFlight = false;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
@@ -290,12 +294,17 @@ export class HookWatchdog {
     config: HookWatchdogConfig,
     targets?: PluginCheckTarget[],
     interceptTargets?: InterceptCheckTarget[],
-    assetRoots?: { pilotDir: string; dataDir: string },
+    assetRoots?: {
+      pilotDir: string;
+      dataDir: string;
+      redownloadHooks?: (expected: Readonly<Record<string, string>>) => Promise<boolean>;
+    },
   ) {
     this.config = config;
     this.targets = targets ?? [];
     this.interceptTargets = interceptTargets ?? [];
     this.assetRoots = assetRoots;
+    this.redownloadHooks = assetRoots?.redownloadHooks;
     this.captureInitialChangeSignatures();
   }
 
@@ -363,11 +372,7 @@ export class HookWatchdog {
     return summary;
   }
 
-  /**
-   * Compare deployed hook scripts and the JS they call against the current
-   * install's assets/hooks. A mismatch is overwritten in this same round.
-   * Settings repair stays in checkTarget and is not used for file bytes.
-   */
+  /** Restore deployed hook files whose bytes no longer match HOOK_ASSET_MANIFEST. */
   private async checkHookAssets(): Promise<void> {
     if (!this.assetRoots) return;
     if (this.assetCheckInFlight) {
@@ -389,127 +394,129 @@ export class HookWatchdog {
   }
 
   private async restoreDeployedHookAssets(pilotDir: string, dataDir: string): Promise<void> {
+    const listed = Object.keys(HOOK_ASSET_MANIFEST);
+    if (listed.length === 0) return;
+    this.hookRedownloadAttempted = false;
+
     const sourceRoot = path.join(pilotDir, 'assets', 'hooks');
-    let sourceStat: Stats;
-    try {
-      sourceStat = await fs.lstat(sourceRoot);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        logger.warn('hook-watchdog.skipped', { reason: 'hook-assets-missing', path: sourceRoot });
-        return;
-      }
-      throw err;
-    }
-    if (sourceStat.isSymbolicLink()) {
-      logger.warn('hook-watchdog.skipped', { reason: 'symlink', path: sourceRoot });
+    const sourceKind = (await this.classifyPath(sourceRoot)).kind;
+    if (sourceKind !== 'directory') {
+      logger.warn('hook-watchdog.skipped', { reason: sourceKind === 'symlink' ? 'symlink' : 'hook-assets-missing', path: sourceRoot });
       return;
     }
-    if (!sourceStat.isDirectory()) {
-      logger.warn('hook-watchdog.skipped', { reason: 'hook-assets-missing', path: sourceRoot });
+    const targetRoot = path.join(dataDir, 'hooks');
+    if ((await this.classifyPath(targetRoot)).kind === 'symlink') {
+      logger.warn('hook-watchdog.skipped', { reason: 'symlink', path: targetRoot });
       return;
     }
 
-    const targetRoot = path.join(dataDir, 'hooks');
-    const files = await this.listHookAssetFiles(sourceRoot);
-    try {
-      if ((await fs.lstat(targetRoot)).isSymbolicLink()) {
-        logger.warn('hook-watchdog.skipped', { reason: 'symlink', path: targetRoot });
-        return;
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-    }
-    for (const relativePath of files) {
+    for (const relativePath of listed) {
       if (await upgradeBlocksRepair(pilotDir, dataDir)) {
         logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
         return;
       }
       try {
-        await this.restoreHookAsset(sourceRoot, targetRoot, relativePath);
+        await this.restoreListedHookAsset(
+          sourceRoot,
+          targetRoot,
+          relativePath,
+          HOOK_ASSET_MANIFEST[relativePath],
+        );
       } catch (err) {
-        logger.error('hook-watchdog.repair-failed', {
-          action: 'hook-asset',
-          path: relativePath,
-          error: String(err),
-        });
+        logger.error('hook-watchdog.repair-failed', { action: 'hook-asset', path: relativePath, error: String(err) });
       }
     }
   }
 
-  private async listHookAssetFiles(sourceRoot: string): Promise<string[]> {
-    const files: string[] = [];
-    const walk = async (dir: string, relative: string): Promise<void> => {
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.name.startsWith('._') || entry.name === '.DS_Store') continue;
-        const rel = relative ? path.join(relative, entry.name) : entry.name;
-        if (entry.isSymbolicLink()) {
-          logger.warn('hook-watchdog.skipped', { reason: 'symlink', path: rel });
-          continue;
-        }
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) await walk(full, rel);
-        else if (entry.isFile()) files.push(rel);
-      }
-    };
-    await walk(sourceRoot, '');
-    return files;
+  /** Classify a path without following symlinks. */
+  private async classifyPath(filePath: string): Promise<{ kind: 'directory' | 'file' | 'symlink' | 'missing'; mode: number }> {
+    let stat: Stats;
+    try {
+      stat = await fs.lstat(filePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing', mode: 0 };
+      throw err;
+    }
+    if (stat.isSymbolicLink()) return { kind: 'symlink', mode: stat.mode };
+    if (stat.isDirectory()) return { kind: 'directory', mode: stat.mode };
+    if (stat.isFile()) return { kind: 'file', mode: stat.mode };
+    return { kind: 'missing', mode: stat.mode };
   }
 
-  private async restoreHookAsset(
+  /** Restore one listed hook file so its deployed bytes match the manifest. */
+  private async restoreListedHookAsset(
     sourceRoot: string,
     targetRoot: string,
     relativePath: string,
-  ): Promise<boolean> {
+    expected: string,
+  ): Promise<void> {
     if (await this.parentIsSymlink(targetRoot, relativePath)) {
       logger.warn('hook-watchdog.skipped', { reason: 'symlink', path: relativePath });
-      return false;
+      return;
     }
 
     const source = path.join(sourceRoot, relativePath);
     const target = path.join(targetRoot, relativePath);
-    const sourceStat = await fs.lstat(source);
-    if (sourceStat.isSymbolicLink()) {
-      logger.warn('hook-watchdog.skipped', { reason: 'symlink', path: relativePath });
-      return false;
-    }
-
-    let targetStat: Stats | null = null;
-    try {
-      targetStat = await fs.lstat(target);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-    }
-
     const executable = relativePath.endsWith('.sh') || relativePath.endsWith('.ps1');
     const mode = executable ? 0o755 : 0o644;
-    // A symlinked file is replaced in place. readFile would follow the link
-    // and compare or write the file outside hooks/.
-    const sizeDiffers = !targetStat || targetStat.isSymbolicLink() || targetStat.size !== sourceStat.size;
-    if (sizeDiffers) {
-      await writeTextFileAtomic(target, await fs.readFile(source, 'utf8'));
-      await fs.chmod(target, mode);
-      logger.warn('hook-watchdog.repair', { action: 'hook-asset', path: relativePath });
-      return true;
+    // Compare the deployed file with the manifest.
+    const targetPath = await this.classifyPath(target);
+    if (targetPath.kind === 'file') {
+      const targetHash = createHash('sha256').update(await fs.readFile(target)).digest('hex');
+      if (targetHash === expected) {
+        if (executable && process.platform !== 'win32' && (targetPath.mode & 0o111) === 0) {
+          await fs.chmod(target, mode);
+          logger.warn('hook-watchdog.repair', { action: 'hook-asset', path: relativePath, reason: 'mode' });
+        }
+        return;
+      }
     }
 
+    // Replace it from the install copy when that copy matches.
+    if (await this.writeMatchingAsset(source, target, relativePath, expected, mode)) return;
+
+    // Re-download the current version once, then try the install copy again.
+    if (!this.hookRedownloadAttempted && this.redownloadHooks) {
+      this.hookRedownloadAttempted = true;
+      let downloaded = false;
+      try {
+        downloaded = await this.redownloadHooks(HOOK_ASSET_MANIFEST);
+      } catch (err) {
+        logger.warn('hook-watchdog.redownload-skipped', { reason: 'redownload', error: String(err) });
+      }
+      if (!downloaded) {
+        logger.error('hook-watchdog.repair-failed', { action: 'hook-asset', path: relativePath, reason: 'redownload' });
+        return;
+      }
+      // The download can outlast the check at the start of this file.
+      const roots = this.assetRoots;
+      if (roots && await upgradeBlocksRepair(roots.pilotDir, roots.dataDir)) {
+        logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
+        return;
+      }
+      if (await this.writeMatchingAsset(source, target, relativePath, expected, mode)) return;
+    }
+    const reason = (await this.classifyPath(source)).kind === 'file' ? 'asset-hash-mismatch' : 'asset-missing';
+    logger.error('hook-watchdog.repair-failed', { action: 'hook-asset', path: relativePath, reason });
+  }
+
+  /** Copy the install file onto the deployed path when its bytes hash to `expected`. */
+  private async writeMatchingAsset(
+    source: string,
+    target: string,
+    relativePath: string,
+    expected: string,
+    mode: number,
+  ): Promise<boolean> {
+    if ((await this.classifyPath(source)).kind !== 'file') return false;
     const sourceBytes = await fs.readFile(source);
-    const targetBytes = await fs.readFile(target);
-    if (!sourceBytes.equals(targetBytes)) {
-      await writeTextFileAtomic(target, sourceBytes.toString('utf8'));
-      await fs.chmod(target, mode);
-      logger.warn('hook-watchdog.repair', { action: 'hook-asset', path: relativePath });
-      return true;
-    }
+    if (createHash('sha256').update(sourceBytes).digest('hex') !== expected) return false;
 
-    // Windows reports a mode that does not carry a Unix execute bit. Treating
-    // that as damage would rewrite every script on each round.
-    if (executable && process.platform !== 'win32' && (targetStat!.mode & 0o111) === 0) {
-      await fs.chmod(target, mode);
-      logger.warn('hook-watchdog.repair', { action: 'hook-asset', path: relativePath, reason: 'mode' });
-      return true;
-    }
-    return false;
+    await writeTextFileAtomic(target, sourceBytes.toString('utf8'), { mode, preserveMode: true });
+    await fs.chmod(target, mode);
+    logger.warn('hook-watchdog.repair', { action: 'hook-asset', path: relativePath });
+    
+    return true;
   }
 
   /** True when an existing parent of relativePath is a symlink. The file itself is lstat'd by the caller. */
@@ -519,12 +526,9 @@ export class HookWatchdog {
     let current = root;
     for (const part of parts) {
       current = path.join(current, part);
-      try {
-        if ((await fs.lstat(current)).isSymbolicLink()) return true;
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
-        throw err;
-      }
+      const kind = (await this.classifyPath(current)).kind;
+      if (kind === 'symlink') return true;
+      if (kind === 'missing') return false;
     }
     return false;
   }

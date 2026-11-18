@@ -1,8 +1,10 @@
 import { build } from 'esbuild';
 import { copyFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
+import { collectHookAssetManifest } from './scripts/hook-asset-manifest.mjs';
 
 const isProprietary = process.env.BUILD_MODE === 'proprietary';
+const hookAssetManifest = await collectHookAssetManifest(path.resolve('assets/hooks'));
 
 const commonDefine = {
   '__PROPRIETARY_BUILD__': String(isProprietary),
@@ -27,7 +29,17 @@ const internalStubPlugin = {
   },
 };
 
-const commonPlugins = [internalStubPlugin];
+const hookAssetManifestPlugin = {
+  name: 'hook-asset-manifest',
+  setup(b) {
+    b.onLoad({ filter: /[/\\]hook-asset-manifest\.ts$/ }, () => ({
+      contents: `export const HOOK_ASSET_MANIFEST = ${JSON.stringify(hookAssetManifest)};\n`,
+      loader: 'ts',
+    }));
+  },
+};
+
+const commonPlugins = [internalStubPlugin, hookAssetManifestPlugin];
 
 await build({
   entryPoints: ['src/index.ts'],
