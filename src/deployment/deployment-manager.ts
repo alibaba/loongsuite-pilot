@@ -28,6 +28,7 @@ import {
 import { mergeDeployedAgentsState, mergeHookSettingsPaths, withDeployedStateLock } from './deployed-state-merge.js';
 import { areSystemHookAssetsHealthy, restoreSystemHookAssets } from './system-hook-assets.js';
 import { supportsSystemTomlHooks } from './system-toml-hooks.js';
+import { prepareRootTriggerLogDirs } from '../utils/producer-log-dir.js';
 
 const logger = createLogger('DeploymentManager');
 
@@ -99,6 +100,7 @@ export class DeploymentManager {
   }
 
   private async deployAllUnlocked(enabled?: (def: AgentDefinition) => boolean): Promise<DeployResult[]> {
+    prepareRootTriggerLogDirs(this.dataDir);
     // ── Phase 0: migrate from old plugins (fail-open) ──
     try {
       await runPluginMigration();
@@ -199,6 +201,7 @@ export class DeploymentManager {
 
   deploySingle(def: AgentDefinition): Promise<DeployResult> {
     return this.runExclusive(async () => {
+      prepareRootTriggerLogDirs(this.dataDir);
       await this.loadState();
       const result = await this.deployAgent(def);
       await this.saveState();
@@ -355,6 +358,11 @@ export class DeploymentManager {
 
   recordedSettingsPaths(agentId: string): string[] {
     return mergeHookSettingsPaths(this.state[agentId]);
+  }
+
+  recordedConfigPath(agentId: string): string | undefined {
+    const record = this.state[agentId];
+    return record?.pluginInjectConfigPath ?? record?.dshPatchPath ?? record?.hookSettingsPath;
   }
 
   recordInstalledBy(agentId: string): 'hook-install' | 'daemon' | 'build' | undefined {

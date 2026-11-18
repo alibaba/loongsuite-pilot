@@ -23,6 +23,22 @@ export function appendRawJsonl(file, text, maxBytes = RAW_SEGMENT_BYTES, options
     Atomics.wait(LOCK_WAIT, 0, 0, Math.min(5, Math.max(0, deadline - performance.now())));
   }
   try {
+    const assertPrivateOwner = candidate => {
+      if (!options.privateOwner) return;
+      try {
+        const stat = fs.lstatSync(candidate);
+        if (!stat.isFile() || stat.isSymbolicLink()
+          || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+          throw new Error('Pilot event path belongs to another writer');
+        }
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    };
+    // Validate the complete file family before rotating or publishing a
+    // pointer: a different UID must never advance another writer's stream.
+    assertPrivateOwner(file);
+    assertPrivateOwner(pointer);
     let target = file;
     try {
       const name = fs.readFileSync(pointer, 'utf8');
@@ -33,6 +49,7 @@ export function appendRawJsonl(file, text, maxBytes = RAW_SEGMENT_BYTES, options
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
     }
+    assertPrivateOwner(target);
     let size = 0;
     try {
       const stat = fs.lstatSync(target);
@@ -54,8 +71,18 @@ export function appendRawJsonl(file, text, maxBytes = RAW_SEGMENT_BYTES, options
         fs.renameSync(temp, pointer);
       } finally { try { fs.unlinkSync(temp); } catch {} }
     }
-    const fd = fs.openSync(target, 'a', 0o600);
+    const flags = options.privateOwner
+      ? fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT
+        | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0)
+      : 'a';
+    const fd = fs.openSync(target, flags, 0o600);
     try {
+      if (options.privateOwner) {
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile() || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+          throw new Error('Pilot event file belongs to another writer');
+        }
+      }
       if (process.platform !== 'win32') fs.fchmodSync(fd, 0o600);
       fs.writeFileSync(fd, text, 'utf8');
     } finally { fs.closeSync(fd); }
