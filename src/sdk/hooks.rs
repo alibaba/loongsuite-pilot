@@ -48,6 +48,15 @@ struct Job {
     deadline: Instant,
     required: bool,
     audit_slot: Option<AuditSlot>,
+    response: Arc<RecentRequest>,
+}
+
+struct RecentRequest {
+    peer: SocketAddr,
+    received: Instant,
+    deadline: Instant,
+    receipt_required: bool,
+    reply: Mutex<Option<Vec<u8>>>,
 }
 
 struct Endpoint {
@@ -327,7 +336,7 @@ impl Drop for Hooks {
 impl Endpoint {
     fn receive(&self, pool: &WorkPool, activated: &AtomicBool, workers: usize, capacity: usize) {
         let mut buffer = [0u8; 4096];
-        let mut seen = HashMap::<String, Instant>::new();
+        let mut seen = HashMap::<String, Arc<RecentRequest>>::new();
         while !self.stop.load(Ordering::SeqCst) {
             if !activated.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(5));
@@ -353,8 +362,22 @@ impl Endpoint {
             {
                 continue;
             }
-            seen.retain(|_, time| time.elapsed() < Duration::from_secs(5));
-            if seen.contains_key(&packet.id) {
+            seen.retain(|_, prior| prior.received.elapsed() < Duration::from_secs(5));
+            if let Some(prior) = seen.get(&packet.id) {
+                // Retransmission is only supported by the paired cloud bin.
+                // Reply to the original peer without running the callback again.
+                if self.descriptor.cloud_capacity
+                    && packet.want_receipt
+                    && prior.peer == peer
+                    && Instant::now() < prior.deadline
+                {
+                    let reply = prior.reply.lock().unwrap();
+                    if let Some(bytes) = reply.as_ref() {
+                        let _ = self.socket.send_to(bytes, peer);
+                    } else {
+                        self.send_receipt(&packet.id, peer, prior.receipt_required);
+                    }
+                }
                 continue;
             }
             let received = Instant::now();
@@ -368,21 +391,34 @@ impl Endpoint {
                 && self.callback.is_some()
                 && packet.event == "PreToolUse"
                 && may_block(&packet, &self.settings.read().unwrap());
+            let deadline = received + Duration::from_millis(remaining);
+            let response = Arc::new(RecentRequest {
+                peer,
+                received,
+                deadline,
+                receipt_required: required,
+                reply: Mutex::new(None),
+            });
             let mut job = Job {
                 packet,
                 peer,
                 received,
-                deadline: received + Duration::from_millis(remaining),
+                deadline,
                 required,
                 audit_slot: None,
+                response: response.clone(),
             };
+            let rate_limited = seen.len() >= 1024;
+            if !rate_limited {
+                seen.insert(job.packet.id.clone(), response);
+            }
             let mut pending = pool.pending.lock().unwrap();
             if pending.closed {
                 break;
             }
             let in_flight = pending.active + pending.jobs.len();
             self.log(&job, "received", json!({"in_flight":in_flight}));
-            if job.packet.capacity_probe || in_flight >= capacity || seen.len() >= 1024 {
+            if job.packet.capacity_probe || in_flight >= capacity || rate_limited {
                 drop(pending);
                 self.reject_busy(&job, "overload");
                 continue;
@@ -395,18 +431,11 @@ impl Endpoint {
                     continue;
                 }
             }
-            seen.insert(job.packet.id.clone(), received);
-            if job.packet.want_receipt
-                && !self.send(
-                    &job,
-                    json!({
-                        "id": job.packet.id, "instance": self.descriptor.instance,
-                        "received": true, "required": job.required,
-                    }),
-                )
-            {
+            if job.packet.want_receipt && !self.send_receipt(&job.packet.id, peer, job.required) {
                 self.log(&job, "receipt_failed", Value::Null);
-                continue;
+                if !self.descriptor.cloud_capacity {
+                    continue;
+                }
             }
             let queued = (in_flight + 1).saturating_sub(workers);
             self.log(
@@ -524,10 +553,25 @@ impl Endpoint {
     }
 
     fn reply(&self, job: &Job, verdict: &Verdict) -> bool {
-        let sent = Instant::now() < job.deadline && self.send(job, json!({
-            "id":job.packet.id, "instance":self.descriptor.instance, "action":verdict.action,
-            "reason":verdict.reason, "status":verdict.status,
-        }));
+        let mut sent = false;
+        if Instant::now() < job.deadline {
+            let reply = json!({
+                "id":job.packet.id, "instance":self.descriptor.instance, "action":verdict.action,
+                "reason":verdict.reason, "status":verdict.status,
+            });
+            if let Some(bytes) = serde_json::to_vec(&reply)
+                .ok()
+                .filter(|bytes| bytes.len() <= MAX_REPLY)
+            {
+                if self.descriptor.cloud_capacity && job.packet.want_receipt {
+                    let mut cached = job.response.reply.lock().unwrap();
+                    sent = self.socket.send_to(&bytes, job.peer).is_ok();
+                    *cached = Some(bytes);
+                } else {
+                    sent = self.socket.send_to(&bytes, job.peer).is_ok();
+                }
+            }
+        }
         self.log(
             job,
             "reply",
@@ -536,10 +580,11 @@ impl Endpoint {
         sent
     }
 
-    fn send(&self, job: &Job, payload: Value) -> bool {
-        serde_json::to_vec(&payload).is_ok_and(|bytes| {
-            bytes.len() <= MAX_REPLY && self.socket.send_to(&bytes, job.peer).is_ok()
-        })
+    fn send_receipt(&self, id: &str, peer: SocketAddr, required: bool) -> bool {
+        let receipt = json!({
+            "id": id, "instance": self.descriptor.instance, "received": true, "required": required,
+        });
+        serde_json::to_vec(&receipt).is_ok_and(|bytes| self.socket.send_to(&bytes, peer).is_ok())
     }
 
     fn log(&self, job: &Job, stage: &str, detail: Value) {

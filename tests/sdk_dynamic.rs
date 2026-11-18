@@ -1564,10 +1564,15 @@ fn fifty_overlapping_cloud_hooks_receive_real_verdicts_with_a_one_second_callbac
             assert_eq!(output.stderr, b"SDK foreign host test\n", "request {index}");
         }
     }
-    assert_eq!(host.ctx.hook_entered.load(Ordering::SeqCst), 50);
     host.stop();
 
     let logs = hook_trace(&data, "hook-verdict.jsonl");
+    let clients = hook_trace(&data, "hook-client.jsonl");
+    assert_eq!(
+        host.ctx.hook_entered.load(Ordering::SeqCst),
+        50,
+        "SDK stages: {logs:?}, native Hook results: {clients:?}"
+    );
     let callbacks = logs
         .iter()
         .filter(|row| row["stage"] == "callback_end")
@@ -1596,7 +1601,6 @@ fn fifty_overlapping_cloud_hooks_receive_real_verdicts_with_a_one_second_callbac
         .filter_map(|row| row["detail"]["active"].as_u64())
         .max();
     assert_eq!(peak, Some(32));
-    let clients = hook_trace(&data, "hook-client.jsonl");
     let replies = logs
         .iter()
         .filter(|row| row["stage"] == "reply")
@@ -1676,4 +1680,45 @@ fn live_cloud_rejects_over_capacity_only_for_required_tool_checks() {
             .count(),
         0
     );
+}
+
+#[test]
+fn cloud_bin_retries_a_lost_first_datagram_with_the_same_request_id() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    let mut host = Host::start(&data, empty_policy(), Box::default());
+    host.ready();
+    let descriptor_path = data.join("sdk-hooks-cloud.json");
+    let saved = std::fs::read(&descriptor_path).unwrap();
+    let mut descriptor: Value = serde_json::from_slice(&saved).unwrap();
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    descriptor["port"] = json!(socket.local_addr().unwrap().port());
+    std::fs::write(&descriptor_path, descriptor.to_string()).unwrap();
+
+    let mut child = cloud_qoder_hook(&data);
+    send_pre_tool(&mut child, 1);
+    let mut buf = [0u8; 4096];
+    let (len, first_peer) = socket.recv_from(&mut buf).unwrap();
+    let first: Value = serde_json::from_slice(&buf[..len]).unwrap();
+    let (len, peer) = socket.recv_from(&mut buf).unwrap();
+    let second: Value = serde_json::from_slice(&buf[..len]).unwrap();
+    assert_eq!(peer, first_peer);
+    assert_eq!(first, second);
+    let response = json!({"id": second["id"], "instance": descriptor["instance"],
+        "action": "block", "reason": "SDK retry test", "status": "verdict"});
+    socket
+        .send_to(response.to_string().as_bytes(), peer)
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.stderr, b"SDK retry test\n");
+    let logs = hook_trace(&data, "hook-client.jsonl");
+    assert_eq!(logs.len(), 1);
+    assert!(logs[0]["send_attempts"].as_u64().unwrap() >= 2);
+    std::fs::write(descriptor_path, saved).unwrap();
+    host.stop();
 }

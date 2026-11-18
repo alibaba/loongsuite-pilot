@@ -57,6 +57,7 @@ struct RequestTrace {
     instance: Option<String>,
     receipt_ms: Option<u128>,
     status: &'static str,
+    send_attempts: usize,
     reply_status: Option<String>,
 }
 
@@ -68,7 +69,7 @@ impl Drop for RequestTrace {
                 "id": self.id, "instance": self.instance, "channel": self.channel,
                 "at_unix_ms": unix_time().map(|time| time.as_millis() as u64),
                 "elapsed_ms": self.started.elapsed().as_millis(), "receipt_ms": self.receipt_ms,
-                "status": self.status, "reply_status": self.reply_status,
+                "status": self.status, "send_attempts": self.send_attempts, "reply_status": self.reply_status,
             }),
         );
     }
@@ -134,6 +135,7 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
         instance: None,
         receipt_ms: None,
         status: "sdk_unavailable",
+        send_attempts: 0,
         reply_status: None,
     };
     let descriptor = descriptor(&data.join(format!("sdk-hooks-{channel}.json")))?;
@@ -206,19 +208,15 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
         16
     };
     let mut count = 0;
-    // Once the bin deadline and grace period have passed, no worker can
-    // consume the orphan payload or produce a valid reply for it.
+    // The lease is authoritative. In particular, Windows may temporarily
+    // report access denied for an entry another process is deleting.
     for entry in std::fs::read_dir(&spool)
         .ok()?
         .take(2 * lease_limit + 1)
         .flatten()
     {
-        let meta = match entry.metadata() {
-            Ok(meta) => meta,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return None,
-        };
-        if meta.modified().ok()?.elapsed().unwrap_or_default() > Duration::from_secs(5) {
+        let modified = entry.metadata().and_then(|meta| meta.modified());
+        if modified.is_ok_and(|time| time.elapsed().unwrap_or_default() > Duration::from_secs(5)) {
             let _ = std::fs::remove_file(entry.path());
         } else {
             count += 1;
@@ -275,30 +273,57 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
     };
     let socket = UdpSocket::bind("127.0.0.1:0").ok()?;
     socket.connect(("127.0.0.1", descriptor.port)).ok()?;
-    socket.send(&serde_json::to_vec(&request).ok()?).ok()?;
+    let request = serde_json::to_vec(&request).ok()?;
     let deadline = started + Duration::from_millis(DEADLINE_MS);
-    // Probe availability as part of the real request. Older SDKs advertise no
-    // receipts, so those pairs continue waiting for the original single reply.
-    let reply = |until: Instant| {
-        let wait = until.checked_duration_since(Instant::now())?;
-        if wait.is_zero() {
-            return None;
-        }
-        socket.set_read_timeout(Some(wait)).ok()?;
-        let mut bytes = [0u8; MAX_REPLY];
-        let len = socket.recv(&mut bytes).ok()?;
-        let reply: serde_json::Value = serde_json::from_slice(&bytes[..len]).ok()?;
-        (Instant::now() < until
-            && reply.get("id")?.as_str() == Some(id.as_str())
-            && reply.get("instance")?.as_str() == Some(descriptor.instance.as_str()))
-        .then_some(reply)
-    };
+    let reply =
+        |until: Instant, valid_until: Instant, is_expected: &dyn Fn(&serde_json::Value) -> bool| {
+            let mut bytes = [0u8; MAX_REPLY];
+            loop {
+                let wait = until
+                    .checked_duration_since(Instant::now())
+                    .filter(|wait| !wait.is_zero())
+                    .ok_or(std::io::ErrorKind::TimedOut)?;
+                socket.set_read_timeout(Some(wait))?;
+                let len = socket.recv(&mut bytes)?;
+                let Ok(reply) = serde_json::from_slice::<serde_json::Value>(&bytes[..len]) else {
+                    continue;
+                };
+                if Instant::now() < valid_until
+                    && reply["id"].as_str() == Some(id.as_str())
+                    && reply["instance"].as_str() == Some(descriptor.instance.as_str())
+                    && is_expected(&reply)
+                {
+                    return Ok::<_, std::io::Error>(reply);
+                }
+            }
+        };
     let first_deadline = if descriptor.request_receipts {
         deadline.min(Instant::now() + Duration::from_millis(RECEIPT_TIMEOUT_MS))
     } else {
         deadline
     };
-    let first = reply(first_deadline)?;
+    let first = loop {
+        trace.send_attempts += 1;
+        socket.send(&request).ok()?;
+        let until = if descriptor.cloud_capacity {
+            first_deadline.min(Instant::now() + Duration::from_millis(50))
+        } else {
+            first_deadline
+        };
+        match reply(until, first_deadline, &|row| {
+            reply_action(row).is_some() || row["received"] == true
+        }) {
+            Ok(reply) => break reply,
+            Err(error)
+                if descriptor.cloud_capacity
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    )
+                    && Instant::now() + Duration::from_millis(10) < first_deadline => {}
+            Err(_) => return None,
+        }
+    };
     let reply = if descriptor.request_receipts
         && first.get("received").and_then(serde_json::Value::as_bool) == Some(true)
     {
@@ -313,8 +338,9 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
             deadline
         };
         trace.status = "verdict_unavailable";
-        let reply = reply(until);
-        if required && reply.as_ref().and_then(reply_action).is_none() {
+        // A delayed/replayed receipt is not a final verdict.
+        let reply = reply(until, until, &|row| reply_action(row).is_some()).ok();
+        if required && reply.is_none() {
             trace.status = "temporary_block";
             trace.reply_status = Some("confirmed_timeout".to_owned());
             return block_output(&agent, &event, TEMPORARY_DENIAL);
