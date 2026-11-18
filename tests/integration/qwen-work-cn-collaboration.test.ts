@@ -1,17 +1,21 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { StateStore } from '../../src/checkpoints/state-store.js';
 import { InputManager } from '../../src/core/input-manager.js';
 import { MultiFlusher } from '../../src/flushers/multi-flusher.js';
+import { JsonlFlusher } from '../../src/flushers/jsonl-flusher.js';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
 import { QwenWorkCNCollaborationInput } from '../../src/inputs/qwen-work-cn/qwen-work-cn-collaboration-input.js';
 import { collaborationTurns } from '../../src/inputs/qwen-work-cn/qwen-work-cn-collaboration-parser.js';
 import { projectLogEntry } from '../../src/normalization/entry-builder.js';
 import { collaborationFixture } from '../helpers/qwen-work-collaboration-fixture.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
+import { AgentActivityEntrySchema } from '../contract/agent-activity-schema.js';
+import { JSONL_VALIDATOR_JS } from '../../scripts/e2e/lib/e2e-scenarios.mjs';
 
 class TestInput extends QwenWorkCNCollaborationInput {
   kick(): void { this.requestCollection(); }
@@ -162,6 +166,82 @@ describe('Qwen Work collaboration collection pipeline', () => {
     expect(logs.batchCalls[0].map(entry => entry['event.name'])).toEqual(['other', 'other']);
     expect(JSON.stringify(logs.batchCalls)).not.toMatch(/Synthetic question|Hello world/);
   });
+
+  it('emits provider-less agent observations that pass the event contract and strict JSONL validation', async () => {
+    const outputDir = path.join(root, 'output');
+    const output = new MultiFlusher([new JsonlFlusher({ enabled: true, outputDir, rotateDaily: false })]);
+    const store = new StateStore(checkpoint); await store.load();
+    const manager = new InputManager(); managers.push(manager);
+    manager.setFlusher(output);
+    const input = new TestInput({ stateStore: store, root: path.join(root, 'source'), pollIntervalMs: 60_000 });
+    manager.registerInput(input);
+    try {
+      await output.start();
+      const initialCycle = new Promise(resolve => input.once('input-runtime-delta', resolve));
+      await manager.startInput(input.id); await initialCycle;
+      await write(collaborationFixture()); input.kick();
+      const file = path.join(outputDir, 'qwen-work-cn-all.jsonl');
+      await vi.waitFor(async () => {
+        const rows = (await fs.readFile(file, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+        expect(rows).toHaveLength(3);
+      }, { timeout: 4000 });
+      const rows = (await fs.readFile(file, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+      expect(rows.map(row => row['event.name'])).toEqual(['other', 'agent.input', 'other']);
+      expect(rows.every(row => row['loongsuite.observation.scope'] === 'agent_turn')).toBe(true);
+      expect(rows.every(row => !Object.hasOwn(row, 'gen_ai.provider.name'))).toBe(true);
+      expect(rows.every(row => AgentActivityEntrySchema.safeParse(row).success)).toBe(true);
+      const strict = spawnSync(process.execPath, ['-'], { input: JSONL_VALIDATOR_JS, encoding: 'utf8', env: {
+        ...process.env, _JV_LOG_DIR: outputDir, E2E_JSONL_STRICT: '1', E2E_JSONL_AGENT_FILTER: 'qwen-work-cn',
+      } });
+      expect(strict.error).toBeUndefined();
+      expect(strict.status, strict.stdout + strict.stderr).toBe(0);
+    } finally {
+      await manager.stopAll();
+      await output.shutdown();
+    }
+  });
+
+  it.each(['enabled', 'agent-off', 'otlp-off'] as const)(
+    'preserves turn identity on real exported spans with content mode %s', async mode => {
+      const logs = new MockFlusher();
+      const spans: ReadableSpan[] = [];
+      const trace = new OtlpTraceFlusher({
+        enabled: true, endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318' }],
+        serviceName: 'qwen-collaboration-test', captureMessageContent: mode !== 'otlp-off',
+      }, undefined, () => ({
+        export: (batch, callback) => { spans.push(...batch); callback({ code: 0 }); }, shutdown: async () => {},
+      }));
+      const run = await start(logs, trace);
+      if (mode === 'agent-off') run.manager.setAgentsConfig({ 'qwen-work-cn': { captureMessageContent: false } });
+      await write(collaborationFixture()); run.input.kick();
+      await vi.waitFor(() => expect(spans).toHaveLength(2), { timeout: 4000 });
+      const startEvent = logs.batchCalls[0].find(entry => entry['gen_ai.turn.start'] === true)!;
+      expect(logs.batchCalls[0].every(event => AgentActivityEntrySchema.safeParse(event).success)).toBe(true);
+      if (mode === 'agent-off') expect(JSON.stringify(logs.batchCalls[0])).not.toMatch(/Synthetic question|Hello world/);
+      if (mode === 'otlp-off') expect(JSON.stringify(logs.batchCalls[0])).toContain('Synthetic question');
+      const entry = spans.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY')!;
+      const agent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT')!;
+      for (const span of [entry, agent]) {
+        expect(span.attributes['gen_ai.user.id']).toBe(startEvent['user.id']);
+        expect(span.attributes['gen_ai.session.id']).toBe(startEvent['gen_ai.session.id']);
+        expect(span.attributes['gen_ai.turn.id']).toBe(startEvent['gen_ai.turn.id']);
+        expect(span.attributes['gen_ai.agent.name']).toBe(startEvent['gen_ai.agent.type']);
+        expect(span.attributes['gen_ai.agent.id']).toBe(startEvent['gen_ai.agent.id']);
+      }
+      expect(agent.attributes['gen_ai.conversation.id']).toBe(startEvent['gen_ai.session.id']);
+      if (mode === 'enabled') {
+        expect(JSON.stringify(spans.map(span => span.attributes))).toContain('Synthetic question');
+        expect(JSON.stringify(spans.map(span => span.attributes))).toContain('Hello world');
+      } else {
+        expect(JSON.stringify(spans.map(span => span.attributes))).not.toMatch(/Synthetic question|Hello world/);
+        for (const span of [entry, agent]) {
+          expect(span.attributes).not.toHaveProperty('gen_ai.input.messages');
+          expect(span.attributes).not.toHaveProperty('gen_ai.output.messages');
+        }
+      }
+      await trace.shutdown();
+    },
+  );
 
   it('retries malformed snapshots and avoids reading unchanged snapshots again', async () => {
     const logs = new MockFlusher();

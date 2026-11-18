@@ -21,6 +21,7 @@ import {
   buildMatrixProbeScript,
 } from './agent-matrix.mjs';
 import { buildAgentProbeRemoteBody } from './agent-probe-body.mjs';
+import { providerOptionalForAgentTurn } from './provider-contract.mjs';
 
 /**
  * Default installer URL shared by run-remote-e2e and the per-scenario script generators.
@@ -740,6 +741,7 @@ exit 0
  * 独立导出便于单元测试。
  */
 export const JSONL_VALIDATOR_JS = `'use strict';
+${providerOptionalForAgentTurn.toString()}
 const fs = require('fs');
 const path = require('path');
 
@@ -756,7 +758,7 @@ const MAX_SAMPLES = parseInt(process.env.E2E_JSONL_MAX_SAMPLES || '3', 10);
 
 const COMMON_REQUIRED = [
   'time_unix_nano', 'event.id', 'user.id', 'event.name',
-  'gen_ai.session.id', 'gen_ai.agent.type', 'gen_ai.provider.name',
+  'gen_ai.session.id', 'gen_ai.agent.type',
 ];
 const EVENT_NAME_ENUM = new Set([
   'gen_ai.agent.invoke', 'gen_ai.agent.result',
@@ -776,6 +778,7 @@ const CONDITIONAL_REQUIRED = {
 };
 const COVERAGE_FIELDS = [
   ...COMMON_REQUIRED,
+  'gen_ai.provider.name', 'loongsuite.observation.scope',
   'trace_id', 'span_id', 'gen_ai.turn.id', 'gen_ai.step.id',
   'gen_ai.agent.invocation.id', 'gen_ai.agent.parent.invocation.id',
   'gen_ai.turn.start', 'gen_ai.turn.end',
@@ -969,6 +972,12 @@ for (const file of files) {
     const en = entry['event.name'];
     const conditional = CONDITIONAL_REQUIRED[en] || [];
     const miss = [...COMMON_REQUIRED, ...conditional].filter(k => !hasValue(entry[k]));
+    if (entry['loongsuite.observation.scope'] !== undefined && !providerOptionalForAgentTurn(entry)) {
+      addIssue(base, 'invalid_observation_scope', ['loongsuite.observation.scope']);
+    }
+    if (!hasValue(entry['gen_ai.provider.name']) && !providerOptionalForAgentTurn(entry)) {
+      miss.push('gen_ai.provider.name');
+    }
     const failedStatus = typeof entry['tool.result.status'] === 'string'
       && ['failure', 'failed', 'error'].includes(entry['tool.result.status'].toLowerCase());
     const finishReasons = Array.isArray(entry['gen_ai.response.finish_reasons'])
@@ -1081,7 +1090,7 @@ console.log('');
 console.log('=== [jsonl-validate] summary ===');
 console.log('  files=' + files.length + ' entries=' + totalEntries + ' windowed=' + totalWindowed);
 for (const category of [
-  'missing_required', 'bad_event_name', 'parse_error', 'type_error',
+  'missing_required', 'bad_event_name', 'parse_error', 'type_error', 'invalid_observation_scope',
   'duplicate_event_id', 'model_pair_error', 'tool_pair_error', 'turn_boundary_error',
   'empty_window',
 ]) {

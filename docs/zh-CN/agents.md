@@ -65,7 +65,7 @@ Pilot 的通用优先级生效。同一账号在多台设备登录时，仍可�
 这是基于千问办公 2.x 私有本地格式的实验性适配；已在 macOS 千问办公 2.1.0 上
 通过手工安装的隔离测试服务验证真实协作空间，尚未验证官方安装器升级和其他平台。
 快照不证明内部模型或工具的调用，因此不会构造 LLM/TOOL Span 或填充模型、
-Provider 和 Token；目前通用事件契约仍要求 Provider，该来源尚不能通过严格事件校验。
+Provider 和 Token；事件标记为 `agent_turn` 观察范围，并省略缺失的 Provider。
 附件以及卡片中的非文本内容不在此采集范围。完成时间优先使用
 卡片的 `terminalAt`，缺失时使用 `updatedAt`，其来源标记为
 `loongsuite.qwenworkcn.completion_time_source`。这些时间表示客户端观察到的对话边界。

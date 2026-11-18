@@ -71,9 +71,9 @@ export function* collaborationTurns(
         'gen_ai.turn.id': turn,
         'gen_ai.agent.type': ClientType.QwenWorkCN,
         'gen_ai.agent.id': text(object(reply.sender)?.id) ?? 'qwen-work-cn',
-        // The IM snapshot does not identify the model provider. Keep the
-        // required field empty instead of inferring it from the product name.
-        'gen_ai.provider.name': '',
+        // This source observes the conversation boundary, not model calls;
+        // the provider is intentionally omitted rather than guessed.
+        'loongsuite.observation.scope': 'agent_turn',
         'agent.source': 'qwen-work-cn-collaboration',
       };
       yield {

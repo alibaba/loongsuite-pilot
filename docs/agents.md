@@ -85,8 +85,8 @@ A manually installed isolated test service was exercised with a real space on
 macOS Qwen Work 2.1.0; installer upgrades and other platforms remain unverified. The
 snapshot does not prove individual model or tool calls, so Pilot does not
 invent LLM/TOOL spans, model, provider, or token data. Attachments and non-text
-card content are outside this source's scope. The common event contract still
-requires a provider, so this source does not yet pass strict event validation.
+card content are outside this source's scope. Its events declare the
+`agent_turn` observation scope and omit the unavailable provider.
 The card's `terminalAt` is used
 as the completion time when available; otherwise
 `updatedAt` is used. `loongsuite.qwenworkcn.completion_time_source` records

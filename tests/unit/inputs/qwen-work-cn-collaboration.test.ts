@@ -24,7 +24,8 @@ describe('Qwen Work collaboration state', () => {
     expect(turn.entries[1]['gen_ai.output.messages']).toEqual([
       { role: 'assistant', parts: [{ type: 'text', content: 'Hello world' }] },
     ]);
-    expect(turn.entries[0]['gen_ai.provider.name']).toBe('');
+    expect(turn.entries[0]).not.toHaveProperty('gen_ai.provider.name');
+    expect(turn.entries[0]['loongsuite.observation.scope']).toBe('agent_turn');
     expect(JSON.stringify(turn.entries)).not.toMatch(/not visible output|gen_ai.request.model|gen_ai.usage/);
     expect([...collaborationTurns(state)][0].entries.map(entry => entry['event.id']))
       .toEqual(turn.entries.map(entry => entry['event.id']));

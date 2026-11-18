@@ -26,5 +26,12 @@ export function convertQwenWorkCollaborationTurn(records: EventLogRecord[], opti
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
-  return convertEventLogToTrace(boundaries, { ...options, ...(wrapped ? { handler: wrapped } : {}) });
+  // The shared converter derives turn identity from user-input events. Content
+  // policies can remove both input fields, so keep an empty marker only on the
+  // conversion copy. It carries no message content and is never sent as an
+  // AgentActivityEntry, but lets the converter retain the boundary's identity.
+  const conversionBoundaries = start['gen_ai.input.messages'] || start['gen_ai.input.messages_delta']
+    ? boundaries
+    : boundaries.map(record => record === start ? { ...record, 'gen_ai.input.messages_delta': [] } : record);
+  return convertEventLogToTrace(conversionBoundaries, { ...options, ...(wrapped ? { handler: wrapped } : {}) });
 }
