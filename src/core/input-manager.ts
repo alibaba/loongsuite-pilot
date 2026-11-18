@@ -168,7 +168,7 @@ export class InputManager extends EventEmitter {
     }
     input.setWorkspacePolicy(this.workspacePolicy);
     this.inputs.set(input.id, input);
-    if (input.agentType === ClientType.CodexCliHook || input.id === 'qwen-work-cn-collaboration') {
+    if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes || input.id === 'qwen-work-cn-collaboration') {
       this.entryAbortControllers.set(input.id, new AbortController());
     }
     this.counters.set(input.id, {
@@ -212,7 +212,7 @@ export class InputManager extends EventEmitter {
           (input as BaseInput & { restoreAbortedDelivery(): void }).restoreAbortedDelivery();
         });
         input.holdCheckpointUntil(retained);
-      } else if (input.agentType === ClientType.CodexCliHook) {
+      } else if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes) {
         input.holdCheckpointUntil(handling);
       }
       const next = handling.catch(err => {
@@ -279,6 +279,14 @@ export class InputManager extends EventEmitter {
     await input.stop();
     await this.drainInputQueue(id);
     logger.info('input stopped', { id });
+  }
+
+  /** Recovery must first drain the actual Hermes source and output queue. */
+  async confirmHermesSourceDrained(sourceToken: string): Promise<boolean> {
+    const input = this.inputs.get('hermes-agent-log') as (BaseInput & {
+      confirmSourceDrained?: (token: string) => Promise<boolean>;
+    }) | undefined;
+    return input?.confirmSourceDrained ? input.confirmSourceDrained(sourceToken) : false;
   }
 
   /** Called before discovery drains starts that may themselves await output. */

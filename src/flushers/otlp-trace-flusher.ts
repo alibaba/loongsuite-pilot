@@ -23,6 +23,8 @@ import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { convertQwenWorkCollaborationTurn } from './qwen-work-collaboration-converter.js';
 import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
+import { currentHermesProcessNamespace, hermesProcessIdentity, isHermesProcessDead,
+  type HermesProcessIdentity } from './hermes-process-identity.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 import { multimodalMetadataItemsFromMessages } from '../multimodal/rewrite.js';
@@ -60,6 +62,15 @@ import {
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
+// Give input polling time to drain the producer's last records. A live or
+// unidentifiable producer is never closed by this recovery timer.
+const HERMES_ABANDONED_GRACE_MS = 5 * 60_000;
+const HERMES_DEAD_CONFIRM_MS = 60_000;
+const HERMES_OWNER_CHECK_INTERVAL_MS = 30_000;
+const HERMES_OWNER_CHECK_LIMIT = 32;
+const HERMES_SOURCE_DRAIN_LIMIT = 2;
+const HERMES_SOURCE_GROUP_LIMIT = 10_000;
+const HERMES_SOURCE_PER_GROUP_LIMIT = 16;
 const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
 // Claude Code marks a failed attempt (mid-turn retry or terminal API failure)
 // with finish_reasons=['error']. 'error' must NOT be a turn boundary on its own,
@@ -142,6 +153,8 @@ interface TurnBuffer {
   spillable?: boolean;
   spilledRecords?: number;
   spilledEventIds?: Set<string>;
+  /** A buffer evicted under the count limit can be restored from its entire journal. */
+  replayEntireJournal?: boolean;
   residentBytes?: number;
   // Stable source IDs index resident replay records. Spilled durable turns
   // retain their identities in spilledEventIds until payload rehydration.
@@ -151,9 +164,16 @@ interface TurnBuffer {
   isRealtimeHermes?: boolean;
   /** Only a turn covered by the native observer may bypass idle flushing. */
   hasHermesNativeRunObserver?: boolean;
+  hermesOwner?: HermesProcessIdentity;
+  hermesOwnerUncertain?: boolean;
+  hermesAbandoned?: boolean;
+  hermesDeadSinceMs?: number;
+  hermesNextDrainMs?: number;
+  hermesDrainFailures?: number;
   /** A fixed-session cron execution has an explicit outer completion event. */
   isObservedOpenClawCron?: boolean;
   lastActivityMs: number;
+  activityVersion: number;
   logicalBytes: number;
   unmeasuredRecords: number;
   openedAtMs: number;
@@ -646,6 +666,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly globalAttributesProvider?: GlobalAttributesProvider;
 
   private idleTimer?: ReturnType<typeof setInterval>;
+  private hermesOwnerTimer?: ReturnType<typeof setInterval>;
+  private hermesOwnerCheckRunning = false;
+  private hermesOwnerCursor = 0;
+  private readonly hermesSourceGroups = new Map<string, Set<string>>();
+  private readonly hermesGroupSources = new Map<string, Set<string>>();
+  private readonly hermesDeferredTurns = new Map<string, TurnBuffer>();
+  private hermesSourceTrackingOverflow = false;
+  private stopping = false;
   private inFlightExports = new Set<Promise<void>>();
   private flushedTurnKeys = new Set<string>();
   private warnedHermesIdleTimeout = false;
@@ -668,6 +696,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     exporterFactory?: OtlpExporterFactory,
     private readonly codexJournal?: CodexTurnJournal,
     private readonly prepareCodexReplay?: (entries: AgentActivityEntry[]) => AgentActivityEntry[],
+    private readonly confirmHermesSourceDrained?: (sourceToken: string) => Promise<boolean>,
   ) {
     super();
     if (!cfg.endpoints || cfg.endpoints.length === 0) {
@@ -723,6 +752,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (cfg.turnIdleTimeoutMs && cfg.turnIdleTimeoutMs > 0) {
       this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);
       this.idleTimer.unref();
+    }
+    if (process.platform === 'linux') {
+      this.hermesOwnerTimer = setInterval(() => { void this.recoverAbandonedHermesTurns(); }, HERMES_OWNER_CHECK_INTERVAL_MS);
+      this.hermesOwnerTimer.unref();
     }
 
     logger.info(
@@ -805,6 +838,50 @@ export class OtlpTraceFlusher extends BaseFlusher {
     counters.removed_unmeasured_records_total += buf.unmeasuredRecords;
   }
 
+  override hasPendingHermesSource(sourceToken: string): boolean {
+    return this.hermesSourceTrackingOverflow || (this.hermesSourceGroups.get(sourceToken)?.size ?? 0) > 0;
+  }
+
+  private trackHermesSource(groupKey: string, sourceToken: string): void {
+    let sources = this.hermesGroupSources.get(groupKey);
+    if (!sources) {
+      if (this.hermesGroupSources.size >= HERMES_SOURCE_GROUP_LIMIT) {
+        if (!this.hermesSourceTrackingOverflow) {
+          this.hermesSourceTrackingOverflow = true;
+          logger.warn('Hermes source protection limit reached; retaining raw Hermes sources until collector restart',
+            { limit: HERMES_SOURCE_GROUP_LIMIT });
+        }
+        return;
+      }
+      sources = new Set();
+      this.hermesGroupSources.set(groupKey, sources);
+    }
+    if (sources.has(sourceToken)) return;
+    if (sources.size >= HERMES_SOURCE_PER_GROUP_LIMIT) {
+      if (!this.hermesSourceTrackingOverflow) {
+        this.hermesSourceTrackingOverflow = true;
+        logger.warn('Hermes source-owner limit reached; retaining raw Hermes sources until collector restart',
+          { limit: HERMES_SOURCE_PER_GROUP_LIMIT });
+      }
+      return;
+    }
+    sources.add(sourceToken);
+    let groups = this.hermesSourceGroups.get(sourceToken);
+    if (!groups) { groups = new Set(); this.hermesSourceGroups.set(sourceToken, groups); }
+    groups.add(groupKey);
+  }
+
+  private releaseHermesSources(groupKey: string): void {
+    const sources = this.hermesGroupSources.get(groupKey);
+    if (!sources) return;
+    for (const token of sources) {
+      const groups = this.hermesSourceGroups.get(token);
+      groups?.delete(groupKey);
+      if (groups?.size === 0) this.hermesSourceGroups.delete(token);
+    }
+    this.hermesGroupSources.delete(groupKey);
+  }
+
   async send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
     await this.start();
     // A public call always owns durable acceptance, even while another call
@@ -882,6 +959,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     let buf = this.turnBuffers.get(key);
     if (!buf) {
+      // A real continuation takes ownership back from the deferred-recovery
+      // list; the journal replay path restores its prefix before this suffix.
+      this.hermesDeferredTurns.delete(key);
       buf = {
         key,
         keySource: source,
@@ -892,6 +972,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         recordIndex: new Map(),
         completed: false,
         lastActivityMs: Date.now(),
+        activityVersion: 0,
         logicalBytes: 0,
         unmeasuredRecords: 0,
         openedAtMs: performance.now(),
@@ -905,6 +986,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
       buf.isRealtimeHermes = true;
       if (entry['agent.hermes.native_run_observer'] === true) {
         buf.hasHermesNativeRunObserver = true;
+      }
+      const owner = hermesProcessIdentity(entry);
+      if (!owner || (buf.hermesOwner && JSON.stringify(owner) !== JSON.stringify(buf.hermesOwner))) {
+        buf.hermesOwnerUncertain = true;
+        // This turn can no longer use process-based recovery. Preserve the
+        // existing journal/retention behavior rather than pinning raw files
+        // indefinitely for an owner we cannot safely identify.
+        this.releaseHermesSources(key);
+      } else {
+        buf.hermesOwner = owner;
+        if (!buf.hermesOwnerUncertain) this.trackHermesSource(key, owner.sourceToken);
       }
     }
     if (agentType === 'openclaw' && entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') {
@@ -951,6 +1043,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     if (!buf.spilledRecords) buf.residentBytes = (buf.residentBytes ?? 0) + residentDelta;
     buf.lastActivityMs = Date.now();
+    buf.activityVersion++;
+    buf.hermesDeadSinceMs = undefined;
+    buf.hermesNextDrainMs = undefined;
+    buf.hermesDrainFailures = undefined;
     if (typeof logicalBytes === 'number' && Number.isFinite(logicalBytes) && logicalBytes >= 0) {
       buf.logicalBytes += logicalBytes;
     } else {
@@ -1009,6 +1105,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
     for (const buf of candidates) {
       if (this.codexJournal?.acceptsAgent(buf.agentType)) {
         // The durable prefix can be rehydrated when this native turn resumes.
+        // A killed producer never resumes, so retain only bounded recovery
+        // metadata and restore its journal lazily once the owner is confirmed dead.
+        if (buf.agentType === 'hermes' && buf.isRealtimeHermes && buf.journalKey
+          && buf.hermesOwner && !buf.hermesOwnerUncertain) {
+          if (this.hermesDeferredTurns.size < HERMES_SOURCE_GROUP_LIMIT) {
+            this.hermesDeferredTurns.set(buf.key, { ...buf, records: [], recordIndex: new Map(),
+              spilledRecords: 1, spilledEventIds: undefined, replayEntireJournal: true, residentBytes: 0 });
+          } else if (!this.hermesSourceTrackingOverflow) {
+            this.hermesSourceTrackingOverflow = true;
+            logger.warn('Hermes deferred recovery limit reached; retaining raw sources until collector restart',
+              { limit: HERMES_SOURCE_GROUP_LIMIT });
+          }
+        } else if (buf.agentType === 'hermes' && !buf.journalKey) {
+          this.releaseHermesSources(buf.key);
+        }
         this.turnBuffers.delete(buf.key);
         this.recordBufferRemoval(buf);
       } else {
@@ -1105,7 +1216,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
     for await (const entries of this.preparedJournalBatches(buf.journalKey!)) {
       // A batch journals its whole suffix before appending. Do not pull a
       // future suffix forward while materializing an unpersistable event.
-      restored.push(...entries.filter(entry => buf.spilledEventIds!.has(entry['event.id'])));
+      restored.push(...(buf.replayEntireJournal
+        ? entries : entries.filter(entry => buf.spilledEventIds!.has(entry['event.id']))));
     }
     if (!restored.length) throw new Error('Retained Codex payload is unavailable; refusing to acknowledge its turn');
     buf.records = restored;
@@ -1114,6 +1226,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     buf.residentBytes = restored.reduce((sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry)), 0);
     buf.spilledRecords = 0;
     buf.spilledEventIds = undefined;
+    buf.replayEntireJournal = false;
   }
 
   private async persistCodexEntries(entries: AgentActivityEntry[]): Promise<void> {
@@ -1140,6 +1253,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   async shutdown(): Promise<void> {
+    this.stopping = true;
+    if (this.hermesOwnerTimer) {
+      clearInterval(this.hermesOwnerTimer);
+      this.hermesOwnerTimer = undefined;
+    }
     if (this.idleTimer) {
       clearInterval(this.idleTimer);
       this.idleTimer = undefined;
@@ -1276,6 +1394,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
     if (turnId && turnId.length > 0) {
+      if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'hermes') {
+        const sessionId = entry['gen_ai.session.id'];
+        if (typeof sessionId === 'string' && sessionId.length > 0) {
+          // Older Hermes plugins reuse the native turn ID after session
+          // compression. Match the durable journal's user/session/turn
+          // identity so a terminal cannot export or acknowledge another
+          // user's or session's independently persisted turn.
+          return { source: 'turn_id', value: turnId,
+            key: `hermes:${JSON.stringify([entry['user.id'] ?? null, sessionId, turnId])}` };
+        }
+      }
       if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
         return { source: 'turn_id', value: turnId,
           key: `codex:${[entry['user.id'], entry['gen_ai.session.id'], turnId]
@@ -1350,9 +1479,26 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
-    const exported = await this.convertAndExport(buf.agentType, buf.records);
+    let records = buf.records;
+    if (buf.hermesAbandoned && records.length > 0) {
+      // Only the export boundary needs this marker. Avoid cloning every event
+      // in a large rehydrated turn or changing the journal-owned records.
+      records = records.slice();
+      records[0] = { ...records[0],
+        'agent.hermes.collection.incomplete': true,
+        'agent.hermes.collection.end_reason': 'producer_process_exited' };
+    }
+    const exported = await this.convertAndExport(buf.agentType, records);
     if (exported && this.codexJournal?.acceptsAgent(buf.agentType) && buf.completed) {
       await this.codexJournal.acknowledge(buf.records);
+    }
+    // A normal terminal is already durable in the journal, even when an OTLP
+    // endpoint failed. Only an abandoned turn needs its source retained for a
+    // later recovery attempt after an unsuccessful export.
+    const terminalDurable = !buf.hermesAbandoned && !!buf.journalKey && !!this.codexJournal
+      && buf.records.every(record => this.codexJournal!.accepts(record));
+    if (buf.completed && buf.agentType === 'hermes' && (exported || terminalDurable)) {
+      this.releaseHermesSources(buf.key);
     }
   }
 
@@ -1605,6 +1751,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
     reasoning?: { seen: boolean; total: number },
   ): Promise<boolean> {
     if (spans.length === 0) return true;
+    if (agentType === 'hermes' && records.some(record =>
+      record['agent.hermes.collection.end_reason'] === 'producer_process_exited')) {
+      for (const span of spans) {
+        span.attributes['agent.hermes.collection.incomplete'] = true;
+        span.attributes['agent.hermes.collection.end_reason'] = 'producer_process_exited';
+      }
+    }
     applyQoderWorkStepTiming(records, spans);
     this.enrichToolSkillAttributes(records, spans);
     this.enrichMultimodalAttributes(records, spans);
@@ -2698,6 +2851,94 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
     } catch (err) {
       logger.warn('Failed-log write failed', { err: String(err) });
+    }
+  }
+
+  private async recoverAbandonedHermesTurns(): Promise<void> {
+    if (this.stopping || this.hermesOwnerCheckRunning || this.batchDepth > 0) return;
+    const now = Date.now();
+    const candidates = [...this.turnBuffers.values(), ...this.hermesDeferredTurns.values()].filter(buf => buf.isRealtimeHermes
+      && !buf.completed && !buf.hermesOwnerUncertain && buf.hermesOwner
+      && now - buf.lastActivityMs >= HERMES_ABANDONED_GRACE_MS);
+    if (!candidates.length) return;
+    this.hermesOwnerCheckRunning = true;
+    try {
+      const current = await currentHermesProcessNamespace();
+      if (!current) return;
+      // Advance fairly even when many alive producers occupy older buffers.
+      const start = this.hermesOwnerCursor % candidates.length;
+      const selected = Array.from({ length: Math.min(candidates.length, HERMES_OWNER_CHECK_LIMIT) },
+        (_, index) => candidates[(start + index) % candidates.length]);
+      this.hermesOwnerCursor = (start + selected.length) % candidates.length;
+      const checked = new Map<string, boolean>();
+      const drained = new Map<string, boolean>();
+      for (const [index, buf] of selected.entries()) {
+        if (Date.now() - buf.lastActivityMs < HERMES_ABANDONED_GRACE_MS) continue;
+        const owner = buf.hermesOwner!;
+        const key = JSON.stringify(owner);
+        const activityVersion = buf.activityVersion;
+        let dead = checked.get(key);
+        if (dead === undefined) {
+          dead = await isHermesProcessDead(owner, current);
+          checked.set(key, dead);
+        }
+        // A new batch or lifecycle marker may arrive while /proc is read.
+        const isCurrent = () => this.turnBuffers.get(buf.key) === buf || this.hermesDeferredTurns.get(buf.key) === buf;
+        if (this.stopping || this.batchDepth > 0 || buf.completed
+          || !isCurrent() || buf.activityVersion !== activityVersion) continue;
+        if (!dead) {
+          buf.hermesDeadSinceMs = undefined;
+          continue;
+        }
+        // The process may have exited normally after a long idle tool call.
+        // Observe its death separately and allow the input poller to drain its
+        // final records before treating the turn as abandoned.
+        if (buf.hermesDeadSinceMs === undefined) {
+          buf.hermesDeadSinceMs = Date.now();
+          continue;
+        }
+        if (Date.now() - buf.hermesDeadSinceMs < HERMES_DEAD_CONFIRM_MS) continue;
+        if (buf.hermesNextDrainMs && Date.now() < buf.hermesNextDrainMs) continue;
+        // Age and process death alone cannot prove the input/dispatch queue is
+        // caught up. Force a collection and check every source segment before
+        // sealing. If the source cannot be verified, keep the journal pending.
+        if (!this.confirmHermesSourceDrained) continue;
+        let sourceDrained = drained.get(owner.sourceToken);
+        if (sourceDrained === undefined) {
+          if (drained.size >= HERMES_SOURCE_DRAIN_LIMIT) {
+            this.hermesOwnerCursor = (start + index) % candidates.length;
+            break;
+          }
+          sourceDrained = await this.confirmHermesSourceDrained(owner.sourceToken);
+          drained.set(owner.sourceToken, sourceDrained);
+        }
+        if (!sourceDrained) {
+          const failures = Math.min((buf.hermesDrainFailures ?? 0) + 1, 5);
+          buf.hermesDrainFailures = failures;
+          buf.hermesNextDrainMs = Date.now() + Math.min(300_000, 30_000 * 2 ** (failures - 1));
+          continue;
+        }
+        if (this.stopping || this.batchDepth > 0 || buf.completed
+          || !isCurrent() || buf.activityVersion !== activityVersion) continue;
+        logger.warn('Recovering incomplete Hermes turn after producer process exited', {
+          sessionId: buf.sessionId, turnId: buf.keyValue, pid: owner.pid,
+          idleMs: Date.now() - buf.lastActivityMs,
+        });
+        buf.hermesAbandoned = true;
+        buf.completed = true;
+        if (this.hermesDeferredTurns.get(buf.key) === buf) {
+          // Conversion rehydrates a single journal at a time via codexFlushTail.
+          this.hermesDeferredTurns.delete(buf.key);
+          this.flushedTurnKeys.add(buf.key);
+          void this.trackTurnExport(buf);
+        } else {
+          this.triggerFlush(buf);
+        }
+      }
+    } catch (error) {
+      logger.warn('Hermes producer process recovery check failed', { error: String(error) });
+    } finally {
+      this.hermesOwnerCheckRunning = false;
     }
   }
 

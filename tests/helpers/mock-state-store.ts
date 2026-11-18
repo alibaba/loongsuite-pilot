@@ -9,8 +9,16 @@ export class MockStateStore {
   private readonly persistedStates = new Map<string, InputState>();
   private _dirty = false;
   private _saveCount = 0;
+  private readonly pendingOutputs = new Set<Promise<void>>();
 
   hasSaveFailure(_id: string): boolean { return false; }
+
+  get waitingForOutput(): boolean { return this.pendingOutputs.size > 0; }
+
+  holdSaveUntil(promise: Promise<void>, _inputId?: string): void {
+    this.pendingOutputs.add(promise);
+    void promise.then(() => this.pendingOutputs.delete(promise), () => this.pendingOutputs.delete(promise));
+  }
 
   get dirty(): boolean {
     return this._dirty;
@@ -32,6 +40,7 @@ export class MockStateStore {
   }
 
   async save(): Promise<void> {
+    await Promise.all([...this.pendingOutputs]);
     this._saveCount++;
     this._dirty = false;
     for (const [id, state] of this.states) this.persistedStates.set(id, { ...state, extra: { ...state.extra } });
@@ -39,6 +48,11 @@ export class MockStateStore {
 
   get(inputId: string): InputState {
     return this.states.get(inputId) ?? {};
+  }
+
+  getPersistedState(inputId: string): InputState | undefined {
+    const state = this.persistedStates.get(inputId);
+    return state ? structuredClone(state) : undefined;
   }
 
   set(inputId: string, state: InputState): void {

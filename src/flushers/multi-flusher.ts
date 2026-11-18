@@ -78,6 +78,10 @@ export class MultiFlusher extends BaseFlusher {
     return this.flushers.flatMap(flusher => flusher.getTraceRuntimeSnapshot());
   }
 
+  override hasPendingHermesSource(sourceToken: string): boolean {
+    return this.flushers.some(flusher => flusher.hasPendingHermesSource(sourceToken));
+  }
+
   async shutdown(): Promise<void> {
     await Promise.allSettled(this.flushers.map(r => r.shutdown()));
   }

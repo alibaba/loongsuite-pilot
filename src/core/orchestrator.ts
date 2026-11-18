@@ -389,7 +389,8 @@ export class Orchestrator extends EventEmitter {
     await this.agentDiscoveryService.start();
 
     // 9. Start log retention service
-    this.logRetentionService = new LogRetentionService(this.dataDir, this.config.retention, this.stateStore);
+    this.logRetentionService = new LogRetentionService(this.dataDir, this.config.retention, this.stateStore,
+      token => this.flusher?.hasPendingHermesSource(token) ?? false);
     this.logRetentionService.start();
 
     // 10. Start hook watchdog (periodically restores hooks overwritten by other tools)
@@ -1062,6 +1063,7 @@ export class Orchestrator extends EventEmitter {
           new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
             ['codex', 'hermes', 'openclaw']),
           entries => this.inputManager!.prepareRestoredEntries(entries),
+          sourceToken => this.inputManager!.confirmHermesSourceDrained(sourceToken),
         );
         await r.start();
         flushers.push(r);

@@ -27,6 +27,20 @@ function withoutBoundaries(value: AgentActivityEntry): AgentActivityEntry {
 }
 
 describe('TurnBoundaryProcessor', () => {
+  it('tracks Hermes users separately when they reuse the same session and turn', () => {
+    const processor = new TurnBoundaryProcessor();
+    const common = { 'gen_ai.agent.type': 'hermes', 'agent.hermes.collection': 'realtime-v1',
+      'gen_ai.session.id': 'shared-session' };
+    const first = entry('user-a-request', 'llm.request', { ...common, 'user.id': 'user-a' });
+    const second = entry('user-b-request', 'llm.request', { ...common, 'user.id': 'user-b' });
+    processor.enrich([first, second]);
+    expect(first['gen_ai.turn.start']).toBe(true);
+    expect(second['gen_ai.turn.start']).toBe(true);
+    const continuation = entry('user-b-response', 'llm.response', { ...common, 'user.id': 'user-b' });
+    processor.enrich([continuation]);
+    expect(continuation['gen_ai.turn.start']).toBeUndefined();
+  });
+
   it('waits for the OpenClaw cron lifecycle end while keeping the ordinary fallback boundary', () => {
     const processor = new TurnBoundaryProcessor();
     const cron = { 'gen_ai.agent.type': 'openclaw', 'agent.openclaw.collection': 'cron-lifecycle-v1' };

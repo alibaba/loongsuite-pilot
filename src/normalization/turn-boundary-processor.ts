@@ -125,6 +125,9 @@ function turnKey(entry: AgentActivityEntry): string | undefined {
   if (!turnId) return undefined;
   const agentType = normalizeAgentType(nonEmptyString(entry['gen_ai.agent.type']) ?? 'unknown');
   const sessionId = nonEmptyString(entry['gen_ai.session.id']) ?? '';
+  // Hermes journal and trace buffers isolate user/session/turn. Do not let a
+  // boundary observed for one user suppress another user's start marker.
+  if (agentType === 'hermes') return JSON.stringify([agentType, entry['user.id'] ?? null, sessionId, turnId]);
   return `${agentType}\u0000${sessionId}\u0000${turnId}`;
 }
 
