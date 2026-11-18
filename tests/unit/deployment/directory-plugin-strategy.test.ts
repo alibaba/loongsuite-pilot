@@ -77,6 +77,17 @@ describe('DirectoryPluginStrategy', () => {
     };
   }
 
+  function deployUnderRestrictiveUmask(dataDir: string, definition: AgentDefinition, pretendRoot: boolean) {
+    return spawnSync(process.execPath, [
+      path.resolve('node_modules/vite-node/vite-node.mjs'),
+      path.resolve('tests/fixtures/directory-plugin-umask-child.ts'),
+    ], {
+      encoding: 'utf8', timeout: 30_000,
+      env: { ...process.env, NODE_OPTIONS: '', BUN_OPTIONS: '', NODE_PATH: '',
+        PILOT_TEST_DIRECTORY_OPTIONS: JSON.stringify({ dataDir, definition, pretendRoot }) },
+    });
+  }
+
   it('delegates detection and returns false when the agent is absent', async () => {
     vi.mocked(detectAgent).mockResolvedValue(false);
     const def = makeDef();
@@ -262,34 +273,16 @@ describe('DirectoryPluginStrategy', () => {
   });
 
   it.skipIf(process.platform === 'win32')('keeps the managed marker readable after root deployment and activation with umask 077', async () => {
-    class RecordingStrategy extends DirectoryPluginStrategy {
-      protected override async runActivationCommand(): Promise<{ stdout: string; stderr: string }> {
-        return { stdout: '', stderr: '' };
-      }
-    }
-    const uid = vi.spyOn(process, 'getuid').mockReturnValue(0);
-    const previousUmask = process.umask(0o077);
-    vi.stubEnv('LOONGSUITE_PILOT_ROOT_TRIGGER', '1');
-    try {
-      const activated = new RecordingStrategy(path.join(tmpDir, 'pilot-data'));
-      await expect(activated.deploy(withActivation(makeDef()))).resolves.toMatchObject({ success: true });
-      expect((await fs.stat(targetDir)).mode & 0o777).toBe(0o755);
-      expect((await fs.stat(path.join(targetDir, MARKER_FILE))).mode & 0o777).toBe(0o644);
-      expect(await readMarker()).toMatchObject({ dataDir: path.join(tmpDir, 'pilot-data'), activationStatus: 'activated' });
-    } finally {
-      process.umask(previousUmask);
-      uid.mockRestore();
-      vi.unstubAllEnvs();
-    }
+    await fs.mkdir(path.dirname(targetDir), { recursive: true });
+    const child = deployUnderRestrictiveUmask(path.join(tmpDir, 'pilot-data'), withActivation(makeDef()), true);
+    expect(child.status, child.stderr).toBe(0);
+    expect((await fs.stat(targetDir)).mode & 0o777).toBe(0o755);
+    expect((await fs.stat(path.join(targetDir, MARKER_FILE))).mode & 0o777).toBe(0o644);
+    expect(await readMarker()).toMatchObject({ dataDir: path.join(tmpDir, 'pilot-data'), activationStatus: 'activated' });
   });
 
   it.skipIf(process.platform !== 'linux' || process.getuid?.() !== 0)(
     'lets the real Hermes plugin resolve the managed data root after dropping to uid 1000', async () => {
-      class RecordingStrategy extends DirectoryPluginStrategy {
-        protected override async runActivationCommand(): Promise<{ stdout: string; stderr: string }> {
-          return { stdout: '', stderr: '' };
-        }
-      }
       const home = path.join(tmpDir, 'user');
       const hermesHome = path.join(home, '.hermes');
       const managedData = path.join(tmpDir, 'shared-pilot');
@@ -304,11 +297,9 @@ describe('DirectoryPluginStrategy', () => {
         detection: { paths: [hermesHome], commands: [] },
         directoryPlugin: { sourceDir: path.resolve('assets/plugins/hermes-agent/loongsuite-pilot'), targetDir: target },
       }));
-      const previousUmask = process.umask(0o077);
-      vi.stubEnv('LOONGSUITE_PILOT_ROOT_TRIGGER', '1');
-      try {
-        const activated = new RecordingStrategy(managedData);
-        await expect(activated.deploy(def)).resolves.toMatchObject({ success: true });
+      {
+        const activated = deployUnderRestrictiveUmask(managedData, def, false);
+        expect(activated.status, activated.stderr).toBe(0);
         const plugin = path.join(target, '__init__.py');
         const python = spawnSync('python3', ['-c', [
           'import importlib.util, json, sys',
@@ -322,9 +313,6 @@ describe('DirectoryPluginStrategy', () => {
         });
         expect(python.status, python.stderr).toBe(0);
         expect(JSON.parse(python.stdout)).toEqual({ data: managedData, config: path.join(managedData, 'config.json') });
-      } finally {
-        process.umask(previousUmask);
-        vi.unstubAllEnvs();
       }
     },
   );
