@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../..",
+    "allowJs": true
+  },
+  "include": ["pocs.ts", "../../src/types/pino-roll.d.ts"],
+  "exclude": ["node_modules", ".build"]
+}

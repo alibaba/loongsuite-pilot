@@ -1,0 +1,15 @@
+{
+  "name": "pilot-upstream-ingress-poc",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "poc": "node run.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.7.0",
+    "@openai/codex-sdk": "0.169.0",
+    "@qoder-ai/qoder-agent-sdk": "1.0.59",
+    "zod": "3.25.76"
+  }
+}
