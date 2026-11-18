@@ -421,7 +421,7 @@ export interface PipelineToggle {
   enabled: boolean;
   file: { enabled: boolean };
   qoderApi: { enabled: boolean };
-  multica?: { enabled: boolean; mode?: 'on' | 'off'; serviceNamePrefix?: string };
+  multica?: { enabled: boolean; mode?: 'on' | 'off'; serviceNamePrefix?: string; discoverLocalDaemon?: boolean };
 }
 
 /** @deprecated Use PipelineToggle instead */

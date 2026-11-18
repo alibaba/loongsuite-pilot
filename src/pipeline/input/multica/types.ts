@@ -9,6 +9,8 @@ export interface MulticaInputConfig {
   WorkspaceIds?: string[];
   MetricsUrls?: string[];
   DaemonHealthUrls?: string[];
+  /** Match loopback health to the PID recorded by the discovered local daemon. */
+  LocalDaemonPid?: number;
   /** Explicit opt-in to native pprof. Never receives the Multica API token. */
   PprofBaseUrl?: string;
   PprofTypes?: ('cpu' | 'allocs')[];
@@ -69,6 +71,9 @@ export function validateMulticaConfig(input: MulticaInputConfig): void {
     if (value !== undefined && (!Array.isArray(value) || value.length > 100 || value.some(v => typeof v !== 'string' || !v))) {
       throw new Error(`Invalid ${name}`);
     }
+  }
+  if (input.LocalDaemonPid !== undefined && (!Number.isSafeInteger(input.LocalDaemonPid) || input.LocalDaemonPid <= 0)) {
+    throw new Error('Invalid LocalDaemonPid');
   }
   if (input.PprofTypes !== undefined && (!Array.isArray(input.PprofTypes) || !input.PprofTypes.length
     || input.PprofTypes.length > 2 || new Set(input.PprofTypes).size !== input.PprofTypes.length

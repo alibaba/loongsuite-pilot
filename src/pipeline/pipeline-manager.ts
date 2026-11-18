@@ -5,6 +5,7 @@ import type { PipelineConfig, PipelineManagerOptions, PipelineToggle, Pipeline }
 import { FilePipeline } from './input/file/file-pipeline.js';
 import { QoderApiPipeline } from './input/qoder-api/qoder-api-pipeline.js';
 import { MulticaPipeline } from './input/multica/multica-pipeline.js';
+import { discoverLocalMulticaDaemons } from './input/multica/local-daemon.js';
 import { validateMulticaConfig } from './input/multica/types.js';
 import { resolveMulticaDestination } from './input/multica/destination.js';
 import { SleepDetector, type WakeEvent } from './sleep-detector.js';
@@ -219,15 +220,24 @@ export class PipelineManager {
     if (!this.running) return;
 
     const diskConfigs = await this.scanConfigDir();
-    const diskNames = new Set(diskConfigs.map((c) => c.configName));
+    const configs = this.pipelineConfig.enabled ? diskConfigs : [];
+    const hasExplicitMultica = diskConfigs.some(config => config.inputs[0].Type === 'input_multica');
+    if (this.pipelineConfig.multica?.discoverLocalDaemon && !hasExplicitMultica) {
+      const discovered = await discoverLocalMulticaDaemons();
+      const names = new Set(diskConfigs.map(config => config.configName));
+      for (const config of discovered) {
+        if (!names.has(config.configName) && this.validateConfig(config, config.configName)) configs.push(config);
+      }
+    }
+    const desiredNames = new Set(configs.map(config => config.configName));
 
     for (const [name] of this.pipelines) {
-      if (!diskNames.has(name)) {
+      if (!desiredNames.has(name)) {
         await this.destroyPipeline(name);
       }
     }
 
-    for (const config of diskConfigs) {
+    for (const config of configs) {
       const configJson = stableStringify(config);
       const existingHash = this.configHashes.get(config.configName);
 

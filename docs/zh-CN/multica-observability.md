@@ -6,7 +6,7 @@
 
 标准 Pilot：先按通常的 `installer.sh install --sls-endpoint ... --sls-project ... --sls-logstore agent-event --sls-api-key ...` 方式接入。Multica 复用安装器写入主配置的 SLS Endpoint、Project 和认证信息，默认写入同一 project 的 `multica-logs`；普通 Agent 仍写入 `agent-event`。
 
-将以下输入配置放入 `<dataDir>/configs/local/multica.json`，在主配置中设置 `pipeline.enabled=true`。没有 `input_multica` 配置时不会扫描本机或创建采集源；安装参数 `--all-agents` 不会自动开启 Multica。示例中的 `CollectionMode=on` 是显式启用，省略时仍默认为 off。
+将以下输入配置放入 `<dataDir>/configs/local/multica.json`，在主配置中设置 `pipeline.enabled=true`。backend 的业务 API、指标和剖析入口仍通过此配置指定。安装参数 `--all-agents` 不会自动开启 Multica。示例中的 `CollectionMode=on` 是显式启用，省略时仍默认为 off。
 
 ```json
 {
@@ -146,6 +146,12 @@ Prometheus counter 要处理相邻采样差分与进程重启；histogram bucket
 输出为 `pprof_profile_chunk`：每段最多 1800 ASCII 字节，按 `profile_id`、`profile_part_index` 拼接得到 Flamebearer JSON，可用于 SLS 火焰图。`profile_sha256` 校验完整性；查询应仅采用段数完整的 profile，并按 `profile_end_ms` 选择最新一次。`profile_total/profile_unit` 对 CPU 是采样次数，对 allocs 是采样窗口内估算分配字节；不代表存活内存或泄漏。`profile_metadata_source` 标明时间来自原生 pprof 或采集器时钟，版本来自显式配置，本地 profile 的 Pod 默认取自系统 hostname，也可通过 `PprofPodName` 指定目标。
 
 成功送达 SLS 后持久化下次采样时间；发送失败复用已有批次，不重复抓取。同样需要持久化 StateDir。pprof 没有样本时如实报告零权重，不生成虚假栈；旧版端点不支持增量 allocs、没有采样时长时报告 `pprof_missing_interval`。启用后需要为 `profile_*`、`source_version`、`pod_name` 配置 SLS 字段索引。
+
+## daemon 自动接入
+
+在 daemon 所在的容器或主机上以其系统用户运行 Pilot，安装时指定 `--multica-collection-mode on`。开启后 Pilot 会检查当前用户的默认目录 `~/.multica/` 和命名 profile 目录，确认本地 `/health` 的 PID 与 `daemon.pid` 一致后读取对应的 `daemon.log`。daemon 自动接入复用安装时的 SLS 配置，并使用默认的 `multica-logs`。
+
+已有显式 `input_multica` 配置时，以现有配置为准。显式关闭 pipeline 或 Multica 会停用自动发现。具体接入步骤见[容器环境](multica-daemon-container.md)和[ECS 主机](multica-daemon-host.md)。
 
 ## 独立运行与验证
 

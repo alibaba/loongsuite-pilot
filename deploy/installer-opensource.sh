@@ -70,6 +70,8 @@ CMS_LICENSE_KEY=""
 CMS_ENDPOINT=""
 CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
+MULTICA_COLLECTION_MODE="${LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE:-}"
+START_SERVICE=1
 SELECTED_AGENTS=""
 HOOK_INSTALL_SCOPE=""
 AGENT_SELECTION_EXPLICIT=0
@@ -171,6 +173,14 @@ while [[ $# -gt 0 ]]; do
         --cms-endpoint=*)     CMS_ENDPOINT="${1#*=}"; shift ;;
         --cms-workspace)      CMS_WORKSPACE="$2"; shift 2 ;;
         --cms-workspace=*)    CMS_WORKSPACE="${1#*=}"; shift ;;
+        --multica-collection-mode)
+            if [ "$#" -lt 2 ] || [[ "$2" == --* ]]; then
+                echo "--multica-collection-mode requires on or off" >&2
+                exit 1
+            fi
+            MULTICA_COLLECTION_MODE="$2"; shift 2 ;;
+        --multica-collection-mode=*) MULTICA_COLLECTION_MODE="${1#*=}"; shift ;;
+        --no-start) START_SERVICE=0; shift ;;
         --service-name-prefix) SERVICE_NAME_PREFIX="$2"; shift 2 ;;
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; shift 2 ;;
@@ -224,6 +234,11 @@ if [ "$DASHBOARD_PORT_SET" -eq 1 ]; then
         exit 1
     fi
 fi
+
+case "$MULTICA_COLLECTION_MODE" in
+    ""|on|off) ;;
+    *) echo "--multica-collection-mode requires on or off" >&2; exit 1 ;;
+esac
 
 if [ -n "$MASK_MODE" ]; then
     case "$MASK_MODE" in
@@ -1253,6 +1268,13 @@ if (cmsLicenseKey || cmsEndpoint || cmsWorkspace) {
 }
 
 if (serviceNamePrefix) config.serviceNamePrefix = serviceNamePrefix;
+const multicaCollectionMode = '${MULTICA_COLLECTION_MODE}';
+if (multicaCollectionMode) {
+  config.pipeline = config.pipeline || {};
+  config.pipeline.multica = config.pipeline.multica || {};
+  config.pipeline.multica.mode = multicaCollectionMode;
+}
+
 
 if (maskMode) {
   config.mask = config.mask || {};
@@ -2129,6 +2151,12 @@ cmd_install() {
     inject_qoderclicn_token_intercept
     inject_claude_code_fetch_intercept
     apply_installation_scope
+
+    if [ "$START_SERVICE" = "0" ]; then
+        PILOT_HELD_FOR_DEPLOY=0
+        print_summary "install"
+        return 0
+    fi
 
     msg "==> 启动服务..." "==> Starting service..."
     if run_pilot_cli start; then

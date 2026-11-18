@@ -42,13 +42,14 @@ function stringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === 'string');
 }
 
-function daemonFingerprint(text: string): boolean {
+function daemonFingerprint(text: string, expectedPid?: number): boolean {
   const row = jsonObject(text);
   if (!row) return false;
   // These fields were present in the original daemon health response. Newer
   // counters and CLI version fields are deliberately not required.
   return (row.status === 'running' || row.status === 'starting')
     && Number.isSafeInteger(row.pid) && Number(row.pid) > 0
+    && (expectedPid === undefined || row.pid === expectedPid)
     && typeof row.uptime === 'string' && row.uptime.length > 0
     && typeof row.daemon_id === 'string' && row.daemon_id.length > 0
     && typeof row.device_name === 'string'
@@ -70,9 +71,9 @@ function apiFingerprint(text: string): boolean {
     || (typeof row.local_worktree_supported === 'boolean' && typeof row.agent_conversation_starters_supported === 'boolean');
 }
 
-function matches(probe: Probe, text: string): boolean {
+function matches(probe: Probe, text: string, expectedPid?: number): boolean {
   if (probe.kind === 'api') return apiFingerprint(text);
-  if (probe.kind === 'daemon') return daemonFingerprint(text);
+  if (probe.kind === 'daemon') return daemonFingerprint(text, expectedPid);
   return parsePrometheus(text).some(row => row.metric_name.startsWith('multica_') && Number.isFinite(Number(row.metric_value)));
 }
 
@@ -179,7 +180,7 @@ export class MulticaActivationGate {
           MaxResponseBytes: Math.min(this.input.MaxResponseBytes ?? PROBE_MAX_BYTES, PROBE_MAX_BYTES),
         });
         responded = true;
-        if (matches(probe, response.text)) {
+        if (matches(probe, response.text, this.input.LocalDaemonPid)) {
           // Prefer the last confirmed endpoint, but rotate past it on failure.
           this.probeOffset = index;
           return {detected: true, reason: `${probe.kind}_detected`};

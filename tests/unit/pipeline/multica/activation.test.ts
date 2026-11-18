@@ -118,6 +118,16 @@ describe('Multica collection activation', () => {
     expect(await new MulticaActivationGate({...on, DaemonHealthUrls: [`${url}/health`]}).evaluate()).toMatchObject({enabled: true, mode: 'on'});
   });
 
+  it('rejects another Multica daemon when the discovered PID does not match', async () => {
+    const url = await server((_req, res) => res.end(JSON.stringify({
+      status: 'running', pid: 123, uptime: '10s', daemon_id: 'daemon-1', device_name: 'host',
+      server_url: 'https://multica.example', agents: [], workspaces: null,
+    })));
+    const input = {...on, DaemonHealthUrls: [`${url}/health`]};
+    expect(await new MulticaActivationGate({...input, LocalDaemonPid: 456}).evaluate()).toMatchObject({enabled: false});
+    expect(await new MulticaActivationGate({...input, LocalDaemonPid: 123}).evaluate()).toMatchObject({enabled: true});
+  });
+
   it('does not identify a generic health endpoint as Multica', async () => {
     const url = await server((_req, res) => res.end(JSON.stringify({status: 'running', pid: 123, uptime: '10s'})));
     expect(await new MulticaActivationGate({...on, DaemonHealthUrls: [`${url}/health`]}).evaluate()).toMatchObject({enabled: false});
