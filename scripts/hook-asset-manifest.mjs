@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-/** SHA-256 of each regular file under assets/hooks, keyed by relative path. */
-export async function collectHookAssetManifest(root) {
+/** SHA-256 of each regular file under root, keyed by relative path. */
+export async function collectFileManifest(root, skip = new Set()) {
   /** @type {Record<string, string>} */
   const manifest = {};
 
@@ -18,7 +18,7 @@ export async function collectHookAssetManifest(root) {
     for (const entry of entries) {
       if (entry.name.startsWith('._') || entry.name === '.DS_Store') continue;
       const rel = relative ? `${relative}/${entry.name}` : entry.name;
-      if (entry.isSymbolicLink()) continue;
+      if (skip.has(rel) || entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
         await walk(path.join(dir, entry.name), rel);
       } else if (entry.isFile()) {

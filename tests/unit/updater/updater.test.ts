@@ -537,6 +537,133 @@ describe('Updater', () => {
       );
     });
 
+    it('redeploys and restarts when asked, even if the release is already current', async () => {
+      setupForDownload();
+      mockFetch.mockReset();
+      mockFetch
+        .mockResolvedValueOnce(makeResponseJson(makeManifest({ version: '1.0.2', git_commit: 'bbb' })))
+        .mockResolvedValueOnce(makeResponseStream());
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        const normalized = String(filePath).replace(/\\/g, '/');
+        if (normalized.endsWith('/current')) return Promise.resolve('1.0.2_bbb\n');
+        if (normalized.endsWith('/VERSION')) return Promise.resolve('version=1.0.2\ngit_commit=bbb\n');
+        if (normalized.endsWith('/runtime-redeploy-requested')) return Promise.resolve(`${Date.now()}\n`);
+        if (normalized.includes('/scripts/')) return Promise.resolve(Buffer.from('script'));
+        return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      });
+      mockFsAccess.mockImplementation((p: string) => {
+        const normalized = String(p).replace(/\\/g, '/');
+        if (normalized.endsWith('/versions/1.0.2_bbb')) return Promise.resolve();
+        if (normalized.includes('package.json')) return Promise.resolve();
+        if (normalized.includes('dist/index.js')) return Promise.resolve();
+        if (normalized.includes('dist/updater/index.js')) return Promise.resolve();
+        if (normalized.includes('scripts/collector-daemon.js')) return Promise.resolve();
+        if (normalized.includes('scripts/updater-daemon.js')) return Promise.resolve();
+        if (normalized.includes('scripts/loongsuite-pilot.sh')) return Promise.resolve();
+        return Promise.reject(new Error('ENOENT'));
+      });
+      let runtimeReads = 0;
+      mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (isInterceptorRuntimePath(filePath)) return Promise.resolve(healthyInterceptorRuntime());
+        if (!String(filePath).replace(/\\/g, '/').endsWith('/logs/runtime.json')) return Promise.resolve({});
+        runtimeReads++;
+        return Promise.resolve({
+          status: 'active',
+          packageVersion: '1.0.2',
+          gitCommit: 'bbb',
+          pid: runtimeReads === 1 ? process.pid : process.ppid,
+          updatedAt: new Date().toISOString(),
+        });
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(mockFetch.mock.calls.map((call) => String(call[0]))).toContain('https://example.com/pkg.tar.gz');
+      expect(pilotCommands()).toContain('restart-collector');
+      expect(mockFsRm).toHaveBeenCalledWith(
+        expect.stringContaining('runtime-redeploy-requested'),
+        { force: true },
+      );
+    });
+
+    it('keeps the redeploy request when collector restart fails', async () => {
+      setupForDownload();
+      mockFetch.mockReset();
+      mockFetch
+        .mockResolvedValueOnce(makeResponseJson(makeManifest({ version: '1.0.2', git_commit: 'bbb' })))
+        .mockResolvedValueOnce(makeResponseStream());
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        const normalized = String(filePath).replace(/\\/g, '/');
+        if (normalized.endsWith('/current')) return Promise.resolve('1.0.2_bbb\n');
+        if (normalized.endsWith('/VERSION')) return Promise.resolve('version=1.0.2\ngit_commit=bbb\n');
+        if (normalized.endsWith('/runtime-redeploy-requested')) return Promise.resolve('1000\n');
+        if (normalized.includes('/scripts/')) return Promise.resolve(Buffer.from('script') as unknown as string);
+        return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      });
+      mockFsAccess.mockImplementation((p: string) => {
+        const normalized = String(p).replace(/\\/g, '/');
+        if (normalized.endsWith('/versions/1.0.2_bbb')) return Promise.resolve();
+        if (normalized.includes('package.json')) return Promise.resolve();
+        if (normalized.includes('dist/index.js')) return Promise.resolve();
+        if (normalized.includes('dist/updater/index.js')) return Promise.resolve();
+        if (normalized.includes('scripts/collector-daemon.js')) return Promise.resolve();
+        if (normalized.includes('scripts/updater-daemon.js')) return Promise.resolve();
+        if (normalized.includes('scripts/loongsuite-pilot.sh')) return Promise.resolve();
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        if (args?.includes('restart-collector') || args?.includes('start-collector')) {
+          return Promise.reject(new Error('restart failed'));
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(pilotCommands()).toContain('restart-collector');
+      expect(mockFsRm).not.toHaveBeenCalledWith(
+        expect.stringContaining('runtime-redeploy-requested'),
+        { force: true },
+      );
+    });
+
+    it('waits out backoff after a redeploy attempt fails', async () => {
+      mockFetch
+        .mockResolvedValueOnce(makeResponseJson(makeManifest()))
+        .mockResolvedValueOnce(makeResponseStream(500));
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        const normalized = String(filePath).replace(/\\/g, '/');
+        if (normalized.endsWith('/runtime-redeploy-requested')) return Promise.resolve('1000\n');
+        return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      });
+      const updater = new Updater(makeConfig({ checkIntervalMs: 10_000 }), tmpDir);
+
+      await updater.check();
+      mockFetch.mockClear();
+      await updater.check();
+
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('retries a redeploy when the manifest fetch returns nothing', async () => {
+      mockFetch.mockResolvedValue(makeResponseJson(null, 500));
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        const normalized = String(filePath).replace(/\\/g, '/');
+        if (normalized.endsWith('/runtime-redeploy-requested')) return Promise.resolve('1000\n');
+        return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      });
+      const updater = new Updater(makeConfig(), tmpDir);
+      (updater as any).nextCheckAt = Date.now() + 60_000;
+
+      await updater.check();
+      mockFetch.mockClear();
+      await updater.check();
+
+      expect(mockFetch).toHaveBeenCalled();
+    });
+
     it('runs the staged package postinstall, pointed at this install data dir', async () => {
       // scripts/postinstall.js is the only thing that fills <dataDir>/{hooks,skills,
       // plugins}, so this call is also how an install broken by the Windows fs.cpSync
@@ -1481,6 +1608,22 @@ describe('Updater', () => {
   // ─── Backoff & retry ──────────────────────────────────
 
   describe('backoff and retry', () => {
+    it('a new redeploy request does not wait out an older backoff', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponseJson(makeManifest()));
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        const normalized = String(filePath).replace(/\\/g, '/');
+        if (normalized.endsWith('/runtime-redeploy-requested')) return Promise.resolve('1000\n');
+        return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      });
+      const updater = new Updater(makeConfig(), tmpDir);
+      (updater as any).nextCheckAt = Date.now() + 60_000;
+      (updater as any).consecutiveFailures = 3;
+
+      await updater.check();
+
+      expect(mockFetch).toHaveBeenCalled();
+    });
+
     it('applies exponential backoff after failure', async () => {
       mockFetch
         .mockResolvedValueOnce(makeResponseJson(makeManifest()))

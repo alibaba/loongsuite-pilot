@@ -10,7 +10,7 @@ import * as os from 'node:os';
 import type { AutoUpdateConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
-import { hookUpgradeMarkerPath } from '../core/hook-watchdog.js';
+import { getUpgradeMarkerPath, getRuntimeRedeployMarkerPath } from '../core/hook-watchdog.js';
 import {
   extractTarGz,
   makeTarStagingDir,
@@ -196,6 +196,8 @@ export class Updater {
   private checking = false;
   private consecutiveFailures = 0;
   private nextCheckAt = 0;
+  /** Set when a redeploy attempt throws and writes nextCheckAt. */
+  private runtimeRedeployAttempted = false;
   private readonly paths: UpdaterPaths;
   private metrics: UpdaterMetrics | null = null;
   private readonly configPath: string;
@@ -257,7 +259,11 @@ export class Updater {
   async check(): Promise<void> {
     if (this.checking) return;
 
-    if (Date.now() < this.nextCheckAt) {
+    const forceRedeploy = await this.hasRuntimeRedeployRequest();
+    if (!forceRedeploy) this.runtimeRedeployAttempted = false;
+    // A newly written request skips an older backoff. After a thrown failure,
+    // runtimeRedeployAttempted is set and later checks wait out nextCheckAt.
+    if (Date.now() < this.nextCheckAt && (!forceRedeploy || this.runtimeRedeployAttempted)) {
       logger.debug('skipping check due to backoff', {
         nextCheckAt: new Date(this.nextCheckAt).toISOString(),
       });
@@ -274,7 +280,7 @@ export class Updater {
       const { manifest: target, channel, hotfixVersion } = this.resolveTargetVersion(latestManifest);
 
       const local = await this.readLocalVersion();
-      if (!this.needsUpdate(local, target, channel)) {
+      if (!forceRedeploy && !this.needsUpdate(local, target, channel)) {
         logger.debug('already up to date', {
           local: local?.version ?? 'unknown',
           remote: target.version,
@@ -298,7 +304,7 @@ export class Updater {
         return;
       }
 
-      logger.info('new version available', {
+      logger.info(forceRedeploy ? 'redeploying current release' : 'new version available', {
         current: local?.version ?? 'unknown',
         latest: target.version,
         commit: target.git_commit,
@@ -328,6 +334,10 @@ export class Updater {
         local?.version === target.version,
         target.git_commit,
       );
+      if (forceRedeploy) {
+        await this.clearRuntimeRedeployRequest();
+        this.runtimeRedeployAttempted = false;
+      }
       void this.metrics?.writeEvent('collector_restarted', {
         latest_version: target.version,
       });
@@ -343,6 +353,7 @@ export class Updater {
       await this.writeHeartbeat();
       await this.scheduleUpdaterRestart();
     } catch (err) {
+      if (forceRedeploy) this.runtimeRedeployAttempted = true;
       this.consecutiveFailures++;
       const backoffMs = Math.min(
         this.config.checkIntervalMs * Math.pow(2, this.consecutiveFailures),
@@ -658,7 +669,7 @@ export class Updater {
       if (await fs.access(postinstallScript).then(() => true).catch(() => false)) {
         try {
           await fs.mkdir(this.paths.cacheDir, { recursive: true });
-          await fs.writeFile(hookUpgradeMarkerPath(this.paths.cacheDir), `${Date.now()}\n`);
+          await fs.writeFile(getUpgradeMarkerPath(this.paths.cacheDir), `${Date.now()}\n`);
           hookUpgradeMarked = true;
         } catch (err) {
           logger.warn('failed to mark hook upgrade', { error: String(err) });
@@ -749,9 +760,22 @@ export class Updater {
     }
   }
 
+  private async hasRuntimeRedeployRequest(): Promise<boolean> {
+    try {
+      await fs.readFile(getRuntimeRedeployMarkerPath(this.paths.cacheDir), 'utf8');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async clearRuntimeRedeployRequest(): Promise<void> {
+    await fs.rm(getRuntimeRedeployMarkerPath(this.paths.cacheDir), { force: true });
+  }
+
   private async clearHookUpgradeMarker(message = 'failed to clear hook upgrade marker'): Promise<void> {
     try {
-      await fs.rm(hookUpgradeMarkerPath(this.paths.cacheDir), { force: true });
+      await fs.rm(getUpgradeMarkerPath(this.paths.cacheDir), { force: true });
     } catch (err) {
       logger.warn(message, { error: String(err) });
     }
