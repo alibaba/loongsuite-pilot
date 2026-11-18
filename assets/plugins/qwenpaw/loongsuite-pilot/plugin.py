@@ -673,14 +673,23 @@ class PilotMiddleware(MiddlewareBase):
         fields = _error(error)
         if response is not None:
             parts = _parts(_get(response, "content", []))
-            reason = "tool_calls" if any(p["type"] == "tool_call" for p in parts) else "stop"
+            # AgentScope's completed status is not the provider finish reason:
+            # it can also represent length or content filtering. Only copy a
+            # native model reason when the response actually exposes one.
+            metadata = _get(response, "metadata", {}) or {}
+            reason = _get(response, "finish_reason") or _get(metadata, "finish_reason")
+            if reason not in ("stop", "length", "content_filter", "tool_calls", "end_turn"):
+                reason = None
             if str(_get(response, "finished_reason", "")) == "interrupted" or isinstance(error, (asyncio.CancelledError, GeneratorExit)):
                 fields.update(_error(asyncio.CancelledError()))
                 reason = "interrupted"
             elif error is not None:
                 reason = "error"
-            fields.update({"gen_ai.output.messages": [{"role": "assistant", "parts": parts, "finish_reason": reason}],
-                           "response.finish_reasons": reason, "gen_ai.response.id": str(_get(response, "id", ""))})
+            message = {"role": "assistant", "parts": parts}
+            if reason is not None:
+                message["finish_reason"] = reason
+                fields["response.finish_reasons"] = reason
+            fields.update({"gen_ai.output.messages": [message], "gen_ai.response.id": str(_get(response, "id", ""))})
             fields.update(_usage(_get(response, "usage")))
         if first is not None:
             fields["gen_ai.response.time_to_first_token"] = round(first * 1_000_000_000)

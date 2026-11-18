@@ -37,6 +37,7 @@ node /absolute/path/to/pilot/dist/index.js
 - Runtime Hook 提供请求 ENTRY 和原生会话/user/turn 身份；正常请求在 POST_RESPONSE（终态响应 yield 前）完成采集，FINALLY 为错误、取消及短路请求幂等收尾；Middleware 提供 AGENT → STEP → LLM/TOOL 的真实父子关系。
 - 多轮会话保持 session/conversation，request ID 标识单轮。同会话重叠请求独立缓冲，LLM finish reason 不会提前关闭整个请求。
 - 记录可得的模型/provider、usage/cache usage、system instructions、工具定义、参数/结果和实际首次非空流式 delta 的 TTFT。非流式不伪造 TTFT。
+- 仅在原生响应明确提供模型 finish reason 时上报；AgentScope 的 `completed` 不区分正常结束、长度限制和内容过滤，不据此填充 `stop`。取消和错误仍记录其实际状态。
 - 对取消和工具/模型错误保留实际结果；后台 Dream 与 helper Agent 在兼容接口存在时补充覆盖。
 - 不解析 AgentCore Task/run 字段，不要求 Qoder UUID Context。不自动导出整个 request_context。
 - converter 能使用已提供的外部 trace_id/parent_span_id，但插件当前没有请求入口 traceparent 的完整提取链路。
@@ -57,7 +58,9 @@ QwenPaw 2.2.1b1 将 Dream 入口迁移到通用 `run_action("auto_dream", ...)`�
 
 `agents.qwenpaw.captureMessageContent=false` 在源端剥离消息、system/tools、工具参数/结果和错误文本。Collector 继续使用 Pilot 公共内容策略与脱敏。主效果验收设置 SPAN_ONLY 并启用上述内容选项；SPAN_ONLY 是验收约定，插件实际内容控制由 Pilot 配置负责。
 
-事件目录/文件权限为 0700/0600。写入故障不改变业务结果。入口消息转换失败只省略内容并诊断，保留原生请求身份、ENTRY 边界和子调用关联，不从 LLM 提示词反填原始请求。Collector 正常退出前排空最终日志并保存 checkpoint；进程强杀不保证补齐所有 span，也不承诺跨崩溃 exactly-once。
+事件目录/文件权限为 0700/0600。写入故障不改变业务结果。入口消息转换失败只省略内容并诊断，保留原生请求身份、ENTRY 边界和子调用关联，不从 LLM 提示词反填原始请求。Collector 正常退出前执行一次有界的最终读取；未读完的积压在下次启动时从 checkpoint 继续。进程强杀不保证补齐所有 span，也不承诺跨崩溃 exactly-once。
+
+每轮最多轮询四个进程文件、每文件读取 16 MiB，超过 16 MiB 的单条记录会告警并跳过；不完整尾行会等待后续写入。长轮次正文暂存在本机临时文件并按预算分批转换和导出，避免在内存中同时展开全部 Span。原始日志只有在消费进度已持久化、文件足够旧且写入进程已退出时才会回收；活动或未消费日志可能继续增长，请监控数据目录空间。
 
 ## 兼容和验证
 

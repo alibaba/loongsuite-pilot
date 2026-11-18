@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ExtendedTelemetryHandler } from '@loongsuite/otel-util-genai';
 import { ExportResultCode } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher } from '../../../src/flushers/otlp-trace-flusher.js';
@@ -10,7 +11,7 @@ function turn(session: string, run: string): AgentActivityEntry[] {
   const scope = (kind: string, id: string, parent: string, phase: string, time: string): AgentActivityEntry => ({
     time_unix_nano: time, 'event.id': `${session}-${run}-${kind}-${phase}`,
     'event.name': kind === 'llm' ? (phase === 'start' ? 'llm.request' : 'llm.response') : 'other',
-    'gen_ai.agent.type': 'qwenpaw', 'gen_ai.session.id': session, 'gen_ai.turn.id': run, 'user.id': 'test',
+    'gen_ai.agent.type': 'qwenpaw', 'gen_ai.session.id': session, 'gen_ai.turn.id': run,
     'agent.qwenpaw.span.id': id, 'agent.qwenpaw.parent.id': parent,
     ...(kind === 'llm' ? {} : { 'agent.qwenpaw.boundary': `${kind}.${phase}` }),
     ...(kind === 'llm' && phase === 'end' ? { 'gen_ai.response.finish_reasons': ['stop'] } : {}),
@@ -30,7 +31,53 @@ describe('QwenPaw collector lifecycle isolation', () => {
     flusher = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'test', endpoint: 'http://localhost:4318/v1/traces', headers: {} }], protocol: 'http/protobuf', serviceName: 'parity', debug: false }, undefined,
       () => ({ export: (batch, callback) => { spans.push(...batch); callback({ code: ExportResultCode.SUCCESS }); }, shutdown: async () => {} }));
   });
-  afterEach(async () => { await flusher.shutdown(); });
+  afterEach(async () => { await flusher.shutdown(); vi.restoreAllMocks(); });
+
+  it('waits for bounded export before converting the next lifecycle and retains content', async () => {
+    await flusher.shutdown();
+    const stoppedModels = vi.spyOn(ExtendedTelemetryHandler.prototype, 'stopLlm');
+    let release!: () => void;
+    let first = true;
+    flusher = new OtlpTraceFlusher({
+      enabled: true, serviceName: 'streaming', protocol: 'http/protobuf', maxExportBatchBytes: 1,
+      endpoints: [{ name: 'test', endpoint: 'http://unused:4318' }],
+    }, undefined, () => ({
+      export(batch, done) {
+        spans.push(...batch);
+        if (first) { first = false; release = () => done({ code: ExportResultCode.SUCCESS }); }
+        else done({ code: ExportResultCode.SUCCESS });
+      }, shutdown: async () => {},
+    }));
+    const records = turn('session', 'run');
+    const content = 'retained content '.repeat(10_000);
+    records[3]['gen_ai.input.messages'] = [{ role: 'user', parts: [{ type: 'text', content }] }];
+    let complete = false;
+    const sending = flusher.sendBatch(records).then(() => { complete = true; });
+    try {
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      expect(stoppedModels).not.toHaveBeenCalled();
+      expect(complete).toBe(false);
+    } finally { release?.(); }
+    await sending;
+    expect(spans).toHaveLength(4);
+    expect(spans.find(span => span.attributes['gen_ai.span.kind'] === 'LLM')?.attributes['gen_ai.input.messages']).toContain(content);
+  });
+
+  it('does not restore spilled message content when the trace exporter disables capture', async () => {
+    await flusher.shutdown();
+    flusher = new OtlpTraceFlusher({
+      enabled: true, serviceName: 'private', protocol: 'http/protobuf', captureMessageContent: false,
+      endpoints: [{ name: 'test', endpoint: 'http://unused:4318' }],
+    }, undefined, () => ({ export: (batch, done) => { spans.push(...batch); done({ code: ExportResultCode.SUCCESS }); }, shutdown: async () => {} }));
+    const records = turn('session', 'private');
+    records[3]['gen_ai.input.messages'] = [{ role: 'user', parts: [{ type: 'text', content: 'private-message' }] }];
+    records[4]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: 'private-answer' }] }];
+    await flusher.sendBatch(records);
+    expect(spans).toHaveLength(4);
+    const exported = JSON.stringify(spans.map(span => ({ attributes: span.attributes, events: span.events })));
+    expect(exported).not.toContain('private-message');
+    expect(exported).not.toContain('private-answer');
+  });
 
   it('does not end an ENTRY on LLM stop, and preserves native request identity', async () => {
     const records = turn('session', 'run');

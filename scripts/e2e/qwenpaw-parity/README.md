@@ -50,6 +50,10 @@ AgentCore container build, runtime HTTP adapter, cloud authorization, or CMS
 readback. Install Pilot, consume the captured events, and validate actual OTLP
 output separately before claiming complete end-to-end delivery.
 
+The runner leaves the host HOME unchanged and isolates QwenPaw's working and
+secret directories using its native environment variables. Its default Pilot
+data directory is the run-local `home/.loongsuite-pilot` path.
+
 For actual OTLP/HTTP wire capture, start the receiver with the baseline venv:
 
 ```bash

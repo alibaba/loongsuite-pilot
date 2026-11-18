@@ -5,7 +5,7 @@ import { AgentDefLoader } from '../../../src/deployment/agent-def-loader.js';
 
 describe('QwenPaw native directory deployment definition', () => {
   afterEach(() => vi.unstubAllEnvs());
-  it.each([undefined, '/tmp/isolated-qwenpaw working'])('resolves working directory %s independently of Pilot dataDir', async working => {
+  it.each([undefined, '/tmp/isolated-qwenpaw working', '/tmp/qwenpaw-$&-workspace'])('resolves working directory %s independently of Pilot dataDir', async working => {
     if (working === undefined) vi.stubEnv('QWENPAW_WORKING_DIR', '');
     else vi.stubEnv('QWENPAW_WORKING_DIR', working);
     const definitions = await new AgentDefLoader({

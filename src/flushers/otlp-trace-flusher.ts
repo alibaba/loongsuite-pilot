@@ -30,7 +30,8 @@ import { removeMessageContentFields, stripAgentMessageContent } from '../normali
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
 import { SpanEnricherRunner } from './span-enricher.js';
-import { convertQwenPawEvents } from './qwenpaw-trace-converter.js';
+import { convertQwenPawEventsStreaming } from './qwenpaw-trace-converter.js';
+import { QwenPawPayloadStore } from './qwenpaw-payload-store.js';
 import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
@@ -133,6 +134,7 @@ interface TurnBuffer {
   agentType: string;
   sessionId?: string;
   records: AgentActivityEntry[];
+  qwenPawPayloadKey?: string;
   journalKey?: string;
   spillable?: boolean;
   spilledRecords?: number;
@@ -634,6 +636,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly exporterFactory: OtlpExporterFactory;
   private readonly debugDir: string;
   private readonly failedDir: string;
+  private readonly qwenPawPayloadStore: QwenPawPayloadStore;
   private readonly resourceAttributeKeys: string[];
   private readonly spanAttributePassthroughPrefixes: string[];
   private readonly globalAttributesProvider?: GlobalAttributesProvider;
@@ -691,6 +694,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       });
     }
     const dataDir = cfg.dataDir ?? os.homedir() + '/.loongsuite-pilot';
+    this.qwenPawPayloadStore = new QwenPawPayloadStore(cfg.dataDir);
     this.pilotVersion = readInstalledVersion(dataDir);
     this.debugDir = path.join(dataDir, 'logs', 'otlp-debug');
     this.failedDir = path.join(dataDir, 'logs', 'otlp-failed');
@@ -799,6 +803,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   async send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
     await this.start();
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'qwenpaw') {
+      // Its asynchronous spill must finish before idle or capacity eviction
+      // can export and release this turn's temporary payload file.
+      this.batchDepth++;
+      try {
+        await this.persistCodexEntries([entry]);
+        await this.appendEntry(entry, logicalBytes);
+      } finally { this.batchDepth--; }
+      await this.finishBatch();
+      return;
+    }
     // A public call always owns durable acceptance, even while another call
     // is replaying or appending. Keep its resident prefix until I/O completes.
     this.batchDepth++;
@@ -878,6 +893,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         agentType,
         sessionId: incomingSessionId,
         records: [],
+        ...(agentType === 'qwenpaw' ? { qwenPawPayloadKey: randomUUID() } : {}),
         recordIndex: new Map(),
         completed: false,
         lastActivityMs: Date.now(),
@@ -896,6 +912,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
         buf.hasHermesNativeRunObserver = true;
       }
     }
+    const bufferedEntry = buf.qwenPawPayloadKey
+      ? await this.qwenPawPayloadStore.prepare(buf.qwenPawPayloadKey, entry)
+      : entry;
     const durable = this.codexJournal?.accepts(entry) === true;
     const residentSize = durable ? Buffer.byteLength(JSON.stringify(entry)) : 0;
     if (durable) {
@@ -930,10 +949,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         buf.records[existingIdx] = merged;
       } else {
         buf.recordIndex.set(eventId, buf.records.length);
-        buf.records.push(entry);
+        buf.records.push(bufferedEntry);
       }
     } else {
-      buf.records.push(entry);
+      buf.records.push(bufferedEntry);
     }
     if (!buf.spilledRecords) buf.residentBytes = (buf.residentBytes ?? 0) + residentDelta;
     buf.lastActivityMs = Date.now();
@@ -1140,6 +1159,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       (s) => s.provider.shutdown(),
     );
     await Promise.allSettled([...exportShutdowns, ...providerShutdowns]);
+    await this.qwenPawPayloadStore.shutdown();
 
     this.agentExportStates.clear();
     this.agentConvertStates.clear();
@@ -1340,9 +1360,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
-    const exported = await this.convertAndExport(buf.agentType, buf.records);
-    if (exported && this.codexJournal?.acceptsAgent(buf.agentType) && buf.completed) {
-      await this.codexJournal.acknowledge(buf.records);
+    try {
+      const exported = await this.convertAndExport(buf.agentType, buf.records);
+      if (exported && this.codexJournal?.acceptsAgent(buf.agentType) && buf.completed) {
+        await this.codexJournal.acknowledge(buf.records);
+      }
+    } finally {
+      if (buf.qwenPawPayloadKey) await this.qwenPawPayloadStore.release(buf.qwenPawPayloadKey);
     }
   }
 
@@ -1495,7 +1519,46 @@ export class OtlpTraceFlusher extends BaseFlusher {
             : prepared.records;
           const stream = agentType === 'qwenpaw' ? undefined : planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
           if (agentType === 'qwenpaw') {
-            result = convertQwenPawEvents(conversionRecords, prepared.handler, passthroughKeys);
+            streamedExportSucceeded = true;
+            let pending: ReadableSpan[] = [];
+            let pendingBytes = 0;
+            const limit = this.cfg.maxExportBatchBytes ?? DEFAULT_MAX_EXPORT_BATCH_BYTES;
+            const exportPending = async () => {
+              if (!pending.length) return;
+              const batch = pending;
+              pending = [];
+              pendingBytes = 0;
+              const started = performance.now();
+              try {
+                const exported = await this.exportConvertedSpans(agentType, serviceName, records, batch,
+                  grokMetadata, openClawIdentity);
+                streamedExportSucceeded = exported && streamedExportSucceeded;
+              } finally {
+                streamExportDurationMs += performance.now() - started;
+              }
+            };
+            result = await convertQwenPawEventsStreaming(
+              conversionRecords as unknown as AgentActivityEntry[], prepared.handler, passthroughKeys, {
+                loadRecord: async record => {
+                  const restored = await this.qwenPawPayloadStore.restore(record);
+                  return this.cfg.captureMessageContent === false ? stripAgentMessageContent(restored) : restored;
+                },
+                onSpan: async () => {
+                  await provider.forceFlush();
+                  await inMem.drain();
+                  const finished = inMem.getFinishedSpans();
+                  inMem.reset();
+                  for (const span of finished) {
+                    const size = estimateSpanSize(span);
+                    if (pending.length && pendingBytes + size > limit) await exportPending();
+                    pending.push(span);
+                    pendingBytes += size;
+                    if (pendingBytes >= limit) await exportPending();
+                  }
+                },
+              },
+            );
+            await exportPending();
           } else if (stream) {
             streamedExportSucceeded = true;
             const reasoning = { seen: false, total: 0 };

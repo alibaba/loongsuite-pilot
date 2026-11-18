@@ -248,7 +248,7 @@ describe('QwenPaw explicit lifecycle converter', () => {
     }
     expect(spans[2].attributes['gen_ai.react.finish_reason']).toBe('cancelled');
     expect(spans[3].attributes['gen_ai.response.finish_reasons']).toEqual(['cancelled']);
-    expect(JSON.parse(spans[4].attributes['gen_ai.output.messages'] as string)[0].finish_reason).toBe('stop');
+    expect(JSON.parse(spans[4].attributes['gen_ai.output.messages'] as string)[0].finish_reason).toBeUndefined();
     expect(JSON.parse(spans[5].attributes['gen_ai.output.messages'] as string)[0].finish_reason).toBe('error');
   });
 

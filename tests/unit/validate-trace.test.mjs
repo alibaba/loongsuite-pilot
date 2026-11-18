@@ -389,7 +389,7 @@ function sample(kind, value, parent, options = {}) {
     endTimeUnixNano: String((options.end ?? 1000) * 1_000_000),
     status: { code: options.error ? 2 : 0 },
     attributes: {
-      'gen_ai.span.kind': kind, 'gen_ai.session.id': 'session', 'gen_ai.user.id': 'user',
+      'gen_ai.span.kind': kind, 'gen_ai.session.id': 'session', 'gen_ai.user.id': 'user', 'gen_ai.agent.type': 'qwenpaw',
       'gen_ai.agent.name': 'agent',
       ...(kind === 'LLM' ? { 'gen_ai.input.messages': input, 'gen_ai.output.messages': output } : {}),
       ...options.attributes,

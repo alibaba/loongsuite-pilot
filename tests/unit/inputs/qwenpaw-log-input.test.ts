@@ -66,6 +66,58 @@ describe('QwenPaw process logs', () => {
     expect(await new Input({ sessionDir: dir, stateStore: new StateStore(path.join(dir, 'state.json')) }).collectOnce()).toEqual([]);
   });
 
+  it('rotates bounded polling across processes without replaying a committed prefix', async () => {
+    for (let i = 0; i < 6; i++) await fs.writeFile(path.join(dir, `qwenpaw-day-${i}.jsonl`), line(`file-${i}`));
+    const state = new StateStore(path.join(dir, 'state.json'));
+    const input = new Input({ sessionDir: dir, stateStore: state });
+    const first = await input.collectOnce();
+    const second = await input.collectOnce();
+    expect(first).toHaveLength(4);
+    expect([...first, ...second].map(entry => entry['event.id']).sort()).toEqual(
+      Array.from({ length: 6 }, (_, i) => `file-${i}`),
+    );
+    expect(await input.collectOnce()).toEqual([]);
+  });
+
+  it('advances past an oversized complete line and continues with later events', async () => {
+    const file = path.join(dir, 'qwenpaw-day-large.jsonl');
+    await fs.writeFile(file, 'x'.repeat(16 * 1024 * 1024 + 1) + '\n' + line('after-large'));
+    const state = new StateStore(path.join(dir, 'state.json'));
+    const input = new Input({ sessionDir: dir, stateStore: state });
+    expect(await input.collectOnce()).toEqual([]);
+    await state.save();
+    const restored = new StateStore(path.join(dir, 'state.json'));
+    await restored.load();
+    const restarted = new Input({ sessionDir: dir, stateStore: restored });
+    expect((await restarted.collectOnce()).map(entry => entry['event.id'])).toEqual(['after-large']);
+    expect(await restarted.collectOnce()).toEqual([]);
+  });
+
+  it('keeps the checkpoint when a source directory temporarily disappears', async () => {
+    const file = path.join(dir, 'qwenpaw-day-101.jsonl');
+    const state = new StateStore(path.join(dir, 'state.json'));
+    await fs.writeFile(file, line('before'));
+    const input = new Input({ sessionDir: dir, stateStore: state });
+    expect((await input.collectOnce()).map(entry => entry['event.id'])).toEqual(['before']);
+    const parked = `${file}.parked`;
+    await fs.rename(file, parked);
+    expect(await input.collectOnce()).toEqual([]);
+    await fs.rename(parked, file);
+    await fs.appendFile(file, line('after'));
+    expect((await input.collectOnce()).map(entry => entry['event.id'])).toEqual(['after']);
+  });
+
+  it('does not rewrite a persisted checkpoint for an unchanged partial tail', async () => {
+    const file = path.join(dir, 'qwenpaw-day-101.jsonl');
+    const state = new StateStore(path.join(dir, 'state.json'));
+    await fs.writeFile(file, line('complete') + '{"partial":');
+    const input = new Input({ sessionDir: dir, stateStore: state });
+    expect((await input.collectOnce()).map(entry => entry['event.id'])).toEqual(['complete']);
+    await state.save();
+    expect(await input.collectOnce()).toEqual([]);
+    expect(state.isPersisted(`qwenpaw-log:${file}`)).toBe(true);
+  });
+
   it('tails a just-appended terminal record on stop and drains its asynchronous dispatch', async () => {
     const file = path.join(dir, 'qwenpaw-day-101.jsonl');
     const start = { ...record('start'), 'event.name': 'llm.request' };
@@ -141,10 +193,13 @@ describe('QwenPaw process logs', () => {
       }
     }
     const input = new GatedInput({ sessionDir: dir, stateStore: new StateStore(path.join(dir, 'state.json')), pollIntervalMs: 60_000 });
+    const firstCycle = deferred();
+    input.once('input-runtime-delta', () => firstCycle.resolve());
     const received: string[] = [];
     input.on('entries', (entries: AgentActivityEntry[]) => { received.push(...entries.map(entry => entry['event.id'])); });
     try {
       await input.start();
+      await firstCycle.promise;
       await fs.appendFile(file, line('in-flight'));
       input.holdNext = true;
       input.requestOnce();

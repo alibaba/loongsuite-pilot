@@ -1,4 +1,4 @@
-import { ROOT_CONTEXT, type Context } from '@opentelemetry/api';
+import { ROOT_CONTEXT, trace, type Context } from '@opentelemetry/api';
 import {
   createEntryInvocation,
   createTraceParentContext,
@@ -64,12 +64,12 @@ function finishReasons(record: AgentActivityEntry): string[] | undefined {
   return reasons?.map(finishReason);
 }
 
-function terminalReason(record: AgentActivityEntry): string {
+function terminalReason(record: AgentActivityEntry): string | undefined {
   if (record['agent.qwenpaw.cancelled'] === true || ['CancelledError', 'GeneratorExit'].includes(string(record, 'error.type') ?? '')) {
     return 'cancelled';
   }
   if (string(record, 'error.type') || string(record, 'error.message')) return 'error';
-  return finishReasons(record)?.[0] ?? 'stop';
+  return finishReasons(record)?.[0];
 }
 
 function scope(record: AgentActivityEntry): string {
@@ -87,12 +87,14 @@ function timestamp(record: AgentActivityEntry): number {
   return Number(ns / 1_000_000n) + Number(ns % 1_000_000n) / 1e6;
 }
 
-function outputMessages(value: unknown, fallbackReason: string): OutputMessage[] | undefined {
+function outputMessages(value: unknown, fallbackReason?: string): OutputMessage[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  return value.map(message => ({
-    ...message,
-    finishReason: finishReason(message.finishReason || message.finish_reason || fallbackReason),
-  }));
+  return value.map(message => {
+    const reason = message.finishReason || message.finish_reason || fallbackReason;
+    // The util's type requires finishReason, but its serializer omits an
+    // undefined value. Do not invent a provider result when it is unavailable.
+    return { ...message, ...(reason ? { finishReason: finishReason(reason) } : {}) } as OutputMessage;
+  });
 }
 
 function toolDefinitions(value: unknown): ToolDefinition[] | undefined {
@@ -108,6 +110,44 @@ export function convertQwenPawEvents(
   handler: ExtendedTelemetryHandler,
   passthroughKeys: readonly string[] = [],
 ): { spanCount: number; warnings: string[] } {
+  const iterator = conversion(records, handler, passthroughKeys);
+  let next = iterator.next();
+  while (!next.done) next = iterator.next(next.value);
+  return next.value;
+}
+
+interface PayloadPair { start: AgentActivityEntry; end: AgentActivityEntry }
+
+/** Load one lifecycle's payload, finish its span, and await bounded export. */
+export async function convertQwenPawEventsStreaming(
+  records: AgentActivityEntry[],
+  handler: ExtendedTelemetryHandler,
+  passthroughKeys: readonly string[],
+  options: {
+    loadRecord: (record: AgentActivityEntry) => Promise<AgentActivityEntry>;
+    onSpan: () => Promise<void>;
+  },
+): Promise<{ spanCount: number; warnings: string[] }> {
+  const iterator = conversion(records, handler, passthroughKeys);
+  let next = iterator.next();
+  while (!next.done) {
+    if (next.value) {
+      const start = await options.loadRecord(next.value.start);
+      const end = await options.loadRecord(next.value.end);
+      next = iterator.next({ start, end });
+    } else {
+      await options.onSpan();
+      next = iterator.next();
+    }
+  }
+  return next.value;
+}
+
+function* conversion(
+  records: AgentActivityEntry[],
+  handler: ExtendedTelemetryHandler,
+  passthroughKeys: readonly string[] = [],
+): Generator<PayloadPair | undefined, { spanCount: number; warnings: string[] }, PayloadPair | undefined> {
   const pairs = new Map<string, Pair>();
   const warnings: string[] = [];
   for (const record of records) {
@@ -134,7 +174,7 @@ export function convertQwenPawEvents(
   const visiting = new Set<string>();
   const skipped = new Set<string>();
   let spanCount = 0;
-  function emit(key: string): Context | undefined {
+  function* emit(key: string): Generator<PayloadPair | undefined, Context | undefined, PayloadPair | undefined> {
     if (contexts.has(key)) return contexts.get(key);
     if (skipped.has(key)) return undefined;
     const pair = pairs.get(key);
@@ -143,7 +183,8 @@ export function convertQwenPawEvents(
       warnings.push('Incomplete, conflicting, or cyclic QwenPaw lifecycle omitted');
       return undefined;
     }
-    const { start, end, kind } = pair;
+    let { start, end } = pair;
+    const { kind } = pair;
     const startTime = timestamp(start);
     const endTime = timestamp(end);
     if (!Number.isFinite(startTime) || !Number.isFinite(endTime) ||
@@ -166,7 +207,7 @@ export function convertQwenPawEvents(
     const rootContext = isValidTraceId(traceId) && isValidSpanId(externalParentId)
       ? createTraceParentContext(traceId, externalParentId)
       : ROOT_CONTEXT;
-    const parentContext = parentId ? emit(spanKey(start, parentId)) : rootContext;
+    const parentContext = parentId ? yield* emit(spanKey(start, parentId)) : rootContext;
     visiting.delete(key);
     if (!parentContext) {
       skipped.add(key);
@@ -184,6 +225,9 @@ export function convertQwenPawEvents(
       }
     }
 
+    const hydrated = yield { start, end };
+    if (hydrated) ({ start, end } = hydrated);
+
     // Normalization materializes absent optional fields as undefined on both
     // records. An absent end field must not erase request-only metadata. Real
     // end values (including empty arrays/null) still take precedence; stripped
@@ -192,9 +236,6 @@ export function convertQwenPawEvents(
     for (const [name, value] of Object.entries(end)) {
       if (value !== undefined) merged[name] = value;
     }
-    // Source protocol IDs reconstruct the tree above; only OTel span context
-    // carries that relationship to exporters. Keep private QwenPaw metadata
-    // local unless a caller explicitly selects a diagnostic passthrough key.
     const passthroughAttributes: Record<string, unknown> = {};
     for (const name of new Set([
       ...passthroughKeys, 'gen_ai.turn.id', 'gen_ai.step.id', 'gen_ai.agent.type',
@@ -301,9 +342,14 @@ export function convertQwenPawEvents(
         }), handler.startExecuteTool.bind(handler), handler.stopExecuteTool.bind(handler), handler.failExecuteTool.bind(handler));
         break;
     }
-    if (ctx) contexts.set(key, ctx);
-    return ctx;
+    // Keeping an ended SDK Span in every parent context retains its serialized
+    // messages even after the exporter drains it. Descendants only need IDs.
+    const spanContext = ctx && trace.getSpanContext(ctx);
+    const compactContext = spanContext ? trace.setSpanContext(ctx!, spanContext) : undefined;
+    if (compactContext) contexts.set(key, compactContext);
+    yield;
+    return compactContext;
   }
-  for (const key of pairs.keys()) emit(key);
+  for (const key of pairs.keys()) yield* emit(key);
   return { spanCount, warnings };
 }

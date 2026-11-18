@@ -70,6 +70,7 @@ Pilot 主要帮助回答这些问题：
 | Qoder Work | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
+| [QwenPaw](docs/zh-CN/qwenpaw-runtime.md) | 原生目录插件 | Yes | Yes | Yes | Yes |
 | Qwen Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |

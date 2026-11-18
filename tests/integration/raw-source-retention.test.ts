@@ -11,6 +11,7 @@ import { appendRawJsonl } from '../../assets/hooks/shared/raw-jsonl-writer.mjs';
 import { acquireRawSourceGate } from '../../src/utils/raw-source-gate.js';
 import { DshLogInput } from '../../src/inputs/dsh-log/dsh-log-input.js';
 import { HermesLogInput } from '../../src/inputs/hermes-log/hermes-log-input.js';
+import { QwenPawLogInput } from '../../src/inputs/qwenpaw-log/qwenpaw-log-input.js';
 import { KiroCliLogInput } from '../../src/inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { QwenWorkCNTraceInput } from '../../src/inputs/qwen-work-cn/qwen-work-cn-trace-input.js';
 import { QoderTraceInput } from '../../src/inputs/qoder-trace/qoder-trace-input.js';
@@ -533,5 +534,27 @@ describe('raw source disk retention', () => {
     expect((await service.runCleanup()).deleted).toBe(0);
     await input.start(); await input.stop();
     expect((await service.runCleanup()).deleted).toBe(1);
+  });
+
+  it('reclaims only old, durably consumed QwenPaw files after the writer exits', async () => {
+    const sessionDir = path.join(root, 'logs', 'qwenpaw');
+    await fs.mkdir(sessionDir, { recursive: true });
+    const source = path.join(sessionDir, `qwenpaw-${oldDate()}-1234567.jsonl`);
+    const row = (id: string) => JSON.stringify({ 'event.id': id, 'event.name': 'other',
+      'gen_ai.agent.type': 'qwenpaw', time_unix_nano: '1700000000000000000' }) + '\n';
+    await fs.writeFile(source, row('first'));
+    await fs.utimes(source, oldTime(), oldTime());
+    const input = new QwenPawLogInput({ stateStore: store, sessionDir });
+    await input.start(); await input.stop();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const service = new LogRetentionService(root, config, store);
+    expect((await service.runCleanup()).deleted).toBe(0);
+    await fs.appendFile(source, row('unread'));
+    await fs.utimes(source, oldTime(), oldTime());
+    kill.mockImplementation(() => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); });
+    expect((await service.runCleanup()).deleted).toBe(0);
+    await input.start(); await input.stop();
+    expect((await service.runCleanup()).deleted).toBe(1);
+    await expect(fs.stat(source)).rejects.toThrow();
   });
 });

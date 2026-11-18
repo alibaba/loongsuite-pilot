@@ -253,6 +253,16 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         await anext(stream)
         await stream.aclose()
         self.assertNotIn("error.type", self.capture.records[-1])
+        self.assertNotIn("response.finish_reasons", self.capture.records[-1])
+        self.assertNotIn("finish_reason", self.capture.records[-1]["gen_ai.output.messages"][0])
+
+    async def test_native_model_finish_reason_is_not_replaced_by_stop(self):
+        response = ChatResponse([TextBlock(text="partial")], True, metadata={"finish_reason": "length"})
+        async def handler(**kwargs):
+            return response
+        await self.middleware.on_model_call(self.agent, {}, handler)
+        self.assertEqual(self.capture.records[-1]["response.finish_reasons"], "length")
+        self.assertEqual(self.capture.records[-1]["gen_ai.output.messages"][0]["finish_reason"], "length")
 
     async def test_concurrent_requests_keep_their_scopes(self):
         gate = asyncio.Event()

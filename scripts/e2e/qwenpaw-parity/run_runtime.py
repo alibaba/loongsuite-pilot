@@ -18,8 +18,7 @@ async def main(args):
     root = Path(args.root).resolve()
     for child in ("home", "working", "secret", "evidence"):
         (root / child).mkdir(parents=True, exist_ok=True)
-    os.environ.update(HOME=str(root / "home"),
-                      QWENPAW_WORKING_DIR=str(root / "working"),
+    os.environ.update(QWENPAW_WORKING_DIR=str(root / "working"),
                       QWENPAW_SECRET_DIR=str(root / "secret"),
                       PARITY_CONTRACT_LOG=str(root / "evidence/contract.jsonl"),
                       OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=args.capture_mode,
