@@ -28,7 +28,8 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     }
   });
 
-  it.each([false, true])('links two turns without session fallback (split batches=%s)', async splitBatches => {
+  it.each([[false, false], [true, false], [false, true], [true, true]])(
+    'links two turns without session fallback (split batches=%s, reused run ID=%s)', async (splitBatches, reusedRunId) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-upstream-'));
     temporaryDirectories.push(root);
     await fs.writeFile(path.join(root, 'config.json'), '{}');
@@ -69,8 +70,11 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       const fixture = (await fs.readFile(FIXTURE_PATH, 'utf8')).split('\n')
         .filter(Boolean).map(line => JSON.parse(line));
       for (const [index, turn] of turns.entries()) {
-        const runId = `upstream-run-${index}`;
-        const ctx = { agentId: 'main', sessionId, runId, sessionKey: 'agent:main:upstream-test' };
+        const runId = reusedRunId ? sessionId : `upstream-run-${index}`;
+        const ctx = { agentId: 'main', sessionId, runId, sessionKey: 'agent:main:upstream-test',
+          ...(reusedRunId ? { trigger: 'cron', jobId: 'upstream-job' } : {}) };
+        if (reusedRunId) handlers.cron_changed({ action: 'started', jobId: ctx.jobId, runAtMs: index + 1,
+          sessionTarget: `session:${ctx.sessionKey}` }, {});
         await handlers.before_model_resolve({ prompt: turn.prompt }, ctx);
         if (splitBatches) {
           const batchCount = flusher.batchCalls.length;
@@ -89,6 +93,8 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
           await Promise.resolve(handler(event, ctx));
           if (splitBatches && envelope.hook === 'before_agent_run') await collect();
         }
+        if (reusedRunId) handlers.cron_changed({ action: 'finished', jobId: ctx.jobId, runAtMs: index + 1,
+          sessionId, sessionKey: ctx.sessionKey }, {});
         if (splitBatches) await collect();
       }
       if (!splitBatches) await collect();
@@ -100,9 +106,15 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
 
     const records = flusher.batchCalls.flat();
     expect(records.some(record => record['agent.openclaw.hook'] === 'before_model_resolve')).toBe(false);
+    const starts = records.filter(record => record['agent.openclaw.hook'] === 'before_agent_run'
+      && record['event.name'] === 'other' && record['gen_ai.turn.start'] === true);
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map(record => record['gen_ai.turn.id'])).size).toBe(2);
     for (const [index, turn] of turns.entries()) {
-      const turnRecords = records.filter(record => record['gen_ai.turn.id'] === `upstream-run-${index}`);
+      const turnRecords = records.filter(record => record['gen_ai.turn.id'] === starts[index]['gen_ai.turn.id']);
       expect(turnRecords.length).toBeGreaterThan(10);
+      expect(new Set(turnRecords.map(record => record['gen_ai.turn.id'])).size).toBe(1);
+      if (reusedRunId) expect(turnRecords.every(record => record['agent.openclaw.run_id'] === sessionId)).toBe(true);
       expect(turnRecords.every(record => record.trace_id === turn.trace)).toBe(true);
       const inputRecords = turnRecords.filter(record => record['agent.openclaw.hook'] === 'before_agent_run');
       expect(inputRecords).toHaveLength(2); // canonical other + derived agent.input

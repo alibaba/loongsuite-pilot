@@ -327,6 +327,16 @@ and `OPENCLAW_STATE_DIR`. For hosts supporting conversation access, the entry is
 }
 ```
 
+For a fixed-session cron job whose native start and completion are observed,
+Pilot assigns each execution a distinct `gen_ai.turn.id`, even if OpenClaw
+reuses its native run ID. Fallback attempts within the execution share that
+turn and are exported when the job finishes. The original run ID is retained as
+`agent.openclaw.run_id`; the session ID is unchanged. Other runs and older hosts
+without the cron lifecycle continue to use their existing collection behavior.
+If a completion hook is missed, Pilot checks the scheduler's matching finished
+run before closing the retained turn and marks the collection incomplete. An
+active or unknown run is not closed merely because a model attempt ended.
+
 The legacy adapter uses `llm_input`, assistant `before_message_write`, tool hooks,
 and `llm_output` to preserve observed output, tool IDs and per-call token usage.
 Run aggregate usage is diagnostic-only, never added to model usage. LLM start
