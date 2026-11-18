@@ -90,6 +90,10 @@ export async function collectFileStat(file: string): Promise<CollectionResult> {
 
 /** Only explicitly configured regular files are read, in bounded byte slices. */
 export async function collectLog(input: MulticaInputConfig, file: string, checkpoint: SourceCheckpoint): Promise<CollectionResult> {
+  const maxLogBytes = input.MaxLogBytes ?? 1024 * 1024;
+  const maxLine = input.MaxLineBytes ?? 16384;
+  // A complete allowed line, including its newline, must fit in one read.
+  if (maxLogBytes <= maxLine) throw new SourceError('invalid_log_read_bounds');
   const handle = await open(file, 'r');
   try {
     const info = await handle.stat();
@@ -101,11 +105,10 @@ export async function collectLog(input: MulticaInputConfig, file: string, checkp
       || info.size < (checkpoint.offset ?? 0) || (checkpoint.signatureSize === prefix.length && checkpoint.signature !== signature));
     const offset = rotated ? 0 : checkpoint.offset ?? 0;
     let discardPartial = rotated ? false : checkpoint.discardPartial ?? false;
-    const buffer = Buffer.alloc(Math.min(input.MaxLogBytes ?? 1024 * 1024, Math.max(0, info.size - offset)));
+    const buffer = Buffer.alloc(Math.min(maxLogBytes, Math.max(0, info.size - offset)));
     const {bytesRead} = await handle.read(buffer, 0, buffer.length, offset);
     const content = buffer.subarray(0, bytesRead);
     const records: MulticaRecord[] = [];
-    const maxLine = input.MaxLineBytes ?? 16384;
     let begin = 0;
     let skipped = 0;
     for (let end = content.indexOf(10); end >= 0; end = content.indexOf(10, begin)) {

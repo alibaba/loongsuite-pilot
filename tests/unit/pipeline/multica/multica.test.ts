@@ -103,6 +103,14 @@ describe('Multica existing-data parsers', () => {
     expect(() => validateMulticaConfig({...input, MetricsUrls: ['https://host/metrics?token=x']})).toThrow();
     expect(() => validateMulticaConfig({...input, IntervalSeconds: 0})).toThrow();
   });
+  it('rejects read chunks that cannot fit an allowed log line and its newline', async () => {
+    for (const config of [{...input, MaxLogBytes: 1024}, {...input, MaxLogBytes: 1024, MaxLineBytes: 1024}]) {
+      expect(() => validateMulticaConfig(config)).toThrow('MaxLogBytes must exceed MaxLineBytes');
+      expect(() => pipeline(config)).toThrow('MaxLogBytes must exceed MaxLineBytes');
+      await expect(collectLog(config, path.join(dir, 'unopened.log'), {})).rejects.toThrow('invalid_log_read_bounds');
+    }
+    expect(() => validateMulticaConfig({...input, MaxLogBytes: 1024, MaxLineBytes: 1023})).not.toThrow();
+  });
   it('maps custom issue states and separates current age from completed wait time', () => {
     expect(snapshot('issue_status_snapshot', {id: 's1', key: 'qa_approval', category: 'in_review', name: 'private name'}))
       .toMatchObject({status: 'qa_approval', status_category: 'in_review'});
@@ -113,6 +121,29 @@ describe('Multica existing-data parsers', () => {
 });
 
 describe('bounded source reads', () => {
+  it('advances past an oversized line across chunks and a checkpoint restart', async () => {
+    const file = path.join(dir, 'chunked.log');
+    const content = `${'x'.repeat(2000)}\nINFO comment created issue_id=after-long-line\n`;
+    await writeFile(file, content);
+    const config = {...input, MaxLogBytes: 1024, MaxLineBytes: 1023};
+    validateMulticaConfig(config);
+    let checkpoint = {};
+    const records: MulticaRecord[] = [];
+    for (let round = 0; round < 4; round++) {
+      const result = await collectLog(config, file, checkpoint);
+      records.push(...result.records);
+      const previousOffset = (checkpoint as {offset?: number}).offset ?? 0;
+      expect(result.checkpoint!.offset).toBeGreaterThanOrEqual(previousOffset);
+      if (previousOffset < Buffer.byteLength(content)) expect(result.checkpoint!.offset).toBeGreaterThan(previousOffset);
+      // A new process restores only the persisted checkpoint, with no partial-line buffer.
+      checkpoint = JSON.parse(JSON.stringify(result.checkpoint));
+    }
+    expect(checkpoint).toMatchObject({offset: Buffer.byteLength(content), discardPartial: false});
+    expect(records.filter(row => row.record_type === 'server_log')).toEqual([
+      expect.objectContaining({issue_id: 'after-long-line', message: 'comment created'}),
+    ]);
+    expect(records.some(row => row.error_kind === 'oversized_log_line_skipped')).toBe(true);
+  });
   it('uses documented header pagination and drops API content before returning', async () => {
     vi.stubEnv('MULTICA_TEST_TOKEN', 'fake-api-token');
     const cursors: string[] = [];
@@ -199,8 +230,51 @@ describe('Multica delivery and failure isolation', () => {
     const manager = new PipelineManager({configDir, stateDir: path.join(dir, 'state'), failedLogDir: path.join(dir, 'failed'), dataDir: dir, pipelineConfig: {enabled: true, file: {enabled: false}, qoderApi: {enabled: false}}});
     try {
       await manager.start();
-      expect(vi.mocked(postWebtracking).mock.calls.some(call => call[1].some(row => row.record_type === 'file_stat'))).toBe(true);
+      await vi.waitFor(() => expect(vi.mocked(postWebtracking).mock.calls.some(call => call[1].some(row => row.record_type === 'file_stat'))).toBe(true));
     } finally { await manager.stop(); }
+  });
+  it('starts before the first SLS ACK and drains that batch on stop', async () => {
+    const file = path.join(dir, 'startup.log');
+    const content = 'INFO comment created issue_id=startup\n';
+    await writeFile(file, content);
+    let acknowledge!: () => void;
+    const ack = new Promise<void>(resolve => { acknowledge = resolve; });
+    vi.mocked(postWebtracking).mockImplementation(() => ack);
+    const p = pipeline({...input, LogFiles: [file]});
+    let started = false;
+    const starting = p.start().then(() => { started = true; });
+    try {
+      await vi.waitFor(() => expect(postWebtracking).toHaveBeenCalledTimes(1));
+      expect(started).toBe(true);
+      expect(await readFile(path.join(dir, 'lab.multica.json'), 'utf8').catch(() => 'absent')).toBe('absent');
+      let stopped = false;
+      const stopping = p.stop().then(() => { stopped = true; });
+      await Promise.resolve();
+      expect(stopped).toBe(false);
+      acknowledge();
+      await stopping;
+      const state = JSON.parse(await readFile(path.join(dir, 'lab.multica.json'), 'utf8'));
+      expect(state[`log:${file}`].extra.checkpoint.offset).toBe(Buffer.byteLength(content));
+      expect(await readdir(path.join(dir, 'lab.multica-pending'))).toEqual([]);
+    } finally { acknowledge(); await starting; await p.stop(); }
+  });
+  it('can stop before its scheduled first collection without making a request', async () => {
+    const p = pipeline({...input, StatFiles: [path.join(dir, 'missing')]});
+    await p.start();
+    await p.stop();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(postWebtracking).not.toHaveBeenCalled();
+  });
+  it('handles a background cycle rejection and retries without abandoning lifecycle ownership', async () => {
+    const activation = vi.fn().mockRejectedValueOnce(new Error('activation notification unavailable')).mockResolvedValue(undefined);
+    const p = new MulticaPipeline({config: {configName: 'retry', inputs: [{...input, IntervalSeconds: 1, StatFiles: [path.join(dir, 'missing')]}],
+      flushers: [{Type: 'flusher_sls', Endpoint: 'example.invalid', Project: 'p', Logstore: 'l'}]},
+      stateDir: dir, dataDir: dir, failedLogDir: dir}, undefined, activation);
+    try {
+      await p.start();
+      await vi.waitFor(() => expect(postWebtracking).toHaveBeenCalled(), {timeout: 2000});
+      expect(activation).toHaveBeenCalledTimes(2);
+    } finally { await p.stop(); }
   });
   it('replays the same sanitized event IDs after SLS failure and restart, advancing offsets only after ACK', async () => {
     const file = path.join(dir, 'server.log');

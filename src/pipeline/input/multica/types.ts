@@ -83,4 +83,7 @@ export function validateMulticaConfig(input: MulticaInputConfig): void {
     const value = input[name];
     if (value !== undefined && (!Number.isInteger(value) || value < min || value > max)) throw new Error(`Invalid ${name}`);
   }
+  if ((input.MaxLogBytes ?? 1024 * 1024) <= (input.MaxLineBytes ?? 16384)) {
+    throw new Error('MaxLogBytes must exceed MaxLineBytes');
+  }
 }

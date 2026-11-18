@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -58,10 +58,11 @@ describe('Multica log bridge activation lease', () => {
     child.stderr.on('data', chunk => { errors += String(chunk); });
     const completed = new Promise<void>((resolve, reject) => { child.once('exit', () => resolve()); child.once('error', reject); });
     try {
-      await delay(250);
+      if (state === 'unscoped') {
+        await vi.waitFor(() => expect(errors).toContain('NAMESPACE and POD_LABEL_SELECTOR are required'), {timeout: 3000});
+      } else await delay(250);
       expect(child.exitCode).toBe(null);
-      if (state === 'unscoped') expect(errors).toContain('NAMESPACE and POD_LABEL_SELECTOR are required');
-      else expect(errors).toBe('');
+      if (state !== 'unscoped') expect(errors).toBe('');
       expect(await readdir(dir)).toEqual(state === 'missing' ? [] : ['activation.json']);
     } finally {
       child.kill('SIGKILL');

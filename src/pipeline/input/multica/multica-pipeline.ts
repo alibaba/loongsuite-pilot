@@ -31,6 +31,7 @@ export class MulticaPipeline implements Pipeline {
   private running = false;
   private loaded = false;
   private inFlight?: Promise<CollectionSummary>;
+  private background?: Promise<void>;
   private readonly activation: MulticaActivationGate;
   private lastActivation?: string;
 
@@ -50,19 +51,27 @@ export class MulticaPipeline implements Pipeline {
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
-    await this.collectOnce();
-    this.schedule();
+    this.schedule(0);
   }
 
-  private schedule(): void {
+  private schedule(delayMs = (this.input.IntervalSeconds ?? 30) * 1000): void {
     if (!this.running) return;
-    this.timer = setTimeout(() => { void this.collectOnce().finally(() => this.schedule()); }, (this.input.IntervalSeconds ?? 30) * 1000);
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.background = this.collectOnce().then(() => {}, error => {
+        logger.error('Multica collection cycle failed', {configName: this.opts.config.configName, error_kind: errorKind(error)});
+      }).finally(() => {
+        this.background = undefined;
+        this.schedule();
+      });
+    }, delayMs);
   }
 
   async stop(): Promise<void> {
     this.running = false;
     if (this.timer) clearTimeout(this.timer);
-    await this.inFlight;
+    this.timer = undefined;
+    await (this.background ?? this.inFlight);
   }
 
   collectOnce(): Promise<CollectionSummary> {
