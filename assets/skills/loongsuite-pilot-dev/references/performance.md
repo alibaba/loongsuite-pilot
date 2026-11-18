@@ -16,17 +16,17 @@ CPU 平均值按计量窗口的累积 CPU 时间差计算，峰值取相邻资�
 
 ```sh
 python3 -m unittest discover -s scripts/performance -p 'test_*.py'
+```
+
+本地只诊断时，使用[迁移手册的本地 smoke](agent-migration.md#linux-下复跑性能-smoke)。官方仓库对绑定的 dev 分支手动触发可能更新公开报表。需要发布且有权限时，将 `PILOT_PERF_DEV_REF` 设为流水线配置的 dev 节点分支。
+
+```sh
 gh workflow run sdk-performance.yml --ref "$PILOT_PERF_DEV_REF" \
   -f mode=dev -f benchmark_method=github-full-pilot-codex-rollout-v2
 ```
 
-运行手动触发命令前，将 `PILOT_PERF_DEV_REF` 设为流水线配置的 dev 节点分支。查看 `scripts/performance/README.md` 获取 Linux/Docker 复现命令、参数和发布权限。比较性能时保留配置、fixture、方法和 SHA，若有显著差异，先检查排空状态、轮询和运行环境。
+查看 `scripts/performance/README.md` 获取 Linux/Docker 复现命令、参数和发布权限。比较性能时保留配置、fixture、方法和 SHA，若有显著差异，先检查排空状态、轮询和运行环境。
 
 ## SDK 热点短筛
 
 归一化前的字符串和字节可以借用到当前解析结束。回调、持久化和跨任务数据按所有权约定复制。用已验收提交保留基线包，候选复用同一 fixture、轮询、采样和质量验证器。测试设计需命中具体热点，例如 Qoder segment 兜底在响应中检查已知 cache-read token，并核对 outbox 汇总值。短筛同时记录平均和峰值 CPU/RSS、输入和交付速率、实测回合数及排空状态。字段缺失、重复、续采或 ACK/RETRY 变化都要在接受候选前解决。
-
-Qoder 的一次短筛以 `c08079d` 的嵌入 SDK 为基线，预热 64 个会话，高负载 200 轮/秒、100 ms 轮询并测 30 秒，空闲 10 秒轮询并测 60 秒。两种高负载候选均通过 6,064 回合的字段、token、唯一事件 ID 和排空检查。
-
-- 合并去掉 segment 补 token 深拷贝、类型字段汇总和 checkpoint/扫描分配优化后，高负载平均 CPU 从 55.23% 降至 52.83%，平均 RSS 从 25.86 MiB 升至 29.05 MiB。空闲平均 CPU 从 0.70% 降至 0.68%，峰值 RSS 从 24.12 MiB 降至 23.04 MiB。
-- 单测去掉补 token 深拷贝的候选，高负载平均 CPU 为 54.30%，平均 RSS 为 29.84 MiB。本轮保留基线代码。后续判断取舍时同时看 CPU、RSS 和数据质量，短筛结果只用于研发决策。

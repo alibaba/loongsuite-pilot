@@ -1,22 +1,23 @@
 ---
 name: loongsuite-pilot-dev
-description: Develop, debug, test, and review the Rust LoongSuite Pilot runtime and CloudShell SDK. Use for Agent discovery and adapters, native Hook migration, transcript recovery, event quality, installer defaults, SDK ABI, or performance benchmarks and GitHub Pages reporting in this repository.
+description: Develop, debug, test, and review the Rust LoongSuite Pilot runtime and native SDK. Use for Agent discovery and adapters, native Hook migration, transcript recovery, event quality, installer defaults, SDK ABI, or performance benchmarks and GitHub Pages reporting in this repository.
 ---
 
 # LoongSuite Pilot Rust 开发
 
-从仓库根目录操作。先读根目录及目标子目录的 `AGENTS.md`，确认当前分支、工作区和目标发行版。以当前任务指定的开源目标分支为准。未指定时，沿用该版本当前的集成分支，版本合入主干后以主干为开发基线。开源改动验收通过后，再单向同步到商业版对应的开发分支。商业代码、内置配置、运行日志和用户数据留在商业环境。
+从仓库根目录操作。先读根目录及目标子目录的 `AGENTS.md`，确认当前分支、工作区和目标发行版。以当前任务指定的开源目标分支为准。未指定时，沿用该版本当前的集成分支，版本合入主干后以主干为开发基线。
 
 ## 同步开源 main
 
 发现当前开源集成分支落后于 `main` 时，直接开始原生适配和验证。
 
-逐项检查 main 自上次同步以来的产品行为、协议、修复及测试变化，并沿 Rust 的生产入口核对现状。对于 JS/TS 的运行时变更，按本 skill 的 Agent、性能和验证要求补齐原生 Rust 适配，保留已有二进制 Hook 与 SDK 行为。为正常路径、兼容性及恢复边界补验收。记录同步所涵盖的 main 提交和每项行为的 Rust 入口。开源验收通过后，再单向同步商业版。
+逐项检查 main 自上次同步以来的产品行为、协议、修复及测试变化，并沿 Rust 的生产入口核对现状。对于 JS/TS 的运行时变更，按本 skill 的 Agent、性能和验证要求补齐原生 Rust 适配，保留已有二进制 Hook 与 SDK 行为。为正常路径、兼容性及恢复边界补验收。记录同步所涵盖的 main 提交和每项行为的 Rust 入口。
 
 ## 按改动查阅
 
 - 编译、隔离调试和了解 SDK 边界，读 [架构与调试](references/runtime.md)。
 - 新增或改造 Agent，替换 JS Hook，读 [Agent 接入与二进制 Hook](references/agents.md)。
+- 独立接手一个 Agent 的完整 SDK 迁移，按 [Agent 迁移手册](references/agent-migration.md) 从 Qoder 参考实现跑到能力和性能验收。
 - 分析 CPU 或内存，修改压测及报表，读 [性能测试与报表](references/performance.md)。
 - 写测试、验收安装包或发布 SDK，读 [测试与发布验收](references/verification.md)。
 
