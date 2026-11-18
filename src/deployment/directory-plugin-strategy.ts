@@ -433,11 +433,15 @@ export class DirectoryPluginStrategy implements DeployStrategy {
     markerFile: string,
     marker: DirectoryPluginMarker,
   ): Promise<void> {
+    const markerPath = path.join(directory, markerFile);
     await fs.writeFile(
-      path.join(directory, markerFile),
+      markerPath,
       `${JSON.stringify(marker, null, 2)}\n`,
       'utf8',
     );
+    // This marker contains only Pilot metadata and the data directory path.
+    // The Agent must read it after the root installer drops privileges.
+    if (process.getuid?.() === 0 && rootTriggerEnabled()) await fs.chmod(markerPath, 0o644);
   }
 
   private resolveMarkerFile(config: DirectoryPluginConfig): string {

@@ -5,6 +5,8 @@ import * as os from 'node:os';
 import { resolveHookInstallScope } from '../../../src/deployment/hook-scope.js';
 import { parseHookArgs } from '../../../src/deployment/hook-command.js';
 import { runEagerInjection } from '../../../src/inject-hooks.js';
+import { DeploymentManager } from '../../../src/deployment/deployment-manager.js';
+import { resolveDeploymentScope } from '../../../src/deployment/deployment-scope.js';
 import { isolateAgentHome } from '../../helpers/isolated-agent-home.js';
 
 vi.mock('node:os', async importOriginal => {
@@ -14,6 +16,10 @@ vi.mock('node:os', async importOriginal => {
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
   redirectRootLoggerToStderr: vi.fn(),
+}));
+vi.mock('../../../src/utils/container-identity.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/utils/container-identity.js')>(),
+  readContainerIdentity: () => ({ identity: 'a'.repeat(64), source: 'cgroup' }),
 }));
 
 let root: string;
@@ -118,5 +124,42 @@ describe('scope env at existing installation entry points', () => {
     vi.stubEnv('LOONGSUITE_PILOT_AGENTS', 'none');
     expect(await runEagerInjection()).toBe(0);
     expect(await fs.stat(path.join(data, 'deployed-agents.json')).catch(() => null)).toBeNull();
+  });
+
+  it.each([
+    ['system', false],
+    ['system', true],
+    ['user', false],
+  ])('leaves deferred Hermes to the daemon for %s scope (existing deployment: %s)', async (scope, existing) => {
+    const hermesHome = path.join(root, '.hermes');
+    const sourceDir = path.join(data, 'plugins', 'hermes-agent', 'loongsuite-pilot');
+    const targetDir = path.join(hermesHome, 'plugins', 'loongsuite-pilot');
+    await fs.mkdir(sourceDir, { recursive: true });
+    await fs.mkdir(hermesHome, { recursive: true });
+    await fs.writeFile(path.join(sourceDir, 'plugin.yaml'), 'name: loongsuite-pilot\n');
+    await fs.writeFile(path.join(pilot, 'agents.d', 'hermes-agent.json'), JSON.stringify({
+      id: 'hermes-agent', displayName: 'Hermes', deployMode: 'directory-plugin',
+      detection: { paths: [hermesHome], commands: [] },
+      directoryPlugin: { sourceDir, targetDir },
+    }));
+    const daemon = new DeploymentManager({ dataDir: data, pilotDir: pilot, installedBy: 'daemon' });
+    const defs = await daemon.loadDefinitions();
+    const hermes = defs.find(def => def.id === 'hermes-agent')!;
+    if (existing) expect((await daemon.deploySingle(hermes)).success).toBe(true);
+
+    vi.stubEnv('LOONGSUITE_PILOT_HOOK_SCOPE', scope);
+    vi.stubEnv('LOONGSUITE_PILOT_AGENTS', 'pi-coding-agent,hermes-agent');
+    expect(await runEagerInjection()).toBe(0);
+    const report = await fs.readFile(path.join(data, 'last-hook-install.json'), 'utf8')
+      .then(JSON.parse, () => null);
+    expect(resolveDeploymentScope({ identity: 'a'.repeat(64), source: 'cgroup' }, report)).toBe('auto');
+    expect(report).toBeNull();
+
+    const results = await daemon.deployAll();
+    expect(results.find(result => result.agentId === 'hermes-agent')).toMatchObject({ success: true });
+    expect(await fs.readFile(path.join(targetDir, 'plugin.yaml'), 'utf8')).toContain('loongsuite-pilot');
+    const state = JSON.parse(await fs.readFile(path.join(data, 'deployed-agents.json'), 'utf8'));
+    expect(state['hermes-agent']).toBeDefined();
+    expect(state['pi-coding-agent']).toBeDefined();
   });
 });

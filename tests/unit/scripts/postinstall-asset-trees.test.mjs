@@ -22,7 +22,7 @@
 // independently, and the installers reporting what actually happened.
 import { describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -67,7 +67,7 @@ const walk = (dir) => {
 //
 // spawnSync rather than execFileSync: the exit code is the thing under test here (the
 // installers key their check mark off it), and the per-tree failures are on stderr.
-const runPostinstall = (dataDir, home, nodeArgs = []) => {
+const runPostinstall = (dataDir, home, nodeArgs = [], extraEnv = {}) => {
   const res = spawnSync(process.execPath, [...nodeArgs, POSTINSTALL], {
     encoding: 'utf-8',
     env: {
@@ -75,12 +75,107 @@ const runPostinstall = (dataDir, home, nodeArgs = []) => {
       HOME: home,
       USERPROFILE: home,
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
+      ...extraEnv,
     },
   });
   return { status: res.status, out: `${res.stdout ?? ''}${res.stderr ?? ''}` };
 };
 
 describe('postinstall installs every asset tree', () => {
+  it.skipIf(process.platform === 'win32')('keeps upgraded assets readable and preserves private installs under a restrictive umask', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'pilot-postinstall-umask-'));
+    try {
+      const preload = path.join(root, 'umask.mjs');
+      writeFileSync(preload, `process.umask(parseInt(process.env.PILOT_TEST_UMASK, 8));\n`);
+      const run = (dir, mask, scope = '') => runPostinstall(dir, root, ['--import', preload], {
+        PILOT_TEST_UMASK: mask, LOONGSUITE_PILOT_ROOT_TRIGGER: scope,
+      });
+      const data = path.join(root, 'upgrade');
+      expect(run(data, '022').status).toBe(0);
+      const files = [
+        'plugins/openclaw/plugin.mjs', 'plugins/dsh/plugin.mjs',
+        'plugins/hermes-agent/loongsuite-pilot/__init__.py', 'hooks/claude-code-sdk-preload.cjs',
+      ];
+      for (const file of files) expect(statSync(path.join(data, file)).mode & 0o777).toBe(0o644);
+      const upgrade = run(data, '077');
+      expect(upgrade.out).not.toMatch(/failed asset tree/i);
+      for (const file of files) expect(statSync(path.join(data, file)).mode & 0o777).toBe(0o644);
+
+      const privateData = path.join(root, 'private');
+      expect(run(privateData, '077').status).toBe(0);
+      expect(statSync(path.join(privateData, files[0])).mode & 0o777).toBe(0o600);
+      expect(run(privateData, '022').status).toBe(0);
+      expect(statSync(path.join(privateData, files[0])).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('creates readable runtime trees for an opted-in root installation under umask 077', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'pilot-postinstall-root-umask-'));
+    try {
+      const preload = path.join(root, 'root-umask.mjs');
+      writeFileSync(preload, `process.umask(0o077); process.getuid = () => 0;\n`);
+      const data = path.join(root, 'data');
+      mkdirSync(data, { mode: 0o755 });
+      const config = path.join(data, 'config.json');
+      writeFileSync(config, '{"secret":"private"}\n', { mode: 0o600 });
+      const installed = runPostinstall(data, root, ['--import', preload], { LOONGSUITE_PILOT_ROOT_TRIGGER: '1' });
+      expect(installed.out).not.toMatch(/failed asset tree/i);
+      for (const dir of ['hooks', 'plugins', 'plugins/dsh', 'plugins/hermes-agent/loongsuite-pilot']) {
+        expect(statSync(path.join(data, dir)).mode & 0o755).toBe(0o755);
+      }
+      for (const file of ['plugins/dsh/plugin.mjs', 'plugins/hermes-agent/loongsuite-pilot/__init__.py', 'hooks/claude-code-sdk-preload.cjs']) {
+        expect(statSync(path.join(data, file)).mode & 0o777).toBe(0o644);
+      }
+      const dshPlugin = path.join(data, 'plugins/dsh/plugin.mjs');
+      chmodSync(dshPlugin, 0o600);
+      expect(runPostinstall(data, root, ['--import', preload], { LOONGSUITE_PILOT_ROOT_TRIGGER: '1' }).out)
+        .not.toMatch(/failed asset tree/i);
+      expect(statSync(dshPlugin).mode & 0o777).toBe(0o644);
+      expect(statSync(config).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform !== 'linux' || process.getuid?.() !== 0)(
+    'keeps real Agent plugin imports working after a root upgrade and uid drop', () => {
+      const root = mkdtempSync(path.join(tmpdir(), 'pilot-postinstall-real-uid-'));
+      try {
+        chmodSync(root, 0o755);
+        const data = path.join(root, 'data');
+        mkdirSync(data, { mode: 0o755 });
+        const preload = path.join(root, 'umask.mjs');
+        writeFileSync(preload, 'process.umask(parseInt(process.env.PILOT_TEST_UMASK, 8));\n');
+        for (const mask of ['022', '077']) {
+          const installed = runPostinstall(data, root, ['--import', preload], {
+            PILOT_TEST_UMASK: mask, LOONGSUITE_PILOT_ROOT_TRIGGER: '1',
+          });
+          expect(installed.out).not.toMatch(/failed asset tree/i);
+        }
+        const entry = [
+          'import { pathToFileURL } from "node:url";',
+          'import { createRequire } from "node:module";',
+          'await import(pathToFileURL(process.argv[1]).href);',
+          'await import(pathToFileURL(process.argv[2]).href);',
+          'createRequire(import.meta.url)(process.argv[3]);',
+        ].join('\n');
+        const child = spawnSync(process.execPath, ['--input-type=module', '-e', entry,
+          path.join(data, 'plugins/dsh/plugin.mjs'),
+          path.join(data, 'plugins/openclaw/plugin.mjs'),
+          path.join(data, 'hooks/claude-code-sdk-preload.cjs'),
+        ], {
+          uid: 1000, gid: 1000, encoding: 'utf8',
+          env: { ...process.env, HOME: root, NODE_OPTIONS: '', BUN_OPTIONS: '', NODE_PATH: '' },
+        });
+        expect(child.status, child.stderr).toBe(0);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('preserves a usable plugin when an upgrade asset write runs out of disk space', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'pilot-postinstall-atomic-'));
     try {

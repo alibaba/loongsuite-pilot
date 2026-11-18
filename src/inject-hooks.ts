@@ -224,7 +224,9 @@ export async function runEagerInjection(): Promise<number> {
       deploymentScope: scope,
       deployModes: new Set([...EAGER_DEPLOY_MODES, 'dsh-yaml-patch']),
       enabled: id => isGateEnabled(gate, id),
-      writeResult: true,
+      // This is only the eager-safe subset. Publishing it as a named install
+      // would prevent the daemon from deploying deferred modes such as Hermes.
+      writeResult: false,
     });
     for (const warning of result.warnings) warn(warning);
     for (const agent of result.report.agents) {
