@@ -77,7 +77,10 @@ export interface AgentActivityEntry {
   'gen_ai.agent.name'?: string;
   'gen_ai.agent.description'?: string;
   'gen_ai.data_source.id'?: string;
-  'gen_ai.provider.name': string;
+  /** Required except for explicitly scoped Agent-only turn observations. */
+  'gen_ai.provider.name'?: string;
+  /** The source observes turn boundaries/input, not model or tool invocations. */
+  'loongsuite.observation.scope'?: 'agent_turn';
   'gen_ai.request.id'?: string;
   /** HTTP response status captured at the model transport boundary. */
   'http.response.status_code'?: number;

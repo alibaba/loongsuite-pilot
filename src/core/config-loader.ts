@@ -120,6 +120,7 @@ export interface ConfigFile {
     pollInterval?: number;
     logDir?: string;
     client?: 'doubao-work' | 'doubao';
+    includeConversationIds?: string[];
   }>;
 
   retention?: {
@@ -807,6 +808,7 @@ function buildListenersConfig(
     'qwen-work-cn-trace': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'qwen-work-cn-hook': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'qwen-work-cn-sqlite': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwen-work-cn-collaboration': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'cursor-hook': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'claude-code-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'grok-build-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
@@ -829,6 +831,17 @@ function buildListenersConfig(
         pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
         ...(key === 'doubao-work' ? resolveDoubaoWorkSource(val) : {}),
       };
+      if (key === 'qwen-work-cn-collaboration' && Object.hasOwn(val, 'includeConversationIds')) {
+        const ids: unknown = val.includeConversationIds;
+        if (!Array.isArray(ids) || ids.length > 1000 || ids.some(id =>
+          typeof id !== 'string' || id.trim() === '' || id.length > 512)) {
+          // Invalid restrictions must never widen the collection scope.
+          logger.warn('Invalid Qwen Work collaboration conversation allowlist; collecting no conversations');
+          result[key].includeConversationIds = [];
+        } else {
+          result[key].includeConversationIds = [...new Set(ids.map(id => id.trim()))];
+        }
+      }
       if (key === 'doubao-work' && val.client !== undefined && val.client !== 'doubao' && val.client !== 'doubao-work') {
         logger.warn('Invalid Doubao client; disabling this listener', {
           valueType: typeof val.client,

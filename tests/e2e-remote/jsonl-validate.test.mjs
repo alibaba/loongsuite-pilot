@@ -208,6 +208,38 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     expect(r.out).toMatch(/category=missing_required fields=\[user\.id\]/);
   });
 
+  it('allows a provider-less agent-turn observation but still requires it for model and tool data', () => {
+    const common = { 'gen_ai.agent.type': 'synthetic-agent', 'gen_ai.turn.id': 'turn-1',
+      'gen_ai.provider.name': undefined, 'loongsuite.observation.scope': 'agent_turn' };
+    const validate = () => runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_AGENT_FILTER: 'synthetic-agent', E2E_JSONL_STRICT: '1' });
+    const records = [
+      graphEntry('start', 'other', { ...common, 'gen_ai.turn.start': true }),
+      graphEntry('input', 'agent.input', common),
+      graphEntry('end', 'other', { ...common, 'gen_ai.turn.end': true }),
+    ];
+    writeJsonl('synthetic-agent.jsonl', records);
+    expect(validate().code).toBe(0);
+    for (const invalid of [
+      graphEntry('invalid', 'other', common),
+      graphEntry('invalid', 'other', { ...common, 'gen_ai.turn.start': true, 'loongsuite.observation.scope': undefined }),
+      graphEntry('invalid', 'llm.request', common),
+      graphEntry('invalid', 'tool.call', { ...common, 'gen_ai.tool.name': 'Read', 'gen_ai.tool.call.id': 'call' }),
+      graphEntry('invalid', 'other', { ...common, 'gen_ai.turn.start': true, 'gen_ai.request.model': 'fixture-model' }),
+      graphEntry('invalid', 'agent.input', { ...common, 'gen_ai.usage.input_tokens': 3 }),
+    ]) {
+      writeJsonl('synthetic-agent.jsonl', [invalid]);
+      const result = validate();
+      expect(result.code).toBe(1);
+      expect(result.out).toMatch(/category=missing_required fields=\[gen_ai\.provider\.name\]/);
+    }
+    writeJsonl('synthetic-agent.jsonl', [
+      graphEntry('invalid-scope', 'llm.request', { ...common, 'gen_ai.provider.name': 'fixture-provider' }),
+    ]);
+    const invalidScope = validate();
+    expect(invalidScope.code).toBe(1);
+    expect(invalidScope.out).toContain('invalid_observation_scope=1');
+  });
+
   it('honors E2E_JSONL_AGENT_FILTER', () => {
     writeJsonl('claude-2026-05-11.jsonl', [goodEntry()]);
     writeJsonl('codex-2026-05-11.jsonl', [{ ...goodEntry(), 'event.name': undefined }]);
