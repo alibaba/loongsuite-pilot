@@ -171,4 +171,4 @@ SLS 是远端输出目标。敏感环境中开启前，请先配置[数据脱敏
 
 `__tag__:__mac__` 和 `__source__` 用的是同一块网卡：采集进程启动时，取 `os.networkInterfaces()` 里第一块非回环 IPv4。全零 MAC 不写这个标签。
 
-`__tag__:__sn__` 来自安装时写入 `config.json` 的 `hostSn`。macOS 安装脚本读 `ioreg`，Linux 读 DMI 文件，Windows 安装脚本读 CIM。Linux 上这些文件通常只有 root 能读，读不到就不写该字段。占位符和超过 128 字节的值也不写。配置里没有 `hostSn` 就没有这个标签。删掉之后不再上报；下次安装或升级如果还能读到，会再写回去。`hostIdentityTags` 设为 `false` 时，主采集和 Qoder 都不带这两个标签。脱敏不会去掉它们。
+`__tag__:__sn__` 来自安装时写入 `config.json` 的 `hostSn`。macOS 安装脚本读 `ioreg`，Linux 读 DMI 文件，Windows 安装脚本读 CIM。Linux 上这些文件通常只有 root 能读，读不到就不写该字段。占位符和超过 128 字节的值也不写。配置里没有 `hostSn` 就没有这个标签。删掉之后不再上报。再次执行安装时如果还能读到，会再写回去。普通升级保留已有配置，不会补写。`hostIdentityTags` 设为 `false` 时，主采集和 Qoder 都不带这两个标签。脱敏不会去掉它们。

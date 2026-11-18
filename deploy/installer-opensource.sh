@@ -1184,7 +1184,7 @@ write_config() {
         uname_s=$(uname -s 2>/dev/null || true)
         if [ "$uname_s" = "Darwin" ]; then
             raw=""
-            raw_file=$(mktemp 2>/dev/null || printf '%s' "/tmp/lp-host-sn.$$")
+            raw_file=$(mktemp 2>/dev/null) || return 0
             if run_bounded 5 "$raw_file" ioreg -rd1 -c IOPlatformExpertDevice; then
                 raw=$(tr -d '\r' < "$raw_file" 2>/dev/null || true)
             fi

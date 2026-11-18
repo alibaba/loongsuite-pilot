@@ -51,6 +51,8 @@ describe('installer host serial', () => {
     expect(sh).not.toContain('host-identity.cjs');
     expect(sh).toContain('ioreg -rd1 -c IOPlatformExpertDevice');
     expect(sh).toContain('run_bounded 5');
+    expect(sh).toContain('raw_file=$(mktemp 2>/dev/null) || return 0');
+    expect(sh).not.toContain('/tmp/lp-host-sn.$$');
     expect(sh).toContain('/sys/class/dmi/id/product_serial');
     expect(sh).toContain('/sys/class/dmi/id/board_serial');
     expect(sh).toContain('/sys/class/dmi/id/chassis_serial');
