@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
-import { copyFile, mkdir } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { collectFileManifest } from './scripts/hook-asset-manifest.mjs';
 
@@ -188,7 +189,7 @@ if (process.platform === 'darwin') {
   }
 }
 
-runtimeAssetManifest = await collectFileManifest(path.resolve('dist'), new Set(['index.js']));
+runtimeAssetManifest = await collectFileManifest(path.resolve('dist'), new Set(['index.js', 'index.sha256']));
 await build({
   entryPoints: ['src/index.ts'],
   outfile: 'dist/index.js',
@@ -208,3 +209,7 @@ await build({
   define: commonDefine,
   plugins: commonPlugins,
 });
+
+const indexPath = path.resolve('dist/index.js');
+const indexHash = createHash('sha256').update(await readFile(indexPath)).digest('hex');
+await writeFile(path.resolve('dist/index.sha256'), `${indexHash}\n`);

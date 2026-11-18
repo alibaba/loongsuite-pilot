@@ -1155,6 +1155,62 @@ describe('HookWatchdog', () => {
       expect(await fs.readFile(processor, 'utf8')).toBe('export const x = 2;\n');
     });
 
+    async function writeCollectorIndex(pilotDir: string, text: string, hash = hashText(text)): Promise<void> {
+      const dist = path.join(pilotDir, 'dist');
+      await fs.mkdir(dist, { recursive: true });
+      await fs.writeFile(path.join(dist, 'index.js'), text);
+      await fs.writeFile(path.join(dist, 'index.sha256'), `${hash}\n`);
+    }
+
+    it('does not ask for a redeploy when index.js matches dist/index.sha256', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const relativePath = 'updater/index.js';
+      const good = 'export const version = 1;\n';
+      const file = path.join(pilotDir, 'dist', relativePath);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, good);
+      await writeCollectorIndex(pilotDir, 'export const collector = 1;\n');
+      setRuntimeManifest({ [relativePath]: hashText(good) });
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      await expect(fs.readFile(path.join(dataDir, 'runtime-redeploy-requested'), 'utf8')).rejects.toThrow();
+    });
+
+    it('asks for a redeploy when index.js does not match dist/index.sha256', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const relativePath = 'updater/index.js';
+      const good = 'export const version = 1;\n';
+      const file = path.join(pilotDir, 'dist', relativePath);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, good);
+      const collector = 'export const collector = 1;\n';
+      await writeCollectorIndex(pilotDir, 'tampered\n', hashText(collector));
+      setRuntimeManifest({ [relativePath]: hashText(good) });
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(path.join(pilotDir, 'dist', 'index.js'), 'utf8')).toBe('tampered\n');
+      expect((await fs.readFile(path.join(dataDir, 'runtime-redeploy-requested'), 'utf8')).trim()).toMatch(/^\d+$/);
+    });
+
+    it('asks for a redeploy when dist/index.sha256 is missing', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const relativePath = 'updater/index.js';
+      const good = 'export const version = 1;\n';
+      const file = path.join(pilotDir, 'dist', relativePath);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, good);
+      setRuntimeManifest({ [relativePath]: hashText(good) });
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect((await fs.readFile(path.join(dataDir, 'runtime-redeploy-requested'), 'utf8')).trim()).toMatch(/^\d+$/);
+    });
+
     it('asks the updater to redeploy when a runtime file was changed', async () => {
       const { pilotDir, dataDir } = await installAssets();
       const relativePath = 'updater/index.js';

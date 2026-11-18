@@ -448,8 +448,8 @@ export class HookWatchdog {
 
   /** Restore built runtime files whose bytes no longer match RUNTIME_ASSET_MANIFEST. */
   private async restoreRuntimeAssets(pilotDir: string, dataDir: string): Promise<void> {
-    const listed = Object.keys(RUNTIME_ASSET_MANIFEST);
-    if (listed.length === 0) return;
+    const expected: Record<string, string> = { ...RUNTIME_ASSET_MANIFEST };
+    if (Object.keys(expected).length === 0) return;
     const controlDir = getControlDir(pilotDir, dataDir);
     const root = path.join(pilotDir, 'dist');
     if (await upgradeBlocksRepair(pilotDir, dataDir)) {
@@ -460,18 +460,29 @@ export class HookWatchdog {
       await this.requestRuntimeRedeploy(controlDir, root);
       return;
     }
+    const indexHash = await this.readCollectorIndexHash(root);
+    if (indexHash) expected['index.js'] = indexHash;
+    else await this.requestRuntimeRedeploy(controlDir, 'index.js');
 
-    for (const relativePath of listed) {
+    for (const relativePath of Object.keys(expected)) {
       if (await upgradeBlocksRepair(pilotDir, dataDir)) {
         logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
         return;
       }
       try {
-        await this.restoreRuntimeFile(controlDir, root, relativePath, RUNTIME_ASSET_MANIFEST[relativePath]);
+        await this.restoreRuntimeFile(controlDir, root, relativePath, expected[relativePath]);
       } catch (err) {
         logger.error('hook-watchdog.repair-failed', { action: 'runtime-asset', path: relativePath, error: String(err) });
       }
     }
+  }
+
+  /** dist/index.sha256 holds the hex SHA-256 of dist/index.js. */
+  private async readCollectorIndexHash(root: string): Promise<string | null> {
+    const filePath = path.join(root, 'index.sha256');
+    if ((await this.classifyPath(filePath)).kind !== 'file') return null;
+    const text = (await fs.readFile(filePath, 'utf8')).trim().toLowerCase();
+    return /^[0-9a-f]{64}$/.test(text) ? text : null;
   }
 
   /** A built file that is missing or hashed differently is handed to the updater. */
