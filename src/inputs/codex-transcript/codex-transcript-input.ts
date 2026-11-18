@@ -603,7 +603,7 @@ export class CodexTranscriptInput extends BaseInput {
     try {
       const stat = await fs.stat(filePath);
       const stamps = [stat.birthtimeMs, stat.mtimeMs].filter(ms => ms > 0);
-      return stamps.length > 0 && Math.min(...stamps) < this.baselinePendingSince;
+      return stamps.length > 0 && Math.floor(Math.min(...stamps)) <= this.baselinePendingSince;
     } catch {
       return false;
     }

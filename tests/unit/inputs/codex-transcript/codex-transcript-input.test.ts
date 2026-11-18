@@ -1060,6 +1060,26 @@ describe('CodexTranscriptInput', () => {
     }
   });
 
+  it('baselines a session written in the same millisecond as startup', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-same-ms-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const transcript = await writeTranscript(sessionDir, completedTurn().replaceAll('turn-1', 'turn-same-ms'));
+    const stat = await fs.stat(transcript);
+    const earliest = Math.min(...[stat.birthtimeMs, stat.mtimeMs].filter(ms => ms > 0));
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Math.floor(earliest));
+    const { input, entries, stateStore } = await createDormantInput(root);
+    try {
+      await input.start();
+      await runInputCycle(input);
+      expect(responsesForTurn(entries, 'turn-same-ms')).toEqual([]);
+      expect(transcriptCheckpoint(stateStore, transcript).scanOffset).toBe(stat.size);
+    } finally {
+      now.mockRestore();
+      await input.stop();
+    }
+  });
+
   it('collects a session created while the first scan is still reading', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-scan-race-'));
     tempDirs.push(root);
