@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { JsonObject, MulticaInputConfig, MulticaRecord } from './types.js';
 import { logDiagnostics } from './log-diagnostics.js';
+import { podScopedSource } from './pod-labels.js';
 
 export const SCALAR_FIELDS = new Set(`workspace_id project_id issue_id task_id agent_id runtime_id daemon_id
   status status_category priority assignee_type assignee_id parent_issue_id parent_task_id
@@ -102,17 +103,20 @@ export function snapshot(recordType: string, value: unknown, extra: MulticaRecor
   return out;
 }
 
-export function envelope(input: MulticaInputConfig, source: string, observed: number, record: MulticaRecord, identity?: string): MulticaRecord {
+export function envelope(input: MulticaInputConfig, source: string, observed: number, record: MulticaRecord, identity?: string,
+  podLabels: MulticaRecord = {}): MulticaRecord {
   const agentId = record.agent_id ?? (record.assignee_type === 'agent' ? record.assignee_id : undefined);
   const evidence = agentId && Object.prototype.hasOwnProperty.call(input.AgentEvidence ?? {}, agentId)
     ? input.AgentEvidence![agentId] : undefined;
+  const scopedSource = podScopedSource(source, podLabels);
   const result: MulticaRecord = {
     schema_version: 'multica.v1', instance: safeScalar(input.Instance) ?? 'multica',
     environment: safeScalar(input.Environment) ?? '', namespace: safeScalar(input.Namespace) ?? '',
     evidence_kind: input.EvidenceKind ?? 'observed', test_case: safeScalar(input.TestCase) ?? '',
     observed_at: new Date(observed).toISOString(), observed_at_ms: String(observed), source_name: source,
-    snapshot_id: digest(`${source}\0${observed}`).slice(0, 24),
+    snapshot_id: digest(`${scopedSource}\0${observed}`).slice(0, 24),
     ...record,
+    ...podLabels,
   };
   if (input.AgentEvidence) {
     // Rules are explicit experiment metadata, never inferred from the error text.
@@ -124,6 +128,6 @@ export function envelope(input: MulticaInputConfig, source: string, observed: nu
     const age = observed - Date.parse(base ?? '');
     if (Number.isFinite(age) && age >= 0) result[record.status === 'running' ? 'run_age_ms' : 'queue_age_ms'] = String(age);
   }
-  result.event_id = digest(`${result.instance}\0${source}\0${identity ?? `${observed}\0${JSON.stringify(record)}`}`);
+  result.event_id = digest(`${result.instance}\0${scopedSource}\0${identity ?? `${observed}\0${JSON.stringify(record)}`}`);
   return result;
 }

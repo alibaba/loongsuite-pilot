@@ -9,6 +9,7 @@ import { sendMulticaRecords } from './sender.js';
 import { errorKind } from './http.js';
 import { MulticaActivationGate, type MulticaActivationResult, type MulticaCollectionMode } from './activation.js';
 import { digest, envelope } from './records.js';
+import { sourcePodLabels } from './pod-labels.js';
 import { collectPprof } from './pprof.js';
 import { collectApi, collectDaemonHealth, collectFileStat, collectLog, collectMetrics, type ApiSource } from './sources.js';
 import { validateMulticaConfig, type CollectionResult, type MulticaInputConfig, type MulticaRecord, type SourceCheckpoint } from './types.js';
@@ -187,6 +188,7 @@ export class MulticaPipeline implements Pipeline {
 
   private async source(name: string, collect: () => Promise<CollectionResult>): Promise<boolean> {
     const observed = Date.now();
+    const labels = sourcePodLabels(this.input, name);
     const pendingPath = path.join(this.spoolDir, `${digest(name)}.json`);
     try {
       let pending: PendingBatch;
@@ -199,11 +201,11 @@ export class MulticaPipeline implements Pipeline {
         const rows = result.records.map(row => {
           const identity = row.log_identity;
           const record = {...row}; delete record.log_identity;
-          return envelope(this.input, name, observed, record, identity);
+          return envelope(this.input, name, observed, record, identity, labels);
         });
         rows.push(envelope(this.input, name, observed, {record_type: 'collection_status', source_type: 'collector',
           success: 'true', record_count: String(result.records.length), truncated: String(result.truncated ?? false),
-          duration_ms: String(Date.now() - observed), entity_id: name}));
+          duration_ms: String(Date.now() - observed), entity_id: name}, undefined, labels));
         pending = {records: rows, checkpoint: result.checkpoint};
         // A durable, sanitized batch makes retries across process restarts use identical IDs.
         await writeJsonFile(pendingPath, pending);
@@ -218,7 +220,7 @@ export class MulticaPipeline implements Pipeline {
       logger.warn('source collection failed', {source: name, error_kind: kind});
       try {
         await this.send([envelope(this.input, name, observed, {record_type: 'collection_status', source_type: 'collector',
-          success: 'false', error_kind: kind, duration_ms: String(Date.now() - observed), entity_id: name})]);
+          success: 'false', error_kind: kind, duration_ms: String(Date.now() - observed), entity_id: name}, undefined, labels)]);
       } catch { /* The pending source batch remains on disk until SLS accepts it. */ }
       return false;
     }

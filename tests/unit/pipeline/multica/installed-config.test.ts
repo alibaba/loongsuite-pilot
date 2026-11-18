@@ -133,11 +133,11 @@ async function installConfig(apiKey = 'test-installer-api-key', collectionMode?:
   return loadConfig();
 }
 
-async function collectInstalledConfig() {
+async function collectInstalledConfig(collectorStateDir = stateDir) {
   const config = await loadConfig();
   logger.info.mockClear();
   manager = new PipelineManager({
-    configDir, stateDir, failedLogDir: path.join(directory, 'failed'), dataDir: directory,
+    configDir, stateDir: collectorStateDir, failedLogDir: path.join(directory, 'failed'), dataDir: directory,
     pipelineConfig: config.pipeline, sls: config.flushers.sls,
   });
   await manager.start();
@@ -152,6 +152,31 @@ async function collectInstalledConfig() {
 }
 
 describe('Multica inherits installer SLS configuration', () => {
+  it('distinguishes two local scrape targets in delivered records while keeping task snapshots workspace scoped', async () => {
+    await installConfig('test-key', 'on');
+    const inputFile = path.join(configDir, 'multica.json');
+    const pipeline = JSON.parse(await readFile(inputFile, 'utf8'));
+    Object.assign(pipeline.inputs[0], {ApiBase: endpoint, WorkspaceIds: ['workspace-a'], TokenEnv: 'MULTICA_REPLICA_TEST_TOKEN'});
+    await writeFile(inputFile, JSON.stringify(pipeline));
+    vi.stubEnv('MULTICA_REPLICA_TEST_TOKEN', 'test-token');
+    tasks = [{id: 'shared-task', status: 'running'}];
+    for (const [pod, ip] of [['backend-a', '10.1.1.3'], ['backend-b', '10.1.1.4']]) {
+      vi.stubEnv('POD_NAME', pod);
+      vi.stubEnv('POD_UID', pod + '-uid');
+      vi.stubEnv('POD_IP', ip);
+      await collectInstalledConfig(path.join(stateDir, pod));
+    }
+    const delivered = records(writes);
+    const samples = delivered.filter(row => row.metric_name === 'multica_task_total');
+    expect(samples.map(row => [row.instance, row.pod_name, row.pod_uid, row.pod_ip])).toEqual([
+      ['multica-installer-test', 'backend-a', 'backend-a-uid', '10.1.1.3'],
+      ['multica-installer-test', 'backend-b', 'backend-b-uid', '10.1.1.4'],
+    ]);
+    const taskRows = delivered.filter(row => row.task_id === 'shared-task');
+    expect(new Set(taskRows.map(row => row.collector_pod_name))).toEqual(new Set(['backend-a', 'backend-b']));
+    expect(taskRows.every(row => !row.pod_name && row.workspace_id === 'workspace-a')).toBe(true);
+  });
+
   it.each(['', '\n', '\r\n'])('redacts complete private tails before pending storage and real HTTP delivery (%j)', async separator => {
     await installConfig('test-installer-api-key', 'on');
     const error = `execution failed prompt="PRIVATE_FIRST${separator}PRIVATE_SECOND"`;

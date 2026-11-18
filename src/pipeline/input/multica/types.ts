@@ -28,6 +28,10 @@ export interface MulticaInputConfig {
   MaxLineBytes?: number;
   UsageDays?: number;
   Instance?: string;
+  /** Collector Pod identity. Defaults to POD_NAME, POD_UID, POD_IP from Kubernetes Downward API. */
+  PodName?: string;
+  PodUid?: string;
+  PodIp?: string;
   Environment?: string;
   Namespace?: string;
   CollectEntityNames?: boolean;
@@ -46,6 +50,8 @@ export interface SourceCheckpoint {
   signature?: string;
   signatureSize?: number;
   discardPartial?: boolean;
+  /** Validated bridge header when a read ends before the source line is complete. */
+  logFrame?: string;
   entityIds?: string[];
   pprofNextCaptureAtMs?: number;
 }

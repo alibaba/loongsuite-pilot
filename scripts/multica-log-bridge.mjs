@@ -31,7 +31,7 @@ export async function readActivationPermit(file, now = Date.now()) {
 }
 
 // Kubernetes log timestamps retain the date missing from Multica's tint output.
-export function freshLines(body, cursor = { time: '', counts: {} }) {
+export function freshLines(body, cursor = { time: '', counts: {} }, format = line => line) {
   // Older checkpoints only establish one known occurrence per hash.
   const previousCounts = new Map(cursor.counts
     ? Object.entries(cursor.counts)
@@ -55,14 +55,39 @@ export function freshLines(body, cursor = { time: '', counts: {} }) {
     // A bounded replay may contain fewer old occurrences; never lower its checkpoint.
     if (time === latest) latestCounts.set(hash, Math.max(latestCounts.get(hash) ?? 0, count));
     if (time === cursor.time && count <= (previousCounts.get(hash) ?? 0)) continue;
-    lines.push(line);
+    lines.push(format(line, hash, count));
   }
   return { lines, cursor: { time: latest, counts: Object.fromEntries(latestCounts) } };
+}
+
+// Frame the original timestamped line without escaping or modifying its body.
+// The identity survives overlapping bridges, including separate occurrences
+// of exactly the same line at the same Kubernetes timestamp.
+export function podLogFormatter(pod, container) {
+  const {uid, name} = pod.metadata;
+  const prefix = ['@multica-k8s-v1', uid, name, pod.status?.podIP ?? '', container].join('\t');
+  return (line, hash, occurrence) => {
+    const id = crypto.createHash('sha256').update(`${uid}\0${container}\0${hash}\0${occurrence}`).digest('hex');
+    return `${prefix}\t${id}\t${line}`;
+  };
+}
+
+export function podListPath(namespace, podSelector, scope, podName) {
+  if (!namespace || !podSelector) throw new Error('NAMESPACE and POD_LABEL_SELECTOR are required for log collection');
+  const query = new URLSearchParams({labelSelector: podSelector});
+  if (scope === 'pod') {
+    if (!podName || !/^[a-z0-9][a-z0-9.-]*$/.test(podName)) throw new Error('Pod-scoped log collection requires POD_NAME');
+    query.set('fieldSelector', `metadata.name=${podName}`);
+  } else if (scope !== 'namespace') {
+    throw new Error('MULTICA_LOG_SCOPE must be pod or namespace');
+  }
+  return `/api/v1/namespaces/${encodeURIComponent(namespace)}/pods?${query}`;
 }
 
 async function main() {
   const namespace = process.env.NAMESPACE;
   const podSelector = process.env.POD_LABEL_SELECTOR;
+  const scope = process.env.MULTICA_LOG_SCOPE ?? 'namespace';
   const containerNames = new Set((process.env.MULTICA_LOG_CONTAINERS || 'backend,daemon').split(',').map(name => name.trim()).filter(Boolean));
   const directory = process.env.LOG_DIRECTORY || '/logs';
   const credentials = process.env.KUBE_CREDENTIAL_DIRECTORY || '/var/run/collector-kube';
@@ -103,7 +128,7 @@ async function main() {
   while (!stopped) {
     try {
       if (await allowed()) {
-        if (!namespace || !podSelector) throw new Error('NAMESPACE and POD_LABEL_SELECTOR are required for log collection');
+        const listPath = podListPath(namespace, podSelector, scope, process.env.POD_NAME);
         if (!initialized) {
           await fs.mkdir(directory, { recursive: true });
           try { state = JSON.parse(await fs.readFile(statePath, 'utf8')); } catch (error) {
@@ -111,9 +136,8 @@ async function main() {
           }
           initialized = true;
         }
-        const selector = encodeURIComponent(podSelector);
         const namespacePath = encodeURIComponent(namespace);
-        const pods = JSON.parse(await request(`/api/v1/namespaces/${namespacePath}/pods?labelSelector=${selector}`));
+        const pods = JSON.parse(await request(listPath));
         for (const pod of pods.items ?? []) {
           for (const container of pod.spec.containers.filter(c => containerNames.has(c.name))) {
             try {
@@ -124,16 +148,17 @@ async function main() {
               if (cursor?.time) query.set('sinceTime', cursor.time);
               else query.set('tailLines', '1000');
               const body = await request(`/api/v1/namespaces/${namespacePath}/pods/${encodeURIComponent(pod.metadata.name)}/log?${query}`);
-              const result = freshLines(body, cursor);
+              const result = freshLines(body, cursor, podLogFormatter(pod, container.name));
               if (body.length && !body.includes('\n')) {
                 throw new Error('Log record exceeds bridge chunk size; source requires manual backfill');
               }
               const file = path.join(directory, `${container.name}.log`);
               const size = await fs.stat(file).then(s => s.size).catch(e => e.code === 'ENOENT' ? 0 : Promise.reject(e));
-              if (size + Buffer.byteLength(result.lines.join('\n')) > 128 * 1024 * 1024) {
+              const addition = result.lines.length ? result.lines.join('\n') + '\n' : '';
+              if (size + Buffer.byteLength(addition) > 128 * 1024 * 1024) {
                 throw new Error('Log spool full; archive and restart bridge after collector catches up');
               }
-              if (result.lines.length) await fs.appendFile(file, result.lines.join('\n') + '\n', { mode: 0o600 });
+              if (addition) await fs.appendFile(file, addition, { mode: 0o600 });
               state[stream] = result.cursor;
               await fs.writeFile(statePath + '.tmp', JSON.stringify(state), { mode: 0o600 });
               await fs.rename(statePath + '.tmp', statePath);

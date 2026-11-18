@@ -119,6 +119,15 @@ describe('profile HTTP reads and delivery', () => {
     }
     expect(urls).toEqual(['/debug/pprof/profile?seconds=30', '/debug/pprof/allocs?seconds=10']);
   });
+  it('separates identical CPU profiles from two local target Pods', async () => {
+    const cpu = await fixture('cpu');
+    const base = await server((_req, res) => { res.end(cpu); });
+    const a = await collectPprof({...input, PprofBaseUrl: base, PodUid: 'uid-a'}, 'cpu');
+    const b = await collectPprof({...input, PprofBaseUrl: base, PodUid: 'uid-b'}, 'cpu');
+    expect(a.records[0].profile_end_ms).toBe(b.records[0].profile_end_ms);
+    expect(a.records[0].profile_sha256).toBe(b.records[0].profile_sha256);
+    expect(a.records[0].profile_id).not.toBe(b.records[0].profile_id);
+  });
   it('rejects redirects and oversized binary responses', async () => {
     const base = await server((req, res) => {
       if (req.url!.includes('/profile')) { res.writeHead(302, {Location: 'http://example.invalid/'}); res.end(); }

@@ -80,6 +80,22 @@ export LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE=off  # 关闭
 
 记录采用 `schema_version=multica.v1`，以 instance/workspace/entity 和 task/issue/agent/runtime ID 关联。SLS 字段按字符串发送，数值分析需配置 long/double 索引；`observed_at` 表示采集时间，来源时间另存。
 
+在 Kubernetes 中，给采集器容器注入以下环境变量。同一部署的副本共用稳定的 `Instance` 值，查询用 `pod_uid` 区分副本，用 `pod_name`、`pod_ip` 提供筛选。
+
+```yaml
+env:
+  - name: POD_NAME
+    valueFrom: {fieldRef: {fieldPath: metadata.name}}
+  - name: POD_UID
+    valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+  - name: POD_IP
+    valueFrom: {fieldRef: {fieldPath: status.podIP}}
+```
+
+本 Pod 的 metrics、health 和 pprof 使用来源 Pod 标签。通过 Service 采集远端端点时，采集器只能确定自己的身份，记录在 `collector_pod_*` 字段。工作区业务快照也采用采集器身份，按 workspace 和业务实体统计。Kubernetes 日志桥从被读取的 Pod 取得来源标签、`container_name` 和稳定的 `log_event_id`；多个桥读取到同一次日志时，可用后者去重。历史无标签记录可纳入全部来源的查询，按具体 Pod 下钻时仅选有对应标签的记录。
+
+Prometheus 查询应按部署、来源 Pod 和指标标签分别对 Counter 求增量，再跨 Pod 求和。计算集群 P95 时先合并相同桶边界的增量。Gauge 在每个时间桶先取各 Pod 的最新值，再根据指标语义汇总。SLS 字段索引需为用到的 Pod 标签和日志标识启用统计。
+
 每源先原子保存过滤后的批次到 `<stateDir>/<configName>.<destinationHash>.multica-pending/`，收到 SLS ACK 后再推进 checkpoint 并删除批次。checkpoint 与待发批次均按 Endpoint、Project、Logstore 隔离，切换目标从新状态开始，不将旧批次重放到新目标；改回原目标可继续其待发批次。旧版不含目标标识的状态文件保留在磁盘，但不会自动采用，升级后日志可能重新采集。重试沿用 event_id，分包部分成功时可能重复，查询需按 event_id 去重。StateDir 应持久化，不能由两个进程共用同一 configName/stateDir。
 
 默认超时 10 秒，每页 100 条、最多 10 页，单响应最多 4 MiB，每轮日志最多 1 MiB，单行最多 16 KiB。达到分页上限标记 `truncated=true`，响应超限记录 `response_too_large`；各源独立处理错误。轮询串行执行，不重叠。超长日志行会丢弃并计数，轮转时不保证补采已移走文件的未读尾部。
@@ -110,7 +126,7 @@ Prometheus counter 要处理相邻采样差分与进程重启；histogram bucket
 
 每种 profile 默认 15 分钟一次，间隔可设 300–86400 秒；CPU 采样 1–60 秒，allocs 采样 1–30 秒。采样在常规业务采集后串行执行，采样当轮会增加约 40 秒耗时；不与另一采样轮重叠。失败后按 60/120/240/300 秒退避。端点有超时、压缩与解压后大小限制，默认各 16 MiB，可用 `PprofMaxBytes` 调低。只保留栈帧及权重，不上传 profile 的任意标签和注释；原始二进制不落盘。
 
-输出为 `pprof_profile_chunk`：每段最多 1800 ASCII 字节，按 `profile_id`、`profile_part_index` 拼接得到 Flamebearer JSON，可用于 SLS 火焰图。`profile_sha256` 校验完整性；查询应仅采用段数完整的 profile，并按 `profile_end_ms` 选择最新一次。`profile_total/profile_unit` 对 CPU 是采样次数，对 allocs 是采样窗口内估算分配字节；不代表存活内存或泄漏。`profile_metadata_source` 标明时间来自原生 pprof 或采集器时钟，版本和 Pod 由上述显式配置提供。
+输出为 `pprof_profile_chunk`：每段最多 1800 ASCII 字节，按 `profile_id`、`profile_part_index` 拼接得到 Flamebearer JSON，可用于 SLS 火焰图。`profile_sha256` 校验完整性；查询应仅采用段数完整的 profile，并按 `profile_end_ms` 选择最新一次。`profile_total/profile_unit` 对 CPU 是采样次数，对 allocs 是采样窗口内估算分配字节；不代表存活内存或泄漏。`profile_metadata_source` 标明时间来自原生 pprof 或采集器时钟，版本来自显式配置，本地 profile 的 Pod 默认取自 Downward API，也可通过 `PprofPodName` 指定目标。
 
 成功送达 SLS 后持久化下次采样时间；发送失败复用已有批次，不重复抓取。同样需要持久化 StateDir。pprof 没有样本时如实报告零权重，不生成虚假栈；旧版端点不支持增量 allocs、没有采样时长时报告 `pprof_missing_interval`。启用后需要为 `profile_*`、`source_version`、`pod_name` 配置 SLS 字段索引。
 
@@ -137,3 +153,5 @@ node scripts/multica-log-bridge.mjs
 ```
 
 桥接器仅在启用状态未过期时拉取日志；缺失、关闭或过期时空闲。启用状态每 10 秒续约、有效期 30 秒，停采时立即关闭，在途请求可以结束。
+
+已有单个日志桥覆盖 namespace 时，可继续使用其 Pod selector。每个源 Pod 均部署了自己的日志桥时，可设置 `MULTICA_LOG_SCOPE=pod`，并给日志桥注入 `POD_NAME`，使它只读取本 Pod。若 daemon 独立部署，也需要由对应的日志桥覆盖。
