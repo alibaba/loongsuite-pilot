@@ -174,11 +174,14 @@ export class Orchestrator extends EventEmitter {
   private acpCorrelateRetentionService?: AcpCorrelateRetentionService;
   private legacySlsFailedLogCleanupService: LegacySlsFailedLogCleanupService | null = null;
   private hookWatchdog!: HookWatchdog;
+  private hookWatchdogTargetKey = '';
   private deploymentScope: DeploymentScopeMode = 'auto';
   /** Agents a named install actually wrote. Raced deployAll records are not in this set. */
   private recordedAgentIds = new Set<string>();
   private hookInstallSignalTimer: ReturnType<typeof setInterval> | null = null;
   private hookInstallSignalMtime = 0;
+  private hookInstallSignalEpoch = 0;
+  private hookInstallSignalPoll: Promise<void> | null = null;
   private readonly relayedHookInstallAlarms = new Set<string>();
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
@@ -351,16 +354,7 @@ export class Orchestrator extends EventEmitter {
     // Build the watchdog immediately after deployment so its constructor records
     // the exact post-deploy Codex config.toml fingerprint. The watchdog itself is
     // started later, after discovery and retention services are ready.
-    const hookWatchdogTargets = this.buildHookWatchdogTargets();
-    const interceptTargets = [
-      ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id) && this.scopeAllows(id)),
-      ...this.buildGrokBuildInterceptTargets(),
-      ...this.buildPluginInjectInterceptTargets(),
-      ...this.buildDirectoryPluginInterceptTargets(),
-      ...this.buildCopilotPluginInterceptTargets(),
-      ...this.buildDshYamlPatchInterceptTargets(),
-    ];
-    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
+    this.hookWatchdog = this.createHookWatchdog();
 
     this.localWorkerActivationService = new LocalWorkerActivationService({
       dataDir: this.dataDir,
@@ -420,6 +414,7 @@ export class Orchestrator extends EventEmitter {
         failedLogDir: path.join(this.dataDir, 'logs', 'pipeline-failed'),
         dataDir: this.dataDir,
         pipelineConfig: this.config.pipeline,
+        sls: this.config.flushers.sls,
         workspacePolicy,
       });
       await this.pipelineManager.start();
@@ -555,6 +550,11 @@ export class Orchestrator extends EventEmitter {
     if (!this.isRunning) return;
     logger.info('stopping orchestrator');
 
+    // Cancel signal work before the first shutdown await. An old poll may be
+    // waiting on deployment I/O and must never restart the stopped watchdog.
+    this.hookWatchdog?.stop();
+    await this.stopHookInstallSignalWatch();
+
     await this.pipelineManager?.stop();
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(err => {
       logger.warn('status bar app stop failed during orchestrator shutdown', { error: String(err) });
@@ -569,10 +569,8 @@ export class Orchestrator extends EventEmitter {
     this.verdictStore = null;
     await this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
-    this.stopHookInstallSignalWatch();
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
-    this.hookWatchdog?.stop();
     this.legacySlsFailedLogCleanupService?.stop();
     this.legacySlsFailedLogCleanupService = null;
     this.logRetentionService?.stop();
@@ -629,13 +627,14 @@ export class Orchestrator extends EventEmitter {
     return this.recordedAgentIds.has(agentId);
   }
 
-  private async refreshDeploymentScope(): Promise<void> {
+  private async refreshDeploymentScope(cancelled: () => boolean = () => false): Promise<void> {
     const result = await readJsonFile<HookInstallReport>(hookInstallResultPath(this.dataDir));
+    if (cancelled()) return;
     this.deploymentScope = resolveDeploymentScope(readContainerIdentity(), result);
     this.recordedAgentIds = this.deploymentScope === 'recorded'
       ? this.allowListForRecorded(result)
       : new Set();
-    await this.relayHookInstallAlarm(result);
+    await this.relayHookInstallAlarm(result, cancelled);
   }
 
   /** Named successes, plus image-build records. Daemon records from a raced deployAll stay out. */
@@ -650,8 +649,8 @@ export class Orchestrator extends EventEmitter {
     return allowed;
   }
 
-  private async relayHookInstallAlarm(result: HookInstallReport | null): Promise<void> {
-    if (!shouldRelayHookInstallAlarm(result, this.relayedHookInstallAlarms) || !result) return;
+  private async relayHookInstallAlarm(result: HookInstallReport | null, cancelled: () => boolean = () => false): Promise<void> {
+    if (cancelled() || !shouldRelayHookInstallAlarm(result, this.relayedHookInstallAlarms) || !result) return;
     const marked = await markHookInstallAlarmSent(hookInstallResultPath(this.dataDir), result.ts);
     if (marked === 'stale') return;
     this.relayedHookInstallAlarms.add(hookInstallAlarmKey(result));
@@ -670,9 +669,10 @@ export class Orchestrator extends EventEmitter {
    * successes in the result file, so those ids stay in the allow list and are
    * not uninstalled. Build records are in the allow list as well.
    */
-  private async reconcileRecordedAgents(): Promise<void> {
+  private async reconcileRecordedAgents(cancelled: () => boolean = () => false): Promise<void> {
     if (this.deploymentScope !== 'recorded') return;
     for (const def of this.deploymentManager.getDefinitions()) {
+      if (cancelled()) return;
       if (!this.deploymentManager.hasRecord(def.id)) continue;
       if (this.recordedAgentIds.has(def.id)) continue;
       if (this.deploymentManager.recordInstalledBy(def.id) === 'build') continue;
@@ -682,23 +682,51 @@ export class Orchestrator extends EventEmitter {
         logger.warn('failed to remove agent outside recorded scope', { agentId: def.id, error: String(err) });
       }
     }
+    if (cancelled()) return;
     await this.agentDiscoveryService?.refresh('recorded-scope');
   }
 
   private startHookInstallSignalWatch(): void {
     const signal = hookInstallSignalPath(this.dataDir);
-    const tick = () => { void this.pollHookInstallSignal(signal); };
-    void this.pollHookInstallSignal(signal);
+    const epoch = ++this.hookInstallSignalEpoch;
+    const tick = () => { void this.pollHookInstallSignal(signal, epoch); };
+    tick();
     this.hookInstallSignalTimer = setInterval(tick, 1000);
     this.hookInstallSignalTimer.unref?.();
   }
 
-  private stopHookInstallSignalWatch(): void {
+  private async stopHookInstallSignalWatch(): Promise<void> {
+    this.hookInstallSignalEpoch++;
     if (this.hookInstallSignalTimer) clearInterval(this.hookInstallSignalTimer);
     this.hookInstallSignalTimer = null;
+    const inFlight = this.hookInstallSignalPoll;
+    this.hookInstallSignalPoll = null;
+    if (!inFlight) return;
+    // The current filesystem operation may be stalled. Drain it when possible,
+    // but keep collector shutdown bounded; the epoch invalidates its continuation.
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        inFlight,
+        new Promise<void>(resolve => { timeout = setTimeout(resolve, 5000); timeout.unref?.(); }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 
-  private async pollHookInstallSignal(signal: string): Promise<void> {
+  private pollHookInstallSignal(signal: string, epoch = this.hookInstallSignalEpoch): Promise<void> {
+    if (epoch !== this.hookInstallSignalEpoch) return Promise.resolve();
+    if (this.hookInstallSignalPoll) return this.hookInstallSignalPoll;
+    const poll = this.handleHookInstallSignal(signal, epoch);
+    this.hookInstallSignalPoll = poll;
+    const clear = () => { if (this.hookInstallSignalPoll === poll) this.hookInstallSignalPoll = null; };
+    void poll.then(clear, clear);
+    return poll;
+  }
+
+  private async handleHookInstallSignal(signal: string, epoch: number): Promise<void> {
+    const cancelled = () => epoch !== this.hookInstallSignalEpoch;
     let mtime = 0;
     try {
       mtime = fsSync.statSync(signal).mtimeMs;
@@ -708,8 +736,17 @@ export class Orchestrator extends EventEmitter {
     if (mtime === this.hookInstallSignalMtime) return;
     try {
       await this.deploymentManager.reloadState();
-      await this.refreshDeploymentScope();
-      await this.reconcileRecordedAgents();
+      if (cancelled()) return;
+      await this.refreshDeploymentScope(cancelled);
+      if (cancelled()) return;
+      await this.reconcileRecordedAgents(cancelled);
+      if (cancelled()) return;
+      if (this.hookWatchdog && this.currentHookWatchdogTargetKey() !== this.hookWatchdogTargetKey) {
+        const next = this.createHookWatchdog();
+        this.hookWatchdog.stop();
+        this.hookWatchdog = next;
+        this.hookWatchdog.start();
+      }
       this.hookInstallSignalMtime = mtime;
     } catch (err) {
       logger.warn('hook install signal handling failed', { error: String(err) });
@@ -751,6 +788,26 @@ export class Orchestrator extends EventEmitter {
     }
 
     return entries;
+  }
+
+  private currentHookWatchdogTargetKey(): string {
+    return JSON.stringify(this.deploymentManager.getDefinitions().filter(def => def.hook).map(def => {
+      const hook = this.deploymentManager.effectiveDefinition(def).hook!;
+      return [def.id, hook.scope ?? 'user', hook.settingsPath];
+    }));
+  }
+
+  private createHookWatchdog(): HookWatchdog {
+    const watchdog = new HookWatchdog(this.config.hookWatchdog, this.buildHookWatchdogTargets(), [
+      ...HookWatchdog.defaultInterceptTargets(this.dataDir, id => this.isAgentGatedEnabled(id) && this.scopeAllows(id)),
+      ...this.buildGrokBuildInterceptTargets(),
+      ...this.buildPluginInjectInterceptTargets(),
+      ...this.buildDirectoryPluginInterceptTargets(),
+      ...this.buildCopilotPluginInterceptTargets(),
+      ...this.buildDshYamlPatchInterceptTargets(),
+    ]);
+    this.hookWatchdogTargetKey = this.currentHookWatchdogTargetKey();
+    return watchdog;
   }
 
   private buildHookWatchdogTargets(): PluginCheckTarget[] {
@@ -1017,15 +1074,7 @@ export class Orchestrator extends EventEmitter {
     }
 
     if (flushers.length === 0) {
-      logger.warn('no flushers enabled, using JSONL fallback');
-      const fallback = new JsonlFlusher({
-        enabled: true,
-        outputDir: path.join(this.dataDir, 'logs', 'output'),
-        rotateDaily: true,
-        maxFileSizeMb: 100,
-      });
-      await fallback.start().catch(err => logger.warn('jsonl fallback flusher start failed', { error: String(err) }));
-      flushers.push(fallback);
+      logger.warn('no flushers enabled, collected events will not be exported');
     }
 
     return flushers.length === 1 ? flushers[0] : new MultiFlusher(flushers);

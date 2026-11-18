@@ -99,6 +99,21 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 
 For example, use port `9000` by appending `--dashboard-port 9000` (or `--dashboard-port=9000`) to the Linux/macOS install command, or `-DashboardPort 9000` to the Windows command. The installer writes `dashboard.port` to `config.json` before starting the service. The port option alone does not enable the dashboard. Invalid or missing port values stop installation before downloads or service changes.
 
+### Collection after privileged initialization on Linux
+
+`LOONGSUITE_PILOT_ROOT_TRIGGER=1` opts into root-triggered collection; it does not
+elevate privileges and is independent of `--scope system`. For OpenClaw, Hermes
+and DSH using an existing shared configuration root, a root collector can read
+private event files produced by later unprivileged processes. Pilot preserves
+the configuration owner's access and only shares its event directories. The
+default installation behavior is unchanged when the variable is unset.
+Set the variable consistently for the collector and participating Agent processes.
+Use a shared Pilot runtime/data directory that participating UIDs can traverse
+and read; a private root home is not a shared runtime directory.
+
+Embedding launchers must preserve the business working directory and coordinate
+with the existing collector; see [runtime bootstrap policies](runtime-bootstrap.md).
+
 ## Verify Installation
 
 ```bash
@@ -106,7 +121,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-Local JSONL output is enabled by default:
+Local JSONL output is disabled by default. To inspect local events, set `"jsonl": { "enabled": true }` in `config.json` as described in [Local JSONL Output](local-jsonl-output.md), restart Pilot, and then check:
 
 ```bash
 ls ~/.loongsuite-pilot/logs/output

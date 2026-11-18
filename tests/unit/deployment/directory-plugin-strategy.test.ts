@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { DirectoryPluginStrategy } from '../../../src/deployment/directory-plugin-strategy.js';
 import type { AgentDefinition } from '../../../src/types/index.js';
 
@@ -76,12 +77,37 @@ describe('DirectoryPluginStrategy', () => {
     };
   }
 
+  function deployUnderRestrictiveUmask(dataDir: string, definition: AgentDefinition, pretendRoot: boolean) {
+    return spawnSync(process.execPath, [
+      path.resolve('node_modules/vite-node/vite-node.mjs'),
+      path.resolve('tests/fixtures/directory-plugin-umask-child.ts'),
+    ], {
+      encoding: 'utf8', timeout: 30_000,
+      env: { ...process.env, NODE_OPTIONS: '', BUN_OPTIONS: '', NODE_PATH: '',
+        PILOT_TEST_DIRECTORY_OPTIONS: JSON.stringify({ dataDir, definition, pretendRoot }) },
+    });
+  }
+
   it('delegates detection and returns false when the agent is absent', async () => {
     vi.mocked(detectAgent).mockResolvedValue(false);
     const def = makeDef();
 
     await expect(strategy.detect(def)).resolves.toBe(false);
     expect(detectAgent).toHaveBeenCalledWith(def.detection);
+  });
+
+  it('detects the resolved native entry before the first configuration directory exists', async () => {
+    vi.mocked(detectAgent).mockResolvedValue(false);
+    const entry = path.join(tmpDir, 'hermes');
+    await fs.writeFile(entry, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const def = withActivation(makeDef());
+    def.directoryPlugin!.activation!.command = entry;
+    expect(await strategy.detect(def)).toBe(true);
+    expect(await fs.stat(targetDir).then(() => true, () => false)).toBe(false);
+    await fs.chmod(entry, 0o644);
+    expect(await strategy.detect(def)).toBe(false);
+    def.directoryPlugin!.activation!.command = 'hermes';
+    expect(await strategy.detect(def)).toBe(false);
   });
 
   it('requires the activation executable even when the home directory detects Hermes', async () => {
@@ -245,6 +271,51 @@ describe('DirectoryPluginStrategy', () => {
       ['plugins', 'disable', 'loongsuite-pilot'],
     ]);
   });
+
+  it.skipIf(process.platform === 'win32')('keeps the managed marker readable after root deployment and activation with umask 077', async () => {
+    await fs.mkdir(path.dirname(targetDir), { recursive: true });
+    const child = deployUnderRestrictiveUmask(path.join(tmpDir, 'pilot-data'), withActivation(makeDef()), true);
+    expect(child.status, child.stderr).toBe(0);
+    expect((await fs.stat(targetDir)).mode & 0o777).toBe(0o755);
+    expect((await fs.stat(path.join(targetDir, MARKER_FILE))).mode & 0o777).toBe(0o644);
+    expect(await readMarker()).toMatchObject({ dataDir: path.join(tmpDir, 'pilot-data'), activationStatus: 'activated' });
+  });
+
+  it.skipIf(process.platform !== 'linux' || process.getuid?.() !== 0)(
+    'lets the real Hermes plugin resolve the managed data root after dropping to uid 1000', async () => {
+      const home = path.join(tmpDir, 'user');
+      const hermesHome = path.join(home, '.hermes');
+      const managedData = path.join(tmpDir, 'shared-pilot');
+      await fs.chmod(tmpDir, 0o755);
+      await fs.mkdir(hermesHome, { recursive: true, mode: 0o755 });
+      await fs.chown(home, 1000, 1000);
+      await fs.chown(hermesHome, 1000, 1000);
+      await fs.mkdir(managedData, { mode: 0o755 });
+      await fs.writeFile(path.join(managedData, 'config.json'), '{}\n', { mode: 0o644 });
+      const target = path.join(hermesHome, 'plugins', 'loongsuite-pilot');
+      const def = withActivation(makeDef({
+        detection: { paths: [hermesHome], commands: [] },
+        directoryPlugin: { sourceDir: path.resolve('assets/plugins/hermes-agent/loongsuite-pilot'), targetDir: target },
+      }));
+      {
+        const activated = deployUnderRestrictiveUmask(managedData, def, false);
+        expect(activated.status, activated.stderr).toBe(0);
+        const plugin = path.join(target, '__init__.py');
+        const python = spawnSync('python3', ['-c', [
+          'import importlib.util, json, sys',
+          'spec = importlib.util.spec_from_file_location("pilot_hermes", sys.argv[1])',
+          'module = importlib.util.module_from_spec(spec)',
+          'spec.loader.exec_module(module)',
+          'print(json.dumps({"data": str(module._data_dir()), "config": str(module._config_path())}))',
+        ].join('\n'), plugin], {
+          uid: 1000, gid: 1000, encoding: 'utf8',
+          env: { ...process.env, HOME: home, LOONGSUITE_PILOT_DATA_DIR: '', AGENT_DATA_COLLECTION_CONFIG: '', PYTHONDONTWRITEBYTECODE: '1' },
+        });
+        expect(python.status, python.stderr).toBe(0);
+        expect(JSON.parse(python.stdout)).toEqual({ data: managedData, config: path.join(managedData, 'config.json') });
+      }
+    },
+  );
 
   it('only appends optional enable arguments advertised by the target CLI', async () => {
     const commands: string[][] = [];

@@ -1,3 +1,4 @@
+import { producerReadFlags } from '../../utils/producer-log-dir.js';
 import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { fileIdentity, matchesFileIdentity } from '../../utils/file-identity.js';
@@ -270,7 +271,7 @@ export abstract class BaseHookInput extends BaseInput {
     this.incompleteTails.delete(logFile);
     if (stat.size <= offset) return { entries, offset: stat.size, readBytes: 0 };
 
-    const handle = await fs.open(logFile, 'r');
+    const handle = await fs.open(logFile, producerReadFlags());
     let checkpointOffset = offset;
     let totalReadBytes = 0;
     try {
@@ -394,11 +395,15 @@ export abstract class BaseHookInput extends BaseInput {
       .sort();
   }
 
-  private isHookLogFile(fileName: string): boolean {
+  protected isHookLogFile(fileName: string): boolean {
     const prefix = `${this.logPrefix}-`;
     if (!fileName.startsWith(prefix)) return false;
     const suffix = fileName.slice(prefix.length);
     return /^\d{4}-\d{2}-\d{2}(?:\.segment-\d{12}-[a-f0-9]{32})?\.jsonl$/.test(suffix);
+  }
+
+  protected isTodayHookLogFile(fileName: string, today: string): boolean {
+    return this.isHookLogFile(fileName) && fileName.startsWith(`${this.logPrefix}-${today}`);
   }
 
   private getPersistedOffsetMap(state: InputState): OffsetMap | null {
@@ -440,22 +445,23 @@ export abstract class BaseHookInput extends BaseInput {
       }
     }
 
-    const todayFileName = `${this.logPrefix}-${today}.jsonl`;
     if (state.lastFile && fileNames.includes(state.lastFile)) {
       // Migration from legacy lastFile/lastOffset state: resume draining the
       // previously tracked file from where we left off, and start reading
       // today's file from the beginning if it is a newer file.
       offsets[state.lastFile] = state.lastOffset ?? 0;
-      if (state.lastFile !== todayFileName && fileNames.includes(todayFileName)) {
-        offsets[todayFileName] = 0;
+      for (const fileName of fileNames) {
+        if (fileName !== state.lastFile && this.isTodayHookLogFile(fileName, today)) offsets[fileName] = 0;
       }
-    } else if (fileNames.includes(todayFileName)) {
+    } else {
       // True cold start (no prior state): skip all existing history and only
       // begin reading today's file from the start. Do NOT seed a non-today
       // file to 0 — that would re-ingest an entire day of history a previous
       // daemon run already dispatched (the collector's local date may still
       // lag behind the newest hook file when it first comes up).
-      offsets[todayFileName] = 0;
+      for (const fileName of fileNames) {
+        if (this.isTodayHookLogFile(fileName, today)) offsets[fileName] = 0;
+      }
     }
 
     return offsets;

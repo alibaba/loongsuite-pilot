@@ -40,6 +40,28 @@ describe('ConfigLoader', () => {
     expect((await loadConfig()).listeners['qwen-work-cn-collaboration'].includeConversationIds).toEqual([]);
   });
 
+  it('defaults Multica collection to off', async () => {
+    expect((await loadConfig()).pipeline.multica).toEqual({enabled: true, mode: 'off'});
+  });
+
+  it('allows environment mode overrides while preserving the Multica hard disable', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({pipeline: {multica: {mode: 'off'}}});
+    vi.stubEnv('LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE', 'on');
+    vi.stubEnv('LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED', 'false');
+    expect((await loadConfig()).pipeline.multica).toEqual({enabled: false, mode: 'on'});
+  });
+
+  it('disables Multica when its collection mode is invalid', async () => {
+    vi.stubEnv('LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE', 'typo');
+    expect((await loadConfig()).pipeline.multica?.mode).toBe('off');
+    expect(mockLoggerWarn).toHaveBeenCalledWith('Invalid Multica collection mode; collection disabled');
+  });
+
+  it('reads the configured Multica mode', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({pipeline: {multica: {mode: 'off'}}});
+    expect((await loadConfig()).pipeline.multica?.mode).toBe('off');
+  });
+
   it('loads workspace exclusions and rejects invalid privacy rules', async () => {
     mockReadJsonFile.mockResolvedValueOnce({ privacy: { excludeWorkspaces: ['/private-project'] } });
     expect((await loadConfig()).privacy?.excludeWorkspaces).toEqual(['/private-project']);
@@ -176,7 +198,7 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.enabled).toBe(true);
-      expect(config.flushers.jsonl?.enabled).toBe(true);
+      expect(config.flushers.jsonl?.enabled).toBe(false);
     });
   });
 
@@ -310,7 +332,20 @@ describe('ConfigLoader', () => {
       expect(config.flushers.http?.url).toBe('https://api.example.com');
     });
 
-    it('resolves JSONL enabled from env', async () => {
+    it('enables JSONL only when explicitly requested in the config file or environment', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: true } });
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: false } });
+      vi.stubEnv('JSONL_ENABLED', 'true');
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: true } });
+      vi.stubEnv('JSONL_ENABLED', 'false');
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(false);
+    });
+
+    it('resolves JSONL disabled from env', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       vi.stubEnv('JSONL_ENABLED', 'false');
 

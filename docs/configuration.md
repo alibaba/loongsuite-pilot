@@ -35,6 +35,7 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
 | `dataDir` | Local runtime and data directory. |
 | `userId` | User identity written to emitted events. Defaults to the machine hostname. |
 | `collectLog` | Enables SLS log reporting. JSONL and HTTP remain controlled by their own `enabled` flags. |
+| `jsonl.enabled` | Controls normalized local event output in `logs/output/`. Defaults to `false`; set to `true` to enable it. |
 | `collectTrace` | Enables OTLP trace export when a trace destination is configured. |
 | `dashboard.enabled` | Local dashboard switch. Only boolean `true` enables it; missing or other values disable it. |
 | `dashboard.port` | Loopback dashboard port when enabled. Must be an integer from 1 through 65535; invalid values fall back to `8765`. |
@@ -49,8 +50,10 @@ Equivalent environment variables:
 | `AGENT_DATA_COLLECTION_CONFIG` | Custom config file path. |
 | `LOONGSUITE_PILOT_ENABLED` | Set `false` or `0` to disable the collector. |
 | `LOONGSUITE_PILOT_DATA_DIR` | Override the data directory. |
+| `LOONGSUITE_PILOT_HOOK_SCOPE` | Installation scope (`user` or Linux-only `system`) for hook CLI and container eager injection. Explicit `--scope` wins; unset preserves existing behavior and recorded targets. |
 | `LOONGSUITE_PILOT_USER_ID` | Override `userId`. |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | Set `false` or `0` to disable SLS log reporting. |
+| `JSONL_ENABLED` | Overrides `jsonl.enabled`; set to `true` to enable local JSONL output. |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | Set `false` or `0` to disable trace reporting. |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | Override `serviceName` with one exact name for all agents and backends. |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | Override `serviceNamePrefix`. |

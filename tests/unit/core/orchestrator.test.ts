@@ -764,8 +764,8 @@ describe('Orchestrator', () => {
     });
   });
 
-  describe('JSONL fallback (T041)', () => {
-    it('uses JsonlFlusher fallback when all flushers disabled', async () => {
+  describe('no output destination (T041)', () => {
+    it('does not write JSONL when all flushers are disabled', async () => {
       const config = makeConfig({
         flushers: {
           sls: undefined,
@@ -776,8 +776,19 @@ describe('Orchestrator', () => {
       const orch = new Orchestrator(config);
       await orch.start();
 
-      // Should not throw, JSONL fallback is created
+      const flusher = (orch as any).flusher;
+      expect(flusher.name).toBe('multi');
+      expect(flusher.getFlushers()).toEqual([]);
+      expect(mockLoggerWarn).toHaveBeenCalledWith('no flushers enabled, collected events will not be exported');
       expect(orch.getInputManager()).toBeDefined();
+      await orch.stop();
+    });
+
+    it('uses JSONL when explicitly enabled', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+
+      expect((orch as any).flusher.name).toBe('jsonl');
       await orch.stop();
     });
   });

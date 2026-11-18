@@ -355,8 +355,7 @@ cfg.mask = {
   types: ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl']
 };
 // Ensure JSONL flusher is active for local validation
-if (!cfg.flushers) cfg.flushers = {};
-cfg.flushers.jsonl = { enabled: true, outputDir: '$OUTPUT_DIR', rotateDaily: false, maxFileSizeMb: 50 };
+cfg.jsonl = { enabled: true, outputDir: '$OUTPUT_DIR', rotateDaily: false, maxFileSizeMb: 50 };
 fs.writeFileSync('$CONFIG', JSON.stringify(cfg, null, 2));
 console.log('[phase5] mask config injected (mode=all)');
 "
