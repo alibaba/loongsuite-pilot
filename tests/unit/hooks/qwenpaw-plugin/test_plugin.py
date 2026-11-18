@@ -853,6 +853,17 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConversionTests(unittest.TestCase):
+    def test_tool_arguments_match_agentscope_native_repair_without_mutating_input(self):
+        from agentscope._utils._common import _json_loads_with_repair
+        raw = '{"path":"file.txt","metadata":{"kind":"test"}'
+        self.assertEqual(plugin._json_input(raw), _json_loads_with_repair(raw))
+        self.assertEqual(raw, '{"path":"file.txt","metadata":{"kind":"test"}')
+        self.assertEqual(plugin._json_input("not-json"), "not-json")
+        with patch("agentscope._utils._common._json_loads_with_repair", side_effect=RuntimeError("unavailable")):
+            self.assertEqual(plugin._json_input(raw), raw)
+        large = '{"data":"' + 'x' * 65536
+        self.assertEqual(plugin._json_input(large), large)
+
     def test_cache_none_alias_fallback_preserves_explicit_zero(self):
         for usage, expected in (({"cache_read_input_tokens": None, "cache_input_tokens": 9}, 9),
                                 ({"cache_read_input_tokens": 0, "cache_input_tokens": 9}, 0),

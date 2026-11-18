@@ -30,6 +30,7 @@ except ImportError:
     MiddlewareBase = object
 
 _logger = logging.getLogger("loongsuite_pilot.qwenpaw")
+_MAX_TOOL_ARGUMENT_REPAIR_CHARS = 64 * 1024
 
 
 def _get(value, key, default=None):
@@ -59,7 +60,17 @@ def _json_input(value):
         try:
             return json.loads(value)
         except (ValueError, TypeError):
-            pass
+            # AgentScope's toolkit can execute a repaired partial JSON object.
+            # Reuse that exact native parser rather than guessing arguments;
+            # if it is unavailable or the payload is large, retain the source.
+            if len(value) <= _MAX_TOOL_ARGUMENT_REPAIR_CHARS and value.lstrip().startswith("{"):
+                try:
+                    from agentscope._utils._common import _json_loads_with_repair
+                    repaired = _json_loads_with_repair(value)
+                    if isinstance(repaired, dict):
+                        return _plain(repaired)
+                except Exception:
+                    pass
     return _plain(value)
 
 

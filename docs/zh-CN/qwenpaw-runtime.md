@@ -39,6 +39,7 @@ QwenPaw 2.2.1 的应用服务启动时会自动加载该插件，已验证 `/api
 - Runtime Hook 提供请求 ENTRY 和原生会话/user/turn 身份；正常请求在 POST_RESPONSE（终态响应 yield 前）完成采集，FINALLY 为错误、取消及短路请求幂等收尾；Middleware 提供 AGENT → STEP → LLM/TOOL 的真实父子关系。
 - 多轮会话保持 session/conversation，request ID 标识单轮。同会话重叠请求独立缓冲，LLM finish reason 不会提前关闭整个请求。
 - 记录可得的模型/provider、usage/cache usage、system instructions、工具定义、参数/结果和实际首次非空流式 delta 的 TTFT。非流式不伪造 TTFT。
+- 工具参数若为不完整的 JSON 对象，插件对不超过 64 KiB 的文本复用 AgentScope Toolkit 的原生解析与修复函数；解析不可用、失败或超过限制时保留原始字符串，严格类型校验可能因此报告缺口。
 - 仅在原生响应明确提供模型 finish reason 时上报；AgentScope 的 `completed` 不区分正常结束、长度限制和内容过滤，不据此填充 `stop`。取消和错误仍记录其实际状态。
 - 对取消和工具/模型错误保留实际结果；后台 Dream 与 helper Agent 在兼容接口存在时补充覆盖。
 - 不解析 AgentCore Task/run 字段，不要求 Qoder UUID Context。不自动导出整个 request_context。
