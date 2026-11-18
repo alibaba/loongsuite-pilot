@@ -338,14 +338,12 @@ export class CodexTranscriptInput extends BaseInput {
         isBaselineInit = true;
       }
     }
+    if (!isBaselineInit && this.baselinePendingSince === 0) this.baselinePendingSince = startedAt;
     const pendingSinceAtEntry = this.baselinePendingSince;
-    if (!isBaselineInit && !this.defaultScanComplete) {
-      if (this.baselinePendingSince === 0) this.baselinePendingSince = startedAt;
-      if (!baselineUnfinished) {
-        this.stateStore.update(this.id, {
-          extra: { baselineUnfinished: true, baselinePendingSince: this.baselinePendingSince },
-        });
-      }
+    if (!isBaselineInit && !this.defaultScanComplete && !baselineUnfinished) {
+      this.stateStore.update(this.id, {
+        extra: { baselineUnfinished: true, baselinePendingSince: this.baselinePendingSince },
+      });
     }
     for (const { filePath, baselineOnStart } of discovered) {
       const key = this.stateKey(filePath);

@@ -4,13 +4,19 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 const blockedReads = vi.hoisted(() => new Set<string>());
+const scanDelays = vi.hoisted(() => new Map<string, () => Promise<void>>());
 vi.mock('node:fs/promises', async () => {
   const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
   return {
     ...actual,
-    readdir: (target: string, options: { withFileTypes: true }) => {
+    readdir: async (target: string, options: { withFileTypes: true }) => {
       if (blockedReads.has(path.resolve(target))) {
         return Promise.reject(Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+      }
+      const delay = scanDelays.get(path.resolve(target));
+      if (delay) {
+        scanDelays.delete(path.resolve(target));
+        await delay();
       }
       return actual.readdir(target, options);
     },
@@ -49,6 +55,7 @@ const CHILD_FIXTURES = [
 
 afterEach(async () => {
   blockedReads.clear();
+  scanDelays.clear();
   await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -1048,6 +1055,35 @@ describe('CodexTranscriptInput', () => {
       expect(responsesForTurn(entries, 'turn-hidden')).toEqual([]);
       expect(responsesForTurn(entries, 'turn-seen')).toEqual([]);
       expect(stateStore.get(input.id).extra?.isBaselineInit).toBe(true);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('collects a session created while the first scan is still reading', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-scan-race-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const dayDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(dayDir, { recursive: true });
+    const oldTranscript = path.join(dayDir, 'rollout-session-old.jsonl');
+    await fs.writeFile(oldTranscript, completedTurn().replaceAll('turn-1', 'turn-old'), 'utf8');
+    const past = new Date('2020-01-01T00:00:00Z');
+    await fs.utimes(oldTranscript, past, past);
+    const { input, entries } = await createDormantInput(root);
+    scanDelays.set(path.resolve(sessionDir), async () => {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await fs.writeFile(
+        path.join(dayDir, 'rollout-session-new.jsonl'),
+        completedTurn().replaceAll('turn-1', 'turn-during-scan'),
+        'utf8',
+      );
+    });
+    try {
+      await input.start();
+      await runInputCycle(input);
+      expect(responsesForTurn(entries, 'turn-old')).toEqual([]);
+      expect(responsesForTurn(entries, 'turn-during-scan').length).toBeGreaterThan(0);
     } finally {
       await input.stop();
     }
@@ -3763,6 +3799,8 @@ describe('CodexTranscriptInput', () => {
     const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
     const transcriptText = completedTurn();
     const transcript = await writeTranscript(sessionDir, transcriptText);
+    const past = new Date('2020-01-01T00:00:00Z');
+    await fs.utimes(transcript, past, past);
 
     await input.start();
     await input.stop();
@@ -5040,6 +5078,7 @@ describe('CodexTranscriptInput', () => {
         { bootstrapFork: false },
       );
       const baselineSize = (await fs.stat(transcript)).size;
+      await fs.utimes(transcript, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'));
 
       await input.start();
       expect(entries).toHaveLength(0);
@@ -5099,6 +5138,7 @@ describe('CodexTranscriptInput', () => {
         { bootstrapFork: false },
       );
       const baselineSize = (await fs.stat(transcript)).size;
+      await fs.utimes(transcript, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'));
 
       await input.start();
 
