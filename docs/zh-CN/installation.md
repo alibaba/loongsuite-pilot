@@ -150,7 +150,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-默认启用本地 JSONL 输出：
+本地 JSONL 输出默认关闭。需要验证本地事件时，先按 [本地 JSONL 输出](local-jsonl-output.md) 在 `config.json` 中设置 `"jsonl": { "enabled": true }` 并重启，再查看：
 
 ```bash
 ls ~/.loongsuite-pilot/logs/output
