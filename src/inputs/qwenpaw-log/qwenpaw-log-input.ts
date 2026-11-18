@@ -89,6 +89,7 @@ export class QwenPawLogInput extends BaseSessionInput {
     try {
       const entries = await this.collect();
       if (entries.length > 0) this.emit('entries', entries);
+      await this.waitForPendingOutputs();
       await this.stateStore.save();
     } catch (error) {
       this.logger.error('final QwenPaw collection failed', { error: String(error) });

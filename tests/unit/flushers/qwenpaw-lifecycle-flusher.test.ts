@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { ExtendedTelemetryHandler } from '@loongsuite/otel-util-genai';
 import { ExportResultCode } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher } from '../../../src/flushers/otlp-trace-flusher.js';
 import { TurnBoundaryProcessor } from '../../../src/normalization/turn-boundary-processor.js';
 import { InputManager } from '../../../src/core/input-manager.js';
+import { CodexTurnJournal } from '../../../src/flushers/codex-turn-journal.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 
 // Synthetic fixtures specifically test collector buffering; real runtime evidence is in the E2E harness.
@@ -123,6 +127,32 @@ describe('QwenPaw collector lifecycle isolation', () => {
     expect(new Set(spans.map(span => span.spanContext().traceId)).size).toBe(2);
     expect(spans.filter(span => span.attributes['gen_ai.turn.id'] === 'a')).toHaveLength(4);
   });
+
+  it('recovers evicted incomplete turns from the durable journal without retaining their spill files', async () => {
+    await flusher.shutdown();
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwenpaw-evicted-'));
+    const journal = new CodexTurnJournal(path.join(root, 'journal'), 10_000, ['qwenpaw']);
+    flusher = new OtlpTraceFlusher({ enabled: true, serviceName: 'evicted', protocol: 'http/protobuf', dataDir: root,
+      endpoints: [{ endpoint: 'http://unused:4318' }] }, undefined,
+    () => ({ export: (batch, done) => { spans.push(...batch); done({ code: ExportResultCode.SUCCESS }); }, shutdown: async () => {} }), journal);
+    try {
+      const turns = Array.from({ length: 70 }, (_, i) => turn(`session-${i}`, `run-${i}`));
+      for (const records of turns) {
+        records[3]['gen_ai.input.messages'] = [{ role: 'user', parts: [{ type: 'text', content: 'retained body' }] }];
+        await flusher.sendBatch(records.slice(0, 4));
+      }
+      expect(flusher.getTraceRuntimeSnapshot().find(row => row.agent_type === 'qwenpaw')?.pending_buffers).toBeLessThanOrEqual(64);
+      for (const records of turns) await flusher.sendBatch(records.slice(4));
+      expect(spans).toHaveLength(70 * 4);
+      expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM'
+        && String(span.attributes['gen_ai.input.messages']).includes('retained body'))).toHaveLength(70);
+      await flusher.shutdown();
+      expect(await fs.readdir(path.join(root, 'logs'))).toEqual([]);
+    } finally {
+      await flusher.shutdown();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it('isolates equal run IDs from different sessions and suppresses late duplicate terminal records', async () => {
     const a = turn('session-a', 'same');

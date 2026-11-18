@@ -28,6 +28,7 @@ const results = [];
 const cases = [
   { name: 'baseline-512', variant: 'baseline', memory: '512m', steps: 168, sink: 'count' },
   { name: 'candidate-512', variant: 'candidate', memory: '512m', steps: 168, sink: 'count' },
+  { name: 'candidate-journal-512', variant: 'candidate', memory: '512m', steps: 168, sink: 'count', journal: true },
   { name: 'baseline-1024', variant: 'baseline', memory: '1024m', steps: 168, sink: 'count' },
   { name: 'candidate-http', variant: 'candidate', memory: '512m', steps: 168, sink: 'http' },
   { name: 'candidate-double', variant: 'candidate', memory: '512m', steps: 336, sink: 'http' },
@@ -38,7 +39,8 @@ for (const test of cases) {
   mkdirSync(spill, { recursive: true, mode: 0o700 });
   const args = ['run', '--name', name, '--platform', 'linux/amd64', '--memory', test.memory,
     '--memory-swap', test.memory, '--network', 'none', '-e', 'LOG_LEVEL=silent',
-    '-e', 'QWENPAW_PERF_DATA_DIR=/spill', '--mount', `type=bind,source=${spill},target=/spill`,
+    '-e', 'QWENPAW_PERF_DATA_DIR=/spill', '-e', `QWENPAW_PERF_JOURNAL=${test.journal ? '1' : '0'}`,
+    '--mount', `type=bind,source=${spill},target=/spill`,
     '--mount', `type=bind,source=${path.join(output, `${test.variant}.mjs`)},target=/app/runner.mjs,readonly`,
     '--mount', `type=bind,source=${dependencies},target=/app/node_modules,readonly`,
     'node:24.14.0-bookworm-slim', 'node', '--max-old-space-size=2048', '/app/runner.mjs', String(test.steps), '1024', '64', test.sink];

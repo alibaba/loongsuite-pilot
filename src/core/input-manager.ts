@@ -205,7 +205,9 @@ export class InputManager extends EventEmitter {
       const handling = previous
         .catch(() => undefined)
         .then(() => this.handleEntries(input.id, entries));
-      if (input.agentType === ClientType.CodexCliHook) input.holdCheckpointUntil(handling);
+      if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.QwenPaw) {
+        input.holdCheckpointUntil(handling);
+      }
       const next = handling.catch(err => {
         logger.error('entry handling failed', { inputId: input.id, error: String(err) });
       });

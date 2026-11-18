@@ -21,7 +21,8 @@ import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
-import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
+import { codexTurnJournalGroupKey } from './codex-turn-journal.js';
+import type { TurnJournal } from './routed-turn-journal.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 import { multimodalMetadataItemsFromMessages } from '../multimodal/rewrite.js';
@@ -661,7 +662,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     cfg: OtlpTraceFlusherConfig,
     globalAttributesProvider?: GlobalAttributesProvider,
     exporterFactory?: OtlpExporterFactory,
-    private readonly codexJournal?: CodexTurnJournal,
+    private readonly codexJournal?: TurnJournal,
     private readonly prepareCodexReplay?: (entries: AgentActivityEntry[]) => AgentActivityEntry[],
   ) {
     super();
@@ -882,7 +883,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     // Preparation has already checked/restored this prefix. Do not evict it
     // before appending the continuation, or evict a later turn in this batch.
-    if (this.batchDepth === 0) this.trimTurnBuffers(key);
+    if (this.batchDepth === 0) await this.trimTurnBuffers(key);
 
     let buf = this.turnBuffers.get(key);
     if (!buf) {
@@ -916,12 +917,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
       ? await this.qwenPawPayloadStore.prepare(buf.qwenPawPayloadKey, entry)
       : entry;
     const durable = this.codexJournal?.accepts(entry) === true;
-    const residentSize = durable ? Buffer.byteLength(JSON.stringify(entry)) : 0;
+    // QwenPaw's bodies already live in its transient spill; retain only the
+    // metadata and locator in the live buffer while the journal owns recovery.
+    const residentSize = durable ? Buffer.byteLength(JSON.stringify(agentType === 'qwenpaw' ? bufferedEntry : entry)) : 0;
     if (durable) {
       buf.journalKey ??= codexTurnJournalGroupKey(entry);
-      buf.spillable ??= buf.records.length === 0;
+      buf.spillable ??= agentType !== 'qwenpaw' && buf.records.length === 0;
       // Restored records must use the same normalized logical size as new ones.
-      logicalBytes ??= residentSize;
+      logicalBytes ??= agentType === 'qwenpaw' ? Buffer.byteLength(JSON.stringify(entry)) : residentSize;
     } else {
       // Malformed/unpersistable continuations must never be discarded by spill.
       if (buf.spilledRecords) await this.rehydrateCodexTurn(buf);
@@ -1000,11 +1003,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (this.batchDepth === 0) {
       await this.flushCompleted();
       // Another Input may begin a batch while completed exports are awaited.
-      if (this.batchDepth === 0) this.trimTurnBuffers();
+      if (this.batchDepth === 0) await this.trimTurnBuffers();
     }
   }
 
-  private trimTurnBuffers(incomingKey?: string): void {
+  private async trimTurnBuffers(incomingKey?: string): Promise<void> {
     if (this.turnBuffers.size <= MAX_TURN_BUFFERS) return;
     const overflow = this.turnBuffers.size - MAX_TURN_BUFFERS;
     const candidates = [...this.turnBuffers.values()]
@@ -1016,6 +1019,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // The durable prefix can be rehydrated when this native turn resumes.
         this.turnBuffers.delete(buf.key);
         this.recordBufferRemoval(buf);
+        if (buf.qwenPawPayloadKey) await this.qwenPawPayloadStore.release(buf.qwenPawPayloadKey);
       } else {
         buf.completed = true;
         this.triggerFlush(buf, false);
@@ -1046,7 +1050,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     await this.journalRestore;
   }
 
-  private async replayCodexJournal(groups: ReturnType<CodexTurnJournal['loadBatches']>): Promise<void> {
+  private async replayCodexJournal(groups: ReturnType<TurnJournal['loadBatches']>): Promise<void> {
     let holding = false;
     let accepted = false;
     try {
@@ -1124,7 +1128,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private async persistCodexEntries(entries: AgentActivityEntry[]): Promise<void> {
     if (!this.codexJournal) return;
     try {
-      const codex = entries.filter(entry => this.codexJournal!.accepts(entry));
+      const codex = entries.filter(entry => this.codexJournal!.accepts(entry)).map(entry =>
+        entry['gen_ai.agent.type'] === 'qwenpaw' && this.cfg.captureMessageContent === false
+          ? stripAgentMessageContent(entry) : entry,
+      );
       const checked = new Set<string>();
       for (const entry of codex) {
         const key = this.resolveGroupKey(entry).key;
@@ -2758,6 +2765,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
         if (this.codexJournal?.acceptsAgent(buf.agentType) && buf.agentType !== 'hermes') {
           this.turnBuffers.delete(buf.key);
           this.recordBufferRemoval(buf);
+          if (buf.qwenPawPayloadKey) {
+            void this.qwenPawPayloadStore.release(buf.qwenPawPayloadKey).catch(error => {
+              logger.warn('failed to release idle QwenPaw payload', { error: String(error) });
+            });
+          }
           continue;
         }
         buf.completed = true;

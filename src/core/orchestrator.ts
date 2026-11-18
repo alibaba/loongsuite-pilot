@@ -998,12 +998,17 @@ export class Orchestrator extends EventEmitter {
       if (otlpTraceCfg?.enabled && otlpTraceCfg.endpoints.length > 0) {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
         const { CodexTurnJournal } = await import('../flushers/codex-turn-journal.js');
+        const { RoutedTurnJournal } = await import('../flushers/routed-turn-journal.js');
         const r = new OtlpTraceFlusher(
           { ...otlpTraceCfg, dataDir: this.dataDir },
           this.globalAttributesProvider,
           undefined,
-          new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
-            ['codex', 'hermes', 'openclaw']),
+          new RoutedTurnJournal([
+            new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
+              ['codex', 'hermes', 'openclaw']),
+            // Keep QwenPaw's budget separate from the other native Agents.
+            new CodexTurnJournal(path.join(this.dataDir, 'logs', 'qwenpaw-pending-turns'), 10_000, ['qwenpaw']),
+          ]),
           entries => this.inputManager!.prepareRestoredEntries(entries),
         );
         await r.start();

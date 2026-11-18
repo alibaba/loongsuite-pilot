@@ -3,7 +3,9 @@
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import * as path from 'node:path';
 import { OtlpTraceFlusher, type OtlpExporterFactory } from '../../src/flushers/otlp-trace-flusher.js';
+import { CodexTurnJournal } from '../../src/flushers/codex-turn-journal.js';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import type { AgentActivityEntry } from '../../src/types/index.js';
 
@@ -60,6 +62,9 @@ const exporter: OtlpExporterFactory = options => {
   shutdown: async () => { await delegate?.shutdown(); },
   };
 };
+const journal = process.env.QWENPAW_PERF_JOURNAL === '1'
+  ? new CodexTurnJournal(path.join(process.env.QWENPAW_PERF_DATA_DIR!, 'qwenpaw-journal'), 10_000, ['qwenpaw'])
+  : undefined;
 const flusher = new OtlpTraceFlusher({
   enabled: true, serviceName: process.env.QWENPAW_PERF_SERVICE ?? 'qwenpaw-oom-synthetic', protocol: 'http/protobuf',
   dataDir: process.env.QWENPAW_PERF_DATA_DIR,
@@ -68,7 +73,7 @@ const flusher = new OtlpTraceFlusher({
     headers: { 'x-arms-license-key': cms.licenseKey, 'x-cms-workspace': cms.workspace } }
     : { name: 'local', endpoint: `http://127.0.0.1:${port}/v1/traces` }],
   maxExportBatchBytes: 4 * 1024 * 1024, debug: false,
-}, undefined, exporter);
+}, undefined, exporter, journal);
 const hex = (n: number) => n.toString(16).padStart(16, '0');
 function event(kind: string, id: number, parent: number, phase: string, ms: number, fields = {}): AgentActivityEntry {
   return {
@@ -85,7 +90,7 @@ function event(kind: string, id: number, parent: number, phase: string, ms: numb
   } as AgentActivityEntry;
 }
 const message = (text: string) => [{ role: 'user', parts: [{ type: 'text', content: text }] }];
-report('start', { node: process.version, arch: process.arch, steps, contextKiB, toolKiB, sink });
+report('start', { node: process.version, arch: process.arch, steps, contextKiB, toolKiB, sink, journal: !!journal });
 await flusher.sendBatch([
   event('entry', 1, 0, 'start', 0, { 'gen_ai.input.messages': message('Synthetic long-turn memory fixture') }),
   event('agent', 2, 1, 'start', 1),
