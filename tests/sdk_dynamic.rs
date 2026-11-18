@@ -1548,26 +1548,49 @@ fn fifty_overlapping_cloud_hooks_receive_real_verdicts_with_a_one_second_callbac
     let mut children: Vec<_> = (0..50).map(|_| cloud_qoder_hook(&data)).collect();
     for (index, child) in children.iter_mut().enumerate() {
         send_pre_tool(child, index);
-    }
-    for (index, child) in children.into_iter().enumerate() {
-        let output = child.wait_with_output().unwrap();
-        assert!(output.stdout.is_empty(), "request {index}");
-        if index.is_multiple_of(2) {
-            assert!(
-                output.status.success(),
-                "request {index}: {:?}",
-                output.stderr
-            );
-            assert!(output.stderr.is_empty(), "request {index}");
-        } else {
-            assert_eq!(output.status.code(), Some(2), "request {index}");
-            assert_eq!(output.stderr, b"SDK foreign host test\n", "request {index}");
+        // Stagger I/O startup briefly while requiring all 50 to remain in flight.
+        if index % 8 == 7 {
+            std::thread::sleep(Duration::from_millis(3));
         }
     }
+    let outputs: Vec<_> = children
+        .into_iter()
+        .map(|child| {
+            (
+                format!("{:08x}", child.id()),
+                child.wait_with_output().unwrap(),
+            )
+        })
+        .collect();
     host.stop();
 
     let logs = hook_trace(&data, "hook-verdict.jsonl");
     let clients = hook_trace(&data, "hook-client.jsonl");
+    for (index, (pid, output)) in outputs.iter().enumerate() {
+        let client = clients
+            .iter()
+            .find(|row| row["id"].as_str().is_some_and(|id| id.starts_with(pid)));
+        let stages: Vec<_> = logs
+            .iter()
+            .filter(|row| row["id"].as_str().is_some_and(|id| id.starts_with(pid)))
+            .map(|row| (&row["stage"], &row["detail"]))
+            .collect();
+        let (code, stderr): (i32, &[u8]) = if index.is_multiple_of(2) {
+            (0, b"")
+        } else {
+            (2, b"SDK foreign host test\n")
+        };
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "request {index}: client {client:?}, SDK stages {stages:?}"
+        );
+        assert_eq!(
+            output.stderr, stderr,
+            "request {index}: client {client:?}, SDK stages {stages:?}"
+        );
+        assert!(output.stdout.is_empty(), "request {index}");
+    }
     assert_eq!(
         host.ctx.hook_entered.load(Ordering::SeqCst),
         50,

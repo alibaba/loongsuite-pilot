@@ -275,6 +275,12 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
     socket.connect(("127.0.0.1", descriptor.port)).ok()?;
     let request = serde_json::to_vec(&request).ok()?;
     let deadline = started + Duration::from_millis(DEADLINE_MS);
+    let parse = |bytes: &[u8]| {
+        let reply: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        (reply["id"].as_str() == Some(id.as_str())
+            && reply["instance"].as_str() == Some(descriptor.instance.as_str()))
+        .then_some(reply)
+    };
     let reply =
         |until: Instant, valid_until: Instant, is_expected: &dyn Fn(&serde_json::Value) -> bool| {
             let mut bytes = [0u8; MAX_REPLY];
@@ -285,13 +291,8 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
                     .ok_or(std::io::ErrorKind::TimedOut)?;
                 socket.set_read_timeout(Some(wait))?;
                 let len = socket.recv(&mut bytes)?;
-                let Ok(reply) = serde_json::from_slice::<serde_json::Value>(&bytes[..len]) else {
-                    continue;
-                };
-                if Instant::now() < valid_until
-                    && reply["id"].as_str() == Some(id.as_str())
-                    && reply["instance"].as_str() == Some(descriptor.instance.as_str())
-                    && is_expected(&reply)
+                if let Some(reply) = parse(&bytes[..len])
+                    .filter(|row| Instant::now() < valid_until && is_expected(row))
                 {
                     return Ok::<_, std::io::Error>(reply);
                 }
@@ -302,6 +303,8 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
     } else {
         deadline
     };
+    let is_receipt_or_verdict =
+        |row: &serde_json::Value| reply_action(row).is_some() || row["received"] == true;
     let first = loop {
         trace.send_attempts += 1;
         socket.send(&request).ok()?;
@@ -310,9 +313,7 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
         } else {
             first_deadline
         };
-        match reply(until, first_deadline, &|row| {
-            reply_action(row).is_some() || row["received"] == true
-        }) {
+        match reply(until, deadline, &is_receipt_or_verdict) {
             Ok(reply) => break reply,
             Err(error)
                 if descriptor.cloud_capacity
@@ -321,6 +322,25 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
                         std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
                     )
                     && Instant::now() + Duration::from_millis(10) < first_deadline => {}
+            Err(error)
+                if descriptor.cloud_capacity
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) =>
+            {
+                // A busy host can deschedule the bin after the kernel queued
+                // its receipt. Check without exceeding the availability wait.
+                socket.set_nonblocking(true).ok()?;
+                let mut bytes = [0u8; MAX_REPLY];
+                let len = socket.recv(&mut bytes).ok()?;
+                let first = parse(&bytes[..len]).filter(is_receipt_or_verdict)?;
+                socket.set_nonblocking(false).ok()?;
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                break first;
+            }
             Err(_) => return None,
         }
     };
