@@ -185,7 +185,11 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
 
-Qoder 产品入口：旧 IDE 输出 `gen_ai.agent.type=qoder`，终端 CLI 输出 `qoder-cli`。CLI 格式 transcript 优先使用本轮原生用户记录的 `businessIdentity.product` 区分 `app`/`cli`，覆盖生命周期 Hook 不带产品字段的子 Agent；旧运行时兼容本轮 Hook 的 `parent_business_info.product=app` 标记。新版桌面端输出 `qoder-app`。OTLP Resource 的 `gen_ai.framework` 使用对应产品类型；新桌面端的 `gen_ai.agent.system=qoder-app`，现有 CLI、IDE 等 Qoder 入口仍为 `qoder`。产品标记仅属于本轮原生记录或 Hook 上下文，不跨 session 恢复沿用。桌面端复用 `agents.qoder` 配置和 CLI transcript/Token 补全路径，不需要新增 `agents.qoder-app` 配置。缺少或无法识别产品证据时保留原分类，不根据路径或进程名猜测。历史数据保留原 system 值，跨版本统计需结合 type/framework 区分入口。
+Qoder 产品入口：IDE 输出 `gen_ai.agent.type=qoder`，终端 CLI 输出 `qoder-cli`。CLI 格式 transcript 优先使用本轮原生用户记录的 `businessIdentity.product` 区分 `app`/`cli`，覆盖生命周期 Hook 不带产品字段的子 Agent；旧运行时兼容本轮 Hook 的 `parent_business_info.product=app` 标记。新版桌面端输出 `qoder-app`。OTLP Resource 的 `gen_ai.framework` 使用对应产品类型；独立 IDE 的 `gen_ai.agent.system=qoder-ide`，新桌面端为 `qoder-app`，CLI、CN、JetBrains 和 Work 保留 `qoder`。产品标记仅属于本轮原生记录或 Hook 上下文，不跨 session 恢复沿用。桌面端复用 `agents.qoder` 配置和 CLI transcript/Token 补全路径，不需要新增 `agents.qoder-app` 配置。缺少或无法识别产品证据时保留原分类，不根据路径或进程名猜测。历史数据保留原 system 值，跨版本统计需结合 type/framework 区分入口。
+
+Qoder IDE 子运行使用独立 session，与 CLI 的共享 session sidechain 协议不同。IDE 适配通过只读 SQLite `chat_record.parent_session_id`、`parent_tool_call_id` 和 `request_id` 确认委派；父 `Agent` 工具产生稳定的 invoke/result 日志，子事件保留原生 session、独立 turn 和 incoming invocation，连接到立即父工具。复用 session 时按原生 request 分开，嵌套工作分别保留 incoming/outgoing invocation。缺少或冲突的关联证据保持待定，不按 Agent 名称或相近时间绑定。
+
+子工具参数和结果来自对应 transcript，通过 SQLite 的精确 `toolCallId` 归属到原生请求；模型调用 ID、模型和 usage 来自该请求的 SQLite 元数据。IDE 1.37 的子 transcript 可能省略纯文本模型响应，此时保留模型调用及 Token，省略不可见的响应正文和 finish reason；父工具实际交付的结果仍作为 Agent result。异步受理不作为成功 Agent result。该适配不读取或解密数据库中的会话正文，生成的事件与其他输入经过相同的内容开关和脱敏处理；checkpoint 仅保存关联 ID 和源定位，不保存正文。
 
 工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
 
