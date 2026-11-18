@@ -114,6 +114,41 @@ test('different cold tail windows assign identical IDs to shared occurrences', a
   assert.deepEqual(ids(next.lines), secondIds.slice(2));
 });
 
+test.each(['cold', 'saved'])('bounded inclusive replay widens once and preserves occurrence IDs (%s cursor)', async mode => {
+  const chunkBytes = 1024 * 1024;
+  const time = '2026-11-16T10:00:00.900000001+08:00';
+  const duplicate = `${time} {"level":"ERROR","msg":"heartbeat"}\n`;
+  const earlier = '2026-11-16T10:00:00.100000001+08:00 ' + 'x'.repeat(8000) + '\n';
+  const format = podLogFormatter({metadata: {uid: 'uid-a', name: 'backend-a'}}, 'backend');
+  const cursor = mode === 'saved' ? freshLines(duplicate, undefined, format).cursor : undefined;
+  const expected = freshLines(duplicate.repeat(2), cursor, format);
+  const fetchBatch = (prefixBytes: number, replayLimits: number[]) => {
+    const source = Buffer.from(earlier.repeat(Math.ceil(prefixBytes / earlier.length)) + duplicate.repeat(2));
+    return readPodLogBatch(async (path: string) => {
+      const params = new URL(path, 'https://kube').searchParams;
+      const limit = Number(params.get('limitBytes'));
+      if (params.has('tailLines')) {
+        assert.equal(mode, 'cold');
+        assert.equal(limit, chunkBytes);
+        return duplicate;
+      }
+      assert.equal(params.get('sinceTime'), time);
+      replayLimits.push(limit);
+      return source.subarray(0, limit).toString();
+    }, '/pods/backend-a/log', 'backend', cursor, format);
+  };
+
+  const retryLimits: number[] = [];
+  assert.deepEqual(await fetchBatch(chunkBytes + 1, retryLimits), expected);
+  assert.deepEqual(retryLimits, [chunkBytes, 4 * chunkBytes]);
+
+  const exhaustedLimits: number[] = [];
+  const savedCursor = structuredClone(cursor);
+  await assert.rejects(fetchBatch(4 * chunkBytes + 1, exhaustedLimits), /4 MiB.*manual backfill/);
+  assert.deepEqual(exhaustedLimits, [chunkBytes, 4 * chunkBytes]);
+  assert.deepEqual(cursor, savedCursor);
+});
+
 test('pod-scoped bridges select only their own Pod and never fall back to the full namespace', () => {
   const selector = 'app.kubernetes.io/name=multica';
   const list = (scope: string, pod?: string) => new URL(podListPath('multica', selector, scope, pod), 'https://kube');

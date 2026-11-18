@@ -97,7 +97,11 @@ env:
     valueFrom: {fieldRef: {fieldPath: status.podIP}}
 ```
 
-本 Pod 的 metrics、health 和 pprof 使用来源 Pod 标签。通过 Service 采集远端端点时，采集器只能确定自己的身份，记录在 `collector_pod_*` 字段。工作区业务快照也采用采集器身份，按 workspace 和业务实体统计。Kubernetes 日志桥从被读取的 Pod 取得来源标签、`container_name` 和稳定的 `log_event_id`；首次读取时，日志桥从最近 1000 行定位起始时间戳，再从该时间戳回读，以区分同一时间、同一内容的多条日志。只要源容器仍保留该时间戳的完整日志组，且能在有界响应内回读，不同桥可以用同一事件 ID 去重。历史无标签记录可纳入全部来源的查询，按具体 Pod 下钻时仅选有对应标签的记录。
+本 Pod 的 metrics、health 和 pprof 使用来源 Pod 标签。通过 Service 采集远端端点时，采集器将自己的身份记录在 `collector_pod_*` 字段。工作区业务快照也采用采集器身份，按 workspace 和业务实体统计。历史无标签记录可纳入全部来源的查询，按具体 Pod 下钻时仅选有对应标签的记录。
+
+Kubernetes 日志桥从来源 Pod 取得 Pod 标签和 `container_name`。首次读取时，桥从最近 1000 行定位起始时间戳，再从这个时间戳回读，给时间和内容都相同的日志逐条编号。源容器仍保留完整时间戳组时，多个桥可以用相同的 `log_event_id` 为同一条日志去重。
+
+Kubernetes 可能按整秒处理回读请求。若同一秒内更早的日志填满 1 MiB 响应，导致游标无法前进，桥会扩大到 4 MiB 重试一次。如果响应仍然满且没有可推进的完整日志行，桥会输出需要人工回补的错误并保留原游标。
 
 Prometheus 查询应按部署、来源 Pod 和指标标签分别对 Counter 求增量，再跨 Pod 求和。计算集群 P95 时先合并相同桶边界的增量。Gauge 在每个时间桶先取各 Pod 的最新值，再根据指标语义汇总。SLS 字段索引需为用到的 Pod 标签和日志标识启用统计。
 

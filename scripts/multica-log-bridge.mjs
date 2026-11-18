@@ -6,6 +6,9 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+const LOG_CHUNK_BYTES = 1024 * 1024;
+const MAX_RESPONSE_BYTES = 4 * LOG_CHUNK_BYTES;
+
 /** The collector publishes a short-lived lease; missing state never enables collection. */
 export function isCollectionActive(value, now = Date.now()) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -74,27 +77,35 @@ export function freshLines(body, cursor = { time: '', counts: {} }, format = lin
 }
 
 export async function readPodLogBatch(request, resource, container, cursor, format) {
-  const query = new URLSearchParams({ container, timestamps: 'true', limitBytes: String(1024 * 1024) });
-  const read = async () => {
-    const body = await request(`${resource}?${query}`);
-    if (body.length && !body.includes('\n')) {
-      throw new Error('Log record exceeds bridge chunk size; source requires manual backfill');
-    }
-    return body;
+  const query = new URLSearchParams({ container, timestamps: 'true' });
+  const read = limit => {
+    query.set('limitBytes', String(limit));
+    return request(`${resource}?${query}`);
   };
   if (!cursor?.time) {
     // A cold tail may start in the middle of identical timestamped lines.
     // Use it only to locate the start time; assign ordinals on the inclusive
     // replay from that timestamp so independent bridges count the same prefix.
     query.set('tailLines', '1000');
-    const tail = await read();
-    const time = tail.slice(0, tail.lastIndexOf('\n')).split('\n').map(logTimestamp).find(Boolean);
-    if (!time) return freshLines(tail, cursor, format);
+    const tail = await read(LOG_CHUNK_BYTES);
+    // Only the timestamp prefix is needed for discovery, even on a cut line.
+    const time = tail.split('\n').map(logTimestamp).find(Boolean);
+    if (!time) {
+      if (tail && !tail.includes('\n')) throw new Error('Missing Kubernetes log timestamp; source requires manual backfill');
+      return freshLines(tail, cursor, format);
+    }
     cursor = { time, counts: {} };
     query.delete('tailLines');
   }
   query.set('sinceTime', cursor.time);
-  return freshLines(await read(), cursor, format);
+  for (const limit of [LOG_CHUNK_BYTES, MAX_RESPONSE_BYTES]) {
+    const body = await read(limit);
+    const result = freshLines(body, cursor, format);
+    if (result.lines.length || Buffer.byteLength(body) < limit) return result;
+    // A whole-second prefix or already-consumed boundary may fill the page.
+    // Replay from the same cursor so occurrence counts stay source-relative.
+  }
+  throw new Error('Kubernetes log replay filled 4 MiB without a new complete line; cursor unchanged, source requires manual backfill');
 }
 
 // Frame the original timestamped line without escaping or modifying its body.
@@ -129,7 +140,6 @@ async function main() {
   const credentials = process.env.KUBE_CREDENTIAL_DIRECTORY || '/var/run/collector-kube';
   const activationFile = process.env.MULTICA_ACTIVATION_STATE_FILE;
   const allowed = () => readActivationPermit(activationFile);
-  const maxBytes = 4 * 1024 * 1024;
   const statePath = path.join(directory, '.bridge-state.json');
   let state = {};
   let initialized = false;
@@ -146,7 +156,7 @@ async function main() {
         const chunks = []; let size = 0;
         response.on('data', (chunk) => {
           size += chunk.length;
-          if (size > maxBytes) req.destroy(new Error('Kubernetes log response exceeded limit'));
+          if (size > MAX_RESPONSE_BYTES) req.destroy(new Error('Kubernetes log response exceeded limit'));
           else chunks.push(chunk);
         });
         response.on('end', () => response.statusCode === 200
