@@ -25,7 +25,7 @@ describe('IDE native delegation through durable input and final spans', () => {
     await fs.writeFile(parent, [
       { type: 'user', sessionId: 'parent', uuid: 'prompt', timestamp: at(0), message: { role: 'user', content: `delegate ${secret}` } },
       model('root-call', 1, [{ type: 'tool_use', id: 'delegate', name: 'Agent', input: { prompt: `read ${secret}`, subagent_type: 'reader' } }]),
-      { type: 'user', sessionId: 'parent', timestamp: at(5), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'delegate', content: 'delivered child result' }] } },
+      { type: 'user', sessionId: 'parent', timestamp: at(5), toolUseResult: 'delivered child result', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'delegate', content: 'delivered child result' }] } },
       model('root-end', 6, [{ type: 'text', text: 'done' }]),
       { type: 'progress', timestamp: at(7), data: { hookEvent: 'Stop' } },
     ].map(row => JSON.stringify(row)).join('\n') + '\n');

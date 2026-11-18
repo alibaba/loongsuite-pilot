@@ -12,8 +12,9 @@ const nativeCall = (call: string, name = 'Read', input: object = { file_path: 'f
   type: 'assistant', sessionId: 'child', timestamp: at(200),
   message: { role: 'assistant', content: [{ type: 'tool_use', id: call, name, input }] },
 });
-const nativeResult = (call: string) => ({ type: 'user', sessionId: 'child', timestamp: at(250),
-  message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: call, content: 'synthetic-file-result' }] } });
+const nativeResult = (call: string, content = 'synthetic-file-result') => ({ type: 'user', sessionId: 'child', timestamp: at(250),
+  toolUseResult: content,
+  message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: call, content }] } });
 function detail(request = 'request-1', tool = 'read-1', session = 'child'): IdeDelegation {
   return { session, request, messages: [
     { id: `user-${request}`, role: 'user', gmt_create: epoch + 100 },
@@ -36,7 +37,7 @@ async function parent(call = 'delegate-1', options: Record<string, unknown> = {}
   for (const record of records) Object.defineProperty(record, QODER_NATIVE_SOURCE, { value: file });
   const native = [
     { ...nativeCall(call, 'Agent', records[0]!['gen_ai.tool.call.arguments']), sessionId: 'parent' },
-    { ...nativeResult(call), sessionId: 'parent' },
+    { ...nativeResult(call, 'delivered-native-result'), sessionId: 'parent' },
   ];
   await fs.appendFile(file, native.map(row => JSON.stringify(row)).join('\n') + '\n');
   return records;
@@ -140,6 +141,28 @@ describe('Qoder IDE native request delegation', () => {
     const batch = await new QoderIdeDelegations(async () => metadata).collect(await parent(), {});
     expect(batch.records.some(row => row['gen_ai.session.id'] === 'child')).toBe(false);
     expect(Object.values(batch.state)[0]!.done).not.toBe(true);
+  });
+
+  it('collects a text-only child from native request metadata and its verified foreground reply', async () => {
+    const metadata = detail(); metadata.messages = metadata.messages.filter(row => row.role !== 'tool').slice(0, 2); metadata.tokens = metadata.tokens.slice(0, 1);
+    await fs.unlink(path.join(root, 'child.jsonl'));
+    const batch = await new QoderIdeDelegations(async () => metadata).collect(await parent(), {});
+    const responses = batch.records.filter(row => row['gen_ai.session.id'] === 'child' && row['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]!['gen_ai.output.messages']).toEqual([{ role: 'assistant', parts: [{ type: 'text', content: 'delivered-native-result' }] }]);
+  });
+
+  it('resumes tool discovery across a transcript larger than the per-cycle byte budget and a restart', async () => {
+    let clock = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const prefix = Array.from({ length: 24 }, () => ({ type: 'progress', data: { detail: 'x'.repeat(200000) } }));
+    await child([...prefix, nativeCall('read-1'), nativeResult('read-1')] as any);
+    const first = await new QoderIdeDelegations(async () => detail()).collect(await parent(), {});
+    expect(first.records.filter(row => row['gen_ai.session.id'] === 'child')).toEqual([]);
+    expect(Object.values(first.state)[0]!.childScan!.offset).toBeGreaterThan(0);
+    clock += 6000;
+    const second = await new QoderIdeDelegations(async () => detail()).collect([], JSON.parse(JSON.stringify(first.state)));
+    expect(second.records.filter(row => row['event.name'] === 'llm.response')).toHaveLength(2);
+    expect(second.records.some(row => row['event.name'].startsWith('gen_ai.agent.'))).toBe(false);
   });
 
   it('rotates pending lookups beyond the per-cycle budget even as retries expire', async () => {

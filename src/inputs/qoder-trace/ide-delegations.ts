@@ -1,10 +1,10 @@
 import fs from 'node:fs/promises';
-import { constants } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { queryReadonly } from '../../utils/node-sqlite.js';
 import { resolveAllQoderDbPaths, isIdeaDbPath, parseTokenInfo, parseModelKey, parseRecordModelKey } from './sqlite-token-reader.js';
 import { buildLlmBoundaries, buildEventsFromBoundaries } from '../../../assets/hooks/qoder-hook-processor.mjs';
+import { readNativeToolRows, type NativeToolCursor } from './native-tool-rows.js';
 
 type RecordData = Record<string, any>;
 export const QODER_NATIVE_SOURCE = Symbol.for('loongsuite.qoder.native-source');
@@ -23,6 +23,8 @@ interface Work {
   search?: { nextIndex: number };
   actor?: string;
   incoming?: Record<string, string>;
+  parentScan?: NativeToolCursor;
+  childScan?: NativeToolCursor;
 }
 export interface IdeMessage {
   id: string; role: string; gmt_create: number; tool_call_id?: string;
@@ -87,27 +89,7 @@ export class QoderIdeDelegations {
     const before = JSON.stringify(saved ?? {});
     const emitted: RecordData[] = [];
     const available = [...input];
-    let bytes = 0;
-    const read = async (file: string): Promise<RecordData[]> => {
-      const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
-      try {
-        const stat = await handle.stat();
-        if (!stat.isFile() || stat.size > MAX_BYTES - bytes) throw new Error('IDE transcript byte budget');
-        bytes += stat.size;
-        const buffer = Buffer.alloc(stat.size);
-        let offset = 0;
-        while (offset < buffer.length) {
-          const read = await handle.read(buffer, offset, buffer.length - offset, offset);
-          if (!read.bytesRead) throw new Error('IDE transcript truncated');
-          offset += read.bytesRead;
-        }
-        const after = await handle.stat();
-        if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) throw new Error('IDE transcript changed');
-        const data = buffer.toString('utf8');
-        if (data && !data.endsWith('\n')) throw new Error('IDE partial transcript');
-        return data.split('\n').filter(Boolean).map(line => JSON.parse(line));
-      } finally { await handle.close(); }
-    };
+    const budget = { remaining: MAX_BYTES };
     const register = (records: RecordData[]) => {
       for (const record of records) {
         if (record['event.name'] !== 'tool.call' || record['gen_ai.agent.type'] !== 'qoder' || record['gen_ai.tool.name'] !== 'Agent') continue;
@@ -150,9 +132,11 @@ export class QoderIdeDelegations {
       try {
         let call = current.find(record => record['event.name'] === 'tool.call');
         let result = current.find(record => record['event.name'] === 'tool.result');
-        if (!call || (!result && !work.done)) {
-          const parent = await read(work.file);
-          for (const row of parent) for (const block of Array.isArray(row.message?.content) ? row.message.content : []) {
+        const parent = await readNativeToolRows(work.file, work.session, new Set([work.call]), work.parentScan, budget);
+        work.parentScan = parent.cursor;
+        let nativeReply = false;
+        if (parent.rows) {
+          for (const row of parent.rows) for (const block of Array.isArray(row.message?.content) ? row.message.content : []) {
             if (!call && block.type === 'tool_use' && block.name === 'Agent' && block.id === work.call) call = {
               'gen_ai.tool.call.arguments': block.input, 'gen_ai.tool.name': 'Agent', time_unix_nano: nano(Date.parse(row.timestamp)),
             };
@@ -160,6 +144,8 @@ export class QoderIdeDelegations {
               'gen_ai.tool.call.result': block.content, 'tool.result.status': block.is_error ? 'error' : 'success',
               time_unix_nano: nano(Date.parse(row.timestamp)),
             };
+            if (block.type === 'tool_result' && block.tool_use_id === work.call
+              && typeof row.toolUseResult === 'string' && row.toolUseResult === block.content) nativeReply = true;
           }
         }
         if (!call) { this.warn('ide-delegation-parent-unavailable'); continue; }
@@ -190,7 +176,8 @@ export class QoderIdeDelegations {
         // IDE 1.37 returns foreground Agent results as tool_result text. Never
         // treat run_in_background/async receipts as delivered Agent results.
         const delivered = result && call['gen_ai.tool.call.arguments']?.run_in_background !== true
-          && call['gen_ai.tool.call.arguments']?.async !== true;
+          && call['gen_ai.tool.call.arguments']?.async !== true
+          && (nativeReply || result['tool.result.status'] === 'error');
         if (delivered && result && !work.result) {
           const event = audit('gen_ai.agent.result', result);
           const body = result['gen_ai.tool.call.result'];
@@ -199,12 +186,20 @@ export class QoderIdeDelegations {
         }
         if (!peer || work.done || !delivered) continue;
         const childPath = path.join(path.dirname(work.file), `${peer.session}.jsonl`);
-        const directory = await fs.realpath(path.dirname(work.file));
-        if (path.dirname(await fs.realpath(childPath)) !== directory) throw new Error('IDE child path escapes transcript directory');
-        const native = await read(childPath);
+        const toolIds = new Set(peer.messages.filter(row => row.role === 'tool' && row.tool_call_id).map(row => row.tool_call_id!));
+        let native: RecordData[] = [];
+        if (toolIds.size) {
+          const directory = await fs.realpath(path.dirname(work.file));
+          if (path.dirname(await fs.realpath(childPath)) !== directory) throw new Error('IDE child path escapes transcript directory');
+          const child = await readNativeToolRows(childPath, peer.session, toolIds, work.childScan, budget);
+          work.childScan = child.cursor;
+          if (!child.rows) continue;
+          native = child.rows;
+        }
         const records = this.buildChild(work, peer, native, call, base, result);
         if (!records) continue;
         emitted.push(...records); available.push(...records); work.done = true;
+        delete work.parentScan; delete work.childScan;
         const oldKeys = new Set(Object.keys(state)); register(records);
         queue.push(...Object.keys(state).filter(key => !oldKeys.has(key)));
       } catch { this.warn('ide-delegation-source-pending'); }
