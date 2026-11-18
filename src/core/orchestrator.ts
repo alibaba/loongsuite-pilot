@@ -1015,15 +1015,7 @@ export class Orchestrator extends EventEmitter {
     }
 
     if (flushers.length === 0) {
-      logger.warn('no flushers enabled, using JSONL fallback');
-      const fallback = new JsonlFlusher({
-        enabled: true,
-        outputDir: path.join(this.dataDir, 'logs', 'output'),
-        rotateDaily: true,
-        maxFileSizeMb: 100,
-      });
-      await fallback.start().catch(err => logger.warn('jsonl fallback flusher start failed', { error: String(err) }));
-      flushers.push(fallback);
+      logger.warn('no flushers enabled, collected events will not be exported');
     }
 
     return flushers.length === 1 ? flushers[0] : new MultiFlusher(flushers);
