@@ -161,6 +161,12 @@ pub trait BaseFlusher: Send + Sync {
         logical_bytes: Option<Vec<f64>>,
     ) -> Result<(), FlushError>;
 
+    /// A sink that can deliver a native SDK batch directly may borrow its bytes
+    /// for the duration of the synchronous callback. Other sinks use typed delivery.
+    async fn send_sdk_activity(&self, _rows: &[&[u8]]) -> Option<Result<(), FlushError>> {
+        None
+    }
+
     /// Callback delivery persists these already serialized activity bytes.
     /// Other protocols retain their existing conversion.
     async fn send_prepared_batch(

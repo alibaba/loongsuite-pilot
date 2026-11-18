@@ -4,7 +4,6 @@ use crate::checkpoints::StateStore;
 use crate::interceptor::{ToolInterceptPhase, ToolVerdictAction, ToolVerdictKey, ToolVerdictStore};
 use crate::sdk::abi;
 use crate::sdk::host_loader::{self, Library};
-use crate::types::AgentActivityEntry;
 use serde_json::Value;
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -255,18 +254,12 @@ unsafe extern "C" fn on_activity(
         let (input, runtime, manager) = (ctx.input, &ctx.runtime, &ctx.manager);
         let manager = manager.upgrade().ok_or("Pilot output stopped")?;
         let rows = unsafe { std::slice::from_raw_parts(rows, len) };
-        let mut entries = Vec::with_capacity(len);
-        let mut encoded = Vec::with_capacity(len);
-        for row in rows {
-            let bytes = unsafe { std::slice::from_raw_parts(row.data, row.len) };
-            entries.push(
-                serde_json::from_slice::<AgentActivityEntry>(bytes)
-                    .map_err(|_| "invalid SDK activity JSON")?,
-            );
-            encoded.push(bytes.to_vec());
-        }
+        let rows = rows
+            .iter()
+            .map(|row| unsafe { std::slice::from_raw_parts(row.data, row.len) })
+            .collect::<Vec<_>>();
         runtime
-            .block_on(manager.accept_sdk_batch(input, entries, encoded))
+            .block_on(manager.accept_sdk_activity(input, &rows))
             .map_err(|_| "Pilot output failed")
     });
     if matches!(result, Ok(Ok(()))) {

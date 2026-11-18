@@ -3,7 +3,7 @@
 //! witnesses retain no message content and survive ordinary budget boundaries.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,35 +41,36 @@ pub(super) fn inject_open_fault(f: impl FnMut(&Path) + 'static) -> OpenFaultGuar
     OpenFaultGuard
 }
 pub fn open_regular(path: &Path) -> std::io::Result<File> {
+    open_versioned(path).map(|(file, _)| file)
+}
+
+pub(super) fn open_versioned(path: &Path) -> std::io::Result<(File, FileVersion)> {
     #[cfg(test)]
     OPEN_FAULT.with(|fault| {
         if let Some(hook) = fault.borrow_mut().as_mut() {
             hook(path)
         }
     });
-    let mut o = OpenOptions::new();
-    o.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        o.custom_flags(libc::O_NONBLOCK);
-    }
-    crate::utils::source_access::check(path)?;
-    let f = o.open(path)?;
-    crate::utils::source_access::verify_open(&f, path)?;
-    version(&f)?;
-    Ok(f)
+    let file = crate::utils::source_access::open_scanner_file(path)?;
+    let stat = version(&file)?;
+    Ok((file, stat))
 }
 pub fn version(f: &File) -> std::io::Result<FileVersion> {
-    let id = crate::utils::file_identity::identity_from_open(f)?;
     let m = f.metadata()?;
+    if !m.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "JSONL source is not a regular file",
+        ));
+    }
     #[cfg(unix)]
-    let changed = {
+    let (dev, ino, changed) = {
         use std::os::unix::fs::MetadataExt;
-        (m.ctime(), m.ctime_nsec())
+        (m.dev(), m.ino(), (m.ctime(), m.ctime_nsec()))
     };
     #[cfg(windows)]
-    let changed = {
+    let (dev, ino, changed) = {
+        let id = crate::utils::file_identity::identity_from_open(f)?;
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{
             FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
@@ -87,11 +88,11 @@ pub fn version(f: &File) -> std::io::Result<FileVersion> {
         {
             return Err(std::io::Error::last_os_error());
         }
-        (b.ChangeTime, 0)
+        (id.dev, id.ino, (b.ChangeTime, 0))
     };
     Ok(FileVersion {
-        dev: id.dev,
-        ino: id.ino,
+        dev,
+        ino,
         size: m.len(),
         modified: m
             .modified()?
@@ -270,9 +271,8 @@ pub(super) fn scan_lines_with_file(
     mut emit: impl FnMut(Line, &mut File, &mut ScanBudget, u64) -> bool,
 ) -> std::io::Result<ScanBatch> {
     let (start, end) = (range.start, range.end);
-    let mut f = open_regular(path)?;
+    let (mut f, initial) = open_versioned(path)?;
     budget.metrics.source_files_opened += 1;
-    let initial = version(&f)?;
     let mut position = start;
     let mut line_start = start;
     let mut bytes = Vec::new();
@@ -486,7 +486,7 @@ fn checked_batch(
     pending: Option<PendingLine>,
 ) -> std::io::Result<ScanBatch> {
     let after = version(f)?;
-    let published = version(&open_regular(path)?)?;
+    let (_, published) = open_versioned(path)?;
     if after.ino != initial.ino
         || after.dev != initial.dev
         || published.ino != initial.ino
@@ -507,6 +507,7 @@ fn checked_batch(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs::OpenOptions;
     use std::io::Write;
     fn run(
         p: &Path,

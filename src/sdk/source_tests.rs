@@ -43,6 +43,8 @@ fn source_capability_checks_opened_files_and_component_boundaries() {
         ErrorKind::PermissionDenied
     );
     assert!(source_access::read_dir(&outside).is_err());
+    assert!(source_access::open_scanner_file(&inside.join("input")).is_ok());
+    assert!(source_access::open_scanner_file(&inside.join("../authorized-foreign/input")).is_err());
 }
 
 #[cfg(unix)]
@@ -57,6 +59,11 @@ fn source_symlinks_and_owned_state_symlinks_are_rejected() {
     std::os::unix::fs::symlink(&foreign, data.join("input")).unwrap();
     let _guard = Installed::new(scope(&data, 8, 4096));
     assert!(source_access::open(data.join("input")).is_err());
+    assert!(source_access::open_scanner_file(&data.join("input")).is_err());
+    std::fs::create_dir(data.join("nested")).unwrap();
+    std::fs::write(data.join("nested/input"), "authorized").unwrap();
+    std::os::unix::fs::symlink(data.join("nested"), data.join("alias")).unwrap();
+    assert!(source_access::open_scanner_file(&data.join("alias/input")).is_err());
     assert!(source_access::private_path(&data.join("input")).is_err());
     assert_eq!(std::fs::read_to_string(foreign).unwrap(), "private");
 }
