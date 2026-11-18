@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { queryReadonly } from '../../utils/node-sqlite.js';
+import { loadDatabaseSync, type DatabaseSyncInstance } from '../../utils/node-sqlite.js';
 import { resolveAllQoderDbPaths, isIdeaDbPath, parseTokenInfo, parseModelKey, parseRecordModelKey } from './sqlite-token-reader.js';
 import { buildLlmBoundaries, buildEventsFromBoundaries } from '../../../assets/hooks/qoder-hook-processor.mjs';
 import { NativeToolRowReader, type NativeToolCursor } from './native-tool-rows.js';
@@ -10,7 +10,11 @@ type RecordData = Record<string, any>;
 export const QODER_NATIVE_SOURCE = Symbol.for('loongsuite.qoder.native-source');
 const MAX_WORK = 4096;
 const MAX_BYTES = 4 * 1024 * 1024;
-const MAX_MESSAGES = 256;
+const MESSAGE_PAGE_SIZE = 32;
+const MAX_MESSAGES = 4096;
+const MAX_METADATA_BYTES = 4 * 1024 * 1024;
+const INLINE_TOOL_METADATA_BYTES = 256 * 1024;
+const MAX_TOOL_METADATA_BYTES = 16 * 1024 * 1024;
 const MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const id = (value: unknown): value is string => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,512}$/.test(value);
@@ -20,6 +24,7 @@ interface Work {
   id: string; session: string; turn: string; call: string; trace: string; span: string;
   file: string; cwd?: string; at: number; done?: boolean; invoke?: boolean; result?: boolean;
   peer?: string; request?: string;
+  diagnostic?: string;
   search?: { nextIndex: number };
   actor?: string;
   incoming?: Record<string, string>;
@@ -33,36 +38,88 @@ export interface IdeMessage {
 export interface IdeDelegation {
   session: string; request: string; messages: IdeMessage[];
   tokens: Array<{ messageId?: string; gmtCreate: number; model?: string; inputTokens: number; outputTokens: number; cacheReadTokens: number }>;
+  /** A known relationship may be emitted even when its message inventory is deferred. */
+  complete?: boolean;
+  diagnostic?: 'message-limit' | 'metadata-byte-limit' | 'tool-metadata-byte-limit' | 'invalid-metadata' | 'metadata-query-failed';
 }
 
 /** Only native relationship/usage metadata is queried. Encrypted bodies stay untouched. */
 export async function readIdeDelegation(session: string, call: string, search = { nextIndex: 0 }): Promise<IdeDelegation | null> {
   const paths = resolveAllQoderDbPaths().filter(file => !isIdeaDbPath(file)).sort();
   const start = Number.isSafeInteger(search.nextIndex) && search.nextIndex >= 0 ? search.nextIndex : 0;
+  const Database = loadDatabaseSync();
+  if (!Database) return null;
   for (let i = 0; i < Math.min(paths.length, 4); i++) {
     const index = (start + i) % paths.length; const file = paths[index]!;
     search.nextIndex = (index + 1) % paths.length;
+    let db: DatabaseSyncInstance | undefined;
+    let found: { session_id: string; request_id: string; record_extra?: string } | undefined;
+    const deferred = (diagnostic?: IdeDelegation['diagnostic']): IdeDelegation => ({ session: found!.session_id,
+      request: found!.request_id, messages: [], tokens: [], complete: false, ...(diagnostic ? { diagnostic } : {}) });
     try {
-      const matches = await queryReadonly<{ session_id: string; request_id: string }>(file,
-        `SELECT session_id,request_id FROM chat_record WHERE parent_session_id=? AND parent_tool_call_id=? LIMIT 2`, [session, call]);
+      db = new Database(file, { readOnly: true });
+      // One read-only snapshot avoids mixing pages with concurrent SQLite writes.
+      db.exec('BEGIN');
+      const matches = db.prepare(`SELECT session_id,request_id,
+        CASE WHEN length(CAST(extra AS BLOB)) <= 16384 THEN extra END AS record_extra
+        FROM chat_record WHERE parent_session_id=? AND parent_tool_call_id=? LIMIT 2`).all(session, call) as Array<{
+          session_id: string; request_id: string; record_extra?: string }>;
       if (!matches.length) continue;
       if (matches.length !== 1 || !id(matches[0]!.session_id) || matches[0]!.session_id === session || !id(matches[0]!.request_id)) return null;
-      const peer = matches[0]!;
-      const messages = await queryReadonly<IdeMessage>(file,
-        `SELECT cm.id,cm.role,cm.gmt_create,cm.token_info,cm.model_info,cr.extra AS record_extra,
-         CASE WHEN json_valid(cm.tool_result) THEN json_extract(cm.tool_result,'$.toolCallId') END AS tool_call_id
-         FROM chat_message cm JOIN chat_record cr ON cr.request_id=cm.request_id
-         WHERE cm.session_id=? AND cm.request_id=? ORDER BY cm.rowid LIMIT 257`, [peer.session_id, peer.request_id]);
-      if (!messages.length || messages.length > MAX_MESSAGES || messages.some(row => !id(row.id) || !Number.isFinite(Number(row.gmt_create)))) return null;
-      const tokens = messages.flatMap(row => {
-        if (row.role !== 'assistant' || !row.token_info || row.token_info.length > 16384) return [];
-        const usage = parseTokenInfo(row.token_info);
-        return usage ? [{ messageId: row.id, gmtCreate: Number(row.gmt_create),
-          model: parseModelKey(row.model_info) ?? parseRecordModelKey(row.record_extra),
-          inputTokens: usage.promptTokens, outputTokens: usage.completionTokens, cacheReadTokens: usage.cachedTokens }] : [];
-      });
-      return { session: peer.session_id, request: peer.request_id, messages, tokens };
-    } catch { /* Schema absent, transient DB failures and older IDEs remain retryable. */ }
+      found = matches[0]!;
+      const stmt = db.prepare(`SELECT cm.rowid AS native_rowid,
+        CASE WHEN length(CAST(cm.id AS BLOB)) <= 512 THEN cm.id END AS id,
+        CASE WHEN length(CAST(cm.role AS BLOB)) <= 64 THEN cm.role END AS role, cm.gmt_create,
+        CASE WHEN length(CAST(cm.token_info AS BLOB)) <= 16384 THEN cm.token_info END AS token_info,
+        CASE WHEN length(CAST(cm.model_info AS BLOB)) <= 16384 THEN cm.model_info END AS model_info,
+        CASE WHEN length(CAST(cm.tool_result AS BLOB)) <= ? AND json_valid(cm.tool_result)
+          THEN json_extract(cm.tool_result,'$.toolCallId') END AS tool_call_id,
+        CASE WHEN length(CAST(cm.tool_result AS BLOB)) > ? THEN 1 ELSE 0 END AS tool_metadata_large,
+        CASE WHEN length(CAST(cm.tool_result AS BLOB)) > ? THEN 1 ELSE 0 END AS tool_metadata_oversized
+        FROM chat_message cm WHERE cm.session_id=? AND cm.request_id=? AND cm.rowid>?
+        ORDER BY cm.rowid LIMIT ?`);
+      const largeTool = db.prepare(`SELECT CASE WHEN json_valid(tool_result)
+        THEN json_extract(tool_result,'$.toolCallId') END AS tool_call_id
+        FROM chat_message WHERE rowid=? AND session_id=? AND request_id=?`);
+      const messages: IdeMessage[] = []; const tokens: IdeDelegation['tokens'] = [];
+      let rowid = 0; let metadataBytes = 0;
+      const recordModel = parseRecordModelKey(found.record_extra);
+      for (;;) {
+        const rows = stmt.all(INLINE_TOOL_METADATA_BYTES, INLINE_TOOL_METADATA_BYTES, MAX_TOOL_METADATA_BYTES,
+          found.session_id, found.request_id, rowid, MESSAGE_PAGE_SIZE) as Array<IdeMessage & {
+            native_rowid: number; tool_metadata_large: number; tool_metadata_oversized: number }>;
+        for (const row of rows) {
+          if (messages.length >= MAX_MESSAGES) return deferred('message-limit');
+          if (row.tool_metadata_oversized && row.role === 'tool') return deferred('tool-metadata-byte-limit');
+          if (row.tool_metadata_large && row.role === 'tool') {
+            const result = largeTool.all(row.native_rowid, found.session_id, found.request_id) as Array<{ tool_call_id?: string }>;
+            row.tool_call_id = result[0]?.tool_call_id;
+            // Keep a large JSON extraction from sharing a synchronous page with another one.
+            await new Promise<void>(resolve => setImmediate(resolve));
+          }
+          if (!id(row.id) || typeof row.role !== 'string' || !Number.isFinite(Number(row.gmt_create))
+            || !Number.isSafeInteger(row.native_rowid) || row.native_rowid <= rowid
+            || (row.tool_call_id != null && !id(row.tool_call_id))) return deferred('invalid-metadata');
+          rowid = row.native_rowid;
+          const message: IdeMessage = { id: row.id, role: row.role, gmt_create: Number(row.gmt_create),
+            ...(row.tool_call_id ? { tool_call_id: row.tool_call_id } : {}) };
+          const usage = row.role === 'assistant' && row.token_info ? parseTokenInfo(row.token_info) : null;
+          const candidateModel = usage ? (parseModelKey(row.model_info) ?? recordModel) : undefined;
+          const token = usage ? { messageId: row.id, gmtCreate: Number(row.gmt_create),
+            ...(candidateModel && candidateModel.length <= 512 ? { model: candidateModel } : {}),
+            inputTokens: usage.promptTokens, outputTokens: usage.completionTokens, cacheReadTokens: usage.cachedTokens } : undefined;
+          metadataBytes += Buffer.byteLength(JSON.stringify(message)) + (token ? Buffer.byteLength(JSON.stringify(token)) : 0);
+          if (metadataBytes > MAX_METADATA_BYTES) return deferred('metadata-byte-limit');
+          messages.push(message); if (token) tokens.push(token);
+        }
+        if (rows.length < MESSAGE_PAGE_SIZE) break;
+        // DatabaseSync returns one bounded page synchronously; yield between pages.
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      if (!messages.length) return deferred();
+      return { session: found.session_id, request: found.request_id, messages, tokens, complete: true };
+    } catch { if (found) return deferred('metadata-query-failed'); /* Missing/locked DB remains retryable. */ }
+    finally { try { db?.close(); } catch { /* Closing a read-only connection is best effort. */ } }
   }
   return null;
 }
@@ -73,7 +130,7 @@ export class QoderIdeDelegations {
   private cursor = 0;
   private readonly nativeRows = new NativeToolRowReader();
   constructor(private readonly resolve = readIdeDelegation,
-    private readonly warn: (reason: string) => void = () => {}) {}
+    private readonly warn: (reason: string, details?: Record<string, string>) => void = () => {}) {}
 
   async collect(input: RecordData[], saved: unknown): Promise<{ records: RecordData[]; state: Record<string, Work>; changed: boolean }> {
     const now = Date.now();
@@ -150,6 +207,7 @@ export class QoderIdeDelegations {
       if (work.done && work.result) { release(work); continue; }
       handled++;
       this.cursor = (keys.indexOf(work.id) + 1) % Math.max(1, keys.length);
+      let retryAfter = 5000;
       try {
         let call = current.find(record => record['event.name'] === 'tool.call');
         let result = current.find(record => record['event.name'] === 'tool.result');
@@ -181,6 +239,11 @@ export class QoderIdeDelegations {
         // do not enable this adapter for JetBrains or missing native evidence.
         if (!peer || peer.session === work.session) { release(work); continue; }
         work.peer = peer.session; work.request = peer.request;
+        if (peer.diagnostic) {
+          if (work.diagnostic !== peer.diagnostic) this.warn(`ide-delegation-${peer.diagnostic}`,
+            { parentSession: work.session, toolCallId: work.call, childSession: peer.session, requestId: peer.request });
+          work.diagnostic = peer.diagnostic; retryAfter = 60000;
+        } else delete work.diagnostic;
         const identity = { 'gen_ai.agent.id': work.session, 'gen_ai.agent.invocation.id': work.id,
           ...(work.peer ? { 'gen_ai.agent.peer.id': work.peer } : {}),
           ...(call['gen_ai.tool.call.arguments']?.subagent_type ? { 'gen_ai.agent.peer.name': call['gen_ai.tool.call.arguments'].subagent_type } : {}) };
@@ -211,6 +274,7 @@ export class QoderIdeDelegations {
           if (typeof body === 'string') event['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: body }] }];
           emitted.push(event); work.result = true;
         }
+        if (peer.complete === false) { this.nativeRows.releaseOwner(`${work.id}:child`); continue; }
         if (work.done || !delivered) { this.nativeRows.releaseOwner(`${work.id}:child`); continue; }
         const childPath = path.join(path.dirname(work.file), `${peer.session}.jsonl`);
         const toolIds = new Set(peer.messages.filter(row => row.role === 'tool' && row.tool_call_id).map(row => row.tool_call_id!));
@@ -232,7 +296,7 @@ export class QoderIdeDelegations {
         queue.push(...Object.keys(state).filter(key => !oldKeys.has(key)));
       } catch { release(work); this.warn('ide-delegation-source-pending'); }
       finally {
-        this.retry.set(work.id, now + 5000);
+        this.retry.set(work.id, now + retryAfter);
         if (this.retry.size > MAX_WORK) this.retry.delete(this.retry.keys().next().value!);
       }
     }
@@ -254,9 +318,11 @@ export class QoderIdeDelegations {
       }
     }
     const users = peer.messages.filter(row => row.role === 'user');
-    const assistants = peer.messages.filter(row => row.role === 'assistant');
+    const assistantIndices = peer.messages.flatMap((row, index) => row.role === 'assistant' ? [index] : []);
+    const assistants = assistantIndices.map(index => peer.messages[index]!);
+    const tokens = new Map(peer.tokens.map(token => [token.messageId, token]));
     if (users.length !== 1 || !assistants.length || peer.messages.at(-1)?.role !== 'assistant'
-      || assistants.some(row => !peer.tokens.some(token => token.messageId === row.id))) return null;
+      || assistants.some(row => !tokens.has(row.id))) return null;
     const prompt = call['gen_ai.tool.call.arguments']?.prompt;
     if (typeof prompt !== 'string' || !prompt) return null;
     const rows: RecordData[] = [{ type: 'user', sessionId: peer.session, uuid: users[0]!.id,
@@ -265,11 +331,11 @@ export class QoderIdeDelegations {
       const message = assistants[i]!; const next = assistants[i + 1];
       // The native request's message ordering owns the model/tool grouping.
       // Exact toolCallId values connect that inventory to transcript bodies.
-      const start = peer.messages.indexOf(message) + 1;
-      const end = next ? peer.messages.indexOf(next) : peer.messages.length;
+      const start = assistantIndices[i]! + 1;
+      const end = next ? assistantIndices[i + 1]! : peer.messages.length;
       const associated = peer.messages.slice(start, end).filter(row => row.role === 'tool');
       if (associated.some(row => !row.tool_call_id || !tools.get(row.tool_call_id)?.call || !tools.get(row.tool_call_id)?.result)) return null;
-      const usage = peer.tokens.find(row => row.messageId === message.id)!;
+      const usage = tokens.get(message.id)!;
       const content = associated.flatMap(row => tools.get(row.tool_call_id!)!.call!.message.content);
       rows.push({ type: 'assistant', sessionId: peer.session, uuid: message.id,
         timestamp: new Date(Number(message.gmt_create)).toISOString(), message: { id: message.id, role: 'assistant', model: usage.model,
@@ -279,7 +345,7 @@ export class QoderIdeDelegations {
       for (const row of associated) rows.push(tools.get(row.tool_call_id!)!.result!);
     }
     const turn = hash(['qoder-ide-request', peer.session, peer.request]);
-    const records = buildEventsFromBoundaries(buildLlmBoundaries([], rows), rows, rows, turn, peer.session, 'qoder', {
+    let records = buildEventsFromBoundaries(buildLlmBoundaries([], rows), rows, rows, turn, peer.session, 'qoder', {
       userId: base['user.id'], userIdentity: { name: base['user.name'], email: base['user.email'] },
       resourceAttributes: base.resourceAttributes ?? {},
     }, work.cwd);
@@ -289,16 +355,18 @@ export class QoderIdeDelegations {
     // reuse it for intermediate calls, failures or asynchronous receipts.
     const requests = records.filter(record => record['event.name'] === 'llm.request');
     if (requests.length !== assistants.length) return null;
+    const responses = new Set(records.filter(record => record['event.name'] === 'llm.response')
+      .map(record => record['gen_ai.response.id']));
+    const missingResponses = new Map<RecordData, RecordData>();
     for (let i = 0; i < assistants.length; i++) {
       const message = assistants[i]!;
-      if (records.some(record => record['event.name'] === 'llm.response' && record['gen_ai.response.id'] === message.id)) continue;
-      const request = requests[i]!; const usage = peer.tokens.find(row => row.messageId === message.id)!;
-      records.splice(records.indexOf(request) + 1, 0, { ...request, 'event.name': 'llm.response',
+      if (responses.has(message.id)) continue;
+      const request = requests[i]!; const usage = tokens.get(message.id)!;
+      const response: RecordData = { ...request, 'event.name': 'llm.response',
         'gen_ai.response.id': message.id, ...(usage.model ? { 'gen_ai.response.model': usage.model } : {}),
         'gen_ai.usage.input_tokens': usage.inputTokens, 'gen_ai.usage.output_tokens': usage.outputTokens,
         'gen_ai.usage.cache_read.input_tokens': usage.cacheReadTokens,
-        time_unix_nano: nano(Number(message.gmt_create)), 'agent.source': 'qoder-ide-sqlite-metadata' });
-      const response = records[records.indexOf(request) + 1]!;
+        time_unix_nano: nano(Number(message.gmt_create)), 'agent.source': 'qoder-ide-sqlite-metadata' };
       delete response['gen_ai.input.messages_delta'];
       const delivered = result?.['gen_ai.tool.call.result'];
       if (i === assistants.length - 1 && result?.['tool.result.status'] === 'success'
@@ -306,7 +374,11 @@ export class QoderIdeDelegations {
         response['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: delivered }] }];
         response['agent.source'] = 'qoder-ide-agent-result';
       }
+      missingResponses.set(request, response);
     }
+    if (missingResponses.size) records = records.flatMap(record => {
+      const response = missingResponses.get(record); return response ? [record, response] : [record];
+    });
     for (let i = 0; i < records.length; i++) {
       const record = records[i]!;
       Object.assign(record, { 'event.id': hash([turn, i, record['event.name'], record['gen_ai.tool.call.id']]),

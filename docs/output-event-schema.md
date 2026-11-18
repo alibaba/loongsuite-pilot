@@ -196,6 +196,8 @@ Child tool bodies come from their transcript and are assigned to native requests
 
 IDE delegation scans limit both individual transcript rows and the combined required tool rows to 16 MiB. When a limit is exceeded, the source and pending state are retained and a warning is recorded rather than reporting an incomplete child execution as complete. Scans use per-cycle byte budgets and resume after restart.
 
+Child-request SQLite metadata is paged within one read-only snapshot, with limits of 4096 rows, 4 MiB of normalized metadata and 16 MiB per tool metadata value. When a limit is reached, confirmed invocations and actually delivered results are still reported; child execution remains pending, the reason and identifiers are logged, and retries back off. Collection can resume if the source returns within the limits.
+
 Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. `workspace.*` and any inferred `git.*` fields are collected independently from message extraction.
 
 ## OpenClaw Session Key

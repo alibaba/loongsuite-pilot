@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { QoderIdeDelegations, QODER_NATIVE_SOURCE, type IdeDelegation } from '../../../src/inputs/qoder-trace/ide-delegations.js';
+import { QoderIdeDelegations, QODER_NATIVE_SOURCE, readIdeDelegation, type IdeDelegation } from '../../../src/inputs/qoder-trace/ide-delegations.js';
 import { NativeToolRowReader, type NativeToolCursor } from '../../../src/inputs/qoder-trace/native-tool-rows.js';
+import { loadDatabaseSync } from '../../../src/utils/node-sqlite.js';
+import * as sqliteTokenReader from '../../../src/inputs/qoder-trace/sqlite-token-reader.js';
 
 let root: string;
 const epoch = Date.now() - 60000;
@@ -53,6 +55,86 @@ beforeEach(async () => {
 afterEach(async () => { vi.restoreAllMocks(); await fs.rm(path.dirname(root), { recursive: true, force: true }); });
 
 describe('Qoder IDE native request delegation', () => {
+  it('emits known invocation and result on message limit, warns once, and recovers after restart', async () => {
+    const Database = loadDatabaseSync(); if (!Database) throw new Error('node:sqlite required');
+    const dbPath = path.join(path.dirname(root), 'limit.db'); const db = new Database(dbPath);
+    try {
+      db.exec(`CREATE TABLE chat_record (session_id TEXT, request_id TEXT, parent_session_id TEXT, parent_tool_call_id TEXT, extra TEXT);
+        CREATE TABLE chat_message (id TEXT, role TEXT, gmt_create INTEGER, token_info TEXT, model_info TEXT, tool_result TEXT, session_id TEXT, request_id TEXT)`);
+      vi.spyOn(sqliteTokenReader, 'resolveAllQoderDbPaths').mockReturnValue([dbPath]);
+      db.prepare('INSERT INTO chat_record VALUES (?, ?, ?, ?, ?)').run('child', 'request-1', 'parent', 'delegate-1', null);
+      const insert = db.prepare('INSERT INTO chat_message VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      const put = (id: string, role: string, tool?: string) => insert.run(id, role, epoch + 200,
+        role === 'assistant' ? JSON.stringify({ prompt_tokens: 10, completion_tokens: 2, cached_tokens: 1 }) : null,
+        null, tool ? JSON.stringify({ toolCallId: tool }) : null, 'child', 'request-1');
+      db.exec('BEGIN'); put('user', 'user'); put('model-1', 'assistant'); put('tool-1', 'tool', 'read-1');
+      for (let i = 0; i < 4092; i++) put(`extra-${i}`, 'assistant');
+      put('model-2', 'assistant'); db.exec('COMMIT');
+      expect((await readIdeDelegation('parent', 'delegate-1'))?.messages).toHaveLength(4096);
+      put('extra-late', 'assistant');
+      let clock = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => clock);
+      const warnings: string[] = []; const reader = new QoderIdeDelegations(undefined, reason => warnings.push(reason));
+      const first = await reader.collect(await parent(), {});
+      expect(first.records.map(row => row['event.name'])).toEqual(['gen_ai.agent.invoke', 'gen_ai.agent.result']);
+      expect(warnings).toEqual(['ide-delegation-message-limit']);
+      expect(Object.values(first.state)[0]!.diagnostic).toBe('message-limit');
+      clock += 6000;
+      expect((await reader.collect([], first.state)).records).toEqual([]);
+      expect(warnings).toHaveLength(1);
+      db.exec("DELETE FROM chat_message WHERE id LIKE 'extra-%'");
+      const retry = await new QoderIdeDelegations().collect([], JSON.parse(JSON.stringify(first.state)));
+      expect(retry.records.filter(row => row['event.name'] === 'llm.response')).toHaveLength(2);
+      expect(retry.records.some(row => row['event.name'].startsWith('gen_ai.agent.'))).toBe(false);
+      expect(Object.values(retry.state)[0]!.diagnostic).toBeUndefined();
+      expect(JSON.stringify(retry.state)).not.toContain(secret);
+    } finally { db.close(); }
+  });
+
+  it('reads one SQLite snapshot when messages are appended between pages', async () => {
+    const Database = loadDatabaseSync(); if (!Database) throw new Error('node:sqlite required');
+    const dbPath = path.join(path.dirname(root), 'snapshot.db'); const db = new Database(dbPath);
+    try {
+      db.exec(`PRAGMA journal_mode=WAL;
+        CREATE TABLE chat_record (session_id TEXT, request_id TEXT, parent_session_id TEXT, parent_tool_call_id TEXT, extra TEXT);
+        CREATE TABLE chat_message (id TEXT, role TEXT, gmt_create INTEGER, token_info TEXT, model_info TEXT, tool_result TEXT, session_id TEXT, request_id TEXT)`);
+      vi.spyOn(sqliteTokenReader, 'resolveAllQoderDbPaths').mockReturnValue([dbPath]);
+      db.prepare('INSERT INTO chat_record VALUES (?, ?, ?, ?, ?)').run('child', 'request-1', 'parent', 'delegate-1', null);
+      const insert = db.prepare('INSERT INTO chat_message VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      const put = (id: string, role: string) => insert.run(id, role, epoch + 200, null, null, null, 'child', 'request-1');
+      db.exec('BEGIN'); put('user', 'user'); for (let i = 0; i < 32; i++) put(`assistant-${i}`, 'assistant'); db.exec('COMMIT');
+      setImmediate(() => put('late-assistant', 'assistant'));
+      const snapshot = await readIdeDelegation('parent', 'delegate-1');
+      expect(snapshot?.messages).toHaveLength(33);
+      const next = await readIdeDelegation('parent', 'delegate-1');
+      expect(next?.messages).toHaveLength(34);
+      expect(next?.messages.at(-1)?.id).toBe('late-assistant');
+    } finally { db.close(); }
+  });
+
+  it('reads a large native tool metadata ID without retaining its payload', async () => {
+    const Database = loadDatabaseSync(); if (!Database) throw new Error('node:sqlite required');
+    const dbPath = path.join(path.dirname(root), 'large-tool.db'); const db = new Database(dbPath);
+    try {
+      db.exec(`CREATE TABLE chat_record (session_id TEXT, request_id TEXT, parent_session_id TEXT, parent_tool_call_id TEXT, extra TEXT);
+        CREATE TABLE chat_message (id TEXT, role TEXT, gmt_create INTEGER, token_info TEXT, model_info TEXT, tool_result TEXT, session_id TEXT, request_id TEXT)`);
+      vi.spyOn(sqliteTokenReader, 'resolveAllQoderDbPaths').mockReturnValue([dbPath]);
+      db.prepare('INSERT INTO chat_record VALUES (?, ?, ?, ?, ?)').run('child', 'request-1', 'parent', 'delegate-1', null);
+      const insert = db.prepare('INSERT INTO chat_message VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      insert.run('user', 'user', epoch, null, null, null, 'child', 'request-1');
+      insert.run('tool', 'tool', epoch + 1, null, null,
+        JSON.stringify({ toolCallId: 'read-1', payload: 'synthetic-long-result-'.repeat(60000) }), 'child', 'request-1');
+      const peer = await readIdeDelegation('parent', 'delegate-1');
+      expect(peer?.complete).toBe(true);
+      expect(peer?.messages[1]?.tool_call_id).toBe('read-1');
+      expect(JSON.stringify(peer)).not.toContain('synthetic-long-result');
+      db.prepare('UPDATE chat_message SET tool_result=? WHERE id=?').run(
+        JSON.stringify({ toolCallId: 'read-1', payload: 'x'.repeat(17 * 1024 * 1024) }), 'tool');
+      expect((await readIdeDelegation('parent', 'delegate-1'))?.diagnostic).toBe('tool-metadata-byte-limit');
+      db.prepare('UPDATE chat_message SET tool_result=? WHERE id=?').run(JSON.stringify({ toolCallId: 'read-1' }), 'tool');
+      expect((await readIdeDelegation('parent', 'delegate-1'))?.messages[1]?.tool_call_id).toBe('read-1');
+    } finally { db.close(); }
+  });
+
   it('preserves the child session/turn, exact model usage and incoming identity on every child event', async () => {
     const input = await parent();
     const resolver = vi.fn(async () => detail());

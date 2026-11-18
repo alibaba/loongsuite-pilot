@@ -124,7 +124,7 @@ export class QoderTraceInput extends BaseInput {
   private readonly transcriptSource: QoderTranscriptSource;
   private readonly legacyHookReader = new QoderLegacyHookReader();
   private readonly ideDelegations = new QoderIdeDelegations(undefined,
-    reason => this.logger.warn('Qoder IDE delegation deferred', { reason }));
+    (reason, details) => this.logger.warn('Qoder IDE delegation deferred', { reason, ...details }));
 
   constructor(opts: QoderTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });

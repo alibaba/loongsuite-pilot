@@ -193,6 +193,8 @@ Qoder IDE 子运行使用独立 session，与 CLI 的共享 session sidechain �
 
 IDE 委派 transcript 单行及所需工具行合计各有 16 MiB 上限；超过时保留原文件和待定状态并记录告警，不将不完整内容当作完整子运行。扫描每轮分块进行，可在重启后继续。
 
+子请求的 SQLite 消息元数据通过同一只读快照分页读取，单请求最多 4096 行、归一化元数据最多 4 MiB，单条工具元数据最多 16 MiB。超过上限时，已确认的委派仍上报 invoke 和已实际交付的 result；子运行保持待定，日志记录原因及相关 ID，并以较低频率重试。源数据恢复到上限内后可继续采集。
+
 工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
 
 ## System Instructions（系统提示词）
