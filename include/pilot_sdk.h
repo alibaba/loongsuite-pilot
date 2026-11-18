@@ -28,6 +28,8 @@ typedef int32_t (*PilotOnHook)(void *, PilotJsonView, uint32_t, uint8_t *, size_
  * monitoring and hook callbacks use independent SDK threads and must be thread
  * safe. They must return: a blocked host callback keeps stop/destroy BUSY rather
  * than allowing an unsafe unload. No exception may cross this C boundary.
+ * The cloud hook channel may invoke on_hook concurrently up to 32 times
+ * per instance and queue another 32 requests. Honor its remaining-ms argument.
  *
  * start/stop return acceptance promptly. After each accepting call RETURNS,
  * the host control thread calls dispatch(handle, 0) until its lifecycle callback

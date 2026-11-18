@@ -24,6 +24,7 @@ struct Context {
     hook_hold: AtomicBool,
     hook_entered: AtomicUsize,
     hook_invalid: AtomicBool,
+    hook_delay_ms: AtomicUsize,
     hook_requests: Mutex<Vec<Value>>,
     rows: Mutex<Vec<Vec<u8>>>,
     metrics: Mutex<Vec<Value>>,
@@ -83,22 +84,29 @@ unsafe extern "C" fn on_hook(
     len: *mut usize,
 ) -> i32 {
     let c = unsafe { context(p) };
-    if let Ok(value) =
-        serde_json::from_slice(unsafe { std::slice::from_raw_parts(request.data, request.len) })
-    {
-        c.hook_requests.lock().unwrap().push(value);
-    }
+    let value = serde_json::from_slice::<Value>(unsafe {
+        std::slice::from_raw_parts(request.data, request.len)
+    })
+    .unwrap_or(Value::Null);
+    let allow = value["command"] == "echo approved";
+    c.hook_requests.lock().unwrap().push(value);
     c.hook_entered.fetch_add(1, Ordering::SeqCst);
     while c.hook_hold.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(5));
     }
+    let delay = c.hook_delay_ms.load(Ordering::SeqCst);
+    if delay > 0 {
+        std::thread::sleep(Duration::from_millis(delay as u64));
+    }
     if c.hook_invalid.load(Ordering::SeqCst) {
-        unsafe {
-            *len = cap + 1;
-        }
+        unsafe { *len = cap + 1 };
         return OK;
     }
-    let verdict = br#"{"action":"block","reason":"SDK foreign host test"}"#;
+    let verdict: &[u8] = if allow {
+        br#"{"action":"allow"}"#
+    } else {
+        br#"{"action":"block","reason":"SDK foreign host test"}"#
+    };
     if cap < verdict.len() {
         return FAILURE;
     }
@@ -415,7 +423,13 @@ fn cloud_hook_deadline_and_local_hook_are_independent_of_activity_retry() {
     assert!(started.elapsed() < Duration::from_secs(2));
     for mut cloud in clouds.drain(..) {
         until(|| cloud.try_wait().unwrap().is_some());
-        assert!(cloud.wait_with_output().unwrap().stdout.is_empty());
+        let output = cloud.wait_with_output().unwrap();
+        let verdict: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(verdict["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(verdict["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("Retry the operation"));
     }
     assert_eq!(unsafe { (host.api().stop)(host.handle, 0) }, OK);
     assert_eq!(unsafe { (host.api().destroy)(host.handle) }, BUSY);
@@ -844,7 +858,7 @@ fn cloud_and_local_verdicts_use_trusted_capabilities_and_the_existing_qoder_prot
 }
 
 #[test]
-fn qoder_cli_pre_tool_block_exits_two_and_failed_verdicts_stay_open() {
+fn qoder_cli_pre_tool_block_exits_two_and_only_required_checks_refuse_on_failure() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");
     let mut policy = json!({"agents":["qoder"],"hcd":{"agent_configs":{"qoder":{"collection":{"enabled":false}}}},
@@ -876,8 +890,9 @@ fn qoder_cli_pre_tool_block_exits_two_and_failed_verdicts_stay_open() {
     };
     assert_allowed(run("observe"));
     host.ctx.hook_invalid.store(true, Ordering::SeqCst);
-    assert_allowed(run("cloud"));
-    host.ctx.hook_invalid.store(false, Ordering::SeqCst);
+    let failure = run("cloud");
+    assert_eq!(failure.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&failure.stderr).contains("Retry the operation"));
     policy["sdk_options"]["hooks"]["blocking_agents"] = json!([]);
     assert_eq!(host.apply(policy).0, OK);
     assert_allowed(run("cloud"));
@@ -1468,4 +1483,265 @@ fn macos_foreign_host_releases_all_instance_sockets() {
         );
         print!("{}", String::from_utf8_lossy(&output.stdout));
     }
+}
+
+fn hook_trace(data: &Path, file: &str) -> Vec<Value> {
+    std::fs::read_to_string(data.join(file))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+fn cloud_qoder_hook(data: &Path) -> std::process::Child {
+    Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"))
+        .args([
+            "sdk-hook",
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--channel",
+            "cloud",
+            "--agent",
+            "qodercli",
+            "--event",
+            "PreToolUse",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn send_pre_tool(child: &mut std::process::Child, index: usize) {
+    let command = if index.is_multiple_of(2) {
+        "echo approved"
+    } else {
+        "echo declined"
+    };
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            json!({
+                "hook_event_name":"PreToolUse", "session_id":format!("capacity-{index}"),
+                "tool_name":"Bash", "tool_input":{"command":command}
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn fifty_overlapping_cloud_hooks_receive_real_verdicts_with_a_one_second_callback() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    let mut policy = qoder_policy(&root.path().join("source"));
+    policy["hcd"]["agent_configs"]["qoder"]["collection"]["enabled"] = json!(false);
+    let ctx = Box::<Context>::default();
+    ctx.hook_delay_ms.store(1000, Ordering::SeqCst);
+    let mut host = Host::start(&data, policy, ctx);
+    host.ready();
+
+    let mut children: Vec<_> = (0..50).map(|_| cloud_qoder_hook(&data)).collect();
+    for (index, child) in children.iter_mut().enumerate() {
+        send_pre_tool(child, index);
+        // Stagger I/O startup briefly while requiring all 50 to remain in flight.
+        if index % 8 == 7 {
+            std::thread::sleep(Duration::from_millis(3));
+        }
+    }
+    let outputs: Vec<_> = children
+        .into_iter()
+        .map(|child| {
+            (
+                format!("{:08x}", child.id()),
+                child.wait_with_output().unwrap(),
+            )
+        })
+        .collect();
+    host.stop();
+
+    let logs = hook_trace(&data, "hook-verdict.jsonl");
+    let clients = hook_trace(&data, "hook-client.jsonl");
+    for (index, (pid, output)) in outputs.iter().enumerate() {
+        let client = clients
+            .iter()
+            .find(|row| row["id"].as_str().is_some_and(|id| id.starts_with(pid)));
+        let stages: Vec<_> = logs
+            .iter()
+            .filter(|row| row["id"].as_str().is_some_and(|id| id.starts_with(pid)))
+            .map(|row| (&row["stage"], &row["detail"]))
+            .collect();
+        let (code, stderr): (i32, &[u8]) = if index.is_multiple_of(2) {
+            (0, b"")
+        } else {
+            (2, b"SDK foreign host test\n")
+        };
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "request {index}: client {client:?}, SDK stages {stages:?}"
+        );
+        assert_eq!(
+            output.stderr, stderr,
+            "request {index}: client {client:?}, SDK stages {stages:?}"
+        );
+        assert!(output.stdout.is_empty(), "request {index}");
+    }
+    assert_eq!(
+        host.ctx.hook_entered.load(Ordering::SeqCst),
+        50,
+        "SDK stages: {logs:?}, native Hook results: {clients:?}"
+    );
+    let callbacks = logs
+        .iter()
+        .filter(|row| row["stage"] == "callback_end")
+        .collect::<Vec<_>>();
+    assert_eq!(callbacks.len(), 50);
+    assert!(callbacks
+        .iter()
+        .all(|row| row["detail"]["duration_ms"].as_u64().unwrap() >= 1000));
+    let first_finish = callbacks
+        .iter()
+        .map(|row| row["at_unix_ms"].as_i64().unwrap())
+        .min()
+        .unwrap();
+    let overlap = logs
+        .iter()
+        .filter(|row| {
+            row["stage"] == "admitted" && row["at_unix_ms"].as_i64().unwrap() < first_finish
+        })
+        .count();
+    assert_eq!(
+        overlap, 50,
+        "all requests must be in flight before any callback returns"
+    );
+    let peak = logs
+        .iter()
+        .filter_map(|row| row["detail"]["active"].as_u64())
+        .max();
+    assert_eq!(peak, Some(32));
+    let replies = logs
+        .iter()
+        .filter(|row| row["stage"] == "reply")
+        .collect::<Vec<_>>();
+    assert_eq!(clients.len(), 50);
+    assert_eq!(replies.len(), 50);
+    let duration_ms = clients
+        .iter()
+        .filter_map(|row| row["elapsed_ms"].as_u64())
+        .max()
+        .unwrap();
+    eprintln!("Qoder hook capacity: in-flight overlap={overlap}, worker peak={}, max client elapsed={duration_ms} ms", peak.unwrap());
+    assert!(clients.iter().all(
+        |client| replies.iter().any(|reply| reply["id"] == client["id"]
+            && reply["detail"]["sent"] == true
+            && reply["detail"]["status"] == "verdict"
+            && client["reply_status"] == "verdict")
+    ));
+}
+
+#[test]
+fn live_cloud_rejects_over_capacity_only_for_required_tool_checks() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    let mut policy = qoder_policy(&root.path().join("source"));
+    policy["hcd"]["agent_configs"]["qoder"]["collection"]["enabled"] = json!(false);
+    let ctx = Box::<Context>::default();
+    ctx.hook_hold.store(true, Ordering::SeqCst);
+    let mut host = Host::start(&data, policy, ctx);
+    host.ready();
+
+    let mut children: Vec<_> = (0..64).map(|_| cloud_qoder_hook(&data)).collect();
+    for (index, child) in children.iter_mut().enumerate() {
+        send_pre_tool(child, index);
+    }
+    let full = || {
+        hook_trace(&data, "hook-verdict.jsonl")
+            .iter()
+            .any(|row| row["stage"] == "admitted" && row["detail"]["queued"] == 32)
+    };
+    until(full);
+
+    let started = Instant::now();
+    let mut overflow = cloud_qoder_hook(&data);
+    send_pre_tool(&mut overflow, 65);
+    let overflow = overflow.wait_with_output().unwrap();
+    assert_eq!(overflow.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&overflow.stderr).contains("Retry the operation"));
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    let unforced = sdk_hook_command(&data, "cloud", "qodercli", "Stop", &json!({}))
+        .wait_with_output()
+        .unwrap();
+    assert!(unforced.status.success() && unforced.stderr.is_empty());
+    assert_eq!(host.ctx.hook_entered.load(Ordering::SeqCst), 32);
+
+    host.ctx.hook_hold.store(false, Ordering::SeqCst);
+    for (index, child) in children.into_iter().enumerate() {
+        assert_eq!(
+            child.wait_with_output().unwrap().status.code(),
+            Some(if index.is_multiple_of(2) { 0 } else { 2 })
+        );
+    }
+    host.stop();
+    let traces = hook_trace(&data, "hook-verdict.jsonl");
+    assert_eq!(
+        traces
+            .iter()
+            .filter(|row| row["detail"]["status"] == "overload")
+            .count(),
+        2
+    );
+    assert_eq!(host.ctx.hook_entered.load(Ordering::SeqCst), 64);
+    assert_eq!(
+        std::fs::read_dir(data.join("hook-requests-cloud"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn cloud_bin_retries_a_lost_first_datagram_with_the_same_request_id() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    let mut host = Host::start(&data, empty_policy(), Box::default());
+    host.ready();
+    let descriptor_path = data.join("sdk-hooks-cloud.json");
+    let saved = std::fs::read(&descriptor_path).unwrap();
+    let mut descriptor: Value = serde_json::from_slice(&saved).unwrap();
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    descriptor["port"] = json!(socket.local_addr().unwrap().port());
+    std::fs::write(&descriptor_path, descriptor.to_string()).unwrap();
+
+    let mut child = cloud_qoder_hook(&data);
+    send_pre_tool(&mut child, 1);
+    let mut buf = [0u8; 4096];
+    let (len, first_peer) = socket.recv_from(&mut buf).unwrap();
+    let first: Value = serde_json::from_slice(&buf[..len]).unwrap();
+    let (len, peer) = socket.recv_from(&mut buf).unwrap();
+    let second: Value = serde_json::from_slice(&buf[..len]).unwrap();
+    assert_eq!(peer, first_peer);
+    assert_eq!(first, second);
+    let response = json!({"id": second["id"], "instance": descriptor["instance"],
+        "action": "block", "reason": "SDK retry test", "status": "verdict"});
+    socket
+        .send_to(response.to_string().as_bytes(), peer)
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.stderr, b"SDK retry test\n");
+    let logs = hook_trace(&data, "hook-client.jsonl");
+    assert_eq!(logs.len(), 1);
+    assert!(logs[0]["send_attempts"].as_u64().unwrap() >= 2);
+    std::fs::write(descriptor_path, saved).unwrap();
+    host.stop();
 }

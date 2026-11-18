@@ -146,8 +146,10 @@ Qoder CLI 在设置中用 `command` 指定 `loongsuite-pilot-sdk-hook` 的绝对
 
 采集唤醒在同一个二进制上使用 `sdk-hook --channel observe --agent qodercli --event Stop --data-dir /var/lib/pilot-sdk/instance-a`。SDK 检查 transcript 位于策略授权范围内，复用现有增量进度。
 
-大输入不直接塞进 UDP。客户端把最多 1 MiB JSON 放在实例私有的 `hook-requests-cloud/local` 目录，用最多 16 个跨进程租约限制未完成请求，再发小于 4096 字节的关联报文。SDK 校验 token、进程/实例关联、请求 ID、长度、期限及文件边界。回包不超过 32 KiB；需要自己实现客户端时，报文定义见 `src/sdk/hook_protocol.rs`，发送与租约处理见 `src/sdk/hook_bin.rs`。
+大输入不直接塞进 UDP。客户端把最多 1 MiB JSON 放在实例私有的 `hook-requests-cloud/local` 目录，云壳通道用最多 64 个跨进程租约限制未完成请求，再发小于 4096 字节的关联报文。SDK 校验 token、进程/实例关联、请求 ID、长度、期限及文件边界。回包不超过 32 KiB；需要自己实现客户端时，报文定义见 `src/sdk/hook_protocol.rs`，发送与租约处理见 `src/sdk/hook_bin.rs`。
 
-SDK 归一化 `trace_id`、`client_event_id`、`agent`、`event`、`session_id`、工具/命令/提示等字段，保留未知字段；`supports_blocking` 来自可信策略和真实 Agent 能力。`on_hook` 写入 `{"action":"allow"}` 或 `{"action":"block","reason":"..."}`。不支持阻断、失败、无效响应和迟到结果一律放行。
+SDK 归一化 `trace_id`、`client_event_id`、`agent`、`event`、`session_id`、工具/命令/提示等字段，保留未知字段；`supports_blocking` 来自可信策略和真实 Agent 能力。`on_hook` 写入 `{"action":"allow"}` 或 `{"action":"block","reason":"..."}`。每个 SDK 实例的云壳通道可同时执行 32 路裁决，并排队等待最多 32 条请求。云壳须允许 `on_hook` 的 32 路调用并行，按 `remaining_ms` 限制等待。建议单次回调在 1.2 秒内返回，以便高负载时给第二批请求留下时间。
 
-bin 在端口描述不存在、进程已退出或端口拒绝连接时立即放行。支持接收回执的 SDK 在确认收到请求前最多等待 200 ms，避免残留端口描述指向无响应的端口时拖慢 Agent。收到回执后才等待裁决。bin 从程序入口计算 3 秒截止，包含 stdin、通信和冷启动。工作线程做等待，主线程独占 Agent 输出，独立截止守卫保证阻塞 stdin 或输出时也结束整个进程。裁决记录异步交接，不等待活动 ACK；SDK 丢弃迟到裁决。整条 Agent Hook 的 4 秒目标仍需结合宿主调度验证。
+启用强制裁决的 `PreToolUse` 遇到在线过载、无效回调或已确认接收后的裁决超时，会返回暂时拒绝，提示重试。无有效接收凭据时继续快速放行。SDK 的本地裁决、观察通道各自调度，继续沿用失败放行。请求级日志位于实例目录的 `hook-client.jsonl` 和 `hook-verdict.jsonl`，可以按 `id` 关联排队、回调、返回及耗时。日志省略请求正文和裁决理由。
+
+bin 在端口描述不存在、进程已退出或端口拒绝连接时立即放行。支持接收回执的 SDK 在确认收到请求前最多等待 200 ms，避免残留端口描述指向无响应的端口时拖慢 Agent。云壳通道在该等待窗口内可用同一请求 ID 重发，SDK 复用回执或已有裁决。收到回执后才等待裁决。bin 从程序入口计算 3 秒截止，包含 stdin、通信和冷启动。工作线程做等待，主线程独占 Agent 输出，独立截止守卫保证阻塞 stdin 或输出时也结束整个进程。裁决记录异步交接，不等待活动 ACK；SDK 丢弃迟到裁决。整条 Agent Hook 的 4 秒目标仍需结合宿主调度验证。
