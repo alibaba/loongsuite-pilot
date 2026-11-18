@@ -14,6 +14,14 @@ const READ_BUDGET_BYTES = 8 * 1024 * 1024;
 
 type OffsetMap = Record<string, number>;
 type IncompleteTail = Pick<Stats, 'dev' | 'ino' | 'size' | 'mtimeMs' | 'ctimeMs'> & { offset: number };
+interface QuarantinedTail {
+  reason: 'closed-incomplete-tail';
+  identity: string;
+  offset: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
 interface ColdStartReplay {
   turnId: string;
   files: Record<string, { size: number; identity: string }>;
@@ -100,6 +108,16 @@ export abstract class BaseHookInput extends BaseInput {
     const shouldPersistOffsets = !persistedOffsets;
     const offsets: OffsetMap = persistedOffsets ? { ...persistedOffsets } : await this.seedOffsetMap(fileNames, state, today);
     const identities: Record<string, string> = { ...(state.extra?.hookLogIdentities as Record<string, string> ?? {}) };
+    const partialTails: Record<string, QuarantinedTail> = {};
+    const previousTails = state.extra?.hookLogPartialTails as Record<string, QuarantinedTail> | undefined;
+    const rememberTail = (name: string, tail: QuarantinedTail) => {
+      partialTails[name] = tail;
+      if (JSON.stringify(tail) !== JSON.stringify(previousTails?.[name])) {
+        this.logger.warn('Closed hook source has an incomplete tail; preserving source and checkpoint, allowing successors', {
+          file: path.join(this.logDir, name), ...tail,
+        });
+      }
+    };
     // Drain every retained source, including offline backlog and late writes.
     // Rotation can split a turn, even across daily files. File names do not
     // prove independent sessions, so never let a successor overtake a prefix.
@@ -143,6 +161,11 @@ export abstract class BaseHookInput extends BaseInput {
       }
       const fileBudget = Math.min(readBudget, historical ? this.replayBudget!.available() : readBudget);
       const blockedByPrefix = pendingPrefix;
+      const quarantine = this.replayBudget && await this.closedPartialTail(logFileName, stat, startOffset, previousTails?.[logFileName]);
+      if (quarantine) {
+        rememberTail(logFileName, quarantine);
+        continue;
+      }
       if (this.replayBudget && startOffset < stat.size) pendingPrefix = true;
       if (blockedByPrefix || fileBudget <= 0 || (work && !work.canProcess())) continue;
       const initial = replay?.files[logFileName];
@@ -151,7 +174,11 @@ export abstract class BaseHookInput extends BaseInput {
       if (historical) this.replayBudget!.charge(fileEntries.readBytes);
       identities[logFileName] = identity;
       offsets[logFileName] = fileEntries.offset;
-      if (this.replayBudget) pendingPrefix = fileEntries.offset < stat.size;
+      if (this.replayBudget) {
+        const tail = await this.closedPartialTail(logFileName, stat, fileEntries.offset, previousTails?.[logFileName]);
+        if (tail) rememberTail(logFileName, tail);
+        pendingPrefix = fileEntries.offset < stat.size && !tail;
+      }
       entries.push(...fileEntries.entries);
       readBudget -= fileEntries.readBytes;
       if (readBudget <= 0 && !this.replayBudget) break;
@@ -181,6 +208,7 @@ export abstract class BaseHookInput extends BaseInput {
       state.lastOffset !== (prunedOffsets[newestFileName] ?? 0) ||
       this.isOffsetMapChanged(persistedOffsets, prunedOffsets) ||
       JSON.stringify(state.extra?.hookLogIdentities) !== JSON.stringify(prunedIdentities) ||
+      (this.replayBudget && JSON.stringify(previousTails ?? {}) !== JSON.stringify(partialTails)) ||
       JSON.stringify(state.extra?.hookColdStartReplay ?? null) !== JSON.stringify(nextReplay)
     )) {
       this.setState({
@@ -192,12 +220,59 @@ export abstract class BaseHookInput extends BaseInput {
           hookLogIdentities: prunedIdentities,
           hookLogDir: path.resolve(this.logDir),
           hookLogPrefix: this.logPrefix,
+          ...(this.replayBudget ? { hookLogPartialTails: partialTails } : {}),
           ...(this.coldStartKeepLastTurnOnly ? { hookColdStartReplay: nextReplay } : {}),
         },
       });
     }
 
     return entries;
+  }
+
+  /** Only a proven EOF suffix with no newline can stop blocking successors.
+   * Its byte offset remains unread, so retention cannot reclaim the evidence.
+   * Persisted evidence is usable only while the entire stat watermark matches.
+   */
+  private async closedPartialTail(name: string, stat: Stats, offset: number,
+    previous?: QuarantinedTail): Promise<QuarantinedTail | undefined> {
+    if (offset >= stat.size) return undefined;
+    const identity = fileIdentity(stat);
+    const file = path.join(this.logDir, name);
+    const cached = this.incompleteTails.get(file);
+    const observed = cached?.offset === offset && cached.dev === stat.dev && cached.ino === stat.ino
+      && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs && cached.ctimeMs === stat.ctimeMs;
+    const persisted = previous?.reason === 'closed-incomplete-tail' && previous.identity === identity
+      && previous.offset === offset && previous.size === stat.size
+      && previous.mtimeMs === stat.mtimeMs && previous.ctimeMs === stat.ctimeMs;
+    if (!observed && !persisted) return undefined;
+    const base = name.replace(/\.segment-\d{12}-[a-f0-9]{32}(?=\.jsonl$)/, '');
+    let active: string | undefined;
+    let handle;
+    try {
+      handle = await fs.open(path.join(this.logDir, base + '.active'), 'r');
+      const pointer = await handle.stat();
+      if (!pointer.isFile() || pointer.size > 1024) return undefined;
+      const buffer = Buffer.alloc(1025);
+      const read = await handle.read(buffer, 0, buffer.length, 0);
+      if (read.bytesRead > 1024) return undefined;
+      active = buffer.subarray(0, read.bytesRead).toString('utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return undefined;
+    } finally { await handle?.close(); }
+    const current = /\.segment-(\d{12})-[a-f0-9]{32}\.jsonl$/.exec(name);
+    const successor = active && path.basename(active) === active && active.startsWith(base.slice(0, -6) + '.segment-')
+      ? /\.segment-(\d{12})-[a-f0-9]{32}\.jsonl$/.exec(active) : null;
+    const date = name.slice(this.logPrefix.length + 1, this.logPrefix.length + 11);
+    const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 2);
+    const localDay = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const agedDaily = date < localDay(cutoff) && localDay(new Date(stat.mtimeMs)) < localDay(cutoff)
+      && ((!active && name === base) || (active === name && name !== base));
+    if (!agedDaily && !(successor && Number(successor[1]) > Number(current?.[1] ?? 0))) return undefined;
+    const fresh = await fs.lstat(file).catch(() => null);
+    if (!fresh?.isFile() || fileIdentity(fresh) !== identity || fresh.size !== stat.size
+      || fresh.mtimeMs !== stat.mtimeMs || fresh.ctimeMs !== stat.ctimeMs) return undefined;
+    return { reason: 'closed-incomplete-tail', identity, offset, size: stat.size,
+      mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs };
   }
 
   /** Persist only initial file watermarks and the last turn ID, never bodies.

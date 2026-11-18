@@ -52,12 +52,16 @@ export async function auditHookHistory(dataDir) {
       const inode = `${stat.dev}:${stat.ino}`;
       const identity = process.platform === 'darwin' || process.platform === 'win32' ? `${inode}:${stat.birthtimeMs}` : inode;
       const matches = identities[name] === identity || (identity === inode && identities[name]?.startsWith(inode + ':'));
+      const partial = extra.hookLogPartialTails?.[name];
       let reason;
       if (!name.startsWith(prefix + '-') || !date) reason = 'untracked-file-name';
       else if (extra.hookLogDir !== dir || extra.hookLogPrefix !== prefix) reason = 'source-not-registered';
       else if (extra.hookLogRetentionBlocked?.[name]) reason = 'retention-blocked';
       else if (!Number.isSafeInteger(offset) || offset < 0) reason = 'offset-unknown';
       else if (!matches) reason = 'identity-unknown-or-changed';
+      else if (closed && partial?.reason === 'closed-incomplete-tail' && partial.identity === identity
+        && partial.offset === offset && partial.size === stat.size && offset < stat.size
+        && partial.mtimeMs === stat.mtimeMs && partial.ctimeMs === stat.ctimeMs) reason = 'closed-incomplete-tail';
       else if (offset < stat.size) reason = 'unread';
       else if (offset > stat.size) reason = 'truncated-or-stale-offset';
       else if (!closed) reason = 'active-or-two-day-window';

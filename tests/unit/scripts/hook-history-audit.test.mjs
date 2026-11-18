@@ -47,6 +47,16 @@ it('explains file metadata without emitting source bodies or changing source/che
   expect(JSON.stringify(result)).not.toContain('private-source-body');
   expect(await fs.readFile(source, 'utf8')).toBe(text);
   expect(await fs.readFile(state, 'utf8')).toBe(checkpoint);
+  const quarantined = JSON.parse(checkpoint);
+  quarantined['pi-coding-agent-log'].extra.hookLogOffsets[name] = 0;
+  quarantined['pi-coding-agent-log'].extra.hookLogPartialTails = { [name]: {
+    reason: 'closed-incomplete-tail', identity: `${stat.dev}:${stat.ino}${process.platform === 'darwin' || process.platform === 'win32' ? ':' + stat.birthtimeMs : ''}`,
+    offset: 0, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs,
+  } };
+  await fs.writeFile(state, JSON.stringify(quarantined));
+  expect((await auditHookHistory(root)).families[0].byReason['closed-incomplete-tail']).toEqual({ files: 1, bytes: stat.size });
+  await fs.appendFile(source, 'changed');
+  expect((await auditHookHistory(root)).families[0].byReason['closed-incomplete-tail']).toBeUndefined();
   await fs.writeFile(path.join(root, 'config.json'), 'private-malformed-config-must-never-be-output');
   const malformed = await auditHookHistory(root);
   expect(malformed.retentionConfigError).toBe('invalid-metadata-json');
