@@ -49,6 +49,62 @@ enum HookOutput {
     Block(String),
 }
 
+struct RequestTrace {
+    path: PathBuf,
+    id: String,
+    channel: String,
+    started: Instant,
+    instance: Option<String>,
+    receipt_ms: Option<u128>,
+    status: &'static str,
+    reply_status: Option<String>,
+}
+
+impl Drop for RequestTrace {
+    fn drop(&mut self) {
+        append_hook_trace(
+            &self.path,
+            serde_json::json!({
+                "id": self.id, "instance": self.instance, "channel": self.channel,
+                "at_unix_ms": unix_time().map(|time| time.as_millis() as u64),
+                "elapsed_ms": self.started.elapsed().as_millis(), "receipt_ms": self.receipt_ms,
+                "status": self.status, "reply_status": self.reply_status,
+            }),
+        );
+    }
+}
+
+fn unix_time() -> Option<Duration> {
+    SystemTime::now().duration_since(UNIX_EPOCH).ok()
+}
+
+struct Remove(PathBuf);
+impl Drop for Remove {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn private_new_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn block_output(agent: &str, event: &str, reason: &str) -> Option<HookOutput> {
+    // Qoder CLI uses the native exit status and stderr for PreToolUse.
+    if agent == "qodercli" && event == "PreToolUse" {
+        Some(HookOutput::Block(block_reason(reason).to_owned()))
+    } else {
+        render_block(agent, event, reason).map(HookOutput::Json)
+    }
+}
+
 fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Option<HookOutput> {
     if args.first().map(String::as_str) == Some("interceptor") {
         return legacy?(&args[2..]).map(HookOutput::Json);
@@ -69,10 +125,23 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
     if configured_event.is_none() && configured_agent != "qoder-auto" {
         return None;
     }
+    let id = format!("{:08x}{:032x}", std::process::id(), unix_time()?.as_nanos());
+    let mut trace = RequestTrace {
+        path: data.join("hook-client.jsonl"),
+        id: id.clone(),
+        channel: channel.to_owned(),
+        started,
+        instance: None,
+        receipt_ms: None,
+        status: "sdk_unavailable",
+        reply_status: None,
+    };
     let descriptor = descriptor(&data.join(format!("sdk-hooks-{channel}.json")))?;
     if descriptor.schema != 2 || descriptor.port == 0 || !pid_alive(descriptor.pid) {
         return None;
     }
+    trace.instance = Some(descriptor.instance.clone());
+    trace.status = "invalid_input";
     let mut body = Vec::new();
     std::io::stdin()
         .take((MAX_REQUEST + 1) as u64)
@@ -124,25 +193,26 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
             }
         }
     }
-    let left = Duration::from_millis(DEADLINE_MS).checked_sub(started.elapsed())?;
-    if left.is_zero() {
-        return None;
-    }
+    trace.status = "client_admission_failed";
     let spool = data.join(format!("hook-requests-{channel}"));
     std::fs::create_dir_all(&spool).ok()?;
-    if std::fs::symlink_metadata(&spool)
-        .ok()?
-        .file_type()
-        .is_symlink()
-    {
+    if !std::fs::symlink_metadata(&spool).ok()?.is_dir() {
         return None;
     }
-    // Bound unconsumed requests even when a stale endpoint remains in a live
-    // host process. Expired requests can no longer produce a valid verdict.
+
+    let lease_limit = if descriptor.cloud_capacity {
+        CLOUD_IN_FLIGHT
+    } else {
+        16
+    };
     let mut count = 0;
-    for entry in std::fs::read_dir(&spool).ok()?.take(65).flatten() {
-        // Another SDK worker may consume a request between read_dir and
-        // metadata. Its disappearance must not discard this unrelated hook.
+    // Once the bin deadline and grace period have passed, no worker can
+    // consume the orphan payload or produce a valid reply for it.
+    for entry in std::fs::read_dir(&spool)
+        .ok()?
+        .take(2 * lease_limit + 1)
+        .flatten()
+    {
         let meta = match entry.metadata() {
             Ok(meta) => meta,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -154,57 +224,34 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
             count += 1;
         }
     }
-    if count >= 32 {
+    // A directory count alone races across concurrent bin processes.
+    let lease = (descriptor.cloud_capacity || count < 32)
+        .then(|| {
+            let first_slot = std::process::id() as usize % lease_limit;
+            (0..lease_limit).find_map(|offset| {
+                let slot = (first_slot + offset) % lease_limit;
+                let path = spool.join(format!("lease-{slot}"));
+                private_new_file(&path).ok().map(|_| Remove(path))
+            })
+        })
+        .flatten();
+    let capacity_probe = lease.is_none();
+    let _lease = lease;
+    if capacity_probe && !descriptor.cloud_capacity {
+        trace.status = "legacy_client_capacity";
         return None;
     }
-    // Fixed create_new leases enforce the cap across simultaneous bin
-    // processes. A directory count alone races when many hooks arrive together.
-    let lease = (0..16).find_map(|slot| {
-        let path = spool.join(format!("lease-{slot}"));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        options.open(&path).ok().map(|file| (path, file))
-    })?;
-    struct Lease(PathBuf, std::fs::File);
-    impl Drop for Lease {
-        fn drop(&mut self) {
-            let _ = self.1.sync_all();
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    let _lease = Lease(lease.0, lease.1);
-    let id = format!(
-        "{:08x}{:032x}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()?
-            .as_nanos()
-    );
-    let path = spool.join(&id);
-    let mut options = std::fs::OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    {
-        let mut file = options.open(&path).ok()?;
+    // At capacity the authenticated zero-body notice lets a live SDK check
+    // whether this is a mandatory hook. It never reserves a slot or a file.
+    let _payload = if capacity_probe {
+        None
+    } else {
+        let path = spool.join(&id);
+        let mut file = private_new_file(&path).ok()?;
+        let cleanup = Remove(path);
         file.write_all(&body).ok()?;
-    }
-    struct Remove(PathBuf);
-    impl Drop for Remove {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    let _remove = Remove(path);
+        Some(cleanup)
+    };
     let request = Datagram {
         schema: 2,
         token: descriptor.token.clone(),
@@ -212,15 +259,19 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
         remaining_ms: Duration::from_millis(DEADLINE_MS)
             .checked_sub(started.elapsed())?
             .as_millis() as u32,
-        t0_unix_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()?
+        t0_unix_ms: unix_time()?
             .as_millis()
             .saturating_sub(started.elapsed().as_millis()) as u64,
-        length: body.len(),
+        length: if capacity_probe { 0 } else { body.len() },
         agent: agent.clone(),
         event: event.clone(),
         want_receipt: descriptor.request_receipts,
+        capacity_probe,
+    };
+    trace.status = if capacity_probe {
+        "capacity_probe_unanswered"
+    } else {
+        "sdk_unreachable"
     };
     let socket = UdpSocket::bind("127.0.0.1:0").ok()?;
     socket.connect(("127.0.0.1", descriptor.port)).ok()?;
@@ -251,20 +302,43 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
     let reply = if descriptor.request_receipts
         && first.get("received").and_then(serde_json::Value::as_bool) == Some(true)
     {
-        reply(deadline)?
+        trace.receipt_ms = Some(started.elapsed().as_millis());
+        let required = descriptor.cloud_capacity
+            && channel == "cloud"
+            && event == "PreToolUse"
+            && first["required"] == true;
+        let until = if required {
+            deadline - Duration::from_millis(REPLY_MARGIN_MS)
+        } else {
+            deadline
+        };
+        trace.status = "verdict_unavailable";
+        let reply = reply(until);
+        if required && reply.as_ref().and_then(reply_action).is_none() {
+            trace.status = "temporary_block";
+            trace.reply_status = Some("confirmed_timeout".to_owned());
+            return block_output(&agent, &event, TEMPORARY_DENIAL);
+        }
+        reply?
     } else {
         first
     };
     let (action, reason) = reply_action(&reply)?;
-    if action != "block" || channel == "observe" {
-        return None;
-    }
-    // Use the CLI's native blocking exit status and stderr reason for PreToolUse.
-    if agent == "qodercli" && event == "PreToolUse" {
-        Some(HookOutput::Block(block_reason(reason).to_owned()))
-    } else {
-        render_block(&agent, &event, reason).map(HookOutput::Json)
-    }
+    let blocked = action == "block" && channel != "observe";
+    trace.reply_status = reply["status"].as_str().map(str::to_owned);
+    trace.status = match (blocked, trace.reply_status.as_deref()) {
+        (false, _) => "allow",
+        (
+            true,
+            Some(
+                "overload" | "audit_overload" | "expired" | "callback_failed" | "input_unavailable",
+            ),
+        ) => "temporary_block",
+        (true, _) => "block",
+    };
+    blocked
+        .then(|| block_output(&agent, &event, reason))
+        .flatten()
 }
 
 /// Never return while a worker can still write to the Agent. Only this main

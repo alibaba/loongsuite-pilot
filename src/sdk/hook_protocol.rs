@@ -5,6 +5,13 @@ pub const MAX_REQUEST: usize = 1024 * 1024;
 pub const MAX_REPLY: usize = 32 * 1024;
 pub const DEADLINE_MS: u64 = 3000;
 pub const RECEIPT_TIMEOUT_MS: u64 = 200;
+pub const CLOUD_WORKERS: usize = 32;
+pub const CLOUD_QUEUE: usize = 32;
+pub const CLOUD_IN_FLIGHT: usize = CLOUD_WORKERS + CLOUD_QUEUE;
+pub const REPLY_MARGIN_MS: u64 = 100;
+pub const TEMPORARY_DENIAL: &str =
+    "Pilot could not complete the security check. Retry the operation.";
+pub const TRACE_LIMIT: u64 = 8 * 1024 * 1024;
 pub const QODER_OBSERVE_CONTEXT: &str = "_pilot_qoder_observe_context";
 pub const QODER_OBSERVE_ENV: [&str; 4] = [
     "TRACEPARENT",
@@ -21,6 +28,8 @@ pub struct Descriptor {
     pub instance: String,
     #[serde(default)]
     pub request_receipts: bool,
+    #[serde(default)]
+    pub cloud_capacity: bool,
 }
 #[derive(Serialize, Deserialize)]
 pub struct Datagram {
@@ -34,6 +43,8 @@ pub struct Datagram {
     pub event: String,
     #[serde(default)]
     pub want_receipt: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub capacity_probe: bool,
 }
 pub fn block_reason(reason: &str) -> &str {
     if reason.is_empty() {
@@ -71,4 +82,34 @@ pub fn reply_action(reply: &Value) -> Option<(&str, &str)> {
         action,
         reply.get("reason").and_then(Value::as_str).unwrap_or(""),
     ))
+}
+
+/// Append one complete JSON line without waiting on other processes. The SDK
+/// rotates its two files; an offline client may leave a full file in place.
+pub fn append_hook_trace(path: &std::path::Path, row: Value) {
+    use std::io::Write;
+    if std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| !meta.is_file() || meta.len() >= TRACE_LIMIT)
+    {
+        return;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    if let Ok(mut file) = options.open(path) {
+        if file
+            .metadata()
+            .is_ok_and(|meta| meta.is_file() && meta.len() < TRACE_LIMIT)
+        {
+            let mut bytes = row.to_string().into_bytes();
+            bytes.push(b'\n');
+            let _ = file.write_all(&bytes);
+        }
+    }
 }

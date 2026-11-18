@@ -7,21 +7,124 @@ use crate::interceptor::{
     rules::{builtin_rules, RuleEngine},
 };
 use serde_json::{json, Value};
-use std::net::UdpSocket;
+use std::collections::{HashMap, VecDeque};
+use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+const MAX_PENDING_AUDITS: usize = 128;
+
 pub struct Hooks {
     stop: Arc<AtomicBool>,
-    threads: Vec<JoinHandle<()>>,
-    workers: Vec<Arc<Mutex<Vec<JoinHandle<()>>>>>,
+    listeners: Vec<JoinHandle<()>>,
+    workers: Vec<JoinHandle<()>>,
+    pools: Vec<Arc<WorkPool>>,
+    writers: Vec<JoinHandle<()>>,
     descriptors: Vec<PathBuf>,
     pub settings: Arc<RwLock<Value>>,
     instance: String,
 }
+
+#[derive(Default)]
+struct Pending {
+    jobs: VecDeque<Job>,
+    active: usize,
+    closed: bool,
+}
+
+#[derive(Default)]
+struct WorkPool {
+    pending: Mutex<Pending>,
+    ready: Condvar,
+}
+
+struct Job {
+    packet: Datagram,
+    peer: SocketAddr,
+    received: Instant,
+    deadline: Instant,
+    required: bool,
+    audit_slot: Option<AuditSlot>,
+}
+
+struct Endpoint {
+    channel: &'static str,
+    socket: UdpSocket,
+    descriptor: Descriptor,
+    spool: PathBuf,
+    settings: Arc<RwLock<Value>>,
+    outbox: Arc<Outbox>,
+    callback: Option<OnHook>,
+    context: usize,
+    stop: Arc<AtomicBool>,
+    trace: mpsc::SyncSender<Value>,
+    dropped_traces: Arc<AtomicUsize>,
+    audit: mpsc::Sender<Audit>,
+    audit_slots: Arc<AtomicUsize>,
+    busy_alarm_pending: Arc<AtomicBool>,
+}
+
+enum Audit {
+    Busy,
+    Verdict {
+        _slot: AuditSlot,
+        activity: Value,
+        blocked_prompt: Option<Box<Verdict>>,
+    },
+}
+
+// Reserve a writer slot at admission so a slow durable writer cannot occupy
+// verdict workers or make us discard an admitted request's activity.
+struct AuditSlot(Arc<AtomicUsize>);
+
+impl AuditSlot {
+    fn reserve(slots: &Arc<AtomicUsize>) -> Option<Self> {
+        slots
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                (count < MAX_PENDING_AUDITS).then_some(count + 1)
+            })
+            .ok()?;
+        Some(Self(slots.clone()))
+    }
+}
+
+impl Drop for AuditSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+struct Verdict {
+    action: &'static str,
+    reason: String,
+    request: Option<crate::interceptor::HookRequest>,
+    status: &'static str,
+}
+
+impl Verdict {
+    fn allow() -> Self {
+        Self {
+            action: "allow",
+            reason: String::new(),
+            request: None,
+            status: "allow",
+        }
+    }
+
+    fn unavailable(status: &'static str, required: bool) -> Self {
+        let mut verdict = Self::allow();
+        verdict.status = status;
+        if required {
+            verdict.action = "block";
+            verdict.reason = TEMPORARY_DENIAL.to_owned();
+        }
+        verdict
+    }
+}
+
 impl Hooks {
     pub fn start(
         root: &Path,
@@ -32,128 +135,176 @@ impl Hooks {
         stop: Arc<AtomicBool>,
         activated: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
-        let workers = Vec::new();
         let instance = uuid::Uuid::new_v4().to_string();
         let settings = Arc::new(RwLock::new(settings));
-        let root = root.to_owned();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
         }
         let mut hooks = Self {
             stop: stop.clone(),
-            threads: Vec::new(),
-            workers,
+            listeners: Vec::new(),
+            workers: Vec::new(),
+            pools: Vec::new(),
+            writers: Vec::new(),
             descriptors: Vec::new(),
             settings: settings.clone(),
             instance: instance.clone(),
         };
-        for channel in ["cloud", "local", "observe"] {
-            let workers = Arc::new(Mutex::new(Vec::new()));
-            hooks.workers.push(workers.clone());
-            let spool = root.join(format!("hook-requests-{channel}"));
-            crate::utils::source_access::private_path(&spool)?;
-            std::fs::create_dir_all(&spool)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&spool, std::fs::Permissions::from_mode(0o700))?;
-            }
-
-            let socket = Arc::new(UdpSocket::bind("127.0.0.1:0")?);
-            socket.set_read_timeout(Some(Duration::from_millis(100)))?;
-            let descriptor = Descriptor {
-                schema: 2,
-                pid: std::process::id(),
-                port: socket.local_addr()?.port(),
-                token: format!(
-                    "{}{}",
-                    uuid::Uuid::new_v4().simple(),
-                    uuid::Uuid::new_v4().simple()
-                ),
-                instance: instance.clone(),
-                request_receipts: true,
-            };
-            let path = root.join(format!("sdk-hooks-{channel}.json"));
-            atomic_descriptor(&path, &descriptor)?;
-            hooks.descriptors.push(path);
-            let (settings, queue, stop, workers, spool) = (
-                settings.clone(),
-                queue.clone(),
-                stop.clone(),
-                workers.clone(),
-                spool.clone(),
-            );
-            let activated = activated.clone();
-            hooks.threads.push(std::thread::Builder::new().name(format!("pilot-hook-{channel}")).spawn(move||{
-                let mut buffer=[0u8;4096];
-                let mut seen=std::collections::HashMap::<String,Instant>::new();
-                while !stop.load(Ordering::SeqCst){
-                    if !activated.load(Ordering::SeqCst) {std::thread::sleep(Duration::from_millis(5));continue;}
-                    let (len,peer)=match socket.recv_from(&mut buffer){Ok(value)=>value,Err(_)=>continue};
-                    if !peer.ip().is_loopback(){continue;}
-                    let packet=match serde_json::from_slice::<Datagram>(&buffer[..len]){Ok(p)=>p,Err(_)=>continue};
-                    if packet.schema!=2 || !constant_time_eq(packet.token.as_bytes(),descriptor.token.as_bytes()) || packet.id.len()!=40 || !packet.id.bytes().all(|b|b.is_ascii_hexdigit()) || packet.length>MAX_REQUEST || packet.remaining_ms==0{continue;}
-                    seen.retain(|_,t|t.elapsed()<Duration::from_secs(5));
-                    if seen.contains_key(&packet.id) || seen.len() >= 1024 { continue; }
-                    seen.insert(packet.id.clone(),Instant::now());
-                    let age=(chrono::Utc::now().timestamp_millis().max(0) as u64).saturating_sub(packet.t0_unix_ms);
-                    let remaining=(packet.remaining_ms as u64).min(DEADLINE_MS.saturating_sub(age));
-                    if remaining==0 { continue; }
-                    let deadline=Instant::now()+Duration::from_millis(remaining);
-                    let mut running=workers.lock().unwrap();
-                    let mut index=0;while index<running.len(){if running[index].is_finished(){let thread=running.swap_remove(index);let _=thread.join();}else{index+=1;}}
-                    if running.len()>=8{queue.alarm("SDK_HOOK_BUSY","hook concurrency exhausted; bin will fail open");continue;}
-                    if packet.want_receipt {
-                        let receipt = json!({
-                            "id": packet.id,
-                            "instance": descriptor.instance,
-                            "received": true,
-                        });
-                        if serde_json::to_vec(&receipt)
-                            .ok()
-                            .and_then(|bytes| socket.send_to(&bytes, peer).ok())
-                            .is_none()
-                        {
-                            continue;
+        let (trace, trace_rx) = mpsc::sync_channel::<Value>(2048);
+        // AuditSlot bounds all queued verdicts; there is at most one alarm.
+        let (audit, audit_rx) = mpsc::channel::<Audit>();
+        let audit_slots = Arc::new(AtomicUsize::new(0));
+        let busy_alarm_pending = Arc::new(AtomicBool::new(false));
+        let dropped_traces = Arc::new(AtomicUsize::new(0));
+        let trace_root = root.to_owned();
+        let dropped = dropped_traces.clone();
+        hooks.writers.push(
+            std::thread::Builder::new()
+                .name("pilot-hook-trace".into())
+                .spawn(move || {
+                    let sdk_log = trace_root.join("hook-verdict.jsonl");
+                    let client_log = trace_root.join("hook-client.jsonl");
+                    for mut row in trace_rx {
+                        for path in [&sdk_log, &client_log] {
+                            if std::fs::symlink_metadata(path)
+                                .is_ok_and(|meta| meta.is_file() && meta.len() >= TRACE_LIMIT)
+                            {
+                                let _ = std::fs::rename(path, path.with_extension("jsonl.1"));
+                            }
+                        }
+                        let lost = dropped.swap(0, Ordering::Relaxed);
+                        if lost > 0 {
+                            row["dropped_trace_rows"] = json!(lost);
+                        }
+                        append_hook_trace(&sdk_log, row);
+                    }
+                })?,
+        );
+        let audit_queue = queue.clone();
+        let audit_settings = settings.clone();
+        let clear_busy_alarm = busy_alarm_pending.clone();
+        hooks.writers.push(
+            std::thread::Builder::new()
+                .name("pilot-hook-audit".into())
+                .spawn(move || {
+                    for entry in audit_rx {
+                        match entry {
+                            Audit::Busy => {
+                                audit_queue
+                                    .alarm("SDK_HOOK_BUSY", "hook admission capacity exhausted");
+                                clear_busy_alarm.store(false, Ordering::Relaxed);
+                            }
+                            Audit::Verdict {
+                                _slot,
+                                activity,
+                                blocked_prompt,
+                            } => {
+                                if let Some(verdict) = blocked_prompt {
+                                    record_blocked_prompt(&audit_queue, &audit_settings, &verdict);
+                                }
+                                if let Err(error) =
+                                    audit_queue.enqueue_hook(activity.to_string().as_bytes())
+                                {
+                                    audit_queue.alarm("SDK_HOOK_RECORD_FULL", &error.to_string());
+                                }
+                            }
                         }
                     }
-                    let (socket,queue,settings,spool,instance,stop)=(socket.clone(),queue.clone(),settings.clone(),spool.clone(),descriptor.instance.clone(),stop.clone());
-                    if let Ok(thread)=std::thread::Builder::new().name("pilot-hook-verdict".into()).spawn(move||{
-                        let scope=crate::utils::source_access::SourceScope::new(Vec::new(),0,0);
-                        if let Some(root)=spool.parent(){scope.set_log(root.join("hook.log"));}
-                        crate::utils::source_access::install(Some(scope));
-                        let hook_started=Instant::now();
-                        let result=process(&packet,&spool,channel,&settings,callback,(context,&queue),deadline);
-                        queue.record_hook(&packet.agent, &format!("{channel}:{}",packet.event),hook_started.elapsed().as_secs_f64()*1000.0);
-                        if Instant::now()<deadline && !stop.load(Ordering::SeqCst){
-                            record_tool_verdict(&queue, &settings, &result, if channel == "local" { callback } else { None }, context, deadline);
-                            let response=json!({"id":packet.id,"instance":instance,"action":result.0,"reason":result.1});
-                            if let Ok(bytes)=serde_json::to_vec(&response){if bytes.len()<=MAX_REPLY && Instant::now()<deadline && socket.send_to(&bytes,peer).is_ok(){record_blocked_prompt(&queue,&settings,&result);}}
-                        }
-                        if channel == "observe" { return; }
-                        // Record delivery is independent of the Agent verdict.
-                        let activity=json!({"event.id":uuid::Uuid::new_v4().to_string(),"event.name":"other","time_unix_nano":chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string(),"gen_ai.agent.type":packet.agent,"gen_ai.session.id":result.2.as_ref().and_then(|r|r.session_id.as_deref()).unwrap_or(""),"gen_ai.provider.name":"pilot","event.kind":"interceptor.result","hook.channel":channel,"hook.request_id":packet.id,"hook.action":result.0,"hook.reason":result.1,"hook.late":Instant::now()>=deadline});
-                        let mut activity=activity;
-                        activity["version"]=json!(env!("CARGO_PKG_VERSION"));
-                        activity["user.id"]=queue.identity.read().unwrap()["user_id"].clone();
-                        if let Err(error)=queue.enqueue_hook(&activity.to_string().into_bytes()){queue.alarm("SDK_HOOK_RECORD_FULL",&error.to_string());}
-                    }){running.push(thread);}
+                })?,
+        );
+        // Hold startup senders only until endpoints have been made. On a
+        // partial startup, drop those senders before Hooks joins its writers.
+        let endpoints = (|| -> anyhow::Result<()> {
+            for channel in ["cloud", "local", "observe"] {
+                let (workers, capacity) = if channel == "cloud" {
+                    (CLOUD_WORKERS, CLOUD_IN_FLIGHT)
+                } else {
+                    (8, 8)
+                };
+                let spool = root.join(format!("hook-requests-{channel}"));
+                crate::utils::source_access::private_path(&spool)?;
+                std::fs::create_dir_all(&spool)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&spool, std::fs::Permissions::from_mode(0o700))?;
                 }
-            })?);
-        }
+                let socket = UdpSocket::bind("127.0.0.1:0")?;
+                socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+                let descriptor = Descriptor {
+                    schema: 2,
+                    pid: std::process::id(),
+                    port: socket.local_addr()?.port(),
+                    token: format!(
+                        "{}{}",
+                        uuid::Uuid::new_v4().simple(),
+                        uuid::Uuid::new_v4().simple()
+                    ),
+                    instance: instance.clone(),
+                    request_receipts: true,
+                    cloud_capacity: channel == "cloud",
+                };
+                let path = root.join(format!("sdk-hooks-{channel}.json"));
+                atomic_descriptor(&path, &descriptor)?;
+                hooks.descriptors.push(path);
+                let pool = Arc::new(WorkPool::default());
+                hooks.pools.push(pool.clone());
+                let endpoint = Arc::new(Endpoint {
+                    channel,
+                    socket,
+                    descriptor,
+                    spool,
+                    settings: settings.clone(),
+                    outbox: queue.clone(),
+                    callback,
+                    context,
+                    stop: stop.clone(),
+                    trace: trace.clone(),
+                    dropped_traces: dropped_traces.clone(),
+                    audit: audit.clone(),
+                    audit_slots: audit_slots.clone(),
+                    busy_alarm_pending: busy_alarm_pending.clone(),
+                });
+                for _ in 0..workers {
+                    let (endpoint, pool) = (endpoint.clone(), pool.clone());
+                    hooks.workers.push(
+                        std::thread::Builder::new()
+                            .name(format!("pilot-hook-{channel}-worker"))
+                            .spawn(move || endpoint.work(&pool))?,
+                    );
+                }
+                let activated = activated.clone();
+                hooks.listeners.push(
+                    std::thread::Builder::new()
+                        .name(format!("pilot-hook-{channel}"))
+                        .spawn(move || endpoint.receive(&pool, &activated, workers, capacity))?,
+                );
+            }
+            Ok(())
+        })();
+        drop(trace);
+        drop(audit);
+        endpoints?;
         Ok(hooks)
     }
+
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        for thread in self.threads.drain(..) {
-            let _ = thread.join();
+        for pool in &self.pools {
+            let mut pending = pool.pending.lock().unwrap();
+            pending.closed = true;
+            pending.jobs.clear();
+            pool.ready.notify_all();
         }
-        for workers in &self.workers {
-            for thread in workers.lock().unwrap().drain(..) {
-                let _ = thread.join();
-            }
+        for thread in self
+            .listeners
+            .drain(..)
+            .chain(self.workers.drain(..))
+            .chain(self.writers.drain(..))
+        {
+            let _ = thread.join();
         }
         for path in &self.descriptors {
             if std::fs::read(path)
@@ -166,9 +317,241 @@ impl Hooks {
         }
     }
 }
+
 impl Drop for Hooks {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+impl Endpoint {
+    fn receive(&self, pool: &WorkPool, activated: &AtomicBool, workers: usize, capacity: usize) {
+        let mut buffer = [0u8; 4096];
+        let mut seen = HashMap::<String, Instant>::new();
+        while !self.stop.load(Ordering::SeqCst) {
+            if !activated.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            let Ok((len, peer)) = self.socket.recv_from(&mut buffer) else {
+                continue;
+            };
+            if !peer.ip().is_loopback() {
+                continue;
+            }
+            let Ok(packet) = serde_json::from_slice::<Datagram>(&buffer[..len]) else {
+                continue;
+            };
+            if packet.schema != 2
+                || !constant_time_eq(packet.token.as_bytes(), self.descriptor.token.as_bytes())
+                || packet.id.len() != 40
+                || !packet.id.bytes().all(|b| b.is_ascii_hexdigit())
+                || packet.length > MAX_REQUEST
+                || packet.remaining_ms == 0
+                || (packet.capacity_probe
+                    && (!self.descriptor.cloud_capacity || packet.length != 0))
+            {
+                continue;
+            }
+            seen.retain(|_, time| time.elapsed() < Duration::from_secs(5));
+            if seen.contains_key(&packet.id) {
+                continue;
+            }
+            let received = Instant::now();
+            let age = (chrono::Utc::now().timestamp_millis().max(0) as u64)
+                .saturating_sub(packet.t0_unix_ms);
+            let remaining = u64::from(packet.remaining_ms).min(DEADLINE_MS.saturating_sub(age));
+            if remaining == 0 {
+                continue;
+            }
+            let required = self.channel == "cloud"
+                && self.callback.is_some()
+                && packet.event == "PreToolUse"
+                && may_block(&packet, &self.settings.read().unwrap());
+            let mut job = Job {
+                packet,
+                peer,
+                received,
+                deadline: received + Duration::from_millis(remaining),
+                required,
+                audit_slot: None,
+            };
+            let mut pending = pool.pending.lock().unwrap();
+            if pending.closed {
+                break;
+            }
+            let in_flight = pending.active + pending.jobs.len();
+            self.log(&job, "received", json!({"in_flight":in_flight}));
+            if job.packet.capacity_probe || in_flight >= capacity || seen.len() >= 1024 {
+                drop(pending);
+                self.reject_busy(&job, "overload");
+                continue;
+            }
+            if self.channel != "observe" {
+                job.audit_slot = AuditSlot::reserve(&self.audit_slots);
+                if job.audit_slot.is_none() {
+                    drop(pending);
+                    self.reject_busy(&job, "audit_overload");
+                    continue;
+                }
+            }
+            seen.insert(job.packet.id.clone(), received);
+            if job.packet.want_receipt
+                && !self.send(
+                    &job,
+                    json!({
+                        "id": job.packet.id, "instance": self.descriptor.instance,
+                        "received": true, "required": job.required,
+                    }),
+                )
+            {
+                self.log(&job, "receipt_failed", Value::Null);
+                continue;
+            }
+            let queued = (in_flight + 1).saturating_sub(workers);
+            self.log(
+                &job,
+                "admitted",
+                json!({"queued":queued, "in_flight":in_flight+1}),
+            );
+            pending.jobs.push_back(job);
+            pool.ready.notify_one();
+        }
+    }
+
+    fn work(&self, pool: &WorkPool) {
+        let scope = crate::utils::source_access::SourceScope::new(Vec::new(), 0, 0);
+        if let Some(root) = self.spool.parent() {
+            scope.set_log(root.join("hook.log"));
+        }
+        crate::utils::source_access::install(Some(scope));
+        loop {
+            let mut job = {
+                let mut pending = pool
+                    .ready
+                    .wait_while(pool.pending.lock().unwrap(), |pending| {
+                        pending.jobs.is_empty() && !pending.closed
+                    })
+                    .unwrap();
+                if pending.closed {
+                    return;
+                }
+                let job = pending.jobs.pop_front().unwrap();
+                pending.active += 1;
+                self.log(&job, "started", json!({"active":pending.active}));
+                job
+            };
+            if let Some(audit) = self.decide(&mut job) {
+                let _ = self.audit.send(audit);
+            }
+            pool.pending.lock().unwrap().active -= 1;
+        }
+    }
+
+    fn decide(&self, job: &mut Job) -> Option<Audit> {
+        let started = Instant::now();
+        let cutoff = if self.descriptor.cloud_capacity {
+            job.deadline - Duration::from_millis(2 * REPLY_MARGIN_MS)
+        } else {
+            job.deadline
+        };
+        let verdict = if started >= cutoff {
+            let _ = std::fs::remove_file(self.spool.join(&job.packet.id));
+            Verdict::unavailable("expired", job.required)
+        } else {
+            process(self, job, cutoff)
+        };
+        let packet = &job.packet;
+        self.outbox.record_hook(
+            &packet.agent,
+            &format!("{}:{}", self.channel, packet.event),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+        let late = Instant::now() >= job.deadline;
+        let sent = if !late && !self.stop.load(Ordering::SeqCst) {
+            if verdict.status == "verdict" {
+                record_tool_verdict(
+                    &self.outbox,
+                    &self.settings,
+                    &verdict,
+                    if self.channel == "local" {
+                        self.callback
+                    } else {
+                        None
+                    },
+                    self.context,
+                    cutoff,
+                );
+            }
+            self.reply(job, &verdict)
+        } else {
+            self.log(
+                job,
+                if late { "late" } else { "stopped" },
+                json!({"status":verdict.status}),
+            );
+            false
+        };
+        let slot = job.audit_slot.take()?;
+        let activity = json!({
+            "event.id":uuid::Uuid::new_v4().to_string(), "event.name":"other",
+            "time_unix_nano":chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string(),
+            "gen_ai.agent.type":packet.agent, "gen_ai.session.id":verdict.request.as_ref()
+                .and_then(|r|r.session_id.as_deref()).unwrap_or(""),
+            "gen_ai.provider.name":"pilot", "event.kind":"interceptor.result",
+            "hook.channel":self.channel, "hook.request_id":packet.id,
+            "hook.action":verdict.action, "hook.reason":verdict.reason,
+            "hook.status":verdict.status, "hook.late":late,
+            "version":env!("CARGO_PKG_VERSION"), "user.id":self.outbox.identity.read().unwrap()["user_id"],
+        });
+        let blocked_prompt = (sent
+            && verdict.status == "verdict"
+            && verdict.action == "block"
+            && packet.event == "UserPromptSubmit")
+            .then(|| Box::new(verdict));
+        Some(Audit::Verdict {
+            _slot: slot,
+            activity,
+            blocked_prompt,
+        })
+    }
+
+    fn reject_busy(&self, job: &Job, status: &'static str) {
+        self.reply(job, &Verdict::unavailable(status, job.required));
+        if !self.busy_alarm_pending.swap(true, Ordering::Relaxed) {
+            let _ = self.audit.send(Audit::Busy);
+        }
+    }
+
+    fn reply(&self, job: &Job, verdict: &Verdict) -> bool {
+        let sent = Instant::now() < job.deadline && self.send(job, json!({
+            "id":job.packet.id, "instance":self.descriptor.instance, "action":verdict.action,
+            "reason":verdict.reason, "status":verdict.status,
+        }));
+        self.log(
+            job,
+            "reply",
+            json!({"status":verdict.status,"action":verdict.action,"sent":sent}),
+        );
+        sent
+    }
+
+    fn send(&self, job: &Job, payload: Value) -> bool {
+        serde_json::to_vec(&payload).is_ok_and(|bytes| {
+            bytes.len() <= MAX_REPLY && self.socket.send_to(&bytes, job.peer).is_ok()
+        })
+    }
+
+    fn log(&self, job: &Job, stage: &str, detail: Value) {
+        let row = json!({
+            "id":job.packet.id, "instance":self.descriptor.instance,
+            "channel":self.channel, "stage":stage,
+            "since_receive_ms":job.received.elapsed().as_millis(),
+            "at_unix_ms":chrono::Utc::now().timestamp_millis(), "detail":detail,
+        });
+        if self.trace.try_send(row).is_err() {
+            self.dropped_traces.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -188,31 +571,43 @@ fn atomic_descriptor(path: &Path, descriptor: &Descriptor) -> anyhow::Result<()>
     file.persist(path)?;
     Ok(())
 }
-fn process(
-    packet: &Datagram,
-    spool: &Path,
-    channel: &str,
-    settings: &RwLock<Value>,
-    callback: Option<OnHook>,
-    callback_context: (usize, &Outbox),
-    deadline: Instant,
-) -> (
-    &'static str,
-    String,
-    Option<crate::interceptor::HookRequest>,
-) {
-    let (context, queue) = callback_context;
-    let allow = || ("allow", String::new(), None);
+fn may_block(packet: &Datagram, trusted: &Value) -> bool {
+    AgentHook::for_wire_id(&packet.agent).is_some_and(|adapter| {
+        adapter.supports_blocking(&packet.event)
+            && trusted["agents"]
+                .as_array()
+                .is_some_and(|list| list.iter().any(|a| a == adapter.policy_id()))
+            && trusted["sync_wait_enabled"].as_bool().unwrap_or(true)
+            && trusted["blocking_agents"]
+                .as_array()
+                .is_none_or(|list| list.iter().any(|a| a == &packet.agent))
+    })
+}
+
+fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
+    let packet = &job.packet;
+    let Endpoint {
+        spool,
+        channel,
+        settings,
+        callback,
+        context,
+        outbox: queue,
+        ..
+    } = endpoint;
+    let (channel, callback, context) = (*channel, *callback, *context);
+    let allow = Verdict::allow;
+    let input_error = || Verdict::unavailable("input_unavailable", job.required);
     let path = spool.join(&packet.id);
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(m) => m,
-        Err(_) => return allow(),
+        Err(_) => return input_error(),
     };
     if !metadata.is_file()
         || metadata.len() as usize != packet.length
         || metadata.file_type().is_symlink()
     {
-        return allow();
+        return input_error();
     }
     let bytes = (|| -> std::io::Result<Vec<u8>> {
         use std::io::Read;
@@ -223,12 +618,12 @@ fn process(
     })();
     let body = match bytes {
         Ok(bytes) if bytes.len() <= MAX_REQUEST => bytes,
-        _ => return allow(),
+        _ => return input_error(),
     };
     let _ = std::fs::remove_file(path);
     let payload = match serde_json::from_slice::<Value>(&body) {
         Ok(Value::Object(object)) => object,
-        _ => return allow(),
+        _ => return input_error(),
     };
     let trusted = settings.read().unwrap().clone();
     let Some(adapter) = AgentHook::for_wire_id(&packet.agent) else {
@@ -271,15 +666,7 @@ fn process(
         return allow();
     }
 
-    let blocking = adapter.supports_blocking(&packet.event)
-        && trusted
-            .get("sync_wait_enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-        && trusted
-            .get("blocking_agents")
-            .and_then(Value::as_array)
-            .is_none_or(|list| list.iter().any(|a| a == &packet.agent));
+    let blocking = may_block(packet, &trusted);
     let request = adapter.parse(&payload, &packet.event);
     let verdict = if channel == "cloud" {
         let Some(callback) = callback else {
@@ -323,10 +710,12 @@ fn process(
             .saturating_duration_since(Instant::now())
             .as_millis() as u32;
         if remaining == 0 {
-            return allow();
+            return Verdict::unavailable("expired", job.required && blocking);
         }
         let mut reply = vec![0u8; MAX_REPLY];
         let mut length = 0usize;
+        let callback_started = Instant::now();
+        endpoint.log(job, "callback_start", json!({"remaining_ms":remaining}));
         queue.callbacks.fetch_add(1, Ordering::SeqCst);
         // SAFETY: SDK-owned input/output buffers and host-retained context. No
         // collector, policy, or queue lock is held during external code.
@@ -341,12 +730,23 @@ fn process(
             )
         };
         queue.callbacks.fetch_sub(1, Ordering::SeqCst);
-        if result != OK || length > reply.len() || Instant::now() >= deadline {
-            return allow();
+        endpoint.log(
+            job,
+            "callback_end",
+            json!({
+                "duration_ms":callback_started.elapsed().as_millis(), "return_code":result,
+            }),
+        );
+        let required = job.required && blocking;
+        if Instant::now() >= deadline {
+            return Verdict::unavailable("expired", required);
+        }
+        if result != OK || length > reply.len() {
+            return Verdict::unavailable("callback_failed", required);
         }
         match serde_json::from_slice::<Value>(&reply[..length]) {
-            Ok(value) => value,
-            Err(_) => return allow(),
+            Ok(value) if reply_action(&value).is_some() => value,
+            _ => return Verdict::unavailable("callback_failed", required),
         }
     } else {
         let Some(request) = request.as_ref() else {
@@ -357,10 +757,17 @@ fn process(
         serde_json::to_value(engine.evaluate(request)).unwrap_or_else(|_| json!({"action":"allow"}))
     };
     match reply_action(&verdict) {
-        Some(("block", reason)) if blocking => {
-            ("block", reason.chars().take(512).collect(), request)
-        }
-        Some(("allow", _)) => ("allow", String::new(), request),
+        Some(("block", reason)) if blocking => Verdict {
+            action: "block",
+            reason: reason.chars().take(512).collect(),
+            request,
+            status: "verdict",
+        },
+        Some(("allow", _)) => Verdict {
+            request,
+            status: "verdict",
+            ..Verdict::allow()
+        },
         _ => allow(),
     }
 }
@@ -378,7 +785,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 fn record_tool_verdict(
     queue: &Outbox,
     settings: &RwLock<Value>,
-    result: &(&str, String, Option<crate::interceptor::HookRequest>),
+    result: &Verdict,
     callback: Option<OnHook>,
     context: usize,
     deadline: Instant,
@@ -386,7 +793,7 @@ fn record_tool_verdict(
     use crate::interceptor::{
         HookEventName, ToolInterceptPhase, ToolVerdictAction, ToolVerdictKey,
     };
-    let Some(request) = result.2.as_ref() else {
+    let Some(request) = result.request.as_ref() else {
         return;
     };
     let phase = match request.event {
@@ -403,7 +810,7 @@ fn record_tool_verdict(
             phase,
         };
         let now = chrono::Utc::now().timestamp_millis();
-        let action = if result.0 == "block" {
+        let action = if result.action == "block" {
             ToolVerdictAction::Block
         } else {
             ToolVerdictAction::Allow
@@ -454,16 +861,12 @@ fn notify_shell(queue: &Outbox, callback: OnHook, context: usize, deadline: Inst
     queue.callbacks.fetch_sub(1, Ordering::SeqCst);
 }
 
-fn record_blocked_prompt(
-    queue: &Outbox,
-    settings: &RwLock<Value>,
-    result: &(&str, String, Option<crate::interceptor::HookRequest>),
-) {
+fn record_blocked_prompt(queue: &Outbox, settings: &RwLock<Value>, result: &Verdict) {
     use crate::interceptor::HookEventName;
-    let Some(request) = result.2.as_ref() else {
+    let Some(request) = result.request.as_ref() else {
         return;
     };
-    if result.0 == "block"
+    if result.action == "block"
         && matches!(
             request.agent,
             crate::interceptor::InterceptorAgent::Qoder
