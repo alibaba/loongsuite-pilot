@@ -455,7 +455,18 @@ impl StateStore {
     /// Loads the file. Missing or corrupt JSON becomes an empty map.
     /// Revisions reset to zero, so a following `save` is a no-op until a mutation.
     pub async fn load(&self) {
-        let parsed = super::state_json::read_json(&self.file_path).await;
+        self.load_values(super::state_json::read_json(&self.file_path).await);
+    }
+
+    pub(crate) fn load_checkpoint_text(&self, text: &str) -> anyhow::Result<()> {
+        let parsed = super::state_json::parse(text)
+            .filter(|value| matches!(value, JVal::Object(_)))
+            .ok_or_else(|| anyhow::anyhow!("invalid SDK checkpoint"))?;
+        self.load_values(Some(parsed));
+        Ok(())
+    }
+
+    fn load_values(&self, parsed: Option<JVal>) {
         let mut data = self.mu.lock().unwrap();
         mark_collect_mutation(&mut data, None);
         data.states.clear();
