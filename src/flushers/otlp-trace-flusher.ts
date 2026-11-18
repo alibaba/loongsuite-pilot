@@ -21,7 +21,8 @@ import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
-import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
+import { codexTurnJournalGroupKey } from './codex-turn-journal.js';
+import type { TurnJournal } from './routed-turn-journal.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 import { multimodalMetadataItemsFromMessages } from '../multimodal/rewrite.js';
@@ -30,6 +31,8 @@ import { removeMessageContentFields, stripAgentMessageContent } from '../normali
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
 import { SpanEnricherRunner } from './span-enricher.js';
+import { convertQwenPawEventsStreaming } from './qwenpaw-trace-converter.js';
+import { QwenPawPayloadStore } from './qwenpaw-payload-store.js';
 import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
@@ -132,6 +135,7 @@ interface TurnBuffer {
   agentType: string;
   sessionId?: string;
   records: AgentActivityEntry[];
+  qwenPawPayloadKey?: string;
   journalKey?: string;
   spillable?: boolean;
   spilledRecords?: number;
@@ -633,6 +637,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly exporterFactory: OtlpExporterFactory;
   private readonly debugDir: string;
   private readonly failedDir: string;
+  private readonly qwenPawPayloadStore: QwenPawPayloadStore;
   private readonly resourceAttributeKeys: string[];
   private readonly spanAttributePassthroughPrefixes: string[];
   private readonly globalAttributesProvider?: GlobalAttributesProvider;
@@ -657,7 +662,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     cfg: OtlpTraceFlusherConfig,
     globalAttributesProvider?: GlobalAttributesProvider,
     exporterFactory?: OtlpExporterFactory,
-    private readonly codexJournal?: CodexTurnJournal,
+    private readonly codexJournal?: TurnJournal,
     private readonly prepareCodexReplay?: (entries: AgentActivityEntry[]) => AgentActivityEntry[],
   ) {
     super();
@@ -690,6 +695,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       });
     }
     const dataDir = cfg.dataDir ?? os.homedir() + '/.loongsuite-pilot';
+    this.qwenPawPayloadStore = new QwenPawPayloadStore(cfg.dataDir);
     this.pilotVersion = readInstalledVersion(dataDir);
     this.debugDir = path.join(dataDir, 'logs', 'otlp-debug');
     this.failedDir = path.join(dataDir, 'logs', 'otlp-failed');
@@ -798,6 +804,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   async send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
     await this.start();
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'qwenpaw') {
+      // Its asynchronous spill must finish before idle or capacity eviction
+      // can export and release this turn's temporary payload file.
+      this.batchDepth++;
+      try {
+        await this.persistCodexEntries([entry]);
+        await this.appendEntry(entry, logicalBytes);
+      } finally { this.batchDepth--; }
+      await this.finishBatch();
+      return;
+    }
     // A public call always owns durable acceptance, even while another call
     // is replaying or appending. Keep its resident prefix until I/O completes.
     this.batchDepth++;
@@ -853,7 +870,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     for (const [bufKey, buf] of this.turnBuffers) {
       // Native Codex task_complete/turn_aborted is authoritative. A second
       // work item in the same thread must not truncate a still-running turn.
-      if (agentType === 'codex' || agentType === 'doubao-work') break;
+      if (agentType === 'codex' || agentType === 'doubao-work' || agentType === 'qwenpaw') break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       // Incremental Hermes turns may overlap inside one IM session. They have
       // their own explicit completion, so a successor is not an implicit end.
@@ -866,7 +883,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     // Preparation has already checked/restored this prefix. Do not evict it
     // before appending the continuation, or evict a later turn in this batch.
-    if (this.batchDepth === 0) this.trimTurnBuffers(key);
+    if (this.batchDepth === 0) {
+      const release = this.trimTurnBuffers(key);
+      if (release) await release;
+    }
 
     let buf = this.turnBuffers.get(key);
     if (!buf) {
@@ -877,6 +897,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         agentType,
         sessionId: incomingSessionId,
         records: [],
+        ...(agentType === 'qwenpaw' ? { qwenPawPayloadKey: randomUUID() } : {}),
         recordIndex: new Map(),
         completed: false,
         lastActivityMs: Date.now(),
@@ -895,13 +916,18 @@ export class OtlpTraceFlusher extends BaseFlusher {
         buf.hasHermesNativeRunObserver = true;
       }
     }
+    const bufferedEntry = buf.qwenPawPayloadKey
+      ? await this.qwenPawPayloadStore.prepare(buf.qwenPawPayloadKey, entry)
+      : entry;
     const durable = this.codexJournal?.accepts(entry) === true;
-    const residentSize = durable ? Buffer.byteLength(JSON.stringify(entry)) : 0;
+    // QwenPaw's bodies already live in its transient spill; retain only the
+    // metadata and locator in the live buffer while the journal owns recovery.
+    const residentSize = durable ? Buffer.byteLength(JSON.stringify(agentType === 'qwenpaw' ? bufferedEntry : entry)) : 0;
     if (durable) {
       buf.journalKey ??= codexTurnJournalGroupKey(entry);
-      buf.spillable ??= buf.records.length === 0;
+      buf.spillable ??= agentType !== 'qwenpaw' && buf.records.length === 0;
       // Restored records must use the same normalized logical size as new ones.
-      logicalBytes ??= residentSize;
+      logicalBytes ??= agentType === 'qwenpaw' ? Buffer.byteLength(JSON.stringify(entry)) : residentSize;
     } else {
       // Malformed/unpersistable continuations must never be discarded by spill.
       if (buf.spilledRecords) await this.rehydrateCodexTurn(buf);
@@ -929,10 +955,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         buf.records[existingIdx] = merged;
       } else {
         buf.recordIndex.set(eventId, buf.records.length);
-        buf.records.push(entry);
+        buf.records.push(bufferedEntry);
       }
     } else {
-      buf.records.push(entry);
+      buf.records.push(bufferedEntry);
     }
     if (!buf.spilledRecords) buf.residentBytes = (buf.residentBytes ?? 0) + residentDelta;
     buf.lastActivityMs = Date.now();
@@ -980,27 +1006,33 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (this.batchDepth === 0) {
       await this.flushCompleted();
       // Another Input may begin a batch while completed exports are awaited.
-      if (this.batchDepth === 0) this.trimTurnBuffers();
+      if (this.batchDepth === 0) {
+        const release = this.trimTurnBuffers();
+        if (release) await release;
+      }
     }
   }
 
-  private trimTurnBuffers(incomingKey?: string): void {
+  private trimTurnBuffers(incomingKey?: string): Promise<void> | undefined {
     if (this.turnBuffers.size <= MAX_TURN_BUFFERS) return;
     const overflow = this.turnBuffers.size - MAX_TURN_BUFFERS;
     const candidates = [...this.turnBuffers.values()]
       .filter((buf) => !buf.completed && buf.key !== incomingKey)
       .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
       .slice(0, overflow);
+    const releases: Promise<void>[] = [];
     for (const buf of candidates) {
       if (this.codexJournal?.acceptsAgent(buf.agentType)) {
         // The durable prefix can be rehydrated when this native turn resumes.
         this.turnBuffers.delete(buf.key);
         this.recordBufferRemoval(buf);
+        if (buf.qwenPawPayloadKey) releases.push(this.qwenPawPayloadStore.release(buf.qwenPawPayloadKey));
       } else {
         buf.completed = true;
         this.triggerFlush(buf, false);
       }
     }
+    return releases.length ? Promise.all(releases).then(() => undefined) : undefined;
   }
 
   async flush(): Promise<void> {
@@ -1026,7 +1058,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     await this.journalRestore;
   }
 
-  private async replayCodexJournal(groups: ReturnType<CodexTurnJournal['loadBatches']>): Promise<void> {
+  private async replayCodexJournal(groups: ReturnType<TurnJournal['loadBatches']>): Promise<void> {
     let holding = false;
     let accepted = false;
     try {
@@ -1104,7 +1136,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private async persistCodexEntries(entries: AgentActivityEntry[]): Promise<void> {
     if (!this.codexJournal) return;
     try {
-      const codex = entries.filter(entry => this.codexJournal!.accepts(entry));
+      const codex = entries.filter(entry => this.codexJournal!.accepts(entry)).map(entry =>
+        entry['gen_ai.agent.type'] === 'qwenpaw' && this.cfg.captureMessageContent === false
+          ? stripAgentMessageContent(entry) : entry,
+      );
       const checked = new Set<string>();
       for (const entry of codex) {
         const key = this.resolveGroupKey(entry).key;
@@ -1139,6 +1174,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       (s) => s.provider.shutdown(),
     );
     await Promise.allSettled([...exportShutdowns, ...providerShutdowns]);
+    await this.qwenPawPayloadStore.shutdown();
 
     this.agentExportStates.clear();
     this.agentConvertStates.clear();
@@ -1192,7 +1228,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
       && entry['agent.qwen-code-cli.collection'] === 'foreground-v1') {
       return entry['gen_ai.agent.scope'] !== 'subagent' && entry['gen_ai.turn.end'] === true;
     }
-
+    if (entry['gen_ai.agent.type'] === 'qwenpaw') {
+      return entry['agent.qwenpaw.boundary'] === 'entry.end'
+        && entry['gen_ai.turn.end'] === true;
+    }
+    // A fused child shares the parent's turn buffer. Its stop closes only the
+    // child lifecycle; the delayed root response remains the turn boundary.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
       // A `stop` closes one Codex model wave, not necessarily the surrounding
       // transcript turn. The transcript input stamps this status only when it
@@ -1260,6 +1301,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         return { source: 'turn_id', value: turnId,
           key: `codex:${[entry['user.id'], entry['gen_ai.session.id'], turnId]
             .map(v => typeof v === 'string' ? `${v.length}:${v}` : '0:').join('')}` };
+      }
+      if (entry['gen_ai.agent.type'] === 'qwenpaw') {
+        return { source: 'turn_id', value: turnId,
+          key: `qwenpaw:${JSON.stringify([entry['gen_ai.session.id'], turnId])}` };
       }
       return { source: 'turn_id', value: turnId, key: `turn:${turnId}` };
     }
@@ -1330,9 +1375,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
-    const exported = await this.convertAndExport(buf.agentType, buf.records);
-    if (exported && this.codexJournal?.acceptsAgent(buf.agentType) && buf.completed) {
-      await this.codexJournal.acknowledge(buf.records);
+    try {
+      const exported = await this.convertAndExport(buf.agentType, buf.records);
+      if (exported && this.codexJournal?.acceptsAgent(buf.agentType) && buf.completed) {
+        await this.codexJournal.acknowledge(buf.records);
+      }
+    } finally {
+      if (buf.qwenPawPayloadKey) await this.qwenPawPayloadStore.release(buf.qwenPawPayloadKey);
     }
   }
 
@@ -1459,9 +1508,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // turn is interrupted before llm.response / tool.result arrive (e.g.
         // user Ctrl+C, agent errored mid-step). The converter library would
         // otherwise still emit a span for the orphan request/call.
-        const sanitized = dropOrphanPairs(traceConversionRecords);
-        toolSpanIds.prepare(sanitized);
-        llmSpanIds.prepare(sanitized);
+        const sanitized = agentType === 'qwenpaw'
+          ? traceConversionRecords : dropOrphanPairs(traceConversionRecords);
+        if (agentType !== 'qwenpaw') {
+          toolSpanIds.prepare(sanitized);
+          llmSpanIds.prepare(sanitized);
+        }
         let result;
         const counters = this.getRuntimeCounters(agentType);
         const convertStarted = performance.now();
@@ -1480,8 +1532,49 @@ export class OtlpTraceFlusher extends BaseFlusher {
           const conversionRecords = this.cfg.captureMessageContent === false
             ? prepared.records.map(stripAgentMessageContent)
             : prepared.records;
-          const stream = planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
-          if (stream) {
+          const stream = agentType === 'qwenpaw' ? undefined : planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
+          if (agentType === 'qwenpaw') {
+            streamedExportSucceeded = true;
+            let pending: ReadableSpan[] = [];
+            let pendingBytes = 0;
+            const limit = this.cfg.maxExportBatchBytes ?? DEFAULT_MAX_EXPORT_BATCH_BYTES;
+            const exportPending = async () => {
+              if (!pending.length) return;
+              const batch = pending;
+              pending = [];
+              pendingBytes = 0;
+              const started = performance.now();
+              try {
+                const exported = await this.exportConvertedSpans(agentType, serviceName, records, batch,
+                  grokMetadata, openClawIdentity);
+                streamedExportSucceeded = exported && streamedExportSucceeded;
+              } finally {
+                streamExportDurationMs += performance.now() - started;
+              }
+            };
+            result = await convertQwenPawEventsStreaming(
+              conversionRecords as unknown as AgentActivityEntry[], prepared.handler, passthroughKeys, {
+                loadRecord: async record => {
+                  const restored = await this.qwenPawPayloadStore.restore(record);
+                  return this.cfg.captureMessageContent === false ? stripAgentMessageContent(restored) : restored;
+                },
+                onSpan: async () => {
+                  await provider.forceFlush();
+                  await inMem.drain();
+                  const finished = inMem.getFinishedSpans();
+                  inMem.reset();
+                  for (const span of finished) {
+                    const size = estimateSpanSize(span);
+                    if (pending.length && pendingBytes + size > limit) await exportPending();
+                    pending.push(span);
+                    pendingBytes += size;
+                    if (pendingBytes >= limit) await exportPending();
+                  }
+                },
+              },
+            );
+            await exportPending();
+          } else if (stream) {
             streamedExportSucceeded = true;
             const reasoning = { seen: false, total: 0 };
             let pending: ReadableSpan[] = [];
@@ -2680,6 +2773,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
         if (this.codexJournal?.acceptsAgent(buf.agentType) && buf.agentType !== 'hermes') {
           this.turnBuffers.delete(buf.key);
           this.recordBufferRemoval(buf);
+          if (buf.qwenPawPayloadKey) {
+            void this.qwenPawPayloadStore.release(buf.qwenPawPayloadKey).catch(error => {
+              logger.warn('failed to release idle QwenPaw payload', { error: String(error) });
+            });
+          }
           continue;
         }
         buf.completed = true;

@@ -52,6 +52,10 @@ export abstract class BaseInput extends EventEmitter {
     this.pendingOutputs.add(promise);
     void promise.then(() => this.pendingOutputs.delete(promise), () => this.pendingOutputs.delete(promise));
   }
+  /** Drain this input's output holds before its final checkpoint on shutdown. */
+  protected async waitForPendingOutputs(): Promise<void> {
+    while (this.pendingOutputs.size) await Promise.all([...this.pendingOutputs]);
+  }
   private startPromise: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
   private activeRuntimeAccumulator: InputRuntimeAccumulator | null = null;

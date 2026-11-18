@@ -7,10 +7,10 @@ import { createLogger } from '../utils/logger.js';
 const logger = createLogger('DiskUsageSampler');
 export const DISK_USAGE_STALE_MS = 20 * 60_000;
 const LOG_FAMILIES = new Set([
-  'output', 'otlp-debug', 'otlp-failed', 'codex-pending-turns', 'metric_alarm',
+  'output', 'otlp-debug', 'otlp-failed', 'codex-pending-turns', 'qwenpaw-pending-turns', 'metric_alarm',
   'claude-code', 'opencode', 'openclaw', 'mimo-code', 'pi-coding-agent',
   'kiro-cli', 'qwen-code-cli', 'grok-build', 'dsh', 'hermes-agent', 'cursor',
-  'cursor-hook', 'qoder', 'qoder-work', 'qwen-work-cn', 'codex',
+  'cursor-hook', 'qoder', 'qoder-work', 'qwen-work-cn', 'codex', 'qwenpaw',
 ]);
 
 // Only mutable Pilot data belongs in the usage signal. Managed installations,

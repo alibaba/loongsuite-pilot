@@ -147,13 +147,14 @@ describe('DiskUsageSampler', () => {
   it('reports bounded log families in the existing traversal without exposing arbitrary names', async () => {
     installTree({
       'logs/output/a.jsonl': 7, 'logs/dsh/session.jsonl': 11,
-      'logs/codex-pending-turns/pending.jsonl': 13, 'logs/secret-project/private.log': 17,
+      'logs/codex-pending-turns/pending.jsonl': 13, 'logs/qwenpaw-pending-turns/pending.jsonl': 23,
+      'logs/qwenpaw/events.jsonl': 29, 'logs/secret-project/private.log': 17,
       'logs/input-state.json': 19,
     });
     const instance = sampler();
     await instance.sample();
     expect(instance.getSnapshot().logsByFamily).toEqual({
-      output: 7, dsh: 11, 'codex-pending-turns': 13, _other: 17, _files: 19,
+      output: 7, dsh: 11, 'codex-pending-turns': 13, 'qwenpaw-pending-turns': 23, qwenpaw: 29, _other: 17, _files: 19,
     });
     const snapshot = instance.getSnapshot();
     expect(Object.values(snapshot.logsByFamily!).reduce((a, n) => a + n, 0)).toBe(snapshot.logsBytes);

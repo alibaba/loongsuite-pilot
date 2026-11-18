@@ -58,8 +58,16 @@ export class TurnBoundaryProcessor {
 
       // Codex persists its native prompt emission with the input cursor. A
       // fresh processor can first see a restored suffix, not a new turn.
-      const codexTurn = normalizeAgentType(String(turnEntries[0]['gen_ai.agent.type'] ?? '')) === 'codex';
-      if (!tracked.started && !codexTurn) {
+      const agentType = normalizeAgentType(String(turnEntries[0]['gen_ai.agent.type'] ?? ''));
+      if (!tracked.started && agentType === 'qwenpaw') {
+        // A restarted collector can first see a continuation of a journaled
+        // turn. Only the native ENTRY start proves a new QwenPaw turn.
+        const nativeStart = turnEntries.find(entry => entry['agent.qwenpaw.boundary'] === 'entry.start');
+        if (nativeStart) {
+          nativeStart['gen_ai.turn.start'] = true;
+          tracked.started = true;
+        }
+      } else if (!tracked.started && agentType !== 'codex') {
         turnEntries[0]['gen_ai.turn.start'] = true;
         tracked.started = true;
       }
@@ -94,6 +102,10 @@ export class TurnBoundaryProcessor {
 
 /** Agent-aware terminal signal used only for additive boundary enrichment. */
 export function isTerminalTurnEntry(entry: AgentActivityEntry): boolean {
+  if (entry['gen_ai.agent.type'] === 'qwenpaw') {
+    return entry['agent.qwenpaw.boundary'] === 'entry.end'
+      && entry['gen_ai.turn.end'] === true;
+  }
   if (entry['gen_ai.agent.scope'] === 'subagent'
     && normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) !== 'codex') return false;
   if (entry['gen_ai.turn.end'] === true) return true;

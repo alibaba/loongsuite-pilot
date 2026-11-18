@@ -277,7 +277,7 @@ export class LogRetentionService {
     let deleted = 0;
     let errors = 0;
     if (!this.stateStore) return { deleted, errors };
-    for (const [input, family] of [['dsh-log', 'dsh'], ['hermes-agent-log', 'hermes-agent']]) {
+    for (const [input, family] of [['dsh-log', 'dsh'], ['hermes-agent-log', 'hermes-agent'], ['qwenpaw-log', 'qwenpaw']]) {
       const dir = path.join(this.logsDir, family);
       const sources = this.stateStore.keys().filter(key => key.startsWith(input + ':'));
       const stats = new Map<string, Awaited<ReturnType<typeof safeLstat>>>();
@@ -305,7 +305,8 @@ export class LogRetentionService {
             || (state.extra?.sourceIdentity !== undefined
               ? !matchesFileIdentity(state.extra.sourceIdentity, current)
               : ((process.platform === 'darwin' || process.platform === 'win32') && state.extra?.sourceBirthtimeMs !== current.birthtimeMs))
-            || state.lastOffset !== current.size) continue;
+            || state.lastOffset !== current.size
+            || (family === 'qwenpaw' && state.extra?.skippingLine === true)) continue;
           const active = await fs.readFile(base + '.active', 'utf8').catch(error => {
             if (error.code === 'ENOENT') return undefined;
             throw error;
@@ -314,8 +315,15 @@ export class LogRetentionService {
           let processExited = false;
           // The process token belongs to the entire file family, including
           // the final segment still named by a pointer after its owner exits.
+          const qwenPawFile = family === 'qwenpaw'
+            ? /^qwenpaw-(\d{4}-\d{2}-\d{2})-(\d+)\.jsonl$/.exec(path.basename(base)) : null;
+          // QwenPaw's writer does not use the raw-source gate. Its date is
+          // computed at every append, so require both an old UTC day and an
+          // exited writer before removing its last fully consumed file.
+          if (family === 'qwenpaw' && (!qwenPawFile || qwenPawFile[1] >= dateCutoff(2))) continue;
           const pid = family === 'hermes-agent'
-            ? /^hermes-agent-(\d+)-\d+-[a-f0-9]+\.jsonl$/.exec(path.basename(base))?.[1] : undefined;
+            ? /^hermes-agent-(\d+)-\d+-[a-f0-9]+\.jsonl$/.exec(path.basename(base))?.[1]
+            : qwenPawFile?.[2];
           if (pid) {
             try { process.kill(Number(pid), 0); }
             catch (error) { processExited = (error as NodeJS.ErrnoException).code === 'ESRCH'; }

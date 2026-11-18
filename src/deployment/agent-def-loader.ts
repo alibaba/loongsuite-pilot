@@ -203,6 +203,7 @@ export class AgentDefLoader {
         : resolveDoubaoWorkPaths(this.doubaoWork?.client).logDir ?? '$DOUBAO_LOG_DIR')
       .replace(/\$DOUBAO_WORK_DATA/g, () => resolveDoubaoWorkPaths().userDataRoot ?? '$DOUBAO_WORK_DATA')
       .replace(/\$DOUBAO_APP_DATA/g, () => resolveDoubaoWorkPaths('doubao').userDataRoot ?? '$DOUBAO_APP_DATA')
+      .replace(/\$QWENPAW_WORKING_DIR/g, () => process.env.QWENPAW_WORKING_DIR || '~/.qwenpaw')
       .replace(/\$HERMES_CLI/g, hermesCli)
       .replace(/\$HERMES_HOME/g, hermesHome)
       .replace(/\$PI_CODING_AGENT_DIR/g, piCodingAgentDir)

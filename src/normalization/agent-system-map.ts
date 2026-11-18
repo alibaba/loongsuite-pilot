@@ -23,6 +23,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'pi-coding-agent': 'pi',
   'grok-build': 'grok',
   'hermes': 'hermes',
+  'qwenpaw': 'qwenpaw',
   'wukong': 'wukong',
   'workbuddy': 'workbuddy',
   'doubao-work': 'doubao',

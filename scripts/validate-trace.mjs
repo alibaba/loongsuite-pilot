@@ -185,6 +185,17 @@ function error(id, detail, spanId, spanName) { return { id, status: 'error', det
 function warn(id, detail, spanId, spanName) { return { id, status: 'warn', detail, ...(spanId ? { spanId } : {}), ...(spanName ? { spanName } : {}) }; }
 function skipped(id, reason) { return { id, status: 'skipped', detail: reason || 'captureMessageContent not enabled' }; }
 
+function isQwenPaw(span) {
+  return span.attributes?.['gen_ai.agent.type'] === 'qwenpaw';
+}
+
+function hasMessages(raw) {
+  try {
+    const value = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Array.isArray(value) && value.length > 0;
+  } catch { return false; }
+}
+
 // ─── 5a. Structure Validation ───────────────────────────────────────────────
 
 // Independently exported delegated turns can be the only local fragment of a
@@ -231,8 +242,10 @@ export function validateStructure(trace) {
     : error('structure.single_entry', `found ${entries.length} ENTRY spans, expected 1 (or an explicitly delegated external fragment)`));
 
   const entryAgents = entries.flatMap(e => (childrenMap.get(e.spanId) || []).filter(c => c._kind === 'AGENT'));
-  checks.push(agents.length > 0 && entries.every(e =>
-    (childrenMap.get(e.spanId) || []).filter(c => c._kind === 'AGENT').length === 1)
+  checks.push(agents.length > 0 && entries.every(e => {
+    const direct = (childrenMap.get(e.spanId) || []).filter(c => c._kind === 'AGENT');
+    return direct.length === 1 || (isQwenPaw(e) && direct.length > 1 && direct.every(isQwenPaw));
+  })
     ? pass('structure.single_agent')
     : error('structure.single_agent', `found ${agents.length} AGENT spans and ${entryAgents.length} directly under ENTRY; expected one root AGENT per ENTRY and optional delegated AGENTs`));
 
@@ -246,7 +259,8 @@ export function validateStructure(trace) {
 
   for (const a of agents) {
     const external = hasExternalDelegationParent(a, spanMap);
-    checks.push(parentKind(a) === 'ENTRY' || parentKind(a) === 'TOOL' || external
+    const directHelper = parentKind(a) === 'AGENT' && isQwenPaw(a) && isQwenPaw(spanMap.get(a.parentSpanId));
+    checks.push(parentKind(a) === 'ENTRY' || parentKind(a) === 'TOOL' || directHelper || external
       ? pass('structure.agent_under_entry')
       : error('structure.agent_under_entry', `AGENT parent is ${parentKind(a) || 'none'}, expected ENTRY, delegation TOOL, or explicit external delegation context`, a.spanId, a.name));
     if (external) {
@@ -292,7 +306,12 @@ export function validateStructure(trace) {
   for (const s of steps) {
     const children = childrenMap.get(s.spanId) || [];
     const llmChildren = children.filter(c => c._kind === 'LLM');
-    if (llmChildren.length !== 1) {
+    const explicitAttempts = isQwenPaw(s) && llmChildren.length > 1 &&
+      llmChildren.every(child => isQwenPaw(child) && /^[0-9a-f]{16}$/.test(child.spanId ?? '') &&
+        typeof child.attributes?.['gen_ai.step.id'] === 'string' && child.attributes['gen_ai.step.id'].length > 0) &&
+      new Set(llmChildren.map(child => child.spanId)).size === llmChildren.length &&
+      new Set(llmChildren.map(child => child.attributes['gen_ai.step.id'])).size === llmChildren.length;
+    if (llmChildren.length !== 1 && !explicitAttempts) {
       checks.push(error('structure.step_has_one_llm', `STEP has ${llmChildren.length} LLM children, expected 1`, s.spanId, s.name));
       allStepsOk = false;
     }
@@ -318,6 +337,20 @@ export function validateStructure(trace) {
   }
   if (llmOrderOk && steps.length > 0) {
     checks.push(pass('structure.llm_before_tools'));
+  }
+
+  if (spanMap.size !== spans.length) checks.push(error('structure.unique_span_ids', 'duplicate span IDs within one trace'));
+  for (const span of spans) {
+    const visited = new Set();
+    let current = span;
+    while (current) {
+      if (visited.has(current.spanId)) {
+        checks.push(error('structure.no_cycles', 'cycle in span parent hierarchy', span.spanId, span.name));
+        break;
+      }
+      visited.add(current.spanId);
+      current = spanMap.get(current.parentSpanId);
+    }
   }
 
   if (entries.length === 1 || externalAgents.length > 0) {
@@ -862,28 +895,28 @@ export function validateSemantic(trace, rules) {
     const stepSpans = spans.filter(s => s._kind === 'STEP');
     for (const step of stepSpans) {
       const children = childrenMap.get(step.spanId) || [];
-      const llm = children.find(c => c._kind === 'LLM');
+      const llms = children.filter(c => c._kind === 'LLM');
+      const llm = llms[llms.length - 1];
       const tools = children.filter(c => c._kind === 'TOOL');
       if (!llm || tools.length === 0) continue;
 
-      const outputRaw = llm.attributes?.['gen_ai.output.messages'];
-      if (!outputRaw) continue;
-
-      let expectedToolCalls = [];
-      try {
-        const output = typeof outputRaw === 'string' ? JSON.parse(outputRaw) : outputRaw;
-        if (Array.isArray(output)) {
+      const expectedToolCalls = [];
+      let observedOutput = false;
+      for (const attempt of llms) {
+        const raw = attempt.attributes?.['gen_ai.output.messages'];
+        if (!raw) continue;
+        try {
+          const output = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (!Array.isArray(output)) continue;
+          observedOutput = true;
           for (const msg of output) {
-            if (msg.parts && Array.isArray(msg.parts)) {
-              for (const part of msg.parts) {
-                if (part.type === 'tool_call') {
-                  expectedToolCalls.push({ id: part.id, name: part.name });
-                }
-              }
+            for (const part of Array.isArray(msg.parts) ? msg.parts : []) {
+              if (part.type === 'tool_call') expectedToolCalls.push({ id: part.id, name: part.name });
             }
           }
-        }
-      } catch { continue; }
+        } catch { /* Attribute validation reports malformed output. */ }
+      }
+      if (!observedOutput) continue;
 
       // Runtime/user-triggered Skill loads are truthful TOOL spans but are not
       // emitted by the model, so they intentionally have no output tool_call.
@@ -964,11 +997,14 @@ export function validateSemantic(trace, rules) {
   } else {
     let allOk = true;
     for (const s of spans.filter(s => s._kind === 'LLM')) {
-      const hasInput = s.attributes?.['gen_ai.input.messages'] !== undefined;
-      const hasOutput = s.attributes?.['gen_ai.output.messages'] !== undefined;
-      if (!hasInput || !hasOutput) {
+      const hasInput = isQwenPaw(s) ? hasMessages(s.attributes?.['gen_ai.input.messages'])
+        : s.attributes?.['gen_ai.input.messages'] !== undefined;
+      const hasOutput = isQwenPaw(s) ? hasMessages(s.attributes?.['gen_ai.output.messages'])
+        : s.attributes?.['gen_ai.output.messages'] !== undefined;
+      const outputRequired = !isQwenPaw(s) || (s.status?.code !== 2 && s.status?.code !== 'ERROR');
+      if (!hasInput || (outputRequired && !hasOutput)) {
         checks.push(error('semantic.llm_has_input_output',
-          `LLM missing ${!hasInput ? 'input' : ''}${!hasInput && !hasOutput ? ' and ' : ''}${!hasOutput ? 'output' : ''}.messages`,
+          `LLM missing ${!hasInput ? 'input' : ''}${!hasInput && outputRequired && !hasOutput ? ' and ' : ''}${outputRequired && !hasOutput ? 'output' : ''}.messages`,
           s.spanId, s.name));
         allOk = false;
       }
