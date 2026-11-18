@@ -86,7 +86,8 @@ export async function auditHookHistory(dataDir) {
   const cleanupLogs = [];
   const logsDir = path.join(root, 'logs');
   const logs = (await fs.readdir(logsDir).catch(() => []))
-    .filter(name => name.startsWith('loongsuite-pilot-service.log') && !name.endsWith('.gz')).sort().slice(-6);
+    .filter(name => name.startsWith('loongsuite-pilot-service.log') && !name.endsWith('.gz'))
+    .sort((a, b) => a.localeCompare(b, 'en', { numeric: true })).slice(-6);
   for (const name of logs) {
     let handle;
     try {

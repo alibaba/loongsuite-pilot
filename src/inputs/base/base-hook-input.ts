@@ -79,6 +79,10 @@ export abstract class BaseHookInput extends BaseInput {
 
   protected override async onStart(): Promise<void> {
     await ensureDir(this.logDir);
+    // The same Input instance can be disabled and enabled again. Its next
+    // snapshot must include everything accumulated while it was stopped.
+    this.initialFiles = undefined;
+    this.replayThrough.clear();
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
@@ -97,14 +101,10 @@ export abstract class BaseHookInput extends BaseInput {
     const offsets: OffsetMap = persistedOffsets ? { ...persistedOffsets } : await this.seedOffsetMap(fileNames, state, today);
     const identities: Record<string, string> = { ...(state.extra?.hookLogIdentities as Record<string, string> ?? {}) };
     // Drain every retained source, including offline backlog and late writes.
-    const candidateFileNames = this.replayBudget ? [...fileNames].sort((a, b) => {
-      const pending = (file: string): number => {
-        const frontier = this.replayThrough.get(file);
-        return this.initialFiles!.has(file) || (frontier && (offsets[file] ?? 0) < frontier.end)
-          || file.slice(this.logPrefix.length + 1, this.logPrefix.length + 11) < today ? 1 : 0;
-      };
-      return pending(a) - pending(b) || (a < b ? -1 : a > b ? 1 : 0);
-    }) : fileNames;
+    // Rotation can split a turn, even across daily files. File names do not
+    // prove independent sessions, so never let a successor overtake a prefix.
+    const candidateFileNames = fileNames;
+    let pendingPrefix = false;
     let readBudget = READ_BUDGET_BYTES;
     const work = this.replayBudget?.work();
     const replay = this.coldStartKeepLastTurnOnly
@@ -125,6 +125,7 @@ export abstract class BaseHookInput extends BaseInput {
       if (replaced) this.incompleteTails.delete(logFile);
       const savedOffset = replaced ? 0 : offsets[logFileName] ?? 0;
       const startOffset = savedOffset > stat.size ? 0 : savedOffset;
+      this.getInputRuntimeAccumulator()?.observeBacklog(stat.size - startOffset);
       let historical = false;
       if (this.replayBudget) {
         let frontier = this.replayThrough.get(logFileName);
@@ -141,13 +142,16 @@ export abstract class BaseHookInput extends BaseInput {
         offsets[logFileName] = startOffset;
       }
       const fileBudget = Math.min(readBudget, historical ? this.replayBudget!.available() : readBudget);
-      if (fileBudget <= 0 || (work && !work.canProcess())) continue;
+      const blockedByPrefix = pendingPrefix;
+      if (this.replayBudget && startOffset < stat.size) pendingPrefix = true;
+      if (blockedByPrefix || fileBudget <= 0 || (work && !work.canProcess())) continue;
       const initial = replay?.files[logFileName];
       const fileEntries = await this.collectFile(logFile, startOffset, fileBudget,
         initial && matchesFileIdentity(initial.identity, stat) ? { turnId: replay!.turnId, through: initial.size } : undefined, work);
       if (historical) this.replayBudget!.charge(fileEntries.readBytes);
       identities[logFileName] = identity;
       offsets[logFileName] = fileEntries.offset;
+      if (this.replayBudget) pendingPrefix = fileEntries.offset < stat.size;
       entries.push(...fileEntries.entries);
       readBudget -= fileEntries.readBytes;
       if (readBudget <= 0 && !this.replayBudget) break;

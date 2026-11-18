@@ -60,6 +60,7 @@ export class PiCodingAgentLogInput extends BaseHookInput {
 
   protected override async onStart(): Promise<void> {
     await ensurePiCodingAgentLogDir(this.logDir);
+    await super.onStart();
   }
 
   protected async transformRecord(

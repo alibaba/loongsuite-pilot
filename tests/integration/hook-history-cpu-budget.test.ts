@@ -9,6 +9,7 @@ import { getTodayDateString } from '../../src/utils/fs-utils.js';
 import { HOOK_MAX_RECORD_BYTES, HOOK_PROCESS_MAX_RECORDS } from '../../src/inputs/base/hook-replay-budget.js';
 import { LogRetentionService } from '../../src/core/log-retention-service.js';
 import type { AgentActivityEntry } from '../../src/types/index.js';
+import type { InputRuntimeDelta } from '../../src/inputs/base/input-runtime-metrics.js';
 
 describe.each([['pi-coding-agent', PiCodingAgentLogInput], ['opencode', OpenCodeLogInput]] as const)(
   '%s background replay', (prefix, Input) => {
@@ -79,7 +80,7 @@ describe.each([['pi-coding-agent', PiCodingAgentLogInput], ['opencode', OpenCode
       expect((await read(source)).map(e => e['event.id'])).toEqual(['new-live-file']);
     });
 
-    it('prioritizes a new live file while historical reads have exhausted their credit', async () => {
+    it('holds successor files behind an unread prefix even when history credit is exhausted', async () => {
       const old = `${prefix}-2020-01-01.jsonl`;
       const source = input();
       await fs.writeFile(path.join(dir, old), row('history', 'x'.repeat(2 * 1024 * 1024)));
@@ -90,9 +91,55 @@ describe.each([['pi-coding-agent', PiCodingAgentLogInput], ['opencode', OpenCode
       await fs.writeFile(path.join(dir, `${prefix}-2020-01-02.jsonl`), row('waiting-history'));
       const live = `${prefix}-${getTodayDateString()}.jsonl`;
       await fs.writeFile(path.join(dir, live), row('live'));
-      expect((await read(source)).map(e => e['event.id'])).toContain('live');
+      expect((await read(source)).map(e => e['event.id'])).toEqual(['late-history']);
       const offsets = store.get(source.id).extra!.hookLogOffsets as Record<string, number>;
       expect(offsets[`${prefix}-2020-01-02.jsonl`]).toBe(0);
+      expect(offsets[live]).toBe(0);
+      clock += 120000;
+      expect((await read(source)).map(e => e['event.id'])).toEqual(['waiting-history', 'live']);
+    });
+
+    it.each(['append', 'new-segment'])('limits history accumulated during stop: %s', async mode => {
+      const name = `${prefix}-${getTodayDateString()}.jsonl`;
+      await fs.writeFile(path.join(dir, name), row('before-stop'));
+      const source = input();
+      store.set(source.id, { lastFile: name, lastOffset: 0 });
+      const deltas: InputRuntimeDelta[] = [];
+      source.on('input-runtime-delta', delta => deltas.push(delta));
+      try {
+        await source.start(); await source.stop();
+        const target = mode === 'append' ? name
+          : `${prefix}-${getTodayDateString()}.segment-000000000001-${'a'.repeat(32)}.jsonl`;
+        const before = (store.get(source.id).extra!.hookLogOffsets as Record<string, number>)[target] ?? 0;
+        const appended = Array.from({ length: 500 }, (_, i) => row(String(i), 'x'.repeat(10000))).join('');
+        await fs.appendFile(path.join(dir, target), appended);
+        await source.start(); await source.stop();
+        const delta = deltas.at(-1)!;
+        expect(delta.rawReadBytes).toBeGreaterThan(0);
+        expect(delta.rawReadBytes).toBeLessThanOrEqual(1024 * 1024);
+        expect(delta.rawBacklogBytesMax).toBe(Buffer.byteLength(appended));
+        const after = (store.get(source.id).extra!.hookLogOffsets as Record<string, number>)[target];
+        expect(after - before).toBeGreaterThan(0);
+        expect(after - before).toBeLessThan(1024 * 1024);
+      } finally { await source.stop(); }
+    });
+
+    it.each(['paused', 'debt'])('reports known unread bytes without reading when history is %s', async mode => {
+      const name = `${prefix}-${getTodayDateString()}.jsonl`;
+      const source = input(mode === 'paused' ? 0 : 4 * 1024 * 1024);
+      store.set(source.id, { lastFile: name, lastOffset: 0 });
+      if (mode === 'debt') {
+        await fs.writeFile(path.join(dir, name), row('large', 'x'.repeat(2 * 1024 * 1024)));
+        await read(source);
+      }
+      const pending = row('pending');
+      await fs.appendFile(path.join(dir, name), pending);
+      const deltas: InputRuntimeDelta[] = [];
+      source.on('input-runtime-delta', delta => deltas.push(delta));
+      try {
+        await source.start(); await source.stop();
+        expect(deltas.at(-1)).toMatchObject({ rawReadBytes: 0, rawBacklogBytesMax: Buffer.byteLength(pending) });
+      } finally { await source.stop(); }
     });
 
     it('still registers fully consumed files behind a backlog so safe reclamation can proceed', async () => {

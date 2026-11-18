@@ -6,6 +6,20 @@ import { auditHookHistory } from '../../../scripts/diagnostics/hook-history-audi
 
 let root;
 afterEach(async () => { if (root) await fs.rm(root, { recursive: true, force: true }); });
+it('selects the latest six numeric rotations across day boundaries', async () => {
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'hook-audit-rotations-'));
+  const logs = path.join(root, 'logs');
+  await fs.mkdir(logs);
+  for (const date of ['2026-11-16', '2026-11-17']) {
+    for (let i = 1; i <= 12; i++) {
+      await fs.writeFile(path.join(logs, `loongsuite-pilot-service.log.${date}.${i}`),
+        JSON.stringify({ tag: 'LogRetention', msg: `${date}.${i}` }) + '\n');
+    }
+  }
+  const result = await auditHookHistory(root);
+  expect(result.cleanupLogs.map(row => row.msg)).toEqual(
+    Array.from({ length: 6 }, (_, i) => `2026-11-17.${i + 7}`));
+});
 it('explains file metadata without emitting source bodies or changing source/checkpoint files', async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'hook-audit-')));
   const dir = path.join(root, 'logs', 'pi-coding-agent');
