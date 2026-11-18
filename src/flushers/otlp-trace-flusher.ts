@@ -883,7 +883,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     // Preparation has already checked/restored this prefix. Do not evict it
     // before appending the continuation, or evict a later turn in this batch.
-    if (this.batchDepth === 0) await this.trimTurnBuffers(key);
+    if (this.batchDepth === 0) {
+      const release = this.trimTurnBuffers(key);
+      if (release) await release;
+    }
 
     let buf = this.turnBuffers.get(key);
     if (!buf) {
@@ -1003,28 +1006,33 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (this.batchDepth === 0) {
       await this.flushCompleted();
       // Another Input may begin a batch while completed exports are awaited.
-      if (this.batchDepth === 0) await this.trimTurnBuffers();
+      if (this.batchDepth === 0) {
+        const release = this.trimTurnBuffers();
+        if (release) await release;
+      }
     }
   }
 
-  private async trimTurnBuffers(incomingKey?: string): Promise<void> {
+  private trimTurnBuffers(incomingKey?: string): Promise<void> | undefined {
     if (this.turnBuffers.size <= MAX_TURN_BUFFERS) return;
     const overflow = this.turnBuffers.size - MAX_TURN_BUFFERS;
     const candidates = [...this.turnBuffers.values()]
       .filter((buf) => !buf.completed && buf.key !== incomingKey)
       .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
       .slice(0, overflow);
+    const releases: Promise<void>[] = [];
     for (const buf of candidates) {
       if (this.codexJournal?.acceptsAgent(buf.agentType)) {
         // The durable prefix can be rehydrated when this native turn resumes.
         this.turnBuffers.delete(buf.key);
         this.recordBufferRemoval(buf);
-        if (buf.qwenPawPayloadKey) await this.qwenPawPayloadStore.release(buf.qwenPawPayloadKey);
+        if (buf.qwenPawPayloadKey) releases.push(this.qwenPawPayloadStore.release(buf.qwenPawPayloadKey));
       } else {
         buf.completed = true;
         this.triggerFlush(buf, false);
       }
     }
+    return releases.length ? Promise.all(releases).then(() => undefined) : undefined;
   }
 
   async flush(): Promise<void> {
