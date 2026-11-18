@@ -32,9 +32,10 @@ function redactText(value: string): string {
     .replace(/\b(?:sk-|mat_|mpt_|ghp_|github_pat_)[A-Za-z0-9_.-]+|\bLTAI[A-Za-z0-9]{12,}|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[REDACTED]')
     .replace(/https?:\/\/[^\s<>"']+/gi, url => url.replace(/(https?:\/\/)[^/@]+:[^/@]+@/i, '$1[REDACTED]@').replace(/[?#].*$/, '?[REDACTED]'))
     .replace(/((?:["']?)(?:authorization|proxy.authorization|cookie|set.cookie|[\w.-]*(?:password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token)|token)["']?\s*[=:]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)/gi, '$1[REDACTED]')
-    // Payloads embedded in prose may contain nested JSON, so discard the tail
+    // Payloads embedded in prose may contain nested JSON and decoded newlines,
+    // so discard the entire tail, including every unverified following line,
     // instead of attempting to balance arbitrary free-form request content.
-    .replace(/(["']?(?:prompt|system_prompt|messages|payload|body|request_body|response_body|custom_env)["']?\s*[=:]\s*)[^\n]*/gi, '$1[REDACTED]');
+    .replace(/(["']?(?:prompt|system_prompt|messages|payload|body|request_body|response_body|custom_env)["']?\s*[=:]\s*)[\s\S]*/gi, '$1[REDACTED]');
 }
 
 export function diagnosticText(value: unknown, maxBytes = 4096): string | undefined {

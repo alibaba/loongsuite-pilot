@@ -52,6 +52,14 @@ describe('Multica diagnostic log content', () => {
       expect(JSON.stringify(task)).not.toContain('private-value-for-');
     }
   });
+  it('discards the complete private tail, including decoded newlines, without dropping the diagnostic prefix', () => {
+    for (const key of ['prompt', 'body', 'payload']) {
+      for (const separator of ['', '\n', '\r\n']) {
+        expect(diagnosticText(`execution failed ${key}="PRIVATE_FIRST${separator}PRIVATE_SECOND"\nUNVERIFIED_TAIL`))
+          .toBe(`execution failed ${key}=[REDACTED]`);
+      }
+    }
+  });
   it('redacts before bounding UTF-8 diagnostic text and labels truncation', () => {
     const row = parseMulticaLog(JSON.stringify({msg: 'task failed', error: '失败'.repeat(6000), stack: '函'.repeat(10000)}));
     expect(Buffer.byteLength(row!.error_message)).toBeLessThanOrEqual(4096);

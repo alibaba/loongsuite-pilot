@@ -44,6 +44,7 @@ let endpoint: string;
 let metricRequests: number;
 let writes: ReceivedRequest[];
 let sendStatus: number;
+let tasks: Record<string, unknown>[];
 let manager: PipelineManager | undefined;
 
 beforeEach(async () => {
@@ -63,11 +64,24 @@ beforeEach(async () => {
   metricRequests = 0;
   writes = [];
   sendStatus = 200;
+  tasks = [];
   server = createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/metrics') {
       metricRequests++;
       res.setHeader('Content-Type', 'text/plain');
       res.end('# TYPE multica_task_total counter\nmultica_task_total 3\n');
+      return;
+    }
+    if (req.method === 'GET') {
+      const pathname = new URL(req.url!, 'http://localhost').pathname;
+      const response = pathname === '/api/agents' ? [{id: 'agent-a'}]
+        : pathname === '/api/agents/agent-a/tasks' || pathname === '/api/agent-task-snapshot' ? tasks
+        : pathname === '/api/issues' ? {issues: []}
+        : pathname === '/api/issue-statuses' ? {statuses: []}
+        : pathname === '/api/autopilots' ? {autopilots: []}
+        : pathname === '/api/autopilots/usage' ? {} : [];
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(response));
       return;
     }
     const chunks: Buffer[] = [];
@@ -138,6 +152,36 @@ async function collectInstalledConfig() {
 }
 
 describe('Multica inherits installer SLS configuration', () => {
+  it.each(['', '\n', '\r\n'])('redacts complete private tails before pending storage and real HTTP delivery (%j)', async separator => {
+    await installConfig('test-installer-api-key', 'on');
+    const error = `execution failed prompt="PRIVATE_FIRST${separator}PRIVATE_SECOND"`;
+    const stderr = `command failed body="PRIVATE_STDERR_FIRST${separator}PRIVATE_STDERR_SECOND"`;
+    await writeFile(serverLog, JSON.stringify({msg: 'task failed', task_id: 'log-task', error, stderr}) + '\n');
+    tasks = [{id: 'api-task', status: 'failed', error, stderr}];
+    vi.stubEnv('MULTICA_DIAGNOSTIC_TEST_TOKEN', 'test-multica-api-token');
+    const inputFile = path.join(configDir, 'multica.json');
+    const pipeline = JSON.parse(await readFile(inputFile, 'utf8'));
+    Object.assign(pipeline.inputs[0], {ApiBase: endpoint, WorkspaceIds: ['workspace-a'], TokenEnv: 'MULTICA_DIAGNOSTIC_TEST_TOKEN'});
+    await writeFile(inputFile, JSON.stringify(pipeline));
+    // Keep batches durable after the controlled HTTP server receives them.
+    sendStatus = 401;
+    await collectInstalledConfig();
+    const sent = records(writes);
+    for (const [type, task_id] of [['server_log', 'log-task'], ['task_snapshot', 'api-task']]) {
+      expect(sent).toContainEqual(expect.objectContaining({record_type: type, task_id,
+        error_message: 'execution failed prompt=[REDACTED]', stderr: 'command failed body=[REDACTED]'}));
+    }
+    for (const request of writes) {
+      expect(request.headers['content-type']).toBe('application/x-protobuf');
+      expect(request.body.toString('utf8')).not.toContain('PRIVATE_');
+    }
+    const pendingName = (await readdir(stateDir)).find(name => name.endsWith('.multica-pending'))!;
+    const pendingDir = path.join(stateDir, pendingName);
+    const pending = (await Promise.all((await readdir(pendingDir)).map(file => readFile(path.join(pendingDir, file), 'utf8')))).join('\n');
+    expect(pending).toContain('execution failed prompt=[REDACTED]');
+    expect(pending).toContain('command failed body=[REDACTED]');
+    expect(pending).not.toContain('PRIVATE_');
+  });
   it('uses the installed project and API key for multica-logs, independently of Agent and CMS destinations', async () => {
     const config = await installConfig('test-installer-api-key', 'on');
     expect(config.flushers.sls?.endpoints[0]).toMatchObject({
