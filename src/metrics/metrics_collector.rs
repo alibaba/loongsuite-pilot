@@ -475,6 +475,18 @@ impl MetricsCollector {
     }
 
     pub fn collect_l1(&mut self, snapshot: &DataflowSnapshot) -> L1Metrics {
+        self.collect_l1_with_scope(snapshot, true)
+    }
+
+    pub(crate) fn collect_sdk_l1(&mut self, snapshot: &DataflowSnapshot) -> L1Metrics {
+        self.collect_l1_with_scope(snapshot, false)
+    }
+
+    fn collect_l1_with_scope(
+        &mut self,
+        snapshot: &DataflowSnapshot,
+        include_installation_health: bool,
+    ) -> L1Metrics {
         let now = (self.now_ms)();
         #[cfg(target_os = "linux")]
         let (cpu, (mem, heap)) = (self.calc_cpu_percent(now), read_mem_mb());
@@ -520,7 +532,14 @@ impl MetricsCollector {
             }
         };
         let agents = count_agents(snapshot);
-        let health = self.collect_infra_health();
+        // A host embedding the SDK owns its installation. Only the full Pilot
+        // writer validates the on-disk release and version pointers.
+        let health = include_installation_health.then(|| self.collect_infra_health());
+        let installation_field = |value: fn(&InfraHealthSnapshot) -> String| {
+            health
+                .as_ref()
+                .map_or_else(|| "not-applicable".into(), value)
+        };
         let row = L1Metrics {
             version: self.version.clone(),
             os_detail: os_detail(),
@@ -561,14 +580,20 @@ impl MetricsCollector {
                 mem_heap_available: None,
                 process_resource_metrics_basis: None,
             },
-            init_type: self.init_type.clone(),
-            rollback_available: health.rollback_available.to_string(),
-            canary_policy: health.canary_policy.clone(),
-            version_count: health.version_count.to_string(),
-            updater_pid_alive: health.updater_pid_alive.to_string(),
+            init_type: if include_installation_health {
+                self.init_type.clone()
+            } else {
+                "not-applicable".into()
+            },
+            rollback_available: installation_field(|health| health.rollback_available.to_string()),
+            canary_policy: self.canary_policy.clone(),
+            version_count: installation_field(|health| health.version_count.to_string()),
+            updater_pid_alive: installation_field(|health| health.updater_pid_alive.to_string()),
             node_bin_valid: "not-applicable".into(),
-            runtime_bin_valid: health.runtime_bin_valid.to_string(),
-            current_version_valid: health.current_version_valid.to_string(),
+            runtime_bin_valid: installation_field(|health| health.runtime_bin_valid.to_string()),
+            current_version_valid: installation_field(|health| {
+                health.current_version_valid.to_string()
+            }),
             time: now / 1000,
         };
         #[cfg(not(target_os = "linux"))]
@@ -1556,6 +1581,32 @@ mod tests {
             std::fs::read_to_string(dir.path().join("node-bin")).unwrap(),
             "/nonexistent/node\n"
         );
+    }
+
+    #[test]
+    fn sdk_resource_samples_skip_the_installation_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut collector = MetricsCollector::from_options(MetricsCollectorOptions {
+            runtime_probe: Some(RuntimeProbe {
+                exec_path: dir.path().join("missing-pilot"),
+                cache_dir: Some(dir.path().to_path_buf()),
+            }),
+            ..MetricsCollectorOptions::new("1.0.0", "test-user", dir.path().to_string_lossy())
+        });
+        let snapshot = DataflowSnapshot::default();
+        let row = collector.collect_sdk_l1(&snapshot);
+
+        assert!(collector.last_infra_health().is_none());
+        assert_eq!(row.runtime_bin_valid, "not-applicable");
+        assert_eq!(row.current_version_valid, "not-applicable");
+        assert_eq!(row.updater_pid_alive, "not-applicable");
+        assert_eq!(row.rollback_available, "not-applicable");
+        assert_eq!(row.version_count, "not-applicable");
+        assert_eq!(row.init_type, "not-applicable");
+
+        let row = collector.collect_l1(&snapshot);
+        assert_eq!(row.runtime_bin_valid, "false");
+        assert!(collector.last_infra_health().is_some());
     }
 
     fn down() -> ProcessLiveness {
