@@ -27,6 +27,19 @@ function withoutBoundaries(value: AgentActivityEntry): AgentActivityEntry {
 }
 
 describe('TurnBoundaryProcessor', () => {
+  it('uses the native QwenPaw entry start instead of inventing another start on a restored suffix', () => {
+    const base = { 'gen_ai.agent.type': 'qwenpaw' };
+    const first = entry('entry-start', 'other', { ...base, 'agent.qwenpaw.boundary': 'entry.start' });
+    const suffix = entry('step-end', 'other', { ...base, 'agent.qwenpaw.boundary': 'step.end' });
+    const end = entry('entry-end', 'other', { ...base, 'agent.qwenpaw.boundary': 'entry.end', 'gen_ai.turn.end': true });
+    new TurnBoundaryProcessor().enrich([first]);
+    new TurnBoundaryProcessor().enrich([suffix, end]);
+    expect(first['gen_ai.turn.start']).toBe(true);
+    expect(suffix['gen_ai.turn.start']).toBeUndefined();
+    expect(end['gen_ai.turn.start']).toBeUndefined();
+    expect(end['gen_ai.turn.end']).toBe(true);
+  });
+
   it('waits for the incremental Hermes end marker across separate response batches', () => {
     const processor = new TurnBoundaryProcessor();
     const base = { 'gen_ai.agent.type': 'hermes', 'agent.hermes.collection': 'realtime-v1' };
