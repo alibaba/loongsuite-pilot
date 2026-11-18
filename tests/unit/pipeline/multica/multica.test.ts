@@ -83,6 +83,7 @@ describe('Multica existing-data parsers', () => {
     expect(row).toMatchObject({message: 'http request', source_time: '2026-11-16T08:00:00.123Z', level: 'INF', duration_ms: '1250', http_status: '200', path: '/api/issues/i/comments'});
     expect(JSON.stringify(row)).not.toContain('secret');
     expect(parseMulticaLog('INFO private user prompt=please-do-something')).toBeUndefined();
+    expect(parseMulticaLog('@multica-k8s-v1\t1970-01-01T00:00:01Z INF task completed task_id=t1')).toBeUndefined();
     expect(parseMulticaLog('2026-11-16T08:00:00Z {"msg":"task failed","error":"429 rate limit","task_id":"t1"}'))
       .toMatchObject({task_id: 't1', failure_reason: 'provider_capacity_or_rate_limit'});
   });
@@ -349,14 +350,12 @@ describe('Multica delivery and failure isolation', () => {
     expect(postWebtracking).not.toHaveBeenCalled();
   });
   it('handles a background cycle rejection and retries without abandoning lifecycle ownership', async () => {
-    const activation = vi.fn().mockRejectedValueOnce(new Error('activation notification unavailable')).mockResolvedValue(undefined);
-    const p = new MulticaPipeline({config: {configName: 'retry', inputs: [{...input, IntervalSeconds: 1, StatFiles: [path.join(dir, 'missing')]}],
-      flushers: [{Type: 'flusher_sls', Endpoint: 'example.invalid', Project: 'p', Logstore: 'l'}]},
-      stateDir: dir, dataDir: dir, failedLogDir: dir}, undefined, activation);
+    const p = pipeline({...input, IntervalSeconds: 1, StatFiles: [path.join(dir, 'missing')]});
+    const collect = vi.spyOn(p, 'collectOnce').mockRejectedValueOnce(new Error('collection cycle unavailable'));
     try {
       await p.start();
       await vi.waitFor(() => expect(postWebtracking).toHaveBeenCalled(), {timeout: 2000});
-      expect(activation).toHaveBeenCalledTimes(2);
+      expect(collect).toHaveBeenCalledTimes(2);
     } finally { await p.stop(); }
   });
   it('replays the same sanitized event IDs after SLS failure and restart, advancing offsets only after ACK', async () => {

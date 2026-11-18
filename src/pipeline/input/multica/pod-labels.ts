@@ -14,7 +14,7 @@ export function sourcePodLabels(input: MulticaInputConfig, source: string): Mult
 
   const separator = source.indexOf(':');
   const kind = source.slice(0, separator);
-  let local = kind === 'stat';
+  let local = kind === 'stat' || (kind === 'log' && input.LocalDaemonPid !== undefined);
   if (kind === 'metrics' || kind === 'health' || kind === 'pprof') {
     const url = kind === 'pprof' ? input.PprofBaseUrl : source.slice(separator + 1);
     if (url) {

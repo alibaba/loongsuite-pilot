@@ -19,7 +19,6 @@
     "TokenFile": "/credentials/multica-token",
     "WorkspaceIds": ["WORKSPACE_UUID"],
     "MetricsUrls": ["http://multica-backend:9090/metrics"],
-    "LogFiles": ["/logs/backend.log", "/logs/daemon.log"],
     "IntervalSeconds": 30
   }],
   "flushers": [{
@@ -87,9 +86,11 @@ export LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE=off  # 关闭
 
 ### 兼容旧版 daemon 的阶段日志
 
+开启 Multica 采集后，同一容器或主机上的 Pilot 会在其运行用户的目录中自动发现 daemon 并直接读取本地日志。HTTP 请求和任务与 Issue 等 backend 日志可通过现有的 `LogFiles` 采集，前提是对应日志文件已在 Pilot 所在环境可读。
+
 Multica v0.6.0 等版本的本地 `daemon.log` 只有时分秒。Pilot 会保留 `phase_elapsed_ms`、`total_elapsed_ms` 和文件读取位置，并在缺少完整日志时间时留空 `source_time`。
 
-Kubernetes 中可通过 Downward API 给采集器容器注入 Pod 元数据。采集器优先使用有效的 `POD_NAME`，缺省时取系统 hostname。配置了自定义 hostname 时，给采集器和日志桥都注入 `metadata.name`，同一个 Pod 的指标、日志和火焰图就能按相同的名字筛选。
+Kubernetes 中可通过 Downward API 给采集器容器注入 Pod 元数据。采集器优先使用有效的 `POD_NAME`，缺省时取系统 hostname。配置了自定义 hostname 时，给采集器注入 `metadata.name`，同一个 Pod 的指标、日志和火焰图就能按相同的名字筛选。
 
 ```yaml
 env:
@@ -101,11 +102,7 @@ env:
     valueFrom: {fieldRef: {fieldPath: status.podIP}}
 ```
 
-本 Pod 的 metrics、health 和 pprof 使用来源 Pod 标签。通过 Service 采集远端端点时，采集器将自己的身份记录在 `collector_pod_*` 字段。工作区业务快照也采用采集器身份，按 workspace 和业务实体统计。历史无标签记录可纳入全部来源的查询，按具体 Pod 下钻时仅选有对应标签的记录。
-
-Kubernetes 日志桥从来源 Pod 取得 Pod 标签和 `container_name`。首次读取时，桥从最近 1000 行定位起始时间戳，再从这个时间戳回读，给时间和内容都相同的日志逐条编号。源容器仍保留完整时间戳组时，多个桥可以用相同的 `log_event_id` 为同一条日志去重。
-
-Kubernetes 的 `limitBytes` 是近似值，同一秒内较早的日志可能占据整个回读窗口。1 MiB 回读没有新的完整日志行时，桥从原游标扩大到 4 MiB 再读一次。若仍无进展，桥单独核对容器末尾的日志和游标已记录的重复次数。已经追平时，桥等待下次轮询。若确认还有未读日志，或尾部核对超过接收上限，桥保留游标并提示人工回补。单次响应的接收上限为 4 MiB 加 64 KiB，以容纳 Kubernetes 略超请求值的响应。[Kubernetes Pod 日志 API](https://kubernetes.io/docs/reference/kubernetes-api/core/pod-v1/#read-log)
+本 Pod 的 metrics、health、pprof 和自动发现的 daemon 日志 使用来源 Pod 标签。通过 Service 采集远端端点时，采集器将自己的身份记录在 `collector_pod_*` 字段。工作区业务快照也采用采集器身份，按 workspace 和业务实体统计。历史无标签记录可纳入全部来源的查询，按具体 Pod 下钻时仅选有对应标签的记录。
 
 Prometheus 查询应按部署、来源 Pod 和指标标签分别对 Counter 求增量，再跨 Pod 求和。计算集群 P95 时先合并相同桶边界的增量。Gauge 在每个时间桶先取各 Pod 的最新值，再根据指标语义汇总。SLS 字段索引需为用到的 Pod 标签和日志标识启用统计。
 
@@ -155,16 +152,3 @@ node dist/multica-collector.cjs --config /config/multica.json --state-dir /state
 npm run typecheck
 npx vitest run tests/unit/pipeline/multica tests/unit/pipeline/pipeline-manager.test.ts tests/unit/core/config-loader.test.ts
 ```
-
-可选 Kubernetes 日志桥接脚本为 `scripts/multica-log-bridge.mjs`。采集器使用 `--activation-state-file /logs/.multica-activation.json`；桥接器须显式配置 `NAMESPACE` 和 `POD_LABEL_SELECTOR`，`MULTICA_LOG_CONTAINERS` 默认 `backend,daemon`。它需要只读的 `pods get/list`、`pods/log get` 权限，并与采集器共享日志卷：
-
-```sh
-export NAMESPACE=YOUR_NAMESPACE
-export POD_LABEL_SELECTOR=app.kubernetes.io/name=multica
-export MULTICA_ACTIVATION_STATE_FILE=/logs/.multica-activation.json
-node scripts/multica-log-bridge.mjs
-```
-
-桥接器仅在启用状态未过期时拉取日志；缺失、关闭或过期时空闲。启用状态每 10 秒续约、有效期 30 秒，停采时立即关闭，在途请求可以结束。
-
-已有单个日志桥覆盖 namespace 时，可继续使用其 Pod selector。每个源 Pod 均部署了自己的日志桥时，可设置 `MULTICA_LOG_SCOPE=pod`，使日志桥按系统 hostname 只读取本 Pod。自定义 hostname 时，可用 `POD_NAME` 指定实际 Pod 名。若 daemon 独立部署，也需要由对应的日志桥覆盖。

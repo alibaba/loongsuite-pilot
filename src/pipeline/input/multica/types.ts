@@ -51,8 +51,6 @@ export interface SourceCheckpoint {
   signature?: string;
   signatureSize?: number;
   discardPartial?: boolean;
-  /** Validated bridge header when a read ends before the source line is complete. */
-  logFrame?: string;
   entityIds?: string[];
   pprofNextCaptureAtMs?: number;
 }

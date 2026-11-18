@@ -47,8 +47,7 @@ export class MulticaPipeline implements Pipeline {
   private readonly pendingProfiles = new Map<string, CollectionResult>();
   private readonly pprofFailures = new Map<string, {count: number; retryAt: number}>();
 
-  constructor(private readonly opts: MulticaPipelineOptions, defaultMode?: MulticaCollectionMode,
-    private readonly onActivation?: (state: MulticaActivationResult) => Promise<void>) {
+  constructor(private readonly opts: MulticaPipelineOptions, defaultMode?: MulticaCollectionMode) {
     const input = opts.config.inputs[0] as MulticaInputConfig;
     this.input = {...input, Instance: opts.serviceNamePrefix?.trim() || input.Instance};
     if (this.input.Type !== 'input_multica') throw new Error('Expected input_multica');
@@ -99,7 +98,6 @@ export class MulticaPipeline implements Pipeline {
     const activation: MulticaActivationResult = this.opts.collectionEnabled === false
       ? {enabled: false, mode: 'off', reason: 'pipeline_disabled', consecutiveMisses: 0, stopped: false}
       : await this.activation.evaluate();
-    await this.onActivation?.(activation);
     const summary: CollectionSummary = {successfulSources: 0, failedSources: 0,
       collectionEnabled: activation.enabled, collectionMode: activation.mode, activationReason: activation.reason,
       detectionMisses: activation.consecutiveMisses, collectionStopped: activation.stopped};

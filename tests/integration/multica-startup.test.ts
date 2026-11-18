@@ -118,7 +118,7 @@ it.skipIf(process.platform === 'win32').each(['explicit', 'local daemon'] as con
     }
     child = spawn(process.execPath, ['--experimental-sqlite', bundle], {cwd: root,
       env: {...env, AGENT_DATA_COLLECTION_CONFIG: configFile, LOONGSUITE_PILOT_DATA_DIR: dataDir,
-        ...(auto ? {LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE: 'on'} : {}),
+        ...(auto ? {LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE: 'on', POD_NAME: 'test-daemon-pod'} : {}),
         LOONGSUITE_PILOT_STDOUT: '1', LOONGSUITE_PILOT_INTERCEPTOR_MODE: 'all', LOG_LEVEL: 'info'},
       stdio: ['ignore', 'pipe', 'pipe']});
     child.stdout!.on('data', chunk => { output += chunk; });
@@ -141,7 +141,7 @@ it.skipIf(process.platform === 'win32').each(['explicit', 'local daemon'] as con
       await vi.waitFor(() => {
         expect(posts.flatMap(post => post.__logs__).find(row => row.task_id === 'local-daemon-task'))
           .toMatchObject({phase: 'environment_ready', phase_elapsed_ms: '250', total_elapsed_ms: '500',
-            instance: 'installed-pilot-env', multica_env: 'installed-pilot-env'});
+            instance: 'installed-pilot-env', multica_env: 'installed-pilot-env', pod_name: 'test-daemon-pod'});
         expect(postPaths).toContain('/logstores/multica-logs/track');
       }, {timeout: 8000});
       const event = posts.flatMap(post => post.__logs__).find(row => row.task_id === 'local-daemon-task');
