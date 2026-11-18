@@ -1,8 +1,8 @@
 # 本地拦截模块
 
-[Qoder CLI Hooks Reference](https://docs.qoder.com/cli/hooks-reference) · [Qoder Hooks](https://docs.qoder.com/extensions/hooks) · [请求与响应协议](interceptor-protocol.md)
+[English](../interceptor.md) · [Qoder CLI Hooks Reference](https://docs.qoder.com/cli/hooks-reference) · [Qoder Hooks](https://docs.qoder.com/extensions/hooks)
 
-Interceptor 的 HTTP 服务跑在 collector 进程里，随 collector 启动和退出。Hook CLI 仍是 IDE 拉起的短进程，通过 loopback HTTP 访问 collector。它不依赖第一次 hook 触发。
+Interceptor 的 HTTP 服务跑在 collector 进程内的独立 Worker 线程里，仅在启动配置 `interceptor.mode` 为 `all` 时随 collector 启动和退出。Worker 直接监听 loopback HTTP，collector 主线程里的同步 SQLite、进程查询或批量采集不会占住它的事件循环。Hook CLI 仍是 IDE 拉起的短进程，不依赖第一次 hook 触发来启动服务。
 
 现有 Qoder / 千问办公 transcript 采集 hook 保持独立，拦截判定走第二条 hook。
 
@@ -63,11 +63,23 @@ collector 进程内 interceptor HTTP（127.0.0.1）
 - 源码：`src/interceptor/`
 - 运行态：`~/.loongsuite-pilot/interceptor/{runtime.json,interceptor.pid,logs}`
 - 访问日志：`~/.loongsuite-pilot/interceptor/logs/access.log`（每次 hook 判定一行 JSONL）。单个文件超过 10MB 时切到 `access.log.1` … `access.log.5`，更旧的丢弃。
-- 工具判定：collector 进程内按 `session id + tool call id + phase` 保存最近 30 分钟，checkpoint 为 `~/.loongsuite-pilot/interceptor/tool-verdicts.json`（详见 [请求与响应协议](interceptor-protocol.md#tool-判定与-transcript-关联)）
-- 构建产物：`dist/interceptor/cli.cjs`、`dist/interceptor/daemon.cjs`
-- 规则开关：`config.json` 的 `interceptor` 对象与 `mask` 相同（`mode` + `types`），collector **启动时读一次**，不热加载
+- 工具判定：Worker 按 `session id + tool call id + phase` 保存最近 30 分钟、最多 10000 条（满时淘汰最早写入的记录），checkpoint 为 `~/.loongsuite-pilot/interceptor/tool-verdicts.json`，每 15 秒仅在变化后异步落盘。主线程的副本只供采集关联使用（关联字段见 [输出事件 Schema](output-event-schema.md)）。
+- 构建产物：`dist/interceptor/cli.cjs`、`dist/interceptor/worker.cjs`；`dist/interceptor/daemon.cjs` 保留为独立兼容入口，collector 不再直接调用它。
+- 规则开关：`config.json` 的 `interceptor.mode` 在 collector **启动时读一次**；`configs/managed/interceptor.json` 的本地规则每 3 秒热更新（见 [本地文件规则](#本地文件规则)）
 
 ## Qoder 协议
+
+### Worker 与采集线程
+
+HTTP 监听、规则引擎、规则热加载、runtime 心跳和裁决 checkpoint 都由 Worker 持有。主线程只负责生命周期管理、部署 hook，以及采集上报。两者共享 collector PID，但不共享普通 Map 对象。
+
+Worker 判定工具调用后，通过 `parentPort.postMessage()` 发送包含原始 `recordedAt` 的裁决，主线程合并进镜像缓存；HTTP 响应不等待主线程处理或确认。裁决与上报共用有界、按序的异步批次，每批最多 128 项，最多一批未确认，其余裁决按调用 ID 合并。独立 `guardrail.evaluation` 命中事件最多暂存 256 条、每批最多 32 条，满后记录累计丢弃数量；被拦截提示词最多暂存 8 条，溢出写运维警告。同步屏障覆盖调用前已经接受的裁决和命中事件；采集侧仅处理受支持 Agent 的工具事件时等待该屏障（2 秒超时），超时沿用已到达的缓存。该屏障不会进入 HTTP 判定路径。
+
+主线程还设有独立的有限上报队列：最多等待 256 条、总计 8MiB，最多一个异步消费任务执行；每个任务等待真实 git enrichment / flusher Promise 完成后才启动下一个。ACK 表示队列已有限接收或明确计数丢弃，不表示外发已完成；镜像屏障不等待外部 I/O，显式 `flushEvents()` 可等待已接收的外发任务。关闭 Worker 后、关闭 flusher 前，服务会等待该队列排空，最长 5 秒；超时取消消费信号、丢弃尚未启动项并记录未完成数量。迟到的 git enrichment 在取消后不会继续发送；无法取消的外部 sink 会记录未完成，不能据此声称数据已持久化。队列满或字节超限会记录累计丢弃数量，不启动无界 Promise。独立命中与被拦截提示词都在替换身份之前执行 workspace 隐私过滤，继承原生 session / agent 的粘性排除结果。
+
+访问日志在有界异步队列中按顺序脱敏和写盘，不在 HTTP 回调里同步写文件。队列满时跳过多余日志，并追加 `event=audit-overflow` 的丢弃计数；服务停止会排空已接受的日志。规则本身的扫描 CPU、大请求序列化和机器 CPU/磁盘竞争仍可能影响 Worker，因此隔离线程不能保证固定响应时间。
+
+Worker 异常退出时，collector 清掉失效的 interceptor runtime，按 1 秒至 30 秒退避重启，并使用主线程镜像与 checkpoint 恢复裁决。恢复前 hook 连接失败继续 fail-open；主线程阻塞时重启和消息处理要等它恢复。Unix sh 规则由一次性 Node guardian 持有进程组，Worker 与 guardian 之间的私有 fd3 管道关闭或独立期限到达时，guardian 回收自己的整组；因此即使脚本 shell 提前退出、后台子进程仍持有 stdout，也能在 Worker 退出后回收。正常完成码通过该管道回传，不改变脚本判定语义；每次 sh 调用会增加一次 Node 启动开销。子进程的启动/关闭控制消息用于父线程兜底清理，父线程只在异步核对仍属本 collector 且命令匹配后回收进程/进程组。此控制流不属于裁决主体批次的背压范围。正常停止先关闭监听、排空请求，再最终落盘并同步镜像；停不下来的 Worker 有超时 terminate 兜底。collector 整个进程退出或进程级内存耗尽时，Worker 也会退出。
 
 CLI 识别 `qoder-auto`，通过祖先进程链区分 Desktop（`qoder`）和 CLI（`qodercli`）。首版覆盖 `UserPromptSubmit`、`PreToolUse` 与 `PostToolUse`。
 
@@ -92,9 +104,9 @@ CLI 识别 `qoder-auto`，通过祖先进程链区分 Desktop（`qoder`）和 CL
 
 `PostToolUse` 发生在工具已经执行之后，拦不住已发生的副作用；拦截是替换回给模型的工具结果。Desktop 对 PostToolUse 的强制力弱于 CLI。
 
-正常放行、未知事件、runtime 缺失、daemon 不健康、超时、坏响应、规则抛错一律 **fail-open**：`exit 0` 且 stdout 为空。每次判定（拦截 / 放行 / fail-open）写一行 JSONL 到 `~/.loongsuite-pilot/interceptor/logs/access.log`，至少包含 `event`（hook 类型）、`input`（请求输入）、`result`（判定结果）。运维日志仍在 `interceptor/logs/interceptor.log`。
+正常放行和仅 `audit` 命中时 `exit 0` 且 stdout 为空，不提示宿主。未知事件、runtime 缺失、daemon 不健康、超时、坏响应、规则抛错继续 **fail-open**。每次判定通过异步队列写一行 JSONL 到 `~/.loongsuite-pilot/interceptor/logs/access.log`，包含 `event`、`input`、`result`；托管规则的 `result.matches` 保留所有已发生的命中。`audit` 命中不等于失败放行，只有发生检查错误才设置 `failOpen`。运维日志仍在 `interceptor/logs/interceptor.log`。
 
-Qoder hook timeout：`UserPromptSubmit` 15 秒，`PreToolUse` / `PostToolUse` 10 秒。CLI 请求 daemon 的超时是 4 秒。
+Qoder hook timeout 为 `UserPromptSubmit` 15 秒，`PreToolUse` / `PostToolUse` 10 秒。CLI 先进行健康检查，默认超时 500ms，再发送判定请求，超时 4 秒。两次请求串行，合计预算约 4.5 秒，另需计入 hook 进程启动及调度耗时。健康检查超时会记录 fail-open 并直接放行。
 
 ## 千问办公（QwenWork）协议
 
@@ -144,7 +156,7 @@ daemon 请求超时仍是 4 秒。`before_tool_call` 在 OpenClaw 上超时会 *
 
 ## 规则开关
 
-配置格式与 [数据脱敏](masking.md) 完全对齐：`mode` + `types`。区别只是 interceptor 的 `types` 是 mask 的密钥子集，不含 `idCard`、`phone`、`email`、`ipAddress`、`bankCard`。
+内置规则只有 `all` 和 `none`。`all` 打开全部拦截类型（mask 的密钥子集）。`custom` 不再是拦截模式，按 `none` 处理。
 
 安装参数：
 
@@ -152,15 +164,9 @@ daemon 请求超时仍是 4 秒。`before_tool_call` 在 OpenClaw 上超时会 *
 bash /tmp/loongsuite-pilot-installer.sh install --interceptor-mode all
 ```
 
-自定义模式安装参数：
+Windows 对应 `-InterceptorMode`。`--interceptor-mode all` 会绑定回环端口并写入拦截 hook。仅 `all` 开启拦截。不传、`none` 或其他值均关闭整个拦截功能，不创建拦截 Worker、不监听端口、不加载或执行本地文件规则，也不部署拦截 hook。
 
-```bash
-bash /tmp/loongsuite-pilot-installer.sh install --interceptor-mode custom --interceptor-types apiKey,cloudAccessKey,privateKey,databaseUrl
-```
-
-Windows 对应 `-InterceptorMode` / `-InterceptorTypes`。
-
-安装 interceptor 时，安装器会把已启用的拦截类型自动补进 `mask`：`mask.mode=all` 已覆盖全部类型则不动；否则写成 `custom`，并并入这些 type（`interceptor.mode=all` 会并入全部拦截类型）。这样被拦截的密钥在采集输出里也会被脱敏。
+安装 `interceptor.mode=all` 时，安装器会把全部拦截类型补进 `mask`：`mask.mode=all` 已覆盖则不动；否则写成 `custom` 并并入这些 type。这样被拦截的密钥在采集输出里也会被脱敏。
 
 配置文件：
 
@@ -172,29 +178,18 @@ Windows 对应 `-InterceptorMode` / `-InterceptorTypes`。
 }
 ```
 
-自定义模式：
-
-```json
-{
-  "interceptor": {
-    "mode": "custom",
-    "types": ["apiKey", "cloudAccessKey", "privateKey", "databaseUrl"]
-  }
-}
-```
-
 等价环境变量：
 
 ```bash
-export LOONGSUITE_PILOT_INTERCEPTOR_MODE=custom
-export LOONGSUITE_PILOT_INTERCEPTOR_TYPES=apiKey,cloudAccessKey,privateKey,databaseUrl
+export LOONGSUITE_PILOT_INTERCEPTOR_MODE=all
 ```
 
 | 模式 | 行为 |
 |------|------|
-| `none` | 不拦截。未配置 interceptor mode 时默认使用该模式。 |
-| `all` | 开启全部 interceptor 类型（mask 的密钥子集）。 |
-| `custom` | 只开启 `interceptor.types` 中列出、且属于 interceptor 子集的类型。未知或 PII 类型会被忽略。 |
+| `none` | 关闭全部拦截，包括内置规则和缓存的托管规则；不创建 Worker、不监听端口、不加载本地文件规则。未配置或其他值均按此模式处理。 |
+| `all` | 开启全部 interceptor 类型（mask 的密钥子集），并绑定回环端口。 |
+
+只有启动时生效的 `mode` 严格等于 `all` 才开启拦截。其他值均关闭，collector 会清掉 `interceptor/runtime.json`，`status` 显示 `interceptor: stopped`。已部署的拦截 hook 会在下一次 collector 启动或 deploy 时卸掉；本地托管规则缓存保留，供下次开启时使用，但不会自行启动服务或执行。采集 hook 不变。修改 `config.json` 的 `mode` 后需要重启 collector；已开启状态下，托管规则仍支持热更新。端口被占用时改绑随机端口，实际端口写入 runtime。
 
 | 类型 | 覆盖内容 |
 |------|----------|
@@ -210,6 +205,96 @@ export LOONGSUITE_PILOT_INTERCEPTOR_TYPES=apiKey,cloudAccessKey,privateKey,datab
 后续新增规则：实现 `LocalRule`，加入 `src/interceptor/rules/registry.ts`，并把它登记到 `SUPPORTED_INTERCEPTOR_TYPES`（必须是已有 mask type 的子集）。
 
 预留有序 evaluator / provider 接口给未来远程判定，首版不产生任何远程请求。
+
+## 本地文件规则
+
+在 `<dataDir>/configs/managed/interceptor.json` 写入规则。目录名 `managed` 是本地格式约定；本地引擎不依赖远端配置服务。先写好脚本正文，再原子替换规则文件。仅启动配置 `interceptor.mode=all` 时加载规则。
+
+```json
+{
+  "interceptor": {
+    "rules": [
+      {
+        "kind": "pattern",
+        "id": "command-preview",
+        "version": "1",
+        "agents": ["qoder", "qodercli"],
+        "events": ["UserPromptSubmit", "PreToolUse", "PostToolUse"],
+        "enforcement": "audit",
+        "match": "substring",
+        "pattern": "RULE_PROBE",
+        "title": "命令规则预览",
+        "message": "操作命中本地规则"
+      },
+      {
+        "kind": "script",
+        "id": "command-policy-sh",
+        "version": "1",
+        "agents": ["qoder", "qodercli"],
+        "events": ["PreToolUse"],
+        "shell": "sh",
+        "enforcement": "enforce",
+        "message": "操作不符合本地规则"
+      }
+    ]
+  }
+}
+```
+
+每条规则的 `id` 在列表内唯一，`id` 和 `version` 只允许 ASCII 字母、数字、点、下划线和连字符。`agents` 和 `events` 必须是非空数组。
+
+| 字段 | 取值 |
+|------|------|
+| `agents` | `qoder`、`qodercli`、`openclaw`、`qwen-work-cn` |
+| `events` | `UserPromptSubmit`、`PreToolUse`、`PostToolUse` |
+| `enforcement` | 默认 `enforce`，命中后拦截并停止；`audit` 记录命中后放行，继续检查后续规则，不提示宿主 |
+| `kind` | `pattern`、`script`；`http` 仅保留格式占位，记录警告并跳过，不发请求 |
+| `match` | pattern 规则的 `substring` 或 `regex` |
+| `shell` | script 规则的 `sh` 或 `powershell`，本机仅执行平台匹配的脚本 |
+
+规则固定按用户输入、工具名、工具输入、工具输出的顺序合并文本；对象递归提取字符串、数字和布尔叶子。`raw`、会话等元数据及规则的 title/message 不参与匹配。旧 `fields` 键兼容接受并忽略，不能缩小范围。
+
+子串采用字面匹配。正则使用 JavaScript RegExp 语法并拒绝前瞻和后顾，在独立 Worker 中执行。默认 200ms 预算包括排队时间；超时终止线程，确认退出后按需重建。终止失败时告警并停止后续正则检查，重启 collector 恢复。pattern 命中原因为 `[PATTERN_BLOCKED]`。
+
+### 脚本文件与缓存格式
+
+默认脚本路径为 `configs/managed/scripts/<id>@<version>.sh` 或 `.ps1`。上例需先写入 `configs/managed/scripts/command-policy-sh@1.sh`：
+
+```sh
+#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"matched":false}'
+```
+
+脚本 stdin 为一个 JSON 对象 `{"prompt":"<完整合并文本>"}`。stdout 必须恰好一行 `{"matched":false}` 或 `{"matched":true,"reason":"..."}`，退出码应为 0。返回非法内容、非零退出或超时将跳过该条，继续检查，保留此前已知 audit 命中。所有文件规则共享 3.5 秒预算，耗尽后停止后续检查并 fail-open。audit 脚本实际运行，具有相同执行开销和副作用。
+
+macOS/Linux 使用 `sh <file>`，由一次性 Node guardian 持有进程组，并在私有租约断开或超时后回收后台进程。Windows 最多预热两个 PowerShell 执行器，使用进程级 `ExecutionPolicy Bypass`，创建时即原子加入 kill-on-close Job Object。每次请求结束后整体回收执行器及其原生后代，再补充预热容量；成功、超时、停止和崩溃均执行回收。私有租约与 guardian 独立期限同时覆盖 interceptor Worker 退出，确认进程树清理后才替换执行器；启动和清理时间都计入请求预算。输入的非 ASCII 字符转义为 `\uXXXX`，脚本可用 `ConvertFrom-Json` 读取。原生 Job 能力需要 Windows 10 / Server 2016 或更新系统；CLM/WDAC 禁止初始化时，在用户脚本运行前以 `Windows Job Object unavailable` 明确 fail-open，绝不降级到无所有权的执行器。仅传入 PATH、HOME、TEMP 等受限环境变量。脚本按 collector 所属用户权限运行，不提供操作系统沙箱；委托给服务或 WMI 创建的进程不属于原生子进程所有权范围。
+
+PowerShell 5.1 的 `.ps1` 正文含非 ASCII 字符时，应使用带 BOM 的 UTF-8 编码。stdin 请求的 JSON 转义只保护请求内容，不会改变 PowerShell 对脚本文件自身的解码方式。
+
+Windows 启动器不继承 `PSModulePath`，由 PowerShell 5.1 重建自身模块路径，避免从 PowerShell 7 经 Node 启动 collector 时加载错误版本的模块。启动命令显式导入 `$PSHOME` 下的系统模块清单，避免启动时扫描无关模块。参见 [微软模块路径说明](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath#starting-windows-powershell-from-powershell-7)。
+
+本地文档还接受可选的 `interceptor.scriptCache`：64 位小写十六进制字符串，用于选择 `configs/managed/scripts/<scriptCache>/` 命名空间。不设置时使用根目录。生成命名空间的配置提供方需先放齐该目录的所有脚本，再发布规则文档。本地执行器只校验格式和路径，不解释命名空间的来源。
+
+每 3 秒检查本地文件，内容变化后生成新引擎。加载时检查普通文件和真实路径，每次执行前再次拒绝符号链接。新脚本未就绪或规则文件不合法时保留可执行的上一代，并记录日志。进行中的请求持有发起时的引擎和执行器；最后一个请求结束后释放旧执行器。改为纯 pattern 或清空规则同样回收脚本资源。
+
+### 判定与观察事件
+
+先执行内置敏感类型规则，命中直接拦截；内置放行后按文件中的数组顺序执行。响应的 `matches` 保留全部已发生的 audit 与 enforce 命中。顶层元数据代表最终 enforce 拦截规则，或放行时的首条 audit 命中。完整检查无命中才有 `matched=false`；检查失败且没有已知命中时省略 matched。audit 命中后发生错误可同时有 `matched=true` 和 `failOpen=true`。
+
+每条命中产生一条 `event.name=guardrail.evaluation`，包含 session、tool call id（若有）、phase、规则 id/version、matched/enforcement/action 和脱敏后的原因、title/message，不复制业务正文。JSONL/SLS 可保存这些观察事件；OTLP 在 turn 分组入口及转换时过滤，避免生成额外执行 Span 或提前结束 turn。
+
+脚本可能在 `reason` 中回显业务正文。该 Agent 的 `captureMessageContent=false` 时，采集输出会从观察事件、关联工具事件、被拒 Prompt 及 OTLP Span 属性和事件中裁掉 `gen_ai.guardrail.reason`，保留 action 和规则身份等结构化信息。返回宿主的阻断诊断原因仍然保留。
+
+独立观察的 action 表示该条规则，普通工具事件及 HTTP 响应的 action 表示整次请求。例如 audit 后 enforce 命中，观察分别为 allow/block，最终工具裁决为 block。UserPromptSubmit audit 不补发被拦截 Prompt，enforce 拦截仍补发 `llm.request`。
+
+Hook 的 `parent_business_info.product=app` 时，Qoder 观察和被拒 Prompt 使用 `qoder-app` 身份。输出前沿用原生 agent/session 的工作区排除状态，App 与 CLI 即使 session id 相同也分别匹配隐私状态。
+
+### 升级与回退
+
+旧 `interceptor.mode=custom` 升级后按 `none` 处理，整个拦截功能关闭。继续使用需在重启 collector 前显式改为 `all`，这将开启全部内置密钥类型；不再支持 `--interceptor-types` 或对应环境变量。mask 的 custom 模式不受影响。
+
+旧客户端可能拒绝 enforcement 和 scriptCache 字段。回退前停止 Pilot，将规则改为旧版支持的格式；停用 audit 或明确改为默认 enforce 并移除新键，不能仅删除 audit 键后意外变成强制拦截。对不支持 scriptCache 的版本，需将正文移回根目录并移除该字段，或清空本地文件规则与脚本，再启动旧版。
 
 ## 服务生命周期
 
@@ -241,6 +326,6 @@ CLI 不会自行拉起 HTTP 服务。runtime 缺失或连不上时立即 fail-op
 |------|------|
 | hook 总是放行 | `loongsuite-pilot status` 是否显示 interceptor running；`~/.loongsuite-pilot/interceptor/runtime.json` 是否新鲜；`interceptor/logs/access.log` 是否有对应 `event`/`result` |
 | 看每次判定 | `~/.loongsuite-pilot/interceptor/logs/access.log`：`event`、`input`、`result.action`（`block` / `allow` / `fail-open`） |
-| 想打开拦截 | 确认 `config.json` 里 `"interceptor": { "mode": "all" }`（或 `custom` + `types`）后**重启 collector** |
+| 想打开内置拦截 | `config.json` 里 `"interceptor": { "mode": "all" }` 后**重启 collector**。已有规则缓存不会自行开启服务，必须显式选择 all |
 | stdout 被吃掉 | Windows 拦截 hook 禁止 `Out-Null`；不要复用采集 processor |
 | 端口冲突 | daemon 优先绑定 `127.0.0.1:18791`，占用则改绑 `0` 并把实际端口写入 runtime |

@@ -10,6 +10,7 @@ import { parseOpenClawHookRequest, renderOpenClawBlock } from '../adapters/openc
 import { parseHookRequest, renderQoderBlock } from '../adapters/qoder.js';
 import { parseQwenWorkHookRequest, renderQwenWorkBlock } from '../adapters/qwenwork.js';
 import { wrapHostReason } from '../adapters/reason.js';
+import { hostBlockDetail } from '../guardrail.js';
 import { interceptorRuntimePath } from '../paths.js';
 import { isInterceptorAgent, type HookRequest, type InterceptorRuntime } from '../types.js';
 import { DaemonClient } from './daemon-client.js';
@@ -114,7 +115,7 @@ export async function runHook(args: string[], deps: HookCliDeps): Promise<number
       return 0;
     }
     const verdict = await client.checkHook(request);
-    emitVerdict(request, verdict.action, verdict.reason, deps.writeStdout);
+    emitVerdict(request, verdict.action, verdict.reason, deps.writeStdout, verdict.message);
   } catch (err) {
     deps.log('daemon hook request failed, fail-open', {
       error: err instanceof Error ? err.message : String(err),
@@ -163,14 +164,16 @@ export function emitVerdict(
   action: string,
   reason: string | undefined,
   writeStdout: (text: string) => void,
+  message?: string,
 ): void {
   if (action !== 'block') return;
+  const detail = hostBlockDetail(message, reason);
   writeStdout(
     request.agent === 'openclaw'
-      ? renderOpenClawBlock(request, reason)
+      ? renderOpenClawBlock(request, detail)
       : request.agent === 'qwen-work-cn'
-        ? renderQwenWorkBlock(request, reason)
-        : renderQoderBlock(request, wrapHostReason(request.event, reason)),
+        ? renderQwenWorkBlock(request, detail)
+        : renderQoderBlock(request, wrapHostReason(request.event, detail)),
   );
 }
 

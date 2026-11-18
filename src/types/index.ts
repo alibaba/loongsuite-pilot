@@ -75,7 +75,8 @@ export const SUPPORTED_INTERCEPTOR_TYPES = [
 export type InterceptorType = (typeof SUPPORTED_INTERCEPTOR_TYPES)[number];
 
 export interface InterceptorConfig {
-  mode: MaskMode;
+  /** `custom` is not an interceptor mode. Builtin rules are all-or-nothing. */
+  mode: 'none' | 'all';
   types: InterceptorType[];
 }
 

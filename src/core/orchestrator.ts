@@ -8,9 +8,10 @@ import { InputManager } from './input-manager.js';
 import { InterceptResultLinker } from './intercept-result-linker.js';
 import { StateStore } from '../checkpoints/state-store.js';
 import { interceptorToolVerdictPath } from '../interceptor/paths.js';
-import { loadInterceptorConfig, resolveEnabledInterceptorTypes } from '../interceptor/config.js';
+import { resolveEnabledInterceptorTypes, shouldDeployInterceptorHooks } from '../interceptor/config.js';
+import { clearInterceptorRuntime } from '../interceptor/daemon/runtime.js';
 import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
-import { startInterceptorService, type InterceptorService } from '../interceptor/daemon/lifecycle.js';
+import { startInterceptorWorker, type InterceptorWorkerService } from '../interceptor/worker-service.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { resolveDeploymentScope, type DeploymentScopeMode } from '../deployment/deployment-scope.js';
@@ -187,7 +188,7 @@ export class Orchestrator extends EventEmitter {
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
   private dashboardServer: DashboardServer | null = null;
-  private interceptorService: InterceptorService | null = null;
+  private interceptorService: InterceptorWorkerService | null = null;
   private verdictStore: ToolVerdictStore | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
@@ -256,11 +257,12 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setAlarmManager(this.alarmManager);
     this.verdictStore = new ToolVerdictStore(interceptorToolVerdictPath(this.dataDir));
     this.verdictStore.restore();
-    const interceptorConfig = await loadInterceptorConfig();
+    const builtinInterceptEnabled = resolveEnabledInterceptorTypes(this.config.interceptor).size > 0;
     this.inputManager.setInterceptResultLinker(
       new InterceptResultLinker(
         this.verdictStore,
-        resolveEnabledInterceptorTypes(interceptorConfig).size > 0,
+        () => builtinInterceptEnabled || this.interceptorService?.managedActive === true,
+        () => this.interceptorService?.syncVerdicts() ?? Promise.resolve(),
       ),
     );
 
@@ -333,6 +335,7 @@ export class Orchestrator extends EventEmitter {
       dataDir: this.dataDir,
       pilotDir,
       installedBy: 'daemon',
+      deployInterceptorHooks: shouldDeployInterceptorHooks(this.config.interceptor),
       doubaoWork: this.config.listeners['doubao-work'],
     });
     await this.deploymentManager.loadDefinitions();
@@ -473,22 +476,23 @@ export class Orchestrator extends EventEmitter {
       });
     }
 
-    // Interceptor HTTP shares this process. A bind failure leaves hooks fail-open
-    // and must not keep the collector from collecting.
-    this.interceptorService = await startInterceptorService({
-      dataDir: this.dataDir,
-      version: packageVersion,
-      gitCommit: packageGitCommit || undefined,
-      verdictStore: this.verdictStore ?? undefined,
-      emitBlockedPrompt: (entry) => {
-        void this.inputManager.flushPreparedEntries([entry]).catch(err => {
-          logger.warn('blocked prompt flush failed', { error: String(err) });
-        });
-      },
-    }).catch(err => {
-      logger.warn('interceptor start failed (non-fatal)', { error: String(err) });
-      return null;
-    });
+    // The startup mode gates the entire interceptor, including cached local rules.
+    if (this.config.interceptor.mode === 'all') {
+      this.interceptorService = await startInterceptorWorker({
+        dataDir: this.dataDir,
+        version: packageVersion,
+        gitCommit: packageGitCommit || undefined,
+        verdictStore: this.verdictStore ?? undefined,
+        mode: this.config.interceptor.mode,
+        emitBlockedPrompt: (entry, signal) => this.inputManager.flushPreparedEntries([entry], signal),
+        emitEvaluation: (entry, signal) => this.inputManager.flushPreparedEntries([entry], signal),
+      }).catch(err => {
+        logger.warn('interceptor start failed (non-fatal)', { error: String(err) });
+        return null;
+      });
+    } else {
+      clearInterceptorRuntime(this.dataDir);
+    }
 
     // The native macOS menu bar app has its own switch.
     if (this.config.statusBar.enabled) {
@@ -550,13 +554,7 @@ export class Orchestrator extends EventEmitter {
     await this.interceptorService?.stop().catch(err => {
       logger.warn('interceptor stop failed during orchestrator shutdown', { error: String(err) });
     });
-    if (!this.interceptorService) {
-      try {
-        this.verdictStore?.dump();
-      } catch (err) {
-        logger.warn('interceptor verdict checkpoint failed', { error: String(err) });
-      }
-    }
+    // The worker is the only checkpoint writer. The collector cache is an IPC mirror.
     this.interceptorService = null;
     this.verdictStore = null;
     await this.metricsSummaryWriter?.stop();
@@ -1035,15 +1033,7 @@ export class Orchestrator extends EventEmitter {
     }
 
     if (flushers.length === 0) {
-      logger.warn('no flushers enabled, using JSONL fallback');
-      const fallback = new JsonlFlusher({
-        enabled: true,
-        outputDir: path.join(this.dataDir, 'logs', 'output'),
-        rotateDaily: true,
-        maxFileSizeMb: 100,
-      });
-      await fallback.start().catch(err => logger.warn('jsonl fallback flusher start failed', { error: String(err) }));
-      flushers.push(fallback);
+      logger.warn('no flushers enabled, collected events will not be exported');
     }
 
     return flushers.length === 1 ? flushers[0] : new MultiFlusher(flushers);

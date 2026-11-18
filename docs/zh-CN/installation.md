@@ -88,8 +88,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--mask-mode <mode>` | 脱敏模式：`all`、`none` 或 `custom`。 |
 | `--mask-types <list>` | 逗号分隔的脱敏类型，`--mask-mode custom` 时必填。 |
 | `--mask-replacement-mode <mode>` | 脱敏替换格式：`placeholder`（默认固定占位符）或 `preview`（星号预览）。Windows 对应 `-MaskReplacementMode`。 |
-| `--interceptor-mode <mode>` | 本地拦截模式：`all`、`none` 或 `custom`。启用的拦截类型会自动补进 `mask`。 |
-| `--interceptor-types <list>` | 逗号分隔的拦截类型（mask 密钥子集），`--interceptor-mode custom` 时必填。 |
+| `--interceptor-mode <mode>` | 本地拦截模式：`all` 或 `none`。`all` 会把全部内置密钥类型补进 `mask`。旧 `custom` 配置会关闭拦截，继续使用需显式改为 `all`；不再接受 `--interceptor-types`。 |
 | `--collect-log <true\|false>` | 开启或关闭 SLS 日志上报。 |
 | `--collect-trace <true\|false>` | 开启或关闭 Trace 上报。 |
 | `--cms-license-key <key>` | CMS 或 ARMS Trace license key。 |
@@ -163,7 +162,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-默认启用本地 JSONL 输出：
+本地 JSONL 输出默认关闭。需要验证本地事件时，先按 [本地 JSONL 输出](local-jsonl-output.md) 在 `config.json` 中设置 `"jsonl": { "enabled": true }` 并重启，再查看：
 
 ```bash
 ls ~/.loongsuite-pilot/logs/output

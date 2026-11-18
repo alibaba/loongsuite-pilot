@@ -139,7 +139,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-Local JSONL output is enabled by default under `~/.loongsuite-pilot/logs/output/` on Linux/macOS and `%USERPROFILE%\.loongsuite-pilot\logs\output\` on Windows.
+Local JSONL output is disabled by default. To write to `~/.loongsuite-pilot/logs/output/` on Linux/macOS or `%USERPROFILE%\.loongsuite-pilot\logs\output\` on Windows, set `"jsonl": { "enabled": true }` in `config.json`.
 
 For installer options, uninstall commands, and source builds, see [Installation](docs/installation.md).
 
@@ -188,7 +188,7 @@ Enabling both `upstreamLink.enabled` and `propagateToLlm` extends the same trace
 
 | Backend    | Use Case                                                                |
 | ---------- | ----------------------------------------------------------------------- |
-| JSONL      | Local backup and easy inspection. Enabled by default.                   |
+| JSONL      | Local backup and easy inspection. Disabled by default; enable explicitly. |
 | SLS        | Alibaba Cloud Log Service reporting. Supports WebTracking, AK, and API Key modes. |
 | HTTP       | POST batches to a custom endpoint.                                      |
 | OTLP Trace | Export GenAI activity as OpenTelemetry traces.                          |

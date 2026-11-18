@@ -87,8 +87,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--mask-mode <mode>` | Data masking mode: `all`, `none`, or `custom`. |
 | `--mask-types <list>` | Comma-separated mask types. Required when `--mask-mode custom`. |
 | `--mask-replacement-mode <mode>` | Mask replacement format: `placeholder` (fixed markers, default) or `preview` (star-masked previews). Windows: `-MaskReplacementMode`. |
-| `--interceptor-mode <mode>` | Local interception mode: `all`, `none`, or `custom`. Enabled interceptor types are also added to `mask`. |
-| `--interceptor-types <list>` | Comma-separated interceptor types (mask credential subset). Required when `--interceptor-mode custom`. |
+| `--interceptor-mode <mode>` | Local interception mode: `all` or `none`. `all` also adds every builtin credential type to `mask`. Previous `custom` configurations disable interception; explicitly switch to `all` to continue. `--interceptor-types` is no longer accepted. |
 | `--collect-log <true\|false>` | Enable or disable SLS log reporting. |
 | `--collect-trace <true\|false>` | Enable or disable trace reporting. |
 | `--cms-license-key <key>` | CMS or ARMS trace license key. |
@@ -122,7 +121,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-Local JSONL output is enabled by default:
+Local JSONL output is disabled by default. To inspect local events, set `"jsonl": { "enabled": true }` in `config.json` as described in [Local JSONL Output](local-jsonl-output.md), restart Pilot, and then check:
 
 ```bash
 ls ~/.loongsuite-pilot/logs/output

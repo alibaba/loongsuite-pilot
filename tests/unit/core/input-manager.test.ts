@@ -27,6 +27,9 @@ import {
 } from '../../../src/normalization/invocation-identity.js';
 import { deriveAgentInputEventId } from '../../../src/normalization/agent-input-dual-write.js';
 import { buildBlockedQoderPromptEntry } from '../../../src/interceptor/blocked-prompt.js';
+import { buildGuardrailEvaluationEntry } from '../../../src/interceptor/evaluation-event.js';
+import { parseHookRequest } from '../../../src/interceptor/adapters/qoder.js';
+import * as gitEnrichment from '../../../src/normalization/enrich-git-context.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -620,6 +623,95 @@ describe('InputManager', () => {
   });
 
   describe('blocked prompt flush', () => {
+    it.each([
+      { surface: 'qoder' as const, kind: 'audit' },
+      { surface: 'qodercli' as const, kind: 'audit' },
+      { surface: 'qoder' as const, kind: 'blocked-prompt' },
+      { surface: 'qodercli' as const, kind: 'blocked-prompt' },
+    ])('inherits native App exclusions for $surface $kind events without cwd', async ({ surface, kind }) => {
+      manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+      const input = new StubInput('qoder-app-native');
+      manager.registerInput(input as any);
+      input.emit('entries', [buildTestEntry({
+        'gen_ai.agent.type': 'qoder-app', 'gen_ai.session.id': 'app-session',
+        'workspace.path': '/private-project/app',
+      })]);
+      await manager.stopAll();
+      expect(flusher.batchCalls).toHaveLength(0);
+
+      const request = parseHookRequest({
+        hook_event_name: 'UserPromptSubmit', session_id: 'app-session',
+        parent_business_info: { product: 'app' }, prompt: 'private prompt',
+      }, surface)!;
+      expect(request.cwd).toBeUndefined();
+      const entry = kind === 'audit'
+        ? buildGuardrailEvaluationEntry(request, { matched: true, action: 'allow', enforcement: 'audit',
+          ruleId: 'audit', ruleVersion: '1', reason: 'private reason' })
+        : buildBlockedQoderPromptEntry(request);
+      entry[INVOCATION_SESSION_ID_FIELD] = 'public-session';
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls).toHaveLength(0);
+      expect(entry['gen_ai.session.id']).toBe('app-session');
+    });
+
+    it('does not borrow App identity for a CLI observation sharing an excluded App session id', async () => {
+      manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+      const input = new StubInput('qoder-app-native');
+      manager.registerInput(input as any);
+      input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'qoder-app',
+        'gen_ai.session.id': 'shared-session', 'workspace.path': '/private-project/app' })]);
+      await manager.stopAll();
+      const request = parseHookRequest({ hook_event_name: 'PreToolUse', session_id: 'shared-session',
+        parent_business_info: { product: 'cli' } }, 'qodercli')!;
+      const entry = buildGuardrailEvaluationEntry(request, { matched: true, action: 'allow', enforcement: 'audit',
+        ruleId: 'audit', ruleVersion: '1', reason: 'CLI hit' });
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls.flat()).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]['gen_ai.agent.type']).toBe('qoder-cli');
+    });
+
+    it('filters excluded prepared events before identity rewriting or any output', async () => {
+      manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+      manager.setConfiguredUserId('configured-user');
+      const entry = buildBlockedQoderPromptEntry({ agent: 'qoder', event: 'UserPromptSubmit',
+        sessionId: 'native-session', cwd: '/private-project/app', prompt: 'private content', raw: {} });
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls).toHaveLength(0);
+      expect(entry['user.id']).toBe('');
+      expect(entry['gen_ai.session.id']).toBe('native-session');
+    });
+
+    it('honors sticky exclusions for audit events without cwd using native session/agent keys', async () => {
+      const policy = new WorkspacePolicy(['/private-project']);
+      manager.setWorkspacePolicy(policy);
+      const blocked = buildTestEntry({ 'gen_ai.agent.type': 'qoder-cli', 'gen_ai.session.id': 'native-session',
+        'workspace.path': '/private-project/app' });
+      expect(policy.allows(blocked)).toBe(false);
+      const entry = buildGuardrailEvaluationEntry({ agent: 'qodercli', event: 'PreToolUse',
+        sessionId: 'native-session', toolUseId: 'tool', raw: {} }, { matched: true, action: 'allow', enforcement: 'audit',
+        ruleId: 'audit', ruleVersion: '1', reason: 'hit' });
+      entry[INVOCATION_SESSION_ID_FIELD] = 'public-session';
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls).toHaveLength(0);
+      expect(entry['gen_ai.session.id']).toBe('native-session');
+    });
+
+    it('does not send late prepared output after its sink aborts during git enrichment', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const enrich = vi.spyOn(gitEnrichment, 'enrichCanonicalEntriesWithGit').mockImplementationOnce(() => gate);
+      const abort = new AbortController();
+      const entry = buildBlockedQoderPromptEntry({ agent: 'qoder', event: 'UserPromptSubmit', sessionId: 's', raw: {} });
+      try {
+        const pending = manager.flushPreparedEntries([entry], abort.signal);
+        expect(enrich).toHaveBeenCalledOnce();
+        abort.abort();
+        release();
+        await expect(pending).rejects.toThrow();
+        expect(flusher.batchCalls).toHaveLength(0);
+      } finally { enrich.mockRestore(); }
+    });
+
     it('applies user id, content policy, and mask before the shared flusher', async () => {
       manager.setConfiguredUserId('configured-user');
       manager.setMaskConfig({ mode: 'all', types: [] });
@@ -631,6 +723,14 @@ describe('InputManager', () => {
         sessionId: 's1',
         cwd: '/tmp/not-a-repo-for-pilot-blocked-prompt',
         raw: {},
+      }, Date.now(), {
+        action: 'block',
+        reason: `hit ${apiKey}`,
+        ruleId: 'flow-probe',
+        ruleVersion: '3',
+        title: `label ${apiKey}`,
+        message: `不要粘贴 ${apiKey}`,
+        evaluatedRules: ['flow-probe'],
       });
 
       await manager.flushPreparedEntries([entry]);
@@ -642,6 +742,11 @@ describe('InputManager', () => {
         { role: 'user', parts: [{ type: 'text', content: 'token [APIKEY_MASKED]' }] },
       ]);
       expect(dispatched['gen_ai.guardrail.action']).toBe('block');
+      expect(dispatched['gen_ai.guardrail.rule_id']).toBe('flow-probe');
+      expect(dispatched['gen_ai.guardrail.rule_version']).toBe('3');
+      expect(dispatched['gen_ai.guardrail.reason']).toBe('hit [APIKEY_MASKED]');
+      expect(dispatched['gen_ai.guardrail.title']).toBe('label [APIKEY_MASKED]');
+      expect(dispatched['gen_ai.guardrail.message']).toBe('不要粘贴 [APIKEY_MASKED]');
       expect(dispatched.trace_id).toBeUndefined();
       expect(dispatched['gen_ai.turn.start']).toBeUndefined();
     });

@@ -65,7 +65,6 @@ param(
     [string]$MaskTypes,
     [string]$MaskReplacementMode,
     [string]$InterceptorMode,
-    [string]$InterceptorTypes,
     [switch]$Purge,
     [switch]$PreferSystemNode
 )
@@ -149,18 +148,10 @@ if ($MaskReplacementMode -and $MaskReplacementMode -notin @("placeholder", "prev
     exit 1
 }
 if ($InterceptorMode) {
-    if ($InterceptorMode -notin @("all", "none", "custom")) {
-        Write-Error "Unknown interceptor mode: $InterceptorMode (use 'all', 'custom', or 'none')"
+    if ($InterceptorMode -notin @("all", "none")) {
+        Write-Error "Unknown interceptor mode: $InterceptorMode (use 'all' or 'none')"
         exit 1
     }
-}
-if ($InterceptorMode -eq "custom" -and -not $InterceptorTypes) {
-    Write-Error "--InterceptorTypes is required when -InterceptorMode custom"
-    exit 1
-}
-if ($InterceptorTypes -and $InterceptorMode -ne "custom") {
-    Write-Error "-InterceptorTypes can only be used with -InterceptorMode custom"
-    exit 1
 }
 if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
     Write-Error "-SlsApiKey cannot be used with -SlsAkId or -SlsAkSecret"
@@ -1142,7 +1133,6 @@ function Confirm-ConfigOverwrite {
         maskTypes = $MaskTypes
         maskReplacementMode = $MaskReplacementMode
         interceptorMode = $InterceptorMode
-        interceptorTypes = $InterceptorTypes
         multimodalMode = $script:MultimodalMode
     } | ConvertTo-Json -Compress
 
@@ -1159,11 +1149,7 @@ const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databas
 const parseTypeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean);
 const uniqueTypes = list => [...new Set(list)];
 const interceptorModeFinal = newVals.interceptorMode || (old.interceptor||{}).mode || '';
-const interceptorTypesFinal = interceptorModeFinal === 'all'
-  ? INTERCEPTOR_TYPE_SET.slice()
-  : interceptorModeFinal === 'custom'
-    ? parseTypeCsv(newVals.interceptorMode ? newVals.interceptorTypes : ((old.interceptor||{}).types||[]).join(',')).filter(t => INTERCEPTOR_TYPE_SET.indexOf(t) !== -1)
-    : [];
+const interceptorTypesFinal = interceptorModeFinal === 'all' ? INTERCEPTOR_TYPE_SET.slice() : [];
 const maskModeFinal = newVals.maskMode || (old.mask||{}).mode || '';
 const maskTypesFinal = maskModeFinal === 'custom'
   ? parseTypeCsv(newVals.maskMode ? newVals.maskTypes : ((old.mask||{}).types||[]).join(','))
@@ -1191,7 +1177,6 @@ const checks = [
   { label: 'mask.types',        oldVal: (old.mask||{}).mode === 'custom' && Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: coveredMaskTypes.join(',') },
   { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
   { label: 'interceptor.mode',  oldVal: (old.interceptor||{}).mode||'',  newVal: newVals.interceptorMode },
-  { label: 'interceptor.types', oldVal: Array.isArray((old.interceptor||{}).types) ? normalizeCsv(old.interceptor.types.join(',')) : '', newVal: normalizeCsv(newVals.interceptorTypes) },
   { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
 ];
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
@@ -1473,7 +1458,6 @@ function Write-Config {
         maskTypes         = "$MaskTypes"
         maskReplacementMode = "$MaskReplacementMode"
         interceptorMode   = "$InterceptorMode"
-        interceptorTypes  = "$InterceptorTypes"
         probeResult       = "$($script:PROBE_RESULT)"
     }
     $cfgJson = $cfgArgs | ConvertTo-Json -Compress
@@ -1575,18 +1559,12 @@ if (opts.maskReplacementMode) {
 if (opts.interceptorMode) {
   config.interceptor = config.interceptor || {};
   config.interceptor.mode = opts.interceptorMode;
-  if (opts.interceptorMode === 'custom') {
-    config.interceptor.types = opts.interceptorTypes.split(',').map(t => t.trim()).filter(Boolean);
-  } else { delete config.interceptor.types; }
+  delete config.interceptor.types;
 }
 const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
 (function ensureMaskCoversInterceptor(config) {
   const interceptor = config.interceptor || {};
-  const extra = interceptor.mode === 'all'
-    ? INTERCEPTOR_TYPE_SET.slice()
-    : interceptor.mode === 'custom' && Array.isArray(interceptor.types)
-      ? interceptor.types.filter(type => INTERCEPTOR_TYPE_SET.indexOf(type) !== -1)
-      : [];
+  const extra = interceptor.mode === 'all' ? INTERCEPTOR_TYPE_SET.slice() : [];
   if (extra.length === 0) return;
   if ((config.mask || {}).mode === 'all') return;
   const current = (config.mask || {}).mode === 'custom' && Array.isArray((config.mask || {}).types)

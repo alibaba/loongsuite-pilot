@@ -35,12 +35,13 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
 | `dataDir` | Local runtime and data directory. |
 | `userId` | User identity written to emitted events. Defaults to the machine hostname. |
 | `collectLog` | Enables SLS log reporting. JSONL and HTTP remain controlled by their own `enabled` flags. |
+| `jsonl.enabled` | Controls normalized local event output in `logs/output/`. Defaults to `false`; set to `true` to enable it. |
 | `collectTrace` | Enables OTLP trace export when a trace destination is configured. |
 | `dashboard.enabled` | Local dashboard switch. Only boolean `true` enables it; missing or other values disable it. |
 | `dashboard.port` | Loopback dashboard port when enabled. Must be an integer from 1 through 65535; invalid values fall back to `8765`. |
 | `serviceName` | Exact service name shared by every agent and reporting backend. It takes precedence over all service-name prefixes. |
 | `serviceNamePrefix` | Legacy service-name base. When `serviceName` is unset, Pilot reports each agent as `<serviceNamePrefix>-<agentType>`. |
-| `interceptor` | Local interception. Same `{ mode, types }` shape as `mask`; `types` is the credential subset of mask types. See [Local Interception](zh-CN/interceptor.md). |
+| `interceptor` | Local interception. Only `mode: "all"` enables builtin and local file rules, the Worker, HTTP listener, and intercept hooks. `none` or any other value disables all interception, including cached rules. See [Local Interception](interceptor.md). |
 
 Equivalent environment variables:
 
@@ -52,13 +53,15 @@ Equivalent environment variables:
 | `LOONGSUITE_PILOT_HOOK_SCOPE` | Installation scope (`user` or Linux-only `system`) for hook CLI and container eager injection. Explicit `--scope` wins; unset preserves existing behavior and recorded targets. |
 | `LOONGSUITE_PILOT_USER_ID` | Override `userId`. |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | Set `false` or `0` to disable SLS log reporting. |
+| `JSONL_ENABLED` | Overrides `jsonl.enabled`; set to `true` to enable local JSONL output. |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | Set `false` or `0` to disable trace reporting. |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | Override `serviceName` with one exact name for all agents and backends. |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | Override `serviceNamePrefix`. |
 | `LOONGSUITE_PILOT_POLL_INTERVAL_MS` | Poll interval in milliseconds for every agent collector. Default is `10000`. Overrides `listeners.*.pollInterval` and `QODER_ANALYTICS_POLL_INTERVAL`. Only decimal integers from `1000` through `2147483647` are accepted; anything else is ignored. When this variable is unset, Wukong and Kiro CLI session keep their 60 second built-in interval. |
 | `LOG_LEVEL` | Runtime log level: `debug`, `info`, `warn`, `error`, or `silent`. |
-| `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | Interceptor mode: `all`, `none`, or `custom`. |
-| `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` | Comma-separated interceptor types. Used only with `custom` mode. |
+| `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | Interceptor mode: `all` or `none`, read at collector startup. |
+
+The former interceptor `custom` mode and `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` are no longer supported. Existing `custom` configurations disable interception after upgrading. To continue interception, explicitly choose `all` before restarting the collector; this enables every builtin credential type. `mask` continues to support its own `custom` mode.
 
 ## SLS Secret Configuration
 

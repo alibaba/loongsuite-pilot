@@ -65,29 +65,24 @@ describe('installer interceptor flags', () => {
   it('shell installer mirrors mask flag parsing, validation, and config write', () => {
     expect(installerSh).toContain('--interceptor-mode)');
     expect(installerSh).toContain('--interceptor-mode=*)');
-    expect(installerSh).toContain('--interceptor-types)');
-    expect(installerSh).toContain('--interceptor-types=*)');
+    expect(installerSh).not.toContain('--interceptor-types)');
     expect(installerSh).toContain("Unknown interceptor mode:");
-    expect(installerSh).toContain('--interceptor-types is required when --interceptor-mode custom');
-    expect(installerSh).toContain('--interceptor-types can only be used with --interceptor-mode custom');
+    expect(installerSh).toContain("use 'all' or 'none'");
     expect(installerSh).toContain("label: 'interceptor.mode'");
-    expect(installerSh).toContain("label: 'interceptor.types'");
+    expect(installerSh).not.toContain("label: 'interceptor.types'");
     expect(installerSh).toContain('config.interceptor.mode = interceptorMode');
-    expect(installerSh).toContain("if (interceptorMode === 'custom')");
     expect(installerSh).toContain('delete config.interceptor.types');
     expect(installerSh).toContain('ensureMaskCoversInterceptor');
   });
 
   it('PowerShell installer mirrors mask flag parsing, validation, and config write', () => {
     expect(installerPs1).toContain('[string]$InterceptorMode');
-    expect(installerPs1).toContain('[string]$InterceptorTypes');
+    expect(installerPs1).not.toContain('[string]$InterceptorTypes');
     expect(installerPs1).toContain('Unknown interceptor mode:');
-    expect(installerPs1).toContain('--InterceptorTypes is required when -InterceptorMode custom');
-    expect(installerPs1).toContain('-InterceptorTypes can only be used with -InterceptorMode custom');
+    expect(installerPs1).toContain("use 'all' or 'none'");
     expect(installerPs1).toContain("label: 'interceptor.mode'");
-    expect(installerPs1).toContain("label: 'interceptor.types'");
+    expect(installerPs1).not.toContain("label: 'interceptor.types'");
     expect(installerPs1).toContain('config.interceptor.mode = opts.interceptorMode');
-    expect(installerPs1).toContain("if (opts.interceptorMode === 'custom')");
     expect(installerPs1).toContain('delete config.interceptor.types');
     expect(installerPs1).toContain('ensureMaskCoversInterceptor');
   });
@@ -104,28 +99,19 @@ describe('installer interceptor flags', () => {
     });
   });
 
-  it('writes interceptor custom types', () => {
-    const result = runBashConfig([
-      '--interceptor-mode', 'custom',
-      '--interceptor-types', 'apiKey, cloudAccessKey,idCard',
-    ]);
-    expect(result.status, result.stderr).toBe(0);
-    expect(result.config.interceptor).toEqual({
-      mode: 'custom',
-      types: ['apiKey', 'cloudAccessKey', 'idCard'],
-    });
-    expect(result.config.mask).toEqual({
-      mode: 'custom',
-      types: ['apiKey', 'cloudAccessKey'],
-    });
+  it('rejects custom interceptor mode', () => {
+    const result = runBashConfig(['--interceptor-mode', 'custom']);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Unknown interceptor mode: custom');
+    expect(result.config).toBeUndefined();
   });
 
-  it('preserves existing interceptor config when flags are omitted', () => {
+  it('preserves an existing interceptor object when flags are omitted', () => {
     const existing = { interceptor: { mode: 'custom', types: ['privateKey'] }, logLevel: 'debug' };
     const result = runBashConfig([], existing);
     expect(result.status, result.stderr).toBe(0);
     expect(result.config).toMatchObject(existing);
-    expect(result.config.mask).toEqual({ mode: 'custom', types: ['privateKey'] });
+    expect(result.config.mask).toBeUndefined();
   });
 
   it('shows interceptor.mode in the overwrite prompt', () => {
@@ -142,20 +128,6 @@ describe('installer interceptor flags', () => {
     expect(result.config).toEqual(existing);
   });
 
-  it('requires types when interceptor mode is custom', () => {
-    const result = runBashConfig(['--interceptor-mode', 'custom']);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('--interceptor-types is required when --interceptor-mode custom');
-    expect(result.config).toBeUndefined();
-  });
-
-  it('rejects types unless interceptor mode is custom', () => {
-    const result = runBashConfig(['--interceptor-types', 'apiKey']);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('--interceptor-types can only be used with --interceptor-mode custom');
-    expect(result.config).toBeUndefined();
-  });
-
   it('PowerShell JS writer matches the shell interceptor config shape', () => {
     const all = runPowerShellJs({ interceptorMode: 'all', interceptorTypes: 'apiKey' }, {
       interceptor: { mode: 'custom', types: ['apiKey'] },
@@ -167,37 +139,9 @@ describe('installer interceptor flags', () => {
       types: ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'],
     });
 
-    const custom = runPowerShellJs({
-      interceptorMode: 'custom',
-      interceptorTypes: 'apiKey, privateKey',
-    });
-    expect(custom.status, custom.stderr).toBe(0);
-    expect(custom.config.interceptor).toEqual({
-      mode: 'custom',
-      types: ['apiKey', 'privateKey'],
-    });
-    expect(custom.config.mask).toEqual({
-      mode: 'custom',
-      types: ['apiKey', 'privateKey'],
-    });
   });
 
   describe('mask covers interceptor types', () => {
-    it('adds interceptor custom types to mask when mask flags omit them', () => {
-      const result = runBashConfig([
-        '--interceptor-mode', 'custom',
-        '--interceptor-types', 'apiKey',
-        '--mask-mode', 'custom',
-        '--mask-types', 'idCard,phone',
-      ]);
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.config.interceptor).toEqual({ mode: 'custom', types: ['apiKey'] });
-      expect(result.config.mask).toEqual({
-        mode: 'custom',
-        types: ['idCard', 'phone', 'apiKey'],
-      });
-    });
-
     it('adds every interceptor type when interceptor is all and mask is custom', () => {
       const result = runBashConfig([
         '--interceptor-mode', 'all',
@@ -212,14 +156,16 @@ describe('installer interceptor flags', () => {
       });
     });
 
-    it('promotes mask none to custom so interceptor types are covered', () => {
+    it('promotes mask none to custom so builtin interceptor types are covered', () => {
       const result = runBashConfig([
-        '--interceptor-mode', 'custom',
-        '--interceptor-types', 'apiKey',
+        '--interceptor-mode', 'all',
         '--mask-mode', 'none',
       ]);
       expect(result.status, result.stderr).toBe(0);
-      expect(result.config.mask).toEqual({ mode: 'custom', types: ['apiKey'] });
+      expect(result.config.mask).toEqual({
+        mode: 'custom',
+        types: ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'],
+      });
     });
 
     it('leaves mask all unchanged because it already covers interceptor types', () => {
@@ -233,15 +179,14 @@ describe('installer interceptor flags', () => {
 
     it('does not duplicate types already present in mask custom', () => {
       const result = runBashConfig([
-        '--interceptor-mode', 'custom',
-        '--interceptor-types', 'apiKey',
+        '--interceptor-mode', 'all',
         '--mask-mode', 'custom',
         '--mask-types', 'apiKey,idCard',
       ]);
       expect(result.status, result.stderr).toBe(0);
       expect(result.config.mask).toEqual({
         mode: 'custom',
-        types: ['apiKey', 'idCard'],
+        types: ['apiKey', 'idCard', 'cloudAccessKey', 'privateKey', 'databaseUrl'],
       });
     });
 
