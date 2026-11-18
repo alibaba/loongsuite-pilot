@@ -27,6 +27,19 @@ function clearSlsEnv() {
 }
 
 describe('ConfigLoader', () => {
+  it('keeps a collaboration conversation allowlist and fails closed for invalid scopes', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'qwen-work-cn-collaboration': { includeConversationIds: [' space-a ', 'space-a', 'space-b'] },
+    } });
+    expect((await loadConfig()).listeners['qwen-work-cn-collaboration'].includeConversationIds)
+      .toEqual(['space-a', 'space-b']);
+
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'qwen-work-cn-collaboration': { includeConversationIds: 'space-a' },
+    } });
+    expect((await loadConfig()).listeners['qwen-work-cn-collaboration'].includeConversationIds).toEqual([]);
+  });
+
   it('loads workspace exclusions and rejects invalid privacy rules', async () => {
     mockReadJsonFile.mockResolvedValueOnce({ privacy: { excludeWorkspaces: ['/private-project'] } });
     expect((await loadConfig()).privacy?.excludeWorkspaces).toEqual(['/private-project']);
@@ -330,6 +343,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qwen-work-cn-hook']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['qwen-work-cn-trace']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-collaboration']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
       expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 10_000 });

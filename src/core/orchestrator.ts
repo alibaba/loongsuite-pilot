@@ -55,6 +55,7 @@ import { QoderWorkTraceInput } from '../inputs/qoder-work-trace/qoder-work-trace
 import { QwenWorkCNInput } from '../inputs/qwen-work-cn/qwen-work-cn-input.js';
 import { QwenWorkCNTraceInput } from '../inputs/qwen-work-cn/qwen-work-cn-trace-input.js';
 import { QwenWorkCNSqliteInput } from '../inputs/qwen-work-cn/qwen-work-cn-sqlite-input.js';
+import { QwenWorkCNCollaborationInput } from '../inputs/qwen-work-cn/qwen-work-cn-collaboration-input.js';
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
@@ -142,6 +143,7 @@ export class Orchestrator extends EventEmitter {
     'qwen-work-cn-trace': 'qwen-work-cn',
     'qwen-work-cn-hook': 'qwen-work-cn',
     'qwen-work-cn-sqlite': 'qwen-work-cn',
+    'qwen-work-cn-collaboration': 'qwen-work-cn',
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
     'grok-build-log': 'grok-build',
@@ -1461,6 +1463,26 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['qwen-work-cn-sqlite']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['qwen-work-cn-sqlite']?.pollInterval,
+      }),
+    );
+
+    // Collaboration messages are a separate IM projection and do not use Stop hooks.
+    const qwenWorkCNCollaborationInput = new QwenWorkCNCollaborationInput({
+      stateStore: this.stateStore,
+      pollIntervalMs: listenerCfg['qwen-work-cn-collaboration']?.pollInterval,
+      includeConversationIds: listenerCfg['qwen-work-cn-collaboration']?.includeConversationIds,
+    });
+    this.inputManager.registerInput(qwenWorkCNCollaborationInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qwenWorkCNCollaborationInput, {
+        watchPaths: QwenWorkCNCollaborationInput.getWatchPaths(),
+        isAvailable: QwenWorkCNCollaborationInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-work-cn-collaboration']) &&
+          this.agentControlManager.resolveEnabled(
+            'qwen-work-cn-collaboration',
+            listenerCfg['qwen-work-cn-collaboration']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qwen-work-cn-collaboration']?.pollInterval,
       }),
     );
 

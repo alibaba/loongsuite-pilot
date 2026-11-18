@@ -21,6 +21,7 @@ import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
+import { convertQwenWorkCollaborationTurn } from './qwen-work-collaboration-converter.js';
 import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
@@ -1166,6 +1167,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    if (entry['agent.source'] === 'qwen-work-cn-collaboration') {
+      return entry['event.name'] === 'other' && entry['gen_ai.turn.end'] === true;
+    }
     if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.source'] === 'hybrid-v2') return entry['gen_ai.turn.end'] === true;
     // V2 step completion (including a failed/retried model request) is not
     // execution completion. Preserve V1's existing finish-reason behavior.
@@ -1480,7 +1484,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
           const conversionRecords = this.cfg.captureMessageContent === false
             ? prepared.records.map(stripAgentMessageContent)
             : prepared.records;
-          const stream = planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
+          const qwenCollaboration = conversionRecords.some(record => record['agent.source'] === 'qwen-work-cn-collaboration');
+          const stream = qwenCollaboration ? null : planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
           if (stream) {
             streamedExportSucceeded = true;
             const reasoning = { seen: false, total: 0 };
@@ -1521,7 +1526,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
               }
             });
           } else {
-            const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents
+            const convert = qwenCollaboration ? convertQwenWorkCollaborationTurn
+              : agentType === 'qwen-code-cli' ? convertQwenSubagents
               : agentType === 'doubao-work' ? convertDoubaoWorkTurn
               : convertEventLogToTrace;
             result = convert(
@@ -1608,6 +1614,37 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     if (agentType === 'claude-code') this.enrichClaudeCodeLlmAttributes(records, spans);
     if (agentType === 'grok-build') this.enrichGrokBuildSpans(records, spans, grokMetadata);
+    if (records.some(record => record['agent.source'] === 'qwen-work-cn-collaboration')) {
+      const start = records.find(record => record['gen_ai.turn.start'] === true);
+      const terminal = records.find(record => record['gen_ai.turn.end'] === true);
+      const hasProvider = records.some(record => typeof record['gen_ai.provider.name'] === 'string'
+        && record['gen_ai.provider.name'].trim().length > 0);
+      const startNano = start?.time_unix_nano;
+      const endNano = terminal?.time_unix_nano;
+      const validTimes = typeof startNano === 'string' && /^\d+$/.test(startNano)
+        && typeof endNano === 'string' && /^\d+$/.test(endNano)
+        && BigInt(endNano) > BigInt(startNano);
+      for (const span of spans) {
+        if (!['ENTRY', 'AGENT'].includes(String(span.attributes['gen_ai.span.kind']))) continue;
+        // The shared converter defaults an absent provider to "unknown". A
+        // collaboration card cannot establish a model provider, so omit it.
+        if (!hasProvider) delete span.attributes['gen_ai.provider.name'];
+        span.attributes['loongsuite.qwenworkcn.observation_scope'] = 'collaboration_conversation';
+        const source = terminal?.['loongsuite.qwenworkcn.completion_time_source'];
+        if (typeof source === 'string') span.attributes['loongsuite.qwenworkcn.completion_time_source'] = source;
+        if (validTimes) {
+          const toHrTime = (value: bigint): [number, number] => [
+            Number(value / 1_000_000_000n), Number(value % 1_000_000_000n),
+          ];
+          const from = BigInt(startNano), to = BigInt(endNano);
+          Object.defineProperties(span, {
+            startTime: { value: toHrTime(from), configurable: true },
+            endTime: { value: toHrTime(to), configurable: true },
+            duration: { value: toHrTime(to - from), configurable: true },
+          });
+        }
+      }
+    }
     if (agentType === 'doubao-work') {
       this.enrichDoubaoWorkSpans(records, spans);
       enrichDoubaoClientRequest(records, spans);

@@ -66,6 +66,42 @@ coverage of billable model tokens:
 Restart the OpenClaw/Hermes host after updating the plugin. Previously lost
 historical content is not automatically recovered.
 
+## Qwen Work collaboration spaces (experimental)
+
+Alongside the Stop Hook for ordinary chats, Pilot polls Qwen Work's local IM
+snapshots read-only. It associates a human message with a digital employee's
+reply only when `replyToMessageId` points to the message in the same space and
+the referenced card is final. Ordinary group messages, greetings, unfinished
+cards and revoked content are not treated as turns. Only messages authored by
+the signed-in account are collected; another member's visible messages are not
+attributed to the observer. The native user identity comes from the message
+sender, subject to Pilot's usual configured-identity precedence. Other members'
+turns require collection under their own accounts. The same account on multiple
+devices may still report a turn more than once; cross-device deduplication is
+not established.
+
+This experimental adapter is based on the private Qwen Work 2.x local format.
+A manually installed isolated test service was exercised with a real space on
+macOS Qwen Work 2.1.0; installer upgrades and other platforms remain unverified. The
+snapshot does not prove individual model or tool calls, so Pilot does not
+invent LLM/TOOL spans, model, provider, or token data. Attachments and non-text
+card content are outside this source's scope. The common event contract still
+requires a provider, so this source does not yet pass strict event validation.
+The card's `terminalAt` is used
+as the completion time when available; otherwise
+`updatedAt` is used. `loongsuite.qwenworkcn.completion_time_source` records
+which client-observed boundary was used. First enablement starts at the current
+time and does not backfill completed history. Messages and cards must
+be synchronized locally. Missing or invalid snapshots are retried; snapshots
+larger than 16 MiB are skipped with a warning. Up to 50,000 completed identities
+are retained for 30 days; reaching the limit pauses new turns with a warning.
+Cards with more than 512 KiB of raw content are skipped. The normal content
+policy and masking apply. Filesystem workspace exclusions
+cannot filter collaboration spaces because this source has no working directory.
+Use `listeners.qwen-work-cn-collaboration.includeConversationIds` to allow only
+specific conversation IDs. An empty or invalid list collects no conversations.
+Set `listeners.qwen-work-cn-collaboration.enabled=false` to disable this source.
+
 ## Supported Agent IDs
 
 These IDs identify the supported integrations. Most can be used in installer
