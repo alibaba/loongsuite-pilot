@@ -52,6 +52,7 @@ export function buildBlockedQoderPromptEntry(
     action: 'block',
     ruleId: verdict?.ruleId,
     ruleVersion: verdict?.ruleVersion,
+    severity: verdict?.severity,
     reason: verdict?.reason,
     title: verdict?.title,
     message: verdict?.message,

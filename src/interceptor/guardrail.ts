@@ -9,6 +9,7 @@ export interface GuardrailSnapshot {
   failOpen?: true;
   ruleId?: string;
   ruleVersion?: string;
+  severity?: string;
   reason?: string;
   title?: string;
   message?: string;
@@ -41,6 +42,7 @@ export function stampGuardrail(entry: AgentActivityEntry, snapshot: GuardrailSna
   if (snapshot.action !== 'block' && snapshot.matched !== true) return;
   assignOptional(entry, 'gen_ai.guardrail.rule_id', snapshot.ruleId);
   assignOptional(entry, 'gen_ai.guardrail.rule_version', snapshot.ruleVersion);
+  assignOptional(entry, 'gen_ai.guardrail.severity', snapshot.severity);
   assignOptional(entry, 'gen_ai.guardrail.reason', snapshot.reason);
   assignOptional(entry, 'gen_ai.guardrail.title', snapshot.title);
   assignOptional(entry, 'gen_ai.guardrail.message', snapshot.message);
@@ -50,6 +52,7 @@ function pickBlockMeta(verdict: EvaluateHookResponse): Omit<GuardrailSnapshot, '
   return {
     ...(nonEmpty(verdict.ruleId) ? { ruleId: verdict.ruleId } : {}),
     ...(nonEmpty(verdict.ruleVersion) ? { ruleVersion: verdict.ruleVersion } : {}),
+    ...(nonEmpty(verdict.severity) ? { severity: verdict.severity } : {}),
     ...(nonEmpty(verdict.reason) ? { reason: verdict.reason } : {}),
     ...(nonEmpty(verdict.title) ? { title: verdict.title } : {}),
     ...(nonEmpty(verdict.message) ? { message: verdict.message } : {}),
@@ -59,6 +62,7 @@ function pickBlockMeta(verdict: EvaluateHookResponse): Omit<GuardrailSnapshot, '
 function assignOptional(
   entry: AgentActivityEntry,
   key: 'gen_ai.guardrail.rule_id' | 'gen_ai.guardrail.rule_version'
+    | 'gen_ai.guardrail.severity'
     | 'gen_ai.guardrail.reason' | 'gen_ai.guardrail.title' | 'gen_ai.guardrail.message',
   value: string | undefined,
 ): void {

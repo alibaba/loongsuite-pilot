@@ -298,6 +298,7 @@ function optionalMeta(value: Partial<Omit<ToolVerdictSnapshot, 'action'>>): Omit
     ...(value.failOpen === true ? { failOpen: true } : {}),
     ...(nonEmpty(value.ruleId) ? { ruleId: value.ruleId } : {}),
     ...(nonEmpty(value.ruleVersion) ? { ruleVersion: value.ruleVersion } : {}),
+    ...(nonEmpty(value.severity) ? { severity: value.severity } : {}),
     ...(nonEmpty(value.reason) ? { reason: value.reason } : {}),
     ...(nonEmpty(value.title) ? { title: value.title } : {}),
     ...(nonEmpty(value.message) ? { message: value.message } : {}),

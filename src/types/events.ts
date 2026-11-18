@@ -121,6 +121,8 @@ export interface AgentActivityEntry {
   'gen_ai.guardrail.rule_id'?: string;
   /** `rules[].version` from the managed document. Builtin rules omit this. */
   'gen_ai.guardrail.rule_version'?: string;
+  /** Optional risk label from managed `rules[].severity`. */
+  'gen_ai.guardrail.severity'?: string;
   /** Script stdout reason, or builtin replacement token. Masked before flush. */
   'gen_ai.guardrail.reason'?: string;
   /** Optional display label from `rules[].title`. */

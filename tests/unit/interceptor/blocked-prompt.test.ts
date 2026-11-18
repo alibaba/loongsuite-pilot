@@ -71,12 +71,14 @@ describe('buildBlockedQoderPromptEntry', () => {
       reason: 'flow-probe-v3',
       ruleId: 'flow-probe',
       ruleVersion: '3',
+      severity: 'CRITICAL',
       title: 'ak-leak',
       message: '不要在对话里粘贴 AccessKey',
       evaluatedRules: ['flow-probe'],
     });
     expect(entry['gen_ai.guardrail.rule_id']).toBe('flow-probe');
     expect(entry['gen_ai.guardrail.rule_version']).toBe('3');
+    expect(entry['gen_ai.guardrail.severity']).toBe('CRITICAL');
     expect(entry['gen_ai.guardrail.reason']).toBe('flow-probe-v3');
     expect(entry['gen_ai.guardrail.title']).toBe('ak-leak');
     expect(entry['gen_ai.guardrail.message']).toBe('不要在对话里粘贴 AccessKey');
