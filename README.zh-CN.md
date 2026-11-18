@@ -55,7 +55,7 @@ Pilot 主要帮助回答这些问题：
 
 完整版 Pilot 和云壳共用同一份 SDK 和原生 Hook 二进制，支持 Qoder IDE 和 Qoder CLI 拦截。
 
-完整版 Pilot 通过共享 SDK 采集 Codex rollout、补采中断回合并执行原生 Hook 裁决，用于开发验证。云壳交付范围为 Qoder。
+云壳 SDK 支持 Qoder 采集和拦截。完整版 Pilot 通过共享 SDK 采集 Codex rollout、补采中断回合并执行原生 Hook 裁决，用于开发验证。
 
 | Agent | 集成方式 | Trace 上报 | 日志上报 | Token 用量 | 对话 / 工具调用 |
 |-------|----------|------------|----------|------------|----------------|
