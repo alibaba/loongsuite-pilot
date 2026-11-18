@@ -101,7 +101,7 @@ env:
 
 Kubernetes 日志桥从来源 Pod 取得 Pod 标签和 `container_name`。首次读取时，桥从最近 1000 行定位起始时间戳，再从这个时间戳回读，给时间和内容都相同的日志逐条编号。源容器仍保留完整时间戳组时，多个桥可以用相同的 `log_event_id` 为同一条日志去重。
 
-Kubernetes 可能按整秒处理回读请求。若同一秒内更早的日志填满 1 MiB 响应，导致游标无法前进，桥会扩大到 4 MiB 重试一次。如果响应仍然满且没有可推进的完整日志行，桥会输出需要人工回补的错误并保留原游标。
+Kubernetes 的 `limitBytes` 是近似值，同一秒内较早的日志可能占据整个回读窗口。1 MiB 回读没有新的完整日志行时，桥从原游标扩大到 4 MiB 再读一次。若仍无进展，桥单独核对容器末尾的日志和游标已记录的重复次数。已经追平时，桥等待下次轮询。若确认还有未读日志，或尾部核对超过接收上限，桥保留游标并提示人工回补。单次响应的接收上限为 4 MiB 加 64 KiB，以容纳 Kubernetes 略超请求值的响应。[Kubernetes Pod 日志 API](https://kubernetes.io/docs/reference/kubernetes-api/core/pod-v1/#read-log)
 
 Prometheus 查询应按部署、来源 Pod 和指标标签分别对 Counter 求增量，再跨 Pod 求和。计算集群 P95 时先合并相同桶边界的增量。Gauge 在每个时间桶先取各 Pod 的最新值，再根据指标语义汇总。SLS 字段索引需为用到的 Pod 标签和日志标识启用统计。
 

@@ -127,12 +127,16 @@ test.each(['cold', 'saved'])('bounded inclusive replay widens once and preserves
     return readPodLogBatch(async (path: string) => {
       const params = new URL(path, 'https://kube').searchParams;
       const limit = Number(params.get('limitBytes'));
-      if (params.has('tailLines')) {
+      if (params.has('tailLines') && !params.has('sinceTime')) {
         assert.equal(mode, 'cold');
         assert.equal(limit, chunkBytes);
         return duplicate;
       }
       assert.equal(params.get('sinceTime'), time);
+      if (params.has('tailLines')) {
+        assert.equal(params.has('limitBytes'), false);
+        return (earlier + duplicate.repeat(2)).trimEnd().split('\n').slice(-Number(params.get('tailLines'))).join('\n') + '\n';
+      }
       replayLimits.push(limit);
       return source.subarray(0, limit).toString();
     }, '/pods/backend-a/log', 'backend', cursor, format);
@@ -147,6 +151,79 @@ test.each(['cold', 'saved'])('bounded inclusive replay widens once and preserves
   await assert.rejects(fetchBatch(4 * chunkBytes + 1, exhaustedLimits), /4 MiB.*manual backfill/);
   assert.deepEqual(exhaustedLimits, [chunkBytes, 4 * chunkBytes]);
   assert.deepEqual(cursor, savedCursor);
+});
+
+// Model a kubelet that stops at the last whole 8,032-byte record before limitBytes.
+const oldLine = '2026-11-16T10:00:00Z old'.padEnd(8031, 'x') + '\n';
+const laterLine = '2026-11-16T10:00:01Z new'.padEnd(8031, 'y') + '\n';
+function wholeLineLogApi(stream: string[], replayLimits: number[], tailRequests: URLSearchParams[]) {
+  return async (path: string) => {
+    const params = new URL(path, 'https://kube').searchParams;
+    const since = params.get('sinceTime') ?? '';
+    const limit = Number(params.get('limitBytes'));
+    const eligible = stream.filter(line => line >= since);
+    if (params.has('tailLines')) {
+      tailRequests.push(params);
+      return eligible.slice(-Number(params.get('tailLines'))).join('');
+    }
+    replayLimits.push(limit);
+    return eligible.slice(0, Math.floor(limit / 8032)).join('');
+  };
+}
+
+test('replays beyond a short 1 MiB page and then idles without duplicating the recovered entry', async () => {
+  const chunk = 1024 * 1024;
+  const history = Array<string>(130).fill(oldLine);
+  assert.equal(Buffer.byteLength(history.join('')), 1_044_160);
+  const cursor = freshLines(history.join('')).cursor;
+  const replayLimits: number[] = [];
+  const tailRequests: URLSearchParams[] = [];
+  const request = wholeLineLogApi([...history, laterLine], replayLimits, tailRequests);
+  const result = await readPodLogBatch(request, '/pods/backend-a/log', 'backend', cursor);
+  assert.deepEqual(replayLimits, [chunk, 4 * chunk]);
+  assert.deepEqual(result.lines, [laterLine.trimEnd()]);
+  assert.equal(result.cursor.time, '2026-11-16T10:00:01Z');
+
+  const caughtUp = await readPodLogBatch(request, '/pods/backend-a/log', 'backend', result.cursor);
+  assert.deepEqual(caughtUp, {lines: [], cursor: result.cursor});
+  assert.equal(tailRequests.length, 1);
+  assert.equal(tailRequests[0].get('sinceTime'), result.cursor.time);
+  assert.equal(tailRequests[0].has('limitBytes'), false);
+});
+
+test.each(['idle', 'later timestamp', 'identical occurrence'])('verifies a short 4 MiB replay using the end of the stream (%s)', async mode => {
+  const chunk = 1024 * 1024;
+  const history = Array<string>(Math.floor(4 * chunk / 8032)).fill(oldLine);
+  const cursor = freshLines(history.join('')).cursor;
+  const saved = structuredClone(cursor);
+  const replayLimits: number[] = [];
+  const tailRequests: URLSearchParams[] = [];
+  const stream = mode === 'idle' ? history : [...history, mode === 'later timestamp' ? laterLine : oldLine];
+  const request = wholeLineLogApi(stream, replayLimits, tailRequests);
+  const read = readPodLogBatch(request, '/pods/backend-a/log', 'backend', cursor);
+  if (mode === 'idle') assert.deepEqual(await read, {lines: [], cursor: saved});
+  else await assert.rejects(read, /manual backfill/);
+  assert.deepEqual(replayLimits, [chunk, 4 * chunk]);
+  assert.equal(tailRequests.length, 1);
+  assert.equal(tailRequests[0].get('sinceTime'), saved.time);
+  assert.equal(tailRequests[0].has('limitBytes'), false);
+  assert.ok(Number(tailRequests[0].get('tailLines')) >= history.length + 1);
+  assert.deepEqual(cursor, saved);
+});
+
+test('propagates a tail verification request error without changing a legacy checkpoint', async () => {
+  const prior = freshLines(oldLine).cursor;
+  const legacy = {time: prior.time, hashes: Object.keys(prior.counts)};
+  const checkpoint = structuredClone(legacy);
+  const denied = new Error('Kubernetes API status 403');
+  const read = readPodLogBatch(async (path: string) => {
+    const query = new URL(path, 'https://kube').searchParams;
+    if (!query.has('tailLines')) return oldLine;
+    assert.ok(Number(query.get('tailLines')) > legacy.hashes.length);
+    throw denied;
+  }, '/pods/backend-a/log', 'backend', legacy);
+  await assert.rejects(read, error => error === denied);
+  assert.deepEqual(legacy, checkpoint);
 });
 
 test('pod-scoped bridges select only their own Pod and never fall back to the full namespace', () => {

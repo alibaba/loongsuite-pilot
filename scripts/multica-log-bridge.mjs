@@ -7,7 +7,11 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const LOG_CHUNK_BYTES = 1024 * 1024;
-const MAX_RESPONSE_BYTES = 4 * LOG_CHUNK_BYTES;
+const MAX_LOG_REPLAY_BYTES = 4 * LOG_CHUNK_BYTES;
+// Kubernetes treats limitBytes as approximate. Allow a bounded overrun on the wire.
+const MAX_RESPONSE_BYTES = MAX_LOG_REPLAY_BYTES + 64 * 1024;
+
+class KubernetesResponseTooLarge extends Error {}
 
 /** The collector publishes a short-lived lease; missing state never enables collection. */
 export function isCollectionActive(value, now = Date.now()) {
@@ -98,14 +102,27 @@ export async function readPodLogBatch(request, resource, container, cursor, form
     query.delete('tailLines');
   }
   query.set('sinceTime', cursor.time);
-  for (const limit of [LOG_CHUNK_BYTES, MAX_RESPONSE_BYTES]) {
-    const body = await read(limit);
-    const result = freshLines(body, cursor, format);
-    if (result.lines.length || Buffer.byteLength(body) < limit) return result;
-    // A whole-second prefix or already-consumed boundary may fill the page.
-    // Replay from the same cursor so occurrence counts stay source-relative.
+  for (const limit of [LOG_CHUNK_BYTES, MAX_LOG_REPLAY_BYTES]) {
+    const result = freshLines(await read(limit), cursor, format);
+    if (result.lines.length) return result;
   }
-  throw new Error('Kubernetes log replay filled 4 MiB without a new complete line; cursor unchanged, source requires manual backfill');
+
+  // limitBytes is approximate. To distinguish an idle stream from an unread
+  // suffix, inspect the tail without a server byte limit (the transport is bounded).
+  // N acknowledged occurrences can hide N identical rows; allow one new row
+  // and a possible unterminated final line. Never advance or emit from a tail.
+  const acknowledged = cursor.counts
+    ? Object.values(cursor.counts).reduce((total, count) => total + count, 0)
+    : (cursor.hashes ?? []).length;
+  query.delete('limitBytes');
+  query.set('tailLines', String(acknowledged + 2));
+  try {
+    const tail = await request(`${resource}?${query}`);
+    if (!freshLines(tail, cursor).lines.length) return { lines: [], cursor };
+  } catch (error) {
+    if (!(error instanceof KubernetesResponseTooLarge)) throw error;
+  }
+  throw new Error('Cannot confirm the end of the Kubernetes log after a 4 MiB replay; cursor unchanged, source requires manual backfill');
 }
 
 // Frame the original timestamped line without escaping or modifying its body.
@@ -131,6 +148,18 @@ export function podListPath(namespace, podSelector, scope, podName = hostname())
   return `/api/v1/namespaces/${encodeURIComponent(namespace)}/pods?${query}`;
 }
 
+export async function readKubernetesResponse(response) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of response) {
+    size += chunk.length;
+    if (size > MAX_RESPONSE_BYTES) throw new KubernetesResponseTooLarge('Kubernetes log response exceeded limit');
+    chunks.push(chunk);
+  }
+  if (response.statusCode !== 200) throw new Error(`Kubernetes API status ${response.statusCode}`);
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 async function main() {
   const namespace = process.env.NAMESPACE;
   const podSelector = process.env.POD_LABEL_SELECTOR;
@@ -152,18 +181,7 @@ async function main() {
     return new Promise((resolve, reject) => {
       const req = https.get(`https://kubernetes.default.svc${resource}`, {
         ca, headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
-      }, (response) => {
-        const chunks = []; let size = 0;
-        response.on('data', (chunk) => {
-          size += chunk.length;
-          if (size > MAX_RESPONSE_BYTES) req.destroy(new Error('Kubernetes log response exceeded limit'));
-          else chunks.push(chunk);
-        });
-        response.on('end', () => response.statusCode === 200
-          ? resolve(Buffer.concat(chunks).toString('utf8'))
-          : reject(new Error(`Kubernetes API status ${response.statusCode}`)));
-        response.on('error', reject);
-      });
+      }, response => readKubernetesResponse(response).then(resolve, reject));
       req.on('timeout', () => req.destroy(new Error('Kubernetes API timeout')));
       req.on('error', reject);
     });

@@ -1,15 +1,38 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { createServer, get } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { isCollectionActive, readActivationPermit } from '../../../../scripts/multica-log-bridge.mjs';
+import { isCollectionActive, readActivationPermit, readKubernetesResponse } from '../../../../scripts/multica-log-bridge.mjs';
 
 let dir: string;
 beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'multica-bridge-activation-')); });
 afterEach(async () => { await rm(dir, {recursive: true, force: true}); });
+
+it('accepts a Kubernetes response slightly over the requested 4 MiB and enforces the transport cap', async () => {
+  const limitBytes = 4 * 1024 * 1024;
+  const headroom = 64 * 1024;
+  const server = createServer((req, res) => {
+    res.write(Buffer.alloc(limitBytes, 'a'));
+    res.end(Buffer.alloc(req.url === '/within-cap' ? headroom : headroom + 1, 'b'));
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const {port} = server.address() as AddressInfo;
+  const read = (path: string) => new Promise<string>((resolve, reject) => {
+    get(`http://127.0.0.1:${port}/${path}`, response => readKubernetesResponse(response).then(resolve, reject)).on('error', reject);
+  });
+  try {
+    expect((await read('within-cap')).length).toBe(limitBytes + headroom);
+    await expect(read('above-cap')).rejects.toThrow('Kubernetes log response exceeded limit');
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
 
 describe('Multica log bridge activation lease', () => {
   const now = 1_700_000_000_000;
