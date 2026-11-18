@@ -68,7 +68,6 @@ struct TerminalFailureContext {
 
 const MAX_SCAN_BYTES_PER_FILE_CYCLE: i64 = 16 * 1024 * 1024;
 const MAX_CACHED_INCOMPLETE_TAILS: usize = 2048;
-const INCOMPLETE_TAIL_WITNESS_BYTES: usize = 64;
 const MAX_CACHED_TRANSCRIPT_META_BYTES: usize = 64 * 1024 * 1024;
 const CACHED_TRANSCRIPT_META_ABSENCE_TTL_MS: i64 = 48 * 60 * 60 * 1_000;
 const SPAN_CONTEXT_TTL_MS: i64 = 48 * 60 * 60 * 1_000;
@@ -228,14 +227,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 return Ok(true);
             }
             position += bytes.len() as i64;
-            if bytes.len() >= INCOMPLETE_TAIL_WITNESS_BYTES {
-                last = bytes[bytes.len() - INCOMPLETE_TAIL_WITNESS_BYTES..].to_vec();
-            } else {
-                last.extend_from_slice(&bytes);
-                if last.len() > INCOMPLETE_TAIL_WITNESS_BYTES {
-                    last.drain(..last.len() - INCOMPLETE_TAIL_WITNESS_BYTES);
-                }
-            }
+            scan::extend_tail_witness(&mut last, &bytes);
         }
         if scan::opened_file_version(&file).await? == current
             && scan::file_version_snapshot(path).await? == current
