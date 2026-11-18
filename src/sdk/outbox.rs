@@ -772,7 +772,7 @@ pub(super) fn write_checkpoint(path: &Path, text: &str) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("checkpoint parent"))?;
-    source_access::private_path(path)?;
+    crate::utils::source_access::private_path(path)?;
     std::fs::create_dir_all(parent)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     temp.write_all(text.as_bytes())?;
