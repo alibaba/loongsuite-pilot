@@ -109,8 +109,9 @@ export function envelope(input: MulticaInputConfig, source: string, observed: nu
   const evidence = agentId && Object.prototype.hasOwnProperty.call(input.AgentEvidence ?? {}, agentId)
     ? input.AgentEvidence![agentId] : undefined;
   const scopedSource = podScopedSource(source, podLabels);
+  const multicaEnv = safeScalar(input.Instance) ?? 'multica';
   const result: MulticaRecord = {
-    schema_version: 'multica.v1', instance: safeScalar(input.Instance) ?? 'multica',
+    schema_version: 'multica.v1', multica_env: multicaEnv, instance: multicaEnv,
     environment: safeScalar(input.Environment) ?? '', namespace: safeScalar(input.Namespace) ?? '',
     evidence_kind: input.EvidenceKind ?? 'observed', test_case: safeScalar(input.TestCase) ?? '',
     observed_at: new Date(observed).toISOString(), observed_at_ms: String(observed), source_name: source,

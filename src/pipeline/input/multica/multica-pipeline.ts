@@ -19,6 +19,7 @@ interface PendingBatch { records: MulticaRecord[]; checkpoint?: SourceCheckpoint
 type MulticaPipelineOptions = Omit<FilePipelineOptions, 'config'> & {
   config: Omit<FilePipelineOptions['config'], 'flushers'> & { flushers?: MulticaSlsFlusherConfig[] };
   sls?: MulticaSlsDefaults;
+  serviceNamePrefix?: string;
   collectionEnabled?: boolean;
 };
 export interface CollectionSummary {
@@ -48,7 +49,8 @@ export class MulticaPipeline implements Pipeline {
 
   constructor(private readonly opts: MulticaPipelineOptions, defaultMode?: MulticaCollectionMode,
     private readonly onActivation?: (state: MulticaActivationResult) => Promise<void>) {
-    this.input = opts.config.inputs[0] as MulticaInputConfig;
+    const input = opts.config.inputs[0] as MulticaInputConfig;
+    this.input = {...input, Instance: opts.serviceNamePrefix?.trim() || input.Instance};
     if (this.input.Type !== 'input_multica') throw new Error('Expected input_multica');
     validateMulticaConfig(this.input);
     this.activation = new MulticaActivationGate(this.input, defaultMode);
@@ -183,7 +185,8 @@ export class MulticaPipeline implements Pipeline {
 
   private async send(records: MulticaRecord[]): Promise<void> {
     if (!records.length) return;
-    await sendMulticaRecords(this.destination, records, this.input.Instance ?? 'multica');
+    // Pending batches keep the environment they were collected in, including legacy batches.
+    await sendMulticaRecords(this.destination, records, records[0].multica_env ?? records[0].instance);
   }
 
   private async source(name: string, collect: () => Promise<CollectionResult>): Promise<boolean> {

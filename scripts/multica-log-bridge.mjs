@@ -31,6 +31,18 @@ export async function readActivationPermit(file, now = Date.now()) {
   }
 }
 
+function logTimestamp(line) {
+  const time = line.match(/^(\d{4}-\d{2}-\d{2}T\S+) /)?.[1];
+  return time && Number.isFinite(Date.parse(time)) ? time : undefined;
+}
+
+function compareTimestamps(a, b) {
+  // The API server can round sinceTime to whole seconds. Keep nanosecond
+  // ordering locally when discarding earlier records from an inclusive replay.
+  const fraction = time => (time.match(/\.(\d+)/)?.[1] ?? '').padEnd(9, '0');
+  return Date.parse(a) - Date.parse(b) || Number(fraction(a)) - Number(fraction(b));
+}
+
 // Kubernetes log timestamps retain the date missing from Multica's tint output.
 export function freshLines(body, cursor = { time: '', counts: {} }, format = line => line) {
   // Older checkpoints only establish one known occurrence per hash.
@@ -44,12 +56,12 @@ export function freshLines(body, cursor = { time: '', counts: {} }, format = lin
   // limitBytes may end in the middle of a record; leave that record for the next pull.
   const complete = body.slice(0, body.lastIndexOf('\n') + 1);
   for (const line of complete.split('\n')) {
-    const time = line.match(/^(\d{4}-\d{2}-\d{2}T\S+) /)?.[1];
-    if (!time || !Number.isFinite(Date.parse(time)) || (cursor.time && Date.parse(time) < Date.parse(cursor.time))) continue;
+    const time = logTimestamp(line);
+    if (!time || (cursor.time && compareTimestamps(time, cursor.time) < 0)) continue;
     const hash = crypto.createHash('sha256').update(line).digest('hex');
     const count = (seenCounts.get(hash) ?? 0) + 1;
     seenCounts.set(hash, count);
-    if (!latest || Date.parse(time) > Date.parse(latest) || (Date.parse(time) === Date.parse(latest) && time > latest)) {
+    if (!latest || compareTimestamps(time, latest) > 0) {
       latest = time;
       latestCounts = new Map();
     }
@@ -61,9 +73,32 @@ export function freshLines(body, cursor = { time: '', counts: {} }, format = lin
   return { lines, cursor: { time: latest, counts: Object.fromEntries(latestCounts) } };
 }
 
+export async function readPodLogBatch(request, resource, container, cursor, format) {
+  const query = new URLSearchParams({ container, timestamps: 'true', limitBytes: String(1024 * 1024) });
+  const read = async () => {
+    const body = await request(`${resource}?${query}`);
+    if (body.length && !body.includes('\n')) {
+      throw new Error('Log record exceeds bridge chunk size; source requires manual backfill');
+    }
+    return body;
+  };
+  if (!cursor?.time) {
+    // A cold tail may start in the middle of identical timestamped lines.
+    // Use it only to locate the start time; assign ordinals on the inclusive
+    // replay from that timestamp so independent bridges count the same prefix.
+    query.set('tailLines', '1000');
+    const tail = await read();
+    const time = tail.slice(0, tail.lastIndexOf('\n')).split('\n').map(logTimestamp).find(Boolean);
+    if (!time) return freshLines(tail, cursor, format);
+    cursor = { time, counts: {} };
+    query.delete('tailLines');
+  }
+  query.set('sinceTime', cursor.time);
+  return freshLines(await read(), cursor, format);
+}
+
 // Frame the original timestamped line without escaping or modifying its body.
-// The identity survives overlapping bridges, including separate occurrences
-// of exactly the same line at the same Kubernetes timestamp.
+// readPodLogBatch supplies occurrence counts from the start of the retained timestamp group.
 export function podLogFormatter(pod, container) {
   const {uid, name} = pod.metadata;
   const prefix = ['@multica-k8s-v1', uid, name, pod.status?.podIP ?? '', container].join('\t');
@@ -144,15 +179,8 @@ async function main() {
             try {
               const stream = `${pod.metadata.uid}/${container.name}`;
               const cursor = state[stream];
-              const query = new URLSearchParams({ container: container.name, timestamps: 'true', limitBytes: String(1024 * 1024) });
-              // Bound initial history; subsequent pulls resume inclusively and deduplicate the boundary.
-              if (cursor?.time) query.set('sinceTime', cursor.time);
-              else query.set('tailLines', '1000');
-              const body = await request(`/api/v1/namespaces/${namespacePath}/pods/${encodeURIComponent(pod.metadata.name)}/log?${query}`);
-              const result = freshLines(body, cursor, podLogFormatter(pod, container.name));
-              if (body.length && !body.includes('\n')) {
-                throw new Error('Log record exceeds bridge chunk size; source requires manual backfill');
-              }
+              const resource = `/api/v1/namespaces/${namespacePath}/pods/${encodeURIComponent(pod.metadata.name)}/log`;
+              const result = await readPodLogBatch(request, resource, container.name, cursor, podLogFormatter(pod, container.name));
               const file = path.join(directory, `${container.name}.log`);
               const size = await fs.stat(file).then(s => s.size).catch(e => e.code === 'ENOENT' ? 0 : Promise.reject(e));
               const addition = result.lines.length ? result.lines.join('\n') + '\n' : '';

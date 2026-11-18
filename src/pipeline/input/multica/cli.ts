@@ -47,7 +47,8 @@ async function main(): Promise<void> {
   };
   await publishActivation();
   const pipeline = new MulticaPipeline({config, stateDir, failedLogDir: path.join(stateDir, 'failed'), dataDir: stateDir,
-    sls: pilotConfig.flushers.sls, collectionEnabled: pilotConfig.pipeline.multica?.enabled}, pilotConfig.pipeline.multica?.mode,
+    sls: pilotConfig.flushers.sls, serviceNamePrefix: pilotConfig.pipeline.multica?.serviceNamePrefix,
+    collectionEnabled: pilotConfig.pipeline.multica?.enabled}, pilotConfig.pipeline.multica?.mode,
     async state => { activation = state; await publishActivation(); });
   if (args.includes('--once')) {
     const summary = await pipeline.collectOnce();

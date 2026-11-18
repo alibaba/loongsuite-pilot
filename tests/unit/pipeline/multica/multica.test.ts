@@ -32,8 +32,8 @@ async function server(handler: Parameters<typeof createServer>[0]): Promise<stri
   await new Promise<void>(resolve => s.listen(0, '127.0.0.1', resolve));
   return `http://127.0.0.1:${(s.address() as {port: number}).port}`;
 }
-function pipeline(config: MulticaInputConfig): MulticaPipeline {
-  return new MulticaPipeline({config: {configName: 'lab', inputs: [config], flushers: [{Type: 'flusher_sls', Endpoint: 'example.invalid', Project: 'p', Logstore: 'l'}]}, stateDir: dir, dataDir: dir, failedLogDir: dir});
+function pipeline(config: MulticaInputConfig, serviceNamePrefix?: string): MulticaPipeline {
+  return new MulticaPipeline({config: {configName: 'lab', inputs: [config], flushers: [{Type: 'flusher_sls', Endpoint: 'example.invalid', Project: 'p', Logstore: 'l'}]}, stateDir: dir, dataDir: dir, failedLogDir: dir, serviceNamePrefix});
 }
 
 describe('Multica existing-data parsers', () => {
@@ -250,6 +250,42 @@ describe('bounded source reads', () => {
 });
 
 describe('Multica delivery and failure isolation', () => {
+  it.each([
+    {prefix: 'staging', instance: 'legacy', expected: 'staging'},
+    {prefix: undefined, instance: 'legacy', expected: 'legacy'},
+    {prefix: undefined, instance: undefined, expected: 'multica'},
+  ])('reports the resolved Multica environment and legacy instance ($expected)', async ({prefix, instance, expected}) => {
+    const cfg = {...input, Instance: instance, Environment: 'region-tag', StatFiles: [path.join(dir, 'missing')]};
+    await pipeline(cfg, prefix).collectOnce();
+    const [, records, options] = vi.mocked(postWebtracking).mock.calls[0];
+    expect(options?.source).toBe(expected);
+    expect(records.map(row => row.record_type)).toEqual(['file_stat', 'collection_status']);
+    for (const row of records) {
+      expect(row).toMatchObject({multica_env: expected, instance: expected, environment: 'region-tag'});
+    }
+  });
+  it('preserves the source and event ID of a pre-upgrade batch after changing environments', async () => {
+    const cfg = {...input, Instance: 'original', StatFiles: [path.join(dir, 'missing')]};
+    vi.mocked(postWebtracking).mockRejectedValue(new Error('offline'));
+    await pipeline(cfg).collectOnce();
+    const spoolDir = path.join(dir, (await readdir(dir)).find(name => name.endsWith('.multica-pending'))!);
+    const [file] = await readdir(spoolDir);
+    const spoolPath = path.join(spoolDir, file);
+    const batch = JSON.parse(await readFile(spoolPath, 'utf8')) as {records: MulticaRecord[]};
+    // Previously persisted envelopes have only the legacy instance field.
+    for (const row of batch.records) delete row.multica_env;
+    await writeFile(spoolPath, JSON.stringify(batch));
+
+    vi.mocked(postWebtracking).mockClear().mockResolvedValue();
+    const restarted = pipeline(cfg, 'new-environment');
+    await restarted.collectOnce();
+    await restarted.collectOnce();
+    const [replay, fresh] = vi.mocked(postWebtracking).mock.calls;
+    expect(replay[2]?.source).toBe('original');
+    expect(replay[1]).toMatchObject(batch.records);
+    expect(fresh[2]?.source).toBe('new-environment');
+    expect(fresh[1][0]).toMatchObject({instance: 'new-environment', multica_env: 'new-environment'});
+  });
   it('starts a configured Multica input through the normal PipelineManager', async () => {
     const configDir = path.join(dir, 'configs');
     await import('node:fs/promises').then(fs => fs.mkdir(configDir));

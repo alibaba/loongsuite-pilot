@@ -4,7 +4,7 @@ import type { MulticaInputConfig, MulticaRecord } from './types.js';
 
 // A service DNS name does not identify the Pod serving an individual request.
 export function sourcePodLabels(input: MulticaInputConfig, source: string): MulticaRecord {
-  const name = podLabel(hostname());
+  const name = podLabel(process.env.POD_NAME) ?? podLabel(hostname());
   const uid = podLabel(input.PodUid ?? process.env.POD_UID);
   const ip = input.PodIp ?? process.env.POD_IP;
   const labels: MulticaRecord = {};

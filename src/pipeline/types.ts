@@ -64,12 +64,7 @@ export interface PipelineManagerOptions {
   pipelineConfig: PipelineToggle;
 }
 
-export interface PipelineToggle {
-  enabled: boolean;
-  file: { enabled: boolean };
-  qoderApi: { enabled: boolean };
-  multica?: { enabled: boolean; mode?: 'on' | 'off' };
-}
+export type PipelineToggle = import('../types/index.js').PipelineToggle;
 
 // --- File pipeline options ---
 

@@ -168,17 +168,18 @@ describe('Multica inherits installer SLS configuration', () => {
     vi.stubEnv('MULTICA_REPLICA_TEST_TOKEN', 'test-token');
     tasks = [{id: 'shared-task', status: 'running'}];
     for (const pod of ['backend-a', 'backend-b']) {
-      vi.mocked(hostname).mockReturnValue(pod);
-      vi.stubEnv('POD_NAME', 'same-unrelated-value');
+      vi.mocked(hostname).mockReturnValue('shared-custom-hostname');
+      vi.stubEnv('POD_NAME', pod);
       vi.stubEnv('POD_UID', '');
       vi.stubEnv('POD_IP', '');
       await collectInstalledConfig(path.join(stateDir, pod));
     }
     const delivered = records(writes);
+    expect(new Set(delivered.map(row => row.multica_env))).toEqual(new Set(['ai-coding-agent']));
     const samples = delivered.filter(row => row.metric_name === 'multica_task_total');
     expect(samples.map(row => [row.instance, row.pod_name, row.pod_uid, row.pod_ip])).toEqual([
-      ['multica-installer-test', 'backend-a', undefined, undefined],
-      ['multica-installer-test', 'backend-b', undefined, undefined],
+      ['ai-coding-agent', 'backend-a', undefined, undefined],
+      ['ai-coding-agent', 'backend-b', undefined, undefined],
     ]);
     const taskRows = delivered.filter(row => row.task_id === 'shared-task');
     expect(new Set(taskRows.map(row => row.collector_pod_name))).toEqual(new Set(['backend-a', 'backend-b']));

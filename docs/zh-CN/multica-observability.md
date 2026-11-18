@@ -20,14 +20,19 @@
     "WorkspaceIds": ["WORKSPACE_UUID"],
     "MetricsUrls": ["http://multica-backend:9090/metrics"],
     "LogFiles": ["/logs/backend.log", "/logs/daemon.log"],
-    "IntervalSeconds": 30,
-    "Instance": "multica-server"
+    "IntervalSeconds": 30
   }],
   "flushers": [{
     "Type": "flusher_sls"
   }]
 }
 ```
+
+安装页面的“应用名前缀”也是 Multica 运行环境名。例如，安装命令带上 `--service-name-prefix multica-prod` 后，采集器会把 `multica-prod` 写入该环境的每条新记录。同一环境的所有副本使用同一个前缀。生产和测试环境写入同一 Logstore 时，分别填写 `multica-prod` 和 `multica-test`。
+
+安装器将前缀保存到 Pilot 主配置的 `serviceNamePrefix`。独立采集器通过 `--pilot-config` 指定这份配置，或使用默认主配置。关闭 Trace 时前缀依然生效。未指定前缀时，采集器沿用 `input_multica.Instance`，缺省为 `multica`。切换前缀后，待重试的批次保留采集时的环境名。
+
+新记录将环境名同时写入 `multica_env` 和兼容字段 `instance`。查询含有历史数据的时间段时可以继续使用 `instance`。要按 `multica_env` 过滤或聚合，可在 SLS 为该字段添加 text 类型的字段索引并开启统计。
 
 `ApiBase` 可省略，`DaemonHealthUrls` 和 `StatFiles` 可按需添加。启用采集至少需要一个可识别的 metrics、daemon health 或公开 API 入口；仅配置日志或文件路径不能确认 Multica 正在运行。
 
@@ -80,17 +85,19 @@ export LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE=off  # 关闭
 
 记录采用 `schema_version=multica.v1`，以 instance/workspace/entity 和 task/issue/agent/runtime ID 关联。SLS 字段按字符串发送，数值分析需配置 long/double 索引；`observed_at` 表示采集时间，来源时间另存。
 
-本地采集直接读取系统 hostname，写入 `pod_name` 供大盘筛选。Kubernetes 默认将 hostname 设为 Pod 名，同一部署的副本共用稳定的 `Instance` 值。查询优先用 `pod_uid` 区分副本，缺少 UID 时按 hostname 区分。若需要 UID 或 IP，可选用 Downward API 注入以下字段。
+Kubernetes 中可通过 Downward API 给采集器容器注入 Pod 元数据。采集器优先使用有效的 `POD_NAME`，缺省时取系统 hostname。配置了自定义 hostname 时，给采集器和日志桥都注入 `metadata.name`，同一个 Pod 的指标、日志和火焰图就能按相同的名字筛选。
 
 ```yaml
 env:
+  - name: POD_NAME
+    valueFrom: {fieldRef: {fieldPath: metadata.name}}
   - name: POD_UID
     valueFrom: {fieldRef: {fieldPath: metadata.uid}}
   - name: POD_IP
     valueFrom: {fieldRef: {fieldPath: status.podIP}}
 ```
 
-本 Pod 的 metrics、health 和 pprof 使用来源 Pod 标签。通过 Service 采集远端端点时，采集器只能确定自己的身份，记录在 `collector_pod_*` 字段。工作区业务快照也采用采集器身份，按 workspace 和业务实体统计。Kubernetes 日志桥从被读取的 Pod 取得来源标签、`container_name` 和稳定的 `log_event_id`；多个桥读取到同一次日志时，可用后者去重。历史无标签记录可纳入全部来源的查询，按具体 Pod 下钻时仅选有对应标签的记录。
+本 Pod 的 metrics、health 和 pprof 使用来源 Pod 标签。通过 Service 采集远端端点时，采集器只能确定自己的身份，记录在 `collector_pod_*` 字段。工作区业务快照也采用采集器身份，按 workspace 和业务实体统计。Kubernetes 日志桥从被读取的 Pod 取得来源标签、`container_name` 和稳定的 `log_event_id`；首次读取时，日志桥从最近 1000 行定位起始时间戳，再从该时间戳回读，以区分同一时间、同一内容的多条日志。只要源容器仍保留该时间戳的完整日志组，且能在有界响应内回读，不同桥可以用同一事件 ID 去重。历史无标签记录可纳入全部来源的查询，按具体 Pod 下钻时仅选有对应标签的记录。
 
 Prometheus 查询应按部署、来源 Pod 和指标标签分别对 Counter 求增量，再跨 Pod 求和。计算集群 P95 时先合并相同桶边界的增量。Gauge 在每个时间桶先取各 Pod 的最新值，再根据指标语义汇总。SLS 字段索引需为用到的 Pod 标签和日志标识启用统计。
 

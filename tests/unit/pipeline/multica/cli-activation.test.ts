@@ -5,7 +5,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
+import { createRequire } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
+import { loadSync } from 'protobufjs';
 
 interface ChildRun {
   child: ChildProcessWithoutNullStreams;
@@ -62,7 +64,7 @@ async function metricsServer(onRequest: () => void): Promise<string> {
 async function launch(metricsUrl: string, enabled: boolean, once = false, pilotConfig?: Record<string, unknown>): Promise<ChildRun> {
   const configPath = path.join(testDir, 'config.json');
   await writeFile(configPath, JSON.stringify({
-    configName: 'cli-activation', inputs: [{Type: 'input_multica', MetricsUrls: [metricsUrl],
+    configName: 'cli-activation', inputs: [{Type: 'input_multica', Instance: 'previous-env', MetricsUrls: [metricsUrl],
       IntervalSeconds: 1, DetectionFailureThreshold: 2, ...(enabled ? {CollectionMode: 'on'} : {})}],
     flushers: pilotConfig ? undefined : [{Type: 'flusher_sls', Endpoint: 'example.invalid', Project: 'unused', Logstore: 'unused'}],
   }));
@@ -133,13 +135,14 @@ describe('Multica standalone CLI activation lifecycle', () => {
     expect(requests).toBe(0);
   }, 15_000);
 
-  it('inherits reporting and global collection mode from --pilot-config', async () => {
-    const writes: Array<{url: string; auth?: string; host?: string}> = [];
-    const server = createServer((req, res) => {
+  it('inherits reporting, environment, and collection mode from --pilot-config with trace disabled', async () => {
+    const writes: Array<{url: string; auth?: string; host?: string; body: Buffer}> = [];
+    const server = createServer(async (req, res) => {
       if (req.method === 'GET') res.end('multica_task_total 1\n');
       else {
-        writes.push({url: req.url ?? '', auth: req.headers.authorization, host: req.headers.host});
-        req.resume();
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk);
+        writes.push({url: req.url ?? '', auth: req.headers.authorization, host: req.headers.host, body: Buffer.concat(chunks)});
         res.end('{}');
       }
     });
@@ -147,11 +150,23 @@ describe('Multica standalone CLI activation lifecycle', () => {
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     const endpoint = `http://127.0.0.1:${(server.address() as {port: number}).port}`;
     const run = await launch(`${endpoint}/metrics`, false, true, {
+      serviceNamePrefix: 'installed-cli-env', collectTrace: false,
       sls: {endpoint, project: 'cli-project', logstore: 'agent-event', mode: 'apiKey', apiKey: 'test-cli-key'},
       pipeline: {multica: {mode: 'on'}},
     });
     expect(await run.closed).toEqual({code: 0, signal: null});
-    expect(writes).toEqual([{url: '/logstores/multica-logs/shards/lb', auth: 'Bearer test-cli-key', host: `cli-project.${new URL(endpoint).host}`}]);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({url: '/logstores/multica-logs/shards/lb', auth: 'Bearer test-cli-key', host: `cli-project.${new URL(endpoint).host}`});
+    const slsSchema = createRequire(import.meta.url).resolve('@alicloud/log/lib/sls.proto');
+    const logGroup = loadSync(slsSchema).lookupType('sls.LogGroup');
+    const group = logGroup.toObject(logGroup.decode(writes[0].body));
+    expect(group.Source).toBe('installed-cli-env');
+    expect(group.Logs).toHaveLength(2);
+    for (const log of group.Logs) {
+      expect(log.Contents).toEqual(expect.arrayContaining([
+        {Key: 'multica_env', Value: 'installed-cli-env'}, {Key: 'instance', Value: 'installed-cli-env'},
+      ]));
+    }
     expect(run.stdout).not.toContain('test-cli-key');
     expect(run.stderr).not.toContain('test-cli-key');
   }, 5_000);

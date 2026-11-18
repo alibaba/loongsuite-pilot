@@ -9,7 +9,6 @@ import type {
   AutoUpdateConfig,
   CmsConfig,
   DashboardConfig,
-  FileCollectionToggle,
   PipelineToggle,
   FlusherConfig,
   HookWatchdogConfig,
@@ -298,8 +297,10 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
   const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
 
   const serviceName = nonEmpty(env('LOONGSUITE_PILOT_SERVICE_NAME')) ?? nonEmpty(file?.serviceName);
-  const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? 'loongsuite-pilot';
+  const configuredServiceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix;
+  const serviceNamePrefix = configuredServiceNamePrefix ?? 'loongsuite-pilot';
   const interceptor = buildInterceptorConfig(file?.interceptor);
+  const pipeline = buildPipelineConfig(file, configuredServiceNamePrefix);
 
   return {
     enabled: envBool('LOONGSUITE_PILOT_ENABLED', file?.enabled ?? true),
@@ -328,8 +329,8 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     privacy: { excludeWorkspaces: validateExcludedWorkspaces(file?.privacy?.excludeWorkspaces) },
     mask: ensureMaskCoversInterceptor(buildMaskConfig(file), interceptor),
     hookWatchdog: buildHookWatchdogConfig(file),
-    fileCollection: buildFileCollectionConfig(file),
-    pipeline: buildPipelineConfig(file),
+    fileCollection: pipeline,
+    pipeline,
     statusBar: buildStatusBarConfig(file),
     dashboard: buildDashboardConfig(file),
     upstreamLink: buildUpstreamLinkConfig(file),
@@ -904,11 +905,7 @@ function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
   };
 }
 
-function buildFileCollectionConfig(file: ConfigFile | null): FileCollectionToggle {
-  return buildPipelineConfig(file);
-}
-
-function buildPipelineConfig(file: ConfigFile | null): PipelineToggle {
+function buildPipelineConfig(file: ConfigFile | null, configuredServiceNamePrefix?: string): PipelineToggle {
   const legacyEnabled = file?.fileCollection?.enabled;
   const enabled = envBool(
     'LOONGSUITE_PILOT_PIPELINE_ENABLED',
@@ -925,6 +922,8 @@ function buildPipelineConfig(file: ConfigFile | null): PipelineToggle {
     multica: {
       enabled: envBool('LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED', file?.pipeline?.multica?.enabled ?? true),
       mode: buildMulticaMode(file?.pipeline?.multica?.mode),
+      // Pilot's built-in prefix must not rename environments on existing installations.
+      serviceNamePrefix: configuredServiceNamePrefix,
     },
   };
 }

@@ -1,7 +1,7 @@
 import { it as test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { freshLines, podListPath, podLogFormatter } from '../../../../scripts/multica-log-bridge.mjs';
+import { freshLines, podListPath, podLogFormatter, readPodLogBatch } from '../../../../scripts/multica-log-bridge.mjs';
 import { parseMulticaLog } from '../../../../src/pipeline/input/multica/parsers.js';
 import { collectLog } from '../../../../src/pipeline/input/multica/sources.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -72,6 +72,46 @@ test('existing hash-only cursors can advance to occurrence-aware checkpoints', (
   const next = freshLines((line + '\n').repeat(2), legacy);
   assert.deepEqual(next.lines, [line]);
   assert.deepEqual(freshLines((line + '\n').repeat(2), next.cursor).lines, []);
+});
+
+test('different cold tail windows assign identical IDs to shared occurrences', async () => {
+  const time = '2026-11-16T10:00:00.123456789Z';
+  const repeated = `${time} {"level":"ERROR","msg":"heartbeat"}\n`;
+  const earlier = '2026-11-16T10:00:00.123456780Z {"level":"ERROR","msg":"older"}\n';
+  const later = '2026-11-16T10:00:01Z {"level":"ERROR","msg":"new"}\n';
+  const pod = { metadata: { uid: 'uid-a', name: 'backend-a' } };
+  const format = podLogFormatter(pod, 'backend');
+  const ids = (lines: string[]) => lines.map(line => parseMulticaLog(line)!.log_event_id);
+  // A second bridge starts after new entries have pushed the first duplicate
+  // outside its tail. The API may round sinceTime down in both replays.
+  const read = async (tail: string, replay: string) => {
+    const requests: URLSearchParams[] = [];
+    const batch = await readPodLogBatch(async (path: string) => {
+      const params = new URL(path, 'https://kube').searchParams;
+      requests.push(params);
+      return params.has('tailLines') ? tail : replay;
+    }, '/pods/backend-a/log', 'backend', undefined, format);
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].get('tailLines'), '1000');
+    assert.equal(requests[1].has('tailLines'), false);
+    assert.equal(requests[1].get('sinceTime'), time);
+    assert.ok(requests.every(query => query.get('limitBytes') === '1048576'));
+    return batch;
+  };
+  const first = await read(repeated.repeat(2), earlier + repeated.repeat(2));
+  const second = await read(repeated + later, earlier + repeated.repeat(2) + later);
+  const firstIds = ids(first.lines);
+  const secondIds = ids(second.lines);
+  assert.deepEqual(secondIds.slice(0, 2), firstIds);
+  assert.equal(secondIds.length, 3);
+  assert.equal(new Set(secondIds).size, 3);
+  const next = await readPodLogBatch(async (path: string) => {
+    const params = new URL(path, 'https://kube').searchParams;
+    assert.equal(params.has('tailLines'), false);
+    assert.equal(params.get('sinceTime'), time);
+    return earlier + repeated.repeat(2) + later;
+  }, '/pods/backend-a/log', 'backend', first.cursor, format);
+  assert.deepEqual(ids(next.lines), secondIds.slice(2));
 });
 
 test('pod-scoped bridges select only their own Pod and never fall back to the full namespace', () => {
