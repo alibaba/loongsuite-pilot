@@ -195,7 +195,9 @@ and is either an `agent.input` or an `other` turn-start/turn-end boundary.
 It must not contain model request/response, token usage, step, system-instruction,
 or tool fields. Other events, including model and tool events, still require a
 non-empty provider. The scope limits what the source observed; it does not
-claim that the Agent did not use a model or tools internally.
+claim that the Agent did not use a model or tools internally. For this scope,
+input and output messages are the visible Agent conversation, not evidence of
+the exact messages sent to or returned by a model.
 
 Qoder product identity: the legacy IDE emits `gen_ai.agent.type=qoder`, and terminal CLI emits `qoder-cli`. For CLI-format transcripts, the owning native user prompt's `businessIdentity.product` determines whether the host is `app` or `cli`; this also covers sidechains whose lifecycle Hooks omit product metadata. Older runtimes fall back to the current Turn's Hook `parent_business_info.product=app` marker. App events use `qoder-app`. The OTLP Resource uses the product type as `gen_ai.framework`; the new desktop App uses `gen_ai.agent.system=qoder-app`, while existing CLI/IDE variants retain `qoder`. Product identity is not cached across resumed Turns. The App reuses `agents.qoder` configuration and CLI transcript/token enrichment. Missing or unrecognized product evidence retains the original classification; paths and process names are not used to guess a product. Historical records retain their original system value, so cross-version queries should also inspect type/framework.
 
