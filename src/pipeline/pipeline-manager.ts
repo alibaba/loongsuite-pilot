@@ -290,13 +290,13 @@ export class PipelineManager {
       logger.warn('config missing inputs', { file: fileName });
       return false;
     }
-    if (!config.flushers || config.flushers.length === 0) {
+    if (config.inputs[0].Type !== 'input_multica' && (!config.flushers || config.flushers.length === 0)) {
       logger.warn('config missing flushers', { file: fileName });
       return false;
     }
 
     const input = config.inputs[0];
-    const flusher = config.flushers[0];
+    const flusher = config.flushers?.[0];
     if (input.Type !== 'input_multica' && (!flusher.Endpoint || !flusher.Project || !flusher.Logstore)) {
       logger.warn('config flusher missing required fields', { file: fileName });
       return false;
@@ -304,7 +304,7 @@ export class PipelineManager {
 
     switch (input.Type) {
       case 'input_multica': {
-        try { validateMulticaConfig(input); resolveMulticaDestination(flusher); return true; }
+        try { validateMulticaConfig(input); resolveMulticaDestination(flusher, this.opts.sls); return true; }
         catch { logger.warn('invalid Multica input config', {file: fileName}); return false; }
       }
       case 'input_file': {
@@ -353,7 +353,7 @@ export class PipelineManager {
 
       switch (inputType) {
         case 'input_multica':
-          pipeline = new MulticaPipeline(opts, this.pipelineConfig.multica?.mode);
+          pipeline = new MulticaPipeline({...opts, sls: this.opts.sls}, this.pipelineConfig.multica?.mode);
           break;
         case 'input_file':
           pipeline = new FilePipeline(opts);

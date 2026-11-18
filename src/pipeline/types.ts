@@ -55,6 +55,8 @@ export interface PipelineConfig {
 
 export interface PipelineManagerOptions {
   workspacePolicy?: import('../core/workspace-policy.js').WorkspacePolicy;
+  /** Resolved installed reporting targets; only Multica inherits these. */
+  sls?: import('./input/multica/destination.js').MulticaSlsDefaults;
   configDir: string;
   stateDir: string;
   failedLogDir: string;

@@ -415,6 +415,7 @@ export class Orchestrator extends EventEmitter {
         failedLogDir: path.join(this.dataDir, 'logs', 'pipeline-failed'),
         dataDir: this.dataDir,
         pipelineConfig: this.config.pipeline,
+        sls: this.config.flushers.sls,
         workspacePolicy,
       });
       await this.pipelineManager.start();

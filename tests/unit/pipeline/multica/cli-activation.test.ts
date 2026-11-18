@@ -3,7 +3,7 @@ import { build } from 'esbuild';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -59,21 +59,28 @@ async function metricsServer(onRequest: () => void): Promise<string> {
   return `http://127.0.0.1:${(server.address() as {port: number}).port}/metrics`;
 }
 
-async function launch(metricsUrl: string, enabled: boolean, once = false): Promise<ChildRun> {
+async function launch(metricsUrl: string, enabled: boolean, once = false, pilotConfig?: Record<string, unknown>): Promise<ChildRun> {
   const configPath = path.join(testDir, 'config.json');
   await writeFile(configPath, JSON.stringify({
     configName: 'cli-activation', inputs: [{Type: 'input_multica', MetricsUrls: [metricsUrl],
       IntervalSeconds: 1, DetectionFailureThreshold: 2, ...(enabled ? {CollectionMode: 'on'} : {})}],
-    flushers: [{Type: 'flusher_sls', Endpoint: 'example.invalid', Project: 'unused', Logstore: 'unused'}],
+    flushers: pilotConfig ? undefined : [{Type: 'flusher_sls', Endpoint: 'example.invalid', Project: 'unused', Logstore: 'unused'}],
   }));
   const env: NodeJS.ProcessEnv = {...process.env, LOG_LEVEL: 'info'};
+  // A standalone collector now reads installed Pilot reporting configuration.
+  // Isolate subprocess tests from the developer's installation and credentials.
+  for (const key of Object.keys(env)) if (key.startsWith('LOONGSUITE_') || key === 'AGENT_DATA_COLLECTION_CONFIG') delete env[key];
+  const pilotConfigPath = path.join(testDir, 'pilot-config.json');
+  await writeFile(pilotConfigPath, JSON.stringify({dataDir: testDir, ...pilotConfig}));
+  env.AGENT_DATA_COLLECTION_CONFIG = pilotConfigPath;
   delete env.LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE;
   delete env.LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED;
   const stateDir = path.join(testDir, 'state');
   const activationFile = path.join(testDir, 'activation.json');
   await mkdir(stateDir);
   const child = spawn(process.execPath, [path.join(bundleDir, 'collector.cjs'), '--config', configPath,
-    '--state-dir', stateDir, '--activation-state-file', activationFile, ...(once ? ['--once'] : [])], {env, stdio: ['pipe', 'pipe', 'pipe']});
+    '--state-dir', stateDir, '--activation-state-file', activationFile,
+    ...(pilotConfig ? ['--pilot-config', pilotConfigPath] : []), ...(once ? ['--once'] : [])], {env, stdio: ['pipe', 'pipe', 'pipe']});
   child.stdin.end();
   const run: ChildRun = {
     child, activationFile, stdout: '', stderr: '',
@@ -105,6 +112,61 @@ async function terminateNormally(run: ChildRun): Promise<void> {
 }
 
 describe('Multica standalone CLI activation lifecycle', () => {
+  it.each([null, 'invalid-json', '[]'])('rejects an unreadable or invalid explicit reporting file before probing: %s', async content => {
+    let requests = 0;
+    const metricsUrl = await metricsServer(() => { requests++; });
+    const configPath = path.join(testDir, 'pipeline.json');
+    const pilotPath = path.join(testDir, 'explicit-pilot.json');
+    await writeFile(configPath, JSON.stringify({
+      configName: 'bad-reporting', inputs: [{Type: 'input_multica', CollectionMode: 'on', MetricsUrls: [metricsUrl]}],
+      flushers: [{Type: 'flusher_sls', Endpoint: 'example.invalid', Project: 'standalone', Logstore: 'multica-logs'}],
+    }));
+    if (content !== null) await writeFile(pilotPath, content);
+    const env = {...process.env, AGENT_DATA_COLLECTION_CONFIG: pilotPath, LOONGSUITE_PILOT_DATA_DIR: testDir};
+    const result = await new Promise<{code: unknown; stdout: string; stderr: string}>(resolve => {
+      execFile(process.execPath, [path.join(bundleDir, 'collector.cjs'), '--config', configPath,
+        '--pilot-config', pilotPath, '--state-dir', path.join(testDir, 'state'), '--once'],
+      {env, timeout: 10_000}, (error, stdout, stderr) => resolve({code: error ? error.code ?? error.signal : 0, stdout, stderr}));
+    });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('Multica collector failed');
+    expect(requests).toBe(0);
+  }, 15_000);
+
+  it('inherits reporting and global collection mode from --pilot-config', async () => {
+    const writes: Array<{url: string; auth?: string; host?: string}> = [];
+    const server = createServer((req, res) => {
+      if (req.method === 'GET') res.end('multica_task_total 1\n');
+      else {
+        writes.push({url: req.url ?? '', auth: req.headers.authorization, host: req.headers.host});
+        req.resume();
+        res.end('{}');
+      }
+    });
+    servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const endpoint = `http://127.0.0.1:${(server.address() as {port: number}).port}`;
+    const run = await launch(`${endpoint}/metrics`, false, true, {
+      sls: {endpoint, project: 'cli-project', logstore: 'agent-event', mode: 'apiKey', apiKey: 'test-cli-key'},
+      pipeline: {multica: {mode: 'on'}},
+    });
+    expect(await run.closed).toEqual({code: 0, signal: null});
+    expect(writes).toEqual([{url: '/logstores/multica-logs/shards/lb', auth: 'Bearer test-cli-key', host: `cli-project.${new URL(endpoint).host}`}]);
+    expect(run.stdout).not.toContain('test-cli-key');
+    expect(run.stderr).not.toContain('test-cli-key');
+  }, 5_000);
+
+  it('honors the installed Multica disabled switch even when the input requests on', async () => {
+    let requests = 0;
+    const run = await launch(await metricsServer(() => { requests++; }), true, true, {
+      sls: {endpoint: 'example.invalid', project: 'cli-project', logstore: 'agent-event', mode: 'apiKey', apiKey: 'test-cli-key'},
+      pipeline: {multica: {enabled: false, mode: 'on'}},
+    });
+    expect(await run.closed).toEqual({code: 0, signal: null});
+    expect(requests).toBe(0);
+    expect(JSON.parse(await readFile(run.activationFile, 'utf8'))).toMatchObject({enabled: false, mode: 'off', expiresAt: 0});
+  }, 5_000);
+
   it('stays alive while disabled by default and performs no HTTP requests', async () => {
     let requests = 0;
     const run = await launch(await metricsServer(() => { requests++; }), false);

@@ -5,6 +5,7 @@ import { MulticaPipeline } from './multica-pipeline.js';
 import { errorKind } from './http.js';
 import { writeJsonFile } from '../../../utils/fs-utils.js';
 import type { MulticaActivationResult } from './activation.js';
+import { loadConfig } from '../../../core/config-loader.js';
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -13,10 +14,22 @@ async function main(): Promise<void> {
     return index >= 0 ? args[index + 1] : undefined;
   };
   const configPath = option('--config');
-  if (!configPath) throw new Error('Usage: multica-collector --config pipeline.json [--state-dir /state] [--activation-state-file /logs/activation.json] [--once]');
+  if (!configPath) throw new Error('Usage: multica-collector --config pipeline.json [--pilot-config config.json] [--state-dir /state] [--activation-state-file /logs/activation.json] [--once]');
   const raw = await readFile(configPath, 'utf8');
   if (Buffer.byteLength(raw) > 1024 * 1024) throw new Error('Config too large');
   const config = JSON.parse(raw) as PipelineConfig;
+  const pilotConfigPath = option('--pilot-config');
+  if (args.includes('--pilot-config')) {
+    if (!pilotConfigPath || pilotConfigPath.startsWith('--')) throw new Error('Expected --pilot-config path');
+    // loadConfig intentionally tolerates absent/broken default files. An
+    // explicitly selected reporting file must not silently lose authentication.
+    const pilotRaw = await readFile(pilotConfigPath, 'utf8');
+    if (Buffer.byteLength(pilotRaw) > 1024 * 1024) throw new Error('Pilot config too large');
+    const parsed: unknown = JSON.parse(pilotRaw.replace(/^\uFEFF/, ''));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid Pilot config');
+    process.env.AGENT_DATA_COLLECTION_CONFIG = path.resolve(pilotConfigPath);
+  }
+  const pilotConfig = await loadConfig();
   const stateDir = path.resolve(option('--state-dir') ?? './multica-state');
   const activationFile = option('--activation-state-file');
   let activation: Pick<MulticaActivationResult, 'enabled' | 'mode' | 'stopped'> = {enabled: false, mode: 'off', stopped: false};
@@ -33,7 +46,8 @@ async function main(): Promise<void> {
     return pendingWrite;
   };
   await publishActivation();
-  const pipeline = new MulticaPipeline({config, stateDir, failedLogDir: path.join(stateDir, 'failed'), dataDir: stateDir}, undefined,
+  const pipeline = new MulticaPipeline({config, stateDir, failedLogDir: path.join(stateDir, 'failed'), dataDir: stateDir,
+    sls: pilotConfig.flushers.sls, collectionEnabled: pilotConfig.pipeline.multica?.enabled}, pilotConfig.pipeline.multica?.mode,
     async state => { activation = state; await publishActivation(); });
   if (args.includes('--once')) {
     const summary = await pipeline.collectOnce();
