@@ -10,12 +10,14 @@ import {
 } from '../access-log.js';
 import { parseQwenWorkHookRequest, qwenWorkAllowBody, qwenWorkBlockBody } from '../adapters/qwenwork.js';
 import { buildBlockedQoderPromptEntry } from '../blocked-prompt.js';
-import { RuleEngine } from '../rules/engine.js';
+import { buildGuardrailEvaluationEntry } from '../evaluation-event.js';
+import { guardrailSnapshotFromVerdict, hostBlockDetail } from '../guardrail.js';
 import {
   INTERCEPTOR_SERVICE,
   SUPPORTED_HOOK_EVENTS,
   isInterceptorAgent,
   type EvaluateHookResponse,
+  type HookEvaluator,
   type HookRequest,
   type InterceptorHealth,
 } from '../types.js';
@@ -23,6 +25,7 @@ import {
   isToolInterceptPhase,
   type ToolVerdictAction,
   type ToolVerdictKey,
+  type ToolVerdictSnapshot,
 } from '../tool-verdict-store.js';
 
 const logger = createLogger('InterceptorServer');
@@ -38,11 +41,13 @@ class HookBodyTooLargeError extends Error {
 export interface InterceptorServerOptions {
   port: number;
   version: string;
-  engine: RuleEngine;
+  engine: HookEvaluator;
   writeAccessLog?: (entry: InterceptorAccessLogEntry) => void;
-  writeToolVerdict?: (key: ToolVerdictKey, result: ToolVerdictAction) => void;
+  writeToolVerdict?: (key: ToolVerdictKey, snapshot: ToolVerdictSnapshot) => void;
   /** Async sink for a denied Qoder UserPromptSubmit. Must not affect the host response. */
-  emitBlockedPrompt?: (entry: AgentActivityEntry) => void;
+  emitBlockedPrompt?: (entry: AgentActivityEntry, signal?: AbortSignal) => void | Promise<void>;
+  /** One metadata-only observation per matched managed rule, including audits. */
+  emitEvaluation?: (entry: AgentActivityEntry, signal?: AbortSignal) => void | Promise<void>;
 }
 
 export function createInterceptorServer(opts: InterceptorServerOptions): http.Server {
@@ -87,21 +92,17 @@ async function handle(
       }
       const request = body;
       const verdict = await opts.engine.evaluate(request);
-      recordToolVerdict(opts, request, verdict.failOpen ? 'unknown' : verdict.action);
+      recordToolVerdict(opts, request, verdict.failOpen && verdict.matched !== true ? 'unknown' : verdict.action, verdict);
       recordAccess(opts, {
         event: request.event,
         agent: request.agent,
         sessionId: request.sessionId,
         toolUseId: request.toolUseId,
         input: accessInputFromHookRequest(request),
-        result: {
-          action: verdict.action,
-          reason: verdict.reason,
-          ruleId: verdict.ruleId,
-          evaluatedRules: verdict.evaluatedRules,
-        },
+        result: { ...verdict },
       });
       writeJson(res, 200, verdict satisfies EvaluateHookResponse);
+      emitEvaluations(opts, request, verdict);
       emitBlockedPrompt(opts, request, verdict);
       return;
     }
@@ -174,25 +175,22 @@ async function handleQwenWorkHttp(
 
   try {
     const verdict = await opts.engine.evaluate(request);
-    recordToolVerdict(opts, request, verdict.failOpen ? 'unknown' : verdict.action);
+    recordToolVerdict(opts, request, verdict.failOpen && verdict.matched !== true ? 'unknown' : verdict.action, verdict);
     recordAccess(opts, {
       event: request.event,
       agent: request.agent,
       sessionId: request.sessionId,
       toolUseId: request.toolUseId,
       input: accessInputFromHookRequest(request),
-      result: {
-        action: verdict.action,
-        reason: verdict.reason,
-        ruleId: verdict.ruleId,
-        evaluatedRules: verdict.evaluatedRules,
-      },
+      result: { ...verdict },
     });
     if (verdict.action !== 'block') {
       writeJson(res, 200, qwenWorkAllowBody());
+      emitEvaluations(opts, request, verdict);
       return;
     }
-    writeJson(res, 200, qwenWorkBlockBody(request, verdict.reason));
+    writeJson(res, 200, qwenWorkBlockBody(request, hostBlockDetail(verdict.message, verdict.reason)));
+    emitEvaluations(opts, request, verdict);
     emitBlockedPrompt(opts, request, verdict);
   } catch (err) {
     recordToolVerdict(opts, request, 'unknown');
@@ -221,9 +219,19 @@ function emitBlockedPrompt(
   if (request.event !== 'UserPromptSubmit') return;
   if (request.agent !== 'qoder' && request.agent !== 'qodercli') return;
   try {
-    opts.emitBlockedPrompt(buildBlockedQoderPromptEntry(request));
+    void Promise.resolve(opts.emitBlockedPrompt(buildBlockedQoderPromptEntry(request, Date.now(), verdict)))
+      .catch(err => logger.warn('blocked prompt emit failed', { error: String(err) }));
   } catch (err) {
     logger.warn('blocked prompt emit failed', { error: String(err) });
+  }
+}
+
+function emitEvaluations(opts: InterceptorServerOptions, request: HookRequest, verdict: EvaluateHookResponse): void {
+  if (!opts.emitEvaluation) return;
+  for (const match of verdict.matches ?? []) {
+    try { void Promise.resolve(opts.emitEvaluation(buildGuardrailEvaluationEntry(request, match, verdict.failOpen)))
+      .catch(err => logger.warn('guardrail evaluation emit failed', { error: String(err) })); }
+    catch (err) { logger.warn('guardrail evaluation emit failed', { error: String(err) }); }
   }
 }
 
@@ -231,6 +239,7 @@ function recordToolVerdict(
   opts: InterceptorServerOptions,
   request: HookRequest,
   result: ToolVerdictAction | 'unknown',
+  verdict?: EvaluateHookResponse,
 ): void {
   if (!opts.writeToolVerdict || !request.toolUseId || !isToolInterceptPhase(request.event)) return;
   if (result !== 'allow' && result !== 'block') return;
@@ -239,7 +248,9 @@ function recordToolVerdict(
       sessionId: request.sessionId,
       toolUseId: request.toolUseId,
       phase: request.event,
-    }, result);
+    }, verdict
+      ? guardrailSnapshotFromVerdict(verdict)
+      : { action: result });
   } catch {
     // Verdict persistence must never affect the host response.
   }

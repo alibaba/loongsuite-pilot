@@ -34,7 +34,7 @@ export function lifecycleFieldsForDeploy(
   resolved?: Pick<DeployedAgentRecord, 'pluginInjectConfigPath'>,
 ): Pick<DeployedAgentRecord, 'hookSettingsPath' | 'hookScope' | 'pluginInjectConfigPath'> {
   const fields: Pick<DeployedAgentRecord, 'hookSettingsPath' | 'hookScope' | 'pluginInjectConfigPath'> = {};
-  if (def.id === 'grok-build' && def.hook?.settingsPath) {
+  if ((def.id === 'grok-build' || def.id === 'codex') && def.hook?.settingsPath) {
     const resolvedHook = path.resolve(def.hook.settingsPath);
     if (path.isAbsolute(resolvedHook)) fields.hookSettingsPath = resolvedHook;
     fields.hookScope = def.hook.scope ?? 'user';

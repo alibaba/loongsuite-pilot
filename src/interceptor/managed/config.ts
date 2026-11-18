@@ -1,0 +1,304 @@
+import * as path from 'node:path';
+import { resolveHome } from '../../utils/fs-utils.js';
+import {
+  INTERCEPTOR_AGENTS,
+  SUPPORTED_HOOK_EVENTS,
+  type HookEventName,
+  type InterceptorAgent,
+  type RuleEnforcement,
+} from '../types.js';
+
+export type ManagedShell = 'sh' | 'powershell';
+
+/** Windows uses powershell; macOS and Linux share sh. */
+export function platformManagedShell(platform: NodeJS.Platform = process.platform): ManagedShell {
+  return platform === 'win32' ? 'powershell' : 'sh';
+}
+
+export type ManagedPatternMatch = 'regex' | 'substring';
+
+interface ManagedRuleBase {
+  id: string;
+  version: string;
+  agents: InterceptorAgent[];
+  events: HookEventName[];
+  enforcement: RuleEnforcement;
+  /** Display label for telemetry. Not shown to the host. */
+  title?: string;
+  /** Reminder shown to the host/agent when this rule blocks. */
+  message?: string;
+}
+
+export interface ManagedPatternRule extends ManagedRuleBase {
+  kind: 'pattern';
+  match: ManagedPatternMatch;
+  /** User-authored source. Regex runs in a terminable Worker; substring is literal. */
+  pattern: string;
+}
+
+export interface ManagedScriptRule extends ManagedRuleBase {
+  kind: 'script';
+  shell: ManagedShell;
+}
+
+export interface ManagedHttpRule extends ManagedRuleBase {
+  kind: 'http';
+  url: string;
+}
+
+export type ManagedRule = ManagedPatternRule | ManagedScriptRule | ManagedHttpRule;
+
+export interface ManagedInterceptorConfig {
+  rules: ManagedRule[];
+  /** Local-only namespace selecting a complete set of script files. */
+  scriptCache?: string;
+}
+
+export function scriptRulesOf(config: ManagedInterceptorConfig): ManagedScriptRule[] {
+  return config.rules.filter((rule): rule is ManagedScriptRule => rule.kind === 'script');
+}
+
+export function patternRulesOf(config: ManagedInterceptorConfig): ManagedPatternRule[] {
+  return config.rules.filter((rule): rule is ManagedPatternRule => rule.kind === 'pattern');
+}
+
+/** id and version become one path segment; neither may contain a separator or `@`. */
+const SCRIPT_TOKEN_RE = /^[A-Za-z0-9._-]+$/;
+const SHELL_EXTENSIONS: Record<ManagedShell, string> = { sh: 'sh', powershell: 'ps1' };
+const HOOK_EVENT_SET = new Set<string>(SUPPORTED_HOOK_EVENTS);
+const AGENT_SET = new Set<string>(INTERCEPTOR_AGENTS);
+
+export function managedConfigDir(dataDir: string): string {
+  return path.join(resolveHome(dataDir), 'configs', 'managed');
+}
+
+export function managedInterceptorPath(dataDir: string): string {
+  return path.join(managedConfigDir(dataDir), 'interceptor.json');
+}
+
+export function managedScriptsDir(dataDir: string, scriptCache?: string): string {
+  const dir = path.join(managedConfigDir(dataDir), 'scripts');
+  return scriptCache === undefined ? dir : path.join(dir, parseScriptCache(scriptCache));
+}
+
+/** Configuration providers and the engine must agree on this derived file name. */
+export function managedScriptFileName(rule: { id: string; version: string; shell: ManagedShell }): string {
+  return `${rule.id}@${rule.version}.${SHELL_EXTENSIONS[rule.shell]}`;
+}
+
+export class ManagedConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ManagedConfigError';
+  }
+}
+
+/** Parses a local rule document at `configs/managed/interceptor.json`. */
+export function parseManagedInterceptorConfig(
+  value: unknown,
+  opts: { allowLocalScriptCache?: boolean } = {},
+): ManagedInterceptorConfig {
+  const root = asRecord(value, 'document');
+  onlyKeys(root, ['interceptor'], 'document');
+  const interceptor = asRecord(root.interceptor, 'interceptor');
+  onlyKeys(interceptor, opts.allowLocalScriptCache ? ['rules', 'scriptCache'] : ['rules'], 'interceptor');
+  return {
+    rules: parseRuleList(interceptor.rules, parseManagedRule),
+    ...(interceptor.scriptCache === undefined ? {} : { scriptCache: parseScriptCache(interceptor.scriptCache) }),
+  };
+}
+
+function parseScriptCache(value: unknown): string {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new ManagedConfigError('interceptor.scriptCache must be a SHA-256 digest');
+  }
+  return value;
+}
+
+export const MAX_RULE_TITLE_CHARS = 128;
+export const MAX_RULE_MESSAGE_CHARS = 2000;
+export const MAX_RULE_PATTERN_CHARS = 2000;
+export const PATTERN_BLOCKED_REASON = '[PATTERN_BLOCKED]';
+
+function parseRuleList<T extends { id: string }>(
+  value: unknown,
+  parseOne: (raw: unknown, where: string) => T,
+  where = 'interceptor.rules',
+): T[] {
+  if (!Array.isArray(value)) throw new ManagedConfigError(`${where} must be an array`);
+  const seen = new Set<string>();
+  return value.map((raw, index) => {
+    const rule = parseOne(raw, `${where}[${index}]`);
+    if (seen.has(rule.id)) throw new ManagedConfigError(`duplicate rule id ${rule.id}`);
+    seen.add(rule.id);
+    return rule;
+  });
+}
+
+function parseManagedRule(value: unknown, where: string): ManagedRule {
+  const rule = asRecord(value, where);
+  if (rule.kind === 'pattern') return parsePatternRule(rule, where);
+  if (rule.kind === 'script') return parseScriptRule(rule, where);
+  if (rule.kind === 'http') return parseHttpRule(rule, where);
+  throw new ManagedConfigError(`${where}.kind must be "pattern", "script", or "http"`);
+}
+
+function parseScriptRule(value: Record<string, unknown>, where: string): ManagedScriptRule {
+  onlyKeys(value, ['kind', 'id', 'version', 'shell', ...BASE_KEYS], where);
+  if (value.shell !== 'sh' && value.shell !== 'powershell') {
+    throw new ManagedConfigError(`${where}.shell must be "sh" or "powershell"`);
+  }
+  return { kind: 'script', ...parseRuleBase(value, where), shell: value.shell };
+}
+
+function parsePatternRule(value: Record<string, unknown>, where: string): ManagedPatternRule {
+  onlyKeys(value, ['kind', 'id', 'version', 'match', 'pattern', ...BASE_KEYS], where);
+  if (value.match !== 'regex' && value.match !== 'substring') {
+    throw new ManagedConfigError(`${where}.match must be "regex" or "substring"`);
+  }
+  if (typeof value.pattern !== 'string') throw new ManagedConfigError(`${where}.pattern must be a string`);
+  const pattern = value.pattern;
+  if (pattern.length === 0) throw new ManagedConfigError(`${where}.pattern must not be empty`);
+  if (pattern.length > MAX_RULE_PATTERN_CHARS) {
+    throw new ManagedConfigError(`${where}.pattern is longer than ${MAX_RULE_PATTERN_CHARS} characters`);
+  }
+  if (value.match === 'regex') compileManagedRegex(pattern, where);
+  return { kind: 'pattern', ...parseRuleBase(value, where), match: value.match, pattern };
+}
+
+function parseHttpRule(value: Record<string, unknown>, where: string): ManagedHttpRule {
+  onlyKeys(value, ['kind', 'id', 'version', 'url', ...BASE_KEYS], where);
+  return { kind: 'http', ...parseRuleBase(value, where), url: parseHttpsUrl(value.url, `${where}.url`) };
+}
+
+// Accept the retired fields key from older documents, but never normalize or apply it.
+const BASE_KEYS = ['agents', 'events', 'fields', 'title', 'message', 'enforcement'];
+
+function parseRuleBase(value: Record<string, unknown>, where: string): ManagedRuleBase {
+  const enforcement = value.enforcement === undefined ? 'enforce' : value.enforcement;
+  if (enforcement !== 'enforce' && enforcement !== 'audit') {
+    throw new ManagedConfigError(`${where}.enforcement must be "enforce" or "audit"`);
+  }
+  return {
+    id: parseToken(value.id, `${where}.id`),
+    version: parseToken(value.version, `${where}.version`),
+    agents: parseIdList(value.agents, `${where}.agents`, AGENT_SET) as InterceptorAgent[],
+    events: parseIdList(value.events, `${where}.events`, HOOK_EVENT_SET) as HookEventName[],
+    enforcement,
+    ...optionalText(value.title, `${where}.title`, MAX_RULE_TITLE_CHARS, 'title'),
+    ...optionalText(value.message, `${where}.message`, MAX_RULE_MESSAGE_CHARS, 'message'),
+  };
+}
+
+function optionalText(
+  value: unknown,
+  where: string,
+  maxChars: number,
+  key: 'title' | 'message',
+): { title: string } | { message: string } | Record<string, never> {
+  const text = parseOptionalText(value, where, maxChars);
+  return text ? { [key]: text } as { title: string } | { message: string } : {};
+}
+
+/** An empty list would make the rule silently never fire, so it is rejected like an unknown entry. */
+function parseIdList(value: unknown, where: string, allowed: ReadonlySet<string>): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new ManagedConfigError(`${where} must be a non-empty array`);
+  }
+  const items = value.map((item) => {
+    if (typeof item !== 'string' || !allowed.has(item)) {
+      throw new ManagedConfigError(`${where} has unsupported value ${String(item)}`);
+    }
+    return item;
+  });
+  return [...new Set(items)];
+}
+
+/** Compile a rule regex. Lookaround is rejected so Windows and Unix stay aligned. */
+export function compileManagedRegex(pattern: string, where = 'pattern'): RegExp {
+  if (hasLookaround(pattern)) {
+    throw new ManagedConfigError(`${where} must not use lookahead or lookbehind`);
+  }
+  try {
+    return new RegExp(pattern);
+  } catch (err) {
+    throw new ManagedConfigError(`${where} is not a valid regular expression: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+export function patternRuleMatches(rule: ManagedPatternRule, text: string): boolean {
+  if (rule.match === 'substring') return text.includes(rule.pattern);
+  return compileManagedRegex(rule.pattern).test(text);
+}
+
+function hasLookaround(pattern: string): boolean {
+  let escaped = false;
+  let inClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (c === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (inClass) {
+      if (c === ']') inClass = false;
+      continue;
+    }
+    if (c === '[') {
+      inClass = true;
+      continue;
+    }
+    if (c !== '(' || pattern[i + 1] !== '?') continue;
+    const a = pattern[i + 2];
+    const b = pattern[i + 3];
+    if (a === '=' || a === '!') return true;
+    if (a === '<' && (b === '=' || b === '!')) return true;
+  }
+  return false;
+}
+
+function parseOptionalText(value: unknown, where: string, maxChars: number): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new ManagedConfigError(`${where} must be a string`);
+  const text = value.trim();
+  if (text.length === 0) throw new ManagedConfigError(`${where} must not be empty`);
+  if (text.length > maxChars) {
+    throw new ManagedConfigError(`${where} is longer than ${maxChars} characters`);
+  }
+  return text;
+}
+
+function parseToken(value: unknown, where: string): string {
+  if (typeof value !== 'string' || !SCRIPT_TOKEN_RE.test(value) || value === '.' || value === '..') {
+    throw new ManagedConfigError(`${where} must match ${SCRIPT_TOKEN_RE.source}`);
+  }
+  return value;
+}
+
+function parseHttpsUrl(value: unknown, where = 'interceptor.url'): string {
+  if (typeof value !== 'string') throw new ManagedConfigError(`${where} must be a string`);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ManagedConfigError(`${where} is not a valid URL`);
+  }
+  if (url.protocol !== 'https:') throw new ManagedConfigError(`${where} must be https`);
+  return url.toString();
+}
+
+function asRecord(value: unknown, where: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ManagedConfigError(`${where} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function onlyKeys(value: Record<string, unknown>, allowed: string[], where: string): void {
+  const unknown = Object.keys(value).filter(key => !allowed.includes(key));
+  if (unknown.length > 0) throw new ManagedConfigError(`${where} has unknown keys: ${unknown.join(', ')}`);
+}

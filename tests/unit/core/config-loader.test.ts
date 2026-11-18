@@ -185,7 +185,7 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.enabled).toBe(true);
-      expect(config.flushers.jsonl?.enabled).toBe(true);
+      expect(config.flushers.jsonl?.enabled).toBe(false);
     });
   });
 
@@ -319,7 +319,20 @@ describe('ConfigLoader', () => {
       expect(config.flushers.http?.url).toBe('https://api.example.com');
     });
 
-    it('resolves JSONL enabled from env', async () => {
+    it('enables JSONL only when explicitly requested in the config file or environment', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: true } });
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: false } });
+      vi.stubEnv('JSONL_ENABLED', 'true');
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: true } });
+      vi.stubEnv('JSONL_ENABLED', 'false');
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(false);
+    });
+
+    it('resolves JSONL disabled from env', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       vi.stubEnv('JSONL_ENABLED', 'false');
 
@@ -2337,7 +2350,7 @@ describe('ConfigLoader', () => {
       expect(config.interceptor).toEqual({ mode: 'none', types: [] });
     });
 
-    it('loads all mode and custom types as a mask-type subset', async () => {
+    it('treats interceptor custom mode as none and does not expand mask', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         interceptor: {
           mode: 'custom',
@@ -2345,10 +2358,8 @@ describe('ConfigLoader', () => {
         },
       });
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({
-        mode: 'custom',
-        types: ['apiKey', 'cloudAccessKey'],
-      });
+      expect(config.interceptor).toEqual({ mode: 'none', types: [] });
+      expect(config.mask.mode).toBe('none');
     });
 
     it('uses interceptor env over config file', async () => {
@@ -2367,7 +2378,7 @@ describe('ConfigLoader', () => {
     it('leaves mask mode all unchanged when interceptor is enabled', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: { mode: 'all' },
-        interceptor: { mode: 'custom', types: ['apiKey'] },
+        interceptor: { mode: 'all' },
       });
       const config = await loadConfig();
       expect(config.mask.mode).toBe('all');

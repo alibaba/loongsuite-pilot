@@ -7,6 +7,7 @@ import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { withDeployedStateLock } from './deployed-state-merge.js';
 import { createLogger } from '../utils/logger.js';
 import { DeploymentManager } from './deployment-manager.js';
+import { resolveDeployInterceptorHooks } from '../interceptor/config.js';
 import { postAlarm } from '../internal/post-alarm.js';
 import { systemTomlDefinition, supportsSystemTomlHooks } from './system-toml-hooks.js';
 import { areSystemHookAssetsHealthy } from './system-hook-assets.js';
@@ -358,6 +359,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
     pilotDir: opts.pilotDir,
     builtinAgentsDir: opts.builtinAgentsDir,
     installedBy: opts.mode === 'status' ? undefined : 'hook-install',
+    deployInterceptorHooks: await resolveDeployInterceptorHooks(opts.dataDir),
   });
   const defs = await manager.loadDefinitions();
   const byId = new Map(defs.map(def => [def.id, def]));
@@ -473,6 +475,11 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
     if (system) {
       agent.hookScope = 'system';
       agent.runtimeHealthy = await areSystemHookAssetsHealthy(agent.id, opts.pilotDir, opts.dataDir);
+      agent.collectionStatus = 'not-verified';
+    } else if (opts.deploymentScope === 'system' && (agent.id === 'pi-coding-agent' || agent.id === 'dsh')
+      && (agent.status === 'ok' || agent.status === 'up-to-date')) {
+      agent.settingsPath = manager.recordedConfigPath(agent.id) ?? agent.settingsPath;
+      agent.hint = `Registered in shared config ${agent.settingsPath}. New sessions must use the same configuration root; independent roots do not inherit it.`;
       agent.collectionStatus = 'not-verified';
     }
   }

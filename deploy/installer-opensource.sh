@@ -83,7 +83,6 @@ MASK_MODE=""
 MASK_TYPES=""
 MASK_REPLACEMENT_MODE=""
 INTERCEPTOR_MODE=""
-INTERCEPTOR_TYPES=""
 HAS_SUDO=0
 PURGE=0
 PREFER_SYSTEM_NODE=0
@@ -191,8 +190,6 @@ while [[ $# -gt 0 ]]; do
         --mask-replacement-mode=*) MASK_REPLACEMENT_MODE="${1#*=}"; shift ;;
         --interceptor-mode)   INTERCEPTOR_MODE="$2"; shift 2 ;;
         --interceptor-mode=*) INTERCEPTOR_MODE="${1#*=}"; shift ;;
-        --interceptor-types)  INTERCEPTOR_TYPES="$2"; shift 2 ;;
-        --interceptor-types=*) INTERCEPTOR_TYPES="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
         --prefer-system-node) PREFER_SYSTEM_NODE=1; shift ;;
         --prefer-system-node=*) PREFER_SYSTEM_NODE=1; shift ;;
@@ -250,19 +247,11 @@ if [ -n "$MASK_REPLACEMENT_MODE" ] && [ "$MASK_REPLACEMENT_MODE" != "placeholder
 fi
 if [ -n "$INTERCEPTOR_MODE" ]; then
     case "$INTERCEPTOR_MODE" in
-        all|none|custom) ;;
+        all|none) ;;
         *)
-            echo "❌ Unknown interceptor mode: $INTERCEPTOR_MODE (use 'all', 'custom', or 'none')" >&2
+            echo "❌ Unknown interceptor mode: $INTERCEPTOR_MODE (use 'all' or 'none')" >&2
             exit 1 ;;
     esac
-fi
-if [ "$INTERCEPTOR_MODE" = "custom" ] && [ -z "$INTERCEPTOR_TYPES" ]; then
-    echo "❌ --interceptor-types is required when --interceptor-mode custom" >&2
-    exit 1
-fi
-if [ -n "$INTERCEPTOR_TYPES" ] && [ "$INTERCEPTOR_MODE" != "custom" ]; then
-    echo "❌ --interceptor-types can only be used with --interceptor-mode custom" >&2
-    exit 1
 fi
 if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; }; then
     echo "❌ --sls-api-key cannot be used with --sls-ak-id or --sls-ak-secret" >&2
@@ -915,11 +904,7 @@ const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databas
 const parseTypeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean);
 const uniqueTypes = list => [...new Set(list)];
 const interceptorModeFinal = newVals.interceptorMode || (old.interceptor||{}).mode || '';
-const interceptorTypesFinal = interceptorModeFinal === 'all'
-  ? INTERCEPTOR_TYPE_SET.slice()
-  : interceptorModeFinal === 'custom'
-    ? parseTypeCsv(newVals.interceptorMode ? newVals.interceptorTypes : ((old.interceptor||{}).types||[]).join(',')).filter(t => INTERCEPTOR_TYPE_SET.indexOf(t) !== -1)
-    : [];
+const interceptorTypesFinal = interceptorModeFinal === 'all' ? INTERCEPTOR_TYPE_SET.slice() : [];
 const maskModeFinal = newVals.maskMode || (old.mask||{}).mode || '';
 const maskTypesFinal = maskModeFinal === 'custom'
   ? parseTypeCsv(newVals.maskMode ? newVals.maskTypes : ((old.mask||{}).types||[]).join(','))
@@ -947,7 +932,6 @@ const checks = [
   { label: 'mask.types',         oldVal: (old.mask||{}).mode === 'custom' && Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: coveredMaskTypes.join(',') },
   { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
   { label: 'interceptor.mode',   oldVal: (old.interceptor||{}).mode||'',   newVal: newVals.interceptorMode },
-  { label: 'interceptor.types',  oldVal: Array.isArray((old.interceptor||{}).types) ? normalizeCsv(old.interceptor.types.join(',')) : '', newVal: normalizeCsv(newVals.interceptorTypes) },
   { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
 ];
 
@@ -957,8 +941,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","maskReplacementMode":"%s","interceptorMode":"%s","interceptorTypes":"%s","multimodalMode":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MASK_REPLACEMENT_MODE" "$INTERCEPTOR_MODE" "$INTERCEPTOR_TYPES" "$MULTIMODAL_MODE")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","maskReplacementMode":"%s","interceptorMode":"%s","multimodalMode":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MASK_REPLACEMENT_MODE" "$INTERCEPTOR_MODE" "$MULTIMODAL_MODE")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -1257,7 +1241,6 @@ const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
 const maskReplacementMode = '${MASK_REPLACEMENT_MODE}';
 const interceptorMode = '${INTERCEPTOR_MODE}';
-const interceptorTypes = '${INTERCEPTOR_TYPES}';
 
 if (collectLog) config.collectLog = collectLog === 'true';
 if (collectTrace) config.collectTrace = collectTrace === 'true';
@@ -1291,24 +1274,13 @@ if (maskReplacementMode) {
 if (interceptorMode) {
   config.interceptor = config.interceptor || {};
   config.interceptor.mode = interceptorMode;
-  if (interceptorMode === 'custom') {
-    config.interceptor.types = interceptorTypes
-      .split(',')
-      .map(type => type.trim())
-      .filter(Boolean);
-  } else {
-    delete config.interceptor.types;
-  }
+  delete config.interceptor.types;
 }
 
 const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
 (function ensureMaskCoversInterceptor(config) {
   const interceptor = config.interceptor || {};
-  const extra = interceptor.mode === 'all'
-    ? INTERCEPTOR_TYPE_SET.slice()
-    : interceptor.mode === 'custom' && Array.isArray(interceptor.types)
-      ? interceptor.types.filter(type => INTERCEPTOR_TYPE_SET.indexOf(type) !== -1)
-      : [];
+  const extra = interceptor.mode === 'all' ? INTERCEPTOR_TYPE_SET.slice() : [];
   if (extra.length === 0) return;
   if ((config.mask || {}).mode === 'all') return;
   const current = (config.mask || {}).mode === 'custom' && Array.isArray((config.mask || {}).types)
@@ -2784,27 +2756,53 @@ try {
 remove_pi_coding_agent_extension() {
     local cfg="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/settings.json"
     local state_file="$DATA_DIR/deployed-agents.json"
-    if command -v node &>/dev/null && [ -f "$state_file" ]; then
+    local node_bin=""
+    local pin_file
+    for pin_file in "$DATA_DIR/node-bin" "$HOME/.loongsuite-pilot/node-bin"; do
+        if [ -f "$pin_file" ]; then
+            local pinned
+            pinned=$(tr -d '\r\n' < "$pin_file")
+            if _node_is_suitable "$pinned"; then node_bin="$pinned"; break; fi
+        fi
+    done
+    if [ -z "$node_bin" ]; then node_bin=$(resolve_node) || node_bin=""; fi
+    if [ -z "$node_bin" ]; then
+        # No parser remains. Do not mistake an unrelated settings file or an
+        # empty local-definition directory for an owned registration. A recorded
+        # Pi target is uncertain without Node, so retain its assets for retry.
+        local pending=0
+        if [ -f "$cfg" ] && grep -Eq 'loongsuite-pilot-pi-(coding-agent|sdk-)|plugins[\\/]+pi-coding-agent[\\/]+index[.]mjs' "$cfg"; then pending=1; fi
+        if [ -f "$state_file" ] && grep -Fq '"pi-coding-agent"' "$state_file"; then pending=1; fi
+        local definition
+        for definition in "$DATA_DIR/agents.d.local/"*.json; do
+            if [ -f "$definition" ] && grep -Fq 'loongsuite-pilot-pi-sdk-' "$definition"; then pending=1; break; fi
+        done
+        [ "$pending" -eq 1 ] || return 0
+        msg "    ❌ 无可用 Node.js，无法确认或清理 Pi 注册；卸载已停止，资产保留供重试" \
+            "    ❌ No usable Node.js; cannot verify or remove Pi registrations. Uninstall stopped; assets retained for retry."
+        return 1
+    fi
+    if [ -f "$state_file" ]; then
         local persisted
-        persisted=$(node -e '
+        if ! persisted=$("$node_bin" -e '
 const fs = require("fs");
 const path = require("path");
 try {
   const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
   const value = state?.["pi-coding-agent"]?.pluginInjectConfigPath;
   if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
-} catch {}
-' "$state_file")
+} catch (error) { if (error.code !== "ENOENT") process.exit(1); }
+' "$state_file"); then
+            msg "    ❌ 无法读取 Pi 注册目标；卸载已停止，资产保留" \
+                "    ❌ Cannot read the recorded Pi target; uninstall stopped and assets retained."
+            return 1
+        fi
         if [ -n "$persisted" ]; then cfg="$persisted"; fi
     fi
     local short="${cfg/#$HOME/\~}"
-    if ! command -v node &>/dev/null; then
-        msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
-        return 0
-    fi
 
     local result
-    result=$(node -e "
+    result=$("$node_bin" -e "
 const fs = require('fs');
 const path = require('path');
 const defaultConfig = process.argv[1];
@@ -2889,7 +2887,14 @@ try {
           if (e?.code !== 'EEXIST') throw e;
         }
       }
-      fs.writeFileSync(target.configPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+      const stat = fs.lstatSync(target.configPath);
+      if (stat.isSymbolicLink() || !(stat.mode & 0o222)) throw new Error('Pi settings are read-only or externally managed');
+      const staged = target.configPath + '.' + process.pid + '.tmp';
+      try {
+        fs.writeFileSync(staged, JSON.stringify(data, null, 2) + '\n', { mode: stat.mode & 0o777, flag: 'wx' });
+        if (fs.readFileSync(target.configPath, 'utf8') !== raw) throw new Error('Pi settings changed during cleanup');
+        fs.renameSync(staged, target.configPath);
+      } finally { try { fs.unlinkSync(staged); } catch {} }
       cleaned++;
     } catch {
       skipped++;
@@ -2912,6 +2917,7 @@ try {
         *)
             msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
     esac
+    case "$result" in cleaned|nochange) return 0 ;; *) return 1 ;; esac
 }
 
 # ============================================================
@@ -3185,7 +3191,9 @@ cmd_uninstall() {
     echo ""
 
     msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
-    remove_pi_coding_agent_extension
+    if ! remove_pi_coding_agent_extension; then
+        return 1
+    fi
     echo ""
 
     # Remove plugin-inject specs (MiMo Code)

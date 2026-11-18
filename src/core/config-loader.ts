@@ -1414,7 +1414,7 @@ function dedupSlsEndpoints(endpoints: SlsEndpoint[]): SlsEndpoint[] {
 
 function buildJsonlConfig(file: ConfigFile | null, dataDir: string) {
   return {
-    enabled: envBool('JSONL_ENABLED', file?.jsonl?.enabled ?? true),
+    enabled: envBool('JSONL_ENABLED', file?.jsonl?.enabled ?? false),
     outputDir: resolveHome(
       env('JSONL_OUTPUT_DIR') ?? file?.jsonl?.outputDir ?? `${dataDir}/logs/output`,
     ),
