@@ -1,11 +1,11 @@
 import { mkdir, readFile, unlink } from 'node:fs/promises';
 import * as path from 'node:path';
 import { StateStore } from '../../../checkpoints/state-store.js';
-import { postWebtracking } from '../../../flushers/sls-transport.js';
 import { writeJsonFile } from '../../../utils/fs-utils.js';
 import { createLogger } from '../../../utils/logger.js';
-import type { FilePipelineOptions, Pipeline, PipelineSlsFlusherConfig } from '../../types.js';
-import { resolveMulticaDestination, type MulticaSlsFlusherConfig } from './destination.js';
+import type { FilePipelineOptions, Pipeline } from '../../types.js';
+import { resolveMulticaDestination, type MulticaDestination, type MulticaSlsDefaults, type MulticaSlsFlusherConfig } from './destination.js';
+import { sendMulticaRecords } from './sender.js';
 import { errorKind } from './http.js';
 import { MulticaActivationGate, type MulticaActivationResult, type MulticaCollectionMode } from './activation.js';
 import { digest, envelope } from './records.js';
@@ -16,7 +16,9 @@ import { validateMulticaConfig, type CollectionResult, type MulticaInputConfig, 
 const logger = createLogger('MulticaPipeline');
 interface PendingBatch { records: MulticaRecord[]; checkpoint?: SourceCheckpoint }
 type MulticaPipelineOptions = Omit<FilePipelineOptions, 'config'> & {
-  config: Omit<FilePipelineOptions['config'], 'flushers'> & { flushers: MulticaSlsFlusherConfig[] };
+  config: Omit<FilePipelineOptions['config'], 'flushers'> & { flushers?: MulticaSlsFlusherConfig[] };
+  sls?: MulticaSlsDefaults;
+  collectionEnabled?: boolean;
 };
 export interface CollectionSummary {
   successfulSources: number;
@@ -32,7 +34,7 @@ export class MulticaPipeline implements Pipeline {
   private readonly input: MulticaInputConfig;
   private readonly state: StateStore;
   private readonly spoolDir: string;
-  private readonly destination: PipelineSlsFlusherConfig;
+  private readonly destination: MulticaDestination;
   private timer?: ReturnType<typeof setTimeout>;
   private running = false;
   private loaded = false;
@@ -50,7 +52,7 @@ export class MulticaPipeline implements Pipeline {
     validateMulticaConfig(this.input);
     this.activation = new MulticaActivationGate(this.input, defaultMode);
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(opts.config.configName)) throw new Error('Invalid configName');
-    this.destination = resolveMulticaDestination(opts.config.flushers[0]);
+    this.destination = resolveMulticaDestination(opts.config.flushers?.[0], opts.sls);
     const destinationId = digest(JSON.stringify([this.destination.Endpoint, this.destination.Project, this.destination.Logstore]));
     // A configuration change must not replay another destination's pending data
     // or reuse its log offsets. Legacy unscoped state is deliberately not adopted.
@@ -91,7 +93,9 @@ export class MulticaPipeline implements Pipeline {
   }
 
   private async cycle(): Promise<CollectionSummary> {
-    const activation = await this.activation.evaluate();
+    const activation: MulticaActivationResult = this.opts.collectionEnabled === false
+      ? {enabled: false, mode: 'off', reason: 'pipeline_disabled', consecutiveMisses: 0, stopped: false}
+      : await this.activation.evaluate();
     await this.onActivation?.(activation);
     const summary: CollectionSummary = {successfulSources: 0, failedSources: 0,
       collectionEnabled: activation.enabled, collectionMode: activation.mode, activationReason: activation.reason,
@@ -178,9 +182,7 @@ export class MulticaPipeline implements Pipeline {
 
   private async send(records: MulticaRecord[]): Promise<void> {
     if (!records.length) return;
-    const flusher = this.destination;
-    await postWebtracking({endpoint: flusher.Endpoint, project: flusher.Project, logstore: flusher.Logstore}, records,
-      {topic: 'multica', source: this.input.Instance ?? 'multica', tags: {pipeline_type: 'multica', schema_version: 'multica.v1'}});
+    await sendMulticaRecords(this.destination, records, this.input.Instance ?? 'multica');
   }
 
   private async source(name: string, collect: () => Promise<CollectionResult>): Promise<boolean> {

@@ -3,7 +3,7 @@ import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'no
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { MulticaPipeline } from '../../../../src/pipeline/input/multica/multica-pipeline.js';
-import { resolveMulticaDestination, type MulticaSlsFlusherConfig } from '../../../../src/pipeline/input/multica/destination.js';
+import { resolveMulticaDestination, type MulticaSlsDefaults, type MulticaSlsFlusherConfig } from '../../../../src/pipeline/input/multica/destination.js';
 import { digest } from '../../../../src/pipeline/input/multica/records.js';
 import { postWebtracking } from '../../../../src/flushers/sls-transport.js';
 
@@ -82,5 +82,63 @@ describe('Multica dispatched destination', () => {
     await collector().collectOnce();
     expect(logs().map(row => row.issue_id)).toEqual(['current']);
     expect(await readdir(legacy)).toEqual([pendingName]);
+  });
+});
+
+describe('Multica installed SLS inheritance', () => {
+  const installed: MulticaSlsDefaults = {enabled: true, endpoints: [{
+    name: 'user-sls', endpoint: 'https://cn-hangzhou.log.aliyuncs.com/', project: 'agentloop-installed',
+    logstore: 'agent-event', kind: 'agentActivity', mode: 'apiKey', apiKey: 'dummy-installed-api-key',
+  }]};
+  const inherited = {Type: 'flusher_sls'} as const;
+
+  it('inherits endpoint, project and authentication without inheriting the ordinary agent logstore', () => {
+    for (const flusher of [undefined, inherited]) {
+      expect(resolveMulticaDestination(flusher, installed)).toEqual({
+        Type: 'flusher_sls', Endpoint: 'https://cn-hangzhou.log.aliyuncs.com', Project: 'agentloop-installed',
+        Logstore: 'multica-logs', mode: 'apiKey', apiKey: 'dummy-installed-api-key',
+      });
+    }
+    expect(resolveMulticaDestination({...inherited, Logstore: 'custom-multica'}, installed).Logstore).toBe('custom-multica');
+    expect(installed.endpoints[0].logstore).toBe('agent-event');
+  });
+
+  it('inherits authentication only for the exact explicit endpoint and project', () => {
+    expect(resolveMulticaDestination({Type: 'flusher_sls', Endpoint: 'cn-hangzhou.log.aliyuncs.com', Project: 'agentloop-installed'}, installed))
+      .toMatchObject({mode: 'apiKey', apiKey: 'dummy-installed-api-key'});
+    for (const target of [original, {...original, Endpoint: 'cn-hangzhou.log.aliyuncs.com'}, {...original, Project: 'agentloop-installed'}]) {
+      const resolved = resolveMulticaDestination(target, installed);
+      expect(resolved.mode).toBe('webtracking');
+      expect(resolved).not.toHaveProperty('apiKey');
+    }
+    expect(() => resolveMulticaDestination({...inherited, Project: 'another-project'}, installed)).toThrow('set together');
+    expect(() => resolveMulticaDestination({...inherited, Endpoint: 'different.example'}, installed)).toThrow('set together');
+  });
+
+  it('requires selection among multiple projects and does not deduplicate differing credentials', () => {
+    const other = {...installed.endpoints[0], name: 'second', project: 'another-project', apiKey: 'dummy-second-key'};
+    const multi = {...installed, endpoints: [...installed.endpoints, other]};
+    expect(() => resolveMulticaDestination(inherited, multi)).toThrow('Ambiguous');
+    expect(resolveMulticaDestination({...inherited, Endpoint: other.endpoint, Project: other.project}, multi))
+      .toMatchObject({Project: 'another-project', apiKey: 'dummy-second-key'});
+    const differentLogstores = {...installed, endpoints: [...installed.endpoints, {...installed.endpoints[0], logstore: 'other-logs'}]};
+    expect(resolveMulticaDestination(inherited, differentLogstores).Project).toBe('agentloop-installed');
+    expect(() => resolveMulticaDestination(inherited, {...installed, endpoints: [...installed.endpoints,
+      {...installed.endpoints[0], apiKey: 'conflicting-key'}]})).toThrow('Ambiguous');
+  });
+
+  it('keeps explicit standalone targets independent of unrelated malformed installed targets', () => {
+    const broken = {...installed, enabled: false, endpoints: [{...installed.endpoints[0], endpoint: ''}]};
+    expect(resolveMulticaDestination(original, broken)).toMatchObject({Project: 'agentspace-a', mode: 'webtracking'});
+    expect(resolveMulticaDestination(original, broken)).not.toHaveProperty('apiKey');
+    expect(() => resolveMulticaDestination(inherited, broken)).toThrow('Invalid inherited');
+  });
+
+  it('rejects disabled, missing, ambiguous, or unsupported installed authentication without downgrading', () => {
+    expect(() => resolveMulticaDestination(inherited)).toThrow();
+    expect(() => resolveMulticaDestination(inherited, {...installed, enabled: false})).toThrow('disabled');
+    for (const change of [{apiKey: ''}, {accessKeyId: 'dummy-ak'}, {mode: 'ak' as const, apiKey: undefined, accessKeyId: 'dummy-ak', accessKeySecret: 'dummy-sk'}]) {
+      expect(() => resolveMulticaDestination(inherited, {...installed, endpoints: [{...installed.endpoints[0], ...change}]})).toThrow();
+    }
   });
 });

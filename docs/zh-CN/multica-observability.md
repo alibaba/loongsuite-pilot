@@ -4,7 +4,9 @@
 
 ## 配置
 
-标准 Pilot：将输入配置放入 `<dataDir>/configs/local/multica.json`，在主配置中启用 `pipeline.enabled`。没有 `input_multica` 配置时不会扫描本机或创建采集源。
+标准 Pilot：先按通常的 `installer.sh install --sls-endpoint ... --sls-project ... --sls-logstore agent-event --sls-api-key ...` 方式接入。Multica 复用安装器写入主配置的 SLS Endpoint、Project 和认证信息，默认写入同一 project 的 `multica-logs`；普通 Agent 仍写入 `agent-event`。
+
+将以下输入配置放入 `<dataDir>/configs/local/multica.json`，在主配置中设置 `pipeline.enabled=true`。没有 `input_multica` 配置时不会扫描本机或创建采集源；安装参数 `--all-agents` 不会自动开启 Multica。示例中的 `CollectionMode=on` 是显式启用，省略时仍默认为 off。
 
 ```json
 {
@@ -22,10 +24,7 @@
     "Instance": "multica-server"
   }],
   "flushers": [{
-    "Type": "flusher_sls",
-    "Endpoint": "YOUR_REGION.log.aliyuncs.com",
-    "Project": "YOUR_AGENTSPACE_SLS_PROJECT",
-    "Logstore": "multica-logs"
+    "Type": "flusher_sls"
   }]
 }
 ```
@@ -34,9 +33,16 @@
 
 `MaxLogBytes`（默认 1 MiB）必须严格大于 `MaxLineBytes`（默认 16 KiB），为完整日志行及其换行符留出空间；不满足时拒绝加载配置。超过单行上限的日志会分块跳过，后续正常行继续采集。
 
-SLS logstore 须开启 webtracking；该传输方式无需配置云 AK。Endpoint 接受地域域名或 HTTP(S) 地址，裸域名默认 HTTPS；不要填写完整 `/track` 路径或已包含 project 前缀的域名。
+`flushers` 也可省略。继承安装器的 `--sls-api-key` 时，使用 SLS Protobuf/Bearer API Key 发送，无需开启 Webtracking。目标 `multica-logs` 需已创建，API Key 需具有其写入权限；采集器不负责创建云资源或复制仪表盘。沿用 `webtracking` 模式时，目标 logstore 才需要开启 Webtracking。本采集器支持 `apiKey` 和 `webtracking`，遇到 AK/SK 配置会拒绝启动，不会降级成无认证发送。
 
-目标以用户下发的本 pipeline `flushers[0]` 为准：`Endpoint`、`Project` 必填，`Logstore` 省略时仅对 Multica 默认使用 `multica-logs`，也可显式指定其他 logstore。填写当前 AgentSpace 对应的 SLS project，不固定为示例项目；不会读取或猜测其他 SLS/CMS 目标，也不会将 CMS LicenseKey 当作 SLS 凭证。主进程监控输入 JSON 变更并重建采集器；独立 CLI 修改配置后需要重启。
+配置规则：
+
+- 未指定 `Endpoint/Project`：继承全局已解析、已启用的 SLS 目标，包含原有配置文件和环境变量的优先级。`Logstore` 单独默认 `multica-logs`，也可显式覆盖，不继承 `--sls-logstore`。
+- 全局存在多个目标时：只有 Endpoint、Project、认证均相同的候选可归并；否则需在 `flushers[0]` 中同时填写 `Endpoint` 和 `Project`，唯一选择目标，不自动选第一项。
+- 显式 `Endpoint/Project`：与全局目标完全匹配时继承该目标认证；不同目标仍按原有独立 Webtracking 配置处理，不会携带另一目标的 API Key。两项必须一起指定，不能拼接不同项目的配置。
+- `--cms-endpoint`、`--cms-license-key` 和 `--cms-workspace` 仅用于 Trace，不参与 Multica SLS 目标或认证解析。继承的是 `--sls-project`，不是 CMS URL 中的 project。
+
+Endpoint 接受地域域名或 HTTP(S) origin，裸域名默认 HTTPS；不要填写完整 `/track` 路径或包含 project 前缀的域名。修改主配置的目标或凭证后重启 Pilot/独立 CLI；主进程监控输入 JSON 变更并重建采集器。凭证只在发送时使用，不写入 Multica 记录、checkpoint 或待发批次。
 
 ## 开关与连续检测
 
@@ -113,6 +119,8 @@ Prometheus counter 要处理相邻采样差分与进程重启；histogram bucket
 ```sh
 npx esbuild src/pipeline/input/multica/cli.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/multica-collector.cjs
 node dist/multica-collector.cjs --config /config/multica.json --state-dir /state
+# 指定安装器生成的主配置（默认读取 ~/.loongsuite-pilot/config.json 或 AGENT_DATA_COLLECTION_CONFIG）
+node dist/multica-collector.cjs --config /config/multica.json --pilot-config /config/pilot-config.json --state-dir /state
 # 单轮检查；任一采集源失败返回非零，未识别环境在 JSON 状态中显示
 node dist/multica-collector.cjs --config /config/multica.json --state-dir /state --once
 npm run typecheck
