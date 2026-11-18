@@ -231,6 +231,7 @@ describe('Grok Build watchdog target', () => {
       const poll = o.pollHookInstallSignal(signal);
       const stop = o.stop();
       await vi.advanceTimersByTimeAsync(0);
+      expect(oldWatchdog.stop).toHaveBeenCalledTimes(1);
       release();
       await Promise.all([poll, stop]);
       await vi.advanceTimersByTimeAsync(35_000);

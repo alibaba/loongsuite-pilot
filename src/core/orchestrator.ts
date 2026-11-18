@@ -180,7 +180,6 @@ export class Orchestrator extends EventEmitter {
   private hookInstallSignalMtime = 0;
   private hookInstallSignalEpoch = 0;
   private hookInstallSignalPoll: Promise<void> | null = null;
-  private stopping = false;
   private readonly relayedHookInstallAlarms = new Set<string>();
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
@@ -210,8 +209,6 @@ export class Orchestrator extends EventEmitter {
       logger.warn('already running');
       return;
     }
-
-    this.stopping = false;
 
     logger.info('starting orchestrator');
     this.emit('starting');
@@ -547,12 +544,12 @@ export class Orchestrator extends EventEmitter {
   }
 
   async stop(): Promise<void> {
-    if (!this.isRunning || this.stopping) return;
-    this.stopping = true;
+    if (!this.isRunning) return;
     logger.info('stopping orchestrator');
 
     // Cancel signal work before the first shutdown await. An old poll may be
     // waiting on deployment I/O and must never restart the stopped watchdog.
+    this.hookWatchdog?.stop();
     await this.stopHookInstallSignalWatch();
 
     await this.pipelineManager?.stop();
@@ -571,7 +568,6 @@ export class Orchestrator extends EventEmitter {
     this.runtimeWriter?.stop();
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
-    this.hookWatchdog?.stop();
     this.legacySlsFailedLogCleanupService?.stop();
     this.legacySlsFailedLogCleanupService = null;
     this.logRetentionService?.stop();
@@ -717,7 +713,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   private pollHookInstallSignal(signal: string, epoch = this.hookInstallSignalEpoch): Promise<void> {
-    if (this.stopping || epoch !== this.hookInstallSignalEpoch) return Promise.resolve();
+    if (epoch !== this.hookInstallSignalEpoch) return Promise.resolve();
     if (this.hookInstallSignalPoll) return this.hookInstallSignalPoll;
     const poll = this.handleHookInstallSignal(signal, epoch);
     this.hookInstallSignalPoll = poll;
@@ -727,7 +723,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   private async handleHookInstallSignal(signal: string, epoch: number): Promise<void> {
-    const cancelled = () => this.stopping || epoch !== this.hookInstallSignalEpoch;
+    const cancelled = () => epoch !== this.hookInstallSignalEpoch;
     let mtime = 0;
     try {
       mtime = fsSync.statSync(signal).mtimeMs;
