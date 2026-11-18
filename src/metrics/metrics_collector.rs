@@ -536,7 +536,9 @@ impl MetricsCollector {
         // writer validates the on-disk release and version pointers.
         let health = include_installation_health.then(|| self.collect_infra_health());
         let installation_field = |value: fn(&InfraHealthSnapshot) -> String| {
-            health.as_ref().map_or_else(|| "not-applicable".into(), value)
+            health
+                .as_ref()
+                .map_or_else(|| "not-applicable".into(), value)
         };
         let row = L1Metrics {
             version: self.version.clone(),
@@ -589,7 +591,9 @@ impl MetricsCollector {
             updater_pid_alive: installation_field(|health| health.updater_pid_alive.to_string()),
             node_bin_valid: "not-applicable".into(),
             runtime_bin_valid: installation_field(|health| health.runtime_bin_valid.to_string()),
-            current_version_valid: installation_field(|health| health.current_version_valid.to_string()),
+            current_version_valid: installation_field(|health| {
+                health.current_version_valid.to_string()
+            }),
             time: now / 1000,
         };
         #[cfg(not(target_os = "linux"))]
