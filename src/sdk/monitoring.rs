@@ -53,7 +53,7 @@ impl Monitoring {
         );
         options.auto_update_enabled = false;
         let mut metrics = MetricsCollector::from_options(options);
-        let identity = metrics.collect_l1(&DataflowSnapshot::default());
+        let identity = metrics.collect_sdk_l1(&DataflowSnapshot::default());
         *queue.identity.write().unwrap() =
             json!({"user_id":init.user_id,"ip":identity.ip,"ver":env!("CARGO_PKG_VERSION")});
         let mut options = MetricsWriterOptions::new(
@@ -131,7 +131,7 @@ impl Monitoring {
                 ..Default::default()
             },
         );
-        let mut l1 = serde_json::to_value(self.metrics.collect_l1(&flow)).expect("L1 metrics");
+        let mut l1 = serde_json::to_value(self.metrics.collect_sdk_l1(&flow)).expect("L1 metrics");
         #[cfg(target_os = "linux")]
         {
             for (key, path) in [("cpu", "/proc/self/stat"), ("mem", "/proc/self/status")] {
@@ -176,16 +176,6 @@ impl Monitoring {
         }
         for alarm in self.resources.drain_resource_alarms() {
             queue.retain_alarm(serde_json::to_value(alarm).expect("resource alarm"));
-        }
-        for key in [
-            "updater_pid_alive",
-            "runtime_bin_valid",
-            "current_version_valid",
-            "rollback_available",
-            "version_count",
-            "init_type",
-        ] {
-            l1[key] = json!("not-applicable");
         }
         l1["event.name"] = json!("pilot.metrics.l1");
         l1["metrics_scope"] = json!("host_process");
