@@ -59,6 +59,7 @@ describe('Multica log bridge activation lease', () => {
     const completed = new Promise<void>((resolve, reject) => { child.once('exit', () => resolve()); child.once('error', reject); });
     try {
       if (state === 'unscoped') {
+        // Wait for the child to start even under parallel test-worker load.
         await vi.waitFor(() => expect(errors).toContain('NAMESPACE and POD_LABEL_SELECTOR are required'), {timeout: 3000});
       } else await delay(250);
       expect(child.exitCode).toBe(null);

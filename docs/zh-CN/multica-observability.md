@@ -24,8 +24,8 @@
   "flushers": [{
     "Type": "flusher_sls",
     "Endpoint": "YOUR_REGION.log.aliyuncs.com",
-    "Project": "YOUR_PROJECT",
-    "Logstore": "YOUR_LOGSTORE"
+    "Project": "YOUR_AGENTSPACE_SLS_PROJECT",
+    "Logstore": "multica-logs"
   }]
 }
 ```
@@ -35,6 +35,8 @@
 `MaxLogBytes`（默认 1 MiB）必须严格大于 `MaxLineBytes`（默认 16 KiB），为完整日志行及其换行符留出空间；不满足时拒绝加载配置。超过单行上限的日志会分块跳过，后续正常行继续采集。
 
 SLS logstore 须开启 webtracking；该传输方式无需配置云 AK。Endpoint 接受地域域名或 HTTP(S) 地址，裸域名默认 HTTPS；不要填写完整 `/track` 路径或已包含 project 前缀的域名。
+
+目标以用户下发的本 pipeline `flushers[0]` 为准：`Endpoint`、`Project` 必填，`Logstore` 省略时仅对 Multica 默认使用 `multica-logs`，也可显式指定其他 logstore。填写当前 AgentSpace 对应的 SLS project，不固定为示例项目；不会读取或猜测其他 SLS/CMS 目标，也不会将 CMS LicenseKey 当作 SLS 凭证。主进程监控输入 JSON 变更并重建采集器；独立 CLI 修改配置后需要重启。
 
 ## 开关与连续检测
 
@@ -62,7 +64,7 @@ export LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE=off  # 关闭
 - **任务与业务状态**：`/api/issues`、`/api/issue-statuses`、`/api/agents`、`/api/runtimes`、`/api/agent-task-snapshot`、`/api/agents/{id}/tasks?include_usage=true`，提供状态、关联 ID、时间、重试、错误分类和已有用量。
 - **自动化与汇总**：`/api/autopilots`、`/{id}/runs`、`/api/autopilots/usage`、`/api/dashboard/*`、`/api/agent-activity-30d`、`/api/agent-run-counts`，提供触发结果、配额及按天/Agent 的用量、耗时和失败汇总。
 - **指标与本机健康**：已有 `/metrics` 的 `multica_*`、`go_*`、`process_*`；daemon `/health` 的活跃任务、资源等待和终态回传积压。需显式启用 Multica 的 metrics listener，并保证配置地址可达；远端不能直接访问 daemon 的 loopback 地址。
-- **日志与文件**：`LogFiles` 读取已知事件及白名单诊断字段；`StatFiles` 只读取大小、修改时间等元数据，不读取文件正文。不展开 glob，不递归扫描。
+- **日志与文件**：`LogFiles` 读取已知事件及白名单诊断字段，保留脱敏后的 `log_message`、`error_message`、`error_code`、`error_stack`、`stderr`、`exit_code`；诊断文本默认最多 4 KiB，堆栈最多 8 KiB，截断通过 `log_content_truncated` 标明；`StatFiles` 只读取大小、修改时间等元数据，不读取文件正文。不展开 glob，不递归扫描。
 
 业务 API 均使用 GET，须显式配置工作区 UUID。凭证通过 `TokenFile` 或 `TokenEnv` 提供，默认环境变量是 `MULTICA_TOKEN`；每次请求重新读取，便于轮换。账号需要相应工作区的读取权限，403 作为采集缺口记录。Metrics/health 不携带业务 Token；源 URL 不接受内嵌凭证、查询参数、fragment 或重定向。
 
@@ -72,7 +74,7 @@ export LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE=off  # 关闭
 
 记录采用 `schema_version=multica.v1`，以 instance/workspace/entity 和 task/issue/agent/runtime ID 关联。SLS 字段按字符串发送，数值分析需配置 long/double 索引；`observed_at` 表示采集时间，来源时间另存。
 
-每源先原子保存过滤后的批次到 `<stateDir>/<configName>.multica-pending/`，收到 SLS ACK 后再推进 checkpoint 并删除批次。重试沿用 event_id，分包部分成功时可能重复，查询需按 event_id 去重。StateDir 应持久化，不能由两个进程共用同一 configName/stateDir。
+每源先原子保存过滤后的批次到 `<stateDir>/<configName>.<destinationHash>.multica-pending/`，收到 SLS ACK 后再推进 checkpoint 并删除批次。checkpoint 与待发批次均按 Endpoint、Project、Logstore 隔离，切换目标从新状态开始，不将旧批次重放到新目标；改回原目标可继续其待发批次。旧版不含目标标识的状态文件保留在磁盘，但不会自动采用，升级后日志可能重新采集。重试沿用 event_id，分包部分成功时可能重复，查询需按 event_id 去重。StateDir 应持久化，不能由两个进程共用同一 configName/stateDir。
 
 默认超时 10 秒，每页 100 条、最多 10 页，单响应最多 4 MiB，每轮日志最多 1 MiB，单行最多 16 KiB。达到分页上限标记 `truncated=true`，响应超限记录 `response_too_large`；各源独立处理错误。轮询串行执行，不重叠。超长日志行会丢弃并计数，轮转时不保证补采已移走文件的未读尾部。
 
@@ -80,7 +82,31 @@ export LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE=off  # 关闭
 
 Prometheus counter 要处理相邻采样差分与进程重启；histogram bucket 是累计值。`multica_llm_request_total` 是用量上报计数，不能当作模型网络请求数。全局指标不能反推出工作区归属；费用是来源上报值，不代表账单。
 
-本采集器不自动抓取 pprof/trace；外部 CLI 内部未暴露的 Token 刷新或限流过程不可见。文件大小和请求耗时的相关性不能证明具体调用栈原因。
+本采集器不抓取 trace；外部 CLI 内部未暴露的 Token 刷新或限流过程不可见。文件大小和请求耗时的相关性不能证明具体调用栈原因，可使用下述 pprof 火焰图进一步定位。
+
+## 可选 pprof 火焰图
+
+默认不采 pprof。要采集已有 Go pprof 端点，在 `input_multica` 中显式增加：
+
+```json
+{
+  "PprofBaseUrl": "http://127.0.0.1:6060",
+  "PprofTypes": ["cpu", "allocs"],
+  "PprofIntervalSeconds": 900,
+  "PprofCpuSeconds": 30,
+  "PprofAllocsSeconds": 10,
+  "PprofSourceVersion": "DEPLOYED_MULTICA_VERSION",
+  "PprofPodName": "BACKEND_POD_NAME"
+}
+```
+
+`PprofBaseUrl` 只接受 origin；采集器请求 `/debug/pprof/profile?seconds=30` 和 `/debug/pprof/allocs?seconds=10`，不向该端点发送业务 Token。此能力同样受默认 off、Multica 特征检测和连续失败停采控制；单独设置 pprof 地址不足以激活采集。端点必须已由 Multica 暴露，采集器不会修改服务配置。
+
+每种 profile 默认 15 分钟一次，间隔可设 300–86400 秒；CPU 采样 1–60 秒，allocs 采样 1–30 秒。采样在常规业务采集后串行执行，采样当轮会增加约 40 秒耗时；不与另一采样轮重叠。失败后按 60/120/240/300 秒退避。端点有超时、压缩与解压后大小限制，默认各 16 MiB，可用 `PprofMaxBytes` 调低。只保留栈帧及权重，不上传 profile 的任意标签和注释；原始二进制不落盘。
+
+输出为 `pprof_profile_chunk`：每段最多 1800 ASCII 字节，按 `profile_id`、`profile_part_index` 拼接得到 Flamebearer JSON，可用于 SLS 火焰图。`profile_sha256` 校验完整性；查询应仅采用段数完整的 profile，并按 `profile_end_ms` 选择最新一次。`profile_total/profile_unit` 对 CPU 是采样次数，对 allocs 是采样窗口内估算分配字节；不代表存活内存或泄漏。`profile_metadata_source` 标明时间来自原生 pprof 或采集器时钟，版本和 Pod 由上述显式配置提供。
+
+成功送达 SLS 后持久化下次采样时间；发送失败复用已有批次，不重复抓取。同样需要持久化 StateDir。pprof 没有样本时如实报告零权重，不生成虚假栈；旧版端点不支持增量 allocs、没有采样时长时报告 `pprof_missing_interval`。启用后需要为 `profile_*`、`source_version`、`pod_name` 配置 SLS 字段索引。
 
 ## 独立运行与验证
 

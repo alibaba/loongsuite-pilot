@@ -4,15 +4,20 @@ import { StateStore } from '../../../checkpoints/state-store.js';
 import { postWebtracking } from '../../../flushers/sls-transport.js';
 import { writeJsonFile } from '../../../utils/fs-utils.js';
 import { createLogger } from '../../../utils/logger.js';
-import type { FilePipelineOptions, Pipeline } from '../../types.js';
+import type { FilePipelineOptions, Pipeline, PipelineSlsFlusherConfig } from '../../types.js';
+import { resolveMulticaDestination, type MulticaSlsFlusherConfig } from './destination.js';
 import { errorKind } from './http.js';
 import { MulticaActivationGate, type MulticaActivationResult, type MulticaCollectionMode } from './activation.js';
 import { digest, envelope } from './records.js';
+import { collectPprof } from './pprof.js';
 import { collectApi, collectDaemonHealth, collectFileStat, collectLog, collectMetrics, type ApiSource } from './sources.js';
 import { validateMulticaConfig, type CollectionResult, type MulticaInputConfig, type MulticaRecord, type SourceCheckpoint } from './types.js';
 
 const logger = createLogger('MulticaPipeline');
 interface PendingBatch { records: MulticaRecord[]; checkpoint?: SourceCheckpoint }
+type MulticaPipelineOptions = Omit<FilePipelineOptions, 'config'> & {
+  config: Omit<FilePipelineOptions['config'], 'flushers'> & { flushers: MulticaSlsFlusherConfig[] };
+};
 export interface CollectionSummary {
   successfulSources: number;
   failedSources: number;
@@ -27,6 +32,7 @@ export class MulticaPipeline implements Pipeline {
   private readonly input: MulticaInputConfig;
   private readonly state: StateStore;
   private readonly spoolDir: string;
+  private readonly destination: PipelineSlsFlusherConfig;
   private timer?: ReturnType<typeof setTimeout>;
   private running = false;
   private loaded = false;
@@ -34,18 +40,23 @@ export class MulticaPipeline implements Pipeline {
   private background?: Promise<void>;
   private readonly activation: MulticaActivationGate;
   private lastActivation?: string;
+  private readonly pendingProfiles = new Map<string, CollectionResult>();
+  private readonly pprofFailures = new Map<string, {count: number; retryAt: number}>();
 
-  constructor(private readonly opts: FilePipelineOptions, defaultMode?: MulticaCollectionMode,
+  constructor(private readonly opts: MulticaPipelineOptions, defaultMode?: MulticaCollectionMode,
     private readonly onActivation?: (state: MulticaActivationResult) => Promise<void>) {
     this.input = opts.config.inputs[0] as MulticaInputConfig;
     if (this.input.Type !== 'input_multica') throw new Error('Expected input_multica');
     validateMulticaConfig(this.input);
     this.activation = new MulticaActivationGate(this.input, defaultMode);
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(opts.config.configName)) throw new Error('Invalid configName');
-    const flusher = opts.config.flushers[0];
-    if (flusher?.Type !== 'flusher_sls' || !flusher.Endpoint || !flusher.Project || !flusher.Logstore) throw new Error('Expected SLS flusher');
-    this.state = new StateStore(path.join(opts.stateDir, `${opts.config.configName}.multica.json`));
-    this.spoolDir = path.join(opts.stateDir, `${opts.config.configName}.multica-pending`);
+    this.destination = resolveMulticaDestination(opts.config.flushers[0]);
+    const destinationId = digest(JSON.stringify([this.destination.Endpoint, this.destination.Project, this.destination.Logstore]));
+    // A configuration change must not replay another destination's pending data
+    // or reuse its log offsets. Legacy unscoped state is deliberately not adopted.
+    const stateName = `${opts.config.configName}.${destinationId}.multica`;
+    this.state = new StateStore(path.join(opts.stateDir, `${stateName}.json`));
+    this.spoolDir = path.join(opts.stateDir, `${stateName}-pending`);
   }
 
   async start(): Promise<void> {
@@ -97,6 +108,7 @@ export class MulticaPipeline implements Pipeline {
     const run = async (name: string, collect: () => Promise<CollectionResult>) => {
       const success = await this.source(name, collect);
       summary[success ? 'successfulSources' : 'failedSources']++;
+      return success;
     };
     for (const url of this.input.MetricsUrls ?? []) await run(`metrics:${url}`, () => collectMetrics(this.input, url));
     for (const url of this.input.DaemonHealthUrls ?? []) await run(`health:${url}`, () => collectDaemonHealth(this.input, url));
@@ -131,6 +143,31 @@ export class MulticaPipeline implements Pipeline {
         await api({name: report, path: `/api/${report}`, recordType: 'usage_snapshot', extra: {report_type: report}});
       }
     }
+    // Profiling is explicitly configured and much less frequent than business
+    // polling. Capture after normal sources; ACKed checkpoints survive restart.
+    // Failed delivery replays the existing profile batch without taking it again.
+    if (this.input.PprofBaseUrl) for (const kind of this.input.PprofTypes ?? ['cpu', 'allocs']) {
+      const name = `pprof:${this.input.PprofBaseUrl}:${kind}`;
+      if ((this.checkpoint(name).pprofNextCaptureAtMs ?? 0) > Date.now()
+        || (this.pprofFailures.get(name)?.retryAt ?? 0) > Date.now()) continue;
+      const delivered = await run(name, async () => {
+        // If spooling fails, retry the same bounded result instead of profiling
+        // the application again. Durable pending data still takes precedence.
+        const pending = this.pendingProfiles.get(name);
+        if (pending) return pending;
+        try {
+          const profile = await collectPprof(this.input, kind);
+          this.pendingProfiles.set(name, profile);
+          this.pprofFailures.delete(name);
+          return profile;
+        } catch (error) {
+          const count = Math.min((this.pprofFailures.get(name)?.count ?? 0) + 1, 4);
+          this.pprofFailures.set(name, {count, retryAt: Date.now() + Math.min(300_000, 60_000 * 2 ** (count - 1))});
+          throw error;
+        }
+      });
+      if (delivered) this.pendingProfiles.delete(name);
+    }
     logger.info('collection cycle complete', {...summary});
     return summary;
   }
@@ -141,9 +178,8 @@ export class MulticaPipeline implements Pipeline {
 
   private async send(records: MulticaRecord[]): Promise<void> {
     if (!records.length) return;
-    const flusher = this.opts.config.flushers[0];
-    const endpoint = /^https?:\/\//.test(flusher.Endpoint) ? flusher.Endpoint : `https://${flusher.Endpoint}`;
-    await postWebtracking({endpoint, project: flusher.Project, logstore: flusher.Logstore}, records,
+    const flusher = this.destination;
+    await postWebtracking({endpoint: flusher.Endpoint, project: flusher.Project, logstore: flusher.Logstore}, records,
       {topic: 'multica', source: this.input.Instance ?? 'multica', tags: {pipeline_type: 'multica', schema_version: 'multica.v1'}});
   }
 

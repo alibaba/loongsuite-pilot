@@ -105,8 +105,11 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
       expect(output).toContain('TimeoutError');
     });
     const stateDir = path.join(dataDir, 'state', 'pipeline');
-    expect(await readdir(path.join(stateDir, 'lab.multica-pending'))).toHaveLength(1);
-    expect(await readFile(path.join(stateDir, 'lab.multica.json'), 'utf8').catch(() => '')).toBe('');
+    const pendingName = (await readdir(stateDir)).find(name => name.endsWith('.multica-pending'))!;
+    const pendingDir = path.join(stateDir, pendingName);
+    const stateFile = path.join(stateDir, pendingName.replace(/-pending$/, '.json'));
+    expect(await readdir(pendingDir)).toHaveLength(1);
+    expect(await readFile(stateFile, 'utf8').catch(() => '')).toBe('');
     child.kill('SIGTERM');
     await new Promise(resolve => setTimeout(resolve, 150));
     expect(child.exitCode, output).toBeNull();
@@ -115,9 +118,9 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
     for (const response of held) if (!response.destroyed) response.end('{}');
     await vi.waitFor(() => expect(child!.exitCode, output).toBe(0), {timeout: 5000});
     expect(await exited, output).toEqual({code: 0, signal: null});
-    expect((await json(path.join(stateDir, 'lab.multica.json')))[`log:${log}`].extra.checkpoint.offset)
+    expect((await json(stateFile))[`log:${log}`].extra.checkpoint.offset)
       .toBe(Buffer.byteLength(content));
-    expect(await readdir(path.join(stateDir, 'lab.multica-pending'))).toEqual([]);
+    expect(await readdir(pendingDir)).toEqual([]);
     await expect(readFile(runtimePath)).rejects.toMatchObject({code: 'ENOENT'});
     await expect(fetch(`http://127.0.0.1:${interceptor.daemon_port}/health`, {signal: AbortSignal.timeout(1000)})).rejects.toThrow();
   } finally {

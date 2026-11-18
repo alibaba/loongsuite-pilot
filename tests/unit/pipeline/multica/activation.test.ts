@@ -245,7 +245,7 @@ describe('Multica collection activation', () => {
     const collector = pipeline({...on, MetricsUrls: [`${url}/metrics`], DetectionFailureThreshold: 1});
     vi.mocked(postWebtracking).mockRejectedValue(new Error('offline'));
     expect(await collector.collectOnce()).toMatchObject({collectionEnabled: true, failedSources: 1});
-    const pendingDir = path.join(dir, 'activation.multica-pending');
+    const pendingDir = path.join(dir, (await readdir(dir)).find(name => name.endsWith('.multica-pending'))!);
     const pendingFiles = await readdir(pendingDir);
     expect(pendingFiles).toHaveLength(1);
     const pending = await readFile(path.join(pendingDir, pendingFiles[0]), 'utf8');

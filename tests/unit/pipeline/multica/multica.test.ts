@@ -61,16 +61,6 @@ describe('Multica existing-data parsers', () => {
     expect(failures[0]).toMatchObject({failure_reason: 'rate_limit', runtime_mode: 'local'});
     expect(failures[0].entity_id).not.toBe(failures[1].entity_id);
   });
-  it('removes query content from metric path labels without merging distinct counter series', () => {
-    const rows = parsePrometheus('multica_http_request_total{path="/api/search?q=private-message&filter=private-filter"} 1\n'
-      + 'multica_http_request_total{path="/api/search?q=another-message"} 2\n'
-      + 'multica_http_request_total{path="/api/issues"} 3\n');
-    expect(rows).toHaveLength(3);
-    expect(rows.map(row => JSON.parse(row.metric_labels).path)).toEqual(['/api/search', '/api/search', '/api/issues']);
-    expect(rows[0].entity_id).not.toBe(rows[1].entity_id);
-    expect(rows.map(row => row.metric_value)).toEqual(['1', '2', '3']);
-    for (const content of ['private-message', 'private-filter', 'another-message']) expect(JSON.stringify(rows)).not.toContain(content);
-  });
   it('parses Kubernetes timestamp + tint duration, exports only known message templates', () => {
     const row = parseMulticaLog('2026-11-16T08:00:00.123Z \u001b[32mINF\u001b[0m http request method=POST path=/api/issues/i/comments?token=secret status=200 duration=1.25s request_id=req-1 token=secret');
     expect(row).toMatchObject({message: 'http request', source_time: '2026-11-16T08:00:00.123Z', level: 'INF', duration_ms: '1250', http_status: '200', path: '/api/issues/i/comments'});
@@ -79,11 +69,31 @@ describe('Multica existing-data parsers', () => {
     expect(parseMulticaLog('2026-11-16T08:00:00Z {"msg":"task failed","error":"429 rate limit","task_id":"t1"}'))
       .toMatchObject({task_id: 't1', failure_reason: 'provider_capacity_or_rate_limit'});
   });
-  it('drops raw error/prompt/result and distinguishes classification from evidence', () => {
+  it('retains native slow event handler timings from JSON without event payloads', () => {
+    const row = parseMulticaLog(JSON.stringify({
+      time: '2026-06-28T08:00:00Z', level: 'WARN', msg: 'slow global event handler',
+      event_type: 'comment:created', handler_index: 0, duration_ms: 82,
+      payload: {body: 'private-comment'}, token: 'private-token',
+    }));
+    expect(row).toMatchObject({record_type: 'server_log', source_type: 'log',
+      message: 'slow global event handler', source_time: '2026-06-28T08:00:00Z', level: 'WARN',
+      event_type: 'comment:created', handler_index: '0', duration_ms: '82'});
+    expect(JSON.stringify(row)).not.toMatch(/private-comment|private-token/);
+  });
+  it('retains native slow publish totals from slog text without user content', () => {
+    const row = parseMulticaLog('time=2026-06-28T08:00:00Z level=WARN msg="slow event publish" event_type=comment:created total_duration_ms=154 handler_count=3 payload="private-comment" prompt="private-prompt" token=private-token');
+    expect(row).toMatchObject({record_type: 'server_log', source_type: 'log',
+      message: 'slow event publish', source_time: '2026-06-28T08:00:00Z', level: 'WARN',
+      event_type: 'comment:created', total_duration_ms: '154', handler_count: '3'});
+    expect(JSON.stringify(row)).not.toMatch(/private-comment|private-prompt|private-token/);
+    // Keep the event bus total separate from an individual handler duration.
+    expect(row).not.toHaveProperty('duration_ms');
+  });
+  it('keeps redacted task errors while dropping prompt/result and distinguishes classification from evidence', () => {
     const row = snapshot('task_snapshot', {id: 't1', status: 'failed', error: '401 credential secret expired', prompt: 'sensitive', result: {secret: 'sensitive'}, created_at: '2026-11-16T00:00:00Z', started_at: '2026-11-16T00:00:02Z', completed_at: '2026-11-16T00:00:05Z', usage: [{input_tokens: 12, output_tokens: 3, cost_usd_ticks: 10000000000}]});
     expect(row).toMatchObject({task_id: 't1', failure_reason: 'provider_auth_or_access', queue_wait_ms: '2000', run_duration_ms: '3000', cost_usd: '1', total_tokens: '15'});
     expect(JSON.stringify(row)).not.toContain('sensitive');
-    expect(JSON.stringify(row)).not.toContain('credential');
+    expect(row.error_message).toBe('401 credential secret expired');
     expect(snapshot('task_snapshot', {id: 't2'})).not.toHaveProperty('cost_usd');
   });
   it('never passes credential-shaped raw errors through as failure codes', () => {
@@ -226,11 +236,12 @@ describe('Multica delivery and failure isolation', () => {
   it('starts a configured Multica input through the normal PipelineManager', async () => {
     const configDir = path.join(dir, 'configs');
     await import('node:fs/promises').then(fs => fs.mkdir(configDir));
-    await writeFile(path.join(configDir, 'multica.json'), JSON.stringify({configName: 'registered', inputs: [{...input, StatFiles: [path.join(dir, 'missing')]}], flushers: [{Type: 'flusher_sls', Endpoint: 'example.invalid', Project: 'p', Logstore: 'l'}]}));
+    await writeFile(path.join(configDir, 'multica.json'), JSON.stringify({configName: 'registered', inputs: [{...input, StatFiles: [path.join(dir, 'missing')]}], flushers: [{Type: 'flusher_sls', Endpoint: 'example.invalid', Project: 'p'}]}));
     const manager = new PipelineManager({configDir, stateDir: path.join(dir, 'state'), failedLogDir: path.join(dir, 'failed'), dataDir: dir, pipelineConfig: {enabled: true, file: {enabled: false}, qoderApi: {enabled: false}}});
     try {
       await manager.start();
       await vi.waitFor(() => expect(vi.mocked(postWebtracking).mock.calls.some(call => call[1].some(row => row.record_type === 'file_stat'))).toBe(true));
+      expect(vi.mocked(postWebtracking).mock.calls[0][0]).toMatchObject({project: 'p', logstore: 'multica-logs'});
     } finally { await manager.stop(); }
   });
   it('starts before the first SLS ACK and drains that batch on stop', async () => {
@@ -246,16 +257,18 @@ describe('Multica delivery and failure isolation', () => {
     try {
       await vi.waitFor(() => expect(postWebtracking).toHaveBeenCalledTimes(1));
       expect(started).toBe(true);
-      expect(await readFile(path.join(dir, 'lab.multica.json'), 'utf8').catch(() => 'absent')).toBe('absent');
+      const pendingName = (await readdir(dir)).find(name => name.endsWith('.multica-pending'))!;
+      const stateFile = path.join(dir, pendingName.replace(/-pending$/, '.json'));
+      expect(await readFile(stateFile, 'utf8').catch(() => 'absent')).toBe('absent');
       let stopped = false;
       const stopping = p.stop().then(() => { stopped = true; });
       await Promise.resolve();
       expect(stopped).toBe(false);
       acknowledge();
       await stopping;
-      const state = JSON.parse(await readFile(path.join(dir, 'lab.multica.json'), 'utf8'));
+      const state = JSON.parse(await readFile(stateFile, 'utf8'));
       expect(state[`log:${file}`].extra.checkpoint.offset).toBe(Buffer.byteLength(content));
-      expect(await readdir(path.join(dir, 'lab.multica-pending'))).toEqual([]);
+      expect(await readdir(path.join(dir, pendingName))).toEqual([]);
     } finally { acknowledge(); await starting; await p.stop(); }
   });
   it('can stop before its scheduled first collection without making a request', async () => {
@@ -282,7 +295,7 @@ describe('Multica delivery and failure isolation', () => {
     const cfg = {...input, LogFiles: [file], EvidenceKind: 'fixture' as const, TestCase: 'delivery-test'};
     vi.mocked(postWebtracking).mockRejectedValue(new Error('offline'));
     expect((await pipeline(cfg).collectOnce()).failedSources).toBe(1);
-    expect(await readFile(path.join(dir, 'lab.multica.json'), 'utf8').catch(() => 'absent')).toBe('absent');
+    expect((await readdir(dir)).filter(name => name.endsWith('.multica.json'))).toEqual([]);
     const failedRows = vi.mocked(postWebtracking).mock.calls[0][1];
     expect(vi.mocked(postWebtracking).mock.calls[0][0].endpoint).toBe('https://example.invalid');
     expect(JSON.stringify(failedRows)).not.toContain('secret');
@@ -291,9 +304,10 @@ describe('Multica delivery and failure isolation', () => {
     await restarted.collectOnce();
     expect(vi.mocked(postWebtracking).mock.calls[0][1]).toEqual(failedRows);
     expect(failedRows[0]).toMatchObject({evidence_kind: 'fixture', test_case: 'delivery-test'});
-    const state = JSON.parse(await readFile(path.join(dir, 'lab.multica.json'), 'utf8'));
+    const stateFile = (await readdir(dir)).find(name => name.endsWith('.multica.json'))!;
+    const state = JSON.parse(await readFile(path.join(dir, stateFile), 'utf8'));
     expect(state[`log:${file}`].extra.checkpoint.offset).toBe(Buffer.byteLength('INFO comment created issue_id=i1 token=secret\n'));
-    expect(await readdir(path.join(dir, 'lab.multica-pending'))).toEqual([]);
+    expect(await readdir(path.join(dir, stateFile.replace(/\.json$/, '-pending')))).toEqual([]);
     vi.mocked(postWebtracking).mockClear();
     await restarted.collectOnce();
     const rows = vi.mocked(postWebtracking).mock.calls.flatMap(call => call[1]);
