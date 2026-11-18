@@ -564,14 +564,19 @@ fn run_agent(
             },
         )
     } else if checkpoint_key == "codex-aborted-turn" {
-        let input = Arc::new(CodexAbortedTurnInput::new(CodexAbortedTurnInputOptions {
-            state_store: store.clone(),
-            session_dir: source_path("transcript"),
-            hook_state_dir: Some(host_path("state/codex/sessions", "sessions")),
-            diagnostic_dir: Some(host_path("logs/diagnostics", "diagnostics")),
-            hook_gap_grace_ms: None,
-            poll_interval_ms: Some(plan.poll_interval_ms),
-        }));
+        let input = Arc::new(CodexAbortedTurnInput::with_rollout_owner(
+            CodexAbortedTurnInputOptions {
+                state_store: store.clone(),
+                session_dir: source_path("transcript"),
+                hook_state_dir: Some(host_path("state/codex/sessions", "sessions")),
+                diagnostic_dir: Some(host_path("logs/diagnostics", "diagnostics")),
+                hook_gap_grace_ms: None,
+                poll_interval_ms: Some(plan.poll_interval_ms),
+            },
+            plan.pilot_host
+                .as_ref()
+                .is_some_and(|host| host.codex_rollout_owns_interrupted_turns),
+        ));
         if let Some(policy) = codex_workspace_policy {
             input.set_collector_workspace_policy(policy);
         }

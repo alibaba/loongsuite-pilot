@@ -49,6 +49,7 @@ pub struct CodexAbortedTurnBody {
     hook_state_dir: String,
     diagnostic_dir: String,
     hook_gap_grace_ms: f64,
+    rollout_owns_interrupted_turns: bool,
 }
 
 struct JsonLine {
@@ -71,6 +72,13 @@ impl CodexAbortedTurnInput {
     }
 
     pub fn new(opts: CodexAbortedTurnInputOptions) -> Self {
+        Self::with_rollout_owner(opts, false)
+    }
+
+    pub(crate) fn with_rollout_owner(
+        opts: CodexAbortedTurnInputOptions,
+        rollout_owns_interrupted_turns: bool,
+    ) -> Self {
         let poll = opts.poll_interval_ms.or(Some(DEFAULT_POLL_INTERVAL_MS));
         Self {
             inner: HostedInput::new(
@@ -85,6 +93,7 @@ impl CodexAbortedTurnInput {
                         .diagnostic_dir
                         .unwrap_or_else(|| resolve_home(DEFAULT_DIAGNOSTIC_DIR)),
                     hook_gap_grace_ms: opts.hook_gap_grace_ms.unwrap_or(DEFAULT_HOOK_GAP_GRACE_MS),
+                    rollout_owns_interrupted_turns,
                 },
                 "CodexAbortedTurnInput",
                 opts.state_store,
@@ -330,10 +339,11 @@ impl CodexAbortedTurnBody {
             {
                 continue;
             }
-            if !checkpoint
-                .emitted_aborted_turn_ids
-                .iter()
-                .any(|id| id == turn_id)
+            if !self.rollout_owns_interrupted_turns
+                && !checkpoint
+                    .emitted_aborted_turn_ids
+                    .iter()
+                    .any(|id| id == turn_id)
             {
                 let recovered = self
                     .recover_turn(file_path, file, size, &checkpoint, line.end_offset)

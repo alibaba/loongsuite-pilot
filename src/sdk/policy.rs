@@ -115,6 +115,8 @@ pub struct PilotHostState {
     pub capture_message_content: Option<bool>,
     #[serde(default)]
     pub exclude_workspaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub codex_rollout_owns_interrupted_turns: bool,
 }
 impl AgentPlan {
     pub(super) fn checkpoint_key(&self) -> &'static str {

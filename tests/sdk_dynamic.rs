@@ -1763,13 +1763,20 @@ fn codex_sdk_observe_delivery_retry_and_interception_share_the_native_library() 
     }}}},"sdk_options":{"delivery":{"flush_interval_ms":10},"hooks":{
         "local":{"mode":"custom","types":["cloudAccessKey"]}
     }}});
+    let infile = include_str!("fixtures/codex-subagent/rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
+    let (header, activity) = infile.split_once('\n').unwrap();
+    std::fs::write(&rollout, format!("{header}\n")).unwrap();
     let ctx = Box::<Context>::default();
     ctx.retry.store(true, Ordering::SeqCst);
     let mut host = Host::start(&data, policy.clone(), ctx);
     host.ready();
     until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
-    let infile = include_str!("fixtures/codex-subagent/rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
-    std::fs::write(&rollout, infile).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout)
+        .unwrap()
+        .write_all(activity.as_bytes())
+        .unwrap();
     let output = sdk_hook_command(
         &data,
         "observe",

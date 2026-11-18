@@ -3041,6 +3041,14 @@ impl Orchestrator {
         let disabled = serde_json::json!({"mode": "none"});
         let local = interceptor_config.map_or(disabled, |config| serde_json::json!(config));
         let config = self.config.agents.get("codex");
+        let rollout_owns_interrupted_turns = mode_enabled(
+            &self.bits.lock().expect("bits").modes,
+            "codex-transcript",
+            self.config
+                .listeners
+                .get("codex-transcript")
+                .is_none_or(|listener| listener.enabled),
+        );
 
         for (input, profile) in [
             ("codex-transcript", "codex_rollout_v1"),
@@ -3064,6 +3072,7 @@ impl Orchestrator {
                         .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS)},
                     "pilot_host": {
                         "data_dir": self.data_dir,
+                        "codex_rollout_owns_interrupted_turns": input == "codex-aborted-turn" && rollout_owns_interrupted_turns,
                         "capture_message_content": config.and_then(|agent| agent.capture_message_content),
                         "exclude_workspaces": self.config.privacy.as_ref()
                             .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
