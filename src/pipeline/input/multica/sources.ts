@@ -1,7 +1,7 @@
 import { open, stat } from 'node:fs/promises';
 import { fetchBounded, SourceError } from './http.js';
 import { digest, object, safeScalar, selectFields, snapshot } from './records.js';
-import { parseMulticaLog, parsePrometheus } from './parsers.js';
+import { parseMulticaLog, parsePrometheus, readBridgeFrame } from './parsers.js';
 import { entityLabels } from './entity-labels.js';
 import type { CollectionResult, MulticaInputConfig, MulticaRecord, SourceCheckpoint } from './types.js';
 
@@ -105,35 +105,44 @@ export async function collectLog(input: MulticaInputConfig, file: string, checkp
       || info.size < (checkpoint.offset ?? 0) || (checkpoint.signatureSize === prefix.length && checkpoint.signature !== signature));
     const offset = rotated ? 0 : checkpoint.offset ?? 0;
     let discardPartial = rotated ? false : checkpoint.discardPartial ?? false;
+    let logFrame = rotated ? undefined : checkpoint.logFrame;
     const buffer = Buffer.alloc(Math.min(maxLogBytes, Math.max(0, info.size - offset)));
     const {bytesRead} = await handle.read(buffer, 0, buffer.length, offset);
     const content = buffer.subarray(0, bytesRead);
     const records: MulticaRecord[] = [];
     let begin = 0;
     let skipped = 0;
-    for (let end = content.indexOf(10); end >= 0; end = content.indexOf(10, begin)) {
-      if (!discardPartial && end - begin <= maxLine) {
-        const line = content.subarray(begin, end).toString('utf8');
+    while (begin < content.length) {
+      const end = content.indexOf(10, begin);
+      const complete = end >= 0;
+      const part = content.subarray(begin, complete ? end : content.length);
+      if (!logFrame && !discardPartial) {
+        const frame = readBridgeFrame(part, complete);
+        if (frame === null) break;
+        // Count only the original source line against MaxLineBytes. Saving the
+        // frame at a read boundary allows a full-size line to fit next poll.
+        if (frame) { logFrame = frame; begin += frame.length; continue; }
+      }
+      if (!complete && !discardPartial && part.length <= maxLine) break;
+      if (complete && !discardPartial && part.length <= maxLine) {
+        const line = (logFrame ?? '') + part.toString('utf8');
         const row = parseMulticaLog(line);
         if (row) {
           row.file_path = file;
-          row.entity_id = `${info.dev}:${info.ino}:${offset + begin}`;
-          row.log_identity = `${row.entity_id}:${digest(line)}`;
+          row.entity_id = row.log_event_id ?? `${info.dev}:${info.ino}:${offset + begin}`;
+          row.log_identity = row.log_event_id ?? `${row.entity_id}:${digest(line)}`;
           records.push(row);
         }
       } else skipped++;
-      discardPartial = false;
-      begin = end + 1;
-    }
-    if (content.length - begin > maxLine || discardPartial) {
-      begin = content.length;
-      discardPartial = true;
-      skipped++;
+      logFrame = undefined;
+      discardPartial = !complete;
+      begin = complete ? end + 1 : content.length;
     }
     if (skipped || rotated) records.push({record_type: 'collection_status', source_type: 'collector',
       success: 'true', error_kind: rotated ? 'log_rotation_detected' : 'oversized_log_line_skipped',
       skipped_line_count: String(skipped), file_path: file, entity_id: file});
     return {records, truncated: offset + begin < info.size, checkpoint: {offset: offset + begin,
-      inode: info.ino, dev: info.dev, signature, signatureSize: prefix.length, discardPartial}};
+      inode: info.ino, dev: info.dev, signature, signatureSize: prefix.length, discardPartial,
+      ...(logFrame ? {logFrame} : {})}};
   } finally { await handle.close(); }
 }

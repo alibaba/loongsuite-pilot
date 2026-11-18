@@ -133,7 +133,8 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `gen_ai.agent.invocation.id` | string | 委派事件 Required | 当前向外逻辑委派的稳定 ID；批量逐工作唯一。 |
 | `gen_ai.agent.parent.invocation.id` | string | 已确认接受委派的工作 Required | 当前事件/轮次所接受的上游委派 ID；不是子 session 的永久属性。 |
 | `gen_ai.agent.name` | string | Recommended | Agent 实例可读名称。 |
-| `gen_ai.provider.name` | string | Required | 模型 Provider 名称，见 [Provider Names](#provider-names)。 |
+| `gen_ai.provider.name` | string | Conditionally Required | 模型 Provider 名称；除下述明确标记的仅观察 Agent 轮次事件外均为必填。见 [Provider Names](#provider-names)。 |
+| `loongsuite.observation.scope` | string | Conditionally Required | `agent_turn` 表示来源只观察到 Agent 输入或轮次边界，不表示内部没有执行模型或工具。 |
 | `gen_ai.request.id` | string | Recommended | 客户端请求 ID，用于关联网关或 Provider 日志。 |
 | `gen_ai.request.model` | string | 可获取时 Conditionally Required | 客户端请求的模型。 |
 | `gen_ai.response.model` | string | Recommended | 实际用于响应的模型。 |
@@ -189,6 +190,13 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `workspace.current_root` | string | Recommended | Git 顶层目录，仅当工作目录是 git 仓库时推断得出。 |
 | `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
+
+只有同时满足以下条件的事件可以省略 `gen_ai.provider.name`：声明
+`loongsuite.observation.scope=agent_turn`，具有非空 `gen_ai.turn.id`，且事件为
+`agent.input` 或带 turn-start/turn-end 标记的 `other` 边界；事件中不能包含模型
+请求/响应、Token 用量、step、系统提示或工具字段。其他事件（包括模型和工具事件）
+仍要求非空 Provider。该范围只说明来源能观察到什么，不表示 Agent 内部没有调用模型或工具；
+此范围内的输入和输出消息是用户可见的 Agent 对话，不代表模型实际请求或响应的完整内容。
 
 Qoder 产品入口：旧 IDE 输出 `gen_ai.agent.type=qoder`，终端 CLI 输出 `qoder-cli`。CLI 格式 transcript 优先使用本轮原生用户记录的 `businessIdentity.product` 区分 `app`/`cli`，覆盖生命周期 Hook 不带产品字段的子 Agent；旧运行时兼容本轮 Hook 的 `parent_business_info.product=app` 标记。新版桌面端输出 `qoder-app`。OTLP Resource 的 `gen_ai.framework` 使用对应产品类型；新桌面端的 `gen_ai.agent.system=qoder-app`，现有 CLI、IDE 等 Qoder 入口仍为 `qoder`。产品标记仅属于本轮原生记录或 Hook 上下文，不跨 session 恢复沿用。桌面端复用 `agents.qoder` 配置和 CLI transcript/Token 补全路径，不需要新增 `agents.qoder-app` 配置。缺少或无法识别产品证据时保留原分类，不根据路径或进程名猜测。历史数据保留原 system 值，跨版本统计需结合 type/framework 区分入口。
 

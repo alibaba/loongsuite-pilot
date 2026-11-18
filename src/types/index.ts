@@ -8,6 +8,8 @@ export * from './events.js';
 export interface ListenerConfig {
   enabled: boolean;
   pollInterval: number;
+  /** Restrict the Qwen Work collaboration input to these conversation IDs. */
+  includeConversationIds?: string[];
   /** Read-only source log directory override for the doubao-work listener. */
   logDir?: string;
   /** Product source for the doubao-work listener; defaults to Doubao Work. */
@@ -419,7 +421,7 @@ export interface PipelineToggle {
   enabled: boolean;
   file: { enabled: boolean };
   qoderApi: { enabled: boolean };
-  multica?: { enabled: boolean; mode?: 'on' | 'off' };
+  multica?: { enabled: boolean; mode?: 'on' | 'off'; serviceNamePrefix?: string };
 }
 
 /** @deprecated Use PipelineToggle instead */

@@ -137,7 +137,8 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.agent.invocation.id` | string | Required on delegation events | Stable outgoing work ID, unique per delegated work item. |
 | `gen_ai.agent.parent.invocation.id` | string | Required on confirmed incoming work | Upstream delegation accepted by this event/turn, not a permanent session property. |
 | `gen_ai.agent.name` | string | Recommended | Human-readable agent instance name. |
-| `gen_ai.provider.name` | string | Required | Model provider name. See [Provider Names](#provider-names). |
+| `gen_ai.provider.name` | string | Conditionally Required | Model provider name. Required except for explicitly scoped Agent-only turn observations described below. See [Provider Names](#provider-names). |
+| `loongsuite.observation.scope` | string | Conditionally Required | `agent_turn` marks a source that observes only Agent input or turn boundaries; it does not assert that no model or tool executed. |
 | `gen_ai.request.id` | string | Recommended | Client-side request ID used to correlate with gateway or provider logs. |
 | `gen_ai.request.model` | string | Conditionally Required when available | Model requested by the client. |
 | `gen_ai.response.model` | string | Recommended | Actual model used for the response. |
@@ -192,6 +193,16 @@ Required levels follow OpenTelemetry wording:
 | `workspace.current_root` | string | Recommended | Git top-level directory, inferred when the working directory is a git repository. |
 | `workspace.path` | string | Recommended | Absolute working directory the agent ran in (process cwd), independent of git. Present even when the directory is not a git repository. |
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
+
+An event can omit `gen_ai.provider.name` only when it declares
+`loongsuite.observation.scope=agent_turn`, has a non-empty `gen_ai.turn.id`,
+and is either an `agent.input` or an `other` turn-start/turn-end boundary.
+It must not contain model request/response, token usage, step, system-instruction,
+or tool fields. Other events, including model and tool events, still require a
+non-empty provider. The scope limits what the source observed; it does not
+claim that the Agent did not use a model or tools internally. For this scope,
+input and output messages are the visible Agent conversation, not evidence of
+the exact messages sent to or returned by a model.
 
 Qoder product identity: the legacy IDE emits `gen_ai.agent.type=qoder`, and terminal CLI emits `qoder-cli`. For CLI-format transcripts, the owning native user prompt's `businessIdentity.product` determines whether the host is `app` or `cli`; this also covers sidechains whose lifecycle Hooks omit product metadata. Older runtimes fall back to the current Turn's Hook `parent_business_info.product=app` marker. App events use `qoder-app`. The OTLP Resource uses the product type as `gen_ai.framework`; the new desktop App uses `gen_ai.agent.system=qoder-app`, while existing CLI/IDE variants retain `qoder`. Product identity is not cached across resumed Turns. The App reuses `agents.qoder` configuration and CLI transcript/token enrichment. Missing or unrecognized product evidence retains the original classification; paths and process names are not used to guess a product. Historical records retain their original system value, so cross-version queries should also inspect type/framework.
 

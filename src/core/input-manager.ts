@@ -168,7 +168,7 @@ export class InputManager extends EventEmitter {
     }
     input.setWorkspacePolicy(this.workspacePolicy);
     this.inputs.set(input.id, input);
-    if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes) {
+    if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes || input.id === 'qwen-work-cn-collaboration') {
       this.entryAbortControllers.set(input.id, new AbortController());
     }
     this.counters.set(input.id, {
@@ -205,7 +205,14 @@ export class InputManager extends EventEmitter {
       const handling = previous
         .catch(() => undefined)
         .then(() => this.handleEntries(input.id, entries));
-      if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes) {
+      if (input.id === 'qwen-work-cn-collaboration') {
+        const controller = this.entryAbortControllers.get(input.id);
+        const retained = handling.catch(error => {
+          if (!controller?.signal.aborted) throw error;
+          (input as BaseInput & { restoreAbortedDelivery(): void }).restoreAbortedDelivery();
+        });
+        input.holdCheckpointUntil(retained);
+      } else if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes) {
         input.holdCheckpointUntil(handling);
       }
       const next = handling.catch(err => {
@@ -537,6 +544,7 @@ export class InputManager extends EventEmitter {
         `dropped ${entries.length} entries from ${inputId}: no flusher`,
         { input_name: inputId },
       );
+      if (inputId === 'qwen-work-cn-collaboration') throw new Error('no flusher for collaboration input');
       return;
     }
 
@@ -545,11 +553,19 @@ export class InputManager extends EventEmitter {
     try {
       const deliver = this.flusher.createBatchDelivery(entries, logicalBytes, signal);
       let quotaAlarmed = false;
+      let collaborationRetryMs = 1000;
       while (true) {
         try {
           await deliver();
           break;
         } catch (error) {
+          if (inputId === 'qwen-work-cn-collaboration' && !signal?.aborted) {
+            // Keep the source checkpoint behind this same fan-out delivery.
+            // Its already-accepted destinations are not sent the batch again.
+            await delay(collaborationRetryMs, undefined, signal ? { signal } : undefined);
+            collaborationRetryMs = Math.min(collaborationRetryMs * 2, 30_000);
+            continue;
+          }
           const quota = (error as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
           if (!quota || signal?.aborted) throw error;
           if (!quotaAlarmed) {
@@ -566,6 +582,7 @@ export class InputManager extends EventEmitter {
       if (counter) counter.outFailed += entries.length;
       if (signal?.aborted) throw err;
       logger.error('dispatch failed', { count: entries.length, error: String(err) });
+      if (inputId === 'qwen-work-cn-collaboration') throw err;
       if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes((err as Error)?.name)) {
         const quota = (err as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
         this.alarmManager?.record(quota ? 'FLUSH_QUOTA_ALARM' : 'FLUSH_SEND_ALARM', '3',

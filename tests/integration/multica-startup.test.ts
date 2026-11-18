@@ -14,7 +14,7 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
   // Keep external package resolution in the repository while isolating all runtime state.
   const bundleDir = await mkdtemp(path.join(repo, 'node_modules', '.multica-startup-'));
   const held: ServerResponse[] = [];
-  let posts = 0;
+  const posts: Array<{__source__: string; __logs__: Record<string, string>[]}> = [];
   let release = false;
   let child: ChildProcess | undefined;
   let output = '';
@@ -22,10 +22,13 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
     if (req.method === 'GET') {
       res.end('multica_http_requests_total 1\n');
     } else {
-      posts++;
-      req.resume();
-      if (release) res.end('{}');
-      else held.push(res);
+      const chunks: Buffer[] = [];
+      req.on('data', chunk => chunks.push(chunk));
+      req.on('end', () => {
+        posts.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        if (release) res.end('{}');
+        else held.push(res);
+      });
     }
   });
   const json = async (file: string) => JSON.parse(await readFile(file, 'utf8'));
@@ -46,11 +49,12 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
       .filter(name => name.endsWith('.json')).map(name => [name.slice(0, -5), {enabled: false}]));
     const configFile = path.join(root, 'config.json');
     await writeFile(configFile, JSON.stringify({enabled: true, dataDir, agents,
+      collectTrace: false, serviceNamePrefix: 'installed-pilot-env',
       enableStatusBarApp: false, dashboard: {enabled: false}, autoUpdate: {enabled: false}, interceptor: {mode: 'all'},
       retention: {enabled: false}, hookWatchdog: {enabled: false},
       pipeline: {enabled: true, multica: {mode: 'on'}}}));
     await writeFile(path.join(configDir, 'lab.json'), JSON.stringify({configName: 'lab',
-      inputs: [{Type: 'input_multica', CollectionMode: 'on', MetricsUrls: [endpoint], LogFiles: [log]}],
+      inputs: [{Type: 'input_multica', Instance: 'previous-env', CollectionMode: 'on', MetricsUrls: [endpoint], LogFiles: [log]}],
       flushers: [{Type: 'flusher_sls', Endpoint: 'http://sls.invalid', Project: 'test', Logstore: 'lab'}]}));
     const bundle = path.join(bundleDir, 'main.mjs');
     const internalStubPlugin = {name: 'internal-stub', setup(b: import('esbuild').PluginBuild) {
@@ -108,7 +112,14 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
     const interceptor = await json(interceptorPath);
     expect(interceptor.pid).toBe(child.pid);
     expect((await fetch(`http://127.0.0.1:${interceptor.daemon_port}/health`)).ok).toBe(true);
-    await vi.waitFor(() => expect(posts).toBe(2), {timeout: 5000});
+    await vi.waitFor(() => expect(posts).toHaveLength(2), {timeout: 5000});
+    for (const post of posts) {
+      expect(post.__source__).toBe('installed-pilot-env');
+      expect(post.__logs__.map(row => row.record_type)).toEqual(['prometheus_sample', 'collection_status']);
+      for (const row of post.__logs__) {
+        expect(row).toMatchObject({multica_env: 'installed-pilot-env', instance: 'installed-pilot-env'});
+      }
+    }
     await vi.waitFor(() => {
       expect(output).toContain('SLS webtracking retrying');
       expect(output).toContain('TimeoutError');
