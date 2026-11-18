@@ -1,4 +1,5 @@
 use crate::types::AgentActivityEntry;
+use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,72 +14,20 @@ struct TrackedTurn {
     updated_at: i64,
 }
 
-/// Insertion-ordered turn map. Updating an existing key does not move it,
-/// matching JavaScript `Map`.
-struct TurnMap {
-    order: Vec<String>,
-    values: HashMap<String, TrackedTurn>,
-}
-
-impl TurnMap {
-    fn new() -> Self {
-        Self {
-            order: Vec::new(),
-            values: HashMap::new(),
-        }
-    }
-
-    fn get(&self, key: &str) -> Option<&TrackedTurn> {
-        self.values.get(key)
-    }
-
-    fn insert(&mut self, key: String, value: TrackedTurn) {
-        match self.values.entry(key) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                entry.insert(value);
-            }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                self.order.push(entry.key().clone());
-                entry.insert(value);
-            }
-        }
-    }
-
-    fn remove(&mut self, key: &str) {
-        if self.values.remove(key).is_some() {
-            self.order.retain(|existing| existing != key);
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.values.len()
-    }
-
-    fn snapshot(&self) -> Vec<(String, i64)> {
-        let keys = self.order.clone();
-        let mut out = Vec::with_capacity(keys.len());
-        for key in keys {
-            if let Some(turn) = self.values.get(&key) {
-                out.push((key, turn.updated_at));
-            }
-        }
-        out
-    }
-}
-
 /// Fill-only turn boundary enrichment shared by every canonical agent input.
 ///
 /// The processor mutates only `gen_ai.turn.start` and `gen_ai.turn.end`.
 /// Existing markers stay authoritative, records are never reordered or
 /// synthesized, and records without a turn id are left untouched.
 pub struct TurnBoundaryProcessor {
-    turns: TurnMap,
+    // Updating an existing key retains its insertion order, matching JavaScript Map.
+    turns: IndexMap<String, TrackedTurn>,
 }
 
 impl TurnBoundaryProcessor {
     pub fn new() -> Self {
         Self {
-            turns: TurnMap::new(),
+            turns: IndexMap::new(),
         }
     }
 
@@ -177,31 +126,28 @@ impl TurnBoundaryProcessor {
     }
 
     fn compact(&mut self, now: i64) {
-        let expired = self
-            .turns
-            .snapshot()
-            .into_iter()
-            .filter_map(|(key, updated_at)| {
-                if now - updated_at > STATE_TTL_MS {
-                    Some(key)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        for key in expired {
-            self.turns.remove(&key);
-        }
-        if self.turns.len() <= MAX_TRACKED_TURNS {
+        self.turns
+            .retain(|_, tracked| now - tracked.updated_at <= STATE_TTL_MS);
+        let overflow = self.turns.len().saturating_sub(MAX_TRACKED_TURNS);
+        if overflow == 0 {
             return;
         }
 
-        let mut ranked = self.turns.snapshot();
-        ranked.sort_by_key(|entry| entry.1);
-        let overflow = self.turns.len() - MAX_TRACKED_TURNS;
-        for (key, _) in ranked.into_iter().take(overflow) {
-            self.turns.remove(&key);
-        }
+        // At equal timestamps, the earliest insertion is evicted first.
+        let mut ranked: Vec<_> = self
+            .turns
+            .values()
+            .enumerate()
+            .map(|(index, turn)| (turn.updated_at, index))
+            .collect();
+        let (_, cutoff, _) = ranked.select_nth_unstable(overflow);
+        let cutoff = *cutoff;
+        let mut index = 0;
+        self.turns.retain(|_, turn| {
+            let keep = (turn.updated_at, index) >= cutoff;
+            index += 1;
+            keep
+        });
     }
 }
 
@@ -770,6 +716,57 @@ mod tests {
                 "agent.openclaw.hook": "llm_output"
             }),
         )));
+    }
+
+    #[test]
+    fn compacts_turns_by_ttl_and_preserves_insertion_order_for_timestamp_ties() {
+        let mut processor = TurnBoundaryProcessor::new();
+        let now = STATE_TTL_MS + 10;
+        for (key, updated_at) in [
+            ("expired", now - STATE_TTL_MS - 1),
+            ("updated", now - STATE_TTL_MS - 1),
+            ("ttl-edge", now - STATE_TTL_MS),
+            ("first-tie", now - STATE_TTL_MS + 1),
+            ("second-tie", now - STATE_TTL_MS + 1),
+        ] {
+            processor.turns.insert(
+                key.to_owned(),
+                TrackedTurn {
+                    started: true,
+                    ended: false,
+                    updated_at,
+                },
+            );
+        }
+        processor.turns["updated"].updated_at = now;
+        processor.compact(now);
+        assert!(!processor.turns.contains_key("expired"));
+        assert!(processor.turns.contains_key("ttl-edge"));
+
+        for index in 0..MAX_TRACKED_TURNS - 2 {
+            processor.turns.insert(
+                format!("new-{index}"),
+                TrackedTurn {
+                    started: false,
+                    ended: false,
+                    updated_at: now,
+                },
+            );
+        }
+        processor.compact(now);
+        assert_eq!(processor.turns.len(), MAX_TRACKED_TURNS);
+        assert!(!processor.turns.contains_key("ttl-edge"));
+        assert!(!processor.turns.contains_key("first-tie"));
+        assert!(processor.turns["updated"].started);
+        assert_eq!(
+            processor
+                .turns
+                .keys()
+                .take(2)
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["updated", "second-tie"]
+        );
     }
 
     #[test]

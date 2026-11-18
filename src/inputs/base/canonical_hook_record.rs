@@ -1,6 +1,8 @@
 //! Port of `src/inputs/base/canonical-hook-record.ts`.
 
-use crate::normalization::{build_agent_activity_entry, is_reserved_key};
+use crate::normalization::{
+    build_standard_with_canonical_payloads, is_canonical_payload_key, is_reserved_key,
+};
 use crate::types::AgentActivityEntry;
 use regex::Regex;
 use serde_json::{Map, Value};
@@ -54,49 +56,83 @@ pub fn build_canonical_hook_entry(
     if !is_canonical_hook_record(record) {
         return None;
     }
-    let mut opts = Map::new();
-    for (key, raw) in record {
-        if !is_canonical_key(key) {
-            continue;
-        }
-        if let Some(value) = to_json_value(raw) {
-            opts.insert(key.clone(), value);
-        }
+    let opts = record
+        .iter()
+        .filter(|(key, _)| is_canonical_key(key))
+        .map(|(key, raw)| {
+            let value = if is_canonical_payload_key(key) {
+                Value::Null
+            } else {
+                raw.clone()
+            };
+            (key.clone(), value)
+        })
+        .collect();
+    let mut entry =
+        build_from_canonical_options(opts, fallback_agent_type, attributes, Some(record));
+    if options.preserve_safe_custom_top_level_fields {
+        attach_safe_custom_top_level_fields(&mut entry, record);
     }
-    opts.insert(
-        "gen_ai.agent.type".to_string(),
-        Value::String(
-            string_value(record, "gen_ai.agent.type")
-                .unwrap_or_else(|| fallback_agent_type.to_owned()),
-        ),
-    );
-    if opts.get("gen_ai.request.model").is_none() {
+    Some(entry)
+}
+
+/// Consume decoded rows where no caller needs to retain their raw payloads.
+pub(crate) fn build_owned_canonical_hook_entry(
+    mut record: Map<String, Value>,
+    fallback_agent_type: &str,
+    options: CanonicalHookRecordOptions,
+) -> Option<AgentActivityEntry> {
+    if !is_canonical_hook_record(&record) {
+        return None;
+    }
+    let mut custom = Map::new();
+    record.retain(|key, value| {
+        if is_canonical_key(key) {
+            return true;
+        }
+        if options.preserve_safe_custom_top_level_fields {
+            custom.insert(key.clone(), std::mem::take(value));
+        }
+        false
+    });
+    let mut entry = build_from_canonical_options(record, fallback_agent_type, None, None);
+    if options.preserve_safe_custom_top_level_fields {
+        attach_safe_custom_top_level_fields(&mut entry, &custom);
+    }
+    Some(entry)
+}
+
+fn build_from_canonical_options(
+    mut opts: Map<String, Value>,
+    fallback_agent_type: &str,
+    attributes: Option<&Map<String, Value>>,
+    canonical_payloads: Option<&Map<String, Value>>,
+) -> AgentActivityEntry {
+    if opts
+        .get("gen_ai.agent.type")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        opts.insert(
+            "gen_ai.agent.type".to_owned(),
+            Value::String(fallback_agent_type.to_owned()),
+        );
+    }
+    if !opts.contains_key("gen_ai.request.model") {
         opts.insert(
             "gen_ai.request.model".to_string(),
             Value::String("unknown".into()),
         );
     }
-    if opts.get("gen_ai.response.model").is_none() {
-        let request = opts
-            .get("gen_ai.request.model")
-            .cloned()
-            .unwrap_or_else(|| Value::String("unknown".into()));
-        opts.insert("gen_ai.response.model".to_string(), request);
+    if !opts.contains_key("gen_ai.response.model") {
+        let request = opts["gen_ai.request.model"].clone();
+        opts.insert("gen_ai.response.model".to_owned(), request);
     }
-    let mut attributes_obj = Map::new();
-    if let Some(attributes) = attributes {
-        for (key, raw) in attributes {
-            if let Some(value) = to_json_value(raw) {
-                attributes_obj.insert(key.clone(), value);
-            }
-        }
-    }
-    opts.insert("attributes".to_string(), Value::Object(attributes_obj));
-    let mut entry = build_agent_activity_entry(&Value::Object(opts));
-    if options.preserve_safe_custom_top_level_fields {
-        attach_safe_custom_top_level_fields(&mut entry, record);
-    }
-    Some(entry)
+    opts.insert(
+        "attributes".to_owned(),
+        Value::Object(attributes.cloned().unwrap_or_default()),
+    );
+    build_standard_with_canonical_payloads(&opts, canonical_payloads)
 }
 
 #[cfg(test)]
@@ -160,34 +196,10 @@ fn is_canonical_key(key: &str) -> bool {
             .any(|prefix| key.starts_with(prefix))
 }
 
-fn string_value(data: &Map<String, Value>, key: &str) -> Option<String> {
-    match data.get(key) {
-        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
-        _ => None,
-    }
-}
-
-fn to_json_value(value: &Value) -> Option<Value> {
-    match value {
-        Value::Null | Value::String(_) | Value::Number(_) | Value::Bool(_) => Some(value.clone()),
-        Value::Array(items) => Some(Value::Array(
-            items.iter().filter_map(to_json_value).collect(),
-        )),
-        Value::Object(map) => {
-            let mut out = Map::new();
-            for (key, raw) in map {
-                if let Some(json) = to_json_value(raw) {
-                    out.insert(key.clone(), json);
-                }
-            }
-            Some(Value::Object(out))
-        }
-    }
-}
-
 #[cfg(test)]
 mod lazy_custom_field_tests {
     use super::*;
+    use crate::normalization::build_agent_activity_entry;
     use serde_json::json;
 
     fn fixture() -> AgentActivityEntry {
@@ -205,6 +217,37 @@ mod lazy_custom_field_tests {
         SAFE_CUSTOM_ENTRY_MAP_CALLS.with(|calls| calls.set(0));
         attach_safe_custom_top_level_fields(entry, record.as_object().unwrap());
         SAFE_CUSTOM_ENTRY_MAP_CALLS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn owned_hook_rows_match_the_borrowed_builder() {
+        let mut record = serde_json::to_value(fixture()).unwrap();
+        let row = record.as_object_mut().unwrap();
+        row.insert("gen_ai.agent.type".into(), json!(""));
+        row.shift_remove("gen_ai.response.model");
+        row.insert("gen_ai.request.model".into(), Value::Null);
+        row.insert("vendor.payload".into(), json!("  custom value  "));
+        row.insert("API_KEY".into(), json!("redacted"));
+        row.insert(
+            "input.messages".into(),
+            json!([{"role":"user","parts":[{"type":"text","content":"alias"}]}]),
+        );
+        row.insert(
+            "agent.opaque".into(),
+            json!({"precise": 18446744073709551615u64}),
+        );
+        let opts = CanonicalHookRecordOptions {
+            preserve_safe_custom_top_level_fields: true,
+        };
+        let expected = build_canonical_hook_entry(row, "qoder-cli", None, opts).unwrap();
+        let actual = build_owned_canonical_hook_entry(row.clone(), "qoder-cli", opts).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&expected).unwrap(),
+            serde_json::to_vec(&actual).unwrap()
+        );
+        assert_eq!(actual.extra["vendor.payload"], "custom value");
+        assert!(!actual.extra.contains_key("API_KEY"));
+        assert!(actual.input_messages.is_none());
     }
 
     #[test]

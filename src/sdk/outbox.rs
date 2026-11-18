@@ -3,7 +3,7 @@
 use super::abi::{OnBatch, PilotJsonView, ACK};
 use super::policy::Delivery;
 use crate::checkpoints::StateStore;
-use crate::flushers::{BaseFlusher, FlushError};
+use crate::flushers::{BaseFlusher, FlushError, QuotaAlarm};
 use crate::types::{AgentActivityEntry, AgentEventName};
 use async_trait::async_trait;
 use rusqlite::{params, Connection};
@@ -20,37 +20,57 @@ const SAVE_CHECKPOINT: &str = "INSERT INTO checkpoint VALUES(?1,?2)
 
 type UsageUpdates = std::collections::BTreeMap<(String, String), [i64; 6]>;
 
-fn usage_updates<'a>(rows: impl IntoIterator<Item = &'a AgentActivityEntry>) -> UsageUpdates {
+fn record_usage(totals: &mut UsageUpdates, row: &AgentActivityEntry) {
+    if row.event_name != Some(AgentEventName::LlmResponse) || row.agent_type.is_empty() {
+        return;
+    }
+    let Some(day) = row
+        .time_unix_nano
+        .parse::<i64>()
+        .ok()
+        .filter(|n| *n > 0)
+        .and_then(|n| chrono::DateTime::from_timestamp(n / 1_000_000_000, 0))
+    else {
+        return;
+    };
+    let value = totals
+        .entry((row.agent_type.clone(), day.format("%Y-%m-%d").to_string()))
+        .or_insert([0i64; 6]);
+    let delta = [
+        1,
+        i64::from(row.input_tokens.is_some() || row.output_tokens.is_some()),
+        row.input_tokens.unwrap_or(0),
+        row.output_tokens.unwrap_or(0),
+        row.cache_read_input_tokens.unwrap_or(0),
+        row.cache_creation_input_tokens.unwrap_or(0),
+    ];
+    for (sum, v) in value.iter_mut().zip(delta) {
+        *sum = sum.saturating_add(v.max(0));
+    }
+}
+
+fn usage_updates(rows: &[AgentActivityEntry]) -> UsageUpdates {
     let mut totals = UsageUpdates::new();
     for row in rows {
-        if row.event_name != Some(AgentEventName::LlmResponse) || row.agent_type.is_empty() {
-            continue;
-        }
-        let Some(day) = row
-            .time_unix_nano
-            .parse::<i64>()
-            .ok()
-            .filter(|n| *n > 0)
-            .and_then(|n| chrono::DateTime::from_timestamp(n / 1_000_000_000, 0))
-        else {
-            continue;
-        };
-        let value = totals
-            .entry((row.agent_type.clone(), day.format("%Y-%m-%d").to_string()))
-            .or_insert([0i64; 6]);
-        let delta = [
-            1,
-            i64::from(row.input_tokens.is_some() || row.output_tokens.is_some()),
-            row.input_tokens.unwrap_or(0),
-            row.output_tokens.unwrap_or(0),
-            row.cache_read_input_tokens.unwrap_or(0),
-            row.cache_creation_input_tokens.unwrap_or(0),
-        ];
-        for (sum, v) in value.iter_mut().zip(delta) {
-            *sum = sum.saturating_add(v.max(0));
-        }
+        record_usage(&mut totals, row);
     }
     totals
+}
+
+fn prepare_owned_rows(
+    entries: Vec<AgentActivityEntry>,
+) -> Result<(Vec<Vec<u8>>, UsageUpdates), serde_json::Error> {
+    let mut usage = UsageUpdates::new();
+    // Keep the encoded batch atomic while releasing each original row's heap
+    // allocations as soon as we have its usage and serialized payload.
+    let encoded = entries
+        .into_iter()
+        .map(|entry| {
+            record_usage(&mut usage, &entry);
+            serde_json::to_vec(&entry)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((encoded, usage))
 }
 
 pub struct Outbox {
@@ -553,6 +573,7 @@ impl Outbox {
                     "unknown activity callback return value; retained for RETRY",
                 );
             }
+            drop(views);
             let result = if ack == ACK {
                 self.ack(&rows)
             } else {
@@ -562,6 +583,9 @@ impl Outbox {
                     "invalid callback result; treated as RETRY"
                 }))
             };
+            // Retry reloads the same durable rows. Release the in-memory
+            // batch before entering the backoff wait.
+            drop(rows);
             match result {
                 Ok(()) => {
                     delay = 0;
@@ -722,6 +746,19 @@ pub struct CallbackOutboxFlusher {
     pub store: Arc<StateStore>,
     pub cancelled: Arc<AtomicBool>,
 }
+impl CallbackOutboxFlusher {
+    async fn accept_rows(
+        &self,
+        encoded: &[Vec<u8>],
+        usage: &UsageUpdates,
+    ) -> Result<(), FlushError> {
+        self.queue
+            .accept(&self.source, &self.store, encoded, usage, &self.cancelled)
+            .await
+            .map_err(|e| FlushError::output_durability("SDK", &e.to_string()))
+    }
+}
+
 #[async_trait]
 impl BaseFlusher for CallbackOutboxFlusher {
     fn uses_prepared_batch(&self) -> bool {
@@ -739,12 +776,19 @@ impl BaseFlusher for CallbackOutboxFlusher {
         entries: Vec<AgentActivityEntry>,
         _: Option<Vec<f64>>,
     ) -> Result<(), FlushError> {
-        let encoded = entries
-            .iter()
-            .map(serde_json::to_vec)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| FlushError::new(e.to_string()))?;
-        self.send_prepared_batch(entries, encoded).await
+        let (encoded, usage) =
+            prepare_owned_rows(entries).map_err(|e| FlushError::new(e.to_string()))?;
+        self.accept_rows(&encoded, &usage).await
+    }
+    async fn deliver_owned_batch(
+        &self,
+        entries: Vec<AgentActivityEntry>,
+        _: Arc<QuotaAlarm>,
+    ) -> Result<(u64, Result<(), FlushError>), serde_json::Error> {
+        let (encoded, usage) = prepare_owned_rows(entries)?;
+        let bytes = encoded.iter().map(|row| row.len() as u64).sum();
+        let result = self.accept_rows(&encoded, &usage).await;
+        Ok((bytes, result))
     }
     async fn send_prepared_batch(
         &self,
@@ -754,10 +798,7 @@ impl BaseFlusher for CallbackOutboxFlusher {
         let usage = usage_updates(&entries);
         // Backpressure only needs the serialized payload and the small usage summary.
         drop(entries);
-        self.queue
-            .accept(&self.source, &self.store, &encoded, &usage, &self.cancelled)
-            .await
-            .map_err(|e| FlushError::output_durability("SDK", &e.to_string()))
+        self.accept_rows(&encoded, &usage).await
     }
     async fn flush(&self) -> Result<(), FlushError> {
         Ok(())
