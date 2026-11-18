@@ -3,6 +3,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
+import { guardrailSnapshotFromVerdict, stampGuardrail } from '../../../src/interceptor/guardrail.js';
+import { buildAgentActivityEntry } from '../../../src/normalization/entry-builder.js';
 import {
   TOOL_VERDICT_TTL_MS,
   TOOL_VERDICT_MAX_RECORDS,
@@ -136,8 +138,9 @@ describe('tool verdict store', () => {
     const file = checkpointFile();
     const store = new ToolVerdictStore(file);
     const key = { toolUseId: 'audit-call', phase: 'PreToolUse' as const };
-    const snapshot = { action: 'allow' as const, matched: true, enforcement: 'audit' as const, failOpen: true as const,
-      ruleId: 'observe', ruleVersion: '3', reason: 'audit hit', title: 'label', message: 'reminder' };
+    const snapshot = guardrailSnapshotFromVerdict({ action: 'allow', matched: true, enforcement: 'audit', failOpen: true,
+      ruleId: 'observe', ruleVersion: '3', reason: 'audit hit', title: 'label', message: 'reminder', severity: 'HIGH', evaluatedRules: ['observe'] });
+    expect(snapshot.severity).toBe('HIGH');
     store.put(key, snapshot);
     await store.checkpoint();
     const restored = new ToolVerdictStore(file);
@@ -146,6 +149,9 @@ describe('tool verdict store', () => {
     const mirror = new ToolVerdictStore(checkpointFile());
     mirror.merge(restored.records());
     expect(mirror.getSnapshot(key)).toEqual(snapshot);
+    const event = buildAgentActivityEntry({ 'event.name': 'tool.call' });
+    stampGuardrail(event, mirror.getSnapshot(key)!);
+    expect(event).toMatchObject({ 'gen_ai.guardrail.severity': 'HIGH', 'gen_ai.guardrail.action': 'allow' });
   });
   it('merges IPC snapshots without refreshing expiry and caps retained records', () => {
     const store = new ToolVerdictStore(checkpointFile());

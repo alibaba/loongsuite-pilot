@@ -728,6 +728,7 @@ describe('InputManager', () => {
         reason: `hit ${apiKey}`,
         ruleId: 'flow-probe',
         ruleVersion: '3',
+        severity: 'CRITICAL',
         title: `label ${apiKey}`,
         message: `不要粘贴 ${apiKey}`,
         evaluatedRules: ['flow-probe'],
@@ -744,6 +745,7 @@ describe('InputManager', () => {
       expect(dispatched['gen_ai.guardrail.action']).toBe('block');
       expect(dispatched['gen_ai.guardrail.rule_id']).toBe('flow-probe');
       expect(dispatched['gen_ai.guardrail.rule_version']).toBe('3');
+      expect(dispatched['gen_ai.guardrail.severity']).toBe('CRITICAL');
       expect(dispatched['gen_ai.guardrail.reason']).toBe('hit [APIKEY_MASKED]');
       expect(dispatched['gen_ai.guardrail.title']).toBe('label [APIKEY_MASKED]');
       expect(dispatched['gen_ai.guardrail.message']).toBe('不要粘贴 [APIKEY_MASKED]');

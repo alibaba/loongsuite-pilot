@@ -38,6 +38,7 @@ export interface InterceptorAccessResult {
   reason?: string;
   ruleId?: string;
   ruleVersion?: string;
+  severity?: string;
   title?: string;
   message?: string;
   evaluatedRules?: string[];
@@ -212,11 +213,13 @@ function redactAccessLogEntry(entry: InterceptorAccessLogEntry): InterceptorAcce
       ...entry.result,
       reason: redactString(entry.result.reason),
       title: redactString(entry.result.title),
+      severity: redactString(entry.result.severity),
       message: redactString(entry.result.message),
       error: redactString(entry.result.error),
       ...(entry.result.matches ? { matches: entry.result.matches.map(match => ({
         ...match, reason: redactString(match.reason) ?? '',
         ...(match.title ? { title: redactString(match.title) } : {}),
+        ...(match.severity ? { severity: redactString(match.severity) } : {}),
         ...(match.message ? { message: redactString(match.message) } : {}),
       })) } : {}),
     },

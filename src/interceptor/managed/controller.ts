@@ -175,7 +175,7 @@ export class ManagedInterceptor {
     const key = JSON.stringify({
       rules: published.rules.map(rule => [
         rule.kind, rule.id, rule.version, rule.agents, rule.events, rule.enforcement,
-        rule.title ?? '', rule.message ?? '',
+        rule.title ?? '', rule.message ?? '', rule.severity ?? '',
         rule.kind === 'pattern' ? [rule.match, rule.pattern] : null,
         rule.kind === 'script' ? rule.shell : null,
         rule.kind === 'http' ? rule.url : null,
