@@ -11,6 +11,7 @@ import {
 } from '../base/base-session-input.js';
 import { transformHookRecord } from '../base/hook-record-transform.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+import { matchesFileIdentity } from '../../utils/file-identity.js';
 
 const DEFAULT_SESSION_DIR = '~/.loongsuite-pilot/logs/hermes-agent';
 const DEFAULT_FILE_PATTERN = 'hermes-agent-*.jsonl';
@@ -42,6 +43,40 @@ export class HermesLogInput extends BaseSessionInput {
 
   static getWatchPaths(): string[] {
     return [resolveHome(DEFAULT_SESSION_DIR)];
+  }
+
+  /** Prove the dead producer's extant source files were drained into output. */
+  async confirmSourceDrained(token: string): Promise<boolean> {
+    if (!/^\d{1,10}-\d{1,24}-[a-f0-9]{8}$/.test(token)) return false;
+    try {
+      const prefix = `hermes-agent-${token}`;
+      const findCandidates = async () => (await fs.readdir(this.sessionDir, { withFileTypes: true }))
+        .filter(entry => entry.name === `${prefix}.jsonl`
+          || (entry.name.startsWith(`${prefix}.segment-`) && entry.name.endsWith('.jsonl')));
+      const candidates = await findCandidates();
+      if (!candidates.length || candidates.some(entry => !entry.isFile())) return false;
+      let drained = true;
+      for (const candidate of candidates) {
+        const file = path.join(this.sessionDir, candidate.name);
+        const stat = await fs.stat(file);
+        const key = `${this.id}:${file}`;
+        // In-memory offsets can run ahead of a blocked output. A previously
+        // persisted cursor for this particular file remains valid even while
+        // a different producer is waiting for journal capacity.
+        const state = this.stateStore.getPersistedState(key);
+        if (!state || (state.lastOffset ?? 0) !== stat.size
+          || !matchesFileIdentity(state.extra?.sourceIdentity, stat)) drained = false;
+      }
+      const after = await findCandidates();
+      const names = new Set(candidates.map(entry => entry.name));
+      if (after.length !== names.size || after.some(entry => !entry.isFile() || !names.has(entry.name))) drained = false;
+      if (!drained) this.requestCollection();
+      return drained && this.running && !this.checkpointFailed;
+    } catch {
+      // An incomplete scan, an unreadable file or a disappearing file is not
+      // evidence that the remaining output has already been consumed.
+      return false;
+    }
   }
 
   protected async discoverSessionFiles(): Promise<string[]> {
