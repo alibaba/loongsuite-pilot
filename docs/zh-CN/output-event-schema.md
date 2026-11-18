@@ -191,6 +191,8 @@ Qoder IDE 子运行使用独立 session，与 CLI 的共享 session sidechain �
 
 子工具参数和结果来自对应 transcript，通过 SQLite 的精确 `toolCallId` 归属到原生请求；模型调用 ID、模型和 usage 来自该请求的 SQLite 元数据。IDE 1.37 的子 transcript 可能省略纯文本模型响应：成功前台运行的最后一条子模型回复使用父 `Agent` 工具实际交付的原生回答，来源标记为 `qoder-ide-agent-result`；中间响应或失败运行缺少正文时保持缺失，不补造 finish reason。父工具实际交付的结果同时作为 Agent result，异步受理不作为成功结果。该适配不读取或解密数据库中的会话正文，生成的事件与其他输入经过相同的内容开关和脱敏处理；checkpoint 仅保存关联 ID 和源定位，不保存正文。
 
+IDE 委派 transcript 单行及所需工具行合计各有 16 MiB 上限；超过时保留原文件和待定状态并记录告警，不将不完整内容当作完整子运行。扫描每轮分块进行，可在重启后继续。
+
 工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
 
 ## System Instructions（系统提示词）

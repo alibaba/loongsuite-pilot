@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { QoderIdeDelegations, QODER_NATIVE_SOURCE, type IdeDelegation } from '../../../src/inputs/qoder-trace/ide-delegations.js';
+import { NativeToolRowReader, type NativeToolCursor } from '../../../src/inputs/qoder-trace/native-tool-rows.js';
 
 let root: string;
 const epoch = Date.now() - 60000;
@@ -98,6 +99,137 @@ describe('Qoder IDE native request delegation', () => {
     expect(invoke['gen_ai.agent.invocation.id']).toBe(Object.keys(first.state)[0]);
     expect(second.records.filter(row => row['gen_ai.session.id'] === 'child')
       .every(row => row['gen_ai.agent.parent.invocation.id'] === invoke['gen_ai.agent.invocation.id'])).toBe(true);
+  });
+
+  it('rescans a completed transcript when a later SQLite snapshot adds a tool, including after restart', async () => {
+    await child([nativeCall('read-1'), nativeResult('read-1'), nativeCall('read-2'), nativeResult('read-2')]);
+    const partial = detail(); partial.messages.pop(); partial.tokens.pop();
+    const first = await new QoderIdeDelegations(async () => partial).collect(await parent(), {});
+    expect(first.records.filter(row => row['gen_ai.session.id'] === 'child')).toEqual([]);
+    const full = detail();
+    full.messages.splice(3, 0,
+      { id: 'model-middle', role: 'assistant', gmt_create: epoch + 260 },
+      { id: 'tool-middle', role: 'tool', gmt_create: epoch + 270, tool_call_id: 'read-2' });
+    full.tokens.push({ messageId: 'model-middle', gmtCreate: epoch + 260,
+      inputTokens: 10, outputTokens: 2, cacheReadTokens: 1, model: 'native-child-model' });
+    const second = await new QoderIdeDelegations(async () => full).collect([], JSON.parse(JSON.stringify(first.state)));
+    expect(second.records.filter(row => row['event.name'] === 'tool.call').map(row => row['gen_ai.tool.call.id']))
+      .toEqual(['read-1', 'read-2']);
+    expect(second.records.filter(row => row['event.name'] === 'llm.response')).toHaveLength(3);
+  });
+
+  it('advances past one 5 MiB native row and finds later tools across a persisted restart', async () => {
+    await child([{ type: 'progress', data: { detail: 'x'.repeat(5 * 1024 * 1024) } },
+      nativeCall('read-1'), nativeResult('read-1')] as any);
+    const file = path.join(root, 'child.jsonl');
+    let cursor: NativeToolCursor | undefined;
+    let rows: Record<string, any>[] | null = null;
+    let reader = new NativeToolRowReader();
+    for (let i = 0; i < 6 && !rows; i++) {
+      if (i === 1) reader = new NativeToolRowReader(); // Simulate loss of the in-memory partial line.
+      const result = await reader.read(file, 'child', new Set(['read-1']), cursor,
+        { remaining: 4 * 1024 * 1024 });
+      cursor = JSON.parse(JSON.stringify(result.cursor));
+      rows = result.rows;
+    }
+    expect(rows).not.toBeNull();
+    expect(rows!.flatMap(row => row.message.content).map((block: any) => block.id ?? block.tool_use_id))
+      .toEqual(['read-1', 'read-1']);
+    expect(JSON.stringify(cursor)).not.toContain('x'.repeat(100));
+  });
+
+  it('resumes a large parent scan after the original input batch is gone', async () => {
+    let clock = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const input = await parent(); const file = path.join(root, 'parent.jsonl');
+    const original = await fs.readFile(file);
+    await fs.writeFile(file, Buffer.concat([Buffer.from(JSON.stringify({ type: 'progress', data: { detail: 'x'.repeat(5 * 1024 * 1024) } }) + '\n'), original]));
+    let result = await new QoderIdeDelegations(async () => detail()).collect(input, {});
+    expect(result.records.filter(row => row['gen_ai.session.id'] === 'child')).toEqual([]);
+    const reader = new QoderIdeDelegations(async () => detail());
+    for (let i = 0; i < 6 && !result.records.some(row => row['gen_ai.session.id'] === 'child'); i++) {
+      clock += 6000; result = await reader.collect([], JSON.parse(JSON.stringify(result.state)));
+    }
+    expect(result.records.filter(row => row['event.name'] === 'llm.response')).toHaveLength(2);
+  });
+
+  it('collects a matching 5 MiB tool result with bounded reads and a restart', async () => {
+    const payload = '大'.repeat(2 * 1024 * 1024);
+    await child([nativeCall('read-1'), nativeResult('read-1', payload)]);
+    const file = path.join(root, 'child.jsonl');
+    let cursor: NativeToolCursor | undefined;
+    let rows: Record<string, any>[] | null = null;
+    let reader = new NativeToolRowReader();
+    for (let i = 0; i < 10 && !rows; i++) {
+      if (i === 1) reader = new NativeToolRowReader();
+      const budget = { remaining: 4 * 1024 * 1024 };
+      const result = await reader.read(file, 'child', new Set(['read-1']), cursor, budget);
+      expect(budget.remaining).toBeGreaterThanOrEqual(0);
+      cursor = JSON.parse(JSON.stringify(result.cursor)); rows = result.rows;
+    }
+    expect(rows).not.toBeNull();
+    expect(rows!.flatMap(row => row.message.content).find((block: any) => block.type === 'tool_result').content).toBe(payload);
+    expect(JSON.stringify(cursor)).not.toContain('大');
+  });
+
+  it('waits for an incomplete UTF-8 row and resumes after an append and restart', async () => {
+    const file = path.join(root, 'child.jsonl');
+    const call = Buffer.from(JSON.stringify(nativeCall('read-1')) + '\n');
+    const result = Buffer.from(JSON.stringify(nativeResult('read-1', '前后')) + '\n');
+    const split = result.indexOf(Buffer.from('前')) + 1;
+    await fs.writeFile(file, Buffer.concat([call, result.subarray(0, split)]));
+    const first = await new NativeToolRowReader().read(file, 'child', new Set(['read-1']), undefined, { remaining: 1024 * 1024 });
+    expect(first.rows).toBeNull();
+    await fs.appendFile(file, result.subarray(split));
+    const next = await new NativeToolRowReader().read(file, 'child', new Set(['read-1']),
+      JSON.parse(JSON.stringify(first.cursor)), { remaining: 1024 * 1024 });
+    expect(next.rows).not.toBeNull();
+    expect(next.rows!.at(-1)!.message.content[0].content).toBe('前后');
+  });
+
+  it('keeps oversized unknown rows visibly incomplete while scanning subsequent rows', async () => {
+    await child([{ type: 'progress', data: { detail: 'x'.repeat(17 * 1024 * 1024) } },
+      nativeCall('read-1'), nativeResult('read-1')] as any);
+    const file = path.join(root, 'child.jsonl'); const size = (await fs.stat(file)).size;
+    let cursor: NativeToolCursor | undefined; const reader = new NativeToolRowReader();
+    let rows: Record<string, any>[] | null = null;
+    for (let i = 0; i < 8 && (cursor?.offset ?? 0) < size; i++) {
+      const result = await reader.read(file, 'child', new Set(['read-1']), cursor, { remaining: 4 * 1024 * 1024 });
+      cursor = JSON.parse(JSON.stringify(result.cursor)); rows = result.rows;
+    }
+    expect(cursor!.offset).toBe(size);
+    expect(cursor!.blocked).toBe('line-byte-limit');
+    expect(cursor!.matches['read-1']?.call).toBeDefined();
+    expect(rows).toBeNull();
+  });
+
+  it('lets concurrent requests for the same transcript finish bounded scans and large range fetches', async () => {
+    let clock = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    await child([nativeCall('read-1'), nativeResult('read-1', 'a'.repeat(180000)),
+      nativeCall('read-2'), nativeResult('read-2', 'b'.repeat(180000))]);
+    const file = path.join(root, 'child.jsonl'); const reader = new NativeToolRowReader();
+    const tasks = ['read-1', 'read-2'].map(id => ({ id, cursor: undefined as NativeToolCursor | undefined,
+      rows: null as Record<string, any>[] | null }));
+    for (let round = 0; round < 40 && tasks.some(task => !task.rows); round++) for (const task of tasks) {
+      if (task.rows) continue;
+      clock += 60_000; // Slow polling must not evict a live partial scan.
+      const result = await reader.read(file, 'child', new Set([task.id]), task.cursor, { remaining: 128 * 1024 }, task.id);
+      task.cursor = JSON.parse(JSON.stringify(result.cursor)); task.rows = result.rows;
+    }
+    for (const task of tasks) {
+      expect(task.rows).not.toBeNull();
+      expect(task.rows!.flatMap(row => row.message.content).map((block: any) => block.id ?? block.tool_use_id)).toEqual([task.id, task.id]);
+    }
+  });
+
+  it('assigns parent TOOL IDs before the per-cycle delegation budget is reached', async () => {
+    const input = (await Promise.all(Array.from({ length: 12 }, (_, i) => parent(`budget-${i}`)))).flat();
+    const reader = new QoderIdeDelegations(async () => null);
+    const first = await reader.collect(input, {});
+    expect(Object.keys(first.state)).toHaveLength(12);
+    for (let i = 0; i < input.length; i += 2) {
+      expect(input[i]!.span_id).toMatch(/^[0-9a-f]{16}$/);
+      expect(input[i + 1]!.span_id).toBe(input[i]!.span_id);
+    }
   });
 
   it('keeps incoming and outgoing identities distinct for nested IDE work', async () => {

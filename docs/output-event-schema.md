@@ -194,6 +194,8 @@ Qoder IDE child executions have separate native sessions, unlike the CLI sidecha
 
 Child tool bodies come from their transcript and are assigned to native requests by exact SQLite `toolCallId`. Model message IDs, model and usage come from request-scoped SQLite metadata. IDE 1.37 may omit text-only responses from child transcripts: the last assistant reply of a successful foreground run uses the actual native reply delivered by the parent `Agent` tool, marked `qoder-ide-agent-result`. Unavailable intermediate or failed-response text stays absent; provider finish reasons are not invented. Actual parent-tool deliveries also produce Agent results; asynchronous receipts are not completed results. Encrypted database conversation bodies are never read or decrypted. Generated events use the common content/masking pipeline; checkpoints retain identifiers and source locations, not message bodies.
 
+IDE delegation scans limit both individual transcript rows and the combined required tool rows to 16 MiB. When a limit is exceeded, the source and pending state are retained and a warning is recorded rather than reporting an incomplete child execution as complete. Scans use per-cycle byte budgets and resume after restart.
+
 Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. `workspace.*` and any inferred `git.*` fields are collected independently from message extraction.
 
 ## OpenClaw Session Key

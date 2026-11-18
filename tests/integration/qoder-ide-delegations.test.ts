@@ -9,10 +9,83 @@ import { StateStore } from '../../src/checkpoints/state-store.js';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
 import { publishQoderWakeup } from '../../assets/hooks/qoder/hook-wakeup.mjs';
+import { loadDatabaseSync } from '../../src/utils/node-sqlite.js';
+import * as sqliteTokenReader from '../../src/inputs/qoder-trace/sqlite-token-reader.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn(); vi.restoreAllMocks(); });
 describe('IDE native delegation through durable input and final spans', () => {
+  it('recovers late SQLite relationships and growing tool inventory across durable restarts', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-ide-late-')));
+    cleanups.push(() => fs.rm(root, { recursive: true, force: true }));
+    const directory = path.join(root, 'transcript'); await fs.mkdir(directory);
+    const epoch = Date.now() - 60000; const at = (s: number) => new Date(epoch + s * 1000).toISOString();
+    const parent = path.join(directory, 'parent.jsonl');
+    await fs.writeFile(parent, [
+      { type: 'user', sessionId: 'parent', uuid: 'prompt', timestamp: at(0), message: { role: 'user', content: 'delegate' } },
+      { type: 'assistant', sessionId: 'parent', uuid: 'model-1', timestamp: at(1), message: { id: 'model-1', role: 'assistant', model: 'native-model', content: [{ type: 'tool_use', id: 'delegate', name: 'Agent', input: { prompt: 'read file', subagent_type: 'reader' } }] } },
+      { type: 'user', sessionId: 'parent', timestamp: at(5), toolUseResult: 'delivered result', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'delegate', content: 'delivered result' }] } },
+      { type: 'assistant', sessionId: 'parent', uuid: 'model-2', timestamp: at(6), message: { id: 'model-2', role: 'assistant', model: 'native-model', content: [{ type: 'text', text: 'done' }] } },
+      { type: 'progress', timestamp: at(7), data: { hookEvent: 'Stop' } },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    await fs.writeFile(path.join(directory, 'child.jsonl'), [
+      ...['read-1', 'read-2'].flatMap(id => [
+        { type: 'assistant', sessionId: 'child', timestamp: at(2), message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'Read', input: { file_path: 'fixture.txt' } }] } },
+        { type: 'user', sessionId: 'child', timestamp: at(3), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'file content' }] } },
+      ]),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    const Database = loadDatabaseSync(); if (!Database) throw new Error('node:sqlite required');
+    const dbPath = path.join(root, 'fixture.db'); const db = new Database(dbPath);
+    cleanups.push(async () => { db.close(); });
+    db.exec(`CREATE TABLE chat_record (session_id TEXT, request_id TEXT, parent_session_id TEXT, parent_tool_call_id TEXT, extra TEXT);
+      CREATE TABLE chat_message (id TEXT, role TEXT, gmt_create INTEGER, token_info TEXT, model_info TEXT, tool_result TEXT, session_id TEXT, request_id TEXT)`);
+    vi.spyOn(sqliteTokenReader, 'resolveAllQoderDbPaths').mockReturnValue([dbPath]);
+    const insert = db.prepare('INSERT INTO chat_message VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+    const put = (id: string, role: string, time: number, tool?: string) => insert.run(id, role, epoch + time,
+      role === 'assistant' ? JSON.stringify({ prompt_tokens: 10, completion_tokens: 2, cached_tokens: 1 }) : null,
+      null, tool ? JSON.stringify({ toolCallId: tool }) : null, 'child', 'request');
+    expect(publishQoderWakeup({ session_id: 'parent', transcript_path: parent, cwd: root, hook_event_name: 'Stop' }, { dataDir: root, agentId: 'qoder' })).toBe(true);
+    const output = new MockFlusher();
+    const start = async () => {
+      const state = new StateStore(path.join(root, 'state.json')); await state.load();
+      const manager = new InputManager(); manager.setFlusher(output); manager.setConfiguredUserId('synthetic-user');
+      manager.setAgentsConfig({ qoder: { enabled: true, captureMessageContent: true } });
+      const input = new QoderTraceInput({ dataDir: root, stateStore: state, logDir: path.join(root, 'history'), pollIntervalMs: 60000 });
+      const collector = (input as any).transcriptSource.collector; collector.stableMs = 0; collector.settleMs = 0;
+      vi.spyOn(input as any, 'readIdeSqliteTokens').mockResolvedValue({ rows: [], matchedDbPath: null });
+      manager.registerInput(input); await input.start(); await (input as any).cyclePromise;
+      for (let i = 0; i < 3; i++) await (input as any).runCycle();
+      await manager.stopAll(); await state.save();
+    };
+    const spans: ReadableSpan[] = [];
+    const otlp = new OtlpTraceFlusher({ enabled: true, protocol: 'http/protobuf', serviceName: 'ide-test', captureMessageContent: true,
+      endpoints: [{ endpoint: 'http://localhost:4318/v1/traces', headers: {} }] }, undefined,
+    () => ({ export(batch, callback) { spans.push(...batch); callback({ code: 0 }); }, shutdown: async () => {} }));
+    try {
+      await start();
+      const first = output.batchCalls.flat();
+      await otlp.sendBatch(first); await otlp.flush();
+      const parentTool = spans.find(span => span.attributes['gen_ai.tool.name'] === 'Agent');
+      expect(parentTool).toBeDefined();
+      expect(spans.some(span => span.attributes['gen_ai.session.id'] === 'child')).toBe(false);
+      db.prepare('INSERT INTO chat_record VALUES (?, ?, ?, ?, ?)').run('child', 'request', 'parent', 'delegate', null);
+      put('user', 'user', 1100); put('assistant-1', 'assistant', 2000); put('tool-1', 'tool', 3000, 'read-1');
+      await start();
+      const second = output.batchCalls.flat();
+      await otlp.sendBatch(second.slice(first.length)); await otlp.flush();
+      expect(spans.some(span => span.attributes['gen_ai.session.id'] === 'child')).toBe(false);
+      put('assistant-2', 'assistant', 3500); put('tool-2', 'tool', 4000, 'read-2'); put('assistant-3', 'assistant', 4500);
+      await start();
+      await otlp.sendBatch(output.batchCalls.flat().slice(second.length)); await otlp.flush();
+      const child = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT' && span.attributes['gen_ai.session.id'] === 'child');
+      expect(child).toBeDefined();
+      expect(child!.parentSpanId).toBe(parentTool!.spanContext().spanId);
+      expect(spans.filter(span => span.attributes['gen_ai.session.id'] === 'child' && span.attributes['gen_ai.span.kind'] === 'TOOL')
+        .map(span => span.attributes['gen_ai.tool.call.id']).sort()).toEqual(['read-1', 'read-2']);
+      expect(spans.filter(span => span.attributes['gen_ai.session.id'] === 'child' && span.attributes['gen_ai.span.kind'] === 'LLM')).toHaveLength(3);
+    } finally { await otlp.shutdown(); }
+  });
+
   it.each([true, false])('keeps independent identity, privacy and final TOOL parentage (content=%s)', async capture => {
     const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-ide-pipeline-')));
     cleanups.push(() => fs.rm(root, { recursive: true, force: true }));

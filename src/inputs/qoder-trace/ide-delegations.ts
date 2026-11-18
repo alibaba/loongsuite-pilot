@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { queryReadonly } from '../../utils/node-sqlite.js';
 import { resolveAllQoderDbPaths, isIdeaDbPath, parseTokenInfo, parseModelKey, parseRecordModelKey } from './sqlite-token-reader.js';
 import { buildLlmBoundaries, buildEventsFromBoundaries } from '../../../assets/hooks/qoder-hook-processor.mjs';
-import { readNativeToolRows, type NativeToolCursor } from './native-tool-rows.js';
+import { NativeToolRowReader, type NativeToolCursor } from './native-tool-rows.js';
 
 type RecordData = Record<string, any>;
 export const QODER_NATIVE_SOURCE = Symbol.for('loongsuite.qoder.native-source');
@@ -71,6 +71,7 @@ export async function readIdeDelegation(session: string, call: string, search = 
 export class QoderIdeDelegations {
   private retry = new Map<string, number>();
   private cursor = 0;
+  private readonly nativeRows = new NativeToolRowReader();
   constructor(private readonly resolve = readIdeDelegation,
     private readonly warn: (reason: string) => void = () => {}) {}
 
@@ -115,24 +116,45 @@ export class QoderIdeDelegations {
           };
         }
       }
+      // A TOOL may be exported before its SQLite relationship exists or before
+      // this work reaches the processing budget. Fix its identity at discovery,
+      // so a later child can still point at the already-exported parent.
+      for (const record of records) {
+        if ((record['event.name'] !== 'tool.call' && record['event.name'] !== 'tool.result')
+          || record['gen_ai.agent.type'] !== 'qoder') continue;
+        const session = record['gen_ai.session.id']; const turn = record['gen_ai.turn.id']; const call = record['gen_ai.tool.call.id'];
+        if (!id(session) || !id(call) || typeof turn !== 'string') continue;
+        const work = state[hash(['qoder-ide-delegation', session, turn, call]).slice(0, 32)];
+        if (work) record.span_id = work.span;
+      }
     };
     register(input);
+    const release = (work: Work) => {
+      this.nativeRows.releaseOwner(`${work.id}:parent`);
+      this.nativeRows.releaseOwner(`${work.id}:child`);
+    };
+    this.nativeRows.retainOwners(new Set(Object.values(state).filter(work => !work.done || !work.result)
+      .flatMap(work => [`${work.id}:parent`, `${work.id}:child`])));
     let handled = 0;
     const keys = Object.keys(state);
     const start = keys.length ? this.cursor % keys.length : 0;
-    const queue = [...keys.slice(start), ...keys.slice(0, start)];
+    const rotated = [...keys.slice(start), ...keys.slice(0, start)];
+    const activeOwners = new Set(this.nativeRows.activeOwners());
+    const priority = (key: string) => activeOwners.has(`${key}:parent`) || activeOwners.has(`${key}:child`);
+    const queue = [...rotated.filter(priority), ...rotated.filter(key => !priority(key))];
     for (let index = 0; index < queue.length && handled < 8; index++) {
       const work = state[queue[index]!]!;
       const current = available.filter(record => record['gen_ai.session.id'] === work.session
         && record['gen_ai.turn.id'] === work.turn && record['gen_ai.tool.call.id'] === work.call);
       if (!current.length && (this.retry.get(work.id) ?? 0) > now) continue;
-      if (work.done && work.result) continue;
+      if (work.done && work.result) { release(work); continue; }
       handled++;
       this.cursor = (keys.indexOf(work.id) + 1) % Math.max(1, keys.length);
       try {
         let call = current.find(record => record['event.name'] === 'tool.call');
         let result = current.find(record => record['event.name'] === 'tool.result');
-        const parent = await readNativeToolRows(work.file, work.session, new Set([work.call]), work.parentScan, budget);
+        const parent = await this.nativeRows.read(work.file, work.session, new Set([work.call]), work.parentScan, budget, `${work.id}:parent`);
+        if (parent.cursor.blocked && parent.cursor.blocked !== work.parentScan?.blocked) this.warn(`ide-delegation-${parent.cursor.blocked}`);
         work.parentScan = parent.cursor;
         let nativeReply = false;
         if (parent.rows) {
@@ -148,11 +170,16 @@ export class QoderIdeDelegations {
               && typeof row.toolUseResult === 'string' && row.toolUseResult === block.content) nativeReply = true;
           }
         }
-        if (!call) { this.warn('ide-delegation-parent-unavailable'); continue; }
+        if (!call) {
+          // An unfinished bounded scan can be the only way to recover the
+          // parent call after its input batch was already emitted.
+          if (!this.nativeRows.activeOwners().includes(`${work.id}:parent`)) release(work);
+          this.warn('ide-delegation-parent-unavailable'); continue;
+        }
         const peer = await this.resolve(work.session, work.call, work.search ??= { nextIndex: 0 });
         // An IDE path/Agent nickname alone is not a relationship. In particular,
         // do not enable this adapter for JetBrains or missing native evidence.
-        if (!peer || peer.session === work.session) continue;
+        if (!peer || peer.session === work.session) { release(work); continue; }
         work.peer = peer.session; work.request = peer.request;
         const identity = { 'gen_ai.agent.id': work.session, 'gen_ai.agent.invocation.id': work.id,
           ...(work.peer ? { 'gen_ai.agent.peer.id': work.peer } : {}),
@@ -184,14 +211,15 @@ export class QoderIdeDelegations {
           if (typeof body === 'string') event['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: body }] }];
           emitted.push(event); work.result = true;
         }
-        if (!peer || work.done || !delivered) continue;
+        if (work.done || !delivered) { this.nativeRows.releaseOwner(`${work.id}:child`); continue; }
         const childPath = path.join(path.dirname(work.file), `${peer.session}.jsonl`);
         const toolIds = new Set(peer.messages.filter(row => row.role === 'tool' && row.tool_call_id).map(row => row.tool_call_id!));
         let native: RecordData[] = [];
         if (toolIds.size) {
           const directory = await fs.realpath(path.dirname(work.file));
           if (path.dirname(await fs.realpath(childPath)) !== directory) throw new Error('IDE child path escapes transcript directory');
-          const child = await readNativeToolRows(childPath, peer.session, toolIds, work.childScan, budget);
+          const child = await this.nativeRows.read(childPath, peer.session, toolIds, work.childScan, budget, `${work.id}:child`);
+          if (child.cursor.blocked && child.cursor.blocked !== work.childScan?.blocked) this.warn(`ide-delegation-${child.cursor.blocked}`);
           work.childScan = child.cursor;
           if (!child.rows) continue;
           native = child.rows;
@@ -202,7 +230,7 @@ export class QoderIdeDelegations {
         delete work.parentScan; delete work.childScan;
         const oldKeys = new Set(Object.keys(state)); register(records);
         queue.push(...Object.keys(state).filter(key => !oldKeys.has(key)));
-      } catch { this.warn('ide-delegation-source-pending'); }
+      } catch { release(work); this.warn('ide-delegation-source-pending'); }
       finally {
         this.retry.set(work.id, now + 5000);
         if (this.retry.size > MAX_WORK) this.retry.delete(this.retry.keys().next().value!);
