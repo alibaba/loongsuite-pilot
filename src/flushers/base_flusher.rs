@@ -178,6 +178,23 @@ pub trait BaseFlusher: Send + Sync {
         self.send_batch(entries, Some(lengths)).await
     }
 
+    /// Deliver a typed batch and report the exact serialized byte count.
+    async fn deliver_owned_batch(
+        &self,
+        entries: Vec<AgentActivityEntry>,
+        quota_alarm: std::sync::Arc<QuotaAlarm>,
+    ) -> Result<(u64, Result<(), FlushError>), serde_json::Error> {
+        let encoded = entries
+            .iter()
+            .map(serde_json::to_vec)
+            .collect::<Result<Vec<_>, _>>()?;
+        let bytes = encoded.iter().map(|row| row.len() as u64).sum();
+        let result = self
+            .deliver_prepared_batch(entries, encoded, quota_alarm)
+            .await;
+        Ok((bytes, result))
+    }
+
     /// Retry only this destination while the source holds its checkpoint.
     async fn deliver_prepared_batch(
         &self,

@@ -318,13 +318,38 @@ async fn token_totals_commit_with_progress_survive_ack_and_restart_without_count
     let root = tempfile::tempdir().unwrap();
     let state = StateStore::new(root.path().join("state.json"));
     let queue = Outbox::open(&root.path().join("outbox"), Delivery::default()).unwrap();
-    let encoded=serde_json::to_vec(&json!({"event.name":"llm.response","event.id":"usage-original","gen_ai.agent.type":"codex","time_unix_nano":"1794066484438000000","gen_ai.usage.input_tokens":64,"gen_ai.usage.output_tokens":32,"gen_ai.usage.cache_read.input_tokens":8})).unwrap();
-    queue
-        .accept_fixture("source", &state, &[encoded], &AtomicBool::new(false))
+    let flusher = CallbackOutboxFlusher {
+        queue: queue.clone(),
+        source: "source".into(),
+        store: Arc::new(state),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    flusher
+        .store
+        .set("qoder-trace", InputState::new().with_last_offset(97.0));
+    let entry: AgentActivityEntry = serde_json::from_value(json!({
+        "event.name": "llm.response",
+        "event.id": "usage-original",
+        "gen_ai.agent.type": "qoder",
+        "time_unix_nano": "1794066484438000000",
+        "gen_ai.usage.input_tokens": 64,
+        "gen_ai.usage.output_tokens": 32,
+        "gen_ai.usage.cache_read.input_tokens": 8,
+        "extension": {"integer": "18446744073709551615"}
+    }))
+    .unwrap();
+    let expected = serde_json::to_vec(&entry).unwrap();
+
+    let (delivered_bytes, result) = flusher
+        .deliver_owned_batch(vec![entry], Arc::new(|_, _| {}))
         .await
         .unwrap();
+    result.unwrap();
+    assert_eq!(delivered_bytes, expected.len() as u64);
+    drop(flusher);
     assert_eq!(queue.token_rows()[0]["input_tokens_total"], 64);
     let first = queue.read_batch(&Delivery::default()).unwrap().0;
+    assert_eq!(first[0].1, expected);
     let retry = queue.read_batch(&Delivery::default()).unwrap().0;
     assert_eq!(first, retry);
     assert_eq!(queue.token_rows()[0]["llm_responses_total"], 1);
@@ -335,6 +360,10 @@ async fn token_totals_commit_with_progress_survive_ack_and_restart_without_count
     let resumed = Outbox::open(&root.path().join("outbox"), Delivery::default()).unwrap();
     assert_eq!(resumed.token_rows()[0]["llm_responses_total"], 1);
     assert_eq!(resumed.token_rows()[0]["cache_read_tokens_total"], 8);
+    let progress = resumed.saved_checkpoints().unwrap();
+    assert_eq!(progress[0].0, "source");
+    let checkpoint: serde_json::Value = serde_json::from_str(&progress[0].1).unwrap();
+    assert_eq!(checkpoint["qoder-trace"]["lastOffset"], 97.0);
     assert_eq!(resumed.snapshot()["pending_events"], 0);
 }
 

@@ -20,6 +20,7 @@ mod sqlite_query;
 mod workspace_policy;
 
 pub use bootstrap_turn_filter::filter_bootstrap_history_turns;
+pub(crate) use canonical_hook_record::build_owned_canonical_hook_entry;
 pub use canonical_hook_record::{build_canonical_hook_entry, CanonicalHookRecordOptions};
 pub use cli_forwarder::{hosted_cli_forwarder, CliForwarderBody, ForwarderPaths};
 pub use entry_map::{

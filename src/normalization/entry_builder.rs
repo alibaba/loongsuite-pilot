@@ -466,23 +466,32 @@ fn build_from_legacy(opts: &Map<String, Value>) -> AgentActivityEntry {
     build_standard(&next)
 }
 
+pub(crate) fn is_canonical_payload_key(key: &str) -> bool {
+    matches!(
+        key,
+        "gen_ai.input.messages_delta"
+            | "gen_ai.input.messages"
+            | "gen_ai.output.messages"
+            | "gen_ai.tool.call.arguments"
+            | "gen_ai.tool.call.result"
+            | "gen_ai.system_instructions"
+            | "gen_ai.tool.definitions"
+    )
+}
+
 fn build_standard(opts: &Map<String, Value>) -> AgentActivityEntry {
-    // These canonical JSON fields are unconditionally replaced from `opts`
-    // below. Keep their positions without cloning payloads that will be discarded.
-    // Aliases and unknown fields still require their original independent values.
+    build_standard_with_canonical_payloads(opts, None)
+}
+
+pub(crate) fn build_standard_with_canonical_payloads(
+    opts: &Map<String, Value>,
+    canonical_payloads: Option<&Map<String, Value>>,
+) -> AgentActivityEntry {
+    // Preserve each payload's key position without cloning it before it is normalized.
     let mut entry: Map<String, Value> = opts
         .iter()
         .map(|(key, value)| {
-            let value = if matches!(
-                key.as_str(),
-                "gen_ai.input.messages_delta"
-                    | "gen_ai.input.messages"
-                    | "gen_ai.output.messages"
-                    | "gen_ai.tool.call.arguments"
-                    | "gen_ai.tool.call.result"
-                    | "gen_ai.system_instructions"
-                    | "gen_ai.tool.definitions"
-            ) {
+            let value = if is_canonical_payload_key(key) {
                 Value::Null
             } else {
                 value.clone()
@@ -490,20 +499,15 @@ fn build_standard(opts: &Map<String, Value>) -> AgentActivityEntry {
             (key.clone(), value)
         })
         .collect();
-    let now_value = match opts.get("timestamp") {
-        None | Some(Value::Null) => Value::Number(Number::from(current_time_millis())),
-        Some(value) => value.clone(),
-    };
-    let time_unix_nano = assigned_string(
-        opts,
-        "time_unix_nano",
-        timestamp_to_unix_nanos(Some(&now_value)),
-    );
-    let observed = assigned_string(
-        opts,
-        "observed_time_unix_nano",
-        timestamp_to_unix_nanos(Some(&Value::Number(Number::from(current_time_millis())))),
-    );
+    let time_unix_nano = assigned_string(opts, "time_unix_nano", || match opts.get("timestamp") {
+        None | Some(Value::Null) => {
+            timestamp_to_unix_nanos(Some(&Value::from(current_time_millis())))
+        }
+        Some(value) => timestamp_to_unix_nanos(Some(value)),
+    });
+    let observed = assigned_string(opts, "observed_time_unix_nano", || {
+        timestamp_to_unix_nanos(Some(&Value::from(current_time_millis())))
+    });
     set_string(&mut entry, "time_unix_nano", Some(time_unix_nano));
     set_string(&mut entry, "observed_time_unix_nano", Some(observed));
     set_string(
@@ -623,34 +627,27 @@ fn build_standard(opts: &Map<String, Value>) -> AgentActivityEntry {
         "gen_ai.input.messages_hash",
         "input.messages_hash",
     );
-    set_alias_json(
+    let set_payload = |entry: &mut Map<String, Value>, canonical, legacy| {
+        // Hook conversion has already selected the canonical fields. Reading
+        // its original payloads must not allow noncanonical aliases back in.
+        let value = match canonical_payloads {
+            Some(original) => first_present(original, &[canonical]).cloned(),
+            None => json_alias(opts, canonical, legacy),
+        };
+        set_json_key(entry, canonical, value);
+    };
+    set_payload(
         &mut entry,
-        opts,
         "gen_ai.input.messages_delta",
         "input.messages_delta",
     );
-    set_alias_json(&mut entry, opts, "gen_ai.input.messages", "input.messages");
-    set_alias_json(
-        &mut entry,
-        opts,
-        "gen_ai.output.messages",
-        "output.messages",
-    );
+    set_payload(&mut entry, "gen_ai.input.messages", "input.messages");
+    set_payload(&mut entry, "gen_ai.output.messages", "output.messages");
     set_alias_string(&mut entry, opts, "gen_ai.tool.name", "tool.name");
     set_alias_string(&mut entry, opts, "gen_ai.tool.call.id", "tool.call.id");
     set_alias_string(&mut entry, opts, "gen_ai.tool.call.exec.id", "tool.exec.id");
-    set_alias_json(
-        &mut entry,
-        opts,
-        "gen_ai.tool.call.arguments",
-        "tool.arguments",
-    );
-    set_alias_json(
-        &mut entry,
-        opts,
-        "gen_ai.tool.call.result",
-        "tool.result.payload",
-    );
+    set_payload(&mut entry, "gen_ai.tool.call.arguments", "tool.arguments");
+    set_payload(&mut entry, "gen_ai.tool.call.result", "tool.result.payload");
     match tool_duration(opts) {
         Some(duration) => {
             if let Some(number) = Number::from_f64(duration) {
@@ -675,18 +672,12 @@ fn build_standard(opts: &Map<String, Value>) -> AgentActivityEntry {
         "skill.description",
     );
     set_alias_string(&mut entry, opts, "gen_ai.skill.version", "skill.version");
-    set_alias_json(
+    set_payload(
         &mut entry,
-        opts,
         "gen_ai.system_instructions",
         "system_instructions",
     );
-    set_alias_json(
-        &mut entry,
-        opts,
-        "gen_ai.tool.definitions",
-        "tool.definitions",
-    );
+    set_payload(&mut entry, "gen_ai.tool.definitions", "tool.definitions");
     apply_legacy_tool_status(&mut entry, opts);
     flatten_attributes(&mut entry, opts);
     normalize_message_fields(&mut entry);
@@ -843,15 +834,6 @@ fn set_alias_f64(
     }
 }
 
-fn set_alias_json(
-    entry: &mut Map<String, Value>,
-    opts: &Map<String, Value>,
-    canonical: &str,
-    legacy: &str,
-) {
-    set_json_key(entry, canonical, json_alias(opts, canonical, legacy));
-}
-
 fn string_alias(input: &Map<String, Value>, canonical: &str, legacy: &str) -> Option<String> {
     match first_present(input, &[canonical, legacy])? {
         Value::String(text) if !text.is_empty() => Some(text.clone()),
@@ -919,9 +901,13 @@ fn json_i64(value: &Value) -> Option<i64> {
     }
 }
 
-fn assigned_string(opts: &Map<String, Value>, key: &str, fallback: String) -> String {
+fn assigned_string(
+    opts: &Map<String, Value>,
+    key: &str,
+    fallback: impl FnOnce() -> String,
+) -> String {
     match opts.get(key) {
-        None | Some(Value::Null) => fallback,
+        None | Some(Value::Null) => fallback(),
         Some(Value::String(text)) => text.clone(),
         Some(other) => serialize_value(other),
     }

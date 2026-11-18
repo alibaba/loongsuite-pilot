@@ -10,16 +10,17 @@
 use super::legacy_hook_reader::QoderLegacyHookReader;
 use super::multimodal::{PathToUri, QoderMultimodal};
 use super::prompt_ownership::{NativeQoderPromptOwnershipResolver, QoderPromptOwnershipResolver};
+use super::token_enricher::{collect_cli_expected_request_ids_from, CliPrimaryEnrichment};
 use super::transcript_source::{QoderTranscriptSource, TranscriptBatch};
 use super::{
-    collect_cli_expected_request_ids, enrich_cli_from_segments, enrich_cli_primary,
-    enrich_ide_turn, is_idea_db_path, needs_cli_segment_fallback, read_intercept_data,
-    read_segment_tokens_for_session, read_sqlite_tokens_for_session, resolve_qoder_app_root,
-    QODER_SEGMENTS_ROOT,
+    enrich_cli_from_segments, enrich_ide_turn, is_idea_db_path, needs_cli_segment_fallback,
+    read_intercept_data, read_segment_tokens_for_session, read_sqlite_tokens_for_session,
+    resolve_qoder_app_root, QODER_SEGMENTS_ROOT,
 };
 use crate::inputs::base::{
-    build_canonical_hook_entry, create_hook_history_startup_checkpoint,
-    filter_bootstrap_history_turns, CanonicalHookRecordOptions, InputBody, InputRuntime,
+    build_canonical_hook_entry, build_owned_canonical_hook_entry,
+    create_hook_history_startup_checkpoint, filter_bootstrap_history_turns,
+    CanonicalHookRecordOptions, InputBody, InputRuntime,
 };
 use crate::multimodal::{MultimodalProcessor, PathToUriOptions};
 use crate::normalization::enrich_canonical_entry_with_git;
@@ -401,7 +402,7 @@ impl InputBody for QoderTraceBody {
         for record in &native.records {
             if let Some(record) = record.as_object() {
                 if let Some(entry) = transform_record(record).await {
-                    raw.push(entry)
+                    raw.push(entry);
                 }
             }
         }
@@ -411,81 +412,86 @@ impl InputBody for QoderTraceBody {
             }
             return Ok(Vec::new());
         }
-        let groups = group_by_turn(&raw);
-        let mut intercept = None;
+        let mut groups = group_by_turn(&raw);
+        let intercept = if groups.iter().any(|indexes| {
+            infer_variant(&raw, indexes) == "qoder-cli"
+                && find_session_index(&raw, indexes).is_some()
+        }) {
+            let mut response_ids = raw
+                .iter()
+                .filter(|entry| entry.event_name == Some(crate::types::AgentEventName::LlmResponse))
+                .filter_map(|entry| entry.response_id.clone())
+                .collect::<Vec<_>>();
+            response_ids.sort_unstable();
+            response_ids.dedup();
+            Some(self.readers.read_cli_intercept_for(&response_ids).await)
+        } else {
+            None
+        };
+        // The same snapshot serves every turn in this collection batch.
+        let cli_primary = intercept.as_ref().map(|data| {
+            CliPrimaryEnrichment::new(
+                data.system_prompt
+                    .as_ref()
+                    .map(|prompt| prompt.content.as_str()),
+                &data.tokens,
+            )
+        });
+        let mut turn_entries = Vec::new();
         let mut ide_sessions: IndexMap<String, Vec<usize>> = IndexMap::new();
-        let mut cli_fallback: HashMap<String, Vec<Vec<usize>>> = HashMap::new();
-        for indexes in groups.values() {
+        let mut cli_fallback: HashMap<String, Vec<&[usize]>> = HashMap::new();
+        for indexes in &groups {
+            let Some(session_index) = find_session_index(&raw, indexes) else {
+                continue;
+            };
             let variant = infer_variant(&raw, indexes);
-            let session = extract_session(&raw, indexes);
             if variant == "qoder-cli" {
-                if let Some(session) = session {
-                    if intercept.is_none() {
-                        let mut response_ids = raw
-                            .iter()
-                            .filter(|entry| {
-                                entry.event_name == Some(crate::types::AgentEventName::LlmResponse)
-                            })
-                            .filter_map(|entry| entry.response_id.clone())
-                            .collect::<Vec<_>>();
-                        response_ids.sort_unstable();
-                        response_ids.dedup();
-                        intercept = Some(self.readers.read_cli_intercept_for(&response_ids).await);
-                    }
-                    let data = intercept.as_ref().unwrap();
-                    // Every index belongs to exactly one turn group. No await,
-                    // fallible operation, or return occurs until ownership is
-                    // restored to raw below; other tasks cannot observe it.
-                    let mut slice: Vec<AgentActivityEntry> = indexes
-                        .iter()
-                        .map(|index| std::mem::take(&mut raw[*index]))
-                        .collect();
-                    enrich_cli_primary(
-                        &mut slice,
-                        data.system_prompt
-                            .as_ref()
-                            .map(|prompt| prompt.content.as_str()),
-                        &data.tokens,
-                    );
-                    let needs_fallback = needs_cli_segment_fallback(&slice);
-                    for (index, entry) in indexes.iter().zip(slice) {
-                        raw[*index] = entry;
-                    }
-                    if needs_fallback {
-                        cli_fallback
-                            .entry(session)
-                            .or_default()
-                            .push(indexes.clone());
-                    }
+                // Each group owns distinct indexes. Restore all entries
+                // before any await or other operation can observe the batch.
+                turn_entries.extend(indexes.iter().map(|index| std::mem::take(&mut raw[*index])));
+                cli_primary
+                    .as_ref()
+                    .expect("CLI groups with a session have an intercept snapshot")
+                    .enrich(&mut turn_entries);
+                let needs_fallback = needs_cli_segment_fallback(&turn_entries);
+                for (index, entry) in indexes.iter().zip(turn_entries.drain(..)) {
+                    raw[*index] = entry;
+                }
+                if needs_fallback {
+                    cli_fallback
+                        .entry(raw[session_index].session_id.clone())
+                        .or_default()
+                        .push(indexes);
                 }
             } else if variant == "qoder" || variant == "qoder-idea" {
-                if let Some(session) = session {
-                    ide_sessions
-                        .entry(session)
-                        .or_default()
-                        .extend(indexes.iter().copied());
-                }
+                ide_sessions
+                    .entry(raw[session_index].session_id.clone())
+                    .or_default()
+                    .extend(indexes.iter().copied());
             }
         }
+        drop(cli_primary);
+        drop(intercept);
         for (session, turns) in &cli_fallback {
             let expected = turns
                 .iter()
                 .flat_map(|indexes| {
-                    let slice: Vec<AgentActivityEntry> =
-                        indexes.iter().map(|index| raw[*index].clone()).collect();
-                    collect_cli_expected_request_ids(&slice)
+                    collect_cli_expected_request_ids_from(indexes.iter().map(|index| &raw[*index]))
                 })
                 .collect::<Vec<_>>();
             let segments = self.readers.read_cli_segments(session, &expected).await;
+            if segments.is_empty() {
+                continue;
+            }
             for indexes in turns {
-                let mut slice: Vec<AgentActivityEntry> =
-                    indexes.iter().map(|index| raw[*index].clone()).collect();
-                enrich_cli_from_segments(&mut slice, &segments);
-                for (pos, index) in indexes.iter().enumerate() {
-                    raw[*index] = slice[pos].clone();
+                turn_entries.extend(indexes.iter().map(|index| std::mem::take(&mut raw[*index])));
+                enrich_cli_from_segments(&mut turn_entries, &segments);
+                for (index, entry) in indexes.iter().zip(turn_entries.drain(..)) {
+                    raw[*index] = entry;
                 }
             }
         }
+        drop(turn_entries);
         // Read every session's initial snapshot before spending the one shared
         // delay. A lagging session must not serialize waits for the rest.
         let mut ide_batches = Vec::with_capacity(ide_sessions.len());
@@ -568,7 +574,7 @@ impl InputBody for QoderTraceBody {
                     synthetic.extend(entries.into_iter().skip(indexes.len()));
                 }
                 // Keep original indexes valid until both enrichment passes finish.
-                for indexes in groups.values() {
+                for indexes in &groups {
                     if self.stopped.load(Ordering::SeqCst) {
                         break;
                     }
@@ -594,6 +600,7 @@ impl InputBody for QoderTraceBody {
                         raw[*index] = entries[position].clone();
                     }
                 }
+                let inserted_synthetic = !synthetic.is_empty();
                 for entry in synthetic {
                     let at = raw
                         .iter()
@@ -605,12 +612,17 @@ impl InputBody for QoderTraceBody {
                         .unwrap_or(raw.len());
                     raw.insert(at, entry);
                 }
+                // Enrichment preserves existing turn IDs and order. Only
+                // inserting synthetic entries shifts the original indexes.
+                if inserted_synthetic {
+                    groups = group_by_turn(&raw);
+                }
             }
         }
         for entry in &mut raw {
             entry.extra.remove("agent.qoder.attachments");
         }
-        for indexes in group_by_turn(&raw).values() {
+        for indexes in groups {
             // Match inject_trace_id: one UUID per existing turn group, with
             // only the small trace string cloned for each member.
             let trace_id = indexes
@@ -622,7 +634,7 @@ impl InputBody for QoderTraceBody {
                         .flatten()
                 })
                 .unwrap_or_else(|| hex::encode(uuid::Uuid::new_v4().as_bytes()));
-            for &index in indexes {
+            for index in indexes {
                 raw[index].trace_id = Some(trace_id.clone());
             }
         }
@@ -718,7 +730,16 @@ async fn decode_legacy_hook_batch(
                 continue;
             }
         };
-        if let Some(entry) = transform_record(&record).await {
+        let entry = if crate::utils::source_access::current().is_some() {
+            build_owned_canonical_hook_entry(
+                record,
+                ClientType::QoderCli.as_str(),
+                HOOK_RECORD_OPTIONS,
+            )
+        } else {
+            transform_record(&record).await
+        };
+        if let Some(entry) = entry {
             entries.push(entry);
         }
     }
@@ -726,31 +747,34 @@ async fn decode_legacy_hook_batch(
     entries
 }
 
+const HOOK_RECORD_OPTIONS: CanonicalHookRecordOptions = CanonicalHookRecordOptions {
+    preserve_safe_custom_top_level_fields: true,
+};
+
 async fn transform_record(record: &Map<String, Value>) -> Option<AgentActivityEntry> {
     let mut entry = build_canonical_hook_entry(
         record,
         ClientType::QoderCli.as_str(),
         None,
-        CanonicalHookRecordOptions {
-            preserve_safe_custom_top_level_fields: true,
-        },
+        HOOK_RECORD_OPTIONS,
     )?;
     let _ = enrich_canonical_entry_with_git(&mut entry, record, "qoder").await;
     Some(entry)
 }
 
-fn group_by_turn(entries: &[AgentActivityEntry]) -> IndexMap<String, Vec<usize>> {
+fn group_by_turn(entries: &[AgentActivityEntry]) -> Vec<Vec<usize>> {
     // Source JS Map order determines per-session expected IDs and IDE turn joins.
+    // Borrow IDs only while grouping so callers can update the entries in place.
     let mut groups = IndexMap::new();
     for (index, entry) in entries.iter().enumerate() {
         let turn = entry
             .turn_id
-            .clone()
+            .as_deref()
             .filter(|id| !id.is_empty())
-            .unwrap_or_else(|| "unknown".into());
+            .unwrap_or("unknown");
         groups.entry(turn).or_insert_with(Vec::new).push(index);
     }
-    groups
+    groups.into_values().collect()
 }
 
 fn infer_variant(entries: &[AgentActivityEntry], indexes: &[usize]) -> &'static str {
@@ -765,11 +789,11 @@ fn infer_variant(entries: &[AgentActivityEntry], indexes: &[usize]) -> &'static 
     "qoder-cli"
 }
 
-fn extract_session(entries: &[AgentActivityEntry], indexes: &[usize]) -> Option<String> {
+fn find_session_index(entries: &[AgentActivityEntry], indexes: &[usize]) -> Option<usize> {
     indexes
         .iter()
-        .map(|index| entries[*index].session_id.clone())
-        .find(|id| !id.is_empty())
+        .copied()
+        .find(|index| !entries[*index].session_id.is_empty())
 }
 
 #[cfg(test)]
@@ -867,11 +891,11 @@ mod native_cache_binding_tests {
                 ..Default::default()
             },
         ];
-        enrich_cli_primary(
-            &mut entries,
+        CliPrimaryEnrichment::new(
             first.system_prompt.as_ref().map(|p| p.content.as_str()),
             &first.tokens,
-        );
+        )
+        .enrich(&mut entries);
         assert_eq!(
             (
                 entries[1].input_tokens,

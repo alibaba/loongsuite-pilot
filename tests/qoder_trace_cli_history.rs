@@ -1,8 +1,8 @@
 //! Fixed ef8953 token/segment contracts: literal fixtures and assertions are
 //! statically extracted from the historical test AST; no TypeScript executes.
 use loongsuite_pilot::inputs::qoder_trace::{
-    enrich_cli_from_segments, enrich_cli_primary, enrich_cli_turn, needs_cli_segment_fallback,
-    InterceptTokenData, SegmentTokenData,
+    collect_cli_expected_request_ids, enrich_cli_from_segments, enrich_cli_primary,
+    enrich_cli_turn, needs_cli_segment_fallback, InterceptTokenData, SegmentTokenData,
 };
 use loongsuite_pilot::types::AgentActivityEntry;
 use serde_json::{json, Value};
@@ -304,4 +304,48 @@ fn borrowed_intercept_keeps_latest_tie_order_first_response_and_input_ownership(
         (Some(0), Some(0), Some(0), Some(0), Some(0))
     );
     assert_eq!(entries[2].input_tokens, Some(99));
+}
+
+#[test]
+fn cli_groups_keep_first_response_and_first_nonempty_client_id() {
+    let response = |response_id: Option<&str>, step_id: &str, client: Option<&str>, usage| {
+        let mut entry: AgentActivityEntry = serde_json::from_value(json!({
+            "event.id":"group-test", "event.name":"llm.response",
+            "gen_ai.agent.type":"qoder-cli", "gen_ai.session.id":"session",
+            "gen_ai.step.id":step_id, "time_unix_nano":"1780000001000000000",
+        }))
+        .unwrap();
+        entry.response_id = response_id.map(str::to_owned);
+        entry.input_tokens = Some(usage);
+        if let Some(client) = client {
+            entry
+                .extra
+                .insert("agent.client_request_id".into(), json!(client));
+        }
+        entry
+    };
+    let first = response(Some("shared"), "first", None::<&str>, 9);
+    let duplicate = response(Some("shared"), "alternative", Some("client"), 0);
+    let by_step = response(None, "shared", Some("client"), -1);
+    let mut entries = vec![first, duplicate, by_step];
+    assert!(!needs_cli_segment_fallback(&entries[..2]));
+    assert!(needs_cli_segment_fallback(&entries));
+    assert_eq!(
+        collect_cli_expected_request_ids(&entries),
+        ["client", "client"]
+    );
+
+    let paired = segments(Some(&json!([
+        {"requestId":"client", "inputTokens":50, "outputTokens":5, "model":"first-model"},
+        {"requestId":"client", "inputTokens":70, "outputTokens":7, "model":"second-model"}
+    ])));
+    let original = serde_json::to_value(&entries).unwrap();
+    enrich_cli_from_segments(&mut entries, &[]);
+    assert_eq!(serde_json::to_value(&entries).unwrap(), original);
+    enrich_cli_from_segments(&mut entries, &paired);
+    assert_eq!(entries[0].input_tokens, Some(9));
+    assert_eq!(entries[0].response_model.as_deref(), Some("first-model"));
+    assert_eq!(entries[1].input_tokens, Some(0));
+    assert_eq!(entries[2].input_tokens, Some(70));
+    assert_eq!(entries[2].response_model.as_deref(), Some("second-model"));
 }

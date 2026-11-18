@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::Local;
 use tokio::sync::{watch, Mutex as AsyncMutex};
 
-use crate::flushers::BaseFlusher;
+use crate::flushers::{BaseFlusher, FlushError, QuotaAlarm};
 use crate::inputs::base::InputRuntimeDelta;
 use crate::mask::{load_mask_plan, mask_agent_activity_entry, MaskPlan, PlanOrRules};
 use crate::metrics::{AlarmContext, AlarmManager};
@@ -780,12 +780,15 @@ impl InputManager {
         input_id: &str,
         entries: Vec<AgentActivityEntry>,
     ) -> Result<(), String> {
-        let encoded = entries
-            .iter()
-            .map(serde_json::to_vec)
-            .collect::<Result<Vec<_>, _>>()
+        let entry_count = entries.len();
+        let Some(flusher) = self.dispatch_flusher(input_id, entry_count) else {
+            return Ok(());
+        };
+        let (batch_bytes, result) = flusher
+            .deliver_owned_batch(entries, self.quota_alarm(input_id))
+            .await
             .map_err(|error| error.to_string())?;
-        self.dispatch_encoded(input_id, entries, encoded).await
+        self.finish_dispatch(input_id, entry_count, batch_bytes, result)
     }
 
     pub(super) async fn accept_sdk_activity(
@@ -863,33 +866,43 @@ impl InputManager {
         entries: Vec<AgentActivityEntry>,
         encoded: Vec<Vec<u8>>,
     ) -> Result<(), String> {
+        let entry_count = entries.len();
+        let Some(flusher) = self.dispatch_flusher(input_id, entry_count) else {
+            return Ok(());
+        };
         let batch_bytes = encoded.iter().map(|row| row.len() as u64).sum();
+        let result = flusher
+            .deliver_prepared_batch(entries, encoded, self.quota_alarm(input_id))
+            .await;
+        self.finish_dispatch(input_id, entry_count, batch_bytes, result)
+    }
+
+    fn dispatch_flusher(&self, input_id: &str, entry_count: usize) -> Option<Arc<dyn BaseFlusher>> {
         let flusher = self.flusher.lock().expect("flusher").clone();
-        let Some(flusher) = flusher else {
+        if flusher.is_none() {
             logger("InputManager").warn(
                 "no flusher set, dropping entries",
-                Some(&fields(serde_json::json!({ "count": entries.len() }))),
+                Some(&fields(serde_json::json!({ "count": entry_count }))),
             );
             if let Some(alarm) = self.alarm_manager.lock().expect("alarm").clone() {
                 alarm.record(
                     "DISPATCH_DROP_ALARM",
                     "3",
-                    &format!(
-                        "dropped {} entries from {input_id}: no flusher",
-                        entries.len()
-                    ),
+                    &format!("dropped {entry_count} entries from {input_id}: no flusher"),
                     Some(AlarmContext {
                         input_name: Some(input_id.to_string()),
                         endpoint_name: None,
                     }),
                 );
             }
-            return Ok(());
-        };
-        let entry_count = entries.len();
+        }
+        flusher
+    }
+
+    fn quota_alarm(&self, input_id: &str) -> Arc<QuotaAlarm> {
         let alarm_manager = self.alarm_manager.lock().expect("alarm").clone();
         let alarm_input = input_id.to_owned();
-        let quota_alarm = Arc::new(move |endpoint: &str, error: &crate::flushers::FlushError| {
+        Arc::new(move |endpoint: &str, error: &FlushError| {
             let message = format!(
                 "Native pending trace journal is full, retaining source checkpoint: {error}"
             );
@@ -905,11 +918,7 @@ impl InputManager {
                     }),
                 );
             }
-        });
-        let result = flusher
-            .deliver_prepared_batch(entries, encoded, quota_alarm)
-            .await;
-        self.finish_dispatch(input_id, entry_count, batch_bytes, result)
+        })
     }
 
     fn finish_dispatch(
@@ -917,7 +926,7 @@ impl InputManager {
         input_id: &str,
         entry_count: usize,
         batch_bytes: u64,
-        result: Result<(), crate::flushers::FlushError>,
+        result: Result<(), FlushError>,
     ) -> Result<(), String> {
         match result {
             Ok(()) => {

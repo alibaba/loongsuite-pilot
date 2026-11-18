@@ -25,27 +25,112 @@ pub fn enrich_cli_primary(
     system_prompt: Option<&str>,
     intercept_tokens: &[InterceptTokenData],
 ) {
-    if let Some(prompt) = system_prompt.filter(|prompt| !prompt.is_empty()) {
-        if let Some(first) = entries.iter_mut().find(|entry| {
-            is_name(entry, "llm.request") && entry.step_id.as_ref().is_some_and(|id| !id.is_empty())
-        }) {
-            first.system_instructions =
-                Some(serde_json::json!([{ "type": "text", "content": prompt }]));
+    CliPrimaryEnrichment::new(system_prompt, intercept_tokens).enrich(entries);
+}
+
+/// Intercept metadata shared by the CLI turns in a collection pass.
+pub(crate) struct CliPrimaryEnrichment<'a> {
+    system_prompt: Option<&'a str>,
+    latest: HashMap<&'a str, &'a InterceptTokenData>,
+}
+
+impl<'a> CliPrimaryEnrichment<'a> {
+    pub(crate) fn new(
+        system_prompt: Option<&'a str>,
+        intercept_tokens: &'a [InterceptTokenData],
+    ) -> Self {
+        let mut latest = HashMap::new();
+        for token in intercept_tokens {
+            if token.id.is_empty()
+                || !(token.prompt_tokens > 0
+                    || token.completion_tokens > 0
+                    || token.total_tokens > 0)
+            {
+                continue;
+            }
+            latest
+                .entry(token.id.as_str())
+                .and_modify(|previous: &mut &InterceptTokenData| {
+                    if previous.ts <= token.ts {
+                        *previous = token;
+                    }
+                })
+                .or_insert(token);
+        }
+        Self {
+            system_prompt: system_prompt.filter(|prompt| !prompt.is_empty()),
+            latest,
         }
     }
-    apply_intercept_usage(entries, intercept_tokens);
+
+    pub(crate) fn enrich(&self, entries: &mut [AgentActivityEntry]) {
+        if let Some(prompt) = self.system_prompt {
+            if let Some(first) = entries.iter_mut().find(|entry| {
+                is_name(entry, "llm.request")
+                    && entry.step_id.as_ref().is_some_and(|id| !id.is_empty())
+            }) {
+                first.system_instructions =
+                    Some(serde_json::json!([{ "type": "text", "content": prompt }]));
+            }
+        }
+        if self.latest.is_empty() {
+            return;
+        }
+        let mut first_seen = None;
+        let mut other_seen = HashSet::new();
+        for entry in entries
+            .iter_mut()
+            .filter(|entry| is_name(entry, "llm.response"))
+        {
+            let Some(usage) = entry
+                .response_id
+                .as_deref()
+                .and_then(|id| self.latest.get(id))
+            else {
+                continue;
+            };
+            // Deduplicate only within this turn, borrowing stable IDs from the
+            // index so mutating the event cannot invalidate the seen set.
+            let id = usage.id.as_str();
+            if let Some(first) = first_seen {
+                if id == first || !other_seen.insert(id) {
+                    zero_usage(entry);
+                    continue;
+                }
+            } else {
+                first_seen = Some(id);
+            }
+            entry.input_tokens = Some(usage.prompt_tokens);
+            entry.output_tokens = Some(usage.completion_tokens);
+            entry.total_tokens = Some(if usage.total_tokens > 0 {
+                usage.total_tokens
+            } else {
+                usage.prompt_tokens + usage.completion_tokens
+            });
+            entry.cache_read_input_tokens = Some(usage.cached_tokens);
+        }
+    }
 }
 
 pub fn needs_cli_segment_fallback(entries: &[AgentActivityEntry]) -> bool {
-    for group in response_groups(entries).values() {
-        if !has_positive_usage(&entries[group.matches[0]]) {
+    let mut first_key = None;
+    let mut other_keys = HashSet::new();
+    for response in entries
+        .iter()
+        .filter(|entry| is_name(entry, "llm.response"))
+    {
+        let key = response_key(response);
+        if let Some(first) = first_key {
+            if key == first || !other_keys.insert(key) {
+                continue;
+            }
+        } else {
+            first_key = Some(key);
+        }
+        if !has_positive_usage(response) {
             return true;
         }
-        let Some(step_id) = entries[group.matches[0]]
-            .step_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-        else {
+        let Some(step_id) = response.step_id.as_deref().filter(|id| !id.is_empty()) else {
             continue;
         };
         let Some(request) = entries.iter().find(|entry| {
@@ -54,7 +139,7 @@ pub fn needs_cli_segment_fallback(entries: &[AgentActivityEntry]) -> bool {
             continue;
         };
         let request_ns = parse_nanos(&request.time_unix_nano);
-        let response_ns = parse_nanos(&entries[group.matches[0]].time_unix_nano);
+        let response_ns = parse_nanos(&response.time_unix_nano);
         if request_ns.is_none() || response_ns.is_none() || request_ns >= response_ns {
             return true;
         }
@@ -63,13 +148,22 @@ pub fn needs_cli_segment_fallback(entries: &[AgentActivityEntry]) -> bool {
 }
 
 pub fn collect_cli_expected_request_ids(entries: &[AgentActivityEntry]) -> Vec<String> {
+    collect_cli_expected_request_ids_from(entries)
+}
+
+pub(crate) fn collect_cli_expected_request_ids_from<'a>(
+    entries: impl IntoIterator<Item = &'a AgentActivityEntry>,
+) -> Vec<String> {
     response_groups(entries)
         .values()
-        .filter_map(|group| group.client_request_id.clone())
+        .filter_map(|group| group.client_request_id.map(str::to_owned))
         .collect()
 }
 
 pub fn enrich_cli_from_segments(entries: &mut [AgentActivityEntry], segments: &[SegmentTokenData]) {
+    if segments.is_empty() {
+        return;
+    }
     let paired = pair_segments(entries, segments);
     for (segment, matches) in paired {
         let use_tokens = !has_positive_usage(&entries[matches[0]])
@@ -90,12 +184,15 @@ pub fn enrich_cli_from_segments(entries: &mut [AgentActivityEntry], segments: &[
                 entries[matches[0]].finish_reasons = Some(vec![normalized.to_owned()]);
             }
         }
-        let step_id = entries[matches[0]].step_id.clone();
-        let request_index = entries.iter().position(|entry| {
-            is_name(entry, "llm.request")
-                && entry.step_id == step_id
-                && step_id.as_ref().is_some_and(|id| !id.is_empty())
-        });
+        let request_index = entries[matches[0]]
+            .step_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .and_then(|step_id| {
+                entries.iter().position(|entry| {
+                    is_name(entry, "llm.request") && entry.step_id.as_deref() == Some(step_id)
+                })
+            });
         if !segment.model.is_empty() && segment.model != "unknown" {
             if missing_model(entries[matches[0]].request_model.as_deref()) {
                 entries[matches[0]].request_model = Some(segment.model.clone());
@@ -123,7 +220,8 @@ pub fn enrich_cli_from_segments(entries: &mut [AgentActivityEntry], segments: &[
                 (segment.request_start_ts as i128 * 1_000_000).to_string();
             entries[matches[0]].time_unix_nano =
                 (segment.response_end_ts as i128 * 1_000_000).to_string();
-            if step_id.as_ref().is_some_and(|id| !id.is_empty()) && segment.tool_finished_ts > 0 {
+            if segment.tool_finished_ts > 0 {
+                let step_id = entries[matches[0]].step_id.clone();
                 let call_ts = (segment.response_end_ts as i128 * 1_000_000).to_string();
                 let result_ts = (segment.tool_finished_ts as i128 * 1_000_000).to_string();
                 let duration = segment.tool_finished_ts - segment.response_end_ts;
@@ -355,88 +453,91 @@ pub fn inject_trace_id(entries: &mut [AgentActivityEntry]) {
     }
 }
 
-struct ResponseGroup {
-    matches: Vec<usize>,
-    ms: Option<i64>,
-    client_request_id: Option<String>,
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ResponseKey<'a> {
+    Id(&'a str),
+    Step(&'a str),
 }
 
-fn response_groups(entries: &[AgentActivityEntry]) -> IndexMap<String, ResponseGroup> {
+fn response_key(entry: &AgentActivityEntry) -> ResponseKey<'_> {
+    match entry.response_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => ResponseKey::Id(id),
+        None => ResponseKey::Step(entry.step_id.as_deref().unwrap_or("")),
+    }
+}
+
+struct ResponseGroup<'a> {
+    matches: Vec<usize>,
+    ms: Option<i64>,
+    client_request_id: Option<&'a str>,
+}
+
+fn response_groups<'a>(
+    entries: impl IntoIterator<Item = &'a AgentActivityEntry>,
+) -> IndexMap<ResponseKey<'a>, ResponseGroup<'a>> {
     // Native response order decides which occurrence consumes a shared client
     // request's next segment, matching the original JavaScript Map contract.
     let mut groups = IndexMap::new();
-    for (index, entry) in entries.iter().enumerate() {
+    for (index, entry) in entries.into_iter().enumerate() {
         if !is_name(entry, "llm.response") {
             continue;
         }
-        let nanos = parse_nanos(&entry.time_unix_nano);
-        let key = entry
-            .response_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .map(|id| format!("id:{id}"))
-            .unwrap_or_else(|| format!("step:{}", entry.step_id.as_deref().unwrap_or("")));
-        let client = entry
-            .extra
-            .get("agent.client_request_id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map(str::to_owned);
-        let group = groups.entry(key).or_insert_with(|| ResponseGroup {
+        let group = groups.entry(response_key(entry)).or_insert(ResponseGroup {
             matches: Vec::new(),
-            ms: nanos.map(|ns| (ns / 1_000_000) as i64),
-            client_request_id: client.clone(),
+            ms: None,
+            client_request_id: None,
         });
         group.matches.push(index);
         if group.client_request_id.is_none() {
-            group.client_request_id = client;
+            group.client_request_id = entry
+                .extra
+                .get("agent.client_request_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty());
         }
         if group.ms.is_none() {
-            group.ms = nanos.map(|ns| (ns / 1_000_000) as i64);
+            group.ms = parse_nanos(&entry.time_unix_nano).map(|ns| (ns / 1_000_000) as i64);
         }
     }
     groups
 }
 
-fn pair_segments(
+fn pair_segments<'a>(
     entries: &[AgentActivityEntry],
-    segments: &[SegmentTokenData],
-) -> Vec<(SegmentTokenData, Vec<usize>)> {
-    let groups = response_groups(entries);
+    segments: &'a [SegmentTokenData],
+) -> Vec<(&'a SegmentTokenData, Vec<usize>)> {
+    use std::collections::VecDeque;
+
+    let mut groups = response_groups(entries);
     if groups.is_empty() {
         return Vec::new();
     }
     let mut used_segments = HashSet::new();
-    let mut used_keys = HashSet::new();
     let mut paired = Vec::new();
-    let mut by_request: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (index, segment) in segments.iter().enumerate() {
-        if segment.request_id.is_empty() {
-            continue;
+    let mut by_request: HashMap<&str, VecDeque<usize>> = groups
+        .values()
+        .filter_map(|group| group.client_request_id.map(|id| (id, VecDeque::new())))
+        .collect();
+    if !by_request.is_empty() {
+        for (index, segment) in segments.iter().enumerate() {
+            if let Some(matches) = by_request.get_mut(segment.request_id.as_str()) {
+                matches.push_back(index);
+            }
         }
-        by_request
-            .entry(segment.request_id.as_str())
-            .or_default()
-            .push(index);
     }
-    for (key, group) in &groups {
-        let Some(client) = &group.client_request_id else {
+    for group in groups.values_mut() {
+        let Some(index) = group
+            .client_request_id
+            .and_then(|id| by_request.get_mut(id).and_then(VecDeque::pop_front))
+        else {
             continue;
         };
-        let Some(index) = by_request.get(client.as_str()).and_then(|list| {
-            list.iter()
-                .copied()
-                .find(|index| !used_segments.contains(index))
-        }) else {
-            continue;
-        };
-        used_keys.insert(key.clone());
         used_segments.insert(index);
-        paired.push((segments[index].clone(), group.matches.clone()));
+        paired.push((&segments[index], std::mem::take(&mut group.matches)));
     }
     let mut candidates = Vec::new();
-    for (key, group) in &groups {
-        if used_keys.contains(key) || group.client_request_id.is_some() {
+    for (position, group) in groups.values().enumerate() {
+        if group.client_request_id.is_some() {
             continue;
         }
         let Some(ms) = group.ms else { continue };
@@ -446,65 +547,20 @@ fn pair_segments(
             }
             let delta = (ms - segment.response_end_ts).abs();
             if delta <= SEGMENT_JOIN_TOLERANCE_MS {
-                candidates.push((delta, key.clone(), index));
+                candidates.push((delta, position, index));
             }
         }
     }
     candidates.sort_by_key(|(delta, _, _)| *delta);
-    for (_, key, index) in candidates {
-        if used_keys.contains(&key) || used_segments.contains(&index) {
-            continue;
+    for (_, position, index) in candidates {
+        let (_, group) = groups
+            .get_index_mut(position)
+            .expect("known response group");
+        if !group.matches.is_empty() && used_segments.insert(index) {
+            paired.push((&segments[index], std::mem::take(&mut group.matches)));
         }
-        used_keys.insert(key.clone());
-        used_segments.insert(index);
-        paired.push((segments[index].clone(), groups[&key].matches.clone()));
     }
     paired
-}
-
-fn apply_intercept_usage(entries: &mut [AgentActivityEntry], tokens: &[InterceptTokenData]) {
-    if tokens.is_empty() {
-        return;
-    }
-    let mut latest: HashMap<&str, &InterceptTokenData> = HashMap::new();
-    for token in tokens {
-        if token.id.is_empty()
-            || !(token.prompt_tokens > 0 || token.completion_tokens > 0 || token.total_tokens > 0)
-        {
-            continue;
-        }
-        match latest.get(token.id.as_str()) {
-            Some(previous) if token.ts < previous.ts => {}
-            _ => {
-                latest.insert(token.id.as_str(), token);
-            }
-        }
-    }
-    for (response_id, usage) in latest {
-        let matches: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                is_name(entry, "llm.response") && entry.response_id.as_deref() == Some(response_id)
-            })
-            .map(|(index, _)| index)
-            .collect();
-        if matches.is_empty() {
-            continue;
-        }
-        let total = if usage.total_tokens > 0 {
-            usage.total_tokens
-        } else {
-            usage.prompt_tokens + usage.completion_tokens
-        };
-        entries[matches[0]].input_tokens = Some(usage.prompt_tokens);
-        entries[matches[0]].output_tokens = Some(usage.completion_tokens);
-        entries[matches[0]].total_tokens = Some(total);
-        entries[matches[0]].cache_read_input_tokens = Some(usage.cached_tokens);
-        for index in matches.iter().skip(1) {
-            zero_usage(&mut entries[*index]);
-        }
-    }
 }
 
 fn match_by_order(
@@ -772,4 +828,41 @@ fn accurate_match_ms(entry: &AgentActivityEntry) -> Option<i64> {
 
 fn match_ms(entry: &AgentActivityEntry) -> i64 {
     accurate_match_ms(entry).unwrap_or_else(|| extract_ms(entry))
+}
+
+#[cfg(test)]
+mod cli_primary_tests {
+    use super::*;
+
+    #[test]
+    fn shared_primary_index_deduplicates_each_turn_independently() {
+        let token = InterceptTokenData {
+            id: "shared-response".into(),
+            ts: 1,
+            prompt_tokens: 10,
+            completion_tokens: 1,
+            cached_tokens: 4,
+            reasoning_tokens: 0,
+            total_tokens: 0,
+        };
+        let index = CliPrimaryEnrichment::new(Some("policy"), std::slice::from_ref(&token));
+        let request: AgentActivityEntry = serde_json::from_value(serde_json::json!({
+            "event.name": "llm.request", "gen_ai.step.id": "step"
+        }))
+        .unwrap();
+        let response: AgentActivityEntry = serde_json::from_value(serde_json::json!({
+            "event.name": "llm.response", "gen_ai.response.id": "shared-response"
+        }))
+        .unwrap();
+        for _ in 0..2 {
+            let mut turn = [request.clone(), response.clone(), response.clone()];
+            index.enrich(&mut turn);
+            assert_eq!(
+                turn[0].system_instructions,
+                Some(serde_json::json!([{ "type": "text", "content": "policy" }]))
+            );
+            assert_eq!(turn[1].total_tokens, Some(11));
+            assert_eq!(turn[2].total_tokens, Some(0));
+        }
+    }
 }
