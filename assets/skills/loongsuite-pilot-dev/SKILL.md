@@ -16,7 +16,7 @@ description: Develop, debug, test, and review the Rust LoongSuite Pilot runtime 
 ## 按改动查阅
 
 - 编译、隔离调试和了解 SDK 边界，读 [架构与调试](references/runtime.md)。
-- 新增或改造 Agent，替换 JS Hook，读 [Agent 接入与二进制 Hook](references/agents.md)。支持范围和已有验收见 [Rust Agent 能力](../../../docs/zh-CN/rust-agent-capabilities.md)。
+- 新增或改造 Agent，替换 JS Hook，读 [Agent 接入与二进制 Hook](references/agents.md)。
 - 分析 CPU 或内存，修改压测及报表，读 [性能测试与报表](references/performance.md)。
 - 写测试、验收安装包或发布 SDK，读 [测试与发布验收](references/verification.md)。
 
@@ -25,4 +25,4 @@ description: Develop, debug, test, and review the Rust LoongSuite Pilot runtime 
 1. 沿 Agent 定义、部署、采集、归一化、持久化和输出定位改动。以完整 Pilot 的 `register_sdk_qoder` 为参考，让 SDK 持有受支持 Agent 的采集和进度。外壳负责宿主配置、生命周期及输出。
 2. 固定输入样本和输出契约后改最小范围。用同一版本的动态库和 `loongsuite-pilot-sdk-hook` 验收两个宿主。涉及 checkpoint、安装或 ABI 时，先写清启动、失败、恢复与交付的验收条件。
 3. 跑相关 Rust 测试及对应宿主契约。打包改动用实际 host 和动态库同版本组合验证。Qoder 数据质量是主要验收项，Codex 需要可用于开发验证。其他 Agent 按实际改动验证。
-4. 记录测试命令、提交 SHA、Agent 版本、结果和仍需实机验证的平台。临时压测产物和中间日志放工作区外，结束后清理自己创建的目录和 worktree。
+4. 记录测试命令、提交 SHA、Agent 版本、结果和仍需实机验证的平台。阶段性的 Agent 能力和验收状态保留在本地。临时压测产物和中间日志放工作区外，结束后清理自己创建的目录和 worktree。

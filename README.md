@@ -53,8 +53,6 @@ Pilot is designed to answer practical questions:
 
 ## Agent Support in the Rust Version
 
-See the [Rust agent capability and validation notes](docs/zh-CN/rust-agent-capabilities.md) for collection, deployment, interception, and benchmark coverage.
-
 The Rust version supports Qoder IDE and Qoder CLI. Other agents and Qoder variants are marked `No` until their maintainers validate the installed Rust package with the real agent and update the verified capabilities and platforms.
 
 Full Pilot and CloudShell use the same SDK and native Hook binary for Qoder IDE and Qoder CLI. Interception for the other agents is unsupported in this Rust release.

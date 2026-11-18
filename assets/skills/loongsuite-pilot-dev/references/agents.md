@@ -23,7 +23,7 @@
 
 ## 接入云壳 SDK Hook
 
-- 先核对 [Rust Agent 能力与验收状态](../../../../docs/zh-CN/rust-agent-capabilities.md)。决定是否需要进入云壳 SDK 后，再新增部署与采集入口。SDK 支持的 Agent 在 `src/sdk/agent_hooks.rs` 注册 ID、兼容别名和裁决事件，在 `src/sdk/policy.rs` 校验 profile 与来源，沿 `src/sdk/runtime.rs` 查采集入口。复用 `sdk-hook` 的传输、限时和 fail-open，实现时沿轻量函数检查链接依赖，两种壳复用一个 Hook 二进制，部署策略按各自入口配置。将完整 Pilot 已有的 Hook 命令作为兼容入口时，按正式 Node.js 回滚目标核对恢复的配置。
+- 按 Agent 的部署、采集和裁决需求判断是否需要进入云壳 SDK，再新增对应入口。SDK 支持的 Agent 在 `src/sdk/agent_hooks.rs` 注册 ID、兼容别名和裁决事件，在 `src/sdk/policy.rs` 校验 profile 与来源，沿 `src/sdk/runtime.rs` 查采集入口。复用 `sdk-hook` 的传输、限时和 fail-open，实现时沿轻量函数检查链接依赖，两种壳复用一个 Hook 二进制，部署策略按各自入口配置。将完整 Pilot 已有的 Hook 命令作为兼容入口时，按正式 Node.js 回滚目标核对恢复的配置。
 - HCD 部署观察点使用 `sdk-hook --channel observe`，它只会唤醒采集。同步判定分别使用 `cloud` 和 `local`。裁决事件要依据 Agent 当前版本的 Hook 输出契约更新 `src/sdk/hook_protocol.rs`，新增 Agent 以该 Agent 实测支持的事件为准。
 - 唤醒只能引用该实例策略中的授权源。使用 SDK 的源命名空间和采集器现有进度机制。运行时策略应能独立启停已编入的适配器。验收加上端口缺失快速放行、观察不走裁决、重启不重复、部署与清理保留用户 Hook，并记录该 Agent 加入后的库与 Hook 二进制增量。
 
