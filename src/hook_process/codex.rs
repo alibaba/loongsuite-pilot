@@ -9,7 +9,6 @@ use super::common::{
     Env, HookRequest, Obj,
 };
 use serde_json::Value;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 const AGENT_ID: &str = "codex";
@@ -24,17 +23,90 @@ pub fn run(request: &mut HookRequest<'_>) -> i32 {
         subcommand.as_str(),
         "session-start" | "user-prompt-submit" | "subagent-start" | "subagent-stop" | "stop"
     ) {
-        let input = normalized_hook_input(&read_stdin(request.env, request.stdin), &subcommand);
-        if matches!(
-            subcommand.as_str(),
-            "user-prompt-submit" | "subagent-start" | "subagent-stop" | "stop"
-        ) {
-            write_turn_span_context(request.env, &input);
-        }
-        write_wakeup_marker(request.env, &input, &subcommand);
+        publish(
+            request.env,
+            &read_stdin(request.env, request.stdin),
+            &subcommand,
+        );
     }
     write_empty(request.stdout);
     0
+}
+
+fn publish(env: &Env, input: &Obj, event: &str) -> bool {
+    let input = normalized_hook_input(input, event);
+    if matches!(
+        event,
+        "user-prompt-submit" | "subagent-start" | "subagent-stop" | "stop"
+    ) {
+        write_turn_span_context(env, &input);
+    }
+    write_wakeup_marker(env, &input, event)
+}
+
+pub(crate) fn publish_sdk_wakeup(
+    input: &Obj,
+    event: &str,
+    transcript: &Path,
+    state: &Path,
+    codex_home: &Path,
+) -> bool {
+    use crate::utils::source_access::private_path;
+    for relative in [
+        "state/codex/transcript-wakeups",
+        "state/codex/transcript-span-contexts",
+        "acp-correlate",
+    ] {
+        if private_path(&state.join(relative)).is_err() {
+            return false;
+        }
+    }
+    let normalized = normalized_hook_input(input, event);
+    let legal_id = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 128
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    };
+    let session = string_field(&normalized, "session_id");
+    let turn = string_field(&normalized, "turn_id");
+    if !legal_id(&session) || (!turn.is_empty() && !legal_id(&turn)) {
+        return false;
+    }
+    let mut env: Env = input
+        .get(crate::sdk::hook_protocol::CODEX_OBSERVE_CONTEXT)
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(key, _)| crate::sdk::hook_protocol::QODER_OBSERVE_ENV.contains(&key.as_str()))
+        .filter_map(|(key, value)| {
+            value
+                .as_str()
+                .filter(|value| value.len() <= 16384)
+                .map(|value| (key.clone(), value.to_owned()))
+        })
+        .collect();
+    env.insert(
+        "LOONGSUITE_PILOT_DATA_DIR".into(),
+        state.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "CODEX_HOME".into(),
+        codex_home.to_string_lossy().into_owned(),
+    );
+    let mut payload = input.clone();
+    let transcript = Value::String(transcript.to_string_lossy().into_owned());
+    payload.insert("transcript_path".into(), transcript.clone());
+    if event == "subagent-stop" {
+        payload.insert("agent_transcript_path".into(), transcript);
+    }
+    publish(&env, &payload, event)
+}
+
+pub(crate) fn isolated_session_dir(transcript: &Path, codex_home: &Path) -> Option<PathBuf> {
+    session_dir_from_transcript(transcript.to_str()?, codex_home)
+        .filter(|dir| dir.starts_with(codex_home.join("u")))
 }
 
 fn read_stdin(env: &Env, stdin: &[u8]) -> Obj {
@@ -109,10 +181,10 @@ fn write_turn_span_context(env: &Env, input: &Obj) {
     }
 }
 
-fn write_wakeup_marker(env: &Env, input: &Obj, hook_event: &str) {
+fn write_wakeup_marker(env: &Env, input: &Obj, hook_event: &str) -> bool {
     let session_id = string_field(input, "session_id");
     if session_id.is_empty() {
-        return;
+        return false;
     }
     let codex_home = resolve_path(env, env_get(env, "CODEX_HOME").unwrap_or(""));
     let codex_home = if env_get(env, "CODEX_HOME").is_some() {
@@ -131,9 +203,14 @@ fn write_wakeup_marker(env: &Env, input: &Obj, hook_event: &str) {
         .join("transcript-wakeups");
     let file_name = format!("{}.json", safe_path_part(&session_id));
     let marker = directory.join(&file_name);
-    let existing = fs::read_to_string(&marker)
+    let mut bytes = Vec::new();
+    let existing = crate::utils::source_access::open_under(&marker, &directory)
+        .and_then(|file| {
+            use std::io::Read;
+            file.take(64 * 1024).read_to_end(&mut bytes)
+        })
         .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        .and_then(|_| serde_json::from_slice::<Value>(&bytes).ok());
     let mut initial_turn_id = existing
         .as_ref()
         .and_then(|value| value.get("initial_turn_id"))
@@ -191,7 +268,9 @@ fn write_wakeup_marker(env: &Env, input: &Obj, hook_event: &str) {
     );
     if let Err(err) = write_atomic_json(&directory, &file_name, &Value::Object(payload)) {
         log_hook_error(env, AGENT_ID, "wakeup_write", "WAKEUP_WRITE_ERROR", &err);
+        return false;
     }
+    true
 }
 
 fn string_field(map: &Obj, key: &str) -> String {

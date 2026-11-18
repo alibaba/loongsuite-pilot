@@ -828,18 +828,36 @@ impl InputManager {
             .expect("flusher")
             .clone()
             .ok_or("Pilot output is not configured")?;
-        if let Some(result) = flusher.send_sdk_activity(rows).await {
-            let entry_count = rows.len();
-            let batch_bytes = rows.iter().map(|row| row.len() as u64).sum();
-            self.record_sdk_input(input_id, entry_count, batch_bytes);
-            return self.finish_dispatch(input_id, entry_count, batch_bytes, result);
+        let codex = matches!(input_id, "codex-transcript" | "codex-aborted-turn");
+        if !codex {
+            if let Some(result) = flusher.send_sdk_activity(rows).await {
+                let entry_count = rows.len();
+                let batch_bytes = rows.iter().map(|row| row.len() as u64).sum();
+                self.record_sdk_input(input_id, entry_count, batch_bytes);
+                return self.finish_dispatch(input_id, entry_count, batch_bytes, result);
+            }
         }
-        let entries = rows
+        let mut entries = rows
             .iter()
             .map(|row| serde_json::from_slice::<AgentActivityEntry>(row))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| "invalid SDK activity JSON")?;
-        let encoded = rows.iter().map(|row| row.to_vec()).collect();
+        let encoded = if codex {
+            // Only the full shell is authorized to inspect a Codex workspace
+            // and join its runs to upstream ACP traces.
+            enrich_canonical_entries_with_git(&mut entries).await;
+            let linker = self.trace_linker();
+            if let Some(linker) = linker {
+                linker.stamp(&mut entries).await;
+            }
+            entries
+                .iter()
+                .map(serde_json::to_vec)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?
+        } else {
+            rows.iter().map(|row| row.to_vec()).collect()
+        };
         self.accept_sdk_batch(input_id, entries, encoded).await
     }
 

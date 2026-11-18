@@ -14,6 +14,7 @@ impl AgentHook {
         Some(Self(match id {
             "qoder" => InterceptorAgent::Qoder,
             "qodercli" => InterceptorAgent::QoderCli,
+            "codex" => InterceptorAgent::Codex,
             _ => return None,
         }))
     }
@@ -27,7 +28,7 @@ impl AgentHook {
 
     pub(super) fn supports_blocking(self, event: &str) -> bool {
         match self.0 {
-            InterceptorAgent::Qoder | InterceptorAgent::QoderCli => {
+            InterceptorAgent::Qoder | InterceptorAgent::QoderCli | InterceptorAgent::Codex => {
                 matches!(event, "PreToolUse" | "PostToolUse" | "UserPromptSubmit")
             }
             _ => false,
@@ -47,28 +48,38 @@ impl AgentHook {
         settings: &Value,
         queue: &Outbox,
     ) -> bool {
+        let is_codex = self.0 == InterceptorAgent::Codex;
+        let codex_event = codex_observe_event(event);
+        let codex_prompt = is_codex && event == "UserPromptSubmit" && channel == "local";
+        if is_codex && (codex_event.is_none() || (channel != "observe" && !codex_prompt)) {
+            return false;
+        }
         let Some(plan) = settings["collector_plans"].get(self.policy_id()) else {
             return false;
         };
         let Some(data) = settings["data_dir"].as_str() else {
             return false;
         };
-        let qoder_host = (self.policy_id() == "qoder")
-            .then(|| plan.pointer("/pilot_host/data_dir").and_then(Value::as_str))
-            .flatten();
-        if qoder_host.is_some() && channel != "observe" {
+        let pilot_host = plan.pointer("/pilot_host/data_dir").and_then(Value::as_str);
+        if pilot_host.is_some() && channel != "observe" && !codex_prompt {
             return false;
         }
-        let Some(path) = payload
-            .get("transcript_path")
-            .or_else(|| payload.get("transcriptPath"))
-            .and_then(Value::as_str)
-            .filter(|path| Path::new(path).is_absolute())
-            .and_then(|path| super::policy::canonical_candidate(Path::new(path)).ok())
-        else {
+        if is_codex && plan["profile"] != "codex_rollout_v1" {
+            return false;
+        }
+        let Some(path) = (if is_codex && event == "SubagentStop" {
+            payload.get("agent_transcript_path")
+        } else {
+            None
+        })
+        .or_else(|| payload.get("transcript_path"))
+        .or_else(|| payload.get("transcriptPath"))
+        .and_then(Value::as_str)
+        .filter(|path| Path::new(path).is_absolute())
+        .and_then(|path| super::policy::canonical_candidate(Path::new(path)).ok()) else {
             return false;
         };
-        let roots: Vec<PathBuf> = plan["sources"]
+        let mut roots: Vec<PathBuf> = plan["sources"]
             .as_array()
             .into_iter()
             .flatten()
@@ -77,6 +88,15 @@ impl AgentHook {
             .collect();
         if roots.is_empty() {
             return false;
+        }
+        let codex_home = is_codex
+            .then(|| roots[0].parent())
+            .flatten()
+            .map(Path::to_path_buf);
+        if let Some(home) = codex_home.as_ref().filter(|_| pilot_host.is_some()) {
+            if let Some(sessions) = crate::hook_process::codex::isolated_session_dir(&path, home) {
+                roots.push(sessions);
+            }
         }
         let authorized = roots.iter().any(|root| path.starts_with(root));
         let scope = crate::utils::source_access::SourceScope::new(roots, 1, MAX_REQUEST);
@@ -88,7 +108,7 @@ impl AgentHook {
             );
             return false;
         }
-        let state = if let Some(host) = qoder_host {
+        let state = if let Some(host) = pilot_host {
             PathBuf::from(host)
         } else {
             let Some(namespace) = plan["namespace"].as_str() else {
@@ -104,7 +124,7 @@ impl AgentHook {
                 let mut value = Value::Object(payload.clone());
                 value["transcript_path"] = json!(path);
                 value["hook_event_name"] = json!(event);
-                if qoder_host.is_some() {
+                if pilot_host.is_some() {
                     let Some(home) = settings["home_dir"].as_str() else {
                         return false;
                     };
@@ -120,6 +140,15 @@ impl AgentHook {
                     )
                 }
             }
+            InterceptorAgent::Codex => codex_home.is_some_and(|home| {
+                crate::hook_process::codex::publish_sdk_wakeup(
+                    payload,
+                    codex_event.expect("validated Codex event"),
+                    &path,
+                    &state,
+                    &home,
+                )
+            }),
             _ => false,
         };
         if !accepted {
@@ -130,4 +159,15 @@ impl AgentHook {
         }
         accepted
     }
+}
+
+fn codex_observe_event(event: &str) -> Option<&'static str> {
+    Some(match event {
+        "SessionStart" => "session-start",
+        "UserPromptSubmit" => "user-prompt-submit",
+        "SubagentStart" => "subagent-start",
+        "SubagentStop" => "subagent-stop",
+        "Stop" => "stop",
+        _ => return None,
+    })
 }

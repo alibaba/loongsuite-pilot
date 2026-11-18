@@ -138,10 +138,23 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
         send_attempts: 0,
         reply_status: None,
     };
-    let descriptor = descriptor(&data.join(format!("sdk-hooks-{channel}.json")))?;
-    if descriptor.schema != 2 || descriptor.port == 0 || !pid_alive(descriptor.pid) {
+    let descriptor = descriptor(&data.join(format!("sdk-hooks-{channel}.json")))
+        .filter(|item| item.schema == 2 && item.port != 0 && pid_alive(item.pid));
+    let Some(descriptor) = descriptor else {
+        if configured_agent == "codex"
+            && (channel == "observe" || configured_event == Some("UserPromptSubmit"))
+        {
+            if let Some(event) = flag(&args, "--legacy-codex-event") {
+                let original = [
+                    "hook-process".to_owned(),
+                    "codex".to_owned(),
+                    event.to_owned(),
+                ];
+                return legacy?(&original).map(HookOutput::Json);
+            }
+        }
         return None;
-    }
+    };
     trace.instance = Some(descriptor.instance.clone());
     trace.status = "invalid_input";
     let mut body = Vec::new();
@@ -174,7 +187,14 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
         configured_agent
     }
     .to_owned();
-    if channel == "observe" && configured_agent == "qoder-auto" {
+    let codex_observe = configured_agent == "codex"
+        && (channel == "observe" || (channel == "local" && event == "UserPromptSubmit"));
+    if (channel == "observe" && configured_agent == "qoder-auto") || codex_observe {
+        let context_key = if configured_agent == "codex" {
+            CODEX_OBSERVE_CONTEXT
+        } else {
+            QODER_OBSERVE_CONTEXT
+        };
         let context: serde_json::Map<_, _> = QODER_OBSERVE_ENV
             .into_iter()
             .filter_map(|key| {
@@ -184,10 +204,7 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
             })
             .collect();
         if !context.is_empty() {
-            payload.insert(
-                QODER_OBSERVE_CONTEXT.into(),
-                serde_json::Value::Object(context),
-            );
+            payload.insert(context_key.into(), serde_json::Value::Object(context));
             if let Ok(encoded) = serde_json::to_vec(&payload) {
                 if encoded.len() <= MAX_REQUEST {
                     body = encoded;

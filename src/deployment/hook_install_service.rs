@@ -1608,7 +1608,7 @@ mod tests {
         );
         assert_eq!(
             def.hook.as_ref().unwrap().settings_path,
-            "~/.codex/hooks.json"
+            "$CODEX_HOME/hooks.json"
         );
         def.hook
             .as_mut()

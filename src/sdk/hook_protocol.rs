@@ -12,6 +12,7 @@ pub const REPLY_MARGIN_MS: u64 = 100;
 pub const TEMPORARY_DENIAL: &str =
     "Pilot could not complete the security check. Retry the operation.";
 pub const TRACE_LIMIT: u64 = 8 * 1024 * 1024;
+pub const CODEX_OBSERVE_CONTEXT: &str = "_pilot_codex_observe_context";
 pub const QODER_OBSERVE_CONTEXT: &str = "_pilot_qoder_observe_context";
 pub const QODER_OBSERVE_ENV: [&str; 4] = [
     "TRACEPARENT",
@@ -55,17 +56,18 @@ pub fn block_reason(reason: &str) -> &str {
 }
 
 pub fn render_block(agent: &str, event: &str, reason: &str) -> Option<String> {
-    if !matches!(agent, "qoder" | "qodercli") {
+    if !matches!(agent, "qoder" | "qodercli" | "codex") {
         return None;
     }
     let reason = block_reason(reason);
     let output = match event {
         "UserPromptSubmit" => {
-            json!({"decision":if agent=="qoder"{"block"}else{"deny"},"reason":reason})
+            json!({"decision":if agent!="qodercli"{"block"}else{"deny"},"reason":reason})
         }
         "PreToolUse" => {
             json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}})
         }
+        "PostToolUse" if agent == "codex" => json!({"decision":"block","reason":reason}),
         "PostToolUse" => {
             json!({"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedToolOutput":reason}})
         }

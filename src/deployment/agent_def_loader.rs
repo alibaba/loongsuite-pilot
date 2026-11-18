@@ -314,6 +314,16 @@ impl AgentDefLoader {
             self.env_get("HOME").filter(|home| !home.is_empty())
         }
         .unwrap_or_else(|| resolve_home("~"));
+        let codex_home = self
+            .env_get("CODEX_HOME")
+            .filter(|value| {
+                let path = Path::new(value);
+                path.is_absolute()
+                    && !path
+                        .components()
+                        .any(|part| matches!(part, std::path::Component::ParentDir))
+            })
+            .unwrap_or_else(|| "~/.codex".into());
         let local_app_data = self.env_get("LOCALAPPDATA");
         let client = self
             .doubao_listener
@@ -353,6 +363,7 @@ impl AgentDefLoader {
             .replace("$HERMES_CLI", &hermes_cli)
             .replace("$HERMES_HOME", &hermes_home)
             .replace("$PI_CODING_AGENT_DIR", &resolve_pi_coding_agent_dir(env))
+            .replace("$CODEX_HOME", &codex_home)
             .replace("$GROK_HOME", &resolve_grok_home(env))
             .replace("$DSH_HOME", &resolve_dsh_home(env));
         result = if let Some(env) = &self.env {

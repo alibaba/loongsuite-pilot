@@ -500,6 +500,14 @@ impl Orchestrator {
             (None, None)
         };
         let mut detection = self.register_all_inputs(&state_store).await;
+        if self.standalone {
+            self.register_sdk_codex(
+                &mut detection,
+                &pilot_dir,
+                &state_store,
+                interceptor_config.as_ref(),
+            );
+        }
         if self.uses_sdk_qoder() {
             self.register_sdk_qoder(
                 &mut detection,
@@ -1970,7 +1978,7 @@ impl Orchestrator {
             CopilotLogInput::check_availability,
         )
         .await;
-        if self.prepare_codex_shell_state(state_store).await {
+        if !self.standalone {
             let session_dir = std::env::var_os("CODEX_HOME")
                 .filter(|value| !value.is_empty())
                 .map(std::path::PathBuf::from)
@@ -3008,25 +3016,123 @@ impl Orchestrator {
         );
     }
 
-    async fn prepare_codex_shell_state(&self, state: &StateStore) -> bool {
-        if !self.standalone {
-            return true;
-        }
-        match super::codex_sdk_migration::migrate(Path::new(&self.data_dir), state, &self.inputs)
-            .await
-        {
-            Ok(()) => true,
-            Err(error) => {
-                logger("Orchestrator").warn(
-                    "Codex SDK state migration failed; retained for retry",
-                    Some(&fields(serde_json::json!({"error":error.to_string()}))),
-                );
-                self.emit(OrchestratorEvent::ComponentFailure {
-                    component: "codex-sdk-migration".into(),
-                    error: error.to_string(),
-                });
-                false
-            }
+    fn register_sdk_codex(
+        &self,
+        entries: &mut Vec<Arc<dyn AgentDetection>>,
+        pilot_dir: &str,
+        state_store: &Arc<StateStore>,
+        interceptor_config: Option<&crate::types::InterceptorConfig>,
+    ) {
+        let home = resolve_home("~");
+        let sessions = std::env::var_os("CODEX_HOME")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .filter(|path| {
+                path.is_absolute()
+                    && !path
+                        .components()
+                        .any(|part| matches!(part, std::path::Component::ParentDir))
+            })
+            .unwrap_or_else(|| Path::new(&home).join(".codex"))
+            .join("sessions")
+            .to_string_lossy()
+            .into_owned();
+        let wakeup = self.data_dir_join("state/codex/transcript-wakeups");
+        let disabled = serde_json::json!({"mode": "none"});
+        let local = interceptor_config.map_or(disabled, |config| serde_json::json!(config));
+        let config = self.config.agents.get("codex");
+        let rollout_owns_interrupted_turns = mode_enabled(
+            &self.bits.lock().expect("bits").modes,
+            "codex-transcript",
+            self.config
+                .listeners
+                .get("codex-transcript")
+                .is_none_or(|listener| listener.enabled),
+        );
+
+        for (input, profile) in [
+            ("codex-transcript", "codex_rollout_v1"),
+            ("codex-aborted-turn", "codex_aborted_turn_v1"),
+        ] {
+            let sdk_data = self.data_dir_join(&format!("state/standalone-{input}-sdk"));
+            let init = serde_json::json!({
+                "data_dir": sdk_data,
+                "resource_dir": pilot_dir,
+                "home_dir": home,
+                "user_id": self.config.user_id,
+            });
+            let policy = serde_json::json!({
+                "agents": ["codex"],
+                "hcd": {"agent_configs": {"codex": {"collection": {
+                    "enabled": true,
+                    "profile": profile,
+                    "allowed_roots": [&sessions, &self.data_dir],
+                    "sources": [{"id": "codex-sessions", "type": "transcript", "path": sessions}],
+                    "limits": {"poll_interval_ms": self.poll(input)
+                        .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS)},
+                    "pilot_host": {
+                        "data_dir": self.data_dir,
+                        "codex_rollout_owns_interrupted_turns": input == "codex-aborted-turn" && rollout_owns_interrupted_turns,
+                        "capture_message_content": config.and_then(|agent| agent.capture_message_content),
+                        "exclude_workspaces": self.config.privacy.as_ref()
+                            .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
+                    },
+                }}}},
+                "sdk_options": {"mask": self.config.mask, "hooks": {"local": local}},
+            });
+            let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
+                input,
+                init,
+                policy,
+                &self.inputs,
+                std::path::PathBuf::from(sdk_data),
+                state_store,
+            ));
+            let live = live_from_parts(
+                input,
+                "codex",
+                "sdk-hosted",
+                sdk,
+                |input| input.running(),
+                |input| Box::pin(async move { input.start().await }),
+                |input| Box::pin(async move { input.stop().await }),
+            );
+            self.inputs.register_input(Arc::clone(&live));
+            let watch_sessions = sessions.clone();
+            let watch_wakeup = wakeup.clone();
+            let is_transcript = input == "codex-transcript";
+            let watch = if is_transcript {
+                CodexTranscriptInput::watch_paths(Some(&wakeup), Some(&sessions))
+            } else {
+                vec![sessions.clone()]
+            };
+            let existing_state = self.data_dir_join(&format!(
+                "state/standalone-{input}-sdk/outbox/delivery.sqlite"
+            ));
+            self.push_detection(
+                entries,
+                live,
+                watch,
+                move || {
+                    let sessions = watch_sessions.clone();
+                    let wakeup = watch_wakeup.clone();
+                    let existing_state = existing_state.clone();
+                    async move {
+                        std::path::Path::new(&existing_state).is_file()
+                            || if is_transcript {
+                                CodexTranscriptInput::check_availability(
+                                    Some(&wakeup),
+                                    Some(&sessions),
+                                )
+                                .await
+                            } else {
+                                crate::utils::directory_exists(&sessions).await
+                            }
+                    }
+                },
+                1,
+                None,
+            );
         }
     }
 
@@ -3360,7 +3466,7 @@ fn listener_agent(listener: &str) -> &str {
         "cursor-hook" => "cursor",
         "claude-code-log" => "claude-code",
         "grok-build-log" => "grok-build",
-        "codex-transcript" => "codex",
+        "codex-transcript" | "codex-aborted-turn" => "codex",
         "kiro-cli-log" | "kiro-cli-session" => "kiro-cli",
         "opencode-log" => "opencode",
         "pi-coding-agent-log" => "pi-coding-agent",

@@ -23,6 +23,47 @@ pub fn run(args: &[String]) -> Option<String> {
 /// Existing installed Qoder command hooks still work while the shell
 /// transactionally reconciles their configuration to the native SDK command.
 pub fn sdk_args(args: Vec<String>) -> Vec<String> {
+    if let [command, agent, event, ..] = args.as_slice() {
+        if command == "hook-process" && agent == "codex" {
+            let (channel, event_name) = match event.as_str() {
+                "session-start" => ("observe", "SessionStart"),
+                "user-prompt-submit" => ("local", "UserPromptSubmit"),
+                "subagent-start" => ("observe", "SubagentStart"),
+                "subagent-stop" => ("observe", "SubagentStop"),
+                "stop" => ("observe", "Stop"),
+                "pre-tool-use" => ("local", "PreToolUse"),
+                "post-tool-use" => ("local", "PostToolUse"),
+                _ => return args,
+            };
+            let data = std::env::var_os("LOONGSUITE_PILOT_DATA_DIR")
+                .filter(|path| !path.is_empty())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::path::PathBuf::from(loongsuite_pilot::utils::resolve_home(
+                        "~/.loongsuite-pilot",
+                    ))
+                });
+            if !data.is_absolute() {
+                return args;
+            }
+            let data = data.join("state").join("standalone-codex-transcript-sdk");
+            return [
+                "sdk-hook",
+                "--channel",
+                channel,
+                "--agent",
+                "codex",
+                "--event",
+                event_name,
+                "--data-dir",
+                &data.to_string_lossy(),
+                "--legacy-codex-event",
+                event,
+            ]
+            .map(str::to_owned)
+            .to_vec();
+        }
+    }
     if args.first().map(String::as_str) != Some("interceptor")
         || args.get(1).map(String::as_str) != Some("hook")
     {

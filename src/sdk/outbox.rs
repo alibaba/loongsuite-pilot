@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+const CODEX_SHELL_MIGRATED: &str = "__pilot_codex_shell_migrated_v1";
+const CODEX_LEGACY_EXPORTED: &str = "__pilot_codex_legacy_exported_v1";
+
 type DeliveryRows = Vec<(i64, Vec<u8>)>;
 
 const SAVE_CHECKPOINT: &str = "INSERT INTO checkpoint VALUES(?1,?2)
@@ -442,11 +445,84 @@ impl Outbox {
         }
         Ok(())
     }
-    pub(crate) fn saved_checkpoints(&self) -> anyhow::Result<Vec<(String, String)>> {
+    #[cfg(test)]
+    fn saved_checkpoints(&self) -> anyhow::Result<Vec<(String, String)>> {
         let db = self.db.lock().unwrap();
-        let mut stmt = db.prepare("SELECT source,json FROM checkpoint")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut statement = db.prepare("SELECT source,json FROM checkpoint")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The old shell marks its journal after taking ownership. Once a clean
+    /// export completes, the legacy installation may also advance the cursor.
+    /// Otherwise SQLite remains authoritative, including historically pending
+    /// bytes from the first version of the Codex SDK.
+    pub(super) fn prepare_codex_checkpoint(
+        &self,
+        source: &str,
+        read_shell_checkpoint: impl FnOnce() -> anyhow::Result<Option<String>>,
+    ) -> anyhow::Result<Option<String>> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let handed_off = Self::find_checkpoint(&tx, CODEX_SHELL_MIGRATED)?.is_some()
+            || Self::find_checkpoint(&tx, CODEX_LEGACY_EXPORTED)?.is_some();
+        if handed_off {
+            let pending: i64 =
+                tx.query_row("SELECT events FROM queue_size", [], |row| row.get(0))?;
+            anyhow::ensure!(
+                pending == 0,
+                "Codex handoff retains unacknowledged activity"
+            );
+            let checkpoint = read_shell_checkpoint()?;
+            tx.execute("DELETE FROM checkpoint", [])?;
+            if let Some(text) = checkpoint.as_deref() {
+                tx.execute(SAVE_CHECKPOINT, params![source, text])?;
+            }
+            tx.commit()?;
+            return Ok(checkpoint);
+        }
+        let mut checkpoints = {
+            let mut statement = tx.prepare("SELECT json FROM checkpoint WHERE source<>?1")?;
+            let rows = statement.query_map([source], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        if let Some(current) = Self::find_checkpoint(&tx, source)? {
+            checkpoints.push(current);
+        }
+        if checkpoints.is_empty() {
+            return Ok(None);
+        }
+        let mut merged = serde_json::Map::new();
+        for checkpoint in checkpoints {
+            for (key, value) in serde_json::from_str::<serde_json::Map<String, Value>>(&checkpoint)?
+            {
+                if let Some(previous) = merged.insert(key, value.clone()) {
+                    anyhow::ensure!(
+                        previous == value,
+                        "conflicting Codex SDK source checkpoints"
+                    );
+                }
+            }
+        }
+        let text = Value::Object(merged).to_string();
+        tx.execute("DELETE FROM checkpoint WHERE source<>?1", [source])?;
+        tx.execute(SAVE_CHECKPOINT, params![source, text])?;
+        tx.commit()?;
+        Ok(Some(text))
+    }
+
+    pub(crate) fn mark_codex_checkpoint_exported(root: &Path) -> anyhow::Result<()> {
+        let mut db = Connection::open_with_flags(
+            Self::database_path(root)?,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        db.busy_timeout(Duration::from_secs(1))?;
+        let tx = db.transaction()?;
+        let pending: i64 = tx.query_row("SELECT events FROM queue_size", [], |row| row.get(0))?;
+        anyhow::ensure!(pending == 0, "Codex activity remains queued");
+        tx.execute(SAVE_CHECKPOINT, params![CODEX_LEGACY_EXPORTED, "{}"])?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn checkpoint(&self, source: &str, text: &str) -> anyhow::Result<()> {
@@ -659,6 +735,7 @@ impl Outbox {
         Ok((rows, Duration::ZERO))
     }
 
+    #[cfg(test)]
     pub(crate) fn read_batch(&self, options: &Delivery) -> anyhow::Result<(DeliveryRows, i64)> {
         Self::select_batch(&self.db.lock().unwrap(), options)
     }

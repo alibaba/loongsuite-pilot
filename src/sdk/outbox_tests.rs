@@ -418,3 +418,42 @@ async fn trace_gauges_use_durable_queue_counters_and_do_not_fabricate_failed_rea
     assert_eq!(row["collection_status"], "unavailable");
     assert!(row.get("pending_records").is_none());
 }
+
+#[test]
+fn codex_checkpoint_rebinds_old_sdk_pending_bytes_then_admits_a_legacy_handoff() {
+    let root = tempfile::tempdir().unwrap();
+    let queue = Outbox::open(root.path(), settings()).unwrap();
+    let old = r#"{"codex-transcript:rollout":{"lastOffset":22,"future":true}}"#;
+    let pending = br#"{"event.id":"historical-codex","event.name":"llm.request"}"#;
+    queue.checkpoint("previous-sdk-source", old).unwrap();
+    queue.enqueue_hook(pending).unwrap();
+
+    assert_eq!(
+        queue
+            .prepare_codex_checkpoint("new-source", || Ok(None))
+            .unwrap()
+            .as_deref(),
+        Some(old)
+    );
+    let rows = queue.read_batch(&settings()).unwrap().0;
+    assert_eq!(rows[0].1, pending);
+    assert!(Outbox::mark_codex_checkpoint_exported(root.path()).is_err());
+    queue.ack(&rows).unwrap();
+
+    Outbox::mark_codex_checkpoint_exported(root.path()).unwrap();
+    assert!(queue
+        .prepare_codex_checkpoint("new-source", || anyhow::bail!("corrupt legacy state"))
+        .is_err());
+    let newer = r#"{"codex-transcript:rollout":{"lastOffset":27,"future":true}}"#;
+    assert_eq!(
+        queue
+            .prepare_codex_checkpoint("new-source", || Ok(Some(newer.to_owned())))
+            .unwrap()
+            .as_deref(),
+        Some(newer)
+    );
+    assert_eq!(
+        queue.saved_checkpoints().unwrap(),
+        vec![("new-source".to_owned(), newer.to_owned())]
+    );
+}

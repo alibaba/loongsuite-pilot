@@ -92,7 +92,11 @@ Linux 动态加载器可能因为外部调用线程上的线程局部存储（TL
 
 路径也可按 `linux`、`darwin`、`windows` 提供平台对象。SDK 校验实际打开的文件和目录边界，拒绝采集中的符号链接或 reparse 跳转。资源目录不授予额外的采集权限。源暂时不存在时报告 waiting，不创建 Agent 的源目录；出现后继续启动。来源或 profile 改变会使用新的进度命名空间；限额、脱敏参数调整保留来源身份，只重建受影响的输入。
 
-云壳 SDK 只支持 Qoder。Codex 的 rollout 和中止回合补采由完整 Pilot 外壳运行，其他 Agent 的采集继续走外壳。Qoder 的 `hook_jsonl` 是现有 `qoder-YYYY-MM-DD.jsonl` 历史事件目录，最多一个；`transcript` 是授权的原生 transcript 目录，需通过 SDK Hook 发布现有 Qoder 唤醒元数据。还可显式提供 `sqlite`、`segments`、`intercept` Token 来源。未列出的默认目录不会作为兜底读取。
+云壳 SDK 只支持 Qoder。其他 Agent 按各自的接入方式运行。Qoder 的 `hook_jsonl` 是现有 `qoder-YYYY-MM-DD.jsonl` 历史事件目录，最多一个；`transcript` 是授权的原生 transcript 目录，需通过 SDK Hook 发布现有 Qoder 唤醒元数据。还可显式提供 `sqlite`、`segments`、`intercept` Token 来源。未列出的默认目录不会作为兜底读取。
+
+开发验证可用 `codex_rollout_v1` 加载 Codex。HCD 只接受一个授权的 `transcript` 目录，例如显式 `CODEX_HOME` 下的 `sessions`。完整 Pilot 也通过 SDK 使用独立的中断补采 profile，并继续管理 Codex 的用户／系统 Hook、信任记录与输出。自定义 `CODEX_HOME` 通过启动 Pilot 的绝对路径环境变量授权；SDK 读取该目录内的会话，收集通知与 span 上下文各自保留在 Pilot 的状态目录。
+
+共享原生 Hook 对 Codex 支持 `UserPromptSubmit`、`PreToolUse` 和 `PostToolUse`。提示提交可拒绝发送，工具调用前可拒绝支持 Hook 的工具，调用完成后可将原始结果替换为裁决反馈。已产生的文件等副作用会保留。嵌入调试可用 `loongsuite-pilot-sdk-hook sdk-hook --agent codex --event <event> --channel <observe|local> --data-dir <sdk-data>`。宿主安装这些调试命令并处理 Codex 信任。
 
 启动普通版 Qoder CLI 时在进程环境中设置 `QODER_EXPOSE_TOKEN_USAGE=true`，SDK 直接从授权 transcript 的逐响应 `message.usage` 读取真实用量。Qoder CLI 1.1.76 已验证。完整 Pilot 的既有 Unix 启动入口会设置该变量，云壳管理 Qoder 进程时应在启动时传入。Qoder 设置文件里的 `env` 对该开关无效。没有正数用量的原生占位记录不作为计量来源。现有诊断 segments 和历史 sidecar 仍可用于兼容读取，Qoder IDE 沿用 SQLite。
 

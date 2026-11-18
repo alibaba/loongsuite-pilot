@@ -492,13 +492,13 @@ fn c_header_and_real_host_example_match_the_exported_table() {
 }
 
 #[test]
-fn cloud_sdk_rejects_codex_without_replacing_the_running_policy() {
+fn sdk_rejects_invalid_codex_sources_without_replacing_the_running_policy() {
     let root = tempfile::tempdir().unwrap();
     let mut host = Host::start(root.path(), empty_policy(), Box::default());
     host.ready();
     let policy = json!({"agents":["codex"],"hcd":{"agent_configs":{"codex":{"collection":{
         "enabled":true,"profile":"codex_rollout_v1","allowed_roots":[root.path()],
-        "sources":[{"id":"rollout","type":"transcript","path":root.path()}]
+        "sources":[{"id":"rollout","type":"sqlite","path":root.path()}]
     }}}}});
     assert_eq!(host.apply(policy).0, BAD_ARGUMENT);
     assert_eq!(host.snapshot()["effective_version"], "original");
@@ -1744,4 +1744,93 @@ fn cloud_bin_retries_a_lost_first_datagram_with_the_same_request_id() {
     assert!(logs[0]["send_attempts"].as_u64().unwrap() >= 2);
     std::fs::write(descriptor_path, saved).unwrap();
     host.stop();
+}
+
+#[test]
+fn codex_sdk_observe_delivery_retry_and_interception_share_the_native_library() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let sessions = root_path.join("codex/sessions");
+    let day = sessions.join("2026/08/07");
+    std::fs::create_dir_all(&day).unwrap();
+    let data = root_path.join("sdk");
+    let session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let rollout = day.join(format!("rollout-2026-08-07T10-00-00-{session}.jsonl"));
+    let policy = json!({"agents":["codex"],"hcd":{"agent_configs":{"codex":{"collection":{
+        "enabled":true,"profile":"codex_rollout_v1","allowed_roots":[sessions],
+        "sources":[{"id":"rollout","type":"transcript","path":sessions}],
+        "limits":{"poll_interval_ms":60000},
+    }}}},"sdk_options":{"delivery":{"flush_interval_ms":10},"hooks":{
+        "local":{"mode":"custom","types":["cloudAccessKey"]}
+    }}});
+    let infile = include_str!("fixtures/codex-subagent/rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
+    let (header, activity) = infile.split_once('\n').unwrap();
+    std::fs::write(&rollout, format!("{header}\n")).unwrap();
+    let ctx = Box::<Context>::default();
+    ctx.retry.store(true, Ordering::SeqCst);
+    let mut host = Host::start(&data, policy.clone(), ctx);
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout)
+        .unwrap()
+        .write_all(activity.as_bytes())
+        .unwrap();
+    let output = sdk_hook_command(
+        &data,
+        "observe",
+        "codex",
+        "Stop",
+        &json!({"session_id":session,"transcript_path":rollout}),
+    )
+    .wait_with_output()
+    .unwrap();
+    assert!(output.status.success() && output.stdout.is_empty());
+    until(|| {
+        host.snapshot()["delivery"]["pending_events"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    });
+    until(|| !host.ctx.rows.lock().unwrap().is_empty());
+    let original = host.ctx.rows.lock().unwrap()[0].clone();
+    let first: Value = serde_json::from_slice(&original).unwrap();
+    assert_eq!(first["gen_ai.session.id"], session);
+    assert!(first["event.id"].is_string());
+
+    for (channel, event, payload) in [
+        (
+            "local",
+            "UserPromptSubmit",
+            json!({"prompt":"LTAI1234567890ABCD"}),
+        ),
+        (
+            "cloud",
+            "PreToolUse",
+            json!({"tool_name":"Bash","tool_input":{"command":"echo blocked"}}),
+        ),
+        (
+            "local",
+            "PostToolUse",
+            json!({"tool_name":"Bash","tool_response":"LTAI1234567890ABCD"}),
+        ),
+    ] {
+        let output = sdk_hook_command(&data, channel, "codex", event, &payload)
+            .wait_with_output()
+            .unwrap();
+        assert!(output.status.success());
+        let verdict: Value = serde_json::from_slice(&output.stdout).unwrap();
+        if event == "PreToolUse" {
+            assert_eq!(verdict["hookSpecificOutput"]["permissionDecision"], "deny");
+        } else {
+            assert_eq!(verdict["decision"], "block");
+        }
+    }
+    host.stop();
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| !resumed.ctx.rows.lock().unwrap().is_empty());
+    assert_eq!(resumed.ctx.rows.lock().unwrap()[0], original);
+    until(|| resumed.snapshot()["delivery"]["pending_events"] == 0);
+    resumed.stop();
 }
