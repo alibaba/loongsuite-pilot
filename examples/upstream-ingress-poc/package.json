@@ -8,8 +8,9 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.7.0",
+    "@anthropic-ai/claude-agent-sdk": "0.3.325",
     "@openai/codex-sdk": "0.169.0",
     "@qoder-ai/qoder-agent-sdk": "1.0.59",
-    "zod": "3.25.76"
+    "zod": "4.6.5"
   }
 }

@@ -10,6 +10,7 @@ import { ROOT_CONTEXT, SpanKind, createTraceState, defaultTextMapSetter, trace }
 import { ExportResultCode, W3CTraceContextPropagator } from '@opentelemetry/core';
 import { BasicTracerProvider, type ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { Codex } from '@openai/codex-sdk';
+import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk';
 import { query, qodercliAuth, shutdownDaemon } from '@qoder-ai/qoder-agent-sdk';
 import { ClientSideConnection, PROTOCOL_VERSION, ndJsonStream } from '@agentclientprotocol/sdk';
 import { bindUpstreamTurn } from '../../assets/hooks/shared/upstream-ingress.mjs';
@@ -182,6 +183,74 @@ async function codexSdkPoc() {
     assert.equal(result.resumed, true);
     await verify(label, codexRecords(result.sessionId, result.nativeTurnId, result.prompt),
       { ...parent, state: `poc=${label}` });
+    parent.caller.end();
+  }
+}
+
+async function claudeSdkPoc() {
+  const sessionId = randomUUID();
+  const transcriptPath = path.join(dataDir, `${sessionId}.jsonl`);
+  const logDir = path.join(dataDir, 'logs', 'claude-code');
+  const readRecords = (): AgentActivityEntry[] => !fs.existsSync(logDir) ? [] :
+    fs.readdirSync(logDir).filter(file => file.endsWith('.jsonl')).flatMap(file =>
+      fs.readFileSync(path.join(logDir, file), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)));
+
+  for (let index = 0; index < 3; index += 1) {
+    const label = `claudesdk${index + 1}`;
+    const parent = carrierFor(label);
+    const requestId = randomUUID();
+    const omitPromptId = index === 2;
+    const env = parent.ingress.childEnv(fixtureEnv, { POC_SESSION_ID: sessionId, POC_REQUEST_ID: requestId,
+      POC_DATA_DIR: dataDir, POC_TRANSCRIPT_PATH: transcriptPath, ...(omitPromptId ? { POC_OMIT_PROMPT_ID: '1' } : {}) });
+    let binding: { recorded: boolean; reason?: string } | undefined;
+    let receivedPromptId: string | undefined;
+    const request = claudeQuery({ prompt: text, options: { resume: sessionId, env,
+      pathToClaudeCodeExecutable: path.join(sourceDir, 'claude-fixture.mjs'),
+      hooks: { UserPromptSubmit: [{ hooks: [async input => {
+        assert.equal(input.session_id, sessionId);
+        receivedPromptId = input.prompt_id;
+        binding = parent.ingress.bindNative({ agentId: 'claude-code', sessionId: input.session_id,
+          nativeTurnId: input.prompt_id, dataDir });
+        return {};
+      }] }] } } });
+    const events = [];
+    for await (const event of request) events.push(event);
+    assert.ok(events.some(event => event.type === 'result' && event.subtype === 'success' && event.result === 'fixture response'));
+    const wire = JSON.parse(fs.readFileSync(path.join(dataDir, `${requestId}.json`), 'utf8'));
+    assert.equal(wire.sessionId, sessionId);
+    assert.equal(wire.prompt, text);
+    assert.ok(wire.args.includes('--resume') || wire.args.includes(`--resume=${sessionId}`),
+      `${label}: SDK did not pass --resume: ${JSON.stringify(wire.args)}`);
+    assert.equal(wire.traceparent, parent.carrier.traceparent);
+    assert.equal(wire.tracestate, parent.carrier.tracestate);
+    assert.equal(receivedPromptId, wire.nativeTurnId);
+    assert.equal(binding?.recorded, !omitPromptId, `${label}: binding result ${JSON.stringify(binding)}`);
+
+    const timestamp = new Date().toISOString();
+    const rows = [{ type: 'user', timestamp, ...(receivedPromptId ? { promptId: receivedPromptId } : {}),
+      message: { role: 'user', content: [{ type: 'text', text }] } },
+    { type: 'assistant', timestamp, message: { id: `response-${requestId}`, model: 'fixture-model',
+      role: 'assistant', content: [{ type: 'text', text: 'fixture response' }],
+      usage: { input_tokens: 10, output_tokens: 3 }, stop_reason: 'end_turn' } }];
+    fs.appendFileSync(transcriptPath, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
+    const previousIds = new Set(readRecords().map(record => record['event.id']));
+    const stop = { session_id: sessionId, ...(receivedPromptId ? { prompt_id: receivedPromptId } : {}),
+      transcript_path: transcriptPath, stop_reason: 'end_turn' };
+    await runProcess(process.execPath, [path.join(sourceDir, '../../assets/hooks/claude-code-hook-processor.mjs'), 'stop'],
+      { ...fixtureEnv, LOONGSUITE_PILOT_DATA_DIR: dataDir }, JSON.stringify(stop));
+    const records = readRecords().filter(record => !previousIds.has(record['event.id']));
+    assert.ok(records.length > 0, `${label}: Claude processor emitted no records`);
+    if (omitPromptId) {
+      assert.ok(records.every(record => !record['agent.pilot.correlation.native_turn_id']));
+      const localTraceId = records[0].trace_id;
+      await new TraceLinker(new CorrelationStore(path.join(dataDir, 'acp-correlate')), { retries: 0 }).stamp(records);
+      assert.equal(records[0].trace_id, localTraceId);
+      assert.notEqual(records[0].trace_id, parent.traceId);
+      summaries.push({ scenario: 'claudesdk-missing-prompt-id', pass: true });
+    } else {
+      assert.ok(records.every(record => record['agent.pilot.correlation.native_turn_id'] === receivedPromptId));
+      await verify(label, records, { ...parent, state: `poc=${label}` });
+    }
     parent.caller.end();
   }
 }
@@ -364,6 +433,7 @@ try {
   await webCliPoc();
   await pythonCliPoc();
   await codexSdkPoc();
+  await claudeSdkPoc();
   await qoderSdkPoc();
   await acpPoc();
   await negativePoc();

@@ -48,17 +48,18 @@ ACP `_meta` 只负责把 carrier 送到 Agent 端，不等于 Pilot 已收到。
 
 POC 的延迟绑定测试只验证绑定发生在发布前时可以成功，不代表完整暂存队列已经实现。
 
-## 四个可运行 POC
+## 可运行 POC
 
-代码位于 [examples/upstream-ingress-poc](../../examples/upstream-ingress-poc/README.md)。四组都复用同一个实验性 `captureIngress` / `bindIngress`，最终进入 PR #615 的真实 `TraceLinker` 和 `OtlpTraceFlusher`：
+代码位于 [examples/upstream-ingress-poc](../../examples/upstream-ingress-poc/README.md)。这些样例复用同一个实验性 `captureIngress` / `bindIngress`，最终进入 PR #615 的真实 `TraceLinker` 和 `OtlpTraceFlusher`：
 
 1. **Web → CLI**：真实本地 HTTP 请求和子进程，重复 session、重复 prompt、并发请求各自对应正确上游。
    另外用官方 Python OTel API 构造当前 Context，通过 Python propagator 和子进程 env 验证同一条路径；父 SpanContext 是合成的，不能等同真实 Python 探针验收。
 2. **Codex SDK**：真实公开 SDK 调用、fixture CLI；两次 resume 同一 session，分别使用各自父节点。
-3. **Qoder SDK**：真实公开 SDK 和一个共享 daemon 连接、fixture daemon；同 session 的两条消息 UUID 不同，实际 Pilot Qoder transcript collector 生成事件后，由 POC 薄适配补原生 alias。
-4. **ACP**：真实 ACP TypeScript SDK 客户端和服务端，通过 stdio 传 `_meta`；fixture Agent 在生成原生 turn 时调用同一个绑定能力。
+3. **Claude Agent SDK**：真实公开 SDK 注册 UserPromptSubmit 回调，fixture CLI 提供 session 和 prompt ID；两次恢复同一 session，分别绑定对应请求，再由真实 Pilot Claude Hook processor 生成事件。缺少 prompt ID 时不按轮次绑定。
+4. **Qoder SDK**：真实公开 SDK 和一个共享 daemon 连接、fixture daemon；同 session 的两条消息 UUID 不同，实际 Pilot Qoder transcript collector 生成事件后，由 POC 薄适配补原生 alias。
+5. **ACP**：真实 ACP TypeScript SDK 客户端和服务端，通过 stdio 传 `_meta`；fixture Agent 在生成原生 turn 时调用同一个绑定能力。
 
-附加检查覆盖错误 carrier、缺失身份、重复绑定、冲突 parent、清除旧 env、发布前绑定以及 unsampled parent。每个成功链路同时检查 traceId、ENTRY 的真实 parent、`tracestate` 与最终 Span。fixture Agent、合成 transcript 和 POC 手工补 alias 不等于真实 Agent 的安装态端到端验收。
+附加检查覆盖错误 carrier、缺失身份、重复绑定、冲突 parent、清除旧 env、发布前绑定以及 unsampled parent。每个成功链路同时检查 traceId、ENTRY 的真实 parent、`tracestate` 与最终 Span。fixture Agent、合成 transcript 和 POC 手工补 alias 不等于真实 Agent 的安装态端到端验收；Claude 样例也未验证真实 CLI 是否在目标版本中同时提供一致的 prompt ID。
 
 ## 生产落地顺序
 

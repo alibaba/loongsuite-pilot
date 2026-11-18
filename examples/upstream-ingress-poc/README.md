@@ -1,12 +1,13 @@
 # Upstream trace ingress prototypes
 
-This directory contains four executable prototypes for one shared request-scoped W3C bridge:
+This directory contains executable prototypes for one shared request-scoped W3C bridge:
 
 | Prototype | Actual components | Fixture boundary |
 | --- | --- | --- |
 | HTTP → CLI | HTTP server, OTel propagator, child process, Pilot linker and OTLP flusher | Agent CLI, Hook notification and transcript are fixtures |
 | Python OTel → CLI | Official Python OpenTelemetry API and propagator, child process, Pilot linker and OTLP flusher | Python uses a synthetic active SpanContext; Agent CLI and transcript are fixtures |
 | Codex SDK | Published Codex TypeScript SDK, Pilot Codex transcript builder, linker and OTLP flusher | The SDK launches a fixture CLI; the generic native-turn field is added by the prototype adapter |
+| Claude Agent SDK | Published Claude TypeScript SDK, its UserPromptSubmit callback, Pilot Claude Hook processor, linker and OTLP flusher | The SDK launches a fixture CLI and the transcript is synthetic; real CLI/Hook identity preservation is not established |
 | Qoder SDK | Published Qoder TypeScript SDK, shared daemon transport, Pilot Qoder transcript collector, linker and OTLP flusher | A fixture daemon preserves the user-message UUID; the generic native-turn field is added by the prototype adapter |
 | ACP | Published ACP TypeScript SDK on both sides of a stdio connection, Pilot linker and OTLP flusher | The ACP server is a fixture Agent that binds its generated native turn ID |
 
@@ -19,11 +20,11 @@ From the repository root, install the existing Pilot development dependencies. T
 ```sh
 npm install
 cd examples/upstream-ingress-poc
-npm install --ignore-scripts
+npm install --ignore-scripts --omit=optional
 npm run poc
 ```
 
-No account, network model call, or shared Agent settings are needed for the prototype. `--ignore-scripts` prevents the Qoder SDK from downloading a native CLI that the fixture does not use. The HTTP server binds to loopback. The final JSON reports each case, its caller/ENTRY IDs, `tracestate`, event count and span count. Set `POC_EVIDENCE_FILE` to save that JSON to a file.
+No account, network model call, or shared Agent settings are needed for the prototype. `--ignore-scripts --omit=optional` skips native CLI downloads that the fixtures do not use. The HTTP server binds to loopback. The final JSON reports each case, its caller/ENTRY IDs, `tracestate`, event count and span count. Set `POC_EVIDENCE_FILE` to save that JSON to a file.
 
 The Python case additionally needs `opentelemetry-api` in the selected Python environment. Set `POC_PYTHON` to select its interpreter. If the dependency is absent, the runner reports this case as `SKIP`; it does not count it as passed. `POC_PYTHONPATH` can supply an existing package path for an isolated test.
 
@@ -31,6 +32,7 @@ The run checks:
 
 - HTTP context extraction and propagation into separate child-process environments; two requests reuse the same session and two other requests run concurrently.
 - Two Codex SDK calls that resume the same session, each with a separately captured environment.
+- Two Claude Agent SDK calls that resume the same session. Their UserPromptSubmit callbacks bind separate request contexts using the supplied prompt ID, and the actual Claude Hook processor generates the matching Pilot events. A missing prompt ID remains unbound.
 - Two Qoder SDK requests using the same daemon and session, with distinct message UUIDs and identical prompt text.
 - Two ACP prompt messages on the same session, with W3C fields in `_meta` and a receiver-side binding before publication.
 - Missing identity, invalid carrier, conflicting bindings, stale environment cleanup, binding before publication, and an unsampled parent.
