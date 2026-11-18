@@ -55,9 +55,9 @@ Pilot is designed to answer practical questions:
 
 The Rust version supports Qoder IDE and Qoder CLI. Other agents and Qoder variants are marked `No` until their maintainers validate the installed Rust package with the real agent and update the verified capabilities and platforms.
 
-Full Pilot and CloudShell use the same SDK and native Hook binary for Qoder IDE and Qoder CLI. Interception for the other agents is unsupported in this Rust release.
+Full Pilot and CloudShell use the same SDK and native Hook binary for Qoder IDE and Qoder CLI.
 
-CloudShell SDK supports Qoder collection and interception. Full Pilot handles the other native collectors in its executable, including Codex for developer validation.
+Full Pilot uses the shared SDK for Codex rollout collection, interrupted-turn recovery, and native Hook decisions in developer validation. CloudShell delivery covers Qoder.
 
 | Agent         | Integration               | Trace Export | Log Export | Token Usage | Conversation / Tool Calls |
 | ------------- | ------------------------- | ------------ | ---------- | ----------- | ------------------------- |

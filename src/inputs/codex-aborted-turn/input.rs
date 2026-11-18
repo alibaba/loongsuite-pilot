@@ -516,7 +516,7 @@ async fn discover_session_files(session_dir: &str) -> Vec<String> {
 }
 
 async fn collect_rollout_files(dir: &str, files: &mut Vec<String>) {
-    let mut entries = match tokio::fs::read_dir(dir).await {
+    let mut entries = match crate::utils::source_access::read_dir_async(dir).await {
         Ok(entries) => entries,
         Err(_) => return,
     };
@@ -649,12 +649,22 @@ fn save_checkpoint(rt: &InputRuntime, key: &str, checkpoint: &CodexAbortedCheckp
 }
 
 async fn has_hook_state(hook_state_dir: &str, session_id: &str) -> bool {
-    tokio::fs::metadata(Path::new(hook_state_dir).join(format!("{session_id}.json")))
-        .await
-        .is_ok()
+    if session_id.is_empty()
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return false;
+    }
+    let path = Path::new(hook_state_dir).join(format!("{session_id}.json"));
+    crate::utils::source_access::check(&path).is_ok() && tokio::fs::metadata(path).await.is_ok()
 }
 
 async fn write_hook_gap(dir: &str, completed: &CodexCompletedTurn, now: f64) -> Result<(), String> {
+    if crate::utils::source_access::current().is_some() {
+        crate::utils::source_access::private_path(Path::new(dir))
+            .map_err(|error| error.to_string())?;
+    }
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|error| error.to_string())?;
@@ -684,6 +694,10 @@ async fn write_recovery_failure(
     turn_id: &str,
     reason: &str,
 ) -> Result<(), String> {
+    if crate::utils::source_access::current().is_some() {
+        crate::utils::source_access::private_path(Path::new(dir))
+            .map_err(|error| error.to_string())?;
+    }
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|error| error.to_string())?;
@@ -702,6 +716,9 @@ async fn write_recovery_failure(
 
 async fn append_line(path: &Path, value: &Value) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
+    if crate::utils::source_access::current().is_some() {
+        crate::utils::source_access::private_path(path).map_err(|error| error.to_string())?;
+    }
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -812,14 +829,10 @@ async fn open_rollout_file(
     tokio::fs::File,
     crate::utils::file_identity::OpenedFileIdentity,
 )> {
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let file = std::fs::File::open(path)?;
-        let identity = crate::utils::file_identity::identity_from_open(&file)?;
-        Ok((tokio::fs::File::from_std(file), identity))
-    })
-    .await
-    .map_err(std::io::Error::other)?
+    let file = crate::utils::source_access::open_async(path).await?;
+    let file = file.into_std().await;
+    let identity = crate::utils::file_identity::identity_from_open(&file)?;
+    Ok((tokio::fs::File::from_std(file), identity))
 }
 
 #[cfg(test)]

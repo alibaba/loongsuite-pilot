@@ -202,6 +202,20 @@ impl Context {
         if namespace.len() != 64 || !namespace.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("SDK returned an invalid source namespace".into());
         }
+        let is_codex = self.input.starts_with("codex-");
+        let _handoff_lock = if is_codex {
+            let path = self.sdk_data.join("collector.lock");
+            crate::utils::source_access::private_path(&path).map_err(|err| err.to_string())?;
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map_err(|err| err.to_string())?;
+            fs2::FileExt::try_lock_exclusive(&lock).map_err(|err| err.to_string())?;
+            Some(lock)
+        } else {
+            None
+        };
         let checkpoint = StateStore::new(
             self.sdk_data
                 .join("sources")
@@ -231,6 +245,12 @@ impl Context {
             }
             if imported {
                 legacy.save().await.map_err(|error| error.to_string())?;
+            }
+            if is_codex {
+                crate::sdk::outbox::Outbox::mark_codex_checkpoint_exported(
+                    &self.sdk_data.join("outbox"),
+                )
+                .map_err(|error| error.to_string())?;
             }
             Ok(())
         })

@@ -74,6 +74,9 @@ async fn collect_rollout_files_observed(
     dir_mtimes: &mut Vec<(String, i64)>,
     observed: &(dyn Fn(&str) + Send + Sync),
 ) -> bool {
+    if crate::utils::source_access::check(dir).is_err() {
+        return false;
+    }
     // Snapshot before enumeration so publication during read_dir invalidates the cache.
     let Ok(meta) = fs::metadata(dir).await else {
         return false;
@@ -85,7 +88,7 @@ async fn collect_rollout_files_observed(
     if !discovery_test_point(dir, DiscoveryPoint::BeforeRead) {
         return false;
     }
-    let mut entries = match fs::read_dir(dir).await {
+    let mut entries = match crate::utils::source_access::read_dir_async(dir).await {
         Ok(entries) => entries,
         Err(_) => return false,
     };
@@ -141,7 +144,7 @@ pub async fn collect_recent_rollout_files(
         return;
     }
     budget.remaining_directories -= 1;
-    let mut entries = match fs::read_dir(dir).await {
+    let mut entries = match crate::utils::source_access::read_dir_async(dir).await {
         Ok(entries) => entries,
         Err(_) => return,
     };
@@ -213,7 +216,7 @@ pub fn is_codex_session_date_directory(name: &str, depth: usize) -> bool {
 
 pub async fn read_codex_wakeup_roots(marker_path: &str, now: i64) -> [Vec<String>; 3] {
     let mut roots = [Vec::new(), Vec::new(), Vec::new()];
-    let Ok(raw) = fs::read_to_string(marker_path).await else {
+    let Ok(raw) = crate::utils::source_access::read_to_string(marker_path).await else {
         return roots;
     };
     let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {

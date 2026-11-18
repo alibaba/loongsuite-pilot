@@ -117,6 +117,14 @@ pub struct PilotHostState {
     pub exclude_workspaces: Vec<String>,
 }
 impl AgentPlan {
+    pub(super) fn checkpoint_key(&self) -> &'static str {
+        match self.profile.as_str() {
+            "codex_rollout_v1" => "codex-transcript",
+            "codex_aborted_turn_v1" => "codex-aborted-turn",
+            _ => "qoder-trace",
+        }
+    }
+
     pub fn namespace(&self) -> String {
         use sha2::{Digest, Sha256};
         let mut bytes = serde_json::to_vec(&(
@@ -295,7 +303,10 @@ impl Policy {
             let agent = name
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("agent name must be a string"))?;
-            anyhow::ensure!(agent == "qoder", "unsupported SDK agent: {agent}");
+            anyhow::ensure!(
+                matches!(agent, "qoder" | "codex"),
+                "unsupported SDK agent: {agent}"
+            );
             anyhow::ensure!(seen.insert(agent), "duplicate agent");
             let collection = configs
                 .get(agent)
@@ -329,7 +340,11 @@ impl Policy {
                 .and_then(Value::as_str)
                 .unwrap_or("");
             anyhow::ensure!(
-                profile == "qoder_trace_v1",
+                matches!(
+                    (agent, profile),
+                    ("qoder", "qoder_trace_v1")
+                        | ("codex", "codex_rollout_v1" | "codex_aborted_turn_v1")
+                ),
                 "unsupported agent/profile: {agent}/{profile}"
             );
             let roots = collection
@@ -362,6 +377,14 @@ impl Policy {
                     Ok(state)
                 })
                 .transpose()?;
+            anyhow::ensure!(
+                collection.get("pilot_qoder").is_none() || agent == "qoder",
+                "pilot_qoder requires the Qoder profile"
+            );
+            anyhow::ensure!(
+                profile != "codex_aborted_turn_v1" || pilot_host.is_some(),
+                "the Codex aborted-turn profile requires authorized Pilot state"
+            );
             let sources = collection
                 .get("sources")
                 .and_then(Value::as_array)
@@ -410,6 +433,12 @@ impl Policy {
                     kind: kind.into(),
                     path: resolved,
                 });
+            }
+            if agent == "codex" {
+                anyhow::ensure!(
+                    parsed.iter().all(|source| source.kind == "transcript") && parsed.len() == 1,
+                    "Codex requires exactly one transcript source"
+                );
             }
             anyhow::ensure!(
                 parsed.iter().filter(|s| s.kind == "hook_jsonl").count() <= 1
@@ -518,7 +547,9 @@ impl Policy {
             hooks["relay_host_verdicts"] = Value::Bool(false);
         }
         hooks["managed_host_rules"] = Value::Bool(
-            hooks.pointer("/collector_plans/qoder/pilot_host").is_some()
+            ["qoder", "codex"]
+                .into_iter()
+                .any(|agent| hooks["collector_plans"][agent]["pilot_host"].is_object())
                 && hooks.pointer("/local/mode").and_then(Value::as_str) == Some("all"),
         );
         hooks["data_dir"] = serde_json::json!(init.data_dir);

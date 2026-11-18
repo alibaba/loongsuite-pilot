@@ -127,7 +127,7 @@ fn spawn_named_watcher(
     dir: &str,
     on_change: impl Fn(Option<String>) + Send + Sync + 'static,
 ) -> Option<RecommendedWatcher> {
-    if crate::utils::source_access::current().is_some() {
+    if crate::utils::source_access::check(dir).is_err() {
         return None;
     }
     let directory = Path::new(dir).to_path_buf();

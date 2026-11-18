@@ -2985,6 +2985,9 @@ impl<'a> CodexTranscriptEngine<'a> {
         let mut session_dirs = IndexMap::new();
         for tier in tiers {
             for candidate in tier.into_keys() {
+                if crate::utils::source_access::check(&candidate).is_err() {
+                    continue;
+                }
                 let Ok(canonical) = tokio::fs::canonicalize(&candidate).await else {
                     continue;
                 };

@@ -404,7 +404,9 @@ impl CodexTranscriptInput {
             )
             .await;
             for candidate in roots.into_iter().flatten() {
-                if directory_exists(&candidate).await {
+                if crate::utils::source_access::check(&candidate).is_ok()
+                    && directory_exists(&candidate).await
+                {
                     return true;
                 }
             }

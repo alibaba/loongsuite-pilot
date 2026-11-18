@@ -53,7 +53,7 @@ cargo build --locked --all-features --lib --bin loongsuite-pilot --bin loongsuit
 
 ### Codex 的映射示例
 
-当前完整壳在 `src/core/orchestrator.rs` 注册 `CodexTranscriptInput` 与 `CodexAbortedTurnInput`，其 rollout 和中断补采可以复用。分别为默认和会话专用 `CODEX_HOME`、唤醒目录、span 上下文及补采状态建立可验证的来源授权。先保留现有 Hook 信任、用户／系统 scope 和配置所有权。通过 `src/core/codex_sdk_migration.rs` 了解已有批次与游标交接，再按本次外壳到 SDK 的方向设计接管。通过目标 Codex 版本证实允许与拒绝实际生效后，才将相应裁决能力标为支持。
+完整壳由 `register_sdk_codex` 注册 rollout 和中断补采 profile，两者复用现有的 `CodexTranscriptInput` 与 `CodexAbortedTurnInput`。从 `src/sdk/policy.rs` 核对 `CODEX_HOME` 和 Pilot 元数据的授权范围，从 `src/sdk/outbox.rs` 核对旧批次、待确认活动及外壳游标的交接。Hook 的信任、用户／系统 scope 和配置所有权由完整壳管理。用实际客户端分别检查提示拒绝、工具执行前拒绝、以及工具执行后结果替换。后置裁决生效时，已发生的工具副作用会保留。
 
 ```sh
 cargo test --locked --all-features \

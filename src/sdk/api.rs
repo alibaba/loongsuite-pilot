@@ -667,6 +667,7 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
             Ok(Command::Stop(drain)) => {
                 if let Some(mut session) = session.take() {
                     session.collector.stop();
+                    instance.status.lock().unwrap().agents = session.collector.snapshot();
                     let deadline = Instant::now() + Duration::from_millis(drain as u64);
                     while session.queue.pending_bytes().unwrap_or(0) > 0
                         && Instant::now() < deadline
