@@ -85,6 +85,14 @@ export LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE=off  # 关闭
 
 记录采用 `schema_version=multica.v1`，以 instance/workspace/entity 和 task/issue/agent/runtime ID 关联。SLS 字段按字符串发送，数值分析需配置 long/double 索引；`observed_at` 表示采集时间，来源时间另存。
 
+### 兼容旧版 daemon 的阶段日志
+
+Multica v0.6.0 等版本的本地 `daemon.log` 只有时分秒。Pilot 会保留 `phase_elapsed_ms`、`total_elapsed_ms` 和文件读取位置，并在缺少完整日志时间时留空 `source_time`。
+
+SLS 的任务阶段图可以使用[兼容查询](examples/multica-task-timeline.sql)。查询优先使用带完整日志时间的阶段。只有本地旧格式阶段时，按同一文件的读取位置识别最近一次领取，并用两项耗时还原相对区间。有任务快照的开始时间时，把执行区间排在该时间点之后，同时显示能从快照确定的排队区间。没有开始时间时，单独画出相对阶段。旧格式阶段的绝对开始和结束时间留空。
+
+图表沿用 `multica_deployment` 和 `gantt_task_id` 变量。横向堆叠条形图用「阶段」作分类，用「开始偏移」和「本段耗时」作数值系列。旧格式分支查询 `entity_id` 和 `file_path` 字段统计索引，耗时字段用数值索引。对于跨文件轮转的同一次执行，仅展示能在选中文件内确认的阶段。
+
 Kubernetes 中可通过 Downward API 给采集器容器注入 Pod 元数据。采集器优先使用有效的 `POD_NAME`，缺省时取系统 hostname。配置了自定义 hostname 时，给采集器和日志桥都注入 `metadata.name`，同一个 Pod 的指标、日志和火焰图就能按相同的名字筛选。
 
 ```yaml
