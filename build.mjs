@@ -5,7 +5,7 @@ import path from 'node:path';
 import { collectFileManifest } from './scripts/hook-asset-manifest.mjs';
 
 const isProprietary = process.env.BUILD_MODE === 'proprietary';
-const hookAssetManifest = await collectFileManifest(path.resolve('assets/hooks'));
+const hookAssetManifest = await collectFileManifest(path.resolve('assets/hooks'), new Set(), /\.(sh|ps1)$/);
 let runtimeAssetManifest = {};
 
 const commonDefine = {
