@@ -147,12 +147,6 @@ Prometheus counter 要处理相邻采样差分与进程重启；histogram bucket
 
 成功送达 SLS 后持久化下次采样时间；发送失败复用已有批次，不重复抓取。同样需要持久化 StateDir。pprof 没有样本时如实报告零权重，不生成虚假栈；旧版端点不支持增量 allocs、没有采样时长时报告 `pprof_missing_interval`。启用后需要为 `profile_*`、`source_version`、`pod_name` 配置 SLS 字段索引。
 
-## daemon 自动接入
-
-在 daemon 所在的容器或主机上以其系统用户运行 Pilot，安装时指定 `--multica-collection-mode on`。开启后 Pilot 会检查当前用户的默认目录 `~/.multica/` 和命名 profile 目录，确认本地 `/health` 的 PID 与 `daemon.pid` 一致后读取对应的 `daemon.log`。daemon 自动接入复用安装时的 SLS 配置，并使用默认的 `multica-logs`。
-
-已有显式 `input_multica` 配置时，以现有配置为准。显式关闭 pipeline 或 Multica 会停用自动发现。具体接入步骤见[容器环境](multica-daemon-container.md)和[ECS 主机](multica-daemon-host.md)。
-
 ## 独立运行与验证
 
 ```sh
