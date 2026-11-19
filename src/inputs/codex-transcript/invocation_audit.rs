@@ -115,12 +115,19 @@ pub(super) fn append_invocations(
     entries: Vec<AgentActivityEntry>,
     spawns: &[CodexSpawnDescriptor],
 ) -> Vec<AgentActivityEntry> {
+    if spawns.is_empty() {
+        return entries;
+    }
     let mut output = Vec::new();
     for original in entries {
         let works: Vec<_> = spawns
             .iter()
             .filter(|work| original.tool_call_id.as_deref() == Some(&work.parent_tool_call_id))
             .collect();
+        if works.is_empty() {
+            output.push(original);
+            continue;
+        }
         let mut fields = entry_to_object(&original);
         if works.len() == 1 {
             if let Some(invocation) = &works[0].invocation_id {
@@ -178,10 +185,10 @@ pub(super) fn append_invocations(
     }
     output
 }
-pub(super) fn with_pending_dispatches(
-    turn: &CodexExtractedTranscriptTurn,
+pub(super) fn with_pending_dispatches<'a>(
+    turn: &'a CodexExtractedTranscriptTurn,
     records: &[CodexTranscriptSourceRecord],
-) -> CodexExtractedTranscriptTurn {
+) -> std::borrow::Cow<'a, CodexExtractedTranscriptTurn> {
     let known: BTreeSet<_> = turn
         .steps
         .iter()
@@ -230,9 +237,9 @@ pub(super) fn with_pending_dispatches(
             }
         }
     }
-    let mut output = turn.clone();
+    let mut output = std::borrow::Cow::Borrowed(turn);
     if !pending.is_empty() {
-        output.steps.push(CodexTranscriptStep {
+        output.to_mut().steps.push(CodexTranscriptStep {
             started_at_ms: pending
                 .values()
                 .map(|tool| tool.started_at_ms)

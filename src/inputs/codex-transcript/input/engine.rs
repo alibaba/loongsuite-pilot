@@ -1375,13 +1375,14 @@ impl<'a> CodexTranscriptEngine<'a> {
                 }
             }
         }
+        let source_record_count = records.items.len();
         let mut sources: Vec<CodexTranscriptSourceRecord> = records
             .items
-            .iter()
+            .into_iter()
             .map(|line| CodexTranscriptSourceRecord {
                 start_offset: line.start_offset,
                 end_offset: line.end_offset,
-                record: line.record.clone(),
+                record: line.record,
             })
             .collect();
         let upload_mode = self.body.upload_mode;
@@ -1448,7 +1449,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 entries: Vec::new(),
                 consumed_end_offset: active.start_offset,
                 diagnostics: Diagnostics {
-                    source_record_count: records.items.len(),
+                    source_record_count,
                 },
             });
         };
@@ -1485,9 +1486,9 @@ impl<'a> CodexTranscriptEngine<'a> {
         } else {
             extraction.committed_step_count
         };
-        let mut committed = extraction.turn.clone();
+        let mut committed = std::borrow::Cow::Borrowed(&extraction.turn);
         if closed != extraction.turn.steps.len() {
-            committed.steps.truncate(closed);
+            committed.to_mut().steps.truncate(closed);
         }
         let input_context = self
             .resolve_input_context(rt, file_path, checkpoint, meta.as_ref())
@@ -1657,7 +1658,8 @@ impl<'a> CodexTranscriptEngine<'a> {
                 active.emitted_trace_id = Some(trace_id);
             }
         }
-        let mut ready = built.entries.clone();
+        let built_count = built.entries.len();
+        let mut ready = built.entries;
         if terminal
             && (!ready.is_empty()
                 || checkpoint
@@ -1685,12 +1687,13 @@ impl<'a> CodexTranscriptEngine<'a> {
                 ready.push(marker);
             }
         }
+        let ready_count = ready.len();
         let filtered = if let Some(active) = checkpoint.active_turn.as_mut() {
-            filter_new_segment_entries(ready.clone(), active)
+            filter_new_segment_entries(ready, active)
         } else {
             SegmentFilterResult {
-                input_entry_count: ready.len(),
-                entries: ready.clone(),
+                input_entry_count: ready_count,
+                entries: ready,
                 deduplicated_entry_count: 0,
                 rejected_entry_count: 0,
             }
@@ -1704,13 +1707,13 @@ impl<'a> CodexTranscriptEngine<'a> {
         } = filtered;
         if terminal && entries.is_empty() {
             let diagnostics = json!({
-                "sourceRecordCount": records.items.len(),
+                "sourceRecordCount": source_record_count,
                 "stepCount": extraction.turn.steps.len(),
                 "toolCount": extraction.turn.steps.iter().map(|step| step.tools.len()).sum::<usize>(),
                 "tokenUsageCount": extraction.turn.steps.iter().filter(|step| step.token_usage.is_some()).count(),
                 "unmatchedTokenUsageCount": extraction.turn.unmatched_token_usages.len(),
-                "builtEntryCount": built.entries.len(),
-                "readyEntryCount": ready.len(),
+                "builtEntryCount": built_count,
+                "readyEntryCount": ready_count,
                 "deduplicatedEntryCount": deduplicated_entry_count,
                 "rejectedEntryCount": rejected_entry_count,
                 "emittedEntryCount": entries.len(),
@@ -1722,7 +1725,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 "terminalStatus": extraction.turn.status.as_str(),
                 "diagnostics": diagnostics,
             });
-            if built.entries.is_empty() {
+            if built_count == 0 {
                 rt.debug(
                     "processed terminal Codex turn without observable entries",
                     meta.as_object(),
@@ -1799,7 +1802,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             entries: output,
             consumed_end_offset: consumed,
             diagnostics: Diagnostics {
-                source_record_count: records.items.len(),
+                source_record_count,
             },
         })
     }

@@ -174,7 +174,39 @@ impl InputBody for CodexAbortedTurnBody {
 
     async fn collect(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
         let mut entries = Vec::new();
-        for file_path in discover_session_files(&self.session_dir).await {
+        let files = discover_session_files(&self.session_dir).await;
+        #[cfg(unix)]
+        let files = {
+            use std::os::unix::fs::MetadataExt;
+            let store = Arc::clone(&rt.state_store);
+            let grace = self.hook_gap_grace_ms;
+            tokio::task::spawn_blocking(move || {
+                let now = now_ms();
+                files
+                    .into_iter()
+                    .filter(|path| {
+                        let Some(checkpoint) = decode_checkpoint(&store, &state_key(path)) else {
+                            return true;
+                        };
+                        let Ok(meta) = std::fs::symlink_metadata(path) else {
+                            return true;
+                        };
+                        // Only omit a no-op. Changed/replaced sources still go through
+                        // the handle-based identity check, and due diagnostics still run.
+                        !(meta.is_file()
+                            && checkpoint.dev == Some(meta.dev())
+                            && checkpoint.inode == meta.ino()
+                            && i64::try_from(meta.len()).ok() == Some(checkpoint.scan_offset)
+                            && checkpoint
+                                .pending_completed_turns
+                                .iter()
+                                .all(|turn| now - turn.completed_at_ms < grace))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await?
+        };
+        for file_path in files {
             entries.extend(self.process_file(rt, &file_path).await?);
         }
         Ok(entries)
@@ -234,7 +266,7 @@ impl CodexAbortedTurnBody {
             save_checkpoint(rt, &key, &checkpoint);
             return Ok(Vec::new());
         }
-        let lines = read_json_lines(file, checkpoint.scan_offset, size).await?;
+        let lines = read_json_lines(file, checkpoint.scan_offset, size, true).await?;
         if lines.next_offset == checkpoint.scan_offset {
             return Ok(Vec::new());
         }
@@ -374,7 +406,7 @@ impl CodexAbortedTurnBody {
         let Some(active) = &checkpoint.active_turn else {
             return Ok(Vec::new());
         };
-        let range = read_json_lines(file, active.start_offset, abort_end_offset).await?;
+        let range = read_json_lines(file, active.start_offset, abort_end_offset, false).await?;
         let meta_record = match checkpoint.latest_session_meta_offset {
             Some(offset) => read_json_line_at(file, offset, size).await?,
             None => None,
@@ -486,7 +518,7 @@ async fn baseline_opened_file(
     key: &str,
 ) {
     let size = i64::try_from(identity.size).unwrap_or(i64::MAX);
-    let Ok(lines) = read_json_lines(file, 0, size).await else {
+    let Ok(lines) = read_json_lines(file, 0, size, true).await else {
         return;
     };
     let mut latest = None;
@@ -550,7 +582,11 @@ fn state_key(file_path: &str) -> String {
 }
 
 fn read_checkpoint(rt: &InputRuntime, key: &str) -> Option<CodexAbortedCheckpoint> {
-    let extra = rt.state_store.get(key).extra()?;
+    decode_checkpoint(&rt.state_store, key)
+}
+
+fn decode_checkpoint(store: &StateStore, key: &str) -> Option<CodexAbortedCheckpoint> {
+    let extra = store.get(key).extra()?;
     let value = extra.get("codexAbortedTurn")?.as_object()?;
     let inode = value.get("inode").and_then(Value::as_u64)?;
     let scan_offset = value
@@ -724,10 +760,24 @@ struct ReadLines {
     next_offset: i64,
 }
 
+// Skipping unknown fields avoids building message/tool payloads in the
+// auxiliary scanner. On noncanonical JSON retain the full parser's behavior.
+fn may_update_turn(text: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Header<'a> {
+        #[serde(rename = "type")]
+        kind: &'a str,
+    }
+    serde_json::from_str::<Header>(text).map_or(true, |h| {
+        matches!(h.kind, "session_meta" | "turn_context" | "event_msg")
+    })
+}
+
 async fn read_json_lines(
     file: &mut tokio::fs::File,
     start_offset: i64,
     end_offset: i64,
+    lifecycle_only: bool,
 ) -> anyhow::Result<ReadLines> {
     if end_offset <= start_offset {
         return Ok(ReadLines {
@@ -762,7 +812,7 @@ async fn read_json_lines(
         }
         let text = String::from_utf8_lossy(&buffer[cursor..newline]);
         let text = text.trim();
-        if !text.is_empty() {
+        if !text.is_empty() && (!lifecycle_only || may_update_turn(text)) {
             if let Ok(Value::Object(record)) = serde_json::from_str::<Value>(text) {
                 items.push(JsonLine {
                     start_offset: start_offset + cursor as i64,

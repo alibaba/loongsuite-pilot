@@ -1861,7 +1861,7 @@ impl OtlpInner {
         let mut sanitized = if agent_type == "doubao-work" {
             trace_records
         } else {
-            drop_orphan_pairs(&trace_records)
+            drop_orphan_pairs(trace_records)
         };
         if self.cfg.capture_message_content == Some(false) {
             for record in &mut sanitized {
@@ -1939,7 +1939,7 @@ impl OtlpInner {
         self: &Arc<Self>,
         scope: &ConvertScope<'_>,
         records: &[AgentActivityEntry],
-        prepared: &PreparedRecords,
+        prepared: &PreparedRecords<'_>,
         projected: &Map<String, Value>,
         mut spans: Vec<ReadableSpan>,
         mut stream: Option<&mut StreamEnrichment>,
@@ -2048,7 +2048,7 @@ impl OtlpInner {
         self: &Arc<Self>,
         scope: &ConvertScope<'_>,
         records: &[AgentActivityEntry],
-        prepared: &PreparedRecords,
+        prepared: &PreparedRecords<'_>,
         projected: &Map<String, Value>,
         original: Vec<AgentActivityEntry>,
         local: Vec<AgentActivityEntry>,
@@ -2564,8 +2564,8 @@ impl OtlpInner {
     }
 }
 
-struct PreparedRecords {
-    records: Vec<AgentActivityEntry>,
+struct PreparedRecords<'a> {
+    records: std::borrow::Cow<'a, [AgentActivityEntry]>,
     passthrough: Vec<String>,
     identity: Map<String, Value>,
     grok: GrokMeta,
@@ -2578,11 +2578,11 @@ struct GrokMeta {
     data_source_id: Option<String>,
 }
 
-fn prepare_records(
+fn prepare_records<'a>(
     inner: &OtlpInner,
     agent_type: &str,
-    records: &[AgentActivityEntry],
-) -> PreparedRecords {
+    records: &'a [AgentActivityEntry],
+) -> PreparedRecords<'a> {
     let mut custom = Map::new();
     if let Some(provider) = &inner.global_attributes {
         let resolved = provider
@@ -2596,18 +2596,20 @@ fn prepare_records(
         }
     }
     let mut prefix_keys = Vec::new();
-    for record in records {
-        for key in entry_to_object(record).keys() {
-            if is_reserved_key(key) {
-                continue;
-            }
-            if inner
-                .passthrough_prefixes
-                .iter()
-                .any(|prefix| key.starts_with(prefix))
-                && !prefix_keys.contains(key)
-            {
-                prefix_keys.push(key.clone());
+    if !inner.passthrough_prefixes.is_empty() {
+        for record in records {
+            for key in entry_to_object(record).keys() {
+                if is_reserved_key(key) {
+                    continue;
+                }
+                if inner
+                    .passthrough_prefixes
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix))
+                    && !prefix_keys.contains(key)
+                {
+                    prefix_keys.push(key.clone());
+                }
             }
         }
     }
@@ -2640,9 +2642,9 @@ fn prepare_records(
         }
     }
     passthrough.extend(prefix_keys);
-    let mut copied: Vec<AgentActivityEntry> = records.to_vec();
+    let mut copied = std::borrow::Cow::Borrowed(records);
     if !custom.is_empty() {
-        for record in &mut copied {
+        for record in copied.to_mut() {
             let mut map = entry_to_object(record);
             for (key, value) in &custom {
                 if !map.contains_key(key) {
@@ -2654,15 +2656,15 @@ fn prepare_records(
     }
     let mut identity = Map::new();
     if agent_type == "openclaw" {
-        copied = prepare_openclaw_collection(&copied);
+        copied = std::borrow::Cow::Owned(prepare_openclaw_collection(&copied));
         let prepared = prepare_openclaw_identity(&copied);
-        copied = prepared.0;
+        copied = std::borrow::Cow::Owned(prepared.0);
         identity = prepared.1;
     }
     let mut grok = GrokMeta::default();
     if agent_type == "grok-build" {
         let prepared = prepare_grok(&copied);
-        copied = prepared.0;
+        copied = std::borrow::Cow::Owned(prepared.0);
         grok = prepared.1;
     }
     PreparedRecords {
@@ -2928,10 +2930,10 @@ fn is_metadata_only_other(entry: &AgentActivityEntry) -> bool {
     entry.input_messages.is_none() && entry.input_messages_delta.is_none()
 }
 
-fn drop_orphan_pairs(records: &[AgentActivityEntry]) -> Vec<AgentActivityEntry> {
+fn drop_orphan_pairs(records: Vec<AgentActivityEntry>) -> Vec<AgentActivityEntry> {
     let mut steps_with_response = HashSet::new();
     let mut completed_tools = HashSet::new();
-    for record in records {
+    for record in &records {
         if entry_str(record, "event.name").as_deref() == Some("llm.response") {
             steps_with_response.insert(
                 entry_str(record, "gen_ai.step.id").unwrap_or_else(|| "__no_step__".to_string()),
@@ -2944,7 +2946,7 @@ fn drop_orphan_pairs(records: &[AgentActivityEntry]) -> Vec<AgentActivityEntry> 
         }
     }
     records
-        .iter()
+        .into_iter()
         .filter(|record| match entry_str(record, "event.name").as_deref() {
             Some("llm.request") => steps_with_response.contains(
                 &entry_str(record, "gen_ai.step.id").unwrap_or_else(|| "__no_step__".to_string()),
@@ -2955,7 +2957,6 @@ fn drop_orphan_pairs(records: &[AgentActivityEntry]) -> Vec<AgentActivityEntry> 
             },
             _ => true,
         })
-        .cloned()
         .collect()
 }
 
@@ -4012,6 +4013,33 @@ fn entry_str(entry: &AgentActivityEntry, key: &str) -> Option<String> {
         "gen_ai.response.id" => entry.response_id.clone().filter(|value| !value.is_empty()),
         "gen_ai.request.id" => entry.request_id.clone().filter(|value| !value.is_empty()),
         "error.type" => entry.error_type.clone().filter(|value| !value.is_empty()),
+        "agent.codex.turn_status"
+        | "agent.qoderwork.step.start_time_unix_nano"
+        | "agent.qoderwork.step.end_time_unix_nano"
+        | "gen_ai.agent.system"
+        | "gen_ai.framework" => entry
+            .extra
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+        "gen_ai.skill.name"
+        | "gen_ai.skill.id"
+        | "gen_ai.skill.description"
+        | "gen_ai.skill.version" => {
+            let typed = match key {
+                "gen_ai.skill.name" => &entry.skill_name,
+                "gen_ai.skill.id" => &entry.skill_id,
+                "gen_ai.skill.description" => &entry.skill_description,
+                _ => &entry.skill_version,
+            };
+            entry
+                .extra
+                .get(key)
+                .map_or_else(|| typed.as_deref(), Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        }
         _ => entry_map(entry)
             .get(key)
             .and_then(|value| value.as_str())
