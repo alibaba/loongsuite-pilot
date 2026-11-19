@@ -103,6 +103,10 @@ export interface AntigravityConversationSnapshot {
   events: AntigravityUsageEvent[];
   /** Native per-step timing, turn UUID, and tool call identity from `steps.metadata`. */
   stepInfos: Map<number, AntigravityStepInfo>;
+  /** `gen_metadata.idx` values currently present with 0 tokens (must survive >512-key eviction watermarks). */
+  zeroTokenGenIdxs?: number[];
+  /** `steps.idx` values currently present with 0-token usage blobs. */
+  zeroTokenStepIdxs?: number[];
 }
 
 interface GeneratorMetadata {
@@ -395,10 +399,10 @@ function parseLocalFileUri(text: string | undefined): string | undefined {
   if (url.hostname && url.hostname.toLowerCase() !== 'localhost') return undefined;
   const converted = tryOptional(() => fileURLToPath(url));
   if (!converted) return undefined;
-  // Reject bare POSIX/Windows root paths and drive roots (/, \, C:\, /C:/)
+  // Reject bare POSIX/Windows root paths, multi-slash roots (//), and drive roots (/, \, C:\, /C:/)
   if (
-    converted === '/' ||
-    converted === '\\' ||
+    /^\/+$/.test(converted) ||
+    /^\\+$/.test(converted) ||
     /^[A-Za-z]:[\\/]?$/.test(converted) ||
     /^\/[A-Za-z]:\/?$/.test(converted)
   ) {
@@ -867,6 +871,9 @@ export async function readAntigravityConversationDb(
       });
     };
 
+    const zeroTokenGenIdxs: number[] = [];
+    const zeroTokenStepIdxs: number[] = [];
+
     // 1) Process steps first (without session-level generationModel fallback)
     for (const { idx, metadata } of stepRows) {
       const rowModel =
@@ -875,6 +882,9 @@ export async function readAntigravityConversationDb(
           ? normalizeAntigravityModel(modelNameFromId(metadata.modelId))
           : undefined);
       if (metadata.usage) {
+        if (!isTokenBearing(metadata.usage)) {
+          zeroTokenStepIdxs.push(idx);
+        }
         appendUsage(metadata.usage, {
           model: rowModel,
           modelId: metadata.modelId,
@@ -923,6 +933,9 @@ export async function readAntigravityConversationDb(
           : [`gen:${sessionId}:${idx}`];
 
       if (metadata.usage) {
+        if (!isTokenBearing(metadata.usage)) {
+          zeroTokenGenIdxs.push(idx);
+        }
         appendUsage(metadata.usage, {
           model: currentModel,
           modelId: metadata.modelId,
@@ -987,6 +1000,8 @@ export async function readAntigravityConversationDb(
       maxStepIdx: tokenBearingMaxStepIdx,
       events: deduped,
       stepInfos,
+      ...(zeroTokenGenIdxs.length > 0 ? { zeroTokenGenIdxs } : {}),
+      ...(zeroTokenStepIdxs.length > 0 ? { zeroTokenStepIdxs } : {}),
     };
   } finally {
     try {

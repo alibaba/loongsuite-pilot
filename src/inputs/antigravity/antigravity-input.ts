@@ -164,6 +164,8 @@ function extractStepOrder(stepId: string | undefined): number {
 
 interface PendingToolCall {
   plannerStepIndex: number;
+  /** Ordinal index of this tool call within the parent PLANNER_RESPONSE (0-based). */
+  toolIndex?: number;
   turnId: string;
   stepId: string;
   resultStepIndex: number;
@@ -183,6 +185,14 @@ interface SessionCheckpoint {
   emittedUsageKeys: string[];
   /** Parallel `[genIdx, stepIdx]` metadata for `emittedUsageKeys` to compute exact eviction watermarks. */
   emittedKeyMeta?: Array<[number, number]>;
+  /** Unemitted 0-token or Loop-3-deferred genIdx values exempt from >512-key eviction watermarks. */
+  deferredGenIdxs?: number[];
+  /** Unemitted 0-token or Loop-3-deferred step-only indices exempt from >512-key eviction watermarks. */
+  deferredStepIdxs?: number[];
+  /** Emitted responseIds (bounded) for cross-cycle collision disambiguation. */
+  emittedResponseIds?: string[];
+  /** Step indices whose primary LLM usage has already been emitted across cycles (for retry detection). */
+  emittedPrimaryStepIdxs?: number[];
   lastTranscriptStepIndex: number;
   pendingToolCalls: PendingToolCall[];
   /** Latched turnId per turn-start stepIndex so delayed native UUIDs never split an already-emitted turn. */
@@ -247,15 +257,29 @@ async function statFileInfo(filePath: string): Promise<{ mtimeMs: number; size: 
   }
 }
 
-function isUsageAlreadyCovered(usage: AntigravityUsageEvent, cursor: SessionCheckpoint, seenKeys: Set<string>): boolean {
+function isUsageAlreadyCovered(
+  usage: AntigravityUsageEvent,
+  cursor: SessionCheckpoint,
+  seenKeys: Set<string>,
+  deferredGenSet: ReadonlySet<number>,
+  deferredStepSet: ReadonlySet<number>,
+): boolean {
   if (seenKeys.has(usage.key)) return true;
   if (usage.identities.some((id) => seenKeys.has(id))) return true;
-  // Monotonic index watermark protects long sessions (>512 events) against key eviction replay
+  // Never let >512-key eviction watermarks drop a row explicitly tracked as 0-token / deferred
+  if (usage.genIdx !== undefined && deferredGenSet.has(usage.genIdx)) {
+    return false;
+  }
+  if (usage.stepIndices.some((s) => deferredStepSet.has(s))) {
+    return false;
+  }
+  // Eviction-only monotonic index watermarks protect long sessions (>512 events) against replay.
+  // Check maxEmittedStepIdx across both steps-only and gen_metadata rows so an already-emitted
+  // steps row evicted past 512 keys is not replayed if gen_metadata later references that step.
   if (usage.genIdx !== undefined && cursor.maxEmittedGenIdx >= 0 && usage.genIdx <= cursor.maxEmittedGenIdx) {
     return true;
   }
   if (
-    usage.genIdx === undefined &&
     usage.stepIndices.length > 0 &&
     cursor.maxEmittedStepIdx >= 0 &&
     Math.max(...usage.stepIndices) <= cursor.maxEmittedStepIdx
@@ -416,6 +440,18 @@ export class AntigravityInput extends BaseInput {
                   ),
                 )
               : undefined;
+          const deferredGenIdxs = Array.isArray(cur.deferredGenIdxs)
+            ? cur.deferredGenIdxs.filter((n): n is number => typeof n === 'number' && Number.isInteger(n))
+            : undefined;
+          const deferredStepIdxs = Array.isArray(cur.deferredStepIdxs)
+            ? cur.deferredStepIdxs.filter((n): n is number => typeof n === 'number' && Number.isInteger(n))
+            : undefined;
+          const emittedResponseIds = Array.isArray(cur.emittedResponseIds)
+            ? cur.emittedResponseIds.filter((s): s is string => typeof s === 'string')
+            : undefined;
+          const emittedPrimaryStepIdxs = Array.isArray(cur.emittedPrimaryStepIdxs)
+            ? cur.emittedPrimaryStepIdxs.filter((n): n is number => typeof n === 'number' && Number.isInteger(n))
+            : undefined;
           sessions[sid] = {
             effectiveMtimeMs: typeof cur.effectiveMtimeMs === 'number' ? cur.effectiveMtimeMs : 0,
             effectiveSize: typeof cur.effectiveSize === 'number' ? cur.effectiveSize : 0,
@@ -424,6 +460,12 @@ export class AntigravityInput extends BaseInput {
               typeof cur.maxEmittedStepIdx === 'number' ? cur.maxEmittedStepIdx : -1,
             emittedUsageKeys,
             ...(emittedKeyMeta ? { emittedKeyMeta } : {}),
+            ...(deferredGenIdxs && deferredGenIdxs.length > 0 ? { deferredGenIdxs } : {}),
+            ...(deferredStepIdxs && deferredStepIdxs.length > 0 ? { deferredStepIdxs } : {}),
+            ...(emittedResponseIds && emittedResponseIds.length > 0 ? { emittedResponseIds } : {}),
+            ...(emittedPrimaryStepIdxs && emittedPrimaryStepIdxs.length > 0
+              ? { emittedPrimaryStepIdxs }
+              : {}),
             lastTranscriptStepIndex:
               typeof cur.lastTranscriptStepIndex === 'number' ? cur.lastTranscriptStepIndex : -1,
             pendingToolCalls,
@@ -506,6 +548,18 @@ export class AntigravityInput extends BaseInput {
             callEntries.slice(-MAX_LATCHED_TOOL_CALLS_PER_SESSION),
           );
         }
+      }
+      if (cur.deferredGenIdxs && cur.deferredGenIdxs.length > MAX_LATCHED_TURNS_PER_SESSION) {
+        cur.deferredGenIdxs = cur.deferredGenIdxs.slice(-MAX_LATCHED_TURNS_PER_SESSION);
+      }
+      if (cur.deferredStepIdxs && cur.deferredStepIdxs.length > MAX_LATCHED_TURNS_PER_SESSION) {
+        cur.deferredStepIdxs = cur.deferredStepIdxs.slice(-MAX_LATCHED_TURNS_PER_SESSION);
+      }
+      if (cur.emittedResponseIds && cur.emittedResponseIds.length > MAX_EMITTED_KEYS_PER_SESSION) {
+        cur.emittedResponseIds = cur.emittedResponseIds.slice(-MAX_EMITTED_KEYS_PER_SESSION);
+      }
+      if (cur.emittedPrimaryStepIdxs && cur.emittedPrimaryStepIdxs.length > MAX_EMITTED_KEYS_PER_SESSION) {
+        cur.emittedPrimaryStepIdxs = cur.emittedPrimaryStepIdxs.slice(-MAX_EMITTED_KEYS_PER_SESSION);
       }
     }
     const prev = this.stateStore.get(this.id);
@@ -790,6 +844,18 @@ export class AntigravityInput extends BaseInput {
         maxEmittedStepIdx: sessionResult.maxEmittedStepIdx,
         emittedUsageKeys: sessionResult.emittedUsageKeys,
         emittedKeyMeta: sessionResult.emittedKeyMeta,
+        ...(sessionResult.deferredGenIdxs.length > 0
+          ? { deferredGenIdxs: sessionResult.deferredGenIdxs }
+          : {}),
+        ...(sessionResult.deferredStepIdxs.length > 0
+          ? { deferredStepIdxs: sessionResult.deferredStepIdxs }
+          : {}),
+        ...(sessionResult.emittedResponseIds.length > 0
+          ? { emittedResponseIds: sessionResult.emittedResponseIds }
+          : {}),
+        ...(sessionResult.emittedPrimaryStepIdxs.length > 0
+          ? { emittedPrimaryStepIdxs: sessionResult.emittedPrimaryStepIdxs }
+          : {}),
         lastTranscriptStepIndex: sessionResult.maxTranscriptStepIndex,
         pendingToolCalls: sessionResult.pendingToolCalls,
         ...(Object.keys(sessionResult.turnIdByStartStep).length > 0
@@ -843,6 +909,10 @@ export class AntigravityInput extends BaseInput {
     maxEmittedStepIdx: number;
     emittedUsageKeys: string[];
     emittedKeyMeta: Array<[number, number]>;
+    deferredGenIdxs: number[];
+    deferredStepIdxs: number[];
+    emittedResponseIds: string[];
+    emittedPrimaryStepIdxs: number[];
     pendingToolCalls: PendingToolCall[];
     turnIdByStartStep: Record<string, string>;
     emittedTurnStarts: string[];
@@ -857,6 +927,16 @@ export class AntigravityInput extends BaseInput {
       prevCursor.emittedKeyMeta && prevCursor.emittedKeyMeta.length === prevCursor.emittedUsageKeys.length
         ? prevCursor.emittedKeyMeta.map(([g, s]) => [g, s])
         : prevCursor.emittedUsageKeys.map(() => [-1, -1]);
+    const deferredGenSet = new Set<number>([
+      ...(prevCursor.deferredGenIdxs ?? []),
+      ...(snapshot?.zeroTokenGenIdxs ?? []),
+    ]);
+    const deferredStepSet = new Set<number>([
+      ...(prevCursor.deferredStepIdxs ?? []),
+      ...(snapshot?.zeroTokenStepIdxs ?? []),
+    ]);
+    const usedResponseIds = new Set<string>(prevCursor.emittedResponseIds ?? []);
+    const seenPrimaryStepIdx = new Set<number>(prevCursor.emittedPrimaryStepIdxs ?? []);
     let maxStepIndex = prevCursor.lastTranscriptStepIndex;
     const maxEmittedGenIdx = prevCursor.maxEmittedGenIdx;
     const maxEmittedStepIdx = prevCursor.maxEmittedStepIdx;
@@ -967,16 +1047,38 @@ export class AntigravityInput extends BaseInput {
 
     // Include any SQLite usage stepIndices in their corresponding turn group so
     // Loop 2 and Loop 3 always resolve the exact same turnId even when only a child
-    // result step carries the native Turn UUID.
+    // result step carries the native Turn UUID. Never fold an early Turn N+1 step
+    // (whose own native Turn UUID conflicts with Turn N) into Turn N.
     const stepToTurn = new Map<number, string>();
     const groupStartSteps = turnGroups.map((g) => g.startStep);
+    const groupNativeTurns: Array<string | undefined> = turnGroups.map((g) => {
+      for (const idx of g.steps) {
+        const t = stepInfos.get(idx)?.turnId;
+        if (t) return t;
+      }
+      return undefined;
+    });
     if (snapshot && turnGroups.length > 0) {
       for (const usage of snapshot.events) {
         for (const idx of usage.stepIndices) {
           const groupNum = binarySearchTurnNumber(groupStartSteps, idx);
-          const group = turnGroups[groupNum - 1];
-          if (group && !group.steps.includes(idx)) {
-            group.steps.push(idx);
+          const groupIdx = groupNum - 1;
+          const group = turnGroups[groupIdx];
+          if (!group || group.steps.includes(idx)) continue;
+          const idxNativeTurn = stepInfos.get(idx)?.turnId;
+          const existingNativeTurn = groupNativeTurns[groupIdx];
+          if (idxNativeTurn && existingNativeTurn && idxNativeTurn !== existingNativeTurn) {
+            // Early Turn N+1 SQLite row before Turn N+1 USER_INPUT flushes to transcript;
+            // keep it out of Turn N so resolveTurnForStep honors its own native Turn UUID.
+            continue;
+          }
+          const existingLatched = latchedTurnByStartStep.get(group.startStep);
+          if (idxNativeTurn && existingLatched && existingLatched !== `${sessionId}:${idxNativeTurn}`) {
+            continue;
+          }
+          group.steps.push(idx);
+          if (!existingNativeTurn && idxNativeTurn) {
+            groupNativeTurns[groupIdx] = idxNativeTurn;
           }
         }
       }
@@ -985,14 +1087,7 @@ export class AntigravityInput extends BaseInput {
       const group = turnGroups[gi]!;
       let resolvedTurn = latchedTurnByStartStep.get(group.startStep);
       if (!resolvedTurn) {
-        let nativeTurn: string | undefined;
-        for (const idx of group.steps) {
-          const t = stepInfos.get(idx)?.turnId;
-          if (t) {
-            nativeTurn = t;
-            break;
-          }
-        }
+        const nativeTurn = groupNativeTurns[gi];
         resolvedTurn = nativeTurn
           ? `${sessionId}:${nativeTurn}`
           : `${sessionId}:turn:${gi + 1}`;
@@ -1036,10 +1131,16 @@ export class AntigravityInput extends BaseInput {
         }
         return `${sessionId}:turn:${groupNum}`;
       }
-      return `${sessionId}:turn:1`;
+      // When transcript is absent in Cycle 1 and native turnId isn't written yet,
+      // latch fallback turn:1 on startStep 0 so Cycle 2 does not split the turn.
+      const latchedRoot = latchedTurnByStartStep.get(0);
+      if (latchedRoot) return latchedRoot;
+      const fallback = `${sessionId}:turn:1`;
+      latchedTurnByStartStep.set(0, fallback);
+      return fallback;
     };
 
-    // Preserve monotonic turn ordering for same-millisecond tie-breaking.
+    // Preserve monotonic turn ordering for deterministic sorting.
     // Register carried-over pending turns FIRST so they never sort after newer turns.
     const turnOrderMap = new Map<string, number>();
     const registerTurnOrder = (turnId: string): void => {
@@ -1056,28 +1157,71 @@ export class AntigravityInput extends BaseInput {
       }
     }
 
-    // Locate the result stepIndex for a tool call, skipping non-tool-result
-    // bookkeeping steps (e.g. CHECKPOINT / TASK_BOUNDARY) between PLANNER_RESPONSE
-    // and the tool result step.
-    const findToolResultStepIndex = (
+    // Locate the result step for a tool call, skipping intermediate non-tool bookkeeping
+    // steps (e.g. CHECKPOINT / TASK_BOUNDARY) up to the next turn/planner boundary.
+    // Prefers exact native toolCallId match, then positional match verified by toolName.
+    const locateToolResultStep = (
       plannerStepIndex: number,
       toolIndex: number,
-    ): number => {
+      toolName?: string,
+      callId?: string,
+    ): { step?: AntigravityTranscriptStep; stepIndex: number; boundaryReached: boolean } => {
       if (transcript) {
         const startPos = stepPositionByIndex.get(plannerStepIndex);
         if (startPos !== undefined) {
-          let seenToolResults = 0;
+          const toolResults: AntigravityTranscriptStep[] = [];
+          let boundaryReached = false;
           for (let pos = startPos + 1; pos < transcript.steps.length; pos++) {
             const candidate = transcript.steps[pos]!;
-            if (TURN_BOUNDARY_STEP_TYPES.has(candidate.type)) break;
+            if (TURN_BOUNDARY_STEP_TYPES.has(candidate.type)) {
+              boundaryReached = true;
+              break;
+            }
             if (!isToolResultStep(candidate)) continue;
-            if (seenToolResults === toolIndex) return candidate.stepIndex;
-            seenToolResults++;
+            toolResults.push(candidate);
           }
+          // 1) Exact native toolCallId match (handles out-of-order parallel completion)
+          if (callId) {
+            const byCallId = toolResults.find(
+              (c) => stepInfos.get(c.stepIndex)?.toolCallId === callId,
+            );
+            if (byCallId) {
+              return { step: byCallId, stepIndex: byCallId.stepIndex, boundaryReached };
+            }
+          }
+          // 2) Positional match if toolName is compatible
+          const positional = toolResults[toolIndex];
+          if (positional) {
+            const posInfo = stepInfos.get(positional.stepIndex);
+            if (!toolName || !posInfo?.toolName || posInfo.toolName === toolName) {
+              return { step: positional, stepIndex: positional.stepIndex, boundaryReached };
+            }
+            // Out-of-order parallel tool completion: look for matching toolName
+            const byName = toolResults.find(
+              (c) => stepInfos.get(c.stepIndex)?.toolName === toolName,
+            );
+            if (byName) {
+              return { step: byName, stepIndex: byName.stepIndex, boundaryReached };
+            }
+            return { step: positional, stepIndex: positional.stepIndex, boundaryReached };
+          }
+          return { step: undefined, stepIndex: plannerStepIndex + 1 + toolIndex, boundaryReached };
         }
       }
-      return plannerStepIndex + 1 + toolIndex;
+      const fallbackIdx = plannerStepIndex + 1 + toolIndex;
+      return {
+        step: transcript?.byStepIndex.get(fallbackIdx),
+        stepIndex: fallbackIdx,
+        boundaryReached: latestFollowupStepIndex > plannerStepIndex,
+      };
     };
+
+    const findToolResultStepIndex = (
+      plannerStepIndex: number,
+      toolIndex: number,
+      toolName?: string,
+      callId?: string,
+    ): number => locateToolResultStep(plannerStepIndex, toolIndex, toolName, callId).stepIndex;
 
     const resolveToolCallId = (
       plannerStepIndex: number,
@@ -1089,8 +1233,8 @@ export class AntigravityInput extends BaseInput {
       const latchKey = `${plannerStepIndex}:${toolIndex}`;
       const latched = latchedToolCallIds.get(latchKey);
       if (latched) return latched;
-      const resultIdx = findToolResultStepIndex(plannerStepIndex, toolIndex);
-      const info = stepInfos.get(resultIdx);
+      const located = locateToolResultStep(plannerStepIndex, toolIndex, toolName);
+      const info = stepInfos.get(located.stepIndex);
       const nameCompatible =
         !toolName || !info?.toolName || info.toolName === toolName;
       const chosen =
@@ -1101,11 +1245,18 @@ export class AntigravityInput extends BaseInput {
       return chosen;
     };
 
-    // A step is genuinely still in-progress only when transcript marks it in-progress,
-    // SQLite has not yet recorded completedAtMs, AND no later step has completed.
-    // This prevents stuck or backgrounded (WaitMsBeforeAsync) RUNNING steps from
-    // stalling the session or dropping completed tool results.
-    const isStepStillActive = (
+    // Symmetric streaming gate for Loop 2 AND Loop 3 on prompt/PLANNER_RESPONSE steps:
+    // defer while transcript status is in-progress at the session tip (even if SQLite
+    // already wrote completedAtMs or partial content) so toolCalls never split across cycles.
+    const isPlannerOrPromptStillStreaming = (step: AntigravityTranscriptStep): boolean => {
+      if (!isStepInProgress(step)) return false;
+      if (latestCompletedStepIndex > step.stepIndex) return false;
+      return true;
+    };
+
+    // Tool-result active gate (Loop 1 & Loop 2 tool results): also treats a backgrounded
+    // RUNNING run_command as finished once SQLite records completedAtMs or later steps complete.
+    const isToolStepStillActive = (
       step: AntigravityTranscriptStep,
       info: AntigravityStepInfo | undefined,
     ): boolean => {
@@ -1115,20 +1266,28 @@ export class AntigravityInput extends BaseInput {
       return true;
     };
 
+    const lastTranscriptStepIdx =
+      transcript && transcript.steps.length > 0
+        ? transcript.steps[transcript.steps.length - 1]!.stepIndex
+        : -1;
+
     // Precompute per-turn primary provider and per-step LLM completion timestamp
-    // from SQLite usage events. gen_metadata field 9.4 (and steps.metadata field 8)
-    // is the generation completion timestamp (respTsMs).
+    // from SQLite usage events (excluding context-compaction CHECKPOINT steps).
     const turnProviderMap = new Map<string, string>();
     const stepCompletionMsMap = new Map<number, number>();
     if (snapshot) {
       for (const usage of snapshot.events) {
+        if (this.isCompactionOnlyUsage(usage, transcript)) continue;
         const linkedStep = this.findLinkedPlannerStep(usage, transcript);
         const primaryIdx = linkedStep?.stepIndex ?? usage.stepIndices[0];
         if (linkedStep) {
-          const completedMs = Math.max(
-            stepInfos.get(linkedStep.stepIndex)?.completedAtMs ?? 0,
-            usage.timestampMs,
-          );
+          const info = stepInfos.get(linkedStep.stepIndex);
+          const durationNs = (usage.ttftNs ?? 0) + (usage.streamDurationNs ?? 0);
+          const durationMs = durationNs > 0 ? Math.max(1, Math.round(durationNs / 1_000_000)) : 0;
+          let completedMs = Math.max(info?.completedAtMs ?? 0, usage.timestampMs);
+          if (info?.createdAtMs !== undefined && completedMs <= info.createdAtMs) {
+            completedMs = info.createdAtMs + Math.max(1, durationMs || 1);
+          }
           const prev = stepCompletionMsMap.get(linkedStep.stepIndex);
           if (prev === undefined || completedMs > prev) {
             stepCompletionMsMap.set(linkedStep.stepIndex, completedMs);
@@ -1150,10 +1309,18 @@ export class AntigravityInput extends BaseInput {
     // 1) Drain any pending tool calls from previous poll cycles whose tool results have now landed
     const remainingPending: PendingToolCall[] = [];
     for (const pending of prevCursor.pendingToolCalls) {
-      const resultStep = transcript?.byStepIndex.get(pending.resultStepIndex);
-      const resultInfo = stepInfos.get(pending.resultStepIndex);
+      const toolIndex =
+        pending.toolIndex ?? Math.max(0, pending.resultStepIndex - pending.plannerStepIndex - 1);
+      const located = locateToolResultStep(
+        pending.plannerStepIndex,
+        toolIndex,
+        pending.toolName,
+        pending.callId,
+      );
+      const resultStep = located.step;
+      const resultInfo = resultStep ? stepInfos.get(resultStep.stepIndex) : undefined;
       if (resultStep && isToolResultStep(resultStep)) {
-        if (isStepStillActive(resultStep, resultInfo)) {
+        if (isToolStepStillActive(resultStep, resultInfo)) {
           // Tool execution is genuinely still in progress; wait for completion
           remainingPending.push(pending);
           continue;
@@ -1218,26 +1385,23 @@ export class AntigravityInput extends BaseInput {
         if (resultMediaParts.length > 0) attachMultimodalMetadataForEntry(resultEntry);
         await this.attachWorkspaceContext(resultEntry, cwd);
         entries.push(resultEntry);
-      } else if (resultStep && !isToolResultStep(resultStep)) {
-        // Slot is occupied by a non-tool-result step (cancelled/skipped tool); retire
-      } else if (latestFollowupStepIndex > pending.resultStepIndex) {
-        // Conversation already progressed past this slot with a new prompt/planner step; retire
+      } else if (located.boundaryReached) {
+        // Next turn/planner boundary already landed without this tool result; retire
       } else {
+        // Result not written yet (intermediate CHECKPOINT/TASK_BOUNDARY does not retire pending)
         remainingPending.push(pending);
       }
     }
 
     // 2) Emit new turn prompts and tool.call / tool.result
     if (transcript) {
-      const stepsByIndex = transcript.byStepIndex;
       for (const step of transcript.steps) {
         if (step.stepIndex <= prevCursor.lastTranscriptStepIndex) continue;
         const stepInfo = stepInfos.get(step.stepIndex);
         const isPrompt = turnPromptStepSet.has(step.stepIndex);
-        // Stop before an active in-progress prompt or planner step at the tip of the
-        // session so we neither emit incomplete tool calls nor skip it via watermark.
-        // Older stuck RUNNING steps with later completed steps do not stall the session.
-        if ((isPrompt || step.type === 'PLANNER_RESPONSE') && isStepStillActive(step, stepInfo)) {
+        // Symmetric streaming gate shared with Loop 3: stop before an in-progress
+        // prompt/planner step at the session tip so Loop 2 and Loop 3 stay in lockstep.
+        if ((isPrompt || step.type === 'PLANNER_RESPONSE') && isPlannerOrPromptStillStreaming(step)) {
           break;
         }
         if (step.stepIndex > maxStepIndex) maxStepIndex = step.stepIndex;
@@ -1287,8 +1451,9 @@ export class AntigravityInput extends BaseInput {
 
           for (let i = 0; i < step.toolCalls.length; i++) {
             const tc = step.toolCalls[i]!;
-            const resultStepIndex = findToolResultStepIndex(step.stepIndex, i);
-            const resultStep = stepsByIndex.get(resultStepIndex);
+            const located = locateToolResultStep(step.stepIndex, i, tc.name, tc.id);
+            const resultStepIndex = located.stepIndex;
+            const resultStep = located.step;
             const resultInfo = stepInfos.get(resultStepIndex);
             const toolName = tc.name || resultInfo?.toolName || 'unknown';
             const callId = resolveToolCallId(step.stepIndex, i, tc.id, toolName);
@@ -1320,7 +1485,7 @@ export class AntigravityInput extends BaseInput {
             await this.attachWorkspaceContext(callEntry, cwd);
             entries.push(callEntry);
 
-            if (resultStep && isToolResultStep(resultStep) && !isStepStillActive(resultStep, resultInfo)) {
+            if (resultStep && isToolResultStep(resultStep) && !isToolStepStillActive(resultStep, resultInfo)) {
               const rawResultTsMs =
                 resultInfo?.completedAtMs ?? resultStep.createdAtMs ?? callTsMs;
               const resultTsMs = Math.max(callTsMs, rawResultTsMs);
@@ -1365,12 +1530,13 @@ export class AntigravityInput extends BaseInput {
               await this.attachWorkspaceContext(resultEntry, cwd);
               entries.push(resultEntry);
             } else if (
-              (resultStep && isToolResultStep(resultStep) && isStepStillActive(resultStep, resultInfo)) ||
-              (!resultStep && latestFollowupStepIndex <= resultStepIndex)
+              (resultStep && isToolResultStep(resultStep) && isToolStepStillActive(resultStep, resultInfo)) ||
+              (!resultStep && !located.boundaryReached)
             ) {
               // Tool result is in-progress or hasn't been written yet; persist for next poll cycle
               remainingPending.push({
                 plannerStepIndex: step.stepIndex,
+                toolIndex: i,
                 turnId,
                 stepId,
                 resultStepIndex,
@@ -1387,17 +1553,27 @@ export class AntigravityInput extends BaseInput {
 
     // 3) Emit authoritative llm.request + llm.response pairs from SQLite usage events
     if (snapshot) {
-      const usedResponseIds = new Set<string>();
-      const seenPrimaryStepIdx = new Set<number>();
-
+      const nowForRace = Date.now();
       for (const usage of snapshot.events) {
-        if (isUsageAlreadyCovered(usage, prevCursor, seenKeys)) continue;
+        if (isUsageAlreadyCovered(usage, prevCursor, seenKeys, deferredGenSet, deferredStepSet)) {
+          continue;
+        }
 
-        // Skip internal context-compaction CHECKPOINT steps: consistent with WorkBuddy/Codex/Claude Code,
-        // compaction is not emitted as an ordinary conversation llm.request/llm.response (doing so also
-        // triggers TurnBoundaryProcessor to falsely stamp gen_ai.turn.end=true mid-turn on ['stop']).
+        // Skip internal context-compaction CHECKPOINT steps only when ALL stepIndices
+        // are visible in transcript and none is a PLANNER_RESPONSE.
         if (this.isCompactionOnlyUsage(usage, transcript)) {
           recordUsageIdentities(seenKeys, keyOrder, keyMeta, usage);
+          if (usage.genIdx !== undefined) deferredGenSet.delete(usage.genIdx);
+          for (const s of usage.stepIndices) deferredStepSet.delete(s);
+          continue;
+        }
+
+        // Cross-file compaction race guard: if SQLite wrote a steps-only row (or partial
+        // CHECKPOINT row) whose stepIndices haven't flushed to transcript yet while recent,
+        // defer instead of eagerly emitting ['stop'] or swallowing a pending PLANNER_RESPONSE.
+        if (this.shouldDeferCompactionRace(usage, transcript, lastTranscriptStepIdx, nowForRace)) {
+          if (usage.genIdx !== undefined) deferredGenSet.add(usage.genIdx);
+          for (const s of usage.stepIndices) deferredStepSet.add(s);
           continue;
         }
 
@@ -1405,22 +1581,22 @@ export class AntigravityInput extends BaseInput {
         const linkedStepIdx = linkedStep?.stepIndex ?? usage.stepIndices[0];
         const linkedStepInfo = linkedStepIdx !== undefined ? stepInfos.get(linkedStepIdx) : undefined;
 
-        // Defer emitting LLM events while a linked PLANNER_RESPONSE at the session tip
-        // is still actively streaming (prevents premature finish_reasons=['stop'] before
-        // tool_calls are flushed to transcript.jsonl).
+        // Symmetric streaming gate with Loop 2: defer while linked PLANNER_RESPONSE at
+        // session tip is still in-progress in transcript (even if SQLite completedAtMs or
+        // partial content arrived before tool_calls flushed).
         if (
           linkedStep &&
           linkedStep.type === 'PLANNER_RESPONSE' &&
-          (isStepStillActive(linkedStep, linkedStepInfo) ||
-            (isStepInProgress(linkedStep) &&
-              linkedStep.toolCalls.length === 0 &&
-              !linkedStep.content &&
-              latestCompletedStepIndex <= linkedStep.stepIndex))
+          isPlannerOrPromptStillStreaming(linkedStep)
         ) {
+          if (usage.genIdx !== undefined) deferredGenSet.add(usage.genIdx);
+          for (const s of usage.stepIndices) deferredStepSet.add(s);
           continue;
         }
 
         recordUsageIdentities(seenKeys, keyOrder, keyMeta, usage);
+        if (usage.genIdx !== undefined) deferredGenSet.delete(usage.genIdx);
+        for (const s of usage.stepIndices) deferredStepSet.delete(s);
 
         const turnId = resolveTurnForStep(linkedStepIdx, usage.stepIndices);
         registerTurnOrder(turnId);
@@ -1467,29 +1643,28 @@ export class AntigravityInput extends BaseInput {
         // gen_metadata field 9.4 (and steps.metadata field 8) is generation completion time.
         // For retries, keep the retry's own timestamp/duration instead of reusing parent step bounds.
         // For primary calls, take max(steps.completedAtMs, usage.timestampMs) to avoid stale
-        // completedAtMs === createdAtMs snapshots, and guarantee strictly non-zero span duration.
+        // completedAtMs === createdAtMs snapshots, and guarantee >= +1ms non-zero span duration
+        // (surviving otel-util-genai readNanoMs millisecond truncation).
         const durationNs = (usage.ttftNs ?? 0) + (usage.streamDurationNs ?? 0);
         const durationMs = durationNs > 0 ? Math.max(1, Math.round(durationNs / 1_000_000)) : 0;
         let respTsMs = isRetryUsage
           ? usage.timestampMs
           : Math.max(linkedStepInfo?.completedAtMs ?? 0, usage.timestampMs);
-        const derivedReqTsMs =
-          durationMs > 0 ? Math.max(1, respTsMs - durationMs) : respTsMs;
+        // Derive request start at least 1ms before completion when duration is absent,
+        // keeping respTsMs anchored at the true completion timestamp (and >= +1ms span duration
+        // so otel-util-genai readNanoMs never truncates to 0ms).
+        const derivedReqTsMs = Math.max(1, respTsMs - Math.max(1, durationMs || 1));
         const reqTsMs =
           !isRetryUsage &&
           linkedStepInfo?.createdAtMs !== undefined &&
           linkedStepInfo.createdAtMs < respTsMs
             ? linkedStepInfo.createdAtMs
             : derivedReqTsMs;
-        if (durationMs > 0 && respTsMs <= reqTsMs) {
-          respTsMs = reqTsMs + durationMs;
+        if (respTsMs <= reqTsMs) {
+          respTsMs = reqTsMs + Math.max(1, durationMs || 1);
         }
         const reqTimeNano = BigInt(Math.floor(reqTsMs)) * 1_000_000n;
-        // Ensure strictly non-zero LLM span duration (+1µs within the same ms when timestamps match)
-        const respTimeNano =
-          respTsMs > reqTsMs
-            ? BigInt(Math.floor(respTsMs)) * 1_000_000n
-            : reqTimeNano + 1_000n;
+        const respTimeNano = BigInt(Math.floor(respTsMs)) * 1_000_000n;
 
         const inputDelta = await this.buildInputMessagesDelta(
           linkedStep,
@@ -1581,26 +1756,22 @@ export class AntigravityInput extends BaseInput {
       }
     }
 
-    // Deterministic sort: millisecond bucket ascending, then turn order (prevents
-    // cross-turn interleaving), then intra-turn step order, then event phase weight,
-    // then sub-millisecond nanoseconds.
+    // Strictly transitive lexicographic sort: turn order -> intra-turn step order ->
+    // timestamp ascending -> event phase weight. Prevents cross-turn Signal B flushes
+    // and intra-turn interleaving even when +1ms non-zero duration bumps cross ms ties.
     entries.sort((a, b) => {
-      const ta = BigInt(a.time_unix_nano);
-      const tb = BigInt(b.time_unix_nano);
-      const ma = ta / 1_000_000n;
-      const mb = tb / 1_000_000n;
-      if (ma !== mb) return ma < mb ? -1 : 1;
       const turnA = turnOrderMap.get(a['gen_ai.turn.id'] ?? '') ?? Number.MAX_SAFE_INTEGER;
       const turnB = turnOrderMap.get(b['gen_ai.turn.id'] ?? '') ?? Number.MAX_SAFE_INTEGER;
       if (turnA !== turnB) return turnA - turnB;
       const stepA = extractStepOrder(a['gen_ai.step.id']);
       const stepB = extractStepOrder(b['gen_ai.step.id']);
       if (stepA !== stepB) return stepA - stepB;
+      const ta = BigInt(a.time_unix_nano);
+      const tb = BigInt(b.time_unix_nano);
+      if (ta !== tb) return ta < tb ? -1 : 1;
       const wa = EVENT_ORDER_WEIGHT[a['event.name']] ?? 5;
       const wb = EVENT_ORDER_WEIGHT[b['event.name']] ?? 5;
-      if (wa !== wb) return wa - wb;
-      if (ta !== tb) return ta < tb ? -1 : 1;
-      return 0;
+      return wa - wb;
     });
 
     const turnIdByStartStep: Record<string, string> = {};
@@ -1619,6 +1790,10 @@ export class AntigravityInput extends BaseInput {
       maxEmittedStepIdx,
       emittedUsageKeys: keyOrder,
       emittedKeyMeta: keyMeta,
+      deferredGenIdxs: [...deferredGenSet],
+      deferredStepIdxs: [...deferredStepSet],
+      emittedResponseIds: [...usedResponseIds],
+      emittedPrimaryStepIdxs: [...seenPrimaryStepIdx],
       pendingToolCalls: remainingPending,
       turnIdByStartStep,
       emittedTurnStarts: [...emittedTurnStartsSet],
@@ -1646,11 +1821,46 @@ export class AntigravityInput extends BaseInput {
     let sawCheckpoint = false;
     for (const idx of usage.stepIndices) {
       const step = transcript.byStepIndex.get(idx);
-      if (!step) continue;
+      // Require ALL referenced indices to be visible in transcript so an unflushed
+      // sibling PLANNER_RESPONSE is never misclassified as compaction-only.
+      if (!step) return false;
       if (step.type === 'PLANNER_RESPONSE') return false;
       if (step.type === 'CHECKPOINT') sawCheckpoint = true;
     }
     return sawCheckpoint;
+  }
+
+  private shouldDeferCompactionRace(
+    usage: AntigravityUsageEvent,
+    transcript: AntigravityTranscript | null,
+    lastTranscriptStepIdx: number,
+    nowMs: number,
+  ): boolean {
+    if (!transcript || usage.stepIndices.length === 0) return false;
+    let hasMissing = false;
+    let hasCheckpoint = false;
+    let hasPlanner = false;
+    for (const idx of usage.stepIndices) {
+      const step = transcript.byStepIndex.get(idx);
+      if (!step) {
+        hasMissing = true;
+      } else if (step.type === 'PLANNER_RESPONSE') {
+        hasPlanner = true;
+      } else if (step.type === 'CHECKPOINT') {
+        hasCheckpoint = true;
+      }
+    }
+    if (!hasMissing || hasPlanner) return false;
+    // Partial CHECKPOINT + missing sibling index, OR recent steps-only row ahead of transcript tip
+    if (hasCheckpoint && nowMs - usage.timestampMs < 30_000) return true;
+    if (
+      usage.genIdx === undefined &&
+      Math.max(...usage.stepIndices) > lastTranscriptStepIdx &&
+      nowMs - usage.timestampMs < 30_000
+    ) {
+      return true;
+    }
+    return false;
   }
 
   private async buildInputMessagesDelta(
@@ -1671,7 +1881,12 @@ export class AntigravityInput extends BaseInput {
       explicitId?: string,
       toolName?: string,
     ) => string,
-    findToolResultStepIndex: (plannerStepIndex: number, toolIndex: number) => number,
+    findToolResultStepIndex: (
+      plannerStepIndex: number,
+      toolIndex: number,
+      toolName?: string,
+      callId?: string,
+    ) => number,
   ): Promise<JsonValue[]> {
     if (!linkedStep || !transcript) return [];
 
@@ -1691,7 +1906,7 @@ export class AntigravityInput extends BaseInput {
           name: tc.name,
           arguments: tc.args ?? null,
         });
-        const resultIdx = findToolResultStepIndex(prevPlanner.stepIndex, i);
+        const resultIdx = findToolResultStepIndex(prevPlanner.stepIndex, i, tc.name, callId);
         if (resultIdx < linkedStep.stepIndex) {
           const resultStep = transcript.byStepIndex.get(resultIdx);
           if (resultStep && isToolResultStep(resultStep)) {
