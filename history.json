@@ -3868,6 +3868,177 @@
           }
         },
         {
+          "id": "v1.19.0",
+          "kind": "release",
+          "version": "v1.19.0",
+          "commit": "c5047ac934537d6cd4c1ba2ab930d3cf7e26e531",
+          "recorded_at": "2026-11-19T02:49:17.700146Z",
+          "status": "passed",
+          "method_id": "github-full-pilot-codex-rollout-v2",
+          "environment_id": "9af4b6b70fb0f4e37b73a4cba6f77a6b7abe4cd7b2a7490314b529c36fd6b9f3",
+          "environment": {
+            "cpu_model": "AMD EPYC 9V45 96-Core Processor",
+            "runner_os": "Linux",
+            "runner_image": "ubuntu22/20261111.360.2",
+            "container_digest": "sha256:b774d993885c47eca14db241ba8cc7e5789235142f76e4a2a6a65ec350a1bac0",
+            "cgroup_version": "v2",
+            "kernel": "6.8.0-1070-azure",
+            "architecture": "x86_64",
+            "cpus": 4
+          },
+          "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/44447029236",
+          "workloads": {
+            "idle": {
+              "repeats": 3,
+              "p95_ms": null,
+              "poll_interval_ms": 10000,
+              "cpu_percent": {
+                "median": 0.37786010203089027,
+                "min": 0.3667270489016109,
+                "max": 0.38588419176013544
+              },
+              "rss_mib": {
+                "median": 119.38671875,
+                "min": 117.66015625,
+                "max": 119.421875
+              },
+              "cpu_peak_percent": {
+                "median": 31.517298433830106,
+                "min": 26.04131545253845,
+                "max": 31.815345363139997
+              },
+              "rss_average_mib": {
+                "median": 113.43322106559287,
+                "min": 113.28237810396524,
+                "max": 113.90666562542879
+              },
+              "raw_input_bytes_per_second": {
+                "median": 0.0,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "jsonl_output_bytes_per_second": {
+                "median": 0.0,
+                "min": 0.0,
+                "max": 0.0
+              },
+              "quality": {
+                "passed": true,
+                "missing": 0,
+                "duplicates": 0
+              }
+            },
+            "low": {
+              "repeats": 3,
+              "p95_ms": {
+                "median": 291.709097,
+                "min": 286.904289,
+                "max": 292.475446
+              },
+              "poll_interval_ms": 10000,
+              "cpu_percent": {
+                "median": 3.2781119478084397,
+                "min": 3.254971529695401,
+                "max": 3.315964868481246
+              },
+              "rss_mib": {
+                "median": 128.51171875,
+                "min": 123.34375,
+                "max": 129.546875
+              },
+              "cpu_peak_percent": {
+                "median": 38.158708112727105,
+                "min": 36.36179439335402,
+                "max": 39.56252613802864
+              },
+              "rss_average_mib": {
+                "median": 120.44518270579722,
+                "min": 118.1156153291776,
+                "max": 121.91429602079636
+              },
+              "raw_input_bytes_per_second": {
+                "median": 27828.50977551568,
+                "min": 27827.95133258084,
+                "max": 27828.520064441265
+              },
+              "jsonl_output_bytes_per_second": {
+                "median": 144744.7902851115,
+                "min": 144744.73676920866,
+                "max": 145227.54599987308
+              },
+              "quality": {
+                "passed": true,
+                "missing": 0,
+                "duplicates": 0
+              }
+            },
+            "high": {
+              "repeats": 3,
+              "p95_ms": {
+                "median": 201.194948,
+                "min": 197.270949,
+                "max": 202.34688
+              },
+              "poll_interval_ms": 100,
+              "cpu_percent": {
+                "median": 49.048808007088844,
+                "min": 48.96333641860837,
+                "max": 49.8519851536377
+              },
+              "rss_mib": {
+                "median": 130.9765625,
+                "min": 129.296875,
+                "max": 132.89453125
+              },
+              "cpu_peak_percent": {
+                "median": 126.27143045985756,
+                "min": 119.82648980568179,
+                "max": 137.0256919944921
+              },
+              "rss_average_mib": {
+                "median": 127.1083243876381,
+                "min": 126.70417141159626,
+                "max": 128.49560614220496
+              },
+              "raw_input_bytes_per_second": {
+                "median": 557603.5100905014,
+                "min": 557575.2547203973,
+                "max": 557605.931294285
+              },
+              "jsonl_output_bytes_per_second": {
+                "median": 2910814.72934898,
+                "min": 2903382.0215568566,
+                "max": 2911946.7188676912
+              },
+              "quality": {
+                "passed": true,
+                "missing": 0,
+                "duplicates": 0
+              }
+            }
+          },
+          "source": {
+            "repository": "alibaba/loongsuite-pilot",
+            "ref": "v1.19.0"
+          },
+          "provenance": {
+            "entry_sha256": "30eacb2b242833f25d7dcfad0b9a5befc1edb3fb90f31d73d04bdf444557a69a",
+            "fixture_sha256": "d095d5e01f0758348388e4a939b3d9f26457af4c70db9ea16053d9ecfcb1befb",
+            "compiler": null,
+            "asset_sha256": "163cf15f6e2ffef0e33e479fc3174f7a7fc628c29fb4c44f3d8add3cb2bda1e5",
+            "release_url": "https://github.com/alibaba/loongsuite-pilot/releases/tag/v1.19.0",
+            "asset_id": 762729463,
+            "asset_name": "loongsuite-pilot.tar.gz",
+            "asset_size_bytes": 5571617,
+            "asset_url": "https://github.com/alibaba/loongsuite-pilot/releases/download/v1.19.0/loongsuite-pilot.tar.gz",
+            "checksum_source": "github_asset_digest"
+          },
+          "publication": {
+            "run_number": 137,
+            "run_id": "44447029236"
+          }
+        },
+        {
           "id": "main",
           "kind": "main",
           "version": "main",
@@ -4197,7 +4368,7 @@
           }
         }
       ],
-      "updated_at": "2026-11-17T06:27:49.166357Z"
+      "updated_at": "2026-11-19T02:54:30.262496Z"
     },
     "github-full-pilot-qoder-stop-30s-v1": {
       "method": {
