@@ -12,6 +12,10 @@ export const FIELDS_TO_MASK = new Set<string>([
   'gen_ai.system_instructions',
   'gen_ai.tool.definitions',
   'error.message',
+  'gen_ai.guardrail.reason',
+  'gen_ai.guardrail.title',
+  'gen_ai.guardrail.severity',
+  'gen_ai.guardrail.message',
 
   'content',
   'inlineDiffMessage',

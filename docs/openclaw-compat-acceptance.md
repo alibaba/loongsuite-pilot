@@ -1,8 +1,7 @@
 # OpenClaw compatibility acceptance
 
-> Historical evidence notice: the reports below validate commits from before
-> `captureMessageContent` was retired. Their content-off results apply only to
-> those tested heads; current code ignores the legacy setting and reports content.
+> Historical evidence notice: the reports below validate only the commits
+> tested at the time. Re-run the scenarios after changing the plugin.
 
 ## Automatic entry follow-up — validation scope
 

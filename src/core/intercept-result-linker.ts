@@ -1,14 +1,28 @@
+import { stampGuardrail } from '../interceptor/guardrail.js';
 import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
 import { ClientType, type AgentActivityEntry } from '../types/index.js';
 
 export class InterceptResultLinker {
   constructor(
     private readonly verdictStore: ToolVerdictStore,
-    private readonly enabled: boolean,
+    /** A function when interception can turn on later (managed rules arrive after startup). */
+    private readonly enabled: boolean | (() => boolean),
+    private readonly beforeEnrich?: () => Promise<void>,
   ) {}
 
+  /** Flush earlier worker verdict messages before collection reads the mirror. */
+  async sync(entries?: AgentActivityEntry[]): Promise<void> {
+    if (!(typeof this.enabled === 'function' ? this.enabled() : this.enabled)) return;
+    if (entries && !entries.some(entry =>
+      (entry['event.name'] === 'tool.call' || entry['event.name'] === 'tool.result')
+      && isInterceptorAgent(entry['gen_ai.agent.type'])
+      && typeof entry['gen_ai.tool.call.id'] === 'string'
+      && entry['gen_ai.tool.call.id'].length > 0)) return;
+    await this.beforeEnrich?.();
+  }
+
   enrich(entries: AgentActivityEntry[]): void {
-    if (!this.enabled) return;
+    if (!(typeof this.enabled === 'function' ? this.enabled() : this.enabled)) return;
     for (const entry of entries) {
       const event = entry['event.name'];
       const phase = event === 'tool.call'
@@ -21,14 +35,13 @@ export class InterceptResultLinker {
       const toolUseId = entry['gen_ai.tool.call.id'];
       const sessionId = entry['gen_ai.session.id'];
       if (typeof toolUseId !== 'string' || toolUseId.length === 0) continue;
-      const action = this.verdictStore.get({
+      const snapshot = this.verdictStore.getSnapshot({
         sessionId: typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined,
         toolUseId,
         phase,
       });
-      if (!action) continue;
-      entry['gen_ai.guardrail.triggered'] = true;
-      entry['gen_ai.guardrail.action'] = action;
+      if (!snapshot) continue;
+      stampGuardrail(entry, snapshot);
     }
   }
 }
@@ -36,6 +49,7 @@ export class InterceptResultLinker {
 const QODER_INTERCEPTOR_AGENT_TYPES = new Set([
   'qoder',
   'qoder-cli',
+  'qoder-app',
   'qodercli',
   'qoder-idea',
   'qoder-jetbrains',

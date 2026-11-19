@@ -17,11 +17,85 @@ function entry(id: string, overrides: Partial<AgentActivityEntry> = {}): AgentAc
 }
 
 describe('CodexTurnJournal', () => {
+  it('applies disk backpressure without deleting pending turns and recovers capacity after ACK', async () => {
+    const first = entry('first');
+    const bytes = Buffer.byteLength(JSON.stringify(first) + '\n');
+    const journal = new CodexTurnJournal(directory, 100, bytes);
+    await journal.append([first]);
+    await expect(journal.append([entry('second')])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    expect((await readJournal(journal)).flat().map(e => e['event.id'])).toEqual(['first']);
+    const restarted = new CodexTurnJournal(directory, 100, bytes);
+    await expect(restarted.append([entry('second')])).rejects.toThrow('disk budget exceeded');
+    await restarted.acknowledge([first]);
+    await restarted.append([entry('third', { 'gen_ai.turn.id': 'new-turn' })]);
+    expect((await readJournal(restarted)).flat().map(e => e['event.id'])).toEqual(['third']);
+  });
+  it('shares the disk budget across delegated Agents and retains rejected work for retry after ACK', async () => {
+    const first = entry('hermes-work', { 'gen_ai.agent.type': 'hermes' });
+    const second = entry('openclaw-work', { 'gen_ai.agent.type': 'openclaw' });
+    const bytes = Buffer.byteLength(JSON.stringify(first) + '\n')
+      + Buffer.byteLength(JSON.stringify(second) + '\n') - 1;
+    const agents = ['codex', 'hermes', 'openclaw'];
+    const journal = new CodexTurnJournal(directory, 100, agents, bytes);
+    await journal.append([first]);
+    await expect(journal.append([second])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    const restarted = new CodexTurnJournal(directory, 100, agents, bytes);
+    expect((await readJournal(restarted)).flat()).toEqual([first]);
+    expect(await restarted.isAcknowledged(second)).toBe(false);
+    await restarted.acknowledge([first]);
+    await restarted.append([second]);
+    expect((await readJournal(restarted)).flat()).toEqual([second]);
+  });
+
+  it('allows Codex and Hermes to resume after a retained OpenClaw cron turn is acknowledged', async () => {
+    const cron = entry('pending-cron', { 'gen_ai.agent.type': 'openclaw', 'agent.openclaw.collection': 'cron-lifecycle-v1' });
+    const codex = entry('next-codex', { 'gen_ai.agent.type': 'codex', 'gen_ai.turn.id': 'next-codex' });
+    const hermes = entry('next-hermes', { 'gen_ai.agent.type': 'hermes', 'gen_ai.turn.id': 'next-hermes' });
+    const size = (item: AgentActivityEntry) => Buffer.byteLength(JSON.stringify(item) + '\n');
+    const limit = Math.max(size(cron), size(codex), size(hermes)) + 16;
+    const journal = new CodexTurnJournal(directory, 100, ['openclaw', 'codex', 'hermes'], limit);
+    await journal.append([cron]);
+    await expect(journal.append([codex])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    await expect(journal.append([hermes])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    await journal.acknowledge([cron]);
+    await journal.append([codex]);
+    await journal.acknowledge([codex]);
+    await journal.append([hermes]);
+    expect((await readJournal(journal)).flat().map(item => item['event.id'])).toEqual(['next-hermes']);
+  });
+
+  it('honors explicit disk budgets for both constructor forms when the environment is invalid', () => {
+    const previous = process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
+    process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES = 'invalid';
+    try {
+      expect(() => new CodexTurnJournal(directory, 100, 1024)).not.toThrow();
+      expect(() => new CodexTurnJournal(directory, 100, ['codex', 'hermes'], 1024)).not.toThrow();
+      expect(() => new CodexTurnJournal(directory)).toThrow(RangeError);
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
+      else process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES = previous;
+    }
+  });
+
   let directory: string;
   beforeEach(async () => { directory = await createTempDir('codex-turn-journal-'); });
   afterEach(async () => { await cleanupTempDir(directory); });
   const filename = (dir: string, record: AgentActivityEntry) =>
     path.join(dir, `codex-turn-${codexTurnJournalGroupKey(record)}.jsonl`);
+
+  it('keeps late OpenClaw cron sender identity in its execution while preserving older journal keys', async () => {
+    const early = entry('early', { 'gen_ai.agent.type': 'openclaw', 'agent.openclaw.collection': 'cron-lifecycle-v1' });
+    const later = entry('later', { ...early, 'event.id': 'later', 'user.id': 'native-sender' });
+    const next = entry('next', { ...later, 'event.id': 'next', 'gen_ai.turn.id': 'next-turn' });
+    const journal = new CodexTurnJournal(directory, 100, ['openclaw']);
+    await journal.append([early, later, next]);
+    const restored = await readJournal(new CodexTurnJournal(directory, 100, ['openclaw']));
+    expect(restored.map(group => group.map(e => e['event.id']).sort()).sort())
+      .toEqual([['early', 'later'], ['next']]);
+    const oldEarly = { ...early, 'agent.openclaw.collection': undefined };
+    const oldLater = { ...later, 'agent.openclaw.collection': undefined };
+    expect(codexTurnJournalGroupKey(oldEarly)).not.toBe(codexTurnJournalGroupKey(oldLater));
+  });
 
   it('restores separate users/sessions/turns and stable records after restart without duplicate event IDs', async () => {
     const records = [entry('a'), entry('b'), entry('c', { 'gen_ai.turn.id': 'turn-2' }),
@@ -136,7 +210,7 @@ describe('CodexTurnJournal', () => {
     expect(await restarted.isAcknowledged(record)).toBe(true);
   });
 
-  it('ignores residual pending content if acknowledgement was written before a crash', async () => {
+  it('reclaims residual pending content if acknowledgement was written before a crash', async () => {
     const record = entry('exported');
     await new CodexTurnJournal(directory).append([record]);
     const key = codexTurnJournalGroupKey(record);
@@ -145,9 +219,9 @@ describe('CodexTurnJournal', () => {
     expect(await restarted.isAcknowledged(record)).toBe(true);
     expect(await readJournal(restarted)).toEqual([]);
     expect(await readJournal(restarted, key)).toEqual([]);
-    const before = await fs.readFile(filename(directory, record), 'utf8');
+    await expect(fs.stat(filename(directory, record))).rejects.toMatchObject({ code: 'ENOENT' });
     await restarted.append([entry('source-replay')]);
-    expect(await fs.readFile(filename(directory, record), 'utf8')).toBe(before);
+    await expect(fs.stat(filename(directory, record))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('cleans residual pending content before evicting its oldest acknowledgement and retains ACK on cleanup failure', async () => {

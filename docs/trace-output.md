@@ -73,8 +73,22 @@ the collector does not fix an already-running old plugin. Restart Hermes after u
 
 Live turns have no forced age cutoff: a time-based flush would again discard later tool/model events.
 Pending buffer count and `oldest_buffer_age_ms` remain visible in the `pilot_trace_runtime` status
-snapshots, under the existing buffer-count cap. A host killed before completion still requires separate
-abandoned-turn recovery; this observer does not provide durable crash replay.
+snapshots, under the existing buffer-count cap. On Linux in the same PID namespace, the new plugin
+records the producer's process identity. After the collector confirms that process has exited and the
+buffer has been idle for at least five minutes, it waits at least one more minute and checks that the
+durably persisted input cursor has reached EOF for every extant source segment. When it has not, recovery
+requests normal input collection without waiting behind another source's output backpressure and checks
+again later. Consumed closed segments remain reclaimable; the final segment of an exited process is
+retained while a turn still needs recovery, until export or durable normal completion. It then exports
+completed spans with `agent.hermes.collection.incomplete=true` and
+`agent.hermes.collection.end_reason=producer_process_exited`. Unpaired requests and tool calls are
+not fabricated into complete spans. Missing or unreadable source files, a partial final line, a disabled
+input or unaccepted output keeps the turn pending. Older plugins without process identity, other PID
+namespaces, non-Linux systems and unidentifiable owners do not use this recovery. The check covers the
+identified producer's files and cannot prove another process will not continue the same turn. The journal
+retains pending data across collector restarts, but does not guarantee end-to-end exactly-once delivery.
+The source index and deferred recovery each track up to 10,000 turns, with up to 16 sources per turn;
+exceeding a limit emits a warning and retains Hermes raw sources until the collector is restarted.
 
 OpenClaw observes completion with `agent_end` and retains the `llm_output` collection boundary. It does
 not register `before_agent_finalize`: that answer-revision hook makes supporting hosts buffer replies
@@ -356,8 +370,8 @@ This caveat applies to OTLP trace backends that aggregate across a span hierarch
 
 ## Content Capture In Traces
 
-Trace spans can carry sensitive content. Legacy `captureMessageContent` settings
-are ignored. For sensitive or team-managed setups, enable masking:
+Trace spans can carry sensitive content. For sensitive or team-managed setups,
+enable masking:
 
 ```json
 {
@@ -368,8 +382,6 @@ are ignored. For sensitive or team-managed setups, enable masking:
 ```
 
 See [Data Masking](masking.md) for supported rules and custom modes.
-
-Pilot sets its converter's `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` to `SPAN_ONLY` and includes `gen_ai_latest_experimental` in `OTEL_SEMCONV_STABILITY_OPT_IN`, preserving unrelated opt-ins. Inherited SDK settings such as `NO_CONTENT` no longer disable content in Pilot traces.
 
 ## Custom Span Attributes
 

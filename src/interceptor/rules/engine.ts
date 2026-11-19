@@ -1,10 +1,11 @@
 import type {
   EvaluateHookResponse,
+  HookEvaluator,
   HookRequest,
   LocalRule,
 } from '../types.js';
 
-export class RuleEngine {
+export class RuleEngine implements HookEvaluator {
   constructor(
     private readonly rules: readonly LocalRule[],
     private readonly enabledRuleIds: ReadonlySet<string>,

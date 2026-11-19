@@ -27,6 +27,45 @@ function withoutBoundaries(value: AgentActivityEntry): AgentActivityEntry {
 }
 
 describe('TurnBoundaryProcessor', () => {
+  it('tracks Hermes users separately when they reuse the same session and turn', () => {
+    const processor = new TurnBoundaryProcessor();
+    const common = { 'gen_ai.agent.type': 'hermes', 'agent.hermes.collection': 'realtime-v1',
+      'gen_ai.session.id': 'shared-session' };
+    const first = entry('user-a-request', 'llm.request', { ...common, 'user.id': 'user-a' });
+    const second = entry('user-b-request', 'llm.request', { ...common, 'user.id': 'user-b' });
+    processor.enrich([first, second]);
+    expect(first['gen_ai.turn.start']).toBe(true);
+    expect(second['gen_ai.turn.start']).toBe(true);
+    const continuation = entry('user-b-response', 'llm.response', { ...common, 'user.id': 'user-b' });
+    processor.enrich([continuation]);
+    expect(continuation['gen_ai.turn.start']).toBeUndefined();
+  });
+
+  it('waits for the OpenClaw cron lifecycle end while keeping the ordinary fallback boundary', () => {
+    const processor = new TurnBoundaryProcessor();
+    const cron = { 'gen_ai.agent.type': 'openclaw', 'agent.openclaw.collection': 'cron-lifecycle-v1' };
+    const request = entry('cron-request', 'llm.request', cron);
+    const primary = entry('cron-primary', 'other', { ...cron, 'agent.openclaw.hook': 'llm_output' });
+    const fallback = entry('cron-fallback', 'other', { ...cron, 'agent.openclaw.hook': 'llm_output' });
+    const finish = entry('cron-finished', 'other', {
+      ...cron, 'agent.openclaw.hook': 'cron_finished', 'gen_ai.turn.end': true,
+    });
+    processor.enrich([request, primary]);
+    processor.enrich([fallback]);
+    processor.enrich([finish]);
+
+    expect(request['gen_ai.turn.start']).toBe(true);
+    expect(primary['gen_ai.turn.end']).toBeUndefined();
+    expect(fallback['gen_ai.turn.end']).toBeUndefined();
+    expect(finish['gen_ai.turn.end']).toBe(true);
+
+    const ordinary = entry('ordinary-output', 'other', {
+      'gen_ai.agent.type': 'openclaw', 'gen_ai.turn.id': 'ordinary-turn', 'agent.openclaw.hook': 'llm_output',
+    });
+    processor.enrich([ordinary]);
+    expect(ordinary['gen_ai.turn.end']).toBe(true);
+  });
+
   it('waits for the incremental Hermes end marker across separate response batches', () => {
     const processor = new TurnBoundaryProcessor();
     const base = { 'gen_ai.agent.type': 'hermes', 'agent.hermes.collection': 'realtime-v1' };

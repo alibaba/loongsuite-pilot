@@ -2,7 +2,7 @@
 
 English | [简体中文](zh-CN/local-jsonl-output.md)
 
-Local JSONL output writes normalized Pilot events to files on the same machine. It is enabled by default and is the easiest way to verify that collection is working before configuring a remote backend.
+Local JSONL output writes normalized Pilot events to files on the same machine. It is disabled by default; enable it explicitly in `config.json` when you need to inspect events locally.
 
 ## Default Location
 
@@ -41,7 +41,7 @@ backend boundary.
 
 | Setting | Description |
 |---------|-------------|
-| `enabled` | Enables or disables local JSONL output. |
+| `enabled` | Enables or disables local JSONL output. Defaults to `false`. |
 | `outputDir` | Directory where output files are written. |
 | `rotateDaily` | Rotates output by date. |
 | `maxFileSizeMb` | Rotates before the next event would exceed this many MiB (default 100). Applies to Agent events and raw topics, including `rotateDaily=false`. Non-positive or non-finite values use the default. |
@@ -88,7 +88,7 @@ Environment variables:
 
 | Variable | Description |
 |----------|-------------|
-| `JSONL_ENABLED` | Enables or disables JSONL output. |
+| `JSONL_ENABLED` | Enables or disables JSONL output; takes precedence over `config.json`. |
 | `JSONL_OUTPUT_DIR` | Overrides the JSONL output directory. |
 
 ## Verify Local Output
@@ -106,7 +106,9 @@ ls ~/.loongsuite-pilot/logs/output
 tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
 ```
 
-If no output appears, make sure at least one supported agent is installed, enabled, and has produced new activity after Pilot started.
+If no output appears, make sure `jsonl.enabled` is `true` and at least one supported agent is installed, enabled, and has produced new activity after Pilot started.
+
+This setting controls normalized event output in `logs/output/` only. Input adapters' raw or intermediate files and runtime metrics and alarm records have separate writers.
 
 ## Privacy Notes
 
