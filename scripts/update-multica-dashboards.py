@@ -1,17 +1,18 @@
 """Update exported Multica dashboards. Read/write JSON keyed by dashboardName via stdin/stdout.
 
-Project bindings and panel positions are preserved.
+By default the exported task-execution dashboard supplies the reference panels.
+Pass --task-panels PATH to apply a separately maintained panel template first.
 """
+import argparse
 import json
 import sys
 import re
 from pathlib import Path
 
 
-def update(boards):
+def update(boards, templates=None):
     task_charts = {c["title"]: c for c in boards["multica-task-execution"]["charts"]}
-    templates = json.loads((Path(__file__).resolve().parents[1] / "assets/multica/task-panels.json").read_text())
-    for name, template in templates.items():
+    for name, template in (templates or {}).items():
         panel = task_charts[name]
         token_query = "\n".join(template["queryLines"])
         panel["search"]["chartQueries"][0].update(
@@ -67,4 +68,8 @@ def update(boards):
 
 
 if __name__ == "__main__":
-    json.dump(update(json.load(sys.stdin)), sys.stdout, ensure_ascii=False)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--task-panels", type=Path, help="Optional external panel template")
+    args = parser.parse_args()
+    templates = json.loads(args.task_panels.read_text(encoding="utf-8")) if args.task_panels else None
+    json.dump(update(json.load(sys.stdin), templates), sys.stdout, ensure_ascii=False)
