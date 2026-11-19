@@ -2784,27 +2784,31 @@ impl Orchestrator {
         .await;
         let openclaw = self.data_dir_join("logs/openclaw");
         ensure_openclaw_plugin_log_dir(&openclaw).await;
-        self.attach_hook(
-            entries,
-            "openclaw-plugin-log",
-            "openclaw",
-            OpenClawPluginInput::new(crate::inputs::openclaw_plugin::OpenClawPluginInputOptions {
-                state_store: Arc::clone(state_store),
-                log_dir: Some(openclaw.clone()),
-                log_prefix: None,
-                poll_interval_ms: self.poll("openclaw-plugin-log"),
-                data_dir: Some(self.data_dir.clone()),
-            }),
-            vec![openclaw.clone()],
-            {
-                let openclaw = openclaw.clone();
-                move || {
+        if !self.uses_sdk_hook_history("openclaw") {
+            self.attach_hook(
+                entries,
+                "openclaw-plugin-log",
+                "openclaw",
+                OpenClawPluginInput::new(
+                    crate::inputs::openclaw_plugin::OpenClawPluginInputOptions {
+                        state_store: Arc::clone(state_store),
+                        log_dir: Some(openclaw.clone()),
+                        log_prefix: None,
+                        poll_interval_ms: self.poll("openclaw-plugin-log"),
+                        data_dir: Some(self.data_dir.clone()),
+                    },
+                ),
+                vec![openclaw.clone()],
+                {
                     let openclaw = openclaw.clone();
-                    async move { directory_exists(&openclaw).await }
-                }
-            },
-        )
-        .await;
+                    move || {
+                        let openclaw = openclaw.clone();
+                        async move { directory_exists(&openclaw).await }
+                    }
+                },
+            )
+            .await;
+        }
         let hermes = self.data_dir_join("logs/hermes-agent");
         ensure_dir(&hermes).await;
         let (hermes_input, live) = self
