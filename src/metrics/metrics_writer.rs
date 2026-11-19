@@ -982,7 +982,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
         let writer = make_writer(dir.path(), None).with_interceptor_monitoring(
-            || json!({"enabled":true, "running":true, "rules":{"effective":2}}),
+            || serde_json::json!({"enabled":true, "running":true, "rules":{"effective":2}}),
             Arc::new(AlarmManager::new("127.0.0.1", "2.0.0", "u1")),
         );
         writer.start().await;
