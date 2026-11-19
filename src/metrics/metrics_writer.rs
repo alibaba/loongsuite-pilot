@@ -75,6 +75,8 @@ pub struct MetricsWriter {
     sampler: Arc<DiskUsageSampler>,
     get_snapshot: Arc<dyn Fn() -> Result<DataflowSnapshot, String> + Send + Sync>,
     get_trace: Option<TraceSnapshotProvider>,
+    get_interceptor: Option<Arc<dyn Fn() -> Value + Send + Sync>>,
+    collector_alarms: Option<Arc<AlarmManager>>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -175,8 +177,20 @@ impl MetricsWriter {
             sampler,
             get_snapshot: opts.get_snapshot,
             get_trace: opts.get_trace_runtime_snapshot,
+            get_interceptor: None,
+            collector_alarms: None,
             tasks: Mutex::new(Vec::new()),
         }
+    }
+
+    pub(crate) fn with_interceptor_monitoring(
+        mut self,
+        status: impl Fn() -> Value + Send + Sync + 'static,
+        alarm: Arc<AlarmManager>,
+    ) -> Self {
+        self.get_interceptor = Some(Arc::new(status));
+        self.collector_alarms = Some(alarm);
+        self
     }
 
     pub async fn start(&self) {
@@ -202,7 +216,9 @@ impl MetricsWriter {
             }
         });
         self.tasks.lock().expect("tasks").push(dataflow);
-        if self.inner.lock().expect("writer").alarm_manager.is_some() {
+        if self.collector_alarms.is_some()
+            || self.inner.lock().expect("writer").alarm_manager.is_some()
+        {
             let writer = self.share();
             let alarms = tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(alarm_flush_interval);
@@ -238,6 +254,8 @@ impl MetricsWriter {
             sampler: Arc::clone(&self.sampler),
             get_snapshot: Arc::clone(&self.get_snapshot),
             get_trace: self.get_trace.clone(),
+            get_interceptor: self.get_interceptor.clone(),
+            collector_alarms: self.collector_alarms.clone(),
         })
     }
 
@@ -292,6 +310,8 @@ struct Shared {
     sampler: Arc<DiskUsageSampler>,
     get_snapshot: Arc<dyn Fn() -> Result<DataflowSnapshot, String> + Send + Sync>,
     get_trace: Option<TraceSnapshotProvider>,
+    get_interceptor: Option<Arc<dyn Fn() -> Value + Send + Sync>>,
+    collector_alarms: Option<Arc<AlarmManager>>,
 }
 
 impl Shared {
@@ -351,7 +371,11 @@ impl Shared {
             inner.check_startup_mode(&metrics);
             inner.check_infra_health();
         }
-        let flat = flatten_to_strings(&as_map(&metrics));
+        let mut row = as_map(&metrics);
+        if let Some(status) = &self.get_interceptor {
+            row.insert("interceptor".into(), status());
+        }
+        let flat = flatten_to_strings(&row);
         dispatch_status("pilot_status", &flat)?;
         let _ = dispatch_running(&flat);
         self.write_trace_runtime(&metrics);
@@ -360,7 +384,7 @@ impl Shared {
             .join(format!("pilot-metrics-{}.jsonl", get_today_date_string()));
         append_line(
             &path.to_string_lossy(),
-            &serde_json::to_string(&metrics).unwrap_or_else(|_| "{}".into()),
+            &serde_json::to_string(&row).unwrap_or_else(|_| "{}".into()),
         )
         .await;
         Ok(())
@@ -474,13 +498,16 @@ impl Shared {
     }
 
     async fn write_alarms(&self) {
-        let entries = {
+        let mut entries = {
             let inner = self.inner.lock().expect("writer");
-            let Some(manager) = &inner.alarm_manager else {
-                return;
-            };
-            manager.serialize()
+            inner
+                .alarm_manager
+                .as_ref()
+                .map_or_else(Vec::new, AlarmManager::serialize)
         };
+        if let Some(manager) = &self.collector_alarms {
+            entries.extend(manager.serialize());
+        }
         if entries.is_empty() {
             return;
         }
@@ -954,7 +981,10 @@ mod tests {
         clear_sends();
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
-        let writer = make_writer(dir.path(), None);
+        let writer = make_writer(dir.path(), None).with_interceptor_monitoring(
+            || json!({"enabled":true, "running":true, "rules":{"effective":2}}),
+            Arc::new(AlarmManager::new("127.0.0.1", "2.0.0", "u1")),
+        );
         writer.start().await;
         let metric_dir = dir.path().join("logs").join("metric_alarm");
         let file = std::fs::read_dir(&metric_dir)
@@ -970,6 +1000,7 @@ mod tests {
         let text = std::fs::read_to_string(file.path()).unwrap();
         let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         assert_eq!(entry["version"], "2.0.0");
+        assert_eq!(entry["interceptor"]["running"], true);
         assert_eq!(entry["user_id"], "u1");
         assert_eq!(entry["metric_json"]["agent_count"], "1");
         assert!(entry["metric_json"].get("raw_in_records").is_none());
@@ -982,6 +1013,8 @@ mod tests {
             status.fields.get("version").map(String::as_str),
             Some("2.0.0")
         );
+        let interceptor: Value = serde_json::from_str(&status.fields["interceptor"]).unwrap();
+        assert_eq!(interceptor, entry["interceptor"]);
         assert!(!status.fields.contains_key("__topic__"));
         assert!(recorded_sends().iter().all(|send| ![
             "pilot_input_detail",

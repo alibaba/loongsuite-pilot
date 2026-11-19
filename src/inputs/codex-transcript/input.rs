@@ -179,6 +179,8 @@ pub(super) struct Shared {
 
     pub last_historical_stat_at: i64,
     pub cached_default: Option<CachedDefault>,
+    default_scan_complete: bool,
+    baseline_since: Option<i64>,
     wakeup: WakeupState,
     #[cfg(test)]
     pub main541_discoveries: usize,
@@ -281,6 +283,8 @@ impl CodexTranscriptInput {
 
                 last_historical_stat_at: 0,
                 cached_default: None,
+                default_scan_complete: false,
+                baseline_since: None,
                 wakeup: WakeupState::default(),
                 #[cfg(test)]
                 main541_discoveries: 0,
@@ -478,62 +482,21 @@ impl InputBody for CodexTranscriptBody {
     }
 
     async fn on_start(&self, rt: &InputRuntime) -> anyhow::Result<()> {
-        // A restart must baseline the actual directory generation before any
-        // output; equal directory timestamps do not prove equal inventories.
+        let started_at = super::utils::now_ms() as i64;
         self.with_shared(|shared| shared.cached_default = None);
         self.engine().restore_delegation_state(rt);
         self.engine().discard_legacy_global_turn_registry(rt);
+        let baseline_since = self.begin_initial_baseline(rt, started_at).await?;
+        self.with_shared(|shared| shared.baseline_since = baseline_since);
         let discovered = self.engine().discover_session_files().await;
         self.engine()
             .index_discovered_transcript_owners(rt, &discovered, None)
             .await?;
         for file in &discovered {
-            if !file.baseline_on_start {
-                continue;
-            }
-            let key = self.engine().state_key(&file.file_path);
-            let meta = self.with_shared(|shared| shared.meta_by_path.get(&file.file_path).cloned());
-            let needed = meta.as_ref().is_some_and(|meta| {
-                meta.depth == 1
-                    && meta.parent_thread_id.as_ref().is_some_and(|parent| {
-                        self.engine().has_pending_fusion_for_parent(rt, parent)
-                    })
-            });
-            if needed
-                || self.engine().read_checkpoint(rt, &key).is_some()
-                || rt.state_store.get(&key).last_offset().is_some()
-            {
-                continue;
-            }
-            // Live ownership survives a failed first output, without advancing
-            // canonical offsets or supplying firstOwned to copied-history bootstrap.
-            if let Some(floor) =
-                source_ownership::baseline_floor(&self.wakeup_dir, &file.file_path).await?
-            {
-                if floor.copied {
-                    self.engine()
-                        .restore_fork_baseline(rt, &file.file_path, &key, floor)
-                        .await?;
-                } else {
-                    self.engine()
-                        .restore_baseline_file(rt, &file.file_path, &key, floor)
-                        .await?;
-                }
-                continue;
-            }
-            if source_ownership::was_live(&self.wakeup_dir, &file.file_path).await? {
-                continue;
-            }
-            if engine::has_copied_history_prefix(meta.as_ref()) {
-                self.engine()
-                    .park_fork_baseline(rt, &file.file_path, &key)
-                    .await?;
-            } else {
-                self.engine()
-                    .baseline_file(rt, &file.file_path, &key)
-                    .await?;
-            }
+            self.prepare_startup_source(rt, file, baseline_since, true)
+                .await?;
         }
+        self.complete_initial_baseline(rt);
         ensure_dir(&self.wakeup_dir).await;
         ensure_dir(&self.span_context_dir).await;
         self.start_wakeup_watcher(rt);
@@ -653,14 +616,23 @@ impl InputBody for CodexTranscriptBody {
                 .cmp(&right_depth)
                 .then_with(|| left.file_path.cmp(&right.file_path))
         });
+        let baseline_since = self.with_shared(|shared| shared.baseline_since);
         let mut emitted = 0usize;
         for file in &discovered {
             if skip.contains(&file.file_path) {
                 continue;
             }
+            if baseline_since.is_some()
+                && self
+                    .prepare_startup_source(rt, file, baseline_since, false)
+                    .await?
+            {
+                continue;
+            }
             emitted += self.engine().process_file(rt, &file.file_path).await?;
         }
         if plan.full {
+            self.complete_initial_baseline(rt);
             emitted += self.engine().retry_pending_agent_results(rt).await?;
         }
         self.engine().save_delegation_state(rt);
@@ -674,6 +646,136 @@ impl InputBody for CodexTranscriptBody {
 }
 
 impl CodexTranscriptBody {
+    async fn begin_initial_baseline(
+        &self,
+        rt: &InputRuntime,
+        started_at: i64,
+    ) -> anyhow::Result<Option<i64>> {
+        use crate::checkpoints::InputStatePatch;
+
+        let extra = rt.state_store.get(self.id()).extra().unwrap_or_default();
+        if extra["isBaselineInit"] == true {
+            return Ok(None);
+        }
+        if extra["baselineUnfinished"] != true {
+            let prefix = format!("{}:", self.id());
+            if rt.state_store.keys().iter().any(|key| {
+                key.starts_with(&prefix)
+                    && (self.engine().read_checkpoint(rt, key).is_some()
+                        || rt.state_store.get(key).last_offset().is_some())
+            }) {
+                self.set_initial_baseline_complete(rt);
+                return Ok(None);
+            }
+        } else if let Some(since) = extra["baselinePendingSince"]
+            .as_i64()
+            .filter(|time| *time > 0)
+        {
+            return Ok(Some(since));
+        }
+
+        rt.state_store.update(
+            self.id(),
+            InputStatePatch {
+                extra: Some(json!({
+                    "baselineUnfinished": true,
+                    "baselinePendingSince": started_at,
+                })),
+                ..InputStatePatch::default()
+            },
+        );
+        // A crash during initial source reads must not turn partially written
+        // checkpoints into evidence of a previous completed installation.
+        rt.state_store.save().await?;
+        Ok(Some(started_at))
+    }
+
+    fn complete_initial_baseline(&self, rt: &InputRuntime) {
+        if self.with_shared(|shared| {
+            shared.default_scan_complete && shared.baseline_since.take().is_some()
+        }) {
+            self.set_initial_baseline_complete(rt);
+        }
+    }
+
+    fn set_initial_baseline_complete(&self, rt: &InputRuntime) {
+        let current = rt.state_store.get(self.id());
+        let mut extra = current
+            .extra()
+            .and_then(|extra| match extra {
+                Value::Object(fields) => Some(fields),
+                _ => None,
+            })
+            .unwrap_or_default();
+        extra.remove("baselineUnfinished");
+        extra.remove("baselinePendingSince");
+        extra.insert("isBaselineInit".into(), Value::Bool(true));
+        rt.state_store
+            .set(self.id(), current.with_extra(Value::Object(extra)));
+    }
+
+    async fn prepare_startup_source(
+        &self,
+        rt: &InputRuntime,
+        file: &super::discovery::DiscoveredSessionFile,
+        baseline_since: Option<i64>,
+        on_start: bool,
+    ) -> anyhow::Result<bool> {
+        if !file.baseline_on_start {
+            return Ok(false);
+        }
+        let path = &file.file_path;
+        let engine = self.engine();
+        let key = engine.state_key(path);
+        let meta = self.with_shared(|shared| shared.meta_by_path.get(path).cloned());
+        let needed = meta.as_ref().is_some_and(|meta| {
+            meta.depth == 1
+                && meta
+                    .parent_thread_id
+                    .as_ref()
+                    .is_some_and(|parent| engine.has_pending_fusion_for_parent(rt, parent))
+        });
+        if needed
+            || engine.read_checkpoint(rt, &key).is_some()
+            || rt.state_store.get(&key).last_offset().is_some()
+        {
+            return Ok(false);
+        }
+        if let Some(floor) = source_ownership::baseline_floor(&self.wakeup_dir, path).await? {
+            if floor.copied {
+                engine.restore_fork_baseline(rt, path, &key, floor).await?;
+            } else {
+                engine.restore_baseline_file(rt, path, &key, floor).await?;
+            }
+            return Ok(true);
+        }
+        if source_ownership::was_live(&self.wakeup_dir, path).await? {
+            return Ok(false);
+        }
+        if let Some(since) = baseline_since {
+            crate::utils::source_access::check(path)?;
+            let metadata = tokio::fs::metadata(path).await?;
+            let first_timestamp = [metadata.created(), metadata.modified()]
+                .into_iter()
+                .filter_map(|time| time.ok()?.duration_since(std::time::UNIX_EPOCH).ok())
+                .filter(|time| !time.is_zero())
+                .min();
+            if first_timestamp.is_none_or(|time| time.as_millis() > since as u128) {
+                return Ok(false);
+            }
+        }
+        if engine::has_copied_history_prefix(meta.as_ref()) {
+            if baseline_since.is_some() || on_start {
+                engine.park_fork_baseline(rt, path, &key).await?;
+                return Ok(true);
+            }
+        } else if baseline_since.is_some() {
+            engine.baseline_file(rt, path, &key).await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn engine(&self) -> CodexTranscriptEngine<'_> {
         CodexTranscriptEngine { body: self }
     }

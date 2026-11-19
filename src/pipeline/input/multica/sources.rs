@@ -1,5 +1,4 @@
 use std::io::{Read, Seek, SeekFrom};
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -277,11 +276,6 @@ pub(crate) async fn stat(file: &Path) -> Result<SourceResult, String> {
     })
 }
 
-static BRIDGE_FRAME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-    r"^@multica-k8s-v1\t([a-zA-Z0-9-]{1,128})\t([a-z0-9.-]{1,253})\t([0-9a-fA-F:.]{0,45})\t([a-z0-9-]{1,63})\t([a-f0-9]{64})\t"
-).expect("known bridge framing")
-});
 static ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*m").expect("ANSI"));
 static CRI: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(\d{4}-\d\d-\d\dT\S+)\s+(?:stdout|stderr)\s+([FP])\s+(.*)$").expect("CRI log")
@@ -296,20 +290,9 @@ static LEVEL: LazyLock<Regex> =
 static DURATION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(\d+(?:\.\d+)?)(ns|µs|μs|us|ms|s|m|h)").expect("duration"));
 
-pub(crate) fn parse_log(mut line: &str) -> Option<Record> {
-    let mut origin = Record::new();
+pub(crate) fn parse_log(line: &str) -> Option<Record> {
     if line.starts_with("@multica-k8s-v1\t") {
-        let frame = BRIDGE_FRAME.captures(line)?;
-        origin.extend(record([
-            ("pod_uid", &frame[1]),
-            ("pod_name", &frame[2]),
-            ("container_name", &frame[4]),
-            ("log_event_id", &frame[5]),
-        ]));
-        if frame[3].parse::<IpAddr>().is_ok() {
-            origin.insert("pod_ip".into(), frame[3].into());
-        }
-        line = &line[frame.get(0)?.end()..];
+        return None;
     }
     let stripped = ANSI.replace_all(line, "");
     let mut clean = stripped.as_ref();
@@ -404,7 +387,6 @@ pub(crate) fn parse_log(mut line: &str) -> Option<Record> {
         ("message", name),
     ]);
     row.extend(fields(&data));
-    row.extend(origin);
     row.extend(diagnostics::log(&data, &message));
     for (key, field) in [
         ("level", "level"),
@@ -498,8 +480,9 @@ fn read_log(
             || (previous.signature_size == prefix.len() && previous.signature != signature)
     });
     let offset = if rotated { 0 } else { previous.offset };
-    let mut discard = !rotated && previous.discard_partial;
-    let mut frame = if rotated { None } else { previous.log_frame };
+    // A legacy checkpoint may already have consumed the removed bridge frame.
+    // Drain the rest of that line without treating its payload as a local log.
+    let mut discard = !rotated && (previous.discard_partial || previous.log_frame.is_some());
     file.seek(SeekFrom::Start(offset))
         .map_err(|_| "file_seek_error")?;
     let bytes = info.size.saturating_sub(offset).min(max_log);
@@ -515,34 +498,14 @@ fn read_log(
         let tail = &buffer[begin..];
         let newline = tail.iter().position(|byte| *byte == b'\n');
         let part = &tail[..newline.unwrap_or(tail.len())];
-        if frame.is_none() && !discard && part.starts_with(b"@multica-k8s-v1\t") {
-            let header = String::from_utf8_lossy(&part[..part.len().min(600)]);
-            if let Some(found) = BRIDGE_FRAME.find(&header) {
-                frame = Some(found.as_str().to_owned());
-                begin += found.end();
-                continue;
-            }
-            if newline.is_none() && part.len() < 600 {
-                break;
-            }
-        }
         if newline.is_none() && !discard && part.len() <= max_line {
             break;
         }
         if newline.is_some() && !discard && part.len() <= max_line {
-            let line = format!(
-                "{}{}",
-                frame.as_deref().unwrap_or(""),
-                String::from_utf8_lossy(part)
-            );
+            let line = String::from_utf8_lossy(part);
             if let Some(mut row) = parse_log(&line) {
-                let id = row.get("log_event_id").cloned().unwrap_or_else(|| {
-                    format!("{}:{}:{}", info.dev, info.ino, offset + begin as u64)
-                });
-                let log_identity = row
-                    .get("log_event_id")
-                    .cloned()
-                    .unwrap_or_else(|| format!("{id}:{}", digest(&line)));
+                let id = format!("{}:{}:{}", info.dev, info.ino, offset + begin as u64);
+                let log_identity = format!("{id}:{}", digest(line.as_bytes()));
                 row.insert("entity_id".into(), id);
                 row.insert("log_identity".into(), log_identity);
                 row.insert("file_path".into(), path.display().to_string());
@@ -551,7 +514,6 @@ fn read_log(
         } else {
             skipped += 1;
         }
-        frame = None;
         discard = newline.is_none();
         begin += part.len() + usize::from(newline.is_some());
     }
@@ -583,7 +545,6 @@ fn read_log(
         signature,
         signature_size: prefix.len(),
         discard_partial: discard,
-        log_frame: frame,
         ..Checkpoint::default()
     });
     Ok(output)

@@ -19,6 +19,8 @@ pub(super) const ENV_OPTIONS: &[(&str, &str)] = &[
     ("slsApiKey", "LP_SLS_API_KEY"),
     ("logLevel", "LP_LOG_LEVEL"),
     ("userId", "LP_USER_ID"),
+    ("hostSn", "LP_HOST_SN"),
+    ("multicaCollectionMode", "LP_MULTICA_COLLECTION_MODE"),
     ("collectLog", "LP_COLLECT_LOG"),
     ("collectTrace", "LP_COLLECT_TRACE"),
     ("enableStatusBarApp", "LP_ENABLE_STATUS_BAR_APP"),
@@ -172,6 +174,111 @@ fn mode(options: &Options, key: &str, allowed: &[&str]) -> Result<String> {
     Ok(text)
 }
 
+/// Hardware probes run only when the installer actually writes configuration.
+pub(super) async fn capture_host_serial(options: &mut Options) {
+    if !options.text("hostSn").is_empty() {
+        return;
+    }
+    if let Some(serial) = read_host_serial().await {
+        options.0.insert("hostSn".into(), json!(serial));
+    }
+}
+
+fn normalize_host_serial(raw: &str) -> Option<&str> {
+    let serial = raw.trim();
+    if serial.is_empty()
+        || serial.len() > 128
+        || !serial
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._: -".contains(&byte))
+        || matches!(
+            serial.to_ascii_lowercase().as_str(),
+            "none"
+                | "default string"
+                | "to be filled by o.e.m."
+                | "system serial number"
+                | "not specified"
+                | "0"
+        )
+    {
+        return None;
+    }
+    Some(serial)
+}
+
+#[cfg(target_os = "linux")]
+async fn read_host_serial() -> Option<String> {
+    use tokio::io::AsyncReadExt;
+
+    for path in [
+        "/sys/class/dmi/id/product_serial",
+        "/sys/class/dmi/id/board_serial",
+        "/sys/class/dmi/id/chassis_serial",
+    ] {
+        let Ok(file) = tokio::fs::File::open(path).await else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        if file.take(130).read_to_end(&mut bytes).await.is_ok() && bytes.len() < 130 {
+            if let Some(serial) = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(normalize_host_serial)
+            {
+                return Some(serial.to_owned());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(any(target_os = "macos", windows))]
+async fn read_host_serial() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    let (program, args) = (
+        "/usr/sbin/ioreg",
+        &["-rd1", "-c", "IOPlatformExpertDevice"][..],
+    );
+    #[cfg(windows)]
+    let (program, args) = ("powershell.exe", &[
+        "-NoProfile", "-NonInteractive", "-Command",
+        "(Get-CimInstance -ClassName Win32_BIOS -OperationTimeoutSec 3 -ErrorAction SilentlyContinue).SerialNumber; (Get-CimInstance -ClassName Win32_ComputerSystemProduct -OperationTimeoutSec 3 -ErrorAction SilentlyContinue).IdentifyingNumber",
+    ][..]);
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(7),
+        tokio::process::Command::new(program)
+            .args(args)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let text = std::str::from_utf8(&output.stdout).ok()?;
+    #[cfg(target_os = "macos")]
+    let values = text.lines().filter_map(|line| {
+        let (_, assignment) = line.split_once("\"IOPlatformSerialNumber\"")?;
+        assignment
+            .trim()
+            .strip_prefix('=')?
+            .trim()
+            .strip_prefix('"')?
+            .split_once('"')
+            .map(|(serial, _)| serial)
+    });
+    #[cfg(windows)]
+    let values = text.lines();
+    values
+        .filter_map(normalize_host_serial)
+        .next()
+        .map(str::to_owned)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+async fn read_host_serial() -> Option<String> {
+    None
+}
+
 pub(super) fn merge(existing: &Value, options: &Options) -> Result<Value> {
     let mut config = existing
         .as_object()
@@ -181,6 +288,14 @@ pub(super) fn merge(existing: &Value, options: &Options) -> Result<Value> {
     ensure!(Path::new(&data_dir).is_absolute(), "dataDir 必须为绝对路径");
     config.insert("enabled".into(), json!(true));
     config.insert("dataDir".into(), json!(data_dir));
+    if let Some(serial) = options
+        .0
+        .get("hostSn")
+        .and_then(Value::as_str)
+        .and_then(normalize_host_serial)
+    {
+        config.insert("hostSn".into(), json!(serial));
+    }
     let port = options.text("dashboardPort");
     let dashboard = object(&mut config, "dashboard")?;
     if !port.is_empty() {
@@ -224,6 +339,14 @@ pub(super) fn merge(existing: &Value, options: &Options) -> Result<Value> {
         if let Some(value) = options.boolean(key)? {
             config.insert(key.into(), json!(value));
         }
+    }
+    let mode = options.text("multicaCollectionMode");
+    if !mode.is_empty() {
+        ensure!(
+            matches!(mode.as_str(), "on" | "off"),
+            "Multica collection mode must be on or off"
+        );
+        object(object(&mut config, "pipeline")?, "multica")?.insert("mode".into(), json!(mode));
     }
     merge_sls(&mut config, options)?;
     if ["cmsLicenseKey", "cmsEndpoint", "cmsWorkspace"]
@@ -735,3 +858,17 @@ mod tests {
 #[cfg(test)]
 #[path = "installer_config_history_tests.rs"]
 mod installer_config_history_tests;
+
+#[cfg(test)]
+#[test]
+fn host_serial_validation_preserves_previous_identity_on_probe_failure() {
+    let path = tempfile::tempdir().unwrap();
+    let old = json!({"hostSn":"previous"});
+    for value in ["", "Default String", "abc\\def", &"a".repeat(129)] {
+        let options = Options::new(json!({"dataDir":path.path(), "hostSn":value})).unwrap();
+        assert_eq!(merge(&old, &options).unwrap()["hostSn"], "previous");
+    }
+    let options =
+        Options::new(json!({"dataDir":path.path(), "hostSn":"  Example-01  " } )).unwrap();
+    assert_eq!(merge(&old, &options).unwrap()["hostSn"], "Example-01");
+}

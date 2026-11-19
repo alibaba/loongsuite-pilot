@@ -24,7 +24,7 @@ impl ProbeKind {
         }
     }
 
-    fn matches(self, body: &[u8]) -> bool {
+    fn matches(self, body: &[u8], expected_pid: Option<u32>) -> bool {
         if matches!(self, Self::Metrics) {
             return String::from_utf8_lossy(body)
                 .lines()
@@ -35,7 +35,10 @@ impl ProbeKind {
         };
         match self {
             Self::Api => api_fingerprint(&body),
-            Self::Daemon => daemon_fingerprint(&body),
+            Self::Daemon => {
+                daemon_fingerprint(&body)
+                    && expected_pid.is_none_or(|pid| body["pid"].as_u64() == Some(u64::from(pid)))
+            }
             Self::Metrics => false,
         }
     }
@@ -67,6 +70,16 @@ pub(crate) struct Status {
 impl Gate {
     pub(crate) fn new(input: &Input) -> Self {
         let mut probes = Vec::new();
+        if let Some(url) = input
+            .backend_identity_url
+            .as_deref()
+            .and_then(|url| source_url(url).ok())
+        {
+            probes.push(Probe {
+                kind: ProbeKind::Api,
+                url,
+            });
+        }
         if let Some(base) = &input.api_base {
             let url = format!("{}/api/config", base.trim_end_matches('/'));
             if let Ok(url) = source_url(&url) {
@@ -192,7 +205,7 @@ impl Gate {
                 source_http::get(client, probe.url.clone(), timeout, limit, None).await
             {
                 responded = true;
-                if probe.kind.matches(&response.bytes) {
+                if probe.kind.matches(&response.bytes, input.local_daemon_pid) {
                     self.offset = index;
                     return (true, probe.kind.label());
                 }

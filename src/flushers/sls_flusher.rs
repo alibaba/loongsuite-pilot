@@ -153,6 +153,7 @@ pub struct SlsFlusher {
 }
 
 struct SlsInner {
+    host_identity: crate::utils::SlsHostIdentity,
     config: SlsFlusherConfig,
     state: Mutex<SlsState>,
     writer: SlsFailureLogWriter,
@@ -204,6 +205,18 @@ fn hostname() -> String {
 
 impl SlsFlusher {
     pub fn new(config: SlsFlusherConfig, data_dir: &str) -> Self {
+        Self::new_with_host_identity(
+            config,
+            data_dir,
+            crate::utils::SlsHostIdentity::new(true, ""),
+        )
+    }
+
+    pub(crate) fn new_with_host_identity(
+        config: SlsFlusherConfig,
+        data_dir: &str,
+        host_identity: crate::utils::SlsHostIdentity,
+    ) -> Self {
         let timeout_ms = config
             .timeout
             .as_ref()
@@ -214,7 +227,7 @@ impl SlsFlusher {
             http: Arc::clone(&http),
             timeout_ms,
         });
-        Self::with_io(config, data_dir, None, http, ak)
+        Self::with_io_and_identity(config, data_dir, None, http, ak, host_identity)
     }
 
     pub fn with_io(
@@ -223,6 +236,24 @@ impl SlsFlusher {
         pilot_version: Option<String>,
         http: Arc<dyn SlsHttp>,
         ak: Arc<dyn AkPoster>,
+    ) -> Self {
+        Self::with_io_and_identity(
+            config,
+            data_dir,
+            pilot_version,
+            http,
+            ak,
+            crate::utils::SlsHostIdentity::new(true, ""),
+        )
+    }
+
+    fn with_io_and_identity(
+        config: SlsFlusherConfig,
+        data_dir: &str,
+        pilot_version: Option<String>,
+        http: Arc<dyn SlsHttp>,
+        ak: Arc<dyn AkPoster>,
+        host_identity: crate::utils::SlsHostIdentity,
     ) -> Self {
         let mut counters = HashMap::new();
         for endpoint in &config.endpoints {
@@ -239,6 +270,7 @@ impl SlsFlusher {
         let retry = config.retry.clone().unwrap_or_default();
         let timeout = config.timeout.clone().unwrap_or_default();
         let inner = Arc::new(SlsInner {
+            host_identity,
             service_name: config
                 .service_name
                 .clone()
@@ -651,6 +683,11 @@ impl SlsInner {
         agent_type: Option<&str>,
     ) -> Vec<IndexMap<String, String>> {
         let mut tags = vec![single_tag("__hostname__", &hostname())];
+        tags.extend(
+            self.host_identity
+                .tags()
+                .map(|(key, value)| single_tag(key, value)),
+        );
         let name = self.resolve_service_name(endpoint, agent_type);
         if !name.is_empty() {
             tags.push(single_tag("__service_name__", &name));
@@ -658,9 +695,19 @@ impl SlsInner {
         tags
     }
 
-    fn web_tags(&self, endpoint: &SlsEndpoint, agent_type: Option<&str>) -> Map<String, Value> {
+    fn web_host_tags(&self) -> Map<String, Value> {
         let mut tags = Map::new();
         tags.insert("__hostname__".to_string(), Value::String(hostname()));
+        tags.extend(
+            self.host_identity
+                .tags()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+        tags
+    }
+
+    fn web_tags(&self, endpoint: &SlsEndpoint, agent_type: Option<&str>) -> Map<String, Value> {
+        let mut tags = self.web_host_tags();
         let name = self.resolve_service_name(endpoint, agent_type);
         if !name.is_empty() {
             tags.insert("__service_name__".to_string(), Value::String(name));
@@ -1018,8 +1065,7 @@ impl SlsInner {
                     .await
                 }
                 SlsMode::Webtracking => {
-                    let mut tags = Map::new();
-                    tags.insert("__hostname__".to_string(), Value::String(hostname()));
+                    let tags = self.web_host_tags();
                     super::sls_transport::post_webtracking(
                         &SlsTransportConfig {
                             endpoint: endpoint.endpoint.clone(),

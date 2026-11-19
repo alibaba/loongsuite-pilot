@@ -64,6 +64,8 @@ CMS_LICENSE_KEY=""
 CMS_ENDPOINT=""
 CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
+MULTICA_COLLECTION_MODE="${LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE:-}"
+START_SERVICE=1
 SELECTED_AGENTS=""
 HOOK_INSTALL_SCOPE=""
 AGENT_SELECTION_EXPLICIT=0
@@ -173,6 +175,9 @@ while [[ $# -gt 0 ]]; do
         --cms-endpoint=*)     CMS_ENDPOINT="${1#*=}"; shift ;;
         --cms-workspace)      require_option_value "$@"; CMS_WORKSPACE="$2"; shift 2 ;;
         --cms-workspace=*)    CMS_WORKSPACE="${1#*=}"; shift ;;
+        --multica-collection-mode) require_option_value "$@"; MULTICA_COLLECTION_MODE="$2"; shift 2 ;;
+        --multica-collection-mode=*) MULTICA_COLLECTION_MODE="${1#*=}"; shift ;;
+        --no-start) START_SERVICE=0; shift ;;
         --service-name-prefix) require_option_value "$@"; SERVICE_NAME_PREFIX="$2"; shift 2 ;;
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             require_option_value "$@"; SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; ALL_AGENTS=0; shift 2 ;;
@@ -203,6 +208,11 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+case "$MULTICA_COLLECTION_MODE" in
+    ""|on|off) ;;
+    *) echo "--multica-collection-mode requires on or off" >&2; exit 1 ;;
+esac
 
 if [ "$AGENT_SELECTION_EXPLICIT" -eq 1 ] && [[ "$SELECTED_AGENTS" != *[![:space:]]* ]]; then
     echo "--agents requires a list of Agent IDs or none" >&2
@@ -634,7 +644,7 @@ installer_config_operation() {
         LP_LOG_LEVEL="$LOG_LEVEL" LP_USER_ID="$USER_ID" \
         LP_COLLECT_LOG="$COLLECT_LOG" LP_COLLECT_TRACE="$COLLECT_TRACE" \
         LP_CMS_LICENSE_KEY="$CMS_LICENSE_KEY" LP_CMS_ENDPOINT="$CMS_ENDPOINT" LP_CMS_WORKSPACE="$CMS_WORKSPACE" \
-        LP_SERVICE_NAME_PREFIX="$SERVICE_NAME_PREFIX" \
+        LP_SERVICE_NAME_PREFIX="$SERVICE_NAME_PREFIX" LP_MULTICA_COLLECTION_MODE="$MULTICA_COLLECTION_MODE" \
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" LP_ALL_AGENTS="$ALL_AGENTS" \
         LP_AGENT_SELECTION_EXPLICIT="$AGENT_SELECTION_EXPLICIT" \
         LP_MULTIMODAL_MODE="$MULTIMODAL_MODE" LP_MULTIMODAL_SUPPORTED_AGENTS="$MULTIMODAL_SUPPORTED_AGENTS" \
@@ -1360,6 +1370,11 @@ cmd_install() {
     inject_claude_code_fetch_intercept
     apply_installation_scope || return 1
 
+    if [ "$START_SERVICE" -eq 0 ]; then
+        PILOT_HELD_FOR_DEPLOY=0
+        print_summary "install"
+        return 0
+    fi
     msg "==> 启动服务..." "==> Starting service..."
     if run_pilot_cli start && wait_for_pilot_running; then
         PILOT_HELD_FOR_DEPLOY=0

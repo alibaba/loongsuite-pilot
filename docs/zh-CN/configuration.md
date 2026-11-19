@@ -350,3 +350,7 @@ Windows 在仓库 `deploy` 目录下使用目录数组：
 - 统一输出过滤覆盖 JSONL、SLS、HTTP 和 OTLP，并在 Codex/Qoder 多模态上传前检查。共享 Hook history 写入入口（`writeJsonlRecords` / `appendRowsToHistory`）及 Cursor 正式 history 的 stop、延迟响应路径也应用相同规则。独立文件/API 管道仅根据记录明确携带的目录字段判断；普通文本或没有目录元数据的记录按未知目录放行。
 
 这是 **Pilot 会话输出控制**，不是文件访问权限：Agent 自己仍可读取文件、写原生日志。输入适配器可能需要读取已有 transcript/Hook 文件才能识别目录，Cursor event journal、插件自行写入的原生/中间 JSONL 等文件可能在统一过滤前产生；不承诺敏感内容从未被读取或暂存。不会删除已有本地文件或历史上报数据，也不会阻止普通 workspace 中的 Agent 访问黑名单目录下的文件。
+
+### SLS 主机标签
+
+安装时能读取的硬件序列号写入 `hostSn`。SLS 日志组包含当前首个非回环 IPv4 对应网卡的 `__mac__`，以及配置非空时的 `__sn__`。默认开启。设置 `hostIdentityTags: false` 或环境变量 `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS=false` 可同时关闭主采集和 Qoder API 流水线的这两个标签。
