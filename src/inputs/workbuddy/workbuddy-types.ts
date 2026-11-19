@@ -11,6 +11,8 @@ export interface WorkBuddyRecord {
   status?: string;
   timestamp?: number;
   cwd?: string;
+  /** Set on `ai-title` records: the LLM-generated session title. */
+  aiTitle?: string;
   content?: Array<Record<string, unknown>>;
   rawContent?: Array<Record<string, unknown>>;
   message?: { usage?: Record<string, unknown> };

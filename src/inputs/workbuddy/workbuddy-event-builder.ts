@@ -85,6 +85,26 @@ export async function buildWorkBuddyEvents(
     const toolName = stringValue(record.name);
     if (callId && toolName) resultNamesByCallId.set(callId, toolName);
   }
+  // `model-usage` records carry per-physical-request usage (rawUsage with
+  // prompt/completion/cache breakdowns) keyed by conversationRequestId.
+  // Some WorkBuddy versions emit them only sporadically, but when present
+  // they backfill token usage for responses whose records carry none.
+  const modelUsageByRequestId = new Map<string, Record<string, unknown>>();
+  for (const record of records) {
+    if (record.type !== 'model-usage') continue;
+    const provider = record.providerData ?? {};
+    const usage = objectValue(provider.usage);
+    const rawUsage = objectValue(provider.rawUsage);
+    if (!usage && !rawUsage) continue;
+    const requestId = providerString(record, 'conversationRequestId');
+    if (requestId && !modelUsageByRequestId.has(requestId)) {
+      modelUsageByRequestId.set(requestId, provider);
+    }
+  }
+  const usageFallbackFor = (record: WorkBuddyRecord): Record<string, unknown> | undefined => {
+    const requestId = providerString(record, 'conversationRequestId');
+    return requestId ? modelUsageByRequestId.get(requestId) : undefined;
+  };
   let turnId = stableId(opts.sessionId, 'turn:unknown');
   let turnOrdinal = 0;
   let stepOrdinal = 0;
@@ -95,6 +115,9 @@ export async function buildWorkBuddyEvents(
   let requestStartMs: number | undefined;
   let cwd: string | undefined;
   let lastResponse: AgentActivityEntry | undefined;
+  let turnActivity = false;
+  let lastActivityRecord: WorkBuddyRecord | undefined;
+  let lastBoundaryRecord: WorkBuddyRecord | undefined;
 
   const push = async (entry: AgentActivityEntry, source: WorkBuddyRecord) => {
     if (cwd) {
@@ -107,37 +130,92 @@ export async function buildWorkBuddyEvents(
 
   const closeInterruptedTurn = async (boundarySource: WorkBuddyRecord): Promise<boolean> => {
     const boundaryTimestamp = timestampMs(boundarySource);
-    if (firstStep || !lastResponse || boundaryTimestamp === undefined) return false;
+    if (boundaryTimestamp === undefined) return false;
 
-    lastResponse['gen_ai.response.finish_reasons'] = ['cancelled'];
-    lastResponse['gen_ai.turn.end'] = true;
-    const messages = lastResponse['gen_ai.output.messages'];
-    if (Array.isArray(messages)) {
-      for (const message of messages) {
-        if (message && typeof message === 'object' && !Array.isArray(message)) {
-          message.finish_reason = 'cancelled';
+    if (lastResponse) {
+      lastResponse['gen_ai.response.finish_reasons'] = ['cancelled'];
+      lastResponse['gen_ai.turn.end'] = true;
+      const messages = lastResponse['gen_ai.output.messages'];
+      if (Array.isArray(messages)) {
+        for (const message of messages) {
+          if (message && typeof message === 'object' && !Array.isArray(message)) {
+            message.finish_reason = 'cancelled';
+          }
         }
       }
+
+      for (const [callId, tool] of tools) {
+        if (tool.step.turnId !== turnId) continue;
+        const result = baseEntry(
+          'tool.result',
+          boundarySource,
+          opts.sessionId,
+          tool.step,
+          `tool-result:${callId}`,
+          boundaryTimestamp,
+        );
+        result['gen_ai.tool.name'] = tool.toolName;
+        result['gen_ai.tool.call.id'] = callId;
+        result['tool.result.status'] = 'cancelled';
+        const durationMs = boundaryTimestamp - tool.callTimestamp;
+        if (durationMs > 0) result['gen_ai.tool.call.duration'] = durationMs;
+        await push(result, boundarySource);
+        tools.delete(callId);
+      }
+      lastResponse = undefined;
+      turnActivity = false;
+      lastActivityRecord = undefined;
+      return true;
     }
 
-    for (const [callId, tool] of tools) {
-      if (tool.step.turnId !== turnId) continue;
-      const result = baseEntry(
-        'tool.result',
-        boundarySource,
-        opts.sessionId,
-        tool.step,
-        `tool-result:${callId}`,
-        boundaryTimestamp,
-      );
-      result['gen_ai.tool.name'] = tool.toolName;
-      result['gen_ai.tool.call.id'] = callId;
-      result['tool.result.status'] = 'cancelled';
-      const durationMs = boundaryTimestamp - tool.callTimestamp;
-      if (durationMs > 0) result['gen_ai.tool.call.duration'] = durationMs;
-      await push(result, boundarySource);
-      tools.delete(callId);
+    if (!turnActivity || !lastActivityRecord) return false;
+
+    // Fast-cancelled turn: the model produced reasoning (or started a tool wave)
+    // but no llm.response was sealed before the interruption. Emit a minimal
+    // cancelled request/response pair so the user prompt and any reasoning are
+    // not silently dropped with the whole turn.
+    const anchor = lastActivityRecord;
+    const step = stepContext(anchor, opts.sessionId, turnId, stepOrdinal + 1);
+    const requestTimestamp = requestStartMs ?? timestampMs(anchor) ?? boundaryTimestamp;
+    const request = baseEntry(
+      'llm.request',
+      anchor,
+      opts.sessionId,
+      step,
+      `request:${step.stepId}`,
+      requestTimestamp,
+    );
+    request['gen_ai.request.id'] = step.requestId;
+    if (step.requestModel) request['gen_ai.request.model'] = step.requestModel;
+    request['gen_ai.turn.start'] = true;
+    if (pendingDelta.length > 0) request['gen_ai.input.messages_delta'] = pendingDelta;
+
+    const response = baseEntry(
+      'llm.response',
+      boundarySource,
+      opts.sessionId,
+      step,
+      `response:${sourceId(anchor)}:cancelled`,
+      boundaryTimestamp,
+    );
+    response['gen_ai.response.id'] = responseSourceId(anchor);
+    if (step.responseModel) response['gen_ai.response.model'] = step.responseModel;
+    response['gen_ai.response.finish_reasons'] = ['cancelled'];
+    response['gen_ai.turn.end'] = true;
+    if (reasoningParts.length > 0) {
+      response['gen_ai.output.messages'] = [{
+        role: 'assistant',
+        parts: reasoningParts,
+        finish_reason: 'cancelled',
+      }];
     }
+    applyUsage(response, anchor, usageFallbackFor(anchor));
+
+    await push(request, anchor);
+    await push(response, boundarySource);
+    pendingDelta = [];
+    turnActivity = false;
+    lastActivityRecord = undefined;
     return true;
   };
 
@@ -214,7 +292,7 @@ export async function buildWorkBuddyEvents(
       parts: outputParts,
       finish_reason: 'tool_call',
     }];
-    applyUsage(response, calls[calls.length - 1].record);
+    applyUsage(response, calls[calls.length - 1].record, usageFallbackFor(responseSource));
 
     await push(request, responseSource);
     await push(response, responseSource);
@@ -251,8 +329,56 @@ export async function buildWorkBuddyEvents(
 
   for (let index = 0; index < records.length; index++) {
     const record = records[index];
+    if (
+      record.type === 'message'
+      && record.role === 'assistant'
+      && record.status === 'incomplete'
+      && record.providerData?.skipRun === true
+    ) {
+      // WorkBuddy writes an internal "Interrupted by user" assistant marker when
+      // a run is cancelled. The record itself stays skipped as noise, but it is
+      // the most precise cancel boundary available, so seal the open turn here.
+      await closeInterruptedTurn(record);
+      continue;
+    }
+    if (record.type === 'ai-title') {
+      // Title generation is a physical model request billed by the provider.
+      // It never appears as an assistant message, so emit a standalone
+      // llm.response to keep physical call counts aligned with billing.
+      const titleTimestamp = timestampMs(record);
+      if (titleTimestamp !== undefined) {
+        const step: StepContext = {
+          stepId: `${opts.sessionId}:title`,
+          requestId: `${opts.sessionId}:title`,
+          turnId: `${opts.sessionId}:title`,
+          traceId: stableHex(`${opts.sessionId}:title`, 32),
+          provider: 'workbuddy',
+        };
+        const title = stringValue(record.aiTitle);
+        const response = baseEntry(
+          'llm.response',
+          record,
+          opts.sessionId,
+          step,
+          `ai-title:${stringValue(record.id) ?? String(titleTimestamp)}`,
+          titleTimestamp,
+        );
+        response['gen_ai.provider.name'] = 'workbuddy';
+        response['gen_ai.response.finish_reasons'] = ['stop'];
+        if (title !== undefined) {
+          response['gen_ai.output.messages'] = [{
+            role: 'assistant',
+            parts: [{ type: 'text', content: title }],
+            finish_reason: 'stop',
+          }];
+        }
+        await push(response, record);
+      }
+      continue;
+    }
     if (isInternalRecord(record)) continue;
     if (typeof record.cwd === 'string' && record.cwd.length > 0) cwd = record.cwd;
+    lastBoundaryRecord = record;
 
     if (record.type === 'message' && record.role === 'user') {
       await closeInterruptedTurn(record);
@@ -262,6 +388,8 @@ export async function buildWorkBuddyEvents(
       firstStep = true;
       turnId = stringValue(record.id) ?? stableId(opts.sessionId, `turn:${turnOrdinal}:${record.timestamp ?? index}`);
       lastResponse = undefined;
+      turnActivity = false;
+      lastActivityRecord = undefined;
       const message = toMessage(record, 'user');
       pendingDelta = message.parts.length > 0 ? [message] : [];
       reasoningParts = [];
@@ -272,12 +400,16 @@ export async function buildWorkBuddyEvents(
     }
 
     if (record.type === 'reasoning') {
+      turnActivity = true;
+      lastActivityRecord = record;
       reasoningParts.push(...toReasoningParts(record));
       reasoningStartMs = earliestTimestamp(reasoningStartMs, timestampMs(record));
       continue;
     }
 
     if (record.type === 'function_call') {
+      turnActivity = true;
+      lastActivityRecord = record;
       const wave = collectFunctionCallWave(records, index, record);
       if (!wave.complete) break;
       await emitToolWave(record, wave.calls);
@@ -335,6 +467,8 @@ export async function buildWorkBuddyEvents(
         await closeInterruptedTurn(record);
         continue;
       }
+      turnActivity = true;
+      lastActivityRecord = record;
       const wave = collectFunctionCallWave(records, index + 1, record);
       if (wave.calls.length > 0) {
         if (!wave.complete) break;
@@ -383,7 +517,7 @@ export async function buildWorkBuddyEvents(
       response['gen_ai.turn.end'] = true;
       const parts = [...reasoningParts, ...message.parts];
       if (parts.length > 0) response['gen_ai.output.messages'] = [{ role: 'assistant', parts, finish_reason: 'stop' }];
-      applyUsage(response, record);
+      applyUsage(response, record, usageFallbackFor(record));
 
       await push(request, record);
       await push(response, record);
@@ -394,7 +528,17 @@ export async function buildWorkBuddyEvents(
       reasoningStartMs = undefined;
       requestStartMs = responseTimestamp;
       firstStep = false;
+      turnActivity = false;
+      lastActivityRecord = undefined;
     }
+  }
+
+  // The batch only reaches the builder behind a stable Stop boundary, so its end
+  // is a real turn boundary. Seal a turn left unsealed here — otherwise the last
+  // llm.response would stay on finish_reasons=['tool_call'] forever when a run
+  // was cancelled without a following user message in the same batch.
+  if (lastBoundaryRecord !== undefined) {
+    await closeInterruptedTurn(lastBoundaryRecord);
   }
 
   return built;
@@ -492,13 +636,20 @@ function toToolCallPart(
   return part;
 }
 
-function applyUsage(entry: AgentActivityEntry, record: WorkBuddyRecord): void {
+function applyUsage(
+  entry: AgentActivityEntry,
+  record: WorkBuddyRecord,
+  fallbackProvider?: Record<string, unknown>,
+): void {
   const provider = record.providerData ?? {};
+  const fallback = fallbackProvider ?? {};
   const usage = record.message?.usage
     ?? objectValue(provider.usage)
     ?? objectValue(provider.rawUsage)
+    ?? objectValue(fallback.usage)
+    ?? objectValue(fallback.rawUsage)
     ?? {};
-  const raw = objectValue(provider.rawUsage) ?? {};
+  const raw = objectValue(provider.rawUsage) ?? objectValue(fallback.rawUsage) ?? {};
   const input = numberValue(usage.input_tokens) ?? numberValue(usage.inputTokens) ?? numberValue(usage.prompt_tokens) ?? numberValue(raw.prompt_tokens);
   const output = numberValue(usage.output_tokens) ?? numberValue(usage.outputTokens) ?? numberValue(usage.completion_tokens) ?? numberValue(raw.completion_tokens);
   const total = numberValue(usage.total_tokens) ?? numberValue(usage.totalTokens) ?? numberValue(raw.total_tokens)
