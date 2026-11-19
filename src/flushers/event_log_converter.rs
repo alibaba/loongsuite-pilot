@@ -1,5 +1,6 @@
 //! 将归一化事件转换为保留外部时间与标识的 GenAI Span。
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 
 use serde_json::{Map, Value};
@@ -333,6 +334,45 @@ fn convert_group(
     );
     agent.parent_span_id = Some(delegated_parent.unwrap_or(&entry_id).to_owned());
     agent.attributes.extend(root.attributes.clone());
+    if let Some(conversation) = source
+        .iter()
+        .find_map(|record| {
+            record
+                .get("gen_ai.conversation.id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+        })
+        .or_else(|| (!first.session_id.is_empty()).then_some(first.session_id.as_str()))
+    {
+        agent.attributes.insert(
+            "gen_ai.conversation.id".into(),
+            Value::String(conversation.into()),
+        );
+    }
+    let mut responses = source
+        .iter()
+        .rev()
+        .filter(|record| record.event_name == Some(AgentEventName::LlmResponse));
+    for (key, value) in [
+        (
+            "gen_ai.request.model",
+            source.iter().find_map(|r| r.request_model.as_ref()),
+        ),
+        (
+            "gen_ai.response.model",
+            responses.clone().find_map(|r| r.response_model.as_ref()),
+        ),
+        (
+            "gen_ai.response.id",
+            responses.find_map(|r| r.response_id.as_ref()),
+        ),
+    ] {
+        if let Some(value) = value {
+            agent
+                .attributes
+                .insert(key.into(), Value::String(value.clone()));
+        }
+    }
     // The event-log SDK uses the first turn-level metadata on the agent and
     // model invocations. Producers may send it only on the first request.
     let mut llm_turn_metadata = Vec::new();
@@ -442,6 +482,11 @@ fn convert_group(
             }
         }
         if pair.kind == "LLM" {
+            if !start.session_id.is_empty() {
+                leaf.attributes
+                    .entry("gen_ai.conversation.id")
+                    .or_insert_with(|| Value::String(start.session_id.clone()));
+            }
             for (key, value) in &llm_turn_metadata {
                 leaf.attributes.entry(*key).or_insert_with(|| value.clone());
             }
@@ -460,6 +505,7 @@ fn convert_group(
                 "gen_ai.tool.type".into(),
                 Value::String(tool_type.to_owned()),
             );
+            restore_skill_identity(&mut leaf.attributes, start, finish);
         }
         // The DSH adapter reports disjoint usage already folded into input
         // and output. Derive only the missing total from those evidenced
@@ -792,11 +838,15 @@ fn context_attributes(
                 .or_insert_with(|| Value::String(record.user_id.clone()));
         }
         for (key, value) in entry_to_object(record) {
-            if key.starts_with("gen_ai.agent.")
+            if key == "gen_ai.provider.name" {
+                let provider = result.entry(key).or_insert_with(|| value.clone());
+                if provider.as_str() == Some("unknown") {
+                    *provider = value;
+                }
+            } else if key.starts_with("gen_ai.agent.")
                 || key.starts_with("gen_ai.subagent.")
                 || key == "gen_ai.session.id"
                 || key == "gen_ai.turn.id"
-                || key == "gen_ai.provider.name"
                 || key == "gen_ai.user.id"
                 || options.passthrough_keys.contains(&key)
             {
@@ -805,6 +855,66 @@ fn context_attributes(
         }
     }
     result
+}
+
+fn skill_object(value: &Value) -> Option<Cow<'_, Map<String, Value>>> {
+    match value {
+        Value::Object(object) => Some(Cow::Borrowed(object)),
+        Value::String(text) => serde_json::from_str(text).ok().map(Cow::Owned),
+        _ => None,
+    }
+}
+
+fn restore_skill_identity(
+    attributes: &mut Map<String, Value>,
+    start: &AgentActivityEntry,
+    finish: &AgentActivityEntry,
+) {
+    const SKILL_TOOLS: &[&str] = &[
+        "skill",
+        "load_skill",
+        "read_skill",
+        "skill_view",
+        "skill_manage",
+    ];
+    if start
+        .tool_name
+        .as_deref()
+        .or(finish.tool_name.as_deref())
+        .is_some_and(|name| {
+            SKILL_TOOLS
+                .iter()
+                .any(|tool| tool.eq_ignore_ascii_case(name))
+        })
+    {
+        let result = finish
+            .tool_call_result
+            .as_ref()
+            .and_then(skill_object)
+            .filter(|result| result.get("success").and_then(Value::as_bool) != Some(false));
+        let arguments = start.tool_call_arguments.as_ref().and_then(skill_object);
+        for data in result.iter().chain(arguments.iter()) {
+            let text = |key| {
+                data.get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+            };
+            for (key, value) in [
+                ("gen_ai.skill.name", text("skill").or_else(|| text("name"))),
+                ("gen_ai.skill.id", text("id")),
+            ] {
+                if let Some(value) = value {
+                    attributes
+                        .entry(key)
+                        .or_insert_with(|| Value::String(value.into()));
+                }
+            }
+        }
+    }
+    if let Some(name) = attributes.get("gen_ai.skill.name").cloned() {
+        attributes.entry("gen_ai.skill.id").or_insert(name);
+    }
 }
 
 fn materialize_input(records: &[&AgentActivityEntry]) -> Option<Value> {
@@ -1013,6 +1123,49 @@ mod tests {
             }
         }
         assert_eq!((matched_models, matched_tools), (2, 2));
+    }
+
+    #[test]
+    fn preserves_conversation_models_provider_and_skill_identity() {
+        let mut request = event("llm.request", "100");
+        request.request_model = Some("requested-model".into());
+        request.provider_name = "test-provider".into();
+        let mut response = event("llm.response", "200");
+        response.response_model = Some("served-model".into());
+        response.provider_name = "unknown".into();
+        let mut call = event("tool.call", "300");
+        call.tool_name = Some("Skill".into());
+        call.tool_call_id = Some("skill-call".into());
+        call.tool_call_arguments = Some(json!({"skill": "qw-app"}));
+        call.span_id = None;
+        let mut result = event("tool.result", "400");
+        result.tool_name = call.tool_name.clone();
+        result.tool_call_id = call.tool_call_id.clone();
+        result.tool_call_result = Some(json!({"success": false, "name": "unreliable-result"}));
+        result.span_id = None;
+        let converted = GenAiEventLogConverter
+            .convert(
+                &[request, response, call, result],
+                &ConvertOptions::default(),
+            )
+            .unwrap();
+        let attrs = |kind| {
+            &converted
+                .spans
+                .iter()
+                .find(|span| span.attributes["gen_ai.span.kind"] == kind)
+                .unwrap()
+                .attributes
+        };
+        assert_eq!(attrs("AGENT")["gen_ai.provider.name"], "test-provider");
+        assert_eq!(attrs("AGENT")["gen_ai.request.model"], "requested-model");
+        assert_eq!(attrs("AGENT")["gen_ai.response.model"], "served-model");
+        assert_eq!(attrs("AGENT")["gen_ai.response.id"], "response");
+        for kind in ["AGENT", "LLM"] {
+            assert_eq!(attrs(kind)["gen_ai.conversation.id"], "s");
+        }
+        assert_eq!(attrs("TOOL")["gen_ai.skill.name"], "qw-app");
+        assert_eq!(attrs("TOOL")["gen_ai.skill.id"], "qw-app");
     }
 
     #[test]
