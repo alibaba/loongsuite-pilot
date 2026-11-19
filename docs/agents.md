@@ -157,12 +157,13 @@ loongsuite-pilot hook status --json
 Without `--agents`, Pilot detects installed Agents. These integrations use a
 shared installation; other detected Agents keep their home-local installation:
 
-| Agent | Shared registration | Tested CLI versions |
+| Agent | Shared registration | CLI version or requirement |
 | --- | --- | --- |
 | Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
 | Codex | `/etc/codex/config.toml` | 0.166.0 |
 | Pi | Existing `$PI_CODING_AGENT_DIR/settings.json` (`extensions`) | 0.73.1, 1.5.0 |
 | DSH | Existing `$DSH_HOME/cordis.patch.yml` (Pilot-owned block) | 0.2.1-rc.5 |
+| Cursor CLI | `/etc/cursor/hooks.json` | Cursor Enterprise required |
 
 `--agents` remains an optional filter, including mixed lists such as
 `--agents grok-build,claude-code`. The first supported topology is multiple
@@ -172,6 +173,13 @@ runtime files and collection directories must be accessible in that business
 container. This does not provide tenant authorization or cross-container injection.
 
 Codex must have its hooks feature enabled.
+
+Cursor CLI uses the [Enterprise-managed hooks file](https://cursor.com/docs/hooks#configuration).
+Keep `cursor-agent` or the official `agent` alias on the installer's PATH and
+grant the installer write access to the managed file. The CLI loads the shared
+hook for each HOME and the hook writes to the common Pilot runtime directory.
+`--agents cursor-cli` selects the shared Cursor registration. Start new CLI
+processes after installation so they can read the updated policy.
 
 Pi reuses its existing configuration root (`PI_CODING_AGENT_DIR`, default
 `~/.pi/agent`). Later sessions using that root load the same extension, even

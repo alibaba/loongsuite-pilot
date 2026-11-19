@@ -1409,6 +1409,9 @@ if (allAgentsMode === '1') {
   config.agents = config.agents || {};
   const previousOpenclaw = config.agents.openclaw;
   const selected = selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
+  // Cursor CLI uses the Cursor registration and Input, including on reinstall.
+  if (selected.includes('cursor-cli')) selected.push('cursor');
+  if ('${HOOK_INSTALL_SCOPE:-}' === 'system' && selected.includes('cursor')) selected.push('cursor-cli');
   for (const agent of allAgents) {
     config.agents[agent.id] = config.agents[agent.id] || {};
     // A transient discovery miss is not consent to uninstall a live plugin.

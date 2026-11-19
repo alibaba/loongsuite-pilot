@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const installer = readFileSync('deploy/installer-opensource.sh', 'utf8');
@@ -42,6 +44,32 @@ printf '|held=%s' "$PILOT_HELD_FOR_DEPLOY"
 `], { encoding: 'utf8' });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toBe('<hook><install><--scope><system><--json><--agents><grok-build>|held=0');
+  });
+
+  it.each(['system', 'default'])('allows the Cursor hook owner when only the CLI is detected (%s)', scope => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-cursor-gate-'));
+    const writer = installer.slice(installer.indexOf('write_config() {'), installer.indexOf('install_loongsuite_pilot_command() {'));
+    const args = scope === 'system' ? ['--scope', scope] : [];
+    try {
+      const result = spawnSync('bash', ['-c', `${parser}
+${writer}
+msg() { :; }
+NODE_BIN="$PILOT_TEST_NODE"
+PROBE_RESULT='[{"id":"cursor","detected":false},{"id":"cursor-cli","detected":true}]'
+SELECTED_AGENTS=cursor-cli
+write_config
+`, 'installer', 'install', '--data-dir', root, ...args], {
+        env: { ...process.env, PILOT_TEST_NODE: process.execPath },
+        encoding: 'utf8',
+      });
+      expect(result.status, result.stderr.trim().split('\n')[0]).toBe(0);
+      expect(JSON.parse(readFileSync(join(root, 'config.json'), 'utf8')).agents).toMatchObject({
+        cursor: { enabled: true },
+        'cursor-cli': { enabled: true },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('omits the agents argument for automatic discovery and --all-agents', () => {

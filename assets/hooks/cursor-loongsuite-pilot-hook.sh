@@ -3,14 +3,21 @@ set -euo pipefail
 
 # Cursor hook entrypoint — delegates to cursor-hook-processor.mjs.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROCESSOR="$SCRIPT_DIR/cursor-hook-processor.mjs"
 EMPTY_RESULT='{}'
+NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+
+if [[ "${1:-}" == "--system-scope" ]]; then
+  # A new Cursor HOME may never have run the Pilot installer.
+  export LOONGSUITE_PILOT_DATA_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+  NODE_PIN_FILE="$LOONGSUITE_PILOT_DATA_DIR/node-bin"
+fi
 
 log_error() {
   local stage="$1"
   local message="$2"
-  local data_dir="${LOONGSUITE_PILOT_DATA_DIR:-${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}}"
+  local data_dir="${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
   local day
   day="$(date -u +%Y-%m-%d 2>/dev/null || true)"
   [[ -n "$day" ]] || day="unknown"
@@ -104,13 +111,11 @@ sort_version_dirs_desc() {
   done | sort -r | cut -d'|' -f2-
 }
 
-NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
-
 NODE_BIN=""
 
 # 1. Try pinned node
 if [[ -f "$NODE_PIN_FILE" ]]; then
-  pinned="$(cat "$NODE_PIN_FILE" 2>/dev/null | tr -d '[:space:]')"
+  pinned="$(tr -d '\r\n' < "$NODE_PIN_FILE" 2>/dev/null || true)"
   if [[ -n "$pinned" ]] && node_is_suitable "$pinned"; then
     NODE_BIN="$pinned"
   fi
@@ -123,6 +128,9 @@ if [[ -z "$NODE_BIN" ]]; then
   # compareNodeRuntimeDirs; a plain reverse glob is lexicographic and would
   # prefer node-v22.9.0 over node-v22.22.2.
   candidates=()
+  if [[ "${1:-}" == "--system-scope" ]]; then
+    candidates+=("$LOONGSUITE_PILOT_DATA_DIR/bin/node")
+  fi
   runtime_dir="$(dirname "$NODE_PIN_FILE")/runtime"
   # Appends "<dir>/bin/node" for each newline-separated dir in $1, newest first.
   # Herestring rather than `done < <(...)`: agents inject this hook as a bare path,
@@ -166,9 +174,19 @@ if [[ -z "$NODE_BIN" ]]; then
   exit 0
 fi
 
-if ! "$NODE_BIN" "$PROCESSOR"; then
-  echo "[loongsuite-pilot] hook processor failed" >&2
-  log_error "processor_failed" "hook processor exited with non-zero status"
+run_processor() {
+  if ! "$NODE_BIN" "$PROCESSOR"; then
+    echo "[loongsuite-pilot] hook processor failed" >&2
+    log_error "processor_failed" "hook processor exited with non-zero status"
+    return 1
+  fi
+}
+
+if [[ "${1:-}" == "--system-scope" ]]; then
+  # A diagnostic on stdout must not become a Cursor policy response.
+  run_processor >/dev/null || true
+  printf '%s\n' "$EMPTY_RESULT"
+elif ! run_processor; then
   printf '%s\n' "$EMPTY_RESULT"
 fi
 

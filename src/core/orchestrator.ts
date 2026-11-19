@@ -21,7 +21,7 @@ import { hookInstallAlarmKey, shouldRelayHookInstallAlarm } from '../deployment/
 import { hookInstallResultPath, hookInstallSignalPath, markHookInstallAlarmSent, type HookInstallReport } from '../deployment/hook-install-service.js';
 import { readContainerIdentity } from '../utils/container-identity.js';
 import { areSystemHookAssetsHealthy, restoreSystemHookAssets } from '../deployment/system-hook-assets.js';
-import { supportsSystemTomlHooks } from '../deployment/system-toml-hooks.js';
+import { supportsSystemHooks } from '../deployment/system-hook-config.js';
 import {
   isAgentGatedEnabled as isAgentGatedEnabledIn,
   resolvePilotDir as resolvePilotDirIn,
@@ -825,7 +825,7 @@ export class Orchestrator extends EventEmitter {
   private createHookWatchdog(): HookWatchdog {
     const watchdog = new HookWatchdog(this.config.hookWatchdog, this.buildHookWatchdogTargets(), [
       ...HookWatchdog.defaultInterceptTargets(this.dataDir, id => this.isAgentGatedEnabled(id) && this.scopeAllows(id)),
-      ...this.buildGrokBuildInterceptTargets(),
+      ...this.buildSystemHookInterceptTargets(),
       ...this.buildPluginInjectInterceptTargets(),
       ...this.buildDirectoryPluginInterceptTargets(),
       ...this.buildCopilotPluginInterceptTargets(),
@@ -869,11 +869,11 @@ export class Orchestrator extends EventEmitter {
     return targets;
   }
 
-  /** Native TOML and multi-file runtime checks cannot use a JSON watchdog. */
-  private buildGrokBuildInterceptTargets(): InterceptCheckTarget[] {
+  /** Native system policies and multi-file runtimes use strategy-aware checks. */
+  private buildSystemHookInterceptTargets(): InterceptCheckTarget[] {
     const pilotDir = this.resolvePilotDir();
     return this.deploymentManager.getDefinitions()
-      .filter(def => supportsSystemTomlHooks(def.id) && def.hook
+      .filter(def => supportsSystemHooks(def.id) && def.hook
         && (def.id === 'grok-build' || this.deploymentManager.effectiveDefinition(def).hook?.scope === 'system'))
       .map(def => ({
         id: `hook:${def.id}`,

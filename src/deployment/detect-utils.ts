@@ -46,14 +46,28 @@ export function commandExists(command: string): Promise<boolean> {
   const cacheKey = JSON.stringify([command, process.env.PATH, process.env.PATHEXT, process.cwd()]);
   const cached = commandExistsCache.get(cacheKey);
   if (cached !== undefined) return Promise.resolve(cached);
+  return findCommandOnPath(command).then(file => {
+    const exists = file !== undefined;
+    commandExistsCache.set(cacheKey, exists);
+    return exists;
+  });
+}
+
+function findCommandOnPath(command: string): Promise<string | undefined> {
   const bin = process.platform === 'win32' ? 'where.exe' : 'which';
   return new Promise(resolve => {
-    execFile(bin, [command], { timeout: COMMAND_EXISTS_TIMEOUT_MS, killSignal: 'SIGKILL' }, err => {
-      const exists = !err;
-      commandExistsCache.set(cacheKey, exists);
-      resolve(exists);
+    execFile(bin, [command], { timeout: COMMAND_EXISTS_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout) => {
+      resolve(err ? undefined : stdout.split(/\r?\n/, 1)[0]?.trim() || undefined);
     });
   });
+}
+
+export async function detectsCursorAgentAlias(): Promise<boolean> {
+  // The official installer links 'agent' to the Cursor-owned 'cursor-agent'
+  // executable. An arbitrary 'agent' on PATH is not evidence of Cursor.
+  const command = await findCommandOnPath('agent');
+  if (!command) return false;
+  return path.basename(await fsp.realpath(command).catch(() => '')) === 'cursor-agent';
 }
 
 function hasGlob(p: string): boolean {
