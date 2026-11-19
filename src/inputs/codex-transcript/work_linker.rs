@@ -237,6 +237,18 @@ fn fingerprints(turn: &str, sources: &[CodexTranscriptSourceRecord]) -> HashSet<
 }
 
 impl CodexSubagentLinker {
+    pub(crate) fn has_persistent_facts(&self) -> bool {
+        [
+            self.spawns.len(),
+            self.children.len(),
+            self.bindings.len(),
+            self.completed_results.len(),
+            self.work_terminals.len(),
+        ]
+        .into_iter()
+        .any(|count| count != 0)
+    }
+
     pub fn serialize(&self) -> Value {
         self.serialized_cache.get(
             [

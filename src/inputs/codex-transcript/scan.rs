@@ -107,6 +107,12 @@ pub async fn file_version_snapshot(path: &str) -> io::Result<FileVersion> {
 // path's generation without opening another reader or authorizing new data.
 pub(super) async fn retained_version_is_current(path: &str, expected: FileVersion) -> bool {
     #[cfg(unix)]
+    if crate::utils::source_access::current().is_some_and(|scope| scope.inline_reads) {
+        return std::fs::symlink_metadata(path)
+            .and_then(|meta| metadata_version(&meta))
+            .is_ok_and(|version| version == expected);
+    }
+    #[cfg(unix)]
     let observed = {
         let path = path.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -269,10 +275,8 @@ pub async fn scan_json_lines(
         while cursor < read {
             // Search only newly read bytes; repeatedly searching the retained
             // prefix makes one long record quadratic even when Vec growth is linear.
-            let newline = chunk[cursor..read]
-                .iter()
-                .position(|b| *b == b'\n')
-                .map(|relative| cursor + relative);
+            let newline =
+                memchr::memchr(b'\n', &chunk[cursor..read]).map(|relative| cursor + relative);
             let part_end = newline.unwrap_or(read);
             #[cfg(test)]
             {

@@ -106,10 +106,25 @@ fn parse_pending_terminal(value: Option<&Value>) -> Option<CodexPendingTerminalT
         failure,
     })
 }
+pub(super) fn parse_checkpoint_position(
+    inode: Option<&Value>,
+    scan_offset: Option<&Value>,
+    owner_offset: Option<&Value>,
+) -> Option<(u64, i64, Option<i64>)> {
+    Some((
+        u64_value(inode)?,
+        safe_i64(scan_offset)?,
+        safe_i64(owner_offset),
+    ))
+}
+
 pub fn parse_checkpoint(raw: &Value) -> Option<CodexTranscriptCheckpoint> {
     let value = as_record(raw)?;
-    let inode = u64_value(value.get("inode"))?;
-    let scan_offset = safe_i64(value.get("scanOffset"))?;
+    let (inode, scan_offset, owner_session_meta_offset) = parse_checkpoint_position(
+        value.get("inode"),
+        value.get("scanOffset"),
+        value.get("ownerSessionMetaOffset"),
+    )?;
     let active_turn = parse_active_turn(value.get("activeTurn"));
     let mut pending_terminal = parse_pending_terminal(value.get("pendingTerminal"));
     // Bound the persisted prefix before parsing; never walk arbitrary later
@@ -215,7 +230,7 @@ pub fn parse_checkpoint(raw: &Value) -> Option<CodexTranscriptCheckpoint> {
         deferred_terminals,
         pending_fusion,
         pending_subagent,
-        owner_session_meta_offset: safe_i64(value.get("ownerSessionMetaOffset")),
+        owner_session_meta_offset,
         fork_bootstrap: parse_fork_bootstrap(value.get("forkBootstrap")),
     })
 }
