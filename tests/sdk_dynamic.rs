@@ -383,6 +383,48 @@ fn openclaw_drains_history_larger_than_one_sdk_memory_budget() {
     assert_eq!(actual, expected);
 }
 
+#[test]
+fn openclaw_advances_past_an_oversized_excluded_entry() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    let excluded = root.join("excluded");
+    std::fs::create_dir(&history).unwrap();
+    std::fs::create_dir(&excluded).unwrap();
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let mut file = std::fs::File::create(history.join(format!("openclaw-{day}.jsonl"))).unwrap();
+    let memory_limit = 64 * 1024;
+    for (id, workspace, output) in [
+        ("excluded", &excluded, "x".repeat(memory_limit * 2)),
+        ("allowed", &root, "small response".to_owned()),
+    ] {
+        let row = json!({
+            "event.id":id,"event.name":"llm.response","gen_ai.agent.type":"openclaw",
+            "gen_ai.session.id":id,"gen_ai.turn.id":"turn","gen_ai.step.id":"turn:s1",
+            "time_unix_nano":"1780000000000000000","workspace.path":workspace,
+            "gen_ai.output.messages":[{"role":"assistant","parts":[{"type":"text","content":output}]}],
+        });
+        writeln!(file, "{row}").unwrap();
+    }
+    drop(file);
+    let mut policy = openclaw_policy(&history);
+    policy["hcd"]["agent_configs"]["openclaw"]["collection"]["pilot_host"] = json!({
+        "data_dir": history, "capture_message_content": true, "exclude_workspaces": [excluded],
+    });
+    policy["sdk_options"]["delivery"]["max_batch_bytes"] = json!(memory_limit);
+    policy["sdk_options"]["delivery"]["max_event_bytes"] = json!(memory_limit);
+    policy["sdk_options"]["delivery"]["queue_memory_bytes"] = json!(memory_limit);
+    let mut host = Host::start(&root.join("instance"), policy, Box::default());
+    host.ready();
+    until(|| !host.ctx.rows.lock().unwrap().is_empty());
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    let rows = host.ctx.rows.lock().unwrap();
+    assert_eq!(rows.len(), 1);
+    let row: Value = serde_json::from_slice(&rows[0]).unwrap();
+    assert_eq!(row["event.id"], "allowed");
+}
+
 fn qoder_policy(source: &Path) -> Value {
     json!({"version":"qoder-v1","agents":["qoder"],"hcd":{"agent_configs":{"qoder":{"collection":{"enabled":true,"profile":"qoder_trace_v1","allowed_roots":[source],"sources":[{"id":"hook","type":"hook_jsonl","path":source}],"limits":{"poll_interval_ms":100}}}}},"sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}})
 }

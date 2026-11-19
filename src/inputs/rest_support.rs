@@ -726,16 +726,15 @@ struct HookEntryBudget {
 }
 
 impl HookEntryBudget {
-    fn reserve(&mut self, entry: &AgentActivityEntry) -> Result<bool, String> {
+    fn reserve(&mut self, entry: &AgentActivityEntry) -> bool {
         let bytes = entry.estimated_heap_bytes();
-        if bytes <= self.remaining {
-            self.remaining -= bytes;
-            return Ok(true);
+        if bytes > self.remaining && self.remaining != self.capacity {
+            return false;
         }
-        if self.remaining == self.capacity {
-            return Err("single hook entry exceeds SDK cycle memory limit; cursor retained".into());
-        }
-        Ok(false)
+        // A single oversized entry must reach workspace filtering before the
+        // SDK decides whether it can be delivered or must retain the cursor.
+        self.remaining = self.remaining.saturating_sub(bytes);
+        true
     }
 }
 
@@ -1126,7 +1125,7 @@ async fn collect_hook_file(
         match (inner.transform)(record).await {
             Ok(Some(entry)) => {
                 if let Some(budget) = entry_budget.as_deref_mut() {
-                    if !budget.reserve(&entry)? {
+                    if !budget.reserve(&entry) {
                         // Submit the complete prefix and retry this row from
                         // the same file after the prefix is durably accepted.
                         read.offset -= raw_line.len() as u64;
