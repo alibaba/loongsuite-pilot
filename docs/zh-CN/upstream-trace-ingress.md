@@ -61,6 +61,21 @@ def run_codex(prompt, session_id=None):
 
 这三个变量只适合每次启动一个子进程处理一轮外部请求的入口。单独设置 `TRACEPARENT` 保留旧版的会话首轮兼容行为。上述 UUID 只是告诉 Hook 这是哪次子进程调用，Hook 自己会读取真实的 turn ID。Codex 的 `--ephemeral` 会关闭可供 Pilot 读取的会话记录，请使用默认的会话持久化。
 
+## 其他 Agent 的单轮本地调用
+
+同一组子进程变量可用于以下入口。应用为每次调用启动一个子进程，Pilot 的 Hook 或插件把变量绑定到该轮。各 Agent 仍须正常加载对应的采集 Hook 或插件。
+
+| Agent | 入口适配使用的轮次标识 |
+| --- | --- |
+| Cursor CLI | `beforeSubmitPrompt` 的 `generation_id` |
+| Grok Build | `user_prompt_submit` 的 `prompt_id` |
+| Claude Code | `UserPromptSubmit` 的 `prompt_id`，依赖 CLI 版本提供该字段 |
+| Pi Coding Agent | 扩展在 `before_agent_start` 写入的轮次 ID |
+| DeepSeek Harness | `turn/start` 的原生轮次号 |
+| OpenClaw | 本地嵌入执行中的原生 `runId` |
+
+常驻进程按每次请求调用 `bindUpstreamTurn`。绑定需要 Agent 侧的原生会话、轮次和本次 W3C 上下文。OpenClaw Gateway 入口可由调用方适配器用已知原生会话和 run ID 登记。环境变量入口用于实际执行 Agent 的新进程。
+
 ## Web 服务调用 SDK
 
 **Codex SDK 0.169.0** 每次 `thread.run()` 启动一次 CLI，恢复会话时走 `exec resume`。按上例构造每次调用的 env，传给 `new Codex({ env })`，使用 `startThread()` 或 `resumeThread(sessionId)`。env 会替换继承环境，构造时保留子进程原本需要的 PATH、认证与配置。

@@ -16,6 +16,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 
 import { readStdinJson } from './shared/stdin-reader.mjs';
+import { bindProcessUpstreamTurn } from './shared/upstream-ingress.mjs';
 import {
   INITIAL_HASH,
   computeHash,
@@ -508,6 +509,7 @@ function buildTurnRecords({
     trace_id: traceId,
     'gen_ai.session.id': sessionId,
     'gen_ai.turn.id': turnId,
+    ...(fusedTurn.promptId ? { 'agent.pilot.correlation.native_turn_id': fusedTurn.promptId } : {}),
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
     'gen_ai.framework': FRAMEWORK_NAME,
@@ -725,6 +727,14 @@ async function processHook(trigger) {
   const sessionId = requireSessionId(event);
   if (!sessionId) return;
   if (isSessionClosingStop(trigger, event)) return;
+  if (trigger === 'user_prompt_submit' && event.prompt_id) {
+    bindProcessUpstreamTurn({
+      agentId: AGENT_ID,
+      sessionId,
+      nativeTurnId: event.prompt_id,
+      dataDir: pilotDataDir(),
+    });
+  }
 
   cleanupExpiredStates();
   return withSessionStateLock(sessionId, () => processHookLocked(trigger, event, sessionId));

@@ -87,6 +87,7 @@ export function assembleTurn(journalEvents, options = {}) {
     trace_id: traceId,
     'gen_ai.session.id': parentConvId,
     'gen_ai.turn.id': turnId,
+    ...(promptEvent.generation_id ? { 'agent.pilot.correlation.native_turn_id': promptEvent.generation_id } : {}),
     'gen_ai.agent.type': variant,
     'user.id': userId,
     ...cursorWorkspaceFields(variant, workspacePath),

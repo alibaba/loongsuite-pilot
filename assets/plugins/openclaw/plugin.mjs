@@ -41,6 +41,7 @@ import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
 import { installSteeredDeliveryObserver } from "./steered-delivery.mjs";
 import { createLegacyHandlers } from "./legacy-adapter.mjs";
 import { createObservationClock } from "./legacy-utils.mjs";
+const upstreamIngress = await import('../../hooks/shared/upstream-ingress.mjs').catch(() => null);
 import {
   evaluateInterceptor,
   resolveDataDir,
@@ -931,6 +932,7 @@ function buildCommonFields(run, sessionId, userId) {
   if (run) {
     base.trace_id = run.traceId;
     base["gen_ai.turn.id"] = run.turnId || run.runId;
+    if (!run.cronExecution) base["agent.pilot.correlation.native_turn_id"] = run.runId;
     // The producer owns the start even if the collector restarts mid-run.
     // An explicit false keeps suffix responses from becoming a second start.
     base["gen_ai.turn.start"] = false;
@@ -1319,6 +1321,14 @@ function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
   if (event?.systemPrompt) run.systemPrompt = event.systemPrompt;
   if (ctx?.sessionId) run.sessionId = ctx.sessionId;
   if (ctx?.sessionKey) run.sessionKey = ctx.sessionKey;
+  if (run.sessionId && !run.cronExecution && !run.announcedWork) {
+    upstreamIngress?.bindProcessUpstreamTurn({
+      agentId: AGENT_TYPE,
+      sessionId: run.sessionId,
+      nativeTurnId: run.runId,
+      dataDir: resolveDataDir(),
+    });
+  }
   const record = {
     ...buildCommonFields(run, ctx?.sessionId, userId),
     "event.name": "other",

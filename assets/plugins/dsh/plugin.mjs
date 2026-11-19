@@ -26,6 +26,7 @@ catch { privateLog = { ensurePrivateLogDir() {}, writerSuffix: () => '' }; }
 const { ensurePrivateLogDir, writerSuffix } = privateLog;
 const sharedRootLogs = /^(1|true|yes|on)$/i.test(String(process.env.LOONGSUITE_PILOT_ROOT_TRIGGER || '').trim());
 import { appendRawJsonl, RAW_SEGMENT_BYTES } from '../shared/raw-jsonl-writer.mjs';
+const upstreamIngress = await import('../../hooks/shared/upstream-ingress.mjs').catch(() => null);
 
 const AGENT = 'loongsuite-pilot-observability';
 const SENSITIVE_KEY_RE = /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE|API_KEY)([_.-]|$)/i;
@@ -110,6 +111,14 @@ export default function apply(ctx) {
     });
   }));
   ctx.on('session/event', observe((s, e) => {
+    if (e.type === 'turn/start' && Number.isSafeInteger(e.data?.turn)) {
+      upstreamIngress?.bindProcessUpstreamTurn({
+        agentId: 'dsh',
+        sessionId: String(s.id),
+        nativeTurnId: String(e.data.turn),
+        dataDir: dataDir(),
+      });
+    }
     appendLine(sessionFile(s.id), {
       sid: String(s.id),
       seq: e.seq,

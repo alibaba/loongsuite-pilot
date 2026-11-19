@@ -34,6 +34,7 @@ import {
 } from './shared/event-emitter.mjs';
 import { logHookError } from './shared/error-logger.mjs';
 import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
+import { bindProcessUpstreamTurn } from './shared/upstream-ingress.mjs';
 import {
   sanitizeObject,
   toJsonValue,
@@ -635,7 +636,9 @@ async function cmdTerminal(eventKind) {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
 
   // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
-  recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  if (!process.env.LOONGSUITE_PILOT_INGRESS_REQUEST_ID) {
+    recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  }
   if (toolPropagationEnabled(runtimeConfig)) {
     markToolPropagationConsumed(pilotDataDir(), sessionId);
   }
@@ -1614,7 +1617,17 @@ const DISPATCH = {
     const event = tryReadStdin();
     if (isCursorCaller(event)) return;
     const sessionId = requireSessionId(event, 'cmd');
-    if (sessionId) recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+    if (!sessionId) return;
+    if (process.env.LOONGSUITE_PILOT_INGRESS_REQUEST_ID) {
+      bindProcessUpstreamTurn({
+        agentId: AGENT_ID,
+        sessionId,
+        nativeTurnId: event.prompt_id,
+        dataDir: pilotDataDir(),
+      });
+    } else {
+      recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+    }
   },
   'pre-tool-use': cmdPreToolUse,
   'stop': cmdStop,
