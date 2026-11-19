@@ -20,12 +20,13 @@ impl SnapshotFile {
         {
             let source = previous.to_owned();
             let dest = tmp.to_owned();
-            if let Some(original) =
-                tokio::task::spawn_blocking(move || clone_snapshot(&source, &dest)).await?
+            if tokio::task::spawn_blocking(move || clone_snapshot(&source, &dest))
+                .await?
+                .is_some()
             {
                 return Ok(Self {
                     file: File::options().write(true).open(tmp).await?,
-                    original: Some(File::from_std(original)),
+                    original: Some(File::open(tmp).await?),
                     scratch: Vec::new(),
                     offset: 0,
                 });
@@ -90,7 +91,7 @@ impl SnapshotFile {
 }
 
 #[cfg(target_os = "macos")]
-fn clone_snapshot(previous: &Path, tmp: &Path) -> Option<std::fs::File> {
+fn clone_snapshot(previous: &Path, tmp: &Path) -> Option<()> {
     use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawFd};
     let source = std::fs::File::options()
         .read(true)
@@ -102,11 +103,11 @@ fn clone_snapshot(previous: &Path, tmp: &Path) -> Option<std::fs::File> {
         return None;
     }
     let target = std::ffi::CString::new(tmp.as_os_str().as_bytes()).ok()?;
-    // The source fd stays open and points at an immutable, atomically replaced
-    // snapshot. The kernel creates a separate inode at the temporary pathname.
+    // Clone from the verified descriptor. Compare the private staging inode
+    // so a concurrent replacement or edit of the source cannot affect it.
     let result =
         unsafe { libc::fclonefileat(source.as_raw_fd(), libc::AT_FDCWD, target.as_ptr(), 0) };
-    (result == 0).then_some(source)
+    (result == 0).then_some(())
 }
 
 #[cfg(test)]
