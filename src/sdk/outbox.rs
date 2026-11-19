@@ -473,10 +473,7 @@ impl Outbox {
             .optional()?)
     }
 
-    pub(crate) fn read_persisted_checkpoint(
-        root: &Path,
-        source: &str,
-    ) -> anyhow::Result<Option<String>> {
+    fn open_checkpoint_database(root: &Path) -> anyhow::Result<Connection> {
         let db = Connection::open_with_flags(
             Self::database_path(root)?,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -484,7 +481,33 @@ impl Outbox {
                 | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         db.busy_timeout(Duration::from_secs(1))?;
-        Self::find_checkpoint(&db, source)
+        Ok(db)
+    }
+
+    pub(crate) fn read_persisted_checkpoint(
+        root: &Path,
+        source: &str,
+    ) -> anyhow::Result<Option<String>> {
+        Self::find_checkpoint(&Self::open_checkpoint_database(root)?, source)
+    }
+
+    pub(crate) fn read_acknowledged_checkpoint(
+        root: &Path,
+        source: &str,
+    ) -> anyhow::Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let db = Self::open_checkpoint_database(root)?;
+        // The source checkpoint and queue depth must agree in the same snapshot.
+        // Fail closed while even one event from this SDK instance awaits ACK.
+        let checkpoint = db
+            .query_row(
+                "SELECT checkpoint.json FROM checkpoint, queue_size
+                 WHERE source=?1 AND singleton=1 AND events=0",
+                [source],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(checkpoint)
     }
 
     pub fn restore(&self, source: &str, path: &Path) -> anyhow::Result<()> {

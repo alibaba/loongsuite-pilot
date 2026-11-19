@@ -433,6 +433,69 @@ fn openclaw_advances_past_an_oversized_excluded_entry() {
     assert_eq!(row["event.id"], "allowed");
 }
 
+#[test]
+fn openclaw_history_advances_past_a_record_larger_than_the_poll_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let data = root.join("instance");
+    let policy = json!({"agents":["openclaw"],"hcd":{"agent_configs":{"openclaw":{"collection":{
+        "enabled":true,"profile":"openclaw_plugin_v1","allowed_roots":[history],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100,"max_read_bytes":4096}
+    }}}}, "sdk_options":{"delivery":{"flush_interval_ms":10}}});
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("openclaw-{day}.jsonl"));
+    std::fs::File::create(&log).unwrap();
+    let row = |id: &str, padding: usize| {
+        json!({"event.id":id, "event.name":"llm.response",
+            "gen_ai.agent.type":"openclaw", "gen_ai.session.id":"large-line-session",
+            "gen_ai.turn.id":"turn", "gen_ai.step.id":"turn:s1",
+            "gen_ai.usage.input_tokens":10, "time_unix_nano":"1780000000000000000",
+            "source_padding":"x".repeat(padding)})
+    };
+    let ids = |host: &Host| {
+        host.ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|raw| {
+                let row: Value = serde_json::from_slice(raw).unwrap();
+                assert_eq!(row["gen_ai.usage.input_tokens"], 10);
+                row["event.id"].as_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    std::fs::write(
+        &log,
+        format!("{}\n{}\n", row("long", 10 * 1024), row("short", 0)),
+    )
+    .unwrap();
+    until(|| ids(&host).len() >= 2);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    assert_eq!(ids(&host), ["long", "short"]);
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| resumed.snapshot()["agents"][0]["status"]["state"] == "running");
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(log).unwrap(),
+        "{}",
+        row("next", 0)
+    )
+    .unwrap();
+    until(|| !ids(&resumed).is_empty());
+    resumed.stop();
+    assert_eq!(ids(&resumed), ["next"]);
+}
+
 fn qoder_policy(source: &Path) -> Value {
     json!({"version":"qoder-v1","agents":["qoder"],"hcd":{"agent_configs":{"qoder":{"collection":{"enabled":true,"profile":"qoder_trace_v1","allowed_roots":[source],"sources":[{"id":"hook","type":"hook_jsonl","path":source}],"limits":{"poll_interval_ms":100}}}}},"sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}})
 }

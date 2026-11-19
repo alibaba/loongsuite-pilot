@@ -75,6 +75,32 @@ impl SdkAgent {
         }
     }
 
+    pub(super) fn acknowledged_checkpoint(
+        &self,
+        agent: &str,
+    ) -> anyhow::Result<Option<crate::checkpoints::InputState>> {
+        use crate::sdk::{
+            outbox::Outbox,
+            policy::{Init, Policy},
+        };
+
+        let outbox = self.sdk_data.join("outbox");
+        if !outbox.join("delivery.sqlite").exists() {
+            return Ok(None);
+        }
+        let init: Init = serde_json::from_slice(&self.init)?;
+        let policy = Policy::parse(serde_json::from_slice(&self.policy)?, &init)?;
+        let Some(plan) = policy.agents.get(agent) else {
+            return Ok(None);
+        };
+        let Some(text) = Outbox::read_acknowledged_checkpoint(&outbox, &plan.namespace())? else {
+            return Ok(None);
+        };
+        let checkpoint = StateStore::new(self.sdk_data.join("input-state.json"));
+        checkpoint.load_checkpoint_text(&text)?;
+        Ok(checkpoint.persisted_input(self.input))
+    }
+
     pub fn running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }

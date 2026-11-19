@@ -518,10 +518,15 @@ impl Orchestrator {
         } else if let Some(config) = &interceptor_config {
             self.start_qoder_hooks(&pilot_dir, config, verdicts).await;
         }
+        let mut openclaw_sdk = None;
         for profile in crate::sdk::hook_history::PROFILES {
             if self.uses_sdk_hook_history(profile.agent) {
-                self.register_sdk_hook_history(&mut detection, &pilot_dir, &state_store, profile)
+                let sdk = self
+                    .register_sdk_hook_history(&mut detection, &pilot_dir, &state_store, profile)
                     .await;
+                if profile.agent == "openclaw" {
+                    openclaw_sdk = Some(sdk);
+                }
             }
         }
         let deploy_entries = deployment
@@ -550,6 +555,7 @@ impl Orchestrator {
         let retention = Arc::new(
             LogRetentionService::new(&self.data_dir, self.config.retention.clone())
                 .with_state_store(Arc::clone(&state_store))
+                .with_openclaw_sdk(openclaw_sdk)
                 .with_hermes_trace(self.otlp.lock().expect("otlp").as_ref()),
         );
         retention.start();
@@ -2982,7 +2988,7 @@ impl Orchestrator {
         pilot_dir: &str,
         state_store: &Arc<StateStore>,
         profile: &crate::sdk::hook_history::HookHistoryProfile,
-    ) {
+    ) -> Arc<super::sdk_agent::SdkAgent> {
         let history = self.data_dir_join(profile.history);
         ensure_dir(&history).await;
         let agent = profile.agent;
@@ -3023,7 +3029,7 @@ impl Orchestrator {
             listener,
             agent,
             "sdk-hosted",
-            sdk,
+            Arc::clone(&sdk),
             |input| input.running(),
             |input| Box::pin(async move { input.start().await }),
             |input| Box::pin(async move { input.stop().await }),
@@ -3040,6 +3046,7 @@ impl Orchestrator {
             1,
             None,
         );
+        sdk
     }
 
     fn register_sdk_qoder(

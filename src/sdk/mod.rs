@@ -4,7 +4,7 @@ mod api;
 pub(crate) mod hook_history;
 pub(crate) mod host_loader;
 mod monitoring;
-mod policy;
+pub(crate) mod policy;
 mod runtime;
 
 pub(crate) mod outbox;
