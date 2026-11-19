@@ -129,6 +129,8 @@ fn powershell(hook: &Hook) -> String {
     }
     if matches!(agent, "qoder" | "qoder-cn") {
         script.push_str("$NativeArgs += '--wakeup-only'\n");
+    } else if agent == "cursor" {
+        script.push_str("if ($env:LOONGSUITE_PILOT_CURSOR_DEFER_ASSEMBLY -eq '1') {\n    $NativeArgs += '--defer-assembly'\n}\n");
     }
     match hook.mode {
         Mode::Payload => {}
@@ -188,6 +190,8 @@ fn shell(hook: &Hook) -> String {
     }
     if matches!(agent, "qoder" | "qoder-cn") {
         script.push_str("NATIVE_ARGS+=('--wakeup-only')\n");
+    } else if agent == "cursor" {
+        script.push_str("if [[ \"${LOONGSUITE_PILOT_CURSOR_DEFER_ASSEMBLY:-}\" == 1 ]]; then\n  NATIVE_ARGS+=('--defer-assembly')\nfi\n");
     }
     match hook.mode {
         Mode::Payload => {}
