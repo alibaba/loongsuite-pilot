@@ -2022,5 +2022,28 @@ fn codex_sdk_deploys_trusted_hooks_and_cleans_only_its_own() {
         assert_eq!(std::fs::read(&settings).unwrap(), cleared);
         assert_eq!(std::fs::read(&trust).unwrap(), kept);
     }
+    assert_eq!(cleanup.apply(policy.clone()).0, OK);
+    let mut with_later_hook: Value =
+        serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    let event = &mut with_later_hook["hooks"]["PreToolUse"];
+    event.as_array_mut().unwrap().push(json!({
+        "matcher":"Bash","hooks":[{"type":"command","command":"another-trusted-tool-hook"}]
+    }));
+    let foreign = event[1].clone();
+    std::fs::write(&settings, with_later_hook.to_string()).unwrap();
+    assert_eq!(cleanup.apply(empty_policy()).0, OK);
+    let after: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(
+        after["hooks"]["PreToolUse"][1], foreign,
+        "foreign trust location moved"
+    );
+    assert!(after["hooks"]["PreToolUse"][0]["hooks"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let cleared = std::fs::read(&settings).unwrap();
+    assert_eq!(cleanup.apply(policy).0, OK);
+    assert_eq!(cleanup.apply(empty_policy()).0, OK);
+    assert_eq!(std::fs::read(&settings).unwrap(), cleared);
     cleanup.stop();
 }

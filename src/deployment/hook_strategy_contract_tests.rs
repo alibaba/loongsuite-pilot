@@ -582,3 +582,65 @@ async fn env_write_io_failure_cannot_report_success_or_publish_partial_hook_conf
     assert_eq!(f.data()["env"]["KEEP"], "user");
     assert_eq!(f.data()["theme"], "dark");
 }
+
+#[tokio::test]
+async fn codex_legacy_rollback_removes_native_hooks_and_preserves_foreign_trust() {
+    let f = Fixture::new("hooks.json");
+    let data = f.root.path();
+    let binary = data
+        .join("versions/.candidate-previous/bin")
+        .join(sdk_hook_binary_name());
+    let mut legacy = f.trust_def(&["Stop"]);
+    legacy.hook.as_mut().unwrap().retired_events = Some(vec!["PreToolUse".into()]);
+    let native = |event| {
+        let command = codex_command(
+            &binary,
+            &data.join("state/standalone-codex-transcript-sdk"),
+            event,
+            codex_channel(event),
+        )
+        .unwrap();
+        json!({"matcher":"*","hooks":[{"type":"command","command":command}]})
+    };
+    let legacy_command = f.strategy.build_hook_definitions(&legacy)[0]
+        .hook_command
+        .clone();
+    let third_party =
+        json!({"matcher":"other","hooks":[{"type":"command","command":"other-tool"}]});
+    f.write(&json!({"hooks":{
+        "Stop":[third_party, native("Stop")],
+        "PreToolUse":[native("PreToolUse"), third_party],
+    }}));
+    let trust_path = data.join("config.toml");
+    let third_key = format!(
+        "{}:pre_tool_use:1:0",
+        node_resolve(&f.settings.to_string_lossy())
+    );
+    std::fs::write(
+        &trust_path,
+        format!(
+            "[hooks.state.{}]\ntrusted_hash = \"sha256:third-party\"\n",
+            serde_json::json!(third_key)
+        ),
+    )
+    .unwrap();
+    let run = || {
+        HookStrategy::new(HookManager::new(None, None))
+            .with_resource_roots(data, data)
+            .restore_codex_legacy(&legacy, data, data)
+    };
+    run().await.unwrap();
+    let hooks = f.data();
+    assert_eq!(hooks["hooks"]["Stop"][0], third_party);
+    assert_eq!(
+        hooks["hooks"]["Stop"][1]["hooks"][0]["command"],
+        legacy_command
+    );
+    assert_eq!(hooks["hooks"]["PreToolUse"][1], third_party);
+    assert!(!hooks.to_string().contains("--pilot-sdk-managed"));
+    let trusted = std::fs::read_to_string(&trust_path).unwrap();
+    assert!(trusted.contains("sha256:third-party"));
+    run().await.unwrap();
+    assert_eq!(f.data(), hooks);
+    assert_eq!(std::fs::read_to_string(&trust_path).unwrap(), trusted);
+}

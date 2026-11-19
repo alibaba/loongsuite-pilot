@@ -995,6 +995,7 @@ pub(crate) fn reconcile_embedded_codex_hooks(
 pub struct HookStrategy {
     hook_manager: HookManager,
     embedded_codex: Option<EmbeddedCodexHooks>,
+    codex_legacy_cache: Option<PathBuf>,
     resource_roots: Option<(PathBuf, PathBuf)>,
     deployment_state: Option<(PathBuf, Option<crate::types::InstalledBy>)>,
     preserve_runtime_assets: bool,
@@ -1007,6 +1008,7 @@ impl HookStrategy {
         Self {
             hook_manager,
             embedded_codex: None,
+            codex_legacy_cache: None,
             resource_roots: None,
             deployment_state: None,
             preserve_runtime_assets: false,
@@ -1023,6 +1025,22 @@ impl HookStrategy {
     pub(crate) fn with_resource_roots(mut self, pilot: &Path, data: &Path) -> Self {
         self.resource_roots = Some((pilot.into(), data.into()));
         self
+    }
+
+    pub(super) async fn restore_codex_legacy(
+        mut self,
+        def: &AgentDefinition,
+        cache: &Path,
+        data: &Path,
+    ) -> anyhow::Result<()> {
+        self.codex_legacy_cache = Some(cache.to_owned());
+        let configs = self.config_targets(def).map_err(anyhow::Error::msg)?;
+        super::hook_assets::HookAssets::configuration_cleanup(data)
+            .apply(configs, None, true, |transaction| {
+                self.plan_config_edits(def, transaction, false, None)
+                    .map_err(anyhow::Error::msg)
+            })
+            .await
     }
 
     pub(crate) fn with_deployment_state(
@@ -1470,6 +1488,13 @@ impl HookStrategy {
             }
         }
         if super::system_toml_hooks::is_system(def) {
+            if self.codex_legacy_cache.is_some()
+                && !original
+                    .as_deref()
+                    .is_some_and(super::system_toml_hooks::has_codex_owner)
+            {
+                return Ok(edits);
+            }
             let native = self.system_codex_sdk_paths(def);
             if let Some(next) = super::system_toml_hooks::plan_with_native(
                 original.as_deref().unwrap_or(""),
@@ -1514,11 +1539,18 @@ impl HookStrategy {
                 true,
                 &document.data,
                 true,
-                !uninstall,
+                !uninstall && self.codex_legacy_cache.is_none(),
             )?
         } else {
             Vec::new()
         };
+        if self.codex_legacy_cache.is_some()
+            && !old_locations.iter().any(|location| {
+                self.owns_codex_sdk_command(def, &location.event_name, &location.handler.command)
+            })
+        {
+            return Ok(edits);
+        }
         if !uninstall {
             self.ensure_settings_file(def, &mut document)?;
         }
@@ -1531,13 +1563,21 @@ impl HookStrategy {
                 edits.insert("kiro-cli".into(), cli.raw);
             }
         } else {
+            let direct_binary = (!uninstall).then(|| self.sdk_hook_binary(def)).flatten();
+            let indexed_codex = def.id == "codex"
+                && self.resource_roots.is_some()
+                && (direct_binary.is_some() || self.codex_legacy_cache.is_some() || uninstall);
             if self.embedded_codex.is_none() {
                 for retired in &retired {
-                    document.apply_hook(
-                        retired,
-                        true,
-                        uninstall && self.preserve_runtime_assets,
-                    )?;
+                    if indexed_codex {
+                        self.edit_indexed_codex_event(def, &mut document, retired, retired, true)?;
+                    } else {
+                        document.apply_hook(
+                            retired,
+                            true,
+                            uninstall && self.preserve_runtime_assets,
+                        )?;
+                    }
                 }
             }
             if !uninstall {
@@ -1545,7 +1585,6 @@ impl HookStrategy {
                     self.apply_env_to_settings(&mut document, env)?;
                 }
             }
-            let direct_binary = (!uninstall).then(|| self.sdk_hook_binary(def)).flatten();
             let prune_empty = uninstall && self.preserve_runtime_assets;
             for legacy in self.legacy_hook_definitions(def) {
                 if def.id != "qoder" && self.is_interceptor_definition(def, &legacy) {
@@ -1553,6 +1592,16 @@ impl HookStrategy {
                     continue;
                 }
                 let desired = self.sdk_desired_hook(legacy.clone(), direct_binary.as_deref());
+                if indexed_codex || self.embedded_codex.is_some() {
+                    self.edit_indexed_codex_event(
+                        def,
+                        &mut document,
+                        &legacy,
+                        &desired,
+                        uninstall,
+                    )?;
+                    continue;
+                }
                 let installed = self.installed_sdk_hooks(def, &document.data, &legacy);
                 let multiple = installed.len() > 1;
                 for definition in installed {
@@ -1566,9 +1615,7 @@ impl HookStrategy {
                 }
                 // Whole-product uninstall owns the removed handlers' empty
                 // containers; ordinary per-agent Hook edits retain their format.
-                if (uninstall && self.embedded_codex.is_some())
-                    || (qoder_subagent_hook(&legacy) && direct_binary.is_none() && !uninstall)
-                {
+                if qoder_subagent_hook(&legacy) && direct_binary.is_none() && !uninstall {
                     continue;
                 }
                 document.apply_hook(&desired, uninstall, prune_empty)?;
@@ -1885,7 +1932,19 @@ impl HookStrategy {
             if matches.is_empty() && allow_missing {
                 continue;
             }
-            if matches.is_empty() || (require_unique && matches.len() != 1) {
+            // Older rollbacks could leave one native handler alongside the
+            // restored Node handler. Both are exact matches for this install.
+            let rollback_pair = include_legacy
+                && matches.len() == 2
+                && self.resource_roots.is_some()
+                && matches
+                    .iter()
+                    .filter(|location| {
+                        self.owns_codex_sdk_command(def, event_name, &location.handler.command)
+                    })
+                    .count()
+                    == 1;
+            if matches.is_empty() || (require_unique && matches.len() != 1 && !rollback_pair) {
                 return Err(format!(
                     "expected exactly one installed Pilot handler for {event_name}; found {}",
                     matches.len()
@@ -1976,6 +2035,9 @@ impl HookStrategy {
     }
 
     fn sdk_hook_binary(&self, def: &AgentDefinition) -> Option<PathBuf> {
+        if def.id == "codex" && self.codex_legacy_cache.is_some() {
+            return None;
+        }
         if let Some(sdk) = &self.embedded_codex {
             return Some(sdk.binary.clone());
         }
@@ -2019,12 +2081,104 @@ impl HookStrategy {
             return false;
         };
         let stable = super::runtime_launcher::hook_binary(root).ok();
+        let cache = self
+            .codex_legacy_cache
+            .clone()
+            .unwrap_or_else(|| hook_cache_dir(root));
         if stable.as_deref() != Some(executable.as_path())
-            && !qoder_version_binary(&executable, &hook_cache_dir(root))
+            && !qoder_version_binary(&executable, &cache)
         {
             return false;
         }
         codex_command(&executable, &data, event, codex_channel(event)).as_deref() == Some(cmd)
+    }
+
+    // Codex trusts a handler by its event, group index and handler index.
+    // Keep an empty group only when removing it would move another owner's
+    // handler. Reuse that group on the next activation.
+    fn edit_indexed_codex_event(
+        &self,
+        def: &AgentDefinition,
+        document: &mut SettingsDocument,
+        legacy: &HookDefinition,
+        desired: &HookDefinition,
+        uninstall: bool,
+    ) -> Result<(), String> {
+        use sha2::{Digest, Sha256};
+        let data = self
+            .codex_sdk_data(def)
+            .ok_or("Missing Codex SDK data path")?;
+        let owner = hex::encode(Sha256::digest(data.as_os_str().as_encoded_bytes()));
+        let vacant =
+            serde_json::json!({"matcher":format!("^pilot-vacant-{}$",&owner[..16]),"hooks":[]});
+        let event = desired
+            .hook_json_path
+            .last()
+            .ok_or("Missing Codex Hook event")?;
+        let current = document.data["hooks"].get(event);
+        let mut groups = match current {
+            None => Vec::new(),
+            Some(value) => value
+                .as_array()
+                .ok_or("Codex Hook event must be an array")?
+                .clone(),
+        };
+        let owned = |entry: &Value| {
+            entry.get("type").is_none_or(|kind| kind == "command")
+                && entry["command"].as_str().is_some_and(|command| {
+                    self.owns_codex_sdk_command(def, event, command)
+                        || (self.embedded_codex.is_none()
+                            && (hook_commands_match(command, &legacy.hook_command)
+                                || legacy
+                                    .replace_hook_commands
+                                    .as_deref()
+                                    .is_some_and(|older| {
+                                        older.iter().any(|old| hook_commands_match(command, old))
+                                    })))
+                })
+        };
+        let mut available = None;
+        for (index, group) in groups.iter_mut().enumerate() {
+            let mut clear = owned(group);
+            if let Some(handlers) = group["hooks"].as_array() {
+                let count = handlers.iter().filter(|handler| owned(handler)).count();
+                if count > 0 {
+                    if count != handlers.len() {
+                        return Err(
+                            "Codex SDK Hook shares a group with externally owned handlers".into(),
+                        );
+                    }
+                    clear = true;
+                }
+            }
+            if clear || *group == vacant {
+                *group = vacant.clone();
+                available.get_or_insert(index);
+            }
+        }
+        if !uninstall {
+            let entry = crate::hooks::build_hook_entry(desired);
+            if let Some(index) = available {
+                groups[index] = entry;
+            } else {
+                groups.push(entry);
+            }
+        }
+        while groups.last() == Some(&vacant) {
+            groups.pop();
+        }
+        if let Some(old) = current.and_then(Value::as_array) {
+            if *old == groups {
+                return Ok(());
+            }
+        }
+        if groups.is_empty() && current.is_none() {
+            return Ok(());
+        }
+        document.set(
+            &["hooks", event],
+            (!groups.is_empty()).then_some(Value::Array(groups)),
+        )
     }
 
     fn installed_sdk_hooks(

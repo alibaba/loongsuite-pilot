@@ -215,6 +215,11 @@ pub(super) fn read(def: &AgentDefinition) -> Result<String, String> {
     }
 }
 
+pub(super) fn has_codex_owner(raw: &str) -> bool {
+    raw.lines()
+        .any(|line| line.trim_start_matches('\u{feff}').trim() == "# BEGIN loongsuite-pilot:codex")
+}
+
 pub(super) fn plan(
     raw: &str,
     def: &AgentDefinition,
