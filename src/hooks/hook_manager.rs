@@ -1156,7 +1156,7 @@ fn move_command_to_head(entries: &mut Vec<Value>, def: &HookDefinition) -> bool 
     true
 }
 
-fn build_hook_entry(def: &HookDefinition) -> Value {
+pub(crate) fn build_hook_entry(def: &HookDefinition) -> Value {
     let mut command = Map::new();
     if let Some(args) = &def.exec_args {
         command.insert(
