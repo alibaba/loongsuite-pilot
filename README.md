@@ -54,6 +54,9 @@ Pilot is designed to answer practical questions:
 
 | Agent         | Integration               | Trace Export | Log Export | Token Usage | Conversation / Tool Calls | Multimodal |
 | ------------- | ------------------------- | ------------ | ---------- | ----------- | ------------------------- | ---------- |
+| Antigravity   | Read-only SQLite + transcript | Yes      | Yes        | Yes         | Yes                       | Yes (Opt-in) |
+| Antigravity IDE | Read-only SQLite + transcript | Yes    | Yes        | Yes         | Yes                       | Yes (Opt-in) |
+| Antigravity CLI (`agy`) | Read-only SQLite + transcript | Yes | Yes   | Yes         | Yes                       | Yes (Opt-in) |
 | Claude Code   | Hook                      | Yes          | Yes        | Yes         | Yes                       | No         |
 | Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       | Yes (Opt-in) |
 | GitHub Copilot CLI | Native plugin + transcript / native OTel | Yes | Yes | Yes (native OTel) | Yes | No |
@@ -78,7 +81,6 @@ Pilot is designed to answer practical questions:
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       | No         |
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       | No         |
 | [Doubao Work (macOS/Windows, experimental)](docs/doubao-work.md) | Read-only logs + execution metadata | Client turns, local tools + native sandbox executions | Metadata only | No | No | No |
-| Antigravity / Antigravity IDE / Antigravity CLI (`agy`) | Read-only SQLite (`conversations/*.db`) + `transcript.jsonl` | Yes | Yes | Yes | Yes | Yes (Opt-in) |
 
 GitHub Copilot CLI automatic deployment supports Unix shells. Exact per-call token usage requires native OTel; transcript-only collection omits unavailable usage. Windows and subagents are not supported. See [telemetry details](docs/zh-CN/copilot-native-telemetry.md).
 

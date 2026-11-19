@@ -51,6 +51,9 @@ Pilot 主要帮助回答这些问题：
 
 | Agent | 集成方式 | Trace 上报 | 日志上报 | Token 用量 | 对话 / 工具调用 | 多模态 |
 |-------|----------|------------|----------|------------|----------------|--------|
+| Antigravity | 本地只读 SQLite + transcript | Yes | Yes | Yes | Yes | Yes (Opt-in) |
+| Antigravity IDE | 本地只读 SQLite + transcript | Yes | Yes | Yes | Yes | Yes (Opt-in) |
+| Antigravity CLI (`agy`) | 本地只读 SQLite + transcript | Yes | Yes | Yes | Yes | Yes (Opt-in) |
 | Claude Code | Hook | Yes | Yes | Yes | Yes | No |
 | Codex | Hook | Yes | Yes | Yes | Yes | Yes (Opt-in) |
 | Cursor | Hook | Yes | Yes | Yes | Yes | No |
@@ -73,7 +76,6 @@ Pilot 主要帮助回答这些问题：
 | Qwen Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes | Yes (Opt-in) |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes | No |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes | No |
-| Antigravity / Antigravity IDE / Antigravity CLI (`agy`) | 本地只读 SQLite (`conversations/*.db`) + `transcript.jsonl` | Yes | Yes | Yes | Yes | Yes (Opt-in) |
 | [豆包工作（macOS/Windows，实验性）](docs/zh-CN/doubao-work.md) | 只读日志与执行元数据 | 客户端轮次、本地工具与原生 sandbox 执行 | 仅元数据 | No | No | No |
 
 OpenClaw 集成支持 2026.3.8 及以上版本，自动识别版本；5.12 之前的模型调用时间通过旧版 Hook 推定，详见[兼容性说明](docs/zh-CN/agents.md#openclaw-兼容性与生命周期)。
