@@ -430,24 +430,33 @@ fn codex_checkpoint_rebinds_old_sdk_pending_bytes_then_admits_a_legacy_handoff()
 
     assert_eq!(
         queue
-            .prepare_codex_checkpoint("new-source", || Ok(None))
+            .prepare_shell_checkpoint("new-source", LegacyCheckpointHandoff::Codex, || Ok(None))
             .unwrap()
             .as_deref(),
         Some(old)
     );
     let rows = queue.read_batch(&settings()).unwrap().0;
     assert_eq!(rows[0].1, pending);
-    assert!(Outbox::mark_codex_checkpoint_exported(root.path()).is_err());
+    assert!(
+        Outbox::mark_shell_checkpoint_exported(root.path(), LegacyCheckpointHandoff::Codex)
+            .is_err()
+    );
     queue.ack(&rows).unwrap();
 
-    Outbox::mark_codex_checkpoint_exported(root.path()).unwrap();
+    Outbox::mark_shell_checkpoint_exported(root.path(), LegacyCheckpointHandoff::Codex).unwrap();
     assert!(queue
-        .prepare_codex_checkpoint("new-source", || anyhow::bail!("corrupt legacy state"))
+        .prepare_shell_checkpoint(
+            "new-source",
+            LegacyCheckpointHandoff::Codex,
+            || anyhow::bail!("corrupt legacy state")
+        )
         .is_err());
     let newer = r#"{"codex-transcript:rollout":{"lastOffset":27,"future":true}}"#;
     assert_eq!(
         queue
-            .prepare_codex_checkpoint("new-source", || Ok(Some(newer.to_owned())))
+            .prepare_shell_checkpoint("new-source", LegacyCheckpointHandoff::Codex, || Ok(Some(
+                newer.to_owned()
+            )))
             .unwrap()
             .as_deref(),
         Some(newer)
@@ -455,6 +464,54 @@ fn codex_checkpoint_rebinds_old_sdk_pending_bytes_then_admits_a_legacy_handoff()
     assert_eq!(
         queue.saved_checkpoints().unwrap(),
         vec![("new-source".to_owned(), newer.to_owned())]
+    );
+}
+
+#[test]
+fn qoder_checkpoint_imports_legacy_progress_only_after_acknowledged_export() {
+    let root = tempfile::tempdir().unwrap();
+    let queue = Outbox::open(root.path(), settings()).unwrap();
+    let handoff = LegacyCheckpointHandoff::Qoder;
+    let source = "qoder-source";
+    let original = r#"{"qoder-trace:fixture":{"lastOffset":12}}"#;
+    let advanced = r#"{"qoder-trace:fixture":{"lastOffset":36}}"#;
+    let pending = br#"{"event.id":"pending-qoder","event.name":"llm.request"}"#;
+    queue.checkpoint(source, original).unwrap();
+    queue.enqueue_hook(pending).unwrap();
+    assert_eq!(
+        queue
+            .prepare_shell_checkpoint(source, handoff, || panic!("SDK still owns the cursor"))
+            .unwrap()
+            .as_deref(),
+        Some(original)
+    );
+    assert!(Outbox::mark_shell_checkpoint_exported(root.path(), handoff).is_err());
+    let rows = queue.read_batch(&settings()).unwrap().0;
+    assert_eq!(rows[0].1, pending);
+    queue.ack(&rows).unwrap();
+    Outbox::mark_shell_checkpoint_exported(root.path(), handoff).unwrap();
+    assert!(queue
+        .prepare_shell_checkpoint(source, handoff, || anyhow::bail!("bad state"))
+        .is_err());
+    assert_eq!(
+        queue
+            .prepare_shell_checkpoint(source, handoff, || Ok(Some(advanced.to_owned())))
+            .unwrap()
+            .as_deref(),
+        Some(advanced)
+    );
+    assert_eq!(
+        queue.saved_checkpoints().unwrap(),
+        vec![(source.to_owned(), advanced.to_owned())]
+    );
+
+    Outbox::mark_shell_checkpoint_exported(root.path(), handoff).unwrap();
+    assert_eq!(
+        queue
+            .prepare_shell_checkpoint(source, handoff, || Ok(None))
+            .unwrap()
+            .as_deref(),
+        Some(advanced)
     );
 }
 

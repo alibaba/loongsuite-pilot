@@ -314,17 +314,21 @@ fn run_agent(
     std::fs::create_dir_all(&state_dir)?;
     let checkpoint = state_dir.join("input-state.json");
     let checkpoint_key = plan.checkpoint_key();
-    let codex_host = plan.pilot_host.as_ref().filter(|host| {
-        plan.agent == "codex"
-            && init.data_dir
-                == host
-                    .data_dir
-                    .join("state")
-                    .join(format!("standalone-{checkpoint_key}-sdk"))
+    use super::outbox::LegacyCheckpointHandoff;
+    let shell_handoff = plan.pilot_host.as_ref().and_then(|host| {
+        let handoff = LegacyCheckpointHandoff::for_input(checkpoint_key)?;
+        let expected = if handoff == LegacyCheckpointHandoff::Qoder {
+            host.data_dir.join(super::STANDALONE_QODER_DATA)
+        } else {
+            host.data_dir
+                .join("state")
+                .join(format!("standalone-{checkpoint_key}-sdk"))
+        };
+        (init.data_dir == expected).then_some((host, handoff))
     });
-    if let Some(host) = codex_host {
+    if let Some((host, handoff)) = shell_handoff {
         let legacy_path = host.data_dir.join("logs/input-state.json");
-        let imported = queue.prepare_codex_checkpoint(&namespace, || {
+        let imported = queue.prepare_shell_checkpoint(&namespace, handoff, || {
             use std::io::Read;
             source_access::private_path(&legacy_path)?;
             let mut file = match source_access::open_under(&legacy_path, &host.data_dir) {
@@ -334,7 +338,7 @@ fn run_agent(
             };
             anyhow::ensure!(
                 file.metadata()?.len() <= 64 * 1024 * 1024,
-                "Codex shell checkpoint exceeds 64 MiB"
+                "Pilot shell checkpoint exceeds 64 MiB"
             );
             let mut body = String::new();
             file.read_to_string(&mut body)?;
@@ -342,7 +346,7 @@ fn run_agent(
         })?;
         if let Some(text) = imported {
             write_checkpoint(&checkpoint, &text)?;
-        } else {
+        } else if handoff == LegacyCheckpointHandoff::Codex {
             source_access::private_path(&checkpoint)?;
             match std::fs::remove_file(&checkpoint) {
                 Ok(()) => {}
