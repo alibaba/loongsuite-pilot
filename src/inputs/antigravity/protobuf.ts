@@ -172,7 +172,7 @@ export function parseDurationNs(buf: Uint8Array): number | undefined {
   const fields = decodeProtoFields(buf);
   const seconds = fieldVarintBig(fields, 1) ?? 0n;
   const nanos = fieldVarintBig(fields, 2) ?? 0n;
-  if (seconds < 0n || nanos < 0n || seconds > 86_400n) {
+  if (seconds < 0n || nanos < 0n || nanos >= 1_000_000_000n || seconds > 86_400n) {
     return undefined;
   }
   const totalNs = seconds * 1_000_000_000n + nanos;

@@ -6,6 +6,7 @@ export {
 } from './antigravity-input.js';
 export {
   readAntigravityConversationDb,
+  extractWorkspacePathFromBlob,
   parseGeneratorMetadata,
   parseStepMetadata,
   type AntigravityConversationSnapshot,

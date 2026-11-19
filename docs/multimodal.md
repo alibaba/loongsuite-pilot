@@ -16,7 +16,7 @@ Multimodal also needs an explicit `config.multimodal.storage` block; a matching 
 | Item | Status |
 |------|--------|
 | Media types | **Images** and **video**. Audio is future work. |
-| Implemented agents | **`codex`**, **`qoder` (IDE and CLI)**, and **`qwen-work-cn`**. Other agents ignore `uploadMode` until their extractors land. |
+| Implemented agents | **`codex`**, **`qoder` (IDE and CLI)**, **`qwen-work-cn`**, and **`antigravity` / `antigravity-ide` / `antigravity-cli`**. Other agents ignore `uploadMode` until their extractors land. |
 
 ### Detection
 
@@ -100,6 +100,7 @@ Extractors still join relative `@` / Read paths with `agent.qoder.cwd`, but cwd 
 | `qoder` | `~/.qoder/tmp` (CLI paste / clipboard), `~/.qoder/vibe_images` (ImageGen), and the desktop IDE paste cache `…/Qoder/SharedClientCache/cache/images` (`~/Library/Application Support/Qoder` / `%APPDATA%/Qoder` / `~/.config/Qoder`; Linux remote hashed profiles use `<appRoot>/<hash>/SharedClientCache/cache/images`). |
 | `codex` | `~/.codex` (reserved; Codex today uses inline base64, not disk paths). |
 | `qwen-work-cn` | `~/.qwenworkcn/workspace` (clipboard paste `uploads/`) and `~/.qwenworkcn/tmp`. |
+| `antigravity` / `antigravity-ide` / `antigravity-cli` | `~/.gemini/antigravity/brain`, `~/.gemini/antigravity-ide/brain`, and `~/.gemini/antigravity-cli/brain` respectively. |
 
 UNC/device paths and symlinks are skipped. An image suffix is accepted only when the bytes are an image header. Video suffixes `.mp4`, `.mov`, `.m4v`, `.3gp`, and `.3g2` need `ftyp` at offset 4, and the major brand must not be `M4A `, `M4B `, or `M4P `. `.webm` and `.mkv` need an EBML header. `.avi` needs `RIFF` with `AVI ` at offset 8. A suffix and header from different families are skipped. Local paths are treated as filesystem paths. A URL query after the extension (for example `a.png?x=1` in markdown) is not stripped; `pathToUri` will not fall back to the path with the query removed.
 
@@ -112,6 +113,7 @@ The table below describes what multimodal collection actually captures per agent
 | `codex` | Yes | See [Codex](#codex) below. |
 | `qoder` | Yes | See [Qoder IDE](#qoder-ide) and [Qoder CLI](#qoder-cli) below. |
 | `qwen-work-cn` | Yes | See [Qwen Work CN](#qwen-work-cn) below. |
+| `antigravity` / `antigravity-ide` / `antigravity-cli` | Yes | Local image and video `media[].uri` entries from `transcript.jsonl` (`USER_INPUT`, `PLANNER_RESPONSE`, tool results), scoped to `<dataRoot>/brain`. |
 | Others | No | Setting `uploadMode` has no effect today. |
 
 ### Codex

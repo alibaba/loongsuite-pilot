@@ -1,6 +1,11 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { loadDatabaseSync, type DatabaseSyncInstance } from '../../utils/node-sqlite.js';
+import { fileURLToPath } from 'node:url';
+import {
+  loadDatabaseSync,
+  SQLITE_SYNC_PAGE,
+  type DatabaseSyncInstance,
+} from '../../utils/node-sqlite.js';
 import {
   decodePackedVarints,
   decodeProtoFields,
@@ -22,6 +27,8 @@ import {
 } from './model-normalizer.js';
 
 const MAX_REASONABLE_TOKENS = 100_000_000;
+const MAX_PROTO_WALK_DEPTH = 8;
+const utf8StrictDecoder = new TextDecoder('utf-8', { fatal: true });
 
 export interface AntigravityModelUsage {
   modelId?: number;
@@ -73,6 +80,8 @@ export interface AntigravityConversationSnapshot {
   dbPath: string;
   workspacePath?: string;
   trajectoryTimestampMs?: number;
+  maxGenIdx: number;
+  maxStepIdx: number;
   events: AntigravityUsageEvent[];
 }
 
@@ -94,6 +103,18 @@ interface StepMetadata {
   usage?: AntigravityModelUsage;
   retryUsages: AntigravityModelUsage[];
   timestampMs?: number;
+}
+
+function tryOptional<T>(fn: () => T): T | undefined {
+  try {
+    return fn();
+  } catch {
+    return undefined;
+  }
+}
+
+function yieldEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function isTokenBearing(u: AntigravityModelUsage): boolean {
@@ -224,22 +245,24 @@ export function parseGeneratorMetadata(blob: Uint8Array): GeneratorMetadata | un
   const chatFields = decodeProtoFields(chatModelBlob);
 
   const usageBlob = fieldBytes(chatFields, 4);
-  const usage = usageBlob ? parseModelUsage(usageBlob) : undefined;
+  const usage = usageBlob ? tryOptional(() => parseModelUsage(usageBlob)) : undefined;
 
   const retryUsages: AntigravityModelUsage[] = [];
   for (const retryBlob of fieldBytesAll(chatFields, 17)) {
-    const parsed = parseRetryInfo(retryBlob);
+    const parsed = tryOptional(() => parseRetryInfo(retryBlob));
     if (parsed) retryUsages.push(parsed);
   }
   dropPrimaryMirror(usage, retryUsages);
 
   const genInfoBlob = fieldBytes(chatFields, 9);
-  const timestampMs = genInfoBlob ? parseGenerationInfoTimestamp(genInfoBlob) : undefined;
+  const timestampMs = genInfoBlob
+    ? tryOptional(() => parseGenerationInfoTimestamp(genInfoBlob))
+    : undefined;
 
   const ttftBlob = fieldBytes(chatFields, 11);
-  const ttftNs = ttftBlob ? parseDurationNs(ttftBlob) : undefined;
+  const ttftNs = ttftBlob ? tryOptional(() => parseDurationNs(ttftBlob)) : undefined;
   const streamBlob = fieldBytes(chatFields, 12);
-  const streamDurationNs = streamBlob ? parseDurationNs(streamBlob) : undefined;
+  const streamDurationNs = streamBlob ? tryOptional(() => parseDurationNs(streamBlob)) : undefined;
 
   const model = fieldText(chatFields, 19) ?? fieldText(chatFields, 21);
   const rawModelId = fieldVarint(chatFields, 3);
@@ -261,11 +284,11 @@ export function parseGeneratorMetadata(blob: Uint8Array): GeneratorMetadata | un
 export function parseStepMetadata(blob: Uint8Array): StepMetadata {
   const fields = decodeProtoFields(blob);
   const usageBlob = fieldBytes(fields, 9);
-  const usage = usageBlob ? parseModelUsage(usageBlob) : undefined;
+  const usage = usageBlob ? tryOptional(() => parseModelUsage(usageBlob)) : undefined;
 
   const retryUsages: AntigravityModelUsage[] = [];
   for (const retryBlob of fieldBytesAll(fields, 28)) {
-    const parsed = parseRetryInfo(retryBlob);
+    const parsed = tryOptional(() => parseRetryInfo(retryBlob));
     if (parsed) retryUsages.push(parsed);
   }
   dropPrimaryMirror(usage, retryUsages);
@@ -275,29 +298,53 @@ export function parseStepMetadata(blob: Uint8Array): StepMetadata {
   let provider: number | undefined;
   const modelInfoBlob = fieldBytes(fields, 24);
   if (modelInfoBlob) {
-    const infoFields = decodeProtoFields(modelInfoBlob);
-    model = fieldText(infoFields, 12) ?? fieldText(infoFields, 8);
-    const rawId = fieldVarint(infoFields, 1);
-    modelId = rawId && rawId > 0 ? rawId : undefined;
-    const rawProv = fieldVarint(infoFields, 7);
-    provider = rawProv && rawProv > 0 ? rawProv : undefined;
+    const infoFields = tryOptional(() => decodeProtoFields(modelInfoBlob));
+    if (infoFields) {
+      model = fieldText(infoFields, 12) ?? fieldText(infoFields, 8);
+      const rawId = fieldVarint(infoFields, 1);
+      modelId = rawId && rawId > 0 ? rawId : undefined;
+      const rawProv = fieldVarint(infoFields, 7);
+      provider = rawProv && rawProv > 0 ? rawProv : undefined;
+    }
   }
 
   const tsBlob = fieldBytes(fields, 8) ?? fieldBytes(fields, 1);
-  const timestampMs = tsBlob ? parseTimestampMs(tsBlob) : undefined;
+  const timestampMs = tsBlob ? tryOptional(() => parseTimestampMs(tsBlob)) : undefined;
 
   return { model, modelId, provider, usage, retryUsages, timestampMs };
 }
 
-function extractWorkspacePath(blob: Uint8Array): string | undefined {
-  const text = Buffer.from(blob).toString('latin1');
-  const match = text.match(/file:\/\/(\/[A-Za-z0-9._\-\/ @+~]+)/);
-  if (!match?.[1]) return undefined;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return match[1];
+/**
+ * Recursively walk decoded wire-2 protobuf fields to locate a `file://` URI
+ * and convert it cleanly via `fileURLToPath` (preserving UTF-8, `%20`, and
+ * Windows drive letters without tag-byte adhesion).
+ */
+export function extractWorkspacePathFromBlob(blob: Uint8Array): string | undefined {
+  return walkProtoForFileUri(blob, 0);
+}
+
+function walkProtoForFileUri(blob: Uint8Array, depth: number): string | undefined {
+  if (depth > MAX_PROTO_WALK_DEPTH || blob.length === 0) return undefined;
+  const fields = tryOptional(() => decodeProtoFields(blob));
+  if (!fields) return undefined;
+
+  for (const field of fields) {
+    if (field.wire !== 2) continue;
+    const bytes = field.value as Uint8Array;
+    if (bytes.length === 0) continue;
+
+    // Check if this field itself is a UTF-8 `file://` URI
+    const text = tryOptional(() => utf8StrictDecoder.decode(bytes));
+    if (text && text.startsWith('file://') && !/[\x00-\x1f\x7f]/.test(text)) {
+      const converted = tryOptional(() => fileURLToPath(new URL(text)));
+      if (converted) return converted;
+    }
+
+    // Otherwise recurse into nested protobuf sub-messages
+    const nested = walkProtoForFileUri(bytes, depth + 1);
+    if (nested) return nested;
   }
+  return undefined;
 }
 
 function tableExists(db: DatabaseSyncInstance, tableName: string): boolean {
@@ -323,14 +370,14 @@ function resolveModel(
     usageModelId !== undefined
       ? normalizeAntigravityModel(modelNameFromId(usageModelId))
       : undefined;
-  const sameModelRow =
-    contextModel && contextModelId === usageModelId
-      ? normalizeAntigravityModel(contextModel)
-      : undefined;
+  const normalizedContext = normalizeAntigravityModel(contextModel);
+  const sameModelRow = contextModelId === usageModelId ? normalizedContext : undefined;
+
   if (idModel && isResolvedModel(idModel)) return idModel;
   if (sameModelRow && isResolvedModel(sameModelRow)) return sameModelRow;
+  // Allow an explicit resolved native model string to override an unmapped placeholder ID
+  if (normalizedContext && isResolvedModel(normalizedContext)) return normalizedContext;
   if (idModel) return idModel;
-  const normalizedContext = normalizeAntigravityModel(contextModel);
   if (normalizedContext) return normalizedContext;
   return DEFAULT_ANTIGRAVITY_MODEL;
 }
@@ -414,7 +461,7 @@ function deduplicateEvents(events: AntigravityUsageEvent[]): AntigravityUsageEve
 }
 
 /**
- * Read one Antigravity conversation SQLite database read-only.
+ * Read one Antigravity conversation SQLite database read-only in bounded pages.
  * Returns null if the DB is empty/uninitialized or missing gen_metadata.
  */
 export async function readAntigravityConversationDb(
@@ -442,58 +489,74 @@ export async function readAntigravityConversationDb(
     let workspacePath: string | undefined;
     if (tableExists(db, 'trajectory_metadata_blob')) {
       const rows = db
-        .prepare('SELECT data FROM trajectory_metadata_blob ORDER BY rowid ASC')
+        .prepare('SELECT data FROM trajectory_metadata_blob ORDER BY rowid ASC LIMIT 32')
         .all() as Array<{ data?: unknown }>;
       for (const row of rows) {
         const blob = toUint8Array(row.data);
         if (!blob) continue;
-        try {
-          if (trajectoryTimestampMs === undefined) {
+        if (trajectoryTimestampMs === undefined) {
+          trajectoryTimestampMs = tryOptional(() => {
             const fields = decodeProtoFields(blob);
             const tsBlob = fieldBytes(fields, 2);
-            if (tsBlob) trajectoryTimestampMs = parseTimestampMs(tsBlob);
-          }
-        } catch {
-          // Best-effort metadata parse
+            return tsBlob ? parseTimestampMs(tsBlob) : undefined;
+          });
         }
         if (workspacePath === undefined) {
-          workspacePath = extractWorkspacePath(blob);
+          workspacePath = extractWorkspacePathFromBlob(blob);
         }
       }
     }
 
     const stepRows: Array<{ idx: number; metadata: StepMetadata }> = [];
+    let maxStepIdx = -1;
     if (tableExists(db, 'steps')) {
-      const rawSteps = db
-        .prepare('SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx ASC')
-        .all() as Array<{ idx: number; metadata: unknown }>;
-      for (const row of rawSteps) {
-        const blob = toUint8Array(row.metadata);
-        if (!blob || blob.length === 0) continue;
-        try {
-          stepRows.push({ idx: Number(row.idx), metadata: parseStepMetadata(blob) });
-        } catch {
-          // Skip malformed step blob without losing the rest of the conversation
+      const stmt = db.prepare(
+        'SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL AND idx > ? ORDER BY idx ASC LIMIT ?',
+      );
+      let cursor = -1;
+      for (;;) {
+        const page = stmt.all(cursor, SQLITE_SYNC_PAGE) as Array<{ idx: number; metadata: unknown }>;
+        if (page.length === 0) break;
+        for (const row of page) {
+          const idx = Number(row.idx);
+          if (idx > maxStepIdx) maxStepIdx = idx;
+          cursor = idx;
+          const blob = toUint8Array(row.metadata);
+          if (!blob || blob.length === 0) continue;
+          const parsed = tryOptional(() => parseStepMetadata(blob));
+          if (parsed) stepRows.push({ idx, metadata: parsed });
         }
+        if (page.length < SQLITE_SYNC_PAGE) break;
+        await yieldEventLoop();
       }
     }
 
     const genRows: Array<{ idx: number; metadata: GeneratorMetadata }> = [];
-    const rawGens = db
-      .prepare('SELECT idx, data FROM gen_metadata ORDER BY idx ASC')
-      .all() as Array<{ idx: number; data: unknown }>;
-    for (const row of rawGens) {
-      const blob = toUint8Array(row.data);
-      if (!blob || blob.length === 0) continue;
-      try {
-        const parsed = parseGeneratorMetadata(blob);
-        if (parsed) genRows.push({ idx: Number(row.idx), metadata: parsed });
-      } catch {
-        // Skip malformed gen_metadata row
+    let maxGenIdx = -1;
+    {
+      const stmt = db.prepare(
+        'SELECT idx, data FROM gen_metadata WHERE idx > ? ORDER BY idx ASC LIMIT ?',
+      );
+      let cursor = -1;
+      for (;;) {
+        const page = stmt.all(cursor, SQLITE_SYNC_PAGE) as Array<{ idx: number; data: unknown }>;
+        if (page.length === 0) break;
+        for (const row of page) {
+          const idx = Number(row.idx);
+          if (idx > maxGenIdx) maxGenIdx = idx;
+          cursor = idx;
+          const blob = toUint8Array(row.data);
+          if (!blob || blob.length === 0) continue;
+          const parsed = tryOptional(() => parseGeneratorMetadata(blob));
+          if (parsed) genRows.push({ idx, metadata: parsed });
+        }
+        if (page.length < SQLITE_SYNC_PAGE) break;
+        await yieldEventLoop();
       }
     }
 
     // Build fallback model from last generation row that carries a model
+    // (only applied AFTER deduplication so it never overrides row-level models)
     let generationModel: string | undefined;
     for (let i = genRows.length - 1; i >= 0; i--) {
       const m = genRows[i]!.metadata;
@@ -610,17 +673,16 @@ export async function readAntigravityConversationDb(
       });
     };
 
-    // 1) Process steps first so identityTimestamps are populated
+    // 1) Process steps first (without session-level generationModel fallback)
     for (const { idx, metadata } of stepRows) {
-      const model =
+      const rowModel =
         normalizeAntigravityModel(metadata.model) ??
         (metadata.modelId !== undefined
           ? normalizeAntigravityModel(modelNameFromId(metadata.modelId))
-          : undefined) ??
-        generationModel;
+          : undefined);
       if (metadata.usage) {
         appendUsage(metadata.usage, {
-          model,
+          model: rowModel,
           modelId: metadata.modelId,
           provider: metadata.provider,
           timestampMs: metadata.timestampMs,
@@ -631,7 +693,7 @@ export async function readAntigravityConversationDb(
       }
       for (let r = 0; r < metadata.retryUsages.length; r++) {
         appendUsage(metadata.retryUsages[r]!, {
-          model,
+          model: rowModel,
           modelId: metadata.modelId,
           provider: metadata.provider,
           timestampMs: metadata.timestampMs,
@@ -693,6 +755,16 @@ export async function readAntigravityConversationDb(
     }
 
     const deduped = deduplicateEvents(rawEvents);
+    // Apply session-level fallback model only to events still unresolved after merge
+    if (generationModel) {
+      for (const event of deduped) {
+        if (modelResolutionRank(event.model) === 0) {
+          event.model = generationModel;
+          event.provider = resolveAntigravityProvider(generationModel);
+        }
+      }
+    }
+
     deduped.sort((a, b) => {
       if (a.timestampMs !== b.timestampMs) return a.timestampMs - b.timestampMs;
       return (a.genIdx ?? Number.MAX_SAFE_INTEGER) - (b.genIdx ?? Number.MAX_SAFE_INTEGER);
@@ -703,6 +775,8 @@ export async function readAntigravityConversationDb(
       dbPath,
       workspacePath,
       trajectoryTimestampMs,
+      maxGenIdx,
+      maxStepIdx,
       events: deduped,
     };
   } finally {
