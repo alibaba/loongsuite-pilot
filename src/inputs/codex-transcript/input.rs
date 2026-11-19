@@ -641,34 +641,13 @@ impl InputBody for CodexTranscriptBody {
                 .cmp(&right_depth)
                 .then_with(|| left.file_path.cmp(&right.file_path))
         });
-        let engine = self.engine();
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        // Only the identity check and durable ownership proof run ahead. Scan,
-        // linker mutations, emission and checkpoint acceptance retain source order.
-        let eligible = discovered
-            .iter()
-            .filter(|file| !skip.contains(&file.file_path));
-        let prepare_engine = &engine;
-        let prepare = async move {
-            for file in eligible {
-                let path = file.file_path.as_str();
-                let stat = prepare_engine.prepare_file(rt, path).await;
-                let failed = stat.is_err();
-                if sender.send((path, stat)).await.is_err() || failed {
-                    break;
-                }
+        let mut emitted = 0usize;
+        for file in &discovered {
+            if skip.contains(&file.file_path) {
+                continue;
             }
-        };
-        let engine = &engine;
-        let scan = async move {
-            let mut count = 0;
-            while let Some((path, stat)) = receiver.recv().await {
-                count += engine.process_prepared_file(rt, path, stat?).await?;
-            }
-            Ok::<_, anyhow::Error>(count)
-        };
-        let (_, scanned) = tokio::join!(prepare, scan);
-        let mut emitted = scanned?;
+            emitted += self.engine().process_file(rt, &file.file_path).await?;
+        }
         if plan.full {
             emitted += self.engine().retry_pending_agent_results(rt).await?;
         }
