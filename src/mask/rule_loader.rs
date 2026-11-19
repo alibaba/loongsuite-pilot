@@ -70,7 +70,7 @@ pub fn load_mask_plan(config: &MaskConfig) -> MaskPlan {
     let enabled = resolve_enabled_mask_types(config);
     let replacement_mode = config
         .replacement_mode
-        .unwrap_or(MaskReplacementMode::Placeholder);
+        .unwrap_or(MaskReplacementMode::Preview);
     if enabled.is_empty() {
         return MaskPlan {
             rules: Vec::new(),
@@ -607,7 +607,7 @@ mod tests {
         let pii: Vec<&str> = plan.pii_types.iter().map(|ty| ty.as_str()).collect();
         assert_eq!(pii.as_slice(), PII_MASK_TYPES);
         assert_eq!(plan.rules.len(), load_sensitive_rules().len());
-        assert_eq!(plan.replacement_mode, MaskReplacementMode::Placeholder);
+        assert_eq!(plan.replacement_mode, MaskReplacementMode::Preview);
     }
 
     #[test]

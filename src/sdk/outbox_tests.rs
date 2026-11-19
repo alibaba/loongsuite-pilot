@@ -457,3 +457,64 @@ fn codex_checkpoint_rebinds_old_sdk_pending_bytes_then_admits_a_legacy_handoff()
         vec![("new-source".to_owned(), newer.to_owned())]
     );
 }
+
+#[tokio::test]
+async fn legacy_queue_totals_stay_exact_after_batch_updates_and_failed_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let previous = Outbox::open(dir.path(), settings()).unwrap();
+    let old_payload = br#"{"event.id":"legacy"}"#;
+    {
+        let db = previous.db.lock().unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER event_accepted AFTER INSERT ON event BEGIN
+                UPDATE queue_size SET bytes=bytes+length(NEW.payload),events=events+1 WHERE singleton=1; END;
+             CREATE TRIGGER event_acked AFTER DELETE ON event BEGIN
+                UPDATE queue_size SET bytes=bytes-length(OLD.payload),events=events-1 WHERE singleton=1; END;",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO event(source,batch,payload,created) VALUES('source','old',?1,1)",
+            [old_payload.as_slice()],
+        )
+        .unwrap();
+    }
+    drop(previous);
+
+    let queue = Outbox::open(dir.path(), settings()).unwrap();
+    let store = StateStore::new(dir.path().join("state.json"));
+    store.set_offset("source", 42.0);
+    let newer = [
+        br#"{"event.id":"one"}"#.to_vec(),
+        br#"{"event.id":"two"}"#.to_vec(),
+    ];
+    queue
+        .accept_fixture("source", &store, &newer, &AtomicBool::new(false))
+        .await
+        .unwrap();
+    let expected = old_payload.len() + newer.iter().map(Vec::len).sum::<usize>();
+    let before = queue.snapshot();
+    assert_eq!(before["pending_events"], 3);
+    assert_eq!(before["pending_bytes"], expected);
+    assert_eq!(
+        queue.saved_checkpoints().unwrap()[0].1,
+        store.snapshot_text()
+    );
+
+    let (rows, _) = queue.read_batch(&settings()).unwrap();
+    assert_eq!(rows[0].1, old_payload);
+    assert_eq!(rows[1].1, newer[0]);
+    assert_eq!(rows[2].1, newer[1]);
+    let mut incomplete = rows.clone();
+    incomplete.push((i64::MAX, Vec::new()));
+    assert!(queue.ack(&incomplete).is_err());
+    assert_eq!(queue.read_batch(&settings()).unwrap().0, rows);
+    assert_eq!(queue.snapshot()["pending_bytes"], expected);
+
+    queue.ack(&rows).unwrap();
+    assert_eq!(queue.snapshot()["pending_events"], 0);
+    assert_eq!(queue.snapshot()["pending_bytes"], 0);
+    assert_eq!(
+        queue.saved_checkpoints().unwrap()[0].1,
+        store.snapshot_text()
+    );
+}

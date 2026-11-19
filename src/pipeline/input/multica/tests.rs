@@ -25,6 +25,7 @@ fn pipeline(input: Input, dir: &Path) -> MulticaPipeline {
         enabled: true,
         prefix: "synthetic-env",
         activation_path: None,
+        daemon_profile: None,
     })
     .unwrap()
 }

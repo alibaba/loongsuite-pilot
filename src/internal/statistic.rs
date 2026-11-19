@@ -28,6 +28,8 @@ const SELECTED_FIELDS: &[&str] = &[
     "version",
     "instance_id",
     "ip",
+    "mac",
+    "sn",
     "hostname",
     "os_detail",
     "metric_json",

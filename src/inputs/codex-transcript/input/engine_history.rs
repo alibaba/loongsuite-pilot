@@ -95,7 +95,7 @@ impl Fixture {
     }
     async fn process(&self, path: &str) -> usize {
         self.engine()
-            .process_file(self.rt(), path)
+            .process_file(self.rt(), path, None)
             .await
             .expect("production process")
     }

@@ -212,7 +212,17 @@ pub(crate) fn project_sdk_jsonl_entry(encoded: &[u8]) -> serde_json::Result<(Str
     Ok((path_agent, row))
 }
 
-type RawLogFields<'a> = indexmap::IndexMap<String, &'a serde_json::value::RawValue>;
+#[derive(PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+#[serde(transparent)]
+struct RawFieldName<'a>(#[serde(borrow)] std::borrow::Cow<'a, str>);
+
+impl std::borrow::Borrow<str> for RawFieldName<'_> {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+type RawLogFields<'a> = indexmap::IndexMap<RawFieldName<'a>, &'a serde_json::value::RawValue>;
 
 fn project_raw_log_fields(
     mut fields: RawLogFields<'_>,
@@ -220,6 +230,7 @@ fn project_raw_log_fields(
     options: &SerialiseLogEntryOptions,
 ) -> serde_json::Result<Vec<u8>> {
     fields.retain(|key, value| {
+        let key = key.0.as_ref();
         if value.get() == "null" || is_legacy_alias(key) {
             return false;
         }
@@ -487,6 +498,20 @@ pub(crate) fn build_standard_with_canonical_payloads(
     opts: &Map<String, Value>,
     canonical_payloads: Option<&Map<String, Value>>,
 ) -> AgentActivityEntry {
+    build_standard_with_payloads(opts, |canonical, legacy| {
+        // Hook conversion has already selected the canonical fields. Reading
+        // its original payloads must not allow noncanonical aliases back in.
+        match canonical_payloads {
+            Some(original) => first_present(original, &[canonical]).cloned(),
+            None => json_alias(opts, canonical, legacy),
+        }
+    })
+}
+
+fn build_standard_with_payloads(
+    opts: &Map<String, Value>,
+    mut payload: impl FnMut(&str, &str) -> Option<Value>,
+) -> AgentActivityEntry {
     // Preserve each payload's key position without cloning it before it is normalized.
     let mut entry: Map<String, Value> = opts
         .iter()
@@ -627,14 +652,8 @@ pub(crate) fn build_standard_with_canonical_payloads(
         "gen_ai.input.messages_hash",
         "input.messages_hash",
     );
-    let set_payload = |entry: &mut Map<String, Value>, canonical, legacy| {
-        // Hook conversion has already selected the canonical fields. Reading
-        // its original payloads must not allow noncanonical aliases back in.
-        let value = match canonical_payloads {
-            Some(original) => first_present(original, &[canonical]).cloned(),
-            None => json_alias(opts, canonical, legacy),
-        };
-        set_json_key(entry, canonical, value);
+    let mut set_payload = |entry: &mut Map<String, Value>, canonical, legacy| {
+        set_json_key(entry, canonical, payload(canonical, legacy));
     };
     set_payload(
         &mut entry,
@@ -882,7 +901,7 @@ fn json_finite(value: &Value) -> Option<f64> {
     number.is_finite().then_some(number)
 }
 
-fn json_i64(value: &Value) -> Option<i64> {
+pub(crate) fn json_i64(value: &Value) -> Option<i64> {
     let Value::Number(number) = value else {
         return None;
     };

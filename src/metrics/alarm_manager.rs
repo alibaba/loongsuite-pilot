@@ -69,6 +69,17 @@ impl AlarmManager {
         message: &str,
         context: Option<AlarmContext>,
     ) {
+        self.record_count(alarm_type, level, message, context, 1);
+    }
+
+    pub(crate) fn record_count(
+        &self,
+        alarm_type: &str,
+        level: &str,
+        message: &str,
+        context: Option<AlarmContext>,
+        count: u64,
+    ) {
         let key = format!(
             "{}_{}_{}",
             alarm_type,
@@ -83,7 +94,7 @@ impl AlarmManager {
         );
         let mut alarms = self.alarms.lock().expect("alarms");
         if let Some(existing) = alarms.get_mut(&key) {
-            existing.count += 1;
+            existing.count = existing.count.saturating_add(count);
             existing.message = message.to_string();
             return;
         }
@@ -93,7 +104,7 @@ impl AlarmManager {
                 alarm_type: alarm_type.to_string(),
                 level: level.to_string(),
                 message: message.to_string(),
-                count: 1,
+                count,
                 context,
             },
         );

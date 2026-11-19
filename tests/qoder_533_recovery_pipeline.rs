@@ -213,7 +213,7 @@ use loongsuite_pilot::inputs::qoder_trace::{
     read_sqlite_tokens, AttachedImageLookup, InterceptData, QoderTraceInput, QoderTraceOptions,
     QoderTraceReaders, SegmentTokenData, SqliteTokenResult,
 };
-use loongsuite_pilot::types::{AgentActivityEntry, MaskConfig, MaskMode};
+use loongsuite_pilot::types::{AgentActivityEntry, MaskConfig, MaskMode, MaskReplacementMode};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{
@@ -423,7 +423,7 @@ fn make_manager(
     manager.set_mask_config(MaskConfig {
         mode: MaskMode::All,
         types: vec![],
-        replacement_mode: None,
+        replacement_mode: Some(MaskReplacementMode::Placeholder),
     });
     manager.set_flusher(output);
     let input = ActualInput::new(f, store, resolver);

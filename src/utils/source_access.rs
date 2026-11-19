@@ -75,7 +75,7 @@ impl SourceScope {
         Self::check_components(path)
     }
 
-    fn check_scanner_lexically(&self, path: &Path) -> bool {
+    fn has_normalized_source_path(&self, path: &Path) -> bool {
         // A canonical root prefix and ordinary components are sufficient when
         // each component is checked for symlinks and the opened fd confirms
         // that exact path. Fall back for relative or non-normalized spellings.
@@ -184,10 +184,9 @@ pub(crate) fn open_scanner_file(path: &Path) -> io::Result<File> {
 }
 
 fn open_source(path: &Path, scope: Option<&SourceScope>, charge_open: bool) -> io::Result<File> {
-    let lexical_scanner_path =
-        !charge_open && scope.is_some_and(|scope| scope.check_scanner_lexically(path));
+    let normalized_path = scope.is_some_and(|scope| scope.has_normalized_source_path(path));
     if let Some(scope) = scope {
-        if lexical_scanner_path {
+        if normalized_path {
             SourceScope::check_components(path)?;
         } else {
             scope.check(path)?;
@@ -219,21 +218,44 @@ fn open_source(path: &Path, scope: Option<&SourceScope>, charge_open: bool) -> i
     }
     let file = options.open(path)?;
     if let Some(scope) = scope {
-        if !charge_open && !lexical_scanner_path {
+        if !charge_open && !normalized_path {
             scope.check(path)?;
         }
-        scope.check_file(&file, lexical_scanner_path.then_some(path))?;
+        scope.check_file(&file, normalized_path.then_some(path))?;
     }
     Ok(file)
 }
 pub async fn open_async(path: impl AsRef<Path>) -> io::Result<tokio::fs::File> {
+    open_with(path, Ok).await.map(tokio::fs::File::from_std)
+}
+
+pub(crate) async fn open_with<T: Send + 'static>(
+    path: impl AsRef<Path>,
+    operation: impl FnOnce(File) -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
     let path = path.as_ref().to_owned();
     let scope = current();
-    let file = tokio::task::spawn_blocking(move || open_scoped(&path, scope))
+    tokio::task::spawn_blocking(move || operation(open_scoped(&path, scope)?))
         .await
-        .map_err(io::Error::other)??;
-    Ok(tokio::fs::File::from_std(file))
+        .map_err(io::Error::other)?
 }
+// Inspect a poll's authorized paths with one executor dispatch. Individual
+// open failures stay attached to their paths and do not suppress other files.
+pub(crate) async fn inspect_batch<T: Send + 'static>(
+    paths: Vec<PathBuf>,
+    inspect: fn(&File) -> io::Result<T>,
+) -> io::Result<Vec<io::Result<T>>> {
+    let scope = current();
+    tokio::task::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .map(|path| open_source(&path, scope.as_deref(), true).and_then(|file| inspect(&file)))
+            .collect()
+    })
+    .await
+    .map_err(io::Error::other)
+}
+
 pub async fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
     let limit = read_limit(usize::MAX);
