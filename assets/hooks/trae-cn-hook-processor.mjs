@@ -1631,7 +1631,19 @@ const DISPATCH = {
 // Dispatcher runs only when invoked as CLI (argv[1] === this file). When
 // imported by unit tests for the vscdb reader / agent_type mapper, skip so
 // the test runner's argv doesn't trigger a hook subcommand.
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+function isDirectExec() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const here = fileURLToPath(import.meta.url);
+  if (entry === here) return true;
+  try {
+    return fs.realpathSync(entry) === fs.realpathSync(here);
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectExec()) {
   const sub = process.argv[2] || 'unknown';
   const fn = DISPATCH[sub];
   if (fn) {

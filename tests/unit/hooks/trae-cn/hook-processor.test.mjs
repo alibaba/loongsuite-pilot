@@ -5,6 +5,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as crypto from 'node:crypto';
+import { AgentDefLoader } from '../../../../src/deployment/agent-def-loader.ts';
+import { HookStrategy } from '../../../../src/deployment/hook-strategy.ts';
+import { HookManager } from '../../../../src/hooks/hook-manager.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/trae-cn-hook-processor.mjs');
@@ -90,6 +93,55 @@ function readOtlpDebugSpans() {
 }
 
 describe('trae-cn hook processor', () => {
+  test('deploys executable event commands and replaces registrations without subcommands', async () => {
+    const hooksDir = path.join(dataDir, 'hooks');
+    fs.cpSync(path.dirname(PROCESSOR), hooksDir, { recursive: true });
+    const loader = new AgentDefLoader({
+      builtinDir: path.dirname(AGENT_DEFINITION),
+      localDir: path.join(dataDir, 'agents.d.local'),
+      pilotDir: dataDir,
+      dataDir,
+    });
+    const def = (await loader.load()).find(agent => agent.id === 'trae-cn');
+    const settingsPath = path.join(dataDir, '.trae-cn', 'hooks.json');
+    def.hook.settingsPath = settingsPath;
+    const strategy = new HookStrategy(new HookManager(hooksDir, path.join(dataDir, 'logs')));
+    const legacy = { ...def, hook: { ...def.hook, eventSubcommand: undefined, replaceHookCommands: [] } };
+    expect((await strategy.deploy(legacy)).success).toBe(true);
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    expect((await strategy.deploy(def)).success).toBe(true);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+
+    const { hooks } = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    const events = {
+      SessionStart: ['session-start', { session_id: 'trae-cn-smoke-session' }],
+      UserPromptSubmit: ['user-prompt-submit', 'user-prompt-submit.json'],
+      PreToolUse: ['pre-tool-use', 'pre-tool-use.json'],
+      PostToolUse: ['post-tool-use', 'post-tool-use.json'],
+      Stop: ['stop', 'stop.json'],
+      Notification: ['notification', 'notification-idle.json'],
+    };
+    for (const [event, [subcommand, fixture]] of Object.entries(events)) {
+      const commands = hooks[event].flatMap(group => group.hooks.map(handler => handler.command));
+      expect(commands).toHaveLength(1);
+      expect(commands[0].endsWith(' ' + subcommand)).toBe(true);
+      const result = spawnSync(commands[0], {
+        shell: true,
+        input: typeof fixture === 'string' ? fs.readFileSync(path.join(FIXTURES, fixture)) : JSON.stringify(fixture),
+        env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir },
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      expect(result.status, result.stderr).toBe(0);
+    }
+    const records = readEmittedJsonl();
+    expect(records.filter(record => record['event.name'] !== 'other').map(record => record['event.name']))
+      .toEqual(['llm.request', 'tool.call', 'tool.result', 'llm.response']);
+    const toolRecords = records.filter(record => record['gen_ai.tool.call.id'] === 'toolu_01');
+    expect(toolRecords).toHaveLength(2);
+    expect(toolRecords[0].span_id).toBe(toolRecords[1].span_id);
+  });
+
   test('agents.d/trae-cn.json declares all 6 hook events', () => {
     const def = JSON.parse(fs.readFileSync(AGENT_DEFINITION, 'utf8'));
     expect(def.id).toBe('trae-cn');
