@@ -824,10 +824,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                         lines.retain(|line| {
                             line.start_offset >= start_offset && line.end_offset <= next_scan_offset
                         });
-                        ScannedTurn {
-                            version,
-                            lines,
-                        }
+                        ScannedTurn { version, lines }
                     });
                 let recovered = self
                     .recover_turn_segment(
