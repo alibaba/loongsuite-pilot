@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { MetricsWriter } from '../../../src/metrics/metrics-writer.js';
+import { LOCAL_MAC } from '../../../src/utils/network-utils.js';
 import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
 import type { TraceRuntimeSnapshot } from '../../../src/metrics/trace-runtime-types.js';
@@ -180,11 +181,42 @@ describe('MetricsWriter', () => {
     expect(call![1]).toHaveProperty('version', '2.0.0');
     expect(call![1]).not.toHaveProperty('__topic__');
 
+    const running = mockSendRunningStatus.mock.calls[0]?.[0] as Record<string, string>;
+    expect(running.version).toBe('2.0.0');
+    expect(running).not.toHaveProperty('sn');
+
     // Old L2 topics must no longer be emitted (merged into pilot_pipeline)
     const legacy = mockSendStatus.mock.calls.filter((c: unknown[]) =>
       ['pilot_input_detail', 'pilot_flusher_detail', 'pilot_alarm_metric'].includes(c[0] as string),
     );
     expect(legacy).toHaveLength(0);
+  });
+
+  it('forwards host mac and serial on both status channels', async () => {
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      hostSn: 'C02SERIAL',
+      getSnapshot: buildSnapshot,
+    });
+
+    vi.useRealTimers();
+    await writer.start();
+
+    const status = mockSendStatus.mock.calls.find(
+      (c: unknown[]) => c[0] === 'pilot_status',
+    )![1] as Record<string, string>;
+    const running = mockSendRunningStatus.mock.calls[0][0] as Record<string, string>;
+    expect(status.sn).toBe('C02SERIAL');
+    expect(running.sn).toBe('C02SERIAL');
+    if (LOCAL_MAC) {
+      expect(status.mac).toBe(LOCAL_MAC);
+      expect(running.mac).toBe(LOCAL_MAC);
+    } else {
+      expect(status).not.toHaveProperty('mac');
+      expect(running).not.toHaveProperty('mac');
+    }
   });
 
   it('reports scalar snapshots in the existing L1 cycle using its exact process identity', async () => {

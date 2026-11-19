@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import { MetricsCollector } from '../../../src/metrics/metrics-collector.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
 import type { ProcessLiveness } from '../../../src/utils/pid-utils.js';
+import { LOCAL_MAC } from '../../../src/utils/network-utils.js';
 
 const fsMockState: {
   blockAccessSync: boolean;
@@ -176,6 +177,37 @@ describe('MetricsCollector', () => {
 
       // __time__ is unix timestamp
       expect(result.__time__).toBeGreaterThan(1700000000);
+    });
+
+    it('reports the same MAC and serial the SLS tags use', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        hostSn: '  C02SERIAL  ',
+      });
+      const result = col.collectL1(buildSnapshot());
+      if (LOCAL_MAC) expect(result.mac).toBe(LOCAL_MAC);
+      else expect(result).not.toHaveProperty('mac');
+      expect(result.sn).toBe('C02SERIAL');
+    });
+
+    it('omits mac and sn when host identity tags are disabled', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        hostSn: 'C02SERIAL',
+        hostIdentityTags: false,
+      });
+      const result = col.collectL1(buildSnapshot());
+      expect(result).not.toHaveProperty('mac');
+      expect(result).not.toHaveProperty('sn');
+    });
+
+    it('omits an empty serial', () => {
+      const result = collector.collectL1(buildSnapshot());
+      expect(result).not.toHaveProperty('sn');
     });
 
     it('counts installed agents, and an agent stays installed while idle', () => {
