@@ -853,7 +853,9 @@ fn context_attributes(
         for (key, value) in entry_to_object(record) {
             if key == "gen_ai.provider.name" {
                 let provider = result.entry(key).or_insert_with(|| value.clone());
-                if provider.as_str() == Some("unknown") {
+                if matches!(provider.as_str(), Some("" | "unknown"))
+                    && value.as_str().is_some_and(|value| !value.is_empty())
+                {
                     *provider = value;
                 }
             } else if key.starts_with("gen_ai.agent.")
