@@ -431,7 +431,7 @@ export class Orchestrator extends EventEmitter {
       logger.info('pipeline subsystem disabled, skipping');
     }
 
-    // 13. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
+    // 13. Prepare metrics writer; its first L1 follows the interceptor startup attempt.
     const slsFlusher = this.getSlsFlusher();
     if (slsFlusher) slsFlusher.setAlarmManager(this.alarmManager);
     this.metricsWriter = new MetricsWriter({
@@ -453,8 +453,6 @@ export class Orchestrator extends EventEmitter {
       // there is the expected state, not a fault.
       autoUpdateEnabled: this.config.autoUpdate?.enabled ?? false,
     });
-    await this.metricsWriter.start();
-
     // 14. Always publish runtime health for service managers. The status bar UI
     // may be disabled, but Windows Task Scheduler still needs runtime.json to
     // distinguish a healthy collector from a task whose child process died.
@@ -509,6 +507,9 @@ export class Orchestrator extends EventEmitter {
     } else {
       clearInterceptorRuntime(this.dataDir);
     }
+
+    // Report the interceptor startup outcome once, including disabled or failed starts.
+    await this.metricsWriter.start();
 
     // The native macOS menu bar app has its own switch.
     if (this.config.statusBar.enabled) {

@@ -93,6 +93,7 @@ Worker 重启不重置冷却。Worker 转发仍受单批 ACK 背压限制，并�
 
 `pilot_status` 的顶层 `interceptor` JSON 对象随现有 L1 status 在启动、每 10 分钟和退出时上报；
 本地同一份数据位于 `logs/metric_alarm/pilot-metrics-YYYY-MM-DD.jsonl`。开源构建沿用本地落盘。
+启动首报在首次拦截启动尝试结束后采样，直接反映成功、失败或关闭状态，无需等待十分钟周期。
 
 | 字段 | 含义 |
 |------|------|
