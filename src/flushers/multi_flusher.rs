@@ -46,9 +46,14 @@ impl BaseFlusher for MultiFlusher {
         encoded: Vec<Vec<u8>>,
         quota_alarm: Arc<QuotaAlarm>,
     ) -> Result<(), FlushError> {
-        if !entries.iter().any(|entry| {
-            super::codex_turn_journal::JOURNALED_AGENTS.contains(&entry.agent_type.as_str())
-        }) {
+        let require_acceptance = entries
+            .iter()
+            .any(AgentActivityEntry::is_qwen_collaboration);
+        if !require_acceptance
+            && !entries.iter().any(|entry| {
+                super::codex_turn_journal::JOURNALED_AGENTS.contains(&entry.agent_type.as_str())
+            })
+        {
             return self.send_prepared_batch(entries, encoded).await;
         }
         // Each child owns its retry. Successful siblings, including nested
@@ -78,7 +83,7 @@ impl BaseFlusher for MultiFlusher {
                 )
             });
         }
-        finish_batch_tasks(tasks).await
+        finish_batch_tasks(tasks, require_acceptance).await
     }
 
     async fn send_prepared_batch(
@@ -120,7 +125,7 @@ impl BaseFlusher for MultiFlusher {
             let name = flusher.name().to_owned();
             (name, flusher.send_prepared_batch(entries, encoded).await)
         });
-        finish_batch_tasks(tasks).await
+        finish_batch_tasks(tasks, false).await
     }
 
     async fn send(
@@ -191,7 +196,7 @@ impl BaseFlusher for MultiFlusher {
                 (name, flusher.send_batch(entries, logical_bytes).await)
             });
         }
-        finish_batch_tasks(set).await
+        finish_batch_tasks(set, false).await
     }
 
     async fn flush(&self) -> Result<(), FlushError> {
@@ -236,6 +241,7 @@ impl BaseFlusher for MultiFlusher {
 
 async fn finish_batch_tasks(
     mut tasks: tokio::task::JoinSet<(String, Result<(), FlushError>)>,
+    require_acceptance: bool,
 ) -> Result<(), FlushError> {
     let logger = create_logger("MultiFlusher");
     let mut durable_failure = None;
@@ -248,8 +254,19 @@ async fn finish_batch_tasks(
                     ("error", Value::String(error.to_string())),
                 ])),
             );
-            if error.preserves_checkpoint() && durable_failure.is_none() {
+            if error.preserves_checkpoint() {
+                if durable_failure
+                    .as_ref()
+                    .is_none_or(|saved: &FlushError| !saved.preserves_checkpoint())
+                {
+                    durable_failure = Some(error);
+                }
+            } else if require_acceptance && durable_failure.is_none() {
                 durable_failure = Some(error);
+            }
+        } else if let Err(error) = joined {
+            if require_acceptance && durable_failure.is_none() {
+                durable_failure = Some(FlushError::new(error.to_string()));
             }
         }
     }

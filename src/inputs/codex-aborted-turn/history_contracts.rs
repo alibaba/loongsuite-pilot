@@ -33,26 +33,36 @@ impl Fixture {
         Self::with_root(root, grace).await
     }
     async fn with_root(root: Arc<tempfile::TempDir>, grace: f64) -> Self {
+        Self::with_rollout_owner(root, grace, false).await
+    }
+    async fn with_rollout_owner(
+        root: Arc<tempfile::TempDir>,
+        grace: f64,
+        rollout_owns_interrupted_turns: bool,
+    ) -> Self {
         let store = Arc::new(StateStore::new(root.path().join("state.json")));
         store.load().await;
-        let input = CodexAbortedTurnInput::new(CodexAbortedTurnInputOptions {
-            state_store: Arc::clone(&store),
-            session_dir: Some(root.path().join("sessions").to_string_lossy().into_owned()),
-            hook_state_dir: Some(
-                root.path()
-                    .join("hook-state")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            diagnostic_dir: Some(
-                root.path()
-                    .join("diagnostics")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            hook_gap_grace_ms: Some(grace),
-            poll_interval_ms: Some(10),
-        });
+        let input = CodexAbortedTurnInput::with_rollout_owner(
+            CodexAbortedTurnInputOptions {
+                state_store: Arc::clone(&store),
+                session_dir: Some(root.path().join("sessions").to_string_lossy().into_owned()),
+                hook_state_dir: Some(
+                    root.path()
+                        .join("hook-state")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                diagnostic_dir: Some(
+                    root.path()
+                        .join("diagnostics")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                hook_gap_grace_ms: Some(grace),
+                poll_interval_ms: Some(10),
+            },
+            rollout_owns_interrupted_turns,
+        );
         let entries = Arc::new(Mutex::new(Vec::new()));
         let slot = Arc::clone(&entries);
         input.on_entries(move |batch| slot.lock().expect("capture").extend_from_slice(batch));
@@ -805,4 +815,18 @@ async fn l118_late_abort_recovers_preceding_meta_without_allocating_the_full_his
     assert_eq!(response["gen_ai.session.id"], "session-large");
     assert_eq!(response["gen_ai.provider.name"], "openai");
     assert_eq!(response["gen_ai.response.model"], "gpt-5.4-mini");
+}
+
+#[tokio::test]
+async fn rollout_owner_keeps_supplemental_checkpoint_without_duplicate_cancellation() {
+    let root = Arc::new(tempfile::tempdir().unwrap());
+    let f = Fixture::with_rollout_owner(root, 60_000.0, true).await;
+    f.start().await;
+    let path = f.write("rollout-owned-by-primary.jsonl", FIXTURE).await;
+    f.offset(&path, FIXTURE.len()).await;
+    f.stop().await;
+    assert!(f.records().is_empty());
+    assert!(f
+        .diagnostics("codex-aborted-turn-recovery-failed-")
+        .is_empty());
 }

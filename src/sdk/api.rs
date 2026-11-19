@@ -39,6 +39,7 @@ struct Status {
     phase: Phase,
     version: String,
     agents: Value,
+    codex_hook_deployment: Value,
     error: Option<String>,
 }
 struct Notification {
@@ -96,8 +97,27 @@ impl Instance {
     fn snapshot(&self) -> Value {
         let state = self.status.lock().unwrap().clone();
         let queue = self.queue.lock().unwrap().clone();
-        json!({"schema":2,"instance_id":self.key,"state":state.phase.name(),"desired_version":state.version,"effective_version":state.version,"agents":state.agents,"reason":state.error,
-            "delivery":queue.map(|q|q.snapshot()),"metrics_scope":"host_process","sdk_callbacks_require_dispatch":true})
+        let interceptor = queue.as_ref().map(|queue| {
+            let Some(builtin) = *queue.local_hook_config.lock().unwrap() else {
+                return crate::interceptor::status::unavailable(false);
+            };
+            let stats = queue.local_hook_stats.lock().unwrap();
+            let mut status = crate::interceptor::status::unavailable(true);
+            status["running"] = json!(state.phase == Phase::Running);
+            status["collection_status"] = json!(if state.phase == Phase::Failed {
+                "unavailable"
+            } else {
+                "ok"
+            });
+            status["sampled_at"] = json!(chrono::Utc::now().to_rfc3339());
+            status["worker_started_at"] = json!(queue.start_time);
+            status["rules"] = json!({"builtin":builtin});
+            status["activity"] = stats.snapshot();
+            status["activity_totals"] = json!(&*stats);
+            status
+        });
+        json!({"schema":2,"instance_id":self.key,"state":state.phase.name(),"desired_version":state.version,"effective_version":state.version,"agents":state.agents,"codex_hook_deployment":state.codex_hook_deployment,"reason":state.error,
+            "delivery":queue.map(|q|q.snapshot()),"interceptor":interceptor,"metrics_scope":"host_process","sdk_callbacks_require_dispatch":true})
     }
     fn notify(&self, start: bool, result: i32) {
         if start && self.start_enqueued.swap(true, Ordering::SeqCst) {
@@ -162,6 +182,10 @@ unsafe extern "C" fn start(
             init.resource_dir =
                 super::policy::canonical_candidate(&init.resource_dir).map_err(|_| BAD_ARGUMENT)?;
 
+            if let Some(home) = &mut init.codex_home {
+                *home = super::policy::canonical_candidate(home).map_err(|_| BAD_ARGUMENT)?;
+            }
+
             let policy =
                 Policy::parse(unsafe { json_input(policy)? }, &init).map_err(|_| BAD_ARGUMENT)?;
             let callbacks = Callbacks {
@@ -183,6 +207,7 @@ unsafe extern "C" fn start(
                     phase: Phase::Starting,
                     version: policy.version.clone(),
                     agents: json!([]),
+                    codex_hook_deployment: json!({"state":"disabled"}),
                     error: None,
                 }),
                 callbacks,
@@ -460,6 +485,7 @@ impl Session {
             &instance.init.data_dir.join("outbox"),
             policy.delivery.clone(),
         )?;
+        super::hooks::update_local_status(&queue, &policy.hooks);
         queue.identity.write().unwrap()["user_id"] = json!(instance.init.user_id);
         *instance.queue.lock().unwrap() = Some(queue.clone());
         let mut monitoring = super::monitoring::Monitoring::new(&instance.init, &queue)?;
@@ -545,6 +571,7 @@ impl Session {
             instance.activated.clone(),
         )?);
         session.collector.apply(policy)?;
+        update_codex_deployment(instance, policy)?;
         Ok(session)
     }
     fn shutdown(&mut self) {
@@ -575,6 +602,19 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+fn update_codex_deployment(instance: &Instance, policy: &Policy) -> anyhow::Result<()> {
+    if let Some(home) = &instance.init.codex_home {
+        let deployment = crate::deployment::reconcile_embedded_codex_hooks(
+            home,
+            &instance.init.data_dir,
+            &instance.init.resource_dir,
+            policy.codex_hook_channel,
+        )?;
+        instance.status.lock().unwrap().codex_hook_deployment = deployment;
+    }
+    Ok(())
 }
 
 fn worker(instance: Arc<Instance>, policy: Policy, receiver: mpsc::Receiver<Command>) {
@@ -632,6 +672,7 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
         instance.status.lock().unwrap().phase = Phase::Running;
     }
     instance.notify(true, if success { OK } else { FAILURE });
+    let mut next_codex_deployment_check = Instant::now();
     loop {
         if let Some(session) = &session {
             instance.status.lock().unwrap().agents = session.collector.snapshot();
@@ -642,10 +683,15 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
                 let result = if instance.stop_requested.load(Ordering::SeqCst) {
                     Err("SDK is stopping".into())
                 } else if let Some(session) = session.as_mut() {
-                    match session.collector.apply(&next) {
+                    match session
+                        .collector
+                        .apply(&next)
+                        .and_then(|()| update_codex_deployment(&instance, &next))
+                    {
                         Ok(()) => {
                             if let Some(hooks) = &session.hooks {
                                 *hooks.settings.write().unwrap() = next.hooks.clone();
+                                super::hooks::update_local_status(&session.queue, &next.hooks);
                             }
                             policy = *next;
                             let mut status = instance.status.lock().unwrap();
@@ -667,6 +713,7 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
             Ok(Command::Stop(drain)) => {
                 if let Some(mut session) = session.take() {
                     session.collector.stop();
+                    instance.status.lock().unwrap().agents = session.collector.snapshot();
                     let deadline = Instant::now() + Duration::from_millis(drain as u64);
                     while session.queue.pending_bytes().unwrap_or(0) > 0
                         && Instant::now() < deadline
@@ -679,7 +726,22 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
                 instance.notify(false, OK);
                 return;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(session) = &session {
+                    let check = policy.codex_hook_channel.is_some()
+                        && Instant::now() >= next_codex_deployment_check
+                        && instance.status.lock().unwrap().codex_hook_deployment["state"]
+                            != "deployed";
+                    if check {
+                        next_codex_deployment_check = Instant::now() + Duration::from_secs(1);
+                        if let Err(error) = update_codex_deployment(&instance, &policy) {
+                            session
+                                .queue
+                                .alarm("SDK_CODEX_HOOK_DEPLOY", &error.to_string());
+                        }
+                    }
+                }
+            }
             Err(_) => return,
         }
     }

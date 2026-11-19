@@ -98,6 +98,18 @@ fn package(f: &Fixture) {
             include_str!("../../assets/plugins/shared/raw-source-gate.mjs"),
         ),
         (
+            "assets/plugins/shared/private-log-dir.cjs",
+            include_str!("../../assets/plugins/shared/private-log-dir.cjs"),
+        ),
+        (
+            "assets/plugins/openclaw/cron-context.mjs",
+            include_str!("../../assets/plugins/openclaw/cron-context.mjs"),
+        ),
+        (
+            "assets/plugins/openclaw/cron-recovery.mjs",
+            include_str!("../../assets/plugins/openclaw/cron-recovery.mjs"),
+        ),
+        (
             "assets/plugins/shared/resource-context.mjs",
             include_str!("../../assets/plugins/shared/resource-context.mjs"),
         ),

@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use regex::Regex;
 use serde_json::{json, Map, Value};
@@ -16,7 +16,8 @@ use crate::normalization::{build_agent_activity_entry, is_reserved_key};
 use crate::types::{AgentActivityEntry, AgentEventName};
 
 use super::super::builder::{
-    build_codex_transcript_segment, next_input_messages_for_step, CodexTranscriptBuildOptions,
+    build_codex_transcript_segment, build_codex_transcript_steps, next_input_messages_for_step,
+    CodexTranscriptBuildOptions,
 };
 use super::super::checkpoint::{
     checkpoint_to_value, create_active_turn, empty_checkpoint, new_pending_terminal,
@@ -67,6 +68,8 @@ struct TerminalFailureContext {
 }
 
 const MAX_SCAN_BYTES_PER_FILE_CYCLE: i64 = 16 * 1024 * 1024;
+const MAX_RETAINED_RECOVERY_BYTES: i64 = 512 * 1024;
+const MAX_RETAINED_RECOVERY_LINES: usize = 1_024;
 const MAX_CACHED_INCOMPLETE_TAILS: usize = 2048;
 const MAX_CACHED_TRANSCRIPT_META_BYTES: usize = 64 * 1024 * 1024;
 const CACHED_TRANSCRIPT_META_ABSENCE_TTL_MS: i64 = 48 * 60 * 60 * 1_000;
@@ -111,6 +114,12 @@ struct RecoveryBoundary {
     terminal: bool,
     inferred: Option<CodexTerminalStatus>,
     next_turn_started_at_ms: Option<f64>,
+    scanned_turn: Option<ScannedTurn>,
+}
+
+struct ScannedTurn {
+    version: scan::FileVersion,
+    lines: Vec<JsonLine>,
 }
 
 #[derive(Default)]
@@ -269,8 +278,8 @@ impl<'a> CodexTranscriptEngine<'a> {
         rt: &InputRuntime,
         key: &str,
     ) -> Option<CodexTranscriptCheckpoint> {
-        let extra = rt.state_store.get(key).extra()?;
-        parse_checkpoint(extra.get("codexTranscript")?)
+        let extra = rt.state_store.get_extra_field(key, "codexTranscript")?;
+        parse_checkpoint(&extra)
     }
 
     pub fn save_checkpoint(
@@ -364,6 +373,8 @@ impl<'a> CodexTranscriptEngine<'a> {
         });
         if let Some((dir_mtimes, files)) = cached {
             if rollout_dirs_unchanged(&dir_mtimes).await {
+                self.body
+                    .with_shared(|shared| shared.default_scan_complete = true);
                 return files;
             }
         }
@@ -371,6 +382,11 @@ impl<'a> CodexTranscriptEngine<'a> {
         let mut dir_mtimes = Vec::new();
         let complete =
             collect_rollout_files(&self.body.session_dir, &mut files, &mut dir_mtimes).await;
+        let root_missing = !complete
+            && tokio::fs::symlink_metadata(&self.body.session_dir)
+                .await
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        let complete = complete || root_missing;
         if !complete {
             crate::utils::create_logger("CodexTranscriptInput").warn(
                 "Codex rollout directory scan failed; retrying next poll",
@@ -378,6 +394,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             );
         }
         self.body.with_shared(|shared| {
+            shared.default_scan_complete = complete;
             shared.cached_default = if !complete || dir_mtimes.is_empty() {
                 None
             } else {
@@ -424,51 +441,6 @@ impl<'a> CodexTranscriptEngine<'a> {
         skip
     }
 
-    #[cfg(unix)]
-    pub async fn unchanged_idle_paths(
-        &self,
-        rt: &InputRuntime,
-        files: &[DiscoveredSessionFile],
-        skip: &HashSet<String>,
-        now: i64,
-    ) -> anyhow::Result<Vec<String>> {
-        use std::os::unix::fs::MetadataExt;
-        let candidates: Vec<_> = self.body.with_shared(|shared| {
-            files
-                .iter()
-                .filter_map(|file| {
-                    let path = &file.file_path;
-                    if skip.contains(path) || !shared.meta_by_path.contains_key(path) {
-                        return None;
-                    }
-                    shared
-                        .idle
-                        .get(path)
-                        .filter(|stat| {
-                            now - stat.mtime_ms < DYNAMIC_SESSION_FILE_MAX_IDLE_MS
-                                && rt.state_store.get_offset(&self.state_key(path))
-                                    == stat.size as f64
-                        })
-                        .map(|stat| (path.clone(), *stat))
-                })
-                .collect()
-        });
-        Ok(tokio::task::spawn_blocking(move || {
-            candidates
-                .into_iter()
-                .filter_map(|(path, stat)| {
-                    let meta = std::fs::symlink_metadata(&path).ok()?;
-                    (meta.is_file()
-                        && meta.ino() == stat.ino
-                        && i64::try_from(meta.len()).ok() == Some(stat.size)
-                        && file_mtime_ms(&meta) == stat.mtime_ms)
-                        .then_some(path)
-                })
-                .collect()
-        })
-        .await?)
-    }
-
     fn note_rollout_idle(&self, rt: &InputRuntime, file_path: &str, stat: Option<RolloutStat>) {
         let Some(stat) = stat else {
             self.body.with_shared(|shared| {
@@ -488,44 +460,54 @@ impl<'a> CodexTranscriptEngine<'a> {
         });
     }
 
-    #[cfg(test)]
-    pub async fn process_file(&self, rt: &InputRuntime, file_path: &str) -> anyhow::Result<usize> {
-        let stat = self.prepare_file(rt, file_path).await?;
-        self.process_prepared_file(rt, file_path, stat).await
-    }
-
-    pub(super) async fn prepare_file(
+    pub async fn process_file(
         &self,
         rt: &InputRuntime,
         file_path: &str,
-    ) -> anyhow::Result<Option<RolloutStat>> {
-        let Ok((ino, size, mtime_ms)) = file_meta_snapshot(file_path).await else {
-            return Ok(None);
-        };
-        let key = self.state_key(file_path);
-        if rt.state_store.get(&key).last_offset().is_none()
-            && self.read_checkpoint(rt, &key).is_none()
-        {
-            super::source_ownership::remember(&self.body.wakeup_dir, file_path).await?;
-        }
-        Ok(Some(RolloutStat {
-            ino,
-            size,
-            mtime_ms,
-        }))
-    }
-
-    pub(super) async fn process_prepared_file(
-        &self,
-        rt: &InputRuntime,
-        file_path: &str,
-        stat: Option<RolloutStat>,
+        observed: Option<scan::FileVersion>,
     ) -> anyhow::Result<usize> {
         #[cfg(test)]
         self.body
             .with_shared(|s| s.main541_visits.push(file_path.to_owned()));
-        let result = match stat {
-            Some(stat) => self.scan_rollout_file(rt, file_path, stat).await,
+        let key = self.state_key(file_path);
+        let checkpoint = self.read_checkpoint(rt, &key);
+        if let Some(version) = observed {
+            let caught_up = checkpoint.as_ref().is_some_and(|checkpoint| {
+                rollout_caught_up(checkpoint, version.inode, version.size)
+            });
+            if caught_up {
+                let mtime_ms = version.mtime_ms();
+                self.body.with_shared(|shared| {
+                    shared.idle.insert(
+                        file_path.to_owned(),
+                        RolloutStat {
+                            ino: version.inode,
+                            size: version.size,
+                            mtime_ms,
+                        },
+                    );
+                });
+                return Ok(0);
+            }
+        }
+        // Pending work takes a fresh, authorized snapshot rather than
+        // relying on the discovery observation as files may have grown.
+        let version = scan::file_version_snapshot(file_path).await.ok();
+        let stat = version.map(|version| RolloutStat {
+            ino: version.inode,
+            size: version.size,
+            mtime_ms: version.mtime_ms(),
+        });
+        let result = match stat.zip(version) {
+            Some((stat, version)) => {
+                if checkpoint.is_none() && rt.state_store.get(&key).last_offset().is_none() {
+                    // Persist body-free ownership before the first native output.
+                    // Failure propagates; the canonical ACK checkpoint stays untouched.
+                    super::source_ownership::remember(&self.body.wakeup_dir, file_path).await?;
+                }
+                self.scan_rollout_file(rt, file_path, stat, version, &key, checkpoint)
+                    .await
+            }
             None => Ok(0),
         };
         self.note_rollout_idle(rt, file_path, stat);
@@ -537,19 +519,16 @@ impl<'a> CodexTranscriptEngine<'a> {
         rt: &InputRuntime,
         file_path: &str,
         stat: RolloutStat,
+        version: scan::FileVersion,
+        key: &str,
+        checkpoint: Option<CodexTranscriptCheckpoint>,
     ) -> anyhow::Result<usize> {
-        let key = self.state_key(file_path);
         let indexed = self
             .body
             .with_shared(|shared| shared.meta_by_path.get(file_path).cloned());
-        let has_indexed_copied = has_copied_history_prefix(indexed.as_ref());
-        let mut checkpoint = self.read_checkpoint(rt, &key);
-        let mut changed = false;
-        if checkpoint.is_none() {
-            checkpoint = Some(empty_checkpoint(stat.ino));
-            changed = true;
-        }
-        let mut checkpoint = checkpoint.expect("checkpoint");
+        let has_indexed_copied = has_copied_history_prefix(indexed.as_deref());
+        let mut changed = checkpoint.is_none();
+        let mut checkpoint = checkpoint.unwrap_or_else(|| empty_checkpoint(stat.ino));
         if checkpoint.inode != stat.ino {
             let bootstrap = checkpoint.fork_bootstrap.clone();
             if has_indexed_copied
@@ -590,9 +569,9 @@ impl<'a> CodexTranscriptEngine<'a> {
                     meta.as_object(),
                 );
                 if has_indexed_copied {
-                    self.park_fork_baseline(rt, file_path, &key).await?;
+                    self.park_fork_baseline(rt, file_path, key).await?;
                 } else {
-                    self.baseline_file(rt, file_path, &key).await?;
+                    self.baseline_file(rt, file_path, key).await?;
                 }
                 return Ok(0);
             }
@@ -600,10 +579,6 @@ impl<'a> CodexTranscriptEngine<'a> {
         let backlog = (stat.size - checkpoint.scan_offset).max(0) as u64;
         scan::observe_backlog(rt, backlog);
         if rollout_caught_up(&checkpoint, stat.ino, stat.size) {
-            return Ok(0);
-        }
-        let version = scan::file_version_snapshot(file_path).await?;
-        if version.inode != stat.ino || version.size != stat.size {
             return Ok(0);
         }
         if checkpoint
@@ -651,7 +626,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 self.register_persisted_subagent_spawns(&checkpoint, &thread_id);
             }
         }
-        if has_copied_history_prefix(owner_meta.as_ref())
+        if has_copied_history_prefix(owner_meta.as_deref())
             && checkpoint.active_turn.is_none()
             && checkpoint.pending_terminal.is_none()
         {
@@ -662,7 +637,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 changed |= prepared.changed;
                 if !prepared.ready {
                     if changed {
-                        self.save_checkpoint(rt, &key, &checkpoint);
+                        self.save_checkpoint(rt, key, &checkpoint);
                     } else {
                         self.save_delegation_state(rt);
                     }
@@ -711,7 +686,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             processed_terminals += released.1;
             changed = true;
             if checkpoint.pending_subagent.is_some() {
-                self.save_checkpoint(rt, &key, &checkpoint);
+                self.save_checkpoint(rt, key, &checkpoint);
                 return Ok(emitted_count);
             }
         }
@@ -746,7 +721,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         processed_terminals += pending.processed_terminal_count;
         if pending.blocked {
             if changed {
-                self.save_checkpoint(rt, &key, &checkpoint);
+                self.save_checkpoint(rt, key, &checkpoint);
             }
             return Ok(emitted_count);
         }
@@ -772,27 +747,32 @@ impl<'a> CodexTranscriptEngine<'a> {
                         - scanned_bytes),
             );
             let mut scanned_boundary = ScannedBoundary::default();
-            let mut scan = scan_json_lines(file_path, scan_start, scan_end, Some(rt), |line| {
-                process_scanned_line(
+            let mut retained_lines = Some(Vec::new());
+            let mut on_line = |line: JsonLine| {
+                let advance = process_scanned_line(
                     &mut checkpoint,
                     file_path,
                     stat.size,
                     &line,
                     &mut scanned_boundary,
                     self,
-                )
-            })
-            .await?;
+                );
+                if let Some(lines) = &mut retained_lines {
+                    if line.end_offset - scan_start <= MAX_RETAINED_RECOVERY_BYTES
+                        && lines.len() < MAX_RETAINED_RECOVERY_LINES
+                    {
+                        lines.push(line);
+                    } else {
+                        retained_lines = None;
+                    }
+                }
+                advance
+            };
+            let mut scan =
+                scan_json_lines(file_path, scan_start, scan_end, Some(rt), &mut on_line).await?;
             if scan.next_offset == scan_start && scan_end < stat.size {
                 scan = scan_json_lines(file_path, scan_start, stat.size, Some(rt), |line| {
-                    process_scanned_line(
-                        &mut checkpoint,
-                        file_path,
-                        stat.size,
-                        &line,
-                        &mut scanned_boundary,
-                        self,
-                    );
+                    on_line(line);
                     false
                 })
                 .await?;
@@ -831,7 +811,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             );
             scanned_bytes += next_scan_offset - scan_start;
             let mut blocked = false;
-            if checkpoint.active_turn.as_ref().is_some_and(|active| {
+            if let Some(active) = checkpoint.active_turn.as_ref().filter(|active| {
                 terminal_turn_id.is_some() || next_scan_offset > active.start_offset
             }) {
                 if is_direct_subagent
@@ -851,6 +831,27 @@ impl<'a> CodexTranscriptEngine<'a> {
                     checkpoint.scan_offset = next_scan_offset;
                     continue;
                 }
+                let start_offset = active.start_offset;
+                // A rollback/recovery that reaches before this scan must read its
+                // persisted range. The next turn's start can end this scan, but
+                // belongs to the following turn and must stay out of these rows.
+                let opened_version = scan.opened_version.filter(|opened| {
+                    // An append between discovery and the guarded read leaves
+                    // the scanned interval readable. Keep the descriptor's
+                    // version and verify it again before consuming the rows.
+                    opened.inode == version.inode
+                        && opened.device == version.device
+                        && (opened == &version || opened.size > version.size)
+                });
+                let scanned_turn = retained_lines
+                    .zip(opened_version)
+                    .filter(|_| start_offset >= scan_start && !scan.quarantined)
+                    .map(|(mut lines, version)| {
+                        lines.retain(|line| {
+                            line.start_offset >= start_offset && line.end_offset <= next_scan_offset
+                        });
+                        ScannedTurn { version, lines }
+                    });
                 let recovered = self
                     .recover_turn_segment(
                         rt,
@@ -862,6 +863,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                             inferred: next_turn_started_at_ms
                                 .map(|_| CodexTerminalStatus::Interrupted),
                             next_turn_started_at_ms,
+                            scanned_turn,
                         },
                         None,
                     )
@@ -933,7 +935,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             changed = true;
         }
         if changed {
-            self.save_checkpoint(rt, &key, &checkpoint);
+            self.save_checkpoint(rt, key, &checkpoint);
         }
         Ok(emitted_count)
     }
@@ -956,6 +958,7 @@ fn process_scanned_line(
         checkpoint.owner_session_meta_offset = owner;
         if owner == Some(line.start_offset) {
             if let Some(meta) = extract_codex_transcript_meta(&line.record) {
+                let meta = Arc::new(meta);
                 engine.remember_transcript_owner_meta(
                     file_path,
                     checkpoint.inode,
@@ -1185,6 +1188,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     terminal: true,
                     inferred: None,
                     next_turn_started_at_ms: None,
+                    scanned_turn: None,
                 },
                 None,
             )
@@ -1270,6 +1274,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     terminal: true,
                     inferred: None,
                     next_turn_started_at_ms: None,
+                    scanned_turn: None,
                 },
                 None,
             )
@@ -1353,14 +1358,35 @@ impl<'a> CodexTranscriptEngine<'a> {
             terminal,
             inferred,
             next_turn_started_at_ms,
+            scanned_turn,
         } = boundary;
         let Some(active) = checkpoint.active_turn.clone() else {
             return Ok(empty_unparseable(end_offset));
         };
-        let records = read_json_lines(file_path, active.start_offset, end_offset, Some(rt)).await?;
-        let current_stat = file_meta_snapshot(file_path).await.ok();
-        let current_ino = current_stat.map(|(inode, _, _)| inode);
-        let current_size = current_stat.map(|(_, size, _)| size);
+        let verified = match scanned_turn {
+            Some(scanned)
+                if scan::retained_version_is_current(file_path, scanned.version).await =>
+            {
+                Some(scanned)
+            }
+            _ => None,
+        };
+        let (lines, current_ino, current_size) = if let Some(scanned) = verified {
+            (
+                scanned.lines,
+                Some(scanned.version.inode),
+                Some(scanned.version.size),
+            )
+        } else {
+            let records =
+                read_json_lines(file_path, active.start_offset, end_offset, Some(rt)).await?;
+            let current_stat = file_meta_snapshot(file_path).await.ok();
+            (
+                records.items,
+                current_stat.map(|(inode, _, _)| inode),
+                current_stat.map(|(_, size, _)| size),
+            )
+        };
         let mut meta = if current_ino == Some(checkpoint.inode) {
             current_size
                 .and_then(|size| self.cached_meta_for_checkpoint(file_path, checkpoint, size))
@@ -1370,7 +1396,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         if meta.is_none() {
             if let Some(offset) = checkpoint.owner_session_meta_offset {
                 if let Some(record) = read_json_line_at(file_path, offset, Some(rt)).await? {
-                    meta = extract_codex_transcript_meta(&record);
+                    meta = extract_codex_transcript_meta(&record).map(Arc::new);
                     if let Some(meta) = meta.clone() {
                         if current_ino == Some(checkpoint.inode)
                             && current_size.is_some_and(|size| offset >= 0 && offset < size)
@@ -1389,9 +1415,8 @@ impl<'a> CodexTranscriptEngine<'a> {
                 }
             }
         }
-        let source_record_count = records.items.len();
-        let mut sources: Vec<CodexTranscriptSourceRecord> = records
-            .items
+        let source_record_count = lines.len();
+        let mut sources: Vec<CodexTranscriptSourceRecord> = lines
             .into_iter()
             .map(|line| CodexTranscriptSourceRecord {
                 start_offset: line.start_offset,
@@ -1439,7 +1464,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         }
         let extraction = extract_codex_partial_turn_with_boundaries(
             &sources,
-            meta.as_ref(),
+            meta.as_deref(),
             &session_id_from_transcript_path(file_path),
             &active.turn_id,
             &ExtractOptions {
@@ -1500,15 +1525,13 @@ impl<'a> CodexTranscriptEngine<'a> {
         } else {
             extraction.committed_step_count
         };
-        let mut committed = std::borrow::Cow::Borrowed(&extraction.turn);
-        if closed != extraction.turn.steps.len() {
-            committed.to_mut().steps.truncate(closed);
-        }
+        let committed_steps = &extraction.turn.steps[..closed];
         let input_context = self
-            .resolve_input_context(rt, file_path, checkpoint, meta.as_ref())
+            .resolve_input_context(rt, file_path, checkpoint, meta.as_deref())
             .await?;
-        let mut built = build_codex_transcript_segment(
-            &committed,
+        let mut built = build_codex_transcript_steps(
+            &extraction.turn,
+            committed_steps,
             &CodexTranscriptBuildOptions {
                 include_prompt: checkpoint
                     .active_turn
@@ -1516,7 +1539,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     .is_none_or(|active| !active.emitted_prompt),
                 start_step_number: step_start,
                 input_context,
-                context_step_count: Some(committed.steps.len()),
+                context_step_count: Some(closed),
             },
         );
         if let (Some(meta), Some(active)) = (meta.as_ref(), checkpoint.active_turn.as_mut()) {
@@ -1578,7 +1601,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             super::super::invocation_audit::stamp_delegation(
                 &mut built.entries,
                 link,
-                meta.as_ref(),
+                meta.as_deref(),
                 link.parent_trace_id.as_deref() == Some(trace_id.as_str()),
             );
         }
@@ -1627,7 +1650,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 super::super::invocation_audit::stamp_delegation(
                     &mut pending,
                     link,
-                    meta.as_ref(),
+                    meta.as_deref(),
                     link.parent_trace_id.as_deref() == Some(trace_id.as_str()),
                 );
             }
@@ -1639,7 +1662,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             super::super::invocation_audit::stamp_delegation(
                 std::slice::from_mut(&mut audit_base),
                 link,
-                meta.as_ref(),
+                meta.as_deref(),
                 link.parent_trace_id.as_deref() == Some(trace_id.as_str()),
             );
         }
@@ -1672,7 +1695,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 active.emitted_trace_id = Some(trace_id);
             }
         }
-        let built_count = built.entries.len();
+        let built_entry_count = built.entries.len();
         let mut ready = built.entries;
         if terminal
             && (!ready.is_empty()
@@ -1701,12 +1724,12 @@ impl<'a> CodexTranscriptEngine<'a> {
                 ready.push(marker);
             }
         }
-        let ready_count = ready.len();
+        let ready_entry_count = ready.len();
         let filtered = if let Some(active) = checkpoint.active_turn.as_mut() {
             filter_new_segment_entries(ready, active)
         } else {
             SegmentFilterResult {
-                input_entry_count: ready_count,
+                input_entry_count: ready_entry_count,
                 entries: ready,
                 deduplicated_entry_count: 0,
                 rejected_entry_count: 0,
@@ -1726,8 +1749,8 @@ impl<'a> CodexTranscriptEngine<'a> {
                 "toolCount": extraction.turn.steps.iter().map(|step| step.tools.len()).sum::<usize>(),
                 "tokenUsageCount": extraction.turn.steps.iter().filter(|step| step.token_usage.is_some()).count(),
                 "unmatchedTokenUsageCount": extraction.turn.unmatched_token_usages.len(),
-                "builtEntryCount": built_count,
-                "readyEntryCount": ready_count,
+                "builtEntryCount": built_entry_count,
+                "readyEntryCount": ready_entry_count,
                 "deduplicatedEntryCount": deduplicated_entry_count,
                 "rejectedEntryCount": rejected_entry_count,
                 "emittedEntryCount": entries.len(),
@@ -1739,7 +1762,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 "terminalStatus": extraction.turn.status.as_str(),
                 "diagnostics": diagnostics,
             });
-            if built_count == 0 {
+            if built_entry_count == 0 {
                 rt.debug(
                     "processed terminal Codex turn without observable entries",
                     meta.as_object(),
@@ -3039,6 +3062,9 @@ impl<'a> CodexTranscriptEngine<'a> {
         let mut session_dirs = IndexMap::new();
         for tier in tiers {
             for candidate in tier.into_keys() {
+                if crate::utils::source_access::check(&candidate).is_err() {
+                    continue;
+                }
                 let Ok(canonical) = tokio::fs::canonicalize(&candidate).await else {
                     continue;
                 };
@@ -3137,7 +3163,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         rt: &InputRuntime,
         files: &[DiscoveredSessionFile],
         skip: Option<&HashSet<String>>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<HashMap<String, scan::FileVersion>> {
         self.index_transcript_owners(rt, files, skip, false).await
     }
 
@@ -3145,7 +3171,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         &self,
         rt: &InputRuntime,
         files: &[DiscoveredSessionFile],
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<HashMap<String, scan::FileVersion>> {
         self.index_transcript_owners(rt, files, None, true).await
     }
 
@@ -3155,31 +3181,49 @@ impl<'a> CodexTranscriptEngine<'a> {
         files: &[DiscoveredSessionFile],
         skip: Option<&HashSet<String>>,
         targeted: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<HashMap<String, scan::FileVersion>> {
         let discovered: HashSet<String> = files.iter().map(|file| file.file_path.clone()).collect();
-        self.body.with_shared(|shared| {
-            shared.meta_by_path.retain(|path, _| {
-                (targeted && !discovered.contains(path))
-                    || skip.is_some_and(|paths| paths.contains(path))
-            });
-            shared.path_by_thread.clear();
-            for (path, meta) in &shared.meta_by_path {
-                shared
-                    .path_by_thread
-                    .insert(meta.thread_id.clone(), path.clone());
-                shared.linker.register_child(meta);
+        let kept = self.body.with_shared(|shared| {
+            let mut kept = Vec::new();
+            if targeted {
+                kept.extend(
+                    shared
+                        .meta_by_path
+                        .iter()
+                        .filter(|(path, _)| !discovered.contains(*path))
+                        .map(|(path, meta)| (path.clone(), meta.clone())),
+                );
             }
+            if let Some(skip) = skip {
+                for path in skip {
+                    if let Some(meta) = shared.meta_by_path.get(path).cloned() {
+                        kept.push((path.clone(), meta));
+                    }
+                }
+            }
+            shared.meta_by_path.clear();
+            shared.path_by_thread.clear();
+            kept
         });
         if !targeted {
             self.prune_absent_meta_cache(&discovered, now_ms() as i64);
         }
-        for file in files {
-            if skip.is_some_and(|skip| skip.contains(&file.file_path)) {
-                continue;
-            }
-            let Ok(version) = scan::file_version_snapshot(&file.file_path).await else {
+        for (path, meta) in kept {
+            self.publish_transcript_owner_meta(&path, meta);
+        }
+        let visible = files
+            .iter()
+            .filter(|file| skip.is_none_or(|skip| !skip.contains(&file.file_path)))
+            .collect::<Vec<_>>();
+        let snapshots =
+            scan::file_version_snapshots(visible.iter().map(|file| file.file_path.as_str()))
+                .await?;
+        let mut observed = HashMap::with_capacity(visible.len());
+        for (file, version) in visible.into_iter().zip(snapshots) {
+            let Ok(version) = version else {
                 continue;
             };
+            observed.insert(file.file_path.clone(), version);
             let inode = version.inode;
             let size = version.size;
             let checkpoint = self.read_checkpoint(rt, &self.state_key(&file.file_path));
@@ -3204,7 +3248,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 self.publish_transcript_owner_meta(&file.file_path, meta);
             }
         }
-        Ok(())
+        Ok(observed)
     }
 
     async fn register_subagent_owner_meta(
@@ -3261,7 +3305,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         file_size: i64,
         owner_offset: i64,
         active: bool,
-    ) -> anyhow::Result<Option<CodexTranscriptMeta>> {
+    ) -> anyhow::Result<Option<Arc<CodexTranscriptMeta>>> {
         let cached = self.body.with_shared(|shared| {
             shared.meta_cache.get(file_path).and_then(|cached| {
                 if reusable_cached(cached, inode, file_size, owner_offset) {
@@ -3298,6 +3342,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         let Some(meta) = extract_codex_transcript_meta(&record) else {
             return Ok(None);
         };
+        let meta = Arc::new(meta);
         self.remember_transcript_owner_meta(
             file_path,
             inode,
@@ -3315,12 +3360,13 @@ impl<'a> CodexTranscriptEngine<'a> {
         inode: u64,
         file_size: i64,
         owner_offset: i64,
-        meta: CodexTranscriptMeta,
+        meta: impl Into<Arc<CodexTranscriptMeta>>,
         active: bool,
     ) {
+        let meta = meta.into();
         self.remove_meta_cache(file_path);
         let estimated = file_path.len()
-            + serde_json::to_vec(&meta)
+            + serde_json::to_vec(meta.as_ref())
                 .map(|bytes| bytes.len())
                 .unwrap_or(0);
         if estimated > MAX_CACHED_TRANSCRIPT_META_BYTES {
@@ -3366,7 +3412,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         file_path: &str,
         checkpoint: &CodexTranscriptCheckpoint,
         file_size: i64,
-    ) -> Option<CodexTranscriptMeta> {
+    ) -> Option<Arc<CodexTranscriptMeta>> {
         let owner = checkpoint.owner_session_meta_offset?;
         self.body.with_shared(|shared| {
             let cached = shared.meta_cache.shift_remove(file_path)?;
@@ -3414,7 +3460,12 @@ impl<'a> CodexTranscriptEngine<'a> {
         });
     }
 
-    fn publish_transcript_owner_meta(&self, file_path: &str, meta: CodexTranscriptMeta) {
+    fn publish_transcript_owner_meta(
+        &self,
+        file_path: &str,
+        meta: impl Into<Arc<CodexTranscriptMeta>>,
+    ) {
+        let meta = meta.into();
         self.body.with_shared(|shared| {
             if let Some(previous) = shared.meta_by_path.get(file_path) {
                 if previous.thread_id != meta.thread_id
@@ -3502,6 +3553,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     terminal: true,
                     inferred: None,
                     next_turn_started_at_ms: None,
+                    scanned_turn: None,
                 },
                 None,
             )
@@ -3550,6 +3602,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     terminal: true,
                     inferred: None,
                     next_turn_started_at_ms: None,
+                    scanned_turn: None,
                 },
                 None,
             )

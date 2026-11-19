@@ -6,7 +6,7 @@
 //! and writes the same JSONL or state files as the JavaScript processor.
 
 mod claude_code;
-mod codex;
+pub(crate) mod codex;
 mod common;
 mod copilot;
 mod cursor;
@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_definition_exposes_only_discovery_and_retires_telemetry_hooks() {
+    fn codex_definition_exposes_discovery_and_supported_interception() {
         let definition: Value =
             serde_json::from_str(include_str!("../../agents.d/codex.json")).unwrap();
         assert_eq!(
@@ -329,12 +329,14 @@ mod tests {
                 "UserPromptSubmit",
                 "SubagentStart",
                 "SubagentStop",
-                "Stop"
+                "Stop",
+                "PreToolUse",
+                "PostToolUse"
             ])
         );
         assert_eq!(
             definition["hook"]["retiredEvents"],
-            json!(["PreToolUse", "PostToolUse", "PostToolUseFailure"])
+            json!(["PostToolUseFailure"])
         );
         assert!(definition["hook"].get("replaceHookCommands").is_none());
     }

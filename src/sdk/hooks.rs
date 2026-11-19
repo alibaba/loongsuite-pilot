@@ -81,6 +81,7 @@ enum Audit {
     Verdict {
         _slot: AuditSlot,
         activity: Value,
+        evaluations: Vec<Value>,
         blocked_prompt: Option<Box<Verdict>>,
     },
 }
@@ -111,6 +112,8 @@ struct Verdict {
     reason: String,
     request: Option<crate::interceptor::HookRequest>,
     status: &'static str,
+    evaluations: Vec<Value>,
+    guardrail: Option<crate::interceptor::GuardrailMetadata>,
 }
 
 impl Verdict {
@@ -120,6 +123,8 @@ impl Verdict {
             reason: String::new(),
             request: None,
             status: "allow",
+            evaluations: Vec::new(),
+            guardrail: None,
         }
     }
 
@@ -208,15 +213,20 @@ impl Hooks {
                             Audit::Verdict {
                                 _slot,
                                 activity,
+                                evaluations,
                                 blocked_prompt,
                             } => {
                                 if let Some(verdict) = blocked_prompt {
                                     record_blocked_prompt(&audit_queue, &audit_settings, &verdict);
                                 }
-                                if let Err(error) =
-                                    audit_queue.enqueue_hook(activity.to_string().as_bytes())
+                                for row in evaluations.into_iter().chain(std::iter::once(activity))
                                 {
-                                    audit_queue.alarm("SDK_HOOK_RECORD_FULL", &error.to_string());
+                                    if let Err(error) =
+                                        audit_queue.enqueue_hook(row.to_string().as_bytes())
+                                    {
+                                        audit_queue
+                                            .alarm("SDK_HOOK_RECORD_FULL", &error.to_string());
+                                    }
                                 }
                             }
                         }
@@ -484,7 +494,7 @@ impl Endpoint {
         } else {
             job.deadline
         };
-        let verdict = if started >= cutoff {
+        let mut verdict = if started >= cutoff {
             let _ = std::fs::remove_file(self.spool.join(&job.packet.id));
             Verdict::unavailable("expired", job.required)
         } else {
@@ -533,6 +543,7 @@ impl Endpoint {
             "hook.status":verdict.status, "hook.late":late,
             "version":env!("CARGO_PKG_VERSION"), "user.id":self.outbox.identity.read().unwrap()["user_id"],
         });
+        let evaluations = std::mem::take(&mut verdict.evaluations);
         let blocked_prompt = (sent
             && verdict.status == "verdict"
             && verdict.action == "block"
@@ -541,6 +552,7 @@ impl Endpoint {
         Some(Audit::Verdict {
             _slot: slot,
             activity,
+            evaluations,
             blocked_prompt,
         })
     }
@@ -627,6 +639,13 @@ fn may_block(packet: &Datagram, trusted: &Value) -> bool {
                 .as_array()
                 .is_none_or(|list| list.iter().any(|a| a == &packet.agent))
     })
+}
+
+pub(super) fn update_local_status(queue: &Outbox, policy: &Value) {
+    let config = build_interceptor_config_with(policy.get("local"), |_| None);
+    let ids = resolve_enabled_rule_ids(&config);
+    *queue.local_hook_config.lock().unwrap() =
+        (config.mode != crate::types::MaskMode::None).then_some(ids.len());
 }
 
 fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
@@ -797,9 +816,49 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
         let Some(request) = request.as_ref() else {
             return allow();
         };
+        let started = Instant::now();
         let config = build_interceptor_config_with(trusted.get("local"), |_| None);
         let engine = RuleEngine::new(builtin_rules(), resolve_enabled_rule_ids(&config));
-        serde_json::to_value(engine.evaluate(request)).unwrap_or_else(|_| json!({"action":"allow"}))
+        let builtin = engine.evaluate(request);
+        let result = if builtin.action == crate::interceptor::VerdictAction::Allow
+            && blocking
+            && trusted["managed_host_rules"] == true
+        {
+            callback
+                .and_then(|callback| managed_verdict(queue, callback, context, deadline, request))
+        } else {
+            serde_json::to_value(builtin).ok()
+        };
+        let unavailable = result.is_none();
+        let verdict = result.unwrap_or_else(|| json!({"action":"allow"}));
+        if config.mode != crate::types::MaskMode::None {
+            queue.local_hook_stats.lock().unwrap().record(
+                &verdict,
+                started.elapsed().as_secs_f64() * 1_000.0,
+                unavailable,
+                endpoint.stop.load(Ordering::Relaxed),
+            );
+        }
+        verdict
+    };
+    let evaluations = if channel == "local" && trusted["managed_host_rules"] == true {
+        request.as_ref().map_or_else(Vec::new, |request| {
+            guardrail_rows(&verdict, request, &trusted)
+        })
+    } else {
+        Vec::new()
+    };
+    let guardrail = if channel == "local" && trusted["managed_host_rules"] == true {
+        verdict["matches"].as_array().and_then(|hits| {
+            let selected = if verdict["action"] == "block" {
+                hits.last()
+            } else {
+                hits.first()
+            }?;
+            serde_json::from_value(selected.clone()).ok()
+        })
+    } else {
+        None
     };
     match reply_action(&verdict) {
         Some(("block", reason)) if blocking => Verdict {
@@ -807,14 +866,91 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
             reason: reason.chars().take(512).collect(),
             request,
             status: "verdict",
+            evaluations,
+            guardrail,
         },
         Some(("allow", _)) => Verdict {
             request,
             status: "verdict",
+            evaluations,
+            guardrail,
             ..Verdict::allow()
         },
         _ => allow(),
     }
+}
+
+fn managed_verdict(
+    queue: &Outbox,
+    callback: OnHook,
+    context: usize,
+    deadline: Instant,
+    request: &crate::interceptor::HookRequest,
+) -> Option<Value> {
+    let mut normalized = request.clone();
+    normalized.raw.clear();
+    let row = serde_json::to_vec(&json!({"kind":"managed_local","request": normalized})).ok()?;
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis() as u32;
+    if remaining == 0 {
+        return None;
+    }
+    let mut reply = vec![0; MAX_REPLY];
+    let mut used = 0;
+    queue.callbacks.fetch_add(1, Ordering::SeqCst);
+    // SAFETY: the callback and these bounded buffers remain live until return.
+    let status = unsafe {
+        callback(
+            context as *mut _,
+            PilotJsonView::from_bytes(&row),
+            remaining,
+            reply.as_mut_ptr(),
+            reply.len(),
+            &mut used,
+        )
+    };
+    queue.callbacks.fetch_sub(1, Ordering::SeqCst);
+    if status != OK || used > reply.len() || Instant::now() >= deadline {
+        return None;
+    }
+    serde_json::from_slice(&reply[..used]).ok()
+}
+
+fn guardrail_rows(
+    verdict: &Value,
+    request: &crate::interceptor::HookRequest,
+    policy: &Value,
+) -> Vec<Value> {
+    verdict["matches"].as_array().into_iter().flatten().take(128).map(|hit| {
+        let agent = match request.agent.as_str() {
+            "qodercli" => "qoder-cli",
+            other => other,
+        };
+        let mut row = json!({
+            "event.id":uuid::Uuid::new_v4().to_string(), "event.name":"guardrail.evaluation",
+            "time_unix_nano":chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string(),
+            "gen_ai.agent.type":agent, "gen_ai.session.id":request.session_id.as_deref().unwrap_or(""),
+            "user.id":policy["user_id"], "version":env!("CARGO_PKG_VERSION"),
+            "agent.source":"interceptor", "gen_ai.guardrail.phase":request.event,
+            "gen_ai.guardrail.rule_id":hit["ruleId"], "gen_ai.guardrail.rule_version":hit["ruleVersion"],
+            "gen_ai.guardrail.action":hit["action"], "gen_ai.guardrail.enforcement":hit["enforcement"],
+            "gen_ai.guardrail.matched":true, "gen_ai.guardrail.triggered":true,
+        });
+        for (field, value) in [
+            ("gen_ai.tool.call.id", request.tool_use_id.as_deref()),
+            ("gen_ai.tool.name", request.tool_name.as_deref()),
+            ("gen_ai.guardrail.severity", hit["severity"].as_str()),
+        ] {
+            if let Some(value) = value {
+                row[field] = json!(value);
+            }
+        }
+        if verdict["failOpen"] == true {
+            row["gen_ai.guardrail.fail_open"] = json!(true);
+        }
+        row
+    }).collect()
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -862,9 +998,9 @@ fn record_tool_verdict(
         };
         // Both independent chains may decide the same tool operation. Retain a
         // block when its peer later allows; one allow cannot erase a block.
-        if queue.verdicts.get(&key, now) != Some(ToolVerdictAction::Block) {
-            queue.verdicts.put(&key, action, now);
-        }
+        queue
+            .verdicts
+            .put_sdk_verdict(&key, action, result.guardrail.clone(), now);
         if let Some(callback) =
             callback.filter(|_| settings.read().unwrap()["relay_host_verdicts"] == true)
         {
@@ -873,6 +1009,7 @@ fn record_tool_verdict(
                 "tool_use_id": key.tool_use_id,
                 "phase": phase,
                 "action": action,
+                "guardrail": result.guardrail,
             });
             notify_shell(queue, callback, context, deadline, verdict);
         }
@@ -920,6 +1057,9 @@ fn record_blocked_prompt(queue: &Outbox, settings: &RwLock<Value>, result: &Verd
         && request.event == HookEventName::UserPromptSubmit
     {
         let mut entry = crate::interceptor::build_blocked_qoder_prompt_entry(request, None);
+        if let Some(guardrail) = &result.guardrail {
+            guardrail.apply(&mut entry);
+        }
         let (host, mask) = {
             let settings = settings.read().unwrap();
             entry.user_id = settings["user_id"].as_str().unwrap_or("").to_owned();

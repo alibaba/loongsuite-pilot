@@ -68,6 +68,7 @@ str_enum!(AgentEventName {
     ToolApprove = "tool.approve",
     AgentInput = "agent.input",
     ReactStep = "react.step",
+    GuardrailEvaluation = "guardrail.evaluation",
     Other = "other",
 });
 
@@ -515,7 +516,13 @@ pub struct AgentActivityEntry {
     pub extra: Map<String, JsonValue>,
 }
 
+pub(crate) const QWEN_COLLABORATION_SOURCE: &str = "qwen-work-cn-collaboration";
+
 impl AgentActivityEntry {
+    pub(crate) fn is_qwen_collaboration(&self) -> bool {
+        self.get("agent.source").and_then(JsonValue::as_str) == Some(QWEN_COLLABORATION_SOURCE)
+    }
+
     pub fn get(&self, key: &str) -> Option<&JsonValue> {
         self.extra.get(key)
     }

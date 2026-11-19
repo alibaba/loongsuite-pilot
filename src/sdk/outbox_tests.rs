@@ -418,3 +418,160 @@ async fn trace_gauges_use_durable_queue_counters_and_do_not_fabricate_failed_rea
     assert_eq!(row["collection_status"], "unavailable");
     assert!(row.get("pending_records").is_none());
 }
+
+#[test]
+fn codex_checkpoint_rebinds_old_sdk_pending_bytes_then_admits_a_legacy_handoff() {
+    let root = tempfile::tempdir().unwrap();
+    let queue = Outbox::open(root.path(), settings()).unwrap();
+    let old = r#"{"codex-transcript:rollout":{"lastOffset":22,"future":true}}"#;
+    let pending = br#"{"event.id":"historical-codex","event.name":"llm.request"}"#;
+    queue.checkpoint("previous-sdk-source", old).unwrap();
+    queue.enqueue_hook(pending).unwrap();
+
+    assert_eq!(
+        queue
+            .prepare_shell_checkpoint("new-source", LegacyCheckpointHandoff::Codex, || Ok(None))
+            .unwrap()
+            .as_deref(),
+        Some(old)
+    );
+    let rows = queue.read_batch(&settings()).unwrap().0;
+    assert_eq!(rows[0].1, pending);
+    assert!(
+        Outbox::mark_shell_checkpoint_exported(root.path(), LegacyCheckpointHandoff::Codex)
+            .is_err()
+    );
+    queue.ack(&rows).unwrap();
+
+    Outbox::mark_shell_checkpoint_exported(root.path(), LegacyCheckpointHandoff::Codex).unwrap();
+    assert!(queue
+        .prepare_shell_checkpoint(
+            "new-source",
+            LegacyCheckpointHandoff::Codex,
+            || anyhow::bail!("corrupt legacy state")
+        )
+        .is_err());
+    let newer = r#"{"codex-transcript:rollout":{"lastOffset":27,"future":true}}"#;
+    assert_eq!(
+        queue
+            .prepare_shell_checkpoint("new-source", LegacyCheckpointHandoff::Codex, || Ok(Some(
+                newer.to_owned()
+            )))
+            .unwrap()
+            .as_deref(),
+        Some(newer)
+    );
+    assert_eq!(
+        queue.saved_checkpoints().unwrap(),
+        vec![("new-source".to_owned(), newer.to_owned())]
+    );
+}
+
+#[test]
+fn qoder_checkpoint_imports_legacy_progress_only_after_acknowledged_export() {
+    let root = tempfile::tempdir().unwrap();
+    let queue = Outbox::open(root.path(), settings()).unwrap();
+    let handoff = LegacyCheckpointHandoff::Qoder;
+    let source = "qoder-source";
+    let original = r#"{"qoder-trace:fixture":{"lastOffset":12}}"#;
+    let advanced = r#"{"qoder-trace:fixture":{"lastOffset":36}}"#;
+    let pending = br#"{"event.id":"pending-qoder","event.name":"llm.request"}"#;
+    queue.checkpoint(source, original).unwrap();
+    queue.enqueue_hook(pending).unwrap();
+    assert_eq!(
+        queue
+            .prepare_shell_checkpoint(source, handoff, || panic!("SDK still owns the cursor"))
+            .unwrap()
+            .as_deref(),
+        Some(original)
+    );
+    assert!(Outbox::mark_shell_checkpoint_exported(root.path(), handoff).is_err());
+    let rows = queue.read_batch(&settings()).unwrap().0;
+    assert_eq!(rows[0].1, pending);
+    queue.ack(&rows).unwrap();
+    Outbox::mark_shell_checkpoint_exported(root.path(), handoff).unwrap();
+    assert!(queue
+        .prepare_shell_checkpoint(source, handoff, || anyhow::bail!("bad state"))
+        .is_err());
+    assert_eq!(
+        queue
+            .prepare_shell_checkpoint(source, handoff, || Ok(Some(advanced.to_owned())))
+            .unwrap()
+            .as_deref(),
+        Some(advanced)
+    );
+    assert_eq!(
+        queue.saved_checkpoints().unwrap(),
+        vec![(source.to_owned(), advanced.to_owned())]
+    );
+
+    Outbox::mark_shell_checkpoint_exported(root.path(), handoff).unwrap();
+    assert_eq!(
+        queue
+            .prepare_shell_checkpoint(source, handoff, || Ok(None))
+            .unwrap()
+            .as_deref(),
+        Some(advanced)
+    );
+}
+
+#[tokio::test]
+async fn legacy_queue_totals_stay_exact_after_batch_updates_and_failed_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let previous = Outbox::open(dir.path(), settings()).unwrap();
+    let old_payload = br#"{"event.id":"legacy"}"#;
+    {
+        let db = previous.db.lock().unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER event_accepted AFTER INSERT ON event BEGIN
+                UPDATE queue_size SET bytes=bytes+length(NEW.payload),events=events+1 WHERE singleton=1; END;
+             CREATE TRIGGER event_acked AFTER DELETE ON event BEGIN
+                UPDATE queue_size SET bytes=bytes-length(OLD.payload),events=events-1 WHERE singleton=1; END;",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO event(source,batch,payload,created) VALUES('source','old',?1,1)",
+            [old_payload.as_slice()],
+        )
+        .unwrap();
+    }
+    drop(previous);
+
+    let queue = Outbox::open(dir.path(), settings()).unwrap();
+    let store = StateStore::new(dir.path().join("state.json"));
+    store.set_offset("source", 42.0);
+    let newer = [
+        br#"{"event.id":"one"}"#.to_vec(),
+        br#"{"event.id":"two"}"#.to_vec(),
+    ];
+    queue
+        .accept_fixture("source", &store, &newer, &AtomicBool::new(false))
+        .await
+        .unwrap();
+    let expected = old_payload.len() + newer.iter().map(Vec::len).sum::<usize>();
+    let before = queue.snapshot();
+    assert_eq!(before["pending_events"], 3);
+    assert_eq!(before["pending_bytes"], expected);
+    assert_eq!(
+        queue.saved_checkpoints().unwrap()[0].1,
+        store.snapshot_text()
+    );
+
+    let (rows, _) = queue.read_batch(&settings()).unwrap();
+    assert_eq!(rows[0].1, old_payload);
+    assert_eq!(rows[1].1, newer[0]);
+    assert_eq!(rows[2].1, newer[1]);
+    let mut incomplete = rows.clone();
+    incomplete.push((i64::MAX, Vec::new()));
+    assert!(queue.ack(&incomplete).is_err());
+    assert_eq!(queue.read_batch(&settings()).unwrap().0, rows);
+    assert_eq!(queue.snapshot()["pending_bytes"], expected);
+
+    queue.ack(&rows).unwrap();
+    assert_eq!(queue.snapshot()["pending_events"], 0);
+    assert_eq!(queue.snapshot()["pending_bytes"], 0);
+    assert_eq!(
+        queue.saved_checkpoints().unwrap()[0].1,
+        store.snapshot_text()
+    );
+}

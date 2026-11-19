@@ -200,7 +200,7 @@ async fn native_full_collect_discovers_new_rollout_in_nonempty_same_clock_bucket
 }
 
 #[tokio::test]
-async fn native_restart_baselines_new_same_clock_rollout_before_any_output() {
+async fn native_restart_collects_offline_rollout_even_with_same_directory_clock() {
     tokio::time::timeout(Duration::from_secs(4), async {
         let f = Fixture::new();
         let old = completed()
@@ -218,9 +218,13 @@ async fn native_restart_baselines_new_same_clock_rollout_before_any_output() {
         f.input.start().await.unwrap();
         f.input.inner.await_current_cycle_for_test().await;
         assert!(
-            f.records().is_empty(),
-            "restart promoted preexisting private history"
+            f.records()
+                .iter()
+                .all(|row| row["gen_ai.session.id"] != "old-session"),
+            "first-install history must remain excluded after restart"
         );
+        assert_eq!(events(&f.records(), "llm.response").len(), 3);
+        assert_unique_native_events(&f.records());
         assert_eq!(
             f.checkpoint(&new_path).scan_offset,
             completed().len() as i64
@@ -230,6 +234,63 @@ async fn native_restart_baselines_new_same_clock_rollout_before_any_output() {
     })
     .await
     .expect("original native collection bound remains 4s");
+}
+
+#[tokio::test]
+async fn unfinished_baseline_survives_restart_and_keeps_only_new_sessions() {
+    use crate::inputs::base::InputBody;
+
+    let f = Fixture::new();
+    let old = completed()
+        .replace("session-1", "old-session")
+        .replace("turn-1", "old-turn");
+    let old_path = f.write("old/rollout-old-session.jsonl", &old).await;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&old_path)
+        .unwrap();
+    file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+        .unwrap();
+    let blocked = std::path::Path::new(&old_path).parent().unwrap().to_owned();
+    let deny = Arc::new(move |path: &str, point| {
+        if point == DiscoveryPoint::BeforeRead && std::path::Path::new(path) == blocked {
+            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        }
+        Ok(())
+    });
+    TEST_DISCOVERY
+        .scope(deny, async {
+            f.input.inner.body.on_start(f.rt()).await.unwrap();
+            f.input.inner.body.on_stop(f.rt()).await.unwrap();
+        })
+        .await;
+    assert_eq!(
+        f.rt().state_store.get("codex-transcript").extra().unwrap()["baselineUnfinished"],
+        true
+    );
+
+    // The filesystem may round creation and modification to milliseconds.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    f.write("new/rollout-session-1.jsonl", &completed()).await;
+    let next = f.restart().await;
+    next.input.start().await.unwrap();
+    next.input.inner.await_current_cycle_for_test().await;
+    assert_eq!(events(&next.records(), "llm.response").len(), 3);
+    assert!(next
+        .records()
+        .iter()
+        .all(|row| row["gen_ai.session.id"] == "session-1"));
+    assert_eq!(next.checkpoint(&old_path).scan_offset, old.len() as i64);
+    assert_unique_native_events(&next.records());
+    assert_eq!(
+        next.rt()
+            .state_store
+            .get("codex-transcript")
+            .extra()
+            .unwrap()["isBaselineInit"],
+        true
+    );
+    next.input.stop().await.unwrap();
 }
 
 #[tokio::test]

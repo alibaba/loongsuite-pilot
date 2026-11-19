@@ -214,6 +214,26 @@ where
             serde_json::to_string(cwd).unwrap_or_default()
         ));
     }
+    if cfg!(unix)
+        && env
+            .get("LOONGSUITE_PILOT_ROOT_TRIGGER")
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+    {
+        let entry = "/app/openclaw.mjs";
+        if !confirmed_missing(entry).await {
+            let Some(host) = from_entry(entry, env).await else {
+                return problem(format!(
+                    "OpenClaw container entry unavailable or unsupported: {entry}"
+                ));
+            };
+            candidates.push(host);
+        }
+    }
     let bundle_root = env
         .get("OPENCLAW_BUNDLE_ROOT")
         .cloned()

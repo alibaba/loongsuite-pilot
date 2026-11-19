@@ -391,7 +391,7 @@ fn from_deploy(
         Some(def.deploy_mode.as_str()),
         settings_path,
     );
-    if !error.is_empty() && def.id == super::system_toml_hooks::GROK {
+    if !error.is_empty() && super::system_toml_hooks::supports(&def.id) {
         failure.hint = Some(error.replace(['\r', '\n'], " ").chars().take(350).collect());
     }
     failure
@@ -727,7 +727,7 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
             agents.push(failed("*", "invalid-deployment-state", None, None));
         }
     }
-    use super::system_toml_hooks::{self, GROK};
+    use super::system_toml_hooks;
     use crate::types::HookScope;
     let mut runtime_prepared = false;
     for def in &selected {
@@ -752,19 +752,21 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
             continue;
         }
         let home = opts.homes.get(&def.id).cloned();
-        let scope = opts.deployment_scope.filter(|_| def.id == GROK);
+        let scope = opts
+            .deployment_scope
+            .filter(|_| system_toml_hooks::supports(&def.id));
         let automatic = matches!(selection, AgentSelection::Detect { .. });
         if scope.is_some() && automatic && !manager.is_agent_detected(def).await {
             continue;
         }
-        if def.id == GROK
+        if system_toml_hooks::supports(&def.id)
             && scope.is_none()
             && home.is_some()
             && manager
                 .recorded_definition(def)
                 .is_ok_and(|def| system_toml_hooks::is_system(&def))
         {
-            let mut failure = failed(GROK, "deploy-failed", Some("hook"), None);
+            let mut failure = failed(&def.id, "deploy-failed", Some("hook"), None);
             failure.hint = Some(
                 "An existing system registration requires explicit --scope user before --home"
                     .into(),
@@ -1043,7 +1045,10 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
         }
         agents.push(from_deploy(def, &result, settings_path));
     }
-    if let Some(base) = by_id.get(GROK) {
+    for base in by_id
+        .values()
+        .filter(|def| system_toml_hooks::supports(&def.id))
+    {
         let effective = if opts.deployment_scope == Some(HookScope::System) {
             system_toml_hooks::definition(base, HookScope::System).ok()
         } else if opts.deployment_scope.is_none() {
@@ -1055,7 +1060,7 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
             None
         };
         if let Some(effective) = effective {
-            if let Some(agent) = agents.iter_mut().find(|agent| agent.id == GROK) {
+            if let Some(agent) = agents.iter_mut().find(|agent| agent.id == base.id) {
                 agent.system = Some(SystemHookStatus {
                     hook_scope: HookScope::System,
                     runtime_healthy: super::hook_assets::healthy(
@@ -1603,7 +1608,7 @@ mod tests {
         );
         assert_eq!(
             def.hook.as_ref().unwrap().settings_path,
-            "~/.codex/hooks.json"
+            "$CODEX_HOME/hooks.json"
         );
         def.hook
             .as_mut()

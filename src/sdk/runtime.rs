@@ -3,6 +3,8 @@ use super::policy::{AgentPlan, Init, Policy};
 use crate::checkpoints::StateStore;
 use crate::core::{InputManager, LiveInput};
 use crate::inputs::base::{HostedInput, InputBody};
+use crate::inputs::codex_aborted_turn::{CodexAbortedTurnInput, CodexAbortedTurnInputOptions};
+use crate::inputs::codex_transcript::{CodexTranscriptInput, CodexTranscriptInputOptions};
 use crate::inputs::qoder_trace::{QoderTraceInput, QoderTraceOptions, QoderTraceReaders};
 use crate::types::AgentActivityEntry;
 use crate::utils::source_access::{self, SourceScope};
@@ -39,12 +41,16 @@ impl Collector {
         }
     }
     pub fn apply(&mut self, policy: &Policy) -> anyhow::Result<()> {
+        let mut plans = policy.agents.clone();
+        if let Some(recovery) = &policy.codex_recovery {
+            plans.insert("codex-recovery".into(), recovery.clone());
+        }
         let delivery_changed = *self.queue.options.read().unwrap() != policy.delivery;
         let removed: Vec<_> = self
             .agents
             .iter()
             .filter(|(id, old)| {
-                policy.agents.get(*id) != Some(&old.plan)
+                plans.get(*id) != Some(&old.plan)
                     || (delivery_changed
                         && old
                             .report
@@ -62,13 +68,13 @@ impl Collector {
             }
         }
         self.queue.update(policy.delivery.clone());
-        for (id, plan) in &policy.agents {
-            if !self.agents.contains_key(id) {
+        for (id, plan) in plans {
+            if !self.agents.contains_key(&id) {
                 self.agents.insert(
-                    id.clone(),
+                    id,
                     Agent::start(
                         &self.init,
-                        plan.clone(),
+                        plan,
                         self.queue.clone(),
                         self.global_stop.clone(),
                     )?,
@@ -78,7 +84,7 @@ impl Collector {
         Ok(())
     }
     pub fn snapshot(&self) -> Value {
-        json!(self.agents.iter().map(|(id,agent)|json!({"agent":id,"profile":agent.plan.profile,"status":agent.report.lock().unwrap().clone()})).collect::<Vec<_>>())
+        json!(self.agents.values().map(|agent|json!({"agent":agent.plan.agent,"profile":agent.plan.profile,"status":agent.report.lock().unwrap().clone()})).collect::<Vec<_>>())
     }
     pub fn dataflow(&self) -> crate::metrics::DataflowSnapshot {
         let mut flow = crate::metrics::DataflowSnapshot::default();
@@ -311,21 +317,88 @@ fn run_agent(
     source_access::private_path(&state_dir)?;
     std::fs::create_dir_all(&state_dir)?;
     let checkpoint = state_dir.join("input-state.json");
-    queue.restore(&namespace, &checkpoint)?;
+    let checkpoint_key = plan.checkpoint_key();
+    use super::outbox::LegacyCheckpointHandoff;
+    let shell_handoff = plan.pilot_host.as_ref().and_then(|host| {
+        let handoff = LegacyCheckpointHandoff::for_input(checkpoint_key)?;
+        let expected = if handoff == LegacyCheckpointHandoff::Qoder {
+            host.data_dir.join(super::STANDALONE_QODER_DATA)
+        } else {
+            host.data_dir
+                .join("state")
+                .join(format!("standalone-{checkpoint_key}-sdk"))
+        };
+        (init.data_dir == expected).then_some((host, handoff))
+    });
+    if let Some((host, handoff)) = shell_handoff {
+        let legacy_path = host.data_dir.join("logs/input-state.json");
+        let imported = queue.prepare_shell_checkpoint(&namespace, handoff, || {
+            use std::io::Read;
+            source_access::private_path(&legacy_path)?;
+            let mut file = match source_access::open_under(&legacy_path, &host.data_dir) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            anyhow::ensure!(
+                file.metadata()?.len() <= 64 * 1024 * 1024,
+                "Pilot shell checkpoint exceeds 64 MiB"
+            );
+            let mut body = String::new();
+            file.read_to_string(&mut body)?;
+            filter_shell_checkpoint(&body, checkpoint_key)
+        })?;
+        if let Some(text) = imported {
+            write_checkpoint(&checkpoint, &text)?;
+        } else if handoff == LegacyCheckpointHandoff::Codex {
+            source_access::private_path(&checkpoint)?;
+            match std::fs::remove_file(&checkpoint) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    } else {
+        queue.restore(&namespace, &checkpoint)?;
+    }
     let mut roots = plan
         .sources
         .iter()
-        .map(|s| super::policy::canonical_candidate(&s.path))
+        .map(|source| {
+            if plan.agent == "codex" {
+                source_access::private_path(&source.path)?;
+                Ok(source.path.clone())
+            } else {
+                super::policy::canonical_candidate(&source.path)
+            }
+        })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let checkpoint_key = "qoder-trace";
     if let Some(state) = &plan.pilot_host {
-        let agent_roots = ["state/qoder-transcripts/qoder", "logs/qoder"];
+        let agent_roots: &[&str] = match checkpoint_key {
+            "codex-transcript" => &[
+                "state/codex/transcript-wakeups",
+                "state/codex/transcript-span-contexts",
+            ],
+            "codex-aborted-turn" => &["state/codex/sessions", "logs/diagnostics"],
+            _ => &["state/qoder-transcripts/qoder", "logs/qoder"],
+        };
+        if checkpoint_key == "codex-transcript" {
+            if let Some(home) = roots[0].parent() {
+                let isolated = home.join("u");
+                source_access::private_path(&isolated)?;
+                roots.push(isolated);
+            }
+        }
         for relative in agent_roots
             .iter()
             .copied()
             .chain(["logs/input-state.json", "state/workspace-exclusions"])
         {
-            let path = super::policy::canonical_candidate(&state.data_dir.join(relative))?;
+            let path = state.data_dir.join(relative);
+            if plan.agent == "codex" {
+                source_access::private_path(&path)?;
+            }
+            let path = super::policy::canonical_candidate(&path)?;
             anyhow::ensure!(
                 path.starts_with(&state.data_dir),
                 "Pilot source {relative} escapes its data directory"
@@ -333,8 +406,21 @@ fn run_agent(
             roots.push(path);
         }
     }
-    // Resource files and another source's SDK state are not collection
-    // capabilities. Inputs only need their own checkpoint/wakeup namespace.
+    // Recovery may consult its paired primary collector's Hook markers. Its
+    // checkpoint and diagnostics stay within its own SDK-owned namespace.
+    let recovery_hook_markers = plan
+        .codex_recovery_wakeup_namespace
+        .as_ref()
+        .map(|namespace| {
+            init.data_dir
+                .join("sources")
+                .join(namespace)
+                .join("state/codex/transcript-wakeups")
+        });
+    if let Some(markers) = &recovery_hook_markers {
+        source_access::private_path(markers)?;
+        roots.push(markers.clone());
+    }
     roots.push(state_dir.canonicalize()?);
     let scope = SourceScope::new(roots, plan.max_files, plan.max_read_bytes);
     scope.set_log(state_dir.join("collector.log"));
@@ -422,7 +508,128 @@ fn run_agent(
             .find(|s| s.kind == kind)
             .map(|s| s.path.to_string_lossy().into_owned())
     };
-    let input: Arc<LiveInput> = {
+    let host_path = |relative: &str, embedded: &str| {
+        plan.pilot_host
+            .as_ref()
+            .map_or_else(
+                || state_dir.join(embedded),
+                |state| state.data_dir.join(relative),
+            )
+            .to_string_lossy()
+            .into_owned()
+    };
+    let codex_workspace_policy = plan.pilot_host.as_ref().map(|state| {
+        crate::inputs::base::WorkspacePolicy::new(
+            state.exclude_workspaces.clone(),
+            Some(state.data_dir.join("state/workspace-exclusions")),
+        )
+    });
+    let capture_codex = {
+        let capture_queue = queue.clone();
+        let buffer = buffer.clone();
+        move |entries: Vec<AgentActivityEntry>| {
+            let limit = capture_queue.options.read().unwrap().queue_memory_bytes;
+            let mut cycle = buffer.lock().unwrap();
+            if cycle.reserve_batch(&entries, limit) {
+                cycle.entries.extend(entries);
+            }
+        }
+    };
+    let record_delta = {
+        let manager = Arc::downgrade(&manager);
+        move |delta: &crate::inputs::base::InputRuntimeDelta| {
+            if let Some(manager) = manager.upgrade() {
+                manager.record_runtime_delta(checkpoint_key, delta);
+            }
+        }
+    };
+    let codex_wakeup = host_path(
+        "state/codex/transcript-wakeups",
+        "state/codex/transcript-wakeups",
+    );
+    let input: Arc<LiveInput> = if checkpoint_key == "codex-transcript" {
+        let input = Arc::new(CodexTranscriptInput::new(CodexTranscriptInputOptions {
+            state_store: store.clone(),
+            session_dir: source_path("transcript"),
+            wakeup_dir: Some(codex_wakeup.clone()),
+            span_context_dir: Some(host_path(
+                "state/codex/transcript-span-contexts",
+                "state/codex/transcript-span-contexts",
+            )),
+            poll_interval_ms: Some(plan.poll_interval_ms),
+            multimodal: None,
+        }));
+        if let Some(policy) = codex_workspace_policy {
+            input.set_collector_workspace_policy(policy);
+        }
+        input.bind_owned_collector(capture_codex, record_delta);
+        bind(
+            &input.inner,
+            manager.clone(),
+            queue.clone(),
+            scope,
+            cancel.clone(),
+            global.clone(),
+            buffer,
+        );
+        live(
+            checkpoint_key,
+            "codex",
+            input,
+            |i| i.collector_running(),
+            |i| Box::pin(async move { i.start().await }),
+            |i| {
+                Box::pin(async move {
+                    let _ = i.stop().await;
+                })
+            },
+        )
+    } else if checkpoint_key == "codex-aborted-turn" {
+        let input = Arc::new(CodexAbortedTurnInput::with_rollout_owner(
+            CodexAbortedTurnInputOptions {
+                state_store: store.clone(),
+                session_dir: source_path("transcript"),
+                hook_state_dir: Some(recovery_hook_markers.as_ref().map_or_else(
+                    || host_path("state/codex/sessions", "sessions"),
+                    |path| path.to_string_lossy().into_owned(),
+                )),
+                diagnostic_dir: Some(host_path("logs/diagnostics", "diagnostics")),
+                hook_gap_grace_ms: None,
+                poll_interval_ms: Some(plan.poll_interval_ms),
+            },
+            recovery_hook_markers.is_some()
+                || plan
+                    .pilot_host
+                    .as_ref()
+                    .is_some_and(|host| host.codex_rollout_owns_interrupted_turns),
+        ));
+        if let Some(policy) = codex_workspace_policy {
+            input.set_collector_workspace_policy(policy);
+        }
+        input.inner.set_owned_entries_handler(capture_codex);
+        input.inner.on_runtime_delta(record_delta);
+        bind(
+            &input.inner,
+            manager.clone(),
+            queue.clone(),
+            scope,
+            cancel.clone(),
+            global.clone(),
+            buffer,
+        );
+        live(
+            checkpoint_key,
+            "codex",
+            input,
+            |i| i.collector_running(),
+            |i| Box::pin(async move { i.start().await }),
+            |i| {
+                Box::pin(async move {
+                    let _ = i.stop().await;
+                })
+            },
+        )
+    } else {
         let paths = plan
             .sources
             .iter()
@@ -511,7 +718,15 @@ fn run_agent(
             .sources
             .iter()
             .filter(|source| matches!(source.kind.as_str(), "hook_jsonl" | "transcript"))
-            .any(|source| source.path.exists());
+            .any(|source| source.path.exists())
+            || (checkpoint_key == "codex-transcript"
+                && !started
+                && std::time::Instant::now() >= next_start
+                && runtime.block_on(CodexTranscriptInput::check_availability(
+                    Some(&codex_wakeup),
+                    source_path("transcript").as_deref(),
+                )))
+            || (checkpoint_key == "codex-transcript" && started);
         if !started && available && std::time::Instant::now() >= next_start {
             next_start = std::time::Instant::now()
                 + std::time::Duration::from_millis(plan.poll_interval_ms.max(1000));
@@ -552,7 +767,7 @@ fn run_agent(
     drop(runtime);
     source_access::install(None);
     queue.restore(&namespace, &checkpoint)?;
-    *report.lock().unwrap() = json!({"state":"stopped"});
+    *report.lock().unwrap() = json!({"state":"stopped","source_namespace":namespace});
     Ok(())
 }
 
@@ -593,12 +808,16 @@ async fn import_pilot_checkpoint(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    let mut legacy: serde_json::Map<String, Value> = serde_json::from_str(&body)?;
-    legacy.retain(|key, _| crate::checkpoints::key_in_namespace(key, input));
-    if !legacy.is_empty() {
-        write_checkpoint(target, &Value::Object(legacy).to_string())?;
+    if let Some(text) = filter_shell_checkpoint(&body, input)? {
+        write_checkpoint(target, &text)?;
     }
     Ok(())
+}
+
+fn filter_shell_checkpoint(body: &str, input: &str) -> anyhow::Result<Option<String>> {
+    let mut legacy: serde_json::Map<String, Value> = serde_json::from_str(body)?;
+    legacy.retain(|key, _| crate::checkpoints::key_in_namespace(key, input));
+    Ok((!legacy.is_empty()).then(|| Value::Object(legacy).to_string()))
 }
 
 struct AuthorizedReaders {

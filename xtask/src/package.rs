@@ -55,6 +55,7 @@ struct Candidate {
 
 const HOST_ASSETS: &[&str] = &[
     "hooks/claude-code-fetch-intercept.mjs",
+    "hooks/claude-code-sdk-preload.cjs",
     "hooks/qodercli-token-intercept.mjs",
     "hooks/qodercli-runtime-wrapper.sh",
     "hooks/qoderwork-runtime-wrapper.mjs",
@@ -72,6 +73,9 @@ const HOST_ASSETS: &[&str] = &[
     "plugins/shared/pilot-config.mjs",
     "plugins/shared/raw-jsonl-writer.mjs",
     "plugins/shared/raw-source-gate.mjs",
+    "plugins/shared/private-log-dir.cjs",
+    "runtime/root-trigger.cjs",
+    "runtime/root_trigger.py",
     "plugins/openclaw/plugin.mjs",
     "plugins/openclaw/package.json",
     "plugins/openclaw/openclaw.plugin.json",
@@ -84,6 +88,8 @@ const HOST_ASSETS: &[&str] = &[
     "plugins/openclaw/first-token.mjs",
     "plugins/openclaw/invocation-audit.mjs",
     "plugins/openclaw/steered-delivery.mjs",
+    "plugins/openclaw/cron-context.mjs",
+    "plugins/openclaw/cron-recovery.mjs",
 ];
 
 pub fn build(root: &Path, options: Options) -> Result<()> {

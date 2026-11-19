@@ -9,6 +9,7 @@ mod doubao_turn_journal;
 mod doubao_work_converter;
 mod doubao_work_round_converter;
 mod event_log_converter;
+pub(crate) mod hermes_process_identity;
 mod http_flusher;
 mod jsonl_flusher;
 mod multi_flusher;
@@ -74,6 +75,9 @@ pub use sls_transport::{
     post_webtracking, split_for_webtracking, HttpError, ReqwestSlsHttp, SendError, SlsHttp,
     SlsTransportConfig, WEBTRACKING_MAX_BODY_BYTES, WEBTRACKING_MAX_LOGS, WEBTRACKING_TIMEOUT_MS,
 };
+pub(crate) use sls_transport::{json_utf8_len, PostApiKeyOptions, PostWebtrackingOptions};
+#[cfg(test)]
+pub(crate) use sls_transport::{SlsHttpRequest, SlsHttpResponse};
 pub use span_enricher::{
     run_span_enricher_worker, SpanEnricher, SpanEnricherContext, SpanEnricherRunner, SpanView,
 };

@@ -12,6 +12,7 @@ const PILOT_CONFIG: &str = "shared/pilot-config.mjs";
 const SHARED: &str = "shared/resource-context.mjs";
 const RAW_WRITER: &str = "shared/raw-jsonl-writer.mjs";
 const RAW_GATE: &str = "shared/raw-source-gate.mjs";
+const PRIVATE_LOG_DIR: &str = "shared/private-log-dir.cjs";
 
 pub(super) fn recovery_pending(data: &Path) -> bool {
     // 错误、链接和损坏记录均不能作为健康或可卸载状态。
@@ -32,7 +33,7 @@ where
 {
     let settings = || async {
         let parent = config.parent().context("插件配置缺少父目录")?;
-        std::fs::create_dir_all(parent)?;
+        super::config_owner::ensure_directory(parent).await?;
         ensure!(runtime_metadata(parent)?.is_dir(), "插件配置父目录无效");
         let mut name = config.as_os_str().to_owned();
         name.push(".loongsuite-pilot.lock");
@@ -99,6 +100,8 @@ fn bundle(def: &AgentDefinition) -> Result<(&'static str, &'static [&'static str
                 "openclaw/first-token.mjs",
                 "openclaw/invocation-audit.mjs",
                 "openclaw/steered-delivery.mjs",
+                "openclaw/cron-context.mjs",
+                "openclaw/cron-recovery.mjs",
                 SHARED,
                 PILOT_CONFIG,
             ],
@@ -259,6 +262,12 @@ impl PluginAssets {
                     .any(|part| part == RAW_WRITER.as_bytes())
             {
                 pending.extend([RAW_WRITER, RAW_GATE]);
+            }
+            let helper = b"private-log-dir.cjs";
+            if !pending.contains(&PRIVATE_LOG_DIR)
+                && bytes.windows(helper.len()).any(|part| part == helper)
+            {
+                pending.push(PRIVATE_LOG_DIR);
             }
             destination(data, relative)?;
             loaded.push(Asset {

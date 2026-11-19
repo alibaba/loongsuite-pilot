@@ -264,6 +264,14 @@ pub(crate) async fn run(args: &ArgMatches) -> Result<i32> {
                     value["deployHooks"] = json!(true);
                 }
             }
+            if name == "publish-package" && !value["configOptions"].is_null() {
+                let mut config = match value["configOptions"].take() {
+                    Value::String(raw) => Options::new(parse_json(&raw)?)?,
+                    raw => Options::new(raw)?,
+                };
+                super::installer_config::capture_host_serial(&mut config).await;
+                value["configOptions"] = Value::Object(config.0);
+            }
             super::native_install::run(name, value).await?
         }
         "check-config" => {
@@ -278,11 +286,12 @@ pub(crate) async fn run(args: &ArgMatches) -> Result<i32> {
             String::new()
         }
         "write-config" | "config-diffs" | "validate-config" => {
-            let options = options(args)?;
+            let mut options = options(args)?;
             let config = options.text("configPath");
             let path = Path::new(&config);
             ensure!(path.is_absolute(), "configPath 必须为绝对路径");
             if name == "write-config" {
+                super::installer_config::capture_host_serial(&mut options).await;
                 write_config(path, &options).await?;
                 String::new()
             } else {

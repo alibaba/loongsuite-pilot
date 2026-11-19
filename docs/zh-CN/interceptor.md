@@ -6,6 +6,12 @@ Interceptor 的 HTTP 服务跑在 collector 进程里，随 collector 启动和�
 
 现有 Qoder / 千问办公 transcript 采集 hook 保持独立，拦截判定走第二条 hook。
 
+## 原生拦截自监控
+
+完整 Pilot 在启动、周期采样及退出时将 `interceptor` 写入 `pilot_status`。其中包含启停状态、规则配置与生效数量、判定次数、命中、拦截、降级放行及耗时。P95 是固定直方图桶上界，空样本或超出 3500 ms 为 null。多个原生裁决实例可在 `instances` 中分别查看其启动时间和累计值。
+
+托管配置无效时保留上一版规则并记录 `MANAGED_CONFIG_ALARM`。原生正则耗时达到 50 ms 产生 `INTERCEPTOR_REGEX_ALARM`，超出 200 ms 或请求剩余预算时跳过该匹配。每种诊断首次进入告警队列，同类告警十分钟冷却并累计次数，沿用现有告警输出。诊断包含固定分类、适用的规则 ID、版本和时间，不包含输入内容、表达式正文或凭证。
+
 ## 架构
 
 ```

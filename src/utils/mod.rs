@@ -23,6 +23,7 @@ pub mod poll_interval;
 pub mod process_discovery;
 pub mod record_utils;
 pub mod restart_breadcrumb;
+pub(crate) mod root_trigger;
 pub mod runtime_paths;
 pub mod single_instance_lock;
 pub mod sync_file_lock;
@@ -86,6 +87,7 @@ pub use json_document::{
 pub use logger::{
     create_logger, flush_logs_sync, init_file_logging, redirect_root_logger_to_stderr, BoundLogger,
 };
+pub(crate) use network_utils::SlsHostIdentity;
 pub use network_utils::{build_user_agent, local_ip, resolve_local_ip};
 pub use node_sqlite::{
     load_database_sync, query_readonly, query_readonly_paged, sqlite_engine_available,

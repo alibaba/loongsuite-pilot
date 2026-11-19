@@ -16,12 +16,12 @@ use tokio::task::JoinHandle;
 
 use crate::checkpoints::StateStore;
 use crate::deployment::{
-    are_grok_build_hook_assets_healthy, detect_agent, hook_install_alarm_key,
-    hook_install_result_path, hook_install_signal_path, is_agent_gated_enabled,
-    mark_hook_install_alarm_sent, resolve_deployment_scope, resolve_pilot_dir,
-    restore_grok_build_hook_assets, should_relay_hook_install_alarm, DeploymentManager,
-    DeploymentManagerOptions, DeploymentScopeMode, DeploymentScopeResult, HookInstallAlarmAgent,
-    HookInstallAlarmReport, HookInstallReport, PluginProbeDeployOptions, PluginProbeStrategy,
+    are_grok_build_hook_assets_healthy, hook_install_alarm_key, hook_install_result_path,
+    hook_install_signal_path, is_agent_gated_enabled, mark_hook_install_alarm_sent,
+    resolve_deployment_scope, resolve_pilot_dir, restore_grok_build_hook_assets,
+    should_relay_hook_install_alarm, DeploymentManager, DeploymentManagerOptions,
+    DeploymentScopeMode, DeploymentScopeResult, HookInstallAlarmAgent, HookInstallAlarmReport,
+    HookInstallReport, PluginProbeDeployOptions, PluginProbeStrategy,
 };
 use crate::flushers::{
     BaseFlusher, HttpFlusher, JsonlFlusher, MultiFlusher, OtlpTraceFlusher, SlsFlusher,
@@ -55,8 +55,8 @@ use crate::inputs::qoder_work_sqlite::{QoderWorkSqliteInput, QoderWorkSqliteOpti
 use crate::inputs::qoder_work_trace::{QoderWorkTraceInput, QoderWorkTraceOptions};
 use crate::inputs::qwen_code_cli_log::QwenCodeCliLogInput;
 use crate::inputs::qwen_work_cn::{
-    QwenWorkCnInput, QwenWorkCnOptions, QwenWorkCnSqliteInput, QwenWorkCnSqliteOptions,
-    QwenWorkCnTraceInput, QwenWorkCnTraceOptions,
+    resolve_collaboration_root, QwenWorkCnCollaborationInput, QwenWorkCnInput, QwenWorkCnOptions,
+    QwenWorkCnSqliteInput, QwenWorkCnSqliteOptions, QwenWorkCnTraceInput, QwenWorkCnTraceOptions,
 };
 use crate::inputs::rest_support::{HookInputOptions, SessionInputOptions};
 use crate::inputs::workbuddy::{WorkBuddyInput, WorkBuddyInputOptions};
@@ -82,8 +82,7 @@ use crate::status_bar::{MetricsSummaryWriter, ProcessOps, RuntimeWriter, StatusB
 use crate::types::CollectionMethod;
 use crate::types::{
     AgentActivityEntry, AgentDefinition, AgentDetection, AgentStopReason, AnalyticsConfig,
-    ClientType, DeployMode, DeployResult, DeploySkipReason, InstalledBy, JsonlFlusherConfig,
-    MultimodalStorage,
+    ClientType, DeployMode, DeployResult, DeploySkipReason, InstalledBy, MultimodalStorage,
 };
 use crate::utils::{
     clean_stale_tmp_files, directory_exists, ensure_dir, file_exists, read_installed_version,
@@ -232,6 +231,7 @@ pub struct Orchestrator {
     status_bar: Mutex<Option<StatusBarAppManager>>,
     signal_task: Mutex<Option<JoinHandle<()>>>,
     signal_stamp: Mutex<Option<(SystemTime, Vec<u8>)>>,
+    hook_watchdog_target_keys: Mutex<Vec<String>>,
     relayed_alarms: Mutex<HashSet<String>>,
     running: Mutex<bool>,
     listeners: Mutex<Vec<OrchestratorListener>>,
@@ -282,6 +282,7 @@ impl Orchestrator {
             status_bar: Mutex::new(None),
             signal_task: Mutex::new(None),
             signal_stamp: Mutex::new(None),
+            hook_watchdog_target_keys: Mutex::new(Vec::new()),
             relayed_alarms: Mutex::new(HashSet::new()),
             running: Mutex::new(false),
             listeners: Mutex::new(Vec::new()),
@@ -480,6 +481,10 @@ impl Orchestrator {
                 logger("Orchestrator").info("recorded deployment scope; skipping deployAll", None);
             }
             let watchdog = Arc::new(self.build_watchdog(&deployment));
+            *self
+                .hook_watchdog_target_keys
+                .lock()
+                .expect("watchdog targets") = Self::watchdog_target_keys(&deployment);
             let workers = LocalWorkerActivationService::new(
                 self.data_dir.clone(),
                 pilot_dir.clone(),
@@ -495,6 +500,14 @@ impl Orchestrator {
             (None, None)
         };
         let mut detection = self.register_all_inputs(&state_store).await;
+        if self.standalone {
+            self.register_sdk_codex(
+                &mut detection,
+                &pilot_dir,
+                &state_store,
+                interceptor_config.as_ref(),
+            );
+        }
         if self.uses_sdk_qoder() {
             self.register_sdk_qoder(
                 &mut detection,
@@ -530,7 +543,8 @@ impl Orchestrator {
         *self.discovery.lock().expect("discovery") = Some(discovery);
         let retention = Arc::new(
             LogRetentionService::new(&self.data_dir, self.config.retention.clone())
-                .with_state_store(Arc::clone(&state_store)),
+                .with_state_store(Arc::clone(&state_store))
+                .with_hermes_trace(self.otlp.lock().expect("otlp").as_ref()),
         );
         retention.start();
         *self.retention.lock().expect("retention") = Some(retention);
@@ -563,19 +577,30 @@ impl Orchestrator {
             updater.start();
             *self.updater_watchdog.lock().expect("updater") = Some(updater);
         }
-        if self.runtime_options.manage_host_services && self.config.pipeline.enabled {
-            let pipeline = Arc::new(PipelineManager::new(PipelineManagerOptions {
-                workspace_policy: Some(pipeline_policy),
-                config_dir: self.data_dir_join("configs/local"),
-                state_dir: self.data_dir_join("state/pipeline"),
-                failed_log_dir: self.data_dir_join("logs/pipeline-failed"),
-                data_dir: self.data_dir.clone(),
-                pipeline_config: crate::pipeline::PipelineToggle {
-                    enabled: self.config.pipeline.enabled,
-                    file_enabled: self.config.pipeline.file.enabled,
-                    qoder_api_enabled: self.config.pipeline.qoder_api.enabled,
-                },
-            }));
+        if self.runtime_options.manage_host_services
+            && (self.config.pipeline.enabled || self.config.pipeline.multica.discover_local_sources)
+        {
+            let pipeline = Arc::new(
+                PipelineManager::new(PipelineManagerOptions {
+                    workspace_policy: Some(pipeline_policy),
+                    config_dir: self.data_dir_join("configs/local"),
+                    state_dir: self.data_dir_join("state/pipeline"),
+                    failed_log_dir: self.data_dir_join("logs/pipeline-failed"),
+                    data_dir: self.data_dir.clone(),
+                    pipeline_config: crate::pipeline::PipelineToggle {
+                        enabled: self.config.pipeline.enabled,
+                        file_enabled: self.config.pipeline.file.enabled,
+                        qoder_api_enabled: self.config.pipeline.qoder_api.enabled,
+                        multica: self.config.pipeline.multica.clone(),
+                    },
+                    sls: self.config.flushers.sls.clone(),
+                    service_name_prefix: self.config.service_name_prefix.clone(),
+                })
+                .with_host_identity(crate::utils::SlsHostIdentity::new(
+                    self.config.host_identity_tags,
+                    &self.config.host_sn,
+                )),
+            );
             pipeline.start().await;
             *self.pipeline.lock().expect("pipeline") = Some(pipeline);
         } else {
@@ -710,6 +735,14 @@ impl Orchestrator {
 
     async fn stop_components(&self) {
         logger("Orchestrator").info("stopping orchestrator", None);
+        let signal = self.signal_task.lock().expect("signal").take();
+        if let Some(watchdog) = self.hook_watchdog.lock().expect("watchdog").take() {
+            watchdog.stop();
+        }
+        if let Some(task) = signal {
+            task.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+        }
         // 先取出组件再等待停止，避免回调或后台任务访问同一同步锁时死锁。
         let pipeline = self.pipeline.lock().expect("pipeline").take();
         if let Some(pipeline) = pipeline {
@@ -757,14 +790,8 @@ impl Orchestrator {
         if let Some(task) = self.runtime_task.lock().expect("runtime task").take() {
             task.abort();
         }
-        if let Some(task) = self.signal_task.lock().expect("signal").take() {
-            task.abort();
-        }
         if let Some(updater) = self.updater_watchdog.lock().expect("updater").take() {
             updater.stop();
-        }
-        if let Some(watchdog) = self.hook_watchdog.lock().expect("watchdog").take() {
-            watchdog.stop();
         }
         if let Some(cleanup) = self.legacy_cleanup.lock().expect("legacy").take() {
             cleanup.stop();
@@ -1174,7 +1201,7 @@ impl Orchestrator {
             return;
         }
         let deployment = self.deployment.lock().expect("deploy").clone();
-        if let Some(deployment) = deployment {
+        if let Some(deployment) = &deployment {
             deployment.load_definitions().await;
         }
         if let Err(err) = self.refresh_deployment_scope().await {
@@ -1182,6 +1209,23 @@ impl Orchestrator {
             return;
         }
         self.reconcile_recorded().await;
+        if let Some(deployment) = deployment {
+            let next_keys = Self::watchdog_target_keys(&deployment);
+            let mut keys = self
+                .hook_watchdog_target_keys
+                .lock()
+                .expect("watchdog targets");
+            if next_keys != *keys {
+                let mut watchdog = self.hook_watchdog.lock().expect("watchdog");
+                if let Some(previous) = watchdog.take() {
+                    let next = Arc::new(self.build_watchdog(&deployment));
+                    previous.stop();
+                    next.start();
+                    *watchdog = Some(next);
+                    *keys = next_keys;
+                }
+            }
+        }
         *self.signal_stamp.lock().expect("signal stamp") = Some(stamp);
     }
 
@@ -1283,13 +1327,36 @@ impl Orchestrator {
         entries
     }
 
+    fn watchdog_target_keys(deployment: &DeploymentManager) -> Vec<String> {
+        deployment
+            .get_definitions()
+            .iter()
+            .filter_map(|def| {
+                let hook = deployment.recorded_definition(def).ok()?.hook?;
+                serde_json::to_string(&(
+                    &def.id,
+                    hook.scope,
+                    &hook.settings_path,
+                    &hook.hook_command,
+                ))
+                .ok()
+            })
+            .collect()
+    }
+
     fn hook_watchdog_targets(&self, deployment: &DeploymentManager) -> Vec<PluginCheckTarget> {
         let mut targets = Vec::new();
         for def in deployment.get_definitions() {
             if def.deploy_mode != DeployMode::Hook || def.hook.is_none() || def.id == "grok-build" {
                 continue;
             }
-            let hook = def.hook.clone().unwrap();
+            let Some(hook) = deployment
+                .recorded_definition(&def)
+                .ok()
+                .and_then(|def| def.hook)
+            else {
+                continue;
+            };
             let script = Path::new(hook.hook_command.split_whitespace().next().unwrap_or(""))
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -1663,9 +1730,13 @@ impl Orchestrator {
             .is_some_and(|sls| sls.enabled)
             && self.config.collect_log
         {
-            let flusher = Arc::new(SlsFlusher::new(
+            let flusher = Arc::new(SlsFlusher::new_with_host_identity(
                 self.config.flushers.sls.clone().unwrap(),
                 &self.data_dir,
+                crate::utils::SlsHostIdentity::new(
+                    self.config.host_identity_tags,
+                    &self.config.host_sn,
+                ),
             ));
             if let Err(err) = flusher.start().await {
                 logger("Orchestrator").warn(
@@ -1732,6 +1803,20 @@ impl Orchestrator {
                                 })
                         });
                         let manager = Arc::downgrade(&self.inputs);
+                        let flusher = flusher.with_hermes_source_probe(move |source| {
+                            let input = manager
+                                .upgrade()
+                                .and_then(|manager| manager.get_input("hermes-agent-log"));
+                            Box::pin(async move {
+                                match input {
+                                    Some(input) => {
+                                        input.confirm_hermes_source_drained(source).await
+                                    }
+                                    None => false,
+                                }
+                            })
+                        });
+                        let manager = Arc::downgrade(&self.inputs);
                         let journal = Arc::new(crate::flushers::DoubaoTurnJournal::new(
                             self.data_dir_join("logs/doubao-pending-turns"),
                         ));
@@ -1762,15 +1847,10 @@ impl Orchestrator {
             }
         }
         if flushers.is_empty() {
-            logger("Orchestrator").warn("no flushers enabled, using JSONL fallback", None);
-            let fallback = Arc::new(JsonlFlusher::new(JsonlFlusherConfig {
-                enabled: true,
-                output_dir: self.data_dir_join("logs/output"),
-                rotate_daily: true,
-                max_file_size_mb: 100.into(),
-            }));
-            let _ = fallback.start().await;
-            flushers.push(fallback);
+            logger("Orchestrator").warn(
+                "no flushers enabled, collected events will not be exported",
+                None,
+            );
         }
         let flusher: Arc<dyn BaseFlusher> = if flushers.len() == 1 {
             flushers.remove(0)
@@ -1910,7 +1990,7 @@ impl Orchestrator {
             CopilotLogInput::check_availability,
         )
         .await;
-        if self.prepare_codex_shell_state(state_store).await {
+        if !self.standalone {
             let session_dir = std::env::var_os("CODEX_HOME")
                 .filter(|value| !value.is_empty())
                 .map(std::path::PathBuf::from)
@@ -2448,6 +2528,40 @@ impl Orchestrator {
             },
         )
         .await;
+        let collaboration_root = resolve_collaboration_root();
+        let collaboration_listener = "qwen-work-cn-collaboration";
+        self.add_hosted(
+            entries,
+            HostedInputSpec::new(
+                collaboration_listener,
+                "qwen-work-cn",
+                "session-file-polling",
+                1,
+            ),
+            QwenWorkCnCollaborationInput::new(
+                collaboration_root.clone(),
+                self.config
+                    .listeners
+                    .get(collaboration_listener)
+                    .and_then(|listener| listener.include_conversation_ids.as_deref()),
+                Arc::clone(state_store),
+                self.poll(collaboration_listener),
+            ),
+            collaboration_root
+                .parent()
+                .map(|path| path.to_string_lossy().into_owned())
+                .into_iter()
+                .collect(),
+            move || {
+                let root = collaboration_root.clone();
+                async move {
+                    tokio::fs::symlink_metadata(root)
+                        .await
+                        .is_ok_and(|metadata| metadata.is_dir())
+                }
+            },
+        )
+        .await;
         if !self.uses_sdk_qoder() {
             let qoder_agent = self.config.agents.get("qoder").cloned().unwrap_or_default();
             let qoder_multimodal = self.inputs_have_multimodal()
@@ -2709,26 +2823,31 @@ impl Orchestrator {
         .await;
         let hermes = self.data_dir_join("logs/hermes-agent");
         ensure_dir(&hermes).await;
-        self.attach_hook(
-            entries,
-            "hermes-agent-log",
-            "hermes-agent",
-            HermesLogInput::new(SessionInputOptions {
-                state_store: Arc::clone(state_store),
-                session_dir: Some(hermes.clone()),
-                file_pattern: None,
-                poll_interval_ms: self.poll("hermes-agent-log"),
-            }),
-            vec![hermes.clone()],
-            {
-                let hermes = hermes.clone();
-                move || {
+        let (hermes_input, live) = self
+            .attach_hook(
+                entries,
+                "hermes-agent-log",
+                "hermes-agent",
+                HermesLogInput::new(SessionInputOptions {
+                    state_store: Arc::clone(state_store),
+                    session_dir: Some(hermes.clone()),
+                    file_pattern: None,
+                    poll_interval_ms: self.poll("hermes-agent-log"),
+                }),
+                vec![hermes.clone()],
+                {
                     let hermes = hermes.clone();
-                    async move { directory_exists(&hermes).await }
-                }
-            },
-        )
-        .await;
+                    move || {
+                        let hermes = hermes.clone();
+                        async move { directory_exists(&hermes).await }
+                    }
+                },
+            )
+            .await;
+        live.set_hermes_source_probe(move |source| {
+            let input = Arc::clone(&hermes_input);
+            Box::pin(async move { input.confirm_source_drained(source).await })
+        });
         let dsh = self.data_dir_join("logs/dsh");
         ensure_dsh_log_dir(&dsh).await;
         self.attach_hook(
@@ -2919,25 +3038,123 @@ impl Orchestrator {
         );
     }
 
-    async fn prepare_codex_shell_state(&self, state: &StateStore) -> bool {
-        if !self.standalone {
-            return true;
-        }
-        match super::codex_sdk_migration::migrate(Path::new(&self.data_dir), state, &self.inputs)
-            .await
-        {
-            Ok(()) => true,
-            Err(error) => {
-                logger("Orchestrator").warn(
-                    "Codex SDK state migration failed; retained for retry",
-                    Some(&fields(serde_json::json!({"error":error.to_string()}))),
-                );
-                self.emit(OrchestratorEvent::ComponentFailure {
-                    component: "codex-sdk-migration".into(),
-                    error: error.to_string(),
-                });
-                false
-            }
+    fn register_sdk_codex(
+        &self,
+        entries: &mut Vec<Arc<dyn AgentDetection>>,
+        pilot_dir: &str,
+        state_store: &Arc<StateStore>,
+        interceptor_config: Option<&crate::types::InterceptorConfig>,
+    ) {
+        let home = resolve_home("~");
+        let sessions = std::env::var_os("CODEX_HOME")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .filter(|path| {
+                path.is_absolute()
+                    && !path
+                        .components()
+                        .any(|part| matches!(part, std::path::Component::ParentDir))
+            })
+            .unwrap_or_else(|| Path::new(&home).join(".codex"))
+            .join("sessions")
+            .to_string_lossy()
+            .into_owned();
+        let wakeup = self.data_dir_join("state/codex/transcript-wakeups");
+        let disabled = serde_json::json!({"mode": "none"});
+        let local = interceptor_config.map_or(disabled, |config| serde_json::json!(config));
+        let config = self.config.agents.get("codex");
+        let rollout_owns_interrupted_turns = mode_enabled(
+            &self.bits.lock().expect("bits").modes,
+            "codex-transcript",
+            self.config
+                .listeners
+                .get("codex-transcript")
+                .is_none_or(|listener| listener.enabled),
+        );
+
+        for (input, profile) in [
+            ("codex-transcript", "codex_rollout_v1"),
+            ("codex-aborted-turn", "codex_aborted_turn_v1"),
+        ] {
+            let sdk_data = self.data_dir_join(&format!("state/standalone-{input}-sdk"));
+            let init = serde_json::json!({
+                "data_dir": sdk_data,
+                "resource_dir": pilot_dir,
+                "home_dir": home,
+                "user_id": self.config.user_id,
+            });
+            let policy = serde_json::json!({
+                "agents": ["codex"],
+                "hcd": {"agent_configs": {"codex": {"collection": {
+                    "enabled": true,
+                    "profile": profile,
+                    "allowed_roots": [&sessions, &self.data_dir],
+                    "sources": [{"id": "codex-sessions", "type": "transcript", "path": sessions}],
+                    "limits": {"poll_interval_ms": self.poll(input)
+                        .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS)},
+                    "pilot_host": {
+                        "data_dir": self.data_dir,
+                        "codex_rollout_owns_interrupted_turns": input == "codex-aborted-turn" && rollout_owns_interrupted_turns,
+                        "capture_message_content": config.and_then(|agent| agent.capture_message_content),
+                        "exclude_workspaces": self.config.privacy.as_ref()
+                            .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
+                    },
+                }}}},
+                "sdk_options": {"mask": self.config.mask, "hooks": {"local": local}},
+            });
+            let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
+                input,
+                init,
+                policy,
+                &self.inputs,
+                std::path::PathBuf::from(sdk_data),
+                state_store,
+            ));
+            let live = live_from_parts(
+                input,
+                "codex",
+                "sdk-hosted",
+                sdk,
+                |input| input.running(),
+                |input| Box::pin(async move { input.start().await }),
+                |input| Box::pin(async move { input.stop().await }),
+            );
+            self.inputs.register_input(Arc::clone(&live));
+            let watch_sessions = sessions.clone();
+            let watch_wakeup = wakeup.clone();
+            let is_transcript = input == "codex-transcript";
+            let watch = if is_transcript {
+                CodexTranscriptInput::watch_paths(Some(&wakeup), Some(&sessions))
+            } else {
+                vec![sessions.clone()]
+            };
+            let existing_state = self.data_dir_join(&format!(
+                "state/standalone-{input}-sdk/outbox/delivery.sqlite"
+            ));
+            self.push_detection(
+                entries,
+                live,
+                watch,
+                move || {
+                    let sessions = watch_sessions.clone();
+                    let wakeup = watch_wakeup.clone();
+                    let existing_state = existing_state.clone();
+                    async move {
+                        std::path::Path::new(&existing_state).is_file()
+                            || if is_transcript {
+                                CodexTranscriptInput::check_availability(
+                                    Some(&wakeup),
+                                    Some(&sessions),
+                                )
+                                .await
+                            } else {
+                                crate::utils::directory_exists(&sessions).await
+                            }
+                    }
+                },
+                1,
+                None,
+            );
         }
     }
 
@@ -3102,7 +3319,8 @@ impl Orchestrator {
         input: T,
         watch: Vec<String>,
         available: A,
-    ) where
+    ) -> (Arc<T>, Arc<LiveInput>)
+    where
         T: HookSurface + 'static,
         A: Fn() -> Av + Send + Sync + 'static,
         Av: std::future::Future<Output = bool> + Send + 'static,
@@ -3137,7 +3355,8 @@ impl Orchestrator {
         });
         let manager = Arc::clone(&self.inputs);
         input.surface_on_entries(move |batch| manager.bind_entries(&id, batch.to_vec()));
-        self.push_detection(entries, live, watch, available, 1, None);
+        self.push_detection(entries, Arc::clone(&live), watch, available, 1, None);
+        (input, live)
     }
 
     fn poll(&self, listener: &str) -> Option<u64> {
@@ -3148,7 +3367,9 @@ impl Orchestrator {
     }
 
     fn metrics_writer(&self, version: &str, alarm: Arc<AlarmManager>) -> MetricsWriter {
-        let _ = alarm;
+        let interceptor_inputs = Arc::clone(&self.inputs);
+        let enabled =
+            self.standalone && self.config.interceptor.mode != crate::types::MaskMode::None;
         let inputs = Arc::clone(&self.inputs);
         let sls = self.sls.lock().expect("sls").clone();
         let otlp = self.otlp.lock().expect("otlp").clone();
@@ -3196,7 +3417,11 @@ impl Orchestrator {
             runtime_probe: None,
             now_ms: None,
         })
-        .tap(|_| {})
+        .with_host_identity(self.config.host_identity_tags, &self.config.host_sn)
+        .with_interceptor_monitoring(
+            move || interceptor_inputs.interceptor.snapshot(enabled),
+            alarm,
+        )
     }
 
     fn read_package_version(&self) -> String {
@@ -3216,24 +3441,14 @@ impl Orchestrator {
     }
 }
 
-trait Tap {
-    fn tap<F: FnOnce(&Self)>(self, f: F) -> Self
-    where
-        Self: Sized,
-    {
-        f(&self);
-        self
-    }
-}
-impl<T> Tap for T {}
-
 async fn precondition_for(
     def: &AgentDefinition,
     deployment: &DeploymentManager,
     data_dir: &str,
 ) -> bool {
     if let Some(plugin) = &def.directory_plugin {
-        return directory_exists(&plugin.source_dir).await && detect_agent(&def.detection).await;
+        return directory_exists(&plugin.source_dir).await
+            && deployment.is_agent_detected(def).await;
     }
     if let Some(patch) = &def.dsh_yaml_patch {
         return file_exists(&resolve_home(&patch.plugin_source)).await
@@ -3261,11 +3476,14 @@ fn listener_agent(listener: &str) -> &str {
         | "qoder-work-cn-hook"
         | "qoder-work-cn-log"
         | "qoder-work-cn-sqlite" => "qoder-work-cn",
-        "qwen-work-cn-trace" | "qwen-work-cn-hook" | "qwen-work-cn-sqlite" => "qwen-work-cn",
+        "qwen-work-cn-trace"
+        | "qwen-work-cn-hook"
+        | "qwen-work-cn-sqlite"
+        | "qwen-work-cn-collaboration" => "qwen-work-cn",
         "cursor-hook" => "cursor",
         "claude-code-log" => "claude-code",
         "grok-build-log" => "grok-build",
-        "codex-transcript" => "codex",
+        "codex-transcript" | "codex-aborted-turn" => "codex",
         "kiro-cli-log" | "kiro-cli-session" => "kiro-cli",
         "opencode-log" => "opencode",
         "pi-coding-agent-log" => "pi-coding-agent",
@@ -3524,6 +3742,7 @@ hosted_surface!(QoderWorkLogTraceInput);
 hosted_surface!(QwenWorkCnTraceInput);
 hosted_surface!(QwenWorkCnInput);
 hosted_surface!(QwenWorkCnSqliteInput);
+hosted_surface!(QwenWorkCnCollaborationInput);
 hosted_surface!(QoderTraceInput);
 hosted_surface!(CodexTranscriptInput);
 hosted_surface!(CopilotLogInput);
@@ -4035,7 +4254,15 @@ mod tests {
 
     fn local_output_orchestrator(data: &Path) -> Arc<Orchestrator> {
         let mut config = isolated_orchestrator(data).config.clone();
-        config.flushers = crate::types::FlusherConfig::default();
+        config.flushers = crate::types::FlusherConfig {
+            jsonl: Some(crate::types::JsonlFlusherConfig {
+                enabled: true,
+                output_dir: data.join("logs/output").to_string_lossy().into_owned(),
+                rotate_daily: true,
+                max_file_size_mb: 100.into(),
+            }),
+            ..Default::default()
+        };
         config.collect_log = false;
         config.collect_trace = false;
         config.otlp_trace = None;
@@ -4082,20 +4309,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_destinations_write_real_jsonl_fallback_in_configured_data_dir() {
+    async fn disabled_destinations_do_not_write_jsonl_implicitly() {
         let root = tempfile::tempdir().unwrap();
-        let orchestrator = local_output_orchestrator(root.path());
+        let mut config = local_output_orchestrator(root.path()).config.clone();
+        config.flushers.jsonl = None;
+        let orchestrator = Orchestrator::new(config);
         let output = install_local_output(&orchestrator).await;
-        assert_eq!(output.name(), "jsonl");
+        assert_eq!(output.name(), "multi");
         output
-            .send(fixture_entry("fallback", ""), None)
+            .send(fixture_entry("no-implicit-output", ""), None)
             .await
             .unwrap();
         output.shutdown().await.unwrap();
-        let rows = output_rows(root.path());
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["event.id"], "fallback");
-        assert_eq!(rows[0]["gen_ai.agent.type"], "orchestrator-fixture");
+        assert!(!root.path().join("logs/output").exists());
     }
 
     #[tokio::test]
@@ -4344,6 +4570,7 @@ mod tests {
         config.listeners.insert(
             "fixture-listener".into(),
             crate::types::ListenerConfig {
+                include_conversation_ids: None,
                 client: None,
                 log_dir: None,
                 enabled: true,
@@ -4599,7 +4826,7 @@ mod tests {
             config.status_bar.runtime_refresh_interval_ms = 300_000;
             config.status_bar.metrics_summary_interval_ms = 300_000;
             if mode == "custom-output" {
-                config.flushers.jsonl = Some(JsonlFlusherConfig {
+                config.flushers.jsonl = Some(crate::types::JsonlFlusherConfig {
                     enabled: true,
                     output_dir: home
                         .join("configured-output")
@@ -4668,6 +4895,7 @@ mod tests {
                 config.listeners.insert(
                     id.into(),
                     crate::types::ListenerConfig {
+                        include_conversation_ids: None,
                         client: None,
                         log_dir: None,
                         enabled: false,
@@ -4691,6 +4919,7 @@ mod tests {
                 config.listeners.insert(
                     id.into(),
                     crate::types::ListenerConfig {
+                        include_conversation_ids: None,
                         client: None,
                         log_dir: None,
                         enabled: false,
@@ -4702,6 +4931,7 @@ mod tests {
                 config.listeners.insert(
                     "fixture-listener".into(),
                     crate::types::ListenerConfig {
+                        include_conversation_ids: None,
                         client: None,
                         log_dir: None,
                         enabled: false,
@@ -5087,6 +5317,7 @@ mod tests {
                 registration_config.listeners.insert(
                     listener.into(),
                     crate::types::ListenerConfig {
+                        include_conversation_ids: None,
                         client: None,
                         log_dir: None,
                         enabled,

@@ -18,6 +18,7 @@ const DEFAULT_API_BASE: &str = "https://api.qoder.com";
 
 pub struct QoderApiPipeline {
     opts: QoderApiPipelineOptions,
+    host_identity: crate::utils::SlsHostIdentity,
     input: std::sync::Mutex<Option<Arc<QoderApiInput>>>,
     sender: std::sync::Mutex<Option<Arc<QoderApiSlsSender>>>,
     running: std::sync::atomic::AtomicBool,
@@ -28,6 +29,7 @@ pub struct QoderApiPipeline {
 impl QoderApiPipeline {
     pub fn new(opts: QoderApiPipelineOptions) -> Self {
         Self {
+            host_identity: Default::default(),
             opts,
             input: std::sync::Mutex::new(None),
             sender: std::sync::Mutex::new(None),
@@ -35,6 +37,14 @@ impl QoderApiPipeline {
             polling: std::sync::atomic::AtomicBool::new(false),
             task: std::sync::Mutex::new(None),
         }
+    }
+
+    pub(crate) fn with_host_identity(
+        mut self,
+        host_identity: crate::utils::SlsHostIdentity,
+    ) -> Self {
+        self.host_identity = host_identity;
+        self
     }
 
     async fn poll(self: &Arc<Self>) {
@@ -155,13 +165,16 @@ impl QoderApiPipeline {
             &self.opts.state_dir,
             backfill,
         )));
-        let sender = Arc::new(QoderApiSlsSender::new(
-            flusher,
-            &self.opts.config.config_name,
-            &self.opts.failed_log_dir,
-            &self.opts.data_dir,
-            self.opts.sink.clone(),
-        ));
+        let sender = Arc::new(
+            QoderApiSlsSender::new(
+                flusher,
+                &self.opts.config.config_name,
+                &self.opts.failed_log_dir,
+                &self.opts.data_dir,
+                self.opts.sink.clone(),
+            )
+            .with_host_identity(self.host_identity.clone()),
+        );
         sender.start();
         *self.sender.lock().unwrap() = Some(sender);
         let this = Arc::clone(self);

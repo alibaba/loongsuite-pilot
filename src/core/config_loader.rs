@@ -45,12 +45,16 @@ pub struct ConfigSources<'a> {
 }
 
 pub async fn load_config() -> anyhow::Result<AnalyticsConfig> {
-    load_config_impl(false).await
+    load_config_impl(false, None).await
 }
 
 /// 预检只读配置；已存在但损坏的文件和无效显式路径不能退回默认值。
 pub async fn check_config() -> anyhow::Result<AnalyticsConfig> {
-    load_config_impl(true).await
+    load_config_impl(true, None).await
+}
+
+pub(crate) async fn check_config_at(path: &str) -> anyhow::Result<AnalyticsConfig> {
+    load_config_impl(true, Some(path)).await
 }
 
 async fn read_checked_config(path: &str, required: bool) -> anyhow::Result<Option<Value>> {
@@ -83,11 +87,12 @@ fn inner_config_path(data_dir: &str) -> String {
         .into_owned()
 }
 
-async fn load_config_impl(strict: bool) -> anyhow::Result<AnalyticsConfig> {
-    let config_path = config_json_path();
+async fn load_config_impl(strict: bool, explicit: Option<&str>) -> anyhow::Result<AnalyticsConfig> {
+    let config_path = explicit.map_or_else(config_json_path, str::to_owned);
     let file = if strict {
-        let required = std::env::var("AGENT_DATA_COLLECTION_CONFIG")
-            .is_ok_and(|value| !value.trim().is_empty());
+        let required = explicit.is_some()
+            || std::env::var("AGENT_DATA_COLLECTION_CONFIG")
+                .is_ok_and(|value| !value.trim().is_empty());
         read_checked_config(&config_path, required).await?
     } else {
         read_json_file::<Value>(&config_path).await
@@ -192,6 +197,15 @@ pub fn assemble_config(
         auto_start: true,
         data_dir: data_dir.clone(),
         user_id,
+        host_sn: json_str(file.and_then(|value| value.get("hostSn")))
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+        host_identity_tags: env_bool(
+            sources,
+            "LOONGSUITE_PILOT_HOST_IDENTITY_TAGS",
+            json_bool(file.and_then(|value| value.get("hostIdentityTags"))).unwrap_or(true),
+        ),
         collect_log: env_bool(
             sources,
             "LOONGSUITE_PILOT_COLLECT_LOG",
@@ -926,7 +940,7 @@ fn build_jsonl_config(
         enabled: env_bool(
             sources,
             "JSONL_ENABLED",
-            json_bool(jsonl.and_then(|value| value.get("enabled"))).unwrap_or(true),
+            json_bool(jsonl.and_then(|value| value.get("enabled"))).unwrap_or(false),
         ),
         output_dir: resolve_home(
             &env_get(sources, "JSONL_OUTPUT_DIR")
@@ -991,12 +1005,39 @@ pub(crate) fn doubao_listener(value: Option<&Value>) -> ListenerConfig {
         );
     }
     ListenerConfig {
+        include_conversation_ids: None,
         enabled: valid && json_bool(value.and_then(|v| v.get("enabled"))).unwrap_or(true),
         poll_interval: json_u64(value.and_then(|v| v.get("pollInterval")))
             .unwrap_or(DEFAULT_POLL_INTERVAL_MS),
         log_dir: json_str(value.and_then(|v| v.get("logDir")))
             .and_then(crate::inputs::doubao_work::resolve_log_dir),
         client,
+    }
+}
+
+fn collaboration_allowlist(value: &Value) -> Vec<String> {
+    let valid = value
+        .as_array()
+        .filter(|ids| ids.len() <= 1000)
+        .and_then(|ids| {
+            ids.iter()
+                .map(|id| {
+                    id.as_str()
+                        .filter(|id| id.encode_utf16().count() <= 512)
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned)
+                })
+                .collect::<Option<std::collections::BTreeSet<_>>>()
+        });
+    if let Some(ids) = valid {
+        ids.into_iter().collect()
+    } else {
+        crate::utils::create_logger("ConfigLoader").warn(
+            "Invalid Qwen Work collaboration allowlist; collecting no conversations",
+            None,
+        );
+        Vec::new()
     }
 }
 
@@ -1018,6 +1059,7 @@ fn build_listeners(
         "qwen-work-cn-trace",
         "qwen-work-cn-hook",
         "qwen-work-cn-sqlite",
+        "qwen-work-cn-collaboration",
         "cursor-hook",
         "claude-code-log",
         "grok-build-log",
@@ -1032,6 +1074,7 @@ fn build_listeners(
         result.insert(
             key.to_string(),
             ListenerConfig {
+                include_conversation_ids: None,
                 client: None,
                 log_dir: None,
                 enabled: true,
@@ -1052,6 +1095,13 @@ fn build_listeners(
             result.insert(
                 key.clone(),
                 ListenerConfig {
+                    include_conversation_ids: (key == "qwen-work-cn-collaboration")
+                        .then(|| {
+                            value
+                                .get("includeConversationIds")
+                                .map(collaboration_allowlist)
+                        })
+                        .flatten(),
                     log_dir: None,
                     client: None,
                     enabled: json_bool(value.get("enabled"))
@@ -1072,6 +1122,7 @@ fn build_listeners(
                     .get("codex-transcript")
                     .cloned()
                     .unwrap_or(ListenerConfig {
+                        include_conversation_ids: None,
                         client: None,
                         log_dir: None,
                         enabled: true,
@@ -1080,6 +1131,7 @@ fn build_listeners(
                 result.insert(
                     "codex-transcript".into(),
                     ListenerConfig {
+                        include_conversation_ids: None,
                         client: None,
                         log_dir: None,
                         enabled: json_bool(legacy.get("enabled")).unwrap_or(defaults.enabled),
@@ -1186,17 +1238,35 @@ fn build_pipeline(file: Option<&Value>, sources: &ConfigSources<'_>) -> Pipeline
         file.and_then(|value| value.get("pipeline"))
             .and_then(|value| value.get("enabled")),
     );
-    let enabled = env_bool(
-        sources,
-        "LOONGSUITE_PILOT_PIPELINE_ENABLED",
+    let enabled = |fallback| {
         env_bool(
             sources,
-            "LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED",
-            file_pipeline.or(legacy).unwrap_or(false),
-        ),
+            "LOONGSUITE_PILOT_PIPELINE_ENABLED",
+            env_bool(
+                sources,
+                "LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED",
+                file_pipeline.or(legacy).unwrap_or(fallback),
+            ),
+        )
+    };
+    let multica_enabled = env_bool(
+        sources,
+        "LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED",
+        json_bool(file.and_then(|value| value.pointer("/pipeline/multica/enabled")))
+            .unwrap_or(true),
     );
+    let multica_mode = env_get(sources, "LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE").or_else(|| {
+        json_str(file.and_then(|value| value.pointer("/pipeline/multica/mode"))).map(str::to_owned)
+    });
     PipelineToggle {
-        enabled,
+        enabled: enabled(false),
+        multica: crate::types::MulticaPipelineToggle {
+            enabled: multica_enabled,
+            discover_local_sources: multica_enabled
+                && multica_mode.as_deref() == Some("on")
+                && enabled(true),
+            mode: multica_mode,
+        },
         file: PipelineSectionToggle {
             enabled: env_bool(
                 sources,
@@ -1331,16 +1401,20 @@ fn build_otlp_trace_raw(file: Option<&Value>) -> Option<OtlpTraceRawConfig> {
 fn build_mask_config(file: Option<&Value>, sources: &ConfigSources<'_>) -> MaskConfig {
     let mask = file.and_then(|value| value.get("mask"));
     let raw_replacement = non_empty(env_get(sources, "LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE"))
-        .or_else(|| json_string(mask.and_then(|value| value.get("replacementMode"))));
+        .or_else(|| {
+            non_empty(json_string(
+                mask.and_then(|value| value.get("replacementMode")),
+            ))
+        });
     let replacement_mode = raw_replacement
         .as_deref()
         .and_then(|value| value.parse::<MaskReplacementMode>().ok())
-        .unwrap_or(MaskReplacementMode::Placeholder);
+        .unwrap_or(MaskReplacementMode::Preview);
     if raw_replacement.as_ref().is_some_and(|value| {
         !value.is_empty() && value.parse::<MaskReplacementMode>().ok() != Some(replacement_mode)
     }) {
         logger("ConfigLoader").warn(
-            "invalid mask replacement mode, using placeholder",
+            "invalid mask replacement mode, using preview",
             Some(&fields(
                 serde_json::json!({ "replacementMode": raw_replacement }),
             )),
@@ -2586,6 +2660,27 @@ mod migration_config_basics_tests {
     #[test]
     fn file_environment_and_default_priority_keep_user_identity() {
         run("priority");
+    }
+    #[test]
+    fn local_jsonl_requires_an_explicit_opt_in_with_environment_precedence() {
+        let enabled = |file: Option<&Value>, setting: Option<&str>| {
+            let env = setting
+                .map(|value| HashMap::from([("JSONL_ENABLED".into(), value.into())]))
+                .unwrap_or_default();
+            let sources = ConfigSources {
+                env: &env,
+                platform: Platform::current(),
+                hostname: "synthetic",
+                config_path: "not-read.json",
+                global_poll_ms: None,
+            };
+            build_jsonl_config(file, "/pilot", &sources).enabled
+        };
+        assert!(!enabled(None, None));
+        let output = serde_json::json!({"jsonl":{"enabled":true}});
+        assert!(enabled(Some(&output), None));
+        assert!(!enabled(Some(&output), Some("false")));
+        assert!(enabled(None, Some("true")));
     }
     #[test]
     fn output_destination_and_batch_controls_keep_their_environment_contract() {

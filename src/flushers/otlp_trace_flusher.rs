@@ -87,6 +87,7 @@ const GROK_PASSTHROUGH: &[&str] = &[
     "loongsuite.grok.timing.source",
 ];
 const OPENCLAW_COMPAT_KEYS: &[&str] = &[
+    "agent.openclaw.run_id",
     "agent.openclaw.compatibility",
     "agent.openclaw.timing.inferred",
     "agent.openclaw.timing.source",
@@ -135,6 +136,9 @@ enum KeySource {
     Ephemeral,
 }
 
+#[path = "hermes_recovery.rs"]
+mod hermes_recovery;
+
 struct TurnBuffer {
     key: String,
     key_source: KeySource,
@@ -151,6 +155,9 @@ struct TurnBuffer {
     completed: bool,
     is_realtime_hermes: bool,
     has_hermes_native_run_observer: bool,
+    hermes_owner: hermes_recovery::OwnerState,
+    hermes_abandoned: bool,
+    is_observed_openclaw_cron: bool,
     last_activity_ms: i64,
     logical_bytes: f64,
     unmeasured_records: u64,
@@ -208,6 +215,7 @@ struct ConvertState {
 }
 
 struct OtlpState {
+    hermes: hermes_recovery::RecoveryState,
     buffers: IndexMap<String, TurnBuffer>,
     flushed: HashSet<String>,
     batch_depth: usize,
@@ -273,6 +281,7 @@ pub struct OtlpTraceFlusher {
 }
 impl Drop for OtlpTraceFlusher {
     fn drop(&mut self) {
+        self.inner.stop_hermes_timer();
         if let Some(idle) = self
             .inner
             .idle
@@ -383,6 +392,7 @@ struct OtlpInner {
     #[cfg(test)]
     test_conversion_clock: Mutex<Option<TestConversionClock>>,
     idle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    hermes_timer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     warned_hermes_idle_timeout: AtomicBool,
     warned_hermes_legacy_idle_timeout: AtomicBool,
     convert_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -534,11 +544,13 @@ impl OtlpTraceFlusher {
             #[cfg(test)]
             test_conversion_clock: Mutex::new(None),
             idle: Mutex::new(None),
+            hermes_timer: Mutex::new(None),
             warned_hermes_idle_timeout: AtomicBool::new(false),
             warned_hermes_legacy_idle_timeout: AtomicBool::new(false),
             convert_locks: Mutex::new(HashMap::new()),
             endpoints,
             state: Mutex::new(OtlpState {
+                hermes: hermes_recovery::RecoveryState::default(),
                 buffers: IndexMap::new(),
                 flushed: HashSet::new(),
                 batch_depth: 0,
@@ -656,6 +668,9 @@ impl OtlpTraceFlusher {
                 drop(batch.take());
             }
             for (index, entry) in entries.into_iter().enumerate() {
+                if entry.event_name == Some(crate::types::AgentEventName::GuardrailEvaluation) {
+                    continue;
+                }
                 self.inner
                     .send_entry(entry, sizes.as_ref().map(|sizes| sizes[index]))
                     .await?;
@@ -769,6 +784,7 @@ impl BaseFlusher for OtlpTraceFlusher {
     }
 
     async fn shutdown(&self) -> Result<(), FlushError> {
+        self.inner.stop_hermes_timer();
         if let Some(handle) = self
             .inner
             .idle
@@ -818,6 +834,12 @@ impl BaseFlusher for OtlpTraceFlusher {
 }
 
 impl OtlpInner {
+    fn stop_hermes_timer(&self) {
+        if let Some(task) = self.hermes_timer.lock().expect("Hermes owner timer").take() {
+            task.abort();
+        }
+    }
+
     async fn ensure_started(self: &Arc<Self>) -> Result<(), FlushError> {
         self.ensure_codex_started().await?;
         self.ensure_doubao_started().await
@@ -909,10 +931,9 @@ impl OtlpInner {
             .journal_key
             .as_ref()
             .expect("durable Codex spill key");
-        let ids = buffer
-            .spilled_event_ids
-            .as_ref()
-            .expect("durable Codex spill ids");
+        // A live spill retains accepted IDs. An evicted Hermes owner is only
+        // rehydrated in full after proving that its raw input was durably drained.
+        let ids = buffer.spilled_event_ids.as_ref();
         let mut prime = context
             .journal
             .load_batches(Some(key))
@@ -940,7 +961,7 @@ impl OtlpInner {
                 (context.prepare)(batch.entries)
                     .map_err(FlushError::codex_journal)?
                     .into_iter()
-                    .filter(|entry| ids.contains(&entry.event_id)),
+                    .filter(|entry| ids.is_none_or(|ids| ids.contains(&entry.event_id))),
             );
         }
         // A public batch is persisted before admission. Never pull a future
@@ -1233,6 +1254,13 @@ impl OtlpInner {
                 || (buffer.agent_type == "doubao-work" && self.doubao_context().is_some())
             {
                 self.record_removal(&buffer);
+                if buffer.journal_key.is_some() && buffer.hermes_owner.owner().is_some() {
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .hermes
+                        .defer(buffer);
+                }
             } else {
                 buffer.completed = true;
                 self.trigger_ordinary_flush(buffer, false).await?;
@@ -1323,6 +1351,9 @@ impl OtlpInner {
                 if buffer.is_realtime_hermes {
                     continue;
                 }
+                if buffer.is_observed_openclaw_cron {
+                    continue;
+                }
                 if incoming_session.is_none()
                     || buffer.session_id.is_none()
                     || incoming_session != buffer.session_id
@@ -1354,6 +1385,9 @@ impl OtlpInner {
                     .counters
                     .insert(agent_type.clone(), TraceRuntimeCounters::default());
             }
+            if !state.buffers.contains_key(&key) {
+                state.hermes.deferred.shift_remove(&key);
+            }
             {
                 let buffer = state
                     .buffers
@@ -1374,6 +1408,9 @@ impl OtlpInner {
                         completed: false,
                         is_realtime_hermes: false,
                         has_hermes_native_run_observer: false,
+                        hermes_owner: hermes_recovery::OwnerState::default(),
+                        hermes_abandoned: false,
+                        is_observed_openclaw_cron: false,
                         last_activity_ms: now,
                         logical_bytes: 0.0,
                         unmeasured_records: 0,
@@ -1388,10 +1425,19 @@ impl OtlpInner {
                         == Some("realtime-v1")
                 {
                     buffer.is_realtime_hermes = true;
+                    buffer.hermes_owner.observe(&entry);
                     buffer.has_hermes_native_run_observer |= entry
                         .get("agent.hermes.native_run_observer")
                         .and_then(Value::as_bool)
                         == Some(true);
+                }
+                if agent_type == "openclaw"
+                    && entry
+                        .get("agent.openclaw.collection")
+                        .and_then(Value::as_str)
+                        == Some("cron-lifecycle-v1")
+                {
+                    buffer.is_observed_openclaw_cron = true;
                 }
                 if durable {
                     buffer
@@ -1452,6 +1498,19 @@ impl OtlpInner {
                 }
                 if is_terminal_event(&entry) {
                     buffer.completed = true;
+                }
+            }
+            if agent_type == "hermes" {
+                if let Some(owner) = state
+                    .buffers
+                    .get(&key)
+                    .filter(|buffer| buffer.journal_key.is_some())
+                    .and_then(|buffer| buffer.hermes_owner.owner())
+                {
+                    let source = owner.source.clone();
+                    state.hermes.track(&key, &source);
+                } else {
+                    state.hermes.release(&key);
                 }
             }
             Self::spill_codex_payloads(&mut state);
@@ -1552,13 +1611,32 @@ impl OtlpInner {
         } else {
             None
         };
-        self.rehydrate_codex_turn(&mut buffer).await?;
+        if let Err(error) = self.rehydrate_codex_turn(&mut buffer).await {
+            if buffer.hermes_abandoned {
+                self.retry_abandoned_hermes(buffer);
+            }
+            return Err(error);
+        }
         let buffer = self.prepare_buffer_export(buffer, mark_flushed);
         self.export_buffer(buffer).await
     }
 
-    async fn export_buffer(self: &Arc<Self>, buffer: TurnBuffer) -> Result<(), FlushError> {
+    fn retry_abandoned_hermes(&self, buffer: TurnBuffer) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.flushed.remove(&buffer.key);
+        state.hermes.defer(buffer);
+    }
+
+    async fn export_buffer(self: &Arc<Self>, mut buffer: TurnBuffer) -> Result<(), FlushError> {
         let doubao = buffer.agent_type == "doubao-work";
+        if buffer.hermes_abandoned {
+            if let Some(first) = buffer.records.first_mut() {
+                first.extra.insert(
+                    "agent.hermes.collection.end_reason".into(),
+                    "producer_process_exited".into(),
+                );
+            }
+        }
         let exported = self
             .convert_and_export(&buffer.agent_type, &buffer.records)
             .await;
@@ -1593,18 +1671,32 @@ impl OtlpInner {
         }
         if exported && buffer.completed && buffer.journal_key.is_some() {
             if let Some(context) = self.codex_context() {
-                context
-                    .journal
-                    .acknowledge(&buffer.records)
-                    .await
-                    .map_err(FlushError::codex_journal)?;
+                if let Err(error) = context.journal.acknowledge(&buffer.records).await {
+                    if buffer.hermes_abandoned {
+                        self.retry_abandoned_hermes(buffer);
+                    }
+                    return Err(FlushError::codex_journal(error));
+                }
             }
+        } else if !exported && buffer.hermes_abandoned {
+            self.retry_abandoned_hermes(buffer);
+            return Ok(());
         } else if !exported && buffer.journal_key.is_some() {
             self.state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .flushed
                 .remove(&buffer.key);
+        }
+        if buffer.agent_type == "hermes"
+            && buffer.completed
+            && (exported || buffer.journal_key.is_some())
+        {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .hermes
+                .release(&buffer.key);
         }
         Ok(())
     }
@@ -1651,7 +1743,9 @@ impl OtlpInner {
         // Transfer ordinary records before the first cancellable wait. These
         // completion signals describe task lifetime only, never transport ACK.
         for buffer in completed {
-            if !matches!(buffer.agent_type.as_str(), "codex" | "doubao-work") {
+            if buffer.journal_key.is_none()
+                && !matches!(buffer.agent_type.as_str(), "codex" | "doubao-work")
+            {
                 if let Some(scope) = &scope {
                     if let Some(done) = self.start_ordinary_export(scope, buffer, false).await {
                         waiting.push(done);
@@ -1700,6 +1794,7 @@ impl OtlpInner {
                 .iter()
                 .filter(|(_, buffer)| {
                     if buffer.completed
+                        || buffer.is_observed_openclaw_cron
                         || now.saturating_sub(buffer.last_activity_ms) <= timeout as i64
                     {
                         return false;
@@ -1732,6 +1827,7 @@ impl OtlpInner {
                 if !state.buffers.get(&key).is_some_and(|buffer| {
                     !buffer.completed
                         && !buffer.has_hermes_native_run_observer
+                        && !buffer.is_observed_openclaw_cron
                         && now.saturating_sub(buffer.last_activity_ms) > timeout as i64
                 }) {
                     continue;
@@ -1955,8 +2051,21 @@ impl OtlpInner {
             ..
         } = *scope;
         let resource = self.build_resource(agent_type, service_name, projected, framework, system);
+        let abandoned_hermes = agent_type == "hermes"
+            && records.iter().any(|record| {
+                entry_str(record, "agent.hermes.collection.end_reason").as_deref()
+                    == Some("producer_process_exited")
+            });
         for span in &mut spans {
             span.resource_attributes = Some(resource.clone());
+            if abandoned_hermes {
+                span.attributes
+                    .insert("agent.hermes.collection.incomplete".into(), true.into());
+                span.attributes.insert(
+                    "agent.hermes.collection.end_reason".into(),
+                    "producer_process_exited".into(),
+                );
+            }
         }
         apply_qoder_work_step_timing(records, &mut spans);
         enrich_tool_skills(records, &mut spans);
@@ -2627,6 +2736,16 @@ fn prepare_records<'a>(
     if agent_type == "copilot" {
         passthrough.push("gen_ai.copilot.telemetry.source".into());
     }
+    if records
+        .iter()
+        .any(AgentActivityEntry::is_qwen_collaboration)
+    {
+        passthrough.extend([
+            "agent.source".into(),
+            "loongsuite.observation.scope".into(),
+            "loongsuite.qwenworkcn.completion_time_source".into(),
+        ]);
+    }
     if super::qoder_turn_converter::is_qoder_transcript_agent(agent_type) {
         passthrough.push("agent.transcript_incomplete".into());
     }
@@ -2720,6 +2839,11 @@ fn route_convert(
         super::convert_qoder_turn(records, &options, converter)
     } else if agent_type == "doubao-work" {
         super::convert_doubao_work_turn(records, &options, converter)
+    } else if records
+        .iter()
+        .any(AgentActivityEntry::is_qwen_collaboration)
+    {
+        convert_qwen_collaboration(records, &options, converter)
     } else if agent_type == "qwen-code-cli" {
         convert_qwen_subagents(records, &options, converter)
     } else if agent_type == "hermes" || agent_type == "openclaw" {
@@ -2746,6 +2870,64 @@ fn route_convert(
     } else {
         converter.convert(records, &options)
     }
+}
+
+fn convert_qwen_collaboration(
+    records: &[AgentActivityEntry],
+    options: &ConvertOptions,
+    converter: &dyn EventLogConverter,
+) -> Result<ConvertResult, String> {
+    let boundary: Vec<_> = records
+        .iter()
+        .filter(|entry| {
+            entry.is_qwen_collaboration()
+                && entry.event_name == Some(crate::types::AgentEventName::Other)
+        })
+        .collect();
+    let start = boundary.iter().find(|entry| entry.turn_start == Some(true));
+    let end = boundary.iter().find(|entry| entry.turn_end == Some(true));
+    let (Some(start), Some(end)) = (start, end) else {
+        return Ok(ConvertResult {
+            warnings: vec!["Incomplete Qwen Work collaboration turn".into()],
+            ..Default::default()
+        });
+    };
+    if boundary.len() != 2
+        || start.event_id == end.event_id
+        || start.turn_id != end.turn_id
+        || start.session_id != end.session_id
+    {
+        return Ok(ConvertResult {
+            warnings: vec!["Incomplete Qwen Work collaboration turn".into()],
+            ..Default::default()
+        });
+    }
+    let mut start = (**start).clone();
+    if start.input_messages.is_none() && start.input_messages_delta.is_none() {
+        start.input_messages_delta = Some(Value::Array(Vec::new()));
+    }
+    let mut result = converter.convert(&[start, (**end).clone()], options)?;
+    if let Some(output) = end
+        .output_messages
+        .as_ref()
+        .filter(|value| value.is_array())
+    {
+        let output = output.to_string();
+        for span in &mut result.spans {
+            if matches!(
+                span.attributes
+                    .get("gen_ai.span.kind")
+                    .and_then(Value::as_str),
+                Some("ENTRY" | "AGENT")
+            ) {
+                span.attributes.insert(
+                    "gen_ai.output.messages".into(),
+                    Value::String(output.clone()),
+                );
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn unique_service_names(inner: &OtlpInner, agent_type: &str) -> Vec<String> {
@@ -2808,7 +2990,15 @@ fn resolve_group_key(entry: &AgentActivityEntry) -> (KeySource, String, String) 
         }
     }
     if let Some(turn_id) = entry_str(entry, "gen_ai.turn.id") {
-        if normalize_agent_type(&entry.agent_type) == "codex" {
+        let agent = normalize_agent_type(&entry.agent_type);
+        if agent == "hermes" && !entry.session_id.is_empty() {
+            return (
+                KeySource::TurnId,
+                turn_id,
+                format!("hermes:{}", super::codex_turn_journal_group_key(entry)),
+            );
+        }
+        if agent == "codex" {
             let parts = [
                 entry.user_id.as_str(),
                 entry.session_id.as_str(),
@@ -2892,6 +3082,15 @@ fn is_terminal_event(entry: &AgentActivityEntry) -> bool {
         return entry_bool(entry, "gen_ai.turn.end") == Some(true);
     }
     if agent_type == "openclaw" {
+        if entry
+            .get("agent.openclaw.collection")
+            .and_then(Value::as_str)
+            == Some("cron-lifecycle-v1")
+        {
+            return entry.get("agent.openclaw.hook").and_then(Value::as_str)
+                == Some("cron_finished")
+                && entry_bool(entry, "gen_ai.turn.end") == Some(true);
+        }
         return entry_str(entry, "agent.openclaw.hook").as_deref() == Some("llm_output")
             || (entry_str(entry, "agent.openclaw.compatibility").as_deref() == Some("legacy")
                 && matches!(
@@ -3625,26 +3824,34 @@ fn enrich_grok(records: &[AgentActivityEntry], meta: &GrokMeta, spans: &mut [Rea
 fn prepare_openclaw_collection(records: &[AgentActivityEntry]) -> Vec<AgentActivityEntry> {
     let mut endings: HashMap<String, Map<String, Value>> = HashMap::new();
     for record in records {
-        if entry_str(record, "agent.openclaw.compatibility").as_deref() == Some("legacy")
-            && entry_str(record, "agent.openclaw.hook").as_deref() == Some("legacy_cleanup")
-        {
+        let hook = record.get("agent.openclaw.hook").and_then(Value::as_str);
+        let legacy_cleanup = hook == Some("legacy_cleanup")
+            && record
+                .get("agent.openclaw.compatibility")
+                .and_then(Value::as_str)
+                == Some("legacy");
+        let incomplete = entry_bool(record, "agent.openclaw.collection.incomplete") == Some(true);
+        let ambiguous = entry_bool(record, "agent.openclaw.correlation.ambiguous") == Some(true);
+        if legacy_cleanup || (hook == Some("cron_finished") && (incomplete || ambiguous)) {
             let key = format!(
                 "{:?}|{:?}",
                 record.trace_id,
                 entry_str(record, "gen_ai.turn.id")
             );
             let mut fields = Map::new();
-            fields.insert(
-                "agent.openclaw.collection.incomplete".to_string(),
-                Value::Bool(true),
-            );
-            if let Some(reason) = entry_str(record, "agent.openclaw.collection.end_reason") {
+            if legacy_cleanup || incomplete {
                 fields.insert(
-                    "agent.openclaw.collection.end_reason".to_string(),
-                    Value::String(reason),
+                    "agent.openclaw.collection.incomplete".to_string(),
+                    Value::Bool(true),
                 );
+                if let Some(reason) = entry_str(record, "agent.openclaw.collection.end_reason") {
+                    fields.insert(
+                        "agent.openclaw.collection.end_reason".to_string(),
+                        Value::String(reason),
+                    );
+                }
             }
-            if entry_bool(record, "agent.openclaw.correlation.ambiguous") == Some(true) {
+            if ambiguous {
                 fields.insert(
                     "agent.openclaw.correlation.ambiguous".to_string(),
                     Value::Bool(true),
@@ -4098,6 +4305,29 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    #[test]
+    fn openclaw_cron_waits_for_outer_completion_and_groups_across_sender_changes() {
+        let event = |user: &str, hook: &str, completed: bool| {
+            entry_from_map(
+                serde_json::from_value(json!({
+                    "event.name":"other", "gen_ai.agent.type":"openclaw",
+                    "gen_ai.session.id":"fixed-session", "gen_ai.turn.id":"unique-cron-turn",
+                    "agent.openclaw.collection":"cron-lifecycle-v1",
+                    "agent.openclaw.hook":hook, "user.id":user, "gen_ai.turn.end":completed,
+                }))
+                .unwrap(),
+            )
+        };
+        let attempt = event("fallback", "llm_output", false);
+        let complete = event("sender", "cron_finished", true);
+        assert!(!super::is_terminal_event(&attempt));
+        assert!(super::is_terminal_event(&complete));
+        assert_eq!(
+            crate::flushers::codex_turn_journal_group_key(&attempt),
+            crate::flushers::codex_turn_journal_group_key(&complete)
+        );
+    }
+
     fn cfg(endpoints: Vec<OtlpEndpoint>) -> OtlpTraceFlusherConfig {
         OtlpTraceFlusherConfig {
             span_enricher_paths: None,
@@ -4161,6 +4391,88 @@ mod tests {
         )
         .unwrap();
         (flusher, converter)
+    }
+
+    #[test]
+    fn hermes_groups_reused_turn_ids_by_session_and_user() {
+        let record = |session: &str, user: &str| {
+            entry(
+                json!({"gen_ai.agent.type":"hermes","gen_ai.turn.id":"reused","gen_ai.session.id":session,"user.id":user}),
+            )
+        };
+        let key = |session, user| super::resolve_group_key(&record(session, user)).2;
+        assert_ne!(key("old", "user-a"), key("new", "user-a"));
+        assert_ne!(key("old", "user-a"), key("old", "user-b"));
+        assert_eq!(key("old", "user-a"), key("old", "user-a"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn hermes_recovery_waits_for_durable_drain_and_replays_evicted_journal() {
+        let root = tempfile::tempdir().unwrap();
+        let (flusher, capture) = make_flusher();
+        let journal =
+            Arc::new(crate::flushers::CodexTurnJournal::new(root.path()).with_delegated_agents());
+        let flusher = flusher.with_codex_journal(Arc::clone(&journal), Ok);
+        let owner = json!({
+            "pid": std::process::id(), "start_ticks": "0",
+            "source_token": format!("{}-123-deadbeef", std::process::id()),
+            "pid_namespace": std::fs::read_link("/proc/self/ns/pid").unwrap().to_str().unwrap(),
+            "boot_id": std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap().trim(),
+        });
+        let request = entry(json!({
+            "event.name":"llm.request","event.id":"request","time_unix_nano":"100",
+            "gen_ai.agent.type":"hermes","gen_ai.session.id":"current","gen_ai.turn.id":"native",
+            "gen_ai.step.id":"step","gen_ai.response.id":"response",
+            "agent.hermes.collection":"realtime-v1","agent.hermes.native_run_observer":true,
+            "agent.hermes.process":owner,
+        }));
+        let mut response = request.clone();
+        response.event_id = "response-event".into();
+        response.event_name = Some(crate::types::AgentEventName::LlmResponse);
+        response.time_unix_nano = "200".into();
+        flusher
+            .send_batch(vec![request.clone(), response], None)
+            .await
+            .unwrap();
+        let source = owner["source_token"].as_str().unwrap();
+        assert!(flusher.has_pending_hermes_source(source));
+        let key = super::resolve_group_key(&request).2;
+        let activity = {
+            let mut state = flusher.inner.state.lock().unwrap();
+            let buffer = state.buffers.shift_remove(&key).unwrap();
+            let activity = buffer.last_activity_ms;
+            state.hermes.defer(buffer);
+            activity
+        };
+        let not_drained: super::hermes_recovery::SourceProbe =
+            Arc::new(|_| Box::pin(async { false }));
+        let drained: super::hermes_recovery::SourceProbe = Arc::new(|_| Box::pin(async { true }));
+        flusher
+            .inner
+            .recover_hermes_at(&drained, activity + 300_000)
+            .await;
+        flusher
+            .inner
+            .recover_hermes_at(&not_drained, activity + 360_000)
+            .await;
+        assert!(capture.calls.lock().unwrap().is_empty());
+        assert!(!journal.is_acknowledged(&request).await.unwrap());
+        assert!(flusher.has_pending_hermes_source(source));
+        flusher
+            .inner
+            .recover_hermes_at(&drained, activity + 390_000)
+            .await;
+        let calls = capture.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].len(), 2);
+        assert_eq!(
+            calls[0][0].get("agent.hermes.collection.end_reason"),
+            Some(&json!("producer_process_exited"))
+        );
+        assert!(journal.is_acknowledged(&request).await.unwrap());
+        assert!(!flusher.has_pending_hermes_source(source));
+        flusher.shutdown().await.unwrap();
     }
 
     #[tokio::test]

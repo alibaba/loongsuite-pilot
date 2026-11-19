@@ -1,5 +1,5 @@
 //! Full Pilot's client for the same activity and lifecycle ABI used by embedders.
-use super::InputManager;
+use super::{managed_hook::ManagedHook, InputManager};
 use crate::checkpoints::StateStore;
 use crate::interceptor::{ToolInterceptPhase, ToolVerdictAction, ToolVerdictKey, ToolVerdictStore};
 use crate::sdk::abi;
@@ -21,6 +21,7 @@ pub(super) struct SdkAgent {
     sdk_data: PathBuf,
     legacy_state: Weak<StateStore>,
     verdicts: Option<Arc<ToolVerdictStore>>,
+    managed: Option<Arc<ManagedHook>>,
     running: Arc<AtomicBool>,
     session: tokio::sync::Mutex<Option<Session>>,
 }
@@ -42,6 +43,7 @@ impl SdkAgent {
         Self {
             input,
             init: init.to_string().into_bytes(),
+            managed: configure_managed_hook(&policy, &sdk_data, manager),
             policy: policy.to_string().into_bytes(),
             manager: Arc::downgrade(manager),
             sdk_data,
@@ -62,6 +64,7 @@ impl SdkAgent {
         Self {
             input: "qoder-trace",
             init: init.to_string().into_bytes(),
+            managed: configure_managed_hook(&policy, &sdk_data, manager),
             policy: policy.to_string().into_bytes(),
             manager: Arc::downgrade(manager),
             sdk_data,
@@ -93,6 +96,7 @@ impl SdkAgent {
             sdk_data: self.sdk_data.clone(),
             legacy_state: self.legacy_state.clone(),
             verdicts: self.verdicts.clone(),
+            managed: self.managed.clone(),
             start_result: AtomicI32::new(PENDING),
             stop_result: AtomicI32::new(PENDING),
         });
@@ -134,6 +138,24 @@ impl SdkAgent {
     }
 }
 
+fn configure_managed_hook(
+    policy: &Value,
+    sdk_data: &std::path::Path,
+    manager: &Arc<InputManager>,
+) -> Option<Arc<ManagedHook>> {
+    if policy
+        .pointer("/sdk_options/hooks/local/mode")
+        .and_then(Value::as_str)
+        != Some("all")
+    {
+        return None;
+    }
+    sdk_data
+        .parent()?
+        .parent()
+        .map(|data| Arc::new(ManagedHook::new(data).with_owner(manager)))
+}
+
 struct Context {
     input: &'static str,
     runtime: tokio::runtime::Handle,
@@ -141,11 +163,29 @@ struct Context {
     sdk_data: PathBuf,
     legacy_state: Weak<StateStore>,
     verdicts: Option<Arc<ToolVerdictStore>>,
+    managed: Option<Arc<ManagedHook>>,
     start_result: AtomicI32,
     stop_result: AtomicI32,
 }
 
 impl Context {
+    fn observe_interceptor(&self, snapshot: &Value, initial: bool) {
+        let Some(manager) = self.manager.upgrade() else {
+            return;
+        };
+        let mut status = snapshot["interceptor"].clone();
+        if status["enabled"] == true {
+            if let Some(rules) = &self.managed {
+                let builtin = status["rules"]["builtin"].clone();
+                let (rule_status, diagnostics) = rules.monitoring(initial);
+                status["rules"] = rule_status;
+                status["rules"]["builtin"] = builtin;
+                status["diagnostics"] = diagnostics;
+            }
+        }
+        manager.interceptor.observe(self.input, status);
+    }
+
     fn export_drained_checkpoint(
         &self,
         api: &abi::PilotApiV2,
@@ -183,17 +223,29 @@ impl Context {
         if namespace.len() != 64 || !namespace.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("SDK returned an invalid source namespace".into());
         }
+        use crate::sdk::outbox::{LegacyCheckpointHandoff, Outbox};
+        let handoff = LegacyCheckpointHandoff::for_input(self.input);
+        let _handoff_lock = if handoff.is_some() {
+            let path = self.sdk_data.join("collector.lock");
+            crate::utils::source_access::private_path(&path).map_err(|err| err.to_string())?;
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map_err(|err| err.to_string())?;
+            fs2::FileExt::try_lock_exclusive(&lock).map_err(|err| err.to_string())?;
+            Some(lock)
+        } else {
+            None
+        };
         let checkpoint = StateStore::new(
             self.sdk_data
                 .join("sources")
                 .join(namespace)
                 .join("input-state.json"),
         );
-        let persisted = crate::sdk::outbox::Outbox::read_persisted_checkpoint(
-            &self.sdk_data.join("outbox"),
-            namespace,
-        )
-        .map_err(|error| error.to_string())?;
+        let persisted = Outbox::read_persisted_checkpoint(&self.sdk_data.join("outbox"), namespace)
+            .map_err(|error| error.to_string())?;
         self.runtime.block_on(async {
             if let Some(text) = persisted.as_deref() {
                 checkpoint
@@ -213,6 +265,10 @@ impl Context {
             if imported {
                 legacy.save().await.map_err(|error| error.to_string())?;
             }
+            if let Some(handoff) = handoff {
+                Outbox::mark_shell_checkpoint_exported(&self.sdk_data.join("outbox"), handoff)
+                    .map_err(|error| error.to_string())?;
+            }
             Ok(())
         })
     }
@@ -222,24 +278,37 @@ unsafe extern "C" fn on_start(
     ctx: *mut c_void,
     _: *mut abi::PilotHandle,
     code: i32,
-    _: abi::PilotJsonView,
+    report: abi::PilotJsonView,
 ) {
     // SAFETY: both lifecycle callbacks run on the owning dispatch thread.
-    unsafe { &*ctx.cast::<Context>() }
-        .start_result
-        .store(code, Ordering::Release);
+    let context = unsafe { &*ctx.cast::<Context>() };
+    observe_lifecycle(context, report, code == abi::OK);
+    context.start_result.store(code, Ordering::Release);
 }
 
 unsafe extern "C" fn on_stop(
     ctx: *mut c_void,
     _: *mut abi::PilotHandle,
     code: i32,
-    _: abi::PilotJsonView,
+    report: abi::PilotJsonView,
 ) {
     // SAFETY: both lifecycle callbacks run on the owning dispatch thread.
-    unsafe { &*ctx.cast::<Context>() }
-        .stop_result
-        .store(code, Ordering::Release);
+    let context = unsafe { &*ctx.cast::<Context>() };
+    observe_lifecycle(context, report, false);
+    context.stop_result.store(code, Ordering::Release);
+}
+
+fn observe_lifecycle(context: &Context, report: abi::PilotJsonView, initial: bool) {
+    if report.data.is_null() || report.len == 0 {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: the SDK owns this report view for the duration of the callback.
+        let bytes = unsafe { std::slice::from_raw_parts(report.data, report.len) };
+        if let Ok(snapshot) = serde_json::from_slice::<Value>(bytes) {
+            context.observe_interceptor(&snapshot, initial);
+        }
+    }));
 }
 
 unsafe extern "C" fn on_activity(
@@ -288,6 +357,9 @@ unsafe extern "C" fn on_monitoring(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| "invalid SDK monitoring JSON")?;
         for row in parsed {
+            if row["event.name"] == "pilot.monitoring" {
+                ctx.observe_interceptor(&row["snapshot"], false);
+            }
             // Full Pilot already reports process CPU/RSS and resource alarms.
             if row["event.name"] == "pilot.alarm" && row["metrics_scope"] != "host_process" {
                 manager.accept_sdk_alarm(ctx.input, &row);
@@ -307,10 +379,10 @@ unsafe extern "C" fn on_monitoring(
 unsafe extern "C" fn on_host_hook_event(
     ctx: *mut c_void,
     row: abi::PilotJsonView,
-    _remaining_ms: u32,
-    _reply: *mut u8,
-    _capacity: usize,
-    _length: *mut usize,
+    remaining_ms: u32,
+    reply: *mut u8,
+    capacity: usize,
+    length: *mut usize,
 ) -> i32 {
     #[derive(serde::Deserialize)]
     struct Verdict {
@@ -318,13 +390,29 @@ unsafe extern "C" fn on_host_hook_event(
         tool_use_id: String,
         phase: ToolInterceptPhase,
         action: ToolVerdictAction,
+        guardrail: Option<crate::interceptor::GuardrailMetadata>,
     }
 
     let result = std::panic::catch_unwind(|| {
         // SAFETY: the SDK retains the buffer and the host context for this call.
         let ctx = unsafe { &*ctx.cast::<Context>() };
         let rows = unsafe { std::slice::from_raw_parts(row.data, row.len) };
-        let row: Value = serde_json::from_slice(rows).ok()?;
+        let mut row: Value = serde_json::from_slice(rows).ok()?;
+        if row["kind"] == "managed_local" {
+            let rules = ctx.managed.as_ref()?;
+            let request = serde_json::from_value(row["request"].take()).ok()?;
+            let verdict = ctx.runtime.block_on(rules.evaluate(&request, remaining_ms));
+            let bytes = serde_json::to_vec(&verdict).ok()?;
+            if bytes.len() > capacity || reply.is_null() || length.is_null() {
+                return None;
+            }
+            // SAFETY: both output pointers belong to the active SDK call.
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), reply, bytes.len());
+                *length = bytes.len();
+            }
+            return Some(());
+        }
         if row["kind"] == "qoder_upstream" {
             let data = ctx.sdk_data.parent()?.parent()?;
             crate::hook_process::record_qoder_upstream_for_host(
@@ -342,9 +430,7 @@ unsafe extern "C" fn on_host_hook_event(
             phase: verdict.phase,
         };
         let now = chrono::Utc::now().timestamp_millis();
-        if store.get(&key, now) != Some(ToolVerdictAction::Block) {
-            store.put(&key, verdict.action, now);
-        }
+        store.put_sdk_verdict(&key, verdict.action, verdict.guardrail, now);
         Some(())
     });
     if matches!(result, Ok(Some(()))) {
@@ -368,10 +454,8 @@ fn run(
     if api.capabilities & required != required {
         return Err("SDK is missing required host capabilities".into());
     }
-    let on_hook = context
-        .verdicts
-        .as_ref()
-        .map(|_| on_host_hook_event as abi::OnHook);
+    let on_hook = (context.verdicts.is_some() || context.managed.is_some())
+        .then_some(on_host_hook_event as abi::OnHook);
     let context_ptr = Box::into_raw(context);
     let ctx = context_ptr.cast::<c_void>();
     let mut handle = std::ptr::null_mut();

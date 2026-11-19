@@ -140,7 +140,7 @@ async fn actual_factory_cases(home: &Path) {
                 .set_multimodal_processor(processor.clone());
             *orchestrator.multimodal_ready.lock().unwrap() = true;
             let output = root.join("output");
-            let jsonl = Arc::new(JsonlFlusher::new(JsonlFlusherConfig {
+            let jsonl = Arc::new(JsonlFlusher::new(crate::types::JsonlFlusherConfig {
                 enabled: true,
                 output_dir: output.to_string_lossy().into_owned(),
                 rotate_daily: false,

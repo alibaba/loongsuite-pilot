@@ -67,6 +67,10 @@ def main():
             files = list((directory / "logs/hermes-agent").glob("*.jsonl"))
             assert len(files) == 1
             records = [json.loads(line) for line in files[0].read_text().splitlines()]
+            # The replay tests trace correlation. Process-owner recovery has
+            # separate tests and must not embed the test host's boot/PID identity.
+            for record in records:
+                record.pop("agent.hermes.process", None)
             cases.append({"name": case, "records": records})
     OUTPUT.write_text(json.dumps({
         "schema": 1,

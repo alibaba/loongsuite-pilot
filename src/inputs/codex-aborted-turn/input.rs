@@ -4,11 +4,13 @@
 //! cancelled trace when a rollout records `turn_aborted` for the active turn
 //! and the Hook state file for that session is not required to build the trace.
 
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::{json, Map, Value};
+use serde::Deserialize;
+use serde_json::{json, value::RawValue, Map, Value};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::checkpoints::{InputStatePatch, StateStore};
@@ -49,6 +51,7 @@ pub struct CodexAbortedTurnBody {
     hook_state_dir: String,
     diagnostic_dir: String,
     hook_gap_grace_ms: f64,
+    rollout_owns_interrupted_turns: bool,
 }
 
 struct JsonLine {
@@ -71,6 +74,13 @@ impl CodexAbortedTurnInput {
     }
 
     pub fn new(opts: CodexAbortedTurnInputOptions) -> Self {
+        Self::with_rollout_owner(opts, false)
+    }
+
+    pub(crate) fn with_rollout_owner(
+        opts: CodexAbortedTurnInputOptions,
+        rollout_owns_interrupted_turns: bool,
+    ) -> Self {
         let poll = opts.poll_interval_ms.or(Some(DEFAULT_POLL_INTERVAL_MS));
         Self {
             inner: HostedInput::new(
@@ -85,6 +95,7 @@ impl CodexAbortedTurnInput {
                         .diagnostic_dir
                         .unwrap_or_else(|| resolve_home(DEFAULT_DIAGNOSTIC_DIR)),
                     hook_gap_grace_ms: opts.hook_gap_grace_ms.unwrap_or(DEFAULT_HOOK_GAP_GRACE_MS),
+                    rollout_owns_interrupted_turns,
                 },
                 "CodexAbortedTurnInput",
                 opts.state_store,
@@ -238,7 +249,12 @@ impl CodexAbortedTurnBody {
         let inode = identity.ino;
         let size = i64::try_from(identity.size).unwrap_or(i64::MAX);
         let key = state_key(file_path);
-        let mut checkpoint = match read_checkpoint(rt, &key) {
+        let persisted = read_checkpoint(rt, &key);
+        let needs_identity_write = persisted
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.dev)
+            .is_none();
+        let mut checkpoint = match persisted {
             Some(checkpoint) => checkpoint,
             None => CodexAbortedCheckpoint {
                 inode,
@@ -256,17 +272,15 @@ impl CodexAbortedTurnBody {
             baseline_opened_file(rt, file, identity, &key).await;
             return Ok(Vec::new());
         }
-        let upgrade_identity = checkpoint.dev.is_none();
         checkpoint.dev = Some(identity.dev);
         if size <= checkpoint.scan_offset {
-            if !upgrade_identity && checkpoint.pending_completed_turns.is_empty() {
-                return Ok(Vec::new());
+            let diagnostics_changed = self.emit_due_hook_gap_warnings(rt, &mut checkpoint).await;
+            if needs_identity_write || diagnostics_changed {
+                save_checkpoint(rt, &key, &checkpoint);
             }
-            self.emit_due_hook_gap_warnings(rt, &mut checkpoint).await;
-            save_checkpoint(rt, &key, &checkpoint);
             return Ok(Vec::new());
         }
-        let lines = read_json_lines(file, checkpoint.scan_offset, size, true).await?;
+        let lines = read_json_lines(file, checkpoint.scan_offset, size, decode_scan_record).await?;
         if lines.next_offset == checkpoint.scan_offset {
             return Ok(Vec::new());
         }
@@ -366,10 +380,11 @@ impl CodexAbortedTurnBody {
             {
                 continue;
             }
-            if !checkpoint
-                .emitted_aborted_turn_ids
-                .iter()
-                .any(|id| id == turn_id)
+            if !self.rollout_owns_interrupted_turns
+                && !checkpoint
+                    .emitted_aborted_turn_ids
+                    .iter()
+                    .any(|id| id == turn_id)
             {
                 let recovered = self
                     .recover_turn(file_path, file, size, &checkpoint, line.end_offset)
@@ -406,7 +421,8 @@ impl CodexAbortedTurnBody {
         let Some(active) = &checkpoint.active_turn else {
             return Ok(Vec::new());
         };
-        let range = read_json_lines(file, active.start_offset, abort_end_offset, false).await?;
+        let range =
+            read_json_lines(file, active.start_offset, abort_end_offset, decode_record).await?;
         let meta_record = match checkpoint.latest_session_meta_offset {
             Some(offset) => read_json_line_at(file, offset, size).await?,
             None => None,
@@ -429,8 +445,12 @@ impl CodexAbortedTurnBody {
         &self,
         rt: &InputRuntime,
         checkpoint: &mut CodexAbortedCheckpoint,
-    ) {
+    ) -> bool {
+        if checkpoint.pending_completed_turns.is_empty() {
+            return false;
+        }
         let now = now_ms();
+        let mut changed = false;
         let mut pending = Vec::new();
         let completed = std::mem::take(&mut checkpoint.pending_completed_turns);
         for item in completed {
@@ -439,10 +459,12 @@ impl CodexAbortedTurnBody {
                 continue;
             }
             if has_hook_state(&self.hook_state_dir, &item.session_id).await {
+                changed = true;
                 continue;
             }
             match write_hook_gap(&self.diagnostic_dir, &item, now).await {
                 Ok(()) => {
+                    changed = true;
                     let meta = json!({
                         "sessionId": item.session_id,
                         "transcriptTurnId": item.turn_id,
@@ -471,6 +493,7 @@ impl CodexAbortedTurnBody {
             }
         }
         checkpoint.pending_completed_turns = pending;
+        changed
     }
 
     async fn emit_recovery_failure_diagnostic(
@@ -518,7 +541,7 @@ async fn baseline_opened_file(
     key: &str,
 ) {
     let size = i64::try_from(identity.size).unwrap_or(i64::MAX);
-    let Ok(lines) = read_json_lines(file, 0, size, true).await else {
+    let Ok(lines) = read_json_lines(file, 0, size, decode_scan_record).await else {
         return;
     };
     let mut latest = None;
@@ -552,7 +575,7 @@ async fn discover_session_files(session_dir: &str) -> Vec<String> {
 }
 
 async fn collect_rollout_files(dir: &str, files: &mut Vec<String>) {
-    let mut entries = match tokio::fs::read_dir(dir).await {
+    let mut entries = match crate::utils::source_access::read_dir_async(dir).await {
         Ok(entries) => entries,
         Err(_) => return,
     };
@@ -689,12 +712,22 @@ fn save_checkpoint(rt: &InputRuntime, key: &str, checkpoint: &CodexAbortedCheckp
 }
 
 async fn has_hook_state(hook_state_dir: &str, session_id: &str) -> bool {
-    tokio::fs::metadata(Path::new(hook_state_dir).join(format!("{session_id}.json")))
-        .await
-        .is_ok()
+    if session_id.is_empty()
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return false;
+    }
+    let path = Path::new(hook_state_dir).join(format!("{session_id}.json"));
+    crate::utils::source_access::check(&path).is_ok() && tokio::fs::metadata(path).await.is_ok()
 }
 
 async fn write_hook_gap(dir: &str, completed: &CodexCompletedTurn, now: f64) -> Result<(), String> {
+    if crate::utils::source_access::current().is_some() {
+        crate::utils::source_access::private_path(Path::new(dir))
+            .map_err(|error| error.to_string())?;
+    }
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|error| error.to_string())?;
@@ -724,6 +757,10 @@ async fn write_recovery_failure(
     turn_id: &str,
     reason: &str,
 ) -> Result<(), String> {
+    if crate::utils::source_access::current().is_some() {
+        crate::utils::source_access::private_path(Path::new(dir))
+            .map_err(|error| error.to_string())?;
+    }
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|error| error.to_string())?;
@@ -742,6 +779,9 @@ async fn write_recovery_failure(
 
 async fn append_line(path: &Path, value: &Value) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
+    if crate::utils::source_access::current().is_some() {
+        crate::utils::source_access::private_path(path).map_err(|error| error.to_string())?;
+    }
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -755,29 +795,63 @@ async fn append_line(path: &Path, value: &Value) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+#[derive(Deserialize)]
+struct RecordKind<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<Cow<'a, str>>,
+}
+
+#[derive(Deserialize)]
+struct ScanEnvelope<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    payload: Option<&'a RawValue>,
+}
+
+fn decode_record(text: &str) -> Option<Map<String, Value>> {
+    match serde_json::from_str(text) {
+        Ok(Value::Object(record)) => Some(record),
+        _ => None,
+    }
+}
+
+// The recovery cursor only needs session metadata and turn boundaries.
+// Keep full records for those cases and use the existing decoder on unusual
+// envelopes that the borrowed probe cannot classify, including duplicate keys.
+fn decode_scan_record(text: &str) -> Option<Map<String, Value>> {
+    if let Ok(envelope) = serde_json::from_str::<ScanEnvelope<'_>>(text) {
+        match envelope.kind.as_deref() {
+            Some("session_meta" | "turn_context") => {}
+            Some("event_msg") => {
+                let kind = envelope
+                    .payload
+                    .and_then(|payload| serde_json::from_str::<RecordKind<'_>>(payload.get()).ok());
+                if kind.is_some_and(|record| {
+                    !matches!(
+                        record.kind.as_deref(),
+                        Some("task_started" | "task_complete" | "turn_aborted")
+                    )
+                }) {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    decode_record(text)
+}
+
 struct ReadLines {
     items: Vec<JsonLine>,
     next_offset: i64,
-}
-
-// Skipping unknown fields avoids building message/tool payloads in the
-// auxiliary scanner. On noncanonical JSON retain the full parser's behavior.
-fn may_update_turn(text: &str) -> bool {
-    #[derive(serde::Deserialize)]
-    struct Header<'a> {
-        #[serde(rename = "type")]
-        kind: &'a str,
-    }
-    serde_json::from_str::<Header>(text).map_or(true, |h| {
-        matches!(h.kind, "session_meta" | "turn_context" | "event_msg")
-    })
 }
 
 async fn read_json_lines(
     file: &mut tokio::fs::File,
     start_offset: i64,
     end_offset: i64,
-    lifecycle_only: bool,
+    decode: impl Fn(&str) -> Option<Map<String, Value>>,
 ) -> anyhow::Result<ReadLines> {
     if end_offset <= start_offset {
         return Ok(ReadLines {
@@ -812,8 +886,8 @@ async fn read_json_lines(
         }
         let text = String::from_utf8_lossy(&buffer[cursor..newline]);
         let text = text.trim();
-        if !text.is_empty() && (!lifecycle_only || may_update_turn(text)) {
-            if let Ok(Value::Object(record)) = serde_json::from_str::<Value>(text) {
+        if !text.is_empty() {
+            if let Some(record) = decode(text) {
                 items.push(JsonLine {
                     start_offset: start_offset + cursor as i64,
                     end_offset: start_offset + newline as i64 + 1,
@@ -866,14 +940,10 @@ async fn open_rollout_file(
     tokio::fs::File,
     crate::utils::file_identity::OpenedFileIdentity,
 )> {
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let file = std::fs::File::open(path)?;
-        let identity = crate::utils::file_identity::identity_from_open(&file)?;
-        Ok((tokio::fs::File::from_std(file), identity))
-    })
-    .await
-    .map_err(std::io::Error::other)?
+    let file = crate::utils::source_access::open_async(path).await?;
+    let file = file.into_std().await;
+    let identity = crate::utils::file_identity::identity_from_open(&file)?;
+    Ok((tokio::fs::File::from_std(file), identity))
 }
 
 #[cfg(test)]

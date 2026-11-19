@@ -30,14 +30,17 @@ async fn actual_dsh_poll_runtime_delta_reaches_registered_input_and_local_metric
         tokio::fs::write(&source, text.as_bytes()).await.unwrap();
         let env = HashMap::new();
         let file = json!({"dataDir":root.path(),"dashboard":{"enabled":false},
-            "autoUpdate":{"enabled":false},"jsonl":{"enabled":false}});
+            "autoUpdate":{"enabled":false},"jsonl":{"enabled":true}});
         let mut config = super::super::config_loader::assemble_config(
             Some(&file), None, &super::super::config_loader::ConfigSources {
                 env:&env, platform:crate::utils::Platform::current(),
                 hostname:"dsh-caller-fixture", config_path:"dsh-caller-fixture.json", global_poll_ms:None,
             },
         ).unwrap();
-        config.flushers = crate::types::FlusherConfig::default();
+        config.flushers = crate::types::FlusherConfig {
+            jsonl: config.flushers.jsonl.take(),
+            ..Default::default()
+        };
         config.collect_log = false;
         config.collect_trace = false;
         config.otlp_trace = None;

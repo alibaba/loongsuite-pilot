@@ -68,6 +68,7 @@ pub(crate) fn registry(data: &Path, marker: bool) -> BTreeMap<String, PathBuf> {
         "plugins/shared/pilot-config.mjs",
         "plugins/shared/raw-jsonl-writer.mjs",
         "plugins/shared/raw-source-gate.mjs",
+        "plugins/shared/private-log-dir.cjs",
     ] {
         paths.insert(key(relative), data.join(relative));
     }
@@ -99,6 +100,7 @@ fn source_relative(path: &str) -> Option<&str> {
                     | "plugins/shared/pilot-config.mjs"
                     | "plugins/shared/raw-jsonl-writer.mjs"
                     | "plugins/shared/raw-source-gate.mjs"
+                    | "plugins/shared/private-log-dir.cjs"
             )
     })
 }

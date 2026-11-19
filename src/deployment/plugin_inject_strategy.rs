@@ -5,8 +5,8 @@ use crate::types::{
     PluginConfigShape, PluginInjectConfig,
 };
 use crate::utils::{
-    create_logger, edit_jsonc, parse_json_document, resolve_home, write_text_file_atomic,
-    AtomicTextWriteOptions, ExpectedFileState, JsonEditOptions, JsonPathSeg, JsonSyntax,
+    create_logger, edit_jsonc, parse_json_document, resolve_home, AtomicTextWriteOptions,
+    ExpectedFileState, JsonEditOptions, JsonPathSeg, JsonSyntax,
 };
 use async_trait::async_trait;
 use serde_json::{Map, Value};
@@ -1277,7 +1277,9 @@ async fn write_prepared_plugin_config(
             write_private_backup(&format!("{path}.bak"), raw).await?;
         }
     }
-    write_text_file_atomic(
+    let owner =
+        super::config_owner::for_target(Path::new(path)).map_err(|error| error.to_string())?;
+    crate::utils::fs_utils::write_text_file_atomic_with_owner(
         path,
         &edit.content,
         &AtomicTextWriteOptions {
@@ -1288,6 +1290,7 @@ async fn write_prepared_plugin_config(
             mode: snapshot.is_none().then_some(0o600),
             ..AtomicTextWriteOptions::default()
         },
+        owner,
     )
     .await
     .map_err(|err| err.to_string())
@@ -1298,7 +1301,9 @@ async fn write_private_backup(path: &str, raw: &str) -> Result<(), String> {
     if plugin_config_exists(path)? {
         return Ok(());
     }
-    write_text_file_atomic(
+    let owner =
+        super::config_owner::for_target(Path::new(path)).map_err(|error| error.to_string())?;
+    crate::utils::fs_utils::write_text_file_atomic_with_owner(
         path,
         raw,
         &AtomicTextWriteOptions {
@@ -1306,6 +1311,7 @@ async fn write_private_backup(path: &str, raw: &str) -> Result<(), String> {
             mode: Some(0o600),
             ..AtomicTextWriteOptions::default()
         },
+        owner,
     )
     .await
     .map_err(|err| err.to_string())

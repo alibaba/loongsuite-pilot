@@ -35,6 +35,7 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
 | `dataDir` | Local runtime and data directory. |
 | `userId` | User identity written to emitted events. Defaults to the machine hostname. |
 | `collectLog` | Enables SLS log reporting. JSONL and HTTP remain controlled by their own `enabled` flags. |
+| `jsonl.enabled` | Controls normalized local event output in `logs/output/`. Defaults to `false`. |
 | `collectTrace` | Enables OTLP trace export when a trace destination is configured. |
 | `dashboard.enabled` | Enable the local dashboard. Defaults to `false`. |
 | `dashboard.port` | Loopback dashboard port. Must be an integer from 1 through 65535; invalid values fall back to `8765`. |
@@ -51,6 +52,7 @@ Equivalent environment variables:
 | `LOONGSUITE_PILOT_DATA_DIR` | Override the data directory. |
 | `LOONGSUITE_PILOT_USER_ID` | Override `userId`. |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | Set `false` or `0` to disable SLS log reporting. |
+| `JSONL_ENABLED` | Overrides `jsonl.enabled`. |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | Set `false` or `0` to disable trace reporting. |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | Override `serviceName` with one exact name for all agents and backends. |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | Override `serviceNamePrefix`. |
@@ -323,3 +325,7 @@ Use repeatable `--exclude-workspace "/absolute/project"` arguments with the shel
 An empty array disables filtering after restart. Run `loongsuite-pilot restart` after every rule edit: hooks may read the new configuration on their next invocation, while the running collector keeps its startup rules. The new rules are not globally effective during this interval. Rules match the directory and descendants, including symlink aliases, without matching sibling prefixes. Windows local paths are matched case-insensitively. Only explicit Agent working-directory/workspace metadata is used; no Git repository is required. Any excluded root in a multi-root workspace blocks the session. Unknown workspaces are allowed. Once identified as excluded, subsequent session events are dropped even after switching directories or restarting Pilot. Each rule list has separate persisted decisions; restoring an earlier list reuses its decisions. Records without a session ID are evaluated individually. If the state directory is unwritable, exclusions remain in memory and public sessions continue normally. A rate-limited diagnostic omits directory names, and later events retry persistence. Cross-process and restart continuity is not guaranteed until persistence succeeds.
 
 Filtering applies before JSONL/SLS/HTTP/OTLP output, Codex/Qoder attachment uploads, shared Hook history writers (`writeJsonlRecords` / `appendRowsToHistory`), and both Cursor stop/deferred-response history writers. Independent file/API pipelines inspect explicit workspace metadata; plain text and records without such metadata remain allowed. This is session output control, not a filesystem access restriction: adapters may read native transcripts or Hook files to identify a workspace, and the Cursor event journal and plugin-owned native/intermediate JSONL files may be written before filtering. Existing local/remote data is not removed; accessing excluded files from another workspace is outside this feature's scope.
+
+### SLS host identity tags
+
+The installer writes a readable hardware serial to `hostSn`. SLS log groups include `__mac__` from the interface used for the local IPv4 and `__sn__` when configured. Set `hostIdentityTags` to `false` or `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS=false` to omit both tags from the collector and Qoder API pipeline. Self-monitoring status uses the same setting for its optional `mac` and `sn` fields.

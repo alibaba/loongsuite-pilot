@@ -8,7 +8,7 @@ mod runtime;
 
 pub(crate) mod outbox;
 
-mod agent_hooks;
+pub(crate) mod agent_hooks;
 pub mod hook_protocol;
 mod hooks;
 

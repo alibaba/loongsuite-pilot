@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::{oneshot, Notify};
 
-use super::json_file::{self, JVal};
+use super::json_file::{self, JVal, JsonObject};
 use super::OrderedMap;
+use serde::{ser::SerializeMap, Serializer};
 
 const LAST_OFFSET: &str = "lastOffset";
 const LAST_FILE: &str = "lastFile";
@@ -239,10 +240,15 @@ fn apply_extra(state: &mut InputState, partial_extra: JVal) {
     let partial_is_object_like = is_object_like(&partial_extra);
     let current_is_object_like = state.field(EXTRA).is_some_and(is_object_like);
     if partial_is_object_like && current_is_object_like {
-        let base = object_like_fields(state.field(EXTRA).cloned().unwrap_or(JVal::Null));
-        let overlay = object_like_fields(partial_extra);
-        state.insert(EXTRA, JVal::Object(merge_fields(base, overlay)));
-        return;
+        if let Some((_, current)) = Arc::make_mut(&mut state.fields)
+            .iter_mut()
+            .find(|(key, _)| key == EXTRA)
+        {
+            let base = object_like_fields(std::mem::replace(current, JVal::Null));
+            let overlay = object_like_fields(partial_extra);
+            *current = JVal::Object(merge_fields(base, overlay));
+            return;
+        }
     }
     state.insert(EXTRA, partial_extra);
 }
@@ -433,7 +439,7 @@ impl StateStore {
 impl StateStore {
     /// Cheap mutation token for adapter caches; source progress remains owned by StateStore.
     pub(crate) fn snapshot_text(&self) -> String {
-        render_states(&self.mu.lock().unwrap().states)
+        render_state_entries(self.mu.lock().unwrap().states.iter())
     }
 
     pub fn revision(&self) -> u64 {
@@ -723,6 +729,11 @@ impl StateStore {
             .unwrap_or_default()
     }
 
+    pub(crate) fn get_extra_field(&self, input_id: &str, key: &str) -> Option<serde_json::Value> {
+        let data = self.mu.lock().unwrap();
+        extra_field(data.states.get(input_id)?, key).map(json_file::to_value)
+    }
+
     pub fn set(&self, input_id: &str, mut state: InputState) {
         state.normalize();
         let mut data = self.mu.lock().unwrap();
@@ -884,7 +895,7 @@ impl StateStore {
                     return;
                 }
                 Step::Write(revision, ordinary, journal_sources) => {
-                    match self.persist_states(&ordinary, &journal_sources).await {
+                    match self.persist_states(ordinary, &journal_sources).await {
                         Ok(()) => {
                             let mut data = self.mu.lock().unwrap();
                             data.persisted_revision = revision;
@@ -918,37 +929,39 @@ impl StateStore {
 
     async fn persist_states(
         &self,
-        ordinary: &[(String, InputState)],
+        mut ordinary: Vec<(String, InputState)>,
         journal: &OrderedMap<InputState>,
     ) -> Result<(), anyhow::Error> {
-        let entries = || {
-            ordinary
+        ordinary.extend(
+            journal
                 .iter()
-                .map(|(id, state)| (id.as_str(), state))
-                .chain(journal.iter())
-        };
+                .map(|(id, state)| (id.to_owned(), state.clone())),
+        );
+        let snapshot = Arc::new(ordinary);
         let hook = self.write_hook.lock().unwrap().clone();
         if let Some(hook) = hook {
-            return hook(self.file_path.clone(), render_state_entries(entries())).await;
+            let text =
+                render_state_entries(snapshot.iter().map(|(id, state)| (id.as_str(), state)));
+            return hook(self.file_path.clone(), text).await;
         }
-        // The snapshot owns immutable InputState fields. Serialize it outside
-        // the store lock and bound staging to one chunk plus a single input.
-        json_file::write_atomic(&self.file_path, |tmp| async move {
-            use tokio::io::AsyncWriteExt;
-            let mut file = tokio::fs::File::create(tmp).await?;
-            let mut text = String::from("{");
-            let mut nonempty = false;
-            for (id, state) in entries() {
-                append_state(&mut text, id, state, nonempty);
-                nonempty = true;
-                if text.len() >= 128 * 1024 {
-                    file.write_all(text.as_bytes()).await?;
-                    text.clear();
-                }
+        // Stream the immutable snapshot outside the store lock. Atomic retries
+        // serialize the same revision, including the same journal visibility.
+        json_file::write_atomic(&self.file_path, |tmp| {
+            let snapshot = Arc::clone(&snapshot);
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    use std::io::{BufWriter, Write};
+                    let mut file =
+                        BufWriter::with_capacity(128 * 1024, std::fs::File::create(tmp)?);
+                    write_state_entries(
+                        &mut file,
+                        snapshot.iter().map(|(id, state)| (id.as_str(), state)),
+                    )?;
+                    file.flush()
+                })
+                .await
+                .map_err(std::io::Error::other)?
             }
-            text.push_str(if nonempty { "\n}\n" } else { "}\n" });
-            file.write_all(text.as_bytes()).await?;
-            file.flush().await
         })
         .await
     }
@@ -1000,30 +1013,23 @@ fn notify(waiters: Vec<Waiter>, result: Result<(), String>) {
     }
 }
 
-fn render_states(states: &OrderedMap<InputState>) -> String {
-    render_state_entries(states.iter())
-}
-
 fn render_state_entries<'a>(states: impl Iterator<Item = (&'a str, &'a InputState)>) -> String {
-    let mut text = String::from("{");
-    for (index, (id, state)) in states.enumerate() {
-        append_state(&mut text, id, state, index > 0);
-    }
-    if text.len() > 1 {
-        text.push('\n');
-    }
-    text.push_str("}\n");
-    text
+    let mut output = Vec::new();
+    write_state_entries(&mut output, states).expect("checkpoint JSON");
+    String::from_utf8(output).expect("checkpoint UTF-8")
 }
 
-fn append_state(text: &mut String, id: &str, state: &InputState, comma: bool) {
-    if comma {
-        text.push(',');
+fn write_state_entries<'a>(
+    mut output: impl std::io::Write,
+    states: impl Iterator<Item = (&'a str, &'a InputState)>,
+) -> std::io::Result<()> {
+    let mut serializer = serde_json::Serializer::pretty(&mut output);
+    let mut map = serializer.serialize_map(None)?;
+    for (id, state) in states {
+        map.serialize_entry(id, &JsonObject(&state.fields))?;
     }
-    text.push_str("\n  ");
-    json_file::write_string(text, id);
-    text.push_str(": ");
-    json_file::write_fields(text, &state.fields, 1);
+    map.end()?;
+    output.write_all(b"\n")
 }
 
 struct LeaderGuard<'a> {

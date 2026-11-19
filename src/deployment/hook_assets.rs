@@ -319,7 +319,7 @@ impl HookAssets {
                         // 与外层状态写入者使用同一把锁；配置仍沿用跨安装共享锁。
                         lock.push(if key == "state" {
                             ".lock"
-                        } else if path == Path::new(super::system_toml_hooks::DEFAULT_PATH) {
+                        } else if super::system_toml_hooks::is_system_path(path) {
                             ".pilot-lock"
                         } else {
                             ".loongsuite-pilot.lock"
@@ -422,12 +422,11 @@ fn pin_configuration_targets(
         .iter()
         .map(|(key, path)| {
             #[cfg(unix)]
-            let path =
-                if key == "state" || path == Path::new(super::system_toml_hooks::DEFAULT_PATH) {
-                    path.clone()
-                } else {
-                    pin_configuration_parent(path)?
-                };
+            let path = if key == "state" || super::system_toml_hooks::is_system_path(path) {
+                path.clone()
+            } else {
+                pin_configuration_parent(path)?
+            };
             #[cfg(not(unix))]
             let path = path.clone();
             Ok((key.clone(), path))
@@ -477,7 +476,7 @@ where
     };
     let parent = path.parent().context("Hook 配置缺少父目录")?;
     #[cfg(target_os = "linux")]
-    if path == Path::new(super::system_toml_hooks::LOCK_PATH) {
+    if super::system_toml_hooks::is_system_lock(path) {
         use std::os::unix::fs::DirBuilderExt;
         match std::fs::DirBuilder::new().mode(0o755).create(parent) {
             Ok(()) => {}

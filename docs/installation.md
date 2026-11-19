@@ -100,7 +100,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--sls-api-key <key>` | SLS API Key for API Key mode. Cannot be combined with AK/SK flags. |
 | `--mask-mode <mode>` | Data masking mode: `all`, `none`, or `custom`. |
 | `--mask-types <list>` | Comma-separated mask types. Required when `--mask-mode custom`. |
-| `--mask-replacement-mode <mode>` | Mask replacement format: `placeholder` (fixed markers, default) or `preview` (star-masked previews). Windows: `-MaskReplacementMode`. |
+| `--mask-replacement-mode <mode>` | Mask replacement format: `preview` (star-masked previews, default) or `placeholder` (fixed markers). Windows: `-MaskReplacementMode`. |
 | `--interceptor-mode <mode>` | Local interception mode: `all`, `none`, or `custom`. Enabled interceptor types are also added to `mask`. |
 | `--interceptor-types <list>` | Comma-separated interceptor types (mask credential subset). Required when `--interceptor-mode custom`. |
 | `--collect-log <true\|false>` | Enable or disable SLS log reporting. |
@@ -123,7 +123,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-Local JSONL output is enabled by default:
+Local JSONL output is disabled by default. To inspect local events, set `"jsonl": { "enabled": true }` in `config.json` as described in [Local JSONL Output](local-jsonl-output.md), restart Pilot, and then check:
 
 ```bash
 ls ~/.loongsuite-pilot/logs/output

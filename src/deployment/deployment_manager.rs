@@ -33,7 +33,7 @@ use super::plugin_inject_strategy::PluginInjectStrategy;
 use super::plugin_migration::run_plugin_migration;
 use super::plugin_probe_strategy::PluginProbeStrategy;
 
-use super::system_toml_hooks::{self, GROK};
+use super::system_toml_hooks;
 use crate::types::HookScope;
 
 fn scoped_hook_target(
@@ -45,7 +45,7 @@ fn scoped_hook_target(
         return Err("Invalid recorded scoped Hook settings path".into());
     }
     if scope == HookScope::System {
-        system_toml_hooks::validate_path(path)?;
+        system_toml_hooks::validate_path(&base.id, path)?;
     }
     let mut target = definition_at_hook_settings(base, path)?;
     target
@@ -313,20 +313,20 @@ impl DeploymentManager {
         def: &AgentDefinition,
     ) -> DeployResult {
         let _guard = self.gate.lock().await;
-        self.configure_grok_scope(base, def, false)
+        self.configure_hook_scope(base, def, false)
             .await
             .map(|()| scoped_hook_success(def))
             .unwrap_or_else(|error| failed(def, &error))
     }
 
-    async fn configure_grok_scope(
+    async fn configure_hook_scope(
         &self,
         base: &AgentDefinition,
         target: &AgentDefinition,
         uninstall: bool,
     ) -> Result<(), String> {
         self.load_state().await?;
-        let previous = self.state.lock().unwrap().get(GROK).cloned();
+        let previous = self.state.lock().unwrap().get(&target.id).cloned();
         let hook = target
             .hook
             .as_ref()
@@ -369,7 +369,7 @@ impl DeploymentManager {
         self.hook
             .configure_scope(target, previous, retired, uninstall)
             .await?;
-        self.sync_committed_hook_state(GROK).await
+        self.sync_committed_hook_state(&target.id).await
     }
 
     pub async fn deploy_prepared(
@@ -480,13 +480,13 @@ impl DeploymentManager {
         def: &AgentDefinition,
         record: Option<&DeployedAgentRecord>,
     ) -> bool {
-        if def.id == GROK
+        if system_toml_hooks::supports(&def.id)
             && record.is_some_and(|entry| {
                 entry.hook_scope == Some(HookScope::System)
                     || entry.hook_pending_migration.is_some()
             })
         {
-            return match self.configure_grok_scope(def, def, true).await {
+            return match self.configure_hook_scope(def, def, true).await {
                 Ok(()) => true,
                 Err(error) => {
                     logger().error(&error, None);
@@ -654,7 +654,7 @@ impl DeploymentManager {
             return true;
         }
         let record = self.state.lock().unwrap().get(&def.id).cloned();
-        if def.id == GROK
+        if system_toml_hooks::supports(&def.id)
             && record
                 .as_ref()
                 .is_some_and(|entry| entry.hook_pending_migration.is_some())
@@ -753,7 +753,7 @@ impl DeploymentManager {
             assume_detected: false,
         });
         let record = self.state.lock().unwrap().get(&def.id).cloned();
-        if def.id == GROK
+        if system_toml_hooks::supports(&def.id)
             && record
                 .as_ref()
                 .is_some_and(|entry| entry.hook_pending_migration.is_some())
@@ -763,7 +763,7 @@ impl DeploymentManager {
                     .into(),
             );
         }
-        if def.id == GROK && !opts.preserve_hook_settings {
+        if system_toml_hooks::supports(&def.id) && !opts.preserve_hook_settings {
             let effective = apply_persisted_deploy_targets(def, record.as_ref(), None)?;
             let paths = merge_hook_settings_paths(record.as_ref(), None);
             if paths.len() > 1 {

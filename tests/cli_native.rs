@@ -249,6 +249,8 @@ fn package(root: &Path) -> PathBuf {
         "assets/plugins/openclaw/first-token.mjs",
         "assets/plugins/openclaw/invocation-audit.mjs",
         "assets/plugins/openclaw/steered-delivery.mjs",
+        "assets/plugins/openclaw/cron-context.mjs",
+        "assets/plugins/openclaw/cron-recovery.mjs",
         "assets/plugins/opencode/plugin.mjs",
         "assets/plugins/opencode/index.js",
         "assets/plugins/opencode/package.json",
@@ -260,6 +262,7 @@ fn package(root: &Path) -> PathBuf {
         "assets/plugins/shared/pilot-config.mjs",
         "assets/plugins/shared/raw-jsonl-writer.mjs",
         "assets/plugins/shared/raw-source-gate.mjs",
+        "assets/plugins/shared/private-log-dir.cjs",
         "agents.d/cursor-cli.json",
         "agents.d/claude-code.json",
         "assets/hooks/claude-code-loongsuite-pilot-hook.sh",
@@ -823,7 +826,16 @@ fn packaged_codex_explicit_home_keeps_trust_and_hooks_together() {
         assert_eq!(config["userField"], "保留");
         assert!(config.get("version").is_none());
         let trust_entries = doc["hooks"]["state"].as_table().unwrap();
-        assert_eq!(trust_entries.len(), 5);
+        let expected_events = [
+            "SessionStart",
+            "UserPromptSubmit",
+            "SubagentStart",
+            "SubagentStop",
+            "Stop",
+            "PreToolUse",
+            "PostToolUse",
+        ];
+        assert_eq!(trust_entries.len(), expected_events.len());
         for (key, entry) in trust_entries {
             assert!(key.starts_with(settings.to_str().unwrap()));
             // 新 trust 仅记录摘要；enabled 是保留用户选择的可选字段。
@@ -833,13 +845,7 @@ fn packaged_codex_explicit_home_keeps_trust_and_hooks_together() {
                 .unwrap()
                 .starts_with("sha256:"));
         }
-        for event in [
-            "SessionStart",
-            "UserPromptSubmit",
-            "SubagentStart",
-            "SubagentStop",
-            "Stop",
-        ] {
+        for event in expected_events {
             let handlers: Vec<_> = config["hooks"][event]
                 .as_array()
                 .unwrap()

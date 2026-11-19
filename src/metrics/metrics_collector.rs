@@ -153,6 +153,10 @@ pub struct L1Metrics {
     pub os_detail: String,
     pub hostname: String,
     pub ip: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sn: Option<String>,
     pub instance_id: String,
     pub run_id: String,
     pub user_id: String,
@@ -345,6 +349,7 @@ pub struct MetricsCollector {
     instance_id: String,
     run_id: String,
     local_ip: String,
+    host_identity: crate::utils::SlsHostIdentity,
     init_type: String,
     last_cpu: Option<(i64, i64)>,
     last_cpu_time: i64,
@@ -445,6 +450,7 @@ impl MetricsCollector {
             instance_id,
             run_id,
             local_ip: resolve_local_ip(),
+            host_identity: Default::default(),
             init_type,
             last_cpu: None,
             last_cpu_time: 0,
@@ -472,6 +478,13 @@ impl MetricsCollector {
 
     pub fn data_dir(&self) -> &str {
         &self.data_dir
+    }
+
+    pub(crate) fn set_host_identity(&mut self, enabled: bool, serial: &str) {
+        self.host_identity = crate::utils::SlsHostIdentity::new(enabled, serial);
+        if self.host_identity.mac().is_some() {
+            self.local_ip = crate::utils::local_ip().to_owned();
+        }
     }
 
     pub fn collect_l1(&mut self, snapshot: &DataflowSnapshot) -> L1Metrics {
@@ -545,6 +558,8 @@ impl MetricsCollector {
             os_detail: os_detail(),
             hostname: host_name(),
             ip: self.local_ip.clone(),
+            mac: self.host_identity.mac().map(str::to_owned),
+            sn: self.host_identity.serial().map(str::to_owned),
             instance_id: self.instance_id.clone(),
             run_id: self.run_id.clone(),
             user_id: self.user_id.clone(),
@@ -1621,4 +1636,21 @@ mod tests {
             pid_file_command_matched: None,
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn host_identity_fields_follow_the_explicit_opt_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut collector = MetricsCollector::new("2.0.0", "fixture", dir.path().to_str().unwrap());
+    let flow = DataflowSnapshot::default();
+    collector.set_host_identity(true, "  fixture-01  ");
+    assert_eq!(
+        collector.collect_l1(&flow).sn.as_deref(),
+        Some("fixture-01")
+    );
+    collector.set_host_identity(false, "fixture-01");
+    let disabled = serde_json::to_value(collector.collect_l1(&flow)).unwrap();
+    assert!(disabled.get("mac").is_none());
+    assert!(disabled.get("sn").is_none());
 }

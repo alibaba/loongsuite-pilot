@@ -61,6 +61,8 @@ pub struct ListenerConfig {
     pub log_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<DoubaoClient>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_conversation_ids: Option<Vec<String>>,
 }
 
 str_enum!(CanaryPolicy {
@@ -571,6 +573,10 @@ pub struct AnalyticsConfig {
     pub auto_start: bool,
     pub data_dir: String,
     pub user_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub host_sn: String,
+    #[serde(default = "default_host_identity_tags")]
+    pub host_identity_tags: bool,
     pub collect_log: bool,
     pub collect_trace: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -599,6 +605,10 @@ pub struct AnalyticsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global_span_attributes: Option<HashMap<String, String>>,
     pub interceptor: InterceptorConfig,
+}
+
+fn default_host_identity_tags() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -664,6 +674,33 @@ pub struct PipelineToggle {
     pub file: PipelineSectionToggle,
     #[serde(rename = "qoderApi")]
     pub qoder_api: PipelineSectionToggle,
+    #[serde(default, skip_serializing_if = "MulticaPipelineToggle::is_default")]
+    pub multica: MulticaPipelineToggle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MulticaPipelineToggle {
+    pub enabled: bool,
+    pub mode: Option<String>,
+    #[serde(skip)]
+    pub discover_local_sources: bool,
+}
+
+impl Default for MulticaPipelineToggle {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: None,
+            discover_local_sources: false,
+        }
+    }
+}
+
+impl MulticaPipelineToggle {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 pub type FileCollectionToggle = PipelineToggle;

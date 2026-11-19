@@ -57,6 +57,8 @@ pub struct InputCounter {
     pub last_active_time: u128,
 }
 
+type HermesSourceProbe = Arc<dyn Fn(String) -> BoxFuture<bool> + Send + Sync>;
+
 pub struct LiveInput {
     pub id: String,
     pub agent_type: String,
@@ -65,6 +67,7 @@ pub struct LiveInput {
     start: Arc<dyn Fn() -> BoxFuture<Result<(), String>> + Send + Sync>,
     stop: Arc<dyn Fn() -> BoxFuture<()> + Send + Sync>,
     runtime_probe: Mutex<Option<RuntimeProbe>>,
+    hermes_source_probe: Mutex<Option<HermesSourceProbe>>,
 }
 
 impl LiveInput {
@@ -84,6 +87,7 @@ impl LiveInput {
             start: Arc::new(start),
             stop: Arc::new(stop),
             runtime_probe: Mutex::new(None),
+            hermes_source_probe: Mutex::new(None),
         })
     }
 
@@ -98,6 +102,28 @@ impl LiveInput {
         probe: impl Fn() -> crate::inputs::base::InputRuntimeInfo + Send + Sync + 'static,
     ) {
         *self.runtime_probe.lock().expect("runtime probe") = Some(Arc::new(probe));
+    }
+
+    pub(crate) fn set_hermes_source_probe(
+        &self,
+        probe: impl Fn(String) -> BoxFuture<bool> + Send + Sync + 'static,
+    ) {
+        *self
+            .hermes_source_probe
+            .lock()
+            .expect("Hermes source probe") = Some(Arc::new(probe));
+    }
+
+    pub(crate) async fn confirm_hermes_source_drained(&self, source: String) -> bool {
+        let probe = self
+            .hermes_source_probe
+            .lock()
+            .expect("Hermes source probe")
+            .clone();
+        match probe {
+            Some(probe) if self.running() => probe(source).await,
+            _ => false,
+        }
     }
 
     pub fn running(&self) -> bool {
@@ -151,6 +177,7 @@ pub struct InputManager {
     flusher: Mutex<Option<Arc<dyn BaseFlusher>>>,
     state_store: Mutex<Option<Arc<crate::checkpoints::StateStore>>>,
     alarm_manager: Mutex<Option<Arc<AlarmManager>>>,
+    pub(super) interceptor: super::interceptor_metrics::InterceptorMetrics,
     user_id: Mutex<String>,
     configured_user_id: Mutex<String>,
     content_policy: Mutex<AgentsConfig>,
@@ -173,6 +200,7 @@ impl InputManager {
             flusher: Mutex::new(None),
             state_store: Mutex::new(None),
             alarm_manager: Mutex::new(None),
+            interceptor: Default::default(),
             user_id: Mutex::new(String::new()),
             configured_user_id: Mutex::new(String::new()),
             content_policy: Mutex::new(AgentsConfig::new()),
@@ -670,7 +698,11 @@ impl InputManager {
         if let Some(linker) = self.intercept_linker.lock().expect("intercept").clone() {
             linker.enrich(&mut entries);
         }
-        if input_id == "qoder-trace" || crate::utils::source_access::current().is_none() {
+        if matches!(
+            input_id,
+            "qoder-trace" | "codex-transcript" | "codex-aborted-turn"
+        ) || crate::utils::source_access::current().is_none()
+        {
             enrich_canonical_entries_with_git(&mut entries).await;
         }
         if let Some(counter) = self.counters.lock().expect("counters").get_mut(input_id) {
@@ -816,19 +848,63 @@ impl InputManager {
             .expect("flusher")
             .clone()
             .ok_or("Pilot output is not configured")?;
-        if let Some(result) = flusher.send_sdk_activity(rows).await {
-            let entry_count = rows.len();
-            let batch_bytes = rows.iter().map(|row| row.len() as u64).sum();
-            self.record_sdk_input(input_id, entry_count, batch_bytes);
-            return self.finish_dispatch(input_id, entry_count, batch_bytes, result);
+        let codex = matches!(input_id, "codex-transcript" | "codex-aborted-turn");
+        if !codex {
+            if let Some(result) = self.forward_sdk_rows(input_id, &*flusher, rows).await {
+                return result;
+            }
         }
-        let entries = rows
+        if codex
+            && self.trace_linker().is_none()
+            && flusher.supports_sdk_activity()
+            && crate::normalization::codex_sdk_rows_keep_git_context(rows)
+        {
+            if let Some(result) = self.forward_sdk_rows(input_id, &*flusher, rows).await {
+                return result;
+            }
+        }
+        let mut entries = rows
             .iter()
             .map(|row| serde_json::from_slice::<AgentActivityEntry>(row))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| "invalid SDK activity JSON")?;
-        let encoded = rows.iter().map(|row| row.to_vec()).collect();
+        let encoded = if codex {
+            // Only the full shell is authorized to inspect a Codex workspace
+            // and join its runs to upstream ACP traces.
+            let mut changed = enrich_canonical_entries_with_git(&mut entries).await;
+            if let Some(linker) = self.trace_linker() {
+                linker.stamp(&mut entries).await;
+                changed = true;
+            }
+            // Journaling already supplied canonical fields. Keep audit rows on
+            // typed delivery because they may depend on the typed defaults.
+            if !changed && entries.iter().all(|row| row.get("event.kind").is_none()) {
+                if let Some(result) = self.forward_sdk_rows(input_id, &*flusher, rows).await {
+                    return result;
+                }
+            }
+            entries
+                .iter()
+                .map(serde_json::to_vec)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?
+        } else {
+            rows.iter().map(|row| row.to_vec()).collect()
+        };
         self.accept_sdk_batch(input_id, entries, encoded).await
+    }
+
+    async fn forward_sdk_rows(
+        &self,
+        input_id: &str,
+        flusher: &dyn BaseFlusher,
+        rows: &[&[u8]],
+    ) -> Option<Result<(), String>> {
+        let result = flusher.send_sdk_activity(rows).await?;
+        let entry_count = rows.len();
+        let batch_bytes = rows.iter().map(|row| row.len() as u64).sum();
+        self.record_sdk_input(input_id, entry_count, batch_bytes);
+        Some(self.finish_dispatch(input_id, entry_count, batch_bytes, result))
     }
 
     pub(super) async fn accept_sdk_batch(
@@ -851,6 +927,12 @@ impl InputManager {
             counter.in_bytes += batch_bytes;
             counter.last_poll_time = format_time(Local::now());
             counter.last_active_time = now_ms();
+        }
+    }
+
+    pub(super) fn record_interceptor_fault(&self, index: usize, payload: &serde_json::Value) {
+        if let Some(alarm) = self.alarm_manager.lock().expect("alarm").clone() {
+            self.interceptor.fault(&alarm, index, payload);
         }
     }
 

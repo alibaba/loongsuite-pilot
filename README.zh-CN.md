@@ -53,9 +53,9 @@ Pilot 主要帮助回答这些问题：
 
 当前 Rust 版声明支持 Qoder IDE 和 Qoder CLI。其他 Agent 和 Qoder 变体先标为 `No`，由各自维护者完成真实 Agent 的安装态验收后，按验证过的能力和平台更新。
 
-完整版 Pilot 和云壳共用同一份 SDK 和原生 Hook 二进制。Rust 版支持 Qoder IDE 和 Qoder CLI 拦截，其他 Agent 的拦截暂不支持。
+完整版 Pilot 和云壳共用同一份 SDK 和原生 Hook 二进制，支持 Qoder IDE 和 Qoder CLI 拦截。
 
-云壳 SDK 支持 Qoder 采集和拦截。Codex 等其余原生采集器由完整版外壳运行，Codex 保留用于开发验证。
+云壳 SDK 支持 Qoder 采集和拦截。完整版 Pilot 通过共享 SDK 采集 Codex rollout、补采中断回合并执行原生 Hook 裁决，用于开发验证。
 
 | Agent | 集成方式 | Trace 上报 | 日志上报 | Token 用量 | 对话 / 工具调用 |
 |-------|----------|------------|----------|------------|----------------|
@@ -125,7 +125,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-默认会开启本地 JSONL 输出，路径为 `~/.loongsuite-pilot/logs/output/`。
+本地 JSONL 输出默认关闭；如需写入 `~/.loongsuite-pilot/logs/output/`，请在 `config.json` 中设置 `"jsonl": { "enabled": true }`。
 
 安装参数、卸载命令和源码运行方式见 [安装指南](docs/zh-CN/installation.md)。
 
@@ -172,7 +172,7 @@ loongsuite-pilot info
 
 | 后端 | 用途 |
 |------|------|
-| JSONL | 本地备份和调试查看，默认开启。 |
+| JSONL | 本地备份和调试查看，默认关闭，需显式开启。 |
 | SLS | 上报到阿里云日志服务，支持 WebTracking、AK 和 API Key 模式。 |
 | HTTP | 批量 POST 到自定义服务端。 |
 | OTLP Trace | 将 GenAI 活动导出为 OpenTelemetry Trace。 |

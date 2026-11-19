@@ -66,7 +66,9 @@ Hermes 通过实际调用结束收口，包括跳过原生结束 hook 的提前�
 
 活动 turn 不设置强制按时长结束的上限，以免再次丢弃后续工具和模型事件。
 在现有缓冲数量上限内，待处理缓冲数和 `oldest_buffer_age_ms` 可通过 `pilot_trace_runtime` 状态快照观察。
-宿主在结束前被强杀仍需单独的遗留 turn 恢复机制；本观察器不提供崩溃后的持久化重放。
+Linux 上，Rust collector 仅在与 Hermes 宿主处于同一 PID 命名空间、能确认进程退出且缓冲已空闲至少五分钟时，进入退出恢复。再次确认前至少等待一分钟，并核对该来源全部现存分段的文件身份和已持久化游标。源缺失、半行、采集停用或输出未接受时继续保留数据。已消费的旧分段可以回收，有待恢复轮次时保留最后分段。
+
+恢复只导出已配对的模型或工具 Span，并标注 \`agent.hermes.collection.incomplete=true\` 和 \`agent.hermes.collection.end_reason=producer_process_exited\`。旧插件、身份不明和非 Linux 场景沿用各自的显式结束或旧版边界处理。待恢复轮次保存在 journal 中，collector 重启后可复查。
 
 OpenClaw 使用 `agent_end` 观察结束，保留 `llm_output` 的采集边界，不注册可改写回答的
 `before_agent_finalize`。注册后者会让支持该能力的宿主缓冲回复直到轮末，影响首次可见回复时间。

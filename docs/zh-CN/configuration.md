@@ -42,6 +42,7 @@ Pilot 按以下顺序解析配置：
 | `dataDir` | 本地运行和数据目录。 |
 | `userId` | 写入输出事件的用户标识，默认使用机器 hostname。 |
 | `collectLog` | 控制 SLS 日志上报。JSONL 和 HTTP 由各自的 `enabled` 控制。 |
+| `jsonl.enabled` | 控制 `logs/output/` 中规范化事件的本地输出，默认 `false`。 |
 | `collectTrace` | 当配置了 Trace 目标时，控制 OTLP Trace 上报。 |
 | `dashboard.enabled` | 本地 Dashboard 开关，默认 `false`。 |
 | `dashboard.port` | 本机 Dashboard 端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
@@ -58,6 +59,7 @@ Pilot 按以下顺序解析配置：
 | `LOONGSUITE_PILOT_DATA_DIR` | 覆盖数据目录。 |
 | `LOONGSUITE_PILOT_USER_ID` | 覆盖 `userId`。 |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | 设置为 `false` 或 `0` 可关闭 SLS 日志上报。 |
+| `JSONL_ENABLED` | 覆盖 `jsonl.enabled`。 |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | 设置为 `false` 或 `0` 可关闭 Trace 上报。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | 用一个唯一服务名覆盖所有 Agent 和上报后端的 `serviceName`。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | 覆盖 `serviceNamePrefix`。 |
@@ -348,3 +350,7 @@ Windows 在仓库 `deploy` 目录下使用目录数组：
 - 统一输出过滤覆盖 JSONL、SLS、HTTP 和 OTLP，并在 Codex/Qoder 多模态上传前检查。共享 Hook history 写入入口（`writeJsonlRecords` / `appendRowsToHistory`）及 Cursor 正式 history 的 stop、延迟响应路径也应用相同规则。独立文件/API 管道仅根据记录明确携带的目录字段判断；普通文本或没有目录元数据的记录按未知目录放行。
 
 这是 **Pilot 会话输出控制**，不是文件访问权限：Agent 自己仍可读取文件、写原生日志。输入适配器可能需要读取已有 transcript/Hook 文件才能识别目录，Cursor event journal、插件自行写入的原生/中间 JSONL 等文件可能在统一过滤前产生；不承诺敏感内容从未被读取或暂存。不会删除已有本地文件或历史上报数据，也不会阻止普通 workspace 中的 Agent 访问黑名单目录下的文件。
+
+### SLS 主机标签
+
+安装时能读取的硬件序列号写入 `hostSn`。SLS 日志组包含当前首个非回环 IPv4 对应网卡的 `__mac__`，以及配置非空时的 `__sn__`。默认开启。设置 `hostIdentityTags: false` 或环境变量 `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS=false` 可同时关闭主采集和 Qoder API 流水线的这两个标签。 自监控状态的可选字段 `mac` 和 `sn` 沿用同一个开关。

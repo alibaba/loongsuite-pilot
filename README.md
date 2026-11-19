@@ -55,9 +55,9 @@ Pilot is designed to answer practical questions:
 
 The Rust version supports Qoder IDE and Qoder CLI. Other agents and Qoder variants are marked `No` until their maintainers validate the installed Rust package with the real agent and update the verified capabilities and platforms.
 
-Full Pilot and CloudShell use the same SDK and native Hook binary for Qoder IDE and Qoder CLI. Interception for the other agents is unsupported in this Rust release.
+Full Pilot and CloudShell use the same SDK and native Hook binary for Qoder IDE and Qoder CLI.
 
-CloudShell SDK supports Qoder collection and interception. Full Pilot handles the other native collectors in its executable, including Codex for developer validation.
+CloudShell SDK supports Qoder collection and interception. Full Pilot uses the shared SDK for Codex rollout collection, interrupted-turn recovery, and native Hook decisions in developer validation.
 
 | Agent         | Integration               | Trace Export | Log Export | Token Usage | Conversation / Tool Calls |
 | ------------- | ------------------------- | ------------ | ---------- | ----------- | ------------------------- |
@@ -137,7 +137,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-Local JSONL output is enabled by default under `~/.loongsuite-pilot/logs/output/` on Linux/macOS and `%USERPROFILE%\.loongsuite-pilot\logs\output\` on Windows.
+Local JSONL output is disabled by default. To write to `~/.loongsuite-pilot/logs/output/` on Linux/macOS or `%USERPROFILE%\.loongsuite-pilot\logs\output\` on Windows, set `"jsonl": { "enabled": true }` in `config.json`.
 
 For installer options, uninstall commands, and source builds, see [Installation](docs/installation.md).
 
@@ -186,7 +186,7 @@ Enabling both `upstreamLink.enabled` and `propagateToLlm` extends the same trace
 
 | Backend    | Use Case                                                                |
 | ---------- | ----------------------------------------------------------------------- |
-| JSONL      | Local backup and easy inspection. Enabled by default.                   |
+| JSONL      | Local backup and easy inspection. Disabled by default; enable explicitly. |
 | SLS        | Alibaba Cloud Log Service reporting. Supports WebTracking, AK, and API Key modes. |
 | HTTP       | POST batches to a custom endpoint.                                      |
 | OTLP Trace | Export GenAI activity as OpenTelemetry traces.                          |

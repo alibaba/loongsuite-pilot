@@ -37,6 +37,7 @@ pub struct QoderApiInputConfig {
 pub enum PipelineInputConfig {
     File(FileInputConfig),
     QoderApi(QoderApiInputConfig),
+    Multica(Box<Value>),
 }
 
 impl PipelineInputConfig {
@@ -44,6 +45,7 @@ impl PipelineInputConfig {
         match self {
             Self::File(_) => "input_file",
             Self::QoderApi(_) => "input_qoder_api",
+            Self::Multica(_) => "input_multica",
         }
     }
 }
@@ -71,6 +73,7 @@ pub struct PipelineToggle {
     pub enabled: bool,
     pub file_enabled: bool,
     pub qoder_api_enabled: bool,
+    pub multica: crate::types::MulticaPipelineToggle,
 }
 
 pub struct PipelineManagerOptions {
@@ -80,6 +83,8 @@ pub struct PipelineManagerOptions {
     pub failed_log_dir: String,
     pub data_dir: String,
     pub pipeline_config: PipelineToggle,
+    pub sls: Option<crate::types::SlsFlusherConfig>,
+    pub service_name_prefix: String,
 }
 
 pub struct FilePipelineOptions {

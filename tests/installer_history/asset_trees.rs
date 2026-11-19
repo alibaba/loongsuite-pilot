@@ -36,6 +36,10 @@ fn minimal_asset_package(f: &Fixture, reference: &str) {
             include_str!("../../assets/plugins/shared/raw-source-gate.mjs"),
         ),
         (
+            "assets/plugins/shared/private-log-dir.cjs",
+            include_str!("../../assets/plugins/shared/private-log-dir.cjs"),
+        ),
+        (
             "assets/plugins/shared/resource-context.mjs",
             include_str!("../../assets/plugins/shared/resource-context.mjs"),
         ),

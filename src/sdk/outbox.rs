@@ -13,6 +13,33 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+const CODEX_SHELL_MIGRATED: &str = "__pilot_codex_shell_migrated_v1";
+const CODEX_LEGACY_EXPORTED: &str = "__pilot_codex_legacy_exported_v1";
+const QODER_LEGACY_EXPORTED: &str = "__pilot_qoder_legacy_exported_v1";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LegacyCheckpointHandoff {
+    Codex,
+    Qoder,
+}
+
+impl LegacyCheckpointHandoff {
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Codex => CODEX_LEGACY_EXPORTED,
+            Self::Qoder => QODER_LEGACY_EXPORTED,
+        }
+    }
+
+    pub(crate) fn for_input(input: &str) -> Option<Self> {
+        match input {
+            "codex-transcript" | "codex-aborted-turn" => Some(Self::Codex),
+            "qoder-trace" => Some(Self::Qoder),
+            _ => None,
+        }
+    }
+}
+
 type DeliveryRows = Vec<(i64, Vec<u8>)>;
 
 const SAVE_CHECKPOINT: &str = "INSERT INTO checkpoint VALUES(?1,?2)
@@ -88,12 +115,15 @@ pub struct Outbox {
     pub callbacks: AtomicU64,
     pub last_error: Mutex<Option<String>>,
     pub identity: RwLock<Value>,
+    pub local_hook_stats: Mutex<crate::interceptor::status::HookActivity>,
+    pub local_hook_config: Mutex<Option<usize>>,
     pub hook_timings: Mutex<Vec<crate::metrics::HookTimingStats>>,
     pub callback_duration_us: AtomicU64,
     pub total_delay_ms: AtomicU64,
     pub last_ack_ms: AtomicU64,
     pub start_time: String,
     pub path: PathBuf,
+    last_disk_compaction: Mutex<Instant>,
 }
 
 impl Outbox {
@@ -120,10 +150,10 @@ impl Outbox {
             INSERT OR IGNORE INTO monitoring_meta VALUES('usage_since',CAST(strftime('%s','now') AS TEXT));
             CREATE TABLE IF NOT EXISTS queue_size(singleton INTEGER PRIMARY KEY CHECK(singleton=1), bytes INTEGER NOT NULL, events INTEGER NOT NULL);
             INSERT OR IGNORE INTO queue_size SELECT 1,COALESCE(SUM(length(payload)),0),count(*) FROM event;
-            CREATE TRIGGER IF NOT EXISTS event_accepted AFTER INSERT ON event BEGIN
-                UPDATE queue_size SET bytes=bytes+length(NEW.payload),events=events+1 WHERE singleton=1; END;
-            CREATE TRIGGER IF NOT EXISTS event_acked AFTER DELETE ON event BEGIN
-                UPDATE queue_size SET bytes=bytes-length(OLD.payload),events=events-1 WHERE singleton=1; END;")?;
+            BEGIN IMMEDIATE;
+            DROP TRIGGER IF EXISTS event_accepted;
+            DROP TRIGGER IF EXISTS event_acked;
+            COMMIT;")?;
         let verdict_path = root.join("tool-verdicts.json");
         crate::utils::source_access::private_path(&verdict_path)?;
         let verdicts = Arc::new(crate::interceptor::ToolVerdictStore::new(verdict_path));
@@ -147,7 +177,10 @@ impl Outbox {
             callback_duration_us: AtomicU64::new(0),
             total_delay_ms: AtomicU64::new(0),
             last_ack_ms: AtomicU64::new(0),
+            local_hook_stats: Default::default(),
+            local_hook_config: Default::default(),
             start_time: chrono::Utc::now().to_rfc3339(),
+            last_disk_compaction: Mutex::new(Instant::now()),
             path,
         }))
     }
@@ -175,6 +208,7 @@ impl Outbox {
                 chrono::Utc::now().timestamp_millis()
             ],
         )?;
+        Self::update_queue_size(&tx, bytes.len() as i64, 1)?;
         tx.commit()?;
         self.accepted_events.fetch_add(1, Ordering::SeqCst);
         self.accepted_bytes
@@ -442,11 +476,103 @@ impl Outbox {
         }
         Ok(())
     }
-    pub(crate) fn saved_checkpoints(&self) -> anyhow::Result<Vec<(String, String)>> {
+    #[cfg(test)]
+    fn saved_checkpoints(&self) -> anyhow::Result<Vec<(String, String)>> {
         let db = self.db.lock().unwrap();
-        let mut stmt = db.prepare("SELECT source,json FROM checkpoint")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut statement = db.prepare("SELECT source,json FROM checkpoint")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The old shell marks its journal after taking ownership. Once a clean
+    /// export completes, the legacy installation may also advance the cursor.
+    /// Otherwise SQLite remains authoritative, including historically pending
+    /// bytes from the first version of the Codex SDK.
+    pub(super) fn prepare_shell_checkpoint(
+        &self,
+        source: &str,
+        handoff: LegacyCheckpointHandoff,
+        read_shell_checkpoint: impl FnOnce() -> anyhow::Result<Option<String>>,
+    ) -> anyhow::Result<Option<String>> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let handed_off = Self::find_checkpoint(&tx, handoff.marker())?.is_some()
+            || (handoff == LegacyCheckpointHandoff::Codex
+                && Self::find_checkpoint(&tx, CODEX_SHELL_MIGRATED)?.is_some());
+        if handed_off {
+            let pending: i64 =
+                tx.query_row("SELECT events FROM queue_size", [], |row| row.get(0))?;
+            anyhow::ensure!(
+                pending == 0,
+                "checkpoint handoff retains unacknowledged activity"
+            );
+            let checkpoint = read_shell_checkpoint()?;
+            let checkpoint = if handoff == LegacyCheckpointHandoff::Qoder {
+                // A missing legacy namespace cannot advance Qoder's saved cursor.
+                let checkpoint = match checkpoint {
+                    Some(text) => Some(text),
+                    None => Self::find_checkpoint(&tx, source)?,
+                };
+                tx.execute("DELETE FROM checkpoint WHERE source=?1", [handoff.marker()])?;
+                checkpoint
+            } else {
+                tx.execute("DELETE FROM checkpoint", [])?;
+                checkpoint
+            };
+            if let Some(text) = checkpoint.as_deref() {
+                tx.execute(SAVE_CHECKPOINT, params![source, text])?;
+            }
+            tx.commit()?;
+            return Ok(checkpoint);
+        }
+        if handoff == LegacyCheckpointHandoff::Qoder {
+            return Self::find_checkpoint(&tx, source);
+        }
+        let mut checkpoints = {
+            let mut statement = tx.prepare("SELECT json FROM checkpoint WHERE source<>?1")?;
+            let rows = statement.query_map([source], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        if let Some(current) = Self::find_checkpoint(&tx, source)? {
+            checkpoints.push(current);
+        }
+        if checkpoints.is_empty() {
+            return Ok(None);
+        }
+        let mut merged = serde_json::Map::new();
+        for checkpoint in checkpoints {
+            for (key, value) in serde_json::from_str::<serde_json::Map<String, Value>>(&checkpoint)?
+            {
+                if let Some(previous) = merged.insert(key, value.clone()) {
+                    anyhow::ensure!(
+                        previous == value,
+                        "conflicting Codex SDK source checkpoints"
+                    );
+                }
+            }
+        }
+        let text = Value::Object(merged).to_string();
+        tx.execute("DELETE FROM checkpoint WHERE source<>?1", [source])?;
+        tx.execute(SAVE_CHECKPOINT, params![source, text])?;
+        tx.commit()?;
+        Ok(Some(text))
+    }
+
+    pub(crate) fn mark_shell_checkpoint_exported(
+        root: &Path,
+        handoff: LegacyCheckpointHandoff,
+    ) -> anyhow::Result<()> {
+        let mut db = Connection::open_with_flags(
+            Self::database_path(root)?,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        db.busy_timeout(Duration::from_secs(1))?;
+        let tx = db.transaction()?;
+        let pending: i64 = tx.query_row("SELECT events FROM queue_size", [], |row| row.get(0))?;
+        anyhow::ensure!(pending == 0, "SDK activity remains queued");
+        tx.execute(SAVE_CHECKPOINT, params![handoff.marker(), "{}"])?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn checkpoint(&self, source: &str, text: &str) -> anyhow::Result<()> {
@@ -493,19 +619,16 @@ impl Outbox {
                         })? as usize;
                     if used.saturating_add(bytes) <= options.queue_disk_bytes {
                         let batch = uuid::Uuid::new_v4().to_string();
+                        let created = chrono::Utc::now().timestamp_millis();
                         {
                             let mut insert = tx.prepare_cached(
                                 "INSERT INTO event(source,batch,payload,created) VALUES(?1,?2,?3,?4)",
                             )?;
                             for row in encoded {
-                                insert.execute(params![
-                                    source,
-                                    batch,
-                                    row,
-                                    chrono::Utc::now().timestamp_millis()
-                                ])?;
+                                insert.execute(params![source, batch, row, created])?;
                             }
                         }
+                        Self::update_queue_size(&tx, bytes as i64, encoded.len() as i64)?;
                         for ((agent, day), totals) in usage {
                             tx.execute("INSERT INTO token_usage VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(agent,day) DO UPDATE SET responses=CASE WHEN responses>9223372036854775807-excluded.responses THEN 9223372036854775807 ELSE responses+excluded.responses END,with_usage=CASE WHEN with_usage>9223372036854775807-excluded.with_usage THEN 9223372036854775807 ELSE with_usage+excluded.with_usage END,input=CASE WHEN input>9223372036854775807-excluded.input THEN 9223372036854775807 ELSE input+excluded.input END,output=CASE WHEN output>9223372036854775807-excluded.output THEN 9223372036854775807 ELSE output+excluded.output END,cache_read=CASE WHEN cache_read>9223372036854775807-excluded.cache_read THEN 9223372036854775807 ELSE cache_read+excluded.cache_read END,cache_creation=CASE WHEN cache_creation>9223372036854775807-excluded.cache_creation THEN 9223372036854775807 ELSE cache_creation+excluded.cache_creation END",
                                 params![agent,day,totals[0],totals[1],totals[2],totals[3],totals[4],totals[5]])?;
@@ -659,6 +782,7 @@ impl Outbox {
         Ok((rows, Duration::ZERO))
     }
 
+    #[cfg(test)]
     pub(crate) fn read_batch(&self, options: &Delivery) -> anyhow::Result<(DeliveryRows, i64)> {
         Self::select_batch(&self.db.lock().unwrap(), options)
     }
@@ -695,19 +819,36 @@ impl Outbox {
         }
         Ok((rows, oldest))
     }
+    /// Update logical limits in the same durable transaction as the rows.
+    /// The previous schema ran these updates from per-row triggers.
+    fn update_queue_size(tx: &Connection, bytes: i64, events: i64) -> anyhow::Result<()> {
+        let changed = tx
+            .prepare_cached(
+                "UPDATE queue_size SET bytes=bytes+?1,events=events+?2 WHERE singleton=1",
+            )?
+            .execute(params![bytes, events])?;
+        anyhow::ensure!(changed == 1, "SDK outbox queue counters missing");
+        Ok(())
+    }
+
     pub(crate) fn ack(&self, rows: &[(i64, Vec<u8>)]) -> anyhow::Result<()> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         let now = chrono::Utc::now().timestamp_millis();
         let mut delay = 0u64;
+        let mut acknowledged_bytes = 0_i64;
         {
-            let mut delete =
-                tx.prepare_cached("DELETE FROM event WHERE seq=?1 RETURNING created")?;
+            let mut delete = tx.prepare_cached(
+                "DELETE FROM event WHERE seq=?1 RETURNING created,length(payload)",
+            )?;
             for (id, _) in rows {
-                let created: i64 = delete.query_row([id], |r| r.get(0))?;
+                let (created, bytes): (i64, i64) =
+                    delete.query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))?;
                 delay = delay.saturating_add(now.saturating_sub(created).max(0) as u64);
+                acknowledged_bytes += bytes;
             }
         }
+        Self::update_queue_size(&tx, -acknowledged_bytes, -(rows.len() as i64))?;
         tx.commit()?;
         self.total_delay_ms.fetch_add(delay, Ordering::SeqCst);
         self.last_ack_ms.store(now.max(0) as u64, Ordering::SeqCst);
@@ -717,7 +858,14 @@ impl Outbox {
             rows.iter().map(|(_, r)| r.len() as u64).sum::<u64>(),
             Ordering::SeqCst,
         );
-        let _ = db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA incremental_vacuum(64);");
+        // FULL synchronous commits still guard every acknowledgement. Limit
+        // physical compaction work while SQLite reuses live WAL pages.
+        let mut last = self.last_disk_compaction.lock().unwrap();
+        if last.elapsed() >= Duration::from_millis(500) {
+            let _ =
+                db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA incremental_vacuum(64);");
+            *last = Instant::now();
+        }
         Ok(())
     }
     pub fn alarm_batch(&self) -> Vec<(String, String)> {

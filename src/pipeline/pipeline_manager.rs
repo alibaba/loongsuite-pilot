@@ -8,6 +8,7 @@ use crate::utils::{create_logger, ensure_dir};
 use serde_json::{Map, Value};
 
 use super::input::file::file_pipeline::FilePipelineHandle;
+use super::input::multica::{self, MulticaPipeline};
 use super::input::qoder_api::qoder_api_pipeline::QoderApiPipeline;
 use super::sleep_detector::{SleepDetector, WakeEvent};
 use super::types::{
@@ -25,9 +26,11 @@ fn logger() -> crate::utils::BoundLogger {
 enum Running {
     File(Arc<FilePipelineHandle>),
     Qoder(Arc<QoderApiPipeline>),
+    Multica(Arc<MulticaPipeline>),
 }
 
 pub struct PipelineManager {
+    host_identity: crate::utils::SlsHostIdentity,
     opts: PipelineManagerOptions,
     pipelines: std::sync::Mutex<HashMap<String, Running>>,
     hashes: std::sync::Mutex<HashMap<String, String>>,
@@ -40,6 +43,7 @@ pub struct PipelineManager {
 impl PipelineManager {
     pub fn new(opts: PipelineManagerOptions) -> Self {
         Self {
+            host_identity: Default::default(),
             opts,
             pipelines: std::sync::Mutex::new(HashMap::new()),
             hashes: std::sync::Mutex::new(HashMap::new()),
@@ -48,6 +52,14 @@ impl PipelineManager {
             task: std::sync::Mutex::new(None),
             sleep: SleepDetector::new(),
         }
+    }
+
+    pub(crate) fn with_host_identity(
+        mut self,
+        host_identity: crate::utils::SlsHostIdentity,
+    ) -> Self {
+        self.host_identity = host_identity;
+        self
     }
 
     pub async fn start(self: &Arc<Self>) {
@@ -109,6 +121,7 @@ impl PipelineManager {
             match pipeline {
                 Running::File(pipeline) => pipeline.stop().await,
                 Running::Qoder(pipeline) => pipeline.stop_handle().await,
+                Running::Multica(pipeline) => pipeline.stop().await,
             }
             let _ = name;
         }
@@ -127,6 +140,7 @@ impl PipelineManager {
             match pipeline {
                 Running::File(pipeline) => pipeline.handle_wake(event).await,
                 Running::Qoder(pipeline) => pipeline.handle_wake_handle(event).await,
+                Running::Multica(_) => {}
             }
         }
         self.rescan_locked().await;
@@ -141,10 +155,30 @@ impl PipelineManager {
         if !self.running.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        let configs = self.scan().await;
+        let scanned = self.scan().await;
+        let explicit_multica = scanned
+            .iter()
+            .any(|config| matches!(config.inputs.first(), Some(PipelineInputConfig::Multica(_))));
+        let mut configs: Vec<_> = scanned
+            .into_iter()
+            .filter(|_| self.opts.pipeline_config.enabled)
+            .map(|config| (config, None))
+            .collect();
+        if self.opts.pipeline_config.multica.discover_local_sources && !explicit_multica {
+            for (raw, profile) in multica::local_daemon::discover().await {
+                if let Some(config) = validate_config(&raw, "local Multica detection") {
+                    if !configs
+                        .iter()
+                        .any(|(other, _)| other.config_name == config.config_name)
+                    {
+                        configs.push((config, profile));
+                    }
+                }
+            }
+        }
         let names: std::collections::HashSet<String> = configs
             .iter()
-            .map(|config| config.config_name.clone())
+            .map(|(config, _)| config.config_name.clone())
             .collect();
         let existing: Vec<String> = self.pipelines.lock().unwrap().keys().cloned().collect();
         for name in existing {
@@ -152,7 +186,7 @@ impl PipelineManager {
                 self.destroy(&name).await;
             }
         }
-        for config in configs {
+        for (config, profile) in configs {
             let hash = stable_stringify(&config.raw);
             let known = self
                 .hashes
@@ -166,12 +200,12 @@ impl PipelineManager {
                 .unwrap()
                 .contains_key(&config.config_name)
             {
-                self.create(config).await;
+                self.create(config, profile).await;
                 self.hashes.lock().unwrap().insert(hash.0, hash.1);
             } else if known.as_deref() != Some(hash.1.as_str()) {
                 let name = hash.0.clone();
                 self.destroy(&name).await;
-                self.create(config).await;
+                self.create(config, profile).await;
                 self.hashes.lock().unwrap().insert(hash.0, hash.1);
             }
         }
@@ -206,7 +240,7 @@ impl PipelineManager {
         configs
     }
 
-    async fn create(&self, config: PipelineConfig) {
+    async fn create(&self, config: PipelineConfig, profile: Option<std::path::PathBuf>) {
         let Some(input) = config.inputs.first() else {
             return;
         };
@@ -233,6 +267,12 @@ impl PipelineManager {
             }
             _ => {}
         }
+        if let PipelineInputConfig::Multica(value) = input {
+            if self.opts.pipeline_config.multica.enabled {
+                self.create_multica(&config, value, profile).await;
+            }
+            return;
+        }
         let name = config.config_name.clone();
         let input_type = input.type_name().to_string();
         match input_type.as_str() {
@@ -258,14 +298,17 @@ impl PipelineManager {
                 }
             }
             "input_qoder_api" => {
-                let pipeline = Arc::new(QoderApiPipeline::new(QoderApiPipelineOptions {
-                    workspace_policy: self.opts.workspace_policy.clone(),
-                    config,
-                    state_dir: self.opts.state_dir.clone(),
-                    failed_log_dir: self.opts.failed_log_dir.clone(),
-                    data_dir: self.opts.data_dir.clone(),
-                    sink: None,
-                }));
+                let pipeline = Arc::new(
+                    QoderApiPipeline::new(QoderApiPipelineOptions {
+                        workspace_policy: self.opts.workspace_policy.clone(),
+                        config,
+                        state_dir: self.opts.state_dir.clone(),
+                        failed_log_dir: self.opts.failed_log_dir.clone(),
+                        data_dir: self.opts.data_dir.clone(),
+                        sink: None,
+                    })
+                    .with_host_identity(self.host_identity.clone()),
+                );
                 if pipeline.start_handle().await.is_ok() {
                     self.pipelines
                         .lock()
@@ -277,12 +320,62 @@ impl PipelineManager {
         }
     }
 
+    async fn create_multica(
+        &self,
+        config: &PipelineConfig,
+        input: &Value,
+        profile: Option<std::path::PathBuf>,
+    ) {
+        let result = (|| {
+            let input = serde_json::from_value::<multica::config::Input>(input.clone())?;
+            let destination = multica::config::resolve_destination(
+                config
+                    .raw
+                    .get("flushers")
+                    .and_then(Value::as_array)
+                    .and_then(|flushers| flushers.first()),
+                self.opts.sls.as_ref(),
+            )?;
+            let mode = self
+                .opts
+                .pipeline_config
+                .multica
+                .mode
+                .as_deref()
+                .and_then(multica::config::CollectionMode::parse)
+                .unwrap_or_default();
+            MulticaPipeline::new(multica::Options {
+                name: &config.config_name,
+                input,
+                destination,
+                state_dir: Path::new(&self.opts.state_dir),
+                mode,
+                enabled: true,
+                prefix: &self.opts.service_name_prefix,
+                activation_path: None,
+                daemon_profile: profile,
+            })
+        })();
+        match result {
+            Ok(pipeline) => {
+                let pipeline = Arc::new(pipeline);
+                pipeline.start().await;
+                self.pipelines
+                    .lock()
+                    .unwrap()
+                    .insert(config.config_name.clone(), Running::Multica(pipeline));
+            }
+            Err(_) => logger().warn("invalid Multica configuration", None),
+        }
+    }
+
     async fn destroy(&self, name: &str) {
         let pipeline = self.pipelines.lock().unwrap().remove(name);
         if let Some(pipeline) = pipeline {
             match pipeline {
                 Running::File(pipeline) => pipeline.stop().await,
                 Running::Qoder(pipeline) => pipeline.stop_handle().await,
+                Running::Multica(pipeline) => pipeline.stop().await,
             }
         }
         self.hashes.lock().unwrap().remove(name);
@@ -335,6 +428,24 @@ fn validate_config(value: &Value, file_name: &str) -> Option<PipelineConfig> {
         return None;
     }
     let inputs = object.get("inputs").and_then(Value::as_array)?;
+    if let Some(input) = inputs
+        .first()
+        .filter(|input| input["Type"] == "input_multica")
+    {
+        if object
+            .get("flushers")
+            .is_some_and(|flushers| !flushers.is_array())
+        {
+            logger().warn("invalid Multica flushers", None);
+            return None;
+        }
+        return Some(PipelineConfig {
+            config_name: config_name.to_owned(),
+            inputs: vec![PipelineInputConfig::Multica(Box::new(input.clone()))],
+            flushers: Vec::new(),
+            raw: value.clone(),
+        });
+    }
     let flushers = object.get("flushers").and_then(Value::as_array)?;
     if inputs.is_empty() || flushers.is_empty() {
         logger().warn(
@@ -525,7 +636,10 @@ mod tests {
                 enabled: true,
                 file_enabled: true,
                 qoder_api_enabled: true,
+                multica: Default::default(),
             },
+            sls: None,
+            service_name_prefix: String::new(),
         }
     }
 

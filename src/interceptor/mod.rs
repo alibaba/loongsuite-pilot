@@ -12,6 +12,7 @@ mod access_log;
 mod blocked_prompt;
 mod config;
 mod paths;
+pub(crate) mod status;
 mod tool_verdict_store;
 mod types;
 
@@ -37,3 +38,5 @@ pub use tool_verdict_store::{
     ToolVerdictStore, TOOL_VERDICT_CHECKPOINT_INTERVAL_MS, TOOL_VERDICT_TTL_MS,
 };
 pub use types::*;
+
+pub use tool_verdict_store::GuardrailMetadata;
