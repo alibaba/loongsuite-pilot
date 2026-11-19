@@ -67,7 +67,8 @@
     "pino-roll": "^3.1.0",
     "smol-toml": "^1.9.1",
     "undici": "^6.29.1",
-    "sqlite3": "file:compat/sqlite3"
+    "sqlite3": "file:compat/sqlite3",
+    "protobufjs": "7.6.6"
   },
   "devDependencies": {
     "@types/express": "^4.17.0",

@@ -17,6 +17,8 @@ const MESSAGE_CONTENT_FIELDS = new Set([
   'gen_ai.system_instructions',
   'gen_ai.tool.definitions',
   'gen_ai.llm.reasoning.text',
+  // A matching script can echo arbitrary business content in its reason.
+  'gen_ai.guardrail.reason',
   'input.messages',
   'input.messages_delta',
   'output.messages',
@@ -46,6 +48,7 @@ const MESSAGE_CONTENT_FIELDS = new Set([
 ]);
 
 const MESSAGE_CONTENT_ATTRIBUTE_FIELDS = new Set([
+  'gen_ai.guardrail.reason',
   'content',
   'inlineDiffMessage',
   'agent.content',

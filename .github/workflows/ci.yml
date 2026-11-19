@@ -23,3 +23,35 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: node -e "const s=require('fs').readFileSync('dist/hook-cli.cjs','utf8'); if(/node:sqlite|native-deps-guard/.test(s)) process.exit(1)"
+
+  windows-interceptor-protocol:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Verify Windows private duplex control and native readiness
+        run: npm exec -- vitest run tests/unit/interceptor/managed-powershell-windows.test.ts --maxWorkers=1 --minWorkers=1 --reporter=verbose -t "overlapped fd3 duplex|reports native guardian"
+
+  windows-interceptor:
+    needs: windows-interceptor-protocol
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Verify real Windows PowerShell ownership and execution
+        run: npm exec -- vitest run tests/unit/interceptor/managed-powershell-windows.test.ts tests/unit/interceptor/managed-powershell-pool.test.ts --maxWorkers=1 --minWorkers=1 --reporter=verbose

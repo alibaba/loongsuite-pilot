@@ -121,7 +121,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-默认会开启本地 JSONL 输出，路径为 `~/.loongsuite-pilot/logs/output/`。
+本地 JSONL 输出默认关闭；如需写入 `~/.loongsuite-pilot/logs/output/`，请在 `config.json` 中设置 `"jsonl": { "enabled": true }`。
 
 安装参数、卸载命令和源码运行方式见 [安装指南](docs/zh-CN/installation.md)。
 
@@ -170,7 +170,7 @@ loongsuite-pilot info
 
 | 后端 | 用途 |
 |------|------|
-| JSONL | 本地备份和调试查看，默认开启。 |
+| JSONL | 本地备份和调试查看，默认关闭，需显式开启。 |
 | SLS | 上报到阿里云日志服务，支持 WebTracking、AK 和 API Key 模式。 |
 | HTTP | 批量 POST 到自定义服务端。 |
 | OTLP Trace | 将 GenAI 活动导出为 OpenTelemetry Trace。 |

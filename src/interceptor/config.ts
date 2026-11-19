@@ -1,5 +1,6 @@
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
-import { configJsonPath } from '../utils/data-dir.js';
+import * as path from 'node:path';
+import { configJsonPath, resolveDataDir } from '../utils/data-dir.js';
 import {
   SUPPORTED_INTERCEPTOR_TYPES,
   type InterceptorConfig,
@@ -8,8 +9,6 @@ import {
   type MaskType,
 } from '../types/index.js';
 
-const SUPPORTED_INTERCEPTOR_TYPE_SET = new Set<string>(SUPPORTED_INTERCEPTOR_TYPES);
-
 function env(key: string): string | undefined {
   const v = process.env[key];
   if (v === undefined) return undefined;
@@ -17,41 +16,15 @@ function env(key: string): string | undefined {
   return normalized.length > 0 ? normalized : undefined;
 }
 
-function parseInterceptorTypes(value: string | string[] | undefined): InterceptorType[] {
-  const rawTypes = Array.isArray(value)
-    ? value
-    : typeof value === 'string'
-      ? value.split(',')
-      : [];
-  return rawTypes
-    .map(type => type.trim())
-    .filter((type): type is InterceptorType => SUPPORTED_INTERCEPTOR_TYPE_SET.has(type));
-}
-
-function asTypesInput(value: unknown): string | string[] | undefined {
-  if (Array.isArray(value)) return value.filter((type): type is string => typeof type === 'string');
-  if (typeof value === 'string') return value;
-  return undefined;
-}
-
 export function buildInterceptorConfig(value: unknown): InterceptorConfig {
   const file = value && typeof value === 'object' && !Array.isArray(value)
-    ? value as { mode?: unknown; types?: unknown }
+    ? value as { mode?: unknown }
     : null;
   const mode = env('LOONGSUITE_PILOT_INTERCEPTOR_MODE') ?? (typeof file?.mode === 'string' ? file.mode : undefined);
-  if (mode !== 'all' && mode !== 'custom' && mode !== 'none') {
+  if (mode !== 'all' && mode !== 'none') {
     return { mode: 'none', types: [] };
   }
-
-  if (mode === 'all' || mode === 'none') {
-    return { mode, types: [] };
-  }
-
-  const types = parseInterceptorTypes(
-    env('LOONGSUITE_PILOT_INTERCEPTOR_TYPES') ?? asTypesInput(file?.types),
-  );
-
-  return { mode: 'custom', types };
+  return { mode, types: [] };
 }
 
 /**
@@ -61,11 +34,7 @@ export function buildInterceptorConfig(value: unknown): InterceptorConfig {
  * leave interceptor matches in the clear.
  */
 export function ensureMaskCoversInterceptor(mask: MaskConfig, interceptor: InterceptorConfig): MaskConfig {
-  const extra: MaskType[] = interceptor.mode === 'all'
-    ? [...SUPPORTED_INTERCEPTOR_TYPES]
-    : interceptor.mode === 'custom'
-      ? interceptor.types.filter((type): type is InterceptorType => SUPPORTED_INTERCEPTOR_TYPE_SET.has(type))
-      : [];
+  const extra: MaskType[] = interceptor.mode === 'all' ? [...SUPPORTED_INTERCEPTOR_TYPES] : [];
   if (extra.length === 0 || mask.mode === 'all') return mask;
   const current = mask.mode === 'custom' ? mask.types : [];
   const types: MaskType[] = [];
@@ -78,10 +47,14 @@ export function ensureMaskCoversInterceptor(mask: MaskConfig, interceptor: Inter
   return { ...mask, mode: 'custom', types };
 }
 
+/** Interceptor hooks follow the startup opt-in; cached rules never enable them. */
+export function shouldDeployInterceptorHooks(config: InterceptorConfig): boolean {
+  return config.mode === 'all';
+}
+
 export function resolveEnabledInterceptorTypes(config: InterceptorConfig): Set<InterceptorType> {
-  if (config.mode === 'none') return new Set();
-  if (config.mode === 'all') return new Set(SUPPORTED_INTERCEPTOR_TYPES);
-  return new Set(config.types.filter((type): type is InterceptorType => SUPPORTED_INTERCEPTOR_TYPE_SET.has(type)));
+  if (config.mode !== 'all') return new Set();
+  return new Set(SUPPORTED_INTERCEPTOR_TYPES);
 }
 
 export function isRuleEnabled(config: InterceptorConfig, ruleId: string): boolean {
@@ -93,4 +66,14 @@ export async function loadInterceptorConfig(configPath?: string): Promise<Interc
     configPath ?? resolveHome(configJsonPath()),
   );
   return buildInterceptorConfig(file?.interceptor);
+}
+
+/** Resolve an install's switch without borrowing another data directory's config. */
+export async function resolveDeployInterceptorHooks(dataDir: string): Promise<boolean> {
+  const installDataDir = path.resolve(resolveHome(dataDir));
+  const daemonDataDir = path.resolve(resolveDataDir());
+  const config = await loadInterceptorConfig(installDataDir === daemonDataDir
+    ? undefined
+    : path.join(installDataDir, 'config.json'));
+  return shouldDeployInterceptorHooks(config);
 }

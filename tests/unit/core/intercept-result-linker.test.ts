@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { InterceptResultLinker } from '../../../src/core/intercept-result-linker.js';
 import { ToolVerdictStore } from '../../../src/interceptor/tool-verdict-store.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
@@ -20,6 +20,31 @@ function storeWith(records: Array<Parameters<ToolVerdictStore['put']>[0] & { act
 }
 
 describe('InterceptResultLinker', () => {
+  it('stamps an allowed audit match with its metadata and separate fail-open state', () => {
+    const store = new ToolVerdictStore('/tmp/unused-tool-verdicts.json');
+    store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, {
+      action: 'allow', matched: true, enforcement: 'audit', failOpen: true, ruleId: 'audit', ruleVersion: '2', reason: 'observed',
+    });
+    const entry = toolEntry('tool.call');
+    new InterceptResultLinker(store, true).enrich([entry]);
+    expect(entry).toMatchObject({ 'gen_ai.guardrail.triggered': true, 'gen_ai.guardrail.matched': true,
+      'gen_ai.guardrail.action': 'allow', 'gen_ai.guardrail.enforcement': 'audit', 'gen_ai.guardrail.fail_open': true,
+      'gen_ai.guardrail.rule_id': 'audit', 'gen_ai.guardrail.rule_version': '2', 'gen_ai.guardrail.reason': 'observed' });
+  });
+  it('waits for IPC only for supported tool batches and enriches the resulting mirror', async () => {
+    const store = new ToolVerdictStore('/tmp/unused-tool-verdicts.json');
+    const barrier = vi.fn(async () => {
+      store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, 'block');
+    });
+    const linker = new InterceptResultLinker(store, true, barrier);
+    await linker.sync([toolEntry('tool.call', { 'gen_ai.agent.type': 'codex' })]);
+    expect(barrier).not.toHaveBeenCalled();
+    const entries = [toolEntry('tool.call')];
+    await linker.sync(entries);
+    linker.enrich(entries);
+    expect(barrier).toHaveBeenCalledOnce();
+    expect(entries[0]['gen_ai.guardrail.action']).toBe('block');
+  });
   it.each(['qoder', 'qoder-app'])('maps %s tool.call to PreToolUse and tool.result to PostToolUse', agentType => {
     const store = storeWith([
       { sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse', action: 'allow' },
@@ -34,6 +59,30 @@ describe('InterceptResultLinker', () => {
     expect(entries[0]['gen_ai.guardrail.action']).toBe('allow');
     expect(entries[1]['gen_ai.guardrail.triggered']).toBe(true);
     expect(entries[1]['gen_ai.guardrail.action']).toBe('block');
+  });
+
+  it('copies the stored rule snapshot onto a blocked tool event', () => {
+    const store = new ToolVerdictStore('/tmp/unused-tool-verdicts.json');
+    store.put(
+      { sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' },
+      {
+        action: 'block',
+        ruleId: 'flow-probe',
+        ruleVersion: '3',
+        severity: 'CRITICAL',
+        reason: 'flow-probe-v3',
+        title: 'ak-leak',
+        message: '不要在对话里粘贴 AccessKey',
+      },
+    );
+    const entry = toolEntry('tool.call');
+    new InterceptResultLinker(store, true).enrich([entry]);
+    expect(entry['gen_ai.guardrail.rule_id']).toBe('flow-probe');
+    expect(entry['gen_ai.guardrail.rule_version']).toBe('3');
+    expect(entry['gen_ai.guardrail.severity']).toBe('CRITICAL');
+    expect(entry['gen_ai.guardrail.reason']).toBe('flow-probe-v3');
+    expect(entry['gen_ai.guardrail.title']).toBe('ak-leak');
+    expect(entry['gen_ai.guardrail.message']).toBe('不要在对话里粘贴 AccessKey');
   });
 
   it('omits guardrail fields when the record is missing and skips other agents', () => {

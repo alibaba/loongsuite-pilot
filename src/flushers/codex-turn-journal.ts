@@ -18,6 +18,15 @@ function pendingBudget(): number {
 }
 
 export function codexTurnJournalGroupKey(entry: AgentActivityEntry): string {
+  if (entry['gen_ai.agent.type'] === 'openclaw'
+    && entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') {
+    // The cron producer assigns a fresh turn UUID for every observed task.
+    // Native sender identity may arrive after its first metadata record; it
+    // must not split one pending execution into differently ordered files.
+    return createHash('sha256').update(JSON.stringify([
+      'openclaw-cron-v1', entry['gen_ai.session.id'], entry['gen_ai.turn.id'],
+    ])).digest('hex');
+  }
   const identity = [
     entry['user.id'], entry['gen_ai.session.id'], entry['gen_ai.turn.id'],
   ];

@@ -4,7 +4,7 @@ import { RuleEngine } from '../../../src/interceptor/rules/engine.js';
 import type { InterceptorAccessLogEntry } from '../../../src/interceptor/access-log.js';
 import { wrapHostReason } from '../../../src/interceptor/adapters/reason.js';
 import { INTERCEPTOR_SERVICE, type HookRequest, type LocalRule } from '../../../src/interceptor/types.js';
-import type { ToolVerdictAction, ToolVerdictKey } from '../../../src/interceptor/tool-verdict-store.js';
+import type { ToolVerdictKey, ToolVerdictSnapshot } from '../../../src/interceptor/tool-verdict-store.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 
 function listen(server: import('node:http').Server): Promise<number> {
@@ -21,6 +21,37 @@ function listen(server: import('node:http').Server): Promise<number> {
 }
 
 describe('interceptor daemon HTTP API', () => {
+  it.each([undefined, null])('preserves observation and blocked prompt delivery when raw is %s', async raw => {
+    const entries: AgentActivityEntry[] = [];
+    const match = { matched: true as const, action: 'block' as const, enforcement: 'enforce' as const,
+      ruleId: 'managed-rule', ruleVersion: '1', reason: 'blocked', severity: 'CRITICAL' };
+    const server = createInterceptorServer({
+      port: 0,
+      version: 'test',
+      engine: { evaluate: async () => ({ ...match, matches: [match] }) },
+      writeAccessLog: () => undefined,
+      emitEvaluation: entry => { entries.push(entry); },
+      emitBlockedPrompt: entry => { entries.push(entry); },
+    });
+    const port = await listen(server);
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/hooks/evaluate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent: 'qoder', event: 'UserPromptSubmit',
+          sessionId: 'session', prompt: 'blocked prompt', raw }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ action: 'block' });
+      expect(entries.map(entry => entry['event.name'])).toEqual(['guardrail.evaluation', 'llm.request']);
+      expect(entries.map(entry => entry['gen_ai.agent.type'])).toEqual(['qoder', 'qoder-cli']);
+      expect(entries.map(entry => entry['gen_ai.guardrail.severity'])).toEqual(['CRITICAL', 'CRITICAL']);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+
   it('serves health and writes access logs for allow and block', async () => {
     const rule: LocalRule = {
       id: 'demo',
@@ -34,7 +65,7 @@ describe('interceptor daemon HTTP API', () => {
       ),
     };
     const access: InterceptorAccessLogEntry[] = [];
-    const verdicts: Array<{ key: ToolVerdictKey; result: ToolVerdictAction }> = [];
+    const verdicts: Array<{ key: ToolVerdictKey; result: ToolVerdictSnapshot }> = [];
     const opts = {
       port: 0,
       version: '1.2.3',
@@ -42,7 +73,7 @@ describe('interceptor daemon HTTP API', () => {
       writeAccessLog: (entry: InterceptorAccessLogEntry) => {
         access.push(entry);
       },
-      writeToolVerdict: (key: ToolVerdictKey, result: ToolVerdictAction) => {
+      writeToolVerdict: (key: ToolVerdictKey, result: ToolVerdictSnapshot) => {
         verdicts.push({ key, result });
       },
     };
@@ -132,7 +163,7 @@ describe('interceptor daemon HTTP API', () => {
             toolUseId: 'qoder-post-1',
             phase: 'PostToolUse',
           },
-          result: 'allow',
+          result: { action: 'allow' },
         },
         {
           key: {
@@ -140,7 +171,7 @@ describe('interceptor daemon HTTP API', () => {
             toolUseId: 'open-pre-1',
             phase: 'PreToolUse',
           },
-          result: 'block',
+          result: { action: 'block', ruleId: 'demo', reason: 'blocked by demo' },
         },
       ]);
     } finally {
@@ -159,7 +190,7 @@ describe('interceptor daemon HTTP API', () => {
       ),
     };
     const access: InterceptorAccessLogEntry[] = [];
-    const verdicts: Array<{ key: ToolVerdictKey; result: ToolVerdictAction }> = [];
+    const verdicts: Array<{ key: ToolVerdictKey; result: ToolVerdictSnapshot }> = [];
     const opts = {
       port: 0,
       version: '1.2.3',
@@ -167,7 +198,7 @@ describe('interceptor daemon HTTP API', () => {
       writeAccessLog: (entry: InterceptorAccessLogEntry) => {
         access.push(entry);
       },
-      writeToolVerdict: (key: ToolVerdictKey, result: ToolVerdictAction) => {
+      writeToolVerdict: (key: ToolVerdictKey, result: ToolVerdictSnapshot) => {
         verdicts.push({ key, result });
       },
     };
@@ -247,7 +278,7 @@ describe('interceptor daemon HTTP API', () => {
           toolUseId: 'qwen-pre-1',
           phase: 'PreToolUse',
         },
-        result: 'block',
+        result: { action: 'block', ruleId: 'demo', reason: '[APIKEY_MASKED]' },
       });
     } finally {
       server.close();
@@ -262,13 +293,13 @@ describe('interceptor daemon HTTP API', () => {
         throw new Error('rule failed');
       },
     };
-    const verdicts: Array<{ key: ToolVerdictKey; result: ToolVerdictAction }> = [];
+    const verdicts: Array<{ key: ToolVerdictKey; result: ToolVerdictSnapshot }> = [];
     const opts = {
       port: 0,
       version: '1.2.3',
       engine: new RuleEngine([rule], new Set(['boom'])),
       writeAccessLog: () => undefined,
-      writeToolVerdict: (key: ToolVerdictKey, result: ToolVerdictAction) => {
+      writeToolVerdict: (key: ToolVerdictKey, result: ToolVerdictSnapshot) => {
         verdicts.push({ key, result });
       },
     };
@@ -376,6 +407,8 @@ describe('interceptor daemon HTTP API', () => {
         'workspace.path': '/tmp/desktop',
         'agent.source': 'interceptor',
         'gen_ai.guardrail.action': 'block',
+        'gen_ai.guardrail.rule_id': 'demo',
+        'gen_ai.guardrail.reason': 'blocked by demo',
       });
       expect(emitted[1]).toMatchObject({
         'gen_ai.agent.type': 'qoder-cli',

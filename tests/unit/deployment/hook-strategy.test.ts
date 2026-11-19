@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { HookStrategy } from '../../../src/deployment/hook-strategy.js';
+import type { HookManager } from '../../../src/hooks/hook-manager.js';
 import type { AgentDefinition, DeployedAgentRecord } from '../../../src/types/index.js';
 
 vi.mock('node:fs/promises', async () => {
@@ -83,6 +84,7 @@ function makeDef(overrides?: Partial<AgentDefinition>): AgentDefinition {
 describe('HookStrategy', () => {
   let mockHookManager: {
     isHookInstalled: ReturnType<typeof vi.fn>;
+    isHookPresent: ReturnType<typeof vi.fn>;
     installHook: ReturnType<typeof vi.fn>;
     uninstallHook: ReturnType<typeof vi.fn>;
   };
@@ -93,6 +95,7 @@ describe('HookStrategy', () => {
     vi.mocked(fileExists).mockResolvedValue(false);
     mockHookManager = {
       isHookInstalled: vi.fn(),
+      isHookPresent: vi.fn().mockResolvedValue(false),
       installHook: vi.fn(),
       uninstallHook: vi.fn(),
     };
@@ -1136,11 +1139,15 @@ describe('HookStrategy', () => {
       });
     }
 
+    function enabledStrategy(): HookStrategy {
+      return new HookStrategy(mockHookManager as unknown as HookManager, { deployInterceptorHooks: true });
+    }
+
     it('installs interceptor hooks before the collection hook', async () => {
       mockHookManager.isHookInstalled.mockResolvedValue(false);
       mockHookManager.installHook.mockResolvedValue(true);
 
-      await strategy.deploy(qoderWithInterceptor());
+      await enabledStrategy().deploy(qoderWithInterceptor());
 
       const commands = mockHookManager.installHook.mock.calls.map(([def]) => def.hookCommand);
       expect(commands).toEqual([
@@ -1170,7 +1177,7 @@ describe('HookStrategy', () => {
       mockHookManager.isHookInstalled.mockResolvedValue(false);
       mockHookManager.installHook.mockResolvedValue(true);
 
-      await strategy.deploy(makeDef({
+      await enabledStrategy().deploy(makeDef({
         id: 'qwen-work-cn',
         hook: {
           settingsPath: '/home/.qwenworkcn/settings.json',
@@ -1207,7 +1214,86 @@ describe('HookStrategy', () => {
       mockHookManager.isHookInstalled
         .mockResolvedValueOnce(false)
         .mockResolvedValue(true);
+      await expect(enabledStrategy().needsDeploy(qoderWithInterceptor())).resolves.toBe(true);
+    });
+
+    it('does not install interceptor hooks when interception is off', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+      mockHookManager.uninstallHook.mockResolvedValue(true);
+
+      const result = await strategy.deploy(qoderWithInterceptor());
+
+      expect(result.success).toBe(true);
+      expect(mockHookManager.installHook.mock.calls.map(([def]) => def.hookCommand)).toEqual([
+        '/opt/pilot/hooks/qoder-loongsuite-pilot-hook.sh',
+      ]);
+      expect(mockHookManager.installHook.mock.calls.some(([def]) => def.hookJsonPath[1] !== 'Stop')).toBe(false);
+      expect(mockHookManager.uninstallHook).not.toHaveBeenCalled();
+    });
+
+    it('uninstalls installed interceptor hooks and leaves the collection hook', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      mockHookManager.isHookPresent.mockResolvedValue(true);
+      mockHookManager.installHook.mockResolvedValue(true);
+      mockHookManager.uninstallHook.mockResolvedValue(true);
+
+      const result = await strategy.deploy(qoderWithInterceptor());
+
+      expect(result.success).toBe(true);
+      expect(mockHookManager.uninstallHook.mock.calls.map(([def]) => def.hookJsonPath[1])).toEqual([
+        'UserPromptSubmit',
+        'PreToolUse',
+        'PostToolUse',
+      ]);
+      expect(mockHookManager.uninstallHook.mock.calls.every(
+        ([def]) => def.hookCommand === '/opt/pilot/hooks/interceptor-hook.sh',
+      )).toBe(true);
+      expect(mockHookManager.installHook).not.toHaveBeenCalled();
+    });
+
+    it('needs deploy when an interceptor command is present and interception is off', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      mockHookManager.isHookPresent.mockImplementation(async (def: { hookCommand: string }) =>
+        def.hookCommand === '/opt/pilot/hooks/interceptor-hook.sh');
+
       await expect(strategy.needsDeploy(qoderWithInterceptor())).resolves.toBe(true);
+    });
+
+    it('does not need deploy when interceptor hooks are absent and the collection hook is installed', async () => {
+      mockHookManager.isHookInstalled.mockImplementation(async (def: { hookCommand: string }) =>
+        def.hookCommand === '/opt/pilot/hooks/qoder-loongsuite-pilot-hook.sh');
+
+      await expect(strategy.needsDeploy(qoderWithInterceptor())).resolves.toBe(false);
+    });
+
+    it('still installs the collection hook when uninstalling an interceptor hook fails', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.isHookPresent.mockResolvedValue(true);
+      mockHookManager.uninstallHook.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      const result = await strategy.deploy(qoderWithInterceptor());
+
+      expect(result.success).toBe(true);
+      expect(mockHookManager.uninstallHook).toHaveBeenCalledTimes(3);
+      expect(mockHookManager.installHook.mock.calls.map(([def]) => def.hookCommand)).toEqual([
+        '/opt/pilot/hooks/qoder-loongsuite-pilot-hook.sh',
+      ]);
+    });
+
+    it('undeploys interceptor hooks even when interception is off', async () => {
+      mockHookManager.uninstallHook.mockResolvedValue(true);
+
+      const result = await strategy.undeploy(qoderWithInterceptor());
+
+      expect(result).toBe(true);
+      expect(mockHookManager.uninstallHook.mock.calls.map(([def]) => def.hookJsonPath[1])).toEqual([
+        'UserPromptSubmit',
+        'PreToolUse',
+        'PostToolUse',
+        'Stop',
+      ]);
     });
   });
 });

@@ -8,6 +8,8 @@ export * from './events.js';
 export interface ListenerConfig {
   enabled: boolean;
   pollInterval: number;
+  /** Restrict the Qwen Work collaboration input to these conversation IDs. */
+  includeConversationIds?: string[];
   /** Read-only source log directory override for the doubao-work listener. */
   logDir?: string;
   /** Product source for the doubao-work listener; defaults to Doubao Work. */
@@ -75,7 +77,8 @@ export const SUPPORTED_INTERCEPTOR_TYPES = [
 export type InterceptorType = (typeof SUPPORTED_INTERCEPTOR_TYPES)[number];
 
 export interface InterceptorConfig {
-  mode: MaskMode;
+  /** `custom` is not an interceptor mode. Builtin rules are all-or-nothing. */
+  mode: 'none' | 'all';
   types: InterceptorType[];
 }
 
@@ -127,6 +130,8 @@ export interface AnalyticsConfig {
   autoStart: boolean;
   dataDir: string;
   userId: string;
+  hostSn?: string;
+  hostIdentityTags: boolean;
   collectLog: boolean;
   collectTrace: boolean;
   /** Exact service.name shared by every agent and backend. */
@@ -418,6 +423,7 @@ export interface PipelineToggle {
   enabled: boolean;
   file: { enabled: boolean };
   qoderApi: { enabled: boolean };
+  multica?: { enabled: boolean; mode?: 'on' | 'off'; serviceNamePrefix?: string; discoverLocalSources?: boolean };
 }
 
 /** @deprecated Use PipelineToggle instead */

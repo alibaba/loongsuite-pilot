@@ -76,7 +76,8 @@ export class LogRetentionService {
   private pressureOnlyCleanup = false;
   private deletedBytes = 0;
 
-  constructor(dataDir: string, config: LogRetentionConfig, private readonly stateStore?: StateStore) {
+  constructor(dataDir: string, config: LogRetentionConfig, private readonly stateStore?: StateStore,
+    private readonly hasPendingHermesSource?: (sourceToken: string) => boolean) {
     this.logsDir = path.join(dataDir, 'logs');
     this.config = config;
   }
@@ -217,7 +218,7 @@ export class LogRetentionService {
         let totalBytes = 0;
         for (const file of files) totalBytes += (await safeLstat(path.join(dir, file)))?.size ?? 0;
         for (const file of files.sort()) {
-          const date = /-(\d{4}-\d{2}-\d{2})(?:\.segment-\d{12}-[a-f0-9]{32})?\.jsonl$/.exec(file)?.[1];
+          const date = /-(\d{4}-\d{2}-\d{2})(?:-uid\d+)?(?:\.segment-\d{12}-[a-f0-9]{32})?\.jsonl$/.exec(file)?.[1];
           const expired = date !== undefined && date < dateCutoff(this.config.hookHistoryDays);
           if ((pressureOnly || !expired) && totalBytes <= RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES) continue;
           const base = file.replace(/\.segment-\d{12}-[a-f0-9]{32}(?=\.jsonl$)/, '');
@@ -316,11 +317,18 @@ export class LogRetentionService {
           // the final segment still named by a pointer after its owner exits.
           const pid = family === 'hermes-agent'
             ? /^hermes-agent-(\d+)-\d+-[a-f0-9]+\.jsonl$/.exec(path.basename(base))?.[1] : undefined;
+          const sourceToken = family === 'hermes-agent'
+            ? /^hermes-agent-(\d+-\d+-[a-f0-9]+)\.jsonl$/.exec(path.basename(base))?.[1] : undefined;
           if (pid) {
             try { process.kill(Number(pid), 0); }
             catch (error) { processExited = (error as NodeJS.ErrnoException).code === 'ESRCH'; }
           }
-          if (!processExited && !isPublishedSuccessor(path.basename(file), path.basename(base), active)) continue;
+          const closedSegment = isPublishedSuccessor(path.basename(file), path.basename(base), active);
+          if (!processExited && !closedSegment) continue;
+          // Closed, checkpointed segments remain reclaimable, including while
+          // the producer is live. Keep only the dead producer's final segment
+          // while a pending turn still needs its source-drain proof.
+          if (processExited && !closedSegment && sourceToken && this.hasPendingHermesSource?.(sourceToken)) continue;
           await fs.unlink(file);
           deleted++;
           this.deletedBytes += current.size;

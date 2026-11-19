@@ -25,6 +25,7 @@ export type AgentEventName =
   | 'skill.use'
   | 'tool.approve'
   | 'agent.input'
+  | 'guardrail.evaluation'
   | 'other';
 
 export type JsonValue =
@@ -76,7 +77,10 @@ export interface AgentActivityEntry {
   'gen_ai.agent.name'?: string;
   'gen_ai.agent.description'?: string;
   'gen_ai.data_source.id'?: string;
-  'gen_ai.provider.name': string;
+  /** Required except for explicitly scoped Agent-only turn observations. */
+  'gen_ai.provider.name'?: string;
+  /** The source observes turn boundaries/input, not model or tool invocations. */
+  'loongsuite.observation.scope'?: 'agent_turn';
   'gen_ai.request.id'?: string;
   /** HTTP response status captured at the model transport boundary. */
   'http.response.status_code'?: number;
@@ -111,6 +115,23 @@ export interface AgentActivityEntry {
   /** Host-observed guardrail verdict for this tool phase. */
   'gen_ai.guardrail.triggered'?: boolean;
   'gen_ai.guardrail.action'?: 'allow' | 'block';
+  /** A successful rule match, independently of the host action. Omitted on unknown outcomes. */
+  'gen_ai.guardrail.matched'?: boolean;
+  'gen_ai.guardrail.enforcement'?: 'enforce' | 'audit';
+  'gen_ai.guardrail.fail_open'?: boolean;
+  'gen_ai.guardrail.phase'?: 'UserPromptSubmit' | 'PreToolUse' | 'PostToolUse';
+  /** Final blocking rule or first audit match; builtin rules report their blocking id. */
+  'gen_ai.guardrail.rule_id'?: string;
+  /** `rules[].version` from the managed document. Builtin rules omit this. */
+  'gen_ai.guardrail.rule_version'?: string;
+  /** Optional risk label from managed `rules[].severity`. */
+  'gen_ai.guardrail.severity'?: string;
+  /** Script stdout reason, or builtin replacement token. Masked before flush. */
+  'gen_ai.guardrail.reason'?: string;
+  /** Optional display label from `rules[].title`. */
+  'gen_ai.guardrail.title'?: string;
+  /** Host-facing reminder from `rules[].message`. */
+  'gen_ai.guardrail.message'?: string;
   'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
   /** Grok execution evidence used to associate a tool declaration with its result. */
