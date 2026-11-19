@@ -6,7 +6,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import type { HookWatchdogConfig } from '../types/index.js';
-import { HOOK_ASSET_MANIFEST, RUNTIME_ASSET_MANIFEST } from './hook-asset-manifest.js';
+import { HOOK_ASSET_MANIFEST } from './hook-asset-manifest.js';
 import { directoryExists, fileExists, writeTextFileAtomic } from '../utils/fs-utils.js';
 import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { createLogger } from '../utils/logger.js';
@@ -23,28 +23,18 @@ export function getUpgradeMarkerPath(controlDir: string): string {
   return path.join(controlDir, 'hook-upgrade-in-progress');
 }
 
-export function getRuntimeRedeployMarkerPath(controlDir: string): string {
-  return path.join(controlDir, 'runtime-redeploy-requested');
-}
-
 /** `current` and `versions/` live in the cache dir. pilotDir is versions/<name>. */
 export function getControlDir(pilotDir: string, dataDir: string): string {
   const versionsDir = path.dirname(pilotDir);
   return path.basename(versionsDir) === 'versions' ? path.dirname(versionsDir) : dataDir;
 }
 
-/** An upgrade, a runtime redeploy that has not finished installing, or a newer active version. */
+/** An upgrade in progress, or a newer active version. */
 export async function upgradeBlocksRepair(pilotDir: string, dataDir: string): Promise<boolean> {
   const controlDir = getControlDir(pilotDir, dataDir);
   try {
     const started = Number((await fs.readFile(getUpgradeMarkerPath(controlDir), 'utf8')).trim());
     if (!Number.isFinite(started) || Date.now() - started < HOOK_UPGRADE_MAX_AGE_MS) return true;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return true;
-  }
-  try {
-    await fs.readFile(getRuntimeRedeployMarkerPath(controlDir));
-    return true;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return true;
   }
@@ -300,7 +290,6 @@ export class HookWatchdog {
   private dailyRepairResetDate = '';
   private readonly assetRoots?: { pilotDir: string; dataDir: string };
   private readonly redownloadHooks?: (expected: Readonly<Record<string, string>>) => Promise<boolean>;
-  private runtimeRedeployRequested = false;
   private hookRedownloadAttempted = false;
   private assetCheckInFlight = false;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
@@ -403,9 +392,7 @@ export class HookWatchdog {
         logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
         return;
       }
-      this.runtimeRedeployRequested = false;
       await this.restoreDeployedHookAssets(pilotDir, dataDir);
-      await this.restoreRuntimeAssets(pilotDir, dataDir);
     } finally {
       this.assetCheckInFlight = false;
     }
@@ -444,77 +431,6 @@ export class HookWatchdog {
         logger.error('hook-watchdog.repair-failed', { action: 'hook-asset', path: relativePath, error: String(err) });
       }
     }
-  }
-
-  /** Restore built runtime files whose bytes no longer match RUNTIME_ASSET_MANIFEST. */
-  private async restoreRuntimeAssets(pilotDir: string, dataDir: string): Promise<void> {
-    const expected: Record<string, string> = { ...RUNTIME_ASSET_MANIFEST };
-    if (Object.keys(expected).length === 0) return;
-    const controlDir = getControlDir(pilotDir, dataDir);
-    const root = path.join(pilotDir, 'dist');
-    if (await upgradeBlocksRepair(pilotDir, dataDir)) {
-      logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
-      return;
-    }
-    if ((await this.classifyPath(root)).kind !== 'directory') {
-      await this.requestRuntimeRedeploy(controlDir, root);
-      return;
-    }
-    const indexHash = await this.readCollectorIndexHash(root);
-    if (indexHash) expected['index.js'] = indexHash;
-    else await this.requestRuntimeRedeploy(controlDir, 'index.js');
-
-    for (const relativePath of Object.keys(expected)) {
-      if (await upgradeBlocksRepair(pilotDir, dataDir)) {
-        logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
-        return;
-      }
-      try {
-        await this.restoreRuntimeFile(controlDir, root, relativePath, expected[relativePath]);
-      } catch (err) {
-        logger.error('hook-watchdog.repair-failed', { action: 'runtime-asset', path: relativePath, error: String(err) });
-      }
-    }
-  }
-
-  /** dist/index.sha256 holds the hex SHA-256 of dist/index.js. */
-  private async readCollectorIndexHash(root: string): Promise<string | null> {
-    const filePath = path.join(root, 'index.sha256');
-    if ((await this.classifyPath(filePath)).kind !== 'file') return null;
-    const text = (await fs.readFile(filePath, 'utf8')).trim().toLowerCase();
-    return /^[0-9a-f]{64}$/.test(text) ? text : null;
-  }
-
-  /** A built file that is missing or hashed differently is handed to the updater. */
-  private async restoreRuntimeFile(
-    controlDir: string,
-    root: string,
-    relativePath: string,
-    expected: string,
-  ): Promise<void> {
-    if (await this.parentIsSymlink(root, relativePath)) {
-      await this.requestRuntimeRedeploy(controlDir, relativePath);
-      return;
-    }
-    const target = path.join(root, relativePath);
-    const current = await this.classifyPath(target);
-    if (current.kind === 'file') {
-      const actual = createHash('sha256').update(await fs.readFile(target)).digest('hex');
-      if (actual === expected) return;
-    }
-    await this.requestRuntimeRedeploy(controlDir, relativePath);
-  }
-
-  /**
-   * Ask the updater to download the current release again and restart.
-   * The running tree is left as it is; downloadAndDeploy installs a new directory.
-   */
-  private async requestRuntimeRedeploy(controlDir: string, relativePath: string): Promise<void> {
-    if (this.runtimeRedeployRequested) return;
-    this.runtimeRedeployRequested = true;
-    await fs.mkdir(controlDir, { recursive: true });
-    await fs.writeFile(getRuntimeRedeployMarkerPath(controlDir), `${Date.now()}\n`);
-    logger.warn('hook-watchdog.repair', { action: 'runtime-asset', path: relativePath, reason: 'redeploy-requested' });
   }
 
   /** Classify a path without following symlinks. */

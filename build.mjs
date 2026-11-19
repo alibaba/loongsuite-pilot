@@ -1,12 +1,10 @@
-import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { collectFileManifest } from './scripts/hook-asset-manifest.mjs';
 
 const isProprietary = process.env.BUILD_MODE === 'proprietary';
 const hookAssetManifest = await collectFileManifest(path.resolve('assets/hooks'), new Set(), /\.(sh|ps1)$/);
-let runtimeAssetManifest = {};
 
 const commonDefine = {
   '__PROPRIETARY_BUILD__': String(isProprietary),
@@ -35,7 +33,7 @@ const hookAssetManifestPlugin = {
   name: 'hook-asset-manifest',
   setup(b) {
     b.onLoad({ filter: /[/\\]hook-asset-manifest\.ts$/ }, () => ({
-      contents: `export const HOOK_ASSET_MANIFEST = ${JSON.stringify(hookAssetManifest)};\nexport const RUNTIME_ASSET_MANIFEST = ${JSON.stringify(runtimeAssetManifest)};\n`,
+      contents: `export const HOOK_ASSET_MANIFEST = ${JSON.stringify(hookAssetManifest)};\n`,
       loader: 'ts',
     }));
   },
@@ -214,7 +212,6 @@ if (process.platform === 'darwin') {
   }
 }
 
-runtimeAssetManifest = await collectFileManifest(path.resolve('dist'), new Set(['index.js', 'index.sha256']));
 await build({
   entryPoints: ['src/index.ts'],
   outfile: 'dist/index.js',
@@ -234,7 +231,3 @@ await build({
   define: commonDefine,
   plugins: commonPlugins,
 });
-
-const indexPath = path.resolve('dist/index.js');
-const indexHash = createHash('sha256').update(await readFile(indexPath)).digest('hex');
-await writeFile(path.resolve('dist/index.sha256'), `${indexHash}\n`);

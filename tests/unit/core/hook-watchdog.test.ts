@@ -8,7 +8,7 @@ import {
   HookWatchdog,
   type PluginCheckTarget,
 } from '../../../src/core/hook-watchdog.js';
-import { HOOK_ASSET_MANIFEST, RUNTIME_ASSET_MANIFEST } from '../../../src/core/hook-asset-manifest.js';
+import { HOOK_ASSET_MANIFEST } from '../../../src/core/hook-asset-manifest.js';
 import type { HookWatchdogConfig } from '../../../src/types/index.js';
 import * as fsUtils from '../../../src/utils/fs-utils.js';
 
@@ -63,12 +63,6 @@ vi.mock('node:child_process', async () => {
 
 function setHookManifest(entries: Record<string, string>): void {
   const manifest = HOOK_ASSET_MANIFEST as Record<string, string>;
-  for (const key of Object.keys(manifest)) delete manifest[key];
-  Object.assign(manifest, entries);
-}
-
-function setRuntimeManifest(entries: Record<string, string>): void {
-  const manifest = RUNTIME_ASSET_MANIFEST as Record<string, string>;
   for (const key of Object.keys(manifest)) delete manifest[key];
   Object.assign(manifest, entries);
 }
@@ -130,7 +124,6 @@ describe('HookWatchdog', () => {
 
   afterEach(async () => {
     setHookManifest({});
-    setRuntimeManifest({});
     await cleanupTempDir(tmpDir);
   });
 
@@ -1153,146 +1146,6 @@ describe('HookWatchdog', () => {
       await wd.runCheck();
 
       expect(await fs.readFile(processor, 'utf8')).toBe('export const x = 2;\n');
-    });
-
-    async function writeCollectorIndex(pilotDir: string, text: string, hash = hashText(text)): Promise<void> {
-      const dist = path.join(pilotDir, 'dist');
-      await fs.mkdir(dist, { recursive: true });
-      await fs.writeFile(path.join(dist, 'index.js'), text);
-      await fs.writeFile(path.join(dist, 'index.sha256'), `${hash}\n`);
-    }
-
-    it('does not ask for a redeploy when index.js matches dist/index.sha256', async () => {
-      const { pilotDir, dataDir } = await installAssets();
-      const relativePath = 'updater/index.js';
-      const good = 'export const version = 1;\n';
-      const file = path.join(pilotDir, 'dist', relativePath);
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, good);
-      await writeCollectorIndex(pilotDir, 'export const collector = 1;\n');
-      setRuntimeManifest({ [relativePath]: hashText(good) });
-      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
-
-      await wd.runCheck();
-
-      await expect(fs.readFile(path.join(dataDir, 'runtime-redeploy-requested'), 'utf8')).rejects.toThrow();
-    });
-
-    it('asks for a redeploy when index.js does not match dist/index.sha256', async () => {
-      const { pilotDir, dataDir } = await installAssets();
-      const relativePath = 'updater/index.js';
-      const good = 'export const version = 1;\n';
-      const file = path.join(pilotDir, 'dist', relativePath);
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, good);
-      const collector = 'export const collector = 1;\n';
-      await writeCollectorIndex(pilotDir, 'tampered\n', hashText(collector));
-      setRuntimeManifest({ [relativePath]: hashText(good) });
-      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
-
-      await wd.runCheck();
-
-      expect(await fs.readFile(path.join(pilotDir, 'dist', 'index.js'), 'utf8')).toBe('tampered\n');
-      expect((await fs.readFile(path.join(dataDir, 'runtime-redeploy-requested'), 'utf8')).trim()).toMatch(/^\d+$/);
-    });
-
-    it('asks for a redeploy when dist/index.sha256 is missing', async () => {
-      const { pilotDir, dataDir } = await installAssets();
-      const relativePath = 'updater/index.js';
-      const good = 'export const version = 1;\n';
-      const file = path.join(pilotDir, 'dist', relativePath);
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, good);
-      setRuntimeManifest({ [relativePath]: hashText(good) });
-      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
-
-      await wd.runCheck();
-
-      expect((await fs.readFile(path.join(dataDir, 'runtime-redeploy-requested'), 'utf8')).trim()).toMatch(/^\d+$/);
-    });
-
-    it('asks the updater to redeploy when a runtime file was changed', async () => {
-      const { pilotDir, dataDir } = await installAssets();
-      const relativePath = 'updater/index.js';
-      const good = 'export const version = 1;\n';
-      const file = path.join(pilotDir, 'dist', relativePath);
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, 'tampered\n');
-      const redownloadHooks = vi.fn(async () => true);
-      setRuntimeManifest({ [relativePath]: hashText(good) });
-      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir, redownloadHooks });
-
-      await wd.runCheck();
-
-      expect(redownloadHooks).not.toHaveBeenCalled();
-      expect(await fs.readFile(file, 'utf8')).toBe('tampered\n');
-      expect((await fs.readFile(path.join(dataDir, 'runtime-redeploy-requested'), 'utf8')).trim()).toMatch(/^\d+$/);
-    });
-
-    it('asks for a redeploy when dist is not a real directory', async () => {
-      const { pilotDir, dataDir } = await installAssets();
-      const outside = path.join(tmpDir, 'outside-dist');
-      await fs.mkdir(outside, { recursive: true });
-      await fs.symlink(outside, path.join(pilotDir, 'dist'));
-      setRuntimeManifest({ 'updater/index.js': hashText('export const version = 1;\n') });
-      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
-
-      await wd.runCheck();
-
-      expect((await fs.readFile(path.join(dataDir, 'runtime-redeploy-requested'), 'utf8')).trim()).toMatch(/^\d+$/);
-    });
-
-    it('does not repair while a redeploy is already requested', async () => {
-      const { pilotDir, dataDir } = await installAssets();
-      const relativePath = 'updater/index.js';
-      const file = path.join(pilotDir, 'dist', relativePath);
-      const deployed = path.join(dataDir, 'hooks', scriptName);
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.mkdir(path.dirname(deployed), { recursive: true });
-      await fs.writeFile(file, 'tampered\n');
-      await fs.writeFile(deployed, 'tampered\n');
-      const marker = path.join(dataDir, 'runtime-redeploy-requested');
-      await fs.writeFile(marker, '1000\n');
-      setHookManifest({ [scriptName]: hashText(scriptText) });
-      setRuntimeManifest({ [relativePath]: hashText('export const version = 1;\n') });
-      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
-
-      await wd.runCheck();
-
-      expect(await fs.readFile(marker, 'utf8')).toBe('1000\n');
-      expect(await fs.readFile(file, 'utf8')).toBe('tampered\n');
-      expect(await fs.readFile(deployed, 'utf8')).toBe('tampered\n');
-    });
-
-    it('does not ask for a redeploy when dist is a symlink during an upgrade', async () => {
-      const { pilotDir, dataDir } = await installAssets();
-      const outside = path.join(tmpDir, 'outside-dist-upgrade');
-      await fs.mkdir(outside, { recursive: true });
-      await fs.mkdir(dataDir, { recursive: true });
-      await fs.symlink(outside, path.join(pilotDir, 'dist'));
-      await fs.writeFile(path.join(dataDir, 'hook-upgrade-in-progress'), `${Date.now()}\n`);
-      setRuntimeManifest({ 'updater/index.js': hashText('export const version = 1;\n') });
-      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
-
-      await wd.runCheck();
-
-      await expect(fs.readFile(path.join(dataDir, 'runtime-redeploy-requested'), 'utf8')).rejects.toThrow();
-    });
-
-    it('does not ask for a redeploy while an upgrade is in progress', async () => {
-      const { pilotDir, dataDir } = await installAssets();
-      const relativePath = 'updater/index.js';
-      const file = path.join(pilotDir, 'dist', relativePath);
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.mkdir(dataDir, { recursive: true });
-      await fs.writeFile(file, 'tampered\n');
-      await fs.writeFile(path.join(dataDir, 'hook-upgrade-in-progress'), `${Date.now()}\n`);
-      setRuntimeManifest({ [relativePath]: hashText('export const version = 1;\n') });
-      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
-
-      await wd.runCheck();
-
-      await expect(fs.readFile(path.join(dataDir, 'runtime-redeploy-requested'), 'utf8')).rejects.toThrow();
     });
   });
 });
