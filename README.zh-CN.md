@@ -79,10 +79,12 @@ Pilot 主要帮助回答这些问题：
 | Qoder Work | Hook / 本地数据轮询 | No | No | No | No |
 | Qoder Work CN | Hook / 本地数据轮询 | No | No | No | No |
 | Qwen Code CLI | Hook | No | No | No | No |
-| Qwen Work CN | Hook / 本地数据轮询 | No | No | No | No |
+| Qwen Work CN | Hook / 本地数据轮询（macOS arm64） | Yes | Yes | No | Yes |
 | Wukong | CLI API 轮询 | No | No | No | No |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | No | No | No | No |
 | [豆包工作（macOS/Windows，实验性）](docs/zh-CN/doubao-work.md) | 只读日志与执行元数据 | No | No | No | No |
+
+千问办公个人会话支持对话和工具调用采集。协作会话采集已完成的 Agent 回合及对话。
 
 维护者可参考 [OpenClaw 兼容性说明](docs/zh-CN/agents.md#openclaw-兼容性与生命周期)、[DeepSeek Harness 采集与生命周期](docs/zh-CN/agents.md#deepseek-harness-采集与生命周期)及[GitHub Copilot CLI 遥测说明](docs/zh-CN/copilot-native-telemetry.md)。
 
