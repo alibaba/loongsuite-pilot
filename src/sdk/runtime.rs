@@ -372,7 +372,8 @@ fn run_agent(
                 "state/codex/transcript-span-contexts",
             ],
             "codex-aborted-turn" => &["state/codex/sessions", "logs/diagnostics"],
-            _ => &["state/qoder-transcripts/qoder", "logs/qoder"],
+            "qoder-trace" => &["state/qoder-transcripts/qoder", "logs/qoder"],
+            _ => &[],
         };
         if checkpoint_key == "codex-transcript" {
             if let Some(home) = roots[0].parent() {
@@ -596,6 +597,43 @@ fn run_agent(
             "codex",
             input,
             |i| i.collector_running(),
+            |i| Box::pin(async move { i.start().await }),
+            |i| {
+                Box::pin(async move {
+                    let _ = i.stop().await;
+                })
+            },
+        )
+    } else if let Some(profile) = super::hook_history::find(&plan.agent) {
+        let input = (profile.build)(crate::inputs::rest_support::HookInputOptions {
+            state_store: store.clone(),
+            log_dir: source_path("hook_jsonl"),
+            log_prefix: None,
+            poll_interval_ms: Some(plan.poll_interval_ms),
+        });
+        if let Some(state) = &plan.pilot_host {
+            let policy = crate::inputs::base::WorkspacePolicy::new(
+                state.exclude_workspaces.clone(),
+                Some(state.data_dir.join("state/workspace-exclusions")),
+            );
+            input.runtime.set_workspace_policy(policy);
+        }
+        input.set_owned_entries_handler(capture_codex);
+        input.on_runtime_delta(record_delta);
+        bind(
+            &input,
+            manager.clone(),
+            queue.clone(),
+            scope,
+            cancel.clone(),
+            global.clone(),
+            buffer,
+        );
+        live(
+            checkpoint_key,
+            profile.agent,
+            input,
+            |i| i.running(),
             |i| Box::pin(async move { i.start().await }),
             |i| {
                 Box::pin(async move {

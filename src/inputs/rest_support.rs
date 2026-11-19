@@ -136,6 +136,19 @@ struct HookInner {
 }
 
 impl HookJsonlInput {
+    /// Host the existing parser inside the SDK's transactional input lifecycle.
+    /// The SDK supplies an explicit source directory and does not create it.
+    pub(crate) fn sdk_hosted(&self) -> Arc<crate::inputs::base::HostedInput<SdkHookBody>> {
+        crate::inputs::base::HostedInput::new(
+            SdkHookBody {
+                inner: Arc::clone(&self.inner),
+            },
+            "SdkHookInput",
+            Arc::clone(&self.inner.state_store),
+            Some(self.poll.interval_ms()),
+        )
+    }
+
     pub fn runtime_info(&self) -> crate::inputs::base::InputRuntimeInfo {
         crate::inputs::base::InputRuntimeInfo {
             poll_interval_ms: self.poll.interval_ms(),
@@ -257,6 +270,45 @@ impl HookJsonlInput {
 
     pub async fn collect_entries(&self) -> Result<Vec<AgentActivityEntry>, String> {
         self.inner.collect().await
+    }
+}
+
+pub(crate) struct SdkHookBody {
+    inner: Arc<HookInner>,
+}
+
+#[async_trait::async_trait]
+impl crate::inputs::base::InputBody for SdkHookBody {
+    fn checkpoint_namespaces(&self) -> Option<Vec<String>> {
+        Some(vec![self.inner.id.into()])
+    }
+
+    fn id(&self) -> &str {
+        self.inner.id
+    }
+
+    fn agent_type(&self) -> ClientType {
+        self.inner.agent_type
+    }
+
+    fn collection_method(&self) -> CollectionMethod {
+        CollectionMethod::HookJsonl
+    }
+
+    async fn on_start(&self, _: &crate::inputs::base::InputRuntime) -> anyhow::Result<()> {
+        crate::utils::source_access::check(&self.inner.log_dir)?;
+        if let Some(replay) = &self.inner.history_replay {
+            *replay.lock().expect("hook replay") = HookReplay::new();
+        }
+        Ok(())
+    }
+
+    async fn collect(
+        &self,
+        _: &crate::inputs::base::InputRuntime,
+    ) -> anyhow::Result<Vec<AgentActivityEntry>> {
+        crate::utils::source_access::check(&self.inner.log_dir)?;
+        self.inner.collect().await.map_err(anyhow::Error::msg)
     }
 }
 
@@ -542,7 +594,15 @@ async fn cursor_first_run_guard(inner: &HookInner) {
     let today = get_today_date_string();
     let log_file_name = format!("{}-{today}.jsonl", inner.log_prefix);
     let log_file = Path::new(&inner.log_dir).join(&log_file_name);
-    match tokio::fs::metadata(&log_file).await {
+    let metadata = if crate::utils::source_access::current().is_some() {
+        match crate::utils::source_access::open_async(&log_file).await {
+            Ok(file) => file.metadata().await,
+            Err(error) => Err(error),
+        }
+    } else {
+        tokio::fs::metadata(&log_file).await
+    };
+    match metadata {
         Ok(meta) if meta.len() > 0 => {
             inner.state_store.update(
                 inner.id,
@@ -747,8 +807,10 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
             .await
         }
     };
-    let raw = work.is_some() || inner.id == "openclaw-plugin-log";
-    let candidates = if raw {
+    let rotated = work.is_some() || inner.id == "openclaw-plugin-log";
+    let scoped = crate::utils::source_access::current().is_some();
+    let bounded = rotated || scoped;
+    let candidates = if rotated {
         file_names.clone()
     } else {
         candidate_file_names(&inner.log_prefix, &file_names, state.last_file(), &today)
@@ -759,7 +821,7 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
         .as_object()
         .cloned()
         .unwrap_or_default();
-    let next = if work.is_some() {
+    let next = if work.is_some() && !scoped {
         0
     } else {
         previous["hookLogSweepNext"]
@@ -768,13 +830,23 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
             .unwrap_or(0)
     };
     let mut resume = None;
-    let mut remaining = if raw {
+    let mut remaining = if scoped {
+        crate::utils::source_access::read_limit(crate::utils::raw_source::CYCLE_BYTES as usize)
+            as u64
+    } else if rotated {
         crate::utils::raw_source::CYCLE_BYTES
     } else {
         u64::MAX
     };
-    for name in candidates.iter().cycle().skip(next).take(candidates.len()) {
-        if remaining == 0 {
+    let file_limit = crate::utils::source_access::file_limit(usize::MAX);
+    for (index, name) in candidates
+        .iter()
+        .cycle()
+        .skip(next)
+        .take(candidates.len())
+        .enumerate()
+    {
+        if remaining == 0 || index >= file_limit {
             resume = Some(name.clone());
             break;
         }
@@ -790,7 +862,7 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
         )
         .await?;
         offsets.insert(name.clone(), file.offset);
-        if raw {
+        if bounded {
             remaining = remaining.saturating_sub(file.bytes);
             if let Some(identity) = file.identity {
                 identities.insert(name.clone(), identity.into());
@@ -798,6 +870,9 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
         }
         entries.extend(file.entries);
         if work.is_some() && file.offset < file.size && !file.closed_partial_tail {
+            if scoped {
+                resume = Some(name.clone());
+            }
             break;
         }
     }
@@ -817,7 +892,7 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
                 .map(|value| value != newest_offset as f64)
                 .unwrap_or(true);
         identities.retain(|name, _| live.contains(name.as_str()));
-        let changed = raw
+        let changed = bounded
             && (previous["hookLogIdentities"].as_object() != Some(&identities)
                 || previous["hookLogSweepNext"].as_str() != resume.as_deref());
         if should_persist
@@ -827,7 +902,7 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
         {
             let mut extra = Map::new();
             extra.insert(OFFSET_MAP_EXTRA_KEY.to_string(), Value::Object(pruned));
-            if raw {
+            if bounded {
                 extra.insert("hookLogDir".into(), inner.log_dir.clone().into());
                 extra.insert("hookLogPrefix".into(), inner.log_prefix.clone().into());
                 extra.insert("hookLogIdentities".into(), Value::Object(identities));
@@ -958,7 +1033,11 @@ async fn collect_hook_file(
         .read_to_end(&mut buf)
         .await
         .map_err(|err| err.to_string())?;
-    let limit = backlog.min(max_record_bytes);
+    let limit = if crate::utils::source_access::current().is_some() {
+        backlog.min(max_record_bytes).min(budget)
+    } else {
+        backlog.min(max_record_bytes)
+    };
     let mut has_newline = buf.contains(&b'\n');
     while !has_newline && (buf.len() as u64) < limit {
         let previous = buf.len();
@@ -1062,7 +1141,16 @@ async fn closed_hook_tail(
     let key = expected.checkpoint_key();
     let size = expected.size;
     let opened = file.into_std().await;
+    let scope = crate::utils::source_access::current();
     tokio::task::spawn_blocking(move || {
+        struct Restore(Option<Arc<crate::utils::source_access::SourceScope>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                crate::utils::source_access::install(self.0.take());
+            }
+        }
+        let _restore = Restore(crate::utils::source_access::current());
+        crate::utils::source_access::install(scope);
         let Ok(active) = crate::utils::raw_source::active(&base) else {
             return false;
         };
@@ -1187,10 +1275,21 @@ async fn seed_offset_map(
             continue;
         }
         let path = Path::new(log_dir).join(name);
-        let size = tokio::fs::metadata(&path)
-            .await
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+        let size = if crate::utils::source_access::current().is_some() {
+            match crate::utils::source_access::check(&path) {
+                Ok(()) => tokio::fs::symlink_metadata(&path)
+                    .await
+                    .ok()
+                    .filter(|meta| meta.is_file())
+                    .map_or(0, |meta| meta.len()),
+                Err(_) => 0,
+            }
+        } else {
+            tokio::fs::metadata(&path)
+                .await
+                .map(|meta| meta.len())
+                .unwrap_or(0)
+        };
         offsets.insert(name.clone(), size);
     }
     let today_name = format!("{prefix}-{today}.jsonl");
@@ -2099,6 +2198,7 @@ async fn open_session_file(
     crate::utils::file_identity::OpenedFileIdentity,
 )> {
     let path = path.to_owned();
+    let scope = crate::utils::source_access::current();
     tokio::task::spawn_blocking(move || {
         let mut options = std::fs::OpenOptions::new();
         options.read(true);
@@ -2107,7 +2207,19 @@ async fn open_session_file(
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
         }
-        let file = options.open(path)?;
+        let file = if let Some(scope) = scope {
+            struct Restore(Option<Arc<crate::utils::source_access::SourceScope>>);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    crate::utils::source_access::install(self.0.take());
+                }
+            }
+            let _restore = Restore(crate::utils::source_access::current());
+            crate::utils::source_access::install(Some(scope));
+            crate::utils::source_access::open(&path)?
+        } else {
+            options.open(&path)?
+        };
         let identity = crate::utils::file_identity::identity_from_open(&file)?;
         Ok((tokio::fs::File::from_std(file), identity))
     })

@@ -120,6 +120,9 @@ pub struct PilotHostState {
 }
 impl AgentPlan {
     pub(super) fn checkpoint_key(&self) -> &'static str {
+        if let Some(profile) = super::hook_history::find(&self.agent) {
+            return profile.listener;
+        }
         match self.profile.as_str() {
             "codex_rollout_v1" => "codex-transcript",
             "codex_aborted_turn_v1" => "codex-aborted-turn",
@@ -306,7 +309,7 @@ impl Policy {
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("agent name must be a string"))?;
             anyhow::ensure!(
-                matches!(agent, "qoder" | "codex"),
+                matches!(agent, "qoder" | "codex") || super::hook_history::find(agent).is_some(),
                 "unsupported SDK agent: {agent}"
             );
             anyhow::ensure!(seen.insert(agent), "duplicate agent");
@@ -346,7 +349,7 @@ impl Policy {
                     (agent, profile),
                     ("qoder", "qoder_trace_v1")
                         | ("codex", "codex_rollout_v1" | "codex_aborted_turn_v1")
-                ),
+                ) || super::hook_history::find(agent).is_some_and(|item| item.profile == profile),
                 "unsupported agent/profile: {agent}/{profile}"
             );
             let roots = collection
@@ -435,6 +438,12 @@ impl Policy {
                     kind: kind.into(),
                     path: resolved,
                 });
+            }
+            if super::hook_history::find(agent).is_some() {
+                anyhow::ensure!(
+                    parsed.len() == 1 && parsed[0].kind == "hook_jsonl",
+                    "this profile requires exactly one hook_jsonl source"
+                );
             }
             if agent == "codex" {
                 anyhow::ensure!(

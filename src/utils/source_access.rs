@@ -254,6 +254,11 @@ pub fn read_limit(default: usize) -> usize {
         .map(|scope| scope.max_read_bytes.min(default))
         .unwrap_or(default)
 }
+pub(crate) fn file_limit(default: usize) -> usize {
+    current()
+        .map(|scope| scope.max_files.min(default))
+        .unwrap_or(default)
+}
 pub fn read_dir(path: impl AsRef<Path>) -> io::Result<std::fs::ReadDir> {
     check(&path)?;
     std::fs::read_dir(path)

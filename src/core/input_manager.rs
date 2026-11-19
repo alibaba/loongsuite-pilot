@@ -829,7 +829,10 @@ impl InputManager {
             .clone()
             .ok_or("Pilot output is not configured")?;
         let codex = matches!(input_id, "codex-transcript" | "codex-aborted-turn");
-        if !codex {
+        let hook_history = crate::sdk::hook_history::PROFILES
+            .iter()
+            .any(|profile| profile.listener == input_id);
+        if !codex && !hook_history {
             if let Some(result) = flusher.send_sdk_activity(rows).await {
                 let entry_count = rows.len();
                 let batch_bytes = rows.iter().map(|row| row.len() as u64).sum();
@@ -842,13 +845,13 @@ impl InputManager {
             .map(|row| serde_json::from_slice::<AgentActivityEntry>(row))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| "invalid SDK activity JSON")?;
-        let encoded = if codex {
-            // Only the full shell is authorized to inspect a Codex workspace
-            // and join its runs to upstream ACP traces.
+        let encoded = if codex || hook_history {
+            // Workspace inspection belongs to the full shell.
             enrich_canonical_entries_with_git(&mut entries).await;
-            let linker = self.trace_linker();
-            if let Some(linker) = linker {
-                linker.stamp(&mut entries).await;
+            if codex {
+                if let Some(linker) = self.trace_linker() {
+                    linker.stamp(&mut entries).await;
+                }
             }
             entries
                 .iter()
