@@ -10,7 +10,7 @@ import * as os from 'node:os';
 import type { AutoUpdateConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
-import { getUpgradeMarkerPath } from '../core/hook-watchdog.js';
+import { getUpgradeMarkerPath, withHookAssetLock } from '../core/hook-watchdog.js';
 import {
   extractTarGz,
   makeTarStagingDir,
@@ -656,38 +656,47 @@ export class Updater {
       // dsh deployment with "plugin file not found or unreadable", once per cycle.
       const postinstallScript = path.join(stagingDir, 'scripts', 'postinstall.js');
       if (await fs.access(postinstallScript).then(() => true).catch(() => false)) {
-        try {
-          await fs.mkdir(this.paths.cacheDir, { recursive: true });
-          await fs.writeFile(getUpgradeMarkerPath(this.paths.cacheDir), `${Date.now()}\n`);
-          hookUpgradeMarked = true;
-        } catch (err) {
-          logger.warn('failed to mark hook upgrade', { error: String(err) });
-        }
-        try {
-          const { stdout, stderr } = await execFileAsync(nodeBin, [postinstallScript], {
-            cwd: stagingDir,
-            env: {
-              ...childEnv,
-              // Pin the target explicitly instead of trusting what we inherited: the
-              // script otherwise falls back to $HOME/.loongsuite-pilot, which is the
-              // wrong tree for any install using a custom data dir.
-              LOONGSUITE_PILOT_DATA_DIR: this.paths.dataDir,
-            },
-            timeout: 30_000,
-          });
-          // postinstall exits 0 even when a tree failed (it is package.json's
-          // `postinstall`, and a non-zero exit there aborts the whole install), so the
-          // only signal for a partial result is its own output. Unlogged, this path
-          // reproduces the failure mode it exists to heal: hooks or plugins absent while
-          // every step reports success.
-          const output = `${stdout ?? ''}${stderr ?? ''}`.trim();
-          if (/failed asset tree/.test(output)) {
-            logger.warn('postinstall reported failed asset trees', { output });
-          } else if (output) {
-            logger.info('postinstall completed', { output });
+        const publishHooks = async () => {
+          try {
+            await fs.mkdir(this.paths.cacheDir, { recursive: true });
+            await fs.writeFile(getUpgradeMarkerPath(this.paths.cacheDir), `${Date.now()}\n`);
+            hookUpgradeMarked = true;
+          } catch (err) {
+            logger.warn('failed to mark hook upgrade', { error: String(err) });
           }
+          try {
+            const { stdout, stderr } = await execFileAsync(nodeBin, [postinstallScript], {
+              cwd: stagingDir,
+              env: {
+                ...childEnv,
+                // Pin the target explicitly instead of trusting what we inherited: the
+                // script otherwise falls back to $HOME/.loongsuite-pilot, which is the
+                // wrong tree for any install using a custom data dir.
+                LOONGSUITE_PILOT_DATA_DIR: this.paths.dataDir,
+              },
+              timeout: 30_000,
+            });
+            // postinstall exits 0 even when a tree failed (it is package.json's
+            // `postinstall`, and a non-zero exit there aborts the whole install), so the
+            // only signal for a partial result is its own output. Unlogged, this path
+            // reproduces the failure mode it exists to heal: hooks or plugins absent while
+            // every step reports success.
+            const output = `${stdout ?? ''}${stderr ?? ''}`.trim();
+            if (/failed asset tree/.test(output)) {
+              logger.warn('postinstall reported failed asset trees', { output });
+            } else if (output) {
+              logger.info('postinstall completed', { output });
+            }
+          } catch (err) {
+            logger.warn('postinstall failed, continuing', { error: String(err) });
+          }
+        };
+        try {
+          // Wait out an in-flight restore so its old bytes cannot land after this publish.
+          await withHookAssetLock(this.paths.cacheDir, publishHooks);
         } catch (err) {
-          logger.warn('postinstall failed, continuing', { error: String(err) });
+          logger.warn('hook asset lock unavailable, publishing without mutual exclusion', { error: String(err) });
+          await publishHooks();
         }
       }
 

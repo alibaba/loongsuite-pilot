@@ -6,6 +6,8 @@ import { EventEmitter } from 'node:events';
 import { createTempDir, cleanupTempDir } from '../../helpers/fixture-builder.js';
 import {
   HookWatchdog,
+  getHookAssetLockPath,
+  withHookAssetLock,
   type PluginCheckTarget,
 } from '../../../src/core/hook-watchdog.js';
 import { HOOK_ASSET_MANIFEST } from '../../../src/core/hook-asset-manifest.js';
@@ -1002,6 +1004,93 @@ describe('HookWatchdog', () => {
       ];
       expect(contents.filter(text => text === 'tampered\n')).toHaveLength(1);
       expect(contents.some(text => text === scriptText || text === processorText)).toBe(true);
+    });
+
+    it('lets an upgrade publish after an in-flight restore, and the old bytes do not land last', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, 'tampered\n');
+      setHookManifest({
+        'claude-code-loongsuite-pilot-hook.sh': createHash('sha256').update(scriptText).digest('hex'),
+      });
+      const realWrite = fsUtils.writeTextFileAtomic;
+      let upgrade: Promise<void> | null = null;
+      const spy = vi.spyOn(fsUtils, 'writeTextFileAtomic').mockImplementation(async (filePath, text, options) => {
+        if (String(filePath) !== deployed) {
+          await realWrite(filePath, text, options);
+          return;
+        }
+        upgrade = withHookAssetLock(dataDir, async () => {
+          await fs.writeFile(path.join(dataDir, 'hook-upgrade-in-progress'), `${Date.now()}\n`);
+          await fs.writeFile(deployed, 'v2\n');
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(await fs.readFile(deployed, 'utf8')).toBe('tampered\n');
+        await realWrite(filePath, text, options);
+      });
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      try {
+        await wd.runCheck();
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(upgrade).not.toBeNull();
+      await upgrade;
+      expect(await fs.readFile(deployed, 'utf8')).toBe('v2\n');
+
+      await fs.rm(path.join(dataDir, 'hook-upgrade-in-progress'), { force: true });
+      await new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir }).runCheck();
+      expect(await fs.readFile(deployed, 'utf8')).toBe(scriptText);
+    });
+
+    it('lets only one waiter take a dead hook-asset lock', async () => {
+      const dir = await createTempDir();
+      await fs.writeFile(getHookAssetLockPath(dir), `${JSON.stringify({ pid: 999999, startedAt: 1 })}\n`);
+      let inside = 0;
+      let maxInside = 0;
+      const entered: Array<() => void> = [];
+      const run = () => withHookAssetLock(dir, async () => {
+        inside += 1;
+        maxInside = Math.max(maxInside, inside);
+        await new Promise<void>((resolve) => entered.push(resolve));
+        inside -= 1;
+      });
+      const first = run();
+      const second = run();
+
+      try {
+        await vi.waitFor(() => expect(entered).toHaveLength(1));
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(maxInside).toBe(1);
+        expect(entered).toHaveLength(1);
+        entered[0]!();
+        await vi.waitFor(() => expect(entered).toHaveLength(2));
+        expect(maxInside).toBe(1);
+        entered[1]!();
+        await Promise.all([first, second]);
+      } finally {
+        await cleanupTempDir(dir);
+      }
+    });
+
+    it('takes over a lock whose timestamp is in the future', async () => {
+      const dir = await createTempDir();
+      await fs.writeFile(
+        getHookAssetLockPath(dir),
+        `${JSON.stringify({ pid: 1, startedAt: Date.now() + 86_400_000 })}\n`,
+      );
+      let entered = false;
+      try {
+        await withHookAssetLock(dir, async () => {
+          entered = true;
+        });
+        expect(entered).toBe(true);
+      } finally {
+        await cleanupTempDir(dir);
+      }
     });
 
     const scriptName = 'claude-code-loongsuite-pilot-hook.sh';
