@@ -116,7 +116,6 @@ export abstract class BaseSessionInput extends BaseInput {
       }
 
       const completeBytes = bytes.subarray(0, lastNewline + 1);
-      this.stateStore.setOffset(stateKey, offset + completeBytes.length);
 
       const entries: AgentActivityEntry[] = [];
       const completeText = completeBytes.toString('utf-8');
@@ -161,6 +160,9 @@ export abstract class BaseSessionInput extends BaseInput {
           this.logger.warn('invalid session line', { file: filePath, error: String(err) });
         }
       }
+      const ready = await this.prepareSessionBatch(entries, filePath);
+      if (ready === null) return [];
+      this.stateStore.setOffset(stateKey, offset + completeBytes.length);
       runtime?.observeCommittedBatch({
         records,
         bytes: completeBytes.length,
@@ -168,10 +170,15 @@ export abstract class BaseSessionInput extends BaseInput {
         parseFailedRecords,
         maxRecordBytes,
       });
-      return entries;
+      return ready;
     } finally {
       await handle.close();
     }
+  }
+
+  /** Return null to retry the same complete lines without advancing their cursor. */
+  protected async prepareSessionBatch(entries: AgentActivityEntry[], _file: string): Promise<AgentActivityEntry[] | null> {
+    return entries;
   }
 
   /** Discover session files to process. */
