@@ -1,10 +1,13 @@
 //! Turn records → activity entries. Port of `codex-transcript-builder.ts`.
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::normalization::{build_owned_standard_entry, timestamp_to_unix_nanos};
-use crate::types::AgentActivityEntry;
+use crate::normalization::{
+    infer_provider_name, normalize_input_messages, normalize_input_messages_delta,
+    normalize_output_messages, timestamp_to_unix_nanos,
+};
+use crate::types::{AgentActivityEntry, AgentEventName};
 
 use super::types::{
     CodexExtractedTranscriptTurn, CodexTranscriptInputContext, CodexTranscriptStep,
@@ -84,34 +87,28 @@ pub(super) fn build_codex_transcript_steps(
     } else {
         turn.model.as_str()
     };
-    let mut base = Map::new();
-    base.insert("trace_id".into(), Value::String(trace_id));
-    base.insert(
-        "gen_ai.session.id".into(),
-        Value::String(turn.session_id.clone()),
-    );
-    base.insert("gen_ai.turn.id".into(), Value::String(turn_id.clone()));
-    base.insert("gen_ai.agent.type".into(), Value::String("codex".into()));
-    base.insert(
-        "gen_ai.agent.id".into(),
-        Value::String(turn.session_id.clone()),
-    );
-    base.insert(
-        "gen_ai.provider.name".into(),
-        Value::String(turn.provider.clone()),
-    );
-    base.insert(
+    let mut base = AgentActivityEntry {
+        trace_id: Some(trace_id),
+        session_id: turn.session_id.clone(),
+        turn_id: Some(turn_id.clone()),
+        agent_type: "codex".into(),
+        agent_id: nonempty(&turn.session_id),
+        provider_name: turn.provider.clone(),
+        ..AgentActivityEntry::default()
+    };
+    base.extra.insert(
         "agent.codex.transcript_turn_id".into(),
         Value::String(turn.transcript_turn_id.clone()),
     );
     if turn.status == super::types::CodexTerminalStatus::Interrupted {
-        base.insert(
+        base.extra.insert(
             "agent.codex.turn_status".into(),
             Value::String("interrupted".into()),
         );
     }
     if let Some(cwd) = &turn.cwd {
-        base.insert("agent.codex.cwd".into(), Value::String(cwd.clone()));
+        base.extra
+            .insert("agent.codex.cwd".into(), Value::String(cwd.clone()));
     }
 
     let mut records = Vec::new();
@@ -125,30 +122,18 @@ pub(super) fn build_codex_transcript_steps(
     if opts.include_prompt && turn.prompt_ready {
         if let Some(prompt) = &turn.prompt {
             if !prompt.is_empty() {
-                let mut fields = base.clone();
-                fields.insert("timestamp".into(), json_ms(turn.started_at_ms));
-                fields.insert(
-                    "event.id".into(),
-                    Value::String(hash_id(
-                        &[
-                            turn.session_id.as_str(),
-                            turn.transcript_turn_id.as_str(),
-                            "other",
-                        ],
-                        32,
-                    )),
+                let mut entry = native_entry(
+                    &base,
+                    turn.started_at_ms,
+                    AgentEventName::Other,
+                    hash_id(&[&turn.session_id, &turn.transcript_turn_id, "other"], 32),
                 );
-                fields.insert("event.name".into(), Value::String("other".into()));
-                fields.insert("span_id".into(), Value::String(agent_span_id));
-                fields.insert(
-                    "parent_span_id".into(),
-                    Value::String("0000000000000001".into()),
-                );
-                fields.insert(
-                    "gen_ai.input.messages_delta".into(),
-                    json!([{ "role": "user", "parts": [{ "type": "text", "content": prompt }] }]),
-                );
-                records.push(build_entry(fields));
+                entry.span_id = Some(agent_span_id);
+                entry.parent_span_id = Some("0000000000000001".into());
+                entry.input_messages_delta = Some(json!([
+                    { "role": "user", "parts": [{ "type": "text", "content": prompt }] }
+                ]));
+                records.push(entry);
             }
         }
     }
@@ -185,89 +170,68 @@ pub(super) fn build_codex_transcript_steps(
             .clone()
             .unwrap_or_else(|| input_messages.clone());
 
-        let mut request = base.clone();
-        request.insert("timestamp".into(), json_ms(step.started_at_ms));
-        request.insert(
-            "event.id".into(),
-            Value::String(hash_id(
+        let mut request = native_entry(
+            &base,
+            step.started_at_ms,
+            AgentEventName::LlmRequest,
+            hash_id(
                 &[
-                    turn.session_id.as_str(),
-                    turn.transcript_turn_id.as_str(),
+                    &turn.session_id,
+                    &turn.transcript_turn_id,
                     "request",
-                    step_number_text.as_str(),
+                    &step_number_text,
                 ],
                 32,
-            )),
+            ),
         );
-        request.insert("event.name".into(), Value::String("llm.request".into()));
-        request.insert("span_id".into(), Value::String(llm_span_id.clone()));
-        request.insert("parent_span_id".into(), Value::String(step_span_id.clone()));
-        request.insert("gen_ai.step.id".into(), Value::String(step_id.clone()));
-        request.insert(
-            "gen_ai.request.model".into(),
-            Value::String(model.to_owned()),
-        );
-        request.insert(
-            "gen_ai.response.id".into(),
-            Value::String(response_id.clone()),
-        );
-        request.insert(
-            "gen_ai.input.messages_hash".into(),
-            Value::String(input_context.hash.clone()),
-        );
+        request.span_id = Some(llm_span_id.clone());
+        request.parent_span_id = Some(step_span_id.clone());
+        request.step_id = Some(step_id.clone());
+        request.request_model = Some(model.to_owned());
+        request.response_id = nonempty(&response_id);
+        request.input_messages_hash = nonempty(&input_context.hash);
         if !input_messages.is_empty() {
-            request.insert(
-                "gen_ai.input.messages_delta".into(),
-                Value::Array(input_messages),
-            );
+            request.input_messages_delta =
+                normalize_input_messages_delta(Some(Value::Array(input_messages)));
         }
         if !output_input_messages.is_empty() {
-            request.insert(
-                "gen_ai.input.messages".into(),
-                Value::Array(output_input_messages),
-            );
+            request.input_messages =
+                normalize_input_messages(Some(Value::Array(output_input_messages)));
         }
+        fill_provider(&mut request, &base);
         extend_shared_llm(&mut request, turn);
-        records.push(build_entry(request));
+        records.push(request);
 
         let terminal_step = index + 1 == steps.len();
         let messages = response_messages(turn, step, terminal_step);
-        let mut response = base.clone();
-        response.insert("timestamp".into(), json_ms(step.response_at_ms));
-        response.insert(
-            "event.id".into(),
-            Value::String(hash_id(
+        let mut response = native_entry(
+            &base,
+            step.response_at_ms,
+            AgentEventName::LlmResponse,
+            hash_id(
                 &[
-                    turn.session_id.as_str(),
-                    turn.transcript_turn_id.as_str(),
+                    &turn.session_id,
+                    &turn.transcript_turn_id,
                     "response",
-                    step_number_text.as_str(),
+                    &step_number_text,
                 ],
                 32,
-            )),
+            ),
         );
-        response.insert("event.name".into(), Value::String("llm.response".into()));
-        response.insert("span_id".into(), Value::String(llm_span_id));
-        response.insert("parent_span_id".into(), Value::String(step_span_id.clone()));
-        response.insert("gen_ai.step.id".into(), Value::String(step_id.clone()));
-        response.insert(
-            "gen_ai.request.model".into(),
-            Value::String(model.to_owned()),
-        );
-        response.insert(
-            "gen_ai.response.model".into(),
-            Value::String(model.to_owned()),
-        );
-        response.insert("gen_ai.response.id".into(), Value::String(response_id));
-        response.insert(
-            "gen_ai.response.finish_reasons".into(),
-            finish_reasons(turn, step, terminal_step),
-        );
+        response.span_id = Some(llm_span_id);
+        response.parent_span_id = Some(step_span_id.clone());
+        response.step_id = Some(step_id.clone());
+        response.request_model = Some(model.to_owned());
+        response.response_model = Some(model.to_owned());
+        response.response_id = nonempty(&response_id);
+        response.finish_reasons =
+            finish_reason(turn, step, terminal_step).map(|reason| vec![reason.into()]);
         if !messages.is_empty() {
-            response.insert("gen_ai.output.messages".into(), Value::Array(messages));
+            response.output_messages = normalize_output_messages(Some(Value::Array(messages)));
         }
+        fill_provider(&mut response, &base);
         extend_usage(&mut response, step.token_usage.as_ref());
-        records.push(build_entry(response));
+        records.push(response);
 
         for (tool_index, tool) in step.tools.iter().enumerate() {
             records.extend(build_tool_entries(
@@ -388,23 +352,23 @@ fn tool_response_message(tools: &[&CodexTranscriptTool]) -> Option<JsonValue> {
     }))
 }
 
-fn finish_reasons(
+fn finish_reason(
     turn: &CodexExtractedTranscriptTurn,
     step: &CodexTranscriptStep,
     terminal_step: bool,
-) -> Value {
+) -> Option<&'static str> {
     if terminal_step && turn.status == super::types::CodexTerminalStatus::Interrupted {
-        return json!(["cancelled"]);
+        return Some("cancelled");
     }
     if !step.tools.is_empty() {
-        return json!(["tool_call"]);
+        return Some("tool_call");
     }
     if step.token_usage.is_some()
         || (terminal_step && turn.status == super::types::CodexTerminalStatus::Completed)
     {
-        return json!(["stop"]);
+        return Some("stop");
     }
-    json!([])
+    None
 }
 
 fn response_messages(
@@ -445,136 +409,90 @@ fn build_tool_entries(
     turn: &CodexExtractedTranscriptTurn,
     tool: &CodexTranscriptTool,
     index: usize,
-    base: &Map<String, Value>,
+    base: &AgentActivityEntry,
     step_id: &str,
     step_span_id: &str,
-) -> Vec<AgentActivityEntry> {
+) -> [AgentActivityEntry; 2] {
     let span_id = codex_tool_span_id(&turn.session_id, &turn.transcript_turn_id, &tool.call_id);
     let index_text = index.to_string();
-    let mut call = base.clone();
-    call.insert("timestamp".into(), json_ms(tool.started_at_ms));
-    call.insert(
-        "event.id".into(),
-        Value::String(hash_id(
+    let event_id = |kind| {
+        hash_id(
             &[
-                turn.session_id.as_str(),
-                turn.transcript_turn_id.as_str(),
-                "tool-call",
-                tool.call_id.as_str(),
-                index_text.as_str(),
+                &turn.session_id,
+                &turn.transcript_turn_id,
+                kind,
+                &tool.call_id,
+                &index_text,
             ],
             32,
-        )),
+        )
+    };
+    let tool_entry = |time, name, id| {
+        let mut entry = native_entry(base, time, name, id);
+        entry.span_id = Some(span_id.clone());
+        entry.parent_span_id = Some(step_span_id.to_owned());
+        entry.step_id = Some(step_id.to_owned());
+        entry.tool_name = nonempty(&tool.name);
+        entry.tool_call_id = nonempty(&tool.call_id);
+        entry
+    };
+    let mut call = tool_entry(
+        tool.started_at_ms,
+        AgentEventName::ToolCall,
+        event_id("tool-call"),
     );
-    call.insert("event.name".into(), Value::String("tool.call".into()));
-    call.insert("span_id".into(), Value::String(span_id.clone()));
-    call.insert(
-        "parent_span_id".into(),
-        Value::String(step_span_id.to_owned()),
-    );
-    call.insert("gen_ai.step.id".into(), Value::String(step_id.to_owned()));
-    call.insert("gen_ai.tool.name".into(), Value::String(tool.name.clone()));
-    call.insert(
-        "gen_ai.tool.call.id".into(),
-        Value::String(tool.call_id.clone()),
-    );
-    if let Some(input) = &tool.input {
-        call.insert("gen_ai.tool.call.arguments".into(), input.clone());
-    }
-    let mut records = vec![build_entry(call)];
+    call.tool_call_arguments = tool
+        .input
+        .as_ref()
+        .filter(|value| !value.is_null())
+        .cloned();
 
     let completed = tool.completed_at_ms.is_some();
-    let mut result = base.clone();
-    result.insert(
-        "timestamp".into(),
-        json_ms(if completed {
-            tool.completed_at_ms.unwrap_or(turn.terminal_at_ms)
-        } else {
-            turn.terminal_at_ms
-        }),
+    let mut result = tool_entry(
+        tool.completed_at_ms.unwrap_or(turn.terminal_at_ms),
+        AgentEventName::ToolResult,
+        event_id("tool-result"),
     );
-    result.insert(
-        "event.id".into(),
-        Value::String(hash_id(
-            &[
-                turn.session_id.as_str(),
-                turn.transcript_turn_id.as_str(),
-                "tool-result",
-                tool.call_id.as_str(),
-                index_text.as_str(),
-            ],
-            32,
-        )),
-    );
-    result.insert("event.name".into(), Value::String("tool.result".into()));
-    result.insert("span_id".into(), Value::String(span_id));
-    result.insert(
-        "parent_span_id".into(),
-        Value::String(step_span_id.to_owned()),
-    );
-    result.insert("gen_ai.step.id".into(), Value::String(step_id.to_owned()));
-    result.insert("gen_ai.tool.name".into(), Value::String(tool.name.clone()));
-    result.insert(
-        "gen_ai.tool.call.id".into(),
-        Value::String(tool.call_id.clone()),
-    );
-    result.insert(
-        "tool.result.status".into(),
-        Value::String(if completed { "success" } else { "cancelled" }.into()),
-    );
-    if completed {
-        if let Some(output) = &tool.output {
-            result.insert("gen_ai.tool.call.result".into(), output.clone());
-        }
-    }
+    result.tool_result_status = Some(if completed { "success" } else { "cancelled" }.into());
     if let Some(completed_at) = tool.completed_at_ms {
+        result.tool_call_result = tool
+            .output
+            .as_ref()
+            .filter(|value| !value.is_null())
+            .cloned();
         let duration = completed_at - tool.started_at_ms;
-        if duration >= 0.0 {
-            result.insert("gen_ai.tool.call.duration".into(), json_ms(duration));
+        if duration >= 0.0 && duration.is_finite() {
+            result.tool_call_duration = Some(duration);
         }
     }
-    records.push(build_entry(result));
-    records
+    [call, result]
 }
 
-fn extend_usage(fields: &mut Map<String, Value>, usage: Option<&CodexTranscriptUsage>) {
-    let resolved = usage.cloned().unwrap_or(CodexTranscriptUsage {
+fn extend_usage(entry: &mut AgentActivityEntry, usage: Option<&CodexTranscriptUsage>) {
+    let count = |value| crate::normalization::activity_integer(&json_ms(value));
+    let zero = CodexTranscriptUsage {
         input_tokens: 0.0,
         output_tokens: 0.0,
         cached_input_tokens: 0.0,
         cache_creation_tokens: 0.0,
         reasoning_output_tokens: None,
         total_tokens: 0.0,
-    });
-    fields.insert(
-        "gen_ai.usage.input_tokens".into(),
-        json_ms(resolved.input_tokens),
-    );
-    fields.insert(
-        "gen_ai.usage.output_tokens".into(),
-        json_ms(resolved.output_tokens),
-    );
-    fields.insert(
-        "gen_ai.usage.cache_read.input_tokens".into(),
-        json_ms(resolved.cached_input_tokens),
-    );
-    fields.insert(
-        "gen_ai.usage.cache_creation.input_tokens".into(),
-        json_ms(resolved.cache_creation_tokens),
-    );
-    fields.insert(
-        "gen_ai.usage.total_tokens".into(),
-        json_ms(resolved.total_tokens),
-    );
-    if let Some(reasoning) = resolved.reasoning_output_tokens {
-        fields.insert(
+    };
+    let usage = usage.unwrap_or(&zero);
+    entry.input_tokens = count(usage.input_tokens);
+    entry.output_tokens = count(usage.output_tokens);
+    entry.cache_read_input_tokens = count(usage.cached_input_tokens);
+    entry.cache_creation_input_tokens = count(usage.cache_creation_tokens);
+    entry.total_tokens = count(usage.total_tokens);
+    if let Some(reasoning) = usage.reasoning_output_tokens {
+        entry.extra.insert(
             "gen_ai.usage.reasoning_output_tokens".into(),
             json_ms(reasoning),
         );
     }
 }
 
-fn extend_shared_llm(fields: &mut Map<String, Value>, turn: &CodexExtractedTranscriptTurn) {
+fn extend_shared_llm(entry: &mut AgentActivityEntry, turn: &CodexExtractedTranscriptTurn) {
     let mut instructions = Vec::new();
     if let Some(text) = &turn.base_instructions {
         instructions.push(json!({ "type": "text", "content": text }));
@@ -583,28 +501,47 @@ fn extend_shared_llm(fields: &mut Map<String, Value>, turn: &CodexExtractedTrans
         instructions.push(json!({ "type": "text", "content": text }));
     }
     if !instructions.is_empty() {
-        fields.insert(
-            "gen_ai.system_instructions".into(),
-            Value::Array(instructions),
-        );
+        entry.system_instructions = Some(Value::Array(instructions));
     }
-    if let Some(definitions) = &turn.tool_definitions {
-        fields.insert("gen_ai.tool.definitions".into(), definitions.clone());
+    entry.tool_definitions = turn
+        .tool_definitions
+        .as_ref()
+        .filter(|value| !value.is_null())
+        .cloned();
+}
+
+fn native_entry(
+    base: &AgentActivityEntry,
+    time: f64,
+    name: AgentEventName,
+    id: String,
+) -> AgentActivityEntry {
+    let timestamp = json_ms(time);
+    let mut entry = base.clone();
+    entry.time_unix_nano = timestamp_to_unix_nanos(Some(&timestamp));
+    entry.observed_time_unix_nano = Some(timestamp_to_unix_nanos(None));
+    entry.event_name = Some(name);
+    entry.event_id = id;
+    entry.extra.insert("timestamp".into(), timestamp);
+    if entry.provider_name.is_empty() {
+        entry.provider_name = "openai".into();
+    }
+    entry
+}
+
+fn fill_provider(entry: &mut AgentActivityEntry, base: &AgentActivityEntry) {
+    if base.provider_name.is_empty() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("gen_ai.agent.type".into(), Value::String("codex".into()));
+        if let Some(model) = entry.request_model.as_ref() {
+            fields.insert("gen_ai.request.model".into(), Value::String(model.clone()));
+        }
+        entry.provider_name = infer_provider_name(&fields);
     }
 }
 
-fn build_entry(fields: Map<String, Value>) -> AgentActivityEntry {
-    let timestamp = fields
-        .get("timestamp")
-        .cloned()
-        .unwrap_or_else(|| json_ms(super::utils::now_ms()));
-    let mut rest = fields;
-    rest.insert(
-        "time_unix_nano".into(),
-        Value::String(timestamp_to_unix_nanos(Some(&timestamp))),
-    );
-    rest.insert("timestamp".into(), timestamp);
-    build_owned_standard_entry(rest)
+fn nonempty(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn json_ms(value: f64) -> Value {
@@ -726,6 +663,7 @@ mod hash_encoding_tests {
 #[cfg(test)]
 mod cpu_optimization_hash_boundary_tests {
     use super::*;
+    use serde_json::Map;
 
     fn legacy_stable_serialize(value: &JsonValue) -> String {
         match value {

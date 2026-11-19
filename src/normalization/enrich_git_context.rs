@@ -376,22 +376,7 @@ fn infer_git_context_sync(probe_dir: &str) -> GitContextResult {
         }
     }
 
-    let root = run_git(probe_dir, &["rev-parse", "--show-toplevel"]);
-    let git_root = root.clone();
-    let command_root = git_root.as_deref().unwrap_or(probe_dir);
-    let branch = normalize_branch(run_git(
-        command_root,
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-    ));
-    let remote = run_git(command_root, &["config", "--get", "remote.origin.url"]);
-    let repo = normalize_git_repo(remote.as_deref());
-    let domain = normalize_domain(remote.as_deref());
-    let result = GitContextResult {
-        repo,
-        branch,
-        root: git_root,
-        domain,
-    };
+    let result = infer_uncached_git_context(probe_dir);
 
     let mut cache = git_cache().lock().unwrap_or_else(|err| err.into_inner());
     cache.evict(now);
@@ -403,6 +388,33 @@ fn infer_git_context_sync(probe_dir: &str) -> GitContextResult {
         },
     );
     result
+}
+
+fn infer_uncached_git_context(probe_dir: &str) -> GitContextResult {
+    // With an explicit Unix PATH a missing executable provides no Git fields.
+    // Cache that result for the normal lifetime without starting a child process.
+    #[cfg(unix)]
+    if std::env::var_os("PATH").is_some()
+        && matches!(which::which("git"), Err(which::Error::CannotFindBinaryPath))
+    {
+        return GitContextResult::default();
+    }
+    let root = run_git(probe_dir, &["rev-parse", "--show-toplevel"]);
+    let git_root = root.clone();
+    let command_root = git_root.as_deref().unwrap_or(probe_dir);
+    let branch = normalize_branch(run_git(
+        command_root,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+    ));
+    let remote = run_git(command_root, &["config", "--get", "remote.origin.url"]);
+    let repo = normalize_git_repo(remote.as_deref());
+    let domain = normalize_domain(remote.as_deref());
+    GitContextResult {
+        repo,
+        branch,
+        root: git_root,
+        domain,
+    }
 }
 
 fn run_git(root: &str, args: &[&str]) -> Option<String> {

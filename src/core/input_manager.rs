@@ -684,7 +684,11 @@ impl InputManager {
         if let Some(linker) = self.intercept_linker.lock().expect("intercept").clone() {
             linker.enrich(&mut entries);
         }
-        if input_id == "qoder-trace" || crate::utils::source_access::current().is_none() {
+        if matches!(
+            input_id,
+            "qoder-trace" | "codex-transcript" | "codex-aborted-turn"
+        ) || crate::utils::source_access::current().is_none()
+        {
             enrich_canonical_entries_with_git(&mut entries).await;
         }
         if let Some(counter) = self.counters.lock().expect("counters").get_mut(input_id) {

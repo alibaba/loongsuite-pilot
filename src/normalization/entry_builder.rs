@@ -508,18 +508,6 @@ pub(crate) fn build_standard_with_canonical_payloads(
     })
 }
 
-// Native builders already own a canonical record with no legacy aliases.
-pub(crate) fn build_owned_standard_entry(mut opts: Map<String, Value>) -> AgentActivityEntry {
-    let mut payloads = Map::new();
-    for (key, value) in &mut opts {
-        if is_canonical_payload_key(key) && !value.is_null() {
-            payloads.insert(key.clone(), std::mem::take(value));
-        }
-    }
-    // Keep null placeholders in opts to preserve the existing field order.
-    build_standard_with_payloads(&opts, |canonical, _| payloads.shift_remove(canonical))
-}
-
 fn build_standard_with_payloads(
     opts: &Map<String, Value>,
     mut payload: impl FnMut(&str, &str) -> Option<Value>,
@@ -913,7 +901,7 @@ fn json_finite(value: &Value) -> Option<f64> {
     number.is_finite().then_some(number)
 }
 
-fn json_i64(value: &Value) -> Option<i64> {
+pub(crate) fn json_i64(value: &Value) -> Option<i64> {
     let Value::Number(number) = value else {
         return None;
     };
