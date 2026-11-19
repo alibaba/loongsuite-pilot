@@ -13,10 +13,12 @@ describe('TRAE renderer metadata', () => {
     const items = [1, 2, 3].flatMap(i => line('[stream-diagnostics][sse-summary] plan item first observed', {
       replyToMessageId: msg, toolCallName: 'Read', planItemId: 'pi_' + String(i).repeat(24), arguments: 'private-input',
     }));
-    const [root] = line('[stream-diagnostics][done] done received', { replyToMessageId: msg, reply: 'private-input' });
+    const [agent, root] = line('[stream-diagnostics][done] done received', { replyToMessageId: msg, reply: 'private-input' });
     expect(items).toHaveLength(3);
     expect(new Set(items.map(item => item.span_id)).size).toBe(3);
-    expect(items.every(item => item.trace_id === trace && item.parent_span_id === root.span_id)).toBe(true);
+    expect(items.every(item => item.trace_id === trace && item.parent_span_id === agent.span_id)).toBe(true);
+    expect(agent.parent_span_id).toBe(root.span_id);
+    expect(agent['gen_ai.span.kind']).toBe('AGENT');
     expect(JSON.stringify({ turns, items, root })).not.toContain('private-input');
     expect(turns).toEqual({});
   });

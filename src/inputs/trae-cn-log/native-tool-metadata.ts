@@ -44,6 +44,7 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
   const turn = turns[trace];
   if (!turn) return;
   const root = spanId(trace, turn.turn);
+  const agent = spanId(trace, 'turn-agent/' + turn.turn);
   const base = {
     trace_id: trace, time_unix_nano: time, endTimeUnixNano: time,
     'gen_ai.session.id': turn.session, 'gen_ai.turn.id': turn.turn,
@@ -83,22 +84,28 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
     turn.calls.push(call);
     const id = spanId(trace, call);
     entries.push(buildAgentActivityEntry({ ...base, 'event.id': id, 'event.name': 'tool.call', span_id: id,
-      parent_span_id: root, startTimeUnixNano: time, 'gen_ai.span.kind': 'TOOL',
+      parent_span_id: turn.delegations?.length ? root : agent, startTimeUnixNano: time, 'gen_ai.span.kind': 'TOOL',
       'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.call.id': call, 'gen_ai.tool.name': tool }));
     return;
   }
   if (turn.turn !== turnId) return;
-  const parents = new Set<string>();
-  for (const delegation of turn.delegations ?? []) {
-    if (!delegation.start) continue;
-    const parentId = spanId(trace, 'agent-run/' + delegation.parent);
-    if (!parents.has(parentId)) {
-      parents.add(parentId);
-      entries.push(buildAgentActivityEntry({ ...base, 'event.id': parentId, 'event.name': 'other',
-        span_id: parentId, parent_span_id: root, startTimeUnixNano: turn.start,
-        'gen_ai.span.kind': 'AGENT', 'gen_ai.operation.name': 'invoke_agent',
-        'gen_ai.agent.invocation.id': delegation.parent }));
-    }
+  const launched = (turn.delegations ?? []).filter(d => d.start);
+  const parents = new Set(launched.map(d => d.parent));
+  const [onlyParent] = parents;
+  entries.push(buildAgentActivityEntry({ ...base, 'event.id': agent, 'event.name': 'other',
+    span_id: agent, parent_span_id: root, startTimeUnixNano: turn.start,
+    'gen_ai.span.kind': 'AGENT', 'gen_ai.operation.name': 'invoke_agent',
+    ...(parents.size === 1 ? { 'gen_ai.agent.invocation.id': onlyParent } : {}) }));
+  // With several observed parent runs, preserve each explicit delegation edge.
+  if (parents.size > 1) for (const parent of parents) {
+    const id = spanId(trace, 'agent-run/' + parent);
+    entries.push(buildAgentActivityEntry({ ...base, 'event.id': id, 'event.name': 'other',
+      span_id: id, parent_span_id: agent, startTimeUnixNano: turn.start,
+      'gen_ai.span.kind': 'AGENT', 'gen_ai.operation.name': 'invoke_agent',
+      'gen_ai.agent.invocation.id': parent }));
+  }
+  for (const delegation of launched) {
+    const parentId = parents.size === 1 ? agent : spanId(trace, 'agent-run/' + delegation.parent);
     const id = spanId(trace, 'delegation/' + delegation.call);
     entries.push(buildAgentActivityEntry({ ...base, 'event.id': id, 'event.name': 'other',
       span_id: id, parent_span_id: parentId, startTimeUnixNano: delegation.start,

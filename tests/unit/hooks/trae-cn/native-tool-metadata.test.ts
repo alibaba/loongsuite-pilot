@@ -50,6 +50,7 @@ it('resumes split compressed records and separates concurrent turns in one sessi
       new_agent_run_id: parent, new_task_id: 'third', source_agent_run_id: child,
     }));
     records.push(record(traceB,'tool execution started',{ tool_name:'Read', toolcall_id:'call_2' }),
+      record(traceB,'chat: runner completed',{turn_id:traceB.slice(0,24)}),
       record(traceA,'chat: runner completed',{turn_id:traceA.slice(0,24)}));
     const compressed = deflateRawSync(Buffer.concat(records));
     const split = Math.floor(compressed.length * .8);
@@ -62,10 +63,13 @@ it('resumes split compressed records and separates concurrent turns in one sessi
     await reader.collect(run,entries,true);
     expect(entries.filter(e => e.trace_id === traceA && e['event.name'] === 'tool.call')
       .map(e => e['gen_ai.tool.name'])).toEqual(['Shell','Shell','Read','Read','Read']);
-    expect(entries.filter(e => e.trace_id === traceB)).toHaveLength(1);
+    const ordinary = entries.filter(e => e.trace_id === traceB);
+    expect(ordinary.map(e => e['gen_ai.span.kind'])).toEqual(['TOOL', 'AGENT', 'ENTRY']);
+    expect(ordinary[0].parent_span_id).toBe(ordinary[1].span_id);
+    expect(ordinary[1].parent_span_id).toBe(ordinary[2].span_id);
     const children = entries.filter(e => e['gen_ai.agent.scope'] === 'subagent');
     const parentSpan = entries.find(e => e['gen_ai.agent.invocation.id'] === parent);
-    expect(parentSpan?.parent_span_id).toBe(entries.find(e => e['gen_ai.span.kind'] === 'ENTRY')?.span_id);
+    expect(parentSpan?.parent_span_id).toBe(entries.find(e => e.trace_id === traceA && e['gen_ai.span.kind'] === 'ENTRY')?.span_id);
     expect(children.map(e => e['gen_ai.subagent.parent_tool_call.id'])).toEqual(['first', 'second', 'third']);
     expect(children.map(e => e.parent_span_id)).toEqual(Array(3).fill(parentSpan?.span_id));
     expect(children.map(e => e['gen_ai.agent.invocation.id'])).toEqual([undefined, undefined, child]);

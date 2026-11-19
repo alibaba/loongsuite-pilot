@@ -46,9 +46,13 @@ export function parseRendererLine(line: string, turns: Turns): AgentActivityEntr
     time_unix_nano: String(BigInt(time) * 1000000n),
   };
   const root = spanId(turn.trace, turn.turn);
+  const agent = spanId(turn.trace, 'turn-agent/' + turn.turn);
   if (match[2].includes('[done]')) {
     delete turns[key];
-    return [buildAgentActivityEntry({ ...base, 'event.id': root, 'event.name': 'other', 'gen_ai.turn.end': true,
+    return [buildAgentActivityEntry({ ...base, 'event.id': agent, 'event.name': 'other',
+      span_id: agent, parent_span_id: root, 'gen_ai.span.kind': 'AGENT', 'gen_ai.operation.name': 'invoke_agent',
+      startTimeUnixNano: String(BigInt(turn.start) * 1000000n), endTimeUnixNano: base.time_unix_nano }),
+      buildAgentActivityEntry({ ...base, 'event.id': root, 'event.name': 'other', 'gen_ai.turn.end': true,
       span_id: root, 'gen_ai.span.kind': 'ENTRY', 'gen_ai.operation.name': 'enter_ai_application_system',
       startTimeUnixNano: String(BigInt(turn.start) * 1000000n), endTimeUnixNano: base.time_unix_nano })];
   }
@@ -57,7 +61,7 @@ export function parseRendererLine(line: string, turns: Turns): AgentActivityEntr
       typeof data.toolCallName !== 'string' || !/^[\w.-]{1,128}$/.test(data.toolCallName)) return [];
   const id = spanId(turn.trace, data.planItemId);
   return [buildAgentActivityEntry({ ...base, 'event.id': id, 'event.name': 'tool.call',
-    span_id: id, parent_span_id: root, 'gen_ai.span.kind': 'TOOL', 'gen_ai.operation.name': 'execute_tool',
+    span_id: id, parent_span_id: agent, 'gen_ai.span.kind': 'TOOL', 'gen_ai.operation.name': 'execute_tool',
     'gen_ai.tool.call.id': data.planItemId, 'gen_ai.tool.name': data.toolCallName,
     startTimeUnixNano: base.time_unix_nano, endTimeUnixNano: base.time_unix_nano })];
 }
