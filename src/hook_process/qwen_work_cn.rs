@@ -14,7 +14,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,17 +26,6 @@ struct Payload {
     transcript_path: String,
     session_id: String,
     cwd: String,
-}
-
-struct Snapshot {
-    line_count: usize,
-    lines: Vec<String>,
-}
-
-struct LineRange {
-    start: usize,
-    end: usize,
-    reason: String,
 }
 
 struct ContentBlock {
@@ -202,188 +191,229 @@ fn read_payload(env: &Env, agent_id: &str, stdin: &[u8]) -> Option<Payload> {
 }
 
 fn consume_transcript(env: &Env, agent_id: &str, log_prefix: &str, payload: &Payload) {
-    let snapshot = read_snapshot(Path::new(&payload.transcript_path));
-    let Some(range) = line_range(
-        env,
-        agent_id,
-        &payload.transcript_path,
-        &payload.session_id,
-        snapshot.line_count,
-    ) else {
-        return;
-    };
-    let lines = slice_lines(&snapshot.lines, range.start, range.end);
-    if lines.is_empty() {
-        update_line_record(
-            env,
-            agent_id,
-            &payload.transcript_path,
-            &payload.session_id,
-            range.end,
-        );
-        return;
-    }
-    let mut parsed = Vec::new();
-    for line in lines {
-        if let Ok(value) = serde_json::from_str::<Value>(&line) {
-            parsed.push(value);
-        }
-    }
-    let runtime = load_runtime_config(env);
-    let records = process_transcript(
-        env,
-        &parsed,
-        &payload.session_id,
-        &runtime.user_id,
-        &payload.cwd,
-        &range.reason,
+    let _ = consume_transcript_with_limit(env, agent_id, log_prefix, payload, None, None);
+}
+
+pub(crate) fn run_for_sdk(
+    root: &Path,
+    user_id: &str,
+    input: &[u8],
+    limit: Option<u64>,
+    legacy_cursor_root: Option<&Path>,
+) -> bool {
+    let mut env = Env::new();
+    env.insert(
+        "LOONGSUITE_PILOT_DATA_DIR".into(),
+        root.to_string_lossy().into_owned(),
     );
-    let count = records.len();
-    if append_rows(env, agent_id, log_prefix, &records) {
-        update_line_record(
-            env,
-            agent_id,
-            &payload.transcript_path,
-            &payload.session_id,
-            range.end,
-        );
-        log_debug(
-            env,
-            agent_id,
-            &format!("Mapped {count} QwenWorkCN event(s)"),
-        );
-    }
-}
-
-fn read_snapshot(path: &Path) -> Snapshot {
-    let Ok(bytes) = fs::read(path) else {
-        return Snapshot {
-            line_count: 0,
-            lines: Vec::new(),
-        };
+    env.insert("LOONGSUITE_PILOT_USER_ID".into(), user_id.to_owned());
+    let Some(payload) = read_payload(&env, "qwen-work-cn", input) else {
+        return false;
     };
-    if bytes.is_empty() {
-        return Snapshot {
-            line_count: 0,
-            lines: Vec::new(),
-        };
-    }
-    let content = String::from_utf8_lossy(&bytes);
-    let trailing_newline = content.ends_with('\n');
-    let lines: Vec<String> = content.split('\n').map(str::to_string).collect();
-    let line_count = if trailing_newline {
-        lines.len().saturating_sub(1)
-    } else {
-        lines.len()
-    };
-    Snapshot { line_count, lines }
+    consume_transcript_with_limit(
+        &env,
+        "qwen-work-cn",
+        "qwen-work-cn",
+        &payload,
+        limit,
+        legacy_cursor_root,
+    )
 }
 
-fn slice_lines(lines: &[String], start: usize, end: usize) -> Vec<String> {
-    lines
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| *index >= start && *index < end)
-        .filter_map(|(_, line)| {
-            let trimmed = js_trim(line);
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        })
-        .collect()
-}
-
-fn line_range(
+fn consume_transcript_with_limit(
     env: &Env,
     agent_id: &str,
-    transcript_path: &str,
-    session_id: &str,
-    current_count: usize,
-) -> Option<LineRange> {
-    let record = load_line_record(env, agent_id, session_id);
-    let recorded_offset = record.get("last_line_count").and_then(finite_nonneg);
-    let mut last = recorded_offset.unwrap_or(0.0);
-    let mut reason = if recorded_offset.is_some() {
-        "incremental"
-    } else {
-        "missing-cursor"
-    }
-    .to_string();
-    let recorded_session = record
-        .get("session_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let recorded_transcript = record
-        .get("transcript_path")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if !recorded_session.is_empty() && recorded_session != session_id {
-        log_debug(
-            env,
-            agent_id,
-            &format!("Session changed: {recorded_session} -> {session_id}, reset to 0"),
+    log_prefix: &str,
+    payload: &Payload,
+    limit: Option<u64>,
+    legacy_cursor_root: Option<&Path>,
+) -> bool {
+    let cursor_data = legacy_cursor_root.map_or_else(|| data_dir(env), Path::to_path_buf);
+    if legacy_cursor_root.is_some() {
+        let primary = session_record_path(&cursor_data, agent_id, &payload.session_id);
+        let mut paths = shadow_paths(&cursor_data, agent_id);
+        paths.extend(
+            shadow_paths(&cursor_data, agent_id)
+                .iter()
+                .map(|path| suffix_path(path, ".lock")),
         );
-        last = 0.0;
-        reason = "session-changed".to_string();
+        paths.push(primary.clone());
+        paths.push(suffix_path(&primary, ".process.lock"));
+        if paths
+            .iter()
+            .any(|path| crate::utils::source_access::private_path(path).is_err())
+        {
+            log_debug(env, agent_id, "Qwen Work shared cursor path is unsafe");
+            return false;
+        }
     }
-    if !recorded_transcript.is_empty() && recorded_transcript != transcript_path {
-        log_debug(
-            env,
-            agent_id,
-            &format!("Transcript changed for session {session_id}, reset to 0"),
-        );
-        last = 0.0;
-        reason = "transcript-changed".to_string();
-    }
-    if current_count == 0 {
-        log_debug(env, agent_id, "Transcript is empty");
-        return None;
-    }
-    if (current_count as f64) == last {
-        log_debug(
-            env,
-            agent_id,
-            &format!("No new lines (count: {current_count})"),
-        );
-        return None;
-    }
-    if (current_count as f64) < last {
-        log_debug(
-            env,
-            agent_id,
-            &format!(
-                "File truncated ({} -> {current_count}), sending all",
-                format_count(last)
-            ),
-        );
-        last = 0.0;
-        reason = "truncated".to_string();
-    }
-    log_debug(
-        env,
-        agent_id,
-        &format!(
-            "Range: {} -> {current_count} ({reason})",
-            format_count(last)
-        ),
+    let lock = suffix_path(
+        &session_record_path(&cursor_data, agent_id, &payload.session_id),
+        ".process.lock",
     );
-    let start = float_index(last)?;
-    Some(LineRange {
-        start,
-        end: current_count,
-        reason,
+    with_file_lock(&lock, 15_000, 300_000, || {
+        consume_transcript_locked(
+            env,
+            agent_id,
+            log_prefix,
+            payload,
+            limit,
+            &cursor_data,
+            legacy_cursor_root.is_some(),
+        )
+    })
+    .unwrap_or_else(|| {
+        log_debug(env, agent_id, "Work transcript is already being processed");
+        false
     })
 }
 
-fn load_line_record(env: &Env, agent_id: &str, session_id: &str) -> Obj {
+fn consume_transcript_locked(
+    env: &Env,
+    agent_id: &str,
+    log_prefix: &str,
+    payload: &Payload,
+    limit: Option<u64>,
+    cursor_data: &Path,
+    shared_cursor: bool,
+) -> bool {
+    if shared_cursor {
+        let mut files = shadow_paths(cursor_data, agent_id);
+        files.push(session_record_path(
+            cursor_data,
+            agent_id,
+            &payload.session_id,
+        ));
+        for path in files {
+            match fs::symlink_metadata(&path) {
+                Ok(_) if read_json_object(&path).is_none() => {
+                    log_debug(
+                        env,
+                        agent_id,
+                        "Qwen Work shared cursor is unreadable; collection will retry",
+                    );
+                    return false;
+                }
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return false,
+                _ => {}
+            }
+        }
+    }
+    let record = load_line_record(cursor_data, agent_id, &payload.session_id);
+    let runtime = load_runtime_config(env);
+    let mut start_line = record
+        .get("last_line_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if record
+        .get("session_id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.is_empty() && value != payload.session_id)
+    {
+        log_debug(
+            env,
+            agent_id,
+            &format!("Session changed for {}", payload.session_id),
+        );
+        start_line = 0;
+    }
+    if record
+        .get("transcript_path")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.is_empty() && value != payload.transcript_path)
+    {
+        log_debug(
+            env,
+            agent_id,
+            &format!("Transcript changed for session {}", payload.session_id),
+        );
+        start_line = 0;
+    }
+    let mut saw_batch = false;
+    let result = super::qwen_work_cn_reader::drain(
+        Path::new(&payload.transcript_path),
+        &payload.session_id,
+        &record,
+        limit,
+        super::qwen_work_cn_reader::RowKinds {
+            is_prompt: is_prompt_row,
+            is_review: |row| is_review_copy(std::slice::from_ref(row)),
+            is_content: is_content_row,
+        },
+        |batch| {
+            saw_batch = true;
+            if batch.reason != "incremental" {
+                start_line = 0;
+            }
+            log_debug(
+                env,
+                agent_id,
+                &format!(
+                    "Range: {start_line} -> {} ({})",
+                    batch.end_line, batch.reason
+                ),
+            );
+            let had_rows = !batch.parsed.is_empty();
+            let mut records = process_transcript(
+                env,
+                &batch.parsed,
+                &payload.session_id,
+                &runtime.user_id,
+                &payload.cwd,
+                batch.reason,
+            );
+            if batch.truncated {
+                for row in &mut records {
+                    row.insert(
+                        "agent.transcript.content_truncated".into(),
+                        Value::Bool(true),
+                    );
+                }
+            }
+            let count = records.len();
+            if !append_rows(env, agent_id, log_prefix, &records) {
+                return false;
+            }
+            let saved = update_line_record(env, agent_id, payload, &batch, cursor_data);
+            if had_rows {
+                log_debug(
+                    env,
+                    agent_id,
+                    &format!("Mapped {count} QwenWorkCN event(s)"),
+                );
+            }
+            start_line = batch.end_line as u64;
+            saved
+        },
+    );
+    match result {
+        Ok(complete) => {
+            if complete && !saw_batch && record.get("last_line_count").is_some() {
+                log_debug(
+                    env,
+                    agent_id,
+                    &format!("No new lines (count: {start_line})"),
+                );
+            }
+            complete
+        }
+        Err(error) => {
+            log_debug(
+                env,
+                agent_id,
+                &format!("Work transcript read failed: {error}"),
+            );
+            false
+        }
+    }
+}
+
+fn load_line_record(data: &Path, agent_id: &str, session_id: &str) -> Obj {
     if session_id.is_empty() {
         return Obj::new();
     }
-    let data = data_dir(env);
-    reconcile_line_records(&data, agent_id, session_id);
-    read_json_object(&session_record_path(&data, agent_id, session_id)).unwrap_or_default()
+    reconcile_line_records(data, agent_id, session_id);
+    read_json_object(&session_record_path(data, agent_id, session_id)).unwrap_or_default()
 }
 
 fn reconcile_line_records(data: &Path, agent_id: &str, session_id: &str) {
@@ -453,10 +483,15 @@ fn is_line_record_newer(candidate: &Obj, existing: &Obj) -> bool {
 fn update_line_record(
     env: &Env,
     agent_id: &str,
-    transcript_path: &str,
-    session_id: &str,
-    end_line: usize,
+    payload: &Payload,
+    batch: &super::qwen_work_cn_reader::Batch,
+    data: &Path,
 ) -> bool {
+    let transcript_path = payload.transcript_path.as_str();
+    let session_id = payload.session_id.as_str();
+    let end_line = batch.end_line;
+    let byte_cursor = &batch.cursor;
+    let reset = batch.reason != "incremental";
     let updated_at = local_stamp_seconds();
     let mut record = Obj::new();
     record.insert(
@@ -471,10 +506,10 @@ fn update_line_record(
         "last_line_count".to_string(),
         Value::from(i64::try_from(end_line).unwrap_or(i64::MAX)),
     );
+    record.insert("byte_cursor".to_string(), byte_cursor.clone());
     record.insert("updated_at".to_string(), Value::String(updated_at.clone()));
-    let data = data_dir(env);
     let ok = save_json_object(
-        &session_record_path(&data, agent_id, session_id),
+        &session_record_path(data, agent_id, session_id),
         &Value::Object(record),
     );
     if ok {
@@ -483,9 +518,16 @@ fn update_line_record(
             agent_id,
             &format!("Updated record: {transcript_path} -> {end_line} lines"),
         );
-        for shadow in shadow_paths(&data, agent_id) {
-            if !update_aggregate_shadow(&shadow, transcript_path, session_id, end_line, &updated_at)
-            {
+        for shadow in shadow_paths(data, agent_id) {
+            if !update_aggregate_shadow(
+                &shadow,
+                transcript_path,
+                session_id,
+                end_line,
+                byte_cursor,
+                reset,
+                &updated_at,
+            ) {
                 log_debug(
                     env,
                     agent_id,
@@ -507,6 +549,8 @@ fn update_aggregate_shadow(
     transcript_path: &str,
     session_id: &str,
     end_line: usize,
+    byte_cursor: &Value,
+    reset: bool,
     updated_at: &str,
 ) -> bool {
     let lock = suffix_path(file, ".lock");
@@ -514,7 +558,8 @@ fn update_aggregate_shadow(
         let mut records = read_json_object(file).unwrap_or_default();
         let incoming = Value::from(i64::try_from(end_line).unwrap_or(i64::MAX));
         if let Some(existing) = records.get(transcript_path).and_then(Value::as_object) {
-            if existing.get("session_id").and_then(Value::as_str) == Some(session_id)
+            if !reset
+                && existing.get("session_id").and_then(Value::as_str) == Some(session_id)
                 && number_gt(existing.get("last_line_count"), Some(&incoming))
             {
                 return true;
@@ -526,6 +571,7 @@ fn update_aggregate_shadow(
             Value::String(session_id.to_string()),
         );
         shadow.insert("last_line_count".to_string(), incoming);
+        shadow.insert("byte_cursor".to_string(), byte_cursor.clone());
         shadow.insert(
             "updated_at".to_string(),
             Value::String(updated_at.to_string()),
@@ -556,7 +602,18 @@ fn shadow_paths(data: &Path, agent_id: &str) -> Vec<PathBuf> {
 }
 
 fn read_json_object(path: &Path) -> Option<Obj> {
-    let text = fs::read_to_string(path).ok()?;
+    let text = if crate::utils::source_access::current().is_some() {
+        let file = crate::utils::source_access::open(path).ok()?;
+        let limit = crate::utils::source_access::read_limit(usize::MAX);
+        if !file.metadata().ok()?.is_file() || file.metadata().ok()?.len() > limit as u64 {
+            return None;
+        }
+        let mut text = String::new();
+        file.take(limit as u64).read_to_string(&mut text).ok()?;
+        text
+    } else {
+        fs::read_to_string(path).ok()?
+    };
     match serde_json::from_str::<Value>(&text) {
         Ok(Value::Object(map)) => Some(map),
         _ => None,
@@ -662,21 +719,111 @@ fn append_rows(env: &Env, agent_id: &str, log_prefix: &str, records: &[Obj]) -> 
 }
 
 fn filter_rows(env: &Env, records: &[Obj], agent_id: &str) -> Result<Vec<Obj>, String> {
+    let disabled = hook_content_disabled(env, agent_id)?;
+    let mut filtered = filter_workspace_records(env, records, agent_id)?;
+    if disabled {
+        for record in &mut filtered {
+            remove_hook_content(record);
+        }
+    }
+    Ok(filtered)
+}
+
+/// Check the same producer-side content setting used by the Node Hooks.
+/// An unreadable existing policy must not silently turn collection back on.
+pub(super) fn hook_content_disabled(env: &Env, agent_id: &str) -> Result<bool, String> {
     let root = data_dir(env);
     let config_path = env_get(env, "AGENT_DATA_COLLECTION_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("config.json"));
-    match fs::read_to_string(&config_path) {
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+    let config = match fs::read_to_string(&config_path) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
         Err(_) => return Err(PRIVACY_ERROR.to_string()),
         Ok(text) => {
             let text = text.strip_prefix('\u{feff}').unwrap_or(&text).trim();
             if text.is_empty() {
                 return Err(PRIVACY_ERROR.to_string());
             }
+            Some(serde_json::from_str::<Value>(text).map_err(|_| PRIVACY_ERROR.to_string())?)
+        }
+    };
+    let capture = config
+        .as_ref()
+        .and_then(|config| config.get("agents"))
+        .and_then(|agents| agents.get(agent_id))
+        .and_then(|agent| agent.get("captureMessageContent"));
+    Ok(capture == Some(&Value::Bool(false))
+        || capture
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("false")))
+}
+
+/// Match the Node Hook policy before writing history, not only at export time.
+pub(super) fn remove_hook_content(record: &mut Obj) {
+    fn clean(value: &mut Value) -> bool {
+        match value {
+            Value::Array(items) => {
+                items.retain_mut(clean);
+                !items.is_empty()
+            }
+            Value::Object(fields) => {
+                fields.retain(|key, value| !content_key(key) && clean(value));
+                true
+            }
+            _ => true,
         }
     }
-    filter_workspace_records(env, records, agent_id)
+
+    fn content_key(key: &str) -> bool {
+        const FIELDS: &[&str] = &[
+            "gen_ai.input.messages",
+            "gen_ai.input.messages_delta",
+            "gen_ai.input.multimodal_metadata",
+            "gen_ai.input.multimodal_metadata_delta",
+            "gen_ai.output.messages",
+            "gen_ai.output.messages_delta",
+            "gen_ai.output.multimodal_metadata",
+            "gen_ai.system_instructions",
+            "gen_ai.tool.definitions",
+            "gen_ai.tool.call.arguments",
+            "gen_ai.tool.call.result",
+            "input.messages",
+            "input.messages_delta",
+            "output.messages",
+            "tool.arguments",
+            "tool.result.payload",
+            "content",
+            "error_message",
+            "inlineDiffMessage",
+            "agent.content",
+            "agent.inline_diff_message",
+            "error.message",
+        ];
+        const SOURCE_KEYS: &[&str] = &[
+            "attachments",
+            "content",
+            "error_message",
+            "inlineDiffMessage",
+            "input",
+            "input_messages",
+            "input_messages_delta",
+            "new_string",
+            "old_string",
+            "output_messages",
+            "prompt",
+            "result_json",
+            "text",
+            "toolUseResult",
+            "tool_input",
+            "tool_output",
+            "tool_results",
+        ];
+        FIELDS.contains(&key)
+            || SOURCE_KEYS.contains(&key)
+            || SOURCE_KEYS.contains(&key.rsplit('.').next().unwrap_or(key))
+    }
+
+    record.retain(|key, value| !content_key(key) && clean(value));
 }
 
 fn history_path(env: &Env, agent_id: &str, log_prefix: &str) -> PathBuf {
@@ -1597,14 +1744,6 @@ fn js_truthy(value: Option<&Value>) -> bool {
     }
 }
 
-fn finite_nonneg(value: &Value) -> Option<f64> {
-    let Value::Number(number) = value else {
-        return None;
-    };
-    let number = number.as_f64()?;
-    (number.is_finite() && number >= 0.0).then_some(number)
-}
-
 fn number_gt(left: Option<&Value>, right: Option<&Value>) -> bool {
     match (js_number(left), js_number(right)) {
         (Some(left), Some(right)) => left > right,
@@ -1626,22 +1765,6 @@ fn js_number(value: Option<&Value>) -> Option<f64> {
         Some(Value::Bool(true)) => Some(1.0),
         Some(Value::Bool(false) | Value::Null) => Some(0.0),
         _ => None,
-    }
-}
-
-fn float_index(value: f64) -> Option<usize> {
-    if value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= usize::MAX as f64 {
-        Some(value as usize)
-    } else {
-        None
-    }
-}
-
-fn format_count(value: f64) -> String {
-    if value.fract() == 0.0 && value.abs() < 1e15 {
-        format!("{}", value as i64)
-    } else {
-        value.to_string()
     }
 }
 
@@ -2787,6 +2910,144 @@ mod tests {
         let debug = debug_text(root, "qwen-work-cn");
         assert!(debug.contains("Mapped 11 QwenWorkCN event(s)"));
         assert!(!debug.contains("Appended "));
+    }
+
+    #[test]
+    fn content_opt_out_removes_messages_and_tool_payloads_before_history_write() {
+        let dir = tempfile::tempdir().unwrap();
+        // SQLite's no-follow lock rejects macOS's /var symlink.
+        let root = dir.path().canonicalize().unwrap();
+        let transcript = root.join("session.jsonl");
+        write_rows(&transcript, &real_shape());
+        let path = transcript.to_string_lossy().into_owned();
+        let mut expected_ids = Vec::new();
+        for (name, capture) in [
+            ("on", json!(true)),
+            ("off", json!(false)),
+            ("off-string", json!(" false ")),
+        ] {
+            let data = root.join(name);
+            fs::create_dir(&data).unwrap();
+            fs::write(
+                data.join("config.json"),
+                json!({"agents":{"qwen-work-cn":{"captureMessageContent":capture}}}).to_string(),
+            )
+            .unwrap();
+            let (_, stdout) = run_in(
+                &data,
+                ARGS,
+                &payload(&path, "sess-qwen-1", "/workspace"),
+                USER,
+            );
+            assert_eq!(stdout, "{}\n");
+            let events = history(&data);
+            assert_eq!(events.len(), 11);
+            let ids: Vec<_> = events
+                .iter()
+                .map(|event| event["event.id"].clone())
+                .collect();
+            if name == "on" {
+                expected_ids = ids;
+                assert!(serde_json::to_string(&events)
+                    .unwrap()
+                    .contains("inspect package.json"));
+            } else {
+                assert_eq!(ids, expected_ids);
+                for event in &events {
+                    for field in [
+                        "gen_ai.input.messages_delta",
+                        "gen_ai.output.messages",
+                        "gen_ai.tool.call.arguments",
+                        "gen_ai.tool.call.result",
+                    ] {
+                        assert!(event.get(field).is_none(), "{name} retained {field}");
+                    }
+                }
+                assert!(!serde_json::to_string(&events)
+                    .unwrap()
+                    .contains("inspect package.json"));
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_reply_waits_with_its_prompt_and_resumes_without_losing_content() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let transcript = root.join("session.jsonl");
+        write_rows(&transcript, &real_shape());
+        let path = transcript.to_string_lossy().into_owned();
+        let input = payload(&path, "sess-qwen-1", "/workspace");
+        run_in(&root, ARGS, &input, USER);
+        let before = history(&root);
+        assert_eq!(before.len(), 11);
+        let prompt = json!({"type":"user","uuid":"prompt-next","promptId":"turn-next",
+            "sessionId":"sess-qwen-1","cwd":"/workspace",
+            "message":{"role":"user","content":[{"type":"text","text":"next prompt"}]}});
+        let answer = json!({"type":"assistant","uuid":"answer-next",
+            "sessionId":"sess-qwen-1","cwd":"/workspace",
+            "message":{"role":"assistant","id":"response-next","model":"qwen-test",
+                "content":[{"type":"text","text":"completed response"}]}})
+        .to_string();
+        let split = answer.len() / 2;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        write!(file, "{prompt}\n{}", &answer[..split]).unwrap();
+        drop(file);
+        run_in(&root, ARGS, &input, USER);
+        assert_eq!(history(&root), before);
+        let cursor: Value = serde_json::from_str(
+            &fs::read_to_string(session_record_path(&root, "qwen-work-cn", "sess-qwen-1")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cursor["last_line_count"], 9);
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&transcript)
+                .unwrap(),
+            "{}",
+            &answer[split..]
+        )
+        .unwrap();
+        run_in(&root, ARGS, &input, USER);
+        let after = history(&root);
+        assert!(after.len() > before.len());
+        assert!(after
+            .iter()
+            .any(|event| event["gen_ai.turn.id"] == "turn-next"
+                && event["event.name"] == "llm.response"
+                && serde_json::to_string(event)
+                    .unwrap()
+                    .contains("completed response")));
+        run_in(&root, ARGS, &input, USER);
+        assert_eq!(history(&root).len(), after.len());
+    }
+
+    #[test]
+    fn concurrent_stop_hooks_share_one_session_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let transcript = root.join("session.jsonl");
+        write_rows(&transcript, &real_shape());
+        let input = payload(&transcript.to_string_lossy(), "sess-qwen-1", "/workspace");
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    assert_eq!(run_in(&root, ARGS, &input, USER).1, "{}\n");
+                });
+            }
+        });
+        let events = history(&root);
+        assert_eq!(events.len(), 11);
+        let ids: std::collections::HashSet<_> = events
+            .iter()
+            .map(|event| event["event.id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), events.len());
     }
 
     #[test]

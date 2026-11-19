@@ -6,6 +6,10 @@ use crate::inputs::base::{HostedInput, InputBody};
 use crate::inputs::codex_aborted_turn::{CodexAbortedTurnInput, CodexAbortedTurnInputOptions};
 use crate::inputs::codex_transcript::{CodexTranscriptInput, CodexTranscriptInputOptions};
 use crate::inputs::qoder_trace::{QoderTraceInput, QoderTraceOptions, QoderTraceReaders};
+use crate::inputs::qwen_work_cn::{
+    QwenWorkCnCollaborationInput, QwenWorkCnNativeWakeups, QwenWorkCnTraceInput,
+    QwenWorkCnTraceOptions,
+};
 use crate::types::AgentActivityEntry;
 use crate::utils::source_access::{self, SourceScope};
 use async_trait::async_trait;
@@ -41,6 +45,19 @@ impl Collector {
         }
     }
     pub fn apply(&mut self, policy: &Policy) -> anyhow::Result<()> {
+        let qwen_policy = self.init.data_dir.join("wakeups/qwen-work-cn-policy.json");
+        let qwen_source = policy.agents.get("qwen-work-cn").and_then(|plan| {
+            plan.sources
+                .iter()
+                .find(|source| source.kind == "transcript")
+        });
+        if qwen_source.is_some() || qwen_policy.exists() {
+            let marker_policy = match qwen_source {
+                Some(source) => json!({"schema":1,"enabled":true,"transcript_root":source.path}),
+                None => json!({"schema":1,"enabled":false}),
+            };
+            write_checkpoint(&qwen_policy, &marker_policy.to_string())?;
+        }
         let delivery_changed = *self.queue.options.read().unwrap() != policy.delivery;
         let removed: Vec<_> = self
             .agents
@@ -365,6 +382,47 @@ fn run_agent(
             }
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let native_wakeups = if plan.agent == "qwen-work-cn" {
+        if let Some(source) = plan
+            .sources
+            .iter()
+            .find(|source| source.kind == "transcript")
+        {
+            let directory = init.data_dir.join("wakeups/qwen-work-cn");
+            source_access::private_path(&directory)?;
+            std::fs::create_dir_all(&directory)?;
+            source_access::private_path(&directory)?;
+            let producer_data_dir = state_dir.join("qwen-work-cn-producer");
+            let history = producer_data_dir.join("logs/qwen-work-cn/history");
+            source_access::private_path(&history)?;
+            std::fs::create_dir_all(&history)?;
+            let capture = plan.capture_message_content.or_else(|| {
+                plan.pilot_host
+                    .as_ref()
+                    .and_then(|state| state.capture_message_content)
+            });
+            let exclusions = plan.pilot_host.as_ref().map_or_else(
+                || plan.exclude_workspaces.clone(),
+                |state| state.exclude_workspaces.clone(),
+            );
+            let config = json!({"userId":init.user_id,
+                "agents":{"qwen-work-cn":{"captureMessageContent":capture.unwrap_or(true)}},
+                "privacy":{"excludeWorkspaces":exclusions}});
+            write_checkpoint(&producer_data_dir.join("config.json"), &config.to_string())?;
+            roots.push(super::policy::canonical_candidate(&directory)?);
+            Some(QwenWorkCnNativeWakeups {
+                directory,
+                transcript_root: source.path.clone(),
+                producer_data_dir,
+                user_id: init.user_id.clone(),
+                legacy_cursor_root: plan.pilot_host.as_ref().map(|state| state.data_dir.clone()),
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     if let Some(state) = &plan.pilot_host {
         let agent_roots: &[&str] = match checkpoint_key {
             "codex-transcript" => &[
@@ -372,6 +430,8 @@ fn run_agent(
                 "state/codex/transcript-span-contexts",
             ],
             "codex-aborted-turn" => &["state/codex/sessions", "logs/diagnostics"],
+            "qwen-work-cn-trace" => &["state/hooks", "hooks"],
+            "qwen-work-cn-collaboration" => &[],
             _ => &["state/qoder-transcripts/qoder", "logs/qoder"],
         };
         if checkpoint_key == "codex-transcript" {
@@ -455,12 +515,25 @@ fn run_agent(
             )
             .map_err(anyhow::Error::msg)?,
         );
+    } else if !plan.exclude_workspaces.is_empty() {
+        manager.set_workspace_policy(
+            crate::core::WorkspacePolicy::new(
+                &plan.exclude_workspaces,
+                Some(
+                    state_dir
+                        .join("workspace-exclusions")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            )
+            .map_err(anyhow::Error::msg)?,
+        );
     }
-    if let Some(capture_message_content) = plan
-        .pilot_host
-        .as_ref()
-        .and_then(|state| state.capture_message_content)
-    {
+    if let Some(capture_message_content) = plan.capture_message_content.or_else(|| {
+        plan.pilot_host
+            .as_ref()
+            .and_then(|state| state.capture_message_content)
+    }) {
         manager.set_agents_config(&crate::types::AgentsConfig::from([(
             plan.agent.clone(),
             crate::types::AgentConfig {
@@ -603,6 +676,119 @@ fn run_agent(
                 })
             },
         )
+    } else if checkpoint_key == "qwen-work-cn-collaboration" {
+        let input = Arc::new(QwenWorkCnCollaborationInput::new(
+            std::path::PathBuf::from(source_path("collaboration").expect("validated Qwen source")),
+            plan.include_conversation_ids.as_deref(),
+            store.clone(),
+            Some(plan.poll_interval_ms),
+        ));
+        let policy = plan
+            .pilot_host
+            .as_ref()
+            .map(|state| {
+                crate::inputs::base::WorkspacePolicy::new(
+                    state.exclude_workspaces.clone(),
+                    Some(state.data_dir.join("state/workspace-exclusions")),
+                )
+            })
+            .or_else(|| {
+                (!plan.exclude_workspaces.is_empty()).then(|| {
+                    crate::inputs::base::WorkspacePolicy::new(
+                        plan.exclude_workspaces.clone(),
+                        Some(state_dir.join("workspace-exclusions")),
+                    )
+                })
+            });
+        if let Some(policy) = policy {
+            input.set_collector_workspace_policy(policy);
+        }
+        input.bind_sdk_collector(capture_codex, record_delta);
+        bind(
+            &input.0,
+            manager.clone(),
+            queue.clone(),
+            scope,
+            cancel.clone(),
+            global.clone(),
+            buffer,
+        );
+        live(
+            checkpoint_key,
+            "qwen-work-cn",
+            input,
+            |i| i.collector_running(),
+            |i| Box::pin(async move { i.start().await }),
+            |i| {
+                Box::pin(async move {
+                    let _ = i.stop().await;
+                })
+            },
+        )
+    } else if checkpoint_key == "qwen-work-cn-trace" {
+        let input =
+            Arc::new(QwenWorkCnTraceInput::new(QwenWorkCnTraceOptions {
+                state_store: store.clone(),
+                log_dir: Some(source_path("hook_jsonl").unwrap_or_else(|| {
+                    native_wakeups
+                        .as_ref()
+                        .expect("validated Qwen source")
+                        .producer_data_dir
+                        .join("logs/qwen-work-cn/history")
+                        .to_string_lossy()
+                        .into_owned()
+                })),
+                segments_root: Some(source_path("segments").unwrap_or_else(|| {
+                    state_dir.join("no-segments").to_string_lossy().into_owned()
+                })),
+                poll_interval_ms: Some(plan.poll_interval_ms),
+                multimodal: None,
+            }));
+        if let Some(native) = native_wakeups {
+            input.set_native_wakeups(native);
+        }
+        let input_policy = plan
+            .pilot_host
+            .as_ref()
+            .map(|state| {
+                crate::inputs::base::WorkspacePolicy::new(
+                    state.exclude_workspaces.clone(),
+                    Some(state.data_dir.join("state/workspace-exclusions")),
+                )
+            })
+            .or_else(|| {
+                (!plan.exclude_workspaces.is_empty()).then(|| {
+                    crate::inputs::base::WorkspacePolicy::new(
+                        plan.exclude_workspaces.clone(),
+                        Some(state_dir.join("workspace-exclusions")),
+                    )
+                })
+            });
+        if let Some(policy) = input_policy {
+            input.set_collector_workspace_policy(policy);
+        }
+        input.bind_sdk_collector(capture_codex, record_delta);
+        bind(
+            &input.inner,
+            manager.clone(),
+            queue.clone(),
+            scope,
+            cancel.clone(),
+            global.clone(),
+            buffer,
+        );
+        live(
+            checkpoint_key,
+            "qwen-work-cn",
+            input,
+            |i| i.collector_running(),
+            |i| Box::pin(async move { i.start().await }),
+            |i| {
+                Box::pin(async move {
+                    let _ = i.stop().await;
+                })
+            },
+        )
     } else {
         let paths = plan
             .sources
@@ -691,7 +877,12 @@ fn run_agent(
         let available = plan
             .sources
             .iter()
-            .filter(|source| matches!(source.kind.as_str(), "hook_jsonl" | "transcript"))
+            .filter(|source| {
+                matches!(
+                    source.kind.as_str(),
+                    "hook_jsonl" | "transcript" | "collaboration"
+                )
+            })
             .any(|source| source.path.exists())
             || (checkpoint_key == "codex-transcript"
                 && !started

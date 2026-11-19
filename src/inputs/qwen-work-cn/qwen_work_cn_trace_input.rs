@@ -14,8 +14,9 @@ use crate::utils::{
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -38,6 +39,15 @@ pub struct QwenWorkCnTraceOptions {
     pub segments_root: Option<String>,
     pub poll_interval_ms: Option<u64>,
     pub multimodal: Option<QwenWorkCnMultimodalOptions>,
+}
+
+#[derive(Clone)]
+pub(crate) struct QwenWorkCnNativeWakeups {
+    pub directory: PathBuf,
+    pub transcript_root: PathBuf,
+    pub producer_data_dir: PathBuf,
+    pub user_id: String,
+    pub legacy_cursor_root: Option<PathBuf>,
 }
 
 pub struct QwenWorkCnMultimodalOptions {
@@ -76,6 +86,7 @@ pub struct QwenWorkCnTraceBody {
     subagent_turns: Mutex<HashMap<String, HashMap<String, i64>>>,
     in_flight_pairs: Mutex<HashMap<String, HashMap<String, InFlightPair>>>,
     segment_dir_by_session: Mutex<HashMap<String, CachedSegmentDir>>,
+    native_wakeups: Mutex<Option<QwenWorkCnNativeWakeups>>,
 }
 
 struct InFlightPair {
@@ -125,6 +136,15 @@ impl QwenWorkCnTraceInput {
         self.inner.runtime.set_workspace_policy(policy);
     }
 
+    pub(crate) fn set_native_wakeups(&self, native: QwenWorkCnNativeWakeups) {
+        *self
+            .inner
+            .body
+            .native_wakeups
+            .lock()
+            .expect("native wakeups") = Some(native);
+    }
+
     /// Collector subscription. Forwards to the hosted runtime without exposing its body type.
     pub fn bind_collector(
         &self,
@@ -132,6 +152,15 @@ impl QwenWorkCnTraceInput {
         on_delta: impl Fn(&crate::inputs::base::InputRuntimeDelta) + Send + Sync + 'static,
     ) {
         self.inner.on_entries(on_entries);
+        self.inner.on_runtime_delta(on_delta);
+    }
+
+    pub(crate) fn bind_sdk_collector(
+        &self,
+        on_entries: impl Fn(Vec<crate::types::AgentActivityEntry>) + Send + Sync + 'static,
+        on_delta: impl Fn(&crate::inputs::base::InputRuntimeDelta) + Send + Sync + 'static,
+    ) {
+        self.inner.set_owned_entries_handler(on_entries);
         self.inner.on_runtime_delta(on_delta);
     }
 
@@ -191,6 +220,7 @@ impl QwenWorkCnTraceInput {
                     subagent_turns: Mutex::new(HashMap::new()),
                     in_flight_pairs: Mutex::new(HashMap::new()),
                     segment_dir_by_session: Mutex::new(HashMap::new()),
+                    native_wakeups: Mutex::new(None),
                 },
                 "QwenWorkCNTraceInput",
                 opts.state_store,
@@ -245,13 +275,34 @@ impl InputBody for QwenWorkCnTraceBody {
 
     async fn on_start(&self, rt: &InputRuntime) -> anyhow::Result<()> {
         self.multimodal_stopped.store(false, Ordering::SeqCst);
-        ensure_dir(&self.log_dir).await;
+        if crate::utils::source_access::current().is_some() {
+            // SDK source directories belong to the host, not to the collector.
+            crate::utils::source_access::check(&self.log_dir)?;
+        } else {
+            ensure_dir(&self.log_dir).await;
+        }
         let current = rt.state();
-        let Some(checkpoint) =
+        let Some(mut checkpoint) =
             create_hook_history_startup_checkpoint(&current, &self.log_dir, "qwen-work-cn").await?
         else {
             return Ok(());
         };
+        if self
+            .native_wakeups
+            .lock()
+            .expect("native wakeups")
+            .is_some()
+        {
+            // This history is SDK-owned, not pre-existing user history. A
+            // crash can occur after the producer advances its cursor and
+            // appends history but before the SDK persists its first input
+            // checkpoint; baselining those bytes would silently lose them.
+            checkpoint.last_offset = 0.0;
+            checkpoint.skipped_existing_bytes = 0;
+            if let Some(extra) = checkpoint.extra.as_object_mut() {
+                extra.insert(HOOK_OFFSET_MAP_KEY.into(), json!({}));
+            }
+        }
         rt.set_state_fields(
             Some(checkpoint.last_file),
             Some(checkpoint.last_offset),
@@ -275,6 +326,7 @@ impl InputBody for QwenWorkCnTraceBody {
 
 impl QwenWorkCnTraceBody {
     async fn collect_inner(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
+        self.drain_native_wakeups(rt).await?;
         let raw = self.read_hook_jsonl(rt).await?;
         if raw.is_empty() {
             return Ok(Vec::new());
@@ -291,6 +343,17 @@ impl QwenWorkCnTraceBody {
             for entry in &mut turn {
                 entry.agent_type = ClientType::QwenWorkCN.as_str().to_owned();
                 let record = crate::inputs::base::entry_map(entry);
+                if crate::utils::source_access::current().is_some()
+                    && entry.workspace_path.as_deref().is_none_or(str::is_empty)
+                {
+                    // The Hook already supplied this path. Keep it without
+                    // probing the host filesystem outside SDK source roots.
+                    entry.workspace_path = record
+                        .get("agent.qwenworkcn.cwd")
+                        .and_then(Value::as_str)
+                        .filter(|cwd| Path::new(cwd).is_absolute())
+                        .map(str::to_owned);
+                }
                 let _ = enrich_canonical_entry_with_git(entry, &record, "qwen-work-cn").await;
             }
             if !self.multimodal_stopped.load(Ordering::SeqCst) {
@@ -308,7 +371,132 @@ impl QwenWorkCnTraceBody {
         Ok(output)
     }
 
+    async fn drain_native_wakeups(&self, rt: &InputRuntime) -> anyhow::Result<()> {
+        let native = self.native_wakeups.lock().expect("native wakeups").clone();
+        let Some(native) = native else {
+            return Ok(());
+        };
+        let mut entries = match crate::utils::source_access::read_dir_async(&native.directory).await
+        {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut markers = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.file_name().to_string_lossy().ends_with(".json") {
+                markers.push(entry.path());
+            }
+        }
+        markers.sort();
+        let mut seen_sessions = HashSet::new();
+        let mut seen_sources = HashSet::new();
+        for marker in markers {
+            let bytes = crate::utils::source_access::read(&marker).await?;
+            let value: Value = match serde_json::from_slice(&bytes) {
+                Ok(value) => value,
+                Err(_) => {
+                    rt.warn(
+                        "invalid Qwen Work SDK wakeup; discarding SDK-owned marker",
+                        None,
+                    );
+                    tokio::fs::remove_file(marker).await?;
+                    continue;
+                }
+            };
+            let Some(path) = value
+                .get("transcript_path")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+            else {
+                rt.warn(
+                    "invalid Qwen Work SDK wakeup; discarding SDK-owned marker",
+                    None,
+                );
+                tokio::fs::remove_file(marker).await?;
+                continue;
+            };
+            let Some(session) = value
+                .get("session_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            else {
+                rt.warn(
+                    "invalid Qwen Work SDK wakeup; discarding SDK-owned marker",
+                    None,
+                );
+                tokio::fs::remove_file(marker).await?;
+                continue;
+            };
+            if !path.starts_with(&native.transcript_root)
+                || path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+            {
+                rt.warn(
+                    "Qwen Work SDK wakeup is outside the authorized transcript source; discarding SDK-owned marker",
+                    None,
+                );
+                tokio::fs::remove_file(marker).await?;
+                continue;
+            }
+            // The SDK read budget is per source per collection cycle. Keep
+            // same-session notifications ordered and avoid resetting that
+            // budget by draining many wakeups for the same file in one poll.
+            if seen_sessions.contains(session) || seen_sources.contains(&path) {
+                continue;
+            }
+            seen_sessions.insert(session.to_owned());
+            seen_sources.insert(path.clone());
+            if let Err(error) = crate::utils::source_access::check(&path) {
+                if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    rt.warn(
+                        "Qwen Work SDK wakeup source was rejected; discarding SDK-owned marker",
+                        None,
+                    );
+                    tokio::fs::remove_file(marker).await?;
+                    continue;
+                }
+                rt.warn(
+                    "Qwen Work SDK wakeup retained while its source is unavailable",
+                    None,
+                );
+                continue;
+            }
+            let input = serde_json::to_vec(&value)?;
+            let limit = value.get("snapshot_bytes").and_then(Value::as_u64);
+            let native = native.clone();
+            let scope = crate::utils::source_access::current();
+            let processed = tokio::task::spawn_blocking(move || {
+                struct Restore(Option<Arc<crate::utils::source_access::SourceScope>>);
+                impl Drop for Restore {
+                    fn drop(&mut self) {
+                        crate::utils::source_access::install(self.0.take());
+                    }
+                }
+                let _restore = Restore(crate::utils::source_access::current());
+                crate::utils::source_access::install(scope);
+                crate::hook_process::run_qwen_work_cn_for_sdk(
+                    &native.producer_data_dir,
+                    &native.user_id,
+                    &input,
+                    limit,
+                    native.legacy_cursor_root.as_deref(),
+                )
+            })
+            .await?;
+            if !processed {
+                // Keep this session ordered without blocking unrelated sessions.
+                rt.warn("Qwen Work SDK wakeup retained for source retry", None);
+                continue;
+            }
+            tokio::fs::remove_file(marker).await?;
+        }
+        Ok(())
+    }
+
     async fn read_hook_jsonl(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
+        crate::utils::source_access::check(&self.log_dir)?;
         let today = get_today_date_string();
         let state = rt.state();
         let file_names = list_hook_files(&self.log_dir).await;
@@ -414,7 +602,7 @@ impl QwenWorkCnTraceBody {
             return;
         };
         let mut files = Vec::new();
-        let mut dir = match tokio::fs::read_dir(&segment_dir).await {
+        let mut dir = match crate::utils::source_access::read_dir_async(&segment_dir).await {
             Ok(dir) => dir,
             Err(_) => return,
         };
@@ -455,7 +643,9 @@ impl QwenWorkCnTraceBody {
             );
             return Some(path);
         }
-        let mut dir = tokio::fs::read_dir(&self.segments_root).await.ok()?;
+        let mut dir = crate::utils::source_access::read_dir_async(&self.segments_root)
+            .await
+            .ok()?;
         while let Ok(Some(entry)) = dir.next_entry().await {
             if !entry
                 .file_type()
@@ -526,7 +716,8 @@ impl QwenWorkCnTraceBody {
             );
             return;
         }
-        let read_size = (identity.size - offset as u64).min(MAX_HOOK_READ_BYTES) as usize;
+        let read_limit = crate::utils::source_access::read_limit(MAX_HOOK_READ_BYTES as usize);
+        let read_size = (identity.size - offset as u64).min(read_limit as u64) as usize;
         if file
             .seek(std::io::SeekFrom::Start(offset as u64))
             .await
@@ -1045,17 +1236,16 @@ async fn read_hook_file(
 ) -> anyhow::Result<HookRead> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let log_file = Path::new(log_dir).join(file_name);
-    let (mut file, id) =
-        match crate::inputs::qoder_work_log::open_log_file(&log_file.to_string_lossy()).await {
-            Ok(opened) => opened,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(HookRead {
-                    offset: start_offset,
-                    ..HookRead::default()
-                })
-            }
-            Err(error) => return Err(error.into()),
-        };
+    let (mut file, id) = match open_qwen_file(&log_file).await {
+        Ok(opened) => opened,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HookRead {
+                offset: start_offset,
+                ..HookRead::default()
+            })
+        }
+        Err(error) => return Err(error.into()),
+    };
     let identity = id.checkpoint_key();
     let offset = if previous_identity.is_some_and(|previous| !id.matches_checkpoint(previous))
         || start_offset > id.size as f64
@@ -1067,12 +1257,13 @@ async fn read_hook_file(
     file.seek(std::io::SeekFrom::Start(offset)).await?;
     let requested = id.size.saturating_sub(offset);
     let mut bytes = Vec::new();
+    let read_limit = crate::utils::source_access::read_limit(MAX_HOOK_READ_BYTES as usize) as u64;
     (&mut file)
-        .take(requested.min(budget))
+        .take(requested.min(budget).min(read_limit))
         .read_to_end(&mut bytes)
         .await?;
-    while !bytes.contains(&b'\n') && (bytes.len() as u64) < requested.min(MAX_HOOK_READ_BYTES) {
-        let room = requested.min(MAX_HOOK_READ_BYTES) - bytes.len() as u64;
+    while !bytes.contains(&b'\n') && (bytes.len() as u64) < requested.min(read_limit) {
+        let room = requested.min(read_limit) - bytes.len() as u64;
         if (&mut file)
             .take(room.min(64 * 1024))
             .read_to_end(&mut bytes)
@@ -1168,6 +1359,9 @@ fn is_ignored_turn(turn_id: &str) -> bool {
 }
 
 async fn is_dir(path: &Path) -> bool {
+    if crate::utils::source_access::check(path).is_err() {
+        return false;
+    }
     tokio::fs::metadata(path)
         .await
         .map(|meta| meta.is_dir())
@@ -1180,14 +1374,24 @@ async fn open_segment_file(
     tokio::fs::File,
     crate::utils::file_identity::OpenedFileIdentity,
 )> {
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let file = std::fs::File::open(path).ok()?;
-        let identity = crate::utils::file_identity::identity_from_open(&file).ok()?;
-        Some((tokio::fs::File::from_std(file), identity))
-    })
-    .await
-    .ok()?
+    open_qwen_file(Path::new(path)).await.ok()
+}
+
+async fn open_qwen_file(
+    path: &Path,
+) -> std::io::Result<(
+    tokio::fs::File,
+    crate::utils::file_identity::OpenedFileIdentity,
+)> {
+    if crate::utils::source_access::current().is_none() {
+        return crate::inputs::qoder_work_log::open_log_file(&path.to_string_lossy()).await;
+    }
+    let file = crate::utils::source_access::open_async(path)
+        .await?
+        .into_std()
+        .await;
+    let identity = crate::utils::file_identity::identity_from_open(&file)?;
+    Ok((tokio::fs::File::from_std(file), identity))
 }
 
 fn now_ms() -> i64 {

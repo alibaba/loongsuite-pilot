@@ -105,6 +105,9 @@ pub struct AgentPlan {
     pub poll_interval_ms: u64,
     pub mask: crate::types::MaskConfig,
     pub pilot_host: Option<PilotHostState>,
+    pub capture_message_content: Option<bool>,
+    pub exclude_workspaces: Vec<String>,
+    pub include_conversation_ids: Option<Vec<String>>,
 }
 
 /// State and output controls owned by a standalone Pilot installation.
@@ -123,6 +126,8 @@ impl AgentPlan {
         match self.profile.as_str() {
             "codex_rollout_v1" => "codex-transcript",
             "codex_aborted_turn_v1" => "codex-aborted-turn",
+            "qwen_work_cn_trace_v1" => "qwen-work-cn-trace",
+            "qwen_work_cn_collaboration_v1" => "qwen-work-cn-collaboration",
             _ => "qoder-trace",
         }
     }
@@ -306,7 +311,7 @@ impl Policy {
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("agent name must be a string"))?;
             anyhow::ensure!(
-                matches!(agent, "qoder" | "codex"),
+                matches!(agent, "qoder" | "codex" | "qwen-work-cn"),
                 "unsupported SDK agent: {agent}"
             );
             anyhow::ensure!(seen.insert(agent), "duplicate agent");
@@ -334,6 +339,9 @@ impl Policy {
                             | "output"
                             | "pilot_qoder"
                             | "pilot_host"
+                            | "capture_message_content"
+                            | "exclude_workspaces"
+                            | "include_conversation_ids"
                     ))),
                 "unsupported collection option"
             );
@@ -346,9 +354,49 @@ impl Policy {
                     (agent, profile),
                     ("qoder", "qoder_trace_v1")
                         | ("codex", "codex_rollout_v1" | "codex_aborted_turn_v1")
+                        | (
+                            "qwen-work-cn",
+                            "qwen_work_cn_trace_v1" | "qwen_work_cn_collaboration_v1"
+                        )
                 ),
                 "unsupported agent/profile: {agent}/{profile}"
             );
+            anyhow::ensure!(
+                (agent == "qwen-work-cn" || collection.get("include_conversation_ids").is_none())
+                    && (!matches!(agent, "qoder" | "codex")
+                        || (collection.get("capture_message_content").is_none()
+                            && collection.get("exclude_workspaces").is_none())),
+                "unsupported content, workspace, or conversation options for this profile"
+            );
+            let capture_message_content = collection
+                .get("capture_message_content")
+                .map(|value| {
+                    value
+                        .as_bool()
+                        .ok_or_else(|| anyhow::anyhow!("capture_message_content must be boolean"))
+                })
+                .transpose()?;
+            let exclude_workspaces = crate::inputs::base::validate_excluded_workspaces(
+                collection.get("exclude_workspaces"),
+            )
+            .map_err(anyhow::Error::msg)?;
+            let include_conversation_ids = collection
+                .get("include_conversation_ids")
+                .map(|value| {
+                    value
+                        .as_array()
+                        .filter(|values| values.len() <= 1024)
+                        .ok_or_else(|| anyhow::anyhow!("invalid conversation allowlist"))?
+                        .iter()
+                        .map(|id| {
+                            id.as_str()
+                                .filter(|id| !id.is_empty() && id.len() <= 1024)
+                                .map(str::to_owned)
+                                .ok_or_else(|| anyhow::anyhow!("invalid conversation ID"))
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()
+                })
+                .transpose()?;
             let roots = collection
                 .get("allowed_roots")
                 .and_then(Value::as_array)
@@ -415,10 +463,17 @@ impl Policy {
                 }
                 let kind = source.get("type").and_then(Value::as_str).unwrap_or("");
                 anyhow::ensure!(
-                    matches!(
-                        kind,
-                        "hook_jsonl" | "transcript" | "sqlite" | "segments" | "intercept"
-                    ) || (pilot_host.is_some() && kind == "sqlite_root"),
+                    if agent == "qwen-work-cn" {
+                        matches!(
+                            kind,
+                            "hook_jsonl" | "transcript" | "segments" | "collaboration"
+                        )
+                    } else {
+                        matches!(
+                            kind,
+                            "hook_jsonl" | "transcript" | "sqlite" | "segments" | "intercept"
+                        ) || (pilot_host.is_some() && kind == "sqlite_root")
+                    },
                     "unsupported source type"
                 );
                 if let Some(mode) = source.get("read_mode") {
@@ -443,12 +498,26 @@ impl Policy {
                 );
             }
             anyhow::ensure!(
-                parsed.iter().filter(|s| s.kind == "hook_jsonl").count() <= 1
-                    && parsed
-                        .iter()
-                        .any(|s| matches!(s.kind.as_str(), "hook_jsonl" | "transcript")),
-                "profile requires exactly one primary source"
+                include_conversation_ids.is_none()
+                    || parsed.iter().any(|source| source.kind == "collaboration"),
+                "conversation allowlist requires a collaboration source"
             );
+            let source_count = |kind| parsed.iter().filter(|source| source.kind == kind).count();
+            let valid_sources = match profile {
+                "qwen_work_cn_collaboration_v1" => {
+                    parsed.len() == 1 && parsed[0].kind == "collaboration"
+                }
+                "qwen_work_cn_trace_v1" => {
+                    source_count("hook_jsonl") + source_count("transcript") == 1
+                        && source_count("segments") <= 1
+                        && source_count("collaboration") <= 1
+                }
+                _ => {
+                    source_count("hook_jsonl") <= 1
+                        && (source_count("hook_jsonl") + source_count("transcript")) > 0
+                }
+            };
+            anyhow::ensure!(valid_sources, "profile requires exactly one primary source");
             let limits = collection
                 .get("limits")
                 .cloned()
@@ -482,20 +551,36 @@ impl Policy {
             if let Some(schema) = collection.pointer("/output/schema") {
                 anyhow::ensure!(schema == "aah.activity.v2", "unsupported output schema");
             }
-            agents.insert(
-                agent.into(),
-                AgentPlan {
-                    mask: mask.clone(),
-                    pilot_host,
-                    agent: agent.into(),
-                    profile: profile.into(),
-                    sources: parsed,
-                    allowed_roots,
-                    max_files: limit("max_files", 512, 16384)?,
-                    max_read_bytes: limit("max_read_bytes", 8 * 1024 * 1024, 64 * 1024 * 1024)?,
-                    poll_interval_ms: limit("poll_interval_ms", 1000, 300000)? as u64,
-                },
-            );
+            let mut plan = AgentPlan {
+                mask: mask.clone(),
+                pilot_host,
+                capture_message_content,
+                exclude_workspaces,
+                include_conversation_ids,
+                agent: agent.into(),
+                profile: profile.into(),
+                sources: parsed,
+                allowed_roots,
+                max_files: limit("max_files", 512, 16384)?,
+                max_read_bytes: limit("max_read_bytes", 8 * 1024 * 1024, 64 * 1024 * 1024)?,
+                poll_interval_ms: limit("poll_interval_ms", 1000, 300000)? as u64,
+            };
+            // Collaboration has its own transaction and checkpoint. One
+            // embedded Qwen policy can activate both independent sources.
+            if profile == "qwen_work_cn_trace_v1" {
+                if let Some(index) = plan
+                    .sources
+                    .iter()
+                    .position(|source| source.kind == "collaboration")
+                {
+                    let collaboration = plan.sources.remove(index);
+                    let mut child = plan.clone();
+                    child.profile = "qwen_work_cn_collaboration_v1".into();
+                    child.sources = vec![collaboration];
+                    agents.insert("qwen-work-cn-collaboration".into(), child);
+                }
+            }
+            agents.insert(agent.into(), plan);
         }
         let mut hooks = raw
             .pointer("/sdk_options/hooks")

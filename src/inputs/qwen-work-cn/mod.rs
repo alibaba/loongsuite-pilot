@@ -15,6 +15,7 @@ pub use qwen_work_cn_input::{QwenWorkCnInput, QwenWorkCnOptions};
 pub use qwen_work_cn_sqlite_input::{
     resolve_qwen_work_cn_root, QwenWorkCnSqliteInput, QwenWorkCnSqliteOptions,
 };
+pub(crate) use qwen_work_cn_trace_input::QwenWorkCnNativeWakeups;
 pub use qwen_work_cn_trace_input::{
     qwen_work_cn_default_allowed_root_paths, resolve_qwen_work_cn_allowed_root_paths,
     QwenWorkCnMultimodalOptions, QwenWorkCnTraceInput, QwenWorkCnTraceOptions,
