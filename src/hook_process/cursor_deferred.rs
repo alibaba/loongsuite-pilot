@@ -196,10 +196,9 @@ mod tests {
         DeferredCursor::new(root.clone()).collect().unwrap();
         let file = fs::read_dir(history)
             .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .expect("Cursor history JSONL was written");
         let first = fs::read(&file).unwrap();
         assert_ne!(first.len(), 0);
         assert!(String::from_utf8_lossy(&first).contains("test response"));
