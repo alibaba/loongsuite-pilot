@@ -10,6 +10,7 @@ export {
   parseGeneratorMetadata,
   parseStepMetadata,
   type AntigravityConversationSnapshot,
+  type AntigravityStepInfo,
   type AntigravityUsageEvent,
   type AntigravityModelUsage,
 } from './sqlite-reader.js';

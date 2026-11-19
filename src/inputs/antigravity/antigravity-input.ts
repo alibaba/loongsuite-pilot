@@ -26,6 +26,7 @@ import { loadDatabaseSync } from '../../utils/node-sqlite.js';
 import {
   readAntigravityConversationDb,
   type AntigravityConversationSnapshot,
+  type AntigravityStepInfo,
   type AntigravityUsageEvent,
 } from './sqlite-reader.js';
 import {
@@ -114,6 +115,17 @@ export interface AntigravityInputOptions extends InputOptions {
   collectHistorical?: boolean;
   /** Optional opt-in multimodal upload configuration. */
   multimodal?: AntigravityMultimodalOptions;
+}
+
+const SYNTHETIC_ROOT_PARENT_SPAN_ID = '0000000000000001';
+
+function hashId(parts: readonly string[], length: number): string {
+  const hex = createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, length);
+  return /^0+$/.test(hex) ? `${'0'.repeat(length - 1)}1` : hex;
+}
+
+function isTurnPromptStep(step: AntigravityTranscriptStep): boolean {
+  return step.type === 'USER_INPUT' || (step.stepIndex === 0 && step.type === 'SYSTEM_MESSAGE');
 }
 
 function toUnixNanoString(ms: number): string {
@@ -562,6 +574,7 @@ export class AntigravityInput extends BaseInput {
   }> {
     const entries: AgentActivityEntry[] = [];
     const cwd = snapshot?.workspacePath;
+    const stepInfos = snapshot?.stepInfos ?? new Map<number, AntigravityStepInfo>();
     const seenKeys = new Set(prevCursor.emittedUsageKeys);
     let maxStepIndex = prevCursor.lastTranscriptStepIndex;
     let maxEmittedGenIdx = prevCursor.maxEmittedGenIdx;
@@ -581,46 +594,72 @@ export class AntigravityInput extends BaseInput {
       return parts;
     };
 
-    // Precompute O(1)/O(log S) turn mapping from deduplicated, sorted transcript steps
+    // Precompute fallback turn mapping from deduplicated, sorted transcript steps
     const stepToTurn = new Map<number, string>();
-    const userInputSteps: number[] = [];
+    const promptSteps: number[] = [];
     if (transcript) {
       let currentTurnIndex = 0;
       for (const step of transcript.steps) {
-        if (step.type === 'USER_INPUT') {
+        if (isTurnPromptStep(step)) {
           currentTurnIndex++;
-          userInputSteps.push(step.stepIndex);
+          promptSteps.push(step.stepIndex);
         }
         stepToTurn.set(step.stepIndex, `${sessionId}:turn:${Math.max(1, currentTurnIndex)}`);
       }
     }
 
-    const resolveTurnForStep = (stepIdx: number | undefined): string => {
+    // Prefer Antigravity's native Turn UUID (steps.metadata field 12); fall back to transcript turn count.
+    const resolveTurnForStep = (
+      stepIdx: number | undefined,
+      candidateIndices?: readonly number[],
+    ): string => {
+      if (stepIdx !== undefined) {
+        const nativeTurn = stepInfos.get(stepIdx)?.turnId;
+        if (nativeTurn) return `${sessionId}:${nativeTurn}`;
+      }
+      if (candidateIndices) {
+        for (const idx of candidateIndices) {
+          const nativeTurn = stepInfos.get(idx)?.turnId;
+          if (nativeTurn) return `${sessionId}:${nativeTurn}`;
+        }
+      }
       if (stepIdx === undefined) return `${sessionId}:turn:1`;
       const exact = stepToTurn.get(stepIdx);
       if (exact) return exact;
-      if (userInputSteps.length > 0) {
-        return `${sessionId}:turn:${binarySearchTurnNumber(userInputSteps, stepIdx)}`;
+      if (promptSteps.length > 0) {
+        return `${sessionId}:turn:${binarySearchTurnNumber(promptSteps, stepIdx)}`;
       }
       return `${sessionId}:turn:1`;
     };
 
+    const resolveToolCallId = (
+      plannerStepIndex: number,
+      toolIndex: number,
+      explicitId?: string,
+    ): string => {
+      if (explicitId) return explicitId;
+      const nativeId = stepInfos.get(plannerStepIndex + 1 + toolIndex)?.toolCallId;
+      if (nativeId) return nativeId;
+      return `${sessionId}:step:${plannerStepIndex}:tc:${toolIndex}`;
+    };
+
     // Precompute per-turn primary provider and per-step LLM completion timestamp
-    // from SQLite usage events. gen_metadata field 9.4 is the generation completion
-    // timestamp (respTsMs), so tool calls emitted by a PLANNER_RESPONSE start at
-    // respTsMs rather than at the earlier step creation (request start) time.
+    // from SQLite usage events. gen_metadata field 9.4 (and steps.metadata field 8)
+    // is the generation completion timestamp (respTsMs).
     const turnProviderMap = new Map<string, string>();
     const stepCompletionMsMap = new Map<number, number>();
     if (snapshot) {
       for (const usage of snapshot.events) {
         const linkedStep = this.findLinkedPlannerStep(usage, transcript);
+        const primaryIdx = linkedStep?.stepIndex ?? usage.stepIndices[0];
         if (linkedStep) {
+          const completedMs = stepInfos.get(linkedStep.stepIndex)?.completedAtMs ?? usage.timestampMs;
           const prev = stepCompletionMsMap.get(linkedStep.stepIndex);
-          if (prev === undefined || usage.timestampMs > prev) {
-            stepCompletionMsMap.set(linkedStep.stepIndex, usage.timestampMs);
+          if (prev === undefined || completedMs > prev) {
+            stepCompletionMsMap.set(linkedStep.stepIndex, completedMs);
           }
         }
-        const turnId = resolveTurnForStep(linkedStep?.stepIndex ?? usage.stepIndices[0]);
+        const turnId = resolveTurnForStep(primaryIdx, usage.stepIndices);
         if (!turnProviderMap.has(turnId)) {
           const transcriptModel = normalizeAntigravityModel(linkedStep?.model);
           const model =
@@ -641,11 +680,17 @@ export class AntigravityInput extends BaseInput {
         resultStep.type !== 'PLANNER_RESPONSE' &&
         resultStep.type !== 'USER_INPUT'
       ) {
-        const resultTsMs = resultStep.createdAtMs ?? pending.callTsMs ?? Date.now();
-        const durationMs =
-          resultStep.createdAtMs !== undefined && pending.callTsMs !== undefined
-            ? resultStep.createdAtMs - pending.callTsMs
-            : undefined;
+        const resultInfo = stepInfos.get(pending.resultStepIndex);
+        const effectiveCallTsMs =
+          pending.callTsMs ??
+          resultInfo?.executionStartedAtMs ??
+          resultInfo?.createdAtMs ??
+          resultStep.createdAtMs ??
+          Date.now();
+        const rawResultTsMs =
+          resultInfo?.completedAtMs ?? resultStep.createdAtMs ?? effectiveCallTsMs;
+        const resultTsMs = Math.max(effectiveCallTsMs, rawResultTsMs);
+        const durationMs = resultTsMs - effectiveCallTsMs;
         const resultMediaParts = await getStepMedia(resultStep, resultTsMs, 'input');
         let resultPayload: JsonValue = resultStep.content ?? null;
         if (resultMediaParts.length > 0) {
@@ -654,13 +699,27 @@ export class AntigravityInput extends BaseInput {
           for (const part of resultMediaParts) combined.push(part as unknown as JsonValue);
           resultPayload = combined;
         }
+        const traceId = hashId([sessionId, pending.turnId, 'trace'], 32);
+        const stepSpanId = hashId([sessionId, pending.turnId, pending.stepId, 'step'], 16);
+        const toolSpanId = hashId(
+          [sessionId, pending.turnId, pending.stepId, pending.callId, 'tool'],
+          16,
+        );
         const resultEntry = buildAgentActivityEntry({
+          'event.id': hashId(
+            [sessionId, pending.turnId, pending.stepId, pending.callId, 'tool.result'],
+            32,
+          ),
           'event.name': 'tool.result',
+          trace_id: traceId,
+          span_id: toolSpanId,
+          parent_span_id: stepSpanId,
           'gen_ai.session.id': sessionId,
           'gen_ai.turn.id': pending.turnId,
           // Keep tool.result in the same step group as its parent PLANNER_RESPONSE & tool.call
           'gen_ai.step.id': pending.stepId,
           'gen_ai.agent.type': this.agentType,
+          'gen_ai.agent.id': sessionId,
           'gen_ai.provider.name': resolveAntigravityProvider(
             normalizeAntigravityModel(pending.model),
           ),
@@ -668,9 +727,7 @@ export class AntigravityInput extends BaseInput {
           'gen_ai.tool.call.id': pending.callId,
           'gen_ai.tool.call.result': resultPayload,
           'tool.result.status': resultStep.status === 'ERROR' ? 'error' : 'success',
-          ...(durationMs !== undefined && durationMs > 0
-            ? { 'gen_ai.tool.call.duration': durationMs }
-            : {}),
+          ...(durationMs > 0 ? { 'gen_ai.tool.call.duration': durationMs } : {}),
           time_unix_nano: toUnixNanoString(resultTsMs),
         });
         if (resultMediaParts.length > 0) attachMultimodalMetadataForEntry(resultEntry);
@@ -682,7 +739,7 @@ export class AntigravityInput extends BaseInput {
       }
     }
 
-    // 2) Emit new USER_INPUT and tool.call / tool.result from transcript when available
+    // 2) Emit new turn prompts (USER_INPUT or initial step-0 SYSTEM_MESSAGE) and tool.call / tool.result
     if (transcript) {
       const stepsByIndex = transcript.byStepIndex;
       for (const step of transcript.steps) {
@@ -691,25 +748,35 @@ export class AntigravityInput extends BaseInput {
 
         const turnId = resolveTurnForStep(step.stepIndex);
         const stepId = `${sessionId}:step:${step.stepIndex}`;
-        const tsMs = step.createdAtMs ?? snapshot?.trajectoryTimestampMs ?? Date.now();
+        const stepInfo = stepInfos.get(step.stepIndex);
+        const tsMs =
+          stepInfo?.createdAtMs ?? step.createdAtMs ?? snapshot?.trajectoryTimestampMs ?? Date.now();
+        const traceId = hashId([sessionId, turnId, 'trace'], 32);
 
-        if (step.type === 'USER_INPUT') {
+        if (isTurnPromptStep(step)) {
           const mediaParts = await getStepMedia(step, tsMs, 'input');
           if (!step.content && mediaParts.length === 0) continue;
           const parts: JsonValue[] = [];
           if (step.content) parts.push({ type: 'text', content: step.content });
           for (const part of mediaParts) parts.push(part as unknown as JsonValue);
-          const userMessages: JsonValue = [{ role: 'user', parts }];
+          const role = step.type === 'USER_INPUT' ? 'user' : 'system';
+          const promptMessages: JsonValue = [{ role, parts }];
+          const agentSpanId = hashId([sessionId, turnId, 'agent'], 16);
           const inputEntry = buildAgentActivityEntry({
+            'event.id': hashId([sessionId, turnId, stepId, 'other'], 32),
             'event.name': 'other',
+            trace_id: traceId,
+            span_id: agentSpanId,
+            parent_span_id: SYNTHETIC_ROOT_PARENT_SPAN_ID,
             'gen_ai.session.id': sessionId,
             'gen_ai.turn.id': turnId,
             'gen_ai.step.id': stepId,
             'gen_ai.turn.start': true,
             'gen_ai.agent.type': this.agentType,
+            'gen_ai.agent.id': sessionId,
             'gen_ai.provider.name': turnProviderMap.get(turnId) ?? 'gcp.gemini',
-            'gen_ai.input.messages': userMessages,
-            'gen_ai.input.messages_delta': userMessages,
+            'gen_ai.input.messages': promptMessages,
+            'gen_ai.input.messages_delta': promptMessages,
             time_unix_nano: toUnixNanoString(tsMs),
           });
           if (mediaParts.length > 0) attachMultimodalMetadataForEntry(inputEntry);
@@ -717,18 +784,38 @@ export class AntigravityInput extends BaseInput {
           entries.push(inputEntry);
         } else if (step.type === 'PLANNER_RESPONSE' && step.toolCalls.length > 0) {
           const stepProvider = resolveAntigravityProvider(normalizeAntigravityModel(step.model));
-          const callTsMs = stepCompletionMsMap.get(step.stepIndex) ?? tsMs;
+          const stepSpanId = hashId([sessionId, turnId, stepId, 'step'], 16);
+          const plannerCompletedMs =
+            stepCompletionMsMap.get(step.stepIndex) ?? stepInfo?.completedAtMs ?? tsMs;
+
           for (let i = 0; i < step.toolCalls.length; i++) {
             const tc = step.toolCalls[i]!;
-            const callId = tc.id ?? `${sessionId}:step:${step.stepIndex}:tc:${i}`;
+            const resultStepIndex = step.stepIndex + 1 + i;
+            const resultStep = stepsByIndex.get(resultStepIndex);
+            const resultInfo = stepInfos.get(resultStepIndex);
+            const callId = resolveToolCallId(step.stepIndex, i, tc.id);
+            const toolName = tc.name || resultInfo?.toolName || 'unknown';
+            const toolSpanId = hashId([sessionId, turnId, stepId, callId, 'tool'], 16);
+
+            // Prefer native tool execution start time (steps.metadata field 32)
+            const callTsMs = Math.max(
+              plannerCompletedMs,
+              resultInfo?.executionStartedAtMs ?? plannerCompletedMs,
+            );
+
             const callEntry = buildAgentActivityEntry({
+              'event.id': hashId([sessionId, turnId, stepId, callId, 'tool.call'], 32),
               'event.name': 'tool.call',
+              trace_id: traceId,
+              span_id: toolSpanId,
+              parent_span_id: stepSpanId,
               'gen_ai.session.id': sessionId,
               'gen_ai.turn.id': turnId,
               'gen_ai.step.id': stepId,
               'gen_ai.agent.type': this.agentType,
+              'gen_ai.agent.id': sessionId,
               'gen_ai.provider.name': stepProvider,
-              'gen_ai.tool.name': tc.name,
+              'gen_ai.tool.name': toolName,
               'gen_ai.tool.call.id': callId,
               'gen_ai.tool.call.arguments': tc.args,
               time_unix_nano: toUnixNanoString(callTsMs),
@@ -736,19 +823,15 @@ export class AntigravityInput extends BaseInput {
             await this.attachWorkspaceContext(callEntry, cwd);
             entries.push(callEntry);
 
-            const resultStepIndex = step.stepIndex + 1 + i;
-            const resultStep = stepsByIndex.get(resultStepIndex);
             if (
               resultStep &&
               resultStep.type !== 'PLANNER_RESPONSE' &&
               resultStep.type !== 'USER_INPUT'
             ) {
-              const rawResultTsMs = resultStep.createdAtMs ?? callTsMs;
+              const rawResultTsMs =
+                resultInfo?.completedAtMs ?? resultStep.createdAtMs ?? callTsMs;
               const resultTsMs = Math.max(callTsMs, rawResultTsMs);
-              const durationMs =
-                resultStep.createdAtMs !== undefined
-                  ? resultStep.createdAtMs - callTsMs
-                  : undefined;
+              const durationMs = resultTsMs - callTsMs;
               const resultMediaParts = await getStepMedia(resultStep, resultTsMs, 'input');
               let resultPayload: JsonValue = resultStep.content ?? null;
               if (resultMediaParts.length > 0) {
@@ -758,20 +841,23 @@ export class AntigravityInput extends BaseInput {
                 resultPayload = combined;
               }
               const resultEntry = buildAgentActivityEntry({
+                'event.id': hashId([sessionId, turnId, stepId, callId, 'tool.result'], 32),
                 'event.name': 'tool.result',
+                trace_id: traceId,
+                span_id: toolSpanId,
+                parent_span_id: stepSpanId,
                 'gen_ai.session.id': sessionId,
                 'gen_ai.turn.id': turnId,
                 // Reuse parent PLANNER_RESPONSE stepId so planTurnStream keeps LLM + tool in one STEP
                 'gen_ai.step.id': stepId,
                 'gen_ai.agent.type': this.agentType,
+                'gen_ai.agent.id': sessionId,
                 'gen_ai.provider.name': stepProvider,
-                'gen_ai.tool.name': tc.name,
+                'gen_ai.tool.name': toolName,
                 'gen_ai.tool.call.id': callId,
                 'gen_ai.tool.call.result': resultPayload,
                 'tool.result.status': resultStep.status === 'ERROR' ? 'error' : 'success',
-                ...(durationMs !== undefined && durationMs > 0
-                  ? { 'gen_ai.tool.call.duration': durationMs }
-                  : {}),
+                ...(durationMs > 0 ? { 'gen_ai.tool.call.duration': durationMs } : {}),
                 time_unix_nano: toUnixNanoString(resultTsMs),
               });
               if (resultMediaParts.length > 0) attachMultimodalMetadataForEntry(resultEntry);
@@ -785,7 +871,7 @@ export class AntigravityInput extends BaseInput {
                 stepId,
                 resultStepIndex,
                 callId,
-                toolName: tc.name,
+                toolName,
                 model: step.model,
                 callTsMs,
               });
@@ -809,12 +895,19 @@ export class AntigravityInput extends BaseInput {
         }
 
         const linkedStep = this.findLinkedPlannerStep(usage, transcript);
-        const turnId = resolveTurnForStep(linkedStep?.stepIndex ?? usage.stepIndices[0]);
+        const linkedStepIdx = linkedStep?.stepIndex ?? usage.stepIndices[0];
+        const linkedStepInfo = linkedStepIdx !== undefined ? stepInfos.get(linkedStepIdx) : undefined;
+        const turnId = resolveTurnForStep(linkedStepIdx, usage.stepIndices);
         const stepId = linkedStep
           ? `${sessionId}:step:${linkedStep.stepIndex}`
           : usage.stepIndices.length > 0
             ? `${sessionId}:step:${usage.stepIndices[0]}`
             : `${sessionId}:gen:${usage.genIdx ?? 0}`;
+
+        const traceId = hashId([sessionId, turnId, 'trace'], 32);
+        const stepSpanId = hashId([sessionId, turnId, stepId, 'step'], 16);
+        const llmSpanId = hashId([sessionId, turnId, stepId, 'llm'], 16);
+        const responseId = usage.messageId ?? `${stepId}:r:${usage.genIdx ?? 0}`;
 
         const transcriptModel = normalizeAntigravityModel(linkedStep?.model);
         const model =
@@ -828,14 +921,18 @@ export class AntigravityInput extends BaseInput {
         const totalOutputTokens = usage.totalOutputTokens;
         const totalTokens = totalInputTokens + totalOutputTokens;
 
-        // gen_metadata field 9.4 records generation completion time (respTsMs);
-        // derive request start time by subtracting (ttft + streamDuration).
-        const respTsMs = usage.timestampMs;
+        // gen_metadata field 9.4 (and steps.metadata field 8) is generation completion time;
+        // prefer native steps.metadata field 1 for request start, else respTsMs - duration.
+        const respTsMs = linkedStepInfo?.completedAtMs ?? usage.timestampMs;
         const durationNs = (usage.ttftNs ?? 0) + (usage.streamDurationNs ?? 0);
-        const reqTsMs =
+        const derivedReqTsMs =
           durationNs > 0
             ? Math.max(1, respTsMs - Math.max(1, Math.round(durationNs / 1_000_000)))
             : respTsMs;
+        const reqTsMs =
+          linkedStepInfo?.createdAtMs !== undefined && linkedStepInfo.createdAtMs <= respTsMs
+            ? linkedStepInfo.createdAtMs
+            : derivedReqTsMs;
 
         const inputDelta = await this.buildInputMessagesDelta(
           sessionId,
@@ -843,13 +940,20 @@ export class AntigravityInput extends BaseInput {
           transcript,
           reqTsMs,
           getStepMedia,
+          resolveToolCallId,
         );
         const reqEntry = buildAgentActivityEntry({
+          'event.id': hashId([sessionId, turnId, stepId, 'llm.request', responseId], 32),
           'event.name': 'llm.request',
+          trace_id: traceId,
+          span_id: llmSpanId,
+          parent_span_id: stepSpanId,
           'gen_ai.session.id': sessionId,
           'gen_ai.turn.id': turnId,
           'gen_ai.step.id': stepId,
+          'gen_ai.response.id': responseId,
           'gen_ai.agent.type': this.agentType,
+          'gen_ai.agent.id': sessionId,
           'gen_ai.provider.name': provider,
           'gen_ai.request.model': model,
           ...(inputDelta.length > 0
@@ -869,26 +973,38 @@ export class AntigravityInput extends BaseInput {
         const outputMediaParts = linkedStep
           ? await getStepMedia(linkedStep, respTsMs, 'output')
           : [];
-        const outputMessages = this.buildOutputMessages(linkedStep, outputMediaParts);
-        const finishReasons =
-          linkedStep && linkedStep.toolCalls.length > 0 ? ['tool_calls'] : ['stop'];
+        const finishReason = linkedStep && linkedStep.toolCalls.length > 0 ? 'tool_call' : 'stop';
+        const outputMessages = this.buildOutputMessages(
+          linkedStep,
+          outputMediaParts,
+          finishReason,
+          resolveToolCallId,
+        );
 
         const respEntry = buildAgentActivityEntry({
+          'event.id': hashId([sessionId, turnId, stepId, 'llm.response', responseId], 32),
           'event.name': 'llm.response',
+          trace_id: traceId,
+          span_id: llmSpanId,
+          parent_span_id: stepSpanId,
           'gen_ai.session.id': sessionId,
           'gen_ai.turn.id': turnId,
           'gen_ai.step.id': stepId,
-          'gen_ai.response.id': usage.messageId,
+          'gen_ai.response.id': responseId,
           'gen_ai.agent.type': this.agentType,
+          'gen_ai.agent.id': sessionId,
           'gen_ai.provider.name': provider,
           'gen_ai.request.model': model,
           'gen_ai.response.model': model,
-          'gen_ai.response.finish_reasons': finishReasons,
+          'gen_ai.response.finish_reasons': [finishReason],
           ...(usage.ttftNs !== undefined && usage.ttftNs > 0
             ? { 'gen_ai.response.time_to_first_token': usage.ttftNs }
             : {}),
           'gen_ai.usage.input_tokens': totalInputTokens,
           'gen_ai.usage.output_tokens': totalOutputTokens,
+          ...(usage.reasoningTokens > 0
+            ? { 'gen_ai.usage.reasoning_output_tokens': usage.reasoningTokens }
+            : {}),
           ...(usage.cacheReadTokens > 0
             ? { 'gen_ai.usage.cache_read.input_tokens': usage.cacheReadTokens }
             : {}),
@@ -947,6 +1063,7 @@ export class AntigravityInput extends BaseInput {
       timeMs: number,
       direction: 'input' | 'output',
     ) => Promise<UriPart[]>,
+    resolveToolCallId: (plannerStepIndex: number, toolIndex: number, explicitId?: string) => string,
   ): Promise<JsonValue[]> {
     if (!linkedStep || !transcript) return [];
 
@@ -965,7 +1082,7 @@ export class AntigravityInput extends BaseInput {
       const toolResponseParts: JsonValue[] = [];
       for (let i = 0; i < prevPlanner.toolCalls.length; i++) {
         const tc = prevPlanner.toolCalls[i]!;
-        const callId = tc.id ?? `${sessionId}:step:${prevPlanner.stepIndex}:tc:${i}`;
+        const callId = resolveToolCallId(prevPlanner.stepIndex, i, tc.id);
         assistantParts.push({
           type: 'tool_call',
           id: callId,
@@ -1004,13 +1121,14 @@ export class AntigravityInput extends BaseInput {
     for (const step of transcript.steps) {
       if (step.stepIndex <= prevPlannerIdx || step.stepIndex >= linkedStep.stepIndex) continue;
       if (consumedStepIndices.has(step.stepIndex)) continue;
-      if (step.type !== 'USER_INPUT') continue;
+      if (!isTurnPromptStep(step)) continue;
       const mediaParts = await getStepMedia(step, step.createdAtMs ?? reqTsMs, 'input');
       const parts: JsonValue[] = [];
       if (step.content) parts.push({ type: 'text', content: step.content });
       for (const part of mediaParts) parts.push(part as unknown as JsonValue);
       if (parts.length > 0) {
-        delta.push({ role: 'user', parts });
+        const role = step.type === 'USER_INPUT' ? 'user' : 'system';
+        delta.push({ role, parts });
       }
     }
 
@@ -1042,6 +1160,8 @@ export class AntigravityInput extends BaseInput {
   private buildOutputMessages(
     step: AntigravityTranscriptStep | undefined,
     mediaParts: readonly UriPart[] = [],
+    finishReason = 'stop',
+    resolveToolCallId?: (plannerStepIndex: number, toolIndex: number, explicitId?: string) => string,
   ): JsonValue | undefined {
     if (!step && mediaParts.length === 0) return undefined;
     const parts: JsonValue[] = [];
@@ -1056,15 +1176,18 @@ export class AntigravityInput extends BaseInput {
     }
     for (let i = 0; i < (step?.toolCalls.length ?? 0); i++) {
       const tc = step!.toolCalls[i]!;
+      const callId = resolveToolCallId
+        ? resolveToolCallId(step!.stepIndex, i, tc.id)
+        : tc.id;
       parts.push({
         type: 'tool_call',
         name: tc.name,
-        ...(tc.id ? { id: tc.id } : {}),
+        ...(callId ? { id: callId } : {}),
         ...(tc.args !== undefined ? { arguments: tc.args } : {}),
       });
     }
     if (parts.length === 0) return undefined;
-    return [{ role: 'assistant', parts }];
+    return [{ role: 'assistant', parts, finish_reason: finishReason }];
   }
 
   private async attachWorkspaceContext(

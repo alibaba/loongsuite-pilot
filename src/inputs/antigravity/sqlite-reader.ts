@@ -75,6 +75,24 @@ export interface AntigravityUsageEvent {
   identities: string[];
 }
 
+export interface AntigravityStepInfo {
+  idx: number;
+  /** Native turn UUID from steps.metadata field 12. */
+  turnId?: string;
+  /** Step created timestamp (field 1): prompt submit / llm.request start. */
+  createdAtMs?: number;
+  /** First token / viewable timestamp (field 6). */
+  firstTokenAtMs?: number;
+  /** Step completed timestamp (field 8): llm.response end / tool.result end. */
+  completedAtMs?: number;
+  /** Tool execution started timestamp (field 32): tool.call start. */
+  executionStartedAtMs?: number;
+  /** Native tool call ID from steps.metadata field 4.1. */
+  toolCallId?: string;
+  /** Native tool name from steps.metadata field 4.2. */
+  toolName?: string;
+}
+
 export interface AntigravityConversationSnapshot {
   sessionId: string;
   dbPath: string;
@@ -83,6 +101,8 @@ export interface AntigravityConversationSnapshot {
   maxGenIdx: number;
   maxStepIdx: number;
   events: AntigravityUsageEvent[];
+  /** Native per-step timing, turn UUID, and tool call identity from `steps.metadata`. */
+  stepInfos: Map<number, AntigravityStepInfo>;
 }
 
 interface GeneratorMetadata {
@@ -103,6 +123,13 @@ interface StepMetadata {
   usage?: AntigravityModelUsage;
   retryUsages: AntigravityModelUsage[];
   timestampMs?: number;
+  turnId?: string;
+  createdAtMs?: number;
+  firstTokenAtMs?: number;
+  completedAtMs?: number;
+  executionStartedAtMs?: number;
+  toolCallId?: string;
+  toolName?: string;
 }
 
 function tryOptional<T>(fn: () => T): T | undefined {
@@ -308,10 +335,54 @@ export function parseStepMetadata(blob: Uint8Array): StepMetadata {
     }
   }
 
-  const tsBlob = fieldBytes(fields, 8) ?? fieldBytes(fields, 1);
-  const timestampMs = tsBlob ? tryOptional(() => parseTimestampMs(tsBlob)) : undefined;
+  const createdBlob = fieldBytes(fields, 1);
+  const createdAtMs = createdBlob ? tryOptional(() => parseTimestampMs(createdBlob)) : undefined;
+  const firstTokenBlob = fieldBytes(fields, 6);
+  const firstTokenAtMs = firstTokenBlob
+    ? tryOptional(() => parseTimestampMs(firstTokenBlob))
+    : undefined;
+  const completedBlob = fieldBytes(fields, 8);
+  const completedAtMs = completedBlob
+    ? tryOptional(() => parseTimestampMs(completedBlob))
+    : undefined;
+  const execStartBlob = fieldBytes(fields, 32);
+  const executionStartedAtMs = execStartBlob
+    ? tryOptional(() => parseTimestampMs(execStartBlob))
+    : undefined;
 
-  return { model, modelId, provider, usage, retryUsages, timestampMs };
+  const rawTurnId = fieldText(fields, 12);
+  const turnId = rawTurnId && !/[\x00-\x1f\x7f]/.test(rawTurnId) ? rawTurnId : undefined;
+
+  let toolCallId: string | undefined;
+  let toolName: string | undefined;
+  const toolInfoBlob = fieldBytes(fields, 4);
+  if (toolInfoBlob) {
+    const toolFields = tryOptional(() => decodeProtoFields(toolInfoBlob));
+    if (toolFields) {
+      const rawCallId = fieldText(toolFields, 1);
+      const rawToolName = fieldText(toolFields, 2);
+      if (rawCallId && !/[\x00-\x1f\x7f]/.test(rawCallId)) toolCallId = rawCallId;
+      if (rawToolName && !/[\x00-\x1f\x7f]/.test(rawToolName)) toolName = rawToolName;
+    }
+  }
+
+  const timestampMs = completedAtMs ?? createdAtMs;
+
+  return {
+    model,
+    modelId,
+    provider,
+    usage,
+    retryUsages,
+    timestampMs,
+    turnId,
+    createdAtMs,
+    firstTokenAtMs,
+    completedAtMs,
+    executionStartedAtMs,
+    toolCallId,
+    toolName,
+  };
 }
 
 /**
@@ -570,10 +641,21 @@ export async function readAntigravityConversationDb(
     }
 
     const stepTimestamps = new Map<number, number>();
+    const stepInfos = new Map<number, AntigravityStepInfo>();
     for (const { idx, metadata } of stepRows) {
       if (metadata.timestampMs !== undefined) {
         stepTimestamps.set(idx, metadata.timestampMs);
       }
+      stepInfos.set(idx, {
+        idx,
+        turnId: metadata.turnId,
+        createdAtMs: metadata.createdAtMs,
+        firstTokenAtMs: metadata.firstTokenAtMs,
+        completedAtMs: metadata.completedAtMs,
+        executionStartedAtMs: metadata.executionStartedAtMs,
+        toolCallId: metadata.toolCallId,
+        toolName: metadata.toolName,
+      });
     }
 
     const rawEvents: AntigravityUsageEvent[] = [];
@@ -778,6 +860,7 @@ export async function readAntigravityConversationDb(
       maxGenIdx,
       maxStepIdx,
       events: deduped,
+      stepInfos,
     };
   } finally {
     try {

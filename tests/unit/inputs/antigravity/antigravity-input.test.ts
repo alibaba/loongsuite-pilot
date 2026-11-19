@@ -448,14 +448,23 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
       expect(llmResp?.['gen_ai.usage.cache_creation.input_tokens']).toBe(500);
       expect(llmResp?.['gen_ai.usage.output_tokens']).toBe(300);
       expect(llmResp?.['gen_ai.usage.total_tokens']).toBe(3800);
+      expect(llmResp?.['gen_ai.usage.reasoning_output_tokens']).toBe(100);
       expect(llmResp?.['gen_ai.response.time_to_first_token']).toBe(500_000_000);
-      expect(llmResp?.['gen_ai.response.finish_reasons']).toEqual(['tool_calls']);
+      expect(llmResp?.['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
+      expect(llmReq?.['gen_ai.response.id']).toBe(llmResp?.['gen_ai.response.id']);
+      expect(llmReq?.trace_id).toMatch(/^[0-9a-f]{32}$/);
+      expect(llmReq?.span_id).toBe(llmResp?.span_id);
+      expect(llmReq?.parent_span_id).toBe(llmResp?.parent_span_id);
+      expect(userInput?.trace_id).toBe(llmReq?.trace_id);
+      expect(userInput?.parent_span_id).toBe('0000000000000001');
 
       const toolCall = collected.find((e) => e['event.name'] === 'tool.call');
       const toolResult = collected.find((e) => e['event.name'] === 'tool.result');
       expect(toolCall?.['gen_ai.tool.name']).toBe('run_command');
       expect(toolResult?.['gen_ai.tool.name']).toBe('run_command');
       expect(toolResult?.['gen_ai.tool.call.id']).toBe(toolCall?.['gen_ai.tool.call.id']);
+      expect(toolResult?.span_id).toBe(toolCall?.span_id);
+      expect(toolResult?.parent_span_id).toBe(llmReq?.parent_span_id);
       // tool.result must share the parent PLANNER_RESPONSE step.id for planTurnStream
       expect(toolResult?.['gen_ai.step.id']).toBe(toolCall?.['gen_ai.step.id']);
       expect(toolResult?.['gen_ai.step.id']).toBe(llmReq?.['gen_ai.step.id']);
@@ -1046,5 +1055,98 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     await input2.start();
     await input2.stop();
     expect(batch2.filter((e) => e['event.name'] === 'llm.response')).toHaveLength(1);
+  });
+
+  it('uses native SQLite turn UUID (f12), tool call ID (f4.1), exec/done timestamps (f32/f8), and step-0 SYSTEM_MESSAGE', async () => {
+    const root = path.join(tmpDir, 'native-meta-root');
+    const convDir = path.join(root, 'conversations');
+    const sid = 'subagent-sess';
+    const logsDir = path.join(root, 'brain', sid, '.system_generated', 'logs');
+    await fs.mkdir(convDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+
+    const nativeTurnUuid = '492c6b8f-0aff-4686-a5a2-d98e74089425';
+    const baseSec = 1_778_005_000;
+
+    // Encode steps.metadata with native f1 (created), f4 (tool call), f8 (completed), f12 (turnId), f32 (execStarted)
+    const step0Meta = concatBytes(
+      protoBytesField(1, protoTimestamp(baseSec, 100_000_000)),
+      protoStringField(12, nativeTurnUuid),
+    );
+    const step1Meta = concatBytes(
+      protoBytesField(1, protoTimestamp(baseSec, 200_000_000)),
+      protoBytesField(8, protoTimestamp(baseSec + 3, 500_000_000)),
+      protoStringField(12, nativeTurnUuid),
+    );
+    const step2Meta = concatBytes(
+      protoBytesField(1, protoTimestamp(baseSec + 3, 400_000_000)),
+      protoBytesField(4, concatBytes(protoStringField(1, 'call_5733556713250294416'), protoStringField(2, 'run_command'))),
+      protoBytesField(8, protoTimestamp(baseSec + 5, 537_000_000)),
+      protoStringField(12, nativeTurnUuid),
+      protoBytesField(32, protoTimestamp(baseSec + 3, 500_000_000)),
+    );
+
+    createConversationDb(path.join(convDir, `${sid}.db`), {
+      genRows: [
+        [
+          0,
+          encodeGeneratorMetadata({
+            model: 'Gemini 4 Neon (Medium)',
+            usage: { inputTokens: 300, totalOutputTokens: 120, reasoningTokens: 40, visibleOutputTokens: 80, responseId: 'sub-r1' },
+            timestampSec: baseSec + 3,
+            stepIndices: [1, 2],
+          }),
+        ],
+      ],
+      stepRows: [
+        [0, step0Meta],
+        [1, step1Meta],
+        [2, step2Meta],
+      ],
+    });
+
+    await fs.writeFile(
+      path.join(logsDir, 'transcript.jsonl'),
+      [
+        JSON.stringify({ step_index: 0, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', created_at: new Date(baseSec * 1000).toISOString(), content: 'Subagent task prompt' }),
+        JSON.stringify({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(baseSec * 1000).toISOString(), tool_calls: [{ name: 'run_command', args: { CommandLine: 'pwd' } }] }),
+        JSON.stringify({ step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', created_at: new Date((baseSec + 3) * 1000).toISOString(), content: '/workspace' }),
+      ].join('\n') + '\n',
+    );
+
+    const input = new AntigravityInput({
+      stateStore,
+      clientType: ClientType.Antigravity,
+      dataRoot: root,
+      collectHistorical: true,
+    });
+    const collected: AgentActivityEntry[] = [];
+    input.on('entries', (entries: AgentActivityEntry[]) => collected.push(...entries));
+    await input.start();
+    await input.stop();
+
+    expect(collected.map((e) => e['event.name'])).toEqual([
+      'other',
+      'llm.request',
+      'llm.response',
+      'tool.call',
+      'tool.result',
+    ]);
+    // All events share native turn UUID and deterministic trace_id
+    expect(collected.every((e) => e['gen_ai.turn.id'] === `${sid}:${nativeTurnUuid}`)).toBe(true);
+    const traceIds = new Set(collected.map((e) => e.trace_id));
+    expect(traceIds.size).toBe(1);
+
+    const llmReq = collected[1]!;
+    expect(llmReq['gen_ai.input.messages_delta']).toEqual([
+      { role: 'system', parts: [{ type: 'text', content: 'Subagent task prompt' }] },
+    ]);
+
+    const toolCall = collected[3]!;
+    const toolResult = collected[4]!;
+    expect(toolCall['gen_ai.tool.call.id']).toBe('call_5733556713250294416');
+    expect(toolResult['gen_ai.tool.call.id']).toBe('call_5733556713250294416');
+    // Real tool execution duration from steps.metadata f8 - f32 = 2037ms
+    expect(toolResult['gen_ai.tool.call.duration']).toBe(2037);
   });
 });
