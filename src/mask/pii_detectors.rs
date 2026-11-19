@@ -857,7 +857,8 @@ mod tests {
     use crate::mask::rule_loader::load_mask_plan;
     use crate::mask::string_masker::{apply_mask_ranges, mask_string};
     use crate::mask::types::{
-        MaskConfig, MaskMode, MaskRange, MaskType, PlanOrRules, StringMaskOptions, PII_MASK_TYPES,
+        MaskConfig, MaskMode, MaskRange, MaskReplacementMode, MaskType, PlanOrRules,
+        StringMaskOptions, PII_MASK_TYPES,
     };
     use chrono::Datelike;
     use std::str::FromStr;
@@ -873,7 +874,7 @@ mod tests {
         let plan = load_mask_plan(&MaskConfig {
             mode: MaskMode::Custom,
             types: types.to_vec(),
-            replacement_mode: None,
+            replacement_mode: Some(MaskReplacementMode::Placeholder),
         });
         mask_string(
             value,
