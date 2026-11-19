@@ -428,6 +428,67 @@ fn real_cache_estimated_byte_budget_evicts_oldest_and_rejects_oversized_metadata
         .with_shared(|s| s.meta_cache.contains_key("oversized")));
 }
 #[tokio::test]
+async fn changed_rollout_recovery_rereads_the_current_rows() {
+    let f = Fixture::new();
+    let original = completed();
+    let path = f.write("rollout-retained.jsonl", &original).await;
+    let version = scan::file_version_snapshot(&path).await.unwrap();
+    let start = (original.lines().next().unwrap().len() + 1) as i64;
+    let lines = read_json_lines(&path, start, version.size, None)
+        .await
+        .unwrap()
+        .items;
+    let mut checkpoint = empty_checkpoint(version.inode);
+    checkpoint.owner_session_meta_offset = Some(0);
+    checkpoint.active_turn = Some(create_active_turn(
+        "turn-1".into(),
+        start,
+        1_782_280_801_000.0,
+        false,
+    ));
+
+    let updated = original.replace("/tmp/project", "/tmp/updated");
+    assert_eq!(original.len(), updated.len());
+    assert_ne!(original, updated);
+    f.write("rollout-retained.jsonl", &updated).await;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(version.modified.unwrap() + std::time::Duration::from_secs(2)),
+        )
+        .unwrap();
+    let recovered = f
+        .engine()
+        .recover_turn_segment(
+            f.rt(),
+            &path,
+            &mut checkpoint,
+            RecoveryBoundary {
+                end_offset: version.size,
+                terminal: true,
+                inferred: None,
+                next_turn_started_at_ms: None,
+                scanned_turn: Some(ScannedTurn { version, lines }),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let tool_result = recovered
+        .entries
+        .iter()
+        .find(|row| row.event_name == Some(AgentEventName::ToolResult))
+        .unwrap();
+    let row = serde_json::to_value(tool_result).unwrap();
+    assert!(row["gen_ai.tool.call.result"]
+        .to_string()
+        .contains("/tmp/updated"));
+}
+
+#[tokio::test]
 async fn recovery_watermark_is_actual_file_size_so_same_inode_shrink_reloads_owner() {
     let f = Fixture::new();
     let turn = completed();
@@ -461,6 +522,7 @@ async fn recovery_watermark_is_actual_file_size_so_same_inode_shrink_reloads_own
                 terminal: true,
                 inferred: None,
                 next_turn_started_at_ms: None,
+                scanned_turn: None,
             },
             None,
         )
