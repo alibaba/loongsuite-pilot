@@ -172,14 +172,14 @@ pub async fn enrich_canonical_entry_with_git(
         return Ok(());
     }
     let mut infer = |dir: &str| Ok(infer_git_context_sync(dir));
-    enrich_entry_using(entry, record, namespace, &mut infer)
+    enrich_entry_using(entry, record, namespace, &mut infer).map(|_| ())
 }
 
 /// Last-mile enrichment for inputs that emit canonical agent records directly.
 ///
 /// A failed probe is logged and skipped. Later entries in the batch still run.
 #[allow(clippy::unused_async)]
-pub async fn enrich_canonical_entries_with_git(entries: &mut [AgentActivityEntry]) {
+pub async fn enrich_canonical_entries_with_git(entries: &mut [AgentActivityEntry]) -> bool {
     let has_source_scope = crate::utils::source_access::current().is_some();
     enrich_canonical_entries_with_git_using(entries, |dir| {
         Ok(if has_source_scope {
@@ -189,7 +189,67 @@ pub async fn enrich_canonical_entries_with_git(entries: &mut [AgentActivityEntry
         } else {
             infer_git_context_sync(dir)
         })
-    });
+    })
+}
+
+/// Read only the fields the native Codex JSONL handoff may enrich. Any
+/// incomplete or unexpected metadata uses the ordinary typed delivery path.
+pub(crate) fn codex_sdk_rows_keep_git_context(rows: &[&[u8]]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Probe<'a> {
+        // SDK-generated rows carry these fields even when their values are
+        // empty. Older or incomplete rows may still need typed defaults.
+        #[serde(borrow, rename = "time_unix_nano")]
+        _timestamp: &'a str,
+        #[serde(borrow, rename = "event.id")]
+        _event_id: &'a str,
+        #[serde(borrow, rename = "user.id")]
+        _user_id: &'a str,
+        #[serde(borrow, rename = "gen_ai.session.id")]
+        _session_id: &'a str,
+        #[serde(default, rename = "event.name")]
+        _event_name: Option<crate::types::AgentEventName>,
+        #[serde(borrow, rename = "gen_ai.agent.type")]
+        agent: &'a str,
+        #[serde(borrow, rename = "workspace.path")]
+        workspace: &'a str,
+        #[serde(borrow, rename = "git.repo")]
+        repo: Option<&'a str>,
+        #[serde(borrow, rename = "git.branch")]
+        branch: Option<&'a str>,
+        #[serde(borrow, rename = "git.domain")]
+        domain: Option<&'a str>,
+        #[serde(borrow, rename = "workspace.current_root")]
+        root: Option<&'a str>,
+        #[serde(default, rename = "event.kind", deserialize_with = "present")]
+        audit: bool,
+    }
+
+    fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+        <serde::de::IgnoredAny as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(true)
+    }
+
+    let mut inferred_by_workspace = HashMap::new();
+    rows.iter().all(|row| {
+        let Ok(probe) = serde_json::from_slice::<Probe<'_>>(row) else {
+            return false;
+        };
+        let workspace = probe.workspace.trim();
+        if probe.agent != "codex" || probe.audit || !is_absolute_path(workspace) {
+            return false;
+        }
+        if truthy_string(probe.repo) && truthy_string(probe.branch) {
+            return true;
+        }
+        let inferred = inferred_by_workspace
+            .entry(workspace)
+            .or_insert_with(|| infer_git_context_sync(workspace));
+        (truthy_string(probe.repo) || !truthy_string(inferred.repo.as_deref()))
+            && (truthy_string(probe.branch) || !truthy_string(inferred.branch.as_deref()))
+            && (truthy_string(probe.domain) || !truthy_string(inferred.domain.as_deref()))
+            && (truthy_string(probe.root) || !truthy_string(inferred.root.as_deref()))
+    })
 }
 
 /// Infer git repo, branch, domain, and root for a directory.
@@ -202,40 +262,39 @@ pub async fn infer_git_context(probe_dir: &str) -> GitContextResult {
     infer_git_context_sync(probe_dir)
 }
 
-fn enrich_canonical_entries_with_git_using<F>(entries: &mut [AgentActivityEntry], mut infer: F)
+fn enrich_canonical_entries_with_git_using<F>(
+    entries: &mut [AgentActivityEntry],
+    mut infer: F,
+) -> bool
 where
     F: FnMut(&str) -> Result<GitContextResult, String>,
 {
+    let mut changed = false;
     for entry in entries.iter_mut() {
         if entry.agent_type.is_empty() {
             continue;
         }
-        let agent_type = entry.agent_type.clone();
-        // Canonical lookup reads only the workspace and producer probe fields.
-        // Preserve extra's fallback for missing/empty typed values without
-        // materializing message bodies and every unrelated event field.
-        let mut record = Map::new();
-        if let Some(value) = entry.extra.get("workspace.path") {
-            record.insert("workspace.path".to_owned(), value.clone());
-        }
-        for namespace in expand_namespaces(std::slice::from_ref(&agent_type)) {
-            for key in [
-                format!("agent.{namespace}.cwd"),
-                format!("agent.{namespace}.workspace_roots"),
-            ] {
-                if let Some(value) = entry.extra.get(&key) {
-                    record.insert(key, value.clone());
-                }
+        let agent_type = entry.agent_type.as_str();
+        let default = [agent_type];
+        let namespaces = NAMESPACE_ALIASES
+            .iter()
+            .find(|(name, _)| *name == agent_type)
+            .map_or(default.as_slice(), |(_, aliases)| *aliases);
+        let probe_dir = extract_probe_dir(entry, &entry.extra, namespaces.iter().copied());
+        match enrich_at_probe(entry, probe_dir, &mut infer) {
+            Ok(updated) => changed |= updated,
+            Err(err) => {
+                // The workspace may already have been set before inference failed.
+                changed = true;
+                tracing::warn!(
+                    target: "GitContextEnrichment",
+                    error = %err,
+                    "git context enrichment failed for entry (skipped)"
+                );
             }
         }
-        if let Err(err) = enrich_entry_using(entry, &record, agent_type.as_str(), &mut infer) {
-            tracing::warn!(
-                target: "GitContextEnrichment",
-                error = %err,
-                "git context enrichment failed for entry (skipped)"
-            );
-        }
     }
+    changed
 }
 
 fn enrich_entry_using<F>(
@@ -243,49 +302,67 @@ fn enrich_entry_using<F>(
     record: &Map<String, Value>,
     namespace: impl IntoNamespaces,
     infer: &mut F,
-) -> Result<(), String>
+) -> Result<bool, String>
 where
     F: FnMut(&str) -> Result<GitContextResult, String>,
 {
     let namespaces = expand_namespaces(&namespace.into_namespaces());
-    let probe_dir = extract_probe_dir(entry, record, &namespaces);
+    let probe_dir = extract_probe_dir(entry, record, namespaces.iter().map(String::as_str));
+    enrich_at_probe(entry, probe_dir, infer)
+}
+
+fn enrich_at_probe<F>(
+    entry: &mut AgentActivityEntry,
+    probe_dir: Option<String>,
+    infer: &mut F,
+) -> Result<bool, String>
+where
+    F: FnMut(&str) -> Result<GitContextResult, String>,
+{
+    let mut changed = false;
     if let Some(dir) = &probe_dir {
         if !truthy_string(entry.workspace_path.as_deref()) {
             entry.workspace_path = Some(dir.clone());
+            changed = true;
         }
     }
     if truthy_string(entry.git_repo.as_deref()) && truthy_string(entry.git_branch.as_deref()) {
-        return Ok(());
+        return Ok(changed);
     }
     let Some(dir) = probe_dir else {
-        return Ok(());
+        return Ok(changed);
     };
     let inferred = infer(&dir)?;
-    apply_inferred(entry, inferred);
-    Ok(())
+    Ok(apply_inferred(entry, inferred) || changed)
 }
 
-fn apply_inferred(entry: &mut AgentActivityEntry, inferred: GitContextResult) {
+fn apply_inferred(entry: &mut AgentActivityEntry, inferred: GitContextResult) -> bool {
+    let mut changed = false;
     if !truthy_string(entry.git_repo.as_deref()) {
         if let Some(repo) = inferred.repo.filter(|value| !value.is_empty()) {
             entry.git_repo = Some(repo);
+            changed = true;
         }
     }
     if !truthy_string(entry.git_branch.as_deref()) {
         if let Some(branch) = inferred.branch.filter(|value| !value.is_empty()) {
             entry.git_branch = Some(branch);
+            changed = true;
         }
     }
     if !truthy_string(entry.git_domain.as_deref()) {
         if let Some(domain) = inferred.domain.filter(|value| !value.is_empty()) {
             entry.git_domain = Some(domain);
+            changed = true;
         }
     }
     if !truthy_string(entry.workspace_current_root.as_deref()) {
         if let Some(root) = inferred.root.filter(|value| !value.is_empty()) {
             entry.workspace_current_root = Some(root);
+            changed = true;
         }
     }
+    changed
 }
 
 fn infer_git_context_sync(probe_dir: &str) -> GitContextResult {
@@ -398,26 +475,30 @@ fn normalize_git_repo(raw: Option<&str>) -> Option<String> {
     }
 }
 
-fn extract_probe_dir(
+fn extract_probe_dir<'a>(
     entry: &AgentActivityEntry,
     record: &Map<String, Value>,
-    namespaces: &[String],
+    namespaces: impl IntoIterator<Item = &'a str>,
 ) -> Option<String> {
     if let Some(workspace_path) = lookup_string(entry, record, "workspace.path") {
-        if is_absolute_path(&workspace_path) {
-            return Some(workspace_path);
+        if is_absolute_path(workspace_path) {
+            return Some(workspace_path.to_owned());
         }
     }
     for candidate in namespaces {
         let cwd_key = format!("agent.{candidate}.cwd");
         if let Some(cwd) = lookup_string(entry, record, &cwd_key) {
-            if is_absolute_path(&cwd) {
-                return Some(cwd);
+            if is_absolute_path(cwd) {
+                return Some(cwd.to_owned());
             }
         }
         let roots_key = format!("agent.{candidate}.workspace_roots");
-        let roots_value = lookup_value(entry, record, &roots_key);
-        let roots = normalize_string_array(roots_value.as_ref());
+        let roots_value = entry
+            .extra
+            .get(&roots_key)
+            .filter(|value| !value.is_null())
+            .or_else(|| record.get(&roots_key));
+        let roots = normalize_string_array(roots_value);
         if let Some(root) = roots.first() {
             if is_absolute_path(root) {
                 return Some(root.clone());
@@ -446,51 +527,26 @@ fn aliases_for(value: &str) -> Vec<String> {
     vec![value.to_string()]
 }
 
-fn lookup_value(
-    entry: &AgentActivityEntry,
-    record: &Map<String, Value>,
+fn lookup_string<'a>(
+    entry: &'a AgentActivityEntry,
+    record: &'a Map<String, Value>,
     key: &str,
-) -> Option<Value> {
-    match entry_get(entry, key) {
-        Some(Value::Null) | None => record.get(key).cloned(),
-        Some(value) => Some(value),
-    }
-}
-
-fn lookup_string(
-    entry: &AgentActivityEntry,
-    record: &Map<String, Value>,
-    key: &str,
-) -> Option<String> {
-    nonempty_trimmed_string(entry_get(entry, key))
-        .or_else(|| nonempty_trimmed_string(record.get(key).cloned()))
-}
-
-fn entry_get(entry: &AgentActivityEntry, key: &str) -> Option<Value> {
-    match key {
-        "workspace.path" => entry.workspace_path.clone().map(Value::String),
-        "git.repo" => entry.git_repo.clone().map(Value::String),
-        "git.branch" => entry.git_branch.clone().map(Value::String),
-        "git.domain" => entry.git_domain.clone().map(Value::String),
-        "workspace.current_root" => entry.workspace_current_root.clone().map(Value::String),
-        "gen_ai.agent.type" => {
-            if entry.agent_type.is_empty() {
-                None
-            } else {
-                Some(Value::String(entry.agent_type.clone()))
-            }
-        }
-        _ => entry.extra.get(key).cloned(),
-    }
-}
-
-fn nonempty_trimmed_string(value: Option<Value>) -> Option<String> {
-    let text = value?.as_str()?.trim().to_string();
-    if text.is_empty() {
-        None
+) -> Option<&'a str> {
+    let canonical = if key == "workspace.path" {
+        entry.workspace_path.as_deref()
     } else {
-        Some(text)
-    }
+        entry.extra.get(key).and_then(Value::as_str)
+    };
+    canonical
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            record
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+        })
 }
 
 /// JSON arrays keep the original element text when it is non-blank. A raw
@@ -575,6 +631,34 @@ mod tests {
             Value::Object(map) => map,
             _ => Map::new(),
         }
+    }
+
+    #[test]
+    fn codex_jsonl_probe_requires_a_complete_workspace_and_excludes_audit_rows() {
+        let mut body = json!({
+            "event.id": "fixture",
+            "event.name": "llm.request",
+            "time_unix_nano": "1000000000",
+            "user.id": "fixture-user",
+            "gen_ai.session.id": "fixture-session",
+            "gen_ai.agent.type": "codex",
+            "workspace.path": "/work",
+            "git.repo": "owner/repo",
+            "git.branch": "main",
+            "gen_ai.input.messages": [{"role": "user", "content": "kept in the original JSON"}],
+        });
+        let row = serde_json::to_vec(&body).unwrap();
+        assert!(codex_sdk_rows_keep_git_context(&[&row]));
+
+        // A present audit key still selects typed delivery even when null.
+        body["event.kind"] = Value::Null;
+        let audit = serde_json::to_vec(&body).unwrap();
+        assert!(!codex_sdk_rows_keep_git_context(&[&row, &audit]));
+        body.as_object_mut().unwrap().shift_remove("event.kind");
+        body.as_object_mut().unwrap().shift_remove("workspace.path");
+        let incomplete = serde_json::to_vec(&body).unwrap();
+        assert!(!codex_sdk_rows_keep_git_context(&[&incomplete]));
+        assert!(!codex_sdk_rows_keep_git_context(&[b"not-json"]));
     }
 
     #[test]

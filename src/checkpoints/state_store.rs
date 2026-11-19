@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use serde::{ser::SerializeMap, Serializer};
 use tokio::sync::{oneshot, Notify};
 
-use super::json_file::{self, JVal};
+use super::json_file::{self, JVal, JsonObject};
 use super::OrderedMap;
 
 const LAST_OFFSET: &str = "lastOffset";
@@ -160,10 +161,6 @@ impl InputState {
         self.fields.push((key.to_owned(), value));
     }
 
-    fn to_jval(&self) -> JVal {
-        JVal::Object(self.fields.clone())
-    }
-
     /// `cloneState`: array `extra` becomes an object with decimal index keys.
     fn normalize(&mut self) {
         let Some(index) = self.fields.iter().position(|(key, _)| key == EXTRA) else {
@@ -243,10 +240,12 @@ fn apply_extra(state: &mut InputState, partial_extra: JVal) {
     let partial_is_object_like = is_object_like(&partial_extra);
     let current_is_object_like = state.field(EXTRA).is_some_and(is_object_like);
     if partial_is_object_like && current_is_object_like {
-        let base = object_like_fields(state.field(EXTRA).cloned().unwrap_or(JVal::Null));
-        let overlay = object_like_fields(partial_extra);
-        state.insert(EXTRA, JVal::Object(merge_fields(base, overlay)));
-        return;
+        if let Some((_, current)) = state.fields.iter_mut().find(|(key, _)| key == EXTRA) {
+            let base = object_like_fields(std::mem::replace(current, JVal::Null));
+            let overlay = object_like_fields(partial_extra);
+            *current = JVal::Object(merge_fields(base, overlay));
+            return;
+        }
     }
     state.insert(EXTRA, partial_extra);
 }
@@ -436,7 +435,7 @@ impl StateStore {
 impl StateStore {
     /// Cheap mutation token for adapter caches; source progress remains owned by StateStore.
     pub(crate) fn snapshot_text(&self) -> String {
-        render_states(&self.mu.lock().unwrap().states)
+        render_states(self.mu.lock().unwrap().states.iter())
     }
 
     pub fn revision(&self) -> u64 {
@@ -734,6 +733,11 @@ impl StateStore {
             .unwrap_or_default()
     }
 
+    pub(crate) fn get_extra_field(&self, input_id: &str, key: &str) -> Option<serde_json::Value> {
+        let data = self.mu.lock().unwrap();
+        extra_field(data.states.get(input_id)?, key).map(json_file::to_value)
+    }
+
     pub fn set(&self, input_id: &str, mut state: InputState) {
         state.normalize();
         let mut data = self.mu.lock().unwrap();
@@ -835,14 +839,12 @@ impl StateStore {
                             journal_sources.insert(id.to_owned(), state.clone());
                         }
                     }
-                    let fields = data
-                        .states
-                        .iter()
-                        .filter(|(id, _)| journal_namespace(id).is_none())
-                        .chain(journal_sources.iter())
-                        .map(|(id, state)| (id.to_owned(), state.to_jval()))
-                        .collect();
-                    let text = format!("{}\n", json_file::to_pretty(&JVal::Object(fields)));
+                    let text = render_states(
+                        data.states
+                            .iter()
+                            .filter(|(id, _)| journal_namespace(id).is_none())
+                            .chain(journal_sources.iter()),
+                    );
                     Step::Write(data.revision, text, journal_sources)
                 }
             };
@@ -940,12 +942,17 @@ fn notify(waiters: Vec<Waiter>, result: Result<(), String>) {
     }
 }
 
-fn render_states(states: &OrderedMap<InputState>) -> String {
-    let fields: Vec<(String, JVal)> = states
-        .iter()
-        .map(|(key, state)| (key.to_owned(), state.to_jval()))
-        .collect();
-    format!("{}\n", json_file::to_pretty(&JVal::Object(fields)))
+fn render_states<'a>(states: impl Iterator<Item = (&'a str, &'a InputState)>) -> String {
+    let mut output = Vec::new();
+    let mut serializer = serde_json::Serializer::pretty(&mut output);
+    let mut map = serializer.serialize_map(None).expect("checkpoint object");
+    for (id, state) in states {
+        map.serialize_entry(id, &JsonObject(&state.fields))
+            .expect("checkpoint state");
+    }
+    map.end().expect("checkpoint object");
+    output.push(b'\n');
+    String::from_utf8(output).expect("checkpoint UTF-8")
 }
 
 struct LeaderGuard<'a> {

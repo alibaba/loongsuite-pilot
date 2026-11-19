@@ -376,8 +376,13 @@ pub(super) fn scan_lines_with_file(
                 .map(|i| i + cursor);
             let stop = newline.unwrap_or(n);
             let fragment = &chunk[cursor..stop];
+            let complete_in_chunk = pending_bytes == 0 && newline.is_some();
             pending_bytes += fragment.len() as u64;
-            if !options.count_only && pending_bytes <= options.max_record_bytes as u64 && !replay {
+            if !options.count_only
+                && pending_bytes <= options.max_record_bytes as u64
+                && !replay
+                && !complete_in_chunk
+            {
                 bytes.extend_from_slice(fragment);
             }
             if pending_bytes > options.max_record_bytes as u64 {
@@ -394,7 +399,8 @@ pub(super) fn scan_lines_with_file(
                 let full = full_line(&mut f, line_start, z - 1, budget, cancel)?;
                 parse(&full, false, budget)
             } else {
-                parse(&bytes, false, budget)
+                let record = if complete_in_chunk { fragment } else { &bytes };
+                parse(record, false, budget)
             };
             complete_offset = z;
             if !emit(

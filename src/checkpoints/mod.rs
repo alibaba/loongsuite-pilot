@@ -92,7 +92,7 @@ mod json_file {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize, Serializer};
 
     #[derive(Clone, Debug)]
     pub(super) enum JVal {
@@ -162,6 +162,27 @@ mod json_file {
             && value.fract() == 0.0
             && (i64::MIN as f64..u64::MAX as f64).contains(&value)
             && value as i128 == integer
+    }
+
+    pub(super) struct JsonObject<'a>(pub &'a [(String, JVal)]);
+
+    impl Serialize for JsonObject<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.collect_map(self.0.iter().map(|(key, value)| (key, value)))
+        }
+    }
+
+    impl Serialize for JVal {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            match self {
+                Self::Null => serializer.serialize_unit(),
+                Self::Bool(value) => serializer.serialize_bool(*value),
+                Self::Number(value) => value.serialize(serializer),
+                Self::String(value) => serializer.serialize_str(value),
+                Self::Array(items) => items.serialize(serializer),
+                Self::Object(fields) => JsonObject(fields).serialize(serializer),
+            }
+        }
     }
 
     impl<'de> Deserialize<'de> for JVal {
@@ -301,57 +322,7 @@ mod json_file {
     }
 
     pub(super) fn to_pretty(value: &JVal) -> String {
-        let mut out = String::new();
-        write_pretty(&mut out, value, 0);
-        out
-    }
-
-    fn write_pretty(out: &mut String, value: &JVal, indent: usize) {
-        match value {
-            JVal::Null => out.push_str("null"),
-            JVal::Bool(true) => out.push_str("true"),
-            JVal::Bool(false) => out.push_str("false"),
-            JVal::Number(number) => out.push_str(&number.to_string()),
-            JVal::String(value) => {
-                out.push_str(&serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned()))
-            }
-            JVal::Array(items) if items.is_empty() => out.push_str("[]"),
-            JVal::Array(items) => {
-                out.push_str("[\n");
-                for (index, item) in items.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(",\n");
-                    }
-                    push_indent(out, indent + 1);
-                    write_pretty(out, item, indent + 1);
-                }
-                out.push('\n');
-                push_indent(out, indent);
-                out.push(']');
-            }
-            JVal::Object(fields) if fields.is_empty() => out.push_str("{}"),
-            JVal::Object(fields) => {
-                out.push_str("{\n");
-                for (index, (key, value)) in fields.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(",\n");
-                    }
-                    push_indent(out, indent + 1);
-                    out.push_str(&serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_owned()));
-                    out.push_str(": ");
-                    write_pretty(out, value, indent + 1);
-                }
-                out.push('\n');
-                push_indent(out, indent);
-                out.push('}');
-            }
-        }
-    }
-
-    fn push_indent(out: &mut String, levels: usize) {
-        for _ in 0..levels {
-            out.push_str("  ");
-        }
+        serde_json::to_string_pretty(value).expect("checkpoint JSON")
     }
 
     pub(super) fn system_now_ms() -> i64 {
