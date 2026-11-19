@@ -328,4 +328,4 @@ Filtering applies before JSONL/SLS/HTTP/OTLP output, Codex/Qoder attachment uplo
 
 ### SLS host identity tags
 
-The installer writes a readable hardware serial to `hostSn`. SLS log groups include `__mac__` from the interface used for the local IPv4 and `__sn__` when configured. Set `hostIdentityTags` to `false` or `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS=false` to omit both tags from the collector and Qoder API pipeline.
+The installer writes a readable hardware serial to `hostSn`. SLS log groups include `__mac__` from the interface used for the local IPv4 and `__sn__` when configured. Set `hostIdentityTags` to `false` or `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS=false` to omit both tags from the collector and Qoder API pipeline. Self-monitoring status uses the same setting for its optional `mac` and `sn` fields.

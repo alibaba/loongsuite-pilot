@@ -91,10 +91,18 @@ impl SlsHostIdentity {
         }
     }
 
+    pub(crate) fn mac(&self) -> Option<&str> {
+        (!self.mac.is_empty()).then_some(self.mac)
+    }
+
+    pub(crate) fn serial(&self) -> Option<&str> {
+        (!self.serial.is_empty()).then_some(self.serial.as_str())
+    }
+
     pub(crate) fn tags(&self) -> impl Iterator<Item = (&'static str, &str)> {
-        [("__mac__", self.mac), ("__sn__", self.serial.as_str())]
+        [("__mac__", self.mac()), ("__sn__", self.serial())]
             .into_iter()
-            .filter(|(_, value)| !value.is_empty())
+            .filter_map(|(key, value)| value.map(|value| (key, value)))
     }
 }
 
