@@ -17,7 +17,7 @@ export interface ApiSource {
   single?: boolean;
 }
 
-export async function collectApi(input: MulticaInputConfig, source: ApiSource): Promise<CollectionResult> {
+export async function collectApi(input: MulticaInputConfig, source: ApiSource, profileToken?: string): Promise<CollectionResult> {
   const records: MulticaRecord[] = [];
   const entityIds: string[] = [];
   const pageSize = 100;
@@ -30,7 +30,7 @@ export async function collectApi(input: MulticaInputConfig, source: ApiSource): 
       if (source.pagination === 'offset') url.searchParams.set('offset', String(page * pageSize));
       if (cursor) url.searchParams.set('before', cursor);
     }
-    const response = await fetchBounded(url.toString(), input, source.workspace);
+    const response = await fetchBounded(url.toString(), input, source.workspace, profileToken);
     let body: unknown;
     try { body = JSON.parse(response.text); } catch { throw new SourceError('invalid_json'); }
     const rows = source.single ? [body] : source.key ? object(body)[source.key] : body;

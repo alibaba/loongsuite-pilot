@@ -408,7 +408,7 @@ export class Orchestrator extends EventEmitter {
     }
 
     // 12. Start pipeline subsystem (disabled by default)
-    if (this.config.pipeline.enabled || this.config.pipeline.multica?.discoverLocalDaemon) {
+    if (this.config.pipeline.enabled || this.config.pipeline.multica?.discoverLocalSources) {
       this.pipelineManager = new PipelineManager({
         configDir: path.join(this.dataDir, 'configs', 'local'),
         stateDir: path.join(this.dataDir, 'state', 'pipeline'),

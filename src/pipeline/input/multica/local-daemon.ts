@@ -4,10 +4,14 @@ import path from 'node:path';
 import type { PipelineConfig } from '../../types.js';
 import { digest } from './records.js';
 
+// Set only by local discovery. A pipeline JSON file cannot request profile credentials.
+export const daemonProfile = Symbol('daemonProfile');
+export type LocalDaemonConfig = PipelineConfig & { [daemonProfile]: string };
+
 const DEFAULT_HEALTH_PORT = 19514;
 const MAX_PROFILE_ENTRIES = 64;
 
-async function findDaemon(home: string, profile: string): Promise<PipelineConfig | undefined> {
+async function findDaemon(home: string, profile: string): Promise<LocalDaemonConfig | undefined> {
   const dir = profile ? path.join(home, 'profiles', profile) : home;
   const pidFile = path.join(dir, 'daemon.pid');
   const logFile = path.join(dir, 'daemon.log');
@@ -23,6 +27,7 @@ async function findDaemon(home: string, profile: string): Promise<PipelineConfig
     const port = profile ? DEFAULT_HEALTH_PORT + 1 + Buffer.from(profile).reduce((sum, byte) => sum + byte, 0) % 1000
       : DEFAULT_HEALTH_PORT;
     return {
+      [daemonProfile]: path.join(dir, 'config.json'),
       configName: 'multica-local-daemon-' + (profile ? digest(profile).slice(0, 16) : 'default'),
       inputs: [{Type: 'input_multica', CollectionMode: 'on', LogFiles: [logFile],
         DaemonHealthUrls: [`http://127.0.0.1:${port}/health`], LocalDaemonPid: pid}],
@@ -34,7 +39,7 @@ async function findDaemon(home: string, profile: string): Promise<PipelineConfig
   }
 }
 
-export async function discoverLocalMulticaDaemons(): Promise<PipelineConfig[]> {
+export async function discoverLocalMulticaDaemons(): Promise<LocalDaemonConfig[]> {
   const home = path.join(homedir(), '.multica');
   const profiles = [''];
   try {

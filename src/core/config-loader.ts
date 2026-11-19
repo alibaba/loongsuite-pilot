@@ -935,7 +935,7 @@ function buildPipelineConfig(file: ConfigFile | null, configuredServiceNamePrefi
     multica: {
       enabled: multicaEnabled,
       mode,
-      discoverLocalDaemon: multicaEnabled && mode === 'on' && enabled(true) || undefined,
+      discoverLocalSources: multicaEnabled && mode === 'on' && enabled(true) || undefined,
       // Pilot's built-in prefix must not rename environments on existing installations.
       serviceNamePrefix: configuredServiceNamePrefix,
     },

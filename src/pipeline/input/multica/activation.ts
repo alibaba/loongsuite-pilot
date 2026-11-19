@@ -141,6 +141,7 @@ export class MulticaActivationGate {
     // Round-robin the configured source types so many unreachable metrics URLs
     // cannot consume the budget before the first daemon/API candidate is tried.
     const groups: Probe[][] = [
+      this.input.BackendIdentityUrl ? [{kind: 'api', url: this.input.BackendIdentityUrl}] : [],
       this.input.ApiBase ? [{kind: 'api', url: `${this.input.ApiBase.replace(/\/$/, '')}/api/config`}] : [],
       (this.input.DaemonHealthUrls ?? []).map(url => ({kind: 'daemon', url})),
       (this.input.MetricsUrls ?? []).map(url => ({kind: 'metrics', url})),

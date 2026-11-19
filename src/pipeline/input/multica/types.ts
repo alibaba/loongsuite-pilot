@@ -7,11 +7,13 @@ export interface MulticaInputConfig {
   TokenEnv?: string;
   TokenFile?: string;
   WorkspaceIds?: string[];
+  /** Public identity endpoint for local backend discovery. */
+  BackendIdentityUrl?: string;
   MetricsUrls?: string[];
   DaemonHealthUrls?: string[];
   /** Match loopback health to the PID recorded by the discovered local daemon. */
   LocalDaemonPid?: number;
-  /** Explicit opt-in to native pprof. Never receives the Multica API token. */
+  /** Native pprof endpoint. Never receives the Multica API token. */
   PprofBaseUrl?: string;
   PprofTypes?: ('cpu' | 'allocs')[];
   PprofIntervalSeconds?: number;
@@ -76,7 +78,7 @@ export function validateMulticaConfig(input: MulticaInputConfig): void {
   if (input.PprofTypes !== undefined && (!Array.isArray(input.PprofTypes) || !input.PprofTypes.length
     || input.PprofTypes.length > 2 || new Set(input.PprofTypes).size !== input.PprofTypes.length
     || input.PprofTypes.some(type => !['cpu', 'allocs'].includes(type)))) throw new Error('Invalid PprofTypes');
-  for (const value of [input.ApiBase, input.PprofBaseUrl, ...(input.MetricsUrls ?? []), ...(input.DaemonHealthUrls ?? [])]) {
+  for (const value of [input.ApiBase, input.BackendIdentityUrl, input.PprofBaseUrl, ...(input.MetricsUrls ?? []), ...(input.DaemonHealthUrls ?? [])]) {
     if (!value) continue;
     const url = new URL(value);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {

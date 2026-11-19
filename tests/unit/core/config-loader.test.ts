@@ -56,9 +56,9 @@ describe('ConfigLoader', () => {
     vi.stubEnv('LOONGSUITE_PILOT_PIPELINE_ENABLED', '');
     vi.stubEnv('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', '');
     mockReadJsonFile.mockResolvedValueOnce({});
-    expect((await loadConfig()).pipeline).toMatchObject({enabled: false, multica: {discoverLocalDaemon: true}});
+    expect((await loadConfig()).pipeline).toMatchObject({enabled: false, multica: {discoverLocalSources: true}});
     mockReadJsonFile.mockResolvedValueOnce({pipeline: {enabled: false}});
-    expect((await loadConfig()).pipeline.multica?.discoverLocalDaemon).toBeUndefined();
+    expect((await loadConfig()).pipeline.multica?.discoverLocalSources).toBeUndefined();
   });
 
   it('disables Multica when its collection mode is invalid', async () => {

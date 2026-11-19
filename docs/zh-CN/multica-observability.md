@@ -6,7 +6,11 @@
 
 标准 Pilot：先按通常的 `installer.sh install --sls-endpoint ... --sls-project ... --sls-logstore agent-event --sls-api-key ...` 方式接入。Multica 复用安装器写入主配置的 SLS Endpoint、Project 和认证信息，默认写入同一 project 的 `multica-logs`；普通 Agent 仍写入 `agent-event`。
 
-将以下输入配置放入 `<dataDir>/configs/local/multica.json`，在主配置中设置 `pipeline.enabled=true`。backend 的业务 API、指标和剖析入口仍通过此配置指定。安装参数 `--all-agents` 不会自动开启 Multica。示例中的 `CollectionMode=on` 是显式启用，省略时仍默认为 off。
+daemon 主机或容器上的标准 Pilot 开启 Multica 采集后，会读取已识别的本地 daemon profile，并使用其中的 `server_url` 和登录身份访问 `GET /api/workspaces`。每轮重新读取 profile 和账号可见的工作区，然后按工作区采集业务快照。无需单独填写 Token、工作区或 Kubernetes 服务地址。Pilot 需要能读取该 profile、访问 daemon 的本机健康端点，并能解析、连接和信任 profile 中的服务地址。凭证仅用于该服务的业务 API，不会写入采集记录。多个 daemon 使用同一账号时，可能重复采集同一工作区的快照。显式配置 `input_multica` 时仍沿用手工选择的数据源。
+
+backend 开启 Multica 采集后，Pilot 在本机通过公开 API 或指标识别 Multica，默认读取已开放的 Prometheus 与 pprof 端点。指标端口取自同进程环境中的 `METRICS_ADDR`，缺省尝试 9090；pprof 使用本机 6060。自动发现使用 Multica 采集开关，无需设置 `pipeline.enabled`。
+
+如需指定远端端点或自选数据源，将以下输入配置放入 `<dataDir>/configs/local/multica.json`，在主配置中设置 `pipeline.enabled=true`。安装参数 `--all-agents` 不会自动开启 Multica。示例中的 `CollectionMode=on` 是显式启用，省略时仍默认为 off。
 
 ```json
 {
@@ -90,7 +94,7 @@ export LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE=off  # 关闭
 
 Multica v0.6.0 等版本的本地 `daemon.log` 只有时分秒。Pilot 会保留 `phase_elapsed_ms`、`total_elapsed_ms` 和文件读取位置，并在缺少完整日志时间时留空 `source_time`。
 
-Kubernetes 中可通过 Downward API 给采集器容器注入 Pod 元数据。采集器优先使用有效的 `POD_NAME`，缺省时取系统 hostname。配置了自定义 hostname 时，给采集器注入 `metadata.name`，同一个 Pod 的指标、日志和火焰图就能按相同的名字筛选。
+Kubernetes 中未提供 Pod IP 时，Pilot 会从容器的 `/etc/hosts` 匹配本机 hostname。也可通过 Downward API 给采集器容器注入 Pod 元数据。采集器优先使用有效的 `POD_NAME`，缺省时取系统 hostname。配置了自定义 hostname 时，给采集器注入 `metadata.name`，同一个 Pod 的指标、日志和火焰图就能按相同的名字筛选。
 
 ```yaml
 env:
@@ -118,7 +122,7 @@ Prometheus counter 要处理相邻采样差分与进程重启；histogram bucket
 
 ## 可选 pprof 火焰图
 
-默认不采 pprof。要采集已有 Go pprof 端点，在 `input_multica` 中显式增加：
+自动发现的 backend 会采集 CPU 和 allocs。如需覆盖地址、采样间隔或类型，可以显式配置 `input_multica`：
 
 ```json
 {

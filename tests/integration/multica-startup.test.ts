@@ -29,7 +29,14 @@ it.skipIf(process.platform === 'win32').each(['explicit', 'local daemon'] as con
   })));
   const server = createServer((req, res) => {
     if (req.method === 'GET') {
-      res.end('multica_http_requests_total 1\n');
+      if (req.url?.startsWith('/api/')) {
+        if (req.headers.authorization !== 'Bearer test-profile-pat') { res.writeHead(401).end(); return; }
+        if (req.url === '/api/workspaces') {
+          res.end(JSON.stringify([{id: 'one'}, {id: 'two'}]));
+        } else if (req.url.startsWith('/api/issues?')) {
+          res.end(JSON.stringify({issues: [{id: 'issue-' + req.headers['x-workspace-id']}]}));
+        } else res.end('[]');
+      } else res.end('multica_http_requests_total 1\n');
     } else {
       const chunks: Buffer[] = [];
       req.on('data', chunk => chunks.push(chunk));
@@ -60,6 +67,7 @@ it.skipIf(process.platform === 'win32').each(['explicit', 'local daemon'] as con
       : 'INFO comment created issue_id=shutdown-test\n';
     if (auto) {
       await mkdir(daemonDir, {recursive: true});
+      await writeFile(path.join(daemonDir, 'config.json'), JSON.stringify({server_url: endpoint, token: 'test-profile-pat'}));
       await writeFile(path.join(daemonDir, 'daemon.pid'), String(process.pid));
       await new Promise<void>((resolve, reject) => {
         daemonHealth.once('error', reject);
@@ -146,6 +154,11 @@ it.skipIf(process.platform === 'win32').each(['explicit', 'local daemon'] as con
       }, {timeout: 8000});
       const event = posts.flatMap(post => post.__logs__).find(row => row.task_id === 'local-daemon-task');
       expect(event).not.toHaveProperty('source_time');
+      await vi.waitFor(() => {
+        const issues = posts.flatMap(post => post.__logs__).filter(row => row.record_type === 'issue_snapshot');
+        expect(issues.map(row => row.workspace_id).sort()).toEqual(['one', 'two']);
+      }, {timeout: 8000});
+      expect(JSON.stringify(posts)).not.toContain('test-profile-pat');
       expect(await readdir(configDir)).toEqual([]);
       child.kill('SIGTERM');
       expect(await exited).toEqual({code: 0, signal: null});

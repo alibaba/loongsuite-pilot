@@ -159,6 +159,32 @@ async function collectInstalledConfig(collectorStateDir = stateDir) {
 }
 
 describe('Multica inherits installer SLS configuration', () => {
+  it('collects local backend metrics and requests both profiles with only the Multica switch enabled', async () => {
+    await installConfig();
+    await rm(path.join(configDir, 'multica.json'));
+    const file = path.join(directory, 'config.json');
+    const config = JSON.parse(await readFile(file, 'utf8'));
+    config.pipeline = {multica: {mode: 'on'}};
+    await writeFile(file, JSON.stringify(config));
+    vi.stubEnv('METRICS_ADDR', new URL(endpoint).host);
+    vi.stubEnv('PORT', new URL(endpoint).port);
+    const profiles: string[] = [];
+    const fetchOriginal = globalThis.fetch;
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, options) => {
+      const url = new URL(String(input));
+      if (url.origin !== 'http://127.0.0.1:6060') return fetchOriginal(input, options);
+      profiles.push(url.pathname);
+      return Promise.resolve(new Response('', {status: 404}));
+    });
+    try {
+      await collectInstalledConfig();
+      expect(records(writes).some(row => row.record_type === 'prometheus_sample')).toBe(true);
+      expect(profiles).toEqual(['/debug/pprof/profile', '/debug/pprof/allocs']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('distinguishes two local scrape targets in delivered records while keeping task snapshots workspace scoped', async () => {
     await installConfig('test-key', 'on');
     const inputFile = path.join(configDir, 'multica.json');
