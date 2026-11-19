@@ -13,6 +13,7 @@ import { clearInterceptorRuntime } from '../interceptor/daemon/runtime.js';
 import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
 import { startInterceptorWorker, type InterceptorWorkerService } from '../interceptor/worker-service.js';
 import { InterceptorAlarmReporter } from '../interceptor/diagnostics.js';
+import { unavailableInterceptorStatus, type InterceptorStatus } from '../interceptor/status.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { resolveDeploymentScope, type DeploymentScopeMode } from '../deployment/deployment-scope.js';
@@ -195,6 +196,7 @@ export class Orchestrator extends EventEmitter {
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
   private dashboardServer: DashboardServer | null = null;
   private interceptorService: InterceptorWorkerService | null = null;
+  private lastInterceptorStatus: InterceptorStatus | null = null;
   private verdictStore: ToolVerdictStore | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
@@ -259,6 +261,7 @@ export class Orchestrator extends EventEmitter {
     const version = readInstalledVersion(this.dataDir);
     this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userId: this.config.userId });
     this.interceptorAlarmReporter = new InterceptorAlarmReporter(this.alarmManager);
+    this.lastInterceptorStatus = null;
 
     this.inputManager.setFlusher(this.flusher);
     this.inputManager.setAlarmManager(this.alarmManager);
@@ -438,6 +441,7 @@ export class Orchestrator extends EventEmitter {
       canaryPolicy: this.config.autoUpdate?.canaryPolicy ?? '',
       getSnapshot: () => this.buildDataflowSnapshot(),
       getTraceRuntimeSnapshot: () => this.flusher?.getTraceRuntimeSnapshot() ?? [],
+      getInterceptorStatus: () => this.readInterceptorStatus(),
       alarmManager: this.alarmManager,
       agentsConfig: this.config.agents,
       slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
@@ -571,6 +575,12 @@ export class Orchestrator extends EventEmitter {
     await this.interceptorService?.stop().catch(err => {
       logger.warn('interceptor stop failed during orchestrator shutdown', { error: String(err) });
     });
+    try {
+      if (this.interceptorService?.getStatus) this.lastInterceptorStatus = await this.interceptorService.getStatus();
+    } catch {
+      this.lastInterceptorStatus = unavailableInterceptorStatus(this.config.interceptor.mode === 'all');
+      logger.warn('final interceptor status unavailable');
+    }
     // The worker is the only checkpoint writer. The collector cache is an IPC mirror.
     this.interceptorService = null;
     this.verdictStore = null;
@@ -608,6 +618,11 @@ export class Orchestrator extends EventEmitter {
 
   getInputManager(): InputManager {
     return this.inputManager;
+  }
+
+  private async readInterceptorStatus(): Promise<InterceptorStatus> {
+    if (this.interceptorService?.getStatus) return this.interceptorService.getStatus();
+    return this.lastInterceptorStatus ?? unavailableInterceptorStatus(this.config.interceptor.mode === 'all');
   }
 
   getAgentControlManager(): AgentControlManager {

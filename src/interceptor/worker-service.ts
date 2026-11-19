@@ -11,6 +11,7 @@ import { ToolVerdictStore } from './tool-verdict-store.js';
 import type { InterceptorDiagnosticBatch, InterceptorWorkerCommand, InterceptorWorkerMessage } from './worker-protocol.js';
 import type { ManagedChildState } from './managed/child-lifecycle.js';
 import { reportInterceptorDiagnostic } from './diagnostics.js';
+import { unavailableInterceptorStatus, type InterceptorStatus } from './status.js';
 
 const logger = createLogger('InterceptorWorkerService');
 const COMMAND_TIMEOUT_MS = 2000;
@@ -65,6 +66,7 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
       managedActive: false,
       verdictStore: mirror,
       async reloadManaged() {},
+      async getStatus() { return unavailableInterceptorStatus(false); },
       async syncVerdicts() {},
       async flushEvents() {},
       async stop() {},
@@ -81,7 +83,11 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
   let seq = 0;
   let reloadPromise: Promise<void> | null = null;
   let stopPromise: Promise<void> | null = null;
-  const pending = new Map<number, { resolve(): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
+  let statusPromise: Promise<void> | null = null;
+  let cachedStatus = unavailableInterceptorStatus(true);
+  let starts = 0;
+  let finalStatusReceived = false;
+  const pending = new Map<number, { resolve(): void; reject(error: Error): void; timer: NodeJS.Timeout; receiveStatus?: (status: InterceptorStatus) => void }>();
   const retiring = new Set<Promise<void>>();
   const eventSink = new InterceptorEventSink({ blockedPrompt: opts.emitBlockedPrompt, evaluation: opts.emitEvaluation });
 
@@ -107,7 +113,8 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
     pending.clear();
   }
 
-  function command(type: 'reload' | 'sync' | 'stop', timeout = COMMAND_TIMEOUT_MS): Promise<void> {
+  function command(type: 'reload' | 'sync' | 'stop' | 'status', timeout = COMMAND_TIMEOUT_MS,
+    receiveStatus?: (status: InterceptorStatus) => void): Promise<void> {
     const current = worker;
     if (!current) return Promise.reject(new Error('interceptor worker unavailable'));
     if (pending.size >= 128) return Promise.reject(new Error('interceptor worker command queue full'));
@@ -117,7 +124,7 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
         pending.delete(id);
         reject(new Error(`interceptor worker ${type} timed out`));
       }, timeout);
-      pending.set(id, { resolve, reject, timer });
+      pending.set(id, { resolve, reject, timer, receiveStatus });
       try { current.postMessage({ type, id } satisfies InterceptorWorkerCommand); }
       catch (error) {
         clearTimeout(timer);
@@ -139,6 +146,9 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
       env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: opts.dataDir, LOONGSUITE_PILOT_STDOUT: '0' },
     });
     worker = current;
+    starts++;
+    cachedStatus = unavailableInterceptorStatus(true);
+    finalStatusReceived = false;
     const children = new Map<number, ManagedChildState>();
     current.stdout?.resume();
     current.stderr?.resume();
@@ -154,6 +164,7 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
           clearTimeout(timer);
           mirror.replace(message.records);
           state(message.port, message.managedActive);
+          if (message.status) cachedStatus = message.status;
           ready = true;
           retryMs = 1000;
           resolve();
@@ -169,6 +180,10 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
           mirror.replace(message.records);
           eventSink.enqueue(message.blockedPrompts, message.evaluationEntries ?? []);
           reportDiagnostics(message.diagnostics);
+          if (message.status) {
+            cachedStatus = message.status;
+            finalStatusReceived = true;
+          }
         } else if (message.type === 'child') {
           if (message.state.running) children.set(message.state.id, message.state);
           else children.delete(message.state.id);
@@ -178,7 +193,10 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
           pending.delete(message.id);
           clearTimeout(item.timer);
           if (message.error) item.reject(new Error(message.error));
-          else item.resolve();
+          else {
+            if (message.status) item.receiveStatus?.(message.status);
+            item.resolve();
+          }
         } else {
           clearTimeout(timer);
           reject(new Error(message.error));
@@ -200,6 +218,7 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
         if (worker !== current) return;
         worker = null;
         port = null;
+        if (!stopped) cachedStatus = { ...cachedStatus, collection_status: 'unavailable' };
         failPending(new Error(`interceptor worker exited (${code})`));
         // A worker shares the collector PID; liveness alone cannot identify a stale listener.
         clearInterceptorRuntime(opts.dataDir);
@@ -239,6 +258,22 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
     get port() { return port; },
     get managedActive() { return managedActive; },
     verdictStore: mirror,
+    async getStatus() {
+      if (worker && !stopped) {
+        if (!statusPromise) {
+          let received = false;
+          statusPromise = command('status', COMMAND_TIMEOUT_MS, snapshot => {
+            cachedStatus = snapshot;
+            received = true;
+          }).catch(() => undefined).then(() => {
+            if (!received) cachedStatus = { ...cachedStatus, collection_status: 'unavailable' };
+          }).finally(() => { statusPromise = null; });
+        }
+        await statusPromise;
+      }
+      return { ...cachedStatus, enabled: true, running: !stopped && port !== null,
+        worker_restarts_total: Math.max(0, starts - 1) };
+    },
     syncVerdicts() {
       if (stopped) return Promise.resolve();
       // Each collection batch needs a barrier covering verdicts accepted before THAT call.
@@ -264,6 +299,7 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
         try {
           await command('stop', 5000);
         } finally {
+          if (!finalStatusReceived) cachedStatus = { ...cachedStatus, collection_status: 'unavailable' };
           // terminate also closes an HTTP listener stuck in a slow request/shutdown.
           await current.terminate();
           await Promise.all(retiring);

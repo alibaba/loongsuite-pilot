@@ -6,6 +6,7 @@ import { MetricsWriter } from '../../../src/metrics/metrics-writer.js';
 import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
 import type { TraceRuntimeSnapshot } from '../../../src/metrics/trace-runtime-types.js';
+import { unavailableInterceptorStatus } from '../../../src/interceptor/status.js';
 
 const fsMockState = { blockAccessSync: false };
 
@@ -114,6 +115,23 @@ describe('MetricsWriter', () => {
     vi.useRealTimers();
     await writer?.stop();
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('includes interceptor status in local and remote L1 rows and isolates snapshot failures', async () => {
+    const status = unavailableInterceptorStatus(false);
+    const getInterceptorStatus = vi.fn().mockResolvedValue(status);
+    writer = new MetricsWriter({ dataDir: tmpDir, version: '2.0.0', userId: 'u1',
+      getSnapshot: buildSnapshot, getInterceptorStatus });
+    vi.useRealTimers();
+    await writer.start();
+    const file = managedLogFile(path.join(tmpDir, 'logs', 'metric_alarm'), 'pilot-metrics');
+    expect(JSON.parse(fs.readFileSync(file, 'utf8').trim()).interceptor).toEqual(status);
+    expect(mockSendStatus).toHaveBeenCalledWith('pilot_status', expect.objectContaining({ interceptor: JSON.stringify(status) }));
+    getInterceptorStatus.mockRejectedValue(new Error('worker unavailable'));
+    await (writer as any).writeL1();
+    const rows = fs.readFileSync(file, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(rows).toHaveLength(2);
+    expect(rows[1].version).toBe('2.0.0');
   });
 
   it('writes L1 metrics on start', async () => {

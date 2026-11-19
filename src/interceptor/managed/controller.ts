@@ -17,6 +17,7 @@ import { ManagedRuleEngine, type ResolvedScriptRule, type ScriptRunners } from '
 import { PowerShellPool } from './powershell-pool.js';
 import { ManagedRegexRunner } from './regex-runner.js';
 import { ShScriptRunner } from './sh-runner.js';
+import type { InterceptorRuleStatus } from '../status.js';
 
 const logger = createLogger('ManagedInterceptor');
 
@@ -43,6 +44,7 @@ interface Generation {
   runners: ScriptRunners;
   inflight: number;
   retired: boolean;
+  status: Pick<InterceptorRuleStatus, 'effective' | 'pattern' | 'regex' | 'substring' | 'script' | 'audit' | 'enforce'>;
 }
 
 /**
@@ -63,6 +65,9 @@ export class ManagedInterceptor {
   private timer: NodeJS.Timeout | null = null;
   private lastProblem: string | null = null;
   private lastResolution: string | null = null;
+  private configuredRules = 0;
+  private pendingScripts = 0;
+  private unsupportedHttp = 0;
 
   constructor(private readonly opts: ManagedInterceptorOptions) {
     this.platform = opts.platform ?? process.platform;
@@ -71,6 +76,14 @@ export class ManagedInterceptor {
 
   get active(): boolean {
     return this.current !== null;
+  }
+
+  getRuleStatus(): Omit<InterceptorRuleStatus, 'builtin'> {
+    return {
+      configured: this.configuredRules, config_valid: this.lastProblem === null,
+      pending_scripts: this.pendingScripts, unsupported_http: this.unsupportedHttp,
+      ...(this.current?.status ?? { effective: 0, pattern: 0, regex: 0, substring: 0, script: 0, audit: 0, enforce: 0 }),
+    };
   }
 
   start(intervalMs = MANAGED_RELOAD_INTERVAL_MS): void {
@@ -111,6 +124,7 @@ export class ManagedInterceptor {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         this.lastProblem = null;
+        this.configuredRules = this.pendingScripts = this.unsupportedHttp = 0;
         this.listedFiles = new Set();
         this.publish(null);
         return;
@@ -131,6 +145,8 @@ export class ManagedInterceptor {
   }
 
   private apply(config: ManagedInterceptorConfig): void {
+    this.configuredRules = config.rules.length;
+    this.unsupportedHttp = config.rules.filter(rule => rule.kind === 'http').length;
     const platformShell = platformManagedShell(this.platform);
     const scriptRules = scriptRulesOf(config);
     const localScripts = scriptRules.filter(rule => rule.shell === platformShell);
@@ -166,6 +182,7 @@ export class ManagedInterceptor {
         effective.push(previous.rule);
       }
     }
+    this.pendingScripts = pending.length;
     this.logResolution(pending);
 
     const hasInline = effective.some(rule => rule.kind === 'pattern' || rule.kind === 'http');
@@ -195,6 +212,15 @@ export class ManagedInterceptor {
       const runners = next.rules.length > 0 ? this.ensureRunners(path.dirname(next.rules[0].file)) : {};
       this.current = {
         key: next.key,
+        status: {
+          effective: next.config.rules.filter(rule => rule.kind !== 'http').length,
+          pattern: next.config.rules.filter(rule => rule.kind === 'pattern').length,
+          regex: next.config.rules.filter(rule => rule.kind === 'pattern' && rule.match === 'regex').length,
+          substring: next.config.rules.filter(rule => rule.kind === 'pattern' && rule.match === 'substring').length,
+          script: next.rules.length,
+          audit: next.config.rules.filter(rule => rule.kind !== 'http' && rule.enforcement === 'audit').length,
+          enforce: next.config.rules.filter(rule => rule.kind !== 'http' && rule.enforcement === 'enforce').length,
+        },
         engine: new ManagedRuleEngine({
           config: next.config,
           rules: next.rules,

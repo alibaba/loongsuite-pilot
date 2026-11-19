@@ -143,6 +143,12 @@ async function main(): Promise<void> {
       pump();
       return;
     }
+    if (command.type === 'status') {
+      // In-memory snapshot only: independent of event ACKs and serialized file reloads.
+      void service.getStatus().then(status => send({ type: 'reply', id: command.id, status }),
+        error => send({ type: 'reply', id: command.id, error: String(error) }));
+      return;
+    }
     commands = commands.then(async () => {
       try {
         if (command.type === 'reload') {
@@ -155,6 +161,7 @@ async function main(): Promise<void> {
           reportDrops();
           send({ type: 'final', records: store.records(), blockedPrompts: prompts.splice(0).map(item => item.entry),
             evaluationEntries: evaluations.splice(0).map(item => item.entry),
+            status: await service.getStatus(),
             diagnostics: [...diagnostics.values()].map(({ diagnostic, count }) => ({ diagnostic, count })) });
           diagnostics.clear();
         }
@@ -165,7 +172,8 @@ async function main(): Promise<void> {
       }
     });
   });
-  send({ type: 'ready', port: service.port, managedActive: service.managedActive, records: store.records() });
+  send({ type: 'ready', port: service.port, managedActive: service.managedActive, records: store.records(),
+    status: await service.getStatus() });
 }
 
 void main().catch(error => {

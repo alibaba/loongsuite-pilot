@@ -3,6 +3,7 @@ import type { InterceptorConfig } from './types.js';
 import type { ToolVerdictRecord } from './tool-verdict-store.js';
 import type { ManagedChildState } from './managed/child-lifecycle.js';
 import type { InterceptorDiagnostic } from './diagnostics.js';
+import type { InterceptorStatus } from './status.js';
 
 export interface InterceptorDiagnosticBatch {
   diagnostic: InterceptorDiagnostic;
@@ -20,13 +21,13 @@ export interface InterceptorWorkerData {
 
 export type InterceptorWorkerCommand =
   | { type: 'ack'; id: number }
-  | { type: 'reload' | 'sync' | 'stop'; id: number };
+  | { type: 'reload' | 'sync' | 'stop' | 'status'; id: number };
 
 export type InterceptorWorkerMessage =
-  | { type: 'ready'; port: number | null; managedActive: boolean; records: ToolVerdictRecord[] }
+  | { type: 'ready'; port: number | null; managedActive: boolean; records: ToolVerdictRecord[]; status?: InterceptorStatus }
   | { type: 'state'; port: number | null; managedActive: boolean }
   | { type: 'events'; id: number; records: ToolVerdictRecord[]; blockedPrompts: AgentActivityEntry[]; evaluationEntries: AgentActivityEntry[]; diagnostics?: InterceptorDiagnosticBatch[] }
-  | { type: 'final'; records: ToolVerdictRecord[]; blockedPrompts: AgentActivityEntry[]; evaluationEntries: AgentActivityEntry[]; diagnostics?: InterceptorDiagnosticBatch[] }
-  | { type: 'reply'; id: number; error?: string }
+  | { type: 'final'; records: ToolVerdictRecord[]; blockedPrompts: AgentActivityEntry[]; evaluationEntries: AgentActivityEntry[]; diagnostics?: InterceptorDiagnosticBatch[]; status?: InterceptorStatus }
+  | { type: 'reply'; id: number; error?: string; status?: InterceptorStatus }
   | { type: 'child'; state: ManagedChildState }
   | { type: 'fatal'; error: string };

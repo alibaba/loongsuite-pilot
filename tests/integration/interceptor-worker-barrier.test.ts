@@ -121,6 +121,14 @@ it('forwards cached config rejection and coalesces regex timeout counts while co
     }
     // No extra MessagePort batches while the first batch remains unacknowledged.
     expect(onDiagnostic).toHaveBeenCalledTimes(1);
+    const status = await service.getStatus(); // Independent of the held event ACK.
+    expect(status).toMatchObject({ enabled: true, running: true, collection_status: 'ok',
+      rules: { configured: 1, effective: 1, regex: 1 },
+      activity: { evaluations_total: 3, fail_open_total: 3, blocked_total: 0 },
+      diagnostics: { config_rejected: 1, regex_timeout: 3 },
+    });
+    expect(status.activity!.duration_ms_avg).toBeGreaterThan(0);
+    expect(status.activity!.duration_ms_p95_upper).toBeGreaterThanOrEqual(status.activity!.duration_ms_max!);
     acknowledgements.shift()!();
     await vi.waitFor(() => expect(onDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
       code: 'regex_timeout', ruleId: 'catastrophic', ruleVersion: '3', limitMs: 200,
@@ -131,6 +139,10 @@ it('forwards cached config rejection and coalesces regex timeout counts while co
     expect(entries).toHaveLength(2);
     expect(entries.find(entry => entry.alarm_type === 'INTERCEPTOR_REGEX_ALARM')?.alarm_count).toBe('3');
     expect(JSON.stringify(entries)).not.toMatch(/private-config|\(a\+\)\+\$/);
+    await service.stop();
+    expect(await service.getStatus()).toMatchObject({
+      running: false, collection_status: 'ok', activity: { evaluations_total: 3 },
+    });
   } finally {
     spy.mockRestore();
     for (const ack of acknowledgements.splice(0)) ack();

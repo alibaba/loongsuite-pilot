@@ -8,12 +8,14 @@ import { checkProcessLiveness, UPDATER_PROCESS_PATTERNS } from '../utils/pid-uti
 import { createLogger } from '../utils/logger.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
+import type { InterceptorStatus } from '../interceptor/status.js';
 
 const logger = createLogger('MetricsCollector');
 
 const MIN_NODE_MAJOR = 18;
 
 export interface L1Metrics {
+  interceptor?: InterceptorStatus;
   version: string;
   os_detail: string;
   hostname: string;

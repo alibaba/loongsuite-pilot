@@ -89,6 +89,37 @@ collector 进程内 interceptor HTTP（127.0.0.1）
 Worker 重启不重置冷却。Worker 转发仍受单批 ACK 背压限制，并按固定诊断 code 合并、保留次数，
 不会因规则数量或异常请求量增长无限队列。
 
+## Status 中的拦截指标
+
+`pilot_status` 的顶层 `interceptor` JSON 对象随现有 L1 status 在启动、每 10 分钟和退出时上报；
+本地同一份数据位于 `logs/metric_alarm/pilot-metrics-YYYY-MM-DD.jsonl`。开源构建沿用本地落盘。
+
+| 字段 | 含义 |
+|------|------|
+| `enabled` / `running` | 启动配置是否开启 / Worker 当前是否正在监听；可区分已开启但服务不可用 |
+| `collection_status` / `sampled_at` | `ok`、`disabled` 或 `unavailable`；最后实际采样时间。不可用时可能保留旧快照，不能当作当前正常数据 |
+| `worker_started_at` / `worker_restarts_total` | 当前 Worker 起点 / 本 collector 生命周期内的重新启动次数 |
+| `rules.configured` / `rules.config_valid` | 最后一次合法文档的规则总数（含其他平台）/ 当前缓存能否合法读取 |
+| `rules.effective` / `rules.builtin` | 当前平台实际可执行的托管规则数 / 内置规则数 |
+| `rules.pattern`、`regex`、`substring`、`script`、`audit`、`enforce` | 当前可执行规则的类型、执行方式计数 |
+| `rules.pending_scripts` / `rules.unsupported_http` | 当前平台等待脚本正文的规则数 / 配置中暂不支持的 HTTP 规则数 |
+| `activity.evaluations_total`、`blocked_total`、`matched_total`、`audit_hits_total` | 完成判定、拦截、命中请求、审计规则命中次数；一次请求可以命中多条审计规则 |
+| `activity.fail_open_total` / `evaluation_errors_total` | 降级放行次数 / 判定抛出异常次数。正常停机取消也计入降级次数，不产生故障告警 |
+| `activity.duration_ms_total`、`duration_ms_avg`、`duration_ms_max` | 完整规则判定的总耗时、平均值和最大值，包含内置及托管规则，不包含 HTTP 读取、网络和结果写出 |
+| `activity.duration_ms_p95_upper` / `duration_over_3500ms_total` | 固定直方图的 P95 桶上界 / 超过 3500ms 的判定次数 |
+| `diagnostics` | Worker 中各固定诊断 code 的实际发生次数，包含被告警冷却抑制的重复事件 |
+
+规则数量不要求相加相等：等待新版脚本时，旧版规则仍可继续生效。
+
+activity、耗时及 diagnostics 都是当前 Worker 生命周期内的累计值，热更新规则不重置，Worker 重启会重置；
+按 `worker_started_at` 区分起点，不能跨 Worker 直接相减。无判定时平均、最大和 P95 为 null；
+P95 落入超过 3500ms 的溢出桶时也为 null，可结合溢出计数识别。有限桶上界为
+1、5、10、25、50、100、200、500、1000、3500ms，P95 是近似上界。
+
+status 采样只读取 Worker 内存，不扫描日志、配置正文或发送逐请求统计消息；
+并发采样合并为一个请求，最多等待 2 秒，失败不阻止基础 status 输出。正常退出会保留最终快照。
+禁用时或尚无可用 Worker 快照时，rules/activity/diagnostics 为 null。统计不包含 prompt、正文、规则 ID 或凭证。
+
 ## Qoder 协议
 
 ### Worker 与采集线程
