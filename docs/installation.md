@@ -86,7 +86,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--sls-api-key <key>` | SLS API Key for API Key mode. Cannot be combined with AK/SK flags. |
 | `--mask-mode <mode>` | Data masking mode: `all`, `none`, or `custom`. |
 | `--mask-types <list>` | Comma-separated mask types. Required when `--mask-mode custom`. |
-| `--mask-replacement-mode <mode>` | Mask replacement format: `placeholder` (fixed markers, default) or `preview` (star-masked previews). Windows: `-MaskReplacementMode`. |
+| `--mask-replacement-mode <mode>` | Mask replacement format: `preview` (star-masked previews, default) or `placeholder` (fixed markers). If omitted, an existing setting is preserved; otherwise `preview` is used. Windows: `-MaskReplacementMode`. |
 | `--interceptor-mode <mode>` | Local interception mode: `all` or `none`. `all` also adds every builtin credential type to `mask`. Previous `custom` configurations disable interception; explicitly switch to `all` to continue. `--interceptor-types` is no longer accepted. |
 | `--collect-log <true\|false>` | Enable or disable SLS log reporting. |
 | `--collect-trace <true\|false>` | Enable or disable trace reporting. |

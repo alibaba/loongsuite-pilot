@@ -87,7 +87,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--sls-api-key <key>` | API Key 模式的 SLS API Key，不能和 AK/SK 参数同时使用。 |
 | `--mask-mode <mode>` | 脱敏模式：`all`、`none` 或 `custom`。 |
 | `--mask-types <list>` | 逗号分隔的脱敏类型，`--mask-mode custom` 时必填。 |
-| `--mask-replacement-mode <mode>` | 脱敏替换格式：`placeholder`（默认固定占位符）或 `preview`（星号预览）。Windows 对应 `-MaskReplacementMode`。 |
+| `--mask-replacement-mode <mode>` | 脱敏替换格式：`preview`（默认星号预览）或 `placeholder`（固定占位符）。不传时保留已有配置；已有配置也未指定时使用 `preview`。Windows 对应 `-MaskReplacementMode`。 |
 | `--interceptor-mode <mode>` | 本地拦截模式：`all` 或 `none`。`all` 会把全部内置密钥类型补进 `mask`。旧 `custom` 配置会关闭拦截，继续使用需显式改为 `all`；不再接受 `--interceptor-types`。 |
 | `--collect-log <true\|false>` | 开启或关闭 SLS 日志上报。 |
 | `--collect-trace <true\|false>` | 开启或关闭 Trace 上报。 |

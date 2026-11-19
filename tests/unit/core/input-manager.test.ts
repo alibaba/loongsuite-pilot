@@ -795,15 +795,15 @@ describe('InputManager', () => {
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['user.id']).toBe('configured-user');
       expect(dispatched['gen_ai.input.messages']).toEqual([
-        { role: 'user', parts: [{ type: 'text', content: 'token [APIKEY_MASKED]' }] },
+        { role: 'user', parts: [{ type: 'text', content: 'token [APIKEY_MASKED]{sk-1*********************mnop}' }] },
       ]);
       expect(dispatched['gen_ai.guardrail.action']).toBe('block');
       expect(dispatched['gen_ai.guardrail.rule_id']).toBe('flow-probe');
       expect(dispatched['gen_ai.guardrail.rule_version']).toBe('3');
       expect(dispatched['gen_ai.guardrail.severity']).toBe('CRITICAL');
-      expect(dispatched['gen_ai.guardrail.reason']).toBe('hit [APIKEY_MASKED]');
-      expect(dispatched['gen_ai.guardrail.title']).toBe('label [APIKEY_MASKED]');
-      expect(dispatched['gen_ai.guardrail.message']).toBe('不要粘贴 [APIKEY_MASKED]');
+      expect(dispatched['gen_ai.guardrail.reason']).toBe('hit [APIKEY_MASKED]{sk-1*********************mnop}');
+      expect(dispatched['gen_ai.guardrail.title']).toBe('label [APIKEY_MASKED]{sk-1*********************mnop}');
+      expect(dispatched['gen_ai.guardrail.message']).toBe('不要粘贴 [APIKEY_MASKED]{sk-1*********************mnop}');
       expect(dispatched.trace_id).toBeUndefined();
       expect(dispatched['gen_ai.turn.start']).toBeUndefined();
     });
@@ -846,7 +846,7 @@ describe('InputManager', () => {
 
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['gen_ai.input.messages']).toEqual([
-        { role: 'user', content: 'use [ACCESSKEY_MASKED]' },
+        { role: 'user', content: 'use [ACCESSKEY_MASKED]{AKIA************MPLE}' },
       ]);
       expect(dispatched['workspace.current_root']).toBe(`/tmp/${accessKey}`);
     });

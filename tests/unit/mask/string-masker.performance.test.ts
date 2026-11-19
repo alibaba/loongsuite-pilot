@@ -85,7 +85,7 @@ describe('mask string masker performance smoke', () => {
     const elapsedMs = measureExecutionMs(() => { masked = maskString(input, plan); });
 
     expect(masked.slice(0, fragmented.length)).toBe(fragmented);
-    expect(masked.slice(fragmented.length)).toBe('[PHONE_MASKED]');
+    expect(masked.slice(fragmented.length)).toBe('[PHONE_MASKED]{138****8000}');
     // Keep the regression budget without charging unrelated runner scheduling.
     expect(elapsedMs).toBeLessThan(100);
   });
