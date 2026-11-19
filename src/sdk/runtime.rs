@@ -322,13 +322,7 @@ fn run_agent(
     use super::outbox::LegacyCheckpointHandoff;
     let shell_handoff = plan.pilot_host.as_ref().and_then(|host| {
         let handoff = LegacyCheckpointHandoff::for_input(checkpoint_key)?;
-        let expected = if handoff == LegacyCheckpointHandoff::Qoder {
-            host.data_dir.join(super::STANDALONE_QODER_DATA)
-        } else {
-            host.data_dir
-                .join("state")
-                .join(format!("standalone-{checkpoint_key}-sdk"))
-        };
+        let expected = handoff.data_dir(&host.data_dir, checkpoint_key);
         (init.data_dir == expected).then_some((host, handoff))
     });
     if let Some((host, handoff)) = shell_handoff {
