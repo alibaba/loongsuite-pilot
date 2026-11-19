@@ -12,7 +12,9 @@ pub(crate) mod agent_content_policy;
 mod agent_input_dual_write;
 mod agent_system_map;
 mod enrich_git_context;
+pub(crate) use enrich_git_context::codex_sdk_rows_keep_git_context;
 mod entry_builder;
+pub(crate) use entry_builder::json_i64 as activity_integer;
 pub(crate) use entry_builder::{
     build_standard_with_canonical_payloads, is_canonical_payload_key, project_sdk_jsonl_entry,
 };

@@ -65,6 +65,7 @@ pub(crate) async fn run(args: &clap::ArgMatches) -> anyhow::Result<i32> {
         enabled: pilot.pipeline.multica.enabled,
         prefix: &pilot.service_name_prefix,
         activation_path,
+        daemon_profile: None,
     })?);
     if args.get_flag("once") {
         let result = pipeline.collect_once().await;

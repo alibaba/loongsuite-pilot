@@ -742,10 +742,35 @@ fn extract_codex_turn(
     }
 
     let resolved_status = status.unwrap_or(CodexTerminalStatus::Completed);
-    let steps: Vec<CodexTranscriptStep> = envelopes
+    let committed: Vec<&StepEnvelope> = if saw_terminal {
+        envelopes
+            .iter()
+            .filter(|envelope| envelope.flushed)
+            .collect()
+    } else {
+        leading_committable(&envelopes)
+    };
+    let committed_tail = committed.last().copied();
+    let next_step_started_at_ms = committed_tail.map(|envelope| envelope.step.completed_at_ms);
+    let last_cumulative_token_total =
+        committed_tail.and_then(|envelope| envelope.last_cumulative_token_total);
+    let committed_step_ranges = committed
         .iter()
+        .map(|envelope| envelope.source_range.clone())
+        .collect();
+    let committed_step_count = committed.len();
+    let consumed_end_offset = committed_tail
+        .map(|envelope| envelope.source_range.end_offset)
+        .unwrap_or_else(|| {
+            records
+                .first()
+                .map(|record| record.start_offset)
+                .unwrap_or(0)
+        });
+    let steps: Vec<CodexTranscriptStep> = envelopes
+        .into_iter()
         .filter(|envelope| envelope.flushed)
-        .map(|envelope| envelope.step.clone())
+        .map(|envelope| envelope.step)
         .collect();
     let prompt_ready =
         prompt.is_some() && (saw_submitted_user_message || !steps.is_empty() || saw_terminal);
@@ -776,31 +801,6 @@ fn extract_codex_turn(
         steps,
         unmatched_token_usages: unmatched,
     };
-    let committed: Vec<&StepEnvelope> = if saw_terminal {
-        envelopes
-            .iter()
-            .filter(|envelope| envelope.flushed)
-            .collect()
-    } else {
-        leading_committable(&envelopes)
-    };
-    let committed_tail = committed.last().copied();
-    let next_step_started_at_ms = committed_tail.map(|envelope| envelope.step.completed_at_ms);
-    let last_cumulative_token_total =
-        committed_tail.and_then(|envelope| envelope.last_cumulative_token_total);
-    let committed_step_ranges = committed
-        .iter()
-        .map(|envelope| envelope.source_range.clone())
-        .collect();
-    let committed_step_count = committed.len();
-    let consumed_end_offset = committed_tail
-        .map(|envelope| envelope.source_range.end_offset)
-        .unwrap_or_else(|| {
-            records
-                .first()
-                .map(|record| record.start_offset)
-                .unwrap_or(0)
-        });
     Some(CodexPartialTurnExtraction {
         turn,
         committed_step_count,

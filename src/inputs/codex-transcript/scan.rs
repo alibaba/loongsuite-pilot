@@ -1,6 +1,7 @@
 //! Byte-offset JSONL scanning. Port of the readers in `codex-transcript-input.ts`.
 
-use std::io::SeekFrom;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
 
 use serde_json::{Map, Value};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -21,6 +22,16 @@ pub struct FileVersion {
     pub modified: Option<std::time::SystemTime>,
     pub changed: (i64, i64),
 }
+impl FileVersion {
+    pub fn mtime_ms(self) -> i64 {
+        self.modified
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |elapsed| {
+                i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+            })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct IncompleteJsonlTail {
     pub start_offset: i64,
@@ -28,56 +39,96 @@ pub struct IncompleteJsonlTail {
     pub anchor: Vec<u8>,
     pub version: FileVersion,
 }
-fn version_from_open(file: &std::fs::File) -> std::io::Result<FileVersion> {
+#[cfg(unix)]
+fn metadata_version(metadata: &std::fs::Metadata) -> io::Result<FileVersion> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "JSONL source is not a regular file",
+        ));
+    }
+    Ok(FileVersion {
+        inode: metadata.ino(),
+        device: metadata.dev(),
+        size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+        modified: metadata.modified().ok(),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+    })
+}
+
+#[cfg(unix)]
+fn version_from_open(file: &File) -> io::Result<FileVersion> {
+    metadata_version(&file.metadata()?)
+}
+
+#[cfg(windows)]
+fn version_from_open(file: &File) -> io::Result<FileVersion> {
     let identity = crate::utils::file_identity::identity_from_open(file)?;
     let metadata = file.metadata()?;
-    #[cfg(unix)]
-    let changed = {
-        use std::os::unix::fs::MetadataExt;
-        (metadata.ctime(), metadata.ctime_nsec())
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
     };
-    #[cfg(windows)]
-    let changed = {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
-        };
-        let mut info = FILE_BASIC_INFO::default();
-        // SAFETY: File owns this live handle and the output buffer has the exact API layout.
-        if unsafe {
-            GetFileInformationByHandleEx(
-                file.as_raw_handle(),
-                FileBasicInfo,
-                (&mut info as *mut FILE_BASIC_INFO).cast(),
-                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
-            )
-        } == 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-        (info.ChangeTime, 0)
-    };
+    let mut info = FILE_BASIC_INFO::default();
+    // SAFETY: File owns this live handle and the output buffer has the exact API layout.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            (&mut info as *mut FILE_BASIC_INFO).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
     Ok(FileVersion {
         inode: identity.ino,
         device: identity.dev,
         size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
         modified: metadata.modified().ok(),
-        changed,
+        changed: (info.ChangeTime, 0),
     })
 }
+
 pub async fn opened_file_version(file: &tokio::fs::File) -> std::io::Result<FileVersion> {
     let file = file.try_clone().await?.into_std().await;
     tokio::task::spawn_blocking(move || version_from_open(&file))
         .await
         .map_err(std::io::Error::other)?
 }
-pub async fn file_version_snapshot(path: &str) -> std::io::Result<FileVersion> {
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || {
-        version_from_open(&crate::utils::source_access::open(path)?)
-    })
+pub async fn file_version_snapshot(path: &str) -> io::Result<FileVersion> {
+    crate::utils::source_access::open_with(path, |file| version_from_open(&file)).await
+}
+
+// The retained bytes have already passed the guarded open. Recheck the
+// path's generation without opening another reader or authorizing new data.
+pub(super) async fn retained_version_is_current(path: &str, expected: FileVersion) -> bool {
+    #[cfg(unix)]
+    let observed = {
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            std::fs::symlink_metadata(path).and_then(|meta| metadata_version(&meta))
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+    };
+    #[cfg(windows)]
+    let observed = file_version_snapshot(path).await.ok();
+    observed == Some(expected)
+}
+
+pub(super) async fn file_version_snapshots<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+) -> io::Result<Vec<io::Result<FileVersion>>> {
+    crate::utils::source_access::inspect_batch(
+        paths.into_iter().map(std::path::PathBuf::from).collect(),
+        version_from_open,
+    )
     .await
-    .map_err(std::io::Error::other)?
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +141,7 @@ pub struct JsonLine {
 #[derive(Clone, Debug, Default)]
 pub struct ScanStats {
     pub next_offset: i64,
+    pub opened_version: Option<FileVersion>,
     pub records: u64,
     pub parse_success_records: u64,
     pub parse_failed_records: u64,
@@ -146,6 +198,18 @@ fn finished_scan(stats: ScanStats) -> ScanStats {
     stats
 }
 
+fn read_scan_chunk(
+    file: &mut File,
+    position: i64,
+    length: usize,
+) -> io::Result<(Vec<u8>, usize, f64)> {
+    let mut chunk = vec![0_u8; length];
+    file.seek(SeekFrom::Start(position as u64))?;
+    let started = InputRuntimeAccumulator::now();
+    let read = file.read(&mut chunk)?;
+    Ok((chunk, read, started))
+}
+
 /// `false` from `on_line` stops the scan at that line, matching the TypeScript scanner.
 pub async fn scan_json_lines(
     file_path: &str,
@@ -161,29 +225,44 @@ pub async fn scan_json_lines(
     if end_offset <= start_offset {
         return Ok(finished_scan(stats));
     }
-    let mut file = crate::utils::source_access::open_async(file_path).await?;
-    let original_version = opened_file_version(&file).await?;
-    let mut last_anchor = Vec::new();
+    let initial_size = ((end_offset - start_offset) as usize).min(READ_CHUNK_SIZE);
+    let (mut file, original_version, first) =
+        crate::utils::source_access::open_with(file_path, move |mut file| {
+            let version = version_from_open(&file)?;
+            let first = read_scan_chunk(&mut file, start_offset, initial_size)?;
+            Ok((file, version, first))
+        })
+        .await?;
+    stats.opened_version = Some(original_version);
+    let mut first = Some(first);
+    let mut last_anchor = [0_u8; 64];
+    let mut last_anchor_len = 0;
     let mut position = start_offset;
     let mut pending = Vec::<(std::sync::Arc<Vec<u8>>, usize, usize)>::new();
     let mut pending_start = start_offset;
     while position < end_offset {
         let length = ((end_offset - position) as usize).min(READ_CHUNK_SIZE);
-        let mut chunk = std::sync::Arc::new(vec![0u8; length]);
-        file.seek(SeekFrom::Start(position as u64)).await?;
-        let started = InputRuntimeAccumulator::now();
-        let read = file
-            .read(
-                std::sync::Arc::get_mut(&mut chunk)
-                    .expect("new chunk")
-                    .as_mut_slice(),
-            )
-            .await?;
+        let (chunk, read, started) = match first.take() {
+            Some(first) => first,
+            None => {
+                let (returned, chunk) = tokio::task::spawn_blocking(move || {
+                    let chunk = read_scan_chunk(&mut file, position, length)?;
+                    Ok::<_, io::Error>((file, chunk))
+                })
+                .await
+                .map_err(io::Error::other)??;
+                file = returned;
+                chunk
+            }
+        };
         observe_read(runtime, read as u64, length as u64, started);
         if read == 0 {
             break;
         }
-        last_anchor = chunk[read.saturating_sub(64)..read].to_vec();
+        let anchor = &chunk[read.saturating_sub(last_anchor.len())..read];
+        last_anchor[..anchor.len()].copy_from_slice(anchor);
+        last_anchor_len = anchor.len();
+        let chunk = std::sync::Arc::new(chunk);
         let chunk_start = position;
         position += read as i64;
         let mut cursor = 0;
@@ -201,9 +280,6 @@ pub async fn scan_json_lines(
             }
             let record_bytes = (chunk_start + part_end as i64 - pending_start) as u64;
             if record_bytes <= MAX_JSONL_RECORD_BYTES as u64 {
-                // Retain references to new chunks, never copy the accumulated
-                // prefix. Only a completed multi-chunk record is assembled once.
-                pending.push((chunk.clone(), cursor, part_end));
                 #[cfg(test)]
                 {
                     stats.peak_retained_record_bytes =
@@ -215,6 +291,11 @@ pub async fn scan_json_lines(
                 pending = Vec::new();
             }
             let Some(newline) = newline else {
+                // Complete lines in this chunk borrow it directly. Only an
+                // unfinished prefix holds the chunk beyond the current read.
+                if record_bytes <= MAX_JSONL_RECORD_BYTES as u64 {
+                    pending.push((chunk.clone(), cursor, part_end));
+                }
                 break;
             };
             let line_end = chunk_start + newline as i64 + 1;
@@ -235,11 +316,12 @@ pub async fn scan_json_lines(
                 // engine before any next-turn start is allowed to replace it.
                 return Ok(finished_scan(stats));
             }
-            let assembled = if pending.len() > 1 {
+            let assembled = if !pending.is_empty() {
                 let mut bytes = Vec::with_capacity(record_bytes as usize);
                 for (chunk, start, end) in &pending {
                     bytes.extend_from_slice(&chunk[*start..*end]);
                 }
+                bytes.extend_from_slice(&chunk[cursor..part_end]);
                 #[cfg(test)]
                 {
                     stats.retained_copy_bytes += record_bytes;
@@ -248,10 +330,7 @@ pub async fn scan_json_lines(
             } else {
                 None
             };
-            let bytes = assembled.as_deref().unwrap_or_else(|| {
-                let (chunk, start, end) = &pending[0];
-                &chunk[*start..*end]
-            });
+            let bytes = assembled.as_deref().unwrap_or(&chunk[cursor..part_end]);
             let text = String::from_utf8_lossy(bytes);
             let text = text.trim();
             if !text.is_empty() {
@@ -279,12 +358,14 @@ pub async fn scan_json_lines(
         }
     }
     if position > pending_start {
-        let version = opened_file_version(&file).await?;
+        let version = tokio::task::spawn_blocking(move || version_from_open(&file))
+            .await
+            .map_err(io::Error::other)??;
         if version == original_version {
             stats.incomplete_tail = Some(IncompleteJsonlTail {
                 start_offset: pending_start,
                 end_offset: position,
-                anchor: last_anchor,
+                anchor: last_anchor[..last_anchor_len].to_vec(),
                 version,
             });
         }

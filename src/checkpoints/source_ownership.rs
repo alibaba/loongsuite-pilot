@@ -264,17 +264,30 @@ pub(crate) async fn remember(wakeup: &str, source: &str) -> io::Result<()> {
         .await
         .map_err(io::Error::other)?
 }
-pub(crate) async fn was_live(wakeup: &str, source: &str) -> io::Result<bool> {
+pub(crate) enum StartupOwnership {
+    Unknown,
+    Live,
+    Baseline(BaselineFloor),
+    Replaced,
+}
+
+pub(crate) async fn startup_ownership(wakeup: &str, source: &str) -> io::Result<StartupOwnership> {
     let (wakeup, source) = (PathBuf::from(wakeup), PathBuf::from(source));
     tokio::task::spawn_blocking(move || {
         let Some(marker) = read_marker(&marker_path(&wakeup, &source))? else {
-            return Ok(false);
+            return Ok(StartupOwnership::Unknown);
         };
-        Ok(marker.baseline_floor.is_none() && matches_source(&marker, &source)?)
+        if !matches_source(&marker, &source)? {
+            return Ok(StartupOwnership::Replaced);
+        }
+        Ok(marker
+            .baseline_floor
+            .map_or(StartupOwnership::Live, StartupOwnership::Baseline))
     })
     .await
     .map_err(io::Error::other)?
 }
+
 // Shared small-record primitives. Existing Codex record/read behavior is unchanged.
 // New adapters must validate their own schema and source witnesses.
 fn link_or_reparse(metadata: &fs::Metadata) -> bool {

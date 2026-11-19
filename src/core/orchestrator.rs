@@ -583,22 +583,30 @@ impl Orchestrator {
             updater.start();
             *self.updater_watchdog.lock().expect("updater") = Some(updater);
         }
-        if self.runtime_options.manage_host_services && self.config.pipeline.enabled {
-            let pipeline = Arc::new(PipelineManager::new(PipelineManagerOptions {
-                workspace_policy: Some(pipeline_policy),
-                config_dir: self.data_dir_join("configs/local"),
-                state_dir: self.data_dir_join("state/pipeline"),
-                failed_log_dir: self.data_dir_join("logs/pipeline-failed"),
-                data_dir: self.data_dir.clone(),
-                pipeline_config: crate::pipeline::PipelineToggle {
-                    enabled: self.config.pipeline.enabled,
-                    file_enabled: self.config.pipeline.file.enabled,
-                    qoder_api_enabled: self.config.pipeline.qoder_api.enabled,
-                    multica: self.config.pipeline.multica.clone(),
-                },
-                sls: self.config.flushers.sls.clone(),
-                service_name_prefix: self.config.service_name_prefix.clone(),
-            }));
+        if self.runtime_options.manage_host_services
+            && (self.config.pipeline.enabled || self.config.pipeline.multica.discover_local_sources)
+        {
+            let pipeline = Arc::new(
+                PipelineManager::new(PipelineManagerOptions {
+                    workspace_policy: Some(pipeline_policy),
+                    config_dir: self.data_dir_join("configs/local"),
+                    state_dir: self.data_dir_join("state/pipeline"),
+                    failed_log_dir: self.data_dir_join("logs/pipeline-failed"),
+                    data_dir: self.data_dir.clone(),
+                    pipeline_config: crate::pipeline::PipelineToggle {
+                        enabled: self.config.pipeline.enabled,
+                        file_enabled: self.config.pipeline.file.enabled,
+                        qoder_api_enabled: self.config.pipeline.qoder_api.enabled,
+                        multica: self.config.pipeline.multica.clone(),
+                    },
+                    sls: self.config.flushers.sls.clone(),
+                    service_name_prefix: self.config.service_name_prefix.clone(),
+                })
+                .with_host_identity(crate::utils::SlsHostIdentity::new(
+                    self.config.host_identity_tags,
+                    &self.config.host_sn,
+                )),
+            );
             pipeline.start().await;
             *self.pipeline.lock().expect("pipeline") = Some(pipeline);
         } else {
@@ -1728,9 +1736,13 @@ impl Orchestrator {
             .is_some_and(|sls| sls.enabled)
             && self.config.collect_log
         {
-            let flusher = Arc::new(SlsFlusher::new(
+            let flusher = Arc::new(SlsFlusher::new_with_host_identity(
                 self.config.flushers.sls.clone().unwrap(),
                 &self.data_dir,
+                crate::utils::SlsHostIdentity::new(
+                    self.config.host_identity_tags,
+                    &self.config.host_sn,
+                ),
             ));
             if let Err(err) = flusher.start().await {
                 logger("Orchestrator").warn(
@@ -3431,7 +3443,9 @@ impl Orchestrator {
     }
 
     fn metrics_writer(&self, version: &str, alarm: Arc<AlarmManager>) -> MetricsWriter {
-        let _ = alarm;
+        let interceptor_inputs = Arc::clone(&self.inputs);
+        let enabled =
+            self.standalone && self.config.interceptor.mode != crate::types::MaskMode::None;
         let inputs = Arc::clone(&self.inputs);
         let sls = self.sls.lock().expect("sls").clone();
         let otlp = self.otlp.lock().expect("otlp").clone();
@@ -3479,7 +3493,11 @@ impl Orchestrator {
             runtime_probe: None,
             now_ms: None,
         })
-        .tap(|_| {})
+        .with_host_identity(self.config.host_identity_tags, &self.config.host_sn)
+        .with_interceptor_monitoring(
+            move || interceptor_inputs.interceptor.snapshot(enabled),
+            alarm,
+        )
     }
 
     fn read_package_version(&self) -> String {
@@ -3498,17 +3516,6 @@ impl Orchestrator {
             .into_owned()
     }
 }
-
-trait Tap {
-    fn tap<F: FnOnce(&Self)>(self, f: F) -> Self
-    where
-        Self: Sized,
-    {
-        f(&self);
-        self
-    }
-}
-impl<T> Tap for T {}
 
 async fn precondition_for(
     def: &AgentDefinition,

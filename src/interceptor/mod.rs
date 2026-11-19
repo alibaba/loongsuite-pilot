@@ -12,6 +12,7 @@ mod access_log;
 mod blocked_prompt;
 mod config;
 mod paths;
+pub(crate) mod status;
 mod tool_verdict_store;
 mod types;
 

@@ -641,6 +641,13 @@ fn may_block(packet: &Datagram, trusted: &Value) -> bool {
     })
 }
 
+pub(super) fn update_local_status(queue: &Outbox, policy: &Value) {
+    let config = build_interceptor_config_with(policy.get("local"), |_| None);
+    let ids = resolve_enabled_rule_ids(&config);
+    *queue.local_hook_config.lock().unwrap() =
+        (config.mode != crate::types::MaskMode::None).then_some(ids.len());
+}
+
 fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
     let packet = &job.packet;
     let Endpoint {
@@ -809,19 +816,30 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
         let Some(request) = request.as_ref() else {
             return allow();
         };
+        let started = Instant::now();
         let config = build_interceptor_config_with(trusted.get("local"), |_| None);
         let engine = RuleEngine::new(builtin_rules(), resolve_enabled_rule_ids(&config));
         let builtin = engine.evaluate(request);
-        if builtin.action == crate::interceptor::VerdictAction::Allow
+        let result = if builtin.action == crate::interceptor::VerdictAction::Allow
             && blocking
             && trusted["managed_host_rules"] == true
         {
             callback
                 .and_then(|callback| managed_verdict(queue, callback, context, deadline, request))
-                .unwrap_or_else(|| json!({"action":"allow"}))
         } else {
-            serde_json::to_value(builtin).unwrap_or_else(|_| json!({"action":"allow"}))
+            serde_json::to_value(builtin).ok()
+        };
+        let unavailable = result.is_none();
+        let verdict = result.unwrap_or_else(|| json!({"action":"allow"}));
+        if config.mode != crate::types::MaskMode::None {
+            queue.local_hook_stats.lock().unwrap().record(
+                &verdict,
+                started.elapsed().as_secs_f64() * 1_000.0,
+                unavailable,
+                endpoint.stop.load(Ordering::Relaxed),
+            );
         }
+        verdict
     };
     let evaluations = if channel == "local" && trusted["managed_host_rules"] == true {
         request.as_ref().map_or_else(Vec::new, |request| {
