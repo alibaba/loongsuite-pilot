@@ -185,8 +185,11 @@ fn persist_marker(wakeup: &Path, source: &Path, marker: &Ownership) -> io::Resul
     let directory = wakeup.join("source-owners");
     private_directory(&directory)?;
     let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
-    serde_json::to_writer(&mut temporary, marker).map_err(io::Error::other)?;
-    temporary.write_all(b"\n")?;
+    // NamedTempFile writes directly to the kernel. Encode the small proof
+    // once, keeping the file and directory durability barriers unchanged.
+    let mut bytes = serde_json::to_vec(marker).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    temporary.write_all(&bytes)?;
     temporary.as_file().sync_all()?;
     temporary
         .persist(marker_path(wakeup, source))
