@@ -125,7 +125,14 @@ impl EventLogConverter for GenAiEventLogConverter {
                 &record.agent_type,
                 &record.session_id,
                 &record.turn_id,
-                &record.agent_id,
+                // OpenCode V2 supplies agent.id on model/tool events but not
+                // on the surrounding turn events. Its turn identity is the
+                // session/turn, not whether this optional field was present.
+                if record.agent_type == "opencode" {
+                    None
+                } else {
+                    record.agent_id.as_deref()
+                },
                 trace,
             ))
             .map_err(|error| error.to_string())?;
@@ -173,7 +180,11 @@ pub(super) fn convert_completed_stream(
         &first.agent_type,
         &first.session_id,
         &first.turn_id,
-        &first.agent_id,
+        if first.agent_type == "opencode" {
+            None
+        } else {
+            first.agent_id.as_deref()
+        },
         trace,
     ))
     .map_err(|error| error.to_string())?;

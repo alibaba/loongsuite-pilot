@@ -2699,21 +2699,23 @@ impl Orchestrator {
         );
         let opencode = self.data_dir_join("logs/opencode");
         ensure_dir(&opencode).await;
-        self.attach_hook(
-            entries,
-            "opencode-log",
-            "opencode",
-            OpenCodeLogInput::new(self.hook_opts_dir(state_store, &opencode, "opencode-log")),
-            vec![opencode.clone()],
-            {
-                let opencode = opencode.clone();
-                move || {
+        if !self.uses_sdk_hook_history("opencode") {
+            self.attach_hook(
+                entries,
+                "opencode-log",
+                "opencode",
+                OpenCodeLogInput::new(self.hook_opts_dir(state_store, &opencode, "opencode-log")),
+                vec![opencode.clone()],
+                {
                     let opencode = opencode.clone();
-                    async move { directory_exists(&opencode).await }
-                }
-            },
-        )
-        .await;
+                    move || {
+                        let opencode = opencode.clone();
+                        async move { directory_exists(&opencode).await }
+                    }
+                },
+            )
+            .await;
+        }
         let pi_dir = self.data_dir_join("logs/pi-coding-agent");
         ensure_pi_coding_agent_log_dir(&pi_dir).await;
         let bits = Arc::clone(&self.bits);

@@ -104,6 +104,10 @@ Linux 动态加载器可能因为外部调用线程上的线程局部存储（TL
 
 脱敏沿用原 `MaskConfig` 和处理管道。启用本地拦截的敏感类型也会纳入活动脱敏。嵌入实例使用库内置规则，不从宿主工作目录或 HOME 搜索规则文件。SDK 日志按实例保存、轮转并脱敏，不接管宿主日志出口。
 
+### OpenCode plug-in history
+
+The development profile `opencode_plugin_v1` accepts one authorized `hook_jsonl` directory from the existing OpenCode plug-in. Both the V1 and V2 plug-in callbacks write this format. The full Pilot uses this SDK collector on the regular path and continues to own plug-in deployment, workspace metadata, and output. The adapter reuses the existing parser and imports its input checkpoint. A host acknowledges delivered batches through the activity callback.
+
 ## 活动、监控与背压
 
 `on_activity` 接收多条独立 JSON 视图，沿用现有 Pilot 事件格式作为 `aah.activity.v2` 的兼容基线。数据在交付前序列化一次，SQLite 事务同时接收事件和对应进度；重试、恢复复用原始字节及 `event.id`。

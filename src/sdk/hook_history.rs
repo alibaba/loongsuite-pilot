@@ -11,7 +11,13 @@ pub(crate) struct HookHistoryProfile {
     pub build: fn(HookInputOptions) -> Arc<HostedInput<SdkHookBody>>,
 }
 
-pub(crate) const PROFILES: &[HookHistoryProfile] = &[];
+pub(crate) const PROFILES: &[HookHistoryProfile] = &[HookHistoryProfile {
+    agent: "opencode",
+    listener: "opencode-log",
+    profile: "opencode_plugin_v1",
+    history: "logs/opencode",
+    build: |options| crate::inputs::opencode_log::OpenCodeLogInput::new(options).sdk_hosted(),
+}];
 
 pub(crate) fn find(agent: &str) -> Option<&'static HookHistoryProfile> {
     PROFILES.iter().find(|profile| profile.agent == agent)
