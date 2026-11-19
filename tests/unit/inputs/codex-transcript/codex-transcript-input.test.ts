@@ -5,6 +5,9 @@ import * as path from 'node:path';
 
 const blockedReads = vi.hoisted(() => new Set<string>());
 const scanDelays = vi.hoisted(() => new Map<string, () => Promise<void>>());
+const sortedReads = vi.hoisted(() => new Set<string>());
+const failOpenOnCount = vi.hoisted(() => new Map<string, number>());
+const openCounts = vi.hoisted(() => new Map<string, number>());
 vi.mock('node:fs/promises', async () => {
   const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
   return {
@@ -18,7 +21,23 @@ vi.mock('node:fs/promises', async () => {
         scanDelays.delete(path.resolve(target));
         await delay();
       }
-      return actual.readdir(target, options);
+      const entries = await actual.readdir(target, options);
+      if (sortedReads.has(path.resolve(target))) {
+        entries.sort((left, right) => left.name.localeCompare(right.name));
+      }
+      return entries;
+    },
+    open: async (filePath: string, flags: string) => {
+      const resolved = path.resolve(filePath);
+      const failAt = failOpenOnCount.get(resolved);
+      if (failAt !== undefined) {
+        const count = (openCounts.get(resolved) ?? 0) + 1;
+        openCounts.set(resolved, count);
+        if (count === failAt) {
+          throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        }
+      }
+      return actual.open(filePath, flags);
     },
   };
 });
@@ -56,6 +75,9 @@ const CHILD_FIXTURES = [
 afterEach(async () => {
   blockedReads.clear();
   scanDelays.clear();
+  sortedReads.clear();
+  failOpenOnCount.clear();
+  openCounts.clear();
   await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -1054,6 +1076,81 @@ describe('CodexTranscriptInput', () => {
       await runInputCycle(input);
       expect(responsesForTurn(entries, 'turn-hidden')).toEqual([]);
       expect(responsesForTurn(entries, 'turn-seen')).toEqual([]);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).toBe(true);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('keeps a partial file baseline unfinished for the same input', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-file-baseline-retry-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const dayDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(dayDir, { recursive: true });
+    const past = new Date('2020-01-01T00:00:00Z');
+    const later = path.join(dayDir, 'rollout-z.jsonl');
+    for (const [name, turn] of [['rollout-a.jsonl', 'turn-first'], ['rollout-z.jsonl', 'turn-second']] as const) {
+      const file = path.join(dayDir, name);
+      await fs.writeFile(file, completedTurn().replaceAll('turn-1', turn), 'utf8');
+      await fs.utimes(file, past, past);
+    }
+    sortedReads.add(path.resolve(dayDir));
+    failOpenOnCount.set(path.resolve(later), 3);
+    const { input, entries, stateStore } = await createDormantInput(root);
+    try {
+      await expect(input.start()).rejects.toThrow(/EACCES/);
+      expect(stateStore.get(input.id).extra?.baselineUnfinished).toBe(true);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
+      expect(stateStore.keys().some(key => key.startsWith(`${input.id}:`))).toBe(true);
+      failOpenOnCount.clear();
+      await input.start();
+      await runInputCycle(input);
+      expect(responsesForTurn(entries, 'turn-first')).toEqual([]);
+      expect(responsesForTurn(entries, 'turn-second')).toEqual([]);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).toBe(true);
+      expect(stateStore.get(input.id).extra?.baselineUnfinished).not.toBe(true);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('keeps a partial file baseline unfinished after the state is reloaded', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-file-baseline-reload-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const dayDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(dayDir, { recursive: true });
+    const past = new Date('2020-01-01T00:00:00Z');
+    const later = path.join(dayDir, 'rollout-z.jsonl');
+    for (const [name, turn] of [['rollout-a.jsonl', 'turn-first'], ['rollout-z.jsonl', 'turn-second']] as const) {
+      const file = path.join(dayDir, name);
+      await fs.writeFile(file, completedTurn().replaceAll('turn-1', turn), 'utf8');
+      await fs.utimes(file, past, past);
+    }
+    sortedReads.add(path.resolve(dayDir));
+    failOpenOnCount.set(path.resolve(later), 3);
+    const first = await createDormantInput(root);
+    await expect(first.input.start()).rejects.toThrow(/EACCES/);
+    await first.stateStore.save();
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const input = new CodexTranscriptInput({
+      stateStore,
+      sessionDir,
+      wakeupDir: path.join(root, 'wakeups'),
+      spanContextDir: path.join(root, 'span-contexts'),
+      pollIntervalMs: 60_000,
+    });
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', batch => entries.push(...batch));
+    failOpenOnCount.clear();
+    try {
+      expect(stateStore.get(input.id).extra?.baselineUnfinished).toBe(true);
+      await input.start();
+      await runInputCycle(input);
+      expect(responsesForTurn(entries, 'turn-first')).toEqual([]);
+      expect(responsesForTurn(entries, 'turn-second')).toEqual([]);
       expect(stateStore.get(input.id).extra?.isBaselineInit).toBe(true);
     } finally {
       await input.stop();

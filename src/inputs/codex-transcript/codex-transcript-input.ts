@@ -340,7 +340,7 @@ export class CodexTranscriptInput extends BaseInput {
     }
     if (!isBaselineInit && this.baselinePendingSince === 0) this.baselinePendingSince = startedAt;
     const pendingSinceAtEntry = this.baselinePendingSince;
-    if (!isBaselineInit && !this.defaultScanComplete && !baselineUnfinished) {
+    if (!isBaselineInit && !baselineUnfinished) {
       this.stateStore.update(this.id, {
         extra: { baselineUnfinished: true, baselinePendingSince: this.baselinePendingSince },
       });
@@ -364,13 +364,7 @@ export class CodexTranscriptInput extends BaseInput {
     }
     this.baselinePending = !isBaselineInit && !this.defaultScanComplete;
     if (!this.baselinePending) this.baselinePendingSince = 0;
-    if (!isBaselineInit && this.defaultScanComplete) {
-      this.stateStore.update(this.id, {
-        extra: baselineUnfinished
-          ? { isBaselineInit: true, baselineUnfinished: false, baselinePendingSince: 0 }
-          : { isBaselineInit: true },
-      });
-    }
+    if (!isBaselineInit && this.defaultScanComplete) this.completeBaselineInit();
     await Promise.all([
       fs.mkdir(this.wakeupDir, { recursive: true }),
       fs.mkdir(this.spanContextDir, { recursive: true }),
@@ -505,13 +499,7 @@ export class CodexTranscriptInput extends BaseInput {
       emittedCount += await this.processFile(filePath);
     }
     if (fullScan) {
-      if (this.baselinePending && this.defaultScanComplete) {
-        this.stateStore.update(this.id, {
-          extra: { isBaselineInit: true, baselineUnfinished: false, baselinePendingSince: 0 },
-        });
-        this.baselinePending = false;
-        this.baselinePendingSince = 0;
-      }
+      if (this.baselinePending && this.defaultScanComplete) this.completeBaselineInit();
       emittedCount += await this.retryPendingAgentResults();
     }
     this.reportSubagentLinks();
@@ -597,6 +585,17 @@ export class CodexTranscriptInput extends BaseInput {
       return;
     }
     this.rolloutIdleSnapshot.set(filePath, { ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs });
+  }
+
+  private completeBaselineInit(): void {
+    const current = this.stateStore.get(this.id);
+    const extra = { ...(current.extra ?? {}) };
+    delete extra.baselineUnfinished;
+    delete extra.baselinePendingSince;
+    extra.isBaselineInit = true;
+    this.stateStore.set(this.id, { ...current, extra });
+    this.baselinePending = false;
+    this.baselinePendingSince = 0;
   }
 
   private async existedBeforeBaseline(filePath: string): Promise<boolean> {
