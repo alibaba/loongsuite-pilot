@@ -1,4 +1,5 @@
 //! Standard operation audit events and observed delegation receipts.
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use indexmap::IndexMap;
@@ -115,12 +116,20 @@ pub(super) fn append_invocations(
     entries: Vec<AgentActivityEntry>,
     spawns: &[CodexSpawnDescriptor],
 ) -> Vec<AgentActivityEntry> {
-    let mut output = Vec::new();
+    if spawns.is_empty() {
+        return entries;
+    }
+
+    let mut output = Vec::with_capacity(entries.len());
     for original in entries {
         let works: Vec<_> = spawns
             .iter()
             .filter(|work| original.tool_call_id.as_deref() == Some(&work.parent_tool_call_id))
             .collect();
+        if works.is_empty() {
+            output.push(original);
+            continue;
+        }
         let mut fields = entry_to_object(&original);
         if works.len() == 1 {
             if let Some(invocation) = &works[0].invocation_id {
@@ -178,15 +187,11 @@ pub(super) fn append_invocations(
     }
     output
 }
-pub(super) fn with_pending_dispatches(
-    turn: &CodexExtractedTranscriptTurn,
+pub(super) fn with_pending_dispatches<'a>(
+    turn: &'a CodexExtractedTranscriptTurn,
     records: &[CodexTranscriptSourceRecord],
-) -> CodexExtractedTranscriptTurn {
-    let known: BTreeSet<_> = turn
-        .steps
-        .iter()
-        .flat_map(|step| step.tools.iter().map(|tool| tool.call_id.as_str()))
-        .collect();
+) -> Cow<'a, CodexExtractedTranscriptTurn> {
+    let mut known = None;
     let mut pending: IndexMap<String, CodexTranscriptTool> = IndexMap::new();
     for source in records {
         if source.record.get("type").and_then(Value::as_str) != Some("response_item") {
@@ -195,11 +200,7 @@ pub(super) fn with_pending_dispatches(
         let Some(payload) = source.record.get("payload") else {
             continue;
         };
-        let Some(call) = payload
-            .get("call_id")
-            .and_then(Value::as_str)
-            .filter(|call| !known.contains(call))
-        else {
+        let Some(call) = payload.get("call_id").and_then(Value::as_str) else {
             continue;
         };
         if payload["type"] == "function_call" {
@@ -210,6 +211,15 @@ pub(super) fn with_pending_dispatches(
                 name.rsplit(['.', '/']).next(),
                 Some("spawn_agent" | "followup_task" | "send_input")
             ) {
+                continue;
+            }
+            let known = known.get_or_insert_with(|| {
+                turn.steps
+                    .iter()
+                    .flat_map(|step| step.tools.iter().map(|tool| tool.call_id.as_str()))
+                    .collect::<BTreeSet<_>>()
+            });
+            if known.contains(call) {
                 continue;
             }
             pending.insert(
@@ -230,25 +240,27 @@ pub(super) fn with_pending_dispatches(
             }
         }
     }
-    let mut output = turn.clone();
-    if !pending.is_empty() {
-        output.steps.push(CodexTranscriptStep {
-            started_at_ms: pending
-                .values()
-                .map(|tool| tool.started_at_ms)
-                .fold(f64::INFINITY, f64::min),
-            response_at_ms: turn.terminal_at_ms,
-            has_response_evidence: false,
-            completed_at_ms: turn.terminal_at_ms,
-            response_id: None,
-            input_messages: None,
-            reasoning: Vec::new(),
-            tools: pending.into_values().collect(),
-            token_usage: None,
-            final_text: None,
-        });
+    if pending.is_empty() {
+        return Cow::Borrowed(turn);
     }
-    output
+
+    let mut output = turn.clone();
+    output.steps.push(CodexTranscriptStep {
+        started_at_ms: pending
+            .values()
+            .map(|tool| tool.started_at_ms)
+            .fold(f64::INFINITY, f64::min),
+        response_at_ms: turn.terminal_at_ms,
+        has_response_evidence: false,
+        completed_at_ms: turn.terminal_at_ms,
+        response_id: None,
+        input_messages: None,
+        reasoning: Vec::new(),
+        tools: pending.into_values().collect(),
+        token_usage: None,
+        final_text: None,
+    });
+    Cow::Owned(output)
 }
 pub(super) struct ResultContext<'a> {
     pub receiving_session: &'a str,
@@ -743,8 +755,7 @@ mod tests {
             let original = entry(name);
             let output = append_invocations(vec![original.clone()], &[]);
             assert_eq!(output.len(), 1);
-            assert_eq!(output[0].event_name, original.event_name);
-            assert_eq!(output[0].event_id, original.event_id);
+            assert_eq!(entry_to_object(&output[0]), entry_to_object(&original));
         }
     }
 

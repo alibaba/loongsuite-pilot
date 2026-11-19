@@ -16,7 +16,8 @@ use crate::normalization::{build_agent_activity_entry, is_reserved_key};
 use crate::types::{AgentActivityEntry, AgentEventName};
 
 use super::super::builder::{
-    build_codex_transcript_segment, next_input_messages_for_step, CodexTranscriptBuildOptions,
+    build_codex_transcript_segment, build_codex_transcript_steps, next_input_messages_for_step,
+    CodexTranscriptBuildOptions,
 };
 use super::super::checkpoint::{
     checkpoint_to_value, create_active_turn, empty_checkpoint, new_pending_terminal,
@@ -1338,13 +1339,14 @@ impl<'a> CodexTranscriptEngine<'a> {
                 }
             }
         }
+        let source_record_count = records.items.len();
         let mut sources: Vec<CodexTranscriptSourceRecord> = records
             .items
-            .iter()
+            .into_iter()
             .map(|line| CodexTranscriptSourceRecord {
                 start_offset: line.start_offset,
                 end_offset: line.end_offset,
-                record: line.record.clone(),
+                record: line.record,
             })
             .collect();
         let upload_mode = self.body.upload_mode;
@@ -1411,7 +1413,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 entries: Vec::new(),
                 consumed_end_offset: active.start_offset,
                 diagnostics: Diagnostics {
-                    source_record_count: records.items.len(),
+                    source_record_count,
                 },
             });
         };
@@ -1448,15 +1450,13 @@ impl<'a> CodexTranscriptEngine<'a> {
         } else {
             extraction.committed_step_count
         };
-        let mut committed = extraction.turn.clone();
-        if closed != extraction.turn.steps.len() {
-            committed.steps.truncate(closed);
-        }
+        let committed_steps = &extraction.turn.steps[..closed];
         let input_context = self
             .resolve_input_context(rt, file_path, checkpoint, meta.as_ref())
             .await?;
-        let mut built = build_codex_transcript_segment(
-            &committed,
+        let mut built = build_codex_transcript_steps(
+            &extraction.turn,
+            committed_steps,
             &CodexTranscriptBuildOptions {
                 include_prompt: checkpoint
                     .active_turn
@@ -1464,7 +1464,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     .is_none_or(|active| !active.emitted_prompt),
                 start_step_number: step_start,
                 input_context,
-                context_step_count: Some(committed.steps.len()),
+                context_step_count: Some(closed),
             },
         );
         if let (Some(meta), Some(active)) = (meta.as_ref(), checkpoint.active_turn.as_mut()) {
@@ -1620,7 +1620,8 @@ impl<'a> CodexTranscriptEngine<'a> {
                 active.emitted_trace_id = Some(trace_id);
             }
         }
-        let mut ready = built.entries.clone();
+        let built_entry_count = built.entries.len();
+        let mut ready = built.entries;
         if terminal
             && (!ready.is_empty()
                 || checkpoint
@@ -1648,12 +1649,13 @@ impl<'a> CodexTranscriptEngine<'a> {
                 ready.push(marker);
             }
         }
+        let ready_entry_count = ready.len();
         let filtered = if let Some(active) = checkpoint.active_turn.as_mut() {
-            filter_new_segment_entries(ready.clone(), active)
+            filter_new_segment_entries(ready, active)
         } else {
             SegmentFilterResult {
-                input_entry_count: ready.len(),
-                entries: ready.clone(),
+                input_entry_count: ready_entry_count,
+                entries: ready,
                 deduplicated_entry_count: 0,
                 rejected_entry_count: 0,
             }
@@ -1667,13 +1669,13 @@ impl<'a> CodexTranscriptEngine<'a> {
         } = filtered;
         if terminal && entries.is_empty() {
             let diagnostics = json!({
-                "sourceRecordCount": records.items.len(),
+                "sourceRecordCount": source_record_count,
                 "stepCount": extraction.turn.steps.len(),
                 "toolCount": extraction.turn.steps.iter().map(|step| step.tools.len()).sum::<usize>(),
                 "tokenUsageCount": extraction.turn.steps.iter().filter(|step| step.token_usage.is_some()).count(),
                 "unmatchedTokenUsageCount": extraction.turn.unmatched_token_usages.len(),
-                "builtEntryCount": built.entries.len(),
-                "readyEntryCount": ready.len(),
+                "builtEntryCount": built_entry_count,
+                "readyEntryCount": ready_entry_count,
                 "deduplicatedEntryCount": deduplicated_entry_count,
                 "rejectedEntryCount": rejected_entry_count,
                 "emittedEntryCount": entries.len(),
@@ -1685,7 +1687,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 "terminalStatus": extraction.turn.status.as_str(),
                 "diagnostics": diagnostics,
             });
-            if built.entries.is_empty() {
+            if built_entry_count == 0 {
                 rt.debug(
                     "processed terminal Codex turn without observable entries",
                     meta.as_object(),
@@ -1762,7 +1764,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             entries: output,
             consumed_end_offset: consumed,
             diagnostics: Diagnostics {
-                source_record_count: records.items.len(),
+                source_record_count,
             },
         })
     }

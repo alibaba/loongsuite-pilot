@@ -54,6 +54,14 @@ pub fn build_codex_transcript_segment(
     turn: &CodexExtractedTranscriptTurn,
     opts: &CodexTranscriptBuildOptions,
 ) -> CodexTranscriptBuildResult {
+    build_codex_transcript_steps(turn, &turn.steps, opts)
+}
+
+pub(super) fn build_codex_transcript_steps(
+    turn: &CodexExtractedTranscriptTurn,
+    steps: &[CodexTranscriptStep],
+    opts: &CodexTranscriptBuildOptions,
+) -> CodexTranscriptBuildResult {
     let trace_id = hash_id(
         &[
             turn.session_id.as_str(),
@@ -110,8 +118,8 @@ pub fn build_codex_transcript_segment(
     let mut input_context = opts
         .input_context
         .clone()
-        .unwrap_or_else(|| initial_input_context(turn));
-    let context_step_count = opts.context_step_count.unwrap_or(turn.steps.len());
+        .unwrap_or_else(|| initial_input_context(turn, steps));
+    let context_step_count = opts.context_step_count.unwrap_or(steps.len());
     let mut next_input_context = input_context.clone();
 
     if opts.include_prompt && turn.prompt_ready {
@@ -145,7 +153,7 @@ pub fn build_codex_transcript_segment(
         }
     }
 
-    for (index, step) in turn.steps.iter().enumerate() {
+    for (index, step) in steps.iter().enumerate() {
         let step_number = opts.start_step_number + index as u64;
         let step_number_text = step_number.to_string();
         let step_id = format!("{turn_id}:s{step_number}");
@@ -222,7 +230,7 @@ pub fn build_codex_transcript_segment(
         extend_shared_llm(&mut request, turn);
         records.push(build_entry(request));
 
-        let terminal_step = index + 1 == turn.steps.len();
+        let terminal_step = index + 1 == steps.len();
         let messages = response_messages(turn, step, terminal_step);
         let mut response = base.clone();
         response.insert("timestamp".into(), json_ms(step.response_at_ms));
@@ -284,22 +292,26 @@ pub fn build_codex_transcript_segment(
     }
 }
 
-fn initial_input_context(turn: &CodexExtractedTranscriptTurn) -> CodexTranscriptInputContext {
-    let delta = if turn
-        .steps
+fn initial_input_context(
+    turn: &CodexExtractedTranscriptTurn,
+    steps: &[CodexTranscriptStep],
+) -> CodexTranscriptInputContext {
+    let prompt;
+    let delta: &[JsonValue] = if let Some(messages) = steps
         .first()
-        .and_then(|step| step.input_messages.as_ref())
-        .is_some_and(|messages| !messages.is_empty())
+        .and_then(|step| step.input_messages.as_deref())
+        .filter(|messages| !messages.is_empty())
     {
-        turn.steps[0].input_messages.clone().unwrap_or_default()
+        messages
     } else if !turn.input_messages.is_empty() {
-        turn.input_messages.clone()
-    } else if let Some(prompt) = &turn.prompt {
-        vec![json!({ "role": "user", "parts": [{ "type": "text", "content": prompt }] })]
+        turn.input_messages.as_slice()
+    } else if let Some(text) = &turn.prompt {
+        prompt = [json!({ "role": "user", "parts": [{ "type": "text", "content": text }] })];
+        &prompt
     } else {
-        Vec::new()
+        &[]
     };
-    context_from_messages(&initial_input_hash(), Some(&Vec::new()), &delta)
+    context_from_messages(&initial_input_hash(), Some(&Vec::new()), delta)
 }
 
 fn advance_input_context(

@@ -12,7 +12,7 @@ mod wakeup;
 use wakeup::{WakeupState, WakeupWatcher};
 
 use std::path::Path;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -55,6 +55,7 @@ pub struct CodexTranscriptInput {
 }
 
 type BatchHandler = Arc<dyn Fn(&[AgentActivityEntry]) + Send + Sync>;
+type OwnedBatchHandler = Box<dyn Fn(Vec<AgentActivityEntry>) + Send + Sync>;
 #[cfg(test)]
 type RecoveryClock = Arc<dyn Fn() -> f64 + Send + Sync>;
 #[cfg(test)]
@@ -204,6 +205,7 @@ pub struct CodexTranscriptBody {
     pub(super) uri_cache: Mutex<LruMap<crate::multimodal::types::UriResult>>,
     pub(super) shared: Mutex<Shared>,
     batch_handlers: Mutex<Vec<BatchHandler>>,
+    owned_batch_handler: OnceLock<OwnedBatchHandler>,
     host: Mutex<Option<Weak<HostedInput<CodexTranscriptBody>>>>,
     watcher_stop: Mutex<Option<WakeupWatcher>>,
     wakeup_signal: Arc<tokio::sync::Notify>,
@@ -288,6 +290,7 @@ impl CodexTranscriptInput {
                 main541_retries: 0,
             }),
             batch_handlers: Mutex::new(Vec::new()),
+            owned_batch_handler: OnceLock::new(),
             host: Mutex::new(None),
             watcher_stop: Mutex::new(None),
             wakeup_signal: Arc::new(tokio::sync::Notify::new()),
@@ -341,6 +344,23 @@ impl CodexTranscriptInput {
         on_delta: impl Fn(&crate::inputs::base::InputRuntimeDelta) + Send + Sync + 'static,
     ) {
         self.on_entries(on_entries);
+        self.inner.on_runtime_delta(on_delta);
+    }
+
+    /// The SDK owns this cycle and applies its own memory and delivery limits.
+    pub(crate) fn bind_owned_collector(
+        &self,
+        on_entries: impl Fn(Vec<AgentActivityEntry>) + Send + Sync + 'static,
+        on_delta: impl Fn(&crate::inputs::base::InputRuntimeDelta) + Send + Sync + 'static,
+    ) {
+        assert!(
+            self.inner
+                .body
+                .owned_batch_handler
+                .set(Box::new(on_entries))
+                .is_ok(),
+            "owned batch handler already registered"
+        );
         self.inner.on_runtime_delta(on_delta);
     }
 
@@ -663,7 +683,19 @@ impl CodexTranscriptBody {
         f(&mut guard)
     }
 
-    pub(super) fn emit_batches(&self, entries: Vec<AgentActivityEntry>) -> usize {
+    pub(super) fn emit_batches(&self, mut entries: Vec<AgentActivityEntry>) -> usize {
+        if let Some(handler) = self.owned_batch_handler.get() {
+            let count = entries.len();
+            if count > 0 {
+                for entry in &mut entries {
+                    crate::multimodal::attach_multimodal_metadata_for_entry(entry);
+                }
+                // The outbox serializes these entries and enforces encoded sizes.
+                handler(entries);
+            }
+            return count;
+        }
+
         let handlers = self
             .batch_handlers
             .lock()
