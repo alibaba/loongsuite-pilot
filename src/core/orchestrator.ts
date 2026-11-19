@@ -439,6 +439,8 @@ export class Orchestrator extends EventEmitter {
       agentsConfig: this.config.agents,
       slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
       cmsWorkspace: this.config.cms?.workspace ?? '',
+      hostSn: this.config.hostSn,
+      hostIdentityTags: this.config.hostIdentityTags,
       // Same condition as the updater watchdog above, deliberately: whether an updater is
       // supposed to exist decides both whether we restart it and whether its absence is
       // worth an alarm. Auto-update resolves to disabled whenever no package source is
