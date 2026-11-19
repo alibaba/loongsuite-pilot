@@ -85,6 +85,8 @@ impl<V> OrderedMap<V> {
     }
 }
 
+mod snapshot_file;
+
 mod json_file {
     use std::fmt;
     use std::path::{Path, PathBuf};
@@ -312,9 +314,7 @@ mod json_file {
             JVal::Bool(true) => out.push_str("true"),
             JVal::Bool(false) => out.push_str("false"),
             JVal::Number(number) => out.push_str(&number.to_string()),
-            JVal::String(value) => {
-                out.push_str(&serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned()))
-            }
+            JVal::String(value) => write_string(out, value),
             JVal::Array(items) if items.is_empty() => out.push_str("[]"),
             JVal::Array(items) => {
                 out.push_str("[\n");
@@ -344,13 +344,26 @@ mod json_file {
                 out.push_str(",\n");
             }
             push_indent(out, indent + 1);
-            out.push_str(&serde_json::to_string(key).expect("JSON key"));
+            write_string(out, key);
             out.push_str(": ");
             write_pretty(out, value, indent + 1);
         }
         out.push('\n');
         push_indent(out, indent);
         out.push('}');
+    }
+
+    pub(super) fn write_string(out: &mut String, value: &str) {
+        if value
+            .bytes()
+            .any(|byte| byte < 0x20 || matches!(byte, b'"' | b'\\'))
+        {
+            out.push_str(&serde_json::to_string(value).expect("JSON string"));
+        } else {
+            out.push('"');
+            out.push_str(value);
+            out.push('"');
+        }
     }
 
     fn push_indent(out: &mut String, levels: usize) {

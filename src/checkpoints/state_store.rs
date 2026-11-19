@@ -815,7 +815,15 @@ impl StateStore {
                     Step::Done(std::mem::take(&mut data.waiters), Err(error))
                 } else if data.output_holds > 0 {
                     Step::Wait
-                } else if data.persisted_revision >= data.revision {
+                } else if data.persisted_revision >= data.revision
+                    || (data.persisted_revision > 0
+                        && (!data.scoped_holds.is_empty() || !data.scoped_failures.is_empty())
+                        && !data.input_revisions.iter().any(|(id, revision)| {
+                            *revision > data.persisted_revision && !scoped_blocked(&data, id)
+                        }))
+                {
+                    // Only held mutations remain. The durable view is already on
+                    // disk. Keep their revisions outstanding for acceptance.
                     data.flushing = false;
                     Step::Done(std::mem::take(&mut data.waiters), Ok(()))
                 } else {
@@ -844,12 +852,19 @@ impl StateStore {
                     }
                     let mut journal_sources = OrderedMap::default();
                     for (id, state) in data.states.iter() {
-                        if journal_namespace(id).is_some() && !scoped_blocked(&data, id) {
-                            journal_sources.insert(id.to_owned(), state.clone());
+                        if journal_namespace(id).is_some() {
+                            let visible = if scoped_blocked(&data, id) {
+                                data.persisted_journal_sources.get(id)
+                            } else {
+                                Some(state)
+                            };
+                            if let Some(visible) = visible {
+                                journal_sources.insert(id.to_owned(), visible.clone());
+                            }
                         }
                     }
                     for (id, state) in data.persisted_journal_sources.iter() {
-                        if scoped_blocked(&data, id) {
+                        if !data.states.contains(id) && scoped_blocked(&data, id) {
                             journal_sources.insert(id.to_owned(), state.clone());
                         }
                     }
@@ -919,21 +934,21 @@ impl StateStore {
         // The snapshot owns immutable InputState fields. Serialize it outside
         // the store lock and bound staging to one chunk plus a single input.
         json_file::write_atomic(&self.file_path, |tmp| async move {
-            use tokio::io::AsyncWriteExt;
-            let mut file = tokio::fs::File::create(tmp).await?;
+            let mut file =
+                super::snapshot_file::SnapshotFile::create(&self.file_path, &tmp).await?;
             let mut text = String::from("{");
             let mut nonempty = false;
             for (id, state) in entries() {
                 append_state(&mut text, id, state, nonempty);
                 nonempty = true;
                 if text.len() >= 128 * 1024 {
-                    file.write_all(text.as_bytes()).await?;
+                    file.append(text.as_bytes()).await?;
                     text.clear();
                 }
             }
             text.push_str(if nonempty { "\n}\n" } else { "}\n" });
-            file.write_all(text.as_bytes()).await?;
-            file.flush().await
+            file.append(text.as_bytes()).await?;
+            file.finish().await
         })
         .await
     }
@@ -1006,7 +1021,7 @@ fn append_state(text: &mut String, id: &str, state: &InputState, comma: bool) {
         text.push(',');
     }
     text.push_str("\n  ");
-    text.push_str(&serde_json::to_string(id).expect("JSON key"));
+    json_file::write_string(text, id);
     text.push_str(": ");
     json_file::write_fields(text, &state.fields, 1);
 }
@@ -1500,6 +1515,28 @@ mod output_acceptance_tests {
         store.set_write_hook(|_, _| async { anyhow::bail!("idle scan rewrote checkpoint") });
         store.begin_output_for("codex-transcript").finish(Ok(()));
         store.save().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unrelated_poll_does_not_rewrite_a_held_only_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input-state.json");
+        let store = Arc::new(StateStore::new(&path));
+        let key = "codex-aborted-turn:rollout";
+        store.set_offset(key, 8.0);
+        store.save().await.unwrap();
+        let hold = store.begin_output_for("codex-aborted-turn");
+        store.set_offset(key, 16.0);
+        store.set_write_hook(|_, _| async { anyhow::bail!("unexpected full snapshot") });
+        store.save_for("qoder-trace").await.unwrap();
+        assert!(!store.is_persisted(key, None));
+        hold.finish(Ok(()));
+        assert!(!store.is_persisted(key, None));
+        *store.write_hook.lock().unwrap() = None;
+        store.save().await.unwrap();
+        let restored = StateStore::new(path);
+        restored.load().await;
+        assert_eq!(restored.get_offset(key), 16.0);
     }
 
     #[tokio::test]
