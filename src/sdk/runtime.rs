@@ -506,11 +506,11 @@ fn run_agent(
     let capture_codex = {
         let capture_queue = queue.clone();
         let buffer = buffer.clone();
-        move |entries: &[AgentActivityEntry]| {
+        move |entries: Vec<AgentActivityEntry>| {
             let limit = capture_queue.options.read().unwrap().queue_memory_bytes;
             let mut cycle = buffer.lock().unwrap();
-            if cycle.reserve_batch(entries, limit) {
-                cycle.entries.extend_from_slice(entries);
+            if cycle.reserve_batch(&entries, limit) {
+                cycle.entries.extend(entries);
             }
         }
     };
@@ -541,7 +541,7 @@ fn run_agent(
         if let Some(policy) = codex_workspace_policy {
             input.set_collector_workspace_policy(policy);
         }
-        input.bind_collector(capture_codex, record_delta);
+        input.bind_owned_collector(capture_codex, record_delta);
         bind(
             &input.inner,
             manager.clone(),
@@ -580,7 +580,8 @@ fn run_agent(
         if let Some(policy) = codex_workspace_policy {
             input.set_collector_workspace_policy(policy);
         }
-        input.bind_collector(capture_codex, record_delta);
+        input.inner.set_owned_entries_handler(capture_codex);
+        input.inner.on_runtime_delta(record_delta);
         bind(
             &input.inner,
             manager.clone(),
