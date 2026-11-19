@@ -41,12 +41,16 @@ impl Collector {
         }
     }
     pub fn apply(&mut self, policy: &Policy) -> anyhow::Result<()> {
+        let mut plans = policy.agents.clone();
+        if let Some(recovery) = &policy.codex_recovery {
+            plans.insert("codex-recovery".into(), recovery.clone());
+        }
         let delivery_changed = *self.queue.options.read().unwrap() != policy.delivery;
         let removed: Vec<_> = self
             .agents
             .iter()
             .filter(|(id, old)| {
-                policy.agents.get(*id) != Some(&old.plan)
+                plans.get(*id) != Some(&old.plan)
                     || (delivery_changed
                         && old
                             .report
@@ -64,13 +68,13 @@ impl Collector {
             }
         }
         self.queue.update(policy.delivery.clone());
-        for (id, plan) in &policy.agents {
-            if !self.agents.contains_key(id) {
+        for (id, plan) in plans {
+            if !self.agents.contains_key(&id) {
                 self.agents.insert(
-                    id.clone(),
+                    id,
                     Agent::start(
                         &self.init,
-                        plan.clone(),
+                        plan,
                         self.queue.clone(),
                         self.global_stop.clone(),
                     )?,
@@ -80,7 +84,7 @@ impl Collector {
         Ok(())
     }
     pub fn snapshot(&self) -> Value {
-        json!(self.agents.iter().map(|(id,agent)|json!({"agent":id,"profile":agent.plan.profile,"status":agent.report.lock().unwrap().clone()})).collect::<Vec<_>>())
+        json!(self.agents.values().map(|agent|json!({"agent":agent.plan.agent,"profile":agent.plan.profile,"status":agent.report.lock().unwrap().clone()})).collect::<Vec<_>>())
     }
     pub fn dataflow(&self) -> crate::metrics::DataflowSnapshot {
         let mut flow = crate::metrics::DataflowSnapshot::default();
@@ -398,8 +402,21 @@ fn run_agent(
             roots.push(path);
         }
     }
-    // Resource files and another source's SDK state are not collection
-    // capabilities. Inputs only need their own checkpoint/wakeup namespace.
+    // Recovery may consult its paired primary collector's Hook markers. Its
+    // checkpoint and diagnostics stay within its own SDK-owned namespace.
+    let recovery_hook_markers = plan
+        .codex_recovery_wakeup_namespace
+        .as_ref()
+        .map(|namespace| {
+            init.data_dir
+                .join("sources")
+                .join(namespace)
+                .join("state/codex/transcript-wakeups")
+        });
+    if let Some(markers) = &recovery_hook_markers {
+        source_access::private_path(markers)?;
+        roots.push(markers.clone());
+    }
     roots.push(state_dir.canonicalize()?);
     let scope = SourceScope::new(roots, plan.max_files, plan.max_read_bytes);
     scope.set_log(state_dir.join("collector.log"));
@@ -568,14 +585,19 @@ fn run_agent(
             CodexAbortedTurnInputOptions {
                 state_store: store.clone(),
                 session_dir: source_path("transcript"),
-                hook_state_dir: Some(host_path("state/codex/sessions", "sessions")),
+                hook_state_dir: Some(recovery_hook_markers.as_ref().map_or_else(
+                    || host_path("state/codex/sessions", "sessions"),
+                    |path| path.to_string_lossy().into_owned(),
+                )),
                 diagnostic_dir: Some(host_path("logs/diagnostics", "diagnostics")),
                 hook_gap_grace_ms: None,
                 poll_interval_ms: Some(plan.poll_interval_ms),
             },
-            plan.pilot_host
-                .as_ref()
-                .is_some_and(|host| host.codex_rollout_owns_interrupted_turns),
+            recovery_hook_markers.is_some()
+                || plan
+                    .pilot_host
+                    .as_ref()
+                    .is_some_and(|host| host.codex_rollout_owns_interrupted_turns),
         ));
         if let Some(policy) = codex_workspace_policy {
             input.set_collector_workspace_policy(policy);

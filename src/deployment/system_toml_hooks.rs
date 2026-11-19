@@ -87,7 +87,10 @@ fn marker(def: &AgentDefinition, tag: &str) -> String {
     format!("# {tag} loongsuite-pilot:{}", def.id)
 }
 
-fn render(def: &AgentDefinition) -> Result<(String, String), String> {
+fn render(
+    def: &AgentDefinition,
+    native_codex: Option<(&Path, &Path)>,
+) -> Result<(String, String), String> {
     let hook = def.hook.as_ref().ok_or("Missing managed Hook definition")?;
     let script = &hook.hook_command;
     if !Path::new(script).is_absolute() || script.chars().any(char::is_control) {
@@ -109,7 +112,18 @@ fn render(def: &AgentDefinition) -> Result<(String, String), String> {
         } else {
             event.clone()
         };
-        let command = serde_json::json!(format!("/bin/bash {quoted} {subcommand}"));
+        let command = if let Some((binary, data)) = native_codex {
+            crate::sdk::agent_hooks::codex_command(
+                binary,
+                data,
+                event,
+                super::hook_strategy::codex_channel(event),
+            )
+            .ok_or("Invalid native Codex system Hook command")?
+        } else {
+            format!("/bin/bash {quoted} {subcommand}")
+        };
+        let command = serde_json::json!(command);
         text.push_str(&format!("[[hooks.{event}]]\nmatcher = \"\"\nhooks = [{{ type = \"command\", command = {command} }}]\n\n"));
     }
     text.push_str(&format!("{}\n", marker(def, "END")));
@@ -175,8 +189,16 @@ fn split_owned<'a>(raw: &'a str, def: &AgentDefinition, owner: &str) -> Result<O
 }
 
 pub(super) fn installed(raw: &str, def: &AgentDefinition) -> Result<bool, String> {
+    installed_with_native(raw, def, None)
+}
+
+pub(super) fn installed_with_native(
+    raw: &str,
+    def: &AgentDefinition,
+    native_codex: Option<(&Path, &Path)>,
+) -> Result<bool, String> {
     parse(raw)?;
-    let (wanted, owner) = render(def)?;
+    let (wanted, owner) = render(def, native_codex)?;
     Ok(split_owned(raw, def, &owner)?.block.replace("\r\n", "\n") == wanted)
 }
 
@@ -198,8 +220,17 @@ pub(super) fn plan(
     def: &AgentDefinition,
     uninstall: bool,
 ) -> Result<Option<String>, String> {
+    plan_with_native(raw, def, uninstall, None)
+}
+
+pub(super) fn plan_with_native(
+    raw: &str,
+    def: &AgentDefinition,
+    uninstall: bool,
+    native_codex: Option<(&Path, &Path)>,
+) -> Result<Option<String>, String> {
     let mut current = parse(raw)?;
-    let (desired, owner) = render(def)?;
+    let (desired, owner) = render(def, native_codex)?;
     let owned = split_owned(raw, def, &owner)?;
     let outside = [owned.before, owned.after].concat();
     let entry = Path::new(&def.hook.as_ref().unwrap().hook_command)

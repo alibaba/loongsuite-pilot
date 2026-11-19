@@ -39,6 +39,7 @@ struct Status {
     phase: Phase,
     version: String,
     agents: Value,
+    codex_hook_deployment: Value,
     error: Option<String>,
 }
 struct Notification {
@@ -115,7 +116,7 @@ impl Instance {
             status["activity_totals"] = json!(&*stats);
             status
         });
-        json!({"schema":2,"instance_id":self.key,"state":state.phase.name(),"desired_version":state.version,"effective_version":state.version,"agents":state.agents,"reason":state.error,
+        json!({"schema":2,"instance_id":self.key,"state":state.phase.name(),"desired_version":state.version,"effective_version":state.version,"agents":state.agents,"codex_hook_deployment":state.codex_hook_deployment,"reason":state.error,
             "delivery":queue.map(|q|q.snapshot()),"interceptor":interceptor,"metrics_scope":"host_process","sdk_callbacks_require_dispatch":true})
     }
     fn notify(&self, start: bool, result: i32) {
@@ -181,6 +182,10 @@ unsafe extern "C" fn start(
             init.resource_dir =
                 super::policy::canonical_candidate(&init.resource_dir).map_err(|_| BAD_ARGUMENT)?;
 
+            if let Some(home) = &mut init.codex_home {
+                *home = super::policy::canonical_candidate(home).map_err(|_| BAD_ARGUMENT)?;
+            }
+
             let policy =
                 Policy::parse(unsafe { json_input(policy)? }, &init).map_err(|_| BAD_ARGUMENT)?;
             let callbacks = Callbacks {
@@ -202,6 +207,7 @@ unsafe extern "C" fn start(
                     phase: Phase::Starting,
                     version: policy.version.clone(),
                     agents: json!([]),
+                    codex_hook_deployment: json!({"state":"disabled"}),
                     error: None,
                 }),
                 callbacks,
@@ -565,6 +571,7 @@ impl Session {
             instance.activated.clone(),
         )?);
         session.collector.apply(policy)?;
+        update_codex_deployment(instance, policy)?;
         Ok(session)
     }
     fn shutdown(&mut self) {
@@ -595,6 +602,19 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+fn update_codex_deployment(instance: &Instance, policy: &Policy) -> anyhow::Result<()> {
+    if let Some(home) = &instance.init.codex_home {
+        let deployment = crate::deployment::reconcile_embedded_codex_hooks(
+            home,
+            &instance.init.data_dir,
+            &instance.init.resource_dir,
+            policy.codex_hook_channel,
+        )?;
+        instance.status.lock().unwrap().codex_hook_deployment = deployment;
+    }
+    Ok(())
 }
 
 fn worker(instance: Arc<Instance>, policy: Policy, receiver: mpsc::Receiver<Command>) {
@@ -652,6 +672,7 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
         instance.status.lock().unwrap().phase = Phase::Running;
     }
     instance.notify(true, if success { OK } else { FAILURE });
+    let mut next_codex_deployment_check = Instant::now();
     loop {
         if let Some(session) = &session {
             instance.status.lock().unwrap().agents = session.collector.snapshot();
@@ -662,7 +683,11 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
                 let result = if instance.stop_requested.load(Ordering::SeqCst) {
                     Err("SDK is stopping".into())
                 } else if let Some(session) = session.as_mut() {
-                    match session.collector.apply(&next) {
+                    match session
+                        .collector
+                        .apply(&next)
+                        .and_then(|()| update_codex_deployment(&instance, &next))
+                    {
                         Ok(()) => {
                             if let Some(hooks) = &session.hooks {
                                 *hooks.settings.write().unwrap() = next.hooks.clone();
@@ -701,7 +726,22 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
                 instance.notify(false, OK);
                 return;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(session) = &session {
+                    let check = policy.codex_hook_channel.is_some()
+                        && Instant::now() >= next_codex_deployment_check
+                        && instance.status.lock().unwrap().codex_hook_deployment["state"]
+                            != "deployed";
+                    if check {
+                        next_codex_deployment_check = Instant::now() + Duration::from_secs(1);
+                        if let Err(error) = update_codex_deployment(&instance, &policy) {
+                            session
+                                .queue
+                                .alarm("SDK_CODEX_HOOK_DEPLOY", &error.to_string());
+                        }
+                    }
+                }
+            }
             Err(_) => return,
         }
     }

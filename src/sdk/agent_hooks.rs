@@ -50,7 +50,8 @@ impl AgentHook {
     ) -> bool {
         let is_codex = self.0 == InterceptorAgent::Codex;
         let codex_event = codex_observe_event(event);
-        let codex_prompt = is_codex && event == "UserPromptSubmit" && channel == "local";
+        let codex_prompt =
+            is_codex && event == "UserPromptSubmit" && matches!(channel, "local" | "cloud");
         if is_codex && (codex_event.is_none() || (channel != "observe" && !codex_prompt)) {
             return false;
         }
@@ -158,6 +159,61 @@ impl AgentHook {
             );
         }
         accepted
+    }
+}
+
+pub(crate) fn codex_command(
+    executable: &Path,
+    data_dir: &Path,
+    event: &str,
+    channel: &str,
+) -> Option<String> {
+    let codex = AgentHook::for_wire_id("codex")?;
+    let supported = match channel {
+        "local" | "cloud" => codex.supports_blocking(event),
+        "observe" => codex_observe_event(event).is_some(),
+        _ => false,
+    };
+    if !supported {
+        return None;
+    }
+    let executable = quote_codex_path(executable)?;
+    let data_dir = quote_codex_path(data_dir)?;
+    Some(format!(
+        "{executable} sdk-hook --channel {channel} --agent codex --event {event} --data-dir {data_dir} --pilot-sdk-managed"
+    ))
+}
+
+pub(crate) fn codex_command_executable(command: &str) -> Option<PathBuf> {
+    let (quoted, _) = command.split_once(" sdk-hook --channel ")?;
+    let executable = if cfg!(windows) {
+        quoted.strip_prefix('"')?.strip_suffix('"')?.to_owned()
+    } else {
+        quoted
+            .strip_prefix('\'')?
+            .strip_suffix('\'')?
+            .replace("'\\''", "'")
+    };
+    let executable = PathBuf::from(executable);
+    (quote_codex_path(&executable).as_deref() == Some(quoted)).then_some(executable)
+}
+
+fn quote_codex_path(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let path = path.to_str()?;
+    if path.chars().any(char::is_control) {
+        return None;
+    }
+    if cfg!(windows) {
+        // cmd.exe expands these even inside a quoted argument.
+        if path.contains(['"', '%', '!']) {
+            return None;
+        }
+        Some(format!("\"{path}\""))
+    } else {
+        Some(format!("'{}'", path.replace('\'', "'\\''")))
     }
 }
 
