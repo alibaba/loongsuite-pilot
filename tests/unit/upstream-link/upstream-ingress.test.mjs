@@ -50,6 +50,16 @@ describe('shared upstream ingress', () => {
     }
   });
 
+  it('links an exact native model request when the host omits the input hook', async () => {
+    bindUpstreamTurn(binding('run-1', { traceparent: TP }, 'openclaw'));
+    const request = { ...entry('run-1', 'openclaw'), 'event.name': 'llm.request' };
+    const stranger = { ...entry('run-2', 'openclaw'), 'event.name': 'llm.request' };
+    await new TraceLinker(new CorrelationStore(path.join(dataDir, 'acp-correlate')), { retries: 0 })
+      .stamp([request, stranger]);
+    expect(request.trace_id).toBe('4bf92f3577b34da6a3ce929d0e0e4736');
+    expect(stranger.trace_id).toBe('local');
+  });
+
   it('allows each process request to claim one native turn on a resumed session', () => {
     const env = { TRACEPARENT: TP, TRACESTATE: 'vendor=value', LOONGSUITE_PILOT_INGRESS_REQUEST_ID: 'request-1' };
     expect(bindProcessUpstreamTurn({ ...binding(), env }).recorded).toBe(true);

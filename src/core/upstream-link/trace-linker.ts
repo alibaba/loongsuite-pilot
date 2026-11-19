@@ -154,13 +154,12 @@ export class TraceLinker {
       return; // already resolved or already attempted (miss)
     }
 
-    // Other events may be metadata-only; their empty text is not a final miss.
-    if (entry['event.name'] !== 'other') return;
-
-    const text = extractUserText(entry);
-    const hash = extractInputHash(entry);
-    // Metadata is not evidence of a user input, including for session fallback.
+    const isInput = entry['event.name'] === 'other';
     const nativeId = nativeTurnId(entry);
+    if (!isInput && (entry['event.name'] !== 'llm.request' || !nativeId)) return;
+
+    const text = isInput ? extractUserText(entry) : '';
+    const hash = isInput ? extractInputHash(entry) : undefined;
     if (!text && !hash && !nativeId) return;
     const isFirstTurn = this.firstTurnBySession.get(sessionKey(entry)) === turnId;
     const agentId = entry['gen_ai.agent.type'];
@@ -170,7 +169,7 @@ export class TraceLinker {
     if (exact && isFirstTurn) this.store.markSessionConsumed(sessionId);
 
     if (!carrier) {
-      if (cacheMisses) this.cache.set(key, { resolved: false });
+      if (isInput && cacheMisses) this.cache.set(key, { resolved: false });
       return;
     }
     const context = extractUpstreamContext(carrier);
