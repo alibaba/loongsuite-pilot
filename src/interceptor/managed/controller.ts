@@ -285,12 +285,13 @@ export class ManagedInterceptor {
   }
 
   private reportProblem(problem: string): void {
-    if (problem === this.lastProblem) return;
-    this.lastProblem = problem;
-    logger.warn('managed interceptor config ignored', { problem, active: this.active });
+    // Every failed load counts; the collector owns alarm cooldown and aggregation.
     reportInterceptorDiagnostic(this.opts.onDiagnostic, {
       code: 'config_rejected', source: 'cache', reason: 'cached interceptor config unreadable or invalid; previous generation kept',
     });
+    if (problem === this.lastProblem) return;
+    this.lastProblem = problem;
+    logger.warn('managed interceptor config ignored', { problem, active: this.active });
   }
 
   private logResolution(pending: string[]): void {

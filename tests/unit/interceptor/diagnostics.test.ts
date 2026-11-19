@@ -1,10 +1,77 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Worker } from 'node:worker_threads';
 import { describe, expect, it, vi } from 'vitest';
+import { managedInterceptorPath } from '../../../src/interceptor/managed/config.js';
+import { ManagedInterceptor } from '../../../src/interceptor/managed/controller.js';
 import { ManagedRuleEngine } from '../../../src/interceptor/managed/engine.js';
 import { ManagedRegexRunner } from '../../../src/interceptor/managed/regex-runner.js';
 import { recordInterceptorDiagnostic, InterceptorAlarmReporter, INTERCEPTOR_ALARM_COOLDOWN_MS } from '../../../src/interceptor/diagnostics.js';
 import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 
 describe('interceptor self-monitoring', () => {
+  it('counts persistent cache rejection across cooldowns and stops reporting after recovery', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'interceptor-cache-diagnostics-'));
+    const manager = new AlarmManager({ ip: '127.0.0.1', version: '1', userId: 'test' });
+    let now = 0;
+    const reporter = new InterceptorAlarmReporter(manager, () => now);
+    const controller = new ManagedInterceptor({ dataDir, onDiagnostic: reporter.record });
+    const file = managedInterceptorPath(dataDir);
+    try {
+      await mkdir(join(dataDir, 'configs', 'managed'), { recursive: true });
+      await writeFile(file, '{invalid');
+      controller.reload();
+      expect(manager.serialize()[0]).toMatchObject({ alarm_type: 'MANAGED_CONFIG_ALARM', alarm_count: '1' });
+      now = 3_000;
+      controller.reload();
+      expect(manager.serialize()).toEqual([]);
+      now = INTERCEPTOR_ALARM_COOLDOWN_MS - 1;
+      controller.reload();
+      expect(manager.serialize()).toEqual([]);
+      now = INTERCEPTOR_ALARM_COOLDOWN_MS;
+      controller.reload();
+      expect(manager.serialize()).toEqual([expect.objectContaining({ alarm_count: '3' })]);
+      now = INTERCEPTOR_ALARM_COOLDOWN_MS + 3_000;
+      controller.reload();
+      expect(manager.serialize()).toEqual([]);
+      now = 2 * INTERCEPTOR_ALARM_COOLDOWN_MS;
+      controller.reload();
+      expect(manager.serialize()).toEqual([expect.objectContaining({ alarm_count: '2' })]);
+      now += 3_000;
+      controller.reload(); // Suppressed fault must not be emitted after recovery.
+      await writeFile(file, JSON.stringify({ interceptor: { rules: [] } }));
+      controller.reload();
+      now = 3 * INTERCEPTOR_ALARM_COOLDOWN_MS;
+      controller.reload();
+      expect(manager.serialize()).toEqual([]);
+    } finally {
+      controller.stop();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('still reports a matching thread that exits unexpectedly', async () => {
+    const regex = new ManagedRegexRunner(5_000);
+    const onDiagnostic = vi.fn();
+    const engine = new ManagedRuleEngine({
+      config: { rules: [{ kind: 'pattern', id: 'r', version: '1', agents: ['qoder'],
+        events: ['UserPromptSubmit'], enforcement: 'enforce', match: 'regex', pattern: '(a+)+$' }] },
+      rules: [], runners: {}, regex, regexTimeoutMs: 5_000, budgetMs: 5_000, onDiagnostic,
+    });
+    try {
+      await regex.test('warm', 'warm');
+      const state = regex as unknown as { worker: Worker; pending: { worker: Worker | null } | null };
+      const worker = state.worker;
+      const pending = engine.evaluate({ agent: 'qoder', event: 'UserPromptSubmit', prompt: 'a'.repeat(32) + '!', raw: {} });
+      await vi.waitFor(() => expect(state.pending?.worker).toBe(worker));
+      await worker.terminate();
+      await expect(pending).resolves.toMatchObject({ action: 'allow', failOpen: true });
+      expect(onDiagnostic).toHaveBeenCalledWith(expect.objectContaining({ code: 'regex_failed', ruleId: 'r' }), 1);
+    } finally {
+      regex.stop();
+    }
+  });
   it('limits repeated faults across rules and versions and carries suppressed counts into the next eligible report', () => {
     const manager = new AlarmManager({ ip: '127.0.0.1', version: '1', userId: 'test' });
     let now = 0;

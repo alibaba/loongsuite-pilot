@@ -27,6 +27,14 @@ export class ManagedRegexTimeoutError extends Error {
   }
 }
 
+/** Normal shutdown cancels matching work without reporting a worker fault. */
+export class ManagedRegexCancelledError extends Error {
+  constructor() {
+    super('managed regex runner stopped');
+    this.name = 'ManagedRegexCancelledError';
+  }
+}
+
 interface RegexReply {
   id?: number;
   matched?: boolean;
@@ -46,12 +54,13 @@ export class ManagedRegexRunner {
   constructor(private readonly timeoutMs = MANAGED_REGEX_TIMEOUT_MS) {}
 
   test(pattern: string, text: string, timeoutMs = this.timeoutMs, onExecuted?: (executionMs: number) => void): Promise<boolean> {
-    if (this.stopped) return Promise.reject(new ManagedRegexTimeoutError());
+    if (this.stopped) return Promise.reject(new ManagedRegexCancelledError());
     // Queue and replacement-thread startup time both count against the request.
     const deadline = Date.now() + Math.max(1, timeoutMs);
     const run = this.tail.then(() => {
+      if (this.stopped) return Promise.reject(new ManagedRegexCancelledError());
       const remaining = deadline - Date.now();
-      if (remaining <= 0 || this.stopped) return Promise.reject(new ManagedRegexTimeoutError());
+      if (remaining <= 0) return Promise.reject(new ManagedRegexTimeoutError());
       return this.runOne(pattern, text, remaining, onExecuted);
     });
     this.tail = run.then(() => undefined, () => undefined);
@@ -60,7 +69,7 @@ export class ManagedRegexRunner {
 
   stop(): void {
     this.stopped = true;
-    this.pending?.reject(new Error('managed regex runner stopped'));
+    this.pending?.reject(new ManagedRegexCancelledError());
     if (this.worker) this.retire(this.worker);
   }
 

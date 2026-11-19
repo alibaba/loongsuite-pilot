@@ -71,9 +71,11 @@ collector 进程内 interceptor HTTP（127.0.0.1）
 
 启用拦截后，本地托管规则缓存不可读或非法时进入 `MANAGED_CONFIG_ALARM`，
 并继续保留内存中上一版有效规则。
+每次实际加载失败都参与告警计数；本地 warning 的文本去重不影响 collector 的冷却和累计次数。
 正则在匹配 Worker 内执行耗时达到 50ms 时产生 `INTERCEPTOR_REGEX_ALARM`（`code=regex_slow`）。
 正则请求超过预算（默认 200ms，包含排队及 Worker 启动时间）时记录 `code=regex_timeout`，
 继续按原有逻辑跳过当前规则；其他匹配线程故障记录 `code=regex_failed`。
+正常停机主动取消的匹配继续 fail-open，不产生线程故障或超时告警。
 
 两类告警级别均为 2，`input_name=interceptor`，`endpoint_name` 为诊断 code。
 `alarm_message` 是 JSON，包含诊断来源、原因分类，以及适用的配置版本、规则 ID/版本、耗时和阈值；

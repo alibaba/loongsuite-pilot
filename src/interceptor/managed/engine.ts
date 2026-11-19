@@ -16,7 +16,7 @@ import {
   type ManagedScriptRule,
   type ManagedShell,
 } from './config.js';
-import { ManagedRegexRunner, ManagedRegexTimeoutError, MANAGED_REGEX_TIMEOUT_MS, MANAGED_REGEX_SLOW_MS } from './regex-runner.js';
+import { ManagedRegexRunner, ManagedRegexCancelledError, ManagedRegexTimeoutError, MANAGED_REGEX_TIMEOUT_MS, MANAGED_REGEX_SLOW_MS } from './regex-runner.js';
 import { parseScriptVerdict, type ScriptRunner } from './runner.js';
 
 const logger = createLogger('ManagedInterceptor');
@@ -115,6 +115,7 @@ export class ManagedRuleEngine implements HookEvaluator {
           continue;
         } catch (err) {
           failed = true;
+          if (err instanceof ManagedRegexCancelledError) continue;
           const timeout = err instanceof ManagedRegexTimeoutError;
           reportInterceptorDiagnostic(this.opts.onDiagnostic, {
             code: timeout ? 'regex_timeout' : 'regex_failed', source: 'regex',
