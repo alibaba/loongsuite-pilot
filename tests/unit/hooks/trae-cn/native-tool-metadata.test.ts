@@ -34,6 +34,21 @@ it('resumes split compressed records and separates concurrent turns in one sessi
       const fields = { tool_name: name, toolcall_id: 'call_' + records.length };
       records.push(record(traceA,'tool execution started', fields), record(traceA,'tool execution started', fields));
     }
+    const parent = '847f3047-50bc-52ae-902b-fc1c6049e676';
+    const child = '19e2e050-31d4-4d99-be08-5efb578b8f79';
+    for (const call of ['first', 'second', 'third', 'unstarted']) {
+      records.push(record(traceA, 'async subagent commit metadata', {
+        conversation_id: '1'.repeat(24), parent_turn_id: traceA.slice(0,24), parent_agent_run_id: parent,
+        toolcall_name: 'Task', async_action: 'run_sub_agent', phase: 'submit_subagent_initial_commit', toolcall_id: call,
+      }));
+      if (call !== 'unstarted') {
+        const start = record(traceA, 'starting SubAgent through commit_results', { toolcall_id: call, agent_run_id: parent });
+        records.push(start, start);
+      }
+    }
+    records.push(record(traceA, '[subagent→parent] detected parent takeover, returning stream', {
+      new_agent_run_id: parent, new_task_id: 'third', source_agent_run_id: child,
+    }));
     records.push(record(traceB,'tool execution started',{ tool_name:'Read', toolcall_id:'call_2' }),
       record(traceA,'chat: runner completed',{turn_id:traceA.slice(0,24)}));
     const compressed = deflateRawSync(Buffer.concat(records));
@@ -48,6 +63,12 @@ it('resumes split compressed records and separates concurrent turns in one sessi
     expect(entries.filter(e => e.trace_id === traceA && e['event.name'] === 'tool.call')
       .map(e => e['gen_ai.tool.name'])).toEqual(['Shell','Shell','Read','Read','Read']);
     expect(entries.filter(e => e.trace_id === traceB)).toHaveLength(1);
+    const children = entries.filter(e => e['gen_ai.agent.scope'] === 'subagent');
+    const parentSpan = entries.find(e => e['gen_ai.agent.invocation.id'] === parent);
+    expect(parentSpan?.parent_span_id).toBe(entries.find(e => e['gen_ai.span.kind'] === 'ENTRY')?.span_id);
+    expect(children.map(e => e['gen_ai.subagent.parent_tool_call.id'])).toEqual(['first', 'second', 'third']);
+    expect(children.map(e => e.parent_span_id)).toEqual(Array(3).fill(parentSpan?.span_id));
+    expect(children.map(e => e['gen_ai.agent.invocation.id'])).toEqual([undefined, undefined, child]);
     expect(new Set(entries.map(e=>e.span_id)).size).toBe(entries.length);
     expect(JSON.stringify(entries)).not.toContain('never-export');
     expect(JSON.stringify(state.get('trae-cn-log:native-turns:'+run))).not.toContain('never-export');

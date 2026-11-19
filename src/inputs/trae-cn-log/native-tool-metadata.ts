@@ -8,17 +8,24 @@ import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { ClientType, type AgentActivityEntry } from '../../types/index.js';
 import { fileIdentity } from '../../utils/file-identity.js';
 
-type Turn = { session: string; turn: string; start: string; calls: string[] };
+type Delegation = { parent: string; call: string; start?: string; end?: string; child?: string };
+type Turn = { session: string; turn: string; start: string; calls: string[]; delegations?: Delegation[] };
 type Turns = Record<string, Turn>;
 const spanId = (trace: string, id: string) => createHash('sha256').update(trace + '/' + id).digest('hex').slice(0, 16);
 const text = (value: unknown) => Buffer.isBuffer(value) ? value.toString('utf8') : '';
 const hexId = /^[a-f0-9]{24}$/;
 
-export function nativeMetadata(record: any, turns: Turns): AgentActivityEntry | undefined {
+const commit = 'async subagent commit metadata';
+const launch = 'starting SubAgent through commit_results';
+const takeover = '[subagent→parent] detected parent takeover, returning stream';
+const runId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+
+function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]): void {
   const fields = record?.fields;
   if (!fields) return;
   const message = text(fields.message);
   if (message !== 'context resolve applied to task request' && message !== 'tool execution started' &&
+      message !== commit && message !== launch && message !== takeover &&
       message !== 'terminal Turn and Inbox transaction committed' && message !== 'chat: runner completed') return;
   const trace = text(fields.trace_id);
   if (!/^[a-f0-9]{32}$/.test(trace)) return;
@@ -43,20 +50,67 @@ export function nativeMetadata(record: any, turns: Turns): AgentActivityEntry | 
     'gen_ai.agent.type': ClientType.TraeCn, 'gen_ai.agent.name': 'trae-cn',
     'gen_ai.system': 'trae', 'agent.trae-cn.source': 'native_metadata',
   };
+  if (message === commit) {
+    const parent = text(fields.parent_agent_run_id);
+    const call = text(fields.toolcall_id);
+    if (text(fields.conversation_id) !== turn.session || text(fields.parent_turn_id) !== turn.turn ||
+        text(fields.toolcall_name) !== 'Task' || text(fields.async_action) !== 'run_sub_agent' ||
+        text(fields.phase) !== 'submit_subagent_initial_commit' || !runId.test(parent) ||
+        !/^[\w.:-]{1,256}$/.test(call)) return;
+    const delegations = turn.delegations ??= [];
+    if (!delegations.some(d => d.call === call)) {
+      const child = text(fields.subagent_agent_run_id);
+      delegations.push({ parent, call, ...(runId.test(child) ? { child } : {}) });
+    }
+    return;
+  }
+  if (message === launch || message === takeover) {
+    const returning = message === takeover;
+    const parent = text(returning ? fields.new_agent_run_id : fields.agent_run_id);
+    const call = text(returning ? fields.new_task_id : fields.toolcall_id);
+    const delegation = turn.delegations?.find(d => d.parent === parent && d.call === call);
+    if (!delegation) return;
+    if (!returning) delegation.start ??= time;
+    else if (delegation.start && runId.test(text(fields.source_agent_run_id))) {
+      delegation.child = text(fields.source_agent_run_id);
+      delegation.end ??= time;
+    }
+    return;
+  }
   if (message === 'tool execution started') {
     const call = text(fields.toolcall_id), tool = text(fields.tool_name);
     if (!/^[\w.:-]{1,256}$/.test(call) || !/^[\w.-]{1,128}$/.test(tool) || turn.calls.includes(call)) return;
     turn.calls.push(call);
     const id = spanId(trace, call);
-    return buildAgentActivityEntry({ ...base, 'event.id': id, 'event.name': 'tool.call', span_id: id,
+    entries.push(buildAgentActivityEntry({ ...base, 'event.id': id, 'event.name': 'tool.call', span_id: id,
       parent_span_id: root, startTimeUnixNano: time, 'gen_ai.span.kind': 'TOOL',
-      'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.call.id': call, 'gen_ai.tool.name': tool });
+      'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.call.id': call, 'gen_ai.tool.name': tool }));
+    return;
   }
   if (turn.turn !== turnId) return;
+  const parents = new Set<string>();
+  for (const delegation of turn.delegations ?? []) {
+    if (!delegation.start) continue;
+    const parentId = spanId(trace, 'agent-run/' + delegation.parent);
+    if (!parents.has(parentId)) {
+      parents.add(parentId);
+      entries.push(buildAgentActivityEntry({ ...base, 'event.id': parentId, 'event.name': 'other',
+        span_id: parentId, parent_span_id: root, startTimeUnixNano: turn.start,
+        'gen_ai.span.kind': 'AGENT', 'gen_ai.operation.name': 'invoke_agent',
+        'gen_ai.agent.invocation.id': delegation.parent }));
+    }
+    const id = spanId(trace, 'delegation/' + delegation.call);
+    entries.push(buildAgentActivityEntry({ ...base, 'event.id': id, 'event.name': 'other',
+      span_id: id, parent_span_id: parentId, startTimeUnixNano: delegation.start,
+      endTimeUnixNano: delegation.end ?? delegation.start, 'gen_ai.span.kind': 'AGENT',
+      'gen_ai.operation.name': 'invoke_agent', 'gen_ai.agent.name': 'subagent', 'gen_ai.agent.scope': 'subagent',
+      'gen_ai.agent.parent.invocation.id': delegation.parent, 'gen_ai.subagent.parent_tool_call.id': delegation.call,
+      ...(delegation.child ? { 'gen_ai.agent.invocation.id': delegation.child } : {}) }));
+  }
   delete turns[trace];
-  return buildAgentActivityEntry({ ...base, 'event.id': root, 'event.name': 'other', span_id: root,
+  entries.push(buildAgentActivityEntry({ ...base, 'event.id': root, 'event.name': 'other', span_id: root,
     startTimeUnixNano: turn.start, 'gen_ai.span.kind': 'ENTRY', 'gen_ai.turn.end': true,
-    'gen_ai.operation.name': 'enter_ai_application_system' });
+    'gen_ai.operation.name': 'enter_ai_application_system' }));
 }
 
 // A live AALG file is a raw DEFLATE stream of concatenated CBOR maps. Keep its
@@ -143,8 +197,7 @@ export class NativeToolMetadata {
           const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, end - stream.offset), stream.offset);
           if (!bytesRead) break;
           stream.visitor = replay ? undefined : record => {
-            const entry = nativeMetadata(record, turns);
-            if (entry) batch.push(entry);
+            nativeMetadata(record, turns, batch);
           };
           await stream.feed(buffer.subarray(0, bytesRead));
         }
