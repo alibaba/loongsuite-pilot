@@ -18,26 +18,7 @@ fn directory(root: &Path) -> PathBuf {
 }
 
 pub(super) fn enqueue(root: &Path, env: &Env, mut event: Obj) -> Result<(), String> {
-    let config = super::super::common::env_get(env, "AGENT_DATA_COLLECTION_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("config.json"));
-    let capture_disabled = match fs::read_to_string(config) {
-        Ok(text) => {
-            let policy: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
-                .map_err(|_| "invalid Cursor capture policy")?;
-            policy
-                .pointer("/agents/cursor/captureMessageContent")
-                .is_some_and(|value| {
-                    value == false
-                        || value
-                            .as_str()
-                            .is_some_and(|text| text.trim().eq_ignore_ascii_case("false"))
-                })
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        Err(_) => return Err("unavailable Cursor capture policy".into()),
-    };
-    if capture_disabled {
+    if super::message_capture_disabled(root, env)? {
         for key in [
             "prompt",
             "text",

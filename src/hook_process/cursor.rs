@@ -712,7 +712,18 @@ fn finish_assembly(
     }
     apply_cursor_cli_resource_context(&mut records, events, conversation_id, variant);
     if !records.is_empty() {
-        let records = filter_workspace_records(env, &records, variant)?;
+        let mut records = filter_workspace_records(env, &records, variant)?;
+        if message_capture_disabled(root, env)? {
+            use crate::normalization::agent_content_policy::remove_message_content_fields;
+            for record in &mut records {
+                remove_message_content_fields(record);
+                if let Some(attributes) =
+                    record.get_mut("attributes").and_then(Value::as_object_mut)
+                {
+                    remove_message_content_fields(attributes);
+                }
+            }
+        }
         if !records.is_empty() {
             let path = root
                 .join("logs")
@@ -725,6 +736,28 @@ fn finish_assembly(
     // The snapshot contains only this assembly's ownership scope. Rewriting
     // it cannot globally consume another generation sharing the conversation.
     journal.rewrite(&compact_remaining(events, &consumed), Some(events))
+}
+
+/// Cursor IDE and CLI share the existing Cursor content-capture setting.
+fn message_capture_disabled(root: &Path, env: &Env) -> Result<bool, String> {
+    let config_path = super::common::env_get(env, "AGENT_DATA_COLLECTION_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("config.json"));
+    let text = match fs::read_to_string(config_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err("unavailable Cursor capture policy".into()),
+    };
+    let policy: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|_| "invalid Cursor capture policy")?;
+    Ok(policy
+        .pointer("/agents/cursor/captureMessageContent")
+        .is_some_and(|value| {
+            value == false
+                || value
+                    .as_str()
+                    .is_some_and(|text| text.trim().eq_ignore_ascii_case("false"))
+        }))
 }
 
 fn compact_remaining(events: &[Value], consumed: &HashSet<String>) -> Vec<Value> {
