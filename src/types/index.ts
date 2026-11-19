@@ -258,6 +258,7 @@ export interface AgentMultimodalConfig {
 }
 
 export interface AgentConfig {
+  userDestinationsOnly?: boolean;
   enabled?: boolean;
   captureMessageContent: boolean;
   multimodal?: AgentMultimodalConfig;
@@ -273,6 +274,7 @@ export interface FlusherConfig {
 
 /** A resolved OTLP backend the flusher exports to (name required for logging). */
 export interface OtlpEndpoint {
+  excludedAgentTypes?: string[];
   name: string;
   endpoint: string;
   headers?: Record<string, string>;
@@ -349,6 +351,7 @@ export interface SlsFlusherConfig {
 }
 
 export interface SlsEndpoint {
+  excludedAgentTypes?: string[];
   /** Unique identifier for this destination. Used in bounded failure-metadata filenames. */
   name: string;
   /** Per-endpoint base URL, e.g. "https://cn-hangzhou.log.aliyuncs.com". */

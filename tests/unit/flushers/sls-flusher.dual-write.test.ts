@@ -107,6 +107,16 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     vi.useRealTimers();
   });
 
+  it('routes a restricted agent only to its allowed destination', async () => {
+    const user = akEndpoint('user', 'https://user.test', 'user');
+    const managed = { ...wtEndpoint('managed', 'https://managed.test', 'managed'), excludedAgentTypes: ['trae-cn'] };
+    const flusher = new SlsFlusher(makeConfig([user, managed]), '/tmp/data');
+    await flusher.send({ ...buildTestEntry(), 'gen_ai.agent.type': 'trae-cn' });
+    await flusher.flush();
+    expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('webtracking-only single endpoint posts via fetch (no AK client)', async () => {
     const flusher = new SlsFlusher(
       makeConfig([wtEndpoint('user', 'https://cn-hangzhou.log.aliyuncs.com', 'p')]),

@@ -371,6 +371,7 @@ export type OtlpExporterFactory = (opts: {
 }) => TraceExporterLike;
 
 interface ResolvedOtlpEndpoint {
+  excludedAgentTypes?: string[];
   name: string;
   url: string;
   headers: Record<string, string>;
@@ -711,6 +712,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     this.exporterFactory = exporterFactory ?? defaultExporterFactory;
     this.endpoints = cfg.endpoints.map((ep, i) => ({
       name: ep.name || `otlp-${i}`,
+      excludedAgentTypes: ep.excludedAgentTypes,
       url: resolveEndpointUrl(ep.endpoint),
       headers: ep.headers ?? {},
       compression: ep.compression === 'none' ? CompressionAlgorithm.NONE : CompressionAlgorithm.GZIP,
@@ -1287,7 +1289,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Fan out to every backend; each endpoint belongs to exactly one serviceName
     // group, so the spans reach each backend once.
     const serviceNames = [...new Set(
-      this.endpoints.map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
+      this.endpointsForAgent(agentType).map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
     )];
     await Promise.all(
       serviceNames.map((serviceName) =>
@@ -1514,7 +1516,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // service names). Each service name owns an independent convert state, so the
     // common single-name case still converts exactly once.
     const serviceNames = [...new Set(
-      this.endpoints.map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
+      this.endpointsForAgent(agentType).map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
     )];
     const results = await Promise.all(
       serviceNames.map((serviceName) => {
@@ -2774,7 +2776,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     let state = this.agentExportStates.get(key);
     if (state) return state;
 
-    const exporters = this.endpoints
+    const exporters = this.endpointsForAgent(agentType)
       .filter((endpoint) => this.resolveEndpointServiceName(endpoint, agentType) === serviceName)
       .map((ep) => ({
         name: ep.name,
@@ -2789,6 +2791,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     state = { exporters };
     this.agentExportStates.set(key, state);
     return state;
+  }
+
+  private endpointsForAgent(agentType: string) {
+    return this.endpoints.filter(endpoint => !endpoint.excludedAgentTypes?.includes(agentType));
   }
 
   private resolveEndpointServiceName(endpoint: ResolvedOtlpEndpoint, agentType: string): string {

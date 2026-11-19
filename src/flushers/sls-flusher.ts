@@ -208,6 +208,7 @@ export class SlsFlusher extends BaseFlusher {
     const agentType = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? 'unknown'));
 
     for (const endpoint of this.config.endpoints) {
+      if (endpoint.excludedAgentTypes?.includes(agentType)) continue;
       const content = endpoint.redact
         ? redactCodeGenerationFields(serialized)
         : serialized;
@@ -232,6 +233,7 @@ export class SlsFlusher extends BaseFlusher {
     let failed = false;
     await this.runWithConcurrency(this.config.endpoints.map(endpoint => async () => {
       if (signal?.aborted) { failed = true; return; }
+      if (endpoint.excludedAgentTypes?.includes('codex')) return;
       const logs = serialized.map(content => this.createQueuedLog(endpoint,
         endpoint.redact ? redactCodeGenerationFields(content) : content, 'codex'));
       const counter = this.endpointCounters.get(endpoint.name);
