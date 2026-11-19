@@ -41,7 +41,7 @@ import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
 import { installSteeredDeliveryObserver } from "./steered-delivery.mjs";
 import { createLegacyHandlers } from "./legacy-adapter.mjs";
 import { createObservationClock } from "./legacy-utils.mjs";
-const upstreamIngress = await import('../../hooks/shared/upstream-ingress.mjs').catch(() => null);
+import { bindProcessUpstreamTurn } from '../../hooks/shared/upstream-ingress.mjs';
 import {
   evaluateInterceptor,
   resolveDataDir,
@@ -1322,7 +1322,7 @@ function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
   if (ctx?.sessionId) run.sessionId = ctx.sessionId;
   if (ctx?.sessionKey) run.sessionKey = ctx.sessionKey;
   if (run.sessionId && !run.cronExecution && !run.announcedWork) {
-    upstreamIngress?.bindProcessUpstreamTurn({
+    bindProcessUpstreamTurn({
       agentId: AGENT_TYPE,
       sessionId: run.sessionId,
       nativeTurnId: run.runId,
