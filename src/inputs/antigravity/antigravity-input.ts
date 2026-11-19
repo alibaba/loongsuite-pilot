@@ -24,6 +24,7 @@ import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-cont
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import { loadDatabaseSync } from '../../utils/node-sqlite.js';
 import {
+  isStrongUsageIdentity,
   readAntigravityConversationDb,
   type AntigravityConversationSnapshot,
   type AntigravityStepInfo,
@@ -53,8 +54,9 @@ const DEFAULT_ROOT_SEGMENTS: Readonly<Record<AntigravityClientType, string>> = {
 
 const MAX_DBS_PER_CYCLE = 16;
 const MAX_TRACKED_SESSIONS = 512;
-const MAX_EMITTED_KEYS_PER_SESSION = 512;
+const MAX_EMITTED_KEYS_PER_SESSION = 1024;
 const MAX_PENDING_TOOL_CALLS_PER_SESSION = 128;
+const BACKLOG_DRAIN_DELAY_MS = 50;
 
 const EVENT_ORDER_WEIGHT: Readonly<Record<string, number>> = {
   other: 0,
@@ -64,6 +66,57 @@ const EVENT_ORDER_WEIGHT: Readonly<Record<string, number>> = {
   'tool.call': 3,
   'tool.result': 4,
 };
+
+const NON_TOOL_RESULT_STEP_TYPES = new Set([
+  'PLANNER_RESPONSE',
+  'USER_INPUT',
+  'SYSTEM_MESSAGE',
+  'CHECKPOINT',
+  'CONVERSATION_HISTORY',
+  'KNOWLEDGE_ARTIFACTS',
+  'TASK_BOUNDARY',
+]);
+
+const IN_PROGRESS_STEP_STATUSES = new Set([
+  'RUNNING',
+  'PENDING',
+  'IN_PROGRESS',
+  'GENERATING',
+  'WAITING',
+]);
+
+function isStepInProgress(step: AntigravityTranscriptStep): boolean {
+  return typeof step.status === 'string' && IN_PROGRESS_STEP_STATUSES.has(step.status.toUpperCase());
+}
+
+function isToolResultStep(step: AntigravityTranscriptStep): boolean {
+  return !NON_TOOL_RESULT_STEP_TYPES.has(step.type);
+}
+
+function isToolErrorStatus(status: string | undefined): boolean {
+  if (!status) return false;
+  const upper = status.toUpperCase();
+  return upper === 'ERROR' || upper === 'CANCELED' || upper === 'CANCELLED';
+}
+
+function recordUsageIdentities(seenKeys: Set<string>, usage: AntigravityUsageEvent): void {
+  const strongIds = usage.identities.filter(isStrongUsageIdentity);
+  if (strongIds.length > 0) {
+    seenKeys.add(usage.key);
+    for (const id of strongIds) seenKeys.add(id);
+  } else {
+    seenKeys.add(usage.key);
+    for (const id of usage.identities) seenKeys.add(id);
+  }
+}
+
+function collectSeedUsageKeys(events: readonly AntigravityUsageEvent[]): string[] {
+  const keys = new Set<string>();
+  for (const event of events) {
+    recordUsageIdentities(keys, event);
+  }
+  return [...keys];
+}
 
 interface PendingToolCall {
   plannerStepIndex: number;
@@ -90,6 +143,8 @@ interface AntigravityCheckpoint {
   schema: 1;
   seeded: boolean;
   evictedWatermarkMtimeMs: number;
+  /** Sessions discovered during initial seed whose DB failed to read transiently. */
+  pendingSeedSessionIds?: string[];
   sessions: Record<string, SessionCheckpoint>;
 }
 
@@ -182,6 +237,7 @@ export class AntigravityInput extends BaseInput {
   private readonly multimodalUploadMode: MultimodalUploadMode;
   private readonly pathToUri?: PathToUriFn;
   private pendingCheckpoint: AntigravityCheckpoint | null = null;
+  private backlogTimer: ReturnType<typeof setTimeout> | null = null;
   private warnedSqliteUnavailable = false;
 
   constructor(opts: AntigravityInputOptions) {
@@ -235,6 +291,17 @@ export class AntigravityInput extends BaseInput {
     return directoryExists(root);
   }
 
+  private clearBacklogTimer(): void {
+    if (this.backlogTimer) {
+      clearTimeout(this.backlogTimer);
+      this.backlogTimer = null;
+    }
+  }
+
+  protected override async onStop(): Promise<void> {
+    this.clearBacklogTimer();
+  }
+
   protected override onEntriesQueued(): void {
     if (!this.pendingCheckpoint) return;
     const cp = this.pendingCheckpoint;
@@ -279,11 +346,15 @@ export class AntigravityInput extends BaseInput {
           };
         }
       }
+      const pendingSeedSessionIds = Array.isArray(cp.pendingSeedSessionIds)
+        ? cp.pendingSeedSessionIds.filter((id): id is string => typeof id === 'string')
+        : [];
       return {
         schema: 1,
         seeded: Boolean(cp.seeded),
         evictedWatermarkMtimeMs:
           typeof cp.evictedWatermarkMtimeMs === 'number' ? cp.evictedWatermarkMtimeMs : 0,
+        ...(pendingSeedSessionIds.length > 0 ? { pendingSeedSessionIds } : {}),
         sessions,
       };
     }
@@ -303,6 +374,9 @@ export class AntigravityInput extends BaseInput {
         }
       }
       cp.sessions = Object.fromEntries(entries.slice(0, MAX_TRACKED_SESSIONS));
+    }
+    if (cp.pendingSeedSessionIds && cp.pendingSeedSessionIds.length > MAX_TRACKED_SESSIONS) {
+      cp.pendingSeedSessionIds = cp.pendingSeedSessionIds.slice(-MAX_TRACKED_SESSIONS);
     }
     for (const cur of Object.values(cp.sessions)) {
       if (cur.emittedUsageKeys.length > MAX_EMITTED_KEYS_PER_SESSION) {
@@ -325,6 +399,7 @@ export class AntigravityInput extends BaseInput {
 
   protected async collect(): Promise<AgentActivityEntry[]> {
     this.pendingCheckpoint = null;
+    this.clearBacklogTimer();
 
     if (!loadDatabaseSync()) {
       if (!this.warnedSqliteUnavailable) {
@@ -361,6 +436,11 @@ export class AntigravityInput extends BaseInput {
       }
       return [];
     }
+
+    const presentSessionIds = new Set(dbFiles.map((f) => f.slice(0, -3)).filter(Boolean));
+    const pendingSeedSet = new Set(
+      (checkpoint.pendingSeedSessionIds ?? []).filter((id) => presentSessionIds.has(id)),
+    );
 
     // Stat candidates and pick changed files (most recently modified first)
     const candidates: Array<{
@@ -399,6 +479,7 @@ export class AntigravityInput extends BaseInput {
             continue;
           }
         } else if (
+          !pendingSeedSet.has(sessionId) &&
           checkpoint.seeded &&
           checkpoint.evictedWatermarkMtimeMs > 0 &&
           effectiveMtimeMs <= checkpoint.evictedWatermarkMtimeMs
@@ -415,16 +496,7 @@ export class AntigravityInput extends BaseInput {
         if (!this.running) return [];
         try {
           const snapshot = await readAntigravityConversationDb(candidate.dbPath);
-          let transcript: AntigravityTranscript | null = null;
-          try {
-            transcript = await readAntigravityTranscript(this.dataRoot, candidate.sessionId);
-          } catch (err) {
-            this.logger.warn('failed to read Antigravity transcript during seed', {
-              agentType: this.agentType,
-              sessionId: candidate.sessionId,
-              error: String(err),
-            });
-          }
+          const transcript = await readAntigravityTranscript(this.dataRoot, candidate.sessionId);
           const maxStep = transcript
             ? transcript.steps.reduce((max, s) => Math.max(max, s.stepIndex), -1)
             : -1;
@@ -433,12 +505,15 @@ export class AntigravityInput extends BaseInput {
             effectiveSize: candidate.effectiveSize,
             maxEmittedGenIdx: snapshot?.maxGenIdx ?? -1,
             maxEmittedStepIdx: snapshot?.maxStepIdx ?? -1,
-            emittedUsageKeys: snapshot ? snapshot.events.map((e) => e.key) : [],
+            emittedUsageKeys: snapshot ? collectSeedUsageKeys(snapshot.events) : [],
             lastTranscriptStepIndex: maxStep,
             pendingToolCalls: [],
           };
+          pendingSeedSet.delete(candidate.sessionId);
         } catch (err) {
-          // Do not freeze effectiveMtimeMs on transient read errors (e.g. SQLITE_BUSY)
+          // Track failed DB in pendingSeedSet so it seeds without replaying history once
+          // readable, while allowing other valid/new sessions to proceed immediately.
+          pendingSeedSet.add(candidate.sessionId);
           this.logger.warn('failed to seed Antigravity conversation DB', {
             agentType: this.agentType,
             sessionId: candidate.sessionId,
@@ -447,6 +522,7 @@ export class AntigravityInput extends BaseInput {
         }
       }
       checkpoint.seeded = true;
+      checkpoint.pendingSeedSessionIds = pendingSeedSet.size > 0 ? [...pendingSeedSet] : undefined;
       this.saveCheckpoint(checkpoint);
       return [];
     }
@@ -458,7 +534,9 @@ export class AntigravityInput extends BaseInput {
     const batch = candidates.slice(0, MAX_DBS_PER_CYCLE);
 
     const emitted: AgentActivityEntry[] = [];
-    let checkpointDirty = false;
+    let checkpointDirty =
+      (checkpoint.pendingSeedSessionIds?.length ?? 0) !== pendingSeedSet.size;
+    let progressMade = false;
 
     for (const candidate of batch) {
       if (!this.running) break;
@@ -484,6 +562,29 @@ export class AntigravityInput extends BaseInput {
           sessionId: candidate.sessionId,
           error: String(err),
         });
+        if (pendingSeedSet.has(candidate.sessionId)) {
+          continue;
+        }
+      }
+
+      // Deferred seed for DBs that failed transiently during initial fresh seed
+      if (pendingSeedSet.has(candidate.sessionId)) {
+        const maxStep = transcript
+          ? transcript.steps.reduce((max, s) => Math.max(max, s.stepIndex), -1)
+          : -1;
+        checkpoint.sessions[candidate.sessionId] = {
+          effectiveMtimeMs: candidate.effectiveMtimeMs,
+          effectiveSize: candidate.effectiveSize,
+          maxEmittedGenIdx: snapshot?.maxGenIdx ?? -1,
+          maxEmittedStepIdx: snapshot?.maxStepIdx ?? -1,
+          emittedUsageKeys: snapshot ? collectSeedUsageKeys(snapshot.events) : [],
+          lastTranscriptStepIndex: maxStep,
+          pendingToolCalls: [],
+        };
+        pendingSeedSet.delete(candidate.sessionId);
+        checkpointDirty = true;
+        progressMade = true;
+        continue;
       }
 
       const workspaceAllowed = this.workspacePolicy.allows(
@@ -503,11 +604,12 @@ export class AntigravityInput extends BaseInput {
           effectiveSize: candidate.effectiveSize,
           maxEmittedGenIdx: snapshot?.maxGenIdx ?? -1,
           maxEmittedStepIdx: snapshot?.maxStepIdx ?? -1,
-          emittedUsageKeys: snapshot ? snapshot.events.map((e) => e.key) : [],
+          emittedUsageKeys: snapshot ? collectSeedUsageKeys(snapshot.events) : [],
           lastTranscriptStepIndex: maxStep,
           pendingToolCalls: [],
         };
         checkpointDirty = true;
+        progressMade = true;
         continue;
       }
 
@@ -540,9 +642,12 @@ export class AntigravityInput extends BaseInput {
         pendingToolCalls: sessionResult.pendingToolCalls,
       };
       checkpointDirty = true;
+      progressMade = true;
     }
 
-    if (checkpointDirty || !checkpoint.seeded) {
+    checkpoint.pendingSeedSessionIds = pendingSeedSet.size > 0 ? [...pendingSeedSet] : undefined;
+
+    if (checkpointDirty) {
       checkpoint.seeded = true;
       if (emitted.length > 0) {
         // Defer StateStore commit until BaseInput invokes onEntriesQueued()
@@ -552,8 +657,14 @@ export class AntigravityInput extends BaseInput {
       }
     }
 
-    if (hasBacklog && this.running) {
-      setImmediate(() => this.requestCollection());
+    // Drain backlog via a managed delayed timer only when this cycle made progress,
+    // avoiding dropped wakeups while BaseInput.cyclePromise is still settling and
+    // preventing tight CPU spin when all DBs in the batch fail transiently.
+    if (hasBacklog && progressMade && this.running) {
+      this.backlogTimer = setTimeout(() => {
+        this.backlogTimer = null;
+        this.requestCollection();
+      }, BACKLOG_DRAIN_DELAY_MS);
     }
 
     return emitted;
@@ -594,15 +705,31 @@ export class AntigravityInput extends BaseInput {
       return parts;
     };
 
-    // Precompute fallback turn mapping from deduplicated, sorted transcript steps
+    // Precompute fallback turn mapping, prev-planner lookup, step positions,
+    // and latest follow-up step index in a single O(S) pass over transcript steps.
     const stepToTurn = new Map<number, string>();
     const promptSteps: number[] = [];
+    const prevPlannerByStepIndex = new Map<number, AntigravityTranscriptStep | undefined>();
+    const stepPositionByIndex = new Map<number, number>();
+    let latestFollowupStepIndex = -1;
     if (transcript) {
       let currentTurnIndex = 0;
-      for (const step of transcript.steps) {
+      let lastPlanner: AntigravityTranscriptStep | undefined;
+      for (let pos = 0; pos < transcript.steps.length; pos++) {
+        const step = transcript.steps[pos]!;
+        stepPositionByIndex.set(step.stepIndex, pos);
+        prevPlannerByStepIndex.set(step.stepIndex, lastPlanner);
         if (isTurnPromptStep(step)) {
           currentTurnIndex++;
           promptSteps.push(step.stepIndex);
+          if (step.stepIndex > latestFollowupStepIndex) {
+            latestFollowupStepIndex = step.stepIndex;
+          }
+        } else if (step.type === 'PLANNER_RESPONSE') {
+          lastPlanner = step;
+          if (step.stepIndex > latestFollowupStepIndex) {
+            latestFollowupStepIndex = step.stepIndex;
+          }
         }
         stepToTurn.set(step.stepIndex, `${sessionId}:turn:${Math.max(1, currentTurnIndex)}`);
       }
@@ -632,6 +759,19 @@ export class AntigravityInput extends BaseInput {
       return `${sessionId}:turn:1`;
     };
 
+    // Preserve monotonic turn ordering for same-millisecond tie-breaking
+    const turnOrderMap = new Map<string, number>();
+    const registerTurnOrder = (turnId: string): void => {
+      if (!turnOrderMap.has(turnId)) {
+        turnOrderMap.set(turnId, turnOrderMap.size);
+      }
+    };
+    if (transcript) {
+      for (const step of transcript.steps) {
+        registerTurnOrder(resolveTurnForStep(step.stepIndex));
+      }
+    }
+
     const resolveToolCallId = (
       plannerStepIndex: number,
       toolIndex: number,
@@ -660,6 +800,7 @@ export class AntigravityInput extends BaseInput {
           }
         }
         const turnId = resolveTurnForStep(primaryIdx, usage.stepIndices);
+        registerTurnOrder(turnId);
         if (!turnProviderMap.has(turnId)) {
           const transcriptModel = normalizeAntigravityModel(linkedStep?.model);
           const model =
@@ -674,12 +815,14 @@ export class AntigravityInput extends BaseInput {
     // 1) Drain any pending tool calls from previous poll cycles whose tool results have now landed
     const remainingPending: PendingToolCall[] = [];
     for (const pending of prevCursor.pendingToolCalls) {
+      registerTurnOrder(pending.turnId);
       const resultStep = transcript?.byStepIndex.get(pending.resultStepIndex);
-      if (
-        resultStep &&
-        resultStep.type !== 'PLANNER_RESPONSE' &&
-        resultStep.type !== 'USER_INPUT'
-      ) {
+      if (resultStep && isToolResultStep(resultStep)) {
+        if (isStepInProgress(resultStep)) {
+          // Tool execution is still in progress; wait for a terminal status
+          remainingPending.push(pending);
+          continue;
+        }
         const resultInfo = stepInfos.get(pending.resultStepIndex);
         const effectiveCallTsMs =
           pending.callTsMs ??
@@ -726,14 +869,17 @@ export class AntigravityInput extends BaseInput {
           'gen_ai.tool.name': pending.toolName,
           'gen_ai.tool.call.id': pending.callId,
           'gen_ai.tool.call.result': resultPayload,
-          'tool.result.status': resultStep.status === 'ERROR' ? 'error' : 'success',
+          'tool.result.status': isToolErrorStatus(resultStep.status) ? 'error' : 'success',
           ...(durationMs > 0 ? { 'gen_ai.tool.call.duration': durationMs } : {}),
           time_unix_nano: toUnixNanoString(resultTsMs),
         });
         if (resultMediaParts.length > 0) attachMultimodalMetadataForEntry(resultEntry);
         await this.attachWorkspaceContext(resultEntry, cwd);
         entries.push(resultEntry);
-        if (resultStep.stepIndex > maxStepIndex) maxStepIndex = resultStep.stepIndex;
+      } else if (resultStep && !isToolResultStep(resultStep)) {
+        // Slot is occupied by a non-tool-result step (cancelled/skipped tool); retire
+      } else if (latestFollowupStepIndex > pending.resultStepIndex) {
+        // Conversation already progressed past this slot with a new prompt/planner step; retire
       } else {
         remainingPending.push(pending);
       }
@@ -744,6 +890,11 @@ export class AntigravityInput extends BaseInput {
       const stepsByIndex = transcript.byStepIndex;
       for (const step of transcript.steps) {
         if (step.stepIndex <= prevCursor.lastTranscriptStepIndex) continue;
+        // Stop before an in-progress prompt or planner step so we neither emit
+        // incomplete tool calls nor advance lastTranscriptStepIndex past it.
+        if ((isTurnPromptStep(step) || step.type === 'PLANNER_RESPONSE') && isStepInProgress(step)) {
+          break;
+        }
         if (step.stepIndex > maxStepIndex) maxStepIndex = step.stepIndex;
 
         const turnId = resolveTurnForStep(step.stepIndex);
@@ -823,11 +974,7 @@ export class AntigravityInput extends BaseInput {
             await this.attachWorkspaceContext(callEntry, cwd);
             entries.push(callEntry);
 
-            if (
-              resultStep &&
-              resultStep.type !== 'PLANNER_RESPONSE' &&
-              resultStep.type !== 'USER_INPUT'
-            ) {
+            if (resultStep && isToolResultStep(resultStep) && !isStepInProgress(resultStep)) {
               const rawResultTsMs =
                 resultInfo?.completedAtMs ?? resultStep.createdAtMs ?? callTsMs;
               const resultTsMs = Math.max(callTsMs, rawResultTsMs);
@@ -856,15 +1003,18 @@ export class AntigravityInput extends BaseInput {
                 'gen_ai.tool.name': toolName,
                 'gen_ai.tool.call.id': callId,
                 'gen_ai.tool.call.result': resultPayload,
-                'tool.result.status': resultStep.status === 'ERROR' ? 'error' : 'success',
+                'tool.result.status': isToolErrorStatus(resultStep.status) ? 'error' : 'success',
                 ...(durationMs > 0 ? { 'gen_ai.tool.call.duration': durationMs } : {}),
                 time_unix_nano: toUnixNanoString(resultTsMs),
               });
               if (resultMediaParts.length > 0) attachMultimodalMetadataForEntry(resultEntry);
               await this.attachWorkspaceContext(resultEntry, cwd);
               entries.push(resultEntry);
-            } else {
-              // Tool result hasn't been written yet; persist pending entry for next poll cycle
+            } else if (
+              (resultStep && isToolResultStep(resultStep) && isStepInProgress(resultStep)) ||
+              (!resultStep && latestFollowupStepIndex <= resultStepIndex)
+            ) {
+              // Tool result is in-progress or hasn't been written yet; persist for next poll cycle
               remainingPending.push({
                 plannerStepIndex: step.stepIndex,
                 turnId,
@@ -885,7 +1035,7 @@ export class AntigravityInput extends BaseInput {
     if (snapshot) {
       for (const usage of snapshot.events) {
         if (isUsageAlreadyCovered(usage, prevCursor, seenKeys)) continue;
-        seenKeys.add(usage.key);
+        recordUsageIdentities(seenKeys, usage);
         if (usage.genIdx !== undefined && usage.genIdx > maxEmittedGenIdx) {
           maxEmittedGenIdx = usage.genIdx;
         }
@@ -898,6 +1048,7 @@ export class AntigravityInput extends BaseInput {
         const linkedStepIdx = linkedStep?.stepIndex ?? usage.stepIndices[0];
         const linkedStepInfo = linkedStepIdx !== undefined ? stepInfos.get(linkedStepIdx) : undefined;
         const turnId = resolveTurnForStep(linkedStepIdx, usage.stepIndices);
+        registerTurnOrder(turnId);
         const stepId = linkedStep
           ? `${sessionId}:step:${linkedStep.stepIndex}`
           : usage.stepIndices.length > 0
@@ -935,9 +1086,10 @@ export class AntigravityInput extends BaseInput {
             : derivedReqTsMs;
 
         const inputDelta = await this.buildInputMessagesDelta(
-          sessionId,
           linkedStep,
           transcript,
+          prevPlannerByStepIndex,
+          stepPositionByIndex,
           reqTsMs,
           getStepMedia,
           resolveToolCallId,
@@ -1021,11 +1173,15 @@ export class AntigravityInput extends BaseInput {
       }
     }
 
-    // Deterministic sort: timestamp ascending, then event type phase order
+    // Deterministic sort: timestamp ascending, then turn order (prevents cross-turn
+    // interleaving on same-ms ties), then event type phase order.
     entries.sort((a, b) => {
       const ta = BigInt(a.time_unix_nano);
       const tb = BigInt(b.time_unix_nano);
       if (ta !== tb) return ta < tb ? -1 : 1;
+      const turnA = turnOrderMap.get(a['gen_ai.turn.id'] ?? '') ?? Number.MAX_SAFE_INTEGER;
+      const turnB = turnOrderMap.get(b['gen_ai.turn.id'] ?? '') ?? Number.MAX_SAFE_INTEGER;
+      if (turnA !== turnB) return turnA - turnB;
       const wa = EVENT_ORDER_WEIGHT[a['event.name']] ?? 5;
       const wb = EVENT_ORDER_WEIGHT[b['event.name']] ?? 5;
       return wa - wb;
@@ -1054,9 +1210,10 @@ export class AntigravityInput extends BaseInput {
   }
 
   private async buildInputMessagesDelta(
-    sessionId: string,
     linkedStep: AntigravityTranscriptStep | undefined,
     transcript: AntigravityTranscript | null,
+    prevPlannerByStepIndex: ReadonlyMap<number, AntigravityTranscriptStep | undefined>,
+    stepPositionByIndex: ReadonlyMap<number, number>,
     reqTsMs: number,
     getStepMedia: (
       step: AntigravityTranscriptStep,
@@ -1067,13 +1224,7 @@ export class AntigravityInput extends BaseInput {
   ): Promise<JsonValue[]> {
     if (!linkedStep || !transcript) return [];
 
-    let prevPlanner: AntigravityTranscriptStep | undefined;
-    for (const step of transcript.steps) {
-      if (step.stepIndex >= linkedStep.stepIndex) break;
-      if (step.type === 'PLANNER_RESPONSE') prevPlanner = step;
-    }
-    const prevPlannerIdx = prevPlanner?.stepIndex ?? -1;
-
+    const prevPlanner = prevPlannerByStepIndex.get(linkedStep.stepIndex);
     const delta: JsonValue[] = [];
     const consumedStepIndices = new Set<number>();
 
@@ -1092,7 +1243,7 @@ export class AntigravityInput extends BaseInput {
         const resultIdx = prevPlanner.stepIndex + 1 + i;
         if (resultIdx < linkedStep.stepIndex) {
           const resultStep = transcript.byStepIndex.get(resultIdx);
-          if (resultStep && resultStep.type !== 'USER_INPUT' && resultStep.type !== 'PLANNER_RESPONSE') {
+          if (resultStep && isToolResultStep(resultStep)) {
             consumedStepIndices.add(resultIdx);
             const resultMedia = await getStepMedia(resultStep, resultStep.createdAtMs ?? reqTsMs, 'input');
             let responsePayload: JsonValue = resultStep.content ?? null;
@@ -1118,8 +1269,10 @@ export class AntigravityInput extends BaseInput {
       }
     }
 
-    for (const step of transcript.steps) {
-      if (step.stepIndex <= prevPlannerIdx || step.stepIndex >= linkedStep.stepIndex) continue;
+    const startPos = prevPlanner ? (stepPositionByIndex.get(prevPlanner.stepIndex) ?? -1) + 1 : 0;
+    const endPos = stepPositionByIndex.get(linkedStep.stepIndex) ?? transcript.steps.length;
+    for (let pos = startPos; pos < endPos; pos++) {
+      const step = transcript.steps[pos]!;
       if (consumedStepIndices.has(step.stepIndex)) continue;
       if (!isTurnPromptStep(step)) continue;
       const mediaParts = await getStepMedia(step, step.createdAtMs ?? reqTsMs, 'input');

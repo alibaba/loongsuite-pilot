@@ -404,11 +404,11 @@ function walkProtoForFileUri(blob: Uint8Array, depth: number): string | undefine
     const bytes = field.value as Uint8Array;
     if (bytes.length === 0) continue;
 
-    // Check if this field itself is a UTF-8 `file://` URI
+    // Check if this field itself is a UTF-8 `file://` URI (reject bare `file://` / root `/`)
     const text = tryOptional(() => utf8StrictDecoder.decode(bytes));
-    if (text && text.startsWith('file://') && !/[\x00-\x1f\x7f]/.test(text)) {
+    if (text && text.startsWith('file://') && text.length > 'file:///'.length && !/[\x00-\x1f\x7f]/.test(text)) {
       const converted = tryOptional(() => fileURLToPath(new URL(text)));
-      if (converted) return converted;
+      if (converted && converted !== '/' && converted !== '\\') return converted;
     }
 
     // Otherwise recurse into nested protobuf sub-messages
@@ -496,21 +496,57 @@ function mergeUsageEvent(target: AntigravityUsageEvent, dup: AntigravityUsageEve
   }
 }
 
+export function isStrongUsageIdentity(identity: string): boolean {
+  return (
+    identity.startsWith('response:') ||
+    identity.startsWith('provider:') ||
+    identity.startsWith('message:')
+  );
+}
+
+function hasStrongIdentityConflict(
+  a: readonly string[],
+  b: readonly string[],
+): boolean {
+  const strongA = a.filter(isStrongUsageIdentity);
+  const strongB = b.filter(isStrongUsageIdentity);
+  if (strongA.length === 0 || strongB.length === 0) return false;
+  return !strongA.some((id) => strongB.includes(id));
+}
+
 function deduplicateEvents(events: AntigravityUsageEvent[]): AntigravityUsageEvent[] {
   const slots: Array<AntigravityUsageEvent | undefined> = [];
-  const identityIndexes = new Map<string, number>();
+  const identityIndexes = new Map<string, number[]>();
+
+  const registerSlot = (targetIdx: number, identities: readonly string[]): void => {
+    for (const id of identities) {
+      let list = identityIndexes.get(id);
+      if (!list) {
+        list = [];
+        identityIndexes.set(id, list);
+      }
+      if (!list.includes(targetIdx)) list.push(targetIdx);
+    }
+  };
 
   for (const event of events) {
     const matching = new Set<number>();
     for (const id of event.identities) {
-      const idx = identityIndexes.get(id);
-      if (idx !== undefined) matching.add(idx);
+      const candidates = identityIndexes.get(id);
+      if (!candidates) continue;
+      for (const idx of candidates) {
+        const candidate = slots[idx];
+        if (!candidate) continue;
+        // Never merge two events whose strong provider/response IDs disagree
+        if (hasStrongIdentityConflict(candidate.identities, event.identities)) continue;
+        matching.add(idx);
+      }
     }
     const sortedMatches = [...matching].sort((a, b) => a - b);
     if (sortedMatches.length === 0) {
       const targetIdx = slots.length;
       slots.push(event);
-      for (const id of event.identities) identityIndexes.set(id, targetIdx);
+      registerSlot(targetIdx, event.identities);
       continue;
     }
 
@@ -519,13 +555,13 @@ function deduplicateEvents(events: AntigravityUsageEvent[]): AntigravityUsageEve
     for (let i = 1; i < sortedMatches.length; i++) {
       const dupIdx = sortedMatches[i]!;
       const dup = slots[dupIdx];
-      if (dup) {
+      if (dup && !hasStrongIdentityConflict(target.identities, dup.identities)) {
         slots[dupIdx] = undefined;
         mergeUsageEvent(target, dup);
       }
     }
     mergeUsageEvent(target, event);
-    for (const id of target.identities) identityIndexes.set(id, targetIdx);
+    registerSlot(targetIdx, target.identities);
   }
 
   return slots.filter((e): e is AntigravityUsageEvent => e !== undefined);
@@ -579,7 +615,6 @@ export async function readAntigravityConversationDb(
     }
 
     const stepRows: Array<{ idx: number; metadata: StepMetadata }> = [];
-    let maxStepIdx = -1;
     if (tableExists(db, 'steps')) {
       const stmt = db.prepare(
         'SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL AND idx > ? ORDER BY idx ASC LIMIT ?',
@@ -590,7 +625,6 @@ export async function readAntigravityConversationDb(
         if (page.length === 0) break;
         for (const row of page) {
           const idx = Number(row.idx);
-          if (idx > maxStepIdx) maxStepIdx = idx;
           cursor = idx;
           const blob = toUint8Array(row.metadata);
           if (!blob || blob.length === 0) continue;
@@ -603,7 +637,6 @@ export async function readAntigravityConversationDb(
     }
 
     const genRows: Array<{ idx: number; metadata: GeneratorMetadata }> = [];
-    let maxGenIdx = -1;
     {
       const stmt = db.prepare(
         'SELECT idx, data FROM gen_metadata WHERE idx > ? ORDER BY idx ASC LIMIT ?',
@@ -614,7 +647,6 @@ export async function readAntigravityConversationDb(
         if (page.length === 0) break;
         for (const row of page) {
           const idx = Number(row.idx);
-          if (idx > maxGenIdx) maxGenIdx = idx;
           cursor = idx;
           const blob = toUint8Array(row.data);
           if (!blob || blob.length === 0) continue;
@@ -679,8 +711,10 @@ export async function readAntigravityConversationDb(
       if (!isTokenBearing(usage) || !hasReasonableTokens(usage)) return;
 
       const identities = usageIdentityKeys(usage);
-      if (identities.length === 0) {
-        identities.push(...opts.fallbackIdentities);
+      // Always include primary fallback identities (e.g. step:<sid>:<idx>) alongside
+      // response/provider IDs so cross-cycle rows that gain a responseId later still dedup.
+      for (const fb of opts.fallbackIdentities) {
+        if (!identities.includes(fb)) identities.push(fb);
       }
 
       let timestampMs: number;
@@ -852,13 +886,27 @@ export async function readAntigravityConversationDb(
       return (a.genIdx ?? Number.MAX_SAFE_INTEGER) - (b.genIdx ?? Number.MAX_SAFE_INTEGER);
     });
 
+    // Only advance watermarks to rows that actually produced token-bearing usage,
+    // so 0-token in-progress rows are never skipped when tokens land later.
+    let tokenBearingMaxGenIdx = -1;
+    let tokenBearingMaxStepIdx = -1;
+    for (const ev of deduped) {
+      if (ev.genIdx !== undefined && ev.genIdx > tokenBearingMaxGenIdx) {
+        tokenBearingMaxGenIdx = ev.genIdx;
+      }
+      if (ev.genIdx === undefined && ev.stepIndices.length > 0) {
+        const sMax = Math.max(...ev.stepIndices);
+        if (sMax > tokenBearingMaxStepIdx) tokenBearingMaxStepIdx = sMax;
+      }
+    }
+
     return {
       sessionId,
       dbPath,
       workspacePath,
       trajectoryTimestampMs,
-      maxGenIdx,
-      maxStepIdx,
+      maxGenIdx: tokenBearingMaxGenIdx,
+      maxStepIdx: tokenBearingMaxStepIdx,
       events: deduped,
       stepInfos,
     };

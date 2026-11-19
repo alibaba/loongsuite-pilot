@@ -90,7 +90,7 @@ loongsuite-pilot restart
 
 ## allowedRootPaths
 
-`pathToUri` 只读取允许根内的文件。配置在 `agents.<id>.multimodal.allowedRootPaths`，与 **该 Agent 自己的默认根合并**（不是替换）。默认根写在各 Agent Input 上（`QoderTraceInput`、`CodexTranscriptInput`、`QwenWorkCNTraceInput`）；由 Input 自己合并用户配置并做一次规范化（`~` 展开、`realpath`），`multimodal` 只校验合并后的列表。
+`pathToUri` 只读取允许根内的文件。配置在 `agents.<id>.multimodal.allowedRootPaths`，与 **该 Agent 自己的默认根合并**（不是替换）。默认根写在各 Agent Input 上（`QoderTraceInput`、`CodexTranscriptInput`、`QwenWorkCNTraceInput`、`AntigravityInput`）；由 Input 自己合并用户配置并做一次规范化（`~` 展开、`realpath`），`multimodal` 只校验合并后的列表。
 
 提取器仍会用 `agent.qoder.cwd` 拼相对 `@` / Read 路径，但 **不会** 自动把 cwd 加进允许根。工作区或 `~/Documents` 等目录需要写进 `allowedRootPaths`。
 
@@ -112,7 +112,7 @@ UNC/设备路径、符号链接都会跳过。图片后缀只认图片文件头�
 | `codex` | 是 | 见下方 [Codex](#codex)。 |
 | `qoder` | 是 | 见下方 [Qoder IDE](#qoder-ide) 与 [Qoder CLI](#qoder-cli)。 |
 | `qwen-work-cn` | 是 | 见下方 [千问办公](#千问办公)。 |
-| `antigravity` / `antigravity-ide` / `antigravity-cli` | 是 | 从 `transcript.jsonl` 的 `media[].uri` 采集本地图片与视频（`USER_INPUT`、`PLANNER_RESPONSE`、工具结果），默认根路径限定在 `<dataRoot>/brain`。 |
+| `antigravity` / `antigravity-ide` / `antigravity-cli` | 是 | 见下方 [Antigravity](#antigravity)。 |
 | 其他 | 否 | 配置 `uploadMode` 目前无效，等待对应 extractor 落地。 |
 
 ### Codex
@@ -181,6 +181,22 @@ Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一�
 - 展示结果里的 `uri` 和 `originalUri` 与 `filePath` 是同一路径，只取 `filePath`。
 - OSS URL 不作为采集源。
 - 会话目录里的选择、拖入、Read、找图和生成文件要能读盘，需要写进 `allowedRootPaths`。
+
+### Antigravity
+
+Antigravity（`antigravity`、`antigravity-ide`、`antigravity-cli`）从 `<dataRoot>/brain/<sessionId>/.system_generated/logs/transcript.jsonl` 中的 `media[].uri` 提取本地图片与视频路径，经 `MultimodalProcessor.pathToUri` 转为 `uri` part。各变体通过各自的 `agents.<id>.multimodal` 独立配置。失败 fail-open，不影响文本与 token 采集。
+
+| `uploadMode` | Antigravity 采集表面 | 典型用户操作 / 事件 |
+|--------------|----------------------|---------------------|
+| `none` | 不转换 | — |
+| `input` | `USER_INPUT` / step-0 `SYSTEM_MESSAGE` 的 `media[].uri`（`other` 与 `llm.request` `messages_delta`）以及工具结果 step 的 `media[].uri`（`tool.result` 与 `llm.request` `messages_delta`） | 粘贴/附加图片或视频；浏览器截图或工具返回的媒体 |
+| `output` | `PLANNER_RESPONSE` 的 `media[].uri`（`llm.response` `gen_ai.output.messages`） | 助手回复附带的生成/渲染图片或视频 |
+| `all` | 以上全部 | 覆盖用户附件、工具结果媒体与助手输出媒体 |
+
+注意：
+
+- 默认 `allowedRootPaths` 为 `<dataRoot>/brain`（与用户配置的 `allowedRootPaths` 合并并在启动时规范化一次）；允许根之外的路径、UNC/设备路径和符号链接会被跳过。
+- 单个轮询周期内按 `(stepIndex, direction)` 缓存解析结果，跨 `other` / `tool.result` / `llm.request` 复用时不会重复读盘。
 
 ## 输出形态（简述）
 

@@ -91,7 +91,7 @@ Unknown values fall back to `none`.
 
 ## allowedRootPaths
 
-`pathToUri` only reads files inside allowed roots. Configured under `agents.<id>.multimodal.allowedRootPaths` and **merged with that agent's defaults** (not a replace). Defaults live on the agent Input (`QoderTraceInput`, `CodexTranscriptInput`, `QwenWorkCNTraceInput`); the Input merges user paths with those defaults and canonicalizes them once (`~` expand, `realpath`). `multimodal` only enforces the resulting list.
+`pathToUri` only reads files inside allowed roots. Configured under `agents.<id>.multimodal.allowedRootPaths` and **merged with that agent's defaults** (not a replace). Defaults live on the agent Input (`QoderTraceInput`, `CodexTranscriptInput`, `QwenWorkCNTraceInput`, `AntigravityInput`); the Input merges user paths with those defaults and canonicalizes them once (`~` expand, `realpath`). `multimodal` only enforces the resulting list.
 
 Extractors still join relative `@` / Read paths with `agent.qoder.cwd`, but cwd is **not** added to the allowlist. Workspace paths and directories such as `~/Documents` need an explicit `allowedRootPaths` entry.
 
@@ -113,7 +113,7 @@ The table below describes what multimodal collection actually captures per agent
 | `codex` | Yes | See [Codex](#codex) below. |
 | `qoder` | Yes | See [Qoder IDE](#qoder-ide) and [Qoder CLI](#qoder-cli) below. |
 | `qwen-work-cn` | Yes | See [Qwen Work CN](#qwen-work-cn) below. |
-| `antigravity` / `antigravity-ide` / `antigravity-cli` | Yes | Local image and video `media[].uri` entries from `transcript.jsonl` (`USER_INPUT`, `PLANNER_RESPONSE`, tool results), scoped to `<dataRoot>/brain`. |
+| `antigravity` / `antigravity-ide` / `antigravity-cli` | Yes | See [Antigravity](#antigravity) below. |
 | Others | No | Setting `uploadMode` has no effect today. |
 
 ### Codex
@@ -182,6 +182,22 @@ Notes:
 - `uri` and `originalUri` on a present result repeat `filePath`. Only `filePath` is taken.
 - OSS URLs are not a collection source.
 - Selected, dragged, Read, found, and generated files live in the session directory. Reading them requires that directory in `allowedRootPaths`.
+
+### Antigravity
+
+Antigravity (`antigravity`, `antigravity-ide`, `antigravity-cli`) converts local image and video `media[].uri` entries recorded in `<dataRoot>/brain/<sessionId>/.system_generated/logs/transcript.jsonl` via `MultimodalProcessor.pathToUri`. Policy is configured independently per variant under `agents.<id>.multimodal`. Failures are fail-open and do not interrupt text/token collection.
+
+| `uploadMode` | Antigravity surface | Typical user action / event |
+|--------------|---------------------|-----------------------------|
+| `none` | No conversion | — |
+| `input` | `USER_INPUT` / step-0 `SYSTEM_MESSAGE` `media[].uri` (`other` and `llm.request` `messages_delta`) and tool-result step `media[].uri` (`tool.result` and `llm.request` `messages_delta`) | Paste/attach image or video; browser screenshots or media returned by tools |
+| `output` | `PLANNER_RESPONSE` `media[].uri` (`llm.response` `gen_ai.output.messages`) | Assistant replies attaching generated/rendered images or videos |
+| `all` | All of the above | User attachments, tool-result media, and assistant output media |
+
+Notes:
+
+- Default `allowedRootPaths` is `<dataRoot>/brain` (merged with user-configured `allowedRootPaths`, canonicalized once at startup). Files outside allowed roots, UNC/device paths, and symlinks are skipped.
+- Media resolution is cached per `(stepIndex, direction)` within a poll cycle so shared references across `other` / `tool.result` / `llm.request` do not re-read disk.
 
 ## Output Shape (Short)
 

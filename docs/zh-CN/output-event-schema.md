@@ -200,7 +200,7 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 
 Qoder 产品入口：旧 IDE 输出 `gen_ai.agent.type=qoder`，终端 CLI 输出 `qoder-cli`。CLI 格式 transcript 优先使用本轮原生用户记录的 `businessIdentity.product` 区分 `app`/`cli`，覆盖生命周期 Hook 不带产品字段的子 Agent；旧运行时兼容本轮 Hook 的 `parent_business_info.product=app` 标记。新版桌面端输出 `qoder-app`。OTLP Resource 的 `gen_ai.framework` 使用对应产品类型；新桌面端的 `gen_ai.agent.system=qoder-app`，现有 CLI、IDE 等 Qoder 入口仍为 `qoder`。产品标记仅属于本轮原生记录或 Hook 上下文，不跨 session 恢复沿用。桌面端复用 `agents.qoder` 配置和 CLI transcript/Token 补全路径，不需要新增 `agents.qoder-app` 配置。缺少或无法识别产品证据时保留原分类，不根据路径或进程名猜测。历史数据保留原 system 值，跨版本统计需结合 type/framework 区分入口。
 
-工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
+工作目录自动采集覆盖 Antigravity / Antigravity IDE / Antigravity CLI、Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
 
 ## System Instructions（系统提示词）
 

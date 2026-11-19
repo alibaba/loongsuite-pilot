@@ -35,7 +35,10 @@ export interface AntigravityTranscript {
 }
 
 const READ_CHUNK_BYTES = 512 * 1024;
+/** Guard against malformed newline-less lines causing unbounded carry growth. */
+const MAX_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_JSON_DEPTH = 64;
+const NEWLINE_BYTE = 0x0a;
 
 function parseIsoMs(value: unknown): number | undefined {
   if (typeof value !== 'string' || !value) return undefined;
@@ -130,9 +133,9 @@ function parseTranscriptLine(trimmed: string): AntigravityTranscriptStep | null 
 
 /**
  * Streamed reader for `<dataRoot>/brain/<sessionId>/.system_generated/logs/transcript.jsonl`.
- * Reads in bounded chunks so transcripts of any size (>8 MiB) are supported without
- * loading the entire file into one string or truncating long conversations.
- * Deduplicates repeated `step_index` records (keeping latest) and sorts ascending.
+ * Splits lines on raw `0x0a` bytes before UTF-8 decoding so multi-byte characters
+ * straddling 512 KiB chunk boundaries are never corrupted and byte offsets stay exact.
+ * Caps single-line carry at `MAX_LINE_BYTES` to prevent OOM on malformed inputs.
  */
 export async function readAntigravityTranscript(
   dataRoot: string,
@@ -158,32 +161,69 @@ export async function readAntigravityTranscript(
     const byStepIndex = new Map<number, AntigravityTranscriptStep>();
     const buf = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, stat.size));
     let pos = 0;
-    let carry = '';
+    let carryParts: Buffer[] = [];
+    let carryBytes = 0;
+    let skippingOversized = false;
     let nextOffset = 0;
+
+    const flushLineBytes = (tailSlice: Buffer): void => {
+      if (skippingOversized) {
+        carryParts = [];
+        carryBytes = 0;
+        skippingOversized = false;
+        return;
+      }
+      const total = carryBytes + tailSlice.length;
+      if (total > MAX_LINE_BYTES) {
+        carryParts = [];
+        carryBytes = 0;
+        return;
+      }
+      const lineBuf =
+        carryParts.length === 0 ? tailSlice : Buffer.concat([...carryParts, tailSlice], total);
+      carryParts = [];
+      carryBytes = 0;
+      const step = parseTranscriptLine(lineBuf.toString('utf-8').trim());
+      if (step) {
+        byStepIndex.set(step.stepIndex, step);
+      }
+    };
 
     while (pos < stat.size) {
       const toRead = Math.min(buf.length, stat.size - pos);
       const { bytesRead } = await fh.read(buf, 0, toRead, pos);
       if (bytesRead <= 0) break;
+      const chunkStartOffset = pos;
       pos += bytesRead;
 
-      const chunk = carry + buf.subarray(0, bytesRead).toString('utf-8');
-      const lines = chunk.split('\n');
-      // Last element may be incomplete if file didn't end with '\n' yet
-      carry = lines.pop() ?? '';
-
-      for (const line of lines) {
-        const step = parseTranscriptLine(line.trim());
-        if (step) {
-          byStepIndex.set(step.stepIndex, step);
+      let sliceStart = 0;
+      while (sliceStart < bytesRead) {
+        const nlIdx = buf.indexOf(NEWLINE_BYTE, sliceStart);
+        if (nlIdx === -1 || nlIdx >= bytesRead) {
+          const remainder = buf.subarray(sliceStart, bytesRead);
+          if (!skippingOversized) {
+            if (carryBytes + remainder.length > MAX_LINE_BYTES) {
+              carryParts = [];
+              carryBytes = 0;
+              skippingOversized = true;
+            } else {
+              // Copy slice because `buf` is reused on the next read
+              carryParts.push(Buffer.from(remainder));
+              carryBytes += remainder.length;
+            }
+          }
+          break;
         }
+        flushLineBytes(buf.subarray(sliceStart, nlIdx));
+        nextOffset = chunkStartOffset + nlIdx + 1;
+        sliceStart = nlIdx + 1;
       }
-      nextOffset = pos - Buffer.byteLength(carry, 'utf-8');
     }
 
     // Parse final line if file had no trailing newline
-    if (carry.trim().length > 0) {
-      const step = parseTranscriptLine(carry.trim());
+    if (!skippingOversized && carryBytes > 0) {
+      const lineBuf = carryParts.length === 1 ? carryParts[0]! : Buffer.concat(carryParts, carryBytes);
+      const step = parseTranscriptLine(lineBuf.toString('utf-8').trim());
       if (step) {
         byStepIndex.set(step.stepIndex, step);
         nextOffset = pos;
