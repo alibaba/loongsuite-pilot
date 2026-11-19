@@ -26,6 +26,29 @@ function localPair(actor = 'synthetic-turn', call = 'synthetic-call', start = 10
 }
 
 describe('Doubao Work truthful partial OTLP', () => {
+  it.each(['doubao', 'doubao-work', undefined] as const)('preserves explicit product identity on every span without guessing legacy records: %s', async client => {
+    const pair = localPair();
+    const root = { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: '12345678', updatedMs: DOUBAO_EPOCH };
+    const records = buildDoubaoTaskEvents('scope', root,
+      parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)!, Date.now(), [pair]);
+    const content = parseNativeContent({ [root.turnId]: [
+      { role: 'assistant', tool_calls: [{ id: 'synthetic-call', function: { name: 'Read', arguments: { file_path: 'fixture.txt' } } }] },
+      { role: 'tool', tool_call_id: 'synthetic-call', content: 'fixture result' },
+      { role: 'assistant', content: 'fixture final' },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n' },
+    { [root.turnId]: `## [${new Date(DOUBAO_EPOCH).toISOString()}] 需求\nfixture request\n` })!;
+    records[0]['agent.doubao_work.assistant_rounds'] = reconstructNativeRounds(content, root.turnId, DOUBAO_EPOCH,
+      records.at(-1)!.time_unix_nano, ['synthetic-call']) as any;
+    for (const record of records) if (client) record['loongsuite.doubao_work.client'] = client;
+    const spans: ReadableSpan[] = [], flusher = collector(spans);
+    try {
+      await flusher.sendBatch(records);
+      await vi.waitFor(() => expect(spans.some(span => span.attributes['gen_ai.span.kind'] === 'LLM')).toBe(true));
+      expect(spans.some(span => span.attributes['gen_ai.span.kind'] === 'TOOL')).toBe(true);
+      for (const span of spans) expect(span.attributes['loongsuite.doubao_work.client']).toBe(client);
+    } finally { await flusher.shutdown(); }
+  });
+
   it('exports real local tool lifetimes without fabricating LLM or ReAct spans', async () => {
     const pair = localPair();
     const firstOutput = parseDoubaoLogLine(doubaoFirstOutputLine(), DOUBAO_FILE)!;

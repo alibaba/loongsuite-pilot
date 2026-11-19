@@ -6,8 +6,8 @@
 
 ## Data Source Bindings
 
-- **Project / Region**：报表目标 Project 及其所属 Region。本插件里取 `~/.loongsuite-pilot/audit/config-record.json` 的 `slsProject`、`regionId`。
-- **CLI profile**：调用方指定的已配置 profile。本插件里用插件自己保存的登录，不要传其他 profile。
+- **Project / Region**：报表目标 Project 及其所属 Region。使用这些 Skill 时取 `~/.loongsuite-pilot/audit/config-record.json` 的 `slsProject`、`regionId`。
+- **CLI profile**：使用 Setup 共享环境当前选中的 Profile。账户或查询目标切换先按[账户与查询目标切换](../../agentloop-collector-setup/references/auth.md)完成，再沿用其登录和目标；不为单张图临时换凭证。
 - **查询时间**：SLS 查询接口和各 chartQuery 使用相同时间窗口。
 - **SQL 表名**：含连字符的 Logstore 名使用双引号包裹，例如 `"agent-event"`。
 
@@ -59,6 +59,8 @@ SLS 元数据 `__time__` 为秒级过滤时间，`__source__`、`__tag__:*` 按�
 | **字段** | **类型** | **说明** |
 | --- | --- | --- |
 | `__tag__:__hostname__` | string | SLS LogGroup 主机名元数据。`host.name` 为空或缺失时，用作主机名的兼容值。 |
+| `__tag__:__mac__` | string | SLS LogGroup 网卡 MAC。探针启动时取一次，对应该次上报 `__source__` 所用的那块非回环 IPv4 网卡；取不到时没有该标签。 |
+| `__tag__:__sn__` | string | SLS LogGroup 硬件序列号。安装时读取：macOS 用 `ioreg`，Linux 读 DMI，Windows 用 CIM。取不到时没有该标签。 |
 | `__source__` | string | SLS 写入来源元数据。`host.ip` 为空或缺失时，用作 Agent 主机 IP 的兼容值；不表示网络对端或外联目标。 |
 | `host.id` | string | 主机或执行环境的稳定标识。 |
 | `host.name` | string | Agent 运行所在的主机、Pod、容器或执行环境名称。 |

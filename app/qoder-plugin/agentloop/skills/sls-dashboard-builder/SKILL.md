@@ -7,7 +7,11 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 
 创建或修改完整、可导入的阿里云 SLS dashboard JSON。
 
-在本插件里，业务口径由 [agentloop-audit-dashboard](../agentloop-audit-dashboard/SKILL.md) 决定，本技能只负责图表 JSON 和预览版式。插件根目录是 `skills` 的上一级。预览命令是 `python3 scripts/run.py report --dashboard <json>`，取数用插件已保存的登录。不要使用 `--profile test`，不要运行 skill 目录里的 `render_report.py`。未得到用户对预览的确认之前，不要 create 或 update 线上大盘。发布用 `python3 scripts/run.py publish --dashboard <json> --remark "<修改原因>"`：不带 `--confirm` 只打印将创建还是覆盖；用户确认后再加 `--confirm`。它走插件的 CLI 与登录，project、region 取当前查询目标。下文的 `aliyun sls create-dashboard` / `update-dashboard` / `get-dashboard` 是插件外的写法，在本插件里会卡在安装 `aliyun-cli-sls` 的确认提示，不要执行。
+业务口径由 [agentloop-audit-dashboard](../agentloop-audit-dashboard/SKILL.md) 决定，本技能持有图表渲染与发布脚本，依赖相邻 [Setup](../agentloop-collector-setup/SKILL.md) 的共享 CLI、认证与目标绑定。
+
+在当前项目目录执行 `python3 "<agentloop-collector-setup目录>/scripts/run.py" report --dashboard <json>` 生成预览；共享入口调用本技能的 `scripts/render_report.py`。发布使用同一入口的 `publish --dashboard <json> --remark "<修改原因>"`：不带 `--confirm` 时只读取线上状态并显示将创建还是覆盖，用户确认预览后再加 `--confirm` 写入。
+
+账户与查询目标切换按 Setup 的[账户与查询目标切换](../agentloop-collector-setup/references/auth.md)处理，沿用已选 Profile，不为报表临时另建 Profile 或换凭证。仅切换环境时不要求日志时间、不查数。下文的 `aliyun sls create-dashboard` / `update-dashboard` / `get-dashboard` 是独立 CLI 的参考写法；使用这些 Skill 时采用上述共享入口。
 
 **必备运维技能：** 若任务涉及真实 Project 或大盘，且需要查看或复用线上大盘，必须基于最新线上 JSON 操作。
 
@@ -51,7 +55,7 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 - 用户提供了现有 JSON：保留未知字段与未改动的图表  
 - 未明确要求发布，或用户尚未确认预览效果前，只生成或修改本地 dashboard JSON，不 create/update 线上大盘  
 - create/update 线上大盘时，以用户确认后的 dashboard JSON 为准  
-- 插件外使用通用 SLS CLI 发布时，使用 `aliyun sls update-dashboard` / `create-dashboard`，显式传 `--display-name`、`--charts`、`--description`、`--attribute remark=<具体修改原因> type=grid update=<ms> version=<version>`；不要用 CamelCase OpenAPI 入口 `UpdateDashboard --body-file` 发布。
+- 独立使用通用 SLS CLI 发布时，使用 `aliyun sls update-dashboard` / `create-dashboard`，显式传 `--display-name`、`--charts`、`--description`、`--attribute remark=<具体修改原因> type=grid update=<ms> version=<version>`；不要用 CamelCase OpenAPI 入口 `UpdateDashboard --body-file` 发布。
 - 公开 SLS Dashboard API 的 `UpdateDashboard` / `aliyun sls update-dashboard` 是覆盖式更新当前大盘；`attribute.version/update/remark` 只影响当前版本展示元数据，不会自动追加控制台「历史版本」归档。
 - 用户说「先给一版」：默认 `single-dashboard-mvp`  
 - 用户提供完整任务包或设计文档：默认 `single-dashboard-full`  
@@ -166,10 +170,10 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 
 预览器按 dashboard JSON 中的查询配置取数并渲染。
 
-在当前项目目录执行，`<插件目录>` 替换为插件安装路径：
+在当前项目目录执行，`<agentloop-collector-setup目录>` 替换为 Setup Skill 的安装路径：
 
 ```bash
-python3 "<插件目录>/scripts/run.py" report --dashboard output/audit/reports/<scenario>-dashboard.json
+python3 "<agentloop-collector-setup目录>/scripts/run.py" report --dashboard output/audit/reports/<scenario>-dashboard.json
 ```
 
 常用参数：
@@ -179,7 +183,7 @@ python3 "<插件目录>/scripts/run.py" report --dashboard output/audit/reports/
 - `--var key=value`：仅替换 SQL 中精确的 `${{key}}` token；高级模板与交互的预览范围见 [筛选器与变量替换](references/filters-and-variables.md#验证与本地预览)。
 - `--with-diff`：和 git HEAD 中同一路径 dashboard JSON 做 SQL / 结果 diff。
 
-登录由插件附带，不要传 `--profile`。Windows 把 `python3 "<插件目录>/scripts/run.py"` 换成 `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<插件目录>/scripts/run.ps1"`，后面的参数不变。
+查询、预览和发布共用 Setup 当前选中的 Profile，通常不需要传 `--profile`。Windows 把 `python3 "<agentloop-collector-setup目录>/scripts/run.py"` 换成 `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<agentloop-collector-setup目录>/scripts/run.ps1"`，后面的参数不变。
 
 ## 参考文档索引
 

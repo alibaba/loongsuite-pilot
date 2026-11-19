@@ -28,6 +28,11 @@ record carries `event.name=other`, `agent.hermes.hook=turn_end` and
 overlapping turns in one session do not truncate a trace. Legacy records retain
 their existing boundary detection. Source appends do not wait for trace export.
 
+Hermes can rotate the session during one native turn when compressing context.
+Events retain the native turn ID; `gen_ai.step.id` and `gen_ai.response.id`
+include the session identity, and the collector groups by both session and turn.
+The collector also separates records written by older Hermes plugins by session.
+
 The modern OpenClaw plugin allocates a model SpanID at `model_call_started` and
 reuses it for the response. Child events awaiting parent context still use bounded
 buffering to preserve trace relationships. Tool events subject to interception
@@ -60,6 +65,7 @@ collectors do not understand the new explicit turn-completion protocol.
 | `gen_ai.agent.result` | An observed Agent result or failed dispatch. Tool acceptance alone is not Agent completion. |
 | `skill.use` | A skill, extension, or agent capability invocation. |
 | `tool.approve` | A user approval event for a tool or action. |
+| `guardrail.evaluation` | One observation per local rule match, including audit allows and enforce blocks. It is not a model or tool execution and is excluded from OTLP turn grouping and conversion. |
 | `agent.input` | A compatibility copy of an input-bearing `other`, for querying Agent input by event name. |
 | `other` | Other events that cannot be classified into the above event names. |
 
@@ -131,7 +137,8 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.agent.invocation.id` | string | Required on delegation events | Stable outgoing work ID, unique per delegated work item. |
 | `gen_ai.agent.parent.invocation.id` | string | Required on confirmed incoming work | Upstream delegation accepted by this event/turn, not a permanent session property. |
 | `gen_ai.agent.name` | string | Recommended | Human-readable agent instance name. |
-| `gen_ai.provider.name` | string | Required | Model provider name. See [Provider Names](#provider-names). |
+| `gen_ai.provider.name` | string | Conditionally Required | Model provider name. Required except for explicitly scoped Agent-only turn observations described below. See [Provider Names](#provider-names). |
+| `loongsuite.observation.scope` | string | Conditionally Required | `agent_turn` marks a source that observes only Agent input or turn boundaries; it does not assert that no model or tool executed. |
 | `gen_ai.request.id` | string | Recommended | Client-side request ID used to correlate with gateway or provider logs. |
 | `gen_ai.request.model` | string | Conditionally Required when available | Model requested by the client. |
 | `gen_ai.response.model` | string | Recommended | Actual model used for the response. |
@@ -161,6 +168,17 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.tool.call.arguments` | json | When available | Tool call arguments. May contain sensitive content. |
 | `gen_ai.tool.call.result` | json | When available | Tool result payload. May contain sensitive content. |
 | `gen_ai.tool.call.duration` | int | Recommended | Positive tool execution duration in milliseconds, computed from the matched result boundary minus the call boundary. Omit it when either boundary is unavailable or the difference is not positive. |
+| `gen_ai.guardrail.triggered` | boolean | With a linked verdict or evaluation | Always `true` when a verdict exists; this does not mean a rule matched. Omitted without a matching, unexpired verdict or when interception is disabled. |
+| `gen_ai.guardrail.action` | string | With a verdict | `allow` or `block`. Tool calls link to PreToolUse and results to PostToolUse. Evaluation events describe that individual rule; tool events describe the final request decision. |
+| `gen_ai.guardrail.matched` | boolean | When the match result is known | `true` for audit/enforce hits, `false` after a complete check without hits, omitted when only an error is known. |
+| `gen_ai.guardrail.enforcement` | string | For local rule hits | `enforce` or `audit`. Audit matches allow the operation and do not notify the host. Builtin rules omit it. |
+| `gen_ai.guardrail.fail_open` | boolean | On check errors | `true` when checking failed or was incomplete. It can coexist with a known audit match. |
+| `gen_ai.guardrail.phase` | string | Evaluation events | `UserPromptSubmit`, `PreToolUse`, or `PostToolUse`. |
+| `gen_ai.guardrail.rule_id` | string | For known matches | The matched rule ID; linked tool events use the final enforce rule or first audit hit. |
+| `gen_ai.guardrail.rule_version` | string | For local rule hits | The rule's version. Builtin rules omit it. |
+| `gen_ai.guardrail.reason` | string | When supplied by the rule | Script reason or pattern/builtin marker, masked before output. |
+| `gen_ai.guardrail.title` | string | When declared by the rule | Rule display label, not returned to the host. |
+| `gen_ai.guardrail.message` | string | When declared by the rule | Rule reminder; audit records it, enforce can return it to the host. Masked before output. |
 | `gen_ai.skill.name` | string | Conditionally Required for `skill.use` | Skill or extension capability name. |
 | `gen_ai.skill.id` | string | Recommended when skill identity is available | Stable skill identifier. |
 | `gen_ai.skill.description` | string | Recommended when skill metadata is available | Human-readable skill description. |
@@ -175,6 +193,18 @@ Required levels follow OpenTelemetry wording:
 | `workspace.current_root` | string | Recommended | Git top-level directory, inferred when the working directory is a git repository. |
 | `workspace.path` | string | Recommended | Absolute working directory the agent ran in (process cwd), independent of git. Present even when the directory is not a git repository. |
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
+
+An event can omit `gen_ai.provider.name` only when it declares
+`loongsuite.observation.scope=agent_turn`, has a non-empty `gen_ai.turn.id`,
+and is either an `agent.input` or an `other` turn-start/turn-end boundary.
+It must not contain model request/response, token usage, step, system-instruction,
+or tool fields. Other events, including model and tool events, still require a
+non-empty provider. The scope limits what the source observed; it does not
+claim that the Agent did not use a model or tools internally. For this scope,
+input and output messages are the visible Agent conversation, not evidence of
+the exact messages sent to or returned by a model.
+
+Qoder product identity: the legacy IDE emits `gen_ai.agent.type=qoder`, and terminal CLI emits `qoder-cli`. For CLI-format transcripts, the owning native user prompt's `businessIdentity.product` determines whether the host is `app` or `cli`; this also covers sidechains whose lifecycle Hooks omit product metadata. Older runtimes fall back to the current Turn's Hook `parent_business_info.product=app` marker. App events use `qoder-app`. The OTLP Resource uses the product type as `gen_ai.framework`; the new desktop App uses `gen_ai.agent.system=qoder-app`, while existing CLI/IDE variants retain `qoder`. Product identity is not cached across resumed Turns. The App reuses `agents.qoder` configuration and CLI transcript/token enrichment. Missing or unrecognized product evidence retains the original classification; paths and process names are not used to guess a product. Historical records retain their original system value, so cross-version queries should also inspect type/framework.
 
 Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. `workspace.*` and any inferred `git.*` fields are collected independently from message extraction.
 
@@ -254,6 +284,8 @@ Experimental `doubao-work` events and OTLP resources expose `loongsuite.doubao_w
 `loongsuite.doubao_work.business_outcome=unknown` and `loongsuite.doubao_work.client_outcome`
 (`received`, `ended`, `error` or `cancelled`). Client completion is not business success or a model finish reason.
 See [scope and configuration](doubao-work.md).
+
+New events and exported OTLP Spans include `loongsuite.doubao_work.client`, with only `doubao-work` (Doubao Work) or `doubao` (Doubao App work mode). This source-product label supplements the shared `gen_ai.agent.type=doubao-work`; it does not identify a model or provider call. Legacy records without the label remain unknown.
 
 Local tools produce paired `tool.call` / `tool.result` logs with unchanged source times. A uniquely correlated current trajectory reconstructs STEP → LLM / TOOL from assistant messages: inputs contain preceding visible messages; outputs include text/tool_calls; parallel tools share one STEP. LLM and untimed trajectory-tool timestamps are estimated from client submission, tool and completion anchors, with intermediate unknown boundaries linearly allocated. Default CMS LLM counts and latency can include these estimates, which are not precise model timing or actual provider request counts. Missing model, usage, provider response ID and model finish reasons are omitted.
 

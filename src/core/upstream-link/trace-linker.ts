@@ -59,6 +59,11 @@ function hasDelegatedParent(entry: AgentActivityEntry): boolean {
     && entry.parent_span_id !== ZERO_SPAN;
 }
 
+function hasLockedQoderContext(entry: AgentActivityEntry): boolean {
+  return entry['agent.qoder.trace_context_locked'] === true
+    && typeof entry.trace_id === 'string' && /^[0-9a-f]{32}$/.test(entry.trace_id) && entry.trace_id !== ZERO_TRACE;
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -93,7 +98,9 @@ export class TraceLinker {
     this.retryDelayMs = opts.retryDelayMs ?? 100;
   }
 
-  async stamp(entries: AgentActivityEntry[]): Promise<void> {
+  /** Pre-publication probes may leave misses open; normal output keeps the
+   * established per-turn negative cache. Published native work stays pinned. */
+  async stamp(entries: AgentActivityEntry[], { cacheMisses = true }: { cacheMisses?: boolean } = {}): Promise<void> {
     // Establish the first turn from source order, before the input-first pass.
     // Otherwise a later turn with text could consume the first-turn env fallback.
     for (const entry of entries) {
@@ -108,33 +115,36 @@ export class TraceLinker {
 
     // Resolve before applying, so leading metadata/LLM events in this batch
     // cannot escape with the local trace id or prematurely claim an env fallback.
+    const inputEntries = new Set<AgentActivityEntry>();
     for (const entry of entries) {
       if (entry['event.name'] !== 'other' || (!extractUserText(entry) && !extractInputHash(entry))) continue;
-      await this.tryStampEntry(entry);
+      inputEntries.add(entry);
+      await this.tryStampEntry(entry, cacheMisses);
     }
     for (const entry of entries) {
-      await this.tryStampEntry(entry);
+      if (inputEntries.has(entry)) continue;
+      await this.tryStampEntry(entry, cacheMisses);
     }
   }
 
-  private async tryStampEntry(entry: AgentActivityEntry): Promise<void> {
+  private async tryStampEntry(entry: AgentActivityEntry, cacheMisses: boolean): Promise<void> {
     try {
-      await this.stampEntry(entry);
+      await this.stampEntry(entry, cacheMisses);
     } catch (err) {
       logger.warn('stamp entry failed (skipped)', { error: String(err) });
     }
   }
 
-  private async stampEntry(entry: AgentActivityEntry): Promise<void> {
+  private async stampEntry(entry: AgentActivityEntry, cacheMisses: boolean): Promise<void> {
     const sessionId = entry['gen_ai.session.id'] as string | undefined;
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
     // Native delegation already identifies the real parent TOOL in its trace.
     // A separate correlation file must not detach the child or consume a claim.
-    if (!sessionId || !turnId || hasDelegatedParent(entry)) return;
+    if (!sessionId || !turnId || hasDelegatedParent(entry) || hasLockedQoderContext(entry)) return;
 
     const key = `${sessionId}|${turnId}`;
     const cached = this.cache.get(key);
-    if (cached) {
+    if (cached && (cached.resolved || cacheMisses)) {
       if (cached.resolved) this.apply(entry, cached);
       return; // already resolved or already attempted (miss)
     }
@@ -150,12 +160,12 @@ export class TraceLinker {
     const tp = await this.resolveWithRetry(sessionId, text, isFirstTurn, turnId, hash);
 
     if (!tp) {
-      this.cache.set(key, { resolved: false });
+      if (cacheMisses) this.cache.set(key, { resolved: false });
       return;
     }
     const parsed = parseTraceparent(tp);
     if (!parsed) {
-      this.cache.set(key, { resolved: false });
+      if (cacheMisses) this.cache.set(key, { resolved: false });
       return;
     }
     const state: ResolveState = { resolved: true, traceId: parsed.traceId, parentSpanId: parsed.spanId };

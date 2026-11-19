@@ -27,6 +27,41 @@ function clearSlsEnv() {
 }
 
 describe('ConfigLoader', () => {
+  it('keeps a collaboration conversation allowlist and fails closed for invalid scopes', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'qwen-work-cn-collaboration': { includeConversationIds: [' space-a ', 'space-a', 'space-b'] },
+    } });
+    expect((await loadConfig()).listeners['qwen-work-cn-collaboration'].includeConversationIds)
+      .toEqual(['space-a', 'space-b']);
+
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'qwen-work-cn-collaboration': { includeConversationIds: 'space-a' },
+    } });
+    expect((await loadConfig()).listeners['qwen-work-cn-collaboration'].includeConversationIds).toEqual([]);
+  });
+
+  it('defaults Multica collection to off', async () => {
+    expect((await loadConfig()).pipeline.multica).toEqual({enabled: true, mode: 'off'});
+  });
+
+  it('allows environment mode overrides while preserving the Multica hard disable', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({pipeline: {multica: {mode: 'off'}}});
+    vi.stubEnv('LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE', 'on');
+    vi.stubEnv('LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED', 'false');
+    expect((await loadConfig()).pipeline.multica).toEqual({enabled: false, mode: 'on'});
+  });
+
+  it('disables Multica when its collection mode is invalid', async () => {
+    vi.stubEnv('LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE', 'typo');
+    expect((await loadConfig()).pipeline.multica?.mode).toBe('off');
+    expect(mockLoggerWarn).toHaveBeenCalledWith('Invalid Multica collection mode; collection disabled');
+  });
+
+  it('reads the configured Multica mode', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({pipeline: {multica: {mode: 'off'}}});
+    expect((await loadConfig()).pipeline.multica?.mode).toBe('off');
+  });
+
   it('loads workspace exclusions and rejects invalid privacy rules', async () => {
     mockReadJsonFile.mockResolvedValueOnce({ privacy: { excludeWorkspaces: ['/private-project'] } });
     expect((await loadConfig()).privacy?.excludeWorkspaces).toEqual(['/private-project']);
@@ -77,6 +112,13 @@ describe('ConfigLoader', () => {
 
   describe('three-layer priority (T025)', () => {
     it.each([
+      [undefined, false], [false, false], [true, true], ['true', false], [1, false],
+    ])('only enables the dashboard for boolean true: %s', async (enabled, expected) => {
+      mockReadJsonFile.mockResolvedValueOnce(enabled === undefined ? {} : { dashboard: { enabled } });
+      expect((await loadConfig()).dashboard.enabled).toBe(expected);
+    });
+
+    it.each([
       [undefined, 8765],
       [1, 1],
       [8765, 8765],
@@ -118,6 +160,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.enabled).toBe(true);
       expect(config.autoStart).toBe(true);
+      expect(config.dashboard).toEqual({ enabled: false, port: 8765 });
     });
 
     it('loads configured userId from env over config file', async () => {
@@ -155,7 +198,7 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.enabled).toBe(true);
-      expect(config.flushers.jsonl?.enabled).toBe(true);
+      expect(config.flushers.jsonl?.enabled).toBe(false);
     });
   });
 
@@ -289,7 +332,20 @@ describe('ConfigLoader', () => {
       expect(config.flushers.http?.url).toBe('https://api.example.com');
     });
 
-    it('resolves JSONL enabled from env', async () => {
+    it('enables JSONL only when explicitly requested in the config file or environment', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: true } });
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: false } });
+      vi.stubEnv('JSONL_ENABLED', 'true');
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: true } });
+      vi.stubEnv('JSONL_ENABLED', 'false');
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(false);
+    });
+
+    it('resolves JSONL disabled from env', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       vi.stubEnv('JSONL_ENABLED', 'false');
 
@@ -322,6 +378,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qwen-work-cn-hook']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['qwen-work-cn-trace']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-collaboration']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
       expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 10_000 });
@@ -339,6 +396,23 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.listeners['doubao-work']).toEqual({ enabled: false, pollInterval: 1200, logDir: '/synthetic/doubao/logs' });
       expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('preserves the explicitly selected Doubao client without affecting other listeners', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'doubao' } } });
+      const config = await loadConfig();
+      expect(config.listeners['doubao-work']).toEqual({ enabled: true, pollInterval: 10_000, client: 'doubao' });
+      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('disables only the Doubao listener for an invalid client instead of collecting another product', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'typo' } } });
+      const config = await loadConfig();
+      expect(config.listeners['doubao-work'].enabled).toBe(false);
+      expect(config.listeners.workbuddy.enabled).toBe(true);
+      expect(mockLoggerWarn).toHaveBeenCalledWith('Invalid Doubao client; disabling this listener', {
+        valueType: 'string', allowedValues: ['doubao-work', 'doubao'],
+      });
     });
 
     it('merges file-level listener overrides', async () => {
@@ -565,7 +639,7 @@ describe('ConfigLoader', () => {
       expect(config.agents).toEqual({});
     });
 
-    it('ignores legacy per-agent captureMessageContent values', async () => {
+    it('loads per-agent captureMessageContent overrides', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           cursor: { captureMessageContent: false },
@@ -574,19 +648,12 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.cursor).toEqual({});
-      expect(config.agents.qoder).toEqual({});
+      expect(config.agents.cursor.captureMessageContent).toBe(false);
+      expect(config.agents.qoder.captureMessageContent).toBe(true);
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 10_000 });
-      expect(mockLoggerWarn).toHaveBeenCalledWith(
-        expect.stringContaining('deprecated and ignored'),
-        { locations: [
-          'agents.cursor.captureMessageContent',
-          'agents.qoder.captureMessageContent',
-        ] },
-      );
     });
 
-    it('ignores legacy string captureMessageContent values', async () => {
+    it('parses string captureMessageContent values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           cursor: { captureMessageContent: 'false' },
@@ -595,11 +662,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.cursor).toEqual({});
-      expect(config.agents.qoder).toEqual({});
+      expect(config.agents.cursor.captureMessageContent).toBe(false);
+      expect(config.agents.qoder.captureMessageContent).toBe(true);
     });
 
-    it('does not expose legacy captureMessageContent in resolved agent config', async () => {
+    it('falls back to capturing message content for invalid or omitted values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           cursor: { captureMessageContent: 'sometimes' },
@@ -608,8 +675,8 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.cursor).not.toHaveProperty('captureMessageContent');
-      expect(config.agents.qoder).not.toHaveProperty('captureMessageContent');
+      expect(config.agents.cursor.captureMessageContent).toBe(true);
+      expect(config.agents.qoder.captureMessageContent).toBe(true);
     });
 
     it('ignores unsupported agent fields for this stage', async () => {
@@ -623,7 +690,7 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.cursor).toEqual({});
+      expect(config.agents.cursor).toEqual({ captureMessageContent: true });
     });
 
     it('parses agents with enabled field', async () => {
@@ -636,9 +703,9 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents['claude-code']).toEqual({ enabled: true });
-      expect(config.agents['cursor']).toEqual({ enabled: false });
-      expect(config.agents['codex']).toEqual({ enabled: true });
+      expect(config.agents['claude-code']).toEqual({ enabled: true, captureMessageContent: true });
+      expect(config.agents['cursor']).toEqual({ enabled: false, captureMessageContent: true });
+      expect(config.agents['codex']).toEqual({ enabled: true, captureMessageContent: false });
     });
 
     it('backward compat: empty agents config means no gate', async () => {
@@ -661,9 +728,10 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.agents.codex).toEqual({
+        captureMessageContent: true,
         multimodal: { uploadMode: 'all' },
       });
-      expect(config.agents.cursor).toEqual({});
+      expect(config.agents.cursor).toEqual({ captureMessageContent: true });
     });
 
     it('parses agent multimodal allowedRootPaths and expands ~', async () => {
@@ -1704,7 +1772,13 @@ describe('ConfigLoader', () => {
       expect(config.collectTrace).toBe(true);
       expect(config.serviceName).toBeUndefined();
       expect(config.serviceNamePrefix).toBe('loongsuite-pilot');
+      expect(config.pipeline.multica?.serviceNamePrefix).toBeUndefined();
       expect(config.cms).toEqual({ enabled: false, licenseKey: '', endpoint: '', workspace: '', debug: false });
+    });
+
+    it('honors an explicit Multica environment even when it matches the built-in Pilot prefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ serviceNamePrefix: 'loongsuite-pilot' });
+      expect((await loadConfig()).pipeline.multica?.serviceNamePrefix).toBe('loongsuite-pilot');
     });
 
     it('reads values from config file', async () => {
@@ -1719,6 +1793,7 @@ describe('ConfigLoader', () => {
       expect(config.collectLog).toBe(false);
       expect(config.collectTrace).toBe(false);
       expect(config.serviceNamePrefix).toBe('my-team');
+      expect(config.pipeline.multica?.serviceNamePrefix).toBe('my-team');
       expect(config.cms).toEqual({
         enabled: true,
         licenseKey: 'key123',
@@ -1769,6 +1844,7 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.serviceNamePrefix).toBe('from-env');
+      expect(config.pipeline.multica?.serviceNamePrefix).toBe('from-env');
     });
 
     it('loads an exact serviceName from env over config and passes it to SLS', async () => {
@@ -1825,7 +1901,6 @@ describe('ConfigLoader', () => {
         collectTrace: true,
         otlpTrace: {
           endpoint: 'http://jaeger:4318',
-          captureMessageContent: false,
           headers: { 'X-Custom': 'val' },
           resourceAttributes: { 'team': 'infra' },
           serviceName: 'my-svc',
@@ -1850,12 +1925,27 @@ describe('ConfigLoader', () => {
       expect(result!.debug).toBe(true);
       expect(result!.turnIdleTimeoutMs).toBe(5000);
       expect(result!.resourceAttributeKeys).toEqual([]);
-      expect(config.otlpTrace).not.toHaveProperty('captureMessageContent');
-      expect(result).not.toHaveProperty('captureMessageContent');
-      expect(mockLoggerWarn).toHaveBeenCalledWith(
-        expect.stringContaining('deprecated and ignored'),
-        { locations: ['otlpTrace.captureMessageContent'] },
-      );
+    });
+
+    it('does not turn a per-agent content policy into a global Trace policy', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        agents: { 'claude-code': { captureMessageContent: false }, cursor: {} },
+        otlpTrace: { endpoint: 'http://localhost:4318' },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents['claude-code'].captureMessageContent).toBe(false);
+      expect(config.agents.cursor.captureMessageContent).toBe(true);
+      expect(buildOtlpTraceConfig(config)?.captureMessageContent).toBe(true);
+    });
+
+    it('keeps an explicit global Trace content policy', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://localhost:4318', captureMessageContent: false },
+      });
+      expect(buildOtlpTraceConfig(await loadConfig())?.captureMessageContent).toBe(false);
     });
 
     it('buildOtlpTraceConfig allows custom resource attribute keys', async () => {
@@ -2282,7 +2372,7 @@ describe('ConfigLoader', () => {
       expect(config.interceptor).toEqual({ mode: 'none', types: [] });
     });
 
-    it('loads all mode and custom types as a mask-type subset', async () => {
+    it('treats interceptor custom mode as none and does not expand mask', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         interceptor: {
           mode: 'custom',
@@ -2290,10 +2380,8 @@ describe('ConfigLoader', () => {
         },
       });
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({
-        mode: 'custom',
-        types: ['apiKey', 'cloudAccessKey'],
-      });
+      expect(config.interceptor).toEqual({ mode: 'none', types: [] });
+      expect(config.mask.mode).toBe('none');
     });
 
     it('uses interceptor env over config file', async () => {
@@ -2312,7 +2400,7 @@ describe('ConfigLoader', () => {
     it('leaves mask mode all unchanged when interceptor is enabled', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: { mode: 'all' },
-        interceptor: { mode: 'custom', types: ['apiKey'] },
+        interceptor: { mode: 'all' },
       });
       const config = await loadConfig();
       expect(config.mask.mode).toBe('all');

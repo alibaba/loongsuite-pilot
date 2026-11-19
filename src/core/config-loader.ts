@@ -9,7 +9,6 @@ import type {
   AutoUpdateConfig,
   CmsConfig,
   DashboardConfig,
-  FileCollectionToggle,
   PipelineToggle,
   FlusherConfig,
   HookWatchdogConfig,
@@ -44,28 +43,9 @@ import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
 import { buildInterceptorConfig, ensureMaskCoversInterceptor } from '../interceptor/config.js';
+import { resolveDoubaoWorkSource } from '../utils/doubao-work-paths.js';
 
 const logger = createLogger('ConfigLoader');
-
-function warnIgnoredCaptureMessageContentConfig(file: ConfigFile): void {
-  const locations: string[] = [];
-  if (file.otlpTrace && Object.prototype.hasOwnProperty.call(file.otlpTrace, 'captureMessageContent')) {
-    locations.push('otlpTrace.captureMessageContent');
-  }
-  if (file.agents && typeof file.agents === 'object') {
-    for (const [agentType, policy] of Object.entries(file.agents)) {
-      if (policy && typeof policy === 'object'
-        && Object.prototype.hasOwnProperty.call(policy, 'captureMessageContent')) {
-        locations.push(`agents.${agentType}.captureMessageContent`);
-      }
-    }
-  }
-  if (locations.length > 0) {
-    logger.warn('captureMessageContent is deprecated and ignored; message content capture is always enabled', {
-      locations,
-    });
-  }
-}
 
 export interface SlsEndpointEntry {
   name?: string;
@@ -116,6 +96,8 @@ export interface ConfigFile {
   dataDir?: string;
   userId?: string;
   'user.id'?: string;
+  hostSn?: string;
+  hostIdentityTags?: boolean;
 
   sls?: SlsSingleConfig | SlsEndpointEntry[];
 
@@ -139,6 +121,8 @@ export interface ConfigFile {
     enabled?: boolean;
     pollInterval?: number;
     logDir?: string;
+    client?: 'doubao-work' | 'doubao';
+    includeConversationIds?: string[];
   }>;
 
   retention?: {
@@ -217,7 +201,6 @@ export interface ConfigFile {
     resourceAttributes?: Record<string, string>;
     serviceName?: string;
     debug?: boolean;
-    /** @deprecated Ignored. Message content capture is always enabled. */
     captureMessageContent?: boolean;
     turnIdleTimeoutMs?: number;
     resourceAttributeKeys?: string[];
@@ -226,7 +209,6 @@ export interface ConfigFile {
 
   agents?: Record<string, {
     enabled?: boolean;
-    /** @deprecated Ignored. Message content capture is always enabled. */
     captureMessageContent?: boolean | string;
     multimodal?: {
       uploadMode?: string;
@@ -249,11 +231,13 @@ export interface ConfigFile {
     enabled?: boolean;
     file?: { enabled?: boolean };
     qoderApi?: { enabled?: boolean };
+    multica?: { enabled?: boolean; mode?: 'on' | 'off' };
   };
 
   enableStatusBarApp?: boolean | string;
 
   dashboard?: {
+    enabled?: boolean;
     port?: number;
   };
 
@@ -304,7 +288,6 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
   if (file) {
     logger.info('loaded config file', { path: configPath });
-    warnIgnoredCaptureMessageContentConfig(file);
   } else {
     logger.debug('no config file found, using env + defaults', { path: configPath });
   }
@@ -315,16 +298,25 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
   const innerDataConfig = await readJsonFile<InnerDataConfig>(innerDataConfigPath);
 
   const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
+  const hostSn = typeof file?.hostSn === 'string' ? file.hostSn.trim() : '';
+  const hostIdentityTags = envBool(
+    'LOONGSUITE_PILOT_HOST_IDENTITY_TAGS',
+    file?.hostIdentityTags ?? true,
+  );
 
   const serviceName = nonEmpty(env('LOONGSUITE_PILOT_SERVICE_NAME')) ?? nonEmpty(file?.serviceName);
-  const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? 'loongsuite-pilot';
+  const configuredServiceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix;
+  const serviceNamePrefix = configuredServiceNamePrefix ?? 'loongsuite-pilot';
   const interceptor = buildInterceptorConfig(file?.interceptor);
+  const pipeline = buildPipelineConfig(file, configuredServiceNamePrefix);
 
   return {
     enabled: envBool('LOONGSUITE_PILOT_ENABLED', file?.enabled ?? true),
     autoStart: true,
     dataDir,
     userId,
+    hostSn,
+    hostIdentityTags,
     collectLog: envBool('LOONGSUITE_PILOT_COLLECT_LOG', file?.collectLog ?? true),
     collectTrace: envBool('LOONGSUITE_PILOT_COLLECT_TRACE', file?.collectTrace ?? true),
     serviceName,
@@ -347,8 +339,8 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     privacy: { excludeWorkspaces: validateExcludedWorkspaces(file?.privacy?.excludeWorkspaces) },
     mask: ensureMaskCoversInterceptor(buildMaskConfig(file), interceptor),
     hookWatchdog: buildHookWatchdogConfig(file),
-    fileCollection: buildFileCollectionConfig(file),
-    pipeline: buildPipelineConfig(file),
+    fileCollection: pipeline,
+    pipeline,
     statusBar: buildStatusBarConfig(file),
     dashboard: buildDashboardConfig(file),
     upstreamLink: buildUpstreamLinkConfig(file),
@@ -635,8 +627,16 @@ function resolveGlobalSpanAttributes(file: ConfigFile | null): Record<string, st
 
 function buildOtlpTraceRawConfig(file: ConfigFile | null): OtlpTraceRawConfig | undefined {
   if (!file?.otlpTrace) return undefined;
-  const { captureMessageContent: _ignored, ...config } = file.otlpTrace;
-  return config;
+  return { ...file.otlpTrace };
+}
+
+function parseOptionalBool(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+  return undefined;
 }
 
 function buildCmsConfig(file: ConfigFile | null): CmsConfig {
@@ -690,7 +690,7 @@ function buildAgentsConfig(file: ConfigFile | null, innerDataConfig: InnerDataCo
           logger.warn('Ignoring unsupported managed agent fields', { agentType, ignoredFields });
         }
       }
-      // Only user agent policies may supply enabled. Content capture is unconditional.
+      // Only user agent policies may supply enabled and captureMessageContent.
       const acceptedPolicy = managed ? { multimodal } : policy;
       const previous = policies[agentType];
       policies[agentType] = {
@@ -705,9 +705,11 @@ function buildAgentsConfig(file: ConfigFile | null, innerDataConfig: InnerDataCo
 
   const result: AgentsConfig = {};
   for (const [agentType, policy] of Object.entries(policies)) {
+    const captureMessageContent = parseOptionalBool(policy.captureMessageContent) ?? true;
     const multimodal = buildAgentMultimodalConfig(agentType, policy.multimodal);
     result[agentType] = {
-      ...(policy.enabled !== undefined ? { enabled: policy.enabled } : {}),
+      enabled: policy.enabled,
+      captureMessageContent,
       ...(multimodal ? { multimodal } : {}),
     };
   }
@@ -815,6 +817,7 @@ function buildListenersConfig(
     'qwen-work-cn-trace': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'qwen-work-cn-hook': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'qwen-work-cn-sqlite': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwen-work-cn-collaboration': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'cursor-hook': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'claude-code-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'grok-build-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
@@ -835,9 +838,26 @@ function buildListenersConfig(
       result[key] = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
         pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
-        ...(key === 'doubao-work' && typeof val.logDir === 'string' && val.logDir.trim()
-          ? { logDir: path.resolve(resolveHome(val.logDir.trim())) } : {}),
+        ...(key === 'doubao-work' ? resolveDoubaoWorkSource(val) : {}),
       };
+      if (key === 'qwen-work-cn-collaboration' && Object.hasOwn(val, 'includeConversationIds')) {
+        const ids: unknown = val.includeConversationIds;
+        if (!Array.isArray(ids) || ids.length > 1000 || ids.some(id =>
+          typeof id !== 'string' || id.trim() === '' || id.length > 512)) {
+          // Invalid restrictions must never widen the collection scope.
+          logger.warn('Invalid Qwen Work collaboration conversation allowlist; collecting no conversations');
+          result[key].includeConversationIds = [];
+        } else {
+          result[key].includeConversationIds = [...new Set(ids.map(id => id.trim()))];
+        }
+      }
+      if (key === 'doubao-work' && val.client !== undefined && val.client !== 'doubao' && val.client !== 'doubao-work') {
+        logger.warn('Invalid Doubao client; disabling this listener', {
+          valueType: typeof val.client,
+          allowedValues: ['doubao-work', 'doubao'],
+        });
+        result[key].enabled = false;
+      }
     }
   }
 
@@ -907,11 +927,7 @@ function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
   };
 }
 
-function buildFileCollectionConfig(file: ConfigFile | null): FileCollectionToggle {
-  return buildPipelineConfig(file);
-}
-
-function buildPipelineConfig(file: ConfigFile | null): PipelineToggle {
+function buildPipelineConfig(file: ConfigFile | null, configuredServiceNamePrefix?: string): PipelineToggle {
   const legacyEnabled = file?.fileCollection?.enabled;
   const enabled = envBool(
     'LOONGSUITE_PILOT_PIPELINE_ENABLED',
@@ -925,11 +941,25 @@ function buildPipelineConfig(file: ConfigFile | null): PipelineToggle {
     qoderApi: {
       enabled: envBool('LOONGSUITE_PILOT_PIPELINE_QODER_API_ENABLED', file?.pipeline?.qoderApi?.enabled ?? true),
     },
+    multica: {
+      enabled: envBool('LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED', file?.pipeline?.multica?.enabled ?? true),
+      mode: buildMulticaMode(file?.pipeline?.multica?.mode),
+      // Pilot's built-in prefix must not rename environments on existing installations.
+      serviceNamePrefix: configuredServiceNamePrefix,
+    },
   };
 }
 
+function buildMulticaMode(value: unknown): 'on' | 'off' {
+  const raw = process.env.LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE ?? value ?? 'off';
+  const mode = typeof raw === 'string' ? raw.trim().toLowerCase() : raw;
+  if (mode === 'on' || mode === 'off') return mode;
+  logger.warn('Invalid Multica collection mode; collection disabled');
+  return 'off';
+}
+
 function buildStatusBarConfig(file: ConfigFile | null): StatusBarConfig {
-  // Accepts both '0' and 'false' to disable the status bar.
+  // Intentionally accepts '0' as false (differs from parseOptionalBool which only handles 'true'/'false').
   // This matches AI Trace's resolveStatusBarAppEnabled() semantics for cross-product consistency.
   const rawEnabled = file?.enableStatusBarApp;
   const fallback = typeof rawEnabled === 'string'
@@ -947,6 +977,7 @@ const DEFAULT_DASHBOARD_PORT = 8_765;
 function buildDashboardConfig(file: ConfigFile | null): DashboardConfig {
   const port = file?.dashboard?.port;
   return {
+    enabled: file?.dashboard?.enabled === true,
     port: typeof port === 'number' && Number.isInteger(port) && port >= 1 && port <= 65_535
       ? port
       : DEFAULT_DASHBOARD_PORT,
@@ -976,7 +1007,7 @@ function buildFlushersConfig(
  *   - inner config.innerTrace.cms[]   (managed ARMS shorthand backends)
  *
  * Endpoints are deduped by normalized URL + license-key + project. Conversion
- * happens once; serviceName and resourceAttributes are
+ * happens once; serviceName / resourceAttributes / captureMessageContent are
  * therefore shared across all backends. Requires collectTrace=true.
  */
 export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherConfig | undefined {
@@ -1052,6 +1083,9 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   if (deduped.length === 0) return undefined;
 
   const otlp = config.otlpTrace;
+  // The global Trace switch is independent of per-agent policies. InputManager
+  // applies those policies before records reach this shared flusher.
+  const captureMessageContent = otlp?.captureMessageContent ?? true;
   const serviceName = userServiceName;
   const resourceAttributes = { ...(otlp?.resourceAttributes ?? {}), ...armsResourceAttributes };
 
@@ -1062,6 +1096,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     serviceName,
     appendAgentTypeToServiceName: config.serviceName ? false : undefined,
     resourceAttributes: Object.keys(resourceAttributes).length > 0 ? resourceAttributes : undefined,
+    captureMessageContent,
     debug: otlp?.debug ?? config.cms.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
@@ -1400,7 +1435,7 @@ function dedupSlsEndpoints(endpoints: SlsEndpoint[]): SlsEndpoint[] {
 
 function buildJsonlConfig(file: ConfigFile | null, dataDir: string) {
   return {
-    enabled: envBool('JSONL_ENABLED', file?.jsonl?.enabled ?? true),
+    enabled: envBool('JSONL_ENABLED', file?.jsonl?.enabled ?? false),
     outputDir: resolveHome(
       env('JSONL_OUTPUT_DIR') ?? file?.jsonl?.outputDir ?? `${dataDir}/logs/output`,
     ),

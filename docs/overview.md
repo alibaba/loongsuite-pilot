@@ -89,7 +89,7 @@ Pilot can fan out the same normalized event stream to multiple destinations:
 | HTTP | Custom ingestion service or gateway. |
 | OTLP Trace | Trace backend, APM, or GenAI observability platform. |
 
-If no remote backend is configured, JSONL remains enabled by default so collected data is still visible locally.
+JSONL is disabled by default, including when no remote backend is configured. Set `jsonl.enabled` to `true` to write normalized events locally.
 
 ## Local Runtime
 
@@ -117,7 +117,7 @@ Important files and directories:
 
 - Install Pilot with [Installation](installation.md).
 - Configure outputs and agent selection in [Configuration Guide](configuration.md).
-- Choose agents and content capture policy in [Agent Configuration](agents.md).
+- Choose agents in [Agent Configuration](agents.md).
 - Configure local output in [Local JSONL Output](local-jsonl-output.md).
 - Configure SLS reporting in [SLS Output](sls-output.md).
 - Configure trace reporting in [Trace Output](trace-output.md).

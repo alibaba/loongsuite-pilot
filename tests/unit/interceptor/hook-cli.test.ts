@@ -272,6 +272,21 @@ describe('interceptor hook CLI', () => {
     })}\n`);
   });
 
+  it('prefers rule.message over the script reason for the host', () => {
+    const chunks: string[] = [];
+    emitVerdict(
+      { agent: 'qoder', event: 'UserPromptSubmit', raw: {} },
+      'block',
+      'flow-probe-v3',
+      (text) => chunks.push(text),
+      '不要在对话里粘贴 AccessKey',
+    );
+    expect(chunks.join('')).toBe(`${JSON.stringify({
+      decision: 'block',
+      reason: wrapHostReason('UserPromptSubmit', '不要在对话里粘贴 AccessKey'),
+    })}\n`);
+  });
+
   it('wraps PostToolUse interceptor reasons for the host', () => {
     const chunks: string[] = [];
     emitVerdict(

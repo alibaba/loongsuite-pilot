@@ -1,3 +1,5 @@
+import { providerOptionalForAgentTurn } from '../../scripts/e2e/lib/provider-contract.mjs';
+
 const EVENT_NAMES = new Set([
   'llm.request',
   'llm.response',
@@ -42,7 +44,12 @@ export const AgentActivityEntrySchema = {
     if (typeof value['gen_ai.session.id'] !== 'string') return { success: false };
     // The previous zod schema accepted the ClientType enum or any non-empty string.
     if (!isNonEmptyString(value['gen_ai.agent.type'])) return { success: false };
-    if (!isNonEmptyString(value['gen_ai.provider.name'])) return { success: false };
+    if (value['loongsuite.observation.scope'] !== undefined && !providerOptionalForAgentTurn(value)) {
+      return { success: false };
+    }
+    const provider = value['gen_ai.provider.name'];
+    if (provider !== undefined && provider !== null && typeof provider !== 'string') return { success: false };
+    if (!isNonEmptyString(provider) && !providerOptionalForAgentTurn(value)) return { success: false };
     return { success: true };
   },
 };

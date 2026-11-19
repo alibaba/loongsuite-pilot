@@ -100,7 +100,7 @@ async function harness(capture = true, endpoint?: string, configureJournal?: (jo
     manager = new InputManager();
     manager.setAgentsConfig({ codex: { captureMessageContent: capture } });
     if (!capture) {
-      // Legacy content opt-outs are ignored; real privacy policies still apply.
+      // Apply the saved content policy before fan-out to local and trace outputs.
       manager.setMaskConfig({ mode: 'all', types: [], replacementMode: 'placeholder' });
       manager.setWorkspacePolicy(new WorkspacePolicy(['/excluded-workspace']));
     }
@@ -371,10 +371,10 @@ describe('Codex independent subagent lifecycle across native input, JSONL and OT
     expect(logs.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke')).toHaveLength(1);
   });
 
-  it('keeps masked content and invocation topology despite legacy opt-out while filtering excluded workspaces', async () => {
+  it('removes content while keeping invocation topology and workspace exclusions', async () => {
     const h = await harness(false);
     const apiKey = 'sk-1234567890abcdefghijklmnop';
-    const prompt = `child-a ${apiKey}`;
+    const prompt = `child-a private-prompt-sentinel ${apiKey}`;
     await h.write(PARENT, [metadata(PARENT, 0), ...begin('p1', 1, 'delegate'), ...dispatch('spawn-a', CHILD, 2, prompt), ...end('p1', 3)]);
     await h.write(CHILD, [metadata(CHILD, 2.005, PARENT), ...work('c1', 4, prompt)], 'c1');
     const excluded = begin('excluded-turn', 8, 'excluded-content-sentinel');
@@ -382,14 +382,13 @@ describe('Codex independent subagent lifecycle across native input, JSONL and OT
     await h.write(PEER, [metadata(PEER, 7), ...excluded, ...end('excluded-turn', 9)]);
     const logs = await h.logs();
     assertChild(logs, h.spans, CHILD, 'c1', 'spawn-a');
-    expect(logs.some(entry => entry['gen_ai.input.messages'] || entry['gen_ai.input.messages_delta'])).toBe(true);
-    expect(logs.some(entry => entry['gen_ai.output.messages'])).toBe(true);
-    expect(logs.some(entry => entry['gen_ai.tool.call.arguments'])).toBe(true);
-    expect(logs.some(entry => entry['gen_ai.tool.call.result'])).toBe(true);
+    expect(logs.some(entry => entry['gen_ai.input.messages'] || entry['gen_ai.input.messages_delta'])).toBe(false);
+    expect(logs.some(entry => entry['gen_ai.output.messages'])).toBe(false);
+    expect(logs.some(entry => entry['gen_ai.tool.call.arguments'])).toBe(false);
+    expect(logs.some(entry => entry['gen_ai.tool.call.result'])).toBe(false);
     for (const text of [JSON.stringify(logs), JSON.stringify(h.spans.map(span => span.attributes))]) {
-      expect(text).toContain('child-a');
-      expect(text).toContain('fixture-result');
-      expect(text).toContain('[APIKEY_MASKED]');
+      expect(text).not.toContain('private-prompt-sentinel');
+      expect(text).not.toContain('fixture-result');
       expect(text).not.toContain(apiKey);
       expect(text).not.toContain('excluded-content-sentinel');
     }
