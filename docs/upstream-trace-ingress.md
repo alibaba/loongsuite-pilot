@@ -1,67 +1,47 @@
-# Upstream application → Agent / Pilot: W3C ingress
+# Link an upstream application span to a Pilot trace
 
-Enable `upstreamLink.enabled` and configure OTLP output. This links the caller span to Pilot's reconstructed ENTRY/AGENT tree; it does not instrument the Agent's active context or inject outgoing HTTP/MCP headers. `propagateToTools` is not required.
+Enable `upstreamLink.enabled`, install the Pilot Hooks, and send application and Pilot spans to the same trace backend. In the application, inject the current OpenTelemetry Context with the W3C propagator. The carrier contains `traceparent` and optional `tracestate`. Pilot resolves that carrier before it creates the ENTRY span, so the upstream span appears as the parent in the trace tree.
 
-## Fresh subprocess: environment bridge
+| Runtime | Caller | Agent-side correlation |
+| --- | --- | --- |
+| Codex CLI | Launch each `codex exec` or `codex exec resume` with its own `TRACEPARENT`, optional `TRACESTATE`, and a fresh `LOONGSUITE_PILOT_INGRESS_REQUEST_ID` | The UserPromptSubmit Hook binds the process invocation to the native session and turn |
+| Codex TypeScript SDK | Pass that per-call environment to a fresh SDK client and run a thread | The SDK starts the CLI, which uses the same Pilot Hook |
+| Qoder Agent SDK | Bind the request to a user message UUID, then send the same UUID through the SDK | Pilot matches the UUID against the native user transcript row |
+| Codex ACP | Add the carrier to each `session/prompt.params._meta` | The adapted server binds the returned app-server turn ID before Pilot publishes |
 
-Inject the caller's current OTel Context, then map carrier `traceparent`/`tracestate` to `TRACEPARENT`/`TRACESTATE` in a per-call child environment. Claude's Pilot `UserPromptSubmit` captures it before execution, with Stop as a compatibility fallback. No Bash call is required. Existing Codex/Qoder/Qwen Code shared-helper paths remain available; other Agents need lifecycle adapters.
+For Codex CLI and SDK calls, use a fresh copy of the child environment and remove stale propagation fields first. Generate a new request UUID for each subprocess invocation. Keep session persistence enabled so Pilot can read the turn. SDK 0.169.0 accepts an `env` option on `new Codex({ env })`, replacing the inherited environment. Include the process variables needed by the CLI and its existing authentication. An unscoped `TRACEPARENT` retains the legacy first-input behavior.
 
-Static env is a **first-collected-input-turn fallback**, not per-request propagation for a persistent shared session. Do not apply a new request's environment to resumed sessions with historical backlog.
-
-## SDK / Plugin: exact native-turn binding
-
-Capture the carrier before dispatch; bind synchronously when a request-scoped callback supplies native IDs:
+Qoder Agent SDK 1.0.59 uses a shared daemon. Keep its environment stable and use the exact message ID before dispatch. The following code uses the supplied `sessionId` from an existing session or a newly generated UUID for a new query.
 
 ```js
-import { propagation } from '@opentelemetry/api';
-import { bindUpstreamTurn } from './assets/hooks/shared/upstream-ingress.mjs';
+import { randomUUID } from 'node:crypto';
+import { bindUpstreamTurn } from '/path/to/pilot/hooks/shared/upstream-ingress.mjs';
 
-const carrier = {};
-propagation.inject(carrier);
-const bindRequest = input => {
-  const result = bindUpstreamTurn({
-    agentId: 'claude-code', sessionId: input.session_id,
-    nativeTurnId: input.prompt_id, carrier,
-  });
-  if (!result.recorded) console.warn('Pilot ingress skipped:', result.reason);
-  return {};
-};
+const uuid = randomUUID();
+bindUpstreamTurn({ agentId: 'qoder-cli', sessionId, nativeTurnId: uuid, carrier });
+
+async function* messages() {
+  yield {
+    type: 'user', uuid, session_id: sessionId, parent_tool_use_id: null,
+    message: { role: 'user', content: [{ type: 'text', text: prompt }] },
+  };
+}
+// Pass messages() as query({ prompt, options })'s prompt. Use options.sessionId
+// for a new session or options.resume for an existing one.
 ```
 
-Claude SDK `UserPromptSubmit` callbacks run in the caller process, so a closure can carry request context. Adapt signatures to the installed SDK. Shell hook payloads do not automatically contain trace headers. Missing native IDs return `invalid`; do not fabricate IDs from text or business sessions. Scope each callback to one request: autonomous later turns or concurrent requests must not inherit a stale closure.
+Keep the Pilot Stop Hook available in the SDK's settings sources or register it through the SDK. The exact Qoder match was exercised on Qoder CLI 1.1.81. The Claude Agent SDK callback contract uses the native `session_id` and `prompt_id` from `UserPromptSubmit`. Check that the installed CLI supplies a matching prompt ID in the native transcript. The live SDK comparison covers Codex and Qoder.
 
-Java/Python can call `node assets/hooks/shared/upstream-ingress-cli.mjs`, send the same object once via stdin, and inspect `{ "recorded": true }`. The dependency-free CLI accepts at most 8 KiB and waits at most two seconds for stdin. It exits zero on telemetry failure, so check `recorded`, impose a caller timeout and keep the business invocation fail-open. See the [Chinese guide](zh-CN/upstream-trace-ingress.md) for Python examples.
+## Configure the ACP receiver
 
-Bindings use hashed `(agentId, native sessionId, nativeTurnId)` namespaces and private, atomically published immutable files. Retries are idempotent; conflicting parents return `conflict`. Identical prompts remain independent, and checkpoint replay restores the binding until existing `upstreamLink.ttlMs` retention removes it. Caller and collector must share the same readable data directory. `dataDir` defaults to `LOONGSUITE_PILOT_DATA_DIR` or `~/.loongsuite-pilot`.
+At ACP v1 `session/prompt`, send `_meta: { traceparent, tracestate }` alongside the regular prompt. Launch the adapted ACP server on the Agent host. The [Codex ACP example patch](../examples/upstream-trace-ingress/codex-acp-2.6.0.patch) targets version 2.6.0 at commit `656765115f82253c79f87918abb77189c114a799`. Apply the patch, install the adapter dependencies, and build it.
 
-## Thin Agent contract
+Set `LOONGSUITE_PILOT_INGRESS_MODULE` to the absolute path of the deployed `hooks/shared/upstream-ingress.mjs` and `LOONGSUITE_PILOT_DATA_DIR` to the collector's data directory. Point `CODEX_PATH` to the CLI that should serve ACP requests. The adapter keeps each carrier in the request callback and uses `prepareUpstreamTurn` to announce an expected binding. The callback then binds the actual native turn after the app-server acknowledges `turn/start`. The collector retries a pending exact match within its existing retry budget. The hint contains no parent context, and only the exact native binding supplies a parent. See the [Chinese runbook](zh-CN/upstream-trace-ingress.md) for full commands.
 
-Bind before the first input boundary; emit `agent.pilot.correlation.native_turn_id` on its `other` input event (preferably all records). Preserve canonical `gen_ai.turn.id`. Claude stamps transcript `promptId`, using the existing single-turn Stop fallback when applicable. Other Agent SDK adapters are not installed by this PR merely because the core supports them.
+## Add an Agent adapter
 
-Precedence: native delegated/locked contexts stay authoritative; otherwise native binding → legacy ACP hash/prefix → first-turn env → local context. Legacy repeated-prompt concurrency retains ordering ambiguity. Publish before collection: no previously exported span is rewritten.
+Call `bindUpstreamTurn({ agentId, sessionId, nativeTurnId, carrier, dataDir })` before collection publishes the turn. Pass the corresponding native turn ID on the producer's `other` event or resolve it in the producer before pinning the trace, as Qoder does. The key uses the native identity, preserving any separate application-facing session and turn attributes. Bind on the Agent host when the caller uses a remote transport. Java and Python can pass the same object as stdin JSON to `hooks/shared/upstream-ingress-cli.mjs`, set a timeout, and inspect `recorded` in the response.
 
-Official OTel extraction provides a remote parent to ENTRY creation in batch and streaming paths, retaining flags and `tracestate`. The default parent-based sampler does not export sampled spans for unsampled parents; explicit `OTEL_TRACES_SAMPLER` overrides follow SDK policy. Invalid tracestate follows the official parser. Content-off stays independent of linking.
+Bindings are private, atomic, and immutable. A duplicate binding with the same parent succeeds and a conflicting parent returns `conflict`. Missing context falls back to existing collection behavior. The collector supplies a remote OTel parent to ENTRY creation in both conversion paths, retaining sampling and trace state subject to the configured sampler. Retention uses `upstreamLink.ttlMs`. The feature applies to Pilot's reconstructed inbound trace.
 
-Trace-ID-only merging loses topology and sampling semantics; accept a valid W3C carrier rather than fabricate a parent. Outgoing propagation, baggage, MCP adapters and span-ID reservations are separate work.
-
-## CLI, SDK and ACP support boundaries
-
-Audited on 2026-11-16; see the [detailed Chinese scenario guide](zh-CN/upstream-trace-ingress.md#三种上游调用场景的实际支持范围). Synthetic converter fixtures with a manually supplied native alias do not prove native framework adapter support.
-
-| Upstream path | Current support | Caller/receiver changes |
-| --- | --- | --- |
-| HTTP service → fresh CLI process and native session | Environment bridge for Claude/Codex, first collected input only | Inject the current server/call span into a per-call child env; keep Pilot Hooks/transcript collection active |
-| Official Agent SDK | Conditional on process and session lifetime | Fresh sessions may use SDK env; reused sessions need request-scoped binding or legacy per-turn correlation |
-| ACP microservice call | Shared store/converter, not an automatic ACP receiver | Inject `params._meta` on each prompt; extract and bind on the Agent host before publication |
-
-Claude SDK currently auto-injects active context at subprocess startup, not at every query on a persistent client. Explicit TypeScript env replaces inherited env; Python merges it. Check installed versions and Pilot Hook activation. The exact callback path needs a real `prompt_id` matching the transcript, not a business request ID. A persistent client's callbacks need an explicit request mapping rather than a stale closure.
-
-Codex SDK 0.169.0 has constructor-scoped env and spawns `codex exec` per run, using `exec resume` for reused threads. Changing the application's active Context does not change that client env. A fresh process with a resumed session is still not a new Pilot first turn. The Codex producer does **not** emit the generic native-turn alias in this PR, so calling the exact bind API alone does not link actual Codex events. Use the existing native-session/input-hash protocol or add the producer alias and a pre-publication caller bridge.
-
-Qoder SDK 1.0.59 now defaults to a process-wide daemon. Env configures the daemon; incompatible per-query env is rejected with `DaemonConfigurationConflictError`. Do not use a single business request's parent as the shared daemon's startup env. Request-scoped legacy correlation needs native session identity and matching input, with serialization for identical inputs until an exact adapter exists. Qoder's producer has no generic native alias and its public UserPromptSubmit type does not promise a prompt/turn ID. Locked/published Qoder checkpoint recovery stores only trace/parent IDs, not the full W3C carrier; full flags/state preservation across that path remains an adapter gap.
-
-[ACP extensibility](https://agentclientprotocol.com/protocol/extensibility) recommends reserving root `_meta.traceparent`, `tracestate` and `baggage` for W3C context. Transporting those fields is not the same as consuming them. The audited Claude/Codex ACP adapters do not bridge W3C prompt metadata to Pilot. Their long-lived SDK/app-server processes need an Agent-side request bridge: exact native binding where supported, or the legacy per-turn file before dispatch. JSON-RPC request IDs are not native turn IDs. Confirm session mapping and prompt transformation; write on the receiving host or shared volume, not an inaccessible caller filesystem. HTTP gateways extract/re-inject headers; stdio uses JSON-RPC metadata, not HTTP headers. This PR does not implement baggage.
-
-Published Codex/Qoder SDKs were exercised with a fake CLI to verify env/resume/daemon behavior without model calls. Actual Codex builder/linker and Qoder collector components were checked with synthetic source records; a simulated locked checkpoint demonstrates the Qoder carrier gap. These are not native CLI/SDK/ACP end-to-end acceptance for all three scenarios.
-
-References: [W3C](https://www.w3.org/TR/trace-context/), [Java](https://opentelemetry.io/docs/languages/java/api/#context-propagation), [Python](https://opentelemetry.io/docs/languages/python/propagation/), [Claude SDK telemetry](https://code.claude.com/docs/en/agent-sdk/observability), [SDK hooks](https://code.claude.com/docs/en/agent-sdk/hooks). Current Claude docs describe subprocess env injection; installed release support and Pilot reconstruction require separate validation.
+Verify with two requests to the same native session and different application spans. Each Pilot ENTRY should be a child of its corresponding Web span in the full backend tree. See [W3C Trace Context](https://www.w3.org/TR/trace-context/) and [ACP metadata](https://agentclientprotocol.com/protocol/v1/extensibility).
