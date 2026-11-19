@@ -23,6 +23,10 @@ use std::time::{Duration, Instant, SystemTime};
 #[path = "cursor_assemble.rs"]
 mod assemble;
 
+#[path = "cursor_deferred.rs"]
+mod deferred;
+pub(crate) use deferred::DeferredCursor;
+
 pub const JOURNAL_LOCK_TIMEOUT_MS: u64 = 3000;
 pub const JOURNAL_LOCK_STALE_MS: u64 = 2000;
 
@@ -71,6 +75,21 @@ pub fn run(request: &mut HookRequest<'_>) -> i32 {
     let resources = collect_resource_attributes(request.env, "cursor-cli");
     if !resources.is_empty() {
         event.insert("resource_attributes".into(), Value::Object(resources));
+    }
+    if request.args.iter().any(|arg| arg == "--defer-assembly") {
+        if let Err(error) = deferred::enqueue(&root, request.env, event) {
+            append_error(
+                &root,
+                &now,
+                "journal_append",
+                "enqueue_failed",
+                &error,
+                None,
+                None,
+            );
+        }
+        write_empty(request.stdout);
+        return 0;
     }
     let journal = Journal::open(&root);
     if let Err(err) = journal.append(&event) {

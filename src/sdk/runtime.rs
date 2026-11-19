@@ -612,6 +612,14 @@ fn run_agent(
             poll_interval_ms: Some(plan.poll_interval_ms),
         });
         if let Some(state) = &plan.pilot_host {
+            if profile.agent == "cursor"
+                && source_path("hook_jsonl").as_deref().map(Path::new)
+                    == Some(state.data_dir.join("logs/cursor/history").as_path())
+            {
+                let _ = input.body.deferred_cursor.set(Arc::new(
+                    crate::hook_process::cursor::DeferredCursor::new(state.data_dir.clone()),
+                ));
+            }
             let policy = crate::inputs::base::WorkspacePolicy::new(
                 state.exclude_workspaces.clone(),
                 Some(state.data_dir.join("state/workspace-exclusions")),

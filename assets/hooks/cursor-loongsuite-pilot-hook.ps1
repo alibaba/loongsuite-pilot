@@ -11,6 +11,9 @@ try {
     exit 0
 }
 $NativeArgs = @('hook-process', 'cursor')
+if ($env:LOONGSUITE_PILOT_CURSOR_DEFER_ASSEMBLY -eq '1') {
+    $NativeArgs += '--defer-assembly'
+}
 try {
     . (Join-Path $PSScriptRoot 'shared\native.ps1')
     Invoke-PilotNative -HookDir $PSScriptRoot -Arguments $NativeArgs -EmptyResult $EmptyResult

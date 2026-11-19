@@ -142,6 +142,7 @@ impl HookJsonlInput {
         crate::inputs::base::HostedInput::new(
             SdkHookBody {
                 inner: Arc::clone(&self.inner),
+                deferred_cursor: std::sync::OnceLock::new(),
             },
             "SdkHookInput",
             Arc::clone(&self.inner.state_store),
@@ -275,6 +276,8 @@ impl HookJsonlInput {
 
 pub(crate) struct SdkHookBody {
     inner: Arc<HookInner>,
+    pub(crate) deferred_cursor:
+        std::sync::OnceLock<Arc<crate::hook_process::cursor::DeferredCursor>>,
 }
 
 #[async_trait::async_trait]
@@ -308,6 +311,19 @@ impl crate::inputs::base::InputBody for SdkHookBody {
         _: &crate::inputs::base::InputRuntime,
     ) -> anyhow::Result<Vec<AgentActivityEntry>> {
         crate::utils::source_access::check(&self.inner.log_dir)?;
+        if let Some(worker) = self.deferred_cursor.get() {
+            // Establish the baseline before the worker writes any new history.
+            if self.inner.cursor_first_run_guard {
+                cursor_first_run_guard(&self.inner).await;
+            }
+            let worker = worker.clone();
+            if let Err(error) = tokio::task::spawn_blocking(move || worker.collect()).await? {
+                self.inner.logger.warn(
+                    &format!("Cursor deferred assembly will retry: {error}"),
+                    None,
+                );
+            }
+        }
         self.inner.collect().await.map_err(anyhow::Error::msg)
     }
 }
