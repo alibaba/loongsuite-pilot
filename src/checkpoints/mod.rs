@@ -375,16 +375,31 @@ mod json_file {
     }
 
     pub(super) async fn write_text_atomic(path: &Path, text: &str) -> Result<(), anyhow::Error> {
+        write_atomic(path, |tmp| tokio::fs::write(tmp, text)).await
+    }
+
+    pub(super) async fn write_atomic<F, Fut>(path: &Path, write_tmp: F) -> Result<(), anyhow::Error>
+    where
+        F: Fn(PathBuf) -> Fut + Send + Sync,
+        Fut: std::future::Future<Output = std::io::Result<()>> + Send,
+    {
+        let write_rename = |tmp: PathBuf| {
+            let write = write_tmp(tmp.clone());
+            async move {
+                write.await?;
+                tokio::fs::rename(tmp, path).await
+            }
+        };
         let dir = path.parent().unwrap_or_else(|| Path::new(""));
         ensure_dir(dir).await;
         let tmp = atomic_tmp_path(path);
-        match write_rename(&tmp, path, text).await {
+        match write_rename(tmp.clone()).await {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 let _ = tokio::fs::remove_file(&tmp).await;
                 ensure_dir(dir).await;
                 let retry = atomic_tmp_path(path);
-                match write_rename(&retry, path, text).await {
+                match write_rename(retry.clone()).await {
                     Ok(()) => Ok(()),
                     Err(retry_err) => {
                         let _ = tokio::fs::remove_file(&retry).await;
@@ -411,11 +426,6 @@ mod json_file {
                 Err(err.into())
             }
         }
-    }
-
-    async fn write_rename(tmp: &Path, dest: &Path, text: &str) -> std::io::Result<()> {
-        tokio::fs::write(tmp, text.as_bytes()).await?;
-        tokio::fs::rename(tmp, dest).await
     }
 
     async fn ensure_dir(dir: &Path) {

@@ -4,7 +4,7 @@
 //! concurrent callers onto one flush loop: each iteration snapshots the map,
 //! writes it, then repeats if `set` / `update` / `delete` ran during the write.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -321,6 +321,7 @@ struct StoreData {
     output_holds: usize,
     output_failure: Option<String>,
     scoped_holds: HashMap<String, usize>,
+    skipped_revisions: HashMap<&'static str, HashSet<String>>,
     scoped_failures: HashMap<String, String>,
     persisted_journal_sources: OrderedMap<InputState>,
     active_collects: Vec<ActiveCollect>,
@@ -469,6 +470,7 @@ impl StateStore {
         data.revision = 0;
         data.persisted_revision = 0;
         data.input_revisions.clear();
+        data.skipped_revisions.clear();
         data.extra_revisions.clear();
         data.persisted_journal_sources.clear();
         let entries = match parsed {
@@ -653,23 +655,14 @@ impl StateStore {
             *holds -= 1;
             if *holds == 0 {
                 data.scoped_holds.remove(scope);
-                // A different input may have saved while this one was held.
-                // Re-mark all scoped revisions before publishing new progress.
-                if !data.scoped_failures.contains_key(scope) {
-                    let keys: Vec<_> = data
-                        .input_revisions
-                        .keys()
-                        .map(String::as_str)
-                        .chain(
-                            data.persisted_journal_sources
-                                .keys()
-                                .filter(|id| !data.states.contains(id)),
-                        )
-                        .filter(|id| journal_namespace(id) == Some(scope))
-                        .map(str::to_owned)
-                        .collect();
-                    for id in keys {
-                        record_input_revision(&mut data, &id, Vec::new());
+                // A concurrent snapshot can acknowledge its global revision while
+                // retaining the previous on-disk values for this scope. Re-publish
+                // only the keys actually excluded, including deleted inputs.
+                if let Some(keys) = data.skipped_revisions.remove(scope) {
+                    if !data.scoped_failures.contains_key(scope) {
+                        for id in keys {
+                            record_input_revision(&mut data, &id, Vec::new());
+                        }
                     }
                 }
             }
@@ -811,7 +804,7 @@ impl StateStore {
         enum Step {
             Wait,
             Done(Vec<Waiter>, Result<(), String>),
-            Write(u64, String, OrderedMap<InputState>),
+            Write(u64, Vec<(String, InputState)>, OrderedMap<InputState>),
         }
         loop {
             let changed = self.output_changed.notified();
@@ -826,6 +819,29 @@ impl StateStore {
                     data.flushing = false;
                     Step::Done(std::mem::take(&mut data.waiters), Ok(()))
                 } else {
+                    // Record exclusions before asynchronous I/O: the last output
+                    // hold may finish while this snapshot is still being written.
+                    let StoreData {
+                        input_revisions,
+                        persisted_revision,
+                        scoped_holds,
+                        skipped_revisions,
+                        ..
+                    } = &mut *data;
+                    if !scoped_holds.is_empty() {
+                        for (id, revision) in input_revisions.iter() {
+                            if revision > persisted_revision {
+                                if let Some(scope) = journal_namespace(id)
+                                    .filter(|scope| scoped_holds.contains_key(*scope))
+                                {
+                                    skipped_revisions
+                                        .entry(scope)
+                                        .or_default()
+                                        .insert(id.clone());
+                                }
+                            }
+                        }
+                    }
                     let mut journal_sources = OrderedMap::default();
                     for (id, state) in data.states.iter() {
                         if journal_namespace(id).is_some() && !scoped_blocked(&data, id) {
@@ -837,13 +853,13 @@ impl StateStore {
                             journal_sources.insert(id.to_owned(), state.clone());
                         }
                     }
-                    let states = data
+                    let ordinary = data
                         .states
                         .iter()
                         .filter(|(id, _)| journal_namespace(id).is_none())
-                        .chain(journal_sources.iter());
-                    let text = render_state_entries(states);
-                    Step::Write(data.revision, text, journal_sources)
+                        .map(|(id, state)| (id.to_owned(), state.clone()))
+                        .collect();
+                    Step::Write(data.revision, ordinary, journal_sources)
                 }
             };
             match step {
@@ -852,8 +868,8 @@ impl StateStore {
                     notify(waiters, result);
                     return;
                 }
-                Step::Write(revision, text, journal_sources) => {
-                    match self.persist_text(&text).await {
+                Step::Write(revision, ordinary, journal_sources) => {
+                    match self.persist_states(&ordinary, &journal_sources).await {
                         Ok(()) => {
                             let mut data = self.mu.lock().unwrap();
                             data.persisted_revision = revision;
@@ -885,12 +901,41 @@ impl StateStore {
         notify(waiters, Err("state store save cancelled".to_owned()));
     }
 
-    async fn persist_text(&self, text: &str) -> Result<(), anyhow::Error> {
+    async fn persist_states(
+        &self,
+        ordinary: &[(String, InputState)],
+        journal: &OrderedMap<InputState>,
+    ) -> Result<(), anyhow::Error> {
+        let entries = || {
+            ordinary
+                .iter()
+                .map(|(id, state)| (id.as_str(), state))
+                .chain(journal.iter())
+        };
         let hook = self.write_hook.lock().unwrap().clone();
         if let Some(hook) = hook {
-            return hook(self.file_path.clone(), text.to_owned()).await;
+            return hook(self.file_path.clone(), render_state_entries(entries())).await;
         }
-        json_file::write_text_atomic(&self.file_path, text).await
+        // The snapshot owns immutable InputState fields. Serialize it outside
+        // the store lock and bound staging to one chunk plus a single input.
+        json_file::write_atomic(&self.file_path, |tmp| async move {
+            use tokio::io::AsyncWriteExt;
+            let mut file = tokio::fs::File::create(tmp).await?;
+            let mut text = String::from("{");
+            let mut nonempty = false;
+            for (id, state) in entries() {
+                append_state(&mut text, id, state, nonempty);
+                nonempty = true;
+                if text.len() >= 128 * 1024 {
+                    file.write_all(text.as_bytes()).await?;
+                    text.clear();
+                }
+            }
+            text.push_str(if nonempty { "\n}\n" } else { "}\n" });
+            file.write_all(text.as_bytes()).await?;
+            file.flush().await
+        })
+        .await
     }
 
     pub(crate) fn set_write_hook<F, Fut>(&self, hook: F)
@@ -947,19 +992,23 @@ fn render_states(states: &OrderedMap<InputState>) -> String {
 fn render_state_entries<'a>(states: impl Iterator<Item = (&'a str, &'a InputState)>) -> String {
     let mut text = String::from("{");
     for (index, (id, state)) in states.enumerate() {
-        if index > 0 {
-            text.push(',');
-        }
-        text.push_str("\n  ");
-        text.push_str(&serde_json::to_string(id).expect("JSON key"));
-        text.push_str(": ");
-        json_file::write_fields(&mut text, &state.fields, 1);
+        append_state(&mut text, id, state, index > 0);
     }
     if text.len() > 1 {
         text.push('\n');
     }
     text.push_str("}\n");
     text
+}
+
+fn append_state(text: &mut String, id: &str, state: &InputState, comma: bool) {
+    if comma {
+        text.push(',');
+    }
+    text.push_str("\n  ");
+    text.push_str(&serde_json::to_string(id).expect("JSON key"));
+    text.push_str(": ");
+    json_file::write_fields(text, &state.fields, 1);
 }
 
 struct LeaderGuard<'a> {
@@ -1435,6 +1484,22 @@ mod output_acceptance_tests {
         let restored = StateStore::new(&path);
         restored.load().await;
         assert_eq!(restored.get("codex").last_offset(), Some(5.0));
+    }
+
+    #[tokio::test]
+    async fn idle_codex_scan_preserves_clean_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input-state.json");
+        let store = Arc::new(StateStore::new(&path));
+        for i in 0..5000 {
+            store.set_offset(&format!("codex-transcript:{i}"), i as f64);
+        }
+        store.save().await.unwrap();
+        let expected = store.snapshot_text();
+        assert_eq!(tokio::fs::read_to_string(path).await.unwrap(), expected);
+        store.set_write_hook(|_, _| async { anyhow::bail!("idle scan rewrote checkpoint") });
+        store.begin_output_for("codex-transcript").finish(Ok(()));
+        store.save().await.unwrap();
     }
 
     #[tokio::test]

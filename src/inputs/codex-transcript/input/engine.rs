@@ -3140,33 +3140,21 @@ impl<'a> CodexTranscriptEngine<'a> {
         targeted: bool,
     ) -> anyhow::Result<()> {
         let discovered: HashSet<String> = files.iter().map(|file| file.file_path.clone()).collect();
-        let kept = self.body.with_shared(|shared| {
-            let mut kept = Vec::new();
-            if targeted {
-                kept.extend(
-                    shared
-                        .meta_by_path
-                        .iter()
-                        .filter(|(path, _)| !discovered.contains(*path))
-                        .map(|(path, meta)| (path.clone(), meta.clone())),
-                );
-            }
-            if let Some(skip) = skip {
-                for path in skip {
-                    if let Some(meta) = shared.meta_by_path.get(path).cloned() {
-                        kept.push((path.clone(), meta));
-                    }
-                }
-            }
-            shared.meta_by_path.clear();
+        self.body.with_shared(|shared| {
+            shared.meta_by_path.retain(|path, _| {
+                (targeted && !discovered.contains(path))
+                    || skip.is_some_and(|paths| paths.contains(path))
+            });
             shared.path_by_thread.clear();
-            kept
+            for (path, meta) in &shared.meta_by_path {
+                shared
+                    .path_by_thread
+                    .insert(meta.thread_id.clone(), path.clone());
+                shared.linker.register_child(meta);
+            }
         });
         if !targeted {
             self.prune_absent_meta_cache(&discovered, now_ms() as i64);
-        }
-        for (path, meta) in kept {
-            self.publish_transcript_owner_meta(&path, meta);
         }
         for file in files {
             if skip.is_some_and(|skip| skip.contains(&file.file_path)) {
