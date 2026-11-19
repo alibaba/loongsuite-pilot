@@ -1556,7 +1556,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           (typeof value === 'string' || typeof value === 'number') && ((observedCounts.has(key) && Number.isSafeInteger(value)) || key.startsWith('gen_ai.') || key === 'agent.trae-cn.source' || key === 'agent.trae-cn.observed_until' || key === 'user.id'))) as Record<string, string | number>;
         return {
           name: tool ? 'execute_tool ' + r['gen_ai.tool.name']
-            : r['gen_ai.span.kind'] === 'LLM' ? 'chat ' + r['gen_ai.response.model']
+            : r['gen_ai.span.kind'] === 'LLM' ? (r['gen_ai.response.model'] ? 'chat ' + r['gen_ai.response.model'] : 'chat')
             : r['gen_ai.span.kind'] === 'AGENT' ? 'invoke_agent ' + r['gen_ai.agent.name'] : 'enter_ai_application_system',
           spanContext: () => ({ traceId: String(r.trace_id), spanId: String(r.span_id), traceFlags: 1 }),
           parentSpanId: r.parent_span_id ? String(r.parent_span_id) : undefined, kind: SpanKind.INTERNAL,

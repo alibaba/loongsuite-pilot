@@ -70,7 +70,9 @@ it('resumes split compressed records and separates concurrent turns in one sessi
     const response = record(traceB, 'recording history entry', {
       history_source: 'Server', source: 'llm_default', history_id: '7'.repeat(24),
     });
-    records.push(response, response, record(traceB,'tool execution started',{ tool_name:'Read', toolcall_id:'call_2' }),
+    records.push(response, response, record(traceB, 'recording history entry', {
+      history_source: 'Server', source: 'llm_default', history_id: '8'.repeat(24),
+    }), record(traceB,'tool execution started',{ tool_name:'Read', toolcall_id:'call_2' }),
       record(traceB,'chat: runner completed',{turn_id:traceB.slice(0,24)}),
       record(traceA,'chat: runner completed',{turn_id:traceA.slice(0,24)}));
     const compressed = deflateRawSync(Buffer.concat(records));
@@ -85,17 +87,23 @@ it('resumes split compressed records and separates concurrent turns in one sessi
     expect(entries.filter(e => e.trace_id === traceA && e['event.name'] === 'tool.call')
       .map(e => e['gen_ai.tool.name'])).toEqual(['Shell','Shell','Read','Read','Read']);
     const ordinary = entries.filter(e => e.trace_id === traceB);
-    expect(ordinary.map(e => e['gen_ai.span.kind'])).toEqual(['TOOL', 'LLM', 'AGENT', 'ENTRY']);
-    expect(ordinary[3]).toMatchObject({ 'agent.trae-cn.model_responses_observed': 1,
+    const responses = ordinary.filter(e => e['event.name'] === 'llm.response');
+    expect(responses.map(e => e['gen_ai.response.id'])).toEqual(['7'.repeat(24), '8'.repeat(24)]);
+    expect(ordinary.filter(e => e['gen_ai.span.kind'] === 'LLM')).toEqual(responses);
+    const root = ordinary.find(e => e['gen_ai.span.kind'] === 'ENTRY')!;
+    const agent = ordinary.find(e => e['gen_ai.span.kind'] === 'AGENT')!;
+    const tool = ordinary.find(e => e['gen_ai.span.kind'] === 'TOOL')!;
+    expect(root).toMatchObject({ 'agent.trae-cn.model_responses_observed': 2,
       'agent.trae-cn.usage_reports_observed': 1, 'agent.trae-cn.input_tokens_observed': 80,
       'agent.trae-cn.output_tokens_observed': 7 });
-    expect(ordinary[0].parent_span_id).toBe(ordinary[2].span_id);
-    expect(ordinary[1].parent_span_id).toBe(ordinary[2].span_id);
-    expect(ordinary[2].parent_span_id).toBe(ordinary[3].span_id);
-    expect(ordinary[0].endTimeUnixNano).toBe('1067000000');
-    expect(ordinary[0].startTimeUnixNano).toBe('1050000000');
-    expect(ordinary[1]['gen_ai.response.time_to_first_token']).toBe(10_000_000);
-    expect(ordinary[1]['agent.trae-cn.observed_until']).toBe('first_token');
+    for (const response of responses) {
+      expect(response.parent_span_id).toBe(agent.span_id);
+      expect(response.startTimeUnixNano).toBe(response.endTimeUnixNano);
+    }
+    expect(tool.parent_span_id).toBe(agent.span_id);
+    expect(agent.parent_span_id).toBe(root.span_id);
+    expect(tool.endTimeUnixNano).toBe('1067000000');
+    expect(tool.startTimeUnixNano).toBe('1050000000');
     const children = entries.filter(e => e['gen_ai.agent.scope'] === 'subagent');
     const parentSpan = entries.find(e => e['gen_ai.agent.invocation.id'] === parent);
     expect(parentSpan?.parent_span_id).toBe(entries.find(e => e.trace_id === traceA && e['gen_ai.span.kind'] === 'ENTRY')?.span_id);

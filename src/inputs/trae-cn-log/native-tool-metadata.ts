@@ -72,14 +72,6 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
   }
   const turn = turns[trace];
   if (!turn) return;
-  if (message === 'recording history entry') {
-    const history = text(fields.history_id);
-    if (text(fields.history_source) === 'Server' && text(fields.source) === 'llm_default' && hexId.test(history)) {
-      const responses = turn.responses ??= [];
-      if (!responses.includes(history)) responses.push(history);
-    }
-    return;
-  }
   const root = spanId(trace, turn.turn);
   const agent = spanId(trace, 'turn-agent/' + turn.turn);
   const base = {
@@ -88,6 +80,20 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
     'gen_ai.agent.type': ClientType.TraeCn, 'gen_ai.agent.name': 'trae-cn',
     'gen_ai.system': 'trae', 'agent.trae-cn.source': 'native_metadata',
   };
+  if (message === 'recording history entry') {
+    const history = text(fields.history_id);
+    if (text(fields.history_source) !== 'Server' || text(fields.source) !== 'llm_default' || !hexId.test(history)) return;
+    const responses = turn.responses ??= [];
+    if (responses.includes(history)) return;
+    responses.push(history);
+    const id = spanId(trace, 'history/' + history);
+    // Only the instant the response was recorded is observable in native history.
+    entries.push(buildAgentActivityEntry({ ...base, 'event.id': id, 'event.name': 'llm.response',
+      span_id: id, parent_span_id: agent, startTimeUnixNano: time,
+      'gen_ai.span.kind': 'LLM', 'gen_ai.operation.name': 'chat', 'gen_ai.response.id': history,
+      'agent.trae-cn.observed_until': 'response_recorded' }));
+    return;
+  }
   if (message === commit) {
     const parent = text(fields.parent_agent_run_id);
     const call = text(fields.toolcall_id);
@@ -131,7 +137,7 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
   if (turn.turn !== turnId) return;
   const observed = hub?.get(trace, turn.turn, turn.session);
   for (const pending of turn.pending ?? []) entries.push(toolEntry(trace, turn, pending, hub));
-  for (const [request, model] of observed?.models ?? []) {
+  for (const [request, model] of turn.responses?.length ? [] : observed?.models ?? []) {
     const id = spanId(trace, 'model/' + request);
     entries.push(buildAgentActivityEntry({ ...base, 'event.id': id, 'event.name': 'llm.request', span_id: id,
       parent_span_id: agent, startTimeUnixNano: ns(model.start), endTimeUnixNano: ns(model.first),
