@@ -488,30 +488,44 @@ impl<'a> CodexTranscriptEngine<'a> {
         });
     }
 
+    #[cfg(test)]
     pub async fn process_file(&self, rt: &InputRuntime, file_path: &str) -> anyhow::Result<usize> {
+        let stat = self.prepare_file(rt, file_path).await?;
+        self.process_prepared_file(rt, file_path, stat).await
+    }
+
+    pub(super) async fn prepare_file(
+        &self,
+        rt: &InputRuntime,
+        file_path: &str,
+    ) -> anyhow::Result<Option<RolloutStat>> {
+        let Ok((ino, size, mtime_ms)) = file_meta_snapshot(file_path).await else {
+            return Ok(None);
+        };
+        let key = self.state_key(file_path);
+        if rt.state_store.get(&key).last_offset().is_none()
+            && self.read_checkpoint(rt, &key).is_none()
+        {
+            super::source_ownership::remember(&self.body.wakeup_dir, file_path).await?;
+        }
+        Ok(Some(RolloutStat {
+            ino,
+            size,
+            mtime_ms,
+        }))
+    }
+
+    pub(super) async fn process_prepared_file(
+        &self,
+        rt: &InputRuntime,
+        file_path: &str,
+        stat: Option<RolloutStat>,
+    ) -> anyhow::Result<usize> {
         #[cfg(test)]
         self.body
             .with_shared(|s| s.main541_visits.push(file_path.to_owned()));
-        let stat = match file_meta_snapshot(file_path).await {
-            Ok((ino, size, mtime_ms)) => Some(RolloutStat {
-                ino,
-                size,
-                mtime_ms,
-            }),
-            Err(_) => None,
-        };
         let result = match stat {
-            Some(stat) => {
-                let key = self.state_key(file_path);
-                if self.read_checkpoint(rt, &key).is_none()
-                    && rt.state_store.get(&key).last_offset().is_none()
-                {
-                    // Persist body-free ownership before the first native output.
-                    // Failure propagates; the canonical ACK checkpoint stays untouched.
-                    super::source_ownership::remember(&self.body.wakeup_dir, file_path).await?;
-                }
-                self.scan_rollout_file(rt, file_path, stat).await
-            }
+            Some(stat) => self.scan_rollout_file(rt, file_path, stat).await,
             None => Ok(0),
         };
         self.note_rollout_idle(rt, file_path, stat);
