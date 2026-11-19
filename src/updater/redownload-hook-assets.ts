@@ -1,13 +1,12 @@
 import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createLogger } from '../utils/logger.js';
 import { writeTextFileAtomic } from '../utils/fs-utils.js';
-import { extractTarGz, makeTarStagingDir } from '../utils/win-archive.js';
+import { extractTarGz, getAsciiTempRoot } from '../utils/win-archive.js';
 import { computeSha256 } from './version-utils.js';
 
 const logger = createLogger('HookWatchdog');
@@ -42,7 +41,8 @@ export async function redownloadCurrentHookAssets(options: {
     logger.warn('hook-watchdog.redownload-skipped', { reason: 'manifest-fetch-failed' });
     return false;
   }
-  if (!sameRelease(local, manifest)) {
+  const release = selectRunningRelease(local, manifest);
+  if (!release) {
     logger.warn('hook-watchdog.redownload-skipped', {
       reason: 'release-mismatch',
       version: local.version,
@@ -51,17 +51,17 @@ export async function redownloadCurrentHookAssets(options: {
     return false;
   }
 
-  const packageUrl = manifest.package_url || options.packageUrl;
+  const packageUrl = release.package_url || options.packageUrl;
   if (!packageUrl) {
     logger.warn('hook-watchdog.redownload-skipped', { reason: 'package-url-missing' });
     return false;
   }
 
-  const tmpDir = await makeTarStagingDir(path.join(os.tmpdir(), `pilot-hook-redownload-${process.pid}-${Date.now()}`));
+  const tmpDir = await fs.mkdtemp(path.join(await getAsciiTempRoot(), 'pilot-hook-redownload-'));
   try {
     const tarball = path.join(tmpDir, 'package.tar.gz');
     await downloadFile(packageUrl, tarball, options.downloadTimeoutMs ?? DOWNLOAD_TIMEOUT_MS);
-    if (manifest.sha256 && await computeSha256(tarball) !== manifest.sha256) {
+    if (release.sha256 && await computeSha256(tarball) !== release.sha256) {
       logger.error('hook-watchdog.repair-failed', { action: 'hook-asset', reason: 'package-hash-mismatch' });
       return false;
     }
@@ -96,6 +96,14 @@ async function readReleaseIdentity(pilotDir: string): Promise<{ version: string;
   }
 }
 
+interface ReleasePackage {
+  version?: string;
+  git_commit?: string;
+  package_url?: string;
+  sha256?: string;
+  canary?: ReleasePackage;
+}
+
 function sameRelease(
   local: { version: string; gitCommit: string },
   remote: { version?: string; git_commit?: string },
@@ -105,16 +113,22 @@ function sameRelease(
   return true;
 }
 
-async function fetchReleaseManifest(manifestUrl: string | undefined) {
+/** Stable entry first, then the nested canary. Exact version match only, no rollout bucket. */
+function selectRunningRelease(
+  local: { version: string; gitCommit: string },
+  manifest: ReleasePackage,
+): ReleasePackage | null {
+  if (sameRelease(local, manifest)) return manifest;
+  const canary = manifest.canary;
+  if (canary && typeof canary === 'object' && sameRelease(local, canary)) return canary;
+  return null;
+}
+
+async function fetchReleaseManifest(manifestUrl: string | undefined): Promise<ReleasePackage | null> {
   if (!manifestUrl) return null;
   const resp = await fetch(manifestUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!resp.ok) return null;
-  return await resp.json() as {
-    version?: string;
-    git_commit?: string;
-    package_url?: string;
-    sha256?: string;
-  };
+  return await resp.json() as ReleasePackage;
 }
 
 async function downloadFile(url: string, dest: string, timeoutMs: number): Promise<void> {
@@ -125,7 +139,7 @@ async function downloadFile(url: string, dest: string, timeoutMs: number): Promi
   }
   await pipeline(
     Readable.fromWeb(resp.body as import('stream/web').ReadableStream),
-    createWriteStream(dest),
+    createWriteStream(dest, { flags: 'wx' }),
     { signal },
   );
 }
