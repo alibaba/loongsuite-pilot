@@ -7,6 +7,7 @@ pub use claude_settings::{
     legacy_claude_hook_paths, quote_claude_hook_path, with_claude_settings_lock,
     with_claude_settings_lock_checked, ClaudeSettingsLockError,
 };
+pub(crate) use hook_manager::build_hook_entry;
 pub use hook_manager::{HookDefinition, HookManager};
 
 #[cfg(all(test, unix))]
