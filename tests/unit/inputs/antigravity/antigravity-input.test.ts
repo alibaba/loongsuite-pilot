@@ -376,13 +376,14 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
         ],
       });
 
+      const respSec = 1_778_000_100;
       const transcriptLines = [
         JSON.stringify({
           step_index: 0,
           source: 'USER_EXPLICIT',
           type: 'USER_INPUT',
           status: 'DONE',
-          created_at: '2026-05-06T00:01:39Z',
+          created_at: new Date((respSec - 3) * 1000).toISOString(),
           content: 'Check repo status',
         }),
         JSON.stringify({
@@ -390,7 +391,7 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
           source: 'MODEL',
           type: 'PLANNER_RESPONSE',
           status: 'DONE',
-          created_at: '2026-05-06T00:01:40Z',
+          created_at: new Date((respSec - 2) * 1000).toISOString(),
           model: 'gemini-4-neon-medium',
           thinking: 'Let me run git status.',
           tool_calls: [{ name: 'run_command', args: { CommandLine: 'git status' } }],
@@ -400,7 +401,7 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
           source: 'MODEL',
           type: 'GENERIC',
           status: 'DONE',
-          created_at: '2026-05-06T00:01:42Z',
+          created_at: new Date((respSec + 2) * 1000).toISOString(),
           content: 'On branch main',
         }),
       ];
@@ -432,6 +433,15 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
       expect(typeof llmReq?.['gen_ai.input.messages_hash']).toBe('string');
 
       const llmResp = collected.find((e) => e['event.name'] === 'llm.response');
+      // gen_metadata timestamp is completion time; reqTsMs = respTsMs - (ttft + stream) = respSec - 2s
+      expect(BigInt(llmResp!.time_unix_nano) - BigInt(llmReq!.time_unix_nano)).toBe(2_000_000_000n);
+      expect(collected.map((e) => e['event.name'])).toEqual([
+        'other',
+        'llm.request',
+        'llm.response',
+        'tool.call',
+        'tool.result',
+      ]);
       // Pilot canonical schema: input_tokens includes cache_read + cache_creation
       expect(llmResp?.['gen_ai.usage.input_tokens']).toBe(3500);
       expect(llmResp?.['gen_ai.usage.cache_read.input_tokens']).toBe(2000);
@@ -882,12 +892,13 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
       ],
     });
 
+    const cpSec = 1_778_000_900;
     const transcriptPath = path.join(logsDir, 'transcript.jsonl');
     await fs.writeFile(
       transcriptPath,
       [
-        JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: '2026-05-06T00:14:59Z', content: 'Run slow cmd' }),
-        JSON.stringify({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-05-06T00:15:00Z', tool_calls: [{ name: 'run_command', args: { CommandLine: 'sleep 15' } }] }),
+        JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date((cpSec - 1) * 1000).toISOString(), content: 'Run slow cmd' }),
+        JSON.stringify({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(cpSec * 1000).toISOString(), tool_calls: [{ name: 'run_command', args: { CommandLine: 'sleep 15' } }] }),
       ].join('\n') + '\n',
     );
 
@@ -909,7 +920,7 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     // Cycle 2: tool result step lands later
     await fs.appendFile(
       transcriptPath,
-      JSON.stringify({ step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', created_at: '2026-05-06T00:15:15Z', content: 'done' }) + '\n',
+      JSON.stringify({ step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', created_at: new Date((cpSec + 15) * 1000).toISOString(), content: 'done' }) + '\n',
     );
 
     const input2 = new AntigravityInput({

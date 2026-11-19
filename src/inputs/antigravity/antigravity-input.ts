@@ -605,12 +605,21 @@ export class AntigravityInput extends BaseInput {
       return `${sessionId}:turn:1`;
     };
 
-    // Precompute per-turn primary provider from SQLite usage events so USER_INPUT
-    // uses the actual turn model's provider instead of hardcoding gcp.gemini.
+    // Precompute per-turn primary provider and per-step LLM completion timestamp
+    // from SQLite usage events. gen_metadata field 9.4 is the generation completion
+    // timestamp (respTsMs), so tool calls emitted by a PLANNER_RESPONSE start at
+    // respTsMs rather than at the earlier step creation (request start) time.
     const turnProviderMap = new Map<string, string>();
+    const stepCompletionMsMap = new Map<number, number>();
     if (snapshot) {
       for (const usage of snapshot.events) {
         const linkedStep = this.findLinkedPlannerStep(usage, transcript);
+        if (linkedStep) {
+          const prev = stepCompletionMsMap.get(linkedStep.stepIndex);
+          if (prev === undefined || usage.timestampMs > prev) {
+            stepCompletionMsMap.set(linkedStep.stepIndex, usage.timestampMs);
+          }
+        }
         const turnId = resolveTurnForStep(linkedStep?.stepIndex ?? usage.stepIndices[0]);
         if (!turnProviderMap.has(turnId)) {
           const transcriptModel = normalizeAntigravityModel(linkedStep?.model);
@@ -708,6 +717,7 @@ export class AntigravityInput extends BaseInput {
           entries.push(inputEntry);
         } else if (step.type === 'PLANNER_RESPONSE' && step.toolCalls.length > 0) {
           const stepProvider = resolveAntigravityProvider(normalizeAntigravityModel(step.model));
+          const callTsMs = stepCompletionMsMap.get(step.stepIndex) ?? tsMs;
           for (let i = 0; i < step.toolCalls.length; i++) {
             const tc = step.toolCalls[i]!;
             const callId = tc.id ?? `${sessionId}:step:${step.stepIndex}:tc:${i}`;
@@ -721,7 +731,7 @@ export class AntigravityInput extends BaseInput {
               'gen_ai.tool.name': tc.name,
               'gen_ai.tool.call.id': callId,
               'gen_ai.tool.call.arguments': tc.args,
-              time_unix_nano: toUnixNanoString(tsMs),
+              time_unix_nano: toUnixNanoString(callTsMs),
             });
             await this.attachWorkspaceContext(callEntry, cwd);
             entries.push(callEntry);
@@ -733,10 +743,11 @@ export class AntigravityInput extends BaseInput {
               resultStep.type !== 'PLANNER_RESPONSE' &&
               resultStep.type !== 'USER_INPUT'
             ) {
-              const resultTsMs = resultStep.createdAtMs ?? tsMs;
+              const rawResultTsMs = resultStep.createdAtMs ?? callTsMs;
+              const resultTsMs = Math.max(callTsMs, rawResultTsMs);
               const durationMs =
-                resultStep.createdAtMs !== undefined && step.createdAtMs !== undefined
-                  ? resultStep.createdAtMs - step.createdAtMs
+                resultStep.createdAtMs !== undefined
+                  ? resultStep.createdAtMs - callTsMs
                   : undefined;
               const resultMediaParts = await getStepMedia(resultStep, resultTsMs, 'input');
               let resultPayload: JsonValue = resultStep.content ?? null;
@@ -776,7 +787,7 @@ export class AntigravityInput extends BaseInput {
                 callId,
                 toolName: tc.name,
                 model: step.model,
-                callTsMs: step.createdAtMs ?? tsMs,
+                callTsMs,
               });
             }
           }
@@ -817,10 +828,14 @@ export class AntigravityInput extends BaseInput {
         const totalOutputTokens = usage.totalOutputTokens;
         const totalTokens = totalInputTokens + totalOutputTokens;
 
-        const reqTsMs = usage.timestampMs;
+        // gen_metadata field 9.4 records generation completion time (respTsMs);
+        // derive request start time by subtracting (ttft + streamDuration).
+        const respTsMs = usage.timestampMs;
         const durationNs = (usage.ttftNs ?? 0) + (usage.streamDurationNs ?? 0);
-        const respTsMs =
-          durationNs > 0 ? reqTsMs + Math.max(1, Math.round(durationNs / 1_000_000)) : reqTsMs;
+        const reqTsMs =
+          durationNs > 0
+            ? Math.max(1, respTsMs - Math.max(1, Math.round(durationNs / 1_000_000)))
+            : respTsMs;
 
         const inputDelta = await this.buildInputMessagesDelta(
           sessionId,
