@@ -62,6 +62,18 @@ pub fn remove_own_pid(data_dir: Option<&str>) {
     remove_own_pid_file_sync(&interceptor_pid_path(data_dir).to_string_lossy());
 }
 
+pub(super) fn remove_own_runtime(data_dir: &str, port: u16) {
+    let path = interceptor_runtime_path(Some(data_dir));
+    let current = fs::read(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<InterceptorRuntime>(&raw).ok());
+    if current.is_some_and(|runtime| {
+        runtime.pid == u64::from(std::process::id()) && runtime.daemon_port == port
+    }) {
+        let _ = fs::remove_file(path);
+    }
+}
+
 pub fn read_installed_git_commit(data_dir: &str) -> Option<String> {
     let current = fs::read_to_string(std::path::Path::new(data_dir).join("current")).ok()?;
     let current = current.trim();

@@ -17,6 +17,27 @@ pub fn run(args: &[String]) -> Option<String> {
     if body.len() > max_input {
         return None;
     }
+    let mut agents = args
+        .windows(2)
+        .filter(|pair| pair[0] == "--agent")
+        .map(|pair| pair[1].as_str());
+    if args
+        .first()
+        .is_some_and(|command| command != "hook-process")
+        && agents.next() == Some("openclaw")
+        && agents.next().is_none()
+    {
+        loongsuite_pilot::utils::redirect_root_logger_to_stderr();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        let input = String::from_utf8(body).ok()?;
+        let (_, verdict) = runtime.block_on(loongsuite_pilot::interceptor::cli::run_hook_captured(
+            args, input,
+        ));
+        return Some(verdict);
+    }
     loongsuite_pilot::hook_process::run_legacy_host_hook(args, &body)
 }
 

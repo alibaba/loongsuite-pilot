@@ -5,7 +5,9 @@ use crate::interceptor::access_log::{
     write_interceptor_access_log, AccessLogLimits, InterceptorAccessLogEntry,
 };
 use crate::interceptor::config::{load_interceptor_config, resolve_enabled_rule_ids};
-use crate::interceptor::daemon::runtime::{remove_own_pid, write_runtime, RuntimeWriteOptions};
+use crate::interceptor::daemon::runtime::{
+    remove_own_pid, remove_own_runtime, write_runtime, RuntimeWriteOptions,
+};
 use crate::interceptor::daemon::server::{
     create_interceptor_server, InterceptorServer, InterceptorServerOptions,
 };
@@ -148,6 +150,7 @@ impl InterceptorService {
         }
         if let Some(task) = self.heartbeat.lock().await.take() {
             task.abort();
+            let _ = task.await;
         }
         if let Err(err) = self
             .verdict_store
@@ -158,8 +161,9 @@ impl InterceptorService {
             meta.insert("error".to_string(), Value::String(err.to_string()));
             logger.warn("interceptor verdict checkpoint failed", Some(&meta));
         }
-        remove_own_pid(Some(&self.data_dir));
         self.server.close().await;
+        remove_own_runtime(&self.data_dir, self.port);
+        remove_own_pid(Some(&self.data_dir));
     }
 }
 
@@ -246,6 +250,7 @@ mod tests {
         assert_eq!(health["daemon_port"], service.port);
         let port = service.port;
         service.stop().await;
+        assert!(!interceptor_runtime_path(Some(&data_dir)).exists());
         assert!(std::net::TcpStream::connect_timeout(
             &format!("127.0.0.1:{port}").parse().unwrap(),
             std::time::Duration::from_millis(200),
