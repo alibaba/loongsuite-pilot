@@ -1122,7 +1122,7 @@ export class AntigravityInput extends BaseInput {
     const stepCompletionMsMap = new Map<number, number>();
     if (snapshot) {
       for (const usage of snapshot.events) {
-        const linkedStep = this.findLinkedResponseStep(usage, transcript);
+        const linkedStep = this.findLinkedPlannerStep(usage, transcript);
         const primaryIdx = linkedStep?.stepIndex ?? usage.stepIndices[0];
         if (linkedStep) {
           const completedMs = Math.max(
@@ -1393,7 +1393,15 @@ export class AntigravityInput extends BaseInput {
       for (const usage of snapshot.events) {
         if (isUsageAlreadyCovered(usage, prevCursor, seenKeys)) continue;
 
-        const linkedStep = this.findLinkedResponseStep(usage, transcript);
+        // Skip internal context-compaction CHECKPOINT steps: consistent with WorkBuddy/Codex/Claude Code,
+        // compaction is not emitted as an ordinary conversation llm.request/llm.response (doing so also
+        // triggers TurnBoundaryProcessor to falsely stamp gen_ai.turn.end=true mid-turn on ['stop']).
+        if (this.isCompactionOnlyUsage(usage, transcript)) {
+          recordUsageIdentities(seenKeys, keyOrder, keyMeta, usage);
+          continue;
+        }
+
+        const linkedStep = this.findLinkedPlannerStep(usage, transcript);
         const linkedStepIdx = linkedStep?.stepIndex ?? usage.stepIndices[0];
         const linkedStepInfo = linkedStepIdx !== undefined ? stepInfos.get(linkedStepIdx) : undefined;
 
@@ -1618,21 +1626,31 @@ export class AntigravityInput extends BaseInput {
     };
   }
 
-  private findLinkedResponseStep(
+  private findLinkedPlannerStep(
     usage: AntigravityUsageEvent,
     transcript: AntigravityTranscript | null,
   ): AntigravityTranscriptStep | undefined {
     if (!transcript) return undefined;
-    let checkpointFallback: AntigravityTranscriptStep | undefined;
+    for (const idx of usage.stepIndices) {
+      const step = transcript.byStepIndex.get(idx);
+      if (step && step.type === 'PLANNER_RESPONSE') return step;
+    }
+    return undefined;
+  }
+
+  private isCompactionOnlyUsage(
+    usage: AntigravityUsageEvent,
+    transcript: AntigravityTranscript | null,
+  ): boolean {
+    if (!transcript || usage.stepIndices.length === 0) return false;
+    let sawCheckpoint = false;
     for (const idx of usage.stepIndices) {
       const step = transcript.byStepIndex.get(idx);
       if (!step) continue;
-      if (step.type === 'PLANNER_RESPONSE') return step;
-      if (step.type === 'CHECKPOINT' && !checkpointFallback) {
-        checkpointFallback = step;
-      }
+      if (step.type === 'PLANNER_RESPONSE') return false;
+      if (step.type === 'CHECKPOINT') sawCheckpoint = true;
     }
-    return checkpointFallback;
+    return sawCheckpoint;
   }
 
   private async buildInputMessagesDelta(

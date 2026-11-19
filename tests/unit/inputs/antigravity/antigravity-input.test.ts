@@ -2265,7 +2265,8 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(pendingCallId).toBe(`${sid}:step:1:tc:1`);
 
     // Cycle 3: step 3 lands with transcript status='RUNNING' (backgrounded run_command!) BUT SQLite has
-    // completedAtMs AND a late native toolCallId; plus step 4 CHECKPOINT compaction LLM call!
+    // completedAtMs AND a late native toolCallId; step 4 is a CHECKPOINT compaction call (must be skipped
+    // from ordinary llm.request/llm.response); step 5 is the next PLANNER_RESPONSE!
     const DatabaseSync = loadDatabaseSync()!;
     const db = new DatabaseSync(dbPath);
     try {
@@ -2281,8 +2282,15 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
         protoBytesField(8, protoTimestamp(baseSec + 15)),
         protoBytesField(9, s4Usage),
       );
+      const g1Blob = encodeGeneratorMetadata({
+        model: 'Gemini 3.8 Flash (High)',
+        usage: { inputTokens: 200, totalOutputTokens: 50, visibleOutputTokens: 50, responseId: 'sg-2' },
+        timestampSec: baseSec + 18,
+        stepIndices: [5],
+      });
       db.prepare('INSERT INTO steps (idx, metadata) VALUES (?, ?)').run(3, s3Meta);
       db.prepare('INSERT INTO steps (idx, metadata) VALUES (?, ?)').run(4, s4Meta);
+      db.prepare('INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)').run(1, g1Blob, g1Blob.length);
     } finally {
       db.close();
     }
@@ -2291,6 +2299,7 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
       [
         JSON.stringify({ step_index: 3, source: 'MODEL', type: 'GENERIC', status: 'RUNNING', created_at: new Date((baseSec + 2) * 1000).toISOString(), content: 'background output' }),
         JSON.stringify({ step_index: 4, source: 'SYSTEM', type: 'CHECKPOINT', status: 'DONE', created_at: new Date((baseSec + 13) * 1000).toISOString(), content: 'Compacted summary text' }),
+        JSON.stringify({ step_index: 5, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date((baseSec + 16) * 1000).toISOString(), content: 'All done' }),
       ].join('\n') + '\n',
     );
     const future = new Date(Date.now() + 5000);
@@ -2308,13 +2317,13 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(bgToolResult['gen_ai.tool.call.id']).toBe(pendingCallId);
     expect(bgToolResult['gen_ai.tool.call.duration']).toBeGreaterThan(0);
 
-    // CHECKPOINT compaction LLM call captures output.messages and keeps latched callId in messages_delta!
-    const ckptReq = c3.find((e) => e['event.name'] === 'llm.request')!;
-    const ckptResp = c3.find((e) => e['event.name'] === 'llm.response')!;
-    expect(ckptResp['gen_ai.output.messages']).toEqual([
-      { role: 'assistant', parts: [{ type: 'text', content: 'Compacted summary text' }], finish_reason: 'stop' },
-    ]);
-    const deltaJson = JSON.stringify(ckptReq['gen_ai.input.messages_delta']);
+    // CHECKPOINT compaction step (ckpt-1) is skipped from llm.request/llm.response;
+    // only step 5 PLANNER_RESPONSE (sg-2) is emitted and preserves latched callId in messages_delta!
+    const llmReqs3 = c3.filter((e) => e['event.name'] === 'llm.request');
+    const llmResps3 = c3.filter((e) => e['event.name'] === 'llm.response');
+    expect(llmReqs3.map((e) => e['gen_ai.response.id'])).toEqual(['sg-2']);
+    expect(llmResps3.map((e) => e['gen_ai.response.id'])).toEqual(['sg-2']);
+    const deltaJson = JSON.stringify(llmReqs3[0]!['gen_ai.input.messages_delta']);
     expect(deltaJson).toContain(pendingCallId);
     expect(deltaJson).not.toContain('call_late_native_id');
   });
