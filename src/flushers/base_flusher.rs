@@ -163,6 +163,10 @@ pub trait BaseFlusher: Send + Sync {
 
     /// A sink that can deliver a native SDK batch directly may borrow its bytes
     /// for the duration of the synchronous callback. Other sinks use typed delivery.
+    fn supports_sdk_activity(&self) -> bool {
+        false
+    }
+
     async fn send_sdk_activity(&self, _rows: &[&[u8]]) -> Option<Result<(), FlushError>> {
         None
     }

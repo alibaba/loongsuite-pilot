@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 const MAX_CONFIG: u64 = 512 * 1024;
@@ -16,12 +16,16 @@ const RELOAD_PERIOD: Duration = Duration::from_secs(3);
 
 pub(super) struct ManagedHook {
     root: PathBuf,
+    owner: Weak<super::InputManager>,
     state: Mutex<Cache>,
 }
 
 struct Cache {
     scanned: Option<Instant>,
     bytes: Vec<u8>,
+    config_valid: bool,
+    pending_scripts: usize,
+    diagnostics: [u64; 6],
     rules: Arc<Rules>,
 }
 
@@ -105,6 +109,7 @@ enum Rule {
     Substring(String),
     Regex(regex::Regex),
     Script(Shell, PathBuf),
+    Http,
     Skipped,
 }
 
@@ -127,6 +132,7 @@ pub(super) struct Hit<'a> {
 impl ManagedHook {
     pub(super) fn new(data: &Path) -> Self {
         Self {
+            owner: Weak::new(),
             root: std::fs::canonicalize(data)
                 .unwrap_or_else(|_| data.to_owned())
                 .join("configs")
@@ -134,9 +140,62 @@ impl ManagedHook {
             state: Mutex::new(Cache {
                 scanned: None,
                 bytes: Vec::new(),
+                config_valid: true,
+                pending_scripts: 0,
+                diagnostics: [0; 6],
                 rules: Arc::new(Rules::default()),
             }),
         }
+    }
+
+    pub(super) fn with_owner(mut self, manager: &Arc<super::InputManager>) -> Self {
+        self.owner = Arc::downgrade(manager);
+        self
+    }
+
+    pub(super) fn monitoring(&self, initial: bool) -> (Value, Value) {
+        if initial {
+            self.snapshot();
+        }
+        let state = self.state.lock().unwrap();
+        let mut pattern = 0;
+        let mut regex = 0;
+        let mut script = 0;
+        let mut audit = 0;
+        let mut enforce = 0;
+        let mut http = 0;
+        for (common, rule) in &state.rules.rules {
+            match rule {
+                Rule::Substring(_) => pattern += 1,
+                Rule::Regex(_) => {
+                    pattern += 1;
+                    regex += 1;
+                }
+                Rule::Script(_, _) => script += 1,
+                Rule::Http => {
+                    http += 1;
+                    continue;
+                }
+                Rule::Skipped => continue,
+            }
+            match common.enforcement {
+                Enforcement::Audit => audit += 1,
+                Enforcement::Enforce => enforce += 1,
+            }
+        }
+        let diagnostics = crate::interceptor::status::DIAGNOSTIC_CODES
+            .into_iter()
+            .zip(state.diagnostics)
+            .collect::<std::collections::BTreeMap<_, _>>();
+        (
+            json!({
+                "configured":state.rules.rules.len(), "config_valid":state.config_valid,
+                "effective":pattern+script, "pattern":pattern, "regex":regex,
+                "substring":pattern-regex, "script":script, "audit":audit, "enforce":enforce,
+                "pending_scripts":state.pending_scripts, "unsupported_http":http,
+            }),
+            json!(diagnostics),
+        )
     }
 
     fn snapshot(&self) -> Arc<Rules> {
@@ -150,24 +209,59 @@ impl ManagedHook {
         state.scanned = Some(Instant::now());
         let path = self.root.join("interceptor.json");
         let update = read_config(&path);
+        let mut fault = false;
         match update {
-            Ok(bytes) if bytes != state.bytes => match Rules::parse(&bytes, &self.root) {
-                Ok(rules) => {
-                    state.bytes = bytes;
-                    state.rules = Arc::new(rules);
+            Ok(bytes) if bytes != state.bytes => {
+                state.pending_scripts = 0;
+                let mut pending_scripts = 0;
+                match Rules::parse(&bytes, &self.root, &mut pending_scripts) {
+                    Ok(rules) => {
+                        state.bytes = bytes;
+                        state.rules = Arc::new(rules);
+                        state.config_valid = true;
+                    }
+                    Err(error) => {
+                        warn(&error.to_string());
+                        fault = true;
+                    }
                 }
-                Err(error) => warn(&error.to_string()),
-            },
+                state.pending_scripts = pending_scripts;
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                state.config_valid = true;
+                state.pending_scripts = 0;
                 if !state.bytes.is_empty() {
                     state.bytes.clear();
                     state.rules = Arc::new(Rules::default());
                 }
             }
-            Err(error) => warn(&error.to_string()),
-            Ok(_) => {}
+            Err(error) => {
+                warn(&error.to_string());
+                fault = true;
+            }
+            Ok(_) => state.config_valid = true,
         }
-        state.rules.clone()
+        let rules = state.rules.clone();
+        if fault {
+            state.config_valid = false;
+            state.diagnostics[0] += 1;
+        }
+        drop(state);
+        if fault {
+            self.report_fault(
+                0,
+                json!({
+                    "code":"config_rejected", "source":"cache", "reason":"invalid_cached_config"
+                }),
+            );
+        }
+        rules
+    }
+
+    fn report_fault(&self, index: usize, payload: Value) {
+        if let Some(owner) = self.owner.upgrade() {
+            owner.record_interceptor_fault(index, &payload);
+        }
     }
 
     pub(super) async fn evaluate(&self, request: &HookRequest, remaining_ms: u32) -> Value {
@@ -180,7 +274,7 @@ impl ManagedHook {
         for (common, rule) in &snapshot.rules {
             if !common.agents.contains(&request.agent)
                 || !common.events.contains(&request.event)
-                || matches!(rule, Rule::Skipped)
+                || matches!(rule, Rule::Http | Rule::Skipped)
             {
                 continue;
             }
@@ -192,7 +286,38 @@ impl ManagedHook {
             let input = text.get_or_insert_with(|| hook_text(request));
             let reason = match rule {
                 Rule::Substring(pattern) => input.contains(pattern).then(pattern_reason),
-                Rule::Regex(regex) => regex.is_match(input).then(pattern_reason),
+                Rule::Regex(regex) => {
+                    let began = Instant::now();
+                    let matched = regex.is_match(input);
+                    let elapsed = began.elapsed();
+                    let limit = remaining.min(Duration::from_millis(200));
+                    let diagnostic = if elapsed >= limit {
+                        failed = true;
+                        Some((4, "regex_timeout", "match_exceeded_budget", limit))
+                    } else if elapsed >= Duration::from_millis(50) {
+                        Some((
+                            3,
+                            "regex_slow",
+                            "match_above_threshold",
+                            Duration::from_millis(50),
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some((index, code, reason, limit)) = diagnostic {
+                        self.state.lock().unwrap().diagnostics[index] += 1;
+                        self.report_fault(
+                            index,
+                            json!({
+                                "code":code, "source":"regex", "reason":reason,
+                                "ruleId":common.id, "ruleVersion":common.version,
+                                "durationMs":elapsed.as_secs_f64()*1000.0,
+                                "limitMs":limit.as_secs_f64()*1000.0,
+                            }),
+                        );
+                    }
+                    (matched && elapsed < limit).then(pattern_reason)
+                }
                 Rule::Script(shell, script) => {
                     match run_script(*shell, script, input, remaining).await {
                         Ok(reason) => reason,
@@ -203,7 +328,7 @@ impl ManagedHook {
                         }
                     }
                 }
-                Rule::Skipped => unreachable!(),
+                Rule::Http | Rule::Skipped => unreachable!(),
             };
             if let Some(reason) = reason {
                 let block = common.enforcement == Enforcement::Enforce;
@@ -248,7 +373,7 @@ impl Common {
 }
 
 impl Rules {
-    fn parse(bytes: &[u8], root: &Path) -> anyhow::Result<Self> {
+    fn parse(bytes: &[u8], root: &Path, pending_scripts: &mut usize) -> anyhow::Result<Self> {
         let doc = serde_json::from_slice::<Document>(bytes)?.interceptor;
         anyhow::ensure!(doc.rules.len() <= MAX_RULES, "Too many managed rules");
         let mut scripts = root.join("scripts");
@@ -303,8 +428,14 @@ impl Rules {
                     };
                     let script =
                         scripts.join(format!("{}@{}.{extension}", common.id, common.version));
-                    validate_file(&script)?;
-                    Rule::Script(shell, script)
+                    match validate_file(&script) {
+                        Ok(()) => Rule::Script(shell, script),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            *pending_scripts += 1;
+                            Rule::Skipped
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 WireKind::Http { url } => {
                     let url = reqwest::Url::parse(&url)?;
@@ -315,11 +446,12 @@ impl Rules {
                         "Invalid managed HTTPS placeholder"
                     );
                     warn("Managed HTTP rule is reserved for compatibility");
-                    Rule::Skipped
+                    Rule::Http
                 }
             };
             rules.push((common, compiled));
         }
+        anyhow::ensure!(*pending_scripts == 0, "Managed scripts are not ready");
         Ok(Self { rules })
     }
 }

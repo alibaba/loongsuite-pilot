@@ -32,9 +32,10 @@ pub(crate) async fn get(
         let token = token(input)
             .await
             .ok_or_else(|| "missing_api_token".to_string())?;
-        request = request
-            .bearer_auth(token)
-            .header("X-Workspace-ID", workspace);
+        request = request.bearer_auth(token);
+        if !workspace.is_empty() {
+            request = request.header("X-Workspace-ID", workspace);
+        }
     }
     let mut response = request.send().await.map_err(network_error)?;
     if !response.status().is_success() {
@@ -65,7 +66,9 @@ fn network_error(error: reqwest::Error) -> String {
 
 async fn token(input: &Input) -> Option<String> {
     const MAX_TOKEN_BYTES: u64 = 4096;
-    let token = if let Some(file) = input.token_file.clone() {
+    let token = if let Some(token) = &input.local_token {
+        token.clone()
+    } else if let Some(file) = input.token_file.clone() {
         tokio::task::spawn_blocking(move || {
             let mut options = std::fs::OpenOptions::new();
             options.read(true);

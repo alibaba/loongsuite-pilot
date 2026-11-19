@@ -153,7 +153,9 @@ async fn interleaved_turns_reset_session_uuid_and_conflicts_keep_session_keys_on
 async fn event_projection_and_real_spans_share_the_masked_session_key_without_replacing_the_session_uuid(
 ) {
     let data = fixture();
-    let config: MaskConfig = serde_json::from_value(json!({"mode":"all","types":[]})).unwrap();
+    let config: MaskConfig =
+        serde_json::from_value(json!({"mode":"all","types":[],"replacementMode":"placeholder"}))
+            .unwrap();
     let entries: Vec<_> = records(&data["maskSource"])
         .iter()
         .map(|entry| mask_agent_activity_entry(entry, &config, None, None).into_owned())

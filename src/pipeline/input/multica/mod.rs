@@ -2,6 +2,7 @@ mod activation;
 pub(crate) mod cli;
 pub(crate) mod config;
 mod diagnostics;
+pub(crate) mod local_daemon;
 mod pprof;
 mod records;
 mod source_http;
@@ -74,6 +75,7 @@ pub(crate) struct Options<'a> {
     pub(crate) enabled: bool,
     pub(crate) prefix: &'a str,
     pub(crate) activation_path: Option<PathBuf>,
+    pub(crate) daemon_profile: Option<PathBuf>,
 }
 
 struct ActivationLease {
@@ -156,6 +158,7 @@ pub(crate) struct MulticaPipeline {
     client: reqwest::Client,
     sender: Arc<dyn SlsHttp>,
     lease: Option<Arc<ActivationLease>>,
+    daemon_profile: Option<PathBuf>,
 }
 
 impl MulticaPipeline {
@@ -169,6 +172,7 @@ impl MulticaPipeline {
             enabled,
             prefix,
             activation_path,
+            daemon_profile,
         } = options;
         anyhow::ensure!(
             config::valid_name(name, true),
@@ -187,6 +191,7 @@ impl MulticaPipeline {
         Ok(Self {
             name: name.to_owned(),
             input,
+            daemon_profile,
             destination,
             mode,
             enabled,
@@ -339,12 +344,26 @@ impl MulticaPipeline {
             )
             .await;
         }
-        for workspace in input
-            .workspace_ids
-            .iter()
-            .filter(|_| input.api_base.is_some())
-        {
-            self.workspace(workspace, &mut summary).await;
+        if let Some(profile) = &self.daemon_profile {
+            match local_daemon::workspace_input(&self.client, input, profile).await {
+                Ok(api_input) => {
+                    summary.successful_sources += 1;
+                    for workspace in &api_input.workspace_ids {
+                        self.workspace(&api_input, workspace, &mut summary).await;
+                    }
+                }
+                Err(error_kind) => {
+                    summary.failed_sources += 1;
+                    create_logger("MulticaPipeline").warn(
+                        "Multica workspace discovery failed",
+                        json!({ "error_kind": error_kind }).as_object(),
+                    );
+                }
+            }
+        } else if input.api_base.is_some() {
+            for workspace in &input.workspace_ids {
+                self.workspace(input, workspace, &mut summary).await;
+            }
         }
         if let Some(base) = &input.pprof_base_url {
             let kinds = input
@@ -412,9 +431,9 @@ impl MulticaPipeline {
             .unwrap_or_default()
     }
 
-    async fn workspace(&self, workspace: &str, summary: &mut Summary) {
+    async fn workspace(&self, input: &Input, workspace: &str, summary: &mut Summary) {
         let mut sources = Vec::new();
-        if self.input.collect_entity_names {
+        if input.collect_entity_names {
             sources.push(api(
                 "workspace",
                 &format!("/api/workspaces/{}", segment(workspace)),
@@ -469,7 +488,7 @@ impl MulticaPipeline {
             .with("report_type", "autopilot_quota"),
         ]);
         for source in sources {
-            self.api(workspace, &source, summary).await;
+            self.api(input, workspace, &source, summary).await;
         }
         for agent in self
             .checkpoint(&format!("api:{workspace}:agents"))
@@ -482,7 +501,7 @@ impl MulticaPipeline {
                 Array::Root,
             )
             .paginated(Pagination::Cursor);
-            self.api(workspace, &source, summary).await;
+            self.api(input, workspace, &source, summary).await;
         }
         for autopilot in self
             .checkpoint(&format!("api:{workspace}:autopilots"))
@@ -496,9 +515,9 @@ impl MulticaPipeline {
             )
             .paginated(Pagination::Offset)
             .with("autopilot_id", &autopilot);
-            self.api(workspace, &source, summary).await;
+            self.api(input, workspace, &source, summary).await;
         }
-        let days = self.input.usage_days.unwrap_or(7);
+        let days = input.usage_days.unwrap_or(7);
         for report in [
             "usage/daily",
             "usage/by-agent",
@@ -514,7 +533,7 @@ impl MulticaPipeline {
                 Array::Root,
             )
             .with("report_type", report);
-            self.api(workspace, &source, summary).await;
+            self.api(input, workspace, &source, summary).await;
         }
         for report in ["agent-activity-30d", "agent-run-counts"] {
             let source = api(
@@ -524,16 +543,16 @@ impl MulticaPipeline {
                 Array::Root,
             )
             .with("report_type", report);
-            self.api(workspace, &source, summary).await;
+            self.api(input, workspace, &source, summary).await;
         }
     }
 
-    async fn api(&self, workspace: &str, source: &ApiSource, summary: &mut Summary) {
+    async fn api(&self, input: &Input, workspace: &str, source: &ApiSource, summary: &mut Summary) {
         let name = format!("api:{workspace}:{}", source.name);
         self.source(
             &name,
             summary,
-            sources::api(&self.client, &self.input, workspace, source),
+            sources::api(&self.client, input, workspace, source),
         )
         .await;
     }

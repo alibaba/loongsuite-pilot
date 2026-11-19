@@ -96,8 +96,27 @@ impl Instance {
     fn snapshot(&self) -> Value {
         let state = self.status.lock().unwrap().clone();
         let queue = self.queue.lock().unwrap().clone();
+        let interceptor = queue.as_ref().map(|queue| {
+            let Some(builtin) = *queue.local_hook_config.lock().unwrap() else {
+                return crate::interceptor::status::unavailable(false);
+            };
+            let stats = queue.local_hook_stats.lock().unwrap();
+            let mut status = crate::interceptor::status::unavailable(true);
+            status["running"] = json!(state.phase == Phase::Running);
+            status["collection_status"] = json!(if state.phase == Phase::Failed {
+                "unavailable"
+            } else {
+                "ok"
+            });
+            status["sampled_at"] = json!(chrono::Utc::now().to_rfc3339());
+            status["worker_started_at"] = json!(queue.start_time);
+            status["rules"] = json!({"builtin":builtin});
+            status["activity"] = stats.snapshot();
+            status["activity_totals"] = json!(&*stats);
+            status
+        });
         json!({"schema":2,"instance_id":self.key,"state":state.phase.name(),"desired_version":state.version,"effective_version":state.version,"agents":state.agents,"reason":state.error,
-            "delivery":queue.map(|q|q.snapshot()),"metrics_scope":"host_process","sdk_callbacks_require_dispatch":true})
+            "delivery":queue.map(|q|q.snapshot()),"interceptor":interceptor,"metrics_scope":"host_process","sdk_callbacks_require_dispatch":true})
     }
     fn notify(&self, start: bool, result: i32) {
         if start && self.start_enqueued.swap(true, Ordering::SeqCst) {
@@ -460,6 +479,7 @@ impl Session {
             &instance.init.data_dir.join("outbox"),
             policy.delivery.clone(),
         )?;
+        super::hooks::update_local_status(&queue, &policy.hooks);
         queue.identity.write().unwrap()["user_id"] = json!(instance.init.user_id);
         *instance.queue.lock().unwrap() = Some(queue.clone());
         let mut monitoring = super::monitoring::Monitoring::new(&instance.init, &queue)?;
@@ -646,6 +666,7 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
                         Ok(()) => {
                             if let Some(hooks) = &session.hooks {
                                 *hooks.settings.write().unwrap() = next.hooks.clone();
+                                super::hooks::update_local_status(&session.queue, &next.hooks);
                             }
                             policy = *next;
                             let mut status = instance.status.lock().unwrap();

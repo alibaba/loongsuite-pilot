@@ -29,6 +29,7 @@ pub struct QoderApiSlsSender {
     failed_log_dir: String,
     user_agent: String,
     hostname: String,
+    host_identity: crate::utils::SlsHostIdentity,
     buffer: std::sync::Mutex<Vec<HashMap<String, String>>>,
     flushing: AtomicBool,
     sink: Arc<dyn SlsSink>,
@@ -64,11 +65,20 @@ impl QoderApiSlsSender {
             failed_log_dir: failed_log_dir.to_string(),
             user_agent: build_user_agent(data_dir),
             hostname,
+            host_identity: Default::default(),
             buffer: std::sync::Mutex::new(Vec::new()),
             flushing: AtomicBool::new(false),
             sink: sink.unwrap_or_else(|| Arc::new(RealSlsSink)),
             task: std::sync::Mutex::new(None),
         }
+    }
+
+    pub(crate) fn with_host_identity(
+        mut self,
+        host_identity: crate::utils::SlsHostIdentity,
+    ) -> Self {
+        self.host_identity = host_identity;
+        self
     }
 
     pub fn start(self: &Arc<Self>) {
@@ -135,6 +145,11 @@ impl QoderApiSlsSender {
             for batch in &tasks {
                 let mut tags = HashMap::new();
                 tags.insert("__hostname__".into(), self.hostname.clone());
+                tags.extend(
+                    self.host_identity
+                        .tags()
+                        .map(|(key, value)| (key.into(), value.into())),
+                );
                 tags.insert("pipeline_type".into(), "qoder-api".into());
                 match self
                     .sink

@@ -341,6 +341,18 @@ fn pod_label(value: &str) -> Option<String> {
     .then(|| value.to_owned())
 }
 
+fn local_pod_ip() -> Option<String> {
+    let hostname = hostname::get().ok()?;
+    let hostname = hostname.to_str()?;
+    let hosts = std::fs::read_to_string("/etc/hosts").ok()?;
+    hosts.lines().find_map(|line| {
+        let mut fields = line.split('#').next()?.split_whitespace();
+        let address = fields.next()?.parse::<IpAddr>().ok()?;
+        (!address.is_loopback() && fields.any(|label| label == hostname))
+            .then(|| address.to_string())
+    })
+}
+
 pub(crate) fn pod_labels(input: &Input, source: &str) -> Record {
     let name = std::env::var("POD_NAME")
         .ok()
@@ -363,7 +375,12 @@ pub(crate) fn pod_labels(input: &Input, source: &str) -> Record {
         .pod_ip
         .clone()
         .or_else(|| std::env::var("POD_IP").ok())
-        .filter(|ip| ip.parse::<IpAddr>().is_ok());
+        .filter(|ip| ip.parse::<IpAddr>().is_ok())
+        .or_else(|| {
+            std::env::var_os("KUBERNETES_SERVICE_HOST")?;
+            static POD_IP: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+            POD_IP.get_or_init(local_pod_ip).clone()
+        });
     let mut row = Record::new();
     for (key, value) in [
         ("collector_pod_name", &name),
@@ -381,6 +398,7 @@ pub(crate) fn pod_labels(input: &Input, source: &str) -> Record {
         _ => None,
     };
     let local = kind == "stat"
+        || (kind == "log" && input.local_daemon_pid.is_some())
         || address
             .and_then(|uri| source_url(uri).ok())
             .and_then(|uri| uri.host_str().map(str::to_owned))

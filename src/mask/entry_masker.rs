@@ -234,7 +234,7 @@ fn mask_json_value<'a>(
 #[cfg(test)]
 mod tests {
     use super::mask_agent_activity_entry;
-    use crate::mask::types::{MaskConfig, MaskMode, MaskType};
+    use crate::mask::types::{MaskConfig, MaskMode, MaskReplacementMode, MaskType};
     use crate::types::AgentActivityEntry;
     use serde_json::{json, Value};
     use std::borrow::Cow;
@@ -243,7 +243,7 @@ mod tests {
         MaskConfig {
             mode: MaskMode::All,
             types: Vec::new(),
-            replacement_mode: None,
+            replacement_mode: Some(MaskReplacementMode::Placeholder),
         }
     }
 

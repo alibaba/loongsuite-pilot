@@ -344,8 +344,9 @@ fn convert_group(
     );
     agent.parent_span_id = Some(delegated_parent.unwrap_or(&entry_id).to_owned());
     agent.attributes.extend(root.attributes.clone());
-    // The event-log SDK takes turn metadata from its first carrying record.
-    // It belongs to the agent invocation, while ENTRY keeps only human input.
+    // The event-log SDK uses the first turn-level metadata on the agent and
+    // model invocations. Producers may send it only on the first request.
+    let mut llm_turn_metadata = Vec::new();
     for (key, value) in [
         (
             "gen_ai.system_instructions",
@@ -364,6 +365,14 @@ fn convert_group(
             agent
                 .attributes
                 .insert(key.into(), attribute(value.clone()));
+            if let Some(mut items) = message_array(value) {
+                if key == "gen_ai.tool.definitions" {
+                    items.retain(|item| item.get("name").is_some_and(Value::is_string));
+                }
+                if !items.is_empty() {
+                    llm_turn_metadata.push((key, Value::String(Value::Array(items).to_string())));
+                }
+            }
         }
     }
     agent.attributes.insert(
@@ -443,6 +452,26 @@ fn convert_group(
                 leaf.attributes.insert(key, value);
             }
         }
+        if pair.kind == "LLM" {
+            for (key, value) in &llm_turn_metadata {
+                leaf.attributes.entry(*key).or_insert_with(|| value.clone());
+            }
+        } else {
+            let tool_type = [start, finish]
+                .into_iter()
+                .chain(pair.updates.iter().copied())
+                .find_map(|record| {
+                    record
+                        .get("gen_ai.tool.type")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                })
+                .unwrap_or("function");
+            leaf.attributes.insert(
+                "gen_ai.tool.type".into(),
+                Value::String(tool_type.to_owned()),
+            );
+        }
         // The DSH adapter reports disjoint usage already folded into input
         // and output. Derive only the missing total from those evidenced
         // counts; cache and reasoning must not be added again.
@@ -504,7 +533,7 @@ fn convert_group(
                 &trace,
                 &step_span_id,
                 "STEP",
-                &format!("react step {round}"),
+                "react step",
                 start_time,
                 end_time,
             );
@@ -918,7 +947,7 @@ mod tests {
         for (kind, operation, name) in [
             ("ENTRY", "enter", "enter_ai_application_system"),
             ("AGENT", "invoke_agent", "invoke_agent codex"),
-            ("STEP", "react", "react step 1"),
+            ("STEP", "react", "react step"),
             ("LLM", "chat", "chat unknown"),
         ] {
             let span = result
@@ -929,6 +958,72 @@ mod tests {
             assert_eq!(span.attributes["gen_ai.operation.name"], operation);
             assert_eq!(span.name, name);
         }
+    }
+
+    #[test]
+    fn preserves_turn_llm_metadata_and_tool_types() {
+        let system = json!([{"type":"text","content":"Read the test file"}]);
+        let definitions = json!([{"type":"function","name":"read"}]);
+        let mut first = event("llm.request", "100");
+        first.system_instructions = Some(system.clone());
+        first.tool_definitions = Some(definitions.clone());
+        let mut records = vec![first, event("llm.response", "200")];
+        for (kind, time) in [("llm.request", "300"), ("llm.response", "400")] {
+            let mut row = event(kind, time);
+            row.step_id = Some("s2".into());
+            row.span_id = None;
+            records.push(row);
+        }
+        for (turn, time, tool_type) in [("t", 500, None), ("other", 700, Some("extension"))] {
+            let mut call = event("tool.call", &time.to_string());
+            call.turn_id = Some(turn.into());
+            call.tool_call_id = Some(turn.into());
+            call.span_id = None;
+            if let Some(tool_type) = tool_type {
+                call.extra
+                    .insert("gen_ai.tool.type".into(), json!(tool_type));
+            }
+            let mut result = call.clone();
+            result.event_name = Some(AgentEventName::ToolResult);
+            result.time_unix_nano = (time + 100).to_string();
+            records.extend([call, result]);
+        }
+        for (kind, time) in [("llm.request", "910"), ("llm.response", "920")] {
+            let mut row = event(kind, time);
+            row.turn_id = Some("other".into());
+            row.span_id = None;
+            records.push(row);
+        }
+        let converted = GenAiEventLogConverter
+            .convert(&records, &ConvertOptions::default())
+            .unwrap();
+        let mut matched_models = 0;
+        let mut matched_tools = 0;
+        for span in &converted.spans {
+            let attrs = &span.attributes;
+            let same_turn = attrs["gen_ai.turn.id"] == "t";
+            match attrs["gen_ai.span.kind"].as_str() {
+                Some("LLM") if same_turn => {
+                    assert_eq!(attrs["gen_ai.tool.definitions"], definitions.to_string());
+                    assert_eq!(attrs["gen_ai.system_instructions"], system.to_string());
+                    matched_models += 1;
+                }
+                Some("LLM") => {
+                    assert!(!attrs.contains_key("gen_ai.tool.definitions"));
+                    assert!(!attrs.contains_key("gen_ai.system_instructions"));
+                }
+                Some("TOOL") => {
+                    assert_eq!(
+                        attrs["gen_ai.tool.type"],
+                        if same_turn { "function" } else { "extension" }
+                    );
+                    matched_tools += 1;
+                }
+                Some("STEP") => assert_eq!(span.name, "react step"),
+                _ => {}
+            }
+        }
+        assert_eq!((matched_models, matched_tools), (2, 2));
     }
 
     #[test]

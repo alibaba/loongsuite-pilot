@@ -382,13 +382,10 @@ impl InputBody for QoderTraceBody {
             .is_persisted(&rt.id, Some("qoderTranscripts"));
         let mut raw =
             read_hook_jsonl(&self.log_dir, rt, &mut *self.legacy_reader.lock().await).await?;
-        let extra = rt.state().extra();
-        let native = self
+        let checkpoint = rt.state_store.get_extra_field(&rt.id, "qoderTranscripts");
+        let mut native = self
             .transcript_source
-            .read_shared(
-                extra.as_ref().and_then(|e| e.get("qoderTranscripts")),
-                persisted,
-            )
+            .read_owned(checkpoint.as_ref(), persisted)
             .await?;
         for observation in &native.metrics.reads {
             rt.with_accumulator(|a| {
@@ -399,16 +396,27 @@ impl InputBody for QoderTraceBody {
                 )
             });
         }
-        for record in &native.records {
-            if let Some(record) = record.as_object() {
-                if let Some(entry) = transform_record(record).await {
-                    raw.push(entry);
-                }
+        let source_owned = crate::utils::source_access::current().is_some();
+        for record in std::mem::take(&mut native.records) {
+            let Value::Object(record) = record else {
+                continue;
+            };
+            let entry = if source_owned {
+                build_owned_canonical_hook_entry(
+                    record,
+                    ClientType::QoderCli.as_str(),
+                    HOOK_RECORD_OPTIONS,
+                )
+            } else {
+                transform_record(&record).await
+            };
+            if let Some(entry) = entry {
+                raw.push(entry);
             }
         }
         if raw.is_empty() {
             if !self.stopped.load(Ordering::SeqCst) {
-                save_native_state(rt, &native);
+                save_native_state(rt, native);
             }
             return Ok(Vec::new());
         }
@@ -639,7 +647,7 @@ impl InputBody for QoderTraceBody {
             }
         }
         if !self.stopped.load(Ordering::SeqCst) {
-            save_native_state(rt, &native);
+            save_native_state(rt, native);
         }
         Ok(raw)
     }
@@ -652,15 +660,12 @@ fn qoder_data_dir_from_state(store: &crate::checkpoints::StateStore) -> PathBuf 
         parent.to_owned()
     }
 }
-fn save_native_state(rt: &InputRuntime, native: &TranscriptBatch) {
+fn save_native_state(rt: &InputRuntime, native: TranscriptBatch) {
     if !native.changed {
         return;
     }
-    let mut extra = match rt.state().extra() {
-        Some(Value::Object(extra)) => extra,
-        _ => Default::default(),
-    };
-    extra.insert("qoderTranscripts".into(), native.state.clone());
+    let mut extra = serde_json::Map::new();
+    extra.insert("qoderTranscripts".into(), native.state);
     rt.set_state_fields(None, None, Some(Value::Object(extra)));
 }
 
