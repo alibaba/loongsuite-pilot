@@ -54,6 +54,7 @@ import {
   loadHookRuntimeConfig,
   resolveUserId,
   applyHookContentPolicy,
+  shouldCaptureHookMessageContent,
 } from './agent-event-normalizer.mjs';
 import {
   agentBaseFieldPatch,
@@ -124,12 +125,17 @@ function loadSessionState(sessionId) {
   }
 }
 
-function saveSessionState(sessionId, state) {
+function saveSessionState(sessionId, state, runtimeConfig) {
   ensureStateDir();
   const file = sessionStatePath(sessionId);
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     state.last_activity_at_sec = nowSec();
+    if (!shouldCaptureHookMessageContent(AGENT_ID, runtimeConfig)) {
+      delete state.prompt;
+      delete state.last_assistant_message;
+      for (const call of Object.values(state.pending_tool_calls ?? {})) delete call.arguments;
+    }
     fs.writeFileSync(file, JSON.stringify(state, null, 2), 'utf-8');
   } catch { /* best-effort */ }
 }
@@ -1151,10 +1157,10 @@ function cmdSessionStart(event, sessionId) {
   let state = loadSessionState(sessionId);
   if (!state) {
     state = { session_id: sessionId, cwd: event.cwd || '', turn_index: 0 };
-    saveSessionState(sessionId, state);
+    saveSessionState(sessionId, state, runtimeConfig);
   } else if (event.cwd && state.cwd !== event.cwd) {
     state.cwd = event.cwd;
-    saveSessionState(sessionId, state);
+    saveSessionState(sessionId, state, runtimeConfig);
   }
 }
 
@@ -1175,7 +1181,7 @@ function cmdUserPromptSubmit(event, sessionId) {
     records.push(llmResponseRecord(state, base, ts, ''));
     state.llm_response_emitted = true;
     emitRecords(state, records, runtimeConfig);
-    saveSessionState(sessionId, state);
+    saveSessionState(sessionId, state, runtimeConfig);
   }
   // Round 5 #5: turn_index persists across idle_prompt so multi-turn
   // conversations produce unique t1/t2/t3 ids. prevState (even after
@@ -1219,7 +1225,7 @@ function cmdUserPromptSubmit(event, sessionId) {
   ]);
 
   emitRecords(state, records, runtimeConfig);
-  saveSessionState(sessionId, state);
+  saveSessionState(sessionId, state, runtimeConfig);
 }
 
 function cmdPreToolUse(event, sessionId) {
@@ -1270,7 +1276,7 @@ function cmdPreToolUse(event, sessionId) {
     if (pending) pending.llm_tool_name = event.llm_tool_name;
   }
   emitRecords(state, records, runtimeConfig);
-  saveSessionState(sessionId, state);
+  saveSessionState(sessionId, state, runtimeConfig);
 }
 
 function cmdPostToolUse(event, sessionId) {
@@ -1304,7 +1310,7 @@ function cmdPostToolUse(event, sessionId) {
     state.pending_tool_calls[toolUseId].completed = true;
   }
   emitRecords(state, records, runtimeConfig);
-  saveSessionState(sessionId, state);
+  saveSessionState(sessionId, state, runtimeConfig);
 }
 
 function cmdStop(event, sessionId) {
@@ -1369,10 +1375,11 @@ function cmdStop(event, sessionId) {
     ];
     try { writeOtlpDebugRecords(corrected); } catch { /* best-effort */ }
   }
-  saveSessionState(sessionId, state);
+  saveSessionState(sessionId, state, runtimeConfig);
 }
 
 function cmdNotification(event, sessionId) {
+  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   // Round 6 #1: forward-compat — if TRAE-CN ever starts emitting LLM streaming
   // chunks (notification_type != idle_prompt) carrying usage data, accumulate
   // it into state.usage so the next Stop extracts real token counts. tester
@@ -1382,7 +1389,7 @@ function cmdNotification(event, sessionId) {
     const state = loadSessionState(sessionId);
     if (state) {
       const changed = mergeUsageIntoState(state, event);
-      if (changed) saveSessionState(sessionId, state);
+      if (changed) saveSessionState(sessionId, state, runtimeConfig);
     }
     return;
   }
@@ -1410,7 +1417,7 @@ function cmdNotification(event, sessionId) {
     Object.keys(stub).forEach((k) => {
       if (stub[k] === undefined) delete stub[k];
     });
-    saveSessionState(sessionId, stub);
+    saveSessionState(sessionId, stub, runtimeConfig);
   } else {
     clearSessionState(sessionId);
   }

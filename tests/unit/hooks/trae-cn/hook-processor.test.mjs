@@ -93,6 +93,37 @@ function readOtlpDebugSpans() {
 }
 
 describe('trae-cn hook processor', () => {
+  test('captureMessageContent false keeps conversation content off disk throughout a tool turn', () => {
+    const markers = ['private-prompt-616', 'private-args-616', 'private-result-616', 'private-answer-616'];
+    const session = 'privacy-test';
+    const config = path.join(dataDir, 'config.json');
+    fs.writeFileSync(config, JSON.stringify({ agents: { 'trae-cn': { captureMessageContent: false } } }));
+    for (const [subcommand, payload] of [
+      ['user-prompt-submit', { prompt: markers[0] }],
+      ['pre-tool-use', { tool_use_id: 't1', tool_name: 'Read', tool_input: { path: markers[1] } }],
+      ['post-tool-use', { tool_use_id: 't1', tool_response: { stdout: markers[2] } }],
+      ['stop', { last_assistant_message: markers[3] }],
+      ['notification', { notification_type: 'idle_prompt' }],
+    ]) {
+      const result = runHook(subcommand, { ...payload, session_id: session }, {
+        AGENT_DATA_COLLECTION_CONFIG: config, LOONGSUITE_PILOT_OTLP_DEBUG: '1',
+      });
+      expect(result.status).toBe(0);
+      expect(readState(session)).toBeTruthy();
+      const files = fs.readdirSync(dataDir, { recursive: true });
+      for (const file of files) {
+        const target = path.join(dataDir, file);
+        if (!fs.statSync(target).isFile()) continue;
+        const bytes = fs.readFileSync(target);
+        for (const marker of markers) expect(bytes.includes(Buffer.from(marker)), file).toBe(false);
+      }
+    }
+    const records = readEmittedJsonl();
+    expect(records.filter(r => r['event.name'] !== 'other').map(r => r['event.name']))
+      .toEqual(['llm.request', 'tool.call', 'tool.result', 'llm.response']);
+    expect(readOtlpDebugSpans().length).toBeGreaterThan(0);
+  });
+
   test('deploys executable event commands and replaces registrations without subcommands', async () => {
     const hooksDir = path.join(dataDir, 'hooks');
     fs.cpSync(path.dirname(PROCESSOR), hooksDir, { recursive: true });
