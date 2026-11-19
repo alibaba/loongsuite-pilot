@@ -52,7 +52,7 @@ it('resumes split compressed records and separates concurrent turns in one sessi
       new_agent_run_id: parent, new_task_id: 'third', source_agent_run_id: child,
     }));
     const reply = '9'.repeat(24);
-    const row = (type: string, data: object) => JSON.stringify({ type,
+    const row = (type: string, data: object) => JSON.stringify({ type, seq: 17,
       data: JSON.stringify({ ...data, reply_to_message_id: reply }) });
     const source = path.join(hub.root, 'workspace');
     await mkdir(source, { recursive: true });
@@ -61,12 +61,16 @@ it('resumes split compressed records and separates concurrent turns in one sessi
       row('timing_events', { logid: 'request-id', model_name: 'model-1', data: {
         rs_17_before_request_llm: 1000, rs_18_llm_response_first_token: 1010,
       } }),
+      ...Array(2).fill(row('token_usage', { prompt_tokens: 80, completion_tokens: 7, total_tokens: 87 })),
       row('plan_item', { agent_run_id: parent, tool_call_info: {
         name: 'Read', meta: { llm_toolcall_id: 'call_2' }, params: 'never-export',
       }, timing: { tool_call_started_at_ms: 1050, tool_call_finished_at_ms: 1067 } }),
     ].join('\n') + '\n');
     await hub.scan();
-    records.push(record(traceB,'tool execution started',{ tool_name:'Read', toolcall_id:'call_2' }),
+    const response = record(traceB, 'recording history entry', {
+      history_source: 'Server', source: 'llm_default', history_id: '7'.repeat(24),
+    });
+    records.push(response, response, record(traceB,'tool execution started',{ tool_name:'Read', toolcall_id:'call_2' }),
       record(traceB,'chat: runner completed',{turn_id:traceB.slice(0,24)}),
       record(traceA,'chat: runner completed',{turn_id:traceA.slice(0,24)}));
     const compressed = deflateRawSync(Buffer.concat(records));
@@ -82,6 +86,9 @@ it('resumes split compressed records and separates concurrent turns in one sessi
       .map(e => e['gen_ai.tool.name'])).toEqual(['Shell','Shell','Read','Read','Read']);
     const ordinary = entries.filter(e => e.trace_id === traceB);
     expect(ordinary.map(e => e['gen_ai.span.kind'])).toEqual(['TOOL', 'LLM', 'AGENT', 'ENTRY']);
+    expect(ordinary[3]).toMatchObject({ 'agent.trae-cn.model_responses_observed': 1,
+      'agent.trae-cn.usage_reports_observed': 1, 'agent.trae-cn.input_tokens_observed': 80,
+      'agent.trae-cn.output_tokens_observed': 7 });
     expect(ordinary[0].parent_span_id).toBe(ordinary[2].span_id);
     expect(ordinary[1].parent_span_id).toBe(ordinary[2].span_id);
     expect(ordinary[2].parent_span_id).toBe(ordinary[3].span_id);

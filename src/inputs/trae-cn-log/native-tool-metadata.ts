@@ -10,7 +10,7 @@ import { ClientType, type AgentActivityEntry } from '../../types/index.js';
 import { fileIdentity } from '../../utils/file-identity.js';
 
 type Delegation = { parent: string; call: string; start?: string; end?: string; child?: string };
-type Turn = { session: string; turn: string; start: string; calls: string[]; pending?: PendingTool[]; delegations?: Delegation[] };
+type Turn = { session: string; turn: string; start: string; calls: string[]; responses?: string[]; pending?: PendingTool[]; delegations?: Delegation[] };
 type PendingTool = { call: string; tool: string; time: string; parent: string; received: number };
 type Turns = Record<string, Turn>;
 const spanId = (trace: string, id: string) => createHash('sha256').update(trace + '/' + id).digest('hex').slice(0, 16);
@@ -54,7 +54,7 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
   if (!fields) return;
   const message = text(fields.message);
   if (message !== 'context resolve applied to task request' && message !== 'tool execution started' &&
-      message !== commit && message !== launch && message !== takeover &&
+      message !== 'recording history entry' && message !== commit && message !== launch && message !== takeover &&
       message !== 'terminal Turn and Inbox transaction committed' && message !== 'chat: runner completed') return;
   const trace = text(fields.trace_id);
   if (!/^[a-f0-9]{32}$/.test(trace)) return;
@@ -72,6 +72,14 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
   }
   const turn = turns[trace];
   if (!turn) return;
+  if (message === 'recording history entry') {
+    const history = text(fields.history_id);
+    if (text(fields.history_source) === 'Server' && text(fields.source) === 'llm_default' && hexId.test(history)) {
+      const responses = turn.responses ??= [];
+      if (!responses.includes(history)) responses.push(history);
+    }
+    return;
+  }
   const root = spanId(trace, turn.turn);
   const agent = spanId(trace, 'turn-agent/' + turn.turn);
   const base = {
@@ -156,8 +164,18 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
       'gen_ai.agent.parent.invocation.id': delegation.parent, 'gen_ai.subagent.parent_tool_call.id': delegation.call,
       ...(delegation.child ? { 'gen_ai.agent.invocation.id': delegation.child } : {}) }));
   }
+  // The cache can disappear before the last usage report is flushed. Label the
+  // observed sum separately from complete, per-request GenAI usage.
+  let input = 0, output = 0;
+  for (const usage of observed?.usage.values() ?? []) {
+    input += usage.input;
+    output += usage.output;
+  }
   delete turns[trace];
   entries.push(buildAgentActivityEntry({ ...base, 'event.id': root, 'event.name': 'other', span_id: root,
+    ...(turn.responses?.length ? { 'agent.trae-cn.model_responses_observed': turn.responses.length } : {}),
+    ...(observed?.usage.size ? { 'agent.trae-cn.usage_reports_observed': observed.usage.size,
+      'agent.trae-cn.input_tokens_observed': input, 'agent.trae-cn.output_tokens_observed': output } : {}),
     startTimeUnixNano: turn.start, 'gen_ai.span.kind': 'ENTRY', 'gen_ai.turn.end': true,
     'gen_ai.operation.name': 'enter_ai_application_system' }));
 }

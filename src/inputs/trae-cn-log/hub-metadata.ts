@@ -12,6 +12,7 @@ type Model = { model: string; start: number; first: number };
 class HubTurn {
   readonly tools = new Map<string, Tool>();
   readonly models = new Map<string, Model>();
+  readonly usage = new Map<string, { input: number; output: number }>();
   touched = Date.now();
   constructor(readonly trace: string, readonly turn: string, readonly session: string) {}
 }
@@ -56,7 +57,7 @@ export class HubMetadata {
           let row, data;
           try {
             row = JSON.parse(line);
-            if (!['metadata', 'timing_events', 'plan_item'].includes(row.type)) continue;
+            if (!['metadata', 'timing_events', 'plan_item', 'token_usage'].includes(row.type)) continue;
             data = JSON.parse(row.data);
           } catch { continue; }
           if (data?.reply_to_message_id !== reply) continue;
@@ -77,6 +78,12 @@ export class HubMetadata {
             if (identifier(call) && identifier(tool.name) && identifier(data.agent_run_id) &&
                 timestamp(start) && timestamp(end) && end >= start) {
               bound.tools.set(call, { name: tool.name, run: data.agent_run_id, start, end });
+            }
+          } else if (row.type === 'token_usage') {
+            const input = data.prompt_tokens, output = data.completion_tokens;
+            if (Number.isSafeInteger(row.seq) && row.seq >= 0 && Number.isSafeInteger(input) && input >= 0 &&
+                Number.isSafeInteger(output) && output >= 0 && input + output === data.total_tokens) {
+              bound.usage.set(reply + '/' + row.seq, { input, output });
             }
           } else if (row.type === 'timing_events') {
             const start = data.data?.rs_17_before_request_llm, first = data.data?.rs_18_llm_response_first_token;
