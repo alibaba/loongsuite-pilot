@@ -223,8 +223,9 @@ impl Context {
         if namespace.len() != 64 || !namespace.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("SDK returned an invalid source namespace".into());
         }
-        let is_codex = self.input.starts_with("codex-");
-        let _handoff_lock = if is_codex {
+        use crate::sdk::outbox::{LegacyCheckpointHandoff, Outbox};
+        let handoff = LegacyCheckpointHandoff::for_input(self.input);
+        let _handoff_lock = if handoff.is_some() {
             let path = self.sdk_data.join("collector.lock");
             crate::utils::source_access::private_path(&path).map_err(|err| err.to_string())?;
             let lock = std::fs::OpenOptions::new()
@@ -243,11 +244,8 @@ impl Context {
                 .join(namespace)
                 .join("input-state.json"),
         );
-        let persisted = crate::sdk::outbox::Outbox::read_persisted_checkpoint(
-            &self.sdk_data.join("outbox"),
-            namespace,
-        )
-        .map_err(|error| error.to_string())?;
+        let persisted = Outbox::read_persisted_checkpoint(&self.sdk_data.join("outbox"), namespace)
+            .map_err(|error| error.to_string())?;
         self.runtime.block_on(async {
             if let Some(text) = persisted.as_deref() {
                 checkpoint
@@ -267,11 +265,9 @@ impl Context {
             if imported {
                 legacy.save().await.map_err(|error| error.to_string())?;
             }
-            if is_codex {
-                crate::sdk::outbox::Outbox::mark_codex_checkpoint_exported(
-                    &self.sdk_data.join("outbox"),
-                )
-                .map_err(|error| error.to_string())?;
+            if let Some(handoff) = handoff {
+                Outbox::mark_shell_checkpoint_exported(&self.sdk_data.join("outbox"), handoff)
+                    .map_err(|error| error.to_string())?;
             }
             Ok(())
         })

@@ -156,8 +156,16 @@ impl Host {
     }
 
     fn start_with_home(root: &Path, home: Option<&Path>, policy: Value, ctx: Box<Context>) -> Self {
+        Self::start_with_init(
+            json!({"data_dir":root,"resource_dir":env!("CARGO_MANIFEST_DIR"),"user_id":"sdk-acceptance","home_dir":home}),
+            policy,
+            ctx,
+        )
+    }
+
+    fn start_with_init(init: Value, policy: Value, ctx: Box<Context>) -> Self {
         let library = loader::Library::open(&library_path()).unwrap();
-        let init = serde_json::to_vec(&json!({"data_dir":root,"resource_dir":env!("CARGO_MANIFEST_DIR"),"user_id":"sdk-acceptance","home_dir":home})).unwrap();
+        let init = serde_json::to_vec(&init).unwrap();
         let policy = serde_json::to_vec(&policy).unwrap();
         let mut host = Self {
             library,
@@ -1987,4 +1995,210 @@ fn codex_sdk_observe_delivery_retry_and_interception_share_the_native_library() 
     assert_eq!(resumed.ctx.rows.lock().unwrap()[0], original);
     until(|| resumed.snapshot()["delivery"]["pending_events"] == 0);
     resumed.stop();
+}
+
+#[test]
+fn codex_sdk_embedded_recovery_uses_one_owner_and_resumes() {
+    let fixture = include_str!("unit/inputs/codex-aborted-turn/fixtures/aborted-turn.jsonl");
+    for (profile, combined) in [("codex_aborted_turn_v1", false), ("codex_rollout_v1", true)] {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let sessions = root.join("codex/sessions");
+        let data = root.join("sdk");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let mut policy = json!({"agents":["codex"],"hcd":{"agent_configs":{"codex":{"collection":{
+            "enabled":true,"profile":profile,"allowed_roots":[sessions],
+            "sources":[{"id":"rollout","type":"transcript","path":sessions}],
+            "limits":{"poll_interval_ms":50},
+        }}}},"sdk_options":{"delivery":{"flush_interval_ms":10}}});
+        if combined {
+            policy["hcd"]["agent_configs"]["codex"]["collection"]["codex_recovery"] = json!(true);
+        }
+        let mut host = Host::start(&data, policy.clone(), Box::default());
+        host.ready();
+        let count = if combined { 2 } else { 1 };
+        let started = |host: &Host| {
+            let status = host.snapshot();
+            let agents = status["agents"].as_array().unwrap();
+            agents.len() == count && agents.iter().all(|a| a["status"]["state"] == "running")
+        };
+        until(|| started(&host));
+        let rollout = sessions.join("rollout-session-aborted.jsonl");
+        std::fs::write(&rollout, fixture).unwrap();
+        let cancelled = |rows: &[Vec<u8>]| {
+            rows.iter()
+                .map(|row| serde_json::from_slice::<Value>(row).unwrap())
+                .filter(|row| {
+                    row["event.name"] == "llm.response"
+                        && row["gen_ai.response.finish_reasons"]
+                            .as_array()
+                            .is_some_and(|reasons| reasons.contains(&json!("cancelled")))
+                })
+                .collect::<Vec<_>>()
+        };
+        until(|| !cancelled(&host.ctx.rows.lock().unwrap()).is_empty());
+        until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+        std::thread::sleep(Duration::from_millis(200));
+        let rows = cancelled(&host.ctx.rows.lock().unwrap());
+        assert_eq!(rows.len(), 1, "{profile} must have one source owner");
+        assert_eq!(rows[0]["gen_ai.session.id"], "session-aborted");
+        if combined {
+            assert_eq!(rows[0]["gen_ai.turn.id"], "session-aborted:turn-aborted");
+        } else {
+            assert_eq!(
+                rows[0]["gen_ai.turn.id"],
+                "session-aborted:aborted:turn-aborted"
+            );
+            assert_eq!(rows[0]["agent.codex.transcript_turn_id"], "turn-aborted");
+        }
+        host.stop();
+
+        let mut resumed = Host::start(&data, policy, Box::default());
+        resumed.ready();
+        until(|| started(&resumed));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            resumed.ctx.rows.lock().unwrap().is_empty(),
+            "{profile} replayed an ACKed turn"
+        );
+        resumed.stop();
+    }
+}
+
+#[test]
+fn codex_sdk_deploys_trusted_hooks_and_cleans_only_its_own() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let home = root.join("Codex 用户");
+    let sessions = home.join("sessions");
+    let settings = home.join("hooks.json");
+    let trust = home.join("config.toml");
+    let data = root.join("SDK state");
+    let resources = root.join("SDK resources");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let original = json!({"foreign":true,"hooks":{"Stop":[{"matcher":"*","hooks":[{"type":"command","command":"third-party-hook"}]}]}});
+    std::fs::write(&settings, original.to_string()).unwrap();
+    std::fs::write(&trust, "# user settings\nmodel = 'test-model'\n").unwrap();
+    std::fs::create_dir_all(resources.join("bin")).unwrap();
+    let binary = Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));
+    std::fs::copy(
+        binary,
+        resources.join("bin").join(binary.file_name().unwrap()),
+    )
+    .unwrap();
+    let init = json!({"data_dir":data,"resource_dir":resources,"codex_home":home});
+    let policy = json!({"version":"codex-managed","agents":["codex"],"hcd":{"agent_configs":{"codex":{
+        "collection":{"enabled":true,"profile":"codex_rollout_v1","codex_recovery":true,
+            "allowed_roots":[sessions],"sources":[{"id":"rollout","type":"transcript","path":sessions}]},
+        "hook_deployment":{"settings_path":settings,"channel":"cloud"}
+    }}}});
+    let mut host = Host::start_with_init(init.clone(), policy.clone(), Box::default());
+    host.ready();
+    assert_eq!(
+        host.snapshot()["codex_hook_deployment"]["state"],
+        "deployed"
+    );
+    let installed = std::fs::read(&settings).unwrap();
+    let trusted = std::fs::read(&trust).unwrap();
+    let hooks: Value = serde_json::from_slice(&installed).unwrap();
+    assert_eq!(hooks["hooks"]["Stop"][0], original["hooks"]["Stop"][0]);
+    let config: toml::Value = std::str::from_utf8(&trusted).unwrap().parse().unwrap();
+    assert_eq!(config["hooks"]["state"].as_table().unwrap().len(), 7);
+    for (event, payload) in [
+        ("UserPromptSubmit", json!({"prompt":"blocked prompt"})),
+        (
+            "PreToolUse",
+            json!({"tool_name":"Bash","tool_input":{"command":"echo blocked"}}),
+        ),
+        (
+            "PostToolUse",
+            json!({"tool_name":"Bash","tool_response":"blocked result"}),
+        ),
+    ] {
+        let command = hooks["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        #[cfg(unix)]
+        let mut process = {
+            let mut c = Command::new("/bin/sh");
+            c.args(["-c", command]);
+            c
+        };
+        #[cfg(windows)]
+        let mut process = {
+            use std::os::windows::process::CommandExt;
+            let mut c = Command::new("cmd.exe");
+            assert!(!command.starts_with(r#""\\?\"#), "{command}");
+            c.args(["/D", "/S", "/C"]).raw_arg(format!("\"{command}\""));
+            c
+        };
+        let mut child = process
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert!(result.status.success());
+        let verdict: Value = serde_json::from_slice(&result.stdout).unwrap();
+        if event == "PreToolUse" {
+            assert_eq!(verdict["hookSpecificOutput"]["permissionDecision"], "deny");
+        } else {
+            assert_eq!(verdict["decision"], "block");
+        }
+    }
+    assert_eq!(host.ctx.hook_requests.lock().unwrap().len(), 3);
+    host.stop();
+
+    let mut cleanup = Host::start_with_init(init, empty_policy(), Box::default());
+    cleanup.ready();
+    assert_eq!(
+        cleanup.snapshot()["codex_hook_deployment"]["state"],
+        "disabled"
+    );
+    let cleared = std::fs::read(&settings).unwrap();
+    let kept = std::fs::read(&trust).unwrap();
+    let after: Value = serde_json::from_slice(&cleared).unwrap();
+    assert_eq!(after["foreign"], original["foreign"]);
+    assert_eq!(after["hooks"]["Stop"], original["hooks"]["Stop"]);
+    assert!(!String::from_utf8_lossy(&cleared).contains("--pilot-sdk-managed"));
+    assert!(String::from_utf8_lossy(&kept).contains("# user settings"));
+    assert!(!String::from_utf8_lossy(&kept).contains("trusted_hash"));
+    for _ in 0..6 {
+        assert_eq!(cleanup.apply(policy.clone()).0, OK);
+        assert_eq!(std::fs::read(&settings).unwrap(), installed);
+        assert_eq!(std::fs::read(&trust).unwrap(), trusted);
+        assert_eq!(cleanup.apply(empty_policy()).0, OK);
+        assert_eq!(std::fs::read(&settings).unwrap(), cleared);
+        assert_eq!(std::fs::read(&trust).unwrap(), kept);
+    }
+    assert_eq!(cleanup.apply(policy.clone()).0, OK);
+    let mut with_later_hook: Value =
+        serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    let event = &mut with_later_hook["hooks"]["PreToolUse"];
+    event.as_array_mut().unwrap().push(json!({
+        "matcher":"Bash","hooks":[{"type":"command","command":"another-trusted-tool-hook"}]
+    }));
+    let foreign = event[1].clone();
+    std::fs::write(&settings, with_later_hook.to_string()).unwrap();
+    assert_eq!(cleanup.apply(empty_policy()).0, OK);
+    let after: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(
+        after["hooks"]["PreToolUse"][1], foreign,
+        "foreign trust location moved"
+    );
+    assert!(after["hooks"]["PreToolUse"][0]["hooks"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let cleared = std::fs::read(&settings).unwrap();
+    assert_eq!(cleanup.apply(policy).0, OK);
+    assert_eq!(cleanup.apply(empty_policy()).0, OK);
+    assert_eq!(std::fs::read(&settings).unwrap(), cleared);
+    cleanup.stop();
 }

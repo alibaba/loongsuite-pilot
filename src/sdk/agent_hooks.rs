@@ -50,7 +50,8 @@ impl AgentHook {
     ) -> bool {
         let is_codex = self.0 == InterceptorAgent::Codex;
         let codex_event = codex_observe_event(event);
-        let codex_prompt = is_codex && event == "UserPromptSubmit" && channel == "local";
+        let codex_prompt =
+            is_codex && event == "UserPromptSubmit" && matches!(channel, "local" | "cloud");
         if is_codex && (codex_event.is_none() || (channel != "observe" && !codex_prompt)) {
             return false;
         }
@@ -158,6 +159,80 @@ impl AgentHook {
             );
         }
         accepted
+    }
+}
+
+pub(crate) fn codex_command(
+    executable: &Path,
+    data_dir: &Path,
+    event: &str,
+    channel: &str,
+) -> Option<String> {
+    let codex = AgentHook::for_wire_id("codex")?;
+    let supported = match channel {
+        "local" | "cloud" => codex.supports_blocking(event),
+        "observe" => codex_observe_event(event).is_some(),
+        _ => false,
+    };
+    if !supported {
+        return None;
+    }
+    let executable = quote_codex_path(executable)?;
+    let data_dir = quote_codex_path(data_dir)?;
+    Some(format!(
+        "{executable} sdk-hook --channel {channel} --agent codex --event {event} --data-dir {data_dir} --pilot-sdk-managed"
+    ))
+}
+
+pub(crate) fn codex_command_executable(command: &str) -> Option<PathBuf> {
+    let (quoted, _) = command.split_once(" sdk-hook --channel ")?;
+    let executable = if cfg!(windows) {
+        quoted.strip_prefix('"')?.strip_suffix('"')?.to_owned()
+    } else {
+        quoted
+            .strip_prefix('\'')?
+            .strip_suffix('\'')?
+            .replace("'\\''", "'")
+    };
+    let executable = PathBuf::from(executable);
+    (quote_codex_path(&executable).as_deref() == Some(quoted)).then_some(executable)
+}
+
+pub(crate) fn codex_shell_path(path: &Path) -> std::borrow::Cow<'_, Path> {
+    #[cfg(windows)]
+    if let Some(path) = path.to_str() {
+        // cmd.exe cannot execute a verbatim-prefixed program path. Keep
+        // verbatim paths for filesystem I/O and lower them at the command boundary.
+        if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+            return std::borrow::Cow::Owned(PathBuf::from(format!(r"\\{unc}")));
+        }
+        if let Some(disk) = path.strip_prefix(r"\\?\").filter(|rest| {
+            let bytes = rest.as_bytes();
+            bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1..3) == Some(b":\\")
+        }) {
+            return std::borrow::Cow::Owned(PathBuf::from(disk));
+        }
+    }
+    std::borrow::Cow::Borrowed(path)
+}
+
+fn quote_codex_path(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let shell_path = codex_shell_path(path);
+    let path = shell_path.to_str()?;
+    if path.chars().any(char::is_control) {
+        return None;
+    }
+    if cfg!(windows) {
+        // cmd.exe expands these even inside a quoted argument.
+        if path.contains(['"', '%', '!']) {
+            return None;
+        }
+        Some(format!("\"{path}\""))
+    } else {
+        Some(format!("'{}'", path.replace('\'', "'\\''")))
     }
 }
 

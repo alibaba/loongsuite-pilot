@@ -41,12 +41,16 @@ impl Collector {
         }
     }
     pub fn apply(&mut self, policy: &Policy) -> anyhow::Result<()> {
+        let mut plans = policy.agents.clone();
+        if let Some(recovery) = &policy.codex_recovery {
+            plans.insert("codex-recovery".into(), recovery.clone());
+        }
         let delivery_changed = *self.queue.options.read().unwrap() != policy.delivery;
         let removed: Vec<_> = self
             .agents
             .iter()
             .filter(|(id, old)| {
-                policy.agents.get(*id) != Some(&old.plan)
+                plans.get(*id) != Some(&old.plan)
                     || (delivery_changed
                         && old
                             .report
@@ -64,13 +68,13 @@ impl Collector {
             }
         }
         self.queue.update(policy.delivery.clone());
-        for (id, plan) in &policy.agents {
-            if !self.agents.contains_key(id) {
+        for (id, plan) in plans {
+            if !self.agents.contains_key(&id) {
                 self.agents.insert(
-                    id.clone(),
+                    id,
                     Agent::start(
                         &self.init,
-                        plan.clone(),
+                        plan,
                         self.queue.clone(),
                         self.global_stop.clone(),
                     )?,
@@ -80,7 +84,7 @@ impl Collector {
         Ok(())
     }
     pub fn snapshot(&self) -> Value {
-        json!(self.agents.iter().map(|(id,agent)|json!({"agent":id,"profile":agent.plan.profile,"status":agent.report.lock().unwrap().clone()})).collect::<Vec<_>>())
+        json!(self.agents.values().map(|agent|json!({"agent":agent.plan.agent,"profile":agent.plan.profile,"status":agent.report.lock().unwrap().clone()})).collect::<Vec<_>>())
     }
     pub fn dataflow(&self) -> crate::metrics::DataflowSnapshot {
         let mut flow = crate::metrics::DataflowSnapshot::default();
@@ -315,17 +319,21 @@ fn run_agent(
     std::fs::create_dir_all(&state_dir)?;
     let checkpoint = state_dir.join("input-state.json");
     let checkpoint_key = plan.checkpoint_key();
-    let codex_host = plan.pilot_host.as_ref().filter(|host| {
-        plan.agent == "codex"
-            && init.data_dir
-                == host
-                    .data_dir
-                    .join("state")
-                    .join(format!("standalone-{checkpoint_key}-sdk"))
+    use super::outbox::LegacyCheckpointHandoff;
+    let shell_handoff = plan.pilot_host.as_ref().and_then(|host| {
+        let handoff = LegacyCheckpointHandoff::for_input(checkpoint_key)?;
+        let expected = if handoff == LegacyCheckpointHandoff::Qoder {
+            host.data_dir.join(super::STANDALONE_QODER_DATA)
+        } else {
+            host.data_dir
+                .join("state")
+                .join(format!("standalone-{checkpoint_key}-sdk"))
+        };
+        (init.data_dir == expected).then_some((host, handoff))
     });
-    if let Some(host) = codex_host {
+    if let Some((host, handoff)) = shell_handoff {
         let legacy_path = host.data_dir.join("logs/input-state.json");
-        let imported = queue.prepare_codex_checkpoint(&namespace, || {
+        let imported = queue.prepare_shell_checkpoint(&namespace, handoff, || {
             use std::io::Read;
             source_access::private_path(&legacy_path)?;
             let mut file = match source_access::open_under(&legacy_path, &host.data_dir) {
@@ -335,7 +343,7 @@ fn run_agent(
             };
             anyhow::ensure!(
                 file.metadata()?.len() <= 64 * 1024 * 1024,
-                "Codex shell checkpoint exceeds 64 MiB"
+                "Pilot shell checkpoint exceeds 64 MiB"
             );
             let mut body = String::new();
             file.read_to_string(&mut body)?;
@@ -343,7 +351,7 @@ fn run_agent(
         })?;
         if let Some(text) = imported {
             write_checkpoint(&checkpoint, &text)?;
-        } else {
+        } else if handoff == LegacyCheckpointHandoff::Codex {
             source_access::private_path(&checkpoint)?;
             match std::fs::remove_file(&checkpoint) {
                 Ok(()) => {}
@@ -400,8 +408,21 @@ fn run_agent(
             roots.push(path);
         }
     }
-    // Resource files and another source's SDK state are not collection
-    // capabilities. Inputs only need their own checkpoint/wakeup namespace.
+    // Recovery may consult its paired primary collector's Hook markers. Its
+    // checkpoint and diagnostics stay within its own SDK-owned namespace.
+    let recovery_hook_markers = plan
+        .codex_recovery_wakeup_namespace
+        .as_ref()
+        .map(|namespace| {
+            init.data_dir
+                .join("sources")
+                .join(namespace)
+                .join("state/codex/transcript-wakeups")
+        });
+    if let Some(markers) = &recovery_hook_markers {
+        source_access::private_path(markers)?;
+        roots.push(markers.clone());
+    }
     roots.push(state_dir.canonicalize()?);
     let scope = SourceScope::new(roots, plan.max_files, plan.max_read_bytes);
     scope.set_log(state_dir.join("collector.log"));
@@ -570,14 +591,19 @@ fn run_agent(
             CodexAbortedTurnInputOptions {
                 state_store: store.clone(),
                 session_dir: source_path("transcript"),
-                hook_state_dir: Some(host_path("state/codex/sessions", "sessions")),
+                hook_state_dir: Some(recovery_hook_markers.as_ref().map_or_else(
+                    || host_path("state/codex/sessions", "sessions"),
+                    |path| path.to_string_lossy().into_owned(),
+                )),
                 diagnostic_dir: Some(host_path("logs/diagnostics", "diagnostics")),
                 hook_gap_grace_ms: None,
                 poll_interval_ms: Some(plan.poll_interval_ms),
             },
-            plan.pilot_host
-                .as_ref()
-                .is_some_and(|host| host.codex_rollout_owns_interrupted_turns),
+            recovery_hook_markers.is_some()
+                || plan
+                    .pilot_host
+                    .as_ref()
+                    .is_some_and(|host| host.codex_rollout_owns_interrupted_turns),
         ));
         if let Some(policy) = codex_workspace_policy {
             input.set_collector_workspace_policy(policy);
