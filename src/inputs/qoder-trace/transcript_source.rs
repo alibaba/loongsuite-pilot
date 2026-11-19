@@ -460,6 +460,44 @@ impl QoderTranscriptSource {
             }
         }
         tokio::task::yield_now().await;
+        let result = self.collect_locked(&mut c, state, persisted).await;
+        let result = result.map(Arc::new);
+        // collect_once derives changed from full JSON equality; stopped and
+        // unsaved/reset branches explicitly return a clone of the input state.
+        // The unchanged result therefore already owns the exact cache key.
+        let prior = if result.as_ref().is_ok_and(|batch| !batch.changed) {
+            debug_assert!(result.as_ref().is_ok_and(|batch| batch.state == *state));
+            None
+        } else {
+            Some(state.clone())
+        };
+        c.last = Some((prior, persisted, result.clone()));
+        self.completed.fetch_add(1, Ordering::SeqCst);
+        result.map_err(anyhow::Error::msg)
+    }
+
+    // A HostedInput serializes collection cycles. Its private source can hand
+    // the batch to the converter without retaining message bodies for coalescing.
+    pub(super) async fn read_owned(
+        &self,
+        state: Option<&Value>,
+        persisted: bool,
+    ) -> anyhow::Result<TranscriptBatch> {
+        let empty = json!({});
+        let state = state.filter(|state| state.is_object()).unwrap_or(&empty);
+        let mut collector = self.inner.lock().await;
+        collector.last = None;
+        self.collect_locked(&mut collector, state, persisted)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn collect_locked(
+        &self,
+        c: &mut Collector,
+        state: &Value,
+        persisted: bool,
+    ) -> Result<TranscriptBatch, String> {
         let result = if self.stopped.load(Ordering::SeqCst) {
             c.clear();
             Ok(TranscriptBatch {
@@ -483,7 +521,7 @@ impl QoderTranscriptSource {
                 .await
                 .map_err(|e| e.to_string())
         };
-        let result = if self.stopped.load(Ordering::SeqCst) {
+        if self.stopped.load(Ordering::SeqCst) {
             c.clear();
             Ok(TranscriptBatch {
                 records: Vec::new(),
@@ -493,20 +531,7 @@ impl QoderTranscriptSource {
             })
         } else {
             result
-        };
-        let result = result.map(Arc::new);
-        // collect_once derives changed from full JSON equality; stopped and
-        // unsaved/reset branches explicitly return a clone of the input state.
-        // The unchanged result therefore already owns the exact cache key.
-        let prior = if result.as_ref().is_ok_and(|batch| !batch.changed) {
-            debug_assert!(result.as_ref().is_ok_and(|batch| batch.state == *state));
-            None
-        } else {
-            Some(state.clone())
-        };
-        c.last = Some((prior, persisted, result.clone()));
-        self.completed.fetch_add(1, Ordering::SeqCst);
-        result.map_err(anyhow::Error::msg)
+        }
     }
 }
 impl Collector {

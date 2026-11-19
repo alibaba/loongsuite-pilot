@@ -832,11 +832,17 @@ impl InputManager {
             .ok_or("Pilot output is not configured")?;
         let codex = matches!(input_id, "codex-transcript" | "codex-aborted-turn");
         if !codex {
-            if let Some(result) = flusher.send_sdk_activity(rows).await {
-                let entry_count = rows.len();
-                let batch_bytes = rows.iter().map(|row| row.len() as u64).sum();
-                self.record_sdk_input(input_id, entry_count, batch_bytes);
-                return self.finish_dispatch(input_id, entry_count, batch_bytes, result);
+            if let Some(result) = self.forward_sdk_rows(input_id, &*flusher, rows).await {
+                return result;
+            }
+        }
+        if codex
+            && self.trace_linker().is_none()
+            && flusher.supports_sdk_activity()
+            && crate::normalization::codex_sdk_rows_keep_git_context(rows)
+        {
+            if let Some(result) = self.forward_sdk_rows(input_id, &*flusher, rows).await {
+                return result;
             }
         }
         let mut entries = rows
@@ -847,10 +853,17 @@ impl InputManager {
         let encoded = if codex {
             // Only the full shell is authorized to inspect a Codex workspace
             // and join its runs to upstream ACP traces.
-            enrich_canonical_entries_with_git(&mut entries).await;
-            let linker = self.trace_linker();
-            if let Some(linker) = linker {
+            let mut changed = enrich_canonical_entries_with_git(&mut entries).await;
+            if let Some(linker) = self.trace_linker() {
                 linker.stamp(&mut entries).await;
+                changed = true;
+            }
+            // Journaling already supplied canonical fields. Keep audit rows on
+            // typed delivery because they may depend on the typed defaults.
+            if !changed && entries.iter().all(|row| row.get("event.kind").is_none()) {
+                if let Some(result) = self.forward_sdk_rows(input_id, &*flusher, rows).await {
+                    return result;
+                }
             }
             entries
                 .iter()
@@ -861,6 +874,19 @@ impl InputManager {
             rows.iter().map(|row| row.to_vec()).collect()
         };
         self.accept_sdk_batch(input_id, entries, encoded).await
+    }
+
+    async fn forward_sdk_rows(
+        &self,
+        input_id: &str,
+        flusher: &dyn BaseFlusher,
+        rows: &[&[u8]],
+    ) -> Option<Result<(), String>> {
+        let result = flusher.send_sdk_activity(rows).await?;
+        let entry_count = rows.len();
+        let batch_bytes = rows.iter().map(|row| row.len() as u64).sum();
+        self.record_sdk_input(input_id, entry_count, batch_bytes);
+        Some(self.finish_dispatch(input_id, entry_count, batch_bytes, result))
     }
 
     pub(super) async fn accept_sdk_batch(

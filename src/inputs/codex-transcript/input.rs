@@ -127,7 +127,7 @@ pub(super) struct CachedMeta {
     pub inode: u64,
     pub file_size: i64,
     pub owner_offset: i64,
-    pub meta: CodexTranscriptMeta,
+    pub meta: Arc<CodexTranscriptMeta>,
     pub estimated_bytes: usize,
     pub last_seen_at_ms: i64,
 }
@@ -153,7 +153,7 @@ pub(super) struct Shared {
     pub last_wakeup_cleanup_at: i64,
     pub last_dynamic_warn_at: i64,
     pub last_span_cleanup_at: i64,
-    pub meta_by_path: IndexMap<String, CodexTranscriptMeta>,
+    pub meta_by_path: IndexMap<String, Arc<CodexTranscriptMeta>>,
     pub path_by_thread: IndexMap<String, String>,
     pub meta_cache: IndexMap<String, CachedMeta>,
     pub meta_cache_bytes: usize,
@@ -540,7 +540,7 @@ impl InputBody for CodexTranscriptBody {
         self.engine().cleanup_expired_span_contexts(rt, now).await;
         let mut discovered;
         let mut skip = std::collections::HashSet::new();
-        if plan.full {
+        let mut observed = if plan.full {
             // Full collection owns rediscovery. Coarse or restored directory
             // clocks must not hide new rollouts; targeted wakeups retain the
             // existing direct-path fast path and all owner/body caches.
@@ -561,7 +561,8 @@ impl InputBody for CodexTranscriptBody {
             for path in &plan.targeted {
                 skip.remove(path);
             }
-            self.engine()
+            let observed = self
+                .engine()
                 .index_discovered_transcript_owners(rt, &discovered, Some(&skip))
                 .await?;
             self.with_shared(|shared| {
@@ -584,6 +585,7 @@ impl InputBody for CodexTranscriptBody {
                     shared.wakeup.discovery_pending = false;
                 }
             });
+            observed
         } else {
             discovered = plan
                 .targeted
@@ -595,26 +597,20 @@ impl InputBody for CodexTranscriptBody {
                 .collect();
             self.engine()
                 .index_targeted_transcript_owners(rt, &discovered)
-                .await?;
-        }
-        discovered.sort_by(|left, right| {
-            let left_depth = self.with_shared(|shared| {
+                .await?
+        };
+        self.with_shared(|shared| {
+            let depth = |file: &super::discovery::DiscoveredSessionFile| {
                 shared
                     .meta_by_path
-                    .get(&left.file_path)
-                    .map(|meta| meta.depth)
-                    .unwrap_or(0)
+                    .get(&file.file_path)
+                    .map_or(0, |meta| meta.depth)
+            };
+            discovered.sort_by(|left, right| {
+                depth(left)
+                    .cmp(&depth(right))
+                    .then_with(|| left.file_path.cmp(&right.file_path))
             });
-            let right_depth = self.with_shared(|shared| {
-                shared
-                    .meta_by_path
-                    .get(&right.file_path)
-                    .map(|meta| meta.depth)
-                    .unwrap_or(0)
-            });
-            left_depth
-                .cmp(&right_depth)
-                .then_with(|| left.file_path.cmp(&right.file_path))
         });
         let baseline_since = self.with_shared(|shared| shared.baseline_since);
         let mut emitted = 0usize;
@@ -629,7 +625,11 @@ impl InputBody for CodexTranscriptBody {
             {
                 continue;
             }
-            emitted += self.engine().process_file(rt, &file.file_path).await?;
+            let version = observed.remove(&file.file_path);
+            emitted += self
+                .engine()
+                .process_file(rt, &file.file_path, version)
+                .await?;
         }
         if plan.full {
             self.complete_initial_baseline(rt);
@@ -774,7 +774,7 @@ impl CodexTranscriptBody {
         } else {
             replaced
         };
-        if engine::has_copied_history_prefix(meta.as_ref()) {
+        if engine::has_copied_history_prefix(meta.as_deref()) {
             if initialize || on_start {
                 engine.park_fork_baseline(rt, path, &key).await?;
                 return Ok(true);

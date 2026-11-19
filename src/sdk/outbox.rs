@@ -99,6 +99,7 @@ pub struct Outbox {
     pub last_ack_ms: AtomicU64,
     pub start_time: String,
     pub path: PathBuf,
+    last_disk_compaction: Mutex<Instant>,
 }
 
 impl Outbox {
@@ -125,10 +126,10 @@ impl Outbox {
             INSERT OR IGNORE INTO monitoring_meta VALUES('usage_since',CAST(strftime('%s','now') AS TEXT));
             CREATE TABLE IF NOT EXISTS queue_size(singleton INTEGER PRIMARY KEY CHECK(singleton=1), bytes INTEGER NOT NULL, events INTEGER NOT NULL);
             INSERT OR IGNORE INTO queue_size SELECT 1,COALESCE(SUM(length(payload)),0),count(*) FROM event;
-            CREATE TRIGGER IF NOT EXISTS event_accepted AFTER INSERT ON event BEGIN
-                UPDATE queue_size SET bytes=bytes+length(NEW.payload),events=events+1 WHERE singleton=1; END;
-            CREATE TRIGGER IF NOT EXISTS event_acked AFTER DELETE ON event BEGIN
-                UPDATE queue_size SET bytes=bytes-length(OLD.payload),events=events-1 WHERE singleton=1; END;")?;
+            BEGIN IMMEDIATE;
+            DROP TRIGGER IF EXISTS event_accepted;
+            DROP TRIGGER IF EXISTS event_acked;
+            COMMIT;")?;
         let verdict_path = root.join("tool-verdicts.json");
         crate::utils::source_access::private_path(&verdict_path)?;
         let verdicts = Arc::new(crate::interceptor::ToolVerdictStore::new(verdict_path));
@@ -155,6 +156,7 @@ impl Outbox {
             local_hook_stats: Default::default(),
             local_hook_config: Default::default(),
             start_time: chrono::Utc::now().to_rfc3339(),
+            last_disk_compaction: Mutex::new(Instant::now()),
             path,
         }))
     }
@@ -182,6 +184,7 @@ impl Outbox {
                 chrono::Utc::now().timestamp_millis()
             ],
         )?;
+        Self::update_queue_size(&tx, bytes.len() as i64, 1)?;
         tx.commit()?;
         self.accepted_events.fetch_add(1, Ordering::SeqCst);
         self.accepted_bytes
@@ -573,19 +576,16 @@ impl Outbox {
                         })? as usize;
                     if used.saturating_add(bytes) <= options.queue_disk_bytes {
                         let batch = uuid::Uuid::new_v4().to_string();
+                        let created = chrono::Utc::now().timestamp_millis();
                         {
                             let mut insert = tx.prepare_cached(
                                 "INSERT INTO event(source,batch,payload,created) VALUES(?1,?2,?3,?4)",
                             )?;
                             for row in encoded {
-                                insert.execute(params![
-                                    source,
-                                    batch,
-                                    row,
-                                    chrono::Utc::now().timestamp_millis()
-                                ])?;
+                                insert.execute(params![source, batch, row, created])?;
                             }
                         }
+                        Self::update_queue_size(&tx, bytes as i64, encoded.len() as i64)?;
                         for ((agent, day), totals) in usage {
                             tx.execute("INSERT INTO token_usage VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(agent,day) DO UPDATE SET responses=CASE WHEN responses>9223372036854775807-excluded.responses THEN 9223372036854775807 ELSE responses+excluded.responses END,with_usage=CASE WHEN with_usage>9223372036854775807-excluded.with_usage THEN 9223372036854775807 ELSE with_usage+excluded.with_usage END,input=CASE WHEN input>9223372036854775807-excluded.input THEN 9223372036854775807 ELSE input+excluded.input END,output=CASE WHEN output>9223372036854775807-excluded.output THEN 9223372036854775807 ELSE output+excluded.output END,cache_read=CASE WHEN cache_read>9223372036854775807-excluded.cache_read THEN 9223372036854775807 ELSE cache_read+excluded.cache_read END,cache_creation=CASE WHEN cache_creation>9223372036854775807-excluded.cache_creation THEN 9223372036854775807 ELSE cache_creation+excluded.cache_creation END",
                                 params![agent,day,totals[0],totals[1],totals[2],totals[3],totals[4],totals[5]])?;
@@ -776,19 +776,36 @@ impl Outbox {
         }
         Ok((rows, oldest))
     }
+    /// Update logical limits in the same durable transaction as the rows.
+    /// The previous schema ran these updates from per-row triggers.
+    fn update_queue_size(tx: &Connection, bytes: i64, events: i64) -> anyhow::Result<()> {
+        let changed = tx
+            .prepare_cached(
+                "UPDATE queue_size SET bytes=bytes+?1,events=events+?2 WHERE singleton=1",
+            )?
+            .execute(params![bytes, events])?;
+        anyhow::ensure!(changed == 1, "SDK outbox queue counters missing");
+        Ok(())
+    }
+
     pub(crate) fn ack(&self, rows: &[(i64, Vec<u8>)]) -> anyhow::Result<()> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         let now = chrono::Utc::now().timestamp_millis();
         let mut delay = 0u64;
+        let mut acknowledged_bytes = 0_i64;
         {
-            let mut delete =
-                tx.prepare_cached("DELETE FROM event WHERE seq=?1 RETURNING created")?;
+            let mut delete = tx.prepare_cached(
+                "DELETE FROM event WHERE seq=?1 RETURNING created,length(payload)",
+            )?;
             for (id, _) in rows {
-                let created: i64 = delete.query_row([id], |r| r.get(0))?;
+                let (created, bytes): (i64, i64) =
+                    delete.query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))?;
                 delay = delay.saturating_add(now.saturating_sub(created).max(0) as u64);
+                acknowledged_bytes += bytes;
             }
         }
+        Self::update_queue_size(&tx, -acknowledged_bytes, -(rows.len() as i64))?;
         tx.commit()?;
         self.total_delay_ms.fetch_add(delay, Ordering::SeqCst);
         self.last_ack_ms.store(now.max(0) as u64, Ordering::SeqCst);
@@ -798,7 +815,14 @@ impl Outbox {
             rows.iter().map(|(_, r)| r.len() as u64).sum::<u64>(),
             Ordering::SeqCst,
         );
-        let _ = db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA incremental_vacuum(64);");
+        // FULL synchronous commits still guard every acknowledgement. Limit
+        // physical compaction work while SQLite reuses live WAL pages.
+        let mut last = self.last_disk_compaction.lock().unwrap();
+        if last.elapsed() >= Duration::from_millis(500) {
+            let _ =
+                db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA incremental_vacuum(64);");
+            *last = Instant::now();
+        }
         Ok(())
     }
     pub fn alarm_batch(&self) -> Vec<(String, String)> {

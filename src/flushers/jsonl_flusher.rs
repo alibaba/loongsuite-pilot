@@ -173,6 +173,10 @@ impl BaseFlusher for JsonlFlusher {
         Ok(())
     }
 
+    fn supports_sdk_activity(&self) -> bool {
+        true
+    }
+
     async fn send_sdk_activity(&self, rows: &[&[u8]]) -> Option<Result<(), FlushError>> {
         Some(self.write_sdk_activity(rows).await)
     }

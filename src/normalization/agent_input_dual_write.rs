@@ -16,6 +16,9 @@ pub fn derive_agent_input_event_id(original_event_id: &str) -> String {
 }
 
 pub fn expand_agent_input_events(entries: Vec<AgentActivityEntry>) -> Vec<AgentActivityEntry> {
+    if !entries.iter().any(is_input_other_event) {
+        return entries;
+    }
     let mut existing_event_ids: HashSet<String> =
         entries.iter().map(|entry| entry.event_id.clone()).collect();
     let mut expanded = Vec::with_capacity(entries.len());

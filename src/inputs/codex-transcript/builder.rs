@@ -3,7 +3,7 @@
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::normalization::{build_agent_activity_entry, timestamp_to_unix_nanos};
+use crate::normalization::{build_owned_standard_entry, timestamp_to_unix_nanos};
 use crate::types::AgentActivityEntry;
 
 use super::types::{
@@ -604,7 +604,7 @@ fn build_entry(fields: Map<String, Value>) -> AgentActivityEntry {
         Value::String(timestamp_to_unix_nanos(Some(&timestamp))),
     );
     rest.insert("timestamp".into(), timestamp);
-    build_agent_activity_entry(&Value::Object(rest))
+    build_owned_standard_entry(rest)
 }
 
 fn json_ms(value: f64) -> Value {
