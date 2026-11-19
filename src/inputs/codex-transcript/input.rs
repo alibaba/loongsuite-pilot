@@ -203,6 +203,9 @@ pub struct CodexTranscriptBody {
     pub(super) processor: Option<Arc<MultimodalProcessor>>,
     pub(super) uri_cache: Mutex<LruMap<crate::multimodal::types::UriResult>>,
     pub(super) shared: Mutex<Shared>,
+    pub(crate) output_capacity: std::sync::OnceLock<
+        Box<dyn Fn() -> crate::inputs::rest_support::BoxFuture<()> + Send + Sync>,
+    >,
     batch_handlers: Mutex<Vec<BatchHandler>>,
     host: Mutex<Option<Weak<HostedInput<CodexTranscriptBody>>>>,
     watcher_stop: Mutex<Option<WakeupWatcher>>,
@@ -287,6 +290,7 @@ impl CodexTranscriptInput {
                 #[cfg(test)]
                 main541_retries: 0,
             }),
+            output_capacity: Default::default(),
             batch_handlers: Mutex::new(Vec::new()),
             host: Mutex::new(None),
             watcher_stop: Mutex::new(None),
@@ -570,6 +574,12 @@ impl InputBody for CodexTranscriptBody {
                 shared.idle.retain(|path, _| paths.contains(path));
             });
             skip = self.engine().historical_skip_paths(&discovered, now);
+            #[cfg(unix)]
+            skip.extend(
+                self.engine()
+                    .unchanged_idle_paths(rt, &discovered, &skip, now)
+                    .await?,
+            );
             if self.with_shared(|shared| shared.wakeup.discovery_pending) {
                 skip.clear();
             }
@@ -661,7 +671,7 @@ impl CodexTranscriptBody {
         f(&mut guard)
     }
 
-    pub(super) fn emit_batches(&self, entries: Vec<AgentActivityEntry>) -> usize {
+    pub(super) async fn emit_batches(&self, entries: Vec<AgentActivityEntry>) -> usize {
         let handlers = self
             .batch_handlers
             .lock()
@@ -671,19 +681,18 @@ impl CodexTranscriptBody {
         let mut batch = Vec::new();
         let mut batch_bytes = 0usize;
         for entry in entries {
-            let entry_bytes = serde_json::to_vec(&entry)
-                .map(|bytes| bytes.len())
+            let entry_bytes = crate::utils::json_size::serialized_json_size(&entry)
                 .unwrap_or(engine::MAX_EMIT_BATCH_BYTES);
             if !batch.is_empty()
                 && (batch.len() >= engine::MAX_EMIT_BATCH_ENTRIES
                     || batch_bytes + entry_bytes > engine::MAX_EMIT_BATCH_BYTES)
             {
-                flush_batch(&handlers, &mut batch, &mut batch_bytes, &mut emitted);
+                flush_batch(self, &handlers, &mut batch, &mut batch_bytes, &mut emitted).await;
             }
             batch.push(entry);
             batch_bytes += entry_bytes;
         }
-        flush_batch(&handlers, &mut batch, &mut batch_bytes, &mut emitted);
+        flush_batch(self, &handlers, &mut batch, &mut batch_bytes, &mut emitted).await;
         emitted
     }
 
@@ -725,7 +734,8 @@ impl CodexTranscriptBody {
     }
 }
 
-fn flush_batch(
+async fn flush_batch(
+    body: &CodexTranscriptBody,
     handlers: &[BatchHandler],
     batch: &mut Vec<AgentActivityEntry>,
     batch_bytes: &mut usize,
@@ -733,6 +743,9 @@ fn flush_batch(
 ) {
     if batch.is_empty() {
         return;
+    }
+    if let Some(capacity) = body.output_capacity.get() {
+        capacity().await;
     }
     for entry in batch.iter_mut() {
         crate::multimodal::attach_multimodal_metadata_for_entry(entry);

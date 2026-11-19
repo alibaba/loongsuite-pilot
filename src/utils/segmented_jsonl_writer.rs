@@ -121,10 +121,7 @@ pub async fn append_segmented_jsonl_batch(
     // One task performs the complete append instead of scheduling each file API.
     tokio::task::spawn_blocking(move || {
         let _guard = guard;
-        for data in records {
-            append_locked(&file, &data, max_file_bytes, failed_data)?;
-        }
-        Ok(())
+        append_locked(&file, records, max_file_bytes, failed_data)
     })
     .await
     .map_err(|error| std::io::Error::other(format!("JSONL append task failed: {error}")))?
@@ -132,10 +129,13 @@ pub async fn append_segmented_jsonl_batch(
 
 fn append_locked(
     file: &Path,
-    data: &[u8],
+    records: Vec<Vec<u8>>,
     max_file_bytes: u64,
     failed_data: bool,
 ) -> std::io::Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -162,35 +162,57 @@ fn append_locked(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
         Err(error) => return Err(error),
     };
-    let bytes = data.len() as u64;
     let limit = max_file_bytes.max(1);
-    if size > LOCAL_LOG_EMERGENCY_FILE_BYTES {
-        std::fs::remove_file(file)?;
-        crate::utils::create_logger("SegmentedJsonlWriter").warn(
-            "Deleted oversized local JSONL file",
-            Some(
-                &serde_json::json!({"bytes":size,"discardedFailedData":failed_data})
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
-        );
-        size = 0;
+    let mut writer = None;
+    for data in records {
+        let bytes = data.len() as u64;
+        if size > LOCAL_LOG_EMERGENCY_FILE_BYTES {
+            close_segment(&mut writer)?;
+            std::fs::remove_file(file)?;
+            crate::utils::create_logger("SegmentedJsonlWriter").warn(
+                "Deleted oversized local JSONL file",
+                Some(
+                    &serde_json::json!({"bytes":size,"discardedFailedData":failed_data})
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default(),
+                ),
+            );
+            size = 0;
+        }
+        if size > 0 && size.saturating_add(bytes) > limit {
+            close_segment(&mut writer)?;
+            std::fs::rename(file, sealed_path(file)?)?;
+            size = 0;
+        }
+        if bytes > limit {
+            crate::utils::create_logger("SegmentedJsonlWriter").warn(
+                "JSONL record exceeds file size limit",
+                Some(
+                    &serde_json::json!({"bytes":bytes,"maxFileBytes":limit})
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default(),
+                ),
+            );
+        }
+        if writer.is_none() {
+            writer = Some(std::io::BufWriter::new(open_segment(file)?));
+        }
+        writer.as_mut().expect("opened segment").write_all(&data)?;
+        size = size.saturating_add(bytes);
     }
-    if size > 0 && size.saturating_add(bytes) > limit {
-        std::fs::rename(file, sealed_path(file)?)?;
+    close_segment(&mut writer)
+}
+
+fn close_segment(writer: &mut Option<std::io::BufWriter<std::fs::File>>) -> std::io::Result<()> {
+    if let Some(mut writer) = writer.take() {
+        writer.flush()?;
     }
-    if bytes > limit {
-        crate::utils::create_logger("SegmentedJsonlWriter").warn(
-            "JSONL record exceeds file size limit",
-            Some(
-                &serde_json::json!({"bytes":bytes,"maxFileBytes":limit})
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
-        );
-    }
+    Ok(())
+}
+
+fn open_segment(file: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -203,7 +225,7 @@ fn append_locked(
         use std::os::windows::fs::OpenOptionsExt;
         options.custom_flags(0x0020_0000);
     }
-    let mut output = options.open(file)?;
+    let output = options.open(file)?;
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -214,8 +236,7 @@ fn append_locked(
             ));
         }
     }
-    output.write_all(data)?;
-    output.flush()
+    Ok(output)
 }
 
 #[cfg(test)]

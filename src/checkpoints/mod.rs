@@ -329,23 +329,28 @@ mod json_file {
                 push_indent(out, indent);
                 out.push(']');
             }
-            JVal::Object(fields) if fields.is_empty() => out.push_str("{}"),
-            JVal::Object(fields) => {
-                out.push_str("{\n");
-                for (index, (key, value)) in fields.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(",\n");
-                    }
-                    push_indent(out, indent + 1);
-                    out.push_str(&serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_owned()));
-                    out.push_str(": ");
-                    write_pretty(out, value, indent + 1);
-                }
-                out.push('\n');
-                push_indent(out, indent);
-                out.push('}');
-            }
+            JVal::Object(fields) => write_fields(out, fields, indent),
         }
+    }
+
+    pub(super) fn write_fields(out: &mut String, fields: &[(String, JVal)], indent: usize) {
+        if fields.is_empty() {
+            out.push_str("{}");
+            return;
+        }
+        out.push_str("{\n");
+        for (index, (key, value)) in fields.iter().enumerate() {
+            if index > 0 {
+                out.push_str(",\n");
+            }
+            push_indent(out, indent + 1);
+            out.push_str(&serde_json::to_string(key).expect("JSON key"));
+            out.push_str(": ");
+            write_pretty(out, value, indent + 1);
+        }
+        out.push('\n');
+        push_indent(out, indent);
+        out.push('}');
     }
 
     fn push_indent(out: &mut String, levels: usize) {

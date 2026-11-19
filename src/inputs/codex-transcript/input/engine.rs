@@ -424,6 +424,51 @@ impl<'a> CodexTranscriptEngine<'a> {
         skip
     }
 
+    #[cfg(unix)]
+    pub async fn unchanged_idle_paths(
+        &self,
+        rt: &InputRuntime,
+        files: &[DiscoveredSessionFile],
+        skip: &HashSet<String>,
+        now: i64,
+    ) -> anyhow::Result<Vec<String>> {
+        use std::os::unix::fs::MetadataExt;
+        let candidates: Vec<_> = self.body.with_shared(|shared| {
+            files
+                .iter()
+                .filter_map(|file| {
+                    let path = &file.file_path;
+                    if skip.contains(path) || !shared.meta_by_path.contains_key(path) {
+                        return None;
+                    }
+                    shared
+                        .idle
+                        .get(path)
+                        .filter(|stat| {
+                            now - stat.mtime_ms < DYNAMIC_SESSION_FILE_MAX_IDLE_MS
+                                && rt.state_store.get_offset(&self.state_key(path))
+                                    == stat.size as f64
+                        })
+                        .map(|stat| (path.clone(), *stat))
+                })
+                .collect()
+        });
+        Ok(tokio::task::spawn_blocking(move || {
+            candidates
+                .into_iter()
+                .filter_map(|(path, stat)| {
+                    let meta = std::fs::symlink_metadata(&path).ok()?;
+                    (meta.is_file()
+                        && meta.ino() == stat.ino
+                        && i64::try_from(meta.len()).ok() == Some(stat.size)
+                        && file_mtime_ms(&meta) == stat.mtime_ms)
+                        .then_some(path)
+                })
+                .collect()
+        })
+        .await?)
+    }
+
     fn note_rollout_idle(&self, rt: &InputRuntime, file_path: &str, stat: Option<RolloutStat>) {
         let Some(stat) = stat else {
             self.body.with_shared(|shared| {
@@ -807,7 +852,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                         None,
                     )
                     .await?;
-                emitted_count += self.body.emit_batches(recovered.entries);
+                emitted_count += self.body.emit_batches(recovered.entries).await;
                 if !matches!(recovered.kind, RecoveryKind::Unparseable)
                     && checkpoint
                         .active_turn
@@ -1159,7 +1204,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             0
         } else {
             checkpoint.deferred_terminals.remove(index);
-            self.body.emit_batches(recovered.entries)
+            self.body.emit_batches(recovered.entries).await
         };
         Ok(DeferredRecovery {
             changed: true,
@@ -1252,7 +1297,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 processed_terminal_count: 1,
             });
         }
-        let emitted_count = self.body.emit_batches(recovered.entries);
+        let emitted_count = self.body.emit_batches(recovered.entries).await;
         checkpoint.active_turn = None;
         checkpoint.pending_terminal = None;
         Ok(PendingRecovery {
@@ -3464,7 +3509,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             ));
             return Ok((0, 0));
         }
-        let emitted = self.body.emit_batches(recovered.entries);
+        let emitted = self.body.emit_batches(recovered.entries).await;
         checkpoint.active_turn = None;
         checkpoint.pending_terminal = None;
         Ok((emitted, 1))
@@ -3516,7 +3561,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             );
             return Ok((0, 0));
         }
-        let emitted = self.body.emit_batches(recovered.entries);
+        let emitted = self.body.emit_batches(recovered.entries).await;
         checkpoint.pending_subagent = None;
         Ok((emitted, 1))
     }
@@ -3662,7 +3707,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     },
                 )
             });
-            emitted += self.body.emit_batches(output);
+            emitted += self.body.emit_batches(output).await;
         }
         self.save_delegation_state(rt);
         Ok(emitted)

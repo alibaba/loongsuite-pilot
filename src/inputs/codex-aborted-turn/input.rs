@@ -224,8 +224,12 @@ impl CodexAbortedTurnBody {
             baseline_opened_file(rt, file, identity, &key).await;
             return Ok(Vec::new());
         }
+        let upgrade_identity = checkpoint.dev.is_none();
         checkpoint.dev = Some(identity.dev);
         if size <= checkpoint.scan_offset {
+            if !upgrade_identity && checkpoint.pending_completed_turns.is_empty() {
+                return Ok(Vec::new());
+            }
             self.emit_due_hook_gap_warnings(rt, &mut checkpoint).await;
             save_checkpoint(rt, &key, &checkpoint);
             return Ok(Vec::new());

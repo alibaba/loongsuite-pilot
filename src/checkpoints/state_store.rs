@@ -34,7 +34,7 @@ type WriteHook = Arc<
 /// `get` returns an owned copy.
 #[derive(Clone, Debug, Default)]
 pub struct InputState {
-    fields: Vec<(String, JVal)>,
+    fields: Arc<Vec<(String, JVal)>>,
 }
 
 impl PartialEq for InputState {
@@ -50,7 +50,7 @@ impl PartialEq for InputState {
 
 impl InputState {
     pub fn new() -> Self {
-        Self { fields: Vec::new() }
+        Self::default()
     }
 
     pub fn last_offset(&self) -> Option<f64> {
@@ -149,19 +149,12 @@ impl InputState {
     }
 
     fn insert(&mut self, key: &str, value: JVal) {
-        if let Some((_, slot)) = self
-            .fields
-            .iter_mut()
-            .find(|(candidate, _)| candidate == key)
-        {
+        let fields = Arc::make_mut(&mut self.fields);
+        if let Some((_, slot)) = fields.iter_mut().find(|(candidate, _)| candidate == key) {
             *slot = value;
             return;
         }
-        self.fields.push((key.to_owned(), value));
-    }
-
-    fn to_jval(&self) -> JVal {
-        JVal::Object(self.fields.clone())
+        fields.push((key.to_owned(), value));
     }
 
     /// `cloneState`: array `extra` becomes an object with decimal index keys.
@@ -169,8 +162,9 @@ impl InputState {
         let Some(index) = self.fields.iter().position(|(key, _)| key == EXTRA) else {
             return;
         };
-        let current = std::mem::replace(&mut self.fields[index].1, JVal::Null);
-        self.fields[index].1 = normalize_extra(current);
+        let fields = Arc::make_mut(&mut self.fields);
+        let current = std::mem::replace(&mut fields[index].1, JVal::Null);
+        fields[index].1 = normalize_extra(current);
     }
 
     fn from_jval(value: JVal) -> Option<Self> {
@@ -183,7 +177,9 @@ impl InputState {
                 .collect(),
             JVal::Null | JVal::Bool(_) | JVal::Number(_) | JVal::String(_) => return None,
         };
-        let mut state = Self { fields };
+        let mut state = Self {
+            fields: Arc::new(fields),
+        };
         state.normalize();
         Some(state)
     }
@@ -778,7 +774,13 @@ impl StateStore {
     }
 
     pub fn get_offset(&self, input_id: &str) -> f64 {
-        self.get(input_id).last_offset().unwrap_or(0.0)
+        self.mu
+            .lock()
+            .unwrap()
+            .states
+            .get(input_id)
+            .and_then(InputState::last_offset)
+            .unwrap_or(0.0)
     }
 
     pub fn set_offset(&self, input_id: &str, offset: f64) {
@@ -835,14 +837,12 @@ impl StateStore {
                             journal_sources.insert(id.to_owned(), state.clone());
                         }
                     }
-                    let fields = data
+                    let states = data
                         .states
                         .iter()
                         .filter(|(id, _)| journal_namespace(id).is_none())
-                        .chain(journal_sources.iter())
-                        .map(|(id, state)| (id.to_owned(), state.to_jval()))
-                        .collect();
-                    let text = format!("{}\n", json_file::to_pretty(&JVal::Object(fields)));
+                        .chain(journal_sources.iter());
+                    let text = render_state_entries(states);
                     Step::Write(data.revision, text, journal_sources)
                 }
             };
@@ -941,11 +941,25 @@ fn notify(waiters: Vec<Waiter>, result: Result<(), String>) {
 }
 
 fn render_states(states: &OrderedMap<InputState>) -> String {
-    let fields: Vec<(String, JVal)> = states
-        .iter()
-        .map(|(key, state)| (key.to_owned(), state.to_jval()))
-        .collect();
-    format!("{}\n", json_file::to_pretty(&JVal::Object(fields)))
+    render_state_entries(states.iter())
+}
+
+fn render_state_entries<'a>(states: impl Iterator<Item = (&'a str, &'a InputState)>) -> String {
+    let mut text = String::from("{");
+    for (index, (id, state)) in states.enumerate() {
+        if index > 0 {
+            text.push(',');
+        }
+        text.push_str("\n  ");
+        text.push_str(&serde_json::to_string(id).expect("JSON key"));
+        text.push_str(": ");
+        json_file::write_fields(&mut text, &state.fields, 1);
+    }
+    if text.len() > 1 {
+        text.push('\n');
+    }
+    text.push_str("}\n");
+    text
 }
 
 struct LeaderGuard<'a> {
