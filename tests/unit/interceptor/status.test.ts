@@ -17,7 +17,7 @@ describe('interceptor status', () => {
     expect(collector.snapshot(true, EMPTY_RULES).activity?.duration_ms_avg).toBeNull();
     for (let i = 0; i < 19; i++) collector.record({
       action: 'allow', evaluatedRules: [], matched: true,
-      matches: [{ matched: true, enforcement: 'audit', action: 'allow', reason: 'audit', ruleId: 'r', ruleVersion: '1' }],
+      matches: [{ matched: true, action: 'log', reason: 'audit', ruleId: 'r', ruleVersion: '1' }],
     }, 10);
     collector.record(null, 5_000);
     collector.recordDiagnostic({ code: 'regex_timeout', source: 'regex', reason: 'timeout' });
@@ -46,7 +46,7 @@ describe('interceptor status', () => {
       await mkdir(managedScriptsDir(dataDir), { recursive: true });
       await writeFile(join(managedScriptsDir(dataDir), 'ready@1.sh'), 'exit 0');
       await writeFile(managedInterceptorPath(dataDir), JSON.stringify({ interceptor: { rules: [
-        { ...base, kind: 'pattern', id: 'regex', match: 'regex', pattern: 'x', enforcement: 'audit' },
+        { ...base, kind: 'pattern', id: 'regex', match: 'regex', pattern: 'x', action: 'log' },
         { ...base, kind: 'pattern', id: 'substring', match: 'substring', pattern: 'x' },
         { ...base, kind: 'script', id: 'ready', shell: 'sh' },
         { ...base, kind: 'script', id: 'pending', shell: 'sh' },

@@ -1076,6 +1076,14 @@ export class QoderTranscriptCollector {
     const boundaries = buildLlmBoundaries([], content);
     const records = buildEventsFromBoundaries(boundaries, content, value.rows, turnId,
       source.sessionId, this.agentId, config, context.cwd ?? source.cwd);
+    // Prefer the native user row's requestSetId. SQLite-proven initial ownership
+    // is a fallback; a Hook watermark alone cannot establish prompt ownership.
+    const promptRequestId = checkpoint.activeRequestSetId;
+    const firstRequest = records.find(record => record['event.name'] === 'llm.request');
+    if (promptRequestId && firstRequest?.['agent.pilot.interceptor.correlation']
+      && !firstRequest['agent.pilot.interceptor.correlation'].requestId) {
+      firstRequest['agent.pilot.interceptor.correlation'].requestId = crypto.createHash('sha256').update(promptRequestId).digest('hex');
+    }
     for (let index = 0; index < records.length; index++) {
       const record = records[index];
       record['event.id'] = digest([turnId, index, record['event.name'], record['gen_ai.tool.call.id']]);

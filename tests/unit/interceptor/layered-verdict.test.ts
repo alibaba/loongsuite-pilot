@@ -9,11 +9,11 @@ describe('layered interceptor verdict', () => {
     expect(result).not.toHaveProperty('matched');
   });
   it('retains known audit metadata independently of a builtin failure', () => {
-    expect(mergeInterceptorVerdicts(failedBuiltin, { action: 'allow', evaluatedRules: ['audit'], matched: true, enforcement: 'audit', ruleId: 'audit' }))
-      .toEqual({ action: 'allow', evaluatedRules: ['builtin', 'audit'], matched: true, enforcement: 'audit', ruleId: 'audit', failOpen: true });
+    expect(mergeInterceptorVerdicts(failedBuiltin, { action: 'allow', evaluatedRules: ['audit'], matched: true, ruleId: 'audit' }))
+      .toEqual({ action: 'allow', evaluatedRules: ['builtin', 'audit'], matched: true, ruleId: 'audit', failOpen: true });
   });
   it('uses a known enforced block despite an earlier failed rule', () => {
-    expect(mergeInterceptorVerdicts(failedBuiltin, { action: 'block', evaluatedRules: ['block'], matched: true, enforcement: 'enforce', ruleId: 'block' }))
-      .toEqual({ action: 'block', evaluatedRules: ['builtin', 'block'], matched: true, enforcement: 'enforce', ruleId: 'block' });
+    expect(mergeInterceptorVerdicts(failedBuiltin, { action: 'block', evaluatedRules: ['block'], matched: true, ruleId: 'block' }))
+      .toEqual({ action: 'block', evaluatedRules: ['builtin', 'block'], matched: true, ruleId: 'block' });
   });
 });

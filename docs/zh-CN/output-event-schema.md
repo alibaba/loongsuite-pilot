@@ -68,7 +68,6 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `skill.use` | 技能、扩展能力或 Agent 能力调用。 |
 | `tool.approve` | 用户批准工具或动作执行的事件。 |
 | `agent.input` | 输入型 `other` 的兼容副本，便于按事件名查询 Agent 输入。 |
-| `guardrail.evaluation` | 每条托管规则命中的独立观察事件，包括 audit 放行和 enforce 拦截；不代表一次模型或工具执行。 |
 | `other` | 无法归类到上述类型的其他事件。 |
 
 兼容期内，携带 `gen_ai.input.messages` 或 `gen_ai.input.messages_delta` 的
@@ -164,18 +163,11 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `gen_ai.tool.call.arguments` | json | 可获取时 | 工具调用参数，可能包含敏感内容。 |
 | `gen_ai.tool.call.result` | json | 可获取时 | 工具结果 payload，可能包含敏感内容。 |
 | `gen_ai.tool.call.duration` | int | Recommended | 使用匹配的 result 边界减去 call 边界得到的正数工具执行耗时，单位毫秒；任一边界缺失或差值非正时省略。 |
-| `gen_ai.guardrail.triggered` | boolean | 关联到裁决或独立命中事件时 Required | 表示存在检查裁决，固定为 `true`，不等于规则命中。工具事件没有 tool call id、没有记录、记录已过期或 interceptor 未开启时省略。 |
-| `gen_ai.guardrail.action` | string | 与 `gen_ai.guardrail.triggered` 同时出现 | 可选值只有 `allow` 和 `block`。`tool.call` 查 `PreToolUse`，`tool.result` 查 `PostToolUse`。被拦截的 Qoder 用户提示补写的 `llm.request` 为 `block`。工具事件查不到时两个字段都不写。 |
-| `gen_ai.guardrail.matched` | boolean | 托管规则检查结果已知时 Recommended | audit / enforce 命中均为 `true`；完整检查无命中为 `false`；仅失败、结果未知时省略。 |
-| `gen_ai.guardrail.enforcement` | string | 托管命中时 Recommended | `enforce` 或 `audit`；后者命中仍为 `action=allow`，不提示宿主。内置规则省略。 |
-| `gen_ai.guardrail.fail_open` | boolean | 检查失败时 Opt-In | `true` 表示有检查错误。此前 audit 命中时可同时保留 `matched=true` 和此字段，不把 audit 等同失败。 |
-| `gen_ai.guardrail.phase` | string | `guardrail.evaluation` Required | `UserPromptSubmit`、`PreToolUse` 或 `PostToolUse`。 |
-| `gen_ai.guardrail.rule_id` | string | 存在已知命中时 Recommended | 独立事件为该条命中；普通工具事件代表最终 enforce 拦截或首条 audit 命中。内置敏感类型为 `cloudAccessKey` 等。 |
-| `gen_ai.guardrail.rule_version` | string | 托管规则命中时 Recommended | `rules[].version`。内置规则省略。 |
-| `gen_ai.guardrail.severity` | string | 命中规则声明了 `severity` 时 Recommended | 风险等级，保留大小写，不参与拦截决策。独立命中事件取该条规则；关联工具事件和被拒提示词取代表规则。 |
-| `gen_ai.guardrail.reason` | string | 存在已知命中且规则给出 reason 时 Recommended | 脚本 stdout 的 reason，或 pattern / 内置替换 token。audit 放行也保留；采集前按 mask 规则脱敏。 |
-| `gen_ai.guardrail.title` | string | 规则声明了 `title` 时 Recommended | 规则展示名，不回给宿主。 |
-| `gen_ai.guardrail.message` | string | 规则声明了 `message` 时 Recommended | 规则提醒原文，audit 仅记录，enforce 拦截时可回给宿主；输出前脱敏。 |
+| `gen_ai.guardrail.triggered` | boolean | 关联到裁决时 Required | 表示存在检查裁决，固定为 `true`，不等于规则命中。工具事件没有 tool call id、没有记录、记录已过期或 interceptor 未开启时省略。 |
+| `gen_ai.guardrail.action` | string | 与 `gen_ai.guardrail.triggered` 同时出现 | `block`：强制拦截；`log`：log 命中但放行；`allow`：其余已知裁决。`tool.call` 查 `PreToolUse`，`tool.result` 查 `PostToolUse`。放行的提示词裁决关联到该轮首个原生 `llm.request`，不增加请求事件；被拦截的 Qoder 提示补报为 `block`。没有对应裁决或关联存在歧义时省略。 |
+| `gen_ai.guardrail.fail_open` | boolean | 检查失败时 Opt-In | `true` 表示有检查错误。此前已有 log 命中时可同时有 `action=log`，不把 log 命中等同失败。 |
+| `gen_ai.guardrail.rule_id` | string | 存在已知命中时 Recommended | 代表最终 block 拦截或首条 log 命中，适用于提示词请求和工具事件。内置规则统一为固定值 `builtin`。 |
+| `gen_ai.guardrail.rule_version` | string | 规则命中时 Recommended | 托管规则取 `rules[].version`；内置规则固定上报空字符串 `""`，不省略字段。 |
 | `gen_ai.skill.name` | string | `skill.use` Conditionally Required | 技能或扩展能力名称。 |
 | `gen_ai.skill.id` | string | 技能标识可用时 Recommended | 稳定的技能标识。 |
 | `gen_ai.skill.description` | string | 技能元数据可用时 Recommended | 技能描述。 |

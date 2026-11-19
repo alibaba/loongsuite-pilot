@@ -5,7 +5,7 @@ import {
   SUPPORTED_HOOK_EVENTS,
   type HookEventName,
   type InterceptorAgent,
-  type RuleEnforcement,
+  type RuleAction,
 } from '../types.js';
 
 export type ManagedShell = 'sh' | 'powershell';
@@ -22,10 +22,10 @@ interface ManagedRuleBase {
   version: string;
   agents: InterceptorAgent[];
   events: HookEventName[];
-  enforcement: RuleEnforcement;
+  action: RuleAction;
   /** Optional risk label; does not affect matching or enforcement. */
   severity?: string;
-  /** Display label for telemetry. Not shown to the host. */
+  /** Display label for local diagnostics. Not shown to the host. */
   title?: string;
   /** Reminder shown to the host/agent when this rule blocks. */
   message?: string;
@@ -171,16 +171,17 @@ function parseHttpRule(value: Record<string, unknown>, where: string): ManagedHt
 }
 
 function parseRuleBase(value: Record<string, unknown>, where: string): ManagedRuleBase {
-  const enforcement = value.enforcement === undefined ? 'enforce' : value.enforcement;
-  if (enforcement !== 'enforce' && enforcement !== 'audit') {
-    throw new ManagedConfigError(`${where}.enforcement must be "enforce" or "audit"`);
+  if ('enforcement' in value) throw new ManagedConfigError(`${where} has unknown keys: enforcement`);
+  const action = value.action === undefined ? 'block' : value.action;
+  if (action !== 'block' && action !== 'log') {
+    throw new ManagedConfigError(`${where}.action must be "block" or "log"`);
   }
   return {
     id: parseToken(value.id, `${where}.id`),
     version: parseToken(value.version, `${where}.version`),
     agents: parseIdList(value.agents, `${where}.agents`, AGENT_SET) as InterceptorAgent[],
     events: parseIdList(value.events, `${where}.events`, HOOK_EVENT_SET) as HookEventName[],
-    enforcement,
+    action,
     ...optionalText(value.severity, `${where}.severity`, MAX_RULE_SEVERITY_CHARS, 'severity'),
     ...optionalText(value.title, `${where}.title`, MAX_RULE_TITLE_CHARS, 'title'),
     ...optionalText(value.message, `${where}.message`, MAX_RULE_MESSAGE_CHARS, 'message'),

@@ -63,7 +63,7 @@ collector 进程内 interceptor HTTP（127.0.0.1）
 - 源码：`src/interceptor/`
 - 运行态：`~/.loongsuite-pilot/interceptor/{runtime.json,interceptor.pid,logs}`
 - 访问日志：`~/.loongsuite-pilot/interceptor/logs/access.log`（每次 hook 判定一行 JSONL）。单个文件超过 10MB 时切到 `access.log.1` … `access.log.5`，更旧的丢弃。
-- 工具判定：Worker 按 `session id + tool call id + phase` 保存最近 30 分钟、最多 10000 条（满时淘汰最早写入的记录），checkpoint 为 `~/.loongsuite-pilot/interceptor/tool-verdicts.json`，每 15 秒仅在变化后异步落盘。主线程的副本只供采集关联使用（关联字段见 [输出事件 Schema](output-event-schema.md)）。
+- 裁决缓存：工具按 `session id + tool call id + phase` 关联；放行的提示词按 Agent、session、提示词 SHA-256 摘要关联原生 `llm.request`，不在缓存中保存提示词正文。Qoder 和千问办公优先用原生用户记录 `requestSetId` 的 SHA-256 摘要，对应 hook 的 `request_set_id` 精确关联；原始 ID 不附加到事件（包括中间 hook history），仅传递私有缓存键摘要，并在最终输出前移除，不替换 `gen_ai.request.id`。有 ID 但查不到对应裁决时不回退关联其他请求。缺少 ID 时仅接受原生提示词时间前后 5 秒内唯一的同摘要裁决；每个已收到的提示词检查在规则执行前登记，检查中、失败和阻断的轮次也参与歧义判断，避免借用上一轮 log 裁决。内部检查标记随缓存持久化，不作为 guardrail action 输出；重复提示词存在歧义时不回填。两类裁决共用最近 30 分钟、最多 10000 条的容量（满时淘汰最早写入的记录），checkpoint 为 `~/.loongsuite-pilot/interceptor/tool-verdicts.json`，每 15 秒仅在变化后异步落盘。主线程的副本只供采集关联使用（关联字段见 [输出事件 Schema](output-event-schema.md)）。
 - 构建产物：`dist/interceptor/cli.cjs`、`dist/interceptor/worker.cjs`；`dist/interceptor/daemon.cjs` 保留为独立兼容入口，collector 不再直接调用它。
 - 规则开关：`config.json` 的 `interceptor.mode` 在 collector **启动时读一次**；`configs/managed/interceptor.json` 的本地规则每 3 秒热更新（见 [本地文件规则](#本地文件规则)）
 
@@ -127,9 +127,9 @@ status 采样只读取 Worker 内存，不扫描日志、配置正文或发送�
 
 HTTP 监听、规则引擎、规则热加载、runtime 心跳和裁决 checkpoint 都由 Worker 持有。主线程只负责生命周期管理、部署 hook，以及采集上报。两者共享 collector PID，但不共享普通 Map 对象。
 
-Worker 判定工具调用后，通过 `parentPort.postMessage()` 发送包含原始 `recordedAt` 的裁决，主线程合并进镜像缓存；HTTP 响应不等待主线程处理或确认。裁决与上报共用有界、按序的异步批次，每批最多 128 项，最多一批未确认，其余裁决按调用 ID 合并。独立 `guardrail.evaluation` 命中事件最多暂存 256 条、每批最多 32 条，满后记录累计丢弃数量；被拦截提示词最多暂存 8 条，溢出写运维警告。同步屏障覆盖调用前已经接受的裁决和命中事件；采集侧仅处理受支持 Agent 的工具事件时等待该屏障（2 秒超时），超时沿用已到达的缓存。该屏障不会进入 HTTP 判定路径。
+Worker 判定工具调用后，通过 `parentPort.postMessage()` 发送包含原始 `recordedAt` 的裁决，主线程合并进镜像缓存；HTTP 响应不等待主线程处理或确认。裁决与上报共用有界、按序的异步批次，每批最多 128 项，最多一批未确认，其余裁决按调用 ID 合并。被拦截提示词最多暂存 8 条，溢出写运维警告。同步屏障覆盖调用前已经接受的裁决和被拦截提示词；采集侧仅处理受支持 Agent 的工具事件时等待该屏障（2 秒超时），超时沿用已到达的缓存。该屏障不会进入 HTTP 判定路径。
 
-主线程还设有独立的有限上报队列：最多等待 256 条、总计 8MiB，最多一个异步消费任务执行；每个任务等待真实 git enrichment / flusher Promise 完成后才启动下一个。ACK 表示队列已有限接收或明确计数丢弃，不表示外发已完成；镜像屏障不等待外部 I/O，显式 `flushEvents()` 可等待已接收的外发任务。关闭 Worker 后、关闭 flusher 前，服务会等待该队列排空，最长 5 秒；超时取消消费信号、丢弃尚未启动项并记录未完成数量。迟到的 git enrichment 在取消后不会继续发送；无法取消的外部 sink 会记录未完成，不能据此声称数据已持久化。队列满或字节超限会记录累计丢弃数量，不启动无界 Promise。独立命中与被拦截提示词都在替换身份之前执行 workspace 隐私过滤，继承原生 session / agent 的粘性排除结果。
+主线程还设有独立的有限上报队列：最多等待 256 条、总计 8MiB，最多一个异步消费任务执行；每个任务等待真实 git enrichment / flusher Promise 完成后才启动下一个。ACK 表示队列已有限接收或明确计数丢弃，不表示外发已完成；镜像屏障不等待外部 I/O，显式 `flushEvents()` 可等待已接收的外发任务。关闭 Worker 后、关闭 flusher 前，服务会等待该队列排空，最长 5 秒；超时取消消费信号、丢弃尚未启动项并记录未完成数量。迟到的 git enrichment 在取消后不会继续发送；无法取消的外部 sink 会记录未完成，不能据此声称数据已持久化。队列满或字节超限会记录累计丢弃数量，不启动无界 Promise。被拦截提示词在替换身份之前执行 workspace 隐私过滤，继承原生 session / agent 的粘性排除结果。
 
 访问日志在有界异步队列中按顺序脱敏和写盘，不在 HTTP 回调里同步写文件。队列满时跳过多余日志，并追加 `event=audit-overflow` 的丢弃计数；服务停止会排空已接受的日志。规则本身的扫描 CPU、大请求序列化和机器 CPU/磁盘竞争仍可能影响 Worker，因此隔离线程不能保证固定响应时间。
 
@@ -158,7 +158,7 @@ CLI 识别 `qoder-auto`，通过祖先进程链区分 Desktop（`qoder`）和 CL
 
 `PostToolUse` 发生在工具已经执行之后，拦不住已发生的副作用；拦截是替换回给模型的工具结果。Desktop 对 PostToolUse 的强制力弱于 CLI。
 
-正常放行和仅 `audit` 命中时 `exit 0` 且 stdout 为空，不提示宿主。未知事件、runtime 缺失、daemon 不健康、超时、坏响应、规则抛错继续 **fail-open**。每次判定通过异步队列写一行 JSONL 到 `~/.loongsuite-pilot/interceptor/logs/access.log`，包含 `event`、`input`、`result`；托管规则的 `result.matches` 保留所有已发生的命中。`audit` 命中不等于失败放行，只有发生检查错误才设置 `failOpen`。运维日志仍在 `interceptor/logs/interceptor.log`。
+正常放行和仅 `log` 命中时 `exit 0` 且 stdout 为空，不提示宿主。未知事件、runtime 缺失、daemon 不健康、超时、坏响应、规则抛错继续 **fail-open**。每次判定通过异步队列写一行 JSONL 到 `~/.loongsuite-pilot/interceptor/logs/access.log`，包含 `event`、`input`、`result`；托管规则的 `result.matches` 保留所有已发生的命中。`log` 命中不等于失败放行，只有发生检查错误才设置 `failOpen`。运维日志仍在 `interceptor/logs/interceptor.log`。
 
 Qoder hook timeout 为 `UserPromptSubmit` 15 秒，`PreToolUse` / `PostToolUse` 10 秒。CLI 先进行健康检查，默认超时 500ms，再发送判定请求，超时 4 秒。两次请求串行，合计预算约 4.5 秒，另需计入 hook 进程启动及调度耗时。健康检查超时会记录 fail-open 并直接放行。
 
@@ -274,7 +274,7 @@ export LOONGSUITE_PILOT_INTERCEPTOR_MODE=all
         "version": "1",
         "agents": ["qoder", "qodercli"],
         "events": ["UserPromptSubmit", "PreToolUse", "PostToolUse"],
-        "enforcement": "audit",
+        "action": "log",
         "match": "substring",
         "pattern": "RULE_PROBE",
         "title": "命令规则预览",
@@ -287,7 +287,7 @@ export LOONGSUITE_PILOT_INTERCEPTOR_MODE=all
         "agents": ["qoder", "qodercli"],
         "events": ["PreToolUse"],
         "shell": "sh",
-        "enforcement": "enforce",
+        "action": "block",
         "message": "操作不符合本地规则"
       }
     ]
@@ -303,8 +303,8 @@ export LOONGSUITE_PILOT_INTERCEPTOR_MODE=all
 |------|------|
 | `agents` | `qoder`、`qodercli`、`openclaw`、`qwen-work-cn` |
 | `events` | `UserPromptSubmit`、`PreToolUse`、`PostToolUse` |
-| `enforcement` | 默认 `enforce`，命中后拦截并停止；`audit` 记录命中后放行，继续检查后续规则，不提示宿主 |
-| `severity` | 可选风险等级字符串，例如 `HIGH`、`CRITICAL`；去掉首尾空白后须为 1–128 个字符，不限定枚举、保留大小写。命中后上报为 `gen_ai.guardrail.severity`，不影响匹配或拦截决策 |
+| `action` | 默认 `block`，命中后拦截并停止；`log` 记录命中后放行，继续检查后续规则，不提示宿主 |
+| `severity` | 可选风险等级字符串，仅用于本地诊断，不上报到采集事件 |
 | `kind` | `pattern`、`script`；`http` 仅保留格式占位，记录警告并跳过，不发请求 |
 | `match` | pattern 规则的 `substring` 或 `regex` |
 | `shell` | script 规则的 `sh` 或 `powershell`，本机仅执行平台匹配的脚本 |
@@ -337,7 +337,7 @@ cat >/dev/null
 printf '%s\n' '{"matched":false}'
 ```
 
-脚本 stdin 为一个 JSON 对象 `{"prompt":"<完整合并文本>"}`。stdout 必须恰好一行 `{"matched":false}` 或 `{"matched":true,"reason":"..."}`，退出码应为 0。返回非法内容、非零退出或超时将跳过该条，继续检查，保留此前已知 audit 命中。所有文件规则共享 3.5 秒预算，耗尽后停止后续检查并 fail-open。audit 脚本实际运行，具有相同执行开销和副作用。
+脚本 stdin 为一个 JSON 对象 `{"prompt":"<完整合并文本>"}`。stdout 必须恰好一行 `{"matched":false}` 或 `{"matched":true,"reason":"..."}`，退出码应为 0。返回非法内容、非零退出或超时将跳过该条，继续检查，保留此前已知 log 命中。所有文件规则共享 3.5 秒预算，耗尽后停止后续检查并 fail-open。log 脚本实际运行，具有相同执行开销和副作用。
 
 macOS/Linux 使用 `sh <file>`，由一次性 Node guardian 持有进程组，并在私有租约断开或超时后回收后台进程。Windows 最多预热两个 PowerShell 执行器，使用进程级 `ExecutionPolicy Bypass`，创建时即原子加入 kill-on-close Job Object。每次请求结束后整体回收执行器及其原生后代，再补充预热容量；成功、超时、停止和崩溃均执行回收。私有租约与 guardian 独立期限同时覆盖 interceptor Worker 退出，确认进程树清理后才替换执行器；启动和清理时间都计入请求预算。输入的非 ASCII 字符转义为 `\uXXXX`，脚本可用 `ConvertFrom-Json` 读取。原生 Job 能力需要 Windows 10 / Server 2016 或更新系统；CLM/WDAC 禁止初始化时，在用户脚本运行前以 `Windows Job Object unavailable` 明确 fail-open，绝不降级到无所有权的执行器。仅传入 PATH、HOME、TEMP 等受限环境变量。脚本按 collector 所属用户权限运行，不提供操作系统沙箱；委托给服务或 WMI 创建的进程不属于原生子进程所有权范围。
 
@@ -349,23 +349,25 @@ Windows 启动器不继承 `PSModulePath`，由 PowerShell 5.1 重建自身模�
 
 每 3 秒检查本地文件，内容变化后生成新引擎。加载时检查普通文件和真实路径，每次执行前再次拒绝符号链接。新脚本未就绪或规则文件不合法时保留可执行的上一代，并记录日志。进行中的请求持有发起时的引擎和执行器；最后一个请求结束后释放旧执行器。改为纯 pattern 或清空规则同样回收脚本资源。
 
-### 判定与观察事件
+### 判定与采集事件
 
-先执行内置敏感类型规则，命中直接拦截；内置放行后按文件中的数组顺序执行。响应的 `matches` 保留全部已发生的 audit 与 enforce 命中。顶层元数据代表最终 enforce 拦截规则，或放行时的首条 audit 命中。完整检查无命中才有 `matched=false`；检查失败且没有已知命中时省略 matched。audit 命中后发生错误可同时有 `matched=true` 和 `failOpen=true`。
+先执行内置敏感类型规则，命中直接拦截；内置放行后按文件中的数组顺序执行。响应的 `matches` 保留全部已发生的 log 与 block 命中。顶层元数据代表最终 block 拦截规则，或放行时的首条 log 命中。完整检查无命中才有 `matched=false`；检查失败且没有已知命中时省略 matched。log 命中后发生错误可同时有 `matched=true` 和 `failOpen=true`。
 
-每条命中产生一条 `event.name=guardrail.evaluation`，包含 session、tool call id（若有）、phase、规则 id/version、matched/enforcement/action、可选的 `gen_ai.guardrail.severity` 和脱敏后的原因、title/message，不复制业务正文。关联工具事件和被拦截的 Qoder 提示词事件也携带代表规则的 severity；每条独立观察事件则保留各自规则的 severity。未声明该字段或没有命中时省略。JSONL/SLS 可保存这些观察事件；OTLP 在 turn 分组入口及转换时过滤，避免生成额外执行 Span 或提前结束 turn。
+规则命中不再单独上报 `guardrail.evaluation`。工具事件通过 `gen_ai.guardrail.*` 关联最终裁决；放行的提示词回填到该轮首个原生 `llm.request`，后续工具续轮不重复标注提示词裁决；被拦截的 Qoder 用户提示仍补报 `llm.request`。逐条 log / block 命中保留在 HTTP 响应和本地 access log 的 `matches` 中。
 
-脚本可能在 `reason` 中回显业务正文。该 Agent 的 `captureMessageContent=false` 时，采集输出会从观察事件、关联工具事件、被拒 Prompt 及 OTLP Span 属性和事件中裁掉 `gen_ai.guardrail.reason`，保留 action 和规则身份等结构化信息。返回宿主的阻断诊断原因仍然保留。
+采集事件不再上报规则的 `reason`、`message`、`matched`、`enforcement`、`title`、`severity` 和 `match`。保留 `rule_id`、`rule_version`；`gen_ai.guardrail.action` 为 `block`（强制拦截）、`log`（log 命中但放行）或 `allow`（其余已知裁决）。`triggered=true` 仍表示存在检查裁决，不等于命中。规则文案仍可用于宿主阻断诊断和本地 access log。
 
-独立观察的 action 表示该条规则，普通工具事件及 HTTP 响应的 action 表示整次请求。例如 audit 后 enforce 命中，观察分别为 allow/block，最终工具裁决为 block。UserPromptSubmit audit 不补发被拦截 Prompt，enforce 拦截仍补发 `llm.request`。
+内置规则命中统一上报 `gen_ai.guardrail.rule_id: "builtin"`、`gen_ai.guardrail.rule_version: ""`，覆盖提示词补报和工具事件关联。内部仍按 `cloudAccessKey`、`apiKey`、`privateKey`、`databaseUrl` 启用规则并记录 `evaluatedRules`，不影响类型开关。托管规则使用各自配置的 ID 和版本。
 
-Hook 的 `parent_business_info.product=app` 时，Qoder 观察和被拒 Prompt 使用 `qoder-app` 身份。输出前沿用原生 agent/session 的工作区排除状态，App 与 CLI 即使 session id 相同也分别匹配隐私状态。
+采集事件的 action 描述最终代表裁决。例如先命中 log、再命中 block，上报 `block`；仅 log 命中上报 `log`。HTTP 响应仍使用 `allow` / `block` 控制宿主行为。UserPromptSubmit log 在原生请求上报 `gen_ai.guardrail.action: "log"`，不新增请求事件；Qoder block 拦截仍补发 `llm.request`。关联发生在消息内容隐私处理之前，内部关联摘要在输出前移除，因此关闭消息内容采集时仍可关联。
+
+Hook 的 `parent_business_info.product=app` 时，Qoder 被拒 Prompt 使用 `qoder-app` 身份。输出前沿用原生 agent/session 的工作区排除状态，App 与 CLI 即使 session id 相同也分别匹配隐私状态。
 
 ### 升级与回退
 
 旧 `interceptor.mode=custom` 升级后按 `none` 处理，整个拦截功能关闭。继续使用需在重启 collector 前显式改为 `all`，这将开启全部内置密钥类型；不再支持 `--interceptor-types` 或对应环境变量。mask 的 custom 模式不受影响。
 
-旧客户端可能拒绝 enforcement、severity 和 scriptCache 字段。回退前停止 Pilot，将规则改为旧版支持的格式；停用 audit 或明确改为默认 enforce 并移除新键，不能仅删除 audit 键后意外变成强制拦截。对不支持 severity 的版本，移除该元数据字段即可。对不支持 scriptCache 的版本，需将正文移回根目录并移除该字段，或清空本地文件规则与脚本，再启动旧版。
+规则只接受 `action: block/log`，默认 `block`，不接受旧 `enforcement` 字段。非法规则文档会被拒绝，并保留上一份可执行配置。
 
 ## 服务生命周期
 

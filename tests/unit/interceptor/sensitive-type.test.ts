@@ -45,7 +45,8 @@ describe('sensitive-type interceptor rules', () => {
     await expect(engine.evaluate(request({ prompt }))).resolves.toEqual({
       action: 'block',
       reason,
-      ruleId: type,
+      ruleId: 'builtin',
+      ruleVersion: '',
       evaluatedRules: [type],
     });
   });
@@ -59,7 +60,8 @@ describe('sensitive-type interceptor rules', () => {
     }))).resolves.toEqual({
       action: 'block',
       reason: '[APIKEY_BLOCKED]',
-      ruleId: 'apiKey',
+      ruleId: 'builtin',
+      ruleVersion: '',
       evaluatedRules: ['apiKey'],
     });
   });
@@ -73,7 +75,8 @@ describe('sensitive-type interceptor rules', () => {
     }))).resolves.toEqual({
       action: 'block',
       reason: '[APIKEY_BLOCKED]',
-      ruleId: 'apiKey',
+      ruleId: 'builtin',
+      ruleVersion: '',
       evaluatedRules: ['apiKey'],
     });
   });
@@ -97,7 +100,8 @@ describe('sensitive-type interceptor rules', () => {
     }))).resolves.toEqual({
       action: 'block',
       reason: '[DATABASEURL_BLOCKED]',
-      ruleId: 'databaseUrl',
+      ruleId: 'builtin',
+      ruleVersion: '',
       evaluatedRules: ['databaseUrl'],
     });
   });

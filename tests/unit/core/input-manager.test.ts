@@ -27,7 +27,6 @@ import {
 } from '../../../src/normalization/invocation-identity.js';
 import { deriveAgentInputEventId } from '../../../src/normalization/agent-input-dual-write.js';
 import { buildBlockedQoderPromptEntry } from '../../../src/interceptor/blocked-prompt.js';
-import { buildGuardrailEvaluationEntry } from '../../../src/interceptor/evaluation-event.js';
 import { parseHookRequest } from '../../../src/interceptor/adapters/qoder.js';
 import * as gitEnrichment from '../../../src/normalization/enrich-git-context.js';
 
@@ -679,11 +678,9 @@ describe('InputManager', () => {
 
   describe('blocked prompt flush', () => {
     it.each([
-      { surface: 'qoder' as const, kind: 'audit' },
-      { surface: 'qodercli' as const, kind: 'audit' },
       { surface: 'qoder' as const, kind: 'blocked-prompt' },
       { surface: 'qodercli' as const, kind: 'blocked-prompt' },
-    ])('inherits native App exclusions for $surface $kind events without cwd', async ({ surface, kind }) => {
+    ])('inherits native App exclusions for $surface $kind events without cwd', async ({ surface }) => {
       manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
       const input = new StubInput('qoder-app-native');
       manager.registerInput(input as any);
@@ -699,27 +696,23 @@ describe('InputManager', () => {
         parent_business_info: { product: 'app' }, prompt: 'private prompt',
       }, surface)!;
       expect(request.cwd).toBeUndefined();
-      const entry = kind === 'audit'
-        ? buildGuardrailEvaluationEntry(request, { matched: true, action: 'allow', enforcement: 'audit',
-          ruleId: 'audit', ruleVersion: '1', reason: 'private reason' })
-        : buildBlockedQoderPromptEntry(request);
+      const entry = buildBlockedQoderPromptEntry(request);
       entry[INVOCATION_SESSION_ID_FIELD] = 'public-session';
       await manager.flushPreparedEntries([entry]);
       expect(flusher.batchCalls).toHaveLength(0);
       expect(entry['gen_ai.session.id']).toBe('app-session');
     });
 
-    it('does not borrow App identity for a CLI observation sharing an excluded App session id', async () => {
+    it('does not borrow App identity for a CLI blocked prompt sharing an excluded App session id', async () => {
       manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
       const input = new StubInput('qoder-app-native');
       manager.registerInput(input as any);
       input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'qoder-app',
         'gen_ai.session.id': 'shared-session', 'workspace.path': '/private-project/app' })]);
       await manager.stopAll();
-      const request = parseHookRequest({ hook_event_name: 'PreToolUse', session_id: 'shared-session',
+      const request = parseHookRequest({ hook_event_name: 'UserPromptSubmit', session_id: 'shared-session',
         parent_business_info: { product: 'cli' } }, 'qodercli')!;
-      const entry = buildGuardrailEvaluationEntry(request, { matched: true, action: 'allow', enforcement: 'audit',
-        ruleId: 'audit', ruleVersion: '1', reason: 'CLI hit' });
+      const entry = buildBlockedQoderPromptEntry(request);
       await manager.flushPreparedEntries([entry]);
       expect(flusher.batchCalls.flat()).toHaveLength(1);
       expect(flusher.batchCalls[0][0]['gen_ai.agent.type']).toBe('qoder-cli');
@@ -736,15 +729,14 @@ describe('InputManager', () => {
       expect(entry['gen_ai.session.id']).toBe('native-session');
     });
 
-    it('honors sticky exclusions for audit events without cwd using native session/agent keys', async () => {
+    it('honors sticky exclusions for blocked prompts without cwd using native session/agent keys', async () => {
       const policy = new WorkspacePolicy(['/private-project']);
       manager.setWorkspacePolicy(policy);
       const blocked = buildTestEntry({ 'gen_ai.agent.type': 'qoder-cli', 'gen_ai.session.id': 'native-session',
         'workspace.path': '/private-project/app' });
       expect(policy.allows(blocked)).toBe(false);
-      const entry = buildGuardrailEvaluationEntry({ agent: 'qodercli', event: 'PreToolUse',
-        sessionId: 'native-session', toolUseId: 'tool', raw: {} }, { matched: true, action: 'allow', enforcement: 'audit',
-        ruleId: 'audit', ruleVersion: '1', reason: 'hit' });
+      const entry = buildBlockedQoderPromptEntry({ agent: 'qodercli', event: 'UserPromptSubmit',
+        sessionId: 'native-session', raw: {} });
       entry[INVOCATION_SESSION_ID_FIELD] = 'public-session';
       await manager.flushPreparedEntries([entry]);
       expect(flusher.batchCalls).toHaveLength(0);
@@ -800,10 +792,10 @@ describe('InputManager', () => {
       expect(dispatched['gen_ai.guardrail.action']).toBe('block');
       expect(dispatched['gen_ai.guardrail.rule_id']).toBe('flow-probe');
       expect(dispatched['gen_ai.guardrail.rule_version']).toBe('3');
-      expect(dispatched['gen_ai.guardrail.severity']).toBe('CRITICAL');
-      expect(dispatched['gen_ai.guardrail.reason']).toBe('hit [APIKEY_MASKED]{sk-1*********************mnop}');
-      expect(dispatched['gen_ai.guardrail.title']).toBe('label [APIKEY_MASKED]{sk-1*********************mnop}');
-      expect(dispatched['gen_ai.guardrail.message']).toBe('不要粘贴 [APIKEY_MASKED]{sk-1*********************mnop}');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.reason');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.severity');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.title');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.message');
       expect(dispatched.trace_id).toBeUndefined();
       expect(dispatched['gen_ai.turn.start']).toBeUndefined();
     });

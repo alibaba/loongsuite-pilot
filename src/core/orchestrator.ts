@@ -500,7 +500,6 @@ export class Orchestrator extends EventEmitter {
         verdictStore: this.verdictStore ?? undefined,
         mode: this.config.interceptor.mode,
         emitBlockedPrompt: (entry, signal) => this.inputManager.flushPreparedEntries([entry], signal),
-        emitEvaluation: (entry, signal) => this.inputManager.flushPreparedEntries([entry], signal),
         onDiagnostic: this.interceptorAlarmReporter.record,
       }).catch(err => {
         logger.warn('interceptor start failed (non-fatal)', { error: String(err) });

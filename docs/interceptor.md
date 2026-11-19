@@ -30,7 +30,7 @@ Write the following document to `<dataDir>/configs/managed/interceptor.json`. Th
         "version": "1",
         "agents": ["qoder", "qodercli"],
         "events": ["UserPromptSubmit", "PreToolUse", "PostToolUse"],
-        "enforcement": "audit",
+        "action": "log",
         "match": "substring",
         "pattern": "RULE_PROBE",
         "title": "Command rule preview",
@@ -55,7 +55,7 @@ Rule IDs must be unique within the document. IDs and versions accept ASCII lette
 |-------|--------|
 | `agents` | `qoder`, `qodercli`, `openclaw`, `qwen-work-cn` |
 | `events` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` |
-| `enforcement` | Defaults to `enforce`: block at the first hit. `audit`: record the hit, allow that rule, continue checking, and do not notify the host. |
+| `action` | Defaults to `block`: stop at the first blocking hit. `log`: record the hit, allow execution, and continue checking without notifying the host. |
 | `kind` | `pattern` or `script`. `http` is a format placeholder: warn and skip without making a request. |
 | `match` | `substring` or `regex` for a pattern rule. |
 | `shell` | `sh` or `powershell` for a script rule; only the local platform's shell runs. |
@@ -74,7 +74,7 @@ cat >/dev/null
 printf '%s\n' '{"matched":false}'
 ```
 
-The script receives one JSON object on stdin: `{"prompt":"<combined text>"}`. Stdout must contain exactly one JSON line, either `{"matched":false}` or `{"matched":true,"reason":"..."}`, and exit successfully. A timeout, nonzero exit, or invalid output skips the rule and preserves earlier audit hits. All local file rules share a 3.5 second budget; exhaustion stops checking and fails open. Audit scripts actually run with the same costs and side effects.
+The script receives one JSON object on stdin: `{"prompt":"<combined text>"}`. Stdout must contain exactly one JSON line, either `{"matched":false}` or `{"matched":true,"reason":"..."}`, and exit successfully. A timeout, nonzero exit, or invalid output skips the rule and preserves earlier log hits. All local file rules share a 3.5 second budget; exhaustion stops checking and fails open. Log scripts actually run with the same costs and side effects.
 
 Unix uses `sh <file>` under a Node guardian that owns the process group. A private lease or deadline reclaims background descendants. Windows maintains at most two warm PowerShell executors with process-scoped `ExecutionPolicy Bypass`. Each executor is created atomically inside a kill-on-close Windows Job Object and retired with its native descendants after one request, including success, timeout, stop and crashes. A private lease and an independent guardian deadline also cover interceptor Worker termination; replacement waits for tree cleanup. Startup and cleanup count toward the request budget. Non-ASCII input is escaped as `\uXXXX`; scripts can read the original text with `ConvertFrom-Json`. The native Job capability requires Windows 10 / Server 2016 or later. If CLM/WDAC blocks its initialization, the rule fails open with `Windows Job Object unavailable` before any script starts; it never falls back to an unowned executor. Scripts receive a restricted environment such as PATH, HOME, and TEMP. They run as the collector user and are not an operating-system sandbox; processes delegated to services or WMI are outside native child-process ownership.
 
@@ -88,23 +88,29 @@ Files are checked every three seconds. Invalid documents or scripts not yet read
 
 ## Decisions and telemetry
 
-Builtin sensitive-type rules run first and stop on a block. After they allow, file rules run in array order. `matches` preserves all known audit and enforce hits. Top-level metadata identifies the final enforcing rule, or the first audit hit when allowed. A complete check without hits has `matched=false`; an error without a known result omits it. A known audit hit followed by an error can retain both `matched=true` and `failOpen=true`.
+Builtin sensitive-type rules run first and stop on a block. After they allow, file rules run in array order. `matches` preserves all known log and block hits. Top-level metadata identifies the final enforcing rule, or the first log hit when allowed. A complete check without hits has `matched=false`; an error without a known result omits it. A known log hit followed by an error can retain both `matched=true` and `failOpen=true`.
 
-Each file-rule hit emits `event.name=guardrail.evaluation`, including session/tool identifiers when available, phase, rule metadata, and that rule's action. It does not copy prompt or tool bodies; reasons and reminders are masked. Linked tool events describe the final request decision. For audit followed by enforce, evaluation actions are allow/block and the final tool action is block. UserPromptSubmit audit does not synthesize a rejected prompt; enforce still records the blocked prompt as `llm.request`.
+Rule hits no longer emit separate `guardrail.evaluation` events. Linked tool events carry the final request decision in `gen_ai.guardrail.*`; denied Qoder user prompts still emit `llm.request`. Individual log/block matches remain in the HTTP response and local access log `matches` array. UserPromptSubmit log does not synthesize a rejected prompt.
 
-Scripts may echo business content in `reason`. Setting an agent's `captureMessageContent=false` removes `gen_ai.guardrail.reason` from emitted observations, linked tool events, rejected-prompt events and OTLP span attributes/events, while preserving action and rule identity. Host blocking responses keep their diagnostic reason.
+Allowed prompt verdicts are linked to the first native `llm.request` of the turn, including `action=log` for log hits. Later tool continuation requests do not reuse that prompt verdict. Correlation happens before content privacy processing and identity rewriting; private correlation metadata is removed before output.
 
-JSONL and SLS can retain evaluation events. OTLP filters them before turn grouping and conversion, so they cannot generate extra execution spans or prematurely end a turn. See [Output Event Schema](output-event-schema.md) for the `gen_ai.guardrail.*` fields.
+Collected events omit rule `reason`, `message`, `matched`, `enforcement`, `title`, `severity`, and `match`. They retain `rule_id` and `rule_version`. The collected `gen_ai.guardrail.action` is `block` for enforced blocks, `log` for log hits, or `allow` for other known verdicts. `triggered=true` still means a check verdict exists, not that a rule matched. HTTP responses continue to use `allow` / `block`; host diagnostics and local access logs retain rule text.
 
-Qoder hooks identifying `parent_business_info.product=app` emit observations and blocked prompts as `qoder-app`. Workspace filtering uses the corresponding native agent/session identity before output, preserving sticky exclusions without sharing App and CLI privacy state.
+Builtin matches use the fixed public `rule_id="builtin"` and an explicit empty `rule_version=""`. Type-based enablement and `evaluatedRules` still use the internal sensitive-type IDs. File rules keep their configured ID and version.
+
+See [Output Event Schema](output-event-schema.md) for the `gen_ai.guardrail.*` fields.
+
+Qoder hooks identifying `parent_business_info.product=app` emit blocked prompts as `qoder-app`. Workspace filtering uses the corresponding native agent/session identity before output, preserving sticky exclusions without sharing App and CLI privacy state.
 
 ## Runtime and failure handling
 
 An interceptor Worker inside the collector process owns loopback HTTP, rules, runtime heartbeats, and verdict checkpoints. The main collector thread handles collection and output. Main-thread stalls do not occupy the Worker's event loop, though they delay message delivery and recovery. All threads still share process and machine resources.
 
-Hook clients perform a 500ms health check followed by a 4 second decision request. Missing runtime, connection failures, timeouts, or invalid responses fail open. The normal and audit-allow paths exit successfully without host output. The listener prefers `127.0.0.1:18791`, falling back to an available port recorded in `interceptor/runtime.json`.
+Hook clients perform a 500ms health check followed by a 4 second decision request. Missing runtime, connection failures, timeouts, or invalid responses fail open. The normal and log-only paths exit successfully without host output. The listener prefers `127.0.0.1:18791`, falling back to an available port recorded in `interceptor/runtime.json`.
 
 Tool verdicts use session ID, tool call ID, and phase, retaining the original timestamp. The Worker keeps at most 10,000 records for 30 minutes and checkpoints changes asynchronously every 15 seconds. The main-thread mirror waits at most two seconds for accepted verdicts before linking events. Message batches allow one outstanding ACK; event output has bounded item and byte queues. Overflow and stop timeouts are explicitly counted. An ACK means bounded acceptance or a counted drop, not backend persistence.
+
+Prompt verdicts share the same retention, capacity, checkpoint and IPC lifecycle. The cache stores the agent, session, a SHA-256 prompt digest and request identity, without prompt text. Qoder and Qwen Work CN use a SHA-256 digest of the native user row's `requestSetId` to match the hook's `request_set_id`. The native ID is never attached to events, including intermediate hook history; only a private cache key digest is transported and removed before output. This does not change `gen_ai.request.id`. An explicit ID that has no matching verdict never falls back to another request. Without an ID, only one matching digest within five seconds of the native prompt timestamp is accepted. Each received prompt evaluation is registered before checking rules, so pending, failed and blocked attempts also make repeated prompts ambiguous and prevent reuse of an earlier log verdict. These internal attempt markers are checkpointed but never emitted as guardrail actions. Ambiguous repeated prompts remain unannotated.
 
 Worker failure clears stale runtime and retries with backoff from one to 30 seconds, recovering from checkpoints and the main-thread mirror. Shutdown closes HTTP, drains accepted output for up to five seconds, and reclaims script resources. Access logs use a bounded asynchronous masking and write queue at `interceptor/logs/access.log`.
 
@@ -112,4 +118,4 @@ Worker failure clears stale runtime and retries with backoff from one to 30 seco
 
 ## Downgrade
 
-Older clients may reject `enforcement` or `scriptCache`. Stop Pilot before returning to an older format. Disable audit rules or explicitly change them to default enforce and remove unsupported fields; merely stripping an audit key would turn it into an enforcing rule. For clients without namespace support, move script bodies to the root scripts directory and remove `scriptCache`, or clear the local rule and script files before starting the older client.
+Rules accept only `action: block/log`, with `block` as the default. The removed `enforcement` key is rejected. Invalid documents preserve the previous executable rule generation.
