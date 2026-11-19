@@ -12,6 +12,7 @@ import type { AlarmLevel, AlarmManager } from './alarm-manager.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
 import type { TraceRuntimeSnapshot } from './trace-runtime-types.js';
+import type { InterceptorStatus } from '../interceptor/status.js';
 
 const logger = createLogger('MetricsWriter');
 
@@ -43,6 +44,7 @@ export interface MetricsWriterOptions {
   canaryPolicy?: string;
   getSnapshot: () => DataflowSnapshot;
   getTraceRuntimeSnapshot?: () => TraceRuntimeSnapshot[];
+  getInterceptorStatus?: () => Promise<InterceptorStatus>;
   alarmManager?: AlarmManager;
   agentsConfig?: AgentsConfig;
   slsEndpoints?: SlsEndpoint[];
@@ -58,6 +60,7 @@ export class MetricsWriter {
   private readonly diskUsageSampler: DiskUsageSampler;
   private readonly getSnapshot: () => DataflowSnapshot;
   private readonly getTraceRuntimeSnapshot?: () => TraceRuntimeSnapshot[];
+  private readonly getInterceptorStatus?: () => Promise<InterceptorStatus>;
   private readonly alarmManager: AlarmManager | null;
   private l2WritePromise: Promise<void> | null = null;
   private dataflowWritePromise: Promise<void> | null = null;
@@ -91,6 +94,7 @@ export class MetricsWriter {
     this.hookMetricsSpool = new HookMetricsSpool(opts.dataDir);
     this.getSnapshot = opts.getSnapshot;
     this.getTraceRuntimeSnapshot = opts.getTraceRuntimeSnapshot;
+    this.getInterceptorStatus = opts.getInterceptorStatus;
     this.alarmManager = opts.alarmManager ?? null;
     this.diskUsageSampler = new DiskUsageSampler({
       dataDir: opts.dataDir,
@@ -161,6 +165,10 @@ export class MetricsWriter {
     try {
       const snapshot = sharedSnapshot ?? this.getSnapshot();
       const metrics = this.collector.collectL1(snapshot);
+      if (this.getInterceptorStatus) {
+        try { metrics.interceptor = await this.getInterceptorStatus(); }
+        catch { logger.warn('interceptor status snapshot unavailable'); }
+      }
       const disk = this.diskUsageSampler.getSnapshot();
       metrics.metric_json.disk_dir_status = disk.status;
       if (disk.scanMs !== undefined) metrics.metric_json.disk_dir_scan_ms = String(disk.scanMs);

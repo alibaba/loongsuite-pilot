@@ -60,7 +60,7 @@ describe('managed enforcement', () => {
     const result = await engine([{ ...pattern('regex', 'audit'), match: 'regex' }], { regex: { test } }).evaluate(request);
     expect(result).toMatchObject({ action: 'allow', matched: true, enforcement: 'audit', ruleId: 'regex' });
     expect(result.matches).toHaveLength(1);
-    expect(test).toHaveBeenCalledWith('MATCH', 'MATCH', expect.any(Number));
+    expect(test).toHaveBeenCalledWith('MATCH', 'MATCH', expect.any(Number), expect.any(Function));
   });
 
   it('reports matched=false only after a complete check without a hit', async () => {

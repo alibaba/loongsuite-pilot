@@ -275,6 +275,30 @@ describe('Orchestrator', () => {
   });
 
   describe('startup sequence (T038)', () => {
+    it('preserves final interceptor status after the Worker service reference is cleared', async () => {
+      let stopped = false;
+      const status = { enabled: true, running: true, collection_status: 'ok',
+        sampled_at: '2026-11-19T00:00:00Z', worker_started_at: '2026-11-19T00:00:00Z',
+        worker_restarts_total: 0, rules: null, activity: null, diagnostics: null };
+      const workerStart = vi.spyOn(interceptorWorker, 'startInterceptorWorker').mockResolvedValue({
+        port: 18791, managedActive: false,
+        stop: async () => { stopped = true; },
+        getStatus: async () => ({ ...status, running: !stopped }),
+        reloadManaged: async () => {}, syncVerdicts: async () => {}, flushEvents: async () => {},
+      } as unknown as interceptorWorker.InterceptorWorkerService);
+      const orch = new Orchestrator(makeConfig({ interceptor: { mode: 'all', types: [] } }));
+      try {
+        await orch.start();
+        expect(await (orch as any).readInterceptorStatus()).toMatchObject({ running: true, sampled_at: status.sampled_at });
+        await orch.stop();
+        expect((orch as any).interceptorService).toBeNull();
+        expect(await (orch as any).readInterceptorStatus()).toMatchObject({ running: false, sampled_at: status.sampled_at });
+      } finally {
+        await orch.stop();
+        workerStart.mockRestore();
+      }
+    });
+
     it.each(['none', 'all'] as const)('gates Worker on startup mode %s even with cached rules', async mode => {
       const dataDir = path.join(homeDir, 'pilot-data');
       fs.mkdirSync(path.join(dataDir, 'configs', 'managed'), { recursive: true });

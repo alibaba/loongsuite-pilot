@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import { createLogger } from '../../utils/logger.js';
 import { collectHookText } from '../rules/hook-text.js';
+import { reportInterceptorDiagnostic, type InterceptorDiagnosticObserver } from '../diagnostics.js';
 import {
   INTERCEPTOR_HOOK_TIMEOUT_MS,
   type EvaluateHookResponse,
@@ -15,7 +16,7 @@ import {
   type ManagedScriptRule,
   type ManagedShell,
 } from './config.js';
-import { ManagedRegexRunner, MANAGED_REGEX_TIMEOUT_MS } from './regex-runner.js';
+import { ManagedRegexRunner, ManagedRegexCancelledError, ManagedRegexTimeoutError, MANAGED_REGEX_TIMEOUT_MS, MANAGED_REGEX_SLOW_MS } from './regex-runner.js';
 import { parseScriptVerdict, type ScriptRunner } from './runner.js';
 
 const logger = createLogger('ManagedInterceptor');
@@ -40,6 +41,7 @@ export interface ManagedRuleEngineOptions {
   /** Shared with the controller so stop() can kill a stuck match. */
   regex?: ManagedRegexRunner;
   regexTimeoutMs?: number;
+  onDiagnostic?: InterceptorDiagnosticObserver;
 }
 
 /**
@@ -99,13 +101,27 @@ export class ManagedRuleEngine implements HookEvaluator {
           failed = true;
           break;
         }
+        const started = performance.now();
+        const limitMs = Math.min(remaining, this.regexTimeoutMs);
         try {
-          const matched = await this.regex.test(rule.pattern, text, Math.min(remaining, this.regexTimeoutMs));
+          const matched = await this.regex.test(rule.pattern, text, limitMs, durationMs => {
+            if (durationMs >= MANAGED_REGEX_SLOW_MS) reportInterceptorDiagnostic(this.opts.onDiagnostic, {
+              code: 'regex_slow', source: 'regex', reason: 'regular expression execution exceeded slow threshold',
+              ruleId: rule.id, ruleVersion: rule.version, durationMs, limitMs: MANAGED_REGEX_SLOW_MS,
+            });
+          });
           if (!matched) continue;
           if (hit(rule, PATTERN_BLOCKED_REASON)) return result(true);
           continue;
         } catch (err) {
           failed = true;
+          if (err instanceof ManagedRegexCancelledError) continue;
+          const timeout = err instanceof ManagedRegexTimeoutError;
+          reportInterceptorDiagnostic(this.opts.onDiagnostic, {
+            code: timeout ? 'regex_timeout' : 'regex_failed', source: 'regex',
+            reason: timeout ? 'regular expression request budget exhausted (includes queue and worker startup)' : 'regular expression worker failed',
+            ruleId: rule.id, ruleVersion: rule.version, durationMs: performance.now() - started, limitMs,
+          });
           logger.warn('managed interceptor rule skipped', {
             ruleId: rule.id,
             version: rule.version,

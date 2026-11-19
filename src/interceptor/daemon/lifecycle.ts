@@ -15,6 +15,8 @@ import { ToolVerdictStore, type ToolVerdictKey, type ToolVerdictRecord } from '.
 import { INTERCEPTOR_DEFAULT_PORT } from '../types.js';
 import { createInterceptorServer, type InterceptorServerOptions } from './server.js';
 import { clearInterceptorRuntime, removeOwnPid, writeRuntime } from './runtime.js';
+import { reportInterceptorDiagnostic, type InterceptorDiagnosticObserver } from '../diagnostics.js';
+import { InterceptorStatusCollector, unavailableInterceptorStatus, type InterceptorStatus } from '../status.js';
 
 const logger = createLogger('InterceptorDaemon');
 const RUNTIME_HEARTBEAT_MS = 30_000;
@@ -29,6 +31,7 @@ export interface InterceptorService {
   readonly managedActive: boolean;
   /** Re-reads managed rules now; rejects while a needed listener still fails to bind. */
   reloadManaged(): Promise<void>;
+  getStatus(): Promise<InterceptorStatus>;
   stop(): Promise<void>;
 }
 
@@ -46,6 +49,7 @@ export interface StartInterceptorServiceOptions {
   onManagedActiveChange?: (active: boolean) => void;
   onToolVerdict?: (record: ToolVerdictRecord) => void;
   onStateChange?: (port: number | null, managedActive: boolean) => void;
+  onDiagnostic?: InterceptorDiagnosticObserver;
 }
 
 /**
@@ -65,10 +69,13 @@ export async function startInterceptorService(
       verdictStore,
       managedActive: false,
       async reloadManaged() {},
+      async getStatus() { return unavailableInterceptorStatus(false); },
       async stop() {},
     };
   }
-  const builtin = new RuleEngine(builtinRules(), resolveEnabledInterceptorTypes({ mode, types: [] }));
+  const rules = builtinRules();
+  const builtin = new RuleEngine(rules, resolveEnabledInterceptorTypes({ mode, types: [] }));
+  const status = new InterceptorStatusCollector();
   if (!opts.verdictStore) verdictStore.restore();
   const accessLog = new InterceptorAccessLogWriter(interceptorAccessLogPath(opts.dataDir));
 
@@ -111,6 +118,10 @@ export async function startInterceptorService(
 
   const managed = new ManagedInterceptor({
     dataDir: opts.dataDir,
+    onDiagnostic: diagnostic => {
+      status.recordDiagnostic(diagnostic);
+      reportInterceptorDiagnostic(opts.onDiagnostic, diagnostic);
+    },
     onActiveChange: (active) => {
       if (started) void reconcileSoon();
       opts.onManagedActiveChange?.(active);
@@ -118,12 +129,16 @@ export async function startInterceptorService(
   });
   const engine: HookEvaluator = {
     evaluate: async (request) => {
-      const local = await builtin.evaluate(request);
-      if (local.action === 'block') return local;
-      const remote = managed.evaluate(request);
-      if (!remote) return local;
-      const managedResult = await remote;
-      return mergeInterceptorVerdicts(local, managedResult);
+      const startedAt = performance.now();
+      let verdict: EvaluateHookResponse | null = null;
+      try {
+        const local = await builtin.evaluate(request);
+        const remote = local.action === 'block' ? null : managed.evaluate(request);
+        verdict = remote ? mergeInterceptorVerdicts(local, await remote) : local;
+        return verdict;
+      } finally {
+        status.record(verdict, performance.now() - startedAt);
+      }
     },
   };
   const serverOpts: InterceptorServerOptions = {
@@ -216,6 +231,9 @@ export async function startInterceptorService(
     verdictStore,
     get managedActive() {
       return managed.active;
+    },
+    async getStatus() {
+      return status.snapshot(!stopped && port !== null, { ...managed.getRuleStatus(), builtin: rules.length });
     },
     async reloadManaged() {
       managed.reload();
