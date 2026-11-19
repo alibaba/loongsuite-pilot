@@ -68,6 +68,8 @@ struct TerminalFailureContext {
 }
 
 const MAX_SCAN_BYTES_PER_FILE_CYCLE: i64 = 16 * 1024 * 1024;
+const MAX_RETAINED_RECOVERY_BYTES: i64 = 512 * 1024;
+const MAX_RETAINED_RECOVERY_LINES: usize = 1_024;
 const MAX_CACHED_INCOMPLETE_TAILS: usize = 2048;
 const INCOMPLETE_TAIL_WITNESS_BYTES: usize = 64;
 const MAX_CACHED_TRANSCRIPT_META_BYTES: usize = 64 * 1024 * 1024;
@@ -113,6 +115,12 @@ struct RecoveryBoundary {
     terminal: bool,
     inferred: Option<CodexTerminalStatus>,
     next_turn_started_at_ms: Option<f64>,
+    scanned_turn: Option<ScannedTurn>,
+}
+
+struct ScannedTurn {
+    version: scan::FileVersion,
+    lines: Vec<JsonLine>,
 }
 
 #[derive(Default)]
@@ -722,27 +730,32 @@ impl<'a> CodexTranscriptEngine<'a> {
                         - scanned_bytes),
             );
             let mut scanned_boundary = ScannedBoundary::default();
-            let mut scan = scan_json_lines(file_path, scan_start, scan_end, Some(rt), |line| {
-                process_scanned_line(
+            let mut retained_lines = Some(Vec::new());
+            let mut on_line = |line: JsonLine| {
+                let advance = process_scanned_line(
                     &mut checkpoint,
                     file_path,
                     stat.size,
                     &line,
                     &mut scanned_boundary,
                     self,
-                )
-            })
-            .await?;
+                );
+                if let Some(lines) = &mut retained_lines {
+                    if line.end_offset - scan_start <= MAX_RETAINED_RECOVERY_BYTES
+                        && lines.len() < MAX_RETAINED_RECOVERY_LINES
+                    {
+                        lines.push(line);
+                    } else {
+                        retained_lines = None;
+                    }
+                }
+                advance
+            };
+            let mut scan =
+                scan_json_lines(file_path, scan_start, scan_end, Some(rt), &mut on_line).await?;
             if scan.next_offset == scan_start && scan_end < stat.size {
                 scan = scan_json_lines(file_path, scan_start, stat.size, Some(rt), |line| {
-                    process_scanned_line(
-                        &mut checkpoint,
-                        file_path,
-                        stat.size,
-                        &line,
-                        &mut scanned_boundary,
-                        self,
-                    );
+                    on_line(line);
                     false
                 })
                 .await?;
@@ -781,7 +794,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             );
             scanned_bytes += next_scan_offset - scan_start;
             let mut blocked = false;
-            if checkpoint.active_turn.as_ref().is_some_and(|active| {
+            if let Some(active) = checkpoint.active_turn.as_ref().filter(|active| {
                 terminal_turn_id.is_some() || next_scan_offset > active.start_offset
             }) {
                 if is_direct_subagent
@@ -801,6 +814,21 @@ impl<'a> CodexTranscriptEngine<'a> {
                     checkpoint.scan_offset = next_scan_offset;
                     continue;
                 }
+                let start_offset = active.start_offset;
+                // A rollback/recovery that reaches before this scan must read its
+                // persisted range. The next turn's start can end this scan, but
+                // belongs to the following turn and must stay out of these rows.
+                let scanned_turn = retained_lines
+                    .filter(|_| start_offset >= scan_start && !scan.quarantined)
+                    .map(|mut lines| {
+                        lines.retain(|line| {
+                            line.start_offset >= start_offset && line.end_offset <= next_scan_offset
+                        });
+                        ScannedTurn {
+                            version: version.clone(),
+                            lines,
+                        }
+                    });
                 let recovered = self
                     .recover_turn_segment(
                         rt,
@@ -812,6 +840,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                             inferred: next_turn_started_at_ms
                                 .map(|_| CodexTerminalStatus::Interrupted),
                             next_turn_started_at_ms,
+                            scanned_turn,
                         },
                         None,
                     )
@@ -1135,6 +1164,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     terminal: true,
                     inferred: None,
                     next_turn_started_at_ms: None,
+                    scanned_turn: None,
                 },
                 None,
             )
@@ -1220,6 +1250,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     terminal: true,
                     inferred: None,
                     next_turn_started_at_ms: None,
+                    scanned_turn: None,
                 },
                 None,
             )
@@ -1303,14 +1334,36 @@ impl<'a> CodexTranscriptEngine<'a> {
             terminal,
             inferred,
             next_turn_started_at_ms,
+            scanned_turn,
         } = boundary;
         let Some(active) = checkpoint.active_turn.clone() else {
             return Ok(empty_unparseable(end_offset));
         };
-        let records = read_json_lines(file_path, active.start_offset, end_offset, Some(rt)).await?;
-        let current_stat = file_meta_snapshot(file_path).await.ok();
-        let current_ino = current_stat.map(|(inode, _, _)| inode);
-        let current_size = current_stat.map(|(_, size, _)| size);
+        let verified = match scanned_turn {
+            Some(scanned)
+                if scan::file_version_snapshot(file_path).await.as_ref().ok()
+                    == Some(&scanned.version) =>
+            {
+                Some(scanned)
+            }
+            _ => None,
+        };
+        let (lines, current_ino, current_size) = if let Some(scanned) = verified {
+            (
+                scanned.lines,
+                Some(scanned.version.inode),
+                Some(scanned.version.size),
+            )
+        } else {
+            let records =
+                read_json_lines(file_path, active.start_offset, end_offset, Some(rt)).await?;
+            let current_stat = file_meta_snapshot(file_path).await.ok();
+            (
+                records.items,
+                current_stat.map(|(inode, _, _)| inode),
+                current_stat.map(|(_, size, _)| size),
+            )
+        };
         let mut meta = if current_ino == Some(checkpoint.inode) {
             current_size
                 .and_then(|size| self.cached_meta_for_checkpoint(file_path, checkpoint, size))
@@ -1339,9 +1392,8 @@ impl<'a> CodexTranscriptEngine<'a> {
                 }
             }
         }
-        let source_record_count = records.items.len();
-        let mut sources: Vec<CodexTranscriptSourceRecord> = records
-            .items
+        let source_record_count = lines.len();
+        let mut sources: Vec<CodexTranscriptSourceRecord> = lines
             .into_iter()
             .map(|line| CodexTranscriptSourceRecord {
                 start_offset: line.start_offset,
@@ -3465,6 +3517,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     terminal: true,
                     inferred: None,
                     next_turn_started_at_ms: None,
+                    scanned_turn: None,
                 },
                 None,
             )
@@ -3513,6 +3566,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     terminal: true,
                     inferred: None,
                     next_turn_started_at_ms: None,
+                    scanned_turn: None,
                 },
                 None,
             )
