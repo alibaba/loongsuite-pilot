@@ -38,7 +38,7 @@ export async function collectApi(input: MulticaInputConfig, source: ApiSource, p
     for (const item of rows) {
       if (!item || typeof item !== 'object' || Array.isArray(item)) throw new SourceError('unexpected_row_shape');
       const row = snapshot(source.recordType, item, {workspace_id: source.workspace, ...source.extra});
-      if (input.CollectEntityNames) Object.assign(row, entityLabels(source.recordType, item));
+      if (input.CollectEntityNames !== false) Object.assign(row, entityLabels(source.recordType, item));
       if (source.recordType === 'usage_snapshot') {
         // Values change between polls; identity is the aggregate's dimensions.
         row.entity_id = digest(JSON.stringify([source.name, row.agent_id, row.runtime_id, row.day, row.bucket_at, row.hour, row.provider, row.model, row.failure_reason]));
