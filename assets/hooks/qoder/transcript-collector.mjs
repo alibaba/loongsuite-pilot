@@ -1127,8 +1127,10 @@ export class QoderTranscriptCollector {
       checkpoint.incoming = { ...incoming };
       checkpoint.traceContext = { traceId: incoming.traceId, parentSpanId: incoming.spanId };
     } else {
-      const record = { 'event.name': 'other', 'gen_ai.agent.type': this.agentId,
+      const isQoderCli = this.agentId === 'qoder' && prompt.entrypoint === 'cli';
+      const record = { 'event.name': 'other', 'gen_ai.agent.type': isQoderCli ? 'qoder-cli' : this.agentId,
         'gen_ai.session.id': source.sessionId, 'gen_ai.turn.id': checkpoint.turnId,
+        ...(isQoderCli && typeof prompt.uuid === 'string' ? { 'agent.pilot.correlation.native_turn_id': prompt.uuid } : {}),
         trace_id: qoderDigest(['qoder-trace', checkpoint.turnId]).slice(0, 32),
         'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content:
           typeof prompt.message?.content === 'string' ? prompt.message.content
@@ -1137,7 +1139,12 @@ export class QoderTranscriptCollector {
       if (!source.subagentId) await this.resolveTraceContext?.([record]);
       else if (prompt.isDelegatedTask) this.report(source.key, 'subagent-parent-unavailable-independent',
         { fallbackCount: ++this.subagentParentFallbacks });
-      checkpoint.traceContext = { traceId: record.trace_id, ...(record.parent_span_id ? { parentSpanId: record.parent_span_id } : {}) };
+      checkpoint.traceContext = {
+        traceId: record.trace_id,
+        ...(record.parent_span_id ? { parentSpanId: record.parent_span_id } : {}),
+        ...(record['agent.pilot.upstream.traceparent'] ? { traceparent: record['agent.pilot.upstream.traceparent'] } : {}),
+        ...(record['agent.pilot.upstream.tracestate'] ? { tracestate: record['agent.pilot.upstream.tracestate'] } : {}),
+      };
       delete checkpoint.incoming;
     }
   }

@@ -4,6 +4,11 @@ import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 
 const MAX_RECORD_BYTES = 8192;
+const PENDING_BINDING_MS = 15_000;
+
+function correlateDirectory(dataDir) {
+  return path.join(dataDir || process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot'), 'acp-correlate');
+}
 
 function validIdentity(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 512 && !value.includes('\0');
@@ -39,13 +44,14 @@ function readRecord(file) {
   }
 }
 
-export function publishUpstreamRecord(file, record) {
+export function publishUpstreamRecord(file, record, { replace = false } = {}) {
   const serialized = JSON.stringify(record);
   if (Buffer.byteLength(serialized) > MAX_RECORD_BYTES) throw new Error('record too large');
   const temporary = path.join(path.dirname(file), `.ingress-${randomUUID()}.tmp`);
   try {
     fs.writeFileSync(temporary, serialized, { flag: 'wx', mode: 0o600 });
-    fs.linkSync(temporary, file);
+    if (replace) fs.renameSync(temporary, file);
+    else fs.linkSync(temporary, file);
     return true;
   } catch (error) {
     if (error?.code === 'EEXIST') return false;
@@ -72,7 +78,7 @@ export function bindUpstreamTurn({ agentId, sessionId, nativeTurnId, carrier, da
   try {
     const context = normalizeUpstreamCarrier(carrier);
     if (![agentId, sessionId, nativeTurnId].every(validIdentity) || !context) return { recorded: false, reason: 'invalid' };
-    const dir = path.join(dataDir || process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot'), 'acp-correlate');
+    const dir = correlateDirectory(dataDir);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const file = turnFile(dir, agentId, sessionId, nativeTurnId);
     if (publishUpstreamRecord(file, { schema: 1, type: 'ingress', agentId, sessionId, nativeTurnId, ...context })) return { recorded: true };
@@ -82,6 +88,53 @@ export function bindUpstreamTurn({ agentId, sessionId, nativeTurnId, carrier, da
   } catch {
     return { recorded: false, reason: 'io' };
   }
+}
+
+export function bindProcessUpstreamTurn({ agentId, sessionId, nativeTurnId, dataDir, env = process.env }) {
+  const requestId = env.LOONGSUITE_PILOT_INGRESS_REQUEST_ID;
+  const carrier = normalizeUpstreamCarrier(env);
+  if (![agentId, sessionId, nativeTurnId, requestId].every(validIdentity) || !carrier) {
+    return { recorded: false, reason: 'invalid' };
+  }
+  try {
+    const dir = correlateDirectory(dataDir);
+    const digest = createHash('sha256').update(JSON.stringify([agentId, requestId])).digest('hex');
+    const claim = path.join(dir, `ingress-request-${digest}.json`);
+    const owner = { sessionId, nativeTurnId, ...carrier };
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (!publishUpstreamRecord(claim, owner)) {
+      const existing = readRecord(claim);
+      if (!existing || JSON.stringify(existing) !== JSON.stringify(owner)) return { recorded: false, reason: 'conflict' };
+    }
+    return bindUpstreamTurn({ agentId, sessionId, nativeTurnId, carrier, dataDir });
+  } catch {
+    return { recorded: false, reason: 'io' };
+  }
+}
+
+function pendingFile(dir, agentId, sessionId) {
+  const digest = createHash('sha256').update(JSON.stringify([agentId, sessionId])).digest('hex');
+  return path.join(dir, `ingress-pending-${digest}.json`);
+}
+
+export function hasPendingUpstreamTurn(dir, agentId, sessionId, now = Date.now()) {
+  if (![agentId, sessionId].every(validIdentity)) return false;
+  const pending = readRecord(pendingFile(dir, agentId, sessionId));
+  return pending?.agentId === agentId && pending.sessionId === sessionId
+    && Number.isSafeInteger(pending.expiresAt) && pending.expiresAt > now
+    && pending.expiresAt <= now + PENDING_BINDING_MS;
+}
+
+export function prepareUpstreamTurn({ agentId, sessionId, carrier, dataDir } = {}) {
+  const context = normalizeUpstreamCarrier(carrier);
+  if (![agentId, sessionId].every(validIdentity) || !context) return null;
+  try {
+    const dir = correlateDirectory(dataDir);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    publishUpstreamRecord(pendingFile(dir, agentId, sessionId),
+      { agentId, sessionId, expiresAt: Date.now() + PENDING_BINDING_MS }, { replace: true });
+  } catch {}
+  return nativeTurnId => bindUpstreamTurn({ agentId, sessionId, nativeTurnId, carrier: context, dataDir });
 }
 
 export function readUpstreamSession(correlateDir, sessionId) {

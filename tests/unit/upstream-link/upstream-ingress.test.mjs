@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { bindUpstreamTurn, readUpstreamTurn, normalizeUpstreamCarrier, readUpstreamSession } from '../../../assets/hooks/shared/upstream-ingress.mjs';
+import { bindProcessUpstreamTurn, bindUpstreamTurn, prepareUpstreamTurn, readUpstreamTurn, normalizeUpstreamCarrier, readUpstreamSession } from '../../../assets/hooks/shared/upstream-ingress.mjs';
 import { recordUpstreamContextOnce } from '../../../assets/hooks/shared/upstream-context.mjs';
 import { TraceLinker } from '../../../src/core/upstream-link/trace-linker.ts';
 import { CorrelationStore } from '../../../src/core/upstream-link/correlation-store.ts';
@@ -48,6 +48,31 @@ describe('shared upstream ingress', () => {
       for (const record of entries) expect(record.trace_id).toBe(record['gen_ai.agent.type'] === 'opencode' || record['gen_ai.turn.id'] === 'prompt-2'
         ? 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' : '4bf92f3577b34da6a3ce929d0e0e4736');
     }
+  });
+
+  it('allows each process request to claim one native turn on a resumed session', () => {
+    const env = { TRACEPARENT: TP, TRACESTATE: 'vendor=value', LOONGSUITE_PILOT_INGRESS_REQUEST_ID: 'request-1' };
+    expect(bindProcessUpstreamTurn({ ...binding(), env }).recorded).toBe(true);
+    expect(bindProcessUpstreamTurn({ ...binding(), env }).recorded).toBe(true);
+    expect(bindProcessUpstreamTurn({ ...binding('prompt-2'), env })).toEqual({ recorded: false, reason: 'conflict' });
+    const secondEnv = { ...env, TRACEPARENT: SECOND_TP, LOONGSUITE_PILOT_INGRESS_REQUEST_ID: 'request-2' };
+    expect(bindProcessUpstreamTurn({ ...binding('prompt-2'), env: secondEnv }).recorded).toBe(true);
+    expect(readUpstreamTurn(path.join(dataDir, 'acp-correlate'), 'claude-code', 'session-1', 'prompt-2')?.traceparent).toBe(SECOND_TP);
+  });
+
+  it('waits for native identity after an adapter announces a pending binding', async () => {
+    const bind = prepareUpstreamTurn(binding('prompt-2'));
+    expect(bind).toBeTypeOf('function');
+    const record = entry('prompt-2');
+    const linker = new TraceLinker(new CorrelationStore(path.join(dataDir, 'acp-correlate')), { retries: 2, retryDelayMs: 10 });
+    const stamping = linker.stamp([record]);
+    expect(record.trace_id).toBe('local');
+    expect(bind('prompt-2').recorded).toBe(true);
+    await stamping;
+    expect(record.trace_id).toBe(TP.split('-')[1]);
+    const unbound = entry('prompt-3');
+    await linker.stamp([unbound]);
+    expect(unbound.trace_id).toBe('local');
   });
 
   it('rejects malformed carriers, corrupt/oversized/symlinked state and invalid identities without throwing', () => {

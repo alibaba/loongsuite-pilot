@@ -165,7 +165,7 @@ export class TraceLinker {
     const isFirstTurn = this.firstTurnBySession.get(sessionKey(entry)) === turnId;
     const agentId = entry['gen_ai.agent.type'];
     const exact = typeof agentId === 'string' && nativeId
-      ? this.store.resolveNativeTurn(agentId, sessionId, nativeId) : null;
+      ? await this.resolveNativeWithRetry(agentId, sessionId, nativeId) : null;
     const carrier = exact ?? (text || hash ? await this.resolveWithRetry(sessionId, text, isFirstTurn, turnId, hash) : null);
     if (exact && isFirstTurn) this.store.markSessionConsumed(sessionId);
 
@@ -182,6 +182,16 @@ export class TraceLinker {
     const state: ResolveState = { resolved: true, traceId: parsed.traceId, parentSpanId: parsed.spanId, carrier };
     this.cache.set(key, state);
     this.apply(entry, state);
+  }
+
+  private async resolveNativeWithRetry(agentId: string, sessionId: string, nativeTurnId: string): Promise<UpstreamCarrier | null> {
+    let carrier = this.store.resolveNativeTurn(agentId, sessionId, nativeTurnId);
+    if (carrier || !this.store.isNativeBindingPending(agentId, sessionId)) return carrier;
+    for (let attempt = 0; !carrier && attempt < this.retries; attempt += 1) {
+      await sleep(this.retryDelayMs);
+      carrier = this.store.resolveNativeTurn(agentId, sessionId, nativeTurnId);
+    }
+    return carrier;
   }
 
   private async resolveWithRetry(sessionId: string, text: string, isFirstTurn: boolean, turnId: string, hash?: string): Promise<UpstreamCarrier | null> {

@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { contentHash } from '../../utils/content-hash.js';
 import { createLogger } from '../../utils/logger.js';
-import { readUpstreamSession, readUpstreamTurn, type UpstreamCarrier } from '../../../assets/hooks/shared/upstream-ingress.mjs';
+import { hasPendingUpstreamTurn, readUpstreamSession, readUpstreamTurn, type UpstreamCarrier } from '../../../assets/hooks/shared/upstream-ingress.mjs';
 
 const logger = createLogger('correlation-store');
 
@@ -227,6 +227,10 @@ export class CorrelationStore {
 
   resolveNativeTurn(agentId: string, sessionId: string, nativeTurnId: string): UpstreamCarrier | null {
     return readUpstreamTurn(this.dir, agentId, sessionId, nativeTurnId);
+  }
+
+  isNativeBindingPending(agentId: string, sessionId: string): boolean {
+    return hasPendingUpstreamTurn(this.dir, agentId, sessionId);
   }
 
   resolveTurnContext(sessionId: string, collectedText: string, turnId?: string, collectedHash?: string): UpstreamCarrier | null {
