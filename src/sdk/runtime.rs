@@ -422,7 +422,13 @@ fn run_agent(
         roots.push(markers.clone());
     }
     roots.push(state_dir.canonicalize()?);
-    let scope = SourceScope::new(roots, plan.max_files, plan.max_read_bytes);
+    let isolated_codex = checkpoint_key == "codex-transcript";
+    let mut scope = SourceScope::new(roots, plan.max_files, plan.max_read_bytes);
+    // Linux Codex already runs on a dedicated source runtime. Keep the
+    // guarded open and read together there instead of waking a blocking task.
+    Arc::get_mut(&mut scope)
+        .expect("new source scope")
+        .inline_reads = cfg!(target_os = "linux") && isolated_codex;
     scope.set_log(state_dir.join("collector.log"));
     let start_scope = scope.clone();
     source_access::install(Some(scope.clone()));
@@ -435,7 +441,11 @@ fn run_agent(
         .on_thread_start(move || source_access::install(Some(start_scope.clone())))
         .on_thread_stop(|| source_access::install(None))
         .build()?;
-    let store = Arc::new(StateStore::new(&checkpoint));
+    let store = Arc::new(if isolated_codex {
+        StateStore::new_sdk_source(&checkpoint)
+    } else {
+        StateStore::new(&checkpoint)
+    });
     if let Some(state) = &plan.pilot_host {
         runtime.block_on(import_pilot_checkpoint(
             &state.data_dir,

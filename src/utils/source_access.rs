@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 thread_local! {static SCOPE:RefCell<Option<Arc<SourceScope>>>=const{RefCell::new(None)};}
 pub struct SourceScope {
+    pub(crate) inline_reads: bool,
     roots: Vec<PathBuf>,
     max_files: usize,
     opened: Mutex<HashSet<PathBuf>>,
@@ -20,6 +21,7 @@ pub struct SourceScope {
 impl SourceScope {
     pub fn new(roots: Vec<PathBuf>, max_files: usize, max_read_bytes: usize) -> Arc<Self> {
         Arc::new(Self {
+            inline_reads: false,
             roots,
             max_files,
             opened: Mutex::new(HashSet::new()),
@@ -227,8 +229,12 @@ pub(crate) async fn open_with<T: Send + 'static>(
     path: impl AsRef<Path>,
     operation: impl FnOnce(File) -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
-    let path = path.as_ref().to_owned();
+    let path = path.as_ref();
     let scope = current();
+    if scope.as_ref().is_some_and(|scope| scope.inline_reads) {
+        return operation(open_scoped(path, scope)?);
+    }
+    let path = path.to_owned();
     tokio::task::spawn_blocking(move || operation(open_scoped(&path, scope)?))
         .await
         .map_err(io::Error::other)?
@@ -240,24 +246,42 @@ pub(crate) async fn inspect_batch<T: Send + 'static>(
     inspect: fn(&File) -> io::Result<T>,
 ) -> io::Result<Vec<io::Result<T>>> {
     let scope = current();
-    tokio::task::spawn_blocking(move || {
+    let inline = scope.as_ref().is_some_and(|scope| scope.inline_reads);
+    let inspect_paths = move || {
         paths
             .into_iter()
             .map(|path| open_source(&path, scope.as_deref(), true).and_then(|file| inspect(&file)))
             .collect()
-    })
-    .await
-    .map_err(io::Error::other)
+    };
+    if inline {
+        Ok(inspect_paths())
+    } else {
+        tokio::task::spawn_blocking(inspect_paths)
+            .await
+            .map_err(io::Error::other)
+    }
 }
 
 pub async fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
     let limit = read_limit(usize::MAX);
+    if let Some(scope) = current().filter(|scope| scope.inline_reads) {
+        use std::io::Read;
+        let file = open_scoped(path.as_ref(), Some(scope))?;
+        let mut bytes = Vec::new();
+        file.take(limit.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)?;
+        return check_read_limit(bytes, limit);
+    }
     let file = open_async(path).await?;
     let mut bytes = Vec::new();
     file.take(limit.saturating_add(1) as u64)
         .read_to_end(&mut bytes)
         .await?;
+    check_read_limit(bytes, limit)
+}
+
+fn check_read_limit(bytes: Vec<u8>, limit: usize) -> io::Result<Vec<u8>> {
     if bytes.len() > limit {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
@@ -316,4 +340,32 @@ pub fn private_path(path: &Path) -> io::Result<()> {
 pub fn open_under(path: &Path, root: &Path) -> io::Result<File> {
     let scope = SourceScope::new(vec![root.canonicalize()?], 1, usize::MAX);
     open_scoped(path, Some(scope))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inline_source_read_retains_size_and_symlink_checks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let source = root.join("events.jsonl");
+        let linked = root.join("linked.jsonl");
+        std::fs::write(&source, b"test-data").unwrap();
+        symlink(&source, &linked).unwrap();
+        let mut scope = SourceScope::new(vec![root], 2, 4);
+        Arc::get_mut(&mut scope).unwrap().inline_reads = true;
+        install(Some(scope));
+        let over_budget = read(&source).await.unwrap_err();
+        let denied = read(&linked).await.unwrap_err();
+        std::fs::write(&source, b"test").unwrap();
+        let data = read(&source).await.unwrap();
+        install(None);
+
+        assert_eq!(over_budget.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(data, b"test");
+    }
 }
