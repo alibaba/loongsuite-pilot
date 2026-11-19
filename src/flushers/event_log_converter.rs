@@ -353,10 +353,16 @@ fn convert_group(
         .iter()
         .rev()
         .filter(|record| record.event_name == Some(AgentEventName::LlmResponse));
+    let mut request_models = source
+        .iter()
+        .filter_map(|record| record.request_model.as_ref());
     for (key, value) in [
         (
             "gen_ai.request.model",
-            source.iter().find_map(|r| r.request_model.as_ref()),
+            request_models
+                .clone()
+                .find(|model| !model.is_empty() && model.as_str() != "unknown")
+                .or_else(|| request_models.find(|model| !model.is_empty())),
         ),
         (
             "gen_ai.response.model",
@@ -616,7 +622,14 @@ fn convert_group(
             }) {
                 input_records.retain(|record| record.event_name != Some(AgentEventName::Other));
             }
-            if let Some(input) = materialize_input(&input_records) {
+            let input = if first.agent_type == "openclaw"
+                && start.event_name == Some(AgentEventName::LlmRequest)
+            {
+                openclaw_request_input(start, &input_records)
+            } else {
+                None
+            };
+            if let Some(input) = input.or_else(|| materialize_input(&input_records)) {
                 leaf.attributes.insert(
                     "gen_ai.input.messages".into(),
                     Value::String(input.to_string()),
@@ -917,6 +930,24 @@ fn restore_skill_identity(
     }
 }
 
+fn openclaw_request_input(
+    request: &AgentActivityEntry,
+    records: &[&AgentActivityEntry],
+) -> Option<Value> {
+    if let Some(full) = request.input_messages.as_ref().and_then(message_array) {
+        return Some(Value::Array(full));
+    }
+    // The full snapshot belongs to that model call. Subsequent incremental
+    // calls use the conversation deltas and carry system instructions separately.
+    let deltas: Vec<_> = records
+        .iter()
+        .filter(|record| record.event_name == Some(AgentEventName::LlmRequest))
+        .filter_map(|record| record.input_messages_delta.as_ref().and_then(message_array))
+        .flatten()
+        .collect();
+    (!deltas.is_empty()).then_some(Value::Array(deltas))
+}
+
 fn materialize_input(records: &[&AgentActivityEntry]) -> Option<Value> {
     let mut messages = Vec::new();
     let mut present = false;
@@ -1127,6 +1158,8 @@ mod tests {
 
     #[test]
     fn preserves_conversation_models_provider_and_skill_identity() {
+        let mut hook = event("other", "90");
+        hook.request_model = Some("unknown".into());
         let mut request = event("llm.request", "100");
         request.request_model = Some("requested-model".into());
         request.provider_name = "test-provider".into();
@@ -1145,7 +1178,7 @@ mod tests {
         result.span_id = None;
         let converted = GenAiEventLogConverter
             .convert(
-                &[request, response, call, result],
+                &[hook, request, response, call, result],
                 &ConvertOptions::default(),
             )
             .unwrap();
@@ -1166,6 +1199,38 @@ mod tests {
         }
         assert_eq!(attrs("TOOL")["gen_ai.skill.name"], "qw-app");
         assert_eq!(attrs("TOOL")["gen_ai.skill.id"], "qw-app");
+    }
+
+    #[test]
+    fn openclaw_incremental_requests_do_not_repeat_snapshot_system_messages() {
+        let system = json!({"role": "system", "parts": [{"type": "text", "content": "system"}]});
+        let user = json!({"role": "user", "parts": [{"type": "text", "content": "user"}]});
+        let tool = json!({"role": "tool", "parts": [{"type": "tool_call_response", "id": "read"}]});
+        let mut first = event("llm.request", "100");
+        let mut end = event("llm.response", "200");
+        let mut next = event("llm.request", "300");
+        let mut next_end = event("llm.response", "400");
+        first.input_messages = Some(json!([system, user]));
+        first.input_messages_delta = Some(json!([user]));
+        next.input_messages_delta = Some(json!([tool]));
+        for event in [&mut next, &mut next_end] {
+            event.step_id = Some("s2".into());
+            event.response_id = Some("second-response".into());
+            event.span_id = None;
+        }
+        for event in [&mut first, &mut end, &mut next, &mut next_end] {
+            event.agent_type = "openclaw".into();
+        }
+        let converted = GenAiEventLogConverter
+            .convert(&[first, end, next, next_end], &ConvertOptions::default())
+            .unwrap();
+        let observed: Vec<_> = converted
+            .spans
+            .iter()
+            .filter(|span| span.attributes["gen_ai.span.kind"] == "LLM")
+            .map(|span| message_array(&span.attributes["gen_ai.input.messages"]).unwrap())
+            .collect();
+        assert_eq!(observed, vec![vec![system, user.clone()], vec![user, tool]]);
     }
 
     #[test]
