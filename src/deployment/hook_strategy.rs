@@ -1566,7 +1566,7 @@ impl HookStrategy {
             let direct_binary = (!uninstall).then(|| self.sdk_hook_binary(def)).flatten();
             let indexed_codex = def.id == "codex"
                 && self.resource_roots.is_some()
-                && (direct_binary.is_some() || self.codex_legacy_cache.is_some() || uninstall);
+                && (direct_binary.is_some() || self.codex_legacy_cache.is_some());
             if self.embedded_codex.is_none() {
                 for retired in &retired {
                     if indexed_codex {
@@ -2085,8 +2085,11 @@ impl HookStrategy {
             .codex_legacy_cache
             .clone()
             .unwrap_or_else(|| hook_cache_dir(root));
-        if stable.as_deref() != Some(executable.as_path())
-            && !qoder_version_binary(&executable, &cache)
+        use crate::sdk::agent_hooks::codex_shell_path;
+        if !stable
+            .as_deref()
+            .is_some_and(|path| codex_shell_path(path).as_ref() == executable.as_path())
+            && !qoder_version_binary(&executable, &codex_shell_path(&cache))
         {
             return false;
         }

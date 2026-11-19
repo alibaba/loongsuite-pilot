@@ -1974,7 +1974,8 @@ fn codex_sdk_deploys_trusted_hooks_and_cleans_only_its_own() {
         let mut process = {
             use std::os::windows::process::CommandExt;
             let mut c = Command::new("cmd.exe");
-            c.arg("/C").raw_arg(format!("\"{command}\""));
+            assert!(!command.starts_with(r#""\\?\"#), "{command}");
+            c.args(["/D", "/S", "/C"]).raw_arg(format!("\"{command}\""));
             c
         };
         let mut child = process

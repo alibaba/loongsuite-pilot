@@ -198,11 +198,30 @@ pub(crate) fn codex_command_executable(command: &str) -> Option<PathBuf> {
     (quote_codex_path(&executable).as_deref() == Some(quoted)).then_some(executable)
 }
 
+pub(crate) fn codex_shell_path(path: &Path) -> std::borrow::Cow<'_, Path> {
+    #[cfg(windows)]
+    if let Some(path) = path.to_str() {
+        // cmd.exe cannot execute a verbatim-prefixed program path. Keep
+        // verbatim paths for filesystem I/O and lower them at the command boundary.
+        if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+            return std::borrow::Cow::Owned(PathBuf::from(format!(r"\\{unc}")));
+        }
+        if let Some(disk) = path.strip_prefix(r"\\?\").filter(|rest| {
+            let bytes = rest.as_bytes();
+            bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1..3) == Some(b":\\")
+        }) {
+            return std::borrow::Cow::Owned(PathBuf::from(disk));
+        }
+    }
+    std::borrow::Cow::Borrowed(path)
+}
+
 fn quote_codex_path(path: &Path) -> Option<String> {
     if !path.is_absolute() {
         return None;
     }
-    let path = path.to_str()?;
+    let shell_path = codex_shell_path(path);
+    let path = shell_path.to_str()?;
     if path.chars().any(char::is_control) {
         return None;
     }
