@@ -43,7 +43,7 @@ impl SdkAgent {
         Self {
             input,
             init: init.to_string().into_bytes(),
-            managed: configure_managed_hook(&policy, &sdk_data),
+            managed: configure_managed_hook(&policy, &sdk_data, manager),
             policy: policy.to_string().into_bytes(),
             manager: Arc::downgrade(manager),
             sdk_data,
@@ -64,7 +64,7 @@ impl SdkAgent {
         Self {
             input: "qoder-trace",
             init: init.to_string().into_bytes(),
-            managed: configure_managed_hook(&policy, &sdk_data),
+            managed: configure_managed_hook(&policy, &sdk_data, manager),
             policy: policy.to_string().into_bytes(),
             manager: Arc::downgrade(manager),
             sdk_data,
@@ -138,7 +138,11 @@ impl SdkAgent {
     }
 }
 
-fn configure_managed_hook(policy: &Value, sdk_data: &std::path::Path) -> Option<Arc<ManagedHook>> {
+fn configure_managed_hook(
+    policy: &Value,
+    sdk_data: &std::path::Path,
+    manager: &Arc<InputManager>,
+) -> Option<Arc<ManagedHook>> {
     if policy
         .pointer("/sdk_options/hooks/local/mode")
         .and_then(Value::as_str)
@@ -149,7 +153,7 @@ fn configure_managed_hook(policy: &Value, sdk_data: &std::path::Path) -> Option<
     sdk_data
         .parent()?
         .parent()
-        .map(|data| Arc::new(ManagedHook::new(data)))
+        .map(|data| Arc::new(ManagedHook::new(data).with_owner(manager)))
 }
 
 struct Context {
@@ -165,6 +169,23 @@ struct Context {
 }
 
 impl Context {
+    fn observe_interceptor(&self, snapshot: &Value, initial: bool) {
+        let Some(manager) = self.manager.upgrade() else {
+            return;
+        };
+        let mut status = snapshot["interceptor"].clone();
+        if status["enabled"] == true {
+            if let Some(rules) = &self.managed {
+                let builtin = status["rules"]["builtin"].clone();
+                let (rule_status, diagnostics) = rules.monitoring(initial);
+                status["rules"] = rule_status;
+                status["rules"]["builtin"] = builtin;
+                status["diagnostics"] = diagnostics;
+            }
+        }
+        manager.interceptor.observe(self.input, status);
+    }
+
     fn export_drained_checkpoint(
         &self,
         api: &abi::PilotApiV2,
@@ -261,24 +282,37 @@ unsafe extern "C" fn on_start(
     ctx: *mut c_void,
     _: *mut abi::PilotHandle,
     code: i32,
-    _: abi::PilotJsonView,
+    report: abi::PilotJsonView,
 ) {
     // SAFETY: both lifecycle callbacks run on the owning dispatch thread.
-    unsafe { &*ctx.cast::<Context>() }
-        .start_result
-        .store(code, Ordering::Release);
+    let context = unsafe { &*ctx.cast::<Context>() };
+    observe_lifecycle(context, report, code == abi::OK);
+    context.start_result.store(code, Ordering::Release);
 }
 
 unsafe extern "C" fn on_stop(
     ctx: *mut c_void,
     _: *mut abi::PilotHandle,
     code: i32,
-    _: abi::PilotJsonView,
+    report: abi::PilotJsonView,
 ) {
     // SAFETY: both lifecycle callbacks run on the owning dispatch thread.
-    unsafe { &*ctx.cast::<Context>() }
-        .stop_result
-        .store(code, Ordering::Release);
+    let context = unsafe { &*ctx.cast::<Context>() };
+    observe_lifecycle(context, report, false);
+    context.stop_result.store(code, Ordering::Release);
+}
+
+fn observe_lifecycle(context: &Context, report: abi::PilotJsonView, initial: bool) {
+    if report.data.is_null() || report.len == 0 {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: the SDK owns this report view for the duration of the callback.
+        let bytes = unsafe { std::slice::from_raw_parts(report.data, report.len) };
+        if let Ok(snapshot) = serde_json::from_slice::<Value>(bytes) {
+            context.observe_interceptor(&snapshot, initial);
+        }
+    }));
 }
 
 unsafe extern "C" fn on_activity(
@@ -327,6 +361,9 @@ unsafe extern "C" fn on_monitoring(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| "invalid SDK monitoring JSON")?;
         for row in parsed {
+            if row["event.name"] == "pilot.monitoring" {
+                ctx.observe_interceptor(&row["snapshot"], false);
+            }
             // Full Pilot already reports process CPU/RSS and resource alarms.
             if row["event.name"] == "pilot.alarm" && row["metrics_scope"] != "host_process" {
                 manager.accept_sdk_alarm(ctx.input, &row);

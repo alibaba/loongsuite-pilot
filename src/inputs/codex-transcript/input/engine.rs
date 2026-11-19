@@ -381,6 +381,8 @@ impl<'a> CodexTranscriptEngine<'a> {
         });
         if let Some((dir_mtimes, files)) = cached {
             if rollout_dirs_unchanged(&dir_mtimes).await {
+                self.body
+                    .with_shared(|shared| shared.default_scan_complete = true);
                 return files;
             }
         }
@@ -388,6 +390,11 @@ impl<'a> CodexTranscriptEngine<'a> {
         let mut dir_mtimes = Vec::new();
         let complete =
             collect_rollout_files(&self.body.session_dir, &mut files, &mut dir_mtimes).await;
+        let root_missing = !complete
+            && tokio::fs::symlink_metadata(&self.body.session_dir)
+                .await
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        let complete = complete || root_missing;
         if !complete {
             crate::utils::create_logger("CodexTranscriptInput").warn(
                 "Codex rollout directory scan failed; retrying next poll",
@@ -395,6 +402,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             );
         }
         self.body.with_shared(|shared| {
+            shared.default_scan_complete = complete;
             shared.cached_default = if !complete || dir_mtimes.is_empty() {
                 None
             } else {

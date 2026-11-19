@@ -91,6 +91,8 @@ pub struct Outbox {
     pub callbacks: AtomicU64,
     pub last_error: Mutex<Option<String>>,
     pub identity: RwLock<Value>,
+    pub local_hook_stats: Mutex<crate::interceptor::status::HookActivity>,
+    pub local_hook_config: Mutex<Option<usize>>,
     pub hook_timings: Mutex<Vec<crate::metrics::HookTimingStats>>,
     pub callback_duration_us: AtomicU64,
     pub total_delay_ms: AtomicU64,
@@ -150,6 +152,8 @@ impl Outbox {
             callback_duration_us: AtomicU64::new(0),
             total_delay_ms: AtomicU64::new(0),
             last_ack_ms: AtomicU64::new(0),
+            local_hook_stats: Default::default(),
+            local_hook_config: Default::default(),
             start_time: chrono::Utc::now().to_rfc3339(),
             path,
         }))

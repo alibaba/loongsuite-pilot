@@ -175,6 +175,7 @@ pub struct InputManager {
     flusher: Mutex<Option<Arc<dyn BaseFlusher>>>,
     state_store: Mutex<Option<Arc<crate::checkpoints::StateStore>>>,
     alarm_manager: Mutex<Option<Arc<AlarmManager>>>,
+    pub(super) interceptor: super::interceptor_metrics::InterceptorMetrics,
     user_id: Mutex<String>,
     configured_user_id: Mutex<String>,
     content_policy: Mutex<AgentsConfig>,
@@ -197,6 +198,7 @@ impl InputManager {
             flusher: Mutex::new(None),
             state_store: Mutex::new(None),
             alarm_manager: Mutex::new(None),
+            interceptor: Default::default(),
             user_id: Mutex::new(String::new()),
             configured_user_id: Mutex::new(String::new()),
             content_policy: Mutex::new(AgentsConfig::new()),
@@ -881,6 +883,12 @@ impl InputManager {
             counter.in_bytes += batch_bytes;
             counter.last_poll_time = format_time(Local::now());
             counter.last_active_time = now_ms();
+        }
+    }
+
+    pub(super) fn record_interceptor_fault(&self, index: usize, payload: &serde_json::Value) {
+        if let Some(alarm) = self.alarm_manager.lock().expect("alarm").clone() {
+            self.interceptor.fault(&alarm, index, payload);
         }
     }
 
