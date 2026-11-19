@@ -175,6 +175,7 @@ pub struct InputManager {
     flusher: Mutex<Option<Arc<dyn BaseFlusher>>>,
     state_store: Mutex<Option<Arc<crate::checkpoints::StateStore>>>,
     alarm_manager: Mutex<Option<Arc<AlarmManager>>>,
+    pub(super) interceptor: super::interceptor_metrics::InterceptorMetrics,
     user_id: Mutex<String>,
     configured_user_id: Mutex<String>,
     content_policy: Mutex<AgentsConfig>,
@@ -197,6 +198,7 @@ impl InputManager {
             flusher: Mutex::new(None),
             state_store: Mutex::new(None),
             alarm_manager: Mutex::new(None),
+            interceptor: Default::default(),
             user_id: Mutex::new(String::new()),
             configured_user_id: Mutex::new(String::new()),
             content_policy: Mutex::new(AgentsConfig::new()),
@@ -682,7 +684,11 @@ impl InputManager {
         if let Some(linker) = self.intercept_linker.lock().expect("intercept").clone() {
             linker.enrich(&mut entries);
         }
-        if input_id == "qoder-trace" || crate::utils::source_access::current().is_none() {
+        if matches!(
+            input_id,
+            "qoder-trace" | "codex-transcript" | "codex-aborted-turn"
+        ) || crate::utils::source_access::current().is_none()
+        {
             enrich_canonical_entries_with_git(&mut entries).await;
         }
         if let Some(counter) = self.counters.lock().expect("counters").get_mut(input_id) {
@@ -831,11 +837,17 @@ impl InputManager {
         let codex = matches!(input_id, "codex-transcript" | "codex-aborted-turn");
         let qwen_work = input_id == "qwen-work-cn-trace";
         if !codex && !qwen_work {
-            if let Some(result) = flusher.send_sdk_activity(rows).await {
-                let entry_count = rows.len();
-                let batch_bytes = rows.iter().map(|row| row.len() as u64).sum();
-                self.record_sdk_input(input_id, entry_count, batch_bytes);
-                return self.finish_dispatch(input_id, entry_count, batch_bytes, result);
+            if let Some(result) = self.forward_sdk_rows(input_id, &*flusher, rows).await {
+                return result;
+            }
+        }
+        if codex
+            && self.trace_linker().is_none()
+            && flusher.supports_sdk_activity()
+            && crate::normalization::codex_sdk_rows_keep_git_context(rows)
+        {
+            if let Some(result) = self.forward_sdk_rows(input_id, &*flusher, rows).await {
+                return result;
             }
         }
         let mut entries = rows
@@ -844,10 +856,19 @@ impl InputManager {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| "invalid SDK activity JSON")?;
         let encoded = if codex || qwen_work {
-            enrich_canonical_entries_with_git(&mut entries).await;
+            // Only the full shell inspects workspaces and links Codex ACP context.
+            let mut changed = enrich_canonical_entries_with_git(&mut entries).await;
             if codex {
                 if let Some(linker) = self.trace_linker() {
                     linker.stamp(&mut entries).await;
+                    changed = true;
+                }
+            }
+            // Canonical Codex rows can use the raw dispatch fast path once
+            // workspace and audit defaults have been accounted for.
+            if codex && !changed && entries.iter().all(|row| row.get("event.kind").is_none()) {
+                if let Some(result) = self.forward_sdk_rows(input_id, &*flusher, rows).await {
+                    return result;
                 }
             }
             entries
@@ -859,6 +880,19 @@ impl InputManager {
             rows.iter().map(|row| row.to_vec()).collect()
         };
         self.accept_sdk_batch(input_id, entries, encoded).await
+    }
+
+    async fn forward_sdk_rows(
+        &self,
+        input_id: &str,
+        flusher: &dyn BaseFlusher,
+        rows: &[&[u8]],
+    ) -> Option<Result<(), String>> {
+        let result = flusher.send_sdk_activity(rows).await?;
+        let entry_count = rows.len();
+        let batch_bytes = rows.iter().map(|row| row.len() as u64).sum();
+        self.record_sdk_input(input_id, entry_count, batch_bytes);
+        Some(self.finish_dispatch(input_id, entry_count, batch_bytes, result))
     }
 
     pub(super) async fn accept_sdk_batch(
@@ -881,6 +915,12 @@ impl InputManager {
             counter.in_bytes += batch_bytes;
             counter.last_poll_time = format_time(Local::now());
             counter.last_active_time = now_ms();
+        }
+    }
+
+    pub(super) fn record_interceptor_fault(&self, index: usize, payload: &serde_json::Value) {
+        if let Some(alarm) = self.alarm_manager.lock().expect("alarm").clone() {
+            self.interceptor.fault(&alarm, index, payload);
         }
     }
 

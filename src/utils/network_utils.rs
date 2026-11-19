@@ -10,6 +10,10 @@ use std::sync::OnceLock;
 /// Interface order follows `/proc/net/dev` on Linux, which is close to
 /// `os.networkInterfaces()` but not identical when several external IPv4s exist.
 pub fn resolve_local_ip() -> String {
+    primary_ipv4().0
+}
+
+fn primary_ipv4() -> (String, String) {
     let networks = sysinfo::Networks::new_with_refreshed_list();
     let mut by_name: HashMap<String, Vec<Ipv4Addr>> = HashMap::new();
     let mut names = Vec::new();
@@ -27,10 +31,15 @@ pub fn resolve_local_ip() -> String {
     }
     for name in interface_order(&names) {
         if let Some(addr) = by_name.get(&name).and_then(|ips| ips.first()) {
-            return addr.to_string();
+            let mac = networks
+                .get(&name)
+                .map(|data| data.mac_address().to_string())
+                .filter(|mac| mac != "00:00:00:00:00:00")
+                .unwrap_or_default();
+            return (addr.to_string(), mac);
         }
     }
-    "127.0.0.1".to_string()
+    ("127.0.0.1".to_string(), String::new())
 }
 
 fn interface_order(known: &[String]) -> Vec<String> {
@@ -56,8 +65,45 @@ fn interface_order(known: &[String]) -> Vec<String> {
 }
 
 pub fn local_ip() -> &'static str {
-    static IP: OnceLock<String> = OnceLock::new();
-    IP.get_or_init(resolve_local_ip).as_str()
+    &local_network_identity().0
+}
+
+fn local_network_identity() -> &'static (String, String) {
+    static IDENTITY: OnceLock<(String, String)> = OnceLock::new();
+    IDENTITY.get_or_init(primary_ipv4)
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct SlsHostIdentity {
+    serial: String,
+    mac: &'static str,
+}
+
+impl SlsHostIdentity {
+    pub(crate) fn new(enabled: bool, serial: &str) -> Self {
+        if enabled {
+            Self {
+                serial: serial.trim().to_owned(),
+                mac: &local_network_identity().1,
+            }
+        } else {
+            Self::default()
+        }
+    }
+
+    pub(crate) fn mac(&self) -> Option<&str> {
+        (!self.mac.is_empty()).then_some(self.mac)
+    }
+
+    pub(crate) fn serial(&self) -> Option<&str> {
+        (!self.serial.is_empty()).then_some(self.serial.as_str())
+    }
+
+    pub(crate) fn tags(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        [("__mac__", self.mac()), ("__sn__", self.serial())]
+            .into_iter()
+            .filter_map(|(key, value)| value.map(|value| (key, value)))
+    }
 }
 
 pub fn build_user_agent(data_dir: &str) -> String {

@@ -47,6 +47,10 @@ pub(crate) struct Input {
     pub(crate) collection_mode: Option<CollectionMode>,
     pub(crate) detection_failure_threshold: Option<u64>,
     pub(crate) api_base: Option<String>,
+    pub(crate) backend_identity_url: Option<String>,
+    pub(crate) local_daemon_pid: Option<u32>,
+    #[serde(skip)]
+    pub(crate) local_token: Option<String>,
     pub(crate) token_env: Option<String>,
     pub(crate) token_file: Option<PathBuf>,
     pub(crate) workspace_ids: Vec<String>,
@@ -145,6 +149,7 @@ impl Input {
         for url in self
             .api_base
             .iter()
+            .chain(&self.backend_identity_url)
             .chain(&self.pprof_base_url)
             .chain(&self.metrics_urls)
             .chain(&self.daemon_health_urls)

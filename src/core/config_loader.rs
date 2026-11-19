@@ -197,6 +197,15 @@ pub fn assemble_config(
         auto_start: true,
         data_dir: data_dir.clone(),
         user_id,
+        host_sn: json_str(file.and_then(|value| value.get("hostSn")))
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+        host_identity_tags: env_bool(
+            sources,
+            "LOONGSUITE_PILOT_HOST_IDENTITY_TAGS",
+            json_bool(file.and_then(|value| value.get("hostIdentityTags"))).unwrap_or(true),
+        ),
         collect_log: env_bool(
             sources,
             "LOONGSUITE_PILOT_COLLECT_LOG",
@@ -1229,26 +1238,34 @@ fn build_pipeline(file: Option<&Value>, sources: &ConfigSources<'_>) -> Pipeline
         file.and_then(|value| value.get("pipeline"))
             .and_then(|value| value.get("enabled")),
     );
-    let enabled = env_bool(
-        sources,
-        "LOONGSUITE_PILOT_PIPELINE_ENABLED",
+    let enabled = |fallback| {
         env_bool(
             sources,
-            "LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED",
-            file_pipeline.or(legacy).unwrap_or(false),
-        ),
-    );
-    PipelineToggle {
-        enabled,
-        multica: crate::types::MulticaPipelineToggle {
-            enabled: env_bool(
+            "LOONGSUITE_PILOT_PIPELINE_ENABLED",
+            env_bool(
                 sources,
-                "LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED",
-                json_bool(file.and_then(|value| value.pointer("/pipeline/multica/enabled")))
-                    .unwrap_or(true),
+                "LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED",
+                file_pipeline.or(legacy).unwrap_or(fallback),
             ),
-            mode: json_str(file.and_then(|value| value.pointer("/pipeline/multica/mode")))
-                .map(str::to_owned),
+        )
+    };
+    let multica_enabled = env_bool(
+        sources,
+        "LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED",
+        json_bool(file.and_then(|value| value.pointer("/pipeline/multica/enabled")))
+            .unwrap_or(true),
+    );
+    let multica_mode = env_get(sources, "LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE").or_else(|| {
+        json_str(file.and_then(|value| value.pointer("/pipeline/multica/mode"))).map(str::to_owned)
+    });
+    PipelineToggle {
+        enabled: enabled(false),
+        multica: crate::types::MulticaPipelineToggle {
+            enabled: multica_enabled,
+            discover_local_sources: multica_enabled
+                && multica_mode.as_deref() == Some("on")
+                && enabled(true),
+            mode: multica_mode,
         },
         file: PipelineSectionToggle {
             enabled: env_bool(
@@ -1384,16 +1401,20 @@ fn build_otlp_trace_raw(file: Option<&Value>) -> Option<OtlpTraceRawConfig> {
 fn build_mask_config(file: Option<&Value>, sources: &ConfigSources<'_>) -> MaskConfig {
     let mask = file.and_then(|value| value.get("mask"));
     let raw_replacement = non_empty(env_get(sources, "LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE"))
-        .or_else(|| json_string(mask.and_then(|value| value.get("replacementMode"))));
+        .or_else(|| {
+            non_empty(json_string(
+                mask.and_then(|value| value.get("replacementMode")),
+            ))
+        });
     let replacement_mode = raw_replacement
         .as_deref()
         .and_then(|value| value.parse::<MaskReplacementMode>().ok())
-        .unwrap_or(MaskReplacementMode::Placeholder);
+        .unwrap_or(MaskReplacementMode::Preview);
     if raw_replacement.as_ref().is_some_and(|value| {
         !value.is_empty() && value.parse::<MaskReplacementMode>().ok() != Some(replacement_mode)
     }) {
         logger("ConfigLoader").warn(
-            "invalid mask replacement mode, using placeholder",
+            "invalid mask replacement mode, using preview",
             Some(&fields(
                 serde_json::json!({ "replacementMode": raw_replacement }),
             )),

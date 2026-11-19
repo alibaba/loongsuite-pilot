@@ -12,6 +12,7 @@ pub(crate) use config_loader::check_config_at;
 mod hook_watchdog;
 mod input_manager;
 mod intercept_result_linker;
+mod interceptor_metrics;
 mod legacy_sls_failed_log_cleanup;
 mod log_retention_service;
 mod managed_hook;
