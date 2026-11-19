@@ -85,8 +85,6 @@ impl<V> OrderedMap<V> {
     }
 }
 
-mod snapshot_file;
-
 mod json_file {
     use std::fmt;
     use std::path::{Path, PathBuf};

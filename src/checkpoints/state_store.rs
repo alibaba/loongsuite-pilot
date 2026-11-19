@@ -934,21 +934,21 @@ impl StateStore {
         // The snapshot owns immutable InputState fields. Serialize it outside
         // the store lock and bound staging to one chunk plus a single input.
         json_file::write_atomic(&self.file_path, |tmp| async move {
-            let mut file =
-                super::snapshot_file::SnapshotFile::create(&self.file_path, &tmp).await?;
+            use tokio::io::AsyncWriteExt;
+            let mut file = tokio::fs::File::create(tmp).await?;
             let mut text = String::from("{");
             let mut nonempty = false;
             for (id, state) in entries() {
                 append_state(&mut text, id, state, nonempty);
                 nonempty = true;
                 if text.len() >= 128 * 1024 {
-                    file.append(text.as_bytes()).await?;
+                    file.write_all(text.as_bytes()).await?;
                     text.clear();
                 }
             }
             text.push_str(if nonempty { "\n}\n" } else { "}\n" });
-            file.append(text.as_bytes()).await?;
-            file.finish().await
+            file.write_all(text.as_bytes()).await?;
+            file.flush().await
         })
         .await
     }
