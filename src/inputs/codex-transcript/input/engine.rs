@@ -825,7 +825,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                             line.start_offset >= start_offset && line.end_offset <= next_scan_offset
                         });
                         ScannedTurn {
-                            version: version.clone(),
+                            version,
                             lines,
                         }
                     });
