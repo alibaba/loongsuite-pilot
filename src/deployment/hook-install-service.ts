@@ -7,6 +7,8 @@ import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { withDeployedStateLock } from './deployed-state-merge.js';
 import { createLogger } from '../utils/logger.js';
 import { DeploymentManager } from './deployment-manager.js';
+import { loadConfig } from '../core/config-loader.js';
+import { configJsonPath, resolveDataDir } from '../utils/data-dir.js';
 import { resolveDeployInterceptorHooks } from '../interceptor/config.js';
 import { postAlarm } from '../internal/post-alarm.js';
 import { systemTomlDefinition, supportsSystemTomlHooks } from './system-toml-hooks.js';
@@ -356,6 +358,8 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
 
   const manager = new DeploymentManager({
     dataDir: opts.dataDir,
+    captureTraeContent: (await loadConfig(path.resolve(opts.dataDir) === path.resolve(resolveDataDir())
+      ? configJsonPath() : path.join(opts.dataDir, 'config.json'))).agents['trae-cn']?.captureMessageContent,
     pilotDir: opts.pilotDir,
     builtinAgentsDir: opts.builtinAgentsDir,
     installedBy: opts.mode === 'status' ? undefined : 'hook-install',

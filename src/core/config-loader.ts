@@ -280,8 +280,7 @@ function envInt(key: string, fallback: number): number {
  *
  * Env vars override config file values. Config file overrides defaults.
  */
-export async function loadConfig(): Promise<AnalyticsConfig> {
-  const configPath = configJsonPath();
+export async function loadConfig(configPath = configJsonPath()): Promise<AnalyticsConfig> {
   const file = await readJsonFile<ConfigFile>(configPath);
 
   if (file) {

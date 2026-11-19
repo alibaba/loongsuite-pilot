@@ -44,6 +44,7 @@ export interface DeploymentManagerOptions {
    * already-installed interceptor hooks and still installs collection hooks.
    */
   deployInterceptorHooks?: boolean;
+  captureTraeContent?: boolean;
 }
 
 export class DeploymentManager {
@@ -60,6 +61,7 @@ export class DeploymentManager {
   private readonly stateFilePath: string;
   private state: DeployedAgentsState = {};
   private definitions: AgentDefinition[] = [];
+  private readonly captureTraeContent: boolean;
   private readonly installedBy: DeploymentManagerOptions['installedBy'];
   private touchedIds = new Set<string>();
   private loadedState: DeployedAgentsState = {};
@@ -69,6 +71,7 @@ export class DeploymentManager {
     this.dataDir = opts.dataDir;
     this.pilotDir = opts.pilotDir;
     this.installedBy = opts.installedBy;
+    this.captureTraeContent = opts.captureTraeContent ?? true;
     this.stateFilePath = path.join(opts.dataDir, 'deployed-agents.json');
 
     const hookManager = new HookManager(
@@ -548,6 +551,15 @@ export class DeploymentManager {
         skipped: true,
         reason: 'not-detected',
       };
+    }
+
+    // TRAE logs the complete command stdin before invoking Pilot. Redaction in the
+    // child process cannot protect it. Metadata collection needs no host hook.
+    if (def.id === 'trae-cn' && !this.captureTraeContent && def.hook) {
+      const ok = await this.hookStrategy.undeploy(def);
+      return ok
+        ? { success: true, agentId: def.id, deployMode: 'detection-only', skipped: true, reason: 'up-to-date' }
+        : { success: false, agentId: def.id, deployMode: def.deployMode, error: 'Could not remove TRAE content hooks' };
     }
 
     const isRemote = def.deployMode === 'plugin-probe'
