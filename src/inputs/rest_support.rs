@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -133,6 +133,7 @@ struct HookInner {
     cursor_first_run_guard: bool,
     transform: TransformFn,
     history_replay: Option<Mutex<HookReplay>>,
+    pending_line: Mutex<Option<PendingHookLine>>,
 }
 
 impl HookJsonlInput {
@@ -177,6 +178,7 @@ impl HookJsonlInput {
             transform: config.transform,
             history_replay: matches!(config.id, "opencode-log" | "pi-coding-agent-log")
                 .then(|| Mutex::new(HookReplay::new())),
+            pending_line: Mutex::new(None),
         });
         Self { inner, poll }
     }
@@ -297,6 +299,7 @@ impl crate::inputs::base::InputBody for SdkHookBody {
 
     async fn on_start(&self, _: &crate::inputs::base::InputRuntime) -> anyhow::Result<()> {
         crate::utils::source_access::check(&self.inner.log_dir)?;
+        *self.inner.pending_line.lock().expect("pending Hook line") = None;
         if let Some(replay) = &self.inner.history_replay {
             *replay.lock().expect("hook replay") = HookReplay::new();
         }
@@ -869,6 +872,10 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
             }
         }
         entries.extend(file.entries);
+        if file.continues_line {
+            resume = Some(name.clone());
+            break;
+        }
         if work.is_some() && file.offset < file.size && !file.closed_partial_tail {
             if scoped {
                 resume = Some(name.clone());
@@ -943,6 +950,16 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
     Ok(entries)
 }
 
+/// A partial row is speculative until the persisted offset reaches its start.
+struct PendingHookLine {
+    path: PathBuf,
+    identity: String,
+    start: u64,
+    scanned: u64,
+    bytes: Vec<u8>,
+    oversize: bool,
+}
+
 #[derive(Default)]
 struct HookRead {
     entries: Vec<AgentActivityEntry>,
@@ -951,6 +968,7 @@ struct HookRead {
     bytes: u64,
     size: u64,
     closed_partial_tail: bool,
+    continues_line: bool,
 }
 
 async fn collect_hook_file(
@@ -1009,7 +1027,7 @@ async fn collect_hook_file(
     let mut read = HookRead {
         offset,
         size,
-        identity: Some(key),
+        identity: Some(key.clone()),
         ..HookRead::default()
     };
     if size <= offset || budget == 0 || work.as_ref().is_some_and(|work| !work.can_process()) {
@@ -1023,53 +1041,101 @@ async fn collect_hook_file(
     } else {
         None
     };
-    file.seek(std::io::SeekFrom::Start(offset))
+    let scoped = crate::utils::source_access::current().is_some();
+    let pending = if scoped {
+        let mut pending = inner.pending_line.lock().expect("pending Hook line");
+        if pending.as_ref().is_some_and(|row| row.path == path) {
+            pending.take()
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+    .filter(|row| row.identity == key && row.start == offset && row.scanned <= size);
+    let (cursor, mut buf, discarding) = pending
+        .map(|row| (row.scanned, row.bytes, row.oversize))
+        .unwrap_or_else(|| (offset, Vec::new(), false));
+    let prefix = buf.len();
+    file.seek(std::io::SeekFrom::Start(cursor))
         .await
         .map_err(|err| err.to_string())?;
-    let mut buf = Vec::new();
-    let backlog = size - offset;
     (&mut file)
-        .take(backlog.min(budget))
+        .take((size - cursor).min(budget))
         .read_to_end(&mut buf)
         .await
         .map_err(|err| err.to_string())?;
-    let limit = if crate::utils::source_access::current().is_some() {
-        backlog.min(max_record_bytes).min(budget)
-    } else {
-        backlog.min(max_record_bytes)
-    };
-    let mut has_newline = buf.contains(&b'\n');
-    while !has_newline && (buf.len() as u64) < limit {
-        let previous = buf.len();
-        let chunk = (limit - buf.len() as u64).min(64 * 1024);
-        if (&mut file)
-            .take(chunk)
-            .read_to_end(&mut buf)
-            .await
-            .map_err(|err| err.to_string())?
-            == 0
-        {
-            break;
+
+    // The legacy reader can finish its first record in the same cycle.
+    if !scoped {
+        let limit = (size - offset).min(max_record_bytes);
+        let mut has_newline = buf.contains(&b'\n');
+        while !has_newline && (buf.len() as u64) < limit {
+            let previous = buf.len();
+            let chunk = (limit - buf.len() as u64).min(64 * 1024);
+            if (&mut file)
+                .take(chunk)
+                .read_to_end(&mut buf)
+                .await
+                .map_err(|err| err.to_string())?
+                == 0
+            {
+                break;
+            }
+            has_newline = buf[previous..].contains(&b'\n');
         }
-        has_newline = buf[previous..].contains(&b'\n');
     }
-    read.bytes = buf.len() as u64;
+    read.bytes = (buf.len() - prefix) as u64;
+    let scanned = cursor + read.bytes;
     if let Some(replay) = inner.history_replay.as_ref().filter(|_| historical) {
         replay.lock().expect("hook replay").credit -= read.bytes as f64;
+    }
+    if discarding {
+        if let Some(newline) = buf.iter().position(|byte| *byte == b'\n') {
+            read.offset = cursor + newline as u64 + 1;
+            warn_oversize_hook_line(inner, path, offset, max_record_bytes);
+            buf.drain(..=newline);
+        } else {
+            if work.is_some()
+                && scanned == size
+                && closed_hook_tail(inner, path, file, &identity, initial_modified).await
+            {
+                warn_oversize_hook_line(inner, path, offset, max_record_bytes);
+                read.offset = size;
+                read.closed_partial_tail = true;
+                return Ok(read);
+            }
+            read.continues_line = scanned < size;
+            *inner.pending_line.lock().expect("pending Hook line") = Some(PendingHookLine {
+                path: path.to_owned(),
+                identity: key,
+                start: offset,
+                scanned,
+                bytes: Vec::new(),
+                oversize: true,
+            });
+            return Ok(read);
+        }
     }
     let complete_len = buf
         .iter()
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |end| end + 1);
+    let complete_end = read.offset + complete_len as u64;
     for raw_line in buf[..complete_len].split_inclusive(|byte| *byte == b'\n') {
         if let Some(work) = work.as_deref_mut() {
-            if !work.can_process() || raw_line.len() as u64 > max_record_bytes {
+            if !work.can_process() || (!scoped && raw_line.len() as u64 > max_record_bytes) {
                 break;
             }
             work.records += 1;
             if work.records.is_multiple_of(32) {
                 tokio::task::yield_now().await;
             }
+        }
+        if scoped && raw_line.len() as u64 > max_record_bytes {
+            warn_oversize_hook_line(inner, path, read.offset, max_record_bytes);
+            read.offset += raw_line.len() as u64;
+            continue;
         }
         read.offset += raw_line.len() as u64;
         let line = String::from_utf8_lossy(&raw_line[..raw_line.len() - 1]);
@@ -1106,15 +1172,42 @@ async fn collect_hook_file(
             }
         }
     }
-    if work.is_some()
-        && read.bytes == backlog
-        && read.offset == offset + complete_len as u64
-        && read.offset < size
-    {
+    if work.is_some() && scanned == size && read.offset == complete_end && read.offset < size {
         read.closed_partial_tail =
             closed_hook_tail(inner, path, file, &identity, initial_modified).await;
     }
+    if scoped
+        && read.offset == complete_end
+        && !read.closed_partial_tail
+        && complete_len < buf.len()
+    {
+        read.continues_line = scanned < size;
+        let oversize = (buf.len() - complete_len) as u64 >= max_record_bytes;
+        let bytes = if oversize {
+            Vec::new()
+        } else {
+            buf.split_off(complete_len)
+        };
+        *inner.pending_line.lock().expect("pending Hook line") = Some(PendingHookLine {
+            path: path.to_owned(),
+            identity: key,
+            start: read.offset,
+            scanned,
+            bytes,
+            oversize,
+        });
+    }
     Ok(read)
+}
+
+fn warn_oversize_hook_line(inner: &HookInner, path: &Path, offset: u64, limit: u64) {
+    inner.logger.warn(
+        &format!(
+            "skipping Hook record beyond {limit} bytes at {}:{offset}",
+            path.display()
+        ),
+        None,
+    );
 }
 
 async fn closed_hook_tail(
