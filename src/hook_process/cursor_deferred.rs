@@ -17,6 +17,34 @@ fn directory(root: &Path) -> PathBuf {
     root.join("state").join("cursor").join("deferred")
 }
 
+fn read_deferred_event(path: &Path) -> io::Result<Obj> {
+    crate::utils::source_access::private_path(path)?;
+    let mut open = fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = open.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid Cursor deferred event file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_EVENT_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_EVENT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Cursor deferred event exceeds the collection budget",
+        ));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 pub(super) fn enqueue(root: &Path, env: &Env, mut event: Obj) -> Result<(), String> {
     if super::message_capture_disabled(root, env)? {
         for key in [
@@ -109,27 +137,26 @@ impl DeferredCursor {
                 continue;
             };
             if accepted.insert(id.to_owned()) {
-                let mut open = fs::OpenOptions::new();
-                open.read(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    open.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-                }
-                crate::utils::source_access::private_path(&path).map_err(|err| err.to_string())?;
-                let file = open.open(&path).map_err(|err| err.to_string())?;
-                if !file.metadata().map_err(|err| err.to_string())?.is_file() {
-                    return Err("invalid Cursor deferred event file".into());
-                }
-                let mut bytes = Vec::new();
-                file.take(MAX_EVENT_BYTES + 1)
-                    .read_to_end(&mut bytes)
-                    .map_err(|err| err.to_string())?;
-                if bytes.len() as u64 > MAX_EVENT_BYTES {
-                    return Err("Cursor deferred event exceeds the collection budget".into());
-                }
-                let mut event: Obj =
-                    serde_json::from_slice(&bytes).map_err(|err| err.to_string())?;
+                let mut event = match read_deferred_event(&path) {
+                    Ok(event) => event,
+                    Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                        let quarantine = journal.dir.join("quarantine");
+                        crate::utils::source_access::private_path(&quarantine)
+                            .map_err(|err| err.to_string())?;
+                        fs::create_dir_all(&quarantine).map_err(|err| err.to_string())?;
+                        let target = quarantine.join(format!("{}-{id}", uuid::Uuid::new_v4()));
+                        fs::rename(&path, &target).map_err(|err| err.to_string())?;
+                        crate::utils::create_logger("CursorHook").warn(
+                            &format!(
+                                "quarantined invalid Cursor deferred event at {}: {error}",
+                                target.display()
+                            ),
+                            None,
+                        );
+                        continue;
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
                 event.remove("transcript_path");
                 event.insert("_pilot_receipt".into(), Value::String(id.into()));
                 journal.append(&event)?;
@@ -193,7 +220,20 @@ mod tests {
         }
         let history = root.join("logs/cursor/history");
         assert!(!history.exists());
+        let deferred = directory(&root);
+        let invalid = deferred.join("inbox/0-truncated.json");
+        fs::write(&invalid, b"{\"hook_event\":\"stop\"").unwrap();
         DeferredCursor::new(root.clone()).collect().unwrap();
+        assert!(!invalid.exists());
+        let quarantined = fs::read_dir(deferred.join("quarantine"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fs::read(quarantined.path()).unwrap(),
+            b"{\"hook_event\":\"stop\""
+        );
         let file = fs::read_dir(history)
             .unwrap()
             .map(|entry| entry.unwrap().path())
