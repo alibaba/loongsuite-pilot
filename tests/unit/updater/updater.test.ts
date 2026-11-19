@@ -1469,6 +1469,22 @@ describe('Updater', () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
+    it('fetches the manifest once when two checks overlap', async () => {
+      let releaseFetch: (value: Response) => void = () => {};
+      mockFetch.mockImplementation(() => new Promise((resolve) => {
+        releaseFetch = resolve;
+      }));
+      const updater = new Updater(makeConfig(), tmpDir);
+      const first = updater.check();
+      const second = updater.check();
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      releaseFetch(makeResponseJson(null, 500));
+      await Promise.all([first, second]);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect((updater as any).checking).toBe(false);
+    });
+
     it('resets checking flag after check completes', async () => {
       mockFetch.mockResolvedValueOnce(makeResponseJson(null, 500));
       const updater = new Updater(makeConfig(), tmpDir);

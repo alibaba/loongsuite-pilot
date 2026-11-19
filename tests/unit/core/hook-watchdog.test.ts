@@ -1047,6 +1047,10 @@ describe('HookWatchdog', () => {
     });
 
     it('lets only one waiter take a dead hook-asset lock', async () => {
+      // Two waiters here share one process. The temp file is named with pid and
+      // startedAt, so a shared millisecond lets one attempt unlink the other's
+      // file. The collector and the updater are different processes, and the pid
+      // already separates them. Start the second waiter on a later millisecond.
       const dir = await createTempDir();
       await fs.writeFile(getHookAssetLockPath(dir), `${JSON.stringify({ pid: 999999, startedAt: 1 })}\n`);
       let inside = 0;
@@ -1059,6 +1063,7 @@ describe('HookWatchdog', () => {
         inside -= 1;
       });
       const first = run();
+      await new Promise((resolve) => setTimeout(resolve, 5));
       const second = run();
 
       try {
