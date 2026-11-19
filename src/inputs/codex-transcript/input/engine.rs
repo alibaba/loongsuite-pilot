@@ -477,12 +477,12 @@ impl<'a> CodexTranscriptEngine<'a> {
         #[cfg(test)]
         self.body
             .with_shared(|s| s.main541_visits.push(file_path.to_owned()));
+        let key = self.state_key(file_path);
+        let checkpoint = self.read_checkpoint(rt, &key);
         if let Some(version) = observed {
-            let caught_up = self
-                .read_checkpoint(rt, &self.state_key(file_path))
-                .is_some_and(|checkpoint| {
-                    rollout_caught_up(&checkpoint, version.inode, version.size)
-                });
+            let caught_up = checkpoint.as_ref().is_some_and(|checkpoint| {
+                rollout_caught_up(checkpoint, version.inode, version.size)
+            });
             if caught_up {
                 let mtime_ms = version.mtime_ms();
                 self.body.with_shared(|shared| {
@@ -508,15 +508,13 @@ impl<'a> CodexTranscriptEngine<'a> {
         });
         let result = match stat.zip(version) {
             Some((stat, version)) => {
-                let key = self.state_key(file_path);
-                if self.read_checkpoint(rt, &key).is_none()
-                    && rt.state_store.get(&key).last_offset().is_none()
-                {
+                if checkpoint.is_none() && rt.state_store.get(&key).last_offset().is_none() {
                     // Persist body-free ownership before the first native output.
                     // Failure propagates; the canonical ACK checkpoint stays untouched.
                     super::source_ownership::remember(&self.body.wakeup_dir, file_path).await?;
                 }
-                self.scan_rollout_file(rt, file_path, stat, version).await
+                self.scan_rollout_file(rt, file_path, stat, version, &key, checkpoint)
+                    .await
             }
             None => Ok(0),
         };
@@ -530,19 +528,15 @@ impl<'a> CodexTranscriptEngine<'a> {
         file_path: &str,
         stat: RolloutStat,
         version: scan::FileVersion,
+        key: &str,
+        checkpoint: Option<CodexTranscriptCheckpoint>,
     ) -> anyhow::Result<usize> {
-        let key = self.state_key(file_path);
         let indexed = self
             .body
             .with_shared(|shared| shared.meta_by_path.get(file_path).cloned());
         let has_indexed_copied = has_copied_history_prefix(indexed.as_deref());
-        let mut checkpoint = self.read_checkpoint(rt, &key);
-        let mut changed = false;
-        if checkpoint.is_none() {
-            checkpoint = Some(empty_checkpoint(stat.ino));
-            changed = true;
-        }
-        let mut checkpoint = checkpoint.expect("checkpoint");
+        let mut changed = checkpoint.is_none();
+        let mut checkpoint = checkpoint.unwrap_or_else(|| empty_checkpoint(stat.ino));
         if checkpoint.inode != stat.ino {
             let bootstrap = checkpoint.fork_bootstrap.clone();
             if has_indexed_copied
@@ -583,9 +577,9 @@ impl<'a> CodexTranscriptEngine<'a> {
                     meta.as_object(),
                 );
                 if has_indexed_copied {
-                    self.park_fork_baseline(rt, file_path, &key).await?;
+                    self.park_fork_baseline(rt, file_path, key).await?;
                 } else {
-                    self.baseline_file(rt, file_path, &key).await?;
+                    self.baseline_file(rt, file_path, key).await?;
                 }
                 return Ok(0);
             }
@@ -651,7 +645,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 changed |= prepared.changed;
                 if !prepared.ready {
                     if changed {
-                        self.save_checkpoint(rt, &key, &checkpoint);
+                        self.save_checkpoint(rt, key, &checkpoint);
                     } else {
                         self.save_delegation_state(rt);
                     }
@@ -700,7 +694,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             processed_terminals += released.1;
             changed = true;
             if checkpoint.pending_subagent.is_some() {
-                self.save_checkpoint(rt, &key, &checkpoint);
+                self.save_checkpoint(rt, key, &checkpoint);
                 return Ok(emitted_count);
             }
         }
@@ -735,7 +729,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         processed_terminals += pending.processed_terminal_count;
         if pending.blocked {
             if changed {
-                self.save_checkpoint(rt, &key, &checkpoint);
+                self.save_checkpoint(rt, key, &checkpoint);
             }
             return Ok(emitted_count);
         }
@@ -949,7 +943,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             changed = true;
         }
         if changed {
-            self.save_checkpoint(rt, &key, &checkpoint);
+            self.save_checkpoint(rt, key, &checkpoint);
         }
         Ok(emitted_count)
     }

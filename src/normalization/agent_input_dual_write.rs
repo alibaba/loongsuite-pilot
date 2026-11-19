@@ -1,5 +1,4 @@
 use crate::types::{AgentActivityEntry, AgentEventName};
-use std::collections::HashSet;
 
 pub const AGENT_INPUT_EVENT_NAMESPACE: &str = "29afa46e-d5de-5c48-946b-90c1d0537f36";
 
@@ -16,33 +15,47 @@ pub fn derive_agent_input_event_id(original_event_id: &str) -> String {
 }
 
 pub fn expand_agent_input_events(entries: Vec<AgentActivityEntry>) -> Vec<AgentActivityEntry> {
-    if !entries.iter().any(is_input_other_event) {
+    // Only derived IDs can collide with a generated row. Track those few
+    // IDs rather than cloning every ID in a large native activity batch.
+    let mut derived_by_id = std::collections::HashMap::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if is_input_other_event(entry) {
+            derived_by_id
+                .entry(derive_agent_input_event_id(&entry.event_id))
+                .or_insert(index);
+        }
+    }
+    if derived_by_id.is_empty() {
         return entries;
     }
-    let mut existing_event_ids: HashSet<String> =
-        entries.iter().map(|entry| entry.event_id.clone()).collect();
-    let mut expanded = Vec::with_capacity(entries.len());
-
-    for entry in entries {
-        let should_derive = is_input_other_event(&entry);
-        expanded.push(entry);
-        if !should_derive {
-            continue;
-        }
-        let source = expanded.last().expect("source entry");
-        let derived_event_id = derive_agent_input_event_id(&source.event_id);
-        if !existing_event_ids.insert(derived_event_id.clone()) {
-            continue;
-        }
-        let mut derived = source.clone();
-        derived.turn_start = None;
-        derived.turn_end = None;
-        derived.event_id = derived_event_id;
-        derived.event_name = Some(AgentEventName::AgentInput);
-        expanded.push(derived);
+    for entry in &entries {
+        derived_by_id.remove(&entry.event_id);
+    }
+    if derived_by_id.is_empty() {
+        return entries;
     }
 
-    expanded
+    let mut derived: Vec<_> = derived_by_id
+        .into_iter()
+        .map(|(id, index)| (index, id))
+        .collect();
+    derived.sort_unstable_by_key(|(index, _)| *index);
+    let mut output = Vec::with_capacity(entries.len() + derived.len());
+    let mut derived = derived.into_iter().peekable();
+    for (index, original) in entries.into_iter().enumerate() {
+        if derived.peek().is_some_and(|(target, _)| *target == index) {
+            let mut generated = original.clone();
+            generated.turn_start = None;
+            generated.turn_end = None;
+            generated.event_id = derived.next().expect("matching native input").1;
+            generated.event_name = Some(AgentEventName::AgentInput);
+            output.push(original);
+            output.push(generated);
+        } else {
+            output.push(original);
+        }
+    }
+    output
 }
 
 fn uuid_v5(namespace: &[u8; 16], name: &[u8]) -> String {
