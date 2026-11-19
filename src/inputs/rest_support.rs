@@ -720,6 +720,25 @@ struct HookWork {
     deadline: Option<Duration>,
 }
 
+struct HookEntryBudget {
+    capacity: usize,
+    remaining: usize,
+}
+
+impl HookEntryBudget {
+    fn reserve(&mut self, entry: &AgentActivityEntry) -> Result<bool, String> {
+        let bytes = entry.estimated_heap_bytes();
+        if bytes <= self.remaining {
+            self.remaining -= bytes;
+            return Ok(true);
+        }
+        if self.remaining == self.capacity {
+            return Err("single hook entry exceeds SDK cycle memory limit; cursor retained".into());
+        }
+        Ok(false)
+    }
+}
+
 impl HookWork {
     fn can_process(&self) -> bool {
         self.records < 256
@@ -839,6 +858,11 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
         u64::MAX
     };
     let file_limit = crate::utils::source_access::file_limit(usize::MAX);
+    let mut entry_budget =
+        crate::utils::source_access::entry_buffer_limit().map(|capacity| HookEntryBudget {
+            capacity,
+            remaining: capacity,
+        });
     for (index, name) in candidates
         .iter()
         .cycle()
@@ -859,6 +883,7 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
             identities.get(name).and_then(Value::as_str),
             remaining,
             work.as_mut(),
+            entry_budget.as_mut(),
         )
         .await?;
         offsets.insert(name.clone(), file.offset);
@@ -869,6 +894,10 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
             }
         }
         entries.extend(file.entries);
+        if file.deferred_for_memory {
+            resume = Some(name.clone());
+            break;
+        }
         if work.is_some() && file.offset < file.size && !file.closed_partial_tail {
             if scoped {
                 resume = Some(name.clone());
@@ -951,6 +980,7 @@ struct HookRead {
     bytes: u64,
     size: u64,
     closed_partial_tail: bool,
+    deferred_for_memory: bool,
 }
 
 async fn collect_hook_file(
@@ -960,6 +990,7 @@ async fn collect_hook_file(
     previous_identity: Option<&str>,
     mut budget: u64,
     mut work: Option<&mut HookWork>,
+    mut entry_budget: Option<&mut HookEntryBudget>,
 ) -> Result<HookRead, String> {
     let (mut file, identity) = match open_session_file(&path.to_string_lossy()).await {
         Ok(opened) => opened,
@@ -1093,7 +1124,18 @@ async fn collect_hook_file(
             continue;
         };
         match (inner.transform)(record).await {
-            Ok(Some(entry)) => read.entries.push(entry),
+            Ok(Some(entry)) => {
+                if let Some(budget) = entry_budget.as_deref_mut() {
+                    if !budget.reserve(&entry)? {
+                        // Submit the complete prefix and retry this row from
+                        // the same file after the prefix is durably accepted.
+                        read.offset -= raw_line.len() as u64;
+                        read.deferred_for_memory = true;
+                        break;
+                    }
+                }
+                read.entries.push(entry);
+            }
             Ok(None) => {}
             Err(err) => {
                 inner.logger.warn(

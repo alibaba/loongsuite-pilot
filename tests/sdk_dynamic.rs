@@ -271,6 +271,13 @@ impl Drop for Host {
 fn empty_policy() -> Value {
     json!({"version":"original","agents":[],"hcd":{"agent_configs":{}}})
 }
+fn openclaw_policy(history: &Path) -> Value {
+    json!({"agents":["openclaw"],"hcd":{"agent_configs":{"openclaw":{"collection":{
+        "enabled":true,"profile":"openclaw_plugin_v1","allowed_roots":[history],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100}
+    }}}}, "sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}})
+}
 #[test]
 fn openclaw_profile_delivers_and_resumes_existing_plugin_events() {
     let temporary = tempfile::tempdir().unwrap();
@@ -278,11 +285,7 @@ fn openclaw_profile_delivers_and_resumes_existing_plugin_events() {
     let history = root.join("history");
     std::fs::create_dir(&history).unwrap();
     let data = root.join("instance");
-    let policy = json!({"agents":["openclaw"],"hcd":{"agent_configs":{"openclaw":{"collection":{
-        "enabled":true,"profile":"openclaw_plugin_v1","allowed_roots":[history],
-        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
-        "limits":{"poll_interval_ms":100}
-    }}}}, "sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}});
+    let policy = openclaw_policy(&history);
     let day = chrono::Local::now().format("%Y-%m-%d");
     let log = history.join(format!("openclaw-{day}.jsonl"));
     std::fs::File::create(&log).unwrap();
@@ -328,6 +331,56 @@ fn openclaw_profile_delivers_and_resumes_existing_plugin_events() {
         serde_json::from_slice::<Value>(row).is_ok_and(|row| row["event.id"] != "sample-first")
     }));
     resumed.stop();
+}
+
+#[test]
+fn openclaw_drains_history_larger_than_one_sdk_memory_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("openclaw-{day}.jsonl"));
+    let output = "bounded response ".repeat(150);
+    let expected = (0..48)
+        .map(|number| format!("bulk-response-{number}"))
+        .collect::<Vec<_>>();
+    let mut file = std::fs::File::create(&log).unwrap();
+    for id in &expected {
+        let row = json!({
+            "event.id":id,"event.name":"llm.response","gen_ai.agent.type":"openclaw",
+            "gen_ai.session.id":"sample","gen_ai.turn.id":"turn","gen_ai.step.id":"turn:s1",
+            "time_unix_nano":"1780000000000000000","gen_ai.usage.output_tokens":20,
+            "gen_ai.output.messages":[{"role":"assistant","parts":[{"type":"text","content":output}]}],
+        });
+        writeln!(file, "{row}").unwrap();
+    }
+    drop(file);
+    let memory_limit = 64 * 1024;
+    assert!(std::fs::metadata(&log).unwrap().len() > memory_limit);
+    let mut policy = openclaw_policy(&history);
+    policy["sdk_options"]["delivery"]["max_batch_bytes"] = json!(memory_limit);
+    policy["sdk_options"]["delivery"]["max_event_bytes"] = json!(memory_limit);
+    policy["sdk_options"]["delivery"]["queue_memory_bytes"] = json!(memory_limit);
+    let mut host = Host::start(&root.join("instance"), policy, Box::default());
+    host.ready();
+    until(|| host.ctx.rows.lock().unwrap().len() >= expected.len());
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    let rows = host.ctx.rows.lock().unwrap();
+    let actual = rows
+        .iter()
+        .map(|bytes| {
+            let row: Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(row["gen_ai.usage.output_tokens"], 20);
+            assert_eq!(
+                row["gen_ai.output.messages"][0]["parts"][0]["content"],
+                output
+            );
+            row["event.id"].as_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
 }
 
 fn qoder_policy(source: &Path) -> Value {
