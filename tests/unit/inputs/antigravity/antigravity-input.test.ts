@@ -416,6 +416,10 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
 
       const llmReq = collected.find((e) => e['event.name'] === 'llm.request');
       expect(llmReq?.['gen_ai.request.model']).toBe('gemini-4-neon-medium');
+      expect(llmReq?.['gen_ai.input.messages_delta']).toEqual([
+        { role: 'user', parts: [{ type: 'text', content: 'Check repo status' }] },
+      ]);
+      expect(typeof llmReq?.['gen_ai.input.messages_hash']).toBe('string');
 
       const llmResp = collected.find((e) => e['event.name'] === 'llm.response');
       // Pilot canonical schema: input_tokens includes cache_read + cache_creation
@@ -685,6 +689,12 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
       { uri: 'oss://bucket/20260506/out.png', mime_type: 'image/png', modality: 'image' },
     ]);
 
+    const llmReq = collected.find((e) => e['event.name'] === 'llm.request');
+    expect(llmReq?.['gen_ai.input.multimodal_metadata_delta']).toEqual([
+      { uri: 'oss://bucket/20260506/img.jpg', mime_type: 'image/jpeg', modality: 'image' },
+      { uri: 'oss://bucket/20260506/clip.mp4', mime_type: 'video/mp4', modality: 'video' },
+    ]);
+
     // When uploadMode is 'none', no media metadata is attached and image-only USER_INPUT is omitted
     const storeNone = new StateStore(path.join(tmpDir, 'state-none.json'));
     await storeNone.load();
@@ -701,5 +711,85 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     await inputNone.stop();
     expect(collectedNone.find((e) => e['event.name'] === 'other')).toBeUndefined();
     expect(collectedNone.find((e) => e['event.name'] === 'llm.response')?.['gen_ai.output.multimodal_metadata']).toBeUndefined();
+  });
+
+  it('populates gen_ai.input.messages_delta across multi-step tool-calling turns', async () => {
+    const root = path.join(tmpDir, 'delta-root');
+    const convDir = path.join(root, 'conversations');
+    const sid = 'delta-sess';
+    const logsDir = path.join(root, 'brain', sid, '.system_generated', 'logs');
+    await fs.mkdir(convDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+
+    createConversationDb(path.join(convDir, `${sid}.db`), {
+      genRows: [
+        [
+          0,
+          encodeGeneratorMetadata({
+            model: 'Gemini 3.8 Flash (High)',
+            usage: { inputTokens: 200, totalOutputTokens: 50, visibleOutputTokens: 50, responseId: 'd-1' },
+            timestampSec: 1_778_000_700,
+            stepIndices: [1, 2],
+          }),
+        ],
+        [
+          1,
+          encodeGeneratorMetadata({
+            model: 'Gemini 3.8 Flash (High)',
+            usage: { inputTokens: 350, totalOutputTokens: 80, visibleOutputTokens: 80, responseId: 'd-2' },
+            timestampSec: 1_778_000_705,
+            stepIndices: [3],
+          }),
+        ],
+      ],
+    });
+
+    const transcriptLines = [
+      JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: '2026-05-06T00:11:39Z', content: 'List files' }),
+      JSON.stringify({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-05-06T00:11:40Z', tool_calls: [{ name: 'run_command', args: { CommandLine: 'ls' } }] }),
+      JSON.stringify({ step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', created_at: '2026-05-06T00:11:42Z', content: 'README.md' }),
+      JSON.stringify({ step_index: 3, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-05-06T00:11:45Z', content: 'Found README.md.' }),
+    ];
+    await fs.writeFile(path.join(logsDir, 'transcript.jsonl'), transcriptLines.join('\n') + '\n');
+
+    const input = new AntigravityInput({
+      stateStore,
+      clientType: ClientType.AntigravityCli,
+      dataRoot: root,
+      collectHistorical: true,
+    });
+    const collected: AgentActivityEntry[] = [];
+    input.on('entries', (entries: AgentActivityEntry[]) => collected.push(...entries));
+    await input.start();
+    await input.stop();
+
+    const reqs = collected.filter((e) => e['event.name'] === 'llm.request');
+    expect(reqs).toHaveLength(2);
+    expect(reqs[0]?.['gen_ai.input.messages_delta']).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'List files' }] },
+    ]);
+    expect(reqs[1]?.['gen_ai.input.messages_delta']).toEqual([
+      {
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool_call',
+            id: `${sid}:step:1:tc:0`,
+            name: 'run_command',
+            arguments: { CommandLine: 'ls' },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        parts: [
+          {
+            type: 'tool_call_response',
+            id: `${sid}:step:1:tc:0`,
+            response: 'README.md',
+          },
+        ],
+      },
+    ]);
   });
 });

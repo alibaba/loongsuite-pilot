@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -367,6 +368,19 @@ export class AntigravityInput extends BaseInput {
     const entries: AgentActivityEntry[] = [];
     const cwd = snapshot?.workspacePath;
     let maxStepIndex = lastTranscriptStepIndex;
+    const resolvedMediaCache = new Map<string, UriPart[]>();
+    const getStepMedia = async (
+      step: AntigravityTranscriptStep,
+      timeMs: number,
+      direction: 'input' | 'output',
+    ): Promise<UriPart[]> => {
+      const cacheKey = `${step.stepIndex}:${direction}`;
+      const cached = resolvedMediaCache.get(cacheKey);
+      if (cached) return cached;
+      const parts = await this.resolveMediaParts(step, timeMs, direction);
+      resolvedMediaCache.set(cacheKey, parts);
+      return parts;
+    };
 
     // 1) Emit USER_INPUT and tool.call / tool.result from transcript when available
     if (transcript) {
@@ -387,11 +401,12 @@ export class AntigravityInput extends BaseInput {
         const tsMs = step.createdAtMs ?? snapshot?.trajectoryTimestampMs ?? Date.now();
 
         if (step.type === 'USER_INPUT') {
-          const mediaParts = await this.resolveMediaParts(step, tsMs, 'input');
+          const mediaParts = await getStepMedia(step, tsMs, 'input');
           if (!step.content && mediaParts.length === 0) continue;
           const parts: JsonValue[] = [];
           if (step.content) parts.push({ type: 'text', content: step.content });
           for (const part of mediaParts) parts.push(part as unknown as JsonValue);
+          const userMessages: JsonValue = [{ role: 'user', parts }];
           const inputEntry = buildAgentActivityEntry({
             'event.name': 'other',
             'gen_ai.session.id': sessionId,
@@ -400,7 +415,8 @@ export class AntigravityInput extends BaseInput {
             'gen_ai.turn.start': true,
             'gen_ai.agent.type': this.agentType,
             'gen_ai.provider.name': 'gcp.gemini',
-            'gen_ai.input.messages': [{ role: 'user', parts }],
+            'gen_ai.input.messages': userMessages,
+            'gen_ai.input.messages_delta': userMessages,
             time_unix_nano: toUnixNanoString(tsMs),
           });
           if (mediaParts.length > 0) attachMultimodalMetadataForEntry(inputEntry);
@@ -435,7 +451,7 @@ export class AntigravityInput extends BaseInput {
                 resultStep.createdAtMs !== undefined && step.createdAtMs !== undefined
                   ? resultStep.createdAtMs - step.createdAtMs
                   : undefined;
-              const resultMediaParts = await this.resolveMediaParts(resultStep, resultTsMs, 'input');
+              const resultMediaParts = await getStepMedia(resultStep, resultTsMs, 'input');
               let resultPayload: JsonValue = resultStep.content ?? null;
               if (resultMediaParts.length > 0) {
                 const combined: JsonValue[] = [];
@@ -500,6 +516,13 @@ export class AntigravityInput extends BaseInput {
         const respTsMs =
           durationNs > 0 ? reqTsMs + Math.max(1, Math.round(durationNs / 1_000_000)) : reqTsMs;
 
+        const inputDelta = await this.buildInputMessagesDelta(
+          sessionId,
+          linkedStep,
+          transcript,
+          reqTsMs,
+          getStepMedia,
+        );
         const reqEntry = buildAgentActivityEntry({
           'event.name': 'llm.request',
           'gen_ai.session.id': sessionId,
@@ -508,13 +531,22 @@ export class AntigravityInput extends BaseInput {
           'gen_ai.agent.type': this.agentType,
           'gen_ai.provider.name': provider,
           'gen_ai.request.model': model,
+          ...(inputDelta.length > 0
+            ? {
+                'gen_ai.input.messages_delta': inputDelta,
+                'gen_ai.input.messages_hash': createHash('sha256')
+                  .update(JSON.stringify(inputDelta))
+                  .digest('hex'),
+              }
+            : {}),
           time_unix_nano: toUnixNanoString(reqTsMs),
         });
+        if (inputDelta.length > 0) attachMultimodalMetadataForEntry(reqEntry);
         await this.attachWorkspaceContext(reqEntry, cwd);
         entries.push(reqEntry);
 
         const outputMediaParts = linkedStep
-          ? await this.resolveMediaParts(linkedStep, respTsMs, 'output')
+          ? await getStepMedia(linkedStep, respTsMs, 'output')
           : [];
         const outputMessages = this.buildOutputMessages(linkedStep, outputMediaParts);
         const finishReasons =
@@ -588,6 +620,89 @@ export class AntigravityInput extends BaseInput {
       if (step.type === 'USER_INPUT') turnNum++;
     }
     return `${sessionId}:turn:${Math.max(1, turnNum)}`;
+  }
+
+  private async buildInputMessagesDelta(
+    sessionId: string,
+    linkedStep: AntigravityTranscriptStep | undefined,
+    transcript: AntigravityTranscript | null,
+    reqTsMs: number,
+    getStepMedia: (
+      step: AntigravityTranscriptStep,
+      timeMs: number,
+      direction: 'input' | 'output',
+    ) => Promise<UriPart[]>,
+  ): Promise<JsonValue[]> {
+    if (!linkedStep || !transcript) return [];
+
+    // Locate the immediately preceding PLANNER_RESPONSE step
+    let prevPlanner: AntigravityTranscriptStep | undefined;
+    for (const step of transcript.steps) {
+      if (step.stepIndex >= linkedStep.stepIndex) break;
+      if (step.type === 'PLANNER_RESPONSE') prevPlanner = step;
+    }
+    const prevPlannerIdx = prevPlanner?.stepIndex ?? -1;
+
+    const delta: JsonValue[] = [];
+    const consumedStepIndices = new Set<number>();
+
+    // If the previous PLANNER_RESPONSE issued tool calls, include assistant tool_call + tool responses
+    if (prevPlanner && prevPlanner.toolCalls.length > 0) {
+      const assistantParts: JsonValue[] = [];
+      const toolResponseParts: JsonValue[] = [];
+      for (let i = 0; i < prevPlanner.toolCalls.length; i++) {
+        const tc = prevPlanner.toolCalls[i]!;
+        const callId = tc.id ?? `${sessionId}:step:${prevPlanner.stepIndex}:tc:${i}`;
+        assistantParts.push({
+          type: 'tool_call',
+          id: callId,
+          name: tc.name,
+          arguments: tc.args ?? null,
+        });
+        const resultIdx = prevPlanner.stepIndex + 1 + i;
+        if (resultIdx < linkedStep.stepIndex) {
+          const resultStep = transcript.byStepIndex.get(resultIdx);
+          if (resultStep && resultStep.type !== 'USER_INPUT' && resultStep.type !== 'PLANNER_RESPONSE') {
+            consumedStepIndices.add(resultIdx);
+            const resultMedia = await getStepMedia(resultStep, resultStep.createdAtMs ?? reqTsMs, 'input');
+            let responsePayload: JsonValue = resultStep.content ?? null;
+            if (resultMedia.length > 0) {
+              const combined: JsonValue[] = [];
+              if (resultStep.content) combined.push({ type: 'text', content: resultStep.content });
+              for (const part of resultMedia) combined.push(part as unknown as JsonValue);
+              responsePayload = combined;
+            }
+            toolResponseParts.push({
+              type: 'tool_call_response',
+              id: callId,
+              response: responsePayload,
+            });
+          }
+        }
+      }
+      if (assistantParts.length > 0) {
+        delta.push({ role: 'assistant', parts: assistantParts });
+      }
+      if (toolResponseParts.length > 0) {
+        delta.push({ role: 'tool', parts: toolResponseParts });
+      }
+    }
+
+    // Include any USER_INPUT steps that arrived between prevPlanner and linkedStep
+    for (const step of transcript.steps) {
+      if (step.stepIndex <= prevPlannerIdx || step.stepIndex >= linkedStep.stepIndex) continue;
+      if (consumedStepIndices.has(step.stepIndex)) continue;
+      if (step.type !== 'USER_INPUT') continue;
+      const mediaParts = await getStepMedia(step, step.createdAtMs ?? reqTsMs, 'input');
+      const parts: JsonValue[] = [];
+      if (step.content) parts.push({ type: 'text', content: step.content });
+      for (const part of mediaParts) parts.push(part as unknown as JsonValue);
+      if (parts.length > 0) {
+        delta.push({ role: 'user', parts });
+      }
+    }
+
+    return delta;
   }
 
   private async resolveMediaParts(
