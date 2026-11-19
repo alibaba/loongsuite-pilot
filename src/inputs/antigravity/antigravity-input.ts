@@ -54,9 +54,13 @@ const DEFAULT_ROOT_SEGMENTS: Readonly<Record<AntigravityClientType, string>> = {
 
 const MAX_DBS_PER_CYCLE = 16;
 const MAX_TRACKED_SESSIONS = 512;
-const MAX_EMITTED_KEYS_PER_SESSION = 1024;
+const MAX_EMITTED_KEYS_PER_SESSION = 512;
 const MAX_PENDING_TOOL_CALLS_PER_SESSION = 128;
+const MAX_LATCHED_TURNS_PER_SESSION = 128;
+const MAX_LATCHED_TOOL_CALLS_PER_SESSION = 256;
 const BACKLOG_DRAIN_DELAY_MS = 50;
+const DB_FAILURE_BACKOFF_BASE_MS = 15_000;
+const DB_FAILURE_BACKOFF_MAX_MS = 300_000;
 
 const EVENT_ORDER_WEIGHT: Readonly<Record<string, number>> = {
   other: 0,
@@ -77,6 +81,12 @@ const NON_TOOL_RESULT_STEP_TYPES = new Set([
   'TASK_BOUNDARY',
 ]);
 
+const TURN_BOUNDARY_STEP_TYPES = new Set([
+  'PLANNER_RESPONSE',
+  'USER_INPUT',
+  'SYSTEM_MESSAGE',
+]);
+
 const IN_PROGRESS_STEP_STATUSES = new Set([
   'RUNNING',
   'PENDING',
@@ -93,29 +103,63 @@ function isToolResultStep(step: AntigravityTranscriptStep): boolean {
   return !NON_TOOL_RESULT_STEP_TYPES.has(step.type);
 }
 
+function isToolCancelledStatus(status: string | undefined): boolean {
+  if (!status) return false;
+  const upper = status.toUpperCase();
+  return upper === 'CANCELED' || upper === 'CANCELLED';
+}
+
 function isToolErrorStatus(status: string | undefined): boolean {
   if (!status) return false;
   const upper = status.toUpperCase();
   return upper === 'ERROR' || upper === 'CANCELED' || upper === 'CANCELLED';
 }
 
-function recordUsageIdentities(seenKeys: Set<string>, usage: AntigravityUsageEvent): void {
+function usageKeyMeta(usage: AntigravityUsageEvent): [number, number] {
+  const genIdx = usage.genIdx ?? -1;
+  const stepIdx =
+    usage.genIdx === undefined && usage.stepIndices.length > 0
+      ? Math.max(...usage.stepIndices)
+      : -1;
+  return [genIdx, stepIdx];
+}
+
+function recordUsageIdentities(
+  seenKeys: Set<string>,
+  keyOrder: string[],
+  keyMeta: Array<[number, number]>,
+  usage: AntigravityUsageEvent,
+): void {
   const strongIds = usage.identities.filter(isStrongUsageIdentity);
-  if (strongIds.length > 0) {
-    seenKeys.add(usage.key);
-    for (const id of strongIds) seenKeys.add(id);
-  } else {
-    seenKeys.add(usage.key);
-    for (const id of usage.identities) seenKeys.add(id);
+  const toRecord = strongIds.length > 0 ? [usage.key, ...strongIds] : [usage.key, ...usage.identities];
+  const meta = usageKeyMeta(usage);
+  for (const id of toRecord) {
+    if (seenKeys.has(id)) continue;
+    seenKeys.add(id);
+    keyOrder.push(id);
+    keyMeta.push(meta);
   }
 }
 
-function collectSeedUsageKeys(events: readonly AntigravityUsageEvent[]): string[] {
-  const keys = new Set<string>();
+function collectSeedUsageCursor(events: readonly AntigravityUsageEvent[]): {
+  keys: string[];
+  meta: Array<[number, number]>;
+} {
+  const seen = new Set<string>();
+  const keys: string[] = [];
+  const meta: Array<[number, number]> = [];
   for (const event of events) {
-    recordUsageIdentities(keys, event);
+    recordUsageIdentities(seen, keys, meta, event);
   }
-  return [...keys];
+  return { keys, meta };
+}
+
+function extractStepOrder(stepId: string | undefined): number {
+  if (!stepId) return Number.MAX_SAFE_INTEGER;
+  const m = /:(?:step|gen):(\d+)$/.exec(stepId);
+  if (!m) return Number.MAX_SAFE_INTEGER;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : Number.MAX_SAFE_INTEGER;
 }
 
 interface PendingToolCall {
@@ -132,11 +176,21 @@ interface PendingToolCall {
 interface SessionCheckpoint {
   effectiveMtimeMs: number;
   effectiveSize: number;
+  /** Highest genIdx among evicted keys (advanced only on eviction, never blocking out-of-order 0-token rows). */
   maxEmittedGenIdx: number;
+  /** Highest stepIdx among evicted step-only keys (advanced only on eviction). */
   maxEmittedStepIdx: number;
   emittedUsageKeys: string[];
+  /** Parallel `[genIdx, stepIdx]` metadata for `emittedUsageKeys` to compute exact eviction watermarks. */
+  emittedKeyMeta?: Array<[number, number]>;
   lastTranscriptStepIndex: number;
   pendingToolCalls: PendingToolCall[];
+  /** Latched turnId per turn-start stepIndex so delayed native UUIDs never split an already-emitted turn. */
+  turnIdByStartStep?: Record<string, string>;
+  /** Turn IDs that have already emitted `gen_ai.turn.start: true`. */
+  emittedTurnStarts?: string[];
+  /** Latched tool call IDs keyed by `${plannerStepIndex}:${toolIndex}` for cross-cycle stability. */
+  toolCallIdMap?: Record<string, string>;
 }
 
 interface AntigravityCheckpoint {
@@ -177,10 +231,6 @@ const SYNTHETIC_ROOT_PARENT_SPAN_ID = '0000000000000001';
 function hashId(parts: readonly string[], length: number): string {
   const hex = createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, length);
   return /^0+$/.test(hex) ? `${'0'.repeat(length - 1)}1` : hex;
-}
-
-function isTurnPromptStep(step: AntigravityTranscriptStep): boolean {
-  return step.type === 'USER_INPUT' || (step.stepIndex === 0 && step.type === 'SYSTEM_MESSAGE');
 }
 
 function toUnixNanoString(ms: number): string {
@@ -238,6 +288,7 @@ export class AntigravityInput extends BaseInput {
   private readonly pathToUri?: PathToUriFn;
   private pendingCheckpoint: AntigravityCheckpoint | null = null;
   private backlogTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly failedDbBackoff = new Map<string, { failures: number; retryAfterMs: number }>();
   private warnedSqliteUnavailable = false;
 
   constructor(opts: AntigravityInputOptions) {
@@ -300,6 +351,7 @@ export class AntigravityInput extends BaseInput {
 
   protected override async onStop(): Promise<void> {
     this.clearBacklogTimer();
+    this.failedDbBackoff.clear();
   }
 
   protected override onEntriesQueued(): void {
@@ -331,18 +383,55 @@ export class AntigravityInput extends BaseInput {
                   typeof p.stepId === 'string',
               )
             : [];
+          const emittedUsageKeys = Array.isArray(cur.emittedUsageKeys)
+            ? cur.emittedUsageKeys.filter((k): k is string => typeof k === 'string')
+            : [];
+          const rawMeta = Array.isArray(cur.emittedKeyMeta) ? cur.emittedKeyMeta : undefined;
+          const emittedKeyMeta: Array<[number, number]> | undefined =
+            rawMeta && rawMeta.length === emittedUsageKeys.length
+              ? rawMeta.map((pair) =>
+                  Array.isArray(pair) &&
+                  typeof pair[0] === 'number' &&
+                  typeof pair[1] === 'number'
+                    ? [pair[0], pair[1]]
+                    : [-1, -1],
+                )
+              : undefined;
+          const turnIdByStartStep: Record<string, string> | undefined =
+            cur.turnIdByStartStep && typeof cur.turnIdByStartStep === 'object'
+              ? Object.fromEntries(
+                  Object.entries(cur.turnIdByStartStep).filter(
+                    (kv): kv is [string, string] => typeof kv[1] === 'string',
+                  ),
+                )
+              : undefined;
+          const emittedTurnStarts = Array.isArray(cur.emittedTurnStarts)
+            ? cur.emittedTurnStarts.filter((t): t is string => typeof t === 'string')
+            : undefined;
+          const toolCallIdMap: Record<string, string> | undefined =
+            cur.toolCallIdMap && typeof cur.toolCallIdMap === 'object'
+              ? Object.fromEntries(
+                  Object.entries(cur.toolCallIdMap).filter(
+                    (kv): kv is [string, string] => typeof kv[1] === 'string',
+                  ),
+                )
+              : undefined;
           sessions[sid] = {
             effectiveMtimeMs: typeof cur.effectiveMtimeMs === 'number' ? cur.effectiveMtimeMs : 0,
             effectiveSize: typeof cur.effectiveSize === 'number' ? cur.effectiveSize : 0,
             maxEmittedGenIdx: typeof cur.maxEmittedGenIdx === 'number' ? cur.maxEmittedGenIdx : -1,
             maxEmittedStepIdx:
               typeof cur.maxEmittedStepIdx === 'number' ? cur.maxEmittedStepIdx : -1,
-            emittedUsageKeys: Array.isArray(cur.emittedUsageKeys)
-              ? cur.emittedUsageKeys.filter((k): k is string => typeof k === 'string')
-              : [],
+            emittedUsageKeys,
+            ...(emittedKeyMeta ? { emittedKeyMeta } : {}),
             lastTranscriptStepIndex:
               typeof cur.lastTranscriptStepIndex === 'number' ? cur.lastTranscriptStepIndex : -1,
             pendingToolCalls,
+            ...(turnIdByStartStep && Object.keys(turnIdByStartStep).length > 0
+              ? { turnIdByStartStep }
+              : {}),
+            ...(emittedTurnStarts && emittedTurnStarts.length > 0 ? { emittedTurnStarts } : {}),
+            ...(toolCallIdMap && Object.keys(toolCallIdMap).length > 0 ? { toolCallIdMap } : {}),
           };
         }
       }
@@ -380,10 +469,43 @@ export class AntigravityInput extends BaseInput {
     }
     for (const cur of Object.values(cp.sessions)) {
       if (cur.emittedUsageKeys.length > MAX_EMITTED_KEYS_PER_SESSION) {
-        cur.emittedUsageKeys = cur.emittedUsageKeys.slice(-MAX_EMITTED_KEYS_PER_SESSION);
+        // Advance monotonic watermarks strictly from the evicted oldest prefix so
+        // out-of-order 0-token rows within the active window are never skipped.
+        const overflow = cur.emittedUsageKeys.length - MAX_EMITTED_KEYS_PER_SESSION;
+        if (cur.emittedKeyMeta && cur.emittedKeyMeta.length === cur.emittedUsageKeys.length) {
+          for (let i = 0; i < overflow; i++) {
+            const [g, s] = cur.emittedKeyMeta[i]!;
+            if (g > cur.maxEmittedGenIdx) cur.maxEmittedGenIdx = g;
+            if (s > cur.maxEmittedStepIdx) cur.maxEmittedStepIdx = s;
+          }
+          cur.emittedKeyMeta = cur.emittedKeyMeta.slice(overflow);
+        } else {
+          cur.emittedKeyMeta = undefined;
+        }
+        cur.emittedUsageKeys = cur.emittedUsageKeys.slice(overflow);
       }
       if (cur.pendingToolCalls.length > MAX_PENDING_TOOL_CALLS_PER_SESSION) {
         cur.pendingToolCalls = cur.pendingToolCalls.slice(-MAX_PENDING_TOOL_CALLS_PER_SESSION);
+      }
+      if (cur.emittedTurnStarts && cur.emittedTurnStarts.length > MAX_LATCHED_TURNS_PER_SESSION) {
+        cur.emittedTurnStarts = cur.emittedTurnStarts.slice(-MAX_LATCHED_TURNS_PER_SESSION);
+      }
+      if (cur.turnIdByStartStep) {
+        const turnEntries = Object.entries(cur.turnIdByStartStep);
+        if (turnEntries.length > MAX_LATCHED_TURNS_PER_SESSION) {
+          turnEntries.sort((a, b) => Number(a[0]) - Number(b[0]));
+          cur.turnIdByStartStep = Object.fromEntries(
+            turnEntries.slice(-MAX_LATCHED_TURNS_PER_SESSION),
+          );
+        }
+      }
+      if (cur.toolCallIdMap) {
+        const callEntries = Object.entries(cur.toolCallIdMap);
+        if (callEntries.length > MAX_LATCHED_TOOL_CALLS_PER_SESSION) {
+          cur.toolCallIdMap = Object.fromEntries(
+            callEntries.slice(-MAX_LATCHED_TOOL_CALLS_PER_SESSION),
+          );
+        }
       }
     }
     const prev = this.stateStore.get(this.id);
@@ -438,6 +560,11 @@ export class AntigravityInput extends BaseInput {
     }
 
     const presentSessionIds = new Set(dbFiles.map((f) => f.slice(0, -3)).filter(Boolean));
+    for (const backedOffId of this.failedDbBackoff.keys()) {
+      if (!presentSessionIds.has(backedOffId)) {
+        this.failedDbBackoff.delete(backedOffId);
+      }
+    }
     const pendingSeedSet = new Set(
       (checkpoint.pendingSeedSessionIds ?? []).filter((id) => presentSessionIds.has(id)),
     );
@@ -500,16 +627,21 @@ export class AntigravityInput extends BaseInput {
           const maxStep = transcript
             ? transcript.steps.reduce((max, s) => Math.max(max, s.stepIndex), -1)
             : -1;
+          const seedCursor = snapshot
+            ? collectSeedUsageCursor(snapshot.events)
+            : { keys: [], meta: [] };
           checkpoint.sessions[candidate.sessionId] = {
             effectiveMtimeMs: candidate.effectiveMtimeMs,
             effectiveSize: candidate.effectiveSize,
-            maxEmittedGenIdx: snapshot?.maxGenIdx ?? -1,
-            maxEmittedStepIdx: snapshot?.maxStepIdx ?? -1,
-            emittedUsageKeys: snapshot ? collectSeedUsageKeys(snapshot.events) : [],
+            maxEmittedGenIdx: -1,
+            maxEmittedStepIdx: -1,
+            emittedUsageKeys: seedCursor.keys,
+            emittedKeyMeta: seedCursor.meta,
             lastTranscriptStepIndex: maxStep,
             pendingToolCalls: [],
           };
           pendingSeedSet.delete(candidate.sessionId);
+          this.failedDbBackoff.delete(candidate.sessionId);
         } catch (err) {
           // Track failed DB in pendingSeedSet so it seeds without replaying history once
           // readable, while allowing other valid/new sessions to proceed immediately.
@@ -529,14 +661,24 @@ export class AntigravityInput extends BaseInput {
 
     if (candidates.length === 0) return [];
 
-    candidates.sort((a, b) => b.effectiveMtimeMs - a.effectiveMtimeMs);
-    const hasBacklog = candidates.length > MAX_DBS_PER_CYCLE;
-    const batch = candidates.slice(0, MAX_DBS_PER_CYCLE);
+    // Filter out DBs currently in exponential failure backoff so Top-16 persistently
+    // corrupt/locked DBs can never starve healthy DBs (#17..N) behind them.
+    const nowMs = Date.now();
+    const readyCandidates = candidates.filter((c) => {
+      const backoff = this.failedDbBackoff.get(c.sessionId);
+      return !backoff || nowMs >= backoff.retryAfterMs;
+    });
+    if (readyCandidates.length === 0) return [];
+
+    readyCandidates.sort((a, b) => b.effectiveMtimeMs - a.effectiveMtimeMs);
+    const hasBacklog = readyCandidates.length > MAX_DBS_PER_CYCLE;
+    const batch = readyCandidates.slice(0, MAX_DBS_PER_CYCLE);
 
     const emitted: AgentActivityEntry[] = [];
     let checkpointDirty =
       (checkpoint.pendingSeedSessionIds?.length ?? 0) !== pendingSeedSet.size;
     let progressMade = false;
+    let newlyBackedOff = false;
 
     for (const candidate of batch) {
       if (!this.running) break;
@@ -544,7 +686,19 @@ export class AntigravityInput extends BaseInput {
       let snapshot: AntigravityConversationSnapshot | null;
       try {
         snapshot = await readAntigravityConversationDb(candidate.dbPath);
+        this.failedDbBackoff.delete(candidate.sessionId);
       } catch (err) {
+        const prevFail = this.failedDbBackoff.get(candidate.sessionId);
+        const failures = (prevFail?.failures ?? 0) + 1;
+        const delayMs = Math.min(
+          DB_FAILURE_BACKOFF_MAX_MS,
+          DB_FAILURE_BACKOFF_BASE_MS * 2 ** (failures - 1),
+        );
+        this.failedDbBackoff.set(candidate.sessionId, {
+          failures,
+          retryAfterMs: Date.now() + delayMs,
+        });
+        newlyBackedOff = true;
         this.logger.warn('failed to read Antigravity conversation DB', {
           agentType: this.agentType,
           sessionId: candidate.sessionId,
@@ -553,31 +707,23 @@ export class AntigravityInput extends BaseInput {
         continue;
       }
 
-      let transcript: AntigravityTranscript | null = null;
-      try {
-        transcript = await readAntigravityTranscript(this.dataRoot, candidate.sessionId);
-      } catch (err) {
-        this.logger.warn('failed to read Antigravity transcript', {
-          agentType: this.agentType,
-          sessionId: candidate.sessionId,
-          error: String(err),
-        });
-        if (pendingSeedSet.has(candidate.sessionId)) {
-          continue;
-        }
-      }
+      const transcript = await readAntigravityTranscript(this.dataRoot, candidate.sessionId);
 
       // Deferred seed for DBs that failed transiently during initial fresh seed
       if (pendingSeedSet.has(candidate.sessionId)) {
         const maxStep = transcript
           ? transcript.steps.reduce((max, s) => Math.max(max, s.stepIndex), -1)
           : -1;
+        const seedCursor = snapshot
+          ? collectSeedUsageCursor(snapshot.events)
+          : { keys: [], meta: [] };
         checkpoint.sessions[candidate.sessionId] = {
           effectiveMtimeMs: candidate.effectiveMtimeMs,
           effectiveSize: candidate.effectiveSize,
-          maxEmittedGenIdx: snapshot?.maxGenIdx ?? -1,
-          maxEmittedStepIdx: snapshot?.maxStepIdx ?? -1,
-          emittedUsageKeys: snapshot ? collectSeedUsageKeys(snapshot.events) : [],
+          maxEmittedGenIdx: -1,
+          maxEmittedStepIdx: -1,
+          emittedUsageKeys: seedCursor.keys,
+          emittedKeyMeta: seedCursor.meta,
           lastTranscriptStepIndex: maxStep,
           pendingToolCalls: [],
         };
@@ -599,12 +745,16 @@ export class AntigravityInput extends BaseInput {
         const maxStep = transcript
           ? transcript.steps.reduce((max, s) => Math.max(max, s.stepIndex), -1)
           : (checkpoint.sessions[candidate.sessionId]?.lastTranscriptStepIndex ?? -1);
+        const seedCursor = snapshot
+          ? collectSeedUsageCursor(snapshot.events)
+          : { keys: [], meta: [] };
         checkpoint.sessions[candidate.sessionId] = {
           effectiveMtimeMs: candidate.effectiveMtimeMs,
           effectiveSize: candidate.effectiveSize,
-          maxEmittedGenIdx: snapshot?.maxGenIdx ?? -1,
-          maxEmittedStepIdx: snapshot?.maxStepIdx ?? -1,
-          emittedUsageKeys: snapshot ? collectSeedUsageKeys(snapshot.events) : [],
+          maxEmittedGenIdx: -1,
+          maxEmittedStepIdx: -1,
+          emittedUsageKeys: seedCursor.keys,
+          emittedKeyMeta: seedCursor.meta,
           lastTranscriptStepIndex: maxStep,
           pendingToolCalls: [],
         };
@@ -619,6 +769,7 @@ export class AntigravityInput extends BaseInput {
         maxEmittedGenIdx: -1,
         maxEmittedStepIdx: -1,
         emittedUsageKeys: [],
+        emittedKeyMeta: [],
         lastTranscriptStepIndex: -1,
         pendingToolCalls: [],
       };
@@ -638,8 +789,18 @@ export class AntigravityInput extends BaseInput {
         maxEmittedGenIdx: sessionResult.maxEmittedGenIdx,
         maxEmittedStepIdx: sessionResult.maxEmittedStepIdx,
         emittedUsageKeys: sessionResult.emittedUsageKeys,
+        emittedKeyMeta: sessionResult.emittedKeyMeta,
         lastTranscriptStepIndex: sessionResult.maxTranscriptStepIndex,
         pendingToolCalls: sessionResult.pendingToolCalls,
+        ...(Object.keys(sessionResult.turnIdByStartStep).length > 0
+          ? { turnIdByStartStep: sessionResult.turnIdByStartStep }
+          : {}),
+        ...(sessionResult.emittedTurnStarts.length > 0
+          ? { emittedTurnStarts: sessionResult.emittedTurnStarts }
+          : {}),
+        ...(Object.keys(sessionResult.toolCallIdMap).length > 0
+          ? { toolCallIdMap: sessionResult.toolCallIdMap }
+          : {}),
       };
       checkpointDirty = true;
       progressMade = true;
@@ -657,10 +818,10 @@ export class AntigravityInput extends BaseInput {
       }
     }
 
-    // Drain backlog via a managed delayed timer only when this cycle made progress,
-    // avoiding dropped wakeups while BaseInput.cyclePromise is still settling and
-    // preventing tight CPU spin when all DBs in the batch fail transiently.
-    if (hasBacklog && progressMade && this.running) {
+    // Drain remaining ready backlog via a managed delayed timer whenever this cycle
+    // either made progress or moved failing DBs into backoff so healthy #17..N DBs
+    // are drained immediately without spinning on backed-off DBs.
+    if (hasBacklog && (progressMade || newlyBackedOff) && this.running) {
       this.backlogTimer = setTimeout(() => {
         this.backlogTimer = null;
         this.requestCollection();
@@ -681,15 +842,31 @@ export class AntigravityInput extends BaseInput {
     maxEmittedGenIdx: number;
     maxEmittedStepIdx: number;
     emittedUsageKeys: string[];
+    emittedKeyMeta: Array<[number, number]>;
     pendingToolCalls: PendingToolCall[];
+    turnIdByStartStep: Record<string, string>;
+    emittedTurnStarts: string[];
+    toolCallIdMap: Record<string, string>;
   }> {
     const entries: AgentActivityEntry[] = [];
     const cwd = snapshot?.workspacePath;
     const stepInfos = snapshot?.stepInfos ?? new Map<number, AntigravityStepInfo>();
     const seenKeys = new Set(prevCursor.emittedUsageKeys);
+    const keyOrder = [...prevCursor.emittedUsageKeys];
+    const keyMeta: Array<[number, number]> =
+      prevCursor.emittedKeyMeta && prevCursor.emittedKeyMeta.length === prevCursor.emittedUsageKeys.length
+        ? prevCursor.emittedKeyMeta.map(([g, s]) => [g, s])
+        : prevCursor.emittedUsageKeys.map(() => [-1, -1]);
     let maxStepIndex = prevCursor.lastTranscriptStepIndex;
-    let maxEmittedGenIdx = prevCursor.maxEmittedGenIdx;
-    let maxEmittedStepIdx = prevCursor.maxEmittedStepIdx;
+    const maxEmittedGenIdx = prevCursor.maxEmittedGenIdx;
+    const maxEmittedStepIdx = prevCursor.maxEmittedStepIdx;
+    const latchedTurnByStartStep = new Map<number, string>(
+      Object.entries(prevCursor.turnIdByStartStep ?? {}).map(([k, v]) => [Number(k), v]),
+    );
+    const emittedTurnStartsSet = new Set<string>(prevCursor.emittedTurnStarts ?? []);
+    const latchedToolCallIds = new Map<string, string>(
+      Object.entries(prevCursor.toolCallIdMap ?? {}),
+    );
 
     const resolvedMediaCache = new Map<string, UriPart[]>();
     const getStepMedia = async (
@@ -705,41 +882,141 @@ export class AntigravityInput extends BaseInput {
       return parts;
     };
 
-    // Precompute fallback turn mapping, prev-planner lookup, step positions,
-    // and latest follow-up step index in a single O(S) pass over transcript steps.
-    const stepToTurn = new Map<number, string>();
-    const promptSteps: number[] = [];
+    // Single O(S) pass over transcript steps to precompute:
+    // - stepPositionByIndex & prevPlannerByStepIndex (for O(delta) buildInputMessagesDelta)
+    // - turnPromptStepIndices (USER_INPUT, step-0 SYSTEM_MESSAGE, or mid-session SYSTEM_MESSAGE
+    //   that starts a new native turn UUID)
+    // - latestFollowupStepIndex & latestCompletedStepIndex (so stuck/backgrounded RUNNING steps
+    //   never stall later completed steps or get permanently dropped)
     const prevPlannerByStepIndex = new Map<number, AntigravityTranscriptStep | undefined>();
     const stepPositionByIndex = new Map<number, number>();
+    const turnPromptStepSet = new Set<number>();
+    const turnGroups: Array<{ startStep: number; steps: number[] }> = [];
     let latestFollowupStepIndex = -1;
+    let latestCompletedStepIndex = -1;
+
     if (transcript) {
-      let currentTurnIndex = 0;
       let lastPlanner: AntigravityTranscriptStep | undefined;
+      let lastNativeTurn: string | undefined;
+      let currentGroup: { startStep: number; steps: number[] } | null = null;
+      let currentGroupHasPlanner = false;
+
       for (let pos = 0; pos < transcript.steps.length; pos++) {
         const step = transcript.steps[pos]!;
+        const info = stepInfos.get(step.stepIndex);
         stepPositionByIndex.set(step.stepIndex, pos);
         prevPlannerByStepIndex.set(step.stepIndex, lastPlanner);
-        if (isTurnPromptStep(step)) {
-          currentTurnIndex++;
-          promptSteps.push(step.stepIndex);
-          if (step.stepIndex > latestFollowupStepIndex) {
-            latestFollowupStepIndex = step.stepIndex;
-          }
-        } else if (step.type === 'PLANNER_RESPONSE') {
-          lastPlanner = step;
-          if (step.stepIndex > latestFollowupStepIndex) {
-            latestFollowupStepIndex = step.stepIndex;
+
+        if (!isStepInProgress(step) || info?.completedAtMs !== undefined) {
+          if (step.stepIndex > latestCompletedStepIndex) {
+            latestCompletedStepIndex = step.stepIndex;
           }
         }
-        stepToTurn.set(step.stepIndex, `${sessionId}:turn:${Math.max(1, currentTurnIndex)}`);
+
+        const nativeTurn = info?.turnId;
+        const isMidSessionSystemTurnStart =
+          step.type === 'SYSTEM_MESSAGE' &&
+          step.stepIndex > 0 &&
+          nativeTurn !== undefined &&
+          nativeTurn !== lastNativeTurn;
+        const isPrompt =
+          step.type === 'USER_INPUT' ||
+          (step.stepIndex === 0 && step.type === 'SYSTEM_MESSAGE') ||
+          isMidSessionSystemTurnStart;
+
+        if (isPrompt) {
+          turnPromptStepSet.add(step.stepIndex);
+          if (step.stepIndex > latestFollowupStepIndex) {
+            latestFollowupStepIndex = step.stepIndex;
+          }
+          // Merge step-0 SYSTEM_MESSAGE + immediate USER_INPUT (before any PLANNER_RESPONSE)
+          // into one turn group when they share the same nativeTurn (or both lack nativeTurn).
+          const mergeIntoStep0SystemGroup =
+            step.type === 'USER_INPUT' &&
+            currentGroup !== null &&
+            currentGroup.startStep === 0 &&
+            !currentGroupHasPlanner &&
+            (nativeTurn === undefined ||
+              lastNativeTurn === undefined ||
+              nativeTurn === lastNativeTurn);
+          if (mergeIntoStep0SystemGroup) {
+            currentGroup!.steps.push(step.stepIndex);
+          } else {
+            currentGroup = { startStep: step.stepIndex, steps: [step.stepIndex] };
+            currentGroupHasPlanner = false;
+            turnGroups.push(currentGroup);
+          }
+        } else {
+          if (step.type === 'PLANNER_RESPONSE') {
+            lastPlanner = step;
+            currentGroupHasPlanner = true;
+            if (step.stepIndex > latestFollowupStepIndex) {
+              latestFollowupStepIndex = step.stepIndex;
+            }
+          }
+          if (!currentGroup) {
+            currentGroup = { startStep: step.stepIndex, steps: [step.stepIndex] };
+            turnGroups.push(currentGroup);
+          } else {
+            currentGroup.steps.push(step.stepIndex);
+          }
+        }
+        if (nativeTurn) lastNativeTurn = nativeTurn;
       }
     }
 
-    // Prefer Antigravity's native Turn UUID (steps.metadata field 12); fall back to transcript turn count.
+    // Include any SQLite usage stepIndices in their corresponding turn group so
+    // Loop 2 and Loop 3 always resolve the exact same turnId even when only a child
+    // result step carries the native Turn UUID.
+    const stepToTurn = new Map<number, string>();
+    const groupStartSteps = turnGroups.map((g) => g.startStep);
+    if (snapshot && turnGroups.length > 0) {
+      for (const usage of snapshot.events) {
+        for (const idx of usage.stepIndices) {
+          const groupNum = binarySearchTurnNumber(groupStartSteps, idx);
+          const group = turnGroups[groupNum - 1];
+          if (group && !group.steps.includes(idx)) {
+            group.steps.push(idx);
+          }
+        }
+      }
+    }
+    for (let gi = 0; gi < turnGroups.length; gi++) {
+      const group = turnGroups[gi]!;
+      let resolvedTurn = latchedTurnByStartStep.get(group.startStep);
+      if (!resolvedTurn) {
+        let nativeTurn: string | undefined;
+        for (const idx of group.steps) {
+          const t = stepInfos.get(idx)?.turnId;
+          if (t) {
+            nativeTurn = t;
+            break;
+          }
+        }
+        resolvedTurn = nativeTurn
+          ? `${sessionId}:${nativeTurn}`
+          : `${sessionId}:turn:${gi + 1}`;
+        latchedTurnByStartStep.set(group.startStep, resolvedTurn);
+      }
+      for (const idx of group.steps) {
+        stepToTurn.set(idx, resolvedTurn);
+      }
+    }
+
     const resolveTurnForStep = (
       stepIdx: number | undefined,
       candidateIndices?: readonly number[],
     ): string => {
+      if (stepIdx !== undefined) {
+        const mapped = stepToTurn.get(stepIdx);
+        if (mapped) return mapped;
+      }
+      if (candidateIndices) {
+        for (const idx of candidateIndices) {
+          const mapped = stepToTurn.get(idx);
+          if (mapped) return mapped;
+        }
+      }
       if (stepIdx !== undefined) {
         const nativeTurn = stepInfos.get(stepIdx)?.turnId;
         if (nativeTurn) return `${sessionId}:${nativeTurn}`;
@@ -750,37 +1027,92 @@ export class AntigravityInput extends BaseInput {
           if (nativeTurn) return `${sessionId}:${nativeTurn}`;
         }
       }
-      if (stepIdx === undefined) return `${sessionId}:turn:1`;
-      const exact = stepToTurn.get(stepIdx);
-      if (exact) return exact;
-      if (promptSteps.length > 0) {
-        return `${sessionId}:turn:${binarySearchTurnNumber(promptSteps, stepIdx)}`;
+      if (stepIdx !== undefined && groupStartSteps.length > 0) {
+        const groupNum = binarySearchTurnNumber(groupStartSteps, stepIdx);
+        const startStep = groupStartSteps[groupNum - 1];
+        if (startStep !== undefined) {
+          const latched = latchedTurnByStartStep.get(startStep);
+          if (latched) return latched;
+        }
+        return `${sessionId}:turn:${groupNum}`;
       }
       return `${sessionId}:turn:1`;
     };
 
-    // Preserve monotonic turn ordering for same-millisecond tie-breaking
+    // Preserve monotonic turn ordering for same-millisecond tie-breaking.
+    // Register carried-over pending turns FIRST so they never sort after newer turns.
     const turnOrderMap = new Map<string, number>();
     const registerTurnOrder = (turnId: string): void => {
       if (!turnOrderMap.has(turnId)) {
         turnOrderMap.set(turnId, turnOrderMap.size);
       }
     };
+    for (const pending of prevCursor.pendingToolCalls) {
+      registerTurnOrder(pending.turnId);
+    }
     if (transcript) {
       for (const step of transcript.steps) {
         registerTurnOrder(resolveTurnForStep(step.stepIndex));
       }
     }
 
+    // Locate the result stepIndex for a tool call, skipping non-tool-result
+    // bookkeeping steps (e.g. CHECKPOINT / TASK_BOUNDARY) between PLANNER_RESPONSE
+    // and the tool result step.
+    const findToolResultStepIndex = (
+      plannerStepIndex: number,
+      toolIndex: number,
+    ): number => {
+      if (transcript) {
+        const startPos = stepPositionByIndex.get(plannerStepIndex);
+        if (startPos !== undefined) {
+          let seenToolResults = 0;
+          for (let pos = startPos + 1; pos < transcript.steps.length; pos++) {
+            const candidate = transcript.steps[pos]!;
+            if (TURN_BOUNDARY_STEP_TYPES.has(candidate.type)) break;
+            if (!isToolResultStep(candidate)) continue;
+            if (seenToolResults === toolIndex) return candidate.stepIndex;
+            seenToolResults++;
+          }
+        }
+      }
+      return plannerStepIndex + 1 + toolIndex;
+    };
+
     const resolveToolCallId = (
       plannerStepIndex: number,
       toolIndex: number,
       explicitId?: string,
+      toolName?: string,
     ): string => {
       if (explicitId) return explicitId;
-      const nativeId = stepInfos.get(plannerStepIndex + 1 + toolIndex)?.toolCallId;
-      if (nativeId) return nativeId;
-      return `${sessionId}:step:${plannerStepIndex}:tc:${toolIndex}`;
+      const latchKey = `${plannerStepIndex}:${toolIndex}`;
+      const latched = latchedToolCallIds.get(latchKey);
+      if (latched) return latched;
+      const resultIdx = findToolResultStepIndex(plannerStepIndex, toolIndex);
+      const info = stepInfos.get(resultIdx);
+      const nameCompatible =
+        !toolName || !info?.toolName || info.toolName === toolName;
+      const chosen =
+        info?.toolCallId && nameCompatible
+          ? info.toolCallId
+          : `${sessionId}:step:${plannerStepIndex}:tc:${toolIndex}`;
+      latchedToolCallIds.set(latchKey, chosen);
+      return chosen;
+    };
+
+    // A step is genuinely still in-progress only when transcript marks it in-progress,
+    // SQLite has not yet recorded completedAtMs, AND no later step has completed.
+    // This prevents stuck or backgrounded (WaitMsBeforeAsync) RUNNING steps from
+    // stalling the session or dropping completed tool results.
+    const isStepStillActive = (
+      step: AntigravityTranscriptStep,
+      info: AntigravityStepInfo | undefined,
+    ): boolean => {
+      if (!isStepInProgress(step)) return false;
+      if (info?.completedAtMs !== undefined) return false;
+      if (latestCompletedStepIndex > step.stepIndex) return false;
+      return true;
     };
 
     // Precompute per-turn primary provider and per-step LLM completion timestamp
@@ -790,10 +1122,13 @@ export class AntigravityInput extends BaseInput {
     const stepCompletionMsMap = new Map<number, number>();
     if (snapshot) {
       for (const usage of snapshot.events) {
-        const linkedStep = this.findLinkedPlannerStep(usage, transcript);
+        const linkedStep = this.findLinkedResponseStep(usage, transcript);
         const primaryIdx = linkedStep?.stepIndex ?? usage.stepIndices[0];
         if (linkedStep) {
-          const completedMs = stepInfos.get(linkedStep.stepIndex)?.completedAtMs ?? usage.timestampMs;
+          const completedMs = Math.max(
+            stepInfos.get(linkedStep.stepIndex)?.completedAtMs ?? 0,
+            usage.timestampMs,
+          );
           const prev = stepCompletionMsMap.get(linkedStep.stepIndex);
           if (prev === undefined || completedMs > prev) {
             stepCompletionMsMap.set(linkedStep.stepIndex, completedMs);
@@ -815,15 +1150,14 @@ export class AntigravityInput extends BaseInput {
     // 1) Drain any pending tool calls from previous poll cycles whose tool results have now landed
     const remainingPending: PendingToolCall[] = [];
     for (const pending of prevCursor.pendingToolCalls) {
-      registerTurnOrder(pending.turnId);
       const resultStep = transcript?.byStepIndex.get(pending.resultStepIndex);
+      const resultInfo = stepInfos.get(pending.resultStepIndex);
       if (resultStep && isToolResultStep(resultStep)) {
-        if (isStepInProgress(resultStep)) {
-          // Tool execution is still in progress; wait for a terminal status
+        if (isStepStillActive(resultStep, resultInfo)) {
+          // Tool execution is genuinely still in progress; wait for completion
           remainingPending.push(pending);
           continue;
         }
-        const resultInfo = stepInfos.get(pending.resultStepIndex);
         const effectiveCallTsMs =
           pending.callTsMs ??
           resultInfo?.executionStartedAtMs ??
@@ -848,6 +1182,7 @@ export class AntigravityInput extends BaseInput {
           [sessionId, pending.turnId, pending.stepId, pending.callId, 'tool'],
           16,
         );
+        const isErr = isToolErrorStatus(resultStep.status);
         const resultEntry = buildAgentActivityEntry({
           'event.id': hashId(
             [sessionId, pending.turnId, pending.stepId, pending.callId, 'tool.result'],
@@ -869,7 +1204,14 @@ export class AntigravityInput extends BaseInput {
           'gen_ai.tool.name': pending.toolName,
           'gen_ai.tool.call.id': pending.callId,
           'gen_ai.tool.call.result': resultPayload,
-          'tool.result.status': isToolErrorStatus(resultStep.status) ? 'error' : 'success',
+          'tool.result.status': isErr ? 'error' : 'success',
+          ...(isErr
+            ? {
+                'error.type': isToolCancelledStatus(resultStep.status)
+                  ? 'antigravity.tool_cancelled'
+                  : 'antigravity.tool_failed',
+              }
+            : {}),
           ...(durationMs > 0 ? { 'gen_ai.tool.call.duration': durationMs } : {}),
           time_unix_nano: toUnixNanoString(resultTsMs),
         });
@@ -885,26 +1227,28 @@ export class AntigravityInput extends BaseInput {
       }
     }
 
-    // 2) Emit new turn prompts (USER_INPUT or initial step-0 SYSTEM_MESSAGE) and tool.call / tool.result
+    // 2) Emit new turn prompts and tool.call / tool.result
     if (transcript) {
       const stepsByIndex = transcript.byStepIndex;
       for (const step of transcript.steps) {
         if (step.stepIndex <= prevCursor.lastTranscriptStepIndex) continue;
-        // Stop before an in-progress prompt or planner step so we neither emit
-        // incomplete tool calls nor advance lastTranscriptStepIndex past it.
-        if ((isTurnPromptStep(step) || step.type === 'PLANNER_RESPONSE') && isStepInProgress(step)) {
+        const stepInfo = stepInfos.get(step.stepIndex);
+        const isPrompt = turnPromptStepSet.has(step.stepIndex);
+        // Stop before an active in-progress prompt or planner step at the tip of the
+        // session so we neither emit incomplete tool calls nor skip it via watermark.
+        // Older stuck RUNNING steps with later completed steps do not stall the session.
+        if ((isPrompt || step.type === 'PLANNER_RESPONSE') && isStepStillActive(step, stepInfo)) {
           break;
         }
         if (step.stepIndex > maxStepIndex) maxStepIndex = step.stepIndex;
 
         const turnId = resolveTurnForStep(step.stepIndex);
         const stepId = `${sessionId}:step:${step.stepIndex}`;
-        const stepInfo = stepInfos.get(step.stepIndex);
         const tsMs =
           stepInfo?.createdAtMs ?? step.createdAtMs ?? snapshot?.trajectoryTimestampMs ?? Date.now();
         const traceId = hashId([sessionId, turnId, 'trace'], 32);
 
-        if (isTurnPromptStep(step)) {
+        if (isPrompt) {
           const mediaParts = await getStepMedia(step, tsMs, 'input');
           if (!step.content && mediaParts.length === 0) continue;
           const parts: JsonValue[] = [];
@@ -913,6 +1257,8 @@ export class AntigravityInput extends BaseInput {
           const role = step.type === 'USER_INPUT' ? 'user' : 'system';
           const promptMessages: JsonValue = [{ role, parts }];
           const agentSpanId = hashId([sessionId, turnId, 'agent'], 16);
+          const isTurnStart = !emittedTurnStartsSet.has(turnId);
+          if (isTurnStart) emittedTurnStartsSet.add(turnId);
           const inputEntry = buildAgentActivityEntry({
             'event.id': hashId([sessionId, turnId, stepId, 'other'], 32),
             'event.name': 'other',
@@ -922,7 +1268,7 @@ export class AntigravityInput extends BaseInput {
             'gen_ai.session.id': sessionId,
             'gen_ai.turn.id': turnId,
             'gen_ai.step.id': stepId,
-            'gen_ai.turn.start': true,
+            ...(isTurnStart ? { 'gen_ai.turn.start': true } : {}),
             'gen_ai.agent.type': this.agentType,
             'gen_ai.agent.id': sessionId,
             'gen_ai.provider.name': turnProviderMap.get(turnId) ?? 'gcp.gemini',
@@ -941,11 +1287,11 @@ export class AntigravityInput extends BaseInput {
 
           for (let i = 0; i < step.toolCalls.length; i++) {
             const tc = step.toolCalls[i]!;
-            const resultStepIndex = step.stepIndex + 1 + i;
+            const resultStepIndex = findToolResultStepIndex(step.stepIndex, i);
             const resultStep = stepsByIndex.get(resultStepIndex);
             const resultInfo = stepInfos.get(resultStepIndex);
-            const callId = resolveToolCallId(step.stepIndex, i, tc.id);
             const toolName = tc.name || resultInfo?.toolName || 'unknown';
+            const callId = resolveToolCallId(step.stepIndex, i, tc.id, toolName);
             const toolSpanId = hashId([sessionId, turnId, stepId, callId, 'tool'], 16);
 
             // Prefer native tool execution start time (steps.metadata field 32)
@@ -974,7 +1320,7 @@ export class AntigravityInput extends BaseInput {
             await this.attachWorkspaceContext(callEntry, cwd);
             entries.push(callEntry);
 
-            if (resultStep && isToolResultStep(resultStep) && !isStepInProgress(resultStep)) {
+            if (resultStep && isToolResultStep(resultStep) && !isStepStillActive(resultStep, resultInfo)) {
               const rawResultTsMs =
                 resultInfo?.completedAtMs ?? resultStep.createdAtMs ?? callTsMs;
               const resultTsMs = Math.max(callTsMs, rawResultTsMs);
@@ -987,6 +1333,7 @@ export class AntigravityInput extends BaseInput {
                 for (const part of resultMediaParts) combined.push(part as unknown as JsonValue);
                 resultPayload = combined;
               }
+              const isErr = isToolErrorStatus(resultStep.status);
               const resultEntry = buildAgentActivityEntry({
                 'event.id': hashId([sessionId, turnId, stepId, callId, 'tool.result'], 32),
                 'event.name': 'tool.result',
@@ -1003,7 +1350,14 @@ export class AntigravityInput extends BaseInput {
                 'gen_ai.tool.name': toolName,
                 'gen_ai.tool.call.id': callId,
                 'gen_ai.tool.call.result': resultPayload,
-                'tool.result.status': isToolErrorStatus(resultStep.status) ? 'error' : 'success',
+                'tool.result.status': isErr ? 'error' : 'success',
+                ...(isErr
+                  ? {
+                      'error.type': isToolCancelledStatus(resultStep.status)
+                        ? 'antigravity.tool_cancelled'
+                        : 'antigravity.tool_failed',
+                    }
+                  : {}),
                 ...(durationMs > 0 ? { 'gen_ai.tool.call.duration': durationMs } : {}),
                 time_unix_nano: toUnixNanoString(resultTsMs),
               });
@@ -1011,7 +1365,7 @@ export class AntigravityInput extends BaseInput {
               await this.attachWorkspaceContext(resultEntry, cwd);
               entries.push(resultEntry);
             } else if (
-              (resultStep && isToolResultStep(resultStep) && isStepInProgress(resultStep)) ||
+              (resultStep && isToolResultStep(resultStep) && isStepStillActive(resultStep, resultInfo)) ||
               (!resultStep && latestFollowupStepIndex <= resultStepIndex)
             ) {
               // Tool result is in-progress or hasn't been written yet; persist for next poll cycle
@@ -1033,20 +1387,33 @@ export class AntigravityInput extends BaseInput {
 
     // 3) Emit authoritative llm.request + llm.response pairs from SQLite usage events
     if (snapshot) {
+      const usedResponseIds = new Set<string>();
+      const seenPrimaryStepIdx = new Set<number>();
+
       for (const usage of snapshot.events) {
         if (isUsageAlreadyCovered(usage, prevCursor, seenKeys)) continue;
-        recordUsageIdentities(seenKeys, usage);
-        if (usage.genIdx !== undefined && usage.genIdx > maxEmittedGenIdx) {
-          maxEmittedGenIdx = usage.genIdx;
-        }
-        if (usage.genIdx === undefined && usage.stepIndices.length > 0) {
-          const stepMax = Math.max(...usage.stepIndices);
-          if (stepMax > maxEmittedStepIdx) maxEmittedStepIdx = stepMax;
-        }
 
-        const linkedStep = this.findLinkedPlannerStep(usage, transcript);
+        const linkedStep = this.findLinkedResponseStep(usage, transcript);
         const linkedStepIdx = linkedStep?.stepIndex ?? usage.stepIndices[0];
         const linkedStepInfo = linkedStepIdx !== undefined ? stepInfos.get(linkedStepIdx) : undefined;
+
+        // Defer emitting LLM events while a linked PLANNER_RESPONSE at the session tip
+        // is still actively streaming (prevents premature finish_reasons=['stop'] before
+        // tool_calls are flushed to transcript.jsonl).
+        if (
+          linkedStep &&
+          linkedStep.type === 'PLANNER_RESPONSE' &&
+          (isStepStillActive(linkedStep, linkedStepInfo) ||
+            (isStepInProgress(linkedStep) &&
+              linkedStep.toolCalls.length === 0 &&
+              !linkedStep.content &&
+              latestCompletedStepIndex <= linkedStep.stepIndex))
+        ) {
+          continue;
+        }
+
+        recordUsageIdentities(seenKeys, keyOrder, keyMeta, usage);
+
         const turnId = resolveTurnForStep(linkedStepIdx, usage.stepIndices);
         registerTurnOrder(turnId);
         const stepId = linkedStep
@@ -1055,10 +1422,27 @@ export class AntigravityInput extends BaseInput {
             ? `${sessionId}:step:${usage.stepIndices[0]}`
             : `${sessionId}:gen:${usage.genIdx ?? 0}`;
 
+        const isRetryUsage =
+          usage.key.startsWith('gen-retry:') ||
+          usage.key.startsWith('step-retry:') ||
+          (linkedStepIdx !== undefined && seenPrimaryStepIdx.has(linkedStepIdx));
+        if (!isRetryUsage && linkedStepIdx !== undefined) {
+          seenPrimaryStepIdx.add(linkedStepIdx);
+        }
+
+        const baseResponseId = usage.messageId ?? `${stepId}:r:${usage.key}`;
+        let responseId = baseResponseId;
+        let dupSeq = 1;
+        while (usedResponseIds.has(responseId)) {
+          responseId = `${baseResponseId}:${dupSeq++}`;
+        }
+        usedResponseIds.add(responseId);
+
         const traceId = hashId([sessionId, turnId, 'trace'], 32);
         const stepSpanId = hashId([sessionId, turnId, stepId, 'step'], 16);
-        const llmSpanId = hashId([sessionId, turnId, stepId, 'llm'], 16);
-        const responseId = usage.messageId ?? `${stepId}:r:${usage.genIdx ?? 0}`;
+        // Include responseId in llmSpanId so retries / multi-usage on the same step
+        // never collide on span_id or event.id in OtlpTraceFlusher.
+        const llmSpanId = hashId([sessionId, turnId, stepId, 'llm', responseId], 16);
 
         const transcriptModel = normalizeAntigravityModel(linkedStep?.model);
         const model =
@@ -1072,27 +1456,43 @@ export class AntigravityInput extends BaseInput {
         const totalOutputTokens = usage.totalOutputTokens;
         const totalTokens = totalInputTokens + totalOutputTokens;
 
-        // gen_metadata field 9.4 (and steps.metadata field 8) is generation completion time;
-        // prefer native steps.metadata field 1 for request start, else respTsMs - duration.
-        const respTsMs = linkedStepInfo?.completedAtMs ?? usage.timestampMs;
+        // gen_metadata field 9.4 (and steps.metadata field 8) is generation completion time.
+        // For retries, keep the retry's own timestamp/duration instead of reusing parent step bounds.
+        // For primary calls, take max(steps.completedAtMs, usage.timestampMs) to avoid stale
+        // completedAtMs === createdAtMs snapshots, and guarantee strictly non-zero span duration.
         const durationNs = (usage.ttftNs ?? 0) + (usage.streamDurationNs ?? 0);
+        const durationMs = durationNs > 0 ? Math.max(1, Math.round(durationNs / 1_000_000)) : 0;
+        let respTsMs = isRetryUsage
+          ? usage.timestampMs
+          : Math.max(linkedStepInfo?.completedAtMs ?? 0, usage.timestampMs);
         const derivedReqTsMs =
-          durationNs > 0
-            ? Math.max(1, respTsMs - Math.max(1, Math.round(durationNs / 1_000_000)))
-            : respTsMs;
+          durationMs > 0 ? Math.max(1, respTsMs - durationMs) : respTsMs;
         const reqTsMs =
-          linkedStepInfo?.createdAtMs !== undefined && linkedStepInfo.createdAtMs <= respTsMs
+          !isRetryUsage &&
+          linkedStepInfo?.createdAtMs !== undefined &&
+          linkedStepInfo.createdAtMs < respTsMs
             ? linkedStepInfo.createdAtMs
             : derivedReqTsMs;
+        if (durationMs > 0 && respTsMs <= reqTsMs) {
+          respTsMs = reqTsMs + durationMs;
+        }
+        const reqTimeNano = BigInt(Math.floor(reqTsMs)) * 1_000_000n;
+        // Ensure strictly non-zero LLM span duration (+1µs within the same ms when timestamps match)
+        const respTimeNano =
+          respTsMs > reqTsMs
+            ? BigInt(Math.floor(respTsMs)) * 1_000_000n
+            : reqTimeNano + 1_000n;
 
         const inputDelta = await this.buildInputMessagesDelta(
           linkedStep,
           transcript,
           prevPlannerByStepIndex,
           stepPositionByIndex,
+          turnPromptStepSet,
           reqTsMs,
           getStepMedia,
           resolveToolCallId,
+          findToolResultStepIndex,
         );
         const reqEntry = buildAgentActivityEntry({
           'event.id': hashId([sessionId, turnId, stepId, 'llm.request', responseId], 32),
@@ -1116,7 +1516,7 @@ export class AntigravityInput extends BaseInput {
                   .digest('hex'),
               }
             : {}),
-          time_unix_nano: toUnixNanoString(reqTsMs),
+          time_unix_nano: `${reqTimeNano}`,
         });
         if (inputDelta.length > 0) attachMultimodalMetadataForEntry(reqEntry);
         await this.attachWorkspaceContext(reqEntry, cwd);
@@ -1165,7 +1565,7 @@ export class AntigravityInput extends BaseInput {
             : {}),
           'gen_ai.usage.total_tokens': totalTokens,
           ...(outputMessages ? { 'gen_ai.output.messages': outputMessages } : {}),
-          time_unix_nano: toUnixNanoString(respTsMs),
+          time_unix_nano: `${respTimeNano}`,
         });
         if (outputMediaParts.length > 0) attachMultimodalMetadataForEntry(respEntry);
         await this.attachWorkspaceContext(respEntry, cwd);
@@ -1173,40 +1573,66 @@ export class AntigravityInput extends BaseInput {
       }
     }
 
-    // Deterministic sort: timestamp ascending, then turn order (prevents cross-turn
-    // interleaving on same-ms ties), then event type phase order.
+    // Deterministic sort: millisecond bucket ascending, then turn order (prevents
+    // cross-turn interleaving), then intra-turn step order, then event phase weight,
+    // then sub-millisecond nanoseconds.
     entries.sort((a, b) => {
       const ta = BigInt(a.time_unix_nano);
       const tb = BigInt(b.time_unix_nano);
-      if (ta !== tb) return ta < tb ? -1 : 1;
+      const ma = ta / 1_000_000n;
+      const mb = tb / 1_000_000n;
+      if (ma !== mb) return ma < mb ? -1 : 1;
       const turnA = turnOrderMap.get(a['gen_ai.turn.id'] ?? '') ?? Number.MAX_SAFE_INTEGER;
       const turnB = turnOrderMap.get(b['gen_ai.turn.id'] ?? '') ?? Number.MAX_SAFE_INTEGER;
       if (turnA !== turnB) return turnA - turnB;
+      const stepA = extractStepOrder(a['gen_ai.step.id']);
+      const stepB = extractStepOrder(b['gen_ai.step.id']);
+      if (stepA !== stepB) return stepA - stepB;
       const wa = EVENT_ORDER_WEIGHT[a['event.name']] ?? 5;
       const wb = EVENT_ORDER_WEIGHT[b['event.name']] ?? 5;
-      return wa - wb;
+      if (wa !== wb) return wa - wb;
+      if (ta !== tb) return ta < tb ? -1 : 1;
+      return 0;
     });
+
+    const turnIdByStartStep: Record<string, string> = {};
+    for (const [k, v] of latchedTurnByStartStep) {
+      turnIdByStartStep[String(k)] = v;
+    }
+    const toolCallIdMap: Record<string, string> = {};
+    for (const [k, v] of latchedToolCallIds) {
+      toolCallIdMap[k] = v;
+    }
 
     return {
       entries,
       maxTranscriptStepIndex: maxStepIndex,
       maxEmittedGenIdx,
       maxEmittedStepIdx,
-      emittedUsageKeys: [...seenKeys],
+      emittedUsageKeys: keyOrder,
+      emittedKeyMeta: keyMeta,
       pendingToolCalls: remainingPending,
+      turnIdByStartStep,
+      emittedTurnStarts: [...emittedTurnStartsSet],
+      toolCallIdMap,
     };
   }
 
-  private findLinkedPlannerStep(
+  private findLinkedResponseStep(
     usage: AntigravityUsageEvent,
     transcript: AntigravityTranscript | null,
   ): AntigravityTranscriptStep | undefined {
     if (!transcript) return undefined;
+    let checkpointFallback: AntigravityTranscriptStep | undefined;
     for (const idx of usage.stepIndices) {
       const step = transcript.byStepIndex.get(idx);
-      if (step && step.type === 'PLANNER_RESPONSE') return step;
+      if (!step) continue;
+      if (step.type === 'PLANNER_RESPONSE') return step;
+      if (step.type === 'CHECKPOINT' && !checkpointFallback) {
+        checkpointFallback = step;
+      }
     }
-    return undefined;
+    return checkpointFallback;
   }
 
   private async buildInputMessagesDelta(
@@ -1214,13 +1640,20 @@ export class AntigravityInput extends BaseInput {
     transcript: AntigravityTranscript | null,
     prevPlannerByStepIndex: ReadonlyMap<number, AntigravityTranscriptStep | undefined>,
     stepPositionByIndex: ReadonlyMap<number, number>,
+    turnPromptStepSet: ReadonlySet<number>,
     reqTsMs: number,
     getStepMedia: (
       step: AntigravityTranscriptStep,
       timeMs: number,
       direction: 'input' | 'output',
     ) => Promise<UriPart[]>,
-    resolveToolCallId: (plannerStepIndex: number, toolIndex: number, explicitId?: string) => string,
+    resolveToolCallId: (
+      plannerStepIndex: number,
+      toolIndex: number,
+      explicitId?: string,
+      toolName?: string,
+    ) => string,
+    findToolResultStepIndex: (plannerStepIndex: number, toolIndex: number) => number,
   ): Promise<JsonValue[]> {
     if (!linkedStep || !transcript) return [];
 
@@ -1233,14 +1666,14 @@ export class AntigravityInput extends BaseInput {
       const toolResponseParts: JsonValue[] = [];
       for (let i = 0; i < prevPlanner.toolCalls.length; i++) {
         const tc = prevPlanner.toolCalls[i]!;
-        const callId = resolveToolCallId(prevPlanner.stepIndex, i, tc.id);
+        const callId = resolveToolCallId(prevPlanner.stepIndex, i, tc.id, tc.name);
         assistantParts.push({
           type: 'tool_call',
           id: callId,
           name: tc.name,
           arguments: tc.args ?? null,
         });
-        const resultIdx = prevPlanner.stepIndex + 1 + i;
+        const resultIdx = findToolResultStepIndex(prevPlanner.stepIndex, i);
         if (resultIdx < linkedStep.stepIndex) {
           const resultStep = transcript.byStepIndex.get(resultIdx);
           if (resultStep && isToolResultStep(resultStep)) {
@@ -1274,7 +1707,7 @@ export class AntigravityInput extends BaseInput {
     for (let pos = startPos; pos < endPos; pos++) {
       const step = transcript.steps[pos]!;
       if (consumedStepIndices.has(step.stepIndex)) continue;
-      if (!isTurnPromptStep(step)) continue;
+      if (!turnPromptStepSet.has(step.stepIndex)) continue;
       const mediaParts = await getStepMedia(step, step.createdAtMs ?? reqTsMs, 'input');
       const parts: JsonValue[] = [];
       if (step.content) parts.push({ type: 'text', content: step.content });
@@ -1314,7 +1747,12 @@ export class AntigravityInput extends BaseInput {
     step: AntigravityTranscriptStep | undefined,
     mediaParts: readonly UriPart[] = [],
     finishReason = 'stop',
-    resolveToolCallId?: (plannerStepIndex: number, toolIndex: number, explicitId?: string) => string,
+    resolveToolCallId?: (
+      plannerStepIndex: number,
+      toolIndex: number,
+      explicitId?: string,
+      toolName?: string,
+    ) => string,
   ): JsonValue | undefined {
     if (!step && mediaParts.length === 0) return undefined;
     const parts: JsonValue[] = [];
@@ -1330,7 +1768,7 @@ export class AntigravityInput extends BaseInput {
     for (let i = 0; i < (step?.toolCalls.length ?? 0); i++) {
       const tc = step!.toolCalls[i]!;
       const callId = resolveToolCallId
-        ? resolveToolCallId(step!.stepIndex, i, tc.id)
+        ? resolveToolCallId(step!.stepIndex, i, tc.id, tc.name)
         : tc.id;
       parts.push({
         type: 'tool_call',

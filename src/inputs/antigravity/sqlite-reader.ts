@@ -385,12 +385,54 @@ export function parseStepMetadata(blob: Uint8Array): StepMetadata {
   };
 }
 
+function parseLocalFileUri(text: string | undefined): string | undefined {
+  if (!text || !text.startsWith('file://') || text.length <= 'file:///'.length || /[\x00-\x1f\x7f]/.test(text)) {
+    return undefined;
+  }
+  const url = tryOptional(() => new URL(text));
+  if (!url || url.protocol !== 'file:') return undefined;
+  // Reject remote UNC hosts (e.g. file://server/share) to avoid SMB access via git -C on Windows
+  if (url.hostname && url.hostname.toLowerCase() !== 'localhost') return undefined;
+  const converted = tryOptional(() => fileURLToPath(url));
+  if (!converted) return undefined;
+  // Reject bare POSIX/Windows root paths and drive roots (/, \, C:\, /C:/)
+  if (
+    converted === '/' ||
+    converted === '\\' ||
+    /^[A-Za-z]:[\\/]?$/.test(converted) ||
+    /^\/[A-Za-z]:\/?$/.test(converted)
+  ) {
+    return undefined;
+  }
+  return converted;
+}
+
 /**
- * Recursively walk decoded wire-2 protobuf fields to locate a `file://` URI
- * and convert it cleanly via `fileURLToPath` (preserving UTF-8, `%20`, and
- * Windows drive letters without tag-byte adhesion).
+ * Extract the workspace directory from `trajectory_metadata_blob`.
+ * Checks Antigravity's native workspace fields first (`1.1`, `1.2`, `7`), then falls back
+ * to a bounded DFS over wire-2 protobuf fields for resilience across schema changes.
+ * Always rejects remote UNC hosts and bare POSIX/Windows drive roots.
  */
 export function extractWorkspacePathFromBlob(blob: Uint8Array): string | undefined {
+  if (blob.length === 0) return undefined;
+  const fields = tryOptional(() => decodeProtoFields(blob));
+  if (fields) {
+    // 1) Native repeated workspace messages: field 1 -> sub-field 1 (folder URI) / 2 (git root URI)
+    for (const wsBlob of fieldBytesAll(fields, 1)) {
+      const wsFields = tryOptional(() => decodeProtoFields(wsBlob));
+      if (!wsFields) continue;
+      const fromFolder = parseLocalFileUri(fieldText(wsFields, 1));
+      if (fromFolder) return fromFolder;
+      const fromGitRoot = parseLocalFileUri(fieldText(wsFields, 2));
+      if (fromGitRoot) return fromGitRoot;
+    }
+    // 2) Native top-level repeated workspace_uris: field 7
+    for (const uriBlob of fieldBytesAll(fields, 7)) {
+      const text = tryOptional(() => utf8StrictDecoder.decode(uriBlob));
+      const parsed = parseLocalFileUri(text);
+      if (parsed) return parsed;
+    }
+  }
   return walkProtoForFileUri(blob, 0);
 }
 
@@ -404,12 +446,9 @@ function walkProtoForFileUri(blob: Uint8Array, depth: number): string | undefine
     const bytes = field.value as Uint8Array;
     if (bytes.length === 0) continue;
 
-    // Check if this field itself is a UTF-8 `file://` URI (reject bare `file://` / root `/`)
     const text = tryOptional(() => utf8StrictDecoder.decode(bytes));
-    if (text && text.startsWith('file://') && text.length > 'file:///'.length && !/[\x00-\x1f\x7f]/.test(text)) {
-      const converted = tryOptional(() => fileURLToPath(new URL(text)));
-      if (converted && converted !== '/' && converted !== '\\') return converted;
-    }
+    const parsed = parseLocalFileUri(text);
+    if (parsed) return parsed;
 
     // Otherwise recurse into nested protobuf sub-messages
     const nested = walkProtoForFileUri(bytes, depth + 1);
@@ -548,6 +587,45 @@ function deduplicateEvents(events: AntigravityUsageEvent[]): AntigravityUsageEve
       slots.push(event);
       registerSlot(targetIdx, event.identities);
       continue;
+    }
+
+    // If an event without strong IDs matches multiple slots whose own strong IDs conflict,
+    // only merge when a single slot matches its exact token counts; otherwise keep separate
+    // rather than arbitrarily folding into slot 0.
+    const eventHasStrong = event.identities.some(isStrongUsageIdentity);
+    if (!eventHasStrong && sortedMatches.length > 1) {
+      let hasPairwiseConflict = false;
+      for (let i = 0; i < sortedMatches.length && !hasPairwiseConflict; i++) {
+        for (let j = i + 1; j < sortedMatches.length; j++) {
+          const si = slots[sortedMatches[i]!];
+          const sj = slots[sortedMatches[j]!];
+          if (si && sj && hasStrongIdentityConflict(si.identities, sj.identities)) {
+            hasPairwiseConflict = true;
+            break;
+          }
+        }
+      }
+      if (hasPairwiseConflict) {
+        const tokenMatches = sortedMatches.filter((idx) => {
+          const s = slots[idx];
+          return (
+            s !== undefined &&
+            s.freshInputTokens === event.freshInputTokens &&
+            s.totalOutputTokens === event.totalOutputTokens
+          );
+        });
+        if (tokenMatches.length === 1) {
+          const targetIdx = tokenMatches[0]!;
+          const target = slots[targetIdx]!;
+          mergeUsageEvent(target, event);
+          registerSlot(targetIdx, target.identities);
+        } else {
+          const targetIdx = slots.length;
+          slots.push(event);
+          registerSlot(targetIdx, event.identities);
+        }
+        continue;
+      }
     }
 
     const targetIdx = sortedMatches[0]!;

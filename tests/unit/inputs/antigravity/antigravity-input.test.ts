@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const sqliteMockState = vi.hoisted(() => ({ unavailable: false }));
 vi.mock('../../../../src/utils/node-sqlite.js', async (importOriginal) => {
@@ -600,12 +601,14 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(batch2[1]?.['gen_ai.agent.type']).toBe('antigravity-cli');
   });
 
-  it('respects WorkspacePolicy exclusions', async () => {
+  it('respects WorkspacePolicy exclusions (DB + transcript)', async () => {
     const root = path.join(tmpDir, 'excluded-root');
     const convDir = path.join(root, 'conversations');
     const excludedWs = path.join(tmpDir, 'secret-repo');
+    const logsDir = path.join(root, 'brain', 'secret', '.system_generated', 'logs');
     await fs.mkdir(convDir, { recursive: true });
     await fs.mkdir(excludedWs, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
 
     createConversationDb(path.join(convDir, 'secret.db'), {
       genRows: [
@@ -615,11 +618,19 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
             model: 'Gemini 3.8 Flash (High)',
             usage: { inputTokens: 100, totalOutputTokens: 20, visibleOutputTokens: 20, responseId: 'sec-1' },
             timestampSec: 1_778_000_500,
+            stepIndices: [1],
           }),
         ],
       ],
-      trajectoryBlob: protoStringField(10, `file://${excludedWs}`),
+      trajectoryBlob: protoStringField(7, pathToFileURL(excludedWs).href),
     });
+    await fs.writeFile(
+      path.join(logsDir, 'transcript.jsonl'),
+      [
+        JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: '2026-05-06T00:08:19Z', content: 'secret prompt' }),
+        JSON.stringify({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-05-06T00:08:20Z', content: 'secret reply' }),
+      ].join('\n') + '\n',
+    );
 
     const input = new AntigravityInput({
       stateStore,
@@ -1161,41 +1172,55 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(toolResult['gen_ai.tool.call.duration']).toBe(2037);
   });
 
-  it('rejects bare file:// and file:/// URIs in extractWorkspacePathFromBlob', () => {
+  it('rejects bare file://, root /, Windows drive roots, and remote UNC URIs and prioritizes native workspace fields', () => {
     const bareFile = protoStringField(1, 'file://');
     const rootFile = protoStringField(1, 'file:///');
+    const winDriveRoot = protoStringField(7, 'file:///C:/');
+    const uncRemote = protoStringField(7, 'file://evil-server/share/repo');
+    // Earlier unrelated file:// URI in field 3 must lose to native workspace field 1.1
+    const nativePrioritized = concatBytes(
+      protoStringField(3, 'file:///tmp/unrelated.txt'),
+      protoBytesField(1, protoStringField(1, 'file:///Users/demo/real-workspace')),
+    );
     const mixed = concatBytes(
-      protoStringField(1, 'file:///'),
-      protoStringField(2, 'file:///Users/demo/project'),
+      protoStringField(7, 'file:///'),
+      protoStringField(7, 'file://evil-server/share'),
+      protoStringField(7, 'file:///Users/demo/project'),
     );
     expect(extractWorkspacePathFromBlob(bareFile)).toBeUndefined();
     expect(extractWorkspacePathFromBlob(rootFile)).toBeUndefined();
+    expect(extractWorkspacePathFromBlob(winDriveRoot)).toBeUndefined();
+    expect(extractWorkspacePathFromBlob(uncRemote)).toBeUndefined();
+    expect(extractWorkspacePathFromBlob(nativePrioritized)).toBe('/Users/demo/real-workspace');
     expect(extractWorkspacePathFromBlob(mixed)).toBe('/Users/demo/project');
   });
 
-  it('reads multi-chunk (>512 KiB) transcripts without splitting UTF-8 across boundaries and skips >4 MiB lines', async () => {
+  it('reads >8 MiB multi-chunk transcripts with a multi-byte UTF-8 character straddling byte 524,288 and skips >4 MiB lines', async () => {
     const root = path.join(tmpDir, 'utf8-chunk-root');
     const sid = 'chunk-sess';
     const logsDir = path.join(root, 'brain', sid, '.system_generated', 'logs');
     await fs.mkdir(logsDir, { recursive: true });
 
-    // Place 3-byte CJK and 4-byte emoji characters right across the 512 KiB read chunk boundary
-    const targetBoundary = 512 * 1024;
-    const prefixObj = JSON.stringify({
-      step_index: 0,
-      source: 'USER_EXPLICIT',
-      type: 'USER_INPUT',
-      status: 'DONE',
-      content: 'a'.repeat(targetBoundary - 100),
-    });
+    // Compute exact byte offset so a 3-byte UTF-8 character ('中', 0xe4 0xb8 0xad)
+    // literally straddles the 512 KiB (524,288) read chunk boundary (byte 524,287..524,289).
+    const chunkBoundary = 512 * 1024;
     const straddleText = '中文测试边界🚀🎉✨你好世界';
-    const straddleLine = JSON.stringify({
-      step_index: 1,
-      source: 'MODEL',
-      type: 'PLANNER_RESPONSE',
-      status: 'DONE',
-      content: `${'x'.repeat(60)}${straddleText}${'y'.repeat(60)}`,
-    });
+    const straddlePrefix = '{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"';
+    const line0Template = (padLen: number) =>
+      JSON.stringify({
+        step_index: 0,
+        source: 'USER_EXPLICIT',
+        type: 'USER_INPUT',
+        status: 'DONE',
+        content: 'a'.repeat(padLen),
+      });
+    const baseLen = Buffer.byteLength(`${line0Template(0)}\n${straddlePrefix}`, 'utf-8');
+    // Put byte 0 of '中' at offset chunkBoundary - 1 so bytes 1 & 2 fall into chunk 2
+    const padLen = chunkBoundary - 1 - baseLen;
+    const line0 = line0Template(padLen);
+    const line1 = `${straddlePrefix}${straddleText}"}`;
+    expect(Buffer.byteLength(`${line0}\n${straddlePrefix}`, 'utf-8')).toBe(chunkBoundary - 1);
+
     // Oversized (>4 MiB) single line that must be skipped without aborting subsequent lines
     const oversizedLine = JSON.stringify({
       step_index: 2,
@@ -1204,25 +1229,32 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
       status: 'DONE',
       content: 'z'.repeat(4 * 1024 * 1024 + 128),
     });
-    const afterOversizedLine = JSON.stringify({
+    // Add a valid 3.8 MiB line so total file size exceeds 8 MiB
+    const largeValidLine = JSON.stringify({
       step_index: 3,
       source: 'MODEL',
       type: 'PLANNER_RESPONSE',
       status: 'DONE',
-      content: 'recovered after oversized line',
+      content: 'b'.repeat(3_800_000),
+    });
+    const finalLine = JSON.stringify({
+      step_index: 4,
+      source: 'MODEL',
+      type: 'PLANNER_RESPONSE',
+      status: 'DONE',
+      content: 'recovered past 8 MiB',
     });
 
-    await fs.writeFile(
-      path.join(logsDir, 'transcript.jsonl'),
-      `${prefixObj}\n${straddleLine}\n${oversizedLine}\n${afterOversizedLine}\n`,
-    );
+    const fullPayload = `${line0}\n${line1}\n${oversizedLine}\n${largeValidLine}\n${finalLine}\n`;
+    expect(Buffer.byteLength(fullPayload, 'utf-8')).toBeGreaterThan(8 * 1024 * 1024);
+    await fs.writeFile(path.join(logsDir, 'transcript.jsonl'), fullPayload);
 
     const transcript = await readAntigravityTranscript(root, sid);
     expect(transcript).not.toBeNull();
-    expect(transcript!.steps.map((s) => s.stepIndex)).toEqual([0, 1, 3]);
-    expect(transcript!.byStepIndex.get(1)?.content).toContain(straddleText);
+    expect(transcript!.steps.map((s) => s.stepIndex)).toEqual([0, 1, 3, 4]);
+    expect(transcript!.byStepIndex.get(1)?.content).toBe(straddleText);
     expect(transcript!.byStepIndex.get(1)?.content).not.toContain('\uFFFD');
-    expect(transcript!.byStepIndex.get(3)?.content).toBe('recovered after oversized line');
+    expect(transcript!.byStepIndex.get(4)?.content).toBe('recovered past 8 MiB');
   });
 
   it('does not advance watermarks on 0-token rows and deduplicates cross-cycle steps -> gen_metadata responseId arrival', async () => {
@@ -1612,12 +1644,31 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     const resps = collected.filter((e) => e['event.name'] === 'llm.response');
     expect(resps).toHaveLength(20);
 
-    // Now verify all-failing >16 DBs do NOT spin via backlogTimer
+    // Now verify Top-16 persistently failing DBs enter backoff and do NOT starve healthy #17..20 DBs or spin
     const failRoot = path.join(tmpDir, 'backlog-fail-root');
     const failConvDir = path.join(failRoot, 'conversations');
     await fs.mkdir(failConvDir, { recursive: true });
-    for (let i = 0; i < 18; i++) {
-      await fs.writeFile(path.join(failConvDir, `bad-${i}.db`), 'corrupt-sqlite');
+    // Create 4 older healthy DBs FIRST (lower mtime -> behind Top-16)
+    const olderDate = new Date(Date.now() - 10_000);
+    for (let i = 0; i < 4; i++) {
+      const p = path.join(failConvDir, `healthy-${i}.db`);
+      createConversationDb(p, {
+        genRows: [
+          [
+            0,
+            encodeGeneratorMetadata({
+              model: 'Gemini 3.8 Flash (High)',
+              usage: { inputTokens: 10, totalOutputTokens: 5, visibleOutputTokens: 5, responseId: `h-${i}` },
+              timestampSec: 1_778_010_500 + i,
+            }),
+          ],
+        ],
+      });
+      await fs.utimes(p, olderDate, olderDate);
+    }
+    // Create 16 newer corrupt DBs (higher mtime -> occupy Top-16 in Cycle 1)
+    for (let i = 0; i < 16; i++) {
+      await fs.writeFile(path.join(failConvDir, `bad-${String(i).padStart(2, '0')}.db`), 'corrupt-sqlite');
     }
     const failStore = new StateStore(path.join(tmpDir, 'fail-state.json'));
     await failStore.load();
@@ -1628,13 +1679,16 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
       collectHistorical: true,
       pollIntervalMs: 60_000,
     });
+    const healthyCollected: AgentActivityEntry[] = [];
     let runtimeDeltas = 0;
+    failInput.on('entries', (entries: AgentActivityEntry[]) => healthyCollected.push(...entries));
     failInput.on('input-runtime-delta', () => { runtimeDeltas++; });
     await failInput.start();
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 250));
     await failInput.stop();
-    // Only the initial startup cycle ran — zero backlogTimer spin!
-    expect(runtimeDeltas).toBe(1);
+    // Cycle 1 backs off the 16 bad DBs; Cycle 2 drains all 4 healthy #17..20 DBs and STOPS (no spin!)
+    expect(healthyCollected.filter((e) => e['event.name'] === 'llm.response')).toHaveLength(4);
+    expect(runtimeDeltas).toBe(2);
   });
 
   it('evicts sessions past 512 cap with a watermark so evicted old sessions are never replayed', async () => {
@@ -1761,6 +1815,7 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
       0x69, 0x73, 0x6f, 0x6d, 0x6d, 0x70, 0x34, 0x31,
     ]);
     const inImg = path.join(brainSessionDir, 'input.png');
+    const symlinkMediaImg = path.join(brainSessionDir, 'symlinked-media.png');
     const toolVid = path.join(brainSessionDir, 'tool-clip.mp4');
     const outImg = path.join(brainSessionDir, 'output.png');
     const outsideImg = path.join(outsideDir, 'blocked.png');
@@ -1768,6 +1823,7 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     await fs.writeFile(toolVid, mp4Bytes);
     await fs.writeFile(outImg, pngBytes);
     await fs.writeFile(outsideImg, pngBytes);
+    await fs.symlink(inImg, symlinkMediaImg);
 
     const tsSec = 1_778_012_000;
     createConversationDb(path.join(convDir, `${sid}.db`), {
@@ -1796,6 +1852,7 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
           content: 'Check these',
           media: [
             { mime_type: 'image/png', uri: inImg },
+            { mime_type: 'image/png', uri: symlinkMediaImg },
             { mime_type: 'image/png', uri: outsideImg },
           ],
         }),
@@ -1871,7 +1928,7 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(uploaded.some((u) => u.startsWith('video/mp4:'))).toBe(true);
   });
 
-  it('gracefully no-ops when node:sqlite is unavailable', async () => {
+  it('gracefully no-ops and warns only once across cycles when node:sqlite is unavailable', async () => {
     const root = path.join(tmpDir, 'no-sqlite-root');
     await fs.mkdir(path.join(root, 'conversations'), { recursive: true });
     sqliteMockState.unavailable = true;
@@ -1881,14 +1938,427 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
         clientType: ClientType.Antigravity,
         dataRoot: root,
         collectHistorical: true,
+        pollIntervalMs: 30,
       });
+      const warnSpy = vi.spyOn(
+        (input as unknown as { logger: { warn: (...args: unknown[]) => void } }).logger,
+        'warn',
+      );
       const collected: AgentActivityEntry[] = [];
+      let cycles = 0;
       input.on('entries', (entries: AgentActivityEntry[]) => collected.push(...entries));
+      input.on('input-runtime-delta', () => { cycles++; });
       await input.start();
+      await new Promise((r) => setTimeout(r, 90));
       await input.stop();
       expect(collected).toHaveLength(0);
+      expect(cycles).toBeGreaterThanOrEqual(2);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
     } finally {
       sqliteMockState.unavailable = false;
     }
+  });
+
+  it('disambiguates retry/multi-usage llmSpanId, responseId, and event.id and guarantees strictly non-zero LLM span duration', async () => {
+    const root = path.join(tmpDir, 'retry-span-root');
+    const convDir = path.join(root, 'conversations');
+    const sid = 'retry-span-sess';
+    const logsDir = path.join(root, 'brain', sid, '.system_generated', 'logs');
+    await fs.mkdir(convDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+
+    const baseSec = 1_778_013_000;
+    // Simulate:
+    // 1) step 1 has stale steps.metadata completedAtMs === createdAtMs (reproducing live af6f2338 step 515!)
+    //    while gen_metadata has real completion timestamp +10s AND a retry usage without messageId!
+    const step1Meta = concatBytes(
+      protoBytesField(1, protoTimestamp(baseSec)),
+      protoBytesField(8, protoTimestamp(baseSec)), // stale completedAtMs === createdAtMs
+    );
+    const retryUsage = encodeModelUsage({ inputTokens: 80, totalOutputTokens: 15, visibleOutputTokens: 15 });
+    const mainUsage = encodeModelUsage({ inputTokens: 100, totalOutputTokens: 40, visibleOutputTokens: 40 });
+    const gen0Blob = concatBytes(
+      protoBytesField(
+        1,
+        concatBytes(
+          protoBytesField(4, mainUsage),
+          protoBytesField(9, protoBytesField(4, protoTimestamp(baseSec + 10))),
+          protoBytesField(11, protoDuration(5, 0)),
+          protoBytesField(12, protoDuration(5, 0)),
+          protoBytesField(17, protoBytesField(2, retryUsage)),
+          protoStringField(19, 'Gemini 4 Neon (Medium)'),
+        ),
+      ),
+      protoVarintField(2, 1),
+    );
+    createConversationDb(path.join(convDir, `${sid}.db`), {
+      stepRows: [[1, step1Meta]],
+      genRows: [[0, gen0Blob]],
+    });
+    await fs.writeFile(
+      path.join(logsDir, 'transcript.jsonl'),
+      [
+        JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date((baseSec - 1) * 1000).toISOString(), content: 'Hello' }),
+        JSON.stringify({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(baseSec * 1000).toISOString(), content: 'World' }),
+      ].join('\n') + '\n',
+    );
+
+    const input = new AntigravityInput({
+      stateStore,
+      clientType: ClientType.Antigravity,
+      dataRoot: root,
+      collectHistorical: true,
+    });
+    const collected: AgentActivityEntry[] = [];
+    input.on('entries', (entries: AgentActivityEntry[]) => collected.push(...entries));
+    await input.start();
+    await input.stop();
+
+    const reqs = collected.filter((e) => e['event.name'] === 'llm.request');
+    const resps = collected.filter((e) => e['event.name'] === 'llm.response');
+    expect(reqs).toHaveLength(2);
+    expect(resps).toHaveLength(2);
+
+    // Every event.id across all entries must be unique
+    const eventIds = collected.map((e) => e['event.id']);
+    expect(new Set(eventIds).size).toBe(eventIds.length);
+    // The 2 LLM calls on step 1 must have distinct span_id and response.id
+    expect(new Set(resps.map((e) => e.span_id)).size).toBe(2);
+    expect(new Set(resps.map((e) => e['gen_ai.response.id'])).size).toBe(2);
+    // Every (llm.request, llm.response) pair must have strictly positive duration (resp > req)
+    for (const resp of resps) {
+      const req = reqs.find((r) => r['gen_ai.response.id'] === resp['gen_ai.response.id'])!;
+      expect(BigInt(resp.time_unix_nano) > BigInt(req.time_unix_nano)).toBe(true);
+    }
+    // Primary usage recovered real 10s completion time from gen_metadata despite stale steps.completedAtMs
+    const primaryResp = resps.find((r) => r['gen_ai.usage.output_tokens'] === 40)!;
+    const primaryReq = reqs.find((r) => r['gen_ai.response.id'] === primaryResp['gen_ai.response.id'])!;
+    expect(BigInt(primaryResp.time_unix_nano) - BigInt(primaryReq.time_unix_nano)).toBe(10_000_000_000n);
+  });
+
+  it('unifies Loop 2/3 turnId, latches turnId across delayed native UUIDs, emits single turn.start, and handles mid-session SYSTEM_MESSAGE turns', async () => {
+    const root = path.join(tmpDir, 'turn-latch-root');
+    const convDir = path.join(root, 'conversations');
+    const sid = 'turn-latch-sess';
+    const logsDir = path.join(root, 'brain', sid, '.system_generated', 'logs');
+    await fs.mkdir(convDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+
+    const baseSec = 1_778_014_000;
+    const dbPath = path.join(convDir, `${sid}.db`);
+    const turn1Uuid = '11111111-1111-1111-1111-111111111111';
+    const turn2Uuid = '22222222-2222-2222-2222-222222222222';
+
+    // Cycle 1: step 0 SYSTEM_MESSAGE + step 1 USER_INPUT + step 2 PLANNER_RESPONSE (no native turnId on step 2, ONLY on step 3 tool result!)
+    createConversationDb(dbPath, {
+      stepRows: [
+        [3, concatBytes(protoBytesField(1, protoTimestamp(baseSec + 2)), protoStringField(12, turn1Uuid))],
+      ],
+      genRows: [
+        [
+          0,
+          encodeGeneratorMetadata({
+            model: 'Gemini 3.8 Flash (High)',
+            usage: { inputTokens: 100, totalOutputTokens: 30, visibleOutputTokens: 30, responseId: 'tl-1' },
+            timestampSec: baseSec + 1,
+            stepIndices: [2, 3],
+          }),
+        ],
+      ],
+    });
+    const transcriptPath = path.join(logsDir, 'transcript.jsonl');
+    await fs.writeFile(
+      transcriptPath,
+      [
+        JSON.stringify({ step_index: 0, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', created_at: new Date((baseSec - 2) * 1000).toISOString(), content: 'System boot' }),
+        JSON.stringify({ step_index: 1, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date((baseSec - 1) * 1000).toISOString(), content: 'User ask' }),
+        JSON.stringify({ step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date(baseSec * 1000).toISOString(), tool_calls: [{ id: 'c1', name: 'read_file', args: {} }] }),
+        JSON.stringify({ step_index: 3, source: 'MODEL', type: 'GENERIC', status: 'DONE', created_at: new Date((baseSec + 2) * 1000).toISOString(), content: 'file ok' }),
+      ].join('\n') + '\n',
+    );
+
+    const input1 = new AntigravityInput({
+      stateStore,
+      clientType: ClientType.Antigravity,
+      dataRoot: root,
+      collectHistorical: true,
+    });
+    const c1: AgentActivityEntry[] = [];
+    input1.on('entries', (entries: AgentActivityEntry[]) => c1.push(...entries));
+    await input1.start();
+    await input1.stop();
+
+    // All Turn 1 events (other, llm.request, llm.response, tool.call, tool.result) share turn1Uuid!
+    expect(c1.every((e) => e['gen_ai.turn.id'] === `${sid}:${turn1Uuid}`)).toBe(true);
+    // Single gen_ai.turn.start=true even though step 0 SYSTEM_MESSAGE and step 1 USER_INPUT both emitted
+    const starts1 = c1.filter((e) => e['gen_ai.turn.start'] === true);
+    expect(starts1).toHaveLength(1);
+
+    // Cycle 2: mid-session SYSTEM_MESSAGE (step 4) with a NEW native turn UUID (turn2Uuid) wakes up the agent
+    const DatabaseSync = loadDatabaseSync()!;
+    const db = new DatabaseSync(dbPath);
+    try {
+      const s4Meta = concatBytes(protoBytesField(1, protoTimestamp(baseSec + 10)), protoStringField(12, turn2Uuid));
+      const s5Meta = concatBytes(protoBytesField(1, protoTimestamp(baseSec + 11)), protoBytesField(8, protoTimestamp(baseSec + 13)), protoStringField(12, turn2Uuid));
+      const g1Blob = encodeGeneratorMetadata({
+        model: 'Gemini 3.8 Flash (High)',
+        usage: { inputTokens: 150, totalOutputTokens: 40, visibleOutputTokens: 40, responseId: 'tl-2' },
+        timestampSec: baseSec + 13,
+        stepIndices: [5],
+      });
+      db.prepare('INSERT INTO steps (idx, metadata) VALUES (?, ?)').run(4, s4Meta);
+      db.prepare('INSERT INTO steps (idx, metadata) VALUES (?, ?)').run(5, s5Meta);
+      db.prepare('INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)').run(1, g1Blob, g1Blob.length);
+    } finally {
+      db.close();
+    }
+    await fs.appendFile(
+      transcriptPath,
+      [
+        JSON.stringify({ step_index: 4, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', created_at: new Date((baseSec + 10) * 1000).toISOString(), content: 'Background task finished' }),
+        JSON.stringify({ step_index: 5, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: new Date((baseSec + 11) * 1000).toISOString(), content: 'Acknowledged' }),
+      ].join('\n') + '\n',
+    );
+    const future = new Date(Date.now() + 5000);
+    await fs.utimes(dbPath, future, future);
+
+    const input2 = new AntigravityInput({
+      stateStore,
+      clientType: ClientType.Antigravity,
+      dataRoot: root,
+      collectHistorical: true,
+    });
+    const c2: AgentActivityEntry[] = [];
+    input2.on('entries', (entries: AgentActivityEntry[]) => c2.push(...entries));
+    await input2.start();
+    await input2.stop();
+
+    expect(c2.map((e) => e['event.name'])).toEqual(['other', 'llm.request', 'llm.response']);
+    expect(c2.every((e) => e['gen_ai.turn.id'] === `${sid}:${turn2Uuid}`)).toBe(true);
+    expect(c2[0]?.['gen_ai.turn.start']).toBe(true);
+    expect(c2[1]?.['gen_ai.input.messages_delta']).toContainEqual({
+      role: 'system',
+      parts: [{ type: 'text', content: 'Background task finished' }],
+    });
+  });
+
+  it('does not drop an out-of-order lower genIdx row that gains tokens after a higher genIdx already emitted', async () => {
+    const root = path.join(tmpDir, 'ooo-zero-root');
+    const convDir = path.join(root, 'conversations');
+    const sid = 'ooo-sess';
+    await fs.mkdir(convDir, { recursive: true });
+    const dbPath = path.join(convDir, `${sid}.db`);
+
+    // Cycle 1: genIdx=1 is 0-token placeholder, genIdx=2 already has tokens!
+    createConversationDb(dbPath, {
+      genRows: [
+        [1, encodeGeneratorMetadata({ model: 'Gemini 3.8 Flash (High)', usage: { inputTokens: 0, totalOutputTokens: 0 }, timestampSec: 1_778_015_001 })],
+        [2, encodeGeneratorMetadata({ model: 'Gemini 3.8 Flash (High)', usage: { inputTokens: 200, totalOutputTokens: 50, visibleOutputTokens: 50, responseId: 'ooo-2' }, timestampSec: 1_778_015_002 })],
+      ],
+    });
+
+    const input1 = new AntigravityInput({ stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true });
+    const c1: AgentActivityEntry[] = [];
+    input1.on('entries', (entries: AgentActivityEntry[]) => c1.push(...entries));
+    await input1.start();
+    await input1.stop();
+    expect(c1.filter((e) => e['event.name'] === 'llm.response').map((e) => e['gen_ai.response.id'])).toEqual(['ooo-2']);
+
+    // Cycle 2: genIdx=1 now receives tokens -> must NOT be dropped!
+    const DatabaseSync = loadDatabaseSync()!;
+    const db = new DatabaseSync(dbPath);
+    try {
+      const filled1 = encodeGeneratorMetadata({
+        model: 'Gemini 3.8 Flash (High)',
+        usage: { inputTokens: 150, totalOutputTokens: 40, visibleOutputTokens: 40, responseId: 'ooo-1-late' },
+        timestampSec: 1_778_015_003,
+      });
+      db.prepare('UPDATE gen_metadata SET data = ?, size = ? WHERE idx = 1').run(filled1, filled1.length);
+    } finally {
+      db.close();
+    }
+    const future = new Date(Date.now() + 5000);
+    await fs.utimes(dbPath, future, future);
+
+    const input2 = new AntigravityInput({ stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true });
+    const c2: AgentActivityEntry[] = [];
+    input2.on('entries', (entries: AgentActivityEntry[]) => c2.push(...entries));
+    await input2.start();
+    await input2.stop();
+    expect(c2.filter((e) => e['event.name'] === 'llm.response').map((e) => e['gen_ai.response.id'])).toEqual(['ooo-1-late']);
+  });
+
+  it('defers Loop 3 on streaming PLANNER_RESPONSE, emits completed background RUNNING tools, sets error.type, and latches toolCallId across cycles', async () => {
+    const root = path.join(tmpDir, 'stream-gate-root');
+    const convDir = path.join(root, 'conversations');
+    const sid = 'stream-gate-sess';
+    const logsDir = path.join(root, 'brain', sid, '.system_generated', 'logs');
+    await fs.mkdir(convDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+
+    const baseSec = 1_778_016_000;
+    const dbPath = path.join(convDir, `${sid}.db`);
+    const transcriptPath = path.join(logsDir, 'transcript.jsonl');
+
+    // Cycle 1: step 1 PLANNER_RESPONSE is still RUNNING without tool_calls -> Loop 3 must NOT prematurely emit ['stop']!
+    createConversationDb(dbPath, {
+      genRows: [
+        [
+          0,
+          encodeGeneratorMetadata({
+            model: 'Gemini 3.8 Flash (High)',
+            usage: { inputTokens: 100, totalOutputTokens: 20, visibleOutputTokens: 20, responseId: 'sg-1' },
+            timestampSec: baseSec + 1,
+            stepIndices: [1],
+          }),
+        ],
+      ],
+    });
+    await fs.writeFile(
+      transcriptPath,
+      [
+        JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: new Date((baseSec - 1) * 1000).toISOString(), content: 'Run cmd' }),
+        JSON.stringify({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'RUNNING', created_at: new Date(baseSec * 1000).toISOString() }),
+      ].join('\n') + '\n',
+    );
+
+    const input1 = new AntigravityInput({ stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true });
+    const c1: AgentActivityEntry[] = [];
+    input1.on('entries', (entries: AgentActivityEntry[]) => c1.push(...entries));
+    await input1.start();
+    await input1.stop();
+    expect(c1.map((e) => e['event.name'])).toEqual(['other']);
+
+    // Cycle 2: step 1 finishes (DONE) with 2 tool_calls (no tc.id yet, no steps.metadata row yet -> fallback callIds latched).
+    // Step 2 is ERROR (must attach error.type), step 3 is not written yet (pending).
+    await fs.appendFile(
+      transcriptPath,
+      [
+        JSON.stringify({
+          step_index: 1,
+          source: 'MODEL',
+          type: 'PLANNER_RESPONSE',
+          status: 'DONE',
+          created_at: new Date(baseSec * 1000).toISOString(),
+          tool_calls: [
+            { name: 'read_file', args: { Path: '/missing' } },
+            { name: 'run_command', args: { CommandLine: 'bg-task' } },
+          ],
+        }),
+        JSON.stringify({ step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'ERROR', created_at: new Date((baseSec + 2) * 1000).toISOString(), content: 'ENOENT' }),
+      ].join('\n') + '\n',
+    );
+
+    const input2 = new AntigravityInput({ stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true });
+    const c2: AgentActivityEntry[] = [];
+    input2.on('entries', (entries: AgentActivityEntry[]) => c2.push(...entries));
+    await input2.start();
+    await input2.stop();
+
+    const resp2 = c2.find((e) => e['event.name'] === 'llm.response')!;
+    expect(resp2['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
+    const errToolResult = c2.find((e) => e['event.name'] === 'tool.result')!;
+    // buildAgentActivityEntry normalizes 'error' -> 'failure' and keeps error.type
+    expect(errToolResult['tool.result.status']).toBe('failure');
+    expect(errToolResult['error.type']).toBe('antigravity.tool_failed');
+    const pendingCallId = c2.filter((e) => e['event.name'] === 'tool.call')[1]!['gen_ai.tool.call.id'];
+    expect(pendingCallId).toBe(`${sid}:step:1:tc:1`);
+
+    // Cycle 3: step 3 lands with transcript status='RUNNING' (backgrounded run_command!) BUT SQLite has
+    // completedAtMs AND a late native toolCallId; plus step 4 CHECKPOINT compaction LLM call!
+    const DatabaseSync = loadDatabaseSync()!;
+    const db = new DatabaseSync(dbPath);
+    try {
+      const s3Meta = concatBytes(
+        protoBytesField(1, protoTimestamp(baseSec + 2)),
+        protoBytesField(4, concatBytes(protoStringField(1, 'call_late_native_id'), protoStringField(2, 'run_command'))),
+        protoBytesField(8, protoTimestamp(baseSec + 12)),
+        protoBytesField(32, protoTimestamp(baseSec + 2)),
+      );
+      const s4Usage = encodeModelUsage({ inputTokens: 500, totalOutputTokens: 120, visibleOutputTokens: 120, responseId: 'ckpt-1' });
+      const s4Meta = concatBytes(
+        protoBytesField(1, protoTimestamp(baseSec + 13)),
+        protoBytesField(8, protoTimestamp(baseSec + 15)),
+        protoBytesField(9, s4Usage),
+      );
+      db.prepare('INSERT INTO steps (idx, metadata) VALUES (?, ?)').run(3, s3Meta);
+      db.prepare('INSERT INTO steps (idx, metadata) VALUES (?, ?)').run(4, s4Meta);
+    } finally {
+      db.close();
+    }
+    await fs.appendFile(
+      transcriptPath,
+      [
+        JSON.stringify({ step_index: 3, source: 'MODEL', type: 'GENERIC', status: 'RUNNING', created_at: new Date((baseSec + 2) * 1000).toISOString(), content: 'background output' }),
+        JSON.stringify({ step_index: 4, source: 'SYSTEM', type: 'CHECKPOINT', status: 'DONE', created_at: new Date((baseSec + 13) * 1000).toISOString(), content: 'Compacted summary text' }),
+      ].join('\n') + '\n',
+    );
+    const future = new Date(Date.now() + 5000);
+    await fs.utimes(dbPath, future, future);
+
+    const input3 = new AntigravityInput({ stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true });
+    const c3: AgentActivityEntry[] = [];
+    input3.on('entries', (entries: AgentActivityEntry[]) => c3.push(...entries));
+    await input3.start();
+    await input3.stop();
+
+    // Background RUNNING tool with SQLite completedAtMs IS emitted with latched callId (no drift!)
+    const bgToolResult = c3.find((e) => e['event.name'] === 'tool.result')!;
+    expect(bgToolResult).toBeDefined();
+    expect(bgToolResult['gen_ai.tool.call.id']).toBe(pendingCallId);
+    expect(bgToolResult['gen_ai.tool.call.duration']).toBeGreaterThan(0);
+
+    // CHECKPOINT compaction LLM call captures output.messages and keeps latched callId in messages_delta!
+    const ckptReq = c3.find((e) => e['event.name'] === 'llm.request')!;
+    const ckptResp = c3.find((e) => e['event.name'] === 'llm.response')!;
+    expect(ckptResp['gen_ai.output.messages']).toEqual([
+      { role: 'assistant', parts: [{ type: 'text', content: 'Compacted summary text' }], finish_reason: 'stop' },
+    ]);
+    const deltaJson = JSON.stringify(ckptReq['gen_ai.input.messages_delta']);
+    expect(deltaJson).toContain(pendingCallId);
+    expect(deltaJson).not.toContain('call_late_native_id');
+  });
+
+  it('orders same-millisecond multi-step events within one turn by step index without interleaving', async () => {
+    const root = path.join(tmpDir, 'same-ms-steps-root');
+    const convDir = path.join(root, 'conversations');
+    const sid = 'same-ms-steps';
+    const logsDir = path.join(root, 'brain', sid, '.system_generated', 'logs');
+    await fs.mkdir(convDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+
+    const tsSec = 1_778_017_000;
+    const iso = new Date(tsSec * 1000).toISOString();
+    createConversationDb(path.join(convDir, `${sid}.db`), {
+      genRows: [
+        [0, encodeGeneratorMetadata({ model: 'Gemini 3.8 Flash (High)', usage: { inputTokens: 100, totalOutputTokens: 20, visibleOutputTokens: 20, responseId: 's1' }, timestampSec: tsSec, stepIndices: [1] })],
+        [1, encodeGeneratorMetadata({ model: 'Gemini 3.8 Flash (High)', usage: { inputTokens: 120, totalOutputTokens: 25, visibleOutputTokens: 25, responseId: 's2' }, timestampSec: tsSec, stepIndices: [3] })],
+      ],
+    });
+    await fs.writeFile(
+      path.join(logsDir, 'transcript.jsonl'),
+      [
+        JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: iso, content: 'One turn, two steps' }),
+        JSON.stringify({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: iso, tool_calls: [{ id: 'tc1', name: 'read_file', args: {} }] }),
+        JSON.stringify({ step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', created_at: iso, content: 'ok' }),
+        JSON.stringify({ step_index: 3, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: iso, content: 'Final' }),
+      ].join('\n') + '\n',
+    );
+
+    const input = new AntigravityInput({ stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true });
+    const collected: AgentActivityEntry[] = [];
+    input.on('entries', (entries: AgentActivityEntry[]) => collected.push(...entries));
+    await input.start();
+    await input.stop();
+
+    expect(collected.map((e) => `${e['gen_ai.step.id']?.split(':').slice(-2).join(':')}:${e['event.name']}`)).toEqual([
+      'step:0:other',
+      'step:1:llm.request',
+      'step:1:llm.response',
+      'step:1:tool.call',
+      'step:1:tool.result',
+      'step:3:llm.request',
+      'step:3:llm.response',
+    ]);
   });
 });

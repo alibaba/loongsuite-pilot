@@ -131,9 +131,9 @@ type differences are called out in the notes.
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |
 | Qwen Code CLI | `qwen-code-cli` | Hook integration; parses qwen-code transcript JSONL on Stop. |
 | Qwen Work CN | `qwen-work-cn` | Hook and local data sources. |
-| Antigravity | `antigravity` | Read-only local SQLite (`~/.gemini/antigravity/conversations/*.db`) + `transcript.jsonl`. |
-| Antigravity IDE | `antigravity-ide` | Read-only local SQLite (`~/.gemini/antigravity-ide/conversations/*.db`) + `transcript.jsonl`. |
-| Antigravity CLI (`agy`) | `antigravity-cli` | Read-only local SQLite (`~/.gemini/antigravity-cli/conversations/*.db`) + `transcript.jsonl`. |
+| Antigravity | `antigravity` | Read-only local SQLite (`~/.gemini/antigravity/conversations/*.db`, requires `node:sqlite` on Node.js >= 22.13 / >= 23.4) + `transcript.jsonl`. |
+| Antigravity IDE | `antigravity-ide` | Read-only local SQLite (`~/.gemini/antigravity-ide/conversations/*.db`, requires `node:sqlite`) + `transcript.jsonl`. |
+| Antigravity CLI (`agy`) | `antigravity-cli` | Read-only local SQLite (`~/.gemini/antigravity-cli/conversations/*.db`, requires `node:sqlite`) + `transcript.jsonl`. |
 | Wukong | `wukong` | Runtime auto-discovery and CLI API polling via local `wukong-cli`; it is not an `agents.d` installer selection. |
 | WorkBuddy | `workbuddy` | Structural Hook/file wakeups with a 30-second local transcript polling fallback. Verified on WorkBuddy Desktop 5.2.6 for macOS and 5.3.5.0 for Windows 11. |
 | Doubao Work | `doubao-work` | Experimental macOS/Windows client-message metadata and task traces; paired local TOOL spans and selected-skill context. Native execution and first-output coverage depend on client evidence; model identities, tokens and full cloud inference remain unavailable. See [scope and configuration](doubao-work.md). |

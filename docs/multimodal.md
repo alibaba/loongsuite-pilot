@@ -28,7 +28,7 @@ Where each agent finds images. Surfaces collected after it is enabled are in [Wh
 | Qoder IDE | SQLite attachments; transcript | Local path |
 | Qoder CLI | transcript | Local path (paste / `@` / Read / ImageGen), read from disk, then `uri` |
 | Qwen Work CN | transcript | Local path (paste tag, `Read`, `qwenwork_media_read`, generate and present tools) |
-| Antigravity / Antigravity IDE / Antigravity CLI | transcript (`transcript.jsonl`) | Local path (`media[].uri` on `USER_INPUT`, `PLANNER_RESPONSE`, and tool-result steps) |
+| Antigravity / Antigravity IDE / Antigravity CLI | transcript (`transcript.jsonl`) | Local path (`media[].uri` on `USER_INPUT`, `SYSTEM_MESSAGE`, `PLANNER_RESPONSE`, and tool-result steps) |
 
 ## How To Enable
 
