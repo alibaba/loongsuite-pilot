@@ -10,6 +10,7 @@ use super::common::{
     local_date, local_stamp_seconds, now_unix_nanos, sanitize_value, sha256_hex, with_file_lock,
     write_empty, Env, HookRequest, Obj,
 };
+use super::qwen_work_cn_reader::TranscriptReadBudget;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -191,7 +192,20 @@ fn read_payload(env: &Env, agent_id: &str, stdin: &[u8]) -> Option<Payload> {
 }
 
 fn consume_transcript(env: &Env, agent_id: &str, log_prefix: &str, payload: &Payload) {
-    let _ = consume_transcript_with_limit(env, agent_id, log_prefix, payload, None, None);
+    let _ = consume_transcript_with_limit(
+        env,
+        agent_id,
+        log_prefix,
+        payload,
+        TranscriptRead::default(),
+    );
+}
+
+#[derive(Default)]
+struct TranscriptRead<'a> {
+    limit: Option<u64>,
+    legacy_cursor_root: Option<&'a Path>,
+    budget: Option<&'a TranscriptReadBudget>,
 }
 
 pub(crate) fn run_for_sdk(
@@ -200,6 +214,7 @@ pub(crate) fn run_for_sdk(
     input: &[u8],
     limit: Option<u64>,
     legacy_cursor_root: Option<&Path>,
+    budget: &TranscriptReadBudget,
 ) -> bool {
     let mut env = Env::new();
     env.insert(
@@ -215,8 +230,11 @@ pub(crate) fn run_for_sdk(
         "qwen-work-cn",
         "qwen-work-cn",
         &payload,
-        limit,
-        legacy_cursor_root,
+        TranscriptRead {
+            limit,
+            legacy_cursor_root,
+            budget: Some(budget),
+        },
     )
 }
 
@@ -225,9 +243,9 @@ fn consume_transcript_with_limit(
     agent_id: &str,
     log_prefix: &str,
     payload: &Payload,
-    limit: Option<u64>,
-    legacy_cursor_root: Option<&Path>,
+    read: TranscriptRead<'_>,
 ) -> bool {
+    let legacy_cursor_root = read.legacy_cursor_root;
     let cursor_data = legacy_cursor_root.map_or_else(|| data_dir(env), Path::to_path_buf);
     if legacy_cursor_root.is_some() {
         let primary = session_record_path(&cursor_data, agent_id, &payload.session_id);
@@ -251,15 +269,15 @@ fn consume_transcript_with_limit(
         &session_record_path(&cursor_data, agent_id, &payload.session_id),
         ".process.lock",
     );
-    with_file_lock(&lock, 15_000, 300_000, || {
+    crate::utils::sync_file_lock::with_file_lock_handle(&lock, 15_000, 300_000, |lease| {
         consume_transcript_locked(
             env,
             agent_id,
             log_prefix,
             payload,
-            limit,
+            read,
             &cursor_data,
-            legacy_cursor_root.is_some(),
+            lease,
         )
     })
     .unwrap_or_else(|| {
@@ -273,11 +291,11 @@ fn consume_transcript_locked(
     agent_id: &str,
     log_prefix: &str,
     payload: &Payload,
-    limit: Option<u64>,
+    read: TranscriptRead<'_>,
     cursor_data: &Path,
-    shared_cursor: bool,
+    lease: &std::fs::File,
 ) -> bool {
-    if shared_cursor {
+    if read.legacy_cursor_root.is_some() {
         let mut files = shadow_paths(cursor_data, agent_id);
         files.push(session_record_path(
             cursor_data,
@@ -334,12 +352,13 @@ fn consume_transcript_locked(
         Path::new(&payload.transcript_path),
         &payload.session_id,
         &record,
-        limit,
+        read.limit,
         super::qwen_work_cn_reader::RowKinds {
             is_prompt: is_prompt_row,
             is_review: |row| is_review_copy(std::slice::from_ref(row)),
             is_content: is_content_row,
         },
+        read.budget.map(|budget| (budget, lease)),
         |batch| {
             saw_batch = true;
             if batch.reason != "incremental" {

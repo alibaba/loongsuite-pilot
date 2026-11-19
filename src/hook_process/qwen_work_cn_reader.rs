@@ -9,7 +9,8 @@ use std::cell::Cell;
 use std::fs::{File, Metadata, OpenOptions};
 use std::io;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const WINDOW: usize = 32 * 1024 * 1024;
 const ROW_TAIL_LIMIT: usize = 1024 * 1024;
@@ -32,9 +33,72 @@ struct FileState {
     ctime_ms: f64,
 }
 
-struct BudgetedFile {
+struct BudgetedFile<'a> {
     file: File,
     remaining: Cell<usize>,
+    paced: Option<(&'a TranscriptReadBudget, &'a File)>,
+    renewed: Cell<Instant>,
+}
+
+/// The SDK keeps one native Stop reader alive between collection cycles. Its
+/// decoder state stays in memory and the durable marker survives a restart.
+pub(crate) struct TranscriptReadBudget {
+    per_poll: usize,
+    state: Mutex<(usize, bool)>,
+    permit: Condvar,
+    pub(crate) exhausted: tokio::sync::Notify,
+}
+
+impl TranscriptReadBudget {
+    pub(crate) fn new(per_poll: usize) -> Self {
+        Self {
+            per_poll,
+            state: Mutex::new((per_poll, false)),
+            permit: Condvar::new(),
+            exhausted: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub(crate) fn resume(&self) {
+        let mut state = self.state.lock().expect("transcript budget");
+        debug_assert_eq!(state.0, 0);
+        state.0 = self.per_poll;
+        self.permit.notify_one();
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.state.lock().expect("transcript budget").1 = true;
+        self.permit.notify_one();
+    }
+
+    fn take(&self, requested: usize, lease: &File, renewed: &Cell<Instant>) -> io::Result<usize> {
+        // Keep the shared Node-compatible session lease live while between
+        // polls, including when the SDK's interval exceeds the lease age.
+        let refresh = Duration::from_secs(30);
+        let mut state = self.state.lock().expect("transcript budget");
+        if state.0 == 0 && !state.1 {
+            self.exhausted.notify_one();
+        }
+        loop {
+            if state.1 {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "SDK stopped"));
+            }
+            if renewed.get().elapsed() >= refresh {
+                lease.set_modified(SystemTime::now())?;
+                renewed.set(Instant::now());
+            }
+            let amount = state.0.min(requested);
+            if amount != 0 {
+                state.0 -= amount;
+                return Ok(amount);
+            }
+            state = self
+                .permit
+                .wait_timeout(state, refresh)
+                .expect("transcript budget")
+                .0;
+        }
+    }
 }
 
 fn time_ms(time: io::Result<std::time::SystemTime>) -> f64 {
@@ -45,7 +109,7 @@ fn time_ms(time: io::Result<std::time::SystemTime>) -> f64 {
         })
 }
 
-fn file_state(file: &BudgetedFile) -> io::Result<FileState> {
+fn file_state(file: &BudgetedFile<'_>) -> io::Result<FileState> {
     let metadata = file.file.metadata()?;
     if !metadata.is_file() {
         return Err(io::Error::new(
@@ -103,17 +167,22 @@ fn windows_filetime_ms(filetime: i64) -> io::Result<f64> {
     Ok(seconds as f64 * 1000.0 + nanoseconds as f64 / 1_000_000.0)
 }
 
-fn read_range(file: &BudgetedFile, mut offset: u64, size: usize) -> io::Result<Vec<u8>> {
-    if size > file.remaining.get() {
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "transcript read budget exhausted; source retained for retry",
-        ));
+fn read_range(file: &BudgetedFile<'_>, mut offset: u64, size: usize) -> io::Result<Vec<u8>> {
+    if file.paced.is_none() {
+        if size > file.remaining.get() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "transcript read budget exhausted; source retained for retry",
+            ));
+        }
+        file.remaining.set(file.remaining.get() - size);
     }
-    file.remaining.set(file.remaining.get() - size);
     let mut result = Vec::with_capacity(size);
     while result.len() < size {
-        let amount = (size - result.len()).min(CHUNK);
+        let mut amount = (size - result.len()).min(CHUNK);
+        if let Some((budget, lease)) = file.paced {
+            amount = budget.take(amount, lease, &file.renewed)?;
+        }
         let mut chunk = vec![0; amount];
         #[cfg(unix)]
         let read = {
@@ -134,7 +203,7 @@ fn read_range(file: &BudgetedFile, mut offset: u64, size: usize) -> io::Result<V
     Ok(result)
 }
 
-fn witness(file: &BudgetedFile, offset: u64) -> io::Result<String> {
+fn witness(file: &BudgetedFile<'_>, offset: u64) -> io::Result<String> {
     let length = offset.min(64) as usize;
     let bytes = read_range(file, offset - length as u64, length)?;
     if bytes.len() != length {
@@ -147,7 +216,7 @@ fn witness(file: &BudgetedFile, offset: u64) -> io::Result<String> {
 }
 
 fn make_cursor(
-    file: &BudgetedFile,
+    file: &BudgetedFile<'_>,
     before: &FileState,
     offset: u64,
     needs_delimiter: bool,
@@ -175,7 +244,7 @@ fn make_cursor(
     Ok(cursor)
 }
 
-fn matches_cursor(file: &BudgetedFile, current: &FileState, saved: &Value) -> io::Result<bool> {
+fn matches_cursor(file: &BudgetedFile<'_>, current: &FileState, saved: &Value) -> io::Result<bool> {
     let Some(offset) = saved.get("offset").and_then(Value::as_u64) else {
         return Ok(false);
     };
@@ -212,7 +281,7 @@ fn complete_row(bytes: &[u8]) -> bool {
 }
 
 fn offset_at_line(
-    file: &BudgetedFile,
+    file: &BudgetedFile<'_>,
     size: u64,
     mut lines: usize,
 ) -> io::Result<Option<(u64, bool)>> {
@@ -248,7 +317,7 @@ fn offset_at_line(
 }
 
 fn tail_start(
-    file: &BudgetedFile,
+    file: &BudgetedFile<'_>,
     size: u64,
     offset: u64,
     mut lines: usize,
@@ -288,7 +357,7 @@ struct RawRow {
 }
 
 fn scan_rows(
-    file: &BudgetedFile,
+    file: &BudgetedFile<'_>,
     size: u64,
     offset: u64,
     mut delimiter: bool,
@@ -354,7 +423,7 @@ fn scan_rows(
     Ok(consumed)
 }
 
-fn snapshot_end(file: &BudgetedFile, actual: u64, limit: Option<u64>) -> io::Result<u64> {
+fn snapshot_end(file: &BudgetedFile<'_>, actual: u64, limit: Option<u64>) -> io::Result<u64> {
     let Some(size) = limit else { return Ok(actual) };
     if size > actual {
         return Err(io::Error::new(
@@ -383,7 +452,10 @@ fn snapshot_end(file: &BudgetedFile, actual: u64, limit: Option<u64>) -> io::Res
             .map_or(extra.len(), |n| n + 1) as u64)
 }
 
-fn open(path: &Path) -> io::Result<BudgetedFile> {
+fn open<'a>(
+    path: &Path,
+    paced: Option<(&'a TranscriptReadBudget, &'a File)>,
+) -> io::Result<BudgetedFile<'a>> {
     let scoped = crate::utils::source_access::current().is_some();
     let file = if scoped {
         crate::utils::source_access::open(path)?
@@ -405,6 +477,8 @@ fn open(path: &Path) -> io::Result<BudgetedFile> {
     Ok(BudgetedFile {
         file,
         remaining: Cell::new(remaining),
+        paced,
+        renewed: Cell::new(Instant::now()),
     })
 }
 
@@ -422,6 +496,7 @@ pub(super) fn drain(
     record: &Map<String, Value>,
     limit: Option<u64>,
     kinds: RowKinds,
+    paced: Option<(&TranscriptReadBudget, &File)>,
     mut emit: impl FnMut(Batch) -> bool,
 ) -> io::Result<bool> {
     let RowKinds {
@@ -429,7 +504,7 @@ pub(super) fn drain(
         is_review,
         is_content,
     } = kinds;
-    let file = open(path)?;
+    let file = open(path, paced)?;
     let before = file_state(&file)?;
     let size = snapshot_end(&file, before.size, limit)?;
     let same_session = record
@@ -665,7 +740,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty-transcript.jsonl");
         File::create(&path).unwrap();
-        let file = open(&path).unwrap();
+        let file = open(&path, None).unwrap();
         let mut current = file_state(&file).unwrap();
         current.ino = 9_007_199_254_740_993;
         // JSON.stringify of the Node Number rounds this index to 2^53.
@@ -693,6 +768,7 @@ mod tests {
                 is_review: |row| row["review"] == true,
                 is_content: |row| row["type"] == "user" || row["type"] == "assistant",
             },
+            None,
             |batch| {
                 next.insert("session_id".into(), json!("session"));
                 next.insert("transcript_path".into(), json!(path));
@@ -893,6 +969,7 @@ mod tests {
                 is_review: |_| false,
                 is_content: |_| true,
             },
+            None,
             |_| {
                 emitted = true;
                 true

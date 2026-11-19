@@ -536,6 +536,21 @@ fn qwen_native_stop_is_durable_while_sdk_is_stopped_and_resumes_after_restart() 
         format!("{}\n{}\n", user("turn-1"), assistant("turn-1")),
     )
     .unwrap();
+    // Many valid short native rows make this Stop larger than the SDK's
+    // default 8 MiB read budget without exceeding the per-record limit.
+    let padding = json!({"type":"progress","data":"x".repeat(1024)}).to_string();
+    {
+        let mut transcript = std::io::BufWriter::new(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&transcript)
+                .unwrap(),
+        );
+        for _ in 0..9000 {
+            writeln!(transcript, "{padding}").unwrap();
+        }
+    }
+    assert!(std::fs::metadata(&transcript).unwrap().len() > 9 * 1024 * 1024);
     let payload = json!({"hook_event_name":"Stop","session_id":"sdk-qwen-session",
         "transcript_path":transcript,"cwd":"/workspace","prompt":"private-prompt"});
     let publish = || {
@@ -552,7 +567,7 @@ fn qwen_native_stop_is_durable_while_sdk_is_stopped_and_resumes_after_restart() 
         "hcd":{"agent_configs":{"qwen-work-cn":{"collection":{
             "enabled":true,"profile":"qwen_work_cn_trace_v1","allowed_roots":[source],
             "sources":[{"id":"transcript","type":"transcript","path":source}],
-            "capture_message_content":false,"limits":{"poll_interval_ms":100}}}}},
+            "capture_message_content":false,"limits":{"poll_interval_ms":500}}}}},
         "sdk_options":{"delivery":{"flush_interval_ms":10}}});
     let mut initialized = Host::start(&data, policy.clone(), Box::default());
     initialized.ready();
@@ -565,7 +580,7 @@ fn qwen_native_stop_is_durable_while_sdk_is_stopped_and_resumes_after_restart() 
         .unwrap()
         .unwrap()
         .path();
-    let marker = std::fs::read_to_string(saved).unwrap();
+    let marker = std::fs::read_to_string(&saved).unwrap();
     assert!(!marker.contains("private-prompt"));
     // One damaged or unauthorized SDK-owned marker must not permanently
     // block a valid wakeup behind it or delete the external source.
@@ -585,6 +600,17 @@ fn qwen_native_stop_is_durable_while_sdk_is_stopped_and_resumes_after_restart() 
         .to_string(),
     )
     .unwrap();
+    // Shut down on the first partial pass. The input keeps the marker while
+    // the paused reader is joined, then resumes from the durable boundary.
+    let mut interrupted = Host::start(&data, policy.clone(), Box::default());
+    interrupted.ready();
+    until(|| interrupted.snapshot()["agents"][0]["status"]["state"] == "running");
+    assert!(saved.is_file());
+    interrupted.stop();
+    assert!(saved.is_file());
+    assert!(interrupted.ctx.rows.lock().unwrap().is_empty());
+    drop(interrupted);
+
     let mut host = Host::start(&data, policy.clone(), Box::default());
     host.ready();
     until(|| host.ctx.rows.lock().unwrap().len() >= 3);

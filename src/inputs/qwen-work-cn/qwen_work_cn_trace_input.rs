@@ -1,5 +1,6 @@
 //! Port of `src/inputs/qwen-work-cn/qwen-work-cn-trace-input.ts`.
 
+use crate::hook_process::TranscriptReadBudget;
 use crate::inputs::base::{
     create_hook_history_startup_checkpoint, entry_from, filter_bootstrap_history_turns, InputBody,
     InputRuntime,
@@ -87,6 +88,40 @@ pub struct QwenWorkCnTraceBody {
     in_flight_pairs: Mutex<HashMap<String, HashMap<String, InFlightPair>>>,
     segment_dir_by_session: Mutex<HashMap<String, CachedSegmentDir>>,
     native_wakeups: Mutex<Option<QwenWorkCnNativeWakeups>>,
+    native_worker: tokio::sync::Mutex<Option<NativeStopWorker>>,
+}
+
+struct NativeStopWorker {
+    marker: PathBuf,
+    source: PathBuf,
+    session: String,
+    budget: Arc<TranscriptReadBudget>,
+    task: tokio::task::JoinHandle<bool>,
+}
+
+impl Drop for NativeStopWorker {
+    fn drop(&mut self) {
+        self.budget.cancel();
+    }
+}
+
+/// A blocked reader yields to the collector until the next poll grants bytes.
+async fn poll_native_stop(
+    worker: &mut Option<NativeStopWorker>,
+    rt: &InputRuntime,
+) -> anyhow::Result<bool> {
+    let pending = worker.as_mut().expect("native Stop worker");
+    let result = tokio::select! {
+        result = &mut pending.task => result,
+        _ = pending.budget.exhausted.notified() => return Ok(false),
+    };
+    let pending = worker.take().expect("native Stop worker");
+    if result? {
+        tokio::fs::remove_file(&pending.marker).await?;
+    } else {
+        rt.warn("Qwen Work SDK wakeup retained for source retry", None);
+    }
+    Ok(true)
 }
 
 struct InFlightPair {
@@ -221,6 +256,7 @@ impl QwenWorkCnTraceInput {
                     in_flight_pairs: Mutex::new(HashMap::new()),
                     segment_dir_by_session: Mutex::new(HashMap::new()),
                     native_wakeups: Mutex::new(None),
+                    native_worker: tokio::sync::Mutex::new(None),
                 },
                 "QwenWorkCNTraceInput",
                 opts.state_store,
@@ -317,6 +353,14 @@ impl InputBody for QwenWorkCnTraceBody {
         Ok(())
     }
 
+    async fn on_stop(&self, _rt: &InputRuntime) -> anyhow::Result<()> {
+        if let Some(mut worker) = self.native_worker.lock().await.take() {
+            worker.budget.cancel();
+            (&mut worker.task).await?;
+        }
+        Ok(())
+    }
+
     async fn collect(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
         let result = self.collect_inner(rt).await;
         self.evict_stale_state();
@@ -376,6 +420,18 @@ impl QwenWorkCnTraceBody {
         let Some(native) = native else {
             return Ok(());
         };
+        let mut worker = self.native_worker.lock().await;
+        let mut seen_sessions = HashSet::new();
+        let mut seen_sources = HashSet::new();
+        if let Some(pending) = worker.as_ref() {
+            seen_sessions.insert(pending.session.clone());
+            seen_sources.insert(pending.source.clone());
+            pending.budget.resume();
+            if !poll_native_stop(&mut worker, rt).await? {
+                return Ok(());
+            }
+        }
+
         let mut entries = match crate::utils::source_access::read_dir_async(&native.directory).await
         {
             Ok(entries) => entries,
@@ -389,8 +445,6 @@ impl QwenWorkCnTraceBody {
             }
         }
         markers.sort();
-        let mut seen_sessions = HashSet::new();
-        let mut seen_sources = HashSet::new();
         for marker in markers {
             let bytes = crate::utils::source_access::read(&marker).await?;
             let value: Value = match serde_json::from_slice(&bytes) {
@@ -467,7 +521,11 @@ impl QwenWorkCnTraceBody {
             let limit = value.get("snapshot_bytes").and_then(Value::as_u64);
             let native = native.clone();
             let scope = crate::utils::source_access::current();
-            let processed = tokio::task::spawn_blocking(move || {
+            let budget = Arc::new(TranscriptReadBudget::new(
+                crate::utils::source_access::read_limit(usize::MAX),
+            ));
+            let read_budget = budget.clone();
+            let task = tokio::task::spawn_blocking(move || {
                 struct Restore(Option<Arc<crate::utils::source_access::SourceScope>>);
                 impl Drop for Restore {
                     fn drop(&mut self) {
@@ -482,15 +540,19 @@ impl QwenWorkCnTraceBody {
                     &input,
                     limit,
                     native.legacy_cursor_root.as_deref(),
+                    &read_budget,
                 )
-            })
-            .await?;
-            if !processed {
-                // Keep this session ordered without blocking unrelated sessions.
-                rt.warn("Qwen Work SDK wakeup retained for source retry", None);
-                continue;
+            });
+            *worker = Some(NativeStopWorker {
+                marker,
+                source: path,
+                session: session.to_owned(),
+                budget,
+                task,
+            });
+            if !poll_native_stop(&mut worker, rt).await? {
+                break;
             }
-            tokio::fs::remove_file(marker).await?;
         }
         Ok(())
     }

@@ -33,6 +33,7 @@ pub use qoder::{
 };
 pub use qoder_wakeup::{publish_qoder_wakeup, with_qoder_wakeup_lock};
 pub(crate) use qwen_work_cn::run_for_sdk as run_qwen_work_cn_for_sdk;
+pub(crate) use qwen_work_cn_reader::TranscriptReadBudget;
 
 use common::{write_empty, Env, HookRequest};
 use std::io::{IsTerminal, Read, Write};
