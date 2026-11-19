@@ -94,7 +94,9 @@ Linux 动态加载器可能因为外部调用线程上的线程局部存储（TL
 
 云壳 SDK 只支持 Qoder。其他 Agent 按各自的接入方式运行。Qoder 的 `hook_jsonl` 是现有 `qoder-YYYY-MM-DD.jsonl` 历史事件目录，最多一个；`transcript` 是授权的原生 transcript 目录，需通过 SDK Hook 发布现有 Qoder 唤醒元数据。还可显式提供 `sqlite`、`segments`、`intercept` Token 来源。未列出的默认目录不会作为兜底读取。
 
-开发验证可用 `codex_rollout_v1` 加载 Codex。HCD 只接受一个授权的 `transcript` 目录，例如显式 `CODEX_HOME` 下的 `sessions`。完整 Pilot 也通过 SDK 使用独立的中断补采 profile，并继续管理 Codex 的用户／系统 Hook、信任记录与输出。自定义 `CODEX_HOME` 通过启动 Pilot 的绝对路径环境变量授权；SDK 读取该目录内的会话，收集通知与 span 上下文各自保留在 Pilot 的状态目录。
+Codex 开发验证使用 `codex_rollout_v1` 采集一个授权的 `transcript` 目录。独立宿主可将 `collection.codex_recovery` 设为 `true`，同时启动中断补采和 Hook 缺口诊断。主采集拥有回合活动，补采复用 SDK 状态目录中的 Hook 标记并保存自己的进度。只加载 `codex_aborted_turn_v1` 时，补采负责上报有完整原始证据的中断回合。
+
+如需管理 Codex Hook，在 SDK 启动参数中传入绝对 `codex_home`，并在 `hcd.agent_configs.codex` 下配置 `"hook_deployment": {"settings_path": "/absolute/codex/hooks.json", "channel": "cloud"}`。路径必须对应 `codex_home/hooks.json`，主源必须是该目录下的 `sessions`。二进制从 `resource_dir/bin` 加载。SDK 注册观察点和三个原生裁决点，并更新同一目录的 `config.toml` 信任记录。`channel` 默认走宿主回调，也可设为 `local`。查询状态使用 `snapshot` 的 `codex_hook_deployment`。应用移除 Codex 的策略撤回本实例注册，保留其他 Hook。普通的停止和重启保留配置。
 
 共享原生 Hook 对 Codex 支持 `UserPromptSubmit`、`PreToolUse` 和 `PostToolUse`。提示提交可拒绝发送，工具调用前可拒绝支持 Hook 的工具，调用完成后可将原始结果替换为裁决反馈。已产生的文件等副作用会保留。嵌入调试可用 `loongsuite-pilot-sdk-hook sdk-hook --agent codex --event <event> --channel <observe|local> --data-dir <sdk-data>`。宿主安装这些调试命令并处理 Codex 信任。
 

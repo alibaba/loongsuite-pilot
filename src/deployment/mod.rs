@@ -32,6 +32,7 @@ mod installer_config;
 pub(crate) mod installer_helper;
 mod legacy_cli_cleanup;
 mod legacy_uninstall;
+mod native_codex_rollback;
 mod native_hermes_rollback;
 pub(crate) mod native_install;
 mod native_installer_stop;
@@ -104,6 +105,7 @@ pub use hook_install_service::{
     HookInstallRunOptions, HookInstallRunResult, HOOK_INSTALL_REASONS, HOOK_INSTALL_RESULT_FILE,
     HOOK_INSTALL_SIGNAL_FILE,
 };
+pub(crate) use hook_strategy::reconcile_embedded_codex_hooks;
 pub use hook_strategy::HookStrategy;
 pub use inject_command::{inject_claude_directory, merge_claude_hooks, parse_inject_command_args};
 pub use openclaw_compat::{open_claw_capabilities, OpenClawCapabilities, MIN_OPENCLAW_VERSION};

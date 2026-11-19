@@ -9,6 +9,7 @@ pub struct Init {
     pub data_dir: PathBuf,
     pub resource_dir: PathBuf,
     pub home_dir: Option<PathBuf>,
+    pub codex_home: Option<PathBuf>,
     #[serde(default)]
     pub user_id: String,
 }
@@ -108,6 +109,8 @@ pub struct AgentPlan {
     pub capture_message_content: Option<bool>,
     pub exclude_workspaces: Vec<String>,
     pub include_conversation_ids: Option<Vec<String>>,
+    #[serde(skip)]
+    pub(super) codex_recovery_wakeup_namespace: Option<String>,
 }
 
 /// State and output controls owned by a standalone Pilot installation.
@@ -155,6 +158,8 @@ pub struct Policy {
     pub agents: BTreeMap<String, AgentPlan>,
     pub delivery: Delivery,
     pub hooks: Value,
+    pub(super) codex_recovery: Option<AgentPlan>,
+    pub(super) codex_hook_channel: Option<&'static str>,
 }
 
 impl Init {
@@ -167,6 +172,13 @@ impl Init {
         }
         if let Some(home) = &self.home_dir {
             anyhow::ensure!(home.is_absolute(), "home_dir must be absolute");
+        }
+        if let Some(home) = &self.codex_home {
+            anyhow::ensure!(
+                home.is_absolute() && !home.components().any(|c| matches!(c, Component::ParentDir)),
+                "codex_home must be absolute without parent traversal"
+            );
+            crate::utils::source_access::private_path(home)?;
         }
         Ok(())
     }
@@ -305,6 +317,8 @@ impl Policy {
         );
         let mask = crate::interceptor::ensure_mask_covers_interceptor(&mask, &local);
         let mut agents = BTreeMap::new();
+        let mut codex_recovery = None;
+        let mut codex_hook_channel = None;
         let mut seen = BTreeSet::new();
         for name in names {
             let agent = name
@@ -342,6 +356,7 @@ impl Policy {
                             | "capture_message_content"
                             | "exclude_workspaces"
                             | "include_conversation_ids"
+                            | "codex_recovery"
                     ))),
                 "unsupported collection option"
             );
@@ -431,10 +446,17 @@ impl Policy {
                 collection.get("pilot_qoder").is_none() || agent == "qoder",
                 "pilot_qoder requires the Qoder profile"
             );
-            anyhow::ensure!(
-                profile != "codex_aborted_turn_v1" || pilot_host.is_some(),
-                "the Codex aborted-turn profile requires authorized Pilot state"
-            );
+            let enable_codex_recovery = if let Some(enabled) = collection.get("codex_recovery") {
+                anyhow::ensure!(
+                    profile == "codex_rollout_v1" && pilot_host.is_none(),
+                    "codex_recovery requires an independent Codex rollout profile"
+                );
+                enabled
+                    .as_bool()
+                    .ok_or_else(|| anyhow::anyhow!("codex_recovery must be boolean"))?
+            } else {
+                false
+            };
             let sources = collection
                 .get("sources")
                 .and_then(Value::as_array)
@@ -496,6 +518,37 @@ impl Policy {
                     parsed.iter().all(|source| source.kind == "transcript") && parsed.len() == 1,
                     "Codex requires exactly one transcript source"
                 );
+                if let Some(deployment) = configs[agent].get("hook_deployment") {
+                    let home = init
+                        .codex_home
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("managed Codex Hook requires codex_home"))?;
+                    let fields = deployment.as_object().ok_or_else(|| {
+                        anyhow::anyhow!("Codex hook_deployment must be an object")
+                    })?;
+                    anyhow::ensure!(
+                        profile == "codex_rollout_v1"
+                            && pilot_host.is_none()
+                            && fields
+                                .keys()
+                                .all(|key| matches!(key.as_str(), "settings_path" | "channel")),
+                        "invalid managed Codex rollout deployment"
+                    );
+                    let settings = platform_path(&deployment["settings_path"], init)?;
+                    crate::utils::source_access::private_path(&settings)?;
+                    anyhow::ensure!(
+                        canonical_candidate(&settings)?
+                            == canonical_candidate(&home.join("hooks.json"))?
+                            && parsed[0].path == canonical_candidate(&home.join("sessions"))?,
+                        "Codex Hook settings and transcript must belong to codex_home"
+                    );
+                    codex_hook_channel = Some(match fields.get("channel") {
+                        None => "cloud",
+                        Some(value) if value == "cloud" => "cloud",
+                        Some(value) if value == "local" => "local",
+                        _ => anyhow::bail!("invalid Codex Hook channel"),
+                    });
+                }
             }
             anyhow::ensure!(
                 include_conversation_ids.is_none()
@@ -564,6 +617,7 @@ impl Policy {
                 max_files: limit("max_files", 512, 16384)?,
                 max_read_bytes: limit("max_read_bytes", 8 * 1024 * 1024, 64 * 1024 * 1024)?,
                 poll_interval_ms: limit("poll_interval_ms", 1000, 300000)? as u64,
+                codex_recovery_wakeup_namespace: None,
             };
             // Collaboration has its own transaction and checkpoint. One
             // embedded Qwen policy can activate both independent sources.
@@ -579,6 +633,12 @@ impl Policy {
                     child.sources = vec![collaboration];
                     agents.insert("qwen-work-cn-collaboration".into(), child);
                 }
+            }
+            if enable_codex_recovery {
+                let mut recovery = plan.clone();
+                recovery.profile = "codex_aborted_turn_v1".into();
+                recovery.codex_recovery_wakeup_namespace = Some(plan.namespace());
+                codex_recovery = Some(recovery);
             }
             agents.insert(agent.into(), plan);
         }
@@ -667,6 +727,8 @@ impl Policy {
             agents,
             delivery,
             hooks,
+            codex_recovery,
+            codex_hook_channel,
         })
     }
 }

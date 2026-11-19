@@ -15,6 +15,30 @@ use std::time::{Duration, Instant};
 
 const CODEX_SHELL_MIGRATED: &str = "__pilot_codex_shell_migrated_v1";
 const CODEX_LEGACY_EXPORTED: &str = "__pilot_codex_legacy_exported_v1";
+const QODER_LEGACY_EXPORTED: &str = "__pilot_qoder_legacy_exported_v1";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LegacyCheckpointHandoff {
+    Codex,
+    Qoder,
+}
+
+impl LegacyCheckpointHandoff {
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Codex => CODEX_LEGACY_EXPORTED,
+            Self::Qoder => QODER_LEGACY_EXPORTED,
+        }
+    }
+
+    pub(crate) fn for_input(input: &str) -> Option<Self> {
+        match input {
+            "codex-transcript" | "codex-aborted-turn" => Some(Self::Codex),
+            "qoder-trace" => Some(Self::Qoder),
+            _ => None,
+        }
+    }
+}
 
 type DeliveryRows = Vec<(i64, Vec<u8>)>;
 
@@ -464,29 +488,45 @@ impl Outbox {
     /// export completes, the legacy installation may also advance the cursor.
     /// Otherwise SQLite remains authoritative, including historically pending
     /// bytes from the first version of the Codex SDK.
-    pub(super) fn prepare_codex_checkpoint(
+    pub(super) fn prepare_shell_checkpoint(
         &self,
         source: &str,
+        handoff: LegacyCheckpointHandoff,
         read_shell_checkpoint: impl FnOnce() -> anyhow::Result<Option<String>>,
     ) -> anyhow::Result<Option<String>> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
-        let handed_off = Self::find_checkpoint(&tx, CODEX_SHELL_MIGRATED)?.is_some()
-            || Self::find_checkpoint(&tx, CODEX_LEGACY_EXPORTED)?.is_some();
+        let handed_off = Self::find_checkpoint(&tx, handoff.marker())?.is_some()
+            || (handoff == LegacyCheckpointHandoff::Codex
+                && Self::find_checkpoint(&tx, CODEX_SHELL_MIGRATED)?.is_some());
         if handed_off {
             let pending: i64 =
                 tx.query_row("SELECT events FROM queue_size", [], |row| row.get(0))?;
             anyhow::ensure!(
                 pending == 0,
-                "Codex handoff retains unacknowledged activity"
+                "checkpoint handoff retains unacknowledged activity"
             );
             let checkpoint = read_shell_checkpoint()?;
-            tx.execute("DELETE FROM checkpoint", [])?;
+            let checkpoint = if handoff == LegacyCheckpointHandoff::Qoder {
+                // A missing legacy namespace cannot advance Qoder's saved cursor.
+                let checkpoint = match checkpoint {
+                    Some(text) => Some(text),
+                    None => Self::find_checkpoint(&tx, source)?,
+                };
+                tx.execute("DELETE FROM checkpoint WHERE source=?1", [handoff.marker()])?;
+                checkpoint
+            } else {
+                tx.execute("DELETE FROM checkpoint", [])?;
+                checkpoint
+            };
             if let Some(text) = checkpoint.as_deref() {
                 tx.execute(SAVE_CHECKPOINT, params![source, text])?;
             }
             tx.commit()?;
             return Ok(checkpoint);
+        }
+        if handoff == LegacyCheckpointHandoff::Qoder {
+            return Self::find_checkpoint(&tx, source);
         }
         let mut checkpoints = {
             let mut statement = tx.prepare("SELECT json FROM checkpoint WHERE source<>?1")?;
@@ -518,7 +558,10 @@ impl Outbox {
         Ok(Some(text))
     }
 
-    pub(crate) fn mark_codex_checkpoint_exported(root: &Path) -> anyhow::Result<()> {
+    pub(crate) fn mark_shell_checkpoint_exported(
+        root: &Path,
+        handoff: LegacyCheckpointHandoff,
+    ) -> anyhow::Result<()> {
         let mut db = Connection::open_with_flags(
             Self::database_path(root)?,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -526,8 +569,8 @@ impl Outbox {
         db.busy_timeout(Duration::from_secs(1))?;
         let tx = db.transaction()?;
         let pending: i64 = tx.query_row("SELECT events FROM queue_size", [], |row| row.get(0))?;
-        anyhow::ensure!(pending == 0, "Codex activity remains queued");
-        tx.execute(SAVE_CHECKPOINT, params![CODEX_LEGACY_EXPORTED, "{}"])?;
+        anyhow::ensure!(pending == 0, "SDK activity remains queued");
+        tx.execute(SAVE_CHECKPOINT, params![handoff.marker(), "{}"])?;
         tx.commit()?;
         Ok(())
     }

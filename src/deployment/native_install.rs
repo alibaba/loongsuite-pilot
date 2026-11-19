@@ -181,6 +181,11 @@ pub(super) async fn run_with_retirement(
                                         &paths.source_dir, manifest, &paths.cache_dir, &paths.data_dir,
                                     ).await.map_err(|error| anyhow::anyhow!("恢复旧版本 Qoder Hook 失败；保留当前版本：{error:#}"))?;
                                 }
+                                if operation == "rollback-package" && manifest.runtime == "node" {
+                                    super::native_codex_rollback::restore_legacy_hooks(
+                                        &paths.source_dir, &paths.cache_dir, &paths.data_dir,
+                                    ).await.context("恢复旧版本 Codex Hook 失败；保留当前版本")?;
+                                }
                                 if let Some(prepared) = &prepared {
                                     ensure!(
                                         super::installer_helper::read_config(&paths.config_path)?.0
