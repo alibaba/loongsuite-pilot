@@ -27,6 +27,7 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（图像的内�
 | Qoder IDE | SQLite 附件；transcript | 本地路径 |
 | Qoder CLI | transcript | 本地路径（粘贴 / `@` / Read / ImageGen），读盘后转 `uri` |
 | 千问办公 | transcript | 本地路径（粘贴标签、`Read`、`qwenwork_media_read`、生成与展示工具） |
+| Antigravity / Antigravity IDE / Antigravity CLI | transcript（`transcript.jsonl`） | 本地路径（`USER_INPUT`、`PLANNER_RESPONSE` 与工具结果 step 上的 `media[].uri`） |
 
 ## 如何开启
 
