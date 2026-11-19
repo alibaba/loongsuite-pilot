@@ -20,13 +20,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectResourceAttributesFromEnv } from '../shared/resource-context.mjs';
 import { createRequire } from 'node:module';
+const requireFromPlugin = createRequire(import.meta.url);
 let privateLog;
-try { privateLog = createRequire(import.meta.url)('../shared/private-log-dir.cjs'); }
+try { privateLog = requireFromPlugin('../shared/private-log-dir.cjs'); }
 catch { privateLog = { ensurePrivateLogDir() {}, writerSuffix: () => '' }; }
 const { ensurePrivateLogDir, writerSuffix } = privateLog;
 const sharedRootLogs = /^(1|true|yes|on)$/i.test(String(process.env.LOONGSUITE_PILOT_ROOT_TRIGGER || '').trim());
 import { appendRawJsonl, RAW_SEGMENT_BYTES } from '../shared/raw-jsonl-writer.mjs';
-import { bindProcessUpstreamTurn } from '../../hooks/shared/upstream-ingress.mjs';
+let upstreamIngress;
+try { upstreamIngress = requireFromPlugin('../../hooks/shared/upstream-ingress.mjs'); }
+catch {}
 
 const AGENT = 'loongsuite-pilot-observability';
 const SENSITIVE_KEY_RE = /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE|API_KEY)([_.-]|$)/i;
@@ -112,7 +115,7 @@ export default function apply(ctx) {
   }));
   ctx.on('session/event', observe((s, e) => {
     if (e.type === 'turn/start' && Number.isSafeInteger(e.data?.turn)) {
-      bindProcessUpstreamTurn({
+      upstreamIngress?.bindProcessUpstreamTurn({
         agentId: 'dsh',
         sessionId: String(s.id),
         nativeTurnId: String(e.data.turn),
