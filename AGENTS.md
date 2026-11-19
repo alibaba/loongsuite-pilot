@@ -72,6 +72,9 @@
 | 千问办公 | `qwen-work-cn` | Hook + Interceptor | `BaseHookInput` / `BaseSqliteInput` / `BaseInput` | `inputs/qwen-work-cn/` | `agents.d/qwen-work-cn.json` |
 | WorkBuddy | `workbuddy` | Hook | `BaseInput`（Hook/文件唤醒 + 本地 transcript 30 秒轮询兜底） | `inputs/workbuddy/` | `agents.d/workbuddy.json` |
 | Wukong | `wukong` | CLI API Polling | `BaseInput` | `inputs/wukong/` | N/A |
+| Antigravity | `antigravity` | Detection-only（本地只读 SQLite + transcript） | `BaseInput` | `inputs/antigravity/` | `agents.d/antigravity.json` |
+| Antigravity IDE | `antigravity-ide` | Detection-only（本地只读 SQLite + transcript） | `BaseInput` | `inputs/antigravity/` | `agents.d/antigravity-ide.json` |
+| Antigravity CLI (`agy`) | `antigravity-cli` | Detection-only（本地只读 SQLite + transcript） | `BaseInput` | `inputs/antigravity/` | `agents.d/antigravity-cli.json` |
 
 ## 依赖关系
 

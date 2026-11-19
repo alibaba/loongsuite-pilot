@@ -250,7 +250,14 @@ export interface MultimodalRuntimeConfig {
 }
 
 /** Agent ids with multimodal extraction implemented. */
-export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder', 'qwen-work-cn'] as const;
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = [
+  'codex',
+  'qoder',
+  'qwen-work-cn',
+  'antigravity',
+  'antigravity-ide',
+  'antigravity-cli',
+] as const;
 
 /** Experimental per-agent multimodal policy (`uploadMode: none` disables). */
 export interface AgentMultimodalConfig {

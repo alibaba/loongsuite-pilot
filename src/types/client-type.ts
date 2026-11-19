@@ -15,6 +15,7 @@ export enum ClientType {
   Kiro = 'kiro',
   KiroCli = 'kiro-cli',
   Antigravity = 'antigravity',
+  AntigravityIde = 'antigravity-ide',
   Lingma = 'lingma',
   LingmaVscode = 'lingma-vscode',
   Wukong = 'wukong',
@@ -29,6 +30,7 @@ export enum ClientType {
   CodexSession = 'codex-session',
   QoderCli = 'qoder-cli',
   CursorCli = 'cursor-cli',
+  AntigravityCli = 'antigravity-cli',
   PiCodingAgent = 'pi-coding-agent',
 
   // Hook-based tools

@@ -1,0 +1,715 @@
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { loadDatabaseSync, type DatabaseSyncInstance } from '../../utils/node-sqlite.js';
+import {
+  decodePackedVarints,
+  decodeProtoFields,
+  fieldBytes,
+  fieldBytesAll,
+  fieldText,
+  fieldVarint,
+  parseDurationNs,
+  parseTimestampMs,
+  type ProtoField,
+} from './protobuf.js';
+import {
+  DEFAULT_ANTIGRAVITY_MODEL,
+  isResolvedModel,
+  modelNameFromId,
+  modelResolutionRank,
+  normalizeAntigravityModel,
+  resolveAntigravityProvider,
+} from './model-normalizer.js';
+
+const MAX_REASONABLE_TOKENS = 100_000_000;
+
+export interface AntigravityModelUsage {
+  modelId?: number;
+  inputTokens: number;
+  totalOutputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  reasoningTokens: number;
+  visibleOutputTokens: number;
+  provider?: number;
+  messageId?: string;
+  responseId?: string;
+  providerAssignedMessageId?: string;
+}
+
+export interface AntigravityUsageEvent {
+  /** Stable dedup identity for this generation/step usage record. */
+  key: string;
+  sessionId: string;
+  /** Source gen_metadata.idx when originated/merged from gen_metadata. */
+  genIdx?: number;
+  /** Linked steps.idx values (from gen_metadata.step_indices or steps.idx). */
+  stepIndices: number[];
+  /** Event timestamp in Unix milliseconds. */
+  timestampMs: number;
+  timestampRank: number;
+  /** Time to first token in nanoseconds, if recorded in gen_metadata. */
+  ttftNs?: number;
+  /** Streaming duration from first token to completion in nanoseconds. */
+  streamDurationNs?: number;
+  model: string;
+  provider: string;
+  /** Fresh (non-cached) input tokens. */
+  freshInputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  /** Visible (non-reasoning) output tokens. */
+  visibleOutputTokens: number;
+  reasoningTokens: number;
+  /** Total output tokens (visible + reasoning). */
+  totalOutputTokens: number;
+  messageId?: string;
+  messageIdRank: number;
+  identities: string[];
+}
+
+export interface AntigravityConversationSnapshot {
+  sessionId: string;
+  dbPath: string;
+  workspacePath?: string;
+  trajectoryTimestampMs?: number;
+  events: AntigravityUsageEvent[];
+}
+
+interface GeneratorMetadata {
+  model?: string;
+  modelId?: number;
+  usage?: AntigravityModelUsage;
+  retryUsages: AntigravityModelUsage[];
+  timestampMs?: number;
+  ttftNs?: number;
+  streamDurationNs?: number;
+  stepIndices: number[];
+}
+
+interface StepMetadata {
+  model?: string;
+  modelId?: number;
+  provider?: number;
+  usage?: AntigravityModelUsage;
+  retryUsages: AntigravityModelUsage[];
+  timestampMs?: number;
+}
+
+function isTokenBearing(u: AntigravityModelUsage): boolean {
+  return (
+    u.inputTokens > 0 ||
+    u.totalOutputTokens > 0 ||
+    u.cacheCreationTokens > 0 ||
+    u.cacheReadTokens > 0 ||
+    u.reasoningTokens > 0 ||
+    u.visibleOutputTokens > 0
+  );
+}
+
+function hasReasonableTokens(u: AntigravityModelUsage): boolean {
+  return (
+    u.inputTokens <= MAX_REASONABLE_TOKENS &&
+    u.totalOutputTokens <= MAX_REASONABLE_TOKENS &&
+    u.cacheCreationTokens <= MAX_REASONABLE_TOKENS &&
+    u.cacheReadTokens <= MAX_REASONABLE_TOKENS &&
+    u.reasoningTokens <= MAX_REASONABLE_TOKENS &&
+    u.visibleOutputTokens <= MAX_REASONABLE_TOKENS
+  );
+}
+
+function usageIdentityKeys(u: AntigravityModelUsage): string[] {
+  const keys: string[] = [];
+  if (u.responseId) keys.push(`response:${u.responseId}`);
+  if (u.providerAssignedMessageId) keys.push(`provider:${u.providerAssignedMessageId}`);
+  if (u.messageId) keys.push(`message:${u.messageId}`);
+  return keys;
+}
+
+function preferredMessageId(u: AntigravityModelUsage): [string | undefined, number] {
+  if (u.responseId) return [u.responseId, 3];
+  if (u.providerAssignedMessageId) return [u.providerAssignedMessageId, 2];
+  if (u.messageId) return [u.messageId, 1];
+  return [undefined, 0];
+}
+
+function sameTokenCounts(a: AntigravityModelUsage, b: AntigravityModelUsage): boolean {
+  return (
+    a.modelId === b.modelId &&
+    a.inputTokens === b.inputTokens &&
+    a.totalOutputTokens === b.totalOutputTokens &&
+    a.cacheCreationTokens === b.cacheCreationTokens &&
+    a.cacheReadTokens === b.cacheReadTokens &&
+    a.reasoningTokens === b.reasoningTokens &&
+    a.visibleOutputTokens === b.visibleOutputTokens
+  );
+}
+
+function isMirrorOf(retry: AntigravityModelUsage, primary: AntigravityModelUsage): boolean {
+  if (!sameTokenCounts(retry, primary)) return false;
+  const primaryIds = new Set(usageIdentityKeys(primary));
+  return usageIdentityKeys(retry).every((id) => primaryIds.has(id));
+}
+
+function dropPrimaryMirror(
+  primary: AntigravityModelUsage | undefined,
+  retries: AntigravityModelUsage[],
+): void {
+  if (!primary) return;
+  const idx = retries.findIndex((r) => isMirrorOf(r, primary));
+  if (idx >= 0) retries.splice(idx, 1);
+}
+
+function toUint8Array(value: unknown): Uint8Array | undefined {
+  if (value instanceof Uint8Array) return value;
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  return undefined;
+}
+
+function parseModelUsage(blob: Uint8Array): AntigravityModelUsage {
+  const fields = decodeProtoFields(blob);
+  const rawModelId = fieldVarint(fields, 1);
+  const rawProvider = fieldVarint(fields, 6);
+  return {
+    modelId: rawModelId && rawModelId > 0 ? rawModelId : undefined,
+    inputTokens: fieldVarint(fields, 2) ?? 0,
+    totalOutputTokens: fieldVarint(fields, 3) ?? 0,
+    cacheCreationTokens: fieldVarint(fields, 4) ?? 0,
+    cacheReadTokens: fieldVarint(fields, 5) ?? 0,
+    reasoningTokens: fieldVarint(fields, 9) ?? 0,
+    visibleOutputTokens: fieldVarint(fields, 10) ?? 0,
+    provider: rawProvider && rawProvider > 0 ? rawProvider : undefined,
+    messageId: fieldText(fields, 7),
+    responseId: fieldText(fields, 11),
+    providerAssignedMessageId: fieldText(fields, 12),
+  };
+}
+
+function parseRetryInfo(blob: Uint8Array): AntigravityModelUsage | undefined {
+  const fields = decodeProtoFields(blob);
+  const usageBlob = fieldBytes(fields, 2);
+  return usageBlob ? parseModelUsage(usageBlob) : undefined;
+}
+
+function parseGenerationInfoTimestamp(blob: Uint8Array): number | undefined {
+  const fields = decodeProtoFields(blob);
+  const tsBlob = fieldBytes(fields, 4);
+  return tsBlob ? parseTimestampMs(tsBlob) : undefined;
+}
+
+function parseStepIndices(root: readonly ProtoField[]): number[] {
+  const indices: number[] = [];
+  for (const f of root) {
+    if (f.number !== 2) continue;
+    if (f.wire === 0) {
+      const big = f.value as bigint;
+      if (big <= BigInt(Number.MAX_SAFE_INTEGER)) indices.push(Number(big));
+    } else if (f.wire === 2) {
+      try {
+        indices.push(...decodePackedVarints(f.value as Uint8Array));
+      } catch {
+        // Ignore malformed packed varint tail
+      }
+    }
+  }
+  return indices;
+}
+
+export function parseGeneratorMetadata(blob: Uint8Array): GeneratorMetadata | undefined {
+  const root = decodeProtoFields(blob);
+  const chatModelBlob = fieldBytes(root, 1);
+  if (!chatModelBlob) return undefined;
+  const chatFields = decodeProtoFields(chatModelBlob);
+
+  const usageBlob = fieldBytes(chatFields, 4);
+  const usage = usageBlob ? parseModelUsage(usageBlob) : undefined;
+
+  const retryUsages: AntigravityModelUsage[] = [];
+  for (const retryBlob of fieldBytesAll(chatFields, 17)) {
+    const parsed = parseRetryInfo(retryBlob);
+    if (parsed) retryUsages.push(parsed);
+  }
+  dropPrimaryMirror(usage, retryUsages);
+
+  const genInfoBlob = fieldBytes(chatFields, 9);
+  const timestampMs = genInfoBlob ? parseGenerationInfoTimestamp(genInfoBlob) : undefined;
+
+  const ttftBlob = fieldBytes(chatFields, 11);
+  const ttftNs = ttftBlob ? parseDurationNs(ttftBlob) : undefined;
+  const streamBlob = fieldBytes(chatFields, 12);
+  const streamDurationNs = streamBlob ? parseDurationNs(streamBlob) : undefined;
+
+  const model = fieldText(chatFields, 19) ?? fieldText(chatFields, 21);
+  const rawModelId = fieldVarint(chatFields, 3);
+  const modelId = rawModelId && rawModelId > 0 ? rawModelId : undefined;
+  const stepIndices = parseStepIndices(root);
+
+  return {
+    model,
+    modelId,
+    usage,
+    retryUsages,
+    timestampMs,
+    ttftNs,
+    streamDurationNs,
+    stepIndices,
+  };
+}
+
+export function parseStepMetadata(blob: Uint8Array): StepMetadata {
+  const fields = decodeProtoFields(blob);
+  const usageBlob = fieldBytes(fields, 9);
+  const usage = usageBlob ? parseModelUsage(usageBlob) : undefined;
+
+  const retryUsages: AntigravityModelUsage[] = [];
+  for (const retryBlob of fieldBytesAll(fields, 28)) {
+    const parsed = parseRetryInfo(retryBlob);
+    if (parsed) retryUsages.push(parsed);
+  }
+  dropPrimaryMirror(usage, retryUsages);
+
+  let model: string | undefined;
+  let modelId: number | undefined;
+  let provider: number | undefined;
+  const modelInfoBlob = fieldBytes(fields, 24);
+  if (modelInfoBlob) {
+    const infoFields = decodeProtoFields(modelInfoBlob);
+    model = fieldText(infoFields, 12) ?? fieldText(infoFields, 8);
+    const rawId = fieldVarint(infoFields, 1);
+    modelId = rawId && rawId > 0 ? rawId : undefined;
+    const rawProv = fieldVarint(infoFields, 7);
+    provider = rawProv && rawProv > 0 ? rawProv : undefined;
+  }
+
+  const tsBlob = fieldBytes(fields, 8) ?? fieldBytes(fields, 1);
+  const timestampMs = tsBlob ? parseTimestampMs(tsBlob) : undefined;
+
+  return { model, modelId, provider, usage, retryUsages, timestampMs };
+}
+
+function extractWorkspacePath(blob: Uint8Array): string | undefined {
+  const text = Buffer.from(blob).toString('latin1');
+  const match = text.match(/file:\/\/(\/[A-Za-z0-9._\-\/ @+~]+)/);
+  if (!match?.[1]) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
+function tableExists(db: DatabaseSyncInstance, tableName: string): boolean {
+  const rows = db
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1")
+    .all(tableName);
+  return rows.length > 0;
+}
+
+function isDatabaseEmpty(db: DatabaseSyncInstance): boolean {
+  const rows = db.prepare('PRAGMA page_count').all() as Array<Record<string, unknown>>;
+  if (rows.length === 0) return true;
+  const count = Number(Object.values(rows[0]!)[0] ?? 0);
+  return !Number.isFinite(count) || count === 0;
+}
+
+function resolveModel(
+  usageModelId: number | undefined,
+  contextModel: string | undefined,
+  contextModelId: number | undefined,
+): string {
+  const idModel =
+    usageModelId !== undefined
+      ? normalizeAntigravityModel(modelNameFromId(usageModelId))
+      : undefined;
+  const sameModelRow =
+    contextModel && contextModelId === usageModelId
+      ? normalizeAntigravityModel(contextModel)
+      : undefined;
+  if (idModel && isResolvedModel(idModel)) return idModel;
+  if (sameModelRow && isResolvedModel(sameModelRow)) return sameModelRow;
+  if (idModel) return idModel;
+  const normalizedContext = normalizeAntigravityModel(contextModel);
+  if (normalizedContext) return normalizedContext;
+  return DEFAULT_ANTIGRAVITY_MODEL;
+}
+
+function mergeUsageEvent(target: AntigravityUsageEvent, dup: AntigravityUsageEvent): void {
+  target.freshInputTokens = Math.max(target.freshInputTokens, dup.freshInputTokens);
+  target.cacheCreationTokens = Math.max(target.cacheCreationTokens, dup.cacheCreationTokens);
+  target.cacheReadTokens = Math.max(target.cacheReadTokens, dup.cacheReadTokens);
+  target.visibleOutputTokens = Math.max(target.visibleOutputTokens, dup.visibleOutputTokens);
+  target.reasoningTokens = Math.max(target.reasoningTokens, dup.reasoningTokens);
+  target.totalOutputTokens = Math.max(
+    target.totalOutputTokens,
+    dup.totalOutputTokens,
+    target.visibleOutputTokens + target.reasoningTokens,
+  );
+  if (modelResolutionRank(dup.model) > modelResolutionRank(target.model)) {
+    target.model = dup.model;
+    target.provider = dup.provider;
+  }
+  const useDupTs =
+    dup.timestampRank > target.timestampRank ||
+    (dup.timestampRank === target.timestampRank && dup.timestampMs < target.timestampMs);
+  if (useDupTs) {
+    target.timestampMs = dup.timestampMs;
+    target.timestampRank = dup.timestampRank;
+  }
+  if (dup.messageIdRank > target.messageIdRank) {
+    target.messageId = dup.messageId;
+    target.messageIdRank = dup.messageIdRank;
+  }
+  if (target.genIdx === undefined && dup.genIdx !== undefined) {
+    target.genIdx = dup.genIdx;
+  }
+  if (target.ttftNs === undefined && dup.ttftNs !== undefined) {
+    target.ttftNs = dup.ttftNs;
+  }
+  if (target.streamDurationNs === undefined && dup.streamDurationNs !== undefined) {
+    target.streamDurationNs = dup.streamDurationNs;
+  }
+  for (const s of dup.stepIndices) {
+    if (!target.stepIndices.includes(s)) target.stepIndices.push(s);
+  }
+  for (const id of dup.identities) {
+    if (!target.identities.includes(id)) target.identities.push(id);
+  }
+}
+
+function deduplicateEvents(events: AntigravityUsageEvent[]): AntigravityUsageEvent[] {
+  const slots: Array<AntigravityUsageEvent | undefined> = [];
+  const identityIndexes = new Map<string, number>();
+
+  for (const event of events) {
+    const matching = new Set<number>();
+    for (const id of event.identities) {
+      const idx = identityIndexes.get(id);
+      if (idx !== undefined) matching.add(idx);
+    }
+    const sortedMatches = [...matching].sort((a, b) => a - b);
+    if (sortedMatches.length === 0) {
+      const targetIdx = slots.length;
+      slots.push(event);
+      for (const id of event.identities) identityIndexes.set(id, targetIdx);
+      continue;
+    }
+
+    const targetIdx = sortedMatches[0]!;
+    const target = slots[targetIdx]!;
+    for (let i = 1; i < sortedMatches.length; i++) {
+      const dupIdx = sortedMatches[i]!;
+      const dup = slots[dupIdx];
+      if (dup) {
+        slots[dupIdx] = undefined;
+        mergeUsageEvent(target, dup);
+      }
+    }
+    mergeUsageEvent(target, event);
+    for (const id of target.identities) identityIndexes.set(id, targetIdx);
+  }
+
+  return slots.filter((e): e is AntigravityUsageEvent => e !== undefined);
+}
+
+/**
+ * Read one Antigravity conversation SQLite database read-only.
+ * Returns null if the DB is empty/uninitialized or missing gen_metadata.
+ */
+export async function readAntigravityConversationDb(
+  dbPath: string,
+): Promise<AntigravityConversationSnapshot | null> {
+  const DatabaseSync = loadDatabaseSync();
+  if (!DatabaseSync) {
+    throw new Error(
+      'node:sqlite is unavailable; Antigravity collection requires Node.js >= 22.13 or >= 23.4',
+    );
+  }
+
+  const stat = await fs.stat(dbPath);
+  const fallbackTimestampMs = Math.floor(stat.mtimeMs);
+  const sessionId = path.basename(dbPath, '.db');
+
+  let db: DatabaseSyncInstance | undefined;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    if (isDatabaseEmpty(db) || !tableExists(db, 'gen_metadata')) {
+      return null;
+    }
+
+    let trajectoryTimestampMs: number | undefined;
+    let workspacePath: string | undefined;
+    if (tableExists(db, 'trajectory_metadata_blob')) {
+      const rows = db
+        .prepare('SELECT data FROM trajectory_metadata_blob ORDER BY rowid ASC')
+        .all() as Array<{ data?: unknown }>;
+      for (const row of rows) {
+        const blob = toUint8Array(row.data);
+        if (!blob) continue;
+        try {
+          if (trajectoryTimestampMs === undefined) {
+            const fields = decodeProtoFields(blob);
+            const tsBlob = fieldBytes(fields, 2);
+            if (tsBlob) trajectoryTimestampMs = parseTimestampMs(tsBlob);
+          }
+        } catch {
+          // Best-effort metadata parse
+        }
+        if (workspacePath === undefined) {
+          workspacePath = extractWorkspacePath(blob);
+        }
+      }
+    }
+
+    const stepRows: Array<{ idx: number; metadata: StepMetadata }> = [];
+    if (tableExists(db, 'steps')) {
+      const rawSteps = db
+        .prepare('SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx ASC')
+        .all() as Array<{ idx: number; metadata: unknown }>;
+      for (const row of rawSteps) {
+        const blob = toUint8Array(row.metadata);
+        if (!blob || blob.length === 0) continue;
+        try {
+          stepRows.push({ idx: Number(row.idx), metadata: parseStepMetadata(blob) });
+        } catch {
+          // Skip malformed step blob without losing the rest of the conversation
+        }
+      }
+    }
+
+    const genRows: Array<{ idx: number; metadata: GeneratorMetadata }> = [];
+    const rawGens = db
+      .prepare('SELECT idx, data FROM gen_metadata ORDER BY idx ASC')
+      .all() as Array<{ idx: number; data: unknown }>;
+    for (const row of rawGens) {
+      const blob = toUint8Array(row.data);
+      if (!blob || blob.length === 0) continue;
+      try {
+        const parsed = parseGeneratorMetadata(blob);
+        if (parsed) genRows.push({ idx: Number(row.idx), metadata: parsed });
+      } catch {
+        // Skip malformed gen_metadata row
+      }
+    }
+
+    // Build fallback model from last generation row that carries a model
+    let generationModel: string | undefined;
+    for (let i = genRows.length - 1; i >= 0; i--) {
+      const m = genRows[i]!.metadata;
+      const candidate =
+        normalizeAntigravityModel(m.model) ??
+        (m.modelId !== undefined ? normalizeAntigravityModel(modelNameFromId(m.modelId)) : undefined);
+      if (candidate) {
+        generationModel = candidate;
+        break;
+      }
+    }
+
+    const stepTimestamps = new Map<number, number>();
+    for (const { idx, metadata } of stepRows) {
+      if (metadata.timestampMs !== undefined) {
+        stepTimestamps.set(idx, metadata.timestampMs);
+      }
+    }
+
+    const rawEvents: AntigravityUsageEvent[] = [];
+    const identityTimestamps = new Map<string, [number, number]>();
+
+    const appendUsage = (
+      usage: AntigravityModelUsage,
+      opts: {
+        model?: string;
+        modelId?: number;
+        provider?: number;
+        timestampMs?: number;
+        timestampRank?: number;
+        fallbackIdentities: string[];
+        genIdx?: number;
+        stepIndices: number[];
+        ttftNs?: number;
+        streamDurationNs?: number;
+      },
+    ): void => {
+      if (!isTokenBearing(usage) || !hasReasonableTokens(usage)) return;
+
+      const identities = usageIdentityKeys(usage);
+      if (identities.length === 0) {
+        identities.push(...opts.fallbackIdentities);
+      }
+
+      let timestampMs: number;
+      let timestampRank: number;
+      if (opts.timestampMs !== undefined) {
+        timestampMs = opts.timestampMs;
+        timestampRank = opts.timestampRank ?? 3;
+      } else {
+        const matched = identities
+          .map((id) => identityTimestamps.get(id))
+          .find((v): v is [number, number] => v !== undefined);
+        if (matched) {
+          [timestampMs, timestampRank] = matched;
+        } else if (trajectoryTimestampMs !== undefined) {
+          timestampMs = trajectoryTimestampMs;
+          timestampRank = 1;
+        } else {
+          timestampMs = fallbackTimestampMs;
+          timestampRank = 0;
+        }
+      }
+
+      for (const id of identities) {
+        const prev = identityTimestamps.get(id);
+        if (
+          !prev ||
+          timestampRank > prev[1] ||
+          (timestampRank === prev[1] && timestampMs < prev[0])
+        ) {
+          identityTimestamps.set(id, [timestampMs, timestampRank]);
+        }
+      }
+
+      const totalOutputTokens = Math.max(
+        usage.totalOutputTokens,
+        usage.visibleOutputTokens + usage.reasoningTokens,
+      );
+      const visibleOutputTokens = Math.max(
+        usage.visibleOutputTokens,
+        Math.max(0, totalOutputTokens - usage.reasoningTokens),
+      );
+      const reasoningTokens = Math.max(
+        usage.reasoningTokens,
+        Math.max(0, totalOutputTokens - visibleOutputTokens),
+      );
+
+      const model = resolveModel(usage.modelId, opts.model, opts.modelId);
+      const provider = resolveAntigravityProvider(model, usage.provider ?? opts.provider);
+      const [messageId, messageIdRank] = preferredMessageId(usage);
+      const key = identities[0] ?? `anon:${sessionId}:${rawEvents.length}`;
+
+      rawEvents.push({
+        key,
+        sessionId,
+        genIdx: opts.genIdx,
+        stepIndices: [...opts.stepIndices],
+        timestampMs,
+        timestampRank,
+        ttftNs: opts.ttftNs,
+        streamDurationNs: opts.streamDurationNs,
+        model,
+        provider,
+        freshInputTokens: usage.inputTokens,
+        cacheCreationTokens: usage.cacheCreationTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        visibleOutputTokens,
+        reasoningTokens,
+        totalOutputTokens,
+        messageId,
+        messageIdRank,
+        identities,
+      });
+    };
+
+    // 1) Process steps first so identityTimestamps are populated
+    for (const { idx, metadata } of stepRows) {
+      const model =
+        normalizeAntigravityModel(metadata.model) ??
+        (metadata.modelId !== undefined
+          ? normalizeAntigravityModel(modelNameFromId(metadata.modelId))
+          : undefined) ??
+        generationModel;
+      if (metadata.usage) {
+        appendUsage(metadata.usage, {
+          model,
+          modelId: metadata.modelId,
+          provider: metadata.provider,
+          timestampMs: metadata.timestampMs,
+          timestampRank: 3,
+          fallbackIdentities: [`step:${sessionId}:${idx}`],
+          stepIndices: [idx],
+        });
+      }
+      for (let r = 0; r < metadata.retryUsages.length; r++) {
+        appendUsage(metadata.retryUsages[r]!, {
+          model,
+          modelId: metadata.modelId,
+          provider: metadata.provider,
+          timestampMs: metadata.timestampMs,
+          timestampRank: 3,
+          fallbackIdentities: [`step-retry:${sessionId}:${idx}:${r}`],
+          stepIndices: [idx],
+        });
+      }
+    }
+
+    // 2) Process gen_metadata in ascending idx order (continuations inherit currentModel)
+    let currentModel: string | undefined;
+    for (const { idx, metadata } of genRows) {
+      const rowModel =
+        normalizeAntigravityModel(metadata.model) ??
+        (metadata.modelId !== undefined
+          ? normalizeAntigravityModel(modelNameFromId(metadata.modelId))
+          : undefined) ??
+        (metadata.usage?.modelId !== undefined
+          ? normalizeAntigravityModel(modelNameFromId(metadata.usage.modelId))
+          : undefined);
+      if (rowModel) currentModel = rowModel;
+
+      const linkedStepTs = metadata.stepIndices
+        .map((s) => stepTimestamps.get(s))
+        .find((ts): ts is number => ts !== undefined);
+      const ts = metadata.timestampMs ?? linkedStepTs;
+      const tsRank = metadata.timestampMs !== undefined ? 3 : linkedStepTs !== undefined ? 2 : undefined;
+
+      const fallbackIdentities =
+        metadata.stepIndices.length > 0
+          ? metadata.stepIndices.map((s) => `step:${sessionId}:${s}`)
+          : [`gen:${sessionId}:${idx}`];
+
+      if (metadata.usage) {
+        appendUsage(metadata.usage, {
+          model: currentModel,
+          modelId: metadata.modelId,
+          timestampMs: ts,
+          timestampRank: tsRank,
+          fallbackIdentities,
+          genIdx: idx,
+          stepIndices: metadata.stepIndices,
+          ttftNs: metadata.ttftNs,
+          streamDurationNs: metadata.streamDurationNs,
+        });
+      }
+      for (let r = 0; r < metadata.retryUsages.length; r++) {
+        appendUsage(metadata.retryUsages[r]!, {
+          model: currentModel,
+          modelId: metadata.modelId,
+          timestampMs: ts,
+          timestampRank: tsRank,
+          fallbackIdentities: [`gen-retry:${sessionId}:${idx}:${r}`],
+          genIdx: idx,
+          stepIndices: metadata.stepIndices,
+        });
+      }
+    }
+
+    const deduped = deduplicateEvents(rawEvents);
+    deduped.sort((a, b) => {
+      if (a.timestampMs !== b.timestampMs) return a.timestampMs - b.timestampMs;
+      return (a.genIdx ?? Number.MAX_SAFE_INTEGER) - (b.genIdx ?? Number.MAX_SAFE_INTEGER);
+    });
+
+    return {
+      sessionId,
+      dbPath,
+      workspacePath,
+      trajectoryTimestampMs,
+      events: deduped,
+    };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // Ignore close errors
+    }
+  }
+}

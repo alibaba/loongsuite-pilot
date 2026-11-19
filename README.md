@@ -78,6 +78,7 @@ Pilot is designed to answer practical questions:
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
 | [Doubao Work (macOS/Windows, experimental)](docs/doubao-work.md) | Read-only logs + execution metadata | Client turns, local tools + native sandbox executions | Metadata only | No | No |
+| Antigravity / Antigravity IDE / Antigravity CLI (`agy`) | Read-only SQLite (`conversations/*.db`) + `transcript.jsonl` | Yes | Yes | Yes | Yes |
 
 GitHub Copilot CLI automatic deployment supports Unix shells. Exact per-call token usage requires native OTel; transcript-only collection omits unavailable usage. Windows and subagents are not supported. See [telemetry details](docs/zh-CN/copilot-native-telemetry.md).
 

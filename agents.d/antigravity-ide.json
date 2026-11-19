@@ -1,0 +1,16 @@
+{
+  "id": "antigravity-ide",
+  "displayName": "Antigravity IDE",
+  "deployMode": "detection-only",
+  "detection": {
+    "paths": ["~/.gemini/antigravity-ide"],
+    "commands": []
+  },
+  "runtime": {
+    "nodeSqlite": "required-for-conversations",
+    "nodeSqliteSince": "22.13"
+  },
+  "input": {
+    "type": "antigravity-sqlite"
+  }
+}

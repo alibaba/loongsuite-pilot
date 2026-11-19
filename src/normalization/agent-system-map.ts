@@ -27,6 +27,9 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'workbuddy': 'workbuddy',
   'doubao-work': 'doubao',
   'dsh': 'dsh',
+  'antigravity': 'antigravity',
+  'antigravity-ide': 'antigravity',
+  'antigravity-cli': 'antigravity',
 };
 
 export function resolveAgentSystem(agentType: string): string {

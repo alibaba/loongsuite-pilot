@@ -828,6 +828,9 @@ function buildListenersConfig(
     workbuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'doubao-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    antigravity: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'antigravity-ide': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'antigravity-cli': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
   };
 
   const result = { ...defaults };
