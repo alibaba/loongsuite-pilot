@@ -1545,13 +1545,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
   ): Promise<boolean> {
     if (agentType === 'trae-cn' && records.every(r => ['native_metadata', 'renderer_metadata'].includes(String(r['agent.trae-cn.source'])))) {
       const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes, resourceIdentity);
+      const observedCounts = new Set(['agent.trae-cn.model_responses_observed', 'agent.trae-cn.usage_reports_observed',
+        'agent.trae-cn.input_tokens_observed', 'agent.trae-cn.output_tokens_observed']);
       const spans = records.map(r => {
         const start = BigInt(String(r.startTimeUnixNano));
         const end = BigInt(String(r.endTimeUnixNano));
         const hr = (ns: bigint): [number, number] => [Number(ns / 1000000000n), Number(ns % 1000000000n)];
         const tool = r['gen_ai.span.kind'] === 'TOOL';
         const attributes = Object.fromEntries(Object.entries(r).filter(([key, value]) =>
-          (typeof value === 'string' || typeof value === 'number') && (key.startsWith('gen_ai.') || key === 'agent.trae-cn.source' || key === 'agent.trae-cn.observed_until' || key === 'user.id'))) as Record<string, string | number>;
+          (typeof value === 'string' || typeof value === 'number') && ((observedCounts.has(key) && Number.isSafeInteger(value)) || key.startsWith('gen_ai.') || key === 'agent.trae-cn.source' || key === 'agent.trae-cn.observed_until' || key === 'user.id'))) as Record<string, string | number>;
         return {
           name: tool ? 'execute_tool ' + r['gen_ai.tool.name']
             : r['gen_ai.span.kind'] === 'LLM' ? 'chat ' + r['gen_ai.response.model']
