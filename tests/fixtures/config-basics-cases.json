@@ -646,7 +646,7 @@
       "mask": {
         "mode": "none",
         "types": [],
-        "replacementMode": "placeholder"
+        "replacementMode": "preview"
       }
     }
   },
@@ -665,7 +665,7 @@
       "mask": {
         "mode": "none",
         "types": [],
-        "replacementMode": "placeholder"
+        "replacementMode": "preview"
       }
     }
   },
@@ -685,7 +685,7 @@
       "mask": {
         "mode": "all",
         "types": [],
-        "replacementMode": "placeholder"
+        "replacementMode": "preview"
       }
     }
   },
@@ -722,7 +722,7 @@
           "ipAddress",
           "bankCard"
         ],
-        "replacementMode": "placeholder"
+        "replacementMode": "preview"
       }
     }
   },
@@ -742,7 +742,7 @@
       "mask": {
         "mode": "none",
         "types": [],
-        "replacementMode": "placeholder"
+        "replacementMode": "preview"
       }
     }
   },
@@ -759,7 +759,7 @@
       "mask": {
         "mode": "custom",
         "types": [],
-        "replacementMode": "placeholder"
+        "replacementMode": "preview"
       }
     }
   },
@@ -777,7 +777,7 @@
       "mask": {
         "mode": "custom",
         "types": [],
-        "replacementMode": "placeholder"
+        "replacementMode": "preview"
       }
     }
   },
@@ -799,7 +799,7 @@
       "mask": {
         "mode": "all",
         "types": [],
-        "replacementMode": "placeholder"
+        "replacementMode": "preview"
       }
     }
   },
@@ -829,7 +829,7 @@
           "ipAddress",
           "bankCard"
         ],
-        "replacementMode": "placeholder"
+        "replacementMode": "preview"
       }
     }
   },
@@ -899,7 +899,7 @@
     "env": {},
     "expected": {
       "mask": {
-        "replacementMode": "placeholder"
+        "replacementMode": "preview"
       }
     }
   },

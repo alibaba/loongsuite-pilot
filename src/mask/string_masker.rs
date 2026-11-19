@@ -132,31 +132,57 @@ fn normalize_mask_ranges(value: &str, ranges: &[MaskRange]) -> Vec<MaskRange> {
 
     let mut result: Vec<MaskRange> = Vec::new();
     for candidate in sorted {
-        let Some((prev_start, prev_end, prev_priority)) = result.last().map(|previous| {
-            (
-                previous.start,
-                previous.end,
-                mask_range_priority(previous.mask_type),
-            )
-        }) else {
+        let Some(previous) = result.last_mut() else {
             result.push(candidate);
             continue;
         };
-        if candidate.start >= prev_end {
+        if candidate.start >= previous.end {
             result.push(candidate);
             continue;
         }
-        let merged_end = prev_end.max(candidate.end);
-        if mask_range_priority(candidate.mask_type) > prev_priority {
-            let mut replacement = candidate;
-            replacement.start = prev_start;
-            replacement.end = merged_end;
-            *result.last_mut().expect("range") = replacement;
-        } else if merged_end != prev_end {
-            result.last_mut().expect("range").end = merged_end;
+        let merged_end = previous.end.max(candidate.end);
+        if mask_range_priority(candidate.mask_type) > mask_range_priority(previous.mask_type) {
+            let mut selected = candidate;
+            selected.start = previous.start;
+            selected.end = merged_end;
+            strip_masked_preview(&mut selected.replacement);
+            *previous = selected;
+        } else {
+            if !is_safe_masked_ipv4_overlap(previous, &candidate, value) {
+                strip_masked_preview(&mut previous.replacement);
+            }
+            previous.end = merged_end;
         }
     }
     result
+}
+
+fn is_safe_masked_ipv4_overlap(selected: &MaskRange, candidate: &MaskRange, value: &str) -> bool {
+    if selected.mask_type != MaskType::DatabaseUrl || candidate.mask_type != MaskType::IpAddress {
+        return false;
+    }
+    candidate
+        .replacement
+        .strip_prefix("[IP_ADDRESS_MASKED]{")
+        .and_then(|value| value.strip_suffix('}'))
+        .is_some_and(|masked_ip| {
+            !masked_ip.is_empty()
+                && !masked_ip.contains(['{', '}'])
+                && selected.replacement.contains(masked_ip)
+                && !selected
+                    .replacement
+                    .contains(&value[candidate.start..candidate.end])
+        })
+}
+
+fn strip_masked_preview(replacement: &mut String) {
+    if let Some(marker) = replacement
+        .split_once('{')
+        .map(|(marker, _)| marker)
+        .filter(|marker| is_masked_token(marker))
+    {
+        replacement.truncate(marker.len());
+    }
 }
 
 fn mask_range_priority(mask_type: MaskType) -> i32 {
@@ -186,7 +212,7 @@ mod tests {
         MaskConfig {
             mode: MaskMode::All,
             types: Vec::new(),
-            replacement_mode: None,
+            replacement_mode: Some(MaskReplacementMode::Placeholder),
         }
     }
 

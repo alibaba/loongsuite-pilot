@@ -1401,16 +1401,20 @@ fn build_otlp_trace_raw(file: Option<&Value>) -> Option<OtlpTraceRawConfig> {
 fn build_mask_config(file: Option<&Value>, sources: &ConfigSources<'_>) -> MaskConfig {
     let mask = file.and_then(|value| value.get("mask"));
     let raw_replacement = non_empty(env_get(sources, "LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE"))
-        .or_else(|| json_string(mask.and_then(|value| value.get("replacementMode"))));
+        .or_else(|| {
+            non_empty(json_string(
+                mask.and_then(|value| value.get("replacementMode")),
+            ))
+        });
     let replacement_mode = raw_replacement
         .as_deref()
         .and_then(|value| value.parse::<MaskReplacementMode>().ok())
-        .unwrap_or(MaskReplacementMode::Placeholder);
+        .unwrap_or(MaskReplacementMode::Preview);
     if raw_replacement.as_ref().is_some_and(|value| {
         !value.is_empty() && value.parse::<MaskReplacementMode>().ok() != Some(replacement_mode)
     }) {
         logger("ConfigLoader").warn(
-            "invalid mask replacement mode, using placeholder",
+            "invalid mask replacement mode, using preview",
             Some(&fields(
                 serde_json::json!({ "replacementMode": raw_replacement }),
             )),

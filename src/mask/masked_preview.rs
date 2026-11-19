@@ -206,10 +206,16 @@ fn mask_private_key(value: &str) -> Option<String> {
 }
 
 fn mask_database_url(value: &str) -> Option<String> {
-    if value.len() >= 5 && value[..5].eq_ignore_ascii_case("jdbc:") {
+    if value
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:"))
+    {
         return mask_jdbc_url(value);
     }
     let parsed = parse_standard_url(value)?;
+    if parsed.username_needs_escape || parsed.pathname.contains('%') {
+        return None;
+    }
     let user_info = if !parsed.username.is_empty() || !parsed.password.is_empty() {
         format!("{}:****@", parsed.username)
     } else {
@@ -233,6 +239,13 @@ fn mask_jdbc_url(value: &str) -> Option<String> {
         Some(index) => &value[..index],
         None => value,
     };
+    if without_parameters
+        .as_bytes()
+        .windows(3)
+        .any(|part| part[0] == b'%' && part[1].is_ascii_hexdigit() && part[2].is_ascii_hexdigit())
+    {
+        return None;
+    }
     let caps = JDBC_PREVIEW.captures(without_parameters)?;
     let prefix = caps.get(1)?.as_str();
     let authority = caps.get(2)?.as_str();
@@ -312,6 +325,7 @@ fn mask_middle(value: &str, keep_start: usize, keep_end: usize) -> String {
 pub(crate) struct ParsedDatabaseUrl {
     pub protocol: String,
     pub username: String,
+    username_needs_escape: bool,
     pub password: String,
     pub hostname: String,
     pub port: String,
@@ -357,6 +371,7 @@ pub(crate) fn parse_standard_url(raw: &str) -> Option<ParsedDatabaseUrl> {
     Some(ParsedDatabaseUrl {
         protocol,
         username: percent_decode(username),
+        username_needs_escape: username.contains(['%', '@']),
         password: percent_decode(password),
         hostname,
         port,
@@ -478,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_placeholder_output_byte_compatible_by_default() {
+    fn keeps_explicit_placeholder_output_byte_compatible() {
         let plan = placeholder_plan();
         assert_eq!(
             mask_with("phone=13800138000", &plan),
@@ -537,6 +552,37 @@ mod tests {
             mask_with(&format!("{standard}|{jdbc}"), &preview_plan()),
             "[DATABASEURL_MASKED]{mysql://agent:****@192.*.*.20:3306/orders}|[DATABASEURL_MASKED]{jdbc:mysql://192.*.*.20:3306/orders}"
         );
+    }
+
+    #[test]
+    fn drops_database_previews_when_userinfo_or_path_may_expose_secrets() {
+        let plan = load_mask_plan(&MaskConfig {
+            mode: MaskMode::All,
+            types: Vec::new(),
+            replacement_mode: None,
+        });
+        let key = synthetic_api_key();
+        let mut urls = vec![
+            format!("mysql://{key}:password@db.example/orders"),
+            format!("mysql://user:password@db.example/{key}"),
+            "postgres://user:password@db.example/alice.wang%40example.com".to_string(),
+            "jdbc:postgresql://db.example/alice.wang%40example.com?user=user&password=secret"
+                .to_string(),
+        ];
+        for scheme in ["mysql", "postgres", "redis", "mongodb"] {
+            for user in [
+                "alice.wang@example.com",
+                "alice.wang%40example.com",
+                "alice.wang%2540example.com",
+            ] {
+                urls.push(format!("{scheme}://{user}:password@db.example/app"));
+            }
+        }
+        for url in urls {
+            let masked = mask_with(&url, &plan);
+            assert_eq!(masked, "[DATABASEURL_MASKED]", "{url}");
+            assert_eq!(mask_with(&masked, &plan), masked);
+        }
     }
 
     #[test]
