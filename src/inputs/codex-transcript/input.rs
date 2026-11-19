@@ -741,18 +741,25 @@ impl CodexTranscriptBody {
         {
             return Ok(false);
         }
-        if let Some(floor) = source_ownership::baseline_floor(&self.wakeup_dir, path).await? {
-            if floor.copied {
-                engine.restore_fork_baseline(rt, path, &key, floor).await?;
-            } else {
-                engine.restore_baseline_file(rt, path, &key, floor).await?;
+        use source_ownership::StartupOwnership;
+
+        let ownership = source_ownership::startup_ownership(&self.wakeup_dir, path).await?;
+        let replaced = match ownership {
+            StartupOwnership::Baseline(floor) => {
+                if floor.copied {
+                    engine.restore_fork_baseline(rt, path, &key, floor).await?;
+                } else {
+                    engine.restore_baseline_file(rt, path, &key, floor).await?;
+                }
+                return Ok(true);
             }
-            return Ok(true);
-        }
-        if source_ownership::was_live(&self.wakeup_dir, path).await? {
-            return Ok(false);
-        }
-        if let Some(since) = baseline_since {
+            StartupOwnership::Live => return Ok(false),
+            StartupOwnership::Unknown => false,
+            StartupOwnership::Replaced => true,
+        };
+        // A known path with a different identity keeps the established
+        // no-replay behavior. An unknown path may contain an offline session.
+        let initialize = if let (false, Some(since)) = (replaced, baseline_since) {
             crate::utils::source_access::check(path)?;
             let metadata = tokio::fs::metadata(path).await?;
             let first_timestamp = [metadata.created(), metadata.modified()]
@@ -763,13 +770,16 @@ impl CodexTranscriptBody {
             if first_timestamp.is_none_or(|time| time.as_millis() > since as u128) {
                 return Ok(false);
             }
-        }
+            true
+        } else {
+            replaced
+        };
         if engine::has_copied_history_prefix(meta.as_ref()) {
-            if baseline_since.is_some() || on_start {
+            if initialize || on_start {
                 engine.park_fork_baseline(rt, path, &key).await?;
                 return Ok(true);
             }
-        } else if baseline_since.is_some() {
+        } else if initialize {
             engine.baseline_file(rt, path, &key).await?;
             return Ok(true);
         }
