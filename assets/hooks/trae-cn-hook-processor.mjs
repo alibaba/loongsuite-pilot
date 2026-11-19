@@ -38,6 +38,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 
 import { readStdinJson } from './shared/stdin-reader.mjs';
+import { withSyncFileLock } from './shared/sync-file-lock.mjs';
 import {
   INITIAL_HASH,
   computeHash,
@@ -1142,10 +1143,7 @@ function emitEntryIfMissing(state, runtimeConfig, records, timestamp) {
 
 // ─── cmd handlers ───
 
-function cmdSessionStart() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'session-start');
-  if (!sessionId) return;
+function cmdSessionStart(event, sessionId) {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
   // SessionStart is a no-op marker — no turn opened (§2.9).
@@ -1160,10 +1158,7 @@ function cmdSessionStart() {
   }
 }
 
-function cmdUserPromptSubmit() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'user-prompt-submit');
-  if (!sessionId) return;
+function cmdUserPromptSubmit(event, sessionId) {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
 
@@ -1227,10 +1222,7 @@ function cmdUserPromptSubmit() {
   saveSessionState(sessionId, state);
 }
 
-function cmdPreToolUse() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'pre-tool-use');
-  if (!sessionId) return;
+function cmdPreToolUse(event, sessionId) {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   let state = loadSessionState(sessionId);
   if (!state || !state.llm_request_emitted) {
@@ -1281,10 +1273,7 @@ function cmdPreToolUse() {
   saveSessionState(sessionId, state);
 }
 
-function cmdPostToolUse() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'post-tool-use');
-  if (!sessionId) return;
+function cmdPostToolUse(event, sessionId) {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   const state = loadSessionState(sessionId);
   if (!state) {
@@ -1318,10 +1307,7 @@ function cmdPostToolUse() {
   saveSessionState(sessionId, state);
 }
 
-function cmdStop() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'stop');
-  if (!sessionId) return;
+function cmdStop(event, sessionId) {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
   let state = loadSessionState(sessionId);
@@ -1386,10 +1372,7 @@ function cmdStop() {
   saveSessionState(sessionId, state);
 }
 
-function cmdNotification() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'notification');
-  if (!sessionId) return;
+function cmdNotification(event, sessionId) {
   // Round 6 #1: forward-compat — if TRAE-CN ever starts emitting LLM streaming
   // chunks (notification_type != idle_prompt) carrying usage data, accumulate
   // it into state.usage so the next Stop extracts real token counts. tester
@@ -1625,8 +1608,24 @@ const DISPATCH = {
   'post-tool-use': cmdPostToolUse,
   'stop': cmdStop,
   'notification': cmdNotification,
-  'frida-enrich': cmdFridaEnrich,
 };
+
+async function dispatch(sub) {
+  if (sub === 'frida-enrich') return cmdFridaEnrich();
+  if (!Object.hasOwn(DISPATCH, sub)) return;
+  const event = tryReadStdin();
+  const sessionId = requireSessionId(event, sub);
+  if (!sessionId) return;
+
+  // Each hook runs in a separate process. Keep the state read, event emission
+  // and state write together for every handler that touches this session.
+  const lock = sessionStatePath(sessionId) + '.lock';
+  const result = withSyncFileLock(lock, 15_000, 300_000, () => DISPATCH[sub](event, sessionId));
+  if (!result.acquired) {
+    logHookError({ agentId: AGENT_ID, stage: sub, errorType: 'session_lock_unavailable',
+      errorMessage: 'Could not acquire session state lock; skipping event' });
+  }
+}
 
 // Dispatcher runs only when invoked as CLI (argv[1] === this file). When
 // imported by unit tests for the vscdb reader / agent_type mapper, skip so
@@ -1645,14 +1644,9 @@ function isDirectExec() {
 
 if (isDirectExec()) {
   const sub = process.argv[2] || 'unknown';
-  const fn = DISPATCH[sub];
-  if (fn) {
-    Promise.resolve(fn()).catch((err) => {
-      logHookError({ agentId: AGENT_ID, stage: `dispatch_${sub}`, errorType: 'unhandled', errorMessage: err?.message || String(err) });
-    }).finally(() => { if (!emittedHookResponse) process.stdout.write('{}\n'); });
-  } else {
-    process.stdout.write('{}\n');
-  }
+  dispatch(sub).catch((err) => {
+    logHookError({ agentId: AGENT_ID, stage: `dispatch_${sub}`, errorType: 'unhandled', errorMessage: err?.message || String(err) });
+  }).finally(() => { if (!emittedHookResponse) process.stdout.write('{}\n'); });
 }
 
 // Test-only exports for the dual-path reader + agent_type mapper.

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -250,19 +250,28 @@ describe('trae-cn hook processor', () => {
     expect(toolRes['agent.trae.status_source']).toBe('exit_code');
   });
 
-  test('parallel PreToolUse calls share same step.id', () => {
-    runFixture('user-prompt-submit', 'parallel-user-prompt-submit.json');
-    runFixture('pre-tool-use', 'parallel-pre-tool-use-a.json');
-    runFixture('pre-tool-use', 'parallel-pre-tool-use-b.json');
-    const state = readState('trae-cn-parallel-session');
-    expect(Object.keys(state.pending_tool_calls).length).toBe(2);
+  test('retains all 12 concurrent PreToolUse calls through Stop', async () => {
+    const sessionId = 'trae-cn-parallel-session';
+    const ids = Array.from({ length: 12 }, (_, i) => 'tool-' + i).sort();
+    expect(runHook('user-prompt-submit', { session_id: sessionId, prompt: 'Read files' }).status).toBe(0);
+    await Promise.all(ids.map(id => new Promise((resolve, reject) => {
+      const child = execFile(process.execPath, [PROCESSOR, 'pre-tool-use'], {
+        env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir },
+        timeout: 15_000,
+      }, error => error ? reject(error) : resolve());
+      child.stdin.end(JSON.stringify({ session_id: sessionId, tool_use_id: id, tool_name: 'Read' }));
+    })));
+
+    const state = readState(sessionId);
+    expect(Object.keys(state.pending_tool_calls).sort()).toEqual(ids);
+    expect(runHook('stop', { session_id: sessionId, last_assistant_message: 'Done' }).status).toBe(0);
     const records = readEmittedJsonl();
-    const toolCalls = records.filter((r) => r['event.name'] === 'tool.call');
-    expect(toolCalls.length).toBe(2);
-    const stepIds = new Set(toolCalls.map((r) => r['gen_ai.step.id']));
-    expect(stepIds.size).toBe(1);
-    const toolIds = new Set(toolCalls.map((r) => r['gen_ai.tool.call.id']));
-    expect(toolIds).toEqual(new Set(['toolu_parallel_a', 'toolu_parallel_b']));
+    const calls = records.filter(record => record['event.name'] === 'tool.call');
+    expect(calls.map(call => call['gen_ai.tool.call.id']).sort()).toEqual(ids);
+    expect(new Set(calls.map(call => call['gen_ai.step.id']))).toEqual(new Set([state.step_id]));
+    const response = records.find(record => record['event.name'] === 'llm.response');
+    const parts = response['gen_ai.output.messages'].flatMap(message => message.parts);
+    expect(parts.filter(part => part.type === 'tool_call').map(part => part.id).sort()).toEqual(ids);
   });
 
   test('multi-turn produces 2 distinct trace_ids', () => {
