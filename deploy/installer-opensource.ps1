@@ -1420,6 +1420,36 @@ function Migrate-LegacyLayout {
     Write-Host ""
 }
 
+function Get-HostSerial {
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $values = @()
+        try {
+            $bios = Get-CimInstance -ClassName Win32_BIOS -OperationTimeoutSec 5 -ErrorAction Stop
+            if ($bios.SerialNumber) { $values += [string]$bios.SerialNumber }
+        } catch {}
+        try {
+            $product = Get-CimInstance -ClassName Win32_ComputerSystemProduct -OperationTimeoutSec 5 -ErrorAction Stop
+            if ($product.IdentifyingNumber) { $values += [string]$product.IdentifyingNumber }
+        } catch {}
+        foreach ($raw in $values) {
+            $value = "$raw".Trim()
+            if (-not $value) { continue }
+            $lower = $value.ToLower()
+            if ($lower -eq 'none' -or $lower -eq 'default string' -or $lower -eq 'to be filled by o.e.m.' -or $lower -eq 'system serial number' -or $lower -eq 'not specified' -or $lower -eq '0') { continue }
+            $byteLength = $value.Length
+            try { $byteLength = [System.Text.Encoding]::UTF8.GetByteCount($value) } catch {}
+            if ($byteLength -gt 128) { continue }
+            if ($value -notmatch '^[A-Za-z0-9._: -]{1,128}$') { continue }
+            return $value
+        }
+        return ""
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
 # ============================================================
 # Write config.json
 # ============================================================
@@ -1427,6 +1457,9 @@ function Write-Config {
     $configFile = Join-Path $DataDir "config.json"
     Msg "==> 写入配置文件 $configFile ..." "==> Writing config to $configFile ..."
     if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
+
+    $hostSn = ""
+    try { $hostSn = Get-HostSerial } catch { $hostSn = "" }
 
     # Bundle all params as JSON to avoid PowerShell dropping empty-string args to native commands
     $cfgArgs = [ordered]@{
@@ -1459,6 +1492,7 @@ function Write-Config {
         maskReplacementMode = "$MaskReplacementMode"
         interceptorMode   = "$InterceptorMode"
         probeResult       = "$($script:PROBE_RESULT)"
+        hostSn            = "$hostSn"
     }
     $cfgJson = $cfgArgs | ConvertTo-Json -Compress
 
@@ -1535,6 +1569,7 @@ if (opts.slsEndpoint || opts.slsProject || opts.slsLogstore || opts.slsApiKey) {
 }
 if (opts.logLevel) config.logLevel = opts.logLevel;
 if (opts.userId) { config.userId = opts.userId; delete config.identity; }
+if (opts.hostSn) config.hostSn = opts.hostSn;
 if (opts.collectLog) config.collectLog = opts.collectLog === 'true';
 if (opts.collectTrace) config.collectTrace = opts.collectTrace === 'true';
 if (opts.enableStatusBarApp) config.enableStatusBarApp = opts.enableStatusBarApp.toLowerCase() === 'true';

@@ -96,6 +96,8 @@ export interface ConfigFile {
   dataDir?: string;
   userId?: string;
   'user.id'?: string;
+  hostSn?: string;
+  hostIdentityTags?: boolean;
 
   sls?: SlsSingleConfig | SlsEndpointEntry[];
 
@@ -296,6 +298,11 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
   const innerDataConfig = await readJsonFile<InnerDataConfig>(innerDataConfigPath);
 
   const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
+  const hostSn = typeof file?.hostSn === 'string' ? file.hostSn.trim() : '';
+  const hostIdentityTags = envBool(
+    'LOONGSUITE_PILOT_HOST_IDENTITY_TAGS',
+    file?.hostIdentityTags ?? true,
+  );
 
   const serviceName = nonEmpty(env('LOONGSUITE_PILOT_SERVICE_NAME')) ?? nonEmpty(file?.serviceName);
   const configuredServiceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix;
@@ -308,6 +315,8 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     autoStart: true,
     dataDir,
     userId,
+    hostSn,
+    hostIdentityTags,
     collectLog: envBool('LOONGSUITE_PILOT_COLLECT_LOG', file?.collectLog ?? true),
     collectTrace: envBool('LOONGSUITE_PILOT_COLLECT_TRACE', file?.collectTrace ?? true),
     serviceName,
