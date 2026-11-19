@@ -47,7 +47,7 @@ export function parseRendererLine(line: string, turns: Turns): AgentActivityEntr
   const root = spanId(turn.trace, turn.turn);
   if (match[2].includes('[done]')) {
     delete turns[key];
-    return [buildAgentActivityEntry({ ...base, 'event.id': root, 'event.name': 'other',
+    return [buildAgentActivityEntry({ ...base, 'event.id': root, 'event.name': 'other', 'gen_ai.turn.end': true,
       span_id: root, 'gen_ai.span.kind': 'ENTRY', 'gen_ai.operation.name': 'enter_ai_application_system',
       startTimeUnixNano: String(BigInt(turn.start) * 1000000n), endTimeUnixNano: base.time_unix_nano })];
   }

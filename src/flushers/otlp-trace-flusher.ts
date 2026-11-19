@@ -1299,6 +1299,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    if (entry['agent.trae-cn.source'] === 'renderer_metadata') return entry['gen_ai.turn.end'] === true;
     if (entry['agent.source'] === 'qwen-work-cn-collaboration') {
       return entry['event.name'] === 'other' && entry['gen_ai.turn.end'] === true;
     }
@@ -1542,6 +1543,26 @@ export class OtlpTraceFlusher extends BaseFlusher {
     resourceIdentity: AgentResourceIdentity,
     convertKey: string,
   ): Promise<boolean> {
+    if (agentType === 'trae-cn' && records.every(r => r['agent.trae-cn.source'] === 'renderer_metadata')) {
+      const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes, resourceIdentity);
+      const spans = records.map(r => {
+        const start = BigInt(String(r.startTimeUnixNano));
+        const end = BigInt(String(r.endTimeUnixNano));
+        const hr = (ns: bigint): [number, number] => [Number(ns / 1000000000n), Number(ns % 1000000000n)];
+        const tool = r['gen_ai.span.kind'] === 'TOOL';
+        const attributes = Object.fromEntries(Object.entries(r).filter(([key, value]) =>
+          typeof value === 'string' && (key.startsWith('gen_ai.') || key === 'agent.trae-cn.source' || key === 'user.id'))) as Record<string, string>;
+        return {
+          name: tool ? 'execute_tool ' + r['gen_ai.tool.name'] : 'enter_ai_application_system',
+          spanContext: () => ({ traceId: String(r.trace_id), spanId: String(r.span_id), traceFlags: 1 }),
+          parentSpanId: tool ? String(r.parent_span_id) : undefined, kind: SpanKind.INTERNAL,
+          startTime: hr(start), endTime: hr(end), duration: hr(end - start), ended: true,
+          resource, attributes, status: { code: SpanStatusCode.UNSET }, links: [], events: [],
+          instrumentationLibrary: { name: 'loongsuite-pilot' }, droppedLinksCount: 0, droppedEventsCount: 0, droppedAttributesCount: 0,
+        } satisfies ReadableSpan;
+      });
+      return this.exportConvertedSpans(agentType, serviceName, records, spans, { systemInstructions: [] }, {});
+    }
     const convertState = this.getOrCreateConvertState(
       agentType,
       serviceName,
