@@ -468,11 +468,25 @@ fn codex_checkpoint_rebinds_old_sdk_pending_bytes_then_admits_a_legacy_handoff()
 }
 
 #[test]
-fn qoder_checkpoint_imports_legacy_progress_only_after_acknowledged_export() {
-    let root = tempfile::tempdir().unwrap();
-    let queue = Outbox::open(root.path(), settings()).unwrap();
-    let handoff = LegacyCheckpointHandoff::Qoder;
-    let source = "qoder-source";
+fn checkpoint_imports_legacy_progress_only_after_acknowledged_export() {
+    for input in [
+        "qoder-trace",
+        "openclaw-plugin-log",
+        "opencode-log",
+        "cursor-hook",
+        "qwen-work-cn-trace",
+        "qwen-work-cn-collaboration",
+    ] {
+        assert_acknowledged_checkpoint_handoff(input);
+    }
+}
+
+fn assert_acknowledged_checkpoint_handoff(input: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let queue = Outbox::open(&root, settings()).unwrap();
+    let handoff = LegacyCheckpointHandoff::for_input(input).unwrap();
+    let source = "fixture-source";
     let original = r#"{"qoder-trace:fixture":{"lastOffset":12}}"#;
     let advanced = r#"{"qoder-trace:fixture":{"lastOffset":36}}"#;
     let pending = br#"{"event.id":"pending-qoder","event.name":"llm.request"}"#;
@@ -485,11 +499,11 @@ fn qoder_checkpoint_imports_legacy_progress_only_after_acknowledged_export() {
             .as_deref(),
         Some(original)
     );
-    assert!(Outbox::mark_shell_checkpoint_exported(root.path(), handoff).is_err());
+    assert!(Outbox::mark_shell_checkpoint_exported(&root, handoff).is_err());
     let rows = queue.read_batch(&settings()).unwrap().0;
     assert_eq!(rows[0].1, pending);
     queue.ack(&rows).unwrap();
-    Outbox::mark_shell_checkpoint_exported(root.path(), handoff).unwrap();
+    Outbox::mark_shell_checkpoint_exported(&root, handoff).unwrap();
     assert!(queue
         .prepare_shell_checkpoint(source, handoff, || anyhow::bail!("bad state"))
         .is_err());
@@ -505,7 +519,7 @@ fn qoder_checkpoint_imports_legacy_progress_only_after_acknowledged_export() {
         vec![(source.to_owned(), advanced.to_owned())]
     );
 
-    Outbox::mark_shell_checkpoint_exported(root.path(), handoff).unwrap();
+    Outbox::mark_shell_checkpoint_exported(&root, handoff).unwrap();
     assert_eq!(
         queue
             .prepare_shell_checkpoint(source, handoff, || Ok(None))
