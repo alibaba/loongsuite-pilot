@@ -1,6 +1,5 @@
 import { hostname } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { podLogFormatter } from '../../../../scripts/multica-log-bridge.mjs';
 import { parseMulticaLog } from '../../../../src/pipeline/input/multica/parsers.js';
 import { sourcePodLabels } from '../../../../src/pipeline/input/multica/pod-labels.js';
 import { digest, envelope } from '../../../../src/pipeline/input/multica/records.js';
@@ -67,24 +66,20 @@ describe('Multica replica identity', () => {
     expect(sourcePodLabels(input, metric)).toMatchObject({pod_name: 'server-a', collector_pod_name: 'server-a'});
   });
 
-  it('separates simultaneous local samples by POD_NAME and joins each to its bridged logs under a shared hostname', () => {
+  it('separates simultaneous local samples and daemon logs by POD_NAME under a shared hostname', () => {
     vi.mocked(hostname).mockReturnValue('shared-host');
     vi.stubEnv('POD_UID', '');
     vi.stubEnv('POD_IP', '');
     const cfg = {...input, PprofBaseUrl: 'http://localhost:6060'};
+    const log = parseMulticaLog('12:00:01.123 ERR task failed task_id=t1')!;
     const sources = [[metric, row], ['health:http://localhost:4317/health', {record_type: 'daemon_health'}],
-      ['pprof:http://localhost:6060:cpu', {record_type: 'pprof_profile_chunk'}]] as const;
-    const line = '1970-01-01T00:00:01Z {"msg":"task failed","task_id":"t1"}';
+      ['pprof:http://localhost:6060:cpu', {record_type: 'pprof_profile_chunk'}],
+      ['log:/root/.multica/daemon.log', log]] as const;
     const [a, b] = ['backend-a', 'backend-b'].map(name => {
       vi.stubEnv('POD_NAME', name);
-      const format = podLogFormatter({metadata: {name, uid: 'uid-' + name}}, 'backend');
-      const log = parseMulticaLog(format(line, digest(line), 1))!;
-      const logSource = 'log:/logs/backend.log';
-      const bridged = envelope(cfg, logSource, 1000, log, log.log_event_id, sourcePodLabels(cfg, logSource));
-      expect(bridged).toMatchObject({pod_name: name, collector_pod_name: name});
       return sources.map(([source, record]) => {
-        const labels = sourcePodLabels(cfg, source);
-        expect(labels).toEqual({pod_name: bridged.pod_name, collector_pod_name: name});
+        const labels = sourcePodLabels({...cfg, LocalDaemonPid: 1}, source);
+        expect(labels).toEqual({pod_name: name, collector_pod_name: name});
         return envelope(cfg, source, 1000, record, undefined, labels);
       });
     });
