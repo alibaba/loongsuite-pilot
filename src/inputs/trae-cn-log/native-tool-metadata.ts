@@ -3,13 +3,15 @@ import * as path from 'node:path';
 import { createInflateRaw } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import cbor from 'cbor';
+import type { HubMetadata } from './hub-metadata.js';
 import type { StateStore } from '../../checkpoints/state-store.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { ClientType, type AgentActivityEntry } from '../../types/index.js';
 import { fileIdentity } from '../../utils/file-identity.js';
 
 type Delegation = { parent: string; call: string; start?: string; end?: string; child?: string };
-type Turn = { session: string; turn: string; start: string; calls: string[]; delegations?: Delegation[] };
+type Turn = { session: string; turn: string; start: string; calls: string[]; pending?: PendingTool[]; delegations?: Delegation[] };
+type PendingTool = { call: string; tool: string; time: string; parent: string; received: number };
 type Turns = Record<string, Turn>;
 const spanId = (trace: string, id: string) => createHash('sha256').update(trace + '/' + id).digest('hex').slice(0, 16);
 const text = (value: unknown) => Buffer.isBuffer(value) ? value.toString('utf8') : '';
@@ -20,7 +22,34 @@ const launch = 'starting SubAgent through commit_results';
 const takeover = '[subagent→parent] detected parent takeover, returning stream';
 const runId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 
-function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]): void {
+const ns = (ms: number) => String(BigInt(ms) * 1_000_000n);
+
+function toolEntry(trace: string, turn: Turn, pending: PendingTool, hub?: HubMetadata) {
+  const { call, tool, time } = pending;
+  const measured = hub?.get(trace, turn.turn, turn.session)?.tools.get(call);
+  let parent = pending.parent, start = time, end = time;
+  if (measured?.name === tool) {
+    start = ns(measured.start);
+    end = ns(measured.end);
+    const launched = turn.delegations?.filter(d => d.start) ?? [];
+    const child = launched.find(d => d.child === measured.run);
+    if (child) parent = spanId(trace, 'delegation/' + child.call);
+    else if (launched.some(d => d.parent === measured.run)) {
+      parent = new Set(launched.map(d => d.parent)).size === 1
+        ? spanId(trace, 'turn-agent/' + turn.turn) : spanId(trace, 'agent-run/' + measured.run);
+    }
+  }
+  const id = spanId(trace, call);
+  return buildAgentActivityEntry({ trace_id: trace, 'event.id': id, 'event.name': 'tool.call',
+    'gen_ai.agent.type': ClientType.TraeCn, 'gen_ai.agent.name': 'trae-cn', 'gen_ai.system': 'trae',
+    'agent.trae-cn.source': 'native_metadata', 'gen_ai.session.id': turn.session, 'gen_ai.turn.id': turn.turn,
+    'agent.trae-cn.observed_until': measured?.name === tool ? 'tool_finished' : 'tool_started',
+    span_id: id, parent_span_id: parent, time_unix_nano: start, startTimeUnixNano: start, endTimeUnixNano: end,
+    'gen_ai.span.kind': 'TOOL', 'gen_ai.operation.name': 'execute_tool',
+    'gen_ai.tool.call.id': call, 'gen_ai.tool.name': tool });
+}
+
+function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[], hub?: HubMetadata): void {
   const fields = record?.fields;
   if (!fields) return;
   const message = text(fields.message);
@@ -82,13 +111,26 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
     const call = text(fields.toolcall_id), tool = text(fields.tool_name);
     if (!/^[\w.:-]{1,256}$/.test(call) || !/^[\w.-]{1,128}$/.test(tool) || turn.calls.includes(call)) return;
     turn.calls.push(call);
-    const id = spanId(trace, call);
-    entries.push(buildAgentActivityEntry({ ...base, 'event.id': id, 'event.name': 'tool.call', span_id: id,
-      parent_span_id: turn.delegations?.length ? root : agent, startTimeUnixNano: time, 'gen_ai.span.kind': 'TOOL',
-      'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.call.id': call, 'gen_ai.tool.name': tool }));
+    const parent = turn.delegations?.length ? root : agent;
+    const pending = { call, tool, time, parent, received: Date.now() };
+    if (hub) {
+      (turn.pending ??= []).push(pending);
+    } else {
+      entries.push(toolEntry(trace, turn, pending));
+    }
     return;
   }
   if (turn.turn !== turnId) return;
+  const observed = hub?.get(trace, turn.turn, turn.session);
+  for (const pending of turn.pending ?? []) entries.push(toolEntry(trace, turn, pending, hub));
+  for (const [request, model] of observed?.models ?? []) {
+    const id = spanId(trace, 'model/' + request);
+    entries.push(buildAgentActivityEntry({ ...base, 'event.id': id, 'event.name': 'llm.request', span_id: id,
+      parent_span_id: agent, startTimeUnixNano: ns(model.start), endTimeUnixNano: ns(model.first),
+      'gen_ai.span.kind': 'LLM', 'gen_ai.operation.name': 'chat', 'gen_ai.request.id': request,
+      'gen_ai.response.model': model.model, 'gen_ai.response.time_to_first_token': (model.first - model.start) * 1e6,
+      'agent.trae-cn.observed_until': 'first_token' }));
+  }
   const launched = (turn.delegations ?? []).filter(d => d.start);
   const parents = new Set(launched.map(d => d.parent));
   const [onlyParent] = parents;
@@ -151,7 +193,7 @@ class NativeStream {
 
 export class NativeToolMetadata {
   private readonly streams = new Map<string, NativeStream>();
-  constructor(private readonly store: StateStore) {}
+  constructor(private readonly store: StateStore, private readonly hub?: HubMetadata) {}
   close() {
     for (const stream of this.streams.values()) stream.close();
     this.streams.clear();
@@ -204,7 +246,7 @@ export class NativeToolMetadata {
           const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, end - stream.offset), stream.offset);
           if (!bytesRead) break;
           stream.visitor = replay ? undefined : record => {
-            nativeMetadata(record, turns, batch);
+            nativeMetadata(record, turns, batch, this.hub);
           };
           await stream.feed(buffer.subarray(0, bytesRead));
         }
@@ -217,6 +259,30 @@ export class NativeToolMetadata {
         this.streams.delete(file);
         throw err;
       } finally { await handle.close(); }
+    }
+    // Emit measured tools before the turn closes. An interrupted runner may
+    // never write a terminal event, so bound the wait for missing timings.
+    const turnKey = 'trae-cn-log:native-turns:' + run;
+    const active = this.store.get(turnKey).extra?.turns as Turns | undefined;
+    if (active) {
+      const updated = { ...active };
+      let changed = false;
+      for (const [trace, turn] of Object.entries(active)) {
+        if (!turn.pending?.length) continue;
+        const observed = this.hub?.get(trace, turn.turn, turn.session);
+        const ready = turn.pending.filter(p => {
+          const measured = observed?.tools.get(p.call);
+          const ownerKnown = !turn.delegations?.length ||
+            turn.delegations.some(d => d.start && (d.parent === measured?.run || d.child === measured?.run));
+          return (measured?.name === p.tool && ownerKnown) || Date.now() - p.received >= 120_000;
+        });
+        if (!ready.length) continue;
+        const sent = new Set(ready);
+        for (const p of ready) entries.push(toolEntry(trace, turn, p, this.hub));
+        updated[trace] = { ...turn, pending: turn.pending.filter(p => !sent.has(p)) };
+        changed = true;
+      }
+      if (changed) this.store.update(turnKey, { extra: { turns: updated } });
     }
     return supported;
   }

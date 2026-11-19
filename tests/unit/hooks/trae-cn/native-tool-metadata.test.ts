@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import cbor from 'cbor';
 import { deflateRawSync } from 'node:zlib';
+import { HubMetadata } from '../../../../src/inputs/trae-cn-log/hub-metadata.js';
 import { NativeToolMetadata } from '../../../../src/inputs/trae-cn-log/native-tool-metadata.js';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
@@ -11,7 +12,8 @@ import type { AgentActivityEntry } from '../../../../src/types/index.js';
 it('resumes split compressed records and separates concurrent turns in one session by native trace ID', async () => {
   const run = await mkdtemp(path.join(os.tmpdir(), 'trae-native-'));
   const state = new StateStore(path.join(run, 'state'));
-  let reader = new NativeToolMetadata(state);
+  const hub = new HubMetadata(path.join(run, 'hub'));
+  let reader = new NativeToolMetadata(state, hub);
   try {
     const dir = path.join(run, 'Modular');
     await mkdir(dir);
@@ -49,6 +51,21 @@ it('resumes split compressed records and separates concurrent turns in one sessi
     records.push(record(traceA, '[subagent→parent] detected parent takeover, returning stream', {
       new_agent_run_id: parent, new_task_id: 'third', source_agent_run_id: child,
     }));
+    const reply = '9'.repeat(24);
+    const row = (type: string, data: object) => JSON.stringify({ type,
+      data: JSON.stringify({ ...data, reply_to_message_id: reply }) });
+    const source = path.join(hub.root, 'workspace');
+    await mkdir(source, { recursive: true });
+    await writeFile(path.join(source, reply + '.jsonl'), [
+      row('metadata', { trace_id: traceB, session_id: '1'.repeat(24), turn_id: traceB.slice(0,24) }),
+      row('timing_events', { logid: 'request-id', model_name: 'model-1', data: {
+        rs_17_before_request_llm: 1000, rs_18_llm_response_first_token: 1010,
+      } }),
+      row('plan_item', { agent_run_id: parent, tool_call_info: {
+        name: 'Read', meta: { llm_toolcall_id: 'call_2' }, params: 'never-export',
+      }, timing: { tool_call_started_at_ms: 1050, tool_call_finished_at_ms: 1067 } }),
+    ].join('\n') + '\n');
+    await hub.scan();
     records.push(record(traceB,'tool execution started',{ tool_name:'Read', toolcall_id:'call_2' }),
       record(traceB,'chat: runner completed',{turn_id:traceB.slice(0,24)}),
       record(traceA,'chat: runner completed',{turn_id:traceA.slice(0,24)}));
@@ -57,16 +74,21 @@ it('resumes split compressed records and separates concurrent turns in one sessi
     await appendFile(file, compressed.subarray(0,split));
     await reader.collect(run,entries,true);
     reader.close();
-    reader = new NativeToolMetadata(state);
+    reader = new NativeToolMetadata(state, hub);
     await appendFile(file,compressed.subarray(split));
     await reader.collect(run,entries,true);
     await reader.collect(run,entries,true);
     expect(entries.filter(e => e.trace_id === traceA && e['event.name'] === 'tool.call')
       .map(e => e['gen_ai.tool.name'])).toEqual(['Shell','Shell','Read','Read','Read']);
     const ordinary = entries.filter(e => e.trace_id === traceB);
-    expect(ordinary.map(e => e['gen_ai.span.kind'])).toEqual(['TOOL', 'AGENT', 'ENTRY']);
-    expect(ordinary[0].parent_span_id).toBe(ordinary[1].span_id);
+    expect(ordinary.map(e => e['gen_ai.span.kind'])).toEqual(['TOOL', 'LLM', 'AGENT', 'ENTRY']);
+    expect(ordinary[0].parent_span_id).toBe(ordinary[2].span_id);
     expect(ordinary[1].parent_span_id).toBe(ordinary[2].span_id);
+    expect(ordinary[2].parent_span_id).toBe(ordinary[3].span_id);
+    expect(ordinary[0].endTimeUnixNano).toBe('1067000000');
+    expect(ordinary[0].startTimeUnixNano).toBe('1050000000');
+    expect(ordinary[1]['gen_ai.response.time_to_first_token']).toBe(10_000_000);
+    expect(ordinary[1]['agent.trae-cn.observed_until']).toBe('first_token');
     const children = entries.filter(e => e['gen_ai.agent.scope'] === 'subagent');
     const parentSpan = entries.find(e => e['gen_ai.agent.invocation.id'] === parent);
     expect(parentSpan?.parent_span_id).toBe(entries.find(e => e.trace_id === traceA && e['gen_ai.span.kind'] === 'ENTRY')?.span_id);

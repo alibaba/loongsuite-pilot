@@ -1551,9 +1551,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         const hr = (ns: bigint): [number, number] => [Number(ns / 1000000000n), Number(ns % 1000000000n)];
         const tool = r['gen_ai.span.kind'] === 'TOOL';
         const attributes = Object.fromEntries(Object.entries(r).filter(([key, value]) =>
-          typeof value === 'string' && (key.startsWith('gen_ai.') || key === 'agent.trae-cn.source' || key === 'user.id'))) as Record<string, string>;
+          (typeof value === 'string' || typeof value === 'number') && (key.startsWith('gen_ai.') || key === 'agent.trae-cn.source' || key === 'agent.trae-cn.observed_until' || key === 'user.id'))) as Record<string, string | number>;
         return {
           name: tool ? 'execute_tool ' + r['gen_ai.tool.name']
+            : r['gen_ai.span.kind'] === 'LLM' ? 'chat ' + r['gen_ai.response.model']
             : r['gen_ai.span.kind'] === 'AGENT' ? 'invoke_agent ' + r['gen_ai.agent.name'] : 'enter_ai_application_system',
           spanContext: () => ({ traceId: String(r.trace_id), spanId: String(r.span_id), traceFlags: 1 }),
           parentSpanId: r.parent_span_id ? String(r.parent_span_id) : undefined, kind: SpanKind.INTERNAL,

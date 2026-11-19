@@ -6,6 +6,8 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { readBoundedLineTail } from '../base/bounded-line-tail.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../types/index.js';
+import { watch, type FSWatcher } from 'node:fs';
+import { HubMetadata } from './hub-metadata.js';
 import { NativeToolMetadata } from './native-tool-metadata.js';
 import { fileIdentity } from '../../utils/file-identity.js';
 
@@ -80,11 +82,20 @@ export class TraeRendererMetadataInput extends BaseInput {
   readonly id = 'trae-cn-log';
   readonly agentType = ClientType.TraeCn;
   readonly collectionMethod = CollectionMethod.SessionFilePolling;
-  private readonly native = new NativeToolMetadata(this.stateStore);
+  private readonly hub = new HubMetadata(path.join(os.homedir(), '.trae-cn/hub_event_cache/TraeCode'));
+  private readonly native = new NativeToolMetadata(this.stateStore, this.hub);
+  private watcher?: FSWatcher;
   constructor(opts: InputOptions, private readonly root = rendererLogRoot()) { super(opts); }
-  protected override async onStop(): Promise<void> { this.native.close(); }
+  protected override async onStop(): Promise<void> { this.watcher?.close(); this.watcher = undefined; this.native.close(); }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
+    if (!this.watcher) {
+      try {
+        this.watcher = watch(this.hub.root, { recursive: true, persistent: false }, () => this.requestCollection());
+        this.watcher.on('error', () => { this.watcher?.close(); this.watcher = undefined; });
+      } catch { /* Older clients may not have created a cache yet. */ }
+    }
+    await this.hub.scan();
     const entries: AgentActivityEntry[] = [];
     // The first scan establishes a baseline so enabling collection doesn't export prior conversations.
     const initialized = this.stateStore.get(this.id + ':renderer').extra?.initialized === true;
