@@ -77,7 +77,8 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  *
  * Stateful across collect batches: a turn's events may arrive in separate
  * batches, so the resolved context is cached by (sessionId, turnId). The
- * `other` event carrying user input triggers resolution. Metadata-only events
+ * `other` event carrying user input or a model request with an exact native
+ * identity can trigger resolution. Metadata-only events
  * can precede it: resolve input-bearing events first within each batch, then
  * stamp the whole batch without changing source order. Empty-text misses stay
  * unresolved so a later batch can still supply the input.

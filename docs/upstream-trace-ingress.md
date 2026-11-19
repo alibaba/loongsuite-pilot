@@ -32,6 +32,26 @@ async function* messages() {
 
 Keep the Pilot Stop Hook available in the SDK's settings sources or register it through the SDK. The exact Qoder match was exercised on Qoder CLI 1.1.81. The Claude Agent SDK callback contract uses the native `session_id` and `prompt_id` from `UserPromptSubmit`. Check that the installed CLI supplies a matching prompt ID in the native transcript. The live SDK comparison covers Codex and Qoder.
 
+## Run one turn in a local Agent process
+
+Pass `TRACEPARENT`, optional `TRACESTATE`, and a fresh
+`LOONGSUITE_PILOT_INGRESS_REQUEST_ID` to each newly launched process.
+The Agent must load its corresponding Pilot hook or plugin.
+
+| Agent | Turn identity used by the adapter |
+| --- | --- |
+| Codex | Native turn ID from UserPromptSubmit |
+| Cursor CLI | Generation ID from beforeSubmitPrompt |
+| Grok Build | Native prompt ID from user_prompt_submit |
+| Claude Code | Native prompt ID when supplied by UserPromptSubmit |
+| Pi Coding Agent | Turn ID recorded by the Pilot extension |
+| DeepSeek Harness | Native turn number from turn/start |
+| OpenClaw | Native run ID in local embedded execution |
+
+For persistent hosts, bind each request using the Agent's actual session and
+turn IDs. An OpenClaw Gateway caller with these IDs can use the shared
+`bindUpstreamTurn` helper before dispatch.
+
 ## Configure the ACP receiver
 
 At ACP v1 `session/prompt`, send `_meta: { traceparent, tracestate }` alongside the regular prompt. Launch the adapted ACP server on the Agent host. The [Codex ACP example patch](../examples/upstream-trace-ingress/codex-acp-2.6.0.patch) targets version 2.6.0 at commit `656765115f82253c79f87918abb77189c114a799`. Apply the patch, install the adapter dependencies, and build it.

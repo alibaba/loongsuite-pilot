@@ -60,6 +60,31 @@ describe('shared upstream ingress', () => {
     expect(stranger.trace_id).toBe('local');
   });
 
+  it.each([
+    ['cursor-cli', 'cursor-hook-processor.mjs', [], {
+      hook_event_name: 'beforeSubmitPrompt', conversation_id: 'session-1', generation_id: 'turn-1',
+      cursor_version: '2026.11.19-f005e9d', prompt: 'same prompt',
+    }],
+    ['grok-build', 'grok-build-hook-processor.mjs', ['user_prompt_submit'], {
+      hookEventName: 'user_prompt_submit', sessionId: 'session-1', promptId: 'turn-1',
+    }],
+    ['claude-code', 'claude-code-hook-processor.mjs', ['user-prompt-submit'], {
+      hook_event_name: 'UserPromptSubmit', session_id: 'session-1', prompt_id: 'turn-1',
+    }],
+  ])('records the native %s prompt from the process environment', (agentId, script, argv, payload) => {
+    const result = spawnSync(process.execPath, [path.resolve('assets/hooks', script), ...argv], {
+      input: JSON.stringify(payload), encoding: 'utf8', timeout: 5_000,
+      env: {
+        ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir,
+        GROK_HOME: path.join(dataDir, 'grok'),
+        TRACEPARENT: TP, TRACESTATE: 'vendor=value', LOONGSUITE_PILOT_INGRESS_REQUEST_ID: 'request-1',
+      },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(readUpstreamTurn(path.join(dataDir, 'acp-correlate'), agentId, 'session-1', 'turn-1'))
+      .toEqual({ traceparent: TP, tracestate: 'vendor=value' });
+  });
+
   it('allows each process request to claim one native turn on a resumed session', () => {
     const env = { TRACEPARENT: TP, TRACESTATE: 'vendor=value', LOONGSUITE_PILOT_INGRESS_REQUEST_ID: 'request-1' };
     expect(bindProcessUpstreamTurn({ ...binding(), env }).recorded).toBe(true);

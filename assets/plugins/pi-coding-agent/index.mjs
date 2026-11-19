@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 // Worker labels are optional. A missing helper during a partial update must not
 // turn telemetry into a Pi startup dependency or prevent ordinary collection.
 const resourceContext = await import('../shared/resource-context.mjs').catch(() => null);
-const upstreamIngress = await import('../../hooks/shared/upstream-ingress.mjs').catch(() => null);
+const upstreamIngress = await import(new URL('../../hooks/shared/upstream-ingress.mjs', import.meta.url).href).catch(() => null);
 const agentBaseFieldPatch = typeof resourceContext?.agentBaseFieldPatch === 'function'
   ? resourceContext.agentBaseFieldPatch : () => ({});
 const collectResourceAttributesFromEnv = typeof resourceContext?.collectResourceAttributesFromEnv === 'function'
