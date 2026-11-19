@@ -183,6 +183,15 @@ impl MetricsWriter {
         }
     }
 
+    pub(crate) fn with_host_identity(self, enabled: bool, serial: &str) -> Self {
+        self.inner
+            .lock()
+            .expect("writer")
+            .collector
+            .set_host_identity(enabled, serial);
+        self
+    }
+
     pub(crate) fn with_interceptor_monitoring(
         mut self,
         status: impl Fn() -> Value + Send + Sync + 'static,
@@ -981,10 +990,12 @@ mod tests {
         clear_sends();
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
-        let writer = make_writer(dir.path(), None).with_interceptor_monitoring(
-            || serde_json::json!({"enabled":true, "running":true, "rules":{"effective":2}}),
-            Arc::new(AlarmManager::new("127.0.0.1", "2.0.0", "u1")),
-        );
+        let writer = make_writer(dir.path(), None)
+            .with_host_identity(true, "  example-10  ")
+            .with_interceptor_monitoring(
+                || serde_json::json!({"enabled":true, "running":true, "rules":{"effective":2}}),
+                Arc::new(AlarmManager::new("127.0.0.1", "2.0.0", "u1")),
+            );
         writer.start().await;
         let metric_dir = dir.path().join("logs").join("metric_alarm");
         let file = std::fs::read_dir(&metric_dir)
@@ -1002,6 +1013,7 @@ mod tests {
         assert_eq!(entry["version"], "2.0.0");
         assert_eq!(entry["interceptor"]["running"], true);
         assert_eq!(entry["user_id"], "u1");
+        assert_eq!(entry["sn"], "example-10");
         assert_eq!(entry["metric_json"]["agent_count"], "1");
         assert!(entry["metric_json"].get("raw_in_records").is_none());
         assert_eq!(entry["capture_message_disabled_agents"], "");
@@ -1015,6 +1027,7 @@ mod tests {
         );
         let interceptor: Value = serde_json::from_str(&status.fields["interceptor"]).unwrap();
         assert_eq!(interceptor, entry["interceptor"]);
+        assert_eq!(&status.fields["sn"], "example-10");
         assert!(!status.fields.contains_key("__topic__"));
         assert!(recorded_sends().iter().all(|send| ![
             "pilot_input_detail",

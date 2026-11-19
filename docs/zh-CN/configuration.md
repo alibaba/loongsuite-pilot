@@ -353,4 +353,4 @@ Windows 在仓库 `deploy` 目录下使用目录数组：
 
 ### SLS 主机标签
 
-安装时能读取的硬件序列号写入 `hostSn`。SLS 日志组包含当前首个非回环 IPv4 对应网卡的 `__mac__`，以及配置非空时的 `__sn__`。默认开启。设置 `hostIdentityTags: false` 或环境变量 `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS=false` 可同时关闭主采集和 Qoder API 流水线的这两个标签。
+安装时能读取的硬件序列号写入 `hostSn`。SLS 日志组包含当前首个非回环 IPv4 对应网卡的 `__mac__`，以及配置非空时的 `__sn__`。默认开启。设置 `hostIdentityTags: false` 或环境变量 `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS=false` 可同时关闭主采集和 Qoder API 流水线的这两个标签。 自监控状态的可选字段 `mac` 和 `sn` 沿用同一个开关。

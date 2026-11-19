@@ -3407,6 +3407,7 @@ impl Orchestrator {
             runtime_probe: None,
             now_ms: None,
         })
+        .with_host_identity(self.config.host_identity_tags, &self.config.host_sn)
         .with_interceptor_monitoring(
             move || interceptor_inputs.interceptor.snapshot(enabled),
             alarm,
