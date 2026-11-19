@@ -1299,7 +1299,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
-    if (entry['agent.trae-cn.source'] === 'renderer_metadata') return entry['gen_ai.turn.end'] === true;
+    if (['native_metadata', 'renderer_metadata'].includes(String(entry['agent.trae-cn.source']))) return entry['gen_ai.turn.end'] === true;
     if (entry['agent.source'] === 'qwen-work-cn-collaboration') {
       return entry['event.name'] === 'other' && entry['gen_ai.turn.end'] === true;
     }
@@ -1543,7 +1543,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     resourceIdentity: AgentResourceIdentity,
     convertKey: string,
   ): Promise<boolean> {
-    if (agentType === 'trae-cn' && records.every(r => r['agent.trae-cn.source'] === 'renderer_metadata')) {
+    if (agentType === 'trae-cn' && records.every(r => ['native_metadata', 'renderer_metadata'].includes(String(r['agent.trae-cn.source'])))) {
       const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes, resourceIdentity);
       const spans = records.map(r => {
         const start = BigInt(String(r.startTimeUnixNano));

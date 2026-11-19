@@ -6,6 +6,7 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { readBoundedLineTail } from '../base/bounded-line-tail.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../types/index.js';
+import { NativeToolMetadata } from './native-tool-metadata.js';
 import { fileIdentity } from '../../utils/file-identity.js';
 
 type Turn = { session: string; turn: string; trace: string; start: number };
@@ -75,13 +76,18 @@ export class TraeRendererMetadataInput extends BaseInput {
   readonly id = 'trae-cn-log';
   readonly agentType = ClientType.TraeCn;
   readonly collectionMethod = CollectionMethod.SessionFilePolling;
+  private readonly native = new NativeToolMetadata(this.stateStore);
   constructor(opts: InputOptions, private readonly root = rendererLogRoot()) { super(opts); }
+  protected override async onStop(): Promise<void> { this.native.close(); }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
     const entries: AgentActivityEntry[] = [];
     // The first scan establishes a baseline so enabling collection doesn't export prior conversations.
     const initialized = this.stateStore.get(this.id + ':renderer').extra?.initialized === true;
+    const nativeKey = this.id + ':native-initialized';
+    const nativeInitialized = this.stateStore.get(nativeKey).extra?.initialized === true;
     for (const run of await directories(this.root, /^\d{8}T\d{6}$/)) {
+      if (await this.native.collect(run, entries, nativeInitialized)) continue;
       for (const window of await directories(run, /^window\d+$/)) {
         const file = path.join(window, 'renderer.log');
         const stat = await fs.lstat(file).catch((err: NodeJS.ErrnoException) => {
@@ -106,6 +112,7 @@ export class TraeRendererMetadataInput extends BaseInput {
           extra: { identity, turns, skippingLine: tail?.skippingLine ?? false } });
       }
     }
+    if (!nativeInitialized) this.stateStore.update(nativeKey, { extra: { initialized: true } });
     if (!initialized) this.stateStore.update(this.id + ':renderer', { extra: { initialized: true } });
     return entries;
   }
