@@ -15,6 +15,7 @@ import { ToolVerdictStore, type ToolVerdictKey, type ToolVerdictRecord } from '.
 import { INTERCEPTOR_DEFAULT_PORT } from '../types.js';
 import { createInterceptorServer, type InterceptorServerOptions } from './server.js';
 import { clearInterceptorRuntime, removeOwnPid, writeRuntime } from './runtime.js';
+import type { InterceptorDiagnosticObserver } from '../diagnostics.js';
 
 const logger = createLogger('InterceptorDaemon');
 const RUNTIME_HEARTBEAT_MS = 30_000;
@@ -46,6 +47,7 @@ export interface StartInterceptorServiceOptions {
   onManagedActiveChange?: (active: boolean) => void;
   onToolVerdict?: (record: ToolVerdictRecord) => void;
   onStateChange?: (port: number | null, managedActive: boolean) => void;
+  onDiagnostic?: InterceptorDiagnosticObserver;
 }
 
 /**
@@ -111,6 +113,7 @@ export async function startInterceptorService(
 
   const managed = new ManagedInterceptor({
     dataDir: opts.dataDir,
+    onDiagnostic: opts.onDiagnostic,
     onActiveChange: (active) => {
       if (started) void reconcileSoon();
       opts.onManagedActiveChange?.(active);

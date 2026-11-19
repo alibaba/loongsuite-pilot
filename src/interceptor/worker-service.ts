@@ -8,8 +8,9 @@ import { clearInterceptorRuntime } from './daemon/runtime.js';
 import type { InterceptorService, StartInterceptorServiceOptions } from './daemon/lifecycle.js';
 import { interceptorToolVerdictPath } from './paths.js';
 import { ToolVerdictStore } from './tool-verdict-store.js';
-import type { InterceptorWorkerCommand, InterceptorWorkerMessage } from './worker-protocol.js';
+import type { InterceptorDiagnosticBatch, InterceptorWorkerCommand, InterceptorWorkerMessage } from './worker-protocol.js';
 import type { ManagedChildState } from './managed/child-lifecycle.js';
+import { reportInterceptorDiagnostic } from './diagnostics.js';
 
 const logger = createLogger('InterceptorWorkerService');
 const COMMAND_TIMEOUT_MS = 2000;
@@ -84,6 +85,12 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
   const retiring = new Set<Promise<void>>();
   const eventSink = new InterceptorEventSink({ blockedPrompt: opts.emitBlockedPrompt, evaluation: opts.emitEvaluation });
 
+  function reportDiagnostics(batch: InterceptorDiagnosticBatch[] = []): void {
+    for (const { diagnostic, count } of batch) {
+      reportInterceptorDiagnostic(opts.onDiagnostic, diagnostic, count);
+    }
+  }
+
   function state(nextPort: number | null, active: boolean): void {
     port = nextPort;
     if (active !== managedActive) {
@@ -155,11 +162,13 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
         } else if (message.type === 'events') {
           mirror.merge(message.records);
           eventSink.enqueue(message.blockedPrompts, message.evaluationEntries ?? []);
+          reportDiagnostics(message.diagnostics);
           // ACK means finite sink admission (or an explicit counted drop), not an untracked Promise.
           current.postMessage({ type: 'ack', id: message.id } satisfies InterceptorWorkerCommand);
         } else if (message.type === 'final') {
           mirror.replace(message.records);
           eventSink.enqueue(message.blockedPrompts, message.evaluationEntries ?? []);
+          reportDiagnostics(message.diagnostics);
         } else if (message.type === 'child') {
           if (message.state.running) children.set(message.state.id, message.state);
           else children.delete(message.state.id);

@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createLogger } from '../../utils/logger.js';
 import type { EvaluateHookResponse, HookRequest } from '../types.js';
+import { reportInterceptorDiagnostic, type InterceptorDiagnosticObserver } from '../diagnostics.js';
 import {
   managedInterceptorPath,
   managedScriptFileName,
@@ -31,6 +32,7 @@ export interface ManagedInterceptorOptions {
   /** Cap for one managed regex match. A stuck pattern is killed, not run on this thread. */
   regexTimeoutMs?: number;
   onActiveChange?: (active: boolean) => void;
+  onDiagnostic?: InterceptorDiagnosticObserver;
 }
 
 interface Generation {
@@ -200,6 +202,7 @@ export class ManagedInterceptor {
           budgetMs: this.opts.budgetMs,
           regex: this.regex,
           regexTimeoutMs: this.opts.regexTimeoutMs,
+          onDiagnostic: this.opts.onDiagnostic,
         }),
         rulesById: new Map(next.rules.map(resolved => [resolved.rule.id, resolved])),
         files: new Set(next.rules.map(resolved => resolved.file)),
@@ -285,6 +288,9 @@ export class ManagedInterceptor {
     if (problem === this.lastProblem) return;
     this.lastProblem = problem;
     logger.warn('managed interceptor config ignored', { problem, active: this.active });
+    reportInterceptorDiagnostic(this.opts.onDiagnostic, {
+      code: 'config_rejected', source: 'cache', reason: 'cached interceptor config unreadable or invalid; previous generation kept',
+    });
   }
 
   private logResolution(pending: string[]): void {

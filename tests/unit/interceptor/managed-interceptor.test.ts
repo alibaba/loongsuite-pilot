@@ -425,7 +425,8 @@ describe('ManagedInterceptor pattern rules', () => {
         }],
       },
     }));
-    const c = new ManagedInterceptor({ dataDir, regexTimeoutMs: 80 });
+    const onDiagnostic = vi.fn();
+    const c = new ManagedInterceptor({ dataDir, regexTimeoutMs: 80, onDiagnostic });
     controllers.push(c);
     c.reload();
     let ticks = 0;
@@ -439,6 +440,9 @@ describe('ManagedInterceptor pattern rules', () => {
       evaluatedRules: ['catastrophic'],
     });
     clearInterval(timer);
+    expect(onDiagnostic).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'regex_timeout', source: 'regex', ruleId: 'catastrophic', ruleVersion: '1', limitMs: 80,
+    }), 1);
   });
 });
 

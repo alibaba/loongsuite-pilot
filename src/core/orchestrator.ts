@@ -12,6 +12,7 @@ import { resolveEnabledInterceptorTypes, shouldDeployInterceptorHooks } from '..
 import { clearInterceptorRuntime } from '../interceptor/daemon/runtime.js';
 import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
 import { startInterceptorWorker, type InterceptorWorkerService } from '../interceptor/worker-service.js';
+import { InterceptorAlarmReporter } from '../interceptor/diagnostics.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { resolveDeploymentScope, type DeploymentScopeMode } from '../deployment/deployment-scope.js';
@@ -189,6 +190,7 @@ export class Orchestrator extends EventEmitter {
   private pipelineManager: PipelineManager | null = null;
   private metricsWriter!: MetricsWriter;
   private alarmManager!: AlarmManager;
+  private interceptorAlarmReporter!: InterceptorAlarmReporter;
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
   private dashboardServer: DashboardServer | null = null;
@@ -256,6 +258,7 @@ export class Orchestrator extends EventEmitter {
     // 4. Build InputManager & AlarmManager
     const version = readInstalledVersion(this.dataDir);
     this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userId: this.config.userId });
+    this.interceptorAlarmReporter = new InterceptorAlarmReporter(this.alarmManager);
 
     this.inputManager.setFlusher(this.flusher);
     this.inputManager.setAlarmManager(this.alarmManager);
@@ -494,6 +497,7 @@ export class Orchestrator extends EventEmitter {
         mode: this.config.interceptor.mode,
         emitBlockedPrompt: (entry, signal) => this.inputManager.flushPreparedEntries([entry], signal),
         emitEvaluation: (entry, signal) => this.inputManager.flushPreparedEntries([entry], signal),
+        onDiagnostic: this.interceptorAlarmReporter.record,
       }).catch(err => {
         logger.warn('interceptor start failed (non-fatal)', { error: String(err) });
         return null;

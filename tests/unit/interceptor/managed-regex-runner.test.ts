@@ -31,6 +31,13 @@ describe('managed regex matching thread', () => {
     expect(matchingWorker(instance)).toBe(worker);
   });
 
+  it('returns execution timing measured inside the matching worker', async () => {
+    const onExecuted = vi.fn();
+    await expect(runner().test('hello', 'hello', 1_000, onExecuted)).resolves.toBe(true);
+    expect(onExecuted).toHaveBeenCalledWith(expect.any(Number));
+    expect(onExecuted.mock.calls[0][0]).toBeGreaterThanOrEqual(0);
+  });
+
   it('terminates catastrophic matches and exits each old thread before reusing a replacement', async () => {
     const instance = runner();
     for (let index = 0; index < 3; index += 1) {

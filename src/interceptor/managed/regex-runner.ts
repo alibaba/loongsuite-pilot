@@ -5,13 +5,15 @@ const logger = createLogger('ManagedRegexRunner');
 
 /** A separate Worker keeps RegExp backtracking off the HTTP event loop and can be terminated on timeout. */
 export const MANAGED_REGEX_TIMEOUT_MS = 200;
+export const MANAGED_REGEX_SLOW_MS = 50;
 
 const REGEX_WORKER_SOURCE = `
 const { parentPort } = require('node:worker_threads');
 parentPort.on('message', (job) => {
   try {
+    const started = performance.now();
     const matched = new RegExp(job.pattern).test(job.text);
-    parentPort.postMessage({ id: job.id, matched });
+    parentPort.postMessage({ id: job.id, matched, executionMs: performance.now() - started });
   } catch (err) {
     parentPort.postMessage({ id: job.id, error: err instanceof Error ? err.message : String(err) });
   }
@@ -29,6 +31,7 @@ interface RegexReply {
   id?: number;
   matched?: boolean;
   error?: string;
+  executionMs?: number;
 }
 
 /** One reused matching thread, owned and timed by the interceptor Worker. */
@@ -42,14 +45,14 @@ export class ManagedRegexRunner {
 
   constructor(private readonly timeoutMs = MANAGED_REGEX_TIMEOUT_MS) {}
 
-  test(pattern: string, text: string, timeoutMs = this.timeoutMs): Promise<boolean> {
+  test(pattern: string, text: string, timeoutMs = this.timeoutMs, onExecuted?: (executionMs: number) => void): Promise<boolean> {
     if (this.stopped) return Promise.reject(new ManagedRegexTimeoutError());
     // Queue and replacement-thread startup time both count against the request.
     const deadline = Date.now() + Math.max(1, timeoutMs);
     const run = this.tail.then(() => {
       const remaining = deadline - Date.now();
       if (remaining <= 0 || this.stopped) return Promise.reject(new ManagedRegexTimeoutError());
-      return this.runOne(pattern, text, remaining);
+      return this.runOne(pattern, text, remaining, onExecuted);
     });
     this.tail = run.then(() => undefined, () => undefined);
     return run;
@@ -61,7 +64,7 @@ export class ManagedRegexRunner {
     if (this.worker) this.retire(this.worker);
   }
 
-  private runOne(pattern: string, text: string, timeoutMs: number): Promise<boolean> {
+  private runOne(pattern: string, text: string, timeoutMs: number, onExecuted?: (executionMs: number) => void): Promise<boolean> {
     return new Promise((resolve, reject) => {
       let worker: Worker | null = null;
       let settled = false;
@@ -76,6 +79,9 @@ export class ManagedRegexRunner {
       };
       const onMessage = (reply: RegexReply) => {
         if (reply.id !== id) return;
+        if (typeof reply.executionMs === 'number') {
+          try { onExecuted?.(reply.executionMs); } catch { /* Monitoring cannot change a match. */ }
+        }
         finish(reply.error ? new Error(reply.error) : undefined, reply.matched);
       };
       const timer = setTimeout(() => {

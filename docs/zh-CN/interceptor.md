@@ -67,6 +67,26 @@ collector 进程内 interceptor HTTP（127.0.0.1）
 - 构建产物：`dist/interceptor/cli.cjs`、`dist/interceptor/worker.cjs`；`dist/interceptor/daemon.cjs` 保留为独立兼容入口，collector 不再直接调用它。
 - 规则开关：`config.json` 的 `interceptor.mode` 在 collector **启动时读一次**；`configs/managed/interceptor.json` 的本地规则每 3 秒热更新（见 [本地文件规则](#本地文件规则)）
 
+## 拦截自监控告警
+
+启用拦截后，本地托管规则缓存不可读或非法时进入 `MANAGED_CONFIG_ALARM`，
+并继续保留内存中上一版有效规则。
+正则在匹配 Worker 内执行耗时达到 50ms 时产生 `INTERCEPTOR_REGEX_ALARM`（`code=regex_slow`）。
+正则请求超过预算（默认 200ms，包含排队及 Worker 启动时间）时记录 `code=regex_timeout`，
+继续按原有逻辑跳过当前规则；其他匹配线程故障记录 `code=regex_failed`。
+
+两类告警级别均为 2，`input_name=interceptor`，`endpoint_name` 为诊断 code。
+`alarm_message` 是 JSON，包含诊断来源、原因分类，以及适用的配置版本、规则 ID/版本、耗时和阈值；
+不携带 prompt、正则正文、配置/脚本内容或凭证。详细校验错误仍在本地日志中。
+告警沿用 collector 的 30 秒刷新链路，落到 `logs/metric_alarm/pilot-alarms-YYYY-MM-DD.jsonl`。
+开源构建只落本地文件；远端上报由发行版的 alarm sender 实现负责。
+
+为避免重复上报，每个 collector 中同一诊断 code 首次立即入队，之后冷却 10 分钟；
+规则 ID 或版本变化不会绕过冷却。窗口内仅累计次数，冷却结束后再次出现该类异常时，
+`alarm_count` 包含此前被抑制的次数。若异常不再出现，不会定时补发历史异常；collector 重启会重置冷却。
+Worker 重启不重置冷却。Worker 转发仍受单批 ACK 背压限制，并按固定诊断 code 合并、保留次数，
+不会因规则数量或异常请求量增长无限队列。
+
 ## Qoder 协议
 
 ### Worker 与采集线程
