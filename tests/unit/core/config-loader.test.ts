@@ -2271,7 +2271,7 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,
         otlpTrace: {
-          traceEndpoint: 'http://collector:4318/v1/traces',
+          traceEndpoint: 'http://collector:4318/v1/traces?unused=true',
           headers: { Authorization: 'token' },
         },
       });
@@ -2287,7 +2287,7 @@ describe('ConfigLoader', () => {
 
       expect(result!.endpoints).toHaveLength(1);
       expect(result!.endpoints[0]).toMatchObject({
-        traceEndpoint: 'http://collector:4318/v1/traces',
+        traceEndpoint: 'http://collector:4318/v1/traces?unused=true',
       });
     });
 

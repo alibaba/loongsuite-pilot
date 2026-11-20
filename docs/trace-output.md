@@ -55,7 +55,7 @@ source, output, installed-runtime and cloud evidence.
 |---------|-------------|
 | `collectTrace` | Master switch for trace export. |
 | `serviceName` | Exact `service.name` shared by every agent, OTLP backend, and SLS backend. |
-| `otlpTrace.traceEndpoint` | Full OTLP HTTP trace URL. Its path, including a trailing slash, is used as configured. Takes precedence over `endpoint`. |
+| `otlpTrace.traceEndpoint` | Full OTLP HTTP trace URL. Its path, including a trailing slash, is used as configured. Takes precedence over `endpoint`. Use `headers` for authentication because the HTTP exporter uses the URL's scheme, host, port, and path. |
 | `otlpTrace.endpoint` | Legacy trace base URL. Pilot appends `/v1/traces` when needed. |
 | `otlpTrace.headers` | Headers sent to the OTLP endpoint. |
 | `otlpTrace.serviceName` | Legacy trace-only service-name base. Pilot appends `-<agentType>`; top-level `serviceName` takes precedence and disables the suffix. |
@@ -242,7 +242,7 @@ Managed/hosted deployments can push extra trace backends via `~/.loongsuite-pilo
 |-------|-----------|-------------|
 | `serviceNamePrefix` | top-level | Service-name prefix for **all** managed backends — trace (`otlp[]`/`cms[]`, as `service.name`) and log (`sls[]`, as the `__service_name__` tag) — keeping them distinct from user backends. Optional; falls back to the user `serviceNamePrefix` when omitted (no differentiation). A user-configured top-level `serviceName` overrides this prefix. |
 | `otlp[].name` / `cms[].name` | both | Label used in logs and in the per-backend failed-log filename. Optional (defaults to `inner-otlp-<i>` / `inner-cms-<i>`). |
-| `otlp[].traceEndpoint` | otlp | Full OTLP HTTP trace URL. Its path, including a trailing slash, is used as configured. Takes precedence over `endpoint`. |
+| `otlp[].traceEndpoint` | otlp | Full OTLP HTTP trace URL. Its path, including a trailing slash, is used as configured. Takes precedence over `endpoint`. Use `headers` for authentication. |
 | `otlp[].endpoint` | otlp | Legacy trace base URL (`/v1/traces` auto-appended). |
 | `otlp[].headers` | otlp | Request headers (e.g. auth token). |
 | `otlp[].compression` | otlp | `gzip` (default) or `none`. |

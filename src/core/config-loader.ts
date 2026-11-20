@@ -1187,8 +1187,8 @@ function dedupOtlpEndpoints(endpoints: OtlpEndpoint[]): OtlpEndpoint[] {
     const traceRoute = resolveOtlpTraceUrl(ep);
     if (!traceRoute) continue;
     const requestUrl = new URL(traceRoute);
-    requestUrl.hash = '';
-    const key = `${requestUrl.href}|${commonKey}`;
+    // OTLP/HTTP uses the origin and path. Compare the route on the wire.
+    const key = `${requestUrl.origin}${requestUrl.pathname}|${commonKey}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(ep);

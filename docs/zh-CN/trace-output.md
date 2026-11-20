@@ -50,7 +50,7 @@ checkpoint 等待持久接收，退出不导出半轮。确认记录保留最近
 |--------|------|
 | `collectTrace` | Trace 上报总开关。 |
 | `serviceName` | 所有 Agent、OTLP 后端和 SLS 后端共用的唯一 `service.name`。 |
-| `otlpTrace.traceEndpoint` | 完整的 OTLP HTTP Trace 地址，其路径（包括末尾 `/`）按配置使用；优先于 `endpoint`。 |
+| `otlpTrace.traceEndpoint` | 完整的 OTLP HTTP Trace 地址，优先于 `endpoint`。HTTP 导出器使用协议、主机、端口和路径，保留路径末尾的 `/`。认证信息通过 `headers` 配置。 |
 | `otlpTrace.endpoint` | 兼容旧配置的 Trace 基础地址，Pilot 会按需追加 `/v1/traces`。 |
 | `otlpTrace.headers` | 发送到 OTLP endpoint 的请求头。 |
 | `otlpTrace.serviceName` | 兼容原有行为的 Trace 服务名基础值，Pilot 会追加 `-<agentType>`；顶层 `serviceName` 优先并关闭该后缀。 |
@@ -224,7 +224,7 @@ Trace 导出会把**同一批**转换后的 span **同时**发往**所有**已�
 |------|------|------|
 | `serviceNamePrefix` | 顶层 | **所有**托管后端的 service name 前缀——trace(`otlp[]`/`cms[]`,作为 `service.name`)与 log(`sls[]`,作为 `__service_name__` tag)——用于与用户后端区分。可选;省略时回退到用户的 `serviceNamePrefix`(即不做区分)。用户配置的顶层 `serviceName` 会覆盖此前缀。 |
 | `otlp[].name` / `cms[].name` | 两者 | 用于日志与失败日志文件名的标签。可选(默认 `inner-otlp-<i>` / `inner-cms-<i>`)。 |
-| `otlp[].traceEndpoint` | otlp | 完整的 OTLP HTTP Trace 地址，其路径（包括末尾 `/`）按配置使用；优先于 `endpoint`。 |
+| `otlp[].traceEndpoint` | otlp | 完整的 OTLP HTTP Trace 地址，优先于 `endpoint`。路径保留末尾的 `/`，认证信息通过 `headers` 配置。 |
 | `otlp[].endpoint` | otlp | 兼容旧配置的 Trace 基础地址（自动补 `/v1/traces`）。 |
 | `otlp[].headers` | otlp | 请求 header(如鉴权 token)。 |
 | `otlp[].compression` | otlp | `gzip`(默认)或 `none`。 |
