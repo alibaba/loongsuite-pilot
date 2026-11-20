@@ -220,6 +220,66 @@ describe('KiroDesktopSessionInput', () => {
     expect(await input.collectOnce()).toEqual([]);
   });
 
+  it.each([false, true])('resumes a runtime file completed while stopped, first observed empty=%s', async (empty) => {
+    const statePath = path.join(tmpDir, 'new-source-state.json');
+    const state = new StateStore(statePath);
+    await state.load();
+    const first = makeInput(state);
+    await first.baselineOnce();
+    const file = await writeSessionFile('hash-new-partial', 'sess_new_partial', []);
+    const key = `kiro-desktop-session:${file}`;
+    const inode = (await fs.stat(file)).ino;
+    const id = 'first-partial';
+    const content = 'New source 🧪';
+    const line = Buffer.from(JSON.stringify({
+      id, timestamp: '2026-07-20T03:15:00.500Z',
+      payload: { type: 'assistant', executionId: 'new-source-turn', operationType: 'Say', content },
+    }) + '\n');
+    const cut = line.indexOf(Buffer.from('🧪')) + 2;
+    if (!empty) await fs.appendFile(file, line.subarray(0, cut));
+    expect(await first.collectOnce()).toEqual([]);
+    await state.save();
+
+    // The sole poll observed an empty or incomplete file. Kiro finishes it
+    // while Pilot is down, before the next instance can inspect the end.
+    await fs.appendFile(file, empty ? line : line.subarray(cut));
+    const restored = new StateStore(statePath);
+    await restored.load();
+    expect(restored.get(key)).toMatchObject({ lastOffset: 0, extra: { inode } });
+    const restarted = makeInput(restored);
+    await restarted.baselineOnce();
+    const entries = await restarted.collectOnce();
+    expect(entries.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(entries[1]['gen_ai.output.messages']).toEqual([{ role: 'assistant', parts: [{ type: 'text', content }] }]);
+    expect(entries[1]['event.id']).toBe(createHash('sha256').update(`${file}::${id}::llm-resp`).digest('hex').slice(0, 32));
+    expect(restored.getOffset(key)).toBe(line.length);
+    expect(await restarted.collectOnce()).toEqual([]);
+  });
+
+  it('keeps the archived prompts with their own turns across unscoped session_pause rows', async () => {
+    const input = makeInput();
+    await input.baselineOnce();
+    const file = await writeSessionFile('hash-archived-gap', 'sess_archived_gap', REAL_FIXTURE_LINES.slice(0, 2));
+    expect(await input.collectOnce()).toEqual([]);
+    expect(stateStore.getOffset(`kiro-desktop-session:${file}`)).toBe(0);
+    await fs.appendFile(file, REAL_FIXTURE_LINES.slice(2).join('\n') + '\n');
+    const output = await input.collectOnce();
+
+    const expected = [[0, 1], [6, 7]].map(([user, start]) => ({
+      id: JSON.parse(REAL_FIXTURE_LINES[start]).payload.executionId,
+      messages: [{ role: 'user', parts: [{ type: 'text', content: JSON.parse(REAL_FIXTURE_LINES[user]).payload.content }] }],
+    }));
+    for (const [eventName, attr] of [
+      ['other', 'gen_ai.input.messages'], ['llm.request', 'gen_ai.input.messages_delta'],
+    ] as const) {
+      expect(output.filter(entry => entry['event.name'] === eventName && entry[attr] !== undefined)
+        .map(entry => ({ id: entry['gen_ai.turn.id'], messages: entry[attr] }))).toEqual(expected);
+    }
+    expect(output.some(entry => entry['agent.kiro_event_type'] === 'session_event')).toBe(false);
+    expect(stateStore.getOffset(`kiro-desktop-session:${file}`)).toBe((await fs.stat(file)).size);
+    expect(await input.collectOnce()).toEqual([]);
+  });
+
   it('collects completed turns appended to a tracked file while Pilot is stopped', async () => {
     const file = await writeSessionFile('hash-resume', 'sess_resume', REAL_FIXTURE_LINES);
     await makeInput().baselineOnce();

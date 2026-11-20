@@ -137,15 +137,12 @@ export class KiroDesktopSessionInput extends BaseSessionInput {
     } catch {
       return [];
     }
+    if (!stat.isFile()) return [];
 
     const prevState = this.stateStore.get(stateKey);
-    const prevInode = prevState.extra?.inode as number | undefined;
-    if (prevInode !== undefined && prevInode !== (stat as any).ino) {
-      this.stateStore.setOffset(stateKey, 0);
-      this.stateStore.update(stateKey, { extra: { inode: (stat as any).ino } });
-    }
-
-    let offset = this.stateStore.getOffset(stateKey);
+    const prevInode = prevState.extra?.inode;
+    const prevOffset = prevState.lastOffset ?? 0;
+    let offset = prevInode !== undefined && prevInode !== stat.ino ? 0 : prevOffset;
     if (offset > 0 && stat.size < offset) {
       this.logger.info('file truncated or rotated, resetting offset', {
         file: filePath,
@@ -153,8 +150,11 @@ export class KiroDesktopSessionInput extends BaseSessionInput {
         actual: stat.size,
       });
       offset = 0;
-      this.stateStore.setOffset(stateKey, 0);
-      this.stateStore.update(stateKey, { extra: { inode: Number((stat as any).ino) } });
+    }
+    // A newly discovered file can contain no complete rows yet. Track it
+    // before returning so startup keeps its cursor when it grows offline.
+    if (prevInode !== stat.ino || offset !== prevOffset) {
+      this.stateStore.update(stateKey, { lastOffset: offset, extra: { inode: stat.ino } });
     }
     if (stat.size <= offset) return [];
 
@@ -192,9 +192,7 @@ export class KiroDesktopSessionInput extends BaseSessionInput {
       if (pendingPrompt) records.length = pendingPrompt.recordIndex;
       const entries = await this.processTurnBatch(records, filePath);
       const lastOffset = offset + (pendingPrompt?.offset ?? completeBytes);
-      if (lastOffset !== offset || prevInode !== stat.ino) {
-        this.stateStore.update(stateKey, { lastOffset, extra: { inode: stat.ino } });
-      }
+      if (lastOffset !== offset) this.stateStore.setOffset(stateKey, lastOffset);
       return entries;
     } finally {
       await handle.close();
@@ -632,14 +630,9 @@ function groupByTurn(records: Record<string, unknown>[]): TurnGroup[] {
   for (const rec of records) {
     const payload = asRecord(rec.payload);
     const executionId = stringValue(payload.executionId);
-    if (executionId === undefined) {
-      if (!current || current.executionId !== undefined) {
-        current = { executionId: undefined, records: [] };
-        groups.push(current);
-      }
-      current.records.push(rec);
-      continue;
-    }
+    // Session metadata without an execution ID is dropped by emission. It
+    // must not split a turn or consume a prompt that is waiting for a turn.
+    if (executionId === undefined && payload.type !== 'user') continue;
     if (!current || current.executionId !== executionId) {
       current = { executionId, records: [] };
       groups.push(current);
