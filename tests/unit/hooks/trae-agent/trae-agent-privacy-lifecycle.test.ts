@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, expect, test } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { InputManager } from '../../../../src/core/input-manager.js';
 import { WorkspacePolicy } from '../../../../src/core/workspace-policy.js';
+import { CodexTurnJournal } from '../../../../src/flushers/codex-turn-journal.js';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
 import { TraeAgentTrajectoryInput } from '../../../../src/inputs/trae-agent-trajectory/trae-agent-trajectory-input.js';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
@@ -75,7 +76,7 @@ test('honors a configured workspace and rejects unproven or excluded Trae source
   manager.setWorkspacePolicy(policy);
   const [entry] = entries;
   expect(manager.prepareRestoredEntries([
-    { ...entry, 'workspace.path': undefined },
+    { ...entry, 'gen_ai.session.id': 'unknown-session', 'workspace.path': undefined },
     { ...entry, 'gen_ai.session.id': 'excluded-session', 'workspace.path': excluded },
     entry,
   ])).toEqual([entry]);
@@ -94,7 +95,59 @@ test.skipIf(process.platform === 'win32')('does not read a trajectory symlink in
   const { input } = await newInput(nativeDir, project, true);
   input.setWorkspacePolicy(new WorkspacePolicy([excluded]));
   expect(await collectAndQueue(input)).toEqual([]);
+
+  const nested = path.join(excluded, 'nested');
+  await mkdir(nested);
+  await symlink(nested, path.join(nativeDir, 'alias'));
+  const pathWithParent = `${nativeDir}/alias/../trajectory.json`;
+  expect(await realpath(pathWithParent)).toBe(await realpath(privateFile));
+  const { input: pinned } = await newInput(pathWithParent, project);
+  pinned.setWorkspacePolicy(new WorkspacePolicy([excluded]));
+  expect(await collectAndQueue(pinned)).toEqual([]);
 });
+
+test.each(['source', 'workspace', 'legacy', 'mixed', 'allowed', 'legacy-without-exclusions'])(
+  'rechecks Trae provenance after a durable journal restart (%s)', async scenario => {
+    const project = path.join(temporary, 'project');
+    const central = path.join(temporary, 'central');
+    await mkdir(project);
+    await mkdir(central);
+    const trajectory = path.join(central, 'trajectory.json');
+    await writeFile(trajectory, await readFile(failedFixture));
+    const sourcePath = await realpath(trajectory);
+    const { input } = await newInput(trajectory, project);
+    const records = await collectAndQueue(input);
+    expect(records).toHaveLength(2);
+    expect(records.every(record => record['agent.trajectory.source.path'] === sourcePath)).toBe(true);
+
+    const journalDir = path.join(temporary, 'pending');
+    const journal = () => new CodexTurnJournal(journalDir, 100, ['codex', 'hermes', 'openclaw', 'trae-agent']);
+    await journal().append(records.map((record, index) =>
+      scenario === 'legacy' || scenario === 'legacy-without-exclusions' || (scenario === 'mixed' && index === 1)
+        ? { ...record, 'agent.trajectory.source.path': undefined } : record));
+    await unlink(trajectory);
+
+    const exclusion = scenario === 'source' ? central : scenario === 'workspace' ? project : path.join(temporary, 'other');
+    const manager = new InputManager();
+    manager.setWorkspacePolicy(new WorkspacePolicy(scenario === 'legacy-without-exclusions' ? [] : [exclusion]));
+    const spans: ReadableSpan[] = [];
+    const flusher = new OtlpTraceFlusher({ enabled: true, serviceName: 'trae-replay-test',
+      protocol: 'http/protobuf', endpoints: [{ endpoint: 'http://localhost:4318/v1/traces', headers: {} }],
+    }, undefined, () => ({
+      export(batch, done) { spans.push(...batch); done({ code: 0 }); },
+      shutdown: async () => {},
+    }), journal(), batch => manager.prepareRestoredEntries(batch));
+    try {
+      await flusher.start();
+      await flusher.flush();
+    } finally {
+      await flusher.shutdown();
+    }
+    const expected = scenario === 'allowed' || scenario === 'legacy-without-exclusions' ? ['AGENT', 'ENTRY'] : [];
+    expect(spans.map(span => span.attributes['gen_ai.span.kind']).sort()).toEqual(expected);
+    expect((await readdir(journalDir)).some(name => name.startsWith('codex-turn-') && name.endsWith('.jsonl'))).toBe(false);
+  },
+);
 
 test('exports a finalized pre-response failure once without synthesizing model or tool spans', async () => {
   const trajectoryFile = path.join(temporary, 'trajectory.json');

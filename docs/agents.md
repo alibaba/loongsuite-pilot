@@ -173,9 +173,16 @@ trae-cli interactive --trajectory-file "$HOME/.trae-agent/trajectories/trajector
 Alternatively, set `listeners["trae-agent-trajectory"].trajectoryDir` in
 `config.json` to the absolute directory used by trae-agent. With workspace
 exclusions enabled, Trae Agent collection requires an explicit `workspaceRoot`
-because the native snapshots do not identify a workspace. Point each configured
-trajectory source at files belonging to that workspace. Pilot replays existing
-matching trajectory files on first discovery and keeps a checkpoint per run. Unless an
+because the native snapshots do not identify a workspace. This setting is the
+operator's assertion that every run in each configured file belongs to that
+workspace. An interactive session can change its working directory between
+prompts, so keep its workspace fixed when writing to a scoped source. Use
+dedicated files or directories for runs from different workspaces.
+
+Pilot checks the resolved source file and the declared workspace before
+collection and again before pending trace replay. When exclusions are active,
+older pending runs missing either path are discarded. Pilot replays existing
+matching files on first discovery and keeps a checkpoint per run. Unless an
 exact top-level `serviceName` is configured, the exported service is named
 `<serviceNamePrefix>-trae-agent`.
 

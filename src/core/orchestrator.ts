@@ -1956,10 +1956,10 @@ export class Orchestrator extends EventEmitter {
     const traeWorkspaceRoot = traeListenerCfg?.workspaceRoot;
     const traeDefaultDir = TraeAgentTrajectoryInput.getDefaultTrajectoryDir(traeWorkspaceRoot);
     const traeExplicitFile = traeListenerCfg?.trajectoryFile
-      ? resolveHome(traeListenerCfg.trajectoryFile)
+      ? resolveHome(traeListenerCfg.trajectoryFile, { preservePathSegments: true })
       : undefined;
     const traeTrajectoryDir = traeListenerCfg?.trajectoryDir
-      ? resolveHome(traeListenerCfg.trajectoryDir)
+      ? resolveHome(traeListenerCfg.trajectoryDir, { preservePathSegments: true })
       : traeDefaultDir;
     // When an explicit file is pinned, poll exactly it (no dir discovery);
     // otherwise pass the dir as the required fallback path and let

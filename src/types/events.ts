@@ -152,6 +152,8 @@ export interface AgentActivityEntry {
   'workspace.current_root'?: string;
   /** Absolute working directory the agent ran in (process cwd), independent of git. */
   'workspace.path'?: string;
+  /** Canonical native trajectory path observed before reading. */
+  'agent.trajectory.source.path'?: string;
   'error.type'?: string;
   'error.message'?: string;
   /** Dynamic OTLP resource attributes emitted by hook processors. */

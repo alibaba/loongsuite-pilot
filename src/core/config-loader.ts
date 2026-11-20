@@ -859,7 +859,8 @@ function buildListenersConfig(
       if (trajectoryDir !== undefined) merged.trajectoryDir = trajectoryDir;
       if (trajectoryFile !== undefined) merged.trajectoryFile = trajectoryFile;
       if (key === 'trae-agent-trajectory' && val.workspaceRoot !== undefined) {
-        const workspaceRoot = typeof val.workspaceRoot === 'string' ? resolveHome(val.workspaceRoot.trim()) : '';
+        const workspaceRoot = typeof val.workspaceRoot === 'string'
+          ? resolveHome(val.workspaceRoot.trim(), { preservePathSegments: true }) : '';
         if (path.isAbsolute(workspaceRoot)) {
           merged.workspaceRoot = workspaceRoot;
         } else {

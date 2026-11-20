@@ -144,8 +144,13 @@ trae-cli interactive --trajectory-file "$HOME/.trae-agent/trajectories/trajector
 也可以在 `config.json` 中将
 `listeners["trae-agent-trajectory"].trajectoryDir` 设置为 trae-agent 实际使用的
 绝对目录。原生快照不记录工作区，因此启用工作区排除规则时，必须提供
-`workspaceRoot`，并确保所配置的数据源只包含该工作区的轨迹。Pilot 首次发现目录时
-会回放已有的匹配文件，并按逻辑 run 隔离 checkpoint。
+`workspaceRoot`。这个配置由操作者确认每个采集文件里的运行都属于该工作区。
+交互模式可以在不同提示间切换工作目录，写入已绑定工作区的文件时请固定工作目录，
+不同工作区的运行使用各自的文件或目录。
+
+采集和待导出 trace 回放前，Pilot 会检查解析后的文件路径和声明的工作区。
+启用排除规则时，缺少任一路径的旧待导出运行会被丢弃。Pilot 首次发现目录时会回放
+已有的匹配文件，并按逻辑 run 隔离 checkpoint。
 如果未配置顶层精确 `serviceName`，最终上报服务名为
 `<serviceNamePrefix>-trae-agent`。
 

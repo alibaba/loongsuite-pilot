@@ -11,6 +11,11 @@ export interface TrajectoryPollingOptions extends InputOptions {
   /** Polling interval, defaults to 30s via BaseInput. */
 }
 
+export interface TrajectorySource {
+  file: string;
+  stat: fsSync.Stats;
+}
+
 const TRAJECTORY_STATE_VERSION = 3;
 const RUN_ID_PREFIX = 'trajectory-run-v3:';
 const MAX_SNAPSHOT_BYTES_PER_POLL = 64 * 1024 * 1024;
@@ -57,7 +62,7 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
     this.trajectoryFile = opts.trajectoryFile;
   }
 
-  protected async collect(): Promise<AgentActivityEntry[]> {
+  protected async collect(workspaceRoot?: string): Promise<AgentActivityEntry[]> {
     this.pendingCheckpoint = undefined;
     const trajectoryFiles = await this.resolveTrajectoryFiles();
     const entries: AgentActivityEntry[] = [];
@@ -75,9 +80,8 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
     this.nextTrajectoryIndex = 0;
     for (let scanned = 0; scanned < trajectoryFiles.length; scanned++) {
       const index = (offset + scanned) % trajectoryFiles.length;
-      const trajectoryFile = trajectoryFiles[index];
+      const { file: trajectoryFile, stat } = trajectoryFiles[index];
       try {
-        const stat = await fs.stat(trajectoryFile);
         if (!stat.isFile() || stat.size === 0) continue;
         const fingerprint = this.trajectoryFingerprint(stat);
         if (fingerprintsByFile.get(trajectoryFile) === fingerprint) continue;
@@ -96,7 +100,11 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
         const result = await this.processTrajectoryFile(trajectoryFile, stat, fingerprint, checkpoint ?? {});
         if (!result) continue;
         checkpoint = result.checkpoint;
-        for (const entry of result.entries) entries.push(entry);
+        for (const entry of result.entries) {
+          entries.push(workspaceRoot ? {
+            ...entry, 'agent.trajectory.source.path': trajectoryFile, 'workspace.path': workspaceRoot,
+          } : entry);
+        }
       } catch (err) {
         // One corrupt or concurrently-removed file must not block other runs
         // discovered in the same polling cycle.
@@ -141,6 +149,8 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
     try {
       const opened = await file.stat();
       if (!opened.isFile() || this.trajectoryFingerprint(opened) !== currentFp) return;
+      const current = await this.resolveTrajectorySource(trajectoryFile);
+      if (current?.file !== trajectoryFile || this.trajectoryFingerprint(current.stat) !== currentFp) return;
       raw = Buffer.allocUnsafe(opened.size);
       for (let offset = 0; offset < raw.length;) {
         const { bytesRead } = await file.read(raw, offset, raw.length - offset, offset);
@@ -437,9 +447,24 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
    * default preserves the historical single-file contract; directory-backed
    * subclasses can override this to return all matching files in stable order.
    */
-  protected async resolveTrajectoryFiles(): Promise<string[]> {
+  protected async resolveTrajectoryFiles(): Promise<TrajectorySource[]> {
     const trajectoryFile = await this.resolveTrajectoryFile();
-    return trajectoryFile ? [trajectoryFile] : [];
+    const source = trajectoryFile ? await this.resolveTrajectorySource(trajectoryFile) : undefined;
+    return source ? [source] : [];
+  }
+
+  protected async resolveTrajectorySource(path: string): Promise<TrajectorySource | undefined> {
+    try {
+      const file = await fs.realpath(path);
+      if (this.workspacePolicy.excludes(file)) return undefined;
+      const stat = await fs.stat(file);
+      return stat.isFile() ? { file, stat } : undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.logger.warn('trajectory source could not be resolved', { code: (error as NodeJS.ErrnoException).code });
+      }
+      return undefined;
+    }
   }
 
   /**

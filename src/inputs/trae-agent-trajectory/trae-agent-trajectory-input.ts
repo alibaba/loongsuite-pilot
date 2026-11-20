@@ -9,6 +9,7 @@ import {
   type TrajectoryEmitContext,
   type TrajectoryJson,
   type TrajectoryPollingOptions,
+  type TrajectorySource,
 } from '../base/base-trajectory-polling-input.js';
 
 const DEFAULT_TRAJECTORY_DIR = '~/.trae-agent/trajectories';
@@ -87,9 +88,9 @@ export class TraeAgentTrajectoryInput extends BaseTrajectoryPollingInput {
   private converter: ConverterModule | null = null;
 
   constructor(opts: TraeAgentTrajectoryOptions) {
-    super(opts);
+    super({ ...opts, trajectoryFile: resolveHome(opts.trajectoryFile, { preservePathSegments: true }) });
     this.converterPath = opts.converterPath;
-    this.trajectoryDir = opts.trajectoryDir ? resolveHome(opts.trajectoryDir) : undefined;
+    this.trajectoryDir = opts.trajectoryDir ? resolveHome(opts.trajectoryDir, { preservePathSegments: true }) : undefined;
     this.trajectoryFilePattern = opts.trajectoryFilePattern ?? DEFAULT_TRAJECTORY_FILE_PATTERN;
     this.workspaceRoot = opts.workspaceRoot && path.isAbsolute(opts.workspaceRoot) ? opts.workspaceRoot : undefined;
   }
@@ -103,7 +104,8 @@ export class TraeAgentTrajectoryInput extends BaseTrajectoryPollingInput {
   }
 
   static getDefaultTrajectoryDir(workspaceRoot?: string): string {
-    return workspaceRoot ? path.join(workspaceRoot, 'trajectories') : resolveHome(DEFAULT_TRAJECTORY_DIR);
+    if (!workspaceRoot) return resolveHome(DEFAULT_TRAJECTORY_DIR);
+    return workspaceRoot.endsWith(path.sep) ? `${workspaceRoot}trajectories` : `${workspaceRoot}${path.sep}trajectories`;
   }
 
   /**
@@ -113,53 +115,46 @@ export class TraeAgentTrajectoryInput extends BaseTrajectoryPollingInput {
    * checkpoints make repeated scans idempotent. Without a directory, preserve
    * the fixed-file behavior.
    */
-  protected async resolveTrajectoryFiles(): Promise<string[]> {
-    if (!this.trajectoryDir) {
-      return this.trajectoryFile && !this.workspacePolicy.excludes(path.resolve(this.trajectoryFile))
-        ? [this.trajectoryFile] : [];
-    }
-    if (this.workspacePolicy.excludes(path.resolve(this.trajectoryDir))) return [];
+  protected async resolveTrajectoryFiles(): Promise<TrajectorySource[]> {
+    if (!this.trajectoryDir) return super.resolveTrajectoryFiles();
+    let directory: string;
     let names: string[];
     try {
-      names = await fs.readdir(this.trajectoryDir);
+      directory = await fs.realpath(this.trajectoryDir);
+      if (this.workspacePolicy.excludes(directory)) return [];
+      names = await fs.readdir(directory);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
         this.logger.warn('trajectory dir scan failed', { dir: this.trajectoryDir, error: String(err) });
       }
       return [];
     }
-    const discovered: Array<{ file: string; mtimeMs: number }> = [];
+    const discovered = new Map<string, TrajectorySource>();
     for (const name of names) {
       this.trajectoryFilePattern.lastIndex = 0;
       if (!this.trajectoryFilePattern.test(name)) continue;
-      const full = path.join(this.trajectoryDir, name);
-      if (this.workspacePolicy.excludes(path.resolve(full))) continue;
-      try {
-        const st = await fs.stat(full);
-        if (st.isFile()) discovered.push({ file: full, mtimeMs: st.mtimeMs });
-      } catch {
-        // A file that vanished mid-scan is simply skipped this cycle.
-      }
+      const source = await this.resolveTrajectorySource(path.join(directory, name));
+      if (source) discovered.set(source.file, source);
     }
-    discovered.sort((a, b) => a.mtimeMs - b.mtimeMs || a.file.localeCompare(b.file));
-    return discovered.map(item => item.file);
+    return [...discovered.values()].sort((a, b) => a.stat.mtimeMs - b.stat.mtimeMs || a.file.localeCompare(b.file));
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
-    if (this.workspacePolicy.enabled && !this.workspaceRoot) {
+    const resolvedRoot = this.workspaceRoot ? await fs.realpath(this.workspaceRoot).catch(() => undefined) : undefined;
+    const workspaceRoot = resolvedRoot && await directoryExists(resolvedRoot) ? resolvedRoot : undefined;
+    if (this.workspacePolicy.enabled && !workspaceRoot) {
       if (!this.reportedUnknownWorkspace) {
         this.logger.warn('Trae Agent trajectory collection requires workspaceRoot when workspace exclusions are active');
         this.reportedUnknownWorkspace = true;
       }
       return [];
     }
-    if (this.workspaceRoot && this.workspacePolicy.excludes(this.workspaceRoot)) return [];
+    if (workspaceRoot && this.workspacePolicy.excludes(workspaceRoot)) return [];
     if (!this.converter) {
       const url = pathToFileURL(this.converterPath).href;
       this.converter = (await import(url)) as unknown as ConverterModule;
     }
-    const entries = await super.collect();
-    return this.workspaceRoot ? entries.map(entry => ({ ...entry, 'workspace.path': this.workspaceRoot })) : entries;
+    return super.collect(workspaceRoot);
   }
 
   protected async parseTrajectory(

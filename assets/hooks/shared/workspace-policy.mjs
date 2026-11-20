@@ -50,7 +50,7 @@ function within(candidate, root) {
   const relative = path.relative(root, candidate);
   return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
-/** Shared by inputs and output dispatch. Unknown workspaces intentionally fail open. */
+/** Shared by inputs and output dispatch. Trae trajectories require source provenance. */
 export class WorkspacePolicy {
   stateDirectory;
   roots;
@@ -118,11 +118,18 @@ export class WorkspacePolicy {
     const directories = [
       ...strings(record['workspace.path']), ...strings(record.cwd), ...strings(record.workspace_roots),
     ];
+    const workspace = record['workspace.path'];
+    const source = agent === 'trae-agent' ? record['agent.trajectory.source.path'] : undefined;
+    const unprovenTrajectory = agent === 'trae-agent' && (
+      typeof workspace !== 'string' || !path.isAbsolute(workspace)
+      || typeof source !== 'string' || !path.isAbsolute(source)
+    );
+    if (typeof source === 'string') directories.push(source);
     for (const [name, value] of Object.entries(record)) {
       if (/^agent\.[^.]+\.(cwd|workspace_roots)$/.test(name))
         directories.push(...strings(value));
     }
-    if (!directories.some(directory => this.excludes(directory)))
+    if (!unprovenTrajectory && !directories.some(directory => this.excludes(directory)))
       return true;
     if (key) {
       this.blocked.add(key);
