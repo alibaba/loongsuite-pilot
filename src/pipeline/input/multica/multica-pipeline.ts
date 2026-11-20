@@ -6,10 +6,10 @@ import { createLogger } from '../../../utils/logger.js';
 import type { FilePipelineOptions, Pipeline } from '../../types.js';
 import { resolveMulticaDestination, type MulticaDestination, type MulticaSlsDefaults, type MulticaSlsFlusherConfig } from './destination.js';
 import { sendMulticaRecords } from './sender.js';
-import { errorKind } from './http.js';
+import { errorKind, fetchBounded, SourceError } from './http.js';
 import { MulticaActivationGate, type MulticaActivationResult, type MulticaCollectionMode } from './activation.js';
 import { digest, envelope } from './records.js';
-import { sourcePodLabels } from './pod-labels.js';
+import { localPodIp, sourcePodLabels } from './pod-labels.js';
 import { collectPprof } from './pprof.js';
 import { collectApi, collectDaemonHealth, collectFileStat, collectLog, collectMetrics, type ApiSource } from './sources.js';
 import { validateMulticaConfig, type CollectionResult, type MulticaInputConfig, type MulticaRecord, type SourceCheckpoint } from './types.js';
@@ -21,6 +21,7 @@ type MulticaPipelineOptions = Omit<FilePipelineOptions, 'config'> & {
   sls?: MulticaSlsDefaults;
   serviceNamePrefix?: string;
   collectionEnabled?: boolean;
+  daemonProfile?: string;
 };
 export interface CollectionSummary {
   successfulSources: number;
@@ -47,10 +48,9 @@ export class MulticaPipeline implements Pipeline {
   private readonly pendingProfiles = new Map<string, CollectionResult>();
   private readonly pprofFailures = new Map<string, {count: number; retryAt: number}>();
 
-  constructor(private readonly opts: MulticaPipelineOptions, defaultMode?: MulticaCollectionMode,
-    private readonly onActivation?: (state: MulticaActivationResult) => Promise<void>) {
+  constructor(private readonly opts: MulticaPipelineOptions, defaultMode?: MulticaCollectionMode) {
     const input = opts.config.inputs[0] as MulticaInputConfig;
-    this.input = {...input, Instance: opts.serviceNamePrefix?.trim() || input.Instance};
+    this.input = {...input, PodIp: input.PodIp ?? (process.env.POD_IP || localPodIp()), Instance: opts.serviceNamePrefix?.trim() || input.Instance};
     if (this.input.Type !== 'input_multica') throw new Error('Expected input_multica');
     validateMulticaConfig(this.input);
     this.activation = new MulticaActivationGate(this.input, defaultMode);
@@ -99,7 +99,6 @@ export class MulticaPipeline implements Pipeline {
     const activation: MulticaActivationResult = this.opts.collectionEnabled === false
       ? {enabled: false, mode: 'off', reason: 'pipeline_disabled', consecutiveMisses: 0, stopped: false}
       : await this.activation.evaluate();
-    await this.onActivation?.(activation);
     const summary: CollectionSummary = {successfulSources: 0, failedSources: 0,
       collectionEnabled: activation.enabled, collectionMode: activation.mode, activationReason: activation.reason,
       detectionMisses: activation.consecutiveMisses, collectionStopped: activation.stopped};
@@ -121,12 +120,37 @@ export class MulticaPipeline implements Pipeline {
     for (const url of this.input.DaemonHealthUrls ?? []) await run(`health:${url}`, () => collectDaemonHealth(this.input, url));
     for (const file of this.input.StatFiles ?? []) await run(`stat:${file}`, () => collectFileStat(file));
     for (const file of this.input.LogFiles ?? []) await run(`log:${file}`, () => collectLog(this.input, file, this.checkpoint(`log:${file}`)));
-    if (this.input.ApiBase) for (const workspace of this.input.WorkspaceIds ?? []) {
+    let apiInput = this.input;
+    let profileToken: string | undefined;
+    let workspaces = this.input.WorkspaceIds ?? [];
+    if (this.opts.daemonProfile) {
+      try {
+        const profile = JSON.parse(await readFile(this.opts.daemonProfile, 'utf8'));
+        if (typeof profile.token !== 'string' || !profile.token.trim()) throw new SourceError('missing_api_token');
+        const base = new URL(profile.server_url);
+        if (!['https:', 'http:'].includes(base.protocol) || base.username || base.password || base.search || base.hash) {
+          throw new SourceError('invalid_profile_url');
+        }
+        apiInput = {...this.input, ApiBase: base.href.replace(/\/$/, '')};
+        profileToken = profile.token.trim();
+        const response = await fetchBounded(apiInput.ApiBase + '/api/workspaces', apiInput, undefined, profileToken);
+        const rows: unknown = JSON.parse(response.text);
+        if (!Array.isArray(rows) || rows.some(row => typeof row?.id !== 'string' || !/^[a-z0-9_-]+$/i.test(row.id))) {
+          throw new SourceError('unexpected_response_shape');
+        }
+        workspaces = [...new Set<string>(rows.map(row => row.id))];
+        summary.successfulSources++;
+      } catch (error) {
+        summary.failedSources++;
+        logger.warn('Multica workspace discovery failed', {configName: this.opts.config.configName, error_kind: errorKind(error)});
+      }
+    }
+    if (apiInput.ApiBase) for (const workspace of workspaces) {
       const api = async (source: Omit<ApiSource, 'workspace'>) => {
         const name = `api:${workspace}:${source.name}`;
-        await run(name, () => collectApi(this.input, {...source, workspace}));
+        await run(name, () => collectApi(apiInput, {...source, workspace}, profileToken));
       };
-      if (this.input.CollectEntityNames) {
+      if (this.input.CollectEntityNames !== false) {
         await api({name: 'workspace', path: `/api/workspaces/${encodeURIComponent(workspace)}`, recordType: 'workspace_snapshot', single: true});
         await api({name: 'projects', path: '/api/projects', recordType: 'project_snapshot', key: 'projects', pagination: 'offset'});
       }

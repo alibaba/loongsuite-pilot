@@ -1,6 +1,19 @@
+import { readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { hostname } from 'node:os';
 import type { MulticaInputConfig, MulticaRecord } from './types.js';
+
+/** Kubernetes writes the Pod's own hostname and primary address to /etc/hosts. */
+export function localPodIp(): string | undefined {
+  if (!process.env.KUBERNETES_SERVICE_HOST) return;
+  try {
+    for (const line of readFileSync('/etc/hosts', 'utf8').split('\n')) {
+      const [ip, ...aliases] = line.split('#')[0].trim().split(/\s+/);
+      if (aliases.includes(hostname()) && isIP(ip) && !ip.startsWith('127.') && ip !== '::1') return ip;
+    }
+  } catch { /* Pod IP is optional. */ }
+  return undefined;
+}
 
 // A service DNS name does not identify the Pod serving an individual request.
 export function sourcePodLabels(input: MulticaInputConfig, source: string): MulticaRecord {
@@ -14,7 +27,7 @@ export function sourcePodLabels(input: MulticaInputConfig, source: string): Mult
 
   const separator = source.indexOf(':');
   const kind = source.slice(0, separator);
-  let local = kind === 'stat';
+  let local = kind === 'stat' || (kind === 'log' && input.LocalDaemonPid !== undefined);
   if (kind === 'metrics' || kind === 'health' || kind === 'pprof') {
     const url = kind === 'pprof' ? input.PprofBaseUrl : source.slice(separator + 1);
     if (url) {

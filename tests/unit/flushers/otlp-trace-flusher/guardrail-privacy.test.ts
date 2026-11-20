@@ -6,8 +6,9 @@ import type { AgentActivityEntry } from '../../../../src/types/index.js';
 
 const secret = 'Confidential customer acquisition terms: discount 37 percent';
 
-describe('OTLP guardrail reason content policy', () => {
-  it.each([false, true])('enforces captureMessageContent=%s after span enrichment, including span events', async capture => {
+describe('OTLP compact guardrail schema', () => {
+  it.each([[false, '2'], [true, '2'], [false, ''], [true, '']] as const)(
+    'enforces captureMessageContent=%s with rule_version=%j after span enrichment, including span events', async (capture, version) => {
     const captured: ReadableSpan[] = [];
     const flusher = new OtlpTraceFlusher({
       enabled: true, endpoints: [{ name: 'test', endpoint: 'http://localhost:4318/v1/traces', headers: {} }],
@@ -19,13 +20,15 @@ describe('OTLP guardrail reason content policy', () => {
       },
       async shutdown() {},
     }));
+    const retired = Object.fromEntries(['reason', 'message', 'matched', 'enforcement', 'title', 'severity', 'match']
+      .map(field => [`gen_ai.guardrail.${field}`, secret]));
     const metadata = { 'gen_ai.guardrail.action': 'block', 'gen_ai.guardrail.rule_id': 'business-policy',
-      'gen_ai.guardrail.rule_version': '2' };
+      'gen_ai.guardrail.rule_version': version };
     vi.spyOn((flusher as any).spanEnrichers, 'enrich').mockImplementation(async (spans: unknown) => {
       for (const span of spans as ReadableSpan[]) {
-        Object.assign(span.attributes, metadata, { 'gen_ai.guardrail.reason': secret });
+        Object.assign(span.attributes, metadata, retired);
         (span.events as Array<unknown>).push({ name: 'guardrail.result', time: span.endTime,
-          attributes: { ...metadata, 'gen_ai.guardrail.reason': secret } });
+          attributes: { ...metadata, ...retired } });
       }
       return spans;
     });
@@ -49,12 +52,9 @@ describe('OTLP guardrail reason content policy', () => {
         expect(span.attributes).toMatchObject(metadata);
         const event = span.events.find(item => item.name === 'guardrail.result')!;
         expect(event.attributes).toMatchObject(metadata);
-        if (capture) {
-          expect(span.attributes['gen_ai.guardrail.reason']).toBe(secret);
-          expect(event.attributes!['gen_ai.guardrail.reason']).toBe(secret);
-        } else {
-          expect(span.attributes).not.toHaveProperty('gen_ai.guardrail.reason');
-          expect(event.attributes).not.toHaveProperty('gen_ai.guardrail.reason');
+        for (const field of Object.keys(retired)) {
+          expect(span.attributes).not.toHaveProperty(field);
+          expect(event.attributes).not.toHaveProperty(field);
         }
       }
     } finally {

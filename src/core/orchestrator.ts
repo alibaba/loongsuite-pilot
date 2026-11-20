@@ -8,10 +8,12 @@ import { InputManager } from './input-manager.js';
 import { InterceptResultLinker } from './intercept-result-linker.js';
 import { StateStore } from '../checkpoints/state-store.js';
 import { interceptorToolVerdictPath } from '../interceptor/paths.js';
-import { resolveEnabledInterceptorTypes, shouldDeployInterceptorHooks } from '../interceptor/config.js';
+import { shouldDeployInterceptorHooks } from '../interceptor/config.js';
 import { clearInterceptorRuntime } from '../interceptor/daemon/runtime.js';
 import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
 import { startInterceptorWorker, type InterceptorWorkerService } from '../interceptor/worker-service.js';
+import { InterceptorAlarmReporter } from '../interceptor/diagnostics.js';
+import { unavailableInterceptorStatus, type InterceptorStatus } from '../interceptor/status.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { resolveDeploymentScope, type DeploymentScopeMode } from '../deployment/deployment-scope.js';
@@ -190,10 +192,12 @@ export class Orchestrator extends EventEmitter {
   private pipelineManager: PipelineManager | null = null;
   private metricsWriter!: MetricsWriter;
   private alarmManager!: AlarmManager;
+  private interceptorAlarmReporter!: InterceptorAlarmReporter;
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
   private dashboardServer: DashboardServer | null = null;
   private interceptorService: InterceptorWorkerService | null = null;
+  private lastInterceptorStatus: InterceptorStatus | null = null;
   private verdictStore: ToolVerdictStore | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
@@ -257,16 +261,18 @@ export class Orchestrator extends EventEmitter {
     // 4. Build InputManager & AlarmManager
     const version = readInstalledVersion(this.dataDir);
     this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userId: this.config.userId });
+    this.interceptorAlarmReporter = new InterceptorAlarmReporter(this.alarmManager);
+    this.lastInterceptorStatus = null;
 
     this.inputManager.setFlusher(this.flusher);
     this.inputManager.setAlarmManager(this.alarmManager);
     this.verdictStore = new ToolVerdictStore(interceptorToolVerdictPath(this.dataDir));
     this.verdictStore.restore();
-    const builtinInterceptEnabled = resolveEnabledInterceptorTypes(this.config.interceptor).size > 0;
+    const interceptorEnabled = shouldDeployInterceptorHooks(this.config.interceptor);
     this.inputManager.setInterceptResultLinker(
       new InterceptResultLinker(
         this.verdictStore,
-        () => builtinInterceptEnabled || this.interceptorService?.managedActive === true,
+        interceptorEnabled,
         () => this.interceptorService?.syncVerdicts() ?? Promise.resolve(),
       ),
     );
@@ -409,7 +415,7 @@ export class Orchestrator extends EventEmitter {
     }
 
     // 12. Start pipeline subsystem (disabled by default)
-    if (this.config.pipeline.enabled) {
+    if (this.config.pipeline.enabled || this.config.pipeline.multica?.discoverLocalSources) {
       this.pipelineManager = new PipelineManager({
         configDir: path.join(this.dataDir, 'configs', 'local'),
         stateDir: path.join(this.dataDir, 'state', 'pipeline'),
@@ -426,7 +432,7 @@ export class Orchestrator extends EventEmitter {
       logger.info('pipeline subsystem disabled, skipping');
     }
 
-    // 13. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
+    // 13. Prepare metrics writer; its first L1 follows the interceptor startup attempt.
     const slsFlusher = this.getSlsFlusher();
     if (slsFlusher) slsFlusher.setAlarmManager(this.alarmManager);
     this.metricsWriter = new MetricsWriter({
@@ -436,10 +442,13 @@ export class Orchestrator extends EventEmitter {
       canaryPolicy: this.config.autoUpdate?.canaryPolicy ?? '',
       getSnapshot: () => this.buildDataflowSnapshot(),
       getTraceRuntimeSnapshot: () => this.flusher?.getTraceRuntimeSnapshot() ?? [],
+      getInterceptorStatus: () => this.readInterceptorStatus(),
       alarmManager: this.alarmManager,
       agentsConfig: this.config.agents,
       slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
       cmsWorkspace: this.config.cms?.workspace ?? '',
+      hostSn: this.config.hostSn,
+      hostIdentityTags: this.config.hostIdentityTags,
       // Same condition as the updater watchdog above, deliberately: whether an updater is
       // supposed to exist decides both whether we restart it and whether its absence is
       // worth an alarm. Auto-update resolves to disabled whenever no package source is
@@ -447,8 +456,6 @@ export class Orchestrator extends EventEmitter {
       // there is the expected state, not a fault.
       autoUpdateEnabled: this.config.autoUpdate?.enabled ?? false,
     });
-    await this.metricsWriter.start();
-
     // 14. Always publish runtime health for service managers. The status bar UI
     // may be disabled, but Windows Task Scheduler still needs runtime.json to
     // distinguish a healthy collector from a task whose child process died.
@@ -494,7 +501,7 @@ export class Orchestrator extends EventEmitter {
         verdictStore: this.verdictStore ?? undefined,
         mode: this.config.interceptor.mode,
         emitBlockedPrompt: (entry, signal) => this.inputManager.flushPreparedEntries([entry], signal),
-        emitEvaluation: (entry, signal) => this.inputManager.flushPreparedEntries([entry], signal),
+        onDiagnostic: this.interceptorAlarmReporter.record,
       }).catch(err => {
         logger.warn('interceptor start failed (non-fatal)', { error: String(err) });
         return null;
@@ -502,6 +509,9 @@ export class Orchestrator extends EventEmitter {
     } else {
       clearInterceptorRuntime(this.dataDir);
     }
+
+    // Report the interceptor startup outcome once, including disabled or failed starts.
+    await this.metricsWriter.start();
 
     // The native macOS menu bar app has its own switch.
     if (this.config.statusBar.enabled) {
@@ -568,6 +578,12 @@ export class Orchestrator extends EventEmitter {
     await this.interceptorService?.stop().catch(err => {
       logger.warn('interceptor stop failed during orchestrator shutdown', { error: String(err) });
     });
+    try {
+      if (this.interceptorService?.getStatus) this.lastInterceptorStatus = await this.interceptorService.getStatus();
+    } catch {
+      this.lastInterceptorStatus = unavailableInterceptorStatus(this.config.interceptor.mode === 'all');
+      logger.warn('final interceptor status unavailable');
+    }
     // The worker is the only checkpoint writer. The collector cache is an IPC mirror.
     this.interceptorService = null;
     this.verdictStore = null;
@@ -605,6 +621,11 @@ export class Orchestrator extends EventEmitter {
 
   getInputManager(): InputManager {
     return this.inputManager;
+  }
+
+  private async readInterceptorStatus(): Promise<InterceptorStatus> {
+    if (this.interceptorService?.getStatus) return this.interceptorService.getStatus();
+    return this.lastInterceptorStatus ?? unavailableInterceptorStatus(this.config.interceptor.mode === 'all');
   }
 
   getAgentControlManager(): AgentControlManager {

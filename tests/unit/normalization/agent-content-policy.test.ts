@@ -93,7 +93,7 @@ describe('applyAgentContentPolicy', () => {
     const retained = applyAgentContentPolicy(makeEntry(fields), {
       [ClientType.Cursor]: { captureMessageContent: true },
     });
-    expect(retained['gen_ai.guardrail.reason']).toBe(fields['gen_ai.guardrail.reason']);
+    expect(retained).not.toHaveProperty('gen_ai.guardrail.reason');
   });
 
   it('removes Qoder Work legacy body fields while preserving tool identity', () => {

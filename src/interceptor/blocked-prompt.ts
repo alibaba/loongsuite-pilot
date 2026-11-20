@@ -52,12 +52,6 @@ export function buildBlockedQoderPromptEntry(
     action: 'block',
     ruleId: verdict?.ruleId,
     ruleVersion: verdict?.ruleVersion,
-    severity: verdict?.severity,
-    reason: verdict?.reason,
-    title: verdict?.title,
-    message: verdict?.message,
-    ...(typeof verdict?.matched === 'boolean' ? { matched: verdict.matched } : {}),
-    ...(verdict?.enforcement ? { enforcement: verdict.enforcement } : {}),
   });
 
   if (!prompt) {

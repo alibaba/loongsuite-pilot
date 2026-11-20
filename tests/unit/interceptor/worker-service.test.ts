@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startInterceptorWorker, type InterceptorWorkerService, type InterceptorWorkerOptions } from '../../../src/interceptor/worker-service.js';
+import { unavailableInterceptorStatus } from '../../../src/interceptor/status.js';
 
 const control = vi.hoisted(() => ({ workers: [] as any[], ready: true, reply: true,
   childCallbacks: [] as Array<(error: Error | null) => void> }));
@@ -73,23 +74,51 @@ describe('interceptor worker supervisor', () => {
       await service.syncVerdicts();
       expect(service.port).toBeNull();
       expect(service.managedActive).toBe(false);
+      expect(await service.getStatus()).toMatchObject({ enabled: false, running: false, collection_status: 'disabled' });
       expect(control.workers).toHaveLength(0);
     } finally {
       vi.unstubAllEnvs();
     }
   });
 
+  it('coalesces status reads, marks timeouts unavailable, and clears old data after a restart', async () => {
+    const service = await start();
+    const worker = control.workers[0];
+    const send = worker.postMessage.bind(worker);
+    const snapshot = { ...unavailableInterceptorStatus(true), collection_status: 'ok', worker_started_at: 'epoch-1' };
+    worker.postMessage = (command: any) => {
+      if (command.type === 'status') {
+        worker.commands.push(command);
+        queueMicrotask(() => worker.emit('message', { type: 'reply', id: command.id, status: snapshot }));
+      } else send(command);
+    };
+    const statuses = await Promise.all([service.getStatus(), service.getStatus()]);
+    expect(worker.commands.filter((c: any) => c.type === 'status')).toHaveLength(1);
+    expect(statuses[0]).toMatchObject({ collection_status: 'ok', running: true, worker_started_at: 'epoch-1' });
+    worker.postMessage = send;
+    control.reply = false;
+    vi.useFakeTimers();
+    const timedOut = service.getStatus();
+    await vi.advanceTimersByTimeAsync(2001);
+    expect(await timedOut).toMatchObject({ collection_status: 'unavailable', worker_started_at: 'epoch-1' });
+    control.reply = true;
+    worker.emit('exit', 1);
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(await service.getStatus()).toMatchObject({
+      collection_status: 'unavailable', worker_started_at: null, worker_restarts_total: 1,
+    });
+  });
+
   it('ACKs finite event admission while joining the gated serial sink before stop resolves', async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    const emitEvaluation = vi.fn(async () => { await gate; });
-    const service = await start({ emitEvaluation });
+    const emitBlockedPrompt = vi.fn(async () => { await gate; });
+    const service = await start({ emitBlockedPrompt });
     const worker = control.workers[0];
-    worker.emit('message', { type: 'events', id: 5, records: [], blockedPrompts: [],
-      evaluationEntries: Array.from({ length: 500 }, (_, i) => ({ 'event.id': String(i), 'event.name': 'guardrail.evaluation' })) });
+    worker.emit('message', { type: 'events', id: 5, records: [], blockedPrompts: Array.from({ length: 500 }, (_, i) => ({ 'event.id': String(i), 'event.name': 'llm.request' })) });
     expect(worker.commands).toContainEqual({ type: 'ack', id: 5 });
     await Promise.resolve();
-    expect(emitEvaluation).toHaveBeenCalledOnce();
+    expect(emitBlockedPrompt).toHaveBeenCalledOnce();
     let stopped = false;
     const stop = service.stop().then(() => { stopped = true; });
     await Promise.resolve();
@@ -97,7 +126,7 @@ describe('interceptor worker supervisor', () => {
     expect(stopped).toBe(false);
     release();
     await stop;
-    expect(emitEvaluation).toHaveBeenCalledTimes(256);
+    expect(emitBlockedPrompt).toHaveBeenCalledTimes(256);
   });
   it('waits for retired child cleanup when stop begins after the worker has exited', async () => {
     const service = await start();
