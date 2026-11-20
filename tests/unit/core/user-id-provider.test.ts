@@ -1,9 +1,10 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import * as os from 'node:os';
 
+const warn = vi.hoisted(() => vi.fn());
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
-    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    info: vi.fn(), debug: vi.fn(), warn, error: vi.fn(),
   }),
 }));
 
@@ -16,6 +17,13 @@ function makeReader(map: { current: string }): (p: string) => string {
 }
 
 describe('createUserIdProvider', () => {
+  beforeEach(() => {
+    vi.stubEnv('LOONGSUITE_PILOT_USER_ID', '');
+    warn.mockClear();
+  });
+
+  afterEach(() => vi.unstubAllEnvs());
+
   it('reads userId from config on the first call', () => {
     const file = { current: JSON.stringify({ userId: '326220' }) };
     const get = createUserIdProvider({
@@ -121,5 +129,32 @@ describe('createUserIdProvider', () => {
     file.current = '__throw__';
     clock = USER_ID_REFRESH_INTERVAL_MS;
     expect(get()).toBe('326220'); // unchanged on read error
+  });
+
+  it('uses the configured path and accepts a BOM and numeric user ID', () => {
+    vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', ` ${CONFIG_PATH} `);
+    const readFile = vi.fn(() => '\uFEFF{"userId":326220}');
+    const get = createUserIdProvider({ initialUserId: 'startup', readFile });
+
+    expect(get()).toBe('326220');
+    expect(readFile.mock.calls).toEqual([[CONFIG_PATH]]);
+  });
+
+  it('preserves the last good ID and warns once per window without logging invalid config content', () => {
+    const readFile = vi.fn(() => '{"apiKey":"private-value",}');
+    let clock = 0;
+    const get = createUserIdProvider({ initialUserId: 'startup', configPath: CONFIG_PATH, readFile, now: () => clock });
+
+    expect(get()).toBe('startup');
+    expect(get()).toBe('startup');
+    expect(readFile).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls).toEqual([['userId refresh failed, keeping last known value', {
+      error: 'SyntaxError',
+      path: CONFIG_PATH,
+    }]]);
+
+    clock = USER_ID_REFRESH_INTERVAL_MS;
+    readFile.mockReturnValueOnce('{"userId":"recovered"}');
+    expect(get()).toBe('recovered');
   });
 });

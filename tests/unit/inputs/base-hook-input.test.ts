@@ -73,6 +73,33 @@ describe('BaseHookInput', () => {
       expect(entries).toHaveLength(0);
       await input.stop();
     });
+
+    it('reports complete raw records and bytes even when no normalized entry survives', async () => {
+      const today = getTodayDateString();
+      const logFile = path.join(tmpDir, `test-hook-${today}.jsonl`);
+      const validLine = JSON.stringify({ file_path: '/已过滤.ts' });
+      const payload = `not-json\n${validLine}\n`;
+      await fs.writeFile(logFile, payload);
+      input.transformFn = async () => null;
+
+      const runtimeDeltas: Array<Record<string, number>> = [];
+      input.on('input-runtime-delta', stats => runtimeDeltas.push(stats));
+
+      await input.start();
+      await input.stop();
+
+      expect(runtimeDeltas).toHaveLength(1);
+      expect(runtimeDeltas[0]).toMatchObject({
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(payload),
+        rawInRecords: 2,
+        rawInBytes: Buffer.byteLength(payload),
+        rawInMaxBatchBytes: Buffer.byteLength(payload),
+        rawInMaxRecordBytes: Buffer.byteLength(`${validLine}\n`),
+        parseSuccessRecords: 1,
+        parseFailedRecords: 1,
+      });
+    });
   });
 
   describe('byte offset incremental reading', () => {
@@ -104,6 +131,84 @@ describe('BaseHookInput', () => {
       await input2.stop();
       expect(moreEntries).toHaveLength(1);
       expect(moreEntries[0]!.filePath).toBe('/second.ts');
+    });
+
+    it('does not reread a static incomplete tail and resumes when it grows', async () => {
+      const file = path.join(tmpDir, `test-hook-${getTodayDateString()}.jsonl`);
+      const initial = JSON.stringify({ file_path: '/already-complete.ts' }) + '\n';
+      const prefix = '{"file_path":"/finished.ts","padding":"';
+      const padding = Buffer.alloc(8 * 1024 * 1024, 0x78);
+      await fs.writeFile(file, initial + prefix);
+      for (let i = 0; i < 4; i++) await fs.appendFile(file, padding);
+      const partialBytes = Buffer.byteLength(prefix) + 4 * padding.length;
+      const deltas: Array<Record<string, number>> = [];
+      const entries: AgentActivityEntry[] = [];
+      input.on('input-runtime-delta', delta => deltas.push(delta));
+      input.on('entries', batch => entries.push(...batch));
+      await input.start();
+      await input.stop();
+      expect(deltas[0].rawReadBytes).toBe(8 * 1024 * 1024);
+      expect(stateStore.get(input.id).lastOffset).toBe(Buffer.byteLength(initial));
+
+      // The budgeted first poll stops before EOF. The next poll observes the
+      // whole incomplete record and caches its unchanged-tail signature.
+      await input.start();
+      await input.stop();
+      expect(deltas[1].rawReadBytes).toBe(partialBytes);
+
+      for (let i = 0; i < 2; i++) {
+        await input.start();
+        await input.stop();
+      }
+      expect(deltas.slice(2)).toEqual(Array.from({ length: 2 }, () => expect.objectContaining({
+        rawReadCalls: 0, rawReadBytes: 0, rawBacklogBytesMax: partialBytes,
+      })));
+
+      await fs.appendFile(file, '"}\n');
+      await input.start();
+      await input.stop();
+      expect(entries.map(entry => entry.filePath)).toEqual(['/already-complete.ts', '/finished.ts']);
+      expect(stateStore.get(input.id).lastOffset).toBe((await fs.stat(file)).size);
+    });
+
+    it('keeps an incomplete trailing JSONL record for the next poll', async () => {
+      const today = getTodayDateString();
+      const logFile = path.join(tmpDir, `test-hook-${today}.jsonl`);
+      const completeRecord = JSON.stringify({ file_path: '/written-in-two-parts.ts' });
+      const splitAt = Math.floor(completeRecord.length / 2);
+      await fs.writeFile(logFile, completeRecord.slice(0, splitAt));
+
+      const firstEntries: AgentActivityEntry[] = [];
+      const firstRuntimeDeltas: Array<Record<string, number>> = [];
+      input.on('entries', (entries: AgentActivityEntry[]) => firstEntries.push(...entries));
+      input.on('input-runtime-delta', stats => firstRuntimeDeltas.push(stats));
+      await input.start();
+      await input.stop();
+      expect(firstEntries).toHaveLength(0);
+      expect(stateStore.get('test-hook').lastOffset).toBe(0);
+      expect(firstRuntimeDeltas).toHaveLength(1);
+      expect(firstRuntimeDeltas[0]).toMatchObject({
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(completeRecord.slice(0, splitAt)),
+        rawInRecords: 0,
+        rawInBytes: 0,
+        rawInMaxBatchBytes: Buffer.byteLength(completeRecord.slice(0, splitAt)),
+      });
+
+      await fs.appendFile(logFile, `${completeRecord.slice(splitAt)}\n`);
+      const nextInput = new TestHookInput({
+        stateStore: stateStore as any,
+        logDir: tmpDir,
+        logPrefix: 'test-hook',
+        pollIntervalMs: 60_000,
+      });
+      const nextEntries: AgentActivityEntry[] = [];
+      nextInput.on('entries', (entries: AgentActivityEntry[]) => nextEntries.push(...entries));
+      await nextInput.start();
+      await nextInput.stop();
+
+      expect(nextEntries).toHaveLength(1);
+      expect(nextEntries[0].filePath).toBe('/written-in-two-parts.ts');
     });
 
     it('should not re-read already consumed bytes', async () => {

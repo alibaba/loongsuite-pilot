@@ -1,4 +1,8 @@
 import { createLogger } from '../utils/logger.js';
+import * as crypto from 'node:crypto';
+import * as http from 'node:http';
+import * as https from 'node:https';
+import { encodeSlsLogGroup, type SlsLogGroupPayload } from './sls-loggroup-codec.js';
 import {
   SlsFailureLogWriter,
   type SlsFailureLogInput,
@@ -15,7 +19,7 @@ export const RETRY_BASE_DELAY_MS = 1000;
 export const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 
 export class HttpError extends Error {
-  constructor(readonly status: number, body: string) {
+  constructor(readonly status: number, readonly body: string) {
     super(`${status} ${body}`);
   }
 }
@@ -33,6 +37,14 @@ export interface PostWebtrackingOptions {
   topic?: string;
   source?: string;
   tags?: Record<string, string>;
+  userAgent?: string;
+}
+
+export interface PostApiKeyOptions {
+  signal?: AbortSignal;
+  topic?: string;
+  source?: string;
+  tags?: Array<Record<string, string>>;
   userAgent?: string;
 }
 
@@ -95,6 +107,126 @@ export async function postWebtracking(
   for (const chunk of chunks) {
     await postWebtrackingChunk(config, chunk, opts);
   }
+}
+
+export async function postApiKeyLogStoreLogs(
+  config: SlsTransportConfig & { apiKey: string },
+  logGroup: SlsLogGroupPayload,
+  opts?: PostApiKeyOptions,
+): Promise<void> {
+  opts?.signal?.throwIfAborted();
+  const body = encodeSlsLogGroup({
+    ...logGroup,
+    topic: logGroup.topic ?? opts?.topic,
+    source: logGroup.source ?? opts?.source,
+    tags: logGroup.tags ?? opts?.tags,
+  });
+  const path = `/logstores/${config.logstore}/shards/lb`;
+  const requestTarget = buildProjectRequestTarget(config.endpoint, config.project, path);
+  const headers: Record<string, string | number> = {
+    Authorization: `Bearer ${config.apiKey}`,
+    'Content-Type': 'application/x-protobuf',
+    'Content-MD5': contentMd5Hex(body),
+    'Content-Length': body.byteLength,
+    Date: new Date().toUTCString(),
+    'x-log-apiversion': '0.6.0',
+    'x-log-bodyrawsize': String(body.byteLength),
+    ...(opts?.userAgent ? { 'user-agent': opts.userAgent } : {}),
+    ...(requestTarget.hostHeader ? { Host: requestTarget.hostHeader } : {}),
+  };
+
+  const maxRetries = config.maxRetries ?? RETRY_MAX_ATTEMPTS;
+  const retryBaseDelay = config.retryBaseDelayMs ?? RETRY_BASE_DELAY_MS;
+  const timeoutMs = config.timeoutMs ?? WEBTRACKING_TIMEOUT_MS;
+
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    opts?.signal?.throwIfAborted();
+    try {
+      const resp = await postBuffer(requestTarget.url, body, headers, timeoutMs, opts?.signal);
+      if (resp.status >= 200 && resp.status < 300) {
+        logger.debug('batch sent via apiKey', {
+          project: config.project,
+          logstore: config.logstore,
+          count: logGroup.logs.length,
+        });
+        return;
+      }
+
+      const err = new HttpError(resp.status, resp.body);
+      if (!RETRYABLE_STATUS_CODES.has(resp.status) || attempt === maxRetries - 1) {
+        throw err;
+      }
+      lastErr = err;
+    } catch (err) {
+      opts?.signal?.throwIfAborted();
+      lastErr = err;
+      if (err instanceof HttpError && !RETRYABLE_STATUS_CODES.has(err.status)) break;
+      if (attempt === maxRetries - 1) break;
+    }
+
+    const delay = retryBaseDelay * 2 ** attempt;
+    logger.warn('SLS apiKey send retrying', {
+      attempt: attempt + 1,
+      delayMs: delay,
+      error: String(lastErr),
+    });
+    await sleep(delay, opts?.signal);
+  }
+
+  throw lastErr;
+}
+
+export function contentMd5Hex(body: Buffer): string {
+  return crypto.createHash('md5').update(body).digest('hex').toUpperCase();
+}
+
+function buildProjectRequestTarget(endpoint: string, project: string, requestPath: string): { url: string; hostHeader?: string } {
+  const normalized = endpoint.replace(/\/+$/, '');
+  const parsed = new URL(normalized);
+  if (isLoopbackHost(parsed.hostname)) {
+    const url = `${parsed.origin}${requestPath}`;
+    return {
+      url,
+      hostHeader: project ? `${project}.${parsed.host}` : parsed.host,
+    };
+  }
+
+  const base = project
+    ? normalized.replace(/^(https?:\/\/)/, `$1${project}.`)
+    : normalized;
+  return { url: `${base}${requestPath}` };
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
+}
+
+function postBuffer(
+  url: string,
+  body: Buffer,
+  headers: Record<string, string | number>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const transport = target.protocol === 'https:' ? https : http;
+    const req = transport.request(target, { method: 'POST', headers, ...(signal ? { signal } : {}) }, res => {
+      const chunks: Buffer[] = [];
+      res.on('error', reject);
+      res.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode ?? 0,
+          body: Buffer.concat(chunks).toString('utf8'),
+        });
+      });
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('TimeoutError')));
+    req.on('error', reject);
+    req.end(body);
+  });
 }
 
 async function postWebtrackingChunk(
@@ -190,6 +322,19 @@ export async function persistFailedLogs(
   });
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise(resolve => setTimeout(resolve, ms));
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const cancel = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', cancel);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', cancel);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', cancel, { once: true });
+  });
 }

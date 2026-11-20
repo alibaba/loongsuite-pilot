@@ -416,6 +416,119 @@ describe('PluginProbeStrategy', () => {
       expect(result.error).toBe('missing pluginProbe config');
     });
 
+    it('keeps the existing local worker bundle when the worker cannot be stopped', async () => {
+      const destDir = path.join(tmpDir, 'local-worker-dest');
+      const tarball = path.join(tmpDir, 'local-worker.tar.gz');
+      const oldMarker = path.join(destDir, 'old.txt');
+
+      await fs.mkdir(destDir, { recursive: true });
+      await fs.writeFile(path.join(destDir, 'worker.manifest.json'), '{invalid-json', 'utf-8');
+      await fs.writeFile(oldMarker, 'old', 'utf-8');
+
+      const sourceDir = path.join(tmpDir, 'local-worker-source');
+      await fs.mkdir(sourceDir, { recursive: true });
+      await fs.writeFile(path.join(sourceDir, 'new.txt'), 'new', 'utf-8');
+      createTarball(tarball, sourceDir);
+
+      const result = await strategy.deploy(makeDef({
+        localWorkerRuntime: 'fake-runtime',
+        pluginProbe: {
+          source: { type: 'tar', tarball, destDir },
+          mountType: 'wrapper',
+        },
+      }), {
+        instance: {
+          id: 'lw_testinstance001',
+          stateDir: path.join(tmpDir, 'state'),
+          logDir: path.join(tmpDir, 'logs'),
+        },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('local worker stop failed; bundle replacement aborted');
+      await expect(fs.readFile(oldMarker, 'utf-8')).resolves.toBe('old');
+      await expect(fs.stat(path.join(destDir, 'new.txt'))).rejects.toThrow();
+    });
+
+    it('skips Unix install and uninstall scripts for Windows local worker bundles', async () => {
+      strategy = new PluginProbeStrategy(dataDir, pilotDir, { platform: 'win32' });
+      const destDir = path.join(tmpDir, 'windows-local-worker-dest');
+      const tarball = path.join(tmpDir, 'windows-local-worker.tar.gz');
+      const uninstallMarker = path.join(tmpDir, 'windows-uninstall-ran');
+      const installMarker = path.join(tmpDir, 'windows-install-ran');
+
+      await fs.mkdir(path.join(destDir, 'scripts'), { recursive: true });
+      await fs.writeFile(
+        path.join(destDir, 'scripts', 'uninstall.sh'),
+        `#!/bin/bash\ntouch "${uninstallMarker}"\n`,
+      );
+
+      const sourceDir = path.join(tmpDir, 'windows-local-worker-source');
+      await fs.mkdir(path.join(sourceDir, 'scripts'), { recursive: true });
+      await fs.writeFile(
+        path.join(sourceDir, 'scripts', 'install.sh'),
+        `#!/bin/bash\ntouch "${installMarker}"\n`,
+      );
+      await fs.writeFile(path.join(sourceDir, 'runtime.txt'), 'windows');
+      createTarball(tarball, sourceDir);
+
+      const result = await strategy.deploy(makeDef({
+        localWorkerRuntime: 'fake-runtime',
+        pluginProbe: {
+          source: { type: 'tar', tarball, destDir },
+          mountType: 'wrapper',
+        },
+      }), {
+        instance: {
+          id: 'lw_testinstance001',
+          stateDir: path.join(tmpDir, 'state'),
+          logDir: path.join(tmpDir, 'logs'),
+        },
+      });
+
+      expect(result.success).toBe(true);
+      await expect(fs.stat(uninstallMarker)).rejects.toThrow();
+      await expect(fs.stat(installMarker)).rejects.toThrow();
+      await expect(fs.readFile(path.join(destDir, 'runtime.txt'), 'utf-8')).resolves.toBe('windows');
+    });
+
+    it('returns failure when a Windows local worker manifest cannot start', async () => {
+      strategy = new PluginProbeStrategy(dataDir, pilotDir, { platform: 'win32' });
+      const destDir = path.join(tmpDir, 'windows-local-worker-dest');
+      const tarball = path.join(tmpDir, 'windows-local-worker.tar.gz');
+      const sourceDir = path.join(tmpDir, 'windows-local-worker-source');
+
+      await fs.mkdir(path.join(sourceDir, 'scripts'), { recursive: true });
+      await fs.writeFile(path.join(sourceDir, 'scripts', 'worker-entrypoint.sh'), '#!/bin/bash\nexit 0\n');
+      await fs.writeFile(
+        path.join(sourceDir, 'worker.manifest.json'),
+        JSON.stringify({
+          name: 'fake-worker',
+          command: ['scripts/worker-entrypoint.sh'],
+        }),
+      );
+      createTarball(tarball, sourceDir);
+
+      const result = await strategy.deploy(makeDef({
+        localWorkerRuntime: 'fake-runtime',
+        pluginProbe: {
+          source: { type: 'tar', tarball, destDir },
+          mountType: 'wrapper',
+        },
+      }), {
+        instance: {
+          id: 'lw_testinstance001',
+          stateDir: path.join(tmpDir, 'state'),
+          logDir: path.join(tmpDir, 'logs'),
+        },
+      });
+
+      expect(result).toMatchObject({
+        success: false,
+        error: 'local worker manifest failed to start',
+      });
+    });
+
     it('extracts tarball and runs convention install script', async () => {
       const destDir = path.join(tmpDir, 'dest');
       const tarball = path.join(tmpDir, 'plugin.tar.gz');
@@ -436,6 +549,33 @@ describe('PluginProbeStrategy', () => {
       const result = await strategy.deploy(def);
       expect(result.success).toBe(true);
       expect(result.agentId).toBe('test-plugin');
+    });
+
+    it('uses the existing external tar extractor for local worker bundles', async () => {
+      const destDir = path.join(tmpDir, 'local-worker-dest');
+      const tarball = path.join(tmpDir, 'local-worker.tar.gz');
+      const sourceDir = path.join(tmpDir, 'local-worker-source');
+      await fs.mkdir(path.join(sourceDir, 'bundle'), { recursive: true });
+      await fs.writeFile(
+        path.join(sourceDir, 'bundle', 'worker.manifest.json'),
+        JSON.stringify({
+          name: 'fake-worker',
+          command: ['missing-entrypoint'],
+        }),
+        'utf-8',
+      );
+      createTarball(tarball, sourceDir);
+
+      const result = await strategy.deploy(makeDef({
+        localWorkerRuntime: 'fake-runtime',
+        pluginProbe: {
+          source: { type: 'tar', tarball, destDir },
+          mountType: 'wrapper',
+        },
+      }));
+
+      expect(result.success).toBe(true);
+      await expect(fs.stat(path.join(destDir, 'bundle', 'worker.manifest.json'))).resolves.toBeDefined();
     });
 
     it('prefers pilot wrapper script over plugin install.sh', async () => {

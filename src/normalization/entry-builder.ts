@@ -1,4 +1,5 @@
-import { v4 as uuidv4 } from 'uuid';
+import { uuidV4 } from '../utils/uuid.js';
+import { OPENCLAW_SESSION_KEY, isOpenClawSessionKey } from './openclaw-session-key.js';
 import {
   type AgentActivityEntry,
   type AgentEventName,
@@ -79,7 +80,7 @@ export function buildAgentActivityEntry(
     ...opts,
     time_unix_nano: opts.time_unix_nano ?? timestampToUnixNanos(now),
     observed_time_unix_nano: opts.observed_time_unix_nano ?? timestampToUnixNanos(Date.now()),
-    'event.id': opts['event.id'] ?? uuidv4(),
+    'event.id': opts['event.id'] ?? uuidV4(),
     'event.name': normalizeEventName(opts['event.name']),
     'user.id': opts['user.id'] ?? '',
     'gen_ai.session.id': stringAlias(opts, 'gen_ai.session.id', 'session.id') ?? '',
@@ -133,6 +134,13 @@ export function buildAgentActivityEntry(
     'gen_ai.tool.call.result': jsonAlias(opts, 'gen_ai.tool.call.result', 'tool.result.payload'),
     'gen_ai.tool.call.duration': resolveToolCallDuration(opts),
     'gen_ai.skill.name': stringAlias(opts, 'gen_ai.skill.name', 'skill.name'),
+    'gen_ai.skill.id': stringAlias(opts, 'gen_ai.skill.id', 'skill.id'),
+    'gen_ai.skill.description': stringAlias(
+      opts,
+      'gen_ai.skill.description',
+      'skill.description',
+    ),
+    'gen_ai.skill.version': stringAlias(opts, 'gen_ai.skill.version', 'skill.version'),
     'gen_ai.system_instructions': jsonAlias(
       opts,
       'gen_ai.system_instructions',
@@ -247,16 +255,36 @@ export interface SerialiseLogEntryOptions {
 
 const AGENT_SCOPED_FIELD_RE = /^agent\.[^.]+\..+$/;
 
+/**
+ * Selects the canonical fields that may leave the normalization boundary while
+ * preserving their JSON value types. JSON-native sinks should use this shape;
+ * string-only sinks can pass it through serialiseLogEntry.
+ */
+export function projectLogEntry(
+  entry: AgentActivityEntry,
+  options: SerialiseLogEntryOptions = {},
+): Record<string, JsonValue> {
+  const out: Record<string, JsonValue> = {};
+
+  for (const [key, value] of Object.entries(entry)) {
+    if (value === undefined || value === null) continue;
+    if (LEGACY_ALIAS_FIELDS.has(key)) continue;
+    if (key === OPENCLAW_SESSION_KEY) {
+      if (entry['gen_ai.agent.type'] !== 'openclaw' || !isOpenClawSessionKey(value)) continue;
+    } else if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;
+    out[key] = value;
+  }
+
+  return out;
+}
+
 export function serialiseLogEntry(
   entry: AgentActivityEntry,
   options: SerialiseLogEntryOptions = {},
 ): SerializedLogEntry {
   const out: SerializedLogEntry = {};
 
-  for (const [key, value] of Object.entries(entry)) {
-    if (value === undefined || value === null) continue;
-    if (LEGACY_ALIAS_FIELDS.has(key)) continue;
-    if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;
+  for (const [key, value] of Object.entries(projectLogEntry(entry, options))) {
     out[key] = serializeValue(value);
   }
 
@@ -355,6 +383,13 @@ function serializeValue(value: JsonValue): string {
 
 export function normalizeEventName(value: unknown): AgentEventName {
   switch (value) {
+    case 'gen_ai.model.request':
+    case 'gen_ai.model.response':
+    case 'gen_ai.tool.call':
+    case 'gen_ai.tool.result':
+    case 'gen_ai.agent.invoke':
+    case 'gen_ai.agent.result':
+      return value;
     case 'llm.request':
     case 'llm_call_input':
       return 'llm.request';
@@ -373,6 +408,8 @@ export function normalizeEventName(value: unknown): AgentEventName {
       return 'skill.use';
     case 'tool.approve':
       return 'tool.approve';
+    case 'agent.input':
+      return 'agent.input';
     case 'event':
     case 'other':
     default:

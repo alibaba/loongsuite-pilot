@@ -30,7 +30,12 @@ describe('AcpCorrelateRetentionService', () => {
     const staleLock = writeFile('old.env.lock', 48 * 3600_000);
     const fresh = writeFile('new.jsonl', 60_000); // 1min
 
-    const svc = new AcpCorrelateRetentionService(dataDir, { enabled: true, ttlMs: 24 * 3600_000 });
+    const svc = new AcpCorrelateRetentionService(dataDir, {
+      enabled: true,
+      propagateToTools: false,
+      generateTraceWhenMissing: false,
+      ttlMs: 24 * 3600_000,
+    });
     const result = await svc.runCleanup();
 
     expect(result.deleted).toBe(2);
@@ -41,8 +46,31 @@ describe('AcpCorrelateRetentionService', () => {
 
   it('no-ops when the directory is absent', async () => {
     fs.rmSync(dir, { recursive: true, force: true });
-    const svc = new AcpCorrelateRetentionService(dataDir, { enabled: true, ttlMs: 1000 });
+    const svc = new AcpCorrelateRetentionService(dataDir, {
+      enabled: true,
+      propagateToTools: false,
+      generateTraceWhenMissing: false,
+      ttlMs: 1000,
+    });
     const result = await svc.runCleanup();
     expect(result).toEqual({ deleted: 0, errors: 0 });
+  });
+
+  it('retains old consumption claims while their append-only source remains active', async () => {
+    const source = writeFile('active.jsonl', 60_000);
+    const turn = writeFile(`active.turn-context-0-${'a'.repeat(64)}.done`, 48 * 3600_000);
+    const session = writeFile('active.session-context.done', 48 * 3600_000);
+    const orphan = writeFile(`orphan.turn-context-0-${'b'.repeat(64)}.done`, 48 * 3600_000);
+    const svc = new AcpCorrelateRetentionService(dataDir, {
+      enabled: true, propagateToTools: false, generateTraceWhenMissing: false,
+      ttlMs: 24 * 3600_000,
+    });
+    expect(await svc.runCleanup()).toEqual({ deleted: 1, errors: 0 });
+    expect(fs.existsSync(orphan)).toBe(false);
+    expect(fs.existsSync(turn)).toBe(true);
+    expect(fs.existsSync(session)).toBe(true);
+    const stale = (Date.now() - 48 * 3600_000) / 1000;
+    fs.utimesSync(source, stale, stale);
+    expect(await svc.runCleanup()).toEqual({ deleted: 3, errors: 0 });
   });
 });

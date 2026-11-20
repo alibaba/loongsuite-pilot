@@ -108,9 +108,8 @@ describe('qoder IDE enrichment — production lag symptom', () => {
   });
 });
 
-// Fix behaviour (Option 1): order-first best-effort matching + time-sanity guard +
-// nearest-timestamp fallback. All in the qoder IDE variant (no response.id / model 'auto'
-// in the hook JSONL; everything comes from SQLite).
+// Deterministic policy: transcript owns Step boundaries; SQLite usage is attached
+// by turn/order, with extra rows aggregated into the last response.
 const B = 1783308010000; // base ms
 
 function makeTurn(
@@ -148,8 +147,8 @@ function makeRows(specs: { gmt: number; id: string; in?: number; out?: number }[
   }));
 }
 
-describe('qoder IDE enrichment — Option 1 robustness', () => {
-  it('tail gap JSONL=3 < SQLite=4 → first 3 matched by order (no collapse to fallback)', () => {
+describe('qoder IDE enrichment — deterministic usage conservation', () => {
+  it('JSONL=3 < SQLite=4 → aggregates the tail rows into the last response', () => {
     const entries = makeTurn([B + 200, B + 10200, B + 20200]);
     const rows = makeRows([
       { gmt: B, id: 'm1' },
@@ -162,8 +161,10 @@ describe('qoder IDE enrichment — Option 1 robustness', () => {
 
     expect(entries[0]['gen_ai.response.id']).toBe('m1');
     expect(entries[1]['gen_ai.response.id']).toBe('m2');
-    expect(entries[2]['gen_ai.response.id']).toBe('m3');
-    expect(entries[2]['gen_ai.usage.total_tokens']).toBe(110);
+    expect(entries[2]['gen_ai.response.id']).toBe('m4');
+    expect(entries[2]['gen_ai.usage.total_tokens']).toBe(220);
+    expect((entries[2] as any)['agent.qoder.usage_match_mode']).toBe('aggregated_tail');
+    expect((entries[2] as any)['agent.qoder.sqlite_row_count']).toBe(2);
     expect(entries.every(e => e['gen_ai.response.model'] === 'ultimate')).toBe(true);
   });
 
@@ -185,9 +186,8 @@ describe('qoder IDE enrichment — Option 1 robustness', () => {
     expect(entries[3]['gen_ai.usage.total_tokens']).toBe(0);
   });
 
-  it('middle gap → guard rejects the shifted pair; nearest fallback attaches the correct row (no mis-attribution)', () => {
+  it('SQLite fewer than responses → applies the available prefix without timestamp guessing', () => {
     const entries = makeTurn([B + 200, B + 10200, B + 20200]);
-    // SQLite missing the MIDDLE call: only rows for t1 and t3.
     const rows = makeRows([
       { gmt: B, id: 'm1' },
       { gmt: B + 20000, id: 'm3' },
@@ -196,25 +196,28 @@ describe('qoder IDE enrichment — Option 1 robustness', () => {
     enrichIdeTurn(entries, rows);
 
     expect(entries[0]['gen_ai.response.id']).toBe('m1');
-    // Without the guard, order would pair resp#2 (t2) with row m3 (t3) — wrong.
-    // With guard + nearest fallback, m3 attaches to resp#3 (t3), resp#2 stays empty.
-    expect(entries[2]['gen_ai.response.id']).toBe('m3');
-    expect(entries[1]['gen_ai.response.id']).toBeUndefined();
+    expect(entries[1]['gen_ai.response.id']).toBe('m3');
+    expect(entries[2]['gen_ai.response.id']).toBeUndefined();
   });
 
-  it('accurate match_ts rescues a drifted response in the best-effort (unequal count) path', () => {
-    // Unequal counts (2 responses, 1 row) → the time-sanity guard runs. Response #1's
-    // time_unix_nano is drifted +6s (beyond the 3s loose guard and 5s fallback), but its
-    // match_ts is exact. Response #2 is far later and has no row.
+  it('ordered structural matching does not depend on response timestamp drift', () => {
     const withMatchTs = makeTurn([B + 6000, B + 60000], { matchTs: [B, undefined] });
     enrichIdeTurn(withMatchTs, makeRows([{ gmt: B, id: 'm1' }]));
-    expect(withMatchTs[0]['gen_ai.response.id']).toBe('m1'); // strict guard uses accurate ts
+    expect(withMatchTs[0]['gen_ai.response.id']).toBe('m1');
     expect(withMatchTs[0]['gen_ai.usage.total_tokens']).toBe(110);
 
-    // Same shape WITHOUT match_ts → loose guard on drifted clock rejects, fallback out of
-    // window → response #1 unmatched (demonstrates the value of the accurate timestamp).
     const noMatchTs = makeTurn([B + 6000, B + 60000]);
     enrichIdeTurn(noMatchTs, makeRows([{ gmt: B, id: 'm1' }]));
-    expect(noMatchTs[0]['gen_ai.response.id']).toBeUndefined();
+    expect(noMatchTs[0]['gen_ai.response.id']).toBe('m1');
+  });
+
+  it('does not attach a stale prior-Turn SQLite group when the current hook has an accurate timestamp', () => {
+    const entries = makeTurn([B + 60000], { matchTs: [B + 60000] });
+    const staleRows = makeRows([{ gmt: B, id: 'old-turn-row', in: 999, out: 99 }]);
+
+    enrichIdeTurn(entries, staleRows);
+
+    expect(entries[0]['gen_ai.response.id']).toBeUndefined();
+    expect(entries[0]['gen_ai.usage.total_tokens']).toBe(0);
   });
 });

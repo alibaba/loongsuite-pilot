@@ -15,6 +15,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { filterWorkspaceRecords } from './shared/workspace-privacy.mjs';
+import { decodePayload } from './shared/decode-payload.mjs';
+import { appendRawJsonl } from './shared/raw-jsonl-writer.mjs';
 import {
   applyHookContentPolicy,
   hashJson,
@@ -25,6 +28,10 @@ import { toInternalEvent } from './cursor/source-event.mjs';
 import { appendEvent, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
 import { assembleTurn } from './cursor/react-assembler.mjs';
 import { buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from './shared/resource-context.mjs';
 
 function resolveDataDir() {
   const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
@@ -66,9 +73,8 @@ async function readStdin() {
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   }
-  let str = Buffer.concat(chunks).toString('utf-8');
-  if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
-  return str;
+  // decodePayload 去 BOM 并修复中文 UTF-8->GBK 双重编码(纠偏已从 PS 侧移入 node)。
+  return decodePayload(Buffer.concat(chunks));
 }
 
 async function appendJsonl(filePath, record) {
@@ -76,7 +82,10 @@ async function appendJsonl(filePath, record) {
   await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
 }
 
-async function appendBatchJsonl(filePath, records) {
+async function appendBatchJsonl(filePath, records, variant) {
+  // Throw on policy errors so the caller retains the journal for a later retry.
+  records = filterWorkspaceRecords(records, variant);
+  if (records.length === 0) return;
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const content = records.map(r => JSON.stringify(r)).join('\n') + '\n';
   await fs.appendFile(filePath, content, 'utf-8');
@@ -93,6 +102,37 @@ function inferVariant(events) {
     if (ev.cursor_version && CLI_VERSION_PATTERN.test(ev.cursor_version)) return 'cursor-cli';
   }
   return 'cursor';
+}
+
+function findConversationResourceAttributes(events, conversationId) {
+  const scopedEvents = events.filter(event => event.conversation_id === conversationId);
+  const promptContext = scopedEvents.find(event =>
+    event.hook_event === 'beforeSubmitPrompt' &&
+    event.resource_attributes &&
+    Object.keys(event.resource_attributes).length > 0
+  );
+  const contextEvent = promptContext || scopedEvents.find(event =>
+    event.resource_attributes && Object.keys(event.resource_attributes).length > 0
+  );
+  return contextEvent?.resource_attributes || {};
+}
+
+function applyCursorCliResourceContext(records, events, conversationId, variant) {
+  if (variant !== 'cursor-cli' || records.length === 0) return;
+  // The journal is shared by Cursor Desktop and Cursor CLI. Re-check only the
+  // current conversation so a pending CLI event cannot activate this feature
+  // for an unrelated Desktop turn.
+  const conversationVariant = inferVariant(
+    events.filter(event => event.conversation_id === conversationId),
+  );
+  if (conversationVariant !== 'cursor-cli') return;
+  const resourceAttributes = findConversationResourceAttributes(events, conversationId);
+  if (Object.keys(resourceAttributes).length === 0) return;
+
+  const baseFieldPatch = agentBaseFieldPatch(resourceAttributes);
+  for (const record of records) {
+    Object.assign(record, baseFieldPatch, { resourceAttributes });
+  }
 }
 
 function compactJournal(allEvents, consumedConversationIds) {
@@ -113,7 +153,81 @@ function applyPolicy(record, runtimeConfig) {
   return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }
 
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function toolCallIdsFromMessages(messages) {
+  const ids = new Set();
+  if (!Array.isArray(messages)) return ids;
+  for (const message of messages) {
+    if (message?.role !== 'assistant' || !Array.isArray(message.parts)) continue;
+    for (const part of message.parts) {
+      if (part?.type === 'tool_call' && part.id) ids.add(part.id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Merge synthetic Skill reads into the previous round's single assistant
+ * output, then add one independent tool-role response message per Skill read.
+ */
+function mergeSkillExchange(
+  messages,
+  sourceToolCallIds,
+  sourceHadToolCalls,
+  callParts,
+  responseParts,
+) {
+  const merged = Array.isArray(messages) ? cloneJson(messages) : [];
+  const existingPartIds = new Set(merged.flatMap(message =>
+    Array.isArray(message?.parts) ? message.parts.map(part => part?.id).filter(Boolean) : []
+  ));
+  const pendingCalls = callParts.filter(part => !existingPartIds.has(part.id));
+  if (pendingCalls.length === 0) return merged;
+
+  const responseById = new Map(responseParts.map(part => [part.id, part]));
+  const responseMessages = pendingCalls.flatMap(call => {
+    const response = responseById.get(call.id);
+    return response ? [{ role: 'tool', parts: [cloneJson(response)] }] : [];
+  });
+
+  let assistantIndex = merged.findIndex(message =>
+    message?.role === 'assistant' &&
+    message.parts?.some(part => part?.id && sourceToolCallIds.has(part.id))
+  );
+  // Cursor can omit tool_use_id while still preserving the prior assistant in
+  // request history. In that case reuse the first assistant (the target is the
+  // first LLM response) instead of creating a second, Skill-only assistant.
+  // Keep the no-source-tool path unchanged: there is no prior tool assistant to
+  // reuse, so the synthetic exchange must remain its own assistant message.
+  if (assistantIndex < 0 && sourceHadToolCalls) {
+    assistantIndex = merged.findIndex(message => message?.role === 'assistant');
+  }
+
+  if (assistantIndex < 0) {
+    const firstHistoryIndex = merged.findIndex(message =>
+      message?.role === 'assistant' || message?.role === 'tool'
+    );
+    const insertAt = firstHistoryIndex >= 0 ? firstHistoryIndex : merged.length;
+    merged.splice(
+      insertAt,
+      0,
+      { role: 'assistant', parts: cloneJson(pendingCalls) },
+      ...responseMessages,
+    );
+  } else {
+    merged[assistantIndex].parts.push(...cloneJson(pendingCalls));
+    let insertAt = assistantIndex + 1;
+    while (insertAt < merged.length && merged[insertAt]?.role === 'tool') insertAt++;
+    merged.splice(insertAt, 0, ...responseMessages);
+  }
+  return merged;
+}
+
 function injectSkillRecords(records, skills, runtimeConfig = {}) {
+  if (!Array.isArray(skills) || skills.length === 0) return;
   // Skill-to-step alignment is best-effort: attach detected reads to the first
   // assembled LLM response. Cursor's assemblers synthesize a response even for
   // thought-only and implicit tool steps, so never attach output to a request.
@@ -132,6 +246,11 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
   const outputMsgs = Array.isArray(llmRecord['gen_ai.output.messages'])
     ? llmRecord['gen_ai.output.messages']
     : [];
+  const sourceToolCallIds = toolCallIdsFromMessages(outputMsgs);
+  const sourceHadToolCalls = outputMsgs.some(message =>
+    message?.role === 'assistant' &&
+    message.parts?.some(part => part?.type === 'tool_call')
+  );
 
   let assistantMsg = outputMsgs.find(m => m.role === 'assistant');
   if (!assistantMsg) {
@@ -151,6 +270,55 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
   llmRecord['gen_ai.output.messages'] = outputMsgs;
   records[targetLlmIdx] = applyPolicy(llmRecord, runtimeConfig);
 
+  const skillCallParts = skillEntries.map(({ skill, toolCallId }) => ({
+    type: 'tool_call',
+    id: toolCallId,
+    name: 'Read',
+    arguments: { path: skill.skillPath },
+  }));
+  // Preserve the call/response relationship without copying SKILL.md content.
+  const skillResponseParts = skillEntries.map(({ toolCallId }) => ({
+    type: 'tool_call_response',
+    id: toolCallId,
+    response: '',
+  }));
+
+  // The assemblers computed request history before this post-assembly injection.
+  // Backfill the immediate next request's delta/full messages, then keep the
+  // synthetic exchange in every later full context for this same turn.
+  const targetTraceId = llmRecord.trace_id;
+  const targetTurnId = llmRecord['gen_ai.turn.id'];
+  const laterRequestIndexes = [];
+  for (let index = targetLlmIdx + 1; index < records.length; index++) {
+    const record = records[index];
+    if (record['event.name'] !== 'llm.request') continue;
+    if (record['gen_ai.agent.scope'] === 'subagent') continue;
+    if (targetTraceId && record.trace_id !== targetTraceId) continue;
+    if (targetTurnId && record['gen_ai.turn.id'] !== targetTurnId) continue;
+    laterRequestIndexes.push(index);
+  }
+  for (let index = 0; index < laterRequestIndexes.length; index++) {
+    const requestIndex = laterRequestIndexes[index];
+    const request = records[requestIndex];
+    if (index === 0) {
+      request['gen_ai.input.messages_delta'] = mergeSkillExchange(
+        request['gen_ai.input.messages_delta'],
+        sourceToolCallIds,
+        sourceHadToolCalls,
+        skillCallParts,
+        skillResponseParts,
+      );
+    }
+    request['gen_ai.input.messages'] = mergeSkillExchange(
+      request['gen_ai.input.messages'],
+      sourceToolCallIds,
+      sourceHadToolCalls,
+      skillCallParts,
+      skillResponseParts,
+    );
+    records[requestIndex] = applyPolicy(request, runtimeConfig);
+  }
+
   // Create tool.call + tool.result record pairs for each skill read
   const insertRecords = [];
   const baseTime = BigInt(llmRecord.time_unix_nano);
@@ -161,13 +329,17 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
     const { skill, toolCallId } = skillEntries[index];
     const callOffset = BigInt(index * 2 + 1);
     const resultOffset = callOffset + 1n;
+    const agentType = llmRecord['gen_ai.agent.type'];
+    const agentCwdKey = `agent.${agentType}.cwd`;
+    const agentCwd = llmRecord[agentCwdKey];
     const baseFields = {
       trace_id: llmRecord.trace_id,
       'gen_ai.session.id': llmRecord['gen_ai.session.id'],
       'gen_ai.turn.id': llmRecord['gen_ai.turn.id'],
       'gen_ai.step.id': llmRecord['gen_ai.step.id'] || 'step_1',
-      'gen_ai.agent.type': llmRecord['gen_ai.agent.type'],
+      'gen_ai.agent.type': agentType,
       'user.id': llmRecord['user.id'],
+      ...(agentCwd ? { [agentCwdKey]: agentCwd } : {}),
     };
 
     // tool.call
@@ -181,7 +353,9 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
       'gen_ai.tool.call.id': toolCallId,
       'gen_ai.tool.call.arguments': { path: skill.skillPath },
       'gen_ai.skill.name': skill.skillName,
-      'agent.cursor.skill_detection_source': 'transcript_post_assembly',
+      'gen_ai.skill.id': skill.skillId || skill.skillName,
+      'agent.cursor.skill_detection_source':
+        skill.detectionSource || 'transcript_post_assembly',
     }, runtimeConfig));
 
     // tool.result
@@ -194,12 +368,34 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
       'gen_ai.tool.name': 'Read',
       'gen_ai.tool.call.id': toolCallId,
       'gen_ai.skill.name': skill.skillName,
-      'agent.cursor.skill_detection_source': 'transcript_post_assembly',
+      'gen_ai.skill.id': skill.skillId || skill.skillName,
+      'agent.cursor.skill_detection_source':
+        skill.detectionSource || 'transcript_post_assembly',
     }, runtimeConfig));
   }
 
   // Insert after the first LLM response.
   records.splice(targetLlmIdx + 1, 0, ...insertRecords);
+}
+
+function filterSkillsForReadInjection(skills, assembledFromTranscript) {
+  return skills.filter(skill => {
+    const sources = skill.detectionSources || [];
+    const hasExplicitUsageSignal = sources.includes('manual_attachment') ||
+      sources.includes('agent_skill');
+
+    if (!assembledFromTranscript) {
+      return hasExplicitUsageSignal ||
+        sources.includes('transcript_read');
+    }
+
+    // The transcript assembler already materializes real Read tool_use entries.
+    // Only synthesize a Read when an explicit user-row signal has no matching
+    // transcript Read. A skill with both sources already has its real Read in the
+    // assembled step.
+    return hasExplicitUsageSignal &&
+      !sources.includes('transcript_read');
+  });
 }
 
 async function main() {
@@ -260,6 +456,12 @@ async function main() {
 
   // Convert to internal event and append to journal
   const internalEvent = toInternalEvent(payload);
+  const invocationResourceAttributes = collectResourceAttributesFromEnv(process.env, {
+    agentId: 'cursor-cli',
+  });
+  if (Object.keys(invocationResourceAttributes).length > 0) {
+    internalEvent.resource_attributes = invocationResourceAttributes;
+  }
   try {
     appendEvent(internalEvent);
   } catch (err) {
@@ -276,7 +478,8 @@ async function main() {
   if (process.env.LOONGSUITE_CURSOR_RAW_TRACE === '1') {
     try {
       const rawFile = path.join(dataDir, 'logs', 'cursor', 'raw', 'cursor-raw-trace.jsonl');
-      await appendJsonl(rawFile, { _captured_at: now.toISOString(), ...payload });
+      appendRawJsonl(rawFile, JSON.stringify({ _captured_at: now.toISOString(), ...payload }) + '\n',
+        10 * 1024 * 1024, { diagnosticMaxBytes: 100 * 1024 * 1024 });
     } catch {
       // best-effort
     }
@@ -334,7 +537,7 @@ async function main() {
         const transcriptRecords = buildCursorRecordsFromTranscript(
           internalEvent.transcript_path,
           allEvents,
-          { runtimeConfig, stopConversationId: convId }
+          { runtimeConfig, stopConversationId: convId, variant }
         );
         if (transcriptRecords && transcriptRecords.length > 0) {
           records = transcriptRecords;
@@ -364,18 +567,27 @@ async function main() {
         if (transcriptPathForSkill && promptForSkill?.prompt && records.length > 0) {
           const { detectSkillFromTranscript } = await import('./cursor/skill-detector.mjs');
           const detectedSkills = detectSkillFromTranscript(transcriptPathForSkill, promptForSkill.prompt);
-          // The Windows transcript assembler already materializes transcript
-          // tool_use entries. Only compensate paths assembled from hook events.
-          if (detectedSkills && detectedSkills.length > 0 && !assembledFromTranscript) {
-            injectSkillRecords(records, detectedSkills, runtimeConfig);
+          if (detectedSkills && detectedSkills.length > 0) {
+            // The Windows transcript assembler already materializes transcript
+            // Read tool_use entries. Synthesize only pure manual attachments on
+            // that path; hook-event assembly still needs both evidence sources.
+            const readSkills = filterSkillsForReadInjection(
+              detectedSkills,
+              assembledFromTranscript,
+            );
+            if (readSkills.length > 0) {
+              injectSkillRecords(records, readSkills, runtimeConfig);
+            }
           }
         }
       } catch { /* best-effort skill detection — never block output */ }
 
+      applyCursorCliResourceContext(records, allEvents, convId, variant);
+
       if (records.length > 0) {
         const day = localDateString(now);
         const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
-        await appendBatchJsonl(historyFile, records);
+        await appendBatchJsonl(historyFile, records, variant);
       }
 
       compactJournal(allEvents, consumedConversationIds);
@@ -409,10 +621,12 @@ async function main() {
           stopConversationId: convId,
         });
 
+        applyCursorCliResourceContext(result.records, allEvents, convId, variant);
+
         if (result.records.length > 0) {
           const day = localDateString(now);
           const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
-          await appendBatchJsonl(historyFile, result.records);
+          await appendBatchJsonl(historyFile, result.records, variant);
         }
 
         compactJournal(allEvents, result.consumedConversationIds);
@@ -443,4 +657,9 @@ if (
   });
 }
 
-export { injectSkillRecords };
+export {
+  applyCursorCliResourceContext,
+  filterSkillsForReadInjection,
+  findConversationResourceAttributes,
+  injectSkillRecords,
+};

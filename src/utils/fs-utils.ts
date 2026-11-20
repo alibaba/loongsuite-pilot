@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as nodePath from 'node:path';
@@ -29,30 +30,98 @@ export async function directoryExists(path: string): Promise<boolean> {
 
 /**
  * Reads and parses JSON from a file. Returns `null` on missing file or parse errors.
+ *
+ * A leading UTF-8 BOM is stripped before parsing. `JSON.parse` rejects it, and
+ * because this function swallows parse errors a BOM would silently degrade to
+ * "file absent" — i.e. deployment state or config reverting to defaults rather
+ * than failing loudly. Windows produces BOMs routinely: PowerShell 5.1's
+ * `Set-Content -Encoding UTF8` always writes one (there is no utf8NoBOM before
+ * PowerShell 6), and so does Notepad. Both touch files we read here
+ * (`deployed-agents.json`, `config.json`).
  */
 export async function readJsonFile<T>(path: string): Promise<T | null> {
   try {
     const text = await fsp.readFile(path, 'utf8');
-    return JSON.parse(text) as T;
+    return JSON.parse(text.replace(/^\uFEFF/, '')) as T;
   } catch {
     return null;
   }
 }
 
-/**
- * Writes pretty-printed JSON atomically (write-to-tmp + rename) and ensures
- * parent directories exist. Errors are propagated to the caller.
- */
-export async function writeJsonFile(
+export type ExpectedFileState =
+  | { exists: false }
+  | { exists: true; content: string };
+
+export interface AtomicTextWriteOptions {
+  /**
+   * Optional optimistic concurrency guard. The write is rejected when the
+   * target no longer matches the content observed by the caller.
+   */
+  expected?: ExpectedFileState;
+  /**
+   * Optional one-time backup path. Existing backups are never overwritten.
+   * Only applies when the expected target already exists.
+   */
+  backupPath?: string;
+  /** Optional permissions for the newly-created temporary file. */
+  mode?: number;
+  /** Retain an existing user file's exact mode, without applying umask again. */
+  preserveMode?: boolean;
+}
+
+async function assertExpectedFileState(
   path: string,
-  data: unknown
+  expected: ExpectedFileState,
+): Promise<void> {
+  let current: string | null;
+  try {
+    current = await fsp.readFile(path, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    current = null;
+  }
+
+  const matches = expected.exists
+    ? current === expected.content
+    : current === null;
+  if (!matches) {
+    throw new Error(`file changed before write: ${path}`);
+  }
+}
+
+/**
+ * Writes text atomically (write-to-tmp + rename) and ensures the parent
+ * directory exists. Errors are propagated to the caller.
+ */
+export async function writeTextFileAtomic(
+  path: string,
+  text: string,
+  options: AtomicTextWriteOptions = {},
 ): Promise<void> {
   const dir = nodePath.dirname(path);
   await ensureDir(dir);
-  const text = `${JSON.stringify(data, null, 2)}\n`;
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+
+  if (options.expected) {
+    await assertExpectedFileState(path, options.expected);
+  }
+
+  if (options.backupPath && options.expected?.exists) {
+    try {
+      await fsp.copyFile(path, options.backupPath, fs.constants.COPYFILE_EXCL);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+  }
+
+  const tmp = atomicTmpPath(path);
   try {
-    await fsp.writeFile(tmp, text, 'utf8');
+    await fsp.writeFile(tmp, text, { encoding: 'utf8', mode: options.mode });
+    if (options.preserveMode && options.mode !== undefined) await fsp.chmod(tmp, options.mode);
+    // Re-check after preparing the temporary file. This narrows the remaining
+    // race to the final compare-and-rename window.
+    if (options.expected) {
+      await assertExpectedFileState(path, options.expected);
+    }
     await fsp.rename(tmp, path);
   } catch (err: unknown) {
     const code = (err as NodeJS.ErrnoException).code;
@@ -61,9 +130,13 @@ export async function writeJsonFile(
     if (code === 'ENOENT') {
       await fsp.unlink(tmp).catch(() => {});
       await ensureDir(dir);
-      const tmp2 = `${path}.${process.pid}.${Date.now()}.tmp`;
+      const tmp2 = atomicTmpPath(path);
       try {
-        await fsp.writeFile(tmp2, text, 'utf8');
+        await fsp.writeFile(tmp2, text, { encoding: 'utf8', mode: options.mode });
+        if (options.preserveMode && options.mode !== undefined) await fsp.chmod(tmp2, options.mode);
+        if (options.expected) {
+          await assertExpectedFileState(path, options.expected);
+        }
         await fsp.rename(tmp2, path);
       } catch (retryErr) {
         await fsp.unlink(tmp2).catch(() => {});
@@ -77,6 +150,9 @@ export async function writeJsonFile(
       if (!tmpExists) throw err;
       await new Promise(r => setTimeout(r, 50));
       try {
+        if (options.expected) {
+          await assertExpectedFileState(path, options.expected);
+        }
         await fsp.rename(tmp, path);
       } catch {
         await fsp.unlink(tmp).catch(() => {});
@@ -87,6 +163,21 @@ export async function writeJsonFile(
       throw err;
     }
   }
+}
+
+/**
+ * Writes pretty-printed JSON atomically. This remains the strict-JSON writer;
+ * JSONC callers must preserve and edit the original text instead.
+ */
+export async function writeJsonFile(
+  path: string,
+  data: unknown
+): Promise<void> {
+  await writeTextFileAtomic(path, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+function atomicTmpPath(path: string): string {
+  return `${path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
 }
 
 /**
@@ -104,7 +195,7 @@ export async function cleanStaleTmpFiles(dir: string, maxAgeMs = 60_000): Promis
   try {
     const entries = await fsp.readdir(dir);
     for (const f of entries) {
-      if (!/\.(\d+)\.\d+\.tmp$/.test(f)) continue;
+      if (!/\.(\d+)\.\d+(?:\.[^.]+)?\.tmp$/.test(f)) continue;
       const full = nodePath.join(dir, f);
       try {
         const st = await fsp.stat(full);
@@ -144,12 +235,25 @@ export async function ensureDir(path: string): Promise<void> {
 /**
  * Expands a leading `~` to the user home directory.
  */
-export function resolveHome(filepath: string): string {
+export interface HomeResolutionOptions {
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+  homedir?: () => string;
+}
+
+export function resolveHome(filepath: string, options: HomeResolutionOptions = {}): string {
+  const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const paths = platform === 'win32' ? nodePath.win32 : nodePath.posix;
+  const systemHome = options.homedir ?? os.homedir;
+  const home = () => env === process.env && platform === process.platform
+    ? systemHome()
+    : (platform === 'win32' ? env.USERPROFILE : env.HOME) || systemHome();
   if (filepath === '~') {
-    return os.homedir();
+    return home();
   }
-  if (filepath.startsWith('~/') || filepath.startsWith(`~${nodePath.sep}`)) {
-    return nodePath.join(os.homedir(), filepath.slice(2));
+  if (filepath.startsWith('~/') || filepath.startsWith(`~${paths.sep}`)) {
+    return paths.join(home(), filepath.slice(2));
   }
   return filepath;
 }

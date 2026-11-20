@@ -50,6 +50,7 @@ const DEFAULTS = {
   E2E_CODEX_MODEL: 'qwen3.6-plus',
   E2E_PROPAGATE_SLS_INSTALL: '1',
   E2E_JSONL_VALIDATE: '1',
+  E2E_JSONL_STRICT: '1',
   E2E_REQUIRED_DEPLOY_AGENTS: 'claude-code,codex,qoder,cursor,qwen-code-cli,opencode',
   // cursor-cli excluded: headless `cursor-agent -p` only fires sessionStart/afterAgentThought/sessionEnd
   // (no beforeSubmitPrompt/afterAgentResponse/stop), so the hook assembler produces no JSONL turn record.

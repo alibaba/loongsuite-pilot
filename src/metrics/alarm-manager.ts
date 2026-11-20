@@ -8,7 +8,10 @@ export type AlarmType =
   | 'FLUSH_SEND_ALARM'
   | 'FLUSH_QUOTA_ALARM'
   | 'HOOK_INSTALL_ALARM'
+  | 'PROCESS_CPU_ALARM'
+  | 'PROCESS_MEMORY_ALARM'
   | 'PROCESS_RESOURCE_ALARM'
+  | 'DISK_USAGE_ALARM'
   | 'DISPATCH_DROP_ALARM'
   | 'INPUT_STOP_ALARM'
   | 'SERVICE_NOT_RUNNING_ALARM'
@@ -17,7 +20,10 @@ export type AlarmType =
   | 'DEGRADED_STARTUP_ALARM'
   | 'UPDATER_NOT_RUNNING_ALARM'
   | 'BROKEN_VERSION_POINTER_ALARM'
-  | 'INVALID_NODE_BIN_ALARM';
+  | 'INVALID_NODE_BIN_ALARM'
+  | 'UPDATER_NODE_PIN_ALARM'
+  | 'MANAGED_CONFIG_ALARM'
+  | 'INTERCEPTOR_REGEX_ALARM';
 
 export interface AlarmContext {
   input_name?: string;
@@ -51,22 +57,20 @@ export class AlarmManager {
   private readonly version: string;
   private readonly userIdProvider: () => string;
 
-  constructor(opts: { ip: string; version: string; userId?: string; userIdProvider?: () => string }) {
+  constructor(opts: { ip: string; version: string; userId: string; userIdProvider?: () => string }) {
     this.ip = opts.ip;
     this.version = opts.version;
-    // Read userId lazily so a runtime correction propagates to alarms too;
-    // a static userId remains supported for callers/tests.
-    this.userIdProvider = opts.userIdProvider ?? (() => opts.userId ?? '');
+    this.userIdProvider = opts.userIdProvider ?? (() => opts.userId);
   }
 
-  record(type: AlarmType, level: AlarmLevel, message: string, context?: AlarmContext): void {
+  record(type: AlarmType, level: AlarmLevel, message: string, context?: AlarmContext, count = 1): void {
     const key = `${type}_${context?.input_name ?? ''}_${context?.endpoint_name ?? ''}`;
     const existing = this.alarms.get(key);
     if (existing) {
-      existing.count++;
+      existing.count += count;
       existing.message = message;
     } else {
-      this.alarms.set(key, { alarmType: type, level, message, count: 1, context });
+      this.alarms.set(key, { alarmType: type, level, message, count, context });
     }
   }
 
@@ -74,6 +78,7 @@ export class AlarmManager {
     if (this.alarms.size === 0) return [];
 
     const now = Math.floor(Date.now() / 1000);
+    const userId = this.userIdProvider();
     const entries: AlarmEntry[] = [];
 
     for (const item of this.alarms.values()) {
@@ -83,7 +88,7 @@ export class AlarmManager {
         alarm_level: item.level,
         alarm_message: item.message,
         alarm_count: String(item.count),
-        user_id: this.userIdProvider(),
+        user_id: userId,
         ip: this.ip,
         ver: this.version,
         __time__: now,

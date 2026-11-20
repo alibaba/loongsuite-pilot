@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { buildJsonlValidationSh, JSONL_VALIDATOR_JS } from '../../scripts/e2e/lib/e2e-scenarios.mjs';
+import { buildWorkBuddyEvents } from '../../src/inputs/workbuddy/workbuddy-event-builder.ts';
+import { projectLogEntry } from '../../src/normalization/entry-builder.ts';
 
 /** Run the embedded validator by piping its source into `node -` (mirrors how the remote bash runs it). */
 function runValidator(envOverrides = {}) {
@@ -59,12 +61,139 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     ...overrides,
   });
 
-  it('passes cleanly on valid entries', () => {
-    writeJsonl('claude-code-2026-05-11.jsonl', [goodEntry(), goodEntry({ 'event.id': 'evt-2' })]);
-    const r = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
+  const graphEntry = (id, eventName, overrides = {}) => goodEntry({
+    'event.id': id,
+    'event.name': eventName,
+    'gen_ai.turn.id': 'turn-1',
+    ...overrides,
+  });
+
+  const validMultiToolGraph = () => [
+    graphEntry('evt-1', 'llm.request', {
+      'gen_ai.step.id': 'step-1',
+      'gen_ai.turn.start': true,
+      'gen_ai.request.id': 'request-1',
+      'gen_ai.request.model': 'model-synthetic',
+      'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'SYNTHETIC_INPUT' }] }],
+    }),
+    graphEntry('evt-2', 'llm.response', {
+      'gen_ai.step.id': 'step-1',
+      'gen_ai.response.id': 'response-1',
+      'gen_ai.response.model': 'model-synthetic',
+      'gen_ai.response.finish_reasons': ['tool_calls'],
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'tool_call', id: 'call-a' }] }],
+      'gen_ai.usage.input_tokens': 10,
+      'gen_ai.usage.output_tokens': 2,
+      'gen_ai.usage.total_tokens': 12,
+    }),
+    graphEntry('evt-3', 'tool.call', {
+      'gen_ai.step.id': 'step-1',
+      'gen_ai.tool.name': 'SyntheticRead',
+      'gen_ai.tool.call.id': 'call-a',
+      'gen_ai.tool.call.arguments': { path: '/workspace/example/a.txt' },
+    }),
+    graphEntry('evt-4', 'tool.call', {
+      'gen_ai.step.id': 'step-1',
+      'gen_ai.tool.name': 'SyntheticRead',
+      'gen_ai.tool.call.id': 'call-b',
+      'gen_ai.tool.call.arguments': { path: '/workspace/example/b.txt' },
+    }),
+    graphEntry('evt-5', 'tool.result', {
+      'gen_ai.step.id': 'step-1',
+      'gen_ai.tool.name': 'SyntheticRead',
+      'gen_ai.tool.call.id': 'call-a',
+      'gen_ai.tool.call.result': { ok: true },
+      'gen_ai.tool.call.duration': 100,
+      'tool.result.status': 'success',
+    }),
+    graphEntry('evt-6', 'tool.result', {
+      'gen_ai.step.id': 'step-1',
+      'gen_ai.tool.name': 'SyntheticRead',
+      'gen_ai.tool.call.id': 'call-b',
+      'gen_ai.tool.call.result': { ok: true },
+      'gen_ai.tool.call.duration': 200,
+      'tool.result.status': 'success',
+    }),
+    graphEntry('evt-7', 'llm.request', {
+      'gen_ai.step.id': 'step-2',
+      'gen_ai.request.id': 'request-2',
+      'gen_ai.request.model': 'model-synthetic',
+      'gen_ai.input.messages_delta': [
+        { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-a', result: { ok: true } }] },
+        { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-b', result: { ok: true } }] },
+      ],
+    }),
+    graphEntry('evt-8', 'llm.response', {
+      'gen_ai.step.id': 'step-2',
+      'gen_ai.turn.end': true,
+      'gen_ai.response.id': 'response-2',
+      'gen_ai.response.model': 'model-synthetic',
+      'gen_ai.response.finish_reasons': ['stop'],
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'SYNTHETIC_OUTPUT' }] }],
+      'gen_ai.usage.input_tokens': 13,
+      'gen_ai.usage.output_tokens': 3,
+      'gen_ai.usage.total_tokens': 16,
+    }),
+  ];
+
+  const runWorkBuddyValidator = () => runValidator({
+    _JV_LOG_DIR: tmpDir,
+    E2E_JSONL_AGENT_FILTER: 'workbuddy',
+    E2E_JSONL_STRICT: '1',
+  });
+
+  it('validates a complete multi-tool graph and reports per-event field coverage', () => {
+    writeJsonl('workbuddy-2026-05-11.jsonl', validMultiToolGraph());
+    const r = runWorkBuddyValidator();
     expect(r.code).toBe(0);
-    expect(r.out).toContain('OK claude-code-2026-05-11.jsonl');
+    expect(r.out).toContain('OK workbuddy-2026-05-11.jsonl');
     expect(r.out).toContain('missing_required=0');
+    expect(r.out).toContain('tool.call count=2');
+    expect(r.out).toContain('gen_ai.tool.call.id=2 (100.0%)');
+  });
+
+  it('accepts an unfinished OpenClaw cron attempt until its explicit lifecycle end', () => {
+    const common = {
+      'gen_ai.agent.type': 'openclaw',
+      'gen_ai.turn.id': 'cron-turn',
+      'agent.openclaw.collection': 'cron-lifecycle-v1',
+    };
+    const records = [
+      goodEntry({ ...common, 'event.id': 'start', 'event.name': 'other', 'gen_ai.turn.start': true }),
+      goodEntry({ ...common, 'event.id': 'attempt', 'event.name': 'other', 'agent.openclaw.hook': 'llm_output' }),
+    ];
+    const validate = () => runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_AGENT_FILTER: 'openclaw', E2E_JSONL_STRICT: '1' });
+    writeJsonl('openclaw-cron.jsonl', records);
+    expect(validate().code).toBe(0);
+    records.push(goodEntry({ ...common, 'event.id': 'finish', 'event.name': 'other',
+      'agent.openclaw.hook': 'cron_finished', 'gen_ai.turn.end': true }));
+    writeJsonl('openclaw-cron.jsonl', records);
+    expect(validate().code).toBe(0);
+  });
+
+  it('accepts projected WorkBuddy builder output after tools with no reliable name are dropped', async () => {
+    const fixture = fs.readFileSync(
+      new URL('../fixtures/workbuddy/multi-tool-wave.jsonl', import.meta.url),
+      'utf8',
+    ).trim().split(/\r?\n/).map(line => JSON.parse(line));
+    const records = fixture.map(record =>
+      record.type === 'function_call' || record.type === 'function_call_result'
+        ? { ...record, name: undefined }
+        : record);
+    const built = await buildWorkBuddyEvents(records, { sessionId: 'session-synthetic-1' });
+    expect(built.some(entry =>
+      entry['event.name'] === 'tool.call' || entry['event.name'] === 'tool.result')).toBe(false);
+
+    const projected = built.map(entry => projectLogEntry({
+      ...entry,
+      'user.id': 'synthetic-user',
+    }, { dropAgentScopedFields: true }));
+    writeJsonl('workbuddy-2026-05-11.jsonl', projected);
+
+    const r = runWorkBuddyValidator();
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('missing_required=0');
+    expect(r.out).toContain('tool_pair_error=0');
   });
 
   it('detects missing required fields and exits 1 under STRICT', () => {
@@ -75,7 +204,40 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     const r = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
     expect(r.code).toBe(1);
     expect(r.out).toContain('FAIL codex-2026-05-11.jsonl');
-    expect(r.out).toMatch(/missing=\[.*user\.id.*\]/);
+    expect(r.out).toContain('missing_required=1');
+    expect(r.out).toMatch(/category=missing_required fields=\[user\.id\]/);
+  });
+
+  it('allows a provider-less agent-turn observation but still requires it for model and tool data', () => {
+    const common = { 'gen_ai.agent.type': 'synthetic-agent', 'gen_ai.turn.id': 'turn-1',
+      'gen_ai.provider.name': undefined, 'loongsuite.observation.scope': 'agent_turn' };
+    const validate = () => runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_AGENT_FILTER: 'synthetic-agent', E2E_JSONL_STRICT: '1' });
+    const records = [
+      graphEntry('start', 'other', { ...common, 'gen_ai.turn.start': true }),
+      graphEntry('input', 'agent.input', common),
+      graphEntry('end', 'other', { ...common, 'gen_ai.turn.end': true }),
+    ];
+    writeJsonl('synthetic-agent.jsonl', records);
+    expect(validate().code).toBe(0);
+    for (const invalid of [
+      graphEntry('invalid', 'other', common),
+      graphEntry('invalid', 'other', { ...common, 'gen_ai.turn.start': true, 'loongsuite.observation.scope': undefined }),
+      graphEntry('invalid', 'llm.request', common),
+      graphEntry('invalid', 'tool.call', { ...common, 'gen_ai.tool.name': 'Read', 'gen_ai.tool.call.id': 'call' }),
+      graphEntry('invalid', 'other', { ...common, 'gen_ai.turn.start': true, 'gen_ai.request.model': 'fixture-model' }),
+      graphEntry('invalid', 'agent.input', { ...common, 'gen_ai.usage.input_tokens': 3 }),
+    ]) {
+      writeJsonl('synthetic-agent.jsonl', [invalid]);
+      const result = validate();
+      expect(result.code).toBe(1);
+      expect(result.out).toMatch(/category=missing_required fields=\[gen_ai\.provider\.name\]/);
+    }
+    writeJsonl('synthetic-agent.jsonl', [
+      graphEntry('invalid-scope', 'llm.request', { ...common, 'gen_ai.provider.name': 'fixture-provider' }),
+    ]);
+    const invalidScope = validate();
+    expect(invalidScope.code).toBe(1);
+    expect(invalidScope.out).toContain('invalid_observation_scope=1');
   });
 
   it('honors E2E_JSONL_AGENT_FILTER', () => {
@@ -92,10 +254,263 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
   });
 
   it('reports bad event.name enum values', () => {
-    writeJsonl('claude-code-2026-05-11.jsonl', [goodEntry({ 'event.name': 'not.a.real.event' })]);
+    writeJsonl('claude-code-2026-05-11.jsonl', [goodEntry({ 'event.name': 'invalid.event.name' })]);
+    const diagnostic = runValidator({ _JV_LOG_DIR: tmpDir });
+    expect(diagnostic.code).toBe(0);
+    expect(diagnostic.out).toContain('bad_event_name=1');
     const r = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
     expect(r.code).toBe(1);
     expect(r.out).toContain('bad_event_name=1');
+  });
+
+  it('accepts all six standard names and pairs standard/short model and tool records', () => {
+    const aliases = {
+      'llm.request': 'gen_ai.model.request',
+      'llm.response': 'gen_ai.model.response',
+      'tool.call': 'gen_ai.tool.call',
+      'tool.result': 'gen_ai.tool.result',
+    };
+    const entries = validMultiToolGraph().map((entry, index) => ({
+      ...entry,
+      // Deliberately mix spellings inside the second model and tool pairs.
+      'event.name': [4, 6].includes(index) ? entry['event.name'] : aliases[entry['event.name']],
+    }));
+    entries.push(...['gen_ai.agent.invoke', 'gen_ai.agent.result'].map((name, index) =>
+      graphEntry(`delegation-${index}`, name, {
+        'gen_ai.agent.invocation.id': 'invocation-1',
+        'gen_ai.tool.call.id': 'call-a',
+      })));
+    writeJsonl('workbuddy-2026-05-11.jsonl', entries);
+    const result = runWorkBuddyValidator();
+    expect(result.code).toBe(0);
+    expect(result.out).toContain('bad_event_name=0');
+    expect(result.out).toContain('model_pair_error=0');
+    expect(result.out).toContain('tool_pair_error=0');
+    expect(result.out).toContain('gen_ai.agent.invoke count=1');
+    expect(result.out).toContain('gen_ai.agent.result count=1');
+  });
+
+  it('rejects duplicate model facts written under both standard and short names', () => {
+    const entries = validMultiToolGraph();
+    entries.push({ ...entries[0], 'event.id': 'duplicate-standard-request',
+      'event.name': 'gen_ai.model.request', 'gen_ai.turn.start': undefined });
+    writeJsonl('workbuddy-2026-05-11.jsonl', entries);
+    const result = runWorkBuddyValidator();
+    expect(result.code).toBe(1);
+    expect(result.out).toContain('bad_event_name=0');
+    expect(result.out).toContain('model_pair_error=1');
+  });
+
+  it('requires the same tool fields for standard tool names', () => {
+    const entries = validMultiToolGraph();
+    entries[2]['event.name'] = 'gen_ai.tool.call';
+    delete entries[2]['gen_ai.tool.name'];
+    writeJsonl('workbuddy-2026-05-11.jsonl', entries);
+    const result = runWorkBuddyValidator();
+    expect(result.code).toBe(1);
+    expect(result.out).toContain('missing_required=1');
+  });
+
+  it.each(['gen_ai.agent.invoke', 'gen_ai.agent.result'])(
+    'requires an invocation ID only on the %s event', eventName => {
+      const entries = [goodEntry({ 'event.name': eventName })];
+      writeJsonl('codex.jsonl', entries);
+      const env = { _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' };
+      const missing = runValidator(env);
+      expect(missing.code).toBe(1);
+      expect(missing.out).toContain('missing_required=1');
+      expect(missing.out).toContain('fields=[gen_ai.agent.invocation.id]');
+
+      entries[0]['gen_ai.agent.invocation.id'] = 'invocation-1';
+      writeJsonl('codex.jsonl', entries);
+      const present = runValidator(env);
+      expect(present.code).toBe(0);
+      expect(present.out).toContain('missing_required=0');
+    },
+  );
+
+  it.each([undefined, 'subagent'].flatMap(scope =>
+    [undefined, 'interrupted', 'completed'].map(status => ({ scope, status })),
+  ))(
+    'accepts Codex scope=$scope status=$status before its native turn end', ({ scope, status }) => {
+      const entries = [goodEntry({
+        'gen_ai.agent.type': 'codex', 'gen_ai.agent.scope': scope,
+        'gen_ai.turn.id': 'turn-1', 'gen_ai.turn.start': true,
+        'agent.codex.turn_status': status,
+      })];
+      const env = { _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' };
+      writeJsonl('codex.jsonl', entries);
+      const running = runValidator(env);
+      expect(running.code).toBe(0);
+      expect(running.out).toContain('turn_boundary_error=0');
+
+      entries.push({ ...entries[0], 'event.id': 'evt-end',
+        'gen_ai.turn.start': undefined, 'gen_ai.turn.end': true });
+      writeJsonl('codex.jsonl', entries);
+      const ended = runValidator(env);
+      expect(ended.code).toBe(0);
+      expect(ended.out).toContain('turn_boundary_error=0');
+    },
+  );
+
+  it.each([
+    { name: 'missing start', markers: [{ 'gen_ai.turn.end': true }] },
+    { name: 'duplicate starts', markers: [{ 'gen_ai.turn.start': true }, { 'gen_ai.turn.start': true }] },
+    { name: 'duplicate ends', markers: [
+      { 'gen_ai.turn.start': true, 'gen_ai.turn.end': true }, { 'gen_ai.turn.end': true },
+    ] },
+  ])('rejects Codex child turn $name', ({ markers }) => {
+    writeJsonl('codex.jsonl', markers.map((marker, index) => goodEntry({
+      'event.id': `child-${index}`, 'event.name': 'other',
+      'gen_ai.agent.type': 'codex', 'gen_ai.agent.scope': 'subagent',
+      'gen_ai.turn.id': 'child-turn', ...marker,
+    })));
+    const result = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
+    expect(result.code).toBe(1);
+    expect(result.out).toContain('turn_boundary_error=1');
+  });
+
+  it('keeps non-Codex subagent boundaries outside the turn check', () => {
+    writeJsonl('claude-code.jsonl', [0, 1].map(index => goodEntry({
+      'event.id': `child-${index}`, 'event.name': 'other',
+      'gen_ai.agent.scope': 'subagent', 'gen_ai.turn.id': 'child-turn',
+      'gen_ai.turn.start': true, 'gen_ai.turn.end': true,
+    })));
+    const result = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
+    expect(result.code).toBe(0);
+    expect(result.out).toContain('turn_boundary_error=0');
+  });
+
+  it.each([
+    { agent: 'claude-code', terminal: { 'gen_ai.response.finish_reasons': ['stop'] } },
+    { agent: 'openclaw', terminal: { 'agent.openclaw.hook': 'llm_output' } },
+  ])('keeps $agent terminal signals authoritative for the boundary check', ({ agent, terminal }) => {
+    const entries = [goodEntry({
+      'event.name': 'other', 'gen_ai.agent.type': agent,
+      'gen_ai.turn.id': 'turn-1', 'gen_ai.turn.start': true, ...terminal,
+    })];
+    const env = { _JV_LOG_DIR: tmpDir, E2E_JSONL_AGENT_FILTER: 'all', E2E_JSONL_STRICT: '1' };
+    writeJsonl(`${agent}.jsonl`, entries);
+    const missing = runValidator(env);
+    expect(missing.code).toBe(1);
+    expect(missing.out).toContain('turn_boundary_error=1');
+
+    entries[0]['gen_ai.turn.end'] = true;
+    writeJsonl(`${agent}.jsonl`, entries);
+    const ended = runValidator(env);
+    expect(ended.code).toBe(0);
+    expect(ended.out).toContain('turn_boundary_error=0');
+  });
+
+  it('keeps Codex delegation audit events outside their own turn boundary check', () => {
+    writeJsonl('codex.jsonl', ['gen_ai.agent.invoke', 'gen_ai.agent.result'].map((eventName, index) => goodEntry({
+      'event.id': `delegation-${index}`, 'event.name': eventName,
+      'gen_ai.agent.type': 'codex', 'gen_ai.turn.id': 'parent-turn',
+      'gen_ai.agent.invocation.id': 'invocation-1',
+    })));
+    const result = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
+    expect(result.code).toBe(0);
+    expect(result.out).toContain('turn_boundary_error=0');
+  });
+
+  it('accepts agent.input as a valid event name', () => {
+    writeJsonl('claude-code-2026-05-11.jsonl', [goodEntry({ 'event.name': 'agent.input' })]);
+    const r = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('bad_event_name=0');
+  });
+
+  it.each([
+    {
+      name: 'duplicate event IDs',
+      mutate: entries => { entries[7]['event.id'] = entries[0]['event.id']; },
+      category: 'duplicate_event_id=1',
+    },
+    {
+      name: 'native JSON types and positive millisecond duration',
+      mutate: entries => {
+        entries[2]['gen_ai.tool.call.arguments'] = '{"path":"/workspace/example/a.txt"}';
+        entries[4]['gen_ai.tool.call.duration'] = 0;
+      },
+      category: 'type_error=2',
+    },
+    {
+      name: 'request/response pairing',
+      mutate: entries => { entries.splice(1, 1); },
+      category: 'model_pair_error=1',
+    },
+    {
+      name: 'tool call/result pairing and name consistency',
+      mutate: entries => { entries[4]['gen_ai.tool.name'] = 'DifferentSyntheticTool'; },
+      category: 'tool_pair_error=1',
+    },
+    {
+      name: 'turn start/end uniqueness',
+      mutate: entries => { delete entries[7]['gen_ai.turn.end']; },
+      category: 'turn_boundary_error=1',
+    },
+    {
+      name: 'both turn boundaries missing',
+      mutate: entries => {
+        delete entries[0]['gen_ai.turn.start'];
+        delete entries[7]['gen_ai.turn.end'];
+      },
+      category: 'turn_boundary_error=1',
+    },
+  ])('strictly rejects $name', ({ mutate, category }) => {
+    const entries = validMultiToolGraph();
+    mutate(entries);
+    writeJsonl('workbuddy-2026-05-11.jsonl', entries);
+    const r = runWorkBuddyValidator();
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(category);
+  });
+
+  it('accepts an incomplete turn with exactly one start and no end', () => {
+    writeJsonl('workbuddy-2026-05-11.jsonl', [
+      graphEntry('evt-incomplete', 'other', {
+        'gen_ai.turn.start': true,
+        'gen_ai.input.messages_delta': [
+          { role: 'user', parts: [{ type: 'text', content: 'SYNTHETIC_INPUT' }] },
+        ],
+      }),
+    ]);
+
+    const r = runWorkBuddyValidator();
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('turn_boundary_error=0');
+  });
+
+  it('accepts a compatibility input pair with the turn boundary only on other', () => {
+    const inputMessages = [
+      { role: 'user', parts: [{ type: 'text', content: 'SYNTHETIC_INPUT' }] },
+    ];
+    writeJsonl('workbuddy-2026-05-11.jsonl', [
+      graphEntry('evt-input-other', 'other', {
+        'gen_ai.turn.start': true,
+        'gen_ai.input.messages_delta': inputMessages,
+      }),
+      graphEntry('evt-agent-input', 'agent.input', {
+        'gen_ai.input.messages_delta': inputMessages,
+      }),
+    ]);
+
+    const r = runWorkBuddyValidator();
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('bad_event_name=0');
+    expect(r.out).toContain('turn_boundary_error=0');
+  });
+
+  it('never prints prompt, tool payload, result, or user path values in validation errors', () => {
+    const entries = validMultiToolGraph();
+    entries[2]['gen_ai.tool.call.arguments'] =
+      '{"secret":"SENSITIVE_MARKER_MUST_NOT_APPEAR","path":"/Users/private/person"}';
+    writeJsonl('workbuddy-2026-05-11.jsonl', entries);
+    const r = runWorkBuddyValidator();
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('type_error=1');
+    expect(r.out).not.toContain('SENSITIVE_MARKER_MUST_NOT_APPEAR');
+    expect(r.out).not.toContain('/Users/private/person');
   });
 
   it('returns 0 with hint when log dir is empty (non-strict)', () => {
@@ -104,14 +519,34 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     expect(r.out).toContain('no .jsonl files');
   });
 
+  it('fails strict validation when the requested time window contains no rows', () => {
+    writeJsonl('workbuddy-2026-05-11.jsonl', [
+      goodEntry({
+        time_unix_nano: String(BigInt(Date.now() - 60_000) * 1_000_000n),
+        'gen_ai.agent.type': 'workbuddy',
+        'gen_ai.provider.name': 'workbuddy',
+      }),
+    ]);
+    const r = runValidator({
+      _JV_LOG_DIR: tmpDir,
+      E2E_JSONL_AGENT_FILTER: 'workbuddy',
+      E2E_JSONL_SINCE_SECONDS: '1',
+      E2E_JSONL_STRICT: '1',
+    });
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('windowed=0');
+    expect(r.out).toContain('empty_window=1');
+  });
+
   it('default filter covers the L1 CLI coverage set and excludes IDE-only agents', () => {
-    writeJsonl('claude-code-2026-05-11.jsonl', [goodEntry()]);
-    writeJsonl('codex-2026-05-11.jsonl', [goodEntry()]);
-    writeJsonl('qoder-cli-2026-05-11.jsonl', [goodEntry({ 'gen_ai.agent.type': 'qoder-cli' })]);
-    writeJsonl('cursor-cli-2026-05-11.jsonl', [goodEntry({ 'gen_ai.agent.type': 'cursor-cli' })]);
-    writeJsonl('qwen-code-cli-2026-05-11.jsonl', [goodEntry({ 'gen_ai.agent.type': 'qwen-code-cli' })]);
-    writeJsonl('opencode-2026-05-11.jsonl', [goodEntry({ 'gen_ai.agent.type': 'opencode' })]);
-    writeJsonl('qoder-2026-05-11.jsonl', [goodEntry()]);
+    writeJsonl('claude-code-2026-05-11.jsonl', [goodEntry({ 'event.id': 'evt-claude' })]);
+    writeJsonl('codex-2026-05-11.jsonl', [goodEntry({ 'event.id': 'evt-codex' })]);
+    writeJsonl('qoder-cli-2026-05-11.jsonl', [goodEntry({ 'event.id': 'evt-qoder-cli', 'gen_ai.agent.type': 'qoder-cli' })]);
+    writeJsonl('cursor-cli-2026-05-11.jsonl', [goodEntry({ 'event.id': 'evt-cursor-cli', 'gen_ai.agent.type': 'cursor-cli' })]);
+    writeJsonl('qwen-code-cli-2026-05-11.jsonl', [goodEntry({ 'event.id': 'evt-qwen', 'gen_ai.agent.type': 'qwen-code-cli' })]);
+    writeJsonl('opencode-2026-05-11.jsonl', [goodEntry({ 'event.id': 'evt-opencode', 'gen_ai.agent.type': 'opencode' })]);
+    writeJsonl('qoder-2026-05-11.jsonl', [goodEntry({ 'event.id': 'evt-qoder' })]);
     const r = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
     expect(r.code).toBe(0);
     expect(r.out).toContain('claude-code-2026-05-11.jsonl');

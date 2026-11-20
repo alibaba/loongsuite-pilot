@@ -6,9 +6,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { SlsFlusherConfig, SlsEndpoint } from '../../../src/types/index.js';
 import { buildTestEntry } from '../../helpers/fixture-builder.js';
+import * as http from 'node:http';
+import * as crypto from 'node:crypto';
 
 const mockPostLogStoreLogs = vi.fn().mockResolvedValue(undefined);
 const mockFailureWrite = vi.fn().mockResolvedValue(true);
+const mockAlarmRecord = vi.fn();
 
 // Track each ALY client constructor call so we can assert on per-endpoint instances.
 const akClientCtorCalls: Array<{ endpoint: string; accessKeyId: string }> = [];
@@ -62,26 +65,42 @@ function wtEndpoint(name: string, url: string, project: string): SlsEndpoint {
   };
 }
 
-function makeConfig(endpoints: SlsEndpoint[]): SlsFlusherConfig {
+function apiKeyEndpoint(name: string, url: string, project: string): SlsEndpoint {
+  return {
+    name, endpoint: url, project, logstore: `${project}-store`,
+    kind: 'agentActivity', mode: 'apiKey',
+    apiKey: `${name}-api-key`,
+    redact: false,
+  };
+}
+
+function makeConfig(
+  endpoints: SlsEndpoint[],
+  overrides: Partial<SlsFlusherConfig> = {},
+): SlsFlusherConfig {
   const primary = endpoints[0];
   return {
     enabled: true,
     accessKeyId: primary.accessKeyId ?? '',
     accessKeySecret: primary.accessKeySecret ?? '',
+    apiKey: primary.apiKey ?? '',
     endpoint: primary.endpoint,
     mode: primary.mode,
     endpoints,
     batchMaxSize: 20,
     flushIntervalMs: 99999,
     serviceNamePrefix: '',
+    ...overrides,
   };
 }
 
 describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockPostLogStoreLogs.mockReset().mockResolvedValue(undefined);
+    mockFailureWrite.mockReset().mockResolvedValue(true);
+    fetchSpy.mockReset().mockResolvedValue({ ok: true, status: 200, text: async () => '' });
     akClientCtorCalls.length = 0;
-    fetchSpy.mockClear();
   });
 
   afterEach(() => {
@@ -208,4 +227,148 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     const endpoints = mockFailureWrite.mock.calls.map((call: unknown[]) => (call[0] as { endpoint: string }).endpoint);
     expect(endpoints.sort()).toEqual(['internal-sls', 'user-sls']);
   });
+
+  it('apiKey endpoint posts protobuf to local mock service with bearer auth', async () => {
+    const received = await withMockSlsServer(async ({ endpoint, requests }) => {
+      const flusher = new SlsFlusher(
+        makeConfig([apiKeyEndpoint('api-key-sls', endpoint, 'api-key-project')]),
+        '/tmp/data',
+      );
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      return requests[0];
+    });
+
+    expect(received.url).toBe('/logstores/api-key-project-store/shards/lb');
+    expect(received.headers.authorization).toBe('Bearer api-key-sls-api-key');
+    expect(received.headers['content-type']).toBe('application/x-protobuf');
+    expect(Number.isFinite(Date.parse(String(received.headers.date)))).toBe(true);
+    expect(received.headers['x-log-apiversion']).toBe('0.6.0');
+    expect(received.headers['x-log-signaturemethod']).toBeUndefined();
+    expect(received.headers['content-md5']).toBe(
+      crypto.createHash('md5').update(received.body).digest('hex').toUpperCase(),
+    );
+    expect(received.headers['x-log-bodyrawsize']).toBe(String(received.body.byteLength));
+    expect(received.body.toString('utf8')).toContain('gen_ai.session.id');
+    expect(received.body.toString('utf8')).toContain('test-session-1');
+  });
+
+  it('apiKey failure persists failed batch without raw API Key', async () => {
+    await withMockSlsServer(async ({ endpoint }) => {
+      const flusher = new SlsFlusher(
+        makeConfig([apiKeyEndpoint('api-key-sls', endpoint, 'api-key-project')]),
+        '/tmp/data',
+      );
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+    }, { statusCode: 403, body: '{"errorCode":"Forbidden"}' });
+
+    expect(mockFailureWrite).toHaveBeenCalledOnce();
+    const [failure] = mockFailureWrite.mock.calls[0];
+    expect(JSON.stringify(failure)).not.toContain('api-key-sls-api-key');
+    expect(failure).toMatchObject({
+      endpoint: 'api-key-sls',
+      mode: 'apiKey',
+      project: 'api-key-project',
+      logstore: 'api-key-project-store',
+      kind: 'agentActivity',
+      batchCount: 1,
+    });
+    expect(failure.batchBytes).toBeGreaterThan(0);
+    expect(String(failure.error)).toContain('Forbidden');
+  });
+
+  it('keeps WebTracking retries for a real fetch error and reports bounded safe detail', async () => {
+    const causeText = `getaddrinfo ENOTFOUND original-host.example Authorization: Bearer test-token ${'x'.repeat(700)}`;
+    fetchSpy.mockRejectedValue(Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error(causeText), { code: 'ENOTFOUND' }),
+    }));
+    const flusher = new SlsFlusher(
+      makeConfig(
+        [wtEndpoint('web-network', 'https://cn-shanghai.log.aliyuncs.com', 'web-project')],
+        { retry: { retryMaxAttempts: 3, retryBaseDelayMs: 0, retryJitter: false } },
+      ),
+      '/tmp/data',
+    );
+    flusher.setAlarmManager({ record: mockAlarmRecord } as any);
+
+    await flusher.send(buildTestEntry());
+    await flusher.flush();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(mockAlarmRecord).toHaveBeenCalledOnce();
+    const message = mockAlarmRecord.mock.calls[0][2] as string;
+    expect(message).toContain('category=dns code=ENOTFOUND attempts=3');
+    expect(message).toContain('TypeError: fetch failed');
+    expect(message).toContain('original-host.example');
+    expect(message).toContain('Authorization: [REDACTED]');
+    expect(message).not.toContain('test-token');
+    expect(message).not.toContain('x'.repeat(700));
+  });
+
+  it('does not change permanent HTTP retry behavior or report the response body', async () => {
+    const body = '{"errorCode":"Forbidden","message":"original response text"}';
+    fetchSpy.mockResolvedValue({ ok: false, status: 403, text: async () => body });
+    const flusher = new SlsFlusher(
+      makeConfig(
+        [wtEndpoint('web-http', 'https://cn-shanghai.log.aliyuncs.com', 'web-project')],
+        { retry: { retryMaxAttempts: 3, retryBaseDelayMs: 0, retryJitter: false } },
+      ),
+      '/tmp/data',
+    );
+    flusher.setAlarmManager({ record: mockAlarmRecord } as any);
+
+    await flusher.send(buildTestEntry());
+    await flusher.flush();
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(mockAlarmRecord).toHaveBeenCalledOnce();
+    const message = mockAlarmRecord.mock.calls[0][2] as string;
+    expect(message).toContain('category=http code=Forbidden status=403 attempts=1');
+    expect(message).not.toContain('original response text');
+  });
 });
+
+interface MockRequest {
+  url: string;
+  headers: http.IncomingHttpHeaders;
+  body: Buffer;
+}
+
+async function withMockSlsServer<T>(
+  fn: (args: { endpoint: string; requests: MockRequest[] }) => Promise<T>,
+  response: { statusCode: number; body: string } = { statusCode: 200, body: '' },
+): Promise<T> {
+  const requests: MockRequest[] = [];
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+    req.on('end', () => {
+      requests.push({
+        url: req.url ?? '',
+        headers: req.headers,
+        body: Buffer.concat(chunks),
+      });
+      res.statusCode = response.statusCode;
+      res.end(response.body);
+    });
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+
+  try {
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('mock server did not bind to a TCP port');
+    return await fn({ endpoint: `http://127.0.0.1:${address.port}`, requests });
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close(err => err ? reject(err) : resolve());
+    });
+  }
+}

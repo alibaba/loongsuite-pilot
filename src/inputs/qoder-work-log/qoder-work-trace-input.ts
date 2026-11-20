@@ -3,8 +3,8 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Dirent } from 'node:fs';
-import sqlite3 from 'sqlite3';
 import { ClientType } from '../../types/index.js';
+import { queryReadonly } from '../../utils/node-sqlite.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { directoryExists } from '../../utils/fs-utils.js';
@@ -12,6 +12,8 @@ import {
   BaseSessionInput,
   type SessionInputOptions,
 } from '../base/base-session-input.js';
+import { readBoundedLineTail } from '../base/bounded-line-tail.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import {
   parseSdkLogLine,
   resolveQoderWorkRoot,
@@ -22,7 +24,6 @@ import {
 // ─── constants ───────────────────────────────────────────────────────────────
 
 const UNKNOWN_MODEL = 'unknown';
-const MAX_READ_BYTES = 16 * 1024 * 1024;
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const PROMPT_MATCH_TOLERANCE_MS = 5 * 60 * 1000;
 const WINDOW_STATE_LIMIT = 500;
@@ -120,7 +121,7 @@ export class QoderWorkTraceInput extends BaseSessionInput {
       stateStore: opts.stateStore,
       sessionDir: path.join(dataRoot, 'logs'),
       filePattern: 'sdk-*.log',
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
     this.agentType = agentType;
     this.id = `${agentType}-trace`;
@@ -217,47 +218,38 @@ export class QoderWorkTraceInput extends BaseSessionInput {
     try { stat = await fs.stat(filePath); } catch { return []; }
 
     const prevState = this.stateStore.get(stateKey);
-    const prevInode = prevState.extra?.inode as number | undefined;
-    const currentInode = (stat as unknown as { ino: number }).ino;
-
-    if (prevInode !== undefined && prevInode !== currentInode) {
-      this.stateStore.setOffset(stateKey, 0);
-      this.stateStore.update(stateKey, { extra: { inode: currentInode } });
+    const currentInode = stat.ino;
+    const savedOffset = prevState.lastOffset ?? 0;
+    const reset = (prevState.extra?.inode !== undefined && prevState.extra.inode !== currentInode)
+      || stat.size < savedOffset;
+    const offset = reset ? 0 : savedOffset;
+    if (reset) {
       this.fileModelPolicies.delete(filePath);
       this.currentModelPolicy = { chat: '', compact: '', scene: '' };
-    } else if (prevInode === undefined) {
-      this.stateStore.update(stateKey, { extra: { inode: currentInode } });
+    }
+    const persistedPolicy = reset ? undefined : prevState.extra?.modelPolicy as
+      { chat?: string; compact?: string; scene?: string } | undefined;
+    this.currentModelPolicy = this.fileModelPolicies.get(filePath)
+      ?? { chat: persistedPolicy?.chat ?? '', compact: persistedPolicy?.compact ?? '', scene: persistedPolicy?.scene ?? '' };
+    const resetPolicy = reset ? { modelPolicy: null } : {};
+    if (stat.size <= offset) {
+      if (reset || prevState.extra?.inode === undefined) {
+        this.stateStore.update(stateKey, { lastOffset: offset, extra: { inode: currentInode, skippingLine: false, ...resetPolicy } });
+      }
+      return [];
     }
 
-    // Restore model policy from persisted state (survives process restarts)
-    const persistedPolicy = prevState.extra?.modelPolicy as { chat?: string; compact?: string; scene?: string } | undefined;
-    this.currentModelPolicy = this.fileModelPolicies.get(filePath)
-      ?? (persistedPolicy ? { chat: persistedPolicy.chat ?? '', compact: persistedPolicy.compact ?? '', scene: persistedPolicy.scene ?? '' }
-        : { chat: '', compact: '', scene: '' });
-
-    const offset = this.stateStore.getOffset(stateKey);
-    if (stat.size <= offset) return [];
-
-    const handle = await fs.open(filePath, 'r');
-    let text: string;
-    try {
-      const readSize = Math.min(stat.size - offset, MAX_READ_BYTES);
-      const buf = Buffer.alloc(readSize);
-      await handle.read(buf, 0, readSize, offset);
-      text = buf.toString('utf-8');
-      let consumedBytes = readSize;
-      if (readSize < stat.size - offset) {
-        const lastNL = text.lastIndexOf('\n');
-        if (lastNL >= 0) { text = text.substring(0, lastNL); consumedBytes = Buffer.byteLength(text, 'utf-8') + 1; }
-      }
-      this.stateStore.setOffset(stateKey, offset + consumedBytes);
-      this.stateStore.update(stateKey, { extra: { inode: currentInode } });
-    } finally {
-      await handle.close();
+    const batch = await readBoundedLineTail(filePath, stat, offset,
+      !reset && prevState.extra?.skippingLine === true, this.getInputRuntimeAccumulator());
+    if (!batch) return [];
+    if (batch.beganSkip) this.logger.warn('oversized Qoder Work SDK line skipped', { file: filePath, offset });
+    if (batch.offset !== savedOffset || reset || prevState.extra?.inode === undefined) {
+      this.stateStore.update(stateKey, { lastOffset: batch.offset,
+        extra: { inode: currentInode, skippingLine: batch.skippingLine, ...resetPolicy } });
     }
 
     const completed: CompletedSessionWindow[] = [];
-    for (const line of text.split('\n')) {
+    for (const line of batch.text.split('\n')) {
       if (!line.trim()) continue;
       const event = parseSdkLogLine(line);
       if (!event) continue;
@@ -265,6 +257,7 @@ export class QoderWorkTraceInput extends BaseSessionInput {
       if (result) completed.push(result);
     }
 
+    if (!batch.text) return completed;
     this.fileModelPolicies.set(filePath, { ...this.currentModelPolicy });
     // Persist model policy so it survives process restarts
     this.stateStore.update(stateKey, {
@@ -669,22 +662,34 @@ export class QoderWorkTraceInput extends BaseSessionInput {
       const stepFields = { ...baseFields, 'gen_ai.step.id': stepId, 'gen_ai.request.model': turnModel };
       const stepEntries: AgentActivityEntry[] = [];
 
-      // Build input.messages_delta (step1=user prompt, stepN=prev tool results)
+      // Build input.messages_delta (step1=user prompt, stepN=prev assistant tool calls + results)
       let inputDelta: JsonValue | undefined;
       if (round === 0 && matchedPrompt?.text) {
         inputDelta = [{ role: 'user', parts: [{ type: 'text', content: matchedPrompt.text }] }];
       } else if (round > 0) {
         const prevTurn = session.turns[round - 1];
         if (prevTurn && prevTurn.toolCalls.length > 0) {
+          const assistantParts: JsonValue[] = [];
           const toolParts: JsonValue[] = [];
           for (const tc of prevTurn.toolCalls) {
+            const toolCallPart: Record<string, JsonValue> = {
+              type: 'tool_call',
+              id: tc.id,
+              name: tc.name,
+            };
+            const args = safeParseJson(tc.argumentsJson);
+            if (args !== undefined) toolCallPart.arguments = args;
+            assistantParts.push(toolCallPart);
             const result = toolResultMap.get(tc.id);
             if (result) {
               toolParts.push({ type: 'tool_call_response', id: tc.id, response: result });
             }
           }
           if (toolParts.length > 0) {
-            inputDelta = [{ role: 'tool', parts: toolParts }];
+            inputDelta = [
+              { role: 'assistant', parts: assistantParts },
+              { role: 'tool', parts: toolParts },
+            ];
           }
         }
       }
@@ -997,21 +1002,6 @@ function extractUserText(msg: Record<string, unknown>): string {
 function safeParseJson(value: string): JsonValue | undefined {
   if (!value) return undefined;
   try { return JSON.parse(value); } catch { return value; }
-}
-
-function queryReadonly<T>(dbPath: string, sql: string, params: unknown[]): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (openErr) => {
-      if (openErr) { reject(openErr); return; }
-      db.all(sql, params, (queryErr: Error | null, rows: T[]) => {
-        db.close((closeErr) => {
-          if (queryErr) { reject(queryErr); return; }
-          if (closeErr) { reject(closeErr); return; }
-          resolve(rows);
-        });
-      });
-    });
-  });
 }
 
 async function findLastResultBoundary(filePath: string, size: number): Promise<number> {

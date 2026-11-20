@@ -12,6 +12,7 @@ export const DEFAULT_GIT_PASSTHROUGH_KEYS = [
   'git.branch',
   'git.domain',
   'workspace.current_root',
+  'workspace.path',
 ] as const;
 
 /**

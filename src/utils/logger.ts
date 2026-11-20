@@ -16,9 +16,27 @@ const pinoOpts: pino.LoggerOptions = {
 
 let rootLogger: pino.Logger = pino(pinoOpts);
 
+// The pino-roll file stream, kept so callers can flush it synchronously before a
+// hard process.exit(). pino-roll builds its SonicBoom directly (not via pino's
+// buildSafeSonicBoom), so it gets no on-exit flush handler and buffered writes are
+// lost on exit unless flushed explicitly.
+let fileStreamRef: { flushSync?: () => void } | null = null;
+
 let fileLoggingInitialized = false;
 let loggerVersion = 0;
 const childCache = new Map<string, { version: number; child: pino.Logger }>();
+
+/**
+ * Keep machine-readable CLI stdout free of operational log records. This is
+ * intentionally limited to the pre-file-logging phase used by short-lived CLI
+ * commands; the collector replaces the root logger in initFileLogging().
+ */
+export function redirectRootLoggerToStderr(): void {
+  if (fileLoggingInitialized) return;
+  rootLogger = pino(pinoOpts, process.stderr);
+  loggerVersion++;
+  childCache.clear();
+}
 
 function getChild(tag: string): pino.Logger {
   const cached = childCache.get(tag);
@@ -45,6 +63,7 @@ export async function initFileLogging(logFilePath: string): Promise<void> {
     dateFormat: 'yyyy-MM-dd',
     limit: { count: 10, removeOtherLogFiles: true },
   });
+  fileStreamRef = fileStream as unknown as { flushSync?: () => void };
 
   const useStdout = process.stdout.isTTY || process.env.LOONGSUITE_PILOT_STDOUT === '1';
   const streams: pino.StreamEntry[] = [{ stream: fileStream, level: LOG_LEVEL }];
@@ -61,6 +80,19 @@ export async function initFileLogging(logFilePath: string): Promise<void> {
 
   loggerVersion++;
   childCache.clear();
+}
+
+/**
+ * Synchronously flush buffered file-log writes. Call before a hard process.exit()
+ * so the last log lines survive — the pino-roll SonicBoom stream is async and has
+ * no on-exit flush of its own. No-op when file logging was never initialized.
+ */
+export function flushLogsSync(): void {
+  try {
+    fileStreamRef?.flushSync?.();
+  } catch {
+    // Best-effort: never let a flush failure block exit.
+  }
 }
 
 export type BoundLogger = {

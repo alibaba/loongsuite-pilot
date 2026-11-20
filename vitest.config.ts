@@ -3,10 +3,12 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   define: {
     '__INTERNAL_BUILD__': 'false',
+    '__PROPRIETARY_BUILD__': 'false',
   },
   test: {
     globals: true,
     environment: 'node',
+    globalSetup: ['tests/helpers/isolated-home-global-setup.ts'],
     include: ['tests/**/*.test.ts', 'tests/**/*.test.mjs'],
     coverage: {
       provider: 'v8',

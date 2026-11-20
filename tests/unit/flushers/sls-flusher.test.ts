@@ -38,12 +38,26 @@ vi.mock('../../../src/utils/logger.js', () => ({
 }));
 
 import { SlsFlusher } from '../../../src/flushers/sls-flusher.js';
+import { LOCAL_MAC } from '../../../src/utils/network-utils.js';
+
+function expectHostIdentity(tags: Array<Record<string, string>> | Record<string, string>): void {
+  if (Array.isArray(tags)) {
+    if (LOCAL_MAC) expect(tags).toContainEqual({ __mac__: LOCAL_MAC });
+    else expect(tags.some((tag) => '__mac__' in tag)).toBe(false);
+    expect(tags.some((tag) => '__sn__' in tag)).toBe(false);
+    return;
+  }
+  if (LOCAL_MAC) expect(tags.__mac__).toBe(LOCAL_MAC);
+  else expect(tags).not.toHaveProperty('__mac__');
+  expect(tags).not.toHaveProperty('__sn__');
+}
 
 function makeConfig(overrides: Partial<SlsFlusherConfig> = {}): SlsFlusherConfig {
   return {
     enabled: true,
     accessKeyId: 'ak',
     accessKeySecret: 'sk',
+    apiKey: '',
     endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
     mode: 'ak',
     endpoints: [
@@ -80,7 +94,146 @@ describe('SlsFlusher', () => {
     vi.useRealTimers();
   });
 
+  describe('Codex cancellation', () => {
+    it('does not send or enqueue an already cancelled Codex batch', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      await expect((flusher as import('../../../src/flushers/base-flusher.js').BaseFlusher).sendBatch([
+        buildTestEntry({ 'gen_ai.agent.type': 'codex' }),
+      ], undefined, controller.signal)).rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+      expect(mockPostLogStoreLogs).not.toHaveBeenCalled();
+    });
+
+    it('cancels retry backoff and skips later endpoint waves without retaining abort listeners', async () => {
+      const { getEventListeners } = await import('node:events');
+      flusher = new SlsFlusher(makeConfig({
+        flushConcurrency: 1,
+        retry: { retryMaxAttempts: 3, retryBaseDelayMs: 10_000, retryJitter: false },
+        endpoints: ['first', 'second'].map(name => ({
+          name, endpoint: 'https://example.invalid', project: 'p', logstore: name,
+          kind: 'agentActivity', mode: 'ak' as const, accessKeyId: 'ak', accessKeySecret: 'sk',
+        })),
+      }), '/tmp/data');
+      mockPostLogStoreLogs.mockRejectedValue(new Error('ECONNRESET'));
+      const controller = new AbortController();
+      const sending = (flusher as import('../../../src/flushers/base-flusher.js').BaseFlusher).sendBatch([
+        buildTestEntry({ 'gen_ai.agent.type': 'codex' }),
+      ], undefined, controller.signal);
+      const rejected = expect(sending).rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await rejected;
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('cancels a webtracking request before later chunks and clears its timeout', async () => {
+      const { getEventListeners } = await import('node:events');
+      const fetchSpy = vi.fn((_url, options) => new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+      }));
+      vi.stubGlobal('fetch', fetchSpy);
+      try {
+        flusher = new SlsFlusher(makeConfig({ endpoints: [{
+          name: 'web', endpoint: 'https://example.invalid', project: '', logstore: 'events',
+          kind: 'agentActivity', mode: 'webtracking',
+        }] }), '/tmp/data');
+        const controller = new AbortController();
+        const entries = Array.from({ length: 4097 }, (_, index) => buildTestEntry({
+          'event.id': `chunk-${index}`, 'gen_ai.agent.type': 'codex',
+        }));
+        const sending = (flusher as import('../../../src/flushers/base-flusher.js').BaseFlusher).sendBatch(entries, undefined, controller.signal);
+        const rejected = expect(sending).rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetchSpy).toHaveBeenCalledOnce();
+        controller.abort();
+        await rejected;
+        expect(fetchSpy).toHaveBeenCalledOnce();
+        expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally { vi.unstubAllGlobals(); }
+    });
+
+    it('releases the cancellable retry sleep after network recovery', async () => {
+      const { getEventListeners } = await import('node:events');
+      flusher = new SlsFlusher(makeConfig({ retry: { retryMaxAttempts: 3, retryBaseDelayMs: 100, retryJitter: false } }), '/tmp/data');
+      mockPostLogStoreLogs.mockRejectedValueOnce(new Error('ECONNRESET')).mockResolvedValueOnce(undefined);
+      const controller = new AbortController();
+      const sending = (flusher as import('../../../src/flushers/base-flusher.js').BaseFlusher).sendBatch([
+        buildTestEntry({ 'gen_ai.agent.type': 'codex' }),
+      ], undefined, controller.signal);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(100);
+      await sending;
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(2);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
   describe('send and flush — multi endpoint routing (T012)', () => {
+    it('waits for a single network acknowledgement per Codex endpoint below the buffer threshold', async () => {
+      let acknowledge!: () => void;
+      mockPostLogStoreLogs.mockImplementationOnce(() => new Promise<void>(resolve => { acknowledge = resolve; }));
+      const entries = [1, 2, 3].map(index => buildTestEntry({
+        'event.id': `codex-${index}`, 'gen_ai.agent.type': 'codex',
+      }));
+      let accepted = false;
+      const sending = flusher.sendBatch(entries).then(() => { accepted = true; });
+      await Promise.resolve();
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      expect(mockPostLogStoreLogs.mock.calls[0][2].logs).toHaveLength(3);
+      expect(accepted).toBe(false);
+      expect(flusher.getEndpointCounters().get('activity')).toMatchObject({ inEntries: 3, outEntries: 0 });
+      acknowledge();
+      await sending;
+      await flusher.flush();
+      expect(accepted).toBe(true);
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      expect(flusher.getEndpointCounters().get('activity')).toMatchObject({ inEntries: 3, outEntries: 3, outFailed: 0 });
+    });
+
+    it('rejects Codex output failure after every endpoint settles without sending ordinary queued entries', async () => {
+      flusher = new SlsFlusher(makeConfig({
+        retry: { retryMaxAttempts: 1 },
+        endpoints: [
+          { name: 'good', endpoint: 'https://example.invalid', project: 'p', logstore: 'good', kind: 'agentActivity', mode: 'ak' },
+          { name: 'bad', endpoint: 'https://example.invalid', project: 'p', logstore: 'bad', kind: 'agentTelemetry', mode: 'ak', redact: true },
+        ],
+      }), '/tmp/data');
+      mockPostLogStoreLogs.mockImplementation(async (_project, logstore) => {
+        if (logstore === 'bad') throw new Error('synthetic transport failure');
+      });
+      await flusher.send(buildTestEntry({ 'event.id': 'ordinary-queued' }));
+      await expect(flusher.sendBatch([buildTestEntry({
+        'event.id': 'codex-failed', 'gen_ai.agent.type': 'codex',
+        'gen_ai.tool.call.arguments': { prompt: 'body' },
+      })])).rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(2);
+      expect(mockPostLogStoreLogs.mock.calls.every(call => call[2].logs[0].content['event.id'] === 'codex-failed')).toBe(true);
+      expect(mockPostLogStoreLogs.mock.calls.find(call => call[1] === 'bad')![2].logs[0].content)
+        .not.toHaveProperty('gen_ai.tool.call.arguments');
+      expect(flusher.getEndpointCounters().get('good')).toMatchObject({ inEntries: 2, outEntries: 1, outFailed: 0 });
+      expect(flusher.getEndpointCounters().get('bad')).toMatchObject({ inEntries: 2, outEntries: 0, outFailed: 1 });
+      expect(mockFailureWrite).toHaveBeenCalledOnce();
+      mockPostLogStoreLogs.mockResolvedValue(undefined);
+      await flusher.flush();
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(4);
+      expect(mockPostLogStoreLogs.mock.calls.slice(2).every(call => call[2].logs[0].content['event.id'] === 'ordinary-queued')).toBe(true);
+    });
+
+    it('also waits for Codex single-entry output and does not retain a second timer copy', async () => {
+      await flusher.send(buildTestEntry({ 'gen_ai.agent.type': 'codex' }));
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      await flusher.flush();
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+    });
+
     it('enqueues per endpoint and flushes grouped by project/logstore', async () => {
       const entry = buildTestEntry();
       await flusher.send(entry);
@@ -123,6 +276,15 @@ describe('SlsFlusher', () => {
       expect(content).not.toHaveProperty('agent.cursor.hook_event_name');
       expect(content['agent.file_path']).toBe('/tmp/test/file.ts');
       expect(content['gen_ai.agent.type']).toBe('qoder');
+    });
+
+    it('sets version to the Pilot version for every SLS entry', async () => {
+      const entry = buildTestEntry({ version: 'agent-runtime-version' });
+      await flusher.send(entry);
+      await flusher.flush();
+
+      const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
+      expect(logGroup.logs[0].content.version).toBe('0.0.0-test');
     });
   });
 
@@ -235,6 +397,35 @@ describe('SlsFlusher', () => {
     });
   });
 
+  describe('endpoint counters follow the flush outcome', () => {
+    it('counts a written batch as bytes out', async () => {
+      await flusher.send(buildTestEntry());
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const counter = flusher.getEndpointCounters().get('activity')!;
+      expect(counter.outEntries).toBe(2);
+      expect(counter.outBytes).toBeGreaterThan(0);
+      expect(counter.outFailed).toBe(0);
+    });
+
+    it('bills a failed batch as failed, not as bytes out', async () => {
+      // The send path persists and returns normally, so only the outcome tells the
+      // counters this batch never landed. Non-retryable, so no backoff to advance.
+      mockPostLogStoreLogs.mockRejectedValue(new Error('invalid request'));
+
+      await flusher.send(buildTestEntry());
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const counter = flusher.getEndpointCounters().get('activity')!;
+      expect(counter.outEntries).toBe(0);
+      expect(counter.outBytes).toBe(0);
+      expect(counter.outFailed).toBe(2);
+      expect(counter.lastFlushTime).toBe('');
+    });
+  });
+
   describe('shutdown (T016)', () => {
     it('stops timer and executes final flush', async () => {
       await flusher.start();
@@ -289,7 +480,29 @@ describe('SlsFlusher', () => {
 
       const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
       expect(logGroup.tags).toContainEqual({ __hostname__: expect.any(String) });
+      expectHostIdentity(logGroup.tags);
       expect(logGroup.tags).toContainEqual({ __service_name__: 'loongsuite-pilot-claude-code' });
+    });
+
+    it('uses one exact serviceName for different agent types and all endpoints', async () => {
+      const config = makeConfig({
+        serviceName: 'shared-service',
+        serviceNamePrefix: 'legacy-prefix',
+        endpoints: [
+          { name: 'user', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p1', logstore: 'l1', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+          { name: 'inner', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p2', logstore: 'l2', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk', serviceName: 'managed-svc' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry({ agentType: ClientType.ClaudeCliHook }));
+      await flusher.send(buildTestEntry({ agentType: ClientType.OpenCode }));
+      await flusher.flush();
+
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(4);
+      for (const call of mockPostLogStoreLogs.mock.calls) {
+        expect(call[2].tags).toContainEqual({ __service_name__: 'shared-service' });
+      }
     });
 
     it('uses per-endpoint serviceName override for its own __service_name__', async () => {
@@ -364,6 +577,50 @@ describe('SlsFlusher', () => {
 
       const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
       expect(logGroup.tags).toContainEqual({ __service_name__: 'my-service' });
+      expectHostIdentity(logGroup.tags);
+    });
+
+    it('sendRaw webtracking writes host identity tags without a service name', async () => {
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+      vi.stubGlobal('fetch', fetchSpy);
+      const config = makeConfig({
+        endpoints: [
+          { name: 'ep-mcp', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p', logstore: 'l', kind: 'mcp', mode: 'webtracking' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.sendRaw('topic', { key: 'val' });
+
+      const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      expect(body.__tags__).not.toHaveProperty('__service_name__');
+      expectHostIdentity(body.__tags__);
+      vi.unstubAllGlobals();
+    });
+
+    it('writes the serial tag from config and the MAC of the selected IP', async () => {
+      const config = makeConfig({
+        serviceNamePrefix: 'pilot',
+      });
+      flusher = new SlsFlusher(config, '/tmp/data', undefined, 'C02XG0AHJG5H');
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const tags = mockPostLogStoreLogs.mock.calls[0][2].tags as Array<Record<string, string>>;
+      if (LOCAL_MAC) expect(tags).toContainEqual({ __mac__: LOCAL_MAC });
+      expect(tags).toContainEqual({ __sn__: 'C02XG0AHJG5H' });
+    });
+
+    it('omits MAC and serial tags when host identity tags are disabled', async () => {
+      const config = makeConfig({ serviceNamePrefix: 'pilot' });
+      flusher = new SlsFlusher(config, '/tmp/data', undefined, 'C02XG0AHJG5H', false);
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const tags = mockPostLogStoreLogs.mock.calls[0][2].tags as Array<Record<string, string>>;
+      expect(tags.some((tag) => '__mac__' in tag || '__sn__' in tag)).toBe(false);
     });
 
     it('webtracking appends agentType to serviceNamePrefix', async () => {
@@ -384,6 +641,7 @@ describe('SlsFlusher', () => {
       expect(fetchSpy).toHaveBeenCalledOnce();
       const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
       expect(body.__tags__.__service_name__).toBe('loongsuite-pilot-cursor');
+      expectHostIdentity(body.__tags__);
 
       vi.unstubAllGlobals();
     });
@@ -436,6 +694,179 @@ describe('SlsFlusher', () => {
 
       const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
       expect(logGroup.tags).toContainEqual({ __service_name__: 'pilot-unknown' });
+    });
+  });
+
+  describe('configurable timeout and retry (Proposal A + B)', () => {
+    it('uses custom timeoutMs from config.timeout', async () => {
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+      vi.stubGlobal('fetch', fetchSpy);
+
+      const config = makeConfig({
+        timeout: { timeoutMs: 25000 },
+        endpoints: [
+          { name: 'ep-wt', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p', logstore: 'l', kind: 'agentActivity', mode: 'webtracking' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      const opts = fetchSpy.mock.calls[0][1];
+      expect(opts.signal).toBeDefined();
+
+      vi.unstubAllGlobals();
+    });
+
+    it('uses custom retryMaxAttempts from config.retry', async () => {
+      vi.useRealTimers();
+      const fetchSpy = vi.fn().mockRejectedValue(new Error('TimeoutError'));
+      vi.stubGlobal('fetch', fetchSpy);
+
+      const config = makeConfig({
+        retry: { retryMaxAttempts: 5, retryBaseDelayMs: 1, retryJitter: false },
+        endpoints: [
+          { name: 'ep-wt', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p', logstore: 'l', kind: 'agentActivity', mode: 'webtracking' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      expect(fetchSpy).toHaveBeenCalledTimes(5);
+
+      vi.unstubAllGlobals();
+    });
+
+    it('applies jitter by default (delay varies between runs)', async () => {
+      const { computeBackoff } = await import('../../../src/flushers/sls-flusher.js');
+      const delays = new Set<number>();
+      for (let i = 0; i < 20; i++) {
+        delays.add(computeBackoff(1000, 1, true));
+      }
+      // With jitter the set should have more than 1 unique value
+      expect(delays.size).toBeGreaterThan(1);
+    });
+
+    it('produces deterministic delay when jitter is disabled', async () => {
+      const { computeBackoff } = await import('../../../src/flushers/sls-flusher.js');
+      expect(computeBackoff(1000, 0, false)).toBe(1000);
+      expect(computeBackoff(1000, 1, false)).toBe(2000);
+      expect(computeBackoff(1000, 2, false)).toBe(4000);
+    });
+
+    it('caps backoff at 60s regardless of attempt number', async () => {
+      const { computeBackoff } = await import('../../../src/flushers/sls-flusher.js');
+      expect(computeBackoff(1000, 10, false)).toBe(60000);
+      expect(computeBackoff(1000, 20, false)).toBe(60000);
+    });
+
+    it('guards against zero retryMaxAttempts — still retries at least once', async () => {
+      vi.useRealTimers();
+      const fetchSpy = vi.fn().mockRejectedValue(new Error('TimeoutError'));
+      vi.stubGlobal('fetch', fetchSpy);
+
+      const config = makeConfig({
+        retry: { retryMaxAttempts: 0, retryBaseDelayMs: 1, retryJitter: false },
+        endpoints: [
+          { name: 'ep-wt', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p', logstore: 'l', kind: 'agentActivity', mode: 'webtracking' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      vi.unstubAllGlobals();
+    });
+
+    it('guards against zero flushConcurrency — still processes batches', async () => {
+      const config = makeConfig({
+        flushConcurrency: 0,
+        endpoints: [
+          { name: 'ep', endpoint: 'https://r.log.aliyuncs.com', project: 'p', logstore: 'l', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry());
+      vi.useRealTimers();
+      await flusher.flush();
+
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('flush concurrency control (Proposal C)', () => {
+    it('limits parallel flush tasks to flushConcurrency', async () => {
+      let concurrentCount = 0;
+      let maxConcurrent = 0;
+
+      mockPostLogStoreLogs.mockImplementation(async () => {
+        concurrentCount++;
+        maxConcurrent = Math.max(maxConcurrent, concurrentCount);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        concurrentCount--;
+      });
+
+      const config = makeConfig({
+        serviceNamePrefix: 'pilot',
+        flushConcurrency: 2,
+        endpoints: [
+          { name: 'ep', endpoint: 'https://r.log.aliyuncs.com', project: 'p', logstore: 'l', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      // Send entries with different agent types to create multiple buckets
+      await flusher.send(buildTestEntry({ agentType: ClientType.ClaudeCliHook }));
+      await flusher.send(buildTestEntry({ agentType: ClientType.Cursor }));
+      await flusher.send(buildTestEntry({ agentType: ClientType.OpenCode }));
+      await flusher.send(buildTestEntry({ agentType: ClientType.Codex }));
+
+      await vi.advanceTimersByTimeAsync(0);
+      vi.useRealTimers();
+      await flusher.flush();
+
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(4);
+      expect(maxConcurrent).toBeLessThanOrEqual(2);
+    });
+
+    it('defaults to concurrency of 3 when not configured', async () => {
+      let concurrentCount = 0;
+      let maxConcurrent = 0;
+
+      mockPostLogStoreLogs.mockImplementation(async () => {
+        concurrentCount++;
+        maxConcurrent = Math.max(maxConcurrent, concurrentCount);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        concurrentCount--;
+      });
+
+      const config = makeConfig({
+        serviceNamePrefix: 'pilot',
+        endpoints: [
+          { name: 'ep', endpoint: 'https://r.log.aliyuncs.com', project: 'p', logstore: 'l', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry({ agentType: ClientType.ClaudeCliHook }));
+      await flusher.send(buildTestEntry({ agentType: ClientType.Cursor }));
+      await flusher.send(buildTestEntry({ agentType: ClientType.OpenCode }));
+      await flusher.send(buildTestEntry({ agentType: ClientType.Codex }));
+      await flusher.send(buildTestEntry({ agentType: ClientType.QoderCn }));
+
+      await vi.advanceTimersByTimeAsync(0);
+      vi.useRealTimers();
+      await flusher.flush();
+
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(5);
+      expect(maxConcurrent).toBeLessThanOrEqual(3);
     });
   });
 });

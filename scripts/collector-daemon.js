@@ -4,10 +4,18 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 
 const HOME = process.env.HOME || process.env.USERPROFILE || '';
-const CACHE_DIR = path.join(HOME, '.loongsuite-pilot');
+const CACHE_DIR = resolveCacheDir();
 const CURRENT_FILE = path.join(CACHE_DIR, 'current');
 const PREVIOUS_FILE = path.join(CACHE_DIR, 'previous');
 const VERSIONS_DIR = path.join(CACHE_DIR, 'versions');
+
+function resolveCacheDir() {
+  const raw = process.env.LOONGSUITE_PILOT_CACHE_DIR;
+  if (!raw) return path.join(HOME, '.loongsuite-pilot');
+  if (raw === '~') return HOME;
+  if (raw.startsWith('~/') || raw.startsWith('~\\')) return path.join(HOME, raw.slice(2));
+  return raw;
+}
 
 function loadVersion(pointerFile) {
   try {
@@ -39,8 +47,9 @@ function resolveInstalledVersion() {
   }
 }
 
-// Fatal early-death happens during ESM module-graph resolution (e.g. a top-level
-// `import sqlite3` failing under npm12), before dist/index.js main() runs. This is
+// Fatal early-death happens during ESM module-graph resolution (e.g. the
+// native-deps-guard banner throwing before dist/index.js main() runs). The
+// guard must throw rather than process.exit, or this catch never runs. This is
 // the only place that can capture the real cause for the updater to report.
 function writeStartupCrash(err) {
   try {

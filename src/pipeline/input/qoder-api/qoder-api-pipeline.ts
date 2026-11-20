@@ -39,7 +39,7 @@ export class QoderApiPipeline implements Pipeline {
   private running = false;
   private polling = false;
 
-  constructor(opts: QoderApiPipelineOptions) {
+  constructor(private readonly opts: QoderApiPipelineOptions) {
     this.config = opts.config;
     this.stateDir = opts.stateDir;
     this.failedLogDir = opts.failedLogDir;
@@ -82,6 +82,8 @@ export class QoderApiPipeline implements Pipeline {
       configName,
       failedLogDir: this.failedLogDir,
       dataDir: this.dataDir,
+      hostSn: this.opts.hostSn,
+      hostIdentityTags: this.opts.hostIdentityTags,
     });
 
     // 4. Start sender flush interval
@@ -151,7 +153,8 @@ export class QoderApiPipeline implements Pipeline {
       if (rows.length === 0) return;
 
       // 3. Enqueue into sender
-      const accepted = this.sender.enqueue(rows);
+      const allowed = this.opts.workspacePolicy?.filter(rows, 'qoder-api') ?? rows;
+      const accepted = allowed.length === 0 || this.sender.enqueue(allowed);
 
       if (accepted) {
         // 4a. Delivery accepted — advance the collection window.

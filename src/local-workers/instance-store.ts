@@ -2,6 +2,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ensureDir, readJsonFile, resolveHome, writeJsonFile } from '../utils/fs-utils.js';
+import { preparePrivateLocalWorkerDirectory } from './private-directory.js';
 
 export type RuntimeOptionValue = string | boolean;
 export type RuntimeOptions = Record<string, RuntimeOptionValue>;
@@ -40,6 +41,8 @@ export interface LocalWorkerView {
   workDir: string;
   enabled: boolean;
   state: string;
+  reason?: string;
+  message?: string;
   pid?: number;
   workerName?: string;
   teamName?: string;
@@ -104,9 +107,15 @@ export async function connectLocalWorker(opts: ConnectLocalWorkerOptions): Promi
   const dir = instanceDir(opts.dataDir, id);
   const now = new Date().toISOString();
 
-  await ensureDir(stateDir(opts.dataDir, id));
-  await ensureDir(logDir(opts.dataDir, id));
-  await writeBootstrapToken(dir, token);
+  try {
+    await preparePrivateLocalWorkerDirectory(dir);
+    await ensureDir(stateDir(opts.dataDir, id));
+    await ensureDir(logDir(opts.dataDir, id));
+    await writeBootstrapToken(dir, token);
+  } catch (err) {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    throw err;
+  }
 
   const instance: LocalWorkerInstance = {
     schemaVersion: 'loongsuite.localWorker.v1',
@@ -132,6 +141,7 @@ export async function reconnectLocalWorker(opts: ReconnectLocalWorkerOptions): P
   if (token === '') throw new Error('bootstrap token is required');
 
   const dir = instanceDir(opts.dataDir, instance.id);
+  await preparePrivateLocalWorkerDirectory(dir);
   await ensureDir(stateDir(opts.dataDir, instance.id));
   await ensureDir(logDir(opts.dataDir, instance.id));
   if (token) await writeBootstrapToken(dir, token);
@@ -225,15 +235,21 @@ export async function readLocalWorkerView(
   const runtimeMember = readRecord(runtimeSnapshot?.member);
   const pid = readNumber(supervisor?.pid);
   const alive = pid ? isAlive(pid) : false;
+  const supervisorFailed = String(supervisor?.state ?? '') === 'failed';
   const heartbeatAt = readTimestampMs(worker?.updatedAt ?? worker?.lastHeartbeatAt ?? worker?.heartbeatAt);
+  const workerPhase = String(worker?.phase ?? worker?.state ?? '').toLowerCase();
   const degraded = isWorkerDegraded(worker)
     || (alive && heartbeatAt !== undefined && Date.now() - heartbeatAt > LOCAL_WORKER_HEARTBEAT_STALE_MS);
 
   let state = 'pending';
-  if (!instance.enabled) {
-    state = 'disabled';
-  } else if (String(supervisor?.state ?? '') === 'failed') {
+  if (supervisorFailed) {
     state = 'failed';
+  } else if (!instance.enabled && alive) {
+    state = 'stopping';
+  } else if (!instance.enabled) {
+    state = 'disabled';
+  } else if (alive && workerPhase === 'waiting') {
+    state = 'waiting';
   } else if (degraded) {
     state = 'degraded';
   } else if (alive) {
@@ -250,6 +266,12 @@ export async function readLocalWorkerView(
     workDir: instance.workDir,
     enabled: instance.enabled,
     state,
+    reason: supervisorFailed
+      ? readString(supervisor?.reason) ?? readString(worker?.reason)
+      : readString(worker?.reason) ?? readString(supervisor?.reason),
+    message: supervisorFailed
+      ? readString(supervisor?.error) ?? readString(worker?.message) ?? readString(worker?.error)
+      : readString(worker?.message) ?? readString(worker?.error) ?? readString(supervisor?.error),
     pid,
     workerName: readString(worker?.workerName)
       ?? readString(worker?.runtimeName)

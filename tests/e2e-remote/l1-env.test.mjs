@@ -96,6 +96,7 @@ describe('applyL1Defaults', () => {
     expect(env.E2E_CODEX_MODEL).toBe('qwen3.6-plus');
     expect(env.E2E_PROPAGATE_SLS_INSTALL).toBe('1');
     expect(env.E2E_JSONL_VALIDATE).toBe('1');
+    expect(env.E2E_JSONL_STRICT).toBe('1');
     expect(env.E2E_REQUIRED_DEPLOY_AGENTS).toBe('claude-code,codex,qoder,cursor,qwen-code-cli,opencode');
     expect(env.E2E_REQUIRED_JSONL_AGENTS).toBe('claude-code,codex,qoder-cli,qwen-code-cli,opencode');
     expect(env.E2E_SLS_ENDPOINT).toBe('cn-hangzhou.log.aliyuncs.com');

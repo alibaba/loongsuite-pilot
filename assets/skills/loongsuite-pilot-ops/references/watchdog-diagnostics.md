@@ -12,9 +12,9 @@ HookWatchdog 是 pilot daemon 内置的巡检器，每 5 分钟（`intervalMs`�
 
 检测 agent settings.json 文件中 `hooks.<event>` 数组是否包含 pilot 的 hook 命令条目。
 
-targets 来源有两种：
-- `HookWatchdog.defaultTargets()`：硬编码的 otel plugin 类（claude-code / codex），用外部安装命令修复
-- `orchestrator.buildHookWatchdogTargets()`：从 `agents.d/*.json` 中 `deployMode: "hook"` 的定义动态构建，用 `DeploymentManager.deploySingle()` 修复
+targets 来源：
+- `orchestrator.buildHookWatchdogTargets()`：从 `agents.d/*.json` 中 `deployMode: "hook"` 的定义动态构建，用 `DeploymentManager.deploySingle()` 修复。每个 target 带 `enabled()` 门禁（`config.agents[id].enabled !== false`），被禁用的 agent 运行期跳过，不再重注入。
+- （已移除）早期的 `HookWatchdog.defaultTargets()` 硬编码 otel plugin 目标已删除：claude-code / codex 已是 hook 模式并由上面的动态构建覆盖，旧 otel 缓存目录也由 plugin-migration 主动清理。
 
 修复方式二选一：
 - **repairFn**（优先）：调用 `DeploymentManager.deploySingle(def)` 重新执行 `HookStrategy.deploy()`，重写 settings.json hook 条目
@@ -26,15 +26,26 @@ targets 来源有两种：
 
 检测 installer 注入的 intercept 配置是否仍然存在。与 hook targets 不同，intercept targets 检测的不是 settings.json，而是系统级配置（launchctl env、LaunchAgent plist、shell rc 文件）。
 
-当前 3 个 intercept target：
+以下 runtime 环境变量目标全部已退役，只做清理；shell intercept 仍按原机制维护：
 
 | target id | 平台 | 检测什么 | 修复方式 |
 |---|---|---|---|
-| `qoderwork-env` | macOS | `launchctl getenv QODER_WORKER_RUNTIME_PATH` 是否等于 wrapper 路径 | `launchctl setenv` + 写/重载 `~/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist` |
+| `qoderwork-env`（已退役） | macOS | 不再检测，每轮巡检直接走禁用清理路径 | 不再注入；仅在精确等于 pilot wrapper 路径时 `launchctl unsetenv QODER_WORKER_RUNTIME_PATH`，并卸载删除 `~/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist` |
+| `qwenworkcn-env`（已退役） | macOS | 每轮巡检直接走禁用清理路径 | 仅在精确等于 pilot wrapper 路径时 `launchctl unsetenv QW_QODER_WORKER_RUNTIME_PATH`，并卸载删除 `~/Library/LaunchAgents/com.loongsuite-pilot.qwenworkcn-env.plist` |
+| `qoderwork-win-env`（已退役） | Windows | 不再检测，每轮巡检直接走禁用清理路径 | 不再注入；仅在 `HKCU\Environment` 中的值精确等于 pilot wrapper 路径时删除 `QODER_WORKER_RUNTIME_PATH` |
+| `qwenworkcn-win-env`（已退役） | Windows | 每轮巡检直接走禁用清理路径 | 仅在 `HKCU\Environment` 中的值精确等于 pilot wrapper 路径时删除 `QW_QODER_WORKER_RUNTIME_PATH`，并广播变更 |
 | `qodercli-rc` | macOS + Linux | `~/.zshrc` 或 `~/.bashrc`（按 `$SHELL` 判断）是否含 `# loongsuite-pilot BEGIN qodercli-intercept` marker | 向 rc 文件末尾 append wrapper function block |
 | `claude-code-rc` | macOS + Linux | 同上，marker 为 `# loongsuite-pilot BEGIN claude-code-intercept` | 同上 |
 
-前置条件（precondition）：对应的 hook 脚本文件必须存在（如 `~/.loongsuite-pilot/hooks/qodercli-token-intercept.mjs`）。对 `qoderwork-env` 还要求 macOS 平台且 QoderWork.app 已安装。前置条件不满足时静默 skip，不算修复失败。
+shell 目标的前置条件（precondition）要求对应 hook 脚本存在（`qodercli-rc` 对应
+`~/.loongsuite-pilot/hooks/qodercli-runtime-wrapper.sh`）。不满足时静默 skip，不算修复失败。
+
+Qoder Work、Qoder Work CN、Qwen Work CN 全部使用原生数据，不再触发 runtime 注入。
+四个 runtime 目标的 `enabled()` 恒为 false，直接清理两个旧覆盖，不依赖 agent 开关、
+应用或 wrapper 是否存在；第三方设置的同名变量因精确匹配而保留。
+wrapper 文件只为仍持有旧环境的进程透明转发到宿主自身 runtime，不再执行截获。
+安装器在停止旧服务并部署新版后、启动新服务前清理覆盖；macOS 同时移除两个 Pilot plist，
+Windows 删除对应 User 环境变量并尝试通知 Explorer。已启动应用需完全退出再打开，广播失败时需重新登录。
 
 ## 安全护栏
 
@@ -51,7 +62,7 @@ targets 来源有两种：
 
 ### Step 1：确定注入类型
 
-- **macOS GUI app**（如 QoderWork）→ `launchctl setenv` + LaunchAgent plist（参考 `qoderwork-env`）
+- **macOS GUI app** → 优先使用原生数据源；不要把已退役的 `qwenworkcn-env` 当作注入模板
 - **CLI 工具**（如 qodercli / claude）→ shell rc wrapper function（参考 `qodercli-rc`）
 
 ### Step 2：在 `hook-watchdog.ts` 的 `defaultInterceptTargets()` 加 target
@@ -124,7 +135,8 @@ grep 'intercept-watchdog.repairing\|intercept-watchdog.repaired' ~/.loongsuite-p
 | 现象 | 原因 | 解决 |
 |---|---|---|
 | intercept target 一直 skip | hook 脚本未部署（`~/.loongsuite-pilot/hooks/<script>.mjs` 不存在） | 跑 `node scripts/postinstall.js` 或 `bash scripts/local-reinstall.sh` |
-| `qoderwork-env` skip | 非 macOS 平台，或 QoderWork.app 未安装 | 仅 macOS + QoderWork.app 已安装时生效 |
+| `qoderwork-env` / `qoderwork-win-env` skip | 该目标已退役，`enabled()` 恒为 false | 正常现象；它每轮只清理旧的 `QODER_WORKER_RUNTIME_PATH` 注入，不再注入任何东西 |
+| `qwenworkcn-env` / `qwenworkcn-win-env` skip | 平台不匹配、Qwen Work CN 未启用或 QwenWorkCN 未安装 | 仅对已启用且已安装的 Qwen Work CN 生效 |
 | rc block 反复被修复又丢失 | dotfile 管理工具覆盖 `.zshrc` | 将 pilot block 加入 dotfile 源文件；watchdog 每日最多修复 3 次后自动停止 |
 | `intercept-watchdog.daily-limit` | 同上，已达当日上限 | 次日自动重置计数 |
 | `intercept-watchdog.repair-failed` | 文件权限、磁盘满、launchctl 异常 | 检查 warn 日志中的 error 详情 |

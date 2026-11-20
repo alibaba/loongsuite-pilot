@@ -23,6 +23,7 @@ describe('classifyStartupCrash', () => {
     expect(classifyStartupCrash(bc('ERR_DLOPEN_FAILED: dlopen failed')).reason).toBe('native_module_missing');
     expect(classifyStartupCrash(bc("Module did not self-register")).reason).toBe('native_module_missing');
     expect(classifyStartupCrash(bc("Cannot find module '/x/build/Release/node_sqlite3.node'")).reason).toBe('native_module_missing');
+    expect(classifyStartupCrash(bc('ERR_UNKNOWN_BUILTIN_MODULE: node:sqlite')).reason).toBe('native_module_missing');
     expect(classifyStartupCrash(bc('The module was compiled against a different Node.js version using NODE_MODULE_VERSION 108')).reason).toBe('native_module_missing');
     expect(classifyStartupCrash(bc('npm error install scripts were not run')).reason).toBe('native_module_missing');
   });

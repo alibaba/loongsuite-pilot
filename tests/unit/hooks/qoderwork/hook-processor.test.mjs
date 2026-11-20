@@ -177,6 +177,21 @@ describe('qoderwork-hook-processor cursor recovery', () => {
 });
 
 describe('qoderwork-hook-processor user prompt extraction', () => {
+  test('keeps the QoderWork runtime version agent-scoped', () => {
+    writeTranscript(baseRows([{ type: 'text', text: 'check version fields' }]).map((row) => ({
+      ...row,
+      version: '1.1.26',
+    })));
+
+    const result = runHook('sess-no-runtime-version');
+    expect(result.status).toBe(0);
+
+    const records = readJsonlRecords();
+    expect(records.length).toBeGreaterThan(0);
+    expect(records.every((record) => record.version === undefined)).toBe(true);
+    expect(records.every((record) => record['agent.qoderwork.version'] === '1.1.26')).toBe(true);
+  });
+
   test('emits per-step input deltas that the converter accumulates', async () => {
     writeTranscript([
       {
@@ -237,16 +252,27 @@ describe('qoderwork-hook-processor user prompt extraction', () => {
     const records = readJsonlRecords();
     const requests = records.filter((record) => record['event.name'] === 'llm.request');
     const promptDelta = [{ role: 'user', parts: [{ type: 'text', content: 'solve it' }] }];
-    const toolDelta = [{
-      role: 'tool',
-      parts: [{ type: 'tool_call_response', id: 'tool-1', response: '/tmp/project' }],
-    }];
+    const toolHistoryDelta = [
+      {
+        role: 'assistant',
+        parts: [{
+          type: 'tool_call',
+          id: 'tool-1',
+          name: 'shell',
+          arguments: { command: 'pwd' },
+        }],
+      },
+      {
+        role: 'tool',
+        parts: [{ type: 'tool_call_response', id: 'tool-1', response: '/tmp/project' }],
+      },
+    ];
 
     expect(requests).toHaveLength(2);
     expect(requests.map((request) => request['gen_ai.input.messages'])).toEqual([undefined, undefined]);
     expect(requests.map((request) => request['gen_ai.input.messages_delta'])).toEqual([
       promptDelta,
-      toolDelta,
+      toolHistoryDelta,
     ]);
 
     const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
@@ -261,7 +287,7 @@ describe('qoderwork-hook-processor user prompt extraction', () => {
 
       expect(convertedInputs).toEqual([
         promptDelta,
-        [...promptDelta, ...toolDelta],
+        [...promptDelta, ...toolHistoryDelta],
       ]);
     } finally {
       if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
@@ -357,9 +383,6 @@ describe('qoderwork-hook-processor user prompt extraction', () => {
 
 describe('qoderwork-hook-processor response.id', () => {
   test('uses message.id as gen_ai.response.id when present', () => {
-    // QoderWork 0.6.2 transcript assistant rows carry message.id = chatcmpl-xxx,
-    // which matches the id captured by qoderwork-runtime-wrapper. Preferring it
-    // enables direct token matching in qoder-work-trace-input.
     const rows = baseRows([{ type: 'text', text: 'hi' }]).map((r) =>
       r.type === 'assistant' ? { ...r, message: { ...r.message, id: 'chatcmpl-resp-1' } } : r,
     );

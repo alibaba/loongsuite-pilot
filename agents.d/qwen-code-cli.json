@@ -8,6 +8,7 @@
   },
   "hook": {
     "settingsPath": "~/.qwen/settings.json",
+    "settingsSyntax": "jsonc",
     "events": [
       "Stop",
       "SubagentStart",
