@@ -2057,13 +2057,27 @@ impl HookStrategy {
             return Some(sdk.binary.clone());
         }
         let (pilot, data) = self.resource_roots.as_ref()?;
+        let cache = hook_cache_dir(data);
         if requires_native_sdk(def) {
+            use crate::utils::runtime_paths::{resource_file, runtime_metadata};
             let hook = format!("bin/{}", sdk_hook_binary_name());
-            crate::utils::runtime_paths::resource_file(pilot, &hook).ok()?;
-        } else if !qoder_definition_supports_exec(def, data) && self.codex_sdk_data(def).is_none() {
+            let binary = resource_file(pilot, &hook).ok()?;
+            // The installer deploys from the validated candidate in versions/
+            // before advancing current. Its transaction owns this registration.
+            if std::fs::canonicalize(pilot.parent()?).ok()?
+                != std::fs::canonicalize(cache.join("versions")).ok()?
+            {
+                return None;
+            }
+            let binary = super::runtime_launcher::RuntimeLauncher::read(&cache, data)
+                .ok()?
+                .map_or(binary, |runtime| runtime.hook_path().to_owned());
+            return runtime_metadata(&binary).ok()?.is_file().then_some(binary);
+        }
+        if !qoder_definition_supports_exec(def, data) && self.codex_sdk_data(def).is_none() {
             return None;
         }
-        installed_qoder_hook_binary(pilot, data, &hook_cache_dir(data))
+        installed_qoder_hook_binary(pilot, data, &cache)
     }
 
     fn codex_sdk_data(&self, def: &AgentDefinition) -> Option<PathBuf> {
