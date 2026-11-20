@@ -135,3 +135,50 @@ async fn overflow_recovery_accepts_bom_and_does_not_change_normal_finite_state_l
         assert_eq!(store.revision(), 0);
     }
 }
+
+#[tokio::test]
+async fn history_handoff_requires_reloading_a_repaired_shared_checkpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("checkpoint.json");
+    std::fs::write(&path, "not valid JSON").unwrap();
+    let store = StateStore::new(&path);
+    store.load().await;
+    assert!(store.load_for_handoff().await.is_err());
+
+    std::fs::write(&path, r#"{"other-agent:existing":{"lastOffset":48}}"#).unwrap();
+    assert!(store.check_for_handoff(None).await.is_err());
+    store.load_for_handoff().await.unwrap();
+    store.check_for_handoff(None).await.unwrap();
+    assert_eq!(store.get_offset("other-agent:existing"), 48.0);
+}
+
+#[tokio::test]
+async fn exported_history_requires_the_authoritative_namespace_when_progress_exists() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("checkpoint.json");
+    let store = StateStore::new(&path);
+    store.load().await;
+    store.check_for_handoff(None).await.unwrap();
+    assert!(store.check_for_handoff(Some("opencode-log")).await.is_err());
+
+    std::fs::write(&path, r#"{"other-agent:existing":{"lastOffset":48}}"#).unwrap();
+    store.load_for_handoff().await.unwrap();
+    assert!(store.check_for_handoff(Some("opencode-log")).await.is_err());
+
+    std::fs::write(&path, r#"{"opencode-log:existing":{"lastOffset":52}}"#).unwrap();
+    assert!(store.check_for_handoff(Some("opencode-log")).await.is_err());
+    store.load_for_handoff().await.unwrap();
+    store.check_for_handoff(Some("opencode-log")).await.unwrap();
+    std::fs::write(&path, r#"{"opencode-log:existing":{"lastOffset":63}}"#).unwrap();
+    assert!(store.check_for_handoff(Some("opencode-log")).await.is_err());
+    store.load_for_handoff().await.unwrap();
+    store.check_for_handoff(Some("opencode-log")).await.unwrap();
+}

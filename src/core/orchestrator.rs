@@ -2985,36 +2985,32 @@ impl Orchestrator {
         ensure_dir(&history).await;
         let agent = profile.agent;
         let listener = profile.listener;
-        let sdk_data = self.data_dir_join(&format!("state/standalone-{agent}-sdk"));
+        let data = std::path::Path::new(&self.data_dir);
+        let sdk_data = profile.sdk_data(data);
         let config = self.config.agents.get(agent);
         let init = serde_json::json!({
             "data_dir": sdk_data,
             "resource_dir": pilot_dir,
             "user_id": self.config.user_id,
         });
-        let policy = serde_json::json!({
-            "agents": [agent],
-            "hcd": {"agent_configs": {(agent): {"collection": {
-                "enabled": true, "profile": profile.profile,
-                "allowed_roots": [&self.data_dir],
-                "sources": [{"id": "history", "type": "hook_jsonl", "path": &history}],
-                "limits": {"poll_interval_ms": self.poll(listener)
-                    .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS)},
-                "pilot_host": {
-                    "data_dir": self.data_dir,
-                    "capture_message_content": config.and_then(|config| config.capture_message_content),
-                    "exclude_workspaces": self.config.privacy.as_ref()
-                        .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
-                },
-            }}}},
-            "sdk_options": {"mask": self.config.mask},
-        });
+        let policy = profile.policy(
+            data,
+            self.poll(listener)
+                .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS),
+            config.and_then(|config| config.capture_message_content),
+            self.config
+                .privacy
+                .as_ref()
+                .map(|privacy| privacy.exclude_workspaces.as_slice())
+                .unwrap_or_default(),
+            Some(&self.config.mask),
+        );
         let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
             listener,
             init,
             policy,
             &self.inputs,
-            std::path::PathBuf::from(sdk_data),
+            sdk_data,
             state_store,
         ));
         let live = live_from_parts(
@@ -3352,6 +3348,10 @@ impl Orchestrator {
         let stop_manager = Arc::clone(&self.inputs);
         let stop_id = id.clone();
         let poll = self.poll(listener).unwrap_or(300_000);
+        let propagate_start_error = self.standalone
+            && crate::sdk::hook_history::PROFILES
+                .iter()
+                .any(|profile| profile.listener == listener);
         entries.push(Arc::new(ClosureDetection {
             id: id.clone(),
             type_name: live.collection_method.clone(),
@@ -3372,7 +3372,10 @@ impl Orchestrator {
                 let manager = Arc::clone(&manager);
                 let id = id.clone();
                 Box::pin(async move {
-                    manager.start_input(&id).await;
+                    let result = manager.start_input_checked(&id).await;
+                    if propagate_start_error {
+                        result.map_err(anyhow::Error::msg)?;
+                    }
                     Ok(())
                 })
             }),
@@ -3402,14 +3405,36 @@ impl Orchestrator {
         Av: std::future::Future<Output = bool> + Send + 'static,
     {
         let input = Arc::new(input);
+        let handoff = crate::sdk::hook_history::find(agent)
+            .filter(|profile| self.standalone && profile.listener == listener)
+            .map(|profile| {
+                let data = std::path::PathBuf::from(&self.data_dir);
+                let state = self.state_store.lock().expect("state").clone();
+                let manager = Arc::downgrade(&self.inputs);
+                let resource_dir = self.runtime_options.resource_dir.clone();
+                let user_id = self.config.user_id.clone();
+                Arc::new(LegacyHookHistory {
+                    profile,
+                    data,
+                    state,
+                    manager,
+                    resource_dir,
+                    user_id,
+                })
+            });
         let live = live_from_parts(
             listener,
             agent,
             &input.collection_method_name(),
             Arc::clone(&input),
             |input| input.surface_running(),
-            |input| {
+            move |input| {
+                let handoff = handoff.clone();
                 Box::pin(async move {
+                    let _sdk_lock = match handoff {
+                        Some(history) => history.take_ownership().await?,
+                        None => None,
+                    };
                     input.surface_start().await;
                     Ok(())
                 })
@@ -3914,6 +3939,61 @@ impl HookSurface for DshLogInput {
         listener: impl Fn(&InputRuntimeDelta) + Send + Sync + 'static,
     ) {
         self.on_runtime_delta(listener);
+    }
+}
+
+struct LegacyHookHistory {
+    profile: &'static crate::sdk::hook_history::HookHistoryProfile,
+    data: std::path::PathBuf,
+    state: Option<Arc<StateStore>>,
+    manager: std::sync::Weak<InputManager>,
+    resource_dir: Option<String>,
+    user_id: String,
+}
+
+impl LegacyHookHistory {
+    async fn take_ownership(&self) -> Result<Option<std::fs::File>, String> {
+        use crate::sdk::hook_history::LegacyHistoryOwnership;
+        let state = self.state.as_ref().ok_or("Pilot checkpoint unavailable")?;
+        if let LegacyHistoryOwnership::Ready(lock) = self
+            .profile
+            .export_checkpoint(&self.data, state)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(lock);
+        }
+        let manager = self.manager.upgrade().ok_or("Pilot output stopped")?;
+        let resource_dir = match &self.resource_dir {
+            Some(path) => path.clone(),
+            None => resolve_pilot_dir(&self.data.to_string_lossy(), &[])?,
+        };
+        let sdk_data = self.profile.sdk_data(&self.data);
+        let init = serde_json::json!({
+            "data_dir": sdk_data, "resource_dir": resource_dir, "user_id": self.user_id,
+        });
+        // A source-free host uses the normal output acknowledgements to
+        // drain committed events without advancing or re-reading the source.
+        let sdk = super::sdk_agent::SdkAgent::drain_history(
+            self.profile,
+            init,
+            &manager,
+            sdk_data,
+            state,
+        );
+        sdk.start().await?;
+        sdk.stop_with_result().await?;
+        match self
+            .profile
+            .export_checkpoint(&self.data, state)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            LegacyHistoryOwnership::Ready(lock) => Ok(lock),
+            LegacyHistoryOwnership::Pending => {
+                Err("SDK activity remains queued; legacy history not started".into())
+            }
+        }
     }
 }
 

@@ -61,6 +61,12 @@ impl LegacyCheckpointHandoff {
 
 type DeliveryRows = Vec<(i64, Vec<u8>)>;
 
+pub(crate) enum ShellCheckpoint {
+    Pending,
+    Exported { has_progress: bool },
+    Ready(Option<String>),
+}
+
 const SAVE_CHECKPOINT: &str = "INSERT INTO checkpoint VALUES(?1,?2)
     ON CONFLICT(source) DO UPDATE SET json=excluded.json WHERE checkpoint.json<>excluded.json";
 
@@ -485,6 +491,44 @@ impl Outbox {
         )?;
         db.busy_timeout(Duration::from_secs(1))?;
         Self::find_checkpoint(&db, source)
+    }
+
+    /// Read the durable queue and its corresponding cursor under collector
+    /// ownership. The exported marker guards later progress by a legacy reader.
+    pub(crate) fn checkpoint_for_shell(
+        root: &Path,
+        source: &str,
+        handoff: LegacyCheckpointHandoff,
+    ) -> anyhow::Result<ShellCheckpoint> {
+        let db = Connection::open_with_flags(
+            Self::database_path(root)?,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        db.busy_timeout(Duration::from_secs(1))?;
+        let pending: i64 = db.query_row("SELECT events FROM queue_size", [], |row| row.get(0))?;
+        if pending != 0 {
+            return Ok(ShellCheckpoint::Pending);
+        }
+        if Self::find_checkpoint(&db, handoff.marker())?.is_some() {
+            let has_progress = db.query_row(
+                "SELECT EXISTS (SELECT 1 FROM checkpoint WHERE source<>?1 AND json<>'{}')",
+                [handoff.marker()],
+                |row| row.get(0),
+            )?;
+            return Ok(ShellCheckpoint::Exported { has_progress });
+        }
+        let checkpoint = Self::find_checkpoint(&db, source)?;
+        if checkpoint.is_none() {
+            let has_other_checkpoint: bool =
+                db.query_row("SELECT EXISTS (SELECT 1 FROM checkpoint)", [], |row| {
+                    row.get(0)
+                })?;
+            anyhow::ensure!(
+                !has_other_checkpoint,
+                "SDK history checkpoint belongs to a different source"
+            );
+        }
+        Ok(ShellCheckpoint::Ready(checkpoint))
     }
 
     pub fn restore(&self, source: &str, path: &Path) -> anyhow::Result<()> {

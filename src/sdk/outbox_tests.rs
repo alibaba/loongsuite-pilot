@@ -525,6 +525,37 @@ fn checkpoint_imports_legacy_progress_only_after_acknowledged_export() {
     }
 }
 
+#[test]
+fn legacy_hook_reader_recovers_an_unexported_drained_checkpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let queue = Outbox::open(&root, settings()).unwrap();
+    let handoff = LegacyCheckpointHandoff::HookHistory("opencode");
+    let source = "opencode-source";
+    let checkpoint = r#"{"opencode-log:fixture":{"lastOffset":97}}"#;
+    queue.checkpoint(source, checkpoint).unwrap();
+    queue
+        .enqueue_hook(br#"{"event.id":"still-queued"}"#)
+        .unwrap();
+    assert!(matches!(
+        Outbox::checkpoint_for_shell(&root, source, handoff).unwrap(),
+        ShellCheckpoint::Pending
+    ));
+    queue
+        .ack(&queue.read_batch(&settings()).unwrap().0)
+        .unwrap();
+    assert!(matches!(
+        Outbox::checkpoint_for_shell(&root, source, handoff).unwrap(),
+        ShellCheckpoint::Ready(Some(text)) if text == checkpoint
+    ));
+    assert!(Outbox::checkpoint_for_shell(&root, "different-source", handoff).is_err());
+    Outbox::mark_shell_checkpoint_exported(&root, handoff).unwrap();
+    assert!(matches!(
+        Outbox::checkpoint_for_shell(&root, source, handoff).unwrap(),
+        ShellCheckpoint::Exported { has_progress: true }
+    ));
+}
+
 fn assert_acknowledged_checkpoint_handoff(input: &str) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
