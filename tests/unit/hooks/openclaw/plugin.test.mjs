@@ -1973,6 +1973,79 @@ describe('subagent trace propagation', () => {
     expect(children.every(r => r['gen_ai.session.id'] === 'child-session')).toBe(true);
   });
 
+  it.each(['event', 'context'])('pairs out-of-order tools sharing an ID with names in the %s', async identitySource => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'reused-mixed-parent', sessionId: 'parent', sessionKey: 'agent:main:main' };
+    const child = { runId: 'reused-mixed-child', sessionId: 'child', sessionKey: 'agent:main:subagent:mixed' };
+    const spawn = { toolName: 'sessions_spawn', toolCallId: 'reused' };
+    const read = { toolName: 'read', toolCallId: 'reused' };
+    const fire = (name, identity, data) => identitySource === 'event'
+      ? h[name]({ ...data, ...identity }, parent)
+      : h[name](data, { ...parent, ...identity });
+
+    await h.before_agent_run({ prompt: 'delegate' }, parent);
+    await h.model_call_started({ callId: 'model-1' }, parent);
+    await fire('before_tool_call', spawn, { params: { task: 'child work' } });
+    await h.model_call_started({ callId: 'model-2' }, parent);
+    await fire('before_tool_call', read, { params: { file: 'fixture' } });
+    await h.after_tool_call({ toolCallId: 'reused', result: 'unattributed result' }, parent);
+    await fire('after_tool_call', read, { result: 'read done' });
+    await fire('after_tool_call', spawn, { result: {
+      details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey },
+    } });
+
+    const restarted = registerPlugin(await loadPlugin());
+    await restarted.before_agent_run({ prompt: 'child work' }, child);
+    await restarted.llm_output({}, child);
+
+    const records = readOutputRecords();
+    const spawnCall = records.find(r => r['event.name'] === 'tool.call' && r['gen_ai.tool.name'] === 'sessions_spawn');
+    const readCall = records.find(r => r['event.name'] === 'tool.call' && r['gen_ai.tool.name'] === 'read');
+    const results = records.filter(r => r['event.name'] === 'tool.result');
+    expect(spawnCall).toBeDefined();
+    expect(readCall).toBeDefined();
+    expect(spawnCall.span_id).not.toBe(readCall.span_id);
+    expect([spawnCall.span_id, readCall.span_id]).not.toContain(results[0]?.span_id);
+    expect(results.slice(1)).toEqual([
+      expect.objectContaining({ span_id: readCall.span_id, 'gen_ai.step.id': readCall['gen_ai.step.id'], 'gen_ai.tool.call.id': 'reused' }),
+      expect.objectContaining({ span_id: spawnCall.span_id, 'gen_ai.step.id': spawnCall['gen_ai.step.id'], 'gen_ai.tool.call.id': 'reused' }),
+    ]);
+    const invoke = records.find(r => r['event.name'] === 'gen_ai.agent.invoke');
+    expect(invoke['gen_ai.agent.invocation.id']).toMatch(/^[a-f0-9]{32}$/);
+    const childRows = records.filter(r => r['gen_ai.turn.id'] === child.runId);
+    expect(childRows.length).toBeGreaterThan(0);
+    for (const row of childRows) expect(row).toMatchObject({
+      trace_id: spawnCall.trace_id,
+      parent_span_id: spawnCall.span_id,
+      'gen_ai.agent.parent.invocation.id': invoke['gen_ai.agent.invocation.id'],
+    });
+  });
+
+  it('does not consume a pending call or bind a child for a mismatching tool name', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'mismatched-tool-parent', sessionId: 'parent', sessionKey: 'agent:main:main' };
+    const child = { runId: 'mismatched-tool-child', sessionId: 'child', sessionKey: 'agent:main:subagent:orphan' };
+    const read = { toolName: 'read', toolCallId: 'shared' };
+    await h.before_agent_run({ prompt: 'read' }, parent);
+    await h.model_call_started({ callId: 'model' }, parent);
+    await h.before_tool_call(read, parent);
+    await h.after_tool_call({
+      toolName: 'sessions_spawn', toolCallId: read.toolCallId,
+      result: { details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey } },
+    }, parent);
+    // The unique pending read can still be paired when a legacy result has no name.
+    await h.after_tool_call({ toolCallId: read.toolCallId, result: 'done' }, parent);
+
+    const records = readOutputRecords();
+    const call = records.find(r => r['event.name'] === 'tool.call');
+    const results = records.filter(r => r['event.name'] === 'tool.result');
+    expect(results).toHaveLength(2);
+    expect(results[0].span_id).not.toBe(call.span_id);
+    expect(results[1]).toMatchObject({ span_id: call.span_id, 'gen_ai.tool.name': 'read' });
+    expect(records.some(r => r['event.name'] === 'gen_ai.agent.invoke')).toBe(false);
+    expect(fs.existsSync(path.join(pilotDataDir, 'subagent-contexts', 'openclaw'))).toBe(false);
+  });
+
   it('keeps reused spawn IDs separate within a parent run, including child audits after restart', async () => {
     const h = registerPlugin(await loadPlugin());
     const parent = { runId: 'reused-spawn-parent', sessionId: 'parent', sessionKey: 'agent:main:main' };

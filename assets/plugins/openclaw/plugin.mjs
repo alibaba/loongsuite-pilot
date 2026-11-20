@@ -1528,32 +1528,33 @@ function handleBeforeToolCall(event, ctx, userId, emit) {
   const stepId = run.currentStepCallId || run.lastCallId;
   const common = buildCommonFields(run, run.sessionId, userId);
   const spanId = generateSpanId();
-  const invocation = event?.toolCallId ? {
-    toolCallId: event.toolCallId, spanId, stepId,
+  const toolCallId = event?.toolCallId || ctx?.toolCallId;
+  const toolName = event?.toolName || ctx?.toolName;
+  const invocation = toolCallId ? {
+    toolCallId, toolName, spanId, stepId,
     startedAtNanos: common.time_unix_nano,
   } : undefined;
   if (invocation) {
     // Keep invocation state together. Reusing a native ID in a later step must
-    // not overwrite a pending result's span, step or start time. Repeated IDs
-    // are consumed in invocation order; different IDs can complete in any order.
+    // not overwrite a pending result's span, step or start time.
     pushBounded(run.pendingToolInvocations, invocation);
-    if (stepId) setBounded(run.toolStepCallIds, event.toolCallId, stepId);
+    if (stepId) setBounded(run.toolStepCallIds, toolCallId, stepId);
   }
   const record = {
     ...common,
     "event.name": "tool.call",
     span_id: spanId,
     "gen_ai.step.id": stepId,
-    "gen_ai.tool.name": event?.toolName,
-    "gen_ai.tool.call.id": event?.toolCallId,
-    "gen_ai.tool.call.exec.id": event?.toolCallId,
+    "gen_ai.tool.name": toolName,
+    "gen_ai.tool.call.id": toolCallId,
+    "gen_ai.tool.call.exec.id": toolCallId,
     "gen_ai.tool.call.arguments": event?.params
       ? truncateContent(safeJsonClone(event.params))
       : undefined,
     "agent.openclaw.hook": "before_tool_call",
   };
   emit(record);
-  if (invocation && run.sessionId && ["sessions_spawn", "sessions_send"].includes(event?.toolName)) {
+  if (invocation && run.sessionId && ["sessions_spawn", "sessions_send"].includes(toolName)) {
     // Each send is new work; polling/history/cancellation tools never enter here.
     // Retain the original audit ID while we can prove this is its first use.
     const firstUse = run.delegatedToolCallIds.size < MAX_RUN_STATE_ENTRIES
@@ -1568,6 +1569,19 @@ function handleBeforeToolCall(event, ctx, userId, emit) {
   }
 }
 
+function takePendingToolInvocation(run, toolCallId, toolName) {
+  if (!toolCallId) return undefined;
+  const pending = run.pendingToolInvocations;
+  const compatible = pending.filter(item => item.toolCallId === toolCallId
+    && (!toolName || !item.toolName || item.toolName === toolName));
+  // Same-name reuse remains FIFO. Without a name on either side, use the ID
+  // alone only when one pending call could own the result.
+  const exact = toolName && compatible.find(item => item.toolName === toolName);
+  const invocation = exact || (compatible.length === 1 ? compatible[0] : undefined);
+  if (invocation) pending.splice(pending.indexOf(invocation), 1);
+  return invocation;
+}
+
 function handleAfterToolCall(event, ctx, userId, emit) {
   const runId = event?.runId || ctx?.runId;
   if (!runId) return;
@@ -1575,12 +1589,10 @@ function handleAfterToolCall(event, ctx, userId, emit) {
   // Tool execution may finish after OpenClaw has already started the next
   // model call. Keep the result on the step where before_tool_call began so
   // the converter merges arguments, result and duration into one TOOL span.
-  const pendingIndex = event?.toolCallId
-    ? run.pendingToolInvocations.findIndex(item => item.toolCallId === event.toolCallId)
-    : -1;
-  const invocation = pendingIndex >= 0
-    ? run.pendingToolInvocations.splice(pendingIndex, 1)[0]
-    : undefined;
+  const toolCallId = event?.toolCallId || ctx?.toolCallId;
+  const observedToolName = event?.toolName || ctx?.toolName;
+  const invocation = takePendingToolInvocation(run, toolCallId, observedToolName);
+  const toolName = observedToolName || invocation?.toolName;
   const stepId = invocation ? invocation.stepId : run.currentStepCallId || run.lastCallId;
   const common = buildCommonFields(run, run.sessionId, userId);
   const startedAtNanos = invocation?.startedAtNanos;
@@ -1611,12 +1623,12 @@ function handleAfterToolCall(event, ctx, userId, emit) {
   const result = event?.result;
   const work = invocation?.delegation;
   const details = result?.details || result;
-  if (invocation && ["sessions_spawn", "sessions_send"].includes(event?.toolName)) {
+  if (invocation && invocation.toolName === toolName && ["sessions_spawn", "sessions_send"].includes(toolName)) {
     // Dispatch identity is independent of visible reply delivery. Native send
     // can finish silently or fail after sending; a pre-dispatch error's runId
     // alone is not evidence that the target actually received this work.
     const dispatched = ["accepted", "ok"].includes(details?.status)
-      || (event.toolName === "sessions_send" && (details?.status === "no_reply"
+      || (toolName === "sessions_send" && (details?.status === "no_reply"
         || (details?.sentBeforeError === true && ["timeout", "error"].includes(details?.status))));
     if (dispatched && typeof details.runId === "string") {
       const parent = {
@@ -1624,10 +1636,10 @@ function handleAfterToolCall(event, ctx, userId, emit) {
         parentSpanId: invocation.spanId,
         sessionId: run.sessionId, turnId: run.turnId || run.runId,
         parentRunId: run.runId,
-        toolCallId: event.toolCallId, userId: run.parentContext?.userId || run.userId || userId,
+        toolCallId, userId: run.parentContext?.userId || run.userId || userId,
         invocationId: work?.invocationId,
         childSessionKey: details.childSessionKey || details.sessionKey || work?.childSessionKey,
-        auditOnly: event.toolName === "sessions_send",
+        auditOnly: toolName === "sessions_send",
       };
       const retained = childContexts.read(details.runId);
       if (retained && retained.invocationId === parent.invocationId) {
@@ -1658,9 +1670,9 @@ function handleAfterToolCall(event, ctx, userId, emit) {
     "event.name": "tool.result",
     span_id: invocation?.spanId || generateSpanId(),
     "gen_ai.step.id": stepId,
-    "gen_ai.tool.name": event?.toolName,
-    "gen_ai.tool.call.id": event?.toolCallId,
-    "gen_ai.tool.call.exec.id": event?.toolCallId,
+    "gen_ai.tool.name": toolName,
+    "gen_ai.tool.call.id": toolCallId,
+    "gen_ai.tool.call.exec.id": toolCallId,
     "gen_ai.tool.call.result": result !== undefined
       ? truncateContent(safeJsonClone(result))
       : undefined,
@@ -1675,7 +1687,7 @@ function handleAfterToolCall(event, ctx, userId, emit) {
   };
   emit(record, startedAtNanos);
   // A send may synchronously deliver a reply. Accepted/timeout is never success.
-  if (work && ((event.toolName === "sessions_send" && details?.status === "ok" && typeof details.reply === "string")
+  if (work && ((toolName === "sessions_send" && details?.status === "ok" && typeof details.reply === "string")
     || isError || details?.status === "error" || details?.status === "forbidden")) {
     const audit = auditRecord(common, work, "result", textMessages(details?.reply ?? errorMessage ?? details?.error, "assistant"), work.childSessionId);
     if (isError || ["error", "forbidden"].includes(details?.status)) audit["error.type"] = "agent_dispatch_error";
