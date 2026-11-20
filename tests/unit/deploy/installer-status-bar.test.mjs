@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { runInNewContext } from 'node:vm';
+import { installerWriteConfigStubs, readInstallerWriteConfig } from '../../helpers/installer-powershell.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -13,7 +14,7 @@ const ps = readFileSync(resolve('deploy/installer-opensource.ps1'), 'utf8');
 const shellPrelude = shell.slice(0, shell.indexOf('# Validate current user'));
 const shellWriter = shell.slice(shell.indexOf('write_config() {'), shell.indexOf('install_loongsuite_pilot_command() {'));
 const psPrelude = ps.slice(0, ps.indexOf('# Resolve package URL'));
-const psWriter = ps.slice(ps.indexOf('function Write-Config {'), ps.indexOf('# QoderWork-family runtime wrapper:'));
+const psWriter = readInstallerWriteConfig(ps);
 const psJs = psWriter.match(/-e @'\r?\n([\s\S]*?)\r?\n'@ \$cfgTmp/)?.[1];
 const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
 const hasPowerShell = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0']).status === 0;
@@ -54,7 +55,7 @@ write_config`, 'installer-test', command, '--data-dir', root, ...args], {
     } else if (platform === 'powershell') {
       const scriptPath = resolve(root, 'installer-test.ps1');
       writeFileSync(scriptPath, `${psPrelude}
-function Msg { }
+${installerWriteConfigStubs}
 $script:NODE_BIN = $env:PILOT_TEST_NODE
 $script:PROBE_RESULT = '[]'
 ${psWriter}

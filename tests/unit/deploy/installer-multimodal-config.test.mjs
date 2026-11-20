@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, rmdirSync, unlinkSync, w
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readInstallerWriteConfig } from '../../helpers/installer-powershell.mjs';
 
 const installerSh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf8').replaceAll('\r\n', '\n');
 const installerPs1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf8').replaceAll('\r\n', '\n');
@@ -65,10 +66,7 @@ describe('public installer multimodal mode flag', () => {
   });
 
   it('PowerShell Write-Config aborts on a nonzero node exit', () => {
-    const fn = installerPs1.slice(
-      installerPs1.indexOf('function Write-Config {'),
-      installerPs1.indexOf('# QoderWork-family runtime wrapper:'),
-    );
+    const fn = readInstallerWriteConfig(installerPs1);
     const lines = fn.split('\n');
     const nodeEnd = lines.indexOf("'@ $cfgTmp");
     expect(nodeEnd).toBeGreaterThan(0);
@@ -108,7 +106,11 @@ function runPsParse(args) {
   const root = mkdtempSync(resolve(tmpdir(), 'pilot-mm-parse-'));
   const scriptPath = resolve(root, 'installer-parse.ps1');
   try {
-    writeFileSync(scriptPath, psParsePrelude);
+    // PowerShell Core's default ConciseView decorates and wraps the error message.
+    writeFileSync(scriptPath, psParsePrelude.replace(
+      '$ErrorActionPreference = "Stop"',
+      '$ErrorActionPreference = "Stop"\n$ErrorView = "NormalView"',
+    ));
     return spawnSync(powershell, [
       '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath,
       'install', ...args,
@@ -271,10 +273,7 @@ function extractShWriteConfigJs(configPath, dataDir, sls = {}, allAgents = false
 }
 
 function extractPsWriteConfigJs() {
-  const fn = installerPs1.slice(
-    installerPs1.indexOf('function Write-Config {'),
-    installerPs1.indexOf('# QoderWork-family runtime wrapper:'),
-  );
+  const fn = readInstallerWriteConfig(installerPs1);
   const start = fn.indexOf("const fs = require('fs');\n");
   const end = fn.indexOf("fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\\n');\n");
   expect(start).toBeGreaterThanOrEqual(0);
