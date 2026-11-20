@@ -13,7 +13,8 @@ import { InputManager } from '../../../../src/core/input-manager.js';
 import { JsonlFlusher } from '../../../../src/flushers/jsonl-flusher.js';
 import { SlsFlusher } from '../../../../src/flushers/sls-flusher.js';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
-import { CodexTurnJournal } from '../../../../src/flushers/codex-turn-journal.js';
+import { CodexTurnJournal, codexTurnJournalGroupKey } from '../../../../src/flushers/codex-turn-journal.js';
+import { buildAgentActivityEntry } from '../../../../src/normalization/entry-builder.js';
 import { MultiFlusher } from '../../../../src/flushers/multi-flusher.js';
 import { WorkspacePolicy } from '../../../../src/core/workspace-policy.js';
 import type { InputRuntimeDelta } from '../../../../src/inputs/base/input-runtime-metrics.js';
@@ -734,6 +735,66 @@ it('requires actual SLS acceptance and retries only its rejected endpoint', asyn
     await endpoint.close();
   }
 }, 15_000);
+
+it('does not acknowledge a torn turn when an earlier turn from the same session replays later in hash order', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-kimi-two-pending-turns-'));
+  roots.push(root);
+  const directory = path.join(root, 'pending-turns');
+  const makeJournal = () => new CodexTurnJournal(directory, 100, ['kimi-code-cli']);
+  const makeTurn = (id: string, start: number) => {
+    const trace = createHash('sha256').update(id).digest('hex').slice(0, 32);
+    const row = (event: string, elapsed: number, fields: Partial<AgentActivityEntry> = {}) => buildAgentActivityEntry({
+      timestamp: start + elapsed, trace_id: trace, 'event.id': `${id}-${event}`, 'event.name': event,
+      'gen_ai.agent.type': 'kimi-code-cli', 'user.id': 'reviewer', 'gen_ai.session.id': 'same-native-session',
+      'gen_ai.turn.id': id, 'gen_ai.step.id': `${id}:1`, 'gen_ai.response.id': `${id}:1`,
+      'gen_ai.request.model': 'test-model', ...fields,
+    });
+    return [row('llm.request', 0, { 'gen_ai.turn.start': true }),
+      row('llm.response', 100, { 'gen_ai.turn.end': true, 'gen_ai.response.model': 'test-model' }),
+      row('tool.call', 200, { 'gen_ai.tool.name': 'read', 'gen_ai.tool.call.id': `${id}-tool` }),
+      row('tool.result', 300, { 'gen_ai.tool.name': 'read', 'gen_ai.tool.call.id': `${id}-tool`, 'tool.result.status': 'success' })];
+  };
+  const now = Date.now();
+  const current = makeTurn('later-torn-turn', now + 1000);
+  const currentKey = codexTurnJournalGroupKey(current[0]!);
+  const prior = Array.from({ length: 30 }, (_, index) => makeTurn(`older-complete-turn-${index}`, now))
+    .find(turn => codexTurnJournalGroupKey(turn[0]!) > currentKey)!;
+  expect(prior).toBeDefined();
+
+  await makeJournal().append([...prior, ...current]);
+  const file = path.join(directory, `codex-turn-${currentKey}.jsonl`);
+  const rows = (await fs.readFile(file, 'utf8')).trimEnd().split('\n');
+  expect(rows.map(line => JSON.parse(line)['event.name'])).toEqual(['llm.request', 'tool.call', 'tool.result', 'llm.response']);
+  await fs.writeFile(file, rows.slice(0, 2).join('\n') + '\n' + rows[2]!.slice(0, 31));
+
+  const accepted: Array<{ turn: string; kind: string }> = [];
+  const decode = createRequire(import.meta.url)('@opentelemetry/otlp-transformer/build/src/generated/root.js')
+    .opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest.decode;
+  const endpoint = await listen((_url, bytes) => {
+    for (const resource of decode(bytes).resourceSpans) for (const scope of resource.scopeSpans) for (const span of scope.spans) {
+      const attr = (key: string) => span.attributes.find(value => value.key === key)?.value.stringValue;
+      accepted.push({ turn: attr('gen_ai.turn.id'), kind: attr('gen_ai.span.kind') });
+    }
+    return 200;
+  });
+  const journal = makeJournal();
+  const trace = new OtlpTraceFlusher({ enabled: true, captureMessageContent: false, serviceName: 'unit',
+    protocol: 'http/protobuf', endpoints: [{ endpoint: endpoint.url, name: 'loopback', compression: 'none' }],
+  }, undefined, undefined, journal);
+  try {
+    await trace.start();
+    const prematurelyAcknowledged = await journal.isAcknowledged(current[0]!);
+    await trace.sendBatch(current);
+    expect.soft(prematurelyAcknowledged).toBe(false);
+    expect.soft(accepted.filter(span => span.turn === current[0]!['gen_ai.turn.id']).map(span => span.kind).sort())
+      .toEqual(['AGENT', 'ENTRY', 'LLM', 'STEP', 'TOOL']);
+    expect(accepted.filter(span => span.turn === prior[0]!['gen_ai.turn.id']).map(span => span.kind).sort())
+      .toEqual(['AGENT', 'ENTRY', 'LLM', 'STEP', 'TOOL']);
+  } finally {
+    await trace.shutdown();
+    await endpoint.close();
+  }
+});
 
 it('persists a Kimi OTLP turn when the transport rejects it and replays the journal on restart', async () => {
   vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);

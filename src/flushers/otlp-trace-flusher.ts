@@ -948,9 +948,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // split its records and synthesize duplicate ENTRY/AGENT spans.
     const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) || undefined;
     for (const [bufKey, buf] of this.turnBuffers) {
-      // Native Codex task_complete/turn_aborted is authoritative. A second
-      // work item in the same thread must not truncate a still-running turn.
-      if (agentType === 'codex' || agentType === 'doubao-work') break;
+      // Native completion owns these turns. In particular, the journal can
+      // replay Kimi turns out of order after an interrupted write.
+      if (agentType === 'codex' || agentType === 'doubao-work' || agentType === 'kimi-code-cli') break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       // Incremental Hermes turns may overlap inside one IM session. They have
       // their own explicit completion, so a successor is not an implicit end.
