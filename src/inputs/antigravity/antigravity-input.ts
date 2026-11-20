@@ -105,7 +105,7 @@ function isToolResultStep(step: AntigravityTranscriptStep): boolean {
   return !NON_TOOL_RESULT_STEP_TYPES.has(step.type);
 }
 
-function isToolCancelledStatus(status: string | undefined): boolean {
+function isCancelledStatus(status: string | undefined): boolean {
   if (!status) return false;
   const upper = status.toUpperCase();
   return upper === 'CANCELED' || upper === 'CANCELLED';
@@ -115,6 +115,11 @@ function isToolErrorStatus(status: string | undefined): boolean {
   if (!status) return false;
   const upper = status.toUpperCase();
   return upper === 'ERROR' || upper === 'CANCELED' || upper === 'CANCELLED';
+}
+
+function plannerFinishReason(step: AntigravityTranscriptStep | undefined): 'cancelled' | 'tool_call' | 'stop' {
+  if (isCancelledStatus(step?.status)) return 'cancelled';
+  return step?.toolCalls.length ? 'tool_call' : 'stop';
 }
 
 function usageResponseKey(usage: AntigravityUsageEvent): string | undefined {
@@ -147,6 +152,14 @@ interface SourceAudit {
   byMs: number;
 }
 
+interface PendingPlanner {
+  turnId: string;
+  responseId: string;
+  stepIndices: number[];
+  provider: string;
+  isRetry: boolean;
+}
+
 interface SessionCheckpoint {
   sourceSignature?: string;
   /** Durable deadlines to verify older records after incremental reads. */
@@ -155,6 +168,7 @@ interface SessionCheckpoint {
   /** Earliest deadline for rechecking an incomplete SQLite/transcript join. */
   retryAtMs?: number;
   joinDeadlines?: Record<string, number>;
+  pendingPlanners?: PendingPlanner[];
   emittedUsageKeys: string[];
   usageResponseKeysBySource?: Record<string, string>;
   /** Legacy eviction state, used only on the first rescan of older checkpoints. */
@@ -175,7 +189,7 @@ interface SessionCheckpoint {
   emittedTurnStarts?: string[];
   /** Turn IDs for which this input has already published a terminal response. */
   endedTurns?: string[];
-  /** Model completed while one or more tool results were still outstanding. */
+  /** Model completed while a tool result or earlier planner was still outstanding. */
   turnsAwaitingToolResults?: string[];
   /** Latched tool call IDs keyed by `${plannerStepIndex}:${toolIndex}` for cross-cycle stability. */
   toolCallIdMap?: Record<string, string>;
@@ -538,6 +552,12 @@ export class AntigravityInput extends BaseInput {
             transcriptAudit: loadSourceAudit(cur.transcriptAudit),
             retryAtMs: typeof cur.retryAtMs === 'number' ? cur.retryAtMs : undefined,
             joinDeadlines: cur.joinDeadlines,
+            pendingPlanners: Array.isArray(cur.pendingPlanners) ? cur.pendingPlanners.filter(pending =>
+              pending && typeof pending.turnId === 'string' && typeof pending.responseId === 'string' &&
+              typeof pending.provider === 'string' && typeof pending.isRetry === 'boolean' &&
+              Array.isArray(pending.stepIndices) && pending.stepIndices.length > 0 &&
+              pending.stepIndices.every(idx => Number.isSafeInteger(idx) && idx >= 0),
+            ) : undefined,
             maxEmittedGenIdx: typeof cur.maxEmittedGenIdx === 'number' ? cur.maxEmittedGenIdx : -1,
             maxEmittedStepIdx:
               typeof cur.maxEmittedStepIdx === 'number' ? cur.maxEmittedStepIdx : -1,
@@ -781,6 +801,7 @@ export class AntigravityInput extends BaseInput {
             transcriptAudit,
             retryAtMs: undefined,
             joinDeadlines: undefined,
+            pendingPlanners: undefined,
             emittedUsageKeys: [...seededKeys],
             usageResponseKeysBySource: Object.fromEntries(responseKeysBySource),
             lastTranscriptStepIndex: previous?.lastTranscriptStepIndex ?? -1,
@@ -893,6 +914,7 @@ export class AntigravityInput extends BaseInput {
     const responseKeysBySource = new Map(Object.entries(prevCursor.usageResponseKeysBySource ?? {}));
     const processedTranscriptSteps = new Set(prevCursor.processedTranscriptSteps);
     const joinDeadlines = new Map<string, number>();
+    const pendingPlanners: PendingPlanner[] = [];
     let retryAtMs: number | undefined;
     const usedResponseIds = new Set<string>(prevCursor.emittedResponseIds ?? []);
     const seenPrimaryStepIdx = new Set<number>(prevCursor.emittedPrimaryStepIdxs ?? []);
@@ -1109,8 +1131,10 @@ export class AntigravityInput extends BaseInput {
       return `${sessionId}:turn:1`;
     };
 
+    const hasUsageTurn = (usage: AntigravityUsageEvent): boolean =>
+      usage.stepIndices.some((idx) => stepToTurn.has(idx) || stepInfos.get(idx)?.turnId);
     const resolveUsageTurn = (usage: AntigravityUsageEvent, stepIdx: number | undefined): string => {
-      if (usage.stepIndices.some((idx) => stepToTurn.has(idx) || stepInfos.get(idx)?.turnId)) {
+      if (hasUsageTurn(usage)) {
         return resolveTurnForStep(stepIdx, usage.stepIndices);
       }
       // With SQLite usage alone there is no evidence that two invocations belong
@@ -1427,7 +1451,7 @@ export class AntigravityInput extends BaseInput {
           'tool.result.status': isErr ? 'error' : 'success',
           ...(isErr
             ? {
-                'error.type': isToolCancelledStatus(resultStep.status)
+                'error.type': isCancelledStatus(resultStep.status)
                   ? 'antigravity.tool_cancelled'
                   : 'antigravity.tool_failed',
               }
@@ -1569,7 +1593,7 @@ export class AntigravityInput extends BaseInput {
                 'tool.result.status': isErr ? 'error' : 'success',
                 ...(isErr
                   ? {
-                      'error.type': isToolCancelledStatus(resultStep.status)
+                      'error.type': isCancelledStatus(resultStep.status)
                         ? 'antigravity.tool_cancelled'
                         : 'antigravity.tool_failed',
                     }
@@ -1605,6 +1629,18 @@ export class AntigravityInput extends BaseInput {
 
     // 3) Emit authoritative llm.request + llm.response pairs from SQLite usage events
     const pendingToolTurns = new Set(remainingPending.map((call) => call.turnId));
+    const waitingForPlannerTurns = new Set<string>();
+    const readyPlannerJoins: Array<{ pending: PendingPlanner; planner: AntigravityTranscriptStep | undefined }> = [];
+    for (const pending of prevCursor.pendingPlanners ?? []) {
+      const knownSteps = pending.stepIndices.map(idx => transcript?.byStepIndex.get(idx));
+      const planner = knownSteps.find(step => step?.type === 'PLANNER_RESPONSE');
+      if (planner ? isPlannerOrPromptStillStreaming(planner) : knownSteps.includes(undefined)) {
+        pendingPlanners.push(pending);
+        waitingForPlannerTurns.add(pending.turnId);
+      } else {
+        readyPlannerJoins.push({ pending, planner });
+      }
+    }
     if (snapshot) {
       const nowForRace = Date.now();
       for (const usage of snapshot.events) {
@@ -1637,16 +1673,21 @@ export class AntigravityInput extends BaseInput {
         const linkedStep = this.findLinkedPlannerStep(usage, transcript);
         // The SQLite writer can be ahead of the JSONL writer. Recheck both sources
         // at a fixed deadline even when neither file changes again.
-        if (!linkedStep && usage.stepIndices.some((idx) => !transcript?.byStepIndex.has(idx))) {
+        const missingStepIndex = linkedStep
+          ? undefined : usage.stepIndices.find((idx) => !transcript?.byStepIndex.has(idx));
+        if (missingStepIndex !== undefined) {
           const deadline = prevCursor.joinDeadlines?.[usage.key] ??
             Math.min(usage.timestampMs, nowForRace) + TRANSCRIPT_JOIN_GRACE_MS;
           if (deadline > nowForRace) {
             joinDeadlines.set(usage.key, deadline);
             retryAtMs = Math.min(retryAtMs ?? deadline, deadline);
+            if (transcript && hasUsageTurn(usage)) {
+              waitingForPlannerTurns.add(resolveUsageTurn(usage, missingStepIndex));
+            }
             continue;
           }
         }
-        const linkedStepIdx = linkedStep?.stepIndex ?? usage.stepIndices[0];
+        const linkedStepIdx = linkedStep?.stepIndex ?? missingStepIndex ?? usage.stepIndices[0];
         const linkedStepInfo = linkedStepIdx !== undefined ? stepInfos.get(linkedStepIdx) : undefined;
 
         // Symmetric streaming gate with Loop 2: defer while linked PLANNER_RESPONSE at
@@ -1662,11 +1703,9 @@ export class AntigravityInput extends BaseInput {
 
         rememberUsage();
 
-        const stepId = linkedStep
-          ? `${sessionId}:step:${linkedStep.stepIndex}`
-          : usage.stepIndices.length > 0
-            ? `${sessionId}:step:${usage.stepIndices[0]}`
-            : `${sessionId}:gen:${usage.genIdx ?? 0}`;
+        const stepId = linkedStepIdx === undefined
+          ? `${sessionId}:gen:${usage.genIdx ?? 0}`
+          : `${sessionId}:step:${linkedStepIdx}`;
 
         const isRetryUsage =
           usage.isRetry ||
@@ -1776,11 +1815,21 @@ export class AntigravityInput extends BaseInput {
         const outputMediaParts = plannerOutput
           ? await getStepMedia(plannerOutput, respTsMs, 'output')
           : [];
-        const finishReason = plannerOutput && plannerOutput.toolCalls.length > 0 ? 'tool_call' : 'stop';
-        const observedStop = finishReason === 'stop' && (!isRetryUsage || !linkedStep);
-        const waitsForTools = observedStop && !isLateAttempt && pendingToolTurns.has(turnId);
-        const endsTurn = isLateAttempt || (observedStop && !waitsForTools);
-        if (waitsForTools) turnsAwaitingToolResults.add(turnId);
+        // The deadline releases the usage event. Only a planner (or an
+        // independent SQLite-only invocation) can provide a turn boundary.
+        const awaitsPlanner = missingStepIndex !== undefined && !isLateAttempt &&
+          transcript !== null && hasUsageTurn(usage);
+        const finishReason = awaitsPlanner ? undefined : plannerFinishReason(plannerOutput);
+        const cancelled = finishReason === 'cancelled';
+        const observedTerminal = cancelled || (finishReason === 'stop' && (!isRetryUsage || !linkedStep));
+        const waitsForMore = observedTerminal && !cancelled && !isLateAttempt &&
+          (pendingToolTurns.has(turnId) || waitingForPlannerTurns.has(turnId));
+        const endsTurn = !awaitsPlanner && (isLateAttempt || (observedTerminal && !waitsForMore));
+        if (awaitsPlanner) {
+          pendingPlanners.push({ turnId, responseId, stepIndices: usage.stepIndices, provider, isRetry: isRetryUsage });
+          waitingForPlannerTurns.add(turnId);
+        }
+        if (waitsForMore) turnsAwaitingToolResults.add(turnId);
         if (endsTurn) endedTurns.add(turnId);
         const outputMessages = this.buildOutputMessages(
           plannerOutput,
@@ -1804,8 +1853,10 @@ export class AntigravityInput extends BaseInput {
           'gen_ai.provider.name': provider,
           'gen_ai.request.model': model,
           'gen_ai.response.model': model,
-          ...(!isRetryUsage || !linkedStep ? { 'gen_ai.response.finish_reasons': [finishReason] } : {}),
-          ...(endsTurn || waitsForTools ? { 'gen_ai.turn.end': endsTurn } : {}),
+          ...(finishReason && (!isRetryUsage || !linkedStep) ? { 'gen_ai.response.finish_reasons': [finishReason] } : {}),
+          ...(endsTurn || waitsForMore || awaitsPlanner ? { 'gen_ai.turn.end': endsTurn } : {}),
+          ...(awaitsPlanner ? { 'agent.antigravity.planner_pending': true } : {}),
+          ...(cancelled ? { 'error.type': 'antigravity.model_cancelled' } : {}),
           ...(usage.ttftNs !== undefined && usage.ttftNs > 0
             ? { 'gen_ai.response.time_to_first_token': usage.ttftNs }
             : {}),
@@ -1830,6 +1881,42 @@ export class AntigravityInput extends BaseInput {
       }
     }
 
+    // A late planner may be the sole new record. Report its classification
+    // separately so the already published usage and event IDs stay intact.
+    for (const { pending, planner } of readyPlannerJoins) {
+      const { turnId, responseId } = pending;
+      const stepId = planner ? `${sessionId}:step:${planner.stepIndex}` : undefined;
+      const finish = planner && !pending.isRetry ? plannerFinishReason(planner) : undefined;
+      const cancelled = finish === 'cancelled';
+      const waitsForMore = finish === 'stop' && (pendingToolTurns.has(turnId) || waitingForPlannerTurns.has(turnId));
+      const endsTurn = cancelled || (finish === 'stop' && !waitsForMore);
+      if (waitsForMore) turnsAwaitingToolResults.add(turnId);
+      if (endsTurn) endedTurns.add(turnId);
+      registerTurnOrder(turnId);
+      const completion = buildAgentActivityEntry({
+        'event.id': hashEventId([sessionId, turnId, responseId, 'planner'], 32),
+        'event.name': 'other',
+        trace_id: hashEventId([sessionId, turnId, 'trace'], 32),
+        ...(stepId ? { parent_span_id: hashEventId([sessionId, turnId, stepId, 'step'], 16) } : {}),
+        'gen_ai.session.id': sessionId,
+        'gen_ai.turn.id': turnId,
+        'gen_ai.step.id': stepId,
+        'gen_ai.response.id': responseId,
+        'gen_ai.agent.type': this.agentType,
+        'gen_ai.agent.id': sessionId,
+        'gen_ai.provider.name': pending.provider,
+        'gen_ai.turn.end': endsTurn,
+        'agent.antigravity.planner_joined': true,
+        ...(finish ? { 'gen_ai.response.finish_reasons': [finish] } : {}),
+        ...(cancelled ? { 'error.type': 'antigravity.model_cancelled' } : {}),
+        time_unix_nano: toUnixNanoString(
+          (planner ? stepInfos.get(planner.stepIndex)?.completedAtMs ?? planner.createdAtMs : undefined) ?? Date.now(),
+        ),
+      });
+      await this.attachWorkspaceContext(completion, cwd);
+      entries.push(completion);
+    }
+
     // Strictly transitive lexicographic sort: turn order -> intra-turn step order ->
     // timestamp ascending -> event phase weight. Prevents cross-turn Signal B flushes
     // and intra-turn interleaving even when +1ms non-zero duration bumps cross ms ties.
@@ -1850,7 +1937,7 @@ export class AntigravityInput extends BaseInput {
 
     const lastEntryByTurn = new Map(entries.map((entry) => [entry['gen_ai.turn.id'], entry]));
     for (const turnId of turnsAwaitingToolResults) {
-      if (pendingToolTurns.has(turnId)) continue;
+      if (pendingToolTurns.has(turnId) || waitingForPlannerTurns.has(turnId)) continue;
       const lastEntry = lastEntryByTurn.get(turnId);
       if (lastEntry) lastEntry['gen_ai.turn.end'] = true;
       // If a new prompt superseded the turn without a result, the exporter sees
@@ -1873,6 +1960,7 @@ export class AntigravityInput extends BaseInput {
       cursor: {
         retryAtMs,
         ...(joinDeadlines.size > 0 ? { joinDeadlines: Object.fromEntries(joinDeadlines) } : {}),
+        ...(pendingPlanners.length > 0 ? { pendingPlanners } : {}),
         lastTranscriptStepIndex: prevCursor.lastTranscriptStepIndex,
         processedTranscriptSteps: [...processedTranscriptSteps],
         emittedUsageKeys: [...seenKeys],

@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { SpanStatusCode } from '@opentelemetry/api';
 import { ExportResultCode } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 
@@ -223,12 +224,13 @@ function createConversationDb(
   }
 }
 
-function captureTraceSpans() {
+function captureTraceSpans(turnIdleTimeoutMs?: number) {
   const spans: ReadableSpan[] = [];
   const flusher = new OtlpTraceFlusher({
     enabled: true,
     serviceName: 'antigravity-test',
     endpoints: [{ endpoint: 'http://127.0.0.1:4318/v1/traces' }],
+    turnIdleTimeoutMs,
   }, undefined, () => ({
     export(batch, callback) {
       spans.push(...batch);
@@ -858,6 +860,220 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
       expect(await collectResponses(restarted)).toEqual([]);
     } finally {
       wallClock.mockRestore();
+    }
+  });
+
+  it.each(['tools', 'tools-after-final', 'terminal', 'cancelled'] as const)(
+    'does not close a known turn on SQLite join timeout before its late %s planner',
+    async (latePlanner) => {
+      const finalBeforeTools = latePlanner === 'tools-after-final';
+      const hasTools = latePlanner === 'tools' || finalBeforeTools;
+      const root = path.join(tmpDir, 'late-planner-after-join');
+      const sid = 'late-planner-session';
+      const conversationsDir = path.join(root, 'conversations');
+      const logsDir = path.join(root, 'brain', sid, '.system_generated', 'logs');
+      await fs.mkdir(conversationsDir, { recursive: true });
+      await fs.mkdir(logsDir, { recursive: true });
+
+      const timestampSec = 1_778_000_500;
+      const dbPath = path.join(conversationsDir, `${sid}.db`);
+      const transcriptPath = path.join(logsDir, 'transcript.jsonl');
+      const generation = (stepIndex: number, responseId: string, inputTokens: number) =>
+        encodeGeneratorMetadata({
+          model: 'Gemini 3.8 Flash (High)',
+          usage: { inputTokens, totalOutputTokens: 3, responseId },
+          timestampSec: timestampSec + stepIndex,
+          stepIndices: [stepIndex],
+        });
+      const line = (step_index: number, type: string, fields: Record<string, unknown>) =>
+        JSON.stringify({
+          step_index, type, status: 'DONE',
+          created_at: new Date((timestampSec + step_index) * 1000).toISOString(), ...fields,
+        }) + '\n';
+      createConversationDb(dbPath, { genRows: [[0, generation(1, 'timed-out-response', 12)]] });
+      await fs.writeFile(transcriptPath, line(0, 'USER_INPUT', { content: 'Run this task' }));
+      const poll = async () => {
+        const input = new AntigravityInput({
+          stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true,
+        });
+        const entries: AgentActivityEntry[] = [];
+        input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+        try {
+          await input.start();
+        } finally {
+          await input.stop();
+        }
+        return entries;
+      };
+      const idleTimeoutMs = 500;
+      const { flusher, spans } = captureTraceSpans(idleTimeoutMs);
+      const wallClock = vi.spyOn(Date, 'now').mockReturnValue(timestampSec * 1000 + 2_000);
+      try {
+        const first = await poll();
+        expect(first.map(entry => entry['event.name'])).toEqual(['other']);
+        const prompt = first[0]!;
+        await flusher.sendBatch(first);
+
+        // The same persisted deadline expires without any writer activity.
+        wallClock.mockReturnValue(timestampSec * 1000 + 31_001);
+        const fallback = await poll();
+        expect(fallback.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+        const response = fallback[1]!;
+        expect(response).toMatchObject({
+          'gen_ai.response.id': 'timed-out-response',
+          'gen_ai.usage.input_tokens': 12,
+          'gen_ai.turn.id': prompt['gen_ai.turn.id'],
+          trace_id: prompt.trace_id,
+        });
+        expect(response['gen_ai.response.finish_reasons'] ?? []).not.toContain('stop');
+        expect(response['gen_ai.turn.end']).not.toBe(true);
+        expect(await poll()).toEqual([]);
+        await flusher.sendBatch(fallback);
+        expect(spans).toHaveLength(0);
+
+        // Advance the configured idle timeout with no writer mutation. The
+        // already-published usage remains buffered until its planner arrives.
+        wallClock.mockReturnValue(timestampSec * 1000 + 31_002 + idleTimeoutMs);
+        const idle = flusher as unknown as {
+          tickIdleTimeout(): void;
+          inFlightExports: Set<Promise<void>>;
+        };
+        idle.tickIdleTimeout();
+        await Promise.allSettled([...idle.inFlightExports]);
+        expect(spans).toHaveLength(0);
+
+        if (hasTools) {
+          const publishFinalPlanner = async () => {
+            const DatabaseSync = loadDatabaseSync()!;
+            const db = new DatabaseSync(dbPath);
+            try {
+              const finalUsage = generation(3, 'final-response', 22);
+              db.prepare('INSERT INTO gen_metadata VALUES (?, ?, ?)').run(1, finalUsage, finalUsage.length);
+            } finally {
+              db.close();
+            }
+            await fs.appendFile(transcriptPath, line(3, 'PLANNER_RESPONSE', { content: 'Done' }));
+            const ending = await poll();
+            expect(ending.find(entry => entry['event.name'] === 'llm.response')).toMatchObject({
+              'gen_ai.response.id': 'final-response', 'gen_ai.turn.end': !finalBeforeTools,
+            });
+            await flusher.sendBatch(ending);
+          };
+          if (finalBeforeTools) {
+            await publishFinalPlanner();
+            expect(spans).toHaveLength(0);
+          }
+
+          await fs.appendFile(transcriptPath, line(1, 'PLANNER_RESPONSE', {
+            tool_calls: [{ id: 'late-tool-call', name: 'run_command' }],
+          }));
+          const calls = await poll();
+          expect(calls.filter(entry => entry['event.name'] === 'tool.call')).toMatchObject([
+            { 'gen_ai.tool.call.id': 'late-tool-call' },
+          ]);
+          expect(calls.some(entry => entry['event.name'].startsWith('llm.'))).toBe(false);
+          expect(calls.some(entry => entry['gen_ai.turn.end'] === true)).toBe(false);
+          await flusher.sendBatch(calls);
+          expect(spans).toHaveLength(0);
+
+          await fs.appendFile(transcriptPath, line(2, 'GENERIC', { content: 'The tool finished' }));
+          const results = await poll();
+          expect(results.map(entry => entry['event.name'])).toEqual(['tool.result']);
+          expect(results[0]?.['gen_ai.tool.call.id']).toBe('late-tool-call');
+          if (finalBeforeTools) expect(results[0]?.['gen_ai.turn.end']).toBe(true);
+          await flusher.sendBatch(results);
+          if (!finalBeforeTools) {
+            expect(spans).toHaveLength(0);
+            await publishFinalPlanner();
+          }
+        } else {
+          // A terminal planner can land without another SQLite generation.
+          const cancelled = latePlanner === 'cancelled';
+          await fs.appendFile(transcriptPath, line(1, 'PLANNER_RESPONSE', {
+            content: 'Partial reply', status: cancelled ? 'CANCELLED' : 'DONE',
+          }));
+          const ending = await poll();
+          expect(ending).toMatchObject([{
+            'event.name': 'other', 'gen_ai.turn.end': true,
+            'gen_ai.turn.id': prompt['gen_ai.turn.id'], trace_id: prompt.trace_id,
+            ...(cancelled ? {
+              'gen_ai.response.finish_reasons': ['cancelled'],
+              'error.type': 'antigravity.model_cancelled',
+            } : {}),
+          }]);
+          await flusher.sendBatch(ending);
+        }
+
+        const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+        const tools = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL');
+        expect(llms.map(span => span.attributes['gen_ai.response.id']).sort()).toEqual(
+          hasTools ? ['final-response', 'timed-out-response'] : ['timed-out-response'],
+        );
+        expect(tools.map(span => span.attributes['gen_ai.tool.call.id'])).toEqual(
+          hasTools ? ['late-tool-call'] : [],
+        );
+        if (latePlanner === 'cancelled') {
+          expect(llms[0]?.status.code).toBe(SpanStatusCode.ERROR);
+          expect(llms[0]?.attributes['error.type']).toBe('antigravity.model_cancelled');
+        }
+        expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'ENTRY')).toHaveLength(1);
+        expect(new Set(spans.map(span => span.spanContext().traceId))).toEqual(new Set([prompt.trace_id]));
+        expect(await poll()).toEqual([]);
+      } finally {
+        wallClock.mockRestore();
+        await flusher.shutdown();
+      }
+    },
+  );
+
+  it.each(['CANCELLED', 'CANCELED'])('exports a native %s planner as a cancelled LLM span', async (status) => {
+    const root = path.join(tmpDir, 'cancelled-planner');
+    const sid = 'cancelled-session';
+    const conversationsDir = path.join(root, 'conversations');
+    const logsDir = path.join(root, 'brain', sid, '.system_generated', 'logs');
+    await fs.mkdir(conversationsDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+    const timestampSec = 1_778_000_600;
+    createConversationDb(path.join(conversationsDir, `${sid}.db`), {
+      genRows: [[0, encodeGeneratorMetadata({
+        model: 'Gemini 3.8 Flash (High)',
+        usage: { inputTokens: 15, totalOutputTokens: 4, responseId: 'cancelled-response' },
+        timestampSec: timestampSec + 1,
+        stepIndices: [1],
+      })]],
+    });
+    await fs.writeFile(path.join(logsDir, 'transcript.jsonl'), [
+      { step_index: 0, type: 'USER_INPUT', status: 'DONE', content: 'Start' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', status, content: 'Partial response' },
+    ].map((step) => JSON.stringify({
+      ...step, created_at: new Date((timestampSec + step.step_index) * 1000).toISOString(),
+    })).join('\n') + '\n');
+    const input = new AntigravityInput({
+      stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true,
+    });
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+    const { flusher, spans } = captureTraceSpans();
+    try {
+      await input.start();
+      await input.stop();
+      const responses = entries.filter(entry => entry['event.name'] === 'llm.response');
+      expect(responses).toMatchObject([{
+        'gen_ai.response.id': 'cancelled-response',
+        'gen_ai.response.finish_reasons': ['cancelled'],
+        'gen_ai.usage.input_tokens': 15,
+        'gen_ai.turn.end': true,
+        'error.type': 'antigravity.model_cancelled',
+      }]);
+      await flusher.sendBatch(entries);
+      const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+      expect(llms).toHaveLength(1);
+      expect(llms[0]?.status.code).toBe(SpanStatusCode.ERROR);
+      expect(llms[0]?.attributes['error.type']).toBe('antigravity.model_cancelled');
+      expect(llms[0]?.spanContext().traceId).toBe(responses[0]?.trace_id);
+    } finally {
+      await input.stop();
+      await flusher.shutdown();
     }
   });
 

@@ -174,6 +174,8 @@ interface TurnBuffer {
   isObservedOpenClawCron?: boolean;
   /** Native Antigravity tool calls the input has explicitly left open. */
   pendingAntigravityTools?: Set<string>;
+  /** Usage already reported while its transcript planner is still missing. */
+  pendingAntigravityPlanners?: Set<string>;
   lastActivityMs: number;
   activityVersion: number;
   logicalBytes: number;
@@ -907,6 +909,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const agentType = normalizeAgentType(
       (entry['gen_ai.agent.type'] as string) ?? '',
     );
+    const isAntigravity = resolveAgentSystem(agentType) === 'antigravity';
+    const plannerJoined = isAntigravity && entry['agent.antigravity.planner_joined'] === true;
+    // A recovered join can outlive the export buffer across a process restart.
+    if (plannerJoined && !this.turnBuffers.has(key)) return;
 
     if (source === 'ephemeral') {
       // Drop metadata-only "other" events (e.g. OpenClaw before_message_write /
@@ -938,7 +944,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Different or unknown sessions may be concurrent; preempting one would
     // split its records and synthesize duplicate ENTRY/AGENT spans.
     const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) || undefined;
-    const isAntigravity = resolveAgentSystem(agentType) === 'antigravity';
     // An older tool can complete after a newer prompt in the same session.
     // Its result is a continuation, even if its buffer no longer exists.
     const continuesAntigravityTurn = isAntigravity
@@ -955,7 +960,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       // Another turn in the same session may overlap a cron task. Its native
       // cron_finished event, not the successor, owns completion.
       if (agentType === 'openclaw' && buf.isObservedOpenClawCron) continue;
-      if (buf.pendingAntigravityTools?.size) continue;
+      if (hasPendingAntigravityData(buf)) continue;
       if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
       buf.completed = true;
       this.triggerFlush(buf, false);
@@ -1019,6 +1024,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
         buf.pendingAntigravityTools?.delete(toolKey);
       }
     }
+    const responseId = isAntigravity && entry['gen_ai.response.id'];
+    if (responseId) {
+      if (entry['agent.antigravity.planner_pending'] === true) {
+        (buf.pendingAntigravityPlanners ??= new Set()).add(responseId);
+      } else if (plannerJoined) {
+        buf.pendingAntigravityPlanners?.delete(responseId);
+      }
+    }
     const durable = this.codexJournal?.accepts(entry) === true;
     const residentSize = durable ? Buffer.byteLength(JSON.stringify(entry)) : 0;
     if (durable) {
@@ -1079,8 +1092,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // 逐条模式下立即 flush；批量模式下（batchDepth>0）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
     if (this.isTerminalEvent(entry)) {
+      if (isAntigravity && entry['gen_ai.response.finish_reasons']?.includes('cancelled')) {
+        buf.pendingAntigravityTools?.clear();
+      }
       buf.completed = true;
-      if (this.batchDepth === 0) {
+      if (this.batchDepth === 0 && !hasPendingAntigravityData(buf)) {
         this.triggerFlush(buf);
       }
     }
@@ -1151,7 +1167,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (this.codexJournal?.acceptsAgent(buf.agentType) && !buf.completed) continue;
       buf.completed = true;
     }
-    await this.flushCompleted();
+    await this.flushCompleted(true);
     while (this.inFlightExports.size > 0) {
       const batch = [...this.inFlightExports];
       await Promise.allSettled(batch);
@@ -1469,10 +1485,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     return p;
   }
 
-  private async flushCompleted(): Promise<void> {
+  private async flushCompleted(force = false): Promise<void> {
     const completed: TurnBuffer[] = [];
     for (const [key, buf] of this.turnBuffers) {
-      if (buf.completed) {
+      if (buf.completed && (force || !hasPendingAntigravityData(buf))) {
         completed.push(buf);
         this.flushedTurnKeys.add(key);
         this.turnBuffers.delete(key);
@@ -1504,6 +1520,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
     }
     let records = buf.records;
+    if (buf.pendingAntigravityPlanners || records.some(record => record['agent.antigravity.planner_joined'] === true)) {
+      records = reconcileAntigravityPlanners(records);
+    }
     if (buf.hermesAbandoned && records.length > 0) {
       // Only the export boundary needs this marker. Avoid cloning every event
       // in a large rehydrated turn or changing the journal-owned records.
@@ -1843,6 +1862,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
       enrichDoubaoClientRequest(records, spans);
     }
     if (resolveAgentSystem(agentType) === 'antigravity') {
+      const cancelledResponses = new Set(records.filter(record => record['event.name'] === 'llm.response'
+        && record['error.type'] === 'antigravity.model_cancelled').map(record => record['gen_ai.response.id']));
+      for (const span of spans) {
+        if (span.attributes['gen_ai.span.kind'] === 'LLM'
+          && cancelledResponses.has(span.attributes['gen_ai.response.id'] as string)) {
+          Object.assign(span.status, { code: SpanStatusCode.ERROR, message: 'model request cancelled' });
+          span.attributes['error.type'] = 'antigravity.model_cancelled';
+        }
+      }
       const entry = spans.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY'
         && span.parentSpanId === '0000000000000001');
       // The converter uses a virtual parent to carry a supplied trace_id.
@@ -2982,7 +3010,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const now = Date.now();
     for (const [, buf] of this.turnBuffers) {
       if (!buf.completed && now - buf.lastActivityMs > timeout) {
-        if (buf.pendingAntigravityTools?.size) continue;
+        if (hasPendingAntigravityData(buf)) continue;
         if (buf.isObservedOpenClawCron) {
           if (!this.warnedOpenClawCronIdleTimeout) {
             this.warnedOpenClawCronIdleTimeout = true;
@@ -3025,6 +3053,33 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
     }
   }
+}
+
+function hasPendingAntigravityData(buf: TurnBuffer): boolean {
+  return Boolean(buf.pendingAntigravityTools?.size || buf.pendingAntigravityPlanners?.size);
+}
+
+function reconcileAntigravityPlanners(records: AgentActivityEntry[]): AgentActivityEntry[] {
+  const joins = new Map<string, AgentActivityEntry>();
+  for (const record of records) {
+    const responseId = record['gen_ai.response.id'];
+    if (responseId && record['agent.antigravity.planner_joined'] === true) joins.set(responseId, record);
+  }
+  if (joins.size === 0) return records;
+  return records.flatMap(record => {
+    if (record['agent.antigravity.planner_joined'] === true) return [];
+    const join = record['gen_ai.response.id'] && joins.get(record['gen_ai.response.id']);
+    if (!join || (record['event.name'] !== 'llm.request' && record['event.name'] !== 'llm.response')) return [record];
+    return [{
+      ...record,
+      'gen_ai.step.id': join['gen_ai.step.id'] ?? record['gen_ai.step.id'],
+      parent_span_id: join.parent_span_id ?? record.parent_span_id,
+      ...(record['event.name'] === 'llm.response' ? {
+        'gen_ai.response.finish_reasons': join['gen_ai.response.finish_reasons'],
+        'error.type': join['error.type'],
+      } : {}),
+    }];
+  });
 }
 
 function hasTerminalFinishReason(finishReasons: unknown): boolean {
