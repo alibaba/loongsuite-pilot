@@ -3,8 +3,9 @@ import { createInterceptorServer } from '../../../src/interceptor/daemon/server.
 import { RuleEngine } from '../../../src/interceptor/rules/engine.js';
 import type { InterceptorAccessLogEntry } from '../../../src/interceptor/access-log.js';
 import { wrapHostReason } from '../../../src/interceptor/adapters/reason.js';
-import { INTERCEPTOR_SERVICE, type HookRequest, type LocalRule } from '../../../src/interceptor/types.js';
-import type { ToolVerdictKey, ToolVerdictSnapshot } from '../../../src/interceptor/tool-verdict-store.js';
+import { INTERCEPTOR_SERVICE, type HookRequest, type LocalRule, type EvaluateHookResponse } from '../../../src/interceptor/types.js';
+import { ToolVerdictStore, type ToolVerdictKey, type ToolVerdictSnapshot, type PromptVerdictKey, type PromptVerdictSnapshot } from '../../../src/interceptor/tool-verdict-store.js';
+import { promptHash, promptRequestId } from '../../../src/interceptor/prompt-verdict.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 
 function listen(server: import('node:http').Server): Promise<number> {
@@ -21,16 +22,102 @@ function listen(server: import('node:http').Server): Promise<number> {
 }
 
 describe('interceptor daemon HTTP API', () => {
-  it.each([undefined, null])('preserves observation and blocked prompt delivery when raw is %s', async raw => {
+  it('observes all prompt attempts but only finalizes known allowed verdicts, retaining log evidence on fail-open', async () => {
+    const records: Array<{ key: PromptVerdictKey; snapshot: PromptVerdictSnapshot }> = [];
+    let verdict: EvaluateHookResponse = { action: 'allow', matched: true, ruleId: 'log-policy', ruleVersion: '4', evaluatedRules: [] };
+    const server = createInterceptorServer({ port: 0, version: 'test',
+      engine: { evaluate: async () => verdict },
+      writePromptVerdict: (key, snapshot) => { records.push({ key, snapshot }); },
+    });
+    const port = await listen(server);
+    const post = async (extra: Record<string, unknown> = {}) => {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/hooks/evaluate`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ agent: 'qodercli', event: 'UserPromptSubmit', sessionId: 'session',
+          prompt: 'synthetic prompt', raw: { request_set_id: 'host-id' }, ...extra }),
+      });
+      return response.json();
+    };
+    try {
+      expect(await post()).toMatchObject({ action: 'allow' });
+      expect(records[0].snapshot).toEqual({ action: 'unknown' });
+      expect(records[1]).toMatchObject({ key: { phase: 'UserPromptSubmit', sessionId: 'session',
+        agentType: 'qoder-cli', requestId: promptRequestId('host-id'), promptHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        snapshot: { action: 'log', ruleId: 'log-policy', ruleVersion: '4' } });
+      expect(JSON.stringify(records)).not.toContain('synthetic prompt');
+      expect(JSON.stringify(records)).not.toContain('host-id');
+      verdict = { ...verdict, failOpen: true };
+      await post();
+      expect(records[3].snapshot).toMatchObject({ action: 'log', failOpen: true });
+      verdict = { action: 'allow', matched: false, evaluatedRules: [] };
+      await post();
+      expect(records[5].snapshot).toEqual({ action: 'allow' });
+      verdict = { action: 'allow', failOpen: true, evaluatedRules: [] };
+      await post();
+      verdict = { action: 'block', matched: true, evaluatedRules: [] };
+      expect(await post()).toMatchObject({ action: 'block' });
+      verdict = { action: 'allow', matched: true, evaluatedRules: [] };
+      await post({ event: 'PreToolUse', toolUseId: 'tool' });
+      await post({ sessionId: undefined });
+      expect(records.slice(6).map(record => record.snapshot)).toEqual([{ action: 'unknown' }, { action: 'unknown' }]);
+      expect(records).toHaveLength(8);
+    } finally { server.close(); }
+  });
+
+  it.each(['qodercli', 'qwen-work-cn'] as const)('does not borrow an older log when a repeated %s prompt is pending or fails without a request id', async agent => {
+    const store = new ToolVerdictStore('/tmp/unused-server-prompt-verdicts.json');
+    const prompt = 'repeated synthetic prompt';
+    let calls = 0;
+    let release!: () => void;
+    let started!: () => void;
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const observed: PromptVerdictKey[] = [];
+    const server = createInterceptorServer({ port: 0, version: 'test',
+      engine: { evaluate: async () => {
+        if (++calls === 1) return { action: 'allow', matched: true, ruleId: 'old', ruleVersion: '1', evaluatedRules: [] };
+        started();
+        await pending;
+        throw new Error('synthetic evaluator failure');
+      } },
+      writePromptVerdict: (key, snapshot) => { observed.push(key); store.put(key, snapshot); },
+    });
+    const port = await listen(server);
+    const endpoint = agent === 'qodercli' ? '/v1/hooks/evaluate' : '/v1/hooks/qwenwork';
+    const payload = agent === 'qodercli'
+      ? { agent, event: 'UserPromptSubmit', sessionId: 'session', prompt, raw: {} }
+      : { hook_event_name: 'UserPromptSubmit', session_id: 'session', prompt };
+    const post = () => fetch(`http://127.0.0.1:${port}${endpoint}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const lookup = { sessionId: 'session', agentType: agent === 'qodercli' ? 'qoder-cli' : agent,
+      promptHash: promptHash(prompt), at: Date.now() };
+    try {
+      expect((await post()).status).toBe(200);
+      expect(store.getPromptSnapshot(lookup)).toMatchObject({ action: 'log', ruleId: 'old' });
+      const failed = post();
+      await entered;
+      expect(store.getPromptSnapshot(lookup)).toBeNull();
+      release();
+      expect((await failed).status).toBe(agent === 'qodercli' ? 500 : 200);
+      expect(store.getPromptSnapshot(lookup)).toBeNull();
+      expect(store.records().map(record => record.action).sort()).toEqual(['log', 'unknown']);
+      expect(observed[0].requestId).toBe(observed[1].requestId); // One generated key for begin/final.
+      expect(observed[2].requestId).not.toBe(observed[0].requestId);
+      expect(store.getPromptSnapshot({ ...lookup, requestId: observed[0].requestId }))
+        .toMatchObject({ action: 'log', ruleId: 'old' });
+      expect(store.getPromptSnapshot({ ...lookup, requestId: observed[2].requestId })).toBeNull();
+    } finally { release(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  });
+  it.each([undefined, null])('preserves only blocked prompt delivery for managed hits when raw is %s', async raw => {
     const entries: AgentActivityEntry[] = [];
-    const match = { matched: true as const, action: 'block' as const, enforcement: 'enforce' as const,
-      ruleId: 'managed-rule', ruleVersion: '1', reason: 'blocked', severity: 'CRITICAL' };
+    const match = { matched: true as const, action: 'block' as const,
+      ruleId: 'managed-rule', ruleVersion: '1', reason: 'blocked' };
     const server = createInterceptorServer({
       port: 0,
       version: 'test',
       engine: { evaluate: async () => ({ ...match, matches: [match] }) },
       writeAccessLog: () => undefined,
-      emitEvaluation: entry => { entries.push(entry); },
       emitBlockedPrompt: entry => { entries.push(entry); },
     });
     const port = await listen(server);
@@ -43,9 +130,8 @@ describe('interceptor daemon HTTP API', () => {
       });
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ action: 'block' });
-      expect(entries.map(entry => entry['event.name'])).toEqual(['guardrail.evaluation', 'llm.request']);
-      expect(entries.map(entry => entry['gen_ai.agent.type'])).toEqual(['qoder', 'qoder-cli']);
-      expect(entries.map(entry => entry['gen_ai.guardrail.severity'])).toEqual(['CRITICAL', 'CRITICAL']);
+      expect(entries.map(entry => entry['event.name'])).toEqual(['llm.request']);
+      expect(entries.map(entry => entry['gen_ai.agent.type'])).toEqual(['qoder-cli']);
     } finally {
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));
@@ -171,7 +257,7 @@ describe('interceptor daemon HTTP API', () => {
             toolUseId: 'open-pre-1',
             phase: 'PreToolUse',
           },
-          result: { action: 'block', ruleId: 'demo', reason: 'blocked by demo' },
+          result: { action: 'block', ruleId: 'demo' },
         },
       ]);
     } finally {
@@ -278,7 +364,7 @@ describe('interceptor daemon HTTP API', () => {
           toolUseId: 'qwen-pre-1',
           phase: 'PreToolUse',
         },
-        result: { action: 'block', ruleId: 'demo', reason: '[APIKEY_MASKED]' },
+        result: { action: 'block', ruleId: 'demo' },
       });
     } finally {
       server.close();
@@ -408,7 +494,6 @@ describe('interceptor daemon HTTP API', () => {
         'agent.source': 'interceptor',
         'gen_ai.guardrail.action': 'block',
         'gen_ai.guardrail.rule_id': 'demo',
-        'gen_ai.guardrail.reason': 'blocked by demo',
       });
       expect(emitted[1]).toMatchObject({
         'gen_ai.agent.type': 'qoder-cli',

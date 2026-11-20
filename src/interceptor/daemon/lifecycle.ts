@@ -11,7 +11,7 @@ import {
 import { ManagedInterceptor, MANAGED_RELOAD_INTERVAL_MS } from '../managed/controller.js';
 import { builtinRules } from '../rules/registry.js';
 import { RuleEngine } from '../rules/engine.js';
-import { ToolVerdictStore, type ToolVerdictKey, type ToolVerdictRecord } from '../tool-verdict-store.js';
+import { ToolVerdictStore, type ToolVerdictKey, type ToolVerdictRecord, type InterceptorVerdictRecord } from '../tool-verdict-store.js';
 import { INTERCEPTOR_DEFAULT_PORT } from '../types.js';
 import { createInterceptorServer, type InterceptorServerOptions } from './server.js';
 import { clearInterceptorRuntime, removeOwnPid, writeRuntime } from './runtime.js';
@@ -41,13 +41,13 @@ export interface StartInterceptorServiceOptions {
   gitCommit?: string;
   verdictStore?: ToolVerdictStore;
   emitBlockedPrompt?: (entry: AgentActivityEntry, signal?: AbortSignal) => void | Promise<void>;
-  emitEvaluation?: (entry: AgentActivityEntry, signal?: AbortSignal) => void | Promise<void>;
   /** When set, overrides interceptor.mode loaded from config. Only `all` enables interception. */
   mode?: InterceptorConfig['mode'];
   managedReloadIntervalMs?: number;
   /** Fired when a managed generation appears or goes away, including the first load. */
   onManagedActiveChange?: (active: boolean) => void;
   onToolVerdict?: (record: ToolVerdictRecord) => void;
+  onPromptVerdict?: (record: InterceptorVerdictRecord) => void;
   onStateChange?: (port: number | null, managedActive: boolean) => void;
   onDiagnostic?: InterceptorDiagnosticObserver;
 }
@@ -154,7 +154,11 @@ export async function startInterceptorService(
       opts.onToolVerdict?.({ ...key, ...snapshot, recordedAt: now.toISOString() });
     },
     emitBlockedPrompt: opts.emitBlockedPrompt,
-    emitEvaluation: opts.emitEvaluation,
+    writePromptVerdict: (key, snapshot) => {
+      const now = new Date();
+      verdictStore.put(key, snapshot, now);
+      opts.onPromptVerdict?.({ ...key, ...snapshot, recordedAt: now.toISOString() });
+    },
   };
   let port: number | null = null;
 

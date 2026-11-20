@@ -27,7 +27,8 @@ export class RuleEngine implements HookEvaluator {
         return {
           action: 'block',
           reason: result.reason,
-          ruleId: rule.id,
+          ruleId: rule.ruleId ?? rule.id,
+          ...(typeof rule.version === 'string' ? { ruleVersion: rule.version } : {}),
           evaluatedRules,
         };
       }

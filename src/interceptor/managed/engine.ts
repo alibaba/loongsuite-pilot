@@ -67,11 +67,11 @@ export class ManagedRuleEngine implements HookEvaluator {
     const matches: ManagedRuleMatch[] = [];
     let failed = false;
     const hit = (rule: ManagedPatternRule | ManagedScriptRule, reason: string): boolean => {
-      matches.push({ matched: true, enforcement: rule.enforcement, action: rule.enforcement === 'audit' ? 'allow' : 'block',
+      matches.push({ matched: true, action: rule.action,
         reason, ruleId: rule.id, ruleVersion: rule.version,
         ...(rule.severity ? { severity: rule.severity } : {}),
         ...(rule.title ? { title: rule.title } : {}), ...(rule.message ? { message: rule.message } : {}) });
-      return rule.enforcement === 'enforce';
+      return rule.action === 'block';
     };
     const result = (blocked = false): EvaluateHookResponse => {
       const representative = blocked ? matches[matches.length - 1] : matches[0];

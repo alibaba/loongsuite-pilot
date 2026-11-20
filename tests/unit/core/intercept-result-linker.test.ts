@@ -23,13 +23,17 @@ describe('InterceptResultLinker', () => {
   it('stamps an allowed audit match with its metadata and separate fail-open state', () => {
     const store = new ToolVerdictStore('/tmp/unused-tool-verdicts.json');
     store.put({ sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse' }, {
-      action: 'allow', matched: true, enforcement: 'audit', failOpen: true, ruleId: 'audit', ruleVersion: '2', reason: 'observed',
+      action: 'log', failOpen: true, ruleId: 'audit', ruleVersion: '2',
     });
     const entry = toolEntry('tool.call');
     new InterceptResultLinker(store, true).enrich([entry]);
-    expect(entry).toMatchObject({ 'gen_ai.guardrail.triggered': true, 'gen_ai.guardrail.matched': true,
-      'gen_ai.guardrail.action': 'allow', 'gen_ai.guardrail.enforcement': 'audit', 'gen_ai.guardrail.fail_open': true,
-      'gen_ai.guardrail.rule_id': 'audit', 'gen_ai.guardrail.rule_version': '2', 'gen_ai.guardrail.reason': 'observed' });
+    expect(entry).toMatchObject({ 'gen_ai.guardrail.triggered': true,
+      'gen_ai.guardrail.action': 'log', 'gen_ai.guardrail.fail_open': true,
+      'gen_ai.guardrail.rule_id': 'audit', 'gen_ai.guardrail.rule_version': '2' });
+    expect(entry).not.toHaveProperty('gen_ai.guardrail.matched');
+    expect(entry).not.toHaveProperty('gen_ai.guardrail.enforcement');
+    expect(entry).not.toHaveProperty('gen_ai.guardrail.reason');
+    expect(entry).not.toHaveProperty('gen_ai.guardrail.severity');
   });
   it('waits for IPC only for supported tool batches and enriches the resulting mirror', async () => {
     const store = new ToolVerdictStore('/tmp/unused-tool-verdicts.json');
@@ -69,20 +73,16 @@ describe('InterceptResultLinker', () => {
         action: 'block',
         ruleId: 'flow-probe',
         ruleVersion: '3',
-        severity: 'CRITICAL',
-        reason: 'flow-probe-v3',
-        title: 'ak-leak',
-        message: '不要在对话里粘贴 AccessKey',
       },
     );
     const entry = toolEntry('tool.call');
     new InterceptResultLinker(store, true).enrich([entry]);
     expect(entry['gen_ai.guardrail.rule_id']).toBe('flow-probe');
     expect(entry['gen_ai.guardrail.rule_version']).toBe('3');
-    expect(entry['gen_ai.guardrail.severity']).toBe('CRITICAL');
-    expect(entry['gen_ai.guardrail.reason']).toBe('flow-probe-v3');
-    expect(entry['gen_ai.guardrail.title']).toBe('ak-leak');
-    expect(entry['gen_ai.guardrail.message']).toBe('不要在对话里粘贴 AccessKey');
+    expect(entry).not.toHaveProperty('gen_ai.guardrail.reason');
+    expect(entry).not.toHaveProperty('gen_ai.guardrail.severity');
+    expect(entry).not.toHaveProperty('gen_ai.guardrail.title');
+    expect(entry).not.toHaveProperty('gen_ai.guardrail.message');
   });
 
   it('omits guardrail fields when the record is missing and skips other agents', () => {

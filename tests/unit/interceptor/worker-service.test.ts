@@ -112,14 +112,13 @@ describe('interceptor worker supervisor', () => {
   it('ACKs finite event admission while joining the gated serial sink before stop resolves', async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    const emitEvaluation = vi.fn(async () => { await gate; });
-    const service = await start({ emitEvaluation });
+    const emitBlockedPrompt = vi.fn(async () => { await gate; });
+    const service = await start({ emitBlockedPrompt });
     const worker = control.workers[0];
-    worker.emit('message', { type: 'events', id: 5, records: [], blockedPrompts: [],
-      evaluationEntries: Array.from({ length: 500 }, (_, i) => ({ 'event.id': String(i), 'event.name': 'guardrail.evaluation' })) });
+    worker.emit('message', { type: 'events', id: 5, records: [], blockedPrompts: Array.from({ length: 500 }, (_, i) => ({ 'event.id': String(i), 'event.name': 'llm.request' })) });
     expect(worker.commands).toContainEqual({ type: 'ack', id: 5 });
     await Promise.resolve();
-    expect(emitEvaluation).toHaveBeenCalledOnce();
+    expect(emitBlockedPrompt).toHaveBeenCalledOnce();
     let stopped = false;
     const stop = service.stop().then(() => { stopped = true; });
     await Promise.resolve();
@@ -127,7 +126,7 @@ describe('interceptor worker supervisor', () => {
     expect(stopped).toBe(false);
     release();
     await stop;
-    expect(emitEvaluation).toHaveBeenCalledTimes(256);
+    expect(emitBlockedPrompt).toHaveBeenCalledTimes(256);
   });
   it('waits for retired child cleanup when stop begins after the worker has exited', async () => {
     const service = await start();

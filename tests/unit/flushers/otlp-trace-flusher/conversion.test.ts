@@ -40,40 +40,6 @@ describe('OtlpTraceFlusher - conversion', () => {
     await flusher.shutdown();
   });
 
-  it('does not let a same-session guardrail observation close or replace an active Qoder turn', async () => {
-    const request = { 'event.name': 'llm.request', 'event.id': 'real-request', 'gen_ai.agent.type': 'qoder',
-      'gen_ai.session.id': 'session', 'gen_ai.turn.id': 'real-turn', 'gen_ai.step.id': 'step' } as AgentActivityEntry;
-    await flusher.send(request);
-    const buffers = (flusher as any).turnBuffers as Map<string, { completed: boolean; records: AgentActivityEntry[] }>;
-    expect([...buffers.keys()]).toEqual(['turn:real-turn']);
-    await flusher.send({ 'event.name': 'guardrail.evaluation', 'event.id': 'audit', 'gen_ai.agent.type': 'qoder',
-      'gen_ai.session.id': 'session', 'gen_ai.guardrail.action': 'allow', 'gen_ai.guardrail.enforcement': 'audit' } as AgentActivityEntry);
-    expect([...buffers.keys()]).toEqual(['turn:real-turn']);
-    expect(buffers.get('turn:real-turn')).toMatchObject({ completed: false, records: [request] });
-    expect(convertEventLogToTrace).not.toHaveBeenCalled();
-    const response = { ...request, 'event.id': 'real-response', 'event.name': 'llm.response',
-      'gen_ai.response.finish_reasons': ['stop'] } as AgentActivityEntry;
-    await flusher.send(response);
-    expect(convertEventLogToTrace).toHaveBeenCalledOnce();
-    expect(vi.mocked(convertEventLogToTrace).mock.calls[0][0]).toEqual([request, response]);
-  });
-
-  it('does not create a session buffer for a guardrail-only observation', async () => {
-    await flusher.send({ 'event.name': 'guardrail.evaluation', 'event.id': 'audit',
-      'gen_ai.agent.type': 'qoder', 'gen_ai.session.id': 'session' } as AgentActivityEntry);
-    expect((flusher as any).turnBuffers.size).toBe(0);
-    expect(convertEventLogToTrace).not.toHaveBeenCalled();
-  });
-
-  it('does not enter ephemeral conversion for a guardrail observation without grouping keys', async () => {
-    const convert = vi.spyOn(flusher as any, 'convertAndExport');
-    await flusher.send({ 'event.name': 'guardrail.evaluation', 'event.id': 'audit',
-      'gen_ai.agent.type': 'qoder' } as AgentActivityEntry);
-    expect(convert).not.toHaveBeenCalled();
-    expect(convertEventLogToTrace).not.toHaveBeenCalled();
-    expect((flusher as any).turnBuffers.size).toBe(0);
-  });
-
   it('calls convertEventLogToTrace with correct records on turn completion', async () => {
     const entries = [
       { 'event.name': 'llm.request', 'gen_ai.agent.type': 'claude-code', 'gen_ai.turn.id': 't1' },

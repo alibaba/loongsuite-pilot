@@ -34,7 +34,7 @@ function rule(id: string, version: string, overrides: Partial<ManagedScriptRule>
     id,
     version,
     shell: 'sh',
-    enforcement: 'enforce',
+    action: 'block',
     agents: ['qoder'],
     events: ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'],
     ...overrides,
@@ -95,7 +95,7 @@ describe('parseManagedInterceptorConfig', () => {
         ...base, path: '/bin/x', metadata: { future: [null, 1] },
       }] },
     });
-    expect(parsed.rules[0]).toMatchObject({ id: 'future', kind, enforcement: 'enforce' });
+    expect(parsed.rules[0]).toMatchObject({ id: 'future', kind, action: 'block' });
     expect(parsed).not.toHaveProperty('revision');
     expect(parsed).not.toHaveProperty('options');
     expect(parsed.rules[0]).not.toHaveProperty('path');
@@ -112,7 +112,7 @@ describe('parseManagedInterceptorConfig', () => {
     const base = { id: 'risk', version: '1', agents: ['qoder'], events: ['PreToolUse'], ...extra };
     for (const severity of ['low', 'medium', 'high', 'critical', 'custom-risk', 'x'.repeat(MAX_RULE_SEVERITY_CHARS)]) {
       const parsed = parseManagedInterceptorConfig({ interceptor: { rules: [{ ...base, severity: ` ${severity} ` }] } });
-      expect(parsed.rules[0]).toMatchObject({ ...base, severity, enforcement: 'enforce' });
+      expect(parsed.rules[0]).toMatchObject({ ...base, severity, action: 'block' });
     }
     expect(parseManagedInterceptorConfig({ interceptor: { rules: [base] } }).rules[0]).not.toHaveProperty('severity');
   });
@@ -149,7 +149,7 @@ describe('parseManagedInterceptorConfig', () => {
         version: '3',
         agents: ['qoder', 'qwen-work-cn'],
         events: ['UserPromptSubmit'],
-        enforcement: 'enforce',
+        action: 'block',
         title: 'ak-leak',
         message: '不要在对话里粘贴 AccessKey',
       }],
@@ -197,7 +197,7 @@ describe('parseManagedInterceptorConfig', () => {
         id: 'internal-token',
         version: '1',
         events: ['UserPromptSubmit', 'PreToolUse'],
-        enforcement: 'enforce',
+        action: 'block',
         match: 'regex',
         pattern: String.raw`INTERNAL_TOKEN\s*=\s*['"][^'"]+['"]`,
         message: '不要粘贴内部 token',
@@ -477,22 +477,22 @@ describeUnix('ManagedInterceptor script execution', () => {
     return c;
   }
 
-  it('runs audit script side effects and switches enforcement without replacing its body', async () => {
+  it('runs audit script side effects and switches action without replacing its body', async () => {
     const dataDir = await makeDataDir();
-    const r = rule('mode-switch', '1', { enforcement: 'audit', severity: 'HIGH' });
+    const r = rule('mode-switch', '1', { action: 'log', severity: 'HIGH' });
     const marker = join(dataDir, 'ran.txt');
     const file = await writeScript(dataDir, r, `printf 'ran' > '${marker}'; ${blockWith('observed')}`);
     const original = await readFile(file, 'utf8');
     await writeRules(dataDir, [r]);
     const c = controller(dataDir);
-    await expect(c.evaluate(request())).resolves.toMatchObject({ action: 'allow', matched: true, enforcement: 'audit', ruleId: r.id, severity: 'HIGH' });
+    await expect(c.evaluate(request())).resolves.toMatchObject({ action: 'allow', matched: true, ruleId: r.id, severity: 'HIGH' });
     expect(await readFile(marker, 'utf8')).toBe('ran');
     await writeRules(dataDir, [{ ...r, severity: 'CRITICAL' }]);
     c.reload();
-    await expect(c.evaluate(request())).resolves.toMatchObject({ action: 'allow', enforcement: 'audit', severity: 'CRITICAL' });
-    await writeRules(dataDir, [{ ...r, enforcement: 'enforce' }]);
+    await expect(c.evaluate(request())).resolves.toMatchObject({ action: 'allow', severity: 'CRITICAL' });
+    await writeRules(dataDir, [{ ...r, action: 'block' }]);
     c.reload();
-    await expect(c.evaluate(request())).resolves.toMatchObject({ action: 'block', matched: true, enforcement: 'enforce', ruleId: r.id, severity: 'HIGH' });
+    await expect(c.evaluate(request())).resolves.toMatchObject({ action: 'block', matched: true, ruleId: r.id, severity: 'HIGH' });
     expect(await readFile(file, 'utf8')).toBe(original);
   });
 
@@ -889,7 +889,7 @@ describeUnix('interceptor service with managed rules', () => {
     const service = await startInterceptorService({ dataDir, version: '9.9.9', mode: 'all', managedReloadIntervalMs: 60_000 });
     services.push(service);
     await expect(evaluate(service.port!, request({ prompt: `key ${SYNTHETIC_ACCESS_KEY}` })))
-      .resolves.toMatchObject({ action: 'block', ruleId: 'cloudAccessKey' });
+      .resolves.toMatchObject({ action: 'block', ruleId: 'builtin', ruleVersion: '' });
   });
 
   it('can start again after the runtime directory bind failure is repaired', async () => {
@@ -920,7 +920,7 @@ describeUnix('interceptor service with managed rules', () => {
     const leaky = request({ prompt: `key ${SYNTHETIC_ACCESS_KEY}` });
 
     const blocked = await evaluate(service.port!, leaky) as { action: string; ruleId?: string; evaluatedRules: string[] };
-    expect(blocked).toMatchObject({ action: 'block', ruleId: 'cloudAccessKey' });
+    expect(blocked).toMatchObject({ action: 'block', ruleId: 'builtin', ruleVersion: '' });
     expect(blocked.evaluatedRules).not.toContain('allow-all');
 
     const allowed = await evaluate(service.port!, request({ prompt: 'hello' })) as { action: string; evaluatedRules: string[] };
@@ -1016,7 +1016,7 @@ describeUnix('interceptor service with managed rules', () => {
     services.push(service);
     const leaky = request({ prompt: `key ${SYNTHETIC_ACCESS_KEY}` });
     const blocked = await evaluate(service.port!, leaky) as { action: string; ruleId?: string; evaluatedRules: string[] };
-    expect(blocked).toMatchObject({ action: 'block', ruleId: 'cloudAccessKey' });
+    expect(blocked).toMatchObject({ action: 'block', ruleId: 'builtin', ruleVersion: '' });
     expect(blocked.evaluatedRules).not.toContain('allow-all');
   });
 

@@ -7,6 +7,7 @@ import { collectHookText } from './hook-text.js';
 
 export const SENSITIVE_INTERCEPT_TYPES = SUPPORTED_INTERCEPTOR_TYPES;
 export type SensitiveInterceptType = InterceptorType;
+export const BUILTIN_RULE_ID = 'builtin';
 
 const BLOCK_REASONS = {
   cloudAccessKey: '[ACCESSKEY_BLOCKED]',
@@ -23,6 +24,8 @@ export function createSensitiveTypeRule(type: SensitiveInterceptType): LocalRule
   let rules: CompiledMaskRule[] | undefined;
   return {
     id: type,
+    ruleId: BUILTIN_RULE_ID,
+    version: '',
     supports(): boolean {
       return true;
     },

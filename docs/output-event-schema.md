@@ -65,7 +65,6 @@ collectors do not understand the new explicit turn-completion protocol.
 | `gen_ai.agent.result` | An observed Agent result or failed dispatch. Tool acceptance alone is not Agent completion. |
 | `skill.use` | A skill, extension, or agent capability invocation. |
 | `tool.approve` | A user approval event for a tool or action. |
-| `guardrail.evaluation` | One observation per local rule match, including audit allows and enforce blocks. It is not a model or tool execution and is excluded from OTLP turn grouping and conversion. |
 | `agent.input` | A compatibility copy of an input-bearing `other`, for querying Agent input by event name. |
 | `other` | Other events that cannot be classified into the above event names. |
 
@@ -168,17 +167,11 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.tool.call.arguments` | json | When available | Tool call arguments. May contain sensitive content. |
 | `gen_ai.tool.call.result` | json | When available | Tool result payload. May contain sensitive content. |
 | `gen_ai.tool.call.duration` | int | Recommended | Positive tool execution duration in milliseconds, computed from the matched result boundary minus the call boundary. Omit it when either boundary is unavailable or the difference is not positive. |
-| `gen_ai.guardrail.triggered` | boolean | With a linked verdict or evaluation | Always `true` when a verdict exists; this does not mean a rule matched. Omitted without a matching, unexpired verdict or when interception is disabled. |
-| `gen_ai.guardrail.action` | string | With a verdict | `allow` or `block`. Tool calls link to PreToolUse and results to PostToolUse. Evaluation events describe that individual rule; tool events describe the final request decision. |
-| `gen_ai.guardrail.matched` | boolean | When the match result is known | `true` for audit/enforce hits, `false` after a complete check without hits, omitted when only an error is known. |
-| `gen_ai.guardrail.enforcement` | string | For local rule hits | `enforce` or `audit`. Audit matches allow the operation and do not notify the host. Builtin rules omit it. |
-| `gen_ai.guardrail.fail_open` | boolean | On check errors | `true` when checking failed or was incomplete. It can coexist with a known audit match. |
-| `gen_ai.guardrail.phase` | string | Evaluation events | `UserPromptSubmit`, `PreToolUse`, or `PostToolUse`. |
-| `gen_ai.guardrail.rule_id` | string | For known matches | The matched rule ID; linked tool events use the final enforce rule or first audit hit. |
-| `gen_ai.guardrail.rule_version` | string | For local rule hits | The rule's version. Builtin rules omit it. |
-| `gen_ai.guardrail.reason` | string | When supplied by the rule | Script reason or pattern/builtin marker, masked before output. |
-| `gen_ai.guardrail.title` | string | When declared by the rule | Rule display label, not returned to the host. |
-| `gen_ai.guardrail.message` | string | When declared by the rule | Rule reminder; audit records it, enforce can return it to the host. Masked before output. |
+| `gen_ai.guardrail.triggered` | boolean | With a linked verdict | Always `true` when a verdict exists; this does not mean a rule matched. Omitted without a matching, unexpired verdict or when interception is disabled. |
+| `gen_ai.guardrail.action` | string | With a verdict | `block` for enforced blocks, `log` for log hits that allow execution, and `allow` for other known verdicts. Tool calls link to PreToolUse and results to PostToolUse. Allowed prompts link to the first native request of the turn without adding a request event; denied Qoder prompts are supplemented as blocked requests. Omitted when no verdict can be uniquely associated. |
+| `gen_ai.guardrail.fail_open` | boolean | On check errors | `true` when checking failed or was incomplete. It can coexist with a known log match. |
+| `gen_ai.guardrail.rule_id` | string | For known matches | The final block rule or first log hit. Builtin matches use the fixed value `builtin`. |
+| `gen_ai.guardrail.rule_version` | string | For rule hits | The configured rule version; builtin matches explicitly use the empty string `""`. |
 | `gen_ai.skill.name` | string | Conditionally Required for `skill.use` | Skill or extension capability name. |
 | `gen_ai.skill.id` | string | Recommended when skill identity is available | Stable skill identifier. |
 | `gen_ai.skill.description` | string | Recommended when skill metadata is available | Human-readable skill description. |

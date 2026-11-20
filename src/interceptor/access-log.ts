@@ -5,7 +5,7 @@ import { loadMaskPlan } from '../mask/rule-loader.js';
 import { maskString } from '../mask/string-masker.js';
 import { SUPPORTED_INTERCEPTOR_TYPES } from '../types/index.js';
 import { interceptorAccessLogPath } from './paths.js';
-import type { HookRequest, ManagedRuleMatch, RuleEnforcement } from './types.js';
+import type { HookRequest, ManagedRuleMatch } from './types.js';
 
 const accessLogMaskPlan = loadMaskPlan({
   mode: 'custom',
@@ -32,7 +32,6 @@ export interface InterceptorAccessInput {
 export interface InterceptorAccessResult {
   action: AccessLogAction;
   matched?: boolean;
-  enforcement?: RuleEnforcement;
   matches?: ManagedRuleMatch[];
   failOpen?: true;
   reason?: string;

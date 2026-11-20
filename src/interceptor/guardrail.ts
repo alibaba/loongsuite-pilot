@@ -1,27 +1,20 @@
 import type { AgentActivityEntry } from '../types/index.js';
-import type { EvaluateHookResponse, RuleEnforcement } from './types.js';
+import type { EvaluateHookResponse } from './types.js';
+import { normalizeGuardrailFields } from '../normalization/guardrail-fields.js';
 
-/** Snapshot of the winning rule, copied onto events and the tool-verdict store. */
+/** Internal verdict snapshot; telemetry projects it onto the compact public schema. */
 export interface GuardrailSnapshot {
-  action: 'allow' | 'block';
-  matched?: boolean;
-  enforcement?: RuleEnforcement;
+  action: 'allow' | 'block' | 'log';
   failOpen?: true;
   ruleId?: string;
   ruleVersion?: string;
-  severity?: string;
-  reason?: string;
-  title?: string;
-  message?: string;
 }
 
 export function guardrailSnapshotFromVerdict(verdict: EvaluateHookResponse): GuardrailSnapshot {
   return {
-    action: verdict.action,
-    ...(typeof verdict.matched === 'boolean' ? { matched: verdict.matched } : {}),
-    ...(verdict.enforcement ? { enforcement: verdict.enforcement } : {}),
+    action: verdict.action === 'block' ? 'block' : verdict.matched === true ? 'log' : 'allow',
     ...(verdict.failOpen ? { failOpen: true } : {}),
-    ...(verdict.action === 'block' || verdict.matched === true ? pickBlockMeta(verdict) : {}),
+    ...(verdict.action === 'block' || verdict.matched === true ? pickRuleIdentity(verdict) : {}),
   };
 }
 
@@ -34,36 +27,25 @@ export function hostBlockDetail(message?: string, reason?: string): string | und
 }
 
 export function stampGuardrail(entry: AgentActivityEntry, snapshot: GuardrailSnapshot): void {
+  normalizeGuardrailFields(entry);
   entry['gen_ai.guardrail.triggered'] = true;
   entry['gen_ai.guardrail.action'] = snapshot.action;
-  if (typeof snapshot.matched === 'boolean') entry['gen_ai.guardrail.matched'] = snapshot.matched;
-  if (snapshot.enforcement) entry['gen_ai.guardrail.enforcement'] = snapshot.enforcement;
   if (snapshot.failOpen) entry['gen_ai.guardrail.fail_open'] = true;
-  if (snapshot.action !== 'block' && snapshot.matched !== true) return;
+  if (snapshot.action === 'allow') return;
   assignOptional(entry, 'gen_ai.guardrail.rule_id', snapshot.ruleId);
-  assignOptional(entry, 'gen_ai.guardrail.rule_version', snapshot.ruleVersion);
-  assignOptional(entry, 'gen_ai.guardrail.severity', snapshot.severity);
-  assignOptional(entry, 'gen_ai.guardrail.reason', snapshot.reason);
-  assignOptional(entry, 'gen_ai.guardrail.title', snapshot.title);
-  assignOptional(entry, 'gen_ai.guardrail.message', snapshot.message);
+  if (typeof snapshot.ruleVersion === 'string') entry['gen_ai.guardrail.rule_version'] = snapshot.ruleVersion;
 }
 
-function pickBlockMeta(verdict: EvaluateHookResponse): Omit<GuardrailSnapshot, 'action'> {
+function pickRuleIdentity(verdict: EvaluateHookResponse): Omit<GuardrailSnapshot, 'action'> {
   return {
     ...(nonEmpty(verdict.ruleId) ? { ruleId: verdict.ruleId } : {}),
-    ...(nonEmpty(verdict.ruleVersion) ? { ruleVersion: verdict.ruleVersion } : {}),
-    ...(nonEmpty(verdict.severity) ? { severity: verdict.severity } : {}),
-    ...(nonEmpty(verdict.reason) ? { reason: verdict.reason } : {}),
-    ...(nonEmpty(verdict.title) ? { title: verdict.title } : {}),
-    ...(nonEmpty(verdict.message) ? { message: verdict.message } : {}),
+    ...(typeof verdict.ruleVersion === 'string' ? { ruleVersion: verdict.ruleVersion } : {}),
   };
 }
 
 function assignOptional(
   entry: AgentActivityEntry,
-  key: 'gen_ai.guardrail.rule_id' | 'gen_ai.guardrail.rule_version'
-    | 'gen_ai.guardrail.severity'
-    | 'gen_ai.guardrail.reason' | 'gen_ai.guardrail.title' | 'gen_ai.guardrail.message',
+  key: 'gen_ai.guardrail.rule_id',
   value: string | undefined,
 ): void {
   if (nonEmpty(value)) entry[key] = value;
