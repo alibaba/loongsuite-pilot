@@ -21,8 +21,13 @@ async function fixture() {
 async function scheduler() {
   const f = await fixture(); const p = f.probe;
   vi.useFakeTimers(); vi.spyOn(f.input, 'running', 'get').mockReturnValue(true);
-  const files = ['a', 'b', 'c'].map(id => ({ filePath: `/sessions/${id}`, baselineOnStart: false }));
-  for (const file of files) p.transcriptMetaByPath.set(file.filePath, { threadId: path.basename(file.filePath), depth: 0 });
+  const files = [];
+  for (const id of ['a', 'b', 'c']) {
+    const filePath = path.join(f.root, id);
+    await fs.writeFile(filePath, '');
+    files.push({ filePath, canonicalPath: await fs.realpath(filePath), baselineOnStart: true });
+    p.transcriptMetaByPath.set(filePath, { threadId: id, depth: 0 });
+  }
   const discover = vi.spyOn(p, 'discoverSessionFiles').mockResolvedValue(files);
   vi.spyOn(p, 'cleanupExpiredSpanContexts').mockResolvedValue(undefined);
   vi.spyOn(p, 'indexDiscoveredTranscriptOwners').mockResolvedValue(undefined);
@@ -43,7 +48,7 @@ it('merges a sustained burst in a fixed window and visits only dirty known sessi
   f.probe.noteWakeup('a.json'); // This must not push the original deadline back.
   await vi.advanceTimersByTimeAsync(1); await Promise.all(f.jobs);
   expect(f.request).toHaveBeenCalledTimes(1);
-  expect(f.process.mock.calls.map(call => call[0])).toEqual(['/sessions/a', '/sessions/b']);
+  expect(f.process.mock.calls.map(call => call[0])).toEqual(f.files.slice(0, 2).map(file => file.filePath));
   expect(f.discover).not.toHaveBeenCalled(); expect(f.retry).not.toHaveBeenCalled();
 });
 
@@ -53,15 +58,19 @@ it('keeps notifications while a cycle is busy and retries until collect consumes
   expect(f.probe.dirtyWakeupMarkers.has('a.json')).toBe(true);
   f.request.mockImplementation(() => { f.jobs.push(f.probe.collect()); });
   await vi.advanceTimersByTimeAsync(200); await Promise.all(f.jobs);
-  expect(f.process).toHaveBeenCalledWith('/sessions/a');
+  expect(f.process).toHaveBeenCalledWith(f.files[0]!.filePath);
   expect(f.probe.dirtyWakeupMarkers.size).toBe(0);
 });
 
 it('retains same-session updates arriving during collection for a following cycle', async () => {
   const f = await scheduler();
   f.process.mockImplementationOnce(async () => { f.probe.noteWakeup('a.json'); return 0; });
-  f.probe.noteWakeup('a.json'); await vi.advanceTimersByTimeAsync(400); await Promise.all(f.jobs);
-  expect(f.process.mock.calls.map(call => call[0])).toEqual(['/sessions/a', '/sessions/a']);
+  f.probe.noteWakeup('a.json');
+  await vi.advanceTimersByTimeAsync(200); await Promise.all(f.jobs);
+  // Path validation performs real async I/O. Drain the first cycle before
+  // advancing the next window so fake time does not outrun its notification.
+  await vi.advanceTimersByTimeAsync(200); await Promise.all(f.jobs);
+  expect(f.process.mock.calls.map(call => call[0])).toEqual(Array(2).fill(f.files[0]!.filePath));
 });
 
 it('discovers unknown sessions on full polling and also forces full scans under continuous wakeups', async () => {
@@ -80,12 +89,12 @@ it('discovers unknown sessions on full polling and also forces full scans under 
 
 it('preserves filename-less evidence until a full pass and checks cold files too', async () => {
   const f = await scheduler();
-  vi.spyOn(f.probe, 'historicalRolloutSkipPaths').mockReturnValue(new Set(['/sessions/a', '/sessions/b']));
+  vi.spyOn(f.probe, 'historicalRolloutSkipPaths').mockReturnValue(new Set(f.files.slice(0, 2).map(file => file.filePath)));
   f.probe.noteWakeup(); await vi.advanceTimersByTimeAsync(200); await Promise.all(f.jobs);
   expect(f.probe.wakeupDiscoveryPending).toBe(true);
   expect(f.discover).not.toHaveBeenCalled();
   await f.probe.collect();
-  expect(f.process.mock.calls.map(call => call[0])).toEqual(['/sessions/a', '/sessions/b', '/sessions/c']);
+  expect(f.process.mock.calls.map(call => call[0])).toEqual(f.files.map(file => file.filePath));
   expect(f.probe.wakeupDiscoveryPending).toBe(false);
 });
 
@@ -129,10 +138,14 @@ it('does not create empty delegation state on startup, but persists clearing rea
 
 it('retains other owners and their fast path across targeted wakeups and historical skipping', async () => {
   const { root, probe } = await fixture();
-  const files = ['a', 'b'].map(id => ({ filePath: path.join(root, `rollout-${id}.jsonl`), baselineOnStart: true }));
-  for (const [i, file] of files.entries()) await fs.writeFile(file.filePath, JSON.stringify({
-    type: 'session_meta', payload: { id: i === 0 ? 'a' : 'b', model_provider: 'openai' },
-  }) + '\n');
+  const files = [];
+  for (const id of ['a', 'b']) {
+    const filePath = path.join(root, `rollout-${id}.jsonl`);
+    await fs.writeFile(filePath, JSON.stringify({
+      type: 'session_meta', payload: { id, model_provider: 'openai' },
+    }) + '\n');
+    files.push({ filePath, canonicalPath: await fs.realpath(filePath), baselineOnStart: true });
+  }
   vi.spyOn(probe, 'discoverSessionFiles').mockResolvedValue(files);
   vi.spyOn(probe, 'cleanupExpiredSpanContexts').mockResolvedValue(undefined);
   const skip = vi.spyOn(probe, 'historicalRolloutSkipPaths').mockReturnValue(new Set());
