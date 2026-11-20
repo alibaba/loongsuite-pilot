@@ -28,20 +28,23 @@ function ensureJournalDir() {
   fs.mkdirSync(JOURNAL_DIR, { recursive: true });
 }
 
-export function appendEvent(event) {
+export function appendEvent(event, prepareForAppend) {
   ensureJournalDir();
-  withJournalLock(() => {
-    fs.appendFileSync(JOURNAL_FILE, JSON.stringify(event) + '\n', 'utf-8');
+  return withJournalLock(() => {
+    const stored = prepareForAppend ? prepareForAppend(event, readJournal()) : event;
+    fs.appendFileSync(JOURNAL_FILE, JSON.stringify(stored) + '\n', 'utf-8');
+    return stored;
   });
+}
+
+function readJournal() {
+  if (!fs.existsSync(JOURNAL_FILE)) return [];
+  return parseJournalContent(fs.readFileSync(JOURNAL_FILE, 'utf-8'));
 }
 
 export function readAllEvents() {
   ensureJournalDir();
-  return withJournalLock(() => {
-    if (!fs.existsSync(JOURNAL_FILE)) return [];
-    const content = fs.readFileSync(JOURNAL_FILE, 'utf-8');
-    return parseJournalContent(content);
-  });
+  return withJournalLock(readJournal);
 }
 
 export function rewriteJournal(remainingEvents, snapshotEvents = null) {
@@ -113,7 +116,8 @@ function parseJournalContent(content) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      events.push(JSON.parse(trimmed));
+      const event = JSON.parse(trimmed);
+      if (event && typeof event === 'object' && !Array.isArray(event)) events.push(event);
     } catch {
       // skip corrupted lines
     }

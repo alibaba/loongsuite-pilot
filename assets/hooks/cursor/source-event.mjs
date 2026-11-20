@@ -21,8 +21,12 @@ export function sanitizeToolCallId(raw) {
   return (idx >= 0 ? raw.slice(0, idx) : raw).trim() || undefined;
 }
 
+export function omitCursorEventContent(event) {
+  const { prompt, attachments, text, tool_input, tool_output, error_message, task, description, ...metadata } = event;
+  return { ...metadata, content_omitted: true };
+}
+
 export function toInternalEvent(payload, captureContent = true) {
-  const content = captureContent ? payload : {};
   const hookEvent = payload.hook_event_name || payload.hookEvent || payload.hookEventName || 'unknown';
   const conversationId = payload.conversation_id || payload.session_id || '';
   const sessionId = payload.session_id || payload.conversation_id || '';
@@ -38,22 +42,20 @@ export function toInternalEvent(payload, captureContent = true) {
     model,
   };
 
-  if (!captureContent) event.content_omitted = true;
-
   switch (hookEvent) {
     case 'beforeSubmitPrompt':
-      event.prompt = content.prompt || undefined;
+      event.prompt = payload.prompt || undefined;
       event.composer_mode = payload.composer_mode || undefined;
-      event.attachments = content.attachments || undefined;
+      event.attachments = payload.attachments || undefined;
       break;
 
     case 'afterAgentThought':
-      event.text = content.text || undefined;
+      event.text = payload.text || undefined;
       event.duration_ms = toFiniteNumber(payload.duration_ms);
       break;
 
     case 'afterAgentResponse':
-      event.text = content.text || undefined;
+      event.text = payload.text || undefined;
       event.input_tokens = toFiniteNumber(payload.input_tokens);
       event.output_tokens = toFiniteNumber(payload.output_tokens);
       event.cache_read_tokens = toFiniteNumber(payload.cache_read_tokens);
@@ -63,15 +65,15 @@ export function toInternalEvent(payload, captureContent = true) {
     case 'preToolUse':
       event.tool_name = payload.tool_name || undefined;
       event.tool_use_id = sanitizeToolCallId(payload.tool_use_id);
-      event.tool_input = content.tool_input || undefined;
+      event.tool_input = payload.tool_input || undefined;
       event.cwd = payload.cwd || undefined;
       break;
 
     case 'postToolUse':
       event.tool_name = payload.tool_name || undefined;
       event.tool_use_id = sanitizeToolCallId(payload.tool_use_id);
-      event.tool_input = content.tool_input || undefined;
-      event.tool_output = content.tool_output || undefined;
+      event.tool_input = payload.tool_input || undefined;
+      event.tool_output = payload.tool_output || undefined;
       event.duration_ms = toFiniteNumber(payload.duration_ms) ?? toFiniteNumber(payload.duration);
       event.cwd = payload.cwd || undefined;
       break;
@@ -79,8 +81,8 @@ export function toInternalEvent(payload, captureContent = true) {
     case 'postToolUseFailure':
       event.tool_name = payload.tool_name || undefined;
       event.tool_use_id = sanitizeToolCallId(payload.tool_use_id);
-      event.tool_input = content.tool_input || undefined;
-      event.error_message = content.error_message || undefined;
+      event.tool_input = payload.tool_input || undefined;
+      event.error_message = payload.error_message || undefined;
       event.failure_type = payload.failure_type || undefined;
       event.is_interrupt = payload.is_interrupt || undefined;
       event.duration_ms = toFiniteNumber(payload.duration_ms) ?? toFiniteNumber(payload.duration);
@@ -102,7 +104,7 @@ export function toInternalEvent(payload, captureContent = true) {
       event.tool_call_id = sanitizeToolCallId(payload.tool_call_id);
       event.subagent_model = payload.subagent_model || undefined;
       event.is_parallel_worker = payload.is_parallel_worker || undefined;
-      event.task = content.task || undefined;
+      event.task = payload.task || undefined;
       break;
 
     case 'subagentStop':
@@ -114,9 +116,9 @@ export function toInternalEvent(payload, captureContent = true) {
       event.message_count = toFiniteNumber(payload.message_count);
       event.tool_call_count = toFiniteNumber(payload.tool_call_count);
       event.loop_count = toFiniteNumber(payload.loop_count);
-      event.task = content.task || undefined;
-      event.description = content.description || undefined;
-      event.error_message = content.error_message || undefined;
+      event.task = payload.task || undefined;
+      event.description = payload.description || undefined;
+      event.error_message = payload.error_message || undefined;
       break;
 
     case 'sessionStart':
@@ -135,7 +137,7 @@ export function toInternalEvent(payload, captureContent = true) {
   event.workspace_roots = payload.workspace_roots || undefined;
   event.transcript_path = payload.transcript_path || undefined;
 
-  return stripUndefined(event);
+  return stripUndefined(captureContent ? event : omitCursorEventContent(event));
 }
 
 function toFiniteNumber(val) {

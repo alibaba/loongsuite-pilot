@@ -29,6 +29,10 @@ function send(name, fields, version, conversation = 'session') {
 function journal() {
   return fs.readFileSync(path.join(data, 'state/cursor/event-journal.jsonl'), 'utf8');
 }
+function readHistory() {
+  const dir = path.join(data, 'logs/cursor/history');
+  return fs.existsSync(dir) ? fs.readdirSync(dir).map(name => fs.readFileSync(path.join(dir, name), 'utf8')).join('') : '';
+}
 
 it.each([
   ['desktop', '1.7.0', { cursor: { captureMessageContent: false }, 'cursor-cli': { captureMessageContent: true } }],
@@ -87,6 +91,74 @@ it('omits malformed version objects without discarding valid same-conversation C
   expect(history).toContain('allowed-cli-response');
   expect(history).toContain('call-1');
   expect(history).not.toContain('malformed-body');
+});
+
+it('reapplies current CLI policy to an older mixed-version journal', () => {
+  configure({ cursor: { captureMessageContent: true }, 'cursor-cli': { captureMessageContent: true } });
+  send('beforeSubmitPrompt', { prompt: 'earlier-cli-prompt' }, '2026.11.17-a1b2c3d');
+  send('afterAgentResponse', { text: 'earlier-cli-response', output_tokens: 12 }, '2026.11.17-a1b2c3d');
+  expect(journal()).toContain('earlier-cli-prompt');
+
+  configure({ cursor: { captureMessageContent: true }, 'cursor-cli': { captureMessageContent: false } });
+  send('stop', { status: 'completed' }, '1.7.2');
+  const history = readHistory();
+  expect(history).toContain('"gen_ai.agent.type":"cursor-cli"');
+  expect(history).toContain('"gen_ai.usage.output_tokens":12');
+  expect(history).not.toMatch(/earlier-cli-prompt|earlier-cli-response/);
+});
+
+it.each([true, false])('defers mixed Stop for CLI and applies the Desktop policy (%s)', desktopCapture => {
+  configure({ cursor: { captureMessageContent: desktopCapture }, 'cursor-cli': { captureMessageContent: true } });
+  const cli = '2026.11.17-a1b2c3d';
+  send('beforeSubmitPrompt', { prompt: 'known-cli-prompt' }, cli);
+  send('stop', { status: 'completed' }, '1.7.2');
+  expect(readHistory()).toBe('');
+
+  send('preToolUse', { tool_name: 'Read', tool_use_id: 'mixed-call', tool_input: { file: 'late-mixed-body' } }, cli);
+  const raw = fs.readFileSync(path.join(data, 'logs/cursor/raw/cursor-raw-trace.jsonl'), 'utf8');
+  expect(journal().includes('late-mixed-body')).toBe(desktopCapture);
+  expect(raw.includes('late-mixed-body')).toBe(desktopCapture);
+  send('afterAgentResponse', { text: 'late-cli-response', output_tokens: 9 }, cli);
+
+  const history = readHistory();
+  expect(history).toContain('"gen_ai.agent.type":"cursor-cli"');
+  expect(history).toContain('"gen_ai.usage.output_tokens":9');
+  expect(history).toContain('mixed-call');
+  expect(history.includes('late-cli-response')).toBe(desktopCapture);
+  expect(history.includes('known-cli-prompt')).toBe(desktopCapture);
+});
+
+it('withholds older unidentified events when a source later opts out', () => {
+  configure({});
+  send('beforeSubmitPrompt', { prompt: 'older-unidentified-prompt' }, 'unknown');
+  expect(journal()).toContain('older-unidentified-prompt');
+
+  configure({ 'cursor-cli': { captureMessageContent: false } });
+  send('afterAgentResponse', { text: 'allowed-desktop-response', output_tokens: 3 }, '1.7.2');
+  send('stop', { status: 'completed' }, '1.7.2');
+  const history = readHistory();
+  expect(history).toContain('allowed-desktop-response');
+  expect(history).not.toContain('older-unidentified-prompt');
+});
+
+it('does not restore pending child content through an allowed parent after the child opts out', () => {
+  configure({});
+  const transcriptPath = path.join(home, 'parent.jsonl');
+  fs.mkdirSync(path.join(home, 'subagents'));
+  fs.writeFileSync(path.join(home, 'subagents/child.jsonl'), '');
+  send('beforeSubmitPrompt', { prompt: 'allowed-parent-prompt' }, '1.7.2', 'parent');
+  send('preToolUse', { tool_name: 'Task', tool_use_id: 'parent-task' }, '1.7.2', 'parent');
+  send('afterAgentResponse', { text: 'older-child-response', output_tokens: 7 }, '2026.11.17', 'child');
+  expect(journal()).toContain('older-child-response');
+
+  configure({ 'cursor-cli': { captureMessageContent: false } });
+  send('afterAgentResponse', { text: 'allowed-parent-response', output_tokens: 3 }, '1.7.2', 'parent');
+  send('stop', { status: 'completed', transcript_path: transcriptPath }, '1.7.2', 'parent');
+  const history = readHistory();
+  expect(history).toContain('allowed-parent-response');
+  expect(history).toContain('"gen_ai.agent.scope":"subagent"');
+  expect(history).toContain('"gen_ai.usage.output_tokens":7');
+  expect(history).not.toContain('older-child-response');
 });
 
 it('keeps desktop and CLI policies separate in a shared journal', () => {

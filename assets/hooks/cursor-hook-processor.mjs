@@ -25,7 +25,7 @@ import {
   loadHookRuntimeConfig,
   sanitizeObject,
 } from './agent-event-normalizer.mjs';
-import { cursorVariantFromVersion, toInternalEvent } from './cursor/source-event.mjs';
+import { cursorVariantFromVersion, omitCursorEventContent, toInternalEvent } from './cursor/source-event.mjs';
 import { appendEvent, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
 import { assembleTurn } from './cursor/react-assembler.mjs';
 import { buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
@@ -96,15 +96,41 @@ function writeEmptyResponse() {
   process.stdout.write('{}\n');
 }
 
-function inferVariant(events) {
-  let variant;
-  for (const ev of events) {
-    const observed = cursorVariantFromVersion(ev.cursor_version);
-    if (!observed) continue;
-    if (variant && variant !== observed) return undefined;
-    variant = observed;
+function captureForVariant(variant, runtimeConfig) {
+  if (!runtimeConfig.policyAvailable) return false;
+  if (variant) return hookCapturesContent(variant, runtimeConfig);
+  return hookCapturesContent('cursor', runtimeConfig) && hookCapturesContent('cursor-cli', runtimeConfig);
+}
+
+function prepareHistory(events, conversationId, runtimeConfig) {
+  const variantsByConversation = new Map();
+  for (const event of events) {
+    const variant = cursorVariantFromVersion(event.cursor_version);
+    if (!variant) continue;
+    const variants = variantsByConversation.get(event.conversation_id) ?? new Set();
+    variants.add(variant);
+    variantsByConversation.set(event.conversation_id, variants);
   }
-  return variant;
+  const variants = variantsByConversation.get(conversationId);
+  // CLI evidence determines whether a response can arrive after Stop. Mixed
+  // evidence does not allow either source's content policy to override the other.
+  const variant = variants?.has('cursor-cli') ? 'cursor-cli' : 'cursor';
+  const unambiguous = variants?.size === 1;
+  const captureContent = captureForVariant(unambiguous ? variant : undefined, runtimeConfig);
+  const visibleEvents = events.map(event => {
+    const mixture = variantsByConversation.get(event.conversation_id)?.size > 1;
+    const source = mixture ? undefined : cursorVariantFromVersion(event.cursor_version);
+    return captureContent && captureForVariant(source, runtimeConfig) ? event : omitCursorEventContent(event);
+  });
+  // The transcript can reintroduce content omitted from this turn's journal.
+  const allowTranscriptText = captureContent && !visibleEvents.some(event =>
+    event.conversation_id === conversationId && event.content_omitted,
+  );
+  const historyConfig = captureContent ? runtimeConfig : {
+    ...runtimeConfig,
+    agents: { ...runtimeConfig.agents, [variant]: { captureMessageContent: false } },
+  };
+  return { variant, events: visibleEvents, runtimeConfig: historyConfig, allowTranscriptText };
 }
 
 function findConversationResourceAttributes(events, conversationId) {
@@ -122,14 +148,11 @@ function findConversationResourceAttributes(events, conversationId) {
 
 function applyCursorCliResourceContext(records, events, conversationId, variant) {
   if (variant !== 'cursor-cli' || records.length === 0) return;
-  // The journal is shared by Cursor Desktop and Cursor CLI. Re-check only the
-  // current conversation so a pending CLI event cannot activate this feature
-  // for an unrelated Desktop turn.
-  const conversationVariant = inferVariant(
-    events.filter(event => event.conversation_id === conversationId),
-  );
-  if (conversationVariant !== 'cursor-cli') return;
-  const resourceAttributes = findConversationResourceAttributes(events, conversationId);
+  const scopedEvents = events.filter(event => event.conversation_id === conversationId);
+  const cliEvents = scopedEvents.filter(event => cursorVariantFromVersion(event.cursor_version) === 'cursor-cli');
+  if (cliEvents.length === 0) return;
+  const mixed = scopedEvents.some(event => cursorVariantFromVersion(event.cursor_version) === 'cursor');
+  const resourceAttributes = findConversationResourceAttributes(mixed ? cliEvents : scopedEvents, conversationId);
   if (Object.keys(resourceAttributes).length === 0) return;
 
   const baseFieldPatch = agentBaseFieldPatch(resourceAttributes);
@@ -461,12 +484,11 @@ async function main() {
   // The collector config stays under the user home when only the log directory moves.
   const runtimeConfig = loadHookRuntimeConfig();
   const eventVariant = cursorVariantFromVersion(payload.cursor_version);
-  // Desktop and CLI share this hook. An event with an ambiguous source is
-  // safe to persist with content only when both sources allow it.
-  const captureContent = runtimeConfig.policyAvailable && (eventVariant
-    ? hookCapturesContent(eventVariant, runtimeConfig)
-    : hookCapturesContent('cursor', runtimeConfig) && hookCapturesContent('cursor-cli', runtimeConfig));
-  const internalEvent = toInternalEvent(payload, captureContent);
+  // Only inspect the open journal when this event would otherwise be allowed
+  // and the other Cursor source has a different policy.
+  const captureContent = captureForVariant(eventVariant, runtimeConfig);
+  const checkConflictingSource = captureContent && !captureForVariant(undefined, runtimeConfig);
+  let internalEvent = toInternalEvent(payload, captureContent);
   const invocationResourceAttributes = collectResourceAttributesFromEnv(process.env, {
     agentId: 'cursor-cli',
   });
@@ -474,7 +496,14 @@ async function main() {
     internalEvent.resource_attributes = invocationResourceAttributes;
   }
   try {
-    appendEvent(internalEvent);
+    internalEvent = appendEvent(internalEvent, checkConflictingSource ? (event, previous) => {
+      const conflicting = previous.some(item => {
+        if (item.conversation_id !== event.conversation_id) return false;
+        const source = cursorVariantFromVersion(item.cursor_version);
+        return source && source !== eventVariant;
+      });
+      return conflicting ? omitCursorEventContent(event) : event;
+    } : undefined);
   } catch (err) {
     await appendErrorJsonl(dataDir, now, {
       stage: 'journal_append',
@@ -486,7 +515,7 @@ async function main() {
     return;
   }
 
-  if (captureContent && process.env.LOONGSUITE_CURSOR_RAW_TRACE === '1') {
+  if (!internalEvent.content_omitted && process.env.LOONGSUITE_CURSOR_RAW_TRACE === '1') {
     try {
       const rawFile = path.join(dataDir, 'logs', 'cursor', 'raw', 'cursor-raw-trace.jsonl');
       appendRawJsonl(rawFile, JSON.stringify({ _captured_at: now.toISOString(), ...payload }) + '\n',
@@ -533,11 +562,9 @@ async function main() {
       // response arrives. IDE sessions always assemble immediately (abort/error
       // scenarios must not lose data).
       const convId = internalEvent.conversation_id;
-      const conversation = allEvents.filter(e => e.conversation_id === convId);
-      const variant = inferVariant(conversation);
-      // A transcript can contain text withheld from the journal earlier in the turn.
-      const transcriptPath = conversation.some(event => event.content_omitted)
-        ? undefined : internalEvent.transcript_path;
+      const history = prepareHistory(allEvents, convId, runtimeConfig);
+      const { variant } = history;
+      const transcriptPath = history.allowTranscriptText ? internalEvent.transcript_path : undefined;
       const hasResponse = allEvents.some(e =>
         e.hook_event === 'afterAgentResponse' && e.conversation_id === convId
       );
@@ -556,8 +583,8 @@ async function main() {
       if (process.platform === 'win32' && transcriptPath) {
         const transcriptRecords = buildCursorRecordsFromTranscript(
           transcriptPath,
-          allEvents,
-          { runtimeConfig, stopConversationId: convId, variant }
+          history.events,
+          { runtimeConfig: history.runtimeConfig, stopConversationId: convId, variant }
         );
         if (transcriptRecords && transcriptRecords.length > 0) {
           records = transcriptRecords;
@@ -568,8 +595,8 @@ async function main() {
 
       // Fallback: use hook-event-driven assembleTurn (Mac/Linux or transcript unavailable)
       if (!records) {
-        const result = assembleTurn(allEvents, {
-          runtimeConfig,
+        const result = assembleTurn(history.events, {
+          runtimeConfig: history.runtimeConfig,
           variant,
           stopConversationId: convId,
           transcriptPath,
@@ -596,7 +623,7 @@ async function main() {
               assembledFromTranscript,
             );
             if (readSkills.length > 0) {
-              injectSkillRecords(records, readSkills, runtimeConfig);
+              injectSkillRecords(records, readSkills, history.runtimeConfig);
             }
           }
         }
@@ -607,7 +634,7 @@ async function main() {
       if (records.length > 0) {
         const day = localDateString(now);
         const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
-        await appendBatchJsonl(historyFile, records, variant ?? 'cursor');
+        await appendBatchJsonl(historyFile, records, variant);
       }
 
       compactJournal(allEvents, consumedConversationIds);
@@ -630,12 +657,13 @@ async function main() {
         e.hook_event === 'stop' && e.conversation_id === convId
       );
       if (hasStop) {
-        const variant = inferVariant(allEvents.filter(e => e.conversation_id === convId));
+        const history = prepareHistory(allEvents, convId, runtimeConfig);
+        const { variant } = history;
         // Note: transcriptPath is deliberately omitted here — assembleTurn falls
         // back to stopEvent?.transcript_path internally. Passing internalEvent's
         // transcriptPath (from afterAgentResponse) would be incorrect.
-        const result = assembleTurn(allEvents, {
-          runtimeConfig,
+        const result = assembleTurn(history.events, {
+          runtimeConfig: history.runtimeConfig,
           variant,
           stopConversationId: convId,
         });
@@ -645,7 +673,7 @@ async function main() {
         if (result.records.length > 0) {
           const day = localDateString(now);
           const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
-          await appendBatchJsonl(historyFile, result.records, variant ?? 'cursor');
+          await appendBatchJsonl(historyFile, result.records, variant);
         }
 
         compactJournal(allEvents, result.consumedConversationIds);
