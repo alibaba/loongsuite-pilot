@@ -10,7 +10,7 @@ import * as os from 'node:os';
 import type { AutoUpdateConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
-import { getUpgradeMarkerPath, withHookAssetLock } from '../core/hook-watchdog.js';
+import { getUpgradeMarkerPath, hookUpgradeInProgress, withHookAssetLock } from '../utils/hook-asset-lock.js';
 import {
   extractTarGz,
   makeTarStagingDir,
@@ -215,10 +215,6 @@ export class Updater {
   }
 
   start(): void {
-    // A crash between marking an upgrade and clearing it leaves the file behind.
-    // This process is not inside an upgrade yet, so the leftover belongs to the dead one.
-    void this.clearHookUpgradeMarker('failed to clear leftover hook upgrade marker');
-
     if (!this.config.enabled) {
       logger.debug('auto-update disabled');
       return;
@@ -549,14 +545,6 @@ export class Updater {
     let targetDir = path.join(versionsDir, dirName);
     const stagingDir = path.join(versionsDir, `${baseDirName}.candidate`);
     let activated = false;
-    let hookUpgradeMarked = false;
-    const releaseHookUpgrade = async () => {
-      if (!hookUpgradeMarked) return;
-      hookUpgradeMarked = false;
-      await this.clearHookUpgradeMarker();
-    };
-    let oldCurrent: string | null = null;
-    let oldPrevious: string | null = null;
 
     try {
       await fs.rm(tmpDir, { recursive: true, force: true });
@@ -627,7 +615,9 @@ export class Updater {
         logger.info('running npm install', { node: nodeBin, PATH: childEnv.PATH });
         await execFileAsync('npm', ['install', '--production', '--no-optional'], {
           cwd: stagingDir,
-          env: childEnv,
+          // npm also runs this package's postinstall. Give it disposable data
+          // so lifecycle scripts can run without updating the active assets.
+          env: { ...childEnv, LOONGSUITE_PILOT_DATA_DIR: path.join(tmpDir, 'npm-data') },
           timeout: NPM_INSTALL_TIMEOUT_MS,
           shell: process.platform === 'win32',
         });
@@ -649,121 +639,86 @@ export class Updater {
         timeout: 30_000,
       });
 
-      // The new package's postinstall is what (re)fills <dataDir>/{hooks,skills,plugins}.
-      // It is also how an install broken by the fs.cpSync fail-fast heals itself: the
-      // trees get rebuilt and the stale AppleDouble sidecars pruned on the next upgrade,
-      // with no reinstall. Do not drop this call -- a missing plugins tree fails every
-      // dsh deployment with "plugin file not found or unreadable", once per cycle.
-      const postinstallScript = path.join(stagingDir, 'scripts', 'postinstall.js');
-      if (await fs.access(postinstallScript).then(() => true).catch(() => false)) {
-        const publishHooks = async () => {
-          try {
-            await fs.mkdir(this.paths.cacheDir, { recursive: true });
-            await fs.writeFile(getUpgradeMarkerPath(this.paths.cacheDir), `${Date.now()}\n`);
-            hookUpgradeMarked = true;
-          } catch (err) {
-            logger.warn('failed to mark hook upgrade', { error: String(err) });
-          }
-          try {
-            const { stdout, stderr } = await execFileAsync(nodeBin, [postinstallScript], {
-              cwd: stagingDir,
-              env: {
-                ...childEnv,
-                // Pin the target explicitly instead of trusting what we inherited: the
-                // script otherwise falls back to $HOME/.loongsuite-pilot, which is the
-                // wrong tree for any install using a custom data dir.
-                LOONGSUITE_PILOT_DATA_DIR: this.paths.dataDir,
-              },
-              timeout: 30_000,
-            });
-            // postinstall exits 0 even when a tree failed (it is package.json's
-            // `postinstall`, and a non-zero exit there aborts the whole install), so the
-            // only signal for a partial result is its own output. Unlogged, this path
-            // reproduces the failure mode it exists to heal: hooks or plugins absent while
-            // every step reports success.
-            const output = `${stdout ?? ''}${stderr ?? ''}`.trim();
-            if (/failed asset tree/.test(output)) {
-              logger.warn('postinstall reported failed asset trees', { output });
-            } else if (output) {
-              logger.info('postinstall completed', { output });
-            }
-          } catch (err) {
-            logger.warn('postinstall failed, continuing', { error: String(err) });
-          }
-        };
+      // Serialise publication, activation and rollback with deployed hook repairs.
+      // A busy or broken lock leaves the current installation untouched.
+      await withHookAssetLock(cacheDir, async () => {
+        if (await hookUpgradeInProgress(cacheDir)) {
+          throw new Error('a prior hook asset publication may still be running');
+        }
+
+        const { currentFile, previousFile } = this.paths;
+        const oldCurrent = await this.readPointerFile(currentFile);
+        const oldPrevious = await this.readPointerFile(previousFile);
+        const marker = getUpgradeMarkerPath(cacheDir);
+        // A postinstall subprocess can briefly outlive an updater crash.
+        await fs.writeFile(marker, `${Date.now()}\n`);
+        let publishedAssets = false;
         try {
-          // Wait out an in-flight restore so its old bytes cannot land after this publish.
-          await withHookAssetLock(this.paths.cacheDir, publishHooks);
+          publishedAssets = await this.runPackagePostinstall(stagingDir, nodeBin, childEnv);
+          // Keep the active installation intact if the same version is redeployed.
+          if (await fs.access(targetDir).then(() => true).catch(() => false)) {
+            const suffix = `${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}_${Math.floor(Math.random() * 9000) + 1000}`;
+            dirName = `${baseDirName}_${suffix}`;
+            targetDir = path.join(versionsDir, dirName);
+          }
+          await fs.rename(stagingDir, targetDir);
+
+          if (oldCurrent && oldCurrent !== dirName) {
+            await this.writePointerFile(previousFile, oldCurrent);
+          }
+
+          await this.writePointerFile(currentFile, dirName);
+          await this.syncInstalledScripts(targetDir);
+          // Repin only after activation. A failure restores the previous installation.
+          if (managedNodeBin) await this.pinNodeRuntime(managedNodeBin);
+          activated = true;
         } catch (err) {
-          logger.warn('hook asset lock unavailable, publishing without mutual exclusion', { error: String(err) });
-          await publishHooks();
-        }
-      }
-
-      const { currentFile, previousFile } = this.paths;
-      oldCurrent = await this.readPointerFile(currentFile);
-      oldPrevious = await this.readPointerFile(previousFile);
-
-      try {
-        // Never overwrite an existing version directory in place: `current` may still
-        // point at it and a collector relaunched mid-deploy would die with
-        // ERR_MODULE_NOT_FOUND (last-startup-crash.json phase=module_load), and a live
-        // collector may still hold native modules loaded out of it. Redeploying the
-        // same version/commit therefore lands in a suffixed sibling, which is what
-        // deploy/installer*.ps1 does too. Version and commit are read from VERSION, not
-        // from the directory name, so the suffix is inert.
-        if (await fs.access(targetDir).then(() => true).catch(() => false)) {
-          const suffix = `${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}_${Math.floor(Math.random() * 9000) + 1000}`;
-          dirName = `${baseDirName}_${suffix}`;
-          targetDir = path.join(versionsDir, dirName);
-        }
-        await fs.rename(stagingDir, targetDir);
-
-        if (oldCurrent && oldCurrent !== dirName) {
-          await this.writePointerFile(previousFile, oldCurrent);
-        }
-
-        await this.writePointerFile(currentFile, dirName);
-        await releaseHookUpgrade();
-        await this.syncInstalledScripts(targetDir);
-        // Repoint the CLI wrapper at the managed runtime only after activation, so
-        // the collector/updater restart (and any future launch) runs on it. Skipped
-        // when we fell back to system node, preserving the existing pin. When the
-        // managed runtime was adopted, pinNodeRuntime throws on failure so we roll the
-        // pointers back below: leaving the pin on a different node would start the
-        // collector against the wrong runtime, with no self-heal.
-        if (managedNodeBin) {
-          await this.pinNodeRuntime(managedNodeBin);
-        }
-        activated = true;
-      } catch (err) {
-        logger.warn('failed to finalize update, restoring previous installation', { error: String(err) });
-        await releaseHookUpgrade();
-        await this.restorePointers(oldCurrent, oldPrevious);
-        if (oldCurrent) {
-          await this.syncInstalledScriptsForPointer(oldCurrent).catch((restoreErr) => {
-            logger.warn('failed to restore installed scripts', { error: String(restoreErr) });
+          logger.warn('failed to finalize update, restoring previous installation', { error: String(err) });
+          await this.restorePointers(oldCurrent, oldPrevious);
+          if (oldCurrent) {
+            if (publishedAssets) {
+              await this.runPackagePostinstall(path.join(versionsDir, oldCurrent), nodeBin, childEnv);
+            }
+            await this.syncInstalledScriptsForPointer(oldCurrent).catch((restoreErr) => {
+              logger.warn('failed to restore installed scripts', { error: String(restoreErr) });
+            });
+          }
+          throw err;
+        } finally {
+          await fs.rm(marker, { force: true }).catch((err) => {
+            logger.warn('failed to clear hook upgrade marker', { error: String(err) });
           });
         }
-        throw err;
-      }
+      });
 
       logger.info('update deployed', { version: manifest.version, dir: dirName });
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-      if (!activated) {
-        await releaseHookUpgrade();
-        await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
-      }
+      if (!activated) await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
     }
   }
 
-  private async clearHookUpgradeMarker(message = 'failed to clear hook upgrade marker'): Promise<void> {
+  // Republish hooks, skills and plugins from the exact package. The script
+  // reports partial asset failures even when the npm lifecycle must exit zero.
+  private async runPackagePostinstall(versionDir: string, nodeBin: string, childEnv: NodeJS.ProcessEnv): Promise<boolean> {
+    const script = path.join(versionDir, 'scripts', 'postinstall.js');
+    if (!await fs.access(script).then(() => true).catch(() => false)) return false;
     try {
-      await fs.rm(getUpgradeMarkerPath(this.paths.cacheDir), { force: true });
+      const { stdout, stderr } = await execFileAsync(nodeBin, [script], {
+        cwd: versionDir,
+        env: { ...childEnv, LOONGSUITE_PILOT_DATA_DIR: this.paths.dataDir },
+        timeout: 30_000,
+      });
+      const output = `${stdout ?? ''}${stderr ?? ''}`.trim();
+      if (/failed asset tree/.test(output)) {
+        logger.warn('postinstall reported failed asset trees', { output });
+      } else if (output) {
+        logger.info('postinstall completed', { output });
+      }
     } catch (err) {
-      logger.warn(message, { error: String(err) });
+      logger.warn('postinstall failed, continuing', { error: String(err) });
     }
+    return true;
   }
 
   private async findExtractedPackage(dir: string): Promise<string | null> {

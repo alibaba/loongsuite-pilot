@@ -10,6 +10,7 @@ import { HOOK_ASSET_MANIFEST } from './hook-asset-manifest.js';
 import { directoryExists, fileExists, writeTextFileAtomic } from '../utils/fs-utils.js';
 import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { createLogger } from '../utils/logger.js';
+import { HookAssetLockError, hookUpgradeInProgress, withHookAssetLock } from '../utils/hook-asset-lock.js';
 
 const execFileAsync = promisify(execFile);
 const logger = createLogger('HookWatchdog');
@@ -17,165 +18,6 @@ const logger = createLogger('HookWatchdog');
 const STARTUP_DELAY_MS = 30_000;
 const REPAIR_TIMEOUT_MS = 30_000;
 const MAX_INTERCEPT_REPAIRS_PER_DAY = 3;
-const HOOK_UPGRADE_MAX_AGE_MS = 10 * 60 * 1000;
-
-export function getUpgradeMarkerPath(controlDir: string): string {
-  return path.join(controlDir, 'hook-upgrade-in-progress');
-}
-
-const HOOK_ASSET_LOCK_WAIT_MS = 15_000;
-const HOOK_ASSET_LOCK_POLL_MS = 20;
-const HOOK_ASSET_LOCK_STALE_MS = 60_000;
-const HOOK_ASSET_LOCK_SKEW_MS = 5_000;
-
-export function getHookAssetLockPath(controlDir: string): string {
-  return path.join(controlDir, 'hook-asset-lock');
-}
-
-function pidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-interface HookAssetLockRecord {
-  pid: number;
-  startedAt: number;
-}
-
-function sameHookAssetLock(record: HookAssetLockRecord | null, mine: HookAssetLockRecord): boolean {
-  return record?.pid === mine.pid && record.startedAt === mine.startedAt;
-}
-
-/** Dead owner, held past the stale bound, or timestamped far enough in the future. */
-function hookAssetLockRecordIsStale(record: HookAssetLockRecord | null): boolean {
-  if (!record || !Number.isInteger(record.pid) || record.pid <= 0 || !Number.isFinite(record.startedAt)) return true;
-  const age = Date.now() - record.startedAt;
-  if (age < -HOOK_ASSET_LOCK_SKEW_MS) return true;
-  if (!pidAlive(record.pid)) return true;
-  return age >= HOOK_ASSET_LOCK_STALE_MS;
-}
-
-/** null means the file is missing. Bytes that are not a record come back as a stale pid. */
-async function readHookAssetLock(lockPath: string): Promise<HookAssetLockRecord | null> {
-  let text: string;
-  try {
-    text = await fs.readFile(lockPath, 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw err;
-  }
-  try {
-    const parsed = JSON.parse(text) as { pid?: unknown; startedAt?: unknown };
-    if (typeof parsed.pid !== 'number' || typeof parsed.startedAt !== 'number') return { pid: 0, startedAt: 0 };
-    return { pid: parsed.pid, startedAt: parsed.startedAt };
-  } catch {
-    return { pid: 0, startedAt: 0 };
-  }
-}
-
-/** Publish a complete lock file. link(2) fails with EEXIST and never exposes an empty file. */
-async function publishHookAssetLock(lockPath: string, record: HookAssetLockRecord): Promise<void> {
-  const payload = `${JSON.stringify(record)}\n`;
-  const tmp = `${lockPath}.${process.pid}.${record.startedAt}.tmp`;
-  await fs.writeFile(tmp, payload);
-  try {
-    await fs.link(tmp, lockPath);
-  } finally {
-    await fs.rm(tmp, { force: true }).catch(() => {});
-  }
-}
-
-/**
- * Move the lock aside and keep it only when the moved bytes are still a live record.
- * A peer that already published a new lock is left in place.
- */
-async function reclaimStaleHookAssetLock(lockPath: string): Promise<'reclaimed' | 'live' | 'absent'> {
-  const claimPath = `${lockPath}.${process.pid}.${Date.now()}.claim`;
-  try {
-    await fs.rename(lockPath, claimPath);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'absent';
-    throw err;
-  }
-  let record: HookAssetLockRecord | null;
-  try {
-    record = await readHookAssetLock(claimPath);
-  } catch {
-    record = null;
-  }
-  if (record === null || !hookAssetLockRecordIsStale(record)) {
-    try {
-      await fs.rename(claimPath, lockPath);
-    } catch {
-      await fs.rm(claimPath, { force: true }).catch(() => {});
-    }
-    return 'live';
-  }
-  await fs.rm(claimPath, { force: true }).catch(() => {});
-  return 'reclaimed';
-}
-
-/** Thrown only when the lock cannot be acquired. The callback's own errors stay unchanged. */
-class HookAssetLockError extends Error {
-  constructor(cause: unknown) {
-    super(cause instanceof Error ? cause.message : String(cause));
-    this.name = 'HookAssetLockError';
-  }
-}
-
-/**
- * Hold the hook-asset lock across one publish or one deployed write.
- * The other side waits, then re-checks the upgrade marker before it writes.
- */
-export async function withHookAssetLock<T>(controlDir: string, body: () => Promise<T>): Promise<T> {
-  const lockPath = getHookAssetLockPath(controlDir);
-  let mine: HookAssetLockRecord | null = null;
-  try {
-    await fs.mkdir(controlDir, { recursive: true });
-    const deadline = Date.now() + HOOK_ASSET_LOCK_WAIT_MS;
-    for (;;) {
-      const record = { pid: process.pid, startedAt: Date.now() };
-      let wait = false;
-      try {
-        await publishHookAssetLock(lockPath, record);
-        const current = await readHookAssetLock(lockPath);
-        if (sameHookAssetLock(current, record)) {
-          mine = record;
-          break;
-        }
-        wait = true;
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-        const current = await readHookAssetLock(lockPath);
-        if (current !== null && !hookAssetLockRecordIsStale(current)) {
-          wait = true;
-        } else if (current !== null && await reclaimStaleHookAssetLock(lockPath) === 'live') {
-          wait = true;
-        }
-      }
-      if (!wait) continue;
-      if (Date.now() >= deadline) throw new Error(`hook asset lock busy: ${lockPath}`);
-      await new Promise((resolve) => setTimeout(resolve, HOOK_ASSET_LOCK_POLL_MS));
-    }
-  } catch (err) {
-    throw new HookAssetLockError(err);
-  }
-  try {
-    return await body();
-  } finally {
-    try {
-      const current = await readHookAssetLock(lockPath);
-      if (mine && sameHookAssetLock(current, mine)) await fs.rm(lockPath, { force: true });
-    } catch {
-      // The owner already released it, or a stale holder replaced it.
-    }
-  }
-}
 
 /** `current` and `versions/` live in the cache dir. pilotDir is versions/<name>. */
 export function getControlDir(pilotDir: string, dataDir: string): string {
@@ -186,12 +28,7 @@ export function getControlDir(pilotDir: string, dataDir: string): string {
 /** An upgrade in progress, or a newer active version. */
 export async function upgradeBlocksRepair(pilotDir: string, dataDir: string): Promise<boolean> {
   const controlDir = getControlDir(pilotDir, dataDir);
-  try {
-    const started = Number((await fs.readFile(getUpgradeMarkerPath(controlDir), 'utf8')).trim());
-    if (!Number.isFinite(started) || Date.now() - started < HOOK_UPGRADE_MAX_AGE_MS) return true;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return true;
-  }
+  if (await hookUpgradeInProgress(controlDir)) return true;
   const active = readActiveVersionDir(controlDir);
   return active !== null && path.resolve(active) !== path.resolve(pilotDir);
 }
@@ -541,7 +378,7 @@ export class HookWatchdog {
     this.assetCheckInFlight = true;
     try {
       const { pilotDir, dataDir } = this.assetRoots;
-      // Marker is set before postinstall and cleared after `current` is written.
+      // A recent marker can also cover a postinstall worker surviving an updater exit.
       if (await upgradeBlocksRepair(pilotDir, dataDir)) {
         logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
         return;
@@ -667,7 +504,7 @@ export class HookWatchdog {
 
   /**
    * Read and write one deployed file while holding the hook-asset lock.
-   * An upgrade waits for this lock before it publishes, then this side sees the marker and does not write.
+   * An upgrade holds the same lock through activation or rollback.
    */
   private async withHookAssets(
     body: () => Promise<'written' | 'mismatch'>,

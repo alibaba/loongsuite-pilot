@@ -8,6 +8,14 @@ vi.mock('../../../src/utils/logger.js', () => ({
   }),
 }));
 
+const mockHookAssetLock = vi.fn<[string, () => Promise<unknown>], Promise<unknown>>();
+const mockHookUpgradeInProgress = vi.fn<[string], Promise<boolean>>();
+vi.mock('../../../src/utils/hook-asset-lock.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/utils/hook-asset-lock.js')>(),
+  withHookAssetLock: (...args: [string, () => Promise<unknown>]) => mockHookAssetLock(...args),
+  hookUpgradeInProgress: (dir: string) => mockHookUpgradeInProgress(dir),
+}));
+
 // --- Mock version-utils (we test these separately) ---
 const mockComputeSha256 = vi.fn<[string], Promise<string>>();
 vi.mock('../../../src/updater/version-utils.js', async (importOriginal) => {
@@ -183,6 +191,8 @@ describe('Updater', () => {
     vi.useFakeTimers();
     vi.stubGlobal('fetch', mockFetch);
     tmpDir = '/tmp/test-updater';
+    mockHookAssetLock.mockImplementation((_dir, body) => body());
+    mockHookUpgradeInProgress.mockResolvedValue(false);
 
     // Default fs mocks
     mockFsRm.mockResolvedValue(undefined);
@@ -239,10 +249,10 @@ describe('Updater', () => {
   // ─── LIFECYCLE ─────────────────────────────────────────
 
   describe('lifecycle', () => {
-    it('clears a leftover hook upgrade marker on start', () => {
+    it('keeps a publication marker that can still protect a surviving postinstall', () => {
       const updater = new Updater(makeConfig({ enabled: false }), tmpDir);
       updater.start();
-      expect(mockFsRm).toHaveBeenCalledWith(
+      expect(mockFsRm).not.toHaveBeenCalledWith(
         expect.stringContaining('hook-upgrade-in-progress'),
         { force: true },
       );
@@ -569,6 +579,12 @@ describe('Updater', () => {
       const env = (call![2] as { env?: Record<string, string> }).env ?? {};
       expect(env.LOONGSUITE_PILOT_DATA_DIR).toBe(tmpDir);
 
+      const fallback = mockExecFile.mock.calls.find((c: unknown[]) => c[0] === 'npm');
+      expect(fallback?.[2]).toMatchObject({
+        env: { LOONGSUITE_PILOT_DATA_DIR: expect.stringContaining('npm-data') },
+      });
+      expect(fallback?.[2].env.LOONGSUITE_PILOT_DATA_DIR).not.toBe(tmpDir);
+
       const markerWrite = mockFsWriteFile.mock.calls.findIndex(([filePath]) =>
         String(filePath).endsWith('hook-upgrade-in-progress'));
       const postinstallCall = mockExecFile.mock.calls.findIndex((c: unknown[]) =>
@@ -584,6 +600,35 @@ describe('Updater', () => {
       expect(mockFsRename.mock.invocationCallOrder[currentRename]).toBeLessThan(
         mockFsRm.mock.invocationCallOrder[markerClear],
       );
+    });
+
+    it('leaves active hook assets and pointers alone when acquiring the publication lock fails', async () => {
+      setupForDownload();
+      const access = mockFsAccess.getMockImplementation()!;
+      mockFsAccess.mockImplementation((file) => file.endsWith('postinstall.js') ? Promise.resolve() : access(file));
+      mockHookAssetLock.mockRejectedValueOnce(new Error('hook asset lock busy'));
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(mockHookAssetLock).toHaveBeenCalledWith(tmpDir, expect.any(Function));
+      const fallback = mockExecFile.mock.calls.find((c: unknown[]) => c[0] === 'npm');
+      expect(fallback?.[2]).toMatchObject({
+        env: { LOONGSUITE_PILOT_DATA_DIR: expect.stringContaining('npm-data') },
+      });
+      expect(pilotCommands().some((command) => command.includes('postinstall.js'))).toBe(false);
+      expect(pilotCommands()).not.toContain('restart-collector');
+      expect(mockFsWriteFile).not.toHaveBeenCalledWith(expect.stringContaining('current.tmp'), expect.anything());
+    });
+
+    it('defers activation while the preceding postinstall marker is still fresh', async () => {
+      setupForDownload();
+      mockHookUpgradeInProgress.mockResolvedValue(true);
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(mockHookUpgradeInProgress).toHaveBeenCalledWith(tmpDir);
+      expect(mockFsWriteFile).not.toHaveBeenCalledWith(expect.stringContaining('current.tmp'), expect.anything());
+      expect(mockFsRm).not.toHaveBeenCalledWith(expect.stringContaining('hook-upgrade-in-progress'), { force: true });
     });
 
     it('clears the hook upgrade marker when activation fails', async () => {
@@ -614,6 +659,47 @@ describe('Updater', () => {
         expect.stringContaining('/current.tmp'),
         '1.0.2_bbb\n',
       );
+    });
+
+    it('restores old hook assets and pointer under the same lock when activation fails', async () => {
+      setupForDownload();
+      const access = mockFsAccess.getMockImplementation()!;
+      mockFsAccess.mockImplementation((file) => file.endsWith('postinstall.js') ? Promise.resolve() : access(file));
+      const readFile = mockFsReadFile.getMockImplementation()!;
+      mockFsReadFile.mockImplementation((file, encoding) => {
+        if (file.endsWith('/current')) return Promise.resolve('1.0.1_aaa\n');
+        if (file.endsWith('/VERSION')) return Promise.resolve('version=1.0.1\ngit_commit=aaa\n');
+        return readFile(file, encoding);
+      });
+      mockFsCopyFile.mockImplementation((file) => file.includes('1.0.2_bbb')
+        ? Promise.reject(new Error('copy failed'))
+        : Promise.resolve());
+
+      let lockHeld = false;
+      mockHookAssetLock.mockImplementation(async (_dir, body) => {
+        lockHeld = true;
+        try { return await body(); }
+        finally { lockHeld = false; }
+      });
+      const posts: string[] = [];
+      mockExecFile.mockImplementation(async (_node: string, args: string[]) => {
+        if (args[0]?.endsWith('postinstall.js')) {
+          expect(lockHeld).toBe(true);
+          posts.push(args[0]);
+        }
+        return { stdout: '', stderr: '' };
+      });
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(posts).toEqual([
+        expect.stringContaining('1.0.2_bbb.candidate'),
+        expect.stringContaining('1.0.1_aaa'),
+      ]);
+      expect(mockFsWriteFile.mock.calls.filter(([file]) => file.endsWith('/current.tmp'))).toEqual([
+        [expect.any(String), '1.0.2_bbb\n'],
+        [expect.any(String), '1.0.1_aaa\n'],
+      ]);
     });
 
     it('adopts the managed node runtime + prebuilt modules and pins node-bin', async () => {

@@ -6,13 +6,12 @@ import { EventEmitter } from 'node:events';
 import { createTempDir, cleanupTempDir } from '../../helpers/fixture-builder.js';
 import {
   HookWatchdog,
-  getHookAssetLockPath,
-  withHookAssetLock,
   type PluginCheckTarget,
 } from '../../../src/core/hook-watchdog.js';
 import { HOOK_ASSET_MANIFEST } from '../../../src/core/hook-asset-manifest.js';
 import type { HookWatchdogConfig } from '../../../src/types/index.js';
 import * as fsUtils from '../../../src/utils/fs-utils.js';
+import { withHookAssetLock } from '../../../src/utils/hook-asset-lock.js';
 
 const mockLogger = vi.hoisted(() => ({
   info: vi.fn(),
@@ -1044,58 +1043,6 @@ describe('HookWatchdog', () => {
       await fs.rm(path.join(dataDir, 'hook-upgrade-in-progress'), { force: true });
       await new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir }).runCheck();
       expect(await fs.readFile(deployed, 'utf8')).toBe(scriptText);
-    });
-
-    it('lets only one waiter take a dead hook-asset lock', async () => {
-      // Two waiters here share one process. The temp file is named with pid and
-      // startedAt, so a shared millisecond lets one attempt unlink the other's
-      // file. The collector and the updater are different processes, and the pid
-      // already separates them. Start the second waiter on a later millisecond.
-      const dir = await createTempDir();
-      await fs.writeFile(getHookAssetLockPath(dir), `${JSON.stringify({ pid: 999999, startedAt: 1 })}\n`);
-      let inside = 0;
-      let maxInside = 0;
-      const entered: Array<() => void> = [];
-      const run = () => withHookAssetLock(dir, async () => {
-        inside += 1;
-        maxInside = Math.max(maxInside, inside);
-        await new Promise<void>((resolve) => entered.push(resolve));
-        inside -= 1;
-      });
-      const first = run();
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      const second = run();
-
-      try {
-        await vi.waitFor(() => expect(entered).toHaveLength(1));
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        expect(maxInside).toBe(1);
-        expect(entered).toHaveLength(1);
-        entered[0]!();
-        await vi.waitFor(() => expect(entered).toHaveLength(2));
-        expect(maxInside).toBe(1);
-        entered[1]!();
-        await Promise.all([first, second]);
-      } finally {
-        await cleanupTempDir(dir);
-      }
-    });
-
-    it('takes over a lock whose timestamp is in the future', async () => {
-      const dir = await createTempDir();
-      await fs.writeFile(
-        getHookAssetLockPath(dir),
-        `${JSON.stringify({ pid: 1, startedAt: Date.now() + 86_400_000 })}\n`,
-      );
-      let entered = false;
-      try {
-        await withHookAssetLock(dir, async () => {
-          entered = true;
-        });
-        expect(entered).toBe(true);
-      } finally {
-        await cleanupTempDir(dir);
-      }
     });
 
     const scriptName = 'claude-code-loongsuite-pilot-hook.sh';
