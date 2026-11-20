@@ -6,6 +6,8 @@ import { BaseSessionInput, type SessionInputOptions } from '../base/base-session
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { transformHookRecord } from '../base/hook-record-transform.js';
 
+import { HubUsage } from './hub-usage.js';
+
 const DEFAULT_HOOK_LOG_DIR = '~/.loongsuite-pilot/logs/trae-cn/history';
 const DEFAULT_FILE_PATTERN = 'trae-cn-*.jsonl';
 const DEFAULT_AUX_LOG_DIR = '~/.trae-cn/logs';
@@ -13,6 +15,7 @@ const DEFAULT_AUX_LOG_DIR = '~/.trae-cn/logs';
 export interface TraeCnLogInputOptions extends SessionInputOptions {
   /** TRAE ai-agent stdout log directory (auxiliary source; best-effort). */
   auxLogDir?: string;
+  hubCacheDir?: string;
 }
 
 /**
@@ -31,6 +34,7 @@ export class TraeCnLogInput extends BaseSessionInput {
   readonly id = 'trae-cn-log';
   readonly agentType = ClientType.TraeCn;
 
+  private readonly hub: HubUsage;
   private readonly auxLogDir: string;
 
   constructor(opts?: Partial<TraeCnLogInputOptions> & { stateStore: SessionInputOptions['stateStore'] }) {
@@ -40,6 +44,7 @@ export class TraeCnLogInput extends BaseSessionInput {
       filePattern: opts?.filePattern ?? DEFAULT_FILE_PATTERN,
       pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
     });
+    this.hub = new HubUsage(opts?.hubCacheDir ?? resolveHome('~/.trae-cn/hub_event_cache/TraeCode'));
     this.auxLogDir = opts?.auxLogDir ?? resolveHome(DEFAULT_AUX_LOG_DIR);
   }
 
@@ -84,7 +89,9 @@ export class TraeCnLogInput extends BaseSessionInput {
    * validator enforces.
    */
   protected override async collect(): Promise<AgentActivityEntry[]> {
+    await this.hub.refresh();
     const primary = await super.collect();
+    for (const entry of primary) this.hub.enrich(entry);
     // Aux source is plumbed and structured but currently a no-op: TRAE ai-agent
     // stdout lines do not carry a stable join key back to the hook's
     // session_id without further implementation work (§8.4 — the join key is
@@ -92,5 +99,9 @@ export class TraeCnLogInput extends BaseSessionInput {
     // aux parser is wired; the dedup guard is by (session_id, span_id) so
     // primary records always win.
     return primary;
+  }
+  protected override async onStop() {
+    await this.hub.close();
+    await super.onStop();
   }
 }
