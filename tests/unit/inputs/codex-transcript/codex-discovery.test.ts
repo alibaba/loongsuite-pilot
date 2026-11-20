@@ -146,6 +146,20 @@ describe('Codex bounded discovery progress', () => {
     expect(f.ends()).toHaveLength(1);
   });
 
+  it('keeps a live custom root available between marker pages', async () => {
+    const f = await fixture();
+    await rollout(f.home, '11', '0000-old', turn('0000-old'));
+    await f.marker('0000-old');
+    for (let index = 0; index < 512; index++) await f.marker(`9999-${index}`, { codex_home: undefined });
+    const check = () => CodexTranscriptInput.checkAvailability(f.wakeupDir, f.sessionDir);
+    expect(await check()).toBe(false);
+    expect(await check()).toBe(false);
+    expect(await check()).toBe(true);
+    expect(await check()).toBe(true);
+    await fs.rm(path.join(f.wakeupDir, '0000-old.json'));
+    expect(await check()).toBe(false);
+  });
+
   it('gives every root a turn when more than 64 custom homes are active', async () => {
     const f = await fixture();
     for (let index = 0; index < 65; index++) {
@@ -284,6 +298,27 @@ describe('Codex bounded discovery progress', () => {
     await fs.symlink(path.join(outsideHome, 'sessions', '2026'), year, 'dir');
     for (let cycle = 0; cycle < 10; cycle++) await f.collect();
     expect(f.entries).toHaveLength(0);
+  });
+
+  it('keeps scanning sibling dates when a saved directory becomes a file', async () => {
+    const f = await fixture();
+    const newer = await rollout(f.home, '02', 'inactive', '', true);
+    for (let index = 0; index < 512; index++) {
+      await rollout(f.home, '02', `inactive-${index}`, '', true);
+    }
+    await rollout(f.home, '01', 'old', turn('old'));
+    await f.marker('legacy');
+    await f.input.start();
+    const roots = (f.input as unknown as {
+      dynamicSessionRoots: Map<string, { walk: { stack: Array<{ dir: string }> } }>;
+    }).dynamicSessionRoots;
+    const resume = [...roots.values()][0]!.walk.stack.at(-1)!.dir;
+    expect(resume).toBe(await fs.realpath(path.dirname(newer)));
+    await fs.rm(resume, { recursive: true });
+    await fs.writeFile(resume, 'directory replaced by a file');
+    for (let cycle = 0; cycle < 6 && !f.ends().length; cycle++) await f.collect();
+    expect(f.ends()).toHaveLength(1);
+    expect(f.ends()[0]!['gen_ai.session.id']).toBe('old');
   });
 
   it.each(['outside-home', 'symlink', 'expired', 'relative'])('rejects an unsafe explicit transcript: %s', async mode => {

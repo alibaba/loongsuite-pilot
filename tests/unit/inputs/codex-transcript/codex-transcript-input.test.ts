@@ -889,6 +889,45 @@ describe('CodexTranscriptInput', () => {
     }
   });
 
+  it('uses the default checkpoint when only a cached marker can locate its transcript', async () => {
+    const testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-default-checkpoint-'));
+    tempDirs.push(testDir);
+    const realRoot = path.join(testDir, 'real');
+    const root = path.join(testDir, 'alias');
+    await fs.mkdir(realRoot);
+    await fs.symlink(realRoot, root, 'junction');
+    const { input, entries, sessionDir, wakeupDir, stateStore } = await createDormantInput(root);
+    const transcript = await writeTranscript(sessionDir, completedTurn());
+    const canonical = await fs.realpath(transcript);
+    await writeWakeupMarker(wakeupDir, 'session-1', {
+      session_id: 'session-1', codex_home: root, transcript_path: transcript,
+      received_at: new Date().toISOString(),
+    });
+    try {
+      await input.start();
+      await runInputCycle(input);
+      expect(entries).toHaveLength(0);
+      expect(transcriptCheckpoint(stateStore, transcript).scanOffset).toBe((await fs.stat(transcript)).size);
+      const internals = input as unknown as { wakeupWatcher: { close(): void }; dirtyWakeupMarkers: Set<string> };
+      internals.wakeupWatcher.close();
+      internals.dirtyWakeupMarkers.clear();
+      const nextTurn = completedTurn().split('\n').slice(1).join('\n').replaceAll('turn-1', 'turn-2');
+      await fs.appendFile(transcript, nextTurn);
+      const day = path.dirname(transcript);
+      const updated = new Date((await fs.stat(day)).mtimeMs + 10_000);
+      await fs.utimes(day, updated, updated);
+      blockedReads.add(path.resolve(day));
+      await runInputCycle(input);
+      expect(responsesForTurn(entries, 'turn-1')).toHaveLength(0);
+      expect(responsesForTurn(entries, 'turn-2').length).toBeGreaterThan(0);
+      expect(entries.filter(entry => entry['gen_ai.turn.end'] === true)).toHaveLength(1);
+      expect(transcriptCheckpoint(stateStore, transcript).scanOffset).toBe((await fs.stat(transcript)).size);
+      expect(stateStore.get(`codex-transcript:${canonical}`).lastOffset).toBeUndefined();
+    } finally {
+      await input.stop();
+    }
+  });
+
   it('collects a session finished during upgrade when older checkpoints exist', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-upgrade-baseline-'));
     tempDirs.push(root);

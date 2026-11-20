@@ -245,7 +245,9 @@ export class CodexTranscriptInput extends BaseInput {
   private baselinePending = false;
   private baselinePendingSince = 0;
   private readonly wakeupPaths = new Map<string, Set<string>>();
-  private static readonly availabilityMarkerCursors = new LruMap<string>(MAX_LINK_DESCRIPTORS);
+  private static readonly availabilityMarkerState = new LruMap<{ after?: string; available?: string }>(
+    MAX_LINK_DESCRIPTORS,
+  );
   private discoveryMarkerCursor?: string;
   private discoveryRootCursor?: string;
   private discoveryTranscriptCursor?: string;
@@ -313,16 +315,25 @@ export class CodexTranscriptInput extends BaseInput {
   ): Promise<boolean> {
     if (await directoryExists(sessionDir)) return true;
     try {
-      const entries = await fs.readdir(wakeupDir, { withFileTypes: true });
       const now = Date.now();
-      const markers = selectCodexWakeupMarkers(entries, this.availabilityMarkerCursors.get(wakeupDir));
-      if (markers.length) this.availabilityMarkerCursors.set(wakeupDir, markers[markers.length - 1]!.name);
+      const previous = this.availabilityMarkerState.get(wakeupDir);
+      if (previous?.available) {
+        const marker = path.join(wakeupDir, previous.available);
+        const stat = await fs.lstat(marker).catch(() => null);
+        // A different marker page cannot disprove an already active custom
+        // root. Revalidate its evidence before advancing the scan.
+        if (stat?.isFile() && await wakeupMarkerHasLiveRoot(marker, now)) return true;
+      }
+      const entries = await fs.readdir(wakeupDir, { withFileTypes: true });
+      const markers = selectCodexWakeupMarkers(entries, previous?.after);
+      const after = markers.at(-1)?.name;
       for (const entry of markers) {
-        const roots = await readCodexWakeupRoots(path.join(wakeupDir, entry.name), now);
-        for (const candidate of roots.flat()) {
-          if (await directoryExists(candidate)) return true;
+        if (await wakeupMarkerHasLiveRoot(path.join(wakeupDir, entry.name), now)) {
+          this.availabilityMarkerState.set(wakeupDir, { after, available: entry.name });
+          return true;
         }
       }
+      this.availabilityMarkerState.set(wakeupDir, { after });
       return false;
     } catch {
       return false;
@@ -475,11 +486,7 @@ export class CodexTranscriptInput extends BaseInput {
       for (const marker of [...dirty].slice(0, MAX_DYNAMIC_SESSION_FILES)) {
         const transcript = await readCodexWakeupTranscript(path.join(this.wakeupDir, marker), Date.now());
         if (!transcript) continue;
-        // Preserve the default tree's existing checkpoint spelling (notably
-        // /var versus /private/var on macOS), or the same file gets replayed.
-        targeted.add(transcript.startsWith(canonicalDefault + path.sep)
-          ? path.join(this.sessionDir, path.relative(canonicalDefault, transcript))
-          : transcript);
+        targeted.add(this.configuredTranscriptPath(transcript, canonicalDefault));
       }
     }
     const discoveryRevision = this.wakeupDiscoveryRevision;
@@ -515,7 +522,7 @@ export class CodexTranscriptInput extends BaseInput {
       // Known sessions need no directory/marker enumeration. Newly created
       // sessions and filename-less notifications retain full polling fallback.
       discovered = [...targeted].slice(0, MAX_DYNAMIC_SESSION_FILES)
-        .map(filePath => ({ filePath, baselineOnStart: false }));
+        .map(filePath => ({ filePath, baselineOnStart: filePath.startsWith(this.sessionDir + path.sep) }));
       await this.indexDiscoveredTranscriptOwners(discovered, skipPaths, 'targeted');
     }
     discovered.sort((left, right) => {
@@ -2490,6 +2497,14 @@ export class CodexTranscriptInput extends BaseInput {
     });
   }
 
+  private configuredTranscriptPath(filePath: string, canonicalDefault: string): string {
+    // Preserve the default tree's checkpoint keys even when a marker is the
+    // only evidence for a file and uses its canonical path.
+    return filePath.startsWith(canonicalDefault + path.sep)
+      ? path.join(this.sessionDir, path.relative(canonicalDefault, filePath))
+      : filePath;
+  }
+
   private async discoverSessionFiles(
     priorityMarkers = new Set<string>(),
     priorityPaths = new Set<string>(),
@@ -2515,7 +2530,10 @@ export class CodexTranscriptInput extends BaseInput {
         ? path.join(canonicalDefaultSessionDir, path.relative(this.sessionDir, filePath))
         : filePath;
       if (discovered.has(canonicalPath)) return;
-      discovered.set(canonicalPath, { filePath, baselineOnStart: false });
+      discovered.set(canonicalPath, {
+        filePath: this.configuredTranscriptPath(canonicalPath, canonicalDefaultSessionDir),
+        baselineOnStart: canonicalPath.startsWith(canonicalDefaultSessionDir + path.sep),
+      });
       remainingDynamicFiles--;
     };
     // Reserve half the file budget for the fallback walk, even when every Hook
@@ -3102,14 +3120,14 @@ async function collectRecentRolloutFiles(
       // enumerated Dirents, do not follow a substituted symlink on resume.
       if (await fs.realpath(frame.dir) !== frame.dir) {
         cursor.stack.pop();
-        return;
+        continue;
       }
       entries = await fs.readdir(frame.dir, { withFileTypes: true });
-    } catch (error) {
-      // Preserve a temporarily unreadable directory's position for the next
-      // poll. A removed directory must not block the rest of the traversal.
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') cursor.stack.pop();
-      return;
+    } catch {
+      // Retry unreadable or replaced directories on the next sweep. Holding
+      // this frame would prevent its siblings from ever being scanned.
+      cursor.stack.pop();
+      continue;
     }
     entries.sort((left, right) => right.name.localeCompare(left.name));
     let descended = false;
@@ -3184,6 +3202,14 @@ function isCodexSessionDateDirectory(name: string, depth: number): boolean {
   if (depth === 0) return /^\d{4}$/.test(name);
   if (depth === 1) return /^(0[1-9]|1[0-2])$/.test(name);
   if (depth === 2) return /^(0[1-9]|[12]\d|3[01])$/.test(name);
+  return false;
+}
+
+async function wakeupMarkerHasLiveRoot(markerPath: string, now: number): Promise<boolean> {
+  const roots = await readCodexWakeupRoots(markerPath, now);
+  for (const root of roots.flat()) {
+    if (await directoryExists(root)) return true;
+  }
   return false;
 }
 
