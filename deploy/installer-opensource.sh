@@ -2436,6 +2436,7 @@ remove_hook_configs() {
         "$HOME/.kiro/agents/pilot-kiro.json"
         "$HOME/.qwen/settings.json"
         "$HOME/.workbuddy/settings.json"
+        "$HOME/.zcode/cli/config.json"
     )
 
     local _has_node=0
@@ -2462,28 +2463,34 @@ try {
   if (!hooks || typeof hooks !== 'object') process.exit(0);
   let changed = false;
   const isCodex = cfg.endsWith('/.codex/hooks.json');
+  const isZCode = cfg.endsWith('/.zcode/cli/config.json');
+  const container = isZCode ? hooks.events : hooks;
+  if (!container || typeof container !== 'object' || Array.isArray(container)) process.exit(0);
   const isPilotCodex = c => typeof c === 'string' && c.includes(marker)
     && new RegExp('(^|[ /])codex-loongsuite-pilot-hook[.](sh|mjs|ps1)([^A-Za-z0-9_.-]|$)', 'i').test(c);
-  for (const [event, entries] of Object.entries(hooks)) {
+  const isPilotZCode = c => typeof c === 'string'
+    && new RegExp('(^|[ /])zcode-loongsuite-pilot-hook[.](sh|ps1)([^A-Za-z0-9_.-]|$)', 'i').test(c);
+  const isOwned = isCodex ? isPilotCodex : isZCode ? isPilotZCode : null;
+  for (const [event, entries] of Object.entries(container)) {
     if (!Array.isArray(entries)) continue;
-    const candidates = isCodex ? entries.flatMap(e => {
+    const candidates = isOwned ? entries.flatMap(e => {
       if (!e || typeof e !== 'object') return [e];
-      if (isPilotCodex(e.command)) { changed = true; return []; }
+      if (isOwned(e.command)) { changed = true; return []; }
       if (!Array.isArray(e.hooks)) return [e];
-      const nested = e.hooks.filter(h => !isPilotCodex(h && h.command));
+      const nested = e.hooks.filter(h => !isOwned(h && h.command));
       if (nested.length === e.hooks.length) return [e];
       changed = true;
       return nested.length ? [{ ...e, hooks: nested }] : [];
     }) : entries;
-    const filtered = isCodex ? candidates : candidates.filter(e => {
+    const filtered = isOwned ? candidates : candidates.filter(e => {
       const cmd = e.command || '';
       const nested = Array.isArray(e.hooks) ? e.hooks : [];
       const hasMarker = cmd.includes(marker) || nested.some(h => (h.command || '').includes(marker));
       if (hasMarker) changed = true;
       return !hasMarker;
     });
-    if (filtered.length === 0) { delete hooks[event]; changed = true; }
-    else hooks[event] = filtered;
+    if (filtered.length === 0 && (!isZCode || entries.length > 0)) { delete container[event]; changed = true; }
+    else container[event] = filtered;
   }
   if (changed) {
     fs.writeFileSync(cfg, JSON.stringify(data, null, 2) + '\n', 'utf-8');

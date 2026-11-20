@@ -26,7 +26,7 @@ function Get-ManagedNodeMajor {
 
 function Test-NodeSuitable {
     param([string]$bin)
-    if (-not (Test-Path $bin)) { return $false }
+    if (-not (Test-Path -LiteralPath $bin)) { return $false }
     $managedMajor = Get-ManagedNodeMajor $bin
     if ($null -ne $managedMajor) { return $managedMajor -ge $script:MIN_NODE_MAJOR }
     try {
@@ -63,7 +63,7 @@ function Resolve-NodeBin {
         $pinFiles += Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
     }
     foreach ($pinFile in $pinFiles) {
-        if (Test-Path $pinFile) {
+        if (Test-Path -LiteralPath $pinFile) {
             # -Encoding UTF8 + BOM strip: the pin file can hold a non-ASCII path and 5.1
             # defaults Get-Content to ANSI, which turns it into "??".
             $pinned = ([string](Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
@@ -75,8 +75,8 @@ function Resolve-NodeBin {
     # first, preserving the custom cache/data/default pin-file priority.
     foreach ($pinFile in $pinFiles) {
         $runtimeDir = Join-Path (Split-Path $pinFile) "runtime"
-        if (Test-Path $runtimeDir) {
-            $runtimeDirs = Get-ChildItem $runtimeDir -Directory -Filter "node-v*" -ErrorAction SilentlyContinue |
+        if (Test-Path -LiteralPath $runtimeDir) {
+            $runtimeDirs = Get-ChildItem -LiteralPath $runtimeDir -Directory -Filter "node-v*" -ErrorAction SilentlyContinue |
                 Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
             foreach ($d in $runtimeDirs) {
                 $candidates += Join-Path $d.FullName "bin\node.exe"
@@ -86,15 +86,15 @@ function Resolve-NodeBin {
         }
     }
     $nvmHome = $env:NVM_HOME
-    if ($nvmHome -and (Test-Path $nvmHome)) {
-        $nvmDirs = Get-ChildItem $nvmHome -Directory -ErrorAction SilentlyContinue |
+    if ($nvmHome -and (Test-Path -LiteralPath $nvmHome)) {
+        $nvmDirs = Get-ChildItem -LiteralPath $nvmHome -Directory -ErrorAction SilentlyContinue |
             Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
         foreach ($d in $nvmDirs) { $candidates += Join-Path $d.FullName "node.exe" }
     }
     if ($env:USERPROFILE) {
         $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
-        if (Test-Path $fnmDir) {
-            $fnmDirs = Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue |
+        if (Test-Path -LiteralPath $fnmDir) {
+            $fnmDirs = Get-ChildItem -LiteralPath $fnmDir -Directory -ErrorAction SilentlyContinue |
                 Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
             foreach ($d in $fnmDirs) { $candidates += Join-Path $d.FullName "installation\node.exe" }
         }

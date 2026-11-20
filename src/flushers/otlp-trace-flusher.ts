@@ -19,6 +19,7 @@ import { prepareCodexTurn } from './codex-turn-converter.js';
 import { prepareDelegatedTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
+import { markZCodeToolObservations, prepareZCodeTurn } from './zcode-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { convertQwenWorkCollaborationTurn } from './qwen-work-collaboration-converter.js';
@@ -36,6 +37,7 @@ import { BaseFlusher } from './base-flusher.js';
 import { SpanEnricherRunner } from './span-enricher.js';
 import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
+import { globalPollIntervalMs } from '../utils/poll-interval.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
 import {
   DEFAULT_GIT_PASSTHROUGH_KEYS,
@@ -126,6 +128,9 @@ function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentA
 // sends a same-session successor AND turnIdleTimeoutMs=0). Normal load
 // stays well under this; the cap is defense-in-depth, not a tuned limit.
 const MAX_TURN_BUFFERS = 64;
+// The Stop hook input polls every 30 seconds by default. Give both inputs
+// two polling intervals without relying on the optional generic idle flush.
+const ZCODE_MIN_SETTLE_MS = 60_000;
 // Payload budgets apply while turns wait for a native terminal, not conversion.
 const MAX_CODEX_TURN_RESIDENT_BYTES = 8 * 1024 * 1024;
 const MAX_CODEX_RESIDENT_BYTES = 32 * 1024 * 1024;
@@ -173,6 +178,9 @@ interface TurnBuffer {
   hermesDrainFailures?: number;
   /** A fixed-session cron execution has an explicit outer completion event. */
   isObservedOpenClawCron?: boolean;
+  zcodeHookSeen?: boolean;
+  zcodeRolloutCompletion?: boolean;
+  zcodeSettleAtMs?: number;
   lastActivityMs: number;
   activityVersion: number;
   logicalBytes: number;
@@ -750,10 +758,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     process.env.OTEL_SEMCONV_STABILITY_OPT_IN = semconvOptIns.join(',');
     process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
 
-    if (cfg.turnIdleTimeoutMs && cfg.turnIdleTimeoutMs > 0) {
-      this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);
-      this.idleTimer.unref();
-    }
+    if ((cfg.turnIdleTimeoutMs ?? 0) > 0) this.startIdleTimer();
     if (process.platform === 'linux') {
       this.hermesOwnerTimer = setInterval(() => { void this.recoverAbandonedHermesTurns(); }, HERMES_OWNER_CHECK_INTERVAL_MS);
       this.hermesOwnerTimer.unref();
@@ -940,7 +945,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     for (const [bufKey, buf] of this.turnBuffers) {
       // Native Codex task_complete/turn_aborted is authoritative. A second
       // work item in the same thread must not truncate a still-running turn.
-      if (agentType === 'codex' || agentType === 'doubao-work') break;
+      if (agentType === 'codex' || agentType === 'doubao-work' || agentType === 'zcode') break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       // Incremental Hermes turns may overlap inside one IM session. They have
       // their own explicit completion, so a successor is not an implicit end.
@@ -1062,12 +1067,37 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // model call carries its own finish reason.
     // 逐条模式下立即 flush；批量模式下（batchDepth>0）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
-    if (this.isTerminalEvent(entry)) {
+    if (agentType === 'zcode') {
+      this.recordZCodeCompletionCandidate(buf, entry);
+    } else if (this.isTerminalEvent(entry)) {
       buf.completed = true;
       if (this.batchDepth === 0) {
         this.triggerFlush(buf);
       }
     }
+  }
+
+  private recordZCodeCompletionCandidate(buf: TurnBuffer, entry: AgentActivityEntry): void {
+    if (entry['agent.source'] === 'zcode-hook') buf.zcodeHookSeen = true;
+    if (entry['agent.source'] === 'zcode-rollout' && entry['event.name'] === 'llm.response') {
+      buf.zcodeRolloutCompletion = entry['agent.zcode.rollout_completion_candidate'] === true;
+    }
+    // Stop can be vetoed, and finish_reason ends a model invocation. Treat
+    // either observation as a candidate, and cancel it when a new tool wave
+    // is observed. Let late records from either input postpone settlement.
+    if (buf.zcodeRolloutCompletion === true
+        || (buf.zcodeHookSeen && buf.zcodeRolloutCompletion === undefined)) {
+      buf.zcodeSettleAtMs = Date.now() + Math.max(ZCODE_MIN_SETTLE_MS, (globalPollIntervalMs() ?? 0) * 2);
+      this.startIdleTimer();
+    } else {
+      buf.zcodeSettleAtMs = undefined;
+    }
+  }
+
+  private startIdleTimer(): void {
+    if (this.idleTimer || this.stopping) return;
+    this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);
+    this.idleTimer.unref();
   }
 
   async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
@@ -1395,6 +1425,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
     if (turnId && turnId.length > 0) {
+      if (entry['gen_ai.agent.type'] === 'zcode' && traceId && VALID_TRACE_ID_RE.test(traceId)
+          && entry['gen_ai.session.id']) {
+        return { source: 'turn_id', value: turnId,
+          key: `zcode:${JSON.stringify([entry['user.id'], entry['gen_ai.session.id'], turnId, traceId])}` };
+      }
       if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'hermes') {
         const sessionId = entry['gen_ai.session.id'];
         if (typeof sessionId === 'string' && sessionId.length > 0) {
@@ -1638,6 +1673,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         try {
           const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(sanitized, { handler, idGenerator })
             : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(sanitized, { handler, idGenerator })
+            : agentType === 'zcode' ? prepareZCodeTurn(sanitized, { handler, idGenerator })
             : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(sanitized, handler, idGenerator)
             : { records: sanitized, handler, removedEntryCount: 0 };
           cleanup = prepared.cleanup;
@@ -1759,6 +1795,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         span.attributes['agent.hermes.collection.end_reason'] = 'producer_process_exited';
       }
     }
+    if (agentType === 'zcode') markZCodeToolObservations(records, spans, this.cfg.captureMessageContent !== false);
     applyQoderWorkStepTiming(records, spans);
     this.enrichToolSkillAttributes(records, spans);
     this.enrichMultimodalAttributes(records, spans);
@@ -2949,10 +2986,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   private tickIdleTimeout(): void {
     const timeout = this.cfg.turnIdleTimeoutMs ?? 0;
-    if (timeout <= 0 || this.batchDepth > 0) return;
+    if (this.batchDepth > 0) return;
     const now = Date.now();
+    let settlingZCode = false;
     for (const [, buf] of this.turnBuffers) {
-      if (!buf.completed && now - buf.lastActivityMs > timeout) {
+      if (buf.completed) continue;
+      if (buf.zcodeSettleAtMs !== undefined) {
+        if (now >= buf.zcodeSettleAtMs) {
+          buf.completed = true;
+          this.triggerFlush(buf);
+        } else {
+          settlingZCode = true;
+        }
+        continue;
+      }
+      if (timeout > 0 && now - buf.lastActivityMs > timeout) {
         if (buf.isObservedOpenClawCron) {
           if (!this.warnedOpenClawCronIdleTimeout) {
             this.warnedOpenClawCronIdleTimeout = true;
@@ -2993,6 +3041,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         buf.completed = true;
         this.triggerFlush(buf);
       }
+    }
+    if (timeout <= 0 && !settlingZCode && this.idleTimer) {
+      clearInterval(this.idleTimer);
+      this.idleTimer = undefined;
     }
   }
 }
@@ -3054,7 +3106,9 @@ function dropOrphanPairs(records: AgentActivityEntry[]): AgentActivityEntry[] {
       const stepId = (r['gen_ai.step.id'] as string | undefined) ?? '__no_step__';
       return stepsWithResponse.has(stepId);
     }
-    if (name === 'tool.call') {
+    // ZCode reports native evidence of a dispatched call even without an
+    // observed result. Keep the call without inventing a tool outcome.
+    if (name === 'tool.call' && r['agent.source'] !== 'zcode-rollout') {
       const callId = r['gen_ai.tool.call.id'] as string | undefined;
       // Keep tool.call only if it has no call.id (rare) or a matching result.
       return !callId || completedToolCallIds.has(callId);

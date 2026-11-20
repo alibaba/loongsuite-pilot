@@ -16,8 +16,9 @@ const KNOWN_SUBAGENT_TOOLS = new Set(['Agent']);
 // `cancelled` is documented there and is terminal in otlp-trace-flusher's
 // TERMINAL_FINISH_REASONS; the Codex aborted-turn and WorkBuddy builders emit it
 // directly, so its absence here was rejecting valid output.
+// ZCode also reports interrupted turns independently of user cancellation.
 // Exported so producers can assert against this set instead of hand-copying it.
-export const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'tool_calls', 'error', 'end_turn', 'max_tokens', 'cancelled']);
+export const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'tool_calls', 'error', 'end_turn', 'max_tokens', 'cancelled', 'interrupted']);
 const VALID_PART_TYPES = new Set(['text', 'tool_call', 'tool_call_response', 'reasoning']);
 
 export function isRuntimeSkillLoadSpan(tool) {
@@ -772,6 +773,13 @@ function isObject(value) {
 
 // ─── 5e. Semantic Validation ────────────────────────────────────────────────
 
+function hasAbnormalFinish(value) {
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return false; }
+  }
+  return Array.isArray(value) && value.some(reason => ['interrupted', 'cancelled', 'error'].includes(reason));
+}
+
 export function validateSemantic(trace, rules) {
   const checks = [];
   const { spans, childrenMap, hasMessageContent } = trace;
@@ -1020,7 +1028,7 @@ export function validateSemantic(trace, rules) {
     if (toolSpans.length === 0) checks.push(pass('semantic.tool_has_arguments'));
   }
 
-  // last_step_no_tool_call: last STEP's LLM output should not contain tool_call
+  // After a normal completion, the last STEP should contain the final answer.
   if (!hasMessageContent) {
     checks.push(skipped('semantic.last_step_no_tool_call'));
   } else {
@@ -1035,6 +1043,10 @@ export function validateSemantic(trace, rules) {
         const children = childrenMap.get(lastStep.spanId) || [];
         const llm = children.find(c => c._kind === 'LLM');
         if (llm) {
+          if (hasAbnormalFinish(llm.attributes?.['gen_ai.response.finish_reasons'])) {
+            checks.push(skipped('semantic.last_step_no_tool_call'));
+            continue;
+          }
           const raw = llm.attributes?.['gen_ai.output.messages'];
           if (raw) {
             try {

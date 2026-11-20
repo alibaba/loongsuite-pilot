@@ -2147,7 +2147,8 @@ function Remove-HookConfigs {
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
         (Join-Path $env:USERPROFILE ".kiro\agents\pilot-kiro.json"),
         (Join-Path $env:USERPROFILE ".qwen\settings.json"),
-        (Join-Path $env:USERPROFILE ".workbuddy\settings.json")
+        (Join-Path $env:USERPROFILE ".workbuddy\settings.json"),
+        (Join-Path $env:USERPROFILE ".zcode\cli\config.json")
     )
 
     foreach ($cfg in $configs) {
@@ -2177,19 +2178,36 @@ try {
   const hooks = data.hooks;
   if (!hooks || typeof hooks !== 'object') process.exit(0);
   let changed = false;
-  for (const [event, entries] of Object.entries(hooks)) {
+  const isZCode = cfg.replaceAll(String.fromCharCode(92), '/').endsWith('/.zcode/cli/config.json');
+  const container = isZCode ? hooks.events : hooks;
+  if (!container || typeof container !== 'object' || Array.isArray(container)) process.exit(0);
+  const isPilotZCode = c => typeof c === 'string'
+    && /(^|[ /])zcode-loongsuite-pilot-hook[.](sh|ps1)([^A-Za-z0-9_.-]|$)/i.test(c.replaceAll(String.fromCharCode(92), '/'));
+  for (const [event, entries] of Object.entries(container)) {
     if (!Array.isArray(entries)) continue;
-    const filtered = entries.filter(e => {
+    const filtered = isZCode ? entries.flatMap(e => {
+      if (!e || typeof e !== 'object') return [e];
+      if (isPilotZCode(e.command)) { changed = true; return []; }
+      if (!Array.isArray(e.hooks)) return [e];
+      const nested = e.hooks.filter(h => !isPilotZCode(h && h.command));
+      if (nested.length === e.hooks.length) return [e];
+      changed = true;
+      return nested.length ? [{ ...e, hooks: nested }] : [];
+    }) : entries.filter(e => {
       const cmd = e.command || '';
       const nested = Array.isArray(e.hooks) ? e.hooks : [];
       const hasMarker = cmd.includes(marker) || nested.some(h => (h.command || '').includes(marker));
       if (hasMarker) changed = true;
       return !hasMarker;
     });
-    if (filtered.length === 0) { delete hooks[event]; changed = true; }
-    else hooks[event] = filtered;
+    if (filtered.length === 0 && (!isZCode || entries.length > 0)) {
+      delete container[event];
+      changed = true;
+    } else {
+      container[event] = filtered;
+    }
   }
-  if (Object.keys(hooks).length === 0) {
+  if (!isZCode && Object.keys(hooks).length === 0) {
     delete data.hooks;
     changed = true;
   }

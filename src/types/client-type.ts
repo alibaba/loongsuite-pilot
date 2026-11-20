@@ -46,6 +46,7 @@ export enum ClientType {
   GrokBuildHook = 'grok-build',
   CopilotCli = 'copilot',
   OpenCode = 'opencode',
+  ZCode = 'zcode',
   MimoCode = 'mimo-code',
   Hermes = 'hermes',
   OpenClaw = 'openclaw',

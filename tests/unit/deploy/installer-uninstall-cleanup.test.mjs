@@ -689,6 +689,45 @@ describe('Unix Codex uninstall preserves third-party assets', () => {
   });
 });
 
+describe('ZCode uninstall preserves user hook configuration', () => {
+  const cleanupCases = process.platform === 'win32' ? ['ps1'] : ['sh', 'ps1'];
+  it.each(cleanupCases)('removes only the Pilot handler from nested ZCode events (%s)', extension => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-zcode-uninstall-'));
+    try {
+      const dir = join(root, '.zcode', 'cli');
+      const config = join(dir, 'config.json');
+      mkdirSync(dir, { recursive: true });
+      const pilot = { type: 'command', command: `"${join(root, 'custom-pilot', 'hooks', `zcode-loongsuite-pilot-hook.${extension}`)}" stop` };
+      const thirdParty = { type: 'command', command: 'unrelated-hook stop' };
+      const coexist = { matcher: '*', hooks: [thirdParty] };
+      const expected = { theme: 'dark', hooks: { enabled: true, metadata: { values: [] }, events: {
+        Stop: [coexist],
+        SessionStart: [],
+      } } };
+      writeFileSync(config, JSON.stringify({ ...expected, hooks: { ...expected.hooks, events: {
+        Stop: [{ ...coexist, hooks: [pilot, thirdParty] }, pilot],
+        SessionStart: [],
+      } } }));
+      let run;
+      if (extension === 'sh') {
+        const cleanup = sh.slice(sh.indexOf('remove_hook_configs()'), sh.indexOf('remove_grok_build_hook_config()'));
+        run = spawnSync('/bin/bash', ['-c', `${cleanup}\nmsg() { :; }\nremove_hook_configs\nremove_hook_configs`], {
+          encoding: 'utf8', env: { ...process.env, HOME: root },
+        });
+      } else {
+        const cleanup = ps1.slice(ps1.indexOf('function Remove-HookConfigs'), ps1.indexOf('function Remove-GrokBuildHookConfig'));
+        const [, nativeProgram] = cleanup.split("-e @'\n");
+        const [script] = nativeProgram.split("\n'@ ");
+        run = spawnSync(process.execPath, ['-e', script, config, '.loongsuite-pilot'], { encoding: 'utf8' });
+      }
+      expect(run.status, run.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual(expected);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('legacy OTel uninstall leaves non-Pilot Codex assets untouched', () => {
   it('shell OTel cleanup only targets the Claude cache', () => {
     const cleanup = sh.slice(sh.indexOf('remove_otel_plugin()'), sh.indexOf('\nprint_summary()'));

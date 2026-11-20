@@ -1205,6 +1205,7 @@ export const VALID_FINISH_REASONS = new Set([
   // Terminal in otlp-trace-flusher's TERMINAL_FINISH_REASONS and already emitted
   // by the Codex and WorkBuddy paths, so it belongs in the enum.
   'cancelled',
+  'interrupted',
 ]);
 
 // stop_sequence and refusal both end the turn, so they map onto values that
