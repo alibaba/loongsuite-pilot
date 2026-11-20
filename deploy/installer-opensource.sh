@@ -70,6 +70,8 @@ CMS_LICENSE_KEY=""
 CMS_ENDPOINT=""
 CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
+MULTICA_COLLECTION_MODE="${LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE:-}"
+START_SERVICE=1
 SELECTED_AGENTS=""
 HOOK_INSTALL_SCOPE=""
 AGENT_SELECTION_EXPLICIT=0
@@ -77,13 +79,12 @@ ALL_AGENTS=0
 MULTIMODAL_MODE=""
 MULTIMODAL_MODE_SET=0
 # Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
-MULTIMODAL_SUPPORTED_AGENTS="codex,qoder"
+MULTIMODAL_SUPPORTED_AGENTS="codex,qoder,qwen-work-cn"
 EXCLUDE_WORKSPACES=()
 MASK_MODE=""
 MASK_TYPES=""
 MASK_REPLACEMENT_MODE=""
 INTERCEPTOR_MODE=""
-INTERCEPTOR_TYPES=""
 HAS_SUDO=0
 PURGE=0
 PREFER_SYSTEM_NODE=0
@@ -172,6 +173,14 @@ while [[ $# -gt 0 ]]; do
         --cms-endpoint=*)     CMS_ENDPOINT="${1#*=}"; shift ;;
         --cms-workspace)      CMS_WORKSPACE="$2"; shift 2 ;;
         --cms-workspace=*)    CMS_WORKSPACE="${1#*=}"; shift ;;
+        --multica-collection-mode)
+            if [ "$#" -lt 2 ] || [[ "$2" == --* ]]; then
+                echo "--multica-collection-mode requires on or off" >&2
+                exit 1
+            fi
+            MULTICA_COLLECTION_MODE="$2"; shift 2 ;;
+        --multica-collection-mode=*) MULTICA_COLLECTION_MODE="${1#*=}"; shift ;;
+        --no-start) START_SERVICE=0; shift ;;
         --service-name-prefix) SERVICE_NAME_PREFIX="$2"; shift 2 ;;
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; shift 2 ;;
@@ -191,8 +200,6 @@ while [[ $# -gt 0 ]]; do
         --mask-replacement-mode=*) MASK_REPLACEMENT_MODE="${1#*=}"; shift ;;
         --interceptor-mode)   INTERCEPTOR_MODE="$2"; shift 2 ;;
         --interceptor-mode=*) INTERCEPTOR_MODE="${1#*=}"; shift ;;
-        --interceptor-types)  INTERCEPTOR_TYPES="$2"; shift 2 ;;
-        --interceptor-types=*) INTERCEPTOR_TYPES="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
         --prefer-system-node) PREFER_SYSTEM_NODE=1; shift ;;
         --prefer-system-node=*) PREFER_SYSTEM_NODE=1; shift ;;
@@ -228,6 +235,11 @@ if [ "$DASHBOARD_PORT_SET" -eq 1 ]; then
     fi
 fi
 
+case "$MULTICA_COLLECTION_MODE" in
+    ""|on|off) ;;
+    *) echo "--multica-collection-mode requires on or off" >&2; exit 1 ;;
+esac
+
 if [ -n "$MASK_MODE" ]; then
     case "$MASK_MODE" in
         all|none|custom) ;;
@@ -250,19 +262,11 @@ if [ -n "$MASK_REPLACEMENT_MODE" ] && [ "$MASK_REPLACEMENT_MODE" != "placeholder
 fi
 if [ -n "$INTERCEPTOR_MODE" ]; then
     case "$INTERCEPTOR_MODE" in
-        all|none|custom) ;;
+        all|none) ;;
         *)
-            echo "❌ Unknown interceptor mode: $INTERCEPTOR_MODE (use 'all', 'custom', or 'none')" >&2
+            echo "❌ Unknown interceptor mode: $INTERCEPTOR_MODE (use 'all' or 'none')" >&2
             exit 1 ;;
     esac
-fi
-if [ "$INTERCEPTOR_MODE" = "custom" ] && [ -z "$INTERCEPTOR_TYPES" ]; then
-    echo "❌ --interceptor-types is required when --interceptor-mode custom" >&2
-    exit 1
-fi
-if [ -n "$INTERCEPTOR_TYPES" ] && [ "$INTERCEPTOR_MODE" != "custom" ]; then
-    echo "❌ --interceptor-types can only be used with --interceptor-mode custom" >&2
-    exit 1
 fi
 if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; }; then
     echo "❌ --sls-api-key cannot be used with --sls-ak-id or --sls-ak-secret" >&2
@@ -911,15 +915,11 @@ try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { pro
 
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
-const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+const INTERCEPTOR_MASK_TYPES = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
 const parseTypeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean);
 const uniqueTypes = list => [...new Set(list)];
 const interceptorModeFinal = newVals.interceptorMode || (old.interceptor||{}).mode || '';
-const interceptorTypesFinal = interceptorModeFinal === 'all'
-  ? INTERCEPTOR_TYPE_SET.slice()
-  : interceptorModeFinal === 'custom'
-    ? parseTypeCsv(newVals.interceptorMode ? newVals.interceptorTypes : ((old.interceptor||{}).types||[]).join(',')).filter(t => INTERCEPTOR_TYPE_SET.indexOf(t) !== -1)
-    : [];
+const interceptorTypesFinal = interceptorModeFinal === 'all' ? INTERCEPTOR_MASK_TYPES.slice() : [];
 const maskModeFinal = newVals.maskMode || (old.mask||{}).mode || '';
 const maskTypesFinal = maskModeFinal === 'custom'
   ? parseTypeCsv(newVals.maskMode ? newVals.maskTypes : ((old.mask||{}).types||[]).join(','))
@@ -947,7 +947,6 @@ const checks = [
   { label: 'mask.types',         oldVal: (old.mask||{}).mode === 'custom' && Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: coveredMaskTypes.join(',') },
   { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
   { label: 'interceptor.mode',   oldVal: (old.interceptor||{}).mode||'',   newVal: newVals.interceptorMode },
-  { label: 'interceptor.types',  oldVal: Array.isArray((old.interceptor||{}).types) ? normalizeCsv(old.interceptor.types.join(',')) : '', newVal: normalizeCsv(newVals.interceptorTypes) },
   { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
 ];
 
@@ -957,8 +956,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","maskReplacementMode":"%s","interceptorMode":"%s","interceptorTypes":"%s","multimodalMode":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MASK_REPLACEMENT_MODE" "$INTERCEPTOR_MODE" "$INTERCEPTOR_TYPES" "$MULTIMODAL_MODE")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","maskReplacementMode":"%s","interceptorMode":"%s","multimodalMode":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MASK_REPLACEMENT_MODE" "$INTERCEPTOR_MODE" "$MULTIMODAL_MODE")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -1150,6 +1149,86 @@ migrate_legacy_layout() {
 # Common: write / merge config.json
 # ============================================================
 write_config() {
+    # Drop placeholders and values over 128 bytes. An empty result leaves the previous hostSn.
+    # Spaces are kept: a VMware serial is "VMware-" plus hex bytes separated by spaces.
+    normalize_host_sn() {
+        local value lower bytes
+        value=$(printf '%s' "${1-}" | tr -d '\r')
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        [ -n "$value" ] || return 0
+        lower=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+        case "$lower" in
+            none|default\ string|to\ be\ filled\ by\ o.e.m.|system\ serial\ number|not\ specified|0)
+                return 0
+                ;;
+        esac
+        bytes=$(printf '%s' "$value" | wc -c | tr -d '[:space:]')
+        [ "$bytes" -le 128 ] || return 0
+        case "$value" in
+            *[!A-Za-z0-9._:\ -]*) return 0 ;;
+        esac
+        printf '%s' "$value"
+    }
+
+    # Run a command for at most N seconds. On expiry, kill it and return 1.
+    # A failed or expired read leaves hostSn unset, so the previous value stays.
+    run_bounded() {
+        local secs="$1" outfile="$2"
+        shift 2
+        "$@" >"$outfile" 2>/dev/null &
+        local pid=$!
+        local i=0
+        while [ "$i" -lt "$secs" ] && kill -0 "$pid" 2>/dev/null; do
+            sleep 1
+            i=$((i + 1))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+            kill -9 "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 1
+        fi
+        wait "$pid" 2>/dev/null || true
+        return 0
+    }
+
+    read_host_sn() {
+        local uname_s raw candidate path raw_file
+        uname_s=$(uname -s 2>/dev/null || true)
+        if [ "$uname_s" = "Darwin" ]; then
+            raw=""
+            raw_file=$(mktemp 2>/dev/null) || return 0
+            if run_bounded 5 "$raw_file" ioreg -rd1 -c IOPlatformExpertDevice; then
+                raw=$(tr -d '\r' < "$raw_file" 2>/dev/null || true)
+            fi
+            rm -f "$raw_file"
+            candidate=$(printf '%s\n' "$raw" | sed -n 's/.*"IOPlatformSerialNumber" *= *"\([^"]*\)".*/\1/p' | head -n 1 || true)
+            if [ "${#candidate}" -gt 128 ]; then
+                candidate=""
+            fi
+            normalize_host_sn "$candidate"
+            return 0
+        fi
+        if [ "$uname_s" = "Linux" ]; then
+            for path in \
+                /sys/class/dmi/id/product_serial \
+                /sys/class/dmi/id/board_serial \
+                /sys/class/dmi/id/chassis_serial
+            do
+                [ -r "$path" ] || continue
+                raw=$(tr -d '\r' < "$path" 2>/dev/null || true)
+                candidate=$(normalize_host_sn "$raw")
+                if [ -n "$candidate" ]; then
+                    printf '%s' "$candidate"
+                    return 0
+                fi
+            done
+        fi
+        return 0
+    }
+
     local config_file="$DATA_DIR/config.json"
     msg "==> 写入配置文件 $config_file ..." \
         "==> Writing config to $config_file ..."
@@ -1159,7 +1238,10 @@ write_config() {
     if [ "${#EXCLUDE_WORKSPACES[@]}" -gt 0 ]; then
         excluded_workspaces_json=$("$NODE_BIN" -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${EXCLUDE_WORKSPACES[@]}")
     fi
+    local host_sn=""
+    host_sn=$(read_host_sn 2>/dev/null || true)
     printf '%s' "$PROBE_RESULT" | \
+        LP_HOST_SN="$host_sn" \
         LP_EXCLUDE_WORKSPACES="$excluded_workspaces_json" \
         LP_SLS_API_KEY="$SLS_API_KEY" \
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
@@ -1244,6 +1326,9 @@ if (userId) {
   delete config.identity;
 }
 
+const hostSn = process.env.LP_HOST_SN || '';
+if (hostSn) config.hostSn = hostSn;
+
 const collectLog = '${COLLECT_LOG}';
 const collectTrace = '${COLLECT_TRACE}';
 const cmsLicenseKey = '${CMS_LICENSE_KEY}';
@@ -1257,7 +1342,6 @@ const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
 const maskReplacementMode = '${MASK_REPLACEMENT_MODE}';
 const interceptorMode = '${INTERCEPTOR_MODE}';
-const interceptorTypes = '${INTERCEPTOR_TYPES}';
 
 if (collectLog) config.collectLog = collectLog === 'true';
 if (collectTrace) config.collectTrace = collectTrace === 'true';
@@ -1270,6 +1354,13 @@ if (cmsLicenseKey || cmsEndpoint || cmsWorkspace) {
 }
 
 if (serviceNamePrefix) config.serviceNamePrefix = serviceNamePrefix;
+const multicaCollectionMode = '${MULTICA_COLLECTION_MODE}';
+if (multicaCollectionMode) {
+  config.pipeline = config.pipeline || {};
+  config.pipeline.multica = config.pipeline.multica || {};
+  config.pipeline.multica.mode = multicaCollectionMode;
+}
+
 
 if (maskMode) {
   config.mask = config.mask || {};
@@ -1291,24 +1382,13 @@ if (maskReplacementMode) {
 if (interceptorMode) {
   config.interceptor = config.interceptor || {};
   config.interceptor.mode = interceptorMode;
-  if (interceptorMode === 'custom') {
-    config.interceptor.types = interceptorTypes
-      .split(',')
-      .map(type => type.trim())
-      .filter(Boolean);
-  } else {
-    delete config.interceptor.types;
-  }
+  delete config.interceptor.types;
 }
 
-const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+const INTERCEPTOR_MASK_TYPES = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
 (function ensureMaskCoversInterceptor(config) {
   const interceptor = config.interceptor || {};
-  const extra = interceptor.mode === 'all'
-    ? INTERCEPTOR_TYPE_SET.slice()
-    : interceptor.mode === 'custom' && Array.isArray(interceptor.types)
-      ? interceptor.types.filter(type => INTERCEPTOR_TYPE_SET.indexOf(type) !== -1)
-      : [];
+  const extra = interceptor.mode === 'all' ? INTERCEPTOR_MASK_TYPES.slice() : [];
   if (extra.length === 0) return;
   if ((config.mask || {}).mode === 'all') return;
   const current = (config.mask || {}).mode === 'custom' && Array.isArray((config.mask || {}).types)
@@ -2157,6 +2237,12 @@ cmd_install() {
     inject_qoderclicn_token_intercept
     inject_claude_code_fetch_intercept
     apply_installation_scope
+
+    if [ "$START_SERVICE" = "0" ]; then
+        PILOT_HELD_FOR_DEPLOY=0
+        print_summary "install"
+        return 0
+    fi
 
     msg "==> 启动服务..." "==> Starting service..."
     if run_pilot_cli start; then

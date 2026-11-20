@@ -173,6 +173,29 @@ describe('QoderWorkTraceInput', () => {
     expect(input.collectionMethod).toBe(CollectionMethod.HookJsonl);
   });
 
+  it('leaves the shared checkpoint clean after consuming an unchanged SDK file', async () => {
+    await writeSdkLog('old-session', ['already consumed']);
+    const file = path.join(sdkLogDir, 'old-session', 'main.log');
+    const stat = await fs.stat(file);
+    const input = makeInput();
+    const key = `${input.id}:sdk-token:${file}`;
+    const update = vi.spyOn(stateStore, 'update');
+    try {
+      expect(await startAndCollect(input)).toEqual([]);
+      expect(stateStore.get(key)).toMatchObject({
+        lastOffset: stat.size,
+        extra: { inode: stat.ino },
+      });
+      update.mockClear();
+      expect(await triggerCycle(input)).toEqual([]);
+      expect(await triggerCycle(input)).toEqual([]);
+      expect(update.mock.calls.filter(([updatedKey]) => updatedKey === key)).toEqual([]);
+    } finally {
+      update.mockRestore();
+      await input.stop();
+    }
+  });
+
   it('reads hook JSONL and injects trace_id', async () => {
     const hookFile = path.join(hookLogDir, todayFileName());
     const entry = buildHookEntry();
@@ -203,6 +226,58 @@ describe('QoderWorkTraceInput', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0].version).toBeUndefined();
     expect(entries[0]['agent.qoderwork.version']).toBe('1.1.26');
+  });
+
+  it('waits for a partial UTF-8 Hook record to finish before advancing', async () => {
+    const file = path.join(hookLogDir, todayFileName());
+    const row = Buffer.from(JSON.stringify(buildHookEntry({ 'event.id': 'split-字' })) + '\n');
+    const split = row.indexOf(Buffer.from('字')) + 1;
+    await fs.writeFile(file, row.subarray(0, split));
+
+    const input = makeInput();
+    expect(await startAndCollect(input)).toEqual([]);
+    expect(stateStore.getOffset(input.id)).toBe(0);
+
+    await fs.appendFile(file, row.subarray(split));
+    expect((await triggerCycle(input)).map(entry => entry['event.id'])).toEqual(['split-字']);
+    expect(stateStore.getOffset(input.id)).toBe(row.length);
+    await input.stop();
+  });
+
+  it('resumes an oversized Hook line skip after restart and collects the following record', async () => {
+    const file = path.join(hookLogDir, todayFileName());
+    const max = 16 * 1024 * 1024;
+    await fs.writeFile(file, Buffer.alloc(max, 0x78));
+    const first = makeInput();
+    expect(await startAndCollect(first)).toEqual([]);
+    await first.stop();
+    expect(stateStore.getOffset(first.id)).toBe(max);
+
+    const next = [buildHookEntry({ 'event.id': 'discarded-suffix' }), buildHookEntry({ 'event.id': 'after-skip' })]
+      .map(entry => JSON.stringify(entry) + '\n').join('');
+    await fs.appendFile(file, next);
+    const second = makeInput();
+    expect((await startAndCollect(second)).map(entry => entry['event.id'])).toEqual(['after-skip']);
+    expect(stateStore.getOffset(second.id)).toBe(max + Buffer.byteLength(next));
+    await second.stop();
+  });
+
+  it('records the inode of an idle legacy Hook checkpoint before a larger replacement', async () => {
+    const name = todayFileName();
+    const file = path.join(hookLogDir, name);
+    const old = JSON.stringify(buildHookEntry({ 'event.id': 'already-consumed' })) + '\n';
+    await fs.writeFile(file, old);
+    stateStore.set('qoder-work-trace', { lastFile: name, lastOffset: Buffer.byteLength(old) });
+    const input = makeInput();
+    expect(await startAndCollect(input)).toEqual([]);
+    expect(stateStore.get(input.id).lastOffset).toBe(Buffer.byteLength(old));
+    expect(stateStore.get(input.id).extra?.hookInode).toBe((await fs.stat(file)).ino);
+
+    const replacement = JSON.stringify(buildHookEntry({ 'event.id': 'new-' + 'x'.repeat(old.length) })) + '\n';
+    await fs.writeFile(file + '.new', replacement);
+    await fs.rename(file + '.new', file);
+    expect((await triggerCycle(input)).map(entry => entry['event.id'])).toEqual(['new-' + 'x'.repeat(old.length)]);
+    await input.stop();
   });
 
   it('resumes from offset on second poll', async () => {

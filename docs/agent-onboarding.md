@@ -461,6 +461,18 @@ If your integration follows an existing hook or plugin record shape, keep the co
 
 An integration is ready only after all applicable gates below pass.
 
+### Memory use when converting long turns
+
+Compatible completed turns use shared step-by-step conversion and await each
+bounded export before releasing finished spans. Existing adapters retain native
+IDs, parent relationships, full messages and per-call/turn token aggregates.
+Unsupported event shapes keep the existing batch path and its memory risk;
+source events, current history and a single large span can still grow.
+
+`npm run perf:turn-stream` checks long-turn memory, unique spans and token totals
+in separate Node processes with a 256 MiB old-space limit. It is a converter
+regression, separate from native-client and collector/backend validation.
+
 ### Field quality
 
 - Fields marked Required in the [Output Event Schema](output-event-schema.md) must have 100% coverage. Conditionally Required fields must have 100% coverage whenever their condition applies.

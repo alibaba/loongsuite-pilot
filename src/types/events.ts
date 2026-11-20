@@ -76,7 +76,10 @@ export interface AgentActivityEntry {
   'gen_ai.agent.name'?: string;
   'gen_ai.agent.description'?: string;
   'gen_ai.data_source.id'?: string;
-  'gen_ai.provider.name': string;
+  /** Required except for explicitly scoped Agent-only turn observations. */
+  'gen_ai.provider.name'?: string;
+  /** The source observes turn boundaries/input, not model or tool invocations. */
+  'loongsuite.observation.scope'?: 'agent_turn';
   'gen_ai.request.id'?: string;
   /** HTTP response status captured at the model transport boundary. */
   'http.response.status_code'?: number;
@@ -110,7 +113,13 @@ export interface AgentActivityEntry {
   'gen_ai.tool.call.duration'?: number;
   /** Host-observed guardrail verdict for this tool phase. */
   'gen_ai.guardrail.triggered'?: boolean;
-  'gen_ai.guardrail.action'?: 'allow' | 'block';
+  /** Enforced block, logged match, or other known verdict, respectively. */
+  'gen_ai.guardrail.action'?: 'block' | 'log' | 'allow';
+  'gen_ai.guardrail.fail_open'?: boolean;
+  /** Final blocking rule or first audit match. */
+  'gen_ai.guardrail.rule_id'?: string;
+  /** `rules[].version` from the managed document. */
+  'gen_ai.guardrail.rule_version'?: string;
   'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
   /** Grok execution evidence used to associate a tool declaration with its result. */

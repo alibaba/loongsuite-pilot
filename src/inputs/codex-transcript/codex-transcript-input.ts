@@ -229,6 +229,9 @@ export class CodexTranscriptInput extends BaseInput {
   private wakeupDiscoveryPending = false;
   private wakeupDiscoveryRevision = 0;
   private lastFullScanAt = -Infinity;
+  private defaultScanComplete = false;
+  private baselinePending = false;
+  private baselinePendingSince = 0;
   private readonly wakeupPaths = new Map<string, Set<string>>();
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
@@ -307,25 +310,61 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
+    const startedAt = Date.now();
     this.subagentLinker.restore(this.stateStore.get(this.id).extra?.codexDelegations);
     this.discardLegacyGlobalTurnRegistry();
     const discovered = await this.discoverSessionFiles();
     await this.indexDiscoveredTranscriptOwners(discovered);
+    const extra = this.stateStore.get(this.id).extra;
+    let isBaselineInit = extra?.isBaselineInit === true;
+    const baselineUnfinished = extra?.baselineUnfinished === true;
+    const persistedSince = extra?.baselinePendingSince;
+    if (
+      baselineUnfinished
+      && this.baselinePendingSince === 0
+      && typeof persistedSince === 'number'
+      && persistedSince > 0
+    ) {
+      this.baselinePendingSince = persistedSince;
+    }
+    // Checkpoints written while this version's scan is still unfinished are not
+    // an old-version migration.
+    if (!isBaselineInit && !baselineUnfinished) {
+      const prefix = `${this.id}:`;
+      const legacy = this.stateStore.keys().some(key =>
+        key.startsWith(prefix) && this.readCheckpoint(key) !== null);
+      if (legacy) {
+        this.stateStore.update(this.id, { extra: { isBaselineInit: true } });
+        isBaselineInit = true;
+      }
+    }
+    if (!isBaselineInit && this.baselinePendingSince === 0) this.baselinePendingSince = startedAt;
+    const pendingSinceAtEntry = this.baselinePendingSince;
+    if (!isBaselineInit && !baselineUnfinished) {
+      this.stateStore.update(this.id, {
+        extra: { baselineUnfinished: true, baselinePendingSince: this.baselinePendingSince },
+      });
+    }
     for (const { filePath, baselineOnStart } of discovered) {
       const key = this.stateKey(filePath);
       const meta = this.transcriptMetaByPath.get(filePath);
       const neededByPendingFusion = meta?.depth === 1
         && meta.parentThreadId !== undefined
         && this.hasLegacyPendingFusionForParent(meta.parentThreadId);
-      if (baselineOnStart && !neededByPendingFusion && !this.readCheckpoint(key)) {
+      const createdAfterPending = pendingSinceAtEntry > 0
+        && !await this.existedBeforeBaseline(filePath);
+      if (baselineOnStart && !neededByPendingFusion && !this.readCheckpoint(key) && !createdAfterPending) {
         const hasCopiedPrefix = hasCopiedHistoryPrefix(meta);
         if (hasCopiedPrefix) {
           await this.parkForkBaseline(filePath, key);
-        } else {
+        } else if (!isBaselineInit) {
           await this.baselineFile(filePath, key);
         }
       }
     }
+    this.baselinePending = !isBaselineInit && !this.defaultScanComplete;
+    if (!this.baselinePending) this.baselinePendingSince = 0;
+    if (!isBaselineInit && this.defaultScanComplete) this.completeBaselineInit();
     await Promise.all([
       fs.mkdir(this.wakeupDir, { recursive: true }),
       fs.mkdir(this.spanContextDir, { recursive: true }),
@@ -443,11 +482,26 @@ export class CodexTranscriptInput extends BaseInput {
       const rightDepth = this.transcriptMetaByPath.get(right.filePath)?.depth ?? 0;
       return leftDepth - rightDepth || left.filePath.localeCompare(right.filePath);
     });
-    for (const { filePath } of discovered) {
+    for (const { filePath, baselineOnStart } of discovered) {
       if (skipPaths.has(filePath)) continue;
+      if (baselineOnStart && this.baselinePending) {
+        const key = this.stateKey(filePath);
+        const meta = this.transcriptMetaByPath.get(filePath);
+        const neededByPendingFusion = meta?.depth === 1
+          && meta.parentThreadId !== undefined
+          && this.hasLegacyPendingFusionForParent(meta.parentThreadId);
+        if (!neededByPendingFusion && !this.readCheckpoint(key) && await this.existedBeforeBaseline(filePath)) {
+          if (hasCopiedHistoryPrefix(meta)) await this.parkForkBaseline(filePath, key);
+          else await this.baselineFile(filePath, key);
+          continue;
+        }
+      }
       emittedCount += await this.processFile(filePath);
     }
-    if (fullScan) emittedCount += await this.retryPendingAgentResults();
+    if (fullScan) {
+      if (this.baselinePending && this.defaultScanComplete) this.completeBaselineInit();
+      emittedCount += await this.retryPendingAgentResults();
+    }
     this.reportSubagentLinks();
     this.saveDelegationState();
     if (emittedCount > 0) {
@@ -533,15 +587,42 @@ export class CodexTranscriptInput extends BaseInput {
     this.rolloutIdleSnapshot.set(filePath, { ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs });
   }
 
+  private completeBaselineInit(): void {
+    const current = this.stateStore.get(this.id);
+    const extra = { ...(current.extra ?? {}) };
+    delete extra.baselineUnfinished;
+    delete extra.baselinePendingSince;
+    extra.isBaselineInit = true;
+    this.stateStore.set(this.id, { ...current, extra });
+    this.baselinePending = false;
+    this.baselinePendingSince = 0;
+  }
+
+  private async existedBeforeBaseline(filePath: string): Promise<boolean> {
+    try {
+      const stat = await fs.stat(filePath);
+      const stamps = [stat.birthtimeMs, stat.mtimeMs].filter(ms => ms > 0);
+      return stamps.length > 0 && Math.floor(Math.min(...stamps)) <= this.baselinePendingSince;
+    } catch {
+      return false;
+    }
+  }
+
   private async listDefaultRolloutFiles(): Promise<string[]> {
     const cached = this.cachedDefaultRollout;
-    if (cached && await this.rolloutDirsUnchanged(cached.dirMtimes)) return cached.files;
+    if (cached && await this.rolloutDirsUnchanged(cached.dirMtimes)) {
+      this.defaultScanComplete = true;
+      return cached.files;
+    }
     const files: string[] = [];
     const dirMtimes = new Map<string, number>();
+    let rootMissing = false;
     const complete = await collectRolloutFiles(this.sessionDir, files, dirMtimes, (dir, error) => {
+      if (dir === this.sessionDir && (error as NodeJS.ErrnoException).code === 'ENOENT') rootMissing = true;
       this.logger.warn('Codex rollout directory scan failed; retrying next poll', { dir, error: String(error) });
     });
-    this.cachedDefaultRollout = complete && dirMtimes.size > 0 ? { dirMtimes, files } : null;
+    this.defaultScanComplete = complete || rootMissing;
+    this.cachedDefaultRollout = this.defaultScanComplete && dirMtimes.size > 0 ? { dirMtimes, files } : null;
     return files;
   }
 
@@ -1512,19 +1593,30 @@ export class CodexTranscriptInput extends BaseInput {
     stat: fsSync.Stats,
     endOffset = stat.size,
   ): Promise<number | null> {
+    const stateKey = this.stateKey(filePath);
+    const version = sourceVersion(stat);
+    const key = filePath + '\0' + version + '\0' + endOffset;
+    const previous = this.ownerOffsetProbes.get(key);
+    const absentVersion = this.stateStore.get(stateKey).extra?.codexOwnerAbsentVersion;
+    // A full, stable negative result belongs to this file's checkpoint, not
+    // the shared LRU: inventories larger than the LRU otherwise evict every
+    // result before the next poll. This does not advance the collection cursor
+    // or bypass pending turn/fork recovery. Prefix probes remain independent.
+    if (endOffset === stat.size && typeof absentVersion === 'string'
+      && absentVersion.length <= 256 && absentVersion === version) return null;
     // Owner selection uses the rollout filename, so paths stay distinct even
     // for hard links. Different scan boundaries can coexist for one version.
     // NUL cannot occur in a filesystem path, so the tuple stays unambiguous
     // without allocating an intermediate array or running a JSON serializer.
-    const key = filePath + '\0' + sourceVersion(stat) + '\0' + endOffset;
-    const previous = this.ownerOffsetProbes.get(key);
     // Hits perform no content I/O. A same-size rewrite preserving both
     // timestamps is indistinguishable and can retain stale owner state until
     // another source-version component changes.
     // A shorter search cannot establish absence in the rest of the file, and
     // an owner found by a longer search may lie outside the requested prefix.
     if (previous !== undefined) return previous;
-    const offset = await findOwnerSessionMetaOffset(filePath, endOffset, this.getInputRuntimeAccumulator());
+    const { offset, completeAbsence } = await findOwnerSessionMetaOffset(
+      filePath, endOffset, this.getInputRuntimeAccumulator(),
+    );
     // Never cache a result observed while a writer changed or removed the file.
     try {
       if (!sameFileVersion(stat, await fs.stat(filePath))) return null;
@@ -1532,6 +1624,15 @@ export class CodexTranscriptInput extends BaseInput {
       return null;
     }
     this.ownerOffsetProbes.set(key, offset);
+    const current = this.stateStore.get(stateKey);
+    if (completeAbsence && endOffset === stat.size) {
+      // Separate from codexTranscript so a caller holding an older checkpoint
+      // cannot overwrite the evidence when it later saves its scan progress.
+      this.stateStore.update(stateKey, { extra: { ...current.extra, codexOwnerAbsentVersion: version } });
+    } else if (offset !== null && current.extra?.codexOwnerAbsentVersion !== undefined) {
+      const { codexOwnerAbsentVersion: _discarded, ...extra } = current.extra;
+      this.stateStore.set(stateKey, { ...current, extra });
+    }
     return offset;
   }
 
@@ -3258,20 +3359,23 @@ async function findOwnerSessionMetaOffset(
   filePath: string,
   endOffset: number,
   runtime?: InputRuntimeAccumulator | null,
-): Promise<number | null> {
+): Promise<{ offset: number | null; completeAbsence: boolean }> {
   let ownerOffset: number | null = null;
-  let sawSessionMeta = false;
-  await scanJsonLines(filePath, 0, endOffset, line => {
+  const scan = await scanJsonLines(filePath, 0, endOffset, line => {
     if (line.record.type !== 'session_meta') {
       // Codex writes the owning meta and any copied fork metadata as a header.
-      // Stop before scanning the potentially large inherited conversation.
-      return sawSessionMeta ? false : undefined;
+      // Only a valid owner closes that header. A malformed session_meta must
+      // not turn a partial probe into an uncacheable negative on every poll.
+      return ownerOffset !== null ? false : undefined;
     }
-    sawSessionMeta = true;
     ownerOffset = selectOwnerSessionMetaOffset(filePath, ownerOffset, line);
     return undefined;
   }, runtime);
-  return ownerOffset;
+  return {
+    offset: ownerOffset,
+    completeAbsence: ownerOffset === null && scan.nextOffset === endOffset
+      && !scan.quarantined && !scan.incompleteTail,
+  };
 }
 
 type ForkAnchorKind = 'initial-hook' | 'uuidv7' | 'terminal-recovery';

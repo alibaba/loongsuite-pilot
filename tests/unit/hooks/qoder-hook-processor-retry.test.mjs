@@ -621,6 +621,89 @@ describe('findTriggeredTurnWindow', () => {
     });
   });
 
+  it('keeps the user row when another UserPromptSubmit progress arrives after it', () => {
+    const firstUser = user('first prompt');
+    const firstStop = progress('Stop');
+    const firstEnd = progress('SessionEnd');
+    const secondUser = user('second prompt');
+    const secondStop = progress('Stop');
+    const secondEnd = progress('SessionEnd');
+    const rows = [
+      progress('UserPromptSubmit'),
+      progress('UserPromptSubmit'),
+      firstUser,
+      progress('UserPromptSubmit'),
+      assistant('first answer'),
+      firstStop,
+      firstEnd,
+      progress('UserPromptSubmit'),
+      secondUser,
+      progress('UserPromptSubmit'),
+      assistant('second answer'),
+      secondStop,
+      secondEnd,
+    ];
+    const transcript = writeTranscript('post-user-progress.jsonl', rows);
+    const snapshot = readTranscriptSnapshot(transcript);
+
+    const first = findTriggeredTurnWindow(snapshot, rows.indexOf(firstStop));
+    const second = findTriggeredTurnWindow(snapshot, rows.indexOf(secondStop));
+    expect(first).toMatchObject({
+      status: 'complete',
+      startLine: rows.indexOf(firstUser),
+      stopLine: rows.indexOf(firstStop),
+      endLine: rows.indexOf(firstEnd) + 1,
+    });
+    expect(second).toMatchObject({
+      status: 'complete',
+      startLine: rows.indexOf(secondUser),
+      stopLine: rows.indexOf(secondStop),
+      endLine: rows.indexOf(secondEnd) + 1,
+    });
+    expect(snapshot.rows.slice(first.startLine, first.endLine).some(row => row.message?.content === 'first prompt')).toBe(true);
+    expect(snapshot.rows.slice(second.startLine, second.endLine).some(row => row.message?.content === 'second prompt')).toBe(true);
+  });
+
+  it.each(['none', 'SessionEnd', 'last-prompt'])('keeps the current user with normal progress ordering after %s', boundary => {
+    const previous = user('previous prompt');
+    const current = user('current prompt');
+    const promptProgress = progress('UserPromptSubmit');
+    const stop = progress('Stop');
+    const rows = [
+      previous,
+      ...(boundary === 'none' ? [] : [boundary === 'last-prompt' ? { type: 'last-prompt' } : progress(boundary)]),
+      promptProgress,
+      current,
+      assistant('current answer'),
+      stop,
+      progress('SessionEnd'),
+    ];
+    const snapshot = readTranscriptSnapshot(writeTranscript('normal-progress.jsonl', rows));
+    const window = findTriggeredTurnWindow(snapshot, rows.indexOf(stop));
+    expect(window).toMatchObject({ status: 'complete', startLine: rows.indexOf(promptProgress) });
+    const windowRows = snapshot.rows.slice(window.startLine, window.endLine);
+    expect(windowRows).toContainEqual(current);
+    expect(windowRows).not.toContainEqual(previous);
+  });
+
+  it.each(['SessionEnd', 'last-prompt'])('does not reuse a previous user across %s when the current user is missing', boundary => {
+    const previous = user('previous prompt');
+    const promptProgress = progress('UserPromptSubmit');
+    const stop = progress('Stop');
+    const rows = [
+      previous,
+      boundary === 'last-prompt' ? { type: 'last-prompt' } : progress(boundary),
+      promptProgress,
+      assistant('current answer'),
+      stop,
+      progress('SessionEnd'),
+    ];
+    const snapshot = readTranscriptSnapshot(writeTranscript('missing-current-user.jsonl', rows));
+    const window = findTriggeredTurnWindow(snapshot, rows.indexOf(stop));
+    expect(window).toMatchObject({ status: 'complete', startLine: rows.indexOf(promptProgress) });
+    expect(snapshot.rows.slice(window.startLine, window.endLine)).not.toContainEqual(previous);
+  });
+
   it('uses the next prompt as a boundary when SessionEnd is missing', () => {
     const rows = [
       progress('UserPromptSubmit'),

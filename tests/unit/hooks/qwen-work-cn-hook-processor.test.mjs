@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { projectLogEntry } from '../../../src/normalization/entry-builder.ts';
 import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 import {
   extractText,
@@ -99,6 +101,41 @@ function realShapeRows() {
 }
 
 describe('QwenWorkCN hook processor', () => {
+  it.each([true, false])('keeps requestSetId private and scoped to the first native request (capture=%s)', captureMessageContent => {
+    const rows = realShapeRows();
+    rows[0].requestSetId = 'native-qwen-request';
+    rows[0].humanInput = { text: 'inspect package.json', mode: 'prompt' };
+    const events = processTranscript(rows, 'fallback-session', {
+      agents: { 'qwen-work-cn': { captureMessageContent } },
+    });
+    const requests = events.filter(event => event['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(3);
+    expect(requests[0]['agent.pilot.interceptor.correlation']).toEqual({
+      requestId: createHash('sha256').update('native-qwen-request').digest('hex'),
+      hash: createHash('sha256').update('inspect package.json').digest('hex'),
+      at: Date.parse(rows[0].timestamp),
+    });
+    expect(events.filter(event => event['agent.pilot.interceptor.correlation'])).toEqual([requests[0]]);
+    expect(JSON.stringify(events)).not.toContain('native-qwen-request');
+    expect(requests.map(event => event['gen_ai.request.id'])).toEqual([
+      'response-1:request', 'response-2:request', 'response-3:request',
+    ]);
+    const outputs = events.map(event => projectLogEntry(event, { dropAgentScopedFields: true }));
+    expect(JSON.stringify(outputs)).not.toContain('native-qwen-request');
+    expect(JSON.stringify(outputs)).not.toContain('interceptor.correlation');
+    expect(JSON.stringify(outputs)).not.toContain('requestSetId');
+    if (!captureMessageContent) expect(requests[0]).not.toHaveProperty('gen_ai.input.messages_delta');
+  });
+
+  it.each([undefined, '', 42, 'x'.repeat(513)])('keeps legacy prompts eligible without an unusable requestSetId (%s)', requestSetId => {
+    const rows = realShapeRows();
+    rows[0].requestSetId = requestSetId;
+    const events = processTranscript(rows, 'fallback-session', {});
+    expect(events.find(event => event['event.name'] === 'llm.request')['agent.pilot.interceptor.correlation'])
+      .toEqual({ hash: createHash('sha256').update(extractText(rows[0])).digest('hex'),
+        at: Date.parse(rows[0].timestamp) });
+  });
+
   it('joins every text block in the user prompt', () => {
     expect(extractText(realShapeRows()[0])).toBe(
       '<system-reminder>workspace context</system-reminder>\ninspect package.json',

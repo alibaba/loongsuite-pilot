@@ -14,7 +14,8 @@ export const CLAUDE_SYSTEM_HOOK_ASSETS = [
   'claude-code/message-converter.mjs', 'claude-code/state.mjs',
   'claude-code/tool-context.mjs', 'claude-code/transcript-parser.mjs',
   'shared/decode-payload.mjs', 'shared/error-logger.mjs', 'shared/event-emitter.mjs',
-  'shared/qoder-db-utils.mjs', 'shared/resource-context.mjs', 'shared/stdin-reader.mjs',
+  'shared/qoder-db-utils.mjs', 'shared/raw-jsonl-writer.mjs', 'shared/raw-source-gate.mjs',
+  'shared/resource-context.mjs', 'shared/stdin-reader.mjs',
   'shared/sync-file-lock.mjs', 'shared/upstream-context.mjs',
   'shared/workspace-policy.mjs', 'shared/workspace-privacy.mjs',
 ] as const;

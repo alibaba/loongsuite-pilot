@@ -208,4 +208,70 @@ describe('Grok Build watchdog target', () => {
     await expect(target.cleanup?.()).resolves.toBeUndefined();
     expect(undeployAgent).toHaveBeenCalledWith(expect.objectContaining({ id: 'grok-build' }));
   });
+
+  it('does not restart the watchdog when an in-flight install signal resumes after shutdown begins', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-signal-stop-'));
+    const signal = hookInstallSignalPath(root);
+    await fs.writeFile(signal, 'scope changed');
+    const o = new Orchestrator({ dataDir: root } as never) as any;
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const oldWatchdog = { stop: vi.fn() };
+    const nextWatchdog = { stop: vi.fn(), start: vi.fn() };
+    o.isRunning = true;
+    o.deploymentManager = { reloadState: vi.fn(() => pending), stopWorkers: vi.fn().mockResolvedValue(undefined) };
+    o.hookWatchdog = oldWatchdog;
+    o.hookWatchdogTargetKey = 'old';
+    const create = vi.spyOn(o, 'createHookWatchdog').mockReturnValue(nextWatchdog);
+    vi.spyOn(o, 'currentHookWatchdogTargetKey').mockReturnValue('new');
+    vi.spyOn(o, 'refreshDeploymentScope').mockResolvedValue(undefined);
+    vi.spyOn(o, 'reconcileRecordedAgents').mockResolvedValue(undefined);
+    vi.useFakeTimers();
+    try {
+      const poll = o.pollHookInstallSignal(signal);
+      const stop = o.stop();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(oldWatchdog.stop).toHaveBeenCalledTimes(1);
+      release();
+      await Promise.all([poll, stop]);
+      await vi.advanceTimersByTimeAsync(35_000);
+      expect(create).not.toHaveBeenCalled();
+      expect(nextWatchdog.start).not.toHaveBeenCalled();
+      expect(o.isRunning).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('bounds shutdown when signal state I/O is stalled and ignores its late completion', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-signal-timeout-'));
+    const signal = hookInstallSignalPath(root);
+    await fs.writeFile(signal, 'scope changed');
+    const o = new Orchestrator({ dataDir: root } as never) as any;
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    o.isRunning = true;
+    o.deploymentManager = { reloadState: vi.fn(() => pending), stopWorkers: vi.fn().mockResolvedValue(undefined) };
+    o.hookWatchdog = { stop: vi.fn() };
+    const refresh = vi.spyOn(o, 'refreshDeploymentScope').mockResolvedValue(undefined);
+    const create = vi.spyOn(o, 'createHookWatchdog');
+    vi.useFakeTimers();
+    try {
+      const poll = o.pollHookInstallSignal(signal);
+      const duplicate = o.pollHookInstallSignal(signal);
+      expect(o.deploymentManager.reloadState).toHaveBeenCalledTimes(1);
+      const stop = o.stop();
+      await vi.advanceTimersByTimeAsync(5000);
+      await stop;
+      expect(o.isRunning).toBe(false);
+      release();
+      await Promise.all([poll, duplicate]);
+      expect(refresh).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });

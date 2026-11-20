@@ -8,10 +8,32 @@ import {
   buildAccessLogEntry,
   serializeAccessLogEntry,
   writeInterceptorAccessLog,
+  InterceptorAccessLogWriter,
 } from '../../../src/interceptor/access-log.js';
 import type { HookRequest } from '../../../src/interceptor/types.js';
 
 describe('interceptor access log', () => {
+  it('keeps audit matches and fail-open state while masking match metadata', () => {
+    const line = serializeAccessLogEntry(buildAccessLogEntry({ event: 'PreToolUse', input: {}, result: {
+      action: 'allow', matched: true, failOpen: true, matches: [{ matched: true, action: 'log',
+        ruleId: 'observed', ruleVersion: '1', reason: 'sk-1234567890abcdefghijklmnop' }],
+    } }));
+    expect(line).not.toContain('sk-1234567890abcdefghijklmnop');
+    expect(JSON.parse(line).result).toMatchObject({ action: 'allow', matched: true, failOpen: true,
+      matches: [{ action: 'log', matched: true, ruleId: 'observed', reason: '[APIKEY_MASKED]' }] });
+  });
+  it('drains an ordered bounded asynchronous queue and records overflow', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'interceptor-async-audit-'));
+    const file = join(dir, 'access.log');
+    const writer = new InterceptorAccessLogWriter(file, 2);
+    for (let i = 0; i < 3; i++) writer.enqueue(buildAccessLogEntry({
+      event: 'UserPromptSubmit', sessionId: String(i), input: {}, result: { action: 'allow' },
+    }));
+    await writer.close();
+    const rows = (await readFile(file, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    expect(rows.map(row => row.sessionId)).toEqual(['0', '1', undefined]);
+    expect(rows[2]).toMatchObject({ event: 'audit-overflow', result: { error: 'audit queue dropped 1 records' } });
+  });
   it('includes event, input, and result on each line', () => {
     const line = serializeAccessLogEntry(buildAccessLogEntry({
       event: 'PostToolUse',
@@ -35,6 +57,28 @@ describe('interceptor access log', () => {
       reason: '[DATABASEURL_BLOCKED]',
     });
     expect(typeof parsed.ts).toBe('string');
+  });
+
+  it('redacts secrets in the rule title and message', () => {
+    const secret = 'mysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot';
+    const line = serializeAccessLogEntry(buildAccessLogEntry({
+      event: 'UserPromptSubmit',
+      input: { prompt: 'hello' },
+      result: {
+        action: 'block',
+        reason: secret,
+        title: `label ${secret}`,
+        severity: secret,
+        message: `不要粘贴 ${secret}`,
+      },
+    }));
+    expect(line).not.toContain('eMCyjl4XWcVzpXFb');
+    expect(JSON.parse(line).result).toMatchObject({
+      reason: '[DATABASEURL_MASKED]',
+      title: 'label [DATABASEURL_MASKED]',
+      severity: '[DATABASEURL_MASKED]',
+      message: '不要粘贴 [DATABASEURL_MASKED]',
+    });
   });
 
   it('copies prompt, tool input, and tool response from a hook request', () => {

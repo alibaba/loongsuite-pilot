@@ -23,6 +23,85 @@ keeps their identity, input and model/tool calls separate by turn/task identity.
 Background reviews without a native sender ID retain the configured identity or
 hostname fallback; they do not inherit the last IM user in the session.
 
+## OpenClaw / Hermes request context
+
+Modern OpenClaw uses `llm_input.historyMessages` plus the submitted prompt to
+seed request history. Later steps append observed assistant messages and tool
+results in persistence order. The Trace converter inherits system instructions
+and tool definitions; it does not reuse the first snapshot as every later
+request. Older OpenClaw releases retain their existing inferred-timing adapter.
+When a model fallback reuses the same `runId`, the new cycle keeps bounded input
+state and emits updated full snapshots as assistant/tool results arrive. This
+prevents the previous cycle's history and prompt from accumulating again.
+
+Hermes prefers native Chat `request_messages`, falling back to the complete
+`conversation_history`. Its current-turn response window stays separate, so
+earlier assistant replies cannot consume a new request's response. Provider
+tool blocks and Responses items retain normalized conversation history as a
+fallback.
+
+Hermes 0.16.0 can discard the entire `request.body` at its 50,000-character Hook
+limit. On hosts exposing the compatible
+`_api_request_payload_for_hook(self, api_kwargs)` boundary, Pilot independently
+snapshots system/tool metadata while preserving the original return object,
+exceptions and payload seen by other plugins. Snapshots match the request
+object and session, expire after five seconds, and are consumed once. Without
+this capability Pilot uses native system fields or the visible body; it does
+not parse a truncated `preview`.
+
+Capture remains bounded; message character counts alone cannot prove complete
+coverage of billable model tokens:
+
+- OpenClaw seeds and fallback-cycle snapshots hold at most 1,024 messages and
+  approximately 2 MiB, retaining the current prompt and recent history on overflow. Existing 64 Ki-character text
+  part/tool-result limits still apply.
+- Hermes captures at most 1,024 messages and approximately 2 MiB per LLM request,
+  with 256 Ki characters per text part. The lifecycle window remains 64 messages.
+  System/tools retain their existing 32 Ki-character string, 128-item and depth
+  limits; the additional metadata snapshot is bounded to approximately 2 MiB.
+- Message/byte budget overflow, or an unrecoverable host-truncated Hermes payload,
+  sets `agent.pilot.request_context.truncated=true` on events and corresponding
+  traces. Individual field clipping retains the `...[truncated]` suffix.
+
+Restart the OpenClaw/Hermes host after updating the plugin. Previously lost
+historical content is not automatically recovered.
+
+## Qwen Work collaboration spaces (experimental)
+
+Alongside the Stop Hook for ordinary chats, Pilot polls Qwen Work's local IM
+snapshots read-only. It associates a human message with a digital employee's
+reply only when `replyToMessageId` points to the message in the same space and
+the referenced card is final. Ordinary group messages, greetings, unfinished
+cards and revoked content are not treated as turns. Only messages authored by
+the signed-in account are collected; another member's visible messages are not
+attributed to the observer. The native user identity comes from the message
+sender, subject to Pilot's usual configured-identity precedence. Other members'
+turns require collection under their own accounts. The same account on multiple
+devices may still report a turn more than once; cross-device deduplication is
+not established.
+
+This experimental adapter is based on the private Qwen Work 2.x local format.
+A manually installed isolated test service was exercised with a real space on
+macOS Qwen Work 2.1.0; installer upgrades and other platforms remain unverified. The
+snapshot does not prove individual model or tool calls, so Pilot does not
+invent LLM/TOOL spans, model, provider, or token data. Attachments and non-text
+card content are outside this source's scope. Its events declare the
+`agent_turn` observation scope and omit the unavailable provider.
+The card's `terminalAt` is used
+as the completion time when available; otherwise
+`updatedAt` is used. `loongsuite.qwenworkcn.completion_time_source` records
+which client-observed boundary was used. First enablement starts at the current
+time and does not backfill completed history. Messages and cards must
+be synchronized locally. Missing or invalid snapshots are retried; snapshots
+larger than 16 MiB are skipped with a warning. Up to 50,000 completed identities
+are retained for 30 days; reaching the limit pauses new turns with a warning.
+Cards with more than 512 KiB of raw content are skipped. The normal content
+policy and masking apply. Filesystem workspace exclusions
+cannot filter collaboration spaces because this source has no working directory.
+Use `listeners.qwen-work-cn-collaboration.includeConversationIds` to allow only
+specific conversation IDs. An empty or invalid list collects no conversations.
+Set `listeners.qwen-work-cn-collaboration.enabled=false` to disable this source.
+
 ## Supported Agent IDs
 
 These IDs identify the supported integrations. Most can be used in installer
@@ -304,6 +383,16 @@ and `OPENCLAW_STATE_DIR`. For hosts supporting conversation access, the entry is
 }
 ```
 
+For a fixed-session cron job whose native start and completion are observed,
+Pilot assigns each execution a distinct `gen_ai.turn.id`, even if OpenClaw
+reuses its native run ID. Fallback attempts within the execution share that
+turn and are exported when the job finishes. The original run ID is retained as
+`agent.openclaw.run_id`; the session ID is unchanged. Other runs and older hosts
+without the cron lifecycle continue to use their existing collection behavior.
+If a completion hook is missed, Pilot checks the scheduler's matching finished
+run before closing the retained turn and marks the collection incomplete. An
+active or unknown run is not closed merely because a model attempt ended.
+
 The legacy adapter uses `llm_input`, assistant `before_message_write`, tool hooks,
 and `llm_output` to preserve observed output, tool IDs and per-call token usage.
 Run aggregate usage is diagnostic-only, never added to model usage. LLM start
@@ -424,7 +513,7 @@ Use `config.json` when you need to enable or disable individual agents:
 | `multimodal.uploadMode` | **Experimental.** Multimodal upload policy. `none` (default) disables; `input` / `output` / `all` select conversion surfaces. See [Multimodal Collection](multimodal.md). |
 | `multimodal.allowedRootPaths` | Extra local roots merged with agent defaults for `pathToUri`. `~` is expanded. Workspace images need the project directory listed here. See [Multimodal Collection](multimodal.md#allowedrootpaths). |
 
-Message content always enters the reporting pipeline. Legacy `captureMessageContent` settings are ignored. Enable [Data Masking](masking.md) in sensitive environments. To collect multimodal data, see [Multimodal Collection](multimodal.md) (images only; `codex` and Qoder IDE/CLI).
+Enable [Data Masking](masking.md) in sensitive environments. To collect multimodal data, see [Multimodal Collection](multimodal.md) (images and local video; `codex`, Qoder IDE/CLI, and `qwen-work-cn`).
 
 Existing config files are not rewritten. Restart resident OpenClaw, Pi, and Hermes hosts after upgrading so they load the updated plugin. Agent enable/disable settings, workspace exclusions, masking, and multimodal upload settings remain independent.
 

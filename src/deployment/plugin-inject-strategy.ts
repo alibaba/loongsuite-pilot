@@ -12,6 +12,7 @@ import { fileExists, resolveHome, writeTextFileAtomic } from '../utils/fs-utils.
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveOpenClawHost, isOpenClawHostBound, openClawBindingProblem, type OpenClawHost } from './openclaw-version-resolver.js';
+import { createAgentConfigFileIfMissing } from './agent-config-owner.js';
 
 const logger = createLogger('PluginInjectStrategy');
 
@@ -270,6 +271,10 @@ export class PluginInjectStrategy implements DeployStrategy {
 
     if (createIfMissing && configPaths.length > 0) {
       const resolved = resolveHome(configPaths[0]);
+      if (this.isOpenclawNested(config)) {
+        await createAgentConfigFileIfMissing(resolved);
+        return resolved;
+      }
       await fs.mkdir(path.dirname(resolved), { recursive: true });
       await fs.writeFile(resolved, '{}\n', {
         encoding: 'utf-8',

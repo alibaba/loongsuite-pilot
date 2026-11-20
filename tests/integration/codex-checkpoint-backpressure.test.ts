@@ -67,7 +67,11 @@ describe('Codex terminal output failure backpressure', () => {
     try {
       await manager.startInput(input.id);
       await vi.advanceTimersByTimeAsync(0);
-      await expect(store.save()).rejects.toThrow('SLS');
+      await store.save();
+      expect(input.checkpointFailed).toBe(true);
+      store.setOffset('healthy', 7);
+      await store.save();
+      expect(store.isPersisted('healthy')).toBe(true);
       for (let i = 0; i < 100; i++) input.wake();
       await vi.advanceTimersByTimeAsync(1000);
       expect(input.collections).toBe(1);
@@ -75,7 +79,7 @@ describe('Codex terminal output failure backpressure', () => {
       expect(store.waitingForOutput).toBe(false);
       expect(JSON.parse(await readFile(file, 'utf8'))[input.id].lastOffset).toBe(0);
       await manager.stopInput(input.id);
-      // Restarting just the input cannot clear the shared fatal failure.
+      // Restarting just the input cannot clear this input's fatal failure.
       await manager.startInput(input.id);
       await vi.advanceTimersByTimeAsync(100);
       expect(input.collections).toBe(1);
@@ -105,6 +109,43 @@ describe('Codex terminal output failure backpressure', () => {
     }
   });
 
+  it('pauses only Codex on quota and resumes the same batch when capacity returns', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'pilot-quota-recovery-'));
+    const file = path.join(directory, 'state.json');
+    const store = new StateStore(file);
+    const input = new ReplayInput({ stateStore: store, pollIntervalMs: 60_000 });
+    store.setOffset(input.id, 0);
+    await store.save();
+    const output = new ControlledFlusher();
+    output.failFirst = false;
+    output.release();
+    const original = output.sendBatch.bind(output);
+    let available = false;
+    vi.spyOn(output, 'sendBatch').mockImplementation(async entries => {
+      if (!available) throw Object.assign(new Error('journal full', {
+        cause: Object.assign(new Error('capacity'), { name: 'CodexTurnJournalCapacityError' }),
+      }), { name: 'CodexTurnJournalError' });
+      return original(entries);
+    });
+    const manager = new InputManager();
+    manager.setFlusher(output);
+    manager.registerInput(input);
+    try {
+      await manager.startInput(input.id);
+      for (let i = 0; i < 100; i++) input.wake();
+      store.setOffset('healthy', 5);
+      await store.save();
+      expect(input.collections).toBe(1);
+      expect(input.checkpointFailed).toBe(false);
+      expect(store.isPersisted('healthy')).toBe(true);
+      expect(JSON.parse(await readFile(file, 'utf8'))[input.id].lastOffset).toBe(0);
+      available = true;
+      await vi.waitFor(() => expect(store.isPersisted(input.id)).toBe(true), { timeout: 2500 });
+      expect(JSON.parse(await readFile(file, 'utf8'))[input.id].lastOffset).toBe(1);
+      expect(output.received.flat().map(entry => entry['event.id'])).toEqual(['event-1']);
+    } finally { await manager.stopAll(); }
+  });
+
   it('does not queue later streaming batches after an earlier batch fails in the same collect', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'pilot-stream-backpressure-'));
     const store = new StateStore(path.join(directory, 'state.json'));
@@ -115,7 +156,7 @@ describe('Codex terminal output failure backpressure', () => {
     manager.registerInput(input);
     try {
       await manager.startInput(input.id);
-      await vi.waitFor(async () => { await expect(store.save()).rejects.toThrow('SLS'); });
+      await vi.waitFor(() => expect(input.checkpointFailed).toBe(true));
       // Codex emits streaming batches directly while collect awaits file I/O.
       for (let i = 0; i < 100; i++) input.emit('entries', output.received[0]);
       await new Promise<void>(resolve => setImmediate(resolve));

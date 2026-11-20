@@ -9,7 +9,7 @@ import {
   extractToolImagePaths,
 } from '../../../src/inputs/qoder-trace/qoder-cli-multimodal.js';
 import { withDeadline } from '../../../src/multimodal/processor.js';
-import { resolveImagePath } from '../../../src/multimodal/resolve.js';
+import { resolveLocalPath } from '../../../src/multimodal/resolve.js';
 import { fakePathToUri } from '../multimodal/fake-uri.js';
 import { MAX_MULTIMODAL_PARTS } from '../../../src/multimodal/types.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
@@ -85,6 +85,9 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
       '@/Users/me/Documents/picture/pipeline.jpg 这个图是一样的？',
     )).toEqual(['/Users/me/Documents/picture/pipeline.jpg']);
     expect(extractInputImagePaths(
+      '@/Users/me/video/clip.mp4',
+    )).toEqual(['/Users/me/video/clip.mp4']);
+    expect(extractInputImagePaths(
       '[Image: source: docs/_assets/img/dashboard.png, original 2556x1656, displayed at 2000x1296]',
       cwd,
     )).toEqual([path.join(cwd, 'docs/_assets/img/dashboard.png')]);
@@ -101,22 +104,28 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
       '附件引用：',
       '- 文件：/tmp/a949604a.png',
       '- 文件：/tmp/55cc677b.jpg',
+      '- 文件：/tmp/whale.mp4',
       '- 文件：/tmp/notes.txt',
       '[Image: original 2516x1418, displayed at 2000x1127. Multiply coordinates by 1.26 to map to original image.]',
     ].join('\n');
     if (process.platform === 'win32') {
       expect(extractInputImagePaths(
-        '文件：C:\\tmp\\a949604a.png\n文件:C:\\tmp\\55cc677b.jpg\n文件：C:\\tmp\\notes.txt',
+        '文件：C:\\tmp\\a949604a.png\n文件:C:\\tmp\\55cc677b.jpg\n文件：C:\\tmp\\whale.mp4\n文件：C:\\tmp\\notes.txt',
       )).toEqual([
         path.win32.normalize('C:\\tmp\\a949604a.png'),
         path.win32.normalize('C:\\tmp\\55cc677b.jpg'),
+        path.win32.normalize('C:\\tmp\\whale.mp4'),
       ]);
       return;
     }
     expect(extractInputImagePaths(text)).toEqual([
       '/tmp/a949604a.png',
       '/tmp/55cc677b.jpg',
+      '/tmp/whale.mp4',
     ]);
+    expect(extractInputImagePaths(
+      '附件引用：\n- 文件：/Users/me/video/clip.mp4',
+    )).toEqual(['/Users/me/video/clip.mp4']);
     expect(extractInputImagePaths('文件: /tmp/clip.png')).toEqual(['/tmp/clip.png']);
   });
 
@@ -212,15 +221,15 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
     )).toEqual([]);
   });
 
-  it('resolveImagePath joins cwd only for relative paths', () => {
+  it('resolveLocalPath joins cwd only for relative paths', () => {
     if (process.platform === 'win32') {
-      expect(resolveImagePath('C:\\abs\\a.png', 'C:\\cwd')).toBe(path.win32.normalize('C:\\abs\\a.png'));
-      expect(resolveImagePath('rel\\a.png', 'C:\\cwd')).toBe(path.win32.resolve('C:\\cwd', 'rel\\a.png'));
+      expect(resolveLocalPath('C:\\abs\\a.png', 'C:\\cwd')).toBe(path.win32.normalize('C:\\abs\\a.png'));
+      expect(resolveLocalPath('rel\\a.png', 'C:\\cwd')).toBe(path.win32.resolve('C:\\cwd', 'rel\\a.png'));
       return;
     }
 
-    expect(resolveImagePath('/abs/a.png', '/cwd')).toBe(path.normalize('/abs/a.png'));
-    expect(resolveImagePath('rel/a.png', '/cwd')).toBe(path.resolve('/cwd', 'rel/a.png'));
+    expect(resolveLocalPath('/abs/a.png', '/cwd')).toBe(path.normalize('/abs/a.png'));
+    expect(resolveLocalPath('rel/a.png', '/cwd')).toBe(path.resolve('/cwd', 'rel/a.png'));
   });
 });
 

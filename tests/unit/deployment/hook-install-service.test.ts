@@ -446,4 +446,99 @@ describe('hook install service', () => {
     expect(disk.ts).toBe('new');
     expect(disk.alarmSent).toBe(false);
   });
+
+  it('writes interceptor hooks only for the resolved mode and removes them when it is off', async () => {
+    const settingsPath = path.join(home, 'settings.json');
+    const savedMode = process.env.LOONGSUITE_PILOT_INTERCEPTOR_MODE;
+    const savedDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
+    const savedConfig = process.env.AGENT_DATA_COLLECTION_CONFIG;
+    const daemonConfig = path.join(tmp, 'daemon-config.json');
+
+    const restoreEnv = () => {
+      if (savedMode === undefined) delete process.env.LOONGSUITE_PILOT_INTERCEPTOR_MODE;
+      else process.env.LOONGSUITE_PILOT_INTERCEPTOR_MODE = savedMode;
+      if (savedDataDir === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
+      else process.env.LOONGSUITE_PILOT_DATA_DIR = savedDataDir;
+      if (savedConfig === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+      else process.env.AGENT_DATA_COLLECTION_CONFIG = savedConfig;
+    };
+
+    await fs.writeFile(path.join(pilotDir, 'agents.d', 'sample-agent.json'), JSON.stringify({
+      id: 'sample-agent',
+      displayName: 'Sample',
+      deployMode: 'hook',
+      detection: { paths: [home], commands: [] },
+      hook: {
+        settingsPath,
+        events: ['Stop'],
+        hookCommand: '$PILOT_DATA/hooks/sample-agent-hook.sh',
+        format: 'nested',
+        matcher: '*',
+        interceptor: {
+          events: ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'],
+          hookCommand: '$PILOT_DATA/hooks/interceptor-hook.sh',
+          matcher: '*',
+          insert: 'head',
+        },
+      },
+    }));
+
+    const events = async (): Promise<string[]> => {
+      const raw = await fs.readFile(settingsPath, 'utf8');
+      const parsed = JSON.parse(raw) as { hooks?: Record<string, unknown> };
+      return Object.keys(parsed.hooks ?? {}).sort();
+    };
+
+    try {
+      delete process.env.LOONGSUITE_PILOT_INTERCEPTOR_MODE;
+      delete process.env.LOONGSUITE_PILOT_DATA_DIR;
+      await fs.mkdir(dataDir, { recursive: true });
+      await fs.writeFile(daemonConfig, JSON.stringify({ interceptor: { mode: 'none' } }));
+      process.env.AGENT_DATA_COLLECTION_CONFIG = daemonConfig;
+      await fs.writeFile(path.join(dataDir, 'config.json'), JSON.stringify({ interceptor: { mode: 'all' } }));
+
+      const installed = await run({ agentsFlag: 'sample-agent' });
+      expect(installed.report.agents[0]?.status).toBe('ok');
+      expect(await events()).toEqual(['PostToolUse', 'PreToolUse', 'Stop', 'UserPromptSubmit']);
+
+      await fs.writeFile(path.join(dataDir, 'config.json'), JSON.stringify({ interceptor: { mode: 'none' } }));
+      const removed = await run({ agentsFlag: 'sample-agent' });
+      expect(removed.report.agents[0]?.status).toBe('ok');
+      expect(await events()).toEqual(['Stop']);
+
+      process.env.LOONGSUITE_PILOT_DATA_DIR = dataDir;
+      await fs.writeFile(daemonConfig, JSON.stringify({ interceptor: { mode: 'none' } }));
+      await fs.writeFile(path.join(dataDir, 'config.json'), JSON.stringify({ interceptor: { mode: 'none' } }));
+      const managedDir = path.join(dataDir, 'configs', 'managed');
+      await fs.mkdir(managedDir, { recursive: true });
+      await fs.writeFile(path.join(managedDir, 'interceptor.json'), JSON.stringify({
+        interceptor: {
+          rules: [{
+            kind: 'pattern',
+            id: 'block-eval',
+            version: '1',
+            agents: ['qoder'],
+            events: ['PreToolUse'],
+            match: 'substring',
+            pattern: 'mcp__browser',
+          }],
+        },
+      }));
+      const fromManaged = await run({ agentsFlag: 'sample-agent' });
+      expect(['ok', 'up-to-date']).toContain(fromManaged.report.agents[0]?.status);
+      expect(await events()).toEqual(['Stop']);
+
+      process.env.LOONGSUITE_PILOT_INTERCEPTOR_MODE = 'none';
+      const envOff = await run({ agentsFlag: 'sample-agent' });
+      expect(['ok', 'up-to-date']).toContain(envOff.report.agents[0]?.status);
+      expect(await events()).toEqual(['Stop']);
+
+      await fs.rm(path.join(managedDir, 'interceptor.json'));
+      const managedGone = await run({ agentsFlag: 'sample-agent' });
+      expect(['ok', 'up-to-date']).toContain(managedGone.report.agents[0]?.status);
+      expect(await events()).toEqual(['Stop']);
+    } finally {
+      restoreEnv();
+    }
+  });
 });

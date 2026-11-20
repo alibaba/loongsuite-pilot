@@ -4,6 +4,7 @@ import {
   type QoderTranscriptBatch,
 } from '../../../assets/hooks/qoder/transcript-collector.mjs';
 import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
+import type { AgentActivityEntry } from '../../types/index.js';
 import { readQoderPromptOwnership } from './prompt-ownership.js';
 
 /** Shared native source; Qoder and CN keep their own token enrichment/outputs. */
@@ -16,9 +17,12 @@ export class QoderTranscriptSource {
     runtime: () => InputRuntimeAccumulator | null,
     warn: (message: string, fields: Record<string, unknown>) => void,
     dataDir = path.resolve(logDir, '../../..'),
+    resolveTraceContext?: (entries: AgentActivityEntry[]) => Promise<void>,
   ) {
     this.collector = new QoderTranscriptCollector({
       dataDir, agentId, runtime, warn,
+      resolveTraceContext: resolveTraceContext
+        ? records => resolveTraceContext(records as unknown as AgentActivityEntry[]) : undefined,
       resolveInitialPrompt: (source, requestId, cursor, search) => readQoderPromptOwnership(agentId, source.sessionId, requestId, cursor, search),
     });
   }

@@ -3,9 +3,11 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { MetricsWriter } from '../../../src/metrics/metrics-writer.js';
+import { LOCAL_MAC } from '../../../src/utils/network-utils.js';
 import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
 import type { TraceRuntimeSnapshot } from '../../../src/metrics/trace-runtime-types.js';
+import { unavailableInterceptorStatus } from '../../../src/interceptor/status.js';
 
 const fsMockState = { blockAccessSync: false };
 
@@ -116,6 +118,23 @@ describe('MetricsWriter', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it('includes interceptor status in local and remote L1 rows and isolates snapshot failures', async () => {
+    const status = unavailableInterceptorStatus(false);
+    const getInterceptorStatus = vi.fn().mockResolvedValue(status);
+    writer = new MetricsWriter({ dataDir: tmpDir, version: '2.0.0', userId: 'u1',
+      getSnapshot: buildSnapshot, getInterceptorStatus });
+    vi.useRealTimers();
+    await writer.start();
+    const file = managedLogFile(path.join(tmpDir, 'logs', 'metric_alarm'), 'pilot-metrics');
+    expect(JSON.parse(fs.readFileSync(file, 'utf8').trim()).interceptor).toEqual(status);
+    expect(mockSendStatus).toHaveBeenCalledWith('pilot_status', expect.objectContaining({ interceptor: JSON.stringify(status) }));
+    getInterceptorStatus.mockRejectedValue(new Error('worker unavailable'));
+    await (writer as any).writeL1();
+    const rows = fs.readFileSync(file, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(rows).toHaveLength(2);
+    expect(rows[1].version).toBe('2.0.0');
+  });
+
   it('writes L1 metrics on start', async () => {
     writer = new MetricsWriter({
       dataDir: tmpDir,
@@ -162,11 +181,42 @@ describe('MetricsWriter', () => {
     expect(call![1]).toHaveProperty('version', '2.0.0');
     expect(call![1]).not.toHaveProperty('__topic__');
 
+    const running = mockSendRunningStatus.mock.calls[0]?.[0] as Record<string, string>;
+    expect(running.version).toBe('2.0.0');
+    expect(running).not.toHaveProperty('sn');
+
     // Old L2 topics must no longer be emitted (merged into pilot_pipeline)
     const legacy = mockSendStatus.mock.calls.filter((c: unknown[]) =>
       ['pilot_input_detail', 'pilot_flusher_detail', 'pilot_alarm_metric'].includes(c[0] as string),
     );
     expect(legacy).toHaveLength(0);
+  });
+
+  it('forwards host mac and serial on both status channels', async () => {
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      hostSn: 'C02SERIAL',
+      getSnapshot: buildSnapshot,
+    });
+
+    vi.useRealTimers();
+    await writer.start();
+
+    const status = mockSendStatus.mock.calls.find(
+      (c: unknown[]) => c[0] === 'pilot_status',
+    )![1] as Record<string, string>;
+    const running = mockSendRunningStatus.mock.calls[0][0] as Record<string, string>;
+    expect(status.sn).toBe('C02SERIAL');
+    expect(running.sn).toBe('C02SERIAL');
+    if (LOCAL_MAC) {
+      expect(status.mac).toBe(LOCAL_MAC);
+      expect(running.mac).toBe(LOCAL_MAC);
+    } else {
+      expect(status).not.toHaveProperty('mac');
+      expect(running).not.toHaveProperty('mac');
+    }
   });
 
   it('reports scalar snapshots in the existing L1 cycle using its exact process identity', async () => {
@@ -462,7 +512,7 @@ describe('MetricsWriter', () => {
     expect(hasManagedLogFile(metricDir, 'pilot-hook-metrics')).toBe(false);
   });
 
-  it('keeps capture_message_disabled_agents empty for compatibility', async () => {
+  it('includes capture_message_disabled_agents in L1 metrics', async () => {
     writer = new MetricsWriter({
       dataDir: tmpDir,
       version: '2.0.0',
@@ -481,7 +531,7 @@ describe('MetricsWriter', () => {
     const lines = fs.readFileSync(filePath, 'utf-8').trim().split('\n');
     const entry = JSON.parse(lines[0]);
 
-    expect(entry.capture_message_disabled_agents).toBe('');
+    expect(entry.capture_message_disabled_agents).toBe('qoder');
   });
 
   describe('process resource thresholds', () => {

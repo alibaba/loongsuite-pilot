@@ -11,6 +11,8 @@ import { getTodayDateString } from '../../utils/fs-utils.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
+import { matchesFileIdentity } from '../../utils/file-identity.js';
+import { historyFileIdentity, historyRetentionExtra, migrateHistoryRetention, nextHistoryFile } from '../base/history-retention-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSegmentTokensForSession } from './segment-token-reader.js';
 import { readSqliteTokensForSession, isIdeaDbPath, resolveQoderAppRoot, type SqliteTokenResult } from './sqlite-token-reader.js';
@@ -27,11 +29,13 @@ import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
 import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import { QoderTranscriptSource } from './transcript-source.js';
+import { QoderIdeDelegations } from './ide-delegations.js';
 import { QoderLegacyHookReader } from './legacy-hook-reader.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
   logDir?: string;
   dataDir?: string;
+  resolveTraceContext?: (entries: AgentActivityEntry[]) => Promise<void>;
   /** Cached multimodal policy; IDE + CLI extraction when enabled. */
   multimodal?: {
     enabled: boolean;
@@ -99,7 +103,7 @@ export function resolveQoderAllowedRootPaths(userPaths?: string[]): string[] {
 }
 
 /**
- * Multi-source merge input for qoder/qoder-cli.
+ * Multi-source merge input for qoder/qoder-cli/qoder-app.
  * Reads hook JSONL (content+structure), session segments (CLI tokens),
  * and SQLite (IDE tokens), merges by variant, outputs enriched events
  * that serve both event logs (SLS) and trace conversion (ARMS).
@@ -119,12 +123,14 @@ export class QoderTraceInput extends BaseInput {
   private multimodalStopped = false;
   private readonly transcriptSource: QoderTranscriptSource;
   private readonly legacyHookReader = new QoderLegacyHookReader();
+  private readonly ideDelegations = new QoderIdeDelegations(undefined,
+    (reason, details) => this.logger.warn('Qoder IDE delegation deferred', { reason, ...details }));
 
   constructor(opts: QoderTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder/history');
     this.transcriptSource = new QoderTranscriptSource(this.logDir, 'qoder',
-      () => this.getInputRuntimeAccumulator(), (message, fields) => this.logger.warn(message, fields), opts.dataDir);
+      () => this.getInputRuntimeAccumulator(), (message, fields) => this.logger.warn(message, fields), opts.dataDir, opts.resolveTraceContext);
     this.multimodalEnabled = opts.multimodal?.enabled === true && !!opts.multimodal.processor;
     this.multimodalUploadMode = opts.multimodal?.uploadMode ?? 'none';
     this.multimodalProcessor = opts.multimodal?.processor ?? null;
@@ -191,16 +197,28 @@ export class QoderTraceInput extends BaseInput {
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
+    // IDE association state and transcript cursors share the normal durable
+    // output/checkpoint boundary. A failed save must not consume new parents.
+    if (!this.stateStore.isPersisted(this.id, 'qoderIdeDelegations')
+      && this.getState().extra?.qoderIdeDelegations) return [];
     const nativeCheckpointPersisted = this.stateStore.isPersisted(this.id, 'qoderTranscripts');
     // 1. Read new hook JSONL lines
     const rawEntries = await this.readHookJsonl();
     const native = await this.transcriptSource.read(this.getState().extra, nativeCheckpointPersisted);
-    for (const record of native.records) {
+    const ide = this.stateStore.isPersisted(this.id, 'qoderIdeDelegations')
+      ? await this.ideDelegations.collect(native.records, this.getState().extra?.qoderIdeDelegations)
+      : { records: [], state: this.getState().extra?.qoderIdeDelegations, changed: false };
+    const saveNative = () => {
+      if (native.changed || ide.changed) this.setState({ extra: { ...this.getState().extra,
+        ...(native.changed ? { qoderTranscripts: native.state } : {}),
+        ...(ide.changed ? { qoderIdeDelegations: ide.state } : {}) } });
+    };
+    for (const record of [...native.records, ...ide.records]) {
       const entry = await this.transformRecord(record);
       if (entry) rawEntries.push(entry);
     }
     if (rawEntries.length === 0) {
-      if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
+      saveNative();
       return [];
     }
 
@@ -340,16 +358,27 @@ export class QoderTraceInput extends BaseInput {
       injectTraceId(turnEntries);
     }
 
-    if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
+    saveNative();
     return rawEntries;
   }
 
   // ─── Hook JSONL reading (adapted from BaseHookInput) ────────────────────────
 
+  private historyCursor?: string;
+  private historyPendingFile?: string;
+
   private async readHookJsonl(): Promise<AgentActivityEntry[]> {
+    const migrated = await migrateHistoryRetention(this.getState(), this.logDir, this.logPrefix);
+    if (migrated) this.setState({ extra: migrated });
+    const file = await nextHistoryFile(this.getState(), this.logDir, this.logPrefix, this.historyCursor, this.historyPendingFile);
+    if (!file) return [];
+    this.historyCursor = file;
+    this.historyPendingFile = undefined;
+    return this.readHookFile(file);
+  }
+
+  private async readHookFile(logFileName: string): Promise<AgentActivityEntry[]> {
     const runtime = this.getInputRuntimeAccumulator();
-    const today = getTodayDateString();
-    const logFileName = `${this.logPrefix}-${today}.jsonl`;
     const logFile = path.join(this.logDir, logFileName);
 
     let stat;
@@ -360,18 +389,31 @@ export class QoderTraceInput extends BaseInput {
     }
 
     const state = this.getState();
-    let offset = state.lastFile === logFileName ? (state.lastOffset ?? 0) : 0;
+    const identities = state.extra?.hookLogIdentities as Record<string, string> | undefined;
+    const offsets = state.extra?.hookLogOffsets as Record<string, number> | undefined;
+    let offset = matchesFileIdentity(identities?.[logFileName], stat)
+      ? offsets?.[logFileName] ?? 0 : 0;
 
     if (offset > 0 && stat.size < offset) {
       this.logger.info('file truncated, resetting offset', { file: logFile, recorded: offset, actual: stat.size });
       offset = 0;
     }
+    const observed = historyRetentionExtra(this.getState(), this.logDir, this.logPrefix, logFileName, stat, offset);
+    if (observed) this.setState({ extra: observed });
     if (stat.size <= offset) return [];
     runtime?.observeBacklog(stat.size - offset);
 
     let entries: AgentActivityEntry[] = [];
     {
       const batch = await this.legacyHookReader.read(logFile, offset, runtime);
+      if (historyFileIdentity(batch.stat) !== historyFileIdentity(stat)) {
+        this.legacyHookReader.reset();
+        throw new Error('legacy Hook source replaced before read');
+      }
+      const progress = historyRetentionExtra(this.getState(), this.logDir, this.logPrefix,
+        logFileName, batch.stat, batch.nextOffset, batch.quarantine.length > 0);
+      if (progress) this.setState({ extra: progress });
+      if (batch.scanPending) this.historyPendingFile = logFileName;
       const completeBytes = batch.buffer;
       const completeLength = batch.nextOffset - offset;
       const skipped = batch.quarantine.filter(record => record.to !== null);
@@ -479,7 +521,7 @@ export class QoderTraceInput extends BaseInput {
   private inferTurnVariant(entries: AgentActivityEntry[]): 'qoder-cli' | 'qoder' | 'qoder-idea' {
     for (const entry of entries) {
       const agentType = entry['gen_ai.agent.type'] as string;
-      if (agentType === ClientType.QoderCli || agentType === 'qoder-cli') return 'qoder-cli';
+      if (agentType === ClientType.QoderCli || agentType === ClientType.QoderApp) return 'qoder-cli';
       if (agentType === ClientType.QoderIdea || agentType === 'qoder-idea') return 'qoder-idea';
       if (agentType === ClientType.Qoder || agentType === 'qoder') return 'qoder';
     }

@@ -2,7 +2,7 @@
 
 [English](../local-jsonl-output.md) | 简体中文
 
-本地 JSONL 输出会把规范化后的 Pilot 事件写入本机文件。它默认开启，是配置远端上报前验证采集是否生效的最简单方式。
+本地 JSONL 输出会把规范化后的 Pilot 事件写入本机文件。默认关闭；需要本地查看事件时，在 `config.json` 中显式开启。
 
 ## 默认路径
 
@@ -39,7 +39,7 @@ JSONL 会保留原生 JSON 类型：token 数量保持 number，标志位保持 
 
 | 配置项 | 说明 |
 |--------|------|
-| `enabled` | 开启或关闭本地 JSONL 输出。 |
+| `enabled` | 开启或关闭本地 JSONL 输出，默认 `false`。 |
 | `outputDir` | 输出文件目录。 |
 | `rotateDaily` | 按日期写入文件。 |
 | `maxFileSizeMb` | 下一条事件会使文件超过此 MiB 数时先滚动，默认 100；Agent 事件、原始 topic 及 `rotateDaily=false` 均生效。非正数或非有限数回退默认值。 |
@@ -71,7 +71,7 @@ Dashboard 不再打开超过 3 GiB 的异常输出文件进行统计，避免启
 
 | 环境变量 | 说明 |
 |----------|------|
-| `JSONL_ENABLED` | 开启或关闭 JSONL 输出。 |
+| `JSONL_ENABLED` | 开启或关闭 JSONL 输出，优先于 `config.json`。 |
 | `JSONL_OUTPUT_DIR` | 覆盖 JSONL 输出目录。 |
 
 ## 验证本地输出
@@ -89,7 +89,9 @@ ls ~/.loongsuite-pilot/logs/output
 tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
 ```
 
-如果没有输出，请确认至少有一个支持的 Agent 已安装、已启用，并且在 Pilot 启动后产生了新活动。
+如果没有输出，请确认 `jsonl.enabled` 已设为 `true`，至少有一个支持的 Agent 已安装、已启用，并且在 Pilot 启动后产生了新活动。
+
+此开关只控制 `logs/output/` 中规范化事件的 JSONL 输出。输入适配器的原始或中间文件，以及指标、告警等运行记录有各自的写入机制。
 
 ## 隐私说明
 

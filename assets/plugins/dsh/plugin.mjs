@@ -15,10 +15,17 @@
  * Worker identity is captured here, inside the DSH process. The collector
  * reads the JSONL later and does not see this process environment.
  */
-import { appendFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
+import { mkdirSync, chmodSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectResourceAttributesFromEnv } from '../shared/resource-context.mjs';
+import { createRequire } from 'node:module';
+let privateLog;
+try { privateLog = createRequire(import.meta.url)('../shared/private-log-dir.cjs'); }
+catch { privateLog = { ensurePrivateLogDir() {}, writerSuffix: () => '' }; }
+const { ensurePrivateLogDir, writerSuffix } = privateLog;
+const sharedRootLogs = /^(1|true|yes|on)$/i.test(String(process.env.LOONGSUITE_PILOT_ROOT_TRIGGER || '').trim());
+import { appendRawJsonl, RAW_SEGMENT_BYTES } from '../shared/raw-jsonl-writer.mjs';
 
 const AGENT = 'loongsuite-pilot-observability';
 const SENSITIVE_KEY_RE = /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE|API_KEY)([_.-]|$)/i;
@@ -33,12 +40,13 @@ function dataDir() {
 function logDir() { return path.join(dataDir(), 'logs', 'dsh'); }
 function collectionEnabled() { return existsSync(ENABLED_MARKER); }
 function ensureDir(d) {
+  if (sharedRootLogs) return ensurePrivateLogDir(d);
   mkdirSync(d, { recursive: true, mode: 0o700 });
   if (process.platform !== 'win32') chmodSync(d, 0o700);
 }
 function sessionFile(sid) {
   const safe = String(sid).replace(/[^a-zA-Z0-9_-]/g, '_');
-  return path.join(logDir(), `dsh-${safe}.jsonl`);
+  return path.join(logDir(), `dsh-${safe}${sharedRootLogs ? writerSuffix() : ''}.jsonl`);
 }
 function redact(value) {
   if (!value || typeof value !== 'object') return value;
@@ -53,8 +61,17 @@ function redact(value) {
 function appendLine(file, obj) {
   try {
     if (!existsSync(file)) ensureDir(path.dirname(file));
-    appendFileSync(file, JSON.stringify(obj) + '\n');
-    if (process.platform !== 'win32') chmodSync(file, 0o600);
+    const line = JSON.stringify(obj) + '\n';
+    if (obj.type === 'request/header') {
+      headers.delete(file);
+      headers.set(file, line);
+      if (headers.size > 1024) headers.delete(headers.keys().next().value);
+    }
+    appendRawJsonl(file, line, RAW_SEGMENT_BYTES, {
+      allowRotate: obj.type === 'turn/start' && headers.has(file),
+      prefix: headers.get(file),
+      privateOwner: sharedRootLogs,
+    });
   } catch {
     // Collection is best effort. Retry only when another business event arrives.
   }
@@ -68,6 +85,7 @@ function observe(handler) {
     }
   };
 }
+const headers = new Map();
 function workerFields() {
   const resourceAttributes = collectResourceAttributesFromEnv(process.env, { agentId: 'dsh' });
   return Object.keys(resourceAttributes).length > 0 ? { resourceAttributes } : {};
@@ -79,7 +97,7 @@ export default function apply(ctx) {
     return;
   }
   const identity = workerFields();
-  appendLine(path.join(logDir(), `dsh-${process.pid}.jsonl`), {
+  appendLine(path.join(logDir(), `dsh-${process.pid}${sharedRootLogs ? writerSuffix() : ''}.jsonl`), {
     type: `${AGENT}/loaded`,
     logDir: logDir(),
     time: Date.now(),
