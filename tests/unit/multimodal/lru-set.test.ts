@@ -4,10 +4,10 @@ import { LruMap } from '../../../src/multimodal/uploader/lru-set.js';
 describe('LruMap', () => {
   it('evicts the least recently used entry', () => {
     const lru = new LruMap<number>(2);
-    lru.set('a', 1);
-    lru.set('b', 2);
+    expect(lru.set('a', 1)).toBe(0);
+    expect(lru.set('b', 2)).toBe(0);
     expect(lru.get('a')).toBe(1); // refresh a
-    lru.set('c', 3); // drops b
+    expect(lru.set('c', 3)).toBe(1); // drops b
     expect(lru.get('b')).toBeUndefined();
     expect(lru.get('a')).toBe(1);
     expect(lru.get('c')).toBe(3);
@@ -33,7 +33,7 @@ describe('LruMap', () => {
   it('overwrites the same key without growing size', () => {
     const lru = new LruMap<number>(2);
     lru.set('a', 1);
-    lru.set('a', 2);
+    expect(lru.set('a', 2)).toBe(0);
     expect(lru.size).toBe(1);
     expect(lru.get('a')).toBe(2);
   });

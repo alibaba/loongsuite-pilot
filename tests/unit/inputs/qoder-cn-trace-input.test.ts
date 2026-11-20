@@ -476,6 +476,71 @@ describe.skipIf(!hasNodeSqlite())('QoderCnTraceInput.collect (session-level enri
     expect(input.observedRequestIds).toEqual(['creq-a', 'creq-b']);
   });
 
+  it('keeps active anchors through session churn and preserves orphan ids after eviction', async () => {
+    class ProbeInput extends QoderCnTraceInput {
+      poll() { return this.collect(); }
+
+      protected override async readIdeSqliteTokens() {
+        return { rows: [], matchedDbPath: null };
+      }
+    }
+
+    const options = { stateStore: stateStore as never, logDir };
+    const input = new ProbeInput(options);
+    const logFileName = `qoder-cn-${getTodayDateString()}.jsonl`;
+    const logFile = path.join(logDir, logFileName);
+    const anchor = (index: number) => ({
+      ...buildEntry({
+        event: 'llm.request', turn: `anchor-${index}`, step: `anchor-${index}:s1`,
+        session: `session-${index}`, ts: 1_780_000_020_000 + index,
+      }),
+      'event.name': 'other',
+      'gen_ai.input.messages_delta': JSON.stringify([{ role: 'user', content: 'hello' }]),
+    });
+    const tool = (session: string, turn: string, ts: number) => buildEntry({
+      event: 'tool.call', turn, step: `${turn}:s1`, session, ts,
+    });
+    const append = (entries: Record<string, unknown>[]) =>
+      fs.appendFile(logFile, `${entries.map(entry => JSON.stringify(entry)).join('\n')}\n`, 'utf-8');
+
+    await append(Array.from({ length: 500 }, (_, index) => anchor(index)));
+    const first = await input.poll();
+    expect(new Set(first.map(entry => entry['gen_ai.session.id'])).size).toBe(500);
+
+    // Session 0 is the oldest insertion but just resumed after being idle.
+    await append([tool('session-0', 'first-orphan', 1_780_050_000_000)]);
+    expect(await input.poll()).toEqual([expect.objectContaining({
+      'gen_ai.turn.id': 'anchor-0',
+      'gen_ai.step.id': 'anchor-0:s2',
+    })]);
+
+    await append([anchor(500)]);
+    await input.poll();
+    await append([
+      tool('session-0', 'active-orphan', 1_780_050_001_000),
+      tool('session-1', 'evicted-orphan', 1_780_050_001_001),
+    ]);
+    expect(await input.poll()).toEqual([
+      expect.objectContaining({
+        'gen_ai.session.id': 'session-0',
+        'gen_ai.turn.id': 'anchor-0',
+        'gen_ai.step.id': 'anchor-0:s3',
+      }),
+      expect.objectContaining({
+        'gen_ai.session.id': 'session-1',
+        'gen_ai.turn.id': 'evicted-orphan',
+        'gen_ai.step.id': 'evicted-orphan:s1',
+      }),
+    ]);
+
+    await stateStore.save();
+    expect(stateStore.getPersistedState(input.id)).toMatchObject({
+      lastFile: logFileName,
+      lastOffset: (await fs.stat(logFile)).size,
+    });
+    expect(await new ProbeInput(options).poll()).toEqual([]);
+  });
+
   it('never commits a half-written record and reads it on the next poll', async () => {
     // stat() can return while the hook is still appending. Committing stat.size
     // would step over the tail of a record whose JSON.parse just failed, so that
