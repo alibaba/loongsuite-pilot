@@ -304,6 +304,24 @@ describe('Orchestrator', () => {
       }
     });
 
+    it('checks an explicitly configured default Codex home and skips alternate homes', async () => {
+      const orchestrator = new Orchestrator(makeConfig());
+      await orchestrator.start();
+      try {
+        const current = orchestrator as any;
+        vi.spyOn(current.inputManager, 'getActiveInputIds').mockReturnValue(['codex-transcript']);
+        const see = () => current.selfCheckInputs(discoveryEntries);
+
+        process.env.CODEX_HOME = path.join(homeDir, '.codex') + path.sep;
+        expect(see()).toEqual([{ id: 'codex-transcript', agentId: 'codex', lastActiveTime: 0 }]);
+
+        process.env.CODEX_HOME = path.join(homeDir, 'alternate-codex');
+        expect(see()).toEqual([]);
+      } finally {
+        await orchestrator.stop();
+      }
+    });
+
     it('preserves final interceptor status after the Worker service reference is cleared', async () => {
       let stopped = false;
       const status = { enabled: true, running: true, collection_status: 'ok',

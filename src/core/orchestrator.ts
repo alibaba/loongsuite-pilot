@@ -2040,6 +2040,7 @@ export class Orchestrator extends EventEmitter {
     if (this.config.privacy?.excludeWorkspaces.length) return [];
     const running = new Set(this.inputManager.getActiveInputIds());
     const counters = this.inputManager.getInputCounters();
+    const codexHome = process.env.CODEX_HOME;
     const eligible: SelfCheckInput[] = [];
     for (const entry of entries) {
       if (!running.has(entry.id) || entry.enabled?.() === false) continue;
@@ -2047,7 +2048,7 @@ export class Orchestrator extends EventEmitter {
       if (!counter) continue;
       const agentId = Orchestrator.LISTENER_AGENT_MAP[entry.id] ?? counter.agentType;
       // The built-in indicator describes the default Codex home.
-      if (agentId === 'codex' && process.env.CODEX_HOME) continue;
+      if (agentId === 'codex' && codexHome && path.relative(resolveHome('~/.codex'), codexHome) !== '') continue;
       eligible.push({ id: entry.id, agentId, lastActiveTime: counter.lastActiveTime });
     }
     return eligible;
