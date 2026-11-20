@@ -64,8 +64,31 @@ class HookEventResolver {
       && event.eventName === eventName
       && (earliestAtMs === undefined || event.observedAtMs >= earliestAtMs));
     if (!match) return undefined;
-    match.consumed = true;
+    // Hook snapshots can repeat the same observation. A repeated boundary
+    // cannot supply chronology for a separate turn.
+    for (const event of this.events) {
+      if (event.eventName === eventName && event.observedAtMs === match.observedAtMs) event.consumed = true;
+    }
     return match;
+  }
+
+  observeCompletedTurn(terminalAtMs: number, usedTranscriptTime: boolean): void {
+    let nextPromptAtMs = Number.POSITIVE_INFINITY;
+    for (const event of this.events) {
+      if (event.consumed || event.eventName !== 'UserPromptSubmit') continue;
+      if (event.observedAtMs <= terminalAtMs) event.consumed = true;
+      else nextPromptAtMs = Math.min(nextPromptAtMs, event.observedAtMs);
+    }
+
+    if (!usedTranscriptTime) return;
+    const stops = this.events.filter(event => !event.consumed && event.eventName === 'Stop'
+      && event.observedAtMs >= terminalAtMs);
+    const priorStop = stops[0]?.observedAtMs;
+    // Retire a distinct earlier Stop when there is evidence of another one.
+    // A single Stop can still supply a later turn with missing native timing.
+    if (priorStop === undefined || priorStop >= nextPromptAtMs
+      || !stops.some(stop => stop.observedAtMs > priorStop)) return;
+    for (const stop of stops) if (stop.observedAtMs === priorStop) stop.consumed = true;
   }
 
   takeTool(
@@ -106,6 +129,7 @@ export async function buildWorkBuddyEvents(
   let reasoningParts: Array<Record<string, JsonValue>> = [];
   let reasoningStartMs: number | undefined;
   let requestStartMs: number | undefined;
+  let previousTurnTerminalAtMs: number | undefined;
   let cwd: string | undefined;
   let lastResponse: AgentActivityEntry | undefined;
   let pendingUserInput: PendingUserInput | undefined;
@@ -427,7 +451,8 @@ export async function buildWorkBuddyEvents(
         timestampMs(record),
       );
       const responseTimestamp = transcriptResponseTimestamp
-        ?? hookEvents.takeBoundary('Stop', requestStartMs)?.observedAtMs;
+        ?? hookEvents.takeBoundary('Stop',
+          latestTimestamp(requestStartMs, previousTurnTerminalAtMs))?.observedAtMs;
       if (responseTimestamp === undefined) continue;
       const requestTimestamp = requestStartMs ?? responseTimestamp;
       await emitPendingUserInput(step.traceId, requestTimestamp);
@@ -464,6 +489,9 @@ export async function buildWorkBuddyEvents(
 
       await push(request, record);
       await push(response, record);
+      const terminalAtMs = timestampMs(record) ?? responseTimestamp;
+      hookEvents.observeCompletedTurn(terminalAtMs, transcriptResponseTimestamp !== undefined);
+      previousTurnTerminalAtMs = latestTimestamp(previousTurnTerminalAtMs, terminalAtMs);
       lastResponse = undefined;
       tools.clear();
       pendingDelta = [];
@@ -614,6 +642,14 @@ function applyUsage(entry: AgentActivityEntry, record: WorkBuddyRecord): void {
 function isInternalRecord(record: WorkBuddyRecord): boolean {
   const provider = record.providerData ?? {};
   return provider.isCompactInternal === true || provider.skipRun === true || provider.agent === 'compact';
+}
+
+export function isWorkBuddyTerminalAssistant(records: WorkBuddyRecord[], index: number): boolean {
+  const record = records[index];
+  const next = records[index + 1];
+  return record.type === 'message' && record.role === 'assistant'
+    && record.status !== 'incomplete' && !isInternalRecord(record)
+    && !(next?.type === 'function_call' && isSameResponseWave(record, next));
 }
 
 function normalizeToolStatus(status: unknown): string | undefined {

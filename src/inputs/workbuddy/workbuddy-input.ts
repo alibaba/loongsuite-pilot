@@ -6,7 +6,7 @@ import type { Dirent, FSWatcher } from 'node:fs';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
-import { buildWorkBuddyEvents } from './workbuddy-event-builder.js';
+import { buildWorkBuddyEvents, isWorkBuddyTerminalAssistant } from './workbuddy-event-builder.js';
 import type { WorkBuddyHookEvent, WorkBuddyRecord } from './workbuddy-types.js';
 
 const OFFSET_MAP_KEY = 'workbuddyTranscriptBytes';
@@ -520,19 +520,45 @@ function findFirstUnsealedUser(
   // A Stop can be observed before a later turn reaches the same transcript.
   // Keep the first source row of that later turn for its own Stop.
   let firstUser: number | undefined;
+  let currentUser: number | undefined;
   let unconfirmedUser: number | undefined;
-  let firstUntimedTurnEnded = false;
+  let currentTurnEnded = false;
+  let currentTerminalAtMs: number | undefined;
+  let previousTerminalAtMs: number | undefined;
+  let earlierCompletedTurns = 0;
+  const stopCount = new Set(hookEvents.filter(hook =>
+    hook.eventName === 'Stop' && hook.observedAtMs <= stopAtMs).map(hook => hook.observedAtMs)).size;
+  const hasStopForCurrentTurn = () => {
+    // A prompt that falls after the preceding native response and before the
+    // only observed Stop can establish that it belongs to the current turn.
+    const terminalAt = previousTerminalAtMs;
+    return earlierCompletedTurns < stopCount || (terminalAt !== undefined && hookEvents.some(hook =>
+      hook.eventName === 'UserPromptSubmit' && hook.observedAtMs > terminalAt
+      && hook.observedAtMs <= stopAtMs));
+  };
   for (const [index, record] of records.entries()) {
     const timestamp = typeof record.timestamp === 'number' && Number.isFinite(record.timestamp)
       ? record.timestamp : undefined;
     if (record.type === 'message' && record.role === 'user') {
-      if (firstUntimedTurnEnded && unconfirmedUser === firstUser) unconfirmedUser = undefined;
+      if (currentTurnEnded) {
+        if (unconfirmedUser !== undefined && !hasStopForCurrentTurn()) return unconfirmedUser;
+        earlierCompletedTurns++;
+        previousTerminalAtMs = currentTerminalAtMs;
+        unconfirmedUser = undefined;
+      }
       if (timestamp !== undefined && timestamp > stopAtMs) return unconfirmedUser ?? index;
       unconfirmedUser = timestamp === undefined && (firstUser !== undefined || hasLaterPrompt)
         ? unconfirmedUser ?? index
         : undefined;
       firstUser ??= index;
+      currentUser = index;
+      currentTurnEnded = false;
+      currentTerminalAtMs = undefined;
       continue;
+    }
+    if (currentUser !== undefined && isWorkBuddyTerminalAssistant(records, index)) {
+      currentTurnEnded = true;
+      currentTerminalAtMs = timestamp;
     }
     if (unconfirmedUser === undefined) continue;
     // Unrelated usage and generated titles do not identify the active turn.
@@ -540,17 +566,12 @@ function findFirstUnsealedUser(
     if (timestamp !== undefined) {
       if (timestamp > stopAtMs) return unconfirmedUser;
       unconfirmedUser = undefined;
-    } else if (unconfirmedUser === firstUser
-      && record.type === 'message' && record.role === 'assistant'
-      && record.status !== 'incomplete' && record.providerData?.skipRun !== true
-      && records[index + 1]?.type !== 'function_call') {
-      // Older transcripts may omit timestamps on both sides of the stopped
-      // turn. A complete first turn still belongs to the earlier Stop.
-      firstUntimedTurnEnded = true;
     }
   }
-  if (!hasLaterPrompt || (firstUntimedTurnEnded && unconfirmedUser === firstUser)) return undefined;
-  return unconfirmedUser;
+  if (unconfirmedUser === undefined) return undefined;
+  // A newer prompt without a terminal record cannot borrow the earlier Stop.
+  if ((hasLaterPrompt && !currentTurnEnded) || !hasStopForCurrentTurn()) return unconfirmedUser;
+  return undefined;
 }
 
 async function readJsonlRange(
