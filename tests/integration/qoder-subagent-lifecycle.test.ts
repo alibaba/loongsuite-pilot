@@ -99,8 +99,10 @@ async function spansFor(entries: AgentActivityEntry[]) {
 }
 
 describe.each(['qoder'] as const)('%s independent native child work', agentId => {
-  it.each(['both wakeups', 'parent only', 'descriptor after restart', 'modern parent marker', 'modern child marker',
-    'missing descriptor', 'conflicting descriptor',
+  it.each(['both wakeups', 'child wakeup first', 'parent only', 'descriptor after restart',
+    'descriptor after both wakeups', 'modern parent marker', 'modern child marker',
+    'missing descriptor', 'conflicting descriptor', 'conflicting native peer', 'conflicting peer in open parent',
+    'matching late native peer', 'conflicting late native peer',
     'explicit independent prompt', 'non-CLI owner', 'desktop owner', 'outside transcript', 'aliased transcript',
     'descriptor cap'])(
     'uses only corroborated legacy CLI 1.1.61 delegation with %s', async mode => {
@@ -125,8 +127,28 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
       if (mode === 'modern parent marker') {
         for (const row of parent) if (row.type === 'assistant') row.entrypoint = 'cli';
       }
-      await h.write(null, parent);
-      if (mode === 'both wakeups' || mode === 'modern child marker') await h.write(descriptor.agentId, child);
+      const nativePeerCases = ['conflicting native peer', 'conflicting peer in open parent', 'matching late native peer', 'conflicting late native peer'];
+      const lateNativePeer = mode === 'matching late native peer' || mode === 'conflicting late native peer';
+      const openParent = lateNativePeer || mode === 'conflicting peer in open parent';
+      const resultIndex = parent.findIndex(row => Array.isArray(row.message?.content)
+        && row.message.content.some(block => block.type === 'tool_result'));
+      if (nativePeerCases.includes(mode)) {
+        expect(resultIndex).toBeGreaterThan(0);
+        parent[resultIndex].toolUseResult = { kind: 'agent-result', state: 'completed',
+          agentId: mode === 'matching late native peer' ? descriptor.agentId : 'different-observed-peer' };
+      }
+      const initialParentRows = lateNativePeer ? resultIndex : resultIndex + 1;
+      if (openParent) {
+        await fs.writeFile(h.parent, '');
+        expect(publishQoderWakeup({ session_id: session, transcript_path: h.parent,
+          hook_event_name: 'UserPromptSubmit', cwd: h.root }, { dataDir: h.root, agentId })).toBe(true);
+        await fs.appendFile(h.parent, jsonl(parent.slice(0, initialParentRows)));
+      } else if (mode !== 'child wakeup first') {
+        await h.write(null, parent);
+      }
+      if (['both wakeups', 'child wakeup first', 'descriptor after both wakeups', 'modern child marker'].includes(mode)) {
+        await h.write(descriptor.agentId, child);
+      }
       else if (mode === 'outside transcript' || mode === 'aliased transcript') {
         descriptor.transcriptPath = path.join(h.root, 'other-session.jsonl');
         await fs.writeFile(descriptor.transcriptPath, jsonl(child));
@@ -141,14 +163,26 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
         transcriptPath: ['outside transcript', 'aliased transcript'].includes(mode) ? descriptor.transcriptPath : childPath };
       const putTask = (item: typeof task) => fs.writeFile(
         path.join(path.dirname(childPath), `task-${item.taskId}.json`), JSON.stringify(item));
-      if (!['missing descriptor', 'descriptor after restart', 'modern child marker'].includes(mode)) await putTask(task);
+      if (!['missing descriptor', 'descriptor after restart', 'descriptor after both wakeups', 'modern child marker'].includes(mode)) await putTask(task);
       if (mode === 'conflicting descriptor') await putTask({ ...task, taskId: task.taskId + '-conflict' });
       if (mode === 'descriptor cap') {
         await Promise.all(Array.from({ length: 129 }, (_, i) =>
           fs.writeFile(path.join(path.dirname(childPath), `.hidden-${i}`), '')));
       }
-      await h.start(); await h.cycle(); await h.stop();
-      if (mode === 'descriptor after restart') {
+      await h.start(); await h.cycle();
+      if (openParent) {
+        expect(h.entries().some(row => row['gen_ai.agent.id'] === task.agentId)).toBe(lateNativePeer);
+        await h.stop();
+        await h.write(null, parent.slice(initialParentRows), true);
+        await h.start(); await h.cycle();
+      }
+      if (mode === 'child wakeup first') {
+        expect(h.entries().some(row => row['gen_ai.agent.id'] === task.agentId)).toBe(false);
+        await h.write(null, parent);
+        await h.cycle();
+      }
+      await h.stop();
+      if (mode === 'descriptor after restart' || mode === 'descriptor after both wakeups') {
         expect(h.entries().some(row => row['gen_ai.tool.call.id'] === task.parentToolUseId)).toBe(true);
         expect(h.entries().some(row => row['gen_ai.agent.id'] === task.agentId)).toBe(false);
         await putTask(task);
@@ -160,10 +194,18 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
       const children = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT'
         && span.attributes['gen_ai.agent.id'] === task.agentId);
       expect(parentTool).toBeDefined();
-      if (['both wakeups', 'parent only', 'descriptor after restart', 'modern parent marker', 'modern child marker'].includes(mode)) {
+      if (lateNativePeer || ['both wakeups', 'child wakeup first', 'parent only', 'descriptor after restart',
+        'descriptor after both wakeups', 'modern parent marker', 'modern child marker'].includes(mode)) {
         expect(children).toHaveLength(1);
         expect(children[0].parentSpanId).toBe(parentTool?.spanContext().spanId);
         expect(children[0].spanContext().traceId).toBe(parentTool?.spanContext().traceId);
+        if (lateNativePeer) {
+          const related = h.entries().filter(row => row['gen_ai.tool.call.id'] === task.parentToolUseId);
+          expect(related.some(row => row['gen_ai.agent.peer.id'] === 'different-observed-peer')).toBe(false);
+          const audit = related.filter(row => row['event.name'] === 'gen_ai.agent.result');
+          expect(audit).toHaveLength(mode === 'matching late native peer' ? 1 : 0);
+          if (audit.length) expect(audit[0]['gen_ai.agent.peer.id']).toBe(task.agentId);
+        }
         if (mode === 'parent only') {
           // Reusing the file with the same historical call reference cannot
           // extend its first delegated prompt to an independent turn.

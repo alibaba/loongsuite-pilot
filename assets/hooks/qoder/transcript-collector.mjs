@@ -441,7 +441,9 @@ export class QoderTranscriptCollector {
     const claim = claims.find(task => task.key === childKey && task.subagentId === source.subagentId);
     if (!claim || (expectedCall && claim.callId !== expectedCall)) return;
     const link = this.links.find(source.sessionId, claim.callId, source.sessionId);
-    if (link?.legacySource !== parentKey) return;
+    if (link?.legacySource !== parentKey || link.legacyPeerConflict) return;
+    const peerId = link.legacyPeerId ?? link.peerId;
+    if (peerId && peerId !== source.subagentId) return;
     const first = await this.firstLegacyPrompt(source);
     if (first?.callId === claim.callId) return { first, link };
   }
@@ -1277,7 +1279,8 @@ export class QoderTranscriptCollector {
     const legacy = first?.start === checkpoint.activeStart && first?.uuid === prompt.uuid
       && first.callId === prompt.parent_tool_use_id && first.inode === checkpoint.inode;
     const legacyProof = legacy ? await this.verifyLegacySource(source, prompt.parent_tool_use_id) : undefined;
-    const incoming = this.links.incoming(source, prompt) ?? legacyProof?.link;
+    const incoming = this.links.incoming(source, prompt)
+      ?? (legacyProof && this.links.bindLegacyPeer(legacyProof.link, source.subagentId));
     // Parent and child directory observations can arrive in either order.
     // Keep the original cursor replayable until the parent call is indexed.
     if (source.subagentId && (prompt.isDelegatedTask === true || legacy) && prompt.parent_tool_use_id && !incoming
@@ -1444,6 +1447,9 @@ export class QoderTranscriptCollector {
           await this.prepareWork(source, checkpoint, activePrompt);
           this.links.register(source, checkpoint, row, legacyPrompt);
           checkpoint.traceContextLocked = true;
+        }
+        if (row?.type === 'user' && !source.subagentId && this.links.hasLegacyParent(source.key)) {
+          this.links.observeLegacyPeer(source, checkpoint, row);
         }
         if (eventOf(row) === 'Stop' || (row && hasQoderCnTerminalMarker([], [row]))) {
           if (!checkpoint.terminal) checkpoint.terminalAt = this.now();

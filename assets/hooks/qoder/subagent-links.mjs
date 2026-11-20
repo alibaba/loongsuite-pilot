@@ -94,6 +94,22 @@ export class QoderSubagentLinks {
     return this.legacySources.has(key);
   }
 
+  observeLegacyPeer(source, checkpoint, row) {
+    const peerId = text(row?.toolUseResult?.agentId);
+    if (!peerId) return;
+    for (const block of blocks(row)) {
+      if (block.type !== 'tool_result') continue;
+      const link = this.find(source.sessionId, block.tool_use_id, source.sessionId, checkpoint.turnId);
+      if (!link?.legacySource || link.legacyPeerId || link.legacyPeerConflict) continue;
+      if (!link.peerId) this.update(link, { peerId });
+      else if (link.peerId !== peerId) this.update(link, { legacyPeerConflict: true });
+    }
+  }
+
+  bindLegacyPeer(link, peerId) {
+    return link.legacyPeerId ? link : this.update(link, { legacyPeerId: peerId, peerId });
+  }
+
   register(source, checkpoint, row, prompt) {
     const added = [];
     if (!checkpoint.turnId || !checkpoint.traceContext) return added;
@@ -154,14 +170,20 @@ export class QoderSubagentLinks {
       this.update(this.state[incoming.id], { childComplete: true });
     }
     const results = new Map();
+    const conflictingResults = new Set();
     for (const row of rows) {
       for (const block of blocks(row)) {
         if (block.type !== 'tool_result') continue;
-        results.set(block.tool_use_id, row.toolUseResult);
         const link = this.find(source.sessionId, block.tool_use_id, source.subagentId ?? source.sessionId, checkpoint.turnId);
-        if (link && text(row.toolUseResult?.agentId) && link.peerId !== row.toolUseResult.agentId) {
-          this.update(link, { peerId: row.toolUseResult.agentId });
+        const peerId = text(row.toolUseResult?.agentId);
+        if (link?.legacyPeerId && peerId && peerId !== link.legacyPeerId) {
+          // Keep the verified peer after binding. This native result still
+          // belongs to the parent tool, but cannot finish the bound child.
+          conflictingResults.add(block.tool_use_id);
+          continue;
         }
+        results.set(block.tool_use_id, row.toolUseResult);
+        if (link && peerId && link.peerId !== peerId) this.update(link, { peerId });
       }
     }
     for (const record of records) {
@@ -195,8 +217,9 @@ export class QoderSubagentLinks {
       if (name !== 'tool.call' && name !== 'tool.result') continue;
       const link = this.find(source.sessionId, record['gen_ai.tool.call.id'], source.subagentId ?? source.sessionId, checkpoint.turnId);
       if (!link || link.turnId !== checkpoint.turnId) continue;
+      if (name === 'tool.result' && conflictingResults.has(link.callId)) continue;
       const result = results.get(link.callId);
-      const peerId = text(result?.agentId);
+      const peerId = link.legacyPeerId ?? text(result?.agentId);
       if (peerId) record['gen_ai.agent.peer.id'] = peerId;
       const event = { ...record, 'event.id': qoderDigest([link.id, name === 'tool.call' ? 'invoke' : 'result']),
         'event.name': name === 'tool.call' ? 'gen_ai.agent.invoke' : 'gen_ai.agent.result',
