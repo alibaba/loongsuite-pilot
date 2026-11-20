@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -6,6 +7,10 @@ import { ClientType, CollectionMethod } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { KiroDesktopSessionInput } from '../../../src/inputs/kiro-desktop-session/kiro-desktop-session-input.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+import { StateStore } from '../../../src/checkpoints/state-store.js';
+import { InputManager } from '../../../src/core/input-manager.js';
+import { OtlpTraceFlusher } from '../../../src/flushers/otlp-trace-flusher.js';
+import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 
 // Fixture derived from real ~/.kiro/sessions/01ebf2a66fa98655/sess_57fd9524-c06e-4026-8424-9f5ea0173c08/messages.jsonl
 // captured during AGE-933 CDP smoke (comment 7b671636 attachment cp1-report.md).
@@ -184,6 +189,37 @@ describe('KiroDesktopSessionInput', () => {
     expect(stateStore.getOffset(stateKey)).toBe((await fs.stat(file)).size);
   });
 
+  it.each([
+    { history: false, padding: 0 },
+    { history: true, padding: 0 },
+    { history: true, padding: 64 * 1024 },
+  ])('preserves a startup partial UTF-8 row with history=$history and padding=$padding', async ({ history, padding }) => {
+    const file = await writeSessionFile('hash-cold-tail', 'sess_cold_tail', history ? REAL_FIXTURE_LINES : []);
+    const key = `kiro-desktop-session:${file}`;
+    const lastComplete = (await fs.stat(file)).size;
+    const id = 'cold-tail-response';
+    const content = `${'x'.repeat(padding)}结果 🧪`;
+    const bytes = Buffer.from(JSON.stringify({
+      id, timestamp: '2026-07-20T03:15:00.500Z',
+      payload: { type: 'assistant', executionId: 'cold-tail-turn', operationType: 'Say', content },
+    }) + '\n');
+    const cut = bytes.indexOf(Buffer.from('🧪')) + 2;
+    await fs.appendFile(file, bytes.subarray(0, cut));
+
+    const input = makeInput();
+    await input.baselineOnce();
+    expect(stateStore.getOffset(key)).toBe(lastComplete);
+    expect(await input.collectOnce()).toEqual([]);
+    await fs.appendFile(file, bytes.subarray(cut));
+
+    const entries = await input.collectOnce();
+    expect(entries.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(entries[1]['gen_ai.output.messages']).toEqual([{ role: 'assistant', parts: [{ type: 'text', content }] }]);
+    expect(entries[1]['event.id']).toBe(createHash('sha256').update(`${file}::${id}::llm-resp`).digest('hex').slice(0, 32));
+    expect(stateStore.getOffset(key)).toBe(lastComplete + bytes.length);
+    expect(await input.collectOnce()).toEqual([]);
+  });
+
   it('collects completed turns appended to a tracked file while Pilot is stopped', async () => {
     const file = await writeSessionFile('hash-resume', 'sess_resume', REAL_FIXTURE_LINES);
     await makeInput().baselineOnce();
@@ -218,34 +254,68 @@ describe('KiroDesktopSessionInput', () => {
     expect(await input.collectOnce()).toEqual([]);
   });
 
-  it('collects nothing after cold-start (offset=size); a lone appended user record is dropped (no following turn to attach to)', async () => {
-    const file = await writeSessionFile('hash-a', 'sess_aaa', REAL_FIXTURE_LINES);
-    const input = makeInput();
+  it('keeps an unmatched prompt on disk through separate polls and restart while committing the preceding turns', async () => {
+    const file = await writeSessionFile('hash-split-user', 'sess_split_user', REAL_FIXTURE_LINES);
+    const stateFile = path.join(tmpDir, 'input-state.json');
+    const state = new StateStore(stateFile);
+    await state.load();
+    const input = makeInput(state);
     await input.baselineOnce();
-
     expect(await input.collectOnce()).toHaveLength(0);
 
-    const appended = JSON.stringify({
-      id: 'post-baseline-user',
-      timestamp: '2026-07-20T03:00:00.000Z',
-      payload: { type: 'user', content: 'post-baseline prompt' },
-    }) + '\n';
-    await fs.appendFile(file, appended);
+    const executionId = 'split-prompt-turn';
+    const prompt = 'Later prompt 要保留 🧪';
+    const row = (id: string, timestamp: string, payload: Record<string, unknown>) => JSON.stringify({ id, timestamp, payload }) + '\n';
+    await fs.appendFile(file, REACT_FIXTURE_LINES.join('\n') + '\n');
+    const lastComplete = (await fs.stat(file)).size;
+    const key = `kiro-desktop-session:${file}`;
+    await fs.appendFile(file, row('split-user', '2026-07-20T03:15:00.000Z', { type: 'user', content: prompt }));
+    const precedingEntries = await input.collectOnce();
+    expect(precedingEntries.filter(entry => entry['event.name'] === 'tool.result')).toHaveLength(3);
+    expect(state.getOffset(key)).toBe(lastComplete);
+    await fs.appendFile(file, row('split-start', '2026-07-20T03:15:00.400Z', { type: 'turn_start', executionId }));
+    expect(await input.collectOnce()).toEqual([]);
+    expect(state.getOffset(key)).toBe(lastComplete);
+    await state.save();
+    expect(await fs.readFile(stateFile, 'utf8')).not.toContain(prompt);
 
-    // A lone user record (no following turn_start in the same batch) is
-    // intentionally dropped to avoid creating a spurious ENTRY+AGENT trace
-    // in the OTLP flusher. When Kiro eventually writes turn_start +
-    // assistant/tool records, those will trigger emission of the user
-    // marker attached to that turn's executionId.
-    const entries = await input.collectOnce();
-    expect(entries).toHaveLength(0);
+    await fs.appendFile(file, row('split-say', '2026-07-20T03:15:00.500Z', {
+      type: 'assistant', executionId, operationType: 'Say', content: 'Done.',
+    }) + row('split-end', '2026-07-20T03:15:00.550Z', { type: 'turn_end', executionId, stopReason: 'end_turn' }));
+    const reopened = new StateStore(stateFile);
+    await reopened.load();
+    expect(reopened.getOffset(key)).toBe(lastComplete);
+    const resumed = makeInput(reopened);
+    const spans: ReadableSpan[] = [];
+    const output = new OtlpTraceFlusher({ enabled: true, protocol: 'http/protobuf', serviceName: 'kiro-test',
+      endpoints: [{ endpoint: 'http://unused.invalid' }] }, undefined, () => ({
+      export(batch, callback) { spans.push(...batch); callback({ code: 0 }); },
+      async shutdown() {},
+    }));
+    const manager = new InputManager();
+    manager.setFlusher(output);
+    manager.registerInput(resumed);
+    try {
+      await manager.startInput(resumed.id);
+      await vi.waitFor(() => expect(spans.map(span => span.attributes['gen_ai.span.kind']).sort())
+        .toEqual(['AGENT', 'ENTRY', 'LLM', 'STEP']));
+      for (const kind of ['ENTRY', 'LLM']) {
+        const span = spans.find(span => span.attributes['gen_ai.span.kind'] === kind);
+        expect(String(span?.attributes['gen_ai.input.messages'])).toContain(prompt);
+      }
+      expect(reopened.getOffset(key)).toBe((await fs.stat(file)).size);
+      expect(await resumed.collectOnce()).toEqual([]);
+    } finally {
+      await manager.stopAll();
+      await output.shutdown();
+    }
   });
 
   it('reads runtime-created session files from the beginning (no prior offset)', async () => {
     const input = makeInput();
     await input.baselineOnce();
 
-    await writeSessionFile('hash-runtime', 'sess_runtime', REAL_FIXTURE_LINES.slice(0, 2));
+    await writeSessionFile('hash-runtime', 'sess_runtime', REAL_FIXTURE_LINES.slice(0, 6));
 
     const entries = await input.collectOnce();
     expect(entries.length).toBeGreaterThanOrEqual(1);
@@ -389,9 +459,9 @@ describe('KiroDesktopSessionInput', () => {
     ]);
   });
 
-  function makeInput(): TestKiroDesktopSessionInput {
+  function makeInput(state: StateStore = stateStore as unknown as StateStore): TestKiroDesktopSessionInput {
     return new TestKiroDesktopSessionInput({
-      stateStore: stateStore as any,
+      stateStore: state,
       sessionDir: tmpDir,
       pollIntervalMs: 60_000,
     });

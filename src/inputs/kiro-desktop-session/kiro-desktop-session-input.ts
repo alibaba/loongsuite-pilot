@@ -15,7 +15,8 @@
 //                                         gen_ai.input.messages; also tracked
 //                                         as pendingUser for the next turn's
 //                                         first llm.request input.messages_delta.
-//                                         If no next turn in this batch, drop.
+//                                         Wait at the source row until a turn
+//                                         can consume the prompt.
 //   turn_start / turn_end / usage_summary / session_metadata / session_event
 //                                       → 'other' (within turn)
 //   pending_interaction / interaction_resolved → dropped (UI metadata only)
@@ -40,7 +41,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { Dirent } from 'node:fs';
+import { constants, type Dirent } from 'node:fs';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, AgentEventName, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
@@ -93,14 +94,21 @@ export class KiroDesktopSessionInput extends BaseSessionInput {
   protected override async onStart(): Promise<void> {
     const files = await this.discoverSessionFiles();
     for (const filePath of files) {
+      const stateKey = this.stateKey(filePath);
+      const state = this.stateStore.get(stateKey);
+      if (state.extra?.inode !== undefined || (state.lastOffset ?? 0) > 0) continue;
       try {
-        const stat = await fs.stat(filePath);
-        const stateKey = this.stateKey(filePath);
-        const state = this.stateStore.get(stateKey);
-        if (state.extra?.inode !== undefined || (state.lastOffset ?? 0) > 0) continue;
-        this.stateStore.update(stateKey, { lastOffset: stat.size, extra: { inode: stat.ino } });
+        const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NONBLOCK);
+        try {
+          const stat = await handle.stat();
+          if (!stat.isFile()) continue;
+          const lastOffset = await lastCompleteLineOffset(handle, stat.size);
+          this.stateStore.update(stateKey, { lastOffset, extra: { inode: stat.ino } });
+        } finally {
+          await handle.close();
+        }
       } catch {
-        // file may disappear between discover and stat
+        // File may disappear or change between discovery and the baseline read.
       }
     }
   }
@@ -156,19 +164,37 @@ export class KiroDesktopSessionInput extends BaseSessionInput {
       const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
       const completeBytes = buf.subarray(0, bytesRead).lastIndexOf(0x0a) + 1;
       if (completeBytes === 0) return [];
-      const text = buf.toString('utf-8', 0, completeBytes);
 
       const records: Record<string, unknown>[] = [];
-      for (const line of text.split('\n')) {
+      let pendingPrompt: { offset: number; recordIndex: number } | undefined;
+      for (let start = 0; start < completeBytes;) {
+        const end = buf.indexOf(0x0a, start);
+        const line = buf.toString('utf-8', start, end);
+        const lineOffset = start;
+        start = end + 1;
         if (!line.trim()) continue;
         try {
-          records.push(JSON.parse(line) as Record<string, unknown>);
+          const record = asRecord(JSON.parse(line));
+          const payload = asRecord(record.payload);
+          if (payload.type === 'user' && stringValue(payload.content)) {
+            pendingPrompt ??= { offset: lineOffset, recordIndex: records.length };
+          } else if (stringValue(payload.executionId)
+            && (payload.type === 'assistant' || payload.type === 'tool_call' || payload.type === 'turn_end')) {
+            pendingPrompt = undefined;
+          }
+          records.push(record);
         } catch (err) {
           this.logger.warn('invalid session line', { file: filePath, error: String(err) });
         }
       }
-      const entries = this.processTurnBatch(records, filePath);
-      this.stateStore.update(stateKey, { lastOffset: offset + completeBytes, extra: { inode: stat.ino } });
+      // Keep the unmatched prompt and any following turn_start in the source,
+      // including across restarts. Earlier complete turns can still advance.
+      if (pendingPrompt) records.length = pendingPrompt.recordIndex;
+      const entries = await this.processTurnBatch(records, filePath);
+      const lastOffset = offset + (pendingPrompt?.offset ?? completeBytes);
+      if (lastOffset !== offset || prevInode !== stat.ino) {
+        this.stateStore.update(stateKey, { lastOffset, extra: { inode: stat.ino } });
+      }
       return entries;
     } finally {
       await handle.close();
@@ -621,6 +647,27 @@ function groupByTurn(records: Record<string, unknown>[]): TurnGroup[] {
     current.records.push(rec);
   }
   return groups;
+}
+
+/** Locate the last newline by reading backward in fixed-size chunks. */
+async function lastCompleteLineOffset(handle: fs.FileHandle, size: number): Promise<number> {
+  if (size === 0) return 0;
+  const lastByte = Buffer.allocUnsafe(1);
+  const { bytesRead } = await handle.read(lastByte, 0, 1, size - 1);
+  if (bytesRead !== 1) throw new Error('Kiro session changed during baseline');
+  if (lastByte[0] === 0x0a) return size;
+
+  const chunk = Buffer.allocUnsafe(64 * 1024);
+  for (let end = size - 1; end > 0;) {
+    const start = Math.max(0, end - chunk.length);
+    const length = end - start;
+    const { bytesRead } = await handle.read(chunk, 0, length, start);
+    if (bytesRead !== length) throw new Error('Kiro session changed during baseline');
+    const newline = chunk.subarray(0, length).lastIndexOf(0x0a);
+    if (newline !== -1) return start + newline + 1;
+    end = start;
+  }
+  return 0;
 }
 
 async function collectSessionFiles(dir: string, files: string[]): Promise<void> {

@@ -129,9 +129,13 @@ fi
 
 log "running validate-trace against OTLP debug jsonl"
 pushd "${REPO_ROOT}" >/dev/null
-node scripts/validate-trace.mjs --input "${LATEST_OTLP}" --rules docs/trace-validation-rules.json --severity error >"${PILOT_DATA_DIR}/validate-trace.out" 2>&1 || \
-  log "validate-trace reported FAIL; see ${PILOT_DATA_DIR}/validate-trace.out"
+validation_status=0
+node scripts/validate-trace.mjs --input "${LATEST_OTLP}" --rules docs/trace-validation-rules.json --severity error >"${PILOT_DATA_DIR}/validate-trace.out" 2>&1 || validation_status=$?
 cat "${PILOT_DATA_DIR}/validate-trace.out"
 popd >/dev/null
+if [[ "${validation_status}" -ne 0 ]]; then
+  log "FAIL: validate-trace exited ${validation_status}" >&2
+  exit "${validation_status}"
+fi
 
 log "PASS: Kiro Desktop E2E"
