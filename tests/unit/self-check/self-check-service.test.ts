@@ -135,4 +135,17 @@ describe('collection self-check', () => {
     expect(await versions.resolveAgentVersion({ type: 'jsonFile', file, key: 'version' }, signal)).toBe('unknown');
     expect(await versions.resolveAgentVersion({ type: 'command', command: 'other-command --version' }, signal)).toBe('unknown');
   });
+
+  it.each([
+    { prefix: '{}\n', expected: '4.3.2' },
+    { prefix: 'partial ', expected: 'unknown' },
+  ])('returns $expected for a version at the tail boundary after $prefix', async ({ prefix, expected }) => {
+    const file = path.join(root, 'version-tail-boundary.jsonl');
+    const versionLine = '{"version":"4.3.2"}\n';
+    const incompleteLine = '{"message":"'.padEnd(32 * 1024 - versionLine.length, 'x');
+    await fs.writeFile(file, `${prefix}${versionLine}${incompleteLine}`);
+    const signal = new AbortController().signal;
+
+    expect(await versions.resolveAgentVersion({ type: 'jsonlTail', file, key: 'version' }, signal)).toBe(expected);
+  });
 });

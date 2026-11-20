@@ -41,15 +41,15 @@ async function readVersion(file: string, key: string, tail: boolean): Promise<st
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || (!tail && stat.size > MAX_BYTES)) return UNKNOWN;
-    const size = Math.min(stat.size, MAX_BYTES);
-    const offset = stat.size - size;
-    const buffer = Buffer.alloc(size);
-    const { bytesRead } = await handle.read(buffer, 0, size, offset);
-    const text = buffer.toString('utf8', 0, bytesRead);
+    const offset = Math.max(0, stat.size - MAX_BYTES);
+    // Include the preceding byte so a record at the window boundary is distinguishable from a suffix.
+    const readStart = Math.max(0, offset - 1);
+    const buffer = Buffer.alloc(stat.size - readStart);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, readStart);
+    const text = buffer.toString('utf8', offset - readStart, bytesRead);
     if (!tail) return cleanVersion(JSON.parse(text)?.[key]);
     const lines = text.split('\n');
-    // The beginning of a bounded suffix can be a partial JSON record.
-    if (offset > 0) lines.shift();
+    if (offset > 0 && buffer[0] !== 0x0a) lines.shift();
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         const version = cleanVersion(JSON.parse(lines[i])?.[key]);
