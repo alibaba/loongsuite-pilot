@@ -189,7 +189,10 @@ describe('WukongInput', () => {
 
   it.each([
     { firstFinish: 24, resultAt: 20, secondStart: 29, handoff: 30 },
+    { firstFinish: 28, resultAt: 28, secondStart: 29, handoff: 30 },
+    { firstFinish: 29, resultAt: 29, secondStart: 29, handoff: 30 },
     { firstFinish: 30, resultAt: 20, secondStart: 30, handoff: 31 },
+    { firstFinish: 30, resultAt: 30, secondStart: 30, handoff: 31 },
     { firstFinish: 24, resultAt: 40, secondStart: 30, handoff: 30 },
   ])('keeps a tied model handoff local to its adjacent steps with tool result at $resultAt and earlier finish at $firstFinish', async ({
     firstFinish, resultAt, secondStart, handoff,
@@ -206,8 +209,8 @@ describe('WukongInput', () => {
       event('TEXT_MESSAGE_END', 7, { messageId: 'one' }),
       event('TOOL_CALL_START', 10, { toolCallId: 'a', toolCallName: 'tool', parentMessageId: 'one' }),
       event('TOOL_CALL_END', 12, { toolCallId: 'a' }),
-      ...(resultAt === 20 ? [
-        event('TOOL_CALL_RESULT', 20, { toolCallId: 'a', messageId: 'result-a', content: 'First result.' }),
+      ...(resultAt <= firstFinish ? [
+        event('TOOL_CALL_RESULT', resultAt, { toolCallId: 'a', messageId: 'result-a', content: 'First result.' }),
       ] : []),
       event('STEP_FINISHED', firstFinish, { stepName: 'first' }),
       event('STEP_STARTED', 30, { stepName: 'second' }),
@@ -215,13 +218,17 @@ describe('WukongInput', () => {
       event('TEXT_MESSAGE_END', 30, { messageId: 'two' }),
       event('STEP_FINISHED', 30, { stepName: 'second' }),
       event('STEP_STARTED', 30, { stepName: 'third' }),
-      ...(resultAt === 40 ? [
-        event('TOOL_CALL_RESULT', 40, { toolCallId: 'a', messageId: 'result-a', content: 'First result.' }),
+      ...(resultAt > firstFinish ? [
+        event('TOOL_CALL_RESULT', resultAt, { toolCallId: 'a', messageId: 'result-a', content: 'First result.' }),
       ] : []),
       event('TEXT_MESSAGE_CONTENT', 45, { messageId: 'three', delta: 'Third.' }),
       event('TEXT_MESSAGE_END', 50, { messageId: 'three' }),
       event('STEP_FINISHED', 54, { stepName: 'third' }),
-      event('RUN_FINISHED', 55, { runId: 'run' }),
+      event('STEP_STARTED', 56, { stepName: 'fourth' }),
+      event('TEXT_MESSAGE_CONTENT', 58, { messageId: 'four', delta: 'Fourth.' }),
+      event('TEXT_MESSAGE_END', 59, { messageId: 'four' }),
+      event('STEP_FINISHED', 60, { stepName: 'fourth' }),
+      event('RUN_FINISHED', 60, { runId: 'run' }),
     ];
     mockExecFile.mockImplementation(makeExecFileImpl({
       list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
@@ -231,17 +238,22 @@ describe('WukongInput', () => {
     }));
     createInput();
     seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
     const spans = await exportInput();
     const ms = (time: ReadableSpan['startTime']) => time[0] * 1000 + time[1] / 1_000_000 - base;
     const intervals = (kind: string) => spans.filter(span => span.attributes['gen_ai.span.kind'] === kind)
       .map(span => [ms(span.startTime), ms(span.endTime)]);
-    expect(intervals('LLM')).toEqual([[0, 9], [secondStart, secondStart + 1], [handoff, 55]]);
-    expect(intervals('STEP')).toEqual([[0, resultAt], [secondStart, secondStart + 1], [handoff, 55]]);
+    expect(intervals('LLM')).toEqual([[0, 9], [secondStart, secondStart + 1], [handoff, 50], [56, 60]]);
+    expect(intervals('STEP')).toEqual([[0, resultAt], [secondStart, secondStart + 1], [handoff, 50], [56, 60]]);
     expect(intervals('TOOL')).toEqual([[10, resultAt]]);
-    const second = spans.find(span => span.attributes['gen_ai.response.id'] === 'two');
-    const inputMessages = String(second?.attributes['gen_ai.input.messages']);
-    if (resultAt === 20) expect(inputMessages).toContain('First result.');
-    else expect(inputMessages).not.toContain('First result.');
+    const eligibleRequest = resultAt < 30 ? 'two' : 'four';
+    const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    const firstModelWithResult = llms.find(span => String(span.attributes['gen_ai.input.messages']).includes('First result.'));
+    expect(firstModelWithResult?.attributes['gen_ai.response.id']).toBe(eligibleRequest);
+    const deltasWithResult = entries.filter(entry => entry['event.name'] === 'llm.request'
+      && JSON.stringify(entry['gen_ai.input.messages_delta'])?.includes('First result.'));
+    expect(deltasWithResult.map(entry => entry['gen_ai.response.id'])).toEqual([eligibleRequest]);
   });
 
   it.each([undefined, 'reasoning-one', 'one'])('retains known text and reasoning in their overlapping explicit step with reasoning id %s', async (reasoningId) => {

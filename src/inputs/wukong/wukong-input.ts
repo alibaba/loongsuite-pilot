@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
-import { buildAgentActivityEntry, toJsonValue } from '../../normalization/entry-builder.js';
+import { buildAgentActivityEntry, timestampToUnixNanos, toJsonValue } from '../../normalization/entry-builder.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { resolvePollIntervalMs } from '../../utils/poll-interval.js';
 
@@ -788,6 +788,7 @@ export class WukongInput extends BaseInput {
     // Use the decision's source boundary for its inferred request. A late
     // result from an earlier decision does not move this decision forward.
     const runStartTs = runStartedTs ?? steps[0].ctx.startTimestamp;
+    const sourceRequestTimes = new Map<AgentActivityEntry, bigint>();
     let earlierActivityEndTs = runStartTs;
     let inferredHandoffTs: number | undefined;
     for (let i = 0; i < steps.length; i++) {
@@ -834,7 +835,7 @@ export class WukongInput extends BaseInput {
       // utterance messageId, fall back to a deterministic per-step id.
       const responseId = s.responseId ?? (runId ? `${runId}:s${s.ctx.stepIndex}` : `${s.ctx.stepId}:r`);
 
-      entries.push(buildAgentActivityEntry({
+      const request = buildAgentActivityEntry({
         timestamp: reqTs,
         'event.id': hashId([sessionId, msg.id, 'request', String(s.ctx.stepIndex)]),
         'event.name': 'llm.request',
@@ -849,7 +850,11 @@ export class WukongInput extends BaseInput {
             { role: 'user', parts: [{ type: 'text', content: userContent }] },
           ],
         } : {}),
-      }));
+      });
+      entries.push(request);
+      if (s.firstToolTs === undefined && reqTs !== startTs) {
+        sourceRequestTimes.set(request, BigInt(timestampToUnixNanos(startTs)));
+      }
 
       // Output parts: reasoning + text merged into ONE message (spec §4.2),
       // followed by tool_call declarations for the tools this step triggered.
@@ -900,15 +905,8 @@ export class WukongInput extends BaseInput {
       }));
     }
 
-    // At equal millisecond resolution, result availability is ambiguous.
-    // Put tied tool results after requests so they feed a later request.
-    entries.sort((a, b) => {
-      const ta = BigInt(String(a['time_unix_nano'] ?? '0'));
-      const tb = BigInt(String(b['time_unix_nano'] ?? '0'));
-      if (ta !== tb) return ta < tb ? -1 : 1;
-      return Number(a['event.name'] === 'tool.result') - Number(b['event.name'] === 'tool.result');
-    });
-    injectPriorStepToolResults(entries);
+    entries.sort(compareActivityTimes);
+    injectPriorStepToolResults(entries, sourceRequestTimes);
 
     return entries;
   }
@@ -1289,13 +1287,23 @@ function findLastCompleteIndex(messages: WukongMessage[]): number {
   return lastComplete;
 }
 
-/**
- * Attach each result to the next LLM request that could have observed it.
- * The entries are chronological, and native decisions may overlap.
- */
-function injectPriorStepToolResults(entries: AgentActivityEntry[]): void {
+function compareActivityTimes(a: AgentActivityEntry, b: AgentActivityEntry, sourceRequestTimes?: ReadonlyMap<AgentActivityEntry, bigint>): number {
+  const ta = sourceRequestTimes?.get(a) ?? BigInt(String(a['time_unix_nano'] ?? '0'));
+  const tb = sourceRequestTimes?.get(b) ?? BigInt(String(b['time_unix_nano'] ?? '0'));
+  if (ta !== tb) return ta < tb ? -1 : 1;
+  // A result at the same native tick might not have been available yet.
+  return Number(a['event.name'] === 'tool.result') - Number(b['event.name'] === 'tool.result');
+}
+
+/** Attach results to the next request that could have observed them. */
+function injectPriorStepToolResults(entries: AgentActivityEntry[], sourceRequestTimes: ReadonlyMap<AgentActivityEntry, bigint>): void {
+  // A handoff can shift an inferred span time without changing the inputs
+  // available at the original request boundary.
+  const chronologicalInputs = sourceRequestTimes.size === 0 ? entries : entries
+    .filter(entry => entry['event.name'] === 'llm.request' || entry['event.name'] === 'tool.result')
+    .sort((a, b) => compareActivityTimes(a, b, sourceRequestTimes));
   let toolResponses: Array<{ role: string; parts: Array<{ type: string; id: string; response: string }> }> = [];
-  for (const entry of entries) {
+  for (const entry of chronologicalInputs) {
     if (entry['event.name'] === 'tool.result') {
       const result = entry['gen_ai.tool.call.result'];
       toolResponses.push({
