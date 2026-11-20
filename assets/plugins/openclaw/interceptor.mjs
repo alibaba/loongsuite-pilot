@@ -12,7 +12,8 @@
  * rewrites the transcript `{ message }` and reuses a short TTL cache.
  */
 
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -41,6 +42,7 @@ export const SAME_TURN_POST_TOOL_HOOK = "tool_result_middleware";
 
 const POST_TOOL_CACHE_TTL_MS = 30_000;
 const POST_TOOL_CACHE_MAX = 256;
+const SDK_HOOK_REQUEST_MAX_BYTES = 1024 * 1024;
 
 function expandHome(value) {
   if (value === "~") return os.homedir();
@@ -77,6 +79,12 @@ function pickString(...values) {
     if (typeof value === "string" && value.length > 0) return value;
   }
   return undefined;
+}
+
+function sharedIdentifier(first, second) {
+  const a = pickString(first);
+  const b = pickString(second);
+  return a && b && a !== b ? null : a ?? b;
 }
 
 function isRecord(value) {
@@ -370,6 +378,7 @@ export function createOpenClawInterceptor(overrides = {}) {
     resolveDataDir,
     fetchImpl: globalThis.fetch?.bind(globalThis),
     spawnSyncImpl: spawnSync,
+    execFileImpl: execFile,
     execPath: process.execPath,
     env: process.env,
     ...overrides,
@@ -381,40 +390,82 @@ export function createOpenClawInterceptor(overrides = {}) {
 
   const postToolCache = new Map();
 
-  function postToolCacheKey(request) {
-    return typeof request.toolUseId === "string" && request.toolUseId.length > 0
-      ? request.toolUseId
-      : undefined;
+  function postToolCacheScope(request, event, ctx, dataDir) {
+    if (request.event !== "PostToolUse") return undefined;
+    const eventToolId = sharedIdentifier(event?.toolCallId, event?.message?.toolCallId);
+    const toolId = eventToolId === null ? null : sharedIdentifier(eventToolId, ctx?.toolCallId);
+    const sessionKey = sharedIdentifier(event?.sessionKey, ctx?.sessionKey);
+    const sessionId = sharedIdentifier(event?.sessionId, ctx?.sessionId);
+    const runId = sharedIdentifier(ctx?.runId, event?.message?.__openclaw?.runId);
+    if (!toolId || sessionKey === null || sessionId === null || runId === null || !(sessionKey || sessionId)) {
+      return undefined;
+    }
+    const key = JSON.stringify([dataDir, sessionKey ? "key" : "id", sessionKey ?? sessionId, toolId, request.toolName]);
+    return { key, runId, sessionId, sessionKey };
   }
 
-  function readPostToolCache(request) {
-    if (request.event !== "PostToolUse") return { miss: true };
-    const key = postToolCacheKey(request);
-    if (!key) return { miss: true };
+  function postToolAuditKey(request, scope, input) {
+    if (!scope?.sessionKey || !scope.runId || !request.toolName) return undefined;
+    try {
+      if (Buffer.byteLength(input) > SDK_HOOK_REQUEST_MAX_BYTES) return undefined;
+      const result = JSON.parse(input).tool_response;
+      if (!isRecord(result) || !Array.isArray(result.content)) return undefined;
+      const hook = request.raw.openclaw_hook;
+      let isError = request.raw.isError ?? false;
+      if (hook === "tool_result_persist") {
+        // The Gateway attaches the owning run before calling the transcript
+        // hook. Only these verified message fields are the host wrapper.
+        if (request.raw.isSynthetic !== false || result.role !== "toolResult"
+          || result.toolName !== request.toolName || result.toolCallId !== request.toolUseId
+          || !Number.isSafeInteger(result.timestamp) || typeof result.isError !== "boolean"
+          || result.__openclaw?.runId !== scope.runId) return undefined;
+        isError = result.isError;
+        delete result.role;
+        delete result.toolName;
+        delete result.toolCallId;
+        delete result.timestamp;
+        delete result.isError;
+        delete result.__openclaw.runId;
+        if (Object.keys(result.__openclaw).length === 0) delete result.__openclaw;
+      } else if (hook !== SAME_TURN_POST_TOOL_HOOK || !scope.sessionId || typeof isError !== "boolean") {
+        return undefined;
+      }
+      // Only the audit writer sees this correlation. Both policy evaluations
+      // still receive the original full input, including args and metadata.
+      return createHash("sha256")
+        .update(JSON.stringify([scope.key, scope.runId, request.cwd, request.prompt, isError, result]))
+        .digest("hex");
+    } catch {
+      return undefined;
+    }
+  }
+
+  function readPostToolCache(request, scope) {
+    if (!scope || request.raw.openclaw_hook !== "tool_result_persist") return { miss: true };
+    const { key, runId, sessionId } = scope;
     const hit = postToolCache.get(key);
     if (!hit) return { miss: true };
     if (Date.now() - hit.ts > POST_TOOL_CACHE_TTL_MS) {
       postToolCache.delete(key);
       return { miss: true };
     }
+    if (hit.sessionId && sessionId && hit.sessionId !== sessionId) return { miss: true };
+    if (hit.runId && runId && hit.runId !== runId) return { miss: true };
     postToolCache.delete(key);
     postToolCache.set(key, hit);
-    if (hit.action !== "block") return { hit: true, result: undefined };
-    return { hit: true, result: openClawBlockResult(request, hit.reason) };
+    return { result: openClawBlockResult(request, hit.reason) };
   }
 
-  function rememberPostToolVerdict(request, action, reason) {
-    if (request.event !== "PostToolUse") return;
-    const key = postToolCacheKey(request);
-    if (!key) return;
+  function rememberPostToolBlock(scope, reason) {
+    if (!scope || (reason != null && typeof reason !== "string")) return;
     if (postToolCache.size >= POST_TOOL_CACHE_MAX) {
       const oldest = postToolCache.keys().next().value;
       postToolCache.delete(oldest);
     }
-    postToolCache.set(key, { ts: Date.now(), action, reason });
+    postToolCache.set(scope.key, { ts: Date.now(), sessionId: scope.sessionId, runId: scope.runId, reason });
   }
 
-  async function evaluateAsync(request, runtime) {
+  async function evaluateAsync(request, runtime, scope) {
     try {
       const health = await doJson(
         deps.fetchImpl,
@@ -440,10 +491,9 @@ export function createOpenClawInterceptor(overrides = {}) {
         INTERCEPTOR_HOOK_TIMEOUT_MS,
       );
       if (verdict?.action !== "block") {
-        rememberPostToolVerdict(request, "allow");
         return undefined;
       }
-      rememberPostToolVerdict(request, "block", verdict.reason);
+      rememberPostToolBlock(scope, verdict.reason);
       return openClawBlockResult(request, verdict.reason);
     } catch (err) {
       writeFailOpen(deps.resolveDataDir(), request, err instanceof Error ? err.message : String(err));
@@ -487,10 +537,7 @@ export function createOpenClawInterceptor(overrides = {}) {
       return undefined;
     }
     const text = typeof result.stdout === "string" ? result.stdout.trim() : "";
-    if (!text) {
-      rememberPostToolVerdict(request, "allow");
-      return undefined;
-    }
+    if (!text) return undefined;
     try {
       return JSON.parse(text);
     } catch {
@@ -499,19 +546,89 @@ export function createOpenClawInterceptor(overrides = {}) {
     }
   }
 
+  function evaluateSdk(request, sync, dataDir, scope) {
+    const stateDir = path.resolve(expandHome(dataDir), "state", "standalone-openclaw-interceptor-sdk");
+    const native = resolveCli(dataDir, deps);
+    if (!native || native.legacyScript) return { available: false };
+    if (!ordinaryPath(path.join(stateDir, "sdk-hooks-local.json"))) {
+      return { available: true };
+    }
+    const binary = path.join(path.dirname(native.binary), process.platform === "win32"
+      ? "loongsuite-pilot-sdk-hook.exe" : "loongsuite-pilot-sdk-hook");
+    if (!ordinaryPath(binary)) {
+      writeFailOpen(dataDir, request, "SDK Hook is missing");
+      return { available: true };
+    }
+    const args = ["sdk-hook", "--channel", "local", "--agent", "openclaw",
+      "--event", request.event, "--data-dir", stateDir];
+    let input = JSON.stringify(toCliPayload(request));
+    const auditKey = postToolAuditKey(request, scope, input);
+    if (auditKey) {
+      const metadata = `,"openclaw_post_tool_audit_key":"${auditKey}"`;
+      // Preserve the exact policy bytes. Optional audit metadata must fit
+      // inside the native request limit without re-evaluating user objects.
+      if (Buffer.byteLength(input) + Buffer.byteLength(metadata) <= SDK_HOOK_REQUEST_MAX_BYTES) {
+        input = `${input.slice(0, -1)}${metadata}}`;
+      }
+    }
+    const options = {
+      encoding: "utf8",
+      timeout: INTERCEPTOR_HOOK_TIMEOUT_MS,
+      windowsHide: true,
+      maxBuffer: 32 * 1024,
+      env: deps.env,
+    };
+    function verdict(error, stdout) {
+      if (error) {
+        writeFailOpen(dataDir, request, error.message);
+        return undefined;
+      }
+      if (!stdout?.trim()) return undefined;
+      try {
+        const result = JSON.parse(stdout);
+        if (result.action === "block") {
+          if (request.raw.openclaw_hook === SAME_TURN_POST_TOOL_HOOK) rememberPostToolBlock(scope, result.reason);
+          return openClawBlockResult(request, result.reason);
+        }
+      } catch {
+        writeFailOpen(dataDir, request, "invalid SDK Hook stdout");
+      }
+      return undefined;
+    }
+    if (sync) {
+      const result = deps.spawnSyncImpl(binary, args, { ...options, input });
+      const error = result.error || (result.status !== 0
+        ? new Error(`SDK Hook exited ${result.status}`) : undefined);
+      return { available: true, result: verdict(error, result.stdout) };
+    }
+    const result = new Promise((resolve) => {
+      const child = deps.execFileImpl(binary, args, options, (error, stdout) => {
+        resolve(verdict(error, stdout));
+      });
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(input);
+    });
+    return { available: true, result };
+  }
+
   function evaluate(hookName, event, ctx, opts = {}) {
     const request = buildHookRequest(hookName, event, ctx, opts.cwd);
     if (!request) return undefined;
-    const cached = readPostToolCache(request);
+    const dataDir = deps.resolveDataDir();
+    const scope = postToolCacheScope(request, event, ctx, dataDir);
+    const cached = readPostToolCache(request, scope);
     if (!cached.miss) return cached.result;
+    const sync = opts.sync || SYNC_INTERCEPT_HOOKS.has(hookName);
+    const sdk = evaluateSdk(request, sync, dataDir, scope);
+    if (sdk.available) return sdk.result;
     const runtime = currentRuntime();
     if (!runtime) {
       return undefined;
     }
-    if (opts.sync || SYNC_INTERCEPT_HOOKS.has(hookName)) {
+    if (sync) {
       return evaluateSync(request);
     }
-    return evaluateAsync(request, runtime);
+    return evaluateAsync(request, runtime, scope);
   }
 
   return { evaluate, buildHookRequest, currentRuntime };

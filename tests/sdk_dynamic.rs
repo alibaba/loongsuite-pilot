@@ -279,6 +279,223 @@ impl Drop for Host {
 fn empty_policy() -> Value {
     json!({"version":"original","agents":[],"hcd":{"agent_configs":{}}})
 }
+fn openclaw_policy(history: &Path) -> Value {
+    json!({"agents":["openclaw"],"hcd":{"agent_configs":{"openclaw":{"collection":{
+        "enabled":true,"profile":"openclaw_plugin_v1","allowed_roots":[history],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100}
+    }}}}, "sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}})
+}
+#[test]
+fn openclaw_profile_delivers_and_resumes_existing_plugin_events() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let data = root.join("instance");
+    let policy = openclaw_policy(&history);
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("openclaw-{day}.jsonl"));
+    std::fs::File::create(&log).unwrap();
+    let append = |id: &str| {
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(&log).unwrap(),
+            "{}",
+            json!({"event.id": id, "event.name":"llm.response",
+                "gen_ai.agent.type":"openclaw","gen_ai.session.id":"sample","gen_ai.turn.id":"turn",
+                "gen_ai.step.id":"turn:s1","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":20,
+                "time_unix_nano":"1780000000000000000","observed_time_unix_nano":"1780000000000000000"})
+        ).unwrap();
+    };
+    let ctx = Box::<Context>::default();
+    ctx.retry.store(true, Ordering::SeqCst);
+    let mut host = Host::start(&data, policy.clone(), ctx);
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    append("sample-first");
+    until(|| host.ctx.rows.lock().unwrap().len() >= 2);
+    {
+        let rows = host.ctx.rows.lock().unwrap();
+        assert_eq!(rows[0], rows[1]);
+        let row: Value = serde_json::from_slice(&rows[0]).unwrap();
+        assert_eq!(row["event.id"], "sample-first");
+        assert_eq!(row["gen_ai.usage.input_tokens"], 100);
+    }
+    host.ctx.retry.store(false, Ordering::SeqCst);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| resumed.snapshot()["agents"][0]["status"]["state"] == "running");
+    append("sample-second");
+    until(|| {
+        resumed.ctx.rows.lock().unwrap().iter().any(|row| {
+            serde_json::from_slice::<Value>(row).is_ok_and(|row| row["event.id"] == "sample-second")
+        })
+    });
+    assert!(resumed.ctx.rows.lock().unwrap().iter().all(|row| {
+        serde_json::from_slice::<Value>(row).is_ok_and(|row| row["event.id"] != "sample-first")
+    }));
+    resumed.stop();
+}
+
+#[test]
+fn openclaw_drains_history_larger_than_one_sdk_memory_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("openclaw-{day}.jsonl"));
+    let output = "bounded response ".repeat(150);
+    let expected = (0..48)
+        .map(|number| format!("bulk-response-{number}"))
+        .collect::<Vec<_>>();
+    let mut file = std::fs::File::create(&log).unwrap();
+    for id in &expected {
+        let row = json!({
+            "event.id":id,"event.name":"llm.response","gen_ai.agent.type":"openclaw",
+            "gen_ai.session.id":"sample","gen_ai.turn.id":"turn","gen_ai.step.id":"turn:s1",
+            "time_unix_nano":"1780000000000000000","gen_ai.usage.output_tokens":20,
+            "gen_ai.output.messages":[{"role":"assistant","parts":[{"type":"text","content":output}]}],
+        });
+        writeln!(file, "{row}").unwrap();
+    }
+    drop(file);
+    let memory_limit = 64 * 1024;
+    assert!(std::fs::metadata(&log).unwrap().len() > memory_limit);
+    let mut policy = openclaw_policy(&history);
+    policy["sdk_options"]["delivery"]["max_batch_bytes"] = json!(memory_limit);
+    policy["sdk_options"]["delivery"]["max_event_bytes"] = json!(memory_limit);
+    policy["sdk_options"]["delivery"]["queue_memory_bytes"] = json!(memory_limit);
+    let mut host = Host::start(&root.join("instance"), policy, Box::default());
+    host.ready();
+    until(|| host.ctx.rows.lock().unwrap().len() >= expected.len());
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    let rows = host.ctx.rows.lock().unwrap();
+    let actual = rows
+        .iter()
+        .map(|bytes| {
+            let row: Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(row["gen_ai.usage.output_tokens"], 20);
+            assert_eq!(
+                row["gen_ai.output.messages"][0]["parts"][0]["content"],
+                output
+            );
+            row["event.id"].as_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn openclaw_advances_past_an_oversized_excluded_entry() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    let excluded = root.join("excluded");
+    std::fs::create_dir(&history).unwrap();
+    std::fs::create_dir(&excluded).unwrap();
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let mut file = std::fs::File::create(history.join(format!("openclaw-{day}.jsonl"))).unwrap();
+    let memory_limit = 64 * 1024;
+    for (id, workspace, output) in [
+        ("excluded", &excluded, "x".repeat(memory_limit * 2)),
+        ("allowed", &root, "small response".to_owned()),
+    ] {
+        let row = json!({
+            "event.id":id,"event.name":"llm.response","gen_ai.agent.type":"openclaw",
+            "gen_ai.session.id":id,"gen_ai.turn.id":"turn","gen_ai.step.id":"turn:s1",
+            "time_unix_nano":"1780000000000000000","workspace.path":workspace,
+            "gen_ai.output.messages":[{"role":"assistant","parts":[{"type":"text","content":output}]}],
+        });
+        writeln!(file, "{row}").unwrap();
+    }
+    drop(file);
+    let mut policy = openclaw_policy(&history);
+    policy["hcd"]["agent_configs"]["openclaw"]["collection"]["pilot_host"] = json!({
+        "data_dir": history, "capture_message_content": true, "exclude_workspaces": [excluded],
+    });
+    policy["sdk_options"]["delivery"]["max_batch_bytes"] = json!(memory_limit);
+    policy["sdk_options"]["delivery"]["max_event_bytes"] = json!(memory_limit);
+    policy["sdk_options"]["delivery"]["queue_memory_bytes"] = json!(memory_limit);
+    let mut host = Host::start(&root.join("instance"), policy, Box::default());
+    host.ready();
+    until(|| !host.ctx.rows.lock().unwrap().is_empty());
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    let rows = host.ctx.rows.lock().unwrap();
+    assert_eq!(rows.len(), 1);
+    let row: Value = serde_json::from_slice(&rows[0]).unwrap();
+    assert_eq!(row["event.id"], "allowed");
+}
+
+#[test]
+fn openclaw_history_advances_past_a_record_larger_than_the_poll_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let data = root.join("instance");
+    let policy = json!({"agents":["openclaw"],"hcd":{"agent_configs":{"openclaw":{"collection":{
+        "enabled":true,"profile":"openclaw_plugin_v1","allowed_roots":[history],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100,"max_read_bytes":4096}
+    }}}}, "sdk_options":{"delivery":{"flush_interval_ms":10}}});
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("openclaw-{day}.jsonl"));
+    std::fs::File::create(&log).unwrap();
+    let row = |id: &str, padding: usize| {
+        json!({"event.id":id, "event.name":"llm.response",
+            "gen_ai.agent.type":"openclaw", "gen_ai.session.id":"large-line-session",
+            "gen_ai.turn.id":"turn", "gen_ai.step.id":"turn:s1",
+            "gen_ai.usage.input_tokens":10, "time_unix_nano":"1780000000000000000",
+            "source_padding":"x".repeat(padding)})
+    };
+    let ids = |host: &Host| {
+        host.ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|raw| {
+                let row: Value = serde_json::from_slice(raw).unwrap();
+                assert_eq!(row["gen_ai.usage.input_tokens"], 10);
+                row["event.id"].as_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    std::fs::write(
+        &log,
+        format!("{}\n{}\n", row("long", 10 * 1024), row("short", 0)),
+    )
+    .unwrap();
+    until(|| ids(&host).len() >= 2);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    assert_eq!(ids(&host), ["long", "short"]);
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| resumed.snapshot()["agents"][0]["status"]["state"] == "running");
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(log).unwrap(),
+        "{}",
+        row("next", 0)
+    )
+    .unwrap();
+    until(|| !ids(&resumed).is_empty());
+    resumed.stop();
+    assert_eq!(ids(&resumed), ["next"]);
+}
+
 fn qoder_policy(source: &Path) -> Value {
     json!({"version":"qoder-v1","agents":["qoder"],"hcd":{"agent_configs":{"qoder":{"collection":{"enabled":true,"profile":"qoder_trace_v1","allowed_roots":[source],"sources":[{"id":"hook","type":"hook_jsonl","path":source}],"limits":{"poll_interval_ms":100}}}}},"sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}})
 }
@@ -2047,4 +2264,145 @@ fn codex_sdk_deploys_trusted_hooks_and_cleans_only_its_own() {
     assert_eq!(cleanup.apply(empty_policy()).0, OK);
     assert_eq!(std::fs::read(&settings).unwrap(), cleared);
     cleanup.stop();
+}
+
+#[test]
+fn openclaw_native_local_command_preserves_allow_block_and_unavailable_behavior() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("sdk");
+    let policy = json!({
+        "agents": ["openclaw"],
+        "hcd": {"agent_configs": {"openclaw": {"collection": {"enabled": false}}}},
+        "sdk_options": {"hooks": {"local": {"mode": "all", "types": []}}},
+    });
+    let mut host = Host::start(&data, policy, Box::default());
+    host.ready();
+    let call = |content: &str| {
+        let payload = json!({"openclaw_hook":"tool_result_persist","session_id":"native-edge","tool_name":"read","tool_response":content});
+        sdk_hook_command(&data, "local", "openclaw", "PostToolUse", &payload)
+            .wait_with_output()
+            .unwrap()
+    };
+    let allowed = call("ordinary tool result");
+    assert!(allowed.status.success());
+    assert!(allowed.stdout.is_empty());
+    let denied = call("LTAI1234567890ABCD");
+    assert!(denied.status.success());
+    let post: Value = serde_json::from_slice(&denied.stdout).unwrap();
+    assert!(post["action"] == "block");
+    assert!(post.to_string().contains("[ACCESSKEY_BLOCKED]"));
+    host.stop();
+    let offline = call("LTAI1234567890ABCD");
+    assert!(offline.status.success());
+    assert!(offline.stdout.is_empty());
+}
+
+#[test]
+fn openclaw_native_post_tool_audits_coalesce_only_two_clean_allows() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("sdk");
+    let policy = json!({
+        "agents": ["openclaw"],
+        "hcd": {"agent_configs": {"openclaw": {"collection": {"enabled": false}}}},
+        "sdk_options": {
+            "delivery": {"flush_interval_ms": 1},
+            "hooks": {"local": {"mode": "all", "types": []}},
+        },
+    });
+    let mut host = Host::start(&data, policy, Box::default());
+    host.ready();
+    let call = |hook: &str, session: &str, key: &str, response: Value| {
+        let payload = json!({
+            "openclaw_hook": hook, "session_id": session, "tool_use_id": "test-call",
+            "tool_name": "read", "tool_response": response, "openclaw_post_tool_audit_key": key,
+        });
+        let output = sdk_hook_command(&data, "local", "openclaw", "PostToolUse", &payload)
+            .wait_with_output()
+            .unwrap();
+        assert!(output.status.success());
+        output.stdout
+    };
+    let audits = || {
+        host.ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|row| serde_json::from_slice::<Value>(row).ok())
+            .filter(|row| row["event.kind"] == "interceptor.result")
+            .collect::<Vec<_>>()
+    };
+    let remembered = "a".repeat(64);
+    let other = "b".repeat(64);
+    let result = json!({
+        "content": [{"type": "text", "text": "ordinary"}], "details": {"elapsed": 1},
+    });
+    let mut message = result.clone();
+    message["role"] = json!("toolResult");
+    message["toolCallId"] = json!("test-call");
+    message["toolName"] = json!("read");
+    message["isError"] = json!(false);
+    message["timestamp"] = json!(1000);
+    message["__openclaw"] = json!({"runId": "run-1"});
+    assert!(call("tool_result_middleware", "first", &remembered, result).is_empty());
+    until(|| {
+        audits()
+            .iter()
+            .any(|row| row["gen_ai.session.id"] == "first")
+    });
+    assert!(call(
+        "tool_result_persist",
+        "other-session",
+        &remembered,
+        message.clone()
+    )
+    .is_empty());
+    let denied = call(
+        "tool_result_persist",
+        "first",
+        &remembered,
+        json!({"details": {"nested":["LTAI1234567890ABCD"]}}),
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&denied).unwrap()["action"],
+        "block"
+    );
+    assert!(call("tool_result_persist", "", &remembered, message).is_empty());
+    assert!(call("tool_result_persist", "unpaired", &other, json!("ordinary")).is_empty());
+    assert!(call(
+        "tool_result_persist",
+        "consumed",
+        &remembered,
+        json!("ordinary")
+    )
+    .is_empty());
+    until(|| {
+        let rows = audits();
+        ["first", "other-session", "unpaired", "consumed"]
+            .into_iter()
+            .all(|session| rows.iter().any(|row| row["gen_ai.session.id"] == session))
+            && rows.iter().any(|row| row["hook.action"] == "block")
+    });
+    // Both paired callbacks receive real SDK verdicts. Only the second
+    // identical clean allow omits its extra interceptor.result event.
+    let replies = || {
+        hook_trace(&data, "hook-verdict.jsonl")
+            .into_iter()
+            .filter(|row| row["stage"] == "reply")
+            .collect::<Vec<_>>()
+    };
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while replies().len() < 6 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let replies = replies();
+    assert_eq!(replies.len(), 6, "SDK replies: {replies:?}");
+    assert!(
+        replies
+            .iter()
+            .all(|row| row["detail"]["status"] == "verdict"),
+        "SDK replies: {replies:?}"
+    );
+    assert_eq!(audits().len(), 5, "paired clean allows produced two audits");
+    host.stop();
 }

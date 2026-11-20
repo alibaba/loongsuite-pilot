@@ -226,6 +226,7 @@ pub struct Orchestrator {
     summary_writer: Mutex<Option<MetricsSummaryWriter>>,
     dashboard: Mutex<Option<dashboard::DashboardServer>>,
     qoder_hooks: Mutex<Option<super::sdk_agent::SdkAgent>>,
+    openclaw_interceptor: Mutex<Option<super::sdk_agent::SdkAgent>>,
     multimodal_ready: Mutex<bool>,
     verdicts: Mutex<Option<Arc<ToolVerdictStore>>>,
     status_bar: Mutex<Option<StatusBarAppManager>>,
@@ -277,6 +278,7 @@ impl Orchestrator {
             summary_writer: Mutex::new(None),
             dashboard: Mutex::new(None),
             qoder_hooks: Mutex::new(None),
+            openclaw_interceptor: Mutex::new(None),
             multimodal_ready: Mutex::new(false),
             verdicts: Mutex::new(None),
             status_bar: Mutex::new(None),
@@ -518,6 +520,28 @@ impl Orchestrator {
         } else if let Some(config) = &interceptor_config {
             self.start_qoder_hooks(&pilot_dir, config, verdicts).await;
         }
+        let mut openclaw_sdk = None;
+        for profile in crate::sdk::hook_history::PROFILES {
+            if self.uses_sdk_hook_history(profile.agent) {
+                let sdk = self
+                    .register_sdk_hook_history(&mut detection, &pilot_dir, &state_store, profile)
+                    .await;
+                if profile.agent == "openclaw" {
+                    openclaw_sdk = Some(sdk);
+                }
+            }
+        }
+        if let Some(config) = interceptor_config.as_ref().filter(|config| {
+            config.mode == crate::types::MaskMode::All
+                && self
+                    .config
+                    .agents
+                    .get("openclaw")
+                    .is_none_or(|agent| agent.enabled != Some(false))
+        }) {
+            self.start_openclaw_interceptor(&pilot_dir, config, &state_store)
+                .await;
+        }
         let deploy_entries = deployment
             .as_ref()
             .map(|deployment| self.deploy_detection_entries(deployment))
@@ -541,9 +565,16 @@ impl Orchestrator {
         });
         discovery.start().await;
         *self.discovery.lock().expect("discovery") = Some(discovery);
+        let openclaw_legacy = if self.standalone && openclaw_sdk.is_none() {
+            self.inputs.get_input("openclaw-plugin-log")
+        } else {
+            None
+        };
         let retention = Arc::new(
             LogRetentionService::new(&self.data_dir, self.config.retention.clone())
                 .with_state_store(Arc::clone(&state_store))
+                .with_openclaw_sdk(openclaw_sdk)
+                .with_openclaw_legacy(openclaw_legacy.as_ref())
                 .with_hermes_trace(self.otlp.lock().expect("otlp").as_ref()),
         );
         retention.start();
@@ -767,6 +798,14 @@ impl Orchestrator {
         let hooks = self.qoder_hooks.lock().expect("Qoder Hook SDK").take();
         if let Some(hooks) = hooks {
             hooks.stop().await;
+        }
+        let openclaw_interceptor = self
+            .openclaw_interceptor
+            .lock()
+            .expect("OpenClaw interceptor")
+            .take();
+        if let Some(sdk) = openclaw_interceptor {
+            sdk.stop().await;
         }
         if let Some(verdicts) = self.verdicts.lock().expect("verdicts").clone() {
             if let Err(err) = verdicts.stop_checkpoint_loop(chrono::Utc::now().timestamp_millis()) {
@@ -2790,27 +2829,31 @@ impl Orchestrator {
         .await;
         let openclaw = self.data_dir_join("logs/openclaw");
         ensure_openclaw_plugin_log_dir(&openclaw).await;
-        self.attach_hook(
-            entries,
-            "openclaw-plugin-log",
-            "openclaw",
-            OpenClawPluginInput::new(crate::inputs::openclaw_plugin::OpenClawPluginInputOptions {
-                state_store: Arc::clone(state_store),
-                log_dir: Some(openclaw.clone()),
-                log_prefix: None,
-                poll_interval_ms: self.poll("openclaw-plugin-log"),
-                data_dir: Some(self.data_dir.clone()),
-            }),
-            vec![openclaw.clone()],
-            {
-                let openclaw = openclaw.clone();
-                move || {
+        if !self.uses_sdk_hook_history("openclaw") {
+            self.attach_hook(
+                entries,
+                "openclaw-plugin-log",
+                "openclaw",
+                OpenClawPluginInput::new(
+                    crate::inputs::openclaw_plugin::OpenClawPluginInputOptions {
+                        state_store: Arc::clone(state_store),
+                        log_dir: Some(openclaw.clone()),
+                        log_prefix: None,
+                        poll_interval_ms: self.poll("openclaw-plugin-log"),
+                        data_dir: Some(self.data_dir.clone()),
+                    },
+                ),
+                vec![openclaw.clone()],
+                {
                     let openclaw = openclaw.clone();
-                    async move { directory_exists(&openclaw).await }
-                }
-            },
-        )
-        .await;
+                    move || {
+                        let openclaw = openclaw.clone();
+                        async move { directory_exists(&openclaw).await }
+                    }
+                },
+            )
+            .await;
+        }
         let hermes = self.data_dir_join("logs/hermes-agent");
         ensure_dir(&hermes).await;
         let (hermes_input, live) = self
@@ -2905,6 +2948,49 @@ impl Orchestrator {
                     .is_some_and(|agent| is_agent_multimodal_enabled(Some("qoder"), agent)))
     }
 
+    async fn start_openclaw_interceptor(
+        &self,
+        pilot_dir: &str,
+        config: &crate::types::InterceptorConfig,
+        state_store: &Arc<StateStore>,
+    ) {
+        let sdk_data = self.data_dir_join("state/standalone-openclaw-interceptor-sdk");
+        let init = serde_json::json!({
+            "data_dir": sdk_data,
+            "resource_dir": pilot_dir,
+            "home_dir": resolve_home("~"),
+            "user_id": self.config.user_id,
+        });
+        let policy = serde_json::json!({
+            "agents": ["openclaw"],
+            "hcd": {"agent_configs": {"openclaw": {"collection": {"enabled": false}}}},
+            "sdk_options": {"mask": self.config.mask, "hooks": {"local": config}},
+        });
+        let sdk = super::sdk_agent::SdkAgent::new(
+            "openclaw-plugin-log",
+            init,
+            policy,
+            &self.inputs,
+            std::path::PathBuf::from(sdk_data),
+            state_store,
+        );
+        if let Err(error) = sdk.start().await {
+            logger("Orchestrator").warn(
+                "OpenClaw SDK Hook start failed (non-fatal)",
+                Some(&fields(serde_json::json!({"error": error}))),
+            );
+            self.emit(OrchestratorEvent::ComponentFailure {
+                component: "openclaw-interceptor".into(),
+                error,
+            });
+        } else {
+            *self
+                .openclaw_interceptor
+                .lock()
+                .expect("OpenClaw interceptor") = Some(sdk);
+        }
+    }
+
     async fn start_qoder_hooks(
         &self,
         pilot_dir: &str,
@@ -2952,6 +3038,81 @@ impl Orchestrator {
             verdicts.start_checkpoint_loop(interceptor::TOOL_VERDICT_CHECKPOINT_INTERVAL_MS);
             *self.qoder_hooks.lock().expect("Qoder Hook SDK") = Some(sdk);
         }
+    }
+
+    fn uses_sdk_hook_history(&self, agent: &str) -> bool {
+        crate::sdk::hook_history::find(agent).is_some()
+            && self.standalone
+            && !self.config.upstream_link.enabled
+            && !(self.inputs_have_multimodal()
+                && self
+                    .config
+                    .agents
+                    .get(agent)
+                    .is_some_and(|config| is_agent_multimodal_enabled(Some(agent), config)))
+    }
+
+    async fn register_sdk_hook_history(
+        &self,
+        entries: &mut Vec<Arc<dyn AgentDetection>>,
+        pilot_dir: &str,
+        state_store: &Arc<StateStore>,
+        profile: &crate::sdk::hook_history::HookHistoryProfile,
+    ) -> Arc<super::sdk_agent::SdkAgent> {
+        let history = self.data_dir_join(profile.history);
+        ensure_dir(&history).await;
+        let agent = profile.agent;
+        let listener = profile.listener;
+        let data = std::path::Path::new(&self.data_dir);
+        let sdk_data = profile.sdk_data(data);
+        let config = self.config.agents.get(agent);
+        let init = serde_json::json!({
+            "data_dir": sdk_data,
+            "resource_dir": pilot_dir,
+            "user_id": self.config.user_id,
+        });
+        let policy = profile.policy(
+            data,
+            self.poll(listener)
+                .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS),
+            config.and_then(|config| config.capture_message_content),
+            self.config
+                .privacy
+                .as_ref()
+                .map(|privacy| privacy.exclude_workspaces.as_slice())
+                .unwrap_or_default(),
+            Some(&self.config.mask),
+        );
+        let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
+            listener,
+            init,
+            policy,
+            &self.inputs,
+            sdk_data,
+            state_store,
+        ));
+        let live = live_from_parts(
+            listener,
+            agent,
+            "sdk-hosted",
+            Arc::clone(&sdk),
+            |input| input.running(),
+            |input| Box::pin(async move { input.start().await }),
+            |input| Box::pin(async move { input.stop().await }),
+        );
+        self.inputs.register_input(Arc::clone(&live));
+        self.push_detection(
+            entries,
+            live,
+            vec![history.clone()],
+            move || {
+                let history = history.clone();
+                async move { directory_exists(&history).await }
+            },
+            1,
+            None,
+        );
+        sdk
     }
 
     fn register_sdk_qoder(
@@ -3266,6 +3427,10 @@ impl Orchestrator {
         let stop_manager = Arc::clone(&self.inputs);
         let stop_id = id.clone();
         let poll = self.poll(listener).unwrap_or(300_000);
+        let propagate_start_error = self.standalone
+            && crate::sdk::hook_history::PROFILES
+                .iter()
+                .any(|profile| profile.listener == listener);
         entries.push(Arc::new(ClosureDetection {
             id: id.clone(),
             type_name: live.collection_method.clone(),
@@ -3286,7 +3451,10 @@ impl Orchestrator {
                 let manager = Arc::clone(&manager);
                 let id = id.clone();
                 Box::pin(async move {
-                    manager.start_input(&id).await;
+                    let result = manager.start_input_checked(&id).await;
+                    if propagate_start_error {
+                        result.map_err(anyhow::Error::msg)?;
+                    }
                     Ok(())
                 })
             }),
@@ -3316,14 +3484,36 @@ impl Orchestrator {
         Av: std::future::Future<Output = bool> + Send + 'static,
     {
         let input = Arc::new(input);
+        let handoff = crate::sdk::hook_history::find(agent)
+            .filter(|profile| self.standalone && profile.listener == listener)
+            .map(|profile| {
+                let data = std::path::PathBuf::from(&self.data_dir);
+                let state = self.state_store.lock().expect("state").clone();
+                let manager = Arc::downgrade(&self.inputs);
+                let resource_dir = self.runtime_options.resource_dir.clone();
+                let user_id = self.config.user_id.clone();
+                Arc::new(LegacyHookHistory {
+                    profile,
+                    data,
+                    state,
+                    manager,
+                    resource_dir,
+                    user_id,
+                })
+            });
         let live = live_from_parts(
             listener,
             agent,
             &input.collection_method_name(),
             Arc::clone(&input),
             |input| input.surface_running(),
-            |input| {
+            move |input| {
+                let handoff = handoff.clone();
                 Box::pin(async move {
+                    let _sdk_lock = match handoff {
+                        Some(history) => history.take_ownership().await?,
+                        None => None,
+                    };
                     input.surface_start().await;
                     Ok(())
                 })
@@ -3828,6 +4018,61 @@ impl HookSurface for DshLogInput {
         listener: impl Fn(&InputRuntimeDelta) + Send + Sync + 'static,
     ) {
         self.on_runtime_delta(listener);
+    }
+}
+
+struct LegacyHookHistory {
+    profile: &'static crate::sdk::hook_history::HookHistoryProfile,
+    data: std::path::PathBuf,
+    state: Option<Arc<StateStore>>,
+    manager: std::sync::Weak<InputManager>,
+    resource_dir: Option<String>,
+    user_id: String,
+}
+
+impl LegacyHookHistory {
+    async fn take_ownership(&self) -> Result<Option<std::fs::File>, String> {
+        use crate::sdk::hook_history::LegacyHistoryOwnership;
+        let state = self.state.as_ref().ok_or("Pilot checkpoint unavailable")?;
+        if let LegacyHistoryOwnership::Ready(lock) = self
+            .profile
+            .export_checkpoint(&self.data, state)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(lock);
+        }
+        let manager = self.manager.upgrade().ok_or("Pilot output stopped")?;
+        let resource_dir = match &self.resource_dir {
+            Some(path) => path.clone(),
+            None => resolve_pilot_dir(&self.data.to_string_lossy(), &[])?,
+        };
+        let sdk_data = self.profile.sdk_data(&self.data);
+        let init = serde_json::json!({
+            "data_dir": sdk_data, "resource_dir": resource_dir, "user_id": self.user_id,
+        });
+        // A source-free host uses the normal output acknowledgements to
+        // drain committed events without advancing or re-reading the source.
+        let sdk = super::sdk_agent::SdkAgent::drain_history(
+            self.profile,
+            init,
+            &manager,
+            sdk_data,
+            state,
+        );
+        sdk.start().await?;
+        sdk.stop_with_result().await?;
+        match self
+            .profile
+            .export_checkpoint(&self.data, state)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            LegacyHistoryOwnership::Ready(lock) => Ok(lock),
+            LegacyHistoryOwnership::Pending => {
+                Err("SDK activity remains queued; legacy history not started".into())
+            }
+        }
     }
 }
 

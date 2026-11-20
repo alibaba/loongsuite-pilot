@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,8 +21,8 @@ use tokio::sync::Notify;
 
 use crate::checkpoints::{InputState, InputStatePatch, StateStore};
 use crate::normalization::{
-    build_agent_activity_entry, enrich_canonical_entry_with_git, is_reserved_key,
-    normalize_event_name,
+    build_agent_activity_entry, build_shared_hook_activity_entry, enrich_canonical_entry_with_git,
+    is_canonical_payload_key, is_reserved_key, normalize_event_name,
 };
 use crate::types::{AgentActivityEntry, ClientType, CollectionMethod};
 use crate::utils::{
@@ -133,9 +133,23 @@ struct HookInner {
     cursor_first_run_guard: bool,
     transform: TransformFn,
     history_replay: Option<Mutex<HookReplay>>,
+    pending_line: Mutex<Option<PendingHookLine>>,
 }
 
 impl HookJsonlInput {
+    /// Host the existing parser inside the SDK's transactional input lifecycle.
+    /// The SDK supplies an explicit source directory and does not create it.
+    pub(crate) fn sdk_hosted(&self) -> Arc<crate::inputs::base::HostedInput<SdkHookBody>> {
+        crate::inputs::base::HostedInput::new(
+            SdkHookBody {
+                inner: Arc::clone(&self.inner),
+            },
+            "SdkHookInput",
+            Arc::clone(&self.inner.state_store),
+            Some(self.poll.interval_ms()),
+        )
+    }
+
     pub fn runtime_info(&self) -> crate::inputs::base::InputRuntimeInfo {
         crate::inputs::base::InputRuntimeInfo {
             poll_interval_ms: self.poll.interval_ms(),
@@ -164,6 +178,7 @@ impl HookJsonlInput {
             transform: config.transform,
             history_replay: matches!(config.id, "opencode-log" | "pi-coding-agent-log")
                 .then(|| Mutex::new(HookReplay::new())),
+            pending_line: Mutex::new(None),
         });
         Self { inner, poll }
     }
@@ -257,6 +272,46 @@ impl HookJsonlInput {
 
     pub async fn collect_entries(&self) -> Result<Vec<AgentActivityEntry>, String> {
         self.inner.collect().await
+    }
+}
+
+pub(crate) struct SdkHookBody {
+    inner: Arc<HookInner>,
+}
+
+#[async_trait::async_trait]
+impl crate::inputs::base::InputBody for SdkHookBody {
+    fn checkpoint_namespaces(&self) -> Option<Vec<String>> {
+        Some(vec![self.inner.id.into()])
+    }
+
+    fn id(&self) -> &str {
+        self.inner.id
+    }
+
+    fn agent_type(&self) -> ClientType {
+        self.inner.agent_type
+    }
+
+    fn collection_method(&self) -> CollectionMethod {
+        CollectionMethod::HookJsonl
+    }
+
+    async fn on_start(&self, _: &crate::inputs::base::InputRuntime) -> anyhow::Result<()> {
+        crate::utils::source_access::check(&self.inner.log_dir)?;
+        *self.inner.pending_line.lock().expect("pending Hook line") = None;
+        if let Some(replay) = &self.inner.history_replay {
+            *replay.lock().expect("hook replay") = HookReplay::new();
+        }
+        Ok(())
+    }
+
+    async fn collect(
+        &self,
+        _: &crate::inputs::base::InputRuntime,
+    ) -> anyhow::Result<Vec<AgentActivityEntry>> {
+        crate::utils::source_access::check(&self.inner.log_dir)?;
+        self.inner.collect().await.map_err(anyhow::Error::msg)
     }
 }
 
@@ -542,7 +597,15 @@ async fn cursor_first_run_guard(inner: &HookInner) {
     let today = get_today_date_string();
     let log_file_name = format!("{}-{today}.jsonl", inner.log_prefix);
     let log_file = Path::new(&inner.log_dir).join(&log_file_name);
-    match tokio::fs::metadata(&log_file).await {
+    let metadata = if crate::utils::source_access::current().is_some() {
+        match crate::utils::source_access::open_async(&log_file).await {
+            Ok(file) => file.metadata().await,
+            Err(error) => Err(error),
+        }
+    } else {
+        tokio::fs::metadata(&log_file).await
+    };
+    match metadata {
         Ok(meta) if meta.len() > 0 => {
             inner.state_store.update(
                 inner.id,
@@ -660,6 +723,24 @@ struct HookWork {
     deadline: Option<Duration>,
 }
 
+struct HookEntryBudget {
+    capacity: usize,
+    remaining: usize,
+}
+
+impl HookEntryBudget {
+    fn reserve(&mut self, entry: &AgentActivityEntry) -> bool {
+        let bytes = entry.estimated_heap_bytes();
+        if bytes > self.remaining && self.remaining != self.capacity {
+            return false;
+        }
+        // A single oversized entry must reach workspace filtering before the
+        // SDK decides whether it can be delivered or must retain the cursor.
+        self.remaining = self.remaining.saturating_sub(bytes);
+        true
+    }
+}
+
 impl HookWork {
     fn can_process(&self) -> bool {
         self.records < 256
@@ -747,8 +828,10 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
             .await
         }
     };
-    let raw = work.is_some() || inner.id == "openclaw-plugin-log";
-    let candidates = if raw {
+    let rotated = work.is_some() || inner.id == "openclaw-plugin-log";
+    let scoped = crate::utils::source_access::current().is_some();
+    let bounded = rotated || scoped;
+    let candidates = if rotated {
         file_names.clone()
     } else {
         candidate_file_names(&inner.log_prefix, &file_names, state.last_file(), &today)
@@ -759,7 +842,7 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
         .as_object()
         .cloned()
         .unwrap_or_default();
-    let next = if work.is_some() {
+    let next = if work.is_some() && !scoped {
         0
     } else {
         previous["hookLogSweepNext"]
@@ -768,13 +851,28 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
             .unwrap_or(0)
     };
     let mut resume = None;
-    let mut remaining = if raw {
+    let mut remaining = if scoped {
+        crate::utils::source_access::read_limit(crate::utils::raw_source::CYCLE_BYTES as usize)
+            as u64
+    } else if rotated {
         crate::utils::raw_source::CYCLE_BYTES
     } else {
         u64::MAX
     };
-    for name in candidates.iter().cycle().skip(next).take(candidates.len()) {
-        if remaining == 0 {
+    let file_limit = crate::utils::source_access::file_limit(usize::MAX);
+    let mut entry_budget =
+        crate::utils::source_access::entry_buffer_limit().map(|capacity| HookEntryBudget {
+            capacity,
+            remaining: capacity,
+        });
+    for (index, name) in candidates
+        .iter()
+        .cycle()
+        .skip(next)
+        .take(candidates.len())
+        .enumerate()
+    {
+        if remaining == 0 || index >= file_limit {
             resume = Some(name.clone());
             break;
         }
@@ -787,17 +885,29 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
             identities.get(name).and_then(Value::as_str),
             remaining,
             work.as_mut(),
+            entry_budget.as_mut(),
         )
         .await?;
         offsets.insert(name.clone(), file.offset);
-        if raw {
+        if bounded {
             remaining = remaining.saturating_sub(file.bytes);
             if let Some(identity) = file.identity {
                 identities.insert(name.clone(), identity.into());
             }
         }
         entries.extend(file.entries);
+        if file.continues_line {
+            resume = Some(name.clone());
+            break;
+        }
+        if file.deferred_for_memory {
+            resume = Some(name.clone());
+            break;
+        }
         if work.is_some() && file.offset < file.size && !file.closed_partial_tail {
+            if scoped {
+                resume = Some(name.clone());
+            }
             break;
         }
     }
@@ -817,7 +927,7 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
                 .map(|value| value != newest_offset as f64)
                 .unwrap_or(true);
         identities.retain(|name, _| live.contains(name.as_str()));
-        let changed = raw
+        let changed = bounded
             && (previous["hookLogIdentities"].as_object() != Some(&identities)
                 || previous["hookLogSweepNext"].as_str() != resume.as_deref());
         if should_persist
@@ -827,7 +937,7 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
         {
             let mut extra = Map::new();
             extra.insert(OFFSET_MAP_EXTRA_KEY.to_string(), Value::Object(pruned));
-            if raw {
+            if bounded {
                 extra.insert("hookLogDir".into(), inner.log_dir.clone().into());
                 extra.insert("hookLogPrefix".into(), inner.log_prefix.clone().into());
                 extra.insert("hookLogIdentities".into(), Value::Object(identities));
@@ -868,6 +978,16 @@ async fn collect_hook_files(inner: &HookInner) -> Result<Vec<AgentActivityEntry>
     Ok(entries)
 }
 
+/// A partial row is speculative until the persisted offset reaches its start.
+struct PendingHookLine {
+    path: PathBuf,
+    identity: String,
+    start: u64,
+    scanned: u64,
+    bytes: Vec<u8>,
+    oversize: bool,
+}
+
 #[derive(Default)]
 struct HookRead {
     entries: Vec<AgentActivityEntry>,
@@ -876,6 +996,8 @@ struct HookRead {
     bytes: u64,
     size: u64,
     closed_partial_tail: bool,
+    continues_line: bool,
+    deferred_for_memory: bool,
 }
 
 async fn collect_hook_file(
@@ -885,6 +1007,7 @@ async fn collect_hook_file(
     previous_identity: Option<&str>,
     mut budget: u64,
     mut work: Option<&mut HookWork>,
+    mut entry_budget: Option<&mut HookEntryBudget>,
 ) -> Result<HookRead, String> {
     let (mut file, identity) = match open_session_file(&path.to_string_lossy()).await {
         Ok(opened) => opened,
@@ -934,7 +1057,7 @@ async fn collect_hook_file(
     let mut read = HookRead {
         offset,
         size,
-        identity: Some(key),
+        identity: Some(key.clone()),
         ..HookRead::default()
     };
     if size <= offset || budget == 0 || work.as_ref().is_some_and(|work| !work.can_process()) {
@@ -948,49 +1071,101 @@ async fn collect_hook_file(
     } else {
         None
     };
-    file.seek(std::io::SeekFrom::Start(offset))
+    let scoped = crate::utils::source_access::current().is_some();
+    let pending = if scoped {
+        let mut pending = inner.pending_line.lock().expect("pending Hook line");
+        if pending.as_ref().is_some_and(|row| row.path == path) {
+            pending.take()
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+    .filter(|row| row.identity == key && row.start == offset && row.scanned <= size);
+    let (cursor, mut buf, discarding) = pending
+        .map(|row| (row.scanned, row.bytes, row.oversize))
+        .unwrap_or_else(|| (offset, Vec::new(), false));
+    let prefix = buf.len();
+    file.seek(std::io::SeekFrom::Start(cursor))
         .await
         .map_err(|err| err.to_string())?;
-    let mut buf = Vec::new();
-    let backlog = size - offset;
     (&mut file)
-        .take(backlog.min(budget))
+        .take((size - cursor).min(budget))
         .read_to_end(&mut buf)
         .await
         .map_err(|err| err.to_string())?;
-    let limit = backlog.min(max_record_bytes);
-    let mut has_newline = buf.contains(&b'\n');
-    while !has_newline && (buf.len() as u64) < limit {
-        let previous = buf.len();
-        let chunk = (limit - buf.len() as u64).min(64 * 1024);
-        if (&mut file)
-            .take(chunk)
-            .read_to_end(&mut buf)
-            .await
-            .map_err(|err| err.to_string())?
-            == 0
-        {
-            break;
+
+    // The legacy reader can finish its first record in the same cycle.
+    if !scoped {
+        let limit = (size - offset).min(max_record_bytes);
+        let mut has_newline = buf.contains(&b'\n');
+        while !has_newline && (buf.len() as u64) < limit {
+            let previous = buf.len();
+            let chunk = (limit - buf.len() as u64).min(64 * 1024);
+            if (&mut file)
+                .take(chunk)
+                .read_to_end(&mut buf)
+                .await
+                .map_err(|err| err.to_string())?
+                == 0
+            {
+                break;
+            }
+            has_newline = buf[previous..].contains(&b'\n');
         }
-        has_newline = buf[previous..].contains(&b'\n');
     }
-    read.bytes = buf.len() as u64;
+    read.bytes = (buf.len() - prefix) as u64;
+    let scanned = cursor + read.bytes;
     if let Some(replay) = inner.history_replay.as_ref().filter(|_| historical) {
         replay.lock().expect("hook replay").credit -= read.bytes as f64;
+    }
+    if discarding {
+        if let Some(newline) = buf.iter().position(|byte| *byte == b'\n') {
+            read.offset = cursor + newline as u64 + 1;
+            warn_oversize_hook_line(inner, path, offset, max_record_bytes);
+            buf.drain(..=newline);
+        } else {
+            if work.is_some()
+                && scanned == size
+                && closed_hook_tail(inner, path, file, &identity, initial_modified).await
+            {
+                warn_oversize_hook_line(inner, path, offset, max_record_bytes);
+                read.offset = size;
+                read.closed_partial_tail = true;
+                return Ok(read);
+            }
+            read.continues_line = scanned < size;
+            *inner.pending_line.lock().expect("pending Hook line") = Some(PendingHookLine {
+                path: path.to_owned(),
+                identity: key,
+                start: offset,
+                scanned,
+                bytes: Vec::new(),
+                oversize: true,
+            });
+            return Ok(read);
+        }
     }
     let complete_len = buf
         .iter()
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |end| end + 1);
+    let complete_end = read.offset + complete_len as u64;
     for raw_line in buf[..complete_len].split_inclusive(|byte| *byte == b'\n') {
         if let Some(work) = work.as_deref_mut() {
-            if !work.can_process() || raw_line.len() as u64 > max_record_bytes {
+            if !work.can_process() || (!scoped && raw_line.len() as u64 > max_record_bytes) {
                 break;
             }
             work.records += 1;
             if work.records.is_multiple_of(32) {
                 tokio::task::yield_now().await;
             }
+        }
+        if scoped && raw_line.len() as u64 > max_record_bytes {
+            warn_oversize_hook_line(inner, path, read.offset, max_record_bytes);
+            read.offset += raw_line.len() as u64;
+            continue;
         }
         read.offset += raw_line.len() as u64;
         let line = String::from_utf8_lossy(&raw_line[..raw_line.len() - 1]);
@@ -1010,11 +1185,22 @@ async fn collect_hook_file(
                 continue;
             }
         };
-        let Some(record) = parsed.as_object().cloned() else {
+        let Value::Object(record) = parsed else {
             continue;
         };
         match (inner.transform)(record).await {
-            Ok(Some(entry)) => read.entries.push(entry),
+            Ok(Some(entry)) => {
+                if let Some(budget) = entry_budget.as_deref_mut() {
+                    if !budget.reserve(&entry) {
+                        // Submit the complete prefix and retry this row from
+                        // the same file after the prefix is durably accepted.
+                        read.offset -= raw_line.len() as u64;
+                        read.deferred_for_memory = true;
+                        break;
+                    }
+                }
+                read.entries.push(entry);
+            }
             Ok(None) => {}
             Err(err) => {
                 inner.logger.warn(
@@ -1027,15 +1213,42 @@ async fn collect_hook_file(
             }
         }
     }
-    if work.is_some()
-        && read.bytes == backlog
-        && read.offset == offset + complete_len as u64
-        && read.offset < size
-    {
+    if work.is_some() && scanned == size && read.offset == complete_end && read.offset < size {
         read.closed_partial_tail =
             closed_hook_tail(inner, path, file, &identity, initial_modified).await;
     }
+    if scoped
+        && read.offset == complete_end
+        && !read.closed_partial_tail
+        && complete_len < buf.len()
+    {
+        read.continues_line = scanned < size;
+        let oversize = (buf.len() - complete_len) as u64 >= max_record_bytes;
+        let bytes = if oversize {
+            Vec::new()
+        } else {
+            buf.split_off(complete_len)
+        };
+        *inner.pending_line.lock().expect("pending Hook line") = Some(PendingHookLine {
+            path: path.to_owned(),
+            identity: key,
+            start: read.offset,
+            scanned,
+            bytes,
+            oversize,
+        });
+    }
     Ok(read)
+}
+
+fn warn_oversize_hook_line(inner: &HookInner, path: &Path, offset: u64, limit: u64) {
+    inner.logger.warn(
+        &format!(
+            "skipping Hook record beyond {limit} bytes at {}:{offset}",
+            path.display()
+        ),
+        None,
+    );
 }
 
 async fn closed_hook_tail(
@@ -1062,7 +1275,16 @@ async fn closed_hook_tail(
     let key = expected.checkpoint_key();
     let size = expected.size;
     let opened = file.into_std().await;
+    let scope = crate::utils::source_access::current();
     tokio::task::spawn_blocking(move || {
+        struct Restore(Option<Arc<crate::utils::source_access::SourceScope>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                crate::utils::source_access::install(self.0.take());
+            }
+        }
+        let _restore = Restore(crate::utils::source_access::current());
+        crate::utils::source_access::install(scope);
         let Ok(active) = crate::utils::raw_source::active(&base) else {
             return false;
         };
@@ -1160,6 +1382,30 @@ fn persisted_offset_map(state: &InputState) -> Option<BTreeMap<String, u64>> {
     }
 }
 
+/// Unlike normal startup, changing ownership must not silently discard a
+/// broken offset entry and continue from whatever remains.
+pub(crate) fn has_usable_hook_log_cursor(state: &InputState) -> bool {
+    fn is_basename(name: &str) -> bool {
+        !name.is_empty() && !matches!(name, "." | "..") && !name.contains(['/', '\\', ':', '\0'])
+    }
+
+    let extra = state.extra();
+    if let Some(offsets) = extra
+        .as_ref()
+        .and_then(|value| value.get(OFFSET_MAP_EXTRA_KEY))
+        .and_then(Value::as_object)
+        .filter(|offsets| !offsets.is_empty())
+    {
+        return offsets
+            .iter()
+            .all(|(name, offset)| is_basename(name) && value_u64(offset).is_some());
+    }
+    state.last_file().is_some_and(is_basename)
+        && state
+            .last_offset()
+            .is_some_and(|offset| offset.is_finite() && offset >= 0.0)
+}
+
 fn offset_map_changed(previous: Option<&BTreeMap<String, u64>>, next: &Map<String, Value>) -> bool {
     let Some(previous) = previous else {
         return true;
@@ -1187,10 +1433,21 @@ async fn seed_offset_map(
             continue;
         }
         let path = Path::new(log_dir).join(name);
-        let size = tokio::fs::metadata(&path)
-            .await
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+        let size = if crate::utils::source_access::current().is_some() {
+            match crate::utils::source_access::check(&path) {
+                Ok(()) => tokio::fs::symlink_metadata(&path)
+                    .await
+                    .ok()
+                    .filter(|meta| meta.is_file())
+                    .map_or(0, |meta| meta.len()),
+                Err(_) => 0,
+            }
+        } else {
+            tokio::fs::metadata(&path)
+                .await
+                .map(|meta| meta.len())
+                .unwrap_or(0)
+        };
         offsets.insert(name.clone(), size);
     }
     let today_name = format!("{prefix}-{today}.jsonl");
@@ -1245,7 +1502,18 @@ pub async fn transform_hook_record(
     let Some(raw_event) = non_empty_string(record.get("event.name")) else {
         return Ok(None);
     };
-    let mut opts = record.clone();
+    let mut opts = record
+        .iter()
+        .map(|(key, value)| {
+            // The builder reads these large payloads from the original record.
+            let value = if is_canonical_payload_key(key) {
+                Value::Null
+            } else {
+                value.clone()
+            };
+            (key.clone(), value)
+        })
+        .collect();
     set_string(
         &mut opts,
         "time_unix_nano",
@@ -1355,25 +1623,6 @@ pub async fn transform_hook_record(
         non_empty_string(record.get("gen_ai.input.messages_hash"))
             .or_else(|| non_empty_string(record.get("input.messages_hash"))),
     );
-    set_json(
-        &mut opts,
-        "gen_ai.input.messages_delta",
-        coalesce_value(
-            record,
-            "gen_ai.input.messages_delta",
-            "input.messages_delta",
-        ),
-    );
-    set_json(
-        &mut opts,
-        "gen_ai.input.messages",
-        coalesce_value(record, "gen_ai.input.messages", "input.messages"),
-    );
-    set_json(
-        &mut opts,
-        "gen_ai.output.messages",
-        coalesce_value(record, "gen_ai.output.messages", "output.messages"),
-    );
     set_string(
         &mut opts,
         "gen_ai.tool.name",
@@ -1385,16 +1634,6 @@ pub async fn transform_hook_record(
         "gen_ai.tool.call.id",
         non_empty_string(record.get("gen_ai.tool.call.id"))
             .or_else(|| non_empty_string(record.get("tool.call.id"))),
-    );
-    set_json(
-        &mut opts,
-        "gen_ai.tool.call.arguments",
-        coalesce_value(record, "gen_ai.tool.call.arguments", "tool.arguments"),
-    );
-    set_json(
-        &mut opts,
-        "gen_ai.tool.call.result",
-        coalesce_value(record, "gen_ai.tool.call.result", "tool.result"),
     );
     set_string(
         &mut opts,
@@ -1434,22 +1673,6 @@ pub async fn transform_hook_record(
         "gen_ai.skill.version",
         non_empty_string(record.get("gen_ai.skill.version")),
     );
-    set_json(
-        &mut opts,
-        "gen_ai.system_instructions",
-        record
-            .get("gen_ai.system_instructions")
-            .filter(|value| !value.is_null())
-            .cloned(),
-    );
-    set_json(
-        &mut opts,
-        "gen_ai.tool.definitions",
-        record
-            .get("gen_ai.tool.definitions")
-            .filter(|value| !value.is_null())
-            .cloned(),
-    );
     set_string(
         &mut opts,
         "error.type",
@@ -1461,7 +1684,7 @@ pub async fn transform_hook_record(
         non_empty_string(record.get("error.message")),
     );
 
-    let mut entry = build_agent_activity_entry(&Value::Object(opts));
+    let mut entry = build_shared_hook_activity_entry(&opts, record);
     enrich_canonical_entry_with_git(&mut entry, record, git_namespace).await?;
     Ok(Some(entry))
 }
@@ -1631,24 +1854,6 @@ fn set_number(map: &mut Map<String, Value>, key: &str, value: Option<Value>) {
         None => {
             map.remove(key);
         }
-    }
-}
-
-fn set_json(map: &mut Map<String, Value>, key: &str, value: Option<Value>) {
-    match value {
-        Some(json) => {
-            map.insert(key.to_string(), json);
-        }
-        None => {
-            map.remove(key);
-        }
-    }
-}
-
-fn coalesce_value(record: &Map<String, Value>, primary: &str, alias: &str) -> Option<Value> {
-    match record.get(primary) {
-        Some(Value::Null) | None => record.get(alias).filter(|value| !value.is_null()).cloned(),
-        Some(value) => Some(value.clone()),
     }
 }
 
@@ -2099,6 +2304,7 @@ async fn open_session_file(
     crate::utils::file_identity::OpenedFileIdentity,
 )> {
     let path = path.to_owned();
+    let scope = crate::utils::source_access::current();
     tokio::task::spawn_blocking(move || {
         let mut options = std::fs::OpenOptions::new();
         options.read(true);
@@ -2107,7 +2313,19 @@ async fn open_session_file(
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
         }
-        let file = options.open(path)?;
+        let file = if let Some(scope) = scope {
+            struct Restore(Option<Arc<crate::utils::source_access::SourceScope>>);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    crate::utils::source_access::install(self.0.take());
+                }
+            }
+            let _restore = Restore(crate::utils::source_access::current());
+            crate::utils::source_access::install(Some(scope));
+            crate::utils::source_access::open(&path)?
+        } else {
+            options.open(&path)?
+        };
         let identity = crate::utils::file_identity::identity_from_open(&file)?;
         Ok((tokio::fs::File::from_std(file), identity))
     })

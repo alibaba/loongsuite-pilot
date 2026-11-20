@@ -56,6 +56,10 @@ pub fn block_reason(reason: &str) -> &str {
 }
 
 pub fn render_block(agent: &str, event: &str, reason: &str) -> Option<String> {
+    if agent == "openclaw" && matches!(event, "UserPromptSubmit" | "PreToolUse" | "PostToolUse") {
+        let output = json!({"action":"block","reason":reason});
+        return Some(format!("{output}\n"));
+    }
     if !matches!(agent, "qoder" | "qodercli" | "codex") {
         return None;
     }
