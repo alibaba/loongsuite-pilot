@@ -432,9 +432,11 @@ export class SlsFlusher extends BaseFlusher {
     const now = Date.now();
     const transient = outcome.failures.find(failure => failure.failureClass === 'transient');
     const config = outcome.failures.find(failure => failure.failureClass === 'config');
-    const allFailedAs = (failureClass: SlsFailureClass) => outcome.sentEntries === 0
-      && outcome.failures.length > 0 && outcome.failures.every(failure => failure.failureClass === failureClass);
-    state.transientCycles = allFailedAs('transient') ? state.transientCycles + 1 : 0;
+    const attemptedFailures = outcome.failures.filter(failure => failure.attempted);
+    const hasWireEvidence = outcome.sentEntries > 0 || attemptedFailures.length > 0;
+    const allWireFailedAs = (failureClass: SlsFailureClass) => outcome.sentEntries === 0
+      && attemptedFailures.length > 0 && attemptedFailures.every(failure => failure.failureClass === failureClass);
+    if (hasWireEvidence) state.transientCycles = allWireFailedAs('transient') ? state.transientCycles + 1 : 0;
 
     if (transient && state.transientCycles >= FAILURES_TO_ESCALATE
       && (state.lastTransientAlarmAt === undefined || now - state.lastTransientAlarmAt >= ALARM_COOLDOWN_MS)) {
@@ -459,21 +461,26 @@ export class SlsFlusher extends BaseFlusher {
 
     // Codex waits for the transport ACK and already owns its durable retry.
     // Preflight-only failures also say nothing about destination readiness.
-    if (!trackCircuit || (outcome.sentEntries === 0 && !outcome.failures.some(failure => failure.attempted))) return;
-    if (!allFailedAs('config')) {
-      if (state.openUntil && outcome.sentEntries > 0) logger.info('SLS circuit breaker recovered', { endpoint: endpoint.name });
+    if (!trackCircuit || !hasWireEvidence) return;
+    if (outcome.sentEntries > 0) {
+      if (state.openUntil) logger.info('SLS circuit breaker recovered', { endpoint: endpoint.name });
       state.configCycles = 0;
       state.openUntil = 0;
       state.backoffMs = 0;
       return;
     }
-    state.configCycles++;
-    if (state.configCycles >= FAILURES_TO_ESCALATE) {
-      state.backoffMs = state.backoffMs === 0 ? INITIAL_CIRCUIT_BACKOFF_MS
-        : Math.min(state.backoffMs * 2, MAX_CIRCUIT_BACKOFF_MS);
-      state.openUntil = now + state.backoffMs;
-      logger.warn('SLS circuit breaker tripped', { endpoint: endpoint.name, backoffMs: state.backoffMs });
+    if (state.openUntil === 0) {
+      state.configCycles = allWireFailedAs('config') ? state.configCycles + 1 : 0;
+      if (state.configCycles < FAILURES_TO_ESCALATE) return;
+    } else if (now < state.openUntil) {
+      // Queue-pressure sends should not keep postponing a scheduled probe.
+      return;
     }
+    // Once the circuit is paused, a failed probe does not establish recovery.
+    state.backoffMs = state.backoffMs === 0 ? INITIAL_CIRCUIT_BACKOFF_MS
+      : Math.min(state.backoffMs * 2, MAX_CIRCUIT_BACKOFF_MS);
+    state.openUntil = now + state.backoffMs;
+    logger.warn('SLS circuit breaker tripped', { endpoint: endpoint.name, backoffMs: state.backoffMs });
   }
 
   private async recordFailedBatch(endpoint: SlsEndpoint, logs: QueuedLog[], error: unknown, attempts: number,

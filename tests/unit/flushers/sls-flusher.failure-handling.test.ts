@@ -113,10 +113,12 @@ describe('SLS final failure handling', () => {
       alarm_message: expect.stringContaining('consecutive_failed_cycles=3') }]);
   });
 
-  it('retains pending entries through a failed single probe and forwards them after recovery', async () => {
+  it.each([403, 503])('retains pending entries through a failed %d probe and forwards them after recovery', async probeStatus => {
     const { flusher, alarms, counter } = makeFlusher();
     let healthy = false;
-    fetchMock.mockImplementation(async () => healthy ? success() : error(403, 'ProjectForbidden'));
+    let probe = false;
+    fetchMock.mockImplementation(async () => healthy ? success()
+      : error(probe ? probeStatus : 403, probe && probeStatus === 503 ? 'ServiceUnavailable' : 'ProjectForbidden'));
     for (let i = 0; i < 3; i++) {
       await flusher.send(buildTestEntry());
       await flusher.flush();
@@ -128,6 +130,7 @@ describe('SLS final failure handling', () => {
     expect(counter.outFailed).toBe(3);
 
     vi.setSystemTime(2_000);
+    probe = true;
     await Promise.all([flusher.flush(), flusher.flush()]);
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(sentIds(fetchMock.mock.calls[3][1])).toEqual(['deferred-first']);
@@ -144,6 +147,23 @@ describe('SLS final failure handling', () => {
       .toEqual(['deferred-first', 'deferred-second']);
     expect(counter).toMatchObject({ outEntries: 2, outFailed: 3 });
     expect(alarms.serialize()).toMatchObject([{ failure_class: 'config', alarm_count: '1' }]);
+  });
+
+  it('does not let a local oversized record hide consecutive terminal failures on the wire', async () => {
+    const { flusher, alarms, counter } = makeFlusher();
+    fetchMock.mockImplementation(async () => error(403, 'ProjectForbidden'));
+    const oversized = buildTestEntry({ custom_text: 'x'.repeat(3_200_000) });
+    for (let i = 0; i < 3; i++) {
+      await flusher.send(oversized);
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+    }
+    await flusher.send(buildTestEntry());
+    await flusher.flush();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(counter).toMatchObject({ outEntries: 0, outFailed: 6 });
+    expect(alarms.serialize().map(({ failure_class, alarm_count }) => [failure_class, alarm_count]))
+      .toEqual(expect.arrayContaining([['config', '1'], ['payload', '3']]));
   });
 
   it('passes a held bucket through normal delivery during shutdown', async () => {

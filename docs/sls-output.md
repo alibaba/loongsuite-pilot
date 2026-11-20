@@ -161,12 +161,12 @@ These JSONL records contain the endpoint, error summary, batch count, and batch 
 
 | Class | Handling |
 |-------|----------|
-| `transient` | Alarm after three consecutive cycles with only transient failures at this endpoint. A successful delivery resets the streak. |
+| `transient` | Alarm after three consecutive cycles in which all sends to this endpoint fail with transient errors. A successful delivery resets the streak. |
 | `quota` | Includes HTTP 429 and recognized SLS write quota codes. Also emits `FLUSH_QUOTA_ALARM`. |
-| `config` | Recognized terminal project or Logstore errors. Three consecutive cycles with only terminal configuration failures pause queued sends to this endpoint. |
+| `config` | Recognized terminal project or Logstore errors. Three consecutive cycles in which all sends fail with terminal configuration errors pause queued sends to this endpoint. |
 | `payload` | The backend rejected an oversized request or Pilot detected an oversized WebTracking entry before sending it. A local rejection shows `attempts=0`. |
 
-Transient and configuration alarms each have a one-hour cooldown per endpoint. After a configuration pause, one queued record probes the destination. A failed probe retains a record that can still be sent, and the pause increases up to ten minutes for continuing terminal configuration errors. Pending records remain in memory. Queue pressure and normal shutdown can trigger a normal send attempt during the pause. Codex delivery still waits for a transport acknowledgment.
+Transient and configuration alarms each have a one-hour cooldown per endpoint. After a configuration pause, one queued record probes the destination. A failed probe retains a record that can still be sent and increases the pause up to ten minutes. Successful delivery ends the pause. Pending records remain in memory. Queue pressure and normal shutdown can trigger a normal send attempt during the pause. Codex delivery still waits for a transport acknowledgment.
 
 WebTracking measures the complete JSON request, including tags and separators. An entry too large to fit in a single request is counted as failed and recorded in the local diagnostics. Other entries can still be sent. Pilot preserves the contents of structured fields.
 
