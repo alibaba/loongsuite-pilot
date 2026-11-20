@@ -1080,6 +1080,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
     await this.finishBatch();
   }
 
+  protected override async sendAcceptedBatch(
+    entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
+    if (!this.codexJournal || entries.some(entry => !this.codexJournal!.accepts(entry))) {
+      throw new Error('OTLP turn journal cannot accept the acknowledged batch');
+    }
+    await this.sendBatch(entries, logicalBytes);
+  }
+
   private async appendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
     const sizes = logicalBytes?.length === entries.length ? logicalBytes : undefined;
     for (let i = 0; i < entries.length; i++) {
@@ -1304,6 +1314,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       return entry['event.name'] === 'other' && entry['gen_ai.turn.end'] === true;
     }
     if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.source'] === 'hybrid-v2') return entry['gen_ai.turn.end'] === true;
+    if (entry['gen_ai.agent.type'] === 'kimi-code-cli') return entry['gen_ai.turn.end'] === true;
     // V2 step completion (including a failed/retried model request) is not
     // execution completion. Preserve V1's existing finish-reason behavior.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'opencode'
@@ -1410,6 +1421,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
         return { source: 'turn_id', value: turnId,
           key: `codex:${[entry['user.id'], entry['gen_ai.session.id'], turnId]
             .map(v => typeof v === 'string' ? `${v.length}:${v}` : '0:').join('')}` };
+      }
+      if (entry['gen_ai.agent.type'] === 'kimi-code-cli') {
+        return { source: 'turn_id', value: turnId, key: `kimi-code-cli:${codexTurnJournalGroupKey(entry)}` };
       }
       return { source: 'turn_id', value: turnId, key: `turn:${turnId}` };
     }

@@ -84,7 +84,7 @@ export class InputManager extends EventEmitter {
   private readonly counters: Map<string, InputCounter> = new Map();
   private readonly entryQueues: Map<string, Promise<void>> = new Map();
   private readonly entryAbortControllers = new Map<string, AbortController>();
-  private readonly kimiOutputReceipts = new Map<BaseFlusher, Set<string>>();
+  private readonly kimiOutputReceipts = new Map<object, Set<string>>();
   private flusher: BaseFlusher | null = null;
   private alarmManager: AlarmManager | null = null;
   private userId: string = '';

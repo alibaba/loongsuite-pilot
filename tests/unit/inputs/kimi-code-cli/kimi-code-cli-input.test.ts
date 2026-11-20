@@ -1,3 +1,5 @@
+import { createServer } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -5,14 +7,18 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import { HttpFlusher } from '../../../../src/flushers/http-flusher.js';
 import { InputManager } from '../../../../src/core/input-manager.js';
 import { JsonlFlusher } from '../../../../src/flushers/jsonl-flusher.js';
+import { SlsFlusher } from '../../../../src/flushers/sls-flusher.js';
+import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
+import { CodexTurnJournal } from '../../../../src/flushers/codex-turn-journal.js';
 import { MultiFlusher } from '../../../../src/flushers/multi-flusher.js';
 import { WorkspacePolicy } from '../../../../src/core/workspace-policy.js';
 import type { InputRuntimeDelta } from '../../../../src/inputs/base/input-runtime-metrics.js';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { KimiCodeCliInput } from '../../../../src/inputs/kimi-code-cli/kimi-code-cli-input.js';
-import type { AgentActivityEntry } from '../../../../src/types/index.js';
+import type { AgentActivityEntry, OtlpTraceFlusherConfig, SlsEndpoint } from '../../../../src/types/index.js';
 
 const roots: string[] = [];
 const fixturePath = new URL('../../../fixtures/kimi-code-cli/2.7.2-loopback-wire.jsonl', import.meta.url);
@@ -56,6 +62,66 @@ async function createInput(stateFile: string, sessionDir: string, captureMessage
 function poll(input: KimiCodeCliInput): Promise<void> {
   return (input as unknown as { runCycle(): Promise<void> }).runCycle();
 }
+
+it('holds the Kimi cursor through HTTP 503 and commits only after the destination accepts every event', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first } = await createSession();
+  let accepting = false;
+  const acceptedIds: string[] = [];
+  let finishRejection!: () => void;
+  const firstRejected = new Promise<void>(resolve => { finishRejection = resolve; });
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on('data', chunk => chunks.push(chunk));
+    request.once('end', () => {
+      if (!accepting) {
+        response.writeHead(503).end(finishRejection);
+        return;
+      }
+      const payload: { entries: AgentActivityEntry[] } = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      acceptedIds.push(...payload.entries.map(entry => entry['event.id']));
+      response.writeHead(200).end();
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address() as { port: number };
+  const store = new StateStore(stateFile);
+  await store.load();
+  const input = new KimiCodeCliInput({ stateStore: store, sessionDir, captureMessageContent: false });
+  const output = new HttpFlusher({ enabled: true, url: `http://127.0.0.1:${address.port}`, headers: {},
+    batchMaxSize: 1, flushIntervalMs: 60_000, requestTimeoutMs: 2_000 });
+  const manager = new InputManager();
+  manager.setFlusher(new MultiFlusher([output]));
+  manager.registerInput(input);
+  try {
+    await manager.startInput(input.id);
+    await poll(input);
+    await fs.writeFile(wire, first.join('\n') + '\n');
+    const cycle = poll(input);
+    await firstRejected;
+    await Promise.race([cycle, delay(100)]);
+    store.set('other-input', { lastOffset: 17 });
+    await store.save();
+    const whileRejected = new StateStore(stateFile);
+    await whileRejected.load();
+    expect(whileRejected.get('other-input').lastOffset).toBe(17);
+    expect(whileRejected.get(`${input.id}:${sessionId}`).lastOffset ?? 0).toBe(0);
+    expect(acceptedIds).toEqual([]);
+
+    accepting = true;
+    await cycle;
+    const afterRecovery = new StateStore(stateFile);
+    await afterRecovery.load();
+    expect(afterRecovery.get(`${input.id}:${sessionId}`).lastOffset).toBe((await fs.stat(wire)).size);
+    expect(acceptedIds).toHaveLength(6);
+    expect(new Set(acceptedIds).size).toBe(6);
+  } finally {
+    accepting = true;
+    await manager.stopInput(input.id);
+    await output.shutdown();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+}, 10_000);
 
 it('waits for the terminal line and resumes after restart without replaying the first turn', async () => {
   vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
@@ -585,3 +651,140 @@ it('remembers all accepted prompt identities sharing a rewrite boundary', async 
     await input.stop();
   }
 });
+
+async function listen(handle: (url: string, body: Buffer) => number) {
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on('data', chunk => chunks.push(chunk));
+    request.on('end', () => {
+      response.writeHead(handle(request.url ?? '', Buffer.concat(chunks)));
+      response.end();
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  return {
+    url: `http://127.0.0.1:${port}`,
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    },
+  };
+}
+
+it('requires actual SLS acceptance and retries only its rejected endpoint', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first } = await createSession();
+  let signalRejected!: () => void;
+  let signalMirror!: () => void;
+  const rejected = new Promise<void>(resolve => { signalRejected = resolve; });
+  const mirrored = new Promise<void>(resolve => { signalMirror = resolve; });
+  let accept = false;
+  const received = new Map<string, string[][]>();
+  const endpoint = await listen((url, body) => {
+    const parsed = JSON.parse(body.toString('utf8')) as { __logs__: Record<string, string>[] };
+    const ids = parsed.__logs__.map(entry => entry['event.id'] ?? entry.event_id);
+    const status = url.includes('/blocked/') && !accept ? 503 : 200;
+    if (status === 503) signalRejected();
+    else {
+      const calls = received.get(url) ?? [];
+      calls.push(ids);
+      received.set(url, calls);
+      if (url.includes('/mirror/')) signalMirror();
+    }
+    return status;
+  });
+  const endpoints: SlsEndpoint[] = ['blocked', 'mirror'].map(name => ({
+    name, endpoint: endpoint.url, project: '', logstore: name, kind: 'agentActivity', mode: 'webtracking',
+  }));
+  const sls = new SlsFlusher({
+    enabled: true, mode: 'webtracking', accessKeyId: '', accessKeySecret: '', apiKey: '',
+    endpoint: endpoint.url, endpoints, batchMaxSize: 20, flushIntervalMs: 60_000,
+    serviceNamePrefix: '', retry: { retryMaxAttempts: 1 },
+  }, path.dirname(stateFile), 'test');
+  await sls.start();
+  const flusher = new MultiFlusher([sls]);
+  const manager = new InputManager();
+  const store = new StateStore(stateFile);
+  await store.load();
+  const input = new KimiCodeCliInput({ stateStore: store, sessionDir, captureMessageContent: false, pollIntervalMs: 60_000 });
+  manager.setFlusher(flusher);
+  manager.registerInput(input);
+  await manager.startInput(input.id);
+  await poll(input);
+  try {
+    await fs.writeFile(wire, first.join('\n') + '\n');
+    const cycle = poll(input);
+    await Promise.all([rejected, mirrored]);
+    await store.save();
+    const key = `${input.id}:${sessionId}`;
+    expect(store.getPersistedState(key)?.lastOffset ?? 0).toBe(0);
+    accept = true;
+    await cycle;
+    const confirmed = received.get('/logstores/blocked/track') ?? [];
+    expect(confirmed).toHaveLength(1);
+    expect(confirmed[0]).toHaveLength(6);
+    expect(new Set(confirmed[0]).size).toBe(6);
+    expect(received.get('/logstores/mirror/track')).toEqual(confirmed);
+    expect(store.getPersistedState(key)?.lastOffset).toBe((await fs.stat(wire)).size);
+  } finally {
+    await manager.stopAll();
+    await flusher.shutdown();
+    await endpoint.close();
+  }
+}, 15_000);
+
+it('persists a Kimi OTLP turn when the transport rejects it and replays the journal on restart', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first } = await createSession();
+  let accept = false;
+  const messages: { status: number; bytes: number }[] = [];
+  const endpoint = await listen((_url, body) => {
+    const status = accept ? 200 : 400;
+    messages.push({ status, bytes: body.length });
+    return status;
+  });
+  const directory = path.join(path.dirname(stateFile), 'pending-turns');
+  const createJournal = () => new CodexTurnJournal(directory, 100, ['kimi-code-cli']);
+  const journal = createJournal();
+  const cfg: OtlpTraceFlusherConfig = {
+    enabled: true, serviceName: 'test', protocol: 'http/protobuf',
+    endpoints: [{ name: 'loopback', endpoint: endpoint.url }], captureMessageContent: false,
+  };
+  const trace = new OtlpTraceFlusher(cfg, undefined, undefined, journal);
+  const output = new MultiFlusher([trace]);
+  const manager = new InputManager();
+  const store = new StateStore(stateFile);
+  await store.load();
+  const input = new KimiCodeCliInput({ stateStore: store, sessionDir, captureMessageContent: false, pollIntervalMs: 60_000 });
+  manager.setFlusher(output);
+  manager.registerInput(input);
+  await manager.startInput(input.id);
+  await poll(input);
+  try {
+    await fs.writeFile(wire, first.join('\n') + '\n');
+    await poll(input);
+    const pending: AgentActivityEntry[] = [];
+    for await (const records of createJournal().load()) pending.push(...records);
+    expect(pending).toHaveLength(6);
+    expect(pending.every(record => record['gen_ai.agent.type'] === 'kimi-code-cli')).toBe(true);
+    expect(messages.some(message => message.status === 400 && message.bytes > 0)).toBe(true);
+    expect(store.getPersistedState(`${input.id}:${sessionId}`)?.lastOffset).toBe((await fs.stat(wire)).size);
+    await manager.stopAll();
+    await trace.shutdown();
+
+    accept = true;
+    const replay = new OtlpTraceFlusher(cfg, undefined, undefined, createJournal());
+    try {
+      await replay.start();
+      expect(await createJournal().isAcknowledged(pending[0]!)).toBe(true);
+      expect(messages.filter(message => message.status === 200 && message.bytes > 0)).toHaveLength(1);
+    } finally {
+      await replay.shutdown();
+    }
+  } finally {
+    await manager.stopAll();
+    await trace.shutdown();
+    await endpoint.close();
+  }
+}, 20_000);

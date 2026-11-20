@@ -12,7 +12,7 @@ export class CodexOutputDurabilityError extends Error {
 export interface BatchDeliveryOptions {
   requireAcceptance?: boolean;
   /** Successful destinations kept while an input is stopped and resumed in this process. */
-  receipts?: Map<BaseFlusher, Set<string>>;
+  receipts?: Map<object, Set<string>>;
 }
 
 /**
@@ -28,24 +28,34 @@ export abstract class BaseFlusher {
   createBatchDelivery(
     entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal, options?: BatchDeliveryOptions,
   ): () => Promise<void> {
+    if (!options?.requireAcceptance) {
+      return () => signal ? this.sendBatch(entries, logicalBytes, signal) : this.sendBatch(entries, logicalBytes);
+    }
     const receipt = this.acceptanceReceipt(options);
-    if (!receipt) return () => signal ? this.sendBatch(entries, logicalBytes, signal) : this.sendBatch(entries, logicalBytes);
+    if (!receipt) return () => this.sendAcceptedBatch(entries, logicalBytes, signal);
     return async () => {
       const pending = entries.flatMap((entry, index) => receipt.has(entry['event.id']) ? [] : [{ entry, index }]);
       if (!pending.length) return;
       const pendingBytes = logicalBytes && pending.map(({ index }) => logicalBytes[index]!);
-      await this.sendBatch(pending.map(({ entry }) => entry), pendingBytes, signal);
+      await this.sendAcceptedBatch(pending.map(({ entry }) => entry), pendingBytes, signal);
       for (const { entry } of pending) receipt.add(entry['event.id']);
     };
   }
 
-  protected acceptanceReceipt(options?: BatchDeliveryOptions): Set<string> | undefined {
+  /** Accept at the destination, or transfer responsibility to durable local output. */
+  protected sendAcceptedBatch(
+    entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal,
+  ): Promise<void> {
+    return this.sendBatch(entries, logicalBytes, signal);
+  }
+
+  protected acceptanceReceipt(options?: BatchDeliveryOptions, destination: object = this): Set<string> | undefined {
     const receipts = options?.receipts;
     if (!receipts) return undefined;
-    let receipt = receipts.get(this);
+    let receipt = receipts.get(destination);
     if (!receipt) {
       receipt = new Set();
-      receipts.set(this, receipt);
+      receipts.set(destination, receipt);
     }
     return receipt;
   }
