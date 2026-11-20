@@ -21,9 +21,9 @@ use super::super::builder::{
 };
 use super::super::checkpoint::{
     checkpoint_to_value, create_active_turn, empty_checkpoint, new_pending_terminal,
-    new_pending_terminal_at, parse_checkpoint, update_active_turn_from_extracted,
-    update_active_turn_metadata, MAX_DEFERRED_TERMINALS, MAX_SAFE_INTEGER, RECOVERY_RETRY_MAX_MS,
-    RECOVERY_RETRY_MIN_MS,
+    new_pending_terminal_at, parse_checkpoint, parse_checkpoint_position,
+    update_active_turn_from_extracted, update_active_turn_metadata, MAX_DEFERRED_TERMINALS,
+    MAX_SAFE_INTEGER, RECOVERY_RETRY_MAX_MS, RECOVERY_RETRY_MIN_MS,
 };
 use super::super::discovery::{
     canonical_directory_path, collect_recent_rollout_files, collect_rollout_files, directory_mtime,
@@ -301,7 +301,10 @@ impl<'a> CodexTranscriptEngine<'a> {
             key,
             InputStatePatch {
                 last_offset: Some(checkpoint.scan_offset as f64),
-                extra: Some(json!({ "codexTranscript": checkpoint_to_value(checkpoint) })),
+                extra: Some(Value::Object(Map::from_iter([(
+                    "codexTranscript".into(),
+                    checkpoint_to_value(checkpoint),
+                )]))),
                 ..InputStatePatch::default()
             },
         );
@@ -1664,16 +1667,19 @@ impl<'a> CodexTranscriptEngine<'a> {
             }
             built.entries.extend(pending);
         }
-        let mut audit_base =
-            super::super::invocation_audit::audit_context(&extraction.turn, &trace_id);
-        if let Some(link) = &delegation {
-            super::super::invocation_audit::stamp_delegation(
-                std::slice::from_mut(&mut audit_base),
-                link,
-                meta.as_deref(),
-                link.parent_trace_id.as_deref() == Some(trace_id.as_str()),
-            );
-        }
+        let audit_context = || {
+            let mut context =
+                super::super::invocation_audit::audit_context(&extraction.turn, &trace_id);
+            if let Some(link) = &delegation {
+                super::super::invocation_audit::stamp_delegation(
+                    std::slice::from_mut(&mut context),
+                    link,
+                    meta.as_deref(),
+                    link.parent_trace_id.as_deref() == Some(trace_id.as_str()),
+                );
+            }
+            context
+        };
         if has_codex_result_delivery(&built.entries, &sources, &dispatches) {
             if spawns.is_empty() {
                 known = self.body.with_shared(|shared| {
@@ -1682,6 +1688,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                         .get_delegations_for_parent(&extraction.turn.session_id)
                 });
             }
+            let fallback = audit_context();
             built.entries = self.body.with_shared(|shared| {
                 super::super::invocation_audit::append_agent_results(
                     built.entries,
@@ -1690,18 +1697,13 @@ impl<'a> CodexTranscriptEngine<'a> {
                     super::super::invocation_audit::ResultContext {
                         receiving_session: &extraction.turn.session_id,
                         delivered: &mut shared.delivered_invocations,
-                        fallback: &audit_base,
+                        fallback: &fallback,
                         pending: &mut shared.pending_agent_results,
                         file_path,
                         inode: checkpoint.inode,
                     },
                 )
             });
-        }
-        if let Some(active) = checkpoint.active_turn.as_mut() {
-            if !built.entries.is_empty() {
-                active.emitted_trace_id = Some(trace_id);
-            }
         }
         let built_entry_count = built.entries.len();
         let mut ready = built.entries;
@@ -1712,7 +1714,14 @@ impl<'a> CodexTranscriptEngine<'a> {
                     .as_ref()
                     .is_some_and(|active| active.emitted_trace_id.is_some()))
         {
-            let marker_base = ready.last().unwrap_or(&audit_base);
+            let fallback;
+            let marker_base = match ready.last() {
+                Some(entry) => entry,
+                None => {
+                    fallback = audit_context();
+                    &fallback
+                }
+            };
             if let Some(mut marker) =
                 codex_turn_end_marker(std::slice::from_ref(marker_base), &extraction.turn)
             {
@@ -1730,6 +1739,11 @@ impl<'a> CodexTranscriptEngine<'a> {
                     }
                 }
                 ready.push(marker);
+            }
+        }
+        if let Some(active) = checkpoint.active_turn.as_mut() {
+            if built_entry_count != 0 {
+                active.emitted_trace_id = Some(trace_id);
             }
         }
         let ready_entry_count = ready.len();
@@ -3234,17 +3248,24 @@ impl<'a> CodexTranscriptEngine<'a> {
             observed.insert(file.file_path.clone(), version);
             let inode = version.inode;
             let size = version.size;
-            let checkpoint = self.read_checkpoint(rt, &self.state_key(&file.file_path));
-            let owner = if checkpoint.as_ref().is_some_and(|item| item.inode == inode) {
-                if let Some(offset) = checkpoint.and_then(|item| item.owner_session_meta_offset) {
-                    Some(offset)
-                } else {
+            let cached_owner = rt
+                .state_store
+                .get_extra_object_fields(
+                    &self.state_key(&file.file_path),
+                    "codexTranscript",
+                    ["inode", "scanOffset", "ownerSessionMetaOffset"],
+                )
+                .and_then(|[id, scan, owner]| {
+                    parse_checkpoint_position(id.as_ref(), scan.as_ref(), owner.as_ref())
+                })
+                .filter(|(checkpoint_inode, _, _)| *checkpoint_inode == inode)
+                .and_then(|(_, _, owner)| owner);
+            let owner = match cached_owner {
+                Some(offset) => Some(offset),
+                None => {
                     self.find_owner_offset(rt, &file.file_path, &version, None)
                         .await?
                 }
-            } else {
-                self.find_owner_offset(rt, &file.file_path, &version, None)
-                    .await?
             };
             let Some(owner) = owner else {
                 continue;
@@ -3672,6 +3693,19 @@ impl<'a> CodexTranscriptEngine<'a> {
     }
 
     pub(super) fn save_delegation_state(&self, rt: &InputRuntime) {
+        const KEYS: [&str; 3] = [
+            "codexDelegations",
+            "codexResultInvocations",
+            "codexPendingAgentResults",
+        ];
+        let empty = self.body.with_shared(|shared| {
+            !shared.linker.has_persistent_facts()
+                && shared.delivered_invocations.is_empty()
+                && shared.pending_agent_results.is_empty()
+        });
+        if empty && !rt.state_store.has_extra_fields("codex-transcript", &KEYS) {
+            return;
+        }
         let extra = self.body.with_shared(|shared| json!({
             "codexDelegations": shared.linker.serialize(),
             "codexResultInvocations": shared.delivered_invocations,
@@ -3691,13 +3725,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 .as_array()
                 .is_none_or(Vec::is_empty)
         });
-        let same = [
-            "codexDelegations",
-            "codexResultInvocations",
-            "codexPendingAgentResults",
-        ]
-        .iter()
-        .all(|key| {
+        let same = KEYS.iter().all(|key| {
             let before = previous.as_ref().and_then(|p| p.get(*key));
             before == Some(&extra[*key])
                 || (before.is_none()
