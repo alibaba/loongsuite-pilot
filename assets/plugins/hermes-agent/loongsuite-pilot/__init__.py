@@ -8,10 +8,12 @@ import functools
 import hashlib
 import importlib
 import inspect
+import itertools
 import json
 import os
 import secrets
 import socket
+import stat
 import sys
 import threading
 import time
@@ -39,33 +41,350 @@ MAX_TURN_MESSAGES = 64
 MAX_PARTS = 64
 MAX_COLLECTION_ITEMS = 128
 MAX_CONTENT_CHARS = 32 * 1024
+MAX_REQUEST_MESSAGES = 1024
+MAX_REQUEST_CONTENT_CHARS = 256 * 1024
+MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_PENDING_INPUT_RECORDS = 128
 MAX_PENDING_INPUT_BYTES = 2 * 1024 * 1024
 MAX_VALUE_DEPTH = 8
 MAX_RESOURCE_FIELD_VALUE_LENGTH = 512
 LOG_RETENTION_SECONDS = 7 * 24 * 60 * 60
+RAW_SEGMENT_BYTES = 100 * 1024 * 1024
+_RAW_WRITE_LOCK = threading.Lock()
 MANAGED_MARKER_FILE = ".loongsuite-pilot-managed.json"
 INVOCATION_USER_ID_FIELD = "agent.pilot.invocation.user.id"
 
-_PROCESS_FILE_TOKEN = "%s-%s-%s" % (
-    os.getpid(),
-    time.time_ns(),
-    secrets.token_hex(4),
-)
+def _new_process_file_token() -> str:
+    return "%s-%s-%s" % (os.getpid(), time.time_ns(), secrets.token_hex(4))
+
+
+_PROCESS_FILE_TOKEN = _new_process_file_token()
+_PROCESS_IDENTITY_CACHE: Any = None
 _STATE_LOCK = threading.RLock()
 # Never hold this lock during file I/O or native callbacks. Closing an API and
 # observing its first delta must be atomic without waiting for another turn's
 # synchronous JSONL append. Lock order is STATE -> TTFT, never the reverse.
 _TTFT_LOCK = threading.Lock()
+
+
+def _after_fork_child() -> None:
+    # A fork inherits the parent's source name, cached owner and locks. Give
+    # the child its own file family; never let its records advertise the
+    # parent's PID or wait on a lock held by a vanished parent thread.
+    global _PROCESS_FILE_TOKEN, _PROCESS_IDENTITY_CACHE, _RAW_WRITE_LOCK, _STATE_LOCK, _TTFT_LOCK
+    _PROCESS_FILE_TOKEN = _new_process_file_token()
+    _PROCESS_IDENTITY_CACHE = None
+    _RAW_WRITE_LOCK = threading.Lock()
+    _STATE_LOCK = threading.RLock()
+    _TTFT_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_child)
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
 # Detached retry snapshots retain no other active turns/session state.
 _EVICTED_TURNS: Dict[str, Any] = {}
 _TTFT_API: contextvars.ContextVar = contextvars.ContextVar("pilot_hermes_ttft", default=None)
 _ACTIVE_DELEGATION = contextvars.ContextVar("pilot_hermes_delegation", default=None)
+_ACTIVE_INCOMING = contextvars.ContextVar("pilot_hermes_incoming", default=None)
+_GATEWAY_DELIVERY = contextvars.ContextVar("pilot_hermes_gateway_delivery", default=None)
+
+
+def _save_identity(path: Path, value: Dict[str, Any]) -> None:
+    temp = path.with_suffix("." + uuid.uuid4().hex + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        files = list(itertools.islice(path.parent.glob("work-*.json"), 4097))
+        for old in files:
+            if time.time() - old.stat().st_mtime > LOG_RETENTION_SECONDS:
+                old.unlink(missing_ok=True)
+        if len(files) >= 4096 and not path.exists():
+            return
+        fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump(dict(value, expires_at=time.time() + LOG_RETENTION_SECONDS), stream)
+        os.replace(temp, path)
+    except Exception as error:
+        _report_internal_error("invocation_identity", error)
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _work_path(work: Dict[str, Any]) -> Path:
+    return _parent_context_path("").parent / ("work-" + work["invocation_id"] + ".json")
+
+
+def _agent_audit(turn: Dict[str, Any], state: Dict[str, Any], work: Dict[str, Any],
+                 kind: str, now_ns: int, text: Any = None, error: Any = None) -> None:
+    record = _common_fields(turn, state, "gen_ai.agent." + kind, now_ns, "", "")
+    record.pop("span_id", None)
+    record.pop("gen_ai.step.id", None)
+    apis = turn.get("apis", [])
+    if apis:
+        provider = (apis[-1].get("post") or {}).get("provider") or (apis[-1].get("pre") or {}).get("provider")
+        if isinstance(provider, str) and provider:
+            record["gen_ai.provider.name"] = _provider_name(provider)
+    if turn.get("model") or state.get("model"):
+        record["gen_ai.request.model"] = turn.get("model") or state["model"]
+    record["gen_ai.agent.invocation.id"] = work["invocation_id"]
+    if work.get("child_session_id"):
+        record["gen_ai.agent.peer.id"] = work["child_session_id"]
+    fingerprint = hashlib.sha256(json.dumps([text, error], sort_keys=True, default=str).encode()).hexdigest()[:16]
+    record["event.id"] = work["invocation_id"] + ":" + kind + (":" + fingerprint if kind == "result" else "")
+    if record["event.id"] in work.get("result_ids", []):
+        return
+    if turn["capture_content"] and isinstance(text, str) and text:
+        record["gen_ai.input.messages" if kind == "invoke" else "gen_ai.output.messages"] = [
+            {"role": "user" if kind == "invoke" else "assistant",
+             "parts": [{"type": "text", "content": _truncate(text)}]}]
+    if error:
+        record["error.type"] = str(error)
+    record["agent.hermes.hook"] = "agent_invocation_audit"
+    try:
+        _write_records([record])
+    except Exception as write_error:
+        _report_internal_error("invocation_audit", write_error)
+        return
+    if kind == "result":
+        work["result_ids"] = (work.get("result_ids", []) + [record["event.id"]])[-32:]
+        _save_identity(_work_path(work), work)
+
+
+def _delegation_work(turn: Dict[str, Any], state: Dict[str, Any], call_id: str,
+                     tool: Dict[str, Any], index: int, task: Dict[str, Any], now_ns: int) -> Dict[str, Any]:
+    works = tool.setdefault("delegations", {})
+    if index in works:
+        return works[index]
+    key = ["hermes-delegation", turn["session_id"], _turn_id(turn), call_id, index]
+    work = {"invocation_id": hashlib.sha256(json.dumps(key, separators=(",", ":")).encode()).hexdigest()[:32],
+            "parent_session_id": turn["session_id"], "parent_turn_id": _turn_id(turn),
+            "tool_call_id": call_id, "task_index": index}
+    works[index] = work
+    _save_identity(_work_path(work), work)
+    parts = [task.get("goal"), task.get("context")]
+    _agent_audit(turn, state, work, "invoke", now_ns, "\n\n".join(p for p in parts if isinstance(p, str) and p))
+    return work
+
+
+def _audit_results(turn: Dict[str, Any], state: Dict[str, Any], works: Dict[int, Any],
+                   results: Any, now_ns: int) -> None:
+    if not isinstance(results, list):
+        return
+    for result in results[:MAX_COLLECTION_ITEMS]:
+        if not isinstance(result, dict):
+            continue
+        index = result.get("task_index")
+        work = works.get(index) if isinstance(index, int) and not isinstance(index, bool) else None
+        status = result.get("status")
+        if not work or status not in ("ok", "completed", "error", "failed", "failure", "timeout", "interrupted", "stalled", "unknown"):
+            continue
+        _agent_audit(turn, state, work, "result", now_ns, result.get("summary") or result.get("error"),
+                     None if status in ("ok", "completed") else "agent_" + status)
+
+
+def _audit_deliveries(turn: Dict[str, Any], state: Dict[str, Any], deliveries: List[Any], now_ns: int) -> None:
+    if not deliveries:
+        return
+    directory = _parent_context_path("").parent
+    files = list(itertools.islice(directory.glob("work-*.json"), 4097)) if directory.is_dir() else []
+    if len(files) > 4096:
+        return
+    saved = [_read_json_object(file) for file in files]
+    for parents, delivery in deliveries:
+        native_id = delivery.get("delegation_id")
+        if not isinstance(native_id, str) or not native_id:
+            continue
+        works, ambiguous = {}, set()
+        for work in saved:
+            if work.get("expires_at", 0) <= time.time() or work.get("parent_session_id") not in parents:
+                continue
+            if work.get("native_delegation_id") != native_id:
+                continue
+            index = work.get("task_index")
+            if not isinstance(index, int) or isinstance(index, bool):
+                continue
+            if index in works:
+                ambiguous.add(index)
+            works[index] = work
+        for index in ambiguous:
+            works.pop(index, None)
+        results = delivery.get("results")
+        if results is None and len(works) == 1:
+            results = [dict(delivery, task_index=next(iter(works)))]
+        _audit_results(turn, state, works, results, now_ns)
+
+
+def _install_notification_context() -> None:
+    """Carry the CLI's native structured delivery through its string-compatible
+    notification object. No prompt parsing and no event on worker completion."""
+    try:
+        module = importlib.import_module("tools.process_registry_notifications")
+        cls = module.TimelineNotification
+        original = cls.for_delegation
+        if getattr(original, "_pilot_audit", False):
+            return
+
+        def delivered(klass: Any, text: str, event: Dict[str, Any]) -> Any:
+            value = original(text, event)
+            try:
+                if isinstance(event, dict) and event.get("type") == "async_delegation":
+                    value._pilot_delegation_event = {key: event.get(key) for key in (
+                        "delegation_id", "parent_session_id", "results", "summary", "status", "task_index")}
+            except Exception as error:
+                _report_internal_error("notification_context", error)
+            return value
+
+        delivered._pilot_audit = True
+        cls.for_delegation = classmethod(delivered)
+    except (ImportError, AttributeError):
+        pass
+    except Exception as error:
+        _report_internal_error("notification_context", error)
+
+
+_CLI_DELIVERY_READY = False
+_GATEWAY_DELIVERY_READY = False
+
+
+def _install_cli_delivery_context() -> None:
+    """The native CLI deliberately stringifies TimelineNotification after staging
+    it. Retain its structured event beside the exact staged row, never in model
+    content or the persisted transcript. Formatting alone is not consumption."""
+    global _CLI_DELIVERY_READY
+    try:
+        cls = importlib.import_module("hermes_cli.cli_chat_turn_mixin").CLIChatTurnMixin
+        original = cls._chat_stage_user_message
+        if getattr(original, "_pilot_audit", False):
+            _CLI_DELIVERY_READY = True
+            return
+
+        @functools.wraps(original)
+        def staged(cli: Any, agent: Any, message: Any, *args: Any, **kwargs: Any) -> Any:
+            try:
+                agent._pilot_delegation_delivery = None
+            except Exception as error:
+                _report_internal_error("notification stage reset", error)
+            result = original(cli, agent, message, *args, **kwargs)
+            try:
+                delivery = getattr(message, "_pilot_delegation_event", None)
+                row = getattr(agent, "_pending_cli_user_message", None)
+                if isinstance(delivery, dict) and isinstance(row, dict):
+                    agent._pilot_delegation_delivery = (row, delivery)
+            except Exception as error:
+                _report_internal_error("notification stage", error)
+            return result
+
+        staged._pilot_audit = True
+        cls._chat_stage_user_message = staged
+        _CLI_DELIVERY_READY = True
+    except (ImportError, AttributeError):
+        pass
+    except Exception as error:
+        _report_internal_error("notification stage installation", error)
+
+
+def _native_delivery(agent: Any, arguments: Dict[str, Any]) -> Any:
+    pending = getattr(agent, "_pilot_delegation_delivery", None)
+    if pending is not None:
+        agent._pilot_delegation_delivery = None
+        row, delivery = pending
+        if row is getattr(agent, "_pending_cli_user_message", None):
+            return delivery
+    message = arguments.get("persist_user_message")
+    if message is None:
+        message = arguments.get("user_message")
+    return getattr(message, "_pilot_delegation_event", None)
+
+
+def _install_gateway_delivery_context() -> None:
+    """Current Hermes CLI executes in the Gateway. Bind the trusted producer
+    identities of an admitted input, not its rendered notification/card text.
+    No audit is emitted unless that admission actually reaches pre_llm_call."""
+    global _GATEWAY_DELIVERY_READY
+    try:
+        owner = importlib.import_module("gateway.session_ingress")
+        original = owner.execute_admission
+        if getattr(original, "_pilot_audit", False):
+            _GATEWAY_DELIVERY_READY = True
+            return
+        if not inspect.iscoroutinefunction(original):
+            return
+
+        @functools.wraps(original)
+        async def admitted(authority: Any, ref: Any, row: Any, *args: Any, **kwargs: Any) -> Any:
+            delivery = None
+            try:
+                payload = row.get("payload", {}) if isinstance(row, dict) else {}
+                descriptor = payload.get("local_automation_v1") or payload.get("native_text_v1", {}).get("automation", {})
+                identities = descriptor.get("identities", [descriptor.get("identity")])
+                work = []
+                for raw in identities[:MAX_COLLECTION_ITEMS]:
+                    if not isinstance(raw, str) or len(raw) > 2048:
+                        continue
+                    try:
+                        identity = json.loads(raw) if isinstance(raw, str) else None
+                    except (ValueError, TypeError):
+                        continue
+                    if (isinstance(identity, list) and len(identity) == 3 and identity[0] == "async_delegation"
+                            and isinstance(identity[1], str) and 0 < len(identity[1]) <= 512 and isinstance(identity[2], str)):
+                        work.append((identity[1], identity[2]))
+                if work:
+                    sessions = {getattr(ref, "session_id", None)}
+                    physical = getattr(authority, "physical_target", None)
+                    if callable(physical):
+                        sessions.add(physical(ref))
+                    sessions = {value for value in sessions if isinstance(value, str) and value}
+                    delivery = {"sessions": sessions, "work": work}
+            except Exception as error:
+                _report_internal_error("gateway delivery metadata", error)
+            token = _GATEWAY_DELIVERY.set(delivery)
+            try:
+                return await original(authority, ref, row, *args, **kwargs)
+            finally:
+                _GATEWAY_DELIVERY.reset(token)
+
+        admitted._pilot_audit = True
+        owner.execute_admission = admitted
+        _GATEWAY_DELIVERY_READY = True
+    except (ImportError, AttributeError):
+        pass
+    except Exception as error:
+        _report_internal_error("gateway delivery installation", error)
+
+
+def _gateway_deliveries(session_ids: Any) -> List[Any]:
+    delivery = _GATEWAY_DELIVERY.get()
+    if not delivery or not delivery["sessions"].intersection(session_ids):
+        return []
+    result = []
+    try:
+        ledger = importlib.import_module("tools.async_delegation")
+        for native_id, notice in delivery["work"]:
+            saved = ledger.get_durable_delegation(native_id)
+            value = saved.get("result") if isinstance(saved, dict) else None
+            if not isinstance(value, dict):
+                continue  # dispatch/acceptance alone is never a result
+            value = dict(value, delegation_id=native_id, status=saved.get("state"))
+            if notice:
+                if not notice.startswith("task_failure:") or not notice[13:].isdigit():
+                    continue
+                index = int(notice[13:])
+                value["results"] = [item for item in value.get("results", [])
+                                    if isinstance(item, dict) and item.get("task_index") == index]
+            result.append((delivery["sessions"], value))
+    except Exception as error:
+        _report_internal_error("gateway delivery result", error)
+    return result
+
+
 _NATIVE_RUN_SCOPE = contextvars.ContextVar("pilot_hermes_native_run", default=None)
 _NATIVE_RUN_OBSERVER_READY = False
 _NATIVE_RUN_OBSERVER_WARNED = False
 _NATIVE_RUN_RETRY_AFTER = 0.0
+_REQUEST_METADATA = contextvars.ContextVar("pilot_hermes_request_metadata", default=None)
 
 
 def _bind_native_run(state: Dict[str, Any], turn: Dict[str, Any]) -> None:
@@ -126,6 +445,8 @@ def _install_run_completion_observer() -> bool:
         _NATIVE_RUN_OBSERVER_READY = True
         return True
 
+    signature = inspect.signature(original)
+
     @functools.wraps(original)
     def observed(agent: Any, *args: Any, **kwargs: Any) -> Any:
         context = observed._pilot_run_scope
@@ -135,6 +456,10 @@ def _install_run_completion_observer() -> bool:
             token = context.set(scope)
         except Exception:
             return original(agent, *args, **kwargs)
+        try:
+            scope["delivery"] = _native_delivery(agent, signature.bind(agent, *args, **kwargs).arguments)
+        except Exception as error:
+            _report_internal_error("native delivery context", error)
         result = None
         try:
             # No telemetry lock spans the application call. Native hooks run
@@ -153,6 +478,7 @@ def _install_run_completion_observer() -> bool:
                         scope["agent"] = None
                         scope["turns"].clear()
                         scope["sessions"].clear()
+                        scope.pop("delivery", None)
                 except Exception as error:
                     _report_internal_error("native run scope cleanup", error)
                 finally:
@@ -334,16 +660,36 @@ def _install_delegate_context() -> None:
                 parent = signature.bind(*args, **kwargs).arguments.get("parent_agent")
                 active = _ACTIVE_DELEGATION.get()
                 with _STATE_LOCK:
+                    if not active:
+                        # New hosts isolate plugin callbacks in copy_context
+                        # workers, so a callback's ContextVar write cannot
+                        # reach this factory. Match the native parent turn and
+                        # its single open delegate call; parallel ambiguity is
+                        # deliberately left unresolved, never selected by time.
+                        sid = getattr(parent, "session_id", None)
+                        tid = getattr(parent, "_current_turn_id", None)
+                        exact = [(sid, _turn_id(t), call_id) for t in
+                                 _SESSIONS.get(sid, {}).get("turns", {}).values()
+                                 if isinstance(tid, str) and tid and _turn_id(t) == tid
+                                 for call_id, tool in t.get("tools", {}).items()
+                                 if tool.get("tool_name") == "delegate_task" and tool.get("end_ns") is None]
+                        active = exact[0] if len(exact) == 1 else None
                     if active and active[0] == getattr(parent, "session_id", None):
                         turn = next((candidate for candidate in
                                      _SESSIONS.get(active[0], {}).get("turns", {}).values()
                                      if _turn_id(candidate) == active[1]), None)
                         tool = turn.get("tools", {}).get(active[2]) if turn else None
                         if turn and _turn_id(turn) == active[1] and tool and tool.get("end_ns") is None:
+                            bound = signature.bind(*args, **kwargs).arguments
+                            index = bound.get("task_index")
+                            work = _delegation_work(turn, _SESSIONS[active[0]], active[2], tool, index,
+                                {"goal": bound.get("goal"), "context": bound.get("context")}, time.time_ns()) if (
+                                    isinstance(index, int) and not isinstance(index, bool) and 0 <= index < MAX_COLLECTION_ITEMS) else None
                             relation = {
                                 "trace_id": turn["trace_id"], "parent_span_id": tool["span_id"],
                                 "parent_session_id": turn["session_id"], "parent_turn_id": _turn_id(turn),
                                 "tool_call_id": active[2], "user_id": turn["user_id"],
+                                **({"invocation_id": work["invocation_id"]} if work else {}),
                             }
             except Exception as error:
                 _report_internal_error("delegate_context", error)
@@ -351,6 +697,16 @@ def _install_delegate_context() -> None:
             try:
                 sid = getattr(child, "session_id", None)
                 if relation and isinstance(sid, str) and sid:
+                    # Keep the exact factory work on this child object too;
+                    # overlapping objects with one session must not read a
+                    # later factory's persisted incoming binding.
+                    try:
+                        child._pilot_invocation_context = dict(relation)
+                    except (AttributeError, TypeError):
+                        pass
+                    if work:
+                        work["child_session_id"] = sid
+                        _save_identity(_work_path(work), work)
                     target = _parent_context_path(sid)
                     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                     # Clean expired identity-only records, never transcripts.
@@ -372,6 +728,28 @@ def _install_delegate_context() -> None:
 
         build_child._pilot_subagent_context = True
         module._build_child_agent = build_child
+        # Scope incoming to the actual worker invocation. A later autonomous
+        # question in an old child session must not inherit its first task.
+        run_child = getattr(module, "_run_single_child", None)
+        if callable(run_child) and not getattr(run_child, "_pilot_incoming", False):
+            run_signature = inspect.signature(run_child)
+
+            @functools.wraps(run_child)
+            def run_work(*args: Any, **kwargs: Any) -> Any:
+                bound = run_signature.bind(*args, **kwargs)
+                child = bound.arguments.get("child")
+                sid = getattr(child, "session_id", None)
+                parent = getattr(child, "_pilot_invocation_context", None)
+                if not isinstance(parent, dict):
+                    parent = _read_parent_context(sid) if isinstance(sid, str) and sid else {}
+                token = _ACTIVE_INCOMING.set((sid, parent))
+                try:
+                    return run_child(*args, **kwargs)
+                finally:
+                    _ACTIVE_INCOMING.reset(token)
+
+            run_work._pilot_incoming = True
+            module._run_single_child = run_work
     except (ImportError, AttributeError):
         pass
     except Exception as error:
@@ -381,7 +759,7 @@ def _install_delegate_context() -> None:
 
 def _read_json_object(path: Path) -> Dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
         return value if isinstance(value, dict) else {}
     except Exception:
         return {}
@@ -440,6 +818,21 @@ def _report_internal_error(operation: str, error: Exception) -> None:
     except Exception:
         # A closed stderr must not replace an application result/exception.
         pass
+
+
+def _capture_message_content(config: Dict[str, Any]) -> bool:
+    agents = config.get("agents")
+    if not isinstance(agents, dict):
+        return True
+    agent_config = agents.get("hermes-agent")
+    if not isinstance(agent_config, dict):
+        agent_config = agents.get("hermes")
+    if not isinstance(agent_config, dict):
+        return True
+    value = agent_config.get("captureMessageContent")
+    if value is False:
+        return False
+    return not (isinstance(value, str) and value.strip().lower() == "false")
 
 
 def _hostname() -> str:
@@ -501,28 +894,28 @@ def _worker_name() -> Optional[str]:
     return value
 
 
-def _truncate(value: str) -> str:
-    if len(value) <= MAX_CONTENT_CHARS:
+def _truncate(value: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
+    if len(value) <= max_chars:
         return value
-    return value[:MAX_CONTENT_CHARS] + "...[truncated]"
+    return value[:max_chars] + "...[truncated]"
 
 
-def _bounded_value(value: Any, depth: int = 0) -> Any:
+def _bounded_value(value: Any, depth: int = 0, max_chars: int = MAX_CONTENT_CHARS) -> Any:
     if depth >= MAX_VALUE_DEPTH:
         return "[max-depth]"
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        return _truncate(value)
+        return _truncate(value, max_chars)
     if isinstance(value, (list, tuple)):
         return [
-            _bounded_value(item, depth + 1)
+            _bounded_value(item, depth + 1, max_chars)
             for item in list(value)[:MAX_COLLECTION_ITEMS]
         ]
     if isinstance(value, dict):
         output: Dict[str, Any] = {}
         for key, item in list(value.items())[:MAX_COLLECTION_ITEMS]:
-            output[_truncate(str(key))] = _bounded_value(item, depth + 1)
+            output[_truncate(str(key))] = _bounded_value(item, depth + 1, max_chars)
         return output
     return _truncate(str(value))
 
@@ -678,6 +1071,74 @@ def _system_instructions(request: Any) -> List[Dict[str, str]]:
     return parts[:MAX_PARTS]
 
 
+def _install_request_metadata_observer() -> bool:
+    """Observe provider metadata without changing Hermes' capped hook view."""
+    module = sys.modules.get("run_agent") or sys.modules.get("__main__")
+    owner = getattr(module, "AIAgent", None)
+    original = getattr(owner, "_api_request_payload_for_hook", None)
+    if not callable(original) or inspect.iscoroutinefunction(original) or inspect.isgeneratorfunction(original):
+        return False
+    if getattr(original, "_pilot_request_observer", False):
+        original._pilot_request_metadata = _REQUEST_METADATA
+        original._pilot_request_extract = _request_metadata
+        return True
+    try:
+        parameters = list(inspect.signature(original).parameters)
+    except (TypeError, ValueError):
+        return False
+    if parameters != ["self", "api_kwargs"]:
+        return False
+
+    @functools.wraps(original)
+    def observed(self: Any, api_kwargs: Any) -> Any:
+        # Return the exact original object to all plugins. A request-identity
+        # match, session, TTL and shared single-use holder prevent stale or
+        # auxiliary-call metadata from decorating an unrelated request.
+        context = observed._pilot_request_metadata
+        context.set(None)
+        result = original(self, api_kwargs)
+        try:
+            if isinstance(result, dict):
+                metadata = observed._pilot_request_extract({"body": api_kwargs})
+                context.set({"request": result, "session_id": getattr(self, "session_id", None),
+                             "created": time.monotonic(), "metadata": metadata})
+        except Exception as error:
+            _report_internal_error("request metadata snapshot", error)
+        return result
+
+    observed._pilot_request_observer = True
+    observed._pilot_request_metadata = _REQUEST_METADATA
+    observed._pilot_request_extract = _request_metadata
+    owner._api_request_payload_for_hook = observed
+    return True
+
+
+def _request_metadata(request: Any) -> Dict[str, Any]:
+    output: Dict[str, Any] = {"system_instructions": [], "tool_definitions": []}
+    size = 2
+    for key, items in (("system_instructions", _system_instructions(request)),
+                       ("tool_definitions", _tool_definitions(request))):
+        for item in items:
+            # Match the JSONL writer: escaped surrogates must round-trip too.
+            size += len(json.dumps(item, ensure_ascii=True)) + 1
+            if size > MAX_REQUEST_BYTES:
+                output["truncated"] = True
+                break
+            output[key].append(item)
+    return output
+
+
+def _take_request_metadata(payload: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = _REQUEST_METADATA.get()
+    if (not isinstance(snapshot, dict) or snapshot.get("request") is not payload.get("request")
+            or snapshot.get("session_id") != payload.get("session_id")
+            or time.monotonic() - snapshot.get("created", 0) > 5.0):
+        return {}
+    # Newer Hermes runs hooks in a copied context on a worker. Clearing the
+    # holder itself also consumes the snapshot in the caller's context.
+    return snapshot.pop("metadata", {})
+
+
 def _skill_attributes(
     tool_name: Any,
     arguments: Any = None,
@@ -734,6 +1195,43 @@ def _new_event_id() -> str:
     return str(uuid.uuid4())
 
 
+def _process_identity() -> Dict[str, Any]:
+    """Identify this Linux process only when /proc uses its PID namespace."""
+    global _PROCESS_IDENTITY_CACHE
+    pid = os.getpid()
+    if _PROCESS_IDENTITY_CACHE and _PROCESS_IDENTITY_CACHE[0] == pid:
+        return _PROCESS_IDENTITY_CACHE[1]
+    identity: Dict[str, Any] = {}
+    try:
+        namespace = os.readlink("/proc/self/ns/pid")
+        # /proc/1/ns/pid may be unreadable to an unprivileged collector or
+        # plugin. NSpid contains one value per namespace between this procfs
+        # mount and the process: more than one means a parent-mounted /proc.
+        # Also compare /proc/self's PID with getpid() in the same process.
+        status = Path("/proc/self/status").read_text()
+        ns_pids = next((line.split()[1:] for line in status.splitlines()
+                        if line.startswith("NSpid:")), [])
+        if os.readlink("/proc/self") != str(pid) or ns_pids != [str(pid)]:
+            return identity
+        stat = Path("/proc/self/stat").read_text()
+        fields = stat[stat.rfind(")") + 2:].split()
+        start_ticks = fields[19]
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        if not start_ticks.isdigit() or not boot_id:
+            return identity
+        identity = {"agent.hermes.process": {
+            "pid": pid, "start_ticks": start_ticks,
+            "pid_namespace": namespace, "boot_id": boot_id,
+            "source_token": _PROCESS_FILE_TOKEN,
+        }}
+    except (OSError, ValueError, IndexError):
+        pass
+    # Do not cache an unavailable /proc: it may become accessible later.
+    if identity:
+        _PROCESS_IDENTITY_CACHE = (pid, identity)
+    return identity
+
+
 def _session(session_id: str) -> Dict[str, Any]:
     state = _SESSIONS.get(session_id)
     if state is None:
@@ -788,6 +1286,7 @@ def _new_turn(
         _session(session_id)["sender_identity"] = dict(user_identity)
     return {
         "session_id": session_id,
+        "session_hash": hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32],
         "task_id": None,
         "thread_id": threading.get_ident(),
         "observer_turn_id": (
@@ -796,9 +1295,12 @@ def _new_turn(
         "fallback_turn_id": "%s:%s" % (session_id, uuid.uuid4()),
         "trace_id": parent.get("trace_id") or _new_trace_id(),
         "parent_context": parent,
+        "audit_parent_context": (_ACTIVE_INCOMING.get()[1] if _ACTIVE_INCOMING.get()
+                                 and _ACTIVE_INCOMING.get()[0] == session_id else {}),
         "user_id": user_identity["user_id"],
         "user_id_source": user_identity["source"],
         "sender_id": normalized_sender_id,
+        "capture_content": _capture_message_content(config),
         "user_message": user_message if isinstance(user_message, str) else str(user_message or ""),
         # None means the initial history boundary was not observed. Do not
         # confuse an empty snapshot with a known first-message boundary.
@@ -920,7 +1422,9 @@ def _numeric(value: Any) -> Optional[int]:
     return None
 
 
-def _tool_calls(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _tool_calls(
+    message: Dict[str, Any], capture_content: bool, max_chars: int = MAX_CONTENT_CHARS
+) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
     calls = message.get("tool_calls")
     if not isinstance(calls, list):
@@ -936,13 +1440,15 @@ def _tool_calls(message: Dict[str, Any]) -> List[Dict[str, Any]]:
             "id": str(call_id) if call_id else None,
             "name": str(name),
         }
-        if "arguments" in function:
-            part["arguments"] = _bounded_value(_decode_json(function.get("arguments")))
+        if capture_content and "arguments" in function:
+            part["arguments"] = _bounded_value(_decode_json(function.get("arguments")), max_chars=max_chars)
         output.append(part)
     return output
 
 
-def _message(message: Any) -> Optional[Dict[str, Any]]:
+def _message(
+    message: Any, capture_content: bool, max_chars: int = MAX_CONTENT_CHARS
+) -> Optional[Dict[str, Any]]:
     if not isinstance(message, dict):
         return None
     role = str(message.get("role") or "unknown")
@@ -951,7 +1457,7 @@ def _message(message: Any) -> Optional[Dict[str, Any]]:
 
     if role == "tool":
         call_id = message.get("tool_call_id") or message.get("call_id")
-        response = _bounded_value(_decode_json(content))
+        response = _bounded_value(_decode_json(content), max_chars=max_chars) if capture_content else ""
         parts.append({
             "type": "tool_call_response",
             "id": str(call_id) if call_id else None,
@@ -960,21 +1466,21 @@ def _message(message: Any) -> Optional[Dict[str, Any]]:
     else:
         if isinstance(content, str):
             if content or not message.get("tool_calls"):
-                parts.append({"type": "text", "content": _truncate(content)})
+                parts.append({"type": "text", "content": _truncate(content, max_chars) if capture_content else ""})
         elif isinstance(content, list):
             for item in content[:MAX_PARTS]:
                 if isinstance(item, dict) and item.get("type") in ("text", "input_text", "output_text"):
                     text = item.get("text", item.get("content", ""))
                     parts.append({
                         "type": "text",
-                        "content": _truncate(str(text or "")),
+                        "content": _truncate(str(text or ""), max_chars) if capture_content else "",
                     })
         elif content is not None:
             parts.append({
                 "type": "text",
-                "content": _truncate(str(content)),
+                "content": _truncate(str(content), max_chars) if capture_content else "",
             })
-        parts.extend(_tool_calls(message))
+        parts.extend(_tool_calls(message, capture_content, max_chars))
 
     if not parts:
         parts.append({"type": "text", "content": ""})
@@ -985,13 +1491,32 @@ def _message(message: Any) -> Optional[Dict[str, Any]]:
     return output
 
 
-def _messages(messages: List[Any]) -> List[Dict[str, Any]]:
+def _messages(messages: List[Any], capture_content: bool) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
     for item in messages[-MAX_TURN_MESSAGES:]:
-        converted = _message(item)
+        converted = _message(item, capture_content)
         if converted is not None:
             output.append(converted)
     return output
+
+
+def _request_inputs(messages: List[Any], capture_content: bool) -> tuple:
+    """Capture the request independently of the small lifecycle window."""
+    output: List[Dict[str, Any]] = []
+    size = 2
+    truncated = len(messages) > MAX_REQUEST_MESSAGES
+    for message in reversed(messages[-MAX_REQUEST_MESSAGES:]):
+        if isinstance(message, dict) and isinstance(message.get("content"), list) and len(message["content"]) > MAX_PARTS:
+            truncated = True
+        converted = _message(message, capture_content, MAX_REQUEST_CONTENT_CHARS)
+        if converted is None:
+            continue
+        size += len(json.dumps(converted, ensure_ascii=True)) + 1
+        if size > MAX_REQUEST_BYTES:
+            truncated = True
+            break
+        output.append(converted)
+    return list(reversed(output)), truncated
 
 
 def _current_turn_messages(turn: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1046,10 +1571,12 @@ def _common_fields(
         "gen_ai.turn.id": _turn_id(turn),
         "gen_ai.step.id": step_id,
         "gen_ai.agent.type": AGENT_TYPE,
+        "gen_ai.agent.id": turn["session_id"],
         "agent.hermes.collection": "realtime-v1",
     }
     if turn.get("native_run_observer") is True:
         fields["agent.hermes.native_run_observer"] = True
+    fields.update(_process_identity())
     if turn.get("user_id_source") in ("invocation", "environment", "sender", "parent"):
         fields[INVOCATION_USER_ID_FIELD] = turn["user_id"]
     if turn.get("sender_id"):
@@ -1063,6 +1590,9 @@ def _common_fields(
             "gen_ai.subagent.parent_tool_call.id": parent["tool_call_id"],
             "agent.pilot.parent.turn.id": parent["parent_turn_id"],
         })
+    incoming = turn.get("audit_parent_context", {}).get("invocation_id")
+    if incoming:
+        fields["gen_ai.agent.parent.invocation.id"] = incoming
     worker_name = _worker_name()
     if worker_name:
         fields["gen_ai.agent.name"] = worker_name
@@ -1137,7 +1667,10 @@ def _api_ids(turn: Dict[str, Any], api: Dict[str, Any]) -> Any:
         api["span_id"] = _new_span_id()
     if not api.get("step_id"):
         index = next(i for i, item in enumerate(turn["apis"]) if item is api)
-        api["step_id"] = "%s:s%s" % (_turn_id(turn), index + 1)
+        # A source turn ID may be reused in another session even when its
+        # previous invocation is no longer resident. Scope response IDs to the
+        # session independently of whether rotation was observed in this run.
+        api["step_id"] = "%s:session:%s:s%s" % (_turn_id(turn), turn["session_hash"], index + 1)
     return api["step_id"], "%s:r" % api["step_id"]
 
 
@@ -1235,7 +1768,7 @@ def _write_turn_input(turn: Dict[str, Any], request: Dict[str, Any]) -> None:
         "gen_ai.provider.name": request.get("gen_ai.provider.name", "unknown"),
         "agent.pilot.correlation.content_hash": turn["input_content_hash"],
         "gen_ai.input.messages_delta": [{"role": "user", "parts": [
-            {"type": "text", "content": turn["input_text"]}
+            {"type": "text", "content": turn["input_text"] if turn["capture_content"] else ""}
         ]}],
     })
     # Reuse stable event ids and append acknowledgement. If this write fails,
@@ -1244,8 +1777,23 @@ def _write_turn_input(turn: Dict[str, Any], request: Dict[str, Any]) -> None:
 
 
 def _request_messages(turn: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    if isinstance(payload.get("conversation_history"), list):
-        return _current_turn_messages(turn, payload)
+    native = payload.get("request_messages")
+    # Native Chat messages are closest to the provider input. Other APIs can
+    # expose Responses items or provider-specific tool blocks here; preserve
+    # their normalized conversation history until those shapes are supported.
+    native_chat = isinstance(native, list) and bool(native) and all(
+        isinstance(message, dict) and message.get("role") in ("system", "developer", "user", "assistant", "tool")
+        and (not isinstance(message.get("content"), list) or all(
+            isinstance(block, dict) and block.get("type") in ("text", "input_text", "output_text")
+            for block in message["content"]))
+        for message in native)
+    if native_chat:
+        return [message for message in native if isinstance(message, dict)
+                and message.get("role") not in ("system", "developer")]
+    if isinstance(payload.get("conversation_history"), list) and payload["conversation_history"]:
+        # This is LLM input, not the lifecycle/response window. Keep earlier
+        # turns without letting their assistants consume current API results.
+        return [message for message in payload["conversation_history"] if isinstance(message, dict)]
     # Older hooks omit request history. Retain only observed boundaries; never
     # invent response text. Tool hooks still supply their actual call/result.
     messages = list(turn.get("initial_messages") or [{"role": "user", "content": turn["user_message"]}])
@@ -1272,7 +1820,8 @@ def _request_messages(turn: Dict[str, Any], api: Dict[str, Any], payload: Dict[s
 def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> None:
     step_id, response_id = _api_ids(turn, api)
     messages = _request_messages(turn, api, payload)
-    _capture_turn_input(turn, messages)
+    capture = bool(turn["capture_content"])
+    _capture_turn_input(turn, _current_turn_messages(turn, payload))
     index = next(i for i, item in enumerate(turn["apis"]) if item is api)
     delta_start = 0
     if index:
@@ -1280,7 +1829,8 @@ def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, An
         if positions:
             delta_start = positions[-1]
     pre = api.get("pre") or {}
-    inputs = _messages(messages)
+    inputs, truncated = _request_inputs(messages, capture)
+    delta = inputs if delta_start == 0 else _request_inputs(messages[delta_start:], capture)[0]
     record = _common_fields(turn, state, "llm.request", api["pre_ns"], step_id, api["span_id"])
     record.update({
         "gen_ai.provider.name": _provider_name(pre.get("provider")),
@@ -1288,12 +1838,16 @@ def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, An
         "gen_ai.response.id": response_id,
         "gen_ai.request.model": pre.get("model") or turn.get("model") or "unknown",
         "gen_ai.input.messages": inputs,
-        "gen_ai.input.messages_delta": _messages(messages[delta_start:]),
+        "gen_ai.input.messages_delta": delta,
         "gen_ai.input.messages_hash": hashlib.sha256(
             json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
         "agent.hermes.hook": "pre_api_request",
     })
+    if truncated or pre.get("context_truncated"):
+        record["agent.pilot.request_context.truncated"] = True
     for key in ("tool_definitions", "system_instructions"):
+        if not capture:
+            continue
         if pre.get(key):
             record["gen_ai.tool.definitions" if key == "tool_definitions" else "gen_ai.system_instructions"] = pre[key]
     _write_new_records(turn, [record])
@@ -1314,6 +1868,7 @@ def _build_records(
         index for index, message in enumerate(current_messages)
         if message.get("role") == "assistant"
     ]
+    capture = bool(turn["capture_content"])
     turn_id = _turn_id(turn)
     records: List[Dict[str, Any]] = []
     tool_step: Dict[str, int] = {}
@@ -1366,7 +1921,7 @@ def _build_records(
         if isinstance(known_assistant, dict):
             assistant_message = known_assistant
 
-        for call in _tool_calls(assistant_message):
+        for call in _tool_calls(assistant_message, capture):
             call_id = call.get("id")
             if call_id:
                 tool_step[str(call_id)] = index
@@ -1377,9 +1932,9 @@ def _build_records(
         # System instructions are provider configuration, not turn messages.
         # Keep them in their dedicated field so they do not alter the existing
         # input, delta, or input-hash semantics.
-        input_messages = _messages(input_source)
-        input_delta = _messages(delta_source)
-        output_message = _message(assistant_message)
+        input_messages = _messages(input_source, capture)
+        input_delta = _messages(delta_source, capture)
+        output_message = _message(assistant_message, capture)
         provider = _provider_name(post.get("provider") or pre.get("provider"))
         request_model = str(pre.get("model") or post.get("model") or turn.get("model") or session_state.get("model") or "unknown")
         response_model = str(post.get("response_model") or post.get("model") or request_model)
@@ -1401,9 +1956,9 @@ def _build_records(
                 json.dumps(input_messages, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest(),
         })
-        if isinstance(tool_definitions, list) and tool_definitions:
+        if capture and isinstance(tool_definitions, list) and tool_definitions:
             request["gen_ai.tool.definitions"] = tool_definitions
-        if isinstance(system_instructions, list) and system_instructions:
+        if capture and isinstance(system_instructions, list) and system_instructions:
             request["gen_ai.system_instructions"] = system_instructions
         records.append(request)
 
@@ -1426,7 +1981,11 @@ def _build_records(
         error_type = post.get("error_type")
         if error_type:
             response["error.type"] = str(error_type)
-            response["error.message"] = str(post.get("error_message") or "provider request failed")
+            response["error.message"] = (
+                str(post.get("error_message") or "provider request failed")
+                if capture
+                else "provider request failed"
+            )
             status_code = _numeric(post.get("status_code"))
             if status_code is not None:
                 response["http.status_code"] = status_code
@@ -1464,7 +2023,7 @@ def _build_records(
             "gen_ai.tool.call.id": call_id,
             "gen_ai.tool.call.exec.id": call_id,
         })
-        if "args" in tool:
+        if capture and "args" in tool:
             call["gen_ai.tool.call.arguments"] = tool["args"]
         call.update(tool.get("skill_attributes") or {})
         records.append(call)
@@ -1487,7 +2046,7 @@ def _build_records(
             "gen_ai.tool.call.duration": duration_ms,
             "tool.result.status": tool.get("status") or "success",
         })
-        if "result" in tool:
+        if capture and "result" in tool:
             result["gen_ai.tool.call.result"] = tool["result"]
         result.update(tool.get("skill_attributes") or {})
         records.append(result)
@@ -1510,36 +2069,87 @@ def _write_records(records: List[Dict[str, Any]]) -> None:
         return
     directory = _data_dir() / "logs" / "hermes-agent"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    shared = False
     try:
-        os.chmod(directory, 0o700)
+        if str(os.environ.get('LOONGSUITE_PILOT_ROOT_TRIGGER', '')).strip().lower() in ('1', 'true', 'yes', 'on'):
+            info = directory.lstat()
+            shared = info.st_uid == 0 and (info.st_mode & 0o7777) == 0o1777
+        if not shared:
+            os.chmod(directory, 0o700)
     except OSError:
         pass
     path = directory / ("hermes-agent-%s.jsonl" % _PROCESS_FILE_TOKEN)
+    # Staged records may have been created before fork. Their source identity
+    # must describe the process that actually appends them to this file.
+    identity = _process_identity().get("agent.hermes.process")
+    for record in records:
+        if identity:
+            record["agent.hermes.process"] = identity
+        else:
+            record.pop("agent.hermes.process", None)
     payload = "".join(
         json.dumps(record, ensure_ascii=True, separators=(",", ":"), default=str) + "\n"
         for record in records
     ).encode("utf-8")
-    descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    try:
-        offset = 0
-        while offset < len(payload):
-            written = os.write(descriptor, payload[offset:])
-            if written <= 0:
-                raise OSError("failed to append Hermes event records")
-            offset += written
-    finally:
-        os.close(descriptor)
+    # Keep source filenames/inodes stable for the collector's byte checkpoints.
+    with _RAW_WRITE_LOCK:
+        # SQLite's OS lock is shared with the collector and released on crash.
+        # Never unlink this gate or use os.kill(pid, 0) on Windows.
+        import sqlite3
+        gate = sqlite3.connect(str(directory / ".raw-source-gate.sqlite"), timeout=0.025)
+        try:
+            gate.execute("BEGIN IMMEDIATE")
+        except Exception:
+            gate.close()
+            raise
+        try:
+            pointer = Path(str(path) + ".active")
+            target = path
+            if pointer.exists():
+                name = pointer.read_text()
+                if Path(name).name != name or not name.startswith(path.stem + ".segment-"):
+                    raise OSError("invalid Hermes raw JSONL pointer")
+                target = directory / name
+            if target.exists() and target.stat().st_size and target.stat().st_size + len(payload) > RAW_SEGMENT_BYTES:
+                sequence = int(target.stem.split(".segment-")[1].split("-")[0]) + 1 if ".segment-" in target.stem else 1
+                target = directory / ("%s.segment-%012d-%s.jsonl" % (path.stem, sequence, uuid.uuid4().hex))
+                descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.close(descriptor)
+                temporary = Path(str(pointer) + "." + uuid.uuid4().hex + ".tmp")
+                try:
+                    temporary.write_text(target.name)
+                    os.replace(str(temporary), str(pointer))
+                finally:
+                    temporary.unlink(missing_ok=True)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+            if shared:
+                flags |= getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+            descriptor = os.open(str(target), flags, 0o600)
+            try:
+                if shared:
+                    info = os.fstat(descriptor)
+                    if not stat.S_ISREG(info.st_mode) or (hasattr(os, 'getuid') and info.st_uid != os.getuid()):
+                        raise OSError('Pilot event file is not a private regular file')
+                if os.name != 'nt':
+                    os.fchmod(descriptor, 0o600)
+                offset = 0
+                while offset < len(payload):
+                    written = os.write(descriptor, payload[offset:])
+                    if written <= 0:
+                        raise OSError("failed to append Hermes event records")
+                    offset += written
+            finally:
+                os.close(descriptor)
+        finally:
+            try:
+                gate.rollback()
+            finally:
+                gate.close()
 
 
 def _purge_old_logs() -> None:
-    directory = _data_dir() / "logs" / "hermes-agent"
-    try:
-        cutoff = time.time() - LOG_RETENTION_SECONDS
-        for candidate in directory.glob("hermes-agent-*.jsonl"):
-            if candidate.is_file() and candidate.stat().st_mtime < cutoff:
-                candidate.unlink(missing_ok=True)
-    except Exception as error:
-        _report_internal_error("log retention", error)
+    # Collector retention owns raw files: age alone cannot prove consumption.
+    pass
 
 
 def _handle_on_session_start(now_ns: int, payload: Dict[str, Any]) -> None:
@@ -1575,6 +2185,22 @@ def _handle_pre_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
     _capture_turn_input(turn, messages)
     turn["initial_messages"] = _bounded_value(messages)
     _remember_turn(state, turn, payload)
+    # Older paths retain the notification object. Current CLI/loop converts it
+    # to plain text; its exact staged-row identity travels in the native scope.
+    # Ordinary user strings and completed-but-unconsumed notifications do not
+    # establish a result or an invocation association.
+    delivery = getattr(payload.get("user_message"), "_pilot_delegation_event", None)
+    scope = _NATIVE_RUN_SCOPE.get()
+    if delivery is None and scope and not scope["closed"] and (
+            session_id in scope["sessions"] or session_id == getattr(scope["agent"], "session_id", None)):
+        delivery = scope.get("delivery")
+    session_ids = {session_id}
+    if scope and not scope["closed"] and session_id == getattr(scope["agent"], "session_id", None):
+        session_ids.update(scope["sessions"])
+    deliveries = _gateway_deliveries(session_ids)
+    if isinstance(delivery, dict) and delivery.get("parent_session_id") in session_ids:
+        deliveries.append(({delivery["parent_session_id"]}, delivery))
+    _audit_deliveries(turn, state, deliveries, now_ns)
     _bind_native_run(state, turn)
 
 
@@ -1600,6 +2226,8 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
     task_id = payload.get("task_id")
     state["model"] = payload.get("model") or state.get("model")
     state["platform"] = payload.get("platform") or state.get("platform")
+    metadata = _take_request_metadata(payload)
+    request = payload.get("request")
     api = {
         "session_id": session_id,
         "task_id": task_id,
@@ -1610,8 +2238,21 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
         "pre": {
             "provider": payload.get("provider"),
             "model": payload.get("model"),
-            "tool_definitions": _tool_definitions(payload.get("request")),
-            "system_instructions": _system_instructions(payload.get("request")),
+            "tool_definitions": (
+                metadata.get("tool_definitions") or _tool_definitions(payload.get("request"))
+                if turn["capture_content"]
+                else []
+            ),
+            "system_instructions": (
+                metadata.get("system_instructions") or _system_instructions({"body": {
+                    "messages": payload.get("request_messages"),
+                    "system": payload.get("system_prompt"),
+                }}) or _system_instructions(payload.get("request"))
+                if turn["capture_content"]
+                else []
+            ),
+            "context_truncated": bool(metadata.get("truncated") or
+                                      (isinstance(request, dict) and request.get("_truncated") and not metadata)),
         },
         "post": {},
     }
@@ -1750,11 +2391,21 @@ def _handle_pre_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
                 payload.get("tool_name"), payload.get("args")
             ),
         }
-        tool["args"] = _bounded_value(payload.get("args"))
+        if turn["capture_content"]:
+            tool["args"] = _bounded_value(payload.get("args"))
         turn["tools"][call_id] = tool
         _write_new_records(turn, _build_records(turn, state, payload))
     if payload.get("tool_name") == "delegate_task":
         _ACTIVE_DELEGATION.set((session_id, _turn_id(turn), call_id))
+        args = payload.get("args")
+        if isinstance(args, dict) and args.get("action", "spawn") in (None, "", "spawn"):
+            tasks = args.get("tasks") if isinstance(args.get("tasks"), list) else [args] if args.get("goal") else []
+            for index, task in enumerate(tasks[:MAX_COLLECTION_ITEMS]):
+                if isinstance(task, dict) and isinstance(task.get("goal"), str) and task["goal"]:
+                    if isinstance(args.get("tasks"), list):
+                        contexts = [args.get("context"), task.get("context")]
+                        task = dict(task, context="\n\n".join(c for c in contexts if isinstance(c, str) and c))
+                    _delegation_work(turn, state, call_id, turn["tools"][call_id], index, task, now_ns)
 
 
 def _handle_post_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
@@ -1786,12 +2437,32 @@ def _handle_post_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
     duration_ms = _numeric(payload.get("duration_ms"))
     if duration_ms is not None:
         tool["duration_ms"] = duration_ms
-    if "args" not in tool:
-        tool["args"] = _bounded_value(payload.get("args"))
-    tool["result"] = _bounded_value(_decode_json(payload.get("result")))
+    if turn["capture_content"]:
+        if "args" not in tool:
+            tool["args"] = _bounded_value(payload.get("args"))
+        tool["result"] = _bounded_value(_decode_json(payload.get("result")))
     tool["skill_attributes"] = _skill_attributes(
         tool.get("tool_name"), payload.get("args"), payload.get("result")
     ) or tool.get("skill_attributes", {})
+    works = tool.get("delegations", {})
+    result = _decode_json(payload.get("result"))
+    if works and isinstance(result, dict):
+        # Only actual per-task results are delivered outcomes. A background
+        # dispatch handle supplies correlation, not a successful result.
+        _audit_results(turn, state, works, result.get("results", result.get("inline_results")), now_ns)
+        units = result.get("units")
+        if not isinstance(units, list) and result.get("delegation_id"):
+            units = [{"delegation_id": result["delegation_id"], "task_indexes": list(works)}]
+        for unit in (units or [])[:MAX_COLLECTION_ITEMS]:
+            if not isinstance(unit, dict) or not isinstance(unit.get("delegation_id"), str):
+                continue
+            for index in unit.get("task_indexes", [])[:MAX_COLLECTION_ITEMS]:
+                if index in works:
+                    works[index]["native_delegation_id"] = unit["delegation_id"]
+                    _save_identity(_work_path(works[index]), works[index])
+        if result.get("error") and not result.get("results") and not result.get("delegation_id"):
+            for work in works.values():
+                _agent_audit(turn, state, work, "result", now_ns, result.get("error"), "agent_dispatch_error")
     _write_new_records(turn, _build_records(turn, state, payload))
 
 
@@ -1875,6 +2546,14 @@ def _safe_callback(hook_name: str) -> Callable[..., None]:
         try:
             if hook_name == "pre_llm_call":
                 _retry_run_completion_observer()
+                # Discovery may run from cli_agent_setup_mixin's run_agent
+                # import, before CLIChatTurnMixin itself has been defined.
+                # Retry once the first native turn reaches lifecycle hooks.
+                if not _CLI_DELIVERY_READY:
+                    _install_cli_delivery_context()
+                if not _GATEWAY_DELIVERY_READY:
+                    _install_gateway_delivery_context()
+                _install_request_metadata_observer()
             with _STATE_LOCK:
                 _HANDLERS[hook_name](time.time_ns(), kwargs)
         except Exception as error:
@@ -1888,7 +2567,14 @@ def _safe_callback(hook_name: str) -> Callable[..., None]:
 def register(ctx: Any) -> None:
     """Register synchronous Hermes lifecycle callbacks."""
     _install_delegate_context()
+    _install_notification_context()
+    _install_cli_delivery_context()
+    _install_gateway_delivery_context()
     _try_install_run_completion_observer()
+    try:
+        _install_request_metadata_observer()
+    except Exception as error:
+        _report_internal_error("request metadata observer", error)
     _purge_old_logs()
     for hook_name in HOOKS:
         try:

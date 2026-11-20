@@ -28,7 +28,7 @@ LLM 请求仅通过 `gen_ai.input.messages_delta` 输出当前 interaction 内�
 
 Copilot 退出后仍可补齐边界之后的尾部交互；已交付数据由 SQLite 去重。历史排空且源文件不再变化后不会持续产生事件。[本地输出](local-jsonl-output.md) 按大小分片，并由保留策略治理当天封存分片和超过 3 GiB 的异常本地日志。该清理不删除 Copilot 自己的源会话、原生 OTel 文件或 checkpoint。
 
-ENTRY 和 AGENT 的 `gen_ai.input.messages` 来自当前 interaction 的真实 `user.message`，按原始时间排序，不复制 LLM 的历史上下文；经过统一消息处理与脱敏流程。主分支已统一始终采集消息正文，旧 `captureMessageContent` 配置不再关闭正文。
+ENTRY 和 AGENT 的 `gen_ai.input.messages` 来自当前 interaction 的真实 `user.message`，按原始时间排序，不复制 LLM 的历史上下文；经过统一消息处理与脱敏流程。
 
 当前支持 Unix Bash/Zsh 自动部署。Windows 自动部署显式禁用；保留旧安装的尽力清理，但不会因 Copilot 清理错误中断公共卸载。子 Agent 并发和外部父 Trace 不在本轮支持范围内。禁用会移除插件注册、资产与托管 shell 块，清理失败保留部署记录以重试；watchdog 会修复启用状态下丢失的注册和资产。
 

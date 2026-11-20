@@ -1482,6 +1482,17 @@ interceptor_embedded_status() {
     echo "stopped"
 }
 
+dashboard_enabled() {
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || return 1
+    "$node_bin" -e '
+const fs = require("node:fs");
+let enabled = false;
+try { enabled = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""))?.dashboard?.enabled === true; } catch {}
+process.exit(enabled ? 0 : 1);
+' "$CONFIG_FILE" 2>/dev/null
+}
+
 dashboard_port() {
     local node_bin
     node_bin=$(resolve_node 2>/dev/null) || {
@@ -1492,7 +1503,7 @@ dashboard_port() {
 const fs = require("node:fs");
 const path = process.argv[1];
 let port;
-try { port = JSON.parse(fs.readFileSync(path, "utf8"))?.dashboard?.port; } catch {}
+try { port = JSON.parse(fs.readFileSync(path, "utf8").replace(/^\uFEFF/, ""))?.dashboard?.port; } catch {}
 process.stdout.write(String(Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 8765));
 ' "$CONFIG_FILE" 2>/dev/null || echo 8765
 }
@@ -1572,12 +1583,13 @@ cmd_status() {
         local pid
         local port
         pid=$(cat "$PID_FILE")
-        port=$(dashboard_port)
         echo "✅ loongsuite-pilot${ver_info} is running (PID $pid)"
-        if dashboard_is_available "$port"; then
+        if ! dashboard_enabled; then
+            echo "   dashboard: disabled"
+        elif port=$(dashboard_port) && dashboard_is_available "$port"; then
             echo "   dashboard: http://127.0.0.1:${port}/"
         else
-            echo "   dashboard: unavailable (http://127.0.0.1:${port}/)"
+            echo "   dashboard: unavailable (http://127.0.0.1:${port:-8765}/)"
         fi
     else
         echo "⚪ loongsuite-pilot${ver_info} is not running"
@@ -1816,11 +1828,53 @@ cmd_menubar() {
 }
 
 cmd_dashboard() {
-    # No bootstrap sync or collector lifecycle work; shortcut changes are explicit.
     case "${1:-}" in
+        start|stop)
+            local action="$1"; shift
+            local repo_dir version_dir entry node_bin port attempt
+            repo_dir="$(dirname "$SCRIPT_DIR")"
+            if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
+                entry="$repo_dir/scripts/dashboard-config.mjs"
+            else
+                version_dir=$(resolve_current_version 2>/dev/null) || {
+                    echo "Pilot is not installed. Install Pilot before managing the Dashboard." >&2
+                    return 1
+                }
+                entry="$version_dir/scripts/dashboard-config.mjs"
+            fi
+            if [ ! -f "$entry" ]; then
+                echo "Dashboard command is missing. Upgrade or repair Pilot." >&2
+                return 1
+            fi
+            node_bin=$(resolve_node) || { echo "node runtime not found" >&2; return 1; }
+            "$node_bin" "$entry" "$CONFIG_FILE" "$action" "$@" || return 1
+            if is_running; then
+                cmd_restart
+            elif [ "$action" = start ]; then
+                cmd_start
+            fi
+            if [ "$action" = stop ]; then
+                if is_running; then
+                    echo "Dashboard stopped; collector remains running."
+                else
+                    echo "Dashboard stopped; collector remains stopped."
+                fi
+                return 0
+            fi
+            port=$(dashboard_port)
+            for attempt in {1..20}; do
+                if dashboard_is_available "$port"; then
+                    echo "Dashboard started: http://127.0.0.1:${port}/"
+                    return 0
+                fi
+                sleep 0.5
+            done
+            echo "Dashboard did not become available on port ${port}. Check $LOG_FILE" >&2
+            return 1
+            ;;
         shortcut) shift ;;
-        --help|-h) echo "Usage: loongsuite-pilot dashboard shortcut {install|status|uninstall}"; return 0 ;;
-        *) echo "Usage: loongsuite-pilot dashboard shortcut {install|status|uninstall}" >&2; return 2 ;;
+        --help|-h) echo "Usage: loongsuite-pilot dashboard start [port] | stop | shortcut {install|status|uninstall}"; return 0 ;;
+        *) echo "Usage: loongsuite-pilot dashboard start [port] | stop | shortcut {install|status|uninstall}" >&2; return 2 ;;
     esac
     local node_bin="" version_dir repo_dir entry config_path pin pinned
     repo_dir="$(dirname "$SCRIPT_DIR")"
@@ -2933,6 +2987,8 @@ cmd_help() {
     echo "  token-usage     Show token usage TUI"
     echo "  menubar start   Enable and start the macOS menu bar app without restarting the collector"
     echo "  menubar stop    Disable and stop only the macOS menu bar app (keep the collector running)"
+    echo "  dashboard start [port]  Enable Dashboard and start it (restarts a running collector)"
+    echo "  dashboard stop          Disable Dashboard (restarts a running collector)"
     echo "  dashboard shortcut {install|status|uninstall}  Optional macOS Dock shortcut"
     echo "  agent ...       Register/list/diagnose PI SDK Agents"
     echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"

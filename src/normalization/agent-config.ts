@@ -1,7 +1,9 @@
 import type { AgentActivityEntry, AgentConfig, AgentsConfig } from '../types/index.js';
 import { MULTIMODAL_SUPPORTED_AGENT_IDS } from '../types/index.js';
 
-const DEFAULT_CONFIG: AgentConfig = {};
+const DEFAULT_CONFIG: AgentConfig = {
+  captureMessageContent: true,
+};
 
 export function isMultimodalSupportedAgent(agentId: string): boolean {
   return (MULTIMODAL_SUPPORTED_AGENT_IDS as readonly string[]).includes(agentId);
@@ -9,6 +11,7 @@ export function isMultimodalSupportedAgent(agentId: string): boolean {
 
 /** Map collector-facing agent.type aliases to config.json agents.<id> keys. */
 const AGENT_TYPE_TO_CONFIG_KEY: Record<string, string> = {
+  'qoder-app': 'qoder',
   'qoder-cli': 'qoder',
   'qoder-cli-hook': 'qoder',
   'cursor-hook': 'cursor',
@@ -23,7 +26,7 @@ export interface ResolvedAgentConfig {
 
 /**
  * Resolve per-agent policy for an activity entry.
- * Shared by agent-specific processors such as multimodal collection.
+ * Shared by content policy and multimodal processor.
  */
 export function resolveAgentConfig(
   entry: AgentActivityEntry,

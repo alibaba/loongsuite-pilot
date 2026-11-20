@@ -9,6 +9,7 @@ export class QoderTranscriptCollector {
     dataDir: string; agentId: 'qoder' | 'qoder-cn'; scanBytes?: number;
     maxTurnBytes?: number; cacheBytes?: number; stableMs?: number; settleMs?: number;
     now?: () => number; warn?: (message: string, fields: Record<string, unknown>) => void;
+    resolveTraceContext?: (records: Record<string, unknown>[]) => Promise<void>;
     resolveInitialPrompt?: (source: { sessionId: string }, requestId: string,
       cursor?: { at: number; requestId: string; inventoryId: string },
       search?: { nextIndex?: number; preferredPath?: string }) => Promise<{

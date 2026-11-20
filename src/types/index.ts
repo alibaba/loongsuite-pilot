@@ -8,8 +8,12 @@ export * from './events.js';
 export interface ListenerConfig {
   enabled: boolean;
   pollInterval: number;
+  /** Restrict the Qwen Work collaboration input to these conversation IDs. */
+  includeConversationIds?: string[];
   /** Read-only source log directory override for the doubao-work listener. */
   logDir?: string;
+  /** Product source for the doubao-work listener; defaults to Doubao Work. */
+  client?: 'doubao-work' | 'doubao';
 }
 
 /**
@@ -62,19 +66,9 @@ export interface MaskConfig {
   replacementMode?: MaskReplacementMode;
 }
 
-/** Interceptor types are the credential subset of mask types; PII is not interceptable. */
-export const SUPPORTED_INTERCEPTOR_TYPES = [
-  'cloudAccessKey',
-  'apiKey',
-  'privateKey',
-  'databaseUrl',
-] as const satisfies readonly MaskType[];
-
-export type InterceptorType = (typeof SUPPORTED_INTERCEPTOR_TYPES)[number];
-
 export interface InterceptorConfig {
-  mode: MaskMode;
-  types: InterceptorType[];
+  /** Explicit opt-in for managed rules and interception hooks. */
+  mode: 'none' | 'all';
 }
 
 export interface OtlpTraceRawConfig {
@@ -85,7 +79,6 @@ export interface OtlpTraceRawConfig {
   resourceAttributes?: Record<string, string>;
   serviceName?: string;
   debug?: boolean;
-  /** @deprecated Ignored. Message content capture is always enabled. */
   captureMessageContent?: boolean;
   turnIdleTimeoutMs?: number;
   resourceAttributeKeys?: string[];
@@ -126,6 +119,8 @@ export interface AnalyticsConfig {
   autoStart: boolean;
   dataDir: string;
   userId: string;
+  hostSn?: string;
+  hostIdentityTags: boolean;
   collectLog: boolean;
   collectTrace: boolean;
   /** Exact service.name shared by every agent and backend. */
@@ -257,8 +252,7 @@ export interface AgentMultimodalConfig {
 
 export interface AgentConfig {
   enabled?: boolean;
-  /** @deprecated Ignored. Message content capture is always enabled. */
-  captureMessageContent?: boolean;
+  captureMessageContent: boolean;
   multimodal?: AgentMultimodalConfig;
 }
 
@@ -292,7 +286,6 @@ export interface OtlpTraceFlusherConfig {
   /** Legacy mode appends the normalized agent type to serviceName. Defaults to true. */
   appendAgentTypeToServiceName?: boolean;
   resourceAttributes?: Record<string, string>;
-  /** @deprecated Ignored. Message content capture is always enabled. */
   captureMessageContent?: boolean;
   debug?: boolean;
   turnIdleTimeoutMs?: number;
@@ -421,6 +414,7 @@ export interface PipelineToggle {
   enabled: boolean;
   file: { enabled: boolean };
   qoderApi: { enabled: boolean };
+  multica?: { enabled: boolean; mode?: 'on' | 'off'; serviceNamePrefix?: string; discoverLocalSources?: boolean };
 }
 
 /** @deprecated Use PipelineToggle instead */
@@ -433,6 +427,7 @@ export interface StatusBarConfig {
 }
 
 export interface DashboardConfig {
+  enabled: boolean;
   port: number;
 }
 

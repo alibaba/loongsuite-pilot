@@ -1,5 +1,7 @@
+import { producerReadFlags } from '../../utils/producer-log-dir.js';
 import type { Dirent } from 'node:fs';
 import * as fs from 'node:fs/promises';
+import { fileIdentity, matchesFileIdentity } from '../../utils/file-identity.js';
 import * as path from 'node:path';
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
@@ -162,11 +164,17 @@ export class DshLogInput extends BaseSessionInput {
 
     const inode = Number((stat as { ino?: number }).ino ?? 0);
     const persisted = this.stateStore.get(stateKey);
+    if (persisted.extra?.sourceIdentity !== fileIdentity(stat)) {
+      this.stateStore.update(stateKey, { extra: { sourceIdentity: fileIdentity(stat), sourceBirthtimeMs: stat.birthtimeMs } });
+    }
     const persistedInode = typeof persisted.extra?.inode === 'number'
       ? persisted.extra.inode
       : undefined;
     let offset = this.stateStore.getOffset(stateKey);
-    const replaced = persistedInode !== undefined && persistedInode !== inode;
+    const replaced = (persistedInode !== undefined && persistedInode !== inode)
+      || (persisted.extra?.sourceIdentity !== undefined && !matchesFileIdentity(persisted.extra.sourceIdentity, stat))
+      || (persisted.extra?.sourceIdentity === undefined && (process.platform === 'darwin' || process.platform === 'win32')
+        && persisted.extra?.sourceBirthtimeMs !== undefined && persisted.extra.sourceBirthtimeMs !== stat.birthtimeMs);
     const truncated = offset > 0 && stat.size < offset;
     if (replaced || truncated) {
       logger.info('dsh event file replaced or truncated, resetting state', {
@@ -422,7 +430,7 @@ export class DshLogInput extends BaseSessionInput {
     boundSessionId?: string,
   ): Promise<{ offset: number; record: Record<string, unknown> } | undefined> {
     const start = Math.max(0, offset - LEGACY_SCAN_BYTES);
-    const handle = await fs.open(filePath, 'r');
+    const handle = await fs.open(filePath, producerReadFlags());
     try {
       const bytes = Buffer.alloc(offset - start);
       const bytesRead = await this.readChunk(handle, bytes, start);
@@ -461,7 +469,7 @@ export class DshLogInput extends BaseSessionInput {
 
   private async findLegacyActiveTurnStart(filePath: string, offset: number): Promise<number | undefined> {
     const start = Math.max(0, offset - LEGACY_SCAN_BYTES);
-    const handle = await fs.open(filePath, 'r');
+    const handle = await fs.open(filePath, producerReadFlags());
     try {
       const bytes = Buffer.alloc(offset - start);
       const bytesRead = await this.readChunk(handle, bytes, start);
@@ -508,7 +516,7 @@ export class DshLogInput extends BaseSessionInput {
     visit: (line: string | undefined, lineOffset: number, recordBytes: number) => boolean | void,
     options: { extendedEnd?: number; discardedLineStart?: number } = {},
   ): Promise<DshScanResult> {
-    const handle = await fs.open(filePath, 'r');
+    const handle = await fs.open(filePath, producerReadFlags());
     let readEnd = start;
     let offset = start;
     let discardedLineStart = options.discardedLineStart;

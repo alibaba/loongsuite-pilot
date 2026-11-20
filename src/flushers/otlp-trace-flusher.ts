@@ -21,10 +21,15 @@ import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
-import { CodexTurnJournal, codexTurnJournalGroupKey, isJournaledCodexEntry } from './codex-turn-journal.js';
+import { convertQwenWorkCollaborationTurn } from './qwen-work-collaboration-converter.js';
+import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
+import { currentHermesProcessNamespace, hermesProcessIdentity, isHermesProcessDead,
+  type HermesProcessIdentity } from './hermes-process-identity.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 import { multimodalMetadataItemsFromMessages } from '../multimodal/rewrite.js';
+import { removeMessageContentFields, stripAgentMessageContent } from '../normalization/agent-content-policy.js';
+import { normalizeGuardrailFields } from '../normalization/guardrail-fields.js';
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
@@ -58,6 +63,15 @@ import {
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
+// Give input polling time to drain the producer's last records. A live or
+// unidentifiable producer is never closed by this recovery timer.
+const HERMES_ABANDONED_GRACE_MS = 5 * 60_000;
+const HERMES_DEAD_CONFIRM_MS = 60_000;
+const HERMES_OWNER_CHECK_INTERVAL_MS = 30_000;
+const HERMES_OWNER_CHECK_LIMIT = 32;
+const HERMES_SOURCE_DRAIN_LIMIT = 2;
+const HERMES_SOURCE_GROUP_LIMIT = 10_000;
+const HERMES_SOURCE_PER_GROUP_LIMIT = 16;
 const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
 // Claude Code marks a failed attempt (mid-turn retry or terminal API failure)
 // with finish_reasons=['error']. 'error' must NOT be a turn boundary on its own,
@@ -74,6 +88,7 @@ const USER_IDENTITY_PASSTHROUGH_KEYS = [
   'user.email',
 ] as const;
 const OPENCLAW_COMPAT_PASSTHROUGH_KEYS = [
+  'agent.openclaw.run_id',
   'agent.openclaw.compatibility',
   'agent.openclaw.timing.inferred',
   'agent.openclaw.timing.source',
@@ -87,10 +102,14 @@ function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentA
   const key = (r: AgentActivityEntry) => JSON.stringify([r.trace_id, r['gen_ai.turn.id']]);
   const endings = new Map<string, Partial<AgentActivityEntry>>();
   for (const r of records) {
-    if (r['agent.openclaw.compatibility'] === 'legacy' && r['agent.openclaw.hook'] === 'legacy_cleanup') {
+    if ((r['agent.openclaw.compatibility'] === 'legacy' && r['agent.openclaw.hook'] === 'legacy_cleanup')
+      || (r['agent.openclaw.hook'] === 'cron_finished'
+        && (r['agent.openclaw.collection.incomplete'] === true || r['agent.openclaw.correlation.ambiguous'] === true))) {
       endings.set(key(r), {
-        'agent.openclaw.collection.incomplete': true,
-        'agent.openclaw.collection.end_reason': r['agent.openclaw.collection.end_reason'],
+        ...((r['agent.openclaw.compatibility'] === 'legacy' || r['agent.openclaw.collection.incomplete'] === true) ? {
+          'agent.openclaw.collection.incomplete': true,
+          'agent.openclaw.collection.end_reason': r['agent.openclaw.collection.end_reason'],
+        } : {}),
         ...(r['agent.openclaw.correlation.ambiguous'] === true
           ? { 'agent.openclaw.correlation.ambiguous': true } : {}),
       });
@@ -135,16 +154,27 @@ interface TurnBuffer {
   spillable?: boolean;
   spilledRecords?: number;
   spilledEventIds?: Set<string>;
+  /** A buffer evicted under the count limit can be restored from its entire journal. */
+  replayEntireJournal?: boolean;
   residentBytes?: number;
-  // Copilot source event IDs are stable across legacy replays. This index
-  // intentionally leaves other producers' update semantics unchanged.
+  // Stable source IDs index resident replay records. Spilled durable turns
+  // retain their identities in spilledEventIds until payload rehydration.
   recordIndex: Map<string, number>;
   completed: boolean;
   /** All realtime producers can overlap turns in one session. */
   isRealtimeHermes?: boolean;
   /** Only a turn covered by the native observer may bypass idle flushing. */
   hasHermesNativeRunObserver?: boolean;
+  hermesOwner?: HermesProcessIdentity;
+  hermesOwnerUncertain?: boolean;
+  hermesAbandoned?: boolean;
+  hermesDeadSinceMs?: number;
+  hermesNextDrainMs?: number;
+  hermesDrainFailures?: number;
+  /** A fixed-session cron execution has an explicit outer completion event. */
+  isObservedOpenClawCron?: boolean;
   lastActivityMs: number;
+  activityVersion: number;
   logicalBytes: number;
   unmeasuredRecords: number;
   openedAtMs: number;
@@ -461,6 +491,8 @@ const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
   'gen_ai.agent.scope',
   'gen_ai.agent.depth',
   'gen_ai.agent.parent.id',
+  'gen_ai.agent.id',
+  'gen_ai.agent.parent.invocation.id',
   'gen_ai.subagent.parent_tool_call.id',
   'agent.pilot.parent.turn.id',
   'agent.qwen-code-cli.subagent.collection',
@@ -635,10 +667,19 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly globalAttributesProvider?: GlobalAttributesProvider;
 
   private idleTimer?: ReturnType<typeof setInterval>;
+  private hermesOwnerTimer?: ReturnType<typeof setInterval>;
+  private hermesOwnerCheckRunning = false;
+  private hermesOwnerCursor = 0;
+  private readonly hermesSourceGroups = new Map<string, Set<string>>();
+  private readonly hermesGroupSources = new Map<string, Set<string>>();
+  private readonly hermesDeferredTurns = new Map<string, TurnBuffer>();
+  private hermesSourceTrackingOverflow = false;
+  private stopping = false;
   private inFlightExports = new Set<Promise<void>>();
   private flushedTurnKeys = new Set<string>();
   private warnedHermesIdleTimeout = false;
   private warnedHermesLegacyIdleTimeout = false;
+  private warnedOpenClawCronIdleTimeout = false;
   private readonly convertLocks = new Map<string, Promise<void>>();
   private journalRestore?: Promise<void>;
   private codexFlushTail: Promise<void> = Promise.resolve();
@@ -656,6 +697,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     exporterFactory?: OtlpExporterFactory,
     private readonly codexJournal?: CodexTurnJournal,
     private readonly prepareCodexReplay?: (entries: AgentActivityEntry[]) => AgentActivityEntry[],
+    private readonly confirmHermesSourceDrained?: (sourceToken: string) => Promise<boolean>,
   ) {
     super();
     if (!cfg.endpoints || cfg.endpoints.length === 0) {
@@ -697,9 +739,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       .map(prefix => prefix.trim())
       .filter(prefix => prefix.length > 0);
 
-    // The converter reads these process-wide settings at conversion time. Pilot
-    // always exports message content; inherited SDK opt-outs must not silently
-    // remove it. Preserve unrelated semantic-convention opt-ins.
+    // The converter reads these process-wide settings at conversion time.
+    // Keep inherited SDK opt-outs from removing content when capture is enabled.
+    // captureMessageContent=false is enforced at the input and final Span boundaries.
     const semconvOptIns = (process.env.OTEL_SEMCONV_STABILITY_OPT_IN ?? '')
       .split(',').map(value => value.trim()).filter(Boolean);
     if (!semconvOptIns.some(value => value.toLowerCase() === 'gen_ai_latest_experimental')) {
@@ -711,6 +753,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (cfg.turnIdleTimeoutMs && cfg.turnIdleTimeoutMs > 0) {
       this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);
       this.idleTimer.unref();
+    }
+    if (process.platform === 'linux') {
+      this.hermesOwnerTimer = setInterval(() => { void this.recoverAbandonedHermesTurns(); }, HERMES_OWNER_CHECK_INTERVAL_MS);
+      this.hermesOwnerTimer.unref();
     }
 
     logger.info(
@@ -729,7 +775,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         agent_type: agentType,
         pending_buffers: 0,
         pending_records: 0,
-        ...(agentType === 'codex' && this.codexJournal ? {
+        ...(this.codexJournal?.acceptsAgent(agentType) ? {
           resident_records: 0, resident_payload_bytes: 0,
           spilled_buffers: 0, spilled_records: 0,
         } : {}),
@@ -791,6 +837,50 @@ export class OtlpTraceFlusher extends BaseFlusher {
     counters.removed_buffers_total++;
     counters.removed_logical_bytes_total += buf.logicalBytes;
     counters.removed_unmeasured_records_total += buf.unmeasuredRecords;
+  }
+
+  override hasPendingHermesSource(sourceToken: string): boolean {
+    return this.hermesSourceTrackingOverflow || (this.hermesSourceGroups.get(sourceToken)?.size ?? 0) > 0;
+  }
+
+  private trackHermesSource(groupKey: string, sourceToken: string): void {
+    let sources = this.hermesGroupSources.get(groupKey);
+    if (!sources) {
+      if (this.hermesGroupSources.size >= HERMES_SOURCE_GROUP_LIMIT) {
+        if (!this.hermesSourceTrackingOverflow) {
+          this.hermesSourceTrackingOverflow = true;
+          logger.warn('Hermes source protection limit reached; retaining raw Hermes sources until collector restart',
+            { limit: HERMES_SOURCE_GROUP_LIMIT });
+        }
+        return;
+      }
+      sources = new Set();
+      this.hermesGroupSources.set(groupKey, sources);
+    }
+    if (sources.has(sourceToken)) return;
+    if (sources.size >= HERMES_SOURCE_PER_GROUP_LIMIT) {
+      if (!this.hermesSourceTrackingOverflow) {
+        this.hermesSourceTrackingOverflow = true;
+        logger.warn('Hermes source-owner limit reached; retaining raw Hermes sources until collector restart',
+          { limit: HERMES_SOURCE_PER_GROUP_LIMIT });
+      }
+      return;
+    }
+    sources.add(sourceToken);
+    let groups = this.hermesSourceGroups.get(sourceToken);
+    if (!groups) { groups = new Set(); this.hermesSourceGroups.set(sourceToken, groups); }
+    groups.add(groupKey);
+  }
+
+  private releaseHermesSources(groupKey: string): void {
+    const sources = this.hermesGroupSources.get(groupKey);
+    if (!sources) return;
+    for (const token of sources) {
+      const groups = this.hermesSourceGroups.get(token);
+      groups?.delete(groupKey);
+      if (groups?.size === 0) this.hermesSourceGroups.delete(token);
+    }
+    this.hermesGroupSources.delete(groupKey);
   }
 
   async send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
@@ -856,6 +946,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       // their own explicit completion, so a successor is not an implicit end.
       if (agentType === 'hermes'
         && buf.isRealtimeHermes) continue;
+      // Another turn in the same session may overlap a cron task. Its native
+      // cron_finished event, not the successor, owns completion.
+      if (agentType === 'openclaw' && buf.isObservedOpenClawCron) continue;
       if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
       buf.completed = true;
       this.triggerFlush(buf, false);
@@ -867,6 +960,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     let buf = this.turnBuffers.get(key);
     if (!buf) {
+      // A real continuation takes ownership back from the deferred-recovery
+      // list; the journal replay path restores its prefix before this suffix.
+      this.hermesDeferredTurns.delete(key);
       buf = {
         key,
         keySource: source,
@@ -877,6 +973,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         recordIndex: new Map(),
         completed: false,
         lastActivityMs: Date.now(),
+        activityVersion: 0,
         logicalBytes: 0,
         unmeasuredRecords: 0,
         openedAtMs: performance.now(),
@@ -891,8 +988,22 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (entry['agent.hermes.native_run_observer'] === true) {
         buf.hasHermesNativeRunObserver = true;
       }
+      const owner = hermesProcessIdentity(entry);
+      if (!owner || (buf.hermesOwner && JSON.stringify(owner) !== JSON.stringify(buf.hermesOwner))) {
+        buf.hermesOwnerUncertain = true;
+        // This turn can no longer use process-based recovery. Preserve the
+        // existing journal/retention behavior rather than pinning raw files
+        // indefinitely for an owner we cannot safely identify.
+        this.releaseHermesSources(key);
+      } else {
+        buf.hermesOwner = owner;
+        if (!buf.hermesOwnerUncertain) this.trackHermesSource(key, owner.sourceToken);
+      }
     }
-    const durable = !!this.codexJournal && isJournaledCodexEntry(entry);
+    if (agentType === 'openclaw' && entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') {
+      buf.isObservedOpenClawCron = true;
+    }
+    const durable = this.codexJournal?.accepts(entry) === true;
     const residentSize = durable ? Buffer.byteLength(JSON.stringify(entry)) : 0;
     if (durable) {
       buf.journalKey ??= codexTurnJournalGroupKey(entry);
@@ -904,26 +1015,39 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (buf.spilledRecords) await this.rehydrateCodexTurn(buf);
       buf.spillable = false;
     }
-    // Copilot-only duplicate merge: preserve known fields on partial replay.
-    // Other agents retain the main branch's append/update behavior.
+    // Preserve known fields when a retained delegated prefix is delivered
+    // again. Audit records never enter these buffers or their journal.
     const eventId = entry['gen_ai.agent.type'] === 'copilot'
+      || (durable && (agentType === 'hermes' || agentType === 'openclaw'))
       ? (entry['event.id'] as string | undefined) : undefined;
-    if (typeof eventId === 'string' && eventId.length > 0) {
+    let residentDelta = residentSize;
+    if (buf.spilledRecords && durable) {
+      // The journal owns both the retained prefix and this appended suffix.
+      // Keep only identity metadata resident until the whole turn is restored.
+      buf.spilledEventIds!.add(entry['event.id']);
+      buf.spilledRecords = buf.spilledEventIds!.size;
+    } else if (typeof eventId === 'string' && eventId.length > 0) {
       const existingIdx = buf.recordIndex.get(eventId);
       if (existingIdx !== undefined) {
-        buf.records[existingIdx] = mergeRecordFields(buf.records[existingIdx], entry);
+        const previous = buf.records[existingIdx];
+        const merged = mergeRecordFields(previous, entry);
+        if (durable) {
+          residentDelta = Buffer.byteLength(JSON.stringify(merged)) - Buffer.byteLength(JSON.stringify(previous));
+        }
+        buf.records[existingIdx] = merged;
       } else {
         buf.recordIndex.set(eventId, buf.records.length);
         buf.records.push(entry);
       }
-    } else if (buf.spilledRecords && durable) {
-      buf.spilledEventIds!.add(entry['event.id']);
-      buf.spilledRecords++;
     } else {
       buf.records.push(entry);
     }
-    if (!buf.spilledRecords) buf.residentBytes = (buf.residentBytes ?? 0) + residentSize;
+    if (!buf.spilledRecords) buf.residentBytes = (buf.residentBytes ?? 0) + residentDelta;
     buf.lastActivityMs = Date.now();
+    buf.activityVersion++;
+    buf.hermesDeadSinceMs = undefined;
+    buf.hermesNextDrainMs = undefined;
+    buf.hermesDrainFailures = undefined;
     if (typeof logicalBytes === 'number' && Number.isFinite(logicalBytes) && logicalBytes >= 0) {
       buf.logicalBytes += logicalBytes;
     } else {
@@ -980,8 +1104,23 @@ export class OtlpTraceFlusher extends BaseFlusher {
       .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
       .slice(0, overflow);
     for (const buf of candidates) {
-      if (buf.agentType === 'codex' && this.codexJournal) {
+      if (this.codexJournal?.acceptsAgent(buf.agentType)) {
         // The durable prefix can be rehydrated when this native turn resumes.
+        // A killed producer never resumes, so retain only bounded recovery
+        // metadata and restore its journal lazily once the owner is confirmed dead.
+        if (buf.agentType === 'hermes' && buf.isRealtimeHermes && buf.journalKey
+          && buf.hermesOwner && !buf.hermesOwnerUncertain) {
+          if (this.hermesDeferredTurns.size < HERMES_SOURCE_GROUP_LIMIT) {
+            this.hermesDeferredTurns.set(buf.key, { ...buf, records: [], recordIndex: new Map(),
+              spilledRecords: 1, spilledEventIds: undefined, replayEntireJournal: true, residentBytes: 0 });
+          } else if (!this.hermesSourceTrackingOverflow) {
+            this.hermesSourceTrackingOverflow = true;
+            logger.warn('Hermes deferred recovery limit reached; retaining raw sources until collector restart',
+              { limit: HERMES_SOURCE_GROUP_LIMIT });
+          }
+        } else if (buf.agentType === 'hermes' && !buf.journalKey) {
+          this.releaseHermesSources(buf.key);
+        }
         this.turnBuffers.delete(buf.key);
         this.recordBufferRemoval(buf);
       } else {
@@ -993,7 +1132,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   async flush(): Promise<void> {
     for (const buf of this.turnBuffers.values()) {
-      if (buf.agentType === 'codex' && this.codexJournal && !buf.completed) continue;
+      if (this.codexJournal?.acceptsAgent(buf.agentType) && !buf.completed) continue;
       buf.completed = true;
     }
     await this.flushCompleted();
@@ -1050,7 +1189,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   /** Release only payloads whose durable journal already owns every event. */
   private spillCodexPayloads(): void {
     const candidates = [...this.turnBuffers.values()].filter(buf =>
-      buf.agentType === 'codex' && buf.spillable && !buf.spilledRecords);
+      this.codexJournal?.acceptsAgent(buf.agentType) && buf.spillable && !buf.spilledRecords);
     let resident = candidates.reduce((sum, buf) => sum + (buf.residentBytes ?? 0), 0);
     for (const buf of candidates.sort((a, b) => (b.residentBytes ?? 0) - (a.residentBytes ?? 0))) {
       if ((buf.residentBytes ?? 0) <= MAX_CODEX_TURN_RESIDENT_BYTES && resident <= MAX_CODEX_RESIDENT_BYTES) continue;
@@ -1078,20 +1217,23 @@ export class OtlpTraceFlusher extends BaseFlusher {
     for await (const entries of this.preparedJournalBatches(buf.journalKey!)) {
       // A batch journals its whole suffix before appending. Do not pull a
       // future suffix forward while materializing an unpersistable event.
-      restored.push(...entries.filter(entry => buf.spilledEventIds!.has(entry['event.id'])));
+      restored.push(...(buf.replayEntireJournal
+        ? entries : entries.filter(entry => buf.spilledEventIds!.has(entry['event.id']))));
     }
     if (!restored.length) throw new Error('Retained Codex payload is unavailable; refusing to acknowledge its turn');
     buf.records = restored;
+    buf.recordIndex.clear();
+    restored.forEach((entry, index) => buf.recordIndex.set(entry['event.id'], index));
     buf.residentBytes = restored.reduce((sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry)), 0);
     buf.spilledRecords = 0;
     buf.spilledEventIds = undefined;
+    buf.replayEntireJournal = false;
   }
 
   private async persistCodexEntries(entries: AgentActivityEntry[]): Promise<void> {
     if (!this.codexJournal) return;
     try {
-      const codex = entries.filter(entry => normalizeAgentType(String(entry['gen_ai.agent.type'])) === 'codex'
-        && !isAgentAuditEvent(entry));
+      const codex = entries.filter(entry => this.codexJournal!.accepts(entry));
       const checked = new Set<string>();
       for (const entry of codex) {
         const key = this.resolveGroupKey(entry).key;
@@ -1105,13 +1247,18 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
       await this.codexJournal.append(codex.filter(entry => !this.flushedTurnKeys.has(this.resolveGroupKey(entry).key)));
     } catch (cause) {
-      const error = new Error('Codex pending trace could not be persisted', { cause });
+      const error = new Error(`Codex pending trace could not be persisted: ${String(cause)}`, { cause });
       error.name = 'CodexTurnJournalError';
       throw error;
     }
   }
 
   async shutdown(): Promise<void> {
+    this.stopping = true;
+    if (this.hermesOwnerTimer) {
+      clearInterval(this.hermesOwnerTimer);
+      this.hermesOwnerTimer = undefined;
+    }
     if (this.idleTimer) {
       clearInterval(this.idleTimer);
       this.idleTimer = undefined;
@@ -1153,6 +1300,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    if (entry['agent.source'] === 'qwen-work-cn-collaboration') {
+      return entry['event.name'] === 'other' && entry['gen_ai.turn.end'] === true;
+    }
     if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.source'] === 'hybrid-v2') return entry['gen_ai.turn.end'] === true;
     // V2 step completion (including a failed/retried model request) is not
     // execution completion. Preserve V1's existing finish-reason behavior.
@@ -1189,11 +1339,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (turnStatus !== 'completed' && turnStatus !== 'interrupted') return false;
       return entry['gen_ai.turn.end'] === true;
     }
-    // OpenClaw emits one finish reason per ReAct model call. Those values close
-    // individual LLM spans, not the whole agent turn. Its llm_output hook is the
-    // stable successful-run boundary. Legacy failed attempts can terminate
-    // before llm_output; the adapter explicitly seals those at agent_end.
+    // A fixed-session cron can perform multiple provider attempts. Only its
+    // observed outer job completion closes that turn. Older producers and
+    // other OpenClaw runs retain their existing llm_output behavior.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'openclaw') {
+      if (entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') {
+        return entry['agent.openclaw.hook'] === 'cron_finished' && entry['gen_ai.turn.end'] === true;
+      }
       return entry['agent.openclaw.hook'] === 'llm_output'
         || (entry['agent.openclaw.compatibility'] === 'legacy'
           && (entry['agent.openclaw.hook'] === 'agent_end' || entry['agent.openclaw.hook'] === 'legacy_cleanup')
@@ -1243,6 +1395,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
     if (turnId && turnId.length > 0) {
+      if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'hermes') {
+        const sessionId = entry['gen_ai.session.id'];
+        if (typeof sessionId === 'string' && sessionId.length > 0) {
+          // Older Hermes plugins reuse the native turn ID after session
+          // compression. Match the durable journal's user/session/turn
+          // identity so a terminal cannot export or acknowledge another
+          // user's or session's independently persisted turn.
+          return { source: 'turn_id', value: turnId,
+            key: `hermes:${JSON.stringify([entry['user.id'] ?? null, sessionId, turnId])}` };
+        }
+      }
       if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
         return { source: 'turn_id', value: turnId,
           key: `codex:${[entry['user.id'], entry['gen_ai.session.id'], turnId]
@@ -1299,7 +1462,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   private flushSingleTurn(buf: TurnBuffer): Promise<void> {
-    if (buf.agentType !== 'codex' || !this.codexJournal) return this.flushSingleTurnReady(buf);
+    if (!this.codexJournal?.acceptsAgent(buf.agentType)) return this.flushSingleTurnReady(buf);
     // Rehydrate/convert one durable turn at a time. Otherwise a terminal burst
     // could materialize every large spooled turn before converter locks run.
     const next = this.codexFlushTail.then(() => this.flushSingleTurnReady(buf));
@@ -1317,9 +1480,26 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
-    const exported = await this.convertAndExport(buf.agentType, buf.records);
-    if (exported && buf.agentType === 'codex' && this.codexJournal && buf.completed) {
+    let records = buf.records;
+    if (buf.hermesAbandoned && records.length > 0) {
+      // Only the export boundary needs this marker. Avoid cloning every event
+      // in a large rehydrated turn or changing the journal-owned records.
+      records = records.slice();
+      records[0] = { ...records[0],
+        'agent.hermes.collection.incomplete': true,
+        'agent.hermes.collection.end_reason': 'producer_process_exited' };
+    }
+    const exported = await this.convertAndExport(buf.agentType, records);
+    if (exported && this.codexJournal?.acceptsAgent(buf.agentType) && buf.completed) {
       await this.codexJournal.acknowledge(buf.records);
+    }
+    // A normal terminal is already durable in the journal, even when an OTLP
+    // endpoint failed. Only an abandoned turn needs its source retained for a
+    // later recovery attempt after an unsuccessful export.
+    const terminalDurable = !buf.hermesAbandoned && !!buf.journalKey && !!this.codexJournal
+      && buf.records.every(record => this.codexJournal!.accepts(record));
+    if (buf.completed && buf.agentType === 'hermes' && (exported || terminalDurable)) {
+      this.releaseHermesSources(buf.key);
     }
   }
 
@@ -1408,6 +1588,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
           ...USER_IDENTITY_PASSTHROUGH_KEYS,
           ...GEN_AI_HIERARCHY_PASSTHROUGH_KEYS,
+          ...(agentType === 'openclaw' || agentType === 'hermes' ? ['agent.pilot.request_context.truncated'] : []),
           ...agentSpecificKeys,
           ...customKeys,
           ...prefixKeys,
@@ -1457,10 +1638,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
         try {
           const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(sanitized, { handler, idGenerator })
             : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(sanitized, { handler, idGenerator })
-            : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(sanitized, handler)
+            : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(sanitized, handler, idGenerator)
             : { records: sanitized, handler, removedEntryCount: 0 };
           cleanup = prepared.cleanup;
-          const stream = planTurnStream(prepared.records, { handler: prepared.handler, passthroughKeys });
+          // Existing process-wide OTel env vars may still request content on
+          // spans. Enforce this flusher's explicit opt-out at the conversion
+          // boundary instead of relying on env defaults.
+          const conversionRecords = this.cfg.captureMessageContent === false
+            ? prepared.records.map(stripAgentMessageContent)
+            : prepared.records;
+          const qwenCollaboration = conversionRecords.some(record => record['agent.source'] === 'qwen-work-cn-collaboration');
+          const stream = qwenCollaboration ? null : planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
           if (stream) {
             streamedExportSucceeded = true;
             const reasoning = { seen: false, total: 0 };
@@ -1501,11 +1689,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
               }
             });
           } else {
-            const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents
+            const convert = qwenCollaboration ? convertQwenWorkCollaborationTurn
+              : agentType === 'qwen-code-cli' ? convertQwenSubagents
               : agentType === 'doubao-work' ? convertDoubaoWorkTurn
               : convertEventLogToTrace;
             result = convert(
-              prepared.records,
+              conversionRecords,
               { handler: prepared.handler, strict: false, passthroughKeys,
                 ...(agentType === 'doubao-work' ? { observationTracer: provider.getTracer('@loongsuite/pilot-doubao-local-observation') } : {}) },
             );
@@ -1563,6 +1752,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
     reasoning?: { seen: boolean; total: number },
   ): Promise<boolean> {
     if (spans.length === 0) return true;
+    if (agentType === 'hermes' && records.some(record =>
+      record['agent.hermes.collection.end_reason'] === 'producer_process_exited')) {
+      for (const span of spans) {
+        span.attributes['agent.hermes.collection.incomplete'] = true;
+        span.attributes['agent.hermes.collection.end_reason'] = 'producer_process_exited';
+      }
+    }
     applyQoderWorkStepTiming(records, spans);
     this.enrichToolSkillAttributes(records, spans);
     this.enrichMultimodalAttributes(records, spans);
@@ -1588,6 +1784,37 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     if (agentType === 'claude-code') this.enrichClaudeCodeLlmAttributes(records, spans);
     if (agentType === 'grok-build') this.enrichGrokBuildSpans(records, spans, grokMetadata);
+    if (records.some(record => record['agent.source'] === 'qwen-work-cn-collaboration')) {
+      const start = records.find(record => record['gen_ai.turn.start'] === true);
+      const terminal = records.find(record => record['gen_ai.turn.end'] === true);
+      const hasProvider = records.some(record => typeof record['gen_ai.provider.name'] === 'string'
+        && record['gen_ai.provider.name'].trim().length > 0);
+      const startNano = start?.time_unix_nano;
+      const endNano = terminal?.time_unix_nano;
+      const validTimes = typeof startNano === 'string' && /^\d+$/.test(startNano)
+        && typeof endNano === 'string' && /^\d+$/.test(endNano)
+        && BigInt(endNano) > BigInt(startNano);
+      for (const span of spans) {
+        if (!['ENTRY', 'AGENT'].includes(String(span.attributes['gen_ai.span.kind']))) continue;
+        // The shared converter defaults an absent provider to "unknown". A
+        // collaboration card cannot establish a model provider, so omit it.
+        if (!hasProvider) delete span.attributes['gen_ai.provider.name'];
+        span.attributes['loongsuite.qwenworkcn.observation_scope'] = 'collaboration_conversation';
+        const source = terminal?.['loongsuite.qwenworkcn.completion_time_source'];
+        if (typeof source === 'string') span.attributes['loongsuite.qwenworkcn.completion_time_source'] = source;
+        if (validTimes) {
+          const toHrTime = (value: bigint): [number, number] => [
+            Number(value / 1_000_000_000n), Number(value % 1_000_000_000n),
+          ];
+          const from = BigInt(startNano), to = BigInt(endNano);
+          Object.defineProperties(span, {
+            startTime: { value: toHrTime(from), configurable: true },
+            endTime: { value: toHrTime(to), configurable: true },
+            duration: { value: toHrTime(to - from), configurable: true },
+          });
+        }
+      }
+    }
     if (agentType === 'doubao-work') {
       this.enrichDoubaoWorkSpans(records, spans);
       enrichDoubaoClientRequest(records, spans);
@@ -1595,6 +1822,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
     this.patchCopilotCustomAttributes(spans, records);
+
+    // Enrichers can reattach source fields after conversion. Apply the same
+    // schema and content opt-out to final attributes and events before debug or export.
+    for (const span of spans) {
+      normalizeGuardrailFields(span.attributes as Record<string, unknown>);
+      for (const event of span.events) {
+        if (event.attributes) normalizeGuardrailFields(event.attributes as Record<string, unknown>);
+      }
+      if (this.cfg.captureMessageContent === false) {
+        removeMessageContentFields(span.attributes as Record<string, unknown>);
+        for (const event of span.events) {
+          if (event.attributes) removeMessageContentFields(event.attributes as Record<string, unknown>);
+        }
+      }
+    }
 
     const exportState = this.getOrCreateExportState(agentType, serviceName);
 
@@ -1604,6 +1846,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   private enrichDoubaoWorkSpans(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+    const clients = new Set(records.map(record => record['loongsuite.doubao_work.client'])
+      .filter((client): client is 'doubao' | 'doubao-work' => client === 'doubao' || client === 'doubao-work'));
+    const client = clients.size === 1 ? [...clients][0] : undefined;
     const terminal = [...records].reverse().find(record => record['gen_ai.turn.end'] === true);
     const outcome = terminal?.['loongsuite.doubao_work.client_outcome'];
     const hasUpstreamParent = records.some(record => record['event.name'] === 'other'
@@ -1611,6 +1856,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       && /^[0-9a-f]{16}$/.test(record.parent_span_id)
       && !/^0+$/.test(record.parent_span_id));
     for (const span of spans) {
+      if (client) span.attributes['loongsuite.doubao_work.client'] = client;
       const kind = span.attributes['gen_ai.span.kind'];
       if (kind !== 'ENTRY' && kind !== 'AGENT') continue;
       span.attributes['gen_ai.framework'] = 'doubao-work';
@@ -2613,12 +2859,109 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
   }
 
+  private async recoverAbandonedHermesTurns(): Promise<void> {
+    if (this.stopping || this.hermesOwnerCheckRunning || this.batchDepth > 0) return;
+    const now = Date.now();
+    const candidates = [...this.turnBuffers.values(), ...this.hermesDeferredTurns.values()].filter(buf => buf.isRealtimeHermes
+      && !buf.completed && !buf.hermesOwnerUncertain && buf.hermesOwner
+      && now - buf.lastActivityMs >= HERMES_ABANDONED_GRACE_MS);
+    if (!candidates.length) return;
+    this.hermesOwnerCheckRunning = true;
+    try {
+      const current = await currentHermesProcessNamespace();
+      if (!current) return;
+      // Advance fairly even when many alive producers occupy older buffers.
+      const start = this.hermesOwnerCursor % candidates.length;
+      const selected = Array.from({ length: Math.min(candidates.length, HERMES_OWNER_CHECK_LIMIT) },
+        (_, index) => candidates[(start + index) % candidates.length]);
+      this.hermesOwnerCursor = (start + selected.length) % candidates.length;
+      const checked = new Map<string, boolean>();
+      const drained = new Map<string, boolean>();
+      for (const [index, buf] of selected.entries()) {
+        if (Date.now() - buf.lastActivityMs < HERMES_ABANDONED_GRACE_MS) continue;
+        const owner = buf.hermesOwner!;
+        const key = JSON.stringify(owner);
+        const activityVersion = buf.activityVersion;
+        let dead = checked.get(key);
+        if (dead === undefined) {
+          dead = await isHermesProcessDead(owner, current);
+          checked.set(key, dead);
+        }
+        // A new batch or lifecycle marker may arrive while /proc is read.
+        const isCurrent = () => this.turnBuffers.get(buf.key) === buf || this.hermesDeferredTurns.get(buf.key) === buf;
+        if (this.stopping || this.batchDepth > 0 || buf.completed
+          || !isCurrent() || buf.activityVersion !== activityVersion) continue;
+        if (!dead) {
+          buf.hermesDeadSinceMs = undefined;
+          continue;
+        }
+        // The process may have exited normally after a long idle tool call.
+        // Observe its death separately and allow the input poller to drain its
+        // final records before treating the turn as abandoned.
+        if (buf.hermesDeadSinceMs === undefined) {
+          buf.hermesDeadSinceMs = Date.now();
+          continue;
+        }
+        if (Date.now() - buf.hermesDeadSinceMs < HERMES_DEAD_CONFIRM_MS) continue;
+        if (buf.hermesNextDrainMs && Date.now() < buf.hermesNextDrainMs) continue;
+        // Age and process death alone cannot prove the input/dispatch queue is
+        // caught up. Force a collection and check every source segment before
+        // sealing. If the source cannot be verified, keep the journal pending.
+        if (!this.confirmHermesSourceDrained) continue;
+        let sourceDrained = drained.get(owner.sourceToken);
+        if (sourceDrained === undefined) {
+          if (drained.size >= HERMES_SOURCE_DRAIN_LIMIT) {
+            this.hermesOwnerCursor = (start + index) % candidates.length;
+            break;
+          }
+          sourceDrained = await this.confirmHermesSourceDrained(owner.sourceToken);
+          drained.set(owner.sourceToken, sourceDrained);
+        }
+        if (!sourceDrained) {
+          const failures = Math.min((buf.hermesDrainFailures ?? 0) + 1, 5);
+          buf.hermesDrainFailures = failures;
+          buf.hermesNextDrainMs = Date.now() + Math.min(300_000, 30_000 * 2 ** (failures - 1));
+          continue;
+        }
+        if (this.stopping || this.batchDepth > 0 || buf.completed
+          || !isCurrent() || buf.activityVersion !== activityVersion) continue;
+        logger.warn('Recovering incomplete Hermes turn after producer process exited', {
+          sessionId: buf.sessionId, turnId: buf.keyValue, pid: owner.pid,
+          idleMs: Date.now() - buf.lastActivityMs,
+        });
+        buf.hermesAbandoned = true;
+        buf.completed = true;
+        if (this.hermesDeferredTurns.get(buf.key) === buf) {
+          // Conversion rehydrates a single journal at a time via codexFlushTail.
+          this.hermesDeferredTurns.delete(buf.key);
+          this.flushedTurnKeys.add(buf.key);
+          void this.trackTurnExport(buf);
+        } else {
+          this.triggerFlush(buf);
+        }
+      }
+    } catch (error) {
+      logger.warn('Hermes producer process recovery check failed', { error: String(error) });
+    } finally {
+      this.hermesOwnerCheckRunning = false;
+    }
+  }
+
   private tickIdleTimeout(): void {
     const timeout = this.cfg.turnIdleTimeoutMs ?? 0;
     if (timeout <= 0 || this.batchDepth > 0) return;
     const now = Date.now();
     for (const [, buf] of this.turnBuffers) {
       if (!buf.completed && now - buf.lastActivityMs > timeout) {
+        if (buf.isObservedOpenClawCron) {
+          if (!this.warnedOpenClawCronIdleTimeout) {
+            this.warnedOpenClawCronIdleTimeout = true;
+            logger.warn('Ignoring idle timeout for observed OpenClaw cron turns; waiting for native job completion', {
+              turnIdleTimeoutMs: timeout,
+            });
+          }
+          continue;
+        }
         if (buf.hasHermesNativeRunObserver) {
           // Idleness does not prove native completion. Sealing here puts the
           // key in flushedTurnKeys and discards later tools/model responses.
@@ -2640,7 +2983,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
             turnIdleTimeoutMs: timeout,
           });
         }
-        if (buf.agentType === 'codex' && this.codexJournal) {
+        // A legacy Hermes producer without native completion still relies on
+        // idle sealing. Journal durability must not disable that existing path.
+        if (this.codexJournal?.acceptsAgent(buf.agentType) && buf.agentType !== 'hermes') {
           this.turnBuffers.delete(buf.key);
           this.recordBufferRemoval(buf);
           continue;

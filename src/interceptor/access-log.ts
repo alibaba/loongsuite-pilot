@@ -1,14 +1,15 @@
 import { appendFileSync, chmodSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
+import * as fsp from 'node:fs/promises';
 import { loadMaskPlan } from '../mask/rule-loader.js';
 import { maskString } from '../mask/string-masker.js';
-import { SUPPORTED_INTERCEPTOR_TYPES } from '../types/index.js';
+import { INTERCEPTOR_MASK_TYPES } from './config.js';
 import { interceptorAccessLogPath } from './paths.js';
-import type { HookRequest } from './types.js';
+import type { HookRequest, ManagedRuleMatch } from './types.js';
 
 const accessLogMaskPlan = loadMaskPlan({
   mode: 'custom',
-  types: [...SUPPORTED_INTERCEPTOR_TYPES],
+  types: [...INTERCEPTOR_MASK_TYPES],
   replacementMode: 'placeholder',
 });
 
@@ -30,8 +31,15 @@ export interface InterceptorAccessInput {
 
 export interface InterceptorAccessResult {
   action: AccessLogAction;
+  matched?: boolean;
+  matches?: ManagedRuleMatch[];
+  failOpen?: true;
   reason?: string;
   ruleId?: string;
+  ruleVersion?: string;
+  severity?: string;
+  title?: string;
+  message?: string;
   evaluatedRules?: string[];
   error?: string;
 }
@@ -122,6 +130,70 @@ export function rotateAccessLog(filePath: string, maxBytes: number, rotateCount:
   }
 }
 
+/** Bounded, ordered audit writer. Neither serialization nor disk IO runs in the HTTP callback. */
+export class InterceptorAccessLogWriter {
+  private readonly queue: InterceptorAccessLogEntry[] = [];
+  private running: Promise<void> | null = null;
+  private closed = false;
+  private dropped = 0;
+
+  constructor(private readonly file: string, private readonly capacity = 8) {}
+
+  enqueue(entry: InterceptorAccessLogEntry): void {
+    if (this.closed) return;
+    if (this.queue.length >= this.capacity) {
+      this.dropped++;
+      return;
+    }
+    this.queue.push(entry);
+    this.schedule();
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    await this.running;
+  }
+
+  private schedule(): void {
+    if (this.running) return;
+    this.running = new Promise<void>(resolve => setImmediate(resolve))
+      .then(() => this.drain()).finally(() => {
+        this.running = null;
+        if (this.queue.length || this.dropped) this.schedule();
+      });
+  }
+
+  private async drain(): Promise<void> {
+    while (this.queue.length || this.dropped) {
+      const entry = this.queue.shift() ?? buildAccessLogEntry({
+        event: 'audit-overflow', input: {},
+        result: { action: 'fail-open', error: `audit queue dropped ${this.dropped} records` },
+      });
+      if (entry.event === 'audit-overflow') this.dropped = 0;
+      try {
+        const line = `${serializeAccessLogEntry(entry)}\n`;
+        const dir = dirname(this.file);
+        await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+        if (process.platform !== 'win32') await fsp.chmod(dir, 0o700).catch(() => {});
+        const stat = await fsp.stat(this.file).catch(() => null);
+        if (stat && stat.size >= ACCESS_LOG_MAX_BYTES) {
+          for (let generation = ACCESS_LOG_ROTATE_COUNT; generation >= 1; generation--) {
+            const from = generation === 1 ? this.file : `${this.file}.${generation - 1}`;
+            const to = `${this.file}.${generation}`;
+            await fsp.rm(to, { force: true }).catch(() => {});
+            await fsp.rename(from, to).catch(() => {});
+          }
+        }
+        await fsp.appendFile(this.file, line, { encoding: 'utf8', mode: 0o600 });
+        if (process.platform !== 'win32') await fsp.chmod(this.file, 0o600).catch(() => {});
+      } catch {
+        // Audit failures do not affect the verdict; the next entry retries IO.
+      }
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+  }
+}
+
 export function serializeAccessLogEntry(entry: InterceptorAccessLogEntry): string {
   const redacted = redactAccessLogEntry(entry);
   const line = safeJson(redacted);
@@ -139,7 +211,16 @@ function redactAccessLogEntry(entry: InterceptorAccessLogEntry): InterceptorAcce
     result: {
       ...entry.result,
       reason: redactString(entry.result.reason),
+      title: redactString(entry.result.title),
+      severity: redactString(entry.result.severity),
+      message: redactString(entry.result.message),
       error: redactString(entry.result.error),
+      ...(entry.result.matches ? { matches: entry.result.matches.map(match => ({
+        ...match, reason: redactString(match.reason) ?? '',
+        ...(match.title ? { title: redactString(match.title) } : {}),
+        ...(match.severity ? { severity: redactString(match.severity) } : {}),
+        ...(match.message ? { message: redactString(match.message) } : {}),
+      })) } : {}),
     },
   };
 }

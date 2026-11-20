@@ -85,7 +85,7 @@ describe('request attributes through the production input and Trace pipeline', (
     manager.setTraceLinker(new TraceLinker(new CorrelationStore(dir, {
       attributesEnabled: true, traceEnabled: linkTrace,
     }), { attributesEnabled: true, linkTrace, retries: 0 }));
-    if (mask) manager.setMaskConfig({ mode: 'all', types: [] });
+    if (mask) manager.setMaskConfig({ mode: 'all', types: [], replacementMode: 'placeholder' });
     const inputs = requests.map((request, i) => new RequestInput(`input-${i}`, request.agent,
       new StateStore(path.join(dir, `state-${i}.json`)), [request.entries]));
     try {
@@ -170,7 +170,7 @@ describe('request attributes through the production input and Trace pipeline', (
     expect(persisted).toContain(sensitiveValue);
 
     const manager = new InputManager();
-    manager.setMaskConfig({ mode: 'all', types: [] });
+    manager.setMaskConfig({ mode: 'all', types: [], replacementMode: 'placeholder' });
     const restored = manager.prepareRestoredEntries(JSON.parse(persisted));
     expect(JSON.stringify(restored)).not.toContain(sensitiveValue);
     const spans: ReadableSpan[] = [];

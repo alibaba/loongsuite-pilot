@@ -40,15 +40,44 @@ describe('interceptor cli/daemon contract', () => {
     child = undefined;
   });
 
-  it.skipIf(!built)('allows when switches are empty and fail-opens when the daemon is down', async () => {
+  it.skipIf(!built)('does not create runtime with empty switches and the CLI fails open', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'interceptor-contract-off-'));
+    await writeFile(join(dataDir, 'config.json'), `${JSON.stringify({ interceptor: {} })}\n`);
+    const env = {
+      ...process.env,
+      LOONGSUITE_PILOT_INTERCEPTOR_MODE: '',
+      LOONGSUITE_PILOT_DATA_DIR: dataDir,
+      AGENT_DATA_COLLECTION_CONFIG: join(dataDir, 'config.json'),
+    };
+
+    const disabled = await spawnNode(DAEMON, [], env);
+    expect(disabled.code).toBe(0);
+    expect(existsSync(join(dataDir, 'interceptor', 'runtime.json'))).toBe(false);
+    expect(existsSync(join(dataDir, 'interceptor', 'interceptor.pid'))).toBe(false);
+
+    const allowed = await spawnNode(CLI, ['hook', '--agent', 'qoder'], env, JSON.stringify({
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'hello',
+    }));
+    expect(allowed.code).toBe(0);
+    expect(allowed.stdout).toBe('');
+  });
+
+  it.skipIf(!built)('evaluates online with mode all and fails open when the daemon is down', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'interceptor-contract-'));
     await mkdir(join(dataDir, 'versions', '1.0.2'), { recursive: true });
     await writeFile(join(dataDir, 'current'), '1.0.2\n');
     await writeFile(join(dataDir, 'versions', '1.0.2', 'VERSION'), 'version=1.0.2\ngit_commit=test\n');
-    await writeFile(join(dataDir, 'config.json'), `${JSON.stringify({ interceptor: {} })}\n`);
+    await writeFile(join(dataDir, 'config.json'), `${JSON.stringify({ interceptor: { mode: 'all' } })}\n`);
+    await mkdir(join(dataDir, 'configs', 'managed'), { recursive: true });
+    await writeFile(join(dataDir, 'configs', 'managed', 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
+      kind: 'pattern', id: 'contract-block', version: '1', agents: ['qoder'],
+      events: ['UserPromptSubmit'], match: 'substring', pattern: 'CONTRACT_BLOCK',
+    }] } }));
 
     const env = {
       ...process.env,
+      LOONGSUITE_PILOT_INTERCEPTOR_MODE: '',
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
       AGENT_DATA_COLLECTION_CONFIG: join(dataDir, 'config.json'),
     };
@@ -71,13 +100,20 @@ describe('interceptor cli/daemon contract', () => {
     expect(allowed.code).toBe(0);
     expect(allowed.stdout).toBe('');
 
+    const blocked = await spawnNode(CLI, ['hook', '--agent', 'qoder'], env, JSON.stringify({
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'CONTRACT_BLOCK',
+    }));
+    expect(blocked.code).toBe(0);
+    expect(JSON.parse(blocked.stdout).decision).toBe('block');
+
     child.kill('SIGTERM');
     await new Promise((resolve) => child?.once('exit', resolve));
     child = undefined;
 
     const down = await spawnNode(CLI, ['hook', '--agent', 'qoder'], env, JSON.stringify({
       hook_event_name: 'UserPromptSubmit',
-      prompt: 'hello',
+      prompt: 'CONTRACT_BLOCK',
     }));
     expect(down.code).toBe(0);
     expect(down.stdout).toBe('');

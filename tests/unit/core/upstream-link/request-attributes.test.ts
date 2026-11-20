@@ -74,6 +74,17 @@ describe('request-scoped correlation attributes', () => {
     expect(next.every(entry => entry['memory.user_id'] === undefined)).toBe(true);
   });
 
+  it('keeps a pre-publication miss open for late per-turn attributes', async () => {
+    const active = linker();
+    const first = input('s1', 't1');
+    await active.stamp([first], { cacheMisses: false });
+    expect(first['memory.user_id']).toBeUndefined();
+    append('s1', { turnId: 't1', attributes: { 'memory.user_id': 'U001' } });
+    const published = [input('s1', 't1'), response('s1', 't1')];
+    await active.stamp(published);
+    expect(published.map(entry => entry['memory.user_id'])).toEqual(['U001', 'U001']);
+  });
+
   it('keeps repeated prompts distinct after restart while restoring a replayed turn to its original claim', async () => {
     append('s1', { attributes: { 'memory.user_id': 'U001' } });
     await linker().stamp([input('s1', 't1')]);

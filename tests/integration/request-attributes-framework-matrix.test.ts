@@ -32,7 +32,9 @@ describe('request attributes across native producer/Input protocols', () => {
     fs.mkdirSync(pluginDir, { recursive: true });
     fs.mkdirSync(sharedDir, { recursive: true });
     fs.copyFileSync(path.resolve('assets/plugins/dsh/plugin.mjs'), path.join(pluginDir, 'plugin.mjs'));
-    fs.copyFileSync(path.resolve('assets/plugins/shared/resource-context.mjs'), path.join(sharedDir, 'resource-context.mjs'));
+    for (const file of ['resource-context.mjs', 'raw-jsonl-writer.mjs', 'raw-source-gate.mjs']) {
+      fs.copyFileSync(path.resolve('assets/plugins/shared', file), path.join(sharedDir, file));
+    }
     fs.writeFileSync(path.join(pluginDir, '.collection-enabled'), 'enabled\n');
   }
 

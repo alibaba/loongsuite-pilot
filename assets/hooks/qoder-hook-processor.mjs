@@ -26,6 +26,9 @@ import {
   parseSpanAttributesFromEnv,
 } from './shared/resource-context.mjs';
 import { publishQoderWakeup, readQoderHookPayload } from './qoder/hook-wakeup.mjs';
+import { applyQoderProductIdentity } from './qoder/product-identity.mjs';
+
+export { applyQoderProductIdentity };
 
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: 'qoder' });
 // Caller-supplied span attributes (e.g. multica.*) stamped as top-level record
@@ -717,6 +720,11 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
   const userRow = contentEvents.find(isRealUserPrompt)
     || contentEvents.find(r => r.type === 'user' && !isToolResult(r));
   const userText = userRow ? (extractUserTexts(userRow)[0] ?? '') : '';
+  // humanInput is the submitted prompt before the host adds context text blocks.
+  const submittedPrompt = typeof userRow?.humanInput?.text === 'string' && userRow.humanInput.text.length > 0
+    ? userRow.humanInput.text : (userRow ? extractUserTexts(userRow).join('') : '');
+  const promptRequestId = typeof userRow?.requestSetId === 'string'
+    && userRow.requestSetId.length > 0 && userRow.requestSetId.length <= 512 ? userRow.requestSetId : undefined;
   const userId = resolveUserId(userRow || contentEvents[0], runtimeConfig);
   const agentType = inferVariant(userRow || contentEvents[0], agentId);
   const providerName = inferProviderName({ 'gen_ai.agent.type': agentType });
@@ -827,6 +835,15 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'gen_ai.request.model': stepModel,
         'user.id': userId,
         ...(inputDelta ? { 'gen_ai.input.messages_delta': inputDelta } : {}),
+        // Private join metadata survives content opt-out; InputManager removes it before output.
+        // Keep this field name in sync with src/interceptor/prompt-verdict.ts.
+        ...(i === 0 && submittedPrompt && userRow?.timestamp ? {
+          'agent.pilot.interceptor.correlation': {
+            hash: crypto.createHash('sha256').update(submittedPrompt).digest('hex'), at: Date.parse(userRow.timestamp),
+            // Transport only a cache key digest, never the native requestSetId.
+            ...(promptRequestId ? { requestId: crypto.createHash('sha256').update(promptRequestId).digest('hex') } : {}),
+          },
+        } : {}),
         'agent.source': 'qoder-transcript-hook',
         time_unix_nano: startNanos,
         observed_time_unix_nano: observedTs,
@@ -900,6 +917,19 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     }
 
     if (outputParts.length > 0) {
+      // SDK/CLI native transcripts can carry per-response usage, including
+      // sidechains absent from the parent's token database. One closing usage
+      // belongs to one model boundary; never add repeated streaming snapshots.
+      const nativeUsage = [...content].reverse().find(row => row.type === 'assistant'
+        && row.message?.usage && typeof row.message.usage === 'object')?.message.usage;
+      const usageFields = {};
+      for (const [source, target] of [
+        ['input_tokens', 'gen_ai.usage.input_tokens'], ['output_tokens', 'gen_ai.usage.output_tokens'],
+        ['cache_read_input_tokens', 'gen_ai.usage.cache_read.input_tokens'],
+        ['cache_creation_input_tokens', 'gen_ai.usage.cache_creation.input_tokens'],
+      ]) {
+        if (Number.isFinite(nativeUsage?.[source]) && nativeUsage[source] >= 0) usageFields[target] = nativeUsage[source];
+      }
       records.push({
         'event.id': crypto.randomUUID(),
         'event.name': 'llm.response',
@@ -911,6 +941,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'gen_ai.request.model': stepModel,
         'gen_ai.response.model': stepModel,
         'gen_ai.response.id': responseId,
+        ...usageFields,
         ...(finishReason ? { 'gen_ai.response.finish_reasons': [finishReason] } : {}),
         'user.id': userId,
         'gen_ai.output.messages': [{
@@ -1020,7 +1051,7 @@ function finalizeRecords(records, cwd, runtimeConfig) {
     Object.assign(record, spanAttributes, agentBaseFieldPatch(attributes),
       Object.keys(attributes).length > 0 ? { resourceAttributes: attributes } : {});
   }
-  return records;
+  return applyQoderProductIdentity(records, runtimeConfig?.hostProduct);
 }
 
 // Variants whose records are committed one complete turn at a time, so the

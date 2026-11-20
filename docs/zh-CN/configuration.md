@@ -19,7 +19,7 @@ Pilot 按以下顺序解析配置：
 
 - 全局 `multimodal` 按整块选择。用户写了该字段，就不从托管配置补存储目标或凭据；用户未写时才使用托管配置。选中用户块后，仍按下文规则判断能否复用用户自己的 SLS `apiKey` 目标。
 - `agents` 按 Agent 名合并，用户字段覆盖托管默认值；其中 `multimodal` 子对象按字段浅合并。例如用户只改 `uploadMode`，可保留托管配置的 `allowedRootPaths`。
-- 托管端的 `agents.<id>` 只能设置 `multimodal`，不能设置 `enabled` 或 `captureMessageContent`。只配置某个 Agent 的多模态设置不会限制其他已发现 Agent 的默认采集；用户可以在 `config.json` 中用 `enabled: false` 关闭指定 Agent。
+- 托管端的 `agents.<id>` 只能设置 `multimodal`，不能设置 Agent 启停。只配置某个 Agent 的多模态设置不会限制其他已发现 Agent 的默认采集；用户可以在 `config.json` 中用 `enabled: false` 关闭指定 Agent。
 
 ## 常用全局配置
 
@@ -30,7 +30,7 @@ Pilot 按以下顺序解析配置：
   "userId": "your-user-id",
   "collectLog": true,
   "collectTrace": true,
-  "dashboard": { "port": 8765 },
+  "dashboard": { "enabled": false, "port": 8765 },
   "serviceName": "my-agent-service",
   "interceptor": { "mode": "none" }
 }
@@ -41,13 +41,17 @@ Pilot 按以下顺序解析配置：
 | `enabled` | collector 总开关。 |
 | `dataDir` | 本地运行和数据目录。 |
 | `userId` | 写入输出事件的用户标识，默认使用机器 hostname。 |
+| `hostSn` | 安装时写入的硬件序列号。有值时 SLS 日志组带 `__tag__:__sn__`。 |
+| `hostIdentityTags` | 设为 `false` 时，主采集和 Qoder 的 SLS 日志组都不带 `__mac__` 和 `__sn__`。默认 `true`。 |
 | `collectLog` | 控制 SLS 日志上报。JSONL 和 HTTP 由各自的 `enabled` 控制。 |
+| `jsonl.enabled` | 控制 `logs/output/` 的本地规范化事件输出，默认 `false`；设为 `true` 后开启。 |
 | `collectTrace` | 当配置了 Trace 目标时，控制 OTLP Trace 上报。 |
 | `requestAttributes.enabled` | 默认关闭。将公共逐轮关联记录中的业务属性添加到本轮事件；写入 Span 还需透传前缀。见[按请求添加自定义属性](request-attributes.md)。 |
-| `dashboard.port` | 本机 Dashboard 端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
+| `dashboard.enabled` | 本地 Dashboard 开关，仅布尔值 `true` 启用；未填写或其他值均关闭。 |
+| `dashboard.port` | 启用后的本机端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
 | `serviceName` | 所有 Agent 和上报后端共用的唯一服务名，优先级高于所有服务名前缀配置。 |
 | `serviceNamePrefix` | 兼容原有行为的服务名基础值。未设置 `serviceName` 时，各 Agent 以 `<serviceNamePrefix>-<agentType>` 上报。 |
-| `interceptor` | 本地拦截。格式与 `mask` 相同（`mode` + `types`），`types` 为 mask 类型的密钥子集。详见 [本地拦截](interceptor.md)。 |
+| `interceptor` | 本地拦截。仅 `mode: "all"` 开启已配置的本地文件规则、Worker、HTTP 监听和拦截 hook，并确保脱敏覆盖凭证类型；没有可执行规则时放行。`none` 或其他值关闭全部拦截，包括已缓存规则。详见 [本地拦截](interceptor.md)。 |
 
 对应环境变量：
 
@@ -56,16 +60,20 @@ Pilot 按以下顺序解析配置：
 | `AGENT_DATA_COLLECTION_CONFIG` | 自定义配置文件路径。 |
 | `LOONGSUITE_PILOT_ENABLED` | 设置为 `false` 或 `0` 可关闭 collector。 |
 | `LOONGSUITE_PILOT_DATA_DIR` | 覆盖数据目录。 |
+| `LOONGSUITE_PILOT_HOOK_SCOPE` | Hook CLI 与容器启动安装的 scope（`user` 或仅 Linux 支持的 `system`）。显式 `--scope` 优先；未设置时保留原行为与已记录目标。 |
 | `LOONGSUITE_PILOT_USER_ID` | 覆盖 `userId`。 |
+| `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS` | 设为 `false` 或 `0` 时不带 `__mac__` 和 `__sn__`。未设置时使用 `hostIdentityTags`。 |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | 设置为 `false` 或 `0` 可关闭 SLS 日志上报。 |
+| `JSONL_ENABLED` | 覆盖 `jsonl.enabled`；设置为 `true` 可开启本地 JSONL 输出。 |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | 设置为 `false` 或 `0` 可关闭 Trace 上报。 |
 | `LOONGSUITE_PILOT_REQUEST_ATTRIBUTES` | 设置为 `true` 或 `1` 开启请求属性关联，覆盖 `requestAttributes.enabled`。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | 用一个唯一服务名覆盖所有 Agent 和上报后端的 `serviceName`。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | 覆盖 `serviceNamePrefix`。 |
 | `LOONGSUITE_PILOT_POLL_INTERVAL_MS` | 所有 Agent 采集器的轮询间隔，单位毫秒。默认 `10000`。覆盖 `listeners.*.pollInterval` 和 `QODER_ANALYTICS_POLL_INTERVAL`。只接受 `1000` 到 `2147483647` 的十进制整数，其余值会被忽略。未设置该变量时，Wukong 和 Kiro CLI session 仍使用各自 60 秒的内置间隔。 |
 | `LOG_LEVEL` | 运行日志级别：`debug`、`info`、`warn`、`error` 或 `silent`。 |
-| `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | 拦截模式：`all`、`none` 或 `custom`。 |
-| `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` | 逗号分隔的拦截类型，仅 `custom` 模式生效。 |
+| `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | 拦截模式：`all` 或 `none`，在 collector 启动时读取。 |
+
+旧的拦截 `custom` 模式与 `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` 不再支持。已有 `custom` 配置升级后会关闭拦截；如需启用已配置的本地文件规则，请在重启 collector 前显式改为 `all`。内置密钥拦截规则已移除。脱敏 `mask` 仍支持自己的 `custom` 模式；开启拦截时，安装器和运行时加载会将 `cloudAccessKey`、`apiKey`、`privateKey`、`databaseUrl` 并入脱敏范围，保留已有自定义类型和替换格式。`mask.mode=all` 不变。
 
 ## SLS 密钥配置
 

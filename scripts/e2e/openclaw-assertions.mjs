@@ -89,15 +89,13 @@ export function assertOpenClawEvidence({ events, spans, nativeMessages, provider
   return { traceIds, tokenChecks, events: events.length, spans: spans.length, tools: calls.length };
 }
 
-export function assertContentPresent(records, markers) {
-  assert(records.length > 0, 'legacy-config test has no records');
-  const contentKeys = ['gen_ai.input.messages', 'gen_ai.input.messages_delta', 'gen_ai.output.messages',
+export function assertContentOff(records, markers) {
+  assert(records.length > 0, 'privacy test has no records');
+  const forbidden = ['gen_ai.input.messages', 'gen_ai.input.messages_delta', 'gen_ai.output.messages',
     'gen_ai.system_instructions', 'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result', 'error.message'];
-  assert(records.some(record => {
+  for (const record of records) {
     const attrs = record.attributes ?? record;
-    return contentKeys.some(key => attrs[key] !== undefined);
-  }), 'legacy content config unexpectedly removed all content fields');
-  for (const marker of markers) {
-    assert(records.some(record => JSON.stringify(record).includes(marker)), `legacy content config removed marker: ${marker}`);
+    for (const key of forbidden) assert.equal(attrs[key], undefined, `content-off leaked ${key}`);
+    assert(markers.every(marker => !JSON.stringify(record).includes(marker)), 'privacy marker leaked');
   }
 }

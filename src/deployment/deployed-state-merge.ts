@@ -40,10 +40,12 @@ export function mergeDeployedAgentsState(
       continue;
     }
     const previous = disk[id];
+    // Scope migration retires the old list; the watchdog must not restore it.
+    const scopeChanged = (previous?.hookScope ?? 'user') !== (next.hookScope ?? 'user');
     const paths = mergeHookSettingsPaths({
       hookSettingsPaths: [
-        ...(previous?.hookSettingsPaths ?? []),
-        ...(previous?.hookSettingsPath ? [previous.hookSettingsPath] : []),
+        ...(!scopeChanged ? previous?.hookSettingsPaths ?? [] : []),
+        ...(!scopeChanged && previous?.hookSettingsPath ? [previous.hookSettingsPath] : []),
         ...(next.hookSettingsPaths ?? []),
       ],
       hookSettingsPath: next.hookSettingsPath ?? previous?.hookSettingsPath,
