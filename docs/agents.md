@@ -165,6 +165,10 @@ matching trajectory file and isolates checkpoints per logical run. Unless an
 exact top-level `serviceName` is configured, the exported service is named
 `<serviceNamePrefix>-trae-agent`.
 
+Pilot processes changed snapshots over successive polls and skips snapshots
+larger than 64 MiB. Prefer a unique file for each unattended run when possible.
+If Trae overwrites an interactive run before its first poll, Pilot cannot recover it.
+
 ## Shared installation on Linux
 
 Add `--scope system` to the POSIX install command or run:

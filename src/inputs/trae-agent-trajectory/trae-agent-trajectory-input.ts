@@ -16,7 +16,7 @@ const AGENT_ID = 'trae-agent-trajectory';
 // trae-agent's TrajectoryRecorder defaults to `trajectories/trajectory_<ts>.json`
 // (timestamped, relative to the CLI's CWD) unless `--trajectory-file` is passed.
 // Pilot cannot know an arbitrary invocation's CWD, so discovery scans a watched
-// directory for any `trajectory*.json` and polls the most recently modified one.
+// directory for matching `trajectory*.json` files and polls changed snapshots.
 const DEFAULT_TRAJECTORY_FILE_PATTERN = /^trajectory.*\.json$/i;
 
 interface ConverterModule {

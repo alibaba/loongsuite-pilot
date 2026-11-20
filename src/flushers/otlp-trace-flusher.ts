@@ -1044,7 +1044,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Preserve known fields when a retained delegated prefix is delivered
     // again. Audit records never enter these buffers or their journal.
     const eventId = entry['gen_ai.agent.type'] === 'copilot'
-      || (durable && (agentType === 'hermes' || agentType === 'openclaw'))
+      || (durable && (agentType === 'hermes' || agentType === 'openclaw' || agentType === 'trae-agent'))
       ? (entry['event.id'] as string | undefined) : undefined;
     let residentDelta = residentSize;
     if (buf.spilledRecords && durable) {
@@ -1534,7 +1534,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
       ? prepareTraeCollectionRecords(records)
       : records;
     const recordsForConversion = preparedRecords.filter(record => !isTraeFlushOnlyMarker(record));
-    if (recordsForConversion.length === 0) return;
+    if (recordsForConversion.length === 0) {
+      if (buf.completed) await this.codexJournal?.acknowledge(buf.records);
+      return;
+    }
     const exported = await this.convertAndExport(buf.agentType, recordsForConversion);
     if (exported && this.codexJournal?.acceptsAgent(buf.agentType) && buf.completed) {
       await this.codexJournal.acknowledge(buf.records);

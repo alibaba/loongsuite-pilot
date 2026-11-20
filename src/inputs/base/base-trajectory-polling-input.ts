@@ -13,6 +13,8 @@ export interface TrajectoryPollingOptions extends InputOptions {
 
 const TRAJECTORY_STATE_VERSION = 3;
 const RUN_ID_PREFIX = 'trajectory-run-v3:';
+const MAX_SNAPSHOT_BYTES_PER_POLL = 64 * 1024 * 1024;
+const MAX_CHANGED_SNAPSHOTS_PER_POLL = 16;
 
 /**
  * Base input for tools that write one or more trajectory JSON files
@@ -47,6 +49,7 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
   readonly collectionMethod = CollectionMethod.LogWatchPolling;
 
   protected readonly trajectoryFile: string;
+  private nextTrajectoryIndex = 0;
 
   constructor(opts: TrajectoryPollingOptions) {
     super(opts);
@@ -56,52 +59,81 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
   protected async collect(): Promise<AgentActivityEntry[]> {
     const trajectoryFiles = await this.resolveTrajectoryFiles();
     const entries: AgentActivityEntry[] = [];
-    for (const trajectoryFile of trajectoryFiles) {
+    const extra = this.stateStore.get(this.id).extra as TrajectoryExtra | undefined;
+    const fingerprintsByFile = new Map<string, string>();
+    if (extra?.trajectoryStateVersion === TRAJECTORY_STATE_VERSION) {
+      for (const run of Object.values(extra.runsById ?? {})) {
+        if (run?.lastFile && run.fingerprint) fingerprintsByFile.set(run.lastFile, run.fingerprint);
+      }
+    }
+    let remaining = MAX_SNAPSHOT_BYTES_PER_POLL;
+    let changed = 0;
+    const offset = this.nextTrajectoryIndex;
+    this.nextTrajectoryIndex = 0;
+    for (let scanned = 0; scanned < trajectoryFiles.length; scanned++) {
+      const index = (offset + scanned) % trajectoryFiles.length;
+      const trajectoryFile = trajectoryFiles[index];
       try {
-        entries.push(...await this.processTrajectoryFile(trajectoryFile));
+        const stat = await fs.stat(trajectoryFile);
+        if (!stat.isFile() || stat.size === 0) continue;
+        const fingerprint = this.trajectoryFingerprint(stat);
+        if (fingerprintsByFile.get(trajectoryFile) === fingerprint) continue;
+        if (stat.size > MAX_SNAPSHOT_BYTES_PER_POLL) {
+          this.logger.warn('trajectory exceeds the snapshot size limit', {
+            file: trajectoryFile, bytes: stat.size, limitBytes: MAX_SNAPSHOT_BYTES_PER_POLL,
+          });
+          continue;
+        }
+        if (stat.size > remaining || changed >= MAX_CHANGED_SNAPSHOTS_PER_POLL) {
+          this.nextTrajectoryIndex = index;
+          break;
+        }
+        remaining -= stat.size;
+        changed++;
+        for (const entry of await this.processTrajectoryFile(trajectoryFile, stat, fingerprint)) entries.push(entry);
       } catch (err) {
         // One corrupt or concurrently-removed file must not block other runs
         // discovered in the same polling cycle.
-        this.logger.warn('trajectory processing failed', { file: trajectoryFile, error: String(err) });
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          this.logger.warn('trajectory processing failed', { file: trajectoryFile, error: String(err) });
+        }
       }
     }
     return entries;
   }
 
-  private async processTrajectoryFile(trajectoryFile: string): Promise<AgentActivityEntry[]> {
+  private async processTrajectoryFile(trajectoryFile: string, stat: fsSync.Stats, currentFp: string): Promise<AgentActivityEntry[]> {
     const stateKey = this.id;
-    let stat: fsSync.Stats;
+    // A growing or partially rewritten source can exceed the discovery stat
+    // before open completes. Never read beyond the bytes reserved for it.
+    const file = await fs.open(trajectoryFile, 'r');
+    let raw: Buffer;
     try {
-      stat = await fs.stat(trajectoryFile);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        this.logger.warn('trajectory stat failed', { file: trajectoryFile, error: String(err) });
+      const opened = await file.stat();
+      if (!opened.isFile() || this.trajectoryFingerprint(opened) !== currentFp) return [];
+      raw = Buffer.allocUnsafe(opened.size);
+      for (let offset = 0; offset < raw.length;) {
+        const { bytesRead } = await file.read(raw, offset, raw.length - offset, offset);
+        if (!bytesRead) return [];
+        offset += bytesRead;
       }
-      return [];
+      if (this.trajectoryFingerprint(await file.stat()) !== currentFp) return [];
+    } finally {
+      await file.close();
     }
-    if (!stat.isFile()) return [];
-
-    let raw: string;
-    try {
-      raw = await fs.readFile(trajectoryFile, 'utf8');
-    } catch (err) {
-      this.logger.warn('trajectory read failed', { file: trajectoryFile, error: String(err) });
-      return [];
-    }
-    if (!raw.trim()) return [];
 
     let parsed: TrajectoryJson;
     try {
-      parsed = JSON.parse(raw) as TrajectoryJson;
-    } catch (err) {
-      this.logger.warn('trajectory json parse failed', { file: trajectoryFile, error: String(err) });
+      parsed = JSON.parse(raw.toString('utf8')) as TrajectoryJson;
+    } catch {
+      this.logger.debug('trajectory JSON is incomplete or invalid', { file: trajectoryFile });
       return [];
     }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
 
     const prevState = this.stateStore.get(stateKey);
     const prevExtra = (prevState.extra ?? {}) as TrajectoryExtra;
     let runsById = this.cloneRunCheckpoints(prevExtra.runsById);
-    const currentFp = this.trajectoryFingerprint(stat);
     const currentRunId = this.deriveRunIdentity(parsed);
     // Identity-less files still need isolated checkpoints; otherwise two such
     // files share a seen-step set and suppress each other.
@@ -397,13 +429,13 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
   }
 
   /**
-   * Default fingerprint: inode+size+mtime. inode is captured via Stats.ino
+   * Default fingerprint: inode, size and filesystem times. Inode is captured via Stats.ino
    * (NaN on platforms without stable inode semantics — caller should treat
    * NaN-inode as a 0 for fingerprint purposes).
    */
   protected trajectoryFingerprint(stat: fsSync.Stats): string {
     const inode = Number.isNaN(stat.ino) ? 0 : stat.ino;
-    return `${inode}:${stat.size}:${stat.mtimeMs}`;
+    return `${inode}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.dev}`;
   }
 
   /**

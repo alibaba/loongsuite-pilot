@@ -137,6 +137,9 @@ trae-cli interactive --trajectory-file "$HOME/.trae-agent/trajectories/trajector
 如果未配置顶层精确 `serviceName`，最终上报服务名为
 `<serviceNamePrefix>-trae-agent`。
 
+Pilot 分批处理发生变化的文件，并跳过超过 64 MiB 的快照。批量调用时宜为
+每次运行保留独立文件。交互模式若在首次轮询前覆盖旧文件，Pilot 无法恢复该轮。
+
 ## Linux 系统接入
 
 在 POSIX 安装命令中加上 `--scope system`，也可对已安装的 Pilot 执行：

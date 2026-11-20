@@ -1,10 +1,15 @@
 import { describe, expect, test, beforeEach, afterEach } from 'vitest';
+import { once } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { TraeAgentTrajectoryInput } from '../../../../src/inputs/trae-agent-trajectory/trae-agent-trajectory-input.js';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
+import { InputManager } from '../../../../src/core/input-manager.js';
+import { CodexTurnJournal } from '../../../../src/flushers/codex-turn-journal.js';
+import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
+import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
 
 // Fixture source: researcher comment fe220457 attachment (52KB), a real trae-agent
@@ -67,6 +72,38 @@ async function newStore(): Promise<StateStore> {
 }
 
 describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
+  test('advances past the per-cycle budget and skips oversized snapshots', async () => {
+    const overflow = path.join(tmpDir, 'trajectory-oversized.json');
+    const descriptor = await fs.open(overflow, 'w');
+    try {
+      await descriptor.truncate(64 * 1024 * 1024 + 1);
+    } finally {
+      await descriptor.close();
+    }
+    const time = Date.parse('2026-08-25T10:00:17.058Z');
+    const oldest = new Date(time - 1_000);
+    await fs.utimes(overflow, oldest, oldest);
+    for (let index = 0; index < 18; index++) {
+      const snapshot = path.join(tmpDir, `trajectory-${index}.json`);
+      const start = new Date(time + index * 1_000);
+      await fs.writeFile(snapshot, truncated(1, start.toISOString()));
+      await fs.utimes(snapshot, start, start);
+    }
+    const input = new TraeAgentTrajectoryInput({
+      stateStore: await newStore(), trajectoryFile: tmpDir, trajectoryDir: tmpDir, converterPath: CONVERTER_PATH,
+    });
+    // @ts-expect-error: exercise collection without starting the polling timer
+    const first = await input.collect();
+    // @ts-expect-error: exercise collection without starting the polling timer
+    const second = await input.collect();
+    // @ts-expect-error: exercise collection without starting the polling timer
+    const third = await input.collect();
+    expect(first).toHaveLength(16 * 4);
+    expect(second).toHaveLength(2 * 4);
+    expect(third).toEqual([]);
+    expect(new Set([...first, ...second].map(entry => entry['gen_ai.session.id'])).size).toBe(18);
+  });
+
   test('polls every trajectory*.json in stable oldest-first order', async () => {
     const dir = path.join(tmpDir, 'trajectories');
     await fs.mkdir(dir, { recursive: true });
@@ -325,6 +362,50 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
     const out = (await input.collect()) as AgentActivityEntry[];
     expect(out).toEqual([]);
   });
+});
+
+test('restores Trae steps from disk and exports one trace when finalization arrives after restart', async () => {
+  const trajectoryFile = path.join(tmpDir, 'trajectory.json');
+  const stateFile = path.join(tmpDir, 'state.json');
+  const startTime = '2026-08-25T10:00:17.058504';
+  const spans: ReadableSpan[] = [];
+  const startCollector = async () => {
+    const stateStore = new StateStore(stateFile);
+    await stateStore.load();
+    const manager = new InputManager();
+    const flusher = new OtlpTraceFlusher({
+      enabled: true, serviceName: 'trae-restart-test', protocol: 'http/protobuf',
+      endpoints: [{ endpoint: 'http://127.0.0.1:4318/v1/traces', headers: {} }],
+    }, undefined, () => ({
+      export(batch, callback) { spans.push(...batch); callback({ code: 0 }); },
+      shutdown: async () => {},
+    }), new CodexTurnJournal(path.join(tmpDir, 'pending-turns'), 20, ['trae-agent']));
+    manager.setFlusher(flusher);
+    await flusher.start();
+    const input = new TraeAgentTrajectoryInput({ stateStore, trajectoryFile, converterPath: CONVERTER_PATH });
+    manager.registerInput(input);
+    const flushed = once(manager, 'flushed');
+    try {
+      await manager.startInput(input.id);
+      await flushed;
+      await stateStore.save();
+    } finally {
+      await manager.stopAll();
+      await flusher.shutdown();
+    }
+  };
+  await fs.writeFile(trajectoryFile, inProgress(3, startTime));
+  await startCollector();
+  expect(spans).toEqual([]);
+  expect(JSON.parse(await fs.readFile(stateFile, 'utf8'))['trae-agent-trajectory'].extra.seenStepNumbers).toEqual([1, 2, 3]);
+
+  await fs.writeFile(trajectoryFile, truncated(3, startTime));
+  await startCollector();
+  const llm = spans.filter(span => span.attributes['gen_ai.operation.name'] === 'chat');
+  expect(llm).toHaveLength(3);
+  expect(spans.filter(span => span.attributes['gen_ai.operation.name'] === 'execute_tool')).toHaveLength(3);
+  expect(new Set(spans.map(span => span.spanContext().traceId)).size).toBe(1);
+  expect(new Set(spans.map(span => span.spanContext().spanId)).size).toBe(spans.length);
 });
 
 describe('TraeAgentTrajectoryInput - P1-3 run identity reset (same path)', () => {

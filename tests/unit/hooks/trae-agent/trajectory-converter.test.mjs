@@ -278,15 +278,31 @@ describe('convertTrajectory - LLM input/output message shape (P1-5, P1-7)', () =
 });
 
 describe('convertTrajectory - terminal marker on last step (P1-6)', () => {
-  test('last LLM response finish_reasons = the model actual reason only (no synthetic stop)', () => {
-    // P1-6: the converter no longer appends a fabricated 'stop'. trae-agent's turn
-    // boundary is the explicit gen_ai.turn.end marker (the OTLP flusher's trae-agent
-    // branch keys off it, NOT finish_reason), so finish_reasons carries ONLY what the
-    // model actually returned — 'tool_use' for the task_done terminal step.
+  test('normalizes the terminal tool finish without inventing a normal stop', () => {
+    // Trae turn completion is separate from the provider's tool finish reason.
     const { entries } = convertTrajectory(RAW, { seenStepNumbers: new Set() });
     const lastResp = entries.find(e => e['event.name'] === 'llm.response' && e['gen_ai.step.id']?.endsWith(':s15'));
-    expect(lastResp['gen_ai.response.finish_reasons']).toEqual(['tool_use']);
+    expect(lastResp['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
+    expect(lastResp['agent.stop_reason']).toBe('tool_use');
     expect(lastResp['gen_ai.response.finish_reasons']).not.toContain('stop');
+  });
+
+  test('interprets OpenAI Responses completed using the actual tool calls', () => {
+    const raw = structuredClone(RAW);
+    const first = raw.llm_interactions[0].response;
+    first.tool_calls = [];
+    first.finish_reason = 'completed';
+    const last = raw.llm_interactions.at(-1).response;
+    last.finish_reason = 'completed';
+    const { entries } = convertTrajectory(raw);
+    const responses = entries.filter(entry => entry['event.name'] === 'llm.response');
+    expect(responses[0]).toMatchObject({
+      'gen_ai.response.finish_reasons': ['stop'], 'agent.stop_reason': 'completed',
+    });
+    expect(responses[0]['gen_ai.turn.end']).toBeUndefined();
+    expect(responses.at(-1)).toMatchObject({
+      'gen_ai.response.finish_reasons': ['tool_call'], 'agent.stop_reason': 'completed', 'gen_ai.turn.end': true,
+    });
   });
 
   test('non-last LLM responses do NOT carry stop (no premature terminal)', () => {

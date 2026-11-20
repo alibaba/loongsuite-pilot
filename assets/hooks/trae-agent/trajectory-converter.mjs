@@ -127,7 +127,8 @@ export function convertTrajectory(json, opts = {}) {
   const buildLlmResponse = ({ step, interaction, stepSpanId, llmSpanId, stepId, turnId, providerName, llmEndNano, isLastStep }) => {
     const usage = normalizeUsageTokens(interaction.response.usage, providerName);
     const outputMessages = buildOutputMessages(interaction);
-    const finishReasons = buildFinishReasons(interaction.response.finishReason);
+    const rawFinishReason = interaction.response.finishReason;
+    const finishReasons = buildFinishReasons(rawFinishReason, interaction.response.toolCalls.length > 0);
     return {
       time_unix_nano: String(llmEndNano),
       observed_time_unix_nano: String(llmEndNano),
@@ -147,7 +148,8 @@ export function convertTrajectory(json, opts = {}) {
       'gen_ai.request.model': interaction.model || parsed.model,
       'gen_ai.response.model': interaction.response.model || interaction.model || parsed.model,
       'gen_ai.response.id': `${sessionId}:r${step.stepNumber}`,
-      'gen_ai.response.finish_reasons': finishReasons,
+      ...(finishReasons.length > 0 ? { 'gen_ai.response.finish_reasons': finishReasons } : {}),
+      ...(rawFinishReason && !finishReasons.includes(rawFinishReason) ? { 'agent.stop_reason': rawFinishReason } : {}),
       // Explicit turn-end marker, stamped ONLY on the finalized last step. The
       // OTLP flusher (isTerminalEvent) and turn-boundary enrichment both key off
       // this marker for trae-agent instead of finish_reason: an intermediate
@@ -384,12 +386,27 @@ function buildOutputMessages(interaction) {
  * off it, not finish_reason), so inventing a 'stop' the model never returned
  * would falsify the response metadata for no benefit.
  */
-function buildFinishReasons(actualFinishReason) {
-  const reasons = [];
-  if (actualFinishReason && actualFinishReason.length > 0) {
-    reasons.push(actualFinishReason);
+function buildFinishReasons(reason, hasToolCalls) {
+  switch (reason) {
+    // OpenAI Responses uses a request status instead of a Chat Completions finish reason.
+    case 'completed': return [hasToolCalls ? 'tool_call' : 'stop'];
+    case 'tool_use':
+    case 'function_call': return ['tool_call'];
+    case 'stop_sequence':
+    case 'refusal': return ['stop'];
+    case 'max_output_tokens': return ['max_tokens'];
+    case 'failed': return ['error'];
+    case 'stop':
+    case 'length':
+    case 'content_filter':
+    case 'tool_call':
+    case 'tool_calls':
+    case 'error':
+    case 'end_turn':
+    case 'max_tokens':
+    case 'cancelled': return [reason];
+    default: return [];
   }
-  return reasons;
 }
 
 /**
