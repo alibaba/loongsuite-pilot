@@ -36,7 +36,7 @@ impl CopilotInstall {
             ("agents.d/copilot.json", &definition),
             (
                 "agents.d/cursor.json",
-                include_str!("../../agents.d/cursor.json"),
+                include_str!("../fixtures/legacy-cursor-agent.json"),
             ),
         ]);
         let mut options = fixture.runtime_options(&fixture.candidate);

@@ -518,6 +518,12 @@ impl Orchestrator {
         } else if let Some(config) = &interceptor_config {
             self.start_qoder_hooks(&pilot_dir, config, verdicts).await;
         }
+        for profile in crate::sdk::hook_history::PROFILES {
+            if self.uses_sdk_hook_history(profile.agent) {
+                self.register_sdk_hook_history(&mut detection, &pilot_dir, &state_store, profile)
+                    .await;
+            }
+        }
         let deploy_entries = deployment
             .as_ref()
             .map(|deployment| self.deploy_detection_entries(deployment))
@@ -2592,22 +2598,33 @@ impl Orchestrator {
             )
             .await;
         }
-        let cursor_dir = self.data_dir_join("logs/cursor/history");
-        self.attach_hook(
-            entries,
-            "cursor-hook",
-            "cursor",
-            CursorHookInput::new(self.hook_opts_dir(state_store, &cursor_dir, "cursor-hook")),
-            vec![cursor_dir.clone()],
-            {
-                let cursor_dir = cursor_dir.clone();
-                move || {
+        if !self.uses_sdk_hook_history("cursor") {
+            let cursor_dir = self.data_dir_join("logs/cursor/history");
+            let input =
+                CursorHookInput::new(self.hook_opts_dir(state_store, &cursor_dir, "cursor-hook"));
+            if self.standalone && self.runtime_options.manage_host_services {
+                ensure_dir(&cursor_dir).await;
+                input.set_cursor_root(
+                    std::path::PathBuf::from(&self.data_dir),
+                    Some(std::path::PathBuf::from(resolve_home("~/.cursor"))),
+                );
+            }
+            self.attach_hook(
+                entries,
+                "cursor-hook",
+                "cursor",
+                input,
+                vec![cursor_dir.clone()],
+                {
                     let cursor_dir = cursor_dir.clone();
-                    async move { directory_exists(&cursor_dir).await }
-                }
-            },
-        )
-        .await;
+                    move || {
+                        let cursor_dir = cursor_dir.clone();
+                        async move { directory_exists(&cursor_dir).await }
+                    }
+                },
+            )
+            .await;
+        }
         self.attach_simple_hooks(entries, state_store).await;
     }
 
@@ -2952,6 +2969,89 @@ impl Orchestrator {
             verdicts.start_checkpoint_loop(interceptor::TOOL_VERDICT_CHECKPOINT_INTERVAL_MS);
             *self.qoder_hooks.lock().expect("Qoder Hook SDK") = Some(sdk);
         }
+    }
+
+    fn uses_sdk_hook_history(&self, agent: &str) -> bool {
+        crate::sdk::hook_history::find(agent).is_some()
+            && self.standalone
+            && !self.config.upstream_link.enabled
+            && !(self.inputs_have_multimodal()
+                && self
+                    .config
+                    .agents
+                    .get(agent)
+                    .is_some_and(|config| is_agent_multimodal_enabled(Some(agent), config)))
+    }
+
+    async fn register_sdk_hook_history(
+        &self,
+        entries: &mut Vec<Arc<dyn AgentDetection>>,
+        pilot_dir: &str,
+        state_store: &Arc<StateStore>,
+        profile: &crate::sdk::hook_history::HookHistoryProfile,
+    ) {
+        let history = self.data_dir_join(profile.history);
+        ensure_dir(&history).await;
+        let agent = profile.agent;
+        let listener = profile.listener;
+        let sdk_data = self.data_dir_join(&format!("state/standalone-{agent}-sdk"));
+        let config = self.config.agents.get(agent);
+        let mut allowed_roots = vec![self.data_dir.clone()];
+        if agent == "cursor" {
+            allowed_roots.push(resolve_home("~/.cursor"));
+        }
+        let init = serde_json::json!({
+            "data_dir": sdk_data,
+            "resource_dir": pilot_dir,
+            "home_dir": resolve_home("~"),
+            "user_id": self.config.user_id,
+        });
+        let policy = serde_json::json!({
+            "agents": [agent],
+            "hcd": {"agent_configs": {(agent): {"collection": {
+                "enabled": true, "profile": profile.profile,
+                "allowed_roots": allowed_roots,
+                "sources": [{"id": "history", "type": "hook_jsonl", "path": &history}],
+                "limits": {"poll_interval_ms": self.poll(listener)
+                    .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS)},
+                "pilot_host": {
+                    "data_dir": self.data_dir,
+                    "capture_message_content": config.and_then(|config| config.capture_message_content),
+                    "exclude_workspaces": self.config.privacy.as_ref()
+                        .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
+                },
+            }}}},
+            "sdk_options": {"mask": self.config.mask},
+        });
+        let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
+            listener,
+            init,
+            policy,
+            &self.inputs,
+            std::path::PathBuf::from(sdk_data),
+            state_store,
+        ));
+        let live = live_from_parts(
+            listener,
+            agent,
+            "sdk-hosted",
+            sdk,
+            |input| input.running(),
+            |input| Box::pin(async move { input.start().await }),
+            |input| Box::pin(async move { input.stop().await }),
+        );
+        self.inputs.register_input(Arc::clone(&live));
+        self.push_detection(
+            entries,
+            live,
+            vec![history.clone()],
+            move || {
+                let history = history.clone();
+                async move { directory_exists(&history).await }
+            },
+            1,
+            None,
+        );
     }
 
     fn register_sdk_qoder(

@@ -870,7 +870,7 @@ fn installation_applies_agent_selection_before_real_hook_injection() {
     fixture.package_with(&[
         (
             "agents.d/cursor.json",
-            include_str!("../agents.d/cursor.json"),
+            include_str!("fixtures/legacy-cursor-agent.json"),
         ),
         (
             "agents.d/codex.json",
@@ -1805,7 +1805,7 @@ fn native_uninstall_preflight_and_repeat_cleanup_preserve_user_hooks_and_configu
     let fixture = Fixture::new();
     fixture.package_with(&[(
         "agents.d/cursor.json",
-        include_str!("../agents.d/cursor.json"),
+        include_str!("fixtures/legacy-cursor-agent.json"),
     )]);
     let path = fixture.root.path().join(".cursor/hooks.json");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1881,7 +1881,7 @@ fn native_uninstall_rejects_invalid_or_unknown_deployment_state_before_config_ch
         let fixture = Fixture::new();
         fixture.package_with(&[(
             "agents.d/cursor.json",
-            include_str!("../agents.d/cursor.json"),
+            include_str!("fixtures/legacy-cursor-agent.json"),
         )]);
         let path = fixture.root.path().join(".cursor/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1959,7 +1959,7 @@ fn native_uninstall_refuses_unrecognized_owned_commands_without_dropping_state_o
     let fixture = Fixture::new();
     fixture.package_with(&[(
         "agents.d/cursor.json",
-        include_str!("../agents.d/cursor.json"),
+        include_str!("fixtures/legacy-cursor-agent.json"),
     )]);
     let config = fixture.root.path().join(".cursor/hooks.json");
     fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -2176,7 +2176,7 @@ fn native_uninstall_shell_preserves_conflicts_and_cleans_custom_cache_without_ex
         let fixture = Fixture::new();
         fixture.package_with(&[(
             "agents.d/cursor.json",
-            include_str!("../agents.d/cursor.json"),
+            include_str!("fixtures/legacy-cursor-agent.json"),
         )]);
         let cache = fixture.root.path().join("cache");
         let installed = cache.join("versions/1.2.0_test");
@@ -2355,7 +2355,7 @@ fn native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_witho
                 let fixture = Fixture::new();
                 fixture.package_with(&[(
                     "agents.d/cursor.json",
-                    include_str!("../agents.d/cursor.json"),
+                    include_str!("fixtures/legacy-cursor-agent.json"),
                 )]);
                 let cache = fixture.root.path().join("cache");
                 let installed = cache.join("versions/1.2.0_test");
@@ -2467,7 +2467,7 @@ fn native_uninstall_cleans_recorded_and_all_existing_alternative_configuration_p
             (
                 "cursor",
                 "agents.d/cursor.json",
-                include_str!("../agents.d/cursor.json"),
+                include_str!("fixtures/legacy-cursor-agent.json"),
             )
         } else {
             (
@@ -2552,7 +2552,7 @@ fn native_uninstall_rejects_invalid_local_overrides_while_discovery_keeps_builti
         let fixture = Fixture::new();
         fixture.package_with(&[(
             "agents.d/cursor.json",
-            include_str!("../agents.d/cursor.json"),
+            include_str!("fixtures/legacy-cursor-agent.json"),
         )]);
         let local = fixture.data.join("agents.d.local/cursor.json");
         fs::create_dir_all(local.parent().unwrap()).unwrap();
