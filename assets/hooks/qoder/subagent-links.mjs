@@ -94,6 +94,11 @@ export class QoderSubagentLinks {
     return this.legacySources.has(key);
   }
 
+  legacyCalls(key) {
+    return new Set(Object.values(this.state)
+      .filter(link => link.legacySource === key).map(link => link.callId));
+  }
+
   observeLegacyPeer(source, checkpoint, row) {
     const peerId = text(row?.toolUseResult?.agentId);
     if (!peerId) return;

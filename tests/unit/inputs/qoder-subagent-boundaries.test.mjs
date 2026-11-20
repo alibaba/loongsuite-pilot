@@ -51,6 +51,7 @@ describe('Qoder native delegation boundaries', () => {
     await fs.writeFile(path.join(directory, 'task-malformed.json'), '{'.repeat(64));
     collector.legacyTasks = new Map();
     collector.legacyDirectoryBudget = 1;
+    collector.legacyEntryBudget = 1;
     collector.legacyMetadataBudget = 65;
 
     expect(await collector.legacyDescriptors(parent, session)).toEqual([]);
