@@ -93,6 +93,13 @@ fn safe_destination(root: &Path, relative: &str) -> Result<PathBuf> {
 }
 
 fn load_assets(def: &AgentDefinition, pilot: &Path, data: &Path) -> Result<Vec<(String, String)>> {
+    if def
+        .hook
+        .as_ref()
+        .is_some_and(|hook| hook.native_sdk_data.is_some())
+    {
+        return Ok(Vec::new());
+    }
     let assets = managed_assets(def, data)?;
     if assets.is_empty() {
         return Ok(Vec::new());
@@ -215,7 +222,12 @@ impl HookAssets {
     pub(super) fn cleanup(def: &AgentDefinition, root: &Path, managed: bool) -> Result<Self> {
         // 清理只需要当前声明的目标集合，不要求待删除引用的源包仍然完整。
         let mut files = Vec::new();
-        if managed {
+        if managed
+            && def
+                .hook
+                .as_ref()
+                .is_none_or(|hook| hook.native_sdk_data.is_none())
+        {
             for relative in managed_assets(def, root)? {
                 let path = safe_destination(root, &relative)?;
                 files.push((relative, path, String::new()));
@@ -463,7 +475,7 @@ fn pin_configuration_parent(path: &Path) -> Result<PathBuf> {
     }
 }
 
-async fn with_config_locks<T, Fut>(
+pub(super) async fn with_config_locks<T, Fut>(
     paths: &[PathBuf],
     body: impl FnOnce() -> Fut + Send,
 ) -> Result<T>
@@ -692,8 +704,10 @@ mod tests {
             let data = root.path().join(link_kind);
             let external = root.path().join(format!("external-{link_kind}"));
             std::fs::create_dir_all(&external).unwrap();
-            let mut def: AgentDefinition =
-                serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+            let mut def: AgentDefinition = serde_json::from_str(include_str!(
+                "../../tests/fixtures/legacy-cursor-agent.json"
+            ))
+            .unwrap();
             def.hook.as_mut().unwrap().hook_command =
                 format!("{}/hooks/cursor-loongsuite-pilot-hook.sh", data.display());
             if link_kind == "root" {
@@ -728,8 +742,10 @@ mod tests {
         std::fs::create_dir_all(pilot.join("assets/hooks/shared")).unwrap();
         std::fs::write(pilot.join("assets/hooks/fixture.sh"), "entry").unwrap();
         std::fs::write(pilot.join("assets/hooks/shared/native.sh"), "shared").unwrap();
-        let mut def: AgentDefinition =
-            serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+        let mut def: AgentDefinition = serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy-cursor-agent.json"
+        ))
+        .unwrap();
         def.hook.as_mut().unwrap().hook_command = format!("{}/hooks/fixture.sh", data.display());
         assert!(HookAssets::load(&def, Some(&pilot), &data).is_err());
         std::fs::write(pilot.join("Cargo.toml"), "[package]\n").unwrap();
@@ -757,8 +773,10 @@ mod tests {
         let external = root.path().join("external");
         std::fs::write(&external, "shared").unwrap();
         std::os::unix::fs::symlink(&external, pilot.join("assets/hooks/shared/native.sh")).unwrap();
-        let mut def: AgentDefinition =
-            serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+        let mut def: AgentDefinition = serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy-cursor-agent.json"
+        ))
+        .unwrap();
         def.hook.as_mut().unwrap().hook_command = format!("{}/hooks/fixture.sh", data.display());
         assert!(HookAssets::load(&def, Some(&pilot), &data).is_err());
         std::fs::remove_file(pilot.join("assets/hooks/shared/native.sh")).unwrap();
@@ -779,8 +797,10 @@ mod tests {
         let pilot = root.path().join("candidate");
         seed_development_root(&pilot);
         let data = root.path().join("数据 🚀");
-        let mut def: AgentDefinition =
-            serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+        let mut def: AgentDefinition = serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy-cursor-agent.json"
+        ))
+        .unwrap();
         def.hook.as_mut().unwrap().hook_command =
             format!("{}/hooks/cursor-loongsuite-pilot-hook.ps1", data.display());
         std::fs::create_dir_all(pilot.join("assets/hooks/shared")).unwrap();

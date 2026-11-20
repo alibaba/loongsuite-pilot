@@ -16,7 +16,7 @@ impl World {
         std::fs::create_dir_all(&data).unwrap();
         for id in ["cursor", "claude-code"] {
             let mut def: AgentDefinition = serde_json::from_str(if id == "cursor" {
-                include_str!("../../agents.d/cursor.json")
+                include_str!("../../tests/fixtures/legacy-cursor-agent.json")
             } else {
                 include_str!("../../agents.d/claude-code.json")
             })

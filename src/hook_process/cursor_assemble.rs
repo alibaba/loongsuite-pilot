@@ -251,13 +251,17 @@ pub(super) fn assemble_parent_turn(
         transcript_user_prompt.or_else(|| event_str(prompt, "prompt").map(str::to_owned));
 
     let mut records = Vec::new();
-    if let Some(prompt_text) = user_prompt.as_deref().filter(|text| !text.is_empty()) {
+    if user_prompt.as_deref().is_some_and(|text| !text.is_empty())
+        || prompt.get("_pilot_redacted_prompt") == Some(&Value::Bool(true))
+    {
         let nanos = event_ts_nanos(prompt);
         let mut fields = timed_identity(&nanos, "other");
-        fields.insert(
-            "gen_ai.input.messages_delta".into(),
-            json!([user_text_message(prompt_text)]),
-        );
+        if let Some(prompt_text) = user_prompt.as_deref().filter(|text| !text.is_empty()) {
+            fields.insert(
+                "gen_ai.input.messages_delta".into(),
+                json!([user_text_message(prompt_text)]),
+            );
+        }
         fields.insert(
             "agent.cursor.hook_event_name".into(),
             Value::String("beforeSubmitPrompt".into()),
@@ -523,17 +527,21 @@ pub(super) fn build_cursor_records_from_transcript(
         .clone()
         .or_else(|| event_str(prompt, "prompt").map(str::to_owned));
     let mut records = Vec::new();
-    if let Some(user_text) = user_text.as_deref().filter(|text| !text.is_empty()) {
+    if user_text.as_deref().is_some_and(|text| !text.is_empty())
+        || prompt.get("_pilot_redacted_prompt") == Some(&Value::Bool(true))
+    {
         let nanos = event_ts_nanos(prompt);
         let mut fields = timed_identity(&nanos, "other");
         fields.insert(
             "gen_ai.provider.name".into(),
             Value::String(infer_provider(&model)),
         );
-        fields.insert(
-            "gen_ai.input.messages_delta".into(),
-            json!([user_text_message(user_text)]),
-        );
+        if let Some(user_text) = user_text.as_deref().filter(|text| !text.is_empty()) {
+            fields.insert(
+                "gen_ai.input.messages_delta".into(),
+                json!([user_text_message(user_text)]),
+            );
+        }
         fields.insert(
             "agent.cursor.hook_event_name".into(),
             Value::String("beforeSubmitPrompt".into()),
@@ -5406,7 +5414,7 @@ mod skill_config_history_contracts {
     use super::super::super::common::{Env, HookRequest};
     use super::*;
     #[test]
-    fn legacy_capture_setting_preserves_injected_skill_and_prompt_through_real_hook_pipeline() {
+    fn content_policy_preserves_identity_and_filters_prompt_through_real_hook_pipeline() {
         for setting in [None, Some(false), Some(true)] {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path();
@@ -5499,23 +5507,34 @@ mod skill_config_history_contracts {
                 })
                 .collect();
             let serialized = serde_json::to_string(&records).unwrap();
-            assert!(serialized.contains(path));
-            assert!(serialized.contains("private prompt"));
+            if setting == Some(false) {
+                assert!(!serialized.contains(path));
+                assert!(!serialized.contains("private prompt"));
+            } else {
+                assert!(serialized.contains(path));
+                assert!(serialized.contains("private prompt"));
+            }
             let call = records
                 .iter()
                 .find(|r| {
                     r["event.name"] == "tool.call" && r["gen_ai.skill.name"] == "private-skill"
                 })
                 .unwrap();
-            assert_eq!(call["gen_ai.tool.call.arguments"], json!({"path":path}));
+            if setting == Some(false) {
+                assert!(call.get("gen_ai.tool.call.arguments").is_none());
+            } else {
+                assert_eq!(call["gen_ai.tool.call.arguments"], json!({"path":path}));
+            }
             assert_eq!(call["gen_ai.skill.id"], "private-skill");
             let id = call["gen_ai.tool.call.id"].clone();
             assert!(records.iter().any(|r| r["event.name"] == "tool.result"
                 && r["gen_ai.skill.name"] == "private-skill"
                 && r["gen_ai.tool.call.id"] == id));
-            assert!(records.iter().any(|r| r["event.name"] == "llm.response"
-                && r.get("gen_ai.output.messages")
-                    .is_some_and(|m| m.to_string().contains(id.as_str().unwrap()))));
+            if setting != Some(false) {
+                assert!(records.iter().any(|r| r["event.name"] == "llm.response"
+                    && r.get("gen_ai.output.messages")
+                        .is_some_and(|m| m.to_string().contains(id.as_str().unwrap()))));
+            }
             let later = records
                 .iter()
                 .find(|r| {
@@ -5523,14 +5542,19 @@ mod skill_config_history_contracts {
                         && r["gen_ai.step.id"].as_str().unwrap_or("").ends_with(":s2")
                 })
                 .unwrap();
-            assert!(later["gen_ai.input.messages_delta"].is_array());
-            assert!(later["gen_ai.input.messages"].is_array());
-            assert!(later["gen_ai.input.messages"]
-                .to_string()
-                .contains("private prompt"));
-            assert!(later["gen_ai.input.messages"]
-                .to_string()
-                .contains(id.as_str().unwrap()));
+            if setting == Some(false) {
+                assert!(later.get("gen_ai.input.messages_delta").is_none());
+                assert!(later.get("gen_ai.input.messages").is_none());
+            } else {
+                assert!(later["gen_ai.input.messages_delta"].is_array());
+                assert!(later["gen_ai.input.messages"].is_array());
+                assert!(later["gen_ai.input.messages"]
+                    .to_string()
+                    .contains("private prompt"));
+                assert!(later["gen_ai.input.messages"]
+                    .to_string()
+                    .contains(id.as_str().unwrap()));
+            }
             assert_eq!(fs::read(&config_file).unwrap(), original_config);
         }
     }

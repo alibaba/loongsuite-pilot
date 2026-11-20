@@ -72,7 +72,7 @@ impl Entry {
         let f = Fixture::new();
         f.package_with(&[(
             "agents.d/cursor.json",
-            include_str!("../../agents.d/cursor.json"),
+            include_str!("../fixtures/legacy-cursor-agent.json"),
         )]);
         let cache = f.root.path().join("cache");
         let installed = cache.join("versions/1.2.0_installed");

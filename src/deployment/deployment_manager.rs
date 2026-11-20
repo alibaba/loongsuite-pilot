@@ -1352,8 +1352,10 @@ mod tests {
     }
 
     fn definition(root: &Path) -> AgentDefinition {
-        let def: AgentDefinition =
-            serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+        let def: AgentDefinition = serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy-cursor-agent.json"
+        ))
+        .unwrap();
         super::super::hook_install_service::definition_at_install_home(
             &def,
             root.join("agent").to_str().unwrap(),

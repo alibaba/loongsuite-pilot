@@ -9,7 +9,7 @@ mod claude_code;
 pub(crate) mod codex;
 mod common;
 mod copilot;
-mod cursor;
+pub(crate) mod cursor;
 mod grok_build;
 mod kiro_cli;
 mod payload_decoder;
@@ -57,7 +57,8 @@ pub fn run_hook_process(agent: &str) -> i32 {
     let terminal = std::io::stdin().is_terminal();
     let mut raw = Vec::new();
     if !terminal {
-        if bounded_qoder {
+        if bounded_qoder || (agent == "cursor" && args.iter().any(|arg| arg == "--defer-assembly"))
+        {
             let (send, receive) = std::sync::mpsc::sync_channel(1);
             std::thread::spawn(move || {
                 let mut payload = Vec::new();
