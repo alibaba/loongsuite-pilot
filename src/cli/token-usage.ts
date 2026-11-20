@@ -52,6 +52,7 @@ export interface RangeData {
   agentShares?: AgentShareEntry[];
   providerShares?: ProviderShareEntry[];
   repoShares?: RepoShareEntry[];
+  incompleteBreakdownDays?: string[];
 }
 
 export interface MetricsSummary {
@@ -284,6 +285,10 @@ export function renderTokenUsage(
 
   lines.push(...renderKpis(rangeData, color));
   lines.push('');
+  const incompleteDays = rangeData.incompleteBreakdownDays?.length ?? 0;
+  if (incompleteDays > 0) {
+    lines.push(color.yellow(`Historical breakdowns are incomplete for ${incompleteDays} ${incompleteDays === 1 ? 'day' : 'days'}.`), '');
+  }
   lines.push(renderTokenBreakdown(rangeData, width, color));
   lines.push('');
   lines.push(...renderShareSection('Providers', rangeData.providerShares ?? [], width, color, {

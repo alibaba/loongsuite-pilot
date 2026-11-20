@@ -111,6 +111,20 @@ describe('token-usage CLI', () => {
     expect(output).toContain('Token Trend (7d)');
   });
 
+  it('identifies when the selected range has incomplete historical breakdowns', () => {
+    const data = makeViewData();
+    data.summary!.ranges!.sevenDays = {
+      totalTokens: 1800,
+      incompleteBreakdownDays: ['2026-06-20', '2026-06-21'],
+    };
+    const options = { color: false, help: false };
+
+    expect(renderTokenUsage(data, { ...options, range: 'sevenDays' }, 100))
+      .toContain('Historical breakdowns are incomplete for 2 days.');
+    expect(renderTokenUsage(data, { ...options, range: 'today' }, 100))
+      .not.toContain('Historical breakdowns are incomplete');
+  });
+
   it('keeps table columns aligned when color is enabled', () => {
     const output = renderTokenUsage(makeViewData(), {
       range: 'today',
