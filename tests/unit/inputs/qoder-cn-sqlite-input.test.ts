@@ -43,9 +43,10 @@ describe.skipIf(!hasNodeSqlite())('QoderCnSqliteInput', () => {
     expect(stateStore.getRowId('qoder-cn-sqlite')).toBe(2);
   });
 
-  it('reads at most one page and resumes from the rowid cursor', async () => {
+  it('drains multiple bounded pages and resumes from the last rowid', async () => {
     stateStore.setRowId('qoder-cn-sqlite', 0);
-    const total = SQLITE_SYNC_PAGE + 1;
+    const perCycle = 10 * SQLITE_SYNC_PAGE;
+    const total = perCycle + 1;
     const values: string[] = [];
     for (let i = 0; i < total; i++) {
       values.push(`('m-${i}','sess','req-${i}','assistant','{"prompt_tokens":1,"completion_tokens":1}',${i})`);
@@ -56,8 +57,8 @@ describe.skipIf(!hasNodeSqlite())('QoderCnSqliteInput', () => {
     );
 
     const first = await collectOnce(makeInput());
-    expect(first).toHaveLength(SQLITE_SYNC_PAGE);
-    expect(stateStore.getRowId('qoder-cn-sqlite')).toBe(SQLITE_SYNC_PAGE);
+    expect(first).toHaveLength(perCycle);
+    expect(stateStore.getRowId('qoder-cn-sqlite')).toBe(perCycle);
 
     const second = await collectOnce(makeInput());
     expect(second).toHaveLength(1);

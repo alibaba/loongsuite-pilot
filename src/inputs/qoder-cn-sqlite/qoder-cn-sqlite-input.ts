@@ -2,7 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { ClientType } from '../../types/index.js';
-import { queryReadonly, SQLITE_SYNC_PAGE } from '../../utils/node-sqlite.js';
+import { queryReadonly } from '../../utils/node-sqlite.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome } from '../../utils/fs-utils.js';
@@ -81,7 +81,7 @@ export class QoderCnSqliteInput extends BaseSqliteInput {
     }
   }
 
-  protected async readNewRows(lastRowId: number): Promise<SqliteRow[]> {
+  protected async readNewRows(lastRowId: number, limit: number): Promise<SqliteRow[]> {
     const sql = `
       SELECT
         rowid,
@@ -97,10 +97,10 @@ export class QoderCnSqliteInput extends BaseSqliteInput {
         AND token_info != ''
         AND json_valid(token_info)
       ORDER BY rowid ASC
-      LIMIT ${SQLITE_SYNC_PAGE}
+      LIMIT ?
     `;
 
-    return queryReadonly<QoderCnTokenRow>(this.dbPath, sql, [lastRowId]);
+    return queryReadonly<QoderCnTokenRow>(this.dbPath, sql, [lastRowId, limit]);
   }
 
   protected async transformRow(row: SqliteRow): Promise<AgentActivityEntry | null> {
