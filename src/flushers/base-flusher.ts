@@ -9,6 +9,11 @@ export class CodexOutputDurabilityError extends Error {
   }
 }
 
+export interface BatchDeliveryOptions {
+  /** Surface target acceptance failures so the source checkpoint can wait. */
+  requireAcceptance?: boolean;
+}
+
 /**
  * Abstract base for all data output flushers.
  * Extend this to add new output destinations (SLS, JSONL, HTTP, etc.).
@@ -19,7 +24,10 @@ export abstract class BaseFlusher {
   abstract send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void>;
   abstract sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): Promise<void>;
   /** Retain the returned attempt for one dispatch so fan-out can track accepted targets across retries. */
-  createBatchDelivery(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): () => Promise<void> {
+  createBatchDelivery(
+    entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal,
+    _options?: BatchDeliveryOptions,
+  ): () => Promise<void> {
     return () => signal ? this.sendBatch(entries, logicalBytes, signal) : this.sendBatch(entries, logicalBytes);
   }
   abstract flush(): Promise<void>;

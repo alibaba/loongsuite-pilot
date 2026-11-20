@@ -7,6 +7,8 @@ import * as path from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { InputManager } from '../../../src/core/input-manager.js';
+import { JsonlFlusher } from '../../../src/flushers/jsonl-flusher.js';
+import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
 import { MinimaxCodeSessionInput } from '../../../src/inputs/minimax-code-session/minimax-code-session-input.js';
 import { MockFlusher } from '../../helpers/mock-flusher.js';
 
@@ -147,6 +149,64 @@ it('holds native completion behind output acceptance while other inputs can save
     });
   } finally {
     accept();
+    await manager.stopAll();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+it('retries a failed JSONL row through fan-out without advancing the source or redelivering accepted rows', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minimax-session-fanout-'));
+  const manager = new InputManager();
+  try {
+    const f = await setup(root);
+    await fs.writeFile(f.source, f.sourceText);
+    await f.addObservations(f.lines);
+    const { input, stateStore } = await f.openInput();
+    const outputDir = path.join(root, 'output');
+    const jsonl = new JsonlFlusher({ enabled: true, outputDir, rotateDaily: false, maxFileSizeMb: 10 });
+    await jsonl.start();
+    const healthy = new MockFlusher('healthy');
+    const send = jsonl.send.bind(jsonl);
+    const attempted: string[] = [];
+    let recover = false;
+    let failure!: () => void;
+    const failedRow = new Promise<void>(resolve => { failure = resolve; });
+    vi.spyOn(jsonl, 'send').mockImplementation(async entry => {
+      const id = entry['event.id'];
+      attempted.push(id);
+      if (!recover && attempted.length > 1) {
+        failure();
+        throw new Error('injected JSONL write failure between rows');
+      }
+      await send(entry);
+    });
+    manager.setFlusher(new MultiFlusher([healthy, jsonl]));
+    manager.registerInput(input);
+    await input.start();
+    await failedRow;
+
+    stateStore.setOffset('unrelated-input', 1);
+    await stateStore.save();
+    const statePath = path.join(root, 'state.json');
+    const outputFile = path.join(outputDir, 'minimax-code-all.jsonl');
+    expect(JSON.parse(await fs.readFile(statePath, 'utf8'))).toEqual({ 'unrelated-input': { lastOffset: 1 } });
+    expect(await fs.readdir(f.observations)).toHaveLength(4);
+    expect((await fs.readFile(outputFile, 'utf8')).trim().split('\n')).toHaveLength(1);
+    expect(healthy.batchCalls).toHaveLength(1);
+
+    const flushed = once(manager, 'flushed');
+    recover = true;
+    await flushed;
+    await vi.waitFor(async () => {
+      const saved = JSON.parse(await fs.readFile(statePath, 'utf8'));
+      expect(Object.keys(saved).filter(key => key.startsWith('minimax-code-session:'))).toHaveLength(2);
+    });
+    const ids = (await fs.readFile(outputFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line)['event.id']);
+    expect(ids).toHaveLength(8);
+    expect(new Set(ids).size).toBe(8);
+    expect(attempted[2]).toBe(attempted[1]);
+    expect(healthy.batchCalls).toHaveLength(1);
+  } finally {
     await manager.stopAll();
     await fs.rm(root, { recursive: true, force: true });
   }

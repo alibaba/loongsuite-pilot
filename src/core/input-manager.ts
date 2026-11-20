@@ -539,8 +539,8 @@ export class InputManager extends EventEmitter {
   }
 
   private async dispatchEntries(inputId: string, entries: AgentActivityEntry[], batchBytes: number, logicalBytes?: readonly number[], signalOverride?: AbortSignal): Promise<void> {
-    const requireDelivery = inputId === 'qwen-work-cn-collaboration'
-      || this.inputs.get(inputId)?.agentType === ClientType.MiniMaxCode;
+    const requireAcceptance = this.inputs.get(inputId)?.agentType === ClientType.MiniMaxCode;
+    const requireDelivery = inputId === 'qwen-work-cn-collaboration' || requireAcceptance;
     if (!this.flusher) {
       logger.warn('no flusher set, dropping entries', { count: entries.length });
       this.alarmManager?.record(
@@ -556,7 +556,9 @@ export class InputManager extends EventEmitter {
     const counter = this.counters.get(inputId);
     const signal = signalOverride ?? this.entryAbortControllers.get(inputId)?.signal;
     try {
-      const deliver = this.flusher.createBatchDelivery(entries, logicalBytes, signal);
+      const deliver = this.flusher.createBatchDelivery(
+        entries, logicalBytes, signal, requireAcceptance ? { requireAcceptance } : undefined,
+      );
       let quotaAlarmed = false;
       let deliveryRetryMs = 1000;
       while (true) {

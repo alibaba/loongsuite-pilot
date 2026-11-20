@@ -1,4 +1,4 @@
-import { BaseFlusher } from './base-flusher.js';
+import { BaseFlusher, type BatchDeliveryOptions } from './base-flusher.js';
 import type { AgentActivityEntry } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -43,10 +43,14 @@ export class MultiFlusher extends BaseFlusher {
     await this.createBatchDelivery(entries, logicalBytes, signal)();
   }
 
-  override createBatchDelivery(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): () => Promise<void> {
-    const requireAcceptance = entries.some(entry => entry['agent.source'] === 'qwen-work-cn-collaboration');
+  override createBatchDelivery(
+    entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal,
+    options?: BatchDeliveryOptions,
+  ): () => Promise<void> {
+    const requireAcceptance = options?.requireAcceptance
+      || entries.some(entry => entry['agent.source'] === 'qwen-work-cn-collaboration');
     const targets = this.flushers.map(flusher => ({
-      flusher, accepted: false, deliver: flusher.createBatchDelivery(entries, logicalBytes, signal),
+      flusher, accepted: false, deliver: flusher.createBatchDelivery(entries, logicalBytes, signal, options),
     }));
     return async () => {
       const pending = targets.filter(target => !target.accepted);
@@ -64,8 +68,8 @@ export class MultiFlusher extends BaseFlusher {
       }
       // A terminal durability failure must not be hidden by another target's
       // retryable quota error. Successful targets remain accepted in either case.
-      const fatal = failures.find(error => (error as Error & { cause?: Error }).cause?.name !== 'CodexTurnJournalCapacityError');
-      if (fatal) throw fatal;
+      const fatal = failures.findIndex(error => (error as Error & { cause?: Error } | undefined)?.cause?.name !== 'CodexTurnJournalCapacityError');
+      if (fatal >= 0) throw failures[fatal];
       if (failures.length) throw failures[0];
     };
   }
