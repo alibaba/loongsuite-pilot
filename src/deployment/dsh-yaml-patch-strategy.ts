@@ -38,13 +38,18 @@ const STALE_LOCK_MS = 30_000;
  *   - Appending never creates a second YAML document. DSH parses the file as
  *     a single document whose root must be a sequence, so appending is only
  *     allowed when the existing root is a block sequence (`- ` rows) or the
- *     file carries no meaningful content. A bare `[]` placeholder (how DSH
- *     serializes an empty patch list) is dropped before appending: an empty
- *     flow sequence followed by block-sequence rows would parse as two
- *     documents and crash DSH at startup (js-yaml "document separator is
- *     expected"). A non-sequence root refuses deployment instead of
- *     corrupting the file, and a file already broken by an older append is
- *     repaired on the next deploy cycle.
+ *     file carries no meaningful content. The optional document preamble
+ *     (`%YAML` directives, a leading `---` marker) and a trailing `...`
+ *     document-end marker are recognized in both classification and
+ *     post-composition validation: `---\n- insert: []` is a valid block
+ *     sequence, and an append is inserted before a trailing `...` so the
+ *     explicit document end stays the file's last line. A bare `[]`
+ *     placeholder (how DSH serializes an empty patch list) is dropped before
+ *     appending: an empty flow sequence followed by block-sequence rows
+ *     would parse as two documents and crash DSH at startup (js-yaml
+ *     "document separator is expected"). A non-sequence root refuses
+ *     deployment instead of corrupting the file, and a file already broken
+ *     by an older append is repaired on the next deploy cycle.
  *   - The block's BEGIN marker carries `created-file: true|false` so
  *     `undeploy(def)` — which only sees `AgentDefinition`, not in-memory
  *     deploy state — can decide whether to delete a now-empty file
@@ -210,10 +215,20 @@ export class DshYamlPatchStrategy implements DeployStrategy {
           const base = rootKind === 'empty-flow-seq'
             ? this.withoutBareEmptySeqLines(originalBytes)
             : originalBytes;
-          const sep = base.length > 0 && !base.toString('utf-8').endsWith('\n')
+          // An explicit document-end marker (`...`) must stay the file's
+          // last line: insert our block before it. Appending after it would
+          // start a second document and crash DSH at startup.
+          const docEnd = this.splitTrailingDocumentEnd(base);
+          const head = docEnd ? docEnd.head : base;
+          const sep = head.length > 0 && !head.toString('utf-8').endsWith('\n')
             ? Buffer.from('\n')
             : Buffer.alloc(0);
-          nextBytes = Buffer.concat([base, sep, Buffer.from(newBlock)]);
+          nextBytes = Buffer.concat([
+            head,
+            sep,
+            Buffer.from(newBlock),
+            docEnd ? docEnd.tail : Buffer.alloc(0),
+          ]);
         }
         // Final guard: never write a file DSH would fail to parse. This also
         // covers the empty-flow-seq replacement above, which must yield a
@@ -318,8 +333,13 @@ export class DshYamlPatchStrategy implements DeployStrategy {
         // a null root. Restore the empty-sequence placeholder DSH itself
         // writes, keeping the file a valid single document. A truly empty
         // (0-byte) pre-existing file stays empty, per the created-file
-        // contract above.
-        if (nextBytes.length > 0 && this.meaningfulLines(nextBytes).length === 0) {
+        // contract above. A remainder that is only document preamble (e.g. a
+        // bare leading `---` kept from `---\n[]\n`) also parses to a null
+        // root, so the placeholder is restored there too.
+        if (
+          nextBytes.length > 0
+          && this.withoutDocumentPreamble(this.meaningfulRawLines(nextBytes)).length === 0
+        ) {
           const restored = nextBytes.toString('utf-8').endsWith('\n')
             ? `${nextBytes.toString('utf-8')}[]\n`
             : `${nextBytes.toString('utf-8')}\n[]\n`;
@@ -354,20 +374,15 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     return Buffer.byteLength(prefix) + 1;
   }
 
-  /** Non-blank, non-comment lines (trimmed) — the YAML-meaningful content. */
-  private meaningfulLines(bytes: Buffer): string[] {
-    return bytes.toString('utf-8')
-      .split(/\r?\n/)
-      .map(line => line.trim())
-      .filter(line => line.length > 0 && !line.startsWith('#'));
-  }
-
   /**
    * Classify the root of existing non-Pilot content before appending our
    * block-sequence entry:
-   *   - `empty`: only comments/blank lines — safe to append.
+   *   - `empty`: only comments/blank lines/document preamble (`%YAML`, `---`)
+   *     — safe to append.
    *   - `block-seq`: first meaningful line starts with `- ` — the existing
-   *     root is a block sequence, so our row continues it.
+   *     root is a block sequence, so our row continues it. The optional
+   *     document start marker (`---`, optionally preceded by directives) is
+   *     skipped: `---\n- insert: []` is a valid block sequence.
    *   - `empty-flow-seq`: the only meaningful line is a column-0 bare `[]`,
    *     the placeholder DSH writes for an empty patch list — drop it and
    *     append (an empty flow sequence followed by block rows would parse as
@@ -381,7 +396,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
    * never be treated as the root placeholder.
    */
   private classifyExistingRoot(bytes: Buffer): 'empty' | 'block-seq' | 'empty-flow-seq' | 'refuse' {
-    const lines = this.meaningfulRawLines(bytes);
+    const lines = this.withoutDocumentPreamble(this.meaningfulRawLines(bytes));
     if (lines.length === 0) return 'empty';
     if (lines[0].startsWith('- ')) return 'block-seq';
     if (lines.length === 1 && this.isColumn0EmptyFlowSeq(lines[0])) return 'empty-flow-seq';
@@ -393,12 +408,58 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     return /^\[\][ \t]*$/.test(line);
   }
 
+  /**
+   * Split off a trailing column-0 standalone `...` document-end line (with
+   * everything from it to EOF — normally just the trailing newline) so an
+   * append can be inserted before it, keeping the explicit document end the
+   * file's last line. Returns undefined when the last meaningful line is not
+   * `...`.
+   */
+  private splitTrailingDocumentEnd(bytes: Buffer): { head: Buffer; tail: Buffer } | undefined {
+    const text = bytes.toString('utf-8');
+    const lines = text.split('\n');
+    let last = lines.length - 1;
+    while (last >= 0 && lines[last].replace(/\r$/, '').trim().length === 0) last -= 1;
+    if (last < 0 || !/^\.\.\.[ \t]*$/.test(lines[last].replace(/\r$/, ''))) return undefined;
+    let headLen = 0;
+    for (let i = 0; i < last; i++) headLen += Buffer.byteLength(lines[i], 'utf-8') + 1;
+    return { head: bytes.subarray(0, headLen), tail: bytes.subarray(headLen) };
+  }
+
   /** Non-blank, non-comment raw lines with indentation preserved. */
   private meaningfulRawLines(bytes: Buffer): string[] {
     return bytes.toString('utf-8')
+      .replace(/^\uFEFF/, '')
       .split(/\r?\n/)
       .map(line => line.replace(/\r$/, ''))
       .filter(line => line.trim().length > 0 && !line.trimStart().startsWith('#'));
+  }
+
+  /**
+   * Strip the optional YAML document preamble: `%DIRECTIVE` lines and the
+   * document start marker `---` (both column 0), so classification sees the
+   * actual root node. A standalone `---` line (even with a trailing comment)
+   * is dropped; content sharing the marker line (`--- - foo`, `--- []`) keeps
+   * the remainder as the first content line. Block-scalar content is always
+   * indented, so a column-0 `---` can only be a real document marker.
+   */
+  private withoutDocumentPreamble(lines: string[]): string[] {
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (line.startsWith('%')) {
+        i += 1;
+        continue;
+      }
+      const match = /^---(?:[ \t]+(.*))?$/.exec(line);
+      if (!match) return lines.slice(i);
+      const rest = (match[1] ?? '').trim();
+      if (rest.length > 0 && !rest.startsWith('#')) {
+        return [rest, ...lines.slice(i + 1)];
+      }
+      i += 1;
+    }
+    return [];
   }
 
   /**
@@ -421,20 +482,31 @@ export class DshYamlPatchStrategy implements DeployStrategy {
    * document whose root is a block sequence of patch rows. Returns a reason
    * string when the bytes would crash `parsePatchList`, or null when valid.
    *
+   * The optional document preamble (`%YAML` directives, a leading `---`
+   * marker) is skipped before reading the root: `---\n- insert: []` is a
+   * valid single block-sequence document.
+   *
    * Second-root detection is indentation-aware: only a column-0 `[]`/`{}`
-   * line can be a second document root. An indented one is block-scalar
-   * content inside a user row (e.g. `value: |` + `      []`), which is a
-   * perfectly valid single document and must not be rejected.
+   * line, or a column-0 `---` after the root began, can start a second
+   * document. Indented occurrences are block-scalar content inside a user
+   * row (e.g. `value: |` + `      []`), which is a perfectly valid single
+   * document and must not be rejected. A column-0 `...` (document end) is
+   * only valid as the very last line: content after it would form a second
+   * document and crash DSH.
    */
   private composedPatchInvalidReason(bytes: Buffer): string | null {
-    const lines = this.meaningfulRawLines(bytes);
+    const lines = this.withoutDocumentPreamble(this.meaningfulRawLines(bytes));
     if (lines.length === 0) return 'no patch rows';
     if (!lines[0].startsWith('- ')) {
       return `root is not a block sequence (${lines[0].trim().slice(0, 40)})`;
     }
-    for (const line of lines.slice(1)) {
-      if (/^(?:\[\]|\{\})[ \t]*$/.test(line)) {
-        return `second document root (${line.trim()})`;
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (/^(?:\[\]|\{\})[ \t]*$/.test(line) || /^---(?:[ \t]|$)/.test(line)) {
+        return `second document root (${line.trim().slice(0, 40)})`;
+      }
+      if (/^\.\.\.[ \t]*$/.test(line) && i < lines.length - 1) {
+        return `content after document end marker (${line.trim().slice(0, 40)})`;
       }
     }
     return null;

@@ -136,6 +136,93 @@ describe('DshYamlPatchStrategy', () => {
     expect(content.startsWith('# user comment line\n- id: user-other-plugin\n  name: file:///tmp/other.mjs\n')).toBe(true);
   });
 
+  it.each([
+    ['review fixture', '---\n- insert:\n    id: user-row\n    name: file:///tmp/user.mjs\n'],
+    ['marker + comment', '--- # patches\n- insert:\n    id: user-row\n    name: file:///tmp/user.mjs\n'],
+    ['content on marker line', '--- - insert:\n    id: user-row\n    name: file:///tmp/user.mjs\n'],
+    ['directives before marker', '%YAML 1.2\n---\n- insert:\n    id: user-row\n    name: file:///tmp/user.mjs\n'],
+    ['BOM + marker', '\uFEFF---\n- insert:\n    id: user-row\n    name: file:///tmp/user.mjs\n'],
+  ])('deploys next to a block sequence with an optional document marker (%s)', async (_name, original) => {
+    await fs.writeFile(patchPath, original);
+    const def = makeDef();
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(true);
+    const content = await readPatch();
+    // The original bytes survive verbatim, before the pilot block.
+    expect(content.startsWith(original)).toBe(true);
+    expect(content.indexOf('    id: user-row')).toBeLessThan(content.indexOf(`# BEGIN ${MARKER}`));
+    // Stable: no redeploy churn.
+    expect(await strategy.needsDeploy(def)).toBe(false);
+    expect((await strategy.deploy(def)).success).toBe(true);
+    expect(await readPatch()).toBe(content);
+    // Undeploy restores the exact original bytes.
+    expect(await strategy.undeploy(def)).toBe(true);
+    expect(await readPatch()).toBe(original);
+  });
+
+  it('replaces the [] placeholder after a leading --- marker and restores it on undeploy', async () => {
+    const original = '---\n[]\n';
+    await fs.writeFile(patchPath, original);
+    const def = makeDef();
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(true);
+    const content = await readPatch();
+    expect(content.startsWith('---\n')).toBe(true);
+    expect(content).not.toMatch(/^\[\][ \t]*$/m);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+    expect(await strategy.undeploy(def)).toBe(true);
+    expect(await readPatch()).toBe(original);
+  });
+
+  it('inserts the pilot block before a trailing ... document-end marker', async () => {
+    const original = '- insert:\n    id: user-row\n    name: file:///tmp/user.mjs\n...\n';
+    await fs.writeFile(patchPath, original);
+    const def = makeDef();
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(true);
+    const content = await readPatch();
+    // The document-end marker stays the file's last line, user bytes intact.
+    expect(content.startsWith('- insert:\n    id: user-row\n    name: file:///tmp/user.mjs\n')).toBe(true);
+    expect(content.endsWith('...\n')).toBe(true);
+    expect(content.indexOf(`# BEGIN ${MARKER}`)).toBeLessThan(content.lastIndexOf('...'));
+    expect(await strategy.needsDeploy(def)).toBe(false);
+    expect((await strategy.deploy(def)).success).toBe(true);
+    expect(await readPatch()).toBe(content);
+    expect(await strategy.undeploy(def)).toBe(true);
+    expect(await readPatch()).toBe(original);
+  });
+
+  it('refuses a file with content after a ... document-end marker (second document)', async () => {
+    const broken = '- insert:\n    id: user-row\n...\n- insert:\n    id: second-doc\n';
+    await fs.writeFile(patchPath, broken);
+    const def = makeDef();
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(false);
+    expect(await readPatch()).toBe(broken);
+  });
+
+  it('refuses a file whose root is split by a mid-file --- marker (second document)', async () => {
+    const broken = '---\n- insert:\n    id: first-doc\n---\n- insert:\n    id: second-doc\n';
+    await fs.writeFile(patchPath, broken);
+    const def = makeDef();
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(false);
+    expect(await readPatch()).toBe(broken);
+    await expect(fs.stat(enabledMarkerPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('flags a mid-file --- second root on a deployed file for repair', async () => {
+    const def = makeDef();
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    const current = await readPatch();
+    // A second document appended after the managed block (external edit).
+    await fs.writeFile(patchPath, current + '---\n- insert:\n    id: second-doc\n');
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/second document root/);
+  });
+
   it('is idempotent on repeated deploy', async () => {
     const def = makeDef();
     await strategy.deploy(def);
