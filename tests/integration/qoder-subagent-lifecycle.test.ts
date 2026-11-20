@@ -99,7 +99,8 @@ async function spansFor(entries: AgentActivityEntry[]) {
 }
 
 describe.each(['qoder'] as const)('%s independent native child work', agentId => {
-  it.each(['both wakeups', 'parent only', 'descriptor after restart', 'missing descriptor', 'conflicting descriptor',
+  it.each(['both wakeups', 'parent only', 'descriptor after restart', 'modern parent marker', 'modern child marker',
+    'missing descriptor', 'conflicting descriptor',
     'explicit independent prompt', 'non-CLI owner', 'desktop owner', 'outside transcript', 'aliased transcript',
     'descriptor cap'])(
     'uses only corroborated legacy CLI 1.1.61 delegation with %s', async mode => {
@@ -119,9 +120,13 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
       const childPath = h.child(descriptor.agentId);
       await fs.mkdir(path.dirname(childPath), { recursive: true });
       if (mode === 'explicit independent prompt') child[0].isDelegatedTask = false;
+      if (mode === 'modern child marker') child[0].isDelegatedTask = true;
       if (mode === 'non-CLI owner') delete parent.find(row => row.type === 'user').entrypoint;
+      if (mode === 'modern parent marker') {
+        for (const row of parent) if (row.type === 'assistant') row.entrypoint = 'cli';
+      }
       await h.write(null, parent);
-      if (mode === 'both wakeups') await h.write(descriptor.agentId, child);
+      if (mode === 'both wakeups' || mode === 'modern child marker') await h.write(descriptor.agentId, child);
       else if (mode === 'outside transcript' || mode === 'aliased transcript') {
         descriptor.transcriptPath = path.join(h.root, 'other-session.jsonl');
         await fs.writeFile(descriptor.transcriptPath, jsonl(child));
@@ -136,7 +141,7 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
         transcriptPath: ['outside transcript', 'aliased transcript'].includes(mode) ? descriptor.transcriptPath : childPath };
       const putTask = (item: typeof task) => fs.writeFile(
         path.join(path.dirname(childPath), `task-${item.taskId}.json`), JSON.stringify(item));
-      if (!['missing descriptor', 'descriptor after restart'].includes(mode)) await putTask(task);
+      if (!['missing descriptor', 'descriptor after restart', 'modern child marker'].includes(mode)) await putTask(task);
       if (mode === 'conflicting descriptor') await putTask({ ...task, taskId: task.taskId + '-conflict' });
       if (mode === 'descriptor cap') {
         await Promise.all(Array.from({ length: 129 }, (_, i) =>
@@ -155,7 +160,7 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
       const children = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT'
         && span.attributes['gen_ai.agent.id'] === task.agentId);
       expect(parentTool).toBeDefined();
-      if (['both wakeups', 'parent only', 'descriptor after restart'].includes(mode)) {
+      if (['both wakeups', 'parent only', 'descriptor after restart', 'modern parent marker', 'modern child marker'].includes(mode)) {
         expect(children).toHaveLength(1);
         expect(children[0].parentSpanId).toBe(parentTool?.spanContext().spanId);
         expect(children[0].spanContext().traceId).toBe(parentTool?.spanContext().traceId);
