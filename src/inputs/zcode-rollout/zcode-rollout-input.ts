@@ -444,12 +444,7 @@ export class ZCodeRolloutInput extends BaseInput {
       .map((m) => normalizeInputMessage(m))
       .filter(Boolean) as { role: string; content: string }[];
 
-    // Native rollout formats have either complete tool definitions or names only.
-    const systemInstructions: JsonValue[] = (rawInputMessages as unknown[])
-      .map((m) => normalizeInputMessage(m))
-      .filter(Boolean)
-      .filter((m) => m!.role === 'system')
-      .map((m) => ({ type: 'text', content: String(m!.content ?? '') })) as JsonValue[];
+    const systemInstructions = collectSystemInstructions(request);
     const toolDefinitions = extractToolDefinitions(record, request);
 
     // P1 fix: detect first line of a turn (no assistant message in input →
@@ -728,6 +723,39 @@ function normalizeToolCall(tc: unknown): ToolCall | null {
   if (!id || !name) return null;
   const args = r.args ?? r.arguments ?? r.input ?? null;
   return { id, name, args };
+}
+
+function systemInstructionText(value: unknown): string[] {
+  if (!Array.isArray(value)) return typeof value === 'string' && value ? [value] : [];
+  return value.flatMap((part: unknown) => {
+    const entry = recordValue(part);
+    if (!entry || (entry.type !== undefined && entry.type !== 'text')) return [];
+    const text = str(entry.text) ?? str(entry.content);
+    return text ? [text] : [];
+  });
+}
+
+function collectSystemInstructions(request: Record<string, unknown>): JsonValue[] {
+  const instructions = new Set<string>();
+  const reminders = new Set<string>();
+  const messages = Array.isArray(request.messages) ? request.messages : [];
+  const sample = Array.isArray(request.messages_sample_truncated) ? request.messages_sample_truncated : [];
+  for (const value of [...messages, ...sample]) {
+    const message = recordValue(value);
+    if (message?.role === 'system') {
+      for (const text of systemInstructionText(message.content)) instructions.add(text);
+    } else if (message?.role === 'user') {
+      for (const text of systemInstructionText(message.content)) {
+        for (const match of text.matchAll(/<system-reminder>([\s\S]*?)<\/system-reminder>/g)) {
+          const reminder = match[1].trim();
+          if (reminder) reminders.add(reminder);
+        }
+      }
+    }
+  }
+  for (const text of systemInstructionText(recordValue(request.body)?.system)) instructions.add(text);
+  for (const text of reminders) instructions.add(text);
+  return Array.from(instructions, content => ({ type: 'text', content }));
 }
 
 function extractToolDefinitions(record: Record<string, unknown>, request: Record<string, unknown>): JsonValue[] {

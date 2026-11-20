@@ -166,6 +166,29 @@ describe('ZCode native rollout formats', () => {
   });
 
   test.each([
+    'Body instruction',
+    [{ type: 'text', text: 'Body instruction' }, { type: 'text', content: 'Native system role' }],
+  ])('reads body system instructions with explicit roles first (%j)', nativeSystem => {
+    const input = new ManualRollout({ stateStore, rolloutDir });
+    const request = {
+      body: { system: nativeSystem },
+      messages: [
+        { role: 'system', content: 'Native system role' },
+        { role: 'user', content: '<system-reminder> Native wrapper </system-reminder> User text' },
+      ],
+      messages_sample_truncated: [{ role: 'user', content: 'shortened sample' }],
+    };
+    const events = input.buildEntriesFromRolloutLine(baseModelIoLine({ request }));
+    const model = events.filter(event => ['llm.request', 'llm.response'].includes(event['event.name']));
+    expect(model).toHaveLength(2);
+    for (const event of model) expect(event['gen_ai.system_instructions']).toEqual([
+      { type: 'text', content: 'Native system role' },
+      { type: 'text', content: 'Body instruction' },
+      { type: 'text', content: 'Native wrapper' },
+    ]);
+  });
+
+  test.each([
     { scenario: 'short history ID', expected: 'native error' },
     { scenario: 'exact ID', expected: 'exact error' },
     { scenario: 'exact ID beats a short alias', expected: 'native error' },

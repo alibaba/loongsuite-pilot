@@ -25,6 +25,7 @@ const fixtures = path.resolve('tests/unit/hooks/zcode/fixtures');
 it.each([
   'hook-first', 'rollout-first', 'no-hook', 'continued-stop', 'legacy-envelope',
   'documented-stop', 'interrupted-eof', 'native-history-error', 'native-history-error-private',
+  'native-history-error-agent-private',
 ])
   ('collects native ZCode records with %s delivery', async (order) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-zcode-dual-'));
@@ -36,18 +37,21 @@ it.each([
   const hook = new TestHookInput({ stateStore: state, logDir });
   const rollout = new TestRolloutInput({ stateStore: state, rolloutDir });
   const spans: ReadableSpan[] = [];
-  const allowContent = order !== 'native-history-error-private';
+  const globalContent = order !== 'native-history-error-private';
+  const agentContent = order !== 'native-history-error-agent-private';
+  const allowContent = globalContent && agentContent;
   const useNativeError = order === 'native-history-error' || !allowContent;
   const flusher = new OtlpTraceFlusher({
     enabled: true, protocol: 'http/protobuf', serviceName: 'zcode-dual-source',
     endpoints: [{ endpoint: 'http://127.0.0.1:4318' }],
-    captureMessageContent: allowContent,
+    captureMessageContent: globalContent,
   }, undefined, () => ({
     export(batch, callback) { spans.push(...batch); callback({ code: 0 }); },
     shutdown: async () => {},
   }));
   const manager = new InputManager();
   manager.setFlusher(flusher);
+  if (!agentContent) manager.setAgentsConfig({ zcode: { captureMessageContent: false } });
   manager.setUserId('collector-fallback-identity');
   manager.registerInput(hook);
   manager.registerInput(rollout);
@@ -61,12 +65,16 @@ it.each([
     const rolloutRows = [row];
     const nativeCallId = 'call_123456789abcdef';
     const nativeError = 'synthetic file does not exist';
+    const nativeSystem = 'synthetic native system instruction';
     const nativeDefinition = {
       name: 'Read', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } } },
     };
     if (useNativeError) {
       const toolCall = { id: nativeCallId, name: 'Read', input: { path: 'synthetic-file' } };
-      row.request.body = { tools: [{ type: 'function', function: nativeDefinition }] };
+      row.request.body = {
+        tools: [{ type: 'function', function: nativeDefinition }],
+        system: [{ type: 'text', text: nativeSystem }],
+      };
       row.response.finishReason = 'tool_calls';
       row.response.toolCalls = [toolCall];
       const nextTime = Date.parse(row.completedAt) + 1_000;
@@ -167,10 +175,12 @@ it.each([
         expect(byKind('LLM')[0].attributes['gen_ai.tool.definitions']).toContain(JSON.stringify({
           type: 'function', ...nativeDefinition,
         }));
+        expect(byKind('LLM')[0].attributes['gen_ai.system_instructions']).toContain(nativeSystem);
         expect(tool.attributes['gen_ai.tool.call.result']).toContain(nativeError);
         expect(tool.attributes['error.message']).toBe(nativeError);
       } else {
         expect(byKind('LLM')[0].attributes['gen_ai.tool.definitions']).toBeUndefined();
+        expect(byKind('LLM')[0].attributes['gen_ai.system_instructions']).toBeUndefined();
         expect(tool.attributes['gen_ai.tool.call.result']).toBeUndefined();
         expect(tool.attributes['error.message']).toBeUndefined();
         expect(JSON.stringify(tool.status)).not.toContain(nativeError);
