@@ -324,6 +324,18 @@ async fn native_exec_errors_and_immediate_exit_do_not_leave_runtime_or_lock() {
         let (manager, _children) = real_manager(root.path(), "2.0.0");
         if immediate_exit {
             std::fs::write(Path::new(&manager.data_dir).join("exit-immediately"), []).unwrap();
+            #[cfg(target_os = "macos")]
+            {
+                // A newly copied, ad-hoc signed executable can be held at
+                // _dyld_start before it executes main. Admit this exact inode
+                // first so the fixture actually exits during the startup probe.
+                let executable = manager.resolve_executable().unwrap();
+                let status = std::process::Command::new(executable)
+                    .env("LOONGSUITE_PILOT_DATA_DIR", &manager.data_dir)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+            }
             assert!(manager.start().await.unwrap().is_none());
         } else {
             let executable = manager.resolve_executable().unwrap();

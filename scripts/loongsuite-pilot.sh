@@ -430,7 +430,7 @@ process_matches_installed_entry() {
     # macOS has no /proc cmdline. Pair the exact final argv text with the
     # process-name and uid checks above; -ww prevents path truncation.
     local command_line
-    command_line=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
+    command_line=$(LC_ALL=en_US.UTF-8 ps -ww -p "$pid" -o command= 2>/dev/null || true)
     if [ "$expected_process" = native ]; then
         local entry="$command_line"
         case "$kind:$command_line" in
@@ -666,6 +666,26 @@ legacy_monitor_process_matches() {
             argv_count=$arg_index
         done < "/proc/$pid/cmdline"
         [ "${argv_entry##*/}" = "$script_name" ] && [ "$argv_count" -eq 2 ]
+        return
+    fi
+
+    if [ "$(uname -s)" = Darwin ]; then
+        # ps flattens argv and escapes non-ASCII paths in the C locale.
+        # Darwin's KERN_PROCARGS2 retains argc and the original NUL boundaries.
+        /usr/bin/perl -e '
+            my ($pid, $name) = @ARGV;
+            my $mib = pack("i3", 1, 49, $pid); # CTL_KERN, KERN_PROCARGS2
+            my $length = pack("J", 0);
+            exit 1 if syscall(202, $mib, 3, 0, $length, 0, 0) != 0; # SYS___sysctl
+            my $size = unpack("J", $length);
+            exit 1 unless $size >= 4 && $size <= 16 * 1024 * 1024;
+            my $data = "\0" x $size;
+            exit 1 if syscall(202, $mib, 3, $data, $length, 0, 0) != 0;
+            exit 1 unless unpack("i", $data) == 2;
+            # Skip argc, executable path and padding, then extract argv[1].
+            my ($script) = substr($data, 4) =~ /\A[^\0]*\0+[^\0]+\0([^\0]+)\0/;
+            exit((defined($script) && $script =~ m{(?:^|/)\Q$name\E\z}) ? 0 : 1);
+        ' "$pid" "$script_name"
         return
     fi
 

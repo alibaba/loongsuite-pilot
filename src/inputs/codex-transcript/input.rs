@@ -496,9 +496,18 @@ impl InputBody for CodexTranscriptBody {
         self.engine()
             .index_discovered_transcript_owners(rt, &discovered, None)
             .await?;
-        for file in &discovered {
-            self.prepare_startup_source(rt, file, baseline_since, true)
-                .await?;
+        // Startup preparation only reconstructs per-file baseline checkpoints.
+        // Owner indexing is complete, and ordered collection starts afterwards.
+        // Overlap independent identity checks and durable marker writes.
+        use futures_util::{stream, StreamExt};
+        let mut prepared = stream::iter(discovered)
+            .map(|file| async move {
+                self.prepare_startup_source(rt, &file, baseline_since, true)
+                    .await
+            })
+            .buffered(8);
+        while let Some(result) = prepared.next().await {
+            result?;
         }
         self.complete_initial_baseline(rt);
         ensure_dir(&self.wakeup_dir).await;

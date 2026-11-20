@@ -1431,6 +1431,7 @@ dependencies = [
  "fancy-regex",
  "flate2",
  "fs2",
+ "futures-util",
  "glob",
  "hex",
  "hmac",
