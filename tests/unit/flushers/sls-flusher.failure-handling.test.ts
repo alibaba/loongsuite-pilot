@@ -63,20 +63,22 @@ describe('SLS final failure handling', () => {
   });
 
   it('keeps a compatible singleton above the batching target and does not acknowledge rejected Codex data', async () => {
-    const { flusher, counter } = makeFlusher();
+    const { flusher, alarms, counter } = makeFlusher();
     fetchMock.mockImplementation(async () => success());
     await flusher.send(buildTestEntry({ custom_text: 'x'.repeat(2_900_000) }));
     await flusher.flush();
     expect(fetchMock).toHaveBeenCalledOnce();
+    fetchMock.mockResolvedValueOnce(error(413, 'PostBodyTooLarge'));
     await expect(flusher.send(buildTestEntry({ 'gen_ai.agent.type': ClientType.CodexCliHook, custom_text: 'x'.repeat(3_200_000) })))
       .rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
-    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(counter).toMatchObject({ outEntries: 1, outFailed: 1 });
+    expect(alarms.serialize()).toMatchObject([{ failure_class: 'payload', alarm_message: expect.stringContaining('attempts=1') }]);
   });
 
   it('reports official write-quota codes across SDK and HTTP without opening a config breaker', async () => {
     const { flusher, alarms } = makeFlusher(['ak', 'webtracking']);
-    sdkSend.mockRejectedValue(Object.assign(new Error('synthetic quota'), { statusCode: 429, code: 'WriteQuotaExceed' }));
+    sdkSend.mockRejectedValue(Object.assign(new Error('synthetic quota'), { code: 'WriteQuotaExceed' }));
     fetchMock.mockImplementation(async () => error(403, 'ShardWriteQuotaExceed'));
     for (let i = 0; i < 4; i++) {
       await flusher.send(buildTestEntry());
@@ -160,6 +162,52 @@ describe('SLS final failure handling', () => {
     await flusher.shutdown();
     expect(sentIds(fetchMock.mock.calls[3][1])).toEqual(['held']);
     expect(counter).toMatchObject({ outEntries: 1, outFailed: 3 });
+  });
+
+  it('does not release the rest of a held queue after a transient half-open failure', async () => {
+    const { flusher, counter } = makeFlusher();
+    fetchMock.mockImplementation(async () => error(403, 'ProjectForbidden'));
+    for (let i = 0; i < 3; i++) {
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+    }
+    await flusher.send(buildTestEntry({ 'event.id': 'held-a' }));
+    await flusher.send(buildTestEntry({ 'event.id': 'held-b' }));
+    fetchMock.mockRejectedValueOnce(new Error('TimeoutError'));
+    vi.setSystemTime(2_000);
+    await flusher.flush();
+    expect(sentIds(fetchMock.mock.calls[3][1])).toEqual(['held-a']);
+    expect(counter.outFailed).toBe(3);
+
+    await flusher.flush();
+    expect(fetchMock.mock.calls.map(([, options]) => sentIds(options)).slice(3)).toEqual([['held-a']]);
+    expect(counter.outFailed).toBe(3);
+
+    vi.setSystemTime(5_999);
+    await flusher.flush();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    fetchMock.mockImplementation(async () => success());
+    vi.setSystemTime(6_000);
+    await flusher.flush();
+    expect(fetchMock.mock.calls.map(([, options]) => sentIds(options)).slice(3)).toEqual([['held-a'], ['held-a']]);
+    await flusher.flush();
+    expect(sentIds(fetchMock.mock.calls[5][1])).toEqual(['held-b']);
+    expect(counter).toMatchObject({ outEntries: 2, outFailed: 3 });
+  });
+
+  it('measures transport config failures even when a local payload is rejected in the same cycle', async () => {
+    const { flusher, counter } = makeFlusher();
+    fetchMock.mockImplementation(async () => error(404, 'ProjectNotExist'));
+    const oversized = buildTestEntry({ custom_text: 'x'.repeat(3_200_000) });
+    for (let i = 0; i < 3; i++) {
+      await flusher.send(oversized);
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+    }
+    await flusher.send(buildTestEntry());
+    await flusher.flush();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(counter.outFailed).toBe(6);
   });
 
   it('bounds an open circuit queue by forwarding under pressure while another endpoint stays live', async () => {

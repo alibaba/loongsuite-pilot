@@ -162,13 +162,13 @@ These JSONL records contain the endpoint, error summary, batch count, and batch 
 | Class | Handling |
 |-------|----------|
 | `transient` | Alarm after three consecutive cycles with only transient failures at this endpoint. A successful delivery resets the streak. |
-| `quota` | Includes HTTP 429 and recognized SLS write quota codes. Also emits `FLUSH_QUOTA_ALARM`. |
+| `quota` | Recognizes structured SLS write quota codes from the AK SDK and HTTP transports. The HTTP transports also recognize status 429. Emits `FLUSH_QUOTA_ALARM`. |
 | `config` | Recognized terminal project or Logstore errors. Three consecutive cycles with only terminal configuration failures pause queued sends to this endpoint. |
 | `payload` | The backend rejected an oversized request or Pilot detected an oversized WebTracking entry before sending it. A local rejection shows `attempts=0`. |
 
-Transient and configuration alarms each have a one-hour cooldown per endpoint. After a configuration pause, one queued record probes the destination. A failed probe retains a record that can still be sent, and the pause increases up to ten minutes for continuing terminal configuration errors. Pending records remain in memory. Queue pressure and normal shutdown can trigger a normal send attempt during the pause. Codex delivery still waits for a transport acknowledgment.
+Transient and configuration alarms each have a one-hour cooldown per endpoint. After a configuration pause, one queued record probes the destination. A failed transport probe extends the pause up to ten minutes. The probe record stays queued when it can still be sent. A successful delivery reopens the queue. Pending records remain in memory. Queue pressure and normal shutdown can trigger a normal send attempt during the pause.
 
-WebTracking measures the complete JSON request, including tags and separators. An entry too large to fit in a single request is counted as failed and recorded in the local diagnostics. Other entries can still be sent. Pilot preserves the contents of structured fields.
+WebTracking measures the complete JSON request, including tags and separators. In the best-effort queue, an entry too large to fit in a single request is counted as failed and recorded in the local diagnostics. Other entries can still be sent. Codex submits records intact to the configured endpoint and still requires its acknowledgment.
 
 Local JSONL output can help confirm whether collection itself is working before debugging SLS delivery:
 

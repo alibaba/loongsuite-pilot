@@ -285,7 +285,7 @@ export class SlsFlusher extends BaseFlusher {
       const counter = this.endpointCounters.get(endpoint.name);
       const startMs = Date.now();
       try {
-        const outcome = await this.flushEndpoint(endpoint, logs, signal);
+        const outcome = await this.flushEndpoint(endpoint, logs, { signal, durable: true });
         if (counter) {
           counter.outEntries += outcome.sentEntries;
           counter.outBytes += outcome.sentBytes;
@@ -417,11 +417,13 @@ export class SlsFlusher extends BaseFlusher {
   private observeEndpointOutcome(endpoint: SlsEndpoint, outcome: FlushOutcome, trackCircuit: boolean): void {
     const state = this.endpointFailures.get(endpoint.name)!;
     const now = Date.now();
-    const transient = outcome.failures.find(failure => failure.failureClass === 'transient');
+    const attemptedFailures = outcome.failures.filter(failure => failure.attempted);
+    const observedTransport = outcome.sentEntries > 0 || attemptedFailures.length > 0;
+    const transient = attemptedFailures.find(failure => failure.failureClass === 'transient');
     const config = outcome.failures.find(failure => failure.failureClass === 'config');
     const allFailedAs = (failureClass: SlsFailureClass) => outcome.sentEntries === 0
-      && outcome.failures.length > 0 && outcome.failures.every(failure => failure.failureClass === failureClass);
-    state.transientCycles = allFailedAs('transient') ? state.transientCycles + 1 : 0;
+      && attemptedFailures.length > 0 && attemptedFailures.every(failure => failure.failureClass === failureClass);
+    if (observedTransport) state.transientCycles = allFailedAs('transient') ? state.transientCycles + 1 : 0;
 
     if (transient && state.transientCycles >= FAILURES_TO_ESCALATE
       && (state.lastTransientAlarmAt === undefined || now - state.lastTransientAlarmAt >= ALARM_COOLDOWN_MS)) {
@@ -446,21 +448,26 @@ export class SlsFlusher extends BaseFlusher {
 
     // Codex waits for the transport ACK and already owns its durable retry.
     // Preflight-only failures also say nothing about destination readiness.
-    if (!trackCircuit || (outcome.sentEntries === 0 && !outcome.failures.some(failure => failure.attempted))) return;
-    if (!allFailedAs('config')) {
-      if (state.openUntil && outcome.sentEntries > 0) logger.info('SLS circuit breaker recovered', { endpoint: endpoint.name });
+    if (!trackCircuit || !observedTransport) return;
+    if (outcome.sentEntries > 0) {
+      if (state.openUntil) logger.info('SLS circuit breaker recovered', { endpoint: endpoint.name });
       state.configCycles = 0;
       state.openUntil = 0;
       state.backoffMs = 0;
       return;
     }
-    state.configCycles++;
-    if (state.configCycles >= FAILURES_TO_ESCALATE) {
-      state.backoffMs = state.backoffMs === 0 ? INITIAL_CIRCUIT_BACKOFF_MS
-        : Math.min(state.backoffMs * 2, MAX_CIRCUIT_BACKOFF_MS);
-      state.openUntil = now + state.backoffMs;
-      logger.warn('SLS circuit breaker tripped', { endpoint: endpoint.name, backoffMs: state.backoffMs });
+    if (state.openUntil) {
+      // An unsuccessful half-open probe does not establish recovery, even if
+      // it failed for a different reason than the original config error.
+      if (state.openUntil > now) return;
+    } else {
+      state.configCycles = allFailedAs('config') ? state.configCycles + 1 : 0;
+      if (state.configCycles < FAILURES_TO_ESCALATE) return;
     }
+    state.backoffMs = state.backoffMs === 0 ? INITIAL_CIRCUIT_BACKOFF_MS
+      : Math.min(state.backoffMs * 2, MAX_CIRCUIT_BACKOFF_MS);
+    state.openUntil = now + state.backoffMs;
+    logger.warn('SLS circuit breaker tripped', { endpoint: endpoint.name, backoffMs: state.backoffMs });
   }
 
   private async recordFailedBatch(endpoint: SlsEndpoint, logs: QueuedLog[], error: unknown, attempts: number,
@@ -497,11 +504,14 @@ export class SlsFlusher extends BaseFlusher {
     return tags;
   }
 
-  private flushEndpoint(endpoint: SlsEndpoint, logs: QueuedLog[], signal?: AbortSignal): Promise<FlushOutcome> {
+  private flushEndpoint(endpoint: SlsEndpoint, logs: QueuedLog[], {
+    signal,
+    durable = false,
+  }: { signal?: AbortSignal; durable?: boolean } = {}): Promise<FlushOutcome> {
     signal?.throwIfAborted();
     if (endpoint.mode === 'ak') return this.flushViaAk(endpoint, logs, signal);
     if (endpoint.mode === 'apiKey') return this.flushViaApiKey(endpoint, logs, signal);
-    return this.flushViaWebtracking(endpoint, logs, signal);
+    return this.flushViaWebtracking(endpoint, logs, durable, signal);
   }
 
   private buildWebtrackingTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string> {
@@ -576,7 +586,8 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   /** One batch, several requests: sum the per-chunk outcomes so a partial send counts as partial. */
-  private async flushViaWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[], signal?: AbortSignal): Promise<FlushOutcome> {
+  private async flushViaWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[], durable: boolean,
+    signal?: AbortSignal): Promise<FlushOutcome> {
     const total = emptyOutcome();
     this.warnIfMixedAgentTypes(logs);
     const envelope = {
@@ -586,7 +597,9 @@ export class SlsFlusher extends BaseFlusher {
       __tags__: this.buildWebtrackingTags(endpoint, logs[0]?.agentType),
     };
     const envelopeBytes = Buffer.byteLength(JSON.stringify(envelope));
-    const { chunks, oversize } = this.splitForWebtracking(logs, envelopeBytes);
+    // A durable Codex write still submits the original record to the configured
+    // endpoint and relies on its response to establish delivery.
+    const { chunks, oversize } = this.splitForWebtracking(logs, envelopeBytes, !durable);
     if (oversize.length) {
       signal?.throwIfAborted();
       const error = new HttpError(413, '{"errorCode":"PostBodyTooLarge"}');
@@ -658,14 +671,15 @@ export class SlsFlusher extends BaseFlusher {
     return this.recordFailedBatch(endpoint, logs, lastErr, attempts);
   }
 
-  private splitForWebtracking(logs: QueuedLog[], envelopeBytes: number): { chunks: QueuedLog[][]; oversize: QueuedLog[] } {
+  private splitForWebtracking(logs: QueuedLog[], envelopeBytes: number,
+    rejectOversize: boolean): { chunks: QueuedLog[][]; oversize: QueuedLog[] } {
     const chunks: QueuedLog[][] = [];
     const oversize: QueuedLog[] = [];
     let current: QueuedLog[] = [];
     let currentSize = envelopeBytes;
 
     for (const log of logs) {
-      if (envelopeBytes + log.byteSize > MAX_SINGLE_WEBTRACKING_BYTES) {
+      if (rejectOversize && envelopeBytes + log.byteSize > MAX_SINGLE_WEBTRACKING_BYTES) {
         // Altering a stringified canonical field could destroy its structure.
         // Report the failed record exactly as a terminal 413, without sending it.
         oversize.push(log);
