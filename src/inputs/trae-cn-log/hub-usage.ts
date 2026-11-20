@@ -3,9 +3,11 @@ import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { AgentActivityEntry } from '../../types/index.js';
 
+import type { NativeUsageIndex } from './native-usage-index.js';
+
 type Usage = { input: number; output: number; cached?: number };
 type Turn = {
-  session: string; trace: string; tools: Set<string>; reports: Map<number, Usage>;
+  reply: string; session: string; trace: string; tools: Set<string>; reports: Map<number, Usage>;
   lastSeq: number; contiguous: boolean; done: boolean; touched: number;
 };
 type Cursor = { handle: FileHandle; offset: number; skipping: boolean; turn?: Turn };
@@ -95,7 +97,7 @@ export class HubUsage {
             const meta = JSON.parse(row.data);
             if (meta.reply_to_message_id !== reply || !/^[0-9a-f]{24}$/.test(meta.session_id) ||
                 !/^[0-9a-f]{32}$/.test(meta.trace_id)) continue;
-            cursor.turn = { session: meta.session_id, trace: meta.trace_id, tools: new Set(), reports: new Map(),
+            cursor.turn = { reply, session: meta.session_id, trace: meta.trace_id, tools: new Set(), reports: new Map(),
               lastSeq: row.seq - 1, contiguous: row.seq === 0 || row.seq === 1, done: false, touched: Date.now() };
             this.turns.set(reply, cursor.turn);
           }
@@ -124,7 +126,7 @@ export class HubUsage {
     }
   }
 
-  enrich(entry: AgentActivityEntry) {
+  enrich(entry: AgentActivityEntry, native?: Pick<NativeUsageIndex, 'complete'>) {
     if (entry['event.name'] !== 'llm.response') return;
     const ids = new Set<string>();
     const messages = entry['gen_ai.output.messages'];
@@ -147,14 +149,15 @@ export class HubUsage {
     entry[prefix + 'total_tokens_observed'] = input + output;
     entry[prefix + 'trace_id'] = turn.trace;
     entry[prefix + 'usage_event_seqs'] = [...turn.reports.keys()].join(',');
-    entry[prefix + 'complete'] = turn.contiguous && turn.done;
+    const complete = (turn.contiguous && turn.done) || native?.complete(turn.trace, turn.session, turn.reply, turn.reports) === true;
+    entry[prefix + 'complete'] = complete;
     entry[prefix + 'input_tokens_observed'] = input;
     entry[prefix + 'output_tokens_observed'] = output;
     if (allCached) {
       entry[prefix + 'cached_tokens_observed'] = cached;
       if (input > 0) entry[prefix + 'cache_hit_ratio_observed'] = cached / input;
     }
-    if (turn.contiguous && turn.done && entry['gen_ai.usage.input_tokens'] == null) {
+    if (complete && entry['gen_ai.usage.input_tokens'] == null) {
       entry['gen_ai.usage.input_tokens'] = input;
       entry['gen_ai.usage.output_tokens'] = output;
       entry['gen_ai.usage.total_tokens'] = input + output;
