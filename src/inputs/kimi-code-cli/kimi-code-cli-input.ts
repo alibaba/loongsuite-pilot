@@ -48,7 +48,8 @@ export class KimiCodeCliInput extends BaseInput {
   private discovery?: AsyncGenerator<string | undefined>;
   private discoveryRoot?: string;
   private readonly waitingSources = new Map<string, string>();
-  private readonly staged = new Map<string, InputState>();
+  private readonly staged = new Map<string, InputState | null>();
+  private readonly beforeDelivery = new Map<string, InputState | undefined>();
   private cutoff = 0;
 
   constructor(options: KimiCodeCliInputOptions) {
@@ -75,13 +76,37 @@ export class KimiCodeCliInput extends BaseInput {
   }
 
   protected override onCollectionProcessed(): void {
+    this.beforeDelivery.clear();
     if (!this.checkpointFailed) {
-      for (const [key, state] of this.staged) this.stateStore.update(key, state);
+      for (const [key, state] of this.staged) {
+        this.beforeDelivery.set(key, this.stateStore.getPersistedState(key));
+        if (state) this.stateStore.update(key, state);
+        else this.stateStore.delete(key);
+      }
     } else {
       this.continuation = undefined;
       this.waitingSources.clear();
     }
     this.staged.clear();
+  }
+
+  /** The manager cancelled a pending delivery before all destinations accepted it. */
+  restoreAbortedDelivery(): void {
+    for (const [key, previous] of this.beforeDelivery) {
+      if (previous) this.stateStore.set(key, previous);
+      else this.stateStore.delete(key);
+    }
+    this.beforeDelivery.clear();
+    this.staged.clear();
+    this.continuation = undefined;
+    this.waitingSources.clear();
+  }
+
+  private readState(key: string): InputState {
+    const current = this.stateStore.get(key);
+    const staged = this.staged.get(key);
+    if (staged === null) return {};
+    return staged ? { ...current, ...staged, extra: { ...current.extra, ...staged.extra } } : current;
   }
 
   private async canonicalSessionDir(): Promise<string | undefined> {
@@ -166,12 +191,16 @@ export class KimiCodeCliInput extends BaseInput {
     sessionDir: string, wirePath: string, wire: FileHandle, stat: Stats, stateKey: string, scan?: ActiveScan,
   ): Promise<AgentActivityEntry[] | undefined> {
     const identity = fileIdentity(stat);
-    const durable = this.stateStore.get(stateKey);
-    const staged = this.staged.get(stateKey);
-    const state = staged ? { ...durable, ...staged, extra: { ...durable.extra, ...staged.extra } } : durable;
+    const owner = this.readState(stateKey);
+    const ownerPath = owner.extra?.wirePath;
+    if (ownerPath && ownerPath !== wirePath && owner.extra?.identity !== identity) return undefined;
+    // A historical snapshot may have the same native ID as a live workspace.
+    // Keep its baseline local to this path until we observe an eligible prompt.
+    const baselineKey = `${this.id}:baseline:${wirePath}`;
+    const cursorKey = ownerPath ? stateKey : baselineKey;
+    const state = ownerPath ? owner : this.readState(baselineKey);
     const savedIdentity = state.extra?.identity;
     const savedPath = state.extra?.wirePath;
-    if (savedPath && savedPath !== wirePath && savedIdentity !== identity) return undefined;
     const savedOffset = state.lastOffset;
     const previousOffset = typeof savedOffset === 'number' && Number.isSafeInteger(savedOffset) && savedOffset >= 0
       ? savedOffset : 0;
@@ -182,23 +211,26 @@ export class KimiCodeCliInput extends BaseInput {
     const previousFloor = state.extra?.minimumTurnTime;
     let minimumTurnTime = typeof previousFloor === 'number' ? previousFloor : this.cutoff;
     const acceptedEnd = state.extra?.acceptedEnd;
-    const acceptedPrompt = typeof state.extra?.acceptedPrompt === 'string' ? state.extra.acceptedPrompt : undefined;
+    const savedPrompts = state.extra?.acceptedPrompts;
+    const acceptedPrompts = new Set(Array.isArray(savedPrompts)
+      ? savedPrompts.filter((value): value is string => typeof value === 'string')
+      : typeof state.extra?.acceptedPrompt === 'string' ? [state.extra.acceptedPrompt] : []);
     if (replaced && !sameAcceptedPrefix && typeof acceptedEnd === 'number') {
-      // Without a matching physical boundary, rescan from the source's last
-      // completed turn timestamp. Never use the later observation wall clock.
-      minimumTurnTime = Math.max(minimumTurnTime, acceptedEnd + 1);
+      // Same-millisecond prompts can be distinct. Keep the native timestamp
+      // inclusive and suppress only accepted prompt identities at that boundary.
+      minimumTurnTime = Math.max(minimumTurnTime, acceptedEnd);
     }
     const committed = replaced && !sameAcceptedPrefix ? 0 : previousOffset;
     if (scan && (replaced || scan.identity !== identity || scan.wirePath !== wirePath || stat.size < scan.endOffset)) {
       scan = undefined;
     }
     if (committed >= stat.size && !replaced && savedIdentity === identity) {
-      if (savedPath !== wirePath) this.staged.set(stateKey, { extra: { wirePath } });
+      if (savedPath !== wirePath) this.staged.set(cursorKey, { extra: { wirePath } });
       return [];
     }
     const sourceStamp = `${identity}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${committed}`;
-    if (!scan && this.waitingSources.get(stateKey) === sourceStamp) return [];
-    this.waitingSources.delete(stateKey);
+    if (!scan && this.waitingSources.get(wirePath) === sourceStamp) return [];
+    this.waitingSources.delete(wirePath);
     if (!scan) {
       if ((replaced || !savedIdentity) && !await hasSupportedWireHeader(wire)) return undefined;
       const session = await readSessionState(sessionDir);
@@ -212,7 +244,7 @@ export class KimiCodeCliInput extends BaseInput {
       }
       scan = {
         wirePath, identity,
-        reader: new KimiCodeWireTurn(session.id, session.cwd, cutoff, this.captureContent, acceptedPrompt),
+        reader: new KimiCodeWireTurn(session.id, session.cwd, cutoff, this.captureContent, acceptedPrompts),
         scanningOffset: committed,
         endOffset: stat.size,
         discardLine: false,
@@ -265,7 +297,7 @@ export class KimiCodeCliInput extends BaseInput {
       if (from + bytesRead < scan.endOffset && scan.scanningOffset > from) {
         this.continuation = { key: stateKey, scan };
       } else if (from + bytesRead === scan.endOffset && scan.endOffset === stat.size) {
-        this.waitingSources.set(stateKey, `${identity}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${nextCommit}`);
+        this.waitingSources.set(wirePath, `${identity}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${nextCommit}`);
         if (this.waitingSources.size > MAX_WAITING_SOURCES) {
           const oldest = this.waitingSources.keys().next().value;
           if (oldest !== undefined) this.waitingSources.delete(oldest);
@@ -276,17 +308,24 @@ export class KimiCodeCliInput extends BaseInput {
       bytes: lineStart, records: countedRecords, parseSuccessRecords,
       parseFailedRecords: countedRecords - parseSuccessRecords, maxRecordBytes,
     });
-    if (nextCommit !== previousOffset || replaced || savedIdentity !== identity || savedPath !== wirePath) {
+    const eligible = scan.reader.hasEligiblePrompt;
+    const claim = !ownerPath && eligible;
+    if (claim || nextCommit !== previousOffset || replaced || savedIdentity !== identity || savedPath !== wirePath) {
       const anchor = await wireAnchor(wire, nextCommit);
       const terminal = scan.reader.lastCompletedTurn;
-      this.staged.set(stateKey, {
+      const promptIds = terminal && terminal.endTime !== acceptedEnd ? terminal.promptIds : acceptedPrompts;
+      if (terminal?.endTime === acceptedEnd) {
+        for (const id of terminal?.promptIds ?? []) promptIds.add(id);
+      }
+      this.staged.set(claim ? stateKey : cursorKey, {
         lastOffset: nextCommit,
         extra: {
           identity, minimumTurnTime, wirePath, anchor,
-          acceptedPrompt: terminal?.promptId ?? acceptedPrompt,
+          acceptedPrompts: [...promptIds],
           acceptedEnd: terminal?.endTime ?? acceptedEnd,
         },
       });
+      if (claim && savedPath) this.staged.set(baselineKey, null);
     }
     return entries;
   }

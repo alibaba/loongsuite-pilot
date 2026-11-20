@@ -9,6 +9,12 @@ export class CodexOutputDurabilityError extends Error {
   }
 }
 
+export interface BatchDeliveryOptions {
+  requireAcceptance?: boolean;
+  /** Successful destinations kept while an input is stopped and resumed in this process. */
+  receipts?: Map<BaseFlusher, Set<string>>;
+}
+
 /**
  * Abstract base for all data output flushers.
  * Extend this to add new output destinations (SLS, JSONL, HTTP, etc.).
@@ -19,8 +25,29 @@ export abstract class BaseFlusher {
   abstract send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void>;
   abstract sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): Promise<void>;
   /** Retain the returned attempt for one dispatch so fan-out can track accepted targets across retries. */
-  createBatchDelivery(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): () => Promise<void> {
-    return () => signal ? this.sendBatch(entries, logicalBytes, signal) : this.sendBatch(entries, logicalBytes);
+  createBatchDelivery(
+    entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal, options?: BatchDeliveryOptions,
+  ): () => Promise<void> {
+    const receipt = this.acceptanceReceipt(options);
+    if (!receipt) return () => signal ? this.sendBatch(entries, logicalBytes, signal) : this.sendBatch(entries, logicalBytes);
+    return async () => {
+      const pending = entries.flatMap((entry, index) => receipt.has(entry['event.id']) ? [] : [{ entry, index }]);
+      if (!pending.length) return;
+      const pendingBytes = logicalBytes && pending.map(({ index }) => logicalBytes[index]!);
+      await this.sendBatch(pending.map(({ entry }) => entry), pendingBytes, signal);
+      for (const { entry } of pending) receipt.add(entry['event.id']);
+    };
+  }
+
+  protected acceptanceReceipt(options?: BatchDeliveryOptions): Set<string> | undefined {
+    const receipts = options?.receipts;
+    if (!receipts) return undefined;
+    let receipt = receipts.get(this);
+    if (!receipt) {
+      receipt = new Set();
+      receipts.set(this, receipt);
+    }
+    return receipt;
   }
   abstract flush(): Promise<void>;
   abstract shutdown(): Promise<void>;

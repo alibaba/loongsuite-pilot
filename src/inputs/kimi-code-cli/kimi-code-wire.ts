@@ -68,14 +68,15 @@ function observeResponse(step: Step, time: number): void {
 
 export class KimiCodeWireTurn {
   private active?: Turn;
-  lastCompletedTurn?: { promptId: string; endTime: number };
+  hasEligiblePrompt = false;
+  lastCompletedTurn?: { promptIds: Set<string>; endTime: number };
 
   constructor(
     private readonly sessionId: string,
     private readonly cwd: string,
     private readonly cutoff: number,
     private readonly captureContent: boolean,
-    private readonly acceptedPrompt?: string,
+    private readonly acceptedPrompts: ReadonlySet<string>,
   ) {}
 
   get hasActiveTurn(): boolean { return this.active !== undefined; }
@@ -89,13 +90,14 @@ export class KimiCodeWireTurn {
     if (record.type === 'turn.prompt') {
       const nativeId = turnID(record.turnId);
       const promptId = string(record.promptId);
-      this.active = nativeId !== undefined && promptId && promptId !== this.acceptedPrompt
+      this.active = nativeId !== undefined && promptId && !this.acceptedPrompts.has(promptId)
         && time >= this.cutoff && object(record.origin)?.kind === 'user'
         ? {
           nativeId, promptId, begin: time, steps: [],
           input: this.captureContent && Array.isArray(record.input) ? record.input.flatMap(part => textPart(part) ?? []) : [],
         }
         : undefined;
+      this.hasEligiblePrompt ||= this.active !== undefined;
       return [];
     }
 
@@ -104,7 +106,10 @@ export class KimiCodeWireTurn {
     if (record.type === 'turn.ended' && turnID(record.turnId) === turn.nativeId) {
       this.active = undefined;
       if (time < turn.begin) return [];
-      this.lastCompletedTurn = { promptId: turn.promptId, endTime: time };
+      if (this.lastCompletedTurn?.endTime !== time) {
+        this.lastCompletedTurn = { promptIds: new Set(), endTime: time };
+      }
+      this.lastCompletedTurn.promptIds.add(turn.promptId);
       return this.entries(turn);
     }
     const step = turn.steps.at(-1);
