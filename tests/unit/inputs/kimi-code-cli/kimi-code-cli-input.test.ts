@@ -3,6 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -786,5 +787,85 @@ it('persists a Kimi OTLP turn when the transport rejects it and replays the jour
     await manager.stopAll();
     await trace.shutdown();
     await endpoint.close();
+  }
+}, 20_000);
+
+
+it.each([false, true])('resumes incomplete Kimi OTLP destinations with stable spans after restart (separate service=%s)', async (separateService) => {
+  interface WireSpan { traceId: Uint8Array; spanId: Uint8Array; parentSpanId?: Uint8Array }
+  const decoder = createRequire(import.meta.url)('@opentelemetry/otlp-transformer/build/src/generated/root.js')
+    .opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest;
+  const spanIdentity = (span: WireSpan) => (['traceId', 'spanId', 'parentSpanId'] as const).map(key =>
+    Buffer.from(span[key] ?? []).toString('hex'));
+  const acceptBody = (body: Buffer, accepted: WireSpan[]) => {
+    for (const resource of decoder.decode(body).resourceSpans) {
+      for (const scope of resource.scopeSpans) accepted.push(...scope.spans);
+    }
+  };
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first } = await createSession();
+  const directory = path.join(path.dirname(stateFile), 'pending-turns');
+  const createJournal = () => new CodexTurnJournal(directory, 100, ['codex', 'hermes', 'openclaw', 'kimi-code-cli']);
+  const primary: WireSpan[] = [];
+  const secondary: WireSpan[] = [];
+  let accepting = false;
+  let rejected = 0;
+  const healthy = await listen((_url, body) => { acceptBody(body, primary); return 200; });
+  const incomplete = await listen((_url, body) => {
+    if (!accepting && secondary.length >= 2) { rejected++; return 400; }
+    acceptBody(body, secondary);
+    return 200;
+  });
+  const open = async (primaryName: string) => {
+    const store = new StateStore(stateFile);
+    await store.load();
+    const input = new KimiCodeCliInput({ stateStore: store, sessionDir, captureMessageContent: false, pollIntervalMs: 60_000 });
+    const manager = new InputManager();
+    const cfg: OtlpTraceFlusherConfig = {
+      enabled: true, serviceName: 'kimi-partial-otlp', protocol: 'http/protobuf', maxExportBatchBytes: 1,
+      dataDir: path.dirname(stateFile), captureMessageContent: false,
+      endpoints: [
+        { name: primaryName, endpoint: healthy.url, compression: 'none' },
+        { name: 'incomplete', endpoint: incomplete.url, compression: 'none', ...(separateService ? { serviceName: 'second-service' } : {}) },
+      ],
+    };
+    const journal = createJournal();
+    const trace = new OtlpTraceFlusher(cfg, undefined, undefined, journal, entries => manager.prepareRestoredEntries(entries));
+    manager.setFlusher(trace);
+    manager.registerInput(input);
+    await trace.start();
+    await manager.startInput(input.id);
+    await poll(input);
+    return { input, store, close: async () => { await manager.stopAll(); await trace.shutdown(); } };
+  };
+  let active: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    active = await open('primary');
+    await fs.writeFile(wire, first.join('\n') + '\n');
+    await poll(active.input);
+    const cursor = (await fs.stat(wire)).size;
+    expect(active.store.getPersistedState(`${active.input.id}:${sessionId}`)?.lastOffset).toBe(cursor);
+    expect(primary).toHaveLength(7);
+    expect(secondary).toHaveLength(2);
+    expect(rejected).toBe(5);
+    const initialIds = primary.map(spanIdentity);
+    const originalGroup = (await fs.readdir(directory)).find(name => name.startsWith('codex-turn-'))!;
+    const receipt = (await fs.readdir(directory)).find(name => name.startsWith('kimi-otlp-receipts-'))!;
+    expect(receipt).toBe(originalGroup.replace('codex-turn-', 'kimi-otlp-receipts-').replace('.jsonl', '.json'));
+    expect((await fs.stat(path.join(directory, receipt))).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(await fs.readFile(path.join(directory, receipt), 'utf8')).destinations).toEqual([expect.stringMatching(/^[a-f0-9]{64}$/)]);
+    await active.close();
+    active = undefined;
+
+    accepting = true;
+    active = await open('renamed-primary');
+    await poll(active.input);
+    expect(active.store.getPersistedState(`${active.input.id}:${sessionId}`)?.lastOffset).toBe(cursor);
+    expect(primary.map(spanIdentity)).toEqual(initialIds);
+    expect(secondary.map(spanIdentity)).toEqual([...initialIds.slice(0, 2), ...initialIds]);
+    expect(await fs.readdir(directory)).toEqual([originalGroup.replace('codex-turn-', 'codex-done-').replace('.jsonl', '.json')]);
+  } finally {
+    await active?.close();
+    await Promise.all([healthy.close(), incomplete.close()]);
   }
 }, 20_000);
