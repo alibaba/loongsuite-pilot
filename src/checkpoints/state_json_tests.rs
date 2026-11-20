@@ -159,10 +159,8 @@ async fn history_handoff_requires_reloading_a_repaired_shared_checkpoint() {
 #[tokio::test]
 async fn exported_history_requires_the_authoritative_namespace_when_progress_exists() {
     let listener = crate::sdk::hook_history::PROFILES[0].listener;
-    let requirement: Option<(&str, fn(&InputState) -> bool)> = Some((
-        listener,
-        crate::inputs::rest_support::has_usable_hook_log_cursor,
-    ));
+    let validate: fn(&InputState) -> bool = crate::inputs::rest_support::has_usable_hook_log_cursor;
+    let requirement = Some((listener, validate));
     let directory = tempfile::tempdir().unwrap();
     let path = directory
         .path()
