@@ -327,7 +327,8 @@ impl InputBody for QwenWorkCnTraceBody {
             .native_wakeups
             .lock()
             .expect("native wakeups")
-            .is_some()
+            .as_ref()
+            .is_some_and(|native| native.legacy_cursor_root.is_none())
         {
             // This history is SDK-owned, not pre-existing user history. A
             // crash can occur after the producer advances its cursor and

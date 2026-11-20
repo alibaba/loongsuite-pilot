@@ -35,6 +35,21 @@ struct Agent {
     metrics: Arc<Mutex<Option<Arc<InputManager>>>>,
 }
 
+pub(crate) fn configure_qwen_wakeups(
+    data_dir: &Path,
+    transcript_root: Option<&Path>,
+) -> anyhow::Result<()> {
+    let path = data_dir.join("wakeups/qwen-work-cn-policy.json");
+    if transcript_root.is_some() || path.exists() {
+        let policy = match transcript_root {
+            Some(root) => json!({"schema":1,"enabled":true,"transcript_root":root}),
+            None => json!({"schema":1,"enabled":false}),
+        };
+        write_checkpoint(&path, &policy.to_string())?;
+    }
+    Ok(())
+}
+
 impl Collector {
     pub fn new(init: Init, queue: Arc<Outbox>, stop: Arc<AtomicBool>) -> Self {
         Self {
@@ -45,19 +60,13 @@ impl Collector {
         }
     }
     pub fn apply(&mut self, policy: &Policy) -> anyhow::Result<()> {
-        let qwen_policy = self.init.data_dir.join("wakeups/qwen-work-cn-policy.json");
-        let qwen_source = policy.agents.get("qwen-work-cn").and_then(|plan| {
+        let qwen_root = policy.agents.get("qwen-work-cn").and_then(|plan| {
             plan.sources
                 .iter()
                 .find(|source| source.kind == "transcript")
+                .map(|source| source.path.as_path())
         });
-        if qwen_source.is_some() || qwen_policy.exists() {
-            let marker_policy = match qwen_source {
-                Some(source) => json!({"schema":1,"enabled":true,"transcript_root":source.path}),
-                None => json!({"schema":1,"enabled":false}),
-            };
-            write_checkpoint(&qwen_policy, &marker_policy.to_string())?;
-        }
+        configure_qwen_wakeups(&self.init.data_dir, qwen_root)?;
         let mut plans = policy.agents.clone();
         if let Some(recovery) = &policy.codex_recovery {
             plans.insert("codex-recovery".into(), recovery.clone());
@@ -394,23 +403,36 @@ fn run_agent(
             source_access::private_path(&directory)?;
             std::fs::create_dir_all(&directory)?;
             source_access::private_path(&directory)?;
-            let producer_data_dir = state_dir.join("qwen-work-cn-producer");
+            // The full host already has a durable Hook history and cursor. Publish
+            // native transcript records to the same source the collector reads.
+            let shared_history = plan.pilot_host.as_ref().filter(|host| {
+                plan.sources.iter().any(|source| {
+                    source.kind == "hook_jsonl"
+                        && source.path == host.data_dir.join("logs/qwen-work-cn/history")
+                })
+            });
+            let producer_data_dir = shared_history.map_or_else(
+                || state_dir.join("qwen-work-cn-producer"),
+                |host| host.data_dir.clone(),
+            );
             let history = producer_data_dir.join("logs/qwen-work-cn/history");
             source_access::private_path(&history)?;
             std::fs::create_dir_all(&history)?;
-            let capture = plan.capture_message_content.or_else(|| {
-                plan.pilot_host
-                    .as_ref()
-                    .and_then(|state| state.capture_message_content)
-            });
-            let exclusions = plan.pilot_host.as_ref().map_or_else(
-                || plan.exclude_workspaces.clone(),
-                |state| state.exclude_workspaces.clone(),
-            );
-            let config = json!({"userId":init.user_id,
+            if shared_history.is_none() {
+                let capture = plan.capture_message_content.or_else(|| {
+                    plan.pilot_host
+                        .as_ref()
+                        .and_then(|state| state.capture_message_content)
+                });
+                let exclusions = plan.pilot_host.as_ref().map_or_else(
+                    || plan.exclude_workspaces.clone(),
+                    |state| state.exclude_workspaces.clone(),
+                );
+                let config = json!({"userId":init.user_id,
                 "agents":{"qwen-work-cn":{"captureMessageContent":capture.unwrap_or(true)}},
                 "privacy":{"excludeWorkspaces":exclusions}});
-            write_checkpoint(&producer_data_dir.join("config.json"), &config.to_string())?;
+                write_checkpoint(&producer_data_dir.join("config.json"), &config.to_string())?;
+            }
             roots.push(super::policy::canonical_candidate(&directory)?);
             Some(QwenWorkCnNativeWakeups {
                 directory,

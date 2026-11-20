@@ -15,6 +15,7 @@ impl AgentHook {
             "qoder" => InterceptorAgent::Qoder,
             "qodercli" => InterceptorAgent::QoderCli,
             "codex" => InterceptorAgent::Codex,
+            "qwen-work-cn" => InterceptorAgent::QwenWorkCn,
             _ => return None,
         }))
     }
@@ -28,7 +29,10 @@ impl AgentHook {
 
     pub(super) fn supports_blocking(self, event: &str) -> bool {
         match self.0 {
-            InterceptorAgent::Qoder | InterceptorAgent::QoderCli | InterceptorAgent::Codex => {
+            InterceptorAgent::Qoder
+            | InterceptorAgent::QoderCli
+            | InterceptorAgent::Codex
+            | InterceptorAgent::QwenWorkCn => {
                 matches!(event, "PreToolUse" | "PostToolUse" | "UserPromptSubmit")
             }
             _ => false,

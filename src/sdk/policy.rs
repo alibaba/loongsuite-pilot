@@ -561,7 +561,17 @@ impl Policy {
                     parsed.len() == 1 && parsed[0].kind == "collaboration"
                 }
                 "qwen_work_cn_trace_v1" => {
-                    source_count("hook_jsonl") + source_count("transcript") == 1
+                    let primary = source_count("hook_jsonl") + source_count("transcript");
+                    let host_upgrade = pilot_host.as_ref().is_some_and(|host| {
+                        source_count("hook_jsonl") == 1
+                            && source_count("transcript") == 1
+                            && parsed.iter().any(|source| {
+                                source.kind == "hook_jsonl"
+                                    && source.path
+                                        == host.data_dir.join("logs/qwen-work-cn/history")
+                            })
+                    });
+                    (primary == 1 || host_upgrade)
                         && source_count("segments") <= 1
                         && source_count("collaboration") <= 1
                 }
