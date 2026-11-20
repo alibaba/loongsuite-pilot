@@ -269,6 +269,8 @@ function resolveVscdbPath(event) {
     process.env.TRAES_USER_DATA_DIR,
     event?.user_data_dir,
     path.join(os.homedir(), '.trae-cn'),
+    process.platform === 'darwin' && !process.env.TRAES_USER_DATA_DIR && !event?.user_data_dir
+      && path.join(os.homedir(), 'Library', 'Application Support', 'Trae CN'),
   ]) {
     if (d && typeof d === 'string') {
       for (const p of candidatesFor(d)) {
@@ -321,6 +323,20 @@ function stripModelIdPrefix(modelId) {
 }
 
 function pickDefaultModelForAgentType(agentType, event) {
+  const vscdbPath = resolveVscdbPath(event);
+  const selection = queryVscdbValueSync('session_selected_model', vscdbPath);
+  if (event?.session_id && selection?.startsWith('{')) {
+    try {
+      const choices = JSON.parse(selection)[event.session_id];
+      const role = choices && Object.keys(choices).find(key => key === agentType ||
+        (normalizeAgentType(key) && normalizeAgentType(key) === normalizeAgentType(agentType)));
+      const selected = role && choices[role]?.modelId;
+      if (typeof selected === 'string' && selected) {
+        const name = stripModelIdPrefix(selected);
+        return { name, display_name: name, provider: null };
+      }
+    } catch { /* Unrecognized selection format, try the catalog. */ }
+  }
   const catalog = readTraeVscdbModelCatalogSync(event);
   const normalized = normalizeAgentType(agentType);
   if (catalog && typeof catalog === 'object' && normalized) {
@@ -350,10 +366,10 @@ function pickDefaultModelForAgentType(agentType, event) {
   // Empty list or unknown agent_type → vscdb session_selected_model /
   // ai_assistant.request.model config. NO solo_agent fallback heuristic
   // (architect explicitly rejected).
-  const vscdbPath = resolveVscdbPath(event);
   if (vscdbPath) {
-    const sel = queryVscdbValueSync('session_selected_model', vscdbPath);
-    if (sel) return { name: sel, provider: null, display_name: sel };
+    if (selection && !selection.startsWith('{') && !selection.startsWith('[')) {
+      return { name: selection, provider: null, display_name: selection };
+    }
     const cfg = queryVscdbValueSync('ai_assistant.request.model', vscdbPath);
     if (cfg) return { name: cfg, provider: null, display_name: cfg };
   }
@@ -406,6 +422,7 @@ function resolveDisplayModel(event, state) {
   const eventDisplay = event?.display_model_name || event?.model_info?.display_name || null;
   if (eventDisplay && typeof eventDisplay === 'string') return eventDisplay;
   if (state?.display_model && state.display_model !== 'unknown') return state.display_model;
+  if (state?.model && state.model !== 'unknown') return state.model;
   const agentType = event?.agent_type || state?.agent_type;
   if (agentType) {
     const pick = pickDefaultModelForAgentType(agentType, event);
@@ -426,6 +443,13 @@ function extractUsage(event, state) {
     if (Number.isInteger(inputTokens) && inputTokens >= 0) out.input_tokens = inputTokens;
     if (Number.isInteger(outputTokens) && outputTokens >= 0) out.output_tokens = outputTokens;
     if (Number.isInteger(totalTokens) && totalTokens >= 0) out.total_tokens = totalTokens;
+    if (out.total_tokens === undefined && Number.isSafeInteger(out.input_tokens + out.output_tokens)) {
+      out.total_tokens = out.input_tokens + out.output_tokens;
+    }
+    const cached = u.cache_read_input_tokens ?? u.prompt_tokens_details?.cached_tokens;
+    if (Number.isSafeInteger(cached) && cached >= 0 && cached <= out.input_tokens) {
+      out.cache_read_input_tokens = cached;
+    }
     if (Object.keys(out).length > 0) return out;
   }
   // Per trae-session-trace-path.md §4.2: token_count=Some(N) attribution
@@ -481,7 +505,7 @@ function mergeUsageIntoState(state, event) {
   const prev = state.usage || {};
   const merged = { ...prev };
   for (const [k, v] of Object.entries(u)) {
-    if (Number.isInteger(v) && v > 0) merged[k] = v;
+    if (Number.isSafeInteger(v) && v >= 0) merged[k] = v;
   }
   if (Object.keys(merged).length > 0) {
     state.usage = merged;
@@ -779,6 +803,9 @@ function llmResponseRecord(state, base, timestamp, lastAssistantMessage) {
   }
   if (Number.isInteger(usage.output_tokens)) {
     record['gen_ai.usage.output_tokens'] = usage.output_tokens;
+  }
+  if (Number.isSafeInteger(usage.cache_read_input_tokens)) {
+    record['gen_ai.usage.cache_read.input_tokens'] = usage.cache_read_input_tokens;
   }
   if (Number.isInteger(usage.total_tokens)) {
     record['gen_ai.usage.total_tokens'] = usage.total_tokens;

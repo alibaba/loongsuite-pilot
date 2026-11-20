@@ -386,7 +386,7 @@ describe('trae-cn hook processor', () => {
       usage: {
         prompt_tokens: 12,
         completion_tokens: 34,
-        total_tokens: 46,
+        prompt_tokens_details: {cached_tokens: 5},
       },
     });
     const records = readEmittedJsonl();
@@ -396,6 +396,7 @@ describe('trae-cn hook processor', () => {
     expect(llmRes['gen_ai.usage.input_tokens']).toBe(12);
     expect(llmRes['gen_ai.usage.output_tokens']).toBe(34);
     expect(llmRes['gen_ai.usage.total_tokens']).toBe(46);
+    expect(llmRes['gen_ai.usage.cache_read.input_tokens']).toBe(5);
   });
 
   test('round 5 #2: usage tokens extracted from alternate input_tokens format', () => {

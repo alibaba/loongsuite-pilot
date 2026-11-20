@@ -222,6 +222,14 @@ describe('Trae-CN agent_type mapper — P1-2 normalization', () => {
 });
 
 describe('Trae-CN pickDefaultModelForAgentType — end-to-end mapper', () => {
+  it('prefers the model selected for the exact session and agent over its catalog default', () => {
+    buildVscdb([
+      {key: 'session_selected_model', value: JSON.stringify({session: {solo_agent: {modelId: 'solo_agent_1__glm-5.3-flashx'}}})},
+      {key: 'AI.agent.model.model_list_map', value: JSON.stringify(CATALOG_SOLO_AGENT_DEFAULT)},
+    ]);
+    expect(mod.pickDefaultModelForAgentType('SoloAgent', {session_id: 'session'}).name).toBe('glm-5.3-flashx');
+  });
+
   it('agent_type=SoloAgent with solo_agent array → returns default Doubao-Seed-Code', () => {
     buildVscdb([{ key: 'someUserId_AI.agent.model.model_list_map', value: JSON.stringify(CATALOG_SOLO_AGENT_DEFAULT) }]);
     const pick = mod.pickDefaultModelForAgentType('SoloAgent', {});
