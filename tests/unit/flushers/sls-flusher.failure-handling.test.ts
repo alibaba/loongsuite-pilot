@@ -17,8 +17,7 @@ const success = () => new Response(null, { status: 200 });
 const error = (status: number, code?: string) => new Response(code ? JSON.stringify({ errorCode: code }) : '', { status });
 const sentIds = (options: RequestInit) => JSON.parse(options.body as string).__logs__.map((row: Record<string, string>) => row['event.id']);
 
-function makeFlusher(modes: SlsEndpoint['mode'][] = ['webtracking']) {
-  const endpoint = 'http://sls.invalid';
+function makeFlusher(modes: SlsEndpoint['mode'][] = ['webtracking'], endpoint = 'http://sls.invalid') {
   const flusher = new SlsFlusher({ enabled: true, endpoint, accessKeyId: '', accessKeySecret: '', apiKey: '',
     mode: modes[0], batchMaxSize: 10_000, flushIntervalMs: 999_999, serviceNamePrefix: 'pilot',
     retry: { retryMaxAttempts: 1 }, endpoints: modes.map((mode, i) => ({ name: `ep${i}`, endpoint,
@@ -40,7 +39,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('SLS final failure handling', () => {
   it('accounts for the JSON envelope, isolates a large entry and sends recoverable records intact', async () => {
-    const { flusher, alarms, counter } = makeFlusher();
+    const { flusher, alarms, counter } = makeFlusher(['webtracking'], 'https://cn-hangzhou.log.aliyuncs.com');
     fetchMock.mockImplementation(async () => success());
     const sizedEntry = (id: string) => {
       const entry = buildTestEntry({ 'event.id': id, custom_text: '' });
@@ -62,8 +61,22 @@ describe('SLS final failure handling', () => {
     expect(alarms.serialize()).toMatchObject([{ failure_class: 'payload', alarm_message: expect.stringContaining('attempts=0') }]);
   });
 
+  it.each([
+    'https://cn-hangzhou.log.aliyuncs.com.compatible.invalid',
+    'https://cn-hangzhou.log.aliyuncs.com:9443',
+    'https://cn-hangzhou.log.aliyuncs.com/gateway',
+  ])('leaves oversized singleton handling to nonstandard WebTracking endpoint %s', async endpoint => {
+    const { flusher, counter } = makeFlusher(['webtracking'], endpoint);
+    fetchMock.mockImplementation(async () => success());
+    await flusher.send(buildTestEntry({ 'event.id': 'large-compatible', custom_text: 'x'.repeat(3_200_000) }));
+    await flusher.flush();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(sentIds(fetchMock.mock.calls[0][1])).toEqual(['large-compatible']);
+    expect(counter).toMatchObject({ outEntries: 1, outFailed: 0 });
+  });
+
   it('keeps a compatible singleton above the batching target and does not acknowledge rejected Codex data', async () => {
-    const { flusher, alarms, counter } = makeFlusher();
+    const { flusher, alarms, counter } = makeFlusher(['webtracking'], 'https://cn-hangzhou.log.aliyuncs.com');
     fetchMock.mockImplementation(async () => success());
     await flusher.send(buildTestEntry({ custom_text: 'x'.repeat(2_900_000) }));
     await flusher.flush();
@@ -196,7 +209,7 @@ describe('SLS final failure handling', () => {
   });
 
   it('measures transport config failures even when a local payload is rejected in the same cycle', async () => {
-    const { flusher, counter } = makeFlusher();
+    const { flusher, counter } = makeFlusher(['webtracking'], 'https://sample.cn-beijing.dualstack.log.aliyuncs.com');
     fetchMock.mockImplementation(async () => error(404, 'ProjectNotExist'));
     const oversized = buildTestEntry({ custom_text: 'x'.repeat(3_200_000) });
     for (let i = 0; i < 3; i++) {

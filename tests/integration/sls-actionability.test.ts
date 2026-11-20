@@ -60,6 +60,25 @@ describe('SLS failure actionability through real HTTP transports', () => {
     } finally { await h.cleanup(); }
   });
 
+  it.each([200, 413])('uses the custom WebTracking endpoint status %d for a large queued record', async status => {
+    const h = await fixture('webtracking', status);
+    try {
+      await h.sls.send(buildTestEntry({ 'event.id': 'large-queued', custom_text: '界'.repeat(1_070_000) }));
+      await h.sls.flush();
+
+      expect(h.requests()).toBe(1);
+      expect(h.receivedLogs.map(log => log['event.id'])).toEqual(['large-queued']);
+      expect(Buffer.byteLength(h.receivedLogs[0].custom_text)).toBe(3_210_000);
+      expect(h.sls.getEndpointCounters().get('local')).toMatchObject({
+        outEntries: status === 200 ? 1 : 0,
+        outFailed: status === 413 ? 1 : 0,
+      });
+      expect(h.alarms.serialize()).toEqual(status === 200 ? [] : [expect.objectContaining({
+        failure_class: 'payload', alarm_message: expect.stringContaining('status=413 attempts=1'),
+      })]);
+    } finally { await h.cleanup(); }
+  });
+
   it('accepts a Codex batch durably when the configured WebTracking endpoint accepts it', async () => {
     const h = await fixture('webtracking', 200);
     const stateFile = path.join(h.root, 'input-state.json');

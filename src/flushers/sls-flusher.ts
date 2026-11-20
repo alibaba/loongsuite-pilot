@@ -53,6 +53,18 @@ const MAX_DEFERRED_BYTES = 16 * 1024 * 1024;
 // even the larger (binary) interpretation of SLS's documented 3 MB wire limit.
 const MAX_SINGLE_WEBTRACKING_BYTES = 3 * 1024 * 1024;
 
+function hasAlibabaWebtrackingLimit(endpoint: string): boolean {
+  try {
+    const url = new URL(endpoint);
+    return (url.protocol === 'http:' || url.protocol === 'https:')
+      && url.pathname === '/' && !url.port && !url.username && !url.password && !url.search && !url.hash
+      && /^(?:[a-z0-9-]+\.)?[a-z]{2}-[a-z0-9-]+(?:\.dualstack)?\.log\.aliyuncs\.com$/
+        .test(url.hostname.replace(/\.$/, ''));
+  } catch {
+    return false;
+  }
+}
+
 interface QueuedLog {
   content: Record<string, string>;
   endpoint: SlsEndpoint;
@@ -590,6 +602,10 @@ export class SlsFlusher extends BaseFlusher {
     signal?: AbortSignal): Promise<FlushOutcome> {
     const total = emptyOutcome();
     this.warnIfMixedAgentTypes(logs);
+    const base = endpoint.project
+      ? endpoint.endpoint.replace(/^(https?:\/\/)/, `$1${endpoint.project}.`)
+      : endpoint.endpoint;
+    const url = `${base}/logstores/${endpoint.logstore}/track`;
     const envelope = {
       __topic__: endpoint.kind ?? '',
       __source__: LOCAL_IP,
@@ -597,9 +613,10 @@ export class SlsFlusher extends BaseFlusher {
       __tags__: this.buildWebtrackingTags(endpoint, logs[0]?.agentType),
     };
     const envelopeBytes = Buffer.byteLength(JSON.stringify(envelope));
-    // A durable Codex write still submits the original record to the configured
-    // endpoint and relies on its response to establish delivery.
-    const { chunks, oversize } = this.splitForWebtracking(logs, envelopeBytes, !durable);
+    // Custom destinations decide their own limit. Durable Codex writes always
+    // submit the original record and rely on the server's acknowledgment.
+    const rejectOversize = !durable && hasAlibabaWebtrackingLimit(base);
+    const { chunks, oversize } = this.splitForWebtracking(logs, envelopeBytes, rejectOversize);
     if (oversize.length) {
       signal?.throwIfAborted();
       const error = new HttpError(413, '{"errorCode":"PostBodyTooLarge"}');
@@ -609,7 +626,7 @@ export class SlsFlusher extends BaseFlusher {
     for (const chunk of chunks) {
       signal?.throwIfAborted();
       const raw = JSON.stringify({ ...envelope, __logs__: chunk.map(log => log.content) });
-      addOutcome(total, await this.postWebtracking(endpoint, chunk, raw, signal));
+      addOutcome(total, await this.postWebtracking(endpoint, url, chunk, raw, signal));
     }
     return total;
   }
@@ -705,12 +722,8 @@ export class SlsFlusher extends BaseFlusher {
     return { chunks, oversize };
   }
 
-  private async postWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[], raw: string, signal?: AbortSignal): Promise<FlushOutcome> {
-    const base = endpoint.project
-      ? endpoint.endpoint.replace(/^(https?:\/\/)/, `$1${endpoint.project}.`)
-      : endpoint.endpoint;
-    const url = `${base}/logstores/${endpoint.logstore}/track`;
-
+  private async postWebtracking(endpoint: SlsEndpoint, url: string, logs: QueuedLog[], raw: string,
+    signal?: AbortSignal): Promise<FlushOutcome> {
     let lastErr: unknown;
     let attempts = 0;
     for (let attempt = 0; attempt < this.resolvedRetryMaxAttempts; attempt++) {

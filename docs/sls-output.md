@@ -168,7 +168,7 @@ These JSONL records contain the endpoint, error summary, batch count, and batch 
 
 Transient and configuration alarms each have a one-hour cooldown per endpoint. After a configuration pause, one queued record probes the destination. A failed transport probe extends the pause up to ten minutes. The probe record stays queued when it can still be sent. A successful delivery reopens the queue. Pending records remain in memory. Queue pressure and normal shutdown can trigger a normal send attempt during the pause.
 
-WebTracking measures the complete JSON request, including tags and separators. In the best-effort queue, an entry too large to fit in a single request is counted as failed and recorded in the local diagnostics. Other entries can still be sent. Codex submits records intact to the configured endpoint and still requires its acknowledgment.
+WebTracking measures the complete JSON request, including tags and separators. In the best-effort queue, Pilot checks the documented single-request size limit for standard Alibaba Cloud SLS endpoints. Oversized entries count as failed and appear in local diagnostics. Custom endpoints apply their own limits and report their own status. Codex submits records intact to the configured endpoint and still requires its acknowledgment.
 
 Local JSONL output can help confirm whether collection itself is working before debugging SLS delivery:
 
