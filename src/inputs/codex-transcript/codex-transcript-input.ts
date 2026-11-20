@@ -232,6 +232,10 @@ export class CodexTranscriptInput extends BaseInput {
   private defaultScanComplete = false;
   private baselinePending = false;
   private baselinePendingSince = 0;
+  private partialBaselineListing?: {
+    directories: ReadonlyMap<string, RolloutDirectoryStamp>;
+    initiallyUncheckpointed: ReadonlySet<string>;
+  };
   private readonly wakeupPaths = new Map<string, Set<string>>();
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
@@ -251,7 +255,7 @@ export class CodexTranscriptInput extends BaseInput {
   /** Caught-up default-tree rollouts whose mtime is old enough to skip between rechecks. */
   private readonly rolloutIdleSnapshot = new Map<string, { ino: number; size: number; mtimeMs: number }>();
   private lastHistoricalRolloutStatAt = 0;
-  private cachedDefaultRollout: { dirMtimes: Map<string, number>; files: string[] } | null = null;
+  private cachedDefaultRollout: { directories: Map<string, RolloutDirectoryStamp>; files: string[] } | null = null;
 
   constructor(opts: CodexTranscriptInputOptions) {
     const processor = opts.multimodal?.processor ?? null;
@@ -313,7 +317,8 @@ export class CodexTranscriptInput extends BaseInput {
     const startedAt = Date.now();
     this.subagentLinker.restore(this.stateStore.get(this.id).extra?.codexDelegations);
     this.discardLegacyGlobalTurnRegistry();
-    const discovered = await this.discoverSessionFiles();
+    const startupDirectories = new Map<string, RolloutDirectoryStamp>();
+    const discovered = await this.discoverSessionFiles(startupDirectories);
     await this.indexDiscoveredTranscriptOwners(discovered);
     const extra = this.stateStore.get(this.id).extra;
     let isBaselineInit = extra?.isBaselineInit === true;
@@ -363,6 +368,13 @@ export class CodexTranscriptInput extends BaseInput {
       }
     }
     this.baselinePending = !isBaselineInit && !this.defaultScanComplete;
+    if (this.baselinePending && !baselineUnfinished) {
+      this.partialBaselineListing = {
+        directories: startupDirectories,
+        initiallyUncheckpointed: new Set(discovered.filter(file => file.baselineOnStart
+          && !this.readCheckpoint(this.stateKey(file.filePath))).map(file => file.filePath)),
+      };
+    }
     if (!this.baselinePending) this.baselinePendingSince = 0;
     if (!isBaselineInit && this.defaultScanComplete) this.completeBaselineInit();
     await Promise.all([
@@ -596,42 +608,59 @@ export class CodexTranscriptInput extends BaseInput {
     this.stateStore.set(this.id, { ...current, extra });
     this.baselinePending = false;
     this.baselinePendingSince = 0;
+    this.partialBaselineListing = undefined;
   }
 
   private async existedBeforeBaseline(filePath: string): Promise<boolean> {
+    let fileTime: number;
     try {
       const stat = await fs.stat(filePath);
       const stamps = [stat.birthtimeMs, stat.mtimeMs].filter(ms => ms > 0);
-      return stamps.length > 0 && Math.floor(Math.min(...stamps)) <= this.baselinePendingSince;
+      if (stamps.length === 0) return false;
+      fileTime = Math.floor(Math.min(...stamps));
     } catch {
       return false;
     }
+    if (fileTime !== this.baselinePendingSince) return fileTime < this.baselinePendingSince;
+
+    // A rollout created after a successful startup listing may share the
+    // cutoff tick. Keep older files and unknown or replaced directories
+    // under the historical cutoff.
+    const startup = this.partialBaselineListing;
+    const directory = path.dirname(filePath);
+    const listed = startup?.directories.get(directory);
+    if (!startup || !listed || !listed.ino || startup.initiallyUncheckpointed.has(filePath)) return true;
+    try {
+      const current = await fs.stat(directory);
+      return current.dev !== listed.dev || current.ino !== listed.ino;
+    } catch {
+      return true;
+    }
   }
 
-  private async listDefaultRolloutFiles(): Promise<string[]> {
+  private async listDefaultRolloutFiles(directories = new Map<string, RolloutDirectoryStamp>()): Promise<string[]> {
     const cached = this.cachedDefaultRollout;
-    if (cached && await this.rolloutDirsUnchanged(cached.dirMtimes)) {
+    if (cached && await this.rolloutDirsUnchanged(cached.directories)) {
       this.defaultScanComplete = true;
       return cached.files;
     }
     const files: string[] = [];
-    const dirMtimes = new Map<string, number>();
     let rootMissing = false;
-    const complete = await collectRolloutFiles(this.sessionDir, files, dirMtimes, (dir, error) => {
+    const complete = await collectRolloutFiles(this.sessionDir, files, directories, (dir, error) => {
       if (dir === this.sessionDir && (error as NodeJS.ErrnoException).code === 'ENOENT') rootMissing = true;
       this.logger.warn('Codex rollout directory scan failed; retrying next poll', { dir, error: String(error) });
     });
     this.defaultScanComplete = complete || rootMissing;
-    this.cachedDefaultRollout = this.defaultScanComplete && dirMtimes.size > 0 ? { dirMtimes, files } : null;
+    this.cachedDefaultRollout = this.defaultScanComplete && directories.size > 0 ? { directories, files } : null;
     return files;
   }
 
-  private async rolloutDirsUnchanged(dirMtimes: Map<string, number>): Promise<boolean> {
-    if (dirMtimes.size === 0) return false;
-    for (const [dir, mtimeMs] of dirMtimes) {
+  private async rolloutDirsUnchanged(directories: ReadonlyMap<string, RolloutDirectoryStamp>): Promise<boolean> {
+    if (directories.size === 0) return false;
+    for (const [dir, previous] of directories) {
       try {
         const stat = await fs.stat(dir);
-        if (stat.mtimeMs !== mtimeMs) return false;
+        if (stat.mtimeMs !== previous.mtimeMs || stat.dev !== previous.dev || stat.ino !== previous.ino) return false;
       } catch {
         return false;
       }
@@ -2449,10 +2478,10 @@ export class CodexTranscriptInput extends BaseInput {
     });
   }
 
-  private async discoverSessionFiles(): Promise<DiscoveredSessionFile[]> {
+  private async discoverSessionFiles(defaultDirectories?: Map<string, RolloutDirectoryStamp>): Promise<DiscoveredSessionFile[]> {
     const discovered = new Map<string, DiscoveredSessionFile>();
     const canonicalDefaultSessionDir = await canonicalDirectoryPath(this.sessionDir);
-    const defaultFiles = await this.listDefaultRolloutFiles();
+    const defaultFiles = await this.listDefaultRolloutFiles(defaultDirectories);
     for (const filePath of defaultFiles) {
       const canonicalPath = path.join(
         canonicalDefaultSessionDir,
@@ -2901,6 +2930,12 @@ export class CodexTranscriptInput extends BaseInput {
   }
 }
 
+interface RolloutDirectoryStamp {
+  dev: number;
+  ino: number;
+  mtimeMs: number;
+}
+
 interface RolloutStatSnapshot {
   ino: number;
   size: number;
@@ -2937,7 +2972,7 @@ function rolloutCaughtUp(
 async function collectRolloutFiles(
   dir: string,
   files: string[],
-  dirMtimes?: Map<string, number>,
+  directories?: Map<string, RolloutDirectoryStamp>,
   onError?: (dir: string, error: unknown) => void,
 ): Promise<boolean> {
   let entries: Dirent[];
@@ -2946,9 +2981,9 @@ async function collectRolloutFiles(
     // subdirectory) after readdir took its listing. Recording the later mtime
     // would cache that stale listing indefinitely, missing all new turns.
     // With the earlier mtime, the next poll invalidates and rescans it.
-    const mtime = dirMtimes ? (await fs.stat(dir)).mtimeMs : undefined;
+    const stat = directories ? await fs.stat(dir) : undefined;
     entries = await fs.readdir(dir, { withFileTypes: true });
-    if (dirMtimes && mtime !== undefined) dirMtimes.set(dir, mtime);
+    if (directories && stat) directories.set(dir, { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs });
   } catch (error) {
     onError?.(dir, error);
     return false;
@@ -2957,7 +2992,7 @@ async function collectRolloutFiles(
   for (const entry of entries) {
     const entryPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (!await collectRolloutFiles(entryPath, files, dirMtimes, onError)) complete = false;
+      if (!await collectRolloutFiles(entryPath, files, directories, onError)) complete = false;
     } else if (entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) {
       files.push(entryPath);
     }

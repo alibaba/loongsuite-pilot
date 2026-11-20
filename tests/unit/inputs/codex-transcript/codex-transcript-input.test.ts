@@ -6,6 +6,7 @@ import * as path from 'node:path';
 const blockedReads = vi.hoisted(() => new Set<string>());
 const scanDelays = vi.hoisted(() => new Map<string, () => Promise<void>>());
 const sortedReads = vi.hoisted(() => new Set<string>());
+const coarseFileTimes = vi.hoisted(() => new Map<string, number>());
 const failOpenOnCount = vi.hoisted(() => new Map<string, number>());
 const openCounts = vi.hoisted(() => new Map<string, number>());
 vi.mock('node:fs/promises', async () => {
@@ -26,6 +27,13 @@ vi.mock('node:fs/promises', async () => {
         entries.sort((left, right) => left.name.localeCompare(right.name));
       }
       return entries;
+    },
+    stat: async (...args: Parameters<typeof actual.stat>) => {
+      const stats = await actual.stat(...args);
+      const filePath = args[0];
+      const fileTime = typeof filePath === 'string' ? coarseFileTimes.get(path.resolve(filePath)) : undefined;
+      if (fileTime !== undefined) Object.assign(stats, { mtimeMs: fileTime, birthtimeMs: fileTime });
+      return stats;
     },
     open: async (filePath: string, flags: string) => {
       const resolved = path.resolve(filePath);
@@ -76,6 +84,7 @@ afterEach(async () => {
   blockedReads.clear();
   scanDelays.clear();
   sortedReads.clear();
+  coarseFileTimes.clear();
   failOpenOnCount.clear();
   openCounts.clear();
   await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
@@ -977,14 +986,19 @@ describe('CodexTranscriptInput', () => {
     try {
       await input.start();
       await runInputCycle(input);
-      await fs.writeFile(
-        path.join(readableDir, 'rollout-session-new.jsonl'),
-        completedTurn().replaceAll('turn-1', 'turn-new'),
-        'utf8',
-      );
+      const fresh = path.join(readableDir, 'rollout-session-new.jsonl');
+      await fs.writeFile(fresh, completedTurn().replaceAll('turn-1', 'turn-new'), 'utf8');
+      const cutoff = stateStore.get(input.id).extra?.baselinePendingSince;
+      expect(typeof cutoff).toBe('number');
+      // A filesystem may timestamp a newly created file in the same tick as startup.
+      coarseFileTimes.set(fresh, cutoff as number);
+      const imported = path.join(readableDir, 'rollout-session-imported.jsonl');
+      await fs.writeFile(imported, completedTurn().replaceAll('turn-1', 'turn-old-imported'), 'utf8');
+      coarseFileTimes.set(imported, (cutoff as number) - 5);
       await runInputCycle(input);
       expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
       expect(responsesForTurn(entries, 'turn-new').length).toBeGreaterThan(0);
+      expect(responsesForTurn(entries, 'turn-old-imported')).toEqual([]);
     } finally {
       await input.stop();
     }
