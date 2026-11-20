@@ -21,8 +21,8 @@ use tokio::sync::Notify;
 
 use crate::checkpoints::{InputState, InputStatePatch, StateStore};
 use crate::normalization::{
-    build_agent_activity_entry, enrich_canonical_entry_with_git, is_reserved_key,
-    normalize_event_name,
+    build_agent_activity_entry, build_shared_hook_activity_entry, enrich_canonical_entry_with_git,
+    is_canonical_payload_key, is_reserved_key, normalize_event_name,
 };
 use crate::types::{AgentActivityEntry, ClientType, CollectionMethod};
 use crate::utils::{
@@ -1185,7 +1185,7 @@ async fn collect_hook_file(
                 continue;
             }
         };
-        let Some(record) = parsed.as_object().cloned() else {
+        let Value::Object(record) = parsed else {
             continue;
         };
         match (inner.transform)(record).await {
@@ -1478,7 +1478,18 @@ pub async fn transform_hook_record(
     let Some(raw_event) = non_empty_string(record.get("event.name")) else {
         return Ok(None);
     };
-    let mut opts = record.clone();
+    let mut opts = record
+        .iter()
+        .map(|(key, value)| {
+            // The builder reads these large payloads from the original record.
+            let value = if is_canonical_payload_key(key) {
+                Value::Null
+            } else {
+                value.clone()
+            };
+            (key.clone(), value)
+        })
+        .collect();
     set_string(
         &mut opts,
         "time_unix_nano",
@@ -1588,25 +1599,6 @@ pub async fn transform_hook_record(
         non_empty_string(record.get("gen_ai.input.messages_hash"))
             .or_else(|| non_empty_string(record.get("input.messages_hash"))),
     );
-    set_json(
-        &mut opts,
-        "gen_ai.input.messages_delta",
-        coalesce_value(
-            record,
-            "gen_ai.input.messages_delta",
-            "input.messages_delta",
-        ),
-    );
-    set_json(
-        &mut opts,
-        "gen_ai.input.messages",
-        coalesce_value(record, "gen_ai.input.messages", "input.messages"),
-    );
-    set_json(
-        &mut opts,
-        "gen_ai.output.messages",
-        coalesce_value(record, "gen_ai.output.messages", "output.messages"),
-    );
     set_string(
         &mut opts,
         "gen_ai.tool.name",
@@ -1618,16 +1610,6 @@ pub async fn transform_hook_record(
         "gen_ai.tool.call.id",
         non_empty_string(record.get("gen_ai.tool.call.id"))
             .or_else(|| non_empty_string(record.get("tool.call.id"))),
-    );
-    set_json(
-        &mut opts,
-        "gen_ai.tool.call.arguments",
-        coalesce_value(record, "gen_ai.tool.call.arguments", "tool.arguments"),
-    );
-    set_json(
-        &mut opts,
-        "gen_ai.tool.call.result",
-        coalesce_value(record, "gen_ai.tool.call.result", "tool.result"),
     );
     set_string(
         &mut opts,
@@ -1667,22 +1649,6 @@ pub async fn transform_hook_record(
         "gen_ai.skill.version",
         non_empty_string(record.get("gen_ai.skill.version")),
     );
-    set_json(
-        &mut opts,
-        "gen_ai.system_instructions",
-        record
-            .get("gen_ai.system_instructions")
-            .filter(|value| !value.is_null())
-            .cloned(),
-    );
-    set_json(
-        &mut opts,
-        "gen_ai.tool.definitions",
-        record
-            .get("gen_ai.tool.definitions")
-            .filter(|value| !value.is_null())
-            .cloned(),
-    );
     set_string(
         &mut opts,
         "error.type",
@@ -1694,7 +1660,7 @@ pub async fn transform_hook_record(
         non_empty_string(record.get("error.message")),
     );
 
-    let mut entry = build_agent_activity_entry(&Value::Object(opts));
+    let mut entry = build_shared_hook_activity_entry(&opts, record);
     enrich_canonical_entry_with_git(&mut entry, record, git_namespace).await?;
     Ok(Some(entry))
 }
@@ -1864,24 +1830,6 @@ fn set_number(map: &mut Map<String, Value>, key: &str, value: Option<Value>) {
         None => {
             map.remove(key);
         }
-    }
-}
-
-fn set_json(map: &mut Map<String, Value>, key: &str, value: Option<Value>) {
-    match value {
-        Some(json) => {
-            map.insert(key.to_string(), json);
-        }
-        None => {
-            map.remove(key);
-        }
-    }
-}
-
-fn coalesce_value(record: &Map<String, Value>, primary: &str, alias: &str) -> Option<Value> {
-    match record.get(primary) {
-        Some(Value::Null) | None => record.get(alias).filter(|value| !value.is_null()).cloned(),
-        Some(value) => Some(value.clone()),
     }
 }
 
