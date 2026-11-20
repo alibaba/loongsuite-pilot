@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const mockReadJsonFile = vi.fn().mockResolvedValue(null);
-const mockLoggerWarn = vi.hoisted(() => vi.fn());
+const { mockLoggerInfo, mockLoggerDebug, mockLoggerWarn } = vi.hoisted(() => ({
+  mockLoggerInfo: vi.fn(), mockLoggerDebug: vi.fn(), mockLoggerWarn: vi.fn(),
+}));
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
   readJsonFile: (...args: unknown[]) => mockReadJsonFile(...args),
@@ -10,11 +12,11 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
-    info: vi.fn(), debug: vi.fn(), warn: mockLoggerWarn, error: vi.fn(),
+    info: mockLoggerInfo, debug: mockLoggerDebug, warn: mockLoggerWarn, error: vi.fn(),
   }),
 }));
 
-import { loadConfig, buildOtlpTraceConfig } from '../../../src/core/config-loader.js';
+import { loadConfig, buildOtlpTraceConfig, logLoadedConfigFile } from '../../../src/core/config-loader.js';
 
 function clearSlsEnv() {
   delete process.env.LOONGSUITE_SLS_MODE;
@@ -118,6 +120,86 @@ describe('ConfigLoader', () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  it('logs only allowlisted on-disk values, including when replayed', async () => {
+    vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '/custom/config.json');
+    const file = {
+      enabled: false,
+      collectLog: true,
+      collectTrace: false,
+      userId: 'private-user-id',
+      jsonl: { enabled: true, outputDir: '/private/output' },
+      http: {
+        enabled: true,
+        url: 'https://private-user:private-pass@example.invalid/ingest?api_key=private-query',
+        headers: { Authorization: 'Bearer private-header' },
+      },
+      sls: [{
+        endpoint: 'https://example.invalid',
+        project: 'private-project',
+        logstore: 'private-logstore',
+        accessKeyId: 'private-ak',
+        accessKeySecret: 'private-sk',
+      }],
+      otlpTrace: {
+        endpoint: 'https://example.invalid/v1/traces#private-fragment',
+        resourceAttributes: { 'custom.id': 'private-resource-attribute' },
+      },
+      cms: { endpoint: 'https://example.invalid', licenseKey: 'private-license' },
+      autoUpdate: {
+        enabled: false,
+        manifestUrl: 'https://example.invalid/latest?X-Amz-Signature=private-signature',
+        packageUrl: 'https://example.invalid/package.tar.gz?token=private-package-token',
+      },
+      globalSpanAttributes: { 'tenant.session_credential': 'private-custom-attribute' },
+      unknown: { arbitrary: 'private-unknown' },
+    };
+    mockReadJsonFile.mockResolvedValueOnce(file);
+
+    await expect(loadConfig()).resolves.toMatchObject({ enabled: false });
+    const expected = {
+      path: '/custom/config.json',
+      configSummary: {
+        enabled: false, collectLog: true, collectTrace: false, jsonlEnabled: true, httpEnabled: true,
+        autoUpdateEnabled: false, slsEndpointCount: 1, httpUrlConfigured: true, otlpTraceEndpointConfigured: true,
+        cmsEndpointConfigured: true, updateManifestUrlConfigured: true, updatePackageUrlConfigured: true,
+      },
+    };
+    expect(mockLoggerInfo).toHaveBeenCalledWith('loaded config file', expected);
+    expect(JSON.stringify(mockLoggerInfo.mock.calls.filter(([message]) => message === 'loaded config file')))
+      .not.toContain('private-');
+
+    file.http.url = '';
+    mockLoggerInfo.mockClear();
+    logLoadedConfigFile();
+    expect(mockLoggerInfo.mock.calls).toEqual([['loaded config file', expected]]);
+  });
+
+  it('ignores a deeply nested unknown config field at startup', async () => {
+    let ignored: unknown = null;
+    for (let depth = 0; depth < 12_000; depth++) ignored = [ignored];
+    mockReadJsonFile.mockResolvedValueOnce({ enabled: false, ignored });
+
+    await expect(loadConfig()).resolves.toMatchObject({ enabled: false });
+    expect(mockLoggerInfo).toHaveBeenCalledWith('loaded config file', expect.objectContaining({
+      configSummary: expect.objectContaining({ enabled: false }),
+    }));
+  });
+
+  it('replays only the path when the file is missing', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({ enabled: false });
+    await loadConfig();
+    mockLoggerInfo.mockClear();
+    mockReadJsonFile.mockResolvedValueOnce(null);
+    await loadConfig();
+    mockLoggerDebug.mockClear();
+    logLoadedConfigFile();
+
+    expect(mockLoggerInfo).not.toHaveBeenCalledWith('loaded config file', expect.anything());
+    expect(mockLoggerDebug.mock.calls).toEqual([
+      ['no config file found, using env + defaults', { path: expect.any(String) }],
+    ]);
   });
 
   describe('three-layer priority (T025)', () => {
