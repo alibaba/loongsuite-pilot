@@ -2278,7 +2278,7 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce({
         otlp: [{
           name: 'managed',
-          endpoint: 'http://collector:4318',
+          endpoint: 'http://COLLECTOR:4318/',
           headers: { Authorization: 'token' },
         }],
       });

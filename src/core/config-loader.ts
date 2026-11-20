@@ -1186,7 +1186,9 @@ function dedupOtlpEndpoints(endpoints: OtlpEndpoint[]): OtlpEndpoint[] {
     const commonKey = `${stableHeaderKey(ep.headers)}|${ep.serviceName ?? ''}`;
     const traceRoute = resolveOtlpTraceUrl(ep);
     if (!traceRoute) continue;
-    const key = `${traceRoute}|${commonKey}`;
+    const requestUrl = new URL(traceRoute);
+    requestUrl.hash = '';
+    const key = `${requestUrl.href}|${commonKey}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(ep);

@@ -760,7 +760,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
 
     logger.info(
-      `OTLP trace flusher initialized → ${this.endpoints.map((endpoint) => `${endpoint.name}(${endpoint.traceUrl})`).join(', ')}`,
+      `OTLP trace flusher initialized → ${this.endpoints.map((endpoint) => `${endpoint.name}(${new URL(endpoint.traceUrl).origin})`).join(', ')}`,
     );
   }
 
