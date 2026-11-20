@@ -1,7 +1,7 @@
 import { object, safeScalar } from './records.js';
 import type { MulticaRecord } from './types.js';
 
-/** Explicitly opted-in display metadata; never copy descriptions or arbitrary metadata. */
+/** Allowlisted display metadata; never copy descriptions or arbitrary metadata. */
 export function entityLabels(recordType: string, value: unknown): MulticaRecord {
   const row = object(value);
   const fields: Record<string, Record<string, unknown>> = {

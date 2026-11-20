@@ -82,7 +82,7 @@ export LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE=off  # 关闭
 
 业务 API 均使用 GET，须显式配置工作区 UUID。凭证通过 `TokenFile` 或 `TokenEnv` 提供，默认环境变量是 `MULTICA_TOKEN`；每次请求重新读取，便于轮换。账号需要相应工作区的读取权限，403 作为采集缺口记录。Metrics/health 不携带业务 Token；源 URL 不接受内嵌凭证、查询参数、fragment 或重定向。
 
-输出使用字段白名单和凭证脱敏，不上传原始日志整行、任务 prompt/result、评论正文或任意配置环境变量。`CollectEntityNames` 默认关闭；开启后增加有限长度的名称/标题，并额外读取 `/api/projects`、`/api/workspaces/{id}`。名称和诊断文本仍可能包含用户信息，应通过 SLS 权限控制访问。
+输出使用字段白名单和凭证脱敏，不上传原始日志整行、任务 prompt/result、评论正文或任意配置环境变量。`CollectEntityNames` 默认开启，可在 Multica input 中显式设置为 false 关闭。开启时增加有限长度的名称/标题，并额外读取 `/api/projects`、`/api/workspaces/{id}`。名称和诊断文本仍可能包含用户信息，应通过 SLS 权限控制访问。
 
 ## 交付、限制与数据含义
 
