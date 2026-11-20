@@ -301,7 +301,9 @@ describe('DshLogInput state isolation and restart recovery', () => {
     expect(later[1]['gen_ai.response.finish_reasons']).toEqual(['stop']);
     expect(JSON.stringify(later[0]['gen_ai.input.messages_delta'])).toContain('answer-1');
     expect(JSON.stringify(later[0]['gen_ai.input.messages_delta'])).not.toContain('private-prompt');
-    expect(JSON.stringify(later[0]['gen_ai.input.messages'])).not.toContain('answer-2');
+    // Delta-only contract: within a turn, only the first request carries the
+    // gen_ai.input.messages anchor; later requests carry deltas only.
+    expect(later[0]['gen_ai.input.messages']).toBeUndefined();
     expect(await third.input.runCollect()).toEqual([]);
     expect(await fs.readFile(statePath, 'utf-8')).not.toContain('private-prompt');
   });
@@ -397,7 +399,10 @@ describe('DshLogInput state isolation and restart recovery', () => {
 
     expect(delta.map(message => message.role)).toEqual(['assistant', 'tool']);
     expect(JSON.stringify(delta)).not.toContain('private-prompt');
-    expect(JSON.stringify(request?.['gen_ai.input.messages'])).toContain('private-prompt');
+    // Delta-only contract: the anchor was emitted by the previous (pre-restart)
+    // input instance of the same turn; the persisted delta cursor means the
+    // post-restart request carries a delta only, with no re-anchored snapshot.
+    expect(request?.['gen_ai.input.messages']).toBeUndefined();
   });
 
   it('restores the last header after a completed turn and pairs a headerless next turn', async () => {
