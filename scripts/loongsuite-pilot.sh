@@ -318,23 +318,88 @@ sync_bootstrap_scripts() {
     cp -f "$src_dir/updater-daemon.js"   "$BOOTSTRAP_DIR/" 2>/dev/null || true
 }
 
+check_rollback_bootstrap_file() {
+    local path="$1"
+    if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
+        printf 'Rollback bootstrap path is not a file: %s\n' "$path" >&2
+        return 1
+    fi
+}
+
+snapshot_rollback_bootstrap() {
+    local backup_dir="$1"
+    shift
+    local path index=0
+    for path in "$@"; do
+        check_rollback_bootstrap_file "$path" || return 1
+        if [ -f "$path" ]; then
+            cp -p "$path" "$backup_dir/bootstrap-$index" || return 1
+        fi
+        index=$((index + 1))
+    done
+}
+
+publish_rollback_bootstrap_file() {
+    local source="$1" destination="$2" phase="$3" mode="${4:-}" staged
+    if ! staged=$(mktemp "$destination.rollback-$phase.XXXXXX"); then return 1; fi
+    if cp -p "$source" "$staged" &&
+        { [ -z "$mode" ] || chmod "$mode" "$staged"; } &&
+        mv -f "$staged" "$destination"; then
+        return 0
+    fi
+    rm -f "$staged" || true
+    return 1
+}
+
+restore_rollback_bootstrap() {
+    local backup_dir="$1"
+    shift
+    local path original index=0 status=0
+    for path in "$@"; do
+        original="$backup_dir/bootstrap-$index"
+        index=$((index + 1))
+        if ! check_rollback_bootstrap_file "$path"; then
+            status=1
+        elif [ -f "$original" ]; then
+            if ! publish_rollback_bootstrap_file "$original" "$path" restore; then
+                printf 'Failed to restore rollback bootstrap file: %s\n' "$path" >&2
+                status=1
+            fi
+        elif [ -f "$path" ] && ! rm -f "$path"; then
+            printf 'Failed to remove new rollback bootstrap file: %s\n' "$path" >&2
+            status=1
+        fi
+    done
+    return "$status"
+}
+
 sync_installed_scripts_from_version() {
     local version_dir="$1"
     local src_dir="$version_dir/scripts"
-    if [ ! -f "$src_dir/collector-daemon.js" ] || [ ! -f "$src_dir/updater-daemon.js" ] || [ ! -f "$src_dir/loongsuite-pilot.sh" ]; then
+    # Open-source packages strip updater-daemon.js (see deploy/package-opensource.sh).
+    # Match sync_bootstrap_scripts / installer-opensource: require collector + CLI only.
+    if [ ! -f "$src_dir/collector-daemon.js" ] || [ ! -f "$src_dir/loongsuite-pilot.sh" ]; then
         return 1
     fi
 
-    mkdir -p "$BOOTSTRAP_DIR"
-    cp -f "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/collector-daemon.js.tmp"
-    mv -f "$BOOTSTRAP_DIR/collector-daemon.js.tmp" "$BOOTSTRAP_DIR/collector-daemon.js"
-    cp -f "$src_dir/updater-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js.tmp"
-    mv -f "$BOOTSTRAP_DIR/updater-daemon.js.tmp" "$BOOTSTRAP_DIR/updater-daemon.js"
+    local dst
+    for dst in "$BOOTSTRAP_DIR/collector-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js" "$LOONGSUITE_PILOT_BIN"; do
+        check_rollback_bootstrap_file "$dst" && check_rollback_bootstrap_file "$dst.tmp" || return 1
+    done
 
-    mkdir -p "$(dirname "$LOONGSUITE_PILOT_BIN")"
-    cp -f "$src_dir/loongsuite-pilot.sh" "$LOONGSUITE_PILOT_BIN.tmp"
-    chmod 755 "$LOONGSUITE_PILOT_BIN.tmp"
-    mv -f "$LOONGSUITE_PILOT_BIN.tmp" "$LOONGSUITE_PILOT_BIN"
+    # The rollback caller checks this function in an if condition, so errexit
+    # does not propagate a failed file operation here.
+    mkdir -p "$BOOTSTRAP_DIR" || return 1
+    if [ -f "$src_dir/updater-daemon.js" ]; then
+        publish_rollback_bootstrap_file "$src_dir/updater-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js" sync || return 1
+    else
+        # Drop a stale proprietary updater so it cannot be paired with this collector.
+        rm -f "$BOOTSTRAP_DIR/updater-daemon.js" || return 1
+    fi
+
+    publish_rollback_bootstrap_file "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/collector-daemon.js" sync || return 1
+    mkdir -p "$(dirname "$LOONGSUITE_PILOT_BIN")" || return 1
+    publish_rollback_bootstrap_file "$src_dir/loongsuite-pilot.sh" "$LOONGSUITE_PILOT_BIN" sync 755
 }
 
 process_matches_installed_entry() {
@@ -2094,26 +2159,57 @@ cmd_rollback() {
     local curr_dir=""
     if [ -f "$CURRENT_FILE" ]; then
         curr_dir=$(cat "$CURRENT_FILE" 2>/dev/null | tr -d '[:space:]')
-    fi
-
-    echo "$prev_dir" > "$CURRENT_FILE.tmp"
-    mv -f "$CURRENT_FILE.tmp" "$CURRENT_FILE"
-    if [ -n "$curr_dir" ]; then
-        echo "$curr_dir" > "$PREVIOUS_FILE.tmp"
-        mv -f "$PREVIOUS_FILE.tmp" "$PREVIOUS_FILE"
-    fi
-
-    if ! sync_installed_scripts_from_version "$VERSIONS_DIR/$prev_dir"; then
-        if [ -n "$curr_dir" ]; then
-            echo "$curr_dir" > "$CURRENT_FILE.tmp"
-            mv -f "$CURRENT_FILE.tmp" "$CURRENT_FILE"
-            echo "$prev_dir" > "$PREVIOUS_FILE.tmp"
-            mv -f "$PREVIOUS_FILE.tmp" "$PREVIOUS_FILE"
-            sync_installed_scripts_from_version "$VERSIONS_DIR/$curr_dir" 2>/dev/null || true
-        fi
-        echo "❌ Failed to sync scripts for rollback target: $prev_dir"
+    elif [ -e "$CURRENT_FILE" ] || [ -L "$CURRENT_FILE" ]; then
+        echo "❌ Current version pointer is not a file: $CURRENT_FILE" >&2
         exit 1
     fi
+
+    # Prepare both pointers before touching the bootstrap. Publish current
+    # last so a failed sync leaves the original pointer files byte-for-byte.
+    local pointer_dir rollback_error="" retain_backup=""
+    local bootstrap_paths=(
+        "$BOOTSTRAP_DIR/collector-daemon.js"
+        "$BOOTSTRAP_DIR/updater-daemon.js"
+        "$LOONGSUITE_PILOT_BIN"
+    )
+    if ! pointer_dir=$(mktemp -d "$CACHE_DIR/.rollback-pointers.XXXXXX"); then
+        echo "❌ Failed to stage version pointers for rollback target: $prev_dir" >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$prev_dir" > "$pointer_dir/current" ||
+        { [ -n "$curr_dir" ] && ! { cp -p "$PREVIOUS_FILE" "$pointer_dir/original-previous" &&
+            printf '%s\n' "$curr_dir" > "$pointer_dir/previous"; }; }; then
+        rm -rf "$pointer_dir" || true
+        echo "❌ Failed to stage version pointers for rollback target: $prev_dir" >&2
+        exit 1
+    fi
+
+    if ! snapshot_rollback_bootstrap "$pointer_dir" "${bootstrap_paths[@]}"; then
+        rm -rf "$pointer_dir" || true
+        echo "❌ Failed to sync scripts for rollback target: $prev_dir (could not snapshot bootstrap)" >&2
+        exit 1
+    fi
+    if ! sync_installed_scripts_from_version "$VERSIONS_DIR/$prev_dir"; then
+        rollback_error="Failed to sync scripts for rollback target: $prev_dir"
+    elif [ -n "$curr_dir" ] && ! mv -f "$pointer_dir/previous" "$PREVIOUS_FILE"; then
+        rollback_error="Failed to publish previous version pointer: $curr_dir"
+    elif ! mv -f "$pointer_dir/current" "$CURRENT_FILE"; then
+        rollback_error="Failed to publish current version pointer: $prev_dir"
+        if [ -n "$curr_dir" ] && ! mv -f "$pointer_dir/original-previous" "$PREVIOUS_FILE"; then
+            echo "⚠️  Failed to restore previous version pointer; backup retained at $pointer_dir" >&2
+            retain_backup=1
+        fi
+    fi
+    if [ -n "$rollback_error" ]; then
+        if ! restore_rollback_bootstrap "$pointer_dir" "${bootstrap_paths[@]}"; then
+            echo "⚠️  Failed to restore bootstrap; backups retained at $pointer_dir" >&2
+            retain_backup=1
+        fi
+        if [ -z "$retain_backup" ]; then rm -rf "$pointer_dir" || true; fi
+        echo "❌ $rollback_error"
+        exit 1
+    fi
+    rm -rf "$pointer_dir" || true
 
     cleanup_hermes_for_rollback "$VERSIONS_DIR/$prev_dir"
 
