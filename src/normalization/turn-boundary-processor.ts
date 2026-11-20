@@ -27,7 +27,9 @@ export class TurnBoundaryProcessor {
 
     const grouped = new Map<string, AgentActivityEntry[]>();
     for (const entry of entries) {
-      if (entry['gen_ai.agent.scope'] === 'subagent') continue;
+      if (entry['gen_ai.agent.scope'] === 'subagent'
+        && normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) !== 'codex') continue;
+      if (entry['event.name'] === 'gen_ai.agent.invoke' || entry['event.name'] === 'gen_ai.agent.result') continue;
       const key = turnKey(entry);
       if (!key) continue;
       const group = grouped.get(key);
@@ -54,7 +56,10 @@ export class TurnBoundaryProcessor {
         tracked.ended = true;
       }
 
-      if (!tracked.started) {
+      // Codex persists its native prompt emission with the input cursor. A
+      // fresh processor can first see a restored suffix, not a new turn.
+      const codexTurn = normalizeAgentType(String(turnEntries[0]['gen_ai.agent.type'] ?? '')) === 'codex';
+      if (!tracked.started && !codexTurn) {
         turnEntries[0]['gen_ai.turn.start'] = true;
         tracked.started = true;
       }
@@ -89,15 +94,24 @@ export class TurnBoundaryProcessor {
 
 /** Agent-aware terminal signal used only for additive boundary enrichment. */
 export function isTerminalTurnEntry(entry: AgentActivityEntry): boolean {
-  if (entry['gen_ai.agent.scope'] === 'subagent') return false;
+  if (entry['gen_ai.agent.scope'] === 'subagent'
+    && normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) !== 'codex') return false;
   if (entry['gen_ai.turn.end'] === true) return true;
 
   const agentType = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? ''));
-  if (agentType === 'codex') {
-    const status = entry['agent.codex.turn_status'];
-    return status === 'completed' || status === 'interrupted';
+  // Codex stamps interrupted status on every record of an aborted turn.
+  // Only its explicit native end marker closes a turn split across batches.
+  if (agentType === 'codex') return false;
+  if (agentType === 'hermes' && entry['agent.hermes.collection'] === 'realtime-v1') {
+    // An individual API stop/error is not the end of a retry/tool turn. The
+    // incremental producer owns the explicit lifecycle marker, even when the
+    // response and marker arrive in different input batches.
+    return false;
   }
   if (agentType === 'openclaw') {
+    // A fixed-session cron execution can contain multiple llm_output hooks
+    // during fallback. Its producer owns the outer cron_finished boundary.
+    if (entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') return false;
     return entry['agent.openclaw.hook'] === 'llm_output';
   }
 
@@ -111,6 +125,9 @@ function turnKey(entry: AgentActivityEntry): string | undefined {
   if (!turnId) return undefined;
   const agentType = normalizeAgentType(nonEmptyString(entry['gen_ai.agent.type']) ?? 'unknown');
   const sessionId = nonEmptyString(entry['gen_ai.session.id']) ?? '';
+  // Hermes journal and trace buffers isolate user/session/turn. Do not let a
+  // boundary observed for one user suppress another user's start marker.
+  if (agentType === 'hermes') return JSON.stringify([agentType, entry['user.id'] ?? null, sessionId, turnId]);
   return `${agentType}\u0000${sessionId}\u0000${turnId}`;
 }
 

@@ -12,7 +12,18 @@
     "hookCommand": "$PILOT_DATA/hooks/qwenworkcn-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",
-    "winShell": "powershell"
+    "winShell": "powershell",
+    "interceptor": {
+      "events": ["UserPromptSubmit", "PreToolUse", "PostToolUse"],
+      "hookCommand": "$PILOT_DATA/hooks/interceptor-qwenworkcn-hook.sh",
+      "matcher": "*",
+      "timeout": {
+        "UserPromptSubmit": 15,
+        "PreToolUse": 10,
+        "PostToolUse": 10
+      },
+      "insert": "head"
+    }
   },
   "input": {
     "type": "hook-jsonl",

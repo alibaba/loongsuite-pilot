@@ -9,12 +9,15 @@
  * can discover task-scoped session roots; Stop remains a best-effort wakeup.
  * This process never parses a transcript, accumulates Hook events, or writes
  * telemetry JSONL.
+ * Also records the Node-side duration of this run into the self-monitoring
+ * spool file (shared/hook-metrics.mjs).
  */
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { decodePayload } from './shared/decode-payload.mjs';
 import { logHookError } from './shared/error-logger.mjs';
 import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
@@ -35,7 +38,8 @@ function pilotDataDir() {
 
 function tryReadStdin() {
   try {
-    // decodePayload 去 BOM 并修复中文 UTF-8->GBK 双重编码(纠偏已从 PS 侧移入 node)。
+    // decodePayload strips the BOM and repairs double-encoded UTF-8->GBK
+    // Chinese text (this correction moved from the PS side into node).
     const input = decodePayload(fs.readFileSync(0)).trim();
     if (!input) return {};
     const value = JSON.parse(input);
@@ -53,6 +57,31 @@ function tryReadStdin() {
 
 function safePathPart(value) {
   return path.basename(String(value)).replace(/[^a-zA-Z0-9_-]/g, '_') || 'unknown';
+}
+
+function sessionDirFromTranscriptPath(transcriptPath, codexHome) {
+  if (typeof transcriptPath !== 'string' || !path.isAbsolute(transcriptPath)) return null;
+  const fileName = path.basename(transcriptPath);
+  if (!fileName.startsWith('rollout-') || !fileName.endsWith('.jsonl')) return null;
+
+  const dayDir = path.dirname(transcriptPath);
+  const monthDir = path.dirname(dayDir);
+  const yearDir = path.dirname(monthDir);
+  const sessionDir = path.dirname(yearDir);
+  if (
+    !/^\d{4}$/.test(path.basename(yearDir))
+    || !/^(0[1-9]|1[0-2])$/.test(path.basename(monthDir))
+    || !/^(0[1-9]|[12]\d|3[01])$/.test(path.basename(dayDir))
+    || path.basename(sessionDir) !== 'sessions'
+  ) {
+    return null;
+  }
+
+  const relative = path.relative(codexHome, sessionDir);
+  const parts = relative.split(path.sep);
+  const supportedLayout = relative === 'sessions'
+    || (parts.length === 3 && parts[0] === 'u' && parts[1] && parts[2] === 'sessions');
+  return supportedLayout ? sessionDir : null;
 }
 
 function writeAtomicJson(directory, fileName, payload, {
@@ -123,8 +152,14 @@ function writeWakeupMarker(input, hookEvent) {
     ? process.env.CODEX_HOME.trim()
     : '';
   const codexHome = path.resolve(configuredCodexHome || path.join(os.homedir(), '.codex'));
+  const transcriptPath = typeof input.transcript_path === 'string' && input.transcript_path
+    ? input.transcript_path
+    : '';
+  const sessionDir = sessionDirFromTranscriptPath(transcriptPath, codexHome)
+    ?? path.join(codexHome, 'sessions');
 
-  // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
+  // Option 1 (env): on the first turn read TRACEPARENT and write a session-level
+  // correlation record (fail-open, once per session).
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
 
   const directory = path.join(pilotDataDir(), 'state', 'codex', 'transcript-wakeups');
@@ -165,12 +200,12 @@ function writeWakeupMarker(input, hookEvent) {
     ...(typeof input.turn_id === 'string' && input.turn_id ? { turn_id: input.turn_id } : {}),
     ...(initialTurnId ? { initial_turn_id: initialTurnId } : {}),
     ...(recoveryTurnId ? { recovery_turn_id: recoveryTurnId } : {}),
-    ...(typeof input.transcript_path === 'string' && input.transcript_path
-      ? { transcript_path: input.transcript_path }
+    ...(transcriptPath
+      ? { transcript_path: transcriptPath }
       : {}),
     hook_event: hookEvent,
     codex_home: codexHome,
-    session_dir: path.join(codexHome, 'sessions'),
+    session_dir: sessionDir,
     ...RESOURCE_ATTRIBUTE_FIELDS,
     received_at: new Date().toISOString(),
   };
@@ -197,7 +232,7 @@ function normalizedHookInput(input, subcommand) {
   };
 }
 
-function main() {
+async function main() {
   const subcommand = (process.argv[2] || '').trim();
   try {
     if (
@@ -222,7 +257,14 @@ function main() {
     }
   } finally {
     process.stdout.write('{}\n');
+    const durationMs = performance.now();
+    // A failed metrics-module load must not break the wakeup, and its load
+    // time is excluded from the measured business duration.
+    try {
+      const { recordHookTiming } = await import('./shared/hook-metrics.mjs');
+      recordHookTiming({ agentId: AGENT_ID, hookEvent: subcommand, durationMs });
+    } catch {}
   }
 }
 
-main();
+await main();

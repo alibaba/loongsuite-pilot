@@ -3,7 +3,7 @@ import { createWriteStream, type Dirent } from 'node:fs';
 import * as path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { createLogger } from '../utils/logger.js';
-import { ensureDir, fileExists } from '../utils/fs-utils.js';
+import { ensureDir, fileExists, writeJsonFile } from '../utils/fs-utils.js';
 
 const logger = createLogger('WorkerManifestSupervisor');
 const WINDOWS_PROCESS_COMMAND_TIMEOUT_MS = 5000;
@@ -35,6 +35,8 @@ interface ManifestLocation {
 interface WorkerRuntime {
   restarts: number;
   stopping: boolean;
+  stopAttempt?: Promise<boolean>;
+  stopped?: boolean;
 }
 
 export interface WindowsProcessIdentity {
@@ -411,10 +413,40 @@ export class WorkerManifestSupervisor {
   ): Promise<boolean> {
     const paths = this.resolvePaths(bundleRoot, manifest, options);
     const runtime = this.runtimes.get(paths.pid);
-    if (runtime) runtime.stopping = true;
+    if (!runtime) return this.stopProcess(agentId, bundleRoot, manifest, options);
+    if (runtime.stopAttempt) return runtime.stopAttempt;
+    runtime.stopping = true;
+    runtime.stopped = false;
+    const attempt = this.stopProcess(agentId, bundleRoot, manifest, options);
+    runtime.stopAttempt = attempt;
+    try {
+      runtime.stopped = await attempt;
+      return runtime.stopped;
+    } finally {
+      runtime.stopAttempt = undefined;
+    }
+  }
+
+  private async stopProcess(
+    agentId: string,
+    bundleRoot: string,
+    manifest: WorkerManifest,
+    options: WorkerManifestOptions,
+  ): Promise<boolean> {
+    const paths = this.resolvePaths(bundleRoot, manifest, options);
 
     const pid = await this.readPid(paths.pid);
-    if (!pid) return true;
+    if (!pid) {
+      // Exit may already have removed the pid while this explicit stop was
+      // starting. Still publish the final state before taking over its cleanup.
+      if (this.runtimes.has(paths.pid)) {
+        await this.writeStatus(paths.status, {
+          state: 'stopped', name: manifest.name, agentId, stoppedAt: new Date().toISOString(),
+        });
+      }
+      this.runtimes.delete(paths.pid);
+      return true;
+    }
 
     let processIdentity: WindowsProcessIdentity | undefined;
     if (this.shouldVerifyWindowsProcessIdentity(options)) {
@@ -566,6 +598,7 @@ export class WorkerManifestSupervisor {
 
     await fs.rm(paths.pid, { force: true });
     await fs.rm(this.processIdentityPath(paths.pid), { force: true });
+    this.runtimes.delete(paths.pid);
     await this.writeStatus(paths.status, {
       state: 'stopped',
       name: manifest.name,
@@ -955,9 +988,14 @@ if ($null -ne $process) {
     code: number | null,
     signal: NodeJS.Signals | null,
   ): Promise<void> {
+    // Wait for an active stop rather than discarding its exit notification.
+    // Only successful stop owns cleanup; a failed stop still suppresses restart
+    // via `stopping`, but must let this callback clean up the exited process.
+    if (runtime.stopped || await runtime.stopAttempt?.catch(() => false)) return;
     const paths = this.resolvePaths(bundleRoot, manifest, options);
     await fs.rm(paths.pid, { force: true });
     await fs.rm(this.processIdentityPath(paths.pid), { force: true });
+    if (runtime.stopped || await runtime.stopAttempt?.catch(() => false)) return;
 
     const failed = code !== 0 || signal !== null;
     const policy = manifest.restartPolicy ?? {};
@@ -1085,8 +1123,9 @@ if ($null -ne $process) {
   }
 
   private async writeStatus(statusPath: string, payload: Record<string, unknown>): Promise<void> {
-    await ensureDir(path.dirname(statusPath));
-    await fs.writeFile(statusPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+    // Exit/start/stop callbacks can overlap. Publish a complete document with
+    // a unique temporary file so their writes cannot mix bytes at the target.
+    await writeJsonFile(statusPath, payload);
   }
 
   private isAlive(pid: number): boolean {

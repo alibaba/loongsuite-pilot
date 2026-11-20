@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { DshLogInput } from '../../../../src/inputs/dsh-log/dsh-log-input.js';
+import type { InputRuntimeDelta } from '../../../../src/inputs/base/input-runtime-metrics.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
 
 class TestDshLogInput extends DshLogInput {
@@ -86,6 +87,225 @@ describe('DshLogInput state isolation and restart recovery', () => {
     return `dsh-log:${filePath}`;
   }
 
+  async function poll(input: TestDshLogInput) {
+    const entries: AgentActivityEntry[] = [];
+    const collectEntries = (batch: AgentActivityEntry[]) => entries.push(...batch);
+    const delta = new Promise<InputRuntimeDelta>(resolve => input.once('input-runtime-delta', resolve));
+    input.on('entries', collectEntries);
+    try {
+      await input.start();
+      await input.stop();
+      return { entries, metrics: await delta };
+    } finally {
+      input.off('entries', collectEntries);
+    }
+  }
+
+  it('keeps the shared checkpoint clean on idle polls, including old checkpoint metadata', async () => {
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    await appendRecords(file, [
+      ...prefix('session-a', 'provider-a', 'prompt-a'),
+      chunk('session-a'),
+      { type: 'turn/end', sid: 'session-a', time: 11, data: { turn: 1 } },
+    ]);
+    const first = await makeInput();
+    await poll(first.input);
+    const persisted = await readPersistedState();
+    delete persisted[stateKey(file)].extra!.dshDiscardedLineStartOffset;
+    persisted['another-input'] = { extra: { retained: 'unrelated checkpoint' } };
+    await writePersistedState(persisted);
+
+    const second = await makeInput();
+    const update = vi.spyOn(second.store, 'update');
+    expect((await poll(second.input)).entries).toEqual([]);
+    const idle = await poll(second.input);
+    expect(idle.entries).toEqual([]);
+    expect(idle.metrics).toMatchObject({ rawReadCalls: 0, rawReadBytes: 0, rawInBytes: 0 });
+    expect(update).not.toHaveBeenCalled();
+    expect(await readPersistedState()).toEqual(persisted);
+  });
+
+  it('decodes a complete 12 MiB record and restores its header after restart', async () => {
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    const header = {
+      ...prefix('session-a', 'provider-a', 'prompt-a')[3],
+      padding: '字'.repeat(4 * 1024 * 1024),
+    };
+    await appendRecords(file, [header]);
+    const bytes = (await fs.stat(file)).size;
+
+    const first = await makeInput();
+    const result = await poll(first.input);
+    expect(first.store.getOffset(stateKey(file))).toBe(bytes);
+    expect(result.metrics).toMatchObject({
+      rawReadBytes: bytes,
+      rawInBytes: bytes,
+      rawInRecords: 1,
+      rawInMaxRecordBytes: bytes,
+      rawBacklogBytesMax: bytes,
+      parseSuccessRecords: 1,
+      parseFailedRecords: 0,
+    });
+    expect(result.metrics.rawReadCalls).toBeGreaterThan(1);
+    expect(result.metrics.rawInMaxBatchBytes).toBeLessThanOrEqual(256 * 1024);
+
+    await appendRecords(file, [
+      ...prefix('session-a', 'provider-a', 'prompt-a').slice(0, 3),
+      chunk('session-a'),
+    ]);
+    const second = await makeInput();
+    const resumed = await poll(second.input);
+    const requests = resumed.entries.filter(entry => entry['event.name'] === 'llm.request');
+    expect(requests.map(entry => entry['gen_ai.request.model'])).toEqual(['provider-a-model']);
+    // Header restoration reads bytes too, but does not count them as new records.
+    expect(resumed.metrics.rawReadBytes).toBeGreaterThan(resumed.metrics.rawInBytes);
+    expect(resumed.metrics.rawInRecords).toBe(4);
+  });
+
+  it('resumes skipping an oversized line after restart and collects the next records', async () => {
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    const records = prefix('session-a', 'provider-a', 'prompt-a');
+    const turnStart = serializeRecords(records.slice(0, 1));
+    const oversized = JSON.stringify({ type: 'ignored', padding: 'x'.repeat(25 * 1024 * 1024) }) + '\n';
+    const turnStartBytes = Buffer.byteLength(turnStart);
+    await fs.writeFile(file, turnStart + oversized);
+    const first = await makeInput();
+    const initial = await poll(first.input);
+    expect(initial.entries).toEqual([]);
+    expect(initial.metrics.rawReadBytes).toBe(8 * 1024 * 1024);
+    expect(first.store.getOffset(stateKey(file))).toBe(turnStartBytes);
+
+    const skipping = await poll(first.input);
+    expect(skipping.metrics.rawReadBytes).toBe(16 * 1024 * 1024);
+    expect(skipping.metrics.rawInRecords).toBe(0);
+    expect(first.store.getOffset(stateKey(file))).toBe(turnStartBytes + 16 * 1024 * 1024);
+
+    const suffix = serializeRecords([...records.slice(1), chunk('session-a')]);
+    await fs.appendFile(file, suffix);
+    const second = await makeInput();
+    const continued = await poll(second.input);
+    expect(continued.entries).toEqual([]);
+    // Recovery replays the turn start, not the discarded 16 MiB prefix.
+    expect(continued.metrics.rawReadBytes).toBe(turnStartBytes + 8 * 1024 * 1024);
+    const resumeOffset = turnStartBytes + 24 * 1024 * 1024;
+    expect(second.store.getOffset(stateKey(file))).toBe(resumeOffset);
+
+    const resumed = await poll(second.input);
+    expect(resumed.entries.map(entry => entry['event.name'])).toEqual(['other', 'llm.request']);
+    const bytes = turnStartBytes + Buffer.byteLength(oversized) + Buffer.byteLength(suffix);
+    expect(resumed.metrics).toMatchObject({
+      rawReadBytes: bytes - resumeOffset,
+      rawInMaxRecordBytes: Buffer.byteLength(oversized),
+      rawInRecords: 6,
+      parseSuccessRecords: 5,
+      parseFailedRecords: 1,
+    });
+    expect(second.store.getOffset(stateKey(file))).toBe(bytes);
+    expect((await poll(second.input)).metrics.rawReadBytes).toBe(0);
+  });
+
+  it.each(['truncated', 'replaced'] as const)(
+    'clears oversized-line progress when the file is %s',
+    async variant => {
+      const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+      await fs.writeFile(file, 'x'.repeat(16 * 1024 * 1024));
+      const first = await makeInput();
+      await poll(first.input);
+      expect(first.store.getOffset(stateKey(file))).toBe(16 * 1024 * 1024);
+
+      const replacement = variant === 'truncated' ? file : path.join(tmpDir, 'replacement.jsonl');
+      await fs.writeFile(replacement, serializeRecords([
+        ...prefix('session-new', 'new-provider', 'new-prompt'), chunk('session-new'),
+      ]));
+      if (variant === 'replaced') await fs.rename(replacement, file);
+      const second = await makeInput();
+      const resumed = await poll(second.input);
+      const requests = resumed.entries.filter(entry => entry['event.name'] === 'llm.request');
+      expect(requests.map(entry => entry['gen_ai.session.id'])).toEqual(['session-new']);
+      expect(resumed.metrics.parseFailedRecords).toBe(0);
+    },
+  );
+
+  it('does not re-read a static incomplete tail and collects it after append', async () => {
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    const initial = serializeRecords(prefix('session-a', 'provider-a', 'prompt-a'));
+    const partial = JSON.stringify(chunk('session-a'));
+    await fs.writeFile(file, initial + partial);
+    const { input, store } = await makeInput();
+    expect((await poll(input)).metrics).toMatchObject({
+      rawReadBytes: Buffer.byteLength(initial + partial),
+      rawInBytes: Buffer.byteLength(initial),
+      rawInRecords: 5,
+    });
+    const update = vi.spyOn(store, 'update');
+    expect((await poll(input)).metrics).toMatchObject({
+      rawReadBytes: 0,
+      rawInBytes: 0,
+      rawBacklogBytesMax: Buffer.byteLength(partial),
+    });
+    expect(update).not.toHaveBeenCalled();
+    await fs.appendFile(file, '\n{bad json}\n');
+    const resumed = await poll(input);
+    expect(resumed.entries.map(entry => entry['event.name'])).toEqual(['llm.request']);
+    expect(resumed.metrics).toMatchObject({
+      rawReadBytes: Buffer.byteLength(partial + '\n{bad json}\n'),
+      rawInRecords: 2,
+      parseSuccessRecords: 1,
+      parseFailedRecords: 1,
+    });
+  });
+
+  it('collects embedded streams across restart with one paired request and response per step', async () => {
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    await appendRecords(file, prefix('session-a', 'provider-a', 'private-prompt'));
+    const first = await makeInput();
+    await first.input.runCollect();
+    await first.store.save();
+
+    const message = (step: number, kind: string, time: number) => ({
+      type: 'assistant/message', sid: 'session-a', time,
+      data: {
+        turn: 1, step,
+        message: {
+          id: `response-${step}`,
+          source: { provider: 'provider-a', model: 'provider-a-model' },
+          content: [{ type: 'text', text: `answer-${step}` }],
+        },
+        usage: { inputTokens: 10, outputTokens: 5 },
+        stream: [
+          { type: 'chunk', time: time - 4, chunk: { type: 'block-start', index: 0, blockType: 'text' } },
+          { type: 'text-chunks', time0: time - 3, index: 0, dt: [1], texts: ['answer', `-${step}`] },
+          { type: 'chunk', time: time - 1, chunk: { type: 'finish', reason: { kind } } },
+        ],
+      },
+    });
+    await appendRecords(file, [message(1, 'tool-calls', 11)]);
+    const second = await makeInput();
+    const entries = await second.input.runCollect();
+    expect(entries.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(entries[0]['time_unix_nano']).toBe('5000000');
+    expect(entries[1]['gen_ai.response.time_to_first_token']).toBe(3_000_000);
+    expect(entries[1]['gen_ai.response.finish_reasons']).toEqual(['tool_calls']);
+    expect(JSON.stringify(entries[0]['gen_ai.input.messages'])).toContain('private-prompt');
+    expect(JSON.stringify(entries[0]['gen_ai.input.messages'])).not.toContain('answer-1');
+    await second.store.save();
+
+    await appendRecords(file, [
+      { type: 'step/start', sid: 'session-a', time: 12, data: { turn: 1, step: 2 } },
+      message(2, 'stop', 20),
+      { type: 'turn/end', sid: 'session-a', time: 21, data: { turn: 1 } },
+    ]);
+    const third = await makeInput();
+    const later = await third.input.runCollect();
+    expect(later.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(later[1]['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    expect(JSON.stringify(later[0]['gen_ai.input.messages_delta'])).toContain('answer-1');
+    expect(JSON.stringify(later[0]['gen_ai.input.messages_delta'])).not.toContain('private-prompt');
+    expect(JSON.stringify(later[0]['gen_ai.input.messages'])).not.toContain('answer-2');
+    expect(await third.input.runCollect()).toEqual([]);
+    expect(await fs.readFile(statePath, 'utf-8')).not.toContain('private-prompt');
+  });
+
   it('keeps aggregators isolated when two session files advance across poll cycles', async () => {
     const fileA = path.join(tmpDir, 'dsh-session-a.jsonl');
     const fileB = path.join(tmpDir, 'dsh-session-b.jsonl');
@@ -125,6 +345,58 @@ describe('DshLogInput state isolation and restart recovery', () => {
     const request = entries.find(entry => entry['event.name'] === 'llm.request');
 
     expect(request?.['gen_ai.provider.name']).toBe('provider-a');
+    expect(JSON.stringify(request?.['gen_ai.input.messages'])).toContain('private-prompt');
+    expect(JSON.stringify(request?.['gen_ai.input.messages_delta'])).toContain('private-prompt');
+  });
+
+  it('rebuilds the request delta cursor when restarting between ReAct steps', async () => {
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    await appendRecords(file, [
+      ...prefix('session-a', 'provider-a', 'private-prompt'),
+      chunk('session-a'),
+      {
+        type: 'assistant/message', sid: 'session-a', time: 11,
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            id: 'response-1',
+            source: { provider: 'provider-a', model: 'provider-a-model' },
+            content: [{
+              type: 'tool-call', id: 'call-1', name: 'read', arguments: { path: 'README.md' },
+            }],
+          },
+        },
+      },
+      {
+        type: 'tool/result', sid: 'session-a', time: 12,
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            source: { callId: 'call-1' },
+            content: [{ type: 'text', text: '# README' }],
+          },
+        },
+      },
+      { type: 'step/start', sid: 'session-a', time: 13, data: { turn: 1, step: 2 } },
+      { type: 'request/context', sid: 'session-a', time: 14, data: { turn: 1, step: 2 } },
+    ]);
+
+    const first = await makeInput();
+    const firstEntries = await first.input.runCollect();
+    await first.store.save();
+    const firstRequest = firstEntries.find(entry => entry['event.name'] === 'llm.request');
+    expect(JSON.stringify(firstRequest?.['gen_ai.input.messages_delta'])).toContain('private-prompt');
+
+    await appendRecords(file, [chunk('session-a', 15, 1, 2)]);
+    const second = await makeInput();
+    const entries = await second.input.runCollect();
+    const request = entries.find(entry => entry['event.name'] === 'llm.request');
+    const delta = request?.['gen_ai.input.messages_delta'] as Array<{ role: string }>;
+
+    expect(delta.map(message => message.role)).toEqual(['assistant', 'tool']);
+    expect(JSON.stringify(delta)).not.toContain('private-prompt');
     expect(JSON.stringify(request?.['gen_ai.input.messages'])).toContain('private-prompt');
   });
 

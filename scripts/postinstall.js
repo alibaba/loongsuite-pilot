@@ -26,13 +26,23 @@ const LOONGSUITE_PILOT_DIR = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(
 const HOOKS_TARGET_DIR = path.join(LOONGSUITE_PILOT_DIR, 'hooks');
 const SKILLS_TARGET_DIR = path.join(LOONGSUITE_PILOT_DIR, 'skills');
 const PLUGINS_TARGET_DIR = path.join(LOONGSUITE_PILOT_DIR, 'plugins');
+const SHARED_ROOT_RUNTIME = process.platform !== 'win32' && process.getuid?.() === 0
+  && /^(1|true|yes|on)$/i.test(String(process.env.LOONGSUITE_PILOT_ROOT_TRIGGER || '').trim());
 
 /**
  * Ensure directory exists
  */
-function ensureDir(dirPath) {
-  if (!fs.existsSync(dirPath)) {
+function ensureDir(dirPath, sharedRuntime = false) {
+  const created = !fs.existsSync(dirPath);
+  if (created) {
     fs.mkdirSync(dirPath, { recursive: true });
+  }
+  if (sharedRuntime && SHARED_ROOT_RUNTIME) {
+    const info = fs.lstatSync(dirPath);
+    // Only touch Pilot runtime directories, not the data root, configs or logs.
+    if (info.isDirectory() && (created || info.uid === 0)) {
+      fs.chmodSync(dirPath, (info.mode & 0o7777) | 0o055);
+    }
   }
 }
 
@@ -45,9 +55,32 @@ function getFileMode(filePath) {
   return 0o644;
 }
 
-function installHookFile(sourcePath, targetPath) {
+let assetWriteSequence = 0;
+
+function installHookFile(sourcePath, targetPath, sharedRuntime = false) {
   const content = fs.readFileSync(sourcePath);
-  fs.writeFileSync(targetPath, content, { mode: getFileMode(sourcePath) });
+  let previousMode;
+  try {
+    const previous = fs.lstatSync(targetPath);
+    if (previous.isFile()) previousMode = previous.mode & 0o777;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  // Agents may load these files while Pilot upgrades. A failed or partial
+  // write must leave the previously installed runtime usable.
+  const stagedPath = `${targetPath}.${process.pid}.${assetWriteSequence++}.tmp`;
+  try {
+    fs.writeFileSync(stagedPath, content, { mode: getFileMode(sourcePath), flag: 'wx' });
+    if (SHARED_ROOT_RUNTIME && sharedRuntime) {
+      fs.chmodSync(stagedPath, getFileMode(sourcePath));
+    } else if (process.platform !== 'win32' && previousMode !== undefined) {
+      // Rename replaces the inode; preserve the old access mode on upgrade.
+      fs.chmodSync(stagedPath, previousMode);
+    }
+    fs.renameSync(stagedPath, targetPath);
+  } finally {
+    try { fs.unlinkSync(stagedPath); } catch {}
+  }
 }
 
 /**
@@ -70,8 +103,8 @@ function installHookFile(sourcePath, targetPath) {
  * missing plugins tree in turn failed every dsh deployment with "plugin file
  * not found or unreadable", once per collection cycle, forever.
  */
-function copyTree(sourceDir, targetDir) {
-  ensureDir(targetDir);
+function copyTree(sourceDir, targetDir, sharedRuntime = false) {
+  ensureDir(targetDir, sharedRuntime);
   let count = 0;
   for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
     // AppleDouble sidecars ride along when the release tarball is built on a
@@ -81,9 +114,9 @@ function copyTree(sourceDir, targetDir) {
     const sourcePath = path.join(sourceDir, entry.name);
     const targetPath = path.join(targetDir, entry.name);
     if (entry.isDirectory()) {
-      count += copyTree(sourcePath, targetPath);
+      count += copyTree(sourcePath, targetPath, sharedRuntime);
     } else {
-      installHookFile(sourcePath, targetPath);
+      installHookFile(sourcePath, targetPath, sharedRuntime);
       count++;
     }
   }
@@ -137,13 +170,13 @@ function pruneSidecars(targetDir) {
  * plugins as one straight line, so whatever failed first ended the script.
  * Returns true when the tree is installed or genuinely absent from the package.
  */
-function installTree(label, sourceDir, targetDir) {
+function installTree(label, sourceDir, targetDir, sharedRuntime = false) {
   if (!fs.existsSync(sourceDir)) {
     console.log(`[loongsuite-pilot] No ${label} found in package, skipping.`);
     return true;
   }
   try {
-    const count = copyTree(sourceDir, targetDir);
+    const count = copyTree(sourceDir, targetDir, sharedRuntime);
     const pruned = pruneSidecars(targetDir);
     const suffix = pruned > 0 ? ` (removed ${pruned} stale sidecar file(s))` : '';
     console.log(`[loongsuite-pilot] Installed ${count} ${label} to ${targetDir}${suffix}`);
@@ -159,7 +192,7 @@ function main() {
 
   let failed = 0;
 
-  if (!installTree('hook script(s)', HOOKS_SOURCE_DIR, HOOKS_TARGET_DIR)) failed++;
+  if (!installTree('hook script(s)', HOOKS_SOURCE_DIR, HOOKS_TARGET_DIR, true)) failed++;
 
   // Ensure .sh/.ps1 files have execute permission (belt-and-suspenders: copyTree
   // already sets the mode at write time, but a pre-existing file keeps its own).
@@ -181,7 +214,7 @@ function main() {
   }
 
   if (!installTree('skill doc(s)', SKILLS_SOURCE_DIR, SKILLS_TARGET_DIR)) failed++;
-  if (!installTree('plugin(s)', PLUGINS_SOURCE_DIR, PLUGINS_TARGET_DIR)) failed++;
+  if (!installTree('plugin(s)', PLUGINS_SOURCE_DIR, PLUGINS_TARGET_DIR, true)) failed++;
 
   // Place a no-op intercept.js stub at the legacy path.
   // Old otel-claude-hook versions injected NODE_OPTIONS="--require intercept.js" into shell profiles.

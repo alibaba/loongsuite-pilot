@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { INVOCATION_USER_ID_FIELD } from '../../../assets/hooks/shared/resource-context.mjs';
 
 const PLUGIN = path.resolve(
   fileURLToPath(import.meta.url),
@@ -48,6 +49,40 @@ function assistantToolCall(id, command) {
 
 function toolMessage(id, output) {
   return { role: 'tool', content: JSON.stringify({ output, exit_code: 0, error: null }), tool_call_id: id };
+}
+
+function toolDefinitionsTurn(...requestBodies) {
+  const prompt = 'Report the available tool surface.';
+  const finalText = 'The tool surface is available.';
+  const requests = requestBodies.map((requestBody, index) => ({
+    ...apiPayload(TURN_ONE, index + 1),
+    request: {
+      method: 'POST',
+      body: {
+        model: 'qwen3-coder-plus',
+        messages: [{ role: 'user', content: prompt }],
+        ...requestBody,
+      },
+    },
+  }));
+  return [
+    { hook: 'pre_llm_call', payload: { session_id: SESSION_ID, user_message: prompt, conversation_history: [{ role: 'user', content: prompt }], model: 'qwen3-coder-plus', platform: 'cli' } },
+    ...requests.flatMap(request => [
+      { hook: 'pre_api_request', payload: request },
+      { hook: 'post_api_request', payload: { ...request, finish_reason: 'stop', usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } },
+    ]),
+    { hook: 'post_llm_call', payload: {
+      session_id: SESSION_ID,
+      user_message: prompt,
+      assistant_response: finalText,
+      conversation_history: [
+        { role: 'user', content: prompt },
+        { role: 'assistant', content: finalText, finish_reason: 'stop' },
+      ],
+      model: 'qwen3-coder-plus',
+      platform: 'cli',
+    } },
+  ];
 }
 
 function priorHistory() {
@@ -248,9 +283,12 @@ function skillViewTurn() {
 
 function replay(events, {
   captureMessageContent = true,
+  agentTeamsWorkerName,
   pilotEnvUser,
   legacyEnvUser,
+  spanAttributes,
   configUser = 'pilot-config-user',
+  configBom = false,
   dataDirSource = 'env',
   beforeSpawn,
   expectLogFile = true,
@@ -280,7 +318,7 @@ function replay(events, {
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     config.dataDir = root;
   }
-  fs.writeFileSync(configPath, JSON.stringify(config));
+  fs.writeFileSync(configPath, `${configBom ? '\uFEFF' : ''}${JSON.stringify(config)}`);
   beforeSpawn?.(root);
   const driver = `
 import importlib.util
@@ -302,10 +340,18 @@ class Context:
 
 ctx = Context()
 module.register(ctx)
+from concurrent.futures import ThreadPoolExecutor
+workers = {}
 for line in events_path.read_text(encoding="utf-8").splitlines():
     event = json.loads(line)
-    ctx.hooks[event["hook"]](**event["payload"])
-print(json.dumps(sorted(ctx.hooks)))
+    if event.get("thread"):
+        worker = workers.setdefault(event["thread"], ThreadPoolExecutor(max_workers=1))
+        worker.submit(ctx.hooks[event["hook"]], **event["payload"]).result()
+    else:
+        ctx.hooks[event["hook"]](**event["payload"])
+for worker in workers.values():
+    worker.shutdown()
+print(json.dumps({"hooks": sorted(ctx.hooks), "activeTurns": sum(len(state["turns"]) for state in module._SESSIONS.values()), "sessions": len(module._SESSIONS)}))
 `;
   const env = {
     ...process.env,
@@ -318,24 +364,33 @@ print(json.dumps(sorted(ctx.hooks)))
   else env.LOONGSUITE_PILOT_USER_ID = pilotEnvUser;
   if (legacyEnvUser === undefined) delete env.LOONGSUITE_USER_ID;
   else env.LOONGSUITE_USER_ID = legacyEnvUser;
+  if (spanAttributes === undefined) delete env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  else env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = spanAttributes;
+  if (agentTeamsWorkerName === undefined) delete env.AGENTTEAMS_WORKER_NAME;
+  else env.AGENTTEAMS_WORKER_NAME = agentTeamsWorkerName;
   const run = spawnSync('python3', ['-c', driver, pluginPath, path.join(root, 'events.jsonl')], {
     cwd: root,
     env,
     encoding: 'utf8',
   });
   expect(run.status, run.stderr).toBe(0);
-  const hooks = JSON.parse(run.stdout.trim());
+  const { hooks, activeTurns, sessions } = JSON.parse(run.stdout.trim());
   const logDir = path.join(root, 'logs', 'hermes-agent');
   if (!expectLogFile) {
     return { hooks, records: [], raw: '', root, logDir, stderr: run.stderr };
   }
-  const files = fs.readdirSync(logDir).filter(file => /^hermes-agent-.*\.jsonl$/.test(file));
+  const files = fs.readdirSync(logDir).filter(file => /^hermes-agent-\d+-\d+-[a-f0-9]+\.jsonl$/.test(file));
   expect(files).toHaveLength(1);
-  const records = fs.readFileSync(path.join(logDir, files[0]), 'utf8')
+  const allRecords = fs.readFileSync(path.join(logDir, files[0]), 'utf8')
     .trim()
     .split('\n')
     .map(line => JSON.parse(line));
-  return { hooks, records, raw: JSON.stringify(records), root, logDir, stderr: run.stderr };
+  // These old fixtures omit per-call response/history payloads. Responses can
+  // only be recovered at turn end; semantic assertions use event time. The
+  // realtime suite checks actual append order and cross-process visibility.
+  const records = allRecords.filter(record => record['event.name'] !== 'other')
+    .sort((a, b) => Number(BigInt(a.time_unix_nano) - BigInt(b.time_unix_nano)));
+  return { hooks, records, allRecords, activeTurns, sessions, raw: JSON.stringify(allRecords), root, logDir, stderr: run.stderr };
 }
 
 function activeSessionEvictionEvents() {
@@ -388,6 +443,119 @@ afterEach(() => {
 });
 
 describe('Hermes Agent native plugin', () => {
+  it.each([[true, true], [false, true], [true, false], [true, 'legacy-thread']])('isolates overlapping turns in one IM session (capture=%s, observer=%s)', (captureMessageContent, observerIds) => {
+    // Synthetic payloads follow the observed foreground/background hook interleaving.
+    const makeTurn = (label, sender) => observerV1Turn()
+      .filter(event => !['on_session_start', 'on_session_finalize'].includes(event.hook))
+      .map(event => {
+        const payload = JSON.parse(JSON.stringify(event.payload)
+          .replaceAll('probe-sender', sender)
+          .replaceAll('approved files', `${label} files`)
+          .replaceAll('call_fixture_001', `call_${label}`)
+          .replaceAll('api-request-', `${label}-api-`));
+        if (observerIds === true) payload.turn_id = label;
+        else delete payload.turn_id;
+        payload.task_id = label;
+        payload.platform = 'dingtalk';
+        if (observerIds === 'legacy-thread' && (event.hook.includes('llm') || event.hook === 'on_session_end')) delete payload.task_id;
+        return { hook: event.hook, payload, ...(observerIds === 'legacy-thread' ? { thread: label } : {}) };
+      });
+    const foreground = makeTurn('foreground', 'im-user-A');
+    const background = makeTurn('background', '');
+    // Foreground API is in flight when background pre_llm_call arrives.
+    const events = [...foreground.slice(0, 2), ...background.slice(0, 2),
+      ...foreground.slice(2),
+      // A duplicate finish for the completed foreground must not end background.
+      foreground.at(-1), ...background.slice(2)];
+    const { records } = replay(events, { configUser: '', captureMessageContent });
+    expect(records).toHaveLength(12);
+    for (const [label, sender] of [['foreground', 'im-user-A'], ['background', 'im-user-A']]) {
+      const own = records.filter(record => record['gen_ai.turn.id'] === label);
+      expect(own).toHaveLength(6);
+      expect(new Set(own.map(record => record.trace_id)).size).toBe(1);
+      expect(own.every(record => record['user.id'] === sender)).toBe(true);
+      expect(own.filter(record => record['event.name'] === 'llm.request')
+        .map(record => record['gen_ai.request.id'])).toEqual([`${label}-api-1`, `${label}-api-2`]);
+      const input = JSON.stringify(own.find(record => record['event.name'] === 'llm.request')['gen_ai.input.messages']);
+      if (captureMessageContent) expect(input).toContain(`${label} files`);
+      else expect(input).not.toContain('files');
+      expect(own.find(record => record['event.name'] === 'tool.call')['gen_ai.tool.call.id']).toBe(`call_${label}`);
+    }
+    expect(new Set(records.map(record => record.trace_id)).size).toBe(2);
+  });
+
+  it.each([
+    ['same-thread', 'on_session_end', 'none'],
+    ['cross-thread', 'on_session_end', 'none'],
+    ['same-thread', 'on_session_finalize', 'none'],
+    ['cross-thread', 'on_session_finalize', 'none'],
+    ['same-thread', 'on_session_end', 'stale-turn'],
+    ['same-thread', 'on_session_end', 'stale-task'],
+  ])('preserves pending background tools and response across %s %s (%s)', (threadMode, hook, identity) => {
+    const makeTurn = label => firstTurn()
+      .filter(event => !['on_session_start', 'on_session_end', 'on_session_finalize'].includes(event.hook))
+      .map(event => {
+        const payload = JSON.parse(JSON.stringify(event.payload)
+          .replaceAll(TURN_ONE, label)
+          .replaceAll('call_fixture_001', `call_${label}`));
+        // Same-thread cases leave observer IDs absent so stale tagged ends
+        // cannot adopt legacy turns; cross-thread cases use current observer IDs.
+        if (threadMode === 'cross-thread') payload.turn_id = label;
+        if (event.hook.includes('llm')) payload.task_id = label;
+        return { hook: event.hook, payload, ...(threadMode === 'cross-thread' ? { thread: label } : {}) };
+      });
+    const foreground = makeTurn('foreground');
+    const background = makeTurn('background');
+    const pending = background.findIndex(event => event.hook === 'post_tool_call');
+    const end = {
+      hook,
+      payload: { session_id: SESSION_ID,
+        ...(identity === 'stale-turn' ? { turn_id: 'completed-foreground' } : {}),
+        ...(identity === 'stale-task' ? { task_id: 'completed-foreground' } : {}),
+      },
+      ...(threadMode === 'cross-thread' ? { thread: 'foreground' } : {}),
+    };
+    const { records, activeTurns, sessions } = replay([
+      ...foreground.slice(0, 3), ...background.slice(0, pending),
+      ...foreground.slice(3), end, end, ...background.slice(pending),
+    ]);
+    expect(activeTurns).toBe(0);
+    if (hook === 'on_session_finalize') expect(sessions).toBe(0);
+    expect(records).toHaveLength(12);
+    expect(new Set(records.map(record => record['event.id'])).size).toBe(12);
+    const own = records.filter(record => record['gen_ai.turn.id'] === 'background');
+    expect(own).toHaveLength(6);
+    expect(own.find(record => record['event.name'] === 'tool.result')['gen_ai.tool.call.result'])
+      .toMatchObject({ output: '17 /etc/hosts\n11 /etc/shells\n28 total', exit_code: 0 });
+    expect(JSON.stringify(own.filter(record => record['event.name'] === 'llm.response')))
+      .toContain('The files have 17 and 11 lines, for a total of 28.');
+  });
+
+  it.each(['turn_id', 'task_id'])('uses exact %s to end a failed turn in an overlapping session', idKey => {
+    const failed = failedApiTurn().filter(event => !['on_session_end', 'on_session_finalize'].includes(event.hook));
+    const events = failed.map(event => ({ ...event, payload: { ...event.payload, [idKey]: 'failed' } }));
+    const other = { hook: 'pre_llm_call', payload: { session_id: SESSION_ID, turn_id: 'other', task_id: 'other', user_message: 'other' } };
+    const end = { hook: 'on_session_end', payload: { session_id: SESSION_ID, [idKey]: 'failed' } };
+    const { records, activeTurns } = replay([...events, other, end, end]);
+    expect(activeTurns).toBe(1);
+    expect(records).toHaveLength(2);
+    expect(records.filter(record => record['event.name'] === 'llm.response')).toHaveLength(1);
+    expect(records.find(record => record['event.name'] === 'llm.response')['error.type']).toBeTruthy();
+  });
+
+  it('flushes completed APIs once at process exit without inventing unfinished API results', () => {
+    const turn = firstTurn();
+    const events = turn.slice(0, turn.findIndex(event => event.hook === 'post_tool_call'));
+    const { records } = replay([...events,
+      { hook: 'on_session_finalize', payload: { session_id: SESSION_ID } },
+      { hook: 'pre_api_request', payload: { ...apiPayload('unfinished', 1), turn_id: 'unfinished' } },
+    ]);
+    expect(records.map(record => record['event.name'])).toEqual([
+      'llm.request', 'llm.response', 'tool.call', 'llm.request',
+    ]);
+    expect(records.filter(record => record['event.name'] === 'llm.response')).toHaveLength(1);
+  });
+
   it('registers all native callbacks and emits the canonical six-event tool turn', () => {
     const { hooks, records } = replay(firstTurn(), {
       pilotEnvUser: 'pilot-env-user',
@@ -408,6 +576,8 @@ describe('Hermes Agent native plugin', () => {
     expect(new Set(records.map(record => record['gen_ai.turn.id']))).toEqual(new Set([TURN_ONE]));
     expect(records.every(record => record['gen_ai.session.id'] === SESSION_ID)).toBe(true);
     expect(records.every(record => record['user.id'] === 'pilot-env-user')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'pilot-env-user')).toBe(true);
     expect(records.every(record => record['gen_ai.agent.type'] === 'hermes')).toBe(true);
     expect(records.every(record => record['gen_ai.provider.name'] === 'qwen')).toBe(true);
 
@@ -430,6 +600,30 @@ describe('Hermes Agent native plugin', () => {
     expect(responseTwo['gen_ai.response.finish_reasons']).toEqual(['stop']);
   });
 
+  it('uses AGENTTEAMS_WORKER_NAME as the agent name and Resource marker', () => {
+    const { records } = replay(firstTurn(), {
+      agentTeamsWorkerName: ' planner ',
+    });
+
+    expect(records).not.toHaveLength(0);
+    expect(records.every(record => record['gen_ai.agent.name'] === 'planner')).toBe(true);
+    expect(records.every(record =>
+      record.resourceAttributes?.['agentteams.worker.name'] === 'planner')).toBe(true);
+    expect(new Set(records.map(record => record['event.name']))).toEqual(new Set([
+      'llm.request', 'llm.response', 'tool.call', 'tool.result',
+    ]));
+  });
+
+  it.each([
+    ['blank', '   '],
+    ['overlong', 'x'.repeat(513)],
+  ])('ignores a %s AGENTTEAMS_WORKER_NAME value', (_label, agentTeamsWorkerName) => {
+    const { records } = replay(firstTurn(), { agentTeamsWorkerName });
+
+    expect(records.every(record => !('gen_ai.agent.name' in record))).toBe(true);
+    expect(records.every(record => !('resourceAttributes' in record))).toBe(true);
+  });
+
   it('emits an error response when a provider request fails before post_llm_call', () => {
     const { records } = replay(failedApiTurn());
 
@@ -442,6 +636,215 @@ describe('Hermes Agent native plugin', () => {
     expect(response['error.type']).toBe('RateLimitError');
     expect(response['error.message']).toBe('Too many requests');
     expect(response['http.status_code']).toBe(429);
+  });
+
+  it('normalizes each Hermes provider tool shape and ignores invalid or built-in tools', () => {
+    // Shapes are derived from Hermes 0.19's provider request builders. The
+    // native observer exposes the resulting body at pre_api_request.request.body.
+    const { records } = replay(toolDefinitionsTurn(
+      {
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'terminal',
+            description: 'Run a command.',
+            parameters: { type: 'object', properties: { command: { type: 'string' } } },
+          },
+        }],
+      },
+      {
+        tools: [{
+          name: 'web_search',
+          description: 'Search the web.',
+          input_schema: { type: 'object', properties: { query: { type: 'string' } } },
+        }],
+      },
+      {
+        tools: [
+          { type: 'web_search' },
+          {
+            type: 'function',
+            name: '  read_file  ',
+            description: 'Read a file.',
+            parameters: { type: 'object', properties: { path: { type: 'string' } } },
+          },
+        ],
+      },
+      {
+        toolConfig: {
+          tools: [{
+            toolSpec: {
+              name: 'lookup',
+              description: 'Look up a value.',
+              inputSchema: { json: { type: 'object', properties: { key: { type: 'string' } } } },
+            },
+          }],
+        },
+      },
+      {
+        // Hermes 0.19 `_translate_tools_to_gemini()` sends one wrapper with
+        // the native Gemini declarations under `functionDeclarations`.
+        tools: [{
+          functionDeclarations: [{
+            name: 'grep_files',
+            description: 'Search files.',
+            parameters: { type: 'object', properties: { query: { type: 'string' } } },
+          }, {
+            name: 'list_directory',
+            parameters: { type: 'object', properties: { path: { type: 'string' } } },
+          }],
+        }],
+      },
+      { tools: [null, {}, { function: {} }] },
+    ));
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+
+    expect(requests).toHaveLength(6);
+    expect(requests.map(request => request['gen_ai.tool.definitions'])).toEqual([
+      [{
+        type: 'function',
+        name: 'terminal',
+        description: 'Run a command.',
+        parameters: { type: 'object', properties: { command: { type: 'string' } } },
+      }],
+      [{
+        type: 'function',
+        name: 'web_search',
+        description: 'Search the web.',
+        parameters: { type: 'object', properties: { query: { type: 'string' } } },
+      }],
+      [{
+        type: 'function',
+        name: 'read_file',
+        description: 'Read a file.',
+        parameters: { type: 'object', properties: { path: { type: 'string' } } },
+      }],
+      [{
+        type: 'function',
+        name: 'lookup',
+        description: 'Look up a value.',
+        parameters: { type: 'object', properties: { key: { type: 'string' } } },
+      }],
+      [{
+        type: 'function',
+        name: 'grep_files',
+        description: 'Search files.',
+        parameters: { type: 'object', properties: { query: { type: 'string' } } },
+      }, {
+        type: 'function',
+        name: 'list_directory',
+        parameters: { type: 'object', properties: { path: { type: 'string' } } },
+      }],
+      undefined,
+    ]);
+  });
+
+  it('does not persist tool definitions when message content capture is disabled', () => {
+    const marker = 'private-tool-description-marker';
+    const { records, raw } = replay(toolDefinitionsTurn({
+      tools: [{
+        type: 'function',
+        function: { name: 'private_tool', description: marker, parameters: { type: 'object' } },
+      }],
+    }), { captureMessageContent: false });
+    const request = records.find(record => record['event.name'] === 'llm.request');
+
+    expect(request).not.toHaveProperty('gen_ai.tool.definitions');
+    expect(raw).not.toContain(marker);
+  });
+
+  it('normalizes each Hermes provider system prompt shape and ignores blank prompts', () => {
+    // Shapes mirror Hermes 0.19's provider request builders: OpenAI-compatible
+    // system/developer messages, Anthropic/Bedrock top-level "system", and
+    // Gemini's nested systemInstruction. conversation_history never replays the
+    // system prompt, so the request body is the only source.
+    const { records } = replay(toolDefinitionsTurn(
+      {
+        messages: [
+          { role: 'system', content: 'You are a careful assistant.' },
+          { role: 'user', content: 'hi' },
+        ],
+      },
+      { system: 'Follow the house rules.' },
+      { system: [{ text: 'Bedrock block prompt.' }] },
+      { systemInstruction: { parts: [{ text: 'Gemini instruction.' }] } },
+      { messages: [{ role: 'developer', content: [{ type: 'text', text: 'Developer rule.' }] }] },
+      { system: '   ' },
+    ));
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+
+    expect(requests).toHaveLength(6);
+    expect(requests.map(request => request['gen_ai.system_instructions'])).toEqual([
+      [{ type: 'text', content: 'You are a careful assistant.' }],
+      [{ type: 'text', content: 'Follow the house rules.' }],
+      [{ type: 'text', content: 'Bedrock block prompt.' }],
+      [{ type: 'text', content: 'Gemini instruction.' }],
+      [{ type: 'text', content: 'Developer rule.' }],
+      undefined,
+    ]);
+    expect(requests.every(request =>
+      !(request['gen_ai.input.messages'] || []).some(message => message.role === 'system')))
+      .toBe(true);
+    expect(requests.every(request =>
+      !(request['gen_ai.input.messages_delta'] || []).some(message => message.role === 'system')))
+      .toBe(true);
+    expect(requests[0]['gen_ai.input.messages_delta'][0]).toEqual({
+      role: 'user',
+      parts: [{ type: 'text', content: 'Report the available tool surface.' }],
+    });
+  });
+
+  it('normalizes Hermes Responses API top-level instructions', () => {
+    const instructions = 'Use the Responses API house rules.';
+    const responsesBody = {
+      model: 'gpt-5',
+      messages: undefined,
+      instructions,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+      tools: [{
+        type: 'function',
+        name: 'terminal',
+        description: 'Run a command.',
+        parameters: { type: 'object' },
+      }],
+      store: false,
+    };
+    const { records } = replay(toolDefinitionsTurn(responsesBody));
+    const request = records.find(record => record['event.name'] === 'llm.request');
+    const { records: recordsWithoutInstructions } = replay(toolDefinitionsTurn({
+      ...responsesBody,
+      instructions: '   ',
+    }));
+    const requestWithoutInstructions = recordsWithoutInstructions.find(
+      record => record['event.name'] === 'llm.request',
+    );
+
+    expect(request['gen_ai.system_instructions']).toEqual([
+      { type: 'text', content: instructions },
+    ]);
+    expect(request['gen_ai.input.messages']).toEqual([{
+      role: 'user',
+      parts: [{ type: 'text', content: 'Report the available tool surface.' }],
+    }]);
+    expect(request['gen_ai.input.messages_delta']).toEqual([{
+      role: 'user',
+      parts: [{ type: 'text', content: 'Report the available tool surface.' }],
+    }]);
+    expect(request['gen_ai.input.messages_hash'])
+      .toBe(requestWithoutInstructions['gen_ai.input.messages_hash']);
+    expect(requestWithoutInstructions).not.toHaveProperty('gen_ai.system_instructions');
+  });
+
+  it('does not persist the system prompt when message content capture is disabled', () => {
+    const marker = 'private-system-prompt-marker';
+    const { records, raw } = replay(
+      toolDefinitionsTurn({ system: marker }),
+      { captureMessageContent: false },
+    );
+    const request = records.find(record => record['event.name'] === 'llm.request');
+
+    expect(request).not.toHaveProperty('gen_ai.system_instructions');
+    expect(raw).not.toContain(marker);
   });
 
   it('redacts provider error messages when message content capture is disabled', () => {
@@ -483,9 +886,11 @@ describe('Hermes Agent native plugin', () => {
     for (const record of skillRecords) {
       expect(record['gen_ai.skill.name']).toBe('loongsuite-pr-review');
       expect(record['gen_ai.skill.id']).toBe('loongsuite-pr-review');
-      expect(record['gen_ai.skill.description']).toBe('Review LoongSuite PR readiness.');
-      expect(record['gen_ai.skill.version']).toBe('1.2.3');
     }
+    // Description/version arrive in the tool result; the already-visible call
+    // cannot be retroactively enriched with future response fields.
+    expect(skillRecords[1]['gen_ai.skill.description']).toBe('Review LoongSuite PR readiness.');
+    expect(skillRecords[1]['gen_ai.skill.version']).toBe('1.2.3');
     expect(skillRecords[0]['gen_ai.tool.call.arguments']).toBeUndefined();
     expect(skillRecords[1]['gen_ai.tool.call.result']).toBeUndefined();
   });
@@ -507,6 +912,19 @@ describe('Hermes Agent native plugin', () => {
     const { records } = replay(firstTurn(), { legacyEnvUser: 'legacy-env-user' });
 
     expect(records.every(record => record['user.id'] === 'legacy-env-user')).toBe(true);
+  });
+
+  it('gives invocation-scoped identity precedence over env and sender identity', () => {
+    const { records } = replay(firstTurn({ senderId: 'sender-user' }), {
+      pilotEnvUser: 'pilot-env-user',
+      spanAttributes: 'gen_ai.user.id=invocation-user,gen_ai.agent.name=blocked',
+    });
+
+    expect(records.every(record => record['user.id'] === 'invocation-user')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'invocation-user')).toBe(true);
+    expect(records.every(record =>
+      record['agent.hermes.sender.id'] === 'sender-user')).toBe(true);
   });
 
   it('pairs two sequential tools with three unique API steps', () => {
@@ -534,6 +952,10 @@ describe('Hermes Agent native plugin', () => {
   it('keeps message and correlation structure while removing captured content', () => {
     const { records, raw } = replay(firstTurn({ senderId: 'sender-user' }), { captureMessageContent: false });
     expect(records.every(record => record['user.id'] === 'sender-user')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'sender-user')).toBe(true);
+    expect(records.every(record =>
+      record['agent.hermes.sender.id'] === 'sender-user')).toBe(true);
     expect(raw).not.toContain('approved files');
     expect(raw).not.toContain('wc -l /etc/hosts');
     expect(raw).not.toContain('17 /etc/hosts');
@@ -571,6 +993,24 @@ describe('Hermes Agent native plugin', () => {
       .not.toHaveProperty('gen_ai.tool.call.result');
   });
 
+  it('honors a BOM-prefixed content opt-out before writing messages and tools', () => {
+    const { records, raw } = replay(firstTurn(), {
+      captureMessageContent: false,
+      configBom: true,
+    });
+
+    expect(records.some(record => record['event.name'] === 'llm.request')).toBe(true);
+    expect(records.some(record => record['event.name'] === 'tool.call')).toBe(true);
+    expect(records.some(record => record['event.name'] === 'tool.result')).toBe(true);
+    for (const text of ['approved files', 'wc -l /etc/hosts', '17 /etc/hosts', 'The files have']) {
+      expect(raw).not.toContain(text);
+    }
+    expect(records.find(record => record['event.name'] === 'tool.call'))
+      .not.toHaveProperty('gen_ai.tool.call.arguments');
+    expect(records.find(record => record['event.name'] === 'tool.result'))
+      .not.toHaveProperty('gen_ai.tool.call.result');
+  });
+
   it.each(['marker', 'config'])(
     'uses the Pilot data directory from the managed %s source',
     (dataDirSource) => {
@@ -581,7 +1021,7 @@ describe('Hermes Agent native plugin', () => {
     },
   );
 
-  it('creates private log directories and removes stale process logs', () => {
+  it('creates private log directories and preserves unconsumed stale process logs', () => {
     let stalePath;
     const { logDir } = replay(firstTurn(), {
       beforeSpawn(root) {
@@ -594,7 +1034,7 @@ describe('Hermes Agent native plugin', () => {
       },
     });
 
-    expect(fs.existsSync(stalePath)).toBe(false);
+    expect(fs.existsSync(stalePath)).toBe(true);
     if (process.platform !== 'win32') {
       expect(fs.statSync(logDir).mode & 0o777).toBe(0o700);
     }
@@ -603,12 +1043,13 @@ describe('Hermes Agent native plugin', () => {
   it('flushes completed API records before evicting an active session', () => {
     const { records } = replay(activeSessionEvictionEvents());
 
-    expect(records.map(record => record['event.name'])).toEqual([
-      'llm.request',
-      'llm.response',
-    ]);
-    expect(records.every(record =>
-      record['gen_ai.session.id'] === 'active-session-0')).toBe(true);
+    // Eviction writes the first pair; interpreter exit drains the other 99
+    // completed APIs, but never the last session's unfinished request.
+    expect(records).toHaveLength(200);
+    expect(records.slice(0, 2).map(record => record['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(records.slice(0, 2).every(record => record['gen_ai.session.id'] === 'active-session-0')).toBe(true);
+    expect(new Set(records.map(record => record['event.id'])).size).toBe(200);
+    expect(records.some(record => record['gen_ai.session.id'] === 'active-session-100')).toBe(false);
   });
 
   it('reports callback failures without exposing payload content', () => {

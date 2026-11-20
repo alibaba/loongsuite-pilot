@@ -13,9 +13,26 @@ export const DEFAULT_MULTIMODAL_RETRY: RetryPolicy = {
   baseDelayMs: MULTIMODAL_UPLOAD_BASE_DELAY_MS,
 };
 
-export async function sleep(ms: number): Promise<void> {
-  if (ms <= 0) return;
-  await new Promise(resolve => setTimeout(resolve, ms));
+export async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return;
+  await new Promise<void>(resolve => {
+    let settled = false;
+    const timer = setTimeout(finish, ms);
+
+    function onAbort(): void {
+      finish();
+    }
+
+    function finish(): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }
+
+    signal?.addEventListener('abort', onAbort);
+  });
 }
 
 /** Full-jitter backoff delay (attempt is 1-based). */
@@ -26,21 +43,37 @@ export function retryDelayMs(policy: RetryPolicy, attempt: number): number {
 
 export async function withRetries<T>(
   policy: RetryPolicy,
-  run: (attempt: number) => Promise<{ ok: true; value: T } | { ok: false; retryable: boolean; error?: string; statusCode?: number }>,
-): Promise<{ ok: true; value: T } | { ok: false; error?: string; statusCode?: number }> {
+  run: (attempt: number) => Promise<{ ok: true; value: T } | { ok: false; retryable: boolean; error?: string; statusCode?: number; requestId?: string }>,
+  opts?: { signal?: AbortSignal },
+): Promise<{ ok: true; value: T } | { ok: false; error?: string; statusCode?: number; requestId?: string }> {
   let lastError: string | undefined;
   let lastStatus: number | undefined;
+  let lastRequestId: string | undefined;
 
   for (let attempt = 1; attempt <= policy.maxAttempts; attempt++) {
+    if (opts?.signal?.aborted) {
+      return { ok: false, error: 'aborted' };
+    }
     const result = await run(attempt);
     if (result.ok) return result;
     lastError = result.error;
     lastStatus = result.statusCode;
+    lastRequestId = result.requestId;
     if (!result.retryable || attempt >= policy.maxAttempts) {
-      return { ok: false, error: lastError, statusCode: lastStatus };
+      return {
+        ok: false,
+        error: lastError,
+        statusCode: lastStatus,
+        ...(lastRequestId ? { requestId: lastRequestId } : {}),
+      };
     }
-    await sleep(retryDelayMs(policy, attempt));
+    await sleep(retryDelayMs(policy, attempt), opts?.signal);
   }
 
-  return { ok: false, error: lastError, statusCode: lastStatus };
+  return {
+    ok: false,
+    error: lastError,
+    statusCode: lastStatus,
+    ...(lastRequestId ? { requestId: lastRequestId } : {}),
+  };
 }

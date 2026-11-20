@@ -1,16 +1,31 @@
-import type { MultimodalRuntimeConfig, Uploader } from '../types.js';
+import type {
+  MultimodalRuntimeConfig,
+  MultimodalStorage,
+  StorageBaseResult,
+  Uploader,
+} from '../types.js';
 import { OssUploader } from './oss-uploader.js';
 import { SlsUploader } from './sls-uploader.js';
 
-/** Build configured Uploader; throws if credentials missing. */
-export function createUploader(config: MultimodalRuntimeConfig): Uploader {
-  if (config.uploader === 'oss') {
-    if (!config.oss) throw new Error('multimodal.oss config is required');
-    return new OssUploader(config.oss, config.storageBasePath);
+/** Build the uploader for the configured storage. */
+export function createUploader(
+  config: MultimodalRuntimeConfig,
+  opts?: { expectedPresignOrigin?: string },
+): Uploader {
+  if (config.storage.type === 'oss') {
+    return new OssUploader(config.storage);
   }
-  if (config.uploader === 'sls') {
-    if (!config.sls) throw new Error('multimodal.sls config is required');
-    return new SlsUploader(config.sls, config.storageBasePath);
-  }
-  throw new Error(`unsupported multimodal.uploader: ${config.uploader}`);
+  return new SlsUploader(config.storage, config.storageBasePath, opts);
+}
+
+/** Build a delegatedOss uploader with its storage discovery function. */
+export function createDelegatedOssUploader(
+  storage: Extract<MultimodalStorage, { type: 'delegatedOss' }>,
+  storageBasePath: string,
+): { uploader: Uploader; resolveStorageBase: () => Promise<StorageBaseResult> } {
+  const uploader = new SlsUploader(storage, storageBasePath);
+  return {
+    uploader,
+    resolveStorageBase: () => uploader.discoverDelegatedOssBucket(),
+  };
 }

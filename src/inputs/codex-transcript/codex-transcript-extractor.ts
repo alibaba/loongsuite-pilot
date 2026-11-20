@@ -1,8 +1,7 @@
 import * as path from 'node:path';
-import { MAX_MULTIMODAL_PARTS, type BlobToUriFn } from '../../multimodal/types.js';
+import { MAX_MULTIMODAL_PARTS, type BlobToUriFn, type UriPart } from '../../multimodal/types.js';
 import {
   multimodalUploadIncludesInput,
-  multimodalUploadIncludesTool,
   type JsonValue,
   type MultimodalUploadMode,
 } from '../../types/index.js';
@@ -182,7 +181,7 @@ function extractCodexTurn(
   let developerInstructions = opts.developerInstructions;
   const blobToUri = opts.blobToUri;
   // Default both when blobToUri is set without mode.
-  const uploadMode = opts.uploadMode ?? (blobToUri ? 'both' : 'none');
+  const uploadMode = opts.uploadMode ?? (blobToUri ? 'all' : 'none');
   let prompt: string | undefined;
   const promptParts: string[] = [];
   const inputMessages: JsonValue[] = [];
@@ -279,6 +278,17 @@ function extractCodexTurn(
     }
 
     if (currentTurnId !== expectedTurnId) continue;
+
+    if (record.type === 'token_usage_record') {
+      const turnId = stringValue(payload.turn_id);
+      const responseId = stringValue(payload.response_id);
+      const envelope = activeStep();
+      if ((!turnId || turnId === expectedTurnId) && responseId && envelope?.step.hasResponseEvidence) {
+        envelope.step.responseId = responseId;
+        touchStep(envelope, source);
+      }
+      continue;
+    }
 
     if (record.type === 'event_msg') {
       if (payload.type === 'user_message') {
@@ -492,7 +502,7 @@ function extractCodexTurn(
     const toolOutput = transcriptToolOutput(
       itemType,
       payload,
-      multimodalUploadIncludesTool(uploadMode) ? blobToUri : undefined,
+      multimodalUploadIncludesInput(uploadMode) ? blobToUri : undefined,
       timestamp,
       source.startOffset,
     );
@@ -685,18 +695,18 @@ function normalizeToolInput(name: string, value: unknown): JsonValue | undefined
 
 type TranscriptMessagePart =
   | { type: 'text'; content: string }
-  | { type: 'uri'; mime_type: string; modality: 'image'; uri: string };
+  | UriPart;
 
 /** Codex content blocks → GenAI parts (text + uri). */
-function transcriptInputMessage(
+export function transcriptInputMessage(
   role: string,
   content: unknown,
   blobToUri?: BlobToUriFn,
   timestampMs = 0,
   recordOffset?: number,
-): { role: string; parts: TranscriptMessagePart[] } | null {
+): JsonValue | null {
   const parts = extractMessageParts(content, blobToUri, timestampMs, recordOffset);
-  return parts.length > 0 ? { role, parts } : null;
+  return parts.length > 0 ? { role, parts } as unknown as JsonValue : null;
 }
 
 function extractMessageParts(

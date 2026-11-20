@@ -44,12 +44,16 @@ const bodyOf = (name) => {
 const code = codeOf(text);
 
 describe('the orphan reap only kills this installation', () => {
-  it('there is exactly one place that enumerates node processes', () => {
+  it('enumerates node command lines with one bulk CIM query', () => {
     // Both inline copies are gone. A fourth copy appearing is the failure mode this
     // catches: the scope below would be correct and irrelevant.
-    const scans = code.match(/Get-Process -Name "node"/g) || [];
+    const scans = code.match(/Get-CimInstance Win32_Process/g) || [];
     expect(scans).toHaveLength(1);
-    expect(bodyOf('Stop-OrphanProcesses')).toContain('Get-Process -Name "node"');
+    const body = bodyOf('Stop-OrphanProcesses');
+    expect(body).toContain('Get-CimInstance Win32_Process');
+    expect(body).toContain('-Filter "Name = \'node.exe\'"');
+    expect(body).not.toMatch(/Get-Process -Name "node"/);
+    expect(body).not.toMatch(/ProcessId\s*=\s*\$\(\$_\./);
   });
 
   it('Stop-OrphanProcesses requires the command line to name our bootstrap dir', () => {

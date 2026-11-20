@@ -29,11 +29,29 @@ export async function detectAgent(detection: AgentDetectionConfig): Promise<bool
   return false;
 }
 
+// Per-process memoisation of `which`/`where.exe` results. Detection sweeps every
+// eager-safe definition (and the daemon re-detects on each deployAll), so the same
+// lookups repeat. Include the lookup environment because an install or an
+// isolated caller may change PATH within this process.
+const commandExistsCache = new Map<string, boolean>();
+
+// `which`/`where.exe` is on the startup critical path (eager injection runs it
+// synchronously before the workload's first module). A hung lookup — a stale NFS
+// mount or dead disk on PATH — must not block the business process indefinitely,
+// so bound it and treat a timeout as "not installed". The child is killed on
+// timeout rather than left to linger.
+const COMMAND_EXISTS_TIMEOUT_MS = 2000;
+
 export function commandExists(command: string): Promise<boolean> {
+  const cacheKey = JSON.stringify([command, process.env.PATH, process.env.PATHEXT, process.cwd()]);
+  const cached = commandExistsCache.get(cacheKey);
+  if (cached !== undefined) return Promise.resolve(cached);
   const bin = process.platform === 'win32' ? 'where.exe' : 'which';
   return new Promise(resolve => {
-    execFile(bin, [command], err => {
-      resolve(!err);
+    execFile(bin, [command], { timeout: COMMAND_EXISTS_TIMEOUT_MS, killSignal: 'SIGKILL' }, err => {
+      const exists = !err;
+      commandExistsCache.set(cacheKey, exists);
+      resolve(exists);
     });
   });
 }

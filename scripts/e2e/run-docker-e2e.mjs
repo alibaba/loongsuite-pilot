@@ -174,6 +174,25 @@ async function main() {
 
   // Agent probe phase for install-smoke
   if (scenario === 'install-smoke') {
+    const enableJsonl = await runLocalScript({
+      script: `set -euo pipefail
+node - <<'NODE'
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const configPath = path.join(os.homedir(), '.loongsuite-pilot', 'config.json');
+const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+cfg.jsonl = { ...(cfg.jsonl || {}), enabled: true };
+fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+NODE
+loongsuite-pilot restart`,
+      artifactDir: ARTIFACT_DIR,
+      artifactLabel: 'enable-jsonl-for-validation',
+    });
+    if (enableJsonl.code !== 0) {
+      console.error(enableJsonl.stderr || enableJsonl.stdout);
+      await keepAliveOnFailure(enableJsonl.code ?? 1);
+    }
     const probeBody = buildAgentProbeOnlyScript({ ...env, E2E_ENSURE_AGENT_CLIS: '0' });
     if (probeBody) {
       // Step 1: Write agent configs IMMEDIATELY so pilot can discover agents on next poll.

@@ -1,42 +1,172 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { convertEventLogToReadableSpans, type EventLogRecord } from '@loongsuite/otel-util-genai';
 import { InputManager } from '../../src/core/input-manager.js';
+import { CorrelationStore } from '../../src/core/upstream-link/correlation-store.js';
+import { TraceLinker } from '../../src/core/upstream-link/trace-linker.js';
 import { OpenClawPluginInput } from '../../src/inputs/openclaw-plugin/openclaw-plugin-input.js';
+import { contentHash } from '../../src/utils/content-hash.js';
 import { ClientType } from '../../src/types/index.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
 import { MockStateStore } from '../helpers/mock-state-store.js';
+// @ts-expect-error synthetic SSE helper has no declaration file
+import { fakeStreamingFetch } from '../helpers/openclaw-stream.mjs';
 
-const PLUGIN_PATH = path.resolve('assets/plugins/openclaw/plugin.mjs');
+const PLUGIN_PATH = process.env.PILOT_OPENCLAW_TEST_PLUGIN || path.resolve('assets/plugins/openclaw/plugin.mjs');
 const FIXTURE_PATH = path.resolve('tests/unit/hooks/openclaw/fixtures/pilot-probe-events-cp2.jsonl');
 
 describe('OpenClaw plugin to InputManager trace flow', () => {
   const temporaryDirectories: string[] = [];
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
+    (globalThis as any)[Symbol.for('loongsuite-pilot.openclaw.first-token')]?.dispose();
     for (const directory of temporaryDirectories.splice(0)) {
       await fs.rm(directory, { recursive: true, force: true });
     }
   });
 
-  it('dispatches real-context plugin JSONL through OpenClawPluginInput to a flusher', async () => {
+  it.each([[false, false], [true, false], [false, true], [true, true]])(
+    'links two turns without session fallback (split batches=%s, reused run ID=%s)', async (splitBatches, reusedRunId) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-upstream-'));
+    temporaryDirectories.push(root);
+    await fs.writeFile(path.join(root, 'config.json'), '{}');
+    const correlateDir = path.join(root, 'acp-correlate');
+    await fs.mkdir(correlateDir);
+    const sessionId = 'native-openclaw-session';
+    const turns = [
+      { prompt: 'Inspect the first project', trace: '11111111111111111111111111111111', parent: '1111111111111111' },
+      { prompt: 'Inspect the second project', trace: '22222222222222222222222222222222', parent: '2222222222222222' },
+    ];
+    await fs.writeFile(path.join(correlateDir, `${sessionId}.jsonl`), turns.map(turn => JSON.stringify({
+      type: 'turn', sessionId, contentHash: contentHash(turn.prompt), contentPrefix: turn.prompt,
+      traceparent: `00-${turn.trace}-${turn.parent}-01`,
+    })).join('\n') + '\n');
+
+    const input = new OpenClawPluginInput({
+      stateStore: new MockStateStore() as any, dataDir: root, pollIntervalMs: 60_000,
+    });
+    const flusher = new MockFlusher();
+    const manager = new InputManager();
+    manager.setFlusher(flusher);
+    manager.setTraceLinker(new TraceLinker(new CorrelationStore(correlateDir), { retries: 0 }));
+    manager.registerInput(input);
+    const collect = async () => {
+      await manager.startInput(input.id);
+      await manager.stopInput(input.id);
+    };
+
+    const previousDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
+    process.env.LOONGSUITE_PILOT_DATA_DIR = root;
+    try {
+      const plugin = (await import(`${PLUGIN_PATH}?upstream=${splitBatches}-${Date.now()}`)).default;
+      const handlers: Record<string, (event: any, ctx: any) => unknown> = {};
+      plugin.register({
+        pluginConfig: {}, runtime: { version: '2026.6.10' },
+        on(name: string, handler: (event: any, ctx: any) => unknown) { handlers[name] = handler; },
+      });
+      const fixture = (await fs.readFile(FIXTURE_PATH, 'utf8')).split('\n')
+        .filter(Boolean).map(line => JSON.parse(line));
+      for (const [index, turn] of turns.entries()) {
+        const runId = reusedRunId ? sessionId : `upstream-run-${index}`;
+        const ctx = { agentId: 'main', sessionId, runId, sessionKey: 'agent:main:upstream-test',
+          ...(reusedRunId ? { trigger: 'cron', jobId: 'upstream-job' } : {}) };
+        if (reusedRunId) handlers.cron_changed({ action: 'started', jobId: ctx.jobId, runAtMs: index + 1,
+          sessionTarget: `session:${ctx.sessionKey}` }, {});
+        await handlers.before_model_resolve({ prompt: turn.prompt }, ctx);
+        if (splitBatches) {
+          const batchCount = flusher.batchCalls.length;
+          await collect();
+          // The redundant pre-input hook must not escape on the local trace.
+          expect(flusher.batchCalls).toHaveLength(batchCount);
+        }
+        for (const envelope of fixture) {
+          const handler = handlers[envelope.hook];
+          if (!handler) continue;
+          const event = { ...envelope.event };
+          if ('runId' in event) event.runId = runId;
+          if ('sessionId' in event) event.sessionId = sessionId;
+          if ('sessionKey' in event) event.sessionKey = ctx.sessionKey;
+          if ('prompt' in event) event.prompt = turn.prompt;
+          await Promise.resolve(handler(event, ctx));
+          if (splitBatches && envelope.hook === 'before_agent_run') await collect();
+        }
+        if (reusedRunId) handlers.cron_changed({ action: 'finished', jobId: ctx.jobId, runAtMs: index + 1,
+          sessionId, sessionKey: ctx.sessionKey }, {});
+        if (splitBatches) await collect();
+      }
+      if (!splitBatches) await collect();
+    } finally {
+      await manager.stopInput(input.id);
+      if (previousDataDir === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
+      else process.env.LOONGSUITE_PILOT_DATA_DIR = previousDataDir;
+    }
+
+    const records = flusher.batchCalls.flat();
+    expect(records.some(record => record['agent.openclaw.hook'] === 'before_model_resolve')).toBe(false);
+    const starts = records.filter(record => record['agent.openclaw.hook'] === 'before_agent_run'
+      && record['event.name'] === 'other' && record['gen_ai.turn.start'] === true);
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map(record => record['gen_ai.turn.id'])).size).toBe(2);
+    for (const [index, turn] of turns.entries()) {
+      const turnRecords = records.filter(record => record['gen_ai.turn.id'] === starts[index]['gen_ai.turn.id']);
+      expect(turnRecords.length).toBeGreaterThan(10);
+      expect(new Set(turnRecords.map(record => record['gen_ai.turn.id'])).size).toBe(1);
+      if (reusedRunId) expect(turnRecords.every(record => record['agent.openclaw.run_id'] === sessionId)).toBe(true);
+      expect(turnRecords.every(record => record.trace_id === turn.trace)).toBe(true);
+      const inputRecords = turnRecords.filter(record => record['agent.openclaw.hook'] === 'before_agent_run');
+      expect(inputRecords).toHaveLength(2); // canonical other + derived agent.input
+      expect(inputRecords.every(record => record.parent_span_id === turn.parent)).toBe(true);
+      expect(turnRecords.filter(record => record['gen_ai.turn.start'] === true)).toHaveLength(1);
+      const converted = await convertEventLogToReadableSpans(
+        turnRecords.filter(record => record['event.name'] !== 'agent.input') as EventLogRecord[],
+        { strict: false },
+      );
+      expect(converted.warnings).toEqual([]);
+      expect(converted.spans.length).toBeGreaterThan(0);
+      expect(converted.spans.every(span => span.spanContext().traceId === turn.trace)).toBe(true);
+      const entry = converted.spans.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY');
+      expect(entry?.parentSpanId).toBe(turn.parent);
+    }
+  });
+
+  it.each(['end-first', 'message-first'])('dispatches %s plugin JSONL with TTFT through InputManager to spans', async (order) => {
+    const observeStream = fakeStreamingFetch();
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-flow-'));
     temporaryDirectories.push(root);
     await fs.writeFile(path.join(root, 'config.json'), JSON.stringify({
-      userId: 'fixture-user',
+      userId: 'plugin-config-user',
       agents: { openclaw: { captureMessageContent: true } },
     }));
 
     const previousDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
     const previousUserId = process.env.LOONGSUITE_USER_ID;
+    const previousPilotUserId = process.env.LOONGSUITE_PILOT_USER_ID;
+    const previousSpanAttributes = process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
     process.env.LOONGSUITE_PILOT_DATA_DIR = root;
-    process.env.LOONGSUITE_USER_ID = 'fixture-user';
+    delete process.env.LOONGSUITE_USER_ID;
+    delete process.env.LOONGSUITE_PILOT_USER_ID;
+    delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
     try {
       const plugin = (await import(`${PLUGIN_PATH}?integration=${Date.now()}`)).default;
       const fixture = await fs.readFile(FIXTURE_PATH, 'utf8');
-      const envelopes = fixture.split('\n').filter(Boolean).map(line => JSON.parse(line));
+      const source = fixture.split('\n').filter(Boolean).map(line => JSON.parse(line));
+      const envelopes = [];
+      let pendingEnd;
+      for (const envelope of source) {
+        if (envelope.hook === 'model_call_ended') {
+          envelope.event.timeToFirstByteMs = 12.5;
+          if (order === 'message-first') { pendingEnd = envelope; continue; }
+        }
+        envelopes.push(envelope);
+        if (envelope.hook === 'before_message_write' && envelope.event.message?.role === 'assistant' && pendingEnd) {
+          envelopes.push(pendingEnd);
+          pendingEnd = undefined;
+        }
+      }
+      expect(pendingEnd).toBeUndefined();
       const handlers: Record<string, (event: any, ctx: any) => unknown> = {};
       plugin.register({
         pluginConfig: {},
@@ -52,6 +182,14 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       for (const envelope of envelopes) {
         const handler = handlers[envelope.hook];
         if (!handler) continue;
+        const event = envelope.hook === 'before_agent_run'
+          ? {
+              ...envelope.event,
+              senderId: 'channel-sender',
+              accountId: 'channel-account',
+              channelId: 'channel-conversation',
+            }
+          : envelope.event;
         const ctx = syncHooks.has(envelope.hook)
           ? { agentId: 'main', sessionKey: envelope.event?.sessionKey || knownSessionKey }
           : {
@@ -59,14 +197,22 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
               runId: envelope.event?.runId || knownRun,
               sessionId: envelope.event?.sessionId || knownSession,
               sessionKey: envelope.event?.sessionKey || knownSessionKey,
+              channel: 'telegram',
             };
-        await Promise.resolve(handler(envelope.event, ctx));
+        if (envelope.hook === 'before_message_write' && envelope.event.message?.role === 'assistant') {
+          await observeStream(envelope.event.message.responseId, { delayMs: 50 });
+        }
+        await Promise.resolve(handler(event, ctx));
       }
     } finally {
       if (previousDataDir === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
       else process.env.LOONGSUITE_PILOT_DATA_DIR = previousDataDir;
       if (previousUserId === undefined) delete process.env.LOONGSUITE_USER_ID;
       else process.env.LOONGSUITE_USER_ID = previousUserId;
+      if (previousPilotUserId === undefined) delete process.env.LOONGSUITE_PILOT_USER_ID;
+      else process.env.LOONGSUITE_PILOT_USER_ID = previousPilotUserId;
+      if (previousSpanAttributes === undefined) delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+      else process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = previousSpanAttributes;
     }
 
     const input = new OpenClawPluginInput({
@@ -77,6 +223,8 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     const flusher = new MockFlusher();
     const manager = new InputManager();
     manager.setAgentsConfig({ [ClientType.OpenClaw]: { captureMessageContent: true } });
+    manager.setConfiguredUserId('collector-config-user');
+    manager.setUserId('collector-fallback-user');
     manager.setFlusher(flusher);
     manager.registerInput(input);
 
@@ -87,6 +235,14 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     const records = flusher.batchCalls[0];
     expect(records.length).toBeGreaterThan(10);
     expect(records.every(record => record['gen_ai.agent.type'] === ClientType.OpenClaw)).toBe(true);
+    expect(records.every(record => record['user.id'] === 'channel-sender')).toBe(true);
+    expect(records.every(record => typeof record['agent.openclaw.session_key'] === 'string')).toBe(true);
+    expect(new Set(records.map(record => record['agent.openclaw.session_key'])).size).toBe(1);
+    expect(records.every(record =>
+      !('agent.pilot.invocation.user.id' in record))).toBe(true);
+    const agentRun = records.find(record =>
+      record['agent.openclaw.hook'] === 'before_agent_run');
+    expect(agentRun?.['gen_ai.input.messages_delta']).toHaveLength(1);
     const terminal = records.find(record => record['agent.openclaw.hook'] === 'llm_output');
     expect(terminal).toMatchObject({
       'event.name': 'other',
@@ -96,7 +252,9 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       'agent.openclaw.per_call_usage.count': 2,
       'gen_ai.turn.end': true,
     });
-    expect(records.filter(record => record['gen_ai.turn.start'] === true)).toHaveLength(1);
+    const turnStarts = records.filter(record => record['gen_ai.turn.start'] === true);
+    expect(turnStarts).toHaveLength(1);
+    expect(turnStarts[0]['event.name']).toBe('other');
     expect(records.filter(record => record['gen_ai.turn.end'] === true)).toHaveLength(1);
     expect(terminal?.['gen_ai.usage.input_tokens']).toBeUndefined();
     expect(terminal?.['gen_ai.output.messages']).toBeUndefined();
@@ -117,7 +275,8 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
     process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
     try {
-      const converted = await convertEventLogToReadableSpans(records as EventLogRecord[], { strict: false });
+      const traceRecords = records.filter(record => record['event.name'] !== 'agent.input');
+      const converted = await convertEventLogToReadableSpans(traceRecords as EventLogRecord[], { strict: false });
       expect(converted.warnings).toEqual([]);
       const kindCounts = converted.spans.reduce<Record<string, number>>((counts, span) => {
         const kind = String(span.attributes['gen_ai.span.kind']);
@@ -126,8 +285,11 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       }, {});
       expect(kindCounts).toEqual({ ENTRY: 1, AGENT: 1, STEP: 2, LLM: 2, TOOL: 2 });
       expect(new Set(converted.spans.map(span => span.spanContext().traceId)).size).toBe(1);
+      expect(converted.spans.every(span =>
+        span.attributes['gen_ai.user.id'] === 'channel-sender')).toBe(true);
 
       const llmSpans = converted.spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+      expect(llmSpans.map(span => span.attributes['gen_ai.response.time_to_first_token'])).toEqual([50_000_000, 50_000_000]);
       expect(llmSpans.map(span => [
         span.attributes['gen_ai.usage.input_tokens'],
         span.attributes['gen_ai.usage.output_tokens'],
@@ -153,6 +315,9 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
         'gen_ai.usage.output_tokens': 326,
         'gen_ai.usage.total_tokens': 27778,
       });
+      const agentInput = JSON.parse(String(agentSpan?.attributes['gen_ai.input.messages']));
+      expect(agentInput).toHaveLength(1);
+      expect(agentInput[0]).toMatchObject({ role: 'user' });
     } finally {
       if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
       else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;

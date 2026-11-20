@@ -17,6 +17,7 @@ import {
   type CodexAbortedCheckpoint,
 } from './codex-aborted-turn-types.js';
 import { asRecord, stringValue, timestampMs } from './codex-aborted-turn-utils.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const DEFAULT_SESSION_DIR = '~/.codex/sessions';
 const DEFAULT_HOOK_STATE_DIR = '~/.loongsuite-pilot/state/codex/sessions';
@@ -50,7 +51,7 @@ export class CodexAbortedTurnInput extends BaseInput {
   constructor(opts: CodexAbortedTurnInputOptions) {
     super({
       stateStore: opts.stateStore,
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
     this.sessionDir = opts.sessionDir ?? resolveHome(DEFAULT_SESSION_DIR);
     this.hookStateDir = opts.hookStateDir ?? resolveHome(DEFAULT_HOOK_STATE_DIR);

@@ -1,32 +1,134 @@
 import { createHash } from 'node:crypto';
-import * as path from 'node:path';
 import { createLogger } from '../utils/logger.js';
 import {
   decodeBlobContent,
   extFromMime,
-  isImageFilePath,
+  isRealPathInsideRoots,
   joinStorageUri,
-  readImagePathBytes,
-  statImagePath,
+  lstatRegularFile,
+  modalityFromMime,
+  normalizeLocalMediaPath,
+  openNormalizedLocalMedia,
   yyyymmddFromUnixMs,
 } from './resolve.js';
+import type { BoundLogger } from '../utils/logger.js';
 import type {
   BlobToUriParams,
+  PathToUriFn,
+  PathToUriOptions,
+  StorageBaseResult,
   Uploader,
   UriConvertMeta,
+  UriPart,
   UriResult,
 } from './types.js';
 import {
   MAX_MULTIMODAL_BASE64_CHARS,
   MAX_MULTIMODAL_DATA_SIZE,
+  MAX_MULTIMODAL_PARTS,
   MAX_MULTIMODAL_PATH_INFLIGHT,
   MAX_MULTIMODAL_PENDING_BYTES,
   MAX_MULTIMODAL_PENDING_UPLOADS,
   MULTIMODAL_SHUTDOWN_TIMEOUT_MS,
+  PATH_TO_URI_DEADLINE_MS,
 } from './types.js';
 import { LruMap, MULTIMODAL_LRU_LIMIT } from './uploader/lru-set.js';
 
 const logger = createLogger('MultimodalProcessor');
+
+/**
+ * Turn local paths into uri parts.
+ * The cap counts attempts, not successes. One pathToUri can block until its
+ * read deadline, so ten tries is the bound for a single carrier. Callers
+ * drop non-media paths first; those must not spend an attempt.
+ */
+export async function convertPathsToUriParts(
+  paths: string[],
+  pathToUri: PathToUriFn,
+  timeMs: number,
+  stats: { skipped: number },
+  log: Pick<BoundLogger, 'debug' | 'warn'> = logger,
+): Promise<UriPart[]> {
+  const parts: UriPart[] = [];
+  const seen = new Set<string>();
+  let attempted = 0;
+  for (let i = 0; i < paths.length; i++) {
+    const trimmed = paths[i]?.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    if (attempted >= MAX_MULTIMODAL_PARTS) {
+      const leftover = paths.length - i;
+      stats.skipped += leftover;
+      log.debug('multimodal attempt cap reached', { attempted, leftover });
+      break;
+    }
+    seen.add(trimmed);
+    attempted += 1;
+    let result: Awaited<ReturnType<PathToUriFn>>;
+    try {
+      result = await pathToUri(trimmed, timeMs);
+    } catch (err) {
+      stats.skipped += 1;
+      log.warn('multimodal pathToUri threw; skipping path', {
+        error: String(err),
+        path: trimmed,
+      });
+      continue;
+    }
+    if (!result) {
+      stats.skipped += 1;
+      continue;
+    }
+    parts.push({
+      type: 'uri',
+      mime_type: result.mime_type,
+      modality: result.modality,
+      uri: result.uri,
+    });
+  }
+  return parts;
+}
+
+const DELEGATED_OSS_RETRY_BASE_MS = 1_000;
+const DELEGATED_OSS_RETRY_MAX_MS = 60_000;
+const DELEGATED_OSS_MISMATCH_REDISCOVERY_INTERVAL_MS = 60_000;
+
+/** Race a promise; timeout does not cancel the underlying work. */
+export async function withDeadline<T>(
+  promise: Promise<T>,
+  deadlineMs: number,
+  onTimeout: () => T,
+): Promise<T> {
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) {
+    return promise;
+  }
+
+  let settled = false;
+  const work = promise.then(
+    value => {
+      settled = true;
+      return value;
+    },
+    err => {
+      settled = true;
+      throw err;
+    },
+  );
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<T>(resolve => {
+        timer = setTimeout(() => resolve(onTimeout()), deadlineMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (!settled) {
+      void work.catch(() => undefined);
+    }
+  }
+}
 
 interface PathUriCacheEntry {
   mtimeMs: number;
@@ -34,8 +136,12 @@ interface PathUriCacheEntry {
   result: UriResult | null;
 }
 
-function pathInflightKey(absPath: string, mtimeMs: number, size: number): string {
-  return `${absPath}\0${mtimeMs}\0${size}`;
+function pathCacheKey(absPath: string, day: string): string {
+  return `${absPath}\0${day}`;
+}
+
+function pathInflightKey(absPath: string, day: string, mtimeMs: number, size: number): string {
+  return `${absPath}\0${day}\0${mtimeMs}\0${size}`;
 }
 
 /** Convert blob/path to storage uri and enqueue async upload. */
@@ -45,53 +151,103 @@ export class MultimodalProcessor {
   private readonly pendingKeys = new Set<string>();
   private pendingBytes = 0;
   private shuttingDown = false;
-  private readonly storageBasePath: string;
-  /** path→uri cache keyed by mtime+size. */
+  private uploader: Uploader;
+  private storageBasePath = '';
+  private readonly resolveStorageBase?: () => Promise<StorageBaseResult>;
+  private sniffTimer: ReturnType<typeof setTimeout> | undefined;
+  private sniffFailureCount = 0;
+  private lastMismatchRediscoveryAt: number | undefined;
+  /** path→uri cache keyed by path + event day + mtime + size. */
   private readonly pathUriCache = new LruMap<PathUriCacheEntry>(MULTIMODAL_LRU_LIMIT);
   /** In-flight path reads. */
   private readonly pathUriInflight = new Map<string, Promise<UriResult | null>>();
 
   constructor(
-    storageBasePath: string,
-    private readonly uploader: Uploader,
+    storageBasePath: string | undefined,
+    uploader: Uploader,
+    resolveStorageBase?: () => Promise<StorageBaseResult>,
   ) {
     const base = (storageBasePath ?? '').trim().replace(/\/+$/, '');
-    if (!base) {
+    if (!base && !resolveStorageBase) {
       throw new Error('multimodal storageBasePath is required');
     }
+    if (!uploader) {
+      throw new Error('multimodal uploader is required');
+    }
     this.storageBasePath = base;
+    this.uploader = uploader;
+    this.resolveStorageBase = resolveStorageBase;
+    if (!base) this.scheduleDelegatedOssSniff();
   }
 
   /** Local image path → uri. */
-  async pathToUri(filePath: string, timeUnixMs?: number): Promise<UriResult | null> {
+  async pathToUri(
+    filePath: string,
+    timeUnixMs?: number,
+    opts?: PathToUriOptions,
+  ): Promise<UriResult | null> {
+    if (!this.storageBasePath) return null;
     if (this.shuttingDown) {
       logger.warn('multimodal pathToUri rejected', { reason: 'shutting_down' });
       return null;
     }
 
-    const trimmed = filePath.trim().split(/[?#]/)[0] ?? '';
-    if (!trimmed || !isImageFilePath(trimmed)) return null;
-    const key = path.resolve(trimmed);
+    const deadlineMs = opts?.deadlineMs ?? PATH_TO_URI_DEADLINE_MS;
+    const ac = new AbortController();
+    const token = { get timedOut() { return ac.signal.aborted; } };
+    return withDeadline(
+      this.convertPathToUri(filePath, timeUnixMs, opts, token, ac.signal),
+      deadlineMs,
+      () => {
+        ac.abort();
+        logger.warn('multimodal pathToUri timed out', { path: filePath, deadlineMs });
+        return null;
+      },
+    );
+  }
 
-    const stated = await statImagePath(key);
-    if (!stated) return null;
+  private async convertPathToUri(
+    filePath: string,
+    timeUnixMs?: number,
+    opts?: PathToUriOptions,
+    token: { timedOut: boolean } = { timedOut: false },
+    signal?: AbortSignal,
+  ): Promise<UriResult | null> {
+    const key = normalizeLocalMediaPath(filePath);
+    if (!key) return null;
 
-    const cached = this.pathUriCache.get(key);
+    const roots = (opts?.allowedRootPaths ?? []).map(r => r.trim()).filter(Boolean);
+    if (roots.length === 0) {
+      logger.warn('multimodal pathToUri rejected', { reason: 'no_allowed_roots', path: key });
+      return null;
+    }
+
+    const stated = await lstatRegularFile(key, signal);
+    if (!stated) {
+      if (!signal?.aborted) logger.warn('multimodal file read failed', { path: key });
+      return null;
+    }
+
+    const day = yyyymmddFromUnixMs(timeUnixMs);
+    const cacheKey = pathCacheKey(key, day);
+    const cached = this.pathUriCache.get(cacheKey);
     if (
       cached
       && cached.mtimeMs === stated.mtimeMs
       && cached.size === stated.size
     ) {
+      if (!(await isRealPathInsideRoots(key, roots, signal))) return null;
       return cached.result;
     }
 
-    const slotKey = pathInflightKey(key, stated.mtimeMs, stated.size);
+    const slotKey = pathInflightKey(key, day, stated.mtimeMs, stated.size);
     const inflight = this.pathUriInflight.get(slotKey);
     if (inflight) return inflight;
 
     if (this.pathUriInflight.size >= MAX_MULTIMODAL_PATH_INFLIGHT) {
       logger.warn('multimodal pathToUri rejected', {
         reason: 'path_inflight_full',
+        path: key,
         pending: this.pathUriInflight.size,
         limit: MAX_MULTIMODAL_PATH_INFLIGHT,
       });
@@ -100,54 +256,37 @@ export class MultimodalProcessor {
 
     const pending = (async (): Promise<UriResult | null> => {
       try {
-        const fresh = await statImagePath(key);
-        if (!fresh) return null;
-
-        if (fresh.mtimeMs !== stated.mtimeMs || fresh.size !== stated.size) {
-          this.pathUriInflight.delete(slotKey);
-          return this.pathToUri(filePath, timeUnixMs);
+        const loaded = await openNormalizedLocalMedia(key, MAX_MULTIMODAL_DATA_SIZE, roots, signal);
+        if (!loaded || token.timedOut) {
+          if (!loaded && !token.timedOut) logger.warn('multimodal file read failed', { path: key });
+          return null;
         }
 
-        const cachedFresh = this.pathUriCache.get(key);
+        const cachedFresh = this.pathUriCache.get(cacheKey);
         if (
           cachedFresh
-          && cachedFresh.mtimeMs === fresh.mtimeMs
-          && cachedFresh.size === fresh.size
+          && cachedFresh.mtimeMs === loaded.mtimeMs
+          && cachedFresh.size === loaded.size
         ) {
           return cachedFresh.result;
         }
 
-        if (fresh.size <= 0 || fresh.size > MAX_MULTIMODAL_DATA_SIZE) {
-          logger.warn('multimodal path rejected', {
-            reason: 'size_limit',
-            size: fresh.size,
-          });
-          this.pathUriCache.set(key, {
-            mtimeMs: fresh.mtimeMs,
-            size: fresh.size,
-            result: null,
-          });
-          return null;
-        }
-
-        const loaded = await readImagePathBytes(fresh);
-        if (!loaded) return null;
-
         const result = this.bytesToUri(loaded.bytes, {
           mime_type: loaded.mime_type,
-          modality: 'image',
+          modality: modalityFromMime(loaded.mime_type),
           ...(typeof timeUnixMs === 'number' && Number.isFinite(timeUnixMs) && timeUnixMs > 0
             ? { time_unix_ms: timeUnixMs }
             : {}),
         });
-        this.pathUriCache.set(key, {
-          mtimeMs: fresh.mtimeMs,
-          size: fresh.size,
+        if (!result) return null;
+        this.pathUriCache.set(cacheKey, {
+          mtimeMs: loaded.mtimeMs,
+          size: loaded.size,
           result,
         });
         return result;
       } catch (err) {
-        logger.warn('multimodal pathToUri failed', { error: String(err) });
+        logger.warn('multimodal pathToUri failed', { path: key, error: String(err) });
         return null;
       }
     })();
@@ -163,6 +302,7 @@ export class MultimodalProcessor {
   /** Raw base64 → uri (upload async). */
   blobToUri(params: BlobToUriParams): UriResult | null {
     try {
+      if (!this.storageBasePath) return null;
       if (this.shuttingDown) {
         logger.warn('multimodal blob rejected', { reason: 'shutting_down' });
         return null;
@@ -263,19 +403,9 @@ export class MultimodalProcessor {
       },
       data: bytes,
       expectedSize: size,
-    }).then(ok => {
-      if (!ok) {
-        logger.warn('multimodal upload failed (uri may be dangling)', {
-          uri,
-          size,
-        });
-      }
-    }).catch(err => {
-      logger.warn('multimodal upload failed (uri may be dangling)', {
-        uri,
-        error: String(err),
-      });
-    });
+    }, {
+      onStorageBaseInvalidated: () => this.noteOriginMismatch(),
+    }).then(() => undefined, () => undefined);
     this.pending.add(uploadPromise);
     void uploadPromise.finally(() => {
       this.pending.delete(uploadPromise);
@@ -292,21 +422,17 @@ export class MultimodalProcessor {
       return;
     }
     this.shuttingDown = true;
+    if (this.sniffTimer) clearTimeout(this.sniffTimer);
+    this.sniffTimer = undefined;
     this.pathUriCache.clear();
     this.pathUriInflight.clear();
 
     if (this.pending.size > 0) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          Promise.allSettled([...this.pending]),
-          new Promise<void>(resolve => {
-            timer = setTimeout(resolve, timeoutMs);
-          }),
-        ]);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
+      await withDeadline(
+        Promise.allSettled([...this.pending]).then(() => undefined),
+        timeoutMs,
+        () => undefined,
+      );
       if (this.pending.size > 0) {
         logger.warn('multimodal shutdown timed out with uploads still in flight', {
           pending: this.pending.size,
@@ -321,4 +447,54 @@ export class MultimodalProcessor {
       logger.warn('multimodal uploader shutdown failed', { error: String(err) });
     }
   }
+
+  /** Re-learn the delegatedOss bucket after the presign origin changes. */
+  private noteOriginMismatch(): void {
+    if (this.shuttingDown || !this.resolveStorageBase || this.sniffTimer) return;
+    const now = performance.now();
+    if (
+      this.lastMismatchRediscoveryAt !== undefined
+      && now - this.lastMismatchRediscoveryAt < DELEGATED_OSS_MISMATCH_REDISCOVERY_INTERVAL_MS
+    ) return;
+    this.lastMismatchRediscoveryAt = now;
+    this.storageBasePath = '';
+    this.pathUriCache.clear();
+    this.scheduleDelegatedOssSniff();
+  }
+
+  private scheduleDelegatedOssSniff(): void {
+    if (this.shuttingDown || !this.resolveStorageBase || this.sniffTimer) return;
+    if (this.storageBasePath) return;
+    const exponent = Math.min(this.sniffFailureCount, 6);
+    const delayMs = Math.min(DELEGATED_OSS_RETRY_BASE_MS * (2 ** exponent), DELEGATED_OSS_RETRY_MAX_MS);
+    this.sniffFailureCount += 1;
+    this.sniffTimer = setTimeout(() => {
+      void this.sniffDelegatedOss();
+    }, delayMs);
+  }
+
+  private async sniffDelegatedOss(): Promise<void> {
+    if (!this.resolveStorageBase) return;
+    let sniffed: StorageBaseResult;
+    try {
+      sniffed = await this.resolveStorageBase();
+    } catch (err) {
+      sniffed = { ok: false, error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      this.sniffTimer = undefined;
+    }
+    if (this.shuttingDown) return;
+    if (!sniffed.ok) {
+      logger.warn('delegatedOss storage sniff failed; retrying', { error: sniffed.error });
+      this.scheduleDelegatedOssSniff();
+      return;
+    }
+    this.storageBasePath = sniffed.storageBasePath;
+    this.sniffFailureCount = 0;
+    logger.info('multimodal processor enabled', {
+      type: 'delegatedOss',
+      storageBasePath: sniffed.storageBasePath,
+    });
+  }
+
 }
