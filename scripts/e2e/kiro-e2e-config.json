@@ -1,0 +1,8 @@
+{
+  "collectTrace": true,
+  "otlpTrace": {
+    "endpoint": "http://127.0.0.1:4318",
+    "debug": true,
+    "captureMessageContent": true
+  }
+}

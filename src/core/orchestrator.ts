@@ -65,6 +65,7 @@ import { GrokBuildLogInput } from '../inputs/grok-build-log/grok-build-log-input
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
 import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
+import { KiroDesktopSessionInput } from '../inputs/kiro-desktop-session/kiro-desktop-session-input.js';
 import { CopilotLogInput } from '../inputs/copilot-log/copilot-log-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
@@ -152,6 +153,7 @@ export class Orchestrator extends EventEmitter {
     'codex-transcript': 'codex',
     'kiro-cli-log': 'kiro-cli',
     'kiro-cli-session': 'kiro-cli',
+    'kiro-desktop-session': 'kiro',
     'copilot-log': 'copilot',
     'opencode-log': 'opencode',
     'pi-coding-agent-log': 'pi-coding-agent',
@@ -1711,6 +1713,27 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['kiro-cli-session']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['kiro-cli-session']?.pollInterval,
+      }),
+    );
+
+    // --- Kiro Desktop Session (Session File Polling, ~/.kiro/sessions/**/messages.jsonl) ---
+    const kiroDesktopSessionInput = new KiroDesktopSessionInput({
+      stateStore: this.stateStore,
+    });
+    this.inputManager.registerInput(kiroDesktopSessionInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(kiroDesktopSessionInput, {
+        watchPaths: KiroDesktopSessionInput.getWatchPaths(),
+        isAvailable: KiroDesktopSessionInput.checkAvailability,
+        enabled: () =>
+          this.isAgentGatedEnabled(
+            Orchestrator.LISTENER_AGENT_MAP['kiro-desktop-session'],
+          ) &&
+          this.agentControlManager.resolveEnabled(
+            'kiro-desktop-session',
+            listenerCfg['kiro-desktop-session']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['kiro-desktop-session']?.pollInterval,
       }),
     );
 
