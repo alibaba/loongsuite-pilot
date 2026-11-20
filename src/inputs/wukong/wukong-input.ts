@@ -806,7 +806,12 @@ export class WukongInput extends BaseInput {
         && (earlierActivityEndTs <= startTs || inferredHandoffTs !== undefined);
       let reqTs = startTs;
       if (s.firstToolTs !== undefined) {
-        reqTs = Math.max(runStartTs, Math.min(startTs, s.firstToolTs - 2));
+        const previous = steps[i - 1];
+        const fitsBeforeOwnTool = s.nativeStep !== undefined && previous?.nativeStep?.finishedAt === startTs
+          && previous.lastContentTs <= startTs && earlierActivityEndTs === startTs && s.firstToolTs === startTs + 1;
+        // At a serial handoff with one millisecond available, the inferred
+        // response can end on the tool's start without overlapping either step.
+        if (!fitsBeforeOwnTool) reqTs = Math.max(runStartTs, Math.min(startTs, s.firstToolTs - 2));
       } else if (tiedHandoff && earlierActivityEndTs <= startTs - 1) {
         // The converter uses whole milliseconds. Use a free tick only before
         // a proven tie and leave all earlier content and tool times intact.

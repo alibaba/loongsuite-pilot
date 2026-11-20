@@ -257,27 +257,30 @@ describe('WukongInput', () => {
   });
 
   it.each([
-    { firstResultAt: 39, secondToolAt: 41, responseId: 'two' },
-    { firstResultAt: 39, secondToolAt: 44, responseId: 'two' },
-    { firstResultAt: 40, secondToolAt: 41, responseId: 'three' },
-  ])('uses the explicit source request for a result at $firstResultAt before a second tool at $secondToolAt', async ({
-    firstResultAt, secondToolAt, responseId,
+    { firstResultAt: 39, secondToolAt: 41, responseId: 'two', secondModelTimes: [39, 40] },
+    { firstResultAt: 39, secondToolAt: 44, responseId: 'two', secondModelTimes: [40, 43] },
+    { firstResultAt: 40, secondToolAt: 41, responseId: 'three', secondModelTimes: [40, 41] },
+    { firstResultAt: 42, secondToolAt: 41, responseId: 'three', secondModelTimes: [39, 40] },
+  ])('keeps model timing and result ownership with a result at $firstResultAt and next tool at $secondToolAt', async ({
+    firstResultAt, secondToolAt, responseId, secondModelTimes,
   }) => {
     const base = 1779240560000;
     const event = (type: string, offset: number, fields: Record<string, unknown> = {}) => ({
       type, timestamp: base + offset, ...fields,
     });
+    const firstResult = event('TOOL_CALL_RESULT', firstResultAt, { toolCallId: 'a', content: 'First result.' });
     const events = [
       event('RUN_STARTED', 0, { runId: 'run' }),
       event('STEP_STARTED', 3, { stepName: 'first' }),
       event('TEXT_MESSAGE_CONTENT', 6, { messageId: 'one', delta: 'First.' }),
       event('TOOL_CALL_START', 10, { toolCallId: 'a', toolCallName: 'read', parentMessageId: 'one' }),
       event('TOOL_CALL_END', 12, { toolCallId: 'a' }),
-      event('TOOL_CALL_RESULT', firstResultAt, { toolCallId: 'a', content: 'First result.' }),
-      event('STEP_FINISHED', firstResultAt, { stepName: 'first' }),
+      ...(firstResultAt <= 40 ? [firstResult] : []),
+      event('STEP_FINISHED', Math.min(firstResultAt, 40), { stepName: 'first' }),
       event('STEP_STARTED', 40, { stepName: 'second' }),
       event('TEXT_MESSAGE_CONTENT', 40, { messageId: 'two', delta: 'Second.' }),
       event('TOOL_CALL_START', secondToolAt, { toolCallId: 'b', toolCallName: 'read', parentMessageId: 'two' }),
+      ...(firstResultAt > 40 ? [firstResult] : []),
       event('TOOL_CALL_END', 45, { toolCallId: 'b' }),
       event('TOOL_CALL_RESULT', 47, { toolCallId: 'b', content: 'Second result.' }),
       event('STEP_FINISHED', 48, { stepName: 'second' }),
@@ -305,6 +308,13 @@ describe('WukongInput', () => {
     expect(requestsWithResult('Second result.')).toEqual(['three']);
     expect(models.find(span => String(span.attributes['gen_ai.input.messages']).includes('First result.'))
       ?.attributes['gen_ai.response.id']).toBe(responseId);
+    const ms = (time: ReadableSpan['startTime']) => time[0] * 1000 + time[1] / 1_000_000 - base;
+    const intervals = (kind: string) => spans.filter(span => span.attributes['gen_ai.span.kind'] === kind)
+      .map(span => [ms(span.startTime), ms(span.endTime)])
+      .sort((a, b) => a[0] - b[0]);
+    expect(intervals('LLM')[1]).toEqual(secondModelTimes);
+    expect(intervals('STEP')).toEqual([[0, firstResultAt], [secondModelTimes[0], 47], [50, 62]]);
+    expect(intervals('TOOL')).toEqual([[10, firstResultAt], [secondToolAt, 47]]);
   });
 
   it.each([undefined, 'reasoning-one', 'one'])('retains known text and reasoning in their overlapping explicit step with reasoning id %s', async (reasoningId) => {
