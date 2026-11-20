@@ -2,6 +2,8 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
+import { JSON_SCHEMA, Type, load } from 'js-yaml';
 import type {
   AgentDefinition,
   DeployResult,
@@ -20,11 +22,67 @@ export const DSH_ENABLED_MARKER = '.collection-enabled';
 
 const BEGIN_PREFIX = '# BEGIN ';
 const END_PREFIX = '# END ';
+const ADDED_SEPARATOR = '# addedSeparator=lf';
 const LOCK_SUFFIX = '.loongsuite-pilot.lock';
 const LOCK_GATE_SUFFIX = '.reclaim';
 const LOCK_TIMEOUT_MS = 2_000;
 const LOCK_RETRY_MS = 25;
 const STALE_LOCK_MS = 30_000;
+
+// DSH 0.2.2 reads patch layers with the Cordis entry-list schema. Retain
+// expression nodes for comparison without evaluating their contents.
+const patchSchema = JSON_SCHEMA.extend(new Type('tag:yaml.org,2002:js', {
+  kind: 'scalar',
+  resolve: (value: unknown) => typeof value === 'string',
+  construct: (value: unknown) => ({ __jsExpr: value }),
+}));
+const patchTrivia = /^(?:(?:[ \t]*(?:#[^\r\n]*)?|%[^\r\n]*)\r?\n)*[ \t]*/;
+const documentStart = /^---(?=[ \t\r\n]|$)[ \t]*(?:(?:#[^\r\n]*)?\r?\n)?/;
+const rootProperty = /^[&!][^ \t\r\n]+[ \t\r\n]+/;
+const documentEnd = /^\.\.\.(?=[ \t]*(?:#|\r?$))/m;
+
+interface DshPatch {
+  rows: unknown[];
+  rootOffset: number;
+  emptyDocument: boolean;
+}
+
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readPatch(bytes: Buffer, allowEmpty: boolean): DshPatch {
+  const text = bytes.toString('utf8');
+  let rootOffset = text.startsWith('\uFEFF') ? 1 : 0;
+  rootOffset += patchTrivia.exec(text.slice(rootOffset))![0].length;
+  const start = documentStart.exec(text.slice(rootOffset));
+  if (start) {
+    rootOffset += start[0].length;
+    rootOffset += patchTrivia.exec(text.slice(rootOffset))![0].length;
+  }
+  let property = rootProperty.exec(text.slice(rootOffset));
+  while (property) {
+    rootOffset += property[0].length;
+    rootOffset += patchTrivia.exec(text.slice(rootOffset))![0].length;
+    property = rootProperty.exec(text.slice(rootOffset));
+  }
+  let parsed: unknown;
+  try {
+    parsed = load(text, { schema: patchSchema });
+  } catch {
+    throw new Error('DSH patch must be valid single-document YAML');
+  }
+  const root = text.slice(rootOffset);
+  const emptyDocument = parsed == null && (!root || root.startsWith('#') || documentEnd.exec(root)?.index === 0);
+  if (allowEmpty && emptyDocument) return { rows: [], rootOffset, emptyDocument };
+  if (!Array.isArray(parsed) || !parsed.every(isMapping)) {
+    throw new Error('DSH patch must be a YAML sequence of mappings');
+  }
+  if (parsed.some(({ insert }) => insert != null && (!Array.isArray(insert) || !insert.every(isMapping)))) {
+    throw new Error('DSH patch insert must be a sequence of mappings');
+  }
+  return { rows: parsed, rootOffset, emptyDocument: false };
+}
 
 /**
  * Manages a single marked YAML block inside deepseek-harness's machine-wide
@@ -34,7 +92,8 @@ const STALE_LOCK_MS = 30_000;
  * Concurrency / safety contract (architect APPROVED comment 1083c086):
  *   - Only the Pilot-managed BEGIN/END block is ever appended or removed.
  *     Non-Pilot bytes (user rows, comments, formatting) are preserved
- *     verbatim — no `js-yaml.dump` whole-file rewrite.
+ *     verbatim. Parse the original and composed document with DSH's schema
+ *     before writing, keeping user rows in the same order and unchanged.
  *   - The block's BEGIN marker carries `created-file: true|false` so
  *     `undeploy(def)` — which only sees `AgentDefinition`, not in-memory
  *     deploy state — can decide whether to delete a now-empty file
@@ -83,12 +142,15 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     const parsed = this.splitOnPilotBlock(fileBytes, cfg.marker);
     const block = parsed.existingBlock;
     if (parsed.conflictBlock || !block) return true;
-    const flowOffset = this.emptyFlowPatchOffset(Buffer.concat([parsed.before, parsed.after]));
-    if (flowOffset !== undefined && !block.startsWith(' ')) return true;
     if (!this.hasMetadataLine(block, `# entryId=${cfg.entryId}`)) return true;
     if (!this.hasMetadataLine(block, `# pluginSource=${pluginUrl}`)) return true;
     if (!this.hasMetadataLine(block, `# pluginHash=${pluginHash}`)) return true;
-    return false;
+    try {
+      const outside = Buffer.concat([parsed.before, parsed.after]);
+      return !this.hasManagedRow(fileBytes, readPatch(outside, true).rows, pluginUrl);
+    } catch {
+      return true;
+    }
   }
 
   async deploy(def: AgentDefinition, record?: DeployedAgentRecord): Promise<DeployResult> {
@@ -165,19 +227,8 @@ export class DshYamlPatchStrategy implements DeployStrategy {
           createdFileFlag = !existedBefore;
         }
         const outside = Buffer.concat([parsed.before, parsed.after]);
-        const flowOffset = this.emptyFlowPatchOffset(outside);
-        const newBlock = this.composePilotBlock(cfg, pluginHash, createdFileFlag, flowOffset !== undefined);
-        let nextBytes: Buffer;
-        if (flowOffset !== undefined) {
-          nextBytes = Buffer.concat([outside.subarray(0, flowOffset), Buffer.from(newBlock), outside.subarray(flowOffset)]);
-        } else if (parsed.existingBlock) {
-          nextBytes = Buffer.concat([parsed.before, Buffer.from(newBlock), parsed.after]);
-        } else {
-          const sep = originalBytes.length > 0 && !originalBytes.toString('utf-8').endsWith('\n')
-            ? Buffer.from('\n')
-            : Buffer.alloc(0);
-          nextBytes = Buffer.concat([originalBytes, sep, Buffer.from(newBlock)]);
-        }
+        const nextBytes = this.composePatch(outside, parsed.existingBlock ? parsed.before.length : undefined,
+          cfg, pluginHash, createdFileFlag);
 
         const wrote = await this.atomicWriteIfUnchanged(patchPath, nextBytes, h0, mode);
         if (wrote) {
@@ -251,15 +302,27 @@ export class DshYamlPatchStrategy implements DeployStrategy {
         }
 
         const createdFile = this.extractCreatedFlag(parsed.existingBlock);
-        const nextBytes = Buffer.concat([parsed.before, parsed.after]);
+        const outside = Buffer.concat([parsed.before, parsed.after]);
 
-        if (createdFile === 'true' && nextBytes.toString('utf-8').trim().length === 0) {
+        if (createdFile === 'true' && outside.toString('utf-8').trim().length === 0) {
           const changed = await this.deleteIfUnchanged(patchPath, h0);
           if (changed) return true;
           logger.warn('concurrent modification during undeploy delete, retrying', { path: patchPath, attempt });
           continue;
         }
 
+        let nextBytes: Buffer = outside;
+        if (outside.length > 0) {
+          try {
+            if (readPatch(outside, true).emptyDocument) {
+              nextBytes = this.insertBlock(outside, this.appendOffset(outside), Buffer.from('[]\n'));
+              readPatch(nextBytes, false);
+            }
+          } catch (error) {
+            logger.warn('undeploy refused: invalid DSH patch outside managed block', { error: String(error) });
+            return false;
+          }
+        }
         const wrote = await this.atomicWriteIfUnchanged(patchPath, nextBytes, h0, mode);
         if (wrote) return true;
         logger.warn('concurrent modification during undeploy, retrying', { path: patchPath, attempt });
@@ -272,22 +335,69 @@ export class DshYamlPatchStrategy implements DeployStrategy {
 
   // ─── Block composition / parsing ───
 
-  /** Empty flow sequences need an entry inside their brackets, not another YAML root. */
-  private emptyFlowPatchOffset(bytes: Buffer): number | undefined {
-    const text = bytes.toString('utf8');
-    const prefix = /^(?:\uFEFF)?(?:[ \t]*(?:#[^\r\n]*|---)?\r?\n)*[ \t]*/.exec(text)![0];
-    const body = text.slice(prefix.length);
-    if (!body.startsWith('[')) return undefined;
-    const empty = /^\[\s*\]/.exec(body);
-    if (!empty || body.slice(empty[0].length).split(/\r?\n/).some(line => line.trim() && !line.trimStart().startsWith('#'))) {
-      throw new Error('Non-empty flow-style DSH patch is unsupported; original preserved. Use a block sequence.');
+  private composePatch(outside: Buffer, previousOffset: number | undefined, cfg: DshYamlPatchConfig,
+    pluginHash: string, createdFile: boolean): Buffer {
+    const patch = readPatch(outside, true);
+    const text = outside.toString('utf8');
+    const root = text.slice(patch.rootOffset);
+    const pluginUrl = pathToFileURL(this.resolvePluginPath(cfg)).href;
+    if (root.startsWith('[')) {
+      if (patch.rows.length) throw new Error('Non-empty flow-style DSH patch is unsupported; original preserved. Use a block sequence.');
+      const offset = Buffer.byteLength(text.slice(0, patch.rootOffset)) + 1;
+      if (previousOffset !== undefined && previousOffset !== offset && previousOffset !== outside.length) {
+        throw new Error('Managed DSH patch is outside the empty flow sequence');
+      }
+      const block = Buffer.from(this.composePilotBlock(cfg, pluginHash, createdFile, true));
+      const composed = Buffer.concat([outside.subarray(0, offset), block, outside.subarray(offset)]);
+      if (this.hasManagedRow(composed, patch.rows, pluginUrl)) return composed;
+      throw new Error('Could not compose a valid DSH flow patch without changing user rows');
     }
-    return Buffer.byteLength(prefix) + 1;
+
+    const rootLineStart = text.lastIndexOf('\n', patch.rootOffset - 1) + 1;
+    const rootLinePrefix = text.slice(rootLineStart, patch.rootOffset).replace(/^\uFEFF/, '');
+    const sequenceIndent = /^-(?=[ \t\r\n]|$)/.test(root) ? rootLinePrefix.length : 0;
+    const append = this.appendOffset(outside);
+    const offset = previousOffset ?? append;
+    const offsets = [offset];
+    // A legacy append at EOF may have placed the row after the end marker.
+    // Do not reorder documents or discard bytes from a user's malformed file.
+    if (offset === outside.length && append !== offset) offsets.push(append);
+    for (const position of offsets) {
+      const addedSeparator = position === outside.length && position > 0 && outside[position - 1] !== 0x0a;
+      const block = Buffer.from(this.composePilotBlock(cfg, pluginHash, createdFile, false, sequenceIndent, addedSeparator));
+      const composed = this.insertBlock(outside, position, block);
+      if (this.hasManagedRow(composed, patch.rows, pluginUrl)) return composed;
+    }
+    throw new Error('Could not compose a valid DSH patch without changing user rows');
   }
 
-  private composePilotBlock(cfg: DshYamlPatchConfig, pluginHash: string, createdFile?: boolean, flow = false): string {
+  private appendOffset(bytes: Buffer): number {
+    const text = bytes.toString('utf8');
+    const match = documentEnd.exec(text);
+    return match ? Buffer.byteLength(text.slice(0, match.index)) : bytes.length;
+  }
+
+  private insertBlock(bytes: Buffer, offset: number, block: Buffer): Buffer {
+    const separator = offset > 0 && bytes[offset - 1] !== 0x0a ? '\n' : '';
+    return Buffer.concat([bytes.subarray(0, offset), Buffer.from(separator), block, bytes.subarray(offset)]);
+  }
+
+  private hasManagedRow(bytes: Buffer, userRows: unknown[], pluginUrl: string): boolean {
+    try {
+      const { rows } = readPatch(bytes, false);
+      if (rows.length !== userRows.length + 1) return false;
+      const managed = { insert: [{ id: 'loongsuite-pilot-observability', name: pluginUrl }] };
+      return rows.some((row, index) => isDeepStrictEqual(row, managed)
+        && isDeepStrictEqual([...rows.slice(0, index), ...rows.slice(index + 1)], userRows));
+    } catch {
+      return false;
+    }
+  }
+
+  private composePilotBlock(cfg: DshYamlPatchConfig, pluginHash: string, createdFile: boolean,
+    flow: boolean, indent = 0, addedSeparator = false): string {
     const pluginUrl = pathToFileURL(this.resolvePluginPath(cfg)).href;
-    const flag = createdFile === undefined ? '' : ` (created-file: ${createdFile ? 'true' : 'false'})`;
+    const flag = ` (created-file: ${createdFile ? 'true' : 'false'})`;
     const entry = flow
       ? [`{insert: [{id: "loongsuite-pilot-observability", name: ${JSON.stringify(pluginUrl)}}]}`]
       : ['- insert:', `  - id: 'loongsuite-pilot-observability'`, `    name: ${pluginUrl}`];
@@ -296,7 +406,8 @@ export class DshYamlPatchStrategy implements DeployStrategy {
       `# entryId=${cfg.entryId}`,
       `# pluginSource=${pluginUrl}`,
       `# pluginHash=${pluginHash}`,
-      ...entry,
+      ...(addedSeparator ? [ADDED_SEPARATOR] : []),
+      ...entry.map(line => ' '.repeat(indent) + line),
       `${END_PREFIX}${cfg.marker}`,
       '',
     ].join('\n');
@@ -339,8 +450,12 @@ export class DshYamlPatchStrategy implements DeployStrategy {
       || !this.hasMetadataPrefix(block, '# entryId=')
       || !this.hasMetadataPrefix(block, '# pluginSource=')
       || !this.hasMetadataPrefix(block, '# pluginHash=');
+    // Track the separator added before a managed EOF block so undeploy
+    // also restores user files whose last line originally had no newline.
+    const ownsSeparator = !conflict && blockEnd === bytes.length && beginIdx > 0
+      && bytes[beginIdx - 1] === 0x0a && this.hasMetadataLine(block, ADDED_SEPARATOR);
     return {
-      before: bytes.subarray(0, beginIdx),
+      before: bytes.subarray(0, beginIdx - (ownsSeparator ? 1 : 0)),
       existingBlock: block,
       after: bytes.subarray(blockEnd),
       conflictBlock: conflict,

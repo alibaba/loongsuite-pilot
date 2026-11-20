@@ -3,6 +3,8 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import { load } from 'js-yaml';
 import {
   DSH_ENABLED_MARKER,
   DshYamlPatchStrategy,
@@ -90,11 +92,21 @@ describe('DshYamlPatchStrategy', () => {
     expect(content.indexOf('- id: user-other-plugin')).toBeLessThan(content.indexOf(`# BEGIN ${MARKER}`));
   });
 
-  it.each(['[]\n', '# shared root\r\n  [ \n ] # empty\r\n', '\uFEFF# Unicode 配置\n[]\n'])('registers within an empty flow sequence and restores its exact bytes: %j', async original => {
+  it.each([
+    '[]\n',
+    '# shared root\r\n  [ \n ] # empty\r\n',
+    '\uFEFF# Unicode 配置\n[]\n',
+    '--- # document\n[]\n... # end\n# footer\n',
+    '--- []\n',
+    '!!seq &patches [ # empty\n]\n',
+  ])('registers within an empty flow sequence and restores its exact bytes: %j', async original => {
     await fs.writeFile(patchPath, original);
     const def = makeDef();
     expect((await strategy.deploy(def)).success).toBe(true);
     expect(await readPatch()).toContain('[ # BEGIN');
+    expect(load(await readPatch())).toEqual([
+      { insert: [{ id: ENTRY_ID, name: pathToFileURL(pluginPath).href }] },
+    ]);
     expect(await strategy.needsDeploy(def)).toBe(false);
     const installed = await readPatch();
     expect((await strategy.deploy(def)).success).toBe(true);
@@ -134,6 +146,134 @@ describe('DshYamlPatchStrategy', () => {
     await strategy.deploy(def);
     const content = await readPatch();
     expect(content.startsWith('# user comment line\n- id: user-other-plugin\n  name: file:///tmp/other.mjs\n')).toBe(true);
+  });
+
+  it.each([
+    ['review fixture', '---\n- insert: []\n'],
+    ['marker + comment', '--- # patches\n- insert: []\n'],
+    ['content on marker line', '--- - insert: []\n'],
+    ['directives before marker', '%YAML 1.2\n---\n- insert: []\n'],
+    ['BOM + marker', '\uFEFF---\n- insert: []\n'],
+    ['indented root', '  - insert: []\n'],
+    ['without newline', '- insert: []'],
+  ])('deploys next to a block sequence with an optional document marker (%s)', async (_name, original) => {
+    await fs.writeFile(patchPath, original);
+    const def = makeDef();
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    const content = await readPatch();
+    expect(content.startsWith(original)).toBe(true);
+    expect(load(content)).toEqual([
+      { insert: [] },
+      { insert: [{ id: ENTRY_ID, name: pathToFileURL(pluginPath).href }] },
+    ]);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+    await fs.writeFile(pluginPath, 'export default function apply() { /* v2 */ }\n');
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    expect(load(await readPatch())).toEqual(load(content));
+    expect(await strategy.undeploy(def)).toBe(true);
+    expect(await readPatch()).toBe(original);
+  });
+
+  it('keeps Cordis JavaScript expression nodes inert on deploy and undeploy', async () => {
+    const original = [
+      '- id: user-row',
+      "  disabled: !!js '(() => { throw new Error(0); })()'",
+      '  config:',
+      '    preserved: |',
+      '      []',
+      '      {}',
+      '',
+    ].join('\n');
+    await fs.writeFile(patchPath, original);
+    const def = makeDef();
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    expect((await readPatch()).startsWith(original)).toBe(true);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+    expect(await strategy.undeploy(def)).toBe(true);
+    expect(await readPatch()).toBe(original);
+  });
+
+  it('replaces the [] placeholder after a leading --- marker and restores it on undeploy', async () => {
+    const original = '---\n[]\n';
+    await fs.writeFile(patchPath, original);
+    const def = makeDef();
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(true);
+    const content = await readPatch();
+    expect(content.startsWith('---\n')).toBe(true);
+    expect(content).not.toMatch(/^\[\][ \t]*$/m);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+    expect(await strategy.undeploy(def)).toBe(true);
+    expect(await readPatch()).toBe(original);
+  });
+
+  it.each(['...\n', '... # end\n# footer\r\n'])('inserts the Pilot block before a document end: %j', async footer => {
+    const original = '- insert: []\n' + footer;
+    await fs.writeFile(patchPath, original);
+    const def = makeDef();
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    const content = await readPatch();
+    expect(content.startsWith('- insert: []\n')).toBe(true);
+    expect(content.endsWith(footer)).toBe(true);
+    expect(load(content)).toHaveLength(2);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    expect(await readPatch()).toBe(content);
+    expect(await strategy.undeploy(def)).toBe(true);
+    expect(await readPatch()).toBe(original);
+  });
+
+  it.each([
+    '--- # document\n[]\n... # end\n# footer\n',
+    '- insert: []\n... # end\n# footer\n',
+  ])('repairs a historically appended block next to a closed YAML document: %j', async original => {
+    const def = makeDef();
+    await fs.writeFile(patchPath, '');
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    const broken = original + await readPatch();
+    expect(() => load(broken)).toThrow();
+    await fs.writeFile(patchPath, broken);
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    expect(load(await readPatch())).toEqual([
+      ...(load(original) as unknown[]),
+      { insert: [{ id: ENTRY_ID, name: pathToFileURL(pluginPath).href }] },
+    ]);
+    expect(await strategy.undeploy(def)).toBe(true);
+    expect(await readPatch()).toBe(original);
+  });
+
+  it('refuses a file with content after a ... document-end marker (second document)', async () => {
+    const broken = '- id: user-row\n...\n- id: second-doc\n';
+    await fs.writeFile(patchPath, broken);
+    const def = makeDef();
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(false);
+    expect(await readPatch()).toBe(broken);
+  });
+
+  it('refuses a file whose root is split by a mid-file --- marker (second document)', async () => {
+    const broken = '---\n- id: first-doc\n---\n- id: second-doc\n';
+    await fs.writeFile(patchPath, broken);
+    const def = makeDef();
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(false);
+    expect(await readPatch()).toBe(broken);
+    await expect(fs.stat(enabledMarkerPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('flags a mid-file --- second root on a deployed file for repair', async () => {
+    const def = makeDef();
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    const current = await readPatch();
+    // A second document appended after the managed block (external edit).
+    await fs.writeFile(patchPath, current + '---\n- id: second-doc\n');
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/without changing user rows/);
+    expect(await readPatch()).toBe(current + '---\n- id: second-doc\n');
   });
 
   it('is idempotent on repeated deploy', async () => {
@@ -179,6 +319,151 @@ describe('DshYamlPatchStrategy', () => {
     // user original was empty file → must remain as empty file (not deleted)
     const stat = await fs.stat(patchPath);
     expect(stat.size).toBe(0);
+  });
+
+  it('replaces a bare [] placeholder instead of appending a second YAML root', async () => {
+    // DSH serializes an empty patch list as `[]`; appending block rows after
+    // that flow sequence would produce two documents and crash DSH startup
+    // (js-yaml "document separator is expected"). The repair inserts the
+    // entry inside the flow brackets (upstream emptyFlowPatchOffset), so the
+    // file keeps a single flow-sequence document.
+    await fs.writeFile(patchPath, '# dsh patches\n[]\n');
+    const def = makeDef();
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(true);
+    const content = await readPatch();
+    expect(content).toContain('# dsh patches\n');
+    expect(content).not.toMatch(/^\s*\[\]\s*$/m);
+    expect(content).toContain('{insert:');
+    expect(content).toContain('created-file: false');
+    // The composed file must read as a single flow-sequence document:
+    // `[ <flow-mapping entry> ]` with the managed marker comments inside.
+    const meaningful = content.split(/\r?\n/)
+      .map(l => l.trim())
+      .filter(l => l.length > 0 && !l.startsWith('#'));
+    expect(meaningful).toHaveLength(3);
+    expect(meaningful[0].startsWith('[ # BEGIN')).toBe(true);
+    expect(meaningful[1].startsWith('{insert:')).toBe(true);
+    expect(meaningful[2]).toBe(']');
+    expect(await strategy.needsDeploy(def)).toBe(false);
+  });
+
+  it('self-heals a file already broken by a [] + block two-root append', async () => {
+    const def = makeDef();
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    // Simulate the corruption an older Pilot produced next to a DSH `[]`.
+    await fs.writeFile(patchPath, `[]\n${await readPatch()}`);
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(true);
+    const content = await readPatch();
+    expect(content).not.toMatch(/^\s*\[\]\s*$/m);
+    expect(content).toContain(`# BEGIN ${MARKER}`);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+  });
+
+  // ─── P1 review regression: indented []/{} inside block scalars ───
+  // A block-scalar body (`value: |` + indented `[]`) is a valid single
+  // document; only a column-0 `[]`/`{}` can be a root placeholder / second
+  // document root. These cases must never be rejected, stripped or repaired.
+
+  const USER_SCALAR_ROWS = [
+    '- id: user-row',
+    '  config:',
+    '    value: |',
+    '      []',
+    '',
+  ].join('\n');
+
+  it('deploys next to a user block scalar containing a literal [] (P1 review fixture)', async () => {
+    await fs.writeFile(patchPath, USER_SCALAR_ROWS);
+    const def = makeDef();
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(true);
+    const content = await readPatch();
+    // The scalar bytes survive verbatim, before the pilot block.
+    expect(content.indexOf('      []')).toBeGreaterThan(-1);
+    expect(content.indexOf('      []')).toBeLessThan(content.indexOf(`# BEGIN ${MARKER}`));
+    expect(await strategy.needsDeploy(def)).toBe(false);
+  });
+
+  it('does not strip an indented [] when recomposing around an existing block', async () => {
+    const def = makeDef();
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    // Put a user row with a block-scalar [] before the pilot block, then
+    // change the plugin to force a full recompose (repair path runs
+    // withoutBareEmptySeqLines on the before/after chunks).
+    const current = await readPatch();
+    const beginIdx = current.indexOf(`# BEGIN ${MARKER}`);
+    await fs.writeFile(patchPath, USER_SCALAR_ROWS + current.slice(beginIdx));
+    await fs.writeFile(pluginPath, 'export default function apply() { /* v2 */ }\n');
+    const result = await strategy.deploy(def);
+    expect(result.success).toBe(true);
+    const content = await readPatch();
+    expect(content).toContain('    value: |');
+    expect(content).toContain('      []');
+    expect(await strategy.needsDeploy(def)).toBe(false);
+  });
+
+  it('undeploy preserves an indented [] inside a user block scalar', async () => {
+    await fs.writeFile(patchPath, USER_SCALAR_ROWS);
+    const def = makeDef();
+    await strategy.deploy(def);
+    const ok = await strategy.undeploy(def);
+    expect(ok).toBe(true);
+    const content = await readPatch();
+    expect(content).not.toContain(`# BEGIN ${MARKER}`);
+    expect(content).toContain('- id: user-row');
+    expect(content).toContain('      []');
+  });
+
+  it('needsDeploy stays false when a user block scalar contains a literal {}', async () => {
+    const rows = ['- id: user-row', '  config:', '    value: |', '      {}', ''].join('\n');
+    await fs.writeFile(patchPath, rows);
+    const def = makeDef();
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    expect(await strategy.needsDeploy(def)).toBe(false);
+  });
+
+  it('preserves malformed YAML outside a trusted block without dropping a user root', async () => {
+    const def = makeDef();
+    expect(await strategy.deploy(def)).toMatchObject({ success: true });
+    const broken = USER_SCALAR_ROWS + await readPatch() + '[]\n';
+    await fs.writeFile(patchPath, broken);
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    expect(await strategy.deploy(def)).toMatchObject({ success: false });
+    expect(await readPatch()).toBe(broken);
+    expect(await strategy.undeploy(def)).toBe(false);
+    expect(await readPatch()).toBe(broken);
+  });
+
+  it.each([
+    '{ "insert": [] }\n',
+    '- not-a-mapping\n',
+    '- insert: invalid\n',
+    '- insert: [null]\n',
+    'null\n...\n',
+    '- insert: [\n',
+    '- insert: []\nextra: true\n',
+    '---\n---\n- insert: []\n',
+    '- insert: []\n  insert: []\n',
+  ])('refuses malformed documents and non-patch roots before writing: %j', async original => {
+    await fs.writeFile(patchPath, original);
+    expect(await strategy.deploy(makeDef())).toMatchObject({ success: false });
+    expect(await readPatch()).toBe(original);
+    await expect(fs.stat(enabledMarkerPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps the [] placeholder on undeploy of a replaced-placeholder file', async () => {
+    await fs.writeFile(patchPath, '# dsh patches\n[]\n');
+    const def = makeDef();
+    await strategy.deploy(def);
+    const ok = await strategy.undeploy(def);
+    expect(ok).toBe(true);
+    const content = await readPatch();
+    expect(content).not.toContain(`# BEGIN ${MARKER}`);
+    expect(content).toContain('# dsh patches');
+    expect(content).toMatch(/^\s*\[\]\s*$/m);
   });
 
   it('rejects when an existing block reuses the marker but is not Pilot-managed', async () => {
@@ -461,7 +746,7 @@ describe('DshYamlPatchStrategy', () => {
     const def = makeDef();
     await strategy.deploy(def);
     const content = await readPatch();
-    const expected = `file://${pluginPath}`;
+    const expected = pathToFileURL(pluginPath).href;
     expect(content).toContain(`# pluginSource=${expected}`);
     expect(content).toContain(`name: ${expected}`);
   });
