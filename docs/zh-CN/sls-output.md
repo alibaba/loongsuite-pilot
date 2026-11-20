@@ -138,6 +138,7 @@ API Key 模式传入：
 | `LOONGSUITE_SLS_ACCESS_KEY_ID` | AK 模式的 Access Key ID。 |
 | `LOONGSUITE_SLS_ACCESS_KEY_SECRET` | AK 模式的 Access Key Secret。 |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | 设置为 `false` 或 `0` 可关闭 SLS 上报。 |
+| `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS` | 设置为 `false` 或 `0` 时不带 `__mac__` 和 `__sn__`。未设置时使用配置里的 `hostIdentityTags`。 |
 
 API Key 模式从 `config.sls` 读取 `apiKey`，不再支持环境变量覆盖。
 
@@ -166,4 +167,8 @@ tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
 
 ## 隐私说明
 
-SLS 是远端输出目标。敏感环境中开启前，请先查看 [Agent 配置](agents.md) 的内容采集控制和 [数据脱敏](masking.md)。
+SLS 是远端输出目标。敏感环境中开启前，请先配置[数据脱敏](masking.md)。
+
+`__tag__:__mac__` 和 `__source__` 用的是同一块网卡：采集进程启动时，取 `os.networkInterfaces()` 里第一块非回环 IPv4。全零 MAC 不写这个标签。
+
+`__tag__:__sn__` 来自安装时写入 `config.json` 的 `hostSn`。macOS 安装脚本读 `ioreg`，Linux 读 DMI 文件，Windows 安装脚本读 CIM。Linux 上这些文件通常只有 root 能读，读不到就不写该字段。占位符和超过 128 字节的值也不写。配置里没有 `hostSn` 就没有这个标签。删掉之后不再上报。再次执行安装时如果还能读到，会再写回去。普通升级保留已有配置，不会补写。`hostIdentityTags` 设为 `false` 时，主采集和 Qoder 都不带这两个标签。脱敏不会去掉它们。

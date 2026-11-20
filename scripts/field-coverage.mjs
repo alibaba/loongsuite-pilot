@@ -55,6 +55,32 @@ const FIELD_SPECS = {
       { key: 'gen_ai.tool.call.duration', label: 'tool.call.dur' },
     ],
   },
+  'gen_ai.agent.invoke': {
+    fields: [
+      { key: 'event.id', label: 'event.id' },
+      { key: 'user.id', label: 'user.id' },
+      { key: 'gen_ai.session.id', label: 'session.id' },
+      { key: 'gen_ai.turn.id', label: 'turn.id' },
+      { key: 'gen_ai.agent.invocation.id', label: 'invocation.id' },
+    ],
+  },
+  'gen_ai.agent.result': {
+    fields: [
+      { key: 'event.id', label: 'event.id' },
+      { key: 'user.id', label: 'user.id' },
+      { key: 'gen_ai.session.id', label: 'session.id' },
+      { key: 'gen_ai.turn.id', label: 'turn.id' },
+      { key: 'gen_ai.agent.invocation.id', label: 'invocation.id' },
+    ],
+  },
+};
+
+// Aggregate aliases in the existing report categories without changing source events.
+const EVENT_NAME_ALIASES = {
+  'gen_ai.model.request': 'llm.request',
+  'gen_ai.model.response': 'llm.response',
+  'gen_ai.tool.call': 'tool.call',
+  'gen_ai.tool.result': 'tool.result',
 };
 
 function parseCli() {
@@ -129,7 +155,7 @@ function collectStats(files) {
       if (!line.trim()) continue;
       let entry;
       try { entry = JSON.parse(line); } catch { continue; }
-      const eventName = entry['event.name'];
+      const eventName = EVENT_NAME_ALIASES[entry['event.name']] || entry['event.name'];
       if (!FIELD_SPECS[eventName]) continue;
       const agentType = entry['gen_ai.agent.type'] || 'unknown';
       if (!stats[eventName][agentType]) {

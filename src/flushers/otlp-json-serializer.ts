@@ -17,6 +17,15 @@ export function createReadableSpanToOtlpSpanJsonArray(spans: ReadableSpan[]): st
       endTimeUnixNano: hrTimeToNano(span.endTime),
       attributes: span.attributes,
       status: span.status,
+      ...(span.events?.length ? { events: span.events.map(event => ({
+        name: event.name, timeUnixNano: hrTimeToNano(event.time), attributes: event.attributes,
+        droppedAttributesCount: event.droppedAttributesCount,
+      })) } : {}),
+      ...(span.links?.length ? { links: span.links.map(link => ({
+        traceId: link.context.traceId, spanId: link.context.spanId,
+        traceState: link.context.traceState?.serialize(), attributes: link.attributes,
+        droppedAttributesCount: link.droppedAttributesCount,
+      })) } : {}),
       resource: span.resource?.attributes,
     };
     return JSON.stringify(obj);

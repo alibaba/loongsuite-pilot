@@ -7,6 +7,8 @@ import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { resolveQoderWorkRoot } from '../qoder-work-log/qoder-work-log-input.js';
+import { resolvePollIntervalMs, DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+
 /** Relative path of the SQLite DB inside the QoderWork data root. */
 const DB_REL_PATH = path.join('data', 'agents.db');
 const SOURCE = 'qoder-work-sqlite';
@@ -70,7 +72,7 @@ export class QoderWorkSqliteInput extends BaseInput {
     this.agentType = agentType;
     this.id = `${agentType}-sqlite`;
     this.dbPath = opts.dbPath ?? path.join(dataRoot, DB_REL_PATH);
-    this.pollIntervalMs = opts.pollIntervalMs ?? 30_000;
+    this.pollIntervalMs = resolvePollIntervalMs(opts.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS);
   }
 
   static getWatchPaths(): string[] {

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const mockReadJsonFile = vi.fn().mockResolvedValue(null);
+const mockLoggerWarn = vi.hoisted(() => vi.fn());
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
   readJsonFile: (...args: unknown[]) => mockReadJsonFile(...args),
@@ -9,7 +10,7 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
-    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    info: vi.fn(), debug: vi.fn(), warn: mockLoggerWarn, error: vi.fn(),
   }),
 }));
 
@@ -26,6 +27,51 @@ function clearSlsEnv() {
 }
 
 describe('ConfigLoader', () => {
+  it('keeps a collaboration conversation allowlist and fails closed for invalid scopes', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'qwen-work-cn-collaboration': { includeConversationIds: [' space-a ', 'space-a', 'space-b'] },
+    } });
+    expect((await loadConfig()).listeners['qwen-work-cn-collaboration'].includeConversationIds)
+      .toEqual(['space-a', 'space-b']);
+
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'qwen-work-cn-collaboration': { includeConversationIds: 'space-a' },
+    } });
+    expect((await loadConfig()).listeners['qwen-work-cn-collaboration'].includeConversationIds).toEqual([]);
+  });
+
+  it('defaults Multica collection to off', async () => {
+    expect((await loadConfig()).pipeline.multica).toEqual({enabled: true, mode: 'off'});
+  });
+
+  it('allows environment mode overrides while preserving the Multica hard disable', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({pipeline: {multica: {mode: 'off'}}});
+    vi.stubEnv('LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE', 'on');
+    vi.stubEnv('LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED', 'false');
+    expect((await loadConfig()).pipeline.multica).toEqual({enabled: false, mode: 'on'});
+  });
+
+  it('discovers a local daemon with only Multica enabled and respects an explicit pipeline disable', async () => {
+    vi.stubEnv('LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE', 'on');
+    vi.stubEnv('LOONGSUITE_PILOT_PIPELINE_ENABLED', '');
+    vi.stubEnv('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', '');
+    mockReadJsonFile.mockResolvedValueOnce({});
+    expect((await loadConfig()).pipeline).toMatchObject({enabled: false, multica: {discoverLocalSources: true}});
+    mockReadJsonFile.mockResolvedValueOnce({pipeline: {enabled: false}});
+    expect((await loadConfig()).pipeline.multica?.discoverLocalSources).toBeUndefined();
+  });
+
+  it('disables Multica when its collection mode is invalid', async () => {
+    vi.stubEnv('LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE', 'typo');
+    expect((await loadConfig()).pipeline.multica?.mode).toBe('off');
+    expect(mockLoggerWarn).toHaveBeenCalledWith('Invalid Multica collection mode; collection disabled');
+  });
+
+  it('reads the configured Multica mode', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({pipeline: {multica: {mode: 'off'}}});
+    expect((await loadConfig()).pipeline.multica?.mode).toBe('off');
+  });
+
   it('loads workspace exclusions and rejects invalid privacy rules', async () => {
     mockReadJsonFile.mockResolvedValueOnce({ privacy: { excludeWorkspaces: ['/private-project'] } });
     expect((await loadConfig()).privacy?.excludeWorkspaces).toEqual(['/private-project']);
@@ -76,6 +122,13 @@ describe('ConfigLoader', () => {
 
   describe('three-layer priority (T025)', () => {
     it.each([
+      [undefined, false], [false, false], [true, true], ['true', false], [1, false],
+    ])('only enables the dashboard for boolean true: %s', async (enabled, expected) => {
+      mockReadJsonFile.mockResolvedValueOnce(enabled === undefined ? {} : { dashboard: { enabled } });
+      expect((await loadConfig()).dashboard.enabled).toBe(expected);
+    });
+
+    it.each([
       [undefined, 8765],
       [1, 1],
       [8765, 8765],
@@ -117,6 +170,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.enabled).toBe(true);
       expect(config.autoStart).toBe(true);
+      expect(config.dashboard).toEqual({ enabled: false, port: 8765 });
     });
 
     it('loads configured userId from env over config file', async () => {
@@ -154,7 +208,7 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.enabled).toBe(true);
-      expect(config.flushers.jsonl?.enabled).toBe(true);
+      expect(config.flushers.jsonl?.enabled).toBe(false);
     });
   });
 
@@ -288,7 +342,20 @@ describe('ConfigLoader', () => {
       expect(config.flushers.http?.url).toBe('https://api.example.com');
     });
 
-    it('resolves JSONL enabled from env', async () => {
+    it('enables JSONL only when explicitly requested in the config file or environment', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: true } });
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: false } });
+      vi.stubEnv('JSONL_ENABLED', 'true');
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: true } });
+      vi.stubEnv('JSONL_ENABLED', 'false');
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(false);
+    });
+
+    it('resolves JSONL disabled from env', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       vi.stubEnv('JSONL_ENABLED', 'false');
 
@@ -314,19 +381,48 @@ describe('ConfigLoader', () => {
       expect(config.listeners.qoder.enabled).toBe(true);
       expect(config.listeners['qoder-trace'].enabled).toBe(true);
       expect(config.listeners['qoder-work'].enabled).toBe(true);
-      expect(config.listeners['qoder-work-cn-trace']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qoder-work-cn-hook']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qoder-work-cn-log']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qoder-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qwen-work-cn-hook']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qwen-work-cn-trace']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['qoder-work-cn-trace']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qoder-work-cn-hook']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qoder-work-cn-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qoder-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-hook']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-trace']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-collaboration']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
-      expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 30_000 });
-      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['copilot-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['doubao-work']).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('resolves the passive Doubao source override without changing other listeners', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        listeners: { 'doubao-work': { enabled: false, pollInterval: 1200, logDir: '/synthetic/doubao/logs' } },
+      });
+      const config = await loadConfig();
+      expect(config.listeners['doubao-work']).toEqual({ enabled: false, pollInterval: 1200, logDir: '/synthetic/doubao/logs' });
+      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('preserves the explicitly selected Doubao client without affecting other listeners', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'doubao' } } });
+      const config = await loadConfig();
+      expect(config.listeners['doubao-work']).toEqual({ enabled: true, pollInterval: 10_000, client: 'doubao' });
+      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('disables only the Doubao listener for an invalid client instead of collecting another product', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'typo' } } });
+      const config = await loadConfig();
+      expect(config.listeners['doubao-work'].enabled).toBe(false);
+      expect(config.listeners.workbuddy.enabled).toBe(true);
+      expect(mockLoggerWarn).toHaveBeenCalledWith('Invalid Doubao client; disabling this listener', {
+        valueType: 'string', allowedValues: ['doubao-work', 'doubao'],
+      });
     });
 
     it('merges file-level listener overrides', async () => {
@@ -334,6 +430,7 @@ describe('ConfigLoader', () => {
         listeners: {
           qoder: { enabled: false, pollInterval: 120000 },
           'opencode-log': { pollInterval: 1000 },
+          'copilot-log': { enabled: false, pollInterval: 45_000 },
         },
       });
 
@@ -341,6 +438,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners.qoder.enabled).toBe(false);
       expect(config.listeners.qoder.pollInterval).toBe(120000);
       expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 1000 });
+      expect(config.listeners['copilot-log']).toEqual({ enabled: false, pollInterval: 45_000 });
     });
 
     it('migrates a legacy codex-log listener override to codex-transcript', async () => {
@@ -363,6 +461,55 @@ describe('ConfigLoader', () => {
       // at it; leaving it on the removed sqlite/session listeners would make the
       // env var silently inert.
       expect(config.listeners['qoder-trace'].pollInterval).toBe(45000);
+    });
+
+    it('applies one poll interval env to every listener', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        listeners: {
+          qoder: { enabled: false, pollInterval: 120_000 },
+          'kiro-cli-session': { enabled: true, pollInterval: 60_000 },
+          'copilot-log': { enabled: false, pollInterval: 45_000 },
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '3000');
+      vi.stubEnv('QODER_ANALYTICS_POLL_INTERVAL', '45000');
+
+      const config = await loadConfig();
+
+      expect(config.listeners.qoder).toEqual({ enabled: false, pollInterval: 3000 });
+      expect(config.listeners['qoder-trace'].pollInterval).toBe(3000);
+      expect(config.listeners['cursor-hook'].pollInterval).toBe(3000);
+      expect(config.listeners['codex-transcript'].pollInterval).toBe(3000);
+      expect(config.listeners['copilot-log']).toEqual({ enabled: false, pollInterval: 3000 });
+      expect(config.listeners['hermes-agent-log'].pollInterval).toBe(3000);
+      expect(config.listeners['kiro-cli-session']).toEqual({ enabled: true, pollInterval: 3000 });
+      expect(config.listeners.workbuddy.pollInterval).toBe(3000);
+    });
+
+    it('ignores a non-positive or non-numeric unified poll interval', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '0');
+
+      const zero = await loadConfig();
+      expect(zero.listeners['cursor-hook'].pollInterval).toBe(10_000);
+
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', 'nope');
+
+      const invalid = await loadConfig();
+      expect(invalid.listeners['cursor-hook'].pollInterval).toBe(10_000);
+
+      for (const raw of ['0.4', '3', '1e5', '0x10', '2147483648']) {
+        mockReadJsonFile.mockResolvedValueOnce(null);
+        vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', raw);
+        const ignored = await loadConfig();
+        expect(ignored.listeners['cursor-hook'].pollInterval).toBe(10_000);
+      }
+
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '1000');
+      const accepted = await loadConfig();
+      expect(accepted.listeners['cursor-hook'].pollInterval).toBe(1_000);
     });
   });
 
@@ -513,10 +660,10 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.agents.cursor.captureMessageContent).toBe(false);
       expect(config.agents.qoder.captureMessageContent).toBe(true);
-      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 10_000 });
     });
 
-    it('parses string boolean captureMessageContent values', async () => {
+    it('parses string captureMessageContent values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           cursor: { captureMessageContent: 'false' },
@@ -1391,7 +1538,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'none',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1404,7 +1551,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'none',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1420,7 +1567,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'all',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1445,7 +1592,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
         types: [
           'apiKey',
           'cloudAccessKey',
@@ -1471,7 +1618,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'none',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1484,7 +1631,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'custom',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1501,7 +1648,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'all',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1520,7 +1667,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
         types: [
           'cloudAccessKey',
           'databaseUrl',
@@ -1549,6 +1696,39 @@ describe('ConfigLoader', () => {
       });
     });
 
+    it('uses placeholder only when explicitly configured', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'all', replacementMode: 'placeholder' },
+      });
+
+      expect((await loadConfig()).mask.replacementMode).toBe('placeholder');
+    });
+
+    it('uses preview for an empty replacement mode in the config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'all', replacementMode: '' },
+      });
+
+      expect((await loadConfig()).mask.replacementMode).toBe('preview');
+    });
+
+    it.each([
+      false,
+      42,
+      {},
+      [],
+      null,
+    ])('uses preview for non-string replacement mode %j even when masking is off', async raw => {
+      for (const mode of ['all', 'none']) {
+        mockReadJsonFile.mockResolvedValueOnce({
+          mask: { mode, replacementMode: raw },
+        });
+        const config = await loadConfig();
+        expect(config.mask.mode).toBe(mode);
+        expect(config.mask.replacementMode).toBe('preview');
+      }
+    });
+
     it('uses replacement mode env over config file', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
@@ -1560,6 +1740,13 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.mask.replacementMode).toBe('preview');
+    });
+
+    it('accepts an explicit placeholder environment override', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ mask: { mode: 'all' } });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE', 'placeholder');
+
+      expect((await loadConfig()).mask.replacementMode).toBe('placeholder');
     });
 
     it('treats an empty replacement mode env as unset', async () => {
@@ -1575,7 +1762,7 @@ describe('ConfigLoader', () => {
       expect(config.mask.replacementMode).toBe('preview');
     });
 
-    it('falls back to placeholder for an invalid replacement mode', async () => {
+    it('falls back to preview for an invalid replacement mode', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
           mode: 'all',
@@ -1584,7 +1771,7 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask.replacementMode).toBe('placeholder');
+      expect(config.mask.replacementMode).toBe('preview');
     });
   });
 
@@ -1635,7 +1822,13 @@ describe('ConfigLoader', () => {
       expect(config.collectTrace).toBe(true);
       expect(config.serviceName).toBeUndefined();
       expect(config.serviceNamePrefix).toBe('loongsuite-pilot');
+      expect(config.pipeline.multica?.serviceNamePrefix).toBeUndefined();
       expect(config.cms).toEqual({ enabled: false, licenseKey: '', endpoint: '', workspace: '', debug: false });
+    });
+
+    it('honors an explicit Multica environment even when it matches the built-in Pilot prefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ serviceNamePrefix: 'loongsuite-pilot' });
+      expect((await loadConfig()).pipeline.multica?.serviceNamePrefix).toBe('loongsuite-pilot');
     });
 
     it('reads values from config file', async () => {
@@ -1650,6 +1843,7 @@ describe('ConfigLoader', () => {
       expect(config.collectLog).toBe(false);
       expect(config.collectTrace).toBe(false);
       expect(config.serviceNamePrefix).toBe('my-team');
+      expect(config.pipeline.multica?.serviceNamePrefix).toBe('my-team');
       expect(config.cms).toEqual({
         enabled: true,
         licenseKey: 'key123',
@@ -1700,6 +1894,7 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.serviceNamePrefix).toBe('from-env');
+      expect(config.pipeline.multica?.serviceNamePrefix).toBe('from-env');
     });
 
     it('loads an exact serviceName from env over config and passes it to SLS', async () => {
@@ -1780,6 +1975,27 @@ describe('ConfigLoader', () => {
       expect(result!.debug).toBe(true);
       expect(result!.turnIdleTimeoutMs).toBe(5000);
       expect(result!.resourceAttributeKeys).toEqual([]);
+    });
+
+    it('does not turn a per-agent content policy into a global Trace policy', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        agents: { 'claude-code': { captureMessageContent: false }, cursor: {} },
+        otlpTrace: { endpoint: 'http://localhost:4318' },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents['claude-code'].captureMessageContent).toBe(false);
+      expect(config.agents.cursor.captureMessageContent).toBe(true);
+      expect(buildOtlpTraceConfig(config)?.captureMessageContent).toBe(true);
+    });
+
+    it('keeps an explicit global Trace content policy', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://localhost:4318', captureMessageContent: false },
+      });
+      expect(buildOtlpTraceConfig(await loadConfig())?.captureMessageContent).toBe(false);
     });
 
     it('buildOtlpTraceConfig allows custom resource attribute keys', async () => {
@@ -2203,10 +2419,10 @@ describe('ConfigLoader', () => {
     it('defaults to none when interceptor config is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({ mode: 'none', types: [] });
+      expect(config.interceptor).toEqual({ mode: 'none' });
     });
 
-    it('loads all mode and custom types as a mask-type subset', async () => {
+    it('treats interceptor custom mode as none and does not expand mask', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         interceptor: {
           mode: 'custom',
@@ -2214,10 +2430,8 @@ describe('ConfigLoader', () => {
         },
       });
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({
-        mode: 'custom',
-        types: ['apiKey', 'cloudAccessKey'],
-      });
+      expect(config.interceptor).toEqual({ mode: 'none' });
+      expect(config.mask.mode).toBe('none');
     });
 
     it('uses interceptor env over config file', async () => {
@@ -2226,20 +2440,39 @@ describe('ConfigLoader', () => {
       });
       vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', 'all');
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({ mode: 'all', types: [] });
+      expect(config.interceptor).toEqual({ mode: 'all' });
       expect(config.mask).toMatchObject({
-        mode: 'custom',
-        types: ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'],
+        mode: 'custom', types: ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'],
       });
     });
 
     it('leaves mask mode all unchanged when interceptor is enabled', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: { mode: 'all' },
-        interceptor: { mode: 'custom', types: ['apiKey'] },
+        interceptor: { mode: 'all' },
       });
       const config = await loadConfig();
       expect(config.mask.mode).toBe('all');
+    });
+
+    it('merges custom mask types and preserves replacement mode when interceptor is enabled', async () => {
+      const mask = { mode: 'custom', types: ['email', 'apiKey', 'email'], replacementMode: 'preview' };
+      mockReadJsonFile.mockResolvedValueOnce({ mask, interceptor: { mode: 'all' } });
+      const config = await loadConfig();
+      expect(config.mask).toEqual({
+        mode: 'custom',
+        types: ['email', 'apiKey', 'cloudAccessKey', 'privateKey', 'databaseUrl'],
+        replacementMode: 'preview',
+      });
+    });
+
+    it('does not expand mask when an interceptor environment override disables interception', async () => {
+      const mask = { mode: 'custom', types: ['email'], replacementMode: 'preview' };
+      mockReadJsonFile.mockResolvedValueOnce({ mask, interceptor: { mode: 'all' } });
+      vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', 'none');
+      const config = await loadConfig();
+      expect(config.interceptor).toEqual({ mode: 'none' });
+      expect(config.mask).toEqual(mask);
     });
   });
 });

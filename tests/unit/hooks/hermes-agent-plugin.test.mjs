@@ -288,6 +288,7 @@ function replay(events, {
   legacyEnvUser,
   spanAttributes,
   configUser = 'pilot-config-user',
+  configBom = false,
   dataDirSource = 'env',
   beforeSpawn,
   expectLogFile = true,
@@ -317,7 +318,7 @@ function replay(events, {
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     config.dataDir = root;
   }
-  fs.writeFileSync(configPath, JSON.stringify(config));
+  fs.writeFileSync(configPath, `${configBom ? '\uFEFF' : ''}${JSON.stringify(config)}`);
   beforeSpawn?.(root);
   const driver = `
 import importlib.util
@@ -378,13 +379,18 @@ print(json.dumps({"hooks": sorted(ctx.hooks), "activeTurns": sum(len(state["turn
   if (!expectLogFile) {
     return { hooks, records: [], raw: '', root, logDir, stderr: run.stderr };
   }
-  const files = fs.readdirSync(logDir).filter(file => /^hermes-agent-.*\.jsonl$/.test(file));
+  const files = fs.readdirSync(logDir).filter(file => /^hermes-agent-\d+-\d+-[a-f0-9]+\.jsonl$/.test(file));
   expect(files).toHaveLength(1);
-  const records = fs.readFileSync(path.join(logDir, files[0]), 'utf8')
+  const allRecords = fs.readFileSync(path.join(logDir, files[0]), 'utf8')
     .trim()
     .split('\n')
     .map(line => JSON.parse(line));
-  return { hooks, records, activeTurns, sessions, raw: JSON.stringify(records), root, logDir, stderr: run.stderr };
+  // These old fixtures omit per-call response/history payloads. Responses can
+  // only be recovered at turn end; semantic assertions use event time. The
+  // realtime suite checks actual append order and cross-process visibility.
+  const records = allRecords.filter(record => record['event.name'] !== 'other')
+    .sort((a, b) => Number(BigInt(a.time_unix_nano) - BigInt(b.time_unix_nano)));
+  return { hooks, records, allRecords, activeTurns, sessions, raw: JSON.stringify(allRecords), root, logDir, stderr: run.stderr };
 }
 
 function activeSessionEvictionEvents() {
@@ -463,7 +469,7 @@ describe('Hermes Agent native plugin', () => {
       foreground.at(-1), ...background.slice(2)];
     const { records } = replay(events, { configUser: '', captureMessageContent });
     expect(records).toHaveLength(12);
-    for (const [label, sender] of [['foreground', 'im-user-A'], ['background', os.hostname()]]) {
+    for (const [label, sender] of [['foreground', 'im-user-A'], ['background', 'im-user-A']]) {
       const own = records.filter(record => record['gen_ai.turn.id'] === label);
       expect(own).toHaveLength(6);
       expect(new Set(own.map(record => record.trace_id)).size).toBe(1);
@@ -544,7 +550,10 @@ describe('Hermes Agent native plugin', () => {
       { hook: 'on_session_finalize', payload: { session_id: SESSION_ID } },
       { hook: 'pre_api_request', payload: { ...apiPayload('unfinished', 1), turn_id: 'unfinished' } },
     ]);
-    expect(records.map(record => record['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(records.map(record => record['event.name'])).toEqual([
+      'llm.request', 'llm.response', 'tool.call', 'llm.request',
+    ]);
+    expect(records.filter(record => record['event.name'] === 'llm.response')).toHaveLength(1);
   });
 
   it('registers all native callbacks and emits the canonical six-event tool turn', () => {
@@ -877,9 +886,11 @@ describe('Hermes Agent native plugin', () => {
     for (const record of skillRecords) {
       expect(record['gen_ai.skill.name']).toBe('loongsuite-pr-review');
       expect(record['gen_ai.skill.id']).toBe('loongsuite-pr-review');
-      expect(record['gen_ai.skill.description']).toBe('Review LoongSuite PR readiness.');
-      expect(record['gen_ai.skill.version']).toBe('1.2.3');
     }
+    // Description/version arrive in the tool result; the already-visible call
+    // cannot be retroactively enriched with future response fields.
+    expect(skillRecords[1]['gen_ai.skill.description']).toBe('Review LoongSuite PR readiness.');
+    expect(skillRecords[1]['gen_ai.skill.version']).toBe('1.2.3');
     expect(skillRecords[0]['gen_ai.tool.call.arguments']).toBeUndefined();
     expect(skillRecords[1]['gen_ai.tool.call.result']).toBeUndefined();
   });
@@ -982,6 +993,24 @@ describe('Hermes Agent native plugin', () => {
       .not.toHaveProperty('gen_ai.tool.call.result');
   });
 
+  it('honors a BOM-prefixed content opt-out before writing messages and tools', () => {
+    const { records, raw } = replay(firstTurn(), {
+      captureMessageContent: false,
+      configBom: true,
+    });
+
+    expect(records.some(record => record['event.name'] === 'llm.request')).toBe(true);
+    expect(records.some(record => record['event.name'] === 'tool.call')).toBe(true);
+    expect(records.some(record => record['event.name'] === 'tool.result')).toBe(true);
+    for (const text of ['approved files', 'wc -l /etc/hosts', '17 /etc/hosts', 'The files have']) {
+      expect(raw).not.toContain(text);
+    }
+    expect(records.find(record => record['event.name'] === 'tool.call'))
+      .not.toHaveProperty('gen_ai.tool.call.arguments');
+    expect(records.find(record => record['event.name'] === 'tool.result'))
+      .not.toHaveProperty('gen_ai.tool.call.result');
+  });
+
   it.each(['marker', 'config'])(
     'uses the Pilot data directory from the managed %s source',
     (dataDirSource) => {
@@ -992,7 +1021,7 @@ describe('Hermes Agent native plugin', () => {
     },
   );
 
-  it('creates private log directories and removes stale process logs', () => {
+  it('creates private log directories and preserves unconsumed stale process logs', () => {
     let stalePath;
     const { logDir } = replay(firstTurn(), {
       beforeSpawn(root) {
@@ -1005,7 +1034,7 @@ describe('Hermes Agent native plugin', () => {
       },
     });
 
-    expect(fs.existsSync(stalePath)).toBe(false);
+    expect(fs.existsSync(stalePath)).toBe(true);
     if (process.platform !== 'win32') {
       expect(fs.statSync(logDir).mode & 0o777).toBe(0o700);
     }

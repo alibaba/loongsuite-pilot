@@ -8,6 +8,12 @@ export * from './events.js';
 export interface ListenerConfig {
   enabled: boolean;
   pollInterval: number;
+  /** Restrict the Qwen Work collaboration input to these conversation IDs. */
+  includeConversationIds?: string[];
+  /** Read-only source log directory override for the doubao-work listener. */
+  logDir?: string;
+  /** Product source for the doubao-work listener; defaults to Doubao Work. */
+  client?: 'doubao-work' | 'doubao';
 }
 
 /**
@@ -60,19 +66,9 @@ export interface MaskConfig {
   replacementMode?: MaskReplacementMode;
 }
 
-/** Interceptor types are the credential subset of mask types; PII is not interceptable. */
-export const SUPPORTED_INTERCEPTOR_TYPES = [
-  'cloudAccessKey',
-  'apiKey',
-  'privateKey',
-  'databaseUrl',
-] as const satisfies readonly MaskType[];
-
-export type InterceptorType = (typeof SUPPORTED_INTERCEPTOR_TYPES)[number];
-
 export interface InterceptorConfig {
-  mode: MaskMode;
-  types: InterceptorType[];
+  /** Explicit opt-in for managed rules and interception hooks. */
+  mode: 'none' | 'all';
 }
 
 export interface OtlpTraceRawConfig {
@@ -123,6 +119,8 @@ export interface AnalyticsConfig {
   autoStart: boolean;
   dataDir: string;
   userId: string;
+  hostSn?: string;
+  hostIdentityTags: boolean;
   collectLog: boolean;
   collectTrace: boolean;
   /** Exact service.name shared by every agent and backend. */
@@ -241,7 +239,7 @@ export interface MultimodalRuntimeConfig {
 }
 
 /** Agent ids with multimodal extraction implemented. */
-export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder'] as const;
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder', 'qwen-work-cn'] as const;
 
 /** Experimental per-agent multimodal policy (`uploadMode: none` disables). */
 export interface AgentMultimodalConfig {
@@ -414,6 +412,7 @@ export interface PipelineToggle {
   enabled: boolean;
   file: { enabled: boolean };
   qoderApi: { enabled: boolean };
+  multica?: { enabled: boolean; mode?: 'on' | 'off'; serviceNamePrefix?: string; discoverLocalSources?: boolean };
 }
 
 /** @deprecated Use PipelineToggle instead */
@@ -426,6 +425,7 @@ export interface StatusBarConfig {
 }
 
 export interface DashboardConfig {
+  enabled: boolean;
   port: number;
 }
 

@@ -143,18 +143,22 @@ vi.mock('../../../src/inputs/qoder-work/qoder-work-input.js', () => ({
   })),
 }));
 
-vi.mock('../../../src/inputs/cursor-hook/cursor-hook-input.js', () => ({
-  CursorHookInput: vi.fn().mockImplementation(() => ({
-    id: 'cursor-hook',
-    agentType: 'cursor',
-    collectionMethod: 'hook-jsonl',
-    setWorkspacePolicy: vi.fn(),
-    on: vi.fn(),
-    start: vi.fn().mockResolvedValue(undefined),
-    stop: vi.fn().mockResolvedValue(undefined),
-    running: false,
-  })),
-}));
+vi.mock('../../../src/inputs/cursor-hook/cursor-hook-input.js', async () => {
+  const { resolvePollIntervalMs, DEFAULT_POLL_INTERVAL_MS } = await import('../../../src/utils/poll-interval.js');
+  return {
+    CursorHookInput: vi.fn().mockImplementation((opts?: { pollIntervalMs?: number }) => ({
+      id: 'cursor-hook',
+      agentType: 'cursor',
+      collectionMethod: 'hook-jsonl',
+      pollIntervalMs: resolvePollIntervalMs(opts?.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS),
+      setWorkspacePolicy: vi.fn(),
+      on: vi.fn(),
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue(undefined),
+      running: false,
+    })),
+  };
+});
 
 // Static methods need to be mocked on the mock class itself
 import { QoderWorkInput } from '../../../src/inputs/qoder-work/qoder-work-input.js';
@@ -191,6 +195,7 @@ vi.mock('../../../src/multimodal/index.js', async (importOriginal) => {
 
 import { InputManager } from '../../../src/core/input-manager.js';
 import { Orchestrator } from '../../../src/core/orchestrator.js';
+import * as interceptorWorker from '../../../src/interceptor/worker-service.js';
 
 function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
   return {
@@ -230,6 +235,8 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
     },
     fileCollection: {
       enabled: false,
+      file: { enabled: false },
+      qoderApi: { enabled: false },
     },
     pipeline: {
       enabled: false,
@@ -242,10 +249,11 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       runtimeRefreshIntervalMs: 30_000,
     },
     dashboard: {
+      enabled: false,
       port: 8765,
     },
     agents: {},
-    interceptor: { mode: 'none', types: [] },
+    interceptor: { mode: 'none' },
     ...overrides,
   };
 }
@@ -267,6 +275,52 @@ describe('Orchestrator', () => {
   });
 
   describe('startup sequence (T038)', () => {
+    it('preserves final interceptor status after the Worker service reference is cleared', async () => {
+      let stopped = false;
+      const status = { enabled: true, running: true, collection_status: 'ok',
+        sampled_at: '2026-11-19T00:00:00Z', worker_started_at: '2026-11-19T00:00:00Z',
+        worker_restarts_total: 0, rules: null, activity: null, diagnostics: null };
+      const workerStart = vi.spyOn(interceptorWorker, 'startInterceptorWorker').mockResolvedValue({
+        port: 18791, managedActive: false,
+        stop: async () => { stopped = true; },
+        getStatus: async () => ({ ...status, running: !stopped }),
+        reloadManaged: async () => {}, syncVerdicts: async () => {}, flushEvents: async () => {},
+      } as unknown as interceptorWorker.InterceptorWorkerService);
+      const orch = new Orchestrator(makeConfig({ interceptor: { mode: 'all' } }));
+      try {
+        await orch.start();
+        expect(await (orch as any).readInterceptorStatus()).toMatchObject({ running: true, sampled_at: status.sampled_at });
+        await orch.stop();
+        expect((orch as any).interceptorService).toBeNull();
+        expect(await (orch as any).readInterceptorStatus()).toMatchObject({ running: false, sampled_at: status.sampled_at });
+      } finally {
+        await orch.stop();
+        workerStart.mockRestore();
+      }
+    });
+
+    it.each(['none', 'all'] as const)('gates Worker on startup mode %s even with cached rules', async mode => {
+      const dataDir = path.join(homeDir, 'pilot-data');
+      fs.mkdirSync(path.join(dataDir, 'configs', 'managed'), { recursive: true });
+      fs.writeFileSync(path.join(dataDir, 'configs', 'managed', 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
+        kind: 'pattern', id: 'cached', version: '1', agents: ['qodercli'], events: ['UserPromptSubmit'], match: 'substring', pattern: 'block',
+      }] } }));
+      const workerStart = vi.spyOn(interceptorWorker, 'startInterceptorWorker').mockResolvedValue({
+        port: 18791, managedActive: true, stop: vi.fn().mockResolvedValue(undefined),
+        reloadManaged: vi.fn().mockResolvedValue(undefined), syncVerdicts: vi.fn().mockResolvedValue(undefined),
+        flushEvents: vi.fn().mockResolvedValue(undefined),
+      } as unknown as interceptorWorker.InterceptorWorkerService);
+      const orch = new Orchestrator(makeConfig({ dataDir, interceptor: { mode, types: [] } }));
+      try {
+        await orch.start();
+        if (mode === 'all') expect(workerStart).toHaveBeenCalledOnce();
+        else expect(workerStart).not.toHaveBeenCalled();
+      } finally {
+        await orch.stop();
+        workerStart.mockRestore();
+      }
+    });
+
     it('creates a detected OpenCode config only inside the isolated home', async () => {
       const binDir = path.join(homeDir, 'bin');
       fs.mkdirSync(binDir);
@@ -311,7 +365,7 @@ describe('Orchestrator', () => {
         expect(escapedTargets).toEqual([]);
         expect(writes).toContain(configPath);
         expect(JSON.parse(fs.readFileSync(configPath, 'utf8')).plugin).toEqual([
-          `file://${dataDir.replace(/\\/g, '/')}/plugins/opencode/plugin.mjs`,
+          `file://${dataDir.replace(/\\/g, '/')}/plugins/opencode`,
         ]);
       } finally {
         try { await orch?.stop(); }
@@ -324,9 +378,20 @@ describe('Orchestrator', () => {
       }
     });
 
+    it('keeps collection and metrics running with the dashboard disabled', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+      expect(mockDiscoveryStart).toHaveBeenCalledOnce();
+      expect(mockMetricsSummaryStart).toHaveBeenCalledOnce();
+      expect(mockDashboardConstructor).not.toHaveBeenCalled();
+      await orch.stop();
+      expect(mockMetricsSummaryStop).toHaveBeenCalledOnce();
+    });
+
     it('starts the metrics summary and dashboard even when the menu bar is disabled', async () => {
       const orch = new Orchestrator(makeConfig({
         dashboard: {
+          enabled: true,
           port: 19_001,
         },
         statusBar: {
@@ -357,6 +422,7 @@ describe('Orchestrator', () => {
       mockDashboardStart.mockRejectedValueOnce(new Error('dashboard exploded'));
       const events: string[] = [];
       const orch = new Orchestrator(makeConfig({
+        dashboard: { enabled: true, port: 8765 },
         statusBar: {
           enabled: true,
           metricsSummaryIntervalMs: 60_000,
@@ -458,6 +524,37 @@ describe('Orchestrator', () => {
       await orch.stop();
     });
 
+    it('applies listener poll intervals and lets the unified env override them', async () => {
+      vi.unstubAllEnvs();
+      delete process.env.LOONGSUITE_PILOT_POLL_INTERVAL_MS;
+      const config = makeConfig();
+      config.listeners['copilot-log'] = { enabled: true, pollInterval: 30_000 };
+      config.listeners['cursor-hook'] = { enabled: true, pollInterval: 30_000 };
+      config.listeners['codex-transcript'] = { enabled: true, pollInterval: 30_000 };
+      config.listeners['qoder-cn-sqlite'] = { enabled: true, pollInterval: 30_000 };
+
+      const pollInterval = (target: Orchestrator, id: string) => (
+        target.getInputManager().getInput(id) as { pollIntervalMs?: number } | undefined
+      )?.pollIntervalMs;
+
+      const orch = new Orchestrator(config);
+      await orch.start();
+      expect(pollInterval(orch, 'copilot-log')).toBe(30_000);
+      expect(pollInterval(orch, 'cursor-hook')).toBe(30_000);
+      expect(pollInterval(orch, 'codex-transcript')).toBe(30_000);
+      expect(pollInterval(orch, 'qoder-cn-sqlite')).toBe(30_000);
+      await orch.stop();
+
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '3000');
+      const overridden = new Orchestrator(config);
+      await overridden.start();
+      expect(pollInterval(overridden, 'cursor-hook')).toBe(3_000);
+      expect(pollInterval(overridden, 'codex-transcript')).toBe(3_000);
+      expect(pollInterval(overridden, 'qoder-cn-sqlite')).toBe(3_000);
+      await overridden.stop();
+      vi.unstubAllEnvs();
+    });
+
     it('passes the configured QoderCN trace poll interval to the input', async () => {
       const config = makeConfig();
       config.listeners['qoder-cn-trace'] = { enabled: true, pollInterval: 1000 };
@@ -470,6 +567,58 @@ describe('Orchestrator', () => {
       expect(input.pollIntervalMs).toBe(1000);
 
       await orch.stop();
+    });
+
+    it('registers passive Doubao collection with source, agent and listener gates', async () => {
+      const config = makeConfig();
+      config.listeners['doubao-work'] = { enabled: true, pollInterval: 1200, logDir: '/synthetic/doubao/logs' };
+      const orch = new Orchestrator(config);
+      await orch.start();
+      try {
+        expect(orch.getInputManager().getInput('doubao-work')).toBeDefined();
+        const detection = discoveryEntries.find(entry => entry.id === 'doubao-work');
+        expect(detection?.watchPaths).toEqual(['/synthetic/doubao/logs']);
+        const gate = vi.fn(() => true);
+        (orch as any).isAgentGatedEnabled = gate;
+        const control = vi.fn((_id: string, configured: boolean) => configured);
+        (orch as any).agentControlManager.resolveEnabled = control;
+        expect(detection?.enabled()).toBe(true);
+        expect(gate).toHaveBeenCalledWith('doubao-work');
+        config.listeners['doubao-work'].enabled = false;
+        expect(detection?.enabled()).toBe(false);
+        config.listeners['doubao-work'].enabled = true;
+        gate.mockReturnValue(false);
+        expect(detection?.enabled()).toBe(false);
+      } finally { await orch.stop(); }
+    });
+
+    it.each(['darwin', 'win32', 'linux'] as const)('uses the selected Doubao App source on %s', async target => {
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      Object.defineProperty(process, 'platform', { value: target, configurable: true });
+      const config = makeConfig();
+      config.listeners['doubao-work'] = { enabled: true, pollInterval: 1200, client: 'doubao' };
+      const orch = new Orchestrator(config);
+      try {
+        await orch.start();
+        const input = orch.getInputManager().getInput('doubao-work') as unknown as { logDir?: string; userDataRoot?: string };
+        const detection = discoveryEntries.find(entry => entry.id === 'doubao-work');
+        if (target === 'linux') {
+          expect(input.userDataRoot).toBeUndefined();
+          expect(input.logDir).toBeUndefined();
+          expect(detection?.watchPaths).toEqual([]);
+        } else {
+          const paths = target === 'win32' ? path.win32 : path.posix;
+          const expectedRoot = target === 'win32'
+            ? paths.join(process.env.LOCALAPPDATA!, 'Doubao', 'User Data')
+            : paths.join(homeDir, 'Library', 'Application Support', 'Doubao');
+          expect(input.userDataRoot).toBe(expectedRoot);
+          expect(input.logDir).toBe(paths.join(expectedRoot, 'sdk_storage', 'log'));
+          expect(detection?.watchPaths).toEqual([input.logDir]);
+        }
+      } finally {
+        try { await orch.stop(); }
+        finally { Object.defineProperty(process, 'platform', platform); }
+      }
     });
 
     it('uses the configured dataDir for QwenWorkCN Hook history and watches only native sources', async () => {
@@ -492,7 +641,7 @@ describe('Orchestrator', () => {
 
     it('registers the QwenWorkCN Hook listener as a fallback when trace is disabled', async () => {
       const config = makeConfig();
-      config.listeners['qwen-work-cn-trace'] = { enabled: false };
+      config.listeners['qwen-work-cn-trace'] = { enabled: false, pollInterval: 0 };
       config.listeners['qwen-work-cn-hook'] = { enabled: true, pollInterval: 1234 };
 
       const orch = new Orchestrator(config);
@@ -511,6 +660,25 @@ describe('Orchestrator', () => {
       (orch as any).agentControlManager.resolveEnabled = (_id: string, configured: boolean) => configured;
       expect(detection?.enabled()).toBe(true);
 
+      await orch.stop();
+    });
+
+    it('registers collaboration independently, with the Qwen Work agent and listener gates', async () => {
+      const config = makeConfig();
+      config.listeners['qwen-work-cn-trace'] = { enabled: false, pollInterval: 1000 };
+      config.listeners['qwen-work-cn-collaboration'] = { enabled: false, pollInterval: 2345 };
+      const orch = new Orchestrator(config);
+      await orch.start();
+      const input = orch.getInputManager().getInput('qwen-work-cn-collaboration') as any;
+      const detection = discoveryEntries.find(entry => entry.id === 'qwen-work-cn-collaboration');
+      expect(input.pollIntervalMs).toBe(2345);
+      (orch as any).isAgentGatedEnabled = (id: string) => id === 'qwen-work-cn';
+      (orch as any).agentControlManager.resolveEnabled = (_id: string, configured: boolean) => configured;
+      expect(detection?.enabled()).toBe(false);
+      config.listeners['qwen-work-cn-collaboration'].enabled = true;
+      expect(detection?.enabled()).toBe(true);
+      (orch as any).isAgentGatedEnabled = () => false;
+      expect(detection?.enabled()).toBe(false);
       await orch.stop();
     });
 
@@ -549,6 +717,21 @@ describe('Orchestrator', () => {
       const discoveryIdx = callOrder.indexOf('discovery.stop');
       const stateStoreIdx = callOrder.indexOf('stateStore.save');
       expect(discoveryIdx).toBeLessThan(stateStoreIdx);
+    });
+
+    it('cancels pending outputs before discovery waits for an input startup', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+      const manager = orch.getInputManager();
+      let cancelled = false;
+      const cancel = vi.spyOn(manager, 'cancelPendingOutputs').mockImplementation(() => { cancelled = true; });
+      // Discovery.stop drains processing, which may itself be waiting for a
+      // first input cycle's HTTP ACK. Detect the wrong order without hanging.
+      mockDiscoveryStop.mockImplementationOnce(async () => {
+        if (!cancelled) throw new Error('Discovery is waiting for uncancelled HTTP output');
+      });
+      await expect(orch.stop()).resolves.toBeUndefined();
+      expect(cancel).toHaveBeenCalled();
     });
 
     it('emits stopped event', async () => {
@@ -605,8 +788,8 @@ describe('Orchestrator', () => {
     });
   });
 
-  describe('JSONL fallback (T041)', () => {
-    it('uses JsonlFlusher fallback when all flushers disabled', async () => {
+  describe('no output destination (T041)', () => {
+    it('does not write JSONL when all flushers are disabled', async () => {
       const config = makeConfig({
         flushers: {
           sls: undefined,
@@ -617,8 +800,19 @@ describe('Orchestrator', () => {
       const orch = new Orchestrator(config);
       await orch.start();
 
-      // Should not throw, JSONL fallback is created
+      const flusher = (orch as any).flusher;
+      expect(flusher.name).toBe('multi');
+      expect(flusher.getFlushers()).toEqual([]);
+      expect(mockLoggerWarn).toHaveBeenCalledWith('no flushers enabled, collected events will not be exported');
       expect(orch.getInputManager()).toBeDefined();
+      await orch.stop();
+    });
+
+    it('uses JSONL when explicitly enabled', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+
+      expect((orch as any).flusher.name).toBe('jsonl');
       await orch.stop();
     });
   });
@@ -720,7 +914,7 @@ describe('Orchestrator', () => {
       error: 'presign failed',
     });
 
-    let setProcessor: ReturnType<typeof vi.spyOn>;
+    let setProcessor: ReturnType<typeof vi.spyOn<InputManager.prototype, 'setMultimodalProcessor'>>;
 
     beforeEach(() => {
       mockCreateDelegatedOssUploader.mockClear();

@@ -4,12 +4,7 @@
 
 LoongSuite Pilot 可以在规范化事件发送到输出后端前，对常见密钥和个人敏感信息进行脱敏。适用于 Prompt、Completion、工具参数或工具结果中可能出现凭证、身份证、电话、邮箱、IPv4 或银行卡的场景。
 
-脱敏和消息内容采集是两层不同控制：
-
-- `captureMessageContent: false` 会减少是否采集完整消息或工具内容。
-- `mask` 会扫描已配置的输出字段，并替换仍然存在的高置信密钥。
-
-敏感环境建议两者同时使用。
+`mask` 会在输出前扫描已配置的字段，并替换其中的高置信密钥。
 
 ## 如何开启脱敏
 
@@ -19,10 +14,10 @@ LoongSuite Pilot 可以在规范化事件发送到输出后端前，对常见密
 bash /tmp/loongsuite-pilot-installer.sh install --mask-mode all
 ```
 
-如需输出可近似区分的星号预览：
+未指定替换格式时默认输出可近似区分的星号预览。若要继续使用固定占位符：
 
 ```bash
-bash /tmp/loongsuite-pilot-installer.sh install --mask-mode all --mask-replacement-mode preview
+bash /tmp/loongsuite-pilot-installer.sh install --mask-mode all --mask-replacement-mode placeholder
 ```
 
 自定义模式安装参数：
@@ -65,7 +60,7 @@ loongsuite-pilot restart
 
 | 类型 | 覆盖内容 |
 |------|----------|
-| `cloudAccessKey` | 阿里云、AWS、腾讯云风格的 Access Key ID。 |
+| `cloudAccessKey` | 阿里云、AWS、腾讯云风格的 Access Key ID；识别到有效 ID 后，也会检查其后方的疑似 Secret。 |
 | `apiKey` | OpenAI-compatible 和 GitHub 风格 API Key。 |
 | `privateKey` | PEM 或 OpenSSH 私钥块。 |
 | `databaseUrl` | 包含密码的数据库 URL。 |
@@ -99,16 +94,18 @@ export LOONGSUITE_PILOT_MASK_TYPES=apiKey,idCard,phone,email,ipAddress,bankCard
 
 | 模式 | 行为 |
 |------|------|
-| `placeholder` | 默认值。使用固定 marker，保持旧版本输出不变。 |
-| `preview` | 保留 marker，并在 `{}` 中附加星号预览。预览只用于近似区分，不保证唯一。 |
+| `placeholder` | 使用固定 marker，保持旧版本输出不变。 |
+| `preview` | 默认值。保留 marker，并在 `{}` 中附加星号预览。预览只用于近似区分，不保证唯一。 |
 
-等价环境变量为 `LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE=preview`。空值或非法值回退到 `placeholder`。
+可用环境变量 `LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE` 覆盖配置文件。未配置、空值或配置文件／环境变量中的非法值均使用 `preview`；只有明确指定 `placeholder` 才使用固定占位符。安装参数中的非法值会被拒绝。已有配置显式写入 `placeholder` 时，安装器不传此参数会保留该设置。
+
+`preview` 会保留部分原文以便人工区分。需要完全隐藏原文片段时，请明确指定 `placeholder`。
 
 规则命中后，`placeholder` 使用以下固定标记：
 
 | 脱敏类型 | 替换标记 |
 |----------|----------|
-| `cloudAccessKey` | `[ACCESSKEY_MASKED]` |
+| `cloudAccessKey` | ID 使用 `[ACCESSKEY_MASKED]`；邻近疑似 Secret 使用 `[ACCESSKEY_SECRET_MASKED]`。 |
 | `apiKey` | `[APIKEY_MASKED]` |
 | `privateKey` | `[PRIVATEKEY_MASKED]` |
 | `databaseUrl` | `[DATABASEURL_MASKED]` |
@@ -128,6 +125,9 @@ export LOONGSUITE_PILOT_MASK_TYPES=apiKey,idCard,phone,email,ipAddress,bankCard
 
 手机号和银行卡会先去掉空格、横线等格式字符，再按固定数字位生成预览。同一号码的常见格式会得到相同结果。数据库 URL 会删除 query 和 fragment，数据库密码固定为 `****`；IPv4 主机使用 IP 预览规则。
 
+如果多条规则重叠命中，且预览会保留另一条规则识别出的完整敏感值，则该范围退回固定占位符。例如数据库 URL 的用户名或路径中含有已识别的 API Key 时，输出 `[DATABASEURL_MASKED]`。
+数据库 URL 中保留的用户名或路径如果含百分号编码，也会退回固定占位符；例如邮箱中的 `@` 被编码成 `%40`。
+
 输出事件中不会保留原始完整值。
 
 ## 哪些字段会被扫描
@@ -139,7 +139,7 @@ Pilot 重点扫描可能包含用户或工具内容的字段，例如：
 - LLM 输入和输出消息。
 - 工具调用参数。
 - 工具调用结果。
-- OpenClaw 路由 key（`agent.openclaw.session_key`），其中可能包含渠道用户/群组标识。关闭消息内容采集时仍遵循脱敏规则；`mask.mode=none` 时保持原值。
+- OpenClaw 路由 key（`agent.openclaw.session_key`），其中可能包含渠道用户/群组标识；`mask.mode=none` 时保持原值。
 - 已知 Agent 内容字段，例如 `agent.content`、`agent.inline_diff_message` 和部分 compact 内容字段。
 
 模型名、token 数、耗时、Git 分支、workspace 路径等稳定元数据不作为密钥内容字段扫描。
@@ -152,9 +152,10 @@ Pilot 重点扫描可能包含用户或工具内容的字段，例如：
 - IP 只支持 IPv4；形如 `1.2.3.4` 的版本号也会按 IPv4 脱敏。
 - 银行卡只覆盖银联、Visa、Mastercard、AmEx、Discover 的高置信前缀，并要求通过 Luhn 校验。
 - 手机号和银行卡号基于号码格式识别；同形的 11 位数值 ID，或通过卡组织前缀和 Luhn 校验的 15-19 位业务编号，也可能被脱敏。数值型业务 ID 较多时建议使用 `custom` 模式按需开启类型。
-- 车牌、地址、公司名、职称、自定义键值和 Secret Key 不在本期范围。
+- AccessKey Secret 仅在识别到受支持的 AccessKey ID 后启动搜索，最多检查其后 1024 个字符；不要求出现 Secret 字段名。候选值为 20–60 个字符（最多计入两个末尾的 `=`），且同时包含大写字母、小写字母和数字。允许 `+`、`/`、`-`、`_`；空白、冒号、分号、逗号、引号、括号和中间的 `=` 会结束候选值。这是启发式筛选，附近符合条件的普通字符串也可能被脱敏。
+- 车牌、地址、公司名、职称和自定义键值不在本期范围。
 
-## 推荐隐私配置
+## 推荐脱敏配置
 
 敏感或团队统一管理的环境建议：
 
@@ -162,16 +163,11 @@ Pilot 重点扫描可能包含用户或工具内容的字段，例如：
 {
   "mask": {
     "mode": "all"
-  },
-  "agents": {
-    "claude-code": { "captureMessageContent": false },
-    "codex": { "captureMessageContent": false },
-    "cursor": { "captureMessageContent": false }
   }
 }
 ```
 
-只有当分析确实需要完整 Prompt、Completion、工具参数或工具结果，并且下游存储已被批准时，才建议使用 `captureMessageContent: true`。
+启用消息内容上报前，应确认下游存储和访问权限符合团队的数据安全要求。
 
 ## 验证脱敏
 

@@ -50,6 +50,16 @@ function Log-Error {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
         $file = Join-Path $dir "grok-build-error-$day.jsonl"
+        $lock = "$file.lock"
+        $locked = $false
+        # New-Item fails when the lock file already exists. Constrained Language
+        # cannot call [System.IO.File]::Open, so a failed claim still appends.
+        try {
+            New-Item -Path $lock -ItemType File -ErrorAction Stop | Out-Null
+            $locked = $true
+        } catch {
+            $locked = $false
+        }
         $record = @{
             time = (Get-Date).ToUniversalTime().ToString("o")
             "gen_ai.agent.type" = "grok-build"
@@ -58,6 +68,9 @@ function Log-Error {
             "error.message" = $Message
         }
         Add-Content -LiteralPath $file -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
+        if ($locked) {
+            Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
+        }
     } catch {}
 }
 

@@ -9,6 +9,13 @@ import { QoderTraceInput } from '../../src/inputs/qoder-trace/qoder-trace-input.
 import { KiroCliLogInput } from '../../src/inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { StateStore } from '../../src/checkpoints/state-store.js';
 import { AgentActivityEntrySchema } from '../contract/agent-activity-schema.js';
+import { QoderTranscriptCollector } from '../../assets/hooks/qoder/transcript-collector.mjs';
+
+async function nativeRecords(dataDir: string) {
+  const collector = new QoderTranscriptCollector({ dataDir, agentId: 'qoder' });
+  try { return (await collector.collect({})).records; }
+  finally { collector.stop(); }
+}
 
 function getTodayDateString(): string {
   const d = new Date();
@@ -232,6 +239,10 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'hook-processor-base.mjs'),
     );
     await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/sync-file-lock.mjs'),
+      path.join(sharedDir, 'sync-file-lock.mjs'),
+    );
+    await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/decode-payload.mjs'),
       path.join(sharedDir, 'decode-payload.mjs'),
     );
@@ -248,6 +259,7 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'upstream-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
+    await fs.cp(path.resolve('assets/hooks/qoder'), path.join(hookDir, 'qoder'), { recursive: true });
 
     const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
     await fs.writeFile(transcriptPath, [
@@ -301,9 +313,8 @@ describe('Hook JSONL integration flow', () => {
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
 
-    const historyLines = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n');
-    expect(historyLines.length).toBeGreaterThanOrEqual(1);
-    const historyRecord = JSON.parse(historyLines[0]!);
+    expect(await fs.readFile(historyFile, 'utf-8')).toBe('');
+    const historyRecord = (await nativeRecords(dataDir))[0]!;
     expect(historyRecord.type).toBeUndefined();
     expect(historyRecord.uuid).toBeUndefined();
     expect(historyRecord.sessionId).toBeUndefined();
@@ -361,6 +372,10 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'hook-processor-base.mjs'),
     );
     await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/sync-file-lock.mjs'),
+      path.join(sharedDir, 'sync-file-lock.mjs'),
+    );
+    await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/decode-payload.mjs'),
       path.join(sharedDir, 'decode-payload.mjs'),
     );
@@ -377,6 +392,7 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'upstream-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
+    await fs.cp(path.resolve('assets/hooks/qoder'), path.join(hookDir, 'qoder'), { recursive: true });
 
     const transcriptPath = path.join(tmpDir, 'delayed-ide-transcript.jsonl');
     await fs.writeFile(transcriptPath, [
@@ -469,17 +485,31 @@ describe('Hook JSONL integration flow', () => {
       hook_event_name: 'Stop',
       transcript_path: transcriptPath,
       session_id: 'sess-delayed-ide',
+      extra: {
+        email: 'git-user@example.com',
+        user: {
+          name: 'qoder-user',
+          email: 'qoder-user@example.com',
+          uid: 'qoder-native-user-id',
+        },
+      },
     }), {
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
     });
     expect(result.status).toBe(0);
 
     const historyFile = path.join(dataDir, 'logs', 'qoder', 'history', `qoder-${getTodayDateString()}.jsonl`);
-    const records = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));
+    const records = await nativeRecords(dataDir);
     const llmRequests = records.filter(r => r['event.name'] === 'llm.request');
     const llmResponses = records.filter(r => r['event.name'] === 'llm.response');
     const toolCalls = records.filter(r => r['event.name'] === 'tool.call');
 
+    expect(records.every(record =>
+      record['user.name'] === 'qoder-user'
+      && record['user.email'] === 'qoder-user@example.com',
+    )).toBe(true);
+    expect(records.some(record => record['user.email'] === 'git-user@example.com')).toBe(false);
+    expect(records.some(record => Object.hasOwn(record, 'user.uid'))).toBe(false);
     expect(llmRequests).toHaveLength(3);
     expect(llmResponses).toHaveLength(3);
     expect(new Set(llmRequests.map(r => r['gen_ai.step.id']))).toEqual(new Set(llmResponses.map(r => r['gen_ai.step.id'])));
@@ -712,6 +742,10 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'hook-processor-base.mjs'),
     );
     await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/sync-file-lock.mjs'),
+      path.join(sharedDir, 'sync-file-lock.mjs'),
+    );
+    await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/decode-payload.mjs'),
       path.join(sharedDir, 'decode-payload.mjs'),
     );
@@ -728,6 +762,7 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'upstream-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
+    await fs.cp(path.resolve('assets/hooks/qoder'), path.join(hookDir, 'qoder'), { recursive: true });
 
     const transcriptPath = path.join(tmpDir, 'multi-turn-transcript.jsonl');
     await fs.writeFile(transcriptPath, [
@@ -797,7 +832,7 @@ describe('Hook JSONL integration flow', () => {
     expect(secondResult.status).toBe(0);
 
     const historyFile = path.join(dataDir, 'logs', 'qoder', 'history', `qoder-${getTodayDateString()}.jsonl`);
-    const records = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));
+    const records = await nativeRecords(dataDir);
     const userHookEvents = records.filter(r => r['event.name'] === 'other');
 
     // Should have two distinct turns
