@@ -9,13 +9,18 @@ permissions:
   contents: write
 
 jobs:
+  riscv64:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/riscv64.yml
   release:
+    needs: riscv64
     runs-on: loongsuite-pilot
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run typecheck
