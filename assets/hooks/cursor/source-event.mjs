@@ -5,6 +5,16 @@
  * and produces a flat internal event object for the event journal.
  */
 
+const DESKTOP_VERSION_PATTERN = /^v?\d{1,3}\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?$/i;
+const CLI_VERSION_PATTERN = /^v?\d{4}\.(?:0[1-9]|1[0-2])\.(?:0[1-9]|[12]\d|3[01])(?:-[\w.-]+)?(?:\+[\w.-]+)?$/i;
+
+export function cursorVariantFromVersion(version) {
+  if (typeof version !== 'string') return undefined;
+  if (CLI_VERSION_PATTERN.test(version)) return 'cursor-cli';
+  if (DESKTOP_VERSION_PATTERN.test(version)) return 'cursor';
+  return undefined;
+}
+
 export function sanitizeToolCallId(raw) {
   if (typeof raw !== 'string' || raw.length === 0) return undefined;
   const idx = raw.indexOf('\n');
@@ -119,7 +129,7 @@ export function toInternalEvent(payload, captureContent = true) {
   }
 
   // common metadata
-  event.cursor_version = payload.cursor_version || undefined;
+  event.cursor_version = cursorVariantFromVersion(payload.cursor_version) ? payload.cursor_version : undefined;
   event.user_email = payload.user_email || undefined;
   event.cwd = payload.cwd || event.cwd || undefined;
   event.workspace_roots = payload.workspace_roots || undefined;

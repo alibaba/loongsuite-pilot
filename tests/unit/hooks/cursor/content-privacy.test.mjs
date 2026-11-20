@@ -34,6 +34,8 @@ it.each([
   ['desktop', '1.7.0', { cursor: { captureMessageContent: false }, 'cursor-cli': { captureMessageContent: true } }],
   ['CLI', '2026.07.31', { cursor: { captureMessageContent: true }, 'cursor-cli': { captureMessageContent: 'false' } }],
   ['unversioned', undefined, { 'cursor-cli': { captureMessageContent: false } }],
+  ['unrecognized', 'unknown', { cursor: { captureMessageContent: true }, 'cursor-cli': { captureMessageContent: false } }],
+  ['malformed date', '2026.07.31unexpected', { cursor: { captureMessageContent: false }, 'cursor-cli': { captureMessageContent: true } }],
 ])('keeps %s content out of the active journal and raw diagnostics', (label, version, agents) => {
   if (label === 'CLI') env.AGENT_DATA_COLLECTION_CONFIG = '~/policy.json';
   configure(agents);
@@ -64,6 +66,27 @@ it.each([{}, { cursor: { captureMessageContent: true } }])('preserves enabled ca
   send('beforeSubmitPrompt', { prompt: 'visible-content' }, '1.7.0');
   expect(journal()).toContain('visible-content');
   expect(fs.readFileSync(path.join(data, 'logs/cursor/raw/cursor-raw-trace.jsonl'), 'utf8')).toContain('visible-content');
+});
+
+it('omits malformed version objects without discarding valid same-conversation CLI evidence', () => {
+  configure({ cursor: { captureMessageContent: false }, 'cursor-cli': { captureMessageContent: true } });
+  send('beforeSubmitPrompt', { prompt: 'allowed-cli-prompt' }, 'v2026.11.17-build.1');
+  send('preToolUse', { tool_name: 'read', tool_use_id: 'call-1', tool_input: { private: 'malformed-body' } },
+    { version: 'malformed-body' });
+  expect(journal()).toContain('allowed-cli-prompt');
+  expect(journal()).not.toContain('malformed-body');
+  const raw = path.join(data, 'logs/cursor/raw/cursor-raw-trace.jsonl');
+  expect(fs.readFileSync(raw, 'utf8')).toContain('allowed-cli-prompt');
+  expect(fs.readFileSync(raw, 'utf8')).not.toContain('malformed-body');
+
+  send('stop', { status: 'completed' }, 'unknown');
+  send('afterAgentResponse', { text: 'allowed-cli-response', output_tokens: 9 }, 'v2026.11.17-build.1');
+  const dir = path.join(data, 'logs/cursor/history');
+  const history = fs.readFileSync(path.join(dir, fs.readdirSync(dir)[0]), 'utf8');
+  expect(history).toContain('"gen_ai.agent.type":"cursor-cli"');
+  expect(history).toContain('allowed-cli-response');
+  expect(history).toContain('call-1');
+  expect(history).not.toContain('malformed-body');
 });
 
 it('keeps desktop and CLI policies separate in a shared journal', () => {

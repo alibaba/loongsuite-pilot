@@ -25,7 +25,7 @@ import {
   loadHookRuntimeConfig,
   sanitizeObject,
 } from './agent-event-normalizer.mjs';
-import { toInternalEvent } from './cursor/source-event.mjs';
+import { cursorVariantFromVersion, toInternalEvent } from './cursor/source-event.mjs';
 import { appendEvent, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
 import { assembleTurn } from './cursor/react-assembler.mjs';
 import { buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
@@ -96,13 +96,15 @@ function writeEmptyResponse() {
   process.stdout.write('{}\n');
 }
 
-const CLI_VERSION_PATTERN = /^\d{4}\.\d{2}\.\d{2}/;
-
 function inferVariant(events) {
+  let variant;
   for (const ev of events) {
-    if (ev.cursor_version && CLI_VERSION_PATTERN.test(ev.cursor_version)) return 'cursor-cli';
+    const observed = cursorVariantFromVersion(ev.cursor_version);
+    if (!observed) continue;
+    if (variant && variant !== observed) return undefined;
+    variant = observed;
   }
-  return 'cursor';
+  return variant;
 }
 
 function findConversationResourceAttributes(events, conversationId) {
@@ -458,11 +460,11 @@ async function main() {
   // Convert to internal event and append to journal
   // The collector config stays under the user home when only the log directory moves.
   const runtimeConfig = loadHookRuntimeConfig();
-  const version = payload.cursor_version;
-  // Desktop and CLI share this hook. An unversioned event is safe to persist
-  // with content only when both sources allow it.
-  const captureContent = runtimeConfig.policyAvailable && (version
-    ? hookCapturesContent(CLI_VERSION_PATTERN.test(version) ? 'cursor-cli' : 'cursor', runtimeConfig)
+  const eventVariant = cursorVariantFromVersion(payload.cursor_version);
+  // Desktop and CLI share this hook. An event with an ambiguous source is
+  // safe to persist with content only when both sources allow it.
+  const captureContent = runtimeConfig.policyAvailable && (eventVariant
+    ? hookCapturesContent(eventVariant, runtimeConfig)
     : hookCapturesContent('cursor', runtimeConfig) && hookCapturesContent('cursor-cli', runtimeConfig));
   const internalEvent = toInternalEvent(payload, captureContent);
   const invocationResourceAttributes = collectResourceAttributesFromEnv(process.env, {
@@ -605,7 +607,7 @@ async function main() {
       if (records.length > 0) {
         const day = localDateString(now);
         const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
-        await appendBatchJsonl(historyFile, records, variant);
+        await appendBatchJsonl(historyFile, records, variant ?? 'cursor');
       }
 
       compactJournal(allEvents, consumedConversationIds);
@@ -643,7 +645,7 @@ async function main() {
         if (result.records.length > 0) {
           const day = localDateString(now);
           const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
-          await appendBatchJsonl(historyFile, result.records, variant);
+          await appendBatchJsonl(historyFile, result.records, variant ?? 'cursor');
         }
 
         compactJournal(allEvents, result.consumedConversationIds);
