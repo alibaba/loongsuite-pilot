@@ -7,6 +7,7 @@ const logger = createLogger('trace-linker');
 const TRACEPARENT_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i;
 const ZERO_TRACE = '0'.repeat(32);
 const ZERO_SPAN = '0'.repeat(16);
+export const UPSTREAM_CORRELATION_HASH_FIELD = 'agent.pilot.correlation.content_hash';
 
 interface ResolveState {
   resolved: boolean;
@@ -47,7 +48,7 @@ function extractUserText(entry: AgentActivityEntry): string {
 }
 
 function extractInputHash(entry: AgentActivityEntry): string | undefined {
-  const value = entry['agent.pilot.correlation.content_hash'];
+  const value = entry[UPSTREAM_CORRELATION_HASH_FIELD];
   return typeof value === 'string' && /^[0-9a-f]{16}$/.test(value) ? value : undefined;
 }
 

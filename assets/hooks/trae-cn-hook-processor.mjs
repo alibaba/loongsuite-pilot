@@ -68,6 +68,7 @@ import {
 // (the file ships with the Frida distribution, not this PR).
 
 const AGENT_ID = 'trae-cn';
+const UPSTREAM_CORRELATION_HASH_FIELD = 'agent.pilot.correlation.content_hash';
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_ID });
 const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
 const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
@@ -1054,7 +1055,7 @@ function buildOtlpSpansFromRecords(records) {
       for (const [k, v] of Object.entries(r)) {
         if (k === 'time_unix_nano' || k === 'startTimeUnixNano' || k === 'endTimeUnixNano'
             || k === 'event' || k === 'span_id' || k === 'parent_span_id' || k === 'trace_id'
-            || k === 'event.id' || k === 'event.name') {
+            || k === 'event.id' || k === 'event.name' || k === UPSTREAM_CORRELATION_HASH_FIELD) {
           continue;
         }
         if (v === undefined || v === null || v === '') continue;
@@ -1208,16 +1209,18 @@ function otlpSpanToRecord(span) {
 function emitEntryIfMissing(state, runtimeConfig, records, timestamp) {
   if (state.entry_emitted) return;
   const base = baseFields(state, runtimeConfig);
-  records.push(entryRecord(state, base, timestamp));
-  records.push(agentRecord(state, base, timestamp));
-  records.push(stepRecord(state, base, timestamp));
+  const entry = entryRecord(state, base, timestamp);
+  records.push(entry, agentRecord(state, base, timestamp), stepRecord(state, base, timestamp));
   state.entry_emitted = true;
+  return entry;
 }
 
 // ─── cmd handlers ───
 
 function cmdSessionStart(event, sessionId, runtimeConfig) {
-  recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  if (runtimeConfig.upstreamLink.enabled) {
+    recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  }
   // SessionStart is a no-op marker — no turn opened (§2.9).
   // Touch session state so the next UserPromptSubmit can chain turn_index.
   let state = loadSessionState(sessionId);
@@ -1231,7 +1234,9 @@ function cmdSessionStart(event, sessionId, runtimeConfig) {
 }
 
 function cmdUserPromptSubmit(event, sessionId, runtimeConfig) {
-  recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  if (runtimeConfig.upstreamLink.enabled) {
+    recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  }
 
   const prevState = loadSessionState(sessionId);
   // §2.9: UserPromptSubmit 总是强制开新轮. 中途启动 (PreToolUse 在前) 时上一
@@ -1280,8 +1285,14 @@ function cmdUserPromptSubmit(event, sessionId, runtimeConfig) {
   state.last_event_at = ts;
   const base = baseFields(state, runtimeConfig);
   const records = [];
-  emitEntryIfMissing(state, runtimeConfig, records, ts);
-  state.prompt = safeText(event.prompt || '');
+  const entry = emitEntryIfMissing(state, runtimeConfig, records, ts);
+  const prompt = typeof event.prompt === 'string' ? event.prompt : undefined;
+  if (entry && runtimeConfig.upstreamLink.enabled && prompt !== undefined) {
+    // Match the adapter's raw UTF-8 SHA-256 prefix before display truncation.
+    // Keep only the hash on the original ENTRY, including when content is off.
+    entry[UPSTREAM_CORRELATION_HASH_FIELD] = crypto.createHash('sha256').update(prompt, 'utf8').digest('hex').slice(0, 16);
+  }
+  state.prompt = safeText(prompt);
   state.prompt_timestamp = ts;
   records.push(llmRequestRecord(state, base, runtimeConfig, ts, state.prompt));
   state.llm_request_emitted = true;
@@ -1377,7 +1388,9 @@ function cmdPostToolUse(event, sessionId, runtimeConfig) {
 }
 
 function cmdStop(event, sessionId, runtimeConfig) {
-  recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  if (runtimeConfig.upstreamLink.enabled) {
+    recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  }
   let state = loadSessionState(sessionId);
   if (!state || !state.llm_request_emitted) {
     // Stop without a UserPromptSubmit — synthesize an empty turn to keep the

@@ -11,6 +11,8 @@ import { HookManager } from '../../../../src/hooks/hook-manager.ts';
 import { StateStore } from '../../../../src/checkpoints/state-store.ts';
 import { InputManager } from '../../../../src/core/input-manager.ts';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.ts';
+import { TraceLinker } from '../../../../src/core/upstream-link/trace-linker.ts';
+import { CorrelationStore } from '../../../../src/core/upstream-link/correlation-store.ts';
 import { TraeCnLogInput } from '../../../../src/inputs/trae-cn-log/trae-cn-log-input.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -97,13 +99,39 @@ function readOtlpDebugSpans() {
 }
 
 describe('trae-cn hook processor', () => {
-  test('exports documented TRAE hook input through the normal collector', async () => {
+  test.each([
+    { name: 'an independent trace', upstreamEnabled: false, captureContent: true },
+    { name: 'disabled upstream linking', upstreamEnabled: false, captureContent: true, context: 'session' },
+    { name: 'pending correlation metadata with collector linking disabled',
+      upstreamEnabled: true, collectorEnabled: false, captureContent: true, context: 'session' },
+    { name: 'an explicit environment parent', upstreamEnabled: true, captureContent: true, context: 'session' },
+    { name: 'an explicit environment parent with content capture disabled',
+      upstreamEnabled: true, captureContent: false, context: 'session' },
+    { name: 'an adapter turn with content capture disabled', upstreamEnabled: true, captureContent: false, context: 'turn' },
+  ])('exports documented TRAE hook input with $name', async ({
+    upstreamEnabled, collectorEnabled = upstreamEnabled, captureContent, context,
+  }) => {
     const sessionId = 'documented-trae-session';
+    const traceId = 'a'.repeat(32);
+    const parentSpanId = '0000000000000001';
+    const traceparent = `00-${traceId}-${parentSpanId}-01`;
+    const sentinel = 'private fixture input';
+    const prompt = context === 'turn' ? sentinel + 'x'.repeat(33_000) : sentinel;
     const configPath = path.join(dataDir, 'config.json');
-    fs.writeFileSync(configPath, JSON.stringify({ agents: { 'trae-cn': { captureMessageContent: true } } }));
-    const hookEnv = { AGENT_DATA_COLLECTION_CONFIG: configPath, TRAES_USER_DATA_DIR: path.join(dataDir, 'native') };
+    const agents = { 'trae-cn': { captureMessageContent: captureContent } };
+    fs.writeFileSync(configPath, JSON.stringify({ agents, upstreamLink: { enabled: upstreamEnabled } }));
+    const correlateDir = path.join(dataDir, 'acp-correlate');
+    const correlateFile = path.join(correlateDir, sessionId + '.jsonl');
+    const contentHash = crypto.createHash('sha256').update(prompt, 'utf8').digest('hex').slice(0, 16);
+    if (context === 'turn') {
+      fs.mkdirSync(correlateDir, { recursive: true });
+      fs.writeFileSync(correlateFile, JSON.stringify({ type: 'turn', sessionId, traceparent, contentHash }) + '\n');
+    }
+    const hookEnv = { AGENT_DATA_COLLECTION_CONFIG: configPath, TRAES_USER_DATA_DIR: path.join(dataDir, 'native'),
+      TRACEPARENT: context === 'session' ? traceparent : '', LOONGSUITE_PILOT_UPSTREAM_LINK: upstreamEnabled ? '1' : '0',
+      LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
     const paths = [
-      ['user-prompt-submit', { hook_event_name: 'UserPromptSubmit', prompt: 'Read the fixture' }],
+      ['user-prompt-submit', { hook_event_name: 'UserPromptSubmit', prompt }],
       ['pre-tool-use', { hook_event_name: 'PreToolUse', tool_use_id: 'read-1', tool_name: 'Read', tool_input: { file_path: 'fixture.txt' } }],
       ['post-tool-use', { hook_event_name: 'PostToolUse', tool_use_id: 'read-1', tool_name: 'Read', tool_response: { output: 'fixture content' } }],
       ['stop', { hook_event_name: 'Stop', stop_hook_active: false, loop_count: 0, last_assistant_message: 'I read the fixture.' }],
@@ -111,8 +139,31 @@ describe('trae-cn hook processor', () => {
     for (const [command, payload] of paths) {
       expect(runHook(command, { ...payload, session_id: sessionId }, hookEnv).status).toBe(0);
     }
-    const hookTraceId = readEmittedJsonl().find(record => record['event.name'] === 'llm.request')?.trace_id;
+    const hookRecords = readEmittedJsonl();
+    const hookRequest = hookRecords.filter(record => record['event.name'] === 'llm.request');
+    expect(hookRequest).toHaveLength(1);
+    expect(hookRecords.filter(record => record['event.name'] === 'tool.call')).toHaveLength(1);
+    expect(hookRecords.filter(record => record['event.name'] === 'tool.result')).toHaveLength(1);
+    expect(hookRecords.filter(record => record['agent.pilot.correlation.content_hash'])
+      .map(record => [record['gen_ai.span.kind'], record['agent.pilot.correlation.content_hash']]))
+      .toEqual(upstreamEnabled ? [['ENTRY', contentHash]] : []);
+    expect(fs.existsSync(correlateFile)).toBe(upstreamEnabled);
+    if (upstreamEnabled) expect(fs.readFileSync(correlateFile, 'utf8')).toContain(traceparent);
+    const hookTraceId = hookRequest[0].trace_id;
     expect(hookTraceId).toMatch(/^[a-f0-9]{32}$/);
+    const hookState = fs.readFileSync(statePath(sessionId), 'utf8');
+    const debugSpans = readOtlpDebugSpans();
+    expect(debugSpans).toHaveLength(5);
+    expect(JSON.stringify(debugSpans)).not.toContain(contentHash);
+    expect(hookState).not.toContain(contentHash);
+    if (!captureContent) {
+      expect(JSON.stringify(debugSpans)).not.toContain(sentinel);
+      expect(JSON.stringify(hookRecords)).not.toContain(sentinel);
+      expect(hookState).not.toContain(sentinel);
+      expect(fs.readFileSync(correlateFile, 'utf8')).not.toContain(sentinel);
+      expect(hookRequest[0]['gen_ai.input.messages']).toBeUndefined();
+      expect(hookRequest[0]['gen_ai.input.messages_delta']).toBeUndefined();
+    }
 
     const spans = [];
     const exporter = {
@@ -123,13 +174,19 @@ describe('trae-cn hook processor', () => {
       enabled: true,
       protocol: 'http/protobuf',
       serviceName: 'trae-collector-test',
+      dataDir,
+      captureMessageContent: captureContent,
+      spanAttributePassthroughPrefixes: ['agent.pilot.correlation.'],
       endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318/v1/traces' }],
     }, undefined, () => exporter);
+    const writes = vi.spyOn(flusher, 'sendBatch');
     const stateStore = new StateStore(path.join(dataDir, 'input-state.json'));
     await stateStore.load();
     const input = new TraeCnLogInput({ stateStore, sessionDir: logDir, auxLogDir: path.join(dataDir, 'native'), hubCacheDir: path.join(dataDir, 'hub') });
     const manager = new InputManager();
     manager.setFlusher(flusher);
+    manager.setAgentsConfig(agents);
+    if (collectorEnabled) manager.setTraceLinker(new TraceLinker(new CorrelationStore(correlateDir), { retries: 0 }));
     manager.registerInput(input);
     try {
       await manager.startInput(input.id);
@@ -143,8 +200,16 @@ describe('trae-cn hook processor', () => {
       expect(tool.parentSpanId).toBe(step.spanContext().spanId);
       expect(step.parentSpanId).toBe(agent.spanContext().spanId);
       expect(agent.parentSpanId).toBe(entry.spanContext().spanId);
-      expect(entry.parentSpanId).toBeUndefined();
-      expect(new Set(spans.map(span => span.spanContext().traceId))).toEqual(new Set([hookTraceId]));
+      expect(entry.parentSpanId).toBe(collectorEnabled ? parentSpanId : undefined);
+      expect(new Set(spans.map(span => span.spanContext().traceId))).toEqual(new Set([collectorEnabled ? traceId : hookTraceId]));
+      const entries = writes.mock.calls.flatMap(([batch]) => batch);
+      const exported = JSON.stringify(spans.map(span => ({ attributes: span.attributes, events: span.events })));
+      expect(entries.some(record => Object.hasOwn(record, 'agent.pilot.correlation.content_hash'))).toBe(false);
+      expect(exported).not.toContain(contentHash);
+      if (!captureContent) {
+        expect(JSON.stringify(entries)).not.toContain(sentinel);
+        expect(exported).not.toContain(sentinel);
+      }
     } finally {
       await manager.stopInput(input.id);
       await flusher.shutdown();

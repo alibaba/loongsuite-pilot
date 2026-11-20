@@ -19,7 +19,7 @@ import { enrichCanonicalEntriesWithGit } from '../normalization/enrich-git-conte
 import { maskAgentActivityEntry } from '../mask/entry-masker.js';
 import { loadMaskPlan } from '../mask/rule-loader.js';
 import type { MaskPlan } from '../mask/types.js';
-import type { TraceLinker } from './upstream-link/trace-linker.js';
+import { UPSTREAM_CORRELATION_HASH_FIELD, type TraceLinker } from './upstream-link/trace-linker.js';
 import type { MultimodalProcessor } from '../multimodal/processor.js';
 import { TurnBoundaryProcessor } from '../normalization/turn-boundary-processor.js';
 import { applyInvocationIdentity } from '../normalization/invocation-identity.js';
@@ -448,6 +448,11 @@ export class InputManager extends EventEmitter {
       }
     }
 
+    // The TRAE hash is source-side correlation metadata, even when the
+    // current collector has upstream linking turned off.
+    if (inputId === 'trae-cn-log') {
+      for (const entry of entries) delete entry[UPSTREAM_CORRELATION_HASH_FIELD];
+    }
     this.applyIdentity(entries);
 
     // Fill-only lifecycle enrichment. It never changes record order/count or
