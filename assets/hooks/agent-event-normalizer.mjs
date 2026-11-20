@@ -292,6 +292,7 @@ export function loadHookRuntimeConfig(dataDir) {
       || os.hostname(),
     agents: file.agents && typeof file.agents === 'object' ? file.agents : {},
     upstreamLink: {
+      sharedContext: envBool('LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT', upstreamLink.sharedContext === true),
       enabled: envBool(
         'LOONGSUITE_PILOT_UPSTREAM_LINK',
         upstreamLink.enabled === true,

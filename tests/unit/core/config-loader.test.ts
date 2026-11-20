@@ -27,6 +27,19 @@ function clearSlsEnv() {
 }
 
 describe('ConfigLoader', () => {
+  it('keeps shared trace propagation opt-in and lets environment override the file', async () => {
+    expect((await loadConfig()).upstreamLink.sharedContext).toBe(false);
+    mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true, sharedContext: true } });
+    expect((await loadConfig()).upstreamLink.sharedContext).toBe(true);
+    for (const environment of ['false', 'FALSE', 'off', '0']) {
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT', environment);
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { sharedContext: true } });
+      expect((await loadConfig()).upstreamLink.sharedContext).toBe(false);
+    }
+    vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT', 'TRUE');
+    expect((await loadConfig()).upstreamLink.sharedContext).toBe(true);
+  });
+
   it('keeps a collaboration conversation allowlist and fails closed for invalid scopes', async () => {
     mockReadJsonFile.mockResolvedValueOnce({ listeners: {
       'qwen-work-cn-collaboration': { includeConversationIds: [' space-a ', 'space-a', 'space-b'] },

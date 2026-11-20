@@ -9,6 +9,7 @@
   "hook": {
     "settingsPath": "~/.claude/settings.json",
     "events": [
+      "UserPromptSubmit",
       "PreToolUse",
       "Stop",
       "StopFailure",

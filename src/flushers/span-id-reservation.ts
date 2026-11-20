@@ -30,6 +30,7 @@ function validSpanId(value: unknown): value is string {
 export class ReservedSpanIdGenerator implements IdGenerator {
   private readonly fallback = new RandomIdGenerator();
   private reserved?: string;
+  private authoritative?: string;
   private reservedTrace?: string;
 
   generateTraceId = (): string => {
@@ -50,7 +51,8 @@ export class ReservedSpanIdGenerator implements IdGenerator {
   }
 
   generateSpanId = (): string => {
-    const reserved = this.reserved;
+    const reserved = this.authoritative ?? this.reserved;
+    this.authoritative = undefined;
     this.reserved = undefined;
     return reserved ?? this.fallback.generateSpanId();
   };
@@ -59,6 +61,14 @@ export class ReservedSpanIdGenerator implements IdGenerator {
     if (!validSpanId(spanId)) return false;
     this.reserved = spanId;
     return true;
+  }
+
+  withAuthoritativeSpanId<Result>(spanId: string, action: () => Result): Result {
+    if (!validSpanId(spanId)) return action();
+    const previous = this.authoritative;
+    this.authoritative = spanId;
+    try { return action(); }
+    finally { this.authoritative = previous; this.reserved = undefined; }
   }
 
   clear(): void {

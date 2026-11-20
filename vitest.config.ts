@@ -8,7 +8,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    globalSetup: ['tests/helpers/isolated-home-global-setup.ts'],
+    globalSetup: ['tests/helpers/trace-context-global-setup.ts', 'tests/helpers/isolated-home-global-setup.ts'],
     include: ['tests/**/*.test.ts', 'tests/**/*.test.mjs'],
     coverage: {
       provider: 'v8',

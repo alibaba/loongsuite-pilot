@@ -30,6 +30,15 @@ const internalStubPlugin = {
 const commonPlugins = [internalStubPlugin];
 
 await build({
+  entryPoints: ['src/core/trace-context/runtime.ts'],
+  outfile: 'assets/hooks/shared/trace-context.cjs',
+  platform: 'node', target: 'es2022', format: 'cjs', bundle: true,
+  mainFields: ['module', 'main'], minifySyntax: true,
+});
+await mkdir('dist', { recursive: true });
+await copyFile('assets/hooks/shared/trace-context.cjs', 'dist/trace-context.cjs');
+
+await build({
   entryPoints: ['src/index.ts'],
   outfile: 'dist/index.js',
   platform: 'node',

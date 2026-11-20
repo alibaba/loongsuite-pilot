@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { TraceContextRuntime } from '../../../../src/core/trace-context/runtime.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PRELOAD = path.resolve(__dirname, '../../../../assets/hooks/claude-code-fetch-intercept.mjs');
@@ -734,6 +735,39 @@ describe.each(['global', 'fetch-session'])('claude-code-fetch-intercept preload 
       LOONGSUITE_PILOT_UPSTREAM_LINK: '1',
       LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM: '1',
     };
+    test.each(['global', 'fetch-session'])('uses the shared binding before each physical send (%s)', (transport) => {
+      const runtime = new TraceContextRuntime(DATA_DIR);
+      const binding = runtime.bindTurn({ agentType: 'claude-code', sessionId: SESS, turnId: 'first' }, { traceparent: TP, tracestate: TS });
+      const first = runScenario({ url: LLM_URL, sessionId: SESS, body: { model: 'claude-test', messages: [] },
+        sseEvents: sseStream(), fetchTransport: transport,
+        env: { ...ON, LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT: '1', TRACEPARENT: 'invalid-must-not-win' } });
+      expect(first.status, first.stderr).toBe(0);
+      const request = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'observed-request.json'), 'utf8'));
+      expect(request.headers.traceparent).toContain(binding.traceId);
+      expect(request.headers.tracestate).toBe(TS);
+      const record = readIntercept(SESS)[0].record;
+      expect(request.headers.traceparent).toBe(`00-${binding.traceId}-${record.llm_span_id}-01`);
+      expect(record.pilot_binding_id).toBe(binding.bindingId);
+      runtime.completeTurn(binding);
+      const secondBinding = runtime.bindTurn({ agentType: 'claude-code', sessionId: SESS, turnId: 'second' }, { traceparent: TP.replace(TRACE_ID, 'c'.repeat(32)) });
+      const second = runScenario({ url: LLM_URL, sessionId: SESS, body: { model: 'claude-test', messages: [] },
+        sseEvents: sseStream(), fetchTransport: transport,
+        env: { ...ON, LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT: '1', TRACEPARENT: TP } });
+      expect(second.status, second.stderr).toBe(0);
+      const secondRequest = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'observed-request.json'), 'utf8'));
+      expect(secondRequest.headers.traceparent).toContain(secondBinding.traceId);
+      expect(secondRequest.headers.tracestate).toBeUndefined();
+    });
+
+    test('fails open rather than selecting a latest concurrent shared turn', () => {
+      const runtime = new TraceContextRuntime(DATA_DIR);
+      runtime.bindTurn({ agentType: 'claude-code', sessionId: SESS, turnId: 'one' }, { traceparent: TP });
+      runtime.bindTurn({ agentType: 'claude-code', sessionId: SESS, turnId: 'two' }, { traceparent: TP });
+      const result = runScenario({ url: LLM_URL, sessionId: SESS, body: { model: 'claude-test', messages: [] }, sseEvents: sseStream(),
+        env: { ...ON, LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT: '1', TRACEPARENT: TP } });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'observed-request.json'), 'utf8')).headers.traceparent).toBeUndefined();
+    });
     const readObservedRequest = () =>
       JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'observed-request.json'), 'utf8'));
 
@@ -766,6 +800,21 @@ describe.each(['global', 'fetch-session'])('claude-code-fetch-intercept preload 
       expectSubstitutedParent(headers.traceparent);
       // tracestate is opaque to us and passes through byte for byte.
       expect(headers.tracestate).toBe(TS);
+    });
+
+    test('a restarted legacy preload respects the inherited context already claimed by shared mode', async () => {
+      const { claimUpstreamContextForTurn } = await import('../../../../assets/hooks/shared/upstream-context.mjs');
+      expect(claimUpstreamContextForTurn({ dataDir: DATA_DIR, sessionId: SESS, turnId: 'shared-turn' })).toBe(true);
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS, body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { ...ON, LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT: 'false', TRACEPARENT: TP, TRACESTATE: TS },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      expect(readObservedRequest().headers.traceparent).toBeUndefined();
+      expect(readObservedRequest().headers.tracestate).toBeUndefined();
+      expect(readAttempts(SESS)).toHaveLength(1);
+      expect(readAttempts(SESS)[0].llm_span_id).toBeUndefined();
     });
 
     test('forwards traceparent alone when no tracestate is inherited', () => {

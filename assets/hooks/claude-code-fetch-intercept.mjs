@@ -44,9 +44,14 @@
 //     It only runs under BUN_OPTIONS --preload inside a compiled Bun binary
 //     (Claude Code CLI).
 
+import { hasSharedUpstreamContextClaim } from './shared/upstream-context.mjs';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+let sharedRuntime;
+try { sharedRuntime = require('./shared/trace-context.cjs'); } catch (_) {}
 
 const PILOT_DATA_DIR = process.env.LOONGSUITE_PILOT_DATA_DIR
   || path.join(process.env.HOME || '/tmp', '.loongsuite-pilot');
@@ -334,13 +339,25 @@ function llmPropagationEnabled() {
   return enabled && toLlm;
 }
 
+function sharedContextEnabled() {
+  try {
+    const override = process.env.LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT;
+    if (override !== undefined && override !== '') return override === '1' || override.toLowerCase() === 'true';
+    const configPath = process.env.AGENT_DATA_COLLECTION_CONFIG || path.join(PILOT_DATA_DIR, 'config.json');
+    return JSON.parse(fs.readFileSync(configPath, 'utf8'))?.upstreamLink?.sharedContext === true;
+  } catch (_) { return false; }
+}
+
+const SHARED_CONTEXT_ENABLED = sharedContextEnabled();
+const SHARED_PROPAGATION_ENABLED = SHARED_CONTEXT_ENABLED && llmPropagationEnabled();
+
 // Evaluated after the validators are defined — a top-level const that called a
 // hoisted function would throw at preload time the moment someone converted
 // those declarations to arrow functions, and a throw here would leave fetch
 // completely uninstrumented.
 const UPSTREAM_TRACE_PARTS = (() => {
   try {
-    if (!llmPropagationEnabled()) return null;
+    if (SHARED_CONTEXT_ENABLED || !llmPropagationEnabled()) return null;
     return parseTraceparent(process.env.TRACEPARENT);
   } catch (_) {
     return null;
@@ -404,6 +421,9 @@ function wrapFetch(origFetch) {
     let requestHash = null;
     let clientRequestId = null;
     let llmSpanId = null;
+    let sharedBinding = null;
+    let forwardsLegacyContext = Boolean(UPSTREAM_TRACE_PARTS);
+    const attemptId = crypto.randomUUID();
     try {
       const headers = dumpHeaders(
         init?.headers ?? (input && typeof input === 'object' ? input.headers : null),
@@ -417,20 +437,38 @@ function wrapFetch(origFetch) {
         // Only mint when a record can be written: a parent-id nobody records
         // would point the gateway at a span pilot never emits, which is worse
         // than forwarding the upstream parent verbatim.
-        if (UPSTREAM_TRACE_PARTS) llmSpanId = mintSpanId();
+        if (forwardsLegacyContext && hasSharedUpstreamContextClaim(PILOT_DATA_DIR, sessionId)) {
+          forwardsLegacyContext = false;
+        }
+        if (forwardsLegacyContext) llmSpanId = mintSpanId();
+        if (SHARED_PROPAGATION_ENABLED && sharedRuntime) {
+          const nativeTurnId = headers['x-claude-code-prompt-id'];
+          const store = new sharedRuntime.TraceContextRuntime(PILOT_DATA_DIR);
+          sharedBinding = store.findTurn({ agentType: 'claude-code', sessionId,
+            ...(nativeTurnId ? { turnId: nativeTurnId } : {}) });
+          if (sharedBinding && readHeaderValue(init?.headers ?? input?.headers, 'traceparent') === null) {
+            const operation = store.reserveOperation(sharedBinding, 'llm', clientRequestId || attemptId, attemptId);
+            if (operation) {
+              llmSpanId = operation.spanId;
+              init = { ...(init || {}), headers: sharedRuntime.injectHttpHeaders(
+                sharedRuntime.bindingContext(sharedBinding, llmSpanId), init?.headers ?? input?.headers) };
+            }
+          }
+        }
       }
     } catch (_) {}
 
     // Forward the caller's trace context before the session-id gate below:
     // that gate decides whether *we* can record telemetry, which has no
     // bearing on the gateway's ability to join the trace.
-    ({ input, init } = withUpstreamTraceContext(input, init, llmSpanId));
+    if (forwardsLegacyContext) {
+      ({ input, init } = withUpstreamTraceContext(input, init, llmSpanId));
+    }
 
     if (!sessionId) {
       return origFetch.call(this, input, init);
     }
 
-    const attemptId = crypto.randomUUID();
     const startedUnixNs = BigInt(Date.now()) * 1_000_000n;
     const startedMonoNs = process.hrtime.bigint();
     let attemptWritten = false;
@@ -449,6 +487,7 @@ function wrapFetch(origFetch) {
         duration_ns: Number(durationNs <= BigInt(Number.MAX_SAFE_INTEGER)
           ? durationNs : BigInt(Number.MAX_SAFE_INTEGER)),
         ...(llmSpanId ? { llm_span_id: llmSpanId } : {}),
+        ...(sharedBinding && llmSpanId ? { pilot_binding_id: sharedBinding.bindingId } : {}),
         ...fields,
       });
       attemptWritten = true;
@@ -512,6 +551,7 @@ function wrapFetch(origFetch) {
         ttft_ns: ttftNs,
         system_instructions: systemInstructions,
         ...(llmSpanId ? { llm_span_id: llmSpanId } : {}),
+        ...(sharedBinding && llmSpanId ? { pilot_binding_id: sharedBinding.bindingId } : {}),
       });
       recordWritten = true;
     };

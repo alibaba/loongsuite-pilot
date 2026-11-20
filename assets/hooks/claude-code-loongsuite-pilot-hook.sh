@@ -18,7 +18,7 @@ SUBCOMMAND="${1:-unknown}"
 
 # Only process registered subcommands; early-return for legacy/unregistered ones.
 case "$SUBCOMMAND" in
-  pre-tool-use|stop|stop-failure|subagent-start|subagent-stop)
+  user-prompt-submit|pre-tool-use|stop|stop-failure|subagent-start|subagent-stop)
     ;;
   *)
     printf '%s\n' "$EMPTY_RESULT"
