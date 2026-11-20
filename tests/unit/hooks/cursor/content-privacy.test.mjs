@@ -20,8 +20,12 @@ function configure(agents) {
   const file = env.AGENT_DATA_COLLECTION_CONFIG ? path.join(home, 'policy.json') : path.join(home, '.loongsuite-pilot/config.json');
   fs.writeFileSync(file, JSON.stringify({ agents }));
 }
-function send(name, fields, version, conversation = 'session') {
-  const result = spawnSync(process.execPath, [processor], { env, encoding: 'utf8', timeout: 15000,
+function writeInstallConfig(contents) {
+  fs.mkdirSync(data, { recursive: true });
+  fs.writeFileSync(path.join(data, 'config.json'), contents);
+}
+function send(name, fields, version, conversation = 'session', hookProcessor = processor) {
+  const result = spawnSync(process.execPath, [hookProcessor], { env, encoding: 'utf8', timeout: 15000,
     input: JSON.stringify({ hook_event_name: name, conversation_id: conversation, cursor_version: version, ...fields }) });
   expect(result.status, result.stderr).toBe(0);
   expect(result.stdout.trim()).toBe('{}');
@@ -41,7 +45,10 @@ it.each([
   ['unrecognized', 'unknown', { cursor: { captureMessageContent: true }, 'cursor-cli': { captureMessageContent: false } }],
   ['malformed date', '2026.07.31unexpected', { cursor: { captureMessageContent: false }, 'cursor-cli': { captureMessageContent: true } }],
 ])('keeps %s content out of the active journal and raw diagnostics', (label, version, agents) => {
-  if (label === 'CLI') env.AGENT_DATA_COLLECTION_CONFIG = '~/policy.json';
+  if (label === 'CLI') {
+    writeInstallConfig(JSON.stringify({ agents: { 'cursor-cli': { captureMessageContent: true } } }));
+    env.AGENT_DATA_COLLECTION_CONFIG = '~/policy.json';
+  }
   configure(agents);
   const secret = 'private-content-marker';
   send('beforeSubmitPrompt', { prompt: secret, attachments: [{ name: secret }] }, version);
@@ -63,6 +70,42 @@ it.each([
   expect(history).toContain('"gen_ai.usage.output_tokens":9');
   expect(history).toContain('call-1');
   expect(history).not.toContain(secret);
+});
+
+it('uses the custom installation policy for the journal, diagnostics, and history', () => {
+  configure({ cursor: { captureMessageContent: true } });
+  writeInstallConfig(JSON.stringify({ agents: { cursor: { captureMessageContent: false } } }));
+  send('beforeSubmitPrompt', { prompt: 'custom-install-private' }, '1.7.0');
+  send('afterAgentResponse', { text: 'custom-install-private', output_tokens: 9 }, '1.7.0');
+  expect(journal()).not.toContain('custom-install-private');
+  expect(fs.existsSync(path.join(data, 'logs/cursor/raw'))).toBe(false);
+
+  send('stop', { status: 'completed' }, '1.7.0');
+  expect(readHistory()).toContain('"gen_ai.usage.output_tokens":9');
+  expect(readHistory()).not.toContain('custom-install-private');
+});
+
+it('omits content while the custom installation policy is malformed', () => {
+  configure({ cursor: { captureMessageContent: true } });
+  writeInstallConfig('{');
+  send('beforeSubmitPrompt', { prompt: 'invalid-install-private' }, '1.7.0');
+  expect(journal()).not.toContain('invalid-install-private');
+  expect(fs.existsSync(path.join(data, 'logs/cursor/raw'))).toBe(false);
+});
+
+it('finds the installed custom policy when Cursor does not inherit the installer environment', () => {
+  delete env.LOONGSUITE_PILOT_DATA_DIR;
+  configure({ cursor: { captureMessageContent: true } });
+  writeInstallConfig(JSON.stringify({ agents: { cursor: { captureMessageContent: false } } }));
+  const installedHooks = path.join(data, 'hooks');
+  fs.cpSync(path.dirname(processor), installedHooks, { recursive: true });
+  const installedProcessor = fs.realpathSync(path.join(installedHooks, path.basename(processor)));
+
+  send('beforeSubmitPrompt', { prompt: 'installed-hook-private' }, '1.7.0', 'session', installedProcessor);
+  expect(journal()).toContain('beforeSubmitPrompt');
+  expect(journal()).not.toContain('installed-hook-private');
+  expect(fs.existsSync(path.join(data, 'logs/cursor/raw'))).toBe(false);
+  expect(fs.existsSync(path.join(home, '.loongsuite-pilot/state/cursor'))).toBe(false);
 });
 
 it.each([{}, { cursor: { captureMessageContent: true } }])('preserves enabled capture and requested raw diagnostics', agents => {

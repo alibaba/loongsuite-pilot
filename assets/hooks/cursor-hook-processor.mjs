@@ -26,19 +26,13 @@ import {
   sanitizeObject,
 } from './agent-event-normalizer.mjs';
 import { cursorVariantFromVersion, omitCursorEventContent, toInternalEvent } from './cursor/source-event.mjs';
-import { appendEvent, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
+import { appendEvent, CURSOR_DATA_DIR, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
 import { assembleTurn } from './cursor/react-assembler.mjs';
 import { buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
 } from './shared/resource-context.mjs';
-
-function resolveDataDir() {
-  const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
-  if (configured) return configured;
-  return path.join(os.homedir(), '.loongsuite-pilot');
-}
 
 function localDateString(date) {
   const year = date.getFullYear();
@@ -425,7 +419,7 @@ function filterSkillsForReadInjection(skills, assembledFromTranscript) {
 }
 
 async function main() {
-  const dataDir = resolveDataDir();
+  const dataDir = CURSOR_DATA_DIR;
   const raw = await readStdin();
   if (!raw || raw.trim().length === 0) {
     writeEmptyResponse();
@@ -481,8 +475,8 @@ async function main() {
   }
 
   // Convert to internal event and append to journal
-  // The collector config stays under the user home when only the log directory moves.
-  const runtimeConfig = loadHookRuntimeConfig();
+  // A custom install stores its config here. A log-only override can use the home config.
+  const runtimeConfig = loadHookRuntimeConfig(dataDir, { fallbackToHome: true });
   const eventVariant = cursorVariantFromVersion(payload.cursor_version);
   // Only inspect the open journal when this event would otherwise be allowed
   // and the other Cursor source has a different policy.
@@ -695,7 +689,7 @@ if (
   import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href
 ) {
   main().catch(async err => {
-    await appendErrorJsonl(resolveDataDir(), new Date(), {
+    await appendErrorJsonl(CURSOR_DATA_DIR, new Date(), {
       stage: 'runtime',
       'error.type': 'unhandled_exception',
       'error.message': err instanceof Error ? err.message : String(err),

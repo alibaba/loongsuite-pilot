@@ -12,12 +12,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 function pilotDataDir() {
-  return process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
+  const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
+  if (configured) return configured;
+  // The deployed Hook lives in <dataDir>/hooks even when the agent did not
+  // inherit the environment of the installer or service.
+  const deployedDataDir = fileURLToPath(new URL('../../', import.meta.url));
+  if (fs.existsSync(path.join(deployedDataDir, 'config.json'))) return deployedDataDir;
+  return path.join(os.homedir(), '.loongsuite-pilot');
 }
 
-const JOURNAL_DIR = path.join(pilotDataDir(), 'state', 'cursor');
+export const CURSOR_DATA_DIR = pilotDataDir();
+const JOURNAL_DIR = path.join(CURSOR_DATA_DIR, 'state', 'cursor');
 const JOURNAL_FILE = path.join(JOURNAL_DIR, 'event-journal.jsonl');
 const JOURNAL_LOCK_FILE = path.join(JOURNAL_DIR, 'event-journal.lock');
 const JOURNAL_LOCK_TIMEOUT_MS = 3000;
