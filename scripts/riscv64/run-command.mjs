@@ -2,7 +2,10 @@
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 
-export function runCommand(executable, args, { cwd, env, timeoutMs, logPath, outputLimitBytes = Infinity }) {
+// Keep the console bounded when its reader stalls, while writing the full log.
+const DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024;
+
+export function runCommand(executable, args, { cwd, env, timeoutMs, logPath, outputLimitBytes = DEFAULT_OUTPUT_LIMIT_BYTES }) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('Command timeout must be positive');
   return new Promise(resolve => {
     // Open before spawning: an unwritable log must not leave a detached compiler.

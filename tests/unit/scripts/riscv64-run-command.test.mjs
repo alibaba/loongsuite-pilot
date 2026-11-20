@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { Writable } from 'node:stream';
 import { runCommand } from '../../../scripts/riscv64/run-command.mjs';
 
@@ -55,6 +57,46 @@ it.skipIf(process.platform === 'win32')('bounds the slow log queue while preserv
     expect(peak).toBeLessThan(256 * 1024);
   } finally {
     writer.mockRestore();
+  }
+});
+
+it.skipIf(process.platform === 'win32').each([
+  { label: 'the default', limit: 64 * 1024, options: {} },
+  { label: 'a stricter per-call cap', limit: 16, options: { outputLimitBytes: 16 } },
+])('bounds a stalled console with $label while retaining the complete log', async ({ limit, options }) => {
+  const logPath = path.join(tmp, 'stalled-console.log');
+  const bytesPerStream = 1024 * 1024;
+  const program = `process.stdout.write(Buffer.alloc(${bytesPerStream},65));process.stderr.write(Buffer.alloc(${bytesPerStream},66));`;
+  const moduleUrl = new URL('../../../scripts/riscv64/run-command.mjs', import.meta.url).href;
+  const driver = `
+    import { runCommand } from ${JSON.stringify(moduleUrl)};
+    const result = await runCommand(process.execPath, ['-e', ${JSON.stringify(program)}], {
+      cwd: process.cwd(), env: process.env, timeoutMs: 3000, logPath: ${JSON.stringify(logPath)},
+      ...${JSON.stringify(options)},
+    });
+    process.send(result, () => process.disconnect());
+  `;
+  const runner = spawn(process.execPath, ['--input-type=module', '-e', driver], {
+    cwd: tmp, env: process.env, stdio: ['ignore', 'pipe', 'inherit', 'ipc'],
+  });
+
+  try {
+    // Wait for command completion over IPC before consuming the console pipe.
+    const [result] = await once(runner, 'message', { signal: AbortSignal.timeout(4000) });
+    const closed = once(runner, 'close', { signal: AbortSignal.timeout(4000) });
+    let consoleBytes = 0;
+    runner.stdout.on('data', chunk => { consoleBytes += chunk.length; });
+    expect(await closed).toEqual([0, null]);
+
+    expect(result.exit_code).toBe(0);
+    expect(result.error).toBeUndefined();
+    expect(result.output_truncated).toBe(true);
+    const notice = `\n[pilot-smoke] Further output is saved in ${logPath}\n`;
+    expect(consoleBytes).toBe(limit + Buffer.byteLength(notice));
+    expect(fs.statSync(logPath).size).toBe(2 * bytesPerStream);
+  } finally {
+    runner.stdout.resume();
+    if (runner.exitCode === null && runner.signalCode === null) runner.kill();
   }
 });
 
