@@ -87,6 +87,7 @@ export class InputManager extends EventEmitter {
   private alarmManager: AlarmManager | null = null;
   private userId: string = '';
   private getConfiguredUserId: () => string = () => '';
+  private bindConfiguredTurnUserId?: (entry: AgentActivityEntry) => void;
   private maskConfig: MaskConfig = {
     mode: 'none',
     types: [],
@@ -127,6 +128,10 @@ export class InputManager extends EventEmitter {
 
   setUserIdProvider(provider: () => string): void {
     this.getConfiguredUserId = provider;
+  }
+
+  setConfiguredTurnUserIdBinder(binder: (entry: AgentActivityEntry) => void): void {
+    this.bindConfiguredTurnUserId = binder;
   }
 
   private agentsConfig: AgentsConfig = {};
@@ -513,7 +518,7 @@ export class InputManager extends EventEmitter {
   private applyIdentity(entries: AgentActivityEntry[]): void {
     const configuredUserId = this.getConfiguredUserId();
     for (const entry of entries) {
-      applyInvocationIdentity(entry, configuredUserId, this.userId);
+      applyInvocationIdentity(entry, configuredUserId, this.userId, this.bindConfiguredTurnUserId);
     }
   }
 

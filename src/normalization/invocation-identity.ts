@@ -37,6 +37,7 @@ export function applyInvocationIdentity(
   entry: AgentActivityEntry,
   configuredUserId: string,
   fallbackUserId: string,
+  bindConfiguredUserId?: (entry: AgentActivityEntry) => void,
 ): void {
   const sessionId = consumeIdentityValue(entry, INVOCATION_SESSION_ID_FIELD);
   const userId = consumeIdentityValue(entry, INVOCATION_USER_ID_FIELD);
@@ -49,6 +50,7 @@ export function applyInvocationIdentity(
     entry['user.id'] = userId;
   } else if (configuredUserId) {
     entry['user.id'] = configuredUserId;
+    bindConfiguredUserId?.(entry);
   } else if (!entry['user.id'] && fallbackUserId) {
     entry['user.id'] = fallbackUserId;
   }

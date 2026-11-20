@@ -6,7 +6,12 @@ import { createHash } from 'node:crypto';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
 import { CodexTurnJournal } from '../../src/flushers/codex-turn-journal.js';
+import { InputManager } from '../../src/core/input-manager.js';
+import { createUserIdProvider, USER_ID_REFRESH_INTERVAL_MS } from '../../src/core/config-loader.js';
+import { MultiFlusher } from '../../src/flushers/multi-flusher.js';
+import { INVOCATION_USER_ID_FIELD } from '../../src/normalization/invocation-identity.js';
 import type { AgentActivityEntry } from '../../src/types/index.js';
+import { MockFlusher } from '../helpers/mock-flusher.js';
 
 afterEach(() => vi.useRealTimers());
 
@@ -93,6 +98,62 @@ it('restores a spilled turn after restart before accepting its final continuatio
     expect(new Set(f.llms().map(s => s.spanContext().spanId)).size).toBe(100);
   } finally { await flusher.shutdown(); await fs.rm(f.dir, { recursive: true, force: true }); }
 }, 30_000);
+
+it.each(['codex', 'hermes', 'openclaw'])('keeps the configured ID of a %s turn through refresh, restart, and acknowledgement', async agent => {
+  const f = await fixture();
+  const configPath = path.join(f.dir, 'config.json');
+  const rows = calls(agent, 2);
+  const close = { ...terminal(rows), 'agent.codex.turn_status': 'completed' } as AgentActivityEntry;
+  const output = new MockFlusher();
+  let active = f.create();
+  let clock = 0;
+  vi.stubEnv('LOONGSUITE_PILOT_USER_ID', '');
+  const attach = async (userId: string) => {
+    await active.flusher.start();
+    const input = new InputManager();
+    input.setUserIdProvider(createUserIdProvider({ initialUserId: userId, configPath, now: () => clock }));
+    const { journal, flusher } = active;
+    input.setConfiguredTurnUserIdBinder(entry => journal.bindConfiguredUserId(entry));
+    input.setFlusher(new MultiFlusher([output, flusher]));
+    return input;
+  };
+  try {
+    await fs.writeFile(configPath, '{"userId":"original"}');
+    let input = await attach('original');
+    await input.flushPreparedEntries(rows.slice(0, 2).map(row => ({ ...row })));
+    await fs.writeFile(configPath, '{"userId":"corrected"}');
+    clock = USER_ID_REFRESH_INTERVAL_MS;
+    await input.flushPreparedEntries(rows.slice(2).map(row => ({ ...row })));
+    expect(output.batchCalls.flat().map(row => row['user.id'])).toEqual(Array(4).fill('original'));
+    expect(f.llms()).toHaveLength(0);
+
+    await active.flusher.shutdown();
+    active = f.create();
+    input = await attach('corrected');
+    await input.flushPreparedEntries([{ ...close }]);
+    expect(f.llms()).toHaveLength(2);
+    expect(await active.journal.isAcknowledged({ ...close, 'user.id': 'original' })).toBe(true);
+    expect(await active.journal.isAcknowledged({ ...close, 'user.id': 'corrected' })).toBe(false);
+
+    await active.flusher.shutdown();
+    active = f.create();
+    input = await attach('corrected');
+    await input.flushPreparedEntries([{ ...close }]);
+    expect(output.batchCalls.at(-1)?.[0]['user.id']).toBe('original');
+    expect(f.llms()).toHaveLength(2);
+
+    await input.flushPreparedEntries([{ ...close, [INVOCATION_USER_ID_FIELD]: 'separate-tenant' }]);
+    expect(output.batchCalls.at(-1)?.[0]['user.id']).toBe('separate-tenant');
+    const newTurn = { ...rows[0], 'event.id': 'new-turn-request', 'gen_ai.turn.id': 'new-turn' };
+    await input.flushPreparedEntries([newTurn]);
+    expect(output.batchCalls.at(-1)?.[0]['user.id']).toBe('corrected');
+    expect(JSON.stringify(output.batchCalls)).not.toContain('configuredOwner');
+  } finally {
+    vi.unstubAllEnvs();
+    await active.flusher.shutdown();
+    await fs.rm(f.dir, { recursive: true, force: true });
+  }
+});
 
 it('retains all turns when aggregate payload spills before any per-turn limit', async () => {
   const f = await fixture(); const { flusher } = f.create();

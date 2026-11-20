@@ -1086,16 +1086,18 @@ export class Orchestrator extends EventEmitter {
       if (otlpTraceCfg?.enabled && otlpTraceCfg.endpoints.length > 0) {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
         const { CodexTurnJournal } = await import('../flushers/codex-turn-journal.js');
+        const journal = new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
+          ['codex', 'hermes', 'openclaw']);
         const r = new OtlpTraceFlusher(
           { ...otlpTraceCfg, dataDir: this.dataDir },
           this.globalAttributesProvider,
           undefined,
-          new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
-            ['codex', 'hermes', 'openclaw']),
+          journal,
           entries => this.inputManager!.prepareRestoredEntries(entries),
           sourceToken => this.inputManager!.confirmHermesSourceDrained(sourceToken),
         );
         await r.start();
+        this.inputManager.setConfiguredTurnUserIdBinder(entry => journal.bindConfiguredUserId(entry));
         flushers.push(r);
       }
     } catch (err) {
