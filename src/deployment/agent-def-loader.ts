@@ -7,6 +7,7 @@ import { resolveHome } from '../utils/fs-utils.js';
 import { resolveDoubaoWorkPaths } from '../utils/doubao-work-paths.js';
 import { createLogger } from '../utils/logger.js';
 import { resolvePiCodingAgentDir, resolveGrokHome, resolveDshHome } from './env-agent-dirs.js';
+import { minimaxCodeProfileDir } from '../inputs/minimax-code-session/minimax-code-session-source.js';
 
 const logger = createLogger('AgentDefLoader');
 
@@ -88,6 +89,9 @@ export class AgentDefLoader {
       try {
         const raw = await fs.readFile(filePath, 'utf-8');
         const parsed = JSON.parse(raw) as Record<string, unknown>;
+        // The official standalone CLI profile is verified on POSIX. Windows
+        // Desktop uses a distinct product surface.
+        if (parsed.id === 'minimax-code' && (process.platform === 'win32' || !minimaxCodeProfileDir())) continue;
         const resolved = this.resolveVariables(parsed) as unknown as AgentDefinition;
 
         if (!this.validate(resolved, filePath)) continue;
@@ -205,6 +209,7 @@ export class AgentDefLoader {
       .replace(/\$DOUBAO_APP_DATA/g, () => resolveDoubaoWorkPaths('doubao').userDataRoot ?? '$DOUBAO_APP_DATA')
       .replace(/\$HERMES_CLI/g, hermesCli)
       .replace(/\$HERMES_HOME/g, hermesHome)
+      .replace(/\$MINIMAX_CODE_PROFILE/g, () => minimaxCodeProfileDir() ?? '$MINIMAX_CODE_PROFILE')
       .replace(/\$PI_CODING_AGENT_DIR/g, piCodingAgentDir)
       .replace(/\$GROK_HOME/g, grokHome)
       .replace(/\$DSH_HOME/g, dshHome);

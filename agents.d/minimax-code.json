@@ -1,0 +1,17 @@
+{
+  "id": "minimax-code",
+  "displayName": "MiniMax Code",
+  "deployMode": "directory-plugin",
+  "detection": {
+    "paths": ["$MINIMAX_CODE_PROFILE/config.yaml"],
+    "commands": ["mcode"]
+  },
+  "directoryPlugin": {
+    "sourceDir": "$PILOT_DIR/assets/plugins/minimax-code/loongsuite-pilot",
+    "targetDir": "$MINIMAX_CODE_PROFILE/plugins/loongsuite-pilot"
+  },
+  "input": {
+    "type": "session-file-polling",
+    "logDir": "$MINIMAX_CODE_PROFILE/v2/sessions"
+  }
+}

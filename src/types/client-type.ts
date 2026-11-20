@@ -47,6 +47,7 @@ export enum ClientType {
   CopilotCli = 'copilot',
   OpenCode = 'opencode',
   MimoCode = 'mimo-code',
+  MiniMaxCode = 'minimax-code',
   Hermes = 'hermes',
   OpenClaw = 'openclaw',
   Dsh = 'dsh',

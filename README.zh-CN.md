@@ -59,6 +59,7 @@ Pilot 主要帮助回答这些问题：
 | Grok Build | Hook + 本地 session 日志 | Yes | Yes | Yes | Yes |
 | Hermes Agent | 原生目录插件 | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / session 轮询 | Yes | Yes | No | Yes |
+| [MiniMax Code CLI（macOS/Linux）](docs/zh-CN/agents.md#minimax-code-cli) | 原生插件 + session 轮询 | Yes | Yes | Yes | Yes |
 | MiMo Code | 插件注入 | Yes | Yes | Yes | Yes |
 | OpenClaw | 插件注入 | Yes | Yes | Yes | Yes |
 | OpenCode | 插件注入 | Yes | Yes | Yes | Yes |

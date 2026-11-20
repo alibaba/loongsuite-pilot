@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "name": "loongsuite-pilot",
+  "version": "1.0.0",
+  "displayName": "LoongSuite Pilot",
+  "description": "Records local turn and tool boundaries for Pilot",
+  "author": "LoongSuite Pilot",
+  "category": "Code",
+  "icon": "icon.png",
+  "exampleQueries": [],
+  "apps": [],
+  "mcpServers": [],
+  "skills": [],
+  "hooks": [
+    "hooks/pilot.json"
+  ]
+}

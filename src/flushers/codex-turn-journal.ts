@@ -86,7 +86,7 @@ export class CodexTurnJournal {
       && value['event.name'] !== 'gen_ai.agent.invoke' && value['event.name'] !== 'gen_ai.agent.result';
   }
 
-  append(entries: AgentActivityEntry[]): Promise<void> {
+  append(entries: AgentActivityEntry[], synchronize = false): Promise<void> {
     return this.enqueue(async () => {
       const acknowledged = await this.loadAcknowledgements();
       const groups = new Map<string, AgentActivityEntry[]>();
@@ -127,7 +127,17 @@ export class CodexTurnJournal {
         }
         try {
           const data = group.map(entry => JSON.stringify(entry)).join('\n') + '\n';
-          await fs.appendFile(file, data, { mode: 0o600 });
+          if (synchronize) {
+            const handle = await fs.open(file, 'a', 0o600);
+            try {
+              await handle.writeFile(data);
+              await handle.sync();
+            } finally {
+              await handle.close();
+            }
+          } else {
+            await fs.appendFile(file, data, { mode: 0o600 });
+          }
           usage.bytes += Buffer.byteLength(data);
           await fs.chmod(file, 0o600);
         } catch (error) {
@@ -136,6 +146,11 @@ export class CodexTurnJournal {
           this.initialized.delete(key);
           throw error;
         }
+      }
+      if (synchronize) {
+        // A successful handoff also covers newly created journal filenames.
+        const directory = await fs.open(this.dir, 'r');
+        try { await directory.sync(); } finally { await directory.close(); }
       }
     });
   }

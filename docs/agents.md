@@ -4,6 +4,34 @@ English | [简体中文](zh-CN/agents.md)
 
 Use this guide to choose which AI coding agents Pilot should collect from and configure collection and masking.
 
+## MiniMax Code CLI
+
+Pilot supports the official `mcode` CLI on macOS and Linux. Version 0.7.9 was
+verified on macOS. Pilot installs a native plugin into the configured local
+profile and joins its turn and tool notifications with the durable session
+under that profile's `v2/sessions` directory. A native turn completion receipt
+allows Pilot to collect the whole turn even if a Stop hook asks the CLI to
+continue. The profile defaults to
+`~/.minimax`. Use the same absolute `MINIMAX_DATA_DIR` or `MAVIS_DATA_DIR` for
+Pilot and `mcode` when using a custom profile.
+
+The plugin records only session, turn, tool, timestamp and workspace metadata.
+Message content follows the usual Pilot workspace and agent policies
+(`agents.minimax-code.captureMessageContent`). Pilot collects completed turns
+observed by the plugin, including turns recorded while Pilot is stopped.
+Disabling the agent revokes the installed plugin and any copies held by the CLI's
+Hook cache. Each Pilot installation activates one MiniMax profile. Switching
+profiles revokes the prior profile's cached hooks after the new plugin is
+installed. An already-running CLI process may need a restart to load the new
+installation.
+
+Pilot checkpoints an observed turn after its JSONL output is synchronized, its
+HTTP and SLS batches are acknowledged, and its OTLP events are accepted by the
+local replay journal, for whichever outputs are configured. Pending OTLP turns
+replay on collector restart. Event IDs are stable across retries. If a process
+exits before its source checkpoint is persisted, a receiver can see a repeated
+event and can deduplicate by event ID.
+
 ## Hermes TTFT
 
 For Hermes OpenAI-compatible streaming chat completions, Pilot records

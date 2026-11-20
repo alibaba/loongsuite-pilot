@@ -32,7 +32,7 @@ import { removeMessageContentFields, stripAgentMessageContent } from '../normali
 import { normalizeGuardrailFields } from '../normalization/guardrail-fields.js';
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
-import { BaseFlusher } from './base-flusher.js';
+import { BaseFlusher, type BatchDelivery, type BatchDeliveryOptions } from './base-flusher.js';
 import { SpanEnricherRunner } from './span-enricher.js';
 import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
@@ -1018,7 +1018,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Preserve known fields when a retained delegated prefix is delivered
     // again. Audit records never enter these buffers or their journal.
     const eventId = entry['gen_ai.agent.type'] === 'copilot'
-      || (durable && (agentType === 'hermes' || agentType === 'openclaw'))
+      || (durable && (agentType === 'hermes' || agentType === 'openclaw' || agentType === 'minimax-code'))
       ? (entry['event.id'] as string | undefined) : undefined;
     let residentDelta = residentSize;
     if (buf.spilledRecords && durable) {
@@ -1078,6 +1078,22 @@ export class OtlpTraceFlusher extends BaseFlusher {
       await this.appendBatch(entries, logicalBytes);
     } finally { this.batchDepth--; }
     await this.finishBatch();
+  }
+
+  override createBatchDelivery(
+    entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal,
+    options?: BatchDeliveryOptions,
+  ): BatchDelivery {
+    if (!options?.requireAcceptance) return super.createBatchDelivery(entries, logicalBytes, signal);
+    return async (attemptSignal = signal) => {
+      attemptSignal?.throwIfAborted();
+      if (entries.some(entry => !this.codexJournal?.accepts(entry))) {
+        throw new Error('OTLP requires an available journal for acknowledged delivery');
+      }
+      // Journal acceptance survives collector failure and exporter rejection.
+      // Only confirmed exports remove recoverable turns from the journal.
+      await this.sendBatch(entries, logicalBytes);
+    };
   }
 
   private async appendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
@@ -1245,7 +1261,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
         await this.replayCodexJournal(this.codexJournal.loadBatches(codexTurnJournalGroupKey(entry)));
       }
-      await this.codexJournal.append(codex.filter(entry => !this.flushedTurnKeys.has(this.resolveGroupKey(entry).key)));
+      const pending = codex.filter(entry => !this.flushedTurnKeys.has(this.resolveGroupKey(entry).key));
+      await this.codexJournal.append(pending, pending.some(entry => entry['gen_ai.agent.type'] === 'minimax-code'));
     } catch (cause) {
       const error = new Error(`Codex pending trace could not be persisted: ${String(cause)}`, { cause });
       error.name = 'CodexTurnJournalError';
@@ -1304,6 +1321,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
       return entry['event.name'] === 'other' && entry['gen_ai.turn.end'] === true;
     }
     if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.source'] === 'hybrid-v2') return entry['gen_ai.turn.end'] === true;
+    // MiniMax Stop continuations can contain multiple model stop reasons.
+    if (entry['gen_ai.agent.type'] === 'minimax-code') return entry['gen_ai.turn.end'] === true;
     // V2 step completion (including a failed/retried model request) is not
     // execution completion. Preserve V1's existing finish-reason behavior.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'opencode'

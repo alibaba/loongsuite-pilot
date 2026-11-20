@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "sessionId": "mvs_c40044a2533248be8605dae21b03f306",
+  "createdAtMs": 1795216940577,
+  "updatedAtMs": 1795216940577,
+  "source": "local-runtime",
+  "layout": "v2-final-dated-session",
+  "paths": {
+    "messages": "messages.jsonl"
+  }
+}

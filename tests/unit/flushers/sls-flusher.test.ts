@@ -234,6 +234,41 @@ describe('SlsFlusher', () => {
       expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
     });
 
+    it('retries only unacknowledged MiniMax chunks and preserves endpoint policy', async () => {
+      flusher = new SlsFlusher(makeConfig({
+        batchMaxSize: 1,
+        retry: { retryMaxAttempts: 1 },
+        endpoints: [
+          { name: 'good', endpoint: 'https://example.invalid', project: 'p', logstore: 'good', kind: 'agentActivity', mode: 'ak' },
+          { name: 'bad', endpoint: 'https://example.invalid', project: 'p', logstore: 'bad', kind: 'agentTelemetry', mode: 'ak', redact: true },
+        ],
+      }), '/tmp/data');
+      let reject = true;
+      const sent: string[] = [];
+      const attempts: string[] = [];
+      mockPostLogStoreLogs.mockImplementation(async (_project, endpoint, data) => {
+        const content = data.logs[0].content;
+        const key = `${endpoint}:${content['event.id']}`;
+        attempts.push(key);
+        if (endpoint === 'bad') expect(content).not.toHaveProperty('gen_ai.tool.call.arguments');
+        if (key === 'bad:minimax-2' && reject) throw new Error('synthetic transport rejection');
+        sent.push(key);
+      });
+      const delivery = flusher.createBatchDelivery([1, 2].map(index => buildTestEntry({
+        'event.id': `minimax-${index}`, 'gen_ai.agent.type': 'minimax-code',
+        'gen_ai.tool.call.arguments': { prompt: 'fixture body' },
+      })), undefined, undefined, { requireAcceptance: true });
+      await expect(delivery()).rejects.toThrow('SLS did not acknowledge');
+      expect(sent.sort()).toEqual(['bad:minimax-1', 'good:minimax-1', 'good:minimax-2']);
+      reject = false;
+      await delivery();
+      expect(sent.sort()).toEqual(['bad:minimax-1', 'bad:minimax-2', 'good:minimax-1', 'good:minimax-2']);
+      expect(attempts.filter(value => value === 'bad:minimax-2')).toHaveLength(2);
+      await flusher.flush();
+      expect(attempts).toHaveLength(5);
+      mockPostLogStoreLogs.mockResolvedValue(undefined);
+    });
+
     it('enqueues per endpoint and flushes grouped by project/logstore', async () => {
       const entry = buildTestEntry();
       await flusher.send(entry);
