@@ -65,7 +65,8 @@ test('honors a configured workspace and rejects unproven or excluded Trae source
   allowed.setWorkspacePolicy(policy);
   const entries = await collectAndQueue(allowed);
   expect(entries).toHaveLength(2);
-  expect(entries.every(entry => entry['workspace.path'] === project)).toBe(true);
+  const canonicalProject = await realpath(project);
+  expect(entries.every(entry => entry['workspace.path'] === canonicalProject)).toBe(true);
 
   const { input: excludedSource } = await newInput(trajectoryFile, external);
   excludedSource.setWorkspacePolicy(new WorkspacePolicy([project]));
@@ -261,8 +262,9 @@ test('keeps the canonical trajectory source out of HTTP and JSONL event output',
     expect(httpRows).toHaveLength(2);
     const lines = (await readFile(path.join(outputDir, 'trae-agent-all.jsonl'), 'utf8')).trim().split('\n');
     expect(lines).toHaveLength(2);
+    const canonicalProject = await realpath(project);
     for (const row of [...httpRows, ...lines.map(line => JSON.parse(line))]) {
-      expect(row['workspace.path']).toBe(project);
+      expect(row['workspace.path']).toBe(canonicalProject);
     }
     for (const payload of [...received, ...lines]) {
       expect(payload).not.toContain('agent.trajectory.source.path');
