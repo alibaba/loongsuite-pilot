@@ -21,7 +21,8 @@ use tokio::sync::Notify;
 
 use crate::checkpoints::{InputState, InputStatePatch, StateStore};
 use crate::normalization::{
-    build_agent_activity_entry, enrich_canonical_entry_with_git, is_reserved_key,
+    build_agent_activity_entry, build_standard_with_canonical_payloads,
+    enrich_canonical_entry_with_git, is_canonical_payload_key, is_reserved_key,
     normalize_event_name,
 };
 use crate::types::{AgentActivityEntry, ClientType, CollectionMethod};
@@ -1171,7 +1172,7 @@ async fn collect_hook_file(
                 continue;
             }
         };
-        let Some(record) = parsed.as_object().cloned() else {
+        let Value::Object(record) = parsed else {
             continue;
         };
         match (inner.transform)(record).await {
@@ -1693,9 +1694,12 @@ pub fn build_canonical_hook_entry(
         if !is_canonical_key(key) {
             continue;
         }
-        if let Some(value) = json_value_from(raw) {
-            opts.insert(key.clone(), value);
-        }
+        let value = if is_canonical_payload_key(key) {
+            Value::Null
+        } else {
+            raw.clone()
+        };
+        opts.insert(key.clone(), value);
     }
     let agent_type = non_empty_string(record.get("gen_ai.agent.type"))
         .unwrap_or_else(|| fallback_agent_type.to_string());
@@ -1721,7 +1725,7 @@ pub fn build_canonical_hook_entry(
     } else {
         opts.insert("attributes".to_string(), Value::Object(Map::new()));
     }
-    let mut entry = build_agent_activity_entry(&Value::Object(opts));
+    let mut entry = build_standard_with_canonical_payloads(&opts, Some(record));
     if options.preserve_safe_custom_top_level_fields {
         attach_safe_custom_top_level_fields(&mut entry, record);
     }
