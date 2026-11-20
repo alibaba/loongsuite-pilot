@@ -1727,7 +1727,8 @@ retire_qoderwork_runtime_overrides() {
     local env_name current_runtime
     for env_name in QW_QODER_WORKER_RUNTIME_PATH QODER_WORKER_RUNTIME_PATH; do
         current_runtime=$(launchctl getenv "$env_name" 2>/dev/null || true)
-        if [ "$current_runtime" = "$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs" ] || printf '%s' "$current_runtime" | grep -q 'loongsuite-pilot'; then
+        if [ "$current_runtime" = "$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs" ] \
+            || [ "$current_runtime" = "$HOME/.loongsuite-pilot/hooks/qoderwork-runtime-wrapper.mjs" ]; then
             launchctl unsetenv "$env_name"
             msg "    已清理 $env_name" "    Cleaned up $env_name"
         fi

@@ -1069,6 +1069,8 @@ describe('Grok Build uninstall smoke', () => {
 });
 
 describe('Windows QoderWork-family runtime override lifecycle', () => {
+  const powerShell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
+  const hasPowerShell = spawnSync(powerShell, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0']).status === 0;
   const runtimeSection = ps1.slice(
     ps1.indexOf('function Get-PilotRuntimeOverride'),
     ps1.indexOf('function Install-Command'),
@@ -1107,9 +1109,39 @@ describe('Windows QoderWork-family runtime override lifecycle', () => {
     const retire = psFunction('Retire-PilotRuntimeOverride');
     expect(retire).toContain('$current = Get-PilotRuntimeOverride -Name $Name');
     expect(retire).toContain('if (-not $current) { return }');
-    expect(retire).toContain("if (($current -ieq $WrapperPath) -or ($current -like '*loongsuite-pilot*')) {");
+    expect(retire).toContain('Join-Path $DEFAULT_PILOT_DIR "hooks\\qoderwork-runtime-wrapper.mjs"');
+    expect(retire).toContain('if (($current -ieq $WrapperPath) -or ($current -ieq $legacyWrapperPath)) {');
     expect(retire).toContain('Remove-PilotRuntimeOverride -Name $Name');
     expect(retire).toContain('if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }');
+  });
+
+  it.skipIf(!hasPowerShell)('retains lookalike user overrides and cleans the default legacy path under constrained language', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-retire-runtime-'));
+    try {
+      const script = join(root, 'retire.ps1');
+      writeFileSync(script, `\uFEFF
+$ErrorActionPreference = 'Stop'
+$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'
+$DataDir = Join-Path $env:USERPROFILE 'current data'
+$DEFAULT_PILOT_DIR = Join-Path $env:USERPROFILE '.loongsuite-pilot'
+$env:QW_QODER_WORKER_RUNTIME_PATH = Join-Path $DEFAULT_PILOT_DIR 'hooks\\qoderwork-runtime-wrapper.mjs'
+$env:QODER_WORKER_RUNTIME_PATH = Join-Path $env:USERPROFILE 'loongsuite-pilot-adapter\\hooks\\qoderwork-runtime-wrapper.mjs'
+$script:removed = @()
+function Get-PilotRuntimeOverride($Name) { (Get-Item "Env:$Name").Value }
+function Remove-PilotRuntimeOverride($Name) { $script:removed += $Name; return $false }
+function Msg($Chinese, $English) { Write-Output $English }
+${psFunction('Retire-PilotRuntimeOverride')}
+${psFunction('Retire-QoderworkRuntimeOverrides')}
+Retire-QoderworkRuntimeOverrides
+Write-Output ("removed=" + ($script:removed -join ','))
+`);
+      const run = spawnSync(powerShell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script], {
+        encoding: 'utf8', env: { ...process.env, USERPROFILE: root },
+      });
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.stdout.trim().split(/\r?\n/).at(-1)).toBe('removed=QW_QODER_WORKER_RUNTIME_PATH');
+      expect(run.stdout).toContain('sign out and back in');
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it('uses CLM-safe registry deletion and a guarded null Explorer broadcast, never setting a runtime path', () => {
