@@ -128,6 +128,13 @@ export class CodexTurnJournal {
           this.initialized.add(key);
         }
         try {
+          if (group[0]['gen_ai.agent.type'] === 'kimi-code-cli') {
+            // Kimi supplies a whole turn, but its final model response can
+            // precede the final tool records. A restart must not treat a
+            // durable prefix as complete before those records have landed.
+            group.sort((left, right) => Number(left['gen_ai.turn.end'] === true)
+              - Number(right['gen_ai.turn.end'] === true));
+          }
           const data = group.map(entry => JSON.stringify(entry)).join('\n') + '\n';
           await fs.appendFile(file, data, { mode: 0o600 });
           usage.bytes += Buffer.byteLength(data);

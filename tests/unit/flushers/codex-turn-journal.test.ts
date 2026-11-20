@@ -83,6 +83,27 @@ describe('CodexTurnJournal', () => {
   const filename = (dir: string, record: AgentActivityEntry) =>
     path.join(dir, `codex-turn-${codexTurnJournalGroupKey(record)}.jsonl`);
 
+  it('retains Kimi tool records before the terminal response so a torn append cannot finish the turn', async () => {
+    const agents = ['kimi-code-cli'];
+    const request = entry('request', { 'gen_ai.agent.type': 'kimi-code-cli' });
+    const response = entry('response', {
+      ...request, 'event.id': 'response', 'event.name': 'llm.response', 'gen_ai.turn.end': true,
+    });
+    const call = entry('call', { ...request, 'event.id': 'call', 'event.name': 'tool.call' });
+    const result = entry('result', { ...request, 'event.id': 'result', 'event.name': 'tool.result' });
+    const turn = [request, response, call, result];
+    const journal = new CodexTurnJournal(directory, 100, agents);
+    await journal.append(turn);
+    const file = filename(directory, request);
+    const records = (await fs.readFile(file, 'utf8')).trimEnd().split('\n');
+    await fs.writeFile(file, records.slice(0, 2).join('\n') + '\n' + records[2].slice(0, 25));
+
+    const reopened = new CodexTurnJournal(directory, 100, agents);
+    expect(await readJournal(reopened)).toEqual([[request, call]]);
+    await reopened.append(turn);
+    expect(await readJournal(reopened)).toEqual([[request, call, result, response]]);
+  });
+
   it('keeps Codex and Hermes replay available when stale Kimi receipt cleanup fails', async () => {
     const agents = ['codex', 'hermes', 'kimi-code-cli'];
     const kimi = entry('kimi-acked', { 'gen_ai.agent.type': 'kimi-code-cli' });
