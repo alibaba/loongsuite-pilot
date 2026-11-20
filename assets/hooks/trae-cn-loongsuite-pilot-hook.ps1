@@ -39,7 +39,7 @@ function Log-Error {
     } catch {}
 }
 
-if (-not (Test-Path $Processor)) {
+if (-not (Test-Path -LiteralPath $Processor)) {
     Write-Error "[trae-cn-hook] processor not found: $Processor"
     Log-Error "missing_processor" "hook processor not found: $Processor"
     Write-Output $EMPTY_RESULT

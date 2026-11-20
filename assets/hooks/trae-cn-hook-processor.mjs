@@ -1131,29 +1131,42 @@ function writeOtlpDebugRecords(records) {
   })();
   const filename = `${AGENT_ID}-${today}.jsonl`;
   const filepath = path.join(dir, filename);
-  // Read existing spans so we can merge across emit calls.
-  let existingRecords = [];
-  if (fs.existsSync(filepath)) {
+  const result = withSyncFileLock(filepath + '.lock', 2_000, SESSION_LOCK_STALE_MS, () => {
+    // Read existing spans so we can merge across emit calls.
+    let existingRecords = [];
+    if (fs.existsSync(filepath)) {
+      try {
+        const text = fs.readFileSync(filepath, 'utf-8');
+        for (const line of text.split(/\r?\n/)) {
+          if (!line.trim()) continue;
+          try {
+            const obj = JSON.parse(line);
+            // Reuse buildOtlpSpansFromRecords which expects event-log
+            // records — the file already contains OTLP spans, so we
+            // unwrap attributes + metadata back into record form for merge.
+            if (obj && obj.spanId && obj.traceId) {
+              existingRecords.push(otlpSpanToRecord(obj));
+            }
+          } catch { /* skip malformed */ }
+        }
+      } catch { /* ignore */ }
+    }
+    const allRecords = existingRecords.concat(records);
+    const spans = buildOtlpSpansFromRecords(allRecords);
+    const lines = spans.map((s) => JSON.stringify(s));
+    const temporary = filepath + '.tmp';
     try {
-      const text = fs.readFileSync(filepath, 'utf-8');
-      for (const line of text.split(/\r?\n/)) {
-        if (!line.trim()) continue;
-        try {
-          const obj = JSON.parse(line);
-          // Reuse buildOtlpSpansFromRecords which expects event-log
-          // records — the file already contains OTLP spans, so we
-          // unwrap attributes + metadata back into record form for merge.
-          if (obj && obj.spanId && obj.traceId) {
-            existingRecords.push(otlpSpanToRecord(obj));
-          }
-        } catch { /* skip malformed */ }
-      }
-    } catch { /* ignore */ }
+      fs.rmSync(temporary, { force: true });
+      fs.writeFileSync(temporary, lines.join('\n') + '\n', { encoding: 'utf-8', flag: 'wx', mode: 0o600 });
+      fs.renameSync(temporary, filepath);
+    } finally {
+      try { fs.rmSync(temporary, { force: true }); } catch { /* best-effort */ }
+    }
+  });
+  if (!result.acquired) {
+    logHookError({ agentId: AGENT_ID, stage: 'otlp_debug', errorType: 'debug_lock_unavailable',
+      errorMessage: 'Could not acquire debug file lock; skipping diagnostic output' });
   }
-  const allRecords = existingRecords.concat(records);
-  const spans = buildOtlpSpansFromRecords(allRecords);
-  const lines = spans.map((s) => JSON.stringify(s));
-  fs.writeFileSync(filepath, lines.join('\n') + '\n', 'utf-8');
 }
 
 // Inverse of buildOtlpSpansFromRecords — flatten an OTLP span back into the

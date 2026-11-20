@@ -93,6 +93,20 @@ function readOtlpDebugSpans() {
 }
 
 describe('trae-cn hook processor', () => {
+  test('keeps debug spans when multiple sessions write concurrently', async () => {
+    const sessions = Array.from({ length: 16 }, (_, index) => 'concurrent-debug-' + index);
+    await Promise.all(sessions.map(session => new Promise((resolve, reject) => {
+      const env = { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
+      const child = execFile(process.execPath, [PROCESSOR, 'user-prompt-submit'], { env, timeout: 10_000 },
+        (error, stdout) => error ? reject(error) : resolve(stdout));
+      child.stdin.end(JSON.stringify({ session_id: session, prompt: 'synthetic prompt' }));
+    })));
+    const requests = readEmittedJsonl().filter(record => record['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(sessions.length);
+    const debugSpanIds = new Set(readOtlpDebugSpans().map(span => span.spanId));
+    for (const request of requests) expect(debugSpanIds.has(request.span_id), request['gen_ai.session.id']).toBe(true);
+  });
+
   test('captureMessageContent false keeps conversation content off disk throughout a tool turn', () => {
     const markers = ['private-prompt-616', 'private-args-616', 'private-result-616', 'private-answer-616'];
     const session = 'privacy-test';
