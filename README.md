@@ -167,7 +167,7 @@ Link each Agent turn to the application span that started it. The [upstream trac
 
 | Setting | Values | Default |
 | ------- | ------ | ------- |
-| `LOONGSUITE_PILOT_UPSTREAM_LINK` (env) · `upstreamLink.enabled` (config.json) | `true` / `1` to enable; unset, `false`, or `0` to disable | disabled |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK` (env) · `upstreamLink.enabled` (config.json) | `true` or `1` enables, `false` or `0` disables. An unset environment variable uses the file setting. | disabled |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS` (env) · `upstreamLink.propagateToTools` (config.json) | propagate trace context and optional resource attributes to supported CLI tool calls | disabled |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM` (env) · `upstreamLink.propagateToLlm` (config.json) | forward trace context to the LLM gateway as a `traceparent` request header (Claude Code) | disabled |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING` (env) · `upstreamLink.generateTraceWhenMissing` (config.json) | generate and propagate a per-turn local trace context when no valid upstream context is available | disabled |

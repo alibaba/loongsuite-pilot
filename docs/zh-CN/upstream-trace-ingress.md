@@ -15,7 +15,28 @@ Web 请求 Span
 
 ## 准备 Pilot
 
-在运行 Agent 的机器上[安装包含逐轮入站透传能力的 Pilot](installation.md)，并部署该版本的 Hook 或插件。保留 Agent 的会话记录。在默认配置文件 `~/.loongsuite-pilot/config.json` 中合并下列配置。按 [Trace 输出](trace-output.md) 配置 Pilot 的 OTLP 上报，确保 Web 探针和 Pilot 上报到同一个 Trace 后端。
+在运行 Agent 的机器上[安装包含逐轮入站透传能力的 Pilot](installation.md)，并部署该版本的 Hook 或插件。保留 Agent 会话记录，按 [Trace 输出](trace-output.md) 配置 OTLP，让 Web 探针和 Pilot 上报到同一个 Trace 后端。
+
+### 用环境变量开启
+
+给 **Pilot 采集器进程**设置 `LOONGSUITE_PILOT_UPSTREAM_LINK=1`。容器部署可以在采集器的环境变量中配置。直接以前台方式启动采集器时，可运行以下命令。
+
+```sh
+LOONGSUITE_PILOT_UPSTREAM_LINK=1 loongsuite-pilot run
+```
+
+如果 Pilot 由 systemd 用户服务管理，可用以下命令临时开启并重启服务。
+
+```sh
+systemctl --user set-environment LOONGSUITE_PILOT_UPSTREAM_LINK=1
+systemctl --user restart loongsuite-pilot.service
+```
+
+临时变量随该用户的 systemd 管理器退出而丢失。长期运行的 systemd 服务可以在采集器单元的 `[Service]` 段配置 `Environment=LOONGSUITE_PILOT_UPSTREAM_LINK=1`，再重启该服务。环境变量取值为 `1` 或 `true` 时开启，为 `0` 或 `false` 时关闭，优先于 `config.json`。[systemd 服务环境](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Environment=)
+
+### 用配置文件开启
+
+也可在默认配置文件 `~/.loongsuite-pilot/config.json` 中合并下列设置，再执行 `loongsuite-pilot restart`。
 
 ```json
 {
@@ -23,14 +44,18 @@ Web 请求 Span
 }
 ```
 
-重启 Pilot 并检查 Hook 安装状态。
+### 安装 Hook
+
+Linux 上可用系统级方式给 Codex 和 Grok Build 安装原生 Hook。新安装时可以给安装器传 `--scope system`。已有 Pilot 时，由能写入对应系统配置的初始化过程执行以下命令。
 
 ```sh
-loongsuite-pilot restart
+loongsuite-pilot hook install --scope system --agents codex,grok-build
 loongsuite-pilot hook status --json
 ```
 
-例如，Codex 缺少用户级 Hook 时，可以执行 `loongsuite-pilot hook install --agents codex --scope user`。其他 Agent 和部署方式见 [Agent 配置](agents.md)。
+系统级安装适用于同一 Linux UID 下的多个 Agent 身份目录。Hook 与采集器需能访问同一个 Pilot 数据目录。Pi 和 DeepSeek Harness 的共享方式由各自的配置根目录决定。
+
+按当前用户安装 Codex Hook 可执行 `loongsuite-pilot hook install --agents codex --scope user`。其他 Agent 和部署方式见 [Agent 配置](agents.md)。
 
 使用自定义数据目录时，Agent 侧的 `LOONGSUITE_PILOT_DATA_DIR` 或绑定参数 `dataDir` 要与采集器使用的目录一致。在处理 Web 请求时，从当前 OpenTelemetry Span 注入 W3C carrier。
 

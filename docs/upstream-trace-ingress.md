@@ -4,7 +4,28 @@ In the application, inject the current OpenTelemetry Context with the W3C propag
 
 ## Set up Pilot
 
-[Install a Pilot build with per-turn upstream linking](installation.md) on the Agent host. Deploy the matching Hook or plugin and keep the Agent's session records available to Pilot. Add this setting to the existing `~/.loongsuite-pilot/config.json`. Configure [OTLP trace output](trace-output.md) so the application's spans and Pilot spans go to the same trace backend.
+[Install a Pilot build with per-turn upstream linking](installation.md) on the Agent host. Deploy the matching Hook or plugin and keep the Agent's session records available to Pilot. Configure [OTLP trace output](trace-output.md) so the application and Pilot export spans to the same trace backend.
+
+### Enable with an environment variable
+
+Set `LOONGSUITE_PILOT_UPSTREAM_LINK=1` in the **Pilot collector process**. For a container deployment, add it to the collector's environment. To launch the collector in the foreground, run the following command.
+
+```sh
+LOONGSUITE_PILOT_UPSTREAM_LINK=1 loongsuite-pilot run
+```
+
+With a systemd user service, these commands enable the feature for the current user manager and restart the collector.
+
+```sh
+systemctl --user set-environment LOONGSUITE_PILOT_UPSTREAM_LINK=1
+systemctl --user restart loongsuite-pilot.service
+```
+
+For a persistent setting, configure `Environment=LOONGSUITE_PILOT_UPSTREAM_LINK=1` in the collector unit's `[Service]` section and restart that unit. The environment variable overrides `config.json`. Use `1` or `true` to enable linking and `0` or `false` to disable it. [systemd service environment](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Environment=)
+
+### Enable in the config file
+
+You can also add this setting to the existing `~/.loongsuite-pilot/config.json` and run `loongsuite-pilot restart`.
 
 ```json
 {
@@ -12,14 +33,18 @@ In the application, inject the current OpenTelemetry Context with the W3C propag
 }
 ```
 
-Restart Pilot and check the Hook installation.
+### Install the Hooks
+
+On Linux, use system scope for native Codex and Grok Build Hooks. Pass `--scope system` to the installer for a new deployment. For an existing Pilot installation, run these commands during initialization with permission to write the relevant system configuration.
 
 ```sh
-loongsuite-pilot restart
+loongsuite-pilot hook install --scope system --agents codex,grok-build
 loongsuite-pilot hook status --json
 ```
 
-If Codex needs its user Hook installed, run `loongsuite-pilot hook install --agents codex --scope user`. See [Agent Configuration](agents.md) for other Agents and deployment modes.
+System scope covers multiple Agent identity homes under one Linux UID. The Hooks and collector need access to the same Pilot data directory. Pi and DeepSeek Harness follow their shared configuration roots.
+
+To install Codex Hooks for the current user, run `loongsuite-pilot hook install --agents codex --scope user`. See [Agent Configuration](agents.md) for other Agents and deployment modes.
 
 If you use a custom Pilot data directory, set `LOONGSUITE_PILOT_DATA_DIR` on the Agent process or pass `dataDir` to the binding helper. Use the same directory for the collector.
 

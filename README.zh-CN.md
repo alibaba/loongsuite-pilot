@@ -149,7 +149,7 @@ loongsuite-pilot info
 
 | 配置项 | 取值 | 默认 |
 | ------ | ---- | ---- |
-| `LOONGSUITE_PILOT_UPSTREAM_LINK`(环境变量)· `upstreamLink.enabled`(config.json) | `true` / `1` 开启;不设、`false` 或 `0` 关闭 | 关闭 |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK`（环境变量）· `upstreamLink.enabled`（config.json） | `true` 或 `1` 开启，`false` 或 `0` 关闭。未设置环境变量时读取文件配置。 | 关闭 |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS`(环境变量)· `upstreamLink.propagateToTools`(config.json) | 将 Trace 上下文和可选资源属性传给受支持的下游 CLI 工具调用 | 关闭 |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM`(环境变量)· `upstreamLink.propagateToLlm`(config.json) | 以 `traceparent` 请求头把 Trace 上下文转发给 LLM 网关(Claude Code) | 关闭 |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING`(环境变量)· `upstreamLink.generateTraceWhenMissing`(config.json) | 没有有效上游上下文时，为每个 turn 生成本地 Trace 上下文并继续传播 | 关闭 |
