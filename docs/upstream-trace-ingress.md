@@ -8,7 +8,19 @@ In the application, inject the current OpenTelemetry Context with the W3C propag
 
 ### Enable with an environment variable
 
-Set `LOONGSUITE_PILOT_UPSTREAM_LINK=1` in the **Pilot collector process**. For a container deployment, add it to the collector's environment. To launch the collector in the foreground, run the following command.
+Set `LOONGSUITE_PILOT_UPSTREAM_LINK=1` in the **Pilot collector process**.
+
+**Kubernetes.** Add this to `spec.template.spec.containers[].env` for the container running the collector. If the webhook's preload starts Pilot in the application container, set it on that container. Use an injected Pilot init image that includes per-turn upstream linking and roll out new Pods. To use system Hooks, follow the scope setting in the [container onboarding guide](zh-CN/container-onboarding.md).
+
+```yaml
+env:
+  - name: LOONGSUITE_PILOT_UPSTREAM_LINK
+    value: "1"
+```
+
+This setting enables linking. The Web service supplies the current request's `TRACEPARENT`, optional `TRACESTATE`, and request UUID on each call.
+
+To launch the collector in the foreground, run the following command.
 
 ```sh
 LOONGSUITE_PILOT_UPSTREAM_LINK=1 loongsuite-pilot run

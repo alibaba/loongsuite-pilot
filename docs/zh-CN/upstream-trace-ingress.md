@@ -19,7 +19,19 @@ Web 请求 Span
 
 ### 用环境变量开启
 
-给 **Pilot 采集器进程**设置 `LOONGSUITE_PILOT_UPSTREAM_LINK=1`。容器部署可以在采集器的环境变量中配置。直接以前台方式启动采集器时，可运行以下命令。
+给 **Pilot 采集器进程**设置 `LOONGSUITE_PILOT_UPSTREAM_LINK=1`。
+
+**Kubernetes**　在 Deployment 的 `spec.template.spec.containers[].env` 中，给运行采集器的容器添加以下设置。Webhook 通过 preload 在业务容器中启动 Pilot 时，就加在该业务容器的 `env` 中。注入配置选用包含逐轮入站能力的 Pilot init 镜像，然后滚动重建 Pod。使用系统级 Hook 时，按[容器快速接入](container-onboarding.md#多个身份目录)设置安装范围。
+
+```yaml
+env:
+  - name: LOONGSUITE_PILOT_UPSTREAM_LINK
+    value: "1"
+```
+
+Pod 配置负责开启关联。每次调用的 `TRACEPARENT`、可选的 `TRACESTATE` 和请求 UUID 由 Web 服务生成并随本次调用传入。
+
+直接以前台方式启动采集器时，可运行以下命令。
 
 ```sh
 LOONGSUITE_PILOT_UPSTREAM_LINK=1 loongsuite-pilot run
