@@ -74,7 +74,9 @@ describe('request correlation with exact native turn ids', () => {
     await linker().stamp([b]);
     expect(a['memory.user_id']).toBe('U001');
     expect(b['memory.user_id']).toBe('U001');
-    expect(fs.readdirSync(root).filter(file => file.endsWith('.done'))).toHaveLength(2);
+    const claims = fs.readdirSync(root).filter(file => file.endsWith('.done'));
+    expect(claims.filter(file => file.includes('.turn-context-'))).toHaveLength(2);
+    expect(claims.filter(file => file.includes('.turn-owner-'))).toHaveLength(2);
   });
 
   it('never lets prompt FIFO consume an exact record for a different turn', async () => {

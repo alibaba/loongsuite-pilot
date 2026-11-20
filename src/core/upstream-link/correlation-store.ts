@@ -32,15 +32,25 @@ interface SessionRecord {
   traceparent: string;
 }
 
+interface RequestOwner {
+  index: number;
+  identity: string;
+}
+
 interface SessionState {
+  dev: number;
+  ino: number;
+  ctimeMs: number;
   mtimeMs: number;
   sizeBytes: number;
   turns: TurnRecord[];
   sessions: SessionRecord[];
   /** Indices already consumed (consume-once), preserved across file re-reads. */
   consumedTurns: Set<number>;
-  /** Native turn -> record, allowing checkpoint replay to recover its own claim. */
+  /** Native turn -> record, retained only while that position's identity matches. */
   resolvedTurns: Map<string, number>;
+  /** A failed FIFO claim still belongs to the turn that reached it first. */
+  pendingTurns: Map<number, string>;
   sessionConsumed: boolean;
   /** contentHash -> ascending turn indices, for O(1) exact-match lookup. */
   hashIndex: Map<string, number[]>;
@@ -150,40 +160,113 @@ export class CorrelationStore {
   private claimTurnContext(
     sessionId: string, index: number, record: TurnRecord, turnId?: string,
   ): { claimed: boolean; turnId?: string } {
+    if (this.options.attributesEnabled && turnId) {
+      const prior = this.readRequestOwner(this.requestOwnerPath(sessionId, turnId));
+      if (prior !== undefined && (prior?.index !== index || prior.identity !== this.requestIdentity(record))) {
+        return { claimed: false };
+      }
+    }
     // Include record identity so replacing a file does not make a new context
     // collide with an old claim at the same append-only position. No prompt
     // text or upstream credentials are copied into the marker or its name.
     const identity = this.identities.get(record) ?? { index, record };
     const digest = createHash('sha256').update(JSON.stringify(identity.record)).digest('hex');
     const marker = path.join(this.dir, `${safeName(sessionId)}.turn-context-${identity.index}-${digest}.done`);
-    const temporary = path.join(this.dir, `.turn-claim-${randomUUID()}.tmp`);
+    let owner = turnId;
     try {
-      // Publish a complete owner atomically. A collector crash between create
-      // and write must not leave an empty claim that loses a replayed turn.
-      fs.writeFileSync(temporary, JSON.stringify({ turnId }), { flag: 'wx', mode: 0o600 });
-      fs.linkSync(temporary, marker);
-      return { claimed: true, turnId };
+      this.publishClaim(marker, { turnId });
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') {
         try {
-          const owner = JSON.parse(fs.readFileSync(marker, 'utf8')).turnId;
-          return { claimed: !!turnId && owner === turnId, turnId: typeof owner === 'string' ? owner : undefined };
+          const previous = JSON.parse(fs.readFileSync(marker, 'utf8')).turnId;
+          owner = typeof previous === 'string' && previous ? previous : undefined;
         } catch {
           return { claimed: false };
         }
+        if (!turnId || owner !== turnId) return { claimed: false, turnId: owner };
+      } else {
+        logger.warn('failed to persist turn context consumption', {
+          sessionId,
+          index,
+          error: String(err),
+        });
+        // Legacy trace-only linking keeps its existing fail-open behavior.
+        return this.options.attributesEnabled ? { claimed: false } : { claimed: true, turnId };
       }
-      logger.warn('failed to persist turn context consumption', {
-        sessionId, index, error: String(err),
-      });
-      // Collection remains fail-open, but business attribution requires durable
-      // ownership: otherwise a restart could attach this user's values to the
-      // next request with the same prompt.
-      return this.options.attributesEnabled && record.attributes
-        ? { claimed: false }
-        : { claimed: true, turnId };
+    }
+    if (this.options.attributesEnabled && turnId && !this.persistRequestOwner(sessionId, turnId, index, record)) {
+      return { claimed: false };
+    }
+    return { claimed: true, turnId: owner };
+  }
+
+  private publishClaim(marker: string, owner: object): void {
+    const temporary = path.join(this.dir, `.turn-claim-${randomUUID()}.tmp`);
+    try {
+      // A crash must never leave an incomplete claim at the final path.
+      fs.writeFileSync(temporary, JSON.stringify(owner), { flag: 'wx', mode: 0o600 });
+      fs.linkSync(temporary, marker);
     } finally {
       try { fs.unlinkSync(temporary); } catch { /* absent or left for retention */ }
     }
+  }
+
+  private requestOwnerPath(sessionId: string, turnId: string): string {
+    const key = createHash('sha256').update(turnId).digest('hex');
+    return path.join(this.dir, `${safeName(sessionId)}.turn-owner-${key}.done`);
+  }
+
+  private readRequestOwner(marker: string): RequestOwner | undefined | null {
+    try {
+      const owner = JSON.parse(fs.readFileSync(marker, 'utf8'));
+      if (Number.isSafeInteger(owner?.index) && owner.index >= 0
+        && typeof owner.identity === 'string' && /^[a-f0-9]{64}$/.test(owner.identity)) return owner;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return undefined;
+    }
+    // Unreadable ownership is not evidence that the turn is unclaimed.
+    return null;
+  }
+
+  private requestIdentity(record: TurnRecord): string {
+    return createHash('sha256').update(JSON.stringify([this.identities.get(record)?.index, exactIdentity(record)])).digest('hex');
+  }
+
+  private persistRequestOwner(sessionId: string, turnId: string, index: number, record: TurnRecord): boolean {
+    const marker = this.requestOwnerPath(sessionId, turnId);
+    const identity = this.requestIdentity(record);
+    const previous = this.readRequestOwner(marker);
+    if (previous !== undefined) return previous?.index === index && previous.identity === identity;
+    try {
+      this.publishClaim(marker, { index, identity });
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') {
+        const owner = this.readRequestOwner(marker);
+        return owner?.index === index && owner.identity === identity;
+      }
+      logger.warn('failed to persist request turn ownership', { sessionId, index, error: String(err) });
+      return false;
+    }
+  }
+
+  private claimFifoTurn(
+    sessionId: string, state: SessionState, index: number, turnId?: string,
+  ): 'matched' | 'other' | 'unavailable' {
+    const record = state.turns[index];
+    const owner = state.pendingTurns.get(index) ?? turnId;
+    const claim = this.claimTurnContext(sessionId, index, record, owner);
+    if (!claim.claimed && !claim.turnId && this.options.attributesEnabled) {
+      if (owner) state.pendingTurns.set(index, owner);
+      return 'unavailable';
+    }
+    state.pendingTurns.delete(index);
+    state.consumedTurns.add(index);
+    if (claim.turnId && (claim.claimed || !this.options.attributesEnabled
+      || this.persistRequestOwner(sessionId, claim.turnId, index, record))) {
+      state.resolvedTurns.set(claim.turnId, index);
+    }
+    return claim.claimed && owner === turnId ? 'matched' : 'other';
   }
 
   private load(sessionId: string): SessionState | null {
@@ -198,7 +281,8 @@ export class CorrelationStore {
     const existing = this.states.get(sessionId);
     // Consecutive appends can share an mtime on filesystems with coarse clocks.
     // Size must also match before reusing the parsed append-only records.
-    if (existing && existing.mtimeMs === stat.mtimeMs && existing.sizeBytes === stat.size) {
+    if (existing && existing.dev === stat.dev && existing.ino === stat.ino && existing.ctimeMs === stat.ctimeMs
+      && existing.mtimeMs === stat.mtimeMs && existing.sizeBytes === stat.size) {
       existing.lastAccessMs = Date.now();
       return existing;
     }
@@ -291,16 +375,25 @@ export class CorrelationStore {
       return existing ?? null;
     }
 
+    const retainedIndex = (index: number): boolean => {
+      const previous = existing?.turns[index];
+      const current = turns[index];
+      return !!previous && !!current && this.identities.get(previous)?.index === this.identities.get(current)?.index
+        && exactIdentity(previous) === exactIdentity(current);
+    };
     const state: SessionState = {
+      dev: stat.dev,
+      ino: stat.ino,
+      ctimeMs: stat.ctimeMs,
       mtimeMs: stat.mtimeMs,
       sizeBytes: stat.size,
       turns,
       sessions,
-      consumedTurns: existing?.consumedTurns ?? new Set<number>(),
-      resolvedTurns: existing?.resolvedTurns ?? new Map<string, number>(),
+      consumedTurns: new Set(existing ? [...existing.consumedTurns].filter(retainedIndex) : []),
+      resolvedTurns: new Map(existing ? [...existing.resolvedTurns].filter(([, index]) => retainedIndex(index)) : []),
+      pendingTurns: new Map(existing ? [...existing.pendingTurns].filter(([index]) => retainedIndex(index)) : []),
       sessionConsumed: existing?.sessionConsumed ?? this.isSessionConsumedOnDisk(sessionId),
-      // Rebuilt on every (re)read; indices are stable (append-only file), and
-      // cursors re-derive from consumedTurns on first use, so a reset is safe.
+      // Cursors re-derive from the consumed prefix after each refresh.
       hashIndex: buildHashIndex(turns),
       hashCursor: new Map<string, number>(),
       turnIndex: buildTurnIndex(turns),
@@ -338,7 +431,7 @@ export class CorrelationStore {
   private resolveContext(sessionId: string, collectedText: string, turnId: string | undefined,
     collectedHash: string | undefined, attributesEnabled: boolean, traceEnabled: boolean): TurnContext | null {
     const state = this.load(sessionId);
-    if (!state || state.turns.length === 0) return null;
+    if (!state) return null;
     const project = (record: TurnRecord): TurnContext | null => {
       const context: TurnContext = {
         ...(traceEnabled && record.traceparent !== undefined ? { traceparent: record.traceparent } : {}),
@@ -349,6 +442,21 @@ export class CorrelationStore {
       };
       return Object.keys(context).length ? context : null;
     };
+    const resolved = turnId ? state.resolvedTurns.get(turnId) : undefined;
+    if (resolved !== undefined) return project(state.turns[resolved]);
+    if (this.options.attributesEnabled && turnId) {
+      // Separate the durable selector from its source line. A replay whose
+      // old line has been replaced must not take the current FIFO head.
+      const owner = this.readRequestOwner(this.requestOwnerPath(sessionId, turnId));
+      if (owner === null) return null;
+      if (owner !== undefined) {
+        const record = state.turns[owner.index];
+        if (!record || this.requestIdentity(record) !== owner.identity) return null;
+        state.consumedTurns.add(owner.index);
+        state.resolvedTurns.set(turnId, owner.index);
+        return project(record);
+      }
+    }
     const exact = turnId ? state.turnIndex.get(turnId) : undefined;
     if (exact?.length) {
       const first = state.turns[exact[0]];
@@ -367,8 +475,6 @@ export class CorrelationStore {
       state.resolvedTurns.set(turnId!, exact[0]);
       return context;
     }
-    const resolved = turnId ? state.resolvedTurns.get(turnId) : undefined;
-    if (resolved !== undefined && state.turns[resolved]) return project(state.turns[resolved]);
 
     // Exact path: advance the hash bucket cursor past already-consumed entries
     // (a bucket entry may have been consumed via the prefix fallback), then take
@@ -383,10 +489,9 @@ export class CorrelationStore {
         if (state.consumedTurns.has(idx)) continue;
         const context = project(state.turns[idx]);
         if (!context) continue;
-        state.consumedTurns.add(idx);
-        const claim = this.claimTurnContext(sessionId, idx, state.turns[idx], turnId);
-        if (claim.turnId) state.resolvedTurns.set(claim.turnId, idx);
-        if (!claim.claimed) continue;
+        const claim = this.claimFifoTurn(sessionId, state, idx, turnId);
+        if (claim === 'unavailable') return null;
+        if (claim === 'other') continue;
         state.hashCursor.set(hash, c);
         return context;
       }
@@ -403,11 +508,9 @@ export class CorrelationStore {
       const context = project(t);
       if (!context) continue;
       if (t.contentPrefix !== undefined && t.contentPrefix.length > 0 && collectedText.startsWith(t.contentPrefix)) {
-        state.consumedTurns.add(i);
-        const claim = this.claimTurnContext(sessionId, i, t, turnId);
-        if (claim.turnId) state.resolvedTurns.set(claim.turnId, i);
-        if (!claim.claimed) continue;
-        return context;
+        const claim = this.claimFifoTurn(sessionId, state, i, turnId);
+        if (claim === 'unavailable') return null;
+        if (claim === 'matched') return context;
       }
     }
     return null;

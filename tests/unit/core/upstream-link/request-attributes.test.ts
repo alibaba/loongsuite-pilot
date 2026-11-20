@@ -272,6 +272,66 @@ describe('request-scoped correlation attributes', () => {
     } finally { failingClaim.mockRestore(); syncBuiltinESMExports(); }
   });
 
+  it.each([
+    ['hash', 'record'],
+    ['prefix', 'record'],
+    ['hash', 'owner'],
+  ])('keeps later %s matches out of a turn whose %s claim is unavailable', async (match, stage) => {
+    const selector = match === 'hash' ? {} : { contentHash: undefined, contentPrefix: 'same' };
+    append('s1', { ...selector, attributes: { 'memory.user_id': 'U001' } });
+    append('s1', { ...selector, attributes: { 'memory.user_id': 'U002' } });
+    const active = linker();
+    const first = input('s1', 't1');
+    const later = input('s1', 't2');
+    const realLink = fsDefault.linkSync;
+    const failingClaim = vi.spyOn(fsDefault, 'linkSync').mockImplementation((source, destination) => {
+      const blocked = stage === 'record' ? '.turn-context-attributes-0-' : '.turn-owner-';
+      if (String(destination).includes(blocked)) {
+        throw Object.assign(new Error('synthetic first claim permission failure'), { code: 'EACCES' });
+      }
+      return realLink(source, destination);
+    });
+    syncBuiltinESMExports();
+    try {
+      await active.stamp([first], { cacheMisses: false });
+      await active.stamp([later], { cacheMisses: false });
+      expect(first['memory.user_id']).toBeUndefined();
+      expect(later['memory.user_id']).toBeUndefined();
+    } finally { failingClaim.mockRestore(); syncBuiltinESMExports(); }
+
+    // If the later turn retries first after recovery, the earlier record
+    // still belongs to the turn that originally reached it.
+    await active.stamp([later]);
+    await active.stamp([first]);
+    expect(later['memory.user_id']).toBe('U002');
+    expect(first['memory.user_id']).toBe('U001');
+    const replay = [input('s1', 't2'), input('s1', 't1')];
+    await linker().stamp(replay);
+    expect(replay.map(entry => entry['memory.user_id'])).toEqual(['U002', 'U001']);
+  });
+
+  it.each(['replacement', 'rewrite'])('does not reassign an existing turn across a same-size file %s', mode => {
+    const file = path.join(dir, 's1.jsonl');
+    const timestamp = new Date('2026-01-01T00:00:00Z');
+    append('s1', { attributes: { 'memory.user_id': 'U001' } });
+    fs.utimesSync(file, timestamp, timestamp);
+    const original = fs.statSync(file);
+    const store = new CorrelationStore(dir, { attributesEnabled: true, traceEnabled: false });
+    expect(store.resolveTurnContext('s1', 'same prompt', 't1')?.attributes?.['memory.user_id']).toBe('U001');
+    if (mode === 'replacement') fs.renameSync(file, path.join(dir, 'previous.jsonl'));
+    else fs.truncateSync(file, 0);
+    append('s1', { attributes: { 'memory.user_id': 'U002' } });
+    fs.utimesSync(file, timestamp, timestamp);
+    expect(fs.statSync(file).size).toBe(original.size);
+    expect(fs.statSync(file).mtimeMs).toBe(original.mtimeMs);
+
+    expect(store.resolveTurnContext('s1', 'same prompt', 't1')).toBeNull();
+    const restarted = new CorrelationStore(dir, { attributesEnabled: true, traceEnabled: false });
+    expect(restarted.resolveTurnContext('s1', 'same prompt', 't1')).toBeNull();
+    expect(restarted.resolveTurnContext('s1', 'same prompt', 't2')?.attributes?.['memory.user_id']).toBe('U002');
+    expect(store.resolveTurnContext('s1', 'same prompt', 't1')).toBeNull();
+  });
+
   it('preserves a native delegated parent and does not consume another request context', async () => {
     append('child', { traceparent: TRACEPARENT, attributes: { 'memory.user_id': 'wrong-owner' } });
     const active = linker(true);
