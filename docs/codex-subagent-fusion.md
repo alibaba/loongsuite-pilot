@@ -1,4 +1,45 @@
-# Codex subagent trace fusion
+# Codex subagent work contexts and historical fusion
+
+> The fusion state machine below describes the historical implementation before independent child turns.
+> The target design is [子 Agent 数据模型与采集设计](zh-CN/subagent-data-model.md):
+> preserve child session/turn identity, attach through trace context, and correlate
+> audit work through invocation IDs. The source now uses independent child turns;
+> see [implementation and verification](zh-CN/codex-subagent-verification.md) for reproducible checks and evidence boundaries.
+
+## Current source behavior
+
+Each native Codex thread keeps its own session, turn and step IDs. A recoverable
+delegation descriptor records the immediate parent, native tool call, actual
+reserved tool span, trace, invocation and child-work evidence. Child turns
+convert and export independently under that tool; parent completion never seals
+an unfinished child or stretches the parent tool interval. A missing or
+ambiguous attachment keeps an independent root, and already-emitted trace
+identity is never rewritten by a later link.
+
+Parent `gen_ai.agent.invoke`/`gen_ai.agent.result` logs and child
+`gen_ai.agent.parent.invocation.id` describe work, including new work in reused
+sessions. Tool acceptance is not an Agent result. The legacy four short event
+names remain supported alongside the six standard names without duplicate
+spans or usage. Codex uses a dedicated conversion boundary; other Agents retain
+their existing adapters.
+
+The input checkpoint retains native turn emission state and delegation binding;
+global input state retains bounded delegation/result identity. Old
+`pendingFusion`/`pendingSubagent` checkpoints are read for independent recovery,
+not to restart a parent barrier. Historical data is not automatically repaired.
+With OTLP enabled, a pending-turn journal retains the full canonical prefix
+before source checkpoints advance. Unfinished turns survive exit and eviction;
+completed turns record export acknowledgements before pending data is removed.
+The latest 10,000 acknowledgements suppress source replay; network delivery
+remains at least once. Codex SLS/HTTP log delivery also waits for network success
+before input checkpoint advancement; a failure holds the shared checkpoint until
+the output is repaired and the collector restarts. See the implementation guide
+for storage and output failure recovery.
+
+## Historical implementation (before independent child turns)
+
+All present-tense statements below describe the old fusion path, not the current
+source or its runtime acceptance status.
 
 Codex depth-one subagent rollouts are formally fused into the parent trace.
 The linker still exposes lower-confidence matches for diagnostics, but those

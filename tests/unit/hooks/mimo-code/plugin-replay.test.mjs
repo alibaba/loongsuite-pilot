@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+vi.mock('../../../../assets/plugins/shared/raw-jsonl-writer.mjs', () => ({
+  appendRawJsonl: (file, data) => fs.appendFileSync(file, data),
+}));
 import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 
 const __dirname_test = path.dirname(fileURLToPath(import.meta.url));
@@ -81,6 +84,20 @@ describe('MiMo Code plugin — end-to-end fixture replay', () => {
       await hooks.event({ event: e });
     }
     expect(capture.length).toBeGreaterThan(0);
+  });
+
+  it('emits a stable namespaced cwd and adopts the per-session message path', async () => {
+    for (const e of events) {
+      await hooks.event({ event: e });
+    }
+    const records = capture.map((c) => parseRecord(c.data));
+    const llmRecords = records.filter((record) =>
+      record['event.name'] === 'llm.request' || record['event.name'] === 'llm.response'
+    );
+
+    expect(records.every((record) => typeof record['agent.mimo-code.cwd'] === 'string')).toBe(true);
+    expect(llmRecords.length).toBeGreaterThan(0);
+    expect(llmRecords.every((record) => record['agent.mimo-code.cwd'] === '/home/admin/mimo-fixtures/proj2')).toBe(true);
   });
 
   it('builds a 5-layer span tree: session > turn > step > {llm, tool}', async () => {
@@ -214,6 +231,42 @@ describe('MiMo Code plugin — end-to-end fixture replay', () => {
     const userMsg = inputMsgs.find((m) => m.role === 'user');
     expect(userMsg).toBeTruthy();
     expect(userMsg.parts[0].content).toContain('List py files');
+  });
+
+  it.each(['custom-path', 'bom'])('omits message and tool bodies with %s config', async (kind) => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-mimo-policy-'));
+    const previous = process.env.LOONGSUITE_PILOT_DATA_DIR;
+    const previousConfig = process.env.AGENT_DATA_COLLECTION_CONFIG;
+    const configPath = path.join(dataDir, kind === 'custom-path' ? 'custom.json' : 'config.json');
+    fs.writeFileSync(configPath, (kind === 'bom' ? '\uFEFF' : '') + JSON.stringify({
+      agents: { 'mimo-code': { captureMessageContent: false } },
+    }));
+    process.env.LOONGSUITE_PILOT_DATA_DIR = dataDir;
+    process.env.AGENT_DATA_COLLECTION_CONFIG = configPath;
+    try {
+      const records = [];
+      const configuredPlugin = await loadPlugin(records);
+      const configuredHooks = await configuredPlugin.server(
+        { sessionID: 'test', cwd: os.tmpdir() }, {},
+      );
+      for (const event of events) await configuredHooks.event({ event });
+      const parsed = records.map(({ data }) => parseRecord(data));
+      expect(parsed.filter(record => record['event.name'] === 'llm.request')).toHaveLength(5);
+      expect(parsed.filter(record => record['event.name'] === 'tool.call')).toHaveLength(4);
+      for (const record of parsed) {
+        for (const field of ['gen_ai.input.messages', 'gen_ai.input.messages_delta',
+          'gen_ai.output.messages', 'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result',
+          'gen_ai.system_instructions', 'error.message']) {
+          expect(record).not.toHaveProperty(field);
+        }
+      }
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
+      else process.env.LOONGSUITE_PILOT_DATA_DIR = previous;
+      if (previousConfig === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+      else process.env.AGENT_DATA_COLLECTION_CONFIG = previousConfig;
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 
   it('preserves the first user message in later converted LLM spans', async () => {

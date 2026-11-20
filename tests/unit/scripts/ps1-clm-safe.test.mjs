@@ -54,6 +54,18 @@ const ALLOWED_STATIC_ACCESS = new Set([
   '[Environment]::SetEnvironmentVariable',        // (c) PATH broadcast on install
   '[datetime]::MinValue',                         // (b) core type; scripts/loongsuite-pilot.ps1
   '[TimeSpan]::Zero',                             // (b) core type; scripts/loongsuite-pilot.ps1
+  // (c) UTF-8 bump for both console directions at script load, in try/catch. The catch
+  // is a no-op on purpose: the fallback is 5.1's ASCII $OutputEncoding / ANSI stdout
+  // decoding, which is why the config payloads are staged through a UTF-8 file rather
+  // than piped -- see tests/unit/scripts/ps1-json-encoding.test.mjs.
+  '[Console]::OutputEncoding',
+  '[System.Text.Encoding]::UTF8',
+  // (c) Test-PilotElevated, in try/catch. GetCurrent() is a static *method* call and so
+  // is genuinely CLM-forbidden; the catch returns $false, which only costs the elevated
+  // install warning -- see the pilot-elevation-warning block. Administrator is an enum
+  // field read, i.e. (a) as well.
+  '[Security.Principal.WindowsIdentity]::GetCurrent',
+  '[Security.Principal.WindowsBuiltInRole]::Administrator',
 ]);
 
 // Shapes that are never acceptable, whatever the file. `.PSObject` is included
@@ -136,6 +148,25 @@ describe('the CLM-safe rewrites stay in place', () => {
     expect(cli).toMatch(/Select-Object -Property \* -ExcludeProperty 'hermes-agent'/);
     // -Property * is required alongside -ExcludeProperty on PowerShell 5.1.
     expect(cli).not.toMatch(/Select-Object -ExcludeProperty/);
+  });
+
+  it('the public installer confirm path does not touch LP_SLS_API_KEY', () => {
+    const installer = codeOf(readFileSync('deploy/installer-opensource.ps1', 'utf-8'));
+    const confirm = installer.slice(
+      installer.indexOf('function Confirm-ConfigOverwrite {'),
+      installer.indexOf('function Write-Config {'),
+    );
+    expect(confirm).not.toMatch(/LP_SLS_API_KEY/);
+    expect(confirm).not.toMatch(/\[Environment\]::GetEnvironmentVariable\(/);
+    expect(confirm).not.toMatch(/\[Environment\]::SetEnvironmentVariable\(/);
+  });
+
+  it('the public installer checks bound parameters without ContainsKey', () => {
+    // installer-opensource.ps1 is still in KNOWN_CLM_UNSAFE for older violations,
+    // so pin this top-level check separately: it runs for every subcommand.
+    const installer = codeOf(readFileSync('deploy/installer-opensource.ps1', 'utf-8'));
+    expect(installer).toContain("$PSBoundParameters.Keys -contains 'DashboardPort'");
+    expect(installer).not.toMatch(/\$PSBoundParameters\.ContainsKey\(/);
   });
 
   it('the CLI wrapper validates an absolute path with a regex, not IsPathRooted', () => {

@@ -125,6 +125,8 @@ Use an array when the same events should be sent to multiple SLS destinations:
 }
 ```
 
+The `install` command does not edit an existing `sls` array. It stops with an error; change its destinations and keys in `config.json` manually. The `upgrade` command preserves this file.
+
 ## Environment Variables
 
 | Variable | Description |
@@ -133,10 +135,12 @@ Use an array when the same events should be sent to multiple SLS destinations:
 | `LOONGSUITE_SLS_PROJECT` | SLS project. |
 | `LOONGSUITE_SLS_LOGSTORE` | SLS logstore. |
 | `LOONGSUITE_SLS_MODE` | `webtracking`, `ak`, or `apiKey`. |
-| `LOONGSUITE_SLS_API_KEY` | API Key for API Key mode. |
 | `LOONGSUITE_SLS_ACCESS_KEY_ID` | Access Key ID for AK mode. |
 | `LOONGSUITE_SLS_ACCESS_KEY_SECRET` | Access Key Secret for AK mode. |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | Set `false` or `0` to disable SLS reporting. |
+| `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS` | Set `false` or `0` to omit `__mac__` and `__sn__`. When unset, `hostIdentityTags` is used. |
+
+API Key mode reads `apiKey` from `config.sls`; it has no environment variable override.
 
 ## Verify SLS Output
 
@@ -153,18 +157,18 @@ ls ~/.loongsuite-pilot/logs/sls-failed-logs/
 
 These JSONL records contain the endpoint, error summary, batch count, and batch byte estimate. They do **not** contain the failed batch payload, message content, request headers, or credentials, so they cannot be used to replay failed uploads. Files rotate by local date and at 10 MiB; the directory is limited to 50 MiB and also follows `retention.slsFailedDays` (7 days by default).
 
-## Send Failure Classification, Cooldown & Circuit Breaker
+`FLUSH_SEND_ALARM` messages include the transport, normalized error category, structured error code, HTTP status, and actual attempt count. Network failures also include a one-line error summary from the error and its `cause` chain, with common credential patterns redacted and the summary limited to 512 UTF-8 bytes. HTTP response bodies are excluded. The `failure_class` field distinguishes these outcomes:
 
-After retries are exhausted, a send failure is classified by actionability, which drives the alarm level and recovery behavior:
+| Class | Handling |
+|-------|----------|
+| `transient` | Alarm after three consecutive cycles with only transient failures at this endpoint. A successful delivery resets the streak. |
+| `quota` | Includes HTTP 429 and recognized SLS write quota codes. Also emits `FLUSH_QUOTA_ALARM`. |
+| `config` | Recognized terminal project or Logstore errors. Three consecutive cycles with only terminal configuration failures pause queued sends to this endpoint. |
+| `payload` | The backend rejected an oversized request or Pilot detected an oversized WebTracking entry before sending it. A local rejection shows `attempts=0`. |
 
-| Class | Trigger | Alarm behavior |
-|-------|---------|----------------|
-| `transient` | Timeout / network failure / 5xx | Not alarmed per-occurrence; failures are only reflected in the failure metric. A single alarm is raised only when one endpoint fails whole batches for several consecutive flush cycles. |
-| `quota` | 429 throttling | Alarmed per-occurrence (aggregated). |
-| `config` | 404 / 403 with an SLS error code, or project not-exist / forbidden / in-recycle-bin | Alarm is cooldown-gated (once per hour) and trips a circuit breaker for that endpoint. |
-| `payload` | 413, or a single entry larger than the per-request body cap | Alarmed (an oversize entry's largest field is truncated to fit, or the entry is dropped). |
+Transient and configuration alarms each have a one-hour cooldown per endpoint. After a configuration pause, one queued record probes the destination. A failed probe retains a record that can still be sent, and the pause increases up to ten minutes for continuing terminal configuration errors. Pending records remain in memory. Queue pressure and normal shutdown can trigger a normal send attempt during the pause. Codex delivery still waits for a transport acknowledgment.
 
-Circuit breaker: when an endpoint keeps returning terminal `config` failures, Pilot stops retrying it at high frequency and backs off exponentially (capped at 10 minutes). When the backoff elapses, one probe request is allowed through, and success clears the breaker automatically. Breaker state is in-memory and does not survive a restart. Regardless of whether an alarm is raised, failed entries are always counted in the flusher metric `out_failed_entries_total`.
+WebTracking measures the complete JSON request, including tags and separators. An entry too large to fit in a single request is counted as failed and recorded in the local diagnostics. Other entries can still be sent. Pilot preserves the contents of structured fields.
 
 Local JSONL output can help confirm whether collection itself is working before debugging SLS delivery:
 
@@ -174,4 +178,8 @@ tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
 
 ## Privacy Notes
 
-SLS is a remote destination. Review [Agent Configuration](agents.md) for content capture controls and [Data Masking](masking.md) for secret masking before enabling SLS in sensitive environments.
+SLS is a remote destination. Enable [Data Masking](masking.md) before using SLS in sensitive environments.
+
+`__tag__:__mac__` and `__source__` come from the same NIC: at collector startup, the first non-loopback IPv4 in `os.networkInterfaces()`. A zero MAC omits the tag.
+
+`__tag__:__sn__` comes from `hostSn` in `config.json`, written by the installer. The macOS installer reads `ioreg`, the Linux installer reads DMI files, and the Windows installer reads CIM. Those Linux files are usually root-only, so the field is left unset when they cannot be read. Placeholders and values longer than 128 bytes are omitted too. The tag is absent when `hostSn` is absent. Deleting it stops the tag. Running install again writes it back when the serial can still be read. A normal upgrade keeps the existing config and does not fill the field in. Set `hostIdentityTags` to `false` to omit both tags from the main collector and from Qoder. Masking does not remove them.

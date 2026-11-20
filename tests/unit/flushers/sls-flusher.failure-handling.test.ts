@@ -1,310 +1,189 @@
-/**
- * SLS flusher failure handling: failure propagation & counting (D1/D2a),
- * transient escalation (D4 方案B), config cooldown (D3/D4), circuit breaker (D3/D5),
- * and oversize payload guard (D2b/D6).
- */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { SlsFlusherConfig, SlsEndpoint } from '../../../src/types/index.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SlsFlusher } from '../../../src/flushers/sls-flusher.js';
+import { WEBTRACKING_MAX_BODY_BYTES } from '../../../src/flushers/sls-transport.js';
+import { serialiseLogEntry } from '../../../src/normalization/entry-builder.js';
+import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
+import { ClientType, type SlsEndpoint } from '../../../src/types/index.js';
 import { buildTestEntry } from '../../helpers/fixture-builder.js';
 
-const mockPostLogStoreLogs = vi.fn().mockResolvedValue(undefined);
-const mockFailureWrite = vi.fn().mockResolvedValue(true);
-
-vi.mock('@alicloud/log', () => ({
-  default: vi.fn().mockImplementation(() => ({ postLogStoreLogs: mockPostLogStoreLogs })),
-}));
-
-const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '' });
-vi.stubGlobal('fetch', fetchSpy);
-
-vi.mock('../../../src/utils/fs-utils.js', () => ({
-  getTodayDateString: () => '2026-04-27',
-  readInstalledVersion: () => '0.0.0-test',
-}));
-
+const { sdkSend, writeFailure } = vi.hoisted(() => ({ sdkSend: vi.fn(), writeFailure: vi.fn() }));
+vi.mock('@alicloud/log', () => ({ default: vi.fn().mockImplementation(() => ({ postLogStoreLogs: sdkSend })) }));
 vi.mock('../../../src/flushers/sls-failure-log-writer.js', () => ({
-  SlsFailureLogWriter: vi.fn().mockImplementation(() => ({
-    start: vi.fn().mockResolvedValue(undefined),
-    write: mockFailureWrite,
-  })),
+  SlsFailureLogWriter: vi.fn().mockImplementation(() => ({ write: writeFailure })),
 }));
 
-vi.mock('../../../src/utils/logger.js', () => ({
-  createLogger: () => ({ info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}));
+const fetchMock = vi.fn<[string, RequestInit], Promise<Response>>();
+const success = () => new Response(null, { status: 200 });
+const error = (status: number, code?: string) => new Response(code ? JSON.stringify({ errorCode: code }) : '', { status });
+const sentIds = (options: RequestInit) => JSON.parse(options.body as string).__logs__.map((row: Record<string, string>) => row['event.id']);
 
-import { SlsFlusher } from '../../../src/flushers/sls-flusher.js';
-import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
-
-function akEndpoint(name: string, url: string, project: string): SlsEndpoint {
-  return {
-    name, endpoint: url, project, logstore: `${project}-store`,
-    kind: 'agentActivity', mode: 'ak',
-    accessKeyId: `${name}-ak`, accessKeySecret: `${name}-sk`, redact: false,
-  };
+function makeFlusher(modes: SlsEndpoint['mode'][] = ['webtracking']) {
+  const endpoint = 'http://sls.invalid';
+  const flusher = new SlsFlusher({ enabled: true, endpoint, accessKeyId: '', accessKeySecret: '', apiKey: '',
+    mode: modes[0], batchMaxSize: 10_000, flushIntervalMs: 999_999, serviceNamePrefix: 'pilot',
+    retry: { retryMaxAttempts: 1 }, endpoints: modes.map((mode, i) => ({ name: `ep${i}`, endpoint,
+      project: '', logstore: `store${i}`, kind: 'agentActivity', mode })) }, '/tmp/sls-test', 'test');
+  const alarms = new AlarmManager({ ip: '127.0.0.1', version: 'test', userId: 'test' });
+  flusher.setAlarmManager(alarms);
+  return { flusher, alarms, counter: flusher.getEndpointCounters().get('ep0')! };
 }
 
-function wtEndpoint(name: string, url: string, project: string): SlsEndpoint {
-  return {
-    name, endpoint: url, project, logstore: `${project}-store`,
-    kind: 'agentActivity', mode: 'webtracking', redact: false,
-  };
-}
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(0));
+  fetchMock.mockReset();
+  sdkSend.mockReset();
+  writeFailure.mockReset();
+  vi.stubGlobal('fetch', fetchMock);
+});
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
-function makeConfig(endpoints: SlsEndpoint[]): SlsFlusherConfig {
-  const primary = endpoints[0];
-  return {
-    enabled: true,
-    accessKeyId: primary.accessKeyId ?? '',
-    accessKeySecret: primary.accessKeySecret ?? '',
-    apiKey: primary.apiKey ?? '',
-    endpoint: primary.endpoint,
-    mode: primary.mode,
-    endpoints,
-    batchMaxSize: 20,
-    flushIntervalMs: 99999,
-    serviceNamePrefix: '',
-  };
-}
-
-// A non-retryable error (so the ak send path breaks immediately, no retry sleeps)
-// that classifyFailure maps to `transient` (matches none of payload/quota/config).
-function transientErr(msg = 'boom'): Error {
-  return new Error(msg);
-}
-// Non-retryable + classified as config (terminal).
-function configErr(): Error {
-  return new Error('{"errorCode":"ProjectNotExist","errorMessage":"gone"}');
-}
-
-function counters(flusher: SlsFlusher, name: string) {
-  return flusher.getEndpointCounters().get(name)!;
-}
-
-describe('SlsFlusher failure handling', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    fetchSpy.mockReset().mockResolvedValue({ ok: true, status: 200, text: async () => '' });
-    mockPostLogStoreLogs.mockReset().mockResolvedValue(undefined);
-    mockFailureWrite.mockReset().mockResolvedValue(true);
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  // --- D1 / D2a: failure propagation & counting -------------------------
-
-  it('counts failed entries in outFailed, not outEntries, on send failure', async () => {
-    const flusher = new SlsFlusher(makeConfig([akEndpoint('user', 'https://cn-shanghai.log.aliyuncs.com', 'p')]), '/tmp/data');
-    mockPostLogStoreLogs.mockRejectedValue(transientErr());
-
-    await flusher.send(buildTestEntry());
+describe('SLS final failure handling', () => {
+  it('accounts for the JSON envelope, isolates a large entry and sends recoverable records intact', async () => {
+    const { flusher, alarms, counter } = makeFlusher();
+    fetchMock.mockImplementation(async () => success());
+    const sizedEntry = (id: string) => {
+      const entry = buildTestEntry({ 'event.id': id, custom_text: '' });
+      const overhead = Buffer.byteLength(JSON.stringify({ ...serialiseLogEntry(entry, { dropAgentScopedFields: true }), version: 'test' }));
+      return { ...entry, custom_text: 'x'.repeat(WEBTRACKING_MAX_BODY_BYTES / 2 - overhead - 8) };
+    };
+    await flusher.send(sizedEntry('first'));
+    await flusher.send(buildTestEntry({ 'event.id': 'oversize', 'gen_ai.input.messages': [
+      { role: 'user', parts: [{ type: 'text', content: '界'.repeat(1_050_000) }] },
+    ] }));
+    await flusher.send(sizedEntry('second'));
     await flusher.flush();
 
-    const c = counters(flusher, 'user');
-    expect(c.outFailed).toBe(1);
-    expect(c.outEntries).toBe(0);
+    expect(fetchMock.mock.calls.map(([, options]) => sentIds(options))).toEqual([['first'], ['second']]);
+    expect(fetchMock.mock.calls.every(([, { body }]) => Buffer.byteLength(body as string) <= WEBTRACKING_MAX_BODY_BYTES)).toBe(true);
+    expect(counter).toMatchObject({ outEntries: 2, outBytes: WEBTRACKING_MAX_BODY_BYTES - 16, outFailed: 1 });
+    expect(writeFailure).toHaveBeenCalledOnce();
+    expect(writeFailure.mock.calls[0][0]).toMatchObject({ batchCount: 1, error: { status: 413 } });
+    expect(alarms.serialize()).toMatchObject([{ failure_class: 'payload', alarm_message: expect.stringContaining('attempts=0') }]);
   });
 
-  it('counts succeeded entries in outEntries on success', async () => {
-    const flusher = new SlsFlusher(makeConfig([akEndpoint('user', 'https://cn-shanghai.log.aliyuncs.com', 'p')]), '/tmp/data');
-
-    await flusher.send(buildTestEntry());
+  it('keeps a compatible singleton above the batching target and does not acknowledge rejected Codex data', async () => {
+    const { flusher, counter } = makeFlusher();
+    fetchMock.mockImplementation(async () => success());
+    await flusher.send(buildTestEntry({ custom_text: 'x'.repeat(2_900_000) }));
     await flusher.flush();
-
-    const c = counters(flusher, 'user');
-    expect(c.outEntries).toBe(1);
-    expect(c.outFailed).toBe(0);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    await expect(flusher.send(buildTestEntry({ 'gen_ai.agent.type': ClientType.CodexCliHook, custom_text: 'x'.repeat(3_200_000) })))
+      .rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(counter).toMatchObject({ outEntries: 1, outFailed: 1 });
   });
 
-  it('splits succeeded vs failed counts across webtracking chunks (partial failure)', async () => {
-    const flusher = new SlsFlusher(makeConfig([wtEndpoint('internal', 'https://cn-heyuan.log.aliyuncs.com', 'p')]), '/tmp/data');
-
-    // Two ~1.6MB entries force a 2-chunk split (cap is 2.8MB). One chunk succeeds, one 404s.
-    const big = 'x'.repeat(1_600_000);
-    await flusher.send(buildTestEntry({ 'gen_ai.completion': big }));
-    await flusher.send(buildTestEntry({ 'gen_ai.completion': big }));
-
-    fetchSpy
-      .mockResolvedValueOnce({ ok: true, status: 200, text: async () => '' })
-      .mockResolvedValueOnce({ ok: false, status: 404, text: async () => '{"errorCode":"ProjectNotExist"}' });
-
-    await flusher.flush();
-
-    const c = counters(flusher, 'internal');
-    expect(c.outEntries).toBe(1);
-    expect(c.outFailed).toBe(1);
-  });
-
-  // --- D4 方案B: transient escalation -----------------------------------
-
-  it('does not alarm on a single transient failure, escalates only after threshold', async () => {
-    const alarm = new AlarmManager({ ip: '1.1.1.1', version: 'v', userId: 'u' });
-    const flusher = new SlsFlusher(makeConfig([akEndpoint('user', 'https://cn-shanghai.log.aliyuncs.com', 'p')]), '/tmp/data');
-    flusher.setAlarmManager(alarm);
-    mockPostLogStoreLogs.mockRejectedValue(transientErr());
-
-    // Threshold is 3 consecutive all-failed cycles.
-    for (let i = 0; i < 2; i++) {
+  it('reports official write-quota codes across SDK and HTTP without opening a config breaker', async () => {
+    const { flusher, alarms } = makeFlusher(['ak', 'webtracking']);
+    sdkSend.mockRejectedValue(Object.assign(new Error('synthetic quota'), { statusCode: 429, code: 'WriteQuotaExceed' }));
+    fetchMock.mockImplementation(async () => error(403, 'ShardWriteQuotaExceed'));
+    for (let i = 0; i < 4; i++) {
       await flusher.send(buildTestEntry());
       await flusher.flush();
     }
-    expect(alarm.serialize()).toHaveLength(0); // still below threshold
-
-    await flusher.send(buildTestEntry());
-    await flusher.flush();
-    const entries = alarm.serialize();
-    expect(entries).toHaveLength(1);
-    expect(entries[0].alarm_type).toBe('FLUSH_SEND_ALARM');
-    expect(entries[0].failure_class).toBe('transient');
-    expect(entries[0].alarm_level).toBe('3');
+    expect(sdkSend).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(alarms.serialize()).toMatchObject(['ep0', 'ep1'].flatMap(endpoint_name => [
+      { alarm_type: 'FLUSH_SEND_ALARM', failure_class: 'quota', endpoint_name, alarm_count: '4' },
+      { alarm_type: 'FLUSH_QUOTA_ALARM', endpoint_name, alarm_count: '4' },
+    ]));
   });
 
-  it('resets the transient streak after a success (intermittent failures stay silent)', async () => {
-    const alarm = new AlarmManager({ ip: '1.1.1.1', version: 'v', userId: 'u' });
-    const flusher = new SlsFlusher(makeConfig([akEndpoint('user', 'https://cn-shanghai.log.aliyuncs.com', 'p')]), '/tmp/data');
-    flusher.setAlarmManager(alarm);
-
-    for (let i = 0; i < 5; i++) {
-      // fail, then succeed — never 3 in a row
-      mockPostLogStoreLogs.mockRejectedValueOnce(transientErr());
-      await flusher.send(buildTestEntry());
+  it('counts transient failures per cycle and resets on partial success without tripping on proxy errors', async () => {
+    const { flusher, alarms } = makeFlusher();
+    let partial = false;
+    fetchMock.mockImplementation(async (_, options) => partial && sentIds(options)[0] === 'cursor'
+      ? success() : error(403, 'ProxyForbidden'));
+    async function cycle() {
+      await flusher.send(buildTestEntry({ 'event.id': 'qoder', 'gen_ai.agent.type': ClientType.Qoder }));
+      await flusher.send(buildTestEntry({ 'event.id': 'cursor', 'gen_ai.agent.type': ClientType.Cursor }));
       await flusher.flush();
-      await flusher.send(buildTestEntry());
-      await flusher.flush(); // success resets streak
     }
-    expect(alarm.serialize()).toHaveLength(0);
+    await cycle(); await cycle();
+    expect(alarms.serialize()).toEqual([]);
+    partial = true;
+    await cycle();
+    partial = false;
+    await cycle(); await cycle();
+    expect(alarms.serialize()).toEqual([]);
+    await cycle(); await cycle();
+    expect(fetchMock).toHaveBeenCalledTimes(14);
+    expect(alarms.serialize()).toMatchObject([{ failure_class: 'transient', alarm_count: '1',
+      alarm_message: expect.stringContaining('consecutive_failed_cycles=3') }]);
   });
 
-  it('always counts transient failures in outFailed regardless of alarming', async () => {
-    const flusher = new SlsFlusher(makeConfig([akEndpoint('user', 'https://cn-shanghai.log.aliyuncs.com', 'p')]), '/tmp/data');
-    mockPostLogStoreLogs.mockRejectedValue(transientErr());
-
-    await flusher.send(buildTestEntry());
-    await flusher.flush();
-    expect(counters(flusher, 'user').outFailed).toBe(1);
-  });
-
-  // --- D3 / D4: config cooldown -----------------------------------------
-
-  it('alarms once for config failure within the cooldown window', async () => {
-    const alarm = new AlarmManager({ ip: '1.1.1.1', version: 'v', userId: 'u' });
-    const record = vi.spyOn(alarm, 'record');
-    const flusher = new SlsFlusher(makeConfig([akEndpoint('user', 'https://cn-shanghai.log.aliyuncs.com', 'p')]), '/tmp/data');
-    flusher.setAlarmManager(alarm);
-    mockPostLogStoreLogs.mockRejectedValue(configErr());
-
-    // Several config failures in quick succession → only one alarm (cooldown).
+  it('retains pending entries through a failed single probe and forwards them after recovery', async () => {
+    const { flusher, alarms, counter } = makeFlusher();
+    let healthy = false;
+    fetchMock.mockImplementation(async () => healthy ? success() : error(403, 'ProjectForbidden'));
     for (let i = 0; i < 3; i++) {
       await flusher.send(buildTestEntry());
       await flusher.flush();
     }
-    const configAlarms = record.mock.calls.filter(c => (c[3] as { failure_class?: string })?.failure_class === 'config');
-    expect(configAlarms).toHaveLength(1);
-    expect(configAlarms[0][1]).toBe('1'); // level 1
+    await flusher.send(buildTestEntry({ 'event.id': 'deferred-first' }));
+    await flusher.send(buildTestEntry({ 'event.id': 'deferred-second', 'gen_ai.agent.type': ClientType.Cursor }));
+    await flusher.flush();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(counter.outFailed).toBe(3);
+
+    vi.setSystemTime(2_000);
+    await Promise.all([flusher.flush(), flusher.flush()]);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(sentIds(fetchMock.mock.calls[3][1])).toEqual(['deferred-first']);
+    expect(counter.outFailed).toBe(3);
+    await flusher.flush();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    healthy = true;
+    vi.setSystemTime(6_000);
+    await flusher.flush();
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    await flusher.flush();
+    expect(fetchMock.mock.calls.slice(4).flatMap(([, options]) => sentIds(options)).sort())
+      .toEqual(['deferred-first', 'deferred-second']);
+    expect(counter).toMatchObject({ outEntries: 2, outFailed: 3 });
+    expect(alarms.serialize()).toMatchObject([{ failure_class: 'config', alarm_count: '1' }]);
   });
 
-  // --- D3 / D5: circuit breaker -----------------------------------------
-
-  it('trips the breaker after consecutive config failures and stops sending', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    const flusher = new SlsFlusher(makeConfig([akEndpoint('user', 'https://cn-shanghai.log.aliyuncs.com', 'p')]), '/tmp/data');
-    mockPostLogStoreLogs.mockRejectedValue(configErr());
-
-    // 3 config failures trip the breaker.
+  it('passes a held bucket through normal delivery during shutdown', async () => {
+    const { flusher, counter } = makeFlusher();
+    fetchMock.mockImplementation(async () => error(404, 'ProjectNotExist'));
     for (let i = 0; i < 3; i++) {
       await flusher.send(buildTestEntry());
       await flusher.flush();
     }
-    expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(3);
-    const failWritesAfterTrip = mockFailureWrite.mock.calls.length;
-
-    // Next cycle: breaker open, send is skipped, but still counted as failed.
-    await flusher.send(buildTestEntry());
+    fetchMock.mockImplementation(async () => success());
+    await flusher.send(buildTestEntry({ 'event.id': 'held' }));
     await flusher.flush();
-    expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(3); // no new send
-    expect(mockFailureWrite.mock.calls.length).toBe(failWritesAfterTrip); // no new persist
-    expect(counters(flusher, 'user').outFailed).toBe(4); // still counted
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await flusher.shutdown();
+    expect(sentIds(fetchMock.mock.calls[3][1])).toEqual(['held']);
+    expect(counter).toMatchObject({ outEntries: 1, outFailed: 3 });
   });
 
-  it('recovers automatically when a half-open probe succeeds', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    const flusher = new SlsFlusher(makeConfig([akEndpoint('user', 'https://cn-shanghai.log.aliyuncs.com', 'p')]), '/tmp/data');
-    mockPostLogStoreLogs.mockRejectedValue(configErr());
-
+  it('bounds an open circuit queue by forwarding under pressure while another endpoint stays live', async () => {
+    const { flusher, counter } = makeFlusher(['webtracking', 'webtracking']);
+    let healthy = false;
+    fetchMock.mockImplementation(async url => healthy || url.includes('/store1/')
+      ? success() : error(403, 'ProjectForbidden'));
     for (let i = 0; i < 3; i++) {
       await flusher.send(buildTestEntry());
       await flusher.flush();
     }
-    // Advance past the backoff window; next flush is a half-open probe.
-    vi.setSystemTime(10_000);
-    mockPostLogStoreLogs.mockReset().mockResolvedValue(undefined);
-    await flusher.send(buildTestEntry());
+    await flusher.send(buildTestEntry({ 'event.id': 'waiting' }));
     await flusher.flush();
-    expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(1); // probe went through
-
-    // Breaker cleared: subsequent sends flow normally.
-    await flusher.send(buildTestEntry());
+    const primary = () => fetchMock.mock.calls.filter(([url]) => url.includes('/store0/'));
+    const backup = flusher.getEndpointCounters().get('ep1')!;
+    expect(primary()).toHaveLength(3);
+    expect(backup.outEntries).toBe(4);
+    healthy = true;
+    for (let i = 0; i < 499; i++) await flusher.send(buildTestEntry());
     await flusher.flush();
-    expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(2);
-  });
-
-  it('circuit breaker on one endpoint does not affect another', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    const flusher = new SlsFlusher(makeConfig([
-      akEndpoint('bad', 'https://cn-shanghai.log.aliyuncs.com', 'bad'),
-      akEndpoint('good', 'https://cn-heyuan.log.aliyuncs.com', 'good'),
-    ]), '/tmp/data');
-    // bad endpoint always config-fails; good always succeeds.
-    mockPostLogStoreLogs.mockImplementation((project: string) =>
-      project === 'bad' ? Promise.reject(configErr()) : Promise.resolve(undefined),
-    );
-
-    for (let i = 0; i < 5; i++) {
-      await flusher.send(buildTestEntry());
-      await flusher.flush();
-    }
-    // good endpoint kept flushing every cycle.
-    expect(counters(flusher, 'good').outEntries).toBe(5);
-    expect(counters(flusher, 'good').outFailed).toBe(0);
-  });
-
-  // --- D2b / D6: oversize payload guard ---------------------------------
-
-  it('drops an entry that stays oversize even after truncation, without blocking the batch', async () => {
-    const flusher = new SlsFlusher(makeConfig([wtEndpoint('internal', 'https://cn-heyuan.log.aliyuncs.com', 'p')]), '/tmp/data');
-
-    // One normal entry + one whose many fields are each huge (no single field to trim under cap).
-    await flusher.send(buildTestEntry());
-    const oversize: Record<string, string> = {};
-    for (let i = 0; i < 40; i++) oversize[`f${i}`] = 'y'.repeat(100_000); // ~4MB spread across fields
-    await flusher.send(buildTestEntry(oversize));
-
-    await flusher.flush();
-
-    // Normal entry still sent; oversize entry dropped + persisted.
-    expect(fetchSpy).toHaveBeenCalled();
-    const persistedPayload = mockFailureWrite.mock.calls.some(c => String((c[0] as { error: unknown }).error).includes('payload dropped'));
-    expect(persistedPayload).toBe(true);
-    expect(counters(flusher, 'internal').outFailed).toBeGreaterThanOrEqual(1);
-  });
-
-  it('truncates an entry with one oversize field so it fits and still sends', async () => {
-    const flusher = new SlsFlusher(makeConfig([wtEndpoint('internal', 'https://cn-heyuan.log.aliyuncs.com', 'p')]), '/tmp/data');
-
-    // Single field just over the 2.8MB cap → truncated, then sent.
-    await flusher.send(buildTestEntry({ 'gen_ai.completion': 'z'.repeat(3_000_000) }));
-    await flusher.flush();
-
-    expect(fetchSpy).toHaveBeenCalledOnce();
-    const body = JSON.parse(String(fetchSpy.mock.calls[0][1].body));
-    const sent = body.__logs__[0]['gen_ai.completion'] as string;
-    expect(sent.endsWith('...[TRUNCATED]')).toBe(true);
-    expect(Buffer.byteLength(JSON.stringify(body.__logs__[0]))).toBeLessThanOrEqual(2_800_000);
-    expect(counters(flusher, 'internal').outEntries).toBe(1);
+    expect(primary()).toHaveLength(4);
+    expect(sentIds(primary()[3][1])).toHaveLength(500);
+    expect(sentIds(primary()[3][1])).toContain('waiting');
+    expect(counter).toMatchObject({ outEntries: 500, outFailed: 3 });
+    expect(backup).toMatchObject({ outEntries: 503, outFailed: 0 });
   });
 });

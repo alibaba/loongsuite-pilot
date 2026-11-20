@@ -10,6 +10,21 @@ import * as os from 'node:os';
 import type { AutoUpdateConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
+import {
+  extractTarGz,
+  makeTarStagingDir,
+  replaceDirWith,
+} from '../utils/win-archive.js';
+import {
+  describeRestartCommandError,
+  isRestartCommandTimeout,
+  isRestartFailureFresh,
+  readRestartFailure,
+  summarizeRestartFailure,
+  writeRestartFailure,
+  type RestartFailureBreadcrumb,
+} from '../utils/restart-breadcrumb.js';
+import { NODE_SQLITE_PROBE } from '../utils/node-sqlite.js';
 import { compareVersions, computeSha256, deterministicBucket } from './version-utils.js';
 import type { UpdaterMetrics } from './updater-metrics.js';
 import { updaterRuntimePath, type UpdaterRuntimeState } from './runtime-state.js';
@@ -23,6 +38,12 @@ const NPM_INSTALL_TIMEOUT_MS = 2 * 60_000;
 const MAX_BACKOFF_MS = 6 * 60 * 60_000; // 6 hours
 const MAX_CONSECUTIVE_FAILURES = 10;
 const MAX_VERSION_GC_REMOVALS_PER_CHECK = 1;
+// Matches UpdaterWatchdog's cap: restart-collector polls for the collector's heartbeat
+// instead of sleeping a second and guessing, and killing it early would throw away both
+// the restart and the diagnostics it was about to write.
+const COLLECTOR_COMMAND_TIMEOUT_MS = 90_000;
+const COLLECTOR_HEALTH_TIMEOUT_MS = 30_000;
+const COLLECTOR_HEALTH_POLL_MS = 500;
 
 // ── Managed Node.js runtime (mirrors deploy/installer-opensource.sh) ──
 // Existing installs that predate the managed runtime run the updater (and hence
@@ -93,6 +114,7 @@ export interface UpdaterPaths {
   bootstrapDir: string;
   loongsuitePilotBin: string;
   runtimeFile: string;
+  collectorRuntimeFile: string;
   // Where the CLI wrapper reads the pinned node runtime (its NODE_PIN_FILE).
   nodePinFile: string;
 }
@@ -131,6 +153,7 @@ function defaultPaths(): UpdaterPaths {
     bootstrapDir: path.join(cacheDir, 'bin'),
     loongsuitePilotBin: pilotBinPath(),
     runtimeFile: updaterRuntimePath(dataDir),
+    collectorRuntimeFile: path.join(dataDir, 'logs', 'runtime.json'),
     nodePinFile: path.join(pinDir, 'node-bin'),
   };
 }
@@ -145,6 +168,7 @@ export function buildPaths(baseDir: string): UpdaterPaths {
     bootstrapDir: path.join(baseDir, 'bin'),
     loongsuitePilotBin: pilotBinPath(),
     runtimeFile: updaterRuntimePath(baseDir),
+    collectorRuntimeFile: path.join(baseDir, 'logs', 'runtime.json'),
     nodePinFile: path.join(baseDir, 'node-bin'),
   };
 }
@@ -153,6 +177,14 @@ export interface ResolvedTarget {
   manifest: VersionManifest;
   channel: 'stable' | 'canary';
   hotfixVersion?: number;
+}
+
+interface CollectorRuntimeRecord {
+  status?: unknown;
+  packageVersion?: unknown;
+  gitCommit?: unknown;
+  pid?: unknown;
+  updatedAt?: unknown;
 }
 
 const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
@@ -243,10 +275,21 @@ export class Updater {
           remote: target.version,
           channel,
         });
+        const activeVersion: LocalVersion = local ?? {
+          version: target.version,
+          gitCommit: target.git_commit,
+        };
+        const collectorRecovered = await this.recoverCurrentCollectorIfNeeded(activeVersion);
+        if (collectorRecovered) {
+          void this.metrics?.writeEvent('collector_restarted', {
+            latest_version: activeVersion.version,
+          });
+        }
         this.consecutiveFailures = 0;
         this.nextCheckAt = 0;
         await this.gcOldVersions();
         await this.writeHeartbeat();
+        if (collectorRecovered) await this.scheduleUpdaterRestart();
         return;
       }
 
@@ -275,21 +318,25 @@ export class Updater {
         latest_version: target.version,
       });
 
+      await this.restartCollector(
+        target.version,
+        local?.version === target.version,
+        target.git_commit,
+      );
+      void this.metrics?.writeEvent('collector_restarted', {
+        latest_version: target.version,
+      });
+
       if (channel === 'canary') {
         await this.persistCanaryState(hotfixVersion ?? 0);
         this.config = { ...this.config, canaryHotfixVersion: hotfixVersion ?? 0 };
       }
 
-      await this.restartCollector();
-      void this.metrics?.writeEvent('collector_restarted', {
-        latest_version: target.version,
-      });
-
-      await this.restartMonitorIfRunning();
       await this.gcOldVersions();
       this.consecutiveFailures = 0;
       this.nextCheckAt = 0;
       await this.writeHeartbeat();
+      await this.scheduleUpdaterRestart();
     } catch (err) {
       this.consecutiveFailures++;
       const backoffMs = Math.min(
@@ -486,11 +533,16 @@ export class Updater {
     manifest: VersionManifest,
   ): Promise<void> {
     const { cacheDir, versionsDir } = this.paths;
-    const tmpDir = path.join(cacheDir, 'download-tmp');
+    // The tarball is unpacked with tar.exe, which cannot address a non-ASCII path
+    // (see utils/win-archive.ts), so under C:\Users\<CJK name> the download staging
+    // moves to an ASCII root. The extracted tree is copied into stagingDir below
+    // with fs.cp, which is Unicode-safe.
+    const tmpDir = await makeTarStagingDir(path.join(cacheDir, 'download-tmp'));
     const tarball = path.join(tmpDir, 'package.tar.gz');
-    const dirName = `${manifest.version}_${manifest.git_commit}`;
-    const targetDir = path.join(versionsDir, dirName);
-    const stagingDir = path.join(versionsDir, `${dirName}.candidate`);
+    const baseDirName = `${manifest.version}_${manifest.git_commit}`;
+    let dirName = baseDirName;
+    let targetDir = path.join(versionsDir, dirName);
+    const stagingDir = path.join(versionsDir, `${baseDirName}.candidate`);
     let activated = false;
     let oldCurrent: string | null = null;
     let oldPrevious: string | null = null;
@@ -530,7 +582,7 @@ export class Updater {
       }
 
       logger.info('extracting update');
-      await execFileAsync('tar', ['-xzf', tarball, '-C', tmpDir]);
+      await extractTarGz(tarball, tmpDir, ARCHIVE_EXTRACT_TIMEOUT_MS);
 
       const extractedDir = await this.findExtractedPackage(tmpDir);
       if (!extractedDir) {
@@ -570,21 +622,52 @@ export class Updater {
         });
       }
 
-      logger.info('checking sqlite3 runtime', { node: nodeBin });
-      await execFileAsync(nodeBin, ['-e', "require('sqlite3')"], {
+      // The node that will actually run the new version (managed runtime when
+      // provisioning succeeded, otherwise this process). The probe require()s
+      // node:sqlite with no version bypass. Failure throws before current is
+      // written, so the previous version stays.
+      //
+      // Cross-version upgrade: a deployed updater from before this migration
+      // runs `require('sqlite3')` instead. The compat shim at compat/sqlite3/
+      // makes that probe succeed (exit 0) so old updaters can activate new
+      // versions. The shim is just `module.exports = {}`.
+      logger.info('checking node:sqlite runtime', { node: nodeBin });
+      await execFileAsync(nodeBin, ['-e', NODE_SQLITE_PROBE], {
         cwd: stagingDir,
         env: childEnv,
         timeout: 30_000,
       });
 
+      // The new package's postinstall is what (re)fills <dataDir>/{hooks,skills,plugins}.
+      // It is also how an install broken by the fs.cpSync fail-fast heals itself: the
+      // trees get rebuilt and the stale AppleDouble sidecars pruned on the next upgrade,
+      // with no reinstall. Do not drop this call -- a missing plugins tree fails every
+      // dsh deployment with "plugin file not found or unreadable", once per cycle.
       const postinstallScript = path.join(stagingDir, 'scripts', 'postinstall.js');
       if (await fs.access(postinstallScript).then(() => true).catch(() => false)) {
         try {
-          await execFileAsync(nodeBin, [postinstallScript], {
+          const { stdout, stderr } = await execFileAsync(nodeBin, [postinstallScript], {
             cwd: stagingDir,
-            env: childEnv,
+            env: {
+              ...childEnv,
+              // Pin the target explicitly instead of trusting what we inherited: the
+              // script otherwise falls back to $HOME/.loongsuite-pilot, which is the
+              // wrong tree for any install using a custom data dir.
+              LOONGSUITE_PILOT_DATA_DIR: this.paths.dataDir,
+            },
             timeout: 30_000,
           });
+          // postinstall exits 0 even when a tree failed (it is package.json's
+          // `postinstall`, and a non-zero exit there aborts the whole install), so the
+          // only signal for a partial result is its own output. Unlogged, this path
+          // reproduces the failure mode it exists to heal: hooks or plugins absent while
+          // every step reports success.
+          const output = `${stdout ?? ''}${stderr ?? ''}`.trim();
+          if (/failed asset tree/.test(output)) {
+            logger.warn('postinstall reported failed asset trees', { output });
+          } else if (output) {
+            logger.info('postinstall completed', { output });
+          }
         } catch (err) {
           logger.warn('postinstall failed, continuing', { error: String(err) });
         }
@@ -595,7 +678,18 @@ export class Updater {
       oldPrevious = await this.readPointerFile(previousFile);
 
       try {
-        await fs.rm(targetDir, { recursive: true, force: true });
+        // Never overwrite an existing version directory in place: `current` may still
+        // point at it and a collector relaunched mid-deploy would die with
+        // ERR_MODULE_NOT_FOUND (last-startup-crash.json phase=module_load), and a live
+        // collector may still hold native modules loaded out of it. Redeploying the
+        // same version/commit therefore lands in a suffixed sibling, which is what
+        // deploy/installer*.ps1 does too. Version and commit are read from VERSION, not
+        // from the directory name, so the suffix is inert.
+        if (await fs.access(targetDir).then(() => true).catch(() => false)) {
+          const suffix = `${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}_${Math.floor(Math.random() * 9000) + 1000}`;
+          dirName = `${baseDirName}_${suffix}`;
+          targetDir = path.join(versionsDir, dirName);
+        }
         await fs.rename(stagingDir, targetDir);
 
         if (oldCurrent && oldCurrent !== dirName) {
@@ -608,9 +702,8 @@ export class Updater {
         // the collector/updater restart (and any future launch) runs on it. Skipped
         // when we fell back to system node, preserving the existing pin. When the
         // managed runtime was adopted, pinNodeRuntime throws on failure so we roll the
-        // pointers back below: the activated version's node_modules are ABI-tied to the
-        // managed node, and leaving the pin on the old node would crash-loop the
-        // collector on mismatched native addons with no self-heal.
+        // pointers back below: leaving the pin on a different node would start the
+        // collector against the wrong runtime, with no self-heal.
         if (managedNodeBin) {
           await this.pinNodeRuntime(managedNodeBin);
         }
@@ -770,9 +863,11 @@ export class Updater {
     let tmp = '';
 
     try {
-      // Stage inside versionsDir (same filesystem as versionDir) so the final
-      // rename can't hit EXDEV across a separate tmpfs.
-      tmp = await fs.mkdtemp(path.join(this.paths.versionsDir, '.pilot-nm-'));
+      // Stage inside versionsDir (same filesystem as versionDir) so the final rename
+      // can't hit EXDEV across a separate tmpfs. Exception: a non-ASCII versionsDir
+      // (C:\Users\<CJK name>\...) is invisible to tar.exe, so staging then moves to an
+      // ASCII root and replaceDirWith below handles the possible cross-volume move.
+      tmp = await makeTarStagingDir(path.join(this.paths.versionsDir, `.pilot-nm-${process.pid}`));
 
       logger.info('downloading prebuilt node_modules', { appVersion, os: osName, arch });
       await this.downloadFile(`${base}/${archive}`, path.join(tmp, archive));
@@ -783,17 +878,14 @@ export class Updater {
 
       const stage = path.join(tmp, 'stage');
       await fs.mkdir(stage, { recursive: true });
-      await execFileAsync('tar', ['-xzf', path.join(tmp, archive), '-C', stage], {
-        timeout: ARCHIVE_EXTRACT_TIMEOUT_MS,
-      });
+      await extractTarGz(path.join(tmp, archive), stage, ARCHIVE_EXTRACT_TIMEOUT_MS);
       const stagedModules = path.join(stage, 'node_modules');
       if (!await fs.access(stagedModules).then(() => true).catch(() => false)) {
         logger.warn('prebuilt node_modules archive has no node_modules/, falling back to npm install');
         return false;
       }
       await fs.writeFile(path.join(stagedModules, '.pilot-modules-version'), stamp + '\n');
-      await fs.rm(modulesDir, { recursive: true, force: true });
-      await fs.rename(stagedModules, modulesDir);
+      await replaceDirWith(stagedModules, modulesDir);
       logger.info('prebuilt node_modules installed', { appVersion });
       return true;
     } catch (err) {
@@ -876,7 +968,11 @@ export class Updater {
         `Expand-Archive -LiteralPath '${q(archive)}' -DestinationPath '${q(destDir)}' -Force`,
       ], { timeout: ARCHIVE_EXTRACT_TIMEOUT_MS });
     } else {
-      await execFileAsync('tar', ['-xzf', archive, '-C', destDir], { timeout: ARCHIVE_EXTRACT_TIMEOUT_MS });
+      // Windows only ever takes the zip branch above, which is why a non-ASCII
+      // destDir (<dataDir>/runtime under a CJK profile) is safe here: Expand-Archive
+      // is Unicode-safe, tar.exe would not be. extractTarGz still routes through
+      // System32\tar.exe so a Git-for-Windows GNU tar on PATH cannot capture it.
+      await extractTarGz(archive, destDir, ARCHIVE_EXTRACT_TIMEOUT_MS);
     }
   }
 
@@ -1022,70 +1118,288 @@ export class Updater {
     }
   }
 
-  private async restartCollector(): Promise<void> {
+  private async restartCollector(
+    targetVersion: string,
+    requireNewPid: boolean,
+    targetGitCommit = '',
+  ): Promise<void> {
     logger.info('restarting collector service');
+    const previousRuntime = requireNewPid ? await this.readCollectorRuntime() : null;
+    const previousPid = typeof previousRuntime?.pid === 'number' ? previousRuntime.pid : null;
+    const restartStartedAt = Date.now();
+    let recoveryAttempted = false;
+    let diagnosed: {
+      detail: string;
+      diagnosis: string;
+      stage: string;
+      breadcrumb: RestartFailureBreadcrumb | null;
+    } | null = null;
+
     try {
-      const bin = this.paths.loongsuitePilotBin;
-      let result: { stdout: string; stderr: string };
-      if (process.platform === 'win32') {
-        result = await execFileAsync('powershell.exe', [
-          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, 'restart-collector',
-        ], { timeout: 30_000 });
-      } else {
-        result = await execFileAsync(bin, ['restart-collector'], { timeout: 30_000 });
-      }
-      const output = (result.stdout || '').trim();
-      if (output) logger.info('restart-collector output', { output });
-      logger.info('collector restarted');
-    } catch (err: any) {
-      const stderr = err?.stderr?.trim?.() || '';
-      const stdout = err?.stdout?.trim?.() || '';
+      await this.runCollectorCommand('restart-collector');
+    } catch (err: unknown) {
+      diagnosed = await this.diagnoseCollectorRestartFailure(restartStartedAt, err);
       logger.warn('collector restart failed', {
-        error: String(err?.message || err),
-        stdout: stdout || undefined,
-        stderr: stderr || undefined,
+        error: diagnosed.detail,
+        stage: diagnosed.stage,
+        initType: diagnosed.breadcrumb?.init_type,
+        diag: diagnosed.breadcrumb?.diag,
+      });
+      try {
+        await this.startCollectorForRecovery(err);
+        recoveryAttempted = true;
+      } catch (recoveryErr) {
+        // Alarm only when recovery also failed: a start-collector rescue after a
+        // timed-out restart is the #328 path working, not a stuck collector.
+        void this.metrics?.writeAlarm(
+          'UPDATER_FAILURE_ALARM', '2',
+          `collector restart command failed: ${diagnosed.detail} | ${diagnosed.diagnosis}`,
+        );
+        throw recoveryErr;
+      }
+    }
+
+    try {
+      await this.waitForCollectorHealth(
+        targetVersion,
+        restartStartedAt,
+        previousPid,
+        targetGitCommit,
+      );
+    } catch (healthErr) {
+      if (recoveryAttempted) {
+        const first = diagnosed
+          ? `${diagnosed.detail} | ${diagnosed.diagnosis}`
+          : 'restart-collector failed';
+        const healthReason = healthErr instanceof Error ? healthErr.message : String(healthErr);
+        void this.metrics?.writeAlarm(
+          'UPDATER_FAILURE_ALARM', '2',
+          `collector restart command failed: ${first}; health check failed after start-collector recovery: ${healthReason}`,
+        );
+        throw healthErr;
+      }
+      logger.warn('collector failed post-restart health check; attempting start-only recovery', {
+        error: String(healthErr),
+      });
+      await this.startCollectorForRecovery(healthErr);
+      await this.waitForCollectorHealth(
+        targetVersion,
+        restartStartedAt,
+        previousPid,
+        targetGitCommit,
+      );
+    }
+
+    logger.info('collector restarted and healthy', { targetVersion });
+  }
+
+  private async runCollectorCommand(
+    command: 'restart-collector' | 'start-collector' | 'schedule-updater-restart',
+  ): Promise<void> {
+    const bin = this.paths.loongsuitePilotBin;
+    const commandArgs = command === 'restart-collector'
+      ? [command, '--defer-updater-restart']
+      : [command];
+    let result: { stdout: string; stderr: string };
+    if (process.platform === 'win32') {
+      result = await execFileAsync('powershell.exe', [
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, ...commandArgs,
+      ], { timeout: COLLECTOR_COMMAND_TIMEOUT_MS });
+    } else {
+      result = await execFileAsync(bin, commandArgs, { timeout: COLLECTOR_COMMAND_TIMEOUT_MS });
+    }
+    const output = (result.stdout || '').trim();
+    if (output) logger.info(`${command} output`, { output });
+  }
+
+  private async startCollectorForRecovery(cause: unknown): Promise<void> {
+    try {
+      await this.runCollectorCommand('start-collector');
+    } catch (recoveryErr) {
+      throw new Error(
+        `collector restart failed (${this.formatCommandFailure(cause)}); `
+          + `start-only recovery also failed (${this.formatCommandFailure(recoveryErr)})`,
+      );
+    }
+  }
+
+  private async diagnoseCollectorRestartFailure(
+    attemptStartedAt: number,
+    err: unknown,
+  ): Promise<{
+    detail: string;
+    diagnosis: string;
+    stage: string;
+    breadcrumb: RestartFailureBreadcrumb | null;
+  }> {
+    const detail = describeRestartCommandError(err);
+    if (isRestartCommandTimeout(err)) {
+      writeRestartFailure(this.paths.dataDir, 'collector', {
+        stage: 'timeout',
+        detail: 'restart command killed by timeout before it reported a stage',
       });
     }
-  }
-
-  private async restartMonitorIfRunning(): Promise<void> {
-    const monitorPidFile = path.join(this.paths.cacheDir, 'loongsuite-pilot-monitor.pid');
-    const dashboardPidFile = path.join(this.paths.cacheDir, 'loongsuite-pilot-dashboard.pid');
-    const monitorRunning = await this.isPidFileRunning(monitorPidFile);
-    const dashboardRunning = await this.isPidFileRunning(dashboardPidFile);
-
-    if (!monitorRunning && !dashboardRunning) return;
-
-    logger.info('restarting monitor after update');
+    let breadcrumb: RestartFailureBreadcrumb | null = null;
     try {
-      const bin = this.paths.loongsuitePilotBin;
-      if (process.platform === 'win32') {
-        await execFileAsync('powershell.exe', [
-          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, 'monitor', 'stop',
-        ], { timeout: 30_000 });
-        await execFileAsync('powershell.exe', [
-          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, 'monitor', 'start',
-        ], { timeout: 30_000 });
-      } else {
-        await execFileAsync(bin, ['monitor', 'stop'], { timeout: 30_000 });
-        await execFileAsync(bin, ['monitor', 'start'], { timeout: 30_000 });
-      }
-      logger.info('monitor restarted');
-    } catch (err) {
-      logger.warn('monitor restart failed', { error: String(err) });
-    }
-  }
-
-  private async isPidFileRunning(pidFile: string): Promise<boolean> {
-    try {
-      const raw = await fs.readFile(pidFile, 'utf-8');
-      const pid = Number(raw.trim());
-      if (!Number.isInteger(pid) || pid <= 0) return false;
-      process.kill(pid, 0);
-      return true;
+      breadcrumb = await readRestartFailure(this.paths.dataDir, 'collector');
+      if (breadcrumb && !isRestartFailureFresh(breadcrumb, attemptStartedAt)) breadcrumb = null;
     } catch {
-      return false;
+      breadcrumb = null;
     }
+    const diagnosis = breadcrumb
+      ? summarizeRestartFailure(breadcrumb)
+      : isRestartCommandTimeout(err)
+        ? 'stage=timeout reason="restart command killed by timeout before it reported a stage"'
+        : 'stage=unknown reason="restart command left no diagnostics"';
+    return {
+      detail,
+      diagnosis,
+      stage: breadcrumb?.stage ?? (isRestartCommandTimeout(err) ? 'timeout' : 'unknown'),
+      breadcrumb,
+    };
+  }
+
+  private formatCommandFailure(error: unknown): string {
+    const err = error as {
+      message?: unknown;
+      stdout?: unknown;
+      stderr?: unknown;
+      code?: unknown;
+      killed?: unknown;
+      signal?: unknown;
+    };
+    const fields = [`error=${String(err?.message ?? error)}`];
+    if (err?.stdout !== undefined && String(err.stdout).trim()) {
+      fields.push(`stdout=${JSON.stringify(String(err.stdout).trim())}`);
+    }
+    if (err?.stderr !== undefined && String(err.stderr).trim()) {
+      fields.push(`stderr=${JSON.stringify(String(err.stderr).trim())}`);
+    }
+    if (err?.code !== undefined) fields.push(`code=${String(err.code)}`);
+    if (err?.killed !== undefined) fields.push(`killed=${String(err.killed)}`);
+    if (err?.signal !== undefined) fields.push(`signal=${String(err.signal)}`);
+    return fields.join(', ');
+  }
+
+  private async scheduleUpdaterRestart(): Promise<void> {
+    // Defer the updater handoff until collector health and success bookkeeping
+    // are complete, otherwise a slow startup could kill this verification.
+    try {
+      await this.runCollectorCommand('schedule-updater-restart');
+    } catch (err) {
+      logger.warn('failed to schedule updater restart', { error: String(err) });
+    }
+  }
+
+  private async readCollectorRuntime(): Promise<CollectorRuntimeRecord | null> {
+    return readJsonFile<CollectorRuntimeRecord>(this.paths.collectorRuntimeFile);
+  }
+
+  private async recoverCurrentCollectorIfNeeded(target: LocalVersion): Promise<boolean> {
+    const runtime = await this.readCollectorRuntime();
+    const healthFailure = this.collectorHealthFailure(
+      runtime,
+      target.version,
+      0,
+      null,
+      target.gitCommit,
+    );
+    if (!healthFailure) return false;
+
+    const livePid = this.liveCollectorPid(runtime);
+    if (livePid !== null) {
+      logger.warn('current version is installed but a stale collector is still alive; restarting it', {
+        targetVersion: target.version,
+        targetGitCommit: target.gitCommit || undefined,
+        collectorPid: livePid,
+        error: healthFailure,
+      });
+      await this.restartCollector(target.version, true, target.gitCommit);
+      return true;
+    }
+
+    logger.warn('current version is installed but collector is not running; attempting start-only recovery', {
+      targetVersion: target.version,
+      targetGitCommit: target.gitCommit || undefined,
+      error: healthFailure,
+    });
+    const recoveryStartedAt = Date.now();
+    await this.startCollectorForRecovery(new Error(healthFailure));
+    await this.waitForCollectorHealth(
+      target.version,
+      recoveryStartedAt,
+      null,
+      target.gitCommit,
+    );
+    logger.info('collector recovered and healthy', { targetVersion: target.version });
+    return true;
+  }
+
+  private liveCollectorPid(runtime: CollectorRuntimeRecord | null): number | null {
+    const pid = runtime?.pid;
+    if (!Number.isInteger(pid) || (pid as number) <= 0) return null;
+    try {
+      process.kill(pid as number, 0);
+      return pid as number;
+    } catch {
+      return null;
+    }
+  }
+
+  private async waitForCollectorHealth(
+    targetVersion: string,
+    notBeforeMs: number,
+    previousPid: number | null,
+    targetGitCommit = '',
+  ): Promise<void> {
+    const deadline = Date.now() + COLLECTOR_HEALTH_TIMEOUT_MS;
+    let lastFailure = 'runtime record not found';
+
+    while (true) {
+      const runtime = await this.readCollectorRuntime();
+      lastFailure = this.collectorHealthFailure(
+        runtime,
+        targetVersion,
+        notBeforeMs,
+        previousPid,
+        targetGitCommit,
+      );
+      if (!lastFailure) return;
+      if (Date.now() >= deadline) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, COLLECTOR_HEALTH_POLL_MS));
+    }
+
+    throw new Error(
+      `collector did not become healthy within ${COLLECTOR_HEALTH_TIMEOUT_MS}ms: ${lastFailure}`,
+    );
+  }
+
+  private collectorHealthFailure(
+    runtime: CollectorRuntimeRecord | null,
+    targetVersion: string,
+    notBeforeMs: number,
+    previousPid: number | null,
+    targetGitCommit = '',
+  ): string {
+    if (!runtime) return 'runtime record not found';
+    if (runtime.status !== 'active') return `runtime status is ${String(runtime.status)}`;
+    if (runtime.packageVersion !== targetVersion) {
+      return `runtime version is ${String(runtime.packageVersion)}, expected ${targetVersion}`;
+    }
+    if (targetGitCommit && runtime.gitCommit !== targetGitCommit) {
+      return `runtime git commit is ${String(runtime.gitCommit)}, expected ${targetGitCommit}`;
+    }
+
+    const updatedAtMs = typeof runtime.updatedAt === 'string' ? Date.parse(runtime.updatedAt) : NaN;
+    if (!Number.isFinite(updatedAtMs) || updatedAtMs < notBeforeMs) {
+      return 'runtime record predates restart';
+    }
+
+    const pid = runtime.pid;
+    if (!Number.isInteger(pid) || (pid as number) <= 0) return 'runtime PID is invalid';
+    if (previousPid !== null && pid === previousPid) return 'collector PID did not change';
+    if (this.liveCollectorPid(runtime) === null) return `collector PID ${String(pid)} is not alive`;
+    return '';
   }
 
   private async gcOldVersions(): Promise<void> {

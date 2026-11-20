@@ -14,8 +14,8 @@ Qwen Code CLI
   └─ ~/.qwen/settings.json 注册 Stop / SubagentStart / SubagentStop hook
        └─ qwen-code-cli-loongsuite-pilot-hook.sh <kebab-case subcommand>
             └─ qwen-code-cli-hook-processor.mjs
-                 ├─ Stop: 解析 transcript_path，写 event_t JSONL
-                 └─ SubagentStart/SubagentStop: v1 仅写入 state，暂不直接发出事件
+                 ├─ Stop: 解析主 transcript 和前台子 transcript/meta，写完整 turn JSONL
+                 └─ SubagentStart/SubagentStop: 只确认 Hook，不并发修改父会话 state
                       └─ ~/.loongsuite-pilot/logs/qwen-code-cli/qwen-code-cli-YYYY-MM-DD.jsonl
                            └─ QwenCodeCliLogInput (id=qwen-code-cli-log)
                                 └─ 规范化输出到 ~/.loongsuite-pilot/logs/output/
@@ -26,7 +26,7 @@ Qwen Code CLI
 | Hook 注册 | `~/.qwen/settings.json` 的 `hooks.{Stop,SubagentStart,SubagentStop}`（nested 格式） | pilot 启动时检测到 `~/.qwen/` 或 `qwen` 命令后自动注入 |
 | Hook 脚本 | `~/.loongsuite-pilot/hooks/qwen-code-cli-loongsuite-pilot-hook.sh` | pilot 安装/升级时拷贝 |
 | Hook processor | `~/.loongsuite-pilot/hooks/qwen-code-cli-hook-processor.mjs` | pilot 安装/升级时拷贝 |
-| Processor state | `~/.loongsuite-pilot/hooks/qwen-code-cli/` 下的 session state | processor 写入 |
+| Processor state | `~/.loongsuite-pilot/state/qwen-code-cli/sessions/` | processor 写入 |
 | 原始 JSONL | `~/.loongsuite-pilot/logs/qwen-code-cli/qwen-code-cli-YYYY-MM-DD.jsonl` | processor 写入 |
 | Hook 错误日志 | `~/.loongsuite-pilot/logs/qwen-code-cli/errors/` | shared error logger 写入 |
 | Pilot 游标 | `~/.loongsuite-pilot/logs/input-state.json` 的 `qwen-code-cli-log` 条目 | QwenCodeCliLogInput 写入 |
@@ -191,7 +191,7 @@ tail -50 ~/.loongsuite-pilot/logs/qwen-code-cli/errors/*.log 2>/dev/null
 ### 5.4 session state
 
 ```bash
-ls -la ~/.loongsuite-pilot/hooks/qwen-code-cli/ 2>/dev/null
+ls -la ~/.loongsuite-pilot/state/qwen-code-cli/sessions/ 2>/dev/null
 ```
 
 如果 state 长期残留且 JSONL 不增长，说明 Stop 导出失败或 transcript offset 未推进。优先看错误日志，而不是直接删除 state。
@@ -205,7 +205,7 @@ ls -la ~/.loongsuite-pilot/hooks/qwen-code-cli/ 2>/dev/null
 | `~/.qwen/settings.json` | Qwen Code CLI 的 3 个 hook 注册 |
 | `~/.loongsuite-pilot/hooks/qwen-code-cli-loongsuite-pilot-hook.sh` | hook shell 入口 |
 | `~/.loongsuite-pilot/hooks/qwen-code-cli-hook-processor.mjs` | transcript parser / event_t emitter |
-| `~/.loongsuite-pilot/hooks/qwen-code-cli/` | processor session state |
+| `~/.loongsuite-pilot/state/qwen-code-cli/sessions/` | processor session state |
 | `~/.loongsuite-pilot/logs/qwen-code-cli/qwen-code-cli-YYYY-MM-DD.jsonl` | 原始 JSONL |
 | `~/.loongsuite-pilot/logs/qwen-code-cli/errors/` | hook / processor 错误日志 |
 | `~/.loongsuite-pilot/logs/input-state.json` | 含 `qwen-code-cli-log` 增量游标 |
@@ -222,4 +222,38 @@ ls -la ~/.loongsuite-pilot/hooks/qwen-code-cli/ 2>/dev/null
 | error 中 `missing_transcript_path` | Qwen Code CLI 版本未在 Stop payload 提供 transcript_path，升级 Qwen Code CLI |
 | error 中 `parse_failed` | transcript 格式变化或损坏，保留错误日志和 transcript 片段排查 parser |
 | JSONL 有数据但 output 无 | 检查 `qwen-code-cli-log` 游标、pilot 服务状态和 listener 启用状态 |
-| SubagentStart/SubagentStop 没有单独事件 | 当前 v1 只把子 agent hook 累积到 state，Stop 导出时再使用；单独无 JSONL 属预期 |
+| SubagentStart/SubagentStop 没有单独事件 | 子 Hook 只确认；父 Stop 从独立 transcript/meta 读取前台子执行，单独无 JSONL 属预期 |
+
+
+## 前台子 Agent 数据缺失
+
+主会话路径为 `<projectDir>/chats/<sessionId>.jsonl` 时，processor 会读取同项目的
+`subagents/<sessionId>/agent-<agentId>.meta.json` 和对应 `.jsonl`。
+通过 metadata 的 `parentAgentId` 和 `toolUseId` 关联各层父工具，并递归输出同一 Trace。
+`SubagentStop.agent_transcript_path` 在部分上游版本可能指向父文件，不能据此判断子文件不存在。
+
+检查父 `agent` 工具事件上的 `agent.qwen-code-cli.subagent.collection`：
+
+| 值 | 含义 / 排查方向 |
+|---|---|
+| `collected` | 已采集该前台子执行 |
+| `unsupported_background` | 后台内部过程不在当前支持范围；父启动工具仍采集 |
+| `metadata_unavailable` / `metadata_missing` | 目录不可读、布局不支持或缺少匹配 metadata；检查 Qwen 实际版本及文件访问权限 |
+| `ambiguous_parent` / `invalid_hierarchy` | 多个子执行声明同一父调用，或层级循环/超限；不猜测关联 |
+| `unknown_execution_mode` | metadata 缺少明确的 `isBackgrounded` 前台标记 |
+| `incomplete` | 未见父工具结果/子终态，或子文件仍变化、末尾半行 |
+| `transcript_unavailable` / `no_model_records` | 子文件缺失、格式/身份不匹配，或当前调用时间范围内没有可解析模型轮次 |
+| `collection_limit` | 超过每次扫描 1000 个 metadata、累计读取 50 MiB 或其他安全限制 |
+
+子事件携带 `gen_ai.agent.scope=subagent`、`gen_ai.agent.depth`、`gen_ai.agent.parent.id`
+及 `gen_ai.subagent.parent_tool_call.id`；子生命周期保留在
+`agent.qwen-code-cli.subagent.status`。子消息与工具 payload 沿用内容采集开关和脱敏。
+子工具 ID 按 Agent/run 做隔离，避免并行或多层复用原生 ID 时串链。
+
+当前为父 Stop 边界的前台快照采集：不会等待后台执行，也不会向已经结束的 turn 补挂迟到子数据。
+子文件暂不可读时保留父工具并标记采集不完整，不声称子数据已完整采集。
+主文件末尾半行则保留原 offset，等待后续 Stop 重试。容器需要让 Stop Hook 完成，
+并在销毁前让 Pilot 输出队列排空，或持久化 Pilot 日志供后续消费。
+
+兼容性依据是上游 Qwen `v0.21.1` 的独立 transcript/meta 格式。
+不同包名或私有 preview 不能仅按版本字符串视为同一实现；应核实上述字段。

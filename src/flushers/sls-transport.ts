@@ -19,78 +19,9 @@ export const RETRY_BASE_DELAY_MS = 1000;
 export const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 
 export class HttpError extends Error {
-  constructor(readonly status: number, body: string) {
+  constructor(readonly status: number, readonly body: string) {
     super(`${status} ${body}`);
   }
-}
-
-/**
- * Actionability classes for a final send failure. Drives alarm level and
- * whether the failure is terminal (needs human config change) vs self-healing.
- */
-export type FailureClass = 'transient' | 'quota' | 'config' | 'payload';
-
-/** alarm_level per failure class: terminal/payload are most actionable. */
-export const FAILURE_CLASS_ALARM_LEVEL: Record<FailureClass, '1' | '2' | '3'> = {
-  transient: '3',
-  quota: '2',
-  config: '1',
-  payload: '1',
-};
-
-// Terminal SLS API error codes: the target project/logstore is gone, forbidden,
-// or recycled — retrying never succeeds until an operator fixes configuration.
-const CONFIG_ERROR_CODES = [
-  'ProjectNotExist',
-  'ProjectForbidden',
-  'ProjectInRecycleBin',
-  'LogStoreNotExist',
-];
-
-function extractStatus(err: unknown): number | undefined {
-  if (err instanceof HttpError) return err.status;
-  if (err && typeof err === 'object' && 'status' in err) {
-    const s = (err as { status: unknown }).status;
-    if (typeof s === 'number') return s;
-  }
-  return undefined;
-}
-
-/**
- * Classify a final send failure by actionability. Works across all send modes:
- * webtracking throws HttpError (has .status), while the @alicloud/log SDK (ak
- * mode) throws objects whose code lives in `.code`/`.errorCode` or the message
- * string — so we inspect both, unlike the historical `instanceof HttpError`
- * check that silently never matched on the ak path.
- */
-export function classifyFailure(err: unknown): FailureClass {
-  const status = extractStatus(err);
-  const codeField =
-    err && typeof err === 'object'
-      ? String(
-          (err as { code?: unknown }).code ??
-            (err as { errorCode?: unknown }).errorCode ??
-            '',
-        )
-      : '';
-  const msg = `${codeField} ${String(err)}`;
-
-  if (status === 413 || /PostBodyTooLarge|Request Entity Too Large|body size/i.test(msg)) {
-    return 'payload';
-  }
-  if (status === 429 || /\bServerBusy\b|Throttl/i.test(msg)) {
-    return 'quota';
-  }
-  // A known SLS error code is terminal regardless of status. A bare 404/403
-  // only counts as config when the body looks like a structured SLS error —
-  // otherwise a proxy/CDN/WAF 404 would falsely trip the circuit breaker.
-  if (CONFIG_ERROR_CODES.some(c => msg.includes(c))) {
-    return 'config';
-  }
-  if ((status === 404 || status === 403) && /errorCode/i.test(msg)) {
-    return 'config';
-  }
-  return 'transient';
 }
 
 export interface SlsTransportConfig {
@@ -110,6 +41,7 @@ export interface PostWebtrackingOptions {
 }
 
 export interface PostApiKeyOptions {
+  signal?: AbortSignal;
   topic?: string;
   source?: string;
   tags?: Array<Record<string, string>>;
@@ -182,6 +114,7 @@ export async function postApiKeyLogStoreLogs(
   logGroup: SlsLogGroupPayload,
   opts?: PostApiKeyOptions,
 ): Promise<void> {
+  opts?.signal?.throwIfAborted();
   const body = encodeSlsLogGroup({
     ...logGroup,
     topic: logGroup.topic ?? opts?.topic,
@@ -208,8 +141,9 @@ export async function postApiKeyLogStoreLogs(
 
   let lastErr: unknown;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
+    opts?.signal?.throwIfAborted();
     try {
-      const resp = await postBuffer(requestTarget.url, body, headers, timeoutMs);
+      const resp = await postBuffer(requestTarget.url, body, headers, timeoutMs, opts?.signal);
       if (resp.status >= 200 && resp.status < 300) {
         logger.debug('batch sent via apiKey', {
           project: config.project,
@@ -225,6 +159,7 @@ export async function postApiKeyLogStoreLogs(
       }
       lastErr = err;
     } catch (err) {
+      opts?.signal?.throwIfAborted();
       lastErr = err;
       if (err instanceof HttpError && !RETRYABLE_STATUS_CODES.has(err.status)) break;
       if (attempt === maxRetries - 1) break;
@@ -236,7 +171,7 @@ export async function postApiKeyLogStoreLogs(
       delayMs: delay,
       error: String(lastErr),
     });
-    await sleep(delay);
+    await sleep(delay, opts?.signal);
   }
 
   throw lastErr;
@@ -272,12 +207,14 @@ function postBuffer(
   body: Buffer,
   headers: Record<string, string | number>,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const transport = target.protocol === 'https:' ? https : http;
-    const req = transport.request(target, { method: 'POST', headers }, res => {
+    const req = transport.request(target, { method: 'POST', headers, ...(signal ? { signal } : {}) }, res => {
       const chunks: Buffer[] = [];
+      res.on('error', reject);
       res.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
       res.on('end', () => {
         resolve({
@@ -385,6 +322,19 @@ export async function persistFailedLogs(
   });
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise(resolve => setTimeout(resolve, ms));
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const cancel = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', cancel);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', cancel);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', cancel, { once: true });
+  });
 }

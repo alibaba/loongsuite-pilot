@@ -1,11 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { splitForWebtracking, isRetryable, HttpError } from '../../../src/flushers/sls-transport.js';
 import {
-  splitForWebtracking,
-  isRetryable,
-  HttpError,
-  classifyFailure,
-  FAILURE_CLASS_ALARM_LEVEL,
-} from '../../../src/flushers/sls-transport.js';
+  classifySlsSendError,
+  formatSlsSendFailureMessage,
+  redactSensitiveErrorText,
+} from '../../../src/flushers/sls-error-classifier.js';
 
 describe('splitForWebtracking', () => {
   it('returns single chunk when under limits', () => {
@@ -70,43 +69,103 @@ describe('isRetryable', () => {
   });
 });
 
-describe('classifyFailure', () => {
-  it('classifies 413 / body-too-large as payload', () => {
-    expect(classifyFailure(new HttpError(413, 'Request Entity Too Large'))).toBe('payload');
-    // ak SDK style: no status, message carries the API error
-    expect(classifyFailure(new Error('PostBodyTooLarge: body size must little than 10485760'))).toBe('payload');
+describe('SLS send error diagnostics', () => {
+  it.each([
+    ['Authorization: Bearer test-token', 'Authorization: [REDACTED]'],
+    ['Authorization=Basic test-token', 'Authorization=[REDACTED]'],
+    ['Bearer test-token', 'Bearer [REDACTED]'],
+    ['accessKeyId=test-key', 'accessKeyId=[REDACTED]'],
+    ['access-key-secret=test-secret', 'access-key-secret=[REDACTED]'],
+    ['api_key=test-api-key', 'api_key=[REDACTED]'],
+    [`LTAI${'1'.repeat(16)}`, '[REDACTED_ACCESS_KEY]'],
+    ['https://user:password@example.com', 'https://[REDACTED]@example.com'],
+  ])('redacts known credential pattern in %s', (input, expected) => {
+    expect(redactSensitiveErrorText(input)).toBe(expected);
   });
 
-  it('classifies 429 / ServerBusy as quota', () => {
-    expect(classifyFailure(new HttpError(429, 'rate limited'))).toBe('quota');
-    expect(classifyFailure({ code: 'ServerBusy', message: 'slow down' })).toBe('quota');
+  it.each([
+    ['ENOTFOUND', 'dns'],
+    ['ECONNRESET', 'connection_reset'],
+    ['ECONNREFUSED', 'connection_refused'],
+    ['UND_ERR_CONNECT_TIMEOUT', 'timeout'],
+    ['ENETUNREACH', 'route'],
+    ['CERT_HAS_EXPIRED', 'tls'],
+    ['UND_ERR_PROXY', 'proxy'],
+  ])('reads nested code %s as %s', (code, category) => {
+    const error = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('original cause text'), { code }),
+    });
+
+    expect(classifySlsSendError(error)).toMatchObject({ code, category });
   });
 
-  it('classifies terminal config errors as config', () => {
-    expect(classifyFailure(new HttpError(404, '{"errorCode":"ProjectNotExist"}'))).toBe('config');
-    expect(classifyFailure(new HttpError(403, '{"errorCode":"ProjectForbidden"}'))).toBe('config');
-    // ak SDK style: errorCode field, no HTTP status
-    expect(classifyFailure({ errorCode: 'ProjectForbidden', message: 'forbidden' })).toBe('config');
-    expect(classifyFailure({ code: 'ProjectInRecycleBin' })).toBe('config');
+  it('extracts a structured HTTP code without including the response body', () => {
+    const body = '{"errorCode":"Forbidden","message":"original response text"}';
+    const classification = classifySlsSendError(new HttpError(403, body));
+
+    expect(classification).toEqual({
+      category: 'http',
+      code: 'Forbidden',
+      httpStatus: 403,
+      detail: '',
+    });
+    expect(formatSlsSendFailureMessage('webtracking', classification, 1))
+      .not.toContain('original response text');
   });
 
-  it('does not classify a bare (proxy) 404/403 as config', () => {
-    // No SLS errorCode in the body → likely a proxy/CDN/WAF, not a terminal SLS error.
-    expect(classifyFailure(new HttpError(404, 'nginx not found'))).toBe('transient');
-    expect(classifyFailure(new HttpError(403, 'Forbidden'))).toBe('transient');
+  it('redacts credentials from network error detail', () => {
+    const causeText = 'Authorization: Bearer test-token accessKeySecret=test-secret'
+      + ' apiKey=test-api-key https://user:password@example.com';
+    const error = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error(causeText), { code: 'ECONNRESET' }),
+    });
+    const classification = classifySlsSendError(error);
+    const message = formatSlsSendFailureMessage('webtracking', classification, 3);
+
+    expect(classification).not.toHaveProperty('retryable');
+    expect(message).toContain('category=connection_reset code=ECONNRESET attempts=3');
+    expect(message).toContain('Authorization: [REDACTED]');
+    expect(message).toContain('accessKeySecret=[REDACTED]');
+    expect(message).toContain('apiKey=[REDACTED]');
+    expect(message).toContain('https://[REDACTED]@example.com');
+    expect(message).not.toContain('test-token');
+    expect(message).not.toContain('test-secret');
+    expect(message).not.toContain('test-api-key');
+    expect(message).not.toContain('user:password');
   });
 
-  it('classifies timeouts / network / unknown as transient', () => {
-    expect(classifyFailure(new Error('TimeoutError'))).toBe('transient');
-    expect(classifyFailure(new Error('fetch failed'))).toBe('transient');
-    expect(classifyFailure(new HttpError(500, 'internal'))).toBe('transient');
-    expect(classifyFailure('some unknown error')).toBe('transient');
+  it('flattens and truncates network detail to 512 UTF-8 bytes', () => {
+    const error = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error(`line one\n${'测'.repeat(400)}`), { code: 'ECONNRESET' }),
+    });
+    const classification = classifySlsSendError(error);
+
+    expect(Buffer.byteLength(classification.detail, 'utf8')).toBeLessThanOrEqual(512);
+    expect(classification.detail).not.toContain('\n');
+    expect(classification.detail).not.toContain('\uFFFD');
   });
 
-  it('maps each class to the expected alarm level', () => {
-    expect(FAILURE_CLASS_ALARM_LEVEL.transient).toBe('3');
-    expect(FAILURE_CLASS_ALARM_LEVEL.quota).toBe('2');
-    expect(FAILURE_CLASS_ALARM_LEVEL.config).toBe('1');
-    expect(FAILURE_CLASS_ALARM_LEVEL.payload).toBe('1');
+  it('bounds HTTP response parsing and error codes', () => {
+    const overlongBody = `${'{"errorCode":"Forbidden","padding":"'}${'x'.repeat(17_000)}"}`;
+
+    expect(classifySlsSendError(new HttpError(403, overlongBody))).toEqual({
+      category: 'http',
+      code: 'HTTP_403',
+      httpStatus: 403,
+      detail: '',
+    });
+    expect(classifySlsSendError({ code: `E${'X'.repeat(128)}` }).code).toBe('UNKNOWN');
+  });
+
+  it('terminates on a cyclic cause chain', () => {
+    const error: Record<string, unknown> = { name: 'Error', message: 'cyclic' };
+    error.cause = error;
+
+    expect(classifySlsSendError(error)).toEqual({
+      category: 'unknown',
+      code: 'UNKNOWN',
+      httpStatus: 0,
+      detail: 'Error: cyclic',
+    });
   });
 });

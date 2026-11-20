@@ -6,6 +6,31 @@ Trace output exports GenAI activity as OpenTelemetry traces. Use it when you wan
 
 Trace output is separate from log output. SLS, JSONL, and HTTP receive event records; OTLP trace output converts those records into trace spans.
 
+## Codex subagents
+
+Codex child turns buffer and export independently with their own session, turn
+and step IDs. Confirmed delegation attaches the child AGENT under the actual
+reserved parent TOOL span, followed by the child's STEP and LLM/TOOL spans.
+Only the child's virtual ENTRY is transparent. Parent completion neither ends
+background child work nor stretches the tool interval.
+
+An unresolved or already independently emitted turn keeps its own root; late
+correlation does not replay exported spans as updates. Incoming invocation is
+scoped to actual work; outgoing invocation belongs to its delegation tool.
+Standard and short model/tool event names are adapted at the trace boundary;
+Agent invoke/result audit records do not add spans, steps or usage.
+With OTLP enabled, pending Codex turns persist in `logs/codex-pending-turns/`
+before input checkpoints advance; shutdown does not export partial turns.
+Export acknowledgements retain the latest 10,000 turns. Uncertain network
+delivery may still retry stable IDs. Journal read failures prevent startup;
+after a write failure, repair storage and restart from the durable cursor.
+Codex SLS/HTTP log sends await actual network success before allowing input
+checkpoints to advance. A failed delivery holds the shared checkpoint until
+the output is repaired and the collector restarts. Partial multi-output success
+or uncertain acknowledgements can still repeat stable IDs; this is at least once.
+See [verification status](zh-CN/codex-subagent-verification.md) for separate
+source, output, installed-runtime and cloud evidence.
+
 ## Generic OTLP Trace Output
 
 ```json
@@ -20,7 +45,6 @@ Trace output is separate from log output. SLS, JSONL, and HTTP receive event rec
     "resourceAttributes": {
       "deployment.environment": "prod"
     },
-    "captureMessageContent": false,
     "debug": false,
     "turnIdleTimeoutMs": 0
   }
@@ -35,9 +59,40 @@ Trace output is separate from log output. SLS, JSONL, and HTTP receive event rec
 | `otlpTrace.headers` | Headers sent to the OTLP endpoint. |
 | `otlpTrace.serviceName` | Legacy trace-only service-name base. Pilot appends `-<agentType>`; top-level `serviceName` takes precedence and disables the suffix. |
 | `otlpTrace.resourceAttributes` | Extra OpenTelemetry resource attributes. |
-| `otlpTrace.captureMessageContent` | Whether trace export may include message content. |
 | `otlpTrace.debug` | Enables local debug output for trace conversion. |
-| `otlpTrace.turnIdleTimeoutMs` | Optional idle timeout for grouping turn-level trace data. |
+| `otlpTrace.turnIdleTimeoutMs` | Turn-level aggregation idle timeout; defaults to `0` (disabled). Hermes turns covered by the native completion observer wait for actual completion even when a timeout is configured. An aged buffer emits one diagnostic with its pending record count and age. Older or uncovered producers retain the configured idle fallback. |
+
+Hermes observes actual call completion, including early returns, failures and cancellation that bypass
+native completion hooks. Normal hooks and the call observer do not emit duplicate completion records;
+other active calls in the same session continue collecting. Ownership follows session-id changes caused
+by compression within that native call. The private `agent.hermes.native_run_observer: true` field is
+emitted only for turns actually covered by the observer; `realtime-v1` alone does not advertise it.
+If the native entry is unavailable, the plugin diagnoses it once and retries lazily with a five-second
+backoff. Uncovered calls keep the previous idle behavior, which can truncate late data; updating only
+the collector does not fix an already-running old plugin. Restart Hermes after updating the plugin.
+
+Live turns have no forced age cutoff: a time-based flush would again discard later tool/model events.
+Pending buffer count and `oldest_buffer_age_ms` remain visible in the `pilot_trace_runtime` status
+snapshots, under the existing buffer-count cap. On Linux in the same PID namespace, the new plugin
+records the producer's process identity. After the collector confirms that process has exited and the
+buffer has been idle for at least five minutes, it waits at least one more minute and checks that the
+durably persisted input cursor has reached EOF for every extant source segment. When it has not, recovery
+requests normal input collection without waiting behind another source's output backpressure and checks
+again later. Consumed closed segments remain reclaimable; the final segment of an exited process is
+retained while a turn still needs recovery, until export or durable normal completion. It then exports
+completed spans with `agent.hermes.collection.incomplete=true` and
+`agent.hermes.collection.end_reason=producer_process_exited`. Unpaired requests and tool calls are
+not fabricated into complete spans. Missing or unreadable source files, a partial final line, a disabled
+input or unaccepted output keeps the turn pending. Older plugins without process identity, other PID
+namespaces, non-Linux systems and unidentifiable owners do not use this recovery. The check covers the
+identified producer's files and cannot prove another process will not continue the same turn. The journal
+retains pending data across collector restarts, but does not guarantee end-to-end exactly-once delivery.
+The source index and deferred recovery each track up to 10,000 turns, with up to 16 sources per turn;
+exceeding a limit emits a warning and retains Hermes raw sources until the collector is restarted.
+
+OpenClaw observes completion with `agent_end` and retains the `llm_output` collection boundary. It does
+not register `before_agent_finalize`: that answer-revision hook makes supporting hosts buffer replies
+until the turn ends. Restart the host after updating the plugin to remove existing listeners.
 
 Environment variables:
 
@@ -47,6 +102,68 @@ Environment variables:
 | `LOONGSUITE_PILOT_SERVICE_NAME` | Exact service name shared by all agents and reporting backends. |
 | `LOONGSUITE_PILOT_OTLP_ENDPOINT` | OTLP trace endpoint. |
 | `LOONGSUITE_PILOT_OTLP_HEADERS` | JSON string for OTLP headers. |
+
+## Custom Span Enrichment
+
+Use `otlpTrace.spanEnrichers` to load trusted local `.mjs` modules that derive attributes
+such as `gen_ai.skill.*` from the completed `gen_ai.tool.*` fields. This also works
+with CMS/ARMS and managed trace backends, without adding a generic OTLP endpoint.
+
+```json
+{
+  "otlpTrace": {
+    "spanEnrichers": ["$PILOT_DATA/span-enrichers/tool-skill.mjs"]
+  }
+}
+```
+
+Each module must default-export an object with a synchronous `enrich(span, context)` method:
+
+```js
+export default {
+  enrich(span, context) {
+    const attrs = span.attributes;
+    if (attrs['gen_ai.span.kind'] !== 'TOOL') return;
+    if (attrs['gen_ai.tool.name'] !== 'exec') return;
+    const raw = attrs['gen_ai.tool.call.arguments'];
+    if (typeof raw !== 'string') return;
+    const args = JSON.parse(raw);
+    if (typeof args.command !== 'string' || !args.command.startsWith('npm test')) return;
+    return {
+      'gen_ai.skill.name': 'run-tests',
+      'gen_ai.skill.id': 'run-tests',
+      'gen_ai.skill.version': '1.0',
+    };
+  },
+};
+```
+
+Execution order: `event conversion → built-in enrichment → custom enrichers → debug/failure logs and OTLP export`.
+This is a Pilot pre-export transform, not OpenTelemetry `SpanProcessor.onEnd`.
+Pilot creates a new export view instead of letting plugins mutate ended SDK spans.
+
+- `span` exposes readonly `name`, `traceId`, `spanId`, and `attributes`, including frozen
+  attribute arrays. `context` exposes readonly `agentType` and the final `serviceName`.
+  Raw events, SDK spans, and resource mutation are not exposed.
+- Return an attribute object or `undefined`. Values may be strings, finite numbers,
+  booleans, or homogeneous arrays (including null/undefined array entries).
+  Nested objects, deletion, and asynchronous callbacks are unsupported. Invalid patches
+  are discarded atomically. Plugins run in configuration order; later plugins see earlier
+  patches and override matching keys, including built-in attributes.
+- Paths may be absolute, start with `~/` or `$PILOT_DATA/` (the configured data directory),
+  or be relative to the directory containing `config.json`. At most 16 modules are loaded,
+  deduplicated by real path. No directory scanning takes place.
+- Modules load once on first conversion; restart Pilot after editing them. Loading waits
+  at most 5 seconds per module. Load failures, invalid exports, and callback exceptions do
+  not block trace export. Callback errors are logged once per plugin without exception
+  text that might disclose tool content. SDK `forceFlush`/`shutdown` methods are not called.
+- Plugins only see attributes retained by collection/privacy settings and cannot recover
+  missing or redacted content. Different backend service names may convert the same turn
+  separately; keep mappings fast and free of side effects.
+- Plugins execute inside the Pilot process. Only load trusted code. A load timeout does
+  not cancel module execution and cannot interrupt synchronous infinite loops. Frozen
+  views and exception handling are not a sandbox. New attributes do not pass through
+  input masking again; do not reintroduce sensitive information.
 
 ## ARMS/CMS-Compatible Trace Output
 
@@ -86,10 +203,10 @@ Backends are **deduplicated** by normalized endpoint URL + full request headers,
 
 Shared vs. per-backend settings (spans are converted once per distinct `service.name`):
 
-- **Shared across all backends:** `resourceAttributes`, `captureMessageContent`, `resourceAttributeKeys`, `spanAttributePassthroughPrefixes`, `maxExportBatchBytes`, `turnIdleTimeoutMs`.
+- **Shared across all backends:** `resourceAttributes`, `resourceAttributeKeys`, `spanAttributePassthroughPrefixes`, `maxExportBatchBytes`, `turnIdleTimeoutMs`.
 - **Per-backend:** endpoint URL, headers, compression, and `service.name` (see below — user vs. managed backends can differ).
 
-A failing backend is isolated — it does not block the healthy backends, and its failed spans are persisted separately under `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<backend-name>.jsonl`.
+A failing backend is isolated — it does not block the healthy backends, and its failed spans are persisted separately under `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<backend-name>-YYYY-MM-DD.jsonl`.
 
 ### Managed backends (`configs/inner/data_config.json`)
 
@@ -232,26 +349,39 @@ Alternatively, add to `~/.loongsuite-pilot/config.json` (not recommended for sha
 
 Open [http://localhost:3000](http://localhost:3000) and navigate to **Traces** to view agent sessions with model name, token usage, and cost details.
 
-> **Note:** Langfuse uses HTTP for OTLP — gRPC (port 4317) is not supported. LLM message content is included in traces by default (`captureMessageContent` defaults to `true`). To disable it, explicitly set `captureMessageContent` to `false` in config.
+> **Note:** Langfuse uses HTTP for OTLP — gRPC (port 4317) is not supported. LLM message content is included in traces.
+
+## Token Usage Aggregation
+
+Pilot reports token usage at two levels in an OTLP trace:
+
+- Each `LLM` span reports the usage of one model call.
+- The parent `AGENT` span reports the aggregate usage of the whole agent turn. Its token values equal the sum of its `LLM` children; they are not additional usage.
+
+This keeps both per-call details and a turn-level total available. However, a backend that calculates a trace total by summing usage across every span may count the same tokens twice. For example, Langfuse may add the `AGENT` aggregate to all child `LLM` values in its trace header.
+
+Use one level consistently when querying token usage:
+
+- For the total usage of one agent turn, read the `AGENT` span (`gen_ai.span.kind = AGENT`).
+- For per-call analysis, sum only the `LLM` spans (`gen_ai.span.kind = LLM`).
+- Do not add an `AGENT` span's usage to the usage of its descendant `LLM` spans.
+
+This caveat applies to OTLP trace backends that aggregate across a span hierarchy. SLS, JSONL, HTTP output, and the built-in status bar consume event records instead of summing both levels of the trace hierarchy.
 
 ## Content Capture In Traces
 
-Trace spans can carry sensitive content if message capture is enabled. For sensitive or team-managed setups, prefer:
+Trace spans can carry sensitive content. For sensitive or team-managed setups,
+enable masking:
 
 ```json
 {
-  "otlpTrace": {
-    "captureMessageContent": false
-  },
-  "agents": {
-    "claude-code": { "captureMessageContent": false },
-    "codex": { "captureMessageContent": false },
-    "cursor": { "captureMessageContent": false }
+  "mask": {
+    "mode": "all"
   }
 }
 ```
 
-Also enable [Data Masking](masking.md) when trace data may include secrets.
+See [Data Masking](masking.md) for supported rules and custom modes.
 
 ## Custom Span Attributes
 
@@ -303,6 +433,19 @@ Notes:
   { "otlpTrace": { "spanAttributePassthroughPrefixes": ["multica."] } }
   ```
 
+**Standard per-invocation identity.** `gen_ai.session.id` and `gen_ai.user.id` are the two exact reserved-key exceptions supported by `LOONGSUITE_PILOT_SPAN_ATTRIBUTES`:
+
+  ```bash
+  export LOONGSUITE_PILOT_SPAN_ATTRIBUTES="gen_ai.session.id=session-123,gen_ai.user.id=user-456"
+  ```
+
+- The values become the canonical event-log identity fields (`gen_ai.session.id` and `user.id`) and the standard trace-span attributes (`gen_ai.session.id` and `gen_ai.user.id`) on every span kind. No `spanAttributePassthroughPrefixes` entry is required.
+- Explicit per-invocation identity wins over the configured user id and agent-native identity. Native turn and step ids are not changed.
+- Phase-one support covers OpenCode, Claude Code, Qoder/Qoder-CN, and OpenClaw. Codex and Qwen Code CLI continue to reject these reserved keys.
+- Hermes additionally supports per-invocation `gen_ai.user.id`. For OpenClaw and Hermes, the final user-id precedence is: explicit `gen_ai.user.id` in `LOONGSUITE_PILOT_SPAN_ATTRIBUTES` → `LOONGSUITE_PILOT_USER_ID` / `LOONGSUITE_USER_ID` → channel-native `senderId` / `sender_id` (carried through the invocation transport field, so it wins over the collector-configured user id) → collector-configured user id → producer plugin configuration / hostname fallback. In a standard installation, the collector and plugin fallbacks normally read the same `config.json`.
+- Other supported agents retain the generic precedence and do not promote an agent-native identity above the collector-configured user id.
+- All other `gen_ai.*` and `user.*` keys remain reserved and are dropped.
+
 **Built-in OpenCode attribute (`opencode.message.id`).** The OpenCode plugin always stamps `opencode.message.id` (the opencode assistant-message id) on its `llm.request`, `llm.response`, `tool.call` and `tool.result` records — no launcher env var required. To surface it on spans, just list the `opencode.` prefix; it then appears on ENTRY / AGENT / STEP / LLM / TOOL spans (LLM and TOOL take the value from their own records; ENTRY / AGENT / STEP take the turn-level value):
 
   ```json
@@ -311,10 +454,11 @@ Notes:
 
 Notes:
 - Unlike source #2 (spans only), passthrough attributes are ordinary top-level record fields, so they appear in **both** the event log (SLS / JSONL) and the trace spans — same behavior as the git fields.
-- Reserved-prefix keys (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`, `agent.`) and sensitive names (token/secret/password/…) are dropped by the hook. Use a dedicated namespace such as `multica.*`.
+- Except for the two standard identity keys documented above, reserved-prefix keys (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`, `agent.`) and sensitive names (token/secret/password/…) are dropped by the hook. Use a dedicated namespace such as `multica.*`.
 - Values must not contain a comma `,` (it is the pair separator); a value is also capped at 512 chars.
-- Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Supported for claude-code, codex, qoder, and opencode.
+- Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Generic passthrough is supported for claude-code, codex, qoder/qoder-cn, qwen-code-cli, opencode, and openclaw.
 - Codex snapshots these process-level attributes on `UserPromptSubmit` (with `Stop` as a fail-open fallback) and correlates them to transcript records by session and turn. This prevents a resumed session launched by a different invocation from reusing the previous invocation's attributes.
+- Qwen Code CLI captures them from the current `Stop` hook and clears any saved values when a resumed invocation does not provide the variable, preventing stale attributes from leaking into a later turn.
 
 ## Verify Trace Output
 
@@ -334,3 +478,11 @@ Failed trace export data may be persisted under:
 ```text
 ~/.loongsuite-pilot/logs/otlp-failed/
 ```
+
+Each JSONL record keeps the existing full span payload plus `_error`. Files use
+the local calendar date and are not split by size. Scheduled retention defaults to
+7 days. If managed files exceed the 512 MiB soft cleanup target, Pilot removes the
+oldest files while always retaining today and yesterday. The directory may exceed
+that target between cleanup runs. Legacy undated JSONL files are no longer appended
+and use their modification date for the same age and pressure cleanup. This lifecycle
+does not change OTLP retry, exporter, or healthy-backend behavior.

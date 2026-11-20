@@ -25,6 +25,16 @@ describe('AlarmManager', () => {
     expect(entries[0].ip).toBe('10.0.0.1');
     expect(entries[0].ver).toBe('1.0.0');
     expect(entries[0].__time__).toBeGreaterThan(0);
+    expect(entries[0]).not.toHaveProperty('failure_class');
+  });
+
+  it('keeps SLS failure classes separate for the same endpoint', () => {
+    manager.record('FLUSH_SEND_ALARM', '1', 'destination', { endpoint_name: 'ep', failure_class: 'config' });
+    manager.record('FLUSH_SEND_ALARM', '3', 'network', { endpoint_name: 'ep', failure_class: 'transient' });
+    expect(manager.serialize()).toMatchObject([
+      { failure_class: 'config', alarm_level: '1', alarm_count: '1' },
+      { failure_class: 'transient', alarm_level: '3', alarm_count: '1' },
+    ]);
   });
 
   it('aggregates count for same alarm type and context', () => {
@@ -49,28 +59,15 @@ describe('AlarmManager', () => {
     expect(entries[1].endpoint_name).toBe('ep2');
   });
 
+  it('preserves coalesced worker occurrence counts alongside single alarms', () => {
+    manager.record('INTERCEPTOR_REGEX_ALARM', '2', 'first', { input_name: 'interceptor' }, 8);
+    manager.record('INTERCEPTOR_REGEX_ALARM', '2', 'latest', { input_name: 'interceptor' });
+    expect(manager.serialize()[0]).toMatchObject({ alarm_count: '9', alarm_message: 'latest' });
+  });
+
   it('clears alarms after serialize', () => {
     manager.record('HOOK_INSTALL_ALARM', '2', 'install failed');
     manager.serialize();
     expect(manager.serialize()).toEqual([]);
-  });
-
-  it('carries failure_class and keeps distinct classes on the same endpoint separate', () => {
-    manager.record('FLUSH_SEND_ALARM', '3', 'timeout', { endpoint_name: 'ep1', failure_class: 'transient' });
-    manager.record('FLUSH_SEND_ALARM', '1', 'project gone', { endpoint_name: 'ep1', failure_class: 'config' });
-
-    const entries = manager.serialize().sort((a, b) => (a.failure_class ?? '').localeCompare(b.failure_class ?? ''));
-    expect(entries).toHaveLength(2);
-    expect(entries[0].failure_class).toBe('config');
-    expect(entries[0].alarm_level).toBe('1');
-    expect(entries[1].failure_class).toBe('transient');
-    expect(entries[1].alarm_level).toBe('3');
-  });
-
-  it('omits failure_class when not provided (backward compatible)', () => {
-    manager.record('INPUT_STOP_ALARM', '3', 'timeout', { input_name: 'cursor-hook' });
-    const entries = manager.serialize();
-    expect(entries).toHaveLength(1);
-    expect(entries[0].failure_class).toBeUndefined();
   });
 });

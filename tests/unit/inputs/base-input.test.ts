@@ -42,6 +42,13 @@ describe('BaseInput', () => {
     vi.useRealTimers();
   });
 
+  it('uses LOONGSUITE_PILOT_POLL_INTERVAL_MS over the constructor value', () => {
+    vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '3000');
+    const overridden = new TestInput({ stateStore: stateStore as any, pollIntervalMs: 5_000 });
+    expect((overridden as { pollIntervalMs: number }).pollIntervalMs).toBe(3000);
+    vi.unstubAllEnvs();
+  });
+
   describe('start/stop lifecycle', () => {
     it('should set running to true after start', async () => {
       expect(input.running).toBe(false);
@@ -86,6 +93,167 @@ describe('BaseInput', () => {
       await input.stop();
       expect(spy).toHaveBeenCalledOnce();
     });
+  });
+
+  it('stops waiting for a shared checkpoint without abandoning its save or cleanup', async () => {
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    let rejectSave!: (error: Error) => void;
+    const saving = new Promise<void>((_resolve, reject) => { rejectSave = reject; });
+    vi.spyOn(stateStore, 'save').mockImplementation(() => { entered(); return saving; });
+    Object.defineProperty(stateStore, 'waitingForOutput', { value: true });
+    const onStop = vi.fn();
+    input.onStopFn = onStop;
+    const start = input.start();
+    await waiting;
+    await input.stop();
+    await start;
+    expect(onStop).toHaveBeenCalledOnce();
+    expect(input.running).toBe(false);
+    // The shared save remains owned by StateStore; a later failure is handled
+    // even though this input no longer waits for it.
+    rejectSave(new Error('another output was cancelled'));
+    await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('still drains an active checkpoint write when no output hold is pending', async () => {
+    let entered!: () => void;
+    const writing = new Promise<void>(resolve => { entered = resolve; });
+    let finish!: () => void;
+    const saved = new Promise<void>(resolve => { finish = resolve; });
+    vi.spyOn(stateStore, 'save').mockImplementation(() => { entered(); return saved; });
+    const onStop = vi.fn();
+    input.onStopFn = onStop;
+    const start = input.start();
+    await writing;
+    const stop = input.stop();
+    await Promise.resolve();
+    expect(onStop).not.toHaveBeenCalled();
+    finish();
+    await Promise.all([start, stop]);
+    expect(onStop).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])('finishes startup at an output hold without overlapping the pending first cycle (watcher=%s)', async earlyWatcher => {
+    let accept!: () => void;
+    const saving = new Promise<void>(resolve => { accept = resolve; });
+    let held = true;
+    Object.defineProperty(stateStore, 'waitingForOutput', { get: () => held });
+    let entered!: () => void;
+    const checkpoint = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(stateStore, 'save').mockImplementation(() => { entered(); return saving; });
+    input.collectFn = vi.fn(async () => []);
+    if (earlyWatcher) {
+      input.onStartFn = async () => {
+        (input as unknown as { requestCollection(): void }).requestCollection();
+        await checkpoint;
+      };
+    }
+    let ready = false;
+    const start = input.start().then(() => { ready = true; });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(ready).toBe(true);
+      await start;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(input.collectFn).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      held = false;
+      accept();
+      await start;
+      await input.stop();
+    }
+  });
+
+  it('does not couple startup to a checkpoint that can acquire a later output hold', async () => {
+    let complete!: () => void;
+    const writing = new Promise<void>(resolve => { complete = resolve; });
+    let held = false;
+    Object.defineProperty(stateStore, 'waitingForOutput', { get: () => held });
+    vi.spyOn(stateStore, 'save').mockImplementation(() => writing);
+    let ready = false;
+    const start = input.start().then(() => { ready = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ready).toBe(true);
+    held = true;
+    await start;
+    await input.stop();
+    complete();
+  });
+
+  it('drains startup resources before stop and never collects after cancelled startup', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let watcherOpen = false;
+    input.onStartFn = async () => { entered(); await gate; watcherOpen = true; };
+    input.onStopFn = async () => { watcherOpen = false; };
+    const collect = vi.fn(async () => []);
+    input.collectFn = collect;
+    const starting = input.start();
+    await started;
+    const stopping = input.stop();
+    expect(input.running).toBe(false);
+    release();
+    await Promise.all([starting, stopping]);
+    expect(watcherOpen).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(collect).not.toHaveBeenCalled();
+  });
+
+  it('does not install a timer when stopped during the first collection', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const collecting = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    input.collectFn = vi.fn(async () => { entered(); await gate; return []; });
+    const starting = input.start();
+    await collecting;
+    const stopping = input.stop();
+    release();
+    await Promise.all([starting, stopping]);
+    expect(input.running).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(input.collectFn).toHaveBeenCalledOnce();
+  });
+
+  it('shares pending startup and waits for cleanup before restarting', async () => {
+    let releaseStart!: () => void;
+    const gate = new Promise<void>(resolve => { releaseStart = resolve; });
+    input.onStartFn = vi.fn(async () => { await gate; });
+    const starting = input.start();
+    const duplicate = input.start();
+    expect(duplicate).toBe(starting);
+    releaseStart();
+    await starting;
+    let releaseStop!: () => void;
+    const cleanup = new Promise<void>(resolve => { releaseStop = resolve; });
+    input.onStopFn = async () => { await cleanup; };
+    const stopping = input.stop();
+    const restarting = input.start();
+    await Promise.resolve();
+    expect(input.onStartFn).toHaveBeenCalledOnce();
+    releaseStop();
+    await Promise.all([stopping, restarting]);
+    expect(input.onStartFn).toHaveBeenCalledTimes(2);
+    expect(input.running).toBe(true);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it('cleans failed startup and allows a later retry', async () => {
+    input.onStartFn = vi.fn().mockRejectedValueOnce(new Error('startup failed')).mockResolvedValue(undefined);
+    input.onStopFn = vi.fn(async () => {});
+    await expect(input.start()).rejects.toThrow('startup failed');
+    expect(input.running).toBe(false);
+    expect(input.onStopFn).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    await input.start();
+    expect(input.running).toBe(true);
   });
 
   describe('polling cycle', () => {
@@ -210,13 +378,24 @@ describe('BaseInput', () => {
       };
 
       const emitted: AgentActivityEntry[][] = [];
+      const runtimeDeltas: Array<Record<string, number | string>> = [];
       input.on('entries', (e) => emitted.push(e));
+      input.on('input-runtime-delta', delta => runtimeDeltas.push(delta));
 
       await input.start();
       expect(emitted).toHaveLength(0);
+      expect(runtimeDeltas).toHaveLength(1);
+      expect(runtimeDeltas[0]).toMatchObject({
+        sourceKind: 'primary',
+        rawReadCalls: 0,
+        rawReadBytes: 0,
+        rawInRecords: 0,
+        rawInBytes: 0,
+      });
 
       await vi.advanceTimersByTimeAsync(5_000);
       expect(emitted).toHaveLength(1);
+      expect(runtimeDeltas).toHaveLength(2);
     });
   });
 });

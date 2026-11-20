@@ -21,6 +21,7 @@ import {
   buildMatrixProbeScript,
 } from './agent-matrix.mjs';
 import { buildAgentProbeRemoteBody } from './agent-probe-body.mjs';
+import { providerOptionalForAgentTurn } from './provider-contract.mjs';
 
 /**
  * Default installer URL shared by run-remote-e2e and the per-scenario script generators.
@@ -740,6 +741,7 @@ exit 0
  * 独立导出便于单元测试。
  */
 export const JSONL_VALIDATOR_JS = `'use strict';
+${providerOptionalForAgentTurn.toString()}
 const fs = require('fs');
 const path = require('path');
 
@@ -756,20 +758,29 @@ const MAX_SAMPLES = parseInt(process.env.E2E_JSONL_MAX_SAMPLES || '3', 10);
 
 const COMMON_REQUIRED = [
   'time_unix_nano', 'event.id', 'user.id', 'event.name',
-  'gen_ai.session.id', 'gen_ai.agent.type', 'gen_ai.provider.name',
+  'gen_ai.session.id', 'gen_ai.agent.type',
 ];
 const EVENT_NAME_ENUM = new Set([
+  'gen_ai.agent.invoke', 'gen_ai.agent.result',
   'llm.request', 'llm.response', 'tool.call', 'tool.result',
-  'skill.use', 'tool.approve', 'other',
+  'gen_ai.model.request', 'gen_ai.model.response', 'gen_ai.tool.call', 'gen_ai.tool.result',
+  'gen_ai.agent.invoke', 'gen_ai.agent.result',
+  'skill.use', 'tool.approve', 'agent.input', 'other',
 ]);
 const CONDITIONAL_REQUIRED = {
   'tool.call': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],
   'tool.result': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],
+  'gen_ai.tool.call': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],
+  'gen_ai.tool.result': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],
+  'gen_ai.agent.invoke': ['gen_ai.agent.invocation.id'],
+  'gen_ai.agent.result': ['gen_ai.agent.invocation.id'],
   'skill.use': ['gen_ai.skill.name'],
 };
 const COVERAGE_FIELDS = [
   ...COMMON_REQUIRED,
+  'gen_ai.provider.name', 'loongsuite.observation.scope',
   'trace_id', 'span_id', 'gen_ai.turn.id', 'gen_ai.step.id',
+  'gen_ai.agent.invocation.id', 'gen_ai.agent.parent.invocation.id',
   'gen_ai.turn.start', 'gen_ai.turn.end',
   'gen_ai.request.id', 'gen_ai.request.model',
   'gen_ai.response.id', 'gen_ai.response.model', 'gen_ai.response.finish_reasons',
@@ -777,6 +788,8 @@ const COVERAGE_FIELDS = [
   'gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens',
   'gen_ai.tool.name', 'gen_ai.tool.call.id', 'gen_ai.tool.call.duration',
   'tool.result.status', 'error.type',
+  'gen_ai.agent.id', 'gen_ai.agent.parent.id', 'gen_ai.agent.peer.id',
+  'gen_ai.agent.invocation.id', 'gen_ai.agent.parent.invocation.id',
 ];
 const NUMBER_FIELDS = [
   'gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens',
@@ -794,6 +807,7 @@ const PLACEHOLDER_FIELDS = [
   'gen_ai.provider.name', 'gen_ai.request.model', 'gen_ai.response.model',
 ];
 const PLACEHOLDERS = new Set(['unknown', 'n/a', 'na', 'none', 'null', 'undefined']);
+const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
 
 function listJsonl(dir) {
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
@@ -823,6 +837,33 @@ function pct(num, total) {
 
 function hasValue(value) {
   return value !== undefined && value !== null && value !== '';
+}
+
+function pairingEventName(value) {
+  return ({
+    'gen_ai.model.request': 'llm.request',
+    'gen_ai.model.response': 'llm.response',
+    'gen_ai.tool.call': 'tool.call',
+    'gen_ai.tool.result': 'tool.result',
+  })[value] || value;
+}
+
+function normalizedAgentType(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function isTerminalTurnEntry(entry) {
+  const agentType = normalizedAgentType(entry['gen_ai.agent.type']);
+  if (entry['gen_ai.agent.scope'] === 'subagent' && agentType !== 'codex') return false;
+  if (entry['gen_ai.turn.end'] === true) return true;
+  // Codex status applies to every record; only the native marker closes a turn.
+  if (agentType === 'codex') return false;
+  if (agentType === 'openclaw') {
+    if (entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') return false;
+    return entry['agent.openclaw.hook'] === 'llm_output';
+  }
+  const reasons = entry['gen_ai.response.finish_reasons'];
+  return Array.isArray(reasons) && reasons.some(reason => TERMINAL_FINISH_REASONS.has(reason));
 }
 
 function increment(target, key, amount = 1) {
@@ -931,6 +972,12 @@ for (const file of files) {
     const en = entry['event.name'];
     const conditional = CONDITIONAL_REQUIRED[en] || [];
     const miss = [...COMMON_REQUIRED, ...conditional].filter(k => !hasValue(entry[k]));
+    if (entry['loongsuite.observation.scope'] !== undefined && !providerOptionalForAgentTurn(entry)) {
+      addIssue(base, 'invalid_observation_scope', ['loongsuite.observation.scope']);
+    }
+    if (!hasValue(entry['gen_ai.provider.name']) && !providerOptionalForAgentTurn(entry)) {
+      miss.push('gen_ai.provider.name');
+    }
     const failedStatus = typeof entry['tool.result.status'] === 'string'
       && ['failure', 'failed', 'error'].includes(entry['tool.result.status'].toLowerCase());
     const finishReasons = Array.isArray(entry['gen_ai.response.finish_reasons'])
@@ -964,15 +1011,16 @@ for (const row of rows) {
 const steps = new Map();
 for (const row of rows) {
   const entry = row.entry;
-  if (entry['event.name'] !== 'llm.request' && entry['event.name'] !== 'llm.response') continue;
+  const eventName = pairingEventName(entry['event.name']);
+  if (eventName !== 'llm.request' && eventName !== 'llm.response') continue;
   if (!hasValue(entry['gen_ai.step.id'])) continue;
   const key = String(entry['gen_ai.session.id']) + '\\0' + String(entry['gen_ai.turn.id'] || '') + '\\0' + String(entry['gen_ai.step.id']);
   if (!steps.has(key)) steps.set(key, []);
   steps.get(key).push(row);
 }
 for (const stepRows of steps.values()) {
-  const requests = stepRows.filter(row => row.entry['event.name'] === 'llm.request');
-  const responses = stepRows.filter(row => row.entry['event.name'] === 'llm.response');
+  const requests = stepRows.filter(row => pairingEventName(row.entry['event.name']) === 'llm.request');
+  const responses = stepRows.filter(row => pairingEventName(row.entry['event.name']) === 'llm.response');
   if (requests.length !== 1 || responses.length !== 1) {
     addIssue(stepRows[0].file, 'model_pair_error', ['event.name', 'gen_ai.step.id']);
   }
@@ -981,7 +1029,8 @@ for (const stepRows of steps.values()) {
 const tools = new Map();
 for (const row of rows) {
   const entry = row.entry;
-  if (entry['event.name'] !== 'tool.call' && entry['event.name'] !== 'tool.result') continue;
+  const eventName = pairingEventName(entry['event.name']);
+  if (eventName !== 'tool.call' && eventName !== 'tool.result') continue;
   const callId = entry['gen_ai.tool.call.id'];
   if (!hasValue(callId)) continue;
   const key = String(entry['gen_ai.session.id']) + '\\0' + String(callId);
@@ -989,8 +1038,8 @@ for (const row of rows) {
   tools.get(key).push(row);
 }
 for (const toolRows of tools.values()) {
-  const calls = toolRows.filter(row => row.entry['event.name'] === 'tool.call');
-  const results = toolRows.filter(row => row.entry['event.name'] === 'tool.result');
+  const calls = toolRows.filter(row => pairingEventName(row.entry['event.name']) === 'tool.call');
+  const results = toolRows.filter(row => pairingEventName(row.entry['event.name']) === 'tool.result');
   const names = new Set(toolRows.map(row => row.entry['gen_ai.tool.name']).filter(hasValue));
   if (calls.length !== 1 || results.length !== 1 || names.size !== 1) {
     addIssue(toolRows[0].file, 'tool_pair_error', ['event.name', 'gen_ai.tool.call.id', 'gen_ai.tool.name']);
@@ -1000,16 +1049,21 @@ for (const toolRows of tools.values()) {
 const turns = new Map();
 for (const row of rows) {
   const entry = row.entry;
+  if (entry['event.name'] === 'gen_ai.agent.invoke' || entry['event.name'] === 'gen_ai.agent.result') continue;
   if (!hasValue(entry['gen_ai.turn.id'])) continue;
-  if (!hasValue(entry['gen_ai.turn.start']) && !hasValue(entry['gen_ai.turn.end'])) continue;
-  const key = String(entry['gen_ai.session.id']) + '\\0' + String(entry['gen_ai.turn.id']);
+  if (entry['gen_ai.agent.scope'] === 'subagent'
+    && normalizedAgentType(entry['gen_ai.agent.type']) !== 'codex') continue;
+  if (entry['event.name'] === 'gen_ai.agent.invoke' || entry['event.name'] === 'gen_ai.agent.result') continue;
+  const key = String(entry['gen_ai.agent.type']) + '\\0'
+    + String(entry['gen_ai.session.id']) + '\\0' + String(entry['gen_ai.turn.id']);
   if (!turns.has(key)) turns.set(key, []);
   turns.get(key).push(row);
 }
 for (const turnRows of turns.values()) {
   const starts = turnRows.filter(row => row.entry['gen_ai.turn.start'] === true).length;
   const ends = turnRows.filter(row => row.entry['gen_ai.turn.end'] === true).length;
-  if (starts !== 1 || ends !== 1) {
+  const completed = turnRows.some(row => isTerminalTurnEntry(row.entry));
+  if (starts !== 1 || ends !== (completed ? 1 : 0)) {
     addIssue(turnRows[0].file, 'turn_boundary_error', ['gen_ai.turn.start', 'gen_ai.turn.end']);
   }
 }
@@ -1036,7 +1090,7 @@ console.log('');
 console.log('=== [jsonl-validate] summary ===');
 console.log('  files=' + files.length + ' entries=' + totalEntries + ' windowed=' + totalWindowed);
 for (const category of [
-  'missing_required', 'bad_event_name', 'parse_error', 'type_error',
+  'missing_required', 'bad_event_name', 'parse_error', 'type_error', 'invalid_observation_scope',
   'duplicate_event_id', 'model_pair_error', 'tool_pair_error', 'turn_boundary_error',
   'empty_window',
 ]) {

@@ -1,0 +1,4 @@
+{"ts":"2026-07-29T03:48:52.621Z","sid":"session-redacted","msg":"shell.turn.inference_start","ctx":{"loop_index":1}}
+{"ts":"2026-07-29T03:48:57.827Z","sid":"session-redacted","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"model_elapsed_ms":5206,"prompt_tokens":10244,"cached_prompt_tokens":8448,"completion_tokens":237,"reasoning_tokens":10}}
+{"ts":"2026-07-29T03:48:58.000Z","sid":"session-redacted","msg":"shell.tool.exec_done","ctx":{"tool_name":"read_file","elapsed_ms":125,"success":false}}
+{"ts":"2026-07-29T03:48:58.010Z","sid":"session-redacted","msg":"shell.tool.exec_done","ctx":{"tool_name":"read_file","elapsed_ms":0,"success":true}}

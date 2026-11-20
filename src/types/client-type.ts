@@ -6,6 +6,7 @@ export enum ClientType {
   // IDE tools
   Cursor = 'cursor',
   Qoder = 'qoder',
+  QoderApp = 'qoder-app',
   QoderCn = 'qoder-cn',
   QoderIdea = 'qoder-idea',
   QoderWork = 'qoder-work',
@@ -18,6 +19,7 @@ export enum ClientType {
   LingmaVscode = 'lingma-vscode',
   Wukong = 'wukong',
   WorkBuddy = 'workbuddy',
+  DoubaoWork = 'doubao-work',
 
   // CLI tools
   GeminiCli = 'gemini-cli',
@@ -41,10 +43,13 @@ export enum ClientType {
   ClineHook = 'cline-hook',
   GithubCopilotHook = 'github-copilot-hook',
   AoneCopilotHook = 'aone-copilot-hook',
+  GrokBuildHook = 'grok-build',
+  CopilotCli = 'copilot',
   OpenCode = 'opencode',
   MimoCode = 'mimo-code',
   Hermes = 'hermes',
   OpenClaw = 'openclaw',
+  Dsh = 'dsh',
 
 }
 

@@ -42,6 +42,8 @@ describe('QwenWorkCNInput', () => {
       time_unix_nano: '1770000000000000000',
       observed_time_unix_nano: '1770000000000000000',
       version: '0.1.5',
+      'agent.qwenworkcn.version': '0.1.5',
+      'agent.qwenworkcn.cwd': '/workspace/qwen-work-cn',
     })}\n`);
     const entries: AgentActivityEntry[] = [];
     input.on('entries', batch => entries.push(...batch));
@@ -51,6 +53,9 @@ describe('QwenWorkCNInput', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]!['gen_ai.agent.type']).toBe(ClientType.QwenWorkCN);
     expect(entries[0]!['gen_ai.session.id']).toBe('qwen-session-1');
+    expect(entries[0]!['workspace.path']).toBe('/workspace/qwen-work-cn');
+    expect(entries[0]!.version).toBeUndefined();
+    expect(entries[0]!['agent.qwenworkcn.version']).toBe('0.1.5');
     expect(input.getAgentVersion()).toBe('0.1.5');
   });
 });

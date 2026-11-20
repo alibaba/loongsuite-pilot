@@ -9,12 +9,15 @@
  * can discover task-scoped session roots; Stop remains a best-effort wakeup.
  * This process never parses a transcript, accumulates Hook events, or writes
  * telemetry JSONL.
+ * Also records the Node-side duration of this run into the self-monitoring
+ * spool file (shared/hook-metrics.mjs).
  */
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { decodePayload } from './shared/decode-payload.mjs';
 import { logHookError } from './shared/error-logger.mjs';
 import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
@@ -35,7 +38,8 @@ function pilotDataDir() {
 
 function tryReadStdin() {
   try {
-    // decodePayload 去 BOM 并修复中文 UTF-8->GBK 双重编码(纠偏已从 PS 侧移入 node)。
+    // decodePayload strips the BOM and repairs double-encoded UTF-8->GBK
+    // Chinese text (this correction moved from the PS side into node).
     const input = decodePayload(fs.readFileSync(0)).trim();
     if (!input) return {};
     const value = JSON.parse(input);
@@ -53,6 +57,31 @@ function tryReadStdin() {
 
 function safePathPart(value) {
   return path.basename(String(value)).replace(/[^a-zA-Z0-9_-]/g, '_') || 'unknown';
+}
+
+function sessionDirFromTranscriptPath(transcriptPath, codexHome) {
+  if (typeof transcriptPath !== 'string' || !path.isAbsolute(transcriptPath)) return null;
+  const fileName = path.basename(transcriptPath);
+  if (!fileName.startsWith('rollout-') || !fileName.endsWith('.jsonl')) return null;
+
+  const dayDir = path.dirname(transcriptPath);
+  const monthDir = path.dirname(dayDir);
+  const yearDir = path.dirname(monthDir);
+  const sessionDir = path.dirname(yearDir);
+  if (
+    !/^\d{4}$/.test(path.basename(yearDir))
+    || !/^(0[1-9]|1[0-2])$/.test(path.basename(monthDir))
+    || !/^(0[1-9]|[12]\d|3[01])$/.test(path.basename(dayDir))
+    || path.basename(sessionDir) !== 'sessions'
+  ) {
+    return null;
+  }
+
+  const relative = path.relative(codexHome, sessionDir);
+  const parts = relative.split(path.sep);
+  const supportedLayout = relative === 'sessions'
+    || (parts.length === 3 && parts[0] === 'u' && parts[1] && parts[2] === 'sessions');
+  return supportedLayout ? sessionDir : null;
 }
 
 function writeAtomicJson(directory, fileName, payload, {
@@ -116,26 +145,67 @@ function writeTurnSpanContext(input) {
   });
 }
 
-function writeWakeupMarker(input) {
+function writeWakeupMarker(input, hookEvent) {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   if (!sessionId) return;
   const configuredCodexHome = typeof process.env.CODEX_HOME === 'string'
     ? process.env.CODEX_HOME.trim()
     : '';
   const codexHome = path.resolve(configuredCodexHome || path.join(os.homedir(), '.codex'));
+  const transcriptPath = typeof input.transcript_path === 'string' && input.transcript_path
+    ? input.transcript_path
+    : '';
+  const sessionDir = sessionDirFromTranscriptPath(transcriptPath, codexHome)
+    ?? path.join(codexHome, 'sessions');
 
-  // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
+  // Option 1 (env): on the first turn read TRACEPARENT and write a session-level
+  // correlation record (fail-open, once per session).
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
 
   const directory = path.join(pilotDataDir(), 'state', 'codex', 'transcript-wakeups');
+  const marker = path.join(directory, `${safePathPart(sessionId)}.json`);
+  let initialTurnId = '';
+  let recoveryTurnId = '';
+  try {
+    const existing = JSON.parse(fs.readFileSync(marker, 'utf8'));
+    if (existing && typeof existing.initial_turn_id === 'string') {
+      initialTurnId = existing.initial_turn_id;
+    }
+    if (existing && typeof existing.recovery_turn_id === 'string') {
+      recoveryTurnId = existing.recovery_turn_id;
+    }
+  } catch {
+    // The first Hook for a session has no existing marker.
+  }
+  if (
+    !initialTurnId
+    && !recoveryTurnId
+    && (hookEvent === 'user-prompt-submit' || hookEvent === 'subagent-start')
+    && typeof input.turn_id === 'string'
+  ) {
+    initialTurnId = input.turn_id;
+  }
+  if (
+    (hookEvent === 'stop' || hookEvent === 'subagent-stop')
+    && typeof input.turn_id === 'string'
+    && input.turn_id
+  ) {
+    // A terminal Hook proves this turn belongs to the rollout, but it may be a
+    // later turn when the corresponding Start Hook was missed. Keep it as
+    // recovery evidence rather than overwriting the exact initial anchor.
+    recoveryTurnId = input.turn_id;
+  }
   const payload = {
     session_id: sessionId,
     ...(typeof input.turn_id === 'string' && input.turn_id ? { turn_id: input.turn_id } : {}),
-    ...(typeof input.transcript_path === 'string' && input.transcript_path
-      ? { transcript_path: input.transcript_path }
+    ...(initialTurnId ? { initial_turn_id: initialTurnId } : {}),
+    ...(recoveryTurnId ? { recovery_turn_id: recoveryTurnId } : {}),
+    ...(transcriptPath
+      ? { transcript_path: transcriptPath }
       : {}),
+    hook_event: hookEvent,
     codex_home: codexHome,
-    session_dir: path.join(codexHome, 'sessions'),
+    session_dir: sessionDir,
     ...RESOURCE_ATTRIBUTE_FIELDS,
     received_at: new Date().toISOString(),
   };
@@ -147,25 +217,54 @@ function writeWakeupMarker(input) {
   });
 }
 
-function main() {
+function normalizedHookInput(input, subcommand) {
+  if (subcommand !== 'subagent-start' && subcommand !== 'subagent-stop') return input;
+  const childSessionId = typeof input.agent_id === 'string' ? input.agent_id : '';
+  const childTranscriptPath = subcommand === 'subagent-stop'
+    ? input.agent_transcript_path
+    : input.transcript_path;
+  return {
+    ...input,
+    session_id: childSessionId,
+    ...(typeof childTranscriptPath === 'string' && childTranscriptPath
+      ? { transcript_path: childTranscriptPath }
+      : {}),
+  };
+}
+
+async function main() {
   const subcommand = (process.argv[2] || '').trim();
   try {
     if (
       subcommand === 'session-start'
       || subcommand === 'user-prompt-submit'
+      || subcommand === 'subagent-start'
+      || subcommand === 'subagent-stop'
       || subcommand === 'stop'
     ) {
-      const input = tryReadStdin();
-      if (subcommand === 'user-prompt-submit' || subcommand === 'stop') {
+      const input = normalizedHookInput(tryReadStdin(), subcommand);
+      if (
+        subcommand === 'user-prompt-submit'
+        || subcommand === 'subagent-start'
+        || subcommand === 'subagent-stop'
+        || subcommand === 'stop'
+      ) {
         // Persist invocation attributes before publishing the wakeup so the
         // asynchronous transcript reader cannot observe the turn first.
         writeTurnSpanContext(input);
       }
-      writeWakeupMarker(input);
+      writeWakeupMarker(input, subcommand);
     }
   } finally {
     process.stdout.write('{}\n');
+    const durationMs = performance.now();
+    // A failed metrics-module load must not break the wakeup, and its load
+    // time is excluded from the measured business duration.
+    try {
+      const { recordHookTiming } = await import('./shared/hook-metrics.mjs');
+      recordHookTiming({ agentId: AGENT_ID, hookEvent: subcommand, durationMs });
+    } catch {}
   }
 }
 
-main();
+await main();

@@ -1,0 +1,34 @@
+# Gitleaks fingerprints for Copilot CLI fixture apiCallId values.
+#
+# These fingerprints are emitted by the `generic-api-key` rule against
+# high-entropy base64 `apiCallId` strings captured from real Copilot CLI
+# v1.0.86 events.jsonl sessions. They are not real secrets — `apiCallId`
+# is a per-request correlation identifier emitted by Copilot CLI's
+# telemetry layer (see fixtures' `rte:true` markers), not a credential.
+#
+# Workaround history:
+#   - CP5 v8 introduced 4 fixture files with raw apiCallId values.
+#   - The follow-up scrub commit replaced all 16 apiCallId occurrences
+#     with low-entropy placeholders (`test-api-call-id-001`..`-015`),
+#     eliminating leaks going forward.
+#   - The 6 older CP5 v3..v8 commits in the PR range still carry the
+#     high-entropy values in their tree snapshots; the fingerprints below
+#     suppress them so reviewer-side local `gitleaks detect` runs clean.
+#
+# Note: the GitHub Secret Scan workflow intentionally ignores
+# `.gitleaksignore` supplied by PR branches (see
+# .github/workflows/secret-scan.yml); these fingerprints are a local
+# backup only. The authoritative fix is the working-tree scrub.
+98e64da4e67482069de0a576ecfd9ccce07c01eb:tests/unit/hooks/copilot/fixtures/events-permdeny.jsonl:generic-api-key:7
+98e64da4e67482069de0a576ecfd9ccce07c01eb:tests/unit/hooks/copilot/fixtures/events-permdeny.jsonl:generic-api-key:14
+98e64da4e67482069de0a576ecfd9ccce07c01eb:tests/unit/hooks/copilot/fixtures/events-permdeny-scriptmode.jsonl:generic-api-key:11
+98e64da4e67482069de0a576ecfd9ccce07c01eb:tests/unit/hooks/copilot/fixtures/events-permdeny-scriptmode.jsonl:generic-api-key:20
+98e64da4e67482069de0a576ecfd9ccce07c01eb:tests/unit/hooks/copilot/fixtures/events-permdeny-scriptmode.jsonl:generic-api-key:29
+98e64da4e67482069de0a576ecfd9ccce07c01eb:tests/unit/hooks/copilot/fixtures/events-session2.jsonl:generic-api-key:11
+98e64da4e67482069de0a576ecfd9ccce07c01eb:tests/unit/hooks/copilot/fixtures/events-session2.jsonl:generic-api-key:20
+98e64da4e67482069de0a576ecfd9ccce07c01eb:tests/unit/hooks/copilot/fixtures/events-session2.jsonl:generic-api-key:33
+98e64da4e67482069de0a576ecfd9ccce07c01eb:tests/unit/hooks/copilot/fixtures/events-scenarioA.jsonl:generic-api-key:11
+98e64da4e67482069de0a576ecfd9ccce07c01eb:tests/unit/hooks/copilot/fixtures/events-scenarioA.jsonl:generic-api-key:20
+98e64da4e67482069de0a576ecfd9ccce07c01eb:tests/unit/hooks/copilot/fixtures/events-scenarioA.jsonl:generic-api-key:55
+98e64da4e67482069de0a576ecfd9ccce07c01eb:tests/unit/hooks/copilot/fixtures/events-scenarioA.jsonl:generic-api-key:68
+98e64da4e67482069de0a576ecfd9ccce07c01eb:tests/unit/hooks/copilot/fixtures/events-scenarioA.jsonl:generic-api-key:69

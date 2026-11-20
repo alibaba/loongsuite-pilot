@@ -65,6 +65,7 @@ export function simulateClaudeBashTool({
   if (isolateInheritedTraceContext) {
     delete childEnv.TRACEPARENT;
     delete childEnv.TRACESTATE;
+    delete childEnv.OTEL_RESOURCE_ATTRIBUTES;
   }
 
   const tool = spawnSync('bash', ['-c', effectiveInput.command], {

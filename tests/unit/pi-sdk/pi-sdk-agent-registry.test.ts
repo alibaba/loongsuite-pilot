@@ -326,6 +326,22 @@ describe('PI SDK Agent registry', () => {
       agentDir: path.join(os.homedir(), '.pi', 'agent'),
       detectionPaths: [detectionPath],
     })).rejects.toThrow('must be dedicated');
+
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    const overriddenDir = path.join(tmpDir, 'pi-override');
+    process.env.PI_CODING_AGENT_DIR = overriddenDir;
+    try {
+      await expect(registerPiSdkAgent({
+        dataDir,
+        id: 'override-dir-code',
+        name: 'Override Dir',
+        agentDir: overriddenDir,
+        detectionPaths: [detectionPath],
+      })).rejects.toThrow('must be dedicated');
+    } finally {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
+    }
   });
 
   it('serializes concurrent registrations before checking the dedicated agentDir', async () => {

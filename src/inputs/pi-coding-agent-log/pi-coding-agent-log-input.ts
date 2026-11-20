@@ -6,6 +6,7 @@ import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const DEFAULT_PILOT_DATA_DIR = '~/.loongsuite-pilot';
 
@@ -43,7 +44,8 @@ export class PiCodingAgentLogInput extends BaseHookInput {
       stateStore: opts.stateStore,
       logDir: opts.logDir ?? resolvePiCodingAgentLogDir(opts.dataDir),
       logPrefix: opts.logPrefix ?? 'pi-coding-agent',
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+      historyReplay: opts.historyReplay ?? {},
     });
     this.agentEnabled = opts.agentEnabled ?? (() => true);
   }
@@ -58,6 +60,7 @@ export class PiCodingAgentLogInput extends BaseHookInput {
 
   protected override async onStart(): Promise<void> {
     await ensurePiCodingAgentLogDir(this.logDir);
+    await super.onStart();
   }
 
   protected async transformRecord(
