@@ -15,7 +15,7 @@ Web 请求 Span
 
 ## 准备 Pilot
 
-安装包含此改动的 Pilot，并确认 Agent 正常加载其 Hook、保留可采集的 transcript。在现有配置中启用 `upstreamLink.enabled`，并配置 OTLP 输出。Web 探针和 Pilot 需把数据送到同一套可查询的 Trace 后端。
+在运行 Agent 的机器上[安装包含逐轮入站透传能力的 Pilot](installation.md)，并部署该版本的 Hook 或插件。保留 Agent 的会话记录。在默认配置文件 `~/.loongsuite-pilot/config.json` 中合并下列配置。按 [Trace 输出](trace-output.md) 配置 Pilot 的 OTLP 上报，确保 Web 探针和 Pilot 上报到同一个 Trace 后端。
 
 ```json
 {
@@ -23,7 +23,16 @@ Web 请求 Span
 }
 ```
 
-默认关联文件和 Hook 位于 `~/.loongsuite-pilot`。如果用自定义数据目录，把该路径通过 `LOONGSUITE_PILOT_DATA_DIR` 或绑定参数 `dataDir` 传到 Agent 端，并确保和 collector 配置一致。使用标准的 W3C propagator，把 Web 服务当前 Span 或包围 Agent 调用的 Span 放入 carrier。
+重启 Pilot 并检查 Hook 安装状态。
+
+```sh
+loongsuite-pilot restart
+loongsuite-pilot hook status --json
+```
+
+例如，Codex 缺少用户级 Hook 时，可以执行 `loongsuite-pilot hook install --agents codex --scope user`。其他 Agent 和部署方式见 [Agent 配置](agents.md)。
+
+使用自定义数据目录时，Agent 侧的 `LOONGSUITE_PILOT_DATA_DIR` 或绑定参数 `dataDir` 要与采集器使用的目录一致。在处理 Web 请求时，从当前 OpenTelemetry Span 注入 W3C carrier。
 
 | 调用方式 | 调用方传什么 | Agent 侧如何对应当前轮 |
 | --- | --- | --- |
@@ -34,7 +43,7 @@ Web 请求 Span
 
 ## Web 服务启动一轮 Codex CLI
 
-Python Web 服务在处理请求的函数里调用。Java 的做法相同，用 `W3CTraceContextPropagator` 向新建的 `ProcessBuilder.environment()` 注入当前 `Context`。每次调用生成新的请求 UUID，避免恢复同一会话时复用旧请求的父节点。
+在 Web 请求的 Span 仍处于当前上下文时调用 `run_codex`。示例依赖 `opentelemetry-api`。Java 可以用 `W3CTraceContextPropagator` 把当前 `Context` 注入新建的 `ProcessBuilder.environment()`。
 
 ```python
 import os
@@ -42,24 +51,29 @@ import subprocess
 from uuid import uuid4
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-def run_codex(prompt, session_id=None):
+def agent_env():
     carrier = {}
     TraceContextTextMapPropagator().inject(carrier)
+    propagation_keys = {"traceparent", "tracestate", "loongsuite_pilot_ingress_request_id"}
     env = {
         key: value for key, value in os.environ.items()
-        if key.lower() not in ("traceparent", "tracestate", "loongsuite_pilot_ingress_request_id")
+        if key.lower() not in propagation_keys
     }
     if "traceparent" in carrier:
         env.update({key.upper(): value for key, value in carrier.items()})
         env["LOONGSUITE_PILOT_INGRESS_REQUEST_ID"] = str(uuid4())
+    return env
+
+
+def run_codex(prompt, session_id=None):
     command = ["codex", "exec", "--json"]
     if session_id:
         command.extend(["resume", session_id])
-    return subprocess.run(command + [prompt], env=env, stdin=subprocess.DEVNULL,
+    return subprocess.run(command + [prompt], env=agent_env(), stdin=subprocess.DEVNULL,
                           capture_output=True, text=True, check=True, timeout=120)
 ```
 
-这三个变量只适合每次启动一个子进程处理一轮外部请求的入口。单独设置 `TRACEPARENT` 保留旧版的会话首轮兼容行为。上述 UUID 只是告诉 Hook 这是哪次子进程调用，Hook 自己会读取真实的 turn ID。Codex 的 `--ephemeral` 会关闭可供 Pilot 读取的会话记录，请使用默认的会话持久化。
+从首轮 stdout 的 `thread.started` 事件取出 `thread_id`，下一次 Web 请求把它传为 `session_id`。每次调用 `agent_env()` 都会为当前 Span 重新生成子进程环境和请求 UUID。Hook 用这个 UUID 认领本次进程调用，并用 Codex 提供的原生 turn ID 绑定。保留 Codex 默认的会话持久化，Pilot 需要读取 transcript。只传 `TRACEPARENT` 时适用会话首轮的兼容路径。
 
 ## 其他 Agent 的单轮本地调用
 
@@ -67,14 +81,37 @@ def run_codex(prompt, session_id=None):
 
 | Agent | 入口适配使用的轮次标识 |
 | --- | --- |
-| Cursor CLI | `beforeSubmitPrompt` 的 `generation_id` |
-| Grok Build | `user_prompt_submit` 的 `prompt_id` |
+| Cursor CLI（交互模式） | `beforeSubmitPrompt` 的 `generation_id` |
+| Grok Build（含 `-p` 和 `--resume`） | `user_prompt_submit` 的 `prompt_id` |
 | Claude Code | `UserPromptSubmit` 的 `prompt_id`，依赖 CLI 版本提供该字段 |
 | Pi Coding Agent | 扩展在 `before_agent_start` 写入的轮次 ID |
 | DeepSeek Harness | `turn/start` 的原生轮次号 |
 | OpenClaw | 本地嵌入执行中的原生 `runId` |
 
 常驻进程按每次请求调用 `bindUpstreamTurn`。绑定需要 Agent 侧的原生会话、轮次和本次 W3C 上下文。OpenClaw Gateway 入口可由调用方适配器用已知原生会话和 run ID 登记。环境变量入口用于实际执行 Agent 的新进程。
+
+### 启动和续聊 Cursor CLI
+
+1. 在运行 CLI 的账号下执行 `cursor-agent login`，用 `cursor-agent status` 确认登录。若安装的命令是 `agent`，用它执行以下步骤。
+2. Web 处理函数用 `env=agent_env()` 启动 `cursor-agent --model auto --mode ask`，为子进程提供交互终端或 PTY，等界面就绪后提交 prompt。首轮完成后用 `/copy-conversation-id` 取会话 ID，再用 `/exit` 退出。
+3. 下一次 Web 请求重新调用 `agent_env()`，启动 `cursor-agent --model auto --mode ask --resume <session-id>`。等会话加载完再提交本轮 prompt。[Cursor CLI 命令](https://cursor.com/docs/cli/reference/slash-commands)
+
+在实测的 Cursor CLI `2026.11.19-f005e9d` 中，`-p` 或 `--print` 缺少 Pilot 绑定和采集所需的 `beforeSubmitPrompt`、`afterAgentResponse` 和 `stop`。用 `--list-models` 查看当前账号可用的模型，实测该版本拒绝 `qwen-plus`。CLI 反复重连时，可在 Cursor 的 `cli-config.json` 中将 `network.useHttp1ForAgent` 设为 `true` 再启动。[Cursor CLI 配置](https://cursor.com/docs/cli/reference/configuration)
+
+### 启动和续聊 Grok Build
+
+每次调用都从 Web 请求生成 `env=agent_env()`。首轮用 `grok --output-format json -p "<prompt>"`，从 JSON 回复取 `sessionId`。下一次请求用 `grok --output-format json --resume <session-id> -p "<prompt>"`。
+
+Grok Build 1.0.89 已验证百炼 `qwen-plus`。在 `$GROK_HOME/config.toml`（默认 `~/.grok/config.toml`）添加以下配置，让子进程继承 `DASHSCOPE_API_KEY`，并在两条命令中加上 `--model bailian-qwen-plus`。`base_url` 选用与 API Key 对应的地域地址。[Grok Build 模型配置](https://docs.x.ai/build/settings) · [百炼兼容地址](https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope)
+
+```toml
+[model.bailian-qwen-plus]
+model = "qwen-plus"
+name = "Bailian Qwen Plus"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+env_key = "DASHSCOPE_API_KEY"
+api_backend = "chat_completions"
+```
 
 ## Web 服务调用 SDK
 
@@ -141,7 +178,7 @@ node dist/index.js
 ## 验证步骤
 
 1. 用已接入 OTel 的服务向同一 Agent 会话连续发送两次请求，可以使用相同文本。保持每次请求独立的 Web Span。
-2. 分别拿到两次 Web 请求的 Trace ID，在后端打开完整调用链。确认两条链路的 Pilot ENTRY 都是对应 Web Span 的直接子节点。
+2. 分别在后端打开两次 Web 请求的 Trace。每轮的 Pilot ENTRY 应与对应 Web Span 使用同一个 `traceId`，且 ENTRY 的 `parentSpanId` 等于该 Web Span 的 `spanId`。
 3. 只有 Web Span 时，核对 Agent 是否执行了 Hook、collector 能否读到该轮 transcript，以及两端是否用了同一数据目录和同一个 OTLP 后端。Agent 另起 Trace 时，核对调用边界传入的 carrier、真实 session/turn 和采集前的绑定文件。采样位为 `00` 时，默认采样器可能不导出子 Span。
 
 原生绑定以 Agent ID、原生 session ID、原生 turn ID 为键。相同绑定可重试，不同父节点会返回 `conflict`。过期文件由 Pilot 定期清理。缺失或非法上下文继续独立采集。此处的链路止于 Pilot 采集到的 Agent 执行。
