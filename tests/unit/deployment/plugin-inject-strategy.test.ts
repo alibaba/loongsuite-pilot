@@ -232,7 +232,9 @@ describe('PluginInjectStrategy', () => {
     await fs.mkdir(path.dirname(settingsPath), { recursive: true });
     const tildeEntry = '~/.loongsuite-pilot/plugins/pi-coding-agent/index.mjs';
     const unrelated = '~/different/plugins/pi-coding-agent/index.mjs';
-    const original = `// Managed by dotfiles\n${JSON.stringify({ extensions: [tildeEntry, unrelated] })}\n`;
+    const adapter = '~/vendor/loongsuite-pilot-pi-coding-agent-adapter/index.mjs';
+    const preserved = [unrelated, adapter];
+    const original = `// Managed by dotfiles\n${JSON.stringify({ extensions: [tildeEntry, ...preserved] })}\n`;
     await fs.writeFile(settingsPath, original);
 
     expect(await strategy.needsDeploy(piDefinition())).toBe(false);
@@ -240,16 +242,18 @@ describe('PluginInjectStrategy', () => {
     expect(await fs.readFile(settingsPath, 'utf8')).toBe(original);
 
     const absoluteEntry = path.join(homeDataDir, 'plugins', 'pi-coding-agent', 'index.mjs');
-    await fs.writeFile(settingsPath, JSON.stringify({ extensions: [tildeEntry, unrelated, absoluteEntry] }));
+    await fs.writeFile(settingsPath, JSON.stringify({
+      extensions: [tildeEntry, ...preserved, absoluteEntry, 'loongsuite-pilot-pi-coding-agent'],
+    }));
     expect(await strategy.needsDeploy(piDefinition())).toBe(true);
     await expect(strategy.deploy(piDefinition())).resolves.toMatchObject({ success: true });
 
     const existing = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
-    expect(existing.extensions).toEqual([tildeEntry, unrelated]);
+    expect(existing.extensions).toEqual([tildeEntry, ...preserved]);
     expect(await strategy.needsDeploy(piDefinition())).toBe(false);
 
     expect(await strategy.undeploy(piDefinition())).toBe(true);
-    expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).extensions).toEqual([unrelated]);
+    expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).extensions).toEqual(preserved);
   });
 
   it('preserves a Windows Pi extension written with a backslash after the home marker', async () => {

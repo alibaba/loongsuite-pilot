@@ -3006,7 +3006,7 @@ try {
       const before = data.extensions.length;
       data.extensions = data.extensions.filter(entry => {
         const value = comparable(entry);
-        return !(target.spec && value === target.spec) && !value.includes(target.pluginId);
+        return !(target.spec && value === target.spec) && entry !== target.pluginId;
       });
       if (data.extensions.length === before) continue;
       if (raw !== JSON.stringify(data, null, 2) + '\n') {

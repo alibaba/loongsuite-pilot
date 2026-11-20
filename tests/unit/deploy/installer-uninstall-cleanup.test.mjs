@@ -54,12 +54,15 @@ function verifyPiCleanupContinuesPastInvalidConfig(script, envKey) {
     writeFileSync(badConfig, '{ broken custom config');
     const managedSpec = join(dataDir, 'plugins', 'pi-coding-agent', 'agents', 'good-code.mjs');
     const unrelatedSpec = '~/different/plugins/pi-coding-agent/agents/good-code.mjs';
+    const adapterSpec = '~/vendor/loongsuite-pilot-pi-sdk-good-code-adapter/index.mjs';
     writeFileSync(goodConfig, `{
   // preserve a backup before normalizing JSONC
   "url": "https://example.test/path//segment",
   "extensions": [
     ${JSON.stringify(managedSpec)},
     ${JSON.stringify(unrelatedSpec)},
+    ${JSON.stringify(adapterSpec)},
+    "loongsuite-pilot-pi-sdk-good-code",
     "/third-party.mjs"
   ]
 }\n`);
@@ -86,7 +89,7 @@ function verifyPiCleanupContinuesPastInvalidConfig(script, envKey) {
     expect(run.stdout).toBe('partial');
     expect(JSON.parse(readFileSync(goodConfig, 'utf8'))).toEqual({
       url: 'https://example.test/path//segment',
-      extensions: [unrelatedSpec, '/third-party.mjs'],
+      extensions: [unrelatedSpec, adapterSpec, '/third-party.mjs'],
     });
     expect(readFileSync(badConfig, 'utf8')).toBe('{ broken custom config');
     expect(existsSync(`${goodConfig}.bak`)).toBe(true);
@@ -377,11 +380,14 @@ remove_pi_coding_agent_extension`, 'cleanup', dataDir], {
         ? '~/shared pilot data/plugins/pi-coding-agent/index.mjs'
         : join(dataDir, 'plugins/pi-coding-agent/index.mjs');
       const unrelated = '~/different/plugins/pi-coding-agent/index.mjs';
-      writeFileSync(configPath, JSON.stringify({ extensions: [extension, unrelated, '/third-party.mjs'] }));
+      const adapter = '~/vendor/loongsuite-pilot-pi-coding-agent-adapter/index.mjs';
+      writeFileSync(configPath, JSON.stringify({ extensions: [
+        extension, 'loongsuite-pilot-pi-coding-agent', unrelated, adapter, '/third-party.mjs',
+      ] }));
       writeFileSync(join(dataDir, 'deployed-agents.json'), JSON.stringify({ 'pi-coding-agent': { pluginInjectConfigPath: configPath } }));
       const run = cleanupWithoutPathNode(root, dataDir);
       expect(run.status, run.stderr).toBe(0);
-      expect(JSON.parse(readFileSync(configPath, 'utf8')).extensions).toEqual([unrelated, '/third-party.mjs']);
+      expect(JSON.parse(readFileSync(configPath, 'utf8')).extensions).toEqual([unrelated, adapter, '/third-party.mjs']);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -394,12 +400,14 @@ remove_pi_coding_agent_extension`, 'cleanup', dataDir], {
       mkdirSync(dataDir);
       mkdirSync(dirname(configPath));
       const unrelated = String.raw`~\different\plugins\pi-coding-agent\index.mjs`;
+      const adapter = String.raw`~\vendor\loongsuite-pilot-pi-coding-agent-adapter\index.mjs`;
       writeFileSync(configPath, JSON.stringify({ extensions: [
         '~/shared Pilot data/plugins/pi-coding-agent/index.mjs',
         String.raw`~\shared Pilot data\plugins/pi-coding-agent/index.mjs`,
         pathToFileURL(join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs')).href,
         'loongsuite-pilot-pi-coding-agent',
         unrelated,
+        adapter,
       ] }));
       writeFileSync(join(dataDir, 'deployed-agents.json'), JSON.stringify({
         'pi-coding-agent': { pluginInjectConfigPath: configPath },
@@ -427,7 +435,7 @@ exit $LASTEXITCODE
       });
       expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
       expect(run.stdout).toContain('Cleaned Pi / PI SDK Agent extension configs');
-      expect(JSON.parse(readFileSync(configPath, 'utf8')).extensions).toEqual([unrelated]);
+      expect(JSON.parse(readFileSync(configPath, 'utf8')).extensions).toEqual([unrelated, adapter]);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

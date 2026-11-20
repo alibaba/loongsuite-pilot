@@ -135,9 +135,9 @@ export class PluginInjectStrategy implements DeployStrategy {
       for (const key of this.flatPluginKeys(json, config)) {
         const entries = json[key] as unknown[];
         if (entries.some(entry => this.isReplacement(entry, config, resolvedSpec))) return true;
-        if (key !== pluginKey && entries.some(entry => this.matchesSpec(entry, resolvedSpec, config.pluginId))) return true;
+        if (key !== pluginKey && entries.some(entry => this.matchesSpec(entry, resolvedSpec, config))) return true;
       }
-      const matching = plugins.filter(entry => this.matchesSpec(entry, resolvedSpec, config.pluginId));
+      const matching = plugins.filter(entry => this.matchesSpec(entry, resolvedSpec, config));
       if (matching.length !== 1) return true;
       const spec = this.entrySpec(matching[0]);
       return this.isHomeRelativeSpec(spec) && !this.canPreserveSpec(spec, resolvedSpec, config);
@@ -228,7 +228,7 @@ export class PluginInjectStrategy implements DeployStrategy {
         mutated = false;
         for (const key of this.flatPluginKeys(json, config)) {
           const before = json[key] as unknown[];
-          const after = before.filter(entry => !this.matchesSpec(entry, resolvedSpec, config.pluginId)
+          const after = before.filter(entry => !this.matchesSpec(entry, resolvedSpec, config)
             && !this.isReplacement(entry, config, resolvedSpec));
           if (after.length !== before.length) { json[key] = after; mutated = true; }
         }
@@ -325,11 +325,11 @@ export class PluginInjectStrategy implements DeployStrategy {
     return process.platform === 'win32' ? resolved.replace(/\\/g, '/') : resolved;
   }
 
-  private matchesSpec(entry: unknown, resolvedSpec: string, pluginId: string): boolean {
+  private matchesSpec(entry: unknown, resolvedSpec: string, config: PluginInjectConfig): boolean {
     const entryStr = this.entrySpec(entry);
-
-    return this.normalizeSpecForComparison(entryStr) === this.normalizeSpecForComparison(resolvedSpec)
-      || entryStr.includes(pluginId);
+    if (this.normalizeSpecForComparison(entryStr) === this.normalizeSpecForComparison(resolvedSpec)) return true;
+    // Pi extensions are paths. A path containing the ID can belong to another extension.
+    return config.configKey === 'extensions' ? entryStr === config.pluginId : entryStr.includes(config.pluginId);
   }
 
   private normalizeSpecForComparison(spec: string): string {
@@ -392,7 +392,7 @@ export class PluginInjectStrategy implements DeployStrategy {
       let keptEquivalent = false;
       const after = before.filter(entry => {
         if (this.isReplacement(entry, config, resolvedSpec)) return false;
-        if (!this.matchesSpec(entry, resolvedSpec, config.pluginId)) return true;
+        if (!this.matchesSpec(entry, resolvedSpec, config)) return true;
         if (key !== pluginKey || keptEquivalent) return false;
         keptEquivalent = this.canPreserveSpec(this.entrySpec(entry), resolvedSpec, config);
         return keptEquivalent;
