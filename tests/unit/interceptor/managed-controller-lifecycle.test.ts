@@ -13,7 +13,7 @@ vi.mock('../../../src/utils/logger.js', () => ({ createLogger: () => logs }));
 const directories: string[] = [];
 const controllers: ManagedInterceptor[] = [];
 const probe: ManagedScriptRule = {
-  kind: 'script', id: 'policy', version: '1', shell: 'powershell', enforcement: 'enforce',
+  kind: 'script', id: 'policy', version: '1', shell: 'powershell', action: 'block',
   agents: ['qoder'], events: ['UserPromptSubmit'],
 };
 const request = { agent: 'qoder' as const, event: 'UserPromptSubmit' as const, prompt: 'hello', raw: {} };

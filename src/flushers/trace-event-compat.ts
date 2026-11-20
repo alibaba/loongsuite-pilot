@@ -23,7 +23,7 @@ export function prepareTraceEvents(records: AgentActivityEntry[]): AgentActivity
     .filter(([long, short]) => names.has(long as AgentActivityEntry['event.name']) && names.has(short))
     .map(([, short]) => short));
   return records.flatMap(record => {
-    if (isAgentAuditEvent(record) || record['event.name'] === 'agent.input' || record['event.name'] === 'guardrail.evaluation') return [];
+    if (isAgentAuditEvent(record) || record['event.name'] === 'agent.input') return [];
     const name = TRACE_NAMES[record['event.name']] ?? record['event.name'];
     const id = record['event.id'];
     if (id && ids.has(id)) return [];

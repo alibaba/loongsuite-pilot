@@ -29,6 +29,7 @@ import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
 import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import { QoderTranscriptSource } from './transcript-source.js';
+import { QoderIdeDelegations } from './ide-delegations.js';
 import { QoderLegacyHookReader } from './legacy-hook-reader.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
@@ -122,6 +123,8 @@ export class QoderTraceInput extends BaseInput {
   private multimodalStopped = false;
   private readonly transcriptSource: QoderTranscriptSource;
   private readonly legacyHookReader = new QoderLegacyHookReader();
+  private readonly ideDelegations = new QoderIdeDelegations(undefined,
+    (reason, details) => this.logger.warn('Qoder IDE delegation deferred', { reason, ...details }));
 
   constructor(opts: QoderTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
@@ -194,16 +197,28 @@ export class QoderTraceInput extends BaseInput {
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
+    // IDE association state and transcript cursors share the normal durable
+    // output/checkpoint boundary. A failed save must not consume new parents.
+    if (!this.stateStore.isPersisted(this.id, 'qoderIdeDelegations')
+      && this.getState().extra?.qoderIdeDelegations) return [];
     const nativeCheckpointPersisted = this.stateStore.isPersisted(this.id, 'qoderTranscripts');
     // 1. Read new hook JSONL lines
     const rawEntries = await this.readHookJsonl();
     const native = await this.transcriptSource.read(this.getState().extra, nativeCheckpointPersisted);
-    for (const record of native.records) {
+    const ide = this.stateStore.isPersisted(this.id, 'qoderIdeDelegations')
+      ? await this.ideDelegations.collect(native.records, this.getState().extra?.qoderIdeDelegations)
+      : { records: [], state: this.getState().extra?.qoderIdeDelegations, changed: false };
+    const saveNative = () => {
+      if (native.changed || ide.changed) this.setState({ extra: { ...this.getState().extra,
+        ...(native.changed ? { qoderTranscripts: native.state } : {}),
+        ...(ide.changed ? { qoderIdeDelegations: ide.state } : {}) } });
+    };
+    for (const record of [...native.records, ...ide.records]) {
       const entry = await this.transformRecord(record);
       if (entry) rawEntries.push(entry);
     }
     if (rawEntries.length === 0) {
-      if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
+      saveNative();
       return [];
     }
 
@@ -343,7 +358,7 @@ export class QoderTraceInput extends BaseInput {
       injectTraceId(turnEntries);
     }
 
-    if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
+    saveNative();
     return rawEntries;
   }
 

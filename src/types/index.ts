@@ -66,20 +66,9 @@ export interface MaskConfig {
   replacementMode?: MaskReplacementMode;
 }
 
-/** Interceptor types are the credential subset of mask types; PII is not interceptable. */
-export const SUPPORTED_INTERCEPTOR_TYPES = [
-  'cloudAccessKey',
-  'apiKey',
-  'privateKey',
-  'databaseUrl',
-] as const satisfies readonly MaskType[];
-
-export type InterceptorType = (typeof SUPPORTED_INTERCEPTOR_TYPES)[number];
-
 export interface InterceptorConfig {
-  /** `custom` is not an interceptor mode. Builtin rules are all-or-nothing. */
+  /** Explicit opt-in for managed rules and interception hooks. */
   mode: 'none' | 'all';
-  types: InterceptorType[];
 }
 
 export interface OtlpTraceRawConfig {

@@ -25,6 +25,9 @@ describe('interceptor result JSONL output', () => {
     const store = new ToolVerdictStore(path.join(root, 'tool-verdicts.json'));
     store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PreToolUse' }, 'allow');
     store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PostToolUse' }, 'block');
+    store.put({ sessionId: 'native-session', toolUseId: 'call-2', phase: 'PreToolUse' }, {
+      action: 'log', ruleId: 'policy', ruleVersion: '2',
+    });
 
     const manager = new InputManager();
     const flusher = new JsonlFlusher({
@@ -54,6 +57,13 @@ describe('interceptor result JSONL output', () => {
         'gen_ai.tool.call.id': 'call-1',
         'gen_ai.tool.name': 'Bash',
       }),
+      buildTestEntry({
+        'event.name': 'tool.call',
+        'event.id': 'audit-call',
+        'gen_ai.session.id': 'native-session',
+        'gen_ai.tool.call.id': 'call-2',
+        'gen_ai.tool.name': 'Bash',
+      }),
     ]);
     await manager.stopAll();
     await flusher.shutdown();
@@ -74,6 +84,15 @@ describe('interceptor result JSONL output', () => {
       'gen_ai.guardrail.triggered': true,
       'gen_ai.guardrail.action': 'block',
     });
+    expect(lines[2]).toMatchObject({
+      'gen_ai.guardrail.triggered': true, 'gen_ai.guardrail.action': 'log',
+      'gen_ai.guardrail.rule_id': 'policy', 'gen_ai.guardrail.rule_version': '2',
+    });
+    for (const entry of lines) {
+      for (const field of ['reason', 'message', 'matched', 'enforcement', 'title', 'severity', 'match']) {
+        expect(entry).not.toHaveProperty(`gen_ai.guardrail.${field}`);
+      }
+    }
     await cleanupTempDir(root);
   });
 });

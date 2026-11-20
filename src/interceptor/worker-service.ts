@@ -89,7 +89,7 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
   let finalStatusReceived = false;
   const pending = new Map<number, { resolve(): void; reject(error: Error): void; timer: NodeJS.Timeout; receiveStatus?: (status: InterceptorStatus) => void }>();
   const retiring = new Set<Promise<void>>();
-  const eventSink = new InterceptorEventSink({ blockedPrompt: opts.emitBlockedPrompt, evaluation: opts.emitEvaluation });
+  const eventSink = new InterceptorEventSink({ blockedPrompt: opts.emitBlockedPrompt });
 
   function reportDiagnostics(batch: InterceptorDiagnosticBatch[] = []): void {
     for (const { diagnostic, count } of batch) {
@@ -172,13 +172,13 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
           state(message.port, message.managedActive);
         } else if (message.type === 'events') {
           mirror.merge(message.records);
-          eventSink.enqueue(message.blockedPrompts, message.evaluationEntries ?? []);
+          eventSink.enqueue(message.blockedPrompts);
           reportDiagnostics(message.diagnostics);
           // ACK means finite sink admission (or an explicit counted drop), not an untracked Promise.
           current.postMessage({ type: 'ack', id: message.id } satisfies InterceptorWorkerCommand);
         } else if (message.type === 'final') {
           mirror.replace(message.records);
-          eventSink.enqueue(message.blockedPrompts, message.evaluationEntries ?? []);
+          eventSink.enqueue(message.blockedPrompts);
           reportDiagnostics(message.diagnostics);
           if (message.status) {
             cachedStatus = message.status;

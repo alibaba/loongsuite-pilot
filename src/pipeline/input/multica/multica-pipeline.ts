@@ -150,7 +150,7 @@ export class MulticaPipeline implements Pipeline {
         const name = `api:${workspace}:${source.name}`;
         await run(name, () => collectApi(apiInput, {...source, workspace}, profileToken));
       };
-      if (this.input.CollectEntityNames) {
+      if (this.input.CollectEntityNames !== false) {
         await api({name: 'workspace', path: `/api/workspaces/${encodeURIComponent(workspace)}`, recordType: 'workspace_snapshot', single: true});
         await api({name: 'projects', path: '/api/projects', recordType: 'project_snapshot', key: 'projects', pagination: 'offset'});
       }
