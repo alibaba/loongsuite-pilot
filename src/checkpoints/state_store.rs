@@ -414,6 +414,7 @@ pub struct StateStore {
     mu: Mutex<StoreData>,
     write_hook: Mutex<Option<WriteHook>>,
     output_changed: Notify,
+    isolated_source: bool,
 }
 
 impl std::fmt::Debug for StateStore {
@@ -434,8 +435,22 @@ impl StateStore {
 
 impl StateStore {
     /// Cheap mutation token for adapter caches; source progress remains owned by StateStore.
-    pub(crate) fn snapshot_text(&self) -> String {
-        render_states(self.mu.lock().unwrap().states.iter())
+    pub(crate) fn snapshot_with_revision(&self) -> (u64, String) {
+        let data = self.mu.lock().unwrap();
+        (data.revision, render_states(data.states.iter()))
+    }
+
+    // Called after the isolated source's event and checkpoint transaction
+    // commits. If an older write is already active, keep the normal save
+    // path so it can complete and then publish the current revision.
+    pub(crate) fn note_committed_snapshot(&self, revision: u64) {
+        if self.isolated_source {
+            let mut data = self.mu.lock().unwrap();
+            if !data.flushing && data.revision == revision {
+                data.persisted_revision = revision;
+                prune_persisted_revision_keys(&mut data);
+            }
+        }
     }
 
     pub fn revision(&self) -> u64 {
@@ -448,7 +463,24 @@ impl StateStore {
             mu: Mutex::new(StoreData::default()),
             write_hook: Mutex::new(None),
             output_changed: Notify::new(),
+            isolated_source: false,
         }
+    }
+
+    // An SDK source has its own immutable namespace and sole writer. Its
+    // output hold gates the entire checkpoint, so no per-input merge is needed.
+    pub(crate) fn new_sdk_source(file_path: impl AsRef<Path>) -> Self {
+        Self {
+            isolated_source: true,
+            ..Self::new(file_path)
+        }
+    }
+
+    pub(crate) fn has_extra_fields(&self, input_id: &str, keys: &[&str]) -> bool {
+        let data = self.mu.lock().unwrap();
+        data.states
+            .get(input_id)
+            .is_some_and(|state| keys.iter().any(|key| extra_field(state, key).is_some()))
     }
 
     /// Loads the file. Missing or corrupt JSON becomes an empty map.
@@ -582,7 +614,11 @@ impl StateStore {
     }
 
     pub(crate) fn begin_output_for(self: &Arc<Self>, id: &str) -> CheckpointOutputHold {
-        self.begin_output_with(journal_namespace(id))
+        if self.isolated_source {
+            self.begin_output()
+        } else {
+            self.begin_output_with(journal_namespace(id))
+        }
     }
 
     fn begin_output_with(self: &Arc<Self>, scope: Option<&'static str>) -> CheckpointOutputHold {
@@ -738,6 +774,24 @@ impl StateStore {
         extra_field(data.states.get(input_id)?, key).map(json_file::to_value)
     }
 
+    pub(crate) fn get_extra_object_fields<const N: usize>(
+        &self,
+        input_id: &str,
+        key: &str,
+        names: [&str; N],
+    ) -> Option<[Option<serde_json::Value>; N]> {
+        let data = self.mu.lock().unwrap();
+        let JVal::Object(fields) = extra_field(data.states.get(input_id)?, key)? else {
+            return None;
+        };
+        Some(names.map(|name| {
+            fields
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| json_file::to_value(value))
+        }))
+    }
+
     pub fn set(&self, input_id: &str, mut state: InputState) {
         state.normalize();
         let mut data = self.mu.lock().unwrap();
@@ -827,6 +881,12 @@ impl StateStore {
                 } else if data.persisted_revision >= data.revision {
                     data.flushing = false;
                     Step::Done(std::mem::take(&mut data.waiters), Ok(()))
+                } else if self.isolated_source {
+                    Step::Write(
+                        data.revision,
+                        render_states(data.states.iter()),
+                        OrderedMap::default(),
+                    )
                 } else {
                     let mut journal_sources = OrderedMap::default();
                     for (id, state) in data.states.iter() {

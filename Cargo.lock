@@ -1441,6 +1441,7 @@ dependencies = [
  "icu_normalizer",
  "indexmap",
  "libc",
+ "memchr",
  "notify",
  "opentelemetry-proto",
  "prost",

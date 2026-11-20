@@ -54,6 +54,50 @@ fn checkpoint_save_only_rewrites_when_source_progress_changes() {
 }
 
 #[tokio::test]
+async fn isolated_source_reuses_committed_progress_and_writes_later_cursor_only_cycles() {
+    let dir = tempfile::tempdir().unwrap();
+    let queue = Outbox::open(dir.path(), settings()).unwrap();
+    let store = Arc::new(StateStore::new_sdk_source(dir.path().join("state.json")));
+    let writes = Arc::new(AtomicU64::new(0));
+    let journal = queue.clone();
+    let observed_writes = writes.clone();
+    store.set_write_hook(move |_, text| {
+        let journal = journal.clone();
+        let observed_writes = observed_writes.clone();
+        async move {
+            observed_writes.fetch_add(1, Ordering::Relaxed);
+            journal.checkpoint("source", &text)
+        }
+    });
+    let key = "codex-transcript:fixture";
+    let hold = store.begin_output_for(key);
+    store.set_offset(key, 42.0);
+    let payload = br#"{"event.id":"one"}"#.to_vec();
+    queue
+        .accept_fixture("source", &store, &[payload], &AtomicBool::new(false))
+        .await
+        .unwrap();
+    hold.finish(Ok(()));
+    store.save_for(key).await.unwrap();
+    assert!(store.is_persisted(key, None));
+    assert_eq!(writes.load(Ordering::Relaxed), 0);
+
+    let hold = store.begin_output_for(key);
+    store.set_offset(key, 56.0);
+    assert!(!store.is_persisted(key, None));
+    hold.finish(Ok(()));
+    store.save_for(key).await.unwrap();
+    assert_eq!(writes.load(Ordering::Relaxed), 1);
+    let text = Outbox::read_persisted_checkpoint(dir.path(), "source")
+        .unwrap()
+        .unwrap();
+    let recovered = StateStore::new(dir.path().join("recovered.json"));
+    recovered.load_checkpoint_text(&text).unwrap();
+    assert_eq!(recovered.get_offset(key), 56.0);
+    assert_eq!(queue.read_batch(&settings()).unwrap().0.len(), 1);
+}
+
+#[tokio::test]
 async fn partial_batch_waits_until_due_and_handles_clock_rollback() {
     let dir = tempfile::tempdir().unwrap();
     let options = Delivery {
@@ -568,7 +612,7 @@ async fn legacy_queue_totals_stay_exact_after_batch_updates_and_failed_ack() {
     assert_eq!(before["pending_bytes"], expected);
     assert_eq!(
         queue.saved_checkpoints().unwrap()[0].1,
-        store.snapshot_text()
+        store.snapshot_with_revision().1
     );
 
     let (rows, _) = queue.read_batch(&settings()).unwrap();
@@ -586,6 +630,6 @@ async fn legacy_queue_totals_stay_exact_after_batch_updates_and_failed_ack() {
     assert_eq!(queue.snapshot()["pending_bytes"], 0);
     assert_eq!(
         queue.saved_checkpoints().unwrap()[0].1,
-        store.snapshot_text()
+        store.snapshot_with_revision().1
     );
 }

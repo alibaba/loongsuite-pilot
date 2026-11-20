@@ -675,9 +675,11 @@ impl Outbox {
                             tx.execute("INSERT INTO token_usage VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(agent,day) DO UPDATE SET responses=CASE WHEN responses>9223372036854775807-excluded.responses THEN 9223372036854775807 ELSE responses+excluded.responses END,with_usage=CASE WHEN with_usage>9223372036854775807-excluded.with_usage THEN 9223372036854775807 ELSE with_usage+excluded.with_usage END,input=CASE WHEN input>9223372036854775807-excluded.input THEN 9223372036854775807 ELSE input+excluded.input END,output=CASE WHEN output>9223372036854775807-excluded.output THEN 9223372036854775807 ELSE output+excluded.output END,cache_read=CASE WHEN cache_read>9223372036854775807-excluded.cache_read THEN 9223372036854775807 ELSE cache_read+excluded.cache_read END,cache_creation=CASE WHEN cache_creation>9223372036854775807-excluded.cache_creation THEN 9223372036854775807 ELSE cache_creation+excluded.cache_creation END",
                                 params![agent,day,totals[0],totals[1],totals[2],totals[3],totals[4],totals[5]])?;
                         }
+                        let (revision, checkpoint) = store.snapshot_with_revision();
                         tx.prepare_cached(SAVE_CHECKPOINT)?
-                            .execute(params![source, store.snapshot_text()])?;
+                            .execute(params![source, checkpoint])?;
                         tx.commit()?;
+                        store.note_committed_snapshot(revision);
                         true
                     } else {
                         false
