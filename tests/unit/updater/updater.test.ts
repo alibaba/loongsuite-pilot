@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AutoUpdateConfig } from '../../../src/types/index.js';
 
@@ -244,6 +245,7 @@ describe('Updater', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   // ─── LIFECYCLE ─────────────────────────────────────────
@@ -545,6 +547,32 @@ describe('Updater', () => {
         expect.stringContaining('current.tmp'),
         expect.stringContaining('/current'),
       );
+    });
+
+    it.each([
+      { layout: 'default', cacheOverride: '', cacheName: '.loongsuite-pilot' },
+      { layout: 'split', cacheOverride: '~/custom-cache', cacheName: 'custom-cache' },
+    ])('uses the bootstrap cache for pointers and publication lock in the $layout layout', async ({
+      cacheOverride, cacheName,
+    }) => {
+      setupForDownload();
+      const home = path.resolve(tmpDir, 'home');
+      const data = path.join(home, 'custom-data');
+      const cache = path.join(home, cacheName);
+      vi.stubEnv('HOME', home);
+      vi.stubEnv('USERPROFILE', home);
+      vi.stubEnv('LOONGSUITE_PILOT_CACHE_DIR', cacheOverride);
+      vi.stubEnv('LOONGSUITE_PILOT_DATA_DIR', data);
+      const access = mockFsAccess.getMockImplementation()!;
+      mockFsAccess.mockImplementation((file) => file.endsWith('postinstall.js') ? Promise.resolve() : access(file));
+
+      await new Updater(makeConfig()).check();
+
+      expect(mockHookAssetLock).toHaveBeenCalledWith(cache, expect.any(Function));
+      expect(mockFsWriteFile).toHaveBeenCalledWith(path.join(cache, 'current.tmp'), '1.0.2_bbb\n');
+      const postinstall = mockExecFile.mock.calls.find(([, args]) =>
+        Array.isArray(args) && args.some((arg) => String(arg).endsWith('postinstall.js')));
+      expect(postinstall?.[2].env.LOONGSUITE_PILOT_DATA_DIR).toBe(data);
     });
 
     it('runs the staged package postinstall, pointed at this install data dir', async () => {

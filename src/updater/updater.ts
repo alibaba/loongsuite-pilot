@@ -140,11 +140,11 @@ function pilotBinPath(): string {
 
 function defaultPaths(): UpdaterPaths {
   const home = homeDir();
-  const cacheDir = path.join(home, '.loongsuite-pilot');
-  const dataDir = resolveHome(process.env.LOONGSUITE_PILOT_DATA_DIR ?? cacheDir);
-  // The CLI wrapper reads the pin from CACHE_DIR (LOONGSUITE_PILOT_CACHE_DIR),
-  // which defaults to the same directory; honour the override to stay in lockstep.
-  const pinDir = resolveHome(process.env.LOONGSUITE_PILOT_CACHE_DIR ?? cacheDir);
+  const defaultDir = path.join(home, '.loongsuite-pilot');
+  // The daemon bootstraps load from this cache. Use the same control directory
+  // for pointers and the asset lock even when the shared hooks live elsewhere.
+  const cacheDir = resolveHome(process.env.LOONGSUITE_PILOT_CACHE_DIR || defaultDir, { homedir: () => home });
+  const dataDir = resolveHome(process.env.LOONGSUITE_PILOT_DATA_DIR ?? defaultDir);
   return {
     cacheDir,
     dataDir,
@@ -155,7 +155,7 @@ function defaultPaths(): UpdaterPaths {
     loongsuitePilotBin: pilotBinPath(),
     runtimeFile: updaterRuntimePath(dataDir),
     collectorRuntimeFile: path.join(dataDir, 'logs', 'runtime.json'),
-    nodePinFile: path.join(pinDir, 'node-bin'),
+    nodePinFile: path.join(cacheDir, 'node-bin'),
   };
 }
 
