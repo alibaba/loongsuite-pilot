@@ -45,11 +45,18 @@ async function seedLegacyState(
   dir: string,
   days: Record<string, Record<string, unknown>>,
   offsets: Record<string, unknown>,
+  synchronized = true,
 ): Promise<void> {
   const cache = path.join(dir, 'cache');
   await fs.mkdir(cache, { recursive: true });
-  await fs.writeFile(path.join(cache, 'metrics-daily-digest.json'), JSON.stringify({ version: 1, days }));
-  await fs.writeFile(path.join(cache, 'metrics-scan-state.json'), JSON.stringify({ files: offsets }));
+  const digestPath = path.join(cache, 'metrics-daily-digest.json');
+  const scanPath = path.join(cache, 'metrics-scan-state.json');
+  await fs.writeFile(digestPath, JSON.stringify({ version: 1, days }));
+  await fs.writeFile(scanPath, JSON.stringify({ files: offsets }));
+  // Give fixtures a definite order even on filesystems with coarse mtimes.
+  const time = Math.ceil((await fs.stat(scanPath)).mtimeMs / 1000);
+  await fs.utimes(digestPath, time, time);
+  await fs.utimes(scanPath, time, synchronized ? time + 1 : time - 1);
 }
 
 function legacyDay(tokens: number, events: number): Record<string, number> {
@@ -64,6 +71,31 @@ async function retire(dir: string, name: string): Promise<void> {
   const retired = path.join(dir, '..', 'retired');
   await fs.mkdir(retired, { recursive: true });
   await fs.rename(path.join(dir, name), path.join(retired, name));
+}
+
+async function seedPartialLegacyDay(dir: string, synchronized: boolean) {
+  const outputDir = path.join(dir, 'logs', 'output');
+  const archivedName = 'claude-code.part-1-2026-08-01.jsonl';
+  const activeName = 'claude-code-2026-08-01.jsonl';
+  const archived = await writeJsonl(outputDir, archivedName, [
+    record({ 'gen_ai.request.model': 'archived-model', 'gen_ai.usage.total_tokens': '1000' }),
+  ]);
+  const active = await writeJsonl(outputDir, activeName, [
+    record({ 'gen_ai.request.model': 'active-model', 'gen_ai.usage.total_tokens': '300' }),
+  ]);
+  const archivedStat = await fs.stat(archived);
+  const activeStat = await fs.stat(active);
+  if (!synchronized) {
+    await fs.appendFile(active, JSON.stringify(record({ 'gen_ai.usage.total_tokens': '50' })) + '\n');
+  }
+  await seedLegacyState(dir, {
+    '2026-08-01': synchronized ? legacyDay(1300, 2) : legacyDay(1350, 3),
+  }, {
+    [archivedName]: { offset: archivedStat.size, size: archivedStat.size, ino: archivedStat.ino },
+    [activeName]: { offset: activeStat.size, size: activeStat.size, ino: activeStat.ino },
+  }, synchronized);
+  await retire(outputDir, archivedName);
+  return { active, archived, retired: path.join(dir, 'logs', 'retired', archivedName) };
 }
 
 let tmpDir: string;
@@ -356,6 +388,52 @@ describe('MetricsSummaryWriter historical breakdown integrity', () => {
     expect(range.totalTokens).toBe(1000);
     expect(range.modelShares[0].totalTokens).toBe(1000);
     expect(range.incompleteBreakdownDays).toBeUndefined();
+  });
+
+  it('counts new bytes from a coherent legacy checkpoint and resumes a restored archive after sidecar loss', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-03T10:00:00'));
+    const { active, archived, retired } = await seedPartialLegacyDay(tmpDir, true);
+    await fs.appendFile(active, JSON.stringify(record({ 'gen_ai.request.model': 'new-model', 'gen_ai.usage.total_tokens': '50' })) + '\n');
+
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    const partial = (await readSummary(tmpDir)).ranges.sevenDays;
+    expect(partial.totalTokens).toBe(1350);
+    expect(partial.modelShares[0]).toMatchObject({ model: 'new-model', totalTokens: 50 });
+    expect(partial.incompleteBreakdownDays).toEqual(['2026-08-01']);
+
+    await fs.unlink(path.join(tmpDir, 'cache', 'metrics-scan-state.json'));
+    await fs.rename(retired, archived);
+    await fs.appendFile(archived, JSON.stringify(record({ 'gen_ai.request.model': 'restored-model', 'gen_ai.usage.total_tokens': '10' })) + '\n');
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const range = (await readSummary(tmpDir)).ranges.sevenDays;
+    expect(range.totalTokens).toBe(1360);
+    expect(range.modelShares).toContainEqual(expect.objectContaining({ model: 'restored-model', totalTokens: 10 }));
+  });
+
+  it('preserves unresolved legacy offsets until the missing archive makes a safe rebuild possible', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-03T10:00:00'));
+    const { active, archived, retired } = await seedPartialLegacyDay(tmpDir, false);
+    await fs.appendFile(active, JSON.stringify(record({ 'gen_ai.request.model': 'new-model', 'gen_ai.usage.total_tokens': '10' })) + '\n');
+
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    await fs.unlink(path.join(tmpDir, 'cache', 'metrics-scan-state.json'));
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    const unresolved = (await readSummary(tmpDir)).ranges.sevenDays;
+    expect(unresolved.totalTokens).toBe(1350);
+    expect(unresolved.incompleteBreakdownDays).toEqual(['2026-08-01']);
+
+    await fs.rename(retired, archived);
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const resolved = (await readSummary(tmpDir)).ranges.sevenDays;
+    expect(resolved.totalTokens).toBe(1360);
+    expect(resolved.modelShares).toContainEqual(expect.objectContaining({ model: 'new-model', totalTokens: 10 }));
+    expect(resolved.incompleteBreakdownDays).toBeUndefined();
   });
 
   it('keeps legacy totals of a retired segment and adds a segment the old scan state never saw', async () => {
