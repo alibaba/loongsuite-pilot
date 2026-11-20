@@ -436,11 +436,13 @@ fn run_agent(
         .on_thread_start(move || source_access::install(Some(start_scope.clone())))
         .on_thread_stop(|| source_access::install(None))
         .build()?;
-    let store = Arc::new(if isolated_codex {
-        StateStore::new_sdk_source(&checkpoint)
-    } else {
-        StateStore::new(&checkpoint)
-    });
+    let store = Arc::new(
+        if isolated_codex || super::hook_history::find(&plan.agent).is_some() {
+            StateStore::new_sdk_source(&checkpoint)
+        } else {
+            StateStore::new(&checkpoint)
+        },
+    );
     if let Some(state) = &plan.pilot_host {
         runtime.block_on(import_pilot_checkpoint(
             &state.data_dir,
