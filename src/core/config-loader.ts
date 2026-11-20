@@ -47,6 +47,47 @@ import { resolveDoubaoWorkSource } from '../utils/doubao-work-paths.js';
 
 const logger = createLogger('ConfigLoader');
 
+function configuredFlag(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function hasConfiguredValue(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function summarizeConfigFile(file: ConfigFile) {
+  // Log only known flags and destination presence. URL queries, headers and
+  // arbitrary config values can carry credentials under any property name.
+  const sls = Array.isArray(file.sls) ? undefined : file.sls;
+  return {
+    enabled: configuredFlag(file.enabled),
+    collectLog: configuredFlag(file.collectLog),
+    collectTrace: configuredFlag(file.collectTrace),
+    jsonlEnabled: configuredFlag(file.jsonl?.enabled),
+    httpEnabled: configuredFlag(file.http?.enabled),
+    slsEnabled: configuredFlag(sls?.enabled),
+    autoUpdateEnabled: configuredFlag(file.autoUpdate?.enabled),
+    slsEndpointCount: Array.isArray(file.sls) ? file.sls.length : Number(hasConfiguredValue(sls?.endpoint)),
+    httpUrlConfigured: hasConfiguredValue(file.http?.url),
+    otlpTraceEndpointConfigured: hasConfiguredValue(file.otlpTrace?.endpoint),
+    cmsEndpointConfigured: hasConfiguredValue(file.cms?.endpoint),
+    updateManifestUrlConfigured: hasConfiguredValue(file.autoUpdate?.manifestUrl),
+    updatePackageUrlConfigured: hasConfiguredValue(file.autoUpdate?.packageUrl),
+  };
+}
+
+let loadedConfigFileLog: { path: string; configSummary?: ReturnType<typeof summarizeConfigFile> } | undefined;
+
+/** Replay the on-disk configuration summary when collector file logging is ready. */
+export function logLoadedConfigFile(): void {
+  if (!loadedConfigFileLog) return;
+  if (loadedConfigFileLog.configSummary) {
+    logger.info('loaded config file', loadedConfigFileLog);
+  } else {
+    logger.debug('no config file found, using env + defaults', { path: loadedConfigFileLog.path });
+  }
+}
+
 export interface SlsEndpointEntry {
   name?: string;
   endpoint: string;
@@ -286,11 +327,10 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
   const configPath = configJsonPath();
   const file = await readJsonFile<ConfigFile>(configPath);
 
-  if (file) {
-    logger.info('loaded config file', { path: configPath });
-  } else {
-    logger.debug('no config file found, using env + defaults', { path: configPath });
-  }
+  loadedConfigFileLog = file
+    ? { path: configPath, configSummary: summarizeConfigFile(file) }
+    : { path: configPath };
+  logLoadedConfigFile();
 
   const dataDir = pickDataDir(env('LOONGSUITE_PILOT_DATA_DIR'), file?.dataDir);
 
