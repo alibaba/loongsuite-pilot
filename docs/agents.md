@@ -46,8 +46,17 @@ limit. On hosts exposing the compatible
 snapshots system/tool metadata while preserving the original return object,
 exceptions and payload seen by other plugins. Snapshots match the request
 object and session, expire after five seconds, and are consumed once. Without
-this capability Pilot uses native system fields or the visible body; it does
-not parse a truncated `preview`.
+this capability Pilot reads system and developer roles in `request_messages`
+for Chat/Gemini, then `system_prompt`, then the visible `request.body`.
+
+Hermes 0.10.0 (`v2026.4.16`) sends a metadata-only request Hook. For this release,
+Pilot observes the request builder and Responses preflight to collect system
+instructions for main conversations using Chat Completions (including Gemini),
+Anthropic Messages, Responses and Bedrock Converse. The observer sees Anthropic
+OAuth and Responses normalization and follows the ASCII recovery rewrite. If
+native method signatures differ, the optional instructions are omitted. Tool
+definitions still require a native request payload. Pilot applies its configured
+masking before export.
 
 Capture remains bounded; message character counts alone cannot prove complete
 coverage of billable model tokens:

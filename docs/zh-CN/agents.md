@@ -37,7 +37,14 @@ Responses 项和提供商专用工具块保留归一化历史作为回退来源�
 Hermes 0.16.0 的 50,000 字符 Hook 载荷上限可能丢掉整个 `request.body`。对于提供兼容
 `_api_request_payload_for_hook(self, api_kwargs)` 的宿主，插件在该边界独立快照 system/tools，
 保持宿主原有返回值、异常和其他插件收到的载荷。快照按请求对象、session 和五秒有效期匹配，
-消费后释放；无此能力时仍读取原生系统字段或可见 body，不解析残缺 `preview`。
+消费后释放。无此能力时，Chat/Gemini 优先取 `request_messages` 中的 system/developer
+消息，其次取 `system_prompt`，最后使用可见的 `request.body`。
+
+Hermes 0.10.0（`v2026.4.16`）的请求 Hook 只提供元数据。Pilot 在该版本观察原生请求
+构建和 Responses 规范化方法，补采 Chat Completions（含 Gemini）、Anthropic Messages、
+Responses 和 Bedrock Converse 主对话的系统指令。采集使用 Anthropic OAuth 转换和
+Responses 规范化后的结果，并匹配 ASCII 错误恢复时的字符改写。原生方法签名不兼容时
+省略该可选字段。工具定义仍依赖原生请求正文，指令输出前按 Pilot 配置脱敏。
 
 采集仍有容量边界，不能将消息字符数直接当作模型计费 Token 的完整性证明：
 
