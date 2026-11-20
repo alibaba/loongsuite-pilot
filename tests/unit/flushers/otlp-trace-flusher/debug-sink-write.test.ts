@@ -202,6 +202,26 @@ describe('OtlpTraceFlusher - otlp-debug sink write via production sendBatch path
     expect(spanKinds.has('LLM')).toBe(true);
   });
 
+  it('exports a late native response immediately and retains turn output on the Hook root', async () => {
+    const events = makeTraeCnTurnEntries();
+    const root = events.find(e => e['gen_ai.span.kind'] === 'ENTRY')!;
+    const agent = events.find(e => e['gen_ai.span.kind'] === 'AGENT')!;
+    const response = events.find(e => e['event.name'] === 'llm.response')!;
+    const output = [{ role: 'assistant', parts: [{ type: 'text', content: 'all tests passed' }] }];
+    const hook = { 'agent.trae-cn.source': 'content_hook' };
+    await flusher.sendBatch([{ ...root, ...hook }, { ...agent, ...hook },
+      { ...agent, ...hook, 'gen_ai.turn.end': true, 'gen_ai.output.messages': output }]);
+    const history = '6affbf2b1968a773c6053633';
+    const native = { ...response, 'agent.trae-cn.source': 'content_history', 'gen_ai.turn.id': 'native-turn',
+      'gen_ai.response.id': history };
+    await flusher.sendBatch([{ ...native, 'gen_ai.span.kind': 'STEP', span_id: '1234567890abcdef',
+      parent_span_id: agent.span_id }, { ...native, parent_span_id: '1234567890abcdef' }]);
+    expect(captured.map(s => s.attributes['gen_ai.span.kind'])).toEqual(['ENTRY', 'AGENT', 'STEP', 'LLM']);
+    expect(captured[0].attributes['gen_ai.output.messages']).toBe(JSON.stringify(output));
+    expect(captured[3].attributes['gen_ai.response.id']).toBe(history);
+    expect(captured[3].parentSpanId).toBe(captured[2].spanContext().spanId);
+  });
+
   it('does NOT write otlp-debug sink when debug=false', async () => {
     // Rebuild flusher with debug:false
     await flusher.shutdown();

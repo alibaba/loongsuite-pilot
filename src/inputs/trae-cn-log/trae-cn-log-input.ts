@@ -109,9 +109,9 @@ export class TraeCnLogInput extends BaseSessionInput {
       for (const response of batch.events) {
         const history = response['gen_ai.response.id']!;
         const step = createHash('sha256').update(trace + '/history-step/' + history).digest('hex').slice(0, 16);
-        entries.push({ ...response, 'event.id': step, 'event.name': 'other', 'gen_ai.operation.name': 'react',
+        entries.push({ ...response, 'agent.trae-cn.source': 'content_history', 'event.id': step, 'event.name': 'other', 'gen_ai.operation.name': 'react',
           'gen_ai.span.kind': 'STEP', 'gen_ai.step.id': history, span_id: step, parent_span_id: parent.agent });
-        entries.push({ ...response, 'gen_ai.step.id': history, parent_span_id: step });
+        entries.push({ ...response, 'agent.trae-cn.source': 'content_history', 'gen_ai.step.id': history, parent_span_id: step });
       }
       delete this.rounds[trace];
     }
@@ -163,6 +163,7 @@ export class TraeCnLogInput extends BaseSessionInput {
     return entries.flatMap(e => {
       const parent = e.trace_id && this.parents[e.trace_id];
       if (!parent) return [e];
+      e['agent.trae-cn.source'] = 'content_hook';
       if (e['gen_ai.span.kind'] === 'STEP') return [];
       if (e['gen_ai.span.kind'] === 'TOOL') {
         delete e['gen_ai.step.id'];
@@ -170,6 +171,7 @@ export class TraeCnLogInput extends BaseSessionInput {
       }
       if (e['gen_ai.span.kind'] === 'LLM') {
         // Hook messages describe the entire turn. Retain them on its agent.
+        if (e['event.name'] === 'llm.response') e['gen_ai.turn.end'] = true;
         e.span_id = parent.agent;
         e.parent_span_id = parent.root;
         e['gen_ai.span.kind'] = 'AGENT';
