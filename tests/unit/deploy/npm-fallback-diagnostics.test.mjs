@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 const windows = process.platform === 'win32';
 const powershell = process.env.PILOT_TEST_PWSH || (windows ? 'powershell.exe' : undefined);
 const privateMarkers = ['fixture-userinfo', 'fixture-registry-auth', 'fixture-signed-value', 'fixture-success-secret'];
+const readOnlyLogCase = process.getuid?.() === 0 ? [] : [{ fail: true, canLog: false, readOnlyLog: true }];
 
 async function withFixture(test) {
   const root = await mkdtemp(path.join(tmpdir(), 'pilot-npm-diagnostics-'));
@@ -105,12 +106,22 @@ async function checkDiagnostics(result, fail, logDir, authOnly) {
       expect(text).not.toContain('unrelated prior npm run');
     } else {
       expect(result.stdout).not.toContain('Full npm output:');
+      expect(result.stdout).toContain('Could not save the full npm output.');
     }
   } else {
     expect(result.stdout).toContain('Dependencies installed');
     expect(result.stdout).not.toContain('Full npm output:');
-    expect(await readdir(logDir)).toEqual([]);
+    if (logDir) expect(await readdir(logDir)).toEqual([]);
   }
+}
+
+async function checkPreservedReplacement(logDir) {
+  const entries = await readdir(logDir, { withFileTypes: true });
+  expect(entries).toHaveLength(1);
+  expect(entries[0].isDirectory()).toBe(true);
+  const replacement = path.join(logDir, entries[0].name);
+  expect(await readdir(replacement)).toEqual(['keep.txt']);
+  expect((await readFile(path.join(replacement, 'keep.txt'), 'utf8')).trim()).toBe('keep this directory');
 }
 
 describe.runIf(!windows)('shell npm fallback diagnostics', () => {
@@ -118,15 +129,19 @@ describe.runIf(!windows)('shell npm fallback diagnostics', () => {
     { fail: true, fallbackLog: false, canLog: true }, { fail: false, fallbackLog: false, canLog: true },
     { fail: true, fallbackLog: true, canLog: true }, { fail: true, fallbackLog: true, canLog: false },
     { fail: true, fallbackLog: false, canLog: true, authOnly: true },
-  ])('reports current npm outcome (failure=$fail, temporary log=$fallbackLog, can log=$canLog, auth only=$authOnly)', async ({ fail, fallbackLog, canLog, authOnly }) => {
+    { fail: true, fallbackLog: false, canLog: false, replaceLog: true },
+    { fail: false, fallbackLog: false, canLog: false, replaceLog: true },
+    ...readOnlyLogCase,
+  ])('reports npm outcome (failure=$fail, temp=$fallbackLog, can log=$canLog, auth=$authOnly, replaced=$replaceLog, read-only=$readOnlyLog)', async ({ fail, fallbackLog, canLog, authOnly, replaceLog, readOnlyLog }) => {
     await withFixture(async (root, capturedTemp, env) => {
       if (fallbackLog) await writeFile(path.join(env.PILOT_FIXTURE_DATA, 'logs'), 'not a directory');
-      if (!canLog) env.TMPDIR = env.PILOT_FIXTURE_SCRIPT;
+      if (!canLog && !replaceLog && !readOnlyLog) env.TMPDIR = env.PILOT_FIXTURE_SCRIPT;
       const source = await readFile('deploy/installer-opensource.sh', 'utf8');
       const fallback = installerBlock(source,
         '    if ensure_node_modules "$modules_ver"; then', '    msg "==> 部署 hook 脚本');
       const diagnosticHelpers = installerBlock(source, 'create_npm_fallback_log() {',
-        '# Common: deploy package to versions/ directory');
+        '# Common: deploy package to versions/ directory')
+        .replace('create_npm_fallback_log() {', 'create_candidate_npm_fallback_log() {');
       const runNpm = source.match(/run_npm\(\) \{[\s\S]*?\n\}/)[0];
       const runner = path.join(root, 'check.sh');
       await writeFile(runner, `
@@ -139,6 +154,16 @@ NODE_BIN="$PILOT_FIXTURE_NODE_DIR/node"
 NPM_BIN="$PILOT_FIXTURE_NPM"
 ${runNpm}
 ${diagnosticHelpers}
+create_npm_fallback_log() {
+    local log
+    log=$(create_candidate_npm_fallback_log) || return $?
+    if [ "$PILOT_FIXTURE_REPLACE_LOG" = 1 ]; then
+        rm "$log" && mkdir "$log" && printf '%s\\n' 'keep this directory' > "$log/keep.txt" || return 1
+    elif [ "$PILOT_FIXTURE_READONLY_LOG" = 1 ]; then
+        chmod 400 "$log" || return 1
+    fi
+    printf '%s\\n' "$log"
+}
 run_fallback() {
     local modules_ver=latest
 ${fallback}
@@ -146,12 +171,17 @@ ${fallback}
 run_fallback
 `);
       const result = spawnSync('bash', [runner], {
-        env: { ...env, PILOT_FIXTURE_FAIL: fail ? '1' : '0', PILOT_FIXTURE_AUTH_ONLY: authOnly ? '1' : '0' },
+        env: {
+          ...env, PILOT_FIXTURE_FAIL: fail ? '1' : '0', PILOT_FIXTURE_AUTH_ONLY: authOnly ? '1' : '0',
+          PILOT_FIXTURE_REPLACE_LOG: replaceLog ? '1' : '0',
+          PILOT_FIXTURE_READONLY_LOG: readOnlyLog ? '1' : '0',
+        },
         encoding: 'utf8',
       });
-      const logDir = canLog ? (fallbackLog ? capturedTemp : path.join(env.PILOT_FIXTURE_DATA, 'logs')) : undefined;
-      await checkDiagnostics(result, fail, logDir, authOnly);
-      if (fail && logDir) {
+      const logDir = fallbackLog ? capturedTemp : path.join(env.PILOT_FIXTURE_DATA, 'logs');
+      await checkDiagnostics(result, fail, canLog ? logDir : undefined, authOnly);
+      if (replaceLog) await checkPreservedReplacement(logDir);
+      if (fail && canLog) {
         const [name] = await readdir(logDir);
         const file = await stat(path.join(logDir, name));
         expect(file.mode & 0o777).toBe(0o600);
@@ -165,15 +195,20 @@ describe.runIf(Boolean(powershell))('PowerShell constrained npm fallback diagnos
   it.each([
     { fail: true, canLog: true }, { fail: false, canLog: true }, { fail: true, canLog: false },
     { fail: true, canLog: false, authOnly: true },
-  ])('reports current npm outcome (failure=$fail, private log=$canLog, auth only=$authOnly)', async ({ fail, canLog, authOnly }) => {
+    { fail: true, canLog: false, replaceLog: true }, { fail: false, canLog: false, replaceLog: true },
+    { fail: true, canLog: false, invalidProvider: true }, { fail: false, canLog: false, invalidProvider: true },
+    ...readOnlyLogCase,
+  ])('reports npm outcome (failure=$fail, can log=$canLog, auth=$authOnly, replaced=$replaceLog, bad provider=$invalidProvider, read-only=$readOnlyLog)', async ({ fail, canLog, authOnly, replaceLog, invalidProvider, readOnlyLog }) => {
     await withFixture(async (root, capturedTemp, env) => {
-      if (!canLog) env.LOCALAPPDATA = env.PILOT_FIXTURE_SCRIPT;
+      if (invalidProvider) env.LOCALAPPDATA = 'NonexistentPilotDrive:\\fixture';
+      else if (!canLog && !replaceLog && !readOnlyLog) env.LOCALAPPDATA = env.PILOT_FIXTURE_SCRIPT;
       const source = await readFile('deploy/installer-opensource.ps1', 'utf8');
       const fallback = installerBlock(source,
         '    if (-not $modulesFromOss) {', '    # Only publish current/previous');
       const shortPathHelpers = installerBlock(source, 'function Get-PilotLongPath {', '# <<< pilot-short-path <<<');
       const diagnosticHelpers = installerBlock(source, 'function New-NpmFallbackLog {',
-        '# Deploy package to versions/ directory');
+        '# Deploy package to versions/ directory')
+        .replace('function New-NpmFallbackLog {', 'function New-CandidateNpmFallbackLog {');
       const runner = path.join(root, 'check.ps1');
       await writeFile(runner, `\uFEFF
 $ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'
@@ -181,6 +216,18 @@ $ErrorActionPreference = 'Stop'
 function Msg([string]$Zh, [string]$En) { Write-Host $En }
 ${shortPathHelpers}
 ${diagnosticHelpers}
+function New-NpmFallbackLog {
+    $log = New-CandidateNpmFallbackLog
+    if ($log -and $env:PILOT_FIXTURE_REPLACE_LOG -eq '1') {
+        Remove-Item -LiteralPath $log
+        New-Item -ItemType Directory -Path $log | Out-Null
+        Set-Content -LiteralPath (Join-Path $log 'keep.txt') -Value 'keep this directory'
+    } elseif ($log -and $env:PILOT_FIXTURE_READONLY_LOG -eq '1') {
+        & $env:PILOT_FIXTURE_NODE -e "require('fs').chmodSync(process.argv[1], 0o400)" $log
+        if ($LASTEXITCODE -ne 0) { throw 'Could not make fixture log read-only' }
+    }
+    return $log
+}
 $script:NODE_BIN = Join-Path $env:PILOT_FIXTURE_NODE_DIR 'node.exe'
 $script:NPM_BIN = $env:PILOT_FIXTURE_NPM
 $script:PERMANENT_DIR = $env:PILOT_FIXTURE_PROJECT
@@ -197,13 +244,20 @@ ${fallback}
 }
 `);
       const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-File', runner], {
-        env: { ...env, PILOT_FIXTURE_FAIL: fail ? '1' : '0', PILOT_FIXTURE_AUTH_ONLY: authOnly ? '1' : '0' },
+        env: {
+          ...env, PILOT_FIXTURE_FAIL: fail ? '1' : '0', PILOT_FIXTURE_AUTH_ONLY: authOnly ? '1' : '0',
+          PILOT_FIXTURE_REPLACE_LOG: replaceLog ? '1' : '0',
+          PILOT_FIXTURE_READONLY_LOG: readOnlyLog ? '1' : '0',
+        },
         encoding: 'utf8',
       });
-      await checkDiagnostics(result, fail, canLog ? path.join(capturedTemp, 'Temp') : undefined, authOnly);
+      const logDir = path.join(capturedTemp, 'Temp');
+      await checkDiagnostics(result, fail, canLog ? logDir : undefined, authOnly);
+      if (replaceLog) await checkPreservedReplacement(logDir);
       expect(result.stdout).toContain('fixture state restored');
       // PowerShell Core can leave its own .dotnet runtime directory.
-      expect((await readdir(capturedTemp)).filter(entry => entry !== '.dotnet')).toEqual(canLog ? ['Temp'] : []);
+      expect((await readdir(capturedTemp)).filter(entry => entry !== '.dotnet'))
+        .toEqual(canLog || replaceLog || readOnlyLog ? ['Temp'] : []);
     });
   });
 });

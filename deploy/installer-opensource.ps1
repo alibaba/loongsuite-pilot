@@ -1223,8 +1223,8 @@ function New-NpmFallbackLog {
     # The user profile's Temp directory provides inherited private ACLs.
     # Avoid storing native command output under a custom or machine-wide directory.
     if (-not $env:LOCALAPPDATA) { return }
-    $logDir = Get-PilotLongPath (Join-Path $env:LOCALAPPDATA "Temp")
     try {
+        $logDir = Get-PilotLongPath (Join-Path $env:LOCALAPPDATA "Temp" -ErrorAction Stop)
         if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
             New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop | Out-Null
         }
@@ -1236,8 +1236,37 @@ function New-NpmFallbackLog {
     }
 }
 
-function Find-NpmFallbackHint {
-    param([Parameter(ValueFromPipeline = $true)][string]$Line)
+function Test-NpmFallbackLogFile {
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        return ($item.PSProvider.Name -eq 'FileSystem' -and -not $item.PSIsContainer -and
+            -not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+    } catch {
+        return $false
+    }
+}
+
+function Add-NpmFallbackLogLines {
+    param([string]$Path, [string[]]$Lines)
+    if (-not (Test-NpmFallbackLogFile $Path)) { return $false }
+    try {
+        Add-Content -LiteralPath $Path -Value $Lines -Encoding UTF8 -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Remove-NpmFallbackLogQuietly {
+    param([string]$Path)
+    if (-not (Test-NpmFallbackLogFile $Path)) { return }
+    try { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop } catch {}
+}
+
+function Read-NpmFallbackOutput {
+    param([string]$LogPath, [Parameter(ValueFromPipeline = $true)][string]$Line)
 
     begin {
         # Only the fixed hint leaves the stream; registry/lifecycle output may contain credentials.
@@ -1268,6 +1297,9 @@ function Find-NpmFallbackHint {
                En = 'a native module failed to build. Inspect the node-gyp error in the local npm log.' }
         )
         $rank = $rules.Count
+        $logComplete = Test-NpmFallbackLogFile $LogPath
+        $logLines = @()
+        $logChars = 0
     }
     process {
         for ($index = 0; $index -lt $rank; $index++) {
@@ -1276,9 +1308,24 @@ function Find-NpmFallbackHint {
                 break
             }
         }
+        if ($logComplete) {
+            $logLines += $Line
+            $logChars += $Line.Length
+            # Batch to limit memory and avoid opening and closing the file per line.
+            if ($logLines.Count -ge 128 -or $logChars -ge 32768) {
+                $logComplete = Add-NpmFallbackLogLines $LogPath $logLines
+                $logLines = @()
+                $logChars = 0
+            }
+        }
     }
     end {
-        if ($rank -lt $rules.Count) { return $rules[$rank] }
+        if ($logComplete -and $logLines.Count) {
+            $logComplete = Add-NpmFallbackLogLines $LogPath $logLines
+        }
+        $hint = $null
+        if ($rank -lt $rules.Count) { $hint = $rules[$rank] }
+        return @{ Hint = $hint; LogComplete = $logComplete }
     }
 }
 
@@ -1365,7 +1412,6 @@ function Deploy-Package {
         $savedPath = $env:PATH
         $prevEAP = $ErrorActionPreference
         $npmLog = ""
-        $npmLogErrors = @()
         $npmExit = $null
         Push-Location -LiteralPath $script:PERMANENT_DIR
         try {
@@ -1377,27 +1423,23 @@ function Deploy-Package {
             $global:LASTEXITCODE = 1
             $npmRetryArgs = @("--fetch-retries", "5", "--fetch-retry-mintimeout", "2000",
                 "--fetch-retry-maxtimeout", "60000")
-            if ($npmLog) {
-                $npmHint = & $script:NPM_BIN install --omit=dev --omit=optional @npmRetryArgs 2>&1 | ForEach-Object { "$_" } |
-                    Tee-Object -LiteralPath $npmLog -ErrorAction SilentlyContinue -ErrorVariable npmLogErrors |
-                    Find-NpmFallbackHint
-            } else {
-                $npmHint = & $script:NPM_BIN install --omit=dev --omit=optional @npmRetryArgs 2>&1 | ForEach-Object { "$_" } |
-                    Find-NpmFallbackHint
-            }
+            $npmCapture = & $script:NPM_BIN install --omit=dev --omit=optional @npmRetryArgs 2>&1 | ForEach-Object { "$_" } |
+                Read-NpmFallbackOutput -LogPath $npmLog
             $npmExit = $LASTEXITCODE
         } finally {
             $ErrorActionPreference = $prevEAP
             $env:PATH = $savedPath
             Pop-Location
-            if ($npmLog -and ($null -eq $npmExit -or $npmLogErrors.Count -or $npmExit -eq 0)) {
-                Remove-PilotPathQuietly $npmLog
-                $npmLog = ""
-            }
+            if ($null -eq $npmExit -or $npmExit -eq 0) { Remove-NpmFallbackLogQuietly $npmLog }
         }
         if ($npmExit -ne 0) {
             Msg "❌ 依赖安装失败 (exit=$npmExit)" "❌ Dependencies installation failed (exit=$npmExit)"
-            if ($npmLog) { Msg "    完整 npm 输出：$npmLog" "    Full npm output: $npmLog" }
+            if ($npmCapture.LogComplete -and (Test-NpmFallbackLogFile $npmLog)) {
+                Msg "    完整 npm 输出：$npmLog" "    Full npm output: $npmLog"
+            } else {
+                Msg "    无法保存完整的 npm 输出。" "    Could not save the full npm output."
+            }
+            $npmHint = $npmCapture.Hint
             if ($npmHint) { Msg "    提示：$($npmHint.Zh)" "    Hint: $($npmHint.En)" }
             throw "npm fallback failed (exit=$npmExit)"
         }

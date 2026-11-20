@@ -1120,25 +1120,31 @@ deploy_package() {
     else
         msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" \
             "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
-        local npm_log npm_diagnostic npm_exit=0
+        local npm_log npm_diagnostic npm_exit=0 log_exit
         npm_log=$(create_npm_fallback_log) || npm_log=""
-        # Preserve npm's own status through the diagnostics pipeline.
+        # tee forwards to the classifier even when its optional log write fails.
+        # Keep the npm exit status separate from whether the full log was saved.
         npm_diagnostic=$(
             cd "$PERMANENT_DIR" || exit $?
             run_npm install --production --no-optional \
                 --fetch-retries 5 --fetch-retry-mintimeout 2000 --fetch-retry-maxtimeout 60000 \
-                2>&1 | tee -a "${npm_log:-/dev/null}" | classify_npm_fallback_output
-            exit "${PIPESTATUS[0]}"
+                2>&1 | tee -a "${npm_log:-/dev/null}" 2>/dev/null | classify_npm_fallback_output
+            local -a statuses=("${PIPESTATUS[@]}")
+            printf '%s\n' "${statuses[1]}"
+            exit "${statuses[0]}"
         ) || npm_exit=$?
+        log_exit=${npm_diagnostic##*$'\n'}
         if [ "$npm_exit" -ne 0 ]; then
             msg "    ❌ 依赖安装失败 (exit=$npm_exit)" "    ❌ Dependency installation failed (exit=$npm_exit)"
-            if [ -n "$npm_log" ]; then
+            if [ "$log_exit" = 0 ] && [ -f "$npm_log" ] && [ ! -L "$npm_log" ]; then
                 msg "    完整 npm 输出：$npm_log" "    Full npm output: $npm_log"
+            else
+                msg "    无法保存完整的 npm 输出。" "    Could not save the full npm output."
             fi
-            report_npm_fallback_hint "$npm_diagnostic"
+            report_npm_fallback_hint "${npm_diagnostic%$'\n'*}"
             return 1
         fi
-        if [ -n "$npm_log" ]; then rm -f "$npm_log" || true; fi
+        if [ -f "$npm_log" ] && [ ! -L "$npm_log" ]; then rm -f "$npm_log" 2>/dev/null || true; fi
         msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     fi
     echo ""
