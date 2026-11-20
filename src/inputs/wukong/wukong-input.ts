@@ -852,7 +852,7 @@ export class WukongInput extends BaseInput {
         } : {}),
       });
       entries.push(request);
-      if (s.firstToolTs === undefined && reqTs !== startTs) {
+      if (reqTs !== startTs && (s.nativeStep !== undefined || s.firstToolTs === undefined)) {
         sourceRequestTimes.set(request, BigInt(timestampToUnixNanos(startTs)));
       }
 

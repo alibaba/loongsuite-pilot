@@ -256,6 +256,57 @@ describe('WukongInput', () => {
     expect(deltasWithResult.map(entry => entry['gen_ai.response.id'])).toEqual([eligibleRequest]);
   });
 
+  it.each([
+    { firstResultAt: 39, secondToolAt: 41, responseId: 'two' },
+    { firstResultAt: 39, secondToolAt: 44, responseId: 'two' },
+    { firstResultAt: 40, secondToolAt: 41, responseId: 'three' },
+  ])('uses the explicit source request for a result at $firstResultAt before a second tool at $secondToolAt', async ({
+    firstResultAt, secondToolAt, responseId,
+  }) => {
+    const base = 1779240560000;
+    const event = (type: string, offset: number, fields: Record<string, unknown> = {}) => ({
+      type, timestamp: base + offset, ...fields,
+    });
+    const events = [
+      event('RUN_STARTED', 0, { runId: 'run' }),
+      event('STEP_STARTED', 3, { stepName: 'first' }),
+      event('TEXT_MESSAGE_CONTENT', 6, { messageId: 'one', delta: 'First.' }),
+      event('TOOL_CALL_START', 10, { toolCallId: 'a', toolCallName: 'read', parentMessageId: 'one' }),
+      event('TOOL_CALL_END', 12, { toolCallId: 'a' }),
+      event('TOOL_CALL_RESULT', firstResultAt, { toolCallId: 'a', content: 'First result.' }),
+      event('STEP_FINISHED', firstResultAt, { stepName: 'first' }),
+      event('STEP_STARTED', 40, { stepName: 'second' }),
+      event('TEXT_MESSAGE_CONTENT', 40, { messageId: 'two', delta: 'Second.' }),
+      event('TOOL_CALL_START', secondToolAt, { toolCallId: 'b', toolCallName: 'read', parentMessageId: 'two' }),
+      event('TOOL_CALL_END', 45, { toolCallId: 'b' }),
+      event('TOOL_CALL_RESULT', 47, { toolCallId: 'b', content: 'Second result.' }),
+      event('STEP_FINISHED', 48, { stepName: 'second' }),
+      event('STEP_STARTED', 50, { stepName: 'third' }),
+      event('TEXT_MESSAGE_CONTENT', 59, { messageId: 'three', delta: 'Third.' }),
+      event('STEP_FINISHED', 61, { stepName: 'third' }),
+      event('RUN_FINISHED', 62, { runId: 'run' }),
+    ];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({
+        messages: [SAMPLE_MESSAGES[0], { ...SAMPLE_MESSAGES[1], createdAt: base, events, isComplete: 1 }],
+      }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+    const spans = await exportInput();
+    const models = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    const requestsWithResult = (result: string) => entries.filter(entry => entry['event.name'] === 'llm.request'
+      && JSON.stringify(entry['gen_ai.input.messages_delta'])?.includes(result))
+      .map(entry => entry['gen_ai.response.id']);
+    expect(requestsWithResult('First result.')).toEqual([responseId]);
+    expect(requestsWithResult('Second result.')).toEqual(['three']);
+    expect(models.find(span => String(span.attributes['gen_ai.input.messages']).includes('First result.'))
+      ?.attributes['gen_ai.response.id']).toBe(responseId);
+  });
+
   it.each([undefined, 'reasoning-one', 'one'])('retains known text and reasoning in their overlapping explicit step with reasoning id %s', async (reasoningId) => {
     const base = 1779240560000;
     const event = (type: string, offset: number, fields: Record<string, unknown> = {}) => ({
