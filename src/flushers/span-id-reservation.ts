@@ -16,7 +16,7 @@ const ZERO_SPAN_ID = '0'.repeat(16);
 const TOOL_EVENT_NAMES = ['tool.call', 'tool.result'] as const;
 const LLM_EVENT_NAMES = ['llm.request', 'llm.response'] as const;
 
-function validSpanId(value: unknown): value is string {
+export function isValidSpanId(value: unknown): value is string {
   return typeof value === 'string'
     && VALID_SPAN_ID_RE.test(value)
     && value !== ZERO_SPAN_ID;
@@ -56,7 +56,7 @@ export class ReservedSpanIdGenerator implements IdGenerator {
   };
 
   reserve(spanId: unknown): boolean {
-    if (!validSpanId(spanId)) return false;
+    if (!isValidSpanId(spanId)) return false;
     this.reserved = spanId;
     return true;
   }
@@ -89,7 +89,7 @@ export class SpanIdReservations {
 
       const key = record[this.keyField];
       const spanId = record.span_id;
-      if (typeof key !== 'string' || !key || !validSpanId(spanId)) continue;
+      if (typeof key !== 'string' || !key || !isValidSpanId(spanId)) continue;
 
       const existing = this.byKey.get(key);
       if (existing && existing !== spanId) {
