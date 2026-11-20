@@ -96,26 +96,6 @@ export async function buildWorkBuddyEvents(
     const toolName = stringValue(record.name);
     if (callId && toolName) resultNamesByCallId.set(callId, toolName);
   }
-  // `model-usage` records carry per-physical-request usage (rawUsage with
-  // prompt/completion/cache breakdowns) keyed by conversationRequestId.
-  // Some WorkBuddy versions emit them only sporadically, but when present
-  // they backfill token usage for responses whose records carry none.
-  const modelUsageByRequestId = new Map<string, Record<string, unknown>>();
-  for (const record of records) {
-    if (record.type !== 'model-usage') continue;
-    const provider = record.providerData ?? {};
-    const usage = objectValue(provider.usage);
-    const rawUsage = objectValue(provider.rawUsage);
-    if (!usage && !rawUsage) continue;
-    const requestId = providerString(record, 'conversationRequestId');
-    if (requestId && !modelUsageByRequestId.has(requestId)) {
-      modelUsageByRequestId.set(requestId, provider);
-    }
-  }
-  const usageFallbackFor = (record: WorkBuddyRecord): Record<string, unknown> | undefined => {
-    const requestId = providerString(record, 'conversationRequestId');
-    return requestId ? modelUsageByRequestId.get(requestId) : undefined;
-  };
   let turnId = stableId(opts.sessionId, 'turn:unknown');
   let turnOrdinal = 0;
   let stepOrdinal = 0;
@@ -128,9 +108,8 @@ export async function buildWorkBuddyEvents(
   let lastResponse: AgentActivityEntry | undefined;
   let pendingUserInput: PendingUserInput | undefined;
   let turnStartEmitted = false;
-  let turnActivity = false;
-  let lastActivityRecord: WorkBuddyRecord | undefined;
-  let lastBoundaryRecord: WorkBuddyRecord | undefined;
+  let pendingModel: WorkBuddyRecord | undefined;
+  let lastActivityAtMs: number | undefined;
 
   const push = async (entry: AgentActivityEntry, source: WorkBuddyRecord) => {
     if (cwd) {
@@ -187,11 +166,41 @@ export async function buildWorkBuddyEvents(
     return true;
   };
 
-  const closeInterruptedTurn = async (boundarySource: WorkBuddyRecord): Promise<boolean> => {
-    const boundaryTimestamp = timestampMs(boundarySource);
-    if (boundaryTimestamp === undefined) return false;
+  const closeInterruptedTurn = async (boundarySource: WorkBuddyRecord, boundaryTimestamp: number | undefined) => {
+    if (boundaryTimestamp === undefined || (lastActivityAtMs !== undefined && boundaryTimestamp < lastActivityAtMs)) return;
+    // Reasoning after a completed tool wave belongs to a new model invocation.
+    // Keep the earlier response's tool_call finish reason in that case.
+    const anchor = pendingModel;
+    if (anchor) {
+      const step = stepContext(anchor, opts.sessionId, turnId, ++stepOrdinal);
+      const rawTraceId = providerString(anchor, 'traceId');
+      if (!isValidTraceId(rawTraceId)) {
+        step.traceId = lastResponse?.trace_id ?? pendingUserInput?.traceId ?? step.traceId;
+      }
+      const requestTimestamp = earliestTimestamp(requestStartMs, reasoningStartMs)
+        ?? timestampMs(anchor)
+        ?? boundaryTimestamp;
+      await emitPendingUserInput(step.traceId, requestTimestamp);
+      const request = baseEntry('llm.request', anchor, opts.sessionId, step, `request:${step.stepId}`, requestTimestamp);
+      request['gen_ai.request.id'] = step.requestId;
+      if (step.requestModel) request['gen_ai.request.model'] = step.requestModel;
+      if (!turnStartEmitted && firstStep) request['gen_ai.turn.start'] = true;
+      if (pendingDelta.length > 0) request['gen_ai.input.messages_delta'] = pendingDelta;
 
-    if (lastResponse) {
+      const response = baseEntry(
+        'llm.response', anchor, opts.sessionId, step, `response:${responseSourceId(anchor)}:cancelled`, boundaryTimestamp,
+      );
+      response['gen_ai.response.id'] = responseSourceId(anchor);
+      if (step.responseModel) response['gen_ai.response.model'] = step.responseModel;
+      response['gen_ai.response.finish_reasons'] = ['cancelled'];
+      response['gen_ai.turn.end'] = true;
+      if (reasoningParts.length > 0) {
+        response['gen_ai.output.messages'] = [{ role: 'assistant', parts: reasoningParts, finish_reason: 'cancelled' }];
+      }
+      applyUsage(response, anchor);
+      await push(request, anchor);
+      await push(response, anchor);
+    } else if (lastResponse) {
       lastResponse['gen_ai.response.finish_reasons'] = ['cancelled'];
       lastResponse['gen_ai.turn.end'] = true;
       const messages = lastResponse['gen_ai.output.messages'];
@@ -202,81 +211,28 @@ export async function buildWorkBuddyEvents(
           }
         }
       }
-
-      for (const [callId, tool] of tools) {
-        if (tool.step.turnId !== turnId) continue;
-        const result = baseEntry(
-          'tool.result',
-          boundarySource,
-          opts.sessionId,
-          tool.step,
-          `tool-result:${callId}`,
-          boundaryTimestamp,
-        );
-        result['gen_ai.tool.name'] = tool.toolName;
-        result['gen_ai.tool.call.id'] = callId;
-        result['tool.result.status'] = 'cancelled';
-        const durationMs = boundaryTimestamp - tool.callTimestamp;
-        if (durationMs > 0) result['gen_ai.tool.call.duration'] = durationMs;
-        await push(result, boundarySource);
-        tools.delete(callId);
-      }
-      lastResponse = undefined;
-      turnActivity = false;
-      lastActivityRecord = undefined;
-      return true;
+    } else {
+      return;
     }
 
-    if (!turnActivity || !lastActivityRecord) return false;
-
-    // Fast-cancelled turn: the model produced reasoning (or started a tool wave)
-    // but no llm.response was sealed before the interruption. Emit a minimal
-    // cancelled request/response pair so the user prompt and any reasoning are
-    // not silently dropped with the whole turn.
-    const anchor = lastActivityRecord;
-    const step = stepContext(anchor, opts.sessionId, turnId, stepOrdinal + 1);
-    const requestTimestamp = requestStartMs ?? timestampMs(anchor) ?? boundaryTimestamp;
-    await emitPendingUserInput(step.traceId, requestTimestamp);
-    const request = baseEntry(
-      'llm.request',
-      anchor,
-      opts.sessionId,
-      step,
-      `request:${step.stepId}`,
-      requestTimestamp,
-    );
-    request['gen_ai.request.id'] = step.requestId;
-    if (step.requestModel) request['gen_ai.request.model'] = step.requestModel;
-    if (!turnStartEmitted) request['gen_ai.turn.start'] = true;
-    if (pendingDelta.length > 0) request['gen_ai.input.messages_delta'] = pendingDelta;
-
-    const response = baseEntry(
-      'llm.response',
-      boundarySource,
-      opts.sessionId,
-      step,
-      `response:${sourceId(anchor)}:cancelled`,
-      boundaryTimestamp,
-    );
-    response['gen_ai.response.id'] = responseSourceId(anchor);
-    if (step.responseModel) response['gen_ai.response.model'] = step.responseModel;
-    response['gen_ai.response.finish_reasons'] = ['cancelled'];
-    response['gen_ai.turn.end'] = true;
-    if (reasoningParts.length > 0) {
-      response['gen_ai.output.messages'] = [{
-        role: 'assistant',
-        parts: reasoningParts,
-        finish_reason: 'cancelled',
-      }];
+    for (const [callId, tool] of tools) {
+      if (tool.step.turnId !== turnId) continue;
+      const result = baseEntry(
+        'tool.result', boundarySource, opts.sessionId, tool.step, `tool-result:${callId}`, boundaryTimestamp,
+      );
+      result['gen_ai.tool.name'] = tool.toolName;
+      result['gen_ai.tool.call.id'] = callId;
+      result['tool.result.status'] = 'cancelled';
+      const durationMs = boundaryTimestamp - tool.callTimestamp;
+      if (durationMs > 0) result['gen_ai.tool.call.duration'] = durationMs;
+      await push(result, boundarySource);
+      tools.delete(callId);
     }
-    applyUsage(response, anchor, usageFallbackFor(anchor));
-
-    await push(request, anchor);
-    await push(response, boundarySource);
+    lastResponse = undefined;
+    pendingModel = undefined;
     pendingDelta = [];
-    turnActivity = false;
-    lastActivityRecord = undefined;
-    return true;
+    reasoningParts = [];
+    reasoningStartMs = undefined;
   };
 
   const emitToolWave = async (
@@ -354,12 +310,13 @@ export async function buildWorkBuddyEvents(
       parts: outputParts,
       finish_reason: 'tool_call',
     }];
-    applyUsage(response, calls[calls.length - 1].record, usageFallbackFor(responseSource));
+    applyUsage(response, calls[calls.length - 1].record);
 
     await push(request, responseSource);
     await push(response, responseSource);
     lastResponse = response;
     for (const call of normalizedCalls) {
+      lastActivityAtMs = latestTimestamp(lastActivityAtMs, call.callTimestamp);
       tools.set(call.callId, {
         step,
         callTimestamp: call.callTimestamp,
@@ -383,6 +340,7 @@ export async function buildWorkBuddyEvents(
     pendingDelta = assistantToolParts.length > 0
       ? [{ role: 'assistant', parts: assistantToolParts.map(part => ({ ...part })) }]
       : [];
+    pendingModel = undefined;
     reasoningParts = [];
     reasoningStartMs = undefined;
     requestStartMs = responseTimestamp;
@@ -391,58 +349,17 @@ export async function buildWorkBuddyEvents(
 
   for (let index = 0; index < records.length; index++) {
     const record = records[index];
-    if (
-      record.type === 'message'
-      && record.role === 'assistant'
-      && record.status === 'incomplete'
-      && record.providerData?.skipRun === true
-    ) {
-      // WorkBuddy writes an internal "Interrupted by user" assistant marker when
-      // a run is cancelled. The record itself stays skipped as noise, but it is
-      // the most precise cancel boundary available, so seal the open turn here.
-      await closeInterruptedTurn(record);
-      continue;
-    }
-    if (record.type === 'ai-title') {
-      // Title generation is a physical model request billed by the provider.
-      // It never appears as an assistant message, so emit a standalone
-      // llm.response to keep physical call counts aligned with billing.
-      const titleTimestamp = timestampMs(record);
-      if (titleTimestamp !== undefined) {
-        const step: StepContext = {
-          stepId: `${opts.sessionId}:title`,
-          requestId: `${opts.sessionId}:title`,
-          turnId: `${opts.sessionId}:title`,
-          traceId: stableHex(`${opts.sessionId}:title`, 32),
-          provider: 'workbuddy',
-        };
-        const title = stringValue(record.aiTitle);
-        const response = baseEntry(
-          'llm.response',
-          record,
-          opts.sessionId,
-          step,
-          `ai-title:${stringValue(record.id) ?? String(titleTimestamp)}`,
-          titleTimestamp,
-        );
-        response['gen_ai.provider.name'] = 'workbuddy';
-        response['gen_ai.response.finish_reasons'] = ['stop'];
-        if (title !== undefined) {
-          response['gen_ai.output.messages'] = [{
-            role: 'assistant',
-            parts: [{ type: 'text', content: title }],
-            finish_reason: 'stop',
-          }];
-        }
-        await push(response, record);
+    if (isInternalRecord(record)) {
+      if (record.type === 'message' && record.role === 'assistant'
+        && record.status === 'incomplete' && record.providerData?.skipRun === true) {
+        rememberPendingUserContext(record);
+        await closeInterruptedTurn(record, timestampMs(record) ?? opts.stopAtMs);
       }
       continue;
     }
-    if (isInternalRecord(record)) continue;
-    lastBoundaryRecord = record;
 
     if (record.type === 'message' && record.role === 'user') {
-      await closeInterruptedTurn(record);
+      await closeInterruptedTurn(record, timestampMs(record));
       // A later response without a timestamp may still need the Stop observation.
       await emitPendingUserInput();
       tools.clear();
@@ -453,14 +370,14 @@ export async function buildWorkBuddyEvents(
       turnStartEmitted = false;
       turnId = stringValue(record.id) ?? stableId(opts.sessionId, `turn:${turnOrdinal}:${record.timestamp ?? index}`);
       lastResponse = undefined;
-      turnActivity = false;
-      lastActivityRecord = undefined;
+      pendingModel = undefined;
       const message = toMessage(record, 'user');
       pendingDelta = message.parts.length > 0 ? [message] : [];
       reasoningParts = [];
       reasoningStartMs = undefined;
       requestStartMs = timestampMs(record)
         ?? hookEvents.takeBoundary('UserPromptSubmit')?.observedAtMs;
+      lastActivityAtMs = requestStartMs;
       const rawTraceId = providerString(record, 'traceId');
       pendingUserInput = {
         source: record,
@@ -475,18 +392,17 @@ export async function buildWorkBuddyEvents(
     rememberPendingUserContext(record);
 
     if (record.type === 'reasoning') {
-      turnActivity = true;
-      lastActivityRecord = record;
+      pendingModel = record;
+      lastActivityAtMs = latestTimestamp(lastActivityAtMs, timestampMs(record));
       reasoningParts.push(...toReasoningParts(record));
       reasoningStartMs = earliestTimestamp(reasoningStartMs, timestampMs(record));
       continue;
     }
 
     if (record.type === 'function_call') {
-      turnActivity = true;
-      lastActivityRecord = record;
+      lastActivityAtMs = latestTimestamp(lastActivityAtMs, timestampMs(record));
       const wave = collectFunctionCallWave(records, index, record);
-      if (!wave.complete) break;
+      if (!wave.complete && (opts.stopAtMs === undefined || (lastActivityAtMs ?? 0) > opts.stopAtMs)) break;
       await emitToolWave(record, wave.calls);
       index = wave.calls[wave.calls.length - 1].index;
       continue;
@@ -500,6 +416,7 @@ export async function buildWorkBuddyEvents(
         : hookEvents.takeTool('PostToolUse', undefined, nativeToolName);
       const callId = nativeCallId ?? hook?.toolCallId;
       const resultTimestamp = timestampMs(record) ?? hook?.observedAtMs;
+      lastActivityAtMs = latestTimestamp(lastActivityAtMs, resultTimestamp);
       requestStartMs = latestTimestamp(requestStartMs, resultTimestamp);
       if (!callId) continue;
       const tool = tools.get(callId);
@@ -539,14 +456,13 @@ export async function buildWorkBuddyEvents(
 
     if (record.type === 'message' && record.role === 'assistant') {
       if (record.status === 'incomplete') {
-        await closeInterruptedTurn(record);
+        await closeInterruptedTurn(record, timestampMs(record) ?? opts.stopAtMs);
         continue;
       }
-      turnActivity = true;
-      lastActivityRecord = record;
+      lastActivityAtMs = latestTimestamp(lastActivityAtMs, timestampMs(record));
       const wave = collectFunctionCallWave(records, index + 1, record);
       if (wave.calls.length > 0) {
-        if (!wave.complete) break;
+        if (!wave.complete && (opts.stopAtMs === undefined || (lastActivityAtMs ?? 0) > opts.stopAtMs)) break;
         await emitToolWave(record, wave.calls, toMessage(record, 'assistant').parts);
         index = wave.calls[wave.calls.length - 1].index;
         continue;
@@ -593,7 +509,7 @@ export async function buildWorkBuddyEvents(
       response['gen_ai.turn.end'] = true;
       const parts = [...reasoningParts, ...message.parts];
       if (parts.length > 0) response['gen_ai.output.messages'] = [{ role: 'assistant', parts, finish_reason: 'stop' }];
-      applyUsage(response, record, usageFallbackFor(record));
+      applyUsage(response, record);
 
       await push(request, record);
       await push(response, record);
@@ -604,17 +520,14 @@ export async function buildWorkBuddyEvents(
       reasoningStartMs = undefined;
       requestStartMs = responseTimestamp;
       firstStep = false;
-      turnActivity = false;
-      lastActivityRecord = undefined;
+      pendingModel = undefined;
     }
   }
 
-  // The batch only reaches the builder behind a stable Stop boundary, so its end
-  // is a real turn boundary. Seal a turn left unsealed here — otherwise the last
-  // llm.response would stay on finish_reasons=['tool_call'] forever when a run
-  // was cancelled without a following user message in the same batch.
-  if (lastBoundaryRecord !== undefined) {
-    await closeInterruptedTurn(lastBoundaryRecord);
+  // The input provides a stable Stop only for records at or before that turn boundary.
+  const finalRecord = records[records.length - 1];
+  if (opts.stopAtMs !== undefined && finalRecord) {
+    await closeInterruptedTurn(finalRecord, opts.stopAtMs);
   }
   await emitPendingUserInput(undefined, undefined, true);
 
@@ -726,20 +639,13 @@ function toToolCallPart(
   return part;
 }
 
-function applyUsage(
-  entry: AgentActivityEntry,
-  record: WorkBuddyRecord,
-  fallbackProvider?: Record<string, unknown>,
-): void {
+function applyUsage(entry: AgentActivityEntry, record: WorkBuddyRecord): void {
   const provider = record.providerData ?? {};
-  const fallback = fallbackProvider ?? {};
   const usage = record.message?.usage
     ?? objectValue(provider.usage)
     ?? objectValue(provider.rawUsage)
-    ?? objectValue(fallback.usage)
-    ?? objectValue(fallback.rawUsage)
     ?? {};
-  const raw = objectValue(provider.rawUsage) ?? objectValue(fallback.rawUsage) ?? {};
+  const raw = objectValue(provider.rawUsage) ?? {};
   const input = numberValue(usage.input_tokens) ?? numberValue(usage.inputTokens) ?? numberValue(usage.prompt_tokens) ?? numberValue(raw.prompt_tokens);
   const output = numberValue(usage.output_tokens) ?? numberValue(usage.outputTokens) ?? numberValue(usage.completion_tokens) ?? numberValue(raw.completion_tokens);
   const total = numberValue(usage.total_tokens) ?? numberValue(usage.totalTokens) ?? numberValue(raw.total_tokens)

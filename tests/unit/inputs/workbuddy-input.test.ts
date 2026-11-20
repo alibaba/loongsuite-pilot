@@ -904,7 +904,7 @@ describe('WorkBuddy audit-event builder', () => {
       },
     ];
 
-    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-eof' });
+    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-eof', stopAtMs: 4_300 });
     const response = entries.find(entry =>
       entry['event.name'] === 'llm.response'
       && entry['gen_ai.turn.id'] === 'turn-eof');
@@ -921,6 +921,33 @@ describe('WorkBuddy audit-event builder', () => {
     // The tool result that did complete keeps its real status.
     expect(toolResult).toMatchObject({
       'tool.result.status': 'success',
+    });
+  });
+
+  it('preserves a final observed tool call at a stable Stop without a tool result', async () => {
+    const records = fixtureRecords();
+    const firstTool = records.findIndex(record => record.type === 'function_call');
+    const observed = records[firstTool];
+    const throughCall = records.slice(0, firstTool + 1);
+    const opts = { sessionId: 'session-eof-tool' };
+    const unsealed = await buildWorkBuddyEvents(throughCall, opts);
+    expect(unsealed.some(entry => entry['gen_ai.turn.end'] === true)).toBe(false);
+
+    const stopAtMs = observed.timestamp! + 100;
+    const sealed = await buildWorkBuddyEvents(throughCall, { ...opts, stopAtMs });
+    expect(sealed.filter(entry => entry['event.name'].startsWith('tool.'))).toMatchObject([
+      { 'event.name': 'tool.call', 'gen_ai.tool.call.id': observed.callId, 'gen_ai.tool.name': observed.name },
+      {
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.id': observed.callId,
+        'gen_ai.tool.name': observed.name,
+        'tool.result.status': 'cancelled',
+        time_unix_nano: String(BigInt(stopAtMs) * 1_000_000n),
+      },
+    ]);
+    expect(sealed.find(entry => entry['event.name'] === 'llm.response')).toMatchObject({
+      'gen_ai.response.finish_reasons': ['cancelled'],
+      'gen_ai.turn.end': true,
     });
   });
 
