@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { SpanStatusCode } from '@opentelemetry/api';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { QoderTraceInput } from '../../src/inputs/qoder-trace/qoder-trace-input.js';
 import { StateStore } from '../../src/checkpoints/state-store.js';
@@ -47,7 +48,8 @@ const end = (id: string, second: number, tokens = 11) => [
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
 
-async function harness(agentId: 'qoder', upstream = false, configureCollector?: (collector: any) => void, hostProduct?: 'app') {
+async function harness(agentId: 'qoder', upstream = false, configureCollector?: (collector: any) => void,
+  hostProduct?: 'app', captureMessageContent = true) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-child-pipeline-')));
   cleanup.push(() => fs.rm(root, { recursive: true, force: true }));
   const parent = path.join(root, `${session}.jsonl`);
@@ -59,6 +61,7 @@ async function harness(agentId: 'qoder', upstream = false, configureCollector?: 
   const start = async () => {
     state = new StateStore(path.join(root, 'input-state.json')); await state.load();
     manager = new InputManager(); manager.setFlusher(events); manager.setMaskConfig({ mode: 'all', types: [] });
+    manager.setAgentsConfig({ qoder: { captureMessageContent } });
     if (upstream) manager.setTraceLinker(new TraceLinker(new CorrelationStore(path.join(root, 'acp-correlate')), { retries: 0 }));
     input = new QoderTraceInput({ stateStore: state, dataDir: root, logDir: path.join(root, 'history'), pollIntervalMs: 60_000,
       resolveTraceContext: entries => manager.stampTraceContext(entries) });
@@ -302,6 +305,41 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
     const identity = (batch: ReadableSpan[]) => batch.map(span => [span.spanContext().traceId,
       span.spanContext().spanId, span.parentSpanId]).sort();
     expect(identity(replay)).toEqual(identity(spans));
+  });
+
+  it.each([true, false])('keeps native child tool outcomes with content capture %s', async captureMessageContent => {
+    const h = await harness(agentId, false, undefined, undefined, captureMessageContent);
+    const failedOutput = 'synthetic failed read output';
+    await h.write(null, [prompt('outcome-parent', 0), ...dispatch('outcome-child', 1, 'child'), ...end('outcome-parent-end', 6)]);
+    await h.write('child', [prompt('outcome-user', 1.1, 'outcome-child', 'child'),
+      assistant('outcome-child-model', 2, [
+        { type: 'tool_use', id: 'read-failed', name: 'Read', input: { path: 'missing.txt' } },
+        { type: 'tool_use', id: 'read-success', name: 'Read', input: { path: 'existing.txt' } },
+      ], 5, 'tool_use'),
+      { type: 'user', timestamp: at(3), message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'read-failed', is_error: true, content: failedOutput },
+        { type: 'tool_result', tool_use_id: 'read-success', content: 'synthetic successful read' },
+      ] } },
+      ...end('outcome-child-end', 4),
+    ]);
+    await h.start(); await h.cycle(); await h.stop();
+    const entries = h.entries();
+    const failedEntry = entries.find(entry => entry['event.name'] === 'tool.result'
+      && entry['gen_ai.tool.call.id'] === 'read-failed');
+    expect(failedEntry).toMatchObject({ 'tool.result.status': 'failure' });
+    expect(JSON.stringify(failedEntry).includes(failedOutput)).toBe(captureMessageContent);
+
+    const spans = await spansFor(entries);
+    const tools = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL');
+    const failed = tools.find(span => span.attributes['gen_ai.tool.call.id'] === 'read-failed');
+    const succeeded = tools.find(span => span.attributes['gen_ai.tool.call.id'] === 'read-success');
+    expect(failed?.attributes['gen_ai.agent.id']).toBe('child');
+    expect(succeeded?.attributes['gen_ai.agent.id']).toBe('child');
+    expect(JSON.stringify(failed?.attributes).includes(failedOutput)).toBe(captureMessageContent);
+    expect(failed?.status.code).toBe(SpanStatusCode.ERROR);
+    expect(failed?.attributes).toMatchObject({ 'tool.result.status': 'failure', 'gen_ai.tool.success': false });
+    expect(succeeded?.status.code).not.toBe(SpanStatusCode.ERROR);
+    expect(succeeded?.attributes).toMatchObject({ 'tool.result.status': 'success', 'gen_ai.tool.success': true });
   });
 
   it('retains a late child through restart and gives reused work a new incoming invocation', async () => {
