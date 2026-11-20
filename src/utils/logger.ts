@@ -1,3 +1,4 @@
+import { once } from 'node:events';
 import pino from 'pino';
 import build from 'pino-roll';
 import { writeFile } from 'node:fs/promises';
@@ -63,6 +64,9 @@ export async function initFileLogging(logFilePath: string): Promise<void> {
     dateFormat: 'yyyy-MM-dd',
     limit: { count: 10, removeOtherLogFiles: true },
   });
+  // pino-roll returns before its asynchronous file open. A disabled collector
+  // can otherwise exit before the startup messages reach the rotating log.
+  await once(fileStream, 'ready');
   fileStreamRef = fileStream as unknown as { flushSync?: () => void };
 
   const useStdout = process.stdout.isTTY || process.env.LOONGSUITE_PILOT_STDOUT === '1';
