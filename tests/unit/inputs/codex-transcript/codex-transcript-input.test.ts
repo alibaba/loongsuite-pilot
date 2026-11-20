@@ -1768,6 +1768,39 @@ describe('CodexTranscriptInput', () => {
     expect(internals.reportedSubagentLinks.has('new-child')).toBe(true);
   });
 
+  it('discovers a new child from a wakeup when the rollout directory mtime is unchanged', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-wakeup-discovery-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createDormantInput(root);
+    await input.start();
+    try {
+      const parent = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+      const parentLines = parent.trimEnd().split('\n');
+      parentLines.pop();
+      const parentTranscript = await writeTranscriptNamed(
+        sessionDir, PARENT_FIXTURE_NAME, parentLines.join('\n') + '\n',
+      );
+      const dayDir = path.dirname(parentTranscript);
+      const unchangedMtime = new Date('2026-06-24T06:00:00.000Z');
+      await fs.utimes(dayDir, unchangedMtime, unchangedMtime);
+      await runInputCycle(input);
+      expect(input.getSubagentLinkSnapshot().detectedSpawns).toBe(4);
+
+      const child = CHILD_FIXTURES[3];
+      const childText = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, child.name), 'utf8');
+      await writeTranscriptNamed(sessionDir, child.name, childText);
+      // Model a filesystem reporting the same timestamp for two directory states.
+      await fs.utimes(dayDir, unchangedMtime, unchangedMtime);
+      expect((await fs.stat(dayDir)).mtimeMs).toBe(unchangedMtime.getTime());
+      (input as unknown as { noteWakeup(filename: string): void }).noteWakeup(`${child.threadId}.json`);
+      await runInputCycle(input);
+
+      expect(responsesForTurn(entries, child.turnId)).toHaveLength(1);
+    } finally {
+      await input.stop();
+    }
+  });
+
   it('emits completed children with their own identity before the parent terminal', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-owner-'));
     tempDirs.push(root);
