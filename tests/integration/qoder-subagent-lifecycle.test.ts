@@ -100,13 +100,25 @@ async function spansFor(entries: AgentActivityEntry[]) {
 
 describe.each(['qoder'] as const)('%s independent native child work', agentId => {
   it.each(['both wakeups', 'child wakeup first', 'parent only', 'descriptor after restart',
-    'descriptor after both wakeups', 'modern parent marker', 'modern child marker',
+    'descriptor after both wakeups', 'prefix budget', 'modern parent marker', 'modern child marker',
     'missing descriptor', 'conflicting descriptor', 'conflicting native peer', 'conflicting peer in open parent',
     'matching late native peer', 'conflicting late native peer',
     'explicit independent prompt', 'non-CLI owner', 'desktop owner', 'outside transcript', 'aliased transcript',
     'descriptor cap'])(
     'uses only corroborated legacy CLI 1.1.61 delegation with %s', async mode => {
-      const h = await harness(agentId, false, undefined, mode === 'desktop owner' ? 'app' : undefined);
+      let prefixWasConstrained = false;
+      const constrainPrefix = mode === 'prefix budget' ? (collector: any) => {
+        const prepareWork = collector.prepareWork.bind(collector);
+        collector.prepareWork = async (source: any, checkpoint: any, prompt: any) => {
+          if (prefixWasConstrained || !source.subagentId) return prepareWork(source, checkpoint, prompt);
+          prefixWasConstrained = true;
+          const remaining = collector.remainingBytes;
+          collector.remainingBytes = 1;
+          try { return await prepareWork(source, checkpoint, prompt); }
+          finally { collector.remainingBytes = remaining - (1 - collector.remainingBytes); }
+        };
+      } : undefined;
+      const h = await harness(agentId, false, constrainPrefix, mode === 'desktop owner' ? 'app' : undefined);
       const fixtures = path.resolve('tests/fixtures/qoder/legacy-subagent');
       async function rows(file: string) {
         const text = await fs.readFile(path.join(fixtures, file), 'utf8');
@@ -146,7 +158,7 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
       } else if (mode !== 'child wakeup first') {
         await h.write(null, parent);
       }
-      if (['both wakeups', 'child wakeup first', 'descriptor after both wakeups', 'modern child marker'].includes(mode)) {
+      if (['both wakeups', 'child wakeup first', 'descriptor after both wakeups', 'prefix budget', 'modern child marker'].includes(mode)) {
         await h.write(descriptor.agentId, child);
       }
       else if (mode === 'outside transcript' || mode === 'aliased transcript') {
@@ -195,7 +207,8 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
         && span.attributes['gen_ai.agent.id'] === task.agentId);
       expect(parentTool).toBeDefined();
       if (lateNativePeer || ['both wakeups', 'child wakeup first', 'parent only', 'descriptor after restart',
-        'descriptor after both wakeups', 'modern parent marker', 'modern child marker'].includes(mode)) {
+        'descriptor after both wakeups', 'prefix budget', 'modern parent marker', 'modern child marker'].includes(mode)) {
+        if (mode === 'prefix budget') expect(prefixWasConstrained).toBe(true);
         expect(children).toHaveLength(1);
         expect(children[0].parentSpanId).toBe(parentTool?.spanContext().spanId);
         expect(children[0].spanContext().traceId).toBe(parentTool?.spanContext().traceId);

@@ -53,6 +53,7 @@ const LEGACY_DIRECTORIES_PER_CYCLE = 8;
 const MAX_LEGACY_TASK_DIRECTORY_ENTRIES = 128;
 const MAX_LEGACY_TASK_BYTES = 128 * 1024;
 const LEGACY_METADATA_BYTES_PER_CYCLE = 512 * 1024;
+const LEGACY_PREFIX_DEFERRED = Symbol('legacy-prefix-deferred');
 const legacyAgentId = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,512}$/.test(value);
 const isInsideDirectory = (directory, file) => {
   const relative = path.relative(directory, file);
@@ -404,13 +405,14 @@ export class QoderTranscriptCollector {
 
   async firstLegacyPrompt(source) {
     if (this.legacyFirstPrompts.has(source.key)) return this.legacyFirstPrompts.get(source.key);
-    if (this.remainingBytes <= 0) return;
+    if (this.remainingBytes <= 0) return LEGACY_PREFIX_DEFERRED;
     let handle;
     try {
       this.metrics.sourceFilesOpened++;
       handle = await openRegular(source.transcriptPath, true);
       const stat = await handle.stat();
-      const buffer = Buffer.alloc(Math.min(CHUNK_BYTES, this.remainingBytes, stat.size));
+      const prefixBytes = Math.min(CHUNK_BYTES, stat.size);
+      const buffer = Buffer.alloc(Math.min(prefixBytes, this.remainingBytes));
       const bytes = await this.read(handle, buffer, 0);
       for (let start = 0; start < bytes;) {
         const end = buffer.indexOf(0x0a, start);
@@ -426,6 +428,7 @@ export class QoderTranscriptCollector {
         }
         start = end + 1;
       }
+      if (bytes < prefixBytes) return LEGACY_PREFIX_DEFERRED;
     } catch {
       // A missing or changing native prefix can be inspected next cycle.
     } finally { await handle?.close(); }
@@ -445,6 +448,7 @@ export class QoderTranscriptCollector {
     const peerId = link.legacyPeerId ?? link.peerId;
     if (peerId && peerId !== source.subagentId) return;
     const first = await this.firstLegacyPrompt(source);
+    if (first === LEGACY_PREFIX_DEFERRED) return;
     if (first?.callId === claim.callId) return { first, link };
   }
 
@@ -1272,10 +1276,8 @@ export class QoderTranscriptCollector {
       if (checkpoint.incoming || checkpoint.traceContext.parentSpanId || checkpoint.traceContextLocked) return;
     }
     const possibleLegacy = legacyDelegatedPrompt(source, prompt) && checkpoint.activeStart < CHUNK_BYTES;
-    if (possibleLegacy && !this.legacyFirstPrompts.has(source.key) && this.remainingBytes <= 0) {
-      throw new Error('legacy-first-prompt-budget');
-    }
     const first = possibleLegacy ? await this.firstLegacyPrompt(source) : undefined;
+    if (first === LEGACY_PREFIX_DEFERRED) throw new Error('legacy-first-prompt-budget');
     const legacy = first?.start === checkpoint.activeStart && first?.uuid === prompt.uuid
       && first.callId === prompt.parent_tool_use_id && first.inode === checkpoint.inode;
     const legacyProof = legacy ? await this.verifyLegacySource(source, prompt.parent_tool_use_id) : undefined;
