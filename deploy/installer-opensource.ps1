@@ -1236,54 +1236,50 @@ function New-NpmFallbackLog {
     }
 }
 
-function Write-NpmFallbackHint {
-    param([string]$LogPath, [string[]]$OutputTail)
+function Find-NpmFallbackHint {
+    param([Parameter(ValueFromPipeline = $true)][string]$Line)
 
-    $rules = @(
-        @{ Pattern = 'not found: (make|g\+\+|gcc|c\+\+|cc1plus)|(make|g\+\+|gcc): command not found|gyp ERR! find VS'
-           Zh = '缺少 C/C++ 构建工具链。请安装 Visual Studio Build Tools 的 C++ 工作负载和 Python 3。'
-           En = 'missing C/C++ build toolchain. Install Visual Studio Build Tools with the C++ workload and Python 3.' }
-        @{ Pattern = "No module named '?distutils|distutils.*(not found|missing)"
-           Zh = '缺少 Python distutils。请检查 setuptools 和当前 Python 版本的兼容性。'
-           En = 'Python distutils is missing. Check setuptools compatibility with the selected Python version.' }
-        @{ Pattern = 'Python\.h|Could not find any Python installation'
-           Zh = '缺少 Python 或开发头文件。请安装 node-gyp 所需的 Python 开发环境。'
-           En = 'Python or its development headers are missing. Install the Python dependencies required by node-gyp.' }
-        @{ Pattern = 'EAI_AGAIN|ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ERR_SOCKET|socket hang up'
-           Zh = '无法连接 npm registry 或请求超时。请检查代理和镜像设置。'
-           En = 'the npm registry is unreachable or timing out. Check proxy and registry settings.' }
-        @{ Pattern = 'EACCES|EPERM'
-           Zh = '权限不足。请检查安装目录和 npm 缓存的属主及权限。'
-           En = 'permission denied. Check ownership and permissions for the installation directory and npm cache.' }
-        @{ Pattern = 'ENOSPC'
-           Zh = '磁盘空间不足。请释放安装目录或 npm 缓存所在磁盘的空间。'
-           En = 'out of disk space. Free space on the disks containing the installation directory and npm cache.' }
-        @{ Pattern = 'gyp ERR!|node-gyp.*(error|failed)'
-           Zh = '原生模块编译失败。请查看上方 gyp 错误。'
-           En = 'a native module failed to build. See the gyp error above.' }
-    )
-    foreach ($rule in $rules) {
-        if (($LogPath -and (Select-String -LiteralPath $LogPath -Pattern $rule.Pattern -Quiet -ErrorAction SilentlyContinue)) -or
-            ($OutputTail -match $rule.Pattern)) {
-            Msg "    提示：$($rule.Zh)" "    Hint: $($rule.En)"
-            break
+    begin {
+        # Only the fixed hint leaves the stream; registry/lifecycle output may contain credentials.
+        $rules = @(
+            @{ Pattern = 'not found: (make|g\+\+|gcc|c\+\+|cc1plus)|(make|g\+\+|gcc): command not found|gyp ERR! find VS'
+               Zh = '缺少 C/C++ 构建工具链。请安装 Visual Studio Build Tools 的 C++ 工作负载和 Python 3。'
+               En = 'missing C/C++ build toolchain. Install Visual Studio Build Tools with the C++ workload and Python 3.' }
+            @{ Pattern = "No module named '?distutils|distutils.*(not found|missing)"
+               Zh = '缺少 Python distutils。请检查 setuptools 和当前 Python 版本的兼容性。'
+               En = 'Python distutils is missing. Check setuptools compatibility with the selected Python version.' }
+            @{ Pattern = 'Python\.h|Could not find any Python installation'
+               Zh = '缺少 Python 或开发头文件。请安装 node-gyp 所需的 Python 开发环境。'
+               En = 'Python or its development headers are missing. Install the Python dependencies required by node-gyp.' }
+            @{ Pattern = '\be(401|403)\b'
+               Zh = 'npm registry 拒绝请求。请检查登录凭据和软件包访问权限。'
+               En = 'the npm registry refused the request. Check npm credentials and package access.' }
+            @{ Pattern = 'EAI_AGAIN|ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ERR_SOCKET|socket hang up'
+               Zh = '无法连接 npm registry 或请求超时。请检查代理和镜像设置。'
+               En = 'the npm registry is unreachable or timing out. Check proxy and registry settings.' }
+            @{ Pattern = 'EACCES|EPERM'
+               Zh = '权限不足。请检查安装目录和 npm 缓存的属主及权限。'
+               En = 'permission denied. Check ownership and permissions for the installation directory and npm cache.' }
+            @{ Pattern = 'ENOSPC'
+               Zh = '磁盘空间不足。请释放安装目录或 npm 缓存所在磁盘的空间。'
+               En = 'out of disk space. Free space on the disks containing the installation directory and npm cache.' }
+            @{ Pattern = 'gyp ERR!|node-gyp.*(error|failed)'
+               Zh = '原生模块编译失败。请在本机检查 npm 日志中的 node-gyp 错误。'
+               En = 'a native module failed to build. Inspect the node-gyp error in the local npm log.' }
+        )
+        $rank = $rules.Count
+    }
+    process {
+        for ($index = 0; $index -lt $rank; $index++) {
+            if ($Line -match $rules[$index].Pattern) {
+                $rank = $index
+                break
+            }
         }
     }
-}
-
-function Write-NpmFallbackLog {
-    param([string]$LogPath, [string[]]$OutputTail)
-
-    if ($LogPath) {
-        Msg "    完整 npm 输出：$LogPath" "    Full npm output: $LogPath"
-        $earlierErrors = @(Select-String -LiteralPath $LogPath -Pattern 'npm (ERR!|error)|gyp ERR!|ERR!' -ErrorAction SilentlyContinue |
-            Where-Object { $OutputTail -notcontains $_.Line } | Select-Object -Last 30)
-        if ($earlierErrors.Count) {
-            Msg "    ---- 较早的 npm/gyp 错误（最多 30 行）----" "    ---- Earlier npm/gyp errors (up to 30 lines) ----"
-            $earlierErrors | ForEach-Object { Write-Host $_.Line }
-        }
+    end {
+        if ($rank -lt $rules.Count) { return $rules[$rank] }
     }
-    Write-NpmFallbackHint $LogPath $OutputTail
 }
 
 function Write-DeployFailure {
@@ -1375,17 +1371,19 @@ function Deploy-Package {
         try {
             $npmLog = New-NpmFallbackLog
             if ($env:PATH -notlike "*$nodeDir*") { $env:PATH = "$nodeDir;$env:PATH" }
+            if (-not (Test-Path -LiteralPath $script:NPM_BIN -PathType Leaf)) { throw "npm executable could not be found" }
             $ErrorActionPreference = "Continue"
             # The initial code also covers failure to launch npm.
             $global:LASTEXITCODE = 1
             $npmRetryArgs = @("--fetch-retries", "5", "--fetch-retry-mintimeout", "2000",
                 "--fetch-retry-maxtimeout", "60000")
             if ($npmLog) {
-                $npmOut = @(& $script:NPM_BIN install --omit=dev --omit=optional @npmRetryArgs 2>&1 | ForEach-Object { "$_" } |
+                $npmHint = & $script:NPM_BIN install --omit=dev --omit=optional @npmRetryArgs 2>&1 | ForEach-Object { "$_" } |
                     Tee-Object -LiteralPath $npmLog -ErrorAction SilentlyContinue -ErrorVariable npmLogErrors |
-                    Select-Object -Last 40)
+                    Find-NpmFallbackHint
             } else {
-                $npmOut = @(& $script:NPM_BIN install --omit=dev --omit=optional @npmRetryArgs 2>&1 | ForEach-Object { "$_" } | Select-Object -Last 40)
+                $npmHint = & $script:NPM_BIN install --omit=dev --omit=optional @npmRetryArgs 2>&1 | ForEach-Object { "$_" } |
+                    Find-NpmFallbackHint
             }
             $npmExit = $LASTEXITCODE
         } finally {
@@ -1399,14 +1397,11 @@ function Deploy-Package {
         }
         if ($npmExit -ne 0) {
             Msg "❌ 依赖安装失败 (exit=$npmExit)" "❌ Dependencies installation failed (exit=$npmExit)"
-            if ($npmOut.Count) {
-                Msg "    ---- npm 输出（末 40 行）----" "    ---- npm output (last 40 lines) ----"
-                $npmOut | ForEach-Object { Write-Host $_ }
-            }
-            Write-NpmFallbackLog $npmLog $npmOut
+            if ($npmLog) { Msg "    完整 npm 输出：$npmLog" "    Full npm output: $npmLog" }
+            if ($npmHint) { Msg "    提示：$($npmHint.Zh)" "    Hint: $($npmHint.En)" }
             throw "npm fallback failed (exit=$npmExit)"
         }
-        if ($npmOut.Count) { Write-Host $npmOut[-1] }
+        Msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     }
 
     $script:DEPLOY_FAILED_STAGE = "files"

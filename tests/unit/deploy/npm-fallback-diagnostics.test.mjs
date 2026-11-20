@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 const windows = process.platform === 'win32';
 const powershell = process.env.PILOT_TEST_PWSH || (windows ? 'powershell.exe' : undefined);
+const privateMarkers = ['fixture-userinfo', 'fixture-registry-auth', 'fixture-signed-value', 'fixture-success-secret'];
 
 async function withFixture(test) {
   const root = await mkdtemp(path.join(tmpdir(), 'pilot-npm-diagnostics-'));
@@ -37,13 +38,18 @@ async function withFixture(test) {
       // Keep failure lines on one stream so native stdout/stderr scheduling
       // cannot move the final line out of the tail on a busy runner.
       const emit = fail ? console.error : console.log;
-      if (fail) emit('npm error gyp ERR! stack Error: not found: make');
+      if (fail) {
+        if (process.env.PILOT_FIXTURE_AUTH_ONLY !== '1') emit('npm error gyp ERR! stack Error: not found: make');
+        emit('npm error E403 https://fixture-userinfo@registry.invalid/package');
+      }
       for (let line = 1; line <= 45; line++) emit('fixture output line ' + line);
       if (fail) {
-        emit('fixture current npm failure ETEST');
+        emit('npm error registry response Authorization: Bearer fixture-registry-auth');
+        emit('npm error https://registry.invalid/package?signature=fixture-signed-value');
+        emit('npm error ' + 'x'.repeat(128 * 1024));
         process.exitCode = 37;
       } else {
-        emit('fixture success summary');
+        emit('fixture success summary fixture-success-secret');
       }
     `);
     await test(root, capturedTemp, {
@@ -72,35 +78,36 @@ function installerBlock(source, start, end) {
   return source.slice(from, through);
 }
 
-async function checkDiagnostics(result, fail, logDir) {
+async function checkDiagnostics(result, fail, logDir, authOnly) {
   expect(result.error).toBeUndefined();
   expect(result.status, result.stderr).toBe(fail ? 1 : 0);
   expect(result.stderr).toBe('');
-  expect(result.stdout).not.toMatch(/^fixture output line 1\r?$/m);
+  expect(result.stdout).not.toContain('fixture output line');
   expect(result.stdout).not.toContain('unrelated prior npm run');
+  expect(result.stdout).not.toContain('registry.invalid');
+  for (const marker of privateMarkers) expect(result.stdout).not.toContain(marker);
+  expect(Buffer.byteLength(result.stdout)).toBeLessThan(4096);
   if (fail) {
     expect(result.stdout).toMatch(/Dependenc(?:y|ies) installation failed \(exit=37\)/);
-    expect(result.stdout).toContain('fixture current npm failure ETEST');
-    expect(result.stdout).toContain('fixture output line 45');
+    expect(result.stdout).toContain(authOnly
+      ? 'Hint: the npm registry refused the request'
+      : 'Hint: missing C/C++ build toolchain');
+    expect(result.stdout.includes('npm registry refused the request')).toBe(Boolean(authOnly));
     if (logDir) {
-      expect(result.stdout).toContain('npm error gyp ERR! stack Error: not found: make');
-      expect(result.stdout).toContain('Hint: missing C/C++ build toolchain');
       const log = result.stdout.match(/Full npm output: (.+)\r?$/m)?.[1].trim();
       expect(log).toBeTruthy();
       expect(path.dirname(log)).toBe(logDir);
       const data = await readFile(log);
       const text = data[0] === 0xff && data[1] === 0xfe ? data.toString('utf16le') : data.toString('utf8');
       expect(text).toMatch(/^fixture output line 1\r?$/m);
-      expect(text).toContain('fixture current npm failure ETEST');
+      expect(text.includes('npm error gyp ERR! stack Error: not found: make')).toBe(!authOnly);
+      for (const marker of privateMarkers.slice(0, -1)) expect(text).toContain(marker);
       expect(text).not.toContain('unrelated prior npm run');
-      expect(result.stdout).toContain('Earlier npm/gyp errors');
     } else {
       expect(result.stdout).not.toContain('Full npm output:');
-      expect(result.stdout).not.toContain('unrelated prior npm run');
     }
   } else {
-    expect(result.stdout).toContain('fixture success summary');
-    expect(result.stdout).not.toContain('fixture output line');
+    expect(result.stdout).toContain('Dependencies installed');
     expect(result.stdout).not.toContain('Full npm output:');
     expect(await readdir(logDir)).toEqual([]);
   }
@@ -108,10 +115,13 @@ async function checkDiagnostics(result, fail, logDir) {
 
 describe.runIf(!windows)('shell npm fallback diagnostics', () => {
   it.each([
-    { fail: true, fallbackLog: false }, { fail: false, fallbackLog: false }, { fail: true, fallbackLog: true },
-  ])('reports current npm output (failure=$fail, temporary log=$fallbackLog)', async ({ fail, fallbackLog }) => {
+    { fail: true, fallbackLog: false, canLog: true }, { fail: false, fallbackLog: false, canLog: true },
+    { fail: true, fallbackLog: true, canLog: true }, { fail: true, fallbackLog: true, canLog: false },
+    { fail: true, fallbackLog: false, canLog: true, authOnly: true },
+  ])('reports current npm outcome (failure=$fail, temporary log=$fallbackLog, can log=$canLog, auth only=$authOnly)', async ({ fail, fallbackLog, canLog, authOnly }) => {
     await withFixture(async (root, capturedTemp, env) => {
       if (fallbackLog) await writeFile(path.join(env.PILOT_FIXTURE_DATA, 'logs'), 'not a directory');
+      if (!canLog) env.TMPDIR = env.PILOT_FIXTURE_SCRIPT;
       const source = await readFile('deploy/installer-opensource.sh', 'utf8');
       const fallback = installerBlock(source,
         '    if ensure_node_modules "$modules_ver"; then', '    msg "==> 部署 hook 脚本');
@@ -136,11 +146,12 @@ ${fallback}
 run_fallback
 `);
       const result = spawnSync('bash', [runner], {
-        env: { ...env, PILOT_FIXTURE_FAIL: fail ? '1' : '0' }, encoding: 'utf8',
+        env: { ...env, PILOT_FIXTURE_FAIL: fail ? '1' : '0', PILOT_FIXTURE_AUTH_ONLY: authOnly ? '1' : '0' },
+        encoding: 'utf8',
       });
-      const logDir = fallbackLog ? capturedTemp : path.join(env.PILOT_FIXTURE_DATA, 'logs');
-      await checkDiagnostics(result, fail, logDir);
-      if (fail) {
+      const logDir = canLog ? (fallbackLog ? capturedTemp : path.join(env.PILOT_FIXTURE_DATA, 'logs')) : undefined;
+      await checkDiagnostics(result, fail, logDir, authOnly);
+      if (fail && logDir) {
         const [name] = await readdir(logDir);
         const file = await stat(path.join(logDir, name));
         expect(file.mode & 0o777).toBe(0o600);
@@ -153,7 +164,8 @@ run_fallback
 describe.runIf(Boolean(powershell))('PowerShell constrained npm fallback diagnostics', () => {
   it.each([
     { fail: true, canLog: true }, { fail: false, canLog: true }, { fail: true, canLog: false },
-  ])('reports current npm output (failure=$fail, private log=$canLog)', async ({ fail, canLog }) => {
+    { fail: true, canLog: false, authOnly: true },
+  ])('reports current npm outcome (failure=$fail, private log=$canLog, auth only=$authOnly)', async ({ fail, canLog, authOnly }) => {
     await withFixture(async (root, capturedTemp, env) => {
       if (!canLog) env.LOCALAPPDATA = env.PILOT_FIXTURE_SCRIPT;
       const source = await readFile('deploy/installer-opensource.ps1', 'utf8');
@@ -185,9 +197,10 @@ ${fallback}
 }
 `);
       const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-File', runner], {
-        env: { ...env, PILOT_FIXTURE_FAIL: fail ? '1' : '0' }, encoding: 'utf8',
+        env: { ...env, PILOT_FIXTURE_FAIL: fail ? '1' : '0', PILOT_FIXTURE_AUTH_ONLY: authOnly ? '1' : '0' },
+        encoding: 'utf8',
       });
-      await checkDiagnostics(result, fail, canLog ? path.join(capturedTemp, 'Temp') : undefined);
+      await checkDiagnostics(result, fail, canLog ? path.join(capturedTemp, 'Temp') : undefined, authOnly);
       expect(result.stdout).toContain('fixture state restored');
       // PowerShell Core can leave its own .dotnet runtime directory.
       expect((await readdir(capturedTemp)).filter(entry => entry !== '.dotnet')).toEqual(canLog ? ['Temp'] : []);
@@ -293,7 +306,8 @@ if ($script:PILOT_POSTINSTALL_ERR) {
       expect(result.stdout).toContain(`Install aborted: ${label} failed`);
       expect(result.stdout.includes('Post-install failed: fixture')).toBe(stage === 'hooks');
       if (stage === 'npm-launch') {
-        expect(result.stdout).toContain('missing-npm.cmd');
+        expect(result.stdout).toContain('npm executable could not be found');
+        expect(result.stdout).not.toContain('missing-npm.cmd');
         expect(await readdir(path.join(capturedTemp, 'Temp'))).toEqual([]);
       }
       // Windows publishes before postinstall and its existing upgrade caller owns rollback.

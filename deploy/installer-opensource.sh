@@ -1007,46 +1007,51 @@ create_npm_fallback_log() {
     mktemp "${TMPDIR:-/tmp}/install-npm.XXXXXXXX" 2>/dev/null
 }
 
-report_npm_fallback_hint() {
-    local log_file="$1"
-    if grep -qiE 'not found: (make|g\+\+|gcc|c\+\+|cc1plus)|(make|g\+\+|gcc): command not found' "$log_file"; then
-        msg "    提示：缺少 C/C++ 构建工具链。Debian/Ubuntu 可安装 build-essential 和 python3。" \
-            "    Hint: missing C/C++ build toolchain. On Debian/Ubuntu, install build-essential and python3."
-    elif grep -qiE "No module named '?distutils|distutils.*(not found|missing)" "$log_file"; then
-        msg "    提示：缺少 Python distutils。请检查 setuptools 和当前 Python 版本的兼容性。" \
-            "    Hint: Python distutils is missing. Check setuptools compatibility with the selected Python version."
-    elif grep -qiE 'Python\.h|Could not find any Python installation' "$log_file"; then
-        msg "    提示：缺少 Python 或开发头文件。请安装 node-gyp 所需的 Python 开发环境。" \
-            "    Hint: Python or its development headers are missing. Install the Python dependencies required by node-gyp."
-    elif grep -qiE 'EAI_AGAIN|ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ERR_SOCKET|socket hang up' "$log_file"; then
-        msg "    提示：无法连接 npm registry 或请求超时。请检查代理和镜像设置。" \
-            "    Hint: the npm registry is unreachable or timing out. Check proxy and registry settings."
-    elif grep -qiE 'EACCES|EPERM' "$log_file"; then
-        msg "    提示：权限不足。请检查安装目录和 npm 缓存的属主及权限。" \
-            "    Hint: permission denied. Check ownership and permissions for the installation directory and npm cache."
-    elif grep -qi 'ENOSPC' "$log_file"; then
-        msg "    提示：磁盘空间不足。请释放安装目录或 npm 缓存所在磁盘的空间。" \
-            "    Hint: out of disk space. Free space on the disks containing the installation directory and npm cache."
-    elif grep -qiE 'gyp ERR!|node-gyp.*(error|failed)' "$log_file"; then
-        msg "    提示：原生模块编译失败。请查看上方 gyp 错误。" \
-            "    Hint: a native module failed to build. See the gyp error above."
-    fi
+classify_npm_fallback_output() {
+    # Forward only a category to the console. Registry and lifecycle output may contain credentials.
+    awk '
+        {
+            line = tolower($0)
+            if (line ~ /not found: (make|g[+][+]|gcc|c[+][+]|cc1plus)|(make|g[+][+]|gcc): command not found/) toolchain = 1
+            else if (line ~ /no module named .*distutils|distutils.*(not found|missing)/) distutils = 1
+            else if (line ~ /python[.]h|could not find any python installation/) python = 1
+            else if (line ~ /(^|[[:space:]])e(401|403)([[:space:]]|$)/) auth = 1
+            else if (line ~ /eai_again|enotfound|etimedout|econnreset|econnrefused|err_socket|socket hang up/) network = 1
+            else if (line ~ /eacces|eperm/) permission = 1
+            else if (line ~ /enospc/) disk = 1
+            else if (line ~ /gyp err!|node-gyp.*(error|failed)/) native = 1
+        }
+        END {
+            if (toolchain) print "toolchain"
+            else if (distutils) print "distutils"
+            else if (python) print "python"
+            else if (auth) print "auth"
+            else if (network) print "network"
+            else if (permission) print "permission"
+            else if (disk) print "disk"
+            else if (native) print "native"
+        }'
 }
 
-report_npm_fallback_log() {
-    local log_file="$1" lines early_errors
-    msg "    完整 npm 输出：$log_file" "    Full npm output: $log_file"
-    lines=$(wc -l < "$log_file") || lines=0
-    if [ "$lines" -gt 40 ]; then
-        early_errors=$(head -n "$((lines - 40))" "$log_file" |
-            grep -Ei 'npm (ERR!|error)|gyp ERR!|ERR!' | tail -n 30) || true
-        if [ -n "$early_errors" ]; then
-            msg "    ---- 较早的 npm/gyp 错误（最多 30 行）----" \
-                "    ---- Earlier npm/gyp errors (up to 30 lines) ----"
-            printf '%s\n' "$early_errors"
-        fi
-    fi
-    report_npm_fallback_hint "$log_file"
+report_npm_fallback_hint() {
+    case "$1" in
+        toolchain) msg "    提示：缺少 C/C++ 构建工具链。Debian/Ubuntu 可安装 build-essential 和 python3。" \
+            "    Hint: missing C/C++ build toolchain. On Debian/Ubuntu, install build-essential and python3." ;;
+        distutils) msg "    提示：缺少 Python distutils。请检查 setuptools 和当前 Python 版本的兼容性。" \
+            "    Hint: Python distutils is missing. Check setuptools compatibility with the selected Python version." ;;
+        python) msg "    提示：缺少 Python 或开发头文件。请安装 node-gyp 所需的 Python 开发环境。" \
+            "    Hint: Python or its development headers are missing. Install the Python dependencies required by node-gyp." ;;
+        auth) msg "    提示：npm registry 拒绝请求。请检查登录凭据和软件包访问权限。" \
+            "    Hint: the npm registry refused the request. Check npm credentials and package access." ;;
+        network) msg "    提示：无法连接 npm registry 或请求超时。请检查代理和镜像设置。" \
+            "    Hint: the npm registry is unreachable or timing out. Check proxy and registry settings." ;;
+        permission) msg "    提示：权限不足。请检查安装目录和 npm 缓存的属主及权限。" \
+            "    Hint: permission denied. Check ownership and permissions for the installation directory and npm cache." ;;
+        disk) msg "    提示：磁盘空间不足。请释放安装目录或 npm 缓存所在磁盘的空间。" \
+            "    Hint: out of disk space. Free space on the disks containing the installation directory and npm cache." ;;
+        native) msg "    提示：原生模块编译失败。请在本机检查 npm 日志中的 node-gyp 错误。" \
+            "    Hint: a native module failed to build. Inspect the node-gyp error in the local npm log." ;;
+    esac
 }
 
 deploy_failure_label() {
@@ -1115,29 +1120,25 @@ deploy_package() {
     else
         msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" \
             "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
-        local npm_log npm_out npm_exit=0
+        local npm_log npm_diagnostic npm_exit=0
         npm_log=$(create_npm_fallback_log) || npm_log=""
         # Preserve npm's own status through the diagnostics pipeline.
-        npm_out=$(
+        npm_diagnostic=$(
             cd "$PERMANENT_DIR" || exit $?
             run_npm install --production --no-optional \
                 --fetch-retries 5 --fetch-retry-mintimeout 2000 --fetch-retry-maxtimeout 60000 \
-                2>&1 | tee -a "${npm_log:-/dev/null}" | tail -n 40
+                2>&1 | tee -a "${npm_log:-/dev/null}" | classify_npm_fallback_output
             exit "${PIPESTATUS[0]}"
         ) || npm_exit=$?
         if [ "$npm_exit" -ne 0 ]; then
             msg "    ❌ 依赖安装失败 (exit=$npm_exit)" "    ❌ Dependency installation failed (exit=$npm_exit)"
-            if [ -n "$npm_out" ]; then
-                msg "    ---- npm 输出（末 40 行）----" "    ---- npm output (last 40 lines) ----"
-                printf '%s\n' "$npm_out"
-            fi
             if [ -n "$npm_log" ]; then
-                report_npm_fallback_log "$npm_log"
+                msg "    完整 npm 输出：$npm_log" "    Full npm output: $npm_log"
             fi
+            report_npm_fallback_hint "$npm_diagnostic"
             return 1
         fi
         if [ -n "$npm_log" ]; then rm -f "$npm_log" || true; fi
-        if [ -n "$npm_out" ]; then printf '%s\n' "${npm_out##*$'\n'}"; fi
         msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     fi
     echo ""
