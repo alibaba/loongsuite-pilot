@@ -1585,9 +1585,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   private async convertAndExport(
     agentType: string,
-    records: AgentActivityEntry[],
+    sourceRecords: AgentActivityEntry[],
   ): Promise<boolean> {
-    if (records.length === 0) return true;
+    if (sourceRecords.length === 0) return true;
+    // The buffered and journaled records retain the canonical source for
+    // replay policy. Remove it before configurable resource/span projection.
+    const records = agentType === 'trae-agent'
+      ? sourceRecords.map(({ 'agent.trajectory.source.path': _sourcePath, ...record }) => record)
+      : sourceRecords;
     const projectedResourceAttributes = this.collectResourceAttributes(records);
     const resourceIdentity = this.resolveAgentResourceIdentity(agentType, records);
     // Convert once per distinct service.name (backends may split into user/inner

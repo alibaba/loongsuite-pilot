@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, expect, test } from 'vitest';
 import { mkdtemp, mkdir, readdir, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { InputManager } from '../../../../src/core/input-manager.js';
 import { WorkspacePolicy } from '../../../../src/core/workspace-policy.js';
 import { CodexTurnJournal } from '../../../../src/flushers/codex-turn-journal.js';
+import { HttpFlusher } from '../../../../src/flushers/http-flusher.js';
+import { JsonlFlusher } from '../../../../src/flushers/jsonl-flusher.js';
+import { MultiFlusher } from '../../../../src/flushers/multi-flusher.js';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
 import { TraeAgentTrajectoryInput } from '../../../../src/inputs/trae-agent-trajectory/trae-agent-trajectory-input.js';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
@@ -133,6 +137,8 @@ test.each(['source', 'workspace', 'legacy', 'mixed', 'allowed', 'legacy-without-
     const spans: ReadableSpan[] = [];
     const flusher = new OtlpTraceFlusher({ enabled: true, serviceName: 'trae-replay-test',
       protocol: 'http/protobuf', endpoints: [{ endpoint: 'http://localhost:4318/v1/traces', headers: {} }],
+      resourceAttributeKeys: ['agent.trajectory.source.path'],
+      spanAttributePassthroughPrefixes: ['agent.trajectory.'],
     }, undefined, () => ({
       export(batch, done) { spans.push(...batch); done({ code: 0 }); },
       shutdown: async () => {},
@@ -145,6 +151,10 @@ test.each(['source', 'workspace', 'legacy', 'mixed', 'allowed', 'legacy-without-
     }
     const expected = scenario === 'allowed' || scenario === 'legacy-without-exclusions' ? ['AGENT', 'ENTRY'] : [];
     expect(spans.map(span => span.attributes['gen_ai.span.kind']).sort()).toEqual(expected);
+    for (const span of spans) {
+      expect(span.attributes).not.toHaveProperty(['agent.trajectory.source.path']);
+      expect(span.resource.attributes).not.toHaveProperty(['agent.trajectory.source.path']);
+    }
     expect((await readdir(journalDir)).some(name => name.startsWith('codex-turn-') && name.endsWith('.jsonl'))).toBe(false);
   },
 );
@@ -202,5 +212,66 @@ test('exports a finalized pre-response failure once without synthesizing model o
   } finally {
     await manager.stopAll();
     await flusher.shutdown();
+  }
+});
+
+test('keeps the canonical trajectory source out of HTTP and JSONL event output', async () => {
+  const project = path.join(temporary, 'project');
+  const external = path.join(temporary, 'collection-inputs');
+  const outputDir = path.join(temporary, 'output');
+  await mkdir(project);
+  await mkdir(external);
+  const trajectory = path.join(external, 'private-source-name.json');
+  await writeFile(trajectory, await readFile(failedFixture));
+  const source = await realpath(trajectory);
+  const { input } = await newInput(trajectory, project);
+  const received: string[] = [];
+  const server = createServer((request, response) => {
+    request.setEncoding('utf8');
+    let body = '';
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => {
+      received.push(body);
+      response.writeHead(200).end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('HTTP test listener has no port');
+  const http = new HttpFlusher({
+    enabled: true, url: `http://127.0.0.1:${address.port}`, batchMaxSize: 1,
+    flushIntervalMs: 60_000, requestTimeoutMs: 1_000,
+  });
+  const jsonl = new JsonlFlusher({ enabled: true, outputDir, rotateDaily: false, maxFileSizeMb: 10 });
+  const manager = new InputManager();
+  manager.setAgentsConfig({ 'trae-agent': { captureMessageContent: false } });
+  manager.setWorkspacePolicy(new WorkspacePolicy([path.join(temporary, 'excluded')]));
+  manager.setFlusher(new MultiFlusher([http, jsonl]));
+  manager.registerInput(input);
+  try {
+    await jsonl.start();
+    await http.start();
+    await manager.startInput(input.id);
+    await manager.stopInput(input.id);
+    const httpRows = received.flatMap(body => JSON.parse(body).entries);
+    expect(httpRows).toHaveLength(2);
+    const lines = (await readFile(path.join(outputDir, 'trae-agent-all.jsonl'), 'utf8')).trim().split('\n');
+    expect(lines).toHaveLength(2);
+    for (const row of [...httpRows, ...lines.map(line => JSON.parse(line))]) {
+      expect(row['workspace.path']).toBe(project);
+    }
+    for (const payload of [...received, ...lines]) {
+      expect(payload).not.toContain('agent.trajectory.source.path');
+      expect(payload).not.toContain(JSON.stringify(source));
+    }
+  } finally {
+    await manager.stopAll();
+    await http.shutdown();
+    await jsonl.shutdown();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   }
 });
