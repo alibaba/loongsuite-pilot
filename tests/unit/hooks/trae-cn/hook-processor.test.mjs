@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { execFile, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -8,6 +8,10 @@ import * as crypto from 'node:crypto';
 import { AgentDefLoader } from '../../../../src/deployment/agent-def-loader.ts';
 import { HookStrategy } from '../../../../src/deployment/hook-strategy.ts';
 import { HookManager } from '../../../../src/hooks/hook-manager.ts';
+import { StateStore } from '../../../../src/checkpoints/state-store.ts';
+import { InputManager } from '../../../../src/core/input-manager.ts';
+import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.ts';
+import { TraeCnLogInput } from '../../../../src/inputs/trae-cn-log/trae-cn-log-input.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/trae-cn-hook-processor.mjs');
@@ -93,6 +97,60 @@ function readOtlpDebugSpans() {
 }
 
 describe('trae-cn hook processor', () => {
+  test('exports documented TRAE hook input through the normal collector', async () => {
+    const sessionId = 'documented-trae-session';
+    const configPath = path.join(dataDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ agents: { 'trae-cn': { captureMessageContent: true } } }));
+    const hookEnv = { AGENT_DATA_COLLECTION_CONFIG: configPath, TRAES_USER_DATA_DIR: path.join(dataDir, 'native') };
+    const paths = [
+      ['user-prompt-submit', { hook_event_name: 'UserPromptSubmit', prompt: 'Read the fixture' }],
+      ['pre-tool-use', { hook_event_name: 'PreToolUse', tool_use_id: 'read-1', tool_name: 'Read', tool_input: { file_path: 'fixture.txt' } }],
+      ['post-tool-use', { hook_event_name: 'PostToolUse', tool_use_id: 'read-1', tool_name: 'Read', tool_response: { output: 'fixture content' } }],
+      ['stop', { hook_event_name: 'Stop', stop_hook_active: false, loop_count: 0, last_assistant_message: 'I read the fixture.' }],
+    ];
+    for (const [command, payload] of paths) {
+      expect(runHook(command, { ...payload, session_id: sessionId }, hookEnv).status).toBe(0);
+    }
+    const hookTraceId = readEmittedJsonl().find(record => record['event.name'] === 'llm.request')?.trace_id;
+    expect(hookTraceId).toMatch(/^[a-f0-9]{32}$/);
+
+    const spans = [];
+    const exporter = {
+      export(batch, callback) { spans.push(...batch); callback({ code: 0 }); },
+      shutdown: async () => {},
+    };
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      protocol: 'http/protobuf',
+      serviceName: 'trae-collector-test',
+      endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318/v1/traces' }],
+    }, undefined, () => exporter);
+    const stateStore = new StateStore(path.join(dataDir, 'input-state.json'));
+    await stateStore.load();
+    const input = new TraeCnLogInput({ stateStore, sessionDir: logDir, auxLogDir: path.join(dataDir, 'native'), hubCacheDir: path.join(dataDir, 'hub') });
+    const manager = new InputManager();
+    manager.setFlusher(flusher);
+    manager.registerInput(input);
+    try {
+      await manager.startInput(input.id);
+      await vi.waitFor(() => expect(spans.map(span => span.attributes['gen_ai.span.kind']).sort())
+        .toEqual(['AGENT', 'ENTRY', 'LLM', 'STEP', 'TOOL']), { timeout: 2_000 });
+      const tool = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL');
+      const step = spans.find(span => span.attributes['gen_ai.span.kind'] === 'STEP');
+      const agent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT');
+      const entry = spans.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY');
+      expect(tool.attributes['gen_ai.tool.call.id']).toBe('read-1');
+      expect(tool.parentSpanId).toBe(step.spanContext().spanId);
+      expect(step.parentSpanId).toBe(agent.spanContext().spanId);
+      expect(agent.parentSpanId).toBe(entry.spanContext().spanId);
+      expect(entry.parentSpanId).toBeUndefined();
+      expect(new Set(spans.map(span => span.spanContext().traceId))).toEqual(new Set([hookTraceId]));
+    } finally {
+      await manager.stopInput(input.id);
+      await flusher.shutdown();
+    }
+  });
+
   test('keeps debug spans when multiple sessions write concurrently', async () => {
     const sessions = Array.from({ length: 16 }, (_, index) => 'concurrent-debug-' + index);
     await Promise.all(sessions.map(session => new Promise((resolve, reject) => {

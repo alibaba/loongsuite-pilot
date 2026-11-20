@@ -16,7 +16,7 @@ import {
 } from '@loongsuite/otel-util-genai';
 import { planTurnStream } from './turn-stream.js';
 import { prepareCodexTurn } from './codex-turn-converter.js';
-import { prepareDelegatedTurn } from './delegated-turn-converter.js';
+import { prepareDelegatedTurn, prepareIndependentTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { expandTraeHistory } from './trae-cn-history-spans.js';
@@ -1653,7 +1653,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
           const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(withCleanParents, { handler, idGenerator })
             : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(withCleanParents, { handler, idGenerator })
             : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(withCleanParents, handler, idGenerator)
-            : { records: withCleanParents, handler, removedEntryCount: 0 };
+            : agentType === 'trae-cn' ? prepareIndependentTurn(withCleanParents, handler, idGenerator)
+              : { records: withCleanParents, handler, removedEntryCount: 0 };
           cleanup = prepared.cleanup;
           // Existing process-wide OTel env vars may still request content on
           // spans. Enforce this flusher's explicit opt-out at the conversion

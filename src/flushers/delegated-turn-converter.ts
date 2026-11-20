@@ -59,7 +59,7 @@ export function prepareDelegatedTurn(records: EventLogRecord[], handler: Extende
  * upstream context was supplied, start a genuine SDK root with that same id.
  * Explicit upstream parents (including 000...001) and delegated TOOL parents
  * remain authoritative. Never rewrite an ended/exported span. */
-function prepareIndependentTurn(records: EventLogRecord[], handler: ExtendedTelemetryHandler, idGenerator?: ReservedSpanIdGenerator) {
+export function prepareIndependentTurn(records: EventLogRecord[], handler: ExtendedTelemetryHandler, idGenerator?: ReservedSpanIdGenerator) {
   if (!idGenerator) return { records, handler, removedEntryCount: 0 };
   const independent = new Set(records.map(record => record.trace_id));
   for (const record of records) {
