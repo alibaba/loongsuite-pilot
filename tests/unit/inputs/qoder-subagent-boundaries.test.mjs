@@ -45,6 +45,18 @@ beforeEach(async () => {
 afterEach(async () => { collector.stop(); await fs.rm(root, { recursive: true, force: true }); });
 
 describe('Qoder native delegation boundaries', () => {
+  it('charges malformed legacy task descriptors against the remaining metadata budget', async () => {
+    const directory = path.dirname(child);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'task-malformed.json'), '{'.repeat(64));
+    collector.legacyTasks = new Map();
+    collector.legacyDirectoryBudget = 1;
+    collector.legacyMetadataBudget = 65;
+
+    expect(await collector.legacyDescriptors(parent, session)).toEqual([]);
+    expect(collector.legacyMetadataBudget).toBe(1);
+  });
+
   it.each([[false, false], [false, true], [true, false], [true, true]])(
     'keeps nested work linked behind historical sources (restart=%s, omit parent agent=%s)', async (restart, omitParentAgent) => {
       const inner = path.join(root, session, 'subagents/agent-grandchild.jsonl');

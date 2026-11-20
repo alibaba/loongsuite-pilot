@@ -80,13 +80,14 @@ async function openRegular(file, noFollow = false) {
   } catch (error) { await handle.close(); throw error; }
 }
 
-async function jsonSnapshot(file, limit = MAX_WAKEUP_BYTES, noFollow = false) {
+async function jsonSnapshot(file, limit = MAX_WAKEUP_BYTES, noFollow = false, chargeRead) {
   const handle = await openRegular(file, noFollow);
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > limit) throw new Error('Qoder metadata exceeds limit');
     const buffer = Buffer.alloc(limit + 1);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    chargeRead?.(bytesRead);
     if (bytesRead > limit) throw new Error('Qoder metadata grew past limit');
     return { value: JSON.parse(buffer.toString('utf8', 0, bytesRead)), stat, bytesRead };
   } finally { await handle.close(); }
@@ -373,9 +374,13 @@ export class QoderTranscriptCollector {
       for (const entry of entries) {
         if (!entry.isFile() || !/^task-[a-zA-Z0-9_-]+\.json$/.test(entry.name)) continue;
         const file = path.join(directory, entry.name);
-        if (this.legacyMetadataBudget <= 0) return result;
-        const { value: task, bytesRead } = await jsonSnapshot(file, Math.min(MAX_LEGACY_TASK_BYTES, this.legacyMetadataBudget), true);
-        this.legacyMetadataBudget -= bytesRead;
+        // Reserve the extra byte used to detect growth and charge bytes even
+        // when a descriptor cannot be parsed.
+        const limit = Math.min(MAX_LEGACY_TASK_BYTES, this.legacyMetadataBudget - 1);
+        if (limit <= 0) return result;
+        const { value: task } = await jsonSnapshot(file, limit, true, bytesRead => {
+          this.legacyMetadataBudget -= bytesRead;
+        });
         if (task?.sessionId !== sessionId || !legacyAgentId(task.agentId)
           || typeof task.parentToolUseId !== 'string' || !task.parentToolUseId
           || `task-${task.taskId}.json` !== entry.name) continue;
