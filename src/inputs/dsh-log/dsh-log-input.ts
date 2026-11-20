@@ -343,15 +343,16 @@ export class DshLogInput extends BaseSessionInput {
       }
     }
 
-    if (record.type === 'turn/start' && sid) {
-      runtime.activeTurnStartOffset = lineOffset;
-    }
     if (sid && parseDshRequestHeader(record)) {
       runtime.lastHeaderOffset = lineOffset;
     }
+    const previousTurn = runtime.aggregator.currentTurn;
     const entries = transformDshRecordEntries(record, ClientType.Dsh, runtime.aggregator);
-    if (record.type === 'turn/end') {
-      runtime.activeTurnStartOffset = undefined;
+    const activeTurn = runtime.aggregator.currentTurn;
+    // Keep the durable replay boundary aligned with accepted turn transitions.
+    // Duplicate starts and stale ends leave the active turn untouched.
+    if (activeTurn !== previousTurn && (activeTurn === undefined || sid)) {
+      runtime.activeTurnStartOffset = activeTurn === undefined ? undefined : lineOffset;
     }
     return entries;
   }

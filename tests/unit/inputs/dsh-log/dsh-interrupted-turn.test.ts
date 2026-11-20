@@ -595,9 +595,14 @@ describe('DshLogInput interrupted-turn recovery (issue #578)', () => {
     }
   }
 
-  it('settles the interrupted turn exactly once across a collector restart', async () => {
+  it.each([
+    ['without a stale boundary', undefined],
+    ['after a duplicate turn/start', { type: 'turn/start', sid: SID, time: TOOL_CALL_TIME + 1, data: { turn: 1 } }],
+    ['after a stale turn/end', { type: 'turn/end', sid: SID, time: TOOL_CALL_TIME + 1, data: { turn: 0 } }],
+  ])('settles the interrupted turn exactly once across a collector restart %s', async (_label, staleBoundary) => {
     const file = path.join(tmpDir, `dsh-${SID}.jsonl`);
     await appendRecords(file, interruptedTurnRecords(SID, BASE));
+    if (staleBoundary) await appendRecords(file, [staleBoundary]);
 
     const firstRun = await poll(await makeInput());
     expect(firstRun.filter(entry => entry['event.name'] === 'tool.call').length).toBe(1);
