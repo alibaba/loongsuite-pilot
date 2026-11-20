@@ -95,15 +95,17 @@ describe('CodexTurnJournal', () => {
     expect(await readJournal(journal)).toEqual([]);
   });
 
-  it('forgets a configured owner when the corresponding acknowledgement is evicted', async () => {
-    const journal = new CodexTurnJournal(directory, 1);
+  it.each(['configured owner', 'legacy ACK'])('forgets the %s identity when its acknowledgement is evicted', async format => {
+    let journal = new CodexTurnJournal(directory, 1);
     const first = entry('first', { 'user.id': 'original' });
-    journal.bindConfiguredUserId(first);
+    if (format === 'configured owner') journal.bindConfiguredUserId(first);
     await journal.append([first]);
     await journal.acknowledge([first]);
+    journal = new CodexTurnJournal(directory, 1);
+    await readJournal(journal);
 
     const retry = entry('retry', { 'user.id': 'corrected' });
-    journal.bindConfiguredUserId(retry);
+    journal.bindConfiguredUserId(retry, 'original');
     expect(retry['user.id']).toBe('original');
 
     const next = entry('next', { 'gen_ai.turn.id': 'next-turn' });
@@ -111,7 +113,7 @@ describe('CodexTurnJournal', () => {
     await journal.append([next]);
     await journal.acknowledge([next]);
     const expired = entry('expired', { 'user.id': 'corrected' });
-    journal.bindConfiguredUserId(expired);
+    journal.bindConfiguredUserId(expired, 'original');
     expect(expired['user.id']).toBe('corrected');
   });
 
@@ -122,7 +124,7 @@ describe('CodexTurnJournal', () => {
     const restarted = new CodexTurnJournal(directory);
     expect(await readJournal(restarted)).toEqual([[legacy]]);
     const configured = entry('next', { 'user.id': 'configured-tenant' });
-    restarted.bindConfiguredUserId(configured);
+    restarted.bindConfiguredUserId(configured, 'old-configured-tenant');
     expect(configured['user.id']).toBe('configured-tenant');
   });
 

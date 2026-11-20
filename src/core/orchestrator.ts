@@ -1097,7 +1097,8 @@ export class Orchestrator extends EventEmitter {
           sourceToken => this.inputManager!.confirmHermesSourceDrained(sourceToken),
         );
         await r.start();
-        this.inputManager.setConfiguredTurnUserIdBinder(entry => journal.bindConfiguredUserId(entry));
+        const startupUserId = this.config.userId;
+        this.inputManager.setConfiguredTurnUserIdBinder(entry => journal.bindConfiguredUserId(entry, startupUserId));
         flushers.push(r);
       }
     } catch (err) {

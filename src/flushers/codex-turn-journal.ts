@@ -45,6 +45,10 @@ function pendingBudget(): number {
 }
 
 export function codexTurnJournalGroupKey(entry: AgentActivityEntry): string {
+  return groupKeyForUserId(entry, entry['user.id']);
+}
+
+function groupKeyForUserId(entry: AgentActivityEntry, userId: string): string {
   if (entry['gen_ai.agent.type'] === 'openclaw'
     && entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') {
     // The cron producer assigns a fresh turn UUID for every observed task.
@@ -55,7 +59,7 @@ export function codexTurnJournalGroupKey(entry: AgentActivityEntry): string {
     ])).digest('hex');
   }
   const identity = [
-    entry['user.id'], entry['gen_ai.session.id'], entry['gen_ai.turn.id'],
+    userId, entry['gen_ai.session.id'], entry['gen_ai.turn.id'],
   ];
   // Preserve existing Codex files/ACKs while separating other native Agents.
   if (entry['gen_ai.agent.type'] !== 'codex') identity.unshift(entry['gen_ai.agent.type']);
@@ -88,6 +92,7 @@ export class CodexTurnJournal {
   // the ACK limit. Native turn keys never replace the tenant-aware group keys.
   private readonly configuredOwners = new Map<string, ConfiguredOwner>();
   private readonly configuredOwnerGroups = new Map<string, string>();
+  private readonly legacyGroupKeys = new Set<string>();
 
   /** Production keeps 10,000 ACKs; a smaller bound exercises the same eviction policy in tests. */
   constructor(
@@ -118,13 +123,20 @@ export class CodexTurnJournal {
   }
 
   /** Called only for collector-configured identity, after session resolution. */
-  bindConfiguredUserId(entry: BoundTurnEntry): void {
+  bindConfiguredUserId(entry: BoundTurnEntry, startupUserId?: string): void {
     if (!this.acceptsAgent(String(entry['gen_ai.agent.type']))) return;
     const turnKey = configuredOwnerKey(entry);
     if (!turnKey) return;
     const groupKey = this.configuredOwnerGroups.get(turnKey);
     const owner = groupKey && this.configuredOwners.get(groupKey);
-    if (owner) entry['user.id'] = owner.userId;
+    if (owner) {
+      entry['user.id'] = owner.userId;
+    } else if (startupUserId && entry['user.id'] !== startupUserId
+      && this.legacyGroupKeys.size > 0 && this.legacyGroupKeys.has(groupKeyForUserId(entry, startupUserId))) {
+      // Legacy records have no identity provenance. Preserve the exact key the
+      // collector would have used before a refresh, including its startup user.
+      entry['user.id'] = startupUserId;
+    }
     // A symbol carries provenance through object spreads without becoming a
     // public field in JSONL, SLS or OTLP. Only journal metadata persists it.
     entry[CONFIGURED_TURN_KEY] = turnKey;
@@ -257,6 +269,9 @@ export class CodexTurnJournal {
           }
           batch.push(entry); bytes += size;
         }
+        if (key === undefined && seen.size > 0 && !this.configuredOwners.has(match[1])) {
+          this.legacyGroupKeys.add(match[1]);
+        }
         yield { key: match[1], entries: batch, last: true };
       } finally { lines.close(); stream.destroy(); }
     }
@@ -300,7 +315,7 @@ export class CodexTurnJournal {
         if (!/^[a-f0-9]{64}$/.test(key)) continue;
         await fs.unlink(this.file(key)).catch(error => { if (error.code !== 'ENOENT') throw error; });
         this.initialized.delete(key);
-        if (!acknowledged.has(key)) this.forgetConfiguredOwner(key);
+        if (!acknowledged.has(key)) this.forgetTurnOwnership(key);
       }
     });
   }
@@ -342,6 +357,7 @@ export class CodexTurnJournal {
           acknowledged.set(match[1], (await fs.stat(fullPath)).mtimeMs);
           const owner = parseConfiguredOwner(metadata.configuredOwner);
           if (owner) this.rememberConfiguredOwner(match[1], owner);
+          else this.legacyGroupKeys.add(match[1]);
           // Recover a crash after publishing the ACK but before unlinking its
           // payload, even when the ACK cache is below its eviction threshold.
           await fs.unlink(this.file(match[1])).catch(error => { if (error.code !== 'ENOENT') throw error; });
@@ -361,16 +377,18 @@ export class CodexTurnJournal {
       this.initialized.delete(key);
       await fs.unlink(this.doneFile(key)).catch(error => { if (error.code !== 'ENOENT') throw error; });
       acknowledged.delete(key);
-      this.forgetConfiguredOwner(key);
+      this.forgetTurnOwnership(key);
     }
   }
 
   private rememberConfiguredOwner(groupKey: string, owner: ConfiguredOwner): void {
+    this.legacyGroupKeys.delete(groupKey);
     this.configuredOwners.set(groupKey, owner);
     this.configuredOwnerGroups.set(owner.turnKey, groupKey);
   }
 
-  private forgetConfiguredOwner(groupKey: string): void {
+  private forgetTurnOwnership(groupKey: string): void {
+    this.legacyGroupKeys.delete(groupKey);
     const owner = this.configuredOwners.get(groupKey);
     if (!owner) return;
     this.configuredOwners.delete(groupKey);

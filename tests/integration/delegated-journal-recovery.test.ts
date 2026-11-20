@@ -12,6 +12,8 @@ import { MultiFlusher } from '../../src/flushers/multi-flusher.js';
 import { INVOCATION_USER_ID_FIELD } from '../../src/normalization/invocation-identity.js';
 import type { AgentActivityEntry } from '../../src/types/index.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
+import { StateStore } from '../../src/checkpoints/state-store.js';
+import { HermesLogInput } from '../../src/inputs/hermes-log/hermes-log-input.js';
 
 afterEach(() => vi.useRealTimers());
 
@@ -151,6 +153,67 @@ it.each(['codex', 'hermes', 'openclaw'])('keeps the configured ID of a %s turn t
   } finally {
     vi.unstubAllEnvs();
     await active.flusher.shutdown();
+    await fs.rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+it.each(['pending', 'acknowledged'])('keeps the startup ID for a legacy %s turn after a same-process refresh', async checkpoint => {
+  const f = await fixture();
+  const { flusher, journal } = f.create();
+  const state = new StateStore(path.join(f.dir, 'state.json'));
+  const sourceDir = path.join(f.dir, 'hermes');
+  const sourceFile = path.join(sourceDir, 'hermes-agent-legacy.jsonl');
+  const configPath = path.join(f.dir, 'config.json');
+  const manager = new InputManager();
+  const output = new MockFlusher();
+  const startupUserId = 'legacy-configured';
+  const rows = calls('hermes', 1).map(row => ({ ...row, 'user.id': startupUserId }));
+  const sourcePrefix = rows.map(row => JSON.stringify(row) + '\n').join('');
+  let clock = 0;
+  vi.stubEnv('LOONGSUITE_PILOT_USER_ID', '');
+  try {
+    // Appending without the binder writes the legacy format without owner metadata.
+    const legacy = new CodexTurnJournal(f.dir, 10_000, ['hermes']);
+    await legacy.append(rows);
+    if (checkpoint === 'acknowledged') await legacy.acknowledge(rows);
+    await fs.mkdir(sourceDir);
+    await fs.writeFile(sourceFile, sourcePrefix);
+    const input = new HermesLogInput({ stateStore: state, sessionDir: sourceDir, pollIntervalMs: 3_600_000 });
+    const inputKey = `${input.id}:${sourceFile}`;
+    if (checkpoint === 'pending') {
+      state.setOffset(inputKey, Buffer.byteLength(sourcePrefix));
+      await state.save();
+    }
+
+    await fs.writeFile(configPath, JSON.stringify({ userId: startupUserId }));
+    const provider = createUserIdProvider({ initialUserId: startupUserId, configPath, now: () => clock });
+    expect(provider()).toBe(startupUserId);
+    await flusher.start();
+    manager.setUserIdProvider(provider);
+    manager.setConfiguredTurnUserIdBinder(entry => journal.bindConfiguredUserId(entry, startupUserId));
+    manager.setFlusher(new MultiFlusher([output, flusher]));
+    manager.registerInput(input);
+
+    await fs.writeFile(configPath, '{"userId":"corrected-configured"}');
+    clock = USER_ID_REFRESH_INTERVAL_MS;
+    expect(provider()).toBe('corrected-configured');
+    const close = terminal(rows);
+    await fs.appendFile(sourceFile, JSON.stringify(close) + '\n');
+    await manager.startInput(input.id);
+    const sourceSize = (await fs.stat(sourceFile)).size;
+    await vi.waitFor(() => expect(state.getPersistedState(inputKey)?.lastOffset).toBe(sourceSize));
+
+    const eventIds = new Set([...rows, close].map(row => row['event.id']));
+    expect.soft(output.batchCalls.flat().filter(row => eventIds.has(row['event.id'])).map(row => row['user.id'])).toEqual(
+      Array(checkpoint === 'pending' ? 1 : 3).fill(startupUserId),
+    );
+    expect.soft(f.llms()).toHaveLength(checkpoint === 'pending' ? 1 : 0);
+    expect.soft(await journal.isAcknowledged(rows[0])).toBe(true);
+    expect.soft(await journal.isAcknowledged({ ...rows[0], 'user.id': 'corrected-configured' })).toBe(false);
+  } finally {
+    vi.unstubAllEnvs();
+    await manager.stopAll();
+    await flusher.shutdown();
     await fs.rm(f.dir, { recursive: true, force: true });
   }
 });
