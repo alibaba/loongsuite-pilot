@@ -4,7 +4,7 @@
 
 ## 数据来源
 
-- `before_tool_call` 中的 `sessions_spawn` / `sessions_send` 表示提交新工作。每个父 session、turn、原生 tool call 生成稳定的 SHA-256 invocation ID；查询和取消工具不产生委派。
+- `before_tool_call` 中的 `sessions_spawn` / `sessions_send` 表示提交新工作。invocation ID 由父 session、turn 和原生 tool call ID 生成。同一 turn 复用原生 ID 时，后续调用用自身的 span ID 区分。查询和取消工具不产生委派。
 - `after_tool_call` 的原生 child runId 绑定已有子上下文。子工作的模型、工具和边界事件携带 `gen_ai.agent.parent.invocation.id`，保留自己的 session/turn。嵌套调用同时保留 incoming 和 outgoing。
 - accepted 只表示受理。同步 `sessions_send` 的实际 reply、明确派发失败，或父侧 `before_message_write` 里带有 `provenance.kind=inter_session`、`sourceTool=subagent_announce` 的消息，才记录 result。纯文本中的相似提示不能建立关系。
 - `sessions_send` 的原生 `no_reply`，以及明确带 `sentBeforeError=true` 的 timeout/error，仍表示工作已经派发，应保留 child run 的 incoming。它们不等于成功交付回复；没有派发证明的 error 不能仅凭 runId 建立关联。

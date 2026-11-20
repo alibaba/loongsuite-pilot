@@ -1,9 +1,9 @@
 import crypto from "node:crypto";
 
-export function invocationId(sessionId, turnId, toolCallId) {
-  return crypto.createHash("sha256").update(JSON.stringify([
-    "openclaw-delegation", sessionId, turnId, toolCallId,
-  ])).digest("hex").slice(0, 32);
+export function invocationId(sessionId, turnId, toolCallId, discriminator) {
+  const key = ["openclaw-delegation", sessionId, turnId, toolCallId];
+  if (discriminator) key.push(discriminator);
+  return crypto.createHash("sha256").update(JSON.stringify(key)).digest("hex").slice(0, 32);
 }
 
 /** Keep audit delivery facts separate from model/tool execution records. */
