@@ -137,6 +137,103 @@ class ManualRollout extends ZCodeRolloutInput {
   pollEntries() { return this.collect(); }
 }
 
+describe('ZCode native rollout formats', () => {
+  const parameters = { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] };
+
+  test.each(['body', 'request'])('reads nested OpenAI tools from %s', async location => {
+    const tool = { type: 'function', function: { name: 'Read', description: 'Read a file', parameters } };
+    const request = location === 'body' ? { body: { tools: [tool] } } : { tools: [tool] };
+    const input = new ManualRollout({ stateStore, rolloutDir });
+    await input.initialize();
+    writeLine('sess_test-001', baseModelIoLine({ request }));
+    const events = await input.pollEntries();
+    const modelEvents = events.filter(event => ['llm.request', 'llm.response'].includes(event['event.name']));
+    expect(modelEvents).toHaveLength(2);
+    for (const event of modelEvents) expect(event['gen_ai.tool.definitions']).toEqual([
+      { type: 'function', name: 'Read', description: 'Read a file', parameters },
+    ]);
+  });
+
+  test('reads flat tool definitions and retains the names-only format as a fallback', () => {
+    const input = new ManualRollout({ stateStore, rolloutDir });
+    const flat = { name: 'Read', description: 'Read a file', input_schema: parameters };
+    const extract = (request: object) => input.buildEntriesFromRolloutLine(baseModelIoLine({ request }))
+      .find(event => event['event.name'] === 'llm.request')?.['gen_ai.tool.definitions'];
+    expect(extract({ body: { tools: [flat] }, toolNames: ['Read'] })).toEqual([
+      { type: 'function', name: 'Read', description: 'Read a file', parameters },
+    ]);
+    expect(extract({ tools: [null, { function: {} }], toolNames: ['Read'] })).toEqual([{ name: 'Read' }]);
+  });
+
+  test.each([
+    { scenario: 'short history ID', expected: 'native error' },
+    { scenario: 'exact ID', expected: 'exact error' },
+    { scenario: 'exact ID beats a short alias', expected: 'native error' },
+    { scenario: 'ambiguous native result', expected: undefined },
+    { scenario: 'ambiguous pending call', expected: undefined },
+    { scenario: 'no matching assistant declaration', expected: undefined },
+    { scenario: 'different trace', expected: undefined },
+    { scenario: 'historical call was never observed', expected: undefined },
+  ])('keeps the original tool result and STEP association for $scenario', async ({ scenario, expected }) => {
+    const shortId = 'call_123456789abcdef';
+    const fullId = `${shortId}987654321`;
+    const shortCall = { id: shortId, name: 'Read', input: { file_path: '/synthetic-missing' } };
+    const toolCalls = [shortCall];
+    if (scenario === 'ambiguous pending call') toolCalls.push(shortCall);
+    if (scenario === 'exact ID beats a short alias') toolCalls.push({ ...shortCall, id: fullId });
+    const nativeError = { role: 'tool', toolCallId: fullId, toolName: 'Read', isError: true, content: 'native error' };
+    const history: unknown[] = [nativeError];
+    if (scenario !== 'no matching assistant declaration') history.unshift({ role: 'assistant', toolCalls: [shortCall] });
+    if (scenario === 'ambiguous native result') history.push({ ...nativeError, toolCallId: `${shortId}012345678` });
+    if (scenario === 'exact ID') history.push({
+      role: 'tool', tool_call_id: shortId, tool_name: 'Read', is_error: true, content: 'exact error',
+    });
+
+    const sid = 'sess_test-001';
+    const first = new ManualRollout({ stateStore, rolloutDir });
+    const declared = baseModelIoLine({
+      response: { text: '', finishReason: 'tool_calls', toolCalls },
+    });
+    if (scenario === 'historical call was never observed') writeLine(sid, declared);
+    await first.initialize();
+    if (scenario !== 'historical call was never observed') writeLine(sid, declared);
+    const firstEvents = await first.pollEntries();
+    await stateStore.save();
+
+    // Use a fresh collector to prove the result follows the persisted call
+    // identity rather than a tool hook or in-memory STEP reference.
+    const restored = new StateStore(path.join(tmpRoot, 'state.json'));
+    await restored.load();
+    const next = new ManualRollout({ stateStore: restored, rolloutDir });
+    await next.initialize();
+    writeLine(sid, baseModelIoLine({
+      requestId: 'req-002',
+      startedAt: '2026-07-13T02:39:30.000Z',
+      completedAt: '2026-07-13T02:39:31.000Z',
+      ...(scenario === 'different trace' ? { traceId: 'd294f5ce-30c2-4817-92be-d035412905a2' } : {}),
+      request: { messages: history, messages_sample_truncated: [{ role: 'user', content: 'shortened sample' }] },
+    }));
+    const results = (await next.pollEntries()).filter(event => event['event.name'] === 'tool.result');
+    if (!expected) {
+      expect(results).toEqual([]);
+      return;
+    }
+
+    const id = scenario === 'exact ID beats a short alias' ? fullId : shortId;
+    const original = firstEvents.find(event => event['event.name'] === 'tool.call' && event['gen_ai.tool.call.id'] === id);
+    expect(original).toBeDefined();
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      'gen_ai.tool.call.id': id,
+      'gen_ai.step.id': original?.['gen_ai.step.id'],
+      span_id: original?.span_id,
+      'tool.result.status': 'failure',
+      'gen_ai.tool.call.result': expected,
+      'error.message': expected,
+    });
+  });
+});
+
 describe('rollout checkpoints across restart', () => {
   test.each([false, true])('preserves a live file with legacy checkpoint=%s', async legacy => {
     const sid = 'sess_runtime_file';

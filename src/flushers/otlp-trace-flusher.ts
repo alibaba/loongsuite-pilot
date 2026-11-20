@@ -1795,7 +1795,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         span.attributes['agent.hermes.collection.end_reason'] = 'producer_process_exited';
       }
     }
-    if (agentType === 'zcode') markZCodeToolObservations(records, spans);
+    if (agentType === 'zcode') markZCodeToolObservations(records, spans, this.cfg.captureMessageContent !== false);
     applyQoderWorkStepTiming(records, spans);
     this.enrichToolSkillAttributes(records, spans);
     this.enrichMultimodalAttributes(records, spans);

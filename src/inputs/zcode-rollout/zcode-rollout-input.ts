@@ -357,13 +357,8 @@ export class ZCodeRolloutInput extends BaseInput {
       return { turn, key, pending: (this.stateStore.get(key).extra?.pending as PendingToolCall[] | undefined) ?? [] };
     });
     if (!groups.length) return [];
-    const toolResults = collectToolResults(currentLine);
     const sameSession = groups.flatMap(group => group.pending.filter(call => call.sid === sid));
-    const owners = new Map<string, PendingToolCall | null>();
-    for (const call of sameSession) {
-      if (call.tid === tid && call.traceId !== traceId) continue;
-      if (toolResults.has(call.callId)) owners.set(call.callId, owners.has(call.callId) ? null : call);
-    }
+    const resultsByCall = matchToolResults(currentLine, sameSession, tid, traceId);
     const startedAt = str(currentLine.startedAt) ?? str(currentLine.started_at) ?? '';
     const nextStartedAt = timestampToUnixNanos(startedAt);
     const cleared = new Set<string>();
@@ -376,7 +371,7 @@ export class ZCodeRolloutInput extends BaseInput {
           continue;
         }
         if (!p.callEmitted) out.push(...this.buildToolCallEntries([p]));
-        const result = owners.get(p.callId) === p ? toolResults.get(p.callId) : undefined;
+        const result = resultsByCall.get(p);
         if (!result) {
           const { args: _args, ...call } = p;
           retained.push({ ...call, callEmitted: true });
@@ -449,20 +444,13 @@ export class ZCodeRolloutInput extends BaseInput {
       .map((m) => normalizeInputMessage(m))
       .filter(Boolean) as { role: string; content: string }[];
 
-    // P1 fix: extract system_instructions (role=="system" messages) and
-    // tool_definitions (request.toolNames — names only, no
-    // description/parameters; ZCode rollout does not log full tool schemas,
-    // so we emit name-only definitions and document the gap as P2 follow-up
-    // for downstream consumers needing full JSON schemas).
+    // Native rollout formats have either complete tool definitions or names only.
     const systemInstructions: JsonValue[] = (rawInputMessages as unknown[])
       .map((m) => normalizeInputMessage(m))
       .filter(Boolean)
       .filter((m) => m!.role === 'system')
       .map((m) => ({ type: 'text', content: String(m!.content ?? '') })) as JsonValue[];
-    const toolNamesRaw = Array.isArray(request.toolNames) ? request.toolNames : [];
-    const toolDefinitions: JsonValue[] = (toolNamesRaw as unknown[])
-      .map((n) => (typeof n === 'string' ? { name: n } : null))
-      .filter(Boolean) as JsonValue[];
+    const toolDefinitions = extractToolDefinitions(record, request);
 
     // P1 fix: detect first line of a turn (no assistant message in input →
     // user prompt that triggered the turn is present). Emit a synthetic
@@ -742,6 +730,34 @@ function normalizeToolCall(tc: unknown): ToolCall | null {
   return { id, name, args };
 }
 
+function extractToolDefinitions(record: Record<string, unknown>, request: Record<string, unknown>): JsonValue[] {
+  const body = recordValue(request.body);
+  const candidates = [
+    body?.tools, request.tools, body?.function_definitions, request.function_definitions,
+    request.toolDefinitions, body?.toolDefinitions, record.tools,
+  ];
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue;
+    const definitions: JsonValue[] = [];
+    for (const rawDefinition of candidate) {
+      const outer = recordValue(rawDefinition);
+      const definition = recordValue(outer?.function) ?? outer;
+      const name = str(definition?.name);
+      if (!name) continue;
+      const tool: Record<string, JsonValue> = { type: str(outer?.type) ?? 'function', name };
+      const description = str(definition?.description);
+      const parameters = definition?.parameters ?? definition?.input_schema ?? definition?.inputSchema;
+      if (description) tool.description = description;
+      // The native rollout is decoded from JSONL, so a schema is JSON already.
+      if (recordValue(parameters)) tool.parameters = parameters as JsonValue;
+      definitions.push(tool);
+    }
+    if (definitions.length) return definitions;
+  }
+  const names = Array.isArray(request.toolNames) ? request.toolNames : [];
+  return names.flatMap((name: unknown) => typeof name === 'string' && name ? [{ name }] : []);
+}
+
 interface ToolResult {
   callId: string;
   content: unknown;
@@ -765,34 +781,74 @@ interface PendingToolCall {
 }
 
 /**
- * Scan the NEXT rollout line's request.messages for `role:"tool"` entries and
- * index them by tool call id. ZCode rollout stores tool results as top-level
- * messages with `role:"tool"` + `toolCallId` + `content` + optional `toolName`
- * + `isError` — they appear in the next LLM call's input because that call
- * consumes the prior tool's output. Returns a Map keyed by toolCallId.
+ * Read observed tool outcomes in a later model request, including errors
+ * recorded only in native history when PostToolUse did not fire.
  */
-function collectToolResults(nextRecord?: Record<string, unknown>): Map<string, ToolResult> {
-  const out = new Map<string, ToolResult>();
-  if (!nextRecord || typeof nextRecord !== 'object') return out;
-  const req = (nextRecord.request && typeof nextRecord.request === 'object'
-    ? nextRecord.request : {}) as Record<string, unknown>;
-  const msgs = Array.isArray(req.messages_sample_truncated)
-    ? req.messages_sample_truncated
-    : Array.isArray(req.messages) ? req.messages : [];
-  for (const m of msgs as unknown[]) {
-    if (!m || typeof m !== 'object') continue;
-    const r = m as Record<string, unknown>;
-    if (r.role !== 'tool') continue;
-    const callId = str(r.toolCallId) ?? str(r.tool_call_id) ?? str(r.toolCallID);
-    if (!callId) continue;
-    out.set(callId, {
+function matchToolResults(
+  row: Record<string, unknown>, pending: PendingToolCall[], turnId: string, traceId: string,
+): Map<PendingToolCall, ToolResult> {
+  const results = new Map<PendingToolCall, ToolResult>();
+  if (!pending.length) return results;
+  const request = recordValue(row.request);
+  const sample = Array.isArray(request?.messages_sample_truncated) ? request.messages_sample_truncated : [];
+  const messages = Array.isArray(request?.messages) ? request.messages : [];
+  const observed = new Map<string, ToolResult>();
+  const declaredNames = new Map<string, string | null>();
+  for (const rawMessage of [...sample, ...messages]) {
+    const message = recordValue(rawMessage);
+    if (message?.role === 'assistant' && Array.isArray(message.toolCalls)) {
+      for (const rawCall of message.toolCalls) {
+        const call = normalizeToolCall(rawCall);
+        if (!call) continue;
+        const previous = declaredNames.get(call.id);
+        declaredNames.set(call.id, previous === undefined || previous === call.name ? call.name : null);
+      }
+    }
+    if (message?.role !== 'tool') continue;
+    const callId = str(message.toolCallId) ?? str(message.tool_call_id) ?? str(message.toolCallID);
+    if (callId) observed.set(callId, {
       callId,
-      content: r.content,
-      toolName: str(r.toolName) ?? str(r.tool_name),
-      isError: r.isError === true,
+      content: message.content,
+      toolName: str(message.toolName) ?? str(message.tool_name),
+      isError: message.isError === true || message.is_error === true,
     });
   }
-  return out;
+
+  const exactOwners = new Map<string, PendingToolCall | null>();
+  const sameTurnOwners = new Map<string, PendingToolCall | null>();
+  for (const call of pending) {
+    if (call.tid === turnId) {
+      if (call.traceId !== traceId) continue;
+      sameTurnOwners.set(call.callId, sameTurnOwners.has(call.callId) ? null : call);
+    }
+    if (observed.has(call.callId)) exactOwners.set(call.callId, exactOwners.has(call.callId) ? null : call);
+  }
+  const aliasResults = new Map<PendingToolCall, ToolResult | null>();
+  for (const result of observed.values()) {
+    if (exactOwners.has(result.callId)) {
+      const exact = exactOwners.get(result.callId);
+      if (exact) results.set(exact, result);
+      continue;
+    }
+    // ZCode v0.15 may shorten a 24-hex call ID to 15 hex digits in the
+    // response and assistant history. Check both sides of the same turn.
+    const prefix = /^(call_[0-9a-f]{15})[0-9a-f]{9}$/.exec(result.callId)?.[1];
+    if (!prefix || observed.has(prefix)) continue;
+    const alias = sameTurnOwners.get(prefix);
+    if (!alias || declaredNames.get(prefix) !== alias.toolName) continue;
+    if (result.toolName && result.toolName !== alias.toolName) continue;
+    aliasResults.set(alias, aliasResults.has(alias) ? null : result);
+  }
+  for (const [call, result] of aliasResults) {
+    if (result) results.set(call, result);
+  }
+  return results;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 function str(v: unknown): string | undefined {

@@ -1,4 +1,4 @@
-import { ROOT_CONTEXT } from '@opentelemetry/api';
+import { ROOT_CONTEXT, SpanStatusCode } from '@opentelemetry/api';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import type { EventLogRecord, ExtendedTelemetryHandler } from '@loongsuite/otel-util-genai';
 import { deriveSpanId } from '../../assets/hooks/shared/event-emitter.mjs';
@@ -55,9 +55,11 @@ export function prepareZCodeTurn(
 
 
 /** A request to call a tool is an observation even when no outcome is recorded. */
-export function markZCodeToolObservations(records: EventLogRecord[], spans: ReadableSpan[]): void {
+export function markZCodeToolObservations(
+  records: EventLogRecord[], spans: ReadableSpan[], captureMessageContent: boolean,
+): void {
   const calls = new Map<string, EventLogRecord>();
-  const results = new Set<string>();
+  const results = new Map<string, EventLogRecord>();
   const stepStarts = new Map<string, bigint>();
   for (const record of records) {
     if (record['agent.source'] !== 'zcode-rollout') continue;
@@ -65,7 +67,7 @@ export function markZCodeToolObservations(records: EventLogRecord[], spans: Read
     const stepId = record['gen_ai.step.id'];
     const time = record.time_unix_nano;
     if (record['event.name'] === 'tool.call' && typeof spanId === 'string') calls.set(spanId, record);
-    if (record['event.name'] === 'tool.result' && typeof spanId === 'string') results.add(spanId);
+    if (record['event.name'] === 'tool.result' && typeof spanId === 'string') results.set(spanId, record);
     if (record['event.name'] === 'llm.request' && typeof stepId === 'string' && typeof time === 'string' && /^\d+$/.test(time)) {
       stepStarts.set(stepId, BigInt(time));
     }
@@ -74,7 +76,19 @@ export function markZCodeToolObservations(records: EventLogRecord[], spans: Read
     const span = spans[index];
     if (span.attributes['gen_ai.span.kind'] !== 'TOOL') continue;
     const spanId = span.spanContext().spanId;
-    if (results.has(spanId)) continue;
+    const result = results.get(spanId);
+    if (result) {
+      const status = result['tool.result.status'];
+      if (typeof status === 'string') span.attributes['tool.result.status'] = status;
+      if (status === 'failure') {
+        const errorType = result['error.type'];
+        const errorMessage = result['error.message'];
+        if (typeof errorType === 'string') span.attributes['error.type'] = errorType;
+        if (captureMessageContent && typeof errorMessage === 'string') span.attributes['error.message'] = errorMessage;
+        span.status.code = SpanStatusCode.ERROR;
+      }
+      continue;
+    }
     const call = calls.get(spanId);
     if (!call) continue;
     span.attributes['agent.zcode.tool.result_observed'] = false;
