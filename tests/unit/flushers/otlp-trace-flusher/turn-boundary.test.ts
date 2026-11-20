@@ -44,6 +44,37 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     await flusher.shutdown();
   });
 
+  it('caps completed Antigravity buffers that still have pending planners and releases them on cancellation', async () => {
+    const turn = (index: number, fields: Record<string, unknown>) => makeEntry({
+      'gen_ai.agent.type': 'antigravity',
+      'gen_ai.session.id': `session-${index}`,
+      'gen_ai.turn.id': `turn-${index}`,
+      ...fields,
+    });
+    const pending = () => flusher.getTraceRuntimeSnapshot()
+      .find(row => row.agent_type === 'antigravity')?.pending_buffers;
+    const indices = Array.from({ length: 71 }, (_, index) => index);
+    await flusher.sendBatch(indices.flatMap(index => [
+      turn(index, {
+        'gen_ai.response.id': `pending-${index}`,
+        'gen_ai.turn.end': false,
+        'agent.antigravity.planner_pending': true,
+      }),
+      turn(index, {
+        'gen_ai.response.id': `second-${index}`,
+        'gen_ai.turn.end': true,
+        'gen_ai.response.finish_reasons': ['stop'],
+      }),
+    ]));
+    expect(pending()).toBe(64);
+    await flusher.sendBatch(indices.map(index => turn(index, {
+      'gen_ai.response.id': `cancelled-${index}`,
+      'gen_ai.turn.end': true,
+      'gen_ai.response.finish_reasons': ['cancelled'],
+    })));
+    expect(pending()).toBe(0);
+  });
+
   it('waits for V2 execution completion but preserves V1 stop behavior', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const convert = vi.mocked(convertEventLogToTrace);

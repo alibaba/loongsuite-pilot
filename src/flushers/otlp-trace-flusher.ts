@@ -23,6 +23,7 @@ import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { convertQwenWorkCollaborationTurn } from './qwen-work-collaboration-converter.js';
 import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
+import { retainedWorkspaceRoots, type WorkspaceScopedEntry } from '../core/workspace-policy.js';
 import { currentHermesProcessNamespace, hermesProcessIdentity, isHermesProcessDead,
   type HermesProcessIdentity } from './hermes-process-identity.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
@@ -769,6 +770,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   // --- Public API (BaseFlusher) ---
 
+  override hasDurableTraceJournal(agentType: string): boolean {
+    return this.codexJournal?.acceptsAgent(agentType) === true;
+  }
+
   override getTraceRuntimeSnapshot(): TraceRuntimeSnapshot[] {
     const now = performance.now();
     const rows = new Map<string, TraceRuntimeSnapshot>();
@@ -1047,7 +1052,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Preserve known fields when a retained delegated prefix is delivered
     // again. Audit records never enter these buffers or their journal.
     const eventId = entry['gen_ai.agent.type'] === 'copilot'
-      || (durable && (agentType === 'hermes' || agentType === 'openclaw'))
+      || (durable && (isAntigravity || agentType === 'hermes' || agentType === 'openclaw'))
       ? (entry['event.id'] as string | undefined) : undefined;
     let residentDelta = residentSize;
     if (buf.spilledRecords && durable) {
@@ -1094,6 +1099,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (this.isTerminalEvent(entry)) {
       if (isAntigravity && entry['gen_ai.response.finish_reasons']?.includes('cancelled')) {
         buf.pendingAntigravityTools?.clear();
+        buf.pendingAntigravityPlanners?.clear();
       }
       buf.completed = true;
       if (this.batchDepth === 0 && !hasPendingAntigravityData(buf)) {
@@ -1132,7 +1138,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (this.turnBuffers.size <= MAX_TURN_BUFFERS) return;
     const overflow = this.turnBuffers.size - MAX_TURN_BUFFERS;
     const candidates = [...this.turnBuffers.values()]
-      .filter((buf) => !buf.completed && buf.key !== incomingKey)
+      .filter((buf) => (!buf.completed || hasPendingAntigravityData(buf)) && buf.key !== incomingKey)
       .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
       .slice(0, overflow);
     for (const buf of candidates) {
@@ -1157,14 +1163,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
         this.recordBufferRemoval(buf);
       } else {
         buf.completed = true;
-        this.triggerFlush(buf, false);
+        this.triggerFlush(buf, hasPendingAntigravityData(buf));
       }
     }
   }
 
   async flush(): Promise<void> {
     for (const buf of this.turnBuffers.values()) {
-      if (this.codexJournal?.acceptsAgent(buf.agentType) && !buf.completed) continue;
+      if (this.hasDurableTraceJournal(buf.agentType) && !buf.completed) continue;
       buf.completed = true;
     }
     await this.flushCompleted(true);
@@ -1206,7 +1212,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           continue;
         }
         if (!holding) { this.batchDepth++; holding = true; accepted = false; }
-        const prepared = batch.entries;
+        const prepared = batch.entries.map(stripAntigravityJournalRoots);
         accepted ||= prepared.length > 0;
         await this.appendBatch(prepared);
         if (batch.last) {
@@ -1239,7 +1245,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
       for await (const batch of this.codexJournal!.loadBatches(key)) this.prepareCodexReplay(batch.entries);
     }
     for await (const batch of this.codexJournal!.loadBatches(key)) {
-      yield this.prepareCodexReplay ? this.prepareCodexReplay(batch.entries) : batch.entries;
+      const entries = this.prepareCodexReplay ? this.prepareCodexReplay(batch.entries) : batch.entries;
+      yield entries.map(stripAntigravityJournalRoots);
     }
   }
 
@@ -1277,7 +1284,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
         await this.replayCodexJournal(this.codexJournal.loadBatches(codexTurnJournalGroupKey(entry)));
       }
-      await this.codexJournal.append(codex.filter(entry => !this.flushedTurnKeys.has(this.resolveGroupKey(entry).key)));
+      await this.codexJournal.append(codex.filter(entry => !this.flushedTurnKeys.has(this.resolveGroupKey(entry).key))
+        .map(entry => {
+          if (resolveAgentSystem(entry['gen_ai.agent.type']) !== 'antigravity') return entry;
+          const roots = (entry as WorkspaceScopedEntry)[retainedWorkspaceRoots];
+          const retained = this.cfg.captureMessageContent === false ? stripAgentMessageContent(entry) : entry;
+          return roots?.length ? { ...retained, workspace_roots: roots } : retained;
+        }));
     } catch (cause) {
       const error = new Error(`Codex pending trace could not be persisted: ${String(cause)}`, { cause });
       error.name = 'CodexTurnJournalError';
@@ -1488,7 +1501,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private async flushCompleted(force = false): Promise<void> {
     const completed: TurnBuffer[] = [];
     for (const [key, buf] of this.turnBuffers) {
-      if (buf.completed && (force || !hasPendingAntigravityData(buf))) {
+      // An explicit drain retains incomplete durable Antigravity prefixes too,
+      // even when a later model response marked the buffer completed.
+      const canForce = force && !(resolveAgentSystem(buf.agentType) === 'antigravity' &&
+        this.hasDurableTraceJournal(buf.agentType));
+      if (buf.completed && (canForce || !hasPendingAntigravityData(buf))) {
         completed.push(buf);
         this.flushedTurnKeys.add(key);
         this.turnBuffers.delete(key);
@@ -3059,6 +3076,12 @@ function hasPendingAntigravityData(buf: TurnBuffer): boolean {
   return Boolean(buf.pendingAntigravityTools?.size || buf.pendingAntigravityPlanners?.size);
 }
 
+function stripAntigravityJournalRoots(entry: AgentActivityEntry): AgentActivityEntry {
+  if (entry.workspace_roots === undefined || resolveAgentSystem(entry['gen_ai.agent.type']) !== 'antigravity') return entry;
+  const { workspace_roots: _roots, ...record } = entry;
+  return record as AgentActivityEntry;
+}
+
 function reconcileAntigravityPlanners(records: AgentActivityEntry[]): AgentActivityEntry[] {
   const joins = new Map<string, AgentActivityEntry>();
   for (const record of records) {
@@ -3075,9 +3098,16 @@ function reconcileAntigravityPlanners(records: AgentActivityEntry[]): AgentActiv
       'gen_ai.step.id': join['gen_ai.step.id'] ?? record['gen_ai.step.id'],
       parent_span_id: join.parent_span_id ?? record.parent_span_id,
       ...(record['event.name'] === 'llm.response' ? {
-        'gen_ai.response.finish_reasons': join['gen_ai.response.finish_reasons'],
-        'error.type': join['error.type'],
-      } : {}),
+        'gen_ai.response.finish_reasons': join['gen_ai.response.finish_reasons'] ?? record['gen_ai.response.finish_reasons'],
+        'error.type': join['error.type'] ?? record['error.type'],
+        'gen_ai.output.messages': join['gen_ai.output.messages'] ?? record['gen_ai.output.messages'],
+        'gen_ai.output.multimodal_metadata': join['gen_ai.output.multimodal_metadata'] ?? record['gen_ai.output.multimodal_metadata'],
+      } : {
+        'gen_ai.input.messages_delta': join['gen_ai.input.messages_delta'] ?? record['gen_ai.input.messages_delta'],
+        'gen_ai.input.messages_hash': join['gen_ai.input.messages_hash'] ?? record['gen_ai.input.messages_hash'],
+        'gen_ai.input.multimodal_metadata': join['gen_ai.input.multimodal_metadata'] ?? record['gen_ai.input.multimodal_metadata'],
+        'gen_ai.input.multimodal_metadata_delta': join['gen_ai.input.multimodal_metadata_delta'] ?? record['gen_ai.input.multimodal_metadata_delta'],
+      }),
     }];
   });
 }

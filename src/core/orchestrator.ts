@@ -1066,7 +1066,7 @@ export class Orchestrator extends EventEmitter {
           this.globalAttributesProvider,
           undefined,
           new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
-            ['codex', 'hermes', 'openclaw']),
+            ['codex', 'hermes', 'openclaw', 'antigravity', 'antigravity-cli']),
           entries => this.inputManager!.prepareRestoredEntries(entries),
           sourceToken => this.inputManager!.confirmHermesSourceDrained(sourceToken),
         );

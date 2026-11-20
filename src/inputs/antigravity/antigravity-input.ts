@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { retainedWorkspaceRoots, type WorkspaceScopedEntry } from '../../core/workspace-policy.js';
 import * as fileWatch from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -27,6 +28,7 @@ import { loadDatabaseSync } from '../../utils/node-sqlite.js';
 import { DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import {
   AntigravityDbReadCache,
+  NATIVE_ID_PREFIXES,
   readAntigravityConversationDb,
   type AntigravityConversationSnapshot,
   type AntigravityStepInfo,
@@ -122,8 +124,70 @@ function plannerFinishReason(step: AntigravityTranscriptStep | undefined): 'canc
   return step?.toolCalls.length ? 'tool_call' : 'stop';
 }
 
-function usageResponseKey(usage: AntigravityUsageEvent): string | undefined {
-  return usage.identities.find((id) => id.startsWith('response:'));
+function preferredUsageIdentity(usage: AntigravityUsageEvent): string | undefined {
+  for (const prefix of NATIVE_ID_PREFIXES) {
+    const identity = usage.identities.find((id) => id.startsWith(prefix));
+    if (identity) return identity;
+  }
+  return undefined;
+}
+
+/** The highest namespace available on both records decides whether they agree. */
+function compareUsageIdentities(
+  previous: readonly string[] | undefined,
+  current: readonly string[],
+): 'same' | 'different' | undefined {
+  if (!previous?.length || !current.length) return undefined;
+  for (const prefix of NATIVE_ID_PREFIXES) {
+    const known = previous.filter(id => id.startsWith(prefix));
+    const observed = current.filter(id => id.startsWith(prefix));
+    if (known.length > 0 && observed.length > 0) {
+      return observed.some(id => known.includes(id)) ? 'same' : 'different';
+    }
+  }
+  return undefined;
+}
+
+function rememberUsage(
+  usage: AntigravityUsageEvent,
+  keys: Set<string>,
+  identitiesBySource: Map<string, string[]>,
+): void {
+  // A weaker alias can be reused by multiple responses. Only the strongest
+  // observed identity can establish sameness across unrelated source slots.
+  const identity = preferredUsageIdentity(usage);
+  if (identity) keys.add(identity);
+  for (const source of usage.sourceKeys) {
+    keys.add(source);
+    if (usage.identities.length === 0) continue;
+    const previous = identitiesBySource.get(source);
+    if (previous && usage.identities.every(id => previous.includes(id))) continue;
+    const compatible = compareUsageIdentities(previous, usage.identities) !== 'different';
+    identitiesBySource.set(
+      source,
+      compatible && previous ? [...new Set([...previous, ...usage.identities])] : usage.identities,
+    );
+  }
+}
+
+function isUsageCovered(
+  usage: AntigravityUsageEvent,
+  keys: ReadonlySet<string>,
+  identitiesBySource: ReadonlyMap<string, string[]>,
+): boolean {
+  const identity = preferredUsageIdentity(usage);
+  if (identity && keys.has(identity)) return true;
+
+  let seenSlot = false;
+  let conflictingSlot = false;
+  for (const source of usage.sourceKeys) {
+    if (!keys.has(source)) continue;
+    seenSlot = true;
+    const comparison = compareUsageIdentities(identitiesBySource.get(source), usage.identities);
+    if (comparison === 'same') return true;
+    if (comparison === 'different') conflictingSlot = true;
+  }
+  return seenSlot && !conflictingSlot;
 }
 
 function extractStepOrder(stepId: string | undefined): number {
@@ -170,6 +234,8 @@ interface SessionCheckpoint {
   joinDeadlines?: Record<string, number>;
   pendingPlanners?: PendingPlanner[];
   emittedUsageKeys: string[];
+  usageIdentitiesBySource?: Record<string, string[]>;
+  /** Legacy response-only ledger, upgraded on load. */
   usageResponseKeysBySource?: Record<string, string>;
   /** Legacy eviction state, used only on the first rescan of older checkpoints. */
   maxEmittedGenIdx?: number;
@@ -546,6 +612,14 @@ export class AntigravityInput extends BaseInput {
           const emittedPrimaryStepIdxs = Array.isArray(cur.emittedPrimaryStepIdxs)
             ? cur.emittedPrimaryStepIdxs.filter((n): n is number => typeof n === 'number' && Number.isInteger(n))
             : undefined;
+          const usageIdentitiesBySource = Object.fromEntries([
+            ...Object.entries(cur.usageResponseKeysBySource ?? {})
+              .filter(([, key]) => typeof key === 'string' && key.startsWith('response:'))
+              .map(([slot, key]) => [slot, [key]] as const),
+            ...Object.entries(cur.usageIdentitiesBySource ?? {})
+              .filter(([, ids]) => Array.isArray(ids))
+              .map(([slot, ids]) => [slot, ids.filter(id => typeof id === 'string')] as const),
+          ]);
           sessions[sid] = {
             sourceSignature: typeof cur.sourceSignature === 'string' ? cur.sourceSignature : undefined,
             dbAudit: loadSourceAudit(cur.dbAudit),
@@ -562,7 +636,7 @@ export class AntigravityInput extends BaseInput {
             maxEmittedStepIdx:
               typeof cur.maxEmittedStepIdx === 'number' ? cur.maxEmittedStepIdx : -1,
             emittedUsageKeys,
-            usageResponseKeysBySource: cur.usageResponseKeysBySource,
+            usageIdentitiesBySource,
             ...(deferredGenIdxs && deferredGenIdxs.length > 0 ? { deferredGenIdxs } : {}),
             ...(deferredStepIdxs && deferredStepIdxs.length > 0 ? { deferredStepIdxs } : {}),
             ...(emittedResponseIds && emittedResponseIds.length > 0 ? { emittedResponseIds } : {}),
@@ -785,14 +859,9 @@ export class AntigravityInput extends BaseInput {
         );
         if (seed || !workspaceAllowed) {
           const seededKeys = new Set(previous?.emittedUsageKeys);
-          const responseKeysBySource = new Map(Object.entries(previous?.usageResponseKeysBySource ?? {}));
+          const identitiesBySource = new Map(Object.entries(previous?.usageIdentitiesBySource ?? {}));
           for (const usage of snapshot?.events ?? []) {
-            const responseKey = usageResponseKey(usage);
-            if (responseKey) seededKeys.add(responseKey);
-            for (const key of usage.sourceKeys) {
-              seededKeys.add(key);
-              if (responseKey) responseKeysBySource.set(key, responseKey);
-            }
+            rememberUsage(usage, seededKeys, identitiesBySource);
           }
           checkpoint.sessions[sessionId] = {
             ...previous,
@@ -803,7 +872,7 @@ export class AntigravityInput extends BaseInput {
             joinDeadlines: undefined,
             pendingPlanners: undefined,
             emittedUsageKeys: [...seededKeys],
-            usageResponseKeysBySource: Object.fromEntries(responseKeysBySource),
+            usageIdentitiesBySource: Object.fromEntries(identitiesBySource),
             lastTranscriptStepIndex: previous?.lastTranscriptStepIndex ?? -1,
             processedTranscriptSteps: [...new Set([
               ...(previous?.processedTranscriptSteps ?? []),
@@ -833,7 +902,12 @@ export class AntigravityInput extends BaseInput {
           };
           const { entries, cursor } = await this.buildSessionEntries(sessionId, snapshot, transcript, prevCursor);
           if (!this.running) break;
-          for (const entry of entries) emitted.push(entry);
+          for (const entry of entries) {
+            if (snapshot?.workspacePaths?.length) {
+              (entry as WorkspaceScopedEntry)[retainedWorkspaceRoots] = snapshot.workspacePaths;
+            }
+            emitted.push(entry);
+          }
           checkpoint.sessions[sessionId] = { ...cursor, sourceSignature, dbAudit, transcriptAudit };
         }
         this.sourceCaches.delete(sessionId);
@@ -911,7 +985,7 @@ export class AntigravityInput extends BaseInput {
     const cwd = snapshot?.workspacePath;
     const stepInfos = snapshot?.stepInfos ?? new Map<number, AntigravityStepInfo>();
     const seenKeys = new Set(prevCursor.emittedUsageKeys);
-    const responseKeysBySource = new Map(Object.entries(prevCursor.usageResponseKeysBySource ?? {}));
+    const identitiesBySource = new Map(Object.entries(prevCursor.usageIdentitiesBySource ?? {}));
     const processedTranscriptSteps = new Set(prevCursor.processedTranscriptSteps);
     const joinDeadlines = new Map<string, number>();
     const pendingPlanners: PendingPlanner[] = [];
@@ -1139,7 +1213,7 @@ export class AntigravityInput extends BaseInput {
       }
       // With SQLite usage alone there is no evidence that two invocations belong
       // to one turn. Reusing a fallback turn would discard all later OTLP batches.
-      return `${sessionId}:usage:${hashId([usageResponseKey(usage) ?? usage.key], 16)}`;
+      return `${sessionId}:usage:${hashId([preferredUsageIdentity(usage) ?? usage.key], 16)}`;
     };
 
     // Preserve monotonic turn ordering for deterministic sorting.
@@ -1393,6 +1467,7 @@ export class AntigravityInput extends BaseInput {
     // 1) Drain any pending tool calls from previous poll cycles whose tool results have now landed
     const remainingPending: PendingToolCall[] = [];
     for (const pending of prevCursor.pendingToolCalls) {
+      if (previouslyEndedTurns.has(pending.turnId)) continue;
       const toolIndex = pendingOrdinal(pending);
       const { step: resultStep, boundaryReached } = findToolResultStep(pending.plannerStepIndex, toolIndex);
       const resultInfo = resultStep ? stepInfos.get(resultStep.stepIndex) : undefined;
@@ -1605,7 +1680,7 @@ export class AntigravityInput extends BaseInput {
               await this.attachWorkspaceContext(resultEntry, cwd);
               entries.push(resultEntry);
               toolResultStepIndices.set(toolCallKey(step.stepIndex, i), resultStep.stepIndex);
-            } else if (resultStep || !boundaryReached) {
+            } else if (!previouslyEndedTurns.has(turnId) && (resultStep || !boundaryReached)) {
               // Tool result is in-progress or hasn't been written yet; persist for next poll cycle
               if (stepInfo?.turnId && nativeToolCallId(step.stepIndex, i, tc.id)) {
                 callEntry['gen_ai.turn.end'] = false;
@@ -1632,6 +1707,7 @@ export class AntigravityInput extends BaseInput {
     const waitingForPlannerTurns = new Set<string>();
     const readyPlannerJoins: Array<{ pending: PendingPlanner; planner: AntigravityTranscriptStep | undefined }> = [];
     for (const pending of prevCursor.pendingPlanners ?? []) {
+      if (previouslyEndedTurns.has(pending.turnId)) continue;
       const knownSteps = pending.stepIndices.map(idx => transcript?.byStepIndex.get(idx));
       const planner = knownSteps.find(step => step?.type === 'PLANNER_RESPONSE');
       if (planner ? isPlannerOrPromptStillStreaming(planner) : knownSteps.includes(undefined)) {
@@ -1644,29 +1720,16 @@ export class AntigravityInput extends BaseInput {
     if (snapshot) {
       const nowForRace = Date.now();
       for (const usage of snapshot.events) {
-        const responseKey = usageResponseKey(usage);
-        const rememberUsage = () => {
-          if (responseKey) seenKeys.add(responseKey);
-          for (const key of usage.sourceKeys) {
-            seenKeys.add(key);
-            if (responseKey) responseKeysBySource.set(key, responseKey);
-          }
-        };
-        const covered = (responseKey !== undefined && seenKeys.has(responseKey)) ||
-          usage.sourceKeys.some((key) => {
-            const previousResponse = responseKeysBySource.get(key);
-            return seenKeys.has(key) && (!responseKey || !previousResponse || responseKey === previousResponse);
-          });
-        if (covered || isLegacyUsageCovered(usage, prevCursor, seenKeys)) {
+        if (isUsageCovered(usage, seenKeys, identitiesBySource) || isLegacyUsageCovered(usage, prevCursor, seenKeys)) {
           // Learn the other table's exact slot when a mirror arrives later.
-          rememberUsage();
+          rememberUsage(usage, seenKeys, identitiesBySource);
           continue;
         }
 
         // Skip internal context-compaction CHECKPOINT steps only when ALL stepIndices
         // are visible in transcript and none is a PLANNER_RESPONSE.
         if (this.isCompactionOnlyUsage(usage, transcript)) {
-          rememberUsage();
+          rememberUsage(usage, seenKeys, identitiesBySource);
           continue;
         }
 
@@ -1701,7 +1764,7 @@ export class AntigravityInput extends BaseInput {
           continue;
         }
 
-        rememberUsage();
+        rememberUsage(usage, seenKeys, identitiesBySource);
 
         const stepId = linkedStepIdx === undefined
           ? `${sessionId}:gen:${usage.genIdx ?? 0}`
@@ -1716,7 +1779,7 @@ export class AntigravityInput extends BaseInput {
         const observedTurn = resolveUsageTurn(usage, linkedStepIdx);
         const isLateAttempt = previouslyEndedTurns.has(observedTurn);
         const turnId = isLateAttempt
-          ? `${observedTurn}:usage:${hashId([responseKey ?? usage.key], 16)}`
+          ? `${observedTurn}:usage:${hashId([preferredUsageIdentity(usage) ?? usage.key], 16)}`
           : observedTurn;
         registerTurnOrder(turnId);
 
@@ -1881,18 +1944,33 @@ export class AntigravityInput extends BaseInput {
       }
     }
 
-    // A late planner may be the sole new record. Report its classification
-    // separately so the already published usage and event IDs stay intact.
+    // Join late transcript content to the response whose usage was already published.
     for (const { pending, planner } of readyPlannerJoins) {
       const { turnId, responseId } = pending;
       const stepId = planner ? `${sessionId}:step:${planner.stepIndex}` : undefined;
-      const finish = planner && !pending.isRetry ? plannerFinishReason(planner) : undefined;
+      const plannerOutput = pending.isRetry ? undefined : planner;
+      const finish = plannerOutput ? plannerFinishReason(plannerOutput) : undefined;
       const cancelled = finish === 'cancelled';
       const waitsForMore = finish === 'stop' && (pendingToolTurns.has(turnId) || waitingForPlannerTurns.has(turnId));
       const endsTurn = cancelled || (finish === 'stop' && !waitsForMore);
       if (waitsForMore) turnsAwaitingToolResults.add(turnId);
       if (endsTurn) endedTurns.add(turnId);
       registerTurnOrder(turnId);
+      const info = planner ? stepInfos.get(planner.stepIndex) : undefined;
+      const completedAtMs = info?.completedAtMs ?? planner?.createdAtMs ?? Date.now();
+      const inputDelta = await this.buildInputMessagesDelta(
+        plannerOutput,
+        transcript,
+        prevPlannerByStepIndex,
+        stepPositionByIndex,
+        turnPromptStepSet,
+        info?.createdAtMs ?? planner?.createdAtMs ?? completedAtMs,
+        getStepMedia,
+        resolveToolCallId,
+        (plannerStep, ordinal) => findToolResultStep(plannerStep, ordinal).step,
+      );
+      const outputMedia = plannerOutput ? await getStepMedia(plannerOutput, completedAtMs, 'output') : [];
+      const outputMessages = this.buildOutputMessages(plannerOutput, outputMedia, finish, resolveToolCallId);
       const completion = buildAgentActivityEntry({
         'event.id': hashEventId([sessionId, turnId, responseId, 'planner'], 32),
         'event.name': 'other',
@@ -1909,10 +1987,14 @@ export class AntigravityInput extends BaseInput {
         'agent.antigravity.planner_joined': true,
         ...(finish ? { 'gen_ai.response.finish_reasons': [finish] } : {}),
         ...(cancelled ? { 'error.type': 'antigravity.model_cancelled' } : {}),
-        time_unix_nano: toUnixNanoString(
-          (planner ? stepInfos.get(planner.stepIndex)?.completedAtMs ?? planner.createdAtMs : undefined) ?? Date.now(),
-        ),
+        ...(inputDelta.length > 0 ? {
+          'gen_ai.input.messages_delta': inputDelta,
+          'gen_ai.input.messages_hash': createHash('sha256').update(JSON.stringify(inputDelta)).digest('hex'),
+        } : {}),
+        ...(outputMessages ? { 'gen_ai.output.messages': outputMessages } : {}),
+        time_unix_nano: toUnixNanoString(completedAtMs),
       });
+      if (inputDelta.length > 0 || outputMedia.length > 0) attachMultimodalMetadataForEntry(completion);
       await this.attachWorkspaceContext(completion, cwd);
       entries.push(completion);
     }
@@ -1937,6 +2019,10 @@ export class AntigravityInput extends BaseInput {
 
     const lastEntryByTurn = new Map(entries.map((entry) => [entry['gen_ai.turn.id'], entry]));
     for (const turnId of turnsAwaitingToolResults) {
+      if (endedTurns.has(turnId)) {
+        turnsAwaitingToolResults.delete(turnId);
+        continue;
+      }
       if (pendingToolTurns.has(turnId) || waitingForPlannerTurns.has(turnId)) continue;
       const lastEntry = lastEntryByTurn.get(turnId);
       if (lastEntry) lastEntry['gen_ai.turn.end'] = true;
@@ -1955,19 +2041,21 @@ export class AntigravityInput extends BaseInput {
       toolCallIdMap[k] = v;
     }
 
+    // Native cancellation ends the turn even if expected source records never arrive.
+    const openPlanners = pendingPlanners.filter(pending => !endedTurns.has(pending.turnId));
     return {
       entries,
       cursor: {
         retryAtMs,
         ...(joinDeadlines.size > 0 ? { joinDeadlines: Object.fromEntries(joinDeadlines) } : {}),
-        ...(pendingPlanners.length > 0 ? { pendingPlanners } : {}),
+        ...(openPlanners.length > 0 ? { pendingPlanners: openPlanners } : {}),
         lastTranscriptStepIndex: prevCursor.lastTranscriptStepIndex,
         processedTranscriptSteps: [...processedTranscriptSteps],
         emittedUsageKeys: [...seenKeys],
-        usageResponseKeysBySource: Object.fromEntries(responseKeysBySource),
+        usageIdentitiesBySource: Object.fromEntries(identitiesBySource),
         emittedResponseIds: [...usedResponseIds],
         emittedPrimaryStepIdxs: [...seenPrimaryStepIdx],
-        pendingToolCalls: remainingPending,
+        pendingToolCalls: remainingPending.filter(pending => !endedTurns.has(pending.turnId)),
         turnIdByStartStep,
         emittedTurnStarts: [...emittedTurnStartsSet],
         endedTurns: [...endedTurns],

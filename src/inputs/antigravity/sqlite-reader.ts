@@ -559,7 +559,7 @@ function mergeUsageEvent(target: AntigravityUsageEvent, dup: AntigravityUsageEve
   }
 }
 
-const NATIVE_ID_PREFIXES = ['response:', 'provider:', 'message:'] as const;
+export const NATIVE_ID_PREFIXES = ['response:', 'provider:', 'message:'] as const;
 
 function usageFingerprint(event: AntigravityUsageEvent, stepIdx: number): string {
   return [
