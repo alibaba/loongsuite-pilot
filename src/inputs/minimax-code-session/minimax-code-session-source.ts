@@ -26,6 +26,7 @@ export interface MinimaxCodeHookObservation {
   sessionId: string;
   turnId?: string;
   toolCallId?: string;
+  workspace?: string;
   observedAtMs: number;
 }
 
@@ -93,5 +94,7 @@ export function parseMinimaxCodeHookObservation(
   const toolCallId = event === 'PreToolUse' || event === 'PostToolUse' ? id(payload?.tool_use_id) : undefined;
   if ((event !== 'SessionStart' && event !== 'SessionEnd' && !turnId)
     || ((event === 'PreToolUse' || event === 'PostToolUse') && !toolCallId)) return undefined;
-  return { event: event as MinimaxCodeHookEvent, sessionId, turnId, toolCallId, observedAtMs };
+  const cwd = payload?.cwd;
+  const workspace = typeof cwd === 'string' && path.isAbsolute(cwd) ? path.normalize(cwd) : undefined;
+  return { event: event as MinimaxCodeHookEvent, sessionId, turnId, toolCallId, workspace, observedAtMs };
 }

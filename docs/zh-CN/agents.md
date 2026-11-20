@@ -21,6 +21,19 @@
 用户身份、输入和模型/工具调用，避免相互覆盖。后台整理未提供原生 sender ID 时，
 仍使用配置身份或 hostname 兜底，不自动继承该 session 最近的 IM 用户。
 
+## MiniMax Code CLI
+
+Pilot 支持 macOS 和 Linux 上的官方 `mcode` CLI，已在 macOS 验证 0.7.9。
+Pilot 会在活跃配置目录中安装原生插件，将轮次和工具通知与该目录下
+`v2/sessions` 的持久会话关联。默认配置目录为 `~/.minimax`。如果通过
+`MINIMAX_DATA_DIR` 或 `MAVIS_DATA_DIR` 自定义位置，请为 Pilot 和
+`mcode` 设置相同的绝对路径。
+
+插件只记录会话、轮次、工具、时间戳和工作区元数据。消息内容遵循 Pilot
+现有的工作区和采集设置（`agents.minimax-code.captureMessageContent`）。
+Pilot 会采集插件观察到的已完成轮次，包括 Pilot 停止期间记录的轮次。
+已运行的 CLI 可能需要重启才能加载插件。
+
 ## OpenClaw / Hermes 请求上下文
 
 OpenClaw 的 `llm_input.historyMessages` 用于保留之前的对话，再追加本次 prompt。

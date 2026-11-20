@@ -69,6 +69,8 @@ import { CopilotLogInput } from '../inputs/copilot-log/copilot-log-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
+import { MinimaxCodeSessionInput } from '../inputs/minimax-code-session/minimax-code-session-input.js';
+import { minimaxCodeProfileDir } from '../inputs/minimax-code-session/minimax-code-session-source.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
 import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
@@ -156,6 +158,7 @@ export class Orchestrator extends EventEmitter {
     'opencode-log': 'opencode',
     'pi-coding-agent-log': 'pi-coding-agent',
     'mimo-code-log': 'mimo-code',
+    'minimax-code-session': 'minimax-code',
     'qwen-code-cli-log': 'qwen-code-cli',
     'hermes-agent-log': 'hermes-agent',
     'openclaw-plugin-log': 'openclaw',
@@ -1843,6 +1846,27 @@ export class Orchestrator extends EventEmitter {
         pollIntervalMs: listenerCfg['mimo-code-log']?.pollInterval,
       }),
     );
+
+    // --- MiniMax Code CLI (native session history plus local Plugin observations) ---
+    const minimaxProfile = process.platform === 'win32' ? undefined : minimaxCodeProfileDir();
+    if (minimaxProfile) {
+      const sessionsDir = path.join(minimaxProfile, 'v2', 'sessions');
+      const hookDir = path.join(this.dataDir, 'state', 'minimax-code', 'hook-events');
+      const minimaxInput = new MinimaxCodeSessionInput({
+        stateStore: this.stateStore,
+        profileDir: minimaxProfile,
+        hookDir,
+        pollIntervalMs: listenerCfg['minimax-code-session']?.pollInterval,
+      });
+      this.inputManager.registerInput(minimaxInput);
+      entries.push(this.inputManager.buildDetectionEntry(minimaxInput, {
+        watchPaths: [sessionsDir, hookDir],
+        isAvailable: () => directoryExists(sessionsDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['minimax-code-session'])
+          && this.agentControlManager.resolveEnabled('minimax-code-session', listenerCfg['minimax-code-session']?.enabled ?? true),
+        pollIntervalMs: listenerCfg['minimax-code-session']?.pollInterval,
+      }));
+    }
 
     // --- Qwen Code CLI Log (transcript-driven hook JSONL) ---
     const qwenCodeCliLogDir = path.join(this.dataDir, 'logs', 'qwen-code-cli');

@@ -63,6 +63,7 @@ Pilot is designed to answer practical questions:
 | Grok Build    | Hook + local session logs | Yes          | Yes        | Yes         | Yes                       |
 | Hermes Agent  | Native directory plugin   | Yes          | Yes        | Yes         | Yes                       |
 | Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
+| [MiniMax Code CLI (macOS/Linux)](docs/agents.md#minimax-code-cli) | Native plugin + session polling | Yes | Yes | Yes | Yes |
 | MiMo Code     | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
 | OpenClaw      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
 | OpenCode      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
