@@ -980,7 +980,6 @@ mod tests {
         let original = b"{\"version\":1,\"hooks\":{\"stop\":[]},\"user\":true}\n";
         fs::create_dir_all(&data).unwrap();
         fs::create_dir_all(settings.parent().unwrap()).unwrap();
-        fs::write(&settings, original).unwrap();
         let native = cache.join("versions/current-rust");
         fs::create_dir_all(native.join("agents.d")).unwrap();
         fs::write(native.join("runtime-manifest.json"), "{}").unwrap();
@@ -990,6 +989,36 @@ mod tests {
         fs::write(native.join("agents.d/cursor.json"), definition.to_string()).unwrap();
         fs::write(cache.join("current"), b"current-rust\n").unwrap();
         fs::write(cache.join("previous"), b"old-node\n").unwrap();
+
+        // A first deployment interrupted after journaling hasn't created settings yet.
+        let hook_cache = data.join(".hook-install");
+        fs::create_dir_all(&hook_cache).unwrap();
+        let mut deployment = ActivationTransaction::begin(
+            &hook_cache,
+            BTreeMap::from([("config".to_owned(), settings.clone())]),
+        )
+        .unwrap();
+        let pending = hook_cache.join("update-recovery.json");
+        let before = fs::read(&pending).unwrap();
+        let result = NativeHookRetirement::with_locks(&cache, &data, false, |_| async { Ok(()) })
+            .await
+            .unwrap_err();
+        assert!(result
+            .to_string()
+            .contains("Recover the pending Hook transaction"));
+        assert_eq!(fs::read(&pending).unwrap(), before);
+        assert!(!settings.exists());
+
+        // A package without a native SDK Hook declaration has no Hook to retire.
+        let cursor_definition = native.join("agents.d/cursor.json");
+        fs::remove_file(&cursor_definition).unwrap();
+        NativeHookRetirement::with_locks(&cache, &data, false, |_| async { Ok(()) })
+            .await
+            .unwrap();
+        fs::write(cursor_definition, definition.to_string()).unwrap();
+        deployment.rollback().unwrap();
+
+        fs::write(&settings, original).unwrap();
         let base = activation_targets(&cache, &service, &data.join("config.json"));
         let mut tx = ActivationTransaction::begin(&cache, base.clone()).unwrap();
         NativeHookRetirement::with_locks(&cache, &data, false, |plan| async move {

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub(super) struct NativeHookRetirement {
     current: PathBuf,
+    supports_native_hooks: bool,
     hooks: BTreeMap<String, (PathBuf, AgentDefinition)>,
 }
 
@@ -21,6 +22,7 @@ impl NativeHookRetirement {
     async fn load(cache: &Path, data: &Path, recovering: bool) -> Result<Self> {
         let mut plans = Self {
             current: PathBuf::new(),
+            supports_native_hooks: false,
             hooks: BTreeMap::new(),
         };
         // During recovery either pointer can refer to the Rust package. The previous
@@ -73,6 +75,7 @@ impl NativeHookRetirement {
                 else {
                     continue;
                 };
+                plans.supports_native_hooks = true;
                 let mut paths: BTreeSet<_> = manager
                     .read_recorded_settings_paths(&definition.id)
                     .await
@@ -128,13 +131,13 @@ impl NativeHookRetirement {
             || async {
                 // A repair can register settings or create the default file while we wait.
                 let plan = Self::load(cache, data, recovering).await?;
-                if plan.hooks.is_empty() {
-                    return body(plan).await;
+                if recovering || plan.supports_native_hooks {
+                    // First-time deployment can have a journal before any settings file exists.
+                    ensure!(
+                        !hook_assets::recovery_pending(data),
+                        "Recover the pending Hook transaction before switching Pilot versions"
+                    );
                 }
-                ensure!(
-                    !hook_assets::recovery_pending(data),
-                    "Recover the pending Hook transaction before switching Pilot versions"
-                );
                 let mut locks = plan
                     .hooks
                     .values()
