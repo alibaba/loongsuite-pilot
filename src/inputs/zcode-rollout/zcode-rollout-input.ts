@@ -104,7 +104,7 @@ export class ZCodeRolloutInput extends BaseInput {
 
   protected override async collect(): Promise<AgentActivityEntry[]> {
     const files = await this.discoverRolloutFiles();
-    const allEntries: AgentActivityEntry[] = [];
+    const allEntries = this.recoverUnreportedToolCalls();
 
     for (const filePath of files) {
       const entries = await this.processFile(filePath);
@@ -185,90 +185,25 @@ export class ZCodeRolloutInput extends BaseInput {
     }
   }
 
-  /**
-   * Convert a batch of rollout `model_io` lines into AgentActivityEntry records.
-   *
-   * Batch (not per-line) because tool.result pairing requires cross-batch state:
-   * tool results for line N's toolCalls live in line N+1's
-   * request.messages[role=tool]. When line N is the last line of a batch (no
-   * nextRecord), the toolCalls are buffered to state and paired when the next
-   * batch's first line arrives.
-   *
-   * STEP↔LLM 1:1 attribution (iter 6 fix):
-   *   - Each rollout line carries a unique `requestId` per LLM call within a
-   *     turn. We derive `gen_ai.step.id` = `<turnId>:<requestId>` and
-   *     `stepSpanId` = `deriveSpanId('step', sid, tid, requestId)` directly
-   *     from this stable per-line identifier — NO state-dependent counter.
-   *     The previous approach (synthesizing an attempt index via
-   *     `nextTurnIndex` persisted in stateStore) was fragile: if the daemon
-   *     was restarted between collect() cycles and the in-memory `extra.idx`
-   *     had not yet been persisted to disk, the next cycle reset to 1 and
-   *     collided with earlier lines, producing merged STEPs with 2+ LLM
-   *     children (validate-trace `structure.step_has_one_llm` ERROR).
-   *     Using `requestId` removes the state dependency entirely.
-   *
-   * Pending toolCalls are persisted in stateStore keyed by
-   * `pending-tool-calls:<sid>+<tid>` so a toolCall emitted in batch K can
-   * be paired with a tool result message arriving in batch K+1.
-   */
+  /** Convert complete native records in file order, retaining late tool links. */
   buildEntriesFromRolloutLines(lines: Record<string, unknown>[]): AgentActivityEntry[] {
     const allEntries: AgentActivityEntry[] = [];
 
-    // Flush pending toolCalls from previous batches using this batch's first
-    // line. The first line's request.messages[role=tool] holds tool results
-    // produced for the previous batch's last-line toolCalls.
-    //
-    // Review P1 fix: this is a SESSION-scoped flush. collect() processes each
-    // rollout file independently, so we only touch pending turns of the SAME
-    // session — draining other sessions' pending here would destroy their
-    // cross-batch pairing when their own file advances next. Every same-
-    // session pending turn (not just the exact current turn) is first PAIRED
-    // against the first line's role=tool messages — a next-turn line can
-    // still carry the previous turn's tool result in its context — and any
-    // still-unmatched call is drained truthfully WITHOUT a fabricated result.
-    // Skip entirely when the first line's sid is unknown.
-    if (lines.length > 0) {
-      const first = lines[0];
-      const fsid = str(first.sessionId) ?? str(first.session_id);
-      const ftid = str(first.turnId) ?? str(first.turn_id);
-      if (fsid && ftid && first.type === 'model_io') {
-        allEntries.push(...this.flushPendingToolCalls(fsid, ftid, first));
+    for (const record of lines) {
+      if (record?.type !== 'model_io') continue;
+      const sid = str(record.sessionId) ?? str(record.session_id);
+      const tid = str(record.turnId) ?? str(record.turn_id);
+      const trace = str(record.traceId) ?? str(record.trace_id);
+      if (sid && tid && trace) {
+        allEntries.push(...this.flushPendingToolResults(sid, tid, toW3CTraceId(trace), record));
       }
-      if (fsid) {
-        allEntries.push(...this.drainStalePendingTurns(fsid, `${fsid}+${ftid ?? ''}`, first));
-      }
-    }
-
-    for (let i = 0; i < lines.length; i++) {
-      const record = lines[i];
-      if (record.type !== 'model_io') continue;
-      const sid = str(record.sessionId) ?? str(record.session_id) ?? '';
-      const tid = str(record.turnId) ?? str(record.turn_id) ?? '';
-      const isLastInBatch = i + 1 >= lines.length;
-      const nextRecord = !isLastInBatch ? lines[i + 1] : undefined;
-
-      if (isLastInBatch && this.lineHasToolCalls(record)) {
-        // Last line of batch with toolCalls: emit STEP+LLM but buffer the
-        // toolCalls to state — they'll be paired with the next batch's first
-        // line (or drained without results if the turn ends here).
-        allEntries.push(...this.buildEntriesFromRolloutLine(record, undefined, { skipToolCalls: true }));
-        // Guard: only buffer when sid+tid are valid. Malformed/partial records
-        // with empty sid/tid would otherwise share a single `:+` state key,
-        // corrupting pairing across sessions/turns.
-        if (sid && tid) {
-          allEntries.push(...this.bufferPendingToolCalls(sid, tid, record));
-        }
-      } else {
-        allEntries.push(...this.buildEntriesFromRolloutLine(record, nextRecord));
-      }
+      allEntries.push(...this.buildEntriesFromRolloutLine(record));
     }
     return allEntries;
   }
 
   /**
-   * Registry of turns holding buffered (un-resulted) tool calls, persisted
-   * under one state key. Bounded to the most recent MAX_PENDING_TURNS entries
-   * so state cannot grow without limit across a long-lived daemon.
+   * Bounded registry of turns awaiting observed tool results.
    */
   private getPendingTurnRegistry(): string[] {
     const key = 'zcode-rollout:pending-turn-registry';
@@ -280,131 +215,58 @@ export class ZCodeRolloutInput extends BaseInput {
     this.stateStore.update(key, { extra: { turns } });
   }
 
-  /**
-   * Drain buffered tool calls for pending turns of the SAME session (sid),
-   * EXCEPT the turn currently active (currentTurnKey = `<sid>+<tid>`).
-   * Emits only the tool.call records — no fabricated tool.result (the source
-   * never observed a result). Clears the drained state keys and drops them
-   * from the registry. Turns of OTHER sessions are left alone: their own
-   * rollout file's next batch drains them (cross-file drain would break
-   * concurrent sessions' pairing — review P1).
-   */
-  private drainStalePendingTurns(
-    sid: string,
-    currentTurnKey: string,
-    currentLine: Record<string, unknown>,
-  ): AgentActivityEntry[] {
-    const registry = this.getPendingTurnRegistry();
-    if (registry.length === 0) return [];
-
-    const out: AgentActivityEntry[] = [];
-    const remaining: string[] = [];
-    for (const turnKey of registry) {
-      // Only touch this session's turns; keep other sessions' pending intact.
-      if (!turnKey.startsWith(`${sid}+`)) {
-        remaining.push(turnKey);
-        continue;
-      }
-      if (turnKey === currentTurnKey) {
-        // The current turn's pending is handled by flushPendingToolCalls
-        // (same-turn continuation path) — keep it registered for now.
-        remaining.push(turnKey);
-        continue;
-      }
-      // Same-session stale turn: first try pairing against the current
-      // line's role=tool messages — a next-turn line can still carry the
-      // previous turn's tool result in its context. flushPendingToolCalls
-      // emits tool.call always and tool.result only for matched calls
-      // (never fabricated), so routing through it keeps semantics honest.
-      const staleTid = turnKey.slice(sid.length + 1);
-      out.push(...this.flushPendingToolCalls(sid, staleTid, currentLine));
+  /** Older checkpoints can contain an observed call from an unchanged EOF. */
+  private recoverUnreportedToolCalls(): AgentActivityEntry[] {
+    const recovered: AgentActivityEntry[] = [];
+    for (const turn of this.getPendingTurnRegistry()) {
+      const key = `zcode-rollout:pending-tool-calls:${turn}`;
+      const pending = (this.stateStore.get(key).extra?.pending as PendingToolCall[] | undefined) ?? [];
+      const unreported = pending.filter(call => !call.callEmitted);
+      if (!unreported.length) continue;
+      recovered.push(...this.buildToolCallEntries(unreported));
+      this.stateStore.update(key, { extra: { pending: pending.map(({ args: _args, ...call }) =>
+        ({ ...call, callEmitted: true })) } });
     }
-    this.setPendingTurnRegistry(remaining);
-    return out;
+    return recovered;
   }
 
-  private lineHasToolCalls(record: Record<string, unknown>): boolean {
-    const response = (record.response && typeof record.response === 'object' ? record.response : {}) as Record<string, unknown>;
-    return Array.isArray(response.toolCalls) && response.toolCalls.length > 0;
-  }
-
-  /**
-   * Buffer a line's toolCalls to state for cross-batch pairing. Stores enough
-   * metadata to emit tool.call + tool.result records in a future batch without
-   * re-reading the source line. Returns tool.call entries drained from turns
-   * evicted by the bounded registry (never silently dropped — Copilot review).
-   */
-  private bufferPendingToolCalls(
-    sid: string, tid: string,
-    record: Record<string, unknown>,
+  /** Emit calls as observed and retain only their identities for a real result. */
+  private emitAndRememberToolCalls(
+    metadata: Omit<PendingToolCall, 'callId' | 'toolName' | 'args' | 'callEmitted'>,
+    toolCalls: ToolCall[],
   ): AgentActivityEntry[] {
-    const key = `zcode-rollout:pending-tool-calls:${sid}+${tid}`;
+    if (toolCalls.length === 0) return [];
+    const turnKey = `${metadata.sid}+${metadata.tid}`;
+    const key = `zcode-rollout:pending-tool-calls:${turnKey}`;
     const existing = (this.stateStore.get(key).extra?.pending as PendingToolCall[] | undefined) ?? [];
-    const response = (record.response && typeof record.response === 'object' ? record.response : {}) as Record<string, unknown>;
-    const toolCallsRaw = Array.isArray(response.toolCalls) ? response.toolCalls : [];
-    const requestId = str(record.requestId) ?? str(record.request_id) ?? crypto.randomUUID();
-    const responseId = str(response.responseId) ?? str(response.response_id) ?? requestId;
-    const traceIdRaw = str(record.traceId) ?? str(record.trace_id) ?? '';
-    const traceId = toW3CTraceId(traceIdRaw);
-    const completedAt = str(record.completedAt) ?? str(record.completed_at);
-    const completedAtNs = timestampToUnixNanos(completedAt || str(record.startedAt) || Date.now());
-    const model = (record.model && typeof record.model === 'object' ? record.model : {}) as Record<string, unknown>;
-    const providerId = str(model.providerId) ?? str(model.provider_id) ?? 'unknown';
-    const modelId = str(model.modelId) ?? str(model.model_id) ?? 'unknown';
-    const responseModelId = str(response.modelId) ?? str(response.model_id) ?? modelId;
-    const stepId = `${tid}:${requestId}`;
-    const stepSpanId = deriveSpanId('step', sid, tid, requestId);
-    const stepParentSpanId = deriveSpanId('agent', sid, tid);
-
-    const pending: PendingToolCall[] = [...existing];
-    for (const tc of toolCallsRaw as unknown[]) {
-      if (!tc || typeof tc !== 'object') continue;
-      const r = tc as Record<string, unknown>;
-      const callId = str(r.id) ?? str(r.toolCallId) ?? str(r.tool_call_id);
-      const toolName = str(r.name) ?? str(r.toolName) ?? str(r.tool_name);
-      if (!callId || !toolName) continue;
-      const args = r.args ?? r.arguments ?? r.input ?? null;
-      pending.push({
-        sid, tid, traceId, requestId, responseId,
-        stepId, stepSpanId, stepParentSpanId,
-        providerId, modelId, responseModelId,
-        completedAtNs, callId, toolName, args,
-      });
-    }
+    const observed: PendingToolCall[] = toolCalls.map(call => ({
+      ...metadata, callId: call.id, toolName: call.name, args: call.args,
+    }));
+    const emitted = this.buildToolCallEntries(observed);
+    const newPending = observed.map(({ args: _args, ...call }) => ({ ...call, callEmitted: true }));
+    const pending = [...existing, ...newPending];
+    // Report calls from a pre-upgrade checkpoint before expiring their metadata.
+    const evictedCalls = pending.splice(0, Math.max(0, pending.length - 512));
+    emitted.push(...this.buildToolCallEntries(evictedCalls.filter(call => !call.callEmitted)));
     this.stateStore.update(key, { extra: { pending } });
 
-    // Register the turn so drainStalePendingTurns can close it out when a
-    // later batch moves on to another turn. Bounded: keep the most recent
-    // MAX_PENDING_TURNS. Evicted turns are EMITTED as tool.call records
-    // (truthful, no fabricated result) rather than silently dropped —
-    // dropping them would irreversibly lose the tool.call events and
-    // block downstream orphan synthesis (Copilot review).
     const MAX_PENDING_TURNS = 32;
-    const turnKey = `${sid}+${tid}`;
     const registry = this.getPendingTurnRegistry().filter((t) => t !== turnKey);
     registry.push(turnKey);
-    const evictedEntries: AgentActivityEntry[] = [];
     if (registry.length > MAX_PENDING_TURNS) {
       const evicted = registry.splice(0, registry.length - MAX_PENDING_TURNS);
       for (const t of evicted) {
         const evictedPending = (this.stateStore.get(`zcode-rollout:pending-tool-calls:${t}`)
           .extra?.pending as PendingToolCall[] | undefined) ?? [];
-        if (evictedPending.length > 0) {
-          evictedEntries.push(...this.buildDrainedToolCallEntries(evictedPending));
-        }
-        this.stateStore.update(`zcode-rollout:pending-tool-calls:${t}`, { extra: { pending: [] } });
+        emitted.push(...this.buildToolCallEntries(evictedPending.filter(call => !call.callEmitted)));
+        this.stateStore.delete(`zcode-rollout:pending-tool-calls:${t}`);
       }
     }
     this.setPendingTurnRegistry(registry);
-    return evictedEntries;
+    return emitted;
   }
 
-  /**
-   * Build truthful tool.call entries for a list of buffered PendingToolCall
-   * records (used by registry eviction — the buffered calls must still reach
-   * the flusher even when their turn is evicted without a pairing line).
-   */
-  private buildDrainedToolCallEntries(calls: PendingToolCall[]): AgentActivityEntry[] {
+  private buildToolCallEntries(calls: PendingToolCall[]): AgentActivityEntry[] {
     return calls.map((p) => buildAgentActivityEntry({
       time_unix_nano: p.completedAtNs,
       'event.id': crypto.randomUUID(),
@@ -429,76 +291,45 @@ export class ZCodeRolloutInput extends BaseInput {
     }));
   }
 
-  /**
-   * Pair pending toolCalls (buffered in previous batches) with the current
-   * line's request.messages[role=tool]. Emits tool.call for every buffered
-   * call, and a tool.result ONLY when a real matching role=tool message is
-   * present — unmatched calls get NO fabricated result (the flusher's
-   * orphan-tool synthesis owns result-less tool.calls). Clears the state
-   * key after flushing.
-   */
-  private flushPendingToolCalls(
-    sid: string, tid: string,
-    currentLine: Record<string, unknown>,
+  /** A later real model request can carry the result, including across polls. */
+  private flushPendingToolResults(
+    sid: string, tid: string, traceId: string, currentLine: Record<string, unknown>,
   ): AgentActivityEntry[] {
-    const key = `zcode-rollout:pending-tool-calls:${sid}+${tid}`;
-    const pending = (this.stateStore.get(key).extra?.pending as PendingToolCall[] | undefined) ?? [];
-    if (pending.length === 0) return [];
-
-    const toolResultsByCallId = collectToolResults(currentLine);
-    const nextStartedAtNs = timestampToUnixNanos(
-      str(currentLine.startedAt) ?? str(currentLine.started_at) ?? '',
-    );
-    const oneNs = 1n;
-    const oneMsNs = 1_000_000n;
+    const registry = this.getPendingTurnRegistry();
+    const groups = registry.filter(turn => turn.startsWith(`${sid}+`)).map(turn => {
+      const key = `zcode-rollout:pending-tool-calls:${turn}`;
+      return { turn, key, pending: (this.stateStore.get(key).extra?.pending as PendingToolCall[] | undefined) ?? [] };
+    });
+    if (!groups.length) return [];
+    const toolResults = collectToolResults(currentLine);
+    const sameSession = groups.flatMap(group => group.pending.filter(call => call.sid === sid));
+    const owners = new Map<string, PendingToolCall | null>();
+    for (const call of sameSession) {
+      if (call.tid === tid && call.traceId !== traceId) continue;
+      if (toolResults.has(call.callId)) owners.set(call.callId, owners.has(call.callId) ? null : call);
+    }
+    const startedAt = str(currentLine.startedAt) ?? str(currentLine.started_at) ?? '';
+    const nextStartedAt = timestampToUnixNanos(startedAt);
+    const cleared = new Set<string>();
     const out: AgentActivityEntry[] = [];
-
-    for (const p of pending) {
-      const toolSpanId = deriveSpanId('tool', p.sid, p.tid, p.requestId ?? 'r', p.callId);
-      const callTimeNs = p.completedAtNs;
-      const result = toolResultsByCallId.get(p.callId);
-      // tool.result time: pick a time strictly inside (callTime, nextStartedAt)
-      // so that the tool span has non-zero duration AND its STEP does not
-      // overlap the next STEP (which starts at nextStartedAt). When there is
-      // no next line (EOF), fall back to callTime + 1ms so the span is still
-      // non-zero. This fixes iter5 `time.non_zero_duration` (0ms TOOL) and
-      // `time.no_step_overlap` (STEP N end == STEP N+1 start) errors.
-      let resultTimeNs: string;
-      if (nextStartedAtNs && BigInt(nextStartedAtNs) > BigInt(callTimeNs) + oneNs) {
-        resultTimeNs = (BigInt(nextStartedAtNs) - oneNs).toString();
-      } else {
-        resultTimeNs = (BigInt(callTimeNs) + oneMsNs).toString();
-      }
-
-      out.push(buildAgentActivityEntry({
-        time_unix_nano: callTimeNs,
-        'event.id': crypto.randomUUID(),
-        'event.name': 'tool.call',
-        'gen_ai.session.id': p.sid,
-        'gen_ai.turn.id': p.tid,
-        'gen_ai.step.id': p.stepId,
-        'gen_ai.agent.type': ClientType.ZCode,
-        'gen_ai.agent.id': p.sid,
-        'gen_ai.agent.name': 'ZCode',
-        'agent.source': 'zcode-rollout',
-        'gen_ai.provider.name': p.providerId,
-        'gen_ai.tool.name': p.toolName,
-        'gen_ai.tool.call.id': p.callId,
-        'gen_ai.tool.call.exec.id': p.callId,
-        ...(p.args !== undefined && p.args !== null
-          ? { 'gen_ai.tool.call.arguments': p.args as JsonValue }
-          : {}),
-        trace_id: p.traceId,
-        span_id: toolSpanId,
-        parent_span_id: p.stepSpanId,
-      }));
-
-      if (result) {
-        // Real observed result only. Canonical statuses per the shared
-        // normalizer (entry-builder normalizeToolResultStatus):
-        // success | failure | cancelled | unknown. Never fabricate a result
-        // for the unmatched case (review fix) — the flusher's orphan-tool
-        // synthesis owns tool.call records whose result never arrived.
+    for (const { turn, key, pending } of groups) {
+      const retained: PendingToolCall[] = [];
+      for (const p of pending) {
+        if (p.sid !== sid) {
+          retained.push(p);
+          continue;
+        }
+        if (!p.callEmitted) out.push(...this.buildToolCallEntries([p]));
+        const result = owners.get(p.callId) === p ? toolResults.get(p.callId) : undefined;
+        if (!result) {
+          const { args: _args, ...call } = p;
+          retained.push({ ...call, callEmitted: true });
+          continue;
+        }
+        const toolSpanId = deriveSpanId('tool', p.sid, p.tid, p.requestId ?? 'r', p.callId);
+        const callTime = BigInt(p.completedAtNs);
+        const nextTime = BigInt(nextStartedAt);
+        const resultTimeNs = (nextTime > callTime + 1n ? nextTime - 1n : callTime + 1_000_000n).toString();
         const isError = result.isError === true;
         out.push(buildAgentActivityEntry({
           time_unix_nano: resultTimeNs,
@@ -527,52 +358,19 @@ export class ZCodeRolloutInput extends BaseInput {
           parent_span_id: p.stepSpanId,
         }));
       }
-      // No else branch: an unobserved result is NOT emitted. Fabricated
-      // 1ms placeholder results (previous 'ok'/'interrupted' variants)
-      // invented audit data the source never recorded.
+      if (pending.length && retained.length === pending.length && pending.every(call => call.callEmitted)) continue;
+      if (retained.length) this.stateStore.update(key, { extra: { pending: retained } });
+      else {
+        cleared.add(turn);
+        this.stateStore.delete(key);
+      }
     }
-
-    // Clear pending and drop the turn from the registry.
-    this.stateStore.update(key, { extra: { pending: [] } });
-    const drained = this.getPendingTurnRegistry().filter((t) => t !== `${sid}+${tid}`);
-    this.setPendingTurnRegistry(drained);
-
-    // Sort flushed tool records by time so the flusher sees them in order.
-    out.sort((a, b) => {
-      const ta = BigInt(a.time_unix_nano || '0');
-      const tb = BigInt(b.time_unix_nano || '0');
-      if (ta < tb) return -1;
-      if (ta > tb) return 1;
-      return 0;
-    });
-    return out;
+    if (cleared.size) this.setPendingTurnRegistry(registry.filter(turn => !cleared.has(turn)));
+    return this.sortEntries(out);
   }
 
-  /**
-   * Convert one rollout `model_io` line into multiple AgentActivityEntry records:
-   * STEP envelope + llm.request + llm.response + tool.call/result per toolCalls[].
-   *
-   * `nextRecord` is the next rollout line in the same file, used to pair
-   * tool.call → tool.result (from next line's request.messages[role=tool]) and
-   * to derive non-zero TOOL span duration (end = next line startedAt - 1ns).
-   *
-   * `options.skipToolCalls = true` skips tool.call/tool.result emission entirely
-   * — used by the batch caller when the line is the last of a batch and its
-   * toolCalls need to be buffered for cross-batch pairing.
-   *
-   * STEP↔LLM 1:1 attribution (iter 6 fix):
-   *   - `gen_ai.step.id` = `<turnId>:<requestId>` and `stepSpanId` =
-   *     `deriveSpanId('step', sessionId, turnId, requestId)`. `requestId` is
-   *     unique per LLM call within a turn in ZCode rollout data, so each LLM
-   *     call gets its own STEP without depending on a state-persisted counter.
-   *
-   * Public so tests can drive it directly with fixture lines.
-   */
-  buildEntriesFromRolloutLine(
-    record: Record<string, unknown>,
-    nextRecord?: Record<string, unknown>,
-    options: { skipToolCalls?: boolean } = {},
-  ): AgentActivityEntry[] {
+  /** Convert one native model invocation and emit any observed tool calls. */
+  buildEntriesFromRolloutLine(record: Record<string, unknown>): AgentActivityEntry[] {
     if (record.type !== 'model_io') return [];
 
     const sessionId = str(record.sessionId) ?? str(record.session_id);
@@ -647,8 +445,8 @@ export class ZCodeRolloutInput extends BaseInput {
     const responseModelId = str(response.modelId) ?? str(response.model_id) ?? modelId;
     const toolCallsRaw = Array.isArray(response.toolCalls) ? response.toolCalls : [];
     const toolCalls = (toolCallsRaw as unknown[])
-      .map((tc) => normalizeToolCall(tc))
-      .filter(Boolean) as { id: string; name: string; args: unknown }[];
+      .map(normalizeToolCall)
+      .filter((call): call is ToolCall => call !== null);
 
     const usage = (response.usage && typeof response.usage === 'object' ? response.usage : {}) as Record<string, unknown>;
     const inputTokens = num(usage.inputTokens) ?? num(usage.input_tokens);
@@ -784,6 +582,7 @@ export class ZCodeRolloutInput extends BaseInput {
       time_unix_nano: responseTimeNs,
       'event.id': crypto.randomUUID(),
       'event.name': 'llm.response',
+      'agent.zcode.rollout_completion_candidate': hasCompletedAt && finishReason !== 'tool_call' && toolCalls.length === 0,
       'gen_ai.session.id': sessionId,
       'gen_ai.turn.id': turnId,
       'gen_ai.step.id': stepId,
@@ -814,104 +613,10 @@ export class ZCodeRolloutInput extends BaseInput {
       parent_span_id: stepSpanId,
     }));
 
-    // tool.call + tool.result per response.toolCalls[].
-    //
-    // Rollout's `model_io` record carries toolCalls definitions on the
-    // response side, but tool results only appear in the NEXT line's
-    // request.messages[role=tool] (since the next LLM call's input includes
-    // the prior tool's output). We pair them here using `nextRecord`.
-    //
-    // TOOL span duration: rollout has no independent tool execution timestamp.
-    // We derive the tool execution window as [current LLM completedAt, next
-    // LLM startedAt). When there is no next line (last LLM in turn), fall back
-    // to a 1ms placeholder so the span is non-zero (validator rule
-    // time.non_zero_duration).
-    //
-    // When `options.skipToolCalls` is set, the caller is buffering toolCalls
-    // for cross-batch pairing — don't emit tool.call/result here. The batch
-    // caller (buildEntriesFromRolloutLines) handles emission via
-    // flushPendingToolCalls in the next batch.
-    if (options.skipToolCalls) {
-      return this.sortEntries(entries);
-    }
-
-    const toolResultsByCallId = collectToolResults(nextRecord);
-    const nextStartedAtNs = nextRecord
-      ? timestampToUnixNanos(str(nextRecord.startedAt) ?? str(nextRecord.started_at) ?? completedAt)
-      : undefined;
-    const oneNs = 1n;
-    const oneMsNs = 1_000_000n;
-    // tool.result time: pick a time strictly inside (responseTime, nextStartedAt)
-    // so that the tool span has non-zero duration AND its STEP does not overlap
-    // the next STEP (which starts at nextStartedAt). When there is no next line
-    // (EOF), fall back to responseTime + 1ms so the span is still non-zero.
-    // This fixes iter5 `time.non_zero_duration` (0ms TOOL) and
-    // `time.no_step_overlap` (STEP N end == STEP N+1 start) errors.
-    const toolResultTimeNs = nextStartedAtNs && BigInt(nextStartedAtNs) > BigInt(responseTimeNs) + oneNs
-      ? (BigInt(nextStartedAtNs) - oneNs).toString()
-      : (BigInt(responseTimeNs) + oneMsNs).toString();
-    for (const tc of toolCalls) {
-      const toolSpanId = deriveSpanId('tool', sessionId, turnId, requestId, tc.id);
-      entries.push(buildAgentActivityEntry({
-        time_unix_nano: responseTimeNs,
-        'event.id': crypto.randomUUID(),
-        'event.name': 'tool.call',
-        'gen_ai.session.id': sessionId,
-        'gen_ai.turn.id': turnId,
-        'gen_ai.step.id': stepId,
-        'gen_ai.agent.type': ClientType.ZCode,
-        'gen_ai.agent.id': sessionId,
-        'gen_ai.agent.name': 'ZCode',
-        'agent.source': 'zcode-rollout',
-        'gen_ai.provider.name': providerId,
-        'gen_ai.tool.name': tc.name,
-        'gen_ai.tool.call.id': tc.id,
-        'gen_ai.tool.call.exec.id': tc.id,
-        ...(tc.args !== undefined && tc.args !== null
-          ? { 'gen_ai.tool.call.arguments': tc.args as JsonValue }
-          : {}),
-        trace_id: traceId,
-        span_id: toolSpanId,
-        parent_span_id: stepSpanId,
-      }));
-
-      const result = toolResultsByCallId.get(tc.id);
-      if (result) {
-        // Real observed result only, canonical statuses (success | failure).
-        const isError = result.isError === true;
-        entries.push(buildAgentActivityEntry({
-          time_unix_nano: toolResultTimeNs,
-          'event.id': crypto.randomUUID(),
-          'event.name': 'tool.result',
-          'gen_ai.session.id': sessionId,
-          'gen_ai.turn.id': turnId,
-          'gen_ai.step.id': stepId,
-          'gen_ai.agent.type': ClientType.ZCode,
-          'gen_ai.agent.id': sessionId,
-          'gen_ai.agent.name': 'ZCode',
-          'agent.source': 'zcode-rollout',
-          'gen_ai.provider.name': providerId,
-          'gen_ai.tool.name': result.toolName ?? tc.name,
-          'gen_ai.tool.call.id': tc.id,
-          'gen_ai.tool.call.exec.id': tc.id,
-          ...(result.content !== undefined
-            ? { 'gen_ai.tool.call.result': result.content as JsonValue }
-            : {}),
-          'tool.result.status': isError ? 'failure' : 'success',
-          ...(isError && result.content
-            ? { 'error.type': 'ToolError', 'error.message': String(result.content).slice(0, 500) }
-            : {}),
-          trace_id: traceId,
-          span_id: toolSpanId,
-          parent_span_id: stepSpanId,
-        }));
-      }
-      // No else branch: unobserved results are NOT fabricated here. When the
-      // line is last-in-batch the caller buffers the toolCalls for cross-batch
-      // pairing; otherwise the flusher's orphan-tool synthesis covers the
-      // unpaired tool.call truthfully.
-    }
-
+    entries.push(...this.emitAndRememberToolCalls({
+      sid: sessionId, tid: turnId, traceId, requestId, stepId, stepSpanId, providerId,
+      completedAtNs: responseTimeNs,
+    }, toolCalls));
     return this.sortEntries(entries);
   }
 
@@ -963,7 +668,13 @@ function normalizeInputMessage(m: unknown): { role: string; content: string } | 
   return { role, content };
 }
 
-function normalizeToolCall(tc: unknown): { id: string; name: string; args: unknown } | null {
+interface ToolCall {
+  id: string;
+  name: string;
+  args: unknown;
+}
+
+function normalizeToolCall(tc: unknown): ToolCall | null {
   if (!tc || typeof tc !== 'object') return null;
   const r = tc as Record<string, unknown>;
   const id = str(r.id) ?? str(r.toolCallId) ?? str(r.tool_call_id);
@@ -985,17 +696,14 @@ interface PendingToolCall {
   tid: string;
   traceId: string;
   requestId?: string;
-  responseId?: string;
   stepId: string;
   stepSpanId: string;
-  stepParentSpanId: string;
   providerId: string;
-  modelId: string;
-  responseModelId: string;
   completedAtNs: string;
   callId: string;
   toolName: string;
-  args: unknown;
+  args?: unknown;
+  callEmitted?: boolean;
 }
 
 /**

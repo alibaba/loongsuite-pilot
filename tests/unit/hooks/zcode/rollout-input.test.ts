@@ -961,6 +961,34 @@ describe('ZCodeRolloutInput: iter6 state-loss regression', () => {
 // canonical finish_reason normalization (tool-calls → tool_call).
 
 describe('ZCodeRolloutInput: no-next-record drain (review fix #2)', () => {
+  test('recovers an unreported tool call from older state even without a new rollout line', async () => {
+    const file = path.join(tmpRoot, 'legacy-pending-state.json');
+    const state = new StateStore(file);
+    const sid = 'sess_legacy';
+    const tid = 'turn_legacy';
+    state.update('zcode-rollout:pending-turn-registry', { extra: { turns: [`${sid}+${tid}`] } });
+    state.update(`zcode-rollout:pending-tool-calls:${sid}+${tid}`, { extra: { pending: [{
+      sid, tid, traceId: 'a'.repeat(32), requestId: 'request-legacy',
+      completedAtNs: '1783929605000000000', stepId: 'legacy-step', stepSpanId: 'b'.repeat(16),
+      callId: 'legacy-call', toolName: 'Read', providerId: 'fixture', args: { path: 'fixture.txt' },
+    }] } });
+    await state.save();
+    const collect = async () => {
+      const restored = new StateStore(file);
+      await restored.load();
+      const input = new ZCodeRolloutInput({ stateStore: restored, rolloutDir });
+      const calls: AgentActivityEntry[] = [];
+      input.on('entries', entries => calls.push(...entries));
+      await input.start();
+      await input.stop();
+      return calls;
+    };
+    expect(await collect()).toEqual([expect.objectContaining({
+      'event.name': 'tool.call', 'gen_ai.tool.call.id': 'legacy-call',
+    })]);
+    expect(await collect()).toEqual([]);
+  });
+
   test('next batch on a different turn drains pending tool.calls WITHOUT fabricating tool.results', async () => {
     const sid = 'sess_drain_001';
     const turnA = 'turn_drain_a';
@@ -1111,9 +1139,10 @@ describe('ZCodeRolloutInput: cross-session drain isolation (review P1)', () => {
     },
   });
 
-  test("session A's batch does NOT drain session B's pending tool calls", async () => {
+  test('emits the EOF call and later pairs its result only within the same session', async () => {
     const sidB = 'sess_concurrent_b';
     const statePath = path.join(tmpRoot, 'cross-session-state.json');
+    let firstCall: any;
 
     // Session B ends a batch with an un-resulted toolCall → buffered pending.
     {
@@ -1129,7 +1158,10 @@ describe('ZCodeRolloutInput: cross-session drain isolation (review P1)', () => {
           startedAt: '2026-07-13T10:00:00.000Z', completedAt: '2026-07-13T10:00:05.000Z',
         }),
       ]);
-      expect(batch.filter((r: any) => r['event.name'] === 'tool.call')).toHaveLength(0);
+      const calls = batch.filter((r: any) => r['event.name'] === 'tool.call');
+      expect(calls).toHaveLength(1);
+      [firstCall] = calls;
+      expect(batch.some((r: any) => r['event.name'] === 'tool.result')).toBe(false);
       await ss.save();
     }
 
@@ -1143,12 +1175,13 @@ describe('ZCodeRolloutInput: cross-session drain isolation (review P1)', () => {
       };
       const batch = buildable.buildEntriesFromRolloutLines([
         mkLine('sess_concurrent_a', 'turn_a1', 'req-a1', {
+          toolMsgs: [{ role: 'tool', toolCallId: 'call_b_1', content: 'different session' }],
           startedAt: '2026-07-13T10:01:00.000Z', completedAt: '2026-07-13T10:01:03.000Z',
         }),
       ]);
       // No tool.call for B's buffered call leaked out of A's batch.
       expect(batch.filter(
-        (r: any) => r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'call_b_1',
+        (r: any) => r['gen_ai.tool.call.id'] === 'call_b_1',
       )).toHaveLength(0);
       await ss.save();
     }
@@ -1162,6 +1195,7 @@ describe('ZCodeRolloutInput: cross-session drain isolation (review P1)', () => {
         buildEntriesFromRolloutLines: (lines: Record<string, unknown>[]) => any[];
       };
       const batch = buildable.buildEntriesFromRolloutLines([
+        { type: 'session_update', sessionId: sidB },
         mkLine(sidB, 'turn_b2', 'req-b2', {
           toolMsgs: [{ role: 'tool', toolCallId: 'call_b_1', content: 'real result b' }],
           startedAt: '2026-07-13T10:02:00.000Z', completedAt: '2026-07-13T10:02:04.000Z',
@@ -1173,16 +1207,20 @@ describe('ZCodeRolloutInput: cross-session drain isolation (review P1)', () => {
       const result = batch.find(
         (r: any) => r['event.name'] === 'tool.result' && r['gen_ai.tool.call.id'] === 'call_b_1',
       );
-      expect(call).toBeDefined();
+      expect(call).toBeUndefined();
       expect(result).toBeDefined();
       expect(result['tool.result.status']).toBe('success');
+      expect(result['gen_ai.tool.call.result']).toBe('real result b');
+      expect(result.span_id).toBe(firstCall.span_id);
+      expect(result['gen_ai.turn.id']).toBe(firstCall['gen_ai.turn.id']);
       await ss.save();
     }
   });
 
-  test('same-session stale turn IS drained without fabricated results', async () => {
+  test('retains a call through an unrelated same-session model request', async () => {
     const sid = 'sess_same_session_drain';
     const statePath = path.join(tmpRoot, 'same-session-state.json');
+    let firstCall: any;
 
     // Turn 1 ends with an un-resulted toolCall.
     {
@@ -1192,16 +1230,18 @@ describe('ZCodeRolloutInput: cross-session drain isolation (review P1)', () => {
       const buildable = input as unknown as {
         buildEntriesFromRolloutLines: (lines: Record<string, unknown>[]) => any[];
       };
-      buildable.buildEntriesFromRolloutLines([
+      const batch = buildable.buildEntriesFromRolloutLines([
         mkLine(sid, 'turn_s1', 'req-s1', {
           toolCalls: [{ id: 'call_s_1', name: 'Bash', input: {} }],
           startedAt: '2026-07-13T11:00:00.000Z', completedAt: '2026-07-13T11:00:05.000Z',
         }),
       ]);
+      firstCall = batch.find(r => r['event.name'] === 'tool.call');
+      expect(firstCall).toBeDefined();
       await ss.save();
     }
 
-    // Same session, NEW turn, no role=tool message → turn_s1 drained truthfully.
+    // Same session with a new turn and no observed result.
     {
       const ss = new StateStore(statePath);
       await ss.load();
@@ -1217,11 +1257,25 @@ describe('ZCodeRolloutInput: cross-session drain isolation (review P1)', () => {
       const drainedCall = batch.find(
         (r: any) => r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'call_s_1',
       );
-      expect(drainedCall).toBeDefined();
+      expect(drainedCall).toBeUndefined();
       expect(batch.find(
         (r: any) => r['event.name'] === 'tool.result' && r['gen_ai.tool.call.id'] === 'call_s_1',
       )).toBeUndefined();
       await ss.save();
     }
+
+    const restarted = new StateStore(statePath);
+    await restarted.load();
+    const later = new ZCodeRolloutInput({ stateStore: restarted, rolloutDir }).buildEntriesFromRolloutLines([
+      mkLine(sid, 'turn_s2', 'req-s3', {
+        toolMsgs: [{ role: 'tool', toolCallId: 'call_s_1', content: 'delayed result' }],
+        startedAt: '2026-07-13T11:02:00.000Z', completedAt: '2026-07-13T11:02:03.000Z',
+      }),
+    ]);
+    expect(later.find(r => r['event.name'] === 'tool.result')).toMatchObject({
+      span_id: firstCall.span_id,
+      'gen_ai.turn.id': 'turn_s1',
+      'gen_ai.tool.call.result': 'delayed result',
+    });
   });
 });

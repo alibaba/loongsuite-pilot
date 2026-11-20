@@ -76,6 +76,7 @@ describe('buildEnvelopeRecords', () => {
     // ENTRY envelope
     expect(entry['event.name']).toBe('other');
     expect(entry['gen_ai.session.id']).toBe(stdinPayload.session_id);
+    expect(entry['gen_ai.turn.id']).toBe(stdinPayload.turnId);
     expect(entry['gen_ai.agent.type']).toBe('zcode');
     expect(entry['gen_ai.span.kind']).toBe('entry');
     expect(entry.span_id).toBeDefined();
@@ -164,7 +165,7 @@ describe('readLastRolloutRecord + resolveNativeIds via rollout transcript', () =
     };
     const olderRecord = { ...lastRecord, turnId: 'turn_older', requestId: 'r0' };
     fs.writeFileSync(
-      path.join(rolloutDir, `model-io-sess_${sessionId}.jsonl`),
+      path.join(rolloutDir, `model-io-${sessionId}.jsonl`),
       `${JSON.stringify(olderRecord)}\n${JSON.stringify({ ...lastRecord, requestId: 'r1' })}\n`,
     );
 
@@ -174,8 +175,47 @@ describe('readLastRolloutRecord + resolveNativeIds via rollout transcript', () =
       expect(rec.type).toBe('model_io');
       expect(rec.turnId).toBe('turn_from_rollout');
       expect(rec.traceId).toBe('11111111-2222-3333-4444-555555555555');
+      fs.appendFileSync(path.join(rolloutDir, `model-io-${sessionId}.jsonl`),
+        JSON.stringify({ ...lastRecord, sessionId: 'sess_different' }) + '\n');
+      expect(readLastRolloutRecord(sessionId, tmpHome)).toBeNull();
     } finally {
       fs.rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ['turn-current', true],
+    ['turn-prior', false],
+    [undefined, false],
+  ])('Stop with turn %s uses the latest rollout only when identity agrees', (turnId, matches) => {
+    const home = fs.mkdtempSync(path.join(tmpdir(), 'zcode-stop-identity-'));
+    const data = path.join(home, 'pilot');
+    const rolloutDir = path.join(home, '.zcode', 'cli', 'rollout');
+    const sessionId = 'sess_own';
+    const nativeTrace = '11111111-2222-3333-4444-555555555555';
+    const timestamp = '2026-07-13T02:39:27.000Z';
+    const processor = path.resolve(__dirname, '../../../../assets/hooks/zcode-hook-processor.mjs');
+    try {
+      fs.mkdirSync(rolloutDir, { recursive: true });
+      fs.writeFileSync(path.join(rolloutDir, `model-io-${sessionId}.jsonl`), JSON.stringify({
+        type: 'model_io', sessionId, turnId: 'turn-current', traceId: nativeTrace, completedAt: timestamp,
+      }) + '\n');
+      const input = JSON.stringify({ hook_event_name: 'Stop', session_id: sessionId, turnId, timestamp,
+        stop_hook_active: false, last_assistant_message: 'text alone does not identify a turn' });
+      const child = spawnSync(process.execPath, [processor, 'stop'], {
+        input, env: { ...process.env, HOME: home, USERPROFILE: home, LOONGSUITE_PILOT_DATA_DIR: data },
+        encoding: 'utf8', timeout: 5_000,
+      });
+      expect(child.status, child.stderr).toBe(0);
+      expect(child.stdout.trim()).toBe('{}');
+      const logs = path.join(data, 'logs', 'zcode');
+      const output = fs.readFileSync(path.join(logs, fs.readdirSync(logs).find(name => name.endsWith('.jsonl'))), 'utf8');
+      const entries = output.trim().split('\n').map(JSON.parse);
+      expect(entries).toHaveLength(2);
+      expect(entries.every(entry => entry.trace_id === toW3CTraceId(nativeTrace))).toBe(matches);
+      expect(entries.every(entry => entry['gen_ai.turn.id'] === 'turn-current')).toBe(matches);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 });

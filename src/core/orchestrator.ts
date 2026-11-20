@@ -2008,8 +2008,8 @@ export class Orchestrator extends EventEmitter {
     // llm.request + llm.response (with gen_ai.input/output.messages) +
     // tool.call per response.toolCalls[] + STEP envelope. Baseline skip
     // on first install: per-file byteOffset initialized to EOF so pilot
-    // doesn't replay history (spec §1.4). turnIdleTimeoutMs in the OTLP
-    // flusher handles the "hook didn't fire" fallback (spec §1.2).
+    // doesn't replay history (spec §1.4). The OTLP flusher gives the Hook
+    // time to arrive and settles an observed model completion without it.
     const zcodeRolloutInput = new ZCodeRolloutInput({
       stateStore: this.stateStore,
     });

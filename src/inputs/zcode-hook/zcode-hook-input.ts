@@ -39,9 +39,34 @@ export class ZCodeHookInput extends BaseHookInput {
     return [resolveHome('~/.loongsuite-pilot/logs/zcode')];
   }
 
+  protected override async collect(): Promise<AgentActivityEntry[]> {
+    const records = await super.collect();
+    // Older envelopes omitted the ENTRY's turn ID. Recover it only from an
+    // unambiguous AGENT pair read in this same batch, with all native IDs.
+    const byParent = new Map<string, string | null>();
+    const key = (record: AgentActivityEntry, entryId: unknown) => JSON.stringify([
+      record['gen_ai.session.id'], record.trace_id, entryId,
+    ]);
+    for (const record of records) {
+      const turnId = record['gen_ai.turn.id'];
+      if (record['gen_ai.span.kind'] !== 'agent' || typeof turnId !== 'string' || !turnId
+          || !record.parent_span_id || !record.trace_id || !record['gen_ai.session.id']) continue;
+      const parent = key(record, record.parent_span_id);
+      byParent.set(parent, !byParent.has(parent) || byParent.get(parent) === turnId ? turnId : null);
+    }
+    for (const record of records) {
+      if (record['gen_ai.span.kind'] !== 'entry' || record['gen_ai.turn.id'] || !record.span_id) continue;
+      const turnId = byParent.get(key(record, record.span_id));
+      if (turnId) record['gen_ai.turn.id'] = turnId;
+    }
+    return records;
+  }
+
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    return transformHookRecord(record, ClientType.ZCode, 'zcode');
+    // The raw envelope's user is a Pilot fallback, never a native ZCode
+    // identity. Resolve it at the same collector boundary as native rollout.
+    return transformHookRecord({ ...record, 'user.id': '' }, ClientType.ZCode, 'zcode');
   }
 }

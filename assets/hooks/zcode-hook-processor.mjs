@@ -22,21 +22,10 @@
  *     gen_ai.turn.id; AGENT span_id and STEP parent_span_id derived from
  *     the SAME shared deriveSpanId() so they match deterministically.
  *
- * Cross-source correlation (review fix):
- *   - ZCode's documented Stop payload guarantees common fields plus
- *     stop_hook_active/last_assistant_message — NOT turnId/traceId/timestamp.
- *   - Native-ID resolution order: stdin → rollout transcript's last
- *     model_io record (authoritative) → derived/random last resort.
- *     See resolveNativeIds() + readLastRolloutRecord().
- *   - Envelopes carry NO terminal finish_reason so a hook-first arrival
- *     cannot flush the turn and drop later rollout records; the rollout's
- *     last llm.response is the terminal signal (turnIdleTimeoutMs fallback).
- *
- * Per spec.md §1.2 fallback: if Stop hook does NOT fire (zcode crash / kill /
- * session timeout), the OTLP flusher synthesizes ENTRY/AGENT envelopes via
- * turnIdleTimeoutMs. This hook-processor does not implement that fallback
- * directly — it lives in the pilot daemon's flusher config. The hook-processor
- * just emits envelopes when Stop DOES fire.
+ * The documented Stop fields may lack native turn and trace identity. A full
+ * native pair can stitch directly, and a supplied turn can be corroborated by
+ * the exact session's rollout file. Otherwise emit a standalone observation.
+ * The flusher settles both independent inputs after a quiet polling window.
  *
  * Fail-open contract: any error → stdout "{}" + exit 0, never blocks zcode.
  */
@@ -106,36 +95,22 @@ function isoToUnixNanos(isoStr) {
  *
  * The rollout transcript (~/.zcode/cli/rollout/model-io-sess_<sid>.jsonl) is
  * the authoritative source for native turnId/traceId — ZCode's documented Stop
- * stdin payload only guarantees common fields + stop_hook_active +
- * last_assistant_message, NOT turnId/traceId/timestamp. Deriving envelope IDs
- * from the rollout's last record guarantees the hook ENTRY/AGENT envelopes
- * correlate with the rollout STEP/LLM records under the same native IDs.
+ * stdin payload may omit turnId, traceId, and timestamp. Only a row from
+ * this exact session is eligible to corroborate an explicit native turn.
  *
  * Returns null when the file is missing or holds no complete line (fail-open).
  *
- * Known race (accepted): if a NEW turn starts between the last rollout write
- * and this Stop hook firing, the envelope attaches to the newest turn rather
- * than the one being stopped. Rollout writes happen before runStopHooks in
- * practice, so the window is one sub-second interleaving; the damage is a
- * mis-parented envelope, not data loss.
  */
 export function readLastRolloutRecord(sessionId, homeDirOverride) {
   try {
+    if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) return null;
     const home = homeDirOverride || os.homedir();
     const rolloutDir = path.join(home, '.zcode', 'cli', 'rollout');
-    const prefix = `model-io-sess_${sessionId}`;
-    let names;
-    try {
-      names = fs.readdirSync(rolloutDir);
-    } catch {
-      return null;
-    }
-    // Exact match first; fall back to sanitized variants (session ids are
-    // filesystem-safe `sess_<uuid>` in practice, so exact hit is the norm).
-    const fileName = names.find((n) => n === `${prefix}.jsonl`)
-      ?? names.find((n) => n.startsWith(prefix) && n.endsWith('.jsonl'));
-    if (!fileName) return null;
-    const filePath = path.join(rolloutDir, fileName);
+    const candidates = [`model-io-sess_${sessionId}.jsonl`];
+    if (sessionId.startsWith('sess_')) candidates.push(`model-io-${sessionId}.jsonl`);
+    const matches = candidates.map(name => path.join(rolloutDir, name)).filter(file => fs.existsSync(file));
+    if (matches.length !== 1) return null;
+    const [filePath] = matches;
 
     // Read the tail of the file (last 256KB is plenty for one record).
     const stat = fs.statSync(filePath);
@@ -152,7 +127,9 @@ export function readLastRolloutRecord(sessionId, homeDirOverride) {
       for (let i = lines.length - 1; i >= 0; i--) {
         try {
           const rec = JSON.parse(lines[i]);
-          if (rec && rec.type === 'model_io') return rec;
+          if (rec?.type === 'model_io') {
+            return getString(rec, 'sessionId', 'session_id') === sessionId ? rec : null;
+          }
         } catch { /* skip invalid line */ }
       }
       return null;
@@ -166,32 +143,34 @@ export function readLastRolloutRecord(sessionId, homeDirOverride) {
 
 /**
  * Resolve native turnId/traceId/timestamp for the Stop envelope.
- * Order of authority: stdin payload first, then the rollout transcript's
- * last model_io record. Only fall back to derived/random values when BOTH
- * sources lack the id (envelope still emitted, just not stitchable).
+ * Trust the observed full pair, or use the latest matching session/turn row
+ * to fill in a missing trace. A Stop with no turn may belong to a previous
+ * turn even when the same session already has a newer model observation.
  */
 function resolveNativeIds(event, sessionId, stdinTimestamp) {
   const stdinTurnId = getString(event, 'turn_id', 'turnId');
-  const stdinTraceId = getString(event, 'trace_id', 'traceId');
+  const rawTraceId = getString(event, 'trace_id', 'traceId');
+  const stdinTraceId = toW3CTraceId(rawTraceId);
+  const validTrace = id => /^[0-9a-f]{32}$/.test(id) && !/^0+$/.test(id);
 
-  if (stdinTurnId && stdinTraceId) {
+  if (stdinTurnId && validTrace(stdinTraceId)) {
     return {
       turnId: stdinTurnId,
-      traceId: toW3CTraceId(stdinTraceId),
+      traceId: stdinTraceId,
       timestamp: stdinTimestamp,
       idsSource: 'stdin',
     };
   }
 
-  const lastRecord = readLastRolloutRecord(sessionId);
+  const lastRecord = stdinTurnId && !rawTraceId ? readLastRolloutRecord(sessionId) : null;
   if (lastRecord) {
-    const rolloutTurnId = getString(lastRecord, 'turnId', 'turn_id') || stdinTurnId;
-    const rolloutTraceId = getString(lastRecord, 'traceId', 'trace_id') || stdinTraceId;
+    const rolloutTurnId = getString(lastRecord, 'turnId', 'turn_id');
+    const rolloutTraceId = toW3CTraceId(getString(lastRecord, 'traceId', 'trace_id'));
     const rolloutCompletedAt = getString(lastRecord, 'completedAt', 'completed_at');
-    if (rolloutTurnId && rolloutTraceId) {
+    if (rolloutTurnId === stdinTurnId && validTrace(rolloutTraceId)) {
       return {
         turnId: rolloutTurnId,
-        traceId: toW3CTraceId(rolloutTraceId),
+        traceId: rolloutTraceId,
         // Prefer the rollout's completedAt: it is the native end-of-turn time
         // and stays stable across Stop re-fires (idempotency).
         timestamp: rolloutCompletedAt || stdinTimestamp,
@@ -200,15 +179,11 @@ function resolveNativeIds(event, sessionId, stdinTimestamp) {
     }
   }
 
-  // Last resort: derived turnId (stable per event timestamp) + fresh 32-hex
-  // trace id. Envelope is emitted but cannot stitch to rollout STEPs — the
-  // rollout input remains the authoritative data/terminal source anyway.
+  // Keep the Stop envelope available as independent observation. Do not
+  // attach it to an unconfirmed native turn or reuse a partial native ID.
   return {
-    turnId: stdinTurnId
-      || deriveSpanId('turn-fallback', sessionId, stdinTimestamp),
-    traceId: stdinTraceId
-      ? toW3CTraceId(stdinTraceId)
-      : toW3CTraceId(generateTraceId()),
+    turnId: deriveSpanId('turn-fallback', sessionId, stdinTimestamp, stdinTurnId),
+    traceId: toW3CTraceId(generateTraceId()),
     timestamp: stdinTimestamp,
     idsSource: 'derived',
   };
@@ -231,17 +206,16 @@ async function cmdStop() {
   // timestamp from stdin for determinism (fallback: now).
   const stdinTimestamp = getString(event, 'timestamp') || new Date().toISOString();
 
-  // Native-ID resolution (review fix): stdin first, then the rollout
-  // transcript's last model_io record (authoritative native source), then
-  // derived/random last resort. See resolveNativeIds.
-  const { turnId, traceId, timestamp } = resolveNativeIds(event, sessionId, stdinTimestamp);
+  // Do not link an unverified Stop to a rollout turn.
+  const { turnId, traceId, timestamp, idsSource } = resolveNativeIds(event, sessionId, stdinTimestamp);
 
   const cwd = getString(event, 'cwd');
 
   // Idempotency: if Stop fires twice for the same turn (zcode may do this on
   // retries), don't emit duplicate envelopes. State.last_exported_turn guard.
   const state = loadState(sessionId);
-  if (turnId && state.last_exported_turn === turnId) {
+  if (state.last_exported_turn === turnId
+      && (idsSource === 'derived' || !state.last_exported_trace || state.last_exported_trace === traceId)) {
     return;
   }
 
@@ -258,6 +232,7 @@ async function cmdStop() {
   // catch swallows it, and a pre-saved marker would silently dedup zcode's
   // Stop retry — the envelope would never be emitted.
   state.last_exported_turn = turnId || state.last_exported_turn;
+  state.last_exported_trace = traceId;
   state.cwd = cwd || state.cwd;
   state.stop_time = Date.now() / 1000;
   saveState(sessionId, state);
@@ -299,6 +274,7 @@ export function buildEnvelopeRecords({ sessionId, turnId, traceId, timestamp, us
   const baseFields = {
     trace_id: w3cTraceId,
     'gen_ai.session.id': sessionId,
+    'gen_ai.turn.id': turnId,
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
     'gen_ai.agent.name': 'ZCode',
@@ -307,10 +283,7 @@ export function buildEnvelopeRecords({ sessionId, turnId, traceId, timestamp, us
   };
 
   // ENTRY envelope — marks session start boundary. Carries NO terminal
-  // finish_reason: per review, the rollout transcript is the authoritative
-  // terminal source. A terminal finish_reason on the hook envelope would
-  // flush the turn immediately and drop rollout records that arrive later
-  // from the independent input.
+  // finish_reason because a Stop hook may still be vetoed or continued.
   records.push({
     time_unix_nano: ts,
     'event.id': crypto.randomUUID(),
@@ -325,14 +298,11 @@ export function buildEnvelopeRecords({ sessionId, turnId, traceId, timestamp, us
   // Always emitted (turnId is now guaranteed by cmdStop's native-ID
   // resolution). agent.source identifies the hook path so the flusher can
   // distinguish hook-originated envelopes from rollout-originated ones.
-  // NO terminal finish_reason here either — rollout's last llm.response
-  // provides the terminal signal; turnIdleTimeoutMs is the fallback.
   records.push({
     time_unix_nano: ts,
     'event.id': crypto.randomUUID(),
     'event.name': 'other',
     ...baseFields,
-    'gen_ai.turn.id': turnId,
     'agent.source': 'zcode-hook',
     span_id: agentSpanId,
     parent_span_id: entrySpanId,
