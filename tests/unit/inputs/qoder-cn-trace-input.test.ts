@@ -51,6 +51,26 @@ afterEach(async () => {
 });
 
 describe.skipIf(!hasNodeSqlite())('QoderCnTraceInput.collect (session-level enrich)', () => {
+  it('bounds session anchors collected from hook records under sustained session churn', async () => {
+    const anchors = Array.from({ length: 502 }, (_, index) => ({
+      ...buildEntry({ event: 'llm.request', turn: `turn-${index}`, step: `turn-${index}:s1`,
+        session: `session-${index}`, ts: 1_780_000_000_000 + index }),
+      'event.name': 'other',
+      'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'fixture' }] }],
+    }));
+    await writeHookJsonl(logDir, anchors);
+    const input = new QoderCnTraceInput({ stateStore: stateStore as never, logDir });
+    await input.start();
+    try {
+      const { sessionAnchor } = input as unknown as { sessionAnchor: ReadonlyMap<string, unknown> };
+      expect(sessionAnchor.size).toBe(500);
+      expect(sessionAnchor.has('session-0')).toBe(false);
+      expect(sessionAnchor.has('session-501')).toBe(true);
+    } finally {
+      await input.stop();
+    }
+  });
+
   it('baselines existing incremental history when the input checkpoint is missing', async () => {
     const oldEntries = [
       buildEntry({ event: 'llm.response', turn: 'historical-turn-1', step: 'historical-turn-1:s1', session: '', ts: 1_780_000_000_000 }),
