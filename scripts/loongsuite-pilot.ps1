@@ -14,7 +14,8 @@
 
 $CliArgs = @($args)
 $Command = if ($CliArgs.Count -ge 1) { [string]$CliArgs[0] } else { "status" }
-$SubArgs = if ($CliArgs.Count -ge 2) { [string[]]$CliArgs[1..($CliArgs.Count - 1)] } else { @() }
+# Keep single subarguments as arrays when splatting to native commands.
+[string[]]$SubArgs = if ($CliArgs.Count -ge 2) { $CliArgs[1..($CliArgs.Count - 1)] } else { @() }
 $ErrorActionPreference = "Stop"
 
 # ============================================================
