@@ -2345,16 +2345,22 @@ impl HookStrategy {
         }) {
             return None;
         }
-        let data_dir = if relative == Path::new(".") {
-            root.clone()
-        } else {
-            root.join(relative)
-        };
         let event = legacy.hook_json_path.last()?;
-        let channel = if self.is_interceptor_definition(def, &legacy) {
-            "local"
+        let interception = self.is_interceptor_definition(def, &legacy);
+        let (data_dir, channel) = if interception {
+            (
+                root.join(format!("state/standalone-{}-interceptor-sdk", def.id)),
+                "local",
+            )
         } else {
-            "observe"
+            (
+                if relative == Path::new(".") {
+                    root.clone()
+                } else {
+                    root.join(relative)
+                },
+                "observe",
+            )
         };
         let command = sdk_hook_command(binary, &data_dir, &def.id, event, channel)?;
         let old = std::mem::replace(&mut legacy.hook_command, command);
