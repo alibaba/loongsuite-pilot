@@ -58,6 +58,7 @@ interface QueuedLog {
   endpoint: SlsEndpoint;
   agentType?: string;
   byteSize: number;
+  failedProbe?: boolean;
 }
 
 interface QueuedBatch {
@@ -330,6 +331,7 @@ export class SlsFlusher extends BaseFlusher {
         // buckets a chance to probe. A single invalid record can fail even
         // after the endpoint recovers.
         const pending = this.queue.get(key) ?? [];
+        logs[0].failedProbe = true;
         this.queue.delete(key);
         pending.push(...logs);
         this.queue.set(key, pending);
@@ -358,13 +360,22 @@ export class SlsFlusher extends BaseFlusher {
     // splits on its wire limits and computes the accounted request sizes.
     const maxEntries = endpoint.mode === 'webtracking' ? logs.length
       : Math.max(1, Math.floor(this.config.batchMaxSize || BATCH_MAX_SIZE));
-    for (let start = 0; start < logs.length; start += maxEntries) {
-      const chunk = start === 0 && maxEntries >= logs.length ? logs : logs.slice(start, start + maxEntries);
+    let start = 0;
+    while (start < logs.length) {
+      // A previously rejected probe must not cause a healthy batch to fail
+      // when ordinary delivery resumes or forces the queue to drain.
+      let end = start + 1;
+      if (!logs[start].failedProbe) {
+        const limit = Math.min(start + maxEntries, logs.length);
+        while (end < limit && !logs[end].failedProbe) end++;
+      }
+      const chunk = start === 0 && end === logs.length ? logs : logs.slice(start, end);
       try {
         addOutcome(total, await this.flushEndpoint(endpoint, chunk));
       } catch (err) {
         addOutcome(total, await this.recordFailedBatch(endpoint, chunk, err, 1));
       }
+      start = end;
     }
     return total;
   }

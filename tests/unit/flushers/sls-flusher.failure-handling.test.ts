@@ -175,9 +175,43 @@ describe('SLS final failure handling', () => {
     expect(counter).toMatchObject({ outEntries: 1, outFailed: 3 });
 
     // Recovery releases the retained records to the ordinary failure path.
+    const beforeDrain = fetchMock.mock.calls.length;
     await flusher.flush();
-    expect(sentIds(fetchMock.mock.calls.at(-1)![1]).sort()).toEqual(['invalid-first', 'invalid-second']);
+    const drainRequests = fetchMock.mock.calls.slice(beforeDrain).map(([, options]) => sentIds(options));
+    expect(drainRequests.flat().sort()).toEqual(['invalid-first', 'invalid-second']);
     expect(counter).toMatchObject({ outEntries: 1, outFailed: 5 });
+  });
+
+  it.each(['recovery', 'queue pressure', 'shutdown'])('isolates a failed probe from healthy records during %s', async drain => {
+    const { flusher, counter } = makeFlusher();
+    fetchMock.mockImplementation(async () => error(403, 'ProjectForbidden'));
+    for (let i = 0; i < 3; i++) {
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+    }
+    fetchMock.mockImplementation(async (_, options) => sentIds(options).includes('invalid-probe')
+      ? error(400, 'InvalidParameter')
+      : success());
+    await flusher.send(buildTestEntry({ 'event.id': 'invalid-probe' }));
+    const healthyIds = Array.from({ length: drain === 'queue pressure' ? 499 : 2 }, (_, index) => `healthy-${index}`);
+    for (const id of healthyIds.slice(0, 2)) await flusher.send(buildTestEntry({ 'event.id': id }));
+    vi.setSystemTime(2_000);
+    await flusher.flush();
+    expect(fetchMock.mock.calls.slice(3).map(([, options]) => sentIds(options))).toEqual([['invalid-probe']]);
+    expect(counter).toMatchObject({ outEntries: 0, outFailed: 3 });
+
+    for (const id of healthyIds.slice(2)) await flusher.send(buildTestEntry({ 'event.id': id }));
+    if (drain === 'recovery') {
+      vi.setSystemTime(6_000);
+      await flusher.flush(); // Reachability is restored by the next healthy probe.
+    }
+    if (drain === 'shutdown') await flusher.shutdown();
+    else await flusher.flush();
+
+    const requests = fetchMock.mock.calls.slice(4).map(([, options]) => sentIds(options));
+    expect(requests.filter(ids => ids.includes('invalid-probe'))).toEqual([['invalid-probe']]);
+    expect(requests.filter(ids => !ids.includes('invalid-probe')).flat()).toEqual(healthyIds);
+    expect(counter).toMatchObject({ outEntries: healthyIds.length, outFailed: 4 });
   });
 
   it('does not let a local oversized record hide consecutive terminal failures on the wire', async () => {
