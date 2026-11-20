@@ -177,30 +177,35 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     await collector.stop();
   }, 20_000);
 
-  it('preserves the fixed builtin identity and empty version for every type and hook through HTTP, IPC, JSONL and restart', async () => {
-    const dataDir = join(root, 'builtin-identity');
+  it('preserves a configured credential rule identity through HTTP, IPC, JSONL and restart', async () => {
+    const dataDir = join(root, 'managed-credential-identity');
     await writeRules(dataDir);
-    let collector = new Collector(dataDir);
-    const { port } = await collector.waitFor('ready');
     const samples = [
       ['cloudAccessKey', 'LTAI' + '1234567890ABCD'],
       ['apiKey', 'ghp_' + '1234567890abcdefghijklmnop'],
       ['privateKey', '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU=\n-----END OPENSSH PRIVATE KEY-----'],
       ['databaseUrl', 'mysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot'],
     ];
+    await writeFile(join(dataDir, 'configs', 'managed', 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
+      kind: 'pattern', id: 'credential-policy', version: '2', agents: ['qoder'],
+      events: ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'],
+      match: 'regex', pattern: 'LTAI|ghp_|BEGIN OPENSSH PRIVATE KEY|mysql://',
+    }] } }));
+    let collector = new Collector(dataDir);
+    const { port } = await collector.waitFor('ready');
     const keys: Array<{ sessionId: string; toolUseId: string; phase: string }> = [];
     for (const [type, sample] of samples) {
       for (const phase of ['UserPromptSubmit', 'PreToolUse', 'PostToolUse']) {
-        const key = { sessionId: `builtin-${type}`, toolUseId: `tool-${type}`, phase };
+        const key = { sessionId: `credential-${type}`, toolUseId: `tool-${type}`, phase };
         const business = phase === 'UserPromptSubmit' ? { prompt: sample }
           : phase === 'PreToolUse' ? { toolInput: { text: sample } } : { toolResponse: { stdout: sample } };
         expect(await evaluate(port!, { ...key, agent: 'qoder', event: phase, ...business, raw: {} }))
-          .toMatchObject({ action: 'block', ruleId: 'builtin', ruleVersion: '', evaluatedRules: expect.arrayContaining([type]) });
+          .toMatchObject({ action: 'block', ruleId: 'credential-policy', ruleVersion: '2', evaluatedRules: ['credential-policy'] });
         if (phase !== 'UserPromptSubmit') {
           keys.push(key);
           const linked = await collector.waitFor('linked', collector.send('linked', { key }));
           expect(linked.entry).toMatchObject({ 'gen_ai.guardrail.action': 'block',
-            'gen_ai.guardrail.rule_id': 'builtin', 'gen_ai.guardrail.rule_version': '' });
+            'gen_ai.guardrail.rule_id': 'credential-policy', 'gen_ai.guardrail.rule_version': '2' });
         }
       }
     }
@@ -208,13 +213,13 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     const prompts = await readOutput(dataDir);
     expect(prompts).toHaveLength(4);
     for (const prompt of prompts) expect(prompt).toMatchObject({ 'event.name': 'llm.request',
-      'gen_ai.guardrail.rule_id': 'builtin', 'gen_ai.guardrail.rule_version': '' });
+      'gen_ai.guardrail.rule_id': 'credential-policy', 'gen_ai.guardrail.rule_version': '2' });
     await collector.stop();
     collector = new Collector(dataDir);
     await collector.waitFor('ready');
     for (const key of keys) {
       expect((await collector.waitFor('linked', collector.send('linked', { key }))).entry)
-        .toMatchObject({ 'gen_ai.guardrail.rule_id': 'builtin', 'gen_ai.guardrail.rule_version': '' });
+        .toMatchObject({ 'gen_ai.guardrail.rule_id': 'credential-policy', 'gen_ai.guardrail.rule_version': '2' });
     }
     await collector.stop();
   }, 20_000);

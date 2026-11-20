@@ -170,8 +170,8 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.guardrail.triggered` | boolean | With a linked verdict | Always `true` when a verdict exists; this does not mean a rule matched. Omitted without a matching, unexpired verdict or when interception is disabled. |
 | `gen_ai.guardrail.action` | string | With a verdict | `block` for enforced blocks, `log` for log hits that allow execution, and `allow` for other known verdicts. Tool calls link to PreToolUse and results to PostToolUse. Allowed prompts link to the first native request of the turn without adding a request event; denied Qoder prompts are supplemented as blocked requests. Omitted when no verdict can be uniquely associated. |
 | `gen_ai.guardrail.fail_open` | boolean | On check errors | `true` when checking failed or was incomplete. It can coexist with a known log match. |
-| `gen_ai.guardrail.rule_id` | string | For known matches | The final block rule or first log hit. Builtin matches use the fixed value `builtin`. |
-| `gen_ai.guardrail.rule_version` | string | For rule hits | The configured rule version; builtin matches explicitly use the empty string `""`. |
+| `gen_ai.guardrail.rule_id` | string | For known matches | The configured ID of the final block rule or first log hit. |
+| `gen_ai.guardrail.rule_version` | string | For rule hits | The configured rule version. |
 | `gen_ai.skill.name` | string | Conditionally Required for `skill.use` | Skill or extension capability name. |
 | `gen_ai.skill.id` | string | Recommended when skill identity is available | Stable skill identifier. |
 | `gen_ai.skill.description` | string | Recommended when skill metadata is available | Human-readable skill description. |

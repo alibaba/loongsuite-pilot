@@ -39,21 +39,7 @@ export interface HookRequest {
   raw: Record<string, unknown>;
 }
 
-export interface LocalRule {
-  /** Internal id used for type-based enablement and evaluation diagnostics. */
-  readonly id: string;
-  /** Stable public identity, when different from the internal type id. */
-  readonly ruleId?: string;
-  readonly version?: string;
-  supports(request: HookRequest): boolean;
-  evaluate(request: HookRequest): Promise<RuleResult>;
-}
-
-export type RuleResult =
-  | { matched: false }
-  | { matched: true; reason: string };
-
-export type { InterceptorConfig, InterceptorType } from '../types/index.js';
+export type { InterceptorConfig } from '../types/index.js';
 
 export interface EvaluateHookResponse {
   action: VerdictAction;
@@ -61,10 +47,10 @@ export interface EvaluateHookResponse {
   matched?: boolean;
   /** Managed hits, including audits before a later enforced block or evaluation error. */
   matches?: ManagedRuleMatch[];
-  /** Script stdout reason or builtin token. Telemetry uses this, not `message`. */
+  /** Managed rule reason. Telemetry uses this, not `message`. */
   reason?: string;
   ruleId?: string;
-  /** Managed `rules[].version`; an empty string for builtin rules. */
+  /** Managed `rules[].version`. */
   ruleVersion?: string;
   /** Optional risk label from managed `rules[].severity`. */
   severity?: string;

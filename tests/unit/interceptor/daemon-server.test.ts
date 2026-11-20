@@ -1,12 +1,29 @@
 import { describe, expect, it } from 'vitest';
 import { createInterceptorServer } from '../../../src/interceptor/daemon/server.js';
-import { RuleEngine } from '../../../src/interceptor/rules/engine.js';
 import type { InterceptorAccessLogEntry } from '../../../src/interceptor/access-log.js';
 import { wrapHostReason } from '../../../src/interceptor/adapters/reason.js';
-import { INTERCEPTOR_SERVICE, type HookRequest, type LocalRule, type EvaluateHookResponse } from '../../../src/interceptor/types.js';
+import { INTERCEPTOR_SERVICE, type HookRequest, type HookEvaluator, type EvaluateHookResponse } from '../../../src/interceptor/types.js';
 import { ToolVerdictStore, type ToolVerdictKey, type ToolVerdictSnapshot, type PromptVerdictKey, type PromptVerdictSnapshot } from '../../../src/interceptor/tool-verdict-store.js';
 import { promptHash, promptRequestId } from '../../../src/interceptor/prompt-verdict.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
+
+type StubRule = { id: string; evaluate(request: HookRequest): Promise<{ matched: boolean; reason?: string }> };
+
+/** Isolate HTTP behavior from the rule runners. */
+function stubEvaluator(rule: StubRule): HookEvaluator {
+  return {
+    async evaluate(request) {
+      try {
+        const result = await rule.evaluate(request);
+        return result.matched
+          ? { action: 'block', ruleId: rule.id, reason: result.reason, evaluatedRules: [rule.id] }
+          : { action: 'allow', evaluatedRules: [rule.id] };
+      } catch {
+        return { action: 'allow', failOpen: true, evaluatedRules: [rule.id] };
+      }
+    },
+  };
+}
 
 function listen(server: import('node:http').Server): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -139,9 +156,8 @@ describe('interceptor daemon HTTP API', () => {
   });
 
   it('serves health and writes access logs for allow and block', async () => {
-    const rule: LocalRule = {
+    const rule: StubRule = {
       id: 'demo',
-      supports: () => true,
       evaluate: async (request) => (
         request.prompt === 'secret'
           || (request.toolInput && typeof request.toolInput === 'object'
@@ -155,7 +171,7 @@ describe('interceptor daemon HTTP API', () => {
     const opts = {
       port: 0,
       version: '1.2.3',
-      engine: new RuleEngine([rule], new Set(['demo'])),
+      engine: stubEvaluator(rule),
       writeAccessLog: (entry: InterceptorAccessLogEntry) => {
         access.push(entry);
       },
@@ -266,9 +282,8 @@ describe('interceptor daemon HTTP API', () => {
   });
 
   it('serves QwenWork HTTP hooks as 200 control JSON and fail-opens with {}', async () => {
-    const rule: LocalRule = {
+    const rule: StubRule = {
       id: 'demo',
-      supports: () => true,
       evaluate: async (request) => (
         request.prompt === 'secret' || request.toolName === 'Bash'
           ? { matched: true, reason: '[APIKEY_MASKED]' }
@@ -280,7 +295,7 @@ describe('interceptor daemon HTTP API', () => {
     const opts = {
       port: 0,
       version: '1.2.3',
-      engine: new RuleEngine([rule], new Set(['demo'])),
+      engine: stubEvaluator(rule),
       writeAccessLog: (entry: InterceptorAccessLogEntry) => {
         access.push(entry);
       },
@@ -372,9 +387,8 @@ describe('interceptor daemon HTTP API', () => {
   });
 
   it('does not store a verdict when a rule throws and still fail-opens the host', async () => {
-    const rule: LocalRule = {
+    const rule: StubRule = {
       id: 'boom',
-      supports: () => true,
       evaluate: async () => {
         throw new Error('rule failed');
       },
@@ -383,7 +397,7 @@ describe('interceptor daemon HTTP API', () => {
     const opts = {
       port: 0,
       version: '1.2.3',
-      engine: new RuleEngine([rule], new Set(['boom'])),
+      engine: stubEvaluator(rule),
       writeAccessLog: () => undefined,
       writeToolVerdict: (key: ToolVerdictKey, result: ToolVerdictSnapshot) => {
         verdicts.push({ key, result });
@@ -416,9 +430,8 @@ describe('interceptor daemon HTTP API', () => {
   });
 
   it('emits an llm.request only for a denied Qoder user prompt', async () => {
-    const rule: LocalRule = {
+    const rule: StubRule = {
       id: 'demo',
-      supports: () => true,
       evaluate: async (request) => (
         request.prompt === 'secret'
           ? { matched: true, reason: 'blocked by demo' }
@@ -429,7 +442,7 @@ describe('interceptor daemon HTTP API', () => {
     const opts = {
       port: 0,
       version: '1.2.3',
-      engine: new RuleEngine([rule], new Set(['demo'])),
+      engine: stubEvaluator(rule),
       writeAccessLog: () => undefined,
       emitBlockedPrompt: (entry: AgentActivityEntry) => {
         emitted.push(entry);
@@ -507,9 +520,8 @@ describe('interceptor daemon HTTP API', () => {
   });
 
   it('does not emit when evaluation fail-opens, and a sink error still blocks the host', async () => {
-    const throwing: LocalRule = {
+    const throwing: StubRule = {
       id: 'boom',
-      supports: () => true,
       evaluate: async () => {
         throw new Error('rule failed');
       },
@@ -518,7 +530,7 @@ describe('interceptor daemon HTTP API', () => {
     const failOpenServer = createInterceptorServer({
       port: 0,
       version: '1.2.3',
-      engine: new RuleEngine([throwing], new Set(['boom'])),
+      engine: stubEvaluator(throwing),
       writeAccessLog: () => undefined,
       emitBlockedPrompt: (entry) => {
         emitted.push(entry);
@@ -542,15 +554,14 @@ describe('interceptor daemon HTTP API', () => {
       failOpenServer.close();
     }
 
-    const blocking: LocalRule = {
+    const blocking: StubRule = {
       id: 'demo',
-      supports: () => true,
       evaluate: async () => ({ matched: true, reason: 'blocked by demo' }),
     };
     const server = createInterceptorServer({
       port: 0,
       version: '1.2.3',
-      engine: new RuleEngine([blocking], new Set(['demo'])),
+      engine: stubEvaluator(blocking),
       writeAccessLog: () => undefined,
       emitBlockedPrompt: () => {
         throw new Error('sink failed');
@@ -580,11 +591,10 @@ describe('interceptor daemon HTTP API', () => {
     const server = createInterceptorServer({
       port: 0,
       version: '1.2.3',
-      engine: new RuleEngine([{
+      engine: stubEvaluator({
         id: 'demo',
-        supports: () => true,
         evaluate: async () => ({ matched: true, reason: 'blocked by demo' }),
-      }], new Set(['demo'])),
+      }),
       writeAccessLog: () => undefined,
       emitBlockedPrompt: (entry) => {
         emitted.push(entry);
@@ -612,7 +622,7 @@ describe('interceptor daemon HTTP API', () => {
     const server = createInterceptorServer({
       port: 0,
       version: '1.2.3',
-      engine: new RuleEngine([], new Set()),
+      engine: { evaluate: async () => ({ action: 'allow' as const, evaluatedRules: [] }) },
       writeAccessLog: () => undefined,
     });
     const port = await listen(server);

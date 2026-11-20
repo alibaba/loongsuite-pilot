@@ -1,7 +1,7 @@
 import type { Server } from 'node:http';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { createLogger } from '../../utils/logger.js';
-import { loadInterceptorConfig, resolveEnabledInterceptorTypes } from '../config.js';
+import { loadInterceptorConfig } from '../config.js';
 import type { EvaluateHookResponse, HookEvaluator, InterceptorConfig } from '../types.js';
 import { InterceptorAccessLogWriter } from '../access-log.js';
 import {
@@ -9,8 +9,6 @@ import {
   interceptorToolVerdictPath,
 } from '../paths.js';
 import { ManagedInterceptor, MANAGED_RELOAD_INTERVAL_MS } from '../managed/controller.js';
-import { builtinRules } from '../rules/registry.js';
-import { RuleEngine } from '../rules/engine.js';
 import { ToolVerdictStore, type ToolVerdictKey, type ToolVerdictRecord, type InterceptorVerdictRecord } from '../tool-verdict-store.js';
 import { INTERCEPTOR_DEFAULT_PORT } from '../types.js';
 import { createInterceptorServer, type InterceptorServerOptions } from './server.js';
@@ -54,7 +52,7 @@ export interface StartInterceptorServiceOptions {
 
 /**
  * Loopback HTTP server and managed rules require the same startup opt-in.
- * Builtin rules run first, followed by the cached managed generation.
+ * Requests are evaluated only against the cached managed generation.
  */
 export async function startInterceptorService(
   opts: StartInterceptorServiceOptions,
@@ -73,8 +71,6 @@ export async function startInterceptorService(
       async stop() {},
     };
   }
-  const rules = builtinRules();
-  const builtin = new RuleEngine(rules, resolveEnabledInterceptorTypes({ mode, types: [] }));
   const status = new InterceptorStatusCollector();
   if (!opts.verdictStore) verdictStore.restore();
   const accessLog = new InterceptorAccessLogWriter(interceptorAccessLogPath(opts.dataDir));
@@ -132,9 +128,8 @@ export async function startInterceptorService(
       const startedAt = performance.now();
       let verdict: EvaluateHookResponse | null = null;
       try {
-        const local = await builtin.evaluate(request);
-        const remote = local.action === 'block' ? null : managed.evaluate(request);
-        verdict = remote ? mergeInterceptorVerdicts(local, await remote) : local;
+        verdict = await managed.evaluate(request)
+          ?? { action: 'allow', matched: false, matches: [], evaluatedRules: [] };
         return verdict;
       } finally {
         status.record(verdict, performance.now() - startedAt);
@@ -237,7 +232,7 @@ export async function startInterceptorService(
       return managed.active;
     },
     async getStatus() {
-      return status.snapshot(!stopped && port !== null, { ...managed.getRuleStatus(), builtin: rules.length });
+      return status.snapshot(!stopped && port !== null, managed.getRuleStatus());
     },
     async reloadManaged() {
       managed.reload();
@@ -260,17 +255,6 @@ export async function startInterceptorService(
       await accessLog.close();
     },
   };
-}
-
-/** Combine layers without reporting an incomplete check as a successful non-match. */
-export function mergeInterceptorVerdicts(local: EvaluateHookResponse, managed: EvaluateHookResponse): EvaluateHookResponse {
-  const result = { ...managed, evaluatedRules: [...local.evaluatedRules, ...managed.evaluatedRules] };
-  if (result.action === 'block') delete result.failOpen;
-  else if (local.failOpen || managed.failOpen) {
-    result.failOpen = true;
-    if (result.matched !== true) delete result.matched;
-  }
-  return result;
 }
 
 function listenLoopback(server: Server, preferredPort: number): Promise<number> {
