@@ -826,7 +826,7 @@ function buildListenersConfig(
     'pi-coding-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     workbuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'doubao-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
-    doubao: { enabled: resolveDoubaoAppEnabled(file?.listeners), pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    doubao: { enabled: resolveDoubaoAppEnabled(file?.listeners, file?.agents), pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
   };
 

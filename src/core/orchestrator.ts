@@ -1977,7 +1977,9 @@ export class Orchestrator extends EventEmitter {
     const doubaoWorkEnabled = () => this.isAgentGatedEnabled('doubao-work')
       && this.agentControlManager.resolveEnabled('doubao-work', listenerCfg['doubao-work']?.enabled ?? true);
     const doubaoAppEnabled = () => this.isAgentGatedEnabled('doubao')
-      && this.agentControlManager.resolveEnabled('doubao', listenerCfg.doubao?.enabled ?? resolveDoubaoAppEnabled(listenerCfg))
+      && this.agentControlManager.resolveEnabled(
+        'doubao', listenerCfg.doubao?.enabled ?? resolveDoubaoAppEnabled(listenerCfg, this.config.agents),
+      )
       && !doubaoAppUsesLegacySource(listenerCfg);
     const resourceShare = doubaoWorkEnabled() && doubaoAppEnabled() ? 2 : 1;
     for (const id of ['doubao-work', 'doubao'] as const) {

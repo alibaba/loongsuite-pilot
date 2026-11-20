@@ -103,7 +103,7 @@ Windows 缺少 `LOCALAPPDATA` 时使用 `~/AppData/Local`；macOS 时间保留�
 
 旧的 `listeners.doubao-work.client` 仍保留单产品选择语义：显式 `doubao-work` 不默认开启 App，显式 `doubao` 继续由旧入口采集 App，并抑制独立 App 入口，避免双采。迁移到双产品配置时，等待已有任务结束、停止 Pilot、备份并合并配置，移除旧 `client`；旧入口的 App `logDir` 应移到 `listeners.doubao.logDir`。已有 App checkpoint 自动接到独立 `doubao` 状态，保留待完成请求与去重记录；无客户端标记的旧状态仍属于豆包工作。已有显式禁用或安装器 Agent 选择不会被升级强行开启。
 
-事件与 Span 的 `gen_ai.agent.type`、`gen_ai.framework` 分别使用 `doubao` / `doubao-work`；没有原生身份时的根 Agent ID 同样区分产品，已确认的原生主/子 Agent ID 保持源值。`loongsuite.doubao_work.client` 保留兼容来源标记，内部 `agent.doubao_work.*` 字段继续共用。按 Agent 类型生成服务名时，两产品分别使用各自后缀；配置了固定服务名时仍可按类型和来源字段区分。历史记录不补写新的产品身份。
+独立入口使用 `doubao` 和 `doubao-work` 区分 `gen_ai.agent.type`、`gen_ai.framework`、缺省 Agent ID 和按 Agent 生成的服务名后缀。通过旧入口采集 App 时，这些字段仍使用 `doubao-work`，并继续应用该 Agent 的内容采集策略。两种入口都用 `loongsuite.doubao_work.client` 标记实际来源，原生主、子 Agent ID 保留源值。
 
 2026-10-30 已用真实 macOS、Windows App 验证工作模式工具、菜单 Skill、并行与后台子 Agent 及复用。普通聊天模式和完整提供商遥测仍不在支持范围内；普通聊天不保证产生工作模式 trajectory，不能据请求边界补造 LLM 或输入输出。多条真实需求即使文本或时间戳相同仍视为歧义。
 

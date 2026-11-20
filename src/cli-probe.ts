@@ -30,7 +30,10 @@ async function main(): Promise<void> {
   const dataDir = resolveHome('~/.loongsuite-pilot');
   // Detection needs only the product source. Unrelated exporter/interceptor
   // validation must not prevent the installer from discovering other Agents.
-  const config = await readJsonFile<{ listeners?: Record<string, { client?: unknown; logDir?: unknown; enabled?: boolean }> }>(configJsonPath());
+  const config = await readJsonFile<{
+    listeners?: Record<string, { client?: unknown; logDir?: unknown; enabled?: boolean }>;
+    agents?: Record<string, { enabled?: boolean }>;
+  }>(configJsonPath());
   const listOnly = process.argv.includes('--list');
 
   const loader = new AgentDefLoader({
@@ -40,7 +43,7 @@ async function main(): Promise<void> {
     dataDir,
     doubaoWork: listOnly ? undefined : { ...resolveDoubaoWorkSource(config?.listeners?.['doubao-work']), enabled: config?.listeners?.['doubao-work']?.enabled },
     doubao: listOnly ? { enabled: true }
-      : { ...resolveDoubaoWorkSource(config?.listeners?.doubao), enabled: resolveDoubaoAppEnabled(config?.listeners) },
+      : { ...resolveDoubaoWorkSource(config?.listeners?.doubao), enabled: resolveDoubaoAppEnabled(config?.listeners, config?.agents) },
   });
 
   // --list: enumerate all selectable agents regardless of source selection,

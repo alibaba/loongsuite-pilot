@@ -425,6 +425,18 @@ describe('ConfigLoader', () => {
       expect(config.listeners['doubao-work'].client).toBe('doubao-work');
     });
 
+    it.each([false, true])('does not add App to a prior installer selection with Work enabled=%s', async enabled => {
+      mockReadJsonFile.mockResolvedValueOnce({ agents: { 'doubao-work': { enabled } } });
+      expect((await loadConfig()).listeners.doubao.enabled).toBe(false);
+    });
+
+    it('honors an explicit App agent selection independently of Work', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: { 'doubao-work': { enabled: false }, doubao: { enabled: true } },
+      });
+      expect((await loadConfig()).listeners.doubao.enabled).toBe(true);
+    });
+
     it('does not redirect the independent App listener to Work', async () => {
       mockReadJsonFile.mockResolvedValueOnce({ listeners: { doubao: { client: 'doubao-work' } } });
       const config = await loadConfig();

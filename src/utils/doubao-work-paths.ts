@@ -8,9 +8,15 @@ export function isDoubaoAgentType(agentType: string): boolean {
   return agentType === 'doubao-work' || agentType === 'doubao';
 }
 
-export function resolveDoubaoAppEnabled(listeners?: Record<string, { client?: unknown; enabled?: boolean }>): boolean {
+export function resolveDoubaoAppEnabled(
+  listeners?: Record<string, { client?: unknown; enabled?: boolean }>,
+  agents?: Record<string, { enabled?: boolean }>,
+): boolean {
   if (listeners?.doubao?.client !== undefined && listeners.doubao.client !== 'doubao') return false;
-  return listeners?.doubao?.enabled ?? (listeners?.['doubao-work']?.client === undefined);
+  const legacy = listeners?.['doubao-work'];
+  // Both true and false on the old Agent indicate a previous installer selection.
+  return listeners?.doubao?.enabled ?? agents?.doubao?.enabled
+    ?? (legacy?.client === undefined && legacy?.enabled !== false && agents?.['doubao-work']?.enabled === undefined);
 }
 
 export function doubaoAppUsesLegacySource(listeners?: Record<string, { client?: unknown; enabled?: boolean }>): boolean {

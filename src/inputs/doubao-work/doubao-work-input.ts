@@ -96,7 +96,8 @@ export class DoubaoWorkInput extends BaseInput {
     super(opts);
     this.id = opts.inputId ?? 'doubao-work';
     this.client = opts.client ?? this.id;
-    this.agentType = this.client === 'doubao' ? ClientType.Doubao : ClientType.DoubaoWork;
+    // The legacy listener can read App data under the existing Work policy.
+    this.agentType = this.id === 'doubao' ? ClientType.Doubao : ClientType.DoubaoWork;
     const legacy = this.stateStore.get('doubao-work');
     if (this.id === 'doubao' && !this.stateStore.get(this.id).extra?.doubaoWork
       && (legacy.extra?.doubaoWork as Checkpoint | undefined)?.client === 'doubao') {
@@ -411,7 +412,7 @@ export class DoubaoWorkInput extends BaseInput {
       entry['gen_ai.agent.type'] = this.agentType;
       entry['gen_ai.framework'] = this.agentType;
       if (entry['gen_ai.agent.id'] === 'doubao-work') entry['gen_ai.agent.id'] = this.agentType;
-      if (entry['gen_ai.agent.name'] === 'Doubao Work') entry['gen_ai.agent.name'] = this.client === 'doubao' ? 'Doubao' : 'Doubao Work';
+      if (entry['gen_ai.agent.name'] === 'Doubao Work' && this.id === 'doubao') entry['gen_ai.agent.name'] = 'Doubao';
     }
     return entries;
   }
