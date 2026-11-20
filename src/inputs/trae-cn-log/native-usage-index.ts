@@ -7,7 +7,7 @@ import cbor from 'cbor';
 type ReplyUsage = { reply: string; seq: number };
 type ResponseStream = {
   request: string; owner: unknown; histories: Set<string>; tools: Set<string>; reports: Map<string, ReplyUsage>;
-  resultCount?: number; closed: boolean;
+  initial: boolean; terminal?: boolean; continuation?: string; resultCount?: number; closed: boolean;
 };
 type Receipt = { session: string; turn: string; done: boolean; touched: number; streams: ResponseStream[]; active?: ResponseStream; ambiguousStreams?: boolean; calls: Set<string>; history: Map<string, string>; expected: Map<string, Set<number>> };
 const text = (value: unknown) => Buffer.isBuffer(value) ? value.toString('utf8') : '';
@@ -67,8 +67,13 @@ export class NativeUsageIndex {
       const request = text(f.resp_logid);
       if (r.active) r.ambiguousStreams = true;
       r.active = undefined;
-      if (owner != null && request && request.length <= 128) {
-        r.active = { owner, request, histories: new Set(), tools: new Set(), reports: new Map(), closed: false };
+      if (owner == null || !request || request.length > 128) r.ambiguousStreams = true;
+      else {
+        const initial = text(f.url).endsWith('/create_agent_task');
+        const previous = r.streams.at(-1);
+        const continuation = !initial && previous?.closed && !previous.terminal && previous.owner === owner
+          ? previous.request : undefined;
+        r.active = { owner, request, initial, continuation, histories: new Set(), tools: new Set(), reports: new Map(), closed: false };
         r.streams.push(r.active);
       }
     }
@@ -81,6 +86,7 @@ export class NativeUsageIndex {
       if (message === 'routing CommitReady' && f.has_async_child === false && f.has_foreground === false &&
           typeof f.parent_result_count === 'number') active.resultCount = f.parent_result_count;
       if (message === 'commit_results' || message === 'resolving explicit Cloud task completion as terminal') {
+        active.terminal = message === 'resolving explicit Cloud task completion as terminal';
         active.closed = message === 'commit_results'
           ? text(f.conversation_id) === r.session && active.resultCount === active.tools.size && f.result_count === active.tools.size
           : active.tools.size === 0;
@@ -129,7 +135,10 @@ export class NativeUsageIndex {
         receipt.streams.every(other => other === s || !other.tools.has(call)));
       const uniqueReports = [...s.reports].filter(([key]) => receipt.streams.every(other => other === s || !other.reports.has(key)));
       const usage = uniqueReports.length === 1 && s.reports.size === 1 ? uniqueReports[0][1] : undefined;
-      return { id, at, request: s.request, toolIds, ...(usage ? { reply: usage.reply, seq: usage.seq } : {}) };
+      return { id, at, request: s.request, toolIds,
+        ...(s.initial && s === receipt.streams[0] ? { initial: true } : {}),
+        ...(s.terminal && s === receipt.streams.at(-1) ? { terminal: true } : {}),
+        ...(s.continuation ? { continuation: s.continuation } : {}), ...(usage ? { reply: usage.reply, seq: usage.seq } : {}) };
     });
   }
 

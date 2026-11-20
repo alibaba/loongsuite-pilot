@@ -19,6 +19,24 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
   const trace = llm.spanContext().traceId;
   const observed: ReadableSpan[] = [];
   const parents = new Map<string, { id: string; history: string }>();
+  // Use the converted (content-policy filtered) messages. A continuation's
+  // observable input is the committed tool result, not the entire model prompt.
+  const resultByCall = new Map(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'TOOL')
+    .map(s => [s.attributes['gen_ai.tool.call.id'], s.attributes['gen_ai.tool.call.result']]));
+  const callsByRequest = new Map<string, string[]>();
+  for (const round of rounds) {
+    if (round && typeof round === 'object' && !Array.isArray(round) && typeof round.request === 'string' && Array.isArray(round.toolIds))
+      callsByRequest.set(round.request, round.toolIds.filter((id): id is string => typeof id === 'string'));
+  }
+  let assistantParts: { type: string; id?: string }[] = [];
+  const output = llm.attributes['gen_ai.output.messages'];
+  if (typeof output === 'string') {
+    try {
+      const messages = JSON.parse(output);
+      if (Array.isArray(messages)) assistantParts = messages.flatMap(m =>
+        m?.role === 'assistant' && Array.isArray(m.parts) ? m.parts.filter((p: { type?: string }) => p?.type) : []);
+    } catch { /* The converter can omit or truncate optional content. */ }
+  }
   const seen = new Set<string>();
   for (const r of rounds) {
     if (!r || typeof r !== 'object' || Array.isArray(r) || typeof r.id !== 'string' || !/^[a-f0-9]{24}$/.test(r.id) ||
@@ -41,6 +59,19 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
       if (typeof r.request === 'string') attributes['loongsuite.trae_cn.stream_request_id'] = r.request;
       if (isModel) {
         attributes['gen_ai.response.id'] = r.id;
+        const prompt = llm.attributes['gen_ai.input.messages'];
+        if (r.initial === true && typeof prompt === 'string') attributes['gen_ai.input.messages'] = prompt;
+        if (typeof r.continuation === 'string') {
+          const parts = (callsByRequest.get(r.continuation) ?? []).flatMap(id => {
+            const response = resultByCall.get(id);
+            return response === undefined ? [] : [{ type: 'tool_call_response', id, response }];
+          });
+          if (parts.length) attributes['gen_ai.input.messages'] = JSON.stringify([{ role: 'tool', parts }]);
+        }
+        const calls = Array.isArray(r.toolIds) ? r.toolIds : [];
+        const parts = assistantParts.filter(p => (p.type === 'tool_call' && p.id && calls.includes(p.id))
+          || (r.terminal === true && p.type === 'text'));
+        if (parts.length) attributes['gen_ai.output.messages'] = JSON.stringify([{ role: 'assistant', parts }]);
         if (typeof r.input === 'number' && typeof r.output === 'number') {
           attributes['gen_ai.usage.input_tokens'] = r.input;
           attributes['gen_ai.usage.output_tokens'] = r.output;
