@@ -8,6 +8,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use super::native_agent_rollback::NativeHookRetirement;
 use crate::updater::ActivationTransaction;
 use crate::utils::runtime_paths::{
     build_edition, build_target, resource_file, runtime_metadata, validate_runtime, RuntimeManifest,
@@ -169,15 +170,7 @@ pub(super) async fn run_with_retirement(
                                     targets.extend(plan.targets(&paths.data_dir, paths.deploy_hooks)?);
                                     Some(plan)
                                 } else { None };
-                                let retiring_hooks = if operation == "rollback-package" && manifest.runtime == "node" {
-                                    let plan = super::native_agent_rollback::NativeHookRetirement::load(
-                                        &paths.cache_dir, &paths.data_dir, false,
-                                    ).await?;
-                                    targets.extend(plan.targets());
-                                    Some(plan)
-                                } else {
-                                    None
-                                };
+                                let retire_native_hooks = operation == "rollback-package" && manifest.runtime == "node";
                                 let mut transaction =
                                     ActivationTransaction::begin(&paths.cache_dir, targets)?;
                                 if let Some(plan) = &resources {
@@ -190,7 +183,7 @@ pub(super) async fn run_with_retirement(
                                         &paths.source_dir, manifest, &paths.cache_dir, &paths.data_dir,
                                     ).await.map_err(|error| anyhow::anyhow!("恢复旧版本 Qoder Hook 失败；保留当前版本：{error:#}"))?;
                                 }
-                                if operation == "rollback-package" && manifest.runtime == "node" {
+                                if retire_native_hooks {
                                     super::native_codex_rollback::restore_legacy_hooks(
                                         &paths.source_dir, &paths.cache_dir, &paths.data_dir,
                                     ).await.context("恢复旧版本 Codex Hook 失败；保留当前版本")?;
@@ -198,8 +191,7 @@ pub(super) async fn run_with_retirement(
                                 let activate = {
                                     let paths = &paths;
                                     let prepared = prepared.as_ref();
-                                    let retiring_hooks = retiring_hooks.as_ref();
-                                    move || async move {
+                                    move |retiring_hooks: Option<NativeHookRetirement>| async move {
                                         if let Some(plan) = retiring_hooks {
                                             plan.retire(&paths.data_dir, &mut transaction)
                                                 .context("恢复旧版本 Agent Hook 失败；保留当前版本")?;
@@ -265,10 +257,12 @@ pub(super) async fn run_with_retirement(
                                         Ok(qoder_settings)
                                     }
                                 };
-                                let qoder_settings = if let Some(plan) = &retiring_hooks {
-                                    plan.with_locks(&paths.data_dir, activate).await?
+                                let qoder_settings = if retire_native_hooks {
+                                    NativeHookRetirement::with_locks(
+                                        &paths.cache_dir, &paths.data_dir, false, |plan| activate(Some(plan)),
+                                    ).await?
                                 } else {
-                                    activate().await?
+                                    activate(None).await?
                                 };
                                 if let Some(settings) = qoder_settings {
                                     if let Err(error) = super::native_qoder_rollback::activate_direct_hooks(
@@ -700,19 +694,16 @@ pub(crate) async fn recover_runtime_files_with_data(
         cache,
         crate::updater::activation_file_targets::NATIVE_HOOK_SETTINGS_PREFIX,
     )? {
-        let hooks =
-            super::native_agent_rollback::NativeHookRetirement::load(cache, data, true).await?;
-        hooks
-            .with_locks(data, || async {
-                super::runtime_data_assets::recover(
-                    cache,
-                    targets,
-                    legacy_targets,
-                    data,
-                    hooks.targets(),
-                )
-            })
-            .await
+        NativeHookRetirement::with_locks(cache, data, true, |hooks| async move {
+            super::runtime_data_assets::recover(
+                cache,
+                targets,
+                legacy_targets,
+                data,
+                hooks.targets(),
+            )
+        })
+        .await
     } else {
         super::runtime_data_assets::recover(cache, targets, legacy_targets, data, BTreeMap::new())
     }
@@ -996,27 +987,23 @@ mod tests {
         let mut definition: Value =
             serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
         definition["hook"]["settingsPath"] = json!(settings);
-        fs::write(
-            native.join("agents.d/cursor.json"),
-            definition.to_string(),
-        )
-        .unwrap();
+        fs::write(native.join("agents.d/cursor.json"), definition.to_string()).unwrap();
         fs::write(cache.join("current"), b"current-rust\n").unwrap();
         fs::write(cache.join("previous"), b"old-node\n").unwrap();
         let base = activation_targets(&cache, &service, &data.join("config.json"));
-        let hooks =
-            super::super::native_agent_rollback::NativeHookRetirement::load(&cache, &data, false)
-                .await
-                .unwrap()
-                .targets();
-        let role = hooks.keys().next().unwrap().clone();
-        let mut targets = base.clone();
-        targets.extend(hooks);
-        let mut tx = ActivationTransaction::begin(&cache, targets).unwrap();
-        tx.write_preserving_mode(&role, b"{}", 0o600).unwrap();
-        tx.write("previous", b"current-rust\n", 0o600).unwrap();
-        tx.write("current", b"old-node\n", 0o600).unwrap();
-        std::mem::forget(tx);
+        let mut tx = ActivationTransaction::begin(&cache, base.clone()).unwrap();
+        NativeHookRetirement::with_locks(&cache, &data, false, |plan| async move {
+            let hooks = plan.targets();
+            let role = hooks.keys().next().unwrap().clone();
+            tx.enroll_native_hook_settings(hooks)?;
+            tx.write_preserving_mode(&role, b"{}", 0o600)?;
+            tx.write("previous", b"current-rust\n", 0o600)?;
+            tx.write("current", b"old-node\n", 0o600)?;
+            std::mem::forget(tx);
+            Ok(())
+        })
+        .await
+        .unwrap();
 
         recover_runtime_files_with_data(&cache, base, &data)
             .await

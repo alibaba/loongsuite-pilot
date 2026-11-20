@@ -18,7 +18,7 @@ pub(super) struct NativeHookRetirement {
 }
 
 impl NativeHookRetirement {
-    pub(super) async fn load(cache: &Path, data: &Path, recovering: bool) -> Result<Self> {
+    async fn load(cache: &Path, data: &Path, recovering: bool) -> Result<Self> {
         let mut plans = Self {
             current: PathBuf::new(),
             hooks: BTreeMap::new(),
@@ -112,37 +112,40 @@ impl NativeHookRetirement {
     }
 
     pub(super) async fn with_locks<T, Fut>(
-        &self,
+        cache: &Path,
         data: &Path,
-        body: impl FnOnce() -> Fut + Send,
+        recovering: bool,
+        body: impl FnOnce(Self) -> Fut + Send,
     ) -> Result<T>
     where
         T: Send,
         Fut: std::future::Future<Output = Result<T>> + Send,
     {
-        if self.hooks.is_empty() {
-            return body().await;
-        }
-        let mut locks = self
-            .hooks
-            .values()
-            .map(|(path, _)| {
-                let mut name = path.as_os_str().to_owned();
-                name.push(".loongsuite-pilot.lock");
-                PathBuf::from(name)
-            })
-            .collect::<Vec<_>>();
-        locks.sort();
         hook_assets::private_directory(data)?;
         let lock = data.join(".hook-assets.lock");
         super::with_deployed_state_lock(
             lock.to_str().context("Invalid Hook asset lock path")?,
             || async {
+                // A repair can register settings or create the default file while we wait.
+                let plan = Self::load(cache, data, recovering).await?;
+                if plan.hooks.is_empty() {
+                    return body(plan).await;
+                }
                 ensure!(
                     !hook_assets::recovery_pending(data),
                     "Recover the pending Hook transaction before switching Pilot versions"
                 );
-                hook_assets::with_config_locks(&locks, body).await
+                let mut locks = plan
+                    .hooks
+                    .values()
+                    .map(|(path, _)| {
+                        let mut name = path.as_os_str().to_owned();
+                        name.push(".loongsuite-pilot.lock");
+                        PathBuf::from(name)
+                    })
+                    .collect::<Vec<_>>();
+                locks.sort();
+                hook_assets::with_config_locks(&locks, || body(plan)).await
             },
             10_000,
         )
@@ -154,6 +157,7 @@ impl NativeHookRetirement {
         data: &Path,
         transaction: &mut ActivationTransaction,
     ) -> Result<()> {
+        transaction.enroll_native_hook_settings(self.targets())?;
         let strategy = HookStrategy::new(HookManager::new(None, None))
             .with_resource_roots(&self.current, data);
         for (key, (_, definition)) in &self.hooks {

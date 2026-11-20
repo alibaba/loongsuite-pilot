@@ -480,7 +480,7 @@ fn current_rollback_helper_rejects_unbound_source_and_configuration_mutation_bef
 }
 
 #[test]
-fn failed_node_switch_restores_cursor_hook_and_retry_retires_only_the_installed_hook() {
+fn failed_node_switch_restores_current_cursor_hooks_and_retry_retires_only_the_installed_hooks() {
     let fixture = Fixture::new();
     let thin = Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));
     fs::copy(
@@ -559,7 +559,42 @@ fn failed_node_switch_restores_cursor_hook_and_retry_retires_only_the_installed_
     let mut read_only = mode.clone();
     read_only.set_readonly(true);
     fs::set_permissions(&service, read_only).unwrap();
-    let output = fixture.helper("rollback-package", &fixture.runtime_options(&node), true);
+    let mut edited: Value = serde_json::from_slice(&original).unwrap();
+    edited["private"] = json!("edited during repair");
+    let edited_bytes = edited.to_string();
+    let added_settings = fixture.root.path().join(".cursor/other-hooks.json");
+    let mut added = edited;
+    added["private"] = json!("created during repair");
+    let added_bytes = added.to_string();
+    let rollback_while_repairing = |repair: &dyn Fn()| {
+        std::thread::scope(|scope| {
+            let asset_lock = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(fixture.data.join(".hook-assets.lock"))
+                .unwrap();
+            fs2::FileExt::try_lock_exclusive(&asset_lock).unwrap();
+            let rollback = scope.spawn(|| {
+                fixture.helper("rollback-package", &fixture.runtime_options(&node), true)
+            });
+            // The installer has opened its activation transaction while repair holds the lock.
+            let journal = cache.join("update-recovery.json");
+            let started = Instant::now();
+            while !journal.exists() && started.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                journal.exists(),
+                "rollback did not open its activation transaction"
+            );
+            repair();
+            drop(asset_lock);
+            rollback.join().unwrap()
+        })
+    };
+    let output = rollback_while_repairing(&|| {
+        fs::write(&settings, &edited_bytes).unwrap();
+    });
     fs::set_permissions(&service, mode).unwrap();
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
@@ -567,7 +602,7 @@ fn failed_node_switch_restores_cursor_hook_and_retry_retires_only_the_installed_
         error.contains("只读") && error.contains("service"),
         "{error}"
     );
-    assert_eq!(fs::read(&settings).unwrap(), original);
+    assert_eq!(fs::read_to_string(&settings).unwrap(), edited_bytes);
     assert_eq!(fs::read(&service).unwrap(), original_service);
     assert_eq!(
         fs::read_to_string(cache.join("current")).unwrap().trim(),
@@ -576,9 +611,22 @@ fn failed_node_switch_restores_cursor_hook_and_retry_retires_only_the_installed_
     assert_eq!(fs::read(cache.join("previous")).unwrap(), b"1.0.9_legacy\n");
     assert!(!cache.join("update-recovery.json").exists());
 
-    success(&fixture.helper("rollback-package", &fixture.runtime_options(&node), true));
-    let cleaned: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
-    assert_eq!(cleaned, foreign);
+    success(&rollback_while_repairing(&|| {
+        fs::write(&added_settings, &added_bytes).unwrap();
+        let state_path = fixture.data.join("deployed-agents.json");
+        let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        state["cursor"]["hookSettingsPaths"] = json!([&settings, &added_settings]);
+        fs::write(state_path, state.to_string()).unwrap();
+    }));
+    for (settings, private) in [
+        (&settings, "edited during repair"),
+        (&added_settings, "created during repair"),
+    ] {
+        let cleaned: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+        let mut expected = foreign.clone();
+        expected["private"] = json!(private);
+        assert_eq!(cleaned, expected);
+    }
     assert_eq!(fs::read(cache.join("current")).unwrap(), b"1.0.9_legacy\n");
     assert_eq!(
         fs::read_to_string(cache.join("previous")).unwrap().trim(),

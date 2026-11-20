@@ -102,6 +102,45 @@ impl ActivationTransaction {
         Ok(transaction)
     }
 
+    /// Enroll discovered settings after the caller holds the Hook asset and file locks.
+    pub(crate) fn enroll_native_hook_settings(
+        &mut self,
+        settings: BTreeMap<String, PathBuf>,
+    ) -> Result<()> {
+        if settings.is_empty() {
+            return Ok(());
+        }
+        ensure!(!self.finished, "更新事务已结束");
+        let mut targets = self.targets.clone();
+        for (key, path) in &settings {
+            ensure!(
+                key.starts_with(binding::NATIVE_HOOK_SETTINGS_PREFIX) && !targets.contains_key(key),
+                "Hook 恢复目标角色无效或重复"
+            );
+            // The corresponding lock authorizes this physical path only.
+            binding::ensure_bound(path)?;
+            targets.insert(key.clone(), path.clone());
+        }
+        ensure!(target_count_valid(&targets), "更新目标数量无效");
+        binding::validate(&targets, &self.path)?;
+        let changes = settings
+            .iter()
+            .map(|(key, path)| {
+                Ok((
+                    key.clone(),
+                    Change {
+                        original: snapshot(path)?,
+                        intended: None,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        self.targets = targets;
+        self.journal.targets.extend(settings);
+        self.journal.changes.extend(changes);
+        self.persist()
+    }
+
     pub(crate) fn has_target_prefix(cache: &Path, prefix: &str) -> Result<bool> {
         let path = binding::bind(&cache.join("update-recovery.json"))?;
         let Some(bytes) = read_bounded(&path, MAX_JOURNAL_BYTES)? else {
