@@ -1,10 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { ExportResultCode } from '@opentelemetry/core';
+import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 
 const sqliteMockState = vi.hoisted(() => ({ unavailable: false }));
+const watchMockState = vi.hoisted(() => ({ watch: undefined as typeof import('node:fs').watch | undefined }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    watch: (...args: Parameters<typeof actual.watch>) => (watchMockState.watch ?? actual.watch)(...args),
+  };
+});
 vi.mock('../../../../src/utils/node-sqlite.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../../src/utils/node-sqlite.js')>();
   return {
@@ -13,14 +24,16 @@ vi.mock('../../../../src/utils/node-sqlite.js', async (importOriginal) => {
   };
 });
 
-import { loadDatabaseSync } from '../../../../src/utils/node-sqlite.js';
+import { loadDatabaseSync, SQLITE_SYNC_PAGE } from '../../../../src/utils/node-sqlite.js';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
+import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
 import { ClientType, MULTIMODAL_SUPPORTED_AGENT_IDS, type AgentActivityEntry } from '../../../../src/types/index.js';
 import { resolveAgentSystem } from '../../../../src/normalization/agent-system-map.js';
 import { WorkspacePolicy } from '../../../../src/core/workspace-policy.js';
 import { MultimodalProcessor, type PathToUriFn } from '../../../../src/multimodal/index.js';
 import {
   AntigravityInput,
+  type AntigravityClientType,
   decodeProtoFields,
   extractWorkspacePathFromBlob,
   modelNameFromId,
@@ -31,6 +44,10 @@ import {
   readAntigravityTranscript,
   resolveAntigravityProvider,
 } from '../../../../src/inputs/antigravity/index.js';
+
+class TestAntigravityInput extends AntigravityInput {
+  poll(): void { this.onPoll(); }
+}
 
 // --- Minimal Protobuf encoder helpers for test fixtures ---
 
@@ -206,6 +223,22 @@ function createConversationDb(
   }
 }
 
+function captureTraceSpans() {
+  const spans: ReadableSpan[] = [];
+  const flusher = new OtlpTraceFlusher({
+    enabled: true,
+    serviceName: 'antigravity-test',
+    endpoints: [{ endpoint: 'http://127.0.0.1:4318/v1/traces' }],
+  }, undefined, () => ({
+    export(batch, callback) {
+      spans.push(...batch);
+      callback({ code: ExportResultCode.SUCCESS });
+    },
+    shutdown: async () => {},
+  }));
+  return { spans, flusher };
+}
+
 describe('Antigravity protobuf & model normalizer', () => {
   it('decodes protobuf timestamps, durations, and rejects truncated blobs', () => {
     const ts = parseTimestampMs(protoTimestamp(1_778_000_000, 250_000_000));
@@ -242,7 +275,6 @@ describe('Antigravity protobuf & model normalizer', () => {
 
   it('maps all three Antigravity client types to the antigravity agent system', () => {
     expect(resolveAgentSystem(ClientType.Antigravity)).toBe('antigravity');
-    expect(resolveAgentSystem(ClientType.AntigravityIde)).toBe('antigravity');
     expect(resolveAgentSystem(ClientType.AntigravityCli)).toBe('antigravity');
   });
 });
@@ -259,6 +291,72 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
 
   afterEach(async () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('reads step usage and every explicit workspace root before gen_metadata exists', async () => {
+    const dbPath = path.join(tmpDir, 'steps-only.db');
+    const folder = path.join(tmpDir, 'folder');
+    const gitRoot = path.join(tmpDir, 'git root');
+    const secondary = path.join(tmpDir, 'secondary');
+    createConversationDb(dbPath, {
+      genRows: [],
+      stepRows: [[0, encodeStepMetadata({
+        timestampSec: 1_778_000_010,
+        usage: { inputTokens: 30, responseId: 'steps-only' },
+      })]],
+      trajectoryBlob: protoBytesField(1, concatBytes(
+        protoStringField(1, pathToFileURL(folder).href),
+        protoStringField(2, pathToFileURL(gitRoot).href),
+      )),
+    });
+    const DatabaseSync = loadDatabaseSync()!;
+    const db = new DatabaseSync(dbPath);
+    try {
+      db.exec('DROP TABLE gen_metadata');
+      const insert = db.prepare('INSERT INTO trajectory_metadata_blob (id, data) VALUES (?, ?)');
+      for (let i = 0; i < 32; i++) insert.run(String(i), new Uint8Array());
+      insert.run('secondary', protoStringField(7, pathToFileURL(secondary).href));
+    } finally {
+      db.close();
+    }
+
+    const snapshot = await readAntigravityConversationDb(dbPath);
+    expect(snapshot?.workspacePath).toBe(folder);
+    expect(snapshot?.workspacePaths).toEqual([folder, gitRoot, secondary]);
+    expect(snapshot?.events.map(event => event.messageId)).toEqual(['steps-only']);
+  });
+
+  it('keeps SQLite tables on one snapshot while a writer commits between pages', async () => {
+    const dbPath = path.join(tmpDir, 'wal-snapshot.db');
+    const generation = (responseId: string) => encodeGeneratorMetadata({
+      usage: { inputTokens: 30, responseId },
+      stepIndices: [1],
+    });
+    createConversationDb(dbPath, {
+      genRows: [[0, generation('before')]],
+      stepRows: Array.from({ length: SQLITE_SYNC_PAGE }, (_, i) => [
+        i,
+        encodeStepMetadata({ timestampSec: 1_778_000_010 }),
+      ]),
+    });
+    const DatabaseSync = loadDatabaseSync()!;
+    const writer = new DatabaseSync(dbPath);
+    try {
+      writer.exec('PRAGMA journal_mode = WAL; DROP TABLE trajectory_metadata_blob;');
+      let checks = 0;
+      const snapshot = await readAntigravityConversationDb(dbPath, () => {
+        // The first step page establishes the snapshot. Commit before the second page.
+        if (++checks === 3) {
+          writer.prepare('UPDATE gen_metadata SET data = ? WHERE idx = 0').run(generation('after'));
+        }
+        return true;
+      });
+      expect(snapshot?.events.map(event => event.messageId)).toEqual(['before']);
+      const next = await readAntigravityConversationDb(dbPath);
+      expect(next?.events.map(event => event.messageId)).toEqual(['after']);
+    } finally {
+      writer.close();
+    }
   });
 
   it('reads gen_metadata + steps, deduplicates mirrors/retries, and extracts workspace', async () => {
@@ -337,9 +435,67 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(primary.cacheCreationTokens).toBe(30);
     expect(primary.totalOutputTokens).toBe(200);
     expect(primary.ttftNs).toBe(400_000_000);
+    expect(primary.isRetry).toBe(false);
+    expect(primary.sourceKeys).toEqual(['step:session-1:1', 'gen:session-1:0', 'gen-retry:session-1:0:0']);
+
+    const retry = snapshot!.events.find((e) => e.messageId === 'resp-retry-1')!;
+    expect(retry.isRetry).toBe(true);
+    expect(retry.sourceKeys).toEqual(['gen-retry:session-1:0:1']);
 
     const cont = snapshot!.events.find((e) => e.messageId === 'resp-2')!;
     expect(cont.model).toBe('gemini-3.8-flash-high');
+  });
+
+  it('keeps distinct generation rows separate when they share a step or a weaker native ID', async () => {
+    const dbPath = path.join(tmpDir, 'distinct-attempts.db');
+    const first = { inputTokens: 20, totalOutputTokens: 10, messageId: 'shared', responseId: 'first' };
+    const second = { ...first, responseId: 'second' };
+    const anonymous = { inputTokens: 25, totalOutputTokens: 15 };
+    createConversationDb(dbPath, {
+      stepRows: [[4, encodeStepMetadata({ timestampSec: 1_778_000_000, usage: first })]],
+      genRows: [first, second, anonymous, anonymous].map((usage, idx) => [
+        idx,
+        encodeGeneratorMetadata({ usage, timestampSec: 1_778_000_010 + idx, stepIndices: [4] }),
+      ]),
+    });
+
+    const { events } = (await readAntigravityConversationDb(dbPath))!;
+    expect(events.map((event) => event.sourceKeys)).toEqual([
+      ['step:distinct-attempts:4', 'gen:distinct-attempts:0'],
+      ['gen:distinct-attempts:1'],
+      ['gen:distinct-attempts:2'],
+      ['gen:distinct-attempts:3'],
+    ]);
+    expect(events[0]?.timestampMs).toBe(1_778_000_010_000);
+    expect(events[0]?.identities).toEqual(['response:first']);
+    expect(events[1]?.identities).toEqual(['response:second']);
+  });
+
+  it('matches a step usage without a native ID only to an unambiguous matching generation', async () => {
+    const dbPath = path.join(tmpDir, 'weak-attempts.db');
+    const usage = { inputTokens: 20, totalOutputTokens: 10 };
+    createConversationDb(dbPath, {
+      stepRows: [
+        [4, encodeStepMetadata({ usage })],
+        [6, encodeStepMetadata({ usage })],
+      ],
+      genRows: [
+        [0, encodeGeneratorMetadata({ usage: { ...usage, responseId: 'unique' }, stepIndices: [4] })],
+        [1, encodeGeneratorMetadata({ usage: { ...usage, inputTokens: 21 }, stepIndices: [4] })],
+        [2, encodeGeneratorMetadata({ usage: { ...usage, responseId: 'ambiguous-1' }, stepIndices: [6] })],
+        [3, encodeGeneratorMetadata({ usage: { ...usage, responseId: 'ambiguous-2' }, stepIndices: [6] })],
+      ],
+    });
+
+    const { events } = (await readAntigravityConversationDb(dbPath))!;
+    expect(events.find((event) => event.messageId === 'unique')?.sourceKeys).toEqual([
+      'step:weak-attempts:4',
+      'gen:weak-attempts:0',
+    ]);
+    expect(events).toHaveLength(5);
+    expect(events.find((event) => event.key === 'step:weak-attempts:6')?.sourceKeys).toEqual([
+      'step:weak-attempts:6',
+    ]);
   });
 
   it('skips empty SQLite files cleanly', async () => {
@@ -349,10 +505,10 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(snapshot).toBeNull();
   });
 
-  it('emits normalized events for all three agent types with transcript enrichment', async () => {
-    const variants: Array<{ clientType: ClientType.Antigravity | ClientType.AntigravityIde | ClientType.AntigravityCli; dir: string }> = [
+  it('emits normalized events for App and new IDE under the same identity, with CLI separate', async () => {
+    const variants: Array<{ clientType: AntigravityClientType; dir: string }> = [
       { clientType: ClientType.Antigravity, dir: 'antigravity' },
-      { clientType: ClientType.AntigravityIde, dir: 'antigravity-ide' },
+      { clientType: ClientType.Antigravity, dir: 'new-ide-fixture' },
       { clientType: ClientType.AntigravityCli, dir: 'antigravity-cli' },
     ];
 
@@ -468,7 +624,7 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
       expect(llmReq?.span_id).toBe(llmResp?.span_id);
       expect(llmReq?.parent_span_id).toBe(llmResp?.parent_span_id);
       expect(userInput?.trace_id).toBe(llmReq?.trace_id);
-      expect(userInput?.parent_span_id).toBe('0000000000000001');
+      expect(userInput?.parent_span_id).toBeUndefined();
 
       const toolCall = collected.find((e) => e['event.name'] === 'tool.call');
       const toolResult = collected.find((e) => e['event.name'] === 'tool.result');
@@ -510,7 +666,7 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
 
     const input1 = new AntigravityInput({
       stateStore,
-      clientType: ClientType.AntigravityIde,
+      clientType: ClientType.Antigravity,
       dataRoot: root,
       collectHistorical: true,
     });
@@ -526,7 +682,7 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     await stateStore2.load();
     const input2 = new AntigravityInput({
       stateStore: stateStore2,
-      clientType: ClientType.AntigravityIde,
+      clientType: ClientType.Antigravity,
       dataRoot: root,
       collectHistorical: true,
     });
@@ -601,7 +757,232 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(batch2[1]?.['gen_ai.agent.type']).toBe('antigravity-cli');
   });
 
-  it('respects WorkspacePolicy exclusions (DB + transcript)', async () => {
+  it('collects an in-place DB update beneath a newer transcript stamp', async () => {
+    const root = path.join(tmpDir, 'independent-source-stamps');
+    const convDir = path.join(root, 'conversations');
+    const logsDir = path.join(root, 'brain', 'session', '.system_generated', 'logs');
+    await fs.mkdir(convDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+    const dbPath = path.join(convDir, 'session.db');
+    const transcriptPath = path.join(logsDir, 'transcript.jsonl');
+    const blob = (inputTokens?: number) => encodeGeneratorMetadata({
+      usage: { inputTokens, responseId: 'late-usage' },
+      timestampSec: 1_778_000_400,
+    });
+    createConversationDb(dbPath, { genRows: [[0, blob()]] });
+    await fs.writeFile(transcriptPath, '');
+    const oldDbDate = new Date(1_778_000_000_000);
+    const newDbDate = new Date(1_778_000_001_000);
+    const transcriptDate = new Date(1_778_000_002_000);
+    await fs.utimes(dbPath, oldDbDate, oldDbDate);
+    await fs.utimes(transcriptPath, transcriptDate, transcriptDate);
+    const { size: initialSize } = await fs.stat(dbPath);
+
+    const input = new AntigravityInput({
+      stateStore,
+      clientType: ClientType.Antigravity,
+      dataRoot: root,
+      collectHistorical: true,
+    });
+    const collected: AgentActivityEntry[] = [];
+    input.on('entries', (entries: AgentActivityEntry[]) => collected.push(...entries));
+    await input.start();
+    await input.stop();
+    expect(collected).toHaveLength(0);
+
+    const DatabaseSync = loadDatabaseSync()!;
+    const db = new DatabaseSync(dbPath);
+    try {
+      const updated = blob(50);
+      db.prepare('UPDATE gen_metadata SET data = ?, size = ? WHERE idx = 0').run(updated, updated.length);
+    } finally {
+      db.close();
+    }
+    await fs.utimes(dbPath, newDbDate, newDbDate);
+    expect((await fs.stat(dbPath)).size).toBe(initialSize);
+
+    await input.start();
+    await input.stop();
+    expect(collected.filter((e) => e['event.name'] === 'llm.response').map((e) => e['gen_ai.response.id']))
+      .toEqual(['late-usage']);
+  });
+
+  it('retries an unchanged SQLite/transcript join after its grace period and a restart', async () => {
+    const root = path.join(tmpDir, 'deferred-transcript-join');
+    const convDir = path.join(root, 'conversations');
+    const logsDir = path.join(root, 'brain', 'session', '.system_generated', 'logs');
+    await fs.mkdir(convDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+
+    const timestampSec = 1_778_000_400;
+    createConversationDb(path.join(convDir, 'session.db'), {
+      genRows: [],
+      stepRows: [[1, encodeStepMetadata({
+        timestampSec,
+        usage: { inputTokens: 12, totalOutputTokens: 3, responseId: 'deferred-success' },
+      })]],
+    });
+    // SQLite recorded step 1, but the transcript stops at the prompt in step 0.
+    await fs.writeFile(path.join(logsDir, 'transcript.jsonl'), `${JSON.stringify({
+      step_index: 0,
+      type: 'USER_INPUT',
+      status: 'DONE',
+      content: 'question',
+    })}\n`);
+
+    const collectResponses = async (store: StateStore) => {
+      const input = new AntigravityInput({
+        stateStore: store,
+        clientType: ClientType.Antigravity,
+        dataRoot: root,
+        collectHistorical: true,
+      });
+      const responseIds: Array<string | undefined> = [];
+      input.on('entries', (entries: AgentActivityEntry[]) => {
+        for (const entry of entries) {
+          if (entry['event.name'] === 'llm.response') responseIds.push(entry['gen_ai.response.id']);
+        }
+      });
+      await input.start();
+      await input.stop();
+      return responseIds;
+    };
+
+    const wallClock = vi.spyOn(Date, 'now').mockReturnValue(timestampSec * 1000 + 1_000);
+    try {
+      expect(await collectResponses(stateStore)).toEqual([]);
+      wallClock.mockReturnValue(timestampSec * 1000 + 31_001);
+      const restarted = new StateStore(path.join(tmpDir, 'state.json'));
+      await restarted.load();
+      expect(await collectResponses(restarted)).toEqual(['deferred-success']);
+      expect(await collectResponses(restarted)).toEqual([]);
+    } finally {
+      wallClock.mockRestore();
+    }
+  });
+
+  it('coalesces WAL notifications for one session and inventories transcript-only updates after watch failure', async () => {
+    const root = path.join(tmpDir, 'flat-watch');
+    const convDir = path.join(root, 'conversations');
+    const quietLogs = path.join(root, 'brain', 'quiet', '.system_generated', 'logs');
+    await fs.mkdir(convDir, { recursive: true });
+    await fs.mkdir(quietLogs, { recursive: true });
+    const activeDbPath = path.join(convDir, 'active.db');
+    createConversationDb(activeDbPath, { genRows: [] });
+    createConversationDb(path.join(convDir, 'quiet.db'), { genRows: [] });
+
+    const watcher = Object.assign(new EventEmitter(), { close: vi.fn() });
+    let notify!: (event: string, name: string | null) => void;
+    const watch = vi.fn((_dir, _options, listener: typeof notify) => {
+      notify = listener;
+      return watcher;
+    });
+    watchMockState.watch = watch as unknown as typeof watchMockState.watch;
+
+    const input = new TestAntigravityInput({
+      stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true,
+      pollIntervalMs: 60_000,
+    });
+    const emitted: AgentActivityEntry[] = [];
+    let cycles = 0;
+    input.on('entries', (batch: AgentActivityEntry[]) => emitted.push(...batch));
+    input.on('input-runtime-delta', () => { cycles++; });
+    const activeDb = new (loadDatabaseSync()!)(activeDbPath);
+    try {
+      activeDb.exec('PRAGMA journal_mode=WAL');
+      await input.start();
+      expect(watch).toHaveBeenCalledTimes(1);
+      expect(watch.mock.calls[0]?.[0]).toBe(convDir);
+
+      const response = encodeGeneratorMetadata({
+        usage: { inputTokens: 8, responseId: 'watched-model' }, timestampSec: 1_778_000_900,
+      });
+      activeDb.prepare('INSERT INTO gen_metadata (idx, data, size) VALUES (0, ?, ?)').run(response, response.length);
+      await fs.writeFile(path.join(quietLogs, 'transcript.jsonl'), JSON.stringify({
+        step_index: 0, type: 'USER_INPUT', status: 'DONE', content: 'quiet prompt',
+      }) + '\n');
+      notify('rename', 'active.db-wal');
+      notify('change', 'active.db');
+      notify('change', 'active.db-wal');
+      await vi.waitFor(() => expect(cycles).toBe(2));
+      expect(emitted.map(entry => entry['gen_ai.session.id'])).toEqual(['active', 'active']);
+
+      watch.mockImplementationOnce(() => { throw Object.assign(new Error('watch limit'), { code: 'EMFILE' }); });
+      watcher.emit('error', new Error('watch invalidated'));
+      input.poll();
+      await vi.waitFor(() => expect(cycles).toBe(3));
+      expect(emitted.map(entry => entry['gen_ai.session.id'])).toEqual(['active', 'active', 'quiet']);
+      expect(watcher.close).toHaveBeenCalledTimes(1);
+      expect(watch).toHaveBeenCalledTimes(2);
+    } finally {
+      await input.stop();
+      activeDb.close();
+      watchMockState.watch = undefined;
+    }
+  });
+
+  it('persists the audit deadline and repairs an old completed row without another source write', async () => {
+    const root = path.join(tmpDir, 'durable-audit');
+    const convDir = path.join(root, 'conversations');
+    await fs.mkdir(convDir, { recursive: true });
+    const dbPath = path.join(convDir, 'session.db');
+    const baseTime = 1_778_000_900_000;
+    const usage = (responseId: string, offset: number) => encodeGeneratorMetadata({
+      usage: { inputTokens: 8, responseId }, timestampSec: baseTime / 1000 + offset,
+    });
+    createConversationDb(dbPath, { genRows: [[0, usage('original-low', 0)], [30, usage('original-high', 1)]] });
+    const makeInput = (store: StateStore) => {
+      const input = new TestAntigravityInput({
+        stateStore: store, clientType: ClientType.AntigravityCli, dataRoot: root, collectHistorical: true,
+        pollIntervalMs: 60_000,
+      });
+      const ids: string[] = [];
+      input.on('entries', (batch: AgentActivityEntry[]) => {
+        for (const entry of batch) {
+          if (entry['event.name'] === 'llm.response' && entry['gen_ai.response.id']) ids.push(entry['gen_ai.response.id']);
+        }
+      });
+      return { input, ids };
+    };
+    const first = makeInput(stateStore);
+    const wallClock = vi.spyOn(Date, 'now').mockReturnValue(baseTime);
+    try {
+      await first.input.start();
+      expect(first.ids).toEqual(['original-low', 'original-high']);
+      wallClock.mockReturnValue(baseTime + 1_000);
+      const db = new (loadDatabaseSync()!)(dbPath);
+      try {
+        const replacement = usage('late-low', 2);
+        const append = usage('append', 3);
+        db.prepare('UPDATE gen_metadata SET data = ?, size = ? WHERE idx = 0').run(replacement, replacement.length);
+        db.prepare('INSERT INTO gen_metadata (idx, data, size) VALUES (31, ?, ?)').run(append, append.length);
+      } finally {
+        db.close();
+      }
+      first.input.poll();
+      await vi.waitFor(() => expect(first.ids).toEqual(['original-low', 'original-high', 'append']));
+      await first.input.stop();
+
+      const restartedStore = new StateStore(path.join(tmpDir, 'state.json'));
+      await restartedStore.load();
+      wallClock.mockReturnValue(baseTime + 31_001);
+      const restarted = makeInput(restartedStore);
+      try {
+        await restarted.input.start();
+        expect(restarted.ids).toEqual(['late-low']);
+      } finally {
+        await restarted.input.stop();
+      }
+      await restarted.input.start();
+      await restarted.input.stop();
+      expect(restarted.ids).toEqual(['late-low']);
+    } finally {
+      await first.input.stop();
+      wallClock.mockRestore();
+    }
+  });
+
+  it('respects WorkspacePolicy exclusions in any workspace root (DB + transcript)', async () => {
     const root = path.join(tmpDir, 'excluded-root');
     const convDir = path.join(root, 'conversations');
     const excludedWs = path.join(tmpDir, 'secret-repo');
@@ -622,7 +1003,10 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
           }),
         ],
       ],
-      trajectoryBlob: protoStringField(7, pathToFileURL(excludedWs).href),
+      trajectoryBlob: concatBytes(
+        protoStringField(7, pathToFileURL(path.join(tmpDir, 'public-repo')).href),
+        protoStringField(7, pathToFileURL(excludedWs).href),
+      ),
     });
     await fs.writeFile(
       path.join(logsDir, 'transcript.jsonl'),
@@ -638,18 +1022,65 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
       dataRoot: root,
       collectHistorical: true,
     });
-    input.setWorkspacePolicy(new WorkspacePolicy([excludedWs]));
+    const workspacePolicy = new WorkspacePolicy([excludedWs]);
+    input.setWorkspacePolicy(workspacePolicy);
 
     const collected: AgentActivityEntry[] = [];
     input.on('entries', (entries: AgentActivityEntry[]) => collected.push(...entries));
     await input.start();
     await input.stop();
     expect(collected).toHaveLength(0);
+    expect(workspacePolicy.allows({
+      'gen_ai.agent.type': ClientType.Antigravity,
+      'gen_ai.session.id': 'secret',
+    })).toBe(false);
+  });
+
+  it.each([true, false])('holds a prompt until workspace metadata arrives when exclusions are active (allowed=%s)', async (allowed) => {
+    const root = path.join(tmpDir, 'workspace-late');
+    const convDir = path.join(root, 'conversations');
+    const logsDir = path.join(root, 'brain', 'session', '.system_generated', 'logs');
+    await fs.mkdir(convDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+    const dbPath = path.join(convDir, 'session.db');
+    createConversationDb(dbPath, {
+      genRows: [],
+      trajectoryBlob: protoStringField(3, pathToFileURL(path.join(tmpDir, 'unrelated-file')).href),
+    });
+    await fs.writeFile(path.join(logsDir, 'transcript.jsonl'), JSON.stringify({
+      step_index: 0, type: 'USER_INPUT', status: 'DONE', content: 'held prompt',
+    }) + '\n');
+    const excluded = path.join(tmpDir, 'excluded');
+    const input = new TestAntigravityInput({
+      stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true,
+    });
+    input.setWorkspacePolicy(new WorkspacePolicy([excluded]));
+    const emitted: AgentActivityEntry[] = [];
+    let cycles = 0;
+    input.on('entries', (batch: AgentActivityEntry[]) => emitted.push(...batch));
+    input.on('input-runtime-delta', () => { cycles++; });
+    try {
+      await input.start();
+      expect(emitted).toEqual([]);
+      const db = new (loadDatabaseSync()!)(dbPath);
+      try {
+        const workspace = allowed ? path.join(tmpDir, 'included') : excluded;
+        db.prepare("UPDATE trajectory_metadata_blob SET data = ? WHERE id = 'main'").run(
+          protoStringField(7, pathToFileURL(workspace).href),
+        );
+      } finally {
+        db.close();
+      }
+      input.poll();
+      await vi.waitFor(() => expect(cycles).toBeGreaterThanOrEqual(2));
+      expect(emitted.map(entry => entry['event.name'])).toEqual(allowed ? ['other'] : []);
+    } finally {
+      await input.stop();
+    }
   });
 
   it('collects multimodal image and video attachments when enabled and respects uploadMode', async () => {
     expect(MULTIMODAL_SUPPORTED_AGENT_IDS).toContain('antigravity');
-    expect(MULTIMODAL_SUPPORTED_AGENT_IDS).toContain('antigravity-ide');
     expect(MULTIMODAL_SUPPORTED_AGENT_IDS).toContain('antigravity-cli');
 
     const root = path.join(tmpDir, 'mm-root');
@@ -972,6 +1403,194 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(result2?.['gen_ai.tool.call.duration']).toBe(15_000);
   });
 
+  it('assigns parallel tool results once by native ID and keeps already-published call IDs', async () => {
+    const root = path.join(tmpDir, 'parallel-tools-root');
+    const sid = 'parallel-tools';
+    const conversationsDir = path.join(root, 'conversations');
+    const logsDir = path.join(root, 'brain', sid, '.system_generated', 'logs');
+    await fs.mkdir(conversationsDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+    const dbPath = path.join(conversationsDir, `${sid}.db`);
+    const transcriptPath = path.join(logsDir, 'transcript.jsonl');
+    const baseSec = 1_778_000_900;
+    const makeToolMetadata = (id: string) =>
+      protoBytesField(4, concatBytes(protoStringField(1, id), protoStringField(2, 'run_command')));
+    const makeUsage = (stepIndex: number, responseId: string) => encodeGeneratorMetadata({
+      model: 'Gemini 3.8 Flash (High)',
+      usage: { inputTokens: 100, totalOutputTokens: 30, responseId },
+      timestampSec: baseSec + stepIndex,
+      stepIndices: [stepIndex],
+    });
+    const line = (step_index: number, type: string, fields: Record<string, unknown>) =>
+      JSON.stringify({ step_index, type, status: 'DONE',
+        created_at: new Date((baseSec + step_index) * 1000).toISOString(), ...fields }) + '\n';
+    const toolCalls = [
+      { id: 'call-a', name: 'run_command' },
+      { id: 'call-b', name: 'run_command' },
+      { name: 'run_command' },
+    ];
+    createConversationDb(dbPath, {
+      stepRows: [[2, makeToolMetadata('call-b')]],
+      genRows: [[0, makeUsage(1, 'first-response')]],
+    });
+    await fs.writeFile(transcriptPath,
+      line(0, 'USER_INPUT', { content: 'Run three tasks' }) +
+      line(1, 'PLANNER_RESPONSE', { tool_calls: toolCalls }) +
+      line(2, 'GENERIC', { content: 'result B' }) +
+      line(4, 'GENERIC', { content: 'result C' }),
+    );
+    const collect = async () => {
+      const input = new AntigravityInput({ stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true });
+      const entries: AgentActivityEntry[] = [];
+      input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+      await input.start();
+      await input.stop();
+      return entries;
+    };
+    const results = (entries: AgentActivityEntry[]) => Object.fromEntries(entries
+      .filter((entry) => entry['event.name'] === 'tool.result')
+      .map((entry) => [entry['gen_ai.tool.call.id'], entry['gen_ai.tool.call.result']]));
+
+    const first = await collect();
+    expect(results(first)).toEqual({ 'call-b': 'result B' });
+    const fallbackId = first.filter((entry) => entry['event.name'] === 'tool.call')[2]?.['gen_ai.tool.call.id'];
+    expect(fallbackId).toBe(`${sid}:step:1:tc:2`);
+
+    const DatabaseSync = loadDatabaseSync()!;
+    const db = new DatabaseSync(dbPath);
+    try {
+      const finalUsage = makeUsage(5, 'final-response');
+      db.prepare('INSERT INTO steps (idx, metadata) VALUES (?, ?)').run(3, makeToolMetadata('call-a'));
+      db.prepare('INSERT INTO steps (idx, metadata) VALUES (?, ?)').run(4, makeToolMetadata('call-c'));
+      db.prepare('INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)').run(1, finalUsage, finalUsage.length);
+    } finally {
+      db.close();
+    }
+    await fs.appendFile(transcriptPath,
+      line(1, 'PLANNER_RESPONSE', { tool_calls: [...toolCalls.slice(0, 2), { id: 'call-c', name: 'run_command' }] }) +
+      line(3, 'GENERIC', { content: 'result A' }) +
+      line(5, 'PLANNER_RESPONSE', { content: 'Finished' }),
+    );
+    const second = await collect();
+    expect(results(second)).toEqual({ 'call-a': 'result A', [fallbackId!]: 'result C' });
+    expect(second.filter((entry) => entry['event.name'] === 'tool.call')).toEqual([]);
+    const finalRequest = second.find((entry) => entry['event.name'] === 'llm.request');
+    expect(finalRequest?.['gen_ai.input.messages_delta']).toContainEqual({
+      role: 'tool',
+      parts: [
+        { type: 'tool_call_response', id: 'call-a', response: 'result A' },
+        { type: 'tool_call_response', id: 'call-b', response: 'result B' },
+        { type: 'tool_call_response', id: fallbackId, response: 'result C' },
+      ],
+    });
+  });
+
+  it.each([false, true])('keeps a known background tool in its exported turn after a later planner (next prompt=%s)', async (nextPrompt) => {
+    const root = path.join(tmpDir, 'background-tool-root');
+    const sid = 'background-tool';
+    const conversationsDir = path.join(root, 'conversations');
+    const logsDir = path.join(root, 'brain', sid, '.system_generated', 'logs');
+    await fs.mkdir(conversationsDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+    const dbPath = path.join(conversationsDir, `${sid}.db`);
+    const transcriptPath = path.join(logsDir, 'transcript.jsonl');
+    const baseSec = 1_778_001_000;
+    const firstTurn = 'ad1261f6-11dc-4101-ae6b-eb9986b0b8bc';
+    const nextTurn = '69db8061-57d1-4fd7-83d5-efd4d51d24d8';
+    const turnMeta = (turn: string) => protoStringField(12, turn);
+    const line = (step_index: number, type: string, fields: Record<string, unknown>) =>
+      JSON.stringify({ step_index, type, status: 'DONE',
+        created_at: new Date((baseSec + step_index) * 1000).toISOString(), ...fields }) + '\n';
+    createConversationDb(dbPath, { genRows: [[0, encodeGeneratorMetadata({
+      model: 'Gemini 3.8 Flash (High)',
+      usage: { inputTokens: 100, totalOutputTokens: 30, responseId: 'background-response' },
+      timestampSec: baseSec + 1,
+      stepIndices: [1],
+    })]], stepRows: [[0, turnMeta(firstTurn)], [1, turnMeta(firstTurn)]] });
+    await fs.writeFile(transcriptPath,
+      line(0, 'USER_INPUT', { content: 'Run work in background' }) +
+      line(1, 'PLANNER_RESPONSE', { tool_calls: [{ id: 'background', name: 'run_command' }] }),
+    );
+    const poll = async () => {
+      const input = new AntigravityInput({ stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true });
+      const entries: AgentActivityEntry[] = [];
+      input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+      await input.start();
+      await input.stop();
+      return entries;
+    };
+    const { flusher, spans } = captureTraceSpans();
+    try {
+      const first = await poll();
+      expect(first.find(entry => entry['event.name'] === 'tool.call')?.['gen_ai.tool.call.id']).toBe('background');
+      await flusher.sendBatch(first);
+
+      const DatabaseSync = loadDatabaseSync()!;
+      const db = new DatabaseSync(dbPath);
+      try {
+        const finalUsage = encodeGeneratorMetadata({
+          model: 'Gemini 3.8 Flash (High)',
+          usage: { inputTokens: 140, totalOutputTokens: 35, responseId: 'background-final' },
+          timestampSec: baseSec + 2,
+          stepIndices: [2],
+        });
+        db.prepare('INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)').run(1, finalUsage, finalUsage.length);
+      } finally {
+        db.close();
+      }
+      // The model stops while its earlier tool is still outstanding.
+      await fs.appendFile(transcriptPath, line(2, 'PLANNER_RESPONSE', { content: 'Background work started' }));
+      const second = await poll();
+      const terminalResponse = second.find(entry => entry['event.name'] === 'llm.response');
+      expect(terminalResponse?.['gen_ai.response.finish_reasons']).toEqual(['stop']);
+      expect(terminalResponse?.['gen_ai.turn.end']).toBe(false);
+      await flusher.sendBatch(second);
+      expect(spans).toEqual([]);
+
+      if (nextPrompt) {
+        const nextDb = new DatabaseSync(dbPath);
+        try {
+          nextDb.prepare('INSERT INTO steps (idx, metadata) VALUES (?, ?)').run(3, turnMeta(nextTurn));
+        } finally {
+          nextDb.close();
+        }
+        await fs.appendFile(transcriptPath, line(3, 'USER_INPUT', { content: 'Independent new work' }));
+        const next = await poll();
+        expect(next).toMatchObject([{ 'event.name': 'other', 'gen_ai.turn.id': `${sid}:${nextTurn}` }]);
+        await flusher.sendBatch(next);
+        expect(spans).toEqual([]);
+      }
+
+      const resultIdx = nextPrompt ? 4 : 3;
+      const updatedDb = new DatabaseSync(dbPath);
+      try {
+        const metadata = concatBytes(turnMeta(firstTurn), protoBytesField(4, concatBytes(
+          protoStringField(1, 'background'), protoStringField(2, 'run_command'),
+        )));
+        updatedDb.prepare('INSERT INTO steps (idx, metadata) VALUES (?, ?)').run(resultIdx, metadata);
+      } finally {
+        updatedDb.close();
+      }
+      await fs.appendFile(transcriptPath, line(resultIdx, 'GENERIC', { content: 'background result' }));
+      const third = await poll();
+      const result = third.find(entry => entry['event.name'] === 'tool.result');
+      expect(result).toMatchObject({
+        'gen_ai.tool.call.id': 'background',
+        'gen_ai.tool.call.result': 'background result',
+        'gen_ai.turn.id': `${sid}:${firstTurn}`,
+        'gen_ai.turn.end': true,
+      });
+      await flusher.sendBatch(third);
+      expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL').map(span => ({
+        id: span.attributes['gen_ai.tool.call.id'],
+        traceId: span.spanContext().traceId,
+        spanId: span.spanContext().spanId,
+      }))).toEqual([{ id: 'background', traceId: result?.trace_id, spanId: result?.span_id }]);
+    } finally {
+      await flusher.shutdown();
+    }
+  });
+
   it('prevents infinite replay in long sessions (>512 events) via monotonic genIdx watermark', async () => {
     const root = path.join(tmpDir, 'long-sess-root');
     const convDir = path.join(root, 'conversations');
@@ -1193,6 +1812,30 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(extractWorkspacePathFromBlob(uncRemote)).toBeUndefined();
     expect(extractWorkspacePathFromBlob(nativePrioritized)).toBe('/Users/demo/real-workspace');
     expect(extractWorkspacePathFromBlob(mixed)).toBe('/Users/demo/project');
+  });
+
+  it('handles an absent transcript and cancels an in-flight read without returning a partial snapshot', async () => {
+    const sessionId = 'transcript-cancellation';
+    const logsDir = path.join(tmpDir, 'brain', sessionId, '.system_generated', 'logs');
+    expect(await readAntigravityTranscript(tmpDir, sessionId)).toBeNull();
+
+    await fs.mkdir(logsDir, { recursive: true });
+    await fs.writeFile(path.join(logsDir, 'transcript.jsonl'), JSON.stringify({
+      step_index: 1, type: 'USER_INPUT', content: 'Hello',
+    }) + '\n');
+    let runningChecks = 0;
+    expect(await readAntigravityTranscript(tmpDir, sessionId, () => ++runningChecks < 3)).toBeNull();
+    expect(await readAntigravityTranscript(tmpDir, sessionId)).toMatchObject({
+      steps: [{ stepIndex: 1, content: 'Hello' }],
+    });
+  });
+
+  it.runIf(process.platform !== 'win32')('propagates transcript I/O failures for the collector to retry', async () => {
+    const sessionId = 'transcript-io-error';
+    const logsDir = path.join(tmpDir, 'brain', sessionId, '.system_generated', 'logs');
+    await fs.mkdir(logsDir, { recursive: true });
+    await fs.symlink('transcript.jsonl', path.join(logsDir, 'transcript.jsonl'));
+    await expect(readAntigravityTranscript(tmpDir, sessionId)).rejects.toMatchObject({ code: 'ELOOP' });
   });
 
   it('reads >8 MiB multi-chunk transcripts with a multi-byte UTF-8 character straddling byte 524,288 and skips >4 MiB lines', async () => {
@@ -1691,107 +2334,73 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(runtimeDeltas).toBe(2);
   });
 
-  it('evicts sessions past 512 cap with a watermark so evicted old sessions are never replayed', async () => {
-    const root = path.join(tmpDir, 'eviction-root');
+  it('resumes the oldest of more than 512 collected conversations and picks up a newly imported older DB', async () => {
+    const root = path.join(tmpDir, 'many-conversations');
     const convDir = path.join(root, 'conversations');
     await fs.mkdir(convDir, { recursive: true });
 
-    // Pre-populate StateStore with 512 tracked sessions at mtime 2_000_000..2_000_511
-    // plus one brand-new DB at mtime 2_001_000 AND one older evicted DB at mtime 1_000_000
-    const sessions: Record<string, unknown> = {};
-    for (let i = 0; i < 512; i++) {
-      sessions[`hist-${i}`] = {
-        effectiveMtimeMs: 2_000_000 + i,
-        effectiveSize: 100,
-        maxEmittedGenIdx: 0,
-        maxEmittedStepIdx: -1,
-        emittedUsageKeys: [`response:h-${i}`],
-        lastTranscriptStepIndex: -1,
-        pendingToolCalls: [],
-      };
-    }
-    stateStore.set(ClientType.Antigravity, {
-      lastTimestamp: Date.now(),
-      extra: {
-        antigravityCheckpoint: {
-          schema: 1,
-          seeded: true,
-          evictedWatermarkMtimeMs: 0,
-          sessions,
-        },
-      },
+    const blob = (responseId: string) => encodeGeneratorMetadata({
+      usage: { inputTokens: 10, totalOutputTokens: 5, responseId },
+      timestampSec: 1_778_011_000,
     });
-
-    // Place the oldest tracked session (`hist-0`) on disk with its exact old mtime (2_000_000)
-    // and add a new session (`newest`) so saving 513 sessions evicts `hist-0` and sets watermark=2_000_000.
-    const oldestDb = path.join(convDir, 'hist-0.db');
-    createConversationDb(oldestDb, {
-      genRows: [
-        [
-          0,
-          encodeGeneratorMetadata({
-            model: 'Gemini 3.8 Flash (High)',
-            usage: { inputTokens: 10, totalOutputTokens: 5, visibleOutputTokens: 5, responseId: 'h-0' },
-            timestampSec: 1_778_011_000,
-          }),
-        ],
-      ],
-    });
-    const oldDate = new Date(2_000_000);
+    const oldestDb = path.join(convDir, 'oldest.db');
+    createConversationDb(oldestDb, { genRows: [[0, blob('seeded')]] });
+    await Promise.all(Array.from({ length: 512 }, (_, i) =>
+      fs.copyFile(oldestDb, path.join(convDir, `session-${i}.db`)),
+    ));
+    const oldDate = new Date(1_778_000_000_000);
     await fs.utimes(oldestDb, oldDate, oldDate);
-    // Keep hist-0's size matching the pre-populated checkpoint so cycle 1 skips it and evicts it
-    const oldStat = await fs.stat(oldestDb);
-    (sessions['hist-0'] as { effectiveSize: number }).effectiveSize = oldStat.size;
 
-    const newestDb = path.join(convDir, 'newest.db');
-    createConversationDb(newestDb, {
-      genRows: [
-        [
-          0,
-          encodeGeneratorMetadata({
-            model: 'Gemini 3.8 Flash (High)',
-            usage: { inputTokens: 20, totalOutputTokens: 8, visibleOutputTokens: 8, responseId: 'newest-r1' },
-            timestampSec: 1_778_011_100,
-          }),
-        ],
-      ],
-    });
-
-    const input1 = new AntigravityInput({
-      stateStore,
+    const initialInput = new AntigravityInput({
       clientType: ClientType.Antigravity,
       dataRoot: root,
-      collectHistorical: false,
-    });
-    const c1: AgentActivityEntry[] = [];
-    input1.on('entries', (entries: AgentActivityEntry[]) => c1.push(...entries));
-    await input1.start();
-    await input1.stop();
-    expect(c1.filter((e) => e['event.name'] === 'llm.response').map((e) => e['gen_ai.response.id'])).toEqual([
-      'newest-r1',
-    ]);
-
-    // Verify hist-0 was evicted and evictedWatermarkMtimeMs recorded
-    const cp = stateStore.get(ClientType.Antigravity)?.extra?.antigravityCheckpoint as {
-      evictedWatermarkMtimeMs: number;
-      sessions: Record<string, unknown>;
-    };
-    expect(Object.keys(cp.sessions)).toHaveLength(512);
-    expect(cp.sessions['hist-0']).toBeUndefined();
-    expect(cp.evictedWatermarkMtimeMs).toBeGreaterThanOrEqual(2_000_000);
-
-    // Cycle 2 must NOT replay evicted hist-0.db
-    const input2 = new AntigravityInput({
       stateStore,
+      collectHistorical: true,
+    });
+    const seenSessions = new Set<string>();
+    initialInput.on('entries', (entries: AgentActivityEntry[]) => {
+      for (const entry of entries) {
+        if (entry['event.name'] === 'llm.response') seenSessions.add(entry['gen_ai.session.id']!);
+      }
+    });
+    try {
+      await initialInput.start();
+      await vi.waitFor(() => expect(seenSessions.size).toBe(513), { timeout: 10_000 });
+    } finally {
+      await initialInput.stop();
+    }
+
+    const DatabaseSync = loadDatabaseSync()!;
+    const db = new DatabaseSync(oldestDb);
+    try {
+      const next = blob('new-in-resumed');
+      db.prepare('INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)').run(1, next, next.length);
+    } finally {
+      db.close();
+    }
+    const refreshedDate = new Date(1_778_002_000_000);
+    await fs.utimes(oldestDb, refreshedDate, refreshedDate);
+    const importedDb = path.join(convDir, 'imported.db');
+    createConversationDb(importedDb, { genRows: [[0, blob('imported')]] });
+    const importedDate = new Date(oldDate.getTime() - 60_000);
+    await fs.utimes(importedDb, importedDate, importedDate);
+
+    const restartedStore = new StateStore(path.join(tmpDir, 'state.json'));
+    await restartedStore.load();
+    const restarted = new AntigravityInput({
       clientType: ClientType.Antigravity,
       dataRoot: root,
-      collectHistorical: false,
+      stateStore: restartedStore,
     });
-    const c2: AgentActivityEntry[] = [];
-    input2.on('entries', (entries: AgentActivityEntry[]) => c2.push(...entries));
-    await input2.start();
-    await input2.stop();
-    expect(c2).toHaveLength(0);
+    const responseIds: Array<string | undefined> = [];
+    restarted.on('entries', (entries: AgentActivityEntry[]) => {
+      for (const entry of entries) {
+        if (entry['event.name'] === 'llm.response') responseIds.push(entry['gen_ai.response.id']);
+      }
+    });
+    await restarted.start();
+    await restarted.stop();
+    expect(responseIds.sort()).toEqual(['imported', 'new-in-resumed']);
   });
 
   it('converts image and video media via real MultimodalProcessor with symlinked dataRoot and rejects paths outside allowedRootPaths', async () => {
@@ -2622,6 +3231,65 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(resps2.map((e) => e['gen_ai.response.id'])).toEqual(['late-zero-1']);
   });
 
+  it('exports two SQLite-only updates through the same OTLP flusher without a phantom parent', async () => {
+    const root = path.join(tmpDir, 'sqlite-only-otlp');
+    const conversationsDir = path.join(root, 'conversations');
+    await fs.mkdir(conversationsDir, { recursive: true });
+    const dbPath = path.join(conversationsDir, 'sqlite-only.db');
+    const makeUsage = (stepIndex: number, responseId: string, inputTokens: number) =>
+      encodeGeneratorMetadata({
+        model: 'Gemini 3.8 Flash (High)',
+        usage: { inputTokens, totalOutputTokens: 3, responseId },
+        timestampSec: 1_778_023_000 + stepIndex,
+        stepIndices: [stepIndex],
+      });
+    createConversationDb(dbPath, { genRows: [[0, makeUsage(1, 'sqlite-response-1', 10)]] });
+
+    const { flusher, spans } = captureTraceSpans();
+    const poll = async (clientType: AntigravityClientType = ClientType.Antigravity) => {
+      const input = new AntigravityInput({ stateStore, clientType, dataRoot: root, collectHistorical: true });
+      const entries: AgentActivityEntry[] = [];
+      input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+      await input.start();
+      await input.stop();
+      await flusher.sendBatch(entries);
+      return entries.find(entry => entry['event.name'] === 'llm.response')!;
+    };
+
+    try {
+      const first = await poll();
+      const otherVariant = await poll(ClientType.AntigravityCli);
+      expect(otherVariant['gen_ai.turn.id']).toBe(first['gen_ai.turn.id']);
+      expect(otherVariant.trace_id).not.toBe(first.trace_id);
+      const DatabaseSync = loadDatabaseSync()!;
+      const db = new DatabaseSync(dbPath);
+      try {
+        const next = makeUsage(3, 'sqlite-response-2', 20);
+        db.prepare('INSERT INTO gen_metadata (idx, data, size) VALUES (?, ?, ?)').run(1, next, next.length);
+      } finally {
+        db.close();
+      }
+      const second = await poll();
+      await flusher.flush();
+
+      const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+      expect(llms).toHaveLength(3);
+      for (const response of [first, second, otherVariant]) {
+        const llm = llms.find(span => span.spanContext().traceId === response.trace_id);
+        expect(llm?.attributes['gen_ai.response.id']).toBe(response['gen_ai.response.id']);
+        expect(llm?.attributes['gen_ai.usage.input_tokens']).toBe(response['gen_ai.usage.input_tokens']);
+        expect(llm?.spanContext().traceId).toBe(response.trace_id);
+        expect(llm?.spanContext().spanId).toBe(response.span_id);
+        const entry = spans.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY'
+          && span.spanContext().traceId === response.trace_id);
+        expect(entry).toBeDefined();
+        expect(entry?.parentSpanId).toBeUndefined();
+      }
+    } finally {
+      await flusher.shutdown();
+    }
+  });
+
   it('tracks cross-cycle retries via persisted emittedPrimaryStepIdxs without reusing parent step bounds', async () => {
     const root = path.join(tmpDir, 'cross-cycle-retry-root');
     const convDir = path.join(root, 'conversations');
@@ -2688,5 +3356,134 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     // Retry uses its own 2s window (baseSec+10..baseSec+12), NOT parent step's baseSec..baseSec+5!
     expect(BigInt(retryReq.time_unix_nano)).toBe(BigInt((baseSec + 10) * 1000) * 1_000_000n);
     expect(BigInt(retryResp.time_unix_nano)).toBe(BigInt((baseSec + 12) * 1000) * 1_000_000n);
+    expect(retryReq['gen_ai.input.messages_delta']).toBeUndefined();
+    expect(retryResp['gen_ai.output.messages']).toBeUndefined();
+    expect(retryResp['gen_ai.turn.id']).not.toBe(mainResp['gen_ai.turn.id']);
+
+    const { flusher, spans } = captureTraceSpans();
+    try {
+      await flusher.sendBatch(c1);
+      await flusher.sendBatch(c2);
+      await flusher.flush();
+      const usageByResponse = Object.fromEntries(spans
+        .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')
+        .map(span => [span.attributes['gen_ai.response.id'], span.attributes['gen_ai.usage.output_tokens']]));
+      expect(usageByResponse).toEqual({ 'cc-main': 20, 'cc-retry': 25 });
+    } finally {
+      await flusher.shutdown();
+    }
+  });
+
+  it('emits a new response when its generation slot is reused and the old response moves to retries', async () => {
+    const root = path.join(tmpDir, 'reused-gen-slot');
+    const convDir = path.join(root, 'conversations');
+    await fs.mkdir(convDir, { recursive: true });
+    const dbPath = path.join(convDir, 'reuse.db');
+    const first = { inputTokens: 4, totalOutputTokens: 2, responseId: 'original' };
+    createConversationDb(dbPath, {
+      genRows: [[0, encodeGeneratorMetadata({ usage: first, timestampSec: 1_778_023_000 })]],
+    });
+
+    const input = new AntigravityInput({
+      stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true,
+    });
+    const responseIds: string[] = [];
+    input.on('entries', (entries: AgentActivityEntry[]) => {
+      for (const entry of entries) {
+        if (entry['event.name'] === 'llm.response') responseIds.push(entry['gen_ai.response.id']!);
+      }
+    });
+    await input.start();
+    await input.stop();
+
+    const replacement = encodeGeneratorMetadata({
+      usage: { inputTokens: 8, totalOutputTokens: 5, responseId: 'replacement' },
+      retries: [first],
+      timestampSec: 1_778_023_003,
+    });
+    const DatabaseSync = loadDatabaseSync()!;
+    const db = new DatabaseSync(dbPath);
+    try {
+      db.prepare('UPDATE gen_metadata SET data = ?, size = ? WHERE idx = 0').run(replacement, replacement.length);
+    } finally {
+      db.close();
+    }
+    await input.start();
+    await input.stop();
+    expect(responseIds).toEqual(['original', 'replacement']);
+  });
+
+  it('seeds previously evicted files on upgrade and accepts older-mtime imports after that inventory', async () => {
+    const root = path.join(tmpDir, 'legacy-eviction');
+    const convDir = path.join(root, 'conversations');
+    await fs.mkdir(convDir, { recursive: true });
+    const input = new AntigravityInput({
+      stateStore, clientType: ClientType.Antigravity, dataRoot: root,
+    });
+    const cutoff = new Date('2026-06-01T00:00:00Z');
+    const old = new Date('2026-05-01T00:00:00Z');
+    stateStore.set(input.id, {
+      lastTimestamp: cutoff.getTime(),
+      extra: {
+        antigravityCheckpoint: {
+          schema: 1, seeded: true, sessions: {}, evictedWatermarkMtimeMs: cutoff.getTime(),
+        },
+      },
+    });
+    const writeDb = async (name: string) => {
+      const dbPath = path.join(convDir, `${name}.db`);
+      createConversationDb(dbPath, {
+        genRows: [[0, encodeGeneratorMetadata({
+          usage: { inputTokens: 4, totalOutputTokens: 2, responseId: name },
+          timestampSec: old.getTime() / 1000,
+        })]],
+      });
+      await fs.utimes(dbPath, old, old);
+    };
+    const responseIds: Array<string | undefined> = [];
+    input.on('entries', (entries: AgentActivityEntry[]) => {
+      for (const entry of entries) {
+        if (entry['event.name'] === 'llm.response') responseIds.push(entry['gen_ai.response.id']);
+      }
+    });
+    await writeDb('previously-evicted');
+    await input.start();
+    await input.stop();
+    expect(responseIds).toEqual([]);
+
+    await writeDb('new-import');
+    await input.start();
+    await input.stop();
+    expect(responseIds).toEqual(['new-import']);
+  });
+
+  it('collects a previously absent lower transcript step without replaying higher steps', async () => {
+    const root = path.join(tmpDir, 'late-lower-transcript');
+    const convDir = path.join(root, 'conversations');
+    const logsDir = path.join(root, 'brain', 'late', '.system_generated', 'logs');
+    await fs.mkdir(convDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+    createConversationDb(path.join(convDir, 'late.db'), { genRows: [] });
+    const transcriptPath = path.join(logsDir, 'transcript.jsonl');
+    const prompt = (step_index: number, content: string) => JSON.stringify({
+      step_index, type: 'USER_INPUT', status: 'DONE', content,
+    }) + '\n';
+    await fs.writeFile(transcriptPath, prompt(2, 'higher prompt'));
+
+    const input = new AntigravityInput({
+      stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true,
+    });
+    const prompts: AgentActivityEntry[] = [];
+    input.on('entries', (entries: AgentActivityEntry[]) => {
+      prompts.push(...entries.filter((entry) => entry['event.name'] === 'other'));
+    });
+    await input.start();
+    await input.stop();
+    await fs.appendFile(transcriptPath, prompt(0, 'lower prompt'));
+    await input.start();
+    await input.stop();
+
+    expect(prompts.map((entry) => entry['gen_ai.step.id'])).toEqual(['late:step:2', 'late:step:0']);
+    expect(new Set(prompts.map((entry) => entry['gen_ai.turn.id'])).size).toBe(2);
   });
 });

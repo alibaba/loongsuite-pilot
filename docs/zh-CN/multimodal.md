@@ -15,7 +15,7 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（图像的内�
 | 项 | 现状 |
 |----|------|
 | 媒体类型 | **图像**和**视频**。音频后续再支持。 |
-| 已实现 Agent | **`codex`**、**`qoder`（IDE 与 CLI）**、**`qwen-work-cn`**、**`antigravity` / `antigravity-ide` / `antigravity-cli`**。其他 Agent 即使配置了 `uploadMode` 也不会转换或上传。 |
+| 已实现 Agent | **`codex`**、**`qoder`（IDE 与 CLI）**、**`qwen-work-cn`**、**`antigravity` / `antigravity-cli`**。其他 Agent 即使配置了 `uploadMode` 也不会转换或上传。 |
 
 ### 判定依据
 
@@ -27,7 +27,7 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（图像的内�
 | Qoder IDE | SQLite 附件；transcript | 本地路径 |
 | Qoder CLI | transcript | 本地路径（粘贴 / `@` / Read / ImageGen），读盘后转 `uri` |
 | 千问办公 | transcript | 本地路径（粘贴标签、`Read`、`qwenwork_media_read`、生成与展示工具） |
-| Antigravity / Antigravity IDE / Antigravity CLI | transcript（`transcript.jsonl`） | 本地路径（`USER_INPUT`、`SYSTEM_MESSAGE`、`PLANNER_RESPONSE` 与工具结果 step 上的 `media[].uri`） |
+| Antigravity App / 新 IDE 和 CLI | transcript（`transcript.jsonl`） | 本地路径（`USER_INPUT`、`SYSTEM_MESSAGE`、`PLANNER_RESPONSE` 与工具结果 step 上的 `media[].uri`） |
 
 ## 如何开启
 
@@ -100,7 +100,7 @@ loongsuite-pilot restart
 | `qoder` | `~/.qoder/tmp`（CLI 粘贴）、`~/.qoder/vibe_images`（ImageGen），以及桌面 IDE 粘贴缓存 `…/Qoder/SharedClientCache/cache/images`（`~/Library/Application Support/Qoder` / `%APPDATA%/Qoder` / `~/.config/Qoder`；远端 Linux hashed profile 是 `<appRoot>/<hash>/SharedClientCache/cache/images`）。 |
 | `codex` | `~/.codex`（预留；Codex 目前走内联 base64，不读盘）。 |
 | `qwen-work-cn` | `~/.qwenworkcn/workspace`（剪贴板粘贴的 `uploads/`）、`~/.qwenworkcn/tmp`。 |
-| `antigravity` / `antigravity-ide` / `antigravity-cli` | 分别为 `~/.gemini/antigravity/brain`、`~/.gemini/antigravity-ide/brain`、`~/.gemini/antigravity-cli/brain`。 |
+| `antigravity` / `antigravity-cli` | 分别为 `~/.gemini/antigravity/brain` 和 `~/.gemini/antigravity-cli/brain`。 |
 
 UNC/设备路径、符号链接都会跳过。图片后缀只认图片文件头，认不出就跳过。视频后缀 `.mp4`、`.mov`、`.m4v`、`.3gp`、`.3g2` 要有偏移 4 处的 `ftyp`，且 major brand 不是 `M4A `、`M4B `、`M4P `；`.webm`、`.mkv` 要有 EBML 头；`.avi` 要有 `RIFF` 且偏移 8 为 `AVI `。后缀和文件头不是同一族就跳过。本地路径一律按文件系统路径处理；后缀后的 URL query（例如 markdown 里的 `a.png?x=1`）不会剥掉，`pathToUri` 不会回退到去掉 query 的路径。
 
@@ -113,7 +113,7 @@ UNC/设备路径、符号链接都会跳过。图片后缀只认图片文件头�
 | `codex` | 是 | 见下方 [Codex](#codex)。 |
 | `qoder` | 是 | 见下方 [Qoder IDE](#qoder-ide) 与 [Qoder CLI](#qoder-cli)。 |
 | `qwen-work-cn` | 是 | 见下方 [千问办公](#千问办公)。 |
-| `antigravity` / `antigravity-ide` / `antigravity-cli` | 是 | 见下方 [Antigravity](#antigravity)。 |
+| `antigravity` / `antigravity-cli` | 是 | 见下方 [Antigravity](#antigravity)。 |
 | 其他 | 否 | 配置 `uploadMode` 目前无效，等待对应 extractor 落地。 |
 
 ### Codex
@@ -185,7 +185,7 @@ Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一�
 
 ### Antigravity
 
-Antigravity（`antigravity`、`antigravity-ide`、`antigravity-cli`）从 `<dataRoot>/brain/<sessionId>/.system_generated/logs/transcript.jsonl` 中的 `media[].uri` 提取本地图片与视频路径，经 `MultimodalProcessor.pathToUri` 转为 `uri` part。各变体通过各自的 `agents.<id>.multimodal` 独立配置。失败 fail-open，不影响文本与 token 采集。
+Antigravity 从 `<dataRoot>/brain/<sessionId>/.system_generated/logs/transcript.jsonl` 中的 `media[].uri` 提取本地图片与视频路径，经 `MultimodalProcessor.pathToUri` 转为 `uri` part。App 和新 IDE 共用 `agents.antigravity.multimodal`，CLI 使用 `agents.antigravity-cli.multimodal`。媒体转换失败时继续采集文本和 token。
 
 | `uploadMode` | Antigravity 采集表面 | 典型用户操作 / 事件 |
 |--------------|----------------------|---------------------|

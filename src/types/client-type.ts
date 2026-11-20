@@ -15,7 +15,6 @@ export enum ClientType {
   Kiro = 'kiro',
   KiroCli = 'kiro-cli',
   Antigravity = 'antigravity',
-  AntigravityIde = 'antigravity-ide',
   Lingma = 'lingma',
   LingmaVscode = 'lingma-vscode',
   Wukong = 'wukong',

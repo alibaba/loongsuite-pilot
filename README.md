@@ -54,8 +54,7 @@ Pilot is designed to answer practical questions:
 
 | Agent         | Integration               | Trace Export | Log Export | Token Usage | Conversation / Tool Calls | Multimodal |
 | ------------- | ------------------------- | ------------ | ---------- | ----------- | ------------------------- | ---------- |
-| Antigravity   | Read-only SQLite + transcript | Yes      | Yes        | Yes         | Yes                       | Yes (Opt-in) |
-| Antigravity IDE | Read-only SQLite + transcript | Yes    | Yes        | Yes         | Yes                       | Yes (Opt-in) |
+| Antigravity App / new IDE | Read-only SQLite + transcript | Yes | Yes | Yes | Yes | Yes (Opt-in) |
 | Antigravity CLI (`agy`) | Read-only SQLite + transcript | Yes | Yes   | Yes         | Yes                       | Yes (Opt-in) |
 | Claude Code   | Hook                      | Yes          | Yes        | Yes         | Yes                       | No         |
 | Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       | Yes (Opt-in) |

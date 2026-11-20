@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import * as fileWatch from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
@@ -23,16 +24,19 @@ import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import { loadDatabaseSync } from '../../utils/node-sqlite.js';
+import { DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import {
-  isStrongUsageIdentity,
+  AntigravityDbReadCache,
   readAntigravityConversationDb,
   type AntigravityConversationSnapshot,
   type AntigravityStepInfo,
   type AntigravityUsageEvent,
 } from './sqlite-reader.js';
 import {
+  AntigravityTranscriptChangedError,
   readAntigravityTranscript,
   type AntigravityTranscript,
+  type AntigravityTranscriptCache,
   type AntigravityTranscriptStep,
 } from './transcript-reader.js';
 import {
@@ -43,22 +47,20 @@ import {
 
 export type AntigravityClientType =
   | ClientType.Antigravity
-  | ClientType.AntigravityIde
   | ClientType.AntigravityCli;
 
 const DEFAULT_ROOT_SEGMENTS: Readonly<Record<AntigravityClientType, string>> = {
   [ClientType.Antigravity]: '~/.gemini/antigravity',
-  [ClientType.AntigravityIde]: '~/.gemini/antigravity-ide',
   [ClientType.AntigravityCli]: '~/.gemini/antigravity-cli',
 };
 
 const MAX_DBS_PER_CYCLE = 16;
-const MAX_TRACKED_SESSIONS = 512;
-const MAX_EMITTED_KEYS_PER_SESSION = 512;
-const MAX_PENDING_TOOL_CALLS_PER_SESSION = 128;
-const MAX_LATCHED_TURNS_PER_SESSION = 128;
-const MAX_LATCHED_TOOL_CALLS_PER_SESSION = 256;
+const MAX_CACHED_SESSIONS = 16;
+const WATCH_BATCH_MS = 300;
+const SOURCE_AUDIT_DELAY_MS = 30_000;
+const SOURCE_AUDIT_MAX_DELAY_MS = 120_000;
 const BACKLOG_DRAIN_DELAY_MS = 50;
+const TRANSCRIPT_JOIN_GRACE_MS = 30_000;
 const DB_FAILURE_BACKOFF_BASE_MS = 15_000;
 const DB_FAILURE_BACKOFF_MAX_MS = 300_000;
 
@@ -115,43 +117,8 @@ function isToolErrorStatus(status: string | undefined): boolean {
   return upper === 'ERROR' || upper === 'CANCELED' || upper === 'CANCELLED';
 }
 
-function usageKeyMeta(usage: AntigravityUsageEvent): [number, number] {
-  const genIdx = usage.genIdx ?? -1;
-  const stepIdx =
-    usage.genIdx === undefined && usage.stepIndices.length > 0
-      ? Math.max(...usage.stepIndices)
-      : -1;
-  return [genIdx, stepIdx];
-}
-
-function recordUsageIdentities(
-  seenKeys: Set<string>,
-  keyOrder: string[],
-  keyMeta: Array<[number, number]>,
-  usage: AntigravityUsageEvent,
-): void {
-  const strongIds = usage.identities.filter(isStrongUsageIdentity);
-  const toRecord = strongIds.length > 0 ? [usage.key, ...strongIds] : [usage.key, ...usage.identities];
-  const meta = usageKeyMeta(usage);
-  for (const id of toRecord) {
-    if (seenKeys.has(id)) continue;
-    seenKeys.add(id);
-    keyOrder.push(id);
-    keyMeta.push(meta);
-  }
-}
-
-function collectSeedUsageCursor(events: readonly AntigravityUsageEvent[]): {
-  keys: string[];
-  meta: Array<[number, number]>;
-} {
-  const seen = new Set<string>();
-  const keys: string[] = [];
-  const meta: Array<[number, number]> = [];
-  for (const event of events) {
-    recordUsageIdentities(seen, keys, meta, event);
-  }
-  return { keys, meta };
+function usageResponseKey(usage: AntigravityUsageEvent): string | undefined {
+  return usage.identities.find((id) => id.startsWith('response:'));
 }
 
 function extractStepOrder(stepId: string | undefined): number {
@@ -175,38 +142,52 @@ interface PendingToolCall {
   callTsMs?: number;
 }
 
+interface SourceAudit {
+  atMs: number;
+  byMs: number;
+}
+
 interface SessionCheckpoint {
-  effectiveMtimeMs: number;
-  effectiveSize: number;
-  /** Highest genIdx among evicted keys (advanced only on eviction, never blocking out-of-order 0-token rows). */
-  maxEmittedGenIdx: number;
-  /** Highest stepIdx among evicted step-only keys (advanced only on eviction). */
-  maxEmittedStepIdx: number;
+  sourceSignature?: string;
+  /** Durable deadlines to verify older records after incremental reads. */
+  dbAudit?: SourceAudit;
+  transcriptAudit?: SourceAudit;
+  /** Earliest deadline for rechecking an incomplete SQLite/transcript join. */
+  retryAtMs?: number;
+  joinDeadlines?: Record<string, number>;
   emittedUsageKeys: string[];
-  /** Parallel `[genIdx, stepIdx]` metadata for `emittedUsageKeys` to compute exact eviction watermarks. */
-  emittedKeyMeta?: Array<[number, number]>;
-  /** Unemitted 0-token or Loop-3-deferred genIdx values exempt from >512-key eviction watermarks. */
+  usageResponseKeysBySource?: Record<string, string>;
+  /** Legacy eviction state, used only on the first rescan of older checkpoints. */
+  maxEmittedGenIdx?: number;
+  maxEmittedStepIdx?: number;
   deferredGenIdxs?: number[];
-  /** Unemitted 0-token or Loop-3-deferred step-only indices exempt from >512-key eviction watermarks. */
   deferredStepIdxs?: number[];
-  /** Emitted responseIds (bounded) for cross-cycle collision disambiguation. */
+  /** Emitted response IDs retained for cross-cycle collision disambiguation. */
   emittedResponseIds?: string[];
   /** Step indices whose primary LLM usage has already been emitted across cycles (for retry detection). */
   emittedPrimaryStepIdxs?: number[];
   lastTranscriptStepIndex: number;
+  processedTranscriptSteps?: number[];
   pendingToolCalls: PendingToolCall[];
   /** Latched turnId per turn-start stepIndex so delayed native UUIDs never split an already-emitted turn. */
   turnIdByStartStep?: Record<string, string>;
   /** Turn IDs that have already emitted `gen_ai.turn.start: true`. */
   emittedTurnStarts?: string[];
+  /** Turn IDs for which this input has already published a terminal response. */
+  endedTurns?: string[];
+  /** Model completed while one or more tool results were still outstanding. */
+  turnsAwaitingToolResults?: string[];
   /** Latched tool call IDs keyed by `${plannerStepIndex}:${toolIndex}` for cross-cycle stability. */
   toolCallIdMap?: Record<string, string>;
+  /** Committed result step indices keyed by the same planner step and call ordinal. */
+  toolResultStepIndexMap?: Record<string, number>;
 }
 
 interface AntigravityCheckpoint {
   schema: 1;
   seeded: boolean;
-  evictedWatermarkMtimeMs: number;
+  /** Legacy cutoff, discarded after the first inventory of existing sessions. */
+  evictedWatermarkMtimeMs?: number;
   /** Sessions discovered during initial seed whose DB failed to read transiently. */
   pendingSeedSessionIds?: string[];
   sessions: Record<string, SessionCheckpoint>;
@@ -236,8 +217,6 @@ export interface AntigravityInputOptions extends InputOptions {
   multimodal?: AntigravityMultimodalOptions;
 }
 
-const SYNTHETIC_ROOT_PARENT_SPAN_ID = '0000000000000001';
-
 function hashId(parts: readonly string[], length: number): string {
   const hex = createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, length);
   return /^0+$/.test(hex) ? `${'0'.repeat(length - 1)}1` : hex;
@@ -248,45 +227,53 @@ function toUnixNanoString(ms: number): string {
   return `${BigInt(safeMs) * 1_000_000n}`;
 }
 
-async function statFileInfo(filePath: string): Promise<{ mtimeMs: number; size: number }> {
+async function statFileInfo(filePath: string): Promise<{
+  mtimeMs: number;
+  signature: string;
+  stat?: fileWatch.BigIntStats;
+}> {
   try {
-    const st = await fs.stat(filePath);
-    return st.isFile() ? { mtimeMs: st.mtimeMs, size: st.size } : { mtimeMs: 0, size: 0 };
-  } catch {
-    return { mtimeMs: 0, size: 0 };
+    const st = await fs.stat(filePath, { bigint: true });
+    if (st.isFile()) {
+      return {
+        mtimeMs: Number(st.mtimeNs) / 1_000_000,
+        signature: `${st.dev}:${st.ino}:${st.mtimeNs}:${st.ctimeNs}:${st.size}`,
+        stat: st,
+      };
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
+  return { mtimeMs: 0, signature: '' };
 }
 
-function isUsageAlreadyCovered(
+function loadSourceAudit(value: SourceAudit | undefined): SourceAudit | undefined {
+  return Number.isFinite(value?.atMs) && Number.isFinite(value?.byMs) ? value : undefined;
+}
+
+function nextSourceAudit(previous: SourceAudit | undefined, changed: boolean, readFull: boolean, nowMs: number): SourceAudit | undefined {
+  if (readFull) return undefined;
+  if (!changed) return previous;
+  const byMs = previous?.byMs ?? nowMs + SOURCE_AUDIT_MAX_DELAY_MS;
+  return { atMs: Math.min(nowMs + SOURCE_AUDIT_DELAY_MS, byMs), byMs };
+}
+
+function isLegacyUsageCovered(
   usage: AntigravityUsageEvent,
   cursor: SessionCheckpoint,
   seenKeys: Set<string>,
-  deferredGenSet: ReadonlySet<number>,
-  deferredStepSet: ReadonlySet<number>,
 ): boolean {
-  if (seenKeys.has(usage.key)) return true;
+  if (cursor.sourceSignature !== undefined) return false;
   if (usage.identities.some((id) => seenKeys.has(id))) return true;
-  // Never let >512-key eviction watermarks drop a row explicitly tracked as 0-token / deferred
-  if (usage.genIdx !== undefined && deferredGenSet.has(usage.genIdx)) {
-    return false;
+  if (usage.isRetry) return false;
+  if (usage.genIdx !== undefined) {
+    return usage.genIdx <= (cursor.maxEmittedGenIdx ?? -1)
+      && !cursor.deferredGenIdxs?.includes(usage.genIdx);
   }
-  if (usage.stepIndices.some((s) => deferredStepSet.has(s))) {
-    return false;
-  }
-  // Eviction-only monotonic index watermarks protect long sessions (>512 events) against replay.
-  // Check maxEmittedStepIdx across both steps-only and gen_metadata rows so an already-emitted
-  // steps row evicted past 512 keys is not replayed if gen_metadata later references that step.
-  if (usage.genIdx !== undefined && cursor.maxEmittedGenIdx >= 0 && usage.genIdx <= cursor.maxEmittedGenIdx) {
-    return true;
-  }
-  if (
-    usage.stepIndices.length > 0 &&
-    cursor.maxEmittedStepIdx >= 0 &&
-    Math.max(...usage.stepIndices) <= cursor.maxEmittedStepIdx
-  ) {
-    return true;
-  }
-  return false;
+  return usage.stepIndices.length > 0
+    && usage.stepIndices.every((idx) =>
+      idx <= (cursor.maxEmittedStepIdx ?? -1) && !cursor.deferredStepIdxs?.includes(idx),
+    );
 }
 
 function binarySearchTurnNumber(userInputSteps: readonly number[], targetStep: number): number {
@@ -311,12 +298,26 @@ export class AntigravityInput extends BaseInput {
   private readonly multimodalUploadMode: MultimodalUploadMode;
   private readonly pathToUri?: PathToUriFn;
   private pendingCheckpoint: AntigravityCheckpoint | null = null;
+  private lastCheckpoint?: AntigravityCheckpoint;
   private backlogTimer: ReturnType<typeof setTimeout> | null = null;
+  private conversationsWatcher: fileWatch.FSWatcher | null = null;
+  private watchedDirectoryId?: string;
+  private watchTimer: ReturnType<typeof setTimeout> | null = null;
+  private watchNeedsInventory = false;
+  private needsInventory = true;
+  private readonly watchingSessions = new Set<string>();
+  private readonly watchedChanges = new Set<string>();
+  private readonly readySessions = new Set<string>();
+  private readonly scheduledSessions = new Map<string, number>();
+  private readonly sourceCaches = new Map<string, {
+    db: AntigravityDbReadCache;
+    transcript: AntigravityTranscriptCache;
+  }>();
   private readonly failedDbBackoff = new Map<string, { failures: number; retryAfterMs: number }>();
   private warnedSqliteUnavailable = false;
 
   constructor(opts: AntigravityInputOptions) {
-    super(opts);
+    super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS });
     this.agentType = opts.clientType;
     this.id = opts.clientType;
     this.dataRoot = opts.dataRoot
@@ -375,7 +376,86 @@ export class AntigravityInput extends BaseInput {
 
   protected override async onStop(): Promise<void> {
     this.clearBacklogTimer();
+    if (this.watchTimer) clearTimeout(this.watchTimer);
+    this.watchTimer = null;
+    this.conversationsWatcher?.close();
+    this.conversationsWatcher = null;
+    this.watchedDirectoryId = undefined;
+    this.watchNeedsInventory = false;
+    this.needsInventory = true;
+    this.watchingSessions.clear();
+    this.watchedChanges.clear();
+    this.readySessions.clear();
+    this.scheduledSessions.clear();
+    this.sourceCaches.clear();
     this.failedDbBackoff.clear();
+    this.lastCheckpoint = undefined;
+  }
+
+  protected override onPoll(): void {
+    this.needsInventory = true;
+    this.requestCollection(true);
+  }
+
+  private async ensureConversationWatcher(): Promise<void> {
+    let directoryId: string | undefined;
+    try {
+      const stat = await fs.stat(this.conversationsDir, { bigint: true });
+      if (stat.isDirectory()) directoryId = `${stat.dev}:${stat.ino}`;
+    } catch {
+      // The inventory handles an absent directory and reports unreadable paths.
+    }
+    if (!this.running || (this.conversationsWatcher && this.watchedDirectoryId === directoryId)) return;
+    this.conversationsWatcher?.close();
+    this.conversationsWatcher = null;
+    this.watchedDirectoryId = undefined;
+    if (!directoryId) return;
+
+    try {
+      const watcher = fileWatch.watch(this.conversationsDir, { persistent: false }, (_event, filename) => {
+        if (!this.running || this.conversationsWatcher !== watcher) return;
+        if (filename) {
+          if (filename.includes('/') || filename.includes('\\')) return;
+          const dbName = filename.endsWith('.db-wal') ? filename.slice(0, -4) : filename;
+          const sessionId = this.sessionIdFromDbName(dbName);
+          if (!sessionId) return;
+          this.watchingSessions.add(sessionId);
+        } else {
+          this.watchNeedsInventory = true;
+        }
+        this.scheduleWatchCollection();
+      });
+      this.conversationsWatcher = watcher;
+      this.watchedDirectoryId = directoryId;
+      watcher.on('error', () => {
+        if (this.conversationsWatcher !== watcher) return;
+        watcher.close();
+        this.conversationsWatcher = null;
+        this.watchedDirectoryId = undefined;
+        // Inventory on the next regular poll. Immediate reattachment can spin
+        // if the OS has exhausted its watch resources.
+      });
+    } catch {
+      // Polling also covers systems where a filesystem watch is unavailable.
+    }
+  }
+
+  private sessionIdFromDbName(name: string): string | undefined {
+    if (name === 'conversation_summaries.db' || !name.endsWith('.db')) return undefined;
+    const sessionId = name.slice(0, -3);
+    return sessionId && sessionId !== '.' && sessionId !== '..' ? sessionId : undefined;
+  }
+
+  private scheduleWatchCollection(): void {
+    if (this.watchTimer) return;
+    this.watchTimer = setTimeout(() => {
+      this.watchTimer = null;
+      this.needsInventory ||= this.watchNeedsInventory;
+      this.watchNeedsInventory = false;
+      for (const sessionId of this.watchingSessions) this.watchedChanges.add(sessionId);
+      this.watchingSessions.clear();
+      this.requestCollection(true);
+    }, WATCH_BATCH_MS);
   }
 
   protected override onEntriesQueued(): void {
@@ -388,9 +468,14 @@ export class AntigravityInput extends BaseInput {
   private loadCheckpoint(): AntigravityCheckpoint {
     const state = this.stateStore.get(this.id);
     const raw = state?.extra?.antigravityCheckpoint;
+    if (this.lastCheckpoint && raw === this.lastCheckpoint) {
+      // Earlier revisions may still be waiting for a durable output ACK.
+      // Share unchanged session records and keep each revision's map immutable.
+      return { ...this.lastCheckpoint, sessions: Object.assign(Object.create(null), this.lastCheckpoint.sessions) };
+    }
     if (raw && typeof raw === 'object' && (raw as AntigravityCheckpoint).schema === 1) {
       const cp = raw as Partial<AntigravityCheckpoint>;
-      const sessions: Record<string, SessionCheckpoint> = {};
+      const sessions: Record<string, SessionCheckpoint> = Object.create(null);
       if (cp.sessions && typeof cp.sessions === 'object') {
         for (const [sid, cur] of Object.entries(cp.sessions)) {
           if (!cur || typeof cur !== 'object') continue;
@@ -410,17 +495,6 @@ export class AntigravityInput extends BaseInput {
           const emittedUsageKeys = Array.isArray(cur.emittedUsageKeys)
             ? cur.emittedUsageKeys.filter((k): k is string => typeof k === 'string')
             : [];
-          const rawMeta = Array.isArray(cur.emittedKeyMeta) ? cur.emittedKeyMeta : undefined;
-          const emittedKeyMeta: Array<[number, number]> | undefined =
-            rawMeta && rawMeta.length === emittedUsageKeys.length
-              ? rawMeta.map((pair) =>
-                  Array.isArray(pair) &&
-                  typeof pair[0] === 'number' &&
-                  typeof pair[1] === 'number'
-                    ? [pair[0], pair[1]]
-                    : [-1, -1],
-                )
-              : undefined;
           const turnIdByStartStep: Record<string, string> | undefined =
             cur.turnIdByStartStep && typeof cur.turnIdByStartStep === 'object'
               ? Object.fromEntries(
@@ -440,6 +514,12 @@ export class AntigravityInput extends BaseInput {
                   ),
                 )
               : undefined;
+          const toolResultStepIndexMap =
+            cur.toolResultStepIndexMap && typeof cur.toolResultStepIndexMap === 'object'
+              ? Object.fromEntries(Object.entries(cur.toolResultStepIndexMap).filter(
+                  ([, index]) => Number.isSafeInteger(index) && index >= 0,
+                ))
+              : undefined;
           const deferredGenIdxs = Array.isArray(cur.deferredGenIdxs)
             ? cur.deferredGenIdxs.filter((n): n is number => typeof n === 'number' && Number.isInteger(n))
             : undefined;
@@ -453,13 +533,16 @@ export class AntigravityInput extends BaseInput {
             ? cur.emittedPrimaryStepIdxs.filter((n): n is number => typeof n === 'number' && Number.isInteger(n))
             : undefined;
           sessions[sid] = {
-            effectiveMtimeMs: typeof cur.effectiveMtimeMs === 'number' ? cur.effectiveMtimeMs : 0,
-            effectiveSize: typeof cur.effectiveSize === 'number' ? cur.effectiveSize : 0,
+            sourceSignature: typeof cur.sourceSignature === 'string' ? cur.sourceSignature : undefined,
+            dbAudit: loadSourceAudit(cur.dbAudit),
+            transcriptAudit: loadSourceAudit(cur.transcriptAudit),
+            retryAtMs: typeof cur.retryAtMs === 'number' ? cur.retryAtMs : undefined,
+            joinDeadlines: cur.joinDeadlines,
             maxEmittedGenIdx: typeof cur.maxEmittedGenIdx === 'number' ? cur.maxEmittedGenIdx : -1,
             maxEmittedStepIdx:
               typeof cur.maxEmittedStepIdx === 'number' ? cur.maxEmittedStepIdx : -1,
             emittedUsageKeys,
-            ...(emittedKeyMeta ? { emittedKeyMeta } : {}),
+            usageResponseKeysBySource: cur.usageResponseKeysBySource,
             ...(deferredGenIdxs && deferredGenIdxs.length > 0 ? { deferredGenIdxs } : {}),
             ...(deferredStepIdxs && deferredStepIdxs.length > 0 ? { deferredStepIdxs } : {}),
             ...(emittedResponseIds && emittedResponseIds.length > 0 ? { emittedResponseIds } : {}),
@@ -468,12 +551,18 @@ export class AntigravityInput extends BaseInput {
               : {}),
             lastTranscriptStepIndex:
               typeof cur.lastTranscriptStepIndex === 'number' ? cur.lastTranscriptStepIndex : -1,
+            processedTranscriptSteps: cur.processedTranscriptSteps,
             pendingToolCalls,
             ...(turnIdByStartStep && Object.keys(turnIdByStartStep).length > 0
               ? { turnIdByStartStep }
               : {}),
             ...(emittedTurnStarts && emittedTurnStarts.length > 0 ? { emittedTurnStarts } : {}),
+            endedTurns: cur.endedTurns,
+            turnsAwaitingToolResults: cur.turnsAwaitingToolResults,
             ...(toolCallIdMap && Object.keys(toolCallIdMap).length > 0 ? { toolCallIdMap } : {}),
+            ...(toolResultStepIndexMap && Object.keys(toolResultStepIndexMap).length > 0
+              ? { toolResultStepIndexMap }
+              : {}),
           };
         }
       }
@@ -483,85 +572,16 @@ export class AntigravityInput extends BaseInput {
       return {
         schema: 1,
         seeded: Boolean(cp.seeded),
-        evictedWatermarkMtimeMs:
-          typeof cp.evictedWatermarkMtimeMs === 'number' ? cp.evictedWatermarkMtimeMs : 0,
+        evictedWatermarkMtimeMs: typeof cp.evictedWatermarkMtimeMs === 'number'
+          ? cp.evictedWatermarkMtimeMs : undefined,
         ...(pendingSeedSessionIds.length > 0 ? { pendingSeedSessionIds } : {}),
         sessions,
       };
     }
-    return { schema: 1, seeded: false, evictedWatermarkMtimeMs: 0, sessions: {} };
+    return { schema: 1, seeded: false, sessions: Object.create(null) };
   }
 
   private saveCheckpoint(cp: AntigravityCheckpoint): void {
-    // Bound total tracked sessions while recording eviction watermark so evicted
-    // old sessions are never treated as brand-new and replayed in an infinite loop.
-    const entries = Object.entries(cp.sessions);
-    if (entries.length > MAX_TRACKED_SESSIONS) {
-      entries.sort((a, b) => b[1].effectiveMtimeMs - a[1].effectiveMtimeMs);
-      const evicted = entries.slice(MAX_TRACKED_SESSIONS);
-      for (const [, cur] of evicted) {
-        if (cur.effectiveMtimeMs > cp.evictedWatermarkMtimeMs) {
-          cp.evictedWatermarkMtimeMs = cur.effectiveMtimeMs;
-        }
-      }
-      cp.sessions = Object.fromEntries(entries.slice(0, MAX_TRACKED_SESSIONS));
-    }
-    if (cp.pendingSeedSessionIds && cp.pendingSeedSessionIds.length > MAX_TRACKED_SESSIONS) {
-      cp.pendingSeedSessionIds = cp.pendingSeedSessionIds.slice(-MAX_TRACKED_SESSIONS);
-    }
-    for (const cur of Object.values(cp.sessions)) {
-      if (cur.emittedUsageKeys.length > MAX_EMITTED_KEYS_PER_SESSION) {
-        // Advance monotonic watermarks strictly from the evicted oldest prefix so
-        // out-of-order 0-token rows within the active window are never skipped.
-        const overflow = cur.emittedUsageKeys.length - MAX_EMITTED_KEYS_PER_SESSION;
-        if (cur.emittedKeyMeta && cur.emittedKeyMeta.length === cur.emittedUsageKeys.length) {
-          for (let i = 0; i < overflow; i++) {
-            const [g, s] = cur.emittedKeyMeta[i]!;
-            if (g > cur.maxEmittedGenIdx) cur.maxEmittedGenIdx = g;
-            if (s > cur.maxEmittedStepIdx) cur.maxEmittedStepIdx = s;
-          }
-          cur.emittedKeyMeta = cur.emittedKeyMeta.slice(overflow);
-        } else {
-          cur.emittedKeyMeta = undefined;
-        }
-        cur.emittedUsageKeys = cur.emittedUsageKeys.slice(overflow);
-      }
-      if (cur.pendingToolCalls.length > MAX_PENDING_TOOL_CALLS_PER_SESSION) {
-        cur.pendingToolCalls = cur.pendingToolCalls.slice(-MAX_PENDING_TOOL_CALLS_PER_SESSION);
-      }
-      if (cur.emittedTurnStarts && cur.emittedTurnStarts.length > MAX_LATCHED_TURNS_PER_SESSION) {
-        cur.emittedTurnStarts = cur.emittedTurnStarts.slice(-MAX_LATCHED_TURNS_PER_SESSION);
-      }
-      if (cur.turnIdByStartStep) {
-        const turnEntries = Object.entries(cur.turnIdByStartStep);
-        if (turnEntries.length > MAX_LATCHED_TURNS_PER_SESSION) {
-          turnEntries.sort((a, b) => Number(a[0]) - Number(b[0]));
-          cur.turnIdByStartStep = Object.fromEntries(
-            turnEntries.slice(-MAX_LATCHED_TURNS_PER_SESSION),
-          );
-        }
-      }
-      if (cur.toolCallIdMap) {
-        const callEntries = Object.entries(cur.toolCallIdMap);
-        if (callEntries.length > MAX_LATCHED_TOOL_CALLS_PER_SESSION) {
-          cur.toolCallIdMap = Object.fromEntries(
-            callEntries.slice(-MAX_LATCHED_TOOL_CALLS_PER_SESSION),
-          );
-        }
-      }
-      if (cur.deferredGenIdxs && cur.deferredGenIdxs.length > MAX_LATCHED_TURNS_PER_SESSION) {
-        cur.deferredGenIdxs = cur.deferredGenIdxs.slice(-MAX_LATCHED_TURNS_PER_SESSION);
-      }
-      if (cur.deferredStepIdxs && cur.deferredStepIdxs.length > MAX_LATCHED_TURNS_PER_SESSION) {
-        cur.deferredStepIdxs = cur.deferredStepIdxs.slice(-MAX_LATCHED_TURNS_PER_SESSION);
-      }
-      if (cur.emittedResponseIds && cur.emittedResponseIds.length > MAX_EMITTED_KEYS_PER_SESSION) {
-        cur.emittedResponseIds = cur.emittedResponseIds.slice(-MAX_EMITTED_KEYS_PER_SESSION);
-      }
-      if (cur.emittedPrimaryStepIdxs && cur.emittedPrimaryStepIdxs.length > MAX_EMITTED_KEYS_PER_SESSION) {
-        cur.emittedPrimaryStepIdxs = cur.emittedPrimaryStepIdxs.slice(-MAX_EMITTED_KEYS_PER_SESSION);
-      }
-    }
     const prev = this.stateStore.get(this.id);
     this.stateStore.set(this.id, {
       ...prev,
@@ -571,6 +591,7 @@ export class AntigravityInput extends BaseInput {
         antigravityCheckpoint: cp,
       },
     });
+    this.lastCheckpoint = cp;
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
@@ -591,310 +612,270 @@ export class AntigravityInput extends BaseInput {
     const checkpoint = this.loadCheckpoint();
     const isFreshSeed = !checkpoint.seeded && !this.collectHistorical;
 
-    let dirEntries: string[];
-    try {
-      dirEntries = await fs.readdir(this.conversationsDir);
-    } catch {
-      if (isFreshSeed) {
-        checkpoint.seeded = true;
-        this.saveCheckpoint(checkpoint);
+    const nowMs = Date.now();
+    const watchedChanges = new Set(this.watchedChanges);
+    const sessionIds = new Set([...this.readySessions, ...watchedChanges]);
+    this.readySessions.clear();
+    this.watchedChanges.clear();
+    for (const [sessionId, deadline] of this.scheduledSessions) {
+      if (deadline <= nowMs) sessionIds.add(sessionId);
+    }
+    if (isFreshSeed || this.needsInventory) {
+      this.needsInventory = false;
+      await this.ensureConversationWatcher();
+      let dirEntries: string[];
+      try {
+        dirEntries = await fs.readdir(this.conversationsDir);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          this.needsInventory = true;
+          throw err;
+        }
+        dirEntries = [];
       }
-      return [];
+      const presentSessionIds = new Set(dirEntries.sort().flatMap(name => {
+        const sessionId = this.sessionIdFromDbName(name);
+        return sessionId ? [sessionId] : [];
+      }));
+      for (const sessionId of presentSessionIds) sessionIds.add(sessionId);
+      for (const sessionId of this.sourceCaches.keys()) {
+        if (!presentSessionIds.has(sessionId)) this.sourceCaches.delete(sessionId);
+      }
+      for (const sessionId of this.scheduledSessions.keys()) {
+        if (presentSessionIds.has(sessionId)) continue;
+        this.scheduledSessions.delete(sessionId);
+        this.failedDbBackoff.delete(sessionId);
+      }
+    }
+    const pendingSeedSet = new Set(checkpoint.pendingSeedSessionIds ?? []);
+    if (isFreshSeed) {
+      for (const id of sessionIds) pendingSeedSet.add(id);
     }
 
-    const dbFiles = dirEntries
-      .filter((name) => name.endsWith('.db') && name !== 'conversation_summaries.db')
-      .sort();
-    if (dbFiles.length === 0) {
-      if (isFreshSeed) {
-        checkpoint.seeded = true;
-        this.saveCheckpoint(checkpoint);
-      }
-      return [];
-    }
-
-    const presentSessionIds = new Set(dbFiles.map((f) => f.slice(0, -3)).filter(Boolean));
-    for (const backedOffId of this.failedDbBackoff.keys()) {
-      if (!presentSessionIds.has(backedOffId)) {
-        this.failedDbBackoff.delete(backedOffId);
-      }
-    }
-    const pendingSeedSet = new Set(
-      (checkpoint.pendingSeedSessionIds ?? []).filter((id) => presentSessionIds.has(id)),
-    );
-
-    // Stat candidates and pick changed files (most recently modified first)
+    const legacyEvictionCutoff = checkpoint.evictedWatermarkMtimeMs ?? 0;
     const candidates: Array<{
       sessionId: string;
       dbPath: string;
-      effectiveMtimeMs: number;
-      effectiveSize: number;
+      mtimeMs: number;
+      sourceSignature: string;
+      transcriptStat?: fileWatch.BigIntStats;
+      dbChanged: boolean;
+      transcriptChanged: boolean;
     }> = [];
 
-    for (const fileName of dbFiles) {
+    for (const sessionId of sessionIds) {
       if (!this.running) return [];
-      const sessionId = fileName.slice(0, -3);
-      if (!sessionId) continue;
-      const dbPath = path.join(this.conversationsDir, fileName);
-      const transcriptPath = path.join(
-        this.dataRoot,
-        'brain',
-        sessionId,
-        '.system_generated',
-        'logs',
-        'transcript.jsonl',
-      );
-      const [dbInfo, walInfo, transcriptInfo] = await Promise.all([
-        statFileInfo(dbPath),
-        statFileInfo(`${dbPath}-wal`),
-        statFileInfo(transcriptPath),
-      ]);
-      const effectiveMtimeMs = Math.max(dbInfo.mtimeMs, walInfo.mtimeMs, transcriptInfo.mtimeMs);
-      const effectiveSize = dbInfo.size + walInfo.size + transcriptInfo.size;
-      if (effectiveMtimeMs <= 0) continue;
+      const backoff = this.failedDbBackoff.get(sessionId);
+      if (backoff && nowMs < backoff.retryAfterMs) {
+        if (watchedChanges.has(sessionId)) this.watchedChanges.add(sessionId);
+        this.scheduledSessions.set(sessionId, backoff.retryAfterMs);
+        continue;
+      }
 
-      const prev = checkpoint.sessions[sessionId];
-      if (!isFreshSeed) {
-        if (prev) {
-          if (effectiveMtimeMs === prev.effectiveMtimeMs && effectiveSize === prev.effectiveSize) {
-            continue;
-          }
-        } else if (
-          !pendingSeedSet.has(sessionId) &&
-          checkpoint.seeded &&
-          checkpoint.evictedWatermarkMtimeMs > 0 &&
-          effectiveMtimeMs <= checkpoint.evictedWatermarkMtimeMs
-        ) {
-          // Previously evicted historical session that has not changed since eviction
+      const dbPath = path.join(this.conversationsDir, `${sessionId}.db`);
+      const transcriptPath = path.join(
+        this.dataRoot, 'brain', sessionId, '.system_generated', 'logs', 'transcript.jsonl',
+      );
+      try {
+        const [dbInfo, walInfo, transcriptInfo] = await Promise.all([
+          statFileInfo(dbPath), statFileInfo(`${dbPath}-wal`), statFileInfo(transcriptPath),
+        ]);
+        if (!dbInfo.signature) {
+          this.scheduledSessions.delete(sessionId);
+          this.failedDbBackoff.delete(sessionId);
+          this.sourceCaches.delete(sessionId);
           continue;
         }
-      }
-      candidates.push({ sessionId, dbPath, effectiveMtimeMs, effectiveSize });
-    }
 
-    if (isFreshSeed) {
-      for (const candidate of candidates) {
-        if (!this.running) return [];
-        try {
-          const snapshot = await readAntigravityConversationDb(candidate.dbPath);
-          const transcript = await readAntigravityTranscript(this.dataRoot, candidate.sessionId);
-          const maxStep = transcript
-            ? transcript.steps.reduce((max, s) => Math.max(max, s.stepIndex), -1)
-            : -1;
-          const seedCursor = snapshot
-            ? collectSeedUsageCursor(snapshot.events)
-            : { keys: [], meta: [] };
-          checkpoint.sessions[candidate.sessionId] = {
-            effectiveMtimeMs: candidate.effectiveMtimeMs,
-            effectiveSize: candidate.effectiveSize,
-            maxEmittedGenIdx: -1,
-            maxEmittedStepIdx: -1,
-            emittedUsageKeys: seedCursor.keys,
-            emittedKeyMeta: seedCursor.meta,
-            lastTranscriptStepIndex: maxStep,
-            pendingToolCalls: [],
-          };
-          pendingSeedSet.delete(candidate.sessionId);
-          this.failedDbBackoff.delete(candidate.sessionId);
-        } catch (err) {
-          // Track failed DB in pendingSeedSet so it seeds without replaying history once
-          // readable, while allowing other valid/new sessions to proceed immediately.
-          pendingSeedSet.add(candidate.sessionId);
-          this.logger.warn('failed to seed Antigravity conversation DB', {
-            agentType: this.agentType,
-            sessionId: candidate.sessionId,
-            error: String(err),
-          });
+        const mtimeMs = Math.max(dbInfo.mtimeMs, walInfo.mtimeMs, transcriptInfo.mtimeMs);
+        const sourceSignature = [dbInfo.signature, walInfo.signature, transcriptInfo.signature].join('|');
+        const prev = checkpoint.sessions[sessionId];
+        // The old checkpoint cannot enumerate its evicted sessions. Seed the
+        // existing files it would have skipped once, then retain exact cursors.
+        if (!prev && legacyEvictionCutoff > 0 && mtimeMs <= legacyEvictionCutoff) {
+          pendingSeedSet.add(sessionId);
         }
+        const [prevDb, prevWal, prevTranscript] = prev?.sourceSignature?.split('|') ?? [];
+        const dbChanged = watchedChanges.has(sessionId) || dbInfo.signature !== prevDb || walInfo.signature !== prevWal;
+        const transcriptChanged = transcriptInfo.signature !== prevTranscript;
+        if (!dbChanged && !transcriptChanged && prev && !pendingSeedSet.has(sessionId)) {
+          const nextReadAt = Math.min(prev.retryAtMs ?? Infinity, prev.dbAudit?.atMs ?? Infinity, prev.transcriptAudit?.atMs ?? Infinity);
+          if (nowMs < nextReadAt) {
+            this.scheduleSession(sessionId, nextReadAt);
+            continue;
+          }
+        }
+        candidates.push({ sessionId, dbPath, mtimeMs, sourceSignature, transcriptStat: transcriptInfo.stat, dbChanged, transcriptChanged });
+      } catch (err) {
+        if (watchedChanges.has(sessionId)) this.watchedChanges.add(sessionId);
+        this.scheduledSessions.set(sessionId, this.backOffSession(sessionId, err));
       }
-      checkpoint.seeded = true;
-      checkpoint.pendingSeedSessionIds = pendingSeedSet.size > 0 ? [...pendingSeedSet] : undefined;
-      this.saveCheckpoint(checkpoint);
-      return [];
     }
 
-    if (candidates.length === 0) return [];
-
-    // Filter out DBs currently in exponential failure backoff so Top-16 persistently
-    // corrupt/locked DBs can never starve healthy DBs (#17..N) behind them.
-    const nowMs = Date.now();
-    const readyCandidates = candidates.filter((c) => {
-      const backoff = this.failedDbBackoff.get(c.sessionId);
-      return !backoff || nowMs >= backoff.retryAfterMs;
-    });
-    if (readyCandidates.length === 0) return [];
-
-    readyCandidates.sort((a, b) => b.effectiveMtimeMs - a.effectiveMtimeMs);
-    const hasBacklog = readyCandidates.length > MAX_DBS_PER_CYCLE;
-    const batch = readyCandidates.slice(0, MAX_DBS_PER_CYCLE);
-
+    // Drain older pending work first, even when other sessions keep receiving writes.
+    candidates.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    const batch = candidates.splice(0, MAX_DBS_PER_CYCLE);
+    for (const { sessionId } of candidates) {
+      this.readySessions.add(sessionId);
+      if (watchedChanges.has(sessionId)) this.watchedChanges.add(sessionId);
+    }
     const emitted: AgentActivityEntry[] = [];
-    let checkpointDirty =
-      (checkpoint.pendingSeedSessionIds?.length ?? 0) !== pendingSeedSet.size;
-    let progressMade = false;
-    let newlyBackedOff = false;
+    let checkpointDirty = isFreshSeed || legacyEvictionCutoff > 0;
+    const isRunning = () => this.running;
 
     for (const candidate of batch) {
       if (!this.running) break;
-
-      let snapshot: AntigravityConversationSnapshot | null;
+      const { sessionId, sourceSignature } = candidate;
       try {
-        snapshot = await readAntigravityConversationDb(candidate.dbPath);
-        this.failedDbBackoff.delete(candidate.sessionId);
-      } catch (err) {
-        const prevFail = this.failedDbBackoff.get(candidate.sessionId);
-        const failures = (prevFail?.failures ?? 0) + 1;
-        const delayMs = Math.min(
-          DB_FAILURE_BACKOFF_MAX_MS,
-          DB_FAILURE_BACKOFF_BASE_MS * 2 ** (failures - 1),
+        const previous = checkpoint.sessions[sessionId];
+        const cached = this.sourceCaches.get(sessionId);
+        const sources = cached ?? { db: new AntigravityDbReadCache(), transcript: {} };
+        const fullDb = !cached || (previous?.dbAudit?.atMs ?? Infinity) <= nowMs;
+        const fullTranscript = !cached || (previous?.transcriptAudit?.atMs ?? Infinity) <= nowMs;
+        const transcript = await readAntigravityTranscript(this.dataRoot, sessionId, isRunning, {
+          cache: sources.transcript,
+          forceFullRead: fullTranscript,
+          observedStat: candidate.transcriptStat,
+        });
+        if (!this.running) break;
+        const snapshot = await readAntigravityConversationDb(candidate.dbPath, isRunning, {
+          cache: sources.db,
+          forceFull: fullDb,
+          refreshWorkspace: this.workspacePolicy.enabled,
+          stepIndices: [
+            ...(previous?.pendingToolCalls ?? []).flatMap(call => [call.plannerStepIndex, call.resultStepIndex]),
+            ...(transcript?.changedStepIndices ?? []),
+            ...(previous?.deferredStepIdxs ?? []),
+          ],
+        });
+        if (!this.running) break;
+
+        // Quiet sessions reconcile once after the burst. A continuous writer
+        // cannot postpone historical reconciliation beyond the persisted cap.
+        const dbAudit = nextSourceAudit(previous?.dbAudit, candidate.dbChanged, fullDb, nowMs);
+        const transcriptAudit = nextSourceAudit(previous?.transcriptAudit, candidate.transcriptChanged, fullTranscript, nowMs);
+        const seed = pendingSeedSet.has(sessionId);
+        const workspaceAllowed = this.workspacePolicy.allows(
+          {
+            'gen_ai.agent.type': this.agentType,
+            'gen_ai.session.id': sessionId,
+            ...(snapshot?.workspacePaths ? { workspace_roots: snapshot.workspacePaths } : {}),
+          },
+          this.agentType,
         );
-        this.failedDbBackoff.set(candidate.sessionId, {
-          failures,
-          retryAfterMs: Date.now() + delayMs,
-        });
-        newlyBackedOff = true;
-        this.logger.warn('failed to read Antigravity conversation DB', {
-          agentType: this.agentType,
-          sessionId: candidate.sessionId,
-          error: String(err),
-        });
-        continue;
-      }
-
-      const transcript = await readAntigravityTranscript(this.dataRoot, candidate.sessionId);
-
-      // Deferred seed for DBs that failed transiently during initial fresh seed
-      if (pendingSeedSet.has(candidate.sessionId)) {
-        const maxStep = transcript
-          ? transcript.steps.reduce((max, s) => Math.max(max, s.stepIndex), -1)
-          : -1;
-        const seedCursor = snapshot
-          ? collectSeedUsageCursor(snapshot.events)
-          : { keys: [], meta: [] };
-        checkpoint.sessions[candidate.sessionId] = {
-          effectiveMtimeMs: candidate.effectiveMtimeMs,
-          effectiveSize: candidate.effectiveSize,
-          maxEmittedGenIdx: -1,
-          maxEmittedStepIdx: -1,
-          emittedUsageKeys: seedCursor.keys,
-          emittedKeyMeta: seedCursor.meta,
-          lastTranscriptStepIndex: maxStep,
-          pendingToolCalls: [],
-        };
-        pendingSeedSet.delete(candidate.sessionId);
+        if (seed || !workspaceAllowed) {
+          const seededKeys = new Set(previous?.emittedUsageKeys);
+          const responseKeysBySource = new Map(Object.entries(previous?.usageResponseKeysBySource ?? {}));
+          for (const usage of snapshot?.events ?? []) {
+            const responseKey = usageResponseKey(usage);
+            if (responseKey) seededKeys.add(responseKey);
+            for (const key of usage.sourceKeys) {
+              seededKeys.add(key);
+              if (responseKey) responseKeysBySource.set(key, responseKey);
+            }
+          }
+          checkpoint.sessions[sessionId] = {
+            ...previous,
+            sourceSignature,
+            dbAudit,
+            transcriptAudit,
+            retryAtMs: undefined,
+            joinDeadlines: undefined,
+            emittedUsageKeys: [...seededKeys],
+            usageResponseKeysBySource: Object.fromEntries(responseKeysBySource),
+            lastTranscriptStepIndex: previous?.lastTranscriptStepIndex ?? -1,
+            processedTranscriptSteps: [...new Set([
+              ...(previous?.processedTranscriptSteps ?? []),
+              ...(transcript?.steps ?? []).map((step) => step.stepIndex),
+            ])],
+            pendingToolCalls: [],
+          };
+          pendingSeedSet.delete(sessionId);
+        } else if (this.workspacePolicy.enabled && !snapshot?.workspacePaths?.length) {
+          // No content or media may leave while the exclusion policy cannot yet
+          // determine the workspace. Retain the old event ledger for the next write.
+          checkpoint.sessions[sessionId] = {
+            ...previous,
+            sourceSignature,
+            dbAudit,
+            transcriptAudit,
+            retryAtMs: undefined,
+            emittedUsageKeys: previous?.emittedUsageKeys ?? [],
+            lastTranscriptStepIndex: previous?.lastTranscriptStepIndex ?? -1,
+            pendingToolCalls: previous?.pendingToolCalls ?? [],
+          };
+        } else {
+          const prevCursor: SessionCheckpoint = previous ?? {
+            emittedUsageKeys: [],
+            lastTranscriptStepIndex: -1,
+            pendingToolCalls: [],
+          };
+          const { entries, cursor } = await this.buildSessionEntries(sessionId, snapshot, transcript, prevCursor);
+          if (!this.running) break;
+          for (const entry of entries) emitted.push(entry);
+          checkpoint.sessions[sessionId] = { ...cursor, sourceSignature, dbAudit, transcriptAudit };
+        }
+        this.sourceCaches.delete(sessionId);
+        this.sourceCaches.set(sessionId, sources);
+        if (this.sourceCaches.size > MAX_CACHED_SESSIONS) {
+          const oldest = this.sourceCaches.keys().next().value;
+          if (oldest !== undefined) this.sourceCaches.delete(oldest);
+        }
+        this.scheduleSession(sessionId, Math.min(
+          checkpoint.sessions[sessionId]!.retryAtMs ?? Infinity,
+          dbAudit?.atMs ?? Infinity,
+          transcriptAudit?.atMs ?? Infinity,
+        ));
+        this.failedDbBackoff.delete(sessionId);
         checkpointDirty = true;
-        progressMade = true;
-        continue;
+      } catch (err) {
+        if (watchedChanges.has(sessionId)) this.watchedChanges.add(sessionId);
+        if (err instanceof AntigravityTranscriptChangedError) {
+          this.readySessions.add(sessionId);
+          this.scheduleSession(sessionId, Date.now() + WATCH_BATCH_MS);
+          continue;
+        }
+        this.sourceCaches.delete(sessionId);
+        this.scheduledSessions.set(sessionId, this.backOffSession(sessionId, err));
       }
-
-      const workspaceAllowed = this.workspacePolicy.allows(
-        {
-          'gen_ai.agent.type': this.agentType,
-          'gen_ai.session.id': candidate.sessionId,
-          ...(snapshot?.workspacePath ? { 'workspace.path': snapshot.workspacePath } : {}),
-        },
-        this.agentType,
-      );
-      if (!workspaceAllowed) {
-        const maxStep = transcript
-          ? transcript.steps.reduce((max, s) => Math.max(max, s.stepIndex), -1)
-          : (checkpoint.sessions[candidate.sessionId]?.lastTranscriptStepIndex ?? -1);
-        const seedCursor = snapshot
-          ? collectSeedUsageCursor(snapshot.events)
-          : { keys: [], meta: [] };
-        checkpoint.sessions[candidate.sessionId] = {
-          effectiveMtimeMs: candidate.effectiveMtimeMs,
-          effectiveSize: candidate.effectiveSize,
-          maxEmittedGenIdx: -1,
-          maxEmittedStepIdx: -1,
-          emittedUsageKeys: seedCursor.keys,
-          emittedKeyMeta: seedCursor.meta,
-          lastTranscriptStepIndex: maxStep,
-          pendingToolCalls: [],
-        };
-        checkpointDirty = true;
-        progressMade = true;
-        continue;
-      }
-
-      const prevCursor: SessionCheckpoint = checkpoint.sessions[candidate.sessionId] ?? {
-        effectiveMtimeMs: 0,
-        effectiveSize: 0,
-        maxEmittedGenIdx: -1,
-        maxEmittedStepIdx: -1,
-        emittedUsageKeys: [],
-        emittedKeyMeta: [],
-        lastTranscriptStepIndex: -1,
-        pendingToolCalls: [],
-      };
-
-      const sessionResult = await this.buildSessionEntries(
-        candidate.sessionId,
-        snapshot,
-        transcript,
-        prevCursor,
-      );
-
-      emitted.push(...sessionResult.entries);
-
-      checkpoint.sessions[candidate.sessionId] = {
-        effectiveMtimeMs: candidate.effectiveMtimeMs,
-        effectiveSize: candidate.effectiveSize,
-        maxEmittedGenIdx: sessionResult.maxEmittedGenIdx,
-        maxEmittedStepIdx: sessionResult.maxEmittedStepIdx,
-        emittedUsageKeys: sessionResult.emittedUsageKeys,
-        emittedKeyMeta: sessionResult.emittedKeyMeta,
-        ...(sessionResult.deferredGenIdxs.length > 0
-          ? { deferredGenIdxs: sessionResult.deferredGenIdxs }
-          : {}),
-        ...(sessionResult.deferredStepIdxs.length > 0
-          ? { deferredStepIdxs: sessionResult.deferredStepIdxs }
-          : {}),
-        ...(sessionResult.emittedResponseIds.length > 0
-          ? { emittedResponseIds: sessionResult.emittedResponseIds }
-          : {}),
-        ...(sessionResult.emittedPrimaryStepIdxs.length > 0
-          ? { emittedPrimaryStepIdxs: sessionResult.emittedPrimaryStepIdxs }
-          : {}),
-        lastTranscriptStepIndex: sessionResult.maxTranscriptStepIndex,
-        pendingToolCalls: sessionResult.pendingToolCalls,
-        ...(Object.keys(sessionResult.turnIdByStartStep).length > 0
-          ? { turnIdByStartStep: sessionResult.turnIdByStartStep }
-          : {}),
-        ...(sessionResult.emittedTurnStarts.length > 0
-          ? { emittedTurnStarts: sessionResult.emittedTurnStarts }
-          : {}),
-        ...(Object.keys(sessionResult.toolCallIdMap).length > 0
-          ? { toolCallIdMap: sessionResult.toolCallIdMap }
-          : {}),
-      };
-      checkpointDirty = true;
-      progressMade = true;
     }
-
-    checkpoint.pendingSeedSessionIds = pendingSeedSet.size > 0 ? [...pendingSeedSet] : undefined;
 
     if (checkpointDirty) {
       checkpoint.seeded = true;
-      if (emitted.length > 0) {
-        // Defer StateStore commit until BaseInput invokes onEntriesQueued()
-        this.pendingCheckpoint = checkpoint;
-      } else {
-        this.saveCheckpoint(checkpoint);
-      }
+      delete checkpoint.evictedWatermarkMtimeMs;
+      checkpoint.pendingSeedSessionIds = pendingSeedSet.size > 0 ? [...pendingSeedSet] : undefined;
+      if (emitted.length > 0) this.pendingCheckpoint = checkpoint;
+      else this.saveCheckpoint(checkpoint);
     }
 
-    // Drain remaining ready backlog via a managed delayed timer whenever this cycle
-    // either made progress or moved failing DBs into backoff so healthy #17..N DBs
-    // are drained immediately without spinning on backed-off DBs.
-    if (hasBacklog && (progressMade || newlyBackedOff) && this.running) {
+    let nextRetryAt = candidates.length > 0 ? Date.now() + BACKLOG_DRAIN_DELAY_MS : Infinity;
+    for (const deadline of this.scheduledSessions.values()) nextRetryAt = Math.min(nextRetryAt, deadline);
+    if (Number.isFinite(nextRetryAt) && this.running) {
       this.backlogTimer = setTimeout(() => {
         this.backlogTimer = null;
-        this.requestCollection();
-      }, BACKLOG_DRAIN_DELAY_MS);
+        this.requestCollection(true);
+      }, Math.max(BACKLOG_DRAIN_DELAY_MS, nextRetryAt - Date.now()));
     }
 
     return emitted;
+  }
+
+  private scheduleSession(sessionId: string, deadline: number): void {
+    if (Number.isFinite(deadline)) this.scheduledSessions.set(sessionId, deadline);
+    else this.scheduledSessions.delete(sessionId);
+  }
+
+  private backOffSession(sessionId: string, error: unknown): number {
+    const failures = (this.failedDbBackoff.get(sessionId)?.failures ?? 0) + 1;
+    const delayMs = Math.min(DB_FAILURE_BACKOFF_MAX_MS, DB_FAILURE_BACKOFF_BASE_MS * 2 ** (failures - 1));
+    const retryAfterMs = Date.now() + delayMs;
+    this.failedDbBackoff.set(sessionId, { failures, retryAfterMs });
+    this.logger.warn('failed to read Antigravity conversation', {
+      agentType: this.agentType,
+      sessionId,
+      error: String(error),
+    });
+    return retryAfterMs;
   }
 
   private async buildSessionEntries(
@@ -902,51 +883,36 @@ export class AntigravityInput extends BaseInput {
     snapshot: AntigravityConversationSnapshot | null,
     transcript: AntigravityTranscript | null,
     prevCursor: SessionCheckpoint,
-  ): Promise<{
-    entries: AgentActivityEntry[];
-    maxTranscriptStepIndex: number;
-    maxEmittedGenIdx: number;
-    maxEmittedStepIdx: number;
-    emittedUsageKeys: string[];
-    emittedKeyMeta: Array<[number, number]>;
-    deferredGenIdxs: number[];
-    deferredStepIdxs: number[];
-    emittedResponseIds: string[];
-    emittedPrimaryStepIdxs: number[];
-    pendingToolCalls: PendingToolCall[];
-    turnIdByStartStep: Record<string, string>;
-    emittedTurnStarts: string[];
-    toolCallIdMap: Record<string, string>;
-  }> {
+  ): Promise<{ entries: AgentActivityEntry[]; cursor: SessionCheckpoint }> {
     const entries: AgentActivityEntry[] = [];
+    const hashEventId = (parts: readonly string[], length: number) =>
+      hashId([this.agentType, ...parts], length);
     const cwd = snapshot?.workspacePath;
     const stepInfos = snapshot?.stepInfos ?? new Map<number, AntigravityStepInfo>();
     const seenKeys = new Set(prevCursor.emittedUsageKeys);
-    const keyOrder = [...prevCursor.emittedUsageKeys];
-    const keyMeta: Array<[number, number]> =
-      prevCursor.emittedKeyMeta && prevCursor.emittedKeyMeta.length === prevCursor.emittedUsageKeys.length
-        ? prevCursor.emittedKeyMeta.map(([g, s]) => [g, s])
-        : prevCursor.emittedUsageKeys.map(() => [-1, -1]);
-    const deferredGenSet = new Set<number>([
-      ...(prevCursor.deferredGenIdxs ?? []),
-      ...(snapshot?.zeroTokenGenIdxs ?? []),
-    ]);
-    const deferredStepSet = new Set<number>([
-      ...(prevCursor.deferredStepIdxs ?? []),
-      ...(snapshot?.zeroTokenStepIdxs ?? []),
-    ]);
+    const responseKeysBySource = new Map(Object.entries(prevCursor.usageResponseKeysBySource ?? {}));
+    const processedTranscriptSteps = new Set(prevCursor.processedTranscriptSteps);
+    const joinDeadlines = new Map<string, number>();
+    let retryAtMs: number | undefined;
     const usedResponseIds = new Set<string>(prevCursor.emittedResponseIds ?? []);
     const seenPrimaryStepIdx = new Set<number>(prevCursor.emittedPrimaryStepIdxs ?? []);
-    let maxStepIndex = prevCursor.lastTranscriptStepIndex;
-    const maxEmittedGenIdx = prevCursor.maxEmittedGenIdx;
-    const maxEmittedStepIdx = prevCursor.maxEmittedStepIdx;
     const latchedTurnByStartStep = new Map<number, string>(
       Object.entries(prevCursor.turnIdByStartStep ?? {}).map(([k, v]) => [Number(k), v]),
     );
     const emittedTurnStartsSet = new Set<string>(prevCursor.emittedTurnStarts ?? []);
+    const previouslyEndedTurns = new Set(prevCursor.endedTurns);
+    const endedTurns = new Set(previouslyEndedTurns);
+    const turnsAwaitingToolResults = new Set(prevCursor.turnsAwaitingToolResults);
     const latchedToolCallIds = new Map<string, string>(
       Object.entries(prevCursor.toolCallIdMap ?? {}),
     );
+    const toolResultStepIndices = new Map(Object.entries(prevCursor.toolResultStepIndexMap ?? {}));
+    const toolCallKey = (stepIndex: number, ordinal: number) => `${stepIndex}:${ordinal}`;
+    const pendingOrdinal = (call: PendingToolCall) =>
+      call.toolIndex ?? Math.max(0, call.resultStepIndex - call.plannerStepIndex - 1);
+    for (const pending of prevCursor.pendingToolCalls) {
+      latchedToolCallIds.set(toolCallKey(pending.plannerStepIndex, pendingOrdinal(pending)), pending.callId);
+    }
 
     const resolvedMediaCache = new Map<string, UriPart[]>();
     const getStepMedia = async (
@@ -1015,6 +981,8 @@ export class AntigravityInput extends BaseInput {
             step.type === 'USER_INPUT' &&
             currentGroup !== null &&
             currentGroup.startStep === 0 &&
+            currentGroup.steps.length === 1 &&
+            transcript.byStepIndex.get(0)?.type === 'SYSTEM_MESSAGE' &&
             !currentGroupHasPlanner &&
             (nativeTurn === undefined ||
               lastNativeTurn === undefined ||
@@ -1050,6 +1018,7 @@ export class AntigravityInput extends BaseInput {
     // result step carries the native Turn UUID. Never fold an early Turn N+1 step
     // (whose own native Turn UUID conflicts with Turn N) into Turn N.
     const stepToTurn = new Map<number, string>();
+    const transcriptIndices = new Set(stepPositionByIndex.keys());
     const groupStartSteps = turnGroups.map((g) => g.startStep);
     const groupNativeTurns: Array<string | undefined> = turnGroups.map((g) => {
       for (const idx of g.steps) {
@@ -1064,7 +1033,7 @@ export class AntigravityInput extends BaseInput {
           const groupNum = binarySearchTurnNumber(groupStartSteps, idx);
           const groupIdx = groupNum - 1;
           const group = turnGroups[groupIdx];
-          if (!group || group.steps.includes(idx)) continue;
+          if (!group || transcriptIndices.has(idx)) continue;
           const idxNativeTurn = stepInfos.get(idx)?.turnId;
           const existingNativeTurn = groupNativeTurns[groupIdx];
           if (idxNativeTurn && existingNativeTurn && idxNativeTurn !== existingNativeTurn) {
@@ -1077,22 +1046,28 @@ export class AntigravityInput extends BaseInput {
             continue;
           }
           group.steps.push(idx);
+          transcriptIndices.add(idx);
           if (!existingNativeTurn && idxNativeTurn) {
             groupNativeTurns[groupIdx] = idxNativeTurn;
           }
         }
       }
     }
+    const allocatedTurnIds = new Set(latchedTurnByStartStep.values());
     for (let gi = 0; gi < turnGroups.length; gi++) {
       const group = turnGroups[gi]!;
-      let resolvedTurn = latchedTurnByStartStep.get(group.startStep);
+      let resolvedTurn = group.steps
+        .map((idx) => latchedTurnByStartStep.get(idx))
+        .find((turn) => turn !== undefined);
       if (!resolvedTurn) {
         const nativeTurn = groupNativeTurns[gi];
+        const ordinalTurn = `${sessionId}:turn:${gi + 1}`;
         resolvedTurn = nativeTurn
           ? `${sessionId}:${nativeTurn}`
-          : `${sessionId}:turn:${gi + 1}`;
-        latchedTurnByStartStep.set(group.startStep, resolvedTurn);
+          : allocatedTurnIds.has(ordinalTurn) ? `${sessionId}:turn-step:${group.startStep}` : ordinalTurn;
       }
+      latchedTurnByStartStep.set(group.startStep, resolvedTurn);
+      allocatedTurnIds.add(resolvedTurn);
       for (const idx of group.steps) {
         stepToTurn.set(idx, resolvedTurn);
       }
@@ -1131,13 +1106,16 @@ export class AntigravityInput extends BaseInput {
         }
         return `${sessionId}:turn:${groupNum}`;
       }
-      // When transcript is absent in Cycle 1 and native turnId isn't written yet,
-      // latch fallback turn:1 on startStep 0 so Cycle 2 does not split the turn.
-      const latchedRoot = latchedTurnByStartStep.get(0);
-      if (latchedRoot) return latchedRoot;
-      const fallback = `${sessionId}:turn:1`;
-      latchedTurnByStartStep.set(0, fallback);
-      return fallback;
+      return `${sessionId}:turn:1`;
+    };
+
+    const resolveUsageTurn = (usage: AntigravityUsageEvent, stepIdx: number | undefined): string => {
+      if (usage.stepIndices.some((idx) => stepToTurn.has(idx) || stepInfos.get(idx)?.turnId)) {
+        return resolveTurnForStep(stepIdx, usage.stepIndices);
+      }
+      // With SQLite usage alone there is no evidence that two invocations belong
+      // to one turn. Reusing a fallback turn would discard all later OTLP batches.
+      return `${sessionId}:usage:${hashId([usageResponseKey(usage) ?? usage.key], 16)}`;
     };
 
     // Preserve monotonic turn ordering for deterministic sorting.
@@ -1157,90 +1135,177 @@ export class AntigravityInput extends BaseInput {
       }
     }
 
-    // Locate the result step for a tool call, skipping intermediate non-tool bookkeeping
-    // steps (e.g. CHECKPOINT / TASK_BOUNDARY) up to the next turn/planner boundary.
-    // Prefers exact native toolCallId match, then positional match verified by toolName.
-    const locateToolResultStep = (
-      plannerStepIndex: number,
-      toolIndex: number,
-      toolName?: string,
-      callId?: string,
-    ): { step?: AntigravityTranscriptStep; stepIndex: number; boundaryReached: boolean } => {
-      if (transcript) {
+    type ToolResult = { step: AntigravityTranscriptStep; nativeId?: string; name?: string };
+    const nativeToolCallId = (plannerStep: number, ordinal: number, explicitId?: string) => {
+      const latchedId = latchedToolCallIds.get(toolCallKey(plannerStep, ordinal));
+      return explicitId ?? (latchedId === `${sessionId}:step:${plannerStep}:tc:${ordinal}` ? undefined : latchedId);
+    };
+    const nativeCallOwners = new Map<string, string | null>();
+    const nativeResults = new Map<string, ToolResult | null>();
+    const committedResultOwners = new Map(
+      [...toolResultStepIndices].map(([owner, stepIndex]) => [stepIndex, owner]),
+    );
+    const resultFor = (step: AntigravityTranscriptStep): ToolResult => {
+      const info = stepInfos.get(step.stepIndex);
+      return { step, nativeId: info?.toolCallId, name: info?.toolName };
+    };
+    const lastTurnPrompt = [...turnPromptStepSet].at(-1);
+    for (const step of transcript?.steps ?? []) {
+      if (step.type === 'PLANNER_RESPONSE') {
+        for (const [ordinal, call] of step.toolCalls.entries()) {
+          const nativeId = nativeToolCallId(step.stepIndex, ordinal, call.id);
+          if (nativeId) {
+            nativeCallOwners.set(nativeId, nativeCallOwners.has(nativeId) ? null : toolCallKey(step.stepIndex, ordinal));
+          }
+        }
+      } else if (isToolResultStep(step)) {
+        const result = resultFor(step);
+        if (result.nativeId) nativeResults.set(result.nativeId, nativeResults.has(result.nativeId) ? null : result);
+      }
+    }
+    const plannerResults = new Map<number, {
+      matched: Map<number, ToolResult>;
+      boundaryReached: boolean;
+    }>();
+    const findToolResultStep = (plannerStepIndex: number, toolIndex: number) => {
+      let results = plannerResults.get(plannerStepIndex);
+      if (!results) {
+        const matched = new Map<number, ToolResult>();
+        results = { matched, boundaryReached: latestFollowupStepIndex > plannerStepIndex };
+        plannerResults.set(plannerStepIndex, results);
         const startPos = stepPositionByIndex.get(plannerStepIndex);
-        if (startPos !== undefined) {
-          const toolResults: AntigravityTranscriptStep[] = [];
-          let boundaryReached = false;
-          for (let pos = startPos + 1; pos < transcript.steps.length; pos++) {
-            const candidate = transcript.steps[pos]!;
-            if (TURN_BOUNDARY_STEP_TYPES.has(candidate.type)) {
-              boundaryReached = true;
-              break;
-            }
-            if (!isToolResultStep(candidate)) continue;
-            toolResults.push(candidate);
+        const planner = transcript?.byStepIndex.get(plannerStepIndex);
+        if (!transcript || !planner || startPos === undefined) {
+          return { step: undefined, boundaryReached: results.boundaryReached };
+        }
+
+        const byOrdinal = new Map<number, ToolResult>();
+        const byNativeId = new Map<string, ToolResult>();
+        const byName = new Map<string, ToolResult[]>();
+        let bookkeepingCount = 0;
+        let previousStepIndex = plannerStepIndex;
+        let positionsKnown = true;
+        results.boundaryReached = false;
+        for (let pos = startPos + 1; pos < transcript.steps.length; pos++) {
+          const candidate = transcript.steps[pos]!;
+          if (TURN_BOUNDARY_STEP_TYPES.has(candidate.type)) {
+            results.boundaryReached = true;
+            break;
           }
-          // 1) Exact native toolCallId match (handles out-of-order parallel completion)
-          if (callId) {
-            const byCallId = toolResults.find(
-              (c) => stepInfos.get(c.stepIndex)?.toolCallId === callId,
-            );
-            if (byCallId) {
-              return { step: byCallId, stepIndex: byCallId.stepIndex, boundaryReached };
+          positionsKnown &&= candidate.stepIndex === previousStepIndex + 1;
+          previousStepIndex = candidate.stepIndex;
+          if (!isToolResultStep(candidate)) {
+            bookkeepingCount++;
+            continue;
+          }
+          const result = resultFor(candidate);
+          const owner = committedResultOwners.get(candidate.stepIndex)
+            ?? (result.nativeId ? nativeCallOwners.get(result.nativeId) : undefined);
+          if (owner && !owner.startsWith(`${plannerStepIndex}:`)) {
+            bookkeepingCount++;
+            continue;
+          }
+          // A missing lower step could be a tool result or bookkeeping, so
+          // position alone cannot identify a result beyond a transcript gap.
+          if (positionsKnown) {
+            byOrdinal.set(candidate.stepIndex - plannerStepIndex - 1 - bookkeepingCount, result);
+          }
+          if (result.nativeId && !byNativeId.has(result.nativeId)) byNativeId.set(result.nativeId, result);
+          if (result.name) {
+            const named = byName.get(result.name) ?? [];
+            named.push(result);
+            byName.set(result.name, named);
+          }
+        }
+
+        const usedSteps = new Set<number>();
+        const calls = planner.toolCalls.map((call, ordinal) => {
+          const key = toolCallKey(plannerStepIndex, ordinal);
+          return {
+            name: call.name,
+            committedStep: toolResultStepIndices.get(key),
+            nativeId: nativeToolCallId(plannerStepIndex, ordinal, call.id),
+          };
+        });
+        const assign = (ordinal: number, result: ToolResult | undefined) => {
+          if (!result || usedSteps.has(result.step.stepIndex)) return;
+          const owner = committedResultOwners.get(result.step.stepIndex);
+          if (owner && owner !== toolCallKey(plannerStepIndex, ordinal)) return;
+          matched.set(ordinal, result);
+          usedSteps.add(result.step.stepIndex);
+        };
+        const compatible = (ordinal: number, result: ToolResult | undefined): result is ToolResult => {
+          const call = calls[ordinal]!;
+          return result !== undefined && !usedSteps.has(result.step.stepIndex) &&
+            (!call.nativeId || !result.nativeId || call.nativeId === result.nativeId) &&
+            (!result.name || call.name === result.name);
+        };
+
+        // Preserve already-published results, then reserve every exact native
+        // match before any call can claim a result by position or name.
+        for (const [ordinal, call] of calls.entries()) {
+          const committedStep = call.committedStep === undefined
+            ? undefined
+            : transcript.byStepIndex.get(call.committedStep);
+          if (committedStep && isToolResultStep(committedStep)) assign(ordinal, resultFor(committedStep));
+        }
+        for (const [ordinal, call] of calls.entries()) {
+          if (matched.has(ordinal) || call.committedStep !== undefined || !call.nativeId) continue;
+          const local = byNativeId.get(call.nativeId);
+          if (local) {
+            assign(ordinal, local);
+          } else if (nativeCallOwners.get(call.nativeId) === toolCallKey(plannerStepIndex, ordinal)) {
+            const result = nativeResults.get(call.nativeId);
+            if (!result || result.step.stepIndex <= plannerStepIndex) continue;
+            const plannerTurn = stepInfos.get(plannerStepIndex)?.turnId;
+            const resultTurn = stepInfos.get(result.step.stepIndex)?.turnId;
+            if (plannerTurn && resultTurn && plannerTurn !== resultTurn) continue;
+            if ((plannerTurn && plannerTurn === resultTurn) ||
+              resolveTurnForStep(result.step.stepIndex) === resolveTurnForStep(plannerStepIndex)) {
+              assign(ordinal, result);
             }
           }
-          // 2) Positional match if toolName is compatible
-          const positional = toolResults[toolIndex];
-          if (positional) {
-            const posInfo = stepInfos.get(positional.stepIndex);
-            if (!toolName || !posInfo?.toolName || posInfo.toolName === toolName) {
-              return { step: positional, stepIndex: positional.stepIndex, boundaryReached };
-            }
-            // Out-of-order parallel tool completion: look for matching toolName
-            const byName = toolResults.find(
-              (c) => stepInfos.get(c.stepIndex)?.toolName === toolName,
-            );
-            if (byName) {
-              return { step: byName, stepIndex: byName.stepIndex, boundaryReached };
-            }
-            return { step: positional, stepIndex: positional.stepIndex, boundaryReached };
-          }
-          return { step: undefined, stepIndex: plannerStepIndex + 1 + toolIndex, boundaryReached };
+        }
+        for (const [ordinal, call] of calls.entries()) {
+          if (matched.has(ordinal) || call.committedStep !== undefined) continue;
+          const positional = byOrdinal.get(ordinal);
+          if (compatible(ordinal, positional)) assign(ordinal, positional);
+        }
+        const unmatchedCallCounts = new Map<string, number>();
+        for (const [ordinal, call] of calls.entries()) {
+          if (matched.has(ordinal) || call.committedStep !== undefined) continue;
+          unmatchedCallCounts.set(call.name, (unmatchedCallCounts.get(call.name) ?? 0) + 1);
+        }
+        for (const [ordinal, call] of calls.entries()) {
+          if (matched.has(ordinal) || call.committedStep !== undefined || unmatchedCallCounts.get(call.name) !== 1) continue;
+          const named = byName.get(call.name)?.filter((result) => compatible(ordinal, result));
+          if (named?.length === 1) assign(ordinal, named[0]);
         }
       }
-      const fallbackIdx = plannerStepIndex + 1 + toolIndex;
+      const call = transcript?.byStepIndex.get(plannerStepIndex)?.toolCalls[toolIndex];
+      const nativeId = nativeToolCallId(plannerStepIndex, toolIndex, call?.id);
+      const canWaitForNativeResult = nativeId !== undefined
+        && nativeCallOwners.get(nativeId) === toolCallKey(plannerStepIndex, toolIndex)
+        && (stepInfos.get(plannerStepIndex)?.turnId !== undefined
+          || lastTurnPrompt === undefined || lastTurnPrompt <= plannerStepIndex
+          || resolveTurnForStep(lastTurnPrompt) === resolveTurnForStep(plannerStepIndex));
       return {
-        step: transcript?.byStepIndex.get(fallbackIdx),
-        stepIndex: fallbackIdx,
-        boundaryReached: latestFollowupStepIndex > plannerStepIndex,
+        step: results.matched.get(toolIndex)?.step,
+        boundaryReached: results.boundaryReached && !canWaitForNativeResult,
       };
     };
-
-    const findToolResultStepIndex = (
-      plannerStepIndex: number,
-      toolIndex: number,
-      toolName?: string,
-      callId?: string,
-    ): number => locateToolResultStep(plannerStepIndex, toolIndex, toolName, callId).stepIndex;
 
     const resolveToolCallId = (
       plannerStepIndex: number,
       toolIndex: number,
       explicitId?: string,
-      toolName?: string,
     ): string => {
-      if (explicitId) return explicitId;
-      const latchKey = `${plannerStepIndex}:${toolIndex}`;
+      const latchKey = toolCallKey(plannerStepIndex, toolIndex);
       const latched = latchedToolCallIds.get(latchKey);
       if (latched) return latched;
-      const located = locateToolResultStep(plannerStepIndex, toolIndex, toolName);
-      const info = stepInfos.get(located.stepIndex);
-      const nameCompatible =
-        !toolName || !info?.toolName || info.toolName === toolName;
-      const chosen =
-        info?.toolCallId && nameCompatible
-          ? info.toolCallId
-          : `${sessionId}:step:${plannerStepIndex}:tc:${toolIndex}`;
+      const { step } = findToolResultStep(plannerStepIndex, toolIndex);
+      const nativeId = step ? stepInfos.get(step.stepIndex)?.toolCallId : undefined;
+      const chosen = explicitId ?? nativeId ?? `${sessionId}:step:${plannerStepIndex}:tc:${toolIndex}`;
       latchedToolCallIds.set(latchKey, chosen);
       return chosen;
     };
@@ -1266,18 +1331,13 @@ export class AntigravityInput extends BaseInput {
       return true;
     };
 
-    const lastTranscriptStepIdx =
-      transcript && transcript.steps.length > 0
-        ? transcript.steps[transcript.steps.length - 1]!.stepIndex
-        : -1;
-
     // Precompute per-turn primary provider and per-step LLM completion timestamp
     // from SQLite usage events (excluding context-compaction CHECKPOINT steps).
     const turnProviderMap = new Map<string, string>();
     const stepCompletionMsMap = new Map<number, number>();
     if (snapshot) {
       for (const usage of snapshot.events) {
-        if (this.isCompactionOnlyUsage(usage, transcript)) continue;
+        if (usage.isRetry || this.isCompactionOnlyUsage(usage, transcript)) continue;
         const linkedStep = this.findLinkedPlannerStep(usage, transcript);
         const primaryIdx = linkedStep?.stepIndex ?? usage.stepIndices[0];
         if (linkedStep) {
@@ -1293,7 +1353,7 @@ export class AntigravityInput extends BaseInput {
             stepCompletionMsMap.set(linkedStep.stepIndex, completedMs);
           }
         }
-        const turnId = resolveTurnForStep(primaryIdx, usage.stepIndices);
+        const turnId = resolveUsageTurn(usage, primaryIdx);
         registerTurnOrder(turnId);
         if (!turnProviderMap.has(turnId)) {
           const transcriptModel = normalizeAntigravityModel(linkedStep?.model);
@@ -1309,17 +1369,10 @@ export class AntigravityInput extends BaseInput {
     // 1) Drain any pending tool calls from previous poll cycles whose tool results have now landed
     const remainingPending: PendingToolCall[] = [];
     for (const pending of prevCursor.pendingToolCalls) {
-      const toolIndex =
-        pending.toolIndex ?? Math.max(0, pending.resultStepIndex - pending.plannerStepIndex - 1);
-      const located = locateToolResultStep(
-        pending.plannerStepIndex,
-        toolIndex,
-        pending.toolName,
-        pending.callId,
-      );
-      const resultStep = located.step;
+      const toolIndex = pendingOrdinal(pending);
+      const { step: resultStep, boundaryReached } = findToolResultStep(pending.plannerStepIndex, toolIndex);
       const resultInfo = resultStep ? stepInfos.get(resultStep.stepIndex) : undefined;
-      if (resultStep && isToolResultStep(resultStep)) {
+      if (resultStep) {
         if (isToolStepStillActive(resultStep, resultInfo)) {
           // Tool execution is genuinely still in progress; wait for completion
           remainingPending.push(pending);
@@ -1343,15 +1396,15 @@ export class AntigravityInput extends BaseInput {
           for (const part of resultMediaParts) combined.push(part as unknown as JsonValue);
           resultPayload = combined;
         }
-        const traceId = hashId([sessionId, pending.turnId, 'trace'], 32);
-        const stepSpanId = hashId([sessionId, pending.turnId, pending.stepId, 'step'], 16);
-        const toolSpanId = hashId(
+        const traceId = hashEventId([sessionId, pending.turnId, 'trace'], 32);
+        const stepSpanId = hashEventId([sessionId, pending.turnId, pending.stepId, 'step'], 16);
+        const toolSpanId = hashEventId(
           [sessionId, pending.turnId, pending.stepId, pending.callId, 'tool'],
           16,
         );
         const isErr = isToolErrorStatus(resultStep.status);
         const resultEntry = buildAgentActivityEntry({
-          'event.id': hashId(
+          'event.id': hashEventId(
             [sessionId, pending.turnId, pending.stepId, pending.callId, 'tool.result'],
             32,
           ),
@@ -1385,9 +1438,8 @@ export class AntigravityInput extends BaseInput {
         if (resultMediaParts.length > 0) attachMultimodalMetadataForEntry(resultEntry);
         await this.attachWorkspaceContext(resultEntry, cwd);
         entries.push(resultEntry);
-      } else if (located.boundaryReached) {
-        // Next turn/planner boundary already landed without this tool result; retire
-      } else {
+        toolResultStepIndices.set(toolCallKey(pending.plannerStepIndex, toolIndex), resultStep.stepIndex);
+      } else if (!boundaryReached) {
         // Result not written yet (intermediate CHECKPOINT/TASK_BOUNDARY does not retire pending)
         remainingPending.push(pending);
       }
@@ -1396,7 +1448,9 @@ export class AntigravityInput extends BaseInput {
     // 2) Emit new turn prompts and tool.call / tool.result
     if (transcript) {
       for (const step of transcript.steps) {
-        if (step.stepIndex <= prevCursor.lastTranscriptStepIndex) continue;
+        if (step.stepIndex <= prevCursor.lastTranscriptStepIndex || processedTranscriptSteps.has(step.stepIndex)) {
+          continue;
+        }
         const stepInfo = stepInfos.get(step.stepIndex);
         const isPrompt = turnPromptStepSet.has(step.stepIndex);
         // Symmetric streaming gate shared with Loop 3: stop before an in-progress
@@ -1404,31 +1458,29 @@ export class AntigravityInput extends BaseInput {
         if ((isPrompt || step.type === 'PLANNER_RESPONSE') && isPlannerOrPromptStillStreaming(step)) {
           break;
         }
-        if (step.stepIndex > maxStepIndex) maxStepIndex = step.stepIndex;
-
         const turnId = resolveTurnForStep(step.stepIndex);
         const stepId = `${sessionId}:step:${step.stepIndex}`;
         const tsMs =
           stepInfo?.createdAtMs ?? step.createdAtMs ?? snapshot?.trajectoryTimestampMs ?? Date.now();
-        const traceId = hashId([sessionId, turnId, 'trace'], 32);
+        const traceId = hashEventId([sessionId, turnId, 'trace'], 32);
 
         if (isPrompt) {
           const mediaParts = await getStepMedia(step, tsMs, 'input');
           if (!step.content && mediaParts.length === 0) continue;
+          processedTranscriptSteps.add(step.stepIndex);
           const parts: JsonValue[] = [];
           if (step.content) parts.push({ type: 'text', content: step.content });
           for (const part of mediaParts) parts.push(part as unknown as JsonValue);
           const role = step.type === 'USER_INPUT' ? 'user' : 'system';
           const promptMessages: JsonValue = [{ role, parts }];
-          const agentSpanId = hashId([sessionId, turnId, 'agent'], 16);
+          const agentSpanId = hashEventId([sessionId, turnId, 'agent'], 16);
           const isTurnStart = !emittedTurnStartsSet.has(turnId);
           if (isTurnStart) emittedTurnStartsSet.add(turnId);
           const inputEntry = buildAgentActivityEntry({
-            'event.id': hashId([sessionId, turnId, stepId, 'other'], 32),
+            'event.id': hashEventId([sessionId, turnId, stepId, 'other'], 32),
             'event.name': 'other',
             trace_id: traceId,
             span_id: agentSpanId,
-            parent_span_id: SYNTHETIC_ROOT_PARENT_SPAN_ID,
             'gen_ai.session.id': sessionId,
             'gen_ai.turn.id': turnId,
             'gen_ai.step.id': stepId,
@@ -1444,20 +1496,19 @@ export class AntigravityInput extends BaseInput {
           await this.attachWorkspaceContext(inputEntry, cwd);
           entries.push(inputEntry);
         } else if (step.type === 'PLANNER_RESPONSE' && step.toolCalls.length > 0) {
+          processedTranscriptSteps.add(step.stepIndex);
           const stepProvider = resolveAntigravityProvider(normalizeAntigravityModel(step.model));
-          const stepSpanId = hashId([sessionId, turnId, stepId, 'step'], 16);
+          const stepSpanId = hashEventId([sessionId, turnId, stepId, 'step'], 16);
           const plannerCompletedMs =
             stepCompletionMsMap.get(step.stepIndex) ?? stepInfo?.completedAtMs ?? tsMs;
 
           for (let i = 0; i < step.toolCalls.length; i++) {
             const tc = step.toolCalls[i]!;
-            const located = locateToolResultStep(step.stepIndex, i, tc.name, tc.id);
-            const resultStepIndex = located.stepIndex;
-            const resultStep = located.step;
-            const resultInfo = stepInfos.get(resultStepIndex);
+            const { step: resultStep, boundaryReached } = findToolResultStep(step.stepIndex, i);
+            const resultInfo = resultStep ? stepInfos.get(resultStep.stepIndex) : undefined;
             const toolName = tc.name || resultInfo?.toolName || 'unknown';
-            const callId = resolveToolCallId(step.stepIndex, i, tc.id, toolName);
-            const toolSpanId = hashId([sessionId, turnId, stepId, callId, 'tool'], 16);
+            const callId = resolveToolCallId(step.stepIndex, i, tc.id);
+            const toolSpanId = hashEventId([sessionId, turnId, stepId, callId, 'tool'], 16);
 
             // Prefer native tool execution start time (steps.metadata field 32)
             const callTsMs = Math.max(
@@ -1466,7 +1517,7 @@ export class AntigravityInput extends BaseInput {
             );
 
             const callEntry = buildAgentActivityEntry({
-              'event.id': hashId([sessionId, turnId, stepId, callId, 'tool.call'], 32),
+              'event.id': hashEventId([sessionId, turnId, stepId, callId, 'tool.call'], 32),
               'event.name': 'tool.call',
               trace_id: traceId,
               span_id: toolSpanId,
@@ -1485,7 +1536,7 @@ export class AntigravityInput extends BaseInput {
             await this.attachWorkspaceContext(callEntry, cwd);
             entries.push(callEntry);
 
-            if (resultStep && isToolResultStep(resultStep) && !isToolStepStillActive(resultStep, resultInfo)) {
+            if (resultStep && !isToolStepStillActive(resultStep, resultInfo)) {
               const rawResultTsMs =
                 resultInfo?.completedAtMs ?? resultStep.createdAtMs ?? callTsMs;
               const resultTsMs = Math.max(callTsMs, rawResultTsMs);
@@ -1500,7 +1551,7 @@ export class AntigravityInput extends BaseInput {
               }
               const isErr = isToolErrorStatus(resultStep.status);
               const resultEntry = buildAgentActivityEntry({
-                'event.id': hashId([sessionId, turnId, stepId, callId, 'tool.result'], 32),
+                'event.id': hashEventId([sessionId, turnId, stepId, callId, 'tool.result'], 32),
                 'event.name': 'tool.result',
                 trace_id: traceId,
                 span_id: toolSpanId,
@@ -1529,17 +1580,18 @@ export class AntigravityInput extends BaseInput {
               if (resultMediaParts.length > 0) attachMultimodalMetadataForEntry(resultEntry);
               await this.attachWorkspaceContext(resultEntry, cwd);
               entries.push(resultEntry);
-            } else if (
-              (resultStep && isToolResultStep(resultStep) && isToolStepStillActive(resultStep, resultInfo)) ||
-              (!resultStep && !located.boundaryReached)
-            ) {
+              toolResultStepIndices.set(toolCallKey(step.stepIndex, i), resultStep.stepIndex);
+            } else if (resultStep || !boundaryReached) {
               // Tool result is in-progress or hasn't been written yet; persist for next poll cycle
+              if (stepInfo?.turnId && nativeToolCallId(step.stepIndex, i, tc.id)) {
+                callEntry['gen_ai.turn.end'] = false;
+              }
               remainingPending.push({
                 plannerStepIndex: step.stepIndex,
                 toolIndex: i,
                 turnId,
                 stepId,
-                resultStepIndex,
+                resultStepIndex: resultStep?.stepIndex ?? step.stepIndex + 1 + i,
                 callId,
                 toolName,
                 model: step.model,
@@ -1552,32 +1604,48 @@ export class AntigravityInput extends BaseInput {
     }
 
     // 3) Emit authoritative llm.request + llm.response pairs from SQLite usage events
+    const pendingToolTurns = new Set(remainingPending.map((call) => call.turnId));
     if (snapshot) {
       const nowForRace = Date.now();
       for (const usage of snapshot.events) {
-        if (isUsageAlreadyCovered(usage, prevCursor, seenKeys, deferredGenSet, deferredStepSet)) {
+        const responseKey = usageResponseKey(usage);
+        const rememberUsage = () => {
+          if (responseKey) seenKeys.add(responseKey);
+          for (const key of usage.sourceKeys) {
+            seenKeys.add(key);
+            if (responseKey) responseKeysBySource.set(key, responseKey);
+          }
+        };
+        const covered = (responseKey !== undefined && seenKeys.has(responseKey)) ||
+          usage.sourceKeys.some((key) => {
+            const previousResponse = responseKeysBySource.get(key);
+            return seenKeys.has(key) && (!responseKey || !previousResponse || responseKey === previousResponse);
+          });
+        if (covered || isLegacyUsageCovered(usage, prevCursor, seenKeys)) {
+          // Learn the other table's exact slot when a mirror arrives later.
+          rememberUsage();
           continue;
         }
 
         // Skip internal context-compaction CHECKPOINT steps only when ALL stepIndices
         // are visible in transcript and none is a PLANNER_RESPONSE.
         if (this.isCompactionOnlyUsage(usage, transcript)) {
-          recordUsageIdentities(seenKeys, keyOrder, keyMeta, usage);
-          if (usage.genIdx !== undefined) deferredGenSet.delete(usage.genIdx);
-          for (const s of usage.stepIndices) deferredStepSet.delete(s);
-          continue;
-        }
-
-        // Cross-file compaction race guard: if SQLite wrote a steps-only row (or partial
-        // CHECKPOINT row) whose stepIndices haven't flushed to transcript yet while recent,
-        // defer instead of eagerly emitting ['stop'] or swallowing a pending PLANNER_RESPONSE.
-        if (this.shouldDeferCompactionRace(usage, transcript, lastTranscriptStepIdx, nowForRace)) {
-          if (usage.genIdx !== undefined) deferredGenSet.add(usage.genIdx);
-          for (const s of usage.stepIndices) deferredStepSet.add(s);
+          rememberUsage();
           continue;
         }
 
         const linkedStep = this.findLinkedPlannerStep(usage, transcript);
+        // The SQLite writer can be ahead of the JSONL writer. Recheck both sources
+        // at a fixed deadline even when neither file changes again.
+        if (!linkedStep && usage.stepIndices.some((idx) => !transcript?.byStepIndex.has(idx))) {
+          const deadline = prevCursor.joinDeadlines?.[usage.key] ??
+            Math.min(usage.timestampMs, nowForRace) + TRANSCRIPT_JOIN_GRACE_MS;
+          if (deadline > nowForRace) {
+            joinDeadlines.set(usage.key, deadline);
+            retryAtMs = Math.min(retryAtMs ?? deadline, deadline);
+            continue;
+          }
+        }
         const linkedStepIdx = linkedStep?.stepIndex ?? usage.stepIndices[0];
         const linkedStepInfo = linkedStepIdx !== undefined ? stepInfos.get(linkedStepIdx) : undefined;
 
@@ -1589,17 +1657,11 @@ export class AntigravityInput extends BaseInput {
           linkedStep.type === 'PLANNER_RESPONSE' &&
           isPlannerOrPromptStillStreaming(linkedStep)
         ) {
-          if (usage.genIdx !== undefined) deferredGenSet.add(usage.genIdx);
-          for (const s of usage.stepIndices) deferredStepSet.add(s);
           continue;
         }
 
-        recordUsageIdentities(seenKeys, keyOrder, keyMeta, usage);
-        if (usage.genIdx !== undefined) deferredGenSet.delete(usage.genIdx);
-        for (const s of usage.stepIndices) deferredStepSet.delete(s);
+        rememberUsage();
 
-        const turnId = resolveTurnForStep(linkedStepIdx, usage.stepIndices);
-        registerTurnOrder(turnId);
         const stepId = linkedStep
           ? `${sessionId}:step:${linkedStep.stepIndex}`
           : usage.stepIndices.length > 0
@@ -1607,12 +1669,17 @@ export class AntigravityInput extends BaseInput {
             : `${sessionId}:gen:${usage.genIdx ?? 0}`;
 
         const isRetryUsage =
-          usage.key.startsWith('gen-retry:') ||
-          usage.key.startsWith('step-retry:') ||
+          usage.isRetry ||
           (linkedStepIdx !== undefined && seenPrimaryStepIdx.has(linkedStepIdx));
         if (!isRetryUsage && linkedStepIdx !== undefined) {
           seenPrimaryStepIdx.add(linkedStepIdx);
         }
+        const observedTurn = resolveUsageTurn(usage, linkedStepIdx);
+        const isLateAttempt = previouslyEndedTurns.has(observedTurn);
+        const turnId = isLateAttempt
+          ? `${observedTurn}:usage:${hashId([responseKey ?? usage.key], 16)}`
+          : observedTurn;
+        registerTurnOrder(turnId);
 
         const baseResponseId = usage.messageId ?? `${stepId}:r:${usage.key}`;
         let responseId = baseResponseId;
@@ -1622,18 +1689,19 @@ export class AntigravityInput extends BaseInput {
         }
         usedResponseIds.add(responseId);
 
-        const traceId = hashId([sessionId, turnId, 'trace'], 32);
-        const stepSpanId = hashId([sessionId, turnId, stepId, 'step'], 16);
+        const traceId = hashEventId([sessionId, turnId, 'trace'], 32);
+        const stepSpanId = hashEventId([sessionId, turnId, stepId, 'step'], 16);
         // Include responseId in llmSpanId so retries / multi-usage on the same step
         // never collide on span_id or event.id in OtlpTraceFlusher.
-        const llmSpanId = hashId([sessionId, turnId, stepId, 'llm', responseId], 16);
+        const llmSpanId = hashEventId([sessionId, turnId, stepId, 'llm', responseId], 16);
 
-        const transcriptModel = normalizeAntigravityModel(linkedStep?.model);
+        const plannerOutput = isRetryUsage ? undefined : linkedStep;
+        const transcriptModel = normalizeAntigravityModel(plannerOutput?.model);
         const model =
           transcriptModel && modelResolutionRank(transcriptModel) > modelResolutionRank(usage.model)
             ? transcriptModel
             : usage.model;
-        const provider = resolveAntigravityProvider(model);
+        const provider = model === usage.model ? usage.provider : resolveAntigravityProvider(model);
 
         const totalInputTokens =
           usage.freshInputTokens + usage.cacheReadTokens + usage.cacheCreationTokens;
@@ -1667,7 +1735,7 @@ export class AntigravityInput extends BaseInput {
         const respTimeNano = BigInt(Math.floor(respTsMs)) * 1_000_000n;
 
         const inputDelta = await this.buildInputMessagesDelta(
-          linkedStep,
+          plannerOutput,
           transcript,
           prevPlannerByStepIndex,
           stepPositionByIndex,
@@ -1675,10 +1743,10 @@ export class AntigravityInput extends BaseInput {
           reqTsMs,
           getStepMedia,
           resolveToolCallId,
-          findToolResultStepIndex,
+          (plannerStep, ordinal) => findToolResultStep(plannerStep, ordinal).step,
         );
         const reqEntry = buildAgentActivityEntry({
-          'event.id': hashId([sessionId, turnId, stepId, 'llm.request', responseId], 32),
+          'event.id': hashEventId([sessionId, turnId, stepId, 'llm.request', responseId], 32),
           'event.name': 'llm.request',
           trace_id: traceId,
           span_id: llmSpanId,
@@ -1705,19 +1773,24 @@ export class AntigravityInput extends BaseInput {
         await this.attachWorkspaceContext(reqEntry, cwd);
         entries.push(reqEntry);
 
-        const outputMediaParts = linkedStep
-          ? await getStepMedia(linkedStep, respTsMs, 'output')
+        const outputMediaParts = plannerOutput
+          ? await getStepMedia(plannerOutput, respTsMs, 'output')
           : [];
-        const finishReason = linkedStep && linkedStep.toolCalls.length > 0 ? 'tool_call' : 'stop';
+        const finishReason = plannerOutput && plannerOutput.toolCalls.length > 0 ? 'tool_call' : 'stop';
+        const observedStop = finishReason === 'stop' && (!isRetryUsage || !linkedStep);
+        const waitsForTools = observedStop && !isLateAttempt && pendingToolTurns.has(turnId);
+        const endsTurn = isLateAttempt || (observedStop && !waitsForTools);
+        if (waitsForTools) turnsAwaitingToolResults.add(turnId);
+        if (endsTurn) endedTurns.add(turnId);
         const outputMessages = this.buildOutputMessages(
-          linkedStep,
+          plannerOutput,
           outputMediaParts,
           finishReason,
           resolveToolCallId,
         );
 
         const respEntry = buildAgentActivityEntry({
-          'event.id': hashId([sessionId, turnId, stepId, 'llm.response', responseId], 32),
+          'event.id': hashEventId([sessionId, turnId, stepId, 'llm.response', responseId], 32),
           'event.name': 'llm.response',
           trace_id: traceId,
           span_id: llmSpanId,
@@ -1731,7 +1804,8 @@ export class AntigravityInput extends BaseInput {
           'gen_ai.provider.name': provider,
           'gen_ai.request.model': model,
           'gen_ai.response.model': model,
-          'gen_ai.response.finish_reasons': [finishReason],
+          ...(!isRetryUsage || !linkedStep ? { 'gen_ai.response.finish_reasons': [finishReason] } : {}),
+          ...(endsTurn || waitsForTools ? { 'gen_ai.turn.end': endsTurn } : {}),
           ...(usage.ttftNs !== undefined && usage.ttftNs > 0
             ? { 'gen_ai.response.time_to_first_token': usage.ttftNs }
             : {}),
@@ -1774,6 +1848,17 @@ export class AntigravityInput extends BaseInput {
       return wa - wb;
     });
 
+    const lastEntryByTurn = new Map(entries.map((entry) => [entry['gen_ai.turn.id'], entry]));
+    for (const turnId of turnsAwaitingToolResults) {
+      if (pendingToolTurns.has(turnId)) continue;
+      const lastEntry = lastEntryByTurn.get(turnId);
+      if (lastEntry) lastEntry['gen_ai.turn.end'] = true;
+      // If a new prompt superseded the turn without a result, the exporter sees
+      // the next turn in the same session and flushes the previous one.
+      endedTurns.add(turnId);
+      turnsAwaitingToolResults.delete(turnId);
+    }
+
     const turnIdByStartStep: Record<string, string> = {};
     for (const [k, v] of latchedTurnByStartStep) {
       turnIdByStartStep[String(k)] = v;
@@ -1785,19 +1870,23 @@ export class AntigravityInput extends BaseInput {
 
     return {
       entries,
-      maxTranscriptStepIndex: maxStepIndex,
-      maxEmittedGenIdx,
-      maxEmittedStepIdx,
-      emittedUsageKeys: keyOrder,
-      emittedKeyMeta: keyMeta,
-      deferredGenIdxs: [...deferredGenSet],
-      deferredStepIdxs: [...deferredStepSet],
-      emittedResponseIds: [...usedResponseIds],
-      emittedPrimaryStepIdxs: [...seenPrimaryStepIdx],
-      pendingToolCalls: remainingPending,
-      turnIdByStartStep,
-      emittedTurnStarts: [...emittedTurnStartsSet],
-      toolCallIdMap,
+      cursor: {
+        retryAtMs,
+        ...(joinDeadlines.size > 0 ? { joinDeadlines: Object.fromEntries(joinDeadlines) } : {}),
+        lastTranscriptStepIndex: prevCursor.lastTranscriptStepIndex,
+        processedTranscriptSteps: [...processedTranscriptSteps],
+        emittedUsageKeys: [...seenKeys],
+        usageResponseKeysBySource: Object.fromEntries(responseKeysBySource),
+        emittedResponseIds: [...usedResponseIds],
+        emittedPrimaryStepIdxs: [...seenPrimaryStepIdx],
+        pendingToolCalls: remainingPending,
+        turnIdByStartStep,
+        emittedTurnStarts: [...emittedTurnStartsSet],
+        endedTurns: [...endedTurns],
+        ...(turnsAwaitingToolResults.size ? { turnsAwaitingToolResults: [...turnsAwaitingToolResults] } : {}),
+        toolCallIdMap,
+        toolResultStepIndexMap: Object.fromEntries(toolResultStepIndices),
+      },
     };
   }
 
@@ -1830,39 +1919,6 @@ export class AntigravityInput extends BaseInput {
     return sawCheckpoint;
   }
 
-  private shouldDeferCompactionRace(
-    usage: AntigravityUsageEvent,
-    transcript: AntigravityTranscript | null,
-    lastTranscriptStepIdx: number,
-    nowMs: number,
-  ): boolean {
-    if (!transcript || usage.stepIndices.length === 0) return false;
-    let hasMissing = false;
-    let hasCheckpoint = false;
-    let hasPlanner = false;
-    for (const idx of usage.stepIndices) {
-      const step = transcript.byStepIndex.get(idx);
-      if (!step) {
-        hasMissing = true;
-      } else if (step.type === 'PLANNER_RESPONSE') {
-        hasPlanner = true;
-      } else if (step.type === 'CHECKPOINT') {
-        hasCheckpoint = true;
-      }
-    }
-    if (!hasMissing || hasPlanner) return false;
-    // Partial CHECKPOINT + missing sibling index, OR recent steps-only row ahead of transcript tip
-    if (hasCheckpoint && nowMs - usage.timestampMs < 30_000) return true;
-    if (
-      usage.genIdx === undefined &&
-      Math.max(...usage.stepIndices) > lastTranscriptStepIdx &&
-      nowMs - usage.timestampMs < 30_000
-    ) {
-      return true;
-    }
-    return false;
-  }
-
   private async buildInputMessagesDelta(
     linkedStep: AntigravityTranscriptStep | undefined,
     transcript: AntigravityTranscript | null,
@@ -1879,52 +1935,44 @@ export class AntigravityInput extends BaseInput {
       plannerStepIndex: number,
       toolIndex: number,
       explicitId?: string,
-      toolName?: string,
     ) => string,
-    findToolResultStepIndex: (
+    findToolResultStep: (
       plannerStepIndex: number,
       toolIndex: number,
-      toolName?: string,
-      callId?: string,
-    ) => number,
+    ) => AntigravityTranscriptStep | undefined,
   ): Promise<JsonValue[]> {
     if (!linkedStep || !transcript) return [];
 
     const prevPlanner = prevPlannerByStepIndex.get(linkedStep.stepIndex);
     const delta: JsonValue[] = [];
-    const consumedStepIndices = new Set<number>();
 
     if (prevPlanner && prevPlanner.toolCalls.length > 0) {
       const assistantParts: JsonValue[] = [];
       const toolResponseParts: JsonValue[] = [];
       for (let i = 0; i < prevPlanner.toolCalls.length; i++) {
         const tc = prevPlanner.toolCalls[i]!;
-        const callId = resolveToolCallId(prevPlanner.stepIndex, i, tc.id, tc.name);
+        const callId = resolveToolCallId(prevPlanner.stepIndex, i, tc.id);
         assistantParts.push({
           type: 'tool_call',
           id: callId,
           name: tc.name,
           arguments: tc.args ?? null,
         });
-        const resultIdx = findToolResultStepIndex(prevPlanner.stepIndex, i, tc.name, callId);
-        if (resultIdx < linkedStep.stepIndex) {
-          const resultStep = transcript.byStepIndex.get(resultIdx);
-          if (resultStep && isToolResultStep(resultStep)) {
-            consumedStepIndices.add(resultIdx);
-            const resultMedia = await getStepMedia(resultStep, resultStep.createdAtMs ?? reqTsMs, 'input');
-            let responsePayload: JsonValue = resultStep.content ?? null;
-            if (resultMedia.length > 0) {
-              const combined: JsonValue[] = [];
-              if (resultStep.content) combined.push({ type: 'text', content: resultStep.content });
-              for (const part of resultMedia) combined.push(part as unknown as JsonValue);
-              responsePayload = combined;
-            }
-            toolResponseParts.push({
-              type: 'tool_call_response',
-              id: callId,
-              response: responsePayload,
-            });
+        const resultStep = findToolResultStep(prevPlanner.stepIndex, i);
+        if (resultStep && resultStep.stepIndex < linkedStep.stepIndex) {
+          const resultMedia = await getStepMedia(resultStep, resultStep.createdAtMs ?? reqTsMs, 'input');
+          let responsePayload: JsonValue = resultStep.content ?? null;
+          if (resultMedia.length > 0) {
+            const combined: JsonValue[] = [];
+            if (resultStep.content) combined.push({ type: 'text', content: resultStep.content });
+            for (const part of resultMedia) combined.push(part as unknown as JsonValue);
+            responsePayload = combined;
           }
+          toolResponseParts.push({
+            type: 'tool_call_response',
+            id: callId,
+            response: responsePayload,
+          });
         }
       }
       if (assistantParts.length > 0) {
@@ -1939,7 +1987,6 @@ export class AntigravityInput extends BaseInput {
     const endPos = stepPositionByIndex.get(linkedStep.stepIndex) ?? transcript.steps.length;
     for (let pos = startPos; pos < endPos; pos++) {
       const step = transcript.steps[pos]!;
-      if (consumedStepIndices.has(step.stepIndex)) continue;
       if (!turnPromptStepSet.has(step.stepIndex)) continue;
       const mediaParts = await getStepMedia(step, step.createdAtMs ?? reqTsMs, 'input');
       const parts: JsonValue[] = [];
@@ -1984,7 +2031,6 @@ export class AntigravityInput extends BaseInput {
       plannerStepIndex: number,
       toolIndex: number,
       explicitId?: string,
-      toolName?: string,
     ) => string,
   ): JsonValue | undefined {
     if (!step && mediaParts.length === 0) return undefined;
@@ -2001,7 +2047,7 @@ export class AntigravityInput extends BaseInput {
     for (let i = 0; i < (step?.toolCalls.length ?? 0); i++) {
       const tc = step!.toolCalls[i]!;
       const callId = resolveToolCallId
-        ? resolveToolCallId(step!.stepIndex, i, tc.id, tc.name)
+        ? resolveToolCallId(step!.stepIndex, i, tc.id)
         : tc.id;
       parts.push({
         type: 'tool_call',

@@ -91,6 +91,78 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     await vi.waitFor(() => expect(convert).toHaveBeenCalledTimes(2));
   });
 
+  it.each(['antigravity', 'antigravity-cli'])(
+    'keeps %s background tools attached to the older turn across separate watcher batches',
+    async (agentType) => {
+      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+      const convert = vi.mocked(convertEventLogToTrace);
+      convert.mockClear();
+      const entry = (turn: 'a' | 'b', event: string, fields: Record<string, unknown> = {}) => makeEntry({
+        'event.name': event,
+        'gen_ai.agent.type': agentType,
+        'gen_ai.session.id': 'shared-session',
+        'gen_ai.turn.id': turn,
+        'gen_ai.step.id': `${turn}:step:1`,
+        trace_id: turn.repeat(32),
+        ...fields,
+      });
+      await flusher.sendBatch([
+        entry('a', 'llm.request'),
+        entry('a', 'llm.response', { 'gen_ai.response.finish_reasons': ['tool_call'] }),
+        entry('a', 'tool.call', {
+          'gen_ai.turn.end': false,
+          'gen_ai.tool.call.id': 'background-call',
+        }),
+      ]);
+      await flusher.send(entry('b', 'llm.request'));
+      expect(convert).not.toHaveBeenCalled();
+
+      // The delayed result must neither split turn a nor preempt the newer turn b.
+      await flusher.send(entry('a', 'tool.result', {
+        'gen_ai.turn.end': true,
+        'gen_ai.tool.call.id': 'background-call',
+      }));
+      await vi.waitFor(() => expect(convert).toHaveBeenCalledOnce());
+      expect(convert.mock.calls[0][0].map(record => record['event.name'])).toEqual([
+        'llm.request', 'llm.response', 'tool.call', 'tool.result',
+      ]);
+      expect(convert.mock.calls[0][0].every(record => record['gen_ai.turn.id'] === 'a')).toBe(true);
+
+      await flusher.send(entry('b', 'llm.response', { 'gen_ai.turn.end': true }));
+      await vi.waitFor(() => expect(convert).toHaveBeenCalledTimes(2));
+      expect(convert.mock.calls[1][0].map(record => record['event.name'])).toEqual(['llm.request', 'llm.response']);
+      expect(convert.mock.calls[1][0].every(record => record['gen_ai.turn.id'] === 'b')).toBe(true);
+    },
+  );
+
+  it('does not apply OTLP idle sealing while an Antigravity background tool is known pending', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const convert = vi.mocked(convertEventLogToTrace);
+    convert.mockClear();
+    await flusher.shutdown();
+    vi.useFakeTimers();
+    try {
+      flusher = new OtlpTraceFlusher({ ...makeConfig(), turnIdleTimeoutMs: 100 });
+      const fields = {
+        'gen_ai.agent.type': 'antigravity',
+        'gen_ai.session.id': 'idle-session',
+        'gen_ai.turn.id': 'background-turn',
+        'gen_ai.step.id': 'background-step',
+        'gen_ai.tool.call.id': 'background-tool',
+      };
+      await flusher.send(makeEntry({ ...fields, 'event.name': 'tool.call', 'gen_ai.turn.end': false }));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(convert).not.toHaveBeenCalled();
+
+      await flusher.send(makeEntry({ ...fields, 'event.name': 'tool.result', 'gen_ai.turn.end': true }));
+      expect(convert).toHaveBeenCalledOnce();
+      expect(convert.mock.calls[0][0].map(record => record['event.name'])).toEqual(['tool.call', 'tool.result']);
+    } finally {
+      await flusher.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it('flushes a failed legacy OpenClaw turn without llm_output', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const convert = vi.mocked(convertEventLogToTrace);

@@ -45,8 +45,11 @@ export interface AntigravityModelUsage {
 }
 
 export interface AntigravityUsageEvent {
-  /** Stable dedup identity for this generation/step usage record. */
+  /** Concrete source slot used when no native response ID is available. */
   key: string;
+  /** Concrete primary or retry slots that describe this same attempt. */
+  sourceKeys: string[];
+  isRetry: boolean;
   sessionId: string;
   /** Source gen_metadata.idx when originated/merged from gen_metadata. */
   genIdx?: number;
@@ -72,6 +75,7 @@ export interface AntigravityUsageEvent {
   totalOutputTokens: number;
   messageId?: string;
   messageIdRank: number;
+  /** Native response/message IDs with their respective namespaces. */
   identities: string[];
 }
 
@@ -97,23 +101,19 @@ export interface AntigravityConversationSnapshot {
   sessionId: string;
   dbPath: string;
   workspacePath?: string;
+  /** All explicit workspace roots, including secondary folders and Git roots. */
+  workspacePaths?: string[];
   trajectoryTimestampMs?: number;
-  maxGenIdx: number;
-  maxStepIdx: number;
   events: AntigravityUsageEvent[];
   /** Native per-step timing, turn UUID, and tool call identity from `steps.metadata`. */
   stepInfos: Map<number, AntigravityStepInfo>;
-  /** `gen_metadata.idx` values currently present with 0 tokens (must survive >512-key eviction watermarks). */
-  zeroTokenGenIdxs?: number[];
-  /** `steps.idx` values currently present with 0-token usage blobs. */
-  zeroTokenStepIdxs?: number[];
 }
 
 interface GeneratorMetadata {
   model?: string;
   modelId?: number;
   usage?: AntigravityModelUsage;
-  retryUsages: AntigravityModelUsage[];
+  retryUsages: Array<AntigravityModelUsage | undefined>;
   timestampMs?: number;
   ttftNs?: number;
   streamDurationNs?: number;
@@ -125,7 +125,7 @@ interface StepMetadata {
   modelId?: number;
   provider?: number;
   usage?: AntigravityModelUsage;
-  retryUsages: AntigravityModelUsage[];
+  retryUsages: Array<AntigravityModelUsage | undefined>;
   timestampMs?: number;
   turnId?: string;
   createdAtMs?: number;
@@ -134,6 +134,50 @@ interface StepMetadata {
   executionStartedAtMs?: number;
   toolCallId?: string;
   toolName?: string;
+}
+
+interface WorkspaceMetadata {
+  paths: string[];
+  fallbackPath?: string;
+  timestampMs?: number;
+}
+
+interface MetadataRows<T> {
+  maxIdx: number;
+  rows: Map<number, T | undefined>;
+  pending: Set<number>;
+}
+
+interface ConversationDbState {
+  fileIdentity: string;
+  schemaVersion: number;
+  workspace: WorkspaceMetadata;
+  steps: MetadataRows<StepMetadata>;
+  generations: MetadataRows<GeneratorMetadata>;
+}
+
+/** In-memory decoded rows for one conversation. Keep it separate from the delivery checkpoint. */
+export class AntigravityDbReadCache {
+  /** @internal Committed by the reader only after a successful snapshot. */
+  state?: ConversationDbState;
+
+  get rowCount(): number {
+    return (this.state?.steps.rows.size ?? 0) + (this.state?.generations.rows.size ?? 0);
+  }
+
+  get pendingRowCount(): number {
+    return (this.state?.steps.pending.size ?? 0) + (this.state?.generations.pending.size ?? 0);
+  }
+}
+
+export interface AntigravityDbReadOptions {
+  cache: AntigravityDbReadCache;
+  /** Reconcile older rows that may have changed without moving the database's index frontier. */
+  forceFull?: boolean;
+  /** Steps changed in the companion transcript or still waiting for native metadata. */
+  stepIndices?: readonly number[];
+  /** Reevaluate all roots when a workspace exclusion policy is active. */
+  refreshWorkspace?: boolean;
 }
 
 function tryOptional<T>(fn: () => T): T | undefined {
@@ -183,33 +227,6 @@ function preferredMessageId(u: AntigravityModelUsage): [string | undefined, numb
   if (u.providerAssignedMessageId) return [u.providerAssignedMessageId, 2];
   if (u.messageId) return [u.messageId, 1];
   return [undefined, 0];
-}
-
-function sameTokenCounts(a: AntigravityModelUsage, b: AntigravityModelUsage): boolean {
-  return (
-    a.modelId === b.modelId &&
-    a.inputTokens === b.inputTokens &&
-    a.totalOutputTokens === b.totalOutputTokens &&
-    a.cacheCreationTokens === b.cacheCreationTokens &&
-    a.cacheReadTokens === b.cacheReadTokens &&
-    a.reasoningTokens === b.reasoningTokens &&
-    a.visibleOutputTokens === b.visibleOutputTokens
-  );
-}
-
-function isMirrorOf(retry: AntigravityModelUsage, primary: AntigravityModelUsage): boolean {
-  if (!sameTokenCounts(retry, primary)) return false;
-  const primaryIds = new Set(usageIdentityKeys(primary));
-  return usageIdentityKeys(retry).every((id) => primaryIds.has(id));
-}
-
-function dropPrimaryMirror(
-  primary: AntigravityModelUsage | undefined,
-  retries: AntigravityModelUsage[],
-): void {
-  if (!primary) return;
-  const idx = retries.findIndex((r) => isMirrorOf(r, primary));
-  if (idx >= 0) retries.splice(idx, 1);
 }
 
 function toUint8Array(value: unknown): Uint8Array | undefined {
@@ -278,12 +295,9 @@ export function parseGeneratorMetadata(blob: Uint8Array): GeneratorMetadata | un
   const usageBlob = fieldBytes(chatFields, 4);
   const usage = usageBlob ? tryOptional(() => parseModelUsage(usageBlob)) : undefined;
 
-  const retryUsages: AntigravityModelUsage[] = [];
-  for (const retryBlob of fieldBytesAll(chatFields, 17)) {
-    const parsed = tryOptional(() => parseRetryInfo(retryBlob));
-    if (parsed) retryUsages.push(parsed);
-  }
-  dropPrimaryMirror(usage, retryUsages);
+  const retryUsages = fieldBytesAll(chatFields, 17).map(
+    (retryBlob) => tryOptional(() => parseRetryInfo(retryBlob)),
+  );
 
   const genInfoBlob = fieldBytes(chatFields, 9);
   const timestampMs = genInfoBlob
@@ -317,12 +331,9 @@ export function parseStepMetadata(blob: Uint8Array): StepMetadata {
   const usageBlob = fieldBytes(fields, 9);
   const usage = usageBlob ? tryOptional(() => parseModelUsage(usageBlob)) : undefined;
 
-  const retryUsages: AntigravityModelUsage[] = [];
-  for (const retryBlob of fieldBytesAll(fields, 28)) {
-    const parsed = tryOptional(() => parseRetryInfo(retryBlob));
-    if (parsed) retryUsages.push(parsed);
-  }
-  dropPrimaryMirror(usage, retryUsages);
+  const retryUsages = fieldBytesAll(fields, 28).map(
+    (retryBlob) => tryOptional(() => parseRetryInfo(retryBlob)),
+  );
 
   let model: string | undefined;
   let modelId: number | undefined;
@@ -398,7 +409,9 @@ function parseLocalFileUri(text: string | undefined): string | undefined {
   // Reject remote UNC hosts (e.g. file://server/share) to avoid SMB access via git -C on Windows
   if (url.hostname && url.hostname.toLowerCase() !== 'localhost') return undefined;
   const converted = tryOptional(() => fileURLToPath(url));
-  if (!converted) return undefined;
+  if (!converted || /^[\\/]{2}/.test(converted) || /[\x00-\x1f\x7f]/.test(converted)) {
+    return undefined;
+  }
   // Reject bare POSIX/Windows root paths, multi-slash roots (//), and drive roots (/, \, C:\, /C:/)
   if (
     /^\/+$/.test(converted) ||
@@ -418,26 +431,29 @@ function parseLocalFileUri(text: string | undefined): string | undefined {
  * Always rejects remote UNC hosts and bare POSIX/Windows drive roots.
  */
 export function extractWorkspacePathFromBlob(blob: Uint8Array): string | undefined {
-  if (blob.length === 0) return undefined;
   const fields = tryOptional(() => decodeProtoFields(blob));
-  if (fields) {
-    // 1) Native repeated workspace messages: field 1 -> sub-field 1 (folder URI) / 2 (git root URI)
-    for (const wsBlob of fieldBytesAll(fields, 1)) {
-      const wsFields = tryOptional(() => decodeProtoFields(wsBlob));
-      if (!wsFields) continue;
-      const fromFolder = parseLocalFileUri(fieldText(wsFields, 1));
-      if (fromFolder) return fromFolder;
-      const fromGitRoot = parseLocalFileUri(fieldText(wsFields, 2));
-      if (fromGitRoot) return fromGitRoot;
-    }
-    // 2) Native top-level repeated workspace_uris: field 7
-    for (const uriBlob of fieldBytesAll(fields, 7)) {
-      const text = tryOptional(() => utf8StrictDecoder.decode(uriBlob));
-      const parsed = parseLocalFileUri(text);
-      if (parsed) return parsed;
-    }
+  if (!fields) return undefined;
+  return extractNativeWorkspacePaths(fields)[0] ?? walkProtoForFileUri(blob, 0);
+}
+
+function extractNativeWorkspacePaths(fields: readonly ProtoField[]): string[] {
+  const roots: string[] = [];
+  // Native repeated workspace messages: field 1 -> sub-field 1 (folder URI) / 2 (Git root URI).
+  for (const wsBlob of fieldBytesAll(fields, 1)) {
+    const wsFields = tryOptional(() => decodeProtoFields(wsBlob));
+    if (!wsFields) continue;
+    const folder = parseLocalFileUri(fieldText(wsFields, 1));
+    const gitRoot = parseLocalFileUri(fieldText(wsFields, 2));
+    if (folder) roots.push(folder);
+    if (gitRoot) roots.push(gitRoot);
   }
-  return walkProtoForFileUri(blob, 0);
+  // Native top-level repeated workspace_uris: field 7.
+  for (const uriBlob of fieldBytesAll(fields, 7)) {
+    const text = tryOptional(() => utf8StrictDecoder.decode(uriBlob));
+    const root = parseLocalFileUri(text);
+    if (root) roots.push(root);
+  }
+  return roots;
 }
 
 function walkProtoForFileUri(blob: Uint8Array, depth: number): string | undefined {
@@ -497,6 +513,7 @@ function resolveModel(
 }
 
 function mergeUsageEvent(target: AntigravityUsageEvent, dup: AntigravityUsageEvent): void {
+  target.isRetry = target.isRetry && dup.isRetry;
   target.freshInputTokens = Math.max(target.freshInputTokens, dup.freshInputTokens);
   target.cacheCreationTokens = Math.max(target.cacheCreationTokens, dup.cacheCreationTokens);
   target.cacheReadTokens = Math.max(target.cacheReadTokens, dup.cacheReadTokens);
@@ -537,124 +554,216 @@ function mergeUsageEvent(target: AntigravityUsageEvent, dup: AntigravityUsageEve
   for (const id of dup.identities) {
     if (!target.identities.includes(id)) target.identities.push(id);
   }
+  for (const key of dup.sourceKeys) {
+    if (!target.sourceKeys.includes(key)) target.sourceKeys.push(key);
+  }
 }
 
-export function isStrongUsageIdentity(identity: string): boolean {
-  return (
-    identity.startsWith('response:') ||
-    identity.startsWith('provider:') ||
-    identity.startsWith('message:')
-  );
-}
+const NATIVE_ID_PREFIXES = ['response:', 'provider:', 'message:'] as const;
 
-function hasStrongIdentityConflict(
-  a: readonly string[],
-  b: readonly string[],
-): boolean {
-  const strongA = a.filter(isStrongUsageIdentity);
-  const strongB = b.filter(isStrongUsageIdentity);
-  if (strongA.length === 0 || strongB.length === 0) return false;
-  return !strongA.some((id) => strongB.includes(id));
+function usageFingerprint(event: AntigravityUsageEvent, stepIdx: number): string {
+  return [
+    stepIdx,
+    Number(event.isRetry),
+    event.freshInputTokens,
+    event.cacheCreationTokens,
+    event.cacheReadTokens,
+    event.visibleOutputTokens,
+    event.reasoningTokens,
+    event.totalOutputTokens,
+  ].join(':');
 }
 
 function deduplicateEvents(events: AntigravityUsageEvent[]): AntigravityUsageEvent[] {
-  const slots: Array<AntigravityUsageEvent | undefined> = [];
-  const identityIndexes = new Map<string, number[]>();
+  const remaining = new Set(events);
 
-  const registerSlot = (targetIdx: number, identities: readonly string[]): void => {
-    for (const id of identities) {
-      let list = identityIndexes.get(id);
-      if (!list) {
-        list = [];
-        identityIndexes.set(id, list);
-      }
-      if (!list.includes(targetIdx)) list.push(targetIdx);
-    }
-  };
-
-  for (const event of events) {
-    const matching = new Set<number>();
-    for (const id of event.identities) {
-      const candidates = identityIndexes.get(id);
-      if (!candidates) continue;
-      for (const idx of candidates) {
-        const candidate = slots[idx];
-        if (!candidate) continue;
-        // Never merge two events whose strong provider/response IDs disagree
-        if (hasStrongIdentityConflict(candidate.identities, event.identities)) continue;
-        matching.add(idx);
-      }
-    }
-    const sortedMatches = [...matching].sort((a, b) => a - b);
-    if (sortedMatches.length === 0) {
-      const targetIdx = slots.length;
-      slots.push(event);
-      registerSlot(targetIdx, event.identities);
-      continue;
+  // A weaker alias can be shared by multiple distinct responses. Resolve native
+  // IDs in priority order and leave an entire weaker group separate when its
+  // stronger IDs disagree, including members with no stronger ID of their own.
+  for (const [rank, prefix] of NATIVE_ID_PREFIXES.entries()) {
+    const groups = new Map<string, AntigravityUsageEvent[]>();
+    for (const event of remaining) {
+      const matches = event.identities.filter((id) => id.startsWith(prefix));
+      if (matches.length !== 1) continue;
+      const id = matches[0]!;
+      const group = groups.get(id);
+      if (group) group.push(event);
+      else groups.set(id, [event]);
     }
 
-    // If an event without strong IDs matches multiple slots whose own strong IDs conflict,
-    // only merge when a single slot matches its exact token counts; otherwise keep separate
-    // rather than arbitrarily folding into slot 0.
-    const eventHasStrong = event.identities.some(isStrongUsageIdentity);
-    if (!eventHasStrong && sortedMatches.length > 1) {
-      let hasPairwiseConflict = false;
-      for (let i = 0; i < sortedMatches.length && !hasPairwiseConflict; i++) {
-        for (let j = i + 1; j < sortedMatches.length; j++) {
-          const si = slots[sortedMatches[i]!];
-          const sj = slots[sortedMatches[j]!];
-          if (si && sj && hasStrongIdentityConflict(si.identities, sj.identities)) {
-            hasPairwiseConflict = true;
-            break;
-          }
-        }
-      }
-      if (hasPairwiseConflict) {
-        const tokenMatches = sortedMatches.filter((idx) => {
-          const s = slots[idx];
-          return (
-            s !== undefined &&
-            s.freshInputTokens === event.freshInputTokens &&
-            s.totalOutputTokens === event.totalOutputTokens
-          );
-        });
-        if (tokenMatches.length === 1) {
-          const targetIdx = tokenMatches[0]!;
-          const target = slots[targetIdx]!;
-          mergeUsageEvent(target, event);
-          registerSlot(targetIdx, target.identities);
-        } else {
-          const targetIdx = slots.length;
-          slots.push(event);
-          registerSlot(targetIdx, event.identities);
-        }
+    const higherPrefixes = NATIVE_ID_PREFIXES.slice(0, rank);
+    for (const [groupId, group] of groups) {
+      if (group.length < 2) continue;
+      const hasConflict = higherPrefixes.some((higher) => {
+        const ids = new Set(group.flatMap((event) =>
+          event.identities.filter((id) => id.startsWith(higher)),
+        ));
+        return ids.size > 1;
+      });
+      if (hasConflict) {
+        // The alias is known to be shared. Never use it as a checkpoint key.
+        for (const event of group) event.identities = event.identities.filter((id) => id !== groupId);
         continue;
       }
-    }
-
-    const targetIdx = sortedMatches[0]!;
-    const target = slots[targetIdx]!;
-    for (let i = 1; i < sortedMatches.length; i++) {
-      const dupIdx = sortedMatches[i]!;
-      const dup = slots[dupIdx];
-      if (dup && !hasStrongIdentityConflict(target.identities, dup.identities)) {
-        slots[dupIdx] = undefined;
-        mergeUsageEvent(target, dup);
+      const target = group[0]!;
+      for (const duplicate of group.slice(1)) {
+        mergeUsageEvent(target, duplicate);
+        remaining.delete(duplicate);
       }
     }
-    mergeUsageEvent(target, event);
-    registerSlot(targetIdx, target.identities);
   }
 
-  return slots.filter((e): e is AntigravityUsageEvent => e !== undefined);
+  // A referenced step is context, not an attempt identity. It can connect a
+  // steps row to a generation row only when both sides have a unique match.
+  const genByFingerprint = new Map<string, Set<AntigravityUsageEvent>>();
+  const stepEvents: AntigravityUsageEvent[] = [];
+  for (const event of remaining) {
+    if (event.genIdx === undefined) {
+      stepEvents.push(event);
+    } else if (!event.sourceKeys.some((key) => key.startsWith('step:') || key.startsWith('step-retry:'))) {
+      for (const stepIdx of event.stepIndices) {
+        const fingerprint = usageFingerprint(event, stepIdx);
+        const group = genByFingerprint.get(fingerprint);
+        if (group) group.add(event);
+        else genByFingerprint.set(fingerprint, new Set([event]));
+      }
+    }
+  }
+
+  const generationMatchCounts = new Map<AntigravityUsageEvent, number>();
+  const uniqueStepMatches = new Map<AntigravityUsageEvent, AntigravityUsageEvent>();
+  for (const step of stepEvents) {
+    const candidates = new Set<AntigravityUsageEvent>();
+    for (const stepIdx of step.stepIndices) {
+      for (const generation of genByFingerprint.get(usageFingerprint(step, stepIdx)) ?? []) {
+        // Both sides carry different native IDs, so matching token counts
+        // alone do not establish a mirror.
+        if (step.messageId !== undefined && generation.messageId !== undefined) continue;
+        candidates.add(generation);
+      }
+    }
+    for (const generation of candidates) {
+      generationMatchCounts.set(generation, (generationMatchCounts.get(generation) ?? 0) + 1);
+    }
+    if (candidates.size === 1) uniqueStepMatches.set(step, [...candidates][0]!);
+  }
+
+  for (const [step, generation] of uniqueStepMatches) {
+    if (generationMatchCounts.get(generation) === 1) {
+      mergeUsageEvent(step, generation);
+      remaining.delete(generation);
+    }
+  }
+  return [...remaining];
+}
+
+function maxMetadataIndex(db: DatabaseSyncInstance, table: 'steps' | 'gen_metadata'): number {
+  const [row] = db.prepare(`SELECT MAX(idx) AS idx FROM ${table}`).all() as Array<{ idx: number | null }>;
+  return row?.idx ?? -1;
+}
+
+function isPendingAttempt(usage: AntigravityModelUsage | undefined): boolean {
+  return usage === undefined || !isTokenBearing(usage);
+}
+
+// Full audits recover older unfinished rows. Bound repeated reads of large BLOBs
+// in the ordinary collector path and yield between the smaller point-read pages.
+const MAX_POINT_READS_PER_TABLE = 64;
+const MAX_PENDING_POINT_READS = 32;
+const POINT_READ_PAGE_ROWS = 16;
+
+interface MetadataReadOptions<T> {
+  previous?: MetadataRows<T>;
+  pointIndices?: ReadonlySet<number>;
+  parse: (blob: Uint8Array) => T | undefined;
+  isPending: (metadata: T) => boolean;
+  isRunning?: () => boolean;
+}
+
+async function readMetadataRows<T>(
+  db: DatabaseSyncInstance,
+  table: 'steps' | 'gen_metadata',
+  tableExists: boolean,
+  options: MetadataReadOptions<T>,
+): Promise<{ cache: MetadataRows<T>; touched: ReadonlySet<number> } | null> {
+  const { previous, pointIndices, parse, isPending, isRunning } = options;
+  const touched = new Set<number>();
+  if (!tableExists) return { cache: { maxIdx: -1, rows: new Map(), pending: new Set() }, touched };
+
+  const rows = new Map(previous?.rows);
+  const pending = new Set(previous?.pending);
+  const column = table === 'steps' ? 'metadata' : 'data';
+  type MetadataRow = { idx: number; blob: unknown };
+  const update = (row: MetadataRow): void => {
+    const blob = toUint8Array(row.blob);
+    const metadata = blob?.length ? tryOptional(() => parse(blob)) : undefined;
+    rows.set(row.idx, metadata);
+    touched.add(row.idx);
+    if (metadata === undefined || isPending(metadata)) pending.add(row.idx);
+    else pending.delete(row.idx);
+  };
+
+  // NULL/empty rows advance the append cursor and remain eligible for point reads.
+  const append = db.prepare(
+    `SELECT idx, ${column} AS blob FROM ${table} WHERE idx > ? ORDER BY idx ASC LIMIT ?`,
+  );
+  let maxIdx = previous?.maxIdx ?? -1;
+  for (;;) {
+    if (isRunning && !isRunning()) return null;
+    const page = append.all(maxIdx, SQLITE_SYNC_PAGE) as MetadataRow[];
+    for (const row of page) update(row);
+    maxIdx = page.at(-1)?.idx ?? maxIdx;
+    if (page.length < SQLITE_SYNC_PAGE) break;
+    await yieldEventLoop();
+  }
+
+  if (previous) {
+    const points = new Set<number>();
+    for (const idx of pointIndices ?? []) {
+      if (Number.isSafeInteger(idx) && idx >= 0 && idx <= previous.maxIdx) points.add(idx);
+      if (points.size === MAX_POINT_READS_PER_TABLE) break;
+    }
+    if (points.size < MAX_POINT_READS_PER_TABLE) {
+      for (const idx of [...previous.pending].slice(-MAX_PENDING_POINT_READS).reverse()) {
+        points.add(idx);
+        if (points.size === MAX_POINT_READS_PER_TABLE) break;
+      }
+    }
+
+    const indices = [...points];
+    for (let start = 0; start < indices.length; start += POINT_READ_PAGE_ROWS) {
+      if (isRunning && !isRunning()) return null;
+      const page = indices.slice(start, start + POINT_READ_PAGE_ROWS);
+      const sql = `SELECT idx, ${column} AS blob FROM ${table} WHERE idx IN (${page.map(() => '?').join(',')})`;
+      for (const idx of page) {
+        // A previously read row may have been removed in-place. Keep a missing point pending
+        // so a companion row inserted below the frontier can be discovered next time.
+        rows.delete(idx);
+        pending.add(idx);
+      }
+      for (const row of db.prepare(sql).all(...page) as MetadataRow[]) update(row);
+      if (start + POINT_READ_PAGE_ROWS < indices.length) await yieldEventLoop();
+    }
+  }
+  return { cache: { maxIdx, rows, pending }, touched };
+}
+
+function orderedMetadataRows<T>(data: MetadataRows<T>): Array<{ idx: number; metadata: T }> {
+  const rows: Array<{ idx: number; metadata: T }> = [];
+  for (const [idx, metadata] of data.rows) {
+    if (metadata !== undefined) rows.push({ idx, metadata });
+  }
+  return rows.sort((a, b) => a.idx - b.idx);
 }
 
 /**
  * Read one Antigravity conversation SQLite database read-only in bounded pages.
- * Returns null if the DB is empty/uninitialized or missing gen_metadata.
+ * Returns null if the DB is empty or a caller cancels collection.
  */
 export async function readAntigravityConversationDb(
   dbPath: string,
+  isRunning?: () => boolean,
+  incremental?: AntigravityDbReadOptions,
 ): Promise<AntigravityConversationSnapshot | null> {
   const DatabaseSync = loadDatabaseSync();
   if (!DatabaseSync) {
@@ -663,82 +772,115 @@ export async function readAntigravityConversationDb(
     );
   }
 
-  const stat = await fs.stat(dbPath);
-  const fallbackTimestampMs = Math.floor(stat.mtimeMs);
+  const stat = await fs.stat(dbPath, { bigint: true });
+  if (isRunning && !isRunning()) return null;
+  const fallbackTimestampMs = Number(stat.mtimeNs / 1_000_000n);
+  const fileIdentity = `${stat.dev}:${stat.ino}`;
   const sessionId = path.basename(dbPath, '.db');
 
   let db: DatabaseSyncInstance | undefined;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
-    if (isDatabaseEmpty(db) || !tableExists(db, 'gen_metadata')) {
+    // Keep workspace, step, and generation rows on the same SQLite snapshot across yields.
+    db.exec('BEGIN');
+    if (isDatabaseEmpty(db)) {
+      if (incremental) incremental.cache.state = undefined;
       return null;
     }
 
-    let trajectoryTimestampMs: number | undefined;
-    let workspacePath: string | undefined;
-    if (tableExists(db, 'trajectory_metadata_blob')) {
-      const rows = db
-        .prepare('SELECT data FROM trajectory_metadata_blob ORDER BY rowid ASC LIMIT 32')
-        .all() as Array<{ data?: unknown }>;
-      for (const row of rows) {
-        const blob = toUint8Array(row.data);
-        if (!blob) continue;
-        if (trajectoryTimestampMs === undefined) {
-          trajectoryTimestampMs = tryOptional(() => {
-            const fields = decodeProtoFields(blob);
-            const tsBlob = fieldBytes(fields, 2);
-            return tsBlob ? parseTimestampMs(tsBlob) : undefined;
-          });
-        }
-        if (workspacePath === undefined) {
-          workspacePath = extractWorkspacePathFromBlob(blob);
-        }
-      }
-    }
+    const stepsExist = tableExists(db, 'steps');
+    const generationsExist = tableExists(db, 'gen_metadata');
+    const [schema] = incremental
+      ? db.prepare('PRAGMA schema_version').all() as Array<{ schema_version: number }>
+      : [];
+    const schemaVersion = schema?.schema_version ?? 0;
+    const cached = incremental?.cache.state;
+    const previous = (
+      cached && !incremental?.forceFull &&
+      cached.fileIdentity === fileIdentity && cached.schemaVersion === schemaVersion &&
+      (stepsExist ? maxMetadataIndex(db, 'steps') : -1) >= cached.steps.maxIdx &&
+      (generationsExist ? maxMetadataIndex(db, 'gen_metadata') : -1) >= cached.generations.maxIdx
+    ) ? cached : undefined;
 
-    const stepRows: Array<{ idx: number; metadata: StepMetadata }> = [];
-    if (tableExists(db, 'steps')) {
-      const stmt = db.prepare(
-        'SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL AND idx > ? ORDER BY idx ASC LIMIT ?',
-      );
-      let cursor = -1;
-      for (;;) {
-        const page = stmt.all(cursor, SQLITE_SYNC_PAGE) as Array<{ idx: number; metadata: unknown }>;
-        if (page.length === 0) break;
-        for (const row of page) {
-          const idx = Number(row.idx);
-          cursor = idx;
-          const blob = toUint8Array(row.metadata);
-          if (!blob || blob.length === 0) continue;
-          const parsed = tryOptional(() => parseStepMetadata(blob));
-          if (parsed) stepRows.push({ idx, metadata: parsed });
+    let workspace = previous?.workspace;
+    if (!workspace?.paths.length || incremental?.refreshWorkspace) {
+      let trajectoryTimestampMs: number | undefined;
+      let fallbackWorkspacePath: string | undefined;
+      const nativeWorkspacePaths = new Set<string>();
+      if (tableExists(db, 'trajectory_metadata_blob')) {
+        const stmt = db.prepare(
+          'SELECT rowid, data FROM trajectory_metadata_blob WHERE rowid > ? ORDER BY rowid ASC LIMIT ?',
+        );
+        let cursor = Number.MIN_SAFE_INTEGER;
+        for (;;) {
+          if (isRunning && !isRunning()) return null;
+          const rows = stmt.all(cursor, SQLITE_SYNC_PAGE) as Array<{ rowid: number; data?: unknown }>;
+          for (const row of rows) {
+            cursor = row.rowid;
+            const blob = toUint8Array(row.data);
+            if (!blob) continue;
+            const fields = tryOptional(() => decodeProtoFields(blob));
+            if (!fields) continue;
+            if (trajectoryTimestampMs === undefined) {
+              const tsBlob = fieldBytes(fields, 2);
+              trajectoryTimestampMs = tsBlob ? tryOptional(() => parseTimestampMs(tsBlob)) : undefined;
+            }
+            for (const root of extractNativeWorkspacePaths(fields)) nativeWorkspacePaths.add(root);
+            if (nativeWorkspacePaths.size === 0 && fallbackWorkspacePath === undefined) {
+              fallbackWorkspacePath = walkProtoForFileUri(blob, 0);
+            }
+          }
+          if (rows.length < SQLITE_SYNC_PAGE) break;
+          await yieldEventLoop();
         }
-        if (page.length < SQLITE_SYNC_PAGE) break;
-        await yieldEventLoop();
       }
+      workspace = { paths: [...nativeWorkspacePaths], fallbackPath: fallbackWorkspacePath, timestampMs: trajectoryTimestampMs };
     }
+    const { paths: workspacePaths, timestampMs: trajectoryTimestampMs } = workspace;
+    const workspacePath = workspacePaths[0] ?? workspace.fallbackPath;
 
-    const genRows: Array<{ idx: number; metadata: GeneratorMetadata }> = [];
-    {
-      const stmt = db.prepare(
-        'SELECT idx, data FROM gen_metadata WHERE idx > ? ORDER BY idx ASC LIMIT ?',
-      );
-      let cursor = -1;
-      for (;;) {
-        const page = stmt.all(cursor, SQLITE_SYNC_PAGE) as Array<{ idx: number; data: unknown }>;
-        if (page.length === 0) break;
-        for (const row of page) {
-          const idx = Number(row.idx);
-          cursor = idx;
-          const blob = toUint8Array(row.data);
-          if (!blob || blob.length === 0) continue;
-          const parsed = tryOptional(() => parseGeneratorMetadata(blob));
-          if (parsed) genRows.push({ idx, metadata: parsed });
-        }
-        if (page.length < SQLITE_SYNC_PAGE) break;
-        await yieldEventLoop();
+    const stepPoints = new Set(incremental?.stepIndices);
+    const generationPoints = new Set<number>();
+    if (previous && stepPoints.size > 0) {
+      for (const [idx, metadata] of previous.generations.rows) {
+        if (metadata?.stepIndices.some((stepIdx) => stepPoints.has(stepIdx))) generationPoints.add(idx);
       }
     }
+    const readSteps = () => readMetadataRows(db!, 'steps', stepsExist, {
+      previous: previous?.steps,
+      pointIndices: stepPoints,
+      parse: parseStepMetadata,
+      isPending: (metadata) => (
+        (metadata.usage !== undefined && isPendingAttempt(metadata.usage)) ||
+        (metadata.executionStartedAtMs !== undefined && metadata.completedAtMs === undefined) ||
+        metadata.retryUsages.some(isPendingAttempt)
+      ),
+      isRunning,
+    });
+
+    // A full read can look at steps first. For an incremental read, include any
+    // older native steps just associated with a changed generation row.
+    let stepRead = previous ? undefined : await readSteps();
+    if (stepRead === null) return null;
+    const genRead = await readMetadataRows(db, 'gen_metadata', generationsExist, {
+      previous: previous?.generations,
+      pointIndices: generationPoints,
+      parse: parseGeneratorMetadata,
+      isPending: (metadata) => isPendingAttempt(metadata.usage) || metadata.retryUsages.some(isPendingAttempt),
+      isRunning,
+    });
+    if (!genRead) return null;
+    if (!stepRead) {
+      for (const idx of genRead.touched) {
+        for (const stepIdx of genRead.cache.rows.get(idx)?.stepIndices ?? []) stepPoints.add(stepIdx);
+      }
+      stepRead = await readSteps();
+      if (!stepRead) return null;
+    }
+    db.exec('COMMIT');
+
+    const stepRows = orderedMetadataRows(stepRead.cache);
+    const genRows = orderedMetadataRows(genRead.cache);
 
     // Build fallback model from last generation row that carries a model
     // (only applied AFTER deduplication so it never overrides row-level models)
@@ -773,62 +915,28 @@ export async function readAntigravityConversationDb(
     }
 
     const rawEvents: AntigravityUsageEvent[] = [];
-    const identityTimestamps = new Map<string, [number, number]>();
 
     const appendUsage = (
-      usage: AntigravityModelUsage,
+      usage: AntigravityModelUsage | undefined,
       opts: {
         model?: string;
         modelId?: number;
         provider?: number;
         timestampMs?: number;
         timestampRank?: number;
-        fallbackIdentities: string[];
+        sourceKey: string;
+        isRetry?: boolean;
         genIdx?: number;
         stepIndices: number[];
         ttftNs?: number;
         streamDurationNs?: number;
       },
     ): void => {
-      if (!isTokenBearing(usage) || !hasReasonableTokens(usage)) return;
+      if (!usage || !isTokenBearing(usage) || !hasReasonableTokens(usage)) return;
 
       const identities = usageIdentityKeys(usage);
-      // Always include primary fallback identities (e.g. step:<sid>:<idx>) alongside
-      // response/provider IDs so cross-cycle rows that gain a responseId later still dedup.
-      for (const fb of opts.fallbackIdentities) {
-        if (!identities.includes(fb)) identities.push(fb);
-      }
-
-      let timestampMs: number;
-      let timestampRank: number;
-      if (opts.timestampMs !== undefined) {
-        timestampMs = opts.timestampMs;
-        timestampRank = opts.timestampRank ?? 3;
-      } else {
-        const matched = identities
-          .map((id) => identityTimestamps.get(id))
-          .find((v): v is [number, number] => v !== undefined);
-        if (matched) {
-          [timestampMs, timestampRank] = matched;
-        } else if (trajectoryTimestampMs !== undefined) {
-          timestampMs = trajectoryTimestampMs;
-          timestampRank = 1;
-        } else {
-          timestampMs = fallbackTimestampMs;
-          timestampRank = 0;
-        }
-      }
-
-      for (const id of identities) {
-        const prev = identityTimestamps.get(id);
-        if (
-          !prev ||
-          timestampRank > prev[1] ||
-          (timestampRank === prev[1] && timestampMs < prev[0])
-        ) {
-          identityTimestamps.set(id, [timestampMs, timestampRank]);
-        }
-      }
+      const timestampMs = opts.timestampMs ?? trajectoryTimestampMs ?? fallbackTimestampMs;
+      const timestampRank = opts.timestampRank ?? (trajectoryTimestampMs === undefined ? 0 : 1);
 
       const totalOutputTokens = Math.max(
         usage.totalOutputTokens,
@@ -846,10 +954,11 @@ export async function readAntigravityConversationDb(
       const model = resolveModel(usage.modelId, opts.model, opts.modelId);
       const provider = resolveAntigravityProvider(model, usage.provider ?? opts.provider);
       const [messageId, messageIdRank] = preferredMessageId(usage);
-      const key = identities[0] ?? `anon:${sessionId}:${rawEvents.length}`;
 
       rawEvents.push({
-        key,
+        key: opts.sourceKey,
+        sourceKeys: [opts.sourceKey],
+        isRetry: opts.isRetry ?? false,
         sessionId,
         genIdx: opts.genIdx,
         stepIndices: [...opts.stepIndices],
@@ -871,9 +980,6 @@ export async function readAntigravityConversationDb(
       });
     };
 
-    const zeroTokenGenIdxs: number[] = [];
-    const zeroTokenStepIdxs: number[] = [];
-
     // 1) Process steps first (without session-level generationModel fallback)
     for (const { idx, metadata } of stepRows) {
       const rowModel =
@@ -882,27 +988,25 @@ export async function readAntigravityConversationDb(
           ? normalizeAntigravityModel(modelNameFromId(metadata.modelId))
           : undefined);
       if (metadata.usage) {
-        if (!isTokenBearing(metadata.usage)) {
-          zeroTokenStepIdxs.push(idx);
-        }
         appendUsage(metadata.usage, {
           model: rowModel,
           modelId: metadata.modelId,
           provider: metadata.provider,
           timestampMs: metadata.timestampMs,
-          timestampRank: 3,
-          fallbackIdentities: [`step:${sessionId}:${idx}`],
+          timestampRank: metadata.timestampMs === undefined ? undefined : 3,
+          sourceKey: `step:${sessionId}:${idx}`,
           stepIndices: [idx],
         });
       }
       for (let r = 0; r < metadata.retryUsages.length; r++) {
-        appendUsage(metadata.retryUsages[r]!, {
+        appendUsage(metadata.retryUsages[r], {
           model: rowModel,
           modelId: metadata.modelId,
           provider: metadata.provider,
           timestampMs: metadata.timestampMs,
-          timestampRank: 3,
-          fallbackIdentities: [`step-retry:${sessionId}:${idx}:${r}`],
+          timestampRank: metadata.timestampMs === undefined ? undefined : 3,
+          sourceKey: `step-retry:${sessionId}:${idx}:${r}`,
+          isRetry: true,
           stepIndices: [idx],
         });
       }
@@ -925,23 +1029,15 @@ export async function readAntigravityConversationDb(
         .map((s) => stepTimestamps.get(s))
         .find((ts): ts is number => ts !== undefined);
       const ts = metadata.timestampMs ?? linkedStepTs;
-      const tsRank = metadata.timestampMs !== undefined ? 3 : linkedStepTs !== undefined ? 2 : undefined;
-
-      const fallbackIdentities =
-        metadata.stepIndices.length > 0
-          ? metadata.stepIndices.map((s) => `step:${sessionId}:${s}`)
-          : [`gen:${sessionId}:${idx}`];
+      const tsRank = metadata.timestampMs !== undefined ? 4 : linkedStepTs !== undefined ? 2 : undefined;
 
       if (metadata.usage) {
-        if (!isTokenBearing(metadata.usage)) {
-          zeroTokenGenIdxs.push(idx);
-        }
         appendUsage(metadata.usage, {
           model: currentModel,
           modelId: metadata.modelId,
           timestampMs: ts,
           timestampRank: tsRank,
-          fallbackIdentities,
+          sourceKey: `gen:${sessionId}:${idx}`,
           genIdx: idx,
           stepIndices: metadata.stepIndices,
           ttftNs: metadata.ttftNs,
@@ -949,12 +1045,13 @@ export async function readAntigravityConversationDb(
         });
       }
       for (let r = 0; r < metadata.retryUsages.length; r++) {
-        appendUsage(metadata.retryUsages[r]!, {
+        appendUsage(metadata.retryUsages[r], {
           model: currentModel,
           modelId: metadata.modelId,
           timestampMs: ts,
           timestampRank: tsRank,
-          fallbackIdentities: [`gen-retry:${sessionId}:${idx}:${r}`],
+          sourceKey: `gen-retry:${sessionId}:${idx}:${r}`,
+          isRetry: true,
           genIdx: idx,
           stepIndices: metadata.stepIndices,
         });
@@ -977,31 +1074,23 @@ export async function readAntigravityConversationDb(
       return (a.genIdx ?? Number.MAX_SAFE_INTEGER) - (b.genIdx ?? Number.MAX_SAFE_INTEGER);
     });
 
-    // Only advance watermarks to rows that actually produced token-bearing usage,
-    // so 0-token in-progress rows are never skipped when tokens land later.
-    let tokenBearingMaxGenIdx = -1;
-    let tokenBearingMaxStepIdx = -1;
-    for (const ev of deduped) {
-      if (ev.genIdx !== undefined && ev.genIdx > tokenBearingMaxGenIdx) {
-        tokenBearingMaxGenIdx = ev.genIdx;
-      }
-      if (ev.genIdx === undefined && ev.stepIndices.length > 0) {
-        const sMax = Math.max(...ev.stepIndices);
-        if (sMax > tokenBearingMaxStepIdx) tokenBearingMaxStepIdx = sMax;
-      }
+    if (incremental) {
+      incremental.cache.state = {
+        fileIdentity,
+        schemaVersion,
+        workspace,
+        steps: stepRead.cache,
+        generations: genRead.cache,
+      };
     }
-
     return {
       sessionId,
       dbPath,
       workspacePath,
+      ...(workspacePaths.length > 0 ? { workspacePaths } : {}),
       trajectoryTimestampMs,
-      maxGenIdx: tokenBearingMaxGenIdx,
-      maxStepIdx: tokenBearingMaxStepIdx,
       events: deduped,
       stepInfos,
-      ...(zeroTokenGenIdxs.length > 0 ? { zeroTokenGenIdxs } : {}),
-      ...(zeroTokenStepIdxs.length > 0 ? { zeroTokenStepIdxs } : {}),
     };
   } finally {
     try {

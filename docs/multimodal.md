@@ -16,7 +16,7 @@ Multimodal also needs an explicit `config.multimodal.storage` block; a matching 
 | Item | Status |
 |------|--------|
 | Media types | **Images** and **video**. Audio is future work. |
-| Implemented agents | **`codex`**, **`qoder` (IDE and CLI)**, **`qwen-work-cn`**, and **`antigravity` / `antigravity-ide` / `antigravity-cli`**. Other agents ignore `uploadMode` until their extractors land. |
+| Implemented agents | **`codex`**, **`qoder` (IDE and CLI)**, **`qwen-work-cn`**, and **`antigravity` / `antigravity-cli`**. Other agents ignore `uploadMode` until their extractors land. |
 
 ### Detection
 
@@ -28,7 +28,7 @@ Where each agent finds images. Surfaces collected after it is enabled are in [Wh
 | Qoder IDE | SQLite attachments; transcript | Local path |
 | Qoder CLI | transcript | Local path (paste / `@` / Read / ImageGen), read from disk, then `uri` |
 | Qwen Work CN | transcript | Local path (paste tag, `Read`, `qwenwork_media_read`, generate and present tools) |
-| Antigravity / Antigravity IDE / Antigravity CLI | transcript (`transcript.jsonl`) | Local path (`media[].uri` on `USER_INPUT`, `SYSTEM_MESSAGE`, `PLANNER_RESPONSE`, and tool-result steps) |
+| Antigravity App / new IDE and CLI | transcript (`transcript.jsonl`) | Local path (`media[].uri` on `USER_INPUT`, `SYSTEM_MESSAGE`, `PLANNER_RESPONSE`, and tool-result steps) |
 
 ## How To Enable
 
@@ -101,7 +101,7 @@ Extractors still join relative `@` / Read paths with `agent.qoder.cwd`, but cwd 
 | `qoder` | `~/.qoder/tmp` (CLI paste / clipboard), `~/.qoder/vibe_images` (ImageGen), and the desktop IDE paste cache `…/Qoder/SharedClientCache/cache/images` (`~/Library/Application Support/Qoder` / `%APPDATA%/Qoder` / `~/.config/Qoder`; Linux remote hashed profiles use `<appRoot>/<hash>/SharedClientCache/cache/images`). |
 | `codex` | `~/.codex` (reserved; Codex today uses inline base64, not disk paths). |
 | `qwen-work-cn` | `~/.qwenworkcn/workspace` (clipboard paste `uploads/`) and `~/.qwenworkcn/tmp`. |
-| `antigravity` / `antigravity-ide` / `antigravity-cli` | `~/.gemini/antigravity/brain`, `~/.gemini/antigravity-ide/brain`, and `~/.gemini/antigravity-cli/brain` respectively. |
+| `antigravity` / `antigravity-cli` | `~/.gemini/antigravity/brain` and `~/.gemini/antigravity-cli/brain` respectively. |
 
 UNC/device paths and symlinks are skipped. An image suffix is accepted only when the bytes are an image header. Video suffixes `.mp4`, `.mov`, `.m4v`, `.3gp`, and `.3g2` need `ftyp` at offset 4, and the major brand must not be `M4A `, `M4B `, or `M4P `. `.webm` and `.mkv` need an EBML header. `.avi` needs `RIFF` with `AVI ` at offset 8. A suffix and header from different families are skipped. Local paths are treated as filesystem paths. A URL query after the extension (for example `a.png?x=1` in markdown) is not stripped; `pathToUri` will not fall back to the path with the query removed.
 
@@ -114,7 +114,7 @@ The table below describes what multimodal collection actually captures per agent
 | `codex` | Yes | See [Codex](#codex) below. |
 | `qoder` | Yes | See [Qoder IDE](#qoder-ide) and [Qoder CLI](#qoder-cli) below. |
 | `qwen-work-cn` | Yes | See [Qwen Work CN](#qwen-work-cn) below. |
-| `antigravity` / `antigravity-ide` / `antigravity-cli` | Yes | See [Antigravity](#antigravity) below. |
+| `antigravity` / `antigravity-cli` | Yes | See [Antigravity](#antigravity) below. |
 | Others | No | Setting `uploadMode` has no effect today. |
 
 ### Codex
@@ -186,7 +186,7 @@ Notes:
 
 ### Antigravity
 
-Antigravity (`antigravity`, `antigravity-ide`, `antigravity-cli`) converts local image and video `media[].uri` entries recorded in `<dataRoot>/brain/<sessionId>/.system_generated/logs/transcript.jsonl` via `MultimodalProcessor.pathToUri`. Policy is configured independently per variant under `agents.<id>.multimodal`. Failures are fail-open and do not interrupt text/token collection.
+Antigravity converts local image and video `media[].uri` entries recorded in `<dataRoot>/brain/<sessionId>/.system_generated/logs/transcript.jsonl` via `MultimodalProcessor.pathToUri`. The App and new IDE share `agents.antigravity.multimodal`. The CLI uses `agents.antigravity-cli.multimodal`. Text and token collection continue if media conversion fails.
 
 | `uploadMode` | Antigravity surface | Typical user action / event |
 |--------------|---------------------|-----------------------------|

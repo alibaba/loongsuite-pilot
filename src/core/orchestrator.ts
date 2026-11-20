@@ -163,7 +163,6 @@ export class Orchestrator extends EventEmitter {
     'doubao-work': 'doubao-work',
     'dsh-log': 'dsh',
     'antigravity': 'antigravity',
-    'antigravity-ide': 'antigravity-ide',
     'antigravity-cli': 'antigravity-cli',
   };
 
@@ -1971,10 +1970,9 @@ export class Orchestrator extends EventEmitter {
       pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
     }));
 
-    // --- Antigravity family (App / IDE / CLI share the same SQLite + transcript schema) ---
+    // --- Antigravity App / new IDE share one data root and listener. CLI has its own. ---
     const antigravityVariants: AntigravityClientType[] = [
       ClientType.Antigravity,
-      ClientType.AntigravityIde,
       ClientType.AntigravityCli,
     ];
     for (const clientType of antigravityVariants) {

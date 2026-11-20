@@ -172,6 +172,8 @@ interface TurnBuffer {
   hermesDrainFailures?: number;
   /** A fixed-session cron execution has an explicit outer completion event. */
   isObservedOpenClawCron?: boolean;
+  /** Native Antigravity tool calls the input has explicitly left open. */
+  pendingAntigravityTools?: Set<string>;
   lastActivityMs: number;
   activityVersion: number;
   logicalBytes: number;
@@ -936,10 +938,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Different or unknown sessions may be concurrent; preempting one would
     // split its records and synthesize duplicate ENTRY/AGENT spans.
     const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) || undefined;
+    const isAntigravity = resolveAgentSystem(agentType) === 'antigravity';
+    // An older tool can complete after a newer prompt in the same session.
+    // Its result is a continuation, even if its buffer no longer exists.
+    const continuesAntigravityTurn = isAntigravity
+      && (this.turnBuffers.has(key) || entry['event.name'] === 'tool.result');
     for (const [bufKey, buf] of this.turnBuffers) {
       // Native Codex task_complete/turn_aborted is authoritative. A second
       // work item in the same thread must not truncate a still-running turn.
-      if (agentType === 'codex' || agentType === 'doubao-work') break;
+      if (agentType === 'codex' || agentType === 'doubao-work' || continuesAntigravityTurn) break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       // Incremental Hermes turns may overlap inside one IM session. They have
       // their own explicit completion, so a successor is not an implicit end.
@@ -948,6 +955,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       // Another turn in the same session may overlap a cron task. Its native
       // cron_finished event, not the successor, owns completion.
       if (agentType === 'openclaw' && buf.isObservedOpenClawCron) continue;
+      if (buf.pendingAntigravityTools?.size) continue;
       if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
       buf.completed = true;
       this.triggerFlush(buf, false);
@@ -1001,6 +1009,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     if (agentType === 'openclaw' && entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') {
       buf.isObservedOpenClawCron = true;
+    }
+    const antigravityCallId = isAntigravity ? entry['gen_ai.tool.call.id'] : undefined;
+    if (antigravityCallId) {
+      const toolKey = JSON.stringify([entry['gen_ai.step.id'], antigravityCallId]);
+      if (entry['event.name'] === 'tool.call' && entry['gen_ai.turn.end'] === false) {
+        (buf.pendingAntigravityTools ??= new Set()).add(toolKey);
+      } else if (entry['event.name'] === 'tool.result') {
+        buf.pendingAntigravityTools?.delete(toolKey);
+      }
     }
     const durable = this.codexJournal?.accepts(entry) === true;
     const residentSize = durable ? Buffer.byteLength(JSON.stringify(entry)) : 0;
@@ -1299,6 +1316,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    if (resolveAgentSystem(String(entry['gen_ai.agent.type'] ?? '')) === 'antigravity'
+      && entry['gen_ai.turn.end'] !== undefined) return entry['gen_ai.turn.end'];
     if (entry['agent.source'] === 'qwen-work-cn-collaboration') {
       return entry['event.name'] === 'other' && entry['gen_ai.turn.end'] === true;
     }
@@ -1394,7 +1413,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
     if (turnId && turnId.length > 0) {
-      if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'hermes') {
+      const agentType = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? ''));
+      if (agentType === 'hermes') {
         const sessionId = entry['gen_ai.session.id'];
         if (typeof sessionId === 'string' && sessionId.length > 0) {
           // Older Hermes plugins reuse the native turn ID after session
@@ -1405,10 +1425,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
             key: `hermes:${JSON.stringify([entry['user.id'] ?? null, sessionId, turnId])}` };
         }
       }
-      if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
+      if (agentType === 'codex') {
         return { source: 'turn_id', value: turnId,
           key: `codex:${[entry['user.id'], entry['gen_ai.session.id'], turnId]
             .map(v => typeof v === 'string' ? `${v.length}:${v}` : '0:').join('')}` };
+      }
+      if (resolveAgentSystem(agentType) === 'antigravity') {
+        return { source: 'turn_id', value: turnId,
+          key: `antigravity:${JSON.stringify([agentType, entry['gen_ai.session.id'], turnId])}` };
       }
       return { source: 'turn_id', value: turnId, key: `turn:${turnId}` };
     }
@@ -1817,6 +1841,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (agentType === 'doubao-work') {
       this.enrichDoubaoWorkSpans(records, spans);
       enrichDoubaoClientRequest(records, spans);
+    }
+    if (resolveAgentSystem(agentType) === 'antigravity') {
+      const entry = spans.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY'
+        && span.parentSpanId === '0000000000000001');
+      // The converter uses a virtual parent to carry a supplied trace_id.
+      // Export independent Antigravity executions as roots.
+      if (entry && !records.some(record => record['event.name'] === 'other'
+        && record.parent_span_id === entry.parentSpanId)) {
+        Object.assign(entry, { parentSpanId: undefined });
+      }
     }
 
     spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
@@ -2948,6 +2982,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const now = Date.now();
     for (const [, buf] of this.turnBuffers) {
       if (!buf.completed && now - buf.lastActivityMs > timeout) {
+        if (buf.pendingAntigravityTools?.size) continue;
         if (buf.isObservedOpenClawCron) {
           if (!this.warnedOpenClawCronIdleTimeout) {
             this.warnedOpenClawCronIdleTimeout = true;

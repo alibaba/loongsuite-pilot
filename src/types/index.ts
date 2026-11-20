@@ -255,7 +255,6 @@ export const MULTIMODAL_SUPPORTED_AGENT_IDS = [
   'qoder',
   'qwen-work-cn',
   'antigravity',
-  'antigravity-ide',
   'antigravity-cli',
 ] as const;
 

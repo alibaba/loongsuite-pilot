@@ -51,8 +51,7 @@ Pilot 主要帮助回答这些问题：
 
 | Agent | 集成方式 | Trace 上报 | 日志上报 | Token 用量 | 对话 / 工具调用 | 多模态 |
 |-------|----------|------------|----------|------------|----------------|--------|
-| Antigravity | 本地只读 SQLite + transcript | Yes | Yes | Yes | Yes | Yes (Opt-in) |
-| Antigravity IDE | 本地只读 SQLite + transcript | Yes | Yes | Yes | Yes | Yes (Opt-in) |
+| Antigravity App / 新 IDE | 本地只读 SQLite + transcript | Yes | Yes | Yes | Yes | Yes (Opt-in) |
 | Antigravity CLI (`agy`) | 本地只读 SQLite + transcript | Yes | Yes | Yes | Yes | Yes (Opt-in) |
 | Claude Code | Hook | Yes | Yes | Yes | Yes | No |
 | Codex | Hook | Yes | Yes | Yes | Yes | Yes (Opt-in) |
