@@ -14,6 +14,7 @@
  * 全程 fail-open:任何异常都不得影响宿主 agent。
  */
 
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -23,6 +24,52 @@ const ZERO_SPAN = '0'.repeat(16);
 
 function safeName(value) {
   return path.basename(String(value)).replace(/[^a-zA-Z0-9_-]/g, '_') || 'unknown';
+}
+
+function environmentLockPath(dataDir, sessionId) {
+  return path.join(dataDir, 'acp-correlate', `${safeName(sessionId)}.env.lock`);
+}
+
+function readSharedOwner(lock) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(lock, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | (fs.constants.O_NOFOLLOW ?? 0));
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size !== 64) return null;
+    // Read only the fixed-size owner. An old empty lock is already owned by
+    // legacy, and never a reusable shared claim.
+    const bytes = Buffer.alloc(64);
+    if (fs.readSync(descriptor, bytes, 0, bytes.length, 0) !== bytes.length) return null;
+    const owner = bytes.toString('utf8');
+    return /^[0-9a-f]{64}$/.test(owner) ? owner : null;
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+export function hasSharedUpstreamContextClaim(dataDir, sessionId) {
+  return Boolean(dataDir && sessionId && readSharedOwner(environmentLockPath(dataDir, sessionId)));
+}
+
+/** Shared and legacy producers compete for the same first-turn environment. */
+export function claimUpstreamContextForTurn({ dataDir, sessionId, turnId, inputHash }) {
+  if (!dataDir || !sessionId || (!turnId && !inputHash)) return false;
+  const lock = environmentLockPath(dataDir, sessionId);
+  const directory = path.dirname(lock);
+  const owner = createHash('sha256').update(JSON.stringify([sessionId, turnId ?? null, inputHash ?? null])).digest('hex');
+  const temporary = path.join(directory, `.${randomUUID()}.tmp`);
+  try {
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(temporary, owner, { flag: 'wx', mode: 0o600 });
+    fs.linkSync(temporary, lock);
+    return true;
+  } catch {
+    return readSharedOwner(lock) === owner;
+  } finally {
+    try { fs.unlinkSync(temporary); } catch {}
+  }
 }
 
 function isValidTraceparent(tp) {
@@ -48,7 +95,7 @@ export function recordUpstreamContextOnce({ agentId, sessionId, dataDir }) {
     fs.mkdirSync(dir, { recursive: true });
 
     const base = safeName(sessionId);
-    const lock = path.join(dir, `${base}.env.lock`);
+    const lock = environmentLockPath(dataDir, sessionId);
     // O_CREAT|O_EXCL:抢锁成功者才写;已存在(EEXIST)= 已写过,直接返回。
     try {
       fs.closeSync(fs.openSync(lock, 'wx'));

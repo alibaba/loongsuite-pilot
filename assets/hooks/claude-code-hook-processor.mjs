@@ -33,7 +33,7 @@ import {
   writeJsonlRecords,
 } from './shared/event-emitter.mjs';
 import { logHookError } from './shared/error-logger.mjs';
-import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
+import { claimUpstreamContextForTurn, recordUpstreamContextOnce } from './shared/upstream-context.mjs';
 import { sharedTraceRuntime } from './shared/trace-context-adapter.mjs';
 import {
   sanitizeObject,
@@ -422,8 +422,9 @@ function cmdUserPromptSubmit() {
   const identity = { agentType: AGENT_ID, sessionId,
     ...(typeof event.prompt_id === 'string' && event.prompt_id ? { turnId: event.prompt_id } : {}),
     inputHash: shared.api.inputHash(event.prompt) };
-  const inheritsEnvironment = !isToolPropagationConsumed(pilotDataDir(), sessionId)
-    && shared.store.claimEnvironmentTurn(identity, config.ttlMs);
+  const dataDir = pilotDataDir();
+  const inheritsEnvironment = !isToolPropagationConsumed(dataDir, sessionId)
+    && claimUpstreamContextForTurn({ dataDir, ...identity });
   if (shared.store.findTurn(identity)) return;
   const inherited = inheritsEnvironment ? { traceparent: process.env.TRACEPARENT, tracestate: process.env.TRACESTATE } : {};
   shared.store.bindTurn(identity, inherited, { generate: config.generateTraceWhenMissing, ttlMs: config.ttlMs });

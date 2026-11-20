@@ -802,6 +802,21 @@ describe.each(['global', 'fetch-session'])('claude-code-fetch-intercept preload 
       expect(headers.tracestate).toBe(TS);
     });
 
+    test('a restarted legacy preload respects the inherited context already claimed by shared mode', async () => {
+      const { claimUpstreamContextForTurn } = await import('../../../../assets/hooks/shared/upstream-context.mjs');
+      expect(claimUpstreamContextForTurn({ dataDir: DATA_DIR, sessionId: SESS, turnId: 'shared-turn' })).toBe(true);
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS, body: { system: 'sys', messages: [] },
+        sseEvents: sseStream(),
+        env: { ...ON, LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT: 'false', TRACEPARENT: TP, TRACESTATE: TS },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      expect(readObservedRequest().headers.traceparent).toBeUndefined();
+      expect(readObservedRequest().headers.tracestate).toBeUndefined();
+      expect(readAttempts(SESS)).toHaveLength(1);
+      expect(readAttempts(SESS)[0].llm_span_id).toBeUndefined();
+    });
+
     test('forwards traceparent alone when no tracestate is inherited', () => {
       const r = runScenario({
         url: LLM_URL, sessionId: SESS,

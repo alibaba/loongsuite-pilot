@@ -194,6 +194,52 @@ describe('shared propagation across runtime and converter', () => {
     expect(runtime.findTurn({ ...explicitIdentity, turnId: 'two' })?.traceId).not.toBe('a'.repeat(32));
   });
 
+  it('does not reclaim the inherited Claude context when switching either direction', () => {
+    const { directory, runtime } = fixture();
+    const configPath = path.join(directory, 'config.json');
+    const correlateDir = path.join(directory, 'acp-correlate');
+    const processor = path.resolve('assets/hooks/claude-code-hook-processor.mjs');
+    const env = { ...process.env, LOONGSUITE_PILOT_DATA_DIR: directory,
+      AGENT_DATA_COLLECTION_CONFIG: configPath, TRACEPARENT, LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES: '' };
+    const configure = (sharedContext: boolean, propagateToTools = false, generateTraceWhenMissing = true) => {
+      fs.writeFileSync(configPath, JSON.stringify({ upstreamLink: {
+        enabled: true, sharedContext, propagateToTools, generateTraceWhenMissing,
+      } }));
+    };
+    const runHook = (action: string, sessionId: string, turnId: string, payload = {}) => {
+      const result = spawnSync(process.execPath, [processor, action], { env,
+        input: JSON.stringify({ session_id: sessionId, prompt_id: turnId, ...payload }), encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      return JSON.parse(result.stdout);
+    };
+    const legacy = () => new CorrelationStore(correlateDir);
+    const sharedTurn = (sessionId: string, turnId: string) => runtime.findTurn({
+      agentType: 'claude-code', sessionId, turnId,
+    });
+
+    configure(false);
+    runHook('stop', 'legacy-first', 'before');
+    expect(legacy().resolveSessionFirst('legacy-first')).toBe(TRACEPARENT);
+    expect(legacy().resolveSessionFirst('legacy-first')).toBeNull();
+    configure(true);
+    runHook('user-prompt-submit', 'legacy-first', 'after', { prompt: 'same text' });
+    expect(sharedTurn('legacy-first', 'after')?.traceId).toMatch(/^[0-9a-f]{32}$/);
+    expect(sharedTurn('legacy-first', 'after')?.traceId).not.toBe('a'.repeat(32));
+    expect(sharedTurn('legacy-first', 'after')?.upstreamSpanId).toBeUndefined();
+
+    runHook('user-prompt-submit', 'shared-first', 'before', { prompt: 'same text' });
+    expect(sharedTurn('shared-first', 'before')?.upstreamSpanId).toBe('b'.repeat(16));
+    expect(legacy().hasSession('shared-first')).toBe(false);
+    // Switch before shared Stop can write the legacy tool-consumed marker.
+    configure(false, true, false);
+    const tool = runHook('pre-tool-use', 'shared-first', 'after', {
+      tool_name: 'Bash', tool_use_id: 'later-tool', tool_input: { command: 'true' },
+    });
+    expect(tool.hookSpecificOutput).toBeUndefined();
+    runHook('stop', 'shared-first', 'after');
+    expect(legacy().hasSession('shared-first')).toBe(false);
+  });
+
   it('Claude physical HTTP retry, Bash subprocess and Stop export reuse every advertised parent', async () => {
     const { directory, runtime } = fixture();
     const configPath = path.join(directory, 'config.json');

@@ -44,6 +44,7 @@
 //     It only runs under BUN_OPTIONS --preload inside a compiled Bun binary
 //     (Claude Code CLI).
 
+import { hasSharedUpstreamContextClaim } from './shared/upstream-context.mjs';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const fs = require('node:fs');
@@ -421,6 +422,7 @@ function wrapFetch(origFetch) {
     let clientRequestId = null;
     let llmSpanId = null;
     let sharedBinding = null;
+    let forwardsLegacyContext = Boolean(UPSTREAM_TRACE_PARTS);
     const attemptId = crypto.randomUUID();
     try {
       const headers = dumpHeaders(
@@ -435,7 +437,10 @@ function wrapFetch(origFetch) {
         // Only mint when a record can be written: a parent-id nobody records
         // would point the gateway at a span pilot never emits, which is worse
         // than forwarding the upstream parent verbatim.
-        if (UPSTREAM_TRACE_PARTS) llmSpanId = mintSpanId();
+        if (forwardsLegacyContext && hasSharedUpstreamContextClaim(PILOT_DATA_DIR, sessionId)) {
+          forwardsLegacyContext = false;
+        }
+        if (forwardsLegacyContext) llmSpanId = mintSpanId();
         if (SHARED_PROPAGATION_ENABLED && sharedRuntime) {
           const nativeTurnId = headers['x-claude-code-prompt-id'];
           const store = new sharedRuntime.TraceContextRuntime(PILOT_DATA_DIR);
@@ -456,7 +461,9 @@ function wrapFetch(origFetch) {
     // Forward the caller's trace context before the session-id gate below:
     // that gate decides whether *we* can record telemetry, which has no
     // bearing on the gateway's ability to join the trace.
-    ({ input, init } = withUpstreamTraceContext(input, init, llmSpanId));
+    if (forwardsLegacyContext) {
+      ({ input, init } = withUpstreamTraceContext(input, init, llmSpanId));
+    }
 
     if (!sessionId) {
       return origFetch.call(this, input, init);
