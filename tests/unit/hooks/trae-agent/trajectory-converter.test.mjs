@@ -275,6 +275,23 @@ describe('convertTrajectory - LLM input/output message shape (P1-5, P1-7)', () =
       expect(r['tool.result.status']).toBe('success');
     }
   });
+
+  test('parallel tools on different steps have unique event and span identities', () => {
+    const raw = structuredClone(RAW);
+    for (const [stepIndex, calls] of [[0, 12], [10, 2]]) {
+      const step = raw.agent_steps[stepIndex];
+      const [sampleCall] = step.tool_calls;
+      const [sampleResult] = step.tool_results;
+      step.tool_calls = Array.from({ length: calls }, (_, index) =>
+        ({ ...sampleCall, call_id: `parallel-${stepIndex}-${index}` }));
+      step.tool_results = step.tool_calls.map(call => ({ ...sampleResult, call_id: call.call_id }));
+    }
+    const { entries } = convertTrajectory(raw);
+    const parallel = entries.filter(entry => entry['gen_ai.tool.call.id']?.startsWith('parallel-'));
+    expect(parallel).toHaveLength(28);
+    expect(new Set(parallel.map(entry => entry['event.id'])).size).toBe(28);
+    expect(new Set(parallel.map(entry => entry.span_id)).size).toBe(14);
+  });
 });
 
 describe('convertTrajectory - terminal marker on last step (P1-6)', () => {

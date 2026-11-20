@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { TraeAgentTrajectoryInput } from '../../../../src/inputs/trae-agent-trajectory/trae-agent-trajectory-input.js';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
-import type { AgentActivityEntry } from '../../../../src/types/index.js';
+import { collectAndQueue } from './collect-and-queue.js';
 
 const FIXTURE = path.resolve(__dirname, 'fixtures/fixture_trajectory_qwen_max.json');
 const CONVERTER_PATH = path.resolve(__dirname, '../../../../assets/hooks/trae-agent/trajectory-converter.mjs');
@@ -31,8 +31,7 @@ describe('TraeAgentTrajectoryInput - TypeScript smoke (CP4)', () => {
       converterPath: CONVERTER_PATH,
       pollIntervalMs: 1000,
     });
-    // @ts-expect-error: protected
-    const first = (await input.collect()) as AgentActivityEntry[];
+    const first = await collectAndQueue(input);
     // 15 LLM.req + 15 LLM.resp + 14 TOOL.call + 14 TOOL.result (step 15 has 0 tools)
     // No SESSION/STEP 'other' markers — the OTLP converter library synthesizes
     // ENTRY/AGENT/STEP from the LLM/TOOL records.
@@ -45,8 +44,7 @@ describe('TraeAgentTrajectoryInput - TypeScript smoke (CP4)', () => {
       'tool.call': 14,
       'tool.result': 14,
     });
-    // @ts-expect-error: protected
-    const second = (await input.collect()) as AgentActivityEntry[];
+    const second = await collectAndQueue(input);
     expect(second.length).toBe(0);
   });
 });

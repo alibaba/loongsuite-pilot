@@ -50,6 +50,7 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
 
   protected readonly trajectoryFile: string;
   private nextTrajectoryIndex = 0;
+  private pendingCheckpoint?: TrajectoryExtra;
 
   constructor(opts: TrajectoryPollingOptions) {
     super(opts);
@@ -57,9 +58,11 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
+    this.pendingCheckpoint = undefined;
     const trajectoryFiles = await this.resolveTrajectoryFiles();
     const entries: AgentActivityEntry[] = [];
     const extra = this.stateStore.get(this.id).extra as TrajectoryExtra | undefined;
+    let checkpoint = extra;
     const fingerprintsByFile = new Map<string, string>();
     if (extra?.trajectoryStateVersion === TRAJECTORY_STATE_VERSION) {
       for (const run of Object.values(extra.runsById ?? {})) {
@@ -90,7 +93,10 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
         }
         remaining -= stat.size;
         changed++;
-        for (const entry of await this.processTrajectoryFile(trajectoryFile, stat, fingerprint)) entries.push(entry);
+        const result = await this.processTrajectoryFile(trajectoryFile, stat, fingerprint, checkpoint ?? {});
+        if (!result) continue;
+        checkpoint = result.checkpoint;
+        for (const entry of result.entries) entries.push(entry);
       } catch (err) {
         // One corrupt or concurrently-removed file must not block other runs
         // discovered in the same polling cycle.
@@ -99,25 +105,49 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
         }
       }
     }
-    return entries;
+    const allowed = this.workspacePolicy.filter(entries, this.agentType);
+    if (checkpoint && checkpoint !== extra) {
+      if (allowed.length > 0) {
+        // Commit only after BaseInput emits synchronously to InputManager.
+        // Another input can save the shared store during any collection await.
+        this.pendingCheckpoint = checkpoint;
+      } else {
+        this.commitCheckpoint(checkpoint);
+      }
+    }
+    return allowed;
   }
 
-  private async processTrajectoryFile(trajectoryFile: string, stat: fsSync.Stats, currentFp: string): Promise<AgentActivityEntry[]> {
-    const stateKey = this.id;
+  protected override onEntriesQueued(): void {
+    if (!this.pendingCheckpoint || this.checkpointFailed) return;
+    this.commitCheckpoint(this.pendingCheckpoint);
+    this.pendingCheckpoint = undefined;
+  }
+
+  private commitCheckpoint(checkpoint: TrajectoryExtra): void {
+    this.stateStore.update(this.id, { extra: checkpoint } as Partial<InputState>);
+  }
+
+  private async processTrajectoryFile(
+    trajectoryFile: string,
+    stat: fsSync.Stats,
+    currentFp: string,
+    prevExtra: TrajectoryExtra,
+  ): Promise<{ entries: AgentActivityEntry[]; checkpoint: TrajectoryExtra } | undefined> {
     // A growing or partially rewritten source can exceed the discovery stat
     // before open completes. Never read beyond the bytes reserved for it.
     const file = await fs.open(trajectoryFile, 'r');
     let raw: Buffer;
     try {
       const opened = await file.stat();
-      if (!opened.isFile() || this.trajectoryFingerprint(opened) !== currentFp) return [];
+      if (!opened.isFile() || this.trajectoryFingerprint(opened) !== currentFp) return;
       raw = Buffer.allocUnsafe(opened.size);
       for (let offset = 0; offset < raw.length;) {
         const { bytesRead } = await file.read(raw, offset, raw.length - offset, offset);
-        if (!bytesRead) return [];
+        if (!bytesRead) return;
         offset += bytesRead;
       }
-      if (this.trajectoryFingerprint(await file.stat()) !== currentFp) return [];
+      if (this.trajectoryFingerprint(await file.stat()) !== currentFp) return;
     } finally {
       await file.close();
     }
@@ -127,12 +157,9 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
       parsed = JSON.parse(raw.toString('utf8')) as TrajectoryJson;
     } catch {
       this.logger.debug('trajectory JSON is incomplete or invalid', { file: trajectoryFile });
-      return [];
+      return;
     }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
-
-    const prevState = this.stateStore.get(stateKey);
-    const prevExtra = (prevState.extra ?? {}) as TrajectoryExtra;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
     let runsById = this.cloneRunCheckpoints(prevExtra.runsById);
     const currentRunId = this.deriveRunIdentity(parsed);
     // Identity-less files still need isolated checkpoints; otherwise two such
@@ -251,8 +278,9 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
       terminalContext,
     };
 
-    this.stateStore.update(stateKey, {
-      extra: {
+    return {
+      entries: replacementEntries.length > 0 ? [...replacementEntries, ...entries] : entries,
+      checkpoint: {
         trajectoryStateVersion: TRAJECTORY_STATE_VERSION,
         activeRunId: currentRunKey,
         runsById,
@@ -265,9 +293,7 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
         runCompletionEmitted: completionEmitted,
         lastProcessedAt,
       },
-    } as unknown as Partial<InputState>);
-
-    return replacementEntries.length > 0 ? [...replacementEntries, ...entries] : entries;
+    };
   }
 
   private captureTerminalContext(

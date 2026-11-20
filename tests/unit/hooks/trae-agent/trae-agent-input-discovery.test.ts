@@ -11,6 +11,7 @@ import { CodexTurnJournal } from '../../../../src/flushers/codex-turn-journal.js
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
+import { collectAndQueue } from './collect-and-queue.js';
 
 // Fixture source: researcher comment fe220457 attachment (52KB), a real trae-agent
 // run with qwen-max via DashScope's Anthropic-compatible proxy (15 steps).
@@ -71,7 +72,94 @@ async function newStore(): Promise<StateStore> {
   return store;
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
 describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
+  test('keeps Trae checkpoints uncommitted during multi-file conversion and journal acceptance', async () => {
+    const firstTime = '2026-08-25T10:00:17.058Z';
+    const secondTime = '2026-08-25T10:00:20.058Z';
+    for (const time of [firstTime, secondTime]) {
+      const file = path.join(tmpDir, `trajectory-${Date.parse(time)}.json`);
+      await fs.writeFile(file, inProgress(1, time));
+      await fs.utimes(file, new Date(time), new Date(time));
+    }
+    const statePath = path.join(tmpDir, 'state.json');
+    const stateStore = new StateStore(statePath);
+    await stateStore.load();
+    const convertingSecond = deferred();
+    const finishConversion = deferred();
+    const accepting = deferred();
+    const finishAcceptance = deferred();
+    class ObservedInput extends TraeAgentTrajectoryInput {
+      protected override async parseTrajectory(...args: Parameters<TraeAgentTrajectoryInput['parseTrajectory']>) {
+        if (args[0].start_time === secondTime) {
+          convertingSecond.resolve();
+          await finishConversion.promise;
+        }
+        return super.parseTrajectory(...args);
+      }
+    }
+    class DelayedJournal extends CodexTurnJournal {
+      override async append(entries: AgentActivityEntry[]): Promise<void> {
+        accepting.resolve();
+        await finishAcceptance.promise;
+        await super.append(entries);
+      }
+    }
+    const input = new ObservedInput({
+      stateStore, trajectoryFile: tmpDir, trajectoryDir: tmpDir, converterPath: CONVERTER_PATH,
+    });
+    const journal = new DelayedJournal(path.join(tmpDir, 'pending-turns'), 20, ['trae-agent']);
+    const flusher = new OtlpTraceFlusher({
+      enabled: true, serviceName: 'trae-checkpoint-test', protocol: 'http/protobuf',
+      endpoints: [{ endpoint: 'http://127.0.0.1:4318/v1/traces', headers: {} }],
+    }, undefined, () => ({
+      export(_batch, callback) { callback({ code: 0 }); },
+      shutdown: async () => {},
+    }), journal);
+    await flusher.start();
+    const manager = new InputManager();
+    manager.setFlusher(flusher);
+    manager.registerInput(input);
+    const flushed = once(manager, 'flushed');
+    const cycleCompleted = once(input, 'input-runtime-delta');
+    const starting = manager.startInput(input.id);
+    const assertUncommitted = async (offset: number) => {
+      stateStore.setOffset('another-input', offset);
+      await stateStore.save();
+      const fresh = new StateStore(statePath);
+      await fresh.load();
+      expect(fresh.getOffset('another-input')).toBe(offset);
+      expect(fresh.get(input.id).extra?.runsById).toBeUndefined();
+    };
+    try {
+      await convertingSecond.promise;
+      await assertUncommitted(10);
+      finishConversion.resolve();
+      await accepting.promise;
+      await assertUncommitted(20);
+      finishAcceptance.resolve();
+      await flushed;
+      await cycleCompleted;
+      const fresh = new StateStore(statePath);
+      await fresh.load();
+      expect(Object.keys(fresh.get(input.id).extra?.runsById as object)).toHaveLength(2);
+      let journaled = 0;
+      for await (const batch of journal.loadBatches()) journaled += batch.entries.length;
+      expect(journaled).toBe(8);
+    } finally {
+      finishConversion.resolve();
+      finishAcceptance.resolve();
+      await starting;
+      await manager.stopAll();
+      await flusher.shutdown();
+    }
+  });
+
   test('advances past the per-cycle budget and skips oversized snapshots', async () => {
     const overflow = path.join(tmpDir, 'trajectory-oversized.json');
     const descriptor = await fs.open(overflow, 'w');
@@ -92,12 +180,9 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
     const input = new TraeAgentTrajectoryInput({
       stateStore: await newStore(), trajectoryFile: tmpDir, trajectoryDir: tmpDir, converterPath: CONVERTER_PATH,
     });
-    // @ts-expect-error: exercise collection without starting the polling timer
-    const first = await input.collect();
-    // @ts-expect-error: exercise collection without starting the polling timer
-    const second = await input.collect();
-    // @ts-expect-error: exercise collection without starting the polling timer
-    const third = await input.collect();
+    const first = await collectAndQueue(input);
+    const second = await collectAndQueue(input);
+    const third = await collectAndQueue(input);
     expect(first).toHaveLength(16 * 4);
     expect(second).toHaveLength(2 * 4);
     expect(third).toEqual([]);
@@ -124,8 +209,7 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
       converterPath: CONVERTER_PATH,
       pollIntervalMs: 1000,
     });
-    // @ts-expect-error: protected
-    const out = (await input.collect()) as AgentActivityEntry[];
+    const out = await collectAndQueue(input);
     expect(out.length).toBe(12 + 58);
     const oldSession = out[0]['gen_ai.session.id'];
     const newSession = out[12]['gen_ai.session.id'];
@@ -149,8 +233,7 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
       converterPath: CONVERTER_PATH,
       pollIntervalMs: 1000,
     });
-    // @ts-expect-error: protected
-    const a = (await input.collect()) as AgentActivityEntry[];
+    const a = await collectAndQueue(input);
     expect(a.length).toBe(58);
     const sessionA = a[0]['gen_ai.session.id'];
 
@@ -158,8 +241,7 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
     const fileB = path.join(dir, 'trajectory_B.json');
     await fs.writeFile(fileB, full('2026-08-26T09:00:00.000000'));
     await fs.utimes(fileB, new Date(now), new Date(now));
-    // @ts-expect-error: protected
-    const b = (await input.collect()) as AgentActivityEntry[];
+    const b = await collectAndQueue(input);
     // Discovery re-resolved to fileB, and its distinct run identity reset dedup
     // (P1-3) so the whole new run re-emits with a session_reset marker.
     expect(b.length).toBe(58);
@@ -186,15 +268,13 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
       pollIntervalMs: 1000,
     });
     // First cycle processes A then B.
-    // @ts-expect-error: protected
-    const first = (await input.collect()) as AgentActivityEntry[];
+    const first = await collectAndQueue(input);
     expect(first.length).toBe(58 + 58);
 
     // Make A newest so the next scan processes B then A. Neither run may emit
     // again: switching between known runs must not clear either seen-step set.
     await fs.utimes(fileA, new Date(now), new Date(now));
-    // @ts-expect-error: protected
-    const second = (await input.collect()) as AgentActivityEntry[];
+    const second = await collectAndQueue(input);
     expect(second).toEqual([]);
   });
 
@@ -218,11 +298,9 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
       pollIntervalMs: 1000,
     });
 
-    // @ts-expect-error: protected
-    const first = (await input.collect()) as AgentActivityEntry[];
+    const first = await collectAndQueue(input);
     expect(first.length).toBe(58 + 58);
-    // @ts-expect-error: protected
-    expect(await input.collect()).toEqual([]);
+    expect(await collectAndQueue(input)).toEqual([]);
     const extra = store.get('trae-agent-trajectory').extra as Record<string, any>;
     const runIds = Object.keys(extra.runsById);
     expect(runIds).toHaveLength(2);
@@ -268,8 +346,7 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
       pollIntervalMs: 1000,
     });
 
-    // @ts-expect-error: protected
-    expect(await input.collect()).toEqual([]);
+    expect(await collectAndQueue(input)).toEqual([]);
     const extra = store.get('trae-agent-trajectory').extra as Record<string, any>;
     expect(extra.trajectoryStateVersion).toBe(3);
     expect(Object.keys(extra.runsById)).toHaveLength(2);
@@ -301,8 +378,7 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
       converterPath: CONVERTER_PATH,
       pollIntervalMs: 1000,
     });
-    // @ts-expect-error: protected
-    const out = (await input.collect()) as AgentActivityEntry[];
+    const out = await collectAndQueue(input);
     expect(out.length).toBe(12);   // only trajectory_keep.json, decoys ignored
   });
 
@@ -327,8 +403,7 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
       converterPath: CONVERTER_PATH,
       pollIntervalMs: 1000,
     });
-    // @ts-expect-error: protected
-    const out = (await input.collect()) as AgentActivityEntry[];
+    const out = await collectAndQueue(input);
     expect(out.length).toBe(12 + 12);
     expect(new Set(out.map(entry => entry['gen_ai.session.id'])).size).toBe(2);
   });
@@ -344,8 +419,7 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
       converterPath: CONVERTER_PATH,
       pollIntervalMs: 1000,
     });
-    // @ts-expect-error: protected
-    const out = (await input.collect()) as AgentActivityEntry[];
+    const out = await collectAndQueue(input);
     expect(out).toEqual([]);
   });
 
@@ -358,8 +432,7 @@ describe('TraeAgentTrajectoryInput - P1-1 directory discovery', () => {
       converterPath: CONVERTER_PATH,
       pollIntervalMs: 1000,
     });
-    // @ts-expect-error: protected
-    const out = (await input.collect()) as AgentActivityEntry[];
+    const out = await collectAndQueue(input);
     expect(out).toEqual([]);
   });
 });
@@ -420,15 +493,13 @@ describe('TraeAgentTrajectoryInput - P1-3 run identity reset (same path)', () =>
       pollIntervalMs: 1000,
     });
 
-    // @ts-expect-error: protected
-    const first = (await input.collect()) as AgentActivityEntry[];
+    const first = await collectAndQueue(input);
     const firstSession = first[0]['gen_ai.session.id'];
     expect(first).toHaveLength(12);
     expect(first.some(entry => entry['gen_ai.turn.end'] === true)).toBe(false);
 
     await fs.writeFile(file, full('2026-08-26T10:00:17.058504'));
-    // @ts-expect-error: protected
-    const second = (await input.collect()) as AgentActivityEntry[];
+    const second = await collectAndQueue(input);
     const replacementMarkers = second.filter(entry =>
       entry['agent.trajectory.flush_only'] === true
       && entry['agent.trajectory.completion.reason'] === 'source_replaced');
@@ -443,8 +514,7 @@ describe('TraeAgentTrajectoryInput - P1-3 run identity reset (same path)', () =>
     const currentRunEntries = second.filter(entry => entry['gen_ai.session.id'] !== firstSession);
     expect(currentRunEntries).toHaveLength(58);
 
-    // @ts-expect-error: protected
-    expect(await input.collect()).toEqual([]);
+    expect(await collectAndQueue(input)).toEqual([]);
     const extra = store.get('trae-agent-trajectory').extra as Record<string, any>;
     expect(Object.keys(extra.runsById)).toHaveLength(1);
     expect(Object.values(extra.runsById)[0]).toMatchObject({ runCompletionEmitted: true });
@@ -463,8 +533,7 @@ describe('TraeAgentTrajectoryInput - P1-3 run identity reset (same path)', () =>
       converterPath: CONVERTER_PATH,
       pollIntervalMs: 1000,
     });
-    // @ts-expect-error: protected
-    const first = (await input.collect()) as AgentActivityEntry[];
+    const first = await collectAndQueue(input);
     expect(first.length).toBe(58);
     const session1 = first[0]['gen_ai.session.id'];
 
@@ -477,8 +546,7 @@ describe('TraeAgentTrajectoryInput - P1-3 run identity reset (same path)', () =>
     expect(after.ino).toBe(before.ino);
     expect(after.size).toBe(before.size);
 
-    // @ts-expect-error: protected
-    const second = (await input.collect()) as AgentActivityEntry[];
+    const second = await collectAndQueue(input);
     expect(second.length).toBe(58);   // NOT suppressed to 0 by the stale seen set
     expect(second.filter(e => e['agent.trajectory.session_reset'] === true).length).toBe(second.length);
     expect(second[0]['gen_ai.session.id']).not.toBe(session1);
@@ -495,11 +563,9 @@ describe('TraeAgentTrajectoryInput - P1-3 run identity reset (same path)', () =>
       converterPath: CONVERTER_PATH,
       pollIntervalMs: 1000,
     });
-    // @ts-expect-error: protected
-    const first = (await input.collect()) as AgentActivityEntry[];
+    const first = await collectAndQueue(input);
     expect(first.length).toBe(58);
-    // @ts-expect-error: protected
-    const second = (await input.collect()) as AgentActivityEntry[];
+    const second = await collectAndQueue(input);
     expect(second.length).toBe(0);
   });
 });

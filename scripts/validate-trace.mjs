@@ -1041,6 +1041,7 @@ export function validateSemantic(trace, rules) {
         const children = childrenMap.get(lastStep.spanId) || [];
         const llm = children.find(c => c._kind === 'LLM');
         if (llm) {
+          const isTrae = (llm.resource?.['gen_ai.agent.type'] ?? llm.attributes?.['gen_ai.agent.type']) === 'trae-agent';
           const raw = llm.attributes?.['gen_ai.output.messages'];
           if (raw) {
             try {
@@ -1054,7 +1055,7 @@ export function validateSemantic(trace, rules) {
                       // the completion signal, not an unfinished tool invocation, so
                       // it does not violate "final answer without tool calls". Any
                       // other tool_call on the last STEP still fails. (P1-6)
-                      if (part.type === 'tool_call' && !TERMINAL_CONTROL_TOOLS.has(part.name)) {
+                      if (part.type === 'tool_call' && !(isTrae && TERMINAL_CONTROL_TOOLS.has(part.name))) {
                         hasToolCall = true;
                       }
                     }

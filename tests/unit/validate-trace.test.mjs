@@ -9,7 +9,6 @@ import {
   buildTraces,
   hasModelToolSpanForOutput,
   isRuntimeSkillLoadSpan,
-  TERMINAL_CONTROL_TOOLS,
   unmatchedToolsForLlmOutput,
   validateMessageField,
   validateSemantic,
@@ -273,14 +272,19 @@ describe('delegated trace validation scopes', () => {
 });
 
 describe('semantic.last_step_no_tool_call terminal-control exemption (P1-6)', () => {
-  test('exempts trae-agent task_done but not real tools', () => {
-    // P1-6: the converter preserves trae-agent's real `task_done` control call on
-    // the finalized last step; the validator treats that name as a completion
-    // signal, not an unfinished tool invocation, so last_step_no_tool_call passes.
-    // A real tool on the last step must still be flagged.
-    expect(TERMINAL_CONTROL_TOOLS.has('task_done')).toBe(true);
-    expect(TERMINAL_CONTROL_TOOLS.has('bash')).toBe(false);
-    expect(TERMINAL_CONTROL_TOOLS.has('str_replace_based_edit_tool')).toBe(false);
+  test.each([
+    { agent: 'trae-agent', tool: 'task_done', unfinished: false },
+    { agent: 'trae-agent', tool: 'bash', unfinished: true },
+    { agent: 'codex', tool: 'task_done', unfinished: true },
+  ])('validates $tool as an unfinished call only when appropriate for $agent', ({ agent, tool, unfinished }) => {
+    const fixture = delegatedTrace();
+    fixture.parentLlm.resource = { 'gen_ai.agent.type': agent };
+    fixture.parentLlm.attributes['gen_ai.output.messages'] = [
+      { role: 'assistant', finish_reason: 'tool_call', parts: [{ type: 'tool_call', name: tool, id: 'tool-1' }] },
+    ];
+    const checks = checkTrace(fixture.spans).filter(check => check.id === 'semantic.last_step_no_tool_call');
+    expect(checks.some(check => check.status === 'error' && check.spanId === fixture.parentLlm.spanId)).toBe(unfinished);
+    expect(checks.length).toBeGreaterThan(0);
   });
 });
 

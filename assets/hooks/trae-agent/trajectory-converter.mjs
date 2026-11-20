@@ -245,13 +245,14 @@ export function convertTrajectory(json, opts = {}) {
     for (let t = 0; t < step.toolCalls.length; t++) {
       const call = step.toolCalls[t];
       const result = step.toolResults.find(r => r.callId && r.callId === call.callId) ?? null;
-      const toolSpanId = hashId([sessionId, 'tool', String(step.stepNumber), String(t), call.callId || ''], 16);
+      const toolIdentity = [sessionId, 'tool', JSON.stringify([step.stepNumber, t, call.callId || ''])];
+      const toolSpanId = hashId(toolIdentity, 16);
       const toolBase = { ...commonBase };
 
       entries.push({
         time_unix_nano: String(toolStartNano),
         observed_time_unix_nano: String(toolEndNano),
-        'event.id': hashId([sessionId, 'tool', String(step.stepNumber), String(t), 'call'], 32),
+        'event.id': hashId([...toolIdentity, 'call'], 32),
         'user.id': '',
         'event.name': 'tool.call',
         ...toolBase,
@@ -266,7 +267,7 @@ export function convertTrajectory(json, opts = {}) {
         entries.push({
           time_unix_nano: String(toolEndNano),
           observed_time_unix_nano: String(toolEndNano),
-          'event.id': hashId([sessionId, 'tool', String(step.stepNumber), String(t), 'result'], 32),
+          'event.id': hashId([...toolIdentity, 'result'], 32),
           'user.id': '',
           'event.name': 'tool.result',
           ...toolBase,
