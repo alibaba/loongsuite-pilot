@@ -114,7 +114,7 @@ describe('Claude native system JSON registration', () => {
 });
 
 describe('Claude system install lifecycle', () => {
-  it('auto-detects, restores the full runtime after restart, and uninstalls from the persisted system target', async () => {
+  it('executes the registered Stop hook from new homes, repairs missing raw logging, and uninstalls from persisted scope', async () => {
     const builtin = path.join(root, 'agents.d');
     await fs.mkdir(builtin);
     await fs.mkdir(path.join(root, 'user'));
@@ -126,13 +126,49 @@ describe('Claude system install lifecycle', () => {
     expect(manager.effectiveDefinition(loaded).hook?.settingsPath).toBe(def.hook!.systemSettingsPath);
     const report = await runHookInstall({ ...opts, mode: 'status' });
     expect(report.report.agents[0]).toMatchObject({ status: 'ok', hookScope: 'system', runtimeHealthy: true, collectionStatus: 'not-verified' });
-    await fs.unlink(path.join(dataDir, 'hooks/claude-code/transcript-parser.mjs'));
+
+    const settingsPath = def.hook!.systemSettingsPath!;
+    const command: string = JSON.parse(await fs.readFile(settingsPath, 'utf8')).hooks.Stop[0].hooks[0].command;
+    await write(path.join(dataDir, 'node-bin'), process.execPath);
+    const logsDir = path.join(dataDir, 'logs/claude-code');
+    async function stop(sessionId: string) {
+      const home = path.join(root, sessionId);
+      const transcriptPath = path.join(home, 'transcript.jsonl');
+      const transcript = [
+        { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: 'Hello' } },
+        { type: 'assistant', timestamp: '2026-06-04T02:57:33.000Z', message: {
+          id: `msg-${sessionId}`, model: 'claude-sonnet-4-6', stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'Hi' }], usage: { input_tokens: 10, output_tokens: 2 },
+        } },
+      ];
+      await write(transcriptPath, transcript.map(row => JSON.stringify(row)).join('\n') + '\n');
+      const result = spawnSync('/bin/bash', ['-c', command], {
+        cwd: home, env: { HOME: home, PATH: '/usr/bin:/bin' }, encoding: 'utf8', timeout: 10000,
+        input: JSON.stringify({ session_id: sessionId, transcript_path: transcriptPath, cwd: home, hook_event_name: 'Stop' }),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe('{}');
+    }
+    async function rawResponseSessions(): Promise<string[]> {
+      const names = (await fs.readdir(logsDir)).filter(name => name.endsWith('.jsonl'));
+      const files = await Promise.all(names.map(name => fs.readFile(path.join(logsDir, name), 'utf8')));
+      return files.flatMap(file => file.split('\n').filter(Boolean).map(line => JSON.parse(line)))
+        .filter(event => event['event.name'] === 'llm.response')
+        .map(event => event['gen_ai.session.id']).sort();
+    }
+
+    await stop('fresh-home');
+    expect(await rawResponseSessions()).toEqual(['fresh-home']);
+    await fs.unlink(path.join(dataDir, 'hooks/shared/raw-jsonl-writer.mjs'));
+    await stop('broken-home');
     expect(await manager.needsRedeploy(loaded)).toBe(true);
     expect((await manager.repairHookSettings(loaded)).success).toBe(true);
     expect(await manager.needsRedeploy(loaded)).toBe(false);
+    await stop('repaired-home');
+    expect(await rawResponseSessions()).toEqual(['fresh-home', 'repaired-home']);
     expect(await fs.stat(def.hook!.settingsPath).catch(() => null)).toBeNull();
     expect(await manager.undeployAgent(loaded)).toBe(true);
-    expect(JSON.parse(await fs.readFile(def.hook!.systemSettingsPath!, 'utf8'))).toEqual({});
+    expect(JSON.parse(await fs.readFile(settingsPath, 'utf8'))).toEqual({});
   });
 
   it('keeps default home installs and migrates only recorded registrations in both directions', async () => {
