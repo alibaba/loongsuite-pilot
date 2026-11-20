@@ -302,4 +302,5 @@ Tools without a usable transcript retain direct AGENT/TASK ownership and the `ge
 | `content_filter` | Content safety filtering stopped generation. |
 | `end_turn` | The model ended the turn. |
 | `cancelled` | The user interrupted generation; this is not a provider or agent error. |
+| `interrupted` | The agent observed an interrupted generation without an explicit user cancellation. |
 | `error` | A single physical model request failed. For Claude Code an intermediate `error` does not end the turn; a terminal failure additionally carries `gen_ai.turn.end=true`. |

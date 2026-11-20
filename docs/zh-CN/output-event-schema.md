@@ -281,6 +281,7 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 | `content_filter` | 内容安全过滤停止生成。 |
 | `end_turn` | 模型结束当前轮次。 |
 | `cancelled` | 用户中断生成，不表示 Provider 或 Agent 错误。 |
+| `interrupted` | Agent 观察到生成中断，且来源没有标记为用户取消。 |
 | `error` | 单次物理模型请求失败。对 Claude Code，中间的 `error` 不结束 turn；最终失败还会带 `gen_ai.turn.end=true`。 |
 
 ### 逐轮关联原文 hash

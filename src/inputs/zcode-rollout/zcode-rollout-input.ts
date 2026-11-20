@@ -7,6 +7,7 @@ import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
+import { VALID_FINISH_REASONS } from '../../normalization/finish-reason.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
 // Import the shared helpers from the .mjs file so the AGENT span_id (derived
@@ -803,15 +804,6 @@ function num(v: unknown): number | undefined {
 }
 
 /**
- * Canonical finish reasons accepted by scripts/validate-trace.mjs
- * (VALID_FINISH_REASONS). Producers must emit exactly these values.
- */
-const CANONICAL_FINISH_REASONS = new Set([
-  'stop', 'length', 'content_filter', 'tool_call', 'tool_calls',
-  'error', 'end_turn', 'max_tokens', 'interrupted', 'cancelled',
-]);
-
-/**
  * Normalize a raw ZCode finish reason to the canonical validator set.
  * Raw rollout values seen in the wild: 'tool_use', 'tool-calls',
  * 'tool_calls', 'function_call' (all → 'tool_call'); 'aborted'/'interrupted'
@@ -837,6 +829,6 @@ function normalizeFinishReason(raw: string): string {
     case 'max_output_tokens':
       return 'max_tokens';
     default:
-      return CANONICAL_FINISH_REASONS.has(v) ? v : 'stop';
+      return VALID_FINISH_REASONS.has(v) ? v : 'stop';
   }
 }
