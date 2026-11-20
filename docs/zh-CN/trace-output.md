@@ -66,7 +66,19 @@ Hermes 通过实际调用结束收口，包括跳过原生结束 hook 的提前�
 
 活动 turn 不设置强制按时长结束的上限，以免再次丢弃后续工具和模型事件。
 在现有缓冲数量上限内，待处理缓冲数和 `oldest_buffer_age_ms` 可通过 `pilot_trace_runtime` 状态快照观察。
-宿主在结束前被强杀仍需单独的遗留 turn 恢复机制；本观察器不提供崩溃后的持久化重放。
+在 Linux 同一 PID 命名空间内，新插件记录宿主进程身份。collector 确认进程已退出且缓冲
+空闲至少五分钟后，再等待至少一分钟，并核对该进程全部现存日志分段的已持久化采集游标与文件末尾。
+尚未追平时触发正常采集并在后续周期复查，不等待其他来源的输出背压。已消费的旧分段仍可回收；
+有待恢复轮次时保留已退出进程的最后分段，直到轮次导出或确认已由正常结束记录持久化。
+确认来源已追平后才导出已完成的 Span，附加
+`agent.hermes.collection.incomplete=true` 和 `agent.hermes.collection.end_reason=producer_process_exited`。
+没有配对结果的请求或工具调用仍不会伪造完整 Span。源文件缺失、读取失败、存在半行、采集器停用或
+输出尚未接收时保留待处理数据。旧插件未记录进程身份、跨 PID 命名空间、非 Linux 或
+进程身份无法确认时不会采用此兜底。此检查基于当前进程拥有的文件，不证明其他进程不会继续同一 turn。
+journal 能保留待处理数据供 collector 重启恢复，
+但不保证整个采集与上报链路 exactly-once。
+恢复来源索引和内存外待恢复轮次各有 10,000 轮上限，每轮最多跟踪 16 个来源；超限会告警并保留
+Hermes 原始来源直至 collector 重启，避免把来源不确定误判为已消费。
 
 OpenClaw 使用 `agent_end` 观察结束，保留 `llm_output` 的采集边界，不注册可改写回答的
 `before_agent_finalize`。注册后者会让支持该能力的宿主缓冲回复直到轮末，影响首次可见回复时间。
@@ -340,7 +352,7 @@ Pilot 会在 OTLP Trace 的两个层级上记录 Token 用量：
 
 ## Trace 中的内容采集
 
-Trace span 可能包含 Prompt、回答、工具参数和工具结果等敏感内容。历史 `captureMessageContent` 配置会被忽略；敏感或团队统一管理的环境建议开启脱敏：
+Trace span 可能包含 Prompt、回答、工具参数和工具结果等敏感内容。敏感或团队统一管理的环境建议开启脱敏：
 
 ```json
 {
@@ -351,8 +363,6 @@ Trace span 可能包含 Prompt、回答、工具参数和工具结果等敏感�
 ```
 
 完整规则和边界见[数据脱敏](masking.md)。
-
-Pilot 将转换器的 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` 固定为 `SPAN_ONLY`，并在保留其他取值的基础上把 `gen_ai_latest_experimental` 加入 `OTEL_SEMCONV_STABILITY_OPT_IN`。继承的 `NO_CONTENT` 等 SDK 配置也不再关闭 Pilot Trace 中的内容。
 
 ## 自定义 Span 属性
 

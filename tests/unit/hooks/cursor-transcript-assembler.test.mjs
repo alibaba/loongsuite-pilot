@@ -481,8 +481,8 @@ describe('buildCursorRecordsFromTranscript', () => {
     });
   });
 
-  describe('legacy content capture policy', () => {
-    it('keeps delta and full input when legacy message capture is disabled', () => {
+  describe('content capture policy', () => {
+    it('removes both delta and full input when message capture is disabled', () => {
       const transcriptPath = simpleTranscript('private prompt', 'private response');
       const records = buildCursorRecordsFromTranscript(
         transcriptPath,
@@ -499,8 +499,10 @@ describe('buildCursorRecordsFromTranscript', () => {
         },
       );
 
-      expect(records.some(record => record['gen_ai.input.messages_delta'] !== undefined)).toBe(true);
-      expect(records.some(record => record['gen_ai.input.messages'] !== undefined)).toBe(true);
+      for (const record of records) {
+        expect(record['gen_ai.input.messages_delta']).toBeUndefined();
+        expect(record['gen_ai.input.messages']).toBeUndefined();
+      }
     });
   });
 

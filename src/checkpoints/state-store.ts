@@ -137,6 +137,12 @@ export class StateStore {
     return this.states.get(inputId) ?? {};
   }
 
+  /** Return only the last state successfully written to disk, never a held cursor. */
+  getPersistedState(inputId: string): InputState | undefined {
+    const state = this.durableStates[inputId];
+    return state ? structuredClone(state) : undefined;
+  }
+
   set(inputId: string, state: InputState): void {
     const previous = this.get(inputId);
     this.states.set(inputId, cloneState(state));

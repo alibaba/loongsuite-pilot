@@ -1,8 +1,7 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeTextFileAtomic } from '../../utils/fs-utils.js';
 import {
-  readProcessStartToken,
   removeOwnPidFileSync,
   writePidFileSync,
 } from '../../utils/pid-utils.js';
@@ -28,7 +27,6 @@ export function buildRuntime(opts: RuntimeWriteOptions): InterceptorRuntime {
     daemon_port: opts.port,
     packageVersion: opts.version,
     gitCommit: opts.gitCommit,
-    processStartToken: readProcessStartToken(process.pid) || undefined,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -48,4 +46,10 @@ export function writePid(dataDir?: string): void {
 
 export function removeOwnPid(dataDir?: string): void {
   removeOwnPidFileSync(interceptorPidPath(dataDir));
+}
+
+/** Drop a previous runtime so status does not report a listener that this process will not bind. */
+export function clearInterceptorRuntime(dataDir?: string): void {
+  rmSync(interceptorRuntimePath(dataDir), { force: true });
+  rmSync(interceptorPidPath(dataDir), { force: true });
 }

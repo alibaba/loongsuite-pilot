@@ -269,7 +269,7 @@ describe('dashboard service lifecycle', () => {
       expect(probe).toContain('setTimeout');
       expect(probe).toContain('}, 300)');
     }
-    expect(runtimeSh).toContain('port = JSON.parse(fs.readFileSync(path, "utf8"))?.dashboard?.port');
+    expect(runtimeSh).toContain('port = JSON.parse(fs.readFileSync(path, "utf8").replace(/^\\uFEFF/, ""))?.dashboard?.port');
     expect(runtimeSh).toContain('configured = JSON.parse(fs.readFileSync(configPath, "utf8"))?.dataDir');
     expect(runtimeSh).toContain('process.env.LOONGSUITE_PILOT_DATA_DIR || configured');
     expect(runtimeSh).toContain('effective_data_dir=$(dashboard_data_dir)');

@@ -13,6 +13,7 @@ import json
 import os
 import secrets
 import socket
+import stat
 import sys
 import threading
 import time
@@ -40,6 +41,9 @@ MAX_TURN_MESSAGES = 64
 MAX_PARTS = 64
 MAX_COLLECTION_ITEMS = 128
 MAX_CONTENT_CHARS = 32 * 1024
+MAX_REQUEST_MESSAGES = 1024
+MAX_REQUEST_CONTENT_CHARS = 256 * 1024
+MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_PENDING_INPUT_RECORDS = 128
 MAX_PENDING_INPUT_BYTES = 2 * 1024 * 1024
 MAX_VALUE_DEPTH = 8
@@ -50,16 +54,33 @@ _RAW_WRITE_LOCK = threading.Lock()
 MANAGED_MARKER_FILE = ".loongsuite-pilot-managed.json"
 INVOCATION_USER_ID_FIELD = "agent.pilot.invocation.user.id"
 
-_PROCESS_FILE_TOKEN = "%s-%s-%s" % (
-    os.getpid(),
-    time.time_ns(),
-    secrets.token_hex(4),
-)
+def _new_process_file_token() -> str:
+    return "%s-%s-%s" % (os.getpid(), time.time_ns(), secrets.token_hex(4))
+
+
+_PROCESS_FILE_TOKEN = _new_process_file_token()
+_PROCESS_IDENTITY_CACHE: Any = None
 _STATE_LOCK = threading.RLock()
 # Never hold this lock during file I/O or native callbacks. Closing an API and
 # observing its first delta must be atomic without waiting for another turn's
 # synchronous JSONL append. Lock order is STATE -> TTFT, never the reverse.
 _TTFT_LOCK = threading.Lock()
+
+
+def _after_fork_child() -> None:
+    # A fork inherits the parent's source name, cached owner and locks. Give
+    # the child its own file family; never let its records advertise the
+    # parent's PID or wait on a lock held by a vanished parent thread.
+    global _PROCESS_FILE_TOKEN, _PROCESS_IDENTITY_CACHE, _RAW_WRITE_LOCK, _STATE_LOCK, _TTFT_LOCK
+    _PROCESS_FILE_TOKEN = _new_process_file_token()
+    _PROCESS_IDENTITY_CACHE = None
+    _RAW_WRITE_LOCK = threading.Lock()
+    _STATE_LOCK = threading.RLock()
+    _TTFT_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_child)
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
 # Detached retry snapshots retain no other active turns/session state.
 _EVICTED_TURNS: Dict[str, Any] = {}
@@ -115,7 +136,7 @@ def _agent_audit(turn: Dict[str, Any], state: Dict[str, Any], work: Dict[str, An
     record["event.id"] = work["invocation_id"] + ":" + kind + (":" + fingerprint if kind == "result" else "")
     if record["event.id"] in work.get("result_ids", []):
         return
-    if isinstance(text, str) and text:
+    if turn["capture_content"] and isinstance(text, str) and text:
         record["gen_ai.input.messages" if kind == "invoke" else "gen_ai.output.messages"] = [
             {"role": "user" if kind == "invoke" else "assistant",
              "parts": [{"type": "text", "content": _truncate(text)}]}]
@@ -363,6 +384,7 @@ _NATIVE_RUN_SCOPE = contextvars.ContextVar("pilot_hermes_native_run", default=No
 _NATIVE_RUN_OBSERVER_READY = False
 _NATIVE_RUN_OBSERVER_WARNED = False
 _NATIVE_RUN_RETRY_AFTER = 0.0
+_REQUEST_METADATA = contextvars.ContextVar("pilot_hermes_request_metadata", default=None)
 
 
 def _bind_native_run(state: Dict[str, Any], turn: Dict[str, Any]) -> None:
@@ -737,7 +759,7 @@ def _install_delegate_context() -> None:
 
 def _read_json_object(path: Path) -> Dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
         return value if isinstance(value, dict) else {}
     except Exception:
         return {}
@@ -796,6 +818,21 @@ def _report_internal_error(operation: str, error: Exception) -> None:
     except Exception:
         # A closed stderr must not replace an application result/exception.
         pass
+
+
+def _capture_message_content(config: Dict[str, Any]) -> bool:
+    agents = config.get("agents")
+    if not isinstance(agents, dict):
+        return True
+    agent_config = agents.get("hermes-agent")
+    if not isinstance(agent_config, dict):
+        agent_config = agents.get("hermes")
+    if not isinstance(agent_config, dict):
+        return True
+    value = agent_config.get("captureMessageContent")
+    if value is False:
+        return False
+    return not (isinstance(value, str) and value.strip().lower() == "false")
 
 
 def _hostname() -> str:
@@ -857,28 +894,28 @@ def _worker_name() -> Optional[str]:
     return value
 
 
-def _truncate(value: str) -> str:
-    if len(value) <= MAX_CONTENT_CHARS:
+def _truncate(value: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
+    if len(value) <= max_chars:
         return value
-    return value[:MAX_CONTENT_CHARS] + "...[truncated]"
+    return value[:max_chars] + "...[truncated]"
 
 
-def _bounded_value(value: Any, depth: int = 0) -> Any:
+def _bounded_value(value: Any, depth: int = 0, max_chars: int = MAX_CONTENT_CHARS) -> Any:
     if depth >= MAX_VALUE_DEPTH:
         return "[max-depth]"
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        return _truncate(value)
+        return _truncate(value, max_chars)
     if isinstance(value, (list, tuple)):
         return [
-            _bounded_value(item, depth + 1)
+            _bounded_value(item, depth + 1, max_chars)
             for item in list(value)[:MAX_COLLECTION_ITEMS]
         ]
     if isinstance(value, dict):
         output: Dict[str, Any] = {}
         for key, item in list(value.items())[:MAX_COLLECTION_ITEMS]:
-            output[_truncate(str(key))] = _bounded_value(item, depth + 1)
+            output[_truncate(str(key))] = _bounded_value(item, depth + 1, max_chars)
         return output
     return _truncate(str(value))
 
@@ -1034,6 +1071,74 @@ def _system_instructions(request: Any) -> List[Dict[str, str]]:
     return parts[:MAX_PARTS]
 
 
+def _install_request_metadata_observer() -> bool:
+    """Observe provider metadata without changing Hermes' capped hook view."""
+    module = sys.modules.get("run_agent") or sys.modules.get("__main__")
+    owner = getattr(module, "AIAgent", None)
+    original = getattr(owner, "_api_request_payload_for_hook", None)
+    if not callable(original) or inspect.iscoroutinefunction(original) or inspect.isgeneratorfunction(original):
+        return False
+    if getattr(original, "_pilot_request_observer", False):
+        original._pilot_request_metadata = _REQUEST_METADATA
+        original._pilot_request_extract = _request_metadata
+        return True
+    try:
+        parameters = list(inspect.signature(original).parameters)
+    except (TypeError, ValueError):
+        return False
+    if parameters != ["self", "api_kwargs"]:
+        return False
+
+    @functools.wraps(original)
+    def observed(self: Any, api_kwargs: Any) -> Any:
+        # Return the exact original object to all plugins. A request-identity
+        # match, session, TTL and shared single-use holder prevent stale or
+        # auxiliary-call metadata from decorating an unrelated request.
+        context = observed._pilot_request_metadata
+        context.set(None)
+        result = original(self, api_kwargs)
+        try:
+            if isinstance(result, dict):
+                metadata = observed._pilot_request_extract({"body": api_kwargs})
+                context.set({"request": result, "session_id": getattr(self, "session_id", None),
+                             "created": time.monotonic(), "metadata": metadata})
+        except Exception as error:
+            _report_internal_error("request metadata snapshot", error)
+        return result
+
+    observed._pilot_request_observer = True
+    observed._pilot_request_metadata = _REQUEST_METADATA
+    observed._pilot_request_extract = _request_metadata
+    owner._api_request_payload_for_hook = observed
+    return True
+
+
+def _request_metadata(request: Any) -> Dict[str, Any]:
+    output: Dict[str, Any] = {"system_instructions": [], "tool_definitions": []}
+    size = 2
+    for key, items in (("system_instructions", _system_instructions(request)),
+                       ("tool_definitions", _tool_definitions(request))):
+        for item in items:
+            # Match the JSONL writer: escaped surrogates must round-trip too.
+            size += len(json.dumps(item, ensure_ascii=True)) + 1
+            if size > MAX_REQUEST_BYTES:
+                output["truncated"] = True
+                break
+            output[key].append(item)
+    return output
+
+
+def _take_request_metadata(payload: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = _REQUEST_METADATA.get()
+    if (not isinstance(snapshot, dict) or snapshot.get("request") is not payload.get("request")
+            or snapshot.get("session_id") != payload.get("session_id")
+            or time.monotonic() - snapshot.get("created", 0) > 5.0):
+        return {}
+    # Newer Hermes runs hooks in a copied context on a worker. Clearing the
+    # holder itself also consumes the snapshot in the caller's context.
+    return snapshot.pop("metadata", {})
+
+
 def _skill_attributes(
     tool_name: Any,
     arguments: Any = None,
@@ -1090,6 +1195,43 @@ def _new_event_id() -> str:
     return str(uuid.uuid4())
 
 
+def _process_identity() -> Dict[str, Any]:
+    """Identify this Linux process only when /proc uses its PID namespace."""
+    global _PROCESS_IDENTITY_CACHE
+    pid = os.getpid()
+    if _PROCESS_IDENTITY_CACHE and _PROCESS_IDENTITY_CACHE[0] == pid:
+        return _PROCESS_IDENTITY_CACHE[1]
+    identity: Dict[str, Any] = {}
+    try:
+        namespace = os.readlink("/proc/self/ns/pid")
+        # /proc/1/ns/pid may be unreadable to an unprivileged collector or
+        # plugin. NSpid contains one value per namespace between this procfs
+        # mount and the process: more than one means a parent-mounted /proc.
+        # Also compare /proc/self's PID with getpid() in the same process.
+        status = Path("/proc/self/status").read_text()
+        ns_pids = next((line.split()[1:] for line in status.splitlines()
+                        if line.startswith("NSpid:")), [])
+        if os.readlink("/proc/self") != str(pid) or ns_pids != [str(pid)]:
+            return identity
+        stat = Path("/proc/self/stat").read_text()
+        fields = stat[stat.rfind(")") + 2:].split()
+        start_ticks = fields[19]
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        if not start_ticks.isdigit() or not boot_id:
+            return identity
+        identity = {"agent.hermes.process": {
+            "pid": pid, "start_ticks": start_ticks,
+            "pid_namespace": namespace, "boot_id": boot_id,
+            "source_token": _PROCESS_FILE_TOKEN,
+        }}
+    except (OSError, ValueError, IndexError):
+        pass
+    # Do not cache an unavailable /proc: it may become accessible later.
+    if identity:
+        _PROCESS_IDENTITY_CACHE = (pid, identity)
+    return identity
+
+
 def _session(session_id: str) -> Dict[str, Any]:
     state = _SESSIONS.get(session_id)
     if state is None:
@@ -1144,6 +1286,7 @@ def _new_turn(
         _session(session_id)["sender_identity"] = dict(user_identity)
     return {
         "session_id": session_id,
+        "session_hash": hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32],
         "task_id": None,
         "thread_id": threading.get_ident(),
         "observer_turn_id": (
@@ -1157,6 +1300,7 @@ def _new_turn(
         "user_id": user_identity["user_id"],
         "user_id_source": user_identity["source"],
         "sender_id": normalized_sender_id,
+        "capture_content": _capture_message_content(config),
         "user_message": user_message if isinstance(user_message, str) else str(user_message or ""),
         # None means the initial history boundary was not observed. Do not
         # confuse an empty snapshot with a known first-message boundary.
@@ -1278,7 +1422,9 @@ def _numeric(value: Any) -> Optional[int]:
     return None
 
 
-def _tool_calls(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _tool_calls(
+    message: Dict[str, Any], capture_content: bool, max_chars: int = MAX_CONTENT_CHARS
+) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
     calls = message.get("tool_calls")
     if not isinstance(calls, list):
@@ -1294,13 +1440,15 @@ def _tool_calls(message: Dict[str, Any]) -> List[Dict[str, Any]]:
             "id": str(call_id) if call_id else None,
             "name": str(name),
         }
-        if "arguments" in function:
-            part["arguments"] = _bounded_value(_decode_json(function.get("arguments")))
+        if capture_content and "arguments" in function:
+            part["arguments"] = _bounded_value(_decode_json(function.get("arguments")), max_chars=max_chars)
         output.append(part)
     return output
 
 
-def _message(message: Any) -> Optional[Dict[str, Any]]:
+def _message(
+    message: Any, capture_content: bool, max_chars: int = MAX_CONTENT_CHARS
+) -> Optional[Dict[str, Any]]:
     if not isinstance(message, dict):
         return None
     role = str(message.get("role") or "unknown")
@@ -1309,7 +1457,7 @@ def _message(message: Any) -> Optional[Dict[str, Any]]:
 
     if role == "tool":
         call_id = message.get("tool_call_id") or message.get("call_id")
-        response = _bounded_value(_decode_json(content))
+        response = _bounded_value(_decode_json(content), max_chars=max_chars) if capture_content else ""
         parts.append({
             "type": "tool_call_response",
             "id": str(call_id) if call_id else None,
@@ -1318,21 +1466,21 @@ def _message(message: Any) -> Optional[Dict[str, Any]]:
     else:
         if isinstance(content, str):
             if content or not message.get("tool_calls"):
-                parts.append({"type": "text", "content": _truncate(content)})
+                parts.append({"type": "text", "content": _truncate(content, max_chars) if capture_content else ""})
         elif isinstance(content, list):
             for item in content[:MAX_PARTS]:
                 if isinstance(item, dict) and item.get("type") in ("text", "input_text", "output_text"):
                     text = item.get("text", item.get("content", ""))
                     parts.append({
                         "type": "text",
-                        "content": _truncate(str(text or "")),
+                        "content": _truncate(str(text or ""), max_chars) if capture_content else "",
                     })
         elif content is not None:
             parts.append({
                 "type": "text",
-                "content": _truncate(str(content)),
+                "content": _truncate(str(content), max_chars) if capture_content else "",
             })
-        parts.extend(_tool_calls(message))
+        parts.extend(_tool_calls(message, capture_content, max_chars))
 
     if not parts:
         parts.append({"type": "text", "content": ""})
@@ -1343,13 +1491,32 @@ def _message(message: Any) -> Optional[Dict[str, Any]]:
     return output
 
 
-def _messages(messages: List[Any]) -> List[Dict[str, Any]]:
+def _messages(messages: List[Any], capture_content: bool) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
     for item in messages[-MAX_TURN_MESSAGES:]:
-        converted = _message(item)
+        converted = _message(item, capture_content)
         if converted is not None:
             output.append(converted)
     return output
+
+
+def _request_inputs(messages: List[Any], capture_content: bool) -> tuple:
+    """Capture the request independently of the small lifecycle window."""
+    output: List[Dict[str, Any]] = []
+    size = 2
+    truncated = len(messages) > MAX_REQUEST_MESSAGES
+    for message in reversed(messages[-MAX_REQUEST_MESSAGES:]):
+        if isinstance(message, dict) and isinstance(message.get("content"), list) and len(message["content"]) > MAX_PARTS:
+            truncated = True
+        converted = _message(message, capture_content, MAX_REQUEST_CONTENT_CHARS)
+        if converted is None:
+            continue
+        size += len(json.dumps(converted, ensure_ascii=True)) + 1
+        if size > MAX_REQUEST_BYTES:
+            truncated = True
+            break
+        output.append(converted)
+    return list(reversed(output)), truncated
 
 
 def _current_turn_messages(turn: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1409,6 +1576,7 @@ def _common_fields(
     }
     if turn.get("native_run_observer") is True:
         fields["agent.hermes.native_run_observer"] = True
+    fields.update(_process_identity())
     if turn.get("user_id_source") in ("invocation", "environment", "sender", "parent"):
         fields[INVOCATION_USER_ID_FIELD] = turn["user_id"]
     if turn.get("sender_id"):
@@ -1499,7 +1667,10 @@ def _api_ids(turn: Dict[str, Any], api: Dict[str, Any]) -> Any:
         api["span_id"] = _new_span_id()
     if not api.get("step_id"):
         index = next(i for i, item in enumerate(turn["apis"]) if item is api)
-        api["step_id"] = "%s:s%s" % (_turn_id(turn), index + 1)
+        # A source turn ID may be reused in another session even when its
+        # previous invocation is no longer resident. Scope response IDs to the
+        # session independently of whether rotation was observed in this run.
+        api["step_id"] = "%s:session:%s:s%s" % (_turn_id(turn), turn["session_hash"], index + 1)
     return api["step_id"], "%s:r" % api["step_id"]
 
 
@@ -1597,7 +1768,7 @@ def _write_turn_input(turn: Dict[str, Any], request: Dict[str, Any]) -> None:
         "gen_ai.provider.name": request.get("gen_ai.provider.name", "unknown"),
         "agent.pilot.correlation.content_hash": turn["input_content_hash"],
         "gen_ai.input.messages_delta": [{"role": "user", "parts": [
-            {"type": "text", "content": turn["input_text"]}
+            {"type": "text", "content": turn["input_text"] if turn["capture_content"] else ""}
         ]}],
     })
     # Reuse stable event ids and append acknowledgement. If this write fails,
@@ -1606,8 +1777,23 @@ def _write_turn_input(turn: Dict[str, Any], request: Dict[str, Any]) -> None:
 
 
 def _request_messages(turn: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    if isinstance(payload.get("conversation_history"), list):
-        return _current_turn_messages(turn, payload)
+    native = payload.get("request_messages")
+    # Native Chat messages are closest to the provider input. Other APIs can
+    # expose Responses items or provider-specific tool blocks here; preserve
+    # their normalized conversation history until those shapes are supported.
+    native_chat = isinstance(native, list) and bool(native) and all(
+        isinstance(message, dict) and message.get("role") in ("system", "developer", "user", "assistant", "tool")
+        and (not isinstance(message.get("content"), list) or all(
+            isinstance(block, dict) and block.get("type") in ("text", "input_text", "output_text")
+            for block in message["content"]))
+        for message in native)
+    if native_chat:
+        return [message for message in native if isinstance(message, dict)
+                and message.get("role") not in ("system", "developer")]
+    if isinstance(payload.get("conversation_history"), list) and payload["conversation_history"]:
+        # This is LLM input, not the lifecycle/response window. Keep earlier
+        # turns without letting their assistants consume current API results.
+        return [message for message in payload["conversation_history"] if isinstance(message, dict)]
     # Older hooks omit request history. Retain only observed boundaries; never
     # invent response text. Tool hooks still supply their actual call/result.
     messages = list(turn.get("initial_messages") or [{"role": "user", "content": turn["user_message"]}])
@@ -1634,7 +1820,8 @@ def _request_messages(turn: Dict[str, Any], api: Dict[str, Any], payload: Dict[s
 def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> None:
     step_id, response_id = _api_ids(turn, api)
     messages = _request_messages(turn, api, payload)
-    _capture_turn_input(turn, messages)
+    capture = bool(turn["capture_content"])
+    _capture_turn_input(turn, _current_turn_messages(turn, payload))
     index = next(i for i, item in enumerate(turn["apis"]) if item is api)
     delta_start = 0
     if index:
@@ -1642,7 +1829,8 @@ def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, An
         if positions:
             delta_start = positions[-1]
     pre = api.get("pre") or {}
-    inputs = _messages(messages)
+    inputs, truncated = _request_inputs(messages, capture)
+    delta = inputs if delta_start == 0 else _request_inputs(messages[delta_start:], capture)[0]
     record = _common_fields(turn, state, "llm.request", api["pre_ns"], step_id, api["span_id"])
     record.update({
         "gen_ai.provider.name": _provider_name(pre.get("provider")),
@@ -1650,12 +1838,16 @@ def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, An
         "gen_ai.response.id": response_id,
         "gen_ai.request.model": pre.get("model") or turn.get("model") or "unknown",
         "gen_ai.input.messages": inputs,
-        "gen_ai.input.messages_delta": _messages(messages[delta_start:]),
+        "gen_ai.input.messages_delta": delta,
         "gen_ai.input.messages_hash": hashlib.sha256(
             json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
         "agent.hermes.hook": "pre_api_request",
     })
+    if truncated or pre.get("context_truncated"):
+        record["agent.pilot.request_context.truncated"] = True
     for key in ("tool_definitions", "system_instructions"):
+        if not capture:
+            continue
         if pre.get(key):
             record["gen_ai.tool.definitions" if key == "tool_definitions" else "gen_ai.system_instructions"] = pre[key]
     _write_new_records(turn, [record])
@@ -1676,6 +1868,7 @@ def _build_records(
         index for index, message in enumerate(current_messages)
         if message.get("role") == "assistant"
     ]
+    capture = bool(turn["capture_content"])
     turn_id = _turn_id(turn)
     records: List[Dict[str, Any]] = []
     tool_step: Dict[str, int] = {}
@@ -1728,7 +1921,7 @@ def _build_records(
         if isinstance(known_assistant, dict):
             assistant_message = known_assistant
 
-        for call in _tool_calls(assistant_message):
+        for call in _tool_calls(assistant_message, capture):
             call_id = call.get("id")
             if call_id:
                 tool_step[str(call_id)] = index
@@ -1739,9 +1932,9 @@ def _build_records(
         # System instructions are provider configuration, not turn messages.
         # Keep them in their dedicated field so they do not alter the existing
         # input, delta, or input-hash semantics.
-        input_messages = _messages(input_source)
-        input_delta = _messages(delta_source)
-        output_message = _message(assistant_message)
+        input_messages = _messages(input_source, capture)
+        input_delta = _messages(delta_source, capture)
+        output_message = _message(assistant_message, capture)
         provider = _provider_name(post.get("provider") or pre.get("provider"))
         request_model = str(pre.get("model") or post.get("model") or turn.get("model") or session_state.get("model") or "unknown")
         response_model = str(post.get("response_model") or post.get("model") or request_model)
@@ -1763,9 +1956,9 @@ def _build_records(
                 json.dumps(input_messages, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest(),
         })
-        if isinstance(tool_definitions, list) and tool_definitions:
+        if capture and isinstance(tool_definitions, list) and tool_definitions:
             request["gen_ai.tool.definitions"] = tool_definitions
-        if isinstance(system_instructions, list) and system_instructions:
+        if capture and isinstance(system_instructions, list) and system_instructions:
             request["gen_ai.system_instructions"] = system_instructions
         records.append(request)
 
@@ -1788,7 +1981,11 @@ def _build_records(
         error_type = post.get("error_type")
         if error_type:
             response["error.type"] = str(error_type)
-            response["error.message"] = str(post.get("error_message") or "provider request failed")
+            response["error.message"] = (
+                str(post.get("error_message") or "provider request failed")
+                if capture
+                else "provider request failed"
+            )
             status_code = _numeric(post.get("status_code"))
             if status_code is not None:
                 response["http.status_code"] = status_code
@@ -1826,7 +2023,7 @@ def _build_records(
             "gen_ai.tool.call.id": call_id,
             "gen_ai.tool.call.exec.id": call_id,
         })
-        if "args" in tool:
+        if capture and "args" in tool:
             call["gen_ai.tool.call.arguments"] = tool["args"]
         call.update(tool.get("skill_attributes") or {})
         records.append(call)
@@ -1849,7 +2046,7 @@ def _build_records(
             "gen_ai.tool.call.duration": duration_ms,
             "tool.result.status": tool.get("status") or "success",
         })
-        if "result" in tool:
+        if capture and "result" in tool:
             result["gen_ai.tool.call.result"] = tool["result"]
         result.update(tool.get("skill_attributes") or {})
         records.append(result)
@@ -1872,11 +2069,24 @@ def _write_records(records: List[Dict[str, Any]]) -> None:
         return
     directory = _data_dir() / "logs" / "hermes-agent"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    shared = False
     try:
-        os.chmod(directory, 0o700)
+        if str(os.environ.get('LOONGSUITE_PILOT_ROOT_TRIGGER', '')).strip().lower() in ('1', 'true', 'yes', 'on'):
+            info = directory.lstat()
+            shared = info.st_uid == 0 and (info.st_mode & 0o7777) == 0o1777
+        if not shared:
+            os.chmod(directory, 0o700)
     except OSError:
         pass
     path = directory / ("hermes-agent-%s.jsonl" % _PROCESS_FILE_TOKEN)
+    # Staged records may have been created before fork. Their source identity
+    # must describe the process that actually appends them to this file.
+    identity = _process_identity().get("agent.hermes.process")
+    for record in records:
+        if identity:
+            record["agent.hermes.process"] = identity
+        else:
+            record.pop("agent.hermes.process", None)
     payload = "".join(
         json.dumps(record, ensure_ascii=True, separators=(",", ":"), default=str) + "\n"
         for record in records
@@ -1911,8 +2121,17 @@ def _write_records(records: List[Dict[str, Any]]) -> None:
                     os.replace(str(temporary), str(pointer))
                 finally:
                     temporary.unlink(missing_ok=True)
-            descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+            if shared:
+                flags |= getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+            descriptor = os.open(str(target), flags, 0o600)
             try:
+                if shared:
+                    info = os.fstat(descriptor)
+                    if not stat.S_ISREG(info.st_mode) or (hasattr(os, 'getuid') and info.st_uid != os.getuid()):
+                        raise OSError('Pilot event file is not a private regular file')
+                if os.name != 'nt':
+                    os.fchmod(descriptor, 0o600)
                 offset = 0
                 while offset < len(payload):
                     written = os.write(descriptor, payload[offset:])
@@ -2007,6 +2226,8 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
     task_id = payload.get("task_id")
     state["model"] = payload.get("model") or state.get("model")
     state["platform"] = payload.get("platform") or state.get("platform")
+    metadata = _take_request_metadata(payload)
+    request = payload.get("request")
     api = {
         "session_id": session_id,
         "task_id": task_id,
@@ -2017,8 +2238,21 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
         "pre": {
             "provider": payload.get("provider"),
             "model": payload.get("model"),
-            "tool_definitions": _tool_definitions(payload.get("request")),
-            "system_instructions": _system_instructions(payload.get("request")),
+            "tool_definitions": (
+                metadata.get("tool_definitions") or _tool_definitions(payload.get("request"))
+                if turn["capture_content"]
+                else []
+            ),
+            "system_instructions": (
+                metadata.get("system_instructions") or _system_instructions({"body": {
+                    "messages": payload.get("request_messages"),
+                    "system": payload.get("system_prompt"),
+                }}) or _system_instructions(payload.get("request"))
+                if turn["capture_content"]
+                else []
+            ),
+            "context_truncated": bool(metadata.get("truncated") or
+                                      (isinstance(request, dict) and request.get("_truncated") and not metadata)),
         },
         "post": {},
     }
@@ -2157,7 +2391,8 @@ def _handle_pre_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
                 payload.get("tool_name"), payload.get("args")
             ),
         }
-        tool["args"] = _bounded_value(payload.get("args"))
+        if turn["capture_content"]:
+            tool["args"] = _bounded_value(payload.get("args"))
         turn["tools"][call_id] = tool
         _write_new_records(turn, _build_records(turn, state, payload))
     if payload.get("tool_name") == "delegate_task":
@@ -2202,9 +2437,10 @@ def _handle_post_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
     duration_ms = _numeric(payload.get("duration_ms"))
     if duration_ms is not None:
         tool["duration_ms"] = duration_ms
-    if "args" not in tool:
-        tool["args"] = _bounded_value(payload.get("args"))
-    tool["result"] = _bounded_value(_decode_json(payload.get("result")))
+    if turn["capture_content"]:
+        if "args" not in tool:
+            tool["args"] = _bounded_value(payload.get("args"))
+        tool["result"] = _bounded_value(_decode_json(payload.get("result")))
     tool["skill_attributes"] = _skill_attributes(
         tool.get("tool_name"), payload.get("args"), payload.get("result")
     ) or tool.get("skill_attributes", {})
@@ -2317,6 +2553,7 @@ def _safe_callback(hook_name: str) -> Callable[..., None]:
                     _install_cli_delivery_context()
                 if not _GATEWAY_DELIVERY_READY:
                     _install_gateway_delivery_context()
+                _install_request_metadata_observer()
             with _STATE_LOCK:
                 _HANDLERS[hook_name](time.time_ns(), kwargs)
         except Exception as error:
@@ -2334,6 +2571,10 @@ def register(ctx: Any) -> None:
     _install_cli_delivery_context()
     _install_gateway_delivery_context()
     _try_install_run_completion_observer()
+    try:
+        _install_request_metadata_observer()
+    except Exception as error:
+        _report_internal_error("request metadata observer", error)
     _purge_old_logs()
     for hook_name in HOOKS:
         try:

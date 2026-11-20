@@ -39,6 +39,11 @@ async function main(): Promise<void> {
   const version = readInstalledVersion(dataDir);
   const gitCommit = readInstalledGitCommit(dataDir);
   const service = await startInterceptorService({ dataDir, version, gitCommit });
+  if (service.port === null) {
+    await service.stop();
+    flushLogsSync();
+    process.exit(0);
+  }
 
   const shutdown = () => {
     void service.stop().finally(() => process.exit(0));

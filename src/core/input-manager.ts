@@ -14,6 +14,7 @@ import type { BaseFlusher } from '../flushers/base-flusher.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
+import { applyAgentContentPolicy } from '../normalization/agent-content-policy.js';
 import { enrichCanonicalEntriesWithGit } from '../normalization/enrich-git-context.js';
 import { maskAgentActivityEntry } from '../mask/entry-masker.js';
 import { loadMaskPlan } from '../mask/rule-loader.js';
@@ -124,8 +125,11 @@ export class InputManager extends EventEmitter {
     this.configuredUserId = userId;
   }
 
-  /** @deprecated Retained for callers; per-agent content opt-outs are ignored. */
-  setAgentsConfig(_config: AgentsConfig): void {}
+  private agentsConfig: AgentsConfig = {};
+
+  setAgentsConfig(config: AgentsConfig): void {
+    this.agentsConfig = config;
+  }
 
   setMaskConfig(config: MaskConfig): void {
     this.maskConfig = config;
@@ -164,7 +168,7 @@ export class InputManager extends EventEmitter {
     }
     input.setWorkspacePolicy(this.workspacePolicy);
     this.inputs.set(input.id, input);
-    if (input.agentType === ClientType.CodexCliHook) {
+    if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes || input.id === 'qwen-work-cn-collaboration') {
       this.entryAbortControllers.set(input.id, new AbortController());
     }
     this.counters.set(input.id, {
@@ -201,7 +205,16 @@ export class InputManager extends EventEmitter {
       const handling = previous
         .catch(() => undefined)
         .then(() => this.handleEntries(input.id, entries));
-      if (input.agentType === ClientType.CodexCliHook) input.holdCheckpointUntil(handling);
+      if (input.id === 'qwen-work-cn-collaboration') {
+        const controller = this.entryAbortControllers.get(input.id);
+        const retained = handling.catch(error => {
+          if (!controller?.signal.aborted) throw error;
+          (input as BaseInput & { restoreAbortedDelivery(): void }).restoreAbortedDelivery();
+        });
+        input.holdCheckpointUntil(retained);
+      } else if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes) {
+        input.holdCheckpointUntil(handling);
+      }
       const next = handling.catch(err => {
         logger.error('entry handling failed', { inputId: input.id, error: String(err) });
       });
@@ -266,6 +279,14 @@ export class InputManager extends EventEmitter {
     await input.stop();
     await this.drainInputQueue(id);
     logger.info('input stopped', { id });
+  }
+
+  /** Recovery must first drain the actual Hermes source and output queue. */
+  async confirmHermesSourceDrained(sourceToken: string): Promise<boolean> {
+    const input = this.inputs.get('hermes-agent-log') as (BaseInput & {
+      confirmSourceDrained?: (token: string) => Promise<boolean>;
+    }) | undefined;
+    return input?.confirmSourceDrained ? input.confirmSourceDrained(sourceToken) : false;
   }
 
   /** Called before discovery drains starts that may themselves await output. */
@@ -381,6 +402,10 @@ export class InputManager extends EventEmitter {
     // Join while entries still carry the agent-native session id.
     if (this.interceptResultLinker) {
       try {
+        // Only collection waits for the worker FIFO barrier; hook HTTP never waits for this thread.
+        await this.interceptResultLinker.sync(entries).catch(error => {
+          logger.warn('interceptor verdict sync failed; using available cache', { inputId, error: String(error) });
+        });
         this.interceptResultLinker.enrich(entries);
       } catch (err) {
         logger.warn('interceptor result linking failed (skipped)', {
@@ -436,7 +461,7 @@ export class InputManager extends EventEmitter {
       });
     }
 
-    const expandedEntries = expandAgentInputEvents(this.applyMask(entries));
+    const expandedEntries = expandAgentInputEvents(this.applyPolicyAndMask(entries));
     let outputBatchBytes = 0;
     // Reuse the existing serialization; only retain its numeric results.
     const logicalBytes = expandedEntries.map(entry => {
@@ -451,10 +476,13 @@ export class InputManager extends EventEmitter {
 
   /**
    * Flush entries that did not come from an Input. Reuses git enrichment,
-   * invocation identity, and mask, then the same flusher.
+   * invocation identity, content policy, and mask, then the same flusher.
    */
-  async flushPreparedEntries(entries: AgentActivityEntry[]): Promise<void> {
+  async flushPreparedEntries(entries: AgentActivityEntry[], signal?: AbortSignal): Promise<void> {
+    // Apply privacy policy before invocation identity replaces native session/agent keys.
+    entries = this.workspacePolicy.filter(entries);
     if (entries.length === 0) return;
+    signal?.throwIfAborted();
     const inputId = 'interceptor';
     try {
       await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);
@@ -465,8 +493,9 @@ export class InputManager extends EventEmitter {
       });
     }
 
+    signal?.throwIfAborted();
     this.applyIdentity(entries);
-    const prepared = this.applyMask(entries);
+    const prepared = this.applyPolicyAndMask(entries);
     let outputBatchBytes = 0;
     const logicalBytes = prepared.map(entry => {
       const bytes = Buffer.byteLength(JSON.stringify(entry));
@@ -474,7 +503,7 @@ export class InputManager extends EventEmitter {
       return bytes;
     });
     logger.info('dispatching entries', { inputId, count: prepared.length });
-    await this.dispatchEntries(inputId, prepared, outputBatchBytes, logicalBytes);
+    await this.dispatchEntries(inputId, prepared, outputBatchBytes, logicalBytes, signal);
   }
 
   private applyIdentity(entries: AgentActivityEntry[]): void {
@@ -485,14 +514,17 @@ export class InputManager extends EventEmitter {
 
   /** Recheck retained output against current workspace and mask rules without rewriting its identity. */
   prepareRestoredEntries(entries: AgentActivityEntry[]): AgentActivityEntry[] {
-    return this.applyMask(this.workspacePolicy.filter(entries));
+    return this.applyPolicyAndMask(this.workspacePolicy.filter(entries));
   }
 
-  private applyMask(entries: AgentActivityEntry[]): AgentActivityEntry[] {
+  private applyPolicyAndMask(entries: AgentActivityEntry[]): AgentActivityEntry[] {
+    const policyAppliedEntries = entries.map(entry =>
+      applyAgentContentPolicy(entry, this.agentsConfig),
+    );
     if (this.maskPlan.rules.length === 0 && this.maskPlan.piiTypes.size === 0) {
-      return entries;
+      return policyAppliedEntries;
     }
-    return entries.map(entry =>
+    return policyAppliedEntries.map(entry =>
       maskAgentActivityEntry(entry, this.maskConfig, this.maskPlan),
     );
   }
@@ -504,7 +536,7 @@ export class InputManager extends EventEmitter {
     }
   }
 
-  private async dispatchEntries(inputId: string, entries: AgentActivityEntry[], batchBytes: number, logicalBytes?: readonly number[]): Promise<void> {
+  private async dispatchEntries(inputId: string, entries: AgentActivityEntry[], batchBytes: number, logicalBytes?: readonly number[], signalOverride?: AbortSignal): Promise<void> {
     if (!this.flusher) {
       logger.warn('no flusher set, dropping entries', { count: entries.length });
       this.alarmManager?.record(
@@ -512,19 +544,28 @@ export class InputManager extends EventEmitter {
         `dropped ${entries.length} entries from ${inputId}: no flusher`,
         { input_name: inputId },
       );
+      if (inputId === 'qwen-work-cn-collaboration') throw new Error('no flusher for collaboration input');
       return;
     }
 
     const counter = this.counters.get(inputId);
+    const signal = signalOverride ?? this.entryAbortControllers.get(inputId)?.signal;
     try {
-      const signal = this.entryAbortControllers.get(inputId)?.signal;
       const deliver = this.flusher.createBatchDelivery(entries, logicalBytes, signal);
       let quotaAlarmed = false;
+      let collaborationRetryMs = 1000;
       while (true) {
         try {
           await deliver();
           break;
         } catch (error) {
+          if (inputId === 'qwen-work-cn-collaboration' && !signal?.aborted) {
+            // Keep the source checkpoint behind this same fan-out delivery.
+            // Its already-accepted destinations are not sent the batch again.
+            await delay(collaborationRetryMs, undefined, signal ? { signal } : undefined);
+            collaborationRetryMs = Math.min(collaborationRetryMs * 2, 30_000);
+            continue;
+          }
           const quota = (error as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
           if (!quota || signal?.aborted) throw error;
           if (!quotaAlarmed) {
@@ -539,8 +580,9 @@ export class InputManager extends EventEmitter {
       this.emit('flushed', { count: entries.length, bytes: batchBytes });
     } catch (err) {
       if (counter) counter.outFailed += entries.length;
-      if (this.entryAbortControllers.get(inputId)?.signal.aborted) throw err;
+      if (signal?.aborted) throw err;
       logger.error('dispatch failed', { count: entries.length, error: String(err) });
+      if (inputId === 'qwen-work-cn-collaboration') throw err;
       if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes((err as Error)?.name)) {
         const quota = (err as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
         this.alarmManager?.record(quota ? 'FLUSH_QUOTA_ALARM' : 'FLUSH_SEND_ALARM', '3',

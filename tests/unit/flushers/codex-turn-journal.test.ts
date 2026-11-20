@@ -47,6 +47,23 @@ describe('CodexTurnJournal', () => {
     expect((await readJournal(restarted)).flat()).toEqual([second]);
   });
 
+  it('allows Codex and Hermes to resume after a retained OpenClaw cron turn is acknowledged', async () => {
+    const cron = entry('pending-cron', { 'gen_ai.agent.type': 'openclaw', 'agent.openclaw.collection': 'cron-lifecycle-v1' });
+    const codex = entry('next-codex', { 'gen_ai.agent.type': 'codex', 'gen_ai.turn.id': 'next-codex' });
+    const hermes = entry('next-hermes', { 'gen_ai.agent.type': 'hermes', 'gen_ai.turn.id': 'next-hermes' });
+    const size = (item: AgentActivityEntry) => Buffer.byteLength(JSON.stringify(item) + '\n');
+    const limit = Math.max(size(cron), size(codex), size(hermes)) + 16;
+    const journal = new CodexTurnJournal(directory, 100, ['openclaw', 'codex', 'hermes'], limit);
+    await journal.append([cron]);
+    await expect(journal.append([codex])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    await expect(journal.append([hermes])).rejects.toMatchObject({ name: 'CodexTurnJournalCapacityError' });
+    await journal.acknowledge([cron]);
+    await journal.append([codex]);
+    await journal.acknowledge([codex]);
+    await journal.append([hermes]);
+    expect((await readJournal(journal)).flat().map(item => item['event.id'])).toEqual(['next-hermes']);
+  });
+
   it('honors explicit disk budgets for both constructor forms when the environment is invalid', () => {
     const previous = process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
     process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES = 'invalid';
@@ -65,6 +82,20 @@ describe('CodexTurnJournal', () => {
   afterEach(async () => { await cleanupTempDir(directory); });
   const filename = (dir: string, record: AgentActivityEntry) =>
     path.join(dir, `codex-turn-${codexTurnJournalGroupKey(record)}.jsonl`);
+
+  it('keeps late OpenClaw cron sender identity in its execution while preserving older journal keys', async () => {
+    const early = entry('early', { 'gen_ai.agent.type': 'openclaw', 'agent.openclaw.collection': 'cron-lifecycle-v1' });
+    const later = entry('later', { ...early, 'event.id': 'later', 'user.id': 'native-sender' });
+    const next = entry('next', { ...later, 'event.id': 'next', 'gen_ai.turn.id': 'next-turn' });
+    const journal = new CodexTurnJournal(directory, 100, ['openclaw']);
+    await journal.append([early, later, next]);
+    const restored = await readJournal(new CodexTurnJournal(directory, 100, ['openclaw']));
+    expect(restored.map(group => group.map(e => e['event.id']).sort()).sort())
+      .toEqual([['early', 'later'], ['next']]);
+    const oldEarly = { ...early, 'agent.openclaw.collection': undefined };
+    const oldLater = { ...later, 'agent.openclaw.collection': undefined };
+    expect(codexTurnJournalGroupKey(oldEarly)).not.toBe(codexTurnJournalGroupKey(oldLater));
+  });
 
   it('restores separate users/sessions/turns and stable records after restart without duplicate event IDs', async () => {
     const records = [entry('a'), entry('b'), entry('c', { 'gen_ai.turn.id': 'turn-2' }),

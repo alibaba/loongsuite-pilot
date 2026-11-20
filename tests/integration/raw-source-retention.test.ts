@@ -534,4 +534,23 @@ describe('raw source disk retention', () => {
     await input.start(); await input.stop();
     expect((await service.runCleanup()).deleted).toBe(1);
   });
+
+  it('still reclaims consumed closed Hermes segments while a turn is pending', async () => {
+    const sessionDir = path.join(root, 'logs', 'hermes-agent');
+    const source = path.join(sessionDir, 'hermes-agent-1234567-1000-abcdef12.jsonl');
+    const files = ['a', 'b'].map(id => appendRawJsonl(source, JSON.stringify({ id }) + '\n', 16));
+    for (const name of files) await fs.utimes(name, oldTime(), oldTime());
+    const input = new HermesLogInput({ stateStore: store, sessionDir });
+    await input.start(); await input.stop();
+    let pending = true;
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const service = new LogRetentionService(root, config, store, () => pending);
+    expect((await service.runCleanup()).deleted).toBe(1);
+    await expect(fs.stat(files[0])).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.stat(files[1])).resolves.toBeDefined();
+    kill.mockImplementation(() => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); });
+    expect((await service.runCleanup()).deleted).toBe(0);
+    pending = false;
+    expect((await service.runCleanup()).deleted).toBe(1);
+  });
 });

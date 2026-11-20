@@ -38,6 +38,19 @@ vi.mock('../../../src/utils/logger.js', () => ({
 }));
 
 import { SlsFlusher } from '../../../src/flushers/sls-flusher.js';
+import { LOCAL_MAC } from '../../../src/utils/network-utils.js';
+
+function expectHostIdentity(tags: Array<Record<string, string>> | Record<string, string>): void {
+  if (Array.isArray(tags)) {
+    if (LOCAL_MAC) expect(tags).toContainEqual({ __mac__: LOCAL_MAC });
+    else expect(tags.some((tag) => '__mac__' in tag)).toBe(false);
+    expect(tags.some((tag) => '__sn__' in tag)).toBe(false);
+    return;
+  }
+  if (LOCAL_MAC) expect(tags.__mac__).toBe(LOCAL_MAC);
+  else expect(tags).not.toHaveProperty('__mac__');
+  expect(tags).not.toHaveProperty('__sn__');
+}
 
 function makeConfig(overrides: Partial<SlsFlusherConfig> = {}): SlsFlusherConfig {
   return {
@@ -467,6 +480,7 @@ describe('SlsFlusher', () => {
 
       const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
       expect(logGroup.tags).toContainEqual({ __hostname__: expect.any(String) });
+      expectHostIdentity(logGroup.tags);
       expect(logGroup.tags).toContainEqual({ __service_name__: 'loongsuite-pilot-claude-code' });
     });
 
@@ -563,6 +577,50 @@ describe('SlsFlusher', () => {
 
       const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
       expect(logGroup.tags).toContainEqual({ __service_name__: 'my-service' });
+      expectHostIdentity(logGroup.tags);
+    });
+
+    it('sendRaw webtracking writes host identity tags without a service name', async () => {
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+      vi.stubGlobal('fetch', fetchSpy);
+      const config = makeConfig({
+        endpoints: [
+          { name: 'ep-mcp', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p', logstore: 'l', kind: 'mcp', mode: 'webtracking' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.sendRaw('topic', { key: 'val' });
+
+      const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      expect(body.__tags__).not.toHaveProperty('__service_name__');
+      expectHostIdentity(body.__tags__);
+      vi.unstubAllGlobals();
+    });
+
+    it('writes the serial tag from config and the MAC of the selected IP', async () => {
+      const config = makeConfig({
+        serviceNamePrefix: 'pilot',
+      });
+      flusher = new SlsFlusher(config, '/tmp/data', undefined, 'C02XG0AHJG5H');
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const tags = mockPostLogStoreLogs.mock.calls[0][2].tags as Array<Record<string, string>>;
+      if (LOCAL_MAC) expect(tags).toContainEqual({ __mac__: LOCAL_MAC });
+      expect(tags).toContainEqual({ __sn__: 'C02XG0AHJG5H' });
+    });
+
+    it('omits MAC and serial tags when host identity tags are disabled', async () => {
+      const config = makeConfig({ serviceNamePrefix: 'pilot' });
+      flusher = new SlsFlusher(config, '/tmp/data', undefined, 'C02XG0AHJG5H', false);
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const tags = mockPostLogStoreLogs.mock.calls[0][2].tags as Array<Record<string, string>>;
+      expect(tags.some((tag) => '__mac__' in tag || '__sn__' in tag)).toBe(false);
     });
 
     it('webtracking appends agentType to serviceNamePrefix', async () => {
@@ -583,6 +641,7 @@ describe('SlsFlusher', () => {
       expect(fetchSpy).toHaveBeenCalledOnce();
       const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
       expect(body.__tags__.__service_name__).toBe('loongsuite-pilot-cursor');
+      expectHostIdentity(body.__tags__);
 
       vi.unstubAllGlobals();
     });

@@ -15,6 +15,7 @@ export class OpenCodeLogInput extends BaseHookInput {
       logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/opencode'),
       logPrefix: opts?.logPrefix ?? 'opencode',
       pollIntervalMs: opts?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+      historyReplay: opts?.historyReplay ?? {},
     });
   }
 

@@ -1,3 +1,4 @@
+import { producerReadFlags } from '../../utils/producer-log-dir.js';
 import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { fileIdentity, matchesFileIdentity } from '../../utils/file-identity.js';
@@ -6,12 +7,22 @@ import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, InputState } from '../../types/index.js';
 import { BaseInput, type InputOptions } from './base-input.js';
 import { getTodayDateString, ensureDir } from '../../utils/fs-utils.js';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
+import { HookReplayBudget, type HookReplayOptions, type HookWorkBudget } from './hook-replay-budget.js';
 
 const OFFSET_MAP_EXTRA_KEY = 'hookLogOffsets';
 const READ_BUDGET_BYTES = 8 * 1024 * 1024;
 
 type OffsetMap = Record<string, number>;
 type IncompleteTail = Pick<Stats, 'dev' | 'ino' | 'size' | 'mtimeMs' | 'ctimeMs'> & { offset: number };
+interface QuarantinedTail {
+  reason: 'closed-incomplete-tail';
+  identity: string;
+  offset: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
 interface ColdStartReplay {
   turnId: string;
   files: Record<string, { size: number; identity: string }>;
@@ -22,6 +33,8 @@ export interface HookInputOptions extends InputOptions {
   logDir: string;
   /** Prefix for JSONL files (e.g. "claude", "cursor"). */
   logPrefix: string;
+  /** Opt in to bounded background replay and per-cycle processing quanta. */
+  historyReplay?: HookReplayOptions;
 }
 
 /**
@@ -46,6 +59,10 @@ export abstract class BaseHookInput extends BaseInput {
   protected readonly logDir: string;
   protected readonly logPrefix: string;
   private readonly incompleteTails = new Map<string, IncompleteTail>();
+  private readonly replayBudget?: HookReplayBudget;
+  private initialFiles?: Set<string>;
+  private readonly replayThrough = new Map<string, { identity: string; end: number }>();
+  private readonly oversizedSources = new Map<string, { identity: string; size: number; mtimeMs: number }>();
 
   /**
    * Cold-start replay protection. When true and the input has no prior state
@@ -66,10 +83,15 @@ export abstract class BaseHookInput extends BaseInput {
     super(opts);
     this.logDir = opts.logDir;
     this.logPrefix = opts.logPrefix;
+    if (opts.historyReplay) this.replayBudget = new HookReplayBudget(opts.historyReplay);
   }
 
   protected override async onStart(): Promise<void> {
     await ensureDir(this.logDir);
+    // The same Input instance can be disabled and enabled again. Its next
+    // snapshot must include everything accumulated while it was stopped.
+    this.initialFiles = undefined;
+    this.replayThrough.clear();
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
@@ -77,6 +99,7 @@ export abstract class BaseHookInput extends BaseInput {
     const entries: AgentActivityEntry[] = [];
     const state = this.getState();
     const fileNames = await this.listHookLogFiles();
+    if (this.replayBudget && !this.initialFiles) this.initialFiles = new Set(fileNames);
     if (fileNames.length === 0) {
       this.incompleteTails.clear();
       return entries;
@@ -86,9 +109,23 @@ export abstract class BaseHookInput extends BaseInput {
     const shouldPersistOffsets = !persistedOffsets;
     const offsets: OffsetMap = persistedOffsets ? { ...persistedOffsets } : await this.seedOffsetMap(fileNames, state, today);
     const identities: Record<string, string> = { ...(state.extra?.hookLogIdentities as Record<string, string> ?? {}) };
+    const partialTails: Record<string, QuarantinedTail> = {};
+    const previousTails = state.extra?.hookLogPartialTails as Record<string, QuarantinedTail> | undefined;
+    const rememberTail = (name: string, tail: QuarantinedTail) => {
+      partialTails[name] = tail;
+      if (JSON.stringify(tail) !== JSON.stringify(previousTails?.[name])) {
+        this.logger.warn('Closed hook source has an incomplete tail; preserving source and checkpoint, allowing successors', {
+          file: path.join(this.logDir, name), ...tail,
+        });
+      }
+    };
     // Drain every retained source, including offline backlog and late writes.
+    // Rotation can split a turn, even across daily files. File names do not
+    // prove independent sessions, so never let a successor overtake a prefix.
     const candidateFileNames = fileNames;
+    let pendingPrefix = false;
     let readBudget = READ_BUDGET_BYTES;
+    const work = this.replayBudget?.work();
     const replay = this.coldStartKeepLastTurnOnly
       ? await this.prepareColdStartReplay(state, fileNames, bytes => { readBudget -= bytes; })
       : undefined;
@@ -98,7 +135,7 @@ export abstract class BaseHookInput extends BaseInput {
     }
 
     for (const logFileName of candidateFileNames) {
-      if (readBudget <= 0) break;
+      if (readBudget <= 0 && !this.replayBudget) break;
       const logFile = path.join(this.logDir, logFileName);
       const stat = await fs.lstat(logFile).catch(() => null);
       if (!stat?.isFile()) continue;
@@ -107,19 +144,53 @@ export abstract class BaseHookInput extends BaseInput {
       if (replaced) this.incompleteTails.delete(logFile);
       const savedOffset = replaced ? 0 : offsets[logFileName] ?? 0;
       const startOffset = savedOffset > stat.size ? 0 : savedOffset;
+      this.getInputRuntimeAccumulator()?.observeBacklog(stat.size - startOffset);
+      let historical = false;
+      if (this.replayBudget) {
+        let frontier = this.replayThrough.get(logFileName);
+        if (!frontier || frontier.identity !== identity) {
+          const existing = this.initialFiles!.delete(logFileName);
+          const olderDay = logFileName.slice(this.logPrefix.length + 1, this.logPrefix.length + 11) < today;
+          frontier = { identity, end: existing || olderDay ? stat.size : 0 };
+          this.replayThrough.set(logFileName, frontier);
+        }
+        historical = startOffset < frontier.end;
+        // Register metadata even after the work/read budget is exhausted.
+        // Fully consumed files must not wait behind a large backlog to reclaim.
+        identities[logFileName] = identity;
+        offsets[logFileName] = startOffset;
+      }
+      const fileBudget = Math.min(readBudget, historical ? this.replayBudget!.available() : readBudget);
+      const blockedByPrefix = pendingPrefix;
+      const quarantine = this.replayBudget && await this.closedPartialTail(logFileName, stat, startOffset, previousTails?.[logFileName]);
+      if (quarantine) {
+        rememberTail(logFileName, quarantine);
+        continue;
+      }
+      if (this.replayBudget && startOffset < stat.size) pendingPrefix = true;
+      if (blockedByPrefix || fileBudget <= 0 || (work && !work.canProcess())) continue;
       const initial = replay?.files[logFileName];
-      const fileEntries = await this.collectFile(logFile, startOffset, readBudget,
-        initial && matchesFileIdentity(initial.identity, stat) ? { turnId: replay!.turnId, through: initial.size } : undefined);
+      const fileEntries = await this.collectFile(logFile, startOffset, fileBudget,
+        initial && matchesFileIdentity(initial.identity, stat) ? { turnId: replay!.turnId, through: initial.size } : undefined, work);
+      if (historical) this.replayBudget!.charge(fileEntries.readBytes);
       identities[logFileName] = identity;
       offsets[logFileName] = fileEntries.offset;
+      if (this.replayBudget) {
+        const tail = await this.closedPartialTail(logFileName, stat, fileEntries.offset, previousTails?.[logFileName]);
+        if (tail) rememberTail(logFileName, tail);
+        pendingPrefix = fileEntries.offset < stat.size && !tail;
+      }
       entries.push(...fileEntries.entries);
       readBudget -= fileEntries.readBytes;
-      if (readBudget <= 0) break;
+      if (readBudget <= 0 && !this.replayBudget) break;
     }
 
     // Prune offsets for files that no longer exist on disk so the persisted
     // map does not grow unbounded as daily files rotate away.
     const liveFileNames = new Set(fileNames);
+    for (const file of this.replayThrough.keys()) if (!liveFileNames.has(file)) this.replayThrough.delete(file);
+    for (const file of this.initialFiles ?? []) if (!liveFileNames.has(file)) this.initialFiles!.delete(file);
+    for (const file of this.oversizedSources.keys()) if (!candidates.has(file)) this.oversizedSources.delete(file);
     const prunedOffsets: OffsetMap = {};
     const prunedIdentities: Record<string, string> = {};
     for (const [fileName, offset] of Object.entries(offsets)) {
@@ -131,13 +202,14 @@ export abstract class BaseHookInput extends BaseInput {
       && (prunedIdentities[file] === undefined || prunedIdentities[file] === initial.identity));
     const nextReplay = replayPending ? replay : null;
 
-    const newestFileName = candidateFileNames[candidateFileNames.length - 1];
+    const newestFileName = fileNames[fileNames.length - 1];
     if (newestFileName && (
       shouldPersistOffsets ||
       state.lastFile !== newestFileName ||
       state.lastOffset !== (prunedOffsets[newestFileName] ?? 0) ||
       this.isOffsetMapChanged(persistedOffsets, prunedOffsets) ||
       JSON.stringify(state.extra?.hookLogIdentities) !== JSON.stringify(prunedIdentities) ||
+      (this.replayBudget && JSON.stringify(previousTails ?? {}) !== JSON.stringify(partialTails)) ||
       JSON.stringify(state.extra?.hookColdStartReplay ?? null) !== JSON.stringify(nextReplay)
     )) {
       this.setState({
@@ -149,12 +221,59 @@ export abstract class BaseHookInput extends BaseInput {
           hookLogIdentities: prunedIdentities,
           hookLogDir: path.resolve(this.logDir),
           hookLogPrefix: this.logPrefix,
+          ...(this.replayBudget ? { hookLogPartialTails: partialTails } : {}),
           ...(this.coldStartKeepLastTurnOnly ? { hookColdStartReplay: nextReplay } : {}),
         },
       });
     }
 
     return entries;
+  }
+
+  /** Only a proven EOF suffix with no newline can stop blocking successors.
+   * Its byte offset remains unread, so retention cannot reclaim the evidence.
+   * Persisted evidence is usable only while the entire stat watermark matches.
+   */
+  private async closedPartialTail(name: string, stat: Stats, offset: number,
+    previous?: QuarantinedTail): Promise<QuarantinedTail | undefined> {
+    if (offset >= stat.size) return undefined;
+    const identity = fileIdentity(stat);
+    const file = path.join(this.logDir, name);
+    const cached = this.incompleteTails.get(file);
+    const observed = cached?.offset === offset && cached.dev === stat.dev && cached.ino === stat.ino
+      && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs && cached.ctimeMs === stat.ctimeMs;
+    const persisted = previous?.reason === 'closed-incomplete-tail' && previous.identity === identity
+      && previous.offset === offset && previous.size === stat.size
+      && previous.mtimeMs === stat.mtimeMs && previous.ctimeMs === stat.ctimeMs;
+    if (!observed && !persisted) return undefined;
+    const base = name.replace(/\.segment-\d{12}-[a-f0-9]{32}(?=\.jsonl$)/, '');
+    let active: string | undefined;
+    let handle;
+    try {
+      handle = await fs.open(path.join(this.logDir, base + '.active'), 'r');
+      const pointer = await handle.stat();
+      if (!pointer.isFile() || pointer.size > 1024) return undefined;
+      const buffer = Buffer.alloc(1025);
+      const read = await handle.read(buffer, 0, buffer.length, 0);
+      if (read.bytesRead > 1024) return undefined;
+      active = buffer.subarray(0, read.bytesRead).toString('utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return undefined;
+    } finally { await handle?.close(); }
+    const current = /\.segment-(\d{12})-[a-f0-9]{32}\.jsonl$/.exec(name);
+    const successor = active && path.basename(active) === active && active.startsWith(base.slice(0, -6) + '.segment-')
+      ? /\.segment-(\d{12})-[a-f0-9]{32}\.jsonl$/.exec(active) : null;
+    const date = name.slice(this.logPrefix.length + 1, this.logPrefix.length + 11);
+    const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 2);
+    const localDay = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const agedDaily = date < localDay(cutoff) && localDay(new Date(stat.mtimeMs)) < localDay(cutoff)
+      && ((!active && name === base) || (active === name && name !== base));
+    if (!agedDaily && !(successor && Number(successor[1]) > Number(current?.[1] ?? 0))) return undefined;
+    const fresh = await fs.lstat(file).catch(() => null);
+    if (!fresh?.isFile() || fileIdentity(fresh) !== identity || fresh.size !== stat.size
+      || fresh.mtimeMs !== stat.mtimeMs || fresh.ctimeMs !== stat.ctimeMs) return undefined;
+    return { reason: 'closed-incomplete-tail', identity, offset, size: stat.size,
+      mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs };
   }
 
   /** Persist only initial file watermarks and the last turn ID, never bodies.
@@ -236,6 +355,7 @@ export abstract class BaseHookInput extends BaseInput {
     startOffset: number,
     readBudget: number,
     coldStart?: { turnId: string; through: number },
+    work?: HookWorkBudget,
   ): Promise<{ entries: AgentActivityEntry[]; offset: number; readBytes: number }> {
     const entries: AgentActivityEntry[] = [];
     const runtime = this.getInputRuntimeAccumulator();
@@ -269,8 +389,19 @@ export abstract class BaseHookInput extends BaseInput {
     }
     this.incompleteTails.delete(logFile);
     if (stat.size <= offset) return { entries, offset: stat.size, readBytes: 0 };
+    const blocked = this.oversizedSources.get(logFile);
+    if (blocked && blocked.identity === fileIdentity(stat) && blocked.size === stat.size && blocked.mtimeMs === stat.mtimeMs) {
+      return { entries, offset, readBytes: 0 };
+    }
+    this.oversizedSources.delete(logFile);
+    const deferOversized = (at: number) => {
+      this.oversizedSources.set(logFile, { identity: fileIdentity(stat), size: stat.size, mtimeMs: stat.mtimeMs });
+      this.logger.warn('Hook record exceeds processing limit; preserving source and checkpoint', {
+        file: logFile, offset: at, maxBytes: work!.maxRecordBytes,
+      });
+    };
 
-    const handle = await fs.open(logFile, 'r');
+    const handle = await fs.open(logFile, producerReadFlags());
     let checkpointOffset = offset;
     let totalReadBytes = 0;
     try {
@@ -290,7 +421,12 @@ export abstract class BaseHookInput extends BaseInput {
         const parts = [snapshot];
         let position = offset + bytesRead;
         while (position < stat.size) {
-          const chunk = Buffer.alloc(Math.min(64 * 1024, stat.size - position));
+          if (work && position - offset >= work.maxRecordBytes) {
+            deferOversized(offset);
+            return { entries, offset, readBytes: totalReadBytes };
+          }
+          const chunk = Buffer.alloc(Math.min(64 * 1024, stat.size - position,
+            work ? work.maxRecordBytes - (position - offset) : Infinity));
           const startedAt = runtime?.now();
           const read = await handle.read(chunk, 0, chunk.length, position);
           totalReadBytes += read.bytesRead;
@@ -319,7 +455,7 @@ export abstract class BaseHookInput extends BaseInput {
         return { entries, offset, readBytes: totalReadBytes };
       }
       const completeLength = lastNewline + 1;
-      checkpointOffset = offset + completeLength;
+      checkpointOffset = work ? offset : offset + completeLength;
       const completeBytes = snapshot.subarray(0, completeLength);
       const completeText = completeBytes.toString('utf-8');
       const asciiBatch = completeText.length === completeBytes.length;
@@ -332,6 +468,8 @@ export abstract class BaseHookInput extends BaseInput {
       let lineEndOffset = offset;
 
       for (const line of lines) {
+        if (work && lineEndOffset >= offset + completeLength) break;
+        if (work && !work.canProcess()) break;
         let recordBytes = line.length + 1;
         if (!asciiBatch) {
           const newline = completeBytes.indexOf(0x0a, recordStartOffset);
@@ -339,7 +477,10 @@ export abstract class BaseHookInput extends BaseInput {
           recordBytes = newline - recordStartOffset + 1;
           recordStartOffset = newline + 1;
         }
+        if (work && recordBytes > work.maxRecordBytes) { deferOversized(lineEndOffset); break; }
         lineEndOffset += recordBytes;
+        if (work) checkpointOffset = lineEndOffset;
+        if (work && ++work.records % 32 === 0) await yieldToEventLoop();
         if (!line.trim()) continue;
         records++;
         maxRecordBytes = Math.max(maxRecordBytes, recordBytes);
@@ -369,7 +510,7 @@ export abstract class BaseHookInput extends BaseInput {
       }
       runtime?.observeCommittedBatch({
         records,
-        bytes: completeLength,
+        bytes: work ? checkpointOffset - offset : completeLength,
         parseSuccessRecords,
         parseFailedRecords,
         maxRecordBytes,
@@ -394,11 +535,15 @@ export abstract class BaseHookInput extends BaseInput {
       .sort();
   }
 
-  private isHookLogFile(fileName: string): boolean {
+  protected isHookLogFile(fileName: string): boolean {
     const prefix = `${this.logPrefix}-`;
     if (!fileName.startsWith(prefix)) return false;
     const suffix = fileName.slice(prefix.length);
     return /^\d{4}-\d{2}-\d{2}(?:\.segment-\d{12}-[a-f0-9]{32})?\.jsonl$/.test(suffix);
+  }
+
+  protected isTodayHookLogFile(fileName: string, today: string): boolean {
+    return this.isHookLogFile(fileName) && fileName.startsWith(`${this.logPrefix}-${today}`);
   }
 
   private getPersistedOffsetMap(state: InputState): OffsetMap | null {
@@ -440,22 +585,23 @@ export abstract class BaseHookInput extends BaseInput {
       }
     }
 
-    const todayFileName = `${this.logPrefix}-${today}.jsonl`;
     if (state.lastFile && fileNames.includes(state.lastFile)) {
       // Migration from legacy lastFile/lastOffset state: resume draining the
       // previously tracked file from where we left off, and start reading
       // today's file from the beginning if it is a newer file.
       offsets[state.lastFile] = state.lastOffset ?? 0;
-      if (state.lastFile !== todayFileName && fileNames.includes(todayFileName)) {
-        offsets[todayFileName] = 0;
+      for (const fileName of fileNames) {
+        if (fileName !== state.lastFile && this.isTodayHookLogFile(fileName, today)) offsets[fileName] = 0;
       }
-    } else if (fileNames.includes(todayFileName)) {
+    } else {
       // True cold start (no prior state): skip all existing history and only
       // begin reading today's file from the start. Do NOT seed a non-today
       // file to 0 — that would re-ingest an entire day of history a previous
       // daemon run already dispatched (the collector's local date may still
       // lag behind the newest hook file when it first comes up).
-      offsets[todayFileName] = 0;
+      for (const fileName of fileNames) {
+        if (this.isTodayHookLogFile(fileName, today)) offsets[fileName] = 0;
+      }
     }
 
     return offsets;

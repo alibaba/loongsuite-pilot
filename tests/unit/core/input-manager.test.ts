@@ -27,6 +27,8 @@ import {
 } from '../../../src/normalization/invocation-identity.js';
 import { deriveAgentInputEventId } from '../../../src/normalization/agent-input-dual-write.js';
 import { buildBlockedQoderPromptEntry } from '../../../src/interceptor/blocked-prompt.js';
+import { parseHookRequest } from '../../../src/interceptor/adapters/qoder.js';
+import * as gitEnrichment from '../../../src/normalization/enrich-git-context.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -73,7 +75,6 @@ describe('InputManager', () => {
   });
 
   it('filters excluded sessions before identity rewriting and every output destination', async () => {
-    manager.setAgentsConfig({ [ClientType.Qoder]: { captureMessageContent: false } });
     manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
     const input = new StubInput('privacy');
     manager.registerInput(input as any);
@@ -163,6 +164,61 @@ describe('InputManager', () => {
       expect(store.isPersisted(input.id + ':file')).toBe(true);
       expect(send).toHaveBeenCalledTimes(2);
     } finally { await manager.stopAll(); await cleanupTempDir(root); }
+  });
+
+  it('holds the Hermes source checkpoint until its journal accepts the batch', async () => {
+    const root = await createTempDir('hermes-checkpoint-output-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    const input = new StubInput('hermes-checkpoint');
+    Object.defineProperty(input, 'agentType', { value: ClientType.Hermes });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling, input.id) });
+    manager.registerInput(input as any);
+    const key = `${input.id}:file`;
+    store.setOffset(key, 1);
+    await store.save();
+    store.setOffset(key, 2);
+    let accept!: () => void;
+    let started!: () => void;
+    const startedOutput = new Promise<void>(resolve => { started = resolve; });
+    const pending = new Promise<void>(resolve => { accept = resolve; });
+    vi.spyOn(flusher, 'sendBatch').mockImplementation(async () => { started(); await pending; });
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'hermes' })]);
+    try {
+      await startedOutput;
+      await store.save();
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[key].lastOffset).toBe(1);
+      accept();
+      await manager.stopAll();
+      await store.save();
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[key].lastOffset).toBe(2);
+    } finally { accept(); await cleanupTempDir(root); }
+  });
+
+  it('aborts a Hermes journal quota retry on shutdown without advancing the source checkpoint', async () => {
+    const root = await createTempDir('hermes-quota-stop-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    const input = new StubInput('hermes-quota');
+    Object.defineProperty(input, 'agentType', { value: ClientType.Hermes });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling, input.id) });
+    manager.registerInput(input as any);
+    const key = `${input.id}:file`;
+    store.setOffset(key, 1);
+    await store.save();
+    store.setOffset(key, 2);
+    let attempted!: () => void;
+    const first = new Promise<void>(resolve => { attempted = resolve; });
+    const quota = Object.assign(new Error('full'), { name: 'CodexTurnJournalCapacityError' });
+    const wrapped = Object.assign(new Error('journal', { cause: quota }), { name: 'CodexTurnJournalError' });
+    vi.spyOn(flusher, 'sendBatch').mockImplementation(async () => { attempted(); throw wrapped; });
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'hermes' })]);
+    try {
+      await first;
+      await manager.stopAll();
+      expect(store.hasSaveFailure(key)).toBe(true);
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[key].lastOffset).toBe(1);
+    } finally { await cleanupTempDir(root); }
   });
 
   describe('registerInput and event dispatch (T030)', () => {
@@ -459,8 +515,8 @@ describe('InputManager', () => {
     });
   });
 
-  describe('legacy message content config', () => {
-    it('preserves content when legacy captureMessageContent is false', async () => {
+  describe('agent content policy', () => {
+    it('deletes sensitive fields before dispatch when message content capture is disabled', async () => {
       const input = new StubInput('cursor-hook');
       manager.registerInput(input as any);
       manager.setAgentsConfig({
@@ -478,10 +534,12 @@ describe('InputManager', () => {
       await new Promise(r => setTimeout(r, 50));
 
       const dispatched = flusher.batchCalls[0][0];
-      expect(dispatched['input.messages']).toEqual([{ role: 'user', content: 'secret prompt' }]);
-      expect(dispatched['tool.result.payload']).toEqual({ output: 'secret output' });
-      expect(dispatched.content).toBe('legacy secret');
-      expect(dispatched.inlineDiffMessage).toBe('legacy diff');
+      expect(dispatched).not.toHaveProperty('input.messages');
+      expect(dispatched).not.toHaveProperty('tool.result.payload');
+      expect(dispatched).not.toHaveProperty('content');
+      expect(dispatched).not.toHaveProperty('inlineDiffMessage');
+      expect(dispatched).not.toHaveProperty('agent.content');
+      expect(dispatched).not.toHaveProperty('agent.inline_diff_message');
       expect(dispatched['gen_ai.agent.type']).toBe(ClientType.Cursor);
       expect(dispatched['event.name']).toBe('other');
     });
@@ -501,7 +559,7 @@ describe('InputManager', () => {
       expect(dispatched['input.messages']).toEqual([{ role: 'user', content: 'visible prompt' }]);
     });
 
-    it('ignores legacy config across every input for the agent', async () => {
+    it('applies policy by agent.type rather than input id', async () => {
       const hookInput = new StubInput('cursor-hook');
       const sqliteInput = new StubInput('cursor-sqlite');
       manager.registerInput(hookInput as any);
@@ -523,11 +581,11 @@ describe('InputManager', () => {
       await new Promise(r => setTimeout(r, 50));
 
       expect(flusher.batchCalls).toHaveLength(2);
-      expect(flusher.batchCalls[0][0]['input.messages']).toBeDefined();
-      expect(flusher.batchCalls[1][0]['input.messages']).toBeDefined();
+      expect(flusher.batchCalls[0][0]).not.toHaveProperty('input.messages');
+      expect(flusher.batchCalls[1][0]).not.toHaveProperty('input.messages');
     });
 
-    it('dispatches content to all child flushers despite legacy config', async () => {
+    it('dispatches the same policy-applied entries to all child flushers', async () => {
       const jsonl = new MockFlusher('jsonl');
       const sls = new MockFlusher('sls');
       const http = new MockFlusher('http');
@@ -548,9 +606,7 @@ describe('InputManager', () => {
 
       for (const child of [jsonl, sls, http]) {
         expect(child.batchCalls).toHaveLength(1);
-        expect(child.batchCalls[0][0]['output.messages']).toEqual([
-          { type: 'text', content: 'secret response' },
-        ]);
+        expect(child.batchCalls[0][0]).not.toHaveProperty('output.messages');
         expect(child.batchCalls[0][0]['gen_ai.agent.type']).toBe(ClientType.Cursor);
       }
     });
@@ -621,6 +677,88 @@ describe('InputManager', () => {
   });
 
   describe('blocked prompt flush', () => {
+    it.each([
+      { surface: 'qoder' as const, kind: 'blocked-prompt' },
+      { surface: 'qodercli' as const, kind: 'blocked-prompt' },
+    ])('inherits native App exclusions for $surface $kind events without cwd', async ({ surface }) => {
+      manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+      const input = new StubInput('qoder-app-native');
+      manager.registerInput(input as any);
+      input.emit('entries', [buildTestEntry({
+        'gen_ai.agent.type': 'qoder-app', 'gen_ai.session.id': 'app-session',
+        'workspace.path': '/private-project/app',
+      })]);
+      await manager.stopAll();
+      expect(flusher.batchCalls).toHaveLength(0);
+
+      const request = parseHookRequest({
+        hook_event_name: 'UserPromptSubmit', session_id: 'app-session',
+        parent_business_info: { product: 'app' }, prompt: 'private prompt',
+      }, surface)!;
+      expect(request.cwd).toBeUndefined();
+      const entry = buildBlockedQoderPromptEntry(request);
+      entry[INVOCATION_SESSION_ID_FIELD] = 'public-session';
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls).toHaveLength(0);
+      expect(entry['gen_ai.session.id']).toBe('app-session');
+    });
+
+    it('does not borrow App identity for a CLI blocked prompt sharing an excluded App session id', async () => {
+      manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+      const input = new StubInput('qoder-app-native');
+      manager.registerInput(input as any);
+      input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'qoder-app',
+        'gen_ai.session.id': 'shared-session', 'workspace.path': '/private-project/app' })]);
+      await manager.stopAll();
+      const request = parseHookRequest({ hook_event_name: 'UserPromptSubmit', session_id: 'shared-session',
+        parent_business_info: { product: 'cli' } }, 'qodercli')!;
+      const entry = buildBlockedQoderPromptEntry(request);
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls.flat()).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]['gen_ai.agent.type']).toBe('qoder-cli');
+    });
+
+    it('filters excluded prepared events before identity rewriting or any output', async () => {
+      manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+      manager.setConfiguredUserId('configured-user');
+      const entry = buildBlockedQoderPromptEntry({ agent: 'qoder', event: 'UserPromptSubmit',
+        sessionId: 'native-session', cwd: '/private-project/app', prompt: 'private content', raw: {} });
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls).toHaveLength(0);
+      expect(entry['user.id']).toBe('');
+      expect(entry['gen_ai.session.id']).toBe('native-session');
+    });
+
+    it('honors sticky exclusions for blocked prompts without cwd using native session/agent keys', async () => {
+      const policy = new WorkspacePolicy(['/private-project']);
+      manager.setWorkspacePolicy(policy);
+      const blocked = buildTestEntry({ 'gen_ai.agent.type': 'qoder-cli', 'gen_ai.session.id': 'native-session',
+        'workspace.path': '/private-project/app' });
+      expect(policy.allows(blocked)).toBe(false);
+      const entry = buildBlockedQoderPromptEntry({ agent: 'qodercli', event: 'UserPromptSubmit',
+        sessionId: 'native-session', raw: {} });
+      entry[INVOCATION_SESSION_ID_FIELD] = 'public-session';
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls).toHaveLength(0);
+      expect(entry['gen_ai.session.id']).toBe('native-session');
+    });
+
+    it('does not send late prepared output after its sink aborts during git enrichment', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const enrich = vi.spyOn(gitEnrichment, 'enrichCanonicalEntriesWithGit').mockImplementationOnce(() => gate);
+      const abort = new AbortController();
+      const entry = buildBlockedQoderPromptEntry({ agent: 'qoder', event: 'UserPromptSubmit', sessionId: 's', raw: {} });
+      try {
+        const pending = manager.flushPreparedEntries([entry], abort.signal);
+        expect(enrich).toHaveBeenCalledOnce();
+        abort.abort();
+        release();
+        await expect(pending).rejects.toThrow();
+        expect(flusher.batchCalls).toHaveLength(0);
+      } finally { enrich.mockRestore(); }
+    });
+
     it('applies user id, content policy, and mask before the shared flusher', async () => {
       manager.setConfiguredUserId('configured-user');
       manager.setMaskConfig({ mode: 'all', types: [] });
@@ -632,6 +770,15 @@ describe('InputManager', () => {
         sessionId: 's1',
         cwd: '/tmp/not-a-repo-for-pilot-blocked-prompt',
         raw: {},
+      }, Date.now(), {
+        action: 'block',
+        reason: `hit ${apiKey}`,
+        ruleId: 'flow-probe',
+        ruleVersion: '3',
+        severity: 'CRITICAL',
+        title: `label ${apiKey}`,
+        message: `不要粘贴 ${apiKey}`,
+        evaluatedRules: ['flow-probe'],
       });
 
       await manager.flushPreparedEntries([entry]);
@@ -640,18 +787,23 @@ describe('InputManager', () => {
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['user.id']).toBe('configured-user');
       expect(dispatched['gen_ai.input.messages']).toEqual([
-        { role: 'user', parts: [{ type: 'text', content: 'token [APIKEY_MASKED]' }] },
+        { role: 'user', parts: [{ type: 'text', content: 'token [APIKEY_MASKED]{sk-1*********************mnop}' }] },
       ]);
       expect(dispatched['gen_ai.guardrail.action']).toBe('block');
+      expect(dispatched['gen_ai.guardrail.rule_id']).toBe('flow-probe');
+      expect(dispatched['gen_ai.guardrail.rule_version']).toBe('3');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.reason');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.severity');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.title');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.message');
       expect(dispatched.trace_id).toBeUndefined();
       expect(dispatched['gen_ai.turn.start']).toBeUndefined();
     });
 
-    it('keeps blocked prompt content and masks it despite the legacy qoder opt-out', async () => {
+    it('drops message content when the qoder capture policy is off', async () => {
       manager.setAgentsConfig({
         [ClientType.Qoder]: { captureMessageContent: false },
       });
-      manager.setMaskConfig({ mode: 'all', types: [] });
       const entry = buildBlockedQoderPromptEntry({
         agent: 'qodercli',
         event: 'UserPromptSubmit',
@@ -662,8 +814,8 @@ describe('InputManager', () => {
       await manager.flushPreparedEntries([entry]);
 
       const dispatched = flusher.batchCalls[0][0];
-      expect(dispatched).toHaveProperty('gen_ai.input.messages');
-      expect(JSON.stringify(dispatched)).toContain('[APIKEY_MASKED]');
+      expect(dispatched).not.toHaveProperty('gen_ai.input.messages');
+      expect(dispatched).not.toHaveProperty('gen_ai.input.messages_delta');
       expect(JSON.stringify(dispatched)).not.toContain('sk-1234567890abcdefghijklmnop');
     });
   });
@@ -686,12 +838,12 @@ describe('InputManager', () => {
 
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['gen_ai.input.messages']).toEqual([
-        { role: 'user', content: 'use [ACCESSKEY_MASKED]' },
+        { role: 'user', content: 'use [ACCESSKEY_MASKED]{AKIA************MPLE}' },
       ]);
       expect(dispatched['workspace.current_root']).toBe(`/tmp/${accessKey}`);
     });
 
-    it('still masks content when legacy captureMessageContent is false', async () => {
+    it('applies content policy before mask when message content capture is disabled', async () => {
       const input = new StubInput('cursor-hook');
       manager.registerInput(input as any);
       manager.setAgentsConfig({
@@ -709,10 +861,8 @@ describe('InputManager', () => {
       await new Promise(r => setTimeout(r, 50));
 
       const dispatched = flusher.batchCalls[0][0];
-      expect(dispatched['input.messages']).toEqual([
-        { role: 'user', content: '[APIKEY_MASKED]' },
-      ]);
-      expect(JSON.stringify(dispatched)).toContain('[APIKEY_MASKED]');
+      expect(dispatched).not.toHaveProperty('input.messages');
+      expect(JSON.stringify(dispatched)).not.toContain('[APIKEY_MASKED]');
       expect(JSON.stringify(dispatched)).not.toContain(apiKey);
     });
 
@@ -794,7 +944,7 @@ describe('InputManager', () => {
       expect(source['event.id']).toBe('input-other');
     });
 
-    it('generates agent.input despite legacy captureMessageContent=false', async () => {
+    it('does not generate agent.input after content policy removes input fields', async () => {
       const input = new StubInput('dual-write-content-policy');
       manager.registerInput(input as any);
       manager.setAgentsConfig({
@@ -810,13 +960,9 @@ describe('InputManager', () => {
       await manager.stopAll();
 
       expect(flusher.batchCalls).toHaveLength(1);
-      expect(flusher.batchCalls[0]).toHaveLength(2);
-      expect(flusher.batchCalls[0].map(entry => entry['event.name'])).toEqual([
-        'other',
-        'agent.input',
-      ]);
-      expect(flusher.batchCalls[0][0]['gen_ai.input.messages_delta']).toBeDefined();
-      expect(flusher.batchCalls[0][1]['gen_ai.input.messages_delta']).toBeDefined();
+      expect(flusher.batchCalls[0]).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]['event.name']).toBe('other');
+      expect(flusher.batchCalls[0][0]).not.toHaveProperty('gen_ai.input.messages_delta');
     });
 
     it('does not copy a non-input other event', async () => {
