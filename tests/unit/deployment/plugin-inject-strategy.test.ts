@@ -1,9 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
+import { promises as nativeFs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as childProcess from 'node:child_process';
 import { PluginInjectStrategy } from '../../../src/deployment/plugin-inject-strategy.js';
 import type { AgentDefinition } from '../../../src/types/index.js';
+
+vi.mock('node:fs/promises', async importOriginal => ({
+  ...await importOriginal<typeof import('node:fs/promises')>(),
+}));
+vi.mock('node:child_process', async importOriginal => ({
+  ...await importOriginal<typeof import('node:child_process')>(),
+}));
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({ info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() }),
@@ -90,6 +99,37 @@ describe('PluginInjectStrategy', () => {
     }
   });
 
+  it('leaves an absent OpenClaw config usable by its owner when root cannot start the creation helper', async () => {
+    const stat = fs.stat;
+    vi.stubEnv('LOONGSUITE_PILOT_ROOT_TRIGGER', '1');
+    vi.spyOn(process, 'getuid').mockReturnValue(0);
+    vi.spyOn(fs, 'stat').mockImplementation(async (...args) => {
+      const result = await Reflect.apply(stat, fs, args);
+      return args[0] === tmpDir ? Object.assign(result, { uid: 1000, gid: 1000 }) : result;
+    });
+    const spawn = vi.spyOn(childProcess, 'execFile').mockImplementation((...args: any[]) => {
+      args[args.length - 1](Object.assign(new Error('identity change denied'), { code: 'EPERM' }), '', '');
+      return {} as childProcess.ChildProcess;
+    });
+    const configPath = path.join(tmpDir, 'native', 'openclaw.json');
+    const def: AgentDefinition = { id: 'openclaw', displayName: 'OpenClaw', deployMode: 'plugin-inject',
+      detection: { paths: [], commands: [] }, pluginInject: { configPaths: [configPath], createIfMissing: true,
+        configShape: 'openclaw-nested', pluginId: 'loongsuite-pilot-openclaw', pluginSpec: 'file://$PILOT_DATA/plugins/openclaw' } };
+    const host = { executable: '/app/openclaw.mjs', source: '/app/package.json', binding: 'explicit-entry' as const,
+      version: '2026.6.10', adapter: 'modern' as const, conversationAccess: true };
+    try {
+      const result = await new PluginInjectStrategy(dataDir, tmpDir, async () => host).deploy(def);
+      expect(result.success).toBe(false);
+      expect(spawn).toHaveBeenCalledWith(process.execPath, expect.any(Array),
+        expect.objectContaining({ uid: 1000, gid: 1000, timeout: 5000,
+          env: expect.objectContaining({ NODE_OPTIONS: '', BUN_OPTIONS: '', NODE_PATH: '' }) }), expect.any(Function));
+      expect(await fs.access(path.dirname(configPath)).then(() => true, () => false)).toBe(false);
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('creates and injects the first OpenCode config from the shipped agent definition', async () => {
     const definitionUrl = new URL('../../../agents.d/opencode.json', import.meta.url);
     const definition = JSON.parse(await fs.readFile(definitionUrl, 'utf8')) as AgentDefinition;
@@ -103,7 +143,7 @@ describe('PluginInjectStrategy', () => {
     const firstConfigPath = path.join(tmpDir, '.config', 'opencode', 'opencode.jsonc');
     const config = JSON.parse(await fs.readFile(firstConfigPath, 'utf8'));
     expect(config.plugin).toEqual([
-      `file://${path.join(dataDir, 'plugins', 'opencode', 'plugin.mjs')}`,
+      `file://${path.join(dataDir, 'plugins', 'opencode')}`,
     ]);
     expect(await strategy.needsDeploy(definition)).toBe(false);
   });
@@ -131,6 +171,35 @@ describe('PluginInjectStrategy', () => {
     expect(await strategy.undeploy(piDefinition())).toBe(true);
     const after = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
     expect(after.extensions).toEqual([]);
+  });
+
+  it.each(['install', 'uninstall'] as const)('preserves Pi settings on a partial %s write failure', async action => {
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(settingsPath, JSON.stringify({ theme: 'dark', extensions: ['/third-party.mjs'] }, null, 2) + '\n');
+    if (action === 'uninstall') await strategy.deploy(piDefinition());
+    const before = await fs.readFile(settingsPath, 'utf8');
+    const write = fs.writeFile;
+    const failWrite: typeof fs.writeFile = async (file, data, options) => {
+      const name = String(file);
+      if (name === settingsPath || (name.startsWith(settingsPath + '.') && name.endsWith('.tmp'))) {
+        await write(file, '{', options);
+        throw Object.assign(new Error('simulated disk full'), { code: 'ENOSPC' });
+      }
+      return write(file, data, options);
+    };
+    const fault = vi.spyOn(fs, 'writeFile').mockImplementation(failWrite);
+    const nativeFault = vi.spyOn(nativeFs, 'writeFile').mockImplementation(failWrite);
+    try {
+      const ok = action === 'install'
+        ? (await strategy.deploy(piDefinition())).success
+        : await strategy.undeploy(piDefinition());
+      expect(ok).toBe(false);
+      expect(await fs.readFile(settingsPath, 'utf8')).toBe(before);
+      expect((await fs.readdir(path.dirname(settingsPath))).filter(name => name.endsWith('.tmp'))).toEqual([]);
+    } finally {
+      nativeFault.mockRestore();
+      fault.mockRestore();
+    }
   });
 
   it('treats mixed Windows separators as the same injected extension', async () => {
@@ -246,6 +315,22 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
       plugins: { load: { paths: [`file://${dataDir}/plugins/openclaw`] }, entries: {} },
     }));
     expect(await strategy.needsDeploy(openclawDef())).toBe(true);
+  });
+
+  it('adds only Pilot to an existing OpenClaw allowlist and remains idempotent', async () => {
+    await strategy.deploy(openclawDef());
+    const cfg = await readConfig();
+    (cfg.plugins as Record<string, unknown>).allow = ['openclaw-security-sdk', 'another-plugin'];
+    await fs.writeFile(configPath, JSON.stringify(cfg));
+    expect(await strategy.needsDeploy(openclawDef())).toBe(true);
+    expect((await strategy.deploy(openclawDef())).success).toBe(true);
+    const updated = await readConfig();
+    expect((updated.plugins as Record<string, unknown>).allow).toEqual([
+      'openclaw-security-sdk', 'another-plugin', 'loongsuite-pilot-openclaw',
+    ]);
+    expect(await strategy.needsDeploy(openclawDef())).toBe(false);
+    await strategy.deploy(openclawDef());
+    expect(await readConfig()).toEqual(updated);
   });
 
   it('needsDeploy returns true when entry enabled but path missing', async () => {

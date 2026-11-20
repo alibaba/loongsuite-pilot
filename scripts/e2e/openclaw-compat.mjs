@@ -170,6 +170,7 @@ try {
   await command('stop-before-config', cli, ['stop']);
   const cfg = await read(pilotConfig);
   cfg.serviceName = service; cfg.otlpTrace = { debug: true, captureMessageContent: true }; cfg.collectTrace = true; cfg.collectLog = true;
+  cfg.jsonl = { enabled: true };
   if (cms) cfg.cms = { ...cms, debug: true };
   else {
     sink = http.createServer((req, res) => { req.resume(); req.on('end', () => { sinkRequests++; res.writeHead(200, { 'Content-Type': 'application/x-protobuf' }); res.end(); }); });

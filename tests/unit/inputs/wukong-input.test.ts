@@ -134,6 +134,16 @@ describe('WukongInput', () => {
     return input;
   }
 
+  it('uses the unified poll interval over the 60s default', () => {
+    vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '3000');
+    const created = new WukongInput({
+      stateStore: stateStore as any,
+      cliPath: '/usr/bin/wukong-cli',
+    });
+    expect((created as { pollIntervalMs: number }).pollIntervalMs).toBe(3000);
+    vi.unstubAllEnvs();
+  });
+
   function seedSeenCounts(counts: Record<string, number> = {}) {
     stateStore.update('wukong', { extra: { seenCounts: counts } });
   }

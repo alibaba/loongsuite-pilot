@@ -4,12 +4,18 @@ export const FIELDS_TO_MASK = new Set<string>([
   'gen_ai.input.messages',
   'gen_ai.input.messages_delta',
   'gen_ai.input.multimodal_metadata',
+  'gen_ai.input.multimodal_metadata_delta',
   'gen_ai.output.messages',
+  'gen_ai.output.multimodal_metadata',
   'gen_ai.tool.call.arguments',
   'gen_ai.tool.call.result',
   'gen_ai.system_instructions',
   'gen_ai.tool.definitions',
   'error.message',
+  'gen_ai.guardrail.reason',
+  'gen_ai.guardrail.title',
+  'gen_ai.guardrail.severity',
+  'gen_ai.guardrail.message',
 
   'content',
   'inlineDiffMessage',
@@ -24,6 +30,12 @@ export const FIELDS_TO_MASK = new Set<string>([
   'tool.result.payload',
   'system_instructions',
   'tool.definitions',
+
+  // Doubao native TASK observations are copied to Span events after masking.
+  'agent.doubao_work.tool_observations',
+  'agent.doubao_work.task_input',
+  'agent.doubao_work.task_output',
+  'agent.doubao_work.assistant_rounds',
 
   'agent._cinput',
   'agent._ctext',

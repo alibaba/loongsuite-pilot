@@ -390,8 +390,9 @@ process_matches_installed_entry() {
         process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
     fi
     process_name="${process_name##*/}"
+    # Node 23+ sets /proc/pid/comm to MainThread, so ucomm is no longer "node".
     case "$expected_process:$process_name" in
-        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
         *) return 1 ;;
     esac
 
@@ -434,7 +435,7 @@ process_matches_installed_entry() {
     local command_prefix="${command_line:0:${#command_line}-${#expected_suffix}-1}"
     local command_executable="${command_prefix##*/}"
     case "$expected_process:$command_executable" in
-        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) return 0 ;;
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -447,7 +448,7 @@ find_current_user_processes() {
     while read -r pid process_name; do
         process_name="${process_name##*/}"
         case "$kind:$process_name" in
-            collector:node|collector:nodejs|updater:node|updater:nodejs|collector-wrapper:bash|collector-wrapper:sh|collector-wrapper:zsh|collector-wrapper:loongsuite-pilot|updater-wrapper:bash|updater-wrapper:sh|updater-wrapper:zsh|updater-wrapper:loongsuite-pilot) ;;
+            collector:node|collector:nodejs|collector:MainThread|updater:node|updater:nodejs|updater:MainThread|collector-wrapper:bash|collector-wrapper:sh|collector-wrapper:zsh|collector-wrapper:loongsuite-pilot|updater-wrapper:bash|updater-wrapper:sh|updater-wrapper:zsh|updater-wrapper:loongsuite-pilot) ;;
             *) continue ;;
         esac
         process_matches_installed_entry "$pid" "$kind" && echo "$pid"
@@ -465,7 +466,7 @@ find_current_user_collector_processes() {
     while read -r pid process_name; do
         process_name="${process_name##*/}"
         case "$process_name" in
-            node|nodejs) kind=collector ;;
+            node|nodejs|MainThread) kind=collector ;;
             bash|sh|zsh|loongsuite-pilot) kind=collector-wrapper ;;
             *) continue ;;
         esac
@@ -625,7 +626,7 @@ legacy_monitor_process_matches() {
     process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
     process_name="${process_name##*/}"
     case "$expected_process:$process_name" in
-        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) ;;
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh) ;;
         *) return 1 ;;
     esac
 
@@ -650,7 +651,7 @@ legacy_monitor_process_matches() {
     local command_executable="${command_prefix%% *}"
     command_executable="${command_executable##*/}"
     case "$expected_process:$command_executable" in
-        node:node|node:nodejs|shell:bash|shell:sh|shell:zsh) return 0 ;;
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -678,15 +679,17 @@ updater_process_exists() {
     pgrep -f "loongsuite-pilot/bin/updater-daemon" >/dev/null 2>&1
 }
 
+# Same rule as the installer: the node that launches the collector must load
+# node:sqlite. Major >= 18 or >= 22 still accepts Node 20 and 22.12.
+_node_supports_sqlite() {
+    "$1" -e "require('node:sqlite')" >/dev/null 2>&1
+}
+
 _node_is_suitable() {
     local bin="$1"
     [ -x "$bin" ] || return 1
     _node_is_app_bundle "$bin" && return 1
-    local ver
-    ver="$("$bin" --version 2>/dev/null)" || return 1
-    local major="${ver#v}"
-    major="${major%%.*}"
-    [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 18 )) || return 1
+    _node_supports_sqlite "$bin" || return 1
     return 0
 }
 
@@ -938,8 +941,6 @@ cmd_run_updater() {
     exec "$node_bin" "$BOOTSTRAP_DIR/updater-daemon.js"
 }
 
-# ---- User-facing commands ----
-
 cmd_start() {
     cleanup_legacy_monitor_processes
     for arg in "$@"; do
@@ -1164,7 +1165,7 @@ start_collector_after_stop() {
                 local node_bin
                 node_bin=$(resolve_node) || {
                     write_restart_failure collector "node-missing" \
-                        "resolve_node found no usable node runtime (needs v18+)"
+                        "resolve_node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime)"
                     echo "❌ node runtime not found" >&2
                     return 1
                 }
@@ -1428,7 +1429,7 @@ cmd_restart_updater() {
                 local node_bin
                 node_bin=$(resolve_node) || {
                     write_restart_failure updater "node-missing" \
-                        "resolve_node found no usable node runtime (needs v18+)"
+                        "resolve_node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime)"
                     echo "❌ node runtime not found" >&2
                     return 1
                 }
@@ -1462,6 +1463,36 @@ cmd_restart() {
     cmd_start
 }
 
+interceptor_embedded_status() {
+    if ! is_running; then
+        echo "stopped"
+        return
+    fi
+    local runtime runtime_status
+    runtime="$DATA_DIR/interceptor/runtime.json"
+    if [ ! -f "$runtime" ]; then
+        echo "stopped"
+        return
+    fi
+    runtime_status=$(sed -n 's/^[[:space:]]*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$runtime" | head -n 1)
+    if [ "$runtime_status" = "ok" ]; then
+        echo "running"
+        return
+    fi
+    echo "stopped"
+}
+
+dashboard_enabled() {
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || return 1
+    "$node_bin" -e '
+const fs = require("node:fs");
+let enabled = false;
+try { enabled = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""))?.dashboard?.enabled === true; } catch {}
+process.exit(enabled ? 0 : 1);
+' "$CONFIG_FILE" 2>/dev/null
+}
+
 dashboard_port() {
     local node_bin
     node_bin=$(resolve_node 2>/dev/null) || {
@@ -1472,7 +1503,7 @@ dashboard_port() {
 const fs = require("node:fs");
 const path = process.argv[1];
 let port;
-try { port = JSON.parse(fs.readFileSync(path, "utf8"))?.dashboard?.port; } catch {}
+try { port = JSON.parse(fs.readFileSync(path, "utf8").replace(/^\uFEFF/, ""))?.dashboard?.port; } catch {}
 process.stdout.write(String(Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 8765));
 ' "$CONFIG_FILE" 2>/dev/null || echo 8765
 }
@@ -1552,12 +1583,13 @@ cmd_status() {
         local pid
         local port
         pid=$(cat "$PID_FILE")
-        port=$(dashboard_port)
         echo "✅ loongsuite-pilot${ver_info} is running (PID $pid)"
-        if dashboard_is_available "$port"; then
+        if ! dashboard_enabled; then
+            echo "   dashboard: disabled"
+        elif port=$(dashboard_port) && dashboard_is_available "$port"; then
             echo "   dashboard: http://127.0.0.1:${port}/"
         else
-            echo "   dashboard: unavailable (http://127.0.0.1:${port}/)"
+            echo "   dashboard: unavailable (http://127.0.0.1:${port:-8765}/)"
         fi
     else
         echo "⚪ loongsuite-pilot${ver_info} is not running"
@@ -1566,6 +1598,13 @@ cmd_status() {
         echo "   updater: running (PID $(cat "$UPDATER_PID_FILE"))"
     else
         echo "   updater: stopped"
+    fi
+    local interceptor_state
+    interceptor_state=$(interceptor_embedded_status)
+    if [ "$interceptor_state" = "stopped" ]; then
+        echo "   interceptor: stopped"
+    else
+        echo "   interceptor: running"
     fi
     autostart_status
 }
@@ -1694,6 +1733,37 @@ cmd_inject() {
     exec "$node_bin" "$version_dir/dist/index.js" inject "$@"
 }
 
+cmd_hook() {
+    local node_bin version_dir entry
+    node_bin=$(resolve_node) || {
+        echo "loongsuite-pilot hook: Node runtime not found" >&2
+        return 1
+    }
+    version_dir=$(resolve_current_version) || {
+        echo "loongsuite-pilot hook: No valid loongsuite-pilot version found" >&2
+        return 1
+    }
+    # Prefer the sqlite-free bundle. Fall back to the daemon entry when an
+    # older install has not shipped hook-cli.cjs yet.
+    if [ -r "$version_dir/dist/hook-cli.cjs" ]; then
+        entry="$version_dir/dist/hook-cli.cjs"
+    else
+        entry="$version_dir/dist/index.js"
+        [ -r "$entry" ] || {
+            echo "loongsuite-pilot hook: Pilot entrypoint is missing or unreadable" >&2
+            return 1
+        }
+        export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+        export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+        export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+        exec "$node_bin" "$entry" hook "$@"
+    fi
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    exec "$node_bin" "$entry" hook "$@"
+}
+
 cmd_deploy() {
     ensure_dirs
     sync_bootstrap_scripts
@@ -1758,11 +1828,53 @@ cmd_menubar() {
 }
 
 cmd_dashboard() {
-    # No bootstrap sync or collector lifecycle work; shortcut changes are explicit.
     case "${1:-}" in
+        start|stop)
+            local action="$1"; shift
+            local repo_dir version_dir entry node_bin port attempt
+            repo_dir="$(dirname "$SCRIPT_DIR")"
+            if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
+                entry="$repo_dir/scripts/dashboard-config.mjs"
+            else
+                version_dir=$(resolve_current_version 2>/dev/null) || {
+                    echo "Pilot is not installed. Install Pilot before managing the Dashboard." >&2
+                    return 1
+                }
+                entry="$version_dir/scripts/dashboard-config.mjs"
+            fi
+            if [ ! -f "$entry" ]; then
+                echo "Dashboard command is missing. Upgrade or repair Pilot." >&2
+                return 1
+            fi
+            node_bin=$(resolve_node) || { echo "node runtime not found" >&2; return 1; }
+            "$node_bin" "$entry" "$CONFIG_FILE" "$action" "$@" || return 1
+            if is_running; then
+                cmd_restart
+            elif [ "$action" = start ]; then
+                cmd_start
+            fi
+            if [ "$action" = stop ]; then
+                if is_running; then
+                    echo "Dashboard stopped; collector remains running."
+                else
+                    echo "Dashboard stopped; collector remains stopped."
+                fi
+                return 0
+            fi
+            port=$(dashboard_port)
+            for attempt in {1..20}; do
+                if dashboard_is_available "$port"; then
+                    echo "Dashboard started: http://127.0.0.1:${port}/"
+                    return 0
+                fi
+                sleep 0.5
+            done
+            echo "Dashboard did not become available on port ${port}. Check $LOG_FILE" >&2
+            return 1
+            ;;
         shortcut) shift ;;
-        --help|-h) echo "Usage: loongsuite-pilot dashboard shortcut {install|status|uninstall}"; return 0 ;;
-        *) echo "Usage: loongsuite-pilot dashboard shortcut {install|status|uninstall}" >&2; return 2 ;;
+        --help|-h) echo "Usage: loongsuite-pilot dashboard start [port] | stop | shortcut {install|status|uninstall}"; return 0 ;;
+        *) echo "Usage: loongsuite-pilot dashboard start [port] | stop | shortcut {install|status|uninstall}" >&2; return 2 ;;
     esac
     local node_bin="" version_dir repo_dir entry config_path pin pinned
     repo_dir="$(dirname "$SCRIPT_DIR")"
@@ -2648,6 +2760,7 @@ autostart_install_updater_only() {
     esac
 }
 
+
 autostart_install() {
     local interactive="${1:-true}"
 
@@ -2864,6 +2977,8 @@ cmd_help() {
     echo "  restart         Restart the collector service"
     echo "  status          Show service status (default)"
     echo "  info            Show version and config info"
+    echo "  hook install    Install hooks before the agent starts"
+    echo "  hook status     Check whether installed hooks are still present"
     echo "  inject --agents=claude-code [--config-dir PATH] [--json]"
     echo "                  Prepare session hooks once (Linux/macOS)"
     echo "  deploy [opts]   Deploy hooks/plugins once and exit (for image builds)"
@@ -2872,6 +2987,8 @@ cmd_help() {
     echo "  token-usage     Show token usage TUI"
     echo "  menubar start   Enable and start the macOS menu bar app without restarting the collector"
     echo "  menubar stop    Disable and stop only the macOS menu bar app (keep the collector running)"
+    echo "  dashboard start [port]  Enable Dashboard and start it (restarts a running collector)"
+    echo "  dashboard stop          Disable Dashboard (restarts a running collector)"
     echo "  dashboard shortcut {install|status|uninstall}  Optional macOS Dock shortcut"
     echo "  agent ...       Register/list/diagnose PI SDK Agents"
     echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
@@ -2892,6 +3009,7 @@ case "${1:-status}" in
     status)      cmd_status ;;
     info)        cmd_info ;;
     inject)      shift; cmd_inject "$@" ;;
+    hook)        shift; cmd_hook "$@" ;;
     deploy)      shift; cmd_deploy "$@" ;;
     dashboard)   shift; cmd_dashboard "$@" ;;
     token-usage) shift; cmd_token_usage "$@" ;;

@@ -6,6 +6,35 @@ import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('DiskUsageSampler');
 export const DISK_USAGE_STALE_MS = 20 * 60_000;
+const LOG_FAMILIES = new Set([
+  'output', 'otlp-debug', 'otlp-failed', 'codex-pending-turns', 'metric_alarm',
+  'claude-code', 'opencode', 'openclaw', 'mimo-code', 'pi-coding-agent',
+  'kiro-cli', 'qwen-code-cli', 'grok-build', 'dsh', 'hermes-agent', 'cursor',
+  'cursor-hook', 'qoder', 'qoder-work', 'qwen-work-cn', 'codex',
+]);
+
+// Only mutable Pilot data belongs in the usage signal. Managed installations,
+// downloaded payloads and other implementation assets can contain dependency
+// trees with thousands of files while saying nothing about user-data growth.
+const SCANNED_DATA_DIRECTORIES = new Set([
+  'logs',
+  'state',
+  'cache',
+  'configs',
+  'agents.d.local',
+  'acp-correlate',
+  'sls-failed-logs',
+  'sls-failed-logs.delete-pending',
+  'local-workers',
+]);
+
+function isLocalWorkerPayload(directory: string, name: string, root: string): boolean {
+  const normalizedName = name.toLowerCase();
+  return path.dirname(directory).toLowerCase() === path.join(root, 'local-workers').toLowerCase()
+    && (normalizedName === 'bundle'
+      || normalizedName.startsWith('.bundle.staging-')
+      || normalizedName.startsWith('.bundle.backup-'));
+}
 
 export type DiskUsageStatus = 'pending' | 'ok' | 'partial' | 'timeout' | 'error' | 'stale';
 
@@ -15,6 +44,8 @@ export interface DiskUsageSnapshot {
   scanMs?: number;
   dataBytes?: number;
   logsBytes?: number;
+  /** Fixed directory families, never session names or arbitrary user paths. */
+  logsByFamily?: Record<string, number>;
 }
 
 export interface DiskUsageSamplerOptions {
@@ -104,6 +135,7 @@ export class DiskUsageSampler {
 
   getSnapshot(): DiskUsageSnapshot {
     const snapshot = { ...this.snapshot };
+    if (snapshot.logsByFamily) snapshot.logsByFamily = { ...snapshot.logsByFamily };
     if (snapshot.status === 'ok' && snapshot.sampledAt !== undefined
       && Date.now() - snapshot.sampledAt > DISK_USAGE_STALE_MS) {
       snapshot.status = 'stale';
@@ -158,6 +190,7 @@ export class DiskUsageSampler {
     let status: DiskUsageStatus = 'ok';
     let dataBytes = 0;
     let logsBytes = 0;
+    const logsByFamily: Record<string, number> = {};
     let entries = 0;
     let rootOpened = false;
     let completed = false;
@@ -262,20 +295,28 @@ export class DiskUsageSampler {
           const child = await io(() => fs.lstat(childPath));
           if (child.isSymbolicLink()) continue;
           if (child.isDirectory()) {
-            // Installed versions and bundled runtimes are immutable payloads,
-            // not user data growth. Prune only these root-level directories;
-            // nested directories with the same basenames remain observable.
-            if (frame.path === root
-              && (entry.name === 'versions' || entry.name === 'runtime')) continue;
+            const normalizedName = entry.name.toLowerCase();
+            // Root files are counted, but recurse only into known mutable data.
+            // This keeps future managed payload directories out by default.
+            if (frame.path === root && !SCANNED_DATA_DIRECTORIES.has(normalizedName)) continue;
+            // A local worker's runtime bundle is a managed dependency tree. Its
+            // configuration, credentials, state and logs remain observable.
+            if (isLocalWorkerPayload(frame.path, entry.name, root)) continue;
             if (frames.length >= this.options.maxDepth) throw new ScanInterrupted('partial');
             await openDirectory(childPath, child, frame.inLogs
-              || path.relative(path.join(root, 'logs'), childPath) === '');
+              || (frame.path === root && normalizedName === 'logs'));
           } else if (child.isFile()) {
             // Recheck after the path-based lookup so an observed replacement
             // cannot turn an external file's metadata into a valid sample.
             await validateIdentity(frame);
             dataBytes += child.size;
-            if (frame.inLogs) logsBytes += child.size;
+            if (frame.inLogs) {
+              logsBytes += child.size;
+              const relative = path.relative(path.join(root, 'logs'), childPath).split(path.sep);
+              const family = relative.length === 1 ? '_files'
+                : LOG_FAMILIES.has(relative[0]) ? relative[0] : '_other';
+              logsByFamily[family] = (logsByFamily[family] ?? 0) + child.size;
+            }
           }
         } catch (error) {
           if (hasCode(error, 'ENOENT')) {
@@ -313,7 +354,7 @@ export class DiskUsageSampler {
       && performance.now() - startedTick >= this.options.budgetMs) status = 'timeout';
     const scanMs = Math.max(0, Math.round(performance.now() - startedTick));
     this.snapshot = status === 'ok'
-      ? { status, dataBytes, logsBytes, sampledAt: Date.now(), scanMs }
+      ? { status, dataBytes, logsBytes, logsByFamily, sampledAt: Date.now(), scanMs }
       : { ...this.snapshot, status, scanMs };
     this.failures = status === 'ok' ? 0 : this.failures + 1;
     const multiplier = this.failures < 2 ? 1 : Math.min(6, 2 ** Math.min(this.failures - 1, 3));

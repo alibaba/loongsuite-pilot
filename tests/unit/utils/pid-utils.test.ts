@@ -30,6 +30,9 @@ vi.mock('node:child_process', async () => {
 const readFileSyncMock = vi.mocked(fs.readFileSync);
 const existsSyncMock = vi.mocked(fs.existsSync);
 const execFileSyncMock = vi.mocked(execFileSync);
+// CI workers can themselves be PID 456/789. Keep the scanned candidate
+// distinct from both this process and the pid-file fixture (123).
+const SCANNED_PID = Math.max(process.pid, 123) + 1;
 
 describe('pid-utils identity-first liveness', () => {
   afterEach(() => {
@@ -87,13 +90,13 @@ describe('pid-utils identity-first liveness', () => {
     readFileSyncMock.mockReturnValueOnce('123\n');
     vi.spyOn(process, 'kill').mockReturnValue(true);
     execFileSyncMock.mockReturnValueOnce('');
-    execFileSyncMock.mockReturnValueOnce('456 /usr/bin/node /tmp/collector-daemon.js\n');
+    execFileSyncMock.mockReturnValueOnce(`${SCANNED_PID} /usr/bin/node /tmp/collector-daemon.js\n`);
 
     const result = checkProcessLiveness('/tmp/pilot.pid', COLLECTOR_PROCESS_PATTERNS);
 
     expect(result).toMatchObject({
       running: true,
-      pid: 456,
+      pid: SCANNED_PID,
       source: 'process-scan',
       pidFileState: 'stale',
       pidFileProcessAlive: true,
@@ -105,7 +108,7 @@ describe('pid-utils identity-first liveness', () => {
     readFileSyncMock.mockReturnValueOnce('123\n');
     vi.spyOn(process, 'kill').mockReturnValue(true);
     execFileSyncMock.mockReturnValueOnce('');
-    execFileSyncMock.mockReturnValueOnce('456 /usr/bin/node unrelated.js\n');
+    execFileSyncMock.mockReturnValueOnce(`${SCANNED_PID} /usr/bin/node unrelated.js\n`);
 
     const result = checkProcessLiveness('/tmp/pilot.pid', COLLECTOR_PROCESS_PATTERNS);
 
@@ -126,13 +129,13 @@ describe('pid-utils identity-first liveness', () => {
       err.code = 'ESRCH';
       throw err;
     });
-    execFileSyncMock.mockReturnValueOnce('456 /usr/bin/node /tmp/collector-daemon.js\n');
+    execFileSyncMock.mockReturnValueOnce(`${SCANNED_PID} /usr/bin/node /tmp/collector-daemon.js\n`);
 
     const result = checkProcessLiveness('/tmp/pilot.pid', COLLECTOR_PROCESS_PATTERNS);
 
     expect(result).toMatchObject({
       running: true,
-      pid: 456,
+      pid: SCANNED_PID,
       source: 'process-scan',
       pidFileState: 'stale',
     });
@@ -145,7 +148,7 @@ describe('pid-utils identity-first liveness', () => {
       err.code = 'ESRCH';
       throw err;
     });
-    execFileSyncMock.mockReturnValueOnce('456 /usr/bin/node unrelated.js\n');
+    execFileSyncMock.mockReturnValueOnce(`${SCANNED_PID} /usr/bin/node unrelated.js\n`);
 
     const result = checkProcessLiveness('/tmp/pilot.pid', COLLECTOR_PROCESS_PATTERNS);
 
@@ -162,15 +165,29 @@ describe('pid-utils identity-first liveness', () => {
       throw Object.assign(new Error('missing'), { code: 'ENOENT' });
     });
     existsSyncMock.mockReturnValueOnce(false);
-    execFileSyncMock.mockReturnValueOnce('789 /usr/bin/node /tmp/updater-daemon.js\n');
+    execFileSyncMock.mockReturnValueOnce(`${SCANNED_PID} /usr/bin/node /tmp/updater-daemon.js\n`);
 
     const result = checkProcessLiveness('/tmp/updater.pid', UPDATER_PROCESS_PATTERNS);
 
     expect(result).toMatchObject({
       running: true,
-      pid: 789,
+      pid: SCANNED_PID,
       source: 'process-scan',
       pidFileState: 'missing',
+    });
+  });
+
+  it('skips its own command before selecting another matching process', () => {
+    readFileSyncMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    existsSyncMock.mockReturnValueOnce(false);
+    execFileSyncMock.mockReturnValueOnce(
+      `${process.pid} /usr/bin/node /tmp/collector-daemon.js\n`
+      + `${SCANNED_PID} /usr/bin/node /tmp/collector-daemon.js\n`,
+    );
+    expect(checkProcessLiveness('/tmp/pilot.pid', COLLECTOR_PROCESS_PATTERNS)).toMatchObject({
+      running: true, pid: SCANNED_PID, source: 'process-scan', pidFileState: 'missing',
     });
   });
 });

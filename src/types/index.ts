@@ -8,6 +8,12 @@ export * from './events.js';
 export interface ListenerConfig {
   enabled: boolean;
   pollInterval: number;
+  /** Restrict the Qwen Work collaboration input to these conversation IDs. */
+  includeConversationIds?: string[];
+  /** Read-only source log directory override for the doubao-work listener. */
+  logDir?: string;
+  /** Product source for the doubao-work listener; defaults to Doubao Work. */
+  client?: 'doubao-work' | 'doubao';
 }
 
 /**
@@ -60,6 +66,11 @@ export interface MaskConfig {
   replacementMode?: MaskReplacementMode;
 }
 
+export interface InterceptorConfig {
+  /** Explicit opt-in for managed rules and interception hooks. */
+  mode: 'none' | 'all';
+}
+
 export interface OtlpTraceRawConfig {
   /** Trusted local .mjs modules exporting a synchronous SpanEnricher. */
   spanEnrichers?: string[];
@@ -103,10 +114,13 @@ export interface InnerTraceConfig {
 }
 
 export interface AnalyticsConfig {
+  privacy?: { excludeWorkspaces: string[] };
   enabled: boolean;
   autoStart: boolean;
   dataDir: string;
   userId: string;
+  hostSn?: string;
+  hostIdentityTags: boolean;
   collectLog: boolean;
   collectTrace: boolean;
   /** Exact service.name shared by every agent and backend. */
@@ -133,6 +147,8 @@ export interface AnalyticsConfig {
   multimodal?: MultimodalRuntimeConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
   globalSpanAttributes?: Record<string, string>;
+  /** Local interceptor rules. Same `{ mode, types }` shape as mask; types are a subset. */
+  interceptor: InterceptorConfig;
 }
 
 /**
@@ -170,15 +186,10 @@ export function multimodalUploadIncludesOutput(mode: MultimodalUploadMode): bool
   return mode === 'output' || mode === 'all';
 }
 
-/** uploadMode covers tool results (included by every non-none mode). */
-export function multimodalUploadIncludesTool(mode: MultimodalUploadMode): boolean {
-  return mode === 'input' || mode === 'output' || mode === 'all';
-}
-
 export const MULTIMODAL_STORAGE_TYPES = ['sls', 'delegatedOss', 'oss'] as const;
 export type MultimodalStorageType = (typeof MULTIMODAL_STORAGE_TYPES)[number];
 
-export const MULTIMODAL_SLS_AUTH_MODES = ['ak', 'apiKey'] as const;
+export const MULTIMODAL_SLS_AUTH_MODES = ['ak', 'apiKey', 'anonymous'] as const;
 export type MultimodalSlsAuthMode = (typeof MULTIMODAL_SLS_AUTH_MODES)[number];
 
 export interface MultimodalAkAuth {
@@ -193,8 +204,14 @@ export interface MultimodalApiKeyAuth {
   apiKey: string;
 }
 
-/** Discriminated auth after load. User config must be exactly one complete credential set. */
-export type MultimodalStorageAuth = MultimodalAkAuth | MultimodalApiKeyAuth;
+export interface MultimodalAnonymousAuth {
+  mode: 'anonymous';
+}
+
+/** Credential-bearing auth shared by SLS, delegated OSS, and direct OSS. */
+export type MultimodalCredentialAuth = MultimodalAkAuth | MultimodalApiKeyAuth;
+/** SLS PutObject also supports explicit credential-free anonymous writes. */
+export type MultimodalStorageAuth = MultimodalCredentialAuth | MultimodalAnonymousAuth;
 
 export interface MultimodalSlsTarget {
   endpoint: string;
@@ -209,7 +226,7 @@ export interface MultimodalOssTarget {
 
 export type MultimodalStorage =
   | { type: 'sls'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
-  | { type: 'delegatedOss'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
+  | { type: 'delegatedOss'; target: MultimodalSlsTarget; auth: MultimodalCredentialAuth }
   | { type: 'oss'; target: MultimodalOssTarget; auth: MultimodalAkAuth };
 
 /**
@@ -222,7 +239,7 @@ export interface MultimodalRuntimeConfig {
 }
 
 /** Agent ids with multimodal extraction implemented. */
-export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder'] as const;
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder', 'qwen-work-cn'] as const;
 
 /** Experimental per-agent multimodal policy (`uploadMode: none` disables). */
 export interface AgentMultimodalConfig {
@@ -395,6 +412,7 @@ export interface PipelineToggle {
   enabled: boolean;
   file: { enabled: boolean };
   qoderApi: { enabled: boolean };
+  multica?: { enabled: boolean; mode?: 'on' | 'off'; serviceNamePrefix?: string; discoverLocalSources?: boolean };
 }
 
 /** @deprecated Use PipelineToggle instead */
@@ -407,6 +425,7 @@ export interface StatusBarConfig {
 }
 
 export interface DashboardConfig {
+  enabled: boolean;
   port: number;
 }
 

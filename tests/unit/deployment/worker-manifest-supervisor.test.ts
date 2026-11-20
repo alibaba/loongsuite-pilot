@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
+import { promises as mutableFs } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -69,6 +71,80 @@ describe('WorkerManifestSupervisor', () => {
       await fs.readFile(path.join(stateDir, 'supervisor-status.json'), 'utf-8'),
     ) as Record<string, unknown>;
   }
+
+  it('keeps the published status valid while a replacement is being written', async () => {
+    const supervisor = new WorkerManifestSupervisor();
+    const statusPath = path.join(stateDir, 'supervisor-status.json');
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(statusPath, JSON.stringify({ state: 'running' }));
+    let opened!: () => void;
+    let resume!: () => void;
+    const started = new Promise<void>(resolve => { opened = resolve; });
+    const released = new Promise<void>(resolve => { resume = resolve; });
+    const writer = vi.spyOn(mutableFs, 'writeFile').mockImplementation(async (target, data, options) => {
+      if (typeof target !== 'string') throw new Error('expected a status file path');
+      const handle = await fs.open(target, 'w');
+      opened();
+      try { await released; await handle.writeFile(data, options); }
+      finally { await handle.close(); }
+    });
+    syncBuiltinESMExports();
+    const writing = (supervisor as any).writeStatus(statusPath, { state: 'stopped' });
+    try {
+      await started;
+      expect(await readStatus()).toEqual({ state: 'running' });
+    } finally {
+      resume();
+      try { await writing; }
+      finally { writer.mockRestore(); syncBuiltinESMExports(); }
+    }
+    expect(await readStatus()).toEqual({ state: 'stopped' });
+    expect(await fs.readdir(stateDir)).toEqual(['supervisor-status.json']);
+  });
+
+  it('does not overwrite the explicit stop status from a late exit callback', async () => {
+    const supervisor = new WorkerManifestSupervisor();
+    await writeManifest(['unused']);
+    const manifest = JSON.parse(await fs.readFile(path.join(bundleRoot, 'worker.manifest.json'), 'utf8'));
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(path.join(stateDir, 'supervisor-status.json'), JSON.stringify({ state: 'stopped' }));
+    const pidPath = path.join(stateDir, 'worker.pid');
+    await fs.writeFile(pidPath, 'replacement-pid');
+    await (supervisor as any).handleExit('test', bundleRoot, manifest, {}, options(),
+      pidPath, { restarts: 0, stopping: true, stopped: true }, 0, 'SIGTERM');
+    expect(await readStatus()).toEqual({ state: 'stopped' });
+    expect(await fs.readFile(pidPath, 'utf8')).toBe('replacement-pid');
+  });
+
+  it.each(['after-stop', 'during-stop'])('cleans worker records when exit happens %s and stopping fails', async timing => {
+    const supervisor = new WorkerManifestSupervisor({ platform: 'darwin' });
+    const probe = supervisor as any;
+    await writeManifest(['unused'], { restartPolicy: { type: 'on-failure', maxRestarts: 1 } });
+    const manifest = JSON.parse(await fs.readFile(path.join(bundleRoot, 'worker.manifest.json'), 'utf8'));
+    await fs.mkdir(stateDir, { recursive: true });
+    const pidPath = path.join(stateDir, 'worker.pid');
+    await fs.writeFile(pidPath, '123456789\n');
+    await fs.writeFile(`${pidPath}.identity.json`, '{}');
+    const runtime = { restarts: 0, stopping: false };
+    probe.runtimes.set(pidPath, runtime);
+    let exited: Promise<void> | undefined;
+    const signal = vi.spyOn(probe, 'signalProcessGroup').mockImplementation(() => {
+      if (timing === 'during-stop') {
+        exited = probe.handleExit('test', bundleRoot, manifest, {}, options(), pidPath, runtime, 1, null);
+      }
+      throw new Error('simulated stop signal failure');
+    });
+    try {
+      expect(await supervisor.stopIfPresent('test', bundleRoot, options())).toBe(false);
+      if (!exited) exited = probe.handleExit('test', bundleRoot, manifest, {}, options(), pidPath, runtime, 1, null);
+      await exited;
+      await expect(fs.stat(pidPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.stat(`${pidPath}.identity.json`)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readStatus()).toMatchObject({ state: 'exited', exitCode: 1 });
+      expect(probe.runtimes.has(pidPath)).toBe(false);
+      expect(runtime.restarts).toBe(0);
+    } finally { signal.mockRestore(); }
+  });
 
   function processIdentity(pid: number, creationTime = '2026-07-30T00:00:00.0000000Z'): WindowsProcessIdentity {
     return {

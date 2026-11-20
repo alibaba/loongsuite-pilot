@@ -84,7 +84,8 @@ describe('dashboard service lifecycle', () => {
     expect(processLookup).toContain('ps -U "$current_user_id" -o pid= -o ucomm=');
     expect(processLookup).toContain('find_current_user_processes collector');
     expect(processLookup).toContain('find_current_user_collector_processes()');
-    expect(processLookup).toContain('node:node|node:nodejs');
+    expect(processLookup).toContain('node:node|node:nodejs|node:MainThread');
+    expect(processLookup).toContain('node|nodejs|MainThread');
     expect(processLookup).toContain('[[ "$command_line" == *" $expected_suffix" ]]');
     expect(processLookup).toContain('process_matches_installed_entry "$pid" collector');
     expect(processLookup).toContain('mv -f "$pid_tmp" "$PID_FILE"');
@@ -268,7 +269,7 @@ describe('dashboard service lifecycle', () => {
       expect(probe).toContain('setTimeout');
       expect(probe).toContain('}, 300)');
     }
-    expect(runtimeSh).toContain('port = JSON.parse(fs.readFileSync(path, "utf8"))?.dashboard?.port');
+    expect(runtimeSh).toContain('port = JSON.parse(fs.readFileSync(path, "utf8").replace(/^\\uFEFF/, ""))?.dashboard?.port');
     expect(runtimeSh).toContain('configured = JSON.parse(fs.readFileSync(configPath, "utf8"))?.dataDir');
     expect(runtimeSh).toContain('process.env.LOONGSUITE_PILOT_DATA_DIR || configured');
     expect(runtimeSh).toContain('effective_data_dir=$(dashboard_data_dir)');

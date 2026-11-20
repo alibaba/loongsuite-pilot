@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -25,7 +26,8 @@ function extractPiCleanupNodeScript(source, style) {
   const functionStart = source.indexOf(functionMarker);
   const functionEnd = source.indexOf('# ====', functionStart);
   const body = source.slice(functionStart, functionEnd);
-  const scriptStartMarker = style === 'sh' ? 'result=$(node -e "\n' : "$result = & $script:NODE_BIN -e @'\n";
+  const shScriptStart = body.includes('result=$("$node_bin" -e "\n') ? 'result=$("$node_bin" -e "\n' : 'result=$(node -e "\n';
+  const scriptStartMarker = style === 'sh' ? shScriptStart : "$result = & $script:NODE_BIN -e @'\n";
   const scriptEndMarker = style === 'sh' ? '\n" "$cfg" "$DATA_DIR"' : "\n'@ $cfg $DATA_DIR";
   const scriptStart = body.indexOf(scriptStartMarker) + scriptStartMarker.length;
   const scriptEnd = body.indexOf(scriptEndMarker, scriptStart);
@@ -191,6 +193,71 @@ describe('uninstall cleans hook configs for all hook agents', () => {
 });
 
 describe('uninstall cleans the OpenCode plugin-inject spec', () => {
+  it.each([['sh', sh], ['ps1', ps1]])('%s removes V1/V2 references from both keys while preserving unrelated plugins', (style, source) => {
+    const start = source.indexOf(style === 'sh' ? 'remove_opencode_plugin()' : 'function Remove-OpenCodePlugin');
+    const marker = style === 'sh' ? 'result=$(node -e "\n' : "$result = & $script:NODE_BIN -e @'\n";
+    const scriptStart = source.indexOf(marker, start) + marker.length;
+    const end = source.indexOf(style === 'sh' ? '\n" "$cfg"' : "\n'@ $cfg", scriptStart);
+    const script = source.slice(scriptStart, end).replace(/\\\$/g, '$');
+    const root = mkdtempSync(join(tmpdir(), 'pilot-opencode-uninstall-'));
+    try {
+      const config = join(root, 'opencode.json');
+      writeFileSync(config, JSON.stringify({ plugin: ['file:///pilot/plugins/opencode/plugin.mjs', 'third-party'], plugins: [{ package: 'file:///pilot/plugins/opencode' }, '/other/plugins/opencode-extra'] }));
+      const result = spawnSync(process.execPath, ['-e', script, config, '/pilot'], { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ plugin: ['third-party'], plugins: ['/other/plugins/opencode-extra'] });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each([['sh', sh], ['ps1', ps1]])('%s removes only exact owned paths or package IDs, including encoded paths', (style, source) => {
+    const start = source.indexOf(style === 'sh' ? 'remove_opencode_plugin()' : 'function Remove-OpenCodePlugin');
+    const marker = style === 'sh' ? 'result=$(node -e "\n' : "$result = & $script:NODE_BIN -e @'\n";
+    const scriptStart = source.indexOf(marker, start) + marker.length;
+    const end = source.indexOf(style === 'sh' ? '\n" "$cfg"' : "\n'@ $cfg", scriptStart);
+    const script = source.slice(scriptStart, end).replace(/\\\$/g, '$');
+    for (const dataDir of ['/custom/pilot data', 'C:\\custom\\pilot data']) {
+      const root = mkdtempSync(join(tmpdir(), 'pilot-opencode-owned-'));
+      try {
+        const managed = dataDir.replace(/\\/g, '/') + '/plugins/opencode';
+        const url = (managed.startsWith('/') ? 'file://' : 'file:///') + managed.replace(/ /g, '%20');
+        const thirdParty = [
+          '/third-party/plugins/opencode', 'file:///third-party/plugins/opencode/',
+          '/third-party/plugins/opencode/plugin.mjs', '/other/pilot data/plugins/opencode',
+          '/third-party/loongsuite-pilot-opencode-custom', 'loongsuite-pilot-opencode-extra',
+          `${managed}-extra`, `${url}/child-plugin.mjs`,
+          { package: '/third-party/plugins/opencode' }, ['file:///third-party/plugins/opencode/plugin.mjs', {}],
+        ];
+        const config = join(root, 'opencode.jsonc');
+        writeFileSync(config, '// original comment\n' + JSON.stringify({
+          plugin: [managed, `${url}/`, [url + '/plugin.mjs', {}], ...thirdParty],
+          plugins: [{ package: url }, `${managed}/plugin.mjs`, 'loongsuite-pilot-opencode', 'loongsuite-pilot-opencode@1.0.0', ...thirdParty],
+        }));
+        const result = spawnSync(process.execPath, ['-e', script, config, dataDir], { encoding: 'utf8' });
+        expect(result.status, result.stderr).toBe(0);
+        expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ plugin: thirdParty, plugins: thirdParty });
+        expect(readFileSync(`${config}.bak`, 'utf8')).toContain('// original comment');
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    }
+  });
+
+  it('the actual shell function passes a custom data directory and preserves third-party plugins', () => {
+    const start = sh.indexOf('remove_opencode_plugin()');
+    const end = sh.indexOf('\n# Remove only the Hermes', start);
+    const root = mkdtempSync(join(tmpdir(), 'pilot-opencode-shell-'));
+    try {
+      const configDir = join(root, '.config', 'opencode');
+      const dataDir = join(root, 'pilot data');
+      mkdirSync(configDir, { recursive: true });
+      const config = join(configDir, 'opencode.json');
+      writeFileSync(config, JSON.stringify({ plugin: [`${dataDir}/plugins/opencode`, '/third-party/plugins/opencode'] }));
+      const result = spawnSync('/bin/bash', ['-c', 'msg() { :; }\n' + sh.slice(start, end) + '\nremove_opencode_plugin'], {
+        encoding: 'utf8', env: { HOME: root, DATA_DIR: dataDir, PATH: `${dirname(process.execPath)}:/usr/bin:/bin` },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ plugin: ['/third-party/plugins/opencode'] });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('sh defines remove_opencode_plugin', () => {
     expect(sh).toMatch(/remove_opencode_plugin\(\)\s*\{/);
   });
@@ -238,15 +305,19 @@ describe('uninstall cleans the OpenCode plugin-inject spec', () => {
   });
 });
 
-// Regression for the 2026-07-29 bug where two orphan `}` survived after
-// Remove-MimoCodePlugin's closing brace (rebase artifact), throwing the
-// whole .ps1 brace balance off and breaking PowerShell parsing. The brace
-// counts must match across the entire file — PowerShell is whitespace- and
-// brace-sensitive, so even one orphan brace aborts the uninstall flow.
+// Lightweight structural guard, not a PowerShell parser. Braces inside strings,
+// comments and embedded Node here-strings are data and must not be counted.
+function structuralBraces(source) {
+  const code = source.replace(/@['"][\s\S]*?^['"]@|'(?:''|[^'])*'|"(?:`[\s\S]|[^"`])*"|<#[\s\S]*?#>|#[^\r\n]*/gm, '');
+  return { open: (code.match(/\{/g) || []).length, close: (code.match(/\}/g) || []).length };
+}
 describe('installer-opensource.ps1 brace balance', () => {
+  it('ignores quoted regex braces but detects orphan code braces', () => {
+    expect(structuralBraces("function f { $pattern = '(?=[}\\]])' }")).toEqual({ open: 1, close: 1 });
+    expect(structuralBraces('function f { } }')).toEqual({ open: 1, close: 2 });
+  });
   it('open { count equals close } count across the whole file', () => {
-    const open = (ps1.match(/\{/g) || []).length;
-    const close = (ps1.match(/\}/g) || []).length;
+    const { open, close } = structuralBraces(ps1);
     expect(open).toBe(close);
   });
 
@@ -260,13 +331,75 @@ describe('installer-opensource.ps1 brace balance', () => {
     expect(end).toBeGreaterThan(start);
     const body = ps1.slice(start, end);
     // The function body must be brace-balanced on its own.
-    const open = (body.match(/\{/g) || []).length;
-    const close = (body.match(/\}/g) || []).length;
+    const { open, close } = structuralBraces(body);
     expect(open).toBe(close);
   });
 });
 
 describe('uninstall cleans the Pi Coding Agent extension injection', () => {
+  function cleanupWithoutPathNode(root, dataDir) {
+    const start = sh.indexOf('remove_pi_coding_agent_extension() {');
+    const helper = sh.slice(start, sh.indexOf('\n# ====', start));
+    const probeStart = sh.indexOf('_resolve_realpath() {');
+    const probes = sh.slice(probeStart, sh.indexOf('\nresolve_node() {', probeStart));
+    return spawnSync('/bin/bash', ['-c', `set -euo pipefail\n${probes}\n${helper}\n
+resolve_node() { return 1; }
+command() { if [ "$1" = -v ] && [ "\${2:-}" = node ]; then return 1; fi; builtin command "$@"; }
+DATA_DIR="$1"
+msg() { :; }
+remove_pi_coding_agent_extension`, 'cleanup', dataDir], {
+      encoding: 'utf8', env: { ...process.env, HOME: root, PI_CODING_AGENT_DIR: '', NODE_OPTIONS: '' },
+    });
+  }
+
+  it.each(['data', 'cache'])('uses the %s pinned runtime for recorded settings when node is absent from PATH', pin => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-pinned-cleanup-'));
+    try {
+      const dataDir = join(root, 'shared pilot data');
+      const configPath = join(root, 'tenants/shared pi/settings.json');
+      const nodePath = join(root, 'managed runtime/node');
+      for (const dir of [dataDir, dirname(configPath), dirname(nodePath), join(root, '.loongsuite-pilot')]) mkdirSync(dir, { recursive: true });
+      symlinkSync(process.execPath, nodePath);
+      writeFileSync(join(pin === 'data' ? dataDir : join(root, '.loongsuite-pilot'), 'node-bin'), nodePath + '\r\n');
+      writeFileSync(configPath, JSON.stringify({ extensions: [join(dataDir, 'plugins/pi-coding-agent/index.mjs'), '/third-party.mjs'] }));
+      writeFileSync(join(dataDir, 'deployed-agents.json'), JSON.stringify({ 'pi-coding-agent': { pluginInjectConfigPath: configPath } }));
+      const run = cleanupWithoutPathNode(root, dataDir);
+      expect(run.status, run.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(configPath, 'utf8')).extensions).toEqual(['/third-party.mjs']);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('does not block without Node when only unrelated settings and definitions exist', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-no-owned-cleanup-'));
+    try {
+      const dataDir = join(root, 'pilot');
+      mkdirSync(join(root, '.pi/agent'), { recursive: true });
+      mkdirSync(join(dataDir, 'agents.d.local'), { recursive: true });
+      const configPath = join(root, '.pi/agent/settings.json');
+      const original = '{"extensions":["/third-party.mjs","/opt/pi-coding-agent-extra.mjs"]}\n';
+      writeFileSync(configPath, original);
+      writeFileSync(join(dataDir, 'agents.d.local/other.json'), '{"id":"other"}');
+      const run = cleanupWithoutPathNode(root, dataDir);
+      expect(run.status, run.stderr).toBe(0);
+      expect(readFileSync(configPath, 'utf8')).toBe(original);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('retains an unverified recorded custom root when no usable runtime remains', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-no-runtime-custom-'));
+    try {
+      const dataDir = join(root, 'pilot');
+      const configPath = join(root, 'custom pi/settings.json');
+      mkdirSync(dataDir); mkdirSync(dirname(configPath));
+      const original = JSON.stringify({ extensions: [join(dataDir, 'plugins/pi-coding-agent/index.mjs')] });
+      writeFileSync(configPath, original);
+      writeFileSync(join(dataDir, 'deployed-agents.json'), JSON.stringify({ 'pi-coding-agent': { pluginInjectConfigPath: configPath } }));
+      const run = cleanupWithoutPathNode(root, dataDir);
+      expect(run.status, run.stderr).toBe(1);
+      expect(readFileSync(configPath, 'utf8')).toBe(original);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('sh defines and calls remove_pi_coding_agent_extension', () => {
     expect(sh).toMatch(/remove_pi_coding_agent_extension\(\)\s*\{/);
     const uninstall = sh.slice(sh.indexOf('cmd_uninstall()'));
@@ -309,6 +442,40 @@ describe('uninstall cleans the Pi Coding Agent extension injection', () => {
     ['Windows', extractPiCleanupNodeScript(ps1, 'ps1'), 'USERPROFILE'],
   ])('%s cleanup accepts JSONC and continues past damaged targets', (_platform, script, envKey) => {
     verifyPiCleanupContinuesPastInvalidConfig(script, envKey);
+  });
+
+  it('fails Pi cleanup without truncating settings when a staged write fails', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-pi-cleanup-fault-'));
+    try {
+      const configPath = join(root, '.pi', 'agent', 'settings.json');
+      const dataDir = join(root, 'pilot');
+      mkdirSync(dirname(configPath), { recursive: true });
+      mkdirSync(dataDir);
+      const original = JSON.stringify({ theme: 'dark', extensions: [
+        join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs'), '/third-party.mjs',
+      ] }, null, 2) + '\n';
+      writeFileSync(configPath, original);
+      const preload = join(root, 'disk-full.mjs');
+      writeFileSync(preload, `import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module';
+const write = fs.writeFileSync;
+fs.writeFileSync = function(file, ...args) {
+  if (String(file) === ${JSON.stringify(configPath)} || String(file).startsWith(${JSON.stringify(configPath + '.')} ) && String(file).endsWith('.tmp')) {
+    write(file, '{'); throw Object.assign(new Error('simulated disk full'), {code:'ENOSPC'});
+  }
+  return write.call(this, file, ...args);
+}; syncBuiltinESMExports();`);
+      const start = sh.indexOf('remove_pi_coding_agent_extension() {');
+      const helper = sh.slice(start, sh.indexOf('\n# ====', start));
+      const run = spawnSync('bash', ['-c', `set -euo pipefail\n${helper}\nresolve_node() { command -v node; }\nDATA_DIR="$1"\nmsg() { :; }\nremove_pi_coding_agent_extension`,
+        'cleanup', dataDir], { encoding: 'utf8', env: { ...process.env, HOME: root, PI_CODING_AGENT_DIR: dirname(configPath), NODE_OPTIONS: `--import=${preload}` } });
+      expect(run.status, run.stderr).toBe(1);
+      expect(readFileSync(configPath, 'utf8')).toBe(original);
+      expect(readdirSync(dirname(configPath)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+      const uninstall = sh.slice(sh.indexOf('\ncmd_uninstall() {'));
+      expect(uninstall).toMatch(/if ! remove_pi_coding_agent_extension; then\s+return 1/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('cleans a persisted custom Pi home when uninstall has no PI_CODING_AGENT_DIR', () => {
@@ -427,11 +594,10 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     expect(cleanup).toContain('function Remove-CodexHookConfig');
     expect(cleanup).toContain('.codex\\hooks.json');
     expect(cleanup).toContain('codex-loongsuite-pilot-hook');
-    expect(cleanup).toContain('otel-codex-hook');
-    expect(cleanup).toContain('Pilot Codex nested hook command is still present');
-    expect(cleanup).toContain('if ($eventProperties.Count -eq 0) { return }');
-    expect(cleanup).toContain('$null -eq $entry');
-    expect(cleanup).toContain('$verifyEventProperties');
+    expect(cleanup).not.toContain('otel-codex-hook');
+    expect(cleanup).toContain('$keptNestedHooks');
+    expect(cleanup).toContain('Write-FileUtf8NoBom -Path $configPath');
+    expect(cleanup).not.toContain('codex-hook-cleanup.cjs');
   });
 
   it('keeps Codex cleanup separate from the generic hook cleaner', () => {
@@ -445,14 +611,18 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
   it('calls dedicated Codex cleanup from uninstall', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
     expect(uninstall).toContain('Remove-CodexHookConfig');
-    expect(uninstall.indexOf('Remove-CodexHookConfig'))
-      .toBeLessThan(uninstall.indexOf('Remove-CodexTrustState'));
+  });
+
+  it('does not restore broad marker-based trust deletion', () => {
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(ps1).not.toContain('function Remove-CodexTrustState');
+    expect(uninstall).not.toContain('Remove-CodexTrustState');
   });
 
   it('passes a valid fs module literal to node when rewriting Codex files', () => {
     const writer = ps1.slice(
       ps1.indexOf('function Write-FileUtf8NoBom'),
-      ps1.indexOf('function Remove-CodexTrustState'),
+      ps1.indexOf('function Test-IsPilotCodexHookCommand'),
     );
     expect(writer).toContain("$rewriteScript = @'");
     expect(writer).toContain("const fs = require('fs');");
@@ -474,11 +644,64 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     }
   });
 
-  it('continues uninstall when dedicated Codex cleanup fails', () => {
+  it('preserves the existing best-effort uninstall policy', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
-    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexHookConfig\s*\}\s*catch\s*\{/);
-    expect(uninstall).toMatch(/try\s*\{\s*Remove-CodexTrustState\s*\}\s*catch\s*\{/);
     expect(uninstall).toContain('Codex hook cleanup failed; continuing uninstall');
+    expect(uninstall.indexOf('Remove-CodexHookConfig')).toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(sh).not.toContain('remove_codex_hook_config || return 1');
+    expect(sh).not.toContain('upgrade Pilot before uninstalling');
+    expect(ps1).not.toContain('upgrade Pilot before uninstalling');
+    const generic = sh.slice(sh.indexOf('remove_hook_configs()'), sh.indexOf('remove_grok_build_hook_config()'));
+    expect(generic).toContain('$HOME/.codex/hooks.json');
+  });
+});
+
+describe('Unix Codex uninstall preserves third-party assets', () => {
+  it.each(['sh', 'mjs'])('removes only Pilot handlers from mixed groups (%s)', extension => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-codex-assets-'));
+    try {
+      mkdirSync(join(root, '.codex'), { recursive: true });
+      const cache = join(root, '.cache', 'opentelemetry.instrumentation.codex');
+      mkdirSync(join(cache, 'sessions'), { recursive: true });
+      const config = join(root, '.codex', 'hooks.json');
+      const agentTrack = { type: 'command', command: 'otel-codex-hook stop', timeout: 17 };
+      const cached = { type: 'command', command: `bash ${cache}/hook-entry.sh stop` };
+      const unrelated = { type: 'command', command: `${root}/.loongsuite-pilot/third-party.sh` };
+      const pilot = { type: 'command', command: `bash ${root}/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.${extension} stop` };
+      writeFileSync(config, JSON.stringify({ extra: 'keep', hooks: {
+        Stop: [{ matcher: '*', hooks: [agentTrack, pilot, cached, unrelated] }, pilot, null, { hooks: [] }],
+        SessionStart: [{ hooks: [pilot] }],
+      } }));
+      const retainedFiles = [join(cache, 'sessions', 'trace.jsonl'), join(root, '.codex', 'config.toml'), join(root, '.codex', 'otel-config.json')];
+      for (const file of retainedFiles) writeFileSync(file, 'agenttrack-original');
+      const cleanup = sh.slice(sh.indexOf('remove_hook_configs()'), sh.indexOf('remove_grok_build_hook_config()'));
+      const run = spawnSync('/bin/bash', ['-c', `${cleanup}\nmsg() { :; }\nremove_hook_configs\nremove_hook_configs`], {
+        encoding: 'utf8', env: { ...process.env, HOME: root },
+      });
+      expect(run.status, run.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ extra: 'keep', hooks: {
+        Stop: [{ matcher: '*', hooks: [agentTrack, cached, unrelated] }, null, { hooks: [] }],
+      } });
+      for (const file of retainedFiles) expect(readFileSync(file, 'utf8')).toBe('agenttrack-original');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('legacy OTel uninstall leaves non-Pilot Codex assets untouched', () => {
+  it('shell OTel cleanup only targets the Claude cache', () => {
+    const cleanup = sh.slice(sh.indexOf('remove_otel_plugin()'), sh.indexOf('\nprint_summary()'));
+    expect(cleanup).not.toContain('.cache/opentelemetry.instrumentation.codex');
+    expect(cleanup).not.toContain('.codex/otel-config.json');
+    expect(cleanup).not.toContain('otel-codex-hook');
+  });
+
+  it('PowerShell OTel cleanup only targets the Claude cache', () => {
+    const cleanup = ps1.slice(ps1.indexOf('function Remove-OtelPlugin'), ps1.indexOf('\nfunction Start-PilotAndWait'));
+    expect(cleanup).not.toContain('.cache\\opentelemetry.instrumentation.codex');
+    expect(cleanup).not.toContain('.codex\\otel-config.json');
+    expect(cleanup).not.toContain('otel-codex-hook');
   });
 });
 
@@ -550,7 +773,7 @@ describe('uninstall cleans only the Pilot OpenClaw plugin injection', () => {
     );
     const psCleanup = ps1.slice(
       ps1.indexOf('function Remove-OpenClawPlugin'),
-      ps1.indexOf('# Remove OTel plugin', ps1.indexOf('function Remove-OpenClawPlugin')),
+      ps1.indexOf('function Remove-OtelPlugin', ps1.indexOf('function Remove-OpenClawPlugin')),
     );
 
     expect(shCleanup).not.toMatch(/node\s+-e/);
@@ -673,6 +896,25 @@ describe('DSH uninstall smoke', () => {
 });
 
 describe('Grok Build uninstall smoke', () => {
+  it('stops uninstall and retains assets when the TOML-aware helper fails', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-grok-system-uninstall-'));
+    try {
+      const dataDir = join(root, 'pilot data');
+      mkdirSync(join(dataDir, 'dist'), { recursive: true });
+      writeFileSync(join(dataDir, 'dist/scope-cleanup.cjs'), 'process.exitCode = 1;\n');
+      writeFileSync(join(dataDir, 'deployed-agents.json'), JSON.stringify({
+        'grok-build': { deployMode: 'hook', hookScope: 'system', hookSettingsPath: join(root, 'managed_config.toml') },
+      }));
+      writeFileSync(join(dataDir, 'retain-me'), 'runtime needed by managed config');
+      const run = spawnSync('/bin/bash', [resolve('deploy/installer-opensource.sh'), 'uninstall', '--data-dir', dataDir, '--lang', 'en'], {
+        encoding: 'utf8', env: { ...process.env, HOME: root, USERPROFILE: root, PATH: `${dirname(process.execPath)}:/usr/bin:/bin` },
+      });
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain('System hook cleanup failed');
+      expect(readFileSync(join(dataDir, 'retain-me'), 'utf8')).toBe('runtime needed by managed config');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }, 20_000);
+
   it('honours GROK_HOME when cleaning the hook file', () => {
     expect(sh).toContain('GROK_HOME:-$HOME/.grok');
     expect(ps1).toContain('GROK_HOME');

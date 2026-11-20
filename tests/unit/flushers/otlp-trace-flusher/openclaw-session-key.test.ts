@@ -31,6 +31,20 @@ async function exportSpans(entries: AgentActivityEntry[]) {
 }
 
 describe('OpenClaw session key output contract', () => {
+  it('exports the OpenClaw system on every span resource when records only identify the agent type', async () => {
+    const spans = await exportSpans(turn(1));
+
+    expect(new Set(spans.map(span => span.attributes['gen_ai.span.kind']))).toEqual(
+      new Set(['ENTRY', 'AGENT', 'STEP', 'LLM', 'TOOL']),
+    );
+    for (const span of spans) {
+      expect(span.resource.attributes).toMatchObject({
+        'gen_ai.agent.type': 'openclaw',
+        'gen_ai.agent.system': 'openclaw',
+      });
+    }
+  });
+
   it('retains exactly the validated OpenClaw extension in JSONL and SLS', () => {
     const entry = { ...turn(1, 'agent:main:test')[0], 'agent.openclaw.sender.id': 'private', 'agent.openclaw.hook': 'private' };
     for (const project of [projectLogEntry, serialiseLogEntry]) {
@@ -84,11 +98,12 @@ describe('OpenClaw session key output contract', () => {
 
   it('uses the same masked value in event logs and spans, without changing the session UUID', async () => {
     const entries = turn(1, 'agent:main:AKIAIOSFODNN7EXAMPLE').map(r => maskAgentActivityEntry(r, { mode: 'all', types: [] }));
-    expect(projectLogEntry(entries[0], { dropAgentScopedFields: true })[KEY]).toBe('agent:main:[ACCESSKEY_MASKED]');
-    expect(serialiseLogEntry(entries[0], { dropAgentScopedFields: true })[KEY]).toBe('agent:main:[ACCESSKEY_MASKED]');
+    const maskedKey = 'agent:main:[ACCESSKEY_MASKED]{AKIA************MPLE}';
+    expect(projectLogEntry(entries[0], { dropAgentScopedFields: true })[KEY]).toBe(maskedKey);
+    expect(serialiseLogEntry(entries[0], { dropAgentScopedFields: true })[KEY]).toBe(maskedKey);
     const spans = await exportSpans(entries);
     expect(spans.length).toBeGreaterThan(0);
-    expect(spans.every(s => s.attributes[KEY] === 'agent:main:[ACCESSKEY_MASKED]')).toBe(true);
+    expect(spans.every(s => s.attributes[KEY] === maskedKey)).toBe(true);
     expect(entries.every(r => r['gen_ai.session.id'] === 'session-1')).toBe(true);
   });
 });

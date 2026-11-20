@@ -1,8 +1,10 @@
 import { EventEmitter } from 'node:events';
+import { WorkspacePolicy } from '../../core/workspace-policy.js';
 import * as fs from 'node:fs/promises';
 import type { AgentActivityEntry, InputState } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { type BoundLogger, createLogger } from '../../utils/logger.js';
+import { resolvePollIntervalMs, DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import type { StateStore } from '../../checkpoints/state-store.js';
 import {
   InputRuntimeAccumulator,
@@ -36,7 +38,20 @@ export abstract class BaseInput extends EventEmitter {
   protected pollIntervalMs: number;
   private timer: ReturnType<typeof setInterval> | null = null;
   private cyclePromise: Promise<void> | null = null;
+  private releaseCheckpointWait: (() => void) | null = null;
+  private releaseStartupWait: (() => void) | null = null;
   private _running = false;
+  protected workspacePolicy = new WorkspacePolicy();
+
+  setWorkspacePolicy(policy: WorkspacePolicy): void { this.workspacePolicy = policy; }
+
+  /** InputManager uses this for the Codex trace journal's durable acceptance. */
+  private readonly pendingOutputs = new Set<Promise<void>>();
+  holdCheckpointUntil(promise: Promise<void>): void {
+    this.stateStore.holdSaveUntil(promise, this.id);
+    this.pendingOutputs.add(promise);
+    void promise.then(() => this.pendingOutputs.delete(promise), () => this.pendingOutputs.delete(promise));
+  }
   private startPromise: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
   private activeRuntimeAccumulator: InputRuntimeAccumulator | null = null;
@@ -46,13 +61,15 @@ export abstract class BaseInput extends EventEmitter {
   constructor(opts: InputOptions) {
     super();
     this.stateStore = opts.stateStore;
-    this.pollIntervalMs = opts.pollIntervalMs ?? 30_000;
+    this.pollIntervalMs = resolvePollIntervalMs(opts.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS);
     this.logger = createLogger(this.constructor.name);
   }
 
   get running(): boolean {
     return this._running;
   }
+
+  get checkpointFailed(): boolean { return this.stateStore.hasSaveFailure(this.id); }
 
   start(): Promise<void> {
     // A restart must not create resources before the preceding stop has drained them.
@@ -69,7 +86,12 @@ export abstract class BaseInput extends EventEmitter {
     try {
       await this.onStart();
       if (!this._running) return;
-      await this.runCycle();
+      const outputWait = new Promise<void>(resolve => { this.releaseStartupWait = resolve; });
+      const firstCycle = this.runCycle();
+      // Watchers may already have started a cycle during onStart. Readiness
+      // must not wait for its checkpoint, but cyclePromise still owns it.
+      if (this.releaseCheckpointWait) this.releaseStartupWait?.();
+      await Promise.race([firstCycle, outputWait]);
       if (!this._running) return;
       this.timer = setInterval(() => void this.runCycle(), this.pollIntervalMs);
     } catch (error) {
@@ -77,6 +99,8 @@ export abstract class BaseInput extends EventEmitter {
       // A concurrent stop owns cleanup after this startup settles.
       if (!this.stopPromise) await this.onStop();
       throw error;
+    } finally {
+      this.releaseStartupWait = null;
     }
   }
 
@@ -84,6 +108,7 @@ export abstract class BaseInput extends EventEmitter {
     if (this.stopPromise) return this.stopPromise;
     if (!this._running && !this.startPromise) return Promise.resolve();
     this._running = false;
+    if (this.stateStore.waitingForOutput) this.releaseCheckpointWait?.();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -109,6 +134,8 @@ export abstract class BaseInput extends EventEmitter {
   protected async onStart(): Promise<void> {}
   /** Optional hook called once on stop. */
   protected async onStop(): Promise<void> {}
+  /** Commit source progress only after the batch has entered the shared output queue. */
+  protected onEntriesQueued(): void | Promise<void> {}
 
   /** Request an immediate serialized collection cycle from an input-owned watcher. */
   protected requestCollection(): void {
@@ -117,6 +144,9 @@ export abstract class BaseInput extends EventEmitter {
 
   private runCycle(): Promise<void> {
     if (this.cyclePromise) return this.cyclePromise;
+    // A terminal output failure freezes the shared cursor until restart. Do
+    // not keep reading into a queue whose checkpoint can no longer progress.
+    if (this.checkpointFailed) return Promise.resolve();
     this.cyclePromise = this.runCycleOnce().finally(() => {
       this.cyclePromise = null;
     });
@@ -128,16 +158,38 @@ export abstract class BaseInput extends EventEmitter {
     this.activeRuntimeAccumulator = runtime;
     const collectStartedAt = runtime.now();
     try {
-      const entries = await this.collect();
+      const entries = this.workspacePolicy.filter(await this.collect(), this.agentType);
       if (entries.length > 0) {
         this.emit('entries', entries);
+        await this.onEntriesQueued();
         this.logger.debug('cycle produced entries', { count: entries.length });
       }
-      await this.stateStore.save();
+      if (this.pendingOutputs.size) {
+        await Promise.race([
+          Promise.all([...this.pendingOutputs]),
+          new Promise<void>(resolve => {
+            this.releaseCheckpointWait = resolve;
+            this.releaseStartupWait?.();
+            if (!this._running) resolve();
+          }),
+        ]);
+      }
+      // A shared checkpoint may wait for another input's HTTP recovery. Stop
+      // must still drain our collect/onStop without waiting for that network;
+      // StateStore retains the save and its output holds until actual ACK.
+      await Promise.race([
+        this.stateStore.save(),
+        new Promise<void>(resolve => {
+          this.releaseCheckpointWait = resolve;
+          this.releaseStartupWait?.();
+          if (!this._running && this.stateStore.waitingForOutput) resolve();
+        }),
+      ]);
     } catch (err) {
       this.logger.error('collection cycle failed', { error: String(err) });
       this.emit('collect-error', err);
     } finally {
+      this.releaseCheckpointWait = null;
       const collectDurationMs = runtime.now() - collectStartedAt;
       this.activeRuntimeAccumulator = null;
       this.emit('input-runtime-delta', runtime.finish(collectDurationMs));

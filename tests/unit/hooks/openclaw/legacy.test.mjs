@@ -13,6 +13,7 @@ const ctx = { agentId: 'main', sessionKey: 'agent:main:test', sessionId: 'sessio
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-oc-legacy-'));
   vi.stubEnv('LOONGSUITE_PILOT_DATA_DIR', root);
+  vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', path.join(root, 'config.json'));
   vi.stubEnv('LOONGSUITE_USER_ID', 'test');
   clock = Date.now();
   vi.spyOn(Date, 'now').mockImplementation(() => clock);
@@ -115,7 +116,10 @@ describe('OpenClaw 3.8 legacy adapter', () => {
     const responses = result.filter(r => r['event.name'] === 'llm.response');
     expect(requests).toHaveLength(2);
     expect(responses).toHaveLength(2);
-    expect(requests[1]['gen_ai.input.messages_delta'].map(m => m.parts[0].id)).toEqual(['t2', 't1']);
+    expect(requests[1]['gen_ai.input.messages_delta'][0]).toMatchObject({ role: 'assistant', parts: [
+      { type: 'tool_call', id: 't1' }, { type: 'tool_call', id: 't2' },
+    ] });
+    expect(requests[1]['gen_ai.input.messages_delta'].slice(1).map(m => m.parts[0].id)).toEqual(['t2', 't1']);
     expect(requests[1]['agent.openclaw.timing.source']).toBe('tool_result_persist');
     expect(result.filter(r => r['event.name'] === 'tool.result').map(r => r['gen_ai.tool.call.id'])).toEqual(['t2', 't1']);
     expect(result.at(-1)['agent.openclaw.per_call_usage.mismatch']).toBeUndefined();
@@ -283,7 +287,7 @@ describe('OpenClaw 3.8 legacy adapter', () => {
     fire('after_tool_call', { runId: 'run-1', toolCallId: 't', toolName: 'read', error: 'private error', result: 'private result' });
     fire('agent_end', { success: false, error: 'private error' });
     const text = JSON.stringify(records());
-    expect(text).not.toContain('private');
+    expect(text).not.toMatch(/private (prompt|output|args|error|result)/);
     expect(records().find(r => r['event.name'] === 'llm.response')['gen_ai.usage.output_tokens']).toBe(4);
   });
 });

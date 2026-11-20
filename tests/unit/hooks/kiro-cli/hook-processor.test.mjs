@@ -3,8 +3,8 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
 import { fileURLToPath } from 'node:url';
+import { execSql } from '../../../helpers/sqlite-fixture.mjs';
 
 import { hasNodeSqlite } from '../../../../assets/hooks/kiro-cli/transcript-parser.mjs';
 
@@ -27,27 +27,19 @@ let DATA_DIR;
 let DB_PATH;
 
 function buildFixtureDb(convRawJson, cwd, updatedMs) {
-  return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(DB_PATH, (err) => {
-      if (err) return reject(err);
-      db.serialize(() => {
-        db.run(`CREATE TABLE conversations_v2 (
-          key TEXT NOT NULL,
-          conversation_id TEXT NOT NULL,
-          value TEXT NOT NULL,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL,
-          PRIMARY KEY (key, conversation_id)
-        )`);
-        const stmt = db.prepare(
-          `INSERT INTO conversations_v2 (key, conversation_id, value, created_at, updated_at) VALUES (?,?,?,?,?)`,
-        );
-        stmt.run(cwd, CONV_ID, JSON.stringify(convRawJson), updatedMs - 10000, updatedMs);
-        stmt.finalize();
-        db.close((cerr) => (cerr ? reject(cerr) : resolve()));
-      });
-    });
-  });
+  execSql(DB_PATH, `CREATE TABLE conversations_v2 (
+    key TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    value TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (key, conversation_id)
+  )`);
+  execSql(
+    DB_PATH,
+    `INSERT INTO conversations_v2 (key, conversation_id, value, created_at, updated_at) VALUES (?,?,?,?,?)`,
+    [cwd, CONV_ID, JSON.stringify(convRawJson), updatedMs - 10000, updatedMs],
+  );
 }
 
 /**
@@ -55,18 +47,11 @@ function buildFixtureDb(convRawJson, cwd, updatedMs) {
  * 模拟交互式新 turn。INSERT OR REPLACE 复用 beforeEach 已建表。
  */
 function upsertConversationRow(convRawJson, updatedMs) {
-  return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(DB_PATH, (err) => {
-      if (err) return reject(err);
-      db.serialize(() => {
-        db.run(
-          `INSERT OR REPLACE INTO conversations_v2 (key, conversation_id, value, created_at, updated_at) VALUES (?,?,?,?,?)`,
-          CWD, CONV_ID, JSON.stringify(convRawJson), updatedMs - 10000, updatedMs,
-          (e) => db.close((cerr) => (e || cerr ? reject(e || cerr) : resolve())),
-        );
-      });
-    });
-  });
+  execSql(
+    DB_PATH,
+    `INSERT OR REPLACE INTO conversations_v2 (key, conversation_id, value, created_at, updated_at) VALUES (?,?,?,?,?)`,
+    [CWD, CONV_ID, JSON.stringify(convRawJson), updatedMs - 10000, updatedMs],
+  );
 }
 
 function buildEnv(extra = {}) {
@@ -177,11 +162,12 @@ function bufferAllToolEvents() {
   bufferPostToolEvents();
 }
 
-beforeEach(async () => {
+beforeEach(() => {
   DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'kiro-hook-test-'));
   DB_PATH = path.join(DATA_DIR, 'data.sqlite3');
+  if (!DB_AVAILABLE) return;
   const convRaw = JSON.parse(fs.readFileSync(FIXTURE_CONV, 'utf-8'));
-  await buildFixtureDb(convRaw, CWD, Date.now());
+  buildFixtureDb(convRaw, CWD, Date.now());
 });
 
 afterEach(() => {
@@ -370,20 +356,11 @@ describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor 端到端（DB transcrip
     expect(firstCount).toBeGreaterThan(0);
 
     // 模拟 kiro-cli 延迟写入：更新 SQLite 行的 updated_at（值变大）
-    // 使用 sqlite3 npm 包直接 UPDATE，不经过 hook processor
-    await new Promise((resolve, reject) => {
-      const db = new sqlite3.Database(DB_PATH, (err) => {
-        if (err) return reject(err);
-        db.run(
-          `UPDATE conversations_v2 SET updated_at = updated_at + 10000 WHERE key = ?`,
-          [CWD],
-          (uerr) => {
-            db.close();
-            uerr ? reject(uerr) : resolve();
-          },
-        );
-      });
-    });
+    execSql(
+      DB_PATH,
+      `UPDATE conversations_v2 SET updated_at = updated_at + 10000 WHERE key = ?`,
+      [CWD],
+    );
 
     // 第二次 stop：updated_at 已推进，SQLite 会重新返回同一会话
     bufferPostToolEvents();
@@ -416,19 +393,11 @@ describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor 端到端（DB transcrip
         entry.request_metadata.message_id = 'new-' + entry.request_metadata.message_id;
       }
     }
-    await new Promise((resolve, reject) => {
-      const db = new sqlite3.Database(DB_PATH, (err) => {
-        if (err) return reject(err);
-        db.run(
-          `UPDATE conversations_v2 SET conversation_id = ?, value = ?, updated_at = ? WHERE key = ?`,
-          [newConvId, JSON.stringify(convRaw), Date.now() + 50000, CWD],
-          (uerr) => {
-            db.close();
-            uerr ? reject(uerr) : resolve();
-          },
-        );
-      });
-    });
+    execSql(
+      DB_PATH,
+      `UPDATE conversations_v2 SET conversation_id = ?, value = ?, updated_at = ? WHERE key = ?`,
+      [newConvId, JSON.stringify(convRaw), Date.now() + 50000, CWD],
+    );
 
     // 第二次 stop：新会话，应重新发射
     bufferPostToolEvents();

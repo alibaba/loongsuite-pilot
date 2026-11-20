@@ -6,6 +6,26 @@ Trace 输出会将 GenAI 活动导出为 OpenTelemetry Trace。适用于在 Trac
 
 Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录；OTLP Trace 输出会将这些记录转换为 Trace spans。
 
+## Codex 子 Agent
+
+Codex 按实际子 session/turn 独立缓冲和导出，确认父工具上下文后生成
+`父 AGENT → 委派 TOOL → 子 AGENT → 子 STEP → LLM/TOOL`。子虚拟 ENTRY
+透明，LLM/TOOL 使用日志预留的实际 Span ID，session/turn/step 不改为父值。
+父 turn 完成不关闭后台子工作，也不延长工具时间；同一 Trace 可以跨多个 session。
+未确认挂载或已独立输出的轮次保留独立根结构，不重发旧 Span 冒充更新。
+
+incoming invocation 随实际工作传播，outgoing invocation 仅属于对应委派工具，
+不会复制到同 turn 的所有 Span。标准模型/工具事件在转换入口兼容短名；
+Agent invoke/result 是审计事件，不额外生成 Span、STEP 或 token。
+启用 OTLP 时，待终态 Codex 轮次保存在 `logs/codex-pending-turns/`，输入
+checkpoint 等待持久接收，退出不导出半轮。确认记录保留最近 10,000 轮；网络
+回执不确定时仍可能重试相同稳定 ID。journal 读失败阻止启动，写失败后需修复
+存储并重启，从最后持久游标恢复。Codex 的 SLS/HTTP 日志发送等待实际网络成功回执，
+而非仅进入内存队列，才允许保存输入游标；失败会冻结共享 checkpoint，修复输出后
+需重启恢复。多目标部分成功或回执不确定仍可能重发相同 ID，不能保证恰好一次。
+校验器按各 AGENT 自身执行范围检查身份、步骤和用量，允许异步子工作晚于父工具结束。
+源码能力与安装态、云端验收分开，见[Codex 验证记录](codex-subagent-verification.md)。
+
 ## 通用 OTLP Trace 输出
 
 ```json
@@ -20,7 +40,6 @@ Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录�
     "resourceAttributes": {
       "deployment.environment": "prod"
     },
-    "captureMessageContent": false,
     "debug": false,
     "turnIdleTimeoutMs": 0
   }
@@ -35,9 +54,35 @@ Trace 输出和日志输出是分开的。SLS、JSONL、HTTP 接收事件记录�
 | `otlpTrace.headers` | 发送到 OTLP endpoint 的请求头。 |
 | `otlpTrace.serviceName` | 兼容原有行为的 Trace 服务名基础值，Pilot 会追加 `-<agentType>`；顶层 `serviceName` 优先并关闭该后缀。 |
 | `otlpTrace.resourceAttributes` | 额外 OpenTelemetry resource attributes。 |
-| `otlpTrace.captureMessageContent` | Trace 输出是否可以包含消息内容。 |
 | `otlpTrace.debug` | 开启 Trace 转换 debug 本地输出。 |
-| `otlpTrace.turnIdleTimeoutMs` | 可选的 turn 级 Trace 聚合空闲超时。 |
+| `otlpTrace.turnIdleTimeoutMs` | turn 级 Trace 聚合空闲超时，默认 `0`（禁用）。被原生结束观察器覆盖的 Hermes 轮次等待实际调用结束，即使配置超时也不会提前关闭。缓冲超过阈值时输出一次诊断，包含待处理记录数和缓冲年龄。旧插件或未覆盖调用保留原有的已配置空闲兜底。 |
+
+Hermes 通过实际调用结束收口，包括跳过原生结束 hook 的提前返回、失败和取消路径。
+正常结束 hook 和调用结束观察不会重复发送结束记录；同一 session 的其他活动调用继续采集。
+调用归属跟随本次原生调用中的压缩 session id 轮换。只有实际被观察器覆盖的 turn 才会携带私有字段
+`agent.hermes.native_run_observer: true`，仅有 `realtime-v1` 不能证明具备该能力。
+原生入口暂不可用时，插件只诊断一次，并以五秒退避延迟重试。未覆盖调用保留旧空闲行为，仍可能截断迟到数据；
+只更新 collector 不会修好仍在运行的旧插件。更新插件后需重新启动 Hermes 宿主进程，使其加载新插件。
+
+活动 turn 不设置强制按时长结束的上限，以免再次丢弃后续工具和模型事件。
+在现有缓冲数量上限内，待处理缓冲数和 `oldest_buffer_age_ms` 可通过 `pilot_trace_runtime` 状态快照观察。
+在 Linux 同一 PID 命名空间内，新插件记录宿主进程身份。collector 确认进程已退出且缓冲
+空闲至少五分钟后，再等待至少一分钟，并核对该进程全部现存日志分段的已持久化采集游标与文件末尾。
+尚未追平时触发正常采集并在后续周期复查，不等待其他来源的输出背压。已消费的旧分段仍可回收；
+有待恢复轮次时保留已退出进程的最后分段，直到轮次导出或确认已由正常结束记录持久化。
+确认来源已追平后才导出已完成的 Span，附加
+`agent.hermes.collection.incomplete=true` 和 `agent.hermes.collection.end_reason=producer_process_exited`。
+没有配对结果的请求或工具调用仍不会伪造完整 Span。源文件缺失、读取失败、存在半行、采集器停用或
+输出尚未接收时保留待处理数据。旧插件未记录进程身份、跨 PID 命名空间、非 Linux 或
+进程身份无法确认时不会采用此兜底。此检查基于当前进程拥有的文件，不证明其他进程不会继续同一 turn。
+journal 能保留待处理数据供 collector 重启恢复，
+但不保证整个采集与上报链路 exactly-once。
+恢复来源索引和内存外待恢复轮次各有 10,000 轮上限，每轮最多跟踪 16 个来源；超限会告警并保留
+Hermes 原始来源直至 collector 重启，避免把来源不确定误判为已消费。
+
+OpenClaw 使用 `agent_end` 观察结束，保留 `llm_output` 的采集边界，不注册可改写回答的
+`before_agent_finalize`。注册后者会让支持该能力的宿主缓冲回复直到轮末，影响首次可见回复时间。
+更新该插件后也需重新启动宿主进程，已有监听器不会因磁盘文件更新而自动消失。
 
 环境变量：
 
@@ -140,7 +185,7 @@ Trace 导出会把**同一批**转换后的 span **同时**发往**所有**已�
 
 共享 vs 单后端设置(span 按不同 `service.name` 各转换一次):
 
-- **所有后端共享:** `resourceAttributes`、`captureMessageContent`、`resourceAttributeKeys`、`spanAttributePassthroughPrefixes`、`maxExportBatchBytes`、`turnIdleTimeoutMs`。
+- **所有后端共享:** `resourceAttributes`、`resourceAttributeKeys`、`spanAttributePassthroughPrefixes`、`maxExportBatchBytes`、`turnIdleTimeoutMs`。
 - **每后端独立:** endpoint URL、headers、compression,以及 `service.name`(见下文——用户后端与托管后端可不同)。
 
 某个后端失败会被隔离——不会阻塞健康后端,其失败 span 会单独落盘到 `~/.loongsuite-pilot/logs/otlp-failed/<服务>-<Agent>__<后端名>-YYYY-MM-DD.jsonl`。
@@ -286,7 +331,7 @@ Pilot 会将 Trace 发送到 `http://localhost:3000/api/public/otel/v1/traces`�
 
 打开 [http://localhost:3000](http://localhost:3000)，进入 **Traces** 页面查看 Agent 会话，包括模型名称、Token 用量和费用详情。
 
-> **注意：** Langfuse 使用 HTTP 接收 OTLP 数据，不支持 gRPC（端口 4317）。LLM 消息内容默认包含在 Trace 中（`captureMessageContent` 默认为 `true`）。如需关闭，请在配置中显式设置 `captureMessageContent` 为 `false`。
+> **注意：** Langfuse 使用 HTTP 接收 OTLP 数据，不支持 gRPC（端口 4317）。LLM 消息内容会包含在 Trace 中。
 
 ## Token 用量聚合口径
 
@@ -307,22 +352,17 @@ Pilot 会在 OTLP Trace 的两个层级上记录 Token 用量：
 
 ## Trace 中的内容采集
 
-如果开启消息内容采集，Trace span 可能包含敏感内容。敏感或团队统一管理的环境建议：
+Trace span 可能包含 Prompt、回答、工具参数和工具结果等敏感内容。敏感或团队统一管理的环境建议开启脱敏：
 
 ```json
 {
-  "otlpTrace": {
-    "captureMessageContent": false
-  },
-  "agents": {
-    "claude-code": { "captureMessageContent": false },
-    "codex": { "captureMessageContent": false },
-    "cursor": { "captureMessageContent": false }
+  "mask": {
+    "mode": "all"
   }
 }
 ```
 
-如果 Trace 数据可能包含密钥，也建议开启 [数据脱敏](masking.md)。
+完整规则和边界见[数据脱敏](masking.md)。
 
 ## 自定义 Span 属性
 

@@ -11,6 +11,7 @@
 | Codex | `codex` | `codex` |
 | OpenCode | `opencode` | `opencode` |
 | Pi Coding Agent | `pi-coding-agent` | `pi` |
+| DeepSeek Harness | `dsh` | `dsh` |
 | MiMo Code | `mimo-code` | `mimo` |
 | Qwen Code CLI | `qwen-code-cli` | `qwen` |
 | Cursor CLI | `cursor-cli` | `cursor-agent` |

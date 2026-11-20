@@ -130,15 +130,30 @@ function Ensure-Dirs {
     }
 }
 
+# Same rule as the installer: the node that launches the collector must load
+# node:sqlite. A major check still accepts Node 20 and 22.12.
+# Native stderr under EAP=Stop becomes a terminating error and hides $LASTEXITCODE.
+function Test-NodeSupportsSqlite {
+    param([string]$bin)
+    if (-not $bin -or -not (Test-Path -LiteralPath $bin)) { return $false }
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $code = 1
+    try {
+        $sqliteProbe = & $bin -e "require('node:sqlite')" 2>&1
+        $code = $LASTEXITCODE
+        if ($null -eq $code) { $code = 1 }
+    } catch {
+        $code = 1
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    return ($code -eq 0)
+}
+
 function Test-NodeSuitable {
     param([string]$bin)
-    if (-not $bin -or -not (Test-Path $bin)) { return $false }
-    try {
-        $ver = & $bin --version 2>$null
-        if (-not $ver) { return $false }
-        $major = [int]($ver -replace '^v','').Split('.')[0]
-        return $major -ge 18
-    } catch { return $false }
+    return (Test-NodeSupportsSqlite $bin)
 }
 
 # The pin file holds one absolute path to node.exe, and for a managed runtime that path
@@ -222,6 +237,7 @@ function Sync-InstalledScriptsFromVersion {
     param([string]$versionDir)
     $srcDir = Join-Path $versionDir "scripts"
     $required = @("collector-daemon.js", "updater-daemon.js")
+    $optional = @()
     foreach ($f in $required) {
         if (-not (Test-Path (Join-Path $srcDir $f))) { return $false }
     }
@@ -230,6 +246,13 @@ function Sync-InstalledScriptsFromVersion {
     foreach ($f in $required) {
         $tmp = Join-Path $BOOTSTRAP_DIR "$f.tmp"
         Copy-Item (Join-Path $srcDir $f) $tmp -Force
+        Move-Item $tmp (Join-Path $BOOTSTRAP_DIR $f) -Force
+    }
+    foreach ($f in $optional) {
+        $src = Join-Path $srcDir $f
+        if (-not (Test-Path $src)) { continue }
+        $tmp = Join-Path $BOOTSTRAP_DIR "$f.tmp"
+        Copy-Item $src $tmp -Force
         Move-Item $tmp (Join-Path $BOOTSTRAP_DIR $f) -Force
     }
     return $true
@@ -623,10 +646,6 @@ function Wait-ForUpdaterAlive {
     return $false
 }
 
-# Best-effort: Start-ScheduledTask on a task that is still Running is often a no-op, so
-# restart would "succeed" against the outgoing instance. Mirror the 10s wait in
-# Start-CompatibleExistingCollectorTask. Failure to leave Running is not fatal; the
-# caller still Stop-PidFile / Start.
 function Wait-ForTaskNotRunning {
     param([string]$TaskName, [int]$TimeoutSeconds = 10)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -1233,9 +1252,6 @@ function Cmd-RunUpdater {
     & $nodeBin $entry
 }
 
-# ============================================================
-# CMD: start
-# ============================================================
 function Cmd-Start {
     $runtime = Get-CollectorRuntime
     if ($runtime) {
@@ -1516,7 +1532,7 @@ function Cmd-RestartCollector {
     $nodeBin = Resolve-Node
     if (-not $nodeBin) {
         Write-RestartFailure -Target "collector" -Stage "node-missing" `
-            -Detail "Resolve-Node found no usable node runtime (needs v18+; checked the pin file, nvm, PATH and the managed runtime)"
+            -Detail "Resolve-Node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime; checked the pin file, nvm, PATH and the managed runtime)"
         Write-Error "node runtime not found"
         exit 1
     }
@@ -1718,7 +1734,7 @@ function Cmd-RestartUpdater {
     $nodeBin = Resolve-Node
     if (-not $nodeBin) {
         Write-RestartFailure -Target "updater" -Stage "node-missing" `
-            -Detail "Resolve-Node found no usable node runtime (needs v18+; checked the pin file, nvm, PATH and the managed runtime)"
+            -Detail "Resolve-Node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime; checked the pin file, nvm, PATH and the managed runtime)"
         Write-Error "node runtime not found"
         return
     }
@@ -1877,9 +1893,65 @@ function Cmd-RestartUpdater {
     }
 }
 
+# CMD: dashboard
 # ============================================================
+function Cmd-Dashboard {
+    if ($SubArgs.Count -eq 0 -or $SubArgs[0] -in @("help", "--help", "-h")) {
+        Write-Host "Usage: loongsuite-pilot dashboard start [port] | stop"
+        return
+    }
+    $action = $SubArgs[0].ToLowerInvariant()
+    if ($action -notin @("start", "stop")) {
+        Write-Error "Usage: loongsuite-pilot dashboard start [port] | stop"
+        return
+    }
+    $entry = Join-Path $PSScriptRoot "dashboard-config.mjs"
+    if (-not (Test-Path -LiteralPath $entry)) {
+        $versionDir = Resolve-CurrentVersion
+        if ($versionDir) { $entry = Join-Path $versionDir "scripts/dashboard-config.mjs" }
+    }
+    if (-not (Test-Path -LiteralPath $entry)) {
+        Write-Error "Dashboard command is missing. Upgrade or repair Pilot."
+        return
+    }
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) { Write-Error "node runtime not found"; return }
+    $nodeArgs = @($entry, $CONFIG_FILE, $action)
+    if ($SubArgs.Count -gt 1) { $nodeArgs += $SubArgs[1..($SubArgs.Count - 1)] }
+    & $nodeBin @nodeArgs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    $collectorRunning = [bool](Get-CollectorRuntime) -or (Test-PidRunning $PID_FILE)
+    if ($collectorRunning) { Cmd-Restart }
+    elseif ($action -eq "start") { Cmd-Start }
+
+    if ($action -eq "stop") {
+        Write-Host "Dashboard stopped; collector remains $(if ($collectorRunning) { 'running' } else { 'stopped' })."
+        return
+    }
+    $port = Get-DashboardPort
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        if (Test-DashboardAvailable -Port $port) {
+            Write-Host "Dashboard started: http://127.0.0.1:$port/"
+            return
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    Write-Error "Dashboard did not become available on port $port. Check $LOG_FILE"
+}
+
 # CMD: status
 # ============================================================
+function Test-DashboardEnabled {
+    try {
+        if (Test-Path -LiteralPath $CONFIG_FILE) {
+            $config = Get-Content -LiteralPath $CONFIG_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
+            return ($config.dashboard.enabled -is [bool] -and $config.dashboard.enabled)
+        }
+    } catch {}
+    return $false
+}
+
 function Get-DashboardPort {
     try {
         if (Test-Path $CONFIG_FILE) {
@@ -1945,6 +2017,18 @@ timer = setTimeout(() => {
     }
 }
 
+function Test-InterceptorEmbedded {
+    if (-not (Get-CollectorRuntime) -and -not (Test-PidRunning $PID_FILE)) { return $false }
+    $runtimePath = Join-Path $DATA_DIR "interceptor\runtime.json"
+    if (-not (Test-Path -LiteralPath $runtimePath)) { return $false }
+    try {
+        $runtime = Get-Content -LiteralPath $runtimePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        return ($runtime.status -eq "ok")
+    } catch {
+        return $false
+    }
+}
+
 function Cmd-Status {
     $verInfo = ""
     $versionDir = Resolve-CurrentVersion
@@ -1957,13 +2041,15 @@ function Cmd-Status {
 
     # Collector status
     $collectorRunning = $false
+    $collectorPid = $null
     $runtime = Get-CollectorRuntime
     if ($runtime) {
-        Write-Host "loongsuite-pilot${verInfo} is running (PID $($runtime.pid), heartbeat)"
+        $collectorPid = [int]$runtime.pid
+        Write-Host "loongsuite-pilot${verInfo} is running (PID $collectorPid, heartbeat)"
         $collectorRunning = $true
     } elseif (Test-PidRunning $PID_FILE) {
-        $pidVal = (Get-Content $PID_FILE).Trim()
-        Write-Host "loongsuite-pilot${verInfo} is running (PID $pidVal)"
+        $collectorPid = [int](Get-Content $PID_FILE).Trim()
+        Write-Host "loongsuite-pilot${verInfo} is running (PID $collectorPid)"
         $collectorRunning = $true
     }
     if (-not $collectorRunning) {
@@ -1973,11 +2059,15 @@ function Cmd-Status {
         }
     }
     if ($collectorRunning) {
-        $dashboardPort = Get-DashboardPort
-        if (Test-DashboardAvailable -Port $dashboardPort) {
-            Write-Host "   dashboard: http://127.0.0.1:$dashboardPort/"
+        if (-not (Test-DashboardEnabled)) {
+            Write-Host "   dashboard: disabled"
         } else {
-            Write-Host "   dashboard: unavailable (http://127.0.0.1:$dashboardPort/)" -ForegroundColor Yellow
+            $dashboardPort = Get-DashboardPort
+            if (Test-DashboardAvailable -Port $dashboardPort) {
+                Write-Host "   dashboard: http://127.0.0.1:$dashboardPort/"
+            } else {
+                Write-Host "   dashboard: unavailable (http://127.0.0.1:$dashboardPort/)" -ForegroundColor Yellow
+            }
         }
     }
 
@@ -1989,6 +2079,12 @@ function Cmd-Status {
         Write-Host "   updater: running (Task Scheduler)"
     } else {
         Write-Host "   updater: stopped"
+    }
+
+    if (Test-InterceptorEmbedded) {
+        Write-Host "   interceptor: running"
+    } else {
+        Write-Host "   interceptor: stopped"
     }
 
     # Autostart status
@@ -2496,6 +2592,8 @@ function Cmd-Help {
     Write-Host "                    --json           machine-readable result"
     Write-Host "  token-usage     Show token usage TUI"
     Write-Host "  tokens          Alias for token-usage"
+    Write-Host "  dashboard start [port]  Enable Dashboard and start it (restarts a running collector)"
+    Write-Host "  dashboard stop          Disable Dashboard (restarts a running collector)"
     Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     Write-Host "  agent ...       Register/list/diagnose PI SDK Agents"
     if (Test-OpenSourceBuild) {
@@ -2517,6 +2615,7 @@ switch ($Command.ToLower()) {
     "restart"            { Cmd-Restart }
     "status"             { Cmd-Status }
     "info"               { Cmd-Info }
+    "dashboard"          { Cmd-Dashboard }
     "log"                { Cmd-Log }
     "inject"             { Write-Error "Session hook injection currently supports Linux and macOS only"; exit 1 }
     "deploy"             { Cmd-Deploy }

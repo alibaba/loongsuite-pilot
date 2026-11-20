@@ -16,6 +16,12 @@ export type AgentEventName =
   | 'llm.response'
   | 'tool.call'
   | 'tool.result'
+  | 'gen_ai.model.request'
+  | 'gen_ai.model.response'
+  | 'gen_ai.tool.call'
+  | 'gen_ai.tool.result'
+  | 'gen_ai.agent.invoke'
+  | 'gen_ai.agent.result'
   | 'skill.use'
   | 'tool.approve'
   | 'agent.input'
@@ -42,6 +48,8 @@ export interface AgentActivityEntry {
   observed_time_unix_nano?: string;
   'event.id': string;
   'user.id': string;
+  'user.name'?: string;
+  'user.email'?: string;
   'event.name': AgentEventName;
   trace_id?: string;
   span_id?: string;
@@ -57,10 +65,21 @@ export interface AgentActivityEntry {
   'gen_ai.response.id'?: string;
   'gen_ai.agent.type': string;
   'gen_ai.agent.id'?: string;
+  /** Upstream Agent identity when observed; this is not a session join key. */
+  'gen_ai.agent.parent.id'?: string;
+  /** The directly interacting Agent, e.g. the target of an invoke. */
+  'gen_ai.agent.peer.id'?: string;
+  /** Outgoing delegation described by this event. Stable across replay. */
+  'gen_ai.agent.invocation.id'?: string;
+  /** Incoming delegation for this event's work, independently of outgoing calls. */
+  'gen_ai.agent.parent.invocation.id'?: string;
   'gen_ai.agent.name'?: string;
   'gen_ai.agent.description'?: string;
   'gen_ai.data_source.id'?: string;
-  'gen_ai.provider.name': string;
+  /** Required except for explicitly scoped Agent-only turn observations. */
+  'gen_ai.provider.name'?: string;
+  /** The source observes turn boundaries/input, not model or tool invocations. */
+  'loongsuite.observation.scope'?: 'agent_turn';
   'gen_ai.request.id'?: string;
   /** HTTP response status captured at the model transport boundary. */
   'http.response.status_code'?: number;
@@ -83,13 +102,24 @@ export interface AgentActivityEntry {
   'gen_ai.input.messages_delta'?: JsonValue;
   'gen_ai.input.messages'?: JsonValue;
   'gen_ai.input.multimodal_metadata'?: JsonValue;
+  'gen_ai.input.multimodal_metadata_delta'?: JsonValue;
   'gen_ai.output.messages'?: JsonValue;
+  'gen_ai.output.multimodal_metadata'?: JsonValue;
   'gen_ai.tool.name'?: string;
   'gen_ai.tool.call.id'?: string;
   'gen_ai.tool.call.exec.id'?: string;
   'gen_ai.tool.call.arguments'?: JsonValue;
   'gen_ai.tool.call.result'?: JsonValue;
   'gen_ai.tool.call.duration'?: number;
+  /** Host-observed guardrail verdict for this tool phase. */
+  'gen_ai.guardrail.triggered'?: boolean;
+  /** Enforced block, logged match, or other known verdict, respectively. */
+  'gen_ai.guardrail.action'?: 'block' | 'log' | 'allow';
+  'gen_ai.guardrail.fail_open'?: boolean;
+  /** Final blocking rule or first audit match. */
+  'gen_ai.guardrail.rule_id'?: string;
+  /** `rules[].version` from the managed document. */
+  'gen_ai.guardrail.rule_version'?: string;
   'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
   /** Grok execution evidence used to associate a tool declaration with its result. */

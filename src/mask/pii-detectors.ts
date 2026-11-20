@@ -24,8 +24,8 @@ const REPLACEMENTS: Record<PiiMaskType, string> = {
   idCard: '[IDCARD_MASKED]',
   phone: '[PHONE_MASKED]',
   email: '[EMAIL_MASKED]',
-  ipAddress: '[IPADDRESS_MASKED]',
-  bankCard: '[BANKCARD_MASKED]',
+  ipAddress: '[IP_ADDRESS_MASKED]',
+  bankCard: '[CREDIT_CARD_MASKED]',
 };
 
 export function collectPiiRanges(

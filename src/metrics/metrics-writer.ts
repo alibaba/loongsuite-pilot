@@ -4,6 +4,7 @@ import { createLogger } from '../utils/logger.js';
 import { flattenToStrings } from '../utils/record-utils.js';
 import { sendAlarm, sendRunningStatus, sendStatus } from '../internal/sender.js';
 import { MetricsCollector } from './metrics-collector.js';
+import { HookMetricsSpool } from './hook-metrics-spool.js';
 import { DISK_USAGE_STALE_MS, DiskUsageSampler } from './disk-usage-sampler.js';
 import type { DiskUsageSnapshot } from './disk-usage-sampler.js';
 import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
@@ -11,6 +12,7 @@ import type { AlarmLevel, AlarmManager } from './alarm-manager.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
 import type { TraceRuntimeSnapshot } from './trace-runtime-types.js';
+import type { InterceptorStatus } from '../interceptor/status.js';
 
 const logger = createLogger('MetricsWriter');
 
@@ -42,20 +44,25 @@ export interface MetricsWriterOptions {
   canaryPolicy?: string;
   getSnapshot: () => DataflowSnapshot;
   getTraceRuntimeSnapshot?: () => TraceRuntimeSnapshot[];
+  getInterceptorStatus?: () => Promise<InterceptorStatus>;
   alarmManager?: AlarmManager;
   agentsConfig?: AgentsConfig;
   slsEndpoints?: SlsEndpoint[];
   cmsWorkspace?: string;
   autoUpdateEnabled?: boolean;
   updaterLiveness?: (pidFile: string) => ProcessLiveness;
+  hostSn?: string;
+  hostIdentityTags?: boolean;
 }
 
 export class MetricsWriter {
   private readonly logsDir: string;
   private readonly collector: MetricsCollector;
+  private readonly hookMetricsSpool: HookMetricsSpool;
   private readonly diskUsageSampler: DiskUsageSampler;
   private readonly getSnapshot: () => DataflowSnapshot;
   private readonly getTraceRuntimeSnapshot?: () => TraceRuntimeSnapshot[];
+  private readonly getInterceptorStatus?: () => Promise<InterceptorStatus>;
   private readonly alarmManager: AlarmManager | null;
   private l2WritePromise: Promise<void> | null = null;
   private dataflowWritePromise: Promise<void> | null = null;
@@ -85,9 +92,13 @@ export class MetricsWriter {
       cmsWorkspace: opts.cmsWorkspace,
       autoUpdateEnabled: opts.autoUpdateEnabled,
       updaterLiveness: opts.updaterLiveness,
+      hostSn: opts.hostSn,
+      hostIdentityTags: opts.hostIdentityTags,
     });
+    this.hookMetricsSpool = new HookMetricsSpool(opts.dataDir);
     this.getSnapshot = opts.getSnapshot;
     this.getTraceRuntimeSnapshot = opts.getTraceRuntimeSnapshot;
+    this.getInterceptorStatus = opts.getInterceptorStatus;
     this.alarmManager = opts.alarmManager ?? null;
     this.diskUsageSampler = new DiskUsageSampler({
       dataDir: opts.dataDir,
@@ -158,12 +169,17 @@ export class MetricsWriter {
     try {
       const snapshot = sharedSnapshot ?? this.getSnapshot();
       const metrics = this.collector.collectL1(snapshot);
+      if (this.getInterceptorStatus) {
+        try { metrics.interceptor = await this.getInterceptorStatus(); }
+        catch { logger.warn('interceptor status snapshot unavailable'); }
+      }
       const disk = this.diskUsageSampler.getSnapshot();
       metrics.metric_json.disk_dir_status = disk.status;
       if (disk.scanMs !== undefined) metrics.metric_json.disk_dir_scan_ms = String(disk.scanMs);
       if (disk.sampledAt !== undefined && disk.dataBytes !== undefined && disk.logsBytes !== undefined) {
         metrics.metric_json.disk_data_bytes = String(disk.dataBytes);
         metrics.metric_json.disk_logs_bytes = String(disk.logsBytes);
+        if (disk.logsByFamily) metrics.metric_json.disk_logs_by_family = JSON.stringify(disk.logsByFamily);
         metrics.metric_json.disk_dir_sampled_at = new Date(disk.sampledAt).toISOString();
       }
 
@@ -456,15 +472,16 @@ export class MetricsWriter {
     try {
       const snapshot = sharedSnapshot ?? this.getSnapshot();
 
-      // One cycle, three row types on the same topic. They share one snapshot
-      // and one drain, so input maxima and flow deltas describe the same window.
-      const l2 = this.collector.collectL2(snapshot);
+      // Four detail types are produced in the same cycle; hook samples are merged by
+      // consumption cycle and leave the input window stats untouched.
+      const l2 = this.collector.collectL2(snapshot, this.hookMetricsSpool.drain());
       if (l2) {
         // Same as L1: the collect drained the counters, so send first and let the
         // local mirror be the thing that can fail.
         for (const row of l2.agents) sendStatus('pilot_pipeline', flattenToStrings(row));
         for (const row of l2.inputs) sendStatus('pilot_pipeline', flattenToStrings(row));
         for (const row of l2.flushers) sendStatus('pilot_pipeline', flattenToStrings(row));
+        for (const row of l2.hooks) sendStatus('pilot_pipeline', flattenToStrings(row));
 
         for (const row of l2.agents) {
           await appendLine(
@@ -481,6 +498,12 @@ export class MetricsWriter {
         for (const row of l2.flushers) {
           await appendLine(
             path.join(this.logsDir, `pilot-flusher-metrics-${getTodayDateString()}.jsonl`),
+            JSON.stringify(row),
+          );
+        }
+        for (const row of l2.hooks) {
+          await appendLine(
+            path.join(this.logsDir, `pilot-hook-metrics-${getTodayDateString()}.jsonl`),
             JSON.stringify(row),
           );
         }

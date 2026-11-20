@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
+import { ClientType } from '../types/index.js';
+import { WorkspacePolicy } from './workspace-policy.js';
 import type {
   AgentActivityEntry,
   AgentDetectionEntry,
@@ -21,6 +24,7 @@ import type { MultimodalProcessor } from '../multimodal/processor.js';
 import { TurnBoundaryProcessor } from '../normalization/turn-boundary-processor.js';
 import { applyInvocationIdentity } from '../normalization/invocation-identity.js';
 import { expandAgentInputEvents } from '../normalization/agent-input-dual-write.js';
+import type { InterceptResultLinker } from './intercept-result-linker.js';
 
 const logger = createLogger('InputManager');
 
@@ -78,11 +82,11 @@ export class InputManager extends EventEmitter {
   private readonly inputs: Map<string, BaseInput> = new Map();
   private readonly counters: Map<string, InputCounter> = new Map();
   private readonly entryQueues: Map<string, Promise<void>> = new Map();
+  private readonly entryAbortControllers = new Map<string, AbortController>();
   private flusher: BaseFlusher | null = null;
   private alarmManager: AlarmManager | null = null;
   private userId: string = '';
   private configuredUserId: string = '';
-  private agentsConfig: AgentsConfig = {};
   private maskConfig: MaskConfig = {
     mode: 'none',
     types: [],
@@ -94,8 +98,16 @@ export class InputManager extends EventEmitter {
     replacementMode: 'placeholder',
   };
   private traceLinker: TraceLinker | null = null;
+  private interceptResultLinker: InterceptResultLinker | null = null;
   private multimodalProcessor: MultimodalProcessor | null = null;
   private readonly turnBoundaryProcessor = new TurnBoundaryProcessor();
+
+  private workspacePolicy = new WorkspacePolicy();
+
+  setWorkspacePolicy(policy: WorkspacePolicy): void {
+    this.workspacePolicy = policy;
+    for (const input of this.inputs.values()) input.setWorkspacePolicy(policy);
+  }
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
@@ -113,6 +125,8 @@ export class InputManager extends EventEmitter {
     this.configuredUserId = userId;
   }
 
+  private agentsConfig: AgentsConfig = {};
+
   setAgentsConfig(config: AgentsConfig): void {
     this.agentsConfig = config;
   }
@@ -124,6 +138,18 @@ export class InputManager extends EventEmitter {
 
   setTraceLinker(linker: TraceLinker): void {
     this.traceLinker = linker;
+  }
+
+  /** Native delegation needs the final upstream context before a parent turn
+   * finishes. Reuse the same claims/cache as ordinary output processing. */
+  async stampTraceContext(entries: AgentActivityEntry[]): Promise<void> {
+    // Collection may be retried before its first output is accepted. A miss
+    // here must not seal the normal publication-time correlation window.
+    await this.traceLinker?.stamp(entries, { cacheMisses: false });
+  }
+
+  setInterceptResultLinker(linker: InterceptResultLinker): void {
+    this.interceptResultLinker = linker;
   }
 
   /** Process-scoped; reject replacing a different live instance. */
@@ -140,7 +166,11 @@ export class InputManager extends EventEmitter {
       logger.warn('input already registered', { id: input.id });
       return;
     }
+    input.setWorkspacePolicy(this.workspacePolicy);
     this.inputs.set(input.id, input);
+    if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes || input.id === 'qwen-work-cn-collaboration') {
+      this.entryAbortControllers.set(input.id, new AbortController());
+    }
     this.counters.set(input.id, {
       sourceKind: 'primary',
       rawReadCalls: 0,
@@ -168,13 +198,26 @@ export class InputManager extends EventEmitter {
       this.handleInputRuntimeDelta(input.id, delta);
     });
     input.on('entries', (entries: AgentActivityEntry[]) => {
+      // Streaming inputs can emit again inside a collect that was already in
+      // flight when an earlier output failed. Keep the cursor frozen for recovery.
+      if (input.checkpointFailed) return;
       const previous = this.entryQueues.get(input.id) ?? Promise.resolve();
-      const next = previous
+      const handling = previous
         .catch(() => undefined)
-        .then(() => this.handleEntries(input.id, entries))
-        .catch(err => {
-          logger.error('entry handling failed', { inputId: input.id, error: String(err) });
+        .then(() => this.handleEntries(input.id, entries));
+      if (input.id === 'qwen-work-cn-collaboration') {
+        const controller = this.entryAbortControllers.get(input.id);
+        const retained = handling.catch(error => {
+          if (!controller?.signal.aborted) throw error;
+          (input as BaseInput & { restoreAbortedDelivery(): void }).restoreAbortedDelivery();
         });
+        input.holdCheckpointUntil(retained);
+      } else if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes) {
+        input.holdCheckpointUntil(handling);
+      }
+      const next = handling.catch(err => {
+        logger.error('entry handling failed', { inputId: input.id, error: String(err) });
+      });
       this.entryQueues.set(input.id, next);
       void next.finally(() => {
         if (this.entryQueues.get(input.id) === next) this.entryQueues.delete(input.id);
@@ -222,6 +265,9 @@ export class InputManager extends EventEmitter {
       logger.warn('cannot start unknown input', { id });
       return;
     }
+    if (this.entryAbortControllers.get(id)?.signal.aborted) {
+      this.entryAbortControllers.set(id, new AbortController());
+    }
     await input.start();
     logger.info('input started', { id });
   }
@@ -229,12 +275,27 @@ export class InputManager extends EventEmitter {
   async stopInput(id: string): Promise<void> {
     const input = this.inputs.get(id);
     if (!input) return;
+    this.entryAbortControllers.get(id)?.abort();
     await input.stop();
     await this.drainInputQueue(id);
     logger.info('input stopped', { id });
   }
 
+  /** Recovery must first drain the actual Hermes source and output queue. */
+  async confirmHermesSourceDrained(sourceToken: string): Promise<boolean> {
+    const input = this.inputs.get('hermes-agent-log') as (BaseInput & {
+      confirmSourceDrained?: (token: string) => Promise<boolean>;
+    }) | undefined;
+    return input?.confirmSourceDrained ? input.confirmSourceDrained(sourceToken) : false;
+  }
+
+  /** Called before discovery drains starts that may themselves await output. */
+  cancelPendingOutputs(): void {
+    for (const controller of this.entryAbortControllers.values()) controller.abort();
+  }
+
   async stopAll(): Promise<void> {
+    this.cancelPendingOutputs();
     for (const [id, input] of this.inputs) {
       if (input.running) {
         await input.stop();
@@ -335,7 +396,24 @@ export class InputManager extends EventEmitter {
     inputId: string,
     entries: AgentActivityEntry[],
   ): Promise<void> {
+    entries = this.workspacePolicy.filter(entries, this.inputs.get(inputId)?.agentType);
     if (entries.length === 0) return;
+
+    // Join while entries still carry the agent-native session id.
+    if (this.interceptResultLinker) {
+      try {
+        // Only collection waits for the worker FIFO barrier; hook HTTP never waits for this thread.
+        await this.interceptResultLinker.sync(entries).catch(error => {
+          logger.warn('interceptor verdict sync failed; using available cache', { inputId, error: String(error) });
+        });
+        this.interceptResultLinker.enrich(entries);
+      } catch (err) {
+        logger.warn('interceptor result linking failed (skipped)', {
+          inputId,
+          error: String(err),
+        });
+      }
+    }
 
     try {
       await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);
@@ -370,9 +448,7 @@ export class InputManager extends EventEmitter {
       }
     }
 
-    for (const entry of entries) {
-      applyInvocationIdentity(entry, this.configuredUserId, this.userId);
-    }
+    this.applyIdentity(entries);
 
     // Fill-only lifecycle enrichment. It never changes record order/count or
     // existing boundary markers, and must not block the normal output path.
@@ -385,18 +461,7 @@ export class InputManager extends EventEmitter {
       });
     }
 
-    const policyAppliedEntries = entries.map(entry =>
-      applyAgentContentPolicy(entry, this.agentsConfig),
-    );
-
-    const maskedEntries =
-      this.maskPlan.rules.length === 0 && this.maskPlan.piiTypes.size === 0
-        ? policyAppliedEntries
-        : policyAppliedEntries.map(entry =>
-            maskAgentActivityEntry(entry, this.maskConfig, this.maskPlan),
-          );
-
-    const expandedEntries = expandAgentInputEvents(maskedEntries);
+    const expandedEntries = expandAgentInputEvents(this.applyPolicyAndMask(entries));
     let outputBatchBytes = 0;
     // Reuse the existing serialization; only retain its numeric results.
     const logicalBytes = expandedEntries.map(entry => {
@@ -409,6 +474,61 @@ export class InputManager extends EventEmitter {
     await this.dispatchEntries(inputId, expandedEntries, outputBatchBytes, logicalBytes);
   }
 
+  /**
+   * Flush entries that did not come from an Input. Reuses git enrichment,
+   * invocation identity, content policy, and mask, then the same flusher.
+   */
+  async flushPreparedEntries(entries: AgentActivityEntry[], signal?: AbortSignal): Promise<void> {
+    // Apply privacy policy before invocation identity replaces native session/agent keys.
+    entries = this.workspacePolicy.filter(entries);
+    if (entries.length === 0) return;
+    signal?.throwIfAborted();
+    const inputId = 'interceptor';
+    try {
+      await enrichCanonicalEntriesWithGit(entries as Record<string, unknown>[]);
+    } catch (err) {
+      logger.warn('git context enrichment failed (skipped)', {
+        inputId,
+        error: String(err),
+      });
+    }
+
+    signal?.throwIfAborted();
+    this.applyIdentity(entries);
+    const prepared = this.applyPolicyAndMask(entries);
+    let outputBatchBytes = 0;
+    const logicalBytes = prepared.map(entry => {
+      const bytes = Buffer.byteLength(JSON.stringify(entry));
+      outputBatchBytes += bytes;
+      return bytes;
+    });
+    logger.info('dispatching entries', { inputId, count: prepared.length });
+    await this.dispatchEntries(inputId, prepared, outputBatchBytes, logicalBytes, signal);
+  }
+
+  private applyIdentity(entries: AgentActivityEntry[]): void {
+    for (const entry of entries) {
+      applyInvocationIdentity(entry, this.configuredUserId, this.userId);
+    }
+  }
+
+  /** Recheck retained output against current workspace and mask rules without rewriting its identity. */
+  prepareRestoredEntries(entries: AgentActivityEntry[]): AgentActivityEntry[] {
+    return this.applyPolicyAndMask(this.workspacePolicy.filter(entries));
+  }
+
+  private applyPolicyAndMask(entries: AgentActivityEntry[]): AgentActivityEntry[] {
+    const policyAppliedEntries = entries.map(entry =>
+      applyAgentContentPolicy(entry, this.agentsConfig),
+    );
+    if (this.maskPlan.rules.length === 0 && this.maskPlan.piiTypes.size === 0) {
+      return policyAppliedEntries;
+    }
+    return policyAppliedEntries.map(entry =>
+      maskAgentActivityEntry(entry, this.maskConfig, this.maskPlan),
+    );
+  }
+
   markInputStarted(id: string): void {
     const counter = this.counters.get(id);
     if (counter && !counter.startTime) {
@@ -416,7 +536,7 @@ export class InputManager extends EventEmitter {
     }
   }
 
-  private async dispatchEntries(inputId: string, entries: AgentActivityEntry[], batchBytes: number, logicalBytes?: readonly number[]): Promise<void> {
+  private async dispatchEntries(inputId: string, entries: AgentActivityEntry[], batchBytes: number, logicalBytes?: readonly number[], signalOverride?: AbortSignal): Promise<void> {
     if (!this.flusher) {
       logger.warn('no flusher set, dropping entries', { count: entries.length });
       this.alarmManager?.record(
@@ -424,17 +544,52 @@ export class InputManager extends EventEmitter {
         `dropped ${entries.length} entries from ${inputId}: no flusher`,
         { input_name: inputId },
       );
+      if (inputId === 'qwen-work-cn-collaboration') throw new Error('no flusher for collaboration input');
       return;
     }
 
     const counter = this.counters.get(inputId);
+    const signal = signalOverride ?? this.entryAbortControllers.get(inputId)?.signal;
     try {
-      await this.flusher.sendBatch(entries, logicalBytes);
+      const deliver = this.flusher.createBatchDelivery(entries, logicalBytes, signal);
+      let quotaAlarmed = false;
+      let collaborationRetryMs = 1000;
+      while (true) {
+        try {
+          await deliver();
+          break;
+        } catch (error) {
+          if (inputId === 'qwen-work-cn-collaboration' && !signal?.aborted) {
+            // Keep the source checkpoint behind this same fan-out delivery.
+            // Its already-accepted destinations are not sent the batch again.
+            await delay(collaborationRetryMs, undefined, signal ? { signal } : undefined);
+            collaborationRetryMs = Math.min(collaborationRetryMs * 2, 30_000);
+            continue;
+          }
+          const quota = (error as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
+          if (!quota || signal?.aborted) throw error;
+          if (!quotaAlarmed) {
+            this.alarmManager?.record('FLUSH_QUOTA_ALARM', '3',
+              `Codex output capacity exhausted for ${inputId}; retrying without advancing its checkpoint`, { input_name: inputId });
+            quotaAlarmed = true;
+          }
+          await delay(1000, undefined, signal ? { signal } : undefined);
+        }
+      }
       if (counter) counter.outEvents += entries.length;
       this.emit('flushed', { count: entries.length, bytes: batchBytes });
     } catch (err) {
       if (counter) counter.outFailed += entries.length;
+      if (signal?.aborted) throw err;
       logger.error('dispatch failed', { count: entries.length, error: String(err) });
+      if (inputId === 'qwen-work-cn-collaboration') throw err;
+      if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes((err as Error)?.name)) {
+        const quota = (err as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
+        this.alarmManager?.record(quota ? 'FLUSH_QUOTA_ALARM' : 'FLUSH_SEND_ALARM', '3',
+          `Output durability blocked for ${inputId}; source checkpoint retained: ${String(err)}`,
+          { input_name: inputId });
+        throw err;
+      }
     }
   }
 }

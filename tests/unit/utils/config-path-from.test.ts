@@ -3,7 +3,9 @@ import * as os from 'node:os';
 import { configJsonPath, configJsonPathFrom } from '../../../src/utils/data-dir.js';
 import { resolveHome } from '../../../src/utils/fs-utils.js';
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 describe('shared config path resolution', () => {
   it.each(['~\\pilot\\config.json', '~/pilot/config.json'])('expands Windows %s using USERPROFILE, not HOME', value => {
     const env = { HOME: 'C:\\wrong', USERPROFILE: 'C:\\Users\\agent', AGENT_DATA_COLLECTION_CONFIG: value };

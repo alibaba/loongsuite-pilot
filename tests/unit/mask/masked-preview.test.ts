@@ -34,7 +34,7 @@ function syntheticPrivateKey(): string {
 }
 
 describe('masked preview replacement mode', () => {
-  it('keeps placeholder output byte-compatible by default', () => {
+  it('keeps placeholder output byte-compatible when explicitly requested', () => {
     expect(maskString('phone=13800138000', placeholderPlan)).toBe(
       'phone=[PHONE_MASKED]',
     );
@@ -90,6 +90,43 @@ describe('masked preview replacement mode', () => {
     );
   });
 
+  it.each([
+    'mysql://sk-1234567890abcdefghijklmnop:password@db.example/orders',
+    'mysql://user:password@db.example/sk-1234567890abcdefghijklmnop',
+  ])('falls back to a fixed marker when a database URL contains another detected secret', value => {
+    const defaultPlan = loadMaskPlan({ mode: 'all', types: [] });
+    for (const plan of [defaultPlan, previewPlan]) {
+      const masked = maskString(value, plan);
+      expect(masked).toBe('[DATABASEURL_MASKED]');
+      expect(masked).not.toContain(syntheticApiKey());
+      expect(maskString(masked, plan)).toBe(masked);
+    }
+  });
+
+  it.each(
+    ['mysql', 'postgres', 'redis', 'mongodb'].flatMap(scheme =>
+      ['alice.wang@example.com', 'alice.wang%40example.com', 'alice.wang%2540example.com'].map(username =>
+        `${scheme}://${username}:password@db.example/app`,
+      ),
+    ),
+  )('does not expose an email username after URL percent-encoding: %s', value => {
+    for (const plan of [loadMaskPlan({ mode: 'all', types: [] }), previewPlan]) {
+      const masked = maskString(value, plan);
+      expect(masked).toBe('[DATABASEURL_MASKED]');
+      expect(masked).not.toContain('alice.wang@example.com');
+      expect(masked).not.toContain('alice.wang%40example.com');
+      expect(maskString(masked, plan)).toBe(masked);
+    }
+  });
+
+  it.each([
+    'postgres://user:password@db.example/alice.wang%40example.com',
+    'jdbc:postgresql://db.example/alice.wang%40example.com?user=user&password=secret',
+  ])('falls back when a retained database path contains encoded sensitive text: %s', value => {
+    const plan = loadMaskPlan({ mode: 'all', types: [] });
+    expect(maskString(value, plan)).toBe('[DATABASEURL_MASKED]');
+  });
+
   it('builds previews for ID card, email, IPv4 and bank card', () => {
     const input = [
       '11010519491231002X',
@@ -101,8 +138,8 @@ describe('masked preview replacement mode', () => {
     expect(maskString(input, previewPlan)).toBe(
       '[IDCARD_MASKED]{1101**********002X}|' +
       '[EMAIL_MASKED]{zh****an@example.com}|' +
-      '[IPADDRESS_MASKED]{192.*.*.10}|' +
-      '[BANKCARD_MASKED]{622126******0000}',
+      '[IP_ADDRESS_MASKED]{192.*.*.10}|' +
+      '[CREDIT_CARD_MASKED]{622126******0000}',
     );
   });
 

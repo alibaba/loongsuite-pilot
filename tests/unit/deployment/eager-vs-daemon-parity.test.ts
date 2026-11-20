@@ -2,11 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { isolateAgentHome } from '../../helpers/isolated-agent-home.js';
 import { AgentDefLoader } from '../../../src/deployment/agent-def-loader.js';
 import { DeploymentManager } from '../../../src/deployment/deployment-manager.js';
 import { HookManager } from '../../../src/hooks/hook-manager.js';
 import { HookStrategy } from '../../../src/deployment/hook-strategy.js';
 import { planEagerDeploys } from '../../../src/inject-hooks.js';
+
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const homedir = vi.fn(actual.homedir);
+  return { ...actual, homedir, default: { ...actual, homedir } };
+});
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
@@ -51,9 +58,11 @@ describe('eager injection vs daemon deployAll parity', () => {
   let pilotDir: string;
   let builtinDir: string;
   let settingsPath: string;
+  let restoreHome: () => void;
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-parity-'));
+    restoreHome = isolateAgentHome(tmp);
     dataDir = path.join(tmp, 'data');
     pilotDir = path.join(tmp, 'pilot');
     builtinDir = path.join(pilotDir, 'agents.d');
@@ -84,7 +93,8 @@ describe('eager injection vs daemon deployAll parity', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmp, { recursive: true, force: true });
+    try { await fs.rm(tmp, { recursive: true, force: true }); }
+    finally { restoreHome(); }
   });
 
   /**
@@ -109,6 +119,19 @@ describe('eager injection vs daemon deployAll parity', () => {
     await strategy.deploy(defs.find(d => d.id === entry!.agentId)!);
   }
 
+  function hookCommands(settings: string): string[] {
+    const parsed = JSON.parse(settings) as { hooks?: Record<string, Array<{ hooks?: Array<{ command?: string }> }>> };
+    const commands: string[] = [];
+    for (const groups of Object.values(parsed.hooks ?? {})) {
+      for (const group of groups ?? []) {
+        for (const hook of group.hooks ?? []) {
+          if (hook.command) commands.push(hook.command);
+        }
+      }
+    }
+    return commands;
+  }
+
   function countHookEntries(settings: Record<string, any>): number {
     let n = 0;
     for (const event of Object.keys(settings.hooks ?? {})) {
@@ -131,6 +154,7 @@ describe('eager injection vs daemon deployAll parity', () => {
     // Byte equality, not just "still one entry": a divergent-but-same-count
     // rewrite would mean the two paths disagree about the command string.
     expect(afterDaemon).toBe(afterEager);
+    expect(hookCommands(afterDaemon)).toEqual(hookCommands(afterEager));
     expect(countHookEntries(JSON.parse(afterDaemon))).toBe(1);
 
     const result = results.find(r => r.agentId === 'test-agent');

@@ -50,6 +50,16 @@ function Log-Error {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
         $file = Join-Path $dir "grok-build-error-$day.jsonl"
+        $lock = "$file.lock"
+        $locked = $false
+        # New-Item fails when the lock file already exists. Constrained Language
+        # cannot call [System.IO.File]::Open, so a failed claim still appends.
+        try {
+            New-Item -Path $lock -ItemType File -ErrorAction Stop | Out-Null
+            $locked = $true
+        } catch {
+            $locked = $false
+        }
         $record = @{
             time = (Get-Date).ToUniversalTime().ToString("o")
             "gen_ai.agent.type" = "grok-build"
@@ -58,6 +68,9 @@ function Log-Error {
             "error.message" = $Message
         }
         Add-Content -LiteralPath $file -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
+        if ($locked) {
+            Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
+        }
     } catch {}
 }
 
@@ -77,10 +90,33 @@ function Convert-NodePath {
 
 $MIN_NODE_MAJOR = 18
 
+# Managed runtimes live at <pilot-dir>\runtime\node-v<x>.<y>.<z>\node.exe (win zip layout)
+# or ...\node-v<x>.<y>.<z>\bin\node.exe, extracted by the installer only after it verified
+# SHASUMS256 and probed the binary itself, so the directory name is authoritative. Reading
+# the major from the path skips a `node --version` launch that would otherwise run on the
+# user's interactive path for every single event. Returns $null for anything that is not a
+# managed runtime, which still gets probed. Split-Path/-match keep this CLM-safe.
+function Get-ManagedNodeMajor {
+    param([string]$bin)
+    if (-not $bin) { return $null }
+    $dir = Split-Path $bin -Parent
+    if (-not $dir) { return $null }
+    if ((Split-Path $dir -Leaf) -eq 'bin') {
+        $dir = Split-Path $dir -Parent
+        if (-not $dir) { return $null }
+    }
+    $parent = Split-Path $dir -Parent
+    if (-not $parent -or (Split-Path $parent -Leaf) -ne 'runtime') { return $null }
+    if ((Split-Path $dir -Leaf) -match '^node-v([0-9]+)') { return [int]$Matches[1] }
+    return $null
+}
+
 function Test-NodeSuitable {
     param([string]$Bin)
     $resolved = Convert-NodePath $Bin
     if (-not $resolved -or -not (Test-Path -LiteralPath $resolved)) { return $false }
+    $managedMajor = Get-ManagedNodeMajor $resolved
+    if ($null -ne $managedMajor) { return $managedMajor -ge $MIN_NODE_MAJOR }
     try {
         $version = & $resolved --version 2>$null
         if (-not $version) { return $false }

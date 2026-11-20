@@ -6,6 +6,7 @@ import type { AgentActivityEntry, CodeGenerationEvent } from '../../types/index.
 import { BaseIdeInput, type IdeInputOptions } from '../base/base-ide-input.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome } from '../../utils/fs-utils.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const DEFAULT_QODER_ROOT_MAC = '~/Library/Application Support/Qoder';
 const DEFAULT_QODER_ROOT_LINUX = '~/.config/Qoder';
@@ -40,7 +41,7 @@ export class QoderInput extends BaseIdeInput {
       snapshotStorePath: opts?.snapshotStorePath
         ?? resolveHome('~/.loongsuite-pilot/logs/qoder/qoder-snapshot-store.json'),
       pollIntervalMs: opts?.pollIntervalMs
-        ?? (Number(process.env.QODER_ANALYTICS_POLL_INTERVAL) || 30_000),
+        ?? (Number(process.env.QODER_ANALYTICS_POLL_INTERVAL) || DEFAULT_POLL_INTERVAL_MS),
       snapshotRetentionMs: opts?.snapshotRetentionMs,
     });
   }

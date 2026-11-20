@@ -4,8 +4,15 @@ import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { isolateAgentHome } from '../../helpers/isolated-agent-home.js';
 import { DeploymentManager } from '../../../src/deployment/deployment-manager.js';
 import type { AgentDefinition } from '../../../src/types/index.js';
+
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const homedir = vi.fn(actual.homedir);
+  return { ...actual, homedir, default: { ...actual, homedir } };
+});
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -32,10 +39,12 @@ describe('DeploymentManager', () => {
   let dataDir: string;
   let pilotDir: string;
   let builtinDir: string;
+  let restoreHome: () => void;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deploy-mgr-'));
+    restoreHome = isolateAgentHome(tmpDir);
     dataDir = path.join(tmpDir, 'data');
     pilotDir = path.join(tmpDir, 'pilot');
     builtinDir = path.join(tmpDir, 'agents.d');
@@ -46,7 +55,8 @@ describe('DeploymentManager', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    try { await fs.rm(tmpDir, { recursive: true, force: true }); }
+    finally { restoreHome(); }
   });
 
   function makeManager() {
@@ -60,6 +70,32 @@ describe('DeploymentManager', () => {
   function writeAgentDef(def: AgentDefinition) {
     return fs.writeFile(path.join(builtinDir, `${def.id}.json`), JSON.stringify(def));
   }
+
+  it('does not create shared producer directories without explicit root mode', async () => {
+    const previous = process.env.LOONGSUITE_PILOT_ROOT_TRIGGER;
+    delete process.env.LOONGSUITE_PILOT_ROOT_TRIGGER;
+    try {
+      await makeManager().deployAll();
+      await expect(fs.stat(path.join(dataDir, 'logs', 'openclaw'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_PILOT_ROOT_TRIGGER;
+      else process.env.LOONGSUITE_PILOT_ROOT_TRIGGER = previous;
+    }
+  });
+
+  it.skipIf(process.platform !== 'linux' || process.getuid?.() !== 0)('prepares shared producer directories through the normal deployment entry', async () => {
+    const previous = process.env.LOONGSUITE_PILOT_ROOT_TRIGGER;
+    process.env.LOONGSUITE_PILOT_ROOT_TRIGGER = '1';
+    try {
+      await makeManager().deployAll();
+      for (const id of ['openclaw', 'hermes-agent', 'dsh']) {
+        expect((await fs.stat(path.join(dataDir, 'logs', id))).mode & 0o7777).toBe(0o1777);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_PILOT_ROOT_TRIGGER;
+      else process.env.LOONGSUITE_PILOT_ROOT_TRIGGER = previous;
+    }
+  });
 
   describe('deployAll', () => {
     it('deploys hook agents that are detected', async () => {
@@ -230,6 +266,64 @@ describe('DeploymentManager', () => {
       expect(results.find(result => result.agentId === def.id)?.skipped).toBe(true);
       const afterDisable = await fs.readFile(settingsPath, 'utf-8');
       expect(afterDisable).not.toContain('/opt/toggle.sh');
+    });
+
+    it('cleans disabled Copilot registrations, assets and shell blocks and retries failed cleanup', async () => {
+      const root = path.join(tmpDir, '.copilot');
+      const def: AgentDefinition = { id: 'copilot', displayName: 'Copilot', deployMode: 'copilot-plugin', detection: {paths:[root],commands:[]},
+        copilotPlugin: { pluginRoot:path.join(root,'installed-plugins/pilot/pilot'),pluginId:'pilot',settingsPath:path.join(root,'settings.json'),
+          configPath:path.join(root,'config.json'),events:['sessionStart'],hookCommand:path.join(dataDir,'hooks/copilot.sh'),format:'nested' } };
+      await writeAgentDef(def);vi.mocked(detectAgent).mockResolvedValue(true);
+      const mgr=makeManager();expect((await mgr.deployAll())[0].success).toBe(true);
+      await fs.writeFile(def.copilotPlugin!.configPath!,'{broken');
+      expect((await mgr.deployAll(()=>false))[0].success).toBe(false);expect(mgr.hasRecord('copilot')).toBe(true);
+      await expect(fs.stat(path.join(def.copilotPlugin!.pluginRoot,'plugin.json'))).resolves.toBeDefined();
+      await fs.writeFile(def.copilotPlugin!.configPath!,'{}');
+      expect((await mgr.deployAll(()=>false))[0].success).toBe(true);expect(mgr.hasRecord('copilot')).toBe(false);
+      await expect(fs.stat(def.copilotPlugin!.pluginRoot)).rejects.toMatchObject({code:'ENOENT'});
+      expect(await fs.readFile(path.join(tmpDir,'.bashrc'),'utf8')).not.toContain('loongsuite-pilot copilot otel');
+    });
+
+    it('persists failed first Copilot deployment for disable cleanup after restart and target drift', async () => {
+      const root = path.join(tmpDir, '.copilot');
+      const def: AgentDefinition = { id: 'copilot', displayName: 'Copilot', deployMode: 'copilot-plugin', detection: {paths:[root],commands:[]},
+        copilotPlugin: {pluginRoot:path.join(root,'installed-plugins/pilot/pilot'),pluginId:'pilot',settingsPath:path.join(root,'settings.json'),
+          configPath:path.join(root,'config.json'),events:['sessionStart'],hookCommand:path.join(dataDir,'hooks/copilot.sh'),format:'nested'} };
+      await writeAgentDef(def); vi.mocked(detectAgent).mockResolvedValue(true);
+      await fs.mkdir(path.join(tmpDir, '.bashrc'));
+      const mgr = makeManager();
+      expect((await mgr.deployAll())[0]).toMatchObject({success:false,cleanupRequired:true});
+      const state = JSON.parse(await fs.readFile(path.join(dataDir,'deployed-agents.json'),'utf8'));
+      expect(state.copilot.cleanupRequired).toBe(true);
+      expect(JSON.parse(await fs.readFile(def.copilotPlugin!.settingsPath,'utf8')).enabledPlugins['pilot@pilot']).toBe(true);
+      // Cleanup failure keeps the state retryable, even in a new daemon.
+      const next = makeManager();
+      expect((await next.deployAll(()=>false))[0].success).toBe(false);
+      expect(next.hasRecord('copilot')).toBe(true);
+      await fs.rmdir(path.join(tmpDir,'.bashrc'));
+      const moved = {...def, copilotPlugin:{...def.copilotPlugin!, settingsPath:path.join(tmpDir,'other/settings.json'),configPath:path.join(tmpDir,'other/config.json'),pluginRoot:path.join(tmpDir,'other/plugin')}};
+      await writeAgentDef(moved);
+      expect((await makeManager().deployAll(()=>false))[0].success).toBe(true);
+      expect(JSON.parse(await fs.readFile(path.join(dataDir,'deployed-agents.json'),'utf8')).copilot).toBeUndefined();
+      await expect(fs.stat(def.copilotPlugin!.pluginRoot)).rejects.toMatchObject({code:'ENOENT'});
+      expect(JSON.parse(await fs.readFile(def.copilotPlugin!.settingsPath,'utf8')).enabledPlugins['pilot@pilot']).toBeUndefined();
+      await expect(fs.stat(path.join(tmpDir,'other'))).rejects.toMatchObject({code:'ENOENT'});
+    });
+
+    it('does not track validation-only Copilot failures and clears partial status after repair', async () => {
+      const root = path.join(tmpDir,'.copilot'); await fs.mkdir(root);
+      const def: AgentDefinition = {id:'copilot',displayName:'Copilot',deployMode:'copilot-plugin',detection:{paths:[root],commands:[]},
+        copilotPlugin:{pluginRoot:path.join(root,'plugins/pilot'),pluginId:'pilot',settingsPath:path.join(root,'settings.json'),configPath:path.join(root,'config.json'),events:['sessionStart'],hookCommand:path.join(dataDir,'hooks/copilot.sh'),format:'nested'}};
+      await writeAgentDef(def);vi.mocked(detectAgent).mockResolvedValue(true);
+      await fs.writeFile(def.copilotPlugin!.settingsPath,'{invalid');
+      const mgr=makeManager();expect((await mgr.deployAll())[0]).toMatchObject({success:false,cleanupRequired:false});expect(mgr.hasRecord('copilot')).toBe(false);
+      await fs.writeFile(def.copilotPlugin!.settingsPath,'{}');await fs.mkdir(path.join(tmpDir,'.bashrc'));
+      expect((await mgr.deployAll())[0].success).toBe(false);
+      await fs.rmdir(path.join(tmpDir,'.bashrc'));
+      expect((await makeManager().deployAll())[0].success).toBe(true);
+      const state=JSON.parse(await fs.readFile(path.join(dataDir,'deployed-agents.json'),'utf8'));
+      expect(state.copilot.cleanupRequired).toBe(false);
+      expect((await makeManager().deployAll())[0].reason).toBe('up-to-date');
     });
 
     it('removes the DSH YAML block and enabled marker when DSH is disabled', async () => {

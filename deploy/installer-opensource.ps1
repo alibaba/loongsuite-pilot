@@ -48,8 +48,11 @@ param(
     [string]$UserId,
     [string]$Lang,
     [string]$Version,
+    [string[]]$ExcludeWorkspace,
     [string]$CollectLog,
     [string]$CollectTrace,
+    [ValidateSet("true", "false")]
+    [string]$EnableStatusBarApp,
     [string]$CmsLicenseKey,
     [string]$CmsEndpoint,
     [string]$CmsWorkspace,
@@ -61,11 +64,17 @@ param(
     [string]$MaskMode,
     [string]$MaskTypes,
     [string]$MaskReplacementMode,
+    [string]$InterceptorMode,
     [switch]$Purge,
     [switch]$PreferSystemNode
 )
 
 $ErrorActionPreference = "Stop"
+foreach ($excludedWorkspace in $ExcludeWorkspace) {
+    if ($excludedWorkspace -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)') {
+        throw "-ExcludeWorkspace requires absolute local directories"
+    }
+}
 # Wrap in try/catch: setting a static property on [Console] throws under Constrained
 # Language Mode (WDAC), and with $ErrorActionPreference=Stop that would abort the whole
 # script at load. Console encoding is cosmetic, so degrade silently.
@@ -110,6 +119,10 @@ if (-not $PackageUrl -and $env:LOONGSUITE_PILOT_PACKAGE_URL) {
 # ============================================================
 # Validate install options
 # ============================================================
+if ($PSBoundParameters.Keys -contains 'EnableStatusBarApp' -and $Command -ne 'install') {
+    Write-Error "-EnableStatusBarApp is only supported with install"
+    exit 1
+}
 if ($PSBoundParameters.Keys -contains 'DashboardPort') {
     if ($DashboardPort -notmatch '\A[0-9]{1,5}\z' -or [int]$DashboardPort -lt 1 -or [int]$DashboardPort -gt 65535) {
         Write-Error "-DashboardPort must be an integer between 1 and 65535"
@@ -134,6 +147,12 @@ if ($MaskReplacementMode -and $MaskReplacementMode -notin @("placeholder", "prev
     Write-Error "Unknown mask replacement mode: $MaskReplacementMode (use 'placeholder' or 'preview')"
     exit 1
 }
+if ($InterceptorMode) {
+    if ($InterceptorMode -notin @("all", "none")) {
+        Write-Error "Unknown interceptor mode: $InterceptorMode (use 'all' or 'none')"
+        exit 1
+    }
+}
 if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
     Write-Error "-SlsApiKey cannot be used with -SlsAkId or -SlsAkSecret"
     exit 1
@@ -144,7 +163,7 @@ if ($PSBoundParameters.Keys -contains 'MultimodalMode' -and -not $MultimodalMode
 }
 $script:MultimodalMode = $MultimodalMode
 # Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
-$script:MultimodalSupportedAgents = "codex,qoder"
+$script:MultimodalSupportedAgents = "codex,qoder,qwen-work-cn"
 if ($MultimodalMode) {
     if ($MultimodalMode -notin @("none", "input", "output", "all")) {
         Write-Error "Unknown multimodal mode: $MultimodalMode (use 'none', 'input', 'output', or 'all')"
@@ -210,15 +229,31 @@ function Test-CanPrompt {
 # ============================================================
 # Node.js resolution
 # ============================================================
+# node:sqlite is unflagged from 22.13 and 23.4. A major check accepts Node 20
+# and 22.12, whose require('node:sqlite') throws, so install succeeds and
+# SQLite collection does not. The require is the check.
+# Native stderr under EAP=Stop becomes a terminating error and hides $LASTEXITCODE.
+function Test-NodeSupportsSqlite {
+    param([string]$bin)
+    if (-not $bin -or -not (Test-Path -LiteralPath $bin)) { return $false }
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $code = 1
+    try {
+        $sqliteProbe = & $bin -e "require('node:sqlite')" 2>&1
+        $code = $LASTEXITCODE
+        if ($null -eq $code) { $code = 1 }
+    } catch {
+        $code = 1
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    return ($code -eq 0)
+}
+
 function Test-NodeSuitable {
     param([string]$bin)
-    if (-not (Test-Path $bin)) { return $false }
-    try {
-        $ver = & $bin --version 2>$null
-        if (-not $ver) { return $false }
-        $major = [int]($ver -replace '^v','').Split('.')[0]
-        return $major -ge 18
-    } catch { return $false }
+    return (Test-NodeSupportsSqlite $bin)
 }
 
 function Resolve-Node {
@@ -762,7 +797,11 @@ function Check-Deps {
     $script:NODE_BIN = ""
     if ($PreferSystemNode) {
         $script:NODE_BIN = Resolve-Node
-        if (-not $script:NODE_BIN) { $script:NODE_BIN = Ensure-ManagedNode }
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️ 系统 Node.js 不可用或无法加载 node:sqlite（需要 22.13+ 或 23.4+），改用托管运行时" `
+                "    ⚠️ System Node.js is missing or cannot load node:sqlite (need 22.13+ or 23.4+); using the managed runtime"
+            $script:NODE_BIN = Ensure-ManagedNode
+        }
     } else {
         $script:NODE_BIN = Ensure-ManagedNode
         if (-not $script:NODE_BIN) {
@@ -772,16 +811,26 @@ function Check-Deps {
         }
     }
     if (-not $script:NODE_BIN) {
-        Msg "❌ 缺少依赖: node，请先安装后重试" "❌ Missing dependency: node — please install it first"
+        Msg "❌ 缺少可用的 Node.js：需要能加载 node:sqlite 的版本（22.13+ / 23.4+），或成功下载托管运行时" `
+            "❌ No usable Node.js: node:sqlite must load (22.13+ / 23.4+), or the managed runtime must download"
         exit 1
     }
 
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $nodeMajor = & $script:NODE_BIN -e "process.stdout.write(String(process.versions.node.split('.')[0]))"
-    $ErrorActionPreference = $prevEAP
-    if ([int]$nodeMajor -lt 18) {
-        $nodeVer = & $script:NODE_BIN --version
-        Msg "❌ 需要 Node.js >= 18，当前版本: $nodeVer" "❌ Requires Node.js >= 18, current: $nodeVer"
+    if (-not (Test-NodeSupportsSqlite $script:NODE_BIN)) {
+        $nodeVer = "unknown"
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $verOut = & $script:NODE_BIN --version 2>&1
+            $code = $LASTEXITCODE
+            if ($code -eq 0 -and $verOut) { $nodeVer = "$verOut".Trim() }
+        } catch {
+            $nodeVer = "unknown"
+        } finally {
+            $ErrorActionPreference = $prevEAP
+        }
+        Msg "❌ 当前 Node.js 无法加载 node:sqlite（$nodeVer）。需要 22.13+ 或 23.4+（无需 --experimental-sqlite），或托管运行时。" `
+            "❌ This Node.js cannot load node:sqlite ($nodeVer). Need 22.13+ or 23.4+ (unflagged), or the managed runtime."
         exit 1
     }
 
@@ -1083,6 +1132,7 @@ function Confirm-ConfigOverwrite {
         maskMode = $MaskMode
         maskTypes = $MaskTypes
         maskReplacementMode = $MaskReplacementMode
+        interceptorMode = $InterceptorMode
         multimodalMode = $script:MultimodalMode
     } | ConvertTo-Json -Compress
 
@@ -1095,6 +1145,17 @@ let old = {};
 try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
+const INTERCEPTOR_MASK_TYPES = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+const parseTypeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean);
+const uniqueTypes = list => [...new Set(list)];
+const interceptorModeFinal = newVals.interceptorMode || (old.interceptor||{}).mode || '';
+const interceptorTypesFinal = interceptorModeFinal === 'all' ? INTERCEPTOR_MASK_TYPES.slice() : [];
+const maskModeFinal = newVals.maskMode || (old.mask||{}).mode || '';
+const maskTypesFinal = maskModeFinal === 'custom'
+  ? parseTypeCsv(newVals.maskMode ? newVals.maskTypes : ((old.mask||{}).types||[]).join(','))
+  : [];
+const coveredMaskMode = interceptorTypesFinal.length && maskModeFinal !== 'all' ? 'custom' : maskModeFinal;
+const coveredMaskTypes = coveredMaskMode === 'custom' ? uniqueTypes(maskTypesFinal.concat(interceptorTypesFinal)) : [];
 const slsModeOf = sls => {
   if (!sls) return '';
   if (sls.mode) return sls.mode;
@@ -1112,9 +1173,10 @@ const checks = [
   { label: 'cms.workspace',     oldVal: (old.cms||{}).workspace||'',     newVal: newVals.cmsWorkspace },
   { label: 'serviceNamePrefix', oldVal: old.serviceNamePrefix||'',       newVal: newVals.serviceNamePrefix },
   { label: 'dashboard.port',    oldVal: (old.dashboard||{}).port||'',   newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
-  { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: newVals.maskMode },
-  { label: 'mask.types',        oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
+  { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: coveredMaskMode },
+  { label: 'mask.types',        oldVal: (old.mask||{}).mode === 'custom' && Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: coveredMaskTypes.join(',') },
   { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
+  { label: 'interceptor.mode',  oldVal: (old.interceptor||{}).mode||'',  newVal: newVals.interceptorMode },
   { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
 ];
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
@@ -1358,6 +1420,36 @@ function Migrate-LegacyLayout {
     Write-Host ""
 }
 
+function Get-HostSerial {
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $values = @()
+        try {
+            $bios = Get-CimInstance -ClassName Win32_BIOS -OperationTimeoutSec 5 -ErrorAction Stop
+            if ($bios.SerialNumber) { $values += [string]$bios.SerialNumber }
+        } catch {}
+        try {
+            $product = Get-CimInstance -ClassName Win32_ComputerSystemProduct -OperationTimeoutSec 5 -ErrorAction Stop
+            if ($product.IdentifyingNumber) { $values += [string]$product.IdentifyingNumber }
+        } catch {}
+        foreach ($raw in $values) {
+            $value = "$raw".Trim()
+            if (-not $value) { continue }
+            $lower = $value.ToLower()
+            if ($lower -eq 'none' -or $lower -eq 'default string' -or $lower -eq 'to be filled by o.e.m.' -or $lower -eq 'system serial number' -or $lower -eq 'not specified' -or $lower -eq '0') { continue }
+            $byteLength = $value.Length
+            try { $byteLength = [System.Text.Encoding]::UTF8.GetByteCount($value) } catch {}
+            if ($byteLength -gt 128) { continue }
+            if ($value -notmatch '^[A-Za-z0-9._: -]{1,128}$') { continue }
+            return $value
+        }
+        return ""
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
 # ============================================================
 # Write config.json
 # ============================================================
@@ -1365,6 +1457,9 @@ function Write-Config {
     $configFile = Join-Path $DataDir "config.json"
     Msg "==> 写入配置文件 $configFile ..." "==> Writing config to $configFile ..."
     if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
+
+    $hostSn = ""
+    try { $hostSn = Get-HostSerial } catch { $hostSn = "" }
 
     # Bundle all params as JSON to avoid PowerShell dropping empty-string args to native commands
     $cfgArgs = [ordered]@{
@@ -1379,8 +1474,10 @@ function Write-Config {
         slsApiKey         = "$SlsApiKey"
         logLevel          = "$LogLevel"
         userId            = "$($script:UserId)"
+        excludeWorkspaces = @($ExcludeWorkspace | Where-Object { $null -ne $_ })
         collectLog        = "$CollectLog"
         collectTrace      = "$CollectTrace"
+        enableStatusBarApp = "$EnableStatusBarApp"
         cmsLicenseKey     = "$CmsLicenseKey"
         cmsEndpoint       = "$CmsEndpoint"
         cmsWorkspace      = "$CmsWorkspace"
@@ -1393,7 +1490,9 @@ function Write-Config {
         maskMode          = "$MaskMode"
         maskTypes         = "$MaskTypes"
         maskReplacementMode = "$MaskReplacementMode"
+        interceptorMode   = "$InterceptorMode"
         probeResult       = "$($script:PROBE_RESULT)"
+        hostSn            = "$hostSn"
     }
     $cfgJson = $cfgArgs | ConvertTo-Json -Compress
 
@@ -1425,6 +1524,12 @@ const config = {
   enabled: true,
   dataDir: opts.dataDir,
 };
+if (Array.isArray(opts.excludeWorkspaces) && opts.excludeWorkspaces.length > 0) {
+  if (opts.excludeWorkspaces.some(value => typeof value !== 'string' || !require('path').win32.isAbsolute(value))) {
+    throw new Error('-ExcludeWorkspace requires absolute local directories');
+  }
+  config.privacy = { ...config.privacy, excludeWorkspaces: opts.excludeWorkspaces };
+}
 if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(config.dashboard)) {
   config.dashboard = {};
 }
@@ -1464,8 +1569,10 @@ if (opts.slsEndpoint || opts.slsProject || opts.slsLogstore || opts.slsApiKey) {
 }
 if (opts.logLevel) config.logLevel = opts.logLevel;
 if (opts.userId) { config.userId = opts.userId; delete config.identity; }
+if (opts.hostSn) config.hostSn = opts.hostSn;
 if (opts.collectLog) config.collectLog = opts.collectLog === 'true';
 if (opts.collectTrace) config.collectTrace = opts.collectTrace === 'true';
+if (opts.enableStatusBarApp) config.enableStatusBarApp = opts.enableStatusBarApp.toLowerCase() === 'true';
 if (opts.cmsLicenseKey || opts.cmsEndpoint || opts.cmsWorkspace) {
   config.cms = config.cms || {};
   if (opts.cmsLicenseKey) config.cms.licenseKey = opts.cmsLicenseKey;
@@ -1484,6 +1591,26 @@ if (opts.maskReplacementMode) {
   config.mask = config.mask || {};
   config.mask.replacementMode = opts.maskReplacementMode;
 }
+if (opts.interceptorMode) {
+  config.interceptor = config.interceptor || {};
+  config.interceptor.mode = opts.interceptorMode;
+  delete config.interceptor.types;
+}
+const INTERCEPTOR_MASK_TYPES = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+(function ensureMaskCoversInterceptor(config) {
+  const interceptor = config.interceptor || {};
+  const extra = interceptor.mode === 'all' ? INTERCEPTOR_MASK_TYPES.slice() : [];
+  if (extra.length === 0) return;
+  if ((config.mask || {}).mode === 'all') return;
+  const current = (config.mask || {}).mode === 'custom' && Array.isArray((config.mask || {}).types)
+    ? config.mask.types.filter(type => typeof type === 'string' && type.trim())
+    : [];
+  config.mask = config.mask && typeof config.mask === 'object' && !Array.isArray(config.mask)
+    ? config.mask
+    : {};
+  config.mask.mode = 'custom';
+  config.mask.types = [...new Set(current.concat(extra))];
+})(config);
 const allAgents = JSON.parse(opts.probeResult || '[]');
 if (opts.allAgentsMode === '1') {
   // Clear enable gates, not metadata such as a persisted OpenClaw entry.
@@ -1534,7 +1661,12 @@ if (opts.multimodalMode) {
 }
 
 if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey) {
-  config.multimodal = { storage: { type: 'sls' } };
+  config.multimodal = {
+    storage: {
+      type: 'sls',
+      target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore },
+    },
+  };
 }
 
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
@@ -2188,8 +2320,32 @@ function Remove-OpenCodePlugin {
         $result = & $script:NODE_BIN -e @'
 const fs = require('fs');
 const f = process.argv[1];
-const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-opencode') || s.includes('plugins/opencode/plugin.mjs'));
-const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
+// Match legacy plugins/opencode/plugin.mjs only under this installation.
+const normalize = value => {
+  if (typeof value !== 'string') return '';
+  let plain = value;
+  if (plain.startsWith('file://')) {
+    try {
+      const url = new URL(plain);
+      plain = decodeURIComponent(url.pathname);
+      if (plain[0] === '/' && plain[2] === ':') plain = plain.slice(1);
+      if (url.hostname && url.hostname !== 'localhost') {
+        if (process.platform !== 'win32') return '';
+        plain = '//' + url.hostname + plain;
+      }
+    } catch { return ''; }
+  }
+  plain = plain.split(String.fromCharCode(92)).join('/');
+  while (plain.endsWith('/')) plain = plain.slice(0, -1);
+  return process.platform === 'win32' ? plain.toLowerCase() : plain;
+};
+const dataDir = normalize(process.argv[2]);
+const managed = dataDir ? dataDir + '/plugins/opencode' : null;
+const isOurs = s => typeof s === 'string' && (
+  s === 'loongsuite-pilot-opencode' || s.startsWith('loongsuite-pilot-opencode@') ||
+  (managed !== null && (normalize(s) === managed || normalize(s) === managed + '/plugin.mjs'))
+);
+const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : (e?.package ?? ''));
 const stripJsonc = src => src
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/^\s*\/\/.*$/gm, '')
@@ -2199,16 +2355,19 @@ try {
   let data, hadComments = false;
   try { data = JSON.parse(raw); }
   catch { data = JSON.parse(stripJsonc(raw)); hadComments = true; }
-  const key = Array.isArray(data.plugins) ? 'plugins' : (Array.isArray(data.plugin) ? 'plugin' : null);
-  if (!key) { process.stdout.write('nochange'); process.exit(0); }
-  const before = data[key].length;
-  data[key] = data[key].filter(e => !isOurs(entryStr(e)));
-  if (data[key].length === before) { process.stdout.write('nochange'); process.exit(0); }
+  let removed = 0;
+  for (const key of ['plugin', 'plugins']) {
+    if (!Array.isArray(data[key])) continue;
+    const before = data[key].length;
+    data[key] = data[key].filter(e => !isOurs(entryStr(e)));
+    removed += before - data[key].length;
+  }
+  if (!removed) { process.stdout.write('nochange'); process.exit(0); }
   if (hadComments) fs.writeFileSync(f + '.bak', raw, 'utf-8');
   fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
   process.stdout.write(hadComments ? 'cleaned-bak' : 'cleaned');
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-'@ $cfg 2>$null
+'@ $cfg $DataDir 2>$null
 
         switch ($result) {
             "cleaned"     { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }
@@ -2551,11 +2710,10 @@ try {
 }
 
 # ============================================================
-# Remove OTel plugin (Claude/Codex)
+# Remove legacy Claude OTel plugin
 # ============================================================
 function Remove-OtelPlugin {
     $OTEL_CLAUDE_DIR = Join-Path $env:USERPROFILE ".cache\opentelemetry.instrumentation.claude"
-    $OTEL_CODEX_DIR = Join-Path $env:USERPROFILE ".cache\opentelemetry.instrumentation.codex"
 
     # Clean Claude settings.json hooks
     $claudeSettings = Join-Path $env:USERPROFILE ".claude\settings.json"
@@ -2590,7 +2748,7 @@ try {
     }
 
     # Remove plugin directories
-    foreach ($dir in @($OTEL_CLAUDE_DIR, $OTEL_CODEX_DIR)) {
+    foreach ($dir in @($OTEL_CLAUDE_DIR)) {
         if (Test-Path $dir) {
             if ($Purge) {
                 Remove-Item $dir -Recurse -Force
@@ -2647,6 +2805,40 @@ function Start-PilotAndWait {
 # ============================================================
 # CMD: install
 # ============================================================
+function Assert-SingleSlsConfig {
+    $configFile = Join-Path $DataDir "config.json"
+    if (-not (Test-Path -LiteralPath $configFile)) { return }
+
+    $prevEAP = $ErrorActionPreference
+    $configExit = 1
+    $global:LASTEXITCODE = 1
+    $nodeOut = $null
+    try {
+        $ErrorActionPreference = "Continue"
+        $nodeOut = & $script:NODE_BIN -e @'
+const fs = require("fs");
+try {
+  const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""));
+  process.exit(Array.isArray(config?.sls) ? 12 : 0);
+} catch { process.exit(13); }
+'@ $configFile 2>&1
+        $configExit = $global:LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($configExit -eq 12) {
+        Msg "❌ 配置包含多个 SLS flusher；安装器不支持修改，请手动编辑 config.json" `
+            "❌ Multiple SLS flushers found; the installer cannot modify them. Edit config.json manually."
+        exit 1
+    }
+    if ($configExit -ne 0) {
+        $detail = (($nodeOut | Out-String).Trim())
+        Msg "❌ 无法检查现有 config.json，请检查文件后重试`n$detail" `
+            "❌ Cannot inspect existing config.json; check the file and retry.`n$detail"
+        exit 1
+    }
+}
+
 function Cmd-Install {
     Msg "==> 开始安装 $PACKAGE_NAME ..." "==> Installing $PACKAGE_NAME ..."
     Write-Host ""
@@ -2655,6 +2847,7 @@ function Cmd-Install {
     Warn-ElevatedInstall
 
     Check-Deps
+    Assert-SingleSlsConfig
     Migrate-LegacyLayout
 
     $curVer = Get-InstalledVersion
@@ -2832,24 +3025,10 @@ fs.writeFileSync(process.argv[2], content);
     if ($rewriteExit -ne 0) { throw "Failed to write UTF-8 file: $Path" }
 }
 
-function Remove-CodexTrustState {
-    $configPath = Join-Path $env:USERPROFILE ".codex\config.toml"
-    if (-not (Test-Path -LiteralPath $configPath)) { return }
-
-    $content = Get-Content -LiteralPath $configPath -Raw
-    $pattern = '(?ms)^[ \t]*# BEGIN otel-codex-hook trust[ \t]*\r?\n.*?^[ \t]*# END otel-codex-hook trust[ \t]*(?:\r?\n)?'
-    $updated = $content -replace $pattern, ""
-    if ($updated -eq $content) { return }
-
-    $updated = $updated -replace '(\r?\n){3,}', "`r`n`r`n"
-    Write-FileUtf8NoBom -Path $configPath -Content $updated
-    Msg "    ✅ Codex trust 状态已清理" "    ✅ Codex trust state cleaned"
-}
-
 function Test-IsPilotCodexHookCommand {
     param([object]$Command)
     if ($null -eq $Command) { return $false }
-    return ([string]$Command) -match '(?i)(?:\.loongsuite-pilot|codex-loongsuite-pilot-hook|otel-codex-hook)'
+    return ([string]$Command) -match '(?i)(?:^|[\/\\"''\s])codex-loongsuite-pilot-hook\.(?:mjs|sh|ps1)(?:["''\s]|$)'
 }
 
 function Remove-CodexHookConfig {
@@ -3378,6 +3557,53 @@ function Remove-DshYamlPatch {
 # ============================================================
 # CMD: uninstall
 # ============================================================
+function Remove-CopilotPlugin {
+    $copilotHome = Join-Path $env:USERPROFILE '.copilot'
+    if (-not (Test-Path -LiteralPath $copilotHome)) { return }
+    $helper = $null
+    $candidates = @((Join-Path $script:PERMANENT_DIR 'dist/copilot-cleanup.cjs'))
+    $currentFile = Join-Path $CACHE_DIR 'current'
+    if (Test-Path -LiteralPath $currentFile) {
+        $version = (Get-Content -LiteralPath $currentFile -Raw -Encoding UTF8).Trim()
+        $candidates = @((Join-Path $CACHE_DIR "versions/$version/dist/copilot-cleanup.cjs")) + $candidates
+    }
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) { $helper = $candidate; break }
+    }
+    if (-not $script:NODE_BIN -or -not $helper) {
+        Write-Warning 'Copilot cleanup skipped: safe Node JSONC helper unavailable; config and plugin assets preserved'
+        return
+    }
+    $savedPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $script:NODE_BIN $helper $copilotHome
+        $cleanupExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedPreference }
+    if ($cleanupExit -ne 0) { Write-Warning 'Copilot cleanup incomplete; config and plugin assets preserved for retry' }
+}
+
+function Remove-CopilotOtelEnvironment {
+    # Best-effort legacy cleanup: Copilot automatic deployment is Unix-only.
+    # A profile access/CLM failure must not interrupt other agents or -Purge.
+    foreach ($relative in @('Documents/PowerShell/Microsoft.PowerShell_profile.ps1', 'Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1')) {
+        $tmp = $null
+        try {
+            $profilePath = Join-Path $env:USERPROFILE $relative
+            if (-not (Test-Path -LiteralPath $profilePath)) { continue }
+            $before = Get-Content -LiteralPath $profilePath -Raw -Encoding UTF8
+            $after = $before -replace '(?s)\r?\n?# >>> loongsuite-pilot copilot otel >>>.*?# <<< loongsuite-pilot copilot otel <<<\r?\n?', "`n"
+            if ($before -ne $after) {
+                $tmp = "$profilePath.pilot-$PID.tmp"
+                Set-Content -LiteralPath $tmp -Value $after -Encoding UTF8 -NoNewline
+                Move-Item -LiteralPath (Get-PilotLongPath $tmp) -Destination (Get-PilotLongPath $profilePath) -Force
+            }
+        } catch { Write-Warning "Copilot profile cleanup incomplete; continuing uninstall" }
+        finally { if ($tmp) { Remove-PilotPathQuietly $tmp } }
+    }
+    Remove-Item -LiteralPath (Join-Path $DATA_DIR 'state/copilot/otel-enabled') -Force -ErrorAction SilentlyContinue
+}
+
 function Cmd-Uninstall {
     Msg "🗑️  开始卸载 $PACKAGE_NAME ..." "🗑️  Uninstalling $PACKAGE_NAME ..."
     Write-Host ""
@@ -3430,6 +3656,8 @@ function Cmd-Uninstall {
     # pinned runtime can disappear, matching the POSIX uninstall ordering.
     Msg "==> 清理 Grok Build hook 配置..." "==> Cleaning up Grok Build hook config..."
     Remove-GrokBuildHookConfig
+    try { Remove-CopilotOtelEnvironment } catch { Write-Warning "Copilot environment cleanup failed; continuing uninstall" }
+    try { Remove-CopilotPlugin } catch { Write-Warning "Copilot plugin cleanup failed; continuing uninstall" }
     Write-Host ""
 
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
@@ -3439,12 +3667,6 @@ function Cmd-Uninstall {
     } catch {
         Msg "    ⚠️  Codex hook 清理失败，继续卸载: $($_.Exception.Message)" `
             "    ⚠️  Codex hook cleanup failed; continuing uninstall: $($_.Exception.Message)"
-    }
-    try {
-        Remove-CodexTrustState
-    } catch {
-        Msg "    ⚠️  Codex trust 清理失败，继续卸载: $($_.Exception.Message)" `
-            "    ⚠️  Codex trust cleanup failed; continuing uninstall: $($_.Exception.Message)"
     }
     Write-Host ""
 
@@ -3472,7 +3694,7 @@ function Cmd-Uninstall {
     }
     Write-Host ""
 
-    Msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
+    Msg "==> 清理 Claude 旧插件..." "==> Cleaning up legacy Claude plugin..."
     Remove-OtelPlugin
     Write-Host ""
 

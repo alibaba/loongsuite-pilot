@@ -84,8 +84,7 @@ export function createLegacyHandlers(shared) {
       const match = context(event, ctx);
       if (!match || !states.has(match.run)) return;
       if (!match.run.currentStepCallId) return;
-      fn(event, match.ctx, userId, record => {
-        const start = match.run.toolStartedAtNanos.get(event?.toolCallId);
+      fn(event, match.ctx, userId, (record, start) => {
         if (record["event.name"] === "tool.result" && start
           && BigInt(record.time_unix_nano) / 1_000_000n <= BigInt(start) / 1_000_000n) {
           record = { ...record,

@@ -7,6 +7,60 @@ import {
 import { ClientType, ActionType } from '../../src/types/index.js';
 
 describe('AgentActivityEntry contract', () => {
+  it('permits an absent provider only for explicitly scoped agent-turn observations', () => {
+    const base = {
+      time_unix_nano: '1700000000000000000', 'event.id': 'observation',
+      'user.id': 'synthetic-user', 'gen_ai.session.id': 'session', 'gen_ai.turn.id': 'turn',
+      'gen_ai.agent.type': 'synthetic-agent', 'loongsuite.observation.scope': 'agent_turn',
+    };
+    for (const event of [
+      { ...base, 'event.name': 'other', 'gen_ai.turn.start': true },
+      { ...base, 'event.name': 'other', 'gen_ai.turn.end': true },
+      { ...base, 'event.name': 'agent.input' },
+    ]) expect(AgentActivityEntrySchema.safeParse(event).success).toBe(true);
+    for (const event of [
+      { ...base, 'event.name': 'other' },
+      { ...base, 'event.name': 'other', 'gen_ai.turn.start': true, 'gen_ai.turn.id': '' },
+      { ...base, 'event.name': 'other', 'gen_ai.turn.start': true, 'loongsuite.observation.scope': undefined },
+      { ...base, 'event.name': 'llm.request', 'gen_ai.turn.start': true },
+      { ...base, 'event.name': 'llm.request', 'gen_ai.provider.name': 'fixture-provider' },
+      { ...base, 'event.name': 'tool.call' },
+      { ...base, 'event.name': 'other', 'gen_ai.turn.start': true, 'loongsuite.observation.scope': 'unknown' },
+      { ...base, 'event.name': 'other', 'gen_ai.turn.end': true, 'gen_ai.response.model': 'fixture-model' },
+      { ...base, 'event.name': 'agent.input', 'gen_ai.usage.input_tokens': 3 },
+    ]) expect(AgentActivityEntrySchema.safeParse(event).success).toBe(false);
+  });
+
+  it.each([
+    'gen_ai.model.request', 'gen_ai.model.response', 'gen_ai.tool.call',
+    'gen_ai.tool.result', 'gen_ai.agent.invoke', 'gen_ai.agent.result',
+  ] as const)('accepts and preserves the standard event %s', eventName => {
+    const entry = buildAgentActivityEntry({
+      'event.name': eventName,
+      'gen_ai.session.id': 'child-session',
+      'gen_ai.turn.id': 'child-turn',
+      'gen_ai.step.id': 'child-step',
+      'gen_ai.agent.type': ClientType.CodexCliHook,
+      'gen_ai.agent.id': 'child-agent',
+      'gen_ai.agent.parent.id': 'parent-agent',
+      'gen_ai.agent.peer.id': 'grandchild-agent',
+      'gen_ai.agent.invocation.id': 'outgoing',
+      'gen_ai.agent.parent.invocation.id': 'incoming',
+    });
+    expect(AgentActivityEntrySchema.safeParse(entry).success).toBe(true);
+    expect(entry).toMatchObject({
+      'event.name': eventName,
+      'gen_ai.session.id': 'child-session',
+      'gen_ai.turn.id': 'child-turn',
+      'gen_ai.step.id': 'child-step',
+      'gen_ai.agent.id': 'child-agent',
+      'gen_ai.agent.parent.id': 'parent-agent',
+      'gen_ai.agent.peer.id': 'grandchild-agent',
+      'gen_ai.agent.invocation.id': 'outgoing',
+      'gen_ai.agent.parent.invocation.id': 'incoming',
+    });
+  });
+
   it('should validate a minimal entry from buildAgentActivityEntry', () => {
     const entry = buildAgentActivityEntry({
       sessionId: 'sess-1',

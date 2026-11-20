@@ -1,8 +1,9 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
+import { mimeFromMediaPath } from '../../multimodal/resolve.js';
 import { resolveHome } from '../../utils/fs-utils.js';
+import { queryReadonly, queryReadonlyPaged } from '../../utils/node-sqlite.js';
 import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('SqliteTokenReader');
@@ -31,11 +32,11 @@ export interface AttachedImageLookup {
 }
 
 /**
- * Batch-read user-attached image paths from chat_record.extra.
+ * Batch-read attached image paths, plus file identifiers, from chat_record.extra.
  * Keys are request_id. Also returns the user-message start clock when present.
  * DB paths are resolved the same way as token enrichment (not caller-supplied).
  * Fail-open: query errors are logged and skipped.
- * Only request_ids that appear in a row are recorded (`paths: []` if extra has no images).
+ * Only request_ids that appear in a row are recorded (`paths: []` if extra has no media).
  */
 export async function readAttachedImagePathsForRequestIds(
   requestIds: string[],
@@ -92,34 +93,42 @@ function parseGmtCreateMs(raw: number | string | null | undefined): number | und
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
-function parseAttachedImagePaths(raw: string | null | undefined): string[] {
+export function parseAttachedImagePaths(raw: string | null | undefined): string[] {
   if (!raw) return [];
   try {
     const extra = JSON.parse(raw) as Record<string, unknown>;
+    const paths: string[] = [];
 
-    const fromField: string[] = [];
     if (Array.isArray(extra.attachedImagePaths)) {
       for (const item of extra.attachedImagePaths) {
-        if (typeof item === 'string' && item.trim()) fromField.push(item.trim());
+        if (typeof item === 'string' && item.trim()) paths.push(item.trim());
       }
     }
-    if (fromField.length > 0) return [...new Set(fromField)];
+    const hasAttachedImages = paths.length > 0;
 
-    // Fallback: context entries marked as image.
-    const fromContext: string[] = [];
     const context = Array.isArray(extra.context) ? extra.context : [];
     for (const item of context) {
       if (!item || typeof item !== 'object') continue;
       const record = item as Record<string, unknown>;
-      const name = typeof record.name === 'string' ? record.name : '';
+      if (record.name === 'file') {
+        const selected = record.selectedItem;
+        if (selected && typeof selected === 'object') {
+          const identifier = (selected as Record<string, unknown>).identifier;
+          if (typeof identifier === 'string') {
+            const trimmed = identifier.trim();
+            if (trimmed && mimeFromMediaPath(trimmed)) paths.push(trimmed);
+          }
+        }
+      }
+      if (hasAttachedImages) continue;
       const fileType = typeof record.fileType === 'string' ? record.fileType : '';
-      if (name !== 'image' && fileType !== 'image') continue;
+      if (record.name !== 'image' && fileType !== 'image') continue;
       const imgUrl = typeof record.imgUrl === 'string' ? record.imgUrl.trim() : '';
       const filePath = typeof record.filePath === 'string' ? record.filePath.trim() : '';
       const candidate = imgUrl || filePath;
-      if (candidate) fromContext.push(candidate);
+      if (candidate) paths.push(candidate);
     }
-    return [...new Set(fromContext)];
+    return [...new Set(paths)];
   } catch {
     return [];
   }
@@ -145,7 +154,8 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
       AND cm.token_info IS NOT NULL
       AND cm.token_info != ''
       AND json_valid(cm.token_info)
-    ORDER BY cm.gmt_create ASC
+      AND (? = 0 OR cm.gmt_create > ? OR (cm.gmt_create = ? AND cm.id > ?))
+    ORDER BY cm.gmt_create ASC, cm.id ASC
   `;
 
   for (const dbPath of dbPaths) {
@@ -159,7 +169,9 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
       record_extra?: string | null;
     }>;
     try {
-      rows = await queryReadonly(dbPath, sql, [sessionId]);
+      rows = await queryReadonlyPaged(dbPath, sql, (cursor) => [
+        sessionId, cursor.continued, cursor.sort, cursor.sort, cursor.id,
+      ], (row) => ({ sort: row.gmt_create, id: row.message_id ?? '' }));
     } catch (err) {
       logger.debug('sqlite query failed', { sessionId, dbPath, error: String(err) });
       continue;
@@ -253,7 +265,7 @@ function listHashedProfileDbPaths(qoderRoot: string): string[] {
   return found;
 }
 
-function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: number; cachedTokens: number } | null {
+export function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: number; cachedTokens: number } | null {
   try {
     const obj = JSON.parse(raw);
     const pt = typeof obj.prompt_tokens === 'number' ? obj.prompt_tokens : 0;
@@ -266,7 +278,7 @@ function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: 
   }
 }
 
-function parseModelKey(raw: string | null | undefined): string | undefined {
+export function parseModelKey(raw: string | null | undefined): string | undefined {
   if (!raw) return undefined;
   try {
     const obj = JSON.parse(raw);
@@ -278,7 +290,7 @@ function parseModelKey(raw: string | null | undefined): string | undefined {
   }
 }
 
-function parseRecordModelKey(raw: string | null | undefined): string | undefined {
+export function parseRecordModelKey(raw: string | null | undefined): string | undefined {
   if (!raw) return undefined;
   try {
     const obj = JSON.parse(raw);
@@ -289,17 +301,3 @@ function parseRecordModelKey(raw: string | null | undefined): string | undefined
   }
 }
 
-function queryReadonly<T>(dbPath: string, sql: string, params: unknown[]): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (openErr) => {
-      if (openErr) { reject(openErr); return; }
-      db.all(sql, params, (queryErr: Error | null, rows: T[]) => {
-        db.close((closeErr) => {
-          if (closeErr) logger.debug('sqlite close warning', { error: String(closeErr) });
-          if (queryErr) { reject(queryErr); return; }
-          resolve(rows);
-        });
-      });
-    });
-  });
-}

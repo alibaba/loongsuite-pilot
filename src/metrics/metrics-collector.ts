@@ -3,21 +3,25 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { formatTime } from '../utils/time-utils.js';
-import { resolveLocalIp } from '../utils/network-utils.js';
+import { LOCAL_MAC, resolveLocalIp } from '../utils/network-utils.js';
 import { checkProcessLiveness, UPDATER_PROCESS_PATTERNS } from '../utils/pid-utils.js';
 import { createLogger } from '../utils/logger.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
+import type { InterceptorStatus } from '../interceptor/status.js';
 
 const logger = createLogger('MetricsCollector');
 
 const MIN_NODE_MAJOR = 18;
 
 export interface L1Metrics {
+  interceptor?: InterceptorStatus;
   version: string;
   os_detail: string;
   hostname: string;
   ip: string;
+  mac?: string;
+  sn?: string;
   instance_id: string;
   run_id: string;
   user_id: string;
@@ -33,6 +37,7 @@ export interface L1Metrics {
     // Cached logical file sizes; sampled_at identifies the last complete scan.
     disk_data_bytes?: string;
     disk_logs_bytes?: string;
+    disk_logs_by_family?: string;
     disk_dir_sampled_at?: string;
     disk_dir_scan_ms?: string;
     disk_dir_status?: string;
@@ -84,7 +89,7 @@ export interface L1Metrics {
 
 /**
  * Fields every L2 row carries, whatever its type. Repeating the identity on each
- * row is what lets the three types be queried independently — filter on `type`
+ * row is what lets each type be queried independently — filter on `type`
  * and group by host or agent, with no join back to another topic.
  */
 interface L2Identity {
@@ -196,15 +201,33 @@ export interface FlusherFlowMetrics extends L2Identity {
 }
 
 /**
+ * One row per agent/hook event; the duration covers only the Node portion.
+ * The average is total_duration_ms / calls; max_duration_ms is the slowest sample.
+ * No row is produced when there are no valid samples, so absence must never be
+ * misread as zero duration.
+ */
+export interface HookFlowMetrics extends L2Identity {
+  type: 'hook';
+  agent: string;
+  /** Hook subcommand, e.g. stop or user-prompt-submit. */
+  hook_event: string;
+  calls: string;
+  total_duration_ms: string;
+  max_duration_ms: string;
+}
+
+/**
  * One reporting cycle's L2 output: complete normalized ingress per agent,
- * covered raw-source detail per Input, and egress per destination. Raw Input
- * fields deliberately stay out of L1 and Agent rows until every custom reader
- * has equivalent instrumentation; consumers can group Input rows by `agent`.
+ * covered raw-source detail per Input, egress per destination, and Hook call
+ * latency per agent and event. Raw Input fields deliberately stay out of L1 and
+ * Agent rows until every custom reader has equivalent instrumentation;
+ * consumers can group Input rows by `agent`.
  */
 export interface L2Metrics {
   agents: AgentFlowMetrics[];
   inputs: InputFlowMetrics[];
   flushers: FlusherFlowMetrics[];
+  hooks: HookFlowMetrics[];
 }
 
 export interface FlusherStats {
@@ -242,6 +265,15 @@ export interface InputStats {
   outFailed: number;
   lastPollTime: string;
   startTime: string;
+}
+
+/** Per-cycle consumed hook stats, not cumulative counters, so no baseline diffing is needed. */
+export interface HookTimingStats {
+  agent: string;
+  hookEvent: string;
+  calls: number;
+  totalDurationMs: number;
+  maxDurationMs: number;
 }
 
 /** Backend family a destination belongs to. */
@@ -427,6 +459,20 @@ function countAgents(snapshot: DataflowSnapshot): { installed: number; active: n
   return { installed: installed.size, active: active.size };
 }
 
+function collectHookRows(hookTimings: readonly HookTimingStats[], identity: L2Identity): HookFlowMetrics[] {
+  return hookTimings
+    .filter(stats => stats.calls > 0)
+    .map((stats): HookFlowMetrics => ({
+      type: 'hook',
+      ...identity,
+      agent: stats.agent,
+      hook_event: stats.hookEvent,
+      calls: String(stats.calls),
+      total_duration_ms: String(Math.round(stats.totalDurationMs)),
+      max_duration_ms: String(Math.round(stats.maxDurationMs)),
+    }));
+}
+
 export class MetricsCollector {
   private readonly version: string;
   private readonly userId: string;
@@ -443,6 +489,9 @@ export class MetricsCollector {
   private readonly runId: string;
   private readonly hostname: string;
   private readonly localIp: string;
+  private readonly mac: string;
+  private readonly hostSn: string;
+  private readonly hostIdentityTags: boolean;
   private readonly initType: string;
 
   private lastCpuUsage: NodeJS.CpuUsage | null = null;
@@ -473,7 +522,7 @@ export class MetricsCollector {
   private updaterConsecutiveFailures = 0;
   private lastInfraHealth: InfraHealthSnapshot | null = null;
 
-  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; autoUpdateEnabled?: boolean; updaterLiveness?: (pidFile: string) => ProcessLiveness }) {
+  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; autoUpdateEnabled?: boolean; updaterLiveness?: (pidFile: string) => ProcessLiveness; hostSn?: string; hostIdentityTags?: boolean }) {
     this.version = opts.version;
     this.userId = opts.userId;
     this.dataDir = opts.dataDir;
@@ -490,6 +539,9 @@ export class MetricsCollector {
     this.startTime = formatTime(new Date());
     this.localIp = resolveLocalIp();
     this.hostname = os.hostname();
+    this.mac = LOCAL_MAC;
+    this.hostSn = opts.hostSn?.trim() ?? '';
+    this.hostIdentityTags = opts.hostIdentityTags !== false;
     // Stable install identity: restart- and IP-invariant, independently derivable
     // by any process on the host. Includes dataDir so multiple installs on one
     // machine (e.g. several OS users, each with their own ~/.loongsuite-pilot) do
@@ -550,6 +602,8 @@ export class MetricsCollector {
       os_detail: `${os.type()}; ${os.release()}; ${os.arch()}`,
       hostname: os.hostname(),
       ip: this.localIp,
+      ...(this.hostIdentityTags && this.mac ? { mac: this.mac } : {}),
+      ...(this.hostIdentityTags && this.hostSn ? { sn: this.hostSn } : {}),
       instance_id: this.instanceId,
       run_id: this.runId,
       user_id: this.userId,
@@ -587,15 +641,17 @@ export class MetricsCollector {
   }
 
   /**
-   * One cycle of L2: Agent aggregate rows, Input detail rows and destination
-   * rows. All are produced by one call so they share one drain and one window;
-   * collecting them separately would let whichever ran first consume the
-   * window while the others reported different maxima or flow intervals.
+   * One cycle of L2: Agent aggregate rows, Input detail rows, destination rows
+   * and Hook latency rows. All are produced by one call so they share one drain
+   * and one window; collecting them separately would let whichever ran first
+   * consume the window while the others reported different maxima or flow
+   * intervals. `hookTimings` is the caller's drain of the Hook timing spools
+   * for this same cycle.
    *
    * Returns null when there are no rows, so a freshly started
    * instance with no agents and no destinations ships nothing at all.
    */
-  collectL2(snapshot: DataflowSnapshot): L2Metrics | null {
+  collectL2(snapshot: DataflowSnapshot, hookTimings: readonly HookTimingStats[] = []): L2Metrics | null {
     const now = Date.now();
     const windowMs = Math.max(0, now - (this.l2LastCollectTime || this.startTimestamp * 1000));
     const identity = {
@@ -611,13 +667,19 @@ export class MetricsCollector {
     const agentRows = this.collectAgentRows(snapshot, identity);
     const inputRows = this.collectInputRows(snapshot, identity);
     const flusherRows = this.collectFlusherRows(snapshot, identity);
+    const hookRows = collectHookRows(hookTimings, identity);
     // The row builders already drained the counters, so the window is spent
     // whether or not there is anything to ship.
     this.l2LastCollectTime = now;
 
-    if (agentRows.length === 0 && inputRows.length === 0 && flusherRows.length === 0) return null;
+    if (
+      agentRows.length === 0
+      && inputRows.length === 0
+      && flusherRows.length === 0
+      && hookRows.length === 0
+    ) return null;
 
-    return { agents: agentRows, inputs: inputRows, flushers: flusherRows };
+    return { agents: agentRows, inputs: inputRows, flushers: flusherRows, hooks: hookRows };
   }
 
   private collectInputRows(

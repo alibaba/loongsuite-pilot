@@ -11,14 +11,19 @@ describe('OpenClawPluginInput', () => {
   let tmpDir: string;
   let stateStore: MockStateStore;
   let previousDataDir: string | undefined;
+  let previousRootTrigger: string | undefined;
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'openclaw-plugin-input-'));
     stateStore = new MockStateStore();
     previousDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
+    previousRootTrigger = process.env.LOONGSUITE_PILOT_ROOT_TRIGGER;
+    delete process.env.LOONGSUITE_PILOT_ROOT_TRIGGER;
   });
 
   afterEach(async () => {
+    if (previousRootTrigger === undefined) delete process.env.LOONGSUITE_PILOT_ROOT_TRIGGER;
+    else process.env.LOONGSUITE_PILOT_ROOT_TRIGGER = previousRootTrigger;
     if (previousDataDir === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
     else process.env.LOONGSUITE_PILOT_DATA_DIR = previousDataDir;
     await fs.rm(tmpDir, { recursive: true, force: true });
@@ -103,6 +108,61 @@ describe('OpenClawPluginInput', () => {
     });
   });
 
+  it('collects both legacy daily logs and separate uid files without replaying them', async () => {
+    const date = new Date().toLocaleDateString('en-CA');
+    const names = [`openclaw-${date}.jsonl`, `openclaw-${date}-uid0.jsonl`, `openclaw-${date}-uid1000.jsonl`,
+      `openclaw-${date}-uid1000.segment-000000000001-${'a'.repeat(32)}.jsonl`];
+    for (const [index, file] of names.entries()) {
+      await fs.writeFile(path.join(tmpDir, file), JSON.stringify({
+        time_unix_nano: String(BigInt(Date.now()) * 1000000n),
+        'event.id': `writer-${index}`,
+        'event.name': 'llm.response',
+        'user.id': 'fixture',
+        'gen_ai.session.id': `session-${index}`,
+        'gen_ai.agent.type': 'openclaw',
+        'gen_ai.response.model': 'fixture-model',
+      }) + '\n');
+    }
+    const input = new OpenClawPluginInput({ stateStore: stateStore as never, logDir: tmpDir, pollIntervalMs: 60_000 });
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', batch => entries.push(...batch));
+    await input.start();
+    await input.stop();
+    expect(entries.map(entry => entry['event.id']).sort()).toEqual(['writer-0', 'writer-1', 'writer-2', 'writer-3']);
+    const resumed = new OpenClawPluginInput({ stateStore: stateStore as never, logDir: tmpDir, pollIntervalMs: 60_000 });
+    resumed.on('entries', batch => entries.push(...batch));
+    await resumed.start();
+    await resumed.stop();
+    expect(entries).toHaveLength(4);
+  });
+
+  it('keeps late appends from every uid active across the daily boundary', async () => {
+    const yesterday = new Date(Date.now() - 86_400_000).toLocaleDateString('en-CA');
+    const files = [0, 1000, 1001, 1002, 1003].map(uid => path.join(tmpDir, `openclaw-${yesterday}-uid${uid}.jsonl`));
+    for (const file of files) await fs.writeFile(file, '');
+    const options = { stateStore: stateStore as never, logDir: tmpDir, pollIntervalMs: 60_000 };
+    const initial = new OpenClawPluginInput(options);
+    await initial.start();
+    await initial.stop();
+    for (const [index, file] of files.entries()) {
+      await fs.appendFile(file, JSON.stringify({
+        time_unix_nano: String(BigInt(Date.now()) * 1000000n),
+        'event.id': `late-${index}`,
+        'event.name': 'llm.response',
+        'user.id': 'fixture',
+        'gen_ai.session.id': `session-${index}`,
+        'gen_ai.agent.type': 'openclaw',
+        'gen_ai.response.model': 'fixture-model',
+      }) + '\n');
+    }
+    const resumed = new OpenClawPluginInput(options);
+    const entries: AgentActivityEntry[] = [];
+    resumed.on('entries', batch => entries.push(...batch));
+    await resumed.start();
+    await resumed.stop();
+    expect(entries.map(entry => entry['event.id']).sort()).toEqual(['late-0', 'late-1', 'late-2', 'late-3', 'late-4']);
+  });
+
   it('drops session lifecycle events from the canonical pipeline', async () => {
     const today = new Date();
     const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
@@ -180,10 +240,8 @@ describe('OpenClawPluginInput', () => {
     await input.start();
     await input.stop();
 
-    expect(entries).toHaveLength(2);
-    const modelResolve = entries.find(entry => entry['agent.openclaw.hook'] === 'before_model_resolve');
-    expect(modelResolve?.['gen_ai.input.messages']).toBeUndefined();
-    expect(modelResolve?.['gen_ai.input.messages_delta']).toBeUndefined();
+    expect(entries).toHaveLength(1);
+    expect(entries.some(entry => entry['agent.openclaw.hook'] === 'before_model_resolve')).toBe(false);
     const agentRun = entries.find(entry => entry['agent.openclaw.hook'] === 'before_agent_run');
     expect(agentRun?.['gen_ai.input.messages_delta']).toEqual(prompt);
     expect(agentRun?.['gen_ai.system_instructions']).toEqual([{ type: 'text', content: 'system prompt' }]);
