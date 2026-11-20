@@ -212,7 +212,11 @@ export class InputManager extends EventEmitter {
           (input as BaseInput & { restoreAbortedDelivery(): void }).restoreAbortedDelivery();
         });
         input.holdCheckpointUntil(retained);
-      } else if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes) {
+      } else if (
+        input.agentType === ClientType.CodexCliHook
+        || input.agentType === ClientType.Hermes
+        || input.agentType === ClientType.KimiCodeCli
+      ) {
         input.holdCheckpointUntil(handling);
       }
       const next = handling.catch(err => {
