@@ -155,11 +155,17 @@ export class WorkBuddyInput extends BaseInput {
             transcriptPath,
             sessionId,
             priorMeta?.handledStopAtMs ?? 0,
-            latestStopAtMs,
           );
-          const built = await buildWorkBuddyEvents(parsed.records, { sessionId, hookEvents });
+          const firstOpenRecord = findFirstUnsealedUser(parsed.records, hookEvents, latestStopAtMs);
+          const records = firstOpenRecord === undefined ? parsed.records : parsed.records.slice(0, firstOpenRecord);
+          const built = await buildWorkBuddyEvents(records, {
+            sessionId,
+            hookEvents: hookEvents.filter(hook => hook.observedAtMs <= latestStopAtMs),
+          });
           entries.push(...built);
-          nextOffsets[transcriptPath] = parsed.nextOffset;
+          nextOffsets[transcriptPath] = firstOpenRecord === undefined
+            ? parsed.nextOffset
+            : parsed.recordOffsets[firstOpenRecord];
           handledStopAtMs = latestStopAtMs;
         } else {
           this.scheduleStabilityRetry();
@@ -465,6 +471,7 @@ export class WorkBuddyInput extends BaseInput {
         continue;
       }
       if (!isPathWithin(realRoot, realCandidate)) continue;
+      if (hint.sessionId && hint.sessionId !== path.basename(realCandidate, '.jsonl')) continue;
       stops.set(realCandidate, Math.max(stops.get(realCandidate) ?? 0, hint.observedAtMs));
     }
     return stops;
@@ -475,7 +482,6 @@ export class WorkBuddyInput extends BaseInput {
     transcriptPath: string,
     sessionId: string,
     afterMs: number,
-    throughMs: number,
   ): Promise<WorkBuddyHookEvent[]> {
     const events: WorkBuddyHookEvent[] = [];
     for (const hint of hints) {
@@ -483,7 +489,7 @@ export class WorkBuddyInput extends BaseInput {
       if (!['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop'].includes(hint.eventName)) {
         continue;
       }
-      if (hint.observedAtMs <= afterMs || hint.observedAtMs > throughMs) continue;
+      if (hint.observedAtMs <= afterMs) continue;
       if (hint.sessionId && hint.sessionId !== sessionId) continue;
       let realCandidate: string;
       try {
@@ -504,12 +510,55 @@ export class WorkBuddyInput extends BaseInput {
   }
 }
 
+function findFirstUnsealedUser(
+  records: WorkBuddyRecord[],
+  hookEvents: WorkBuddyHookEvent[],
+  stopAtMs: number,
+): number | undefined {
+  const hasLaterPrompt = hookEvents.some(hook =>
+    hook.eventName === 'UserPromptSubmit' && hook.observedAtMs > stopAtMs);
+  // A Stop can be observed before a later turn reaches the same transcript.
+  // Keep the first source row of that later turn for its own Stop.
+  let firstUser: number | undefined;
+  let unconfirmedUser: number | undefined;
+  let firstUntimedTurnEnded = false;
+  for (const [index, record] of records.entries()) {
+    const timestamp = typeof record.timestamp === 'number' && Number.isFinite(record.timestamp)
+      ? record.timestamp : undefined;
+    if (record.type === 'message' && record.role === 'user') {
+      if (firstUntimedTurnEnded && unconfirmedUser === firstUser) unconfirmedUser = undefined;
+      if (timestamp !== undefined && timestamp > stopAtMs) return unconfirmedUser ?? index;
+      unconfirmedUser = timestamp === undefined && (firstUser !== undefined || hasLaterPrompt)
+        ? unconfirmedUser ?? index
+        : undefined;
+      firstUser ??= index;
+      continue;
+    }
+    if (unconfirmedUser === undefined) continue;
+    // Unrelated usage and generated titles do not identify the active turn.
+    if (!['message', 'reasoning', 'function_call', 'function_call_result'].includes(record.type ?? '')) continue;
+    if (timestamp !== undefined) {
+      if (timestamp > stopAtMs) return unconfirmedUser;
+      unconfirmedUser = undefined;
+    } else if (unconfirmedUser === firstUser
+      && record.type === 'message' && record.role === 'assistant'
+      && record.status !== 'incomplete' && record.providerData?.skipRun !== true
+      && records[index + 1]?.type !== 'function_call') {
+      // Older transcripts may omit timestamps on both sides of the stopped
+      // turn. A complete first turn still belongs to the earlier Stop.
+      firstUntimedTurnEnded = true;
+    }
+  }
+  if (!hasLaterPrompt || (firstUntimedTurnEnded && unconfirmedUser === firstUser)) return undefined;
+  return unconfirmedUser;
+}
+
 async function readJsonlRange(
   filePath: string,
   startOffset: number,
   endOffset: number,
-): Promise<{ records: WorkBuddyRecord[]; nextOffset: number } | null> {
-  if (startOffset >= endOffset) return { records: [], nextOffset: startOffset };
+): Promise<{ records: WorkBuddyRecord[]; recordOffsets: number[]; nextOffset: number } | null> {
+  if (startOffset >= endOffset) return { records: [], recordOffsets: [], nextOffset: startOffset };
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   let content: Buffer;
   try {
@@ -524,34 +573,30 @@ async function readJsonlRange(
   }
 
   const records: WorkBuddyRecord[] = [];
+  const recordOffsets: number[] = [];
   let lineStart = 0;
   let nextOffset = startOffset;
+  const parseLine = (lineEnd: number) => {
+    const text = content.subarray(lineStart, lineEnd).toString('utf8').trim();
+    if (!text) return true;
+    try {
+      records.push(JSON.parse(text) as WorkBuddyRecord);
+      recordOffsets.push(startOffset + lineStart);
+      return true;
+    } catch {
+      return false;
+    }
+  };
   for (let index = 0; index < content.length; index++) {
     if (content[index] !== 0x0a) continue;
-    if (!parseJsonlLine(content.subarray(lineStart, index), records)) {
-      return { records, nextOffset };
-    }
+    if (!parseLine(index)) return { records, recordOffsets, nextOffset };
     lineStart = index + 1;
     nextOffset = startOffset + lineStart;
   }
-  if (lineStart < content.length) {
-    const trailing = content.subarray(lineStart);
-    if (parseJsonlLine(trailing, records)) {
-      nextOffset = startOffset + content.length;
-    }
+  if (lineStart < content.length && parseLine(content.length)) {
+    nextOffset = startOffset + content.length;
   }
-  return { records, nextOffset };
-}
-
-function parseJsonlLine(line: Buffer, records: WorkBuddyRecord[]): boolean {
-  const text = line.toString('utf8').replace(/\r$/, '').trim();
-  if (!text) return true;
-  try {
-    records.push(JSON.parse(text) as WorkBuddyRecord);
-    return true;
-  } catch {
-    return false;
-  }
+  return { records, recordOffsets, nextOffset };
 }
 
 function isPathWithin(root: string, candidate: string): boolean {
