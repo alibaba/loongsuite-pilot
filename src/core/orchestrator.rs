@@ -518,6 +518,12 @@ impl Orchestrator {
         } else if let Some(config) = &interceptor_config {
             self.start_qoder_hooks(&pilot_dir, config, verdicts).await;
         }
+        for profile in crate::sdk::hook_history::PROFILES {
+            if self.uses_sdk_hook_history(profile.agent) {
+                self.register_sdk_hook_history(&mut detection, &pilot_dir, &state_store, profile)
+                    .await;
+            }
+        }
         let deploy_entries = deployment
             .as_ref()
             .map(|deployment| self.deploy_detection_entries(deployment))
@@ -2705,21 +2711,23 @@ impl Orchestrator {
         );
         let opencode = self.data_dir_join("logs/opencode");
         ensure_dir(&opencode).await;
-        self.attach_hook(
-            entries,
-            "opencode-log",
-            "opencode",
-            OpenCodeLogInput::new(self.hook_opts_dir(state_store, &opencode, "opencode-log")),
-            vec![opencode.clone()],
-            {
-                let opencode = opencode.clone();
-                move || {
+        if !self.uses_sdk_hook_history("opencode") {
+            self.attach_hook(
+                entries,
+                "opencode-log",
+                "opencode",
+                OpenCodeLogInput::new(self.hook_opts_dir(state_store, &opencode, "opencode-log")),
+                vec![opencode.clone()],
+                {
                     let opencode = opencode.clone();
-                    async move { directory_exists(&opencode).await }
-                }
-            },
-        )
-        .await;
+                    move || {
+                        let opencode = opencode.clone();
+                        async move { directory_exists(&opencode).await }
+                    }
+                },
+            )
+            .await;
+        }
         let pi_dir = self.data_dir_join("logs/pi-coding-agent");
         ensure_pi_coding_agent_log_dir(&pi_dir).await;
         let bits = Arc::clone(&self.bits);
@@ -2952,6 +2960,84 @@ impl Orchestrator {
             verdicts.start_checkpoint_loop(interceptor::TOOL_VERDICT_CHECKPOINT_INTERVAL_MS);
             *self.qoder_hooks.lock().expect("Qoder Hook SDK") = Some(sdk);
         }
+    }
+
+    fn uses_sdk_hook_history(&self, agent: &str) -> bool {
+        crate::sdk::hook_history::find(agent).is_some()
+            && self.standalone
+            && !self.config.upstream_link.enabled
+            && !(self.inputs_have_multimodal()
+                && self
+                    .config
+                    .agents
+                    .get(agent)
+                    .is_some_and(|config| is_agent_multimodal_enabled(Some(agent), config)))
+    }
+
+    async fn register_sdk_hook_history(
+        &self,
+        entries: &mut Vec<Arc<dyn AgentDetection>>,
+        pilot_dir: &str,
+        state_store: &Arc<StateStore>,
+        profile: &crate::sdk::hook_history::HookHistoryProfile,
+    ) {
+        let history = self.data_dir_join(profile.history);
+        ensure_dir(&history).await;
+        let agent = profile.agent;
+        let listener = profile.listener;
+        let sdk_data = self.data_dir_join(&format!("state/standalone-{agent}-sdk"));
+        let config = self.config.agents.get(agent);
+        let init = serde_json::json!({
+            "data_dir": sdk_data,
+            "resource_dir": pilot_dir,
+            "user_id": self.config.user_id,
+        });
+        let policy = serde_json::json!({
+            "agents": [agent],
+            "hcd": {"agent_configs": {(agent): {"collection": {
+                "enabled": true, "profile": profile.profile,
+                "allowed_roots": [&self.data_dir],
+                "sources": [{"id": "history", "type": "hook_jsonl", "path": &history}],
+                "limits": {"poll_interval_ms": self.poll(listener)
+                    .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS)},
+                "pilot_host": {
+                    "data_dir": self.data_dir,
+                    "capture_message_content": config.and_then(|config| config.capture_message_content),
+                    "exclude_workspaces": self.config.privacy.as_ref()
+                        .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
+                },
+            }}}},
+            "sdk_options": {"mask": self.config.mask},
+        });
+        let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
+            listener,
+            init,
+            policy,
+            &self.inputs,
+            std::path::PathBuf::from(sdk_data),
+            state_store,
+        ));
+        let live = live_from_parts(
+            listener,
+            agent,
+            "sdk-hosted",
+            sdk,
+            |input| input.running(),
+            |input| Box::pin(async move { input.start().await }),
+            |input| Box::pin(async move { input.stop().await }),
+        );
+        self.inputs.register_input(Arc::clone(&live));
+        self.push_detection(
+            entries,
+            live,
+            vec![history.clone()],
+            move || {
+                let history = history.clone();
+                async move { directory_exists(&history).await }
+            },
+            1,
+            None,
+        );
     }
 
     fn register_sdk_qoder(
