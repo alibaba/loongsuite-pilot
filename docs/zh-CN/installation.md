@@ -38,7 +38,7 @@ Windows 安装器默认下载 `loongsuite-pilot.zip`。数据目录默认在 `%U
 
 ```powershell
 icacls "$env:USERPROFILE\.local\bin"
-icacls "$env:USERPROFILE\.local\bin" /grant "$env:USERNAME:(OI)(CI)M"
+icacls "$env:USERPROFILE\.local\bin" /grant "${env:USERNAME}:(OI)(CI)M"
 ```
 
 之后用普通权限重跑安装器。不要整体用管理员权限跑安装器：安装出来的文件属主会变成 Administrators，下次升级会在同一步再失败。

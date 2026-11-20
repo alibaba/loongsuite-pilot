@@ -1993,6 +1993,8 @@ const finish = (code) => {
   process.exit(code);
 };
 const request = http.request({
+  // Keep the local probe off Node's environment-configured global proxy.
+  agent: false,
   host: "127.0.0.1",
   port: Number(process.argv[1]),
   path: "/metrics-summary.json",

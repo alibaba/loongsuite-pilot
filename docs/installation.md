@@ -37,7 +37,7 @@ If the install stops with `Copy-Item : Access to the path '...\loongsuite-pilot-
 
 ```powershell
 icacls "$env:USERPROFILE\.local\bin"
-icacls "$env:USERPROFILE\.local\bin" /grant "$env:USERNAME:(OI)(CI)M"
+icacls "$env:USERPROFILE\.local\bin" /grant "${env:USERNAME}:(OI)(CI)M"
 ```
 
 Afterwards rerun the installer as your normal user. Running the whole installer elevated is not a workaround: the installed files would be owned by Administrators and the next upgrade would fail on the same overwrite.
