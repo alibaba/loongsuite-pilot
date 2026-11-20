@@ -4,7 +4,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { parse } from 'smol-toml';
 import type { AgentDefinition } from '../../../src/types/deployment.js';
-import { systemTomlDefinition, updateSystemTomlHooks } from '../../../src/deployment/system-toml-hooks.js';
+import { systemHookDefinition } from '../../../src/deployment/system-hook-config.js';
+import { updateSystemTomlHooks } from '../../../src/deployment/system-toml-hooks.js';
 import { runHookInstall } from '../../../src/deployment/hook-install-service.js';
 import { DeploymentManager } from '../../../src/deployment/deployment-manager.js';
 import { isolateAgentHome } from '../../helpers/isolated-agent-home.js';
@@ -41,7 +42,7 @@ afterEach(async () => { restore(); await fs.rm(root, { recursive: true, force: t
 
 describe('Codex native system hooks', () => {
   it('uses PascalCase event tables with kebab-case handler arguments and preserves policy/trust state', async () => {
-    const target = systemTomlDefinition(def);
+    const target = systemHookDefinition(def);
     await fs.mkdir(path.dirname(target.hook!.settingsPath), { recursive: true });
     await fs.writeFile(target.hook!.settingsPath, policy);
     await updateSystemTomlHooks(target, true);
@@ -86,7 +87,7 @@ describe('Codex native system hooks', () => {
     // Releases before scope tracking have a record without a persisted path.
     await fs.writeFile(path.join(dataDir, 'deployed-agents.json'),
       JSON.stringify({ codex: { deployMode: 'hook', deployedAt: new Date().toISOString() } }));
-    expect((await manager.deployHookScope(systemTomlDefinition(def))).success).toBe(true);
+    expect((await manager.deployHookScope(systemHookDefinition(def))).success).toBe(true);
     expect(await fs.readFile(def.hook!.settingsPath, 'utf8')).not.toContain('codex-loongsuite-pilot-hook');
     const state = JSON.parse(await fs.readFile(path.join(dataDir, 'deployed-agents.json'), 'utf8')).codex;
     expect(state.hookScope).toBe('system');
@@ -103,7 +104,7 @@ describe('Codex native system hooks', () => {
       if (++calls === 2) throw new Error('state commit failed');
       await save();
     });
-    await expect(manager.deployHookScope(systemTomlDefinition(def))).rejects.toThrow('state commit failed');
+    await expect(manager.deployHookScope(systemHookDefinition(def))).rejects.toThrow('state commit failed');
     const state = JSON.parse(await fs.readFile(path.join(dataDir, 'deployed-agents.json'), 'utf8')).codex;
     expect(state.hookPendingMigration).toEqual({ scope: 'system', settingsPath: def.hook!.systemSettingsPath });
     const restarted = new DeploymentManager({ dataDir, pilotDir: path.resolve('.') });

@@ -125,15 +125,18 @@ export interface HookStrategyOptions {
    * removes interceptor hooks, whether or not this flag is set.
    */
   deployInterceptorHooks?: boolean;
+  systemHookDataDir?: string;
 }
 
 export class HookStrategy implements DeployStrategy {
   private readonly hookManager: HookManager;
   private readonly deployInterceptorHooks: boolean;
+  private readonly systemHookDataDir?: string;
 
   constructor(hookManager: HookManager, options?: HookStrategyOptions) {
     this.hookManager = hookManager;
     this.deployInterceptorHooks = options?.deployInterceptorHooks ?? false;
+    this.systemHookDataDir = options?.systemHookDataDir;
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
@@ -144,8 +147,8 @@ export class HookStrategy implements DeployStrategy {
 
   async needsDeploy(def: AgentDefinition, _record?: DeployedAgentRecord): Promise<boolean> {
     if (def.hook?.scope === 'system') {
-      const { systemTomlHooksInstalled } = await import('./system-toml-hooks.js');
-      return !(await systemTomlHooksInstalled(def));
+      const { systemHooksInstalled } = await import('./system-hook-config.js');
+      return !(await systemHooksInstalled(def, this.systemHookDataDir));
     }
     if (await this.needsSettingsRepairForCodex(def)) {
       return true;
@@ -220,8 +223,8 @@ export class HookStrategy implements DeployStrategy {
 
     try {
       if (hookConfig.scope === 'system') {
-        const { updateSystemTomlHooks } = await import('./system-toml-hooks.js');
-        await updateSystemTomlHooks(def, true);
+        const { updateSystemHooks } = await import('./system-hook-config.js');
+        await updateSystemHooks(def, true, this.systemHookDataDir);
         return { success: true, agentId: def.id, deployMode: 'hook' };
       }
       const ensureSettings = () => this.ensureSettingsFile(hookConfig.settingsPath);
@@ -409,8 +412,8 @@ export class HookStrategy implements DeployStrategy {
   async undeploy(def: AgentDefinition): Promise<boolean> {
     if (def.hook?.scope === 'system') {
       try {
-        const { updateSystemTomlHooks } = await import('./system-toml-hooks.js');
-        await updateSystemTomlHooks(def, false);
+        const { updateSystemHooks } = await import('./system-hook-config.js');
+        await updateSystemHooks(def, false, this.systemHookDataDir);
         return true;
       } catch (error) {
         logger.error('System hook removal failed', { error: String(error) });

@@ -1,6 +1,6 @@
 import type { AgentDefinition } from '../types/index.js';
 import { directoryExists, fileExists, resolveHome } from '../utils/fs-utils.js';
-import { commandExists, detectAgent } from './detect-utils.js';
+import { commandExists, detectAgent, detectsCursorAgentAlias } from './detect-utils.js';
 import { resolveOpenClawHost, isOpenClawHostBound, openClawBindingProblem } from './openclaw-version-resolver.js';
 import {
   DshRuntimeLocator,
@@ -81,6 +81,10 @@ export async function probeAgentDefinition(
   };
 
   if (options.listOnly) return result;
+
+  if (def.id === 'cursor-cli' && await detectsCursorAgentAlias()) {
+    return { ...result, detected: true, reason: 'command: agent (Cursor)' };
+  }
 
   if (def.id === 'openclaw') {
     let detail: string | undefined;

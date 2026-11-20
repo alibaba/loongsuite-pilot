@@ -10,19 +10,10 @@ export const SYSTEM_TOML_HOOK_PATHS: Record<string, string> = {
   codex: '/etc/codex/config.toml',
 };
 
-export function supportsSystemTomlHooks(id: string): boolean {
-  return Object.hasOwn(SYSTEM_TOML_HOOK_PATHS, id);
-}
 const BEGIN = (def: AgentDefinition) => `# BEGIN loongsuite-pilot:${def.id}`;
 const END = (def: AgentDefinition) => `# END loongsuite-pilot:${def.id}`;
 const OWNER = '# pilot-hook: ';
 
-export function systemTomlDefinition(def: AgentDefinition, configPath?: string): AgentDefinition {
-  if (!supportsSystemTomlHooks(def.id) || !def.hook) throw new Error(`System TOML hooks are not supported for ${def.id}`);
-  configPath ??= def.hook.systemSettingsPath ?? SYSTEM_TOML_HOOK_PATHS[def.id];
-  if (!path.isAbsolute(configPath)) throw new Error('Managed system config path must be absolute');
-  return { ...def, hook: { ...def.hook, userSettingsPath: def.hook.userSettingsPath ?? def.hook.settingsPath, scope: 'system', settingsPath: configPath } };
-}
 function scriptPath(def: AgentDefinition): string {
   const script = def.hook?.hookCommand;
   if (!script || !path.isAbsolute(script) || /[\r\n\0]/.test(script)) {

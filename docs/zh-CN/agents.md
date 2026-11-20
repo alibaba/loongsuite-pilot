@@ -130,12 +130,13 @@ loongsuite-pilot hook status --json
 不指定 `--agents` 时自动探测已安装的 Agent。下列框架使用公共安装方式，
 其他已探测到的 Agent 继续安装到原来的 home：
 
-| Agent | 公共注册方式 | 已验证 CLI 版本 |
+| Agent | 公共注册方式 | CLI 版本或要求 |
 | --- | --- | --- |
 | Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
 | Codex | `/etc/codex/config.toml` | 0.166.0 |
 | Pi | 现有 `$PI_CODING_AGENT_DIR/settings.json` 的 `extensions` | 0.73.1、1.5.0 |
 | DSH | 现有 `$DSH_HOME/cordis.patch.yml` 的 Pilot 标记块 | 0.2.1-rc.5 |
+| Cursor CLI | `/etc/cursor/hooks.json` | 需要 Cursor Enterprise |
 
 `--agents` 仍可选填以限定范围，也支持 `--agents grok-build,claude-code` 这样的混合列表。
 首批支持同一 Linux UID 下多个身份 home；在 Agent 进程启动前初始化，后续新增身份无需
@@ -143,6 +144,14 @@ loongsuite-pilot hook status --json
 此能力不提供租户授权隔离或跨容器自动注入。
 
 Codex 自身的 hooks 功能需保持启用。
+
+Cursor CLI 使用 [Enterprise 系统 Hook 配置](https://cursor.com/docs/hooks#configuration)。安装时
+`cursor-agent` 或官方 `agent` 别名需在 PATH 上，安装进程需有权限写入系统配置。
+同容器内的新 CLI 进程启动时读取公共 Hook，采集数据写到同一份 Pilot 目录。
+系统 Hook 使用共享目录中的 `node-bin` 和 `config.json`。Hook 文件和 Node 运行时
+应由 root 或安装用户持有，仅属主可写。Cursor 会话日志只允许 Collector 和 CLI
+共同使用的 UID 访问。
+可用 `--agents cursor-cli` 指定 Cursor 的这份共享注册。
 
 Pi 复用现有配置根 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）。后续会话只要仍读取
 这份配置，就会加载同一插件；会话文件放在子目录不影响该注册。另行选择独立

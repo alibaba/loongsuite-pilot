@@ -97,7 +97,7 @@ export function assembleTurn(journalEvents, options = {}) {
   // User-hook: user prompt is not an LLM call — emit as "other" so converter
   // merges messages_delta into ENTRY span without generating a standalone LLM span.
   const userPrompt = transcriptUserPrompt || promptEvent.prompt;
-  if (userPrompt) {
+  if (userPrompt || promptEvent.content_omitted) {
     records.push(applyPolicy({
       time_unix_nano: eventTs(promptEvent),
       observed_time_unix_nano: eventTs(promptEvent),

@@ -3,7 +3,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { DeploymentManager } from './deployment/deployment-manager.js';
-import { supportsSystemTomlHooks } from './deployment/system-toml-hooks.js';
+import { supportsSystemHooks } from './deployment/system-hook-config.js';
 
 async function main(): Promise<void> {
   const dataDir = process.argv[2];
@@ -17,7 +17,7 @@ async function main(): Promise<void> {
   if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('Invalid deployment state');
   const manager = new DeploymentManager({ dataDir, pilotDir: path.resolve(__dirname, '..') });
   const definitions = await manager.loadDefinitions();
-  for (const id of Object.keys(state).filter(id => supportsSystemTomlHooks(id))) {
+  for (const id of Object.keys(state).filter(id => supportsSystemHooks(id))) {
     const definition = definitions.find(def => def.id === id);
     if (!definition || !(await manager.undeployAgent(definition))) throw new Error(`Hook cleanup failed for ${id}`);
   }

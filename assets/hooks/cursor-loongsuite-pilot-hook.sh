@@ -3,14 +3,22 @@ set -euo pipefail
 
 # Cursor hook entrypoint — delegates to cursor-hook-processor.mjs.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "${1:-}" == "--system-scope" ]]; then
+  export PATH='/usr/bin:/bin'
+  unset CDPATH NODE_OPTIONS NODE_PATH
+  umask 077
+fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROCESSOR="$SCRIPT_DIR/cursor-hook-processor.mjs"
 EMPTY_RESULT='{}'
+if [[ "${1:-}" != "--system-scope" ]]; then
+  NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+fi
 
 log_error() {
   local stage="$1"
   local message="$2"
-  local data_dir="${LOONGSUITE_PILOT_DATA_DIR:-${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}}"
+  local data_dir="${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
   local day
   day="$(date -u +%Y-%m-%d 2>/dev/null || true)"
   [[ -n "$day" ]] || day="unknown"
@@ -30,7 +38,7 @@ if [[ -t 0 ]]; then
   exit 0
 fi
 
-if [[ ! -f "$PROCESSOR" ]]; then
+if [[ ! -f "$PROCESSOR" && "${1:-}" != "--system-scope" ]]; then
   echo "[loongsuite-pilot] hook processor not found: $PROCESSOR" >&2
   log_error "missing_processor" "hook processor not found: $PROCESSOR"
   printf '%s\n' "$EMPTY_RESULT"
@@ -78,7 +86,7 @@ node_is_app_bundle() {
   local resolved
   resolved="$(realpath "$1" 2>/dev/null || readlink -f "$1" 2>/dev/null || echo "$1")"
   case "$resolved" in
-    /Applications/*.app/Contents/*|/System/Applications/*.app/Contents/*|"$HOME"/Applications/*.app/Contents/*)
+    /Applications/*.app/Contents/*|/System/Applications/*.app/Contents/*|"${HOME:-}"/Applications/*.app/Contents/*)
       return 0
       ;;
   esac
@@ -104,13 +112,97 @@ sort_version_dirs_desc() {
   done | sort -r | cut -d'|' -f2-
 }
 
-NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+system_stat() {
+  stat -c '%u %a' -- "$@" 2>/dev/null || stat -f '%u %Lp' "$@" 2>/dev/null
+}
+
+trusted_system_mode() {
+  local owner="$1" mode="$2"
+  [[ "$owner" == 0 || "$owner" == "$EUID" ]] && [[ "$mode" =~ ^[0-7]{1,4}$ ]]
+}
+
+trusted_system_directory() {
+  local metadata owner mode
+  [[ -d "$1" && ! -L "$1" ]] || return 1
+  metadata="$(system_stat "$1")" || return 1
+  read -r owner mode <<< "$metadata"
+  trusted_system_mode "$owner" "$mode" || return 1
+  (( (8#$mode & 022) == 0 || (${2:-0} == 1 && (8#$mode & 01000) != 0) ))
+}
+
+trusted_system_ancestors() {
+  local dir="$1" sticky=0
+  while true; do
+    trusted_system_directory "$dir" "$sticky" || return 1
+    [[ "$dir" == / ]] && return 0
+    dir="${dir%/*}"
+    dir="${dir:-/}"
+    sticky=1
+  done
+}
+
+trusted_system_files() {
+  local file metadata owner mode
+  for file in "$@"; do
+    [[ -f "$file" && -r "$file" && ! -L "$file" ]] || return 1
+  done
+  metadata="$(system_stat "$@")" || return 1
+  while read -r owner mode; do
+    trusted_system_mode "$owner" "$mode" && (( (8#$mode & 022) == 0 )) || return 1
+  done <<< "$metadata"
+}
+
+run_system_processor() {
+  local data_dir="${SCRIPT_DIR%/*}" list="$SCRIPT_DIR/cursor-system-assets.list"
+  local config_file rel pinned resolved metadata owner mode
+  local -a assets=()
+  config_file="$data_dir/config.json"
+  trusted_system_ancestors "$SCRIPT_DIR" || return 1
+  trusted_system_directory "$SCRIPT_DIR/cursor" && trusted_system_directory "$SCRIPT_DIR/shared" || return 1
+  [[ -s "$list" ]] && trusted_system_files "$list" "$data_dir/node-bin" || return 1
+  while IFS= read -r rel; do
+    [[ "$rel" =~ ^[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?$ ]] || return 1
+    case "/$rel/" in */../*|*/./*) return 1 ;; esac
+    assets+=("$SCRIPT_DIR/$rel")
+  done < "$list"
+  trusted_system_files "$PROCESSOR" "${assets[@]}" || return 1
+
+  pinned="$(cat "$data_dir/node-bin")" || return 1
+  pinned="${pinned%$'\r'}"
+  [[ "$pinned" == /* && "$pinned" != *$'\n'* && "$pinned" != *$'\r'* ]] || return 1
+  resolved="$(realpath "$pinned" 2>/dev/null || readlink -f "$pinned" 2>/dev/null)" || return 1
+  trusted_system_ancestors "$(dirname "$resolved")" || return 1
+  trusted_system_files "$resolved" && node_is_suitable "$resolved" || return 1
+
+  if [[ -e "$config_file" || -L "$config_file" ]]; then
+    trusted_system_files "$config_file" || return 1
+  fi
+  if [[ -e "$data_dir/state" || -L "$data_dir/state" ]]; then
+    trusted_system_directory "$data_dir/state" || return 1
+  fi
+  trusted_system_directory "$data_dir/logs" && trusted_system_directory "$data_dir/logs/cursor" || return 1
+  metadata="$(system_stat "$data_dir/logs/cursor")" || return 1
+  read -r owner mode <<< "$metadata"
+  [[ "$owner" == "$EUID" ]] && (( (8#$mode & 077) == 0 )) || return 1
+  export LOONGSUITE_PILOT_DATA_DIR="$data_dir"
+  export AGENT_DATA_COLLECTION_CONFIG="$config_file"
+  export LOONGSUITE_PILOT_CURSOR_SYSTEM_SCOPE=1
+  "$resolved" "$PROCESSOR" >/dev/null
+}
+
+if [[ "${1:-}" == "--system-scope" ]]; then
+  if ! run_system_processor; then
+    echo "[loongsuite-pilot] Cursor system hook runtime unavailable or untrusted" >&2
+  fi
+  printf '%s\n' "$EMPTY_RESULT"
+  exit 0
+fi
 
 NODE_BIN=""
 
 # 1. Try pinned node
 if [[ -f "$NODE_PIN_FILE" ]]; then
-  pinned="$(cat "$NODE_PIN_FILE" 2>/dev/null | tr -d '[:space:]')"
+  pinned="$(tr -d '\r\n' < "$NODE_PIN_FILE" 2>/dev/null || true)"
   if [[ -n "$pinned" ]] && node_is_suitable "$pinned"; then
     NODE_BIN="$pinned"
   fi
@@ -166,9 +258,15 @@ if [[ -z "$NODE_BIN" ]]; then
   exit 0
 fi
 
-if ! "$NODE_BIN" "$PROCESSOR"; then
-  echo "[loongsuite-pilot] hook processor failed" >&2
-  log_error "processor_failed" "hook processor exited with non-zero status"
+run_processor() {
+  if ! "$NODE_BIN" "$PROCESSOR"; then
+    echo "[loongsuite-pilot] hook processor failed" >&2
+    log_error "processor_failed" "hook processor exited with non-zero status"
+    return 1
+  fi
+}
+
+if ! run_processor; then
   printf '%s\n' "$EMPTY_RESULT"
 fi
 
