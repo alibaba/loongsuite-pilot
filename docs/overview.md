@@ -48,6 +48,8 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 
 Kimi Code collection reads the shared main-agent journal under `$KIMI_CODE_HOME/sessions` (default `~/.kimi-code/sessions`). Pilot starts at the first observation of the source, skips history copied by forks, and keeps its position across restarts. Verification covers CLI 2.7.2 and wire protocol 1.5. The desktop runtime and subagents still need validation. Set `agents.kimi-code-cli.captureMessageContent` to `false` to retain request and tool IDs, timing, and token usage without capturing their content.
 
+After restart, retained Kimi JSONL records serve as local delivery receipts. While the source cursor is pending, HTTP and SLS retries can resend the same stable event IDs after a restart or an ambiguous response.
+
 OpenClaw integration supports 2026.3.8 or later with automatic version detection; releases before 2026.5.12 use inferred model-call timing.
 
 ### Documented Windows Agent Support
