@@ -1,12 +1,62 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Writable } from 'node:stream';
 import { runCommand } from '../../../scripts/riscv64/run-command.mjs';
 
 let tmp;
 beforeEach(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-riscv-install-')); });
 afterEach(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
+
+it.skipIf(process.platform === 'win32')('bounds the slow log queue while preserving stdout and stderr', async () => {
+  const logPath = path.join(tmp, 'slow.log');
+  const bytesPerStream = 1024 * 1024;
+  let peak = 0;
+  const writer = vi.spyOn(fs, 'createWriteStream').mockImplementation((_path, { fd }) => {
+    const stream = new Writable({
+      highWaterMark: 1024,
+      write(chunk, _encoding, done) {
+        setTimeout(() => {
+          try {
+            fs.writeSync(fd, chunk);
+            done();
+          } catch (error) {
+            done(error);
+          }
+        }, 20);
+      },
+      destroy(error, done) {
+        fs.closeSync(fd);
+        done(error);
+      },
+    });
+    const write = stream.write.bind(stream);
+    stream.write = (...args) => {
+      const accepted = write(...args);
+      peak = Math.max(peak, stream.writableLength);
+      return accepted;
+    };
+    return stream;
+  });
+
+  try {
+    const program = `process.stdout.write(Buffer.alloc(${bytesPerStream},65));process.stderr.write(Buffer.alloc(${bytesPerStream},66));`;
+    const result = await runCommand(process.execPath, ['-e', program], {
+      cwd: tmp, env: process.env, logPath, timeoutMs: 10_000, outputLimitBytes: 0,
+    });
+    expect(result.exit_code).toBe(0);
+    expect(result.error).toBeUndefined();
+    expect(result.output_truncated).toBe(true);
+    const log = fs.readFileSync(logPath);
+    expect(log.length).toBe(2 * bytesPerStream);
+    expect(log.reduce((count, byte) => count + Number(byte === 65), 0)).toBe(bytesPerStream);
+    // Pipe reads can exceed the writable high-water mark by a chunk.
+    expect(peak).toBeLessThan(256 * 1024);
+  } finally {
+    writer.mockRestore();
+  }
+});
 
 describe.skipIf(process.platform !== 'linux')('RISC-V acceptance subprocess execution', () => {
   it('does not spawn when the diagnostic file cannot be opened', async () => {

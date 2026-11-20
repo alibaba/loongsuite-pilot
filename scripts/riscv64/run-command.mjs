@@ -11,6 +11,10 @@ export function runCommand(executable, args, { cwd, env, timeoutMs, logPath, out
     const logClosed = new Promise(done => log.once('close', done));
     const started = Date.now();
     const child = spawn(executable, args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const outputs = [child.stdout, child.stderr];
+    const resumeOutputs = () => {
+      for (const output of outputs) output.resume();
+    };
     let timedOut = false, interrupted = false, terminating = false, childClosed = false, spawnError, killTimer;
     const terminate = () => {
       terminating = true;
@@ -23,14 +27,21 @@ export function runCommand(executable, args, { cwd, env, timeoutMs, logPath, out
     const onSignal = () => { interrupted = true; terminate(); };
     process.on('SIGTERM', onSignal); process.on('SIGINT', onSignal);
     const timer = setTimeout(() => { timedOut = true; terminate(); }, timeoutMs);
+    log.on('drain', resumeOutputs);
     log.on('error', error => {
       spawnError = `Cannot write command log ${logPath}: ${error.message}`;
+      // A failed writer never drains. Discard remaining file output so the
+      // child can finish closing its pipes after termination.
+      resumeOutputs();
       if (!childClosed) terminate();
     });
     let forwarded = 0;
     let outputTruncated = false;
     const capture = chunk => {
-      log.write(chunk);
+      if (!log.destroyed && !log.write(chunk)) {
+        // Both pipes share one writable queue.
+        for (const output of outputs) output.pause();
+      }
       const count = Math.min(chunk.length, Math.max(0, outputLimitBytes - forwarded));
       if (count) { process.stdout.write(chunk.subarray(0, count)); forwarded += count; }
       if (count < chunk.length && !outputTruncated) {
@@ -38,7 +49,7 @@ export function runCommand(executable, args, { cwd, env, timeoutMs, logPath, out
         process.stdout.write(`\n[pilot-smoke] Further output is saved in ${logPath}\n`);
       }
     };
-    child.stdout.on('data', capture); child.stderr.on('data', capture);
+    for (const output of outputs) output.on('data', capture);
     child.once('error', error => { spawnError = String(error); });
     child.once('close', async (exitCode, signal) => {
       childClosed = true;
