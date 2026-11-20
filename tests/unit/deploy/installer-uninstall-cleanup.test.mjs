@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 
 const sh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf-8');
@@ -27,8 +28,8 @@ function extractPiCleanupNodeScript(source, style) {
   const functionEnd = source.indexOf('# ====', functionStart);
   const body = source.slice(functionStart, functionEnd);
   const shScriptStart = body.includes('result=$("$node_bin" -e "\n') ? 'result=$("$node_bin" -e "\n' : 'result=$(node -e "\n';
-  const scriptStartMarker = style === 'sh' ? shScriptStart : "$result = & $script:NODE_BIN -e @'\n";
-  const scriptEndMarker = style === 'sh' ? '\n" "$cfg" "$DATA_DIR"' : "\n'@ $cfg $DATA_DIR";
+  const scriptStartMarker = style === 'sh' ? shScriptStart : "$cleanupScript = @'\n";
+  const scriptEndMarker = style === 'sh' ? '\n" "$cfg" "$DATA_DIR"' : "\n'@";
   const scriptStart = body.indexOf(scriptStartMarker) + scriptStartMarker.length;
   const scriptEnd = body.indexOf(scriptEndMarker, scriptStart);
   if (scriptStart < scriptStartMarker.length || scriptEnd < scriptStart) {
@@ -52,11 +53,13 @@ function verifyPiCleanupContinuesPastInvalidConfig(script, envKey) {
     writeFileSync(defaultConfig, '{ broken default config');
     writeFileSync(badConfig, '{ broken custom config');
     const managedSpec = join(dataDir, 'plugins', 'pi-coding-agent', 'agents', 'good-code.mjs');
+    const unrelatedSpec = '~/different/plugins/pi-coding-agent/agents/good-code.mjs';
     writeFileSync(goodConfig, `{
   // preserve a backup before normalizing JSONC
   "url": "https://example.test/path//segment",
   "extensions": [
     ${JSON.stringify(managedSpec)},
+    ${JSON.stringify(unrelatedSpec)},
     "/third-party.mjs"
   ]
 }\n`);
@@ -73,15 +76,17 @@ function verifyPiCleanupContinuesPastInvalidConfig(script, envKey) {
       }));
     }
 
-    const run = spawnSync(process.execPath, ['-e', script, defaultConfig, dataDir], {
+    const args = envKey === 'USERPROFILE' ? ['-'] : ['-e', script];
+    const run = spawnSync(process.execPath, [...args, defaultConfig, dataDir], {
       encoding: 'utf8',
+      input: envKey === 'USERPROFILE' ? script : undefined,
       env: { ...process.env, [envKey]: root },
     });
     expect(run.status, run.stderr).toBe(0);
     expect(run.stdout).toBe('partial');
     expect(JSON.parse(readFileSync(goodConfig, 'utf8'))).toEqual({
       url: 'https://example.test/path//segment',
-      extensions: ['/third-party.mjs'],
+      extensions: [unrelatedSpec, '/third-party.mjs'],
     });
     expect(readFileSync(badConfig, 'utf8')).toBe('{ broken custom config');
     expect(existsSync(`${goodConfig}.bak`)).toBe(true);
@@ -337,6 +342,9 @@ describe('installer-opensource.ps1 brace balance', () => {
 });
 
 describe('uninstall cleans the Pi Coding Agent extension injection', () => {
+  const powerShell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
+  const hasPowerShell = spawnSync(powerShell, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0']).status === 0;
+
   function cleanupWithoutPathNode(root, dataDir) {
     const start = sh.indexOf('remove_pi_coding_agent_extension() {');
     const helper = sh.slice(start, sh.indexOf('\n# ====', start));
@@ -368,11 +376,58 @@ remove_pi_coding_agent_extension`, 'cleanup', dataDir], {
       const extension = spelling === 'home-relative'
         ? '~/shared pilot data/plugins/pi-coding-agent/index.mjs'
         : join(dataDir, 'plugins/pi-coding-agent/index.mjs');
-      writeFileSync(configPath, JSON.stringify({ extensions: [extension, '/third-party.mjs'] }));
+      const unrelated = '~/different/plugins/pi-coding-agent/index.mjs';
+      writeFileSync(configPath, JSON.stringify({ extensions: [extension, unrelated, '/third-party.mjs'] }));
       writeFileSync(join(dataDir, 'deployed-agents.json'), JSON.stringify({ 'pi-coding-agent': { pluginInjectConfigPath: configPath } }));
       const run = cleanupWithoutPathNode(root, dataDir);
       expect(run.status, run.stderr).toBe(0);
-      expect(JSON.parse(readFileSync(configPath, 'utf8')).extensions).toEqual(['/third-party.mjs']);
+      expect(JSON.parse(readFileSync(configPath, 'utf8')).extensions).toEqual([unrelated, '/third-party.mjs']);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.skipIf(!hasPowerShell)('passes the data directory to the real PowerShell cleanup under constrained language', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-ps-cleanup-'));
+    try {
+      const dataDir = join(root, 'shared Pilot data');
+      const configPath = join(root, 'custom Pi', 'settings.json');
+      const scriptPath = join(root, 'cleanup.ps1');
+      mkdirSync(dataDir);
+      mkdirSync(dirname(configPath));
+      const unrelated = String.raw`~\different\plugins\pi-coding-agent\index.mjs`;
+      writeFileSync(configPath, JSON.stringify({ extensions: [
+        '~/shared Pilot data/plugins/pi-coding-agent/index.mjs',
+        String.raw`~\shared Pilot data\plugins/pi-coding-agent/index.mjs`,
+        pathToFileURL(join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs')).href,
+        'loongsuite-pilot-pi-coding-agent',
+        unrelated,
+      ] }));
+      writeFileSync(join(dataDir, 'deployed-agents.json'), JSON.stringify({
+        'pi-coding-agent': { pluginInjectConfigPath: configPath },
+      }));
+
+      const start = ps1.indexOf('function Remove-PiCodingAgentExtension');
+      const cleanup = ps1.slice(start, ps1.indexOf('# ====', start));
+      writeFileSync(scriptPath, `\uFEFF
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandArgumentPassing = 'Legacy'
+$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'
+$script:NODE_BIN = $env:PILOT_TEST_NODE
+$DataDir = $env:PILOT_TEST_DATA
+function Msg($Chinese, $English) { Write-Output $English }
+${cleanup}
+Remove-PiCodingAgentExtension
+exit $LASTEXITCODE
+`);
+      const run = spawnSync(powerShell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+        encoding: 'utf8',
+        env: {
+          ...process.env, USERPROFILE: root, PI_CODING_AGENT_DIR: '',
+          PILOT_TEST_NODE: process.execPath, PILOT_TEST_DATA: dataDir,
+        },
+      });
+      expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(run.stdout).toContain('Cleaned Pi / PI SDK Agent extension configs');
+      expect(JSON.parse(readFileSync(configPath, 'utf8')).extensions).toEqual([unrelated]);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -440,7 +495,7 @@ remove_pi_coding_agent_extension`, 'cleanup', dataDir], {
       expect(source).toContain('agents.d.local');
       expect(source).toContain('piSdk?.schemaVersion');
       expect(source).toContain('loongsuite-pilot-pi-sdk-');
-      expect(source).toContain('plugins/pi-coding-agent/agents/');
+      expect(source).toContain('comparable(resolveValue(def.pluginInject.pluginSpec))');
     }
   });
 
