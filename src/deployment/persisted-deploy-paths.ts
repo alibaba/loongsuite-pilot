@@ -32,11 +32,12 @@ export function homeFromConfigFile(configPath: string): string {
 export function lifecycleFieldsForDeploy(
   def: AgentDefinition,
   resolved?: Pick<DeployedAgentRecord, 'pluginInjectConfigPath'>,
-): Pick<DeployedAgentRecord, 'hookSettingsPath' | 'pluginInjectConfigPath'> {
-  const fields: Pick<DeployedAgentRecord, 'hookSettingsPath' | 'pluginInjectConfigPath'> = {};
-  if (def.id === 'grok-build' && def.hook?.settingsPath) {
+): Pick<DeployedAgentRecord, 'hookSettingsPath' | 'hookScope' | 'pluginInjectConfigPath'> {
+  const fields: Pick<DeployedAgentRecord, 'hookSettingsPath' | 'hookScope' | 'pluginInjectConfigPath'> = {};
+  if ((def.id === 'grok-build' || def.id === 'codex') && def.hook?.settingsPath) {
     const resolvedHook = path.resolve(def.hook.settingsPath);
     if (path.isAbsolute(resolvedHook)) fields.hookSettingsPath = resolvedHook;
+    fields.hookScope = def.hook.scope ?? 'user';
   }
   if (def.id === 'pi-coding-agent' && def.pluginInject) {
     const selected = absolutePath(resolved?.pluginInjectConfigPath)
@@ -87,6 +88,9 @@ export function applyPersistedDeployTargets(
   if (!record) return def;
 
   let next = def;
+  if (def.copilotPlugin && record.copilotPluginTargets) {
+    next = { ...next, copilotPlugin: { ...def.copilotPlugin, ...record.copilotPluginTargets } };
+  }
   const hookSettingsPath = absolutePath(record.hookSettingsPath);
   if (!opts?.preserveHookSettings && hookSettingsPath && def.hook) {
     next = {
@@ -95,7 +99,7 @@ export function applyPersistedDeployTargets(
         ...next.detection,
         paths: uniquePaths([homeFromConfigFile(hookSettingsPath), ...next.detection.paths]),
       },
-      hook: { ...def.hook, settingsPath: hookSettingsPath },
+      hook: { ...def.hook, settingsPath: hookSettingsPath, scope: record.hookScope ?? 'user' },
     };
   }
 

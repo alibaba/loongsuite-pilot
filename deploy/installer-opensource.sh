@@ -70,19 +70,21 @@ CMS_LICENSE_KEY=""
 CMS_ENDPOINT=""
 CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
+MULTICA_COLLECTION_MODE="${LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE:-}"
+START_SERVICE=1
 SELECTED_AGENTS=""
+HOOK_INSTALL_SCOPE=""
 AGENT_SELECTION_EXPLICIT=0
 ALL_AGENTS=0
 MULTIMODAL_MODE=""
 MULTIMODAL_MODE_SET=0
 # Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
-MULTIMODAL_SUPPORTED_AGENTS="codex,qoder"
+MULTIMODAL_SUPPORTED_AGENTS="codex,qoder,qwen-work-cn"
 EXCLUDE_WORKSPACES=()
 MASK_MODE=""
 MASK_TYPES=""
 MASK_REPLACEMENT_MODE=""
 INTERCEPTOR_MODE=""
-INTERCEPTOR_TYPES=""
 HAS_SUDO=0
 PURGE=0
 PREFER_SYSTEM_NODE=0
@@ -171,10 +173,22 @@ while [[ $# -gt 0 ]]; do
         --cms-endpoint=*)     CMS_ENDPOINT="${1#*=}"; shift ;;
         --cms-workspace)      CMS_WORKSPACE="$2"; shift 2 ;;
         --cms-workspace=*)    CMS_WORKSPACE="${1#*=}"; shift ;;
+        --multica-collection-mode)
+            if [ "$#" -lt 2 ] || [[ "$2" == --* ]]; then
+                echo "--multica-collection-mode requires on or off" >&2
+                exit 1
+            fi
+            MULTICA_COLLECTION_MODE="$2"; shift 2 ;;
+        --multica-collection-mode=*) MULTICA_COLLECTION_MODE="${1#*=}"; shift ;;
+        --no-start) START_SERVICE=0; shift ;;
         --service-name-prefix) SERVICE_NAME_PREFIX="$2"; shift 2 ;;
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; shift 2 ;;
         --agents=*)           SELECTED_AGENTS="${1#*=}"; AGENT_SELECTION_EXPLICIT=1; shift ;;
+        --scope)
+            [ "$#" -ge 2 ] || { echo "--scope requires user or system" >&2; exit 1; }
+            HOOK_INSTALL_SCOPE="$2"; shift 2 ;;
+        --scope=*)            HOOK_INSTALL_SCOPE="${1#*=}"; shift ;;
         --all-agents)         ALL_AGENTS=1; shift ;;
         --multimodal-mode)    MULTIMODAL_MODE="${2-}"; MULTIMODAL_MODE_SET=1; shift 2 || shift ;;
         --multimodal-mode=*)  MULTIMODAL_MODE="${1#*=}"; MULTIMODAL_MODE_SET=1; shift ;;
@@ -186,8 +200,6 @@ while [[ $# -gt 0 ]]; do
         --mask-replacement-mode=*) MASK_REPLACEMENT_MODE="${1#*=}"; shift ;;
         --interceptor-mode)   INTERCEPTOR_MODE="$2"; shift 2 ;;
         --interceptor-mode=*) INTERCEPTOR_MODE="${1#*=}"; shift ;;
-        --interceptor-types)  INTERCEPTOR_TYPES="$2"; shift 2 ;;
-        --interceptor-types=*) INTERCEPTOR_TYPES="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
         --prefer-system-node) PREFER_SYSTEM_NODE=1; shift ;;
         --prefer-system-node=*) PREFER_SYSTEM_NODE=1; shift ;;
@@ -200,6 +212,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [ -n "$HOOK_INSTALL_SCOPE" ]; then
+    case "$HOOK_INSTALL_SCOPE" in
+        user|system) ;;
+        *) echo "--scope requires user or system" >&2; exit 1 ;;
+    esac
+    if [ "$COMMAND" != "install" ]; then
+        echo "--scope is only supported with install; upgrades preserve recorded hook scope" >&2
+        exit 1
+    fi
+fi
+
 if [ -n "$ENABLE_STATUS_BAR_APP" ] && [ "$COMMAND" != "install" ]; then
     echo "--enable-status-bar-app is only supported with install" >&2
     exit 1
@@ -211,6 +234,11 @@ if [ "$DASHBOARD_PORT_SET" -eq 1 ]; then
         exit 1
     fi
 fi
+
+case "$MULTICA_COLLECTION_MODE" in
+    ""|on|off) ;;
+    *) echo "--multica-collection-mode requires on or off" >&2; exit 1 ;;
+esac
 
 if [ -n "$MASK_MODE" ]; then
     case "$MASK_MODE" in
@@ -234,19 +262,11 @@ if [ -n "$MASK_REPLACEMENT_MODE" ] && [ "$MASK_REPLACEMENT_MODE" != "placeholder
 fi
 if [ -n "$INTERCEPTOR_MODE" ]; then
     case "$INTERCEPTOR_MODE" in
-        all|none|custom) ;;
+        all|none) ;;
         *)
-            echo "❌ Unknown interceptor mode: $INTERCEPTOR_MODE (use 'all', 'custom', or 'none')" >&2
+            echo "❌ Unknown interceptor mode: $INTERCEPTOR_MODE (use 'all' or 'none')" >&2
             exit 1 ;;
     esac
-fi
-if [ "$INTERCEPTOR_MODE" = "custom" ] && [ -z "$INTERCEPTOR_TYPES" ]; then
-    echo "❌ --interceptor-types is required when --interceptor-mode custom" >&2
-    exit 1
-fi
-if [ -n "$INTERCEPTOR_TYPES" ] && [ "$INTERCEPTOR_MODE" != "custom" ]; then
-    echo "❌ --interceptor-types can only be used with --interceptor-mode custom" >&2
-    exit 1
 fi
 if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; }; then
     echo "❌ --sls-api-key cannot be used with --sls-ak-id or --sls-ak-secret" >&2
@@ -769,14 +789,14 @@ select_agents() {
     fi
 
     # Non-interactive: auto-select all detected agents
-    if [ ! -t 0 ]; then
+    if [ ! -t 0 ] || [ "$HOOK_INSTALL_SCOPE" = system ]; then
         SELECTED_AGENTS=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "
 const r = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 const detected = r.filter(a => a.detected).map(a => a.id);
 process.stdout.write(detected.join(','));
 " 2>/dev/null || true)
-        msg "    (非交互模式) 自动选择已检测到的 Agent: $SELECTED_AGENTS" \
-            "    (non-interactive) Auto-selected detected agents: $SELECTED_AGENTS"
+        msg "    自动选择已检测到的 Agent: $SELECTED_AGENTS" \
+            "    Auto-selected detected agents: $SELECTED_AGENTS"
         echo ""
         return 0
     fi
@@ -895,15 +915,11 @@ try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { pro
 
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
-const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+const INTERCEPTOR_MASK_TYPES = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
 const parseTypeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean);
 const uniqueTypes = list => [...new Set(list)];
 const interceptorModeFinal = newVals.interceptorMode || (old.interceptor||{}).mode || '';
-const interceptorTypesFinal = interceptorModeFinal === 'all'
-  ? INTERCEPTOR_TYPE_SET.slice()
-  : interceptorModeFinal === 'custom'
-    ? parseTypeCsv(newVals.interceptorMode ? newVals.interceptorTypes : ((old.interceptor||{}).types||[]).join(',')).filter(t => INTERCEPTOR_TYPE_SET.indexOf(t) !== -1)
-    : [];
+const interceptorTypesFinal = interceptorModeFinal === 'all' ? INTERCEPTOR_MASK_TYPES.slice() : [];
 const maskModeFinal = newVals.maskMode || (old.mask||{}).mode || '';
 const maskTypesFinal = maskModeFinal === 'custom'
   ? parseTypeCsv(newVals.maskMode ? newVals.maskTypes : ((old.mask||{}).types||[]).join(','))
@@ -931,7 +947,6 @@ const checks = [
   { label: 'mask.types',         oldVal: (old.mask||{}).mode === 'custom' && Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: coveredMaskTypes.join(',') },
   { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
   { label: 'interceptor.mode',   oldVal: (old.interceptor||{}).mode||'',   newVal: newVals.interceptorMode },
-  { label: 'interceptor.types',  oldVal: Array.isArray((old.interceptor||{}).types) ? normalizeCsv(old.interceptor.types.join(',')) : '', newVal: normalizeCsv(newVals.interceptorTypes) },
   { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
 ];
 
@@ -941,8 +956,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","maskReplacementMode":"%s","interceptorMode":"%s","interceptorTypes":"%s","multimodalMode":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MASK_REPLACEMENT_MODE" "$INTERCEPTOR_MODE" "$INTERCEPTOR_TYPES" "$MULTIMODAL_MODE")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","maskReplacementMode":"%s","interceptorMode":"%s","multimodalMode":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MASK_REPLACEMENT_MODE" "$INTERCEPTOR_MODE" "$MULTIMODAL_MODE")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -1134,6 +1149,86 @@ migrate_legacy_layout() {
 # Common: write / merge config.json
 # ============================================================
 write_config() {
+    # Drop placeholders and values over 128 bytes. An empty result leaves the previous hostSn.
+    # Spaces are kept: a VMware serial is "VMware-" plus hex bytes separated by spaces.
+    normalize_host_sn() {
+        local value lower bytes
+        value=$(printf '%s' "${1-}" | tr -d '\r')
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        [ -n "$value" ] || return 0
+        lower=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+        case "$lower" in
+            none|default\ string|to\ be\ filled\ by\ o.e.m.|system\ serial\ number|not\ specified|0)
+                return 0
+                ;;
+        esac
+        bytes=$(printf '%s' "$value" | wc -c | tr -d '[:space:]')
+        [ "$bytes" -le 128 ] || return 0
+        case "$value" in
+            *[!A-Za-z0-9._:\ -]*) return 0 ;;
+        esac
+        printf '%s' "$value"
+    }
+
+    # Run a command for at most N seconds. On expiry, kill it and return 1.
+    # A failed or expired read leaves hostSn unset, so the previous value stays.
+    run_bounded() {
+        local secs="$1" outfile="$2"
+        shift 2
+        "$@" >"$outfile" 2>/dev/null &
+        local pid=$!
+        local i=0
+        while [ "$i" -lt "$secs" ] && kill -0 "$pid" 2>/dev/null; do
+            sleep 1
+            i=$((i + 1))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+            kill -9 "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 1
+        fi
+        wait "$pid" 2>/dev/null || true
+        return 0
+    }
+
+    read_host_sn() {
+        local uname_s raw candidate path raw_file
+        uname_s=$(uname -s 2>/dev/null || true)
+        if [ "$uname_s" = "Darwin" ]; then
+            raw=""
+            raw_file=$(mktemp 2>/dev/null) || return 0
+            if run_bounded 5 "$raw_file" ioreg -rd1 -c IOPlatformExpertDevice; then
+                raw=$(tr -d '\r' < "$raw_file" 2>/dev/null || true)
+            fi
+            rm -f "$raw_file"
+            candidate=$(printf '%s\n' "$raw" | sed -n 's/.*"IOPlatformSerialNumber" *= *"\([^"]*\)".*/\1/p' | head -n 1 || true)
+            if [ "${#candidate}" -gt 128 ]; then
+                candidate=""
+            fi
+            normalize_host_sn "$candidate"
+            return 0
+        fi
+        if [ "$uname_s" = "Linux" ]; then
+            for path in \
+                /sys/class/dmi/id/product_serial \
+                /sys/class/dmi/id/board_serial \
+                /sys/class/dmi/id/chassis_serial
+            do
+                [ -r "$path" ] || continue
+                raw=$(tr -d '\r' < "$path" 2>/dev/null || true)
+                candidate=$(normalize_host_sn "$raw")
+                if [ -n "$candidate" ]; then
+                    printf '%s' "$candidate"
+                    return 0
+                fi
+            done
+        fi
+        return 0
+    }
+
     local config_file="$DATA_DIR/config.json"
     msg "==> 写入配置文件 $config_file ..." \
         "==> Writing config to $config_file ..."
@@ -1143,7 +1238,10 @@ write_config() {
     if [ "${#EXCLUDE_WORKSPACES[@]}" -gt 0 ]; then
         excluded_workspaces_json=$("$NODE_BIN" -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${EXCLUDE_WORKSPACES[@]}")
     fi
+    local host_sn=""
+    host_sn=$(read_host_sn 2>/dev/null || true)
     printf '%s' "$PROBE_RESULT" | \
+        LP_HOST_SN="$host_sn" \
         LP_EXCLUDE_WORKSPACES="$excluded_workspaces_json" \
         LP_SLS_API_KEY="$SLS_API_KEY" \
         LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
@@ -1228,6 +1326,9 @@ if (userId) {
   delete config.identity;
 }
 
+const hostSn = process.env.LP_HOST_SN || '';
+if (hostSn) config.hostSn = hostSn;
+
 const collectLog = '${COLLECT_LOG}';
 const collectTrace = '${COLLECT_TRACE}';
 const cmsLicenseKey = '${CMS_LICENSE_KEY}';
@@ -1241,7 +1342,6 @@ const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
 const maskReplacementMode = '${MASK_REPLACEMENT_MODE}';
 const interceptorMode = '${INTERCEPTOR_MODE}';
-const interceptorTypes = '${INTERCEPTOR_TYPES}';
 
 if (collectLog) config.collectLog = collectLog === 'true';
 if (collectTrace) config.collectTrace = collectTrace === 'true';
@@ -1254,6 +1354,13 @@ if (cmsLicenseKey || cmsEndpoint || cmsWorkspace) {
 }
 
 if (serviceNamePrefix) config.serviceNamePrefix = serviceNamePrefix;
+const multicaCollectionMode = '${MULTICA_COLLECTION_MODE}';
+if (multicaCollectionMode) {
+  config.pipeline = config.pipeline || {};
+  config.pipeline.multica = config.pipeline.multica || {};
+  config.pipeline.multica.mode = multicaCollectionMode;
+}
+
 
 if (maskMode) {
   config.mask = config.mask || {};
@@ -1275,24 +1382,13 @@ if (maskReplacementMode) {
 if (interceptorMode) {
   config.interceptor = config.interceptor || {};
   config.interceptor.mode = interceptorMode;
-  if (interceptorMode === 'custom') {
-    config.interceptor.types = interceptorTypes
-      .split(',')
-      .map(type => type.trim())
-      .filter(Boolean);
-  } else {
-    delete config.interceptor.types;
-  }
+  delete config.interceptor.types;
 }
 
-const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+const INTERCEPTOR_MASK_TYPES = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
 (function ensureMaskCoversInterceptor(config) {
   const interceptor = config.interceptor || {};
-  const extra = interceptor.mode === 'all'
-    ? INTERCEPTOR_TYPE_SET.slice()
-    : interceptor.mode === 'custom' && Array.isArray(interceptor.types)
-      ? interceptor.types.filter(type => INTERCEPTOR_TYPE_SET.indexOf(type) !== -1)
-      : [];
+  const extra = interceptor.mode === 'all' ? INTERCEPTOR_MASK_TYPES.slice() : [];
   if (extra.length === 0) return;
   if ((config.mask || {}).mode === 'all') return;
   const current = (config.mask || {}).mode === 'custom' && Array.isArray((config.mask || {}).types)
@@ -1739,6 +1835,42 @@ INTERCEPTBLOCK
     echo ""
 }
 
+# Remove only the Pilot-owned Copilot startup block. Native telemetry files are data.
+remove_copilot_plugin() {
+    local copilot_home="$HOME/.copilot"
+    [ -d "$copilot_home" ] || return 0
+    local node_bin="${NODE_BIN:-}" helper="" version="" cache="$HOME/.loongsuite-pilot"
+    if [ ! -x "$node_bin" ] && [ -f "$cache/node-bin" ]; then
+        node_bin=$(tr -d '\r\n' < "$cache/node-bin")
+    fi
+    if [ ! -x "$node_bin" ]; then node_bin=$(command -v node) || node_bin=""; fi
+    if [ -f "$cache/current" ]; then version=$(tr -d '\r\n' < "$cache/current"); fi
+    local candidate
+    for candidate in "$cache/versions/$version/dist/copilot-cleanup.cjs" "${PERMANENT_DIR:-$cache/package}/dist/copilot-cleanup.cjs"; do
+        if [ -f "$candidate" ]; then helper="$candidate"; break; fi
+    done
+    if [ -z "$node_bin" ] || [ -z "$helper" ]; then
+        echo "Copilot cleanup skipped: safe Node JSONC helper unavailable; config and plugin assets preserved" >&2
+        return 0
+    fi
+    if ! "$node_bin" "$helper" "$copilot_home"; then
+        echo "Copilot cleanup incomplete; config and plugin assets preserved for retry" >&2
+    fi
+}
+
+remove_copilot_otel_environment() {
+    local file
+    for file in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        [ -f "$file" ] || continue
+        local tmp="${file}.pilot-copilot-$$.tmp"
+        if sed '/^# >>> loongsuite-pilot copilot otel >>>$/,/^# <<< loongsuite-pilot copilot otel <<<$/{d;}' "$file" > "$tmp"; then
+            cat "$tmp" > "$file"
+        fi
+        rm -f "$tmp"
+    done
+    rm -f "$DATA_DIR/state/copilot/otel-enabled"
+}
+
 remove_claude_code_fetch_intercept() {
     for file in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
         if [ -f "$file" ] && grep -q 'loongsuite-pilot BEGIN claude-code-intercept' "$file" 2>/dev/null; then
@@ -2046,6 +2178,20 @@ try {
     return 1
 }
 
+apply_installation_scope() {
+    [ -n "$HOOK_INSTALL_SCOPE" ] || return 0
+    local scope_args=(hook install --scope "$HOOK_INSTALL_SCOPE" --json)
+    if [ -n "$SELECTED_AGENTS" ]; then scope_args+=(--agents "$SELECTED_AGENTS"); fi
+    if ! run_pilot_cli "${scope_args[@]}"; then
+        # A partial registration can require recovery. Keep its runtime and
+        # leave the collector stopped instead of the EXIT trap starting it.
+        PILOT_HELD_FOR_DEPLOY=0
+        msg "❌ Hook 安装未完成；已保留运行文件，请修复后重试 hook install" \
+            "❌ Hook installation incomplete; runtime retained. Resolve the error and retry hook install." >&2
+        return 1
+    fi
+}
+
 cmd_install() {
     msg "==> 开始安装 $PACKAGE_NAME ..." \
         "==> Installing $PACKAGE_NAME ..."
@@ -2090,6 +2236,13 @@ cmd_install() {
     inject_qodercli_token_intercept
     inject_qoderclicn_token_intercept
     inject_claude_code_fetch_intercept
+    apply_installation_scope
+
+    if [ "$START_SERVICE" = "0" ]; then
+        PILOT_HELD_FOR_DEPLOY=0
+        print_summary "install"
+        return 0
+    fi
 
     msg "==> 启动服务..." "==> Starting service..."
     if run_pilot_cli start; then
@@ -2361,6 +2514,43 @@ try {
 # Grok Build uses a dedicated Pilot-owned hook file. Match the stable entry
 # script name instead of the data-dir path so custom LOONGSUITE_PILOT_DATA_DIR
 # installations uninstall correctly, while unrelated hooks in the file remain.
+remove_native_system_hooks() {
+    [ -f "$DATA_DIR/deployed-agents.json" ] || return 0
+    local cache="${PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
+    local version="$(cat "$cache/current" 2>/dev/null || true)"
+    local node_bin="${NODE_BIN:-}"
+    if [ ! -x "$node_bin" ] && [ -f "$DATA_DIR/node-bin" ]; then
+        node_bin=$(tr -d '\r\n' < "$DATA_DIR/node-bin")
+    fi
+    if [ ! -x "$node_bin" ]; then node_bin=$(command -v node) || node_bin=""; fi
+    if [ -z "$node_bin" ]; then
+        echo "System hook cleanup requires Node.js; Pilot assets retained for retry" >&2
+        return 1
+    fi
+    local candidate
+    for candidate in "$DATA_DIR/dist/scope-cleanup.cjs" "$cache/versions/$version/dist/scope-cleanup.cjs" "${PERMANENT_DIR:-$cache/package}/dist/scope-cleanup.cjs"; do
+        if [ -f "$candidate" ]; then
+            if ! "$node_bin" "$candidate" "$DATA_DIR"; then
+                echo "System hook cleanup failed; uninstall stopped and Pilot assets retained for retry" >&2
+                return 1
+            fi
+            return 0
+        fi
+    done
+    # Refuse to delete assets while recorded system hooks still reference them.
+    "$node_bin" - "$DATA_DIR/deployed-agents.json" <<'NODE'
+const fs = require('fs');
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+  if (Object.values(state).some(r => r?.hookScope === 'system' || r?.hookPendingMigration)) {
+    throw new Error('System hook cleanup helper missing; retain Pilot assets and retry with the installed package');
+  }
+} catch (error) {
+  if (error.code !== 'ENOENT') { console.error(error.message); process.exitCode = 1; }
+}
+NODE
+}
+
 remove_grok_build_hook_config() {
     local grok_home="${GROK_HOME:-$HOME/.grok}"
     local cfg="$grok_home/hooks/loongsuite-pilot.json"
@@ -2522,9 +2712,32 @@ remove_opencode_plugin() {
         result=$(node -e "
 const fs = require('fs');
 const f = process.argv[1];
-// Our entries are identified by the pluginId or the plugin file path.
-const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-opencode') || s.includes('plugins/opencode/plugin.mjs'));
-const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
+// Match legacy plugins/opencode/plugin.mjs only under this installation.
+const normalize = value => {
+  if (typeof value !== 'string') return '';
+  let plain = value;
+  if (plain.startsWith('file://')) {
+    try {
+      const url = new URL(plain);
+      plain = decodeURIComponent(url.pathname);
+      if (plain[0] === '/' && plain[2] === ':') plain = plain.slice(1);
+      if (url.hostname && url.hostname !== 'localhost') {
+        if (process.platform !== 'win32') return '';
+        plain = '//' + url.hostname + plain;
+      }
+    } catch { return ''; }
+  }
+  plain = plain.split(String.fromCharCode(92)).join('/');
+  while (plain.endsWith('/')) plain = plain.slice(0, -1);
+  return process.platform === 'win32' ? plain.toLowerCase() : plain;
+};
+const dataDir = normalize(process.argv[2]);
+const managed = dataDir ? dataDir + '/plugins/opencode' : null;
+const isOurs = s => typeof s === 'string' && (
+  s === 'loongsuite-pilot-opencode' || s.startsWith('loongsuite-pilot-opencode@') ||
+  (managed !== null && (normalize(s) === managed || normalize(s) === managed + '/plugin.mjs'))
+);
+const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : (e?.package ?? ''));
 // JSONC fallback: strip block comments, whole-line // comments, and trailing
 // // comments preceded by whitespace. URL values like file:/// are never
 // touched because their slashes are not preceded by whitespace.
@@ -2537,16 +2750,19 @@ try {
   let data, hadComments = false;
   try { data = JSON.parse(raw); }
   catch { data = JSON.parse(stripJsonc(raw)); hadComments = true; }
-  const key = Array.isArray(data.plugins) ? 'plugins' : (Array.isArray(data.plugin) ? 'plugin' : null);
-  if (!key) { process.stdout.write('nochange'); process.exit(0); }
-  const before = data[key].length;
-  data[key] = data[key].filter(e => !isOurs(entryStr(e)));
-  if (data[key].length === before) { process.stdout.write('nochange'); process.exit(0); }
+  let removed = 0;
+  for (const key of ['plugin', 'plugins']) {
+    if (!Array.isArray(data[key])) continue;
+    const before = data[key].length;
+    data[key] = data[key].filter(e => !isOurs(entryStr(e)));
+    removed += before - data[key].length;
+  }
+  if (!removed) { process.stdout.write('nochange'); process.exit(0); }
   if (hadComments) fs.writeFileSync(f + '.bak', raw, 'utf-8');
   fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
   process.stdout.write(hadComments ? 'cleaned-bak' : 'cleaned');
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-" "$cfg" 2>/dev/null) || result="error"
+" "$cfg" "$DATA_DIR" 2>/dev/null) || result="error"
 
         case "$result" in
             cleaned)
@@ -2654,27 +2870,53 @@ try {
 remove_pi_coding_agent_extension() {
     local cfg="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/settings.json"
     local state_file="$DATA_DIR/deployed-agents.json"
-    if command -v node &>/dev/null && [ -f "$state_file" ]; then
+    local node_bin=""
+    local pin_file
+    for pin_file in "$DATA_DIR/node-bin" "$HOME/.loongsuite-pilot/node-bin"; do
+        if [ -f "$pin_file" ]; then
+            local pinned
+            pinned=$(tr -d '\r\n' < "$pin_file")
+            if _node_is_suitable "$pinned"; then node_bin="$pinned"; break; fi
+        fi
+    done
+    if [ -z "$node_bin" ]; then node_bin=$(resolve_node) || node_bin=""; fi
+    if [ -z "$node_bin" ]; then
+        # No parser remains. Do not mistake an unrelated settings file or an
+        # empty local-definition directory for an owned registration. A recorded
+        # Pi target is uncertain without Node, so retain its assets for retry.
+        local pending=0
+        if [ -f "$cfg" ] && grep -Eq 'loongsuite-pilot-pi-(coding-agent|sdk-)|plugins[\\/]+pi-coding-agent[\\/]+index[.]mjs' "$cfg"; then pending=1; fi
+        if [ -f "$state_file" ] && grep -Fq '"pi-coding-agent"' "$state_file"; then pending=1; fi
+        local definition
+        for definition in "$DATA_DIR/agents.d.local/"*.json; do
+            if [ -f "$definition" ] && grep -Fq 'loongsuite-pilot-pi-sdk-' "$definition"; then pending=1; break; fi
+        done
+        [ "$pending" -eq 1 ] || return 0
+        msg "    ❌ 无可用 Node.js，无法确认或清理 Pi 注册；卸载已停止，资产保留供重试" \
+            "    ❌ No usable Node.js; cannot verify or remove Pi registrations. Uninstall stopped; assets retained for retry."
+        return 1
+    fi
+    if [ -f "$state_file" ]; then
         local persisted
-        persisted=$(node -e '
+        if ! persisted=$("$node_bin" -e '
 const fs = require("fs");
 const path = require("path");
 try {
   const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
   const value = state?.["pi-coding-agent"]?.pluginInjectConfigPath;
   if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
-} catch {}
-' "$state_file")
+} catch (error) { if (error.code !== "ENOENT") process.exit(1); }
+' "$state_file"); then
+            msg "    ❌ 无法读取 Pi 注册目标；卸载已停止，资产保留" \
+                "    ❌ Cannot read the recorded Pi target; uninstall stopped and assets retained."
+            return 1
+        fi
         if [ -n "$persisted" ]; then cfg="$persisted"; fi
     fi
     local short="${cfg/#$HOME/\~}"
-    if ! command -v node &>/dev/null; then
-        msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
-        return 0
-    fi
 
     local result
-    result=$(node -e "
+    result=$("$node_bin" -e "
 const fs = require('fs');
 const path = require('path');
 const defaultConfig = process.argv[1];
@@ -2759,7 +3001,14 @@ try {
           if (e?.code !== 'EEXIST') throw e;
         }
       }
-      fs.writeFileSync(target.configPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+      const stat = fs.lstatSync(target.configPath);
+      if (stat.isSymbolicLink() || !(stat.mode & 0o222)) throw new Error('Pi settings are read-only or externally managed');
+      const staged = target.configPath + '.' + process.pid + '.tmp';
+      try {
+        fs.writeFileSync(staged, JSON.stringify(data, null, 2) + '\n', { mode: stat.mode & 0o777, flag: 'wx' });
+        if (fs.readFileSync(target.configPath, 'utf8') !== raw) throw new Error('Pi settings changed during cleanup');
+        fs.renameSync(staged, target.configPath);
+      } finally { try { fs.unlinkSync(staged); } catch {} }
       cleaned++;
     } catch {
       skipped++;
@@ -2782,6 +3031,7 @@ try {
         *)
             msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
     esac
+    case "$result" in cleaned|nochange) return 0 ;; *) return 1 ;; esac
 }
 
 # ============================================================
@@ -3029,12 +3279,19 @@ cmd_uninstall() {
 
     # Remove hook entries from tool configs BEFORE removing install dir
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
+    if ! remove_native_system_hooks; then
+        return 1
+    fi
     remove_hook_configs
-    remove_grok_build_hook_config
+    if ! remove_grok_build_hook_config; then
+        return 1
+    fi
     remove_qodercli_token_intercept
     remove_qoderclicn_token_intercept
     retire_qoderwork_runtime_overrides
     remove_claude_code_fetch_intercept
+    remove_copilot_otel_environment
+    remove_copilot_plugin
     echo ""
 
     # Remove OTel Claude plugin
@@ -3048,7 +3305,9 @@ cmd_uninstall() {
     echo ""
 
     msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
-    remove_pi_coding_agent_extension
+    if ! remove_pi_coding_agent_extension; then
+        return 1
+    fi
     echo ""
 
     # Remove plugin-inject specs (MiMo Code)

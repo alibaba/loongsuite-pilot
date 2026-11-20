@@ -81,9 +81,9 @@ def payload(session, count=1):
             "api_request_id": session + "-api-" + str(count), "api_call_count": count,
             "model": "fixture-model", "provider": "fixture-provider", "platform": "cli"}
 
-def begin(session, start=100, count=1):
+def begin(session, start=100, count=1, **input_fields):
     clock.value = start
-    ctx.hooks["pre_api_request"](**payload(session, count))
+    ctx.hooks["pre_api_request"](**payload(session, count), **input_fields)
 
 def end(session, count=1, error=False):
     if error:
@@ -141,7 +141,8 @@ def slow_writer(records):
     assert release_writer.wait(3), 'test writer timed out'
     original_writer(records)
 plugin._write_records = slow_writer
-writer = threading.Thread(target=lambda: begin('other-session', start=110))
+# Supply actual input so this request enters I/O rather than input staging.
+writer = threading.Thread(target=lambda: begin('other-session', start=110, user_message='other request'))
 writer.start()
 assert writer_entered.wait(2)
 result, errors = [], []
@@ -352,7 +353,7 @@ flush("invalid-duration")
     expect(responses[0]).not.toHaveProperty(TTFT);
   });
 
-  it('records timing and content with legacy captureMessageContent=false', () => {
+  it('records timing when message content capture is disabled', () => {
     const { responses } = runScenario(String.raw`
 begin("no-content")
 AIAgent("no-content")._interruptible_streaming_api_call({"delta_times": [180]})
@@ -361,7 +362,7 @@ flush("no-content")
 `, { agents: { 'hermes-agent': { captureMessageContent: false } } });
     expect(responses).toHaveLength(1);
     expect(responses[0][TTFT]).toBe(80);
-    expect(responses[0]['gen_ai.output.messages'][0].parts).toEqual([{ type: 'text', content: 'done' }]);
+    expect(responses[0]['gen_ai.output.messages'][0].parts).toEqual([{ type: 'text', content: '' }]);
   });
 
   it.each(['old-signature', 'missing-module', 'missing-pre', 'unsupported-mode', 'wrong-session'])

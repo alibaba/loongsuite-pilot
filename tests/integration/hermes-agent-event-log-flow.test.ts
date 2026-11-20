@@ -154,7 +154,11 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
     expect(flusher.batchCalls).toHaveLength(1);
     const allRecords = flusher.batchCalls[0];
     expect(allRecords.filter(record => record['gen_ai.turn.end'] === true)).toHaveLength(1);
-    const records = allRecords.filter(record => record['event.name'] !== 'other')
+    expect(allRecords.filter(record => record['agent.hermes.hook'] === 'turn_start'
+      && record['event.name'] === 'other')).toHaveLength(1);
+    expect(allRecords.filter(record => record['event.name'] === 'agent.input')).toHaveLength(1);
+    const records = allRecords.filter(record => record['event.name'] !== 'other'
+      && record['event.name'] !== 'agent.input')
       .sort((a, b) => Number(BigInt(a.time_unix_nano) - BigInt(b.time_unix_nano)));
     expect(records.map(record => record['event.name'])).toEqual([
       'llm.request',
@@ -193,7 +197,8 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
     process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
     process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
     try {
-      const converted = await convertEventLogToReadableSpans(records as EventLogRecord[], {
+      const converted = await convertEventLogToReadableSpans(allRecords.filter(record =>
+        record['event.name'] !== 'agent.input') as EventLogRecord[], {
         strict: false,
       });
       expect(converted.warnings).toEqual([]);

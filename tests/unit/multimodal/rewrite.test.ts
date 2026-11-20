@@ -101,6 +101,28 @@ describe('multimodal rewrite helpers', () => {
     expect(entry[INPUT_MULTIMODAL_METADATA_FIELD]).toBeUndefined();
   });
 
+  it('collects uri parts nested in a tool_call arguments array', () => {
+    const uri = 'oss://bucket/mm/nested.png';
+    const entry = baseEntry({
+      'gen_ai.output.messages': [{
+        role: 'assistant',
+        parts: [{
+          type: 'tool_call',
+          id: 'call-1',
+          name: 'Read',
+          arguments: [
+            { type: 'text', content: '{"file_path":"/tmp/a.png"}' },
+            { type: 'uri', uri, mime_type: 'image/png', modality: 'image' },
+          ],
+        }],
+      }],
+    });
+    attachMultimodalMetadataForEntry(entry);
+    expect(entry[OUTPUT_MULTIMODAL_METADATA_FIELD]).toEqual([
+      { uri, mime_type: 'image/png', modality: 'image' },
+    ]);
+  });
+
   it('ignores non-uri tool arguments', () => {
     const entry = baseEntry({
       'gen_ai.tool.call.arguments': { file_path: '/tmp/a.png' },

@@ -4,6 +4,51 @@ import os from 'node:os';
 import path from 'node:path';
 import { isQoderIdeaSession } from './shared/qoder-db-utils.mjs';
 
+const MESSAGE_CONTENT_FIELDS = new Set([
+  'gen_ai.input.messages',
+  'gen_ai.input.messages_delta',
+  'gen_ai.input.multimodal_metadata',
+  'gen_ai.input.multimodal_metadata_delta',
+  'gen_ai.output.messages',
+  'gen_ai.output.messages_delta',
+  'gen_ai.output.multimodal_metadata',
+  'gen_ai.system_instructions',
+  'gen_ai.tool.definitions',
+  'gen_ai.tool.call.arguments',
+  'gen_ai.tool.call.result',
+  'input.messages',
+  'input.messages_delta',
+  'output.messages',
+  'tool.arguments',
+  'tool.result.payload',
+  'content',
+  'error_message',
+  'inlineDiffMessage',
+  'agent.content',
+  'agent.inline_diff_message',
+  'error.message',
+]);
+
+const MESSAGE_CONTENT_SOURCE_KEYS = new Set([
+  'attachments',
+  'content',
+  'error_message',
+  'inlineDiffMessage',
+  'input',
+  'input_messages',
+  'input_messages_delta',
+  'new_string',
+  'old_string',
+  'output_messages',
+  'prompt',
+  'result_json',
+  'text',
+  'toolUseResult',
+  'tool_input',
+  'tool_output',
+  'tool_results',
+]);
+
 const CURSOR_MAPPED_SOURCE_KEYS = new Set([
   'cache_read_tokens',
   'cache_write_tokens',
@@ -90,6 +135,47 @@ const QODER_MAPPED_SOURCE_KEYS = new Set([
   'userId',
   'user_id',
   'uuid',
+]);
+
+const COPILOT_MAPPED_SOURCE_KEYS = new Set([
+  'apiCallId',
+  'chosenModel',
+  'cwd',
+  'decisionSource',
+  'event.id',
+  'event.name',
+  'gen_ai.session.id',
+  'hookEvent',
+  'hook_event_name',
+  'hookInvocationId',
+  'interactionId',
+  'interaction_id',
+  'model',
+  'newModel',
+  'observed_time_unix_nano',
+  'parentAgentTaskId',
+  'permissionMode',
+  'permissionRequest',
+  'promptRequest',
+  'reasoningEffort',
+  'reasoningOpaque',
+  'reasoningText',
+  'requestId',
+  'routingMethod',
+  'sessionId',
+  'session_id',
+  'shutdownType',
+  'timestamp',
+  'time_unix_nano',
+  'toolCallId',
+  'tool_call_id',
+  'toolName',
+  'tool_name',
+  'toolRequests',
+  'toolTelemetry',
+  'turnId',
+  'turn_id',
+  'user.id',
 ]);
 
 export function sanitizeObject(obj) {
@@ -181,11 +267,11 @@ export function hashJson(value) {
 }
 
 export function loadHookRuntimeConfig(dataDir) {
-  const configPath = process.env.AGENT_DATA_COLLECTION_CONFIG
+  const configPath = process.env.AGENT_DATA_COLLECTION_CONFIG?.trim()
     || path.join(dataDir || path.join(os.homedir(), '.loongsuite-pilot'), 'config.json');
   let file = {};
   try {
-    if (fs.existsSync(configPath)) file = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    if (fs.existsSync(configPath)) file = JSON.parse(fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, ''));
   } catch {
     file = {};
   }
@@ -261,13 +347,48 @@ export function resolveUserId(record, runtimeConfig = {}) {
     || os.hostname();
 }
 
-/**
- * @deprecated Kept for older hook processors during asset upgrades. Hook files
- * are copied individually, so removing this export could break an old caller
- * that loads the new shared module. Legacy content settings have no effect.
- */
-export function applyHookContentPolicy(record, _runtimeConfig = {}) {
-  return record;
+const AGENT_TYPE_TO_CONFIG_KEY = {
+  'qoder-cli': 'qoder',
+  'qoder-cli-hook': 'qoder',
+  'qoder-cn': 'qoder-cn',
+  'qoder-cn-hook': 'qoder-cn',
+  'cursor-hook': 'cursor',
+  'cursor-cli': 'cursor',
+  'openclaw': 'openclaw',
+};
+
+export function applyHookContentPolicy(record, runtimeConfig = {}) {
+  const agentType = getStringValue(record, 'gen_ai.agent.type') || getStringValue(record, 'agent.type');
+  const agents = runtimeConfig.agents;
+  const policy = agentType && agents
+    ? (agents[agentType] || agents[AGENT_TYPE_TO_CONFIG_KEY[agentType] || ''])
+    : undefined;
+  const capture = parseCaptureMessageContent(policy?.captureMessageContent);
+  if (capture !== false) return record;
+
+  return removeContentFields(record);
+}
+
+function removeContentFields(value) {
+  if (Array.isArray(value)) {
+    const list = value.map(item => removeContentFields(item)).filter(item => item !== undefined);
+    return list.length > 0 ? list : undefined;
+  }
+  if (!value || typeof value !== 'object') return value;
+
+  const next = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (isContentSourceKey(key)) continue;
+    const cleaned = removeContentFields(raw);
+    if (cleaned !== undefined) next[key] = cleaned;
+  }
+  return next;
+}
+
+function isContentSourceKey(key) {
+  if (MESSAGE_CONTENT_FIELDS.has(key) || MESSAGE_CONTENT_SOURCE_KEYS.has(key)) return true;
+  const last = key.includes('.') ? key.slice(key.lastIndexOf('.') + 1) : key;
+  return MESSAGE_CONTENT_SOURCE_KEYS.has(last);
 }
 
 function addSourceAttributes(record, source, raw, mappedKeys) {
@@ -276,6 +397,15 @@ function addSourceAttributes(record, source, raw, mappedKeys) {
     const json = toJsonValue(value);
     if (json !== undefined) record[`agent.${source}.${key}`] = json;
   }
+}
+
+function parseCaptureMessageContent(value) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return true;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'false') return false;
+  if (normalized === 'true') return true;
+  return true;
 }
 
 export function getSourceHookEvent(payload) {
@@ -374,7 +504,7 @@ export function buildCursorHookRecord(payload, options = {}) {
     time_unix_nano: getStringValue(payload, 'time_unix_nano') || timestampToUnixNanos(payload.timestamp ?? now),
   };
   addSourceAttributes(record, 'cursor', payload, CURSOR_MAPPED_SOURCE_KEYS);
-  return sanitizeObject(record) || {};
+  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }
 
 export function buildQoderHookRecord(row, options = {}) {
@@ -437,7 +567,7 @@ export function buildQoderHookRecord(row, options = {}) {
     observed_time_unix_nano: timestampToUnixNanos(Date.now()),
   };
   addSourceAttributes(record, sourceNamespace, row, QODER_MAPPED_SOURCE_KEYS);
-  return sanitizeObject(record) || {};
+  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }
 
 function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId, turnId) {
@@ -480,7 +610,7 @@ function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId, turnId) 
     observed_time_unix_nano: timestampToUnixNanos(Date.now()),
   };
   addSourceAttributes(record, sourceNamespace, data, QODER_MAPPED_SOURCE_KEYS);
-  return sanitizeObject(record) || {};
+  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }
 
 function qoderSourceNamespace(variant) {
@@ -601,4 +731,60 @@ function inferQoderToolResultStatus(content) {
   if (content.is_error === true) return 'failure';
   if (content.is_error === false) return 'success';
   return undefined;
+}
+
+/**
+ * Build a normalized hook record for Copilot (GitHub Copilot CLI).
+ *
+ * Note: CopilotLogInput reads events.jsonl directly via transcript-parser.mjs
+ * and does not flow through this builder. This function exists for parity with
+ * buildCursorHookRecord / buildQoderHookRecord so future hook-JSONL paths
+ * (should the Copilot hook processor ever emit raw JSONL) have a stable
+ * normalization contract. It is intentionally isolated: it never touches the
+ * shared MESSAGE_CONTENT_FIELDS / MESSAGE_CONTENT_SOURCE_KEYS sets and only
+ * attaches Copilot-specific source fields under the `agent.copilot.*`
+ * namespace.
+ */
+export function buildCopilotHookRecord(payload, options = {}) {
+  const now = options.now || new Date();
+  const runtimeConfig = options.runtimeConfig || {};
+  const sourceEvent = getSourceHookEvent(payload);
+  const eventName = getStringValue(payload, 'event.name') || mapSourceHookEventToEventName(sourceEvent);
+  const model = getStringValue(payload, 'model') || 'unknown';
+  const toolArguments = parseMaybeJson(payload.toolArguments ?? payload.arguments);
+  const toolResult = parseMaybeJson(payload.toolResult ?? payload.result);
+  const record = {
+    'event.id': getStringValue(payload, 'event.id') || crypto.randomUUID(),
+    'event.name': eventName,
+    'user.id': resolveUserId(payload, runtimeConfig),
+    'gen_ai.session.id': getStringValue(payload, 'gen_ai.session.id')
+      || getStringValue(payload, 'sessionId')
+      || getStringValue(payload, 'session_id')
+      || '',
+    'gen_ai.turn.id': getStringValue(payload, 'gen_ai.turn.id')
+      || getStringValue(payload, 'turnId')
+      || getStringValue(payload, 'turn_id'),
+    'gen_ai.agent.type': 'copilot',
+    'gen_ai.provider.name': inferProviderName({ ...payload, 'gen_ai.request.model': model, 'gen_ai.agent.type': 'copilot' }),
+    'gen_ai.request.model': getStringValue(payload, 'gen_ai.request.model') || model,
+    'gen_ai.response.model': getStringValue(payload, 'gen_ai.response.model') || model,
+    'gen_ai.tool.name': getStringValue(payload, 'toolName') || getStringValue(payload, 'tool_name'),
+    'gen_ai.tool.call.id': getStringValue(payload, 'toolCallId') || getStringValue(payload, 'tool_call_id'),
+    'gen_ai.tool.call.exec.id': getStringValue(payload, 'toolCallId') || getStringValue(payload, 'tool_call_id'),
+    'gen_ai.tool.call.arguments': eventName === 'tool.call' ? toJsonValue(toolArguments) : undefined,
+    'gen_ai.tool.call.result': eventName === 'tool.result' ? toJsonValue(toolResult) : undefined,
+    'gen_ai.tool.success': typeof payload.success === 'boolean' ? payload.success : undefined,
+    'error.code': getStringValue(payload, 'error.code') || getStringValue(payload, 'error_code'),
+    'error.message': getStringValue(payload, 'error.message') || getStringValue(payload, 'error_message'),
+    'permission.result.kind': getStringValue(payload, 'permission.result.kind'),
+    'permission.decision_source': getStringValue(payload, 'decisionSource') || getStringValue(payload, 'decision_source'),
+    'agent.copilot.hook_event_name': sourceEvent,
+    'agent.copilot.hook_invocation_id': getStringValue(payload, 'hookInvocationId'),
+    'agent.copilot.interaction_id': getStringValue(payload, 'interactionId'),
+    'agent.copilot.reasoning_text': getStringValue(payload, 'reasoningText'),
+    observed_time_unix_nano: getStringValue(payload, 'observed_time_unix_nano') || timestampToUnixNanos(now),
+    time_unix_nano: getStringValue(payload, 'time_unix_nano') || timestampToUnixNanos(payload.timestamp ?? now),
+  };
+  addSourceAttributes(record, 'copilot', payload, COPILOT_MAPPED_SOURCE_KEYS);
+  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }

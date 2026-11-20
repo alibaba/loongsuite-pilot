@@ -9,12 +9,15 @@
  * can discover task-scoped session roots; Stop remains a best-effort wakeup.
  * This process never parses a transcript, accumulates Hook events, or writes
  * telemetry JSONL.
+ * Also records the Node-side duration of this run into the self-monitoring
+ * spool file (shared/hook-metrics.mjs).
  */
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { decodePayload } from './shared/decode-payload.mjs';
 import { logHookError } from './shared/error-logger.mjs';
 import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
@@ -35,7 +38,8 @@ function pilotDataDir() {
 
 function tryReadStdin() {
   try {
-    // decodePayload 去 BOM 并修复中文 UTF-8->GBK 双重编码(纠偏已从 PS 侧移入 node)。
+    // decodePayload strips the BOM and repairs double-encoded UTF-8->GBK
+    // Chinese text (this correction moved from the PS side into node).
     const input = decodePayload(fs.readFileSync(0)).trim();
     if (!input) return {};
     const value = JSON.parse(input);
@@ -154,7 +158,8 @@ function writeWakeupMarker(input, hookEvent) {
   const sessionDir = sessionDirFromTranscriptPath(transcriptPath, codexHome)
     ?? path.join(codexHome, 'sessions');
 
-  // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
+  // Option 1 (env): on the first turn read TRACEPARENT and write a session-level
+  // correlation record (fail-open, once per session).
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
 
   const directory = path.join(pilotDataDir(), 'state', 'codex', 'transcript-wakeups');
@@ -227,7 +232,7 @@ function normalizedHookInput(input, subcommand) {
   };
 }
 
-function main() {
+async function main() {
   const subcommand = (process.argv[2] || '').trim();
   try {
     if (
@@ -252,7 +257,14 @@ function main() {
     }
   } finally {
     process.stdout.write('{}\n');
+    const durationMs = performance.now();
+    // A failed metrics-module load must not break the wakeup, and its load
+    // time is excluded from the measured business duration.
+    try {
+      const { recordHookTiming } = await import('./shared/hook-metrics.mjs');
+      recordHookTiming({ agentId: AGENT_ID, hookEvent: subcommand, durationMs });
+    } catch {}
   }
 }
 
-main();
+await main();

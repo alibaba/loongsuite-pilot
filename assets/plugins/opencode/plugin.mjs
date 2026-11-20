@@ -22,6 +22,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { appendRawJsonl } from "../shared/raw-jsonl-writer.mjs";
+import { readPilotConfig } from "../shared/pilot-config.mjs";
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
@@ -192,13 +194,7 @@ function truncateContent(val) {
 // ---------------------------------------------------------------------------
 
 function loadPilotConfig() {
-  try {
-    const cfgPath = path.join(resolveDataDir(), "config.json");
-    const raw = fs.readFileSync(cfgPath, "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
+  return readPilotConfig();
 }
 
 function resolveUserId(cfg) {
@@ -221,6 +217,25 @@ let _logDirReady = false;
 // for the process lifetime. Emitted as agent.opencode.cwd so the pilot pipeline
 // can enrich git.repo / workspace.current_root downstream.
 let agentCwd;
+let captureContent = true;
+
+const CONTENT_FIELDS = new Set([
+  'gen_ai.input.messages', 'gen_ai.input.messages_delta',
+  'gen_ai.output.messages', 'gen_ai.output.messages_delta',
+  'gen_ai.system_instructions', 'gen_ai.tool.definitions',
+  'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result', 'error.message',
+]);
+
+function contentEnabled(config) {
+  const value = config.agents?.opencode?.captureMessageContent;
+  return value !== false && !(typeof value === 'string' && value.trim().toLowerCase() === 'false');
+}
+
+function contentSafeRecord(record) {
+  return captureContent ? record : Object.fromEntries(
+    Object.entries(record).filter(([key]) => !CONTENT_FIELDS.has(key)),
+  );
+}
 
 function writeRecord(record) {
   try {
@@ -229,7 +244,7 @@ function writeRecord(record) {
       _logDirReady = true;
     }
     const filePath = path.join(logDir(), `opencode-${todayStamp()}.jsonl`);
-    fs.appendFileSync(filePath, safeStringify(record) + "\n");
+    appendRawJsonl(filePath, safeStringify(contentSafeRecord(record)) + "\n");
   } catch (err) {
     writeError("writeRecord", err);
   }
@@ -299,7 +314,7 @@ function clearSession(sessionID) {
 // Record builder helpers
 // ---------------------------------------------------------------------------
 
-function buildCommonFields(sessionID, session, userId) {
+function buildCommonFields(sessionID, session, userId, cwd = agentCwd) {
   const turn = session.currentTurn;
   return {
     time_unix_nano: nowNanos(),
@@ -311,7 +326,7 @@ function buildCommonFields(sessionID, session, userId) {
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": AGENT_TYPE,
     "gen_ai.agent.id": session.agentMeta?.name || undefined,
-    ...(agentCwd ? { [`agent.${AGENT_TYPE}.cwd`]: agentCwd } : {}),
+    ...(cwd ? { [`agent.${AGENT_TYPE}.cwd`]: cwd } : {}),
     ...SPAN_ATTRIBUTES,
     ...RESOURCE_BASE_FIELD_PATCH,
     ...RESOURCE_ATTRIBUTE_FIELDS,
@@ -955,6 +970,18 @@ function safe(fn) {
 export default {
   id: "loongsuite-pilot-opencode",
 
+  // Lazy-load V2 so V1 keeps its existing hooks and does not resolve V2 APIs.
+  setup: async (ctx) => {
+    const { setupV2 } = await import("./v2.mjs");
+    const cfg = loadPilotConfig();
+    captureContent = contentEnabled(cfg);
+    const userId = resolveUserId(cfg);
+    return setupV2(ctx, {
+      writeRecord, writeError, inferProviderName, recordUpstreamEnvOnce,
+      common: (sessionID, session) => buildCommonFields(sessionID, session, userId, ctx.location.directory),
+    });
+  },
+
   server: async (input, _options) => {
     ensureDir(logDir());
 
@@ -967,6 +994,7 @@ export default {
       undefined;
 
     const cfg = loadPilotConfig();
+    captureContent = contentEnabled(cfg);
     const userId = resolveUserId(cfg);
 
     return {

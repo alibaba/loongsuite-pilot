@@ -38,3 +38,5 @@
 | 文档 | 用途 |
 |------|------|
 | [新 Agent 接入](agent-onboarding.md) | 为新的 AI Coding Agent 增加采集支持。 |
+| [子 Agent 数据模型与采集设计](subagent-data-model.md) | 查看独立会话、Trace 拓扑、审计双向关联的目标模型、关联规则及验收矩阵。 |
+| [Codex 子 Agent 实现与验证入口](codex-subagent-verification.md) | 查看 Codex 实现机制、回归命令与验证证据边界。 |

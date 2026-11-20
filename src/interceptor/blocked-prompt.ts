@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { buildAgentActivityEntry, timestampToUnixNanos } from '../normalization/entry-builder.js';
 import type { AgentActivityEntry, JsonValue } from '../types/index.js';
-import type { HookRequest } from './types.js';
+import { stampGuardrail } from './guardrail.js';
+import type { EvaluateHookResponse, HookRequest } from './types.js';
+import { resolveQoderEventAgentType } from './adapters/qoder.js';
 
 function userMessage(prompt: string): JsonValue {
   return [{ role: 'user', parts: [{ type: 'text', content: prompt }] }];
@@ -14,6 +16,7 @@ function userMessage(prompt: string): JsonValue {
 export function buildBlockedQoderPromptEntry(
   request: HookRequest,
   now = Date.now(),
+  verdict?: EvaluateHookResponse,
 ): AgentActivityEntry {
   const turnId = randomUUID();
   const nanos = timestampToUnixNanos(now);
@@ -29,7 +32,7 @@ export function buildBlockedQoderPromptEntry(
     'event.id': randomUUID(),
     time_unix_nano: nanos,
     observed_time_unix_nano: nanos,
-    'gen_ai.agent.type': 'qoder-cli',
+    'gen_ai.agent.type': resolveQoderEventAgentType(request, 'qoder-cli'),
     'gen_ai.session.id': typeof request.sessionId === 'string' ? request.sessionId : '',
     'gen_ai.turn.id': turnId,
     'gen_ai.step.id': `${turnId}:s1`,
@@ -44,8 +47,11 @@ export function buildBlockedQoderPromptEntry(
       : {}),
     ...(cwd ? { 'workspace.path': cwd } : {}),
     'agent.source': 'interceptor',
-    'gen_ai.guardrail.triggered': true,
-    'gen_ai.guardrail.action': 'block',
+  });
+  stampGuardrail(entry, {
+    action: 'block',
+    ruleId: verdict?.ruleId,
+    ruleVersion: verdict?.ruleVersion,
   });
 
   if (!prompt) {

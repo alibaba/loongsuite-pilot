@@ -43,6 +43,9 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Qwen Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
+| [豆包工作（macOS/Windows，实验性）](doubao-work.md) | 只读客户端日志 | 客户端轮次与本地工具 | 仅元数据 | No | No |
+
+新 Qoder 桌面端复用 Qoder Hook 采集与 `agents.qoder` 配置。CLI 格式 transcript 以本轮原生用户记录的 `businessIdentity.product=app` 识别桌面端，兼容旧运行时的 Hook 产品标记；事件类型、OTLP `gen_ai.framework` 和 `gen_ai.agent.system` 均为 `qoder-app`。现有 CLI/IDE 的 system 保持 `qoder`，便于按 system 单独统计新版桌面端。
 
 OpenClaw 集成支持 2026.3.8 及以上版本，自动识别版本；5.12 之前的模型调用时间通过旧版 Hook 推定。
 
@@ -88,7 +91,7 @@ Pilot 可以将同一份规范化事件流输出到多个目标：
 | HTTP | 自定义采集网关或服务端。 |
 | OTLP Trace | Trace 后端、APM 或 GenAI 可观测平台。 |
 
-如果没有配置远端后端，JSONL 默认保持开启，方便本地验证采集是否生效。
+JSONL 默认关闭，包括未配置远端后端时。需要本地查看规范化事件时，设置 `jsonl.enabled: true`。
 
 ## 本地运行目录
 

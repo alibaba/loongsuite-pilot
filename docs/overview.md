@@ -43,6 +43,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Qwen Work CN | Hook / local data polling | Yes | Yes | Yes | Yes |
 | Wukong | CLI API polling | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook wakeup + local transcript watch/poll fallback | Yes | Yes | Yes | Yes |
+| [Doubao Work (macOS/Windows, experimental)](doubao-work.md) | Read-only client logs | Client turns + local tools | Metadata only | No | No |
 
 OpenClaw integration supports 2026.3.8 or later with automatic version detection; releases before 2026.5.12 use inferred model-call timing.
 
@@ -88,7 +89,7 @@ Pilot can fan out the same normalized event stream to multiple destinations:
 | HTTP | Custom ingestion service or gateway. |
 | OTLP Trace | Trace backend, APM, or GenAI observability platform. |
 
-If no remote backend is configured, JSONL remains enabled by default so collected data is still visible locally.
+JSONL is disabled by default, including when no remote backend is configured. Set `jsonl.enabled` to `true` to write normalized events locally.
 
 ## Local Runtime
 
@@ -116,7 +117,7 @@ Important files and directories:
 
 - Install Pilot with [Installation](installation.md).
 - Configure outputs and agent selection in [Configuration Guide](configuration.md).
-- Choose agents and content capture policy in [Agent Configuration](agents.md).
+- Choose agents in [Agent Configuration](agents.md).
 - Configure local output in [Local JSONL Output](local-jsonl-output.md).
 - Configure SLS reporting in [SLS Output](sls-output.md).
 - Configure trace reporting in [Trace Output](trace-output.md).

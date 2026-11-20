@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { v5 as uuidv5 } from 'uuid';
+import { uuidV5 } from '../../../src/utils/uuid.js';
 import {
   AGENT_INPUT_EVENT_NAMESPACE,
   deriveAgentInputEventId,
@@ -80,7 +80,7 @@ describe('agent input compatibility dual-write', () => {
   });
 
   it('derives a deterministic UUID v5 in the fixed namespace', () => {
-    const expected = uuidv5('source-event', AGENT_INPUT_EVENT_NAMESPACE);
+    const expected = uuidV5('source-event', AGENT_INPUT_EVENT_NAMESPACE);
     expect(deriveAgentInputEventId('source-event')).toBe(expected);
     expect(deriveAgentInputEventId('source-event')).toBe(expected);
     expect(expected).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);

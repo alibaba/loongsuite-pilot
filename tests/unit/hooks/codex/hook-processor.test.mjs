@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/codex-hook-processor.mjs');
@@ -21,12 +21,12 @@ afterEach(() => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-function runHook(subcommand, payload, extraEnv = {}) {
+function runHook(subcommand, payload, extraEnv = {}, processor = PROCESSOR) {
   const env = { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, ...extraEnv };
   if (!Object.hasOwn(extraEnv, 'LOONGSUITE_PILOT_SPAN_ATTRIBUTES')) {
     delete env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
   }
-  return spawnSync('node', [PROCESSOR, subcommand], {
+  return spawnSync('node', [processor, subcommand], {
     input: JSON.stringify(payload),
     env,
     encoding: 'utf-8',
@@ -46,6 +46,26 @@ function spanContextPath(sessionId, turnId) {
     'transcript-span-contexts',
     `${sessionId}--${turnId}.json`,
   );
+}
+
+function timingSpoolPath(root = dataDir) {
+  return path.join(root, 'state', 'hook-metrics', 'codex.jsonl');
+}
+
+function timingSamples(root = dataDir) {
+  return fs.readFileSync(timingSpoolPath(root), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+}
+
+function installProcessor() {
+  const hookDir = path.join(dataDir, 'hooks');
+  const sharedDir = path.join(hookDir, 'shared');
+  fs.mkdirSync(sharedDir, { recursive: true });
+  const processor = path.join(hookDir, 'codex-hook-processor.mjs');
+  fs.copyFileSync(PROCESSOR, processor);
+  for (const name of fs.readdirSync(SHARED_HOOK_ASSETS)) {
+    fs.copyFileSync(path.join(SHARED_HOOK_ASSETS, name), path.join(sharedDir, name));
+  }
+  return processor;
 }
 
 describe('codex transcript discovery hook', () => {
@@ -377,6 +397,135 @@ describe('codex transcript discovery hook', () => {
     ))).toBe(true);
   });
 
+  test('records the duration of every call in the timing spool', () => {
+    runHook('session-start', { session_id: 'cdx-timing' });
+    runHook('stop', { session_id: 'cdx-timing', turn_id: 'turn-timing' });
+
+    const samples = timingSamples();
+    expect(samples.map(sample => sample.hook_event)).toEqual(['session-start', 'stop']);
+    for (const sample of samples) {
+      expect(Object.keys(sample).sort()).toEqual(['duration_ms', 'hook_event']);
+      expect(Number.isInteger(sample.duration_ms)).toBe(true);
+      expect(sample.duration_ms).toBeGreaterThanOrEqual(0);
+    }
+    // The writers' lock is released once the sample is appended.
+    expect(fs.readdirSync(path.dirname(timingSpoolPath()))).toEqual(['codex.jsonl']);
+  });
+
+  test('times ignored events too, with an invalid event name recorded as unknown', () => {
+    const ignored = runHook('pre-tool-use', { session_id: 'cdx-ignore', tool_name: 'Bash' });
+    const invalid = runHook('Not An Event', { session_id: 'cdx-ignore' });
+
+    expect(ignored.stdout.trim()).toBe('{}');
+    expect(invalid.stdout.trim()).toBe('{}');
+    expect(timingSamples().map(sample => sample.hook_event)).toEqual(['pre-tool-use', 'unknown']);
+  });
+
+  test('drops new samples once the spool reaches its cap', () => {
+    fs.mkdirSync(path.dirname(timingSpoolPath()), { recursive: true });
+    const full = `${'x'.repeat(1024 * 1024 - 1)}\n`;
+    fs.writeFileSync(timingSpoolPath(), full);
+
+    const result = runHook('stop', { session_id: 'cdx-spool-full', turn_id: 'turn-spool-full' });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    expect(fs.readFileSync(timingSpoolPath(), 'utf8')).toBe(full);
+    expect(fs.existsSync(markerPath('cdx-spool-full'))).toBe(true);
+  });
+
+  test.each(['missing', 'syntax-error', 'initialization-error'])(
+    'keeps the response, span context and wakeup when the timing module has a %s failure',
+    failure => {
+      const processor = installProcessor();
+      const timingModule = path.join(path.dirname(processor), 'shared', 'hook-metrics.mjs');
+      if (failure === 'missing') fs.unlinkSync(timingModule);
+      else fs.writeFileSync(timingModule, failure === 'syntax-error'
+        ? 'export function recordHookTiming('
+        : 'throw new Error("timing initialization failed"); export function recordHookTiming() {}');
+      const result = runHook('stop', {
+        session_id: 'cdx-optional-metrics', turn_id: 'turn-optional-metrics',
+      }, {
+        CODEX_HOME: path.join(dataDir, 'task-codex-home'),
+        LOONGSUITE_PILOT_SPAN_ATTRIBUTES: 'multica.issue.id=issue-optional-metrics',
+      }, processor);
+
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe('{}');
+      expect(result.stderr).toBe('');
+      expect(JSON.parse(fs.readFileSync(markerPath('cdx-optional-metrics'), 'utf8'))).toMatchObject({
+        codex_home: path.join(dataDir, 'task-codex-home'),
+        turn_id: 'turn-optional-metrics',
+      });
+      expect(JSON.parse(fs.readFileSync(
+        spanContextPath('cdx-optional-metrics', 'turn-optional-metrics'), 'utf8',
+      )).spanAttributes).toEqual({ 'multica.issue.id': 'issue-optional-metrics' });
+      expect(fs.existsSync(timingSpoolPath())).toBe(false);
+    },
+  );
+
+  test('captures through the response write but excludes optional module loading', () => {
+    const processor = installProcessor();
+    const timingModule = path.join(path.dirname(processor), 'shared', 'hook-metrics.mjs');
+    fs.writeFileSync(timingModule, `
+      import { performance as testClock } from 'node:perf_hooks';
+      Object.defineProperty(testClock, 'now', { configurable: true, value: () => 900 });
+    ` + fs.readFileSync(timingModule, 'utf8'));
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import fs from 'node:fs';
+      import { performance } from 'node:perf_hooks';
+      let now = 10;
+      Object.defineProperty(performance, 'now', { configurable: true, value: () => now });
+      const read = fs.readFileSync;
+      fs.readFileSync = (...args) => {
+        if (args[0] === 0) now = 40;
+        return read(...args);
+      };
+      const write = process.stdout.write;
+      process.stdout.write = function (...args) {
+        now = 80;
+        return write.apply(this, args);
+      };
+      process.argv[2] = 'stop';
+      await import(${JSON.stringify(pathToFileURL(processor).href)});
+    `], {
+      input: JSON.stringify({ session_id: 'cdx-timing-boundary' }),
+      env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir },
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    expect(fs.existsSync(markerPath('cdx-timing-boundary'))).toBe(true);
+    expect(timingSamples()).toEqual([{ hook_event: 'stop', duration_ms: 80 }]);
+  });
+
+  test('keeps the response and wakeup when the timing lock remains held', () => {
+    fs.mkdirSync(path.dirname(timingSpoolPath()), { recursive: true });
+    const lock = `${timingSpoolPath()}.lock`;
+    fs.writeFileSync(lock, 'holder');
+
+    const result = runHook('stop', { session_id: 'cdx-timing-lock', turn_id: 'turn-timing-lock' });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    expect(fs.existsSync(markerPath('cdx-timing-lock'))).toBe(true);
+    expect(fs.existsSync(timingSpoolPath())).toBe(false);
+    expect(fs.readFileSync(lock, 'utf8')).toBe('holder');
+  });
+
+  test('keeps the hook response when the timing spool cannot be written', () => {
+    fs.mkdirSync(path.join(dataDir, 'state'), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'state', 'hook-metrics'), 'not-a-directory');
+
+    const result = runHook('stop', { session_id: 'cdx-spool-error', turn_id: 'turn-spool-error' });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    expect(fs.existsSync(markerPath('cdx-spool-error'))).toBe(true);
+  });
+
   test('derives the shared Pilot data directory from the installed shell wrapper', () => {
     if (process.platform === 'win32') return;
     const pilotRoot = path.join(dataDir, 'shared-pilot');
@@ -419,6 +568,8 @@ describe('codex transcript discovery hook', () => {
       codex_home: codexHome,
       session_dir: path.join(codexHome, 'sessions'),
     });
+    // The timing sample follows the same data directory as the wakeup marker.
+    expect(timingSamples(pilotRoot).map(sample => sample.hook_event)).toEqual(['session-start']);
     expect(fs.existsSync(path.join(taskHome, '.loongsuite-pilot'))).toBe(false);
   });
 });

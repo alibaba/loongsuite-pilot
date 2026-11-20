@@ -1,3 +1,4 @@
+import type { CodexSubagentLink } from './codex-subagent-linker.js';
 import type { JsonValue } from '../../types/index.js';
 
 export type CodexTerminalStatus = 'completed' | 'interrupted';
@@ -35,10 +36,18 @@ export interface CodexActiveTranscriptTurn {
   emittedToolCallIds?: string[];
   emittedToolResultIds?: string[];
   inputContext?: CodexTranscriptInputContext;
-  /** Direct spawn_agent calls already observed while this parent turn streamed. */
+  /** Incoming work is bound by evidence, independently of creation lineage. */
+  delegation?: CodexSubagentLink;
+  /** New unbound work invalidated the old incoming context for this turn. */
+  delegationUnbound?: boolean;
+  /** Fixed at first emission; late links must not re-export an existing trace. */
+  emittedTraceId?: string;
+  emittedAuditEventIds?: string[];
+  /** Legacy fusion checkpoint only: previously observed direct spawn calls. */
   subagentSpawns?: CodexPendingFusionChild[];
 }
 
+/** Legacy fusion descriptor retained only for checkpoint migration. */
 export interface CodexPendingFusionChild {
   parentToolCallId: string;
   parentTraceId: string;
@@ -48,7 +57,7 @@ export interface CodexPendingFusionChild {
   childThreadId?: string;
 }
 
-/** Parent task_complete staged until the current cycle rebuilds or degrades its direct children. */
+/** Legacy parent terminal barrier retained only for checkpoint migration. */
 export interface CodexPendingFusionTurn {
   turnId: string;
   parentThreadId: string;
@@ -58,7 +67,8 @@ export interface CodexPendingFusionTurn {
 }
 
 /**
- * Completed child turn consumed from its rollout but not emitted independently.
+ * Legacy captured child turn consumed but not independently emitted.
+ * New collection never creates this state; it is retained for migration only.
  * The active-turn snapshot lets fusion reconstruct it after the child scan
  * offset advances or the collector restarts.
  */
@@ -85,6 +95,20 @@ export interface CodexPendingTerminalTurn {
   firstPendingAtMs?: number;
   lastAttemptAtMs?: number;
   sourceRecordCount?: number;
+  /** A failed version is retried only after a source change and bounded backoff. */
+  failure?: {
+    sourceVersion: string;
+    /** Earliest retry time in epoch milliseconds; the source must also change. */
+    retryAtMs: number;
+    /** Current exponential backoff delay in milliseconds (1,000–60,000). */
+    delayMs: number;
+  };
+}
+
+/** Failed ranges retain their semantic context without retaining parsed bodies. */
+export interface CodexDeferredTerminalTurn {
+  activeTurn: CodexActiveTranscriptTurn;
+  pendingTerminal: CodexPendingTerminalTurn;
 }
 
 interface CodexForkBootstrapBase {
@@ -116,6 +140,8 @@ export interface CodexTranscriptCheckpoint {
   scanOffset: number;
   activeTurn: CodexActiveTranscriptTurn | null;
   pendingTerminal: CodexPendingTerminalTurn | null;
+  deferredTerminals?: CodexDeferredTerminalTurn[];
+  /** Legacy terminal barriers; new collection writes null. */
   pendingFusion: CodexPendingFusionTurn | null;
   pendingSubagent: CodexPendingSubagentTurn | null;
   /**
@@ -126,6 +152,7 @@ export interface CodexTranscriptCheckpoint {
    * meta therefore misattributes child turns to the parent session.
    */
   ownerSessionMetaOffset: number | null;
+  firstOwnedTurnId?: string;
   /** Independent ownership probe; searchOffset never acts as the normal collection cursor. */
   forkBootstrap?: CodexForkBootstrap;
 }

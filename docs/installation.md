@@ -81,7 +81,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--version <ver>` | Install a specific version, for example `1.2.0`. |
 | `--agents <list>` | Comma-separated agent list. Skips interactive selection. |
 | `--all-agents` | Collect every agent. Does not write `enabled` gates; runtime treats missing `enabled` as on. Ignores `--agents`. Windows: `-AllAgents`. |
-| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`. Writes that mode to selected `codex` and `qoder`; other existing supported agents get `none`. With `--all-agents`, non-`none` writes that mode onto `codex` and `qoder` and creates missing entries. `none` deletes. Omit to leave unchanged. Non-`none` requires the four SLS flags. |
+| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`. Writes that mode to selected `codex`, `qoder`, and `qwen-work-cn`; other existing supported agents get `none`. With `--all-agents`, non-`none` writes that mode onto `codex`, `qoder`, and `qwen-work-cn` and creates missing entries. `none` deletes. Omit to leave unchanged. Non-`none` requires the four SLS flags. |
 | `--userId <id>` | Set user identity written to output events. |
 | `--data-dir <path>` | Override data directory. Default is `~/.loongsuite-pilot`. |
 | `--enable-status-bar-app <true\|false>` | Set automatic macOS menu bar startup during `install`. Omission preserves the existing setting; fresh installs default to enabled. Windows: `-EnableStatusBarApp <true\|false>` (stores the setting; the UI is macOS-only). |
@@ -95,9 +95,8 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--sls-api-key <key>` | SLS API Key for API Key mode. Cannot be combined with AK/SK flags. |
 | `--mask-mode <mode>` | Data masking mode: `all`, `none`, or `custom`. |
 | `--mask-types <list>` | Comma-separated mask types. Required when `--mask-mode custom`. |
-| `--mask-replacement-mode <mode>` | Mask replacement format: `placeholder` (fixed markers, default) or `preview` (star-masked previews). Windows: `-MaskReplacementMode`. |
-| `--interceptor-mode <mode>` | Local interception mode: `all`, `none`, or `custom`. Enabled interceptor types are also added to `mask`. |
-| `--interceptor-types <list>` | Comma-separated interceptor types (mask credential subset). Required when `--interceptor-mode custom`. |
+| `--mask-replacement-mode <mode>` | Mask replacement format: `preview` (star-masked previews, default) or `placeholder` (fixed markers). If omitted, an existing setting is preserved; otherwise `preview` is used. Windows: `-MaskReplacementMode`. |
+| `--interceptor-mode <mode>` | Local interception mode: `all` or `none`. `all` enables configured local file rules and ensures masking covers access keys, API keys, private keys, and database URLs, merging existing custom mask types. Mask mode `all` stays unchanged. Previous `custom` configurations disable interception; explicitly switch to `all` to enable configured rules. `--interceptor-types` is no longer accepted. |
 | `--collect-log <true\|false>` | Enable or disable SLS log reporting. |
 | `--collect-trace <true\|false>` | Enable or disable trace reporting. |
 | `--cms-license-key <key>` | CMS or ARMS trace license key. |
@@ -107,7 +106,22 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--system-service` | **Deprecated** — ignored. Init system is now auto-detected (systemd-user → systemd-system → init.d). |
 | `--lang <lang>` | Output language: `zh` or `en`. |
 
-For example, use port `9000` by appending `--dashboard-port 9000` (or `--dashboard-port=9000`) to the Linux/macOS install command, or `-DashboardPort 9000` to the Windows command. The installer writes `dashboard.port` to `config.json` before starting the service. Open `http://127.0.0.1:9000/` after installation. Invalid or missing port values stop installation before downloads or service changes.
+For example, use port `9000` by appending `--dashboard-port 9000` (or `--dashboard-port=9000`) to the Linux/macOS install command, or `-DashboardPort 9000` to the Windows command. The installer writes `dashboard.port` to `config.json` before starting the service. The port option alone does not enable the dashboard. Invalid or missing port values stop installation before downloads or service changes.
+
+### Collection after privileged initialization on Linux
+
+`LOONGSUITE_PILOT_ROOT_TRIGGER=1` opts into root-triggered collection; it does not
+elevate privileges and is independent of `--scope system`. For OpenClaw, Hermes
+and DSH using an existing shared configuration root, a root collector can read
+private event files produced by later unprivileged processes. Pilot preserves
+the configuration owner's access and only shares its event directories. The
+default installation behavior is unchanged when the variable is unset.
+Set the variable consistently for the collector and participating Agent processes.
+Use a shared Pilot runtime/data directory that participating UIDs can traverse
+and read; a private root home is not a shared runtime directory.
+
+Embedding launchers must preserve the business working directory and coordinate
+with the existing collector; see [runtime bootstrap policies](runtime-bootstrap.md).
 
 ## Verify Installation
 
@@ -116,7 +130,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-Local JSONL output is enabled by default:
+Local JSONL output is disabled by default. To inspect local events, set `"jsonl": { "enabled": true }` in `config.json` as described in [Local JSONL Output](local-jsonl-output.md), restart Pilot, and then check:
 
 ```bash
 ls ~/.loongsuite-pilot/logs/output
@@ -140,7 +154,18 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-The local dashboard starts and stops with the collector. Open the default address below, or use your configured port:
+The local dashboard is disabled by default. Start or stop it with:
+
+```bash
+loongsuite-pilot dashboard start       # use the saved port, or 8765 by default
+loongsuite-pilot dashboard start 9999  # save and use port 9999
+loongsuite-pilot dashboard stop
+```
+
+The commands save `dashboard.enabled` and the optional port in `config.json`.
+They restart a running collector so the change takes effect; `start` also starts
+the collector if it was stopped. `stop` leaves collection running. When enabled,
+open the default address below, or use your configured port:
 
 ```text
 http://127.0.0.1:8765/
@@ -157,7 +182,7 @@ To keep the menu bar closed from the first collector startup, add the option to 
 bash /tmp/loongsuite-pilot-installer.sh install --enable-status-bar-app false
 ```
 
-The installer writes `"enableStatusBarApp": false` to `config.json` before starting collection. Explicit `true` re-enables automatic startup; omission preserves the existing value. This option applies to `install`, including reinstall; `upgrade` preserves the saved configuration. Collection and the local Dashboard remain enabled. The runtime environment variable `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` still takes precedence over this setting.
+The installer writes `"enableStatusBarApp": false` to `config.json` before starting collection. Explicit `true` re-enables automatic startup; omission preserves the existing value. This option applies to `install`, including reinstall; `upgrade` preserves the saved configuration. Collection and the local Dashboard are unaffected. The runtime environment variable `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` still takes precedence over this setting.
 
 The menu bar app starts with the collector by default. Quitting it leaves collection running, so another `loongsuite-pilot start` does not reopen it. Use:
 
