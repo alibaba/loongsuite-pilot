@@ -167,6 +167,7 @@ export class QoderTranscriptCollector {
     this.discovery = null;
     this.pendingSources = [];
     this.legacyProofRetries = new Map();
+    this.nextSourceLane = 0;
     this.prioritySources = new Map();
     this.parentAttempts = new Map();
     this.parentOwners = new Map();
@@ -693,12 +694,19 @@ export class QoderTranscriptCollector {
     } catch {}
     const priority = [...this.prioritySources.values()].slice(0, PRIORITY_SOURCES_PER_CYCLE);
     const priorityKeys = new Set(priority.map(entry => entry.name));
-    for (const key of priorityKeys) this.prioritySources.delete(key);
     const retries = this.legacyRetrySources();
     // Retrying changing legacy descriptors must not hold the wakeup directory
     // cursor. Reserve room for new sources under the same per-poll limit.
     const ordinary = await this.sources(MAX_SOURCES_PER_CYCLE - retries.length);
-    const entries = [...new Map([...priority, ...retries, ...ordinary].map(entry => [entry.name, entry])).values()];
+    const lanes = [priority, retries, ordinary];
+    const contended = retries.length > 0 && ordinary.length > 0;
+    const firstLane = contended ? this.nextSourceLane : 0;
+    if (contended) this.nextSourceLane = (firstLane + 1) % lanes.length;
+    // A source may spend the whole transcript byte or record budget in one
+    // visit. Rotate which queue starts with the full budget during legacy
+    // retry contention so all queues, including parent priority, can advance.
+    const scheduled = [...lanes.slice(firstLane), ...lanes.slice(0, firstLane)].flat();
+    const entries = [...new Map(scheduled.map(entry => [entry.name, entry])).values()];
     // Seed only bounded scheduler queues; do not walk all historical checkpoints.
     const queuedKeys = new Set([...this.prioritySources.keys(), ...this.pendingSources.map(entry => entry.name),
       ...entries.map(entry => entry.name)]);
@@ -724,6 +732,7 @@ export class QoderTranscriptCollector {
       visited.add(key);
       this.legacyProofRetries.delete(key);
       if (priorityKeys.has(key)) {
+        this.prioritySources.delete(key);
         this.parentAttempts.delete(key);
       }
       this.legacyDescriptorEntry = key;

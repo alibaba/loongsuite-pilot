@@ -458,6 +458,80 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
     expect(children).toHaveLength(18);
   }, 30_000);
 
+  it.each(['bytes', 'records'] as const)('keeps ordinary parents moving while legacy retries exhaust %s', async pressure => {
+    let collector: any;
+    const h = await harness(agentId, false, instance => { collector = instance; });
+    const busyOwner = 'synthetic-busy-stream';
+    const busy = await legacyParent(h.root, busyOwner);
+    await busy.createChild();
+    const longTask = { ...busy.task, taskId: 'old-large-native-result', agentId: 'old-child',
+      parentToolUseId: 'old-parent-call', transcriptPath: path.join(busy.directory, 'agent-old-child.jsonl'),
+      result: 'synthetic result\n'.repeat(100_000), updatedAt: 0 };
+    await busy.putTask(longTask);
+    await h.start();
+    expect(collector.legacyProofRetries.has(busy.key)).toBe(true);
+    await h.write(null, [prompt('quiet-ordinary', 0), ...end('quiet-ordinary', 1)]);
+    const collect = collector.collect.bind(collector);
+    const transcript = path.join(h.root, `${busyOwner}.jsonl`);
+    const bytePressure = jsonl(Array.from({ length: 100 }, () => ({
+      type: 'progress', sessionId: busyOwner, data: { detail: 'x'.repeat(48 * 1024) },
+    })));
+    const recordPressure = (turn: number) => {
+      const ids = Array.from({ length: 2_100 }, (_, i) => `tool-${turn}-${i}`);
+      return jsonl([prompt(`busy-${turn}`, turn), assistant(`busy-tools-${turn}`, turn,
+        ids.map(id => ({ type: 'tool_use', id, name: 'Read', input: {} })), 11, 'tool_use'),
+      { type: 'user', message: { role: 'user', content: ids.map(id => ({ type: 'tool_result', tool_use_id: id, content: 'x' })) } },
+      ...end(`busy-end-${turn}`, turn)].map(row => ({ ...row, sessionId: busyOwner })));
+    };
+    const budgetUse: Array<{ remainingBytes: number; records: number }> = [];
+    collector.collect = async (...args: any[]) => {
+      longTask.updatedAt++;
+      const content = pressure === 'bytes' ? bytePressure : recordPressure(longTask.updatedAt);
+      await Promise.all([busy.putTask(longTask), fs.appendFile(transcript, content)]);
+      const result = await collect(...args);
+      budgetUse.push({ remainingBytes: collector.remainingBytes, records: result.records.length });
+      return result;
+    };
+    await h.cycle();
+    expect(budgetUse.some(({ remainingBytes, records }) => pressure === 'bytes'
+      ? remainingBytes <= 0 && records < 4096 : remainingBytes > 0 && records >= 4096)).toBe(true);
+    expect((await spansFor(h.entries().filter(entry => entry['gen_ai.session.id'] === session)))
+      .filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(1);
+  }, 30_000);
+
+  it('finishes a paged legacy proof while ordinary sources exhaust the transcript budget', async () => {
+    let collector: any;
+    const h = await harness(agentId, false, instance => { collector = instance; });
+    const target = await legacyParent(h.root, 'synthetic-paged-target');
+    await target.createChild();
+    await target.putTask({ ...target.task, taskId: 'historical-result', agentId: 'historical-child',
+      parentToolUseId: 'historical-call', transcriptPath: path.join(target.directory, 'agent-historical-child.jsonl'),
+      result: 'synthetic result\n'.repeat(62_000) });
+    await h.write(null, [prompt('busy-ordinary', 0), ...end('busy-ordinary', 1)]);
+    await h.start();
+    expect(collector.legacyProofRetries.has(target.key)).toBe(true);
+    const collect = collector.collect.bind(collector);
+    const pressure = jsonl(Array.from({ length: 100 }, () => ({
+      type: 'progress', sessionId: session, data: { detail: 'x'.repeat(48 * 1024) },
+    })));
+    let exhausted = 0;
+    collector.collect = async (...args: any[]) => {
+      await fs.appendFile(h.parent, pressure);
+      const result = await collect(...args);
+      if (collector.remainingBytes <= 0) exhausted++;
+      return result;
+    };
+    for (let i = 0; i < 7; i++) await h.cycle();
+    expect(exhausted).toBeGreaterThan(1);
+    const spans = await spansFor(h.entries());
+    const targetTool = spans.find(span => span.attributes['gen_ai.session.id'] === target.task.sessionId
+      && span.attributes['gen_ai.tool.call.id'] === target.task.parentToolUseId);
+    const children = await childSpans(h, target.task.agentId);
+    expect(targetTool).toBeDefined();
+    expect(children).toHaveLength(1);
+    expect(children[0].parentSpanId).toBe(targetTool?.spanContext().spanId);
+  }, 30_000);
+
   it('reopens a committed synthetic legacy source when the native transcript grows', async () => {
     const h = await harness(agentId);
     const source = await legacyParent(h.root, session);
