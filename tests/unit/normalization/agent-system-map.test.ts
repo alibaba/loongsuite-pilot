@@ -7,6 +7,7 @@ describe('resolveAgentSystem', () => {
     ['openclaw', 'openclaw'],
     ['copilot', 'copilot'],
     ['cursor-cli', 'cursor'],
+    ['kiro', 'kiro'],
     ['kiro-cli', 'kiro'],
     ['qoder-cn', 'qoder'],
   ])('maps supported type %s to %s', (agentType, system) => {

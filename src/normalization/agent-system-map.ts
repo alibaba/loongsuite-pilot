@@ -15,6 +15,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'cursor': 'cursor',
   'cursor-cli': 'cursor',
   'cursor-hook': 'cursor',
+  'kiro': 'kiro',
   'kiro-cli': 'kiro',
   'qwen-code-cli': 'qwen-code',
   'opencode': 'opencode',
