@@ -1,13 +1,11 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { parseOutputSegment } from './jsonl-output-file.js';
-import { createLogger } from './logger.js';
-import { completeJsonlEnd, LOCAL_LOG_EMERGENCY_FILE_BYTES, withJsonlFileLock } from './segmented-jsonl-writer.js';
+import { LOCAL_LOG_EMERGENCY_FILE_BYTES, withJsonlFileLock } from './segmented-jsonl-writer.js';
 
 const MAX_RECENT_IDS = 65_536;
 const MAX_RECORD_BYTES = 64 * 1024 * 1024;
 const FILTER_BYTES = 4 * 1024 * 1024;
-const logger = createLogger('KimiJsonlReceipts');
 
 function isKimiOutput(name: string): boolean {
   return /^kimi-code-cli-(?:all|\d{4}-\d{2}-\d{2})\.jsonl$/.test(name)
@@ -38,7 +36,7 @@ export class KimiJsonlReceipts {
   constructor(private readonly outputDir: string) {}
 
   load(signal?: AbortSignal): Promise<void> {
-    return scanOutput(this.outputDir, id => { this.remember(id); return true; }, signal, true);
+    return scanOutput(this.outputDir, id => { this.remember(id); return true; }, signal);
   }
 
   hasRecent(id: string): boolean { return this.recent.has(id); }
@@ -71,7 +69,6 @@ async function scanOutput(
   outputDir: string,
   visit: (id: string) => boolean,
   signal?: AbortSignal,
-  repair = false,
 ): Promise<void> {
   const files = await fs.readdir(outputDir).catch(error => {
     if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return [];
@@ -92,7 +89,7 @@ async function scanOutput(
   segments.sort((a, b) => a.mtimeMs - b.mtimeMs);
   for (const { file } of segments) {
     signal?.throwIfAborted();
-    if (!await withJsonlFileLock(file, () => scanSegment(file, visit, signal, repair))) return;
+    if (!await withJsonlFileLock(file, () => scanSegment(file, visit, signal))) return;
   }
 }
 
@@ -100,7 +97,6 @@ async function scanSegment(
   file: string,
   visit: (id: string) => boolean,
   signal: AbortSignal | undefined,
-  repair: boolean,
 ): Promise<boolean> {
   const handle = await fs.open(file, 'r').catch(error => {
     if (error.code === 'ENOENT') return undefined;
@@ -110,28 +106,11 @@ async function scanSegment(
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size === 0 || stat.size > LOCAL_LOG_EMERGENCY_FILE_BYTES) return true;
-    let end = stat.size;
-    if (repair) {
-      end = await completeJsonlEnd(handle, end);
-      if (end < stat.size) {
-        const writable = await fs.open(file, 'r+');
-        try {
-          const current = await writable.stat();
-          if (current.dev !== stat.dev || current.ino !== stat.ino || current.size !== stat.size || current.mtimeMs !== stat.mtimeMs) {
-            throw new Error(`Kimi JSONL file changed during tail repair: ${file}`);
-          }
-          await writable.truncate(end);
-          await writable.sync();
-          logger.warn('Repaired incomplete Kimi JSONL tail on restart', { file, bytes: stat.size - end });
-        } finally { await writable.close(); }
-      }
-    }
-    if (end === 0) return true;
-    const stream = handle.createReadStream({ end: end - 1, autoClose: false });
+    const stream = handle.createReadStream({ end: stat.size - 1, autoClose: false });
     let pieces: Buffer[] = [];
     let bytes = 0;
-    // Only a complete line with the expected event identity can acknowledge
-    // a write. Limit scratch data even if an old segment contains a bad row.
+    // Retained segments may be read-only. An unterminated tail never
+    // acknowledges a write. The writer repairs only the file it appends to.
     for await (const data of stream) {
       signal?.throwIfAborted();
       const chunk = data as Buffer;

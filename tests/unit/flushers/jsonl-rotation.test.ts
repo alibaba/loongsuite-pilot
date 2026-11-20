@@ -94,7 +94,7 @@ it('does not reuse a segment name after retention removes previously closed file
   expect(newNames.some(file => oldNames.includes(file))).toBe(false);
 });
 
-it.each([false, true])('repairs a torn Kimi record and preserves the accepted prefix (daily=%s)', async rotateDaily => {
+it.each([false, true])('repairs the active Kimi tail before appending and preserves its accepted prefix (daily=%s)', async rotateDaily => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date(2026, 10, 20, 12));
   const { outputDir, options, flusher } = await setup(rotateDaily);
@@ -108,7 +108,6 @@ it.each([false, true])('repairs a torn Kimi record and preserves the accepted pr
   // already present, but there is no committed record ending in a newline.
   await fs.appendFile(file, '{"event.id":"kimi-b","gen_ai.agent.type":"kimi-code-cli","text":"');
   await fs.appendFile(file, Buffer.from([0xe7, 0x95]));
-  vi.setSystemTime(new Date(2026, 10, 21, 12));
   const restarted = new JsonlFlusher(options);
   await restarted.sendBatch([first, second]);
   await restarted.shutdown();
@@ -116,6 +115,59 @@ it.each([false, true])('repairs a torn Kimi record and preserves the accepted pr
   expect(records.map(record => record['event.id']).sort()).toEqual(['kimi-a', 'kimi-b']);
   expect(JSON.stringify(records.find(record => record['event.id'] === 'kimi-a')) + '\n').toBe(complete);
 });
+
+it.each(['kimi-code-cli-2026-11-20.jsonl', `kimi-code-cli.part-${'a'.repeat(32)}-2026-11-20.jsonl`])(
+  'recovers complete Kimi receipts from the read-only archive %s', async filename => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 10, 21, 12));
+    const { outputDir, flusher } = await setup(true);
+    const archived = path.join(outputDir, filename);
+    const active = path.join(outputDir, `kimi-code-cli-${getTodayDateString()}.jsonl`);
+    const accepted = { ...entry('kimi-accepted'), 'gen_ai.agent.type': 'kimi-code-cli' };
+    const interrupted = { ...entry('kimi-interrupted'), 'gen_ai.agent.type': 'kimi-code-cli' };
+    const bytes = JSON.stringify(accepted) + '\n' + JSON.stringify(interrupted);
+    await fs.writeFile(archived, bytes, { mode: 0o444 });
+
+    await flusher.createBatchDelivery([accepted, interrupted], undefined, undefined, { requireAcceptance: true })();
+
+    expect(await fs.readFile(archived, 'utf8')).toBe(bytes);
+    expect(JSON.parse((await fs.readFile(active, 'utf8')).trim())['event.id']).toBe('kimi-interrupted');
+    await flusher.shutdown();
+  },
+);
+
+it('rejects a failed Kimi write and accepts a single record once the active output is writable', async () => {
+  const { outputDir, flusher } = await setup(false);
+  const active = path.join(outputDir, 'kimi-code-cli-all.jsonl');
+  const kimi = { ...entry('kimi-failed-append'), 'gen_ai.agent.type': 'kimi-code-cli' };
+  await fs.mkdir(active);
+  const deliver = flusher.createBatchDelivery([kimi], undefined, undefined, { requireAcceptance: true });
+  await expect(deliver()).rejects.toThrow('not a regular file');
+  await fs.rmdir(active);
+  await deliver();
+  await deliver();
+  expect((await readAll(outputDir)).records.map(record => record['event.id'])).toEqual(['kimi-failed-append']);
+  await flusher.shutdown();
+});
+
+it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  'rejects an unreadable Kimi archive until its receipt can be checked', async () => {
+    const { outputDir, flusher } = await setup(false);
+    const archived = path.join(outputDir, `kimi-code-cli.part-${'b'.repeat(32)}-all.jsonl`);
+    const kimi = { ...entry('kimi-unreadable-receipt'), 'gen_ai.agent.type': 'kimi-code-cli' };
+    await fs.writeFile(archived, JSON.stringify(kimi) + '\n');
+    const deliver = flusher.createBatchDelivery([kimi], undefined, undefined, { requireAcceptance: true });
+    await fs.chmod(archived, 0o000);
+    try {
+      await expect(deliver()).rejects.toMatchObject({ code: 'EACCES' });
+    } finally {
+      await fs.chmod(archived, 0o600);
+    }
+    await deliver();
+    expect(await fs.readdir(outputDir)).toEqual([path.basename(archived)]);
+    await flusher.shutdown();
+  },
+);
 
 it('finds a retained Kimi receipt beyond the recent cache and avoids archive reads for new IDs', async () => {
   const { outputDir, options } = await setup(false);

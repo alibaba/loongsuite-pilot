@@ -9,7 +9,7 @@ const logger = createLogger('SegmentedJsonlWriter');
 const writes = new Map<string, Promise<unknown>>();
 
 /** Return the byte offset after the last newline. */
-export async function completeJsonlEnd(file: fs.FileHandle, end: number): Promise<number> {
+async function completeJsonlEnd(file: fs.FileHandle, end: number): Promise<number> {
   if (end === 0) return 0;
   const last = Buffer.allocUnsafe(1);
   const { bytesRead: lastRead } = await file.read(last, 0, 1, end - 1);
