@@ -2376,7 +2376,13 @@ impl HookStrategy {
                 "observe",
             )
         };
-        let command = sdk_hook_command(binary, &data_dir, &def.id, event, channel)?;
+        // Cursor desktop and CLI share the same configuration and registration.
+        let agent = if def.id == "cursor-cli" {
+            "cursor"
+        } else {
+            &def.id
+        };
+        let command = sdk_hook_command(binary, &data_dir, agent, event, channel)?;
         let old = std::mem::replace(&mut legacy.hook_command, command);
         legacy
             .replace_hook_commands

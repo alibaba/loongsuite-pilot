@@ -32,6 +32,7 @@ mod installer_config;
 pub(crate) mod installer_helper;
 mod legacy_cli_cleanup;
 mod legacy_uninstall;
+mod native_agent_rollback;
 mod native_codex_rollback;
 mod native_hermes_rollback;
 pub(crate) mod native_install;
