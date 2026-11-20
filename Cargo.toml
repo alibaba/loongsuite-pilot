@@ -45,6 +45,7 @@ hostname = "0.4"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+memchr = "2"
 notify = "=8.2.1"
 opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace"] }
 prost = "0.14"
