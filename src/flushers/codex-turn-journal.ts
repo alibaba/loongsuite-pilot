@@ -9,6 +9,33 @@ import { createLogger } from '../utils/logger.js';
 const MAX_ACKNOWLEDGED_TURNS = 10_000;
 export const CODEX_PENDING_MAX_BYTES = 512 * 1024 * 1024;
 const logger = createLogger('CodexTurnJournal');
+const CONFIGURED_TURN_KEY = Symbol('turn key for collector-configured identity');
+type BoundTurnEntry = AgentActivityEntry & { [CONFIGURED_TURN_KEY]?: string };
+interface ConfiguredOwner { turnKey: string; userId: string }
+
+/** Configured identity is installation-scoped. Explicit invocation identities
+ * never enter this index, and all journal and export group keys still use user.id. */
+function configuredOwnerKey(entry: AgentActivityEntry): string | undefined {
+  const agent = entry['gen_ai.agent.type'];
+  const session = entry['gen_ai.session.id'];
+  const turn = entry['gen_ai.turn.id'];
+  // Cron journal keys are already independent of the sender's user ID.
+  const legacyOpenClaw = agent === 'openclaw' && entry['agent.openclaw.collection'] !== 'cron-lifecycle-v1';
+  if ((!legacyOpenClaw && agent !== 'codex' && agent !== 'hermes')
+    || typeof session !== 'string' || !session || typeof turn !== 'string' || !turn) return undefined;
+  return createHash('sha256').update(JSON.stringify([
+    agent, session, turn,
+  ])).digest('hex');
+}
+
+function parseConfiguredOwner(value: unknown): ConfiguredOwner | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const owner = value as Partial<ConfiguredOwner>;
+  if (typeof owner.turnKey !== 'string' || !/^[a-f0-9]{64}$/.test(owner.turnKey)
+    || typeof owner.userId !== 'string' || !owner.userId) return undefined;
+  return { turnKey: owner.turnKey, userId: owner.userId };
+}
+
 function pendingBudget(): number {
   const raw = process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
   if (raw === undefined) return CODEX_PENDING_MAX_BYTES;
@@ -18,6 +45,10 @@ function pendingBudget(): number {
 }
 
 export function codexTurnJournalGroupKey(entry: AgentActivityEntry): string {
+  return groupKeyForUserId(entry, entry['user.id']);
+}
+
+function groupKeyForUserId(entry: AgentActivityEntry, userId: string): string {
   if (entry['gen_ai.agent.type'] === 'openclaw'
     && entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') {
     // The cron producer assigns a fresh turn UUID for every observed task.
@@ -28,7 +59,7 @@ export function codexTurnJournalGroupKey(entry: AgentActivityEntry): string {
     ])).digest('hex');
   }
   const identity = [
-    entry['user.id'], entry['gen_ai.session.id'], entry['gen_ai.turn.id'],
+    userId, entry['gen_ai.session.id'], entry['gen_ai.turn.id'],
   ];
   // Preserve existing Codex files/ACKs while separating other native Agents.
   if (entry['gen_ai.agent.type'] !== 'codex') identity.unshift(entry['gen_ai.agent.type']);
@@ -57,6 +88,11 @@ export class CodexTurnJournal {
   private readonly agentTypes: Set<string>;
   private readonly maxPendingBytes: number;
   private usage?: { bytes: number; oldest: number };
+  // Pending owners are bounded by the payload budget and completed owners by
+  // the ACK limit. Native turn keys never replace the tenant-aware group keys.
+  private readonly configuredOwners = new Map<string, ConfiguredOwner>();
+  private readonly configuredOwnerGroups = new Map<string, string>();
+  private readonly legacyGroupKeys = new Set<string>();
 
   /** Production keeps 10,000 ACKs; a smaller bound exercises the same eviction policy in tests. */
   constructor(
@@ -86,6 +122,26 @@ export class CodexTurnJournal {
       && value['event.name'] !== 'gen_ai.agent.invoke' && value['event.name'] !== 'gen_ai.agent.result';
   }
 
+  /** Called only for collector-configured identity, after session resolution. */
+  bindConfiguredUserId(entry: BoundTurnEntry, startupUserId?: string): void {
+    if (!this.acceptsAgent(String(entry['gen_ai.agent.type']))) return;
+    const turnKey = configuredOwnerKey(entry);
+    if (!turnKey) return;
+    const groupKey = this.configuredOwnerGroups.get(turnKey);
+    const owner = groupKey && this.configuredOwners.get(groupKey);
+    if (owner) {
+      entry['user.id'] = owner.userId;
+    } else if (startupUserId && entry['user.id'] !== startupUserId
+      && this.legacyGroupKeys.size > 0 && this.legacyGroupKeys.has(groupKeyForUserId(entry, startupUserId))) {
+      // Legacy records have no identity provenance. Preserve the exact key the
+      // collector would have used before a refresh, including its startup user.
+      entry['user.id'] = startupUserId;
+    }
+    // A symbol carries provenance through object spreads without becoming a
+    // public field in JSONL, SLS or OTLP. Only journal metadata persists it.
+    entry[CONFIGURED_TURN_KEY] = turnKey;
+  }
+
   append(entries: AgentActivityEntry[]): Promise<void> {
     return this.enqueue(async () => {
       const acknowledged = await this.loadAcknowledgements();
@@ -101,8 +157,19 @@ export class CodexTurnJournal {
       // Preflight the entire batch without retaining a second copy of every
       // group's payload; a large recovery batch can contain many turns.
       let addedBytes = 0;
-      for (const group of groups.values()) {
+      const ownerMarkers = new Map<string, { owner: ConfiguredOwner; line: string }>();
+      for (const [key, group] of groups) {
         for (const entry of group) addedBytes += Buffer.byteLength(JSON.stringify(entry)) + 1;
+        if (this.configuredOwners.has(key)) continue;
+        const configured = (group as BoundTurnEntry[]).find(entry => entry[CONFIGURED_TURN_KEY] !== undefined);
+        const turnKey = configured?.[CONFIGURED_TURN_KEY];
+        if (turnKey && configured?.['user.id']) {
+          const owner = { turnKey, userId: configured['user.id'] };
+          // Legacy readers skip this line because it has no event identity.
+          const line = JSON.stringify({ configuredOwner: owner }) + '\n';
+          ownerMarkers.set(key, { owner, line });
+          addedBytes += Buffer.byteLength(line);
+        }
       }
       const usage = await this.pendingUsage();
       if (usage.bytes + addedBytes > this.maxPendingBytes) {
@@ -126,10 +193,12 @@ export class CodexTurnJournal {
           this.initialized.add(key);
         }
         try {
-          const data = group.map(entry => JSON.stringify(entry)).join('\n') + '\n';
+          const marker = ownerMarkers.get(key);
+          const data = (marker?.line ?? '') + group.map(entry => JSON.stringify(entry)).join('\n') + '\n';
           await fs.appendFile(file, data, { mode: 0o600 });
           usage.bytes += Buffer.byteLength(data);
           await fs.chmod(file, 0o600);
+          if (marker) this.rememberConfiguredOwner(key, marker.owner);
         } catch (error) {
           // An interrupted append may have partially written its payload.
           this.usage = undefined;
@@ -175,12 +244,23 @@ export class CodexTurnJournal {
       const seen = new Set<string>();
       let batch: AgentActivityEntry[] = [];
       let bytes = 0;
+      let owner: ConfiguredOwner | undefined;
       try {
         for await (const line of lines) {
           let entry: unknown;
           try { entry = JSON.parse(line); } catch { continue; }
-          if (!this.accepts(entry) || codexTurnJournalGroupKey(entry) !== match[1]
-            || seen.has(entry['event.id'])) continue;
+          if (!this.accepts(entry)) {
+            if (entry && typeof entry === 'object' && 'configuredOwner' in entry) {
+              owner = parseConfiguredOwner(entry.configuredOwner);
+            }
+            continue;
+          }
+          if (codexTurnJournalGroupKey(entry) !== match[1]) continue;
+          if (owner && entry['user.id'] === owner.userId && configuredOwnerKey(entry) === owner.turnKey) {
+            this.rememberConfiguredOwner(match[1], owner);
+            owner = undefined;
+          }
+          if (seen.has(entry['event.id'])) continue;
           seen.add(entry['event.id']);
           const size = Buffer.byteLength(line);
           if (batch.length && bytes + size > 1024 * 1024) {
@@ -188,6 +268,9 @@ export class CodexTurnJournal {
             batch = []; bytes = 0;
           }
           batch.push(entry); bytes += size;
+        }
+        if (key === undefined && seen.size > 0 && !this.configuredOwners.has(match[1])) {
+          this.legacyGroupKeys.add(match[1]);
         }
         yield { key: match[1], entries: batch, last: true };
       } finally { lines.close(); stream.destroy(); }
@@ -209,7 +292,8 @@ export class CodexTurnJournal {
       for (const key of keys) {
         if (!acknowledged.has(key)) {
           const temporary = path.join(this.dir, `.codex-done-${randomUUID()}.tmp`);
-          await fs.writeFile(temporary, JSON.stringify({ version: 1, key }), { mode: 0o600 });
+          const configuredOwner = this.configuredOwners.get(key);
+          await fs.writeFile(temporary, JSON.stringify({ version: 1, key, configuredOwner }), { mode: 0o600 });
           await fs.rename(temporary, this.doneFile(key));
           acknowledged.set(key, Date.now());
         }
@@ -224,12 +308,14 @@ export class CodexTurnJournal {
   remove(entriesOrKey: AgentActivityEntry[] | string): Promise<void> {
     return this.enqueue(async () => {
       this.usage = undefined;
+      const acknowledged = await this.loadAcknowledgements();
       const keys = typeof entriesOrKey === 'string' ? [entriesOrKey]
         : [...new Set(entriesOrKey.filter(entry => this.accepts(entry)).map(codexTurnJournalGroupKey))];
       for (const key of keys) {
         if (!/^[a-f0-9]{64}$/.test(key)) continue;
         await fs.unlink(this.file(key)).catch(error => { if (error.code !== 'ENOENT') throw error; });
         this.initialized.delete(key);
+        if (!acknowledged.has(key)) this.forgetTurnOwnership(key);
       }
     });
   }
@@ -269,6 +355,9 @@ export class CodexTurnJournal {
         try { metadata = JSON.parse(raw); } catch { continue; }
         if (metadata?.version === 1 && metadata.key === match[1]) {
           acknowledged.set(match[1], (await fs.stat(fullPath)).mtimeMs);
+          const owner = parseConfiguredOwner(metadata.configuredOwner);
+          if (owner) this.rememberConfiguredOwner(match[1], owner);
+          else this.legacyGroupKeys.add(match[1]);
           // Recover a crash after publishing the ACK but before unlinking its
           // payload, even when the ACK cache is below its eviction threshold.
           await fs.unlink(this.file(match[1])).catch(error => { if (error.code !== 'ENOENT') throw error; });
@@ -288,7 +377,22 @@ export class CodexTurnJournal {
       this.initialized.delete(key);
       await fs.unlink(this.doneFile(key)).catch(error => { if (error.code !== 'ENOENT') throw error; });
       acknowledged.delete(key);
+      this.forgetTurnOwnership(key);
     }
+  }
+
+  private rememberConfiguredOwner(groupKey: string, owner: ConfiguredOwner): void {
+    this.legacyGroupKeys.delete(groupKey);
+    this.configuredOwners.set(groupKey, owner);
+    this.configuredOwnerGroups.set(owner.turnKey, groupKey);
+  }
+
+  private forgetTurnOwnership(groupKey: string): void {
+    this.legacyGroupKeys.delete(groupKey);
+    const owner = this.configuredOwners.get(groupKey);
+    if (!owner) return;
+    this.configuredOwners.delete(groupKey);
+    if (this.configuredOwnerGroups.get(owner.turnKey) === groupKey) this.configuredOwnerGroups.delete(owner.turnKey);
   }
 
   private enqueue(work: () => Promise<void>): Promise<void> {

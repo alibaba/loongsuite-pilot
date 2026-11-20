@@ -43,7 +43,7 @@ import { SlsFlusher } from '../flushers/sls-flusher.js';
 import { JsonlFlusher } from '../flushers/jsonl-flusher.js';
 import { HttpFlusher } from '../flushers/http-flusher.js';
 import { MultiFlusher } from '../flushers/multi-flusher.js';
-import { buildOtlpTraceConfig } from './config-loader.js';
+import { buildOtlpTraceConfig, createUserIdProvider } from './config-loader.js';
 
 // Concrete inputs
 import { QoderCnSqliteInput } from '../inputs/qoder-cn-sqlite/qoder-cn-sqlite-input.js';
@@ -234,8 +234,9 @@ export class Orchestrator extends EventEmitter {
     await this.agentControlManager.load();
 
     // Journal replay during flusher startup must use the current privacy rules.
+    const userIdProvider = createUserIdProvider({ initialUserId: this.config.userId });
     this.inputManager = new InputManager();
-    this.inputManager.setConfiguredUserId(this.config.userId);
+    this.inputManager.setUserIdProvider(userIdProvider);
     const workspacePolicy = new WorkspacePolicy(
       this.config.privacy?.excludeWorkspaces,
       path.join(this.dataDir, 'state', 'workspace-exclusions'),
@@ -259,7 +260,12 @@ export class Orchestrator extends EventEmitter {
 
     // 4. Build InputManager & AlarmManager
     const version = readInstalledVersion(this.dataDir);
-    this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userId: this.config.userId });
+    this.alarmManager = new AlarmManager({
+      ip: resolveLocalIp(),
+      version,
+      userId: this.config.userId,
+      userIdProvider,
+    });
     this.interceptorAlarmReporter = new InterceptorAlarmReporter(this.alarmManager);
     this.lastInterceptorStatus = null;
 
@@ -438,6 +444,7 @@ export class Orchestrator extends EventEmitter {
       dataDir: this.dataDir,
       version,
       userId: this.config.userId,
+      userIdProvider,
       canaryPolicy: this.config.autoUpdate?.canaryPolicy ?? '',
       getSnapshot: () => this.buildDataflowSnapshot(),
       getTraceRuntimeSnapshot: () => this.flusher?.getTraceRuntimeSnapshot() ?? [],
@@ -1079,16 +1086,19 @@ export class Orchestrator extends EventEmitter {
       if (otlpTraceCfg?.enabled && otlpTraceCfg.endpoints.length > 0) {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
         const { CodexTurnJournal } = await import('../flushers/codex-turn-journal.js');
+        const journal = new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
+          ['codex', 'hermes', 'openclaw']);
         const r = new OtlpTraceFlusher(
           { ...otlpTraceCfg, dataDir: this.dataDir },
           this.globalAttributesProvider,
           undefined,
-          new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
-            ['codex', 'hermes', 'openclaw']),
+          journal,
           entries => this.inputManager!.prepareRestoredEntries(entries),
           sourceToken => this.inputManager!.confirmHermesSourceDrained(sourceToken),
         );
         await r.start();
+        const startupUserId = this.config.userId;
+        this.inputManager.setConfiguredTurnUserIdBinder(entry => journal.bindConfiguredUserId(entry, startupUserId));
         flushers.push(r);
       }
     } catch (err) {

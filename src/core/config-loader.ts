@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import * as os from 'node:os';
 import { validateExcludedWorkspaces } from './workspace-policy.js';
 import { globalPollIntervalMs, DEFAULT_POLL_INTERVAL_MS } from '../utils/poll-interval.js';
@@ -274,6 +275,62 @@ function envInt(key: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function resolveUserId(file: Pick<ConfigFile, 'userId' | 'user.id'> | null): string {
+  const candidates: unknown[] = [env('LOONGSUITE_PILOT_USER_ID'), file?.userId, file?.['user.id']];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) return String(candidate);
+    if (typeof candidate === 'string') {
+      const trimmed = candidate.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+  return os.hostname();
+}
+
+export const USER_ID_REFRESH_INTERVAL_MS = 86_400_000; // 24h
+
+interface UserIdProviderOptions {
+  initialUserId: string;
+  configPath?: string;
+  refreshIntervalMs?: number;
+  now?: () => number;
+  readFile?: (filePath: string) => string;
+}
+
+/** Resolve the collector ID at startup and after each refresh window. */
+export function createUserIdProvider(opts: UserIdProviderOptions): () => string {
+  const configPath = opts.configPath === undefined ? configJsonPath() : resolveHome(opts.configPath);
+  const refreshIntervalMs = opts.refreshIntervalMs ?? USER_ID_REFRESH_INTERVAL_MS;
+  const now = opts.now ?? Date.now;
+  const readFile = opts.readFile ?? ((filePath: string) => readFileSync(filePath, 'utf8'));
+
+  let cached = opts.initialUserId;
+  let lastRefreshAt: number | undefined;
+  return (): string => {
+    const timestamp = now();
+    if (lastRefreshAt !== undefined && timestamp - lastRefreshAt < refreshIntervalMs) return cached;
+    lastRefreshAt = timestamp;
+
+    try {
+      const parsed: unknown = JSON.parse(readFile(configPath).replace(/^\uFEFF/, ''));
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new TypeError('expected a configuration object');
+      }
+      const next = resolveUserId(parsed as ConfigFile);
+      if (next !== cached) logger.info('userId refreshed from config');
+      cached = next;
+    } catch (error) {
+      // JSON parser errors can include fragments of the config, which may contain secrets.
+      const reason = error instanceof Error ? (error as NodeJS.ErrnoException).code ?? error.name : 'unknown';
+      logger.warn('userId refresh failed, keeping last known value', {
+        path: configPath,
+        error: reason,
+      });
+    }
+    return cached;
+  };
+}
+
 /**
  * Load configuration with three priority layers:
  *   1. Environment variables (highest)
@@ -297,7 +354,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
   const innerDataConfigPath = resolveHome(`${dataDir}/configs/inner/data_config.json`);
   const innerDataConfig = await readJsonFile<InnerDataConfig>(innerDataConfigPath);
 
-  const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
+  const userId = resolveUserId(file);
   const hostSn = typeof file?.hostSn === 'string' ? file.hostSn.trim() : '';
   const hostIdentityTags = envBool(
     'LOONGSUITE_PILOT_HOST_IDENTITY_TAGS',

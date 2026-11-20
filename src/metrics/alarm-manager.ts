@@ -55,12 +55,12 @@ export class AlarmManager {
   private readonly alarms: Map<string, AlarmItem> = new Map();
   private readonly ip: string;
   private readonly version: string;
-  private readonly userId: string;
+  private readonly userIdProvider: () => string;
 
-  constructor(opts: { ip: string; version: string; userId: string }) {
+  constructor(opts: { ip: string; version: string; userId: string; userIdProvider?: () => string }) {
     this.ip = opts.ip;
     this.version = opts.version;
-    this.userId = opts.userId;
+    this.userIdProvider = opts.userIdProvider ?? (() => opts.userId);
   }
 
   record(type: AlarmType, level: AlarmLevel, message: string, context?: AlarmContext, count = 1): void {
@@ -78,6 +78,7 @@ export class AlarmManager {
     if (this.alarms.size === 0) return [];
 
     const now = Math.floor(Date.now() / 1000);
+    const userId = this.userIdProvider();
     const entries: AlarmEntry[] = [];
 
     for (const item of this.alarms.values()) {
@@ -87,7 +88,7 @@ export class AlarmManager {
         alarm_level: item.level,
         alarm_message: item.message,
         alarm_count: String(item.count),
-        user_id: this.userId,
+        user_id: userId,
         ip: this.ip,
         ver: this.version,
         __time__: now,
