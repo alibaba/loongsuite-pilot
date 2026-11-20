@@ -54,7 +54,7 @@ async function seedLegacyState(
   await fs.writeFile(digestPath, JSON.stringify({ version: 1, days }));
   await fs.writeFile(scanPath, JSON.stringify({ files: offsets }));
   // Give fixtures a definite order even on filesystems with coarse mtimes.
-  const time = Math.ceil((await fs.stat(scanPath)).mtimeMs / 1000);
+  const time = Math.ceil((await fs.stat(scanPath)).mtimeMs / 1000) + 1;
   await fs.utimes(digestPath, time, time);
   await fs.utimes(scanPath, time, synchronized ? time + 1 : time - 1);
 }
@@ -78,10 +78,10 @@ async function seedPartialLegacyDay(dir: string, synchronized: boolean) {
   const archivedName = 'claude-code.part-1-2026-08-01.jsonl';
   const activeName = 'claude-code-2026-08-01.jsonl';
   const archived = await writeJsonl(outputDir, archivedName, [
-    record({ 'gen_ai.request.model': 'archived-model', 'gen_ai.usage.total_tokens': '1000' }),
+    record({ 'gen_ai.request.model': 'archived-model', 'gen_ai.session.id': 'archive', 'gen_ai.usage.total_tokens': '1000' }),
   ]);
   const active = await writeJsonl(outputDir, activeName, [
-    record({ 'gen_ai.request.model': 'active-model', 'gen_ai.usage.total_tokens': '300' }),
+    record({ 'gen_ai.request.model': 'active-model', 'gen_ai.session.id': 'active', 'gen_ai.usage.total_tokens': '300' }),
   ]);
   const archivedStat = await fs.stat(archived);
   const activeStat = await fs.stat(active);
@@ -89,7 +89,9 @@ async function seedPartialLegacyDay(dir: string, synchronized: boolean) {
     await fs.appendFile(active, JSON.stringify(record({ 'gen_ai.usage.total_tokens': '50' })) + '\n');
   }
   await seedLegacyState(dir, {
-    '2026-08-01': synchronized ? legacyDay(1300, 2) : legacyDay(1350, 3),
+    '2026-08-01': synchronized
+      ? { ...legacyDay(1300, 2), sessions: 2 }
+      : { ...legacyDay(1350, 3), sessions: 3 },
   }, {
     [archivedName]: { offset: archivedStat.size, size: archivedStat.size, ino: archivedStat.ino },
     [activeName]: { offset: activeStat.size, size: activeStat.size, ino: activeStat.ino },
@@ -323,6 +325,49 @@ describe('MetricsSummaryWriter historical breakdown integrity', () => {
     expect(range).toMatchObject({ totalTokens: 1300, inputTokens: 1300, totalEvents: 2 });
     expect(range.modelShares).toEqual([]);
     expect(range.incompleteBreakdownDays).toEqual(['2026-08-01']);
+  });
+
+  it.each([0, 1])('does not accept matching counters with a source timestamp %i seconds after the legacy digest', async delay => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-03T10:00:00'));
+    const { active, archived, retired } = await seedPartialLegacyDay(tmpDir, true);
+    const digestPath = path.join(tmpDir, 'cache', 'metrics-daily-digest.json');
+    const digestTime = (await fs.stat(digestPath)).mtimeMs / 1000;
+    const oldSize = (await fs.stat(active)).size;
+    const alias = record({
+      'gen_ai.request.model': 'unrelated-model',
+      'gen_ai.session.id': 'unrelated-session',
+      'gen_ai.usage.total_tokens': '1000',
+    });
+    await fs.unlink(path.join(tmpDir, 'cache', 'metrics-scan-state.json'));
+    await fs.appendFile(active, JSON.stringify(alias) + '\n');
+    await fs.utimes(active, digestTime, digestTime + delay);
+
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    const unavailable = (await readSummary(tmpDir)).ranges.sevenDays;
+    expect(unavailable.totalTokens).toBe(1300);
+    expect(unavailable.modelShares).toEqual([]);
+    expect(unavailable.incompleteBreakdownDays).toEqual(['2026-08-01']);
+
+    await fs.rename(retired, archived);
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    const pending = JSON.parse(await fs.readFile(digestPath, 'utf8'));
+    expect(pending.legacyScan.digestMtimeMs).toBe(digestTime * 1000);
+    expect(pending.days['2026-08-01'].files).toBeUndefined();
+
+    // A preserved copy of the original bytes can establish the old boundary.
+    // Replaying the deferred append after that boundary counts it once.
+    await fs.truncate(active, oldSize);
+    await fs.utimes(active, digestTime, digestTime - 1);
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    await fs.appendFile(active, JSON.stringify(alias) + '\n');
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const resolved = (await readSummary(tmpDir)).ranges.sevenDays;
+    expect(resolved.totalTokens).toBe(2300);
+    expect(resolved.modelShares).toContainEqual(expect.objectContaining({ model: 'archived-model', totalTokens: 1000 }));
+    expect(resolved.modelShares).toContainEqual(expect.objectContaining({ model: 'unrelated-model', totalTokens: 1000 }));
+    expect(resolved.incompleteBreakdownDays).toBeUndefined();
   });
 
   it('keeps records appended to a legacy day before the first refresh after an upgrade', async () => {

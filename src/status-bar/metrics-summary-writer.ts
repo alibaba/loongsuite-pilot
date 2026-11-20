@@ -197,6 +197,7 @@ interface ScanState {
 
 interface LegacyScanCheckpoint extends ScanState {
   synchronized: boolean;
+  digestMtimeMs?: number;
 }
 
 interface LegacyScanOffset {
@@ -686,13 +687,17 @@ export class MetricsSummaryWriter {
     const coversLegacy = LEGACY_COUNTERS.every(key => whole[key] >= legacyTotals[key]);
     const matches = (stats: DayStats, totals: DayTotals) => LEGACY_COUNTERS.every(key => stats[key] === totals[key]);
     // Legacy increments could sum the number of sessions in multiple batches.
-    // A verified file inventory can deduplicate them. With no usable offsets,
-    // all original counters, including sessions, must match the raw day.
+    // A verified file inventory can deduplicate them. Without usable offsets,
+    // require matching counters and evidence that every raw source predates
+    // the original digest. A newer record can reproduce a missing one's totals.
     const wholeMatches = matches(whole, legacyTotals);
     const recoveredBaseline = completeScanState || (legacy.legacyBaseline && matches(head, legacy.legacyBaseline));
+    const digestMtime = scanState.digestMtimeMs;
+    const sourcesPredateDigest = inputs.length > 0 && digestMtime !== undefined && Number.isFinite(digestMtime)
+      && inputs.every(({ stat }) => stat.mtimeMs > 0 && stat.mtimeMs < digestMtime);
     const hasCoverage = trustScanState
       ? rebuild && coversLegacy && (matches(head, legacyTotals) || wholeMatches || completeScanState)
-      : wholeMatches && whole.sessions.size === legacyTotals.sessions;
+      : sourcesPredateDigest && wholeMatches && whole.sessions.size === legacyTotals.sessions;
     if (recoveringTrackedDay ? trustScanState && wholeMatches && recoveredBaseline : hasCoverage) {
       logger.info('metrics digest day rebuilt from its segments', { day });
       return composeDay(undefined, withStats(wholeFile), false);
@@ -1088,13 +1093,13 @@ export class MetricsSummaryWriter {
 
   private async captureLegacyScan(scanState: ScanState): Promise<LegacyScanCheckpoint> {
     const [digestStat, scanStat] = await Promise.all([
-      fs.stat(this.digestPath, { bigint: true }).catch(() => undefined),
-      fs.stat(this.scanStatePath, { bigint: true }).catch(() => undefined),
+      this.safeStat(this.digestPath),
+      this.safeStat(this.scanStatePath),
     ]);
     // The old writer atomically committed the digest first and the sidecar
     // second. Equal or missing timestamps provide no ordering evidence.
-    const synchronized = !!digestStat && !!scanStat && scanStat.mtimeNs > digestStat.mtimeNs;
-    return { synchronized, files: { ...scanState.files } };
+    const synchronized = !!digestStat && !!scanStat && scanStat.mtimeMs > digestStat.mtimeMs;
+    return { synchronized, digestMtimeMs: digestStat?.mtimeMs, files: { ...scanState.files } };
   }
 
   private pruneLegacyScan(digest: DigestFile): void {
