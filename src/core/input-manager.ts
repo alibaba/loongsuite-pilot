@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ClientType } from '../types/index.js';
@@ -10,7 +11,7 @@ import type {
 } from '../types/index.js';
 import type { BaseInput } from '../inputs/base/base-input.js';
 import type { InputRuntimeDelta } from '../inputs/base/input-runtime-metrics.js';
-import type { BaseFlusher } from '../flushers/base-flusher.js';
+import type { BaseFlusher, BatchDelivery } from '../flushers/base-flusher.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
@@ -27,6 +28,20 @@ import { expandAgentInputEvents } from '../normalization/agent-input-dual-write.
 import type { InterceptResultLinker } from './intercept-result-linker.js';
 
 const logger = createLogger('InputManager');
+
+interface MiniMaxDelivery {
+  ids: string[];
+  fingerprint: string;
+  accept: BatchDelivery;
+  accepted: boolean;
+}
+
+function batchFingerprint(entries: readonly AgentActivityEntry[]): string {
+  // Re-reading a native record gives it a new collector observation time.
+  // Include the entire prepared payload and ignore only that top-level stamp.
+  const payloads = entries.map(({ observed_time_unix_nano: _observedAt, ...payload }) => payload);
+  return createHash('sha256').update(JSON.stringify(payloads)).digest('hex');
+}
 
 export interface InputCounter {
   /** Fixed, bounded source classification for this Input. */
@@ -83,6 +98,7 @@ export class InputManager extends EventEmitter {
   private readonly counters: Map<string, InputCounter> = new Map();
   private readonly entryQueues: Map<string, Promise<void>> = new Map();
   private readonly entryAbortControllers = new Map<string, AbortController>();
+  private readonly minimaxDeliveries = new Map<string, MiniMaxDelivery[]>();
   private flusher: BaseFlusher | null = null;
   private alarmManager: AlarmManager | null = null;
   private userId: string = '';
@@ -110,6 +126,7 @@ export class InputManager extends EventEmitter {
   }
 
   setFlusher(flusher: BaseFlusher): void {
+    if (this.flusher !== flusher) this.minimaxDeliveries.clear();
     this.flusher = flusher;
   }
 
@@ -206,15 +223,14 @@ export class InputManager extends EventEmitter {
       const handling = previous
         .catch(() => undefined)
         .then(() => this.handleEntries(input.id, entries));
-      if (input.id === 'qwen-work-cn-collaboration') {
+      if (input.id === 'qwen-work-cn-collaboration' || input.agentType === ClientType.MiniMaxCode) {
         const controller = this.entryAbortControllers.get(input.id);
         const retained = handling.catch(error => {
           if (!controller?.signal.aborted) throw error;
           (input as BaseInput & { restoreAbortedDelivery(): void }).restoreAbortedDelivery();
         });
         input.holdCheckpointUntil(retained);
-      } else if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes
-        || input.agentType === ClientType.MiniMaxCode) {
+      } else if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes) {
         input.holdCheckpointUntil(handling);
       }
       const next = handling.catch(err => {
@@ -304,6 +320,7 @@ export class InputManager extends EventEmitter {
       }
     }
     await this.drainAllEntryQueues();
+    this.minimaxDeliveries.clear();
     if (this.multimodalProcessor) {
       try {
         await this.multimodalProcessor.shutdown();
@@ -538,6 +555,42 @@ export class InputManager extends EventEmitter {
     }
   }
 
+  private minimaxDelivery(
+    flusher: BaseFlusher, inputId: string, entries: AgentActivityEntry[], logicalBytes?: readonly number[],
+  ): BatchDelivery {
+    const incoming = new Map(entries.map(entry => [entry['event.id'], entry]));
+    const pending = (this.minimaxDeliveries.get(inputId) ?? []).filter(batch => {
+      const replayed = batch.ids.map(id => incoming.get(id));
+      // Retry receipts refer to the already prepared payload. Reapply current
+      // policy if privacy filtering or masking changed it after the pause.
+      return replayed.every(entry => entry !== undefined) && batch.fingerprint === batchFingerprint(replayed);
+    });
+    // A resumed cycle can contain newer turns as well as the interrupted
+    // batch. Keep receipts for the replayed entries and enqueue only new ones.
+    for (const batch of pending) for (const id of batch.ids) incoming.delete(id);
+    const indices = entries.flatMap((entry, i) => incoming.has(entry['event.id']) ? [i] : []);
+    if (indices.length) {
+      const remaining = indices.map(i => entries[i]);
+      pending.push({
+        ids: remaining.map(entry => entry['event.id']),
+        fingerprint: batchFingerprint(remaining),
+        accept: flusher.createBatchDelivery(remaining, logicalBytes && indices.map(i => logicalBytes[i]),
+          undefined, { requireAcceptance: true }),
+        accepted: false,
+      });
+    }
+    this.minimaxDeliveries.set(inputId, pending);
+    return async signal => {
+      for (const batch of pending) {
+        if (batch.accepted) continue;
+        signal?.throwIfAborted();
+        await batch.accept(signal);
+        batch.accepted = true;
+      }
+      this.minimaxDeliveries.delete(inputId);
+    };
+  }
+
   private async dispatchEntries(inputId: string, entries: AgentActivityEntry[], batchBytes: number, logicalBytes?: readonly number[], signalOverride?: AbortSignal): Promise<void> {
     const requireAcceptance = this.inputs.get(inputId)?.agentType === ClientType.MiniMaxCode;
     const requireDelivery = inputId === 'qwen-work-cn-collaboration' || requireAcceptance;
@@ -556,14 +609,14 @@ export class InputManager extends EventEmitter {
     const counter = this.counters.get(inputId);
     const signal = signalOverride ?? this.entryAbortControllers.get(inputId)?.signal;
     try {
-      const deliver = this.flusher.createBatchDelivery(
-        entries, logicalBytes, signal, requireAcceptance ? { requireAcceptance } : undefined,
-      );
+      const deliver = requireAcceptance
+        ? this.minimaxDelivery(this.flusher, inputId, entries, logicalBytes)
+        : this.flusher.createBatchDelivery(entries, logicalBytes, signal);
       let quotaAlarmed = false;
       let deliveryRetryMs = 1000;
       while (true) {
         try {
-          await deliver();
+          await deliver(signal);
           break;
         } catch (error) {
           if (requireDelivery && !signal?.aborted) {

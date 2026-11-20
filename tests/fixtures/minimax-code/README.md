@@ -12,3 +12,9 @@ timestamp fields and correlation IDs remain intact.
 
 The official hook `transcript_path` is a disposable compatibility snapshot.
 The durable source is the session's `manifest.json` and `messages.jsonl`.
+`turns.json` is a projection of the CLI's native SQLite turn ingress receipt.
+
+`continuation/` captures a genuine turn in the same release with a separate
+Stop hook that asks the runtime to continue once. The native records retain both
+assistant steps and the follow-up user message. Both Stop observations share the
+same turn ID and precede its native completion receipt.

@@ -25,14 +25,16 @@
 
 Pilot 支持 macOS 和 Linux 上的官方 `mcode` CLI，已在 macOS 验证 0.7.9。
 Pilot 会在活跃配置目录中安装原生插件，将轮次和工具通知与该目录下
-`v2/sessions` 的持久会话关联。默认配置目录为 `~/.minimax`。如果通过
+`v2/sessions` 的持久会话关联。Pilot 依据原生轮次完成记录采集整轮，
+即使 Stop Hook 要求 CLI 继续执行。默认配置目录为 `~/.minimax`。如果通过
 `MINIMAX_DATA_DIR` 或 `MAVIS_DATA_DIR` 自定义位置，请为 Pilot 和
 `mcode` 设置相同的绝对路径。
 
 插件只记录会话、轮次、工具、时间戳和工作区元数据。消息内容遵循 Pilot
 现有的工作区和采集设置（`agents.minimax-code.captureMessageContent`）。
 Pilot 会采集插件观察到的已完成轮次，包括 Pilot 停止期间记录的轮次。
-已运行的 CLI 可能需要重启才能加载插件。
+关闭此 Agent 的采集会让已安装的插件及 CLI 缓存中的副本同时失效。
+已运行的 CLI 可能需要重启才能加载新安装的插件。
 
 ## OpenClaw / Hermes 请求上下文
 

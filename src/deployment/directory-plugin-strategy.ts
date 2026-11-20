@@ -24,6 +24,7 @@ const DEFAULT_MARKER_FILE = '.loongsuite-pilot-managed.json';
 const MARKER_SCHEMA_VERSION = 1;
 const MARKER_OWNER = 'loongsuite-pilot';
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const INSTALLATION_ID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const DEFAULT_ACTIVATION_TIMEOUT_MS = 30_000;
 const execFile = promisify(execFileCallback);
 
@@ -33,6 +34,8 @@ interface DirectoryPluginMarker {
   agentId: string;
   sourceHash: string;
   dataDir?: string;
+  installationId?: string;
+  targetDir?: string;
   activationHash?: string;
   activationStatus?: 'activated' | 'unsupported';
 }
@@ -127,6 +130,9 @@ export class DirectoryPluginStrategy implements DeployStrategy {
       const sourceHash = await this.hashDirectory(config.sourceDir, markerFile);
       if (targetState.marker.sourceHash !== sourceHash) return true;
       if (this.dataDir && targetState.marker.dataDir !== this.dataDir) return true;
+      if (def.id === 'minimax-code' && (!targetState.marker.installationId
+        || !INSTALLATION_ID_PATTERN.test(targetState.marker.installationId)
+        || targetState.marker.targetDir !== path.resolve(config.targetDir))) return true;
       if (targetState.marker.activationHash !== this.hashActivation(config.activation)) return true;
 
       const targetHash = await this.hashDirectory(
@@ -187,6 +193,9 @@ export class DirectoryPluginStrategy implements DeployStrategy {
         agentId: def.id,
         sourceHash,
         ...(this.dataDir ? { dataDir: this.dataDir } : {}),
+        // MiniMax copies the plugin tree to a private Hook cache. Give each
+        // deployment a fresh identity that its cached snapshots must check.
+        ...(def.id === 'minimax-code' ? { installationId: crypto.randomUUID(), targetDir } : {}),
       };
       await this.writeMarker(stagingDir, markerFile, marker);
       // mkdtemp is 0700. Root-triggered installation must leave managed plugin

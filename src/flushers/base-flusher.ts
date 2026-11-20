@@ -14,6 +14,8 @@ export interface BatchDeliveryOptions {
   requireAcceptance?: boolean;
 }
 
+export type BatchDelivery = (signal?: AbortSignal) => Promise<void>;
+
 /**
  * Abstract base for all data output flushers.
  * Extend this to add new output destinations (SLS, JSONL, HTTP, etc.).
@@ -27,8 +29,10 @@ export abstract class BaseFlusher {
   createBatchDelivery(
     entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal,
     _options?: BatchDeliveryOptions,
-  ): () => Promise<void> {
-    return () => signal ? this.sendBatch(entries, logicalBytes, signal) : this.sendBatch(entries, logicalBytes);
+  ): BatchDelivery {
+    return (attemptSignal = signal) => attemptSignal
+      ? this.sendBatch(entries, logicalBytes, attemptSignal)
+      : this.sendBatch(entries, logicalBytes);
   }
   abstract flush(): Promise<void>;
   abstract shutdown(): Promise<void>;

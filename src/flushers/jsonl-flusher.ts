@@ -1,5 +1,5 @@
 import * as path from 'node:path';
-import { BaseFlusher, type BatchDeliveryOptions } from './base-flusher.js';
+import { BaseFlusher, type BatchDelivery, type BatchDeliveryOptions } from './base-flusher.js';
 import { projectLogEntry } from '../normalization/entry-builder.js';
 import type { AgentActivityEntry, JsonlFlusherConfig } from '../types/index.js';
 import { ensureDir, getTodayDateString } from '../utils/fs-utils.js';
@@ -39,13 +39,13 @@ export class JsonlFlusher extends BaseFlusher {
   override createBatchDelivery(
     entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal,
     options?: BatchDeliveryOptions,
-  ): () => Promise<void> {
+  ): BatchDelivery {
     if (!options?.requireAcceptance) return super.createBatchDelivery(entries, logicalBytes, signal);
     // Resume within this attempt if a later record fails after earlier appends.
     let next = 0;
-    return async () => {
+    return async (attemptSignal = signal) => {
       for (; next < entries.length; next++) {
-        signal?.throwIfAborted();
+        attemptSignal?.throwIfAborted();
         await this.send(entries[next]);
       }
     };

@@ -4,12 +4,15 @@ import { once } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { expect, it, vi } from 'vitest';
 import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { InputManager } from '../../../src/core/input-manager.js';
+import { DirectoryPluginStrategy } from '../../../src/deployment/directory-plugin-strategy.js';
 import { JsonlFlusher } from '../../../src/flushers/jsonl-flusher.js';
 import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
 import { MinimaxCodeSessionInput } from '../../../src/inputs/minimax-code-session/minimax-code-session-input.js';
+import { loadDatabaseSync } from '../../../src/utils/node-sqlite.js';
 import { MockFlusher } from '../../helpers/mock-flusher.js';
 
 class TestInput extends MinimaxCodeSessionInput {
@@ -22,20 +25,34 @@ class TestInput extends MinimaxCodeSessionInput {
 
 const fixture = new URL('../../fixtures/minimax-code/', import.meta.url);
 
-async function setup(root: string) {
+async function setup(root: string, records = fixture, initiallyCompleted = true) {
   const profileDir = path.join(root, 'profile');
   const hookDir = path.join(root, 'hooks');
   const statePath = path.join(root, 'state.json');
-  const manifest = JSON.parse(await fs.readFile(new URL('manifest.json', fixture), 'utf8'));
+  const manifest = JSON.parse(await fs.readFile(new URL('manifest.json', records), 'utf8'));
   const suffix = Buffer.from(manifest.sessionId).toString('base64url');
   const sourceDir = path.join(profileDir, 'v2', 'sessions', '2026', '11', '20', `22-47-46-172-session_${suffix}`);
   const source = path.join(sourceDir, 'messages.jsonl');
   const observations = path.join(hookDir, createHash('sha256').update(manifest.sessionId).digest('hex'));
-  const sourceText = await fs.readFile(new URL('messages.jsonl', fixture), 'utf8');
-  const lines = (await fs.readFile(new URL('hooks.jsonl', fixture), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const sourceText = await fs.readFile(new URL('messages.jsonl', records), 'utf8');
+  const lines = (await fs.readFile(new URL('hooks.jsonl', records), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const turns = JSON.parse(await fs.readFile(new URL('turns.json', records), 'utf8'));
   await fs.mkdir(sourceDir, { recursive: true });
   await fs.mkdir(observations, { recursive: true });
   await fs.writeFile(path.join(sourceDir, 'manifest.json'), JSON.stringify(manifest));
+  const dbDir = path.join(profileDir, 'v2', 'sqlite');
+  await fs.mkdir(dbDir, { recursive: true });
+  const Database = loadDatabaseSync()!;
+  const dbFile = path.join(dbDir, 'runtime-state.sqlite');
+  const db = new Database(dbFile);
+  try {
+    db.exec('CREATE TABLE local_runtime_turn_ingress (turn_id TEXT PRIMARY KEY, session_id TEXT, status TEXT, completed_at_ms INTEGER)');
+    const insert = db.prepare('INSERT INTO local_runtime_turn_ingress VALUES (?, ?, ?, ?)');
+    for (const turn of turns) {
+      insert.run(turn.turnId, manifest.sessionId, initiallyCompleted ? turn.status : 'running',
+        initiallyCompleted ? turn.completedAtMs : null);
+    }
+  } finally { db.close(); }
 
   const openInput = async () => {
     const stateStore = new StateStore(statePath);
@@ -50,7 +67,14 @@ async function setup(root: string) {
       }));
     }
   };
-  return { openInput, addObservations, lines, observations, source, sourceText };
+  const settleNativeTurns = () => {
+    const writer = new Database(dbFile);
+    try {
+      const settle = writer.prepare('UPDATE local_runtime_turn_ingress SET status = ?, completed_at_ms = ? WHERE turn_id = ?');
+      for (const turn of turns) settle.run(turn.status, turn.completedAtMs, turn.turnId);
+    } finally { writer.close(); }
+  };
+  return { openInput, addObservations, settleNativeTurns, lines, observations, source, sourceText };
 }
 
 it('uses durable native bytes, correlates tool timing and checkpoints completed turns across restart', async () => {
@@ -115,6 +139,47 @@ it('retains observations and waits for an unfinished record or temporarily unava
   }
 });
 
+it('waits for the native completion receipt and includes both steps of one continued Stop turn', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minimax-session-continued-'));
+  try {
+    const f = await setup(root, new URL('continuation/', fixture), false);
+    const partial = f.sourceText.trimEnd().split('\n').slice(0, 3).join('\n') + '\n';
+    await fs.writeFile(f.source, partial);
+    await f.addObservations(f.lines.slice(0, 3));
+    const { input, stateStore } = await f.openInput();
+    expect(await input.poll()).toEqual([]);
+    expect(await input.poll()).toEqual([]);
+    expect(await fs.readdir(f.observations)).toHaveLength(1);
+    expect(stateStore.keys()).toEqual([]);
+
+    await f.addObservations(f.lines.slice(3));
+    expect(await input.poll()).toEqual([]);
+    f.settleNativeTurns();
+    expect(await input.poll()).toEqual([]);
+    expect(await input.poll()).toEqual([]);
+    expect(stateStore.keys()).toEqual([]);
+    await fs.writeFile(f.source, f.sourceText);
+    expect(await input.poll()).toEqual([]);
+    const events = await input.poll();
+    expect(events.map(event => event['event.name'])).toEqual(['llm.request', 'llm.response', 'llm.request', 'llm.response']);
+    expect(events.map(event => event.time_unix_nano)).toEqual([
+      '1795216940889000000', '1795216940985000000', '1795216941013000000', '1795216941062000000',
+    ]);
+    expect(events.filter(event => event['gen_ai.turn.start'] === true)).toEqual([events[0]]);
+    expect(events.filter(event => event['gen_ai.turn.end'] === true)).toEqual([events[3]]);
+    expect(events[2]['gen_ai.input.messages_delta']).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'fixture user step 2' }] },
+    ]);
+    expect(new Set(events.map(event => event['event.id'])).size).toBe(4);
+    await stateStore.save();
+    const restarted = await f.openInput();
+    expect(await restarted.input.poll()).toEqual([]);
+    expect(await fs.readdir(f.observations)).toEqual([]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 it('holds native completion behind output acceptance while other inputs can save', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minimax-session-checkpoint-'));
   const manager = new InputManager();
@@ -154,7 +219,7 @@ it('holds native completion behind output acceptance while other inputs can save
   }
 });
 
-it('retries a failed JSONL row through fan-out without advancing the source or redelivering accepted rows', async () => {
+it.each([false, true])('retries a failed JSONL row without redelivering accepted rows (discovery restart: %s)', async restart => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minimax-session-fanout-'));
   const manager = new InputManager();
   try {
@@ -182,7 +247,7 @@ it('retries a failed JSONL row through fan-out without advancing the source or r
     });
     manager.setFlusher(new MultiFlusher([healthy, jsonl]));
     manager.registerInput(input);
-    await input.start();
+    await manager.startInput(input.id);
     await failedRow;
 
     stateStore.setOffset('unrelated-input', 1);
@@ -194,8 +259,15 @@ it('retries a failed JSONL row through fan-out without advancing the source or r
     expect((await fs.readFile(outputFile, 'utf8')).trim().split('\n')).toHaveLength(1);
     expect(healthy.batchCalls).toHaveLength(1);
 
+    if (restart) {
+      await manager.stopInput(input.id);
+      expect(input.checkpointFailed).toBe(false);
+      expect(await fs.readdir(f.observations)).toHaveLength(4);
+      expect(stateStore.keys()).toEqual(['unrelated-input']);
+    }
     const flushed = once(manager, 'flushed');
     recover = true;
+    if (restart) await manager.startInput(input.id);
     await flushed;
     await vi.waitFor(async () => {
       const saved = JSON.parse(await fs.readFile(statePath, 'utf8'));
@@ -215,23 +287,30 @@ it('retries a failed JSONL row through fan-out without advancing the source or r
 it('writes only observed identity metadata when the real plugin receives private Hook content', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minimax-hook-metadata-'));
   try {
-    const installed = path.join(root, 'installed');
-    const source = new URL('../../../assets/plugins/minimax-code/loongsuite-pilot/', import.meta.url);
-    await fs.cp(source, installed, { recursive: true });
+    const installed = path.join(root, 'plugins', 'loongsuite-pilot');
+    const sourceDir = fileURLToPath(new URL('../../../assets/plugins/minimax-code/loongsuite-pilot/', import.meta.url));
     const dataDir = path.join(root, 'pilot-data');
-    await fs.writeFile(path.join(installed, '.loongsuite-pilot-managed.json'), JSON.stringify({
-      schemaVersion: 1, owner: 'loongsuite-pilot', agentId: 'minimax-code', dataDir,
-    }));
+    const strategy = new DirectoryPluginStrategy(dataDir);
+    const def = {
+      id: 'minimax-code', displayName: 'MiniMax Code', deployMode: 'directory-plugin' as const,
+      detection: { paths: [], commands: [] }, directoryPlugin: { sourceDir, targetDir: installed },
+    };
+    expect((await strategy.deploy(def)).success).toBe(true);
+    const cached = path.join(root, 'plugin-hook-cache', 'cached-plugin');
+    await fs.cp(installed, cached, { recursive: true });
     const payload = {
       hook_event_name: 'PostToolUse', session_id: 'synthetic-session', turn_id: 'synthetic-turn',
       cwd: root, tool_use_id: 'tool-1', tool_input: 'PRIVATE_INPUT', tool_response: 'PRIVATE_RESPONSE',
       transcript_path: '/temporary/PRIVATE_TRANSCRIPT', prompt: 'PRIVATE_PROMPT',
     };
-    const hook = spawnSync(process.execPath, [path.join(installed, 'scripts', 'observe.mjs')], {
-      input: JSON.stringify(payload), encoding: 'utf8',
-    });
-    expect(hook.status).toBe(0);
-    expect(hook.stdout).toBe('{}\n');
+    const runHook = (plugin: string) => {
+      const hook = spawnSync(process.execPath, [path.join(plugin, 'scripts', 'observe.mjs')], {
+        input: JSON.stringify(payload), encoding: 'utf8',
+      });
+      expect(hook.status).toBe(0);
+      expect(hook.stdout).toBe('{}\n');
+    };
+    runHook(cached);
     const sessionKey = createHash('sha256').update(payload.session_id).digest('hex');
     const spool = path.join(dataDir, 'state', 'minimax-code', 'hook-events', sessionKey);
     const [filename] = await fs.readdir(spool);
@@ -241,6 +320,14 @@ it('writes only observed identity metadata when the real plugin receives private
       observedAtMs: expect.any(Number),
       payload: { hook_event_name: 'PostToolUse', session_id: 'synthetic-session', turn_id: 'synthetic-turn', cwd: root, tool_use_id: 'tool-1' },
     });
+    expect(await strategy.undeploy(def)).toBe(true);
+    runHook(cached);
+    expect(await fs.readdir(spool)).toEqual([filename]);
+    expect((await strategy.deploy(def)).success).toBe(true);
+    runHook(cached);
+    expect(await fs.readdir(spool)).toEqual([filename]);
+    runHook(installed);
+    expect(await fs.readdir(spool)).toHaveLength(2);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

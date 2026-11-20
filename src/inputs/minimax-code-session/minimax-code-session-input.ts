@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { createInterface } from 'node:readline';
 import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../types/index.js';
 import { fileIdentity } from '../../utils/file-identity.js';
+import { queryReadonly } from '../../utils/node-sqlite.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { buildMinimaxCodeTurn } from './minimax-code-events.js';
 import {
@@ -15,6 +16,7 @@ import {
 const RETRY_MS = 1_000;
 const OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0);
 const SESSION_SHARD = [/^\d{4}$/, /^\d{2}$/, /^\d{2}$/];
+const TURN_QUERY_BATCH = 200;
 
 interface Options extends InputOptions {
   profileDir: string;
@@ -45,15 +47,18 @@ export class MinimaxCodeSessionInput extends BaseInput {
   readonly collectionMethod = CollectionMethod.SessionFilePolling;
 
   private readonly sessionsDir: string;
+  private readonly runtimeDb: string;
   private readonly hookDir: string;
   private readonly pendingSnapshots = new Map<string, string>();
   private pendingTurnKeys: string[] = [];
+  private queuedTurnKeys: string[] = [];
   private watcher?: FSWatcher;
   private retry?: ReturnType<typeof setTimeout>;
 
   constructor(opts: Options) {
     super(opts);
     this.sessionsDir = path.join(opts.profileDir, 'v2', 'sessions');
+    this.runtimeDb = path.join(opts.profileDir, 'v2', 'sqlite', 'runtime-state.sqlite');
     this.hookDir = opts.hookDir;
   }
 
@@ -78,7 +83,8 @@ export class MinimaxCodeSessionInput extends BaseInput {
   protected async collect(): Promise<AgentActivityEntry[]> {
     this.pendingTurnKeys = [];
     const bySession = await this.readObservations();
-    const sessions = await this.findSessions(new Set(bySession.keys()));
+    const completed = await this.readNativeCompletions(bySession);
+    const sessions = await this.findSessions(new Set(completed.keys()));
     const activeSources = new Set(sessions.values());
     for (const source of this.pendingSnapshots.keys()) {
       if (!activeSources.has(source)) this.pendingSnapshots.delete(source);
@@ -86,13 +92,13 @@ export class MinimaxCodeSessionInput extends BaseInput {
     const entries: AgentActivityEntry[] = [];
     for (const [sessionId, observations] of bySession) {
       const source = sessions.get(sessionId);
-      if (!source) continue;
-      const turns = new Set(observations.filter(item => item.event === 'Stop').map(item => item.turnId!));
+      const turns = completed.get(sessionId);
+      if (!source || !turns) continue;
       try {
-        const rows = await this.readStableMessages(source, turns);
+        const rows = await this.readStableMessages(source, new Set(turns.keys()));
         if (!rows) continue;
-        for (const turnId of turns) {
-          const built = buildMinimaxCodeTurn(sessionId, turnId, rows, observations);
+        for (const [turnId, completedAtMs] of turns) {
+          const built = buildMinimaxCodeTurn(sessionId, turnId, completedAtMs, rows, observations);
           if (!built.length) continue;
           const key = this.turnStateKey(sessionId, turnId);
           const allowed = this.workspacePolicy.filter(built, this.agentType);
@@ -116,8 +122,19 @@ export class MinimaxCodeSessionInput extends BaseInput {
 
   protected override onEntriesQueued(): void {
     // InputManager establishes the output hold synchronously when enqueuing.
-    for (const key of this.pendingTurnKeys) this.completeTurn(key);
+    this.queuedTurnKeys = this.pendingTurnKeys;
+    for (const key of this.queuedTurnKeys) this.completeTurn(key);
     this.pendingTurnKeys = [];
+  }
+
+  /** An ordered retry was aborted for discovery stop; retain only written progress. */
+  restoreAbortedDelivery(): void {
+    for (const key of this.queuedTurnKeys) {
+      const persisted = this.stateStore.getPersistedState(key);
+      if (persisted) this.stateStore.set(key, persisted);
+      else this.stateStore.delete(key);
+    }
+    this.queuedTurnKeys = [];
   }
 
   private completeTurn(key: string): void {
@@ -164,6 +181,38 @@ export class MinimaxCodeSessionInput extends BaseInput {
       if (!observations.some(observation => observation.event === 'Stop')) bySession.delete(sessionId);
     }
     return bySession;
+  }
+
+  private async readNativeCompletions(
+    observations: ReadonlyMap<string, MinimaxCodeHookObservation[]>,
+  ): Promise<Map<string, Map<string, number>>> {
+    const completed = new Map<string, Map<string, number>>();
+    // Stop is a pre-finalization decision point and can occur again in the
+    // same turn. The native receipt is committed only when turn ingress settles.
+    try {
+      for (const [sessionId, batch] of observations) {
+        const turnIds = [...new Set(batch.filter(item => item.event === 'Stop').map(item => item.turnId!))];
+        const turns = new Map<string, number>();
+        for (let i = 0; i < turnIds.length; i += TURN_QUERY_BATCH) {
+          const window = turnIds.slice(i, i + TURN_QUERY_BATCH);
+          const params = window.map(() => '?').join(',');
+          const rows = await queryReadonly<{ turn_id: string; completed_at_ms: number }>(this.runtimeDb,
+            `SELECT turn_id, completed_at_ms FROM local_runtime_turn_ingress
+             WHERE session_id = ? AND status = 'completed' AND turn_id IN (${params})`,
+            [sessionId, ...window]);
+          for (const row of rows) {
+            if (Number.isSafeInteger(row.completed_at_ms) && row.completed_at_ms > 0) {
+              turns.set(row.turn_id, row.completed_at_ms);
+            }
+          }
+        }
+        if (turns.size) completed.set(sessionId, turns);
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      this.logger.debug('MiniMax Code native completion receipt unavailable', { code: code ?? 'invalid-source' });
+    }
+    return completed;
   }
 
   private async findSessions(pending: ReadonlySet<string>): Promise<Map<string, string>> {

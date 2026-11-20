@@ -59,17 +59,18 @@ function ns(ms: number): string {
 export function buildMinimaxCodeTurn(
   sessionId: string,
   turnId: string,
+  completedAtMs: number,
   messages: readonly MinimaxCodeSessionMessage[],
   observations: readonly MinimaxCodeHookObservation[],
 ): AgentActivityEntry[] {
   const hooks = observations.filter(observation => observation.sessionId === sessionId && observation.turnId === turnId);
-  const stops = hooks.filter(observation => observation.event === 'Stop');
-  if (stops.length !== 1 || !stops[0].workspace) return [];
-  const stop = stops[0];
   const native = messages.filter(message => message.turnId === turnId);
   const models = native.filter(message => message.role === 'assistant');
-  const user = native.find(message => message.role === 'user');
-  if (!user || !models.length) return [];
+  if (!models.length || native[0]?.role !== 'user') return [];
+  const stops = hooks.filter(observation => observation.event === 'Stop' && observation.workspace
+    && observation.observedAtMs <= completedAtMs).sort((a, b) => b.observedAtMs - a.observedAtMs);
+  const terminalStop = stops[0];
+  if (!terminalStop || terminalStop.observedAtMs < models.at(-1)!.timestampMs) return [];
 
   const identity = ['minimax-code', sessionId, turnId];
   const traceId = hash([...identity, 'trace']);
@@ -85,31 +86,51 @@ export function buildMinimaxCodeTurn(
       'gen_ai.turn.id': turnId,
       'gen_ai.step.id': call.messageId,
       trace_id: traceId,
-      'workspace.path': stop.workspace,
+      'workspace.path': terminalStop.workspace,
     });
 
   const result: AgentActivityEntry[] = [];
-  const inputParts = textParts(user.message.content);
-  let input: JsonValue[] = inputParts.length ? [{ role: 'user', parts: inputParts }] : [];
-  let readyAt = user.timestampMs;
+  const matchedStops = new Set<MinimaxCodeHookObservation>();
+  let previousModelIndex = -1;
   for (const [index, model] of models.entries()) {
     const provider = strings(model.message.provider);
     const modelName = strings(model.message.model);
     const reason = strings(model.message.stopReason);
     const calls = toolCalls(model.message.content);
-    const last = index === models.length - 1;
-    if (!provider || !modelName || !reason || last === (calls.length > 0)) return [];
+    const upcoming = models[index + 1];
+    const last = upcoming === undefined;
+    if (!provider || !modelName || !reason || (last && calls.length > 0)) return [];
+
+    const modelIndex = native.indexOf(model, previousModelIndex + 1);
+    const stepInput = native.slice(previousModelIndex + 1, modelIndex);
+    const upcomingIndex = upcoming ? native.indexOf(upcoming, modelIndex + 1) : native.length;
+    const nativeResults = native.slice(modelIndex + 1, upcomingIndex);
+    const latestStepAt = upcoming?.timestampMs ?? (completedAtMs + 1);
+    previousModelIndex = modelIndex;
 
     const tools = calls.map(call => {
-      const start = hooks.filter(observation => observation.event === 'PreToolUse' && observation.toolCallId === call.id);
-      const end = native.filter(message => message.role === 'toolResult' && message.message.toolCallId === call.id);
+      const start = hooks.filter(observation => observation.event === 'PreToolUse' && observation.toolCallId === call.id
+        && observation.observedAtMs >= model.timestampMs && observation.observedAtMs < latestStepAt);
+      const end = nativeResults.filter(message => message.role === 'toolResult' && message.message.toolCallId === call.id);
       return { call, start, end };
     });
     if (tools.some(tool => tool.start.length !== 1 || tool.end.length !== 1
       || tool.start[0].observedAtMs < model.timestampMs || tool.end[0].timestampMs < tool.start[0].observedAtMs)) return [];
 
-    const responseTime = tools.length ? Math.min(...tools.map(tool => tool.start[0].observedAtMs)) : stop.observedAtMs;
-    if (model.timestampMs < readyAt || responseTime < model.timestampMs) return [];
+    const stepStop = stops.find(observation => observation.observedAtMs >= model.timestampMs
+      && observation.observedAtMs < latestStepAt);
+    const responseTime = tools.length ? Math.min(...tools.map(tool => tool.start[0].observedAtMs)) : stepStop?.observedAtMs;
+    if (responseTime === undefined || stepInput.some(message => message.timestampMs > model.timestampMs)) return [];
+    if (!tools.length && stepStop) matchedStops.add(stepStop);
+    const input: JsonValue[] = [];
+    for (const message of stepInput) {
+      const parts = textParts(message.message.content);
+      if (message.role === 'user' && parts.length) input.push({ role: 'user', parts });
+      const toolId = strings(message.message.toolCallId);
+      if (message.role === 'toolResult' && toolId) {
+        input.push({ role: 'tool', parts: [{ type: 'tool_call_response', id: toolId, response: parts }] });
+      }
+    }
     const responseId = strings(model.message.responseId) ?? model.messageId;
     const shared = {
       'gen_ai.provider.name': provider,
@@ -144,7 +165,6 @@ export function buildMinimaxCodeTurn(
       ...(outputParts.length ? { 'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts, finish_reason: finishReason }] } : {}),
       ...(last ? { 'gen_ai.turn.end': true } : {}),
     });
-    input = [];
     for (const tool of tools) {
       const nativeResult = tool.end[0];
       const start = tool.start[0].observedAtMs;
@@ -170,9 +190,11 @@ export function buildMinimaxCodeTurn(
           ? { 'tool.result.status': nativeResult.message.isError ? 'error' : 'success' } : {}),
         ...(nativeResult.message.isError === true ? { 'error.type': 'tool_error' } : {}),
       });
-      input.push({ role: 'tool', parts: [{ type: 'tool_call_response', id: tool.call.id, response: content }] });
-      readyAt = Math.max(readyAt, finish);
     }
   }
+  // A completed ingress receipt can become visible while the canonical
+  // history is being materialized. An unpaired Stop means that graph has not
+  // caught up with the observed pass boundaries.
+  if (matchedStops.size !== stops.length) return [];
   return result.sort((a, b) => a.time_unix_nano.localeCompare(b.time_unix_nano));
 }

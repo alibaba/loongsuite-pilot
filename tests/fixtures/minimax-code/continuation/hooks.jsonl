@@ -1,0 +1,4 @@
+{"timeReceivedMs":1795216940788,"payload":{"hook_event_name":"SessionStart","session_id":"mvs_c40044a2533248be8605dae21b03f306","cwd":"/fixtures/minimax-code/workspace"}}
+{"timeReceivedMs":1795216940817,"payload":{"hook_event_name":"UserPromptSubmit","session_id":"mvs_c40044a2533248be8605dae21b03f306","turn_id":"turn_mwpltcmo_5vu1t1","cwd":"/fixtures/minimax-code/workspace"}}
+{"timeReceivedMs":1795216940985,"payload":{"hook_event_name":"Stop","session_id":"mvs_c40044a2533248be8605dae21b03f306","turn_id":"turn_mwpltcmo_5vu1t1","stop_hook_active":false,"cwd":"/fixtures/minimax-code/workspace"}}
+{"timeReceivedMs":1795216941062,"payload":{"hook_event_name":"Stop","session_id":"mvs_c40044a2533248be8605dae21b03f306","turn_id":"turn_mwpltcmo_5vu1t1","stop_hook_active":true,"cwd":"/fixtures/minimax-code/workspace"}}

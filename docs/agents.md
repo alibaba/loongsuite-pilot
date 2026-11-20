@@ -9,15 +9,19 @@ Use this guide to choose which AI coding agents Pilot should collect from and co
 Pilot supports the official `mcode` CLI on macOS and Linux. Version 0.7.9 was
 verified on macOS. Pilot installs a native plugin into the configured local
 profile and joins its turn and tool notifications with the durable session
-under that profile's `v2/sessions` directory. The profile defaults to
+under that profile's `v2/sessions` directory. A native turn completion receipt
+allows Pilot to collect the whole turn even if a Stop hook asks the CLI to
+continue. The profile defaults to
 `~/.minimax`. Use the same absolute `MINIMAX_DATA_DIR` or `MAVIS_DATA_DIR` for
 Pilot and `mcode` when using a custom profile.
 
 The plugin records only session, turn, tool, timestamp and workspace metadata.
 Message content follows the usual Pilot workspace and agent policies
 (`agents.minimax-code.captureMessageContent`). Pilot collects completed turns
-observed by the plugin, including turns recorded while Pilot is stopped. An
-already-running CLI process may need to be restarted to load the plugin.
+observed by the plugin, including turns recorded while Pilot is stopped.
+Disabling the agent revokes the installed plugin and any copies held by the CLI's
+Hook cache. An already-running CLI process may need to be restarted to load a
+new installation.
 
 ## Hermes TTFT
 

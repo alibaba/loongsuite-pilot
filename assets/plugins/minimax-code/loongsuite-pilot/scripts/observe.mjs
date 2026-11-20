@@ -10,6 +10,31 @@ function identity(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 512 ? value : undefined;
 }
 
+const MARKER = '.loongsuite-pilot-managed.json';
+
+function readMarker(file) {
+  if (!fs.lstatSync(file).isFile()) throw new Error('unmanaged hook');
+  const marker = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (marker.schemaVersion !== 1 || marker.owner !== 'loongsuite-pilot' || marker.agentId !== 'minimax-code'
+    || typeof marker.dataDir !== 'string' || !path.isAbsolute(marker.dataDir)
+    || typeof marker.targetDir !== 'string' || !path.isAbsolute(marker.targetDir)
+    || typeof marker.installationId !== 'string'
+    || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(marker.installationId)
+    || typeof marker.sourceHash !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(marker.sourceHash)) {
+    throw new Error('unmanaged hook');
+  }
+  return marker;
+}
+
+function assertCurrentInstall(snapshot) {
+  if (!fs.lstatSync(snapshot.targetDir).isDirectory()) throw new Error('inactive hook installation');
+  const current = readMarker(path.join(snapshot.targetDir, MARKER));
+  if (current.installationId !== snapshot.installationId || current.targetDir !== snapshot.targetDir
+    || current.sourceHash !== snapshot.sourceHash || current.dataDir !== snapshot.dataDir) {
+    throw new Error('inactive hook installation');
+  }
+}
+
 try {
   const observedAtMs = Date.now();
   const record = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -21,10 +46,8 @@ try {
   const workspace = typeof record.cwd === 'string' && path.isAbsolute(record.cwd) ? record.cwd : undefined;
   if (!session || !turn || !workspace || (event !== 'Stop' && !tool)) throw new Error('unsupported hook');
 
-  const markerFile = fileURLToPath(new URL('../.loongsuite-pilot-managed.json', import.meta.url));
-  const marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
-  if (marker.schemaVersion !== 1 || marker.owner !== 'loongsuite-pilot' || marker.agentId !== 'minimax-code'
-    || typeof marker.dataDir !== 'string' || !path.isAbsolute(marker.dataDir)) throw new Error('unmanaged hook');
+  const marker = readMarker(fileURLToPath(new URL(`../${MARKER}`, import.meta.url)));
+  assertCurrentInstall(marker);
 
   const sessionKey = createHash('sha256').update(session).digest('hex');
   const dir = path.join(marker.dataDir, 'state', 'minimax-code', 'hook-events', sessionKey);
@@ -36,6 +59,7 @@ try {
       observedAtMs,
       payload: { hook_event_name: event, session_id: session, turn_id: turn, cwd: workspace, tool_use_id: tool },
     }), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    assertCurrentInstall(marker);
     fs.renameSync(temp, path.join(dir, `${unique}.json`));
   } finally {
     try { fs.unlinkSync(temp); } catch {}

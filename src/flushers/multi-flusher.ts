@@ -1,4 +1,4 @@
-import { BaseFlusher, type BatchDeliveryOptions } from './base-flusher.js';
+import { BaseFlusher, type BatchDelivery, type BatchDeliveryOptions } from './base-flusher.js';
 import type { AgentActivityEntry } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -46,15 +46,15 @@ export class MultiFlusher extends BaseFlusher {
   override createBatchDelivery(
     entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal,
     options?: BatchDeliveryOptions,
-  ): () => Promise<void> {
+  ): BatchDelivery {
     const requireAcceptance = options?.requireAcceptance
       || entries.some(entry => entry['agent.source'] === 'qwen-work-cn-collaboration');
     const targets = this.flushers.map(flusher => ({
       flusher, accepted: false, deliver: flusher.createBatchDelivery(entries, logicalBytes, signal, options),
     }));
-    return async () => {
+    return async (attemptSignal) => {
       const pending = targets.filter(target => !target.accepted);
-      const results = await Promise.allSettled(pending.map(target => target.deliver()));
+      const results = await Promise.allSettled(pending.map(target => target.deliver(attemptSignal)));
       const failures: unknown[] = [];
       for (let i = 0; i < results.length; i++) {
         const result = results[i];
