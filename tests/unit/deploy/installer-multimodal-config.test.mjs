@@ -6,12 +6,13 @@ import { describe, expect, it } from 'vitest';
 
 const installerSh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf8').replaceAll('\r\n', '\n');
 const installerPs1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf8').replaceAll('\r\n', '\n');
+const MULTIMODAL_SUPPORTED_AGENTS = 'codex,qoder,qwen-work-cn';
 
 describe('public installer multimodal mode flag', () => {
   it('shell installer accepts --multimodal-mode and writes uploadMode', () => {
     expect(installerSh).toContain('MULTIMODAL_MODE=""');
     expect(installerSh).toContain('MULTIMODAL_MODE_SET=0');
-    expect(installerSh).toContain('MULTIMODAL_SUPPORTED_AGENTS="codex,qoder"');
+    expect(installerSh).toContain(`MULTIMODAL_SUPPORTED_AGENTS="${MULTIMODAL_SUPPORTED_AGENTS}"`);
     expect(installerSh).toContain('--multimodal-mode)');
     expect(installerSh).toContain('--multimodal-mode=*)');
     expect(installerSh).toContain('MULTIMODAL_MODE="${2-}"; MULTIMODAL_MODE_SET=1; shift 2 || shift');
@@ -43,7 +44,7 @@ describe('public installer multimodal mode flag', () => {
     expect(installerPs1).toContain('[AllowEmptyString()]');
     expect(installerPs1).toContain("if ($PSBoundParameters.Keys -contains 'MultimodalMode' -and -not $MultimodalMode)");
     expect(installerPs1).toContain("-MultimodalMode requires 'none', 'input', 'output', or 'all'");
-    expect(installerPs1).toContain('$script:MultimodalSupportedAgents = "codex,qoder"');
+    expect(installerPs1).toContain(`$script:MultimodalSupportedAgents = "${MULTIMODAL_SUPPORTED_AGENTS}"`);
     expect(installerPs1).toContain('multimodalMode');
     expect(installerPs1).toContain('-MultimodalMode is only supported with install');
     expect(installerPs1).toContain('requires -SlsEndpoint, -SlsProject, -SlsLogstore, and -SlsApiKey');
@@ -287,6 +288,7 @@ const enabledAgents = {
   agents: {
     codex: { enabled: true },
     qoder: { enabled: true },
+    'qwen-work-cn': { enabled: true },
   },
 };
 
@@ -319,7 +321,7 @@ function runWriteConfig(platform, multimodalMode, existing, {
         configPath,
         dataDir: root,
         multimodalMode,
-        multimodalSupportedAgents: 'codex,qoder',
+        multimodalSupportedAgents: MULTIMODAL_SUPPORTED_AGENTS,
         selectedAgents,
         allAgentsMode: allAgents ? '1' : '',
         probeResult: probeJson,
@@ -340,7 +342,7 @@ function runWriteConfig(platform, multimodalMode, existing, {
       env: {
         ...process.env,
         LP_MULTIMODAL_MODE: multimodalMode,
-        LP_MULTIMODAL_SUPPORTED_AGENTS: 'codex,qoder',
+        LP_MULTIMODAL_SUPPORTED_AGENTS: MULTIMODAL_SUPPORTED_AGENTS,
         LP_SELECTED_AGENTS: selectedAgents,
         LP_SLS_API_KEY: sls.apiKey ?? '',
         LP_DASHBOARD_PORT: '',
@@ -363,10 +365,11 @@ describe('installer write_config multimodal-mode', () => {
             ...enabledAgents.agents,
             cursor: { enabled: true },
           },
-        }, { selectedAgents: 'codex,qoder,cursor' });
+        }, { selectedAgents: 'codex,qoder,qwen-work-cn,cursor' });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'all' });
         expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'all' });
+        expect(result.config.agents['qwen-work-cn'].multimodal).toEqual({ uploadMode: 'all' });
         expect(result.config.agents.cursor.multimodal).toBeUndefined();
         expect(result.config.agents.foo).toBeUndefined();
         expect(result.config.multimodal).toBeUndefined();
@@ -400,11 +403,13 @@ describe('installer write_config multimodal-mode', () => {
         const result = runWriteConfig(platform, 'output', {
           agents: {
             qoder: { enabled: false },
+            'qwen-work-cn': { enabled: true },
             cursor: { enabled: true },
           },
         }, { selectedAgents: 'cursor' });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.qoder.multimodal).toEqual({ uploadMode: 'none' });
+        expect(result.config.agents['qwen-work-cn'].multimodal).toEqual({ uploadMode: 'none' });
         expect(result.config.agents.cursor.multimodal).toBeUndefined();
       });
 
@@ -439,7 +444,7 @@ describe('installer write_config multimodal-mode', () => {
           ...enabledAgents,
           multimodal: { extra: true },
         }, {
-          selectedAgents: 'codex,qoder',
+          selectedAgents: 'codex,qoder,qwen-work-cn',
           sls: completeSls,
         });
         expect(result.status, result.stderr).toBe(0);
@@ -457,11 +462,12 @@ describe('installer write_config multimodal-mode', () => {
 
       it('does not write storage when the SLS four-tuple is incomplete', () => {
         const result = runWriteConfig(platform, 'all', enabledAgents, {
-          selectedAgents: 'codex,qoder',
+          selectedAgents: 'codex,qoder,qwen-work-cn',
           sls: { ...completeSls, apiKey: '' },
         });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.codex.multimodal).toEqual({ uploadMode: 'all' });
+        expect(result.config.agents['qwen-work-cn'].multimodal).toEqual({ uploadMode: 'all' });
         expect(result.config.multimodal).toBeUndefined();
       });
 
@@ -477,7 +483,7 @@ describe('installer write_config multimodal-mode', () => {
             },
           },
         }, {
-          selectedAgents: 'codex,qoder',
+          selectedAgents: 'codex,qoder,qwen-work-cn',
           sls: completeSls,
         });
         expect(result.status, result.stderr).toBe(0);
@@ -503,6 +509,7 @@ describe('installer write_config multimodal-mode', () => {
           agents: {
             codex: { enabled: true, multimodal: { uploadMode: 'all', allowedRootPaths: ['~/workspace'] } },
             qoder: { enabled: true, multimodal: { uploadMode: 'input' } },
+            'qwen-work-cn': { enabled: true, multimodal: { uploadMode: 'output' } },
             cursor: { enabled: true, multimodal: { uploadMode: 'all' } },
           },
           multimodal: { storage: existing },
@@ -512,6 +519,7 @@ describe('installer write_config multimodal-mode', () => {
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.codex).toEqual({ enabled: true });
         expect(result.config.agents.qoder).toEqual({ enabled: true });
+        expect(result.config.agents['qwen-work-cn']).toEqual({ enabled: true });
         expect(result.config.agents.cursor.multimodal).toEqual({ uploadMode: 'all' });
         expect(result.config.multimodal.storage).toEqual(existing);
       });
@@ -522,6 +530,7 @@ describe('installer write_config multimodal-mode', () => {
         });
         expect(result.status, result.stderr).toBe(0);
         expect(result.config.agents.codex.multimodal).toBeUndefined();
+        expect(result.config.agents['qwen-work-cn'].multimodal).toBeUndefined();
         expect(result.config.multimodal).toBeUndefined();
       });
 
@@ -540,6 +549,7 @@ describe('installer write_config multimodal-mode', () => {
         expect(result.config.agents.qoder).toEqual({
           multimodal: { uploadMode: 'all', allowedRootPaths: ['~/workspace'] },
         });
+        expect(result.config.agents['qwen-work-cn']).toEqual({ multimodal: { uploadMode: 'all' } });
         expect(result.config.agents.cursor).toEqual({ extra: true });
       });
     });

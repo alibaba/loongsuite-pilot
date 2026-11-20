@@ -163,7 +163,7 @@ if ($PSBoundParameters.Keys -contains 'MultimodalMode' -and -not $MultimodalMode
 }
 $script:MultimodalMode = $MultimodalMode
 # Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
-$script:MultimodalSupportedAgents = "codex,qoder"
+$script:MultimodalSupportedAgents = "codex,qoder,qwen-work-cn"
 if ($MultimodalMode) {
     if ($MultimodalMode -notin @("none", "input", "output", "all")) {
         Write-Error "Unknown multimodal mode: $MultimodalMode (use 'none', 'input', 'output', or 'all')"
