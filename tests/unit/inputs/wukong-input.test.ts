@@ -10,6 +10,9 @@ import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { WukongInput } from '../../../src/inputs/wukong/wukong-input.js';
 import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
+import { InputManager } from '../../../src/core/input-manager.js';
+import { OtlpTraceFlusher } from '../../../src/flushers/otlp-trace-flusher.js';
 
 const LEETCODE_FIXTURE = JSON.parse(
   readFileSync(
@@ -158,6 +161,30 @@ describe('WukongInput', () => {
 
   function seedSeenCounts(counts: Record<string, number> = {}) {
     stateStore.update('wukong', { extra: { seenCounts: counts } });
+  }
+
+  async function exportInput(): Promise<ReadableSpan[]> {
+    const spans: ReadableSpan[] = [];
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      protocol: 'http/protobuf',
+      serviceName: 'wukong-test',
+      endpoints: [{ endpoint: 'http://unused.invalid' }],
+    }, undefined, () => ({
+      export(batch, callback) { spans.push(...batch); callback({ code: 0 }); },
+      async shutdown() {},
+    }));
+    const manager = new InputManager();
+    manager.setFlusher(flusher);
+    manager.registerInput(input);
+    try {
+      await manager.startInput(input.id);
+      await vi.waitFor(() => expect(spans.length).toBeGreaterThan(0));
+    } finally {
+      await manager.stopAll();
+      await flusher.shutdown();
+    }
+    return spans;
   }
 
   it('user content is merged into step 1 llm.request messages_delta', async () => {
@@ -426,6 +453,110 @@ describe('WukongInput', () => {
       const result = results.find(entry => entry['gen_ai.tool.call.id'] === id);
       expect(result?.['gen_ai.tool.call.duration']).toBe(duration);
       expect(result?.['gen_ai.tool.call.result']).toBe(returnsResults ? `${id} contents` : undefined);
+    }
+  });
+
+  it.each([
+    { label: 'same native parent', secondParent: 'decision', decisions: 2 },
+    { label: 'distinct native parents', secondParent: 'second-decision', decisions: 3 },
+    { label: 'continued text in the same parent', secondParent: 'decision', decisions: 2, continuation: 'text' },
+    { label: 'continued reasoning in the same parent', secondParent: 'decision', decisions: 2, continuation: 'reasoning' },
+  ])('preserves $label when declarations interleave', async ({ secondParent, decisions, continuation }) => {
+    const base = 1779240560000;
+    const event = (type: string, offset: number, fields: Record<string, unknown> = {}) => ({
+      type, timestamp: base + offset, ...fields,
+    });
+    const events = [
+      event('RUN_STARTED', 0, { runId: 'run' }),
+      event('TEXT_MESSAGE_START', 10, { messageId: 'decision' }),
+      event('TEXT_MESSAGE_CONTENT', 11, { messageId: 'decision', delta: 'Reading both files' }),
+      ...(continuation !== 'text' ? [event('TEXT_MESSAGE_END', 14, { messageId: 'decision' })] : []),
+      ...(continuation === 'reasoning' ? [
+        event('REASONING_START', 15, { messageId: 'reasoning' }),
+        event('REASONING_MESSAGE_CHUNK', 16, { messageId: 'reasoning', delta: 'Read ' }),
+      ] : []),
+      event('TOOL_CALL_START', 20, { toolCallId: 'a', toolCallName: 'read_file', parentMessageId: 'decision' }),
+      event('TOOL_CALL_ARGS', 21, { toolCallId: 'a', delta: '{"path":"a.txt"}' }),
+      event('TOOL_CALL_START', 25, { toolCallId: 'b', toolCallName: 'read_file', parentMessageId: secondParent }),
+      event('TOOL_CALL_ARGS', 26, { toolCallId: 'b', delta: '{"path":"b.txt"}' }),
+      event('TOOL_CALL_END', 28, { toolCallId: 'b' }),
+      ...(continuation === 'text' ? [
+        event('TEXT_MESSAGE_CONTENT', 29, { messageId: 'decision', delta: '.' }),
+        event('TEXT_MESSAGE_END', 30, { messageId: 'decision' }),
+      ] : []),
+      ...(continuation === 'reasoning' ? [
+        event('REASONING_MESSAGE_CHUNK', 29, { messageId: 'reasoning', delta: 'in parallel' }),
+        event('REASONING_END', 30, { messageId: 'reasoning' }),
+      ] : []),
+      event('TOOL_CALL_END', 31, { toolCallId: 'a' }),
+      event('TOOL_CALL_RESULT', 52, { toolCallId: 'b', messageId: 'result-b', content: 'b contents' }),
+      event('TOOL_CALL_RESULT', 90, { toolCallId: 'a', messageId: 'result-a', content: 'a contents' }),
+      event('TEXT_MESSAGE_START', 100, { messageId: 'answer' }),
+      event('TEXT_MESSAGE_CONTENT', 101, { messageId: 'answer', delta: 'Both reads succeeded.' }),
+      event('TEXT_MESSAGE_END', 102, { messageId: 'answer' }),
+      event('RUN_FINISHED', 105, { runId: 'run' }),
+    ];
+    const messages = [SAMPLE_MESSAGES[0], { ...SAMPLE_MESSAGES[1], createdAt: base, events, isComplete: 1 }];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+    const spans = await exportInput();
+
+    const calls = entries.filter(entry => entry['event.name'] === 'tool.call');
+    const results = entries.filter(entry => entry['event.name'] === 'tool.result');
+    const responses = entries.filter(entry => entry['event.name'] === 'llm.response');
+    expect(calls.map(entry => entry['gen_ai.tool.call.id'])).toEqual(['a', 'b']);
+    expect(results.map(entry => [
+      entry['gen_ai.tool.call.id'], entry['gen_ai.tool.call.result'], entry['gen_ai.tool.call.duration']
+    ])).toEqual([['b', 'b contents', 27], ['a', 'a contents', 70]]);
+    expect(responses.map(entry => entry['gen_ai.response.id'])).toEqual(decisions === 2
+      ? ['decision', 'answer'] : ['decision', 'second-decision', 'answer']);
+
+    expect(new Set(calls.map(entry => entry['gen_ai.step.id'])).size).toBe(decisions - 1);
+    expect(responses[0]['gen_ai.output.messages']).toEqual([{
+      role: 'assistant',
+      parts: expect.arrayContaining([
+        { type: 'text', content: continuation === 'text' ? 'Reading both files.' : 'Reading both files' },
+        ...(continuation === 'reasoning' ? [{ type: 'reasoning', content: 'Read in parallel' }] : []),
+        ...calls.filter(call => call['gen_ai.step.id'] === responses[0]['gen_ai.step.id'])
+          .map(call => ({ type: 'tool_call', id: call['gen_ai.tool.call.id'], name: 'read_file' })),
+      ]),
+    }]);
+    expect(responses.at(-1)?.['gen_ai.output.messages']).toEqual([
+      { role: 'assistant', parts: [{ type: 'text', content: 'Both reads succeeded.' }] },
+    ]);
+
+    const request = (responseId: string) => entries.find(entry => entry['event.name'] === 'llm.request'
+      && entry['gen_ai.response.id'] === responseId);
+    if (decisions === 3) expect(request('second-decision')?.['gen_ai.input.messages_delta']).toBeUndefined();
+    expect(request('answer')?.['gen_ai.input.messages_delta']).toEqual(['b', 'a'].map(id => ({
+      role: 'tool', parts: [{ type: 'tool_call_response', id, response: `${id} contents` }],
+    })));
+
+    const kind = (spanKind: string) => spans.filter(span => span.attributes['gen_ai.span.kind'] === spanKind);
+    const ns = (time: ReadableSpan['startTime']) => BigInt(time[0]) * 1_000_000_000n + BigInt(time[1]);
+    expect(kind('LLM')).toHaveLength(decisions);
+    expect(kind('STEP')).toHaveLength(decisions);
+    expect(kind('TOOL')).toHaveLength(2);
+    for (const call of calls) {
+      const id = call['gen_ai.tool.call.id'];
+      const span = kind('TOOL').find(tool => tool.attributes['gen_ai.tool.call.id'] === id);
+      const response = responses.find(entry => entry['gen_ai.step.id'] === call['gen_ai.step.id']);
+      const llm = kind('LLM').find(span => span.attributes['gen_ai.response.id'] === response?.['gen_ai.response.id']);
+      const step = kind('STEP').find(span => span.spanContext().spanId === llm?.parentSpanId);
+      expect(span).toBeDefined();
+      expect(step).toBeDefined();
+      expect(span!.parentSpanId).toBe(step!.spanContext().spanId);
+      expect(ns(llm!.endTime)).toBeLessThan(ns(span!.startTime));
+      expect(ns(step!.startTime)).toBeLessThanOrEqual(ns(span!.startTime));
+      expect(ns(step!.endTime)).toBeGreaterThanOrEqual(ns(span!.endTime));
+      expect(ns(span!.startTime)).toBe(BigInt(String(call['time_unix_nano'])));
+      expect(ns(span!.endTime)).toBe(BigInt(String(results.find(result => result['gen_ai.tool.call.id'] === id)?.['time_unix_nano'])));
     }
   });
 
@@ -917,6 +1048,9 @@ describe('WukongInput', () => {
         events: [
           { type: 'RUN_STARTED', runId: 'run-err', threadId: 'sess-1', timestamp: 1779240560000 },
           { type: 'TEXT_MESSAGE_CONTENT', delta: 'Working...', messageId: 'text-1', timestamp: 1779240560100 },
+          { type: 'TOOL_CALL_START', toolCallId: 'started', toolCallName: 'read_file', parentMessageId: 'text-1', timestamp: 1779240560120 },
+          { type: 'TOOL_CALL_END', toolCallId: 'started', result: 'first file', timestamp: 1779240560140 },
+          { type: 'TOOL_CALL_START', toolCallId: 'interrupted', toolCallName: 'read_file', parentMessageId: 'unfinished-decision', timestamp: 1779240560150 },
           { type: 'RUN_ERROR', code: 'CANCELLED', message: '任务已终止', runId: 'run-err', timestamp: 1779240560200 },
           { type: 'RUN_FINISHED', runId: 'run-err', threadId: 'sess-1', timestamp: 1779240560200 },
         ],
@@ -938,7 +1072,11 @@ describe('WukongInput', () => {
     await input.start();
     await input.stop();
 
-    const respEntry = entries.find(e => e['event.name'] === 'llm.response');
+    const tools = entries.filter(e => e['event.name'] === 'tool.call' || e['event.name'] === 'tool.result');
+    expect(tools.map(e => e['gen_ai.tool.call.id'])).toEqual(['started', 'started']);
+    const responses = entries.filter(e => e['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    const respEntry = responses[0];
     expect(respEntry!['gen_ai.response.finish_reasons']).toEqual(['stop']);
     expect(respEntry!['error.type']).toBe('CANCELLED');
     expect(respEntry!['error.message']).toBe('任务已终止');
@@ -1582,8 +1720,7 @@ describe('WukongInput', () => {
     seedSeenCounts();
     const entries: AgentActivityEntry[] = [];
     input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
-    await input.start();
-    await input.stop();
+    const spans = await exportInput();
 
     // Problem 2a: the turn begins with exactly one `other` carrying the user prompt (no step id).
     const others = entries.filter(e => e['event.name'] === 'other');
@@ -1627,6 +1764,13 @@ describe('WukongInput', () => {
     const sumOut = llmResps.reduce((s, e) => s + Number(e['gen_ai.usage.output_tokens'] ?? 0), 0);
     expect(sumIn).toBe(36779);
     expect(sumOut).toBe(906);
+
+    expect(spans.map(span => span.attributes['gen_ai.span.kind']).sort())
+      .toEqual(['AGENT', 'ENTRY', 'LLM', 'LLM', 'STEP', 'STEP', 'TOOL']);
+    const agent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT');
+    expect(agent?.attributes['gen_ai.usage.input_tokens']).toBe(36779);
+    expect(agent?.attributes['gen_ai.usage.output_tokens']).toBe(906);
+
 
     // The first decision paired a file_read tool.call/result.
     const toolCalls = entries.filter(e => e['event.name'] === 'tool.call');

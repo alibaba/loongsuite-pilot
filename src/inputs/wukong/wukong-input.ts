@@ -473,6 +473,7 @@ export class WukongInput extends BaseInput {
 
     // Run metadata and tool results can arrive after the events they describe.
     const toolResults = new Map<string, AguiEvent>();
+    const endedToolIds = new Set<string>();
     let runId: string | undefined;
     let runStartedTs: number | undefined;
     let runFinishedTs: number | undefined;
@@ -488,6 +489,9 @@ export class WukongInput extends BaseInput {
           break;
         case 'RUN_ERROR':
           runError = { code: String(e.code ?? 'UNKNOWN'), message: String(e.message ?? '') };
+          break;
+        case 'TOOL_CALL_END':
+          if (typeof e.toolCallId === 'string' && e.toolCallId) endedToolIds.add(e.toolCallId);
           break;
         case 'TOOL_CALL_RESULT':
           if (typeof e.toolCallId === 'string' && e.toolCallId) toolResults.set(e.toolCallId, e);
@@ -517,15 +521,17 @@ export class WukongInput extends BaseInput {
       cur = s;
       return s;
     };
-    // An assistant utterance (text/reasoning). With STEP_STARTED boundaries it just
-    // attaches to the current step. Without them, a new utterance after the current
-    // step already produced tools starts a fresh step (one LLM decision per step).
-    const stepForUtterance = (ts: number): StepAcc => {
-      if (!cur) return openStep(ts);
-      if (!hasStepEvents && cur.hasTools) return openStep(ts);
+    const stepsByMessageId = new Map<string, StepAcc>();
+    const knownMessageStep = (messageId: unknown): StepAcc | undefined =>
+      !hasStepEvents && typeof messageId === 'string' ? stepsByMessageId.get(messageId) : undefined;
+    // Only a new utterance can open a new implicit step. Chunks of an existing
+    // message may arrive while its tools are being declared or executed.
+    const stepForUtterance = (evt: AguiEvent): StepAcc => {
+      const known = knownMessageStep(evt.messageId);
+      if (known) return known;
+      if (!cur || (!hasStepEvents && cur.hasTools)) return openStep(evt.timestamp);
       return cur;
     };
-    const stepsByMessageId = new Map<string, StepAcc>();
     const rememberMessage = (step: StepAcc, messageId: unknown): void => {
       if (typeof messageId !== 'string' || !messageId) return;
       step.responseId ??= messageId;
@@ -577,13 +583,13 @@ export class WukongInput extends BaseInput {
           break;
 
         case 'REASONING_START': {
-          const s = stepForUtterance(evt.timestamp);
+          const s = stepForUtterance(evt);
           rememberMessage(s, evt.messageId);
           break;
         }
 
         case 'REASONING_MESSAGE_CHUNK': {
-          const s = stepForUtterance(evt.timestamp);
+          const s = stepForUtterance(evt);
           rememberMessage(s, evt.messageId);
           if (typeof evt.delta === 'string') s.reasoning += evt.delta;
           else if (typeof evt.content === 'string') s.reasoning += evt.content;
@@ -592,19 +598,19 @@ export class WukongInput extends BaseInput {
         }
 
         case 'REASONING_END': {
-          const last = steps[steps.length - 1];
+          const last = knownMessageStep(evt.messageId) ?? steps[steps.length - 1];
           if (last) last.lastContentTs = evt.timestamp;
           break;
         }
 
         case 'TEXT_MESSAGE_START': {
-          const s = stepForUtterance(evt.timestamp);
+          const s = stepForUtterance(evt);
           rememberMessage(s, evt.messageId);
           break;
         }
 
         case 'TEXT_MESSAGE_CONTENT': {
-          const s = stepForUtterance(evt.timestamp);
+          const s = stepForUtterance(evt);
           rememberMessage(s, evt.messageId);
           if (typeof evt.delta === 'string') s.text += evt.delta;
           s.lastContentTs = evt.timestamp;
@@ -612,7 +618,7 @@ export class WukongInput extends BaseInput {
         }
 
         case 'TEXT_MESSAGE_END': {
-          const last = steps[steps.length - 1];
+          const last = knownMessageStep(evt.messageId) ?? steps[steps.length - 1];
           if (last) last.lastContentTs = evt.timestamp;
           break;
         }
@@ -646,8 +652,15 @@ export class WukongInput extends BaseInput {
             ?? (evt.name as string | undefined) ?? '';
           const parentMessageId = typeof evt.parentMessageId === 'string' && evt.parentMessageId !== runId
             ? evt.parentMessageId : undefined;
-          toolStarts.set(tcId, { timestamp: evt.timestamp, name: toolName, parentMessageId,
-            step: hasStepEvents ? steps[steps.length - 1] : undefined });
+          let step: StepAcc | undefined;
+          if (hasStepEvents) {
+            step = steps[steps.length - 1];
+          } else if (parentMessageId && typeof evt.toolCallId === 'string' && endedToolIds.has(evt.toolCallId)) {
+            // Bind by declaration order. Several calls can end in a different
+            // order than they started, and an aborted declaration opens no step.
+            step = stepForTool(evt.timestamp, parentMessageId);
+          }
+          toolStarts.set(tcId, { timestamp: evt.timestamp, name: toolName, parentMessageId, step });
           toolStartCount++;
           break;
         }
@@ -751,16 +764,20 @@ export class WukongInput extends BaseInput {
       }));
     }
 
-    // Emit one llm.request + llm.response per step. Timing is computed sequentially
-    // so requests precede responses precede the step's tools, and steps ascend.
-    let cursorTs = runStartedTs ?? steps[0].ctx.startTimestamp;
+    // Emit one llm.request + llm.response per step. When the native parent
+    // identifies an overlapping decision, its LLM still precedes its own tools.
+    const runStartTs = runStartedTs ?? steps[0].ctx.startTimestamp;
+    let cursorTs = runStartTs;
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i];
       const isFinal = i === finalIdx;
 
-      const reqTs = i === 0
-        ? (runStartedTs ?? s.ctx.startTimestamp)
+      const sequentialReqTs = i === 0
+        ? runStartTs
         : Math.max(s.ctx.startTimestamp, cursorTs + 1);
+      const reqTs = i > 0 && !hasStepEvents && s.toolParentMessageId && s.firstToolTs !== undefined
+        ? Math.min(sequentialReqTs, Math.max(runStartTs, s.firstToolTs - 2))
+        : sequentialReqTs;
       let respTs: number;
       if (s.hasTools && s.firstToolTs !== undefined) {
         respTs = Math.max(reqTs + 1, s.firstToolTs - 1);
@@ -769,7 +786,7 @@ export class WukongInput extends BaseInput {
       } else {
         respTs = Math.max(reqTs + 1, s.lastContentTs);
       }
-      cursorTs = Math.max(respTs, s.lastToolTs ?? respTs);
+      cursorTs = Math.max(cursorTs, respTs, s.lastToolTs ?? respTs);
 
       const finishReasons = this.inferFinishReasons(s.hasTools, isFinal ? runError : undefined);
       const llmSpanId = generateSpanId();
@@ -845,17 +862,13 @@ export class WukongInput extends BaseInput {
       }));
     }
 
-    // Make messages_delta incremental: for each step N>=2, prepend the tool_call
-    // responses produced by step N-1 to that step's llm.request.
-    injectPriorStepToolResults(entries);
-
-    // Sort chronologically so the emitted stream reads other → llm.request →
-    // llm.response → tool.call → tool.result → … (spec §8), independent of push order.
+    // Sort chronologically before attaching results to the next LLM request.
     entries.sort((a, b) => {
       const ta = BigInt(String(a['time_unix_nano'] ?? '0'));
       const tb = BigInt(String(b['time_unix_nano'] ?? '0'));
       return ta < tb ? -1 : ta > tb ? 1 : 0;
     });
+    injectPriorStepToolResults(entries);
 
     return entries;
   }
@@ -1237,54 +1250,27 @@ function findLastCompleteIndex(messages: WukongMessage[]): number {
 }
 
 /**
- * Prepend, to each step N>=2's llm.request, the tool_call_response messages
- * produced by step N-1. Keeps gen_ai.input.messages_delta truly incremental:
- * step 1 = user input, step 2+ = prior tool results.
+ * Attach each result to the next LLM request that could have observed it.
+ * The entries are chronological, and native decisions may overlap.
  */
 function injectPriorStepToolResults(entries: AgentActivityEntry[]): void {
-  const toolResultsByStep = new Map<string, Array<{ id: string; name: string; result: unknown }>>();
+  let toolResponses: Array<{ role: string; parts: Array<{ type: string; id: string; response: string }> }> = [];
   for (const entry of entries) {
-    if (entry['event.name'] !== 'tool.result') continue;
-    const sid = entry['gen_ai.step.id'];
-    if (typeof sid !== 'string' || !sid) continue;
-    const arr = toolResultsByStep.get(sid) ?? [];
-    arr.push({
-      id: String(entry['gen_ai.tool.call.id'] ?? ''),
-      name: String(entry['gen_ai.tool.name'] ?? ''),
-      result: entry['gen_ai.tool.call.result'],
-    });
-    toolResultsByStep.set(sid, arr);
-  }
-
-  const stepIds = Array.from(new Set(entries
-    .map(e => e['gen_ai.step.id'])
-    .filter((s): s is string => typeof s === 'string' && !!s)
-  )).sort((a, b) => {
-    const na = parseInt(a.match(/:s(\d+)$/)?.[1] ?? '0', 10);
-    const nb = parseInt(b.match(/:s(\d+)$/)?.[1] ?? '0', 10);
-    return na - nb;
-  });
-
-  for (let i = 1; i < stepIds.length; i++) {
-    const prevStepId = stepIds[i - 1];
-    const curStepId = stepIds[i];
-    const priorTools = toolResultsByStep.get(prevStepId) ?? [];
-    if (priorTools.length === 0) continue;
-    const toolResponseMessages = priorTools.map(t => ({
-      role: 'tool',
-      parts: [{
-        type: 'tool_call_response',
-        id: t.id,
-        response: typeof t.result === 'string' ? t.result : JSON.stringify(t.result ?? ''),
-      }],
-    }));
-    for (const entry of entries) {
-      if (entry['event.name'] !== 'llm.request') continue;
-      if (entry['gen_ai.step.id'] !== curStepId) continue;
+    if (entry['event.name'] === 'tool.result') {
+      const result = entry['gen_ai.tool.call.result'];
+      toolResponses.push({
+        role: 'tool',
+        parts: [{
+          type: 'tool_call_response',
+          id: String(entry['gen_ai.tool.call.id'] ?? ''),
+          response: typeof result === 'string' ? result : JSON.stringify(result ?? ''),
+        }],
+      });
+    } else if (entry['event.name'] === 'llm.request' && toolResponses.length > 0) {
       const existing = entry['gen_ai.input.messages_delta'];
       const existingArr = Array.isArray(existing) ? existing : [];
-      entry['gen_ai.input.messages_delta'] = toJsonValue([...toolResponseMessages, ...existingArr]);
-      break;
+      entry['gen_ai.input.messages_delta'] = toJsonValue([...toolResponses, ...existingArr]);
+      toolResponses = [];
     }
   }
 }
