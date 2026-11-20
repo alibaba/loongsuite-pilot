@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import { promises as nativeFs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import * as childProcess from 'node:child_process';
 import { PluginInjectStrategy } from '../../../src/deployment/plugin-inject-strategy.js';
 import type { AgentDefinition } from '../../../src/types/index.js';
@@ -269,6 +270,23 @@ describe('PluginInjectStrategy', () => {
     expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).extensions).toEqual([tildeEntry]);
     expect(await strategy.undeploy(piDefinition())).toBe(true);
     expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).extensions).toEqual([]);
+  });
+
+  it.each([
+    { alias: 'file URL', entry: (spec: string) => pathToFileURL(spec).href },
+    { alias: 'plugin package object', entry: (spec: string) => ({ package: spec }) },
+    { alias: 'plugin package tuple', entry: (spec: string) => [spec, {}] },
+  ])('repairs an owned Pi extension written as a $alias', async ({ entry }) => {
+    const absoluteEntry = path.join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs');
+    const canonicalEntry = process.platform === 'win32' ? absoluteEntry.replaceAll('\\', '/') : absoluteEntry;
+    const unrelated = '~/vendor/loongsuite-pilot-pi-coding-agent-adapter/index.mjs';
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(settingsPath, JSON.stringify({ extensions: [entry(absoluteEntry), unrelated] }));
+
+    expect(await strategy.needsDeploy(piDefinition())).toBe(true);
+    await expect(strategy.deploy(piDefinition())).resolves.toMatchObject({ success: true });
+    expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).extensions).toEqual([unrelated, canonicalEntry]);
+    expect(await strategy.needsDeploy(piDefinition())).toBe(false);
   });
 
   it('canonicalizes an owned OpenCode home-relative plugin entry and still removes its old file spec', async () => {

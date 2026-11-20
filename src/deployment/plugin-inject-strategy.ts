@@ -139,8 +139,9 @@ export class PluginInjectStrategy implements DeployStrategy {
       }
       const matching = plugins.filter(entry => this.matchesSpec(entry, resolvedSpec, config));
       if (matching.length !== 1) return true;
-      const spec = this.entrySpec(matching[0]);
-      return this.isHomeRelativeSpec(spec) && !this.canPreserveSpec(spec, resolvedSpec, config);
+      const entry = matching[0];
+      return (config.configKey === 'extensions' || this.isHomeRelativeSpec(this.entrySpec(entry)))
+        && !this.canPreserveSpec(entry, resolvedSpec, config);
     } catch (err) {
       logger.warn('failed to read config file', { configPath, error: String(err) });
       return true;
@@ -346,10 +347,15 @@ export class PluginInjectStrategy implements DeployStrategy {
     return spec.startsWith('~/') || (process.platform === 'win32' && spec.startsWith('~\\'));
   }
 
-  private canPreserveSpec(spec: string, resolvedSpec: string, config: PluginInjectConfig): boolean {
-    // Pi supports home-relative extension paths. Package plugin loaders such
-    // as OpenCode V1 need a canonical spec even when the path is equivalent.
-    if (this.isHomeRelativeSpec(spec) && config.configKey !== 'extensions') return false;
+  private canPreserveSpec(entry: unknown, resolvedSpec: string, config: PluginInjectConfig): boolean {
+    const spec = this.entrySpec(entry);
+    if (config.configKey === 'extensions') {
+      // Pi 0.73.1 accepts paths in extensions but does not resolve file URLs.
+      if (typeof entry !== 'string' || (spec.startsWith('file://') && !resolvedSpec.startsWith('file://'))) return false;
+    } else if (this.isHomeRelativeSpec(spec)) {
+      // Package plugin loaders such as OpenCode V1 need a canonical spec.
+      return false;
+    }
     return this.normalizeSpecForComparison(spec) === this.normalizeSpecForComparison(resolvedSpec);
   }
 
@@ -394,7 +400,7 @@ export class PluginInjectStrategy implements DeployStrategy {
         if (this.isReplacement(entry, config, resolvedSpec)) return false;
         if (!this.matchesSpec(entry, resolvedSpec, config)) return true;
         if (key !== pluginKey || keptEquivalent) return false;
-        keptEquivalent = this.canPreserveSpec(this.entrySpec(entry), resolvedSpec, config);
+        keptEquivalent = this.canPreserveSpec(entry, resolvedSpec, config);
         return keptEquivalent;
       });
       if (key === pluginKey && !keptEquivalent) after.push(resolvedSpec);
