@@ -141,6 +141,34 @@ describe('DSH event-to-span OTLP flow', () => {
     }
   });
 
+  it.each(['ABORTED', 'TOOL_OUTCOME_UNKNOWN', 'TOOL_NOT_STARTED'])(
+    'keeps native %s outside the ordinary failed-tool mapping',
+    async (code) => {
+      const fixture = await fs.readFile(path.resolve('tests/fixtures/dsh/dsh-probe-events-real.jsonl'), 'utf8');
+      const records = fixture.split('\n').filter(Boolean).map(line => JSON.parse(line));
+      const result = records.find(record => record.type === 'tool/result');
+      const callId = result.data.message.source.callId;
+      result.data.error = { code };
+      result.data.message.isError = true;
+
+      const state = newState();
+      const entries = records.flatMap(record => transformDshRecordEntries(record, ClientType.Dsh, state));
+      const toolResult = entries.find(entry => entry['event.name'] === 'tool.result'
+        && entry['gen_ai.tool.call.id'] === callId);
+      if (code !== 'TOOL_NOT_STARTED') expect(toolResult).toBeDefined();
+      expect.soft(toolResult?.['gen_ai.tool.success']).toBeUndefined();
+
+      await flusher.sendBatch(entries);
+      await flusher.flush();
+      const tool = captured.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL'
+        && span.attributes['gen_ai.tool.call.id'] === callId);
+      if (code !== 'TOOL_NOT_STARTED') expect(tool).toBeDefined();
+      expect.soft(tool?.attributes['gen_ai.tool.success']).toBeUndefined();
+      expect.soft(tool?.attributes['error.type']).not.toBe('tool_error');
+      if (code !== 'ABORTED') expect(tool?.status.code).not.toBe(SpanStatusCode.ERROR);
+    },
+  );
+
   it('exports both sessions when each uses native turn 1', async () => {
     const a = transformTurn('session-a', 1_800_000_000_000);
     const b = transformTurn('session-b', 1_800_000_001_000);

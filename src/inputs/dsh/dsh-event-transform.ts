@@ -600,6 +600,12 @@ export function transformDshRecord(
       const name = state.toolNames.get(callId);
       state.toolNames.delete(callId);
       const content = message.content;
+      const outcomeCode = asString(asObject(data.error)?.code);
+      // Native cancellation and resume diagnostics also set isError. Leave
+      // their outcome to the separate interruption handling.
+      const isOrdinaryResult = outcomeCode !== 'ABORTED'
+        && outcomeCode !== 'TOOL_OUTCOME_UNKNOWN'
+        && outcomeCode !== 'TOOL_NOT_STARTED';
       const toolParts = normalizeToolResultParts(content);
       // Push the tool result as a `tool` role message so the next step's
       // llm.request input.messages includes the tool_call_response.
@@ -612,7 +618,8 @@ export function transformDshRecord(
         'event.name': 'tool.result',
         'gen_ai.tool.name': name,
         'gen_ai.tool.call.id': callId,
-        'gen_ai.tool.success': typeof message.isError === 'boolean' ? !message.isError : undefined,
+        'gen_ai.tool.success': isOrdinaryResult && typeof message.isError === 'boolean'
+          ? !message.isError : undefined,
         'gen_ai.tool.call.result': toJsonValue([{
           role: 'tool',
           parts: toolParts,
