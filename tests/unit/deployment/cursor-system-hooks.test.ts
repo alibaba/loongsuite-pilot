@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -24,12 +24,22 @@ let root: string;
 let dataDir: string;
 let def: AgentDefinition;
 let restore: () => void;
+let runtimeRoot: string;
+let trustedNode: string;
+beforeAll(async () => {
+  runtimeRoot = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'cursor-system-runtime-'));
+  trustedNode = path.join(runtimeRoot, path.basename(process.execPath));
+  // The CI runner may install Node beneath a group-writable home directory.
+  await fs.copyFile(process.execPath, trustedNode, fs.constants.COPYFILE_FICLONE);
+  await fs.chmod(trustedNode, 0o700);
+});
+afterAll(async () => { await fs.rm(runtimeRoot, { recursive: true, force: true }); });
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'cursor-system-'));
   restore = isolateAgentHome(root);
   dataDir = path.join(root, "pilot's data");
   await fs.mkdir(dataDir);
-  await fs.writeFile(path.join(dataDir, 'node-bin'), process.execPath + '\n', { mode: 0o644 });
+  await fs.writeFile(path.join(dataDir, 'node-bin'), trustedNode + '\n', { mode: 0o644 });
   def = { id: 'cursor', displayName: 'Cursor', deployMode: 'hook',
     detection: { paths: [path.join(root, 'user/.cursor')], commands: [] },
     hook: { settingsPath: path.join(root, 'user/.cursor/hooks.json'),
