@@ -494,12 +494,11 @@ TRAE-CN（[官网](https://www.trae.cn/)，[Hook 文档](https://docs.trae.ai/id
 
 TRAE-CN 的 HookGroup 使用 `matcher`（正则）字段，与 Claude Code 一致。`agents.d/trae-cn.json` 设 `matcher: "*"` 表示匹配全部工具。如需限定到特定工具（如 `Edit|Write`、`mcp__.*`），按官方文档的标准化工具名表写正则。
 
-### 已知限制（用户已确认接受）
+### 模型轮次与用量
 
-- `gen_ai.usage.*` 字段缺失：TRAE-CN Hook payload 不携带 token 计数，只有日志的 `token_count` 行能补，目前不采集。
-- 迭代中间步骤 `input.messages` 缺失：仅首轮（UserPromptSubmit）可见。
-- `output.messages` 中 reasoning 内容缺失：仅 final text（Stop 的 `last_assistant_message`）可见。
-- 一轮 = 一个 STEP = 一个 LLM：ReAct 多迭代边界只能从 TRAE 的 `ai-agent` 日志 `[commit_toolcall_result]` 行切分，hook 无权切，按 §8.2 / §8.5 已放弃启发式。
+- Hook 记录用户输入、工具调用和最终回答。Pilot 能确认原生模型响应的 `history_id` 时，为各模型响应生成 STEP 和 LLM span，并按调用 ID 关联工具。原生记录不足时，保留 Hook 采集的轮次摘要。
+- Token 用量来自本地 Hub 事件缓存。Pilot 核对事件序号和归属后汇总输入、输出和缓存读取量。缺少可归属的记录时，省略对应的用量字段。
+- 正文遵循采集开关和脱敏配置。首轮记录用户输入，后续模型轮次保留可归属的工具调用和已提交结果，末轮记录最终回答。正文覆盖范围取决于原生记录提供的字段。
 
 ### 跨 Agent 重复采集防护（P0）
 
