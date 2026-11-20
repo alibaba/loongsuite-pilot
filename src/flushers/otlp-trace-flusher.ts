@@ -1775,7 +1775,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       for (const span of spans) {
         if (span.attributes['gen_ai.span.kind'] !== 'LLM') continue;
         const response = records.find(r => r['event.name'] === 'llm.response' &&
-          r['gen_ai.step.id'] === span.attributes['gen_ai.step.id'] && r['gen_ai.step.id']);
+          r.span_id === span.spanContext().spanId);
         for (const [key, value] of Object.entries(response ?? {})) {
           if (key.startsWith('agent.trae-cn.hub.') &&
               (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')) {

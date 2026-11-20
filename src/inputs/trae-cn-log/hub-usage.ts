@@ -144,6 +144,7 @@ export class HubUsage {
       else cached += r.cached;
     }
     const prefix = 'agent.trae-cn.hub.';
+    entry[prefix + 'total_tokens_observed'] = input + output;
     entry[prefix + 'trace_id'] = turn.trace;
     entry[prefix + 'usage_event_seqs'] = [...turn.reports.keys()].join(',');
     entry[prefix + 'complete'] = turn.contiguous && turn.done;
