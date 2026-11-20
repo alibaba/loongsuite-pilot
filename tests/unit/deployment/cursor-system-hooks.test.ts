@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import type { AgentDefinition } from '../../../src/types/deployment.js';
 import { systemHookDefinition } from '../../../src/deployment/system-hook-config.js';
 import { cursorSystemHooksInstalled, updateCursorSystemHooks } from '../../../src/deployment/cursor-system-hooks.js';
+import { areSystemHookAssetsHealthy } from '../../../src/deployment/system-hook-assets.js';
 import { runHookInstall } from '../../../src/deployment/hook-install-service.js';
 import { DeploymentManager } from '../../../src/deployment/deployment-manager.js';
 import { isolateAgentHome } from '../../helpers/isolated-agent-home.js';
@@ -28,6 +29,7 @@ beforeEach(async () => {
   restore = isolateAgentHome(root);
   dataDir = path.join(root, "pilot's data");
   await fs.mkdir(dataDir);
+  await fs.writeFile(path.join(dataDir, 'node-bin'), process.execPath + '\n', { mode: 0o644 });
   def = { id: 'cursor', displayName: 'Cursor', deployMode: 'hook',
     detection: { paths: [path.join(root, 'user/.cursor')], commands: [] },
     hook: { settingsPath: path.join(root, 'user/.cursor/hooks.json'),
@@ -233,8 +235,9 @@ describe('Cursor enterprise system registration', () => {
     expect((await manager.deployHookScope(target)).success).toBe(true);
     const { hooks } = JSON.parse(await fs.readFile(target.hook!.settingsPath, 'utf8'));
     const command = hooks.beforeSubmitPrompt[0].command;
-    await write(path.join(dataDir, 'node-bin'), process.execPath + '\n');
     await fs.mkdir(homes[2]);
+    const journalDir = path.join(dataDir, 'state/cursor');
+    const journalFile = path.join(journalDir, 'event-journal.jsonl');
     for (const home of homes) {
       const identity = path.basename(home);
       const env = { ...process.env, HOME: home, PATH: '/usr/bin:/bin' };
@@ -246,12 +249,67 @@ describe('Cursor enterprise system registration', () => {
       expect(result.status, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual({});
       expect(await fs.stat(path.join(home, '.loongsuite-pilot')).catch(() => null)).toBeNull();
+      expect((await fs.stat(journalDir)).mode & 0o777).toBe(0o700);
+      expect((await fs.stat(journalFile)).mode & 0o777).toBe(0o600);
+      if (identity === 'a') {
+        // Simulate an older owned journal before the next HOME starts.
+        await fs.chmod(journalFile, 0o644);
+        await fs.chmod(journalDir, 0o755);
+      }
     }
-    const journal = (await fs.readFile(path.join(dataDir, 'state/cursor/event-journal.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    const journal = (await fs.readFile(journalFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     expect(journal.map(event => event.conversation_id)).toEqual(['a', 'b', 'created-after-install']);
     await fs.unlink(path.join(dataDir, 'hooks/cursor/source-event.mjs'));
     const missing = spawnSync('/bin/bash', ['-c', command], { input: '{}', encoding: 'utf8', timeout: 10000 });
     expect(missing.status).toBe(0);
     expect(JSON.parse(missing.stdout)).toEqual({});
+  });
+
+  it('refuses an untrusted installed asset, Node pin or executable without using the caller fallback', async () => {
+    const target = systemHookDefinition(def);
+    const pilotDir = path.resolve('.');
+    const manager = new DeploymentManager({ dataDir, pilotDir });
+    expect((await manager.deployHookScope(target)).success).toBe(true);
+    const { hooks } = JSON.parse(await fs.readFile(target.hook!.settingsPath, 'utf8'));
+    const command = hooks.beforeSubmitPrompt[0].command;
+    const pin = path.join(dataDir, 'node-bin');
+    const processor = path.join(dataDir, 'hooks/cursor-hook-processor.mjs');
+    const journal = path.join(dataDir, 'state/cursor/event-journal.jsonl');
+    const home = path.join(root, 'agent-home');
+    const fallback = path.join(home, '.local/bin/node');
+    await write(fallback, '#!/bin/sh\nprintf used > "$CURSOR_TEST_NODE_USED"\nexit 0\n');
+    await fs.chmod(fallback, 0o755);
+    const usedFallback = path.join(root, 'fallback-used');
+    const run = () => spawnSync('/bin/bash', ['-c', command], {
+      env: { ...process.env, HOME: home, PATH: path.dirname(fallback) + ':/usr/bin:/bin',
+        CURSOR_TEST_NODE_USED: usedFallback },
+      input: JSON.stringify({ hook_event_name: 'beforeSubmitPrompt', conversation_id: 'system-test',
+        generation_id: 'test', cursor_version: '2026.11.10', prompt: 'synthetic' }),
+      encoding: 'utf8', timeout: 10_000,
+    });
+    const expectFailOpen = async () => {
+      expect(await areSystemHookAssetsHealthy('cursor', pilotDir, dataDir)).toBe(false);
+      const result = run();
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({});
+      expect(result.stderr).toContain('untrusted');
+      await expect(fs.stat(journal)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.stat(usedFallback)).rejects.toMatchObject({ code: 'ENOENT' });
+    };
+    await fs.chmod(processor, 0o666);
+    await expectFailOpen();
+    expect((await manager.repairHookSettings(def)).success).toBe(true);
+    expect((await fs.stat(processor)).mode & 0o777).toBe(0o644);
+    await fs.chmod(pin, 0o666);
+    await expectFailOpen();
+    await fs.chmod(pin, 0o644);
+    const binary = path.join(root, 'untrusted-runtime', 'node');
+    await write(binary, '#!/bin/sh\nprintf used > "$CURSOR_TEST_NODE_USED"\nexit 0\n');
+    await fs.chmod(binary, 0o755);
+    await fs.chmod(path.dirname(binary), 0o777);
+    await fs.writeFile(pin, binary + '\n');
+    await expectFailOpen();
+    await fs.unlink(pin);
+    await expectFailOpen();
   });
 });

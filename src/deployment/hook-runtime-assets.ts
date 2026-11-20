@@ -35,6 +35,7 @@ export async function restoreHookRuntimeAssets(
   pilotDir: string,
   dataDir: string,
   assets: readonly string[],
+  verifyPaths?: (source: string, target: string) => Promise<void>,
 ): Promise<void> {
   const sourceRoot = path.join(pilotDir, 'assets', 'hooks');
   const targetRoot = path.join(dataDir, 'hooks');
@@ -42,9 +43,18 @@ export async function restoreHookRuntimeAssets(
   for (const relativePath of assets) {
     const source = path.join(sourceRoot, relativePath);
     const target = path.join(targetRoot, relativePath);
+    if (verifyPaths) await verifyPaths(source, target);
     await fs.access(source);
     await fs.mkdir(path.dirname(target), { recursive: true });
     const content = await fs.readFile(source, 'utf8');
+    if (verifyPaths) {
+      await verifyPaths(source, target);
+      await writeTextFileAtomic(target, content, {
+        mode: relativePath.endsWith('.sh') ? 0o755 : 0o644,
+        preserveMode: true,
+      });
+      continue;
+    }
     await writeTextFileAtomic(target, content);
     await fs.chmod(target, relativePath.endsWith('.sh') ? 0o755 : 0o644).catch(() => {});
   }

@@ -10,6 +10,24 @@ export function isTrustedCursorSystemFile(stat: Stats): boolean {
   return stat.isFile() && canTrustOwner(stat.uid) && (stat.mode & 0o022) === 0;
 }
 
+export async function assertTrustedCursorSystemFile(file: string): Promise<void> {
+  await assertTrustedCursorSystemDirectory(path.dirname(file));
+  if (!isTrustedCursorSystemFile(await fs.lstat(file))) {
+    throw new Error(`Untrusted Cursor system runtime file: ${file}`);
+  }
+}
+
+export async function assertTrustedCursorSystemNodePin(dataDir: string): Promise<void> {
+  const pin = path.join(dataDir, 'node-bin');
+  await assertTrustedCursorSystemFile(pin);
+  const node = (await fs.readFile(pin, 'utf8')).replace(/\r?\n$/, '');
+  if (!path.isAbsolute(node) || /[\r\n\0]/.test(node)) throw new Error('Cursor system Node pin must contain one absolute path');
+  await assertTrustedCursorSystemDirectory(path.dirname(node));
+  const resolved = await fs.realpath(node);
+  await assertTrustedCursorSystemFile(resolved);
+  await fs.access(resolved, fs.constants.X_OK);
+}
+
 export async function assertTrustedCursorSystemDirectory(directory: string): Promise<void> {
   let current = path.resolve(directory);
   let leaf = true;

@@ -178,6 +178,10 @@ Cursor CLI uses the [Enterprise-managed hooks file](https://cursor.com/docs/hook
 Keep `cursor-agent` or the official `agent` alias on the installer's PATH and
 grant the installer write access to the managed file. The CLI loads the shared
 hook for each HOME and the hook writes to the common Pilot runtime directory.
+The system hook uses the shared directory's `node-bin` pin and `config.json`.
+Keep the hook assets and pinned Node runtime under root-owned or installer-owned
+paths with write access limited to the owner. The Cursor journal is private to
+the UID running the collector and CLI.
 `--agents cursor-cli` selects the shared Cursor registration. Start new CLI
 processes after installation so they can read the updated policy.
 

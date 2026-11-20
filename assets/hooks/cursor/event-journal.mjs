@@ -23,9 +23,29 @@ const JOURNAL_LOCK_FILE = path.join(JOURNAL_DIR, 'event-journal.lock');
 const JOURNAL_LOCK_TIMEOUT_MS = 3000;
 const JOURNAL_LOCK_STALE_MS = 2000;
 const JOURNAL_LOCK_RETRY_MS = 10;
+const SYSTEM_SCOPE = process.env.LOONGSUITE_PILOT_CURSOR_SYSTEM_SCOPE === '1';
+
+if (SYSTEM_SCOPE) process.umask(0o077);
 
 function ensureJournalDir() {
-  fs.mkdirSync(JOURNAL_DIR, { recursive: true });
+  fs.mkdirSync(JOURNAL_DIR, { recursive: true, mode: SYSTEM_SCOPE ? 0o700 : undefined });
+  if (!SYSTEM_SCOPE) return;
+
+  // The system registration shares this directory only across HOMEs of the
+  // same UID. Tighten an existing owned journal before reading or writing it.
+  const owner = process.geteuid();
+  const directory = fs.lstatSync(JOURNAL_DIR);
+  if (!directory.isDirectory() || directory.uid !== owner || (directory.mode & 0o022) !== 0) {
+    throw new Error('Untrusted Cursor system journal directory');
+  }
+  if ((directory.mode & 0o077) !== 0) fs.chmodSync(JOURNAL_DIR, 0o700);
+
+  const file = fs.lstatSync(JOURNAL_FILE, { throwIfNoEntry: false });
+  if (!file) return;
+  if (!file.isFile() || file.nlink !== 1 || file.uid !== owner || (file.mode & 0o022) !== 0) {
+    throw new Error('Untrusted Cursor system journal file');
+  }
+  if ((file.mode & 0o077) !== 0) fs.chmodSync(JOURNAL_FILE, 0o600);
 }
 
 export function appendEvent(event) {

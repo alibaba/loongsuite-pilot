@@ -1,7 +1,10 @@
-import { mkdir } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { GROK_BUILD_HOOK_ASSETS } from './grok-build-assets.js';
 import { areHookRuntimeAssetsHealthy, restoreHookRuntimeAssets } from './hook-runtime-assets.js';
+import { assertTrustedCursorSystemDirectory, assertTrustedCursorSystemFile,
+  assertTrustedCursorSystemNodePin } from './cursor-system-paths.js';
+import { writeTextFileAtomic } from '../utils/fs-utils.js';
 
 export const CODEX_SYSTEM_HOOK_ASSETS = [
   'codex-loongsuite-pilot-hook.sh', 'codex-loongsuite-pilot-hook.ps1',
@@ -18,6 +21,8 @@ const CURSOR_SYSTEM_HOOK_ASSETS = [
   'shared/raw-source-gate.mjs', 'shared/resource-context.mjs', 'shared/workspace-policy.mjs',
   'shared/workspace-privacy.mjs',
 ] as const;
+const CURSOR_SYSTEM_MANIFEST = 'cursor-system-assets.list';
+const CURSOR_SYSTEM_MANIFEST_TEXT = CURSOR_SYSTEM_HOOK_ASSETS.join('\n') + '\n';
 
 function manifest(agentId: string): readonly string[] {
   if (agentId === 'grok-build') return GROK_BUILD_HOOK_ASSETS;
@@ -26,14 +31,55 @@ function manifest(agentId: string): readonly string[] {
   throw new Error(`No system hook runtime for ${agentId}`);
 }
 
-export function areSystemHookAssetsHealthy(agentId: string, pilotDir: string, dataDir: string): Promise<boolean> {
+async function assertPrivateCursorLogs(dataDir: string): Promise<void> {
+  const logs = path.join(dataDir, 'logs/cursor');
+  await assertTrustedCursorSystemDirectory(logs);
+  const stat = await lstat(logs);
+  if (stat.uid !== process.geteuid?.() || (stat.mode & 0o077) !== 0) {
+    throw new Error('Cursor system log directory must be private to the collector user');
+  }
+}
+
+export async function areSystemHookAssetsHealthy(agentId: string, pilotDir: string, dataDir: string): Promise<boolean> {
+  if (agentId === 'cursor') {
+    try {
+      await assertTrustedCursorSystemNodePin(dataDir);
+      await assertPrivateCursorLogs(dataDir);
+      const root = path.join(dataDir, 'hooks');
+      const list = path.join(root, CURSOR_SYSTEM_MANIFEST);
+      await assertTrustedCursorSystemFile(list);
+      if (await readFile(list, 'utf8') !== CURSOR_SYSTEM_MANIFEST_TEXT) return false;
+      for (const file of CURSOR_SYSTEM_HOOK_ASSETS) await assertTrustedCursorSystemFile(path.join(root, file));
+    } catch {
+      return false;
+    }
+  }
   return areHookRuntimeAssetsHealthy(pilotDir, dataDir, manifest(agentId));
 }
 
 export async function restoreSystemHookAssets(agentId: string, pilotDir: string, dataDir: string): Promise<void> {
-  await restoreHookRuntimeAssets(pilotDir, dataDir, manifest(agentId));
   if (agentId === 'cursor') {
+    await assertTrustedCursorSystemNodePin(dataDir);
+    const root = path.join(dataDir, 'hooks');
+    await assertTrustedCursorSystemDirectory(root);
+    const logs = path.join(dataDir, 'logs/cursor');
+    await assertTrustedCursorSystemDirectory(logs);
+    await mkdir(logs, { recursive: true, mode: 0o700 });
+    await assertTrustedCursorSystemDirectory(logs);
+    const owner = (await lstat(logs)).uid;
+    if (owner !== process.geteuid?.()) throw new Error('Cursor system log directory must belong to the collector user');
+    await chmod(logs, 0o700);
+    const history = path.join(logs, 'history');
+    await assertTrustedCursorSystemDirectory(history);
+    await mkdir(history, { recursive: true, mode: 0o700 });
     // Let the Cursor Input establish its first-run baseline before the first turn.
-    await mkdir(path.join(dataDir, 'logs/cursor/history'), { recursive: true });
+    await restoreHookRuntimeAssets(pilotDir, dataDir, CURSOR_SYSTEM_HOOK_ASSETS, async (source, target) => {
+      await assertTrustedCursorSystemFile(source);
+      await assertTrustedCursorSystemDirectory(path.dirname(target));
+    });
+    await writeTextFileAtomic(path.join(root, CURSOR_SYSTEM_MANIFEST), CURSOR_SYSTEM_MANIFEST_TEXT,
+      { mode: 0o644, preserveMode: true });
+    return;
   }
+  await restoreHookRuntimeAssets(pilotDir, dataDir, manifest(agentId));
 }
