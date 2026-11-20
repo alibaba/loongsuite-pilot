@@ -64,7 +64,7 @@ finish()
     });
     const flusher = new MockFlusher();
     const manager = new InputManager();
-    manager.setMaskConfig({ mode: 'all', types: [] });
+    manager.setMaskConfig({ mode: 'all', types: [], replacementMode: 'placeholder' });
     manager.setFlusher(flusher);
     manager.registerInput(input);
     await manager.startInput(input.id);

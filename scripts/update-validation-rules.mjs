@@ -260,7 +260,7 @@ const OPTIONAL_TO_SHOULD = {
   'EMBEDDING:gen_ai.usage.total_tokens': true,
 };
 
-// Attributes that require observed message content
+// Attributes that require captureMessageContent
 const MESSAGE_CONTENT_KEYS = new Set([
   'gen_ai.input.messages', 'gen_ai.output.messages',
   'gen_ai.system_instructions', 'gen_ai.tool.definitions',
@@ -365,7 +365,7 @@ function buildRulesJson(sections, operationKindMapping) {
       { id: 'time.non_zero_duration', applies: 'all', severity: 'error' },
       { id: 'time.no_step_overlap', applies: 'STEP', severity: 'error', scope: 'direct_steps_of_each_agent' },
       { id: 'time.parent_contains_children', applies: 'all', severity: 'error', toleranceMs: 0,
-        exception: 'TOOL to delegated AGENT requires causal start ordering but permits the child to finish after the tool.' },
+        exception: 'TOOL to delegated AGENT requires causal start ordering but permits asynchronous child completion.' },
       { id: 'time.reasonable_duration', applies: 'LLM', maxMs: 600000, severity: 'warn' },
       { id: 'time.chronological_steps', applies: 'STEP', severity: 'warn', scope: 'direct_steps_of_each_agent' },
     ],

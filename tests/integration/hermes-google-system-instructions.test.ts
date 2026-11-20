@@ -81,7 +81,7 @@ ctx.hooks['post_llm_call'](session_id='fixture-session', user_message=user_input
     const input = new HermesLogInput({ stateStore: new MockStateStore() as any, sessionDir: path.join(root, 'logs/hermes-agent'), pollIntervalMs: 60_000 });
     const flusher = new MockFlusher();
     const manager = new InputManager();
-    manager.setMaskConfig({ mode: 'all', types: [] });
+    manager.setMaskConfig({ mode: 'all', types: [], replacementMode: 'placeholder' });
     manager.setFlusher(flusher);
     manager.registerInput(input);
     await manager.startInput(input.id);

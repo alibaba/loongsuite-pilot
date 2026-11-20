@@ -32,6 +32,49 @@ describe('StateStore', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
+  it('isolates an output hold and failure to its input family while saving other inputs', async () => {
+    store.setOffset('codex:file', 1);
+    store.setOffset('other', 1);
+    await store.save();
+    let reject!: (error: Error) => void;
+    const output = new Promise<void>((_, fail) => { reject = fail; });
+    store.holdSaveUntil(output, 'codex');
+    store.setOffset('codex:file', 2);
+    store.setOffset('codex:new-file', 3);
+    store.setOffset('other', 4);
+    await store.save();
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual({
+      'codex:file': { lastOffset: 1 }, other: { lastOffset: 4 },
+    });
+    expect(store.isPersisted('codex:file')).toBe(false);
+    expect(store.isPersisted('other')).toBe(true);
+    reject(new Error('durability failure'));
+    await output.catch(() => undefined);
+    store.setOffset('other', 5);
+    await store.save();
+    expect(store.hasSaveFailure('codex')).toBe(true);
+    expect(store.hasSaveFailure('other')).toBe(false);
+    expect(store.saveFailed).toBe(false);
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual({
+      'codex:file': { lastOffset: 1 }, other: { lastOffset: 5 },
+    });
+  });
+
+  it('publishes previously held changes after ACK even when another input already saved', async () => {
+    store.setOffset('codex:file', 1);
+    await store.save();
+    let accept!: () => void;
+    const output = new Promise<void>(resolve => { accept = resolve; });
+    store.holdSaveUntil(output, 'codex');
+    store.setOffset('codex:file', 2);
+    await store.save();
+    accept(); await output;
+    expect(store.isPersisted('codex:file')).toBe(false);
+    await store.save();
+    expect(store.isPersisted('codex:file')).toBe(true);
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8'))['codex:file'].lastOffset).toBe(2);
+  });
+
   describe('load/save lifecycle', () => {
     it('should start with empty state', async () => {
       await store.load();
@@ -120,6 +163,44 @@ describe('StateStore', () => {
       store.setRowId('input-b', 42);
       expect(store.getRowId('input-b')).toBe(42);
     });
+  });
+
+  it('reports only successfully written per-input revisions without unrelated-input interference', async () => {
+    store.setOffset('qoder-trace', 1);
+    expect(store.isPersisted('qoder-trace')).toBe(false);
+    await store.save();
+    expect(store.isPersisted('qoder-trace')).toBe(true);
+    store.setOffset('other-input', 2);
+    expect(store.isPersisted('qoder-trace')).toBe(true);
+    expect(store.isPersisted('other-input')).toBe(false);
+    vi.mocked(writeJsonFile).mockRejectedValueOnce(new Error('synthetic disk failure'));
+    store.setOffset('qoder-trace', 3);
+    await expect(store.save()).rejects.toThrow('synthetic disk failure');
+    expect(store.isPersisted('qoder-trace')).toBe(false);
+    expect(store.saveFailed).toBe(false);
+    await store.save();
+    expect(store.isPersisted('qoder-trace')).toBe(true);
+    expect(store.isPersisted('other-input')).toBe(true);
+  });
+
+  it('distinguishes a durable native cursor from unrelated metadata and pending writes', async () => {
+    const native = { source: { offset: 10 } };
+    store.set('qoder-trace', { extra: { qoderTranscripts: native, other: 1 } });
+    await store.save();
+    store.update('qoder-trace', { extra: { other: 2 } });
+    expect(store.isPersisted('qoder-trace')).toBe(false);
+    expect(store.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(true);
+    store.update('qoder-trace', { extra: { qoderTranscripts: { source: { offset: 20 } } } });
+    expect(store.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(false);
+    await store.save();
+    expect(store.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(true);
+    const loaded = new StateStore(filePath);
+    await loaded.load();
+    expect(loaded.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(true);
+    loaded.delete('qoder-trace');
+    expect(loaded.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(false);
+    await loaded.save();
+    expect(loaded.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(true);
   });
 
   describe('revision optimization', () => {

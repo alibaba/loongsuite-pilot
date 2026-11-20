@@ -19,9 +19,23 @@ export class StateStore {
   private readonly filePath: string;
   private revision = 0;
   private persistedRevision = 0;
+  private readonly inputRevisions = new Map<string, number>();
+  private readonly extraRevisions = new Map<string, Map<string, number>>();
   private savePromise: Promise<void> | null = null;
   private readonly saveHolds = new Set<Promise<void>>();
   private saveFailure: { error: unknown } | null = null;
+  private durableStates: StateFileShape = {};
+  private readonly scopedHolds = new Map<string, Set<Promise<void>>>();
+  private readonly scopedFailures = new Map<string, unknown>();
+
+  private scopeFor(id: string): string | undefined {
+    return [...this.scopedHolds.keys(), ...this.scopedFailures.keys()]
+      .find(scope => id === scope || id.startsWith(scope + ':'));
+  }
+
+  hasSaveFailure(id: string): boolean {
+    return this.saveFailed || [...this.scopedFailures.keys()].some(scope => id === scope || id.startsWith(scope + ':'));
+  }
 
   constructor(filePath: string) {
     this.filePath = filePath;
@@ -30,6 +44,9 @@ export class StateStore {
   async load(): Promise<void> {
     const data = await readJsonFile<StateFileShape | null>(this.filePath);
     this.states.clear();
+    this.durableStates = structuredClone(data ?? {});
+    this.inputRevisions.clear();
+    this.extraRevisions.clear();
     if (!data || typeof data !== 'object' || data === null) {
       this.revision = 0;
       this.persistedRevision = 0;
@@ -44,12 +61,51 @@ export class StateStore {
     this.persistedRevision = 0;
   }
 
-  get waitingForOutput(): boolean { return this.saveHolds.size > 0; }
+  get waitingForOutput(): boolean { return this.saveHolds.size > 0 || this.scopedHolds.size > 0; }
 
   get saveFailed(): boolean { return this.saveFailure !== null; }
 
+  /** A settled save promise may have failed; only written revisions are durable. */
+  isPersisted(inputId: string, extraKey?: string): boolean {
+    const revision = extraKey === undefined ? this.inputRevisions.get(inputId)
+      : this.extraRevisions.get(inputId)?.get(extraKey);
+    return !this.saveFailure && !this.scopeFor(inputId) && (revision ?? 0) <= this.persistedRevision;
+  }
+
+  private trackExtraRevision(inputId: string, previous: InputState, next: InputState): void {
+    const before = previous.extra ?? {};
+    const after = next.extra ?? {};
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      if (before[key] === after[key]) continue;
+      let revisions = this.extraRevisions.get(inputId);
+      if (!revisions) { revisions = new Map(); this.extraRevisions.set(inputId, revisions); }
+      revisions.set(key, this.revision);
+    }
+  }
+
   /** Do not checkpoint source progress before its output has been durably accepted. */
-  holdSaveUntil(promise: Promise<void>): void {
+  holdSaveUntil(promise: Promise<void>, inputId?: string): void {
+    if (inputId) {
+      let holds = this.scopedHolds.get(inputId);
+      if (!holds) { holds = new Set(); this.scopedHolds.set(inputId, holds); }
+      holds.add(promise);
+      const settled = (error?: unknown) => {
+        if (error !== undefined) this.scopedFailures.set(inputId, error);
+        holds!.delete(promise);
+        if (!holds!.size) this.scopedHolds.delete(inputId);
+        // An ACK must cause a new save even if the held changes were omitted
+        // from a concurrent save made by another input.
+        this.revision++;
+        for (const id of new Set([...this.states.keys(), ...this.inputRevisions.keys()])) {
+          if (id !== inputId && !id.startsWith(inputId + ':')) continue;
+          this.inputRevisions.set(id, this.revision);
+          const revisions = this.extraRevisions.get(id);
+          if (revisions) for (const key of revisions.keys()) revisions.set(key, this.revision);
+        }
+      };
+      void promise.then(() => settled(), error => settled(error));
+      return;
+    }
     this.saveHolds.add(promise);
     // Keep one failure until restart without retaining every settled promise.
     // Later saves must not advance offsets that recovery still needs to replay.
@@ -81,9 +137,18 @@ export class StateStore {
     return this.states.get(inputId) ?? {};
   }
 
+  /** Return only the last state successfully written to disk, never a held cursor. */
+  getPersistedState(inputId: string): InputState | undefined {
+    const state = this.durableStates[inputId];
+    return state ? structuredClone(state) : undefined;
+  }
+
   set(inputId: string, state: InputState): void {
+    const previous = this.get(inputId);
     this.states.set(inputId, cloneState(state));
     this.revision++;
+    this.inputRevisions.set(inputId, this.revision);
+    this.trackExtraRevision(inputId, previous, state);
   }
 
   update(inputId: string, partial: Partial<InputState>): void {
@@ -94,11 +159,18 @@ export class StateStore {
     }
     this.states.set(inputId, cloneState(merged));
     this.revision++;
+    this.inputRevisions.set(inputId, this.revision);
+    this.trackExtraRevision(inputId, current, merged);
   }
 
   delete(inputId: string): boolean {
+    const previous = this.get(inputId);
     const deleted = this.states.delete(inputId);
-    if (deleted) this.revision++;
+    if (deleted) {
+      this.revision++;
+      this.inputRevisions.set(inputId, this.revision);
+      this.trackExtraRevision(inputId, previous, {});
+    }
     return deleted;
   }
 
@@ -133,11 +205,25 @@ export class StateStore {
       const targetRevision = this.revision;
       const out: StateFileShape = {};
       for (const [k, v] of this.states) {
-        out[k] = cloneState(v);
+        if (!this.scopeFor(k)) out[k] = structuredClone(v);
+      }
+      for (const [k, v] of Object.entries(this.durableStates)) {
+        if (this.scopeFor(k)) out[k] = structuredClone(v);
       }
 
       await writeJsonFile(this.filePath, out);
+      this.durableStates = out;
       this.persistedRevision = targetRevision;
+      for (const [id, revision] of this.inputRevisions) {
+        if (!this.states.has(id) && revision <= this.persistedRevision) this.inputRevisions.delete(id);
+      }
+      for (const [id, revisions] of this.extraRevisions) {
+        const extra = this.states.get(id)?.extra ?? {};
+        for (const [key, revision] of revisions) {
+          if (!(key in extra) && revision <= this.persistedRevision) revisions.delete(key);
+        }
+        if (!revisions.size) this.extraRevisions.delete(id);
+      }
     }
   }
 }

@@ -16,7 +16,7 @@ async function setup(){
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'copilot-hybrid-'));dirs.push(dir);
  const sessions=path.join(dir,'sessions');const session=path.join(sessions,'session-test');const otel=path.join(dir,'otel');await fs.mkdir(session,{recursive:true});await fs.mkdir(otel);
  const stateFile=path.join(dir,'state.json');const state=new StateStore(stateFile);await state.load();
- const input=tracked(new CopilotLogInput({stateStore:state,sessionDir:sessions,dataDir:dir,otelDir:otel}));
+ const input=tracked(new CopilotLogInput({stateStore:state,sessionDir:sessions,dataDir:dir,otelDir:otel,historyStartTimeMs:0}));
  return {dir,sessions,session,otel,stateFile,state,input,file:path.join(session,'events.jsonl'),native:path.join(otel,'native.jsonl')};
 }
 const collect=(i:CopilotLogInput)=>(i as any).collect();

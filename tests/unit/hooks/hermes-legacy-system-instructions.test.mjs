@@ -12,10 +12,10 @@ const temporaryDirectories = [];
 // boundary. Real CLI/provider coverage is performed separately.
 const DRIVER = fs.readFileSync(new URL('../../helpers/hermes-legacy-system-driver.py', import.meta.url), 'utf8');
 
-function runScenario(scenario) {
+function runScenario(scenario, config = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-hermes-legacy-system-'));
   temporaryDirectories.push(root);
-  fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify({ userId: 'fixture-user' }));
+  fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify({ userId: 'fixture-user', ...config }));
   const run = spawnSync('python3', ['-c', `${DRIVER}\n${scenario}\nprint(json.dumps(extra))`, PLUGIN], {
     encoding: 'utf8',
     timeout: 15_000,
@@ -69,6 +69,21 @@ observe(count=4)
 finish()
 `);
     expect(requests.map(instructions)).toEqual([text('native instruction'), undefined, undefined, undefined]);
+  });
+
+  it('omits raw instruction and tool content when Hermes content collection is disabled', () => {
+    const { requests, records } = runScenario(String.raw`
+begin()
+request(AIAgent(), 'private legacy instruction')
+observe(count=2, request={'body': {'system': 'private native instruction',
+                                  'tools': [{'type': 'function', 'function': {'name': 'private_tool'}}]}},
+        system_prompt='private native instruction')
+finish()
+`, { agents: { 'hermes-agent': { captureMessageContent: false } } });
+    expect(requests).toHaveLength(2);
+    expect(requests.every(record => record['gen_ai.system_instructions'] === undefined
+      && record['gen_ai.tool.definitions'] === undefined)).toBe(true);
+    expect(JSON.stringify(records)).not.toMatch(/private (legacy|native) instruction|private_tool/);
   });
 
   it('captures developer and system text parts while skipping blank instructions', () => {

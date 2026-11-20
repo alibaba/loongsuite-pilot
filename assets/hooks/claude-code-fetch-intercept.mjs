@@ -1,5 +1,6 @@
 // BUN_OPTIONS preload script for Claude Code fetch interception.
 // Injected via: BUN_OPTIONS="--preload=<this-file>" claude ...
+// Covers globalThis.fetch and the native Bun.FetchSession transport.
 // Writes early response enrichment to:
 //   ~/.loongsuite-pilot/intercept/claude-code/<session_id>/<response_id>.json
 // and one metadata-only record per physical HTTP attempt to:
@@ -377,11 +378,10 @@ function withUpstreamTraceContext(input, init, llmSpanId) {
   }
 }
 
-// ─── globalThis.fetch monkey-patch ───────────────────────────────────────
+// ─── fetch interception ─────────────────────────────────────────────────
 
-const origFetch = globalThis.fetch;
-if (typeof origFetch === 'function') {
-  globalThis.fetch = async function patchedFetch(input, init) {
+function wrapFetch(origFetch) {
+  return async function patchedFetch(input, init) {
     let url;
     try {
       url = typeof input === 'string' ? input
@@ -675,4 +675,44 @@ if (typeof origFetch === 'function') {
       return response;
     }
   };
+}
+
+// A container preload and a shell preload can both reach this module.
+const pilotClaudeFetchMarker = Symbol.for('loongsuite-pilot.claude-code-fetch-intercept');
+const pilotClaudeFetchAlreadyLoaded = Boolean(globalThis[pilotClaudeFetchMarker]);
+if (!pilotClaudeFetchAlreadyLoaded) globalThis[pilotClaudeFetchMarker] = true;
+
+if (!pilotClaudeFetchAlreadyLoaded && typeof globalThis.fetch === 'function') {
+  globalThis.fetch = wrapFetch(globalThis.fetch);
+}
+
+// Claude Code 2.1.311's native Bun runtime dispatches model requests through
+// FetchSession.fetch, bypassing globalThis.fetch. Its prototype exposes fetch
+// as a non-configurable getter, so intercept new instances instead. Keep the
+// original native instance, constructor arguments, receiver and close() method.
+// Older runtimes have no FetchSession and continue using the global path.
+try {
+  const NativeFetchSession = globalThis.Bun?.FetchSession;
+  if (!pilotClaudeFetchAlreadyLoaded && typeof NativeFetchSession === 'function') {
+    globalThis.Bun.FetchSession = new Proxy(NativeFetchSession, {
+      construct(target, args, newTarget) {
+        const session = Reflect.construct(target, args, newTarget);
+        try {
+          const nativeFetch = session.fetch;
+          if (typeof nativeFetch === 'function') {
+            Object.defineProperty(session, 'fetch', {
+              value: wrapFetch(nativeFetch),
+              configurable: true,
+              writable: true,
+            });
+          }
+        } catch (_) {
+          // An unsupported/read-only native instance must still be usable.
+        }
+        return session;
+      },
+    });
+  }
+} catch (_) {
+  // Optional native transport instrumentation must not prevent CLI startup.
 }

@@ -1,25 +1,35 @@
 import type { Server } from 'node:http';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { createLogger } from '../../utils/logger.js';
-import { loadInterceptorConfig, resolveEnabledInterceptorTypes } from '../config.js';
-import { writeInterceptorAccessLog } from '../access-log.js';
+import { loadInterceptorConfig } from '../config.js';
+import type { EvaluateHookResponse, HookEvaluator, InterceptorConfig } from '../types.js';
+import { InterceptorAccessLogWriter } from '../access-log.js';
 import {
   interceptorAccessLogPath,
   interceptorToolVerdictPath,
 } from '../paths.js';
-import { builtinRules } from '../rules/registry.js';
-import { RuleEngine } from '../rules/engine.js';
-import { ToolVerdictStore, type ToolVerdictAction, type ToolVerdictKey } from '../tool-verdict-store.js';
+import { ManagedInterceptor, MANAGED_RELOAD_INTERVAL_MS } from '../managed/controller.js';
+import { ToolVerdictStore, type ToolVerdictKey, type ToolVerdictRecord, type InterceptorVerdictRecord } from '../tool-verdict-store.js';
 import { INTERCEPTOR_DEFAULT_PORT } from '../types.js';
-import { createInterceptorServer } from './server.js';
-import { removeOwnPid, writeRuntime } from './runtime.js';
+import { createInterceptorServer, type InterceptorServerOptions } from './server.js';
+import { clearInterceptorRuntime, removeOwnPid, writeRuntime } from './runtime.js';
+import { reportInterceptorDiagnostic, type InterceptorDiagnosticObserver } from '../diagnostics.js';
+import { InterceptorStatusCollector, unavailableInterceptorStatus, type InterceptorStatus } from '../status.js';
 
 const logger = createLogger('InterceptorDaemon');
 const RUNTIME_HEARTBEAT_MS = 30_000;
+const BIND_RETRY_MIN_MS = 1_000;
+const BIND_RETRY_MAX_MS = 30_000;
 
 export interface InterceptorService {
-  readonly port: number;
+  /** Loopback port while listening; null when interceptor.mode is not all. */
+  readonly port: number | null;
   readonly verdictStore: ToolVerdictStore;
+  /** True while configs/managed/interceptor.json has a runnable rule generation. */
+  readonly managedActive: boolean;
+  /** Re-reads managed rules now; rejects while a needed listener still fails to bind. */
+  reloadManaged(): Promise<void>;
+  getStatus(): Promise<InterceptorStatus>;
   stop(): Promise<void>;
 }
 
@@ -28,85 +38,221 @@ export interface StartInterceptorServiceOptions {
   version: string;
   gitCommit?: string;
   verdictStore?: ToolVerdictStore;
-  emitBlockedPrompt?: (entry: AgentActivityEntry) => void;
+  emitBlockedPrompt?: (entry: AgentActivityEntry, signal?: AbortSignal) => void | Promise<void>;
+  /** When set, overrides interceptor.mode loaded from config. Only `all` enables interception. */
+  mode?: InterceptorConfig['mode'];
+  managedReloadIntervalMs?: number;
+  /** Fired when a managed generation appears or goes away, including the first load. */
+  onManagedActiveChange?: (active: boolean) => void;
+  onToolVerdict?: (record: ToolVerdictRecord) => void;
+  onPromptVerdict?: (record: InterceptorVerdictRecord) => void;
+  onStateChange?: (port: number | null, managedActive: boolean) => void;
+  onDiagnostic?: InterceptorDiagnosticObserver;
 }
 
 /**
- * Loopback HTTP server, runtime heartbeat, and verdict cleanup shared by the
- * standalone daemon entry and the collector process.
+ * Loopback HTTP server and managed rules require the same startup opt-in.
+ * Requests are evaluated only against the cached managed generation.
  */
 export async function startInterceptorService(
   opts: StartInterceptorServiceOptions,
 ): Promise<InterceptorService> {
   const interceptorConfig = await loadInterceptorConfig();
-  const engine = new RuleEngine(builtinRules(), resolveEnabledInterceptorTypes(interceptorConfig));
+  const mode = opts.mode ?? interceptorConfig.mode;
   const verdictStore = opts.verdictStore ?? new ToolVerdictStore(interceptorToolVerdictPath(opts.dataDir));
+  if (mode !== 'all') {
+    clearInterceptorRuntime(opts.dataDir);
+    return {
+      port: null,
+      verdictStore,
+      managedActive: false,
+      async reloadManaged() {},
+      async getStatus() { return unavailableInterceptorStatus(false); },
+      async stop() {},
+    };
+  }
+  const status = new InterceptorStatusCollector();
   if (!opts.verdictStore) verdictStore.restore();
-  const accessLog = interceptorAccessLogPath(opts.dataDir);
-  const serverOpts = {
+  const accessLog = new InterceptorAccessLogWriter(interceptorAccessLogPath(opts.dataDir));
+
+  let stopped = false;
+  let started = false;
+  let server: Server | null = null;
+  let heartbeat: NodeJS.Timeout | null = null;
+  let bindRetry: NodeJS.Timeout | null = null;
+  let bindRetryMs = BIND_RETRY_MIN_MS;
+  let lastError: unknown = null;
+  // Listener changes and runtime writes are serialized so a heartbeat cannot
+  // recreate runtime.json / the pid file after unbind removed them.
+  let chain: Promise<void> = Promise.resolve();
+  const enqueue = (task: () => Promise<void>): Promise<void> => {
+    chain = chain.then(task).catch((err) => {
+      logger.warn('interceptor lifecycle task failed', { error: String(err) });
+    });
+    return chain;
+  };
+  const reconcileSoon = (): Promise<void> => enqueue(async () => {
+    try {
+      await reconcile();
+      lastError = null;
+      bindRetryMs = BIND_RETRY_MIN_MS;
+    } catch (err) {
+      lastError = err;
+      logger.warn('interceptor listener update failed', { error: String(err), retryInMs: bindRetryMs });
+      scheduleBindRetry();
+    }
+  });
+  const scheduleBindRetry = (): void => {
+    if (stopped || bindRetry) return;
+    bindRetry = setTimeout(() => {
+      bindRetry = null;
+      void reconcileSoon();
+    }, bindRetryMs);
+    bindRetry.unref();
+    bindRetryMs = Math.min(bindRetryMs * 2, BIND_RETRY_MAX_MS);
+  };
+
+  const managed = new ManagedInterceptor({
+    dataDir: opts.dataDir,
+    onDiagnostic: diagnostic => {
+      status.recordDiagnostic(diagnostic);
+      reportInterceptorDiagnostic(opts.onDiagnostic, diagnostic);
+    },
+    onActiveChange: (active) => {
+      if (started) void reconcileSoon();
+      opts.onManagedActiveChange?.(active);
+    },
+  });
+  const engine: HookEvaluator = {
+    evaluate: async (request) => {
+      const startedAt = performance.now();
+      let verdict: EvaluateHookResponse | null = null;
+      try {
+        verdict = await managed.evaluate(request)
+          ?? { action: 'allow', matched: false, matches: [], evaluatedRules: [] };
+        return verdict;
+      } finally {
+        status.record(verdict, performance.now() - startedAt);
+      }
+    },
+  };
+  const serverOpts: InterceptorServerOptions = {
     port: INTERCEPTOR_DEFAULT_PORT,
     version: opts.version,
     engine,
-    writeAccessLog: (entry: Parameters<typeof writeInterceptorAccessLog>[0]) => {
-      writeInterceptorAccessLog(entry, accessLog);
+    writeAccessLog: (entry) => {
+      accessLog.enqueue(entry);
     },
-    writeToolVerdict: (key: ToolVerdictKey, result: ToolVerdictAction) => {
-      verdictStore.put(key, result);
+    writeToolVerdict: (key: ToolVerdictKey, snapshot) => {
+      const now = new Date();
+      verdictStore.put(key, snapshot, now);
+      opts.onToolVerdict?.({ ...key, ...snapshot, recordedAt: now.toISOString() });
     },
     emitBlockedPrompt: opts.emitBlockedPrompt,
+    writePromptVerdict: (key, snapshot) => {
+      const now = new Date();
+      verdictStore.put(key, snapshot, now);
+      opts.onPromptVerdict?.({ ...key, ...snapshot, recordedAt: now.toISOString() });
+    },
   };
-  const server = createInterceptorServer(serverOpts);
-  let port: number;
+  let port: number | null = null;
+
+  const runtimeOpts = () => ({
+    dataDir: opts.dataDir,
+    port: port!,
+    version: opts.version,
+    gitCommit: opts.gitCommit,
+  });
+
+  async function bind(): Promise<void> {
+    const next = createInterceptorServer(serverOpts);
+    let bound: number;
+    try {
+      bound = await listenLoopback(next, INTERCEPTOR_DEFAULT_PORT);
+      serverOpts.port = bound;
+      port = bound;
+      await writeRuntime(runtimeOpts());
+      opts.onStateChange?.(port, managed.active);
+    } catch (err) {
+      port = null;
+      await closeServer(next);
+      throw err;
+    }
+    server = next;
+    logger.info('interceptor HTTP server starting', { addr: `127.0.0.1:${bound}`, managed: managed.active });
+    heartbeat = setInterval(() => {
+      void enqueue(async () => {
+        if (stopped || server !== next) return;
+        await writeRuntime(runtimeOpts()).catch((err) => {
+          logger.warn('interceptor runtime heartbeat failed', { error: String(err) });
+        });
+      });
+    }, RUNTIME_HEARTBEAT_MS);
+    heartbeat.unref();
+  }
+
+  async function unbind(clearRuntime: boolean): Promise<void> {
+    if (heartbeat) clearInterval(heartbeat);
+    heartbeat = null;
+    const current = server;
+    server = null;
+    port = null;
+    if (clearRuntime) clearInterceptorRuntime(opts.dataDir);
+    else removeOwnPid(opts.dataDir);
+    if (current) await closeServer(current);
+    opts.onStateChange?.(null, managed.active);
+  }
+
+  async function reconcile(): Promise<void> {
+    if (stopped) return;
+    if (!server) await bind();
+  }
+
+  managed.start(opts.managedReloadIntervalMs ?? MANAGED_RELOAD_INTERVAL_MS);
   try {
-    port = await listenLoopback(server, INTERCEPTOR_DEFAULT_PORT);
+    // The first bind failure reaches the caller, as before managed rules existed.
+    await reconcile();
   } catch (err) {
-    await closeServer(server);
+    stopped = true;
+    managed.stop();
+    await accessLog.close();
     throw err;
   }
-  serverOpts.port = port;
-
-  try {
-    await writeRuntime({
-      dataDir: opts.dataDir,
-      port,
-      version: opts.version,
-      gitCommit: opts.gitCommit,
-    });
-  } catch (err) {
-    await closeServer(server);
-    throw err;
-  }
-
-  logger.info('interceptor HTTP server starting', { addr: `127.0.0.1:${port}` });
+  started = true;
+  // Catches a managed toggle that landed while the first bind was in flight.
+  void reconcileSoon();
   verdictStore.startCheckpointLoop();
 
-  const heartbeat = setInterval(() => {
-    void writeRuntime({
-      dataDir: opts.dataDir,
-      port,
-      version: opts.version,
-      gitCommit: opts.gitCommit,
-    }).catch((err) => {
-      logger.warn('interceptor runtime heartbeat failed', { error: String(err) });
-    });
-  }, RUNTIME_HEARTBEAT_MS);
-  heartbeat.unref();
-
-  let stopped = false;
   return {
-    port,
+    get port() {
+      return port;
+    },
     verdictStore,
+    get managedActive() {
+      return managed.active;
+    },
+    async getStatus() {
+      return status.snapshot(!stopped && port !== null, managed.getRuleStatus());
+    },
+    async reloadManaged() {
+      managed.reload();
+      await chain;
+      if (lastError) throw lastError;
+    },
     async stop() {
       if (stopped) return;
       stopped = true;
-      clearInterval(heartbeat);
+      if (bindRetry) clearTimeout(bindRetry);
+      bindRetry = null;
+      managed.stop();
+      // Close admission and drain evaluations before the final checkpoint.
+      await enqueue(() => unbind(false));
       try {
-        verdictStore.stopCheckpointLoop();
+        await verdictStore.stopCheckpointLoop();
       } catch (err) {
         logger.warn('interceptor verdict checkpoint failed', { error: String(err) });
       }
-      removeOwnPid(opts.dataDir);
-      await closeServer(server);
+      await accessLog.close();
     },
   };
 }

@@ -1893,8 +1893,65 @@ function Cmd-RestartUpdater {
     }
 }
 
+# CMD: dashboard
+# ============================================================
+function Cmd-Dashboard {
+    if ($SubArgs.Count -eq 0 -or $SubArgs[0] -in @("help", "--help", "-h")) {
+        Write-Host "Usage: loongsuite-pilot dashboard start [port] | stop"
+        return
+    }
+    $action = $SubArgs[0].ToLowerInvariant()
+    if ($action -notin @("start", "stop")) {
+        Write-Error "Usage: loongsuite-pilot dashboard start [port] | stop"
+        return
+    }
+    $entry = Join-Path $PSScriptRoot "dashboard-config.mjs"
+    if (-not (Test-Path -LiteralPath $entry)) {
+        $versionDir = Resolve-CurrentVersion
+        if ($versionDir) { $entry = Join-Path $versionDir "scripts/dashboard-config.mjs" }
+    }
+    if (-not (Test-Path -LiteralPath $entry)) {
+        Write-Error "Dashboard command is missing. Upgrade or repair Pilot."
+        return
+    }
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) { Write-Error "node runtime not found"; return }
+    $nodeArgs = @($entry, $CONFIG_FILE, $action)
+    if ($SubArgs.Count -gt 1) { $nodeArgs += $SubArgs[1..($SubArgs.Count - 1)] }
+    & $nodeBin @nodeArgs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    $collectorRunning = [bool](Get-CollectorRuntime) -or (Test-PidRunning $PID_FILE)
+    if ($collectorRunning) { Cmd-Restart }
+    elseif ($action -eq "start") { Cmd-Start }
+
+    if ($action -eq "stop") {
+        Write-Host "Dashboard stopped; collector remains $(if ($collectorRunning) { 'running' } else { 'stopped' })."
+        return
+    }
+    $port = Get-DashboardPort
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        if (Test-DashboardAvailable -Port $port) {
+            Write-Host "Dashboard started: http://127.0.0.1:$port/"
+            return
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    Write-Error "Dashboard did not become available on port $port. Check $LOG_FILE"
+}
+
 # CMD: status
 # ============================================================
+function Test-DashboardEnabled {
+    try {
+        if (Test-Path -LiteralPath $CONFIG_FILE) {
+            $config = Get-Content -LiteralPath $CONFIG_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
+            return ($config.dashboard.enabled -is [bool] -and $config.dashboard.enabled)
+        }
+    } catch {}
+    return $false
+}
+
 function Get-DashboardPort {
     try {
         if (Test-Path $CONFIG_FILE) {
@@ -2002,11 +2059,15 @@ function Cmd-Status {
         }
     }
     if ($collectorRunning) {
-        $dashboardPort = Get-DashboardPort
-        if (Test-DashboardAvailable -Port $dashboardPort) {
-            Write-Host "   dashboard: http://127.0.0.1:$dashboardPort/"
+        if (-not (Test-DashboardEnabled)) {
+            Write-Host "   dashboard: disabled"
         } else {
-            Write-Host "   dashboard: unavailable (http://127.0.0.1:$dashboardPort/)" -ForegroundColor Yellow
+            $dashboardPort = Get-DashboardPort
+            if (Test-DashboardAvailable -Port $dashboardPort) {
+                Write-Host "   dashboard: http://127.0.0.1:$dashboardPort/"
+            } else {
+                Write-Host "   dashboard: unavailable (http://127.0.0.1:$dashboardPort/)" -ForegroundColor Yellow
+            }
         }
     }
 
@@ -2531,6 +2592,8 @@ function Cmd-Help {
     Write-Host "                    --json           machine-readable result"
     Write-Host "  token-usage     Show token usage TUI"
     Write-Host "  tokens          Alias for token-usage"
+    Write-Host "  dashboard start [port]  Enable Dashboard and start it (restarts a running collector)"
+    Write-Host "  dashboard stop          Disable Dashboard (restarts a running collector)"
     Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     Write-Host "  agent ...       Register/list/diagnose PI SDK Agents"
     if (Test-OpenSourceBuild) {
@@ -2552,6 +2615,7 @@ switch ($Command.ToLower()) {
     "restart"            { Cmd-Restart }
     "status"             { Cmd-Status }
     "info"               { Cmd-Info }
+    "dashboard"          { Cmd-Dashboard }
     "log"                { Cmd-Log }
     "inject"             { Write-Error "Session hook injection currently supports Linux and macOS only"; exit 1 }
     "deploy"             { Cmd-Deploy }

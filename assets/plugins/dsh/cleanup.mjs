@@ -55,7 +55,7 @@ function splitPilotBlock(bytes, marker) {
 
   const beginLineEnd = lineEndOffset(bytes, beginIndex);
   const endLineEnd = lineEndOffset(bytes, endIndex);
-  const beginLine = bytes.subarray(beginIndex, beginLineEnd).toString('utf-8').replace(/\r$/, '');
+  const beginLine = bytes.subarray(beginIndex, beginLineEnd).toString('utf-8').replace(/\r$/, '').trimStart();
   const endLine = bytes.subarray(endIndex, endLineEnd).toString('utf-8').replace(/\r$/, '');
   const escapedMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const validBegin = new RegExp(`^${BEGIN_PREFIX}${escapedMarker}(?: \\(created-file: (?:true|false)\\))?$`)
@@ -86,13 +86,15 @@ function findLineMarkerOffsets(bytes, marker) {
     const index = bytes.indexOf(needle, from);
     if (index < 0) break;
     const atLineStart = index === 0 || bytes[index - 1] === 0x0a;
+    const flowBegin = marker.startsWith(BEGIN_PREFIX) && index >= 2
+      && bytes[index - 2] === 0x5b && bytes[index - 1] === 0x20;
     const next = index + needle.length;
     const boundary = next === bytes.length
       || bytes[next] === 0x20
       || bytes[next] === 0x09
       || bytes[next] === 0x0d
       || bytes[next] === 0x0a;
-    if (atLineStart && boundary) offsets.push(index);
+    if ((atLineStart || flowBegin) && boundary) offsets.push(flowBegin ? index - 1 : index);
     from = next;
   }
   return offsets;

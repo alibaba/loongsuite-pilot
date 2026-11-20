@@ -45,7 +45,7 @@ Pilot is designed to answer practical questions:
 | Collection deployment    | Installs hooks or plugins and reads local logs, sessions, or data files.           |
 | Unified event schema     | Normalizes agent-native events into a shared GenAI schema.                         |
 | Multi-destination output | Exports to JSONL, Alibaba Cloud SLS, HTTP, and OTLP trace backends.                |
-| Privacy controls         | Supports per-agent content capture policy and secret masking before output.        |
+| Privacy controls         | Supports secret masking before output.                                                |
 | Local operations         | Provides service status, restart, rollback, and a built-in local dashboard. |
 
 
@@ -77,6 +77,7 @@ Pilot is designed to answer practical questions:
 | Qwen Work CN  | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
+| [Doubao Work (macOS/Windows, experimental)](docs/doubao-work.md) | Read-only logs + execution metadata | Client turns, local tools + native sandbox executions | Metadata only | No | No |
 
 GitHub Copilot CLI automatic deployment supports Unix shells. Exact per-call token usage requires native OTel; transcript-only collection omits unavailable usage. Windows and subagents are not supported. See [telemetry details](docs/zh-CN/copilot-native-telemetry.md).
 
@@ -138,7 +139,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-Local JSONL output is enabled by default under `~/.loongsuite-pilot/logs/output/` on Linux/macOS and `%USERPROFILE%\.loongsuite-pilot\logs\output\` on Windows.
+Local JSONL output is disabled by default. To write to `~/.loongsuite-pilot/logs/output/` on Linux/macOS or `%USERPROFILE%\.loongsuite-pilot\logs\output\` on Windows, set `"jsonl": { "enabled": true }` in `config.json`.
 
 For installer options, uninstall commands, and source builds, see [Installation](docs/installation.md).
 
@@ -151,7 +152,7 @@ Start with the guide that matches what you want to change:
 
 | Task                                             | Guide                                            |
 | ------------------------------------------------ | ------------------------------------------------ |
-| Choose agents and content capture policy         | [Agent Configuration](docs/agents.md)            |
+| Choose agents                                    | [Agent Configuration](docs/agents.md)            |
 | Write local JSONL logs                           | [Local JSONL Output](docs/local-jsonl-output.md) |
 | Report logs to SLS                               | [SLS Output](docs/sls-output.md)                 |
 | Report OTLP traces                               | [Trace Output](docs/trace-output.md)             |
@@ -187,7 +188,7 @@ Enabling both `upstreamLink.enabled` and `propagateToLlm` extends the same trace
 
 | Backend    | Use Case                                                                |
 | ---------- | ----------------------------------------------------------------------- |
-| JSONL      | Local backup and easy inspection. Enabled by default.                   |
+| JSONL      | Local backup and easy inspection. Disabled by default; enable explicitly. |
 | SLS        | Alibaba Cloud Log Service reporting. Supports WebTracking, AK, and API Key modes. |
 | HTTP       | POST batches to a custom endpoint.                                      |
 | OTLP Trace | Export GenAI activity as OpenTelemetry traces.                          |
@@ -209,9 +210,11 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-The local dashboard starts and stops with the collector. Open
-`http://127.0.0.1:8765/`; no separate monitor command is required. It reads the
-collector-owned `logs/metrics-summary.json` file directly.
+The local dashboard is disabled by default. Run `loongsuite-pilot dashboard start`
+to enable it on port 8765, or `loongsuite-pilot dashboard start 9999` to choose a
+port. Run `loongsuite-pilot dashboard stop` to disable it. These commands restart
+a running collector; collection remains enabled. The page reads the collector-owned
+`logs/metrics-summary.json` file directly.
 
 On macOS, optionally run `loongsuite-pilot dashboard shortcut install` to create a
 Dashboard `.webloc` shortcut with a radar icon and add it to the Dock's files area.

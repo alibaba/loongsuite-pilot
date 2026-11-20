@@ -12,6 +12,7 @@ import type { AlarmLevel, AlarmManager } from './alarm-manager.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
 import type { TraceRuntimeSnapshot } from './trace-runtime-types.js';
+import type { InterceptorStatus } from '../interceptor/status.js';
 
 const logger = createLogger('MetricsWriter');
 
@@ -43,12 +44,15 @@ export interface MetricsWriterOptions {
   canaryPolicy?: string;
   getSnapshot: () => DataflowSnapshot;
   getTraceRuntimeSnapshot?: () => TraceRuntimeSnapshot[];
+  getInterceptorStatus?: () => Promise<InterceptorStatus>;
   alarmManager?: AlarmManager;
   agentsConfig?: AgentsConfig;
   slsEndpoints?: SlsEndpoint[];
   cmsWorkspace?: string;
   autoUpdateEnabled?: boolean;
   updaterLiveness?: (pidFile: string) => ProcessLiveness;
+  hostSn?: string;
+  hostIdentityTags?: boolean;
 }
 
 export class MetricsWriter {
@@ -58,6 +62,7 @@ export class MetricsWriter {
   private readonly diskUsageSampler: DiskUsageSampler;
   private readonly getSnapshot: () => DataflowSnapshot;
   private readonly getTraceRuntimeSnapshot?: () => TraceRuntimeSnapshot[];
+  private readonly getInterceptorStatus?: () => Promise<InterceptorStatus>;
   private readonly alarmManager: AlarmManager | null;
   private l2WritePromise: Promise<void> | null = null;
   private dataflowWritePromise: Promise<void> | null = null;
@@ -87,10 +92,13 @@ export class MetricsWriter {
       cmsWorkspace: opts.cmsWorkspace,
       autoUpdateEnabled: opts.autoUpdateEnabled,
       updaterLiveness: opts.updaterLiveness,
+      hostSn: opts.hostSn,
+      hostIdentityTags: opts.hostIdentityTags,
     });
     this.hookMetricsSpool = new HookMetricsSpool(opts.dataDir);
     this.getSnapshot = opts.getSnapshot;
     this.getTraceRuntimeSnapshot = opts.getTraceRuntimeSnapshot;
+    this.getInterceptorStatus = opts.getInterceptorStatus;
     this.alarmManager = opts.alarmManager ?? null;
     this.diskUsageSampler = new DiskUsageSampler({
       dataDir: opts.dataDir,
@@ -161,12 +169,17 @@ export class MetricsWriter {
     try {
       const snapshot = sharedSnapshot ?? this.getSnapshot();
       const metrics = this.collector.collectL1(snapshot);
+      if (this.getInterceptorStatus) {
+        try { metrics.interceptor = await this.getInterceptorStatus(); }
+        catch { logger.warn('interceptor status snapshot unavailable'); }
+      }
       const disk = this.diskUsageSampler.getSnapshot();
       metrics.metric_json.disk_dir_status = disk.status;
       if (disk.scanMs !== undefined) metrics.metric_json.disk_dir_scan_ms = String(disk.scanMs);
       if (disk.sampledAt !== undefined && disk.dataBytes !== undefined && disk.logsBytes !== undefined) {
         metrics.metric_json.disk_data_bytes = String(disk.dataBytes);
         metrics.metric_json.disk_logs_bytes = String(disk.logsBytes);
+        if (disk.logsByFamily) metrics.metric_json.disk_logs_by_family = JSON.stringify(disk.logsByFamily);
         metrics.metric_json.disk_dir_sampled_at = new Date(disk.sampledAt).toISOString();
       }
 

@@ -30,8 +30,24 @@ function validSpanId(value: unknown): value is string {
 export class ReservedSpanIdGenerator implements IdGenerator {
   private readonly fallback = new RandomIdGenerator();
   private reserved?: string;
+  private reservedTrace?: string;
 
-  generateTraceId = (): string => this.fallback.generateTraceId();
+  generateTraceId = (): string => {
+    const reserved = this.reservedTrace;
+    this.reservedTrace = undefined;
+    return reserved ?? this.fallback.generateTraceId();
+  };
+
+  reserveTraceId(traceId: string): void {
+    if (!/^[0-9a-f]{32}$/.test(traceId) || /^0+$/.test(traceId)) {
+      throw new Error('Invalid reserved trace id');
+    }
+    this.reservedTrace = traceId;
+  }
+
+  clearTraceId(): void {
+    this.reservedTrace = undefined;
+  }
 
   generateSpanId = (): string => {
     const reserved = this.reserved;

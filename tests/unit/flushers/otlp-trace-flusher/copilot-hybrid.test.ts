@@ -1,10 +1,26 @@
 import { describe,it,expect } from 'vitest';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
 import { parseInteractions } from '../../../../assets/hooks/copilot/interaction-parser.mjs';
-import { conversation } from '../../hooks/copilot/hybrid-fixture.mjs';
+import { conversation, toolConversation } from '../../hooks/copilot/hybrid-fixture.mjs';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 
 describe('Copilot hybrid final spans',()=>{
+ it('reconstructs within-interaction LLM input from deltas while preserving roots, tool results and tokens',async()=>{
+  const f=toolConversation();const captured:ReadableSpan[]=[];
+  const flusher=new OtlpTraceFlusher({enabled:true,protocol:'http/protobuf',serviceName:'test',endpoints:[{name:'test',endpoint:'http://localhost:4318'}]},undefined,()=>({export:(spans,cb)=>{captured.push(...spans);cb({code:0});},shutdown:async()=>{}}));
+  await flusher.sendBatch(parseInteractions(f.events,f.spans,{requireOtel:true})[0].records);await flusher.shutdown();
+  expect(new Set(captured.map(s=>s.spanContext().traceId)).size).toBe(1);
+  const llms=captured.filter(s=>s.attributes['gen_ai.span.kind']==='LLM').sort((a,b)=>a.startTime[0]-b.startTime[0]);
+  expect(llms).toHaveLength(2);
+  expect(JSON.parse(String(llms[0].attributes['gen_ai.input.messages'])).map((m:any)=>m.role)).toEqual(['user']);
+  expect(JSON.parse(String(llms[1].attributes['gen_ai.input.messages'])).map((m:any)=>m.role)).toEqual(['user','assistant','tool']);
+  for(const root of captured.filter(s=>['ENTRY','AGENT'].includes(String(s.attributes['gen_ai.span.kind'])))){
+   expect(JSON.parse(String(root.attributes['gen_ai.input.messages']))).toEqual([{role:'user',parts:[{type:'text',content:'Read the sample.'}]}]);
+  }
+  const agent=captured.find(s=>s.attributes['gen_ai.span.kind']==='AGENT')!;
+  expect(agent.attributes['gen_ai.usage.input_tokens']).toBe(200);
+  expect(captured.filter(s=>s.attributes['gen_ai.span.kind']==='TOOL')).toHaveLength(1);
+ });
  it('exports separate traces, exact LLM/AGENT usage and no summary trace',async()=>{
   const captured:ReadableSpan[]=[];
   const flusher=new OtlpTraceFlusher({enabled:true,protocol:'http/protobuf',serviceName:'test',endpoints:[{name:'test',endpoint:'http://localhost:4318'}]},undefined,()=>({export:(spans,cb)=>{captured.push(...spans);cb({code:0});},shutdown:async()=>{}}));
