@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ExportResultCode } from '@opentelemetry/core';
+import { SpanStatusCode } from '@opentelemetry/api';
 import type { ExportResult } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
@@ -103,6 +104,41 @@ describe('DSH event-to-span OTLP flow', () => {
 
   afterEach(async () => {
     await flusher.shutdown();
+  });
+
+  it.each([true, false, undefined].flatMap(isError =>
+    [false, true].map(stream => ({ isError, stream })),
+  ))('exports isError=$isError independently of the final reply (stream=$stream)', async ({ isError, stream }) => {
+    const fixture = await fs.readFile(path.resolve('tests/fixtures/dsh/dsh-probe-events-real.jsonl'), 'utf8');
+    const records = fixture.split('\n').filter(Boolean).map(line => JSON.parse(line));
+    // Vary only the result status/content within an otherwise successful turn.
+    const toolResult = records.find(record => record.type === 'tool/result');
+    const callId = toolResult.data.message.source.callId;
+    toolResult.data.message.isError = isError;
+    toolResult.data.message.content = [{ type: 'text', text: 'error: requested file not found' }];
+    const state = newState();
+    const entries = records.flatMap(record => transformDshRecordEntries(record, ClientType.Dsh, state));
+    if (stream) {
+      for (const entry of entries) {
+        await flusher.sendBatch([entry]);
+        await flusher.flush();
+      }
+    } else {
+      await flusher.sendBatch(entries);
+    }
+    await flusher.flush();
+
+    const tool = captured.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL'
+      && span.attributes['gen_ai.tool.call.id'] === callId);
+    expect(tool).toBeDefined();
+    expect(tool!.status.code).toBe(isError === true ? SpanStatusCode.ERROR : SpanStatusCode.UNSET);
+    expect(tool!.attributes['gen_ai.tool.success']).toBe(typeof isError === 'boolean' ? !isError : undefined);
+    expect(tool!.attributes['gen_ai.tool.call.result']).toContain('error: requested file not found');
+    const replies = captured.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(replies.length).toBeGreaterThan(0);
+    for (const span of replies) {
+      expect(span.status.code).not.toBe(SpanStatusCode.ERROR);
+    }
   });
 
   it('exports both sessions when each uses native turn 1', async () => {
