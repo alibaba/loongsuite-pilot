@@ -753,6 +753,29 @@ describe('dsh-event-transform (correlation isolation)', () => {
     expect(result('orphan')).toBeNull();
   });
 
+  it.each([
+    { isError: true, success: false },
+    { isError: false, success: true },
+    { isError: undefined, success: undefined },
+    { isError: null, success: undefined },
+    { isError: 'true', success: undefined },
+    { isError: 1, success: undefined },
+  ])('preserves an explicit boolean tool error flag ($isError)', ({ isError, success }) => {
+    const state = newState();
+    const base = { sid: 'tool-status', time: 10 };
+    transformDshRecord({
+      ...base, type: 'tool/call', data: { callId: 'read-1', name: 'read', arguments: {} },
+    }, ClientType.Dsh, state);
+    const text = 'error: requested file not found';
+    const result = transformDshRecord({
+      ...base, type: 'tool/result',
+      data: { message: { source: { callId: 'read-1' }, isError, content: [{ type: 'text', text }] } },
+    }, ClientType.Dsh, state);
+    expect(result?.['gen_ai.tool.success']).toBe(success);
+    expect(result?.['gen_ai.tool.call.id']).toBe('read-1');
+    expect(JSON.stringify(result?.['gen_ai.tool.call.result'])).toContain(text);
+  });
+
   it('clears unfinished turn state at turn/end', () => {
     const state = newState();
     state.currentTurn = 1;
