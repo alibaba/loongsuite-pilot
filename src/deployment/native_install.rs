@@ -182,6 +182,9 @@ pub(super) async fn run_with_retirement(
                                     ).await.map_err(|error| anyhow::anyhow!("恢复旧版本 Qoder Hook 失败；保留当前版本：{error:#}"))?;
                                 }
                                 if operation == "rollback-package" && manifest.runtime == "node" {
+                                    super::native_agent_rollback::retire_native_hooks(
+                                        &paths.cache_dir, &paths.data_dir,
+                                    ).await.context("恢复旧版本 Agent Hook 失败；保留当前版本")?;
                                     super::native_codex_rollback::restore_legacy_hooks(
                                         &paths.source_dir, &paths.cache_dir, &paths.data_dir,
                                     ).await.context("恢复旧版本 Codex Hook 失败；保留当前版本")?;
