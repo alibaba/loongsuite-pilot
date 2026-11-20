@@ -2600,11 +2600,17 @@ impl Orchestrator {
         }
         if !self.uses_sdk_hook_history("cursor") {
             let cursor_dir = self.data_dir_join("logs/cursor/history");
+            let input =
+                CursorHookInput::new(self.hook_opts_dir(state_store, &cursor_dir, "cursor-hook"));
+            if self.standalone && self.runtime_options.manage_host_services {
+                ensure_dir(&cursor_dir).await;
+                input.set_cursor_root(std::path::PathBuf::from(&self.data_dir));
+            }
             self.attach_hook(
                 entries,
                 "cursor-hook",
                 "cursor",
-                CursorHookInput::new(self.hook_opts_dir(state_store, &cursor_dir, "cursor-hook")),
+                input,
                 vec![cursor_dir.clone()],
                 {
                     let cursor_dir = cursor_dir.clone();

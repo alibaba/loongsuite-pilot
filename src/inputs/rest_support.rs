@@ -135,6 +135,7 @@ struct HookInner {
     transform: TransformFn,
     history_replay: Option<Mutex<HookReplay>>,
     pending_line: Mutex<Option<PendingHookLine>>,
+    deferred_cursor: std::sync::OnceLock<Arc<crate::hook_process::cursor::DeferredCursor>>,
 }
 
 impl HookJsonlInput {
@@ -144,12 +145,15 @@ impl HookJsonlInput {
         crate::inputs::base::HostedInput::new(
             SdkHookBody {
                 inner: Arc::clone(&self.inner),
-                deferred_cursor: std::sync::OnceLock::new(),
             },
             "SdkHookInput",
             Arc::clone(&self.inner.state_store),
             Some(self.poll.interval_ms()),
         )
+    }
+
+    pub(crate) fn set_cursor_root(&self, root: PathBuf) {
+        self.inner.set_cursor_root(root);
     }
 
     pub fn runtime_info(&self) -> crate::inputs::base::InputRuntimeInfo {
@@ -181,6 +185,7 @@ impl HookJsonlInput {
             history_replay: matches!(config.id, "opencode-log" | "pi-coding-agent-log")
                 .then(|| Mutex::new(HookReplay::new())),
             pending_line: Mutex::new(None),
+            deferred_cursor: std::sync::OnceLock::new(),
         });
         Self { inner, poll }
     }
@@ -279,8 +284,12 @@ impl HookJsonlInput {
 
 pub(crate) struct SdkHookBody {
     inner: Arc<HookInner>,
-    pub(crate) deferred_cursor:
-        std::sync::OnceLock<Arc<crate::hook_process::cursor::DeferredCursor>>,
+}
+
+impl SdkHookBody {
+    pub(crate) fn set_cursor_root(&self, root: PathBuf) {
+        self.inner.set_cursor_root(root);
+    }
 }
 
 #[async_trait::async_trait]
@@ -315,24 +324,16 @@ impl crate::inputs::base::InputBody for SdkHookBody {
         _: &crate::inputs::base::InputRuntime,
     ) -> anyhow::Result<Vec<AgentActivityEntry>> {
         crate::utils::source_access::check(&self.inner.log_dir)?;
-        if let Some(worker) = self.deferred_cursor.get() {
-            // Establish the baseline before the worker writes any new history.
-            if self.inner.cursor_first_run_guard {
-                cursor_first_run_guard(&self.inner).await;
-            }
-            let worker = worker.clone();
-            if let Err(error) = tokio::task::spawn_blocking(move || worker.collect()).await? {
-                self.inner.logger.warn(
-                    &format!("Cursor deferred assembly will retry: {error}"),
-                    None,
-                );
-            }
-        }
         self.inner.collect().await.map_err(anyhow::Error::msg)
     }
 }
 
 impl HookInner {
+    fn set_cursor_root(&self, root: PathBuf) {
+        let worker = Arc::new(crate::hook_process::cursor::DeferredCursor::new(root));
+        let _ = self.deferred_cursor.set(worker);
+    }
+
     async fn on_start(&self) {
         if let Some(replay) = &self.history_replay {
             *replay.lock().expect("hook replay") = HookReplay::new();
@@ -347,6 +348,18 @@ impl HookInner {
     async fn collect(&self) -> Result<Vec<AgentActivityEntry>, String> {
         if self.cursor_first_run_guard {
             cursor_first_run_guard(self).await;
+        }
+        if let Some(worker) = self.deferred_cursor.get() {
+            let worker = Arc::clone(worker);
+            if let Err(error) = tokio::task::spawn_blocking(move || worker.collect())
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                self.logger.warn(
+                    &format!("Cursor deferred assembly will retry: {error}"),
+                    None,
+                );
+            }
         }
         collect_hook_files(self).await
     }

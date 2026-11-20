@@ -10,7 +10,6 @@ struct Hook {
 }
 
 enum Mode {
-    Payload,
     Event(&'static [&'static str]),
     Identity,
     FixedIdentity,
@@ -33,11 +32,6 @@ const HOOKS: &[Hook] = &[
             "stop",
             "agent-stop",
         ]),
-    },
-    Hook {
-        file: "cursor-loongsuite-pilot-hook",
-        agent: "cursor",
-        mode: Mode::Payload,
     },
     Hook {
         file: "claude-code-loongsuite-pilot-hook",
@@ -129,11 +123,8 @@ fn powershell(hook: &Hook) -> String {
     }
     if matches!(agent, "qoder" | "qoder-cn") {
         script.push_str("$NativeArgs += '--wakeup-only'\n");
-    } else if agent == "cursor" {
-        script.push_str("if ($env:LOONGSUITE_PILOT_CURSOR_DEFER_ASSEMBLY -eq '1') {\n    $NativeArgs += '--defer-assembly'\n}\n");
     }
     match hook.mode {
-        Mode::Payload => {}
         Mode::Event(allowed) => {
             script.push_str("$Event = if ($args.Count -gt 0) { $args[0] } else { 'unknown' }\n");
             if !allowed.is_empty() {
@@ -190,11 +181,8 @@ fn shell(hook: &Hook) -> String {
     }
     if matches!(agent, "qoder" | "qoder-cn") {
         script.push_str("NATIVE_ARGS+=('--wakeup-only')\n");
-    } else if agent == "cursor" {
-        script.push_str("if [[ \"${LOONGSUITE_PILOT_CURSOR_DEFER_ASSEMBLY:-}\" == 1 ]]; then\n  NATIVE_ARGS+=('--defer-assembly')\nfi\n");
     }
     match hook.mode {
-        Mode::Payload => {}
         Mode::Event(allowed) => {
             script.push_str("EVENT=\"${1:-unknown}\"\n");
             if !allowed.is_empty() {
@@ -333,7 +321,7 @@ mod tests {
         sync(root.path(), true).unwrap();
         let path = root
             .path()
-            .join("assets/hooks/cursor-loongsuite-pilot-hook.ps1");
+            .join("assets/hooks/claude-code-loongsuite-pilot-hook.ps1");
         fs::write(&path, "modified").unwrap();
         assert!(sync(root.path(), true).is_err());
         assert_eq!(fs::read_to_string(path).unwrap(), "modified");

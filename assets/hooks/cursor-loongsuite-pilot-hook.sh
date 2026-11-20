@@ -2,9 +2,6 @@
 set -u
 EMPTY_RESULT='{}'
 NATIVE_ARGS=('hook-process' 'cursor')
-if [[ "${LOONGSUITE_PILOT_CURSOR_DEFER_ASSEMBLY:-}" == 1 ]]; then
-  NATIVE_ARGS+=('--defer-assembly')
-fi
 HOOK_DIR="${BASH_SOURCE[0]%/*}"
 [[ "$HOOK_DIR" != "${BASH_SOURCE[0]}" ]] || HOOK_DIR=.
 if HOOK_DIR="$(cd -- "$HOOK_DIR" && pwd -P)" && source "$HOOK_DIR/shared/native.sh"; then

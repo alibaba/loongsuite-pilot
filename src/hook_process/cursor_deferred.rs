@@ -41,8 +41,24 @@ fn read_deferred_event(path: &Path) -> io::Result<Obj> {
             "Cursor deferred event exceeds the collection budget",
         ));
     }
-    serde_json::from_slice(&bytes)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    let mut raw: Obj = serde_json::from_slice(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let Some(Value::Object(payload)) = raw.remove("cursor_hook") else {
+        return Ok(raw);
+    };
+    let mut event = super::to_internal_event(&payload);
+    if let Some(ns) = raw.get("captured_ns").and_then(Value::as_i64) {
+        let timestamp = chrono::DateTime::from_timestamp_nanos(ns)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        event.insert("_journal_ts".into(), Value::String(timestamp));
+    }
+    if raw.get("redacted_prompt") == Some(&Value::Bool(true)) {
+        event.insert("_pilot_redacted_prompt".into(), Value::Bool(true));
+    }
+    if let Some(resources) = raw.remove("resource_attributes") {
+        event.insert("resource_attributes".into(), resources);
+    }
+    Ok(event)
 }
 
 pub(super) fn enqueue(root: &Path, env: &Env, mut event: Obj) -> Result<(), String> {
@@ -157,7 +173,24 @@ impl DeferredCursor {
                     }
                     Err(error) => return Err(error.to_string()),
                 };
-                event.remove("transcript_path");
+                let authorized = event
+                    .get("transcript_path")
+                    .and_then(Value::as_str)
+                    .is_some_and(|path| {
+                        let root = crate::utils::resolve_home("~/.cursor");
+                        let root = Path::new(&root);
+                        let path = Path::new(path);
+                        path.is_absolute()
+                            && crate::utils::source_access::private_path(path).is_ok()
+                            && root
+                                .canonicalize()
+                                .ok()
+                                .zip(path.canonicalize().ok())
+                                .is_some_and(|(root, path)| path.starts_with(root))
+                    });
+                if !authorized {
+                    event.remove("transcript_path");
+                }
                 event.insert("_pilot_receipt".into(), Value::String(id.into()));
                 journal.append(&event)?;
                 events.push(Value::Object(event));

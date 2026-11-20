@@ -46,7 +46,7 @@ fn cleanup_l548_codex_failure_continues_other_owned_agents_and_legacy_cleanup_bu
         ),
         (
             "agents.d/cursor.json",
-            include_str!("../../agents.d/cursor.json"),
+            include_str!("../fixtures/legacy-cursor-agent.json"),
         ),
     ]);
     let (codex_asset, codex_command) = hook(&f, "codex");

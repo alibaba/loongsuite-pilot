@@ -251,13 +251,17 @@ pub(super) fn assemble_parent_turn(
         transcript_user_prompt.or_else(|| event_str(prompt, "prompt").map(str::to_owned));
 
     let mut records = Vec::new();
-    if let Some(prompt_text) = user_prompt.as_deref().filter(|text| !text.is_empty()) {
+    if user_prompt.as_deref().is_some_and(|text| !text.is_empty())
+        || prompt.get("_pilot_redacted_prompt") == Some(&Value::Bool(true))
+    {
         let nanos = event_ts_nanos(prompt);
         let mut fields = timed_identity(&nanos, "other");
-        fields.insert(
-            "gen_ai.input.messages_delta".into(),
-            json!([user_text_message(prompt_text)]),
-        );
+        if let Some(prompt_text) = user_prompt.as_deref().filter(|text| !text.is_empty()) {
+            fields.insert(
+                "gen_ai.input.messages_delta".into(),
+                json!([user_text_message(prompt_text)]),
+            );
+        }
         fields.insert(
             "agent.cursor.hook_event_name".into(),
             Value::String("beforeSubmitPrompt".into()),
@@ -523,17 +527,21 @@ pub(super) fn build_cursor_records_from_transcript(
         .clone()
         .or_else(|| event_str(prompt, "prompt").map(str::to_owned));
     let mut records = Vec::new();
-    if let Some(user_text) = user_text.as_deref().filter(|text| !text.is_empty()) {
+    if user_text.as_deref().is_some_and(|text| !text.is_empty())
+        || prompt.get("_pilot_redacted_prompt") == Some(&Value::Bool(true))
+    {
         let nanos = event_ts_nanos(prompt);
         let mut fields = timed_identity(&nanos, "other");
         fields.insert(
             "gen_ai.provider.name".into(),
             Value::String(infer_provider(&model)),
         );
-        fields.insert(
-            "gen_ai.input.messages_delta".into(),
-            json!([user_text_message(user_text)]),
-        );
+        if let Some(user_text) = user_text.as_deref().filter(|text| !text.is_empty()) {
+            fields.insert(
+                "gen_ai.input.messages_delta".into(),
+                json!([user_text_message(user_text)]),
+            );
+        }
         fields.insert(
             "agent.cursor.hook_event_name".into(),
             Value::String("beforeSubmitPrompt".into()),
