@@ -1173,12 +1173,8 @@ def _request_system_instructions(payload: Dict[str, Any], metadata: Dict[str, An
         parts = _system_instructions({"body": {"messages": payload.get("request_messages")}})
         if parts:
             return parts
-    # Older native hooks may omit api_mode while retaining structured roles.
-    if payload.get("api_mode") is None:
-        parts = _system_instructions({"body": {"system": payload.get("system_prompt"),
-                                               "messages": payload.get("request_messages")}})
-    else:
-        parts = _text_parts(payload.get("system_prompt"))
+    parts = _system_instructions({"body": {"system": payload.get("system_prompt"),
+                                           "messages": payload.get("request_messages")}})
     if parts:
         return parts
     if any(key in payload for key in ("request", "request_messages", "system_prompt")):

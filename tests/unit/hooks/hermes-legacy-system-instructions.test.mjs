@@ -161,6 +161,20 @@ finish()
     ]]);
   });
 
+  it('keeps structured instruction roles as a fallback for non-Chat native hooks', () => {
+    const { requests } = runScenario(String.raw`
+begin()
+messages = [{'role': 'developer', 'content': 'structured native rule'}]
+observe(api_mode='anthropic_messages', request={}, request_messages=messages)
+observe(count=2, api_mode='anthropic_messages', request={}, request_messages=messages,
+        system_prompt='provider prompt takes precedence')
+finish()
+`);
+    expect(requests.map(instructions)).toEqual([
+      text('structured native rule'), text('provider prompt takes precedence'),
+    ]);
+  });
+
   it('does not replace an explicit native message list with stale legacy context', () => {
     const { requests } = runScenario(String.raw`
 begin()
