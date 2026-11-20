@@ -36,7 +36,7 @@ export class QoderSubagentLinks {
     this.now = now;
     this.warn = warn;
     this.byCall = new Map();
-    this.legacySources = new Set();
+    this.legacySources = new Map();
     const saved = state && typeof state === 'object' && !Array.isArray(state) ? state : {};
     for (const [id, link] of Object.entries(saved).slice(-MAX_DELEGATIONS)) {
       if (!link || link.id !== id || !/^[0-9a-f]{32}$/.test(id)
@@ -56,7 +56,11 @@ export class QoderSubagentLinks {
     const matches = this.byCall.get(key) ?? [];
     matches.push(link);
     this.byCall.set(key, matches);
-    if (link.legacySource) this.legacySources.add(link.legacySource);
+    if (link.legacySource) {
+      const ids = this.legacySources.get(link.legacySource) ?? new Set();
+      ids.add(link.id);
+      this.legacySources.set(link.legacySource, ids);
+    }
   }
 
   update(link, fields) {
@@ -95,8 +99,19 @@ export class QoderSubagentLinks {
   }
 
   legacyCalls(key) {
-    return new Set(Object.values(this.state)
-      .filter(link => link.legacySource === key).map(link => link.callId));
+    const calls = new Set();
+    for (const id of this.legacySources.get(key) ?? []) {
+      if (this.state[id]) calls.add(this.state[id].callId);
+    }
+    return calls;
+  }
+
+  hasUncollectedLegacyChild(key) {
+    for (const id of this.legacySources.get(key) ?? []) {
+      const link = this.state[id];
+      if (link && !link.childComplete && !link.legacyPeerConflict) return true;
+    }
+    return false;
   }
 
   observeLegacyPeer(source, checkpoint, row) {
@@ -133,6 +148,11 @@ export class QoderSubagentLinks {
         const key = callKey(finished.sessionId, finished.callId);
         const matches = this.byCall.get(key).filter(link => link.id !== finished.id);
         if (matches.length) this.byCall.set(key, matches); else this.byCall.delete(key);
+        if (finished.legacySource) {
+          const ids = this.legacySources.get(finished.legacySource);
+          ids?.delete(finished.id);
+          if (!ids?.size) this.legacySources.delete(finished.legacySource);
+        }
         this.size--;
       }
       const link = { id, sessionId: source.sessionId, agentId: source.subagentId ?? source.sessionId,

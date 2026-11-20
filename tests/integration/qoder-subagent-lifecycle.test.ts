@@ -384,6 +384,96 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
     expect(await childSpans(h, target.task.agentId)).toHaveLength(1);
   });
 
+  it('discovers a quiet legacy session beyond the first page while another task descriptor changes', async () => {
+    let collector: any;
+    const h = await harness(agentId, false, instance => { collector = instance; });
+    const owners = new Map<string, string>();
+    for (let i = 0; i < 70; i++) {
+      const owner = `synthetic-live-scope-${i}`;
+      const file = path.join(h.root, `${owner}.jsonl`);
+      await fs.writeFile(file, jsonl([prompt(`prompt-${i}`, 0), ...end(`end-${i}`, 1)].map(row => ({ ...row, sessionId: owner }))));
+      expect(publishQoderWakeup({ session_id: owner, transcript_path: file,
+        hook_event_name: 'Stop', cwd: h.root }, { dataDir: h.root, agentId })).toBe(true);
+      owners.set(qoderSourceKey(owner, file), owner);
+    }
+    const inDiscoveryOrder = [];
+    for await (const entry of await fs.opendir(qoderWakeupRoot(h.root, agentId))) {
+      const owner = owners.get(entry.name);
+      if (owner) inDiscoveryOrder.push(owner);
+    }
+    expect(inDiscoveryOrder).toHaveLength(70);
+    const busyOwner = inDiscoveryOrder[0];
+    const quietOwner = inDiscoveryOrder[69];
+    const busy = await legacyParent(h.root, busyOwner);
+    const quiet = await legacyParent(h.root, quietOwner);
+    await busy.createChild();
+    await quiet.createChild();
+    const longTask = { ...busy.task, taskId: 'historic-native-result', agentId: 'historical-child',
+      parentToolUseId: 'historical-call', transcriptPath: path.join(busy.directory, 'agent-historical-child.jsonl'),
+      result: 'synthetic result\n'.repeat(100_000), updatedAt: 0 };
+    await busy.putTask(longTask);
+    await h.start();
+    const collect = collector.collect.bind(collector);
+    const metadataFor = collector.metadataFor.bind(collector);
+    let sourcesVisited = 0;
+    let mostSourcesVisited = 0;
+    collector.metadataFor = (...args: any[]) => { sourcesVisited++; return metadataFor(...args); };
+    let revisions = 0;
+    collector.collect = async (...args: any[]) => {
+      longTask.updatedAt++;
+      await busy.putTask(longTask);
+      revisions++;
+      sourcesVisited = 0;
+      const result = await collect(...args);
+      mostSourcesVisited = Math.max(mostSourcesVisited, sourcesVisited);
+      return result;
+    };
+    for (let i = 0; i < 12; i++) await h.cycle();
+    const quietChildren = async () => (await childSpans(h, quiet.task.agentId)).filter(span =>
+      span.attributes['gen_ai.session.id'] === quietOwner);
+    expect(revisions).toBe(48);
+    expect(mostSourcesVisited).toBeLessThanOrEqual(72);
+    expect.soft(await quietChildren()).toHaveLength(1);
+    collector.collect = collect;
+    for (let i = 0; i < 12; i++) await h.cycle();
+    expect(await quietChildren()).toHaveLength(1);
+  }, 30_000);
+
+  it('eventually attaches every unchanged legacy child across discovery and metadata budgets', async () => {
+    const h = await harness(agentId);
+    for (let i = 0; i < 18; i++) {
+      const source = await legacyParent(h.root, `synthetic-stable-scope-${i}`);
+      await source.createChild();
+      const older = `older-scope-${i}`;
+      await source.putTask({ ...source.task, taskId: older, parentToolUseId: older, agentId: older,
+        transcriptPath: path.join(source.directory, `agent-${older}.jsonl`), result: 'historic\n'.repeat(14_000) });
+    }
+    await h.start();
+    for (let i = 0; i < 12; i++) await h.cycle();
+    const spans = await spansFor(h.entries());
+    const parentTools = new Set(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL')
+      .map(span => span.spanContext().spanId));
+    const children = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT' && parentTools.has(span.parentSpanId ?? ''));
+    expect(new Set(children.map(span => span.attributes['gen_ai.session.id'])).size).toBe(18);
+    expect(children).toHaveLength(18);
+  }, 30_000);
+
+  it('reopens a committed synthetic legacy source when the native transcript grows', async () => {
+    const h = await harness(agentId);
+    const source = await legacyParent(h.root, session);
+    await source.createChild();
+    await h.start();
+    for (let i = 0; i < 4; i++) await h.cycle();
+    const before = await childSpans(h, source.task.agentId);
+    expect(before).toHaveLength(1);
+    const newWork = [prompt('direct-reuse', 10, undefined, source.task.agentId), ...end('direct-reuse', 11)];
+    await fs.appendFile(source.task.transcriptPath, jsonl(newWork));
+    for (let i = 0; i < 4; i++) await h.cycle();
+    const after = await childSpans(h, source.task.agentId);
+    expect(after).toHaveLength(2);
+    expect(new Set(after.map(span => span.spanContext().traceId)).size).toBe(2);
+  });
+
   it.each(['unrelated result', 'transient incomplete write', 'conflicting call', 'duplicate ownership field'])(
     'checks a large historical descriptor with %s before attaching the current child', async scenario => {
       const h = await harness(agentId);

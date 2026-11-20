@@ -50,6 +50,8 @@ const noticeVersion = (value, stat) => typeof value.observationId === 'string' &
 const noticeName = name => /^\d+-(?:SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|SessionEnd|SubagentStart|SubagentStop)-[a-f0-9]{24}\.json$/.test(name);
 const MAX_PRIORITY_SOURCES = 128;
 const PRIORITY_SOURCES_PER_CYCLE = 8;
+const LEGACY_RETRIES_PER_CYCLE = 8;
+const MAX_LEGACY_PROOF_RETRIES = MAX_SOURCES_PER_CYCLE + PRIORITY_SOURCES_PER_CYCLE;
 const LEGACY_DIRECTORIES_PER_CYCLE = 8;
 const LEGACY_DIRECTORY_ENTRIES_PER_CYCLE = 256;
 const MAX_LEGACY_TASK_METADATA_BYTES = 128 * 1024;
@@ -164,6 +166,7 @@ export class QoderTranscriptCollector {
     this.promptInspectionSequence = 0;
     this.discovery = null;
     this.pendingSources = [];
+    this.legacyProofRetries = new Map();
     this.prioritySources = new Map();
     this.parentAttempts = new Map();
     this.parentOwners = new Map();
@@ -191,6 +194,7 @@ export class QoderTranscriptCollector {
     const directory = this.discovery;
     this.discovery = null;
     this.pendingSources = [];
+    this.legacyProofRetries.clear();
     this.prioritySources.clear();
     this.parentAttempts.clear();
     this.parentOwners.clear(); this.parentProbes.clear();
@@ -319,14 +323,14 @@ export class QoderTranscriptCollector {
     return this.inFlight;
   }
 
-  async sources() {
+  async sources(limit) {
     // Keep a directory cursor across cycles. Historical sessions do not impose
     // a lifetime admission limit or an unbounded readdir/all-source stat walk.
-    if (this.pendingSources.length) return this.pendingSources;
+    if (this.pendingSources.length) return this.pendingSources.slice(0, limit);
     try {
       if (!this.discovery) this.discovery = await fs.opendir(this.root);
       this.discoveryStartedAt ??= this.now();
-      for (let count = 0; count < MAX_SOURCES_PER_CYCLE; count++) {
+      for (let count = 0; count < limit; count++) {
         const entry = await this.discovery.read();
         if (!entry) {
           await this.discovery.close(); this.discovery = null; this.discoveryComplete = true; break;
@@ -339,6 +343,23 @@ export class QoderTranscriptCollector {
       if (error.code !== 'ENOENT' && !this.stopped) throw error;
     }
     return this.pendingSources;
+  }
+
+  legacyRetrySources() {
+    const active = this.legacyProofRetries.get(this.legacyDescriptorContinuation?.entryKey);
+    const queued = [...this.legacyProofRetries.values()].filter(entry => entry !== active);
+    if (active) queued.unshift(active);
+    return queued.slice(0, LEGACY_RETRIES_PER_CYCLE);
+  }
+
+  rememberLegacyProofRetry(entry) {
+    if (this.legacyProofRetries.size >= MAX_LEGACY_PROOF_RETRIES) {
+      // Ordinary directory rotation will rediscover overflow; keep the one
+      // entry that owns an open directory proof so it can continue next poll.
+      if (entry.name !== this.legacyDescriptorContinuation?.entryKey) return;
+      this.legacyProofRetries.delete(this.legacyProofRetries.keys().next().value);
+    }
+    this.legacyProofRetries.set(entry.name, entry);
   }
 
   async metadataFor(directory) {
@@ -663,11 +684,6 @@ export class QoderTranscriptCollector {
     this.legacyDirectoryBudget = LEGACY_DIRECTORIES_PER_CYCLE;
     this.legacyMetadataBudget = LEGACY_METADATA_BYTES_PER_CYCLE;
     this.parentProbeBudget = 1;
-    // Seed only the bounded scheduler queues; ordinary discovery adds pending
-    // requests as it visits them. Do not walk/copy all historical checkpoints.
-    this.parentRequests = new Map([...new Set([...this.prioritySources.keys(), ...this.pendingSources.map(entry => entry.name)])]
-      .filter(key => state[key]?.parentPendingCall && state[key].parentPendingSessionId)
-      .map(key => [key, { sessionId: state[key].parentPendingSessionId, callId: state[key].parentPendingCall, parentAgentId: state[key].parentPendingAgent }]));
     this.ownerInspectionBudget = 1;
     this.promptInspectionBudget = 1;
     if (this.stopped) return { records, state: next, metrics: this.metrics, changed };
@@ -675,11 +691,20 @@ export class QoderTranscriptCollector {
       const capacity = await smallJson(path.join(this.root, '..', 'capacity.json'));
       if (capacity.observedAt > this.now() - 60_000) this.report('wakeup', capacity.reason);
     } catch {}
-    let entries = await this.sources();
     const priority = [...this.prioritySources.values()].slice(0, PRIORITY_SOURCES_PER_CYCLE);
     const priorityKeys = new Set(priority.map(entry => entry.name));
     for (const key of priorityKeys) this.prioritySources.delete(key);
-    if (priority.length) entries = [...priority, ...entries.filter(entry => !priorityKeys.has(entry.name))];
+    const retries = this.legacyRetrySources();
+    // Retrying changing legacy descriptors must not hold the wakeup directory
+    // cursor. Reserve room for new sources under the same per-poll limit.
+    const ordinary = await this.sources(MAX_SOURCES_PER_CYCLE - retries.length);
+    const entries = [...new Map([...priority, ...retries, ...ordinary].map(entry => [entry.name, entry])).values()];
+    // Seed only bounded scheduler queues; do not walk all historical checkpoints.
+    const queuedKeys = new Set([...this.prioritySources.keys(), ...this.pendingSources.map(entry => entry.name),
+      ...entries.map(entry => entry.name)]);
+    this.parentRequests = new Map([...queuedKeys]
+      .filter(key => state[key]?.parentPendingCall && state[key].parentPendingSessionId)
+      .map(key => [key, { sessionId: state[key].parentPendingSessionId, callId: state[key].parentPendingCall, parentAgentId: state[key].parentPendingAgent }]));
     if (!entries.length) { this.finishDiscovery(); return { records, state: next, metrics: this.metrics, changed }; }
     // One unavailable owner must not consume every cycle's shared DB budget.
     // Choose fairly from this bounded discovery batch, even if that source's
@@ -692,12 +717,12 @@ export class QoderTranscriptCollector {
       .reduce((chosen, entry) => !chosen || (this.legacyInspections.get(entry.name) ?? 0)
         < (this.legacyInspections.get(chosen) ?? 0) ? entry.name : chosen, null);
     if (this.legacyChosenKey) this.rememberLegacyInspection(this.legacyChosenKey);
-    let visited = 0;
-    const legacyProofRetries = [];
+    const visited = new Set();
     for (const entry of entries) {
       if (this.stopped || this.remainingBytes <= 0 || records.length >= 4096) break;
-      visited++;
       const key = entry.name;
+      visited.add(key);
+      this.legacyProofRetries.delete(key);
       if (priorityKeys.has(key)) {
         this.parentAttempts.delete(key);
       }
@@ -737,6 +762,10 @@ export class QoderTranscriptCollector {
         if (contexts.some(context => context.legacyDiscovery !== true)) {
           contexts = contexts.filter(context => !context.legacyDiscovery);
         } else if (source.legacyDiscovery) {
+          // A fully committed, unchanged child cannot emit anything else.
+          // Fresh bytes or a replaced transcript still need a new proof.
+          if (old?.committedOffset === stat.size && old.offset === stat.size && old.activeStart === null
+            && old.inode === stat.ino && old.fileMtime === stat.mtimeMs && old.fileCtime === stat.ctimeMs) continue;
           const proof = await this.verifyLegacySource(source);
           if (!proof || proof === LEGACY_PROOF_DEFERRED) continue;
         }
@@ -788,7 +817,7 @@ export class QoderTranscriptCollector {
         records.push(...batch);
         if (priorityKeys.has(key) && checkpoint.offset >= stat.size) this.markParentAttempt(key);
         next[key] = checkpoint;
-        if (!source.subagentId && this.links.hasLegacyParent(source.key)) {
+        if (!source.subagentId && this.links.hasUncollectedLegacyChild(source.key)) {
           await this.discoverLegacySubagents(source);
         }
         if (Object.keys(this.links.state).length || state[QODER_DELEGATIONS_KEY]) {
@@ -816,16 +845,11 @@ export class QoderTranscriptCollector {
         // Retain the prior checkpoint and published observations on any I/O,
         // parse, capacity or cancellation failure. Other sources still run.
       } finally {
-        if (this.legacyProofDeferred) legacyProofRetries.push(entry);
+        if (this.legacyProofDeferred) this.rememberLegacyProofRetry(entry);
       }
     }
-    // Let budget-blocked sources make progress before opendir starts another
-    // pass in the same order. Preserve unvisited entries and keep retries
-    // within one discovery batch plus its priority entries.
-    const unvisited = entries.slice(visited);
-    const retryLimit = Math.max(0, MAX_SOURCES_PER_CYCLE + PRIORITY_SOURCES_PER_CYCLE - unvisited.length);
-    this.pendingSources = [...legacyProofRetries.slice(0, retryLimit), ...unvisited];
-    if (this.legacyDescriptorContinuation && !this.pendingSources.some(entry => entry.name === this.legacyDescriptorContinuation.entryKey)) {
+    this.pendingSources = this.pendingSources.filter(entry => !visited.has(entry.name));
+    if (this.legacyDescriptorContinuation && !this.legacyProofRetries.has(this.legacyDescriptorContinuation.entryKey)) {
       this.discardLegacyDescriptorContinuation();
     }
     this.finishDiscovery();
