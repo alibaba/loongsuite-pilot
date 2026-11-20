@@ -97,9 +97,16 @@ export class KimiCodeCliInput extends BaseInput {
       if ((replaced || !state.extra?.identity) && !await hasSupportedWireHeader(wire)) return [];
       const session = JSON.parse(await fs.readFile(path.join(sessionDir, 'state.json'), 'utf8')) as Record<string, unknown>;
       if (session.version !== 2 || session.id !== path.basename(sessionDir) || typeof session.cwd !== 'string') return [];
+      let cutoff = minimumTurnTime;
+      if (typeof session.forkedFrom === 'string') {
+        // The native fork copies the source wire and preserves its turn times.
+        const createdAt = session.createdAt;
+        if (typeof createdAt !== 'number' || !Number.isSafeInteger(createdAt) || createdAt <= 0) return [];
+        cutoff = Math.max(cutoff, createdAt + 1);
+      }
       scan = {
         identity,
-        reader: new KimiCodeWireTurn(session.id, session.cwd, minimumTurnTime, this.captureContent),
+        reader: new KimiCodeWireTurn(session.id, session.cwd, cutoff, this.captureContent),
         scanningOffset: committed,
         discardLine: false,
       };

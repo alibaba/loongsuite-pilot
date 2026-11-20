@@ -157,3 +157,25 @@ it('preserves the committed cursor while the source directory is temporarily una
     await input.stop();
   }
 });
+
+it('uses the native fork boundary and collects only turns the fork owns', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, wire, sessionId, first, second } = await createSession();
+  const session = path.join(path.dirname(wire), '..', '..');
+  const state = { id: sessionId, version: 2, cwd: sessionDir, forkedFrom: 'session_original',
+    createdAt: (turnOneAt + turnTwoAt) / 2 };
+  await fs.writeFile(path.join(session, 'state.json'), JSON.stringify(state));
+  const { input, entries } = await createInput(stateFile, sessionDir);
+  try {
+    await fs.writeFile(wire, first.join('\n') + '\n');
+    await poll(input);
+    expect(entries).toEqual([]);
+    await fs.appendFile(wire, second.join('\n') + '\n');
+    await poll(input);
+    expect(entries).toHaveLength(2);
+    expect(JSON.stringify(entries)).toContain('Synthetic resumed message');
+    expect(JSON.stringify(entries)).not.toContain('Synthetic first message');
+  } finally {
+    await input.stop();
+  }
+});
