@@ -791,7 +791,16 @@ it('persists a Kimi OTLP turn when the transport rejects it and replays the jour
 }, 20_000);
 
 
-it.each([false, true])('resumes incomplete Kimi OTLP destinations with stable spans after restart (separate service=%s)', async (separateService) => {
+it.each([
+  { separateService: false, shape: 'valid' },
+  { separateService: true, shape: 'valid' },
+  { separateService: false, shape: 'empty' },
+  { separateService: false, shape: 'invalid JSON' },
+  { separateService: false, shape: 'invalid addresses' },
+  { separateService: false, shape: 'directory' },
+])('resumes incomplete Kimi OTLP destinations with $shape receipts (separate service=$separateService)', async ({
+  separateService, shape,
+}) => {
   interface WireSpan { traceId: Uint8Array; spanId: Uint8Array; parentSpanId?: Uint8Array }
   const decoder = createRequire(import.meta.url)('@opentelemetry/otlp-transformer/build/src/generated/root.js')
     .opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest;
@@ -857,11 +866,32 @@ it.each([false, true])('resumes incomplete Kimi OTLP destinations with stable sp
     await active.close();
     active = undefined;
 
+    const receiptPath = path.join(directory, receipt);
     accepting = true;
+    if (shape === 'directory') {
+      await fs.rename(receiptPath, receiptPath + '.saved');
+      await fs.mkdir(receiptPath);
+      try {
+        for (let restart = 0; restart < 2; restart++) {
+          active = await open('renamed-primary');
+          expect(await fs.stat(path.join(directory, originalGroup))).toBeDefined();
+          await active.close();
+          active = undefined;
+        }
+        expect(primary.map(spanIdentity)).toEqual(initialIds);
+        expect(secondary.map(spanIdentity)).toEqual(initialIds.slice(0, 2));
+      } finally {
+        await fs.rmdir(receiptPath);
+        await fs.rename(receiptPath + '.saved', receiptPath);
+      }
+    } else if (shape !== 'valid') {
+      await fs.writeFile(receiptPath, shape === 'empty' ? '' : shape === 'invalid JSON' ? '{' :
+        JSON.stringify({ version: 1, destinations: ['not-a-destination'] }));
+    }
     active = await open('renamed-primary');
     await poll(active.input);
     expect(active.store.getPersistedState(`${active.input.id}:${sessionId}`)?.lastOffset).toBe(cursor);
-    expect(primary.map(spanIdentity)).toEqual(initialIds);
+    expect(primary.map(spanIdentity)).toEqual(shape === 'valid' || shape === 'directory' ? initialIds : [...initialIds, ...initialIds]);
     expect(secondary.map(spanIdentity)).toEqual([...initialIds.slice(0, 2), ...initialIds]);
     expect(await fs.readdir(directory)).toEqual([originalGroup.replace('codex-turn-', 'codex-done-').replace('.jsonl', '.json')]);
   } finally {

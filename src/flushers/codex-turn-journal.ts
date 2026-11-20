@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
+import { constants, createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { createHash, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
@@ -8,6 +8,8 @@ import { createLogger } from '../utils/logger.js';
 
 const MAX_ACKNOWLEDGED_TURNS = 10_000;
 export const CODEX_PENDING_MAX_BYTES = 512 * 1024 * 1024;
+const KIMI_OTLP_RECEIPT_READ_FLAGS = process.platform === 'win32' ? 'r'
+  : constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
 const logger = createLogger('CodexTurnJournal');
 function pendingBudget(): number {
   const raw = process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
@@ -263,11 +265,23 @@ export class CodexTurnJournal {
 
   private async readKimiOtlpReceipts(key: string): Promise<Set<string>> {
     if (!this.acceptsAgent('kimi-code-cli') || !/^[a-f0-9]{64}$/.test(key)) return new Set();
-    const raw = await fs.readFile(this.kimiReceiptFile(key), 'utf8').catch(error => {
-      if (error.code !== 'ENOENT') logger.warn('Unable to read Kimi OTLP receipts; replaying the retained turn', { code: error.code });
-      return undefined;
+    const file = this.kimiReceiptFile(key);
+    // Missing receipts can be replayed, but treating blocked I/O as missing
+    // would send again on every restart and still be unable to record an ACK.
+    const stat = await fs.lstat(file).catch(error => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
     });
-    if (raw === undefined) return new Set();
+    if (!stat) return new Set();
+    if (!stat.isFile()) throw new Error(`Kimi OTLP receipt is not a regular file: ${file}`);
+    const handle = await fs.open(file, KIMI_OTLP_RECEIPT_READ_FLAGS);
+    let raw: string;
+    try {
+      if (!(await handle.stat()).isFile()) throw new Error(`Kimi OTLP receipt is not a regular file: ${file}`);
+      raw = await handle.readFile('utf8');
+    } finally {
+      await handle.close();
+    }
     try {
       const parsed = JSON.parse(raw);
       if (parsed?.version === 1 && Array.isArray(parsed.destinations)
@@ -280,7 +294,11 @@ export class CodexTurnJournal {
   }
 
   private async removeKimiOtlpReceipts(key: string): Promise<void> {
-    await fs.unlink(this.kimiReceiptFile(key)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    await fs.unlink(this.kimiReceiptFile(key)).catch(error => {
+      // A stale sidecar cannot revoke the authoritative whole-turn ACK or
+      // prevent unrelated agents from replaying the shared journal.
+      if (error.code !== 'ENOENT') logger.warn('Unable to remove stale Kimi OTLP receipt', { key, code: error.code });
+    });
   }
 
   private file(key: string): string { return path.join(this.dir, `codex-turn-${key}.jsonl`); }
