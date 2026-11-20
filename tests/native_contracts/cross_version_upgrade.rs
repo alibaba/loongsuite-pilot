@@ -478,3 +478,110 @@ fn current_rollback_helper_rejects_unbound_source_and_configuration_mutation_bef
         assert!(!cache.join("update-recovery.json").exists());
     }
 }
+
+#[test]
+fn failed_node_switch_restores_qwen_hook_and_retry_retires_only_the_installed_hook() {
+    let fixture = Fixture::new();
+    let thin = Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));
+    fs::copy(
+        thin,
+        fixture
+            .candidate
+            .join("bin")
+            .join(thin.file_name().unwrap()),
+    )
+    .unwrap();
+    fixture.package_with(&[(
+        "agents.d/qwen-work-cn.json",
+        include_str!("../../agents.d/qwen-work-cn.json"),
+    )]);
+    let cache = fixture.root.path().join("cache");
+    let stage = fixture.helper(
+        "stage-package",
+        &fixture.runtime_options(&fixture.candidate),
+        true,
+    );
+    success(&stage);
+    let name = String::from_utf8(stage.stdout).unwrap();
+    let current = cache.join("versions").join(name.trim());
+    success(&fixture.helper("publish-package", &fixture.runtime_options(&current), true));
+    let settings = fixture.root.path().join(".qwenworkcn/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let user_hook = json!({"type":"command","command":"keep-user-hook"});
+    let foreign = json!({"private":"keep","hooks":{
+        "Stop":[{"matcher":"user-scope","hooks":[user_hook]}]
+    }});
+    fs::write(&settings, foreign.to_string()).unwrap();
+    let binary = current
+        .join("bin")
+        .join(fixture.binary.file_name().unwrap());
+    let mut command = fixture.command(&binary);
+    command
+        .args(["hook", "install", "--agents", "qwen-work-cn", "--json"])
+        .env("LOONGSUITE_PILOT_RESOURCE_ROOT", &current)
+        .env(
+            "AGENT_DATA_COLLECTION_CONFIG",
+            fixture.data.join("config.json"),
+        );
+    let installed = bounded(command);
+    success(&installed);
+    let report: Value = serde_json::from_slice(&installed.stdout).unwrap();
+    assert_eq!(report["agents"][0]["status"], "ok", "{report}");
+    let original = fs::read(&settings).unwrap();
+    assert!(String::from_utf8_lossy(&original).contains("loongsuite-pilot-sdk-hook"));
+
+    let node = cache.join("versions/1.0.9_legacy");
+    legacy_tree(&node);
+    fs::create_dir_all(node.join("agents.d")).unwrap();
+    fs::write(
+        node.join("agents.d/qoder.json"),
+        include_str!("../../agents.d/qoder.json"),
+    )
+    .unwrap();
+    fs::write(
+        node.join("scripts/loongsuite-pilot.sh"),
+        "#!/bin/sh\n# legacy fixture\n",
+    )
+    .unwrap();
+    fs::write(
+        node.join("scripts/loongsuite-pilot.ps1"),
+        "# legacy fixture\n",
+    )
+    .unwrap();
+    fs::write(cache.join("previous"), b"1.0.9_legacy\n").unwrap();
+    let service = fixture.root.path().join(if cfg!(windows) {
+        ".local/bin/loongsuite-pilot-service.ps1"
+    } else {
+        ".local/bin/loongsuite-pilot"
+    });
+    let original_service = fs::read(&service).unwrap();
+    let mode = fs::metadata(&service).unwrap().permissions();
+    let mut read_only = mode.clone();
+    read_only.set_readonly(true);
+    fs::set_permissions(&service, read_only).unwrap();
+    let output = fixture.helper("rollback-package", &fixture.runtime_options(&node), true);
+    fs::set_permissions(&service, mode).unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("只读") && error.contains("service"),
+        "{error}"
+    );
+    assert_eq!(fs::read(&settings).unwrap(), original);
+    assert_eq!(fs::read(&service).unwrap(), original_service);
+    assert_eq!(
+        fs::read_to_string(cache.join("current")).unwrap().trim(),
+        name.trim()
+    );
+    assert_eq!(fs::read(cache.join("previous")).unwrap(), b"1.0.9_legacy\n");
+    assert!(!cache.join("update-recovery.json").exists());
+
+    success(&fixture.helper("rollback-package", &fixture.runtime_options(&node), true));
+    let cleaned: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+    assert_eq!(cleaned, foreign);
+    assert_eq!(fs::read(cache.join("current")).unwrap(), b"1.0.9_legacy\n");
+    assert_eq!(
+        fs::read_to_string(cache.join("previous")).unwrap().trim(),
+        name.trim()
+    );
+}

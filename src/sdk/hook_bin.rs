@@ -3,6 +3,8 @@
 mod protocol;
 #[path = "hook_qoder.rs"]
 mod qoder;
+#[path = "qwen_wakeup.rs"]
+mod qwen_wakeup;
 use protocol::*;
 use std::io::{Read, Write};
 use std::net::UdpSocket;
@@ -124,6 +126,20 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
     let configured_agent = flag(&args, "--agent")?;
     let configured_event = flag(&args, "--event");
     if configured_event.is_none() && configured_agent != "qoder-auto" {
+        return None;
+    }
+    if channel == "observe"
+        && configured_agent == "qwen-work-cn"
+        && configured_event == Some("Stop")
+    {
+        let mut body = Vec::new();
+        std::io::stdin()
+            .take((MAX_REQUEST + 1) as u64)
+            .read_to_end(&mut body)
+            .ok()?;
+        if body.len() <= MAX_REQUEST {
+            let _ = qwen_wakeup::publish(&data, &body);
+        }
         return None;
     }
     let id = format!("{:08x}{:032x}", std::process::id(), unix_time()?.as_nanos());

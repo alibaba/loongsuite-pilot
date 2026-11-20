@@ -121,7 +121,7 @@ pub(super) async fn run_with_retirement(
                                     &destination,
                                     &paths.config_path,
                                 );
-                                recover_runtime_files_with_data(&paths.cache_dir, targets.clone(), &paths.data_dir)?;
+                                recover_runtime_files_with_data(&paths.cache_dir, targets.clone(), &paths.data_dir).await?;
                                 let prepared = PreparedConfig::load(&paths)?;
                                 let checked;
                                 let manifest = if operation == "rollback-package" {
@@ -169,6 +169,15 @@ pub(super) async fn run_with_retirement(
                                     targets.extend(plan.targets(&paths.data_dir, paths.deploy_hooks)?);
                                     Some(plan)
                                 } else { None };
+                                let retiring_hooks = if operation == "rollback-package" && manifest.runtime == "node" {
+                                    let plan = super::native_agent_rollback::NativeHookRetirement::load(
+                                        &paths.cache_dir, &paths.data_dir, false,
+                                    ).await?;
+                                    targets.extend(plan.targets());
+                                    Some(plan)
+                                } else {
+                                    None
+                                };
                                 let mut transaction =
                                     ActivationTransaction::begin(&paths.cache_dir, targets)?;
                                 if let Some(plan) = &resources {
@@ -186,64 +195,81 @@ pub(super) async fn run_with_retirement(
                                         &paths.source_dir, &paths.cache_dir, &paths.data_dir,
                                     ).await.context("恢复旧版本 Codex Hook 失败；保留当前版本")?;
                                 }
-                                if let Some(prepared) = &prepared {
-                                    ensure!(
-                                        super::installer_helper::read_config(&paths.config_path)?.0
-                                            == prepared.original,
-                                        "配置被并发修改；已中止发布"
-                                    );
-                                    transaction.write("config", &prepared.bytes, prepared.mode)?;
-                                }
-                                let qoder_settings = if paths.deploy_hooks {
-                                    let report = candidate_command(
-                                        &paths,
-                                        manifest,
-                                        &paths.config_path,
-                                        &["hook", "install", "--json"],
-                                    )
-                                    .await
-                                    .context("Hook 部署失败；恢复配置和版本入口")?;
-                                    qoder_direct_hooks.then(|| {
-                                        serde_json::from_str::<super::hook_install_service::HookInstallReport>(&report).ok()
-                                    }).flatten()
-                                        .and_then(|report| report.agents.into_iter().find(|agent| {
-                                            agent.id == "qoder" && matches!(agent.status.as_str(), "ok" | "up-to-date")
-                                        }))
-                                        .and_then(|agent| agent.settings_path)
-                                } else {
-                                    None
-                                };
-                                if publish {
-                                    let name = paths
-                                        .source_dir
-                                        .file_name()
-                                        .and_then(|v| v.to_str())
-                                        .context("候选目录名无效")?;
-                                    ensure!(
-                                        crate::utils::runtime_paths::safe_component(name),
-                                        "候选目录名无效"
-                                    );
-                                    if let Some(previous) =
-                                        read_pointer(&paths.cache_dir.join("current"))?
-                                    {
-                                        if previous != name {
+                                let activate = {
+                                    let paths = &paths;
+                                    let prepared = prepared.as_ref();
+                                    let retiring_hooks = retiring_hooks.as_ref();
+                                    move || async move {
+                                        if let Some(plan) = retiring_hooks {
+                                            plan.retire(&paths.data_dir, &mut transaction)
+                                                .context("恢复旧版本 Agent Hook 失败；保留当前版本")?;
+                                        }
+                                        if let Some(prepared) = prepared {
+                                            ensure!(
+                                                super::installer_helper::read_config(&paths.config_path)?.0
+                                                    == prepared.original,
+                                                "配置被并发修改；已中止发布"
+                                            );
+                                            transaction.write("config", &prepared.bytes, prepared.mode)?;
+                                        }
+                                        let qoder_settings = if paths.deploy_hooks {
+                                            let report = candidate_command(
+                                                paths,
+                                                manifest,
+                                                &paths.config_path,
+                                                &["hook", "install", "--json"],
+                                            )
+                                            .await
+                                            .context("Hook 部署失败；恢复配置和版本入口")?;
+                                            qoder_direct_hooks.then(|| {
+                                                serde_json::from_str::<super::hook_install_service::HookInstallReport>(&report).ok()
+                                            }).flatten()
+                                                .and_then(|report| report.agents.into_iter().find(|agent| {
+                                                    agent.id == "qoder" && matches!(agent.status.as_str(), "ok" | "up-to-date")
+                                                }))
+                                                .and_then(|agent| agent.settings_path)
+                                        } else {
+                                            None
+                                        };
+                                        if publish {
+                                            let name = paths
+                                                .source_dir
+                                                .file_name()
+                                                .and_then(|v| v.to_str())
+                                                .context("候选目录名无效")?;
+                                            ensure!(
+                                                crate::utils::runtime_paths::safe_component(name),
+                                                "候选目录名无效"
+                                            );
+                                            if let Some(previous) =
+                                                read_pointer(&paths.cache_dir.join("current"))?
+                                            {
+                                                if previous != name {
+                                                    transaction.write(
+                                                        "previous",
+                                                        format!("{previous}\n").as_bytes(),
+                                                        0o600,
+                                                    )?;
+                                                }
+                                            }
                                             transaction.write(
-                                                "previous",
-                                                format!("{previous}\n").as_bytes(),
+                                                "current",
+                                                format!("{name}\n").as_bytes(),
                                                 0o600,
                                             )?;
                                         }
+                                        for (key, (bytes, mode)) in files {
+                                            transaction.write(&key, &bytes, mode)?;
+                                        }
+                                        transaction.commit()?;
+                                        Ok(qoder_settings)
                                     }
-                                    transaction.write(
-                                        "current",
-                                        format!("{name}\n").as_bytes(),
-                                        0o600,
-                                    )?;
-                                }
-                                for (key, (bytes, mode)) in files {
-                                    transaction.write(&key, &bytes, mode)?;
-                                }
-                                transaction.commit()?;
+                                };
+                                let qoder_settings = if let Some(plan) = &retiring_hooks {
+                                    plan.with_locks(&paths.data_dir, activate).await?
+                                } else {
+                                    activate().await?
+                                };
                                 if let Some(settings) = qoder_settings {
                                     if let Err(error) = super::native_qoder_rollback::activate_direct_hooks(
                                         &paths.source_dir, &paths.cache_dir, &paths.data_dir, &settings,
@@ -653,22 +679,46 @@ pub(crate) fn recover_runtime_files(
     cache: &Path,
     targets: BTreeMap<String, PathBuf>,
 ) -> Result<()> {
-    recover_runtime_files_inner(cache, targets, None)
+    recover_legacy_service(cache, &targets)?;
+    let mut legacy_targets = targets.clone();
+    legacy_targets.remove("config");
+    ActivationTransaction::recover_compatible(cache, targets, legacy_targets)
 }
 
-pub(crate) fn recover_runtime_files_with_data(
+pub(crate) async fn recover_runtime_files_with_data(
     cache: &Path,
     targets: BTreeMap<String, PathBuf>,
     data: &Path,
 ) -> Result<()> {
-    recover_runtime_files_inner(cache, targets, Some(data))
+    recover_legacy_service(cache, &targets)?;
+    if !journal_exists(cache)? {
+        return Ok(());
+    }
+    let mut legacy_targets = targets.clone();
+    legacy_targets.remove("config");
+    if ActivationTransaction::has_target_prefix(
+        cache,
+        crate::updater::activation_file_targets::NATIVE_HOOK_SETTINGS_PREFIX,
+    )? {
+        let hooks =
+            super::native_agent_rollback::NativeHookRetirement::load(cache, data, true).await?;
+        hooks
+            .with_locks(data, || async {
+                super::runtime_data_assets::recover(
+                    cache,
+                    targets,
+                    legacy_targets,
+                    data,
+                    hooks.targets(),
+                )
+            })
+            .await
+    } else {
+        super::runtime_data_assets::recover(cache, targets, legacy_targets, data, BTreeMap::new())
+    }
 }
 
-fn recover_runtime_files_inner(
-    cache: &Path,
-    targets: BTreeMap<String, PathBuf>,
-    data: Option<&Path>,
-) -> Result<()> {
+fn recover_legacy_service(cache: &Path, targets: &BTreeMap<String, PathBuf>) -> Result<()> {
     let legacy = cache.join("service-sync");
     ensure!(
         !(journal_exists(cache)? && journal_exists(&legacy)?),
@@ -678,13 +728,7 @@ fn recover_runtime_files_inner(
         let service = targets.get("service").context("恢复目标缺少服务入口")?;
         ActivationTransaction::recover(&legacy, service_targets(service))?;
     }
-    let mut legacy_targets = targets.clone();
-    legacy_targets.remove("config");
-    if let Some(data) = data {
-        super::runtime_data_assets::recover(cache, targets, legacy_targets, data)
-    } else {
-        ActivationTransaction::recover_compatible(cache, targets, legacy_targets)
-    }
+    Ok(())
 }
 
 pub(crate) fn cleanup_legacy_windows_cli(
@@ -933,6 +977,54 @@ mod tests {
         recover_runtime_files(&cache, targets).unwrap();
         assert_eq!(fs::read(config).unwrap(), original);
         assert!(!cache.join("current").exists());
+    }
+
+    #[tokio::test]
+    async fn qwen_settings_and_pointers_recover_together_after_interruption() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let data = root.path().join("data");
+        let service = root.path().join("bin/service");
+        let settings = root.path().join("settings/qwen.json");
+        let original = b"{\"hooks\":{\"Stop\":[]},\"user\":true}\n";
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(&settings, original).unwrap();
+        let native = cache.join("versions/current-rust");
+        fs::create_dir_all(native.join("agents.d")).unwrap();
+        fs::write(native.join("runtime-manifest.json"), "{}").unwrap();
+        let mut definition: Value =
+            serde_json::from_str(include_str!("../../agents.d/qwen-work-cn.json")).unwrap();
+        definition["hook"]["settingsPath"] = json!(settings);
+        fs::write(
+            native.join("agents.d/qwen-work-cn.json"),
+            definition.to_string(),
+        )
+        .unwrap();
+        fs::write(cache.join("current"), b"current-rust\n").unwrap();
+        fs::write(cache.join("previous"), b"old-node\n").unwrap();
+        let base = activation_targets(&cache, &service, &data.join("config.json"));
+        let hooks =
+            super::super::native_agent_rollback::NativeHookRetirement::load(&cache, &data, false)
+                .await
+                .unwrap()
+                .targets();
+        let role = hooks.keys().next().unwrap().clone();
+        let mut targets = base.clone();
+        targets.extend(hooks);
+        let mut tx = ActivationTransaction::begin(&cache, targets).unwrap();
+        tx.write_preserving_mode(&role, b"{}", 0o600).unwrap();
+        tx.write("previous", b"current-rust\n", 0o600).unwrap();
+        tx.write("current", b"old-node\n", 0o600).unwrap();
+        std::mem::forget(tx);
+
+        recover_runtime_files_with_data(&cache, base, &data)
+            .await
+            .unwrap();
+        assert_eq!(fs::read(settings).unwrap(), original);
+        assert_eq!(fs::read(cache.join("current")).unwrap(), b"current-rust\n");
+        assert_eq!(fs::read(cache.join("previous")).unwrap(), b"old-node\n");
+        assert!(!cache.join("update-recovery.json").exists());
     }
 
     #[test]
