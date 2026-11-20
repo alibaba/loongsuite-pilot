@@ -22,7 +22,7 @@ import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-con
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { convertQwenWorkCollaborationTurn } from './qwen-work-collaboration-converter.js';
-import { isDoubaoAgentType } from '../utils/doubao-work-paths.js';
+import { isDoubaoAgentType, type DoubaoClient } from '../utils/doubao-work-paths.js';
 import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
 import { currentHermesProcessNamespace, hermesProcessIdentity, isHermesProcessDead,
   type HermesProcessIdentity } from './hermes-process-identity.js';
@@ -1817,7 +1817,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
     }
     if (isDoubaoAgentType(agentType)) {
-      this.enrichDoubaoWorkSpans(records, spans);
+      this.enrichDoubaoWorkSpans(agentType, records, spans);
       enrichDoubaoClientRequest(records, spans);
     }
 
@@ -1846,7 +1846,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     return this.exportInBatches(exportState, agentType, spans);
   }
 
-  private enrichDoubaoWorkSpans(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+  private enrichDoubaoWorkSpans(agentType: DoubaoClient, records: AgentActivityEntry[], spans: ReadableSpan[]): void {
     const clients = new Set(records.map(record => record['loongsuite.doubao_work.client'])
       .filter((client): client is 'doubao' | 'doubao-work' => client === 'doubao' || client === 'doubao-work'));
     const client = clients.size === 1 ? [...clients][0] : undefined;
@@ -1857,13 +1857,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
       && /^[0-9a-f]{16}$/.test(record.parent_span_id)
       && !/^0+$/.test(record.parent_span_id));
     for (const span of spans) {
-      if (client) {
-        span.attributes['loongsuite.doubao_work.client'] = client;
-        span.attributes['gen_ai.framework'] = client;
-      }
+      if (client) span.attributes['loongsuite.doubao_work.client'] = client;
+      span.attributes['gen_ai.framework'] = agentType;
       const kind = span.attributes['gen_ai.span.kind'];
       if (kind !== 'ENTRY' && kind !== 'AGENT') continue;
-      span.attributes['gen_ai.framework'] = client ?? 'doubao-work';
       for (const key of ['loongsuite.doubao_work.selected_skills', 'loongsuite.doubao_work.selected_partners']) {
         const values = terminal?.[key];
         if (Array.isArray(values) && values.length <= 32 && values.every(value => typeof value === 'string' && /^[a-zA-Z0-9_.:-]{1,256}$/.test(value))) span.attributes[key] = values as string[];

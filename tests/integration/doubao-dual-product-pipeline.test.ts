@@ -13,7 +13,12 @@ import { DOUBAO_EPOCH, DOUBAO_FILE, doubaoLine, doubaoToolLine } from '../helper
 
 class ProbeInput extends DoubaoWorkInput { baseline() { return this.collect(); } }
 
-it('keeps both products isolated through shared identity, masking, JSONL and LLM/tool conversion', async () => {
+it.each([
+  { mode: 'independent listeners', sources: [
+    { id: 'doubao', client: 'doubao' }, { id: 'doubao-work', client: 'doubao-work' },
+  ] as const },
+  { mode: 'legacy App listener', sources: [{ id: 'doubao-work', client: 'doubao' }] as const },
+])('preserves identity and masking through JSONL and OTLP for $mode', async ({ sources }) => {
   const root = await mkdtemp(path.join(tmpdir(), 'doubao-dual-pipeline-'));
   const store = new StateStore(path.join(root, 'state.json'));
   const spans: ReadableSpan[] = [];
@@ -27,8 +32,8 @@ it('keeps both products isolated through shared identity, masking, JSONL and LLM
   const inputs: ProbeInput[] = [];
   const secret = 'sk-' + 'x'.repeat(24);
   try {
-    for (const client of ['doubao', 'doubao-work'] as const) {
-      const logs = path.join(root, client, 'logs'), sessions = path.join(root, client, 'sessions');
+    for (const { id, client } of sources) {
+      const logs = path.join(root, id, 'logs'), sessions = path.join(root, id, 'sessions');
       await mkdir(logs, { recursive: true }); await writeFile(path.join(logs, DOUBAO_FILE), '');
       const system = path.join(sessions, '12345678', 'agents', 'm_main', 'system');
       await mkdir(system, { recursive: true });
@@ -38,7 +43,8 @@ it('keeps both products isolated through shared identity, masking, JSONL and LLM
         { role: 'tool', tool_call_id: 'same-call', content: `${client}_RESULT ${secret}` },
         { role: 'assistant', content: `${client}_FINAL ${secret}` },
       ].map(row => JSON.stringify(row)).join('\n') + '\n');
-      const input = new ProbeInput({ stateStore: store, inputId: client, sessionsRoot: sessions, logDir: logs, resourceShare: 2, pollIntervalMs: 100 });
+      const input = new ProbeInput({ stateStore: store, inputId: id, client, sessionsRoot: sessions, logDir: logs,
+        resourceShare: sources.length, workBudget: { milliseconds: Infinity }, pollIntervalMs: 100 });
       inputs.push(input); manager.registerInput(input);
     }
     const clock = vi.spyOn(Date, 'now').mockReturnValue(DOUBAO_EPOCH - 1);
@@ -51,23 +57,24 @@ it('keeps both products isolated through shared identity, masking, JSONL and LLM
         + doubaoToolLine({ toolCallID: 'same-call', phase: 'execution_settled', status: 'success' }, 2000)
         + doubaoLine('on_message_session_end', meta, 3000));
     }
-    await vi.waitFor(() => expect(spans).toHaveLength(14));
+    const expectedSpans = sources.length * 7;
+    await vi.waitFor(() => expect(spans).toHaveLength(expectedSpans));
     await manager.stopAll(); await output.flush();
-    expect(new Set(spans.map(span => span.spanContext().traceId)).size).toBe(2);
-    expect(new Set(spans.map(span => `${span.spanContext().traceId}:${span.spanContext().spanId}`)).size).toBe(14);
-    for (const client of ['doubao', 'doubao-work']) {
+    expect(new Set(spans.map(span => span.spanContext().traceId)).size).toBe(sources.length);
+    expect(new Set(spans.map(span => `${span.spanContext().traceId}:${span.spanContext().spanId}`)).size).toBe(expectedSpans);
+    for (const { id, client } of sources) {
       const own = spans.filter(span => span.attributes['loongsuite.doubao_work.client'] === client);
       expect(own).toHaveLength(7);
       expect(own.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')).toHaveLength(2);
       expect(own.filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL')).toHaveLength(1);
-      expect(own.every(span => span.attributes['gen_ai.framework'] === client)).toBe(true);
+      expect(own.every(span => span.attributes['gen_ai.framework'] === id)).toBe(true);
       const agent = own.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT')!;
       expect(agent.attributes['gen_ai.agent.id']).toBe('m_main');
       for (const span of own.filter(span => span.parentSpanId)) {
         expect(own.some(parent => parent.spanContext().spanId === span.parentSpanId)).toBe(true);
       }
-      const events = (await readFile(path.join(outputDir, `${client}-all.jsonl`), 'utf8')).trim().split('\n').map(row => JSON.parse(row));
-      expect(events.every(event => event['gen_ai.agent.type'] === client)).toBe(true);
+      const events = (await readFile(path.join(outputDir, `${id}-all.jsonl`), 'utf8')).trim().split('\n').map(row => JSON.parse(row));
+      expect(events.every(event => event['gen_ai.agent.type'] === id && event['loongsuite.doubao_work.client'] === client)).toBe(true);
       expect(JSON.stringify(events)).not.toContain(secret);
     }
     expect(JSON.stringify(spans.map(span => span.attributes))).not.toContain(secret);

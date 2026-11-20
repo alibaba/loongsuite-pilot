@@ -4,7 +4,7 @@ import { resolveHome } from './fs-utils.js';
 
 export type DoubaoClient = 'doubao-work' | 'doubao';
 
-export function isDoubaoAgentType(agentType: string): boolean {
+export function isDoubaoAgentType(agentType: string): agentType is DoubaoClient {
   return agentType === 'doubao-work' || agentType === 'doubao';
 }
 
