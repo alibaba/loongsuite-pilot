@@ -6,7 +6,6 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { readBoundedLineTail } from '../base/bounded-line-tail.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../types/index.js';
-import { watch, type FSWatcher } from 'node:fs';
 import { HubMetadata } from './hub-metadata.js';
 import { NativeToolMetadata } from './native-tool-metadata.js';
 import { fileIdentity } from '../../utils/file-identity.js';
@@ -84,17 +83,11 @@ export class TraeRendererMetadataInput extends BaseInput {
   readonly collectionMethod = CollectionMethod.SessionFilePolling;
   private readonly hub = new HubMetadata(path.join(os.homedir(), '.trae-cn/hub_event_cache/TraeCode'));
   private readonly native = new NativeToolMetadata(this.stateStore, this.hub);
-  private watcher?: FSWatcher;
   constructor(opts: InputOptions, private readonly root = rendererLogRoot()) { super(opts); }
-  protected override async onStop(): Promise<void> { this.watcher?.close(); this.watcher = undefined; this.native.close(); }
+  protected override async onStop(): Promise<void> { this.hub.close(); this.native.close(); }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
-    if (!this.watcher) {
-      try {
-        this.watcher = watch(this.hub.root, { recursive: true, persistent: false }, () => this.requestCollection());
-        this.watcher.on('error', () => { this.watcher?.close(); this.watcher = undefined; });
-      } catch { /* Older clients may not have created a cache yet. */ }
-    }
+    this.hub.watchChanges(() => this.requestCollection());
     await this.hub.scan();
     const entries: AgentActivityEntry[] = [];
     // The first scan establishes a baseline so enabling collection doesn't export prior conversations.
@@ -129,6 +122,7 @@ export class TraeRendererMetadataInput extends BaseInput {
     }
     if (!nativeInitialized) this.stateStore.update(nativeKey, { extra: { initialized: true } });
     if (!initialized) this.stateStore.update(this.id + ':renderer', { extra: { initialized: true } });
+    for (const entry of entries) if (entry['agent.trae-cn.source'] === 'hub_usage') this.hub.enrichUsage(entry);
     return entries;
   }
 }

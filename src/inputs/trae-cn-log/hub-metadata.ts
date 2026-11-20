@@ -1,6 +1,8 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, watch, type FSWatcher } from 'node:fs';
 import * as path from 'node:path';
 import { readBoundedLineTail } from '../base/bounded-line-tail.js';
+
+import type { AgentActivityEntry } from '../../types/index.js';
 
 const id24 = /^[0-9a-f]{24}$/;
 const identifier = (value: unknown): value is string =>
@@ -12,7 +14,7 @@ type Model = { model: string; start: number; first: number };
 class HubTurn {
   readonly tools = new Map<string, Tool>();
   readonly models = new Map<string, Model>();
-  readonly usage = new Map<string, { input: number; output: number }>();
+  readonly usage = new Map<string, { input: number; output: number; cached?: number }>();
   touched = Date.now();
   constructor(readonly trace: string, readonly turn: string, readonly session: string) {}
 }
@@ -22,7 +24,33 @@ class HubTurn {
 export class HubMetadata {
   private files = new Map<string, { ino: number; offset: number; skip: boolean; bound?: HubTurn }>();
   private turns = new Map<string, HubTurn>();
+  private watcher?: FSWatcher;
   constructor(readonly root: string) {}
+
+  watchChanges(onChange: () => void) {
+    if (this.watcher) return;
+    try {
+      this.watcher = watch(this.root, { recursive: true, persistent: false }, onChange);
+      this.watcher.on('error', () => this.close());
+    } catch { /* The cache directory may not exist yet. */ }
+  }
+
+  close() {
+    this.watcher?.close();
+    this.watcher = undefined;
+  }
+
+  enrichUsage(e: AgentActivityEntry) {
+    const turn = this.get(e.trace_id!, e['gen_ai.turn.id']!, e['gen_ai.session.id']);
+    const usage = turn?.usage.get(e['agent.trae-cn.reply_id'] + '/' + e['agent.trae-cn.event_seq']);
+    e['agent.trae-cn.usage_payload_present'] = !!usage;
+    if (usage) {
+      e['gen_ai.usage.input_tokens'] = usage.input;
+      e['gen_ai.usage.output_tokens'] = usage.output;
+      e['gen_ai.usage.total_tokens'] = usage.input + usage.output;
+      if (usage.cached !== undefined) e['gen_ai.usage.cache_read.input_tokens'] = usage.cached;
+    }
+  }
 
   get(trace: string, turn: string, session: string) {
     const found = this.turns.get(trace);
@@ -83,7 +111,9 @@ export class HubMetadata {
             const input = data.prompt_tokens, output = data.completion_tokens;
             if (Number.isSafeInteger(row.seq) && row.seq >= 0 && Number.isSafeInteger(input) && input >= 0 &&
                 Number.isSafeInteger(output) && output >= 0 && input + output === data.total_tokens) {
-              bound.usage.set(reply + '/' + row.seq, { input, output });
+              const cached = data.cache_read_input_tokens;
+              bound.usage.set(reply + '/' + row.seq, { input, output,
+                ...(Number.isSafeInteger(cached) && cached >= 0 && cached <= input ? { cached } : {}) });
             }
           } else if (row.type === 'timing_events') {
             const start = data.data?.rs_17_before_request_llm, first = data.data?.rs_18_llm_response_first_token;

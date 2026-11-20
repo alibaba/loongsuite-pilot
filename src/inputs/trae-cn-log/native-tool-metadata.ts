@@ -10,7 +10,7 @@ import { ClientType, type AgentActivityEntry } from '../../types/index.js';
 import { fileIdentity } from '../../utils/file-identity.js';
 
 type Delegation = { parent: string; call: string; start?: string; end?: string; child?: string };
-type Turn = { session: string; turn: string; start: string; calls: string[]; requestedModel?: string; responses?: string[]; pending?: PendingTool[]; delegations?: Delegation[] };
+type Turn = { session: string; turn: string; start: string; calls: string[]; usageReports?: Record<string, string>; requestedModel?: string; responses?: string[]; pending?: PendingTool[]; delegations?: Delegation[] };
 type PendingTool = { call: string; tool: string; time: string; parent: string; received: number };
 type Turns = Record<string, Turn>;
 const spanId = (trace: string, id: string) => createHash('sha256').update(trace + '/' + id).digest('hex').slice(0, 16);
@@ -54,7 +54,7 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
   if (!fields) return;
   const message = text(fields.message);
   if (message !== 'context resolve applied to task request' && message !== 'tool execution started' &&
-      message !== 'create_task' && message !== 'recording history entry' && message !== commit && message !== launch && message !== takeover &&
+      message !== '[Hub] task event contract' && message !== 'create_task' && message !== 'recording history entry' && message !== commit && message !== launch && message !== takeover &&
       message !== 'terminal Turn and Inbox transaction committed' && message !== 'chat: runner completed') return;
   const trace = text(fields.trace_id);
   if (!/^[a-f0-9]{32}$/.test(trace)) return;
@@ -85,6 +85,14 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
     'gen_ai.agent.type': ClientType.TraeCn, 'gen_ai.agent.name': 'trae-cn',
     'gen_ai.system': 'trae', 'agent.trae-cn.source': 'native_metadata',
   };
+  if (message === '[Hub] task event contract') {
+    const reply = text(fields.task_id), seq = fields.event_seq;
+    if (text(fields.event_type) === 'token_usage' && text(fields.conversation_id) === turn.session &&
+        hexId.test(reply) && Number.isSafeInteger(seq) && seq >= 0) {
+      (turn.usageReports ??= {})[reply + '/' + seq] ??= time;
+    }
+    return;
+  }
   if (message === 'recording history entry') {
     const history = text(fields.history_id);
     if (text(fields.history_source) !== 'Server' || text(fields.source) !== 'llm_default' || !hexId.test(history)) return;
@@ -142,6 +150,12 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
   }
   if (turn.turn !== turnId) return;
   const observed = hub?.get(trace, turn.turn, turn.session);
+  for (const [key, observedAt] of Object.entries(turn.usageReports ?? {})) {
+    const [reply, seq] = key.split('/');
+    entries.push(buildAgentActivityEntry({ ...base, time_unix_nano: observedAt,
+      'event.id': spanId(trace, 'usage/' + key), 'event.name': 'other',
+      'agent.trae-cn.source': 'hub_usage', 'agent.trae-cn.reply_id': reply, 'agent.trae-cn.event_seq': Number(seq) }));
+  }
   for (const pending of turn.pending ?? []) entries.push(toolEntry(trace, turn, pending, hub));
   for (const [request, model] of turn.responses?.length ? [] : observed?.models ?? []) {
     const id = spanId(trace, 'model/' + request);

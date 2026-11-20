@@ -5,6 +5,7 @@ import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseSessionInput, type SessionInputOptions } from '../base/base-session-input.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
+import { HubMetadata } from './hub-metadata.js';
 import { NativeToolMetadata } from './native-tool-metadata.js';
 import { rendererLogRoot } from './renderer-metadata-input.js';
 import { transformHookRecord } from '../base/hook-record-transform.js';
@@ -16,6 +17,7 @@ type TraceIndex = Record<string, TraceReference>;
 
 export interface TraeCnLogInputOptions extends SessionInputOptions {
   auxLogDir?: string;
+  hubRoot?: string;
 }
 
 /** Read content-bearing hook records, retaining their span IDs and parent edges. */
@@ -24,6 +26,7 @@ export class TraeCnLogInput extends BaseSessionInput {
   readonly agentType = ClientType.TraeCn;
   private readonly native = new NativeToolMetadata(this.stateStore);
   private readonly nativeRoot: string;
+  private readonly hub: HubMetadata;
   private readonly waiting = new Map<string, number>();
   private calls: TraceIndex = {};
   private bindings: TraceIndex = {};
@@ -39,6 +42,7 @@ export class TraeCnLogInput extends BaseSessionInput {
       filePattern: opts?.filePattern ?? DEFAULT_FILE_PATTERN,
       pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
     });
+    this.hub = new HubMetadata(opts?.hubRoot ?? resolveHome('~/.trae-cn/hub_event_cache/TraeCode'));
     this.nativeRoot = opts?.auxLogDir ?? rendererLogRoot();
   }
 
@@ -71,6 +75,7 @@ export class TraeCnLogInput extends BaseSessionInput {
   }
 
   protected override async onStop(): Promise<void> {
+    this.hub.close();
     this.native.close();
   }
 
@@ -83,6 +88,9 @@ export class TraeCnLogInput extends BaseSessionInput {
     this.bindings = recent(state?.bindings as TraceIndex);
     this.rounds = recent(state?.rounds as typeof this.rounds);
     this.parents = recent(state?.parents as typeof this.parents);
+    this.hub.watchChanges(() => this.requestCollection());
+    await this.hub.scan();
+    const reports: AgentActivityEntry[] = [];
     const runs = await fs.readdir(this.nativeRoot, { withFileTypes: true }).catch(() => []);
     this.hasNative = false;
     for (const run of runs.filter(r => r.isDirectory() && /^\d{8}T\d{6}$/.test(r.name))) {
@@ -90,6 +98,11 @@ export class TraeCnLogInput extends BaseSessionInput {
       if (!await this.native.collect(path.join(this.nativeRoot, run.name), events, state?.initialized === true)) continue;
       this.hasNative = true;
       for (const e of events) {
+        if (e['agent.trae-cn.source'] === 'hub_usage') {
+          this.hub.enrichUsage(e);
+          reports.push(e);
+          continue;
+        }
         if (e.trace_id && e['gen_ai.response.id'] && e['gen_ai.span.kind'] === 'LLM') {
           const pending = this.rounds[e.trace_id] ??= { seen: Date.now(), events: [] };
           pending.events.push(e);
@@ -103,6 +116,7 @@ export class TraeCnLogInput extends BaseSessionInput {
       }
     }
     const entries = await super.collect();
+    entries.push(...reports);
     for (const [trace, batch] of Object.entries(this.rounds)) {
       const parent = this.parents[trace];
       if (!parent) continue;

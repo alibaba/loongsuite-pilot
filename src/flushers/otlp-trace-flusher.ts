@@ -926,6 +926,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Audit delegation/result records describe an existing tool/work boundary.
     // They must not create, close or reopen a model turn buffer.
     if (isAgentAuditEvent(entry) || entry['event.name'] === 'guardrail.evaluation') return;
+    // A Hub usage receipt is a log event until a response ID is evidenced.
+    if (entry['gen_ai.agent.type'] === 'trae-cn' && entry['agent.trae-cn.source'] === 'hub_usage') return;
     // Session summaries are log events, never an extra or reopened trace.
     if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.session_summary'] === true) return;
     if (entry['gen_ai.agent.type'] === 'doubao-work' && entry['loongsuite.doubao_work.trace_role'] === 'log_only') return;
