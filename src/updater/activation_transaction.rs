@@ -94,6 +94,16 @@ impl ActivationTransaction {
         Ok(transaction)
     }
 
+    pub(crate) fn has_target_prefix(cache: &Path, prefix: &str) -> Result<bool> {
+        let path = binding::bind(&cache.join("update-recovery.json"))?;
+        let Some(bytes) = read_bounded(&path, MAX_JOURNAL_BYTES)? else {
+            return Ok(false);
+        };
+        let journal: Journal =
+            serde_json::from_slice(&bytes).context("更新恢复记录损坏，保留当前版本和恢复材料")?;
+        Ok(journal.targets.keys().any(|key| key.starts_with(prefix)))
+    }
+
     pub fn recover(cache: &Path, targets: BTreeMap<String, PathBuf>) -> Result<()> {
         Self::recover_compatible(cache, targets.clone(), targets)
     }

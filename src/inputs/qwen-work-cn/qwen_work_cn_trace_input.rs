@@ -1,6 +1,6 @@
 //! Port of `src/inputs/qwen-work-cn/qwen-work-cn-trace-input.ts`.
 
-use crate::hook_process::TranscriptReadBudget;
+use super::native_wakeups::{NativeWakeupReader, QwenWorkCnNativeWakeups};
 use crate::inputs::base::{
     create_hook_history_startup_checkpoint, entry_from, filter_bootstrap_history_turns, InputBody,
     InputRuntime,
@@ -15,9 +15,8 @@ use crate::utils::{
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -40,15 +39,6 @@ pub struct QwenWorkCnTraceOptions {
     pub segments_root: Option<String>,
     pub poll_interval_ms: Option<u64>,
     pub multimodal: Option<QwenWorkCnMultimodalOptions>,
-}
-
-#[derive(Clone)]
-pub(crate) struct QwenWorkCnNativeWakeups {
-    pub directory: PathBuf,
-    pub transcript_root: PathBuf,
-    pub producer_data_dir: PathBuf,
-    pub user_id: String,
-    pub legacy_cursor_root: Option<PathBuf>,
 }
 
 pub struct QwenWorkCnMultimodalOptions {
@@ -87,41 +77,7 @@ pub struct QwenWorkCnTraceBody {
     subagent_turns: Mutex<HashMap<String, HashMap<String, i64>>>,
     in_flight_pairs: Mutex<HashMap<String, HashMap<String, InFlightPair>>>,
     segment_dir_by_session: Mutex<HashMap<String, CachedSegmentDir>>,
-    native_wakeups: Mutex<Option<QwenWorkCnNativeWakeups>>,
-    native_worker: tokio::sync::Mutex<Option<NativeStopWorker>>,
-}
-
-struct NativeStopWorker {
-    marker: PathBuf,
-    source: PathBuf,
-    session: String,
-    budget: Arc<TranscriptReadBudget>,
-    task: tokio::task::JoinHandle<bool>,
-}
-
-impl Drop for NativeStopWorker {
-    fn drop(&mut self) {
-        self.budget.cancel();
-    }
-}
-
-/// A blocked reader yields to the collector until the next poll grants bytes.
-async fn poll_native_stop(
-    worker: &mut Option<NativeStopWorker>,
-    rt: &InputRuntime,
-) -> anyhow::Result<bool> {
-    let pending = worker.as_mut().expect("native Stop worker");
-    let result = tokio::select! {
-        result = &mut pending.task => result,
-        _ = pending.budget.exhausted.notified() => return Ok(false),
-    };
-    let pending = worker.take().expect("native Stop worker");
-    if result? {
-        tokio::fs::remove_file(&pending.marker).await?;
-    } else {
-        rt.warn("Qwen Work SDK wakeup retained for source retry", None);
-    }
-    Ok(true)
+    native_wakeups: NativeWakeupReader,
 }
 
 struct InFlightPair {
@@ -172,12 +128,7 @@ impl QwenWorkCnTraceInput {
     }
 
     pub(crate) fn set_native_wakeups(&self, native: QwenWorkCnNativeWakeups) {
-        *self
-            .inner
-            .body
-            .native_wakeups
-            .lock()
-            .expect("native wakeups") = Some(native);
+        self.inner.body.native_wakeups.configure(native);
     }
 
     /// Collector subscription. Forwards to the hosted runtime without exposing its body type.
@@ -255,8 +206,7 @@ impl QwenWorkCnTraceInput {
                     subagent_turns: Mutex::new(HashMap::new()),
                     in_flight_pairs: Mutex::new(HashMap::new()),
                     segment_dir_by_session: Mutex::new(HashMap::new()),
-                    native_wakeups: Mutex::new(None),
-                    native_worker: tokio::sync::Mutex::new(None),
+                    native_wakeups: NativeWakeupReader::default(),
                 },
                 "QwenWorkCNTraceInput",
                 opts.state_store,
@@ -311,6 +261,7 @@ impl InputBody for QwenWorkCnTraceBody {
 
     async fn on_start(&self, rt: &InputRuntime) -> anyhow::Result<()> {
         self.multimodal_stopped.store(false, Ordering::SeqCst);
+        self.native_wakeups.start(rt);
         if crate::utils::source_access::current().is_some() {
             // SDK source directories belong to the host, not to the collector.
             crate::utils::source_access::check(&self.log_dir)?;
@@ -323,13 +274,7 @@ impl InputBody for QwenWorkCnTraceBody {
         else {
             return Ok(());
         };
-        if self
-            .native_wakeups
-            .lock()
-            .expect("native wakeups")
-            .as_ref()
-            .is_some_and(|native| native.legacy_cursor_root.is_none())
-        {
+        if self.native_wakeups.owns_history() {
             // This history is SDK-owned, not pre-existing user history. A
             // crash can occur after the producer advances its cursor and
             // appends history but before the SDK persists its first input
@@ -355,11 +300,7 @@ impl InputBody for QwenWorkCnTraceBody {
     }
 
     async fn on_stop(&self, _rt: &InputRuntime) -> anyhow::Result<()> {
-        if let Some(mut worker) = self.native_worker.lock().await.take() {
-            worker.budget.cancel();
-            (&mut worker.task).await?;
-        }
-        Ok(())
+        self.native_wakeups.stop().await
     }
 
     async fn collect(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
@@ -371,7 +312,7 @@ impl InputBody for QwenWorkCnTraceBody {
 
 impl QwenWorkCnTraceBody {
     async fn collect_inner(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
-        self.drain_native_wakeups(rt).await?;
+        self.native_wakeups.drain(rt).await?;
         let raw = self.read_hook_jsonl(rt).await?;
         if raw.is_empty() {
             return Ok(Vec::new());
@@ -417,150 +358,6 @@ impl QwenWorkCnTraceBody {
             output.extend(turn);
         }
         Ok(output)
-    }
-
-    async fn drain_native_wakeups(&self, rt: &InputRuntime) -> anyhow::Result<()> {
-        let native = self.native_wakeups.lock().expect("native wakeups").clone();
-        let Some(native) = native else {
-            return Ok(());
-        };
-        let mut worker = self.native_worker.lock().await;
-        let mut seen_sessions = HashSet::new();
-        let mut seen_sources = HashSet::new();
-        if let Some(pending) = worker.as_ref() {
-            seen_sessions.insert(pending.session.clone());
-            seen_sources.insert(pending.source.clone());
-            pending.budget.resume();
-            if !poll_native_stop(&mut worker, rt).await? {
-                return Ok(());
-            }
-        }
-
-        let mut entries = match crate::utils::source_access::read_dir_async(&native.directory).await
-        {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
-        let mut markers = Vec::new();
-        while let Some(entry) = entries.next_entry().await? {
-            if entry.file_name().to_string_lossy().ends_with(".json") {
-                markers.push(entry.path());
-            }
-        }
-        markers.sort();
-        for marker in markers {
-            let bytes = crate::utils::source_access::read(&marker).await?;
-            let value: Value = match serde_json::from_slice(&bytes) {
-                Ok(value) => value,
-                Err(_) => {
-                    rt.warn(
-                        "invalid Qwen Work SDK wakeup; discarding SDK-owned marker",
-                        None,
-                    );
-                    tokio::fs::remove_file(marker).await?;
-                    continue;
-                }
-            };
-            let Some(path) = value
-                .get("transcript_path")
-                .and_then(Value::as_str)
-                .map(PathBuf::from)
-            else {
-                rt.warn(
-                    "invalid Qwen Work SDK wakeup; discarding SDK-owned marker",
-                    None,
-                );
-                tokio::fs::remove_file(marker).await?;
-                continue;
-            };
-            let Some(session) = value
-                .get("session_id")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            else {
-                rt.warn(
-                    "invalid Qwen Work SDK wakeup; discarding SDK-owned marker",
-                    None,
-                );
-                tokio::fs::remove_file(marker).await?;
-                continue;
-            };
-            if !path.starts_with(&native.transcript_root)
-                || path
-                    .components()
-                    .any(|part| matches!(part, std::path::Component::ParentDir))
-            {
-                rt.warn(
-                    "Qwen Work SDK wakeup is outside the authorized transcript source; discarding SDK-owned marker",
-                    None,
-                );
-                tokio::fs::remove_file(marker).await?;
-                continue;
-            }
-            // The SDK read budget is per source per collection cycle. Keep
-            // same-session notifications ordered and avoid resetting that
-            // budget by draining many wakeups for the same file in one poll.
-            if seen_sessions.contains(session) || seen_sources.contains(&path) {
-                continue;
-            }
-            seen_sessions.insert(session.to_owned());
-            seen_sources.insert(path.clone());
-            if let Err(error) = crate::utils::source_access::private_path(&path)
-                .and_then(|()| crate::utils::source_access::check(&path))
-            {
-                if error.kind() == std::io::ErrorKind::PermissionDenied {
-                    rt.warn(
-                        "Qwen Work SDK wakeup source was rejected; discarding SDK-owned marker",
-                        None,
-                    );
-                    tokio::fs::remove_file(marker).await?;
-                    continue;
-                }
-                rt.warn(
-                    "Qwen Work SDK wakeup retained while its source is unavailable",
-                    None,
-                );
-                continue;
-            }
-            let input = serde_json::to_vec(&value)?;
-            let limit = value.get("snapshot_bytes").and_then(Value::as_u64);
-            let native = native.clone();
-            let scope = crate::utils::source_access::current();
-            let budget = Arc::new(TranscriptReadBudget::new(
-                crate::utils::source_access::read_limit(usize::MAX),
-            ));
-            let read_budget = budget.clone();
-            let task = tokio::task::spawn_blocking(move || {
-                struct Restore(Option<Arc<crate::utils::source_access::SourceScope>>);
-                impl Drop for Restore {
-                    fn drop(&mut self) {
-                        crate::utils::source_access::install(self.0.take());
-                    }
-                }
-                let _restore = Restore(crate::utils::source_access::current());
-                crate::utils::source_access::install(scope);
-                crate::hook_process::run_qwen_work_cn_for_sdk(
-                    &native.producer_data_dir,
-                    &native.user_id,
-                    &input,
-                    limit,
-                    native.legacy_cursor_root.as_deref(),
-                    &read_budget,
-                )
-            });
-            *worker = Some(NativeStopWorker {
-                marker,
-                source: path,
-                session: session.to_owned(),
-                budget,
-                task,
-            });
-            if !poll_native_stop(&mut worker, rt).await? {
-                break;
-            }
-        }
-        Ok(())
     }
 
     async fn read_hook_jsonl(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {

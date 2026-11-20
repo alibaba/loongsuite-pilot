@@ -2447,6 +2447,23 @@ impl Orchestrator {
                 )
             })
         };
+        let qwen_wakeups =
+            (self.standalone && self.runtime_options.manage_host_services).then(|| {
+                let sdk_data = std::path::PathBuf::from(
+                    self.data_dir_join("state/standalone-qwen-work-cn-sdk"),
+                );
+                let data = std::path::PathBuf::from(&self.data_dir);
+                crate::inputs::qwen_work_cn::QwenWorkCnNativeWakeups {
+                    directory: sdk_data.join("wakeups/qwen-work-cn"),
+                    pilot_policy_dir: Some(sdk_data),
+                    transcript_root: std::path::PathBuf::from(resolve_home(
+                        "~/.qwenworkcn/projects",
+                    )),
+                    producer_data_dir: data.clone(),
+                    legacy_cursor_root: Some(data),
+                    user_id: self.config.user_id.clone(),
+                }
+            });
         if !self.uses_sdk_qwen_work_cn() {
             let input = QwenWorkCnTraceInput::new(QwenWorkCnTraceOptions {
                 state_store: Arc::clone(state_store),
@@ -2476,28 +2493,8 @@ impl Orchestrator {
                     })
                 },
             });
-            if self.standalone && self.runtime_options.manage_host_services {
-                ensure_dir(&qwen_log).await;
-                let sdk_data = std::path::PathBuf::from(
-                    self.data_dir_join("state/standalone-qwen-work-cn-sdk"),
-                );
-                let transcript_root =
-                    std::path::PathBuf::from(resolve_home("~/.qwenworkcn/projects"));
-                match crate::sdk::configure_qwen_wakeups(&sdk_data, Some(&transcript_root)) {
-                    Ok(()) => input.set_native_wakeups(
-                        crate::inputs::qwen_work_cn::QwenWorkCnNativeWakeups {
-                            directory: sdk_data.join("wakeups/qwen-work-cn"),
-                            transcript_root,
-                            producer_data_dir: std::path::PathBuf::from(&self.data_dir),
-                            legacy_cursor_root: Some(std::path::PathBuf::from(&self.data_dir)),
-                            user_id: self.config.user_id.clone(),
-                        },
-                    ),
-                    Err(error) => logger("Orchestrator").warn(
-                        "Qwen Work transcript wakeup setup failed",
-                        Some(&fields(serde_json::json!({"error": error.to_string()}))),
-                    ),
-                }
+            if let Some(native) = &qwen_wakeups {
+                input.set_native_wakeups(native.clone());
             }
             self.add_hosted(
                 entries,
@@ -2508,15 +2505,20 @@ impl Orchestrator {
             )
             .await;
         }
+        let qwen_history = QwenWorkCnInput::new(QwenWorkCnOptions {
+            state_store: Arc::clone(state_store),
+            log_dir: Some(qwen_log.clone()),
+            log_prefix: None,
+            poll_interval_ms: self.poll("qwen-work-cn-hook"),
+        });
+        if let Some(native) = qwen_wakeups {
+            // The history-only listener is gated off while either trace listener owns Stop.
+            qwen_history.set_native_wakeups(native);
+        }
         self.add_hosted_when(
             entries,
             HostedInputSpec::new("qwen-work-cn-hook", "qwen-work-cn", "hook-jsonl", 1),
-            QwenWorkCnInput::new(QwenWorkCnOptions {
-                state_store: Arc::clone(state_store),
-                log_dir: Some(qwen_log.clone()),
-                log_prefix: None,
-                poll_interval_ms: self.poll("qwen-work-cn-hook"),
-            }),
+            qwen_history,
             vec![qwen_log.clone()],
             QwenWorkCnInput::check_availability,
             {

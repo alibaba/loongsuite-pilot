@@ -436,6 +436,7 @@ fn run_agent(
             roots.push(super::policy::canonical_candidate(&directory)?);
             Some(QwenWorkCnNativeWakeups {
                 directory,
+                pilot_policy_dir: None,
                 transcript_root: source.path.clone(),
                 producer_data_dir,
                 user_id: init.user_id.clone(),

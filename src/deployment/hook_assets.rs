@@ -475,7 +475,7 @@ fn pin_configuration_parent(path: &Path) -> Result<PathBuf> {
     }
 }
 
-async fn with_config_locks<T, Fut>(
+pub(super) async fn with_config_locks<T, Fut>(
     paths: &[PathBuf],
     body: impl FnOnce() -> Fut + Send,
 ) -> Result<T>
