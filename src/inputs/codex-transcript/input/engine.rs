@@ -39,7 +39,7 @@ use super::super::extractor::{
 };
 use super::super::scan::{
     self, file_meta_snapshot, file_mtime_ms, find_turn_start_offset, last_complete_jsonl_offset,
-    read_json_line_at, read_json_lines, scan_json_lines, scan_json_lines_through_quarantine,
+    read_json_lines, read_owner_record_at, scan_json_lines, scan_json_lines_through_quarantine,
     select_owner_session_meta_offset, terminal_turn_id_for, turn_id_for_start,
     uuid_v7_timestamp_ms, JsonLine,
 };
@@ -1398,7 +1398,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         };
         if meta.is_none() {
             if let Some(offset) = checkpoint.owner_session_meta_offset {
-                if let Some(record) = read_json_line_at(file_path, offset, Some(rt)).await? {
+                if let Some(record) = read_owner_record_at(file_path, offset, Some(rt)).await? {
                     meta = extract_codex_transcript_meta(&record).map(Arc::new);
                     if let Some(meta) = meta.clone() {
                         if current_ino == Some(checkpoint.inode)
@@ -3357,7 +3357,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         if owner_offset < 0 || owner_offset >= file_size {
             return Ok(None);
         }
-        let Some(record) = read_json_line_at(file_path, owner_offset, Some(rt)).await? else {
+        let Some(record) = read_owner_record_at(file_path, owner_offset, Some(rt)).await? else {
             return Ok(None);
         };
         let Some(meta) = extract_codex_transcript_meta(&record) else {

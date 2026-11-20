@@ -1715,6 +1715,84 @@ fn owning_session_metadata_preserves_every_single_level_subagent_relationship_fi
         assert_eq!(got[key], value, "{key}");
     }
 }
+// The producer streams the fixture too, so an isolated run measures the reader's RSS.
+async fn recover_long_owner(mebibytes: usize) {
+    use std::io::{BufWriter, Seek, Write};
+    let first = Fixture::new();
+    let path = first.write("rollout-large-owner.jsonl", "{}\n").await;
+    let child = child_record();
+    let json = child
+        .to_string()
+        .replace("\"payload\":{", "\"payload\":{\"instructions\":\"");
+    let (prefix, fields) = json.split_once("\"instructions\":\"").unwrap();
+    let mut out = BufWriter::new(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+    );
+    write!(out, "{prefix}\"instructions\":\"").unwrap();
+    let chunk = [b'x'; 65536];
+    for _ in 0..mebibytes * 16 {
+        out.write_all(&chunk).unwrap();
+    }
+    writeln!(out, "\",{fields}").unwrap();
+    let next = out.stream_position().unwrap();
+    writeln!(
+        out,
+        "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"other\"}}}}"
+    )
+    .unwrap();
+    out.flush().unwrap();
+    drop(out);
+    let (ino, size, _) = file_meta_snapshot(&path).await.unwrap();
+    first.rt().state_store.update(
+        &first.engine().state_key(&path),
+        InputStatePatch {
+            last_offset: Some(next as f64),
+            extra: Some(json!({"codexTranscript":{"inode":ino,"scanOffset":next,
+          "ownerSessionMetaOffset":3,"emittedTerminalTurnIds":[]}})),
+            ..Default::default()
+        },
+    );
+    let restarted = first.restart().await;
+    restarted
+        .engine()
+        .process_file(restarted.rt(), &path, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted.input.subagent_link_snapshot().detected_children,
+        1
+    );
+    let owner = restarted
+        .engine()
+        .load_transcript_owner_meta(restarted.rt(), &path, ino, size, 3, true)
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = extract_codex_transcript_meta(child.as_object().unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(owner.as_ref()).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+    let next_record = read_owner_record_at(&path, next as i64, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(next_record["payload"]["id"], "other");
+}
+
+#[tokio::test]
+async fn restart_recovers_64_mib_owner() {
+    recover_long_owner(64).await;
+}
+
+#[tokio::test]
+async fn restart_recovers_120_mib_owner() {
+    recover_long_owner(120).await;
+}
+
 #[tokio::test]
 async fn cached_owner_metadata_reregisters_child_after_linker_eviction_without_reading_transcript()
 {

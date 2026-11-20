@@ -2009,6 +2009,8 @@ impl Orchestrator {
                 multimodal: None,
             });
             let manager = Arc::downgrade(&self.inputs);
+            // Hosted input batches share the manager's queue. The standalone collector
+            // registers Codex through the SDK and persists owned batches in its outbox.
             let _ = transcript.inner.body.output_capacity.set(Box::new(move || {
                 let manager = manager.upgrade();
                 Box::pin(async move {

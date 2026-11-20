@@ -480,40 +480,112 @@ pub async fn last_complete_jsonl_offset(
     Ok(0)
 }
 
-pub async fn read_json_line_at(
+// Only these members feed extract_codex_transcript_meta. In particular,
+// historical "instructions" can occupy almost the entire allowed record.
+struct OwnerFields(bool);
+
+impl<'de> serde::de::DeserializeSeed<'de> for OwnerFields {
+    type Value = Map<String, Value>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for OwnerFields {
+    type Value = Map<String, Value>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a Codex session metadata object")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut selected = Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let value = match (self.0, key.as_str()) {
+                (false, "payload") => Value::Object(map.next_value_seed(OwnerFields(true))?),
+                (_, "timestamp")
+                | (false, "type")
+                | (
+                    true,
+                    "id" | "session_id" | "source" | "forked_from_id" | "thread_source"
+                    | "model_provider" | "base_instructions" | "dynamic_tools",
+                ) => map.next_value()?,
+                _ => {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                    continue;
+                }
+            };
+            selected.insert(key, value);
+        }
+        Ok(selected)
+    }
+}
+
+pub async fn read_owner_record_at(
     file_path: &str,
     offset: i64,
     runtime: Option<&InputRuntime>,
 ) -> anyhow::Result<Option<Map<String, Value>>> {
-    let mut file = crate::utils::source_access::open_async(file_path).await?;
-    let mut chunks: Vec<u8> = Vec::new();
-    file.seek(SeekFrom::Start(offset.max(0) as u64)).await?;
-    let mut buffer = vec![0u8; 64 * 1024];
-    // Checkpoint recovery must accept the same owner record as the live scanner.
-    // Include one byte for the newline of an exactly-at-limit record.
-    loop {
-        let length = buffer.len().min(MAX_JSONL_RECORD_BYTES + 1 - chunks.len());
-        let started = InputRuntimeAccumulator::now();
-        let bytes_read = file.read(&mut buffer[..length]).await?;
-        observe_read(runtime, bytes_read as u64, length as u64, started);
-        if bytes_read == 0 {
-            break;
+    use serde::de::DeserializeSeed;
+    let started = InputRuntimeAccumulator::now();
+    let (record, reads) = crate::utils::source_access::open_with(file_path, move |mut file| {
+        file.seek(SeekFrom::Start(offset.max(0) as u64))?;
+        let mut remaining = MAX_JSONL_RECORD_BYTES + 1;
+        let mut complete = false;
+        let mut reads = Vec::new();
+        let mut read_line = |buf: &mut [u8]| -> io::Result<usize> {
+            if complete || remaining == 0 {
+                return Ok(0);
+            }
+            let requested = buf.len().min(remaining);
+            let n = file.read(&mut buf[..requested])?;
+            remaining -= n;
+            reads.push((n, requested));
+            if let Some(end) = buf[..n].iter().position(|b| *b == b'\n') {
+                complete = true;
+                return Ok(end);
+            }
+            Ok(n)
+        };
+        struct LineReader<F>(F);
+        impl<F: FnMut(&mut [u8]) -> io::Result<usize>> Read for LineReader<F> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                (self.0)(buf)
+            }
         }
-        let newline = buffer[..bytes_read].iter().position(|byte| *byte == b'\n');
-        let take = newline.unwrap_or(bytes_read);
-        if chunks.len() + take > MAX_JSONL_RECORD_BYTES {
-            break;
-        }
-        chunks.extend_from_slice(&buffer[..take]);
-        if newline.is_some() {
-            let text = String::from_utf8_lossy(&chunks);
-            return Ok(match serde_json::from_str::<Value>(text.trim()) {
-                Ok(Value::Object(record)) => Some(record),
-                _ => None,
+        let reader = std::io::BufReader::with_capacity(64 * 1024, LineReader(&mut read_line));
+        let mut json = serde_json::Deserializer::from_reader(reader);
+        let record = OwnerFields(false)
+            .deserialize(&mut json)
+            .and_then(|record| {
+                json.end()?;
+                Ok(record)
             });
+        if let Err(error) = &record {
+            if error.is_io() {
+                return Err(io::Error::other(error.to_string()));
+            }
         }
+        Ok((record.ok().filter(|_| complete), reads))
+    })
+    .await?;
+    if let Some(rt) = runtime {
+        let elapsed = InputRuntimeAccumulator::now() - started;
+        rt.with_accumulator(|acc| {
+            for (index, (n, requested)) in reads.into_iter().enumerate() {
+                acc.observe_read(
+                    n as u64,
+                    requested as u64,
+                    if index == 0 { elapsed } else { 0.0 },
+                );
+            }
+        });
     }
-    Ok(None)
+    Ok(record)
 }
 
 pub async fn find_owner_session_meta_probe(
@@ -794,11 +866,16 @@ mod main346_scanner_contracts {
         let text = format!("{prefix}{meta}\n{{}}");
         tokio::fs::write(&path, &text).await.unwrap();
         let path = path.to_str().unwrap();
-        let owner = read_json_line_at(path, prefix.len() as i64, None)
+        let owner = read_owner_record_at(path, prefix.len() as i64, None)
             .await
             .unwrap();
-        assert_eq!(owner.as_ref(), meta.as_object());
-        assert!(read_json_line_at(path, (text.len() - 2) as i64, None)
+        let owner = owner.unwrap();
+        assert_eq!(
+            extract_codex_transcript_meta(&owner).unwrap().thread_id,
+            "child"
+        );
+        assert!(owner["payload"].get("instructions").is_none());
+        assert!(read_owner_record_at(path, (text.len() - 2) as i64, None)
             .await
             .unwrap()
             .is_none());
