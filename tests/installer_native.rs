@@ -865,6 +865,59 @@ fn first_install_previews_config_without_publishing_then_commits_it_with_runtime
 }
 
 #[test]
+fn staged_install_registers_the_versioned_cursor_helper_without_script_assets() {
+    let fixture = Fixture::new();
+    let hook = Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));
+    fs::copy(
+        hook,
+        fixture
+            .candidate
+            .join("bin")
+            .join(hook.file_name().unwrap()),
+    )
+    .unwrap();
+    fixture.package_with(&[(
+        "agents.d/cursor.json",
+        include_str!("../agents.d/cursor.json"),
+    )]);
+    let cursor = fixture.root.path().join(".cursor/hooks.json");
+    fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    fs::write(
+        &cursor,
+        r#"{"version":1,"hooks":{"stop":[{"command":"third-party-hook"}]}}"#,
+    )
+    .unwrap();
+    let mut options = fixture.runtime_options(&fixture.candidate);
+    options["configOptions"] = json!({
+        "selectedAgents":"cursor", "agentSelectionExplicit":true,
+        "probeResult":[{"id":"cursor", "detected":true}, {"id":"cursor-cli", "detected":false}]
+    });
+    let staged = fixture.helper("stage-package", &options, true);
+    success(&staged);
+    let name = String::from_utf8(staged.stdout).unwrap().trim().to_owned();
+    let installed = fixture.root.path().join("cache/versions").join(name);
+    options["sourceDir"] = json!(installed);
+    options["deployHooks"] = json!(true);
+    success(&fixture.helper("publish-package", &options, true));
+    let first = fs::read_to_string(&cursor).unwrap();
+    let parsed: Value = serde_json::from_str(&first).unwrap();
+    let stop = parsed["hooks"]["stop"].as_array().unwrap();
+    assert_eq!(stop.len(), 2);
+    assert!(stop
+        .iter()
+        .any(|hook| hook["command"] == "third-party-hook"));
+    assert!(stop.iter().any(|hook| {
+        hook["command"].as_str().is_some_and(|command| {
+            command.contains("loongsuite-pilot-sdk-hook")
+                && command.contains("sdk-hook --channel observe --agent cursor --event stop")
+        })
+    }));
+    assert!(!fixture.data.join("hooks").exists());
+    success(&fixture.helper("publish-package", &options, false));
+    assert_eq!(fs::read_to_string(cursor).unwrap(), first);
+}
+
+#[test]
 fn installation_applies_agent_selection_before_real_hook_injection() {
     let fixture = Fixture::new();
     fixture.package_with(&[

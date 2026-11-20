@@ -704,8 +704,10 @@ mod tests {
             let data = root.path().join(link_kind);
             let external = root.path().join(format!("external-{link_kind}"));
             std::fs::create_dir_all(&external).unwrap();
-            let mut def: AgentDefinition =
-                serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+            let mut def: AgentDefinition = serde_json::from_str(include_str!(
+                "../../tests/fixtures/legacy-cursor-agent.json"
+            ))
+            .unwrap();
             def.hook.as_mut().unwrap().hook_command =
                 format!("{}/hooks/cursor-loongsuite-pilot-hook.sh", data.display());
             if link_kind == "root" {
@@ -740,8 +742,10 @@ mod tests {
         std::fs::create_dir_all(pilot.join("assets/hooks/shared")).unwrap();
         std::fs::write(pilot.join("assets/hooks/fixture.sh"), "entry").unwrap();
         std::fs::write(pilot.join("assets/hooks/shared/native.sh"), "shared").unwrap();
-        let mut def: AgentDefinition =
-            serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+        let mut def: AgentDefinition = serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy-cursor-agent.json"
+        ))
+        .unwrap();
         def.hook.as_mut().unwrap().hook_command = format!("{}/hooks/fixture.sh", data.display());
         assert!(HookAssets::load(&def, Some(&pilot), &data).is_err());
         std::fs::write(pilot.join("Cargo.toml"), "[package]\n").unwrap();
@@ -769,8 +773,10 @@ mod tests {
         let external = root.path().join("external");
         std::fs::write(&external, "shared").unwrap();
         std::os::unix::fs::symlink(&external, pilot.join("assets/hooks/shared/native.sh")).unwrap();
-        let mut def: AgentDefinition =
-            serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+        let mut def: AgentDefinition = serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy-cursor-agent.json"
+        ))
+        .unwrap();
         def.hook.as_mut().unwrap().hook_command = format!("{}/hooks/fixture.sh", data.display());
         assert!(HookAssets::load(&def, Some(&pilot), &data).is_err());
         std::fs::remove_file(pilot.join("assets/hooks/shared/native.sh")).unwrap();
@@ -791,8 +797,10 @@ mod tests {
         let pilot = root.path().join("candidate");
         seed_development_root(&pilot);
         let data = root.path().join("数据 🚀");
-        let mut def: AgentDefinition =
-            serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+        let mut def: AgentDefinition = serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy-cursor-agent.json"
+        ))
+        .unwrap();
         def.hook.as_mut().unwrap().hook_command =
             format!("{}/hooks/cursor-loongsuite-pilot-hook.ps1", data.display());
         std::fs::create_dir_all(pilot.join("assets/hooks/shared")).unwrap();

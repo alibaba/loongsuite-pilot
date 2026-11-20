@@ -108,6 +108,12 @@ esac
 # Retain every original shell-dispatch command, including upgrade and rollback.
 # Unknown/new native CLI commands go to ELF; unsupported uninstall/autostart stay errors.
 case "${1:-status}" in
+  sdk-hook)
+    version_dir=$(resolve_current_version) || { printf '%s\n' '{}'; exit 0; }
+    hook_bin="$version_dir/bin/loongsuite-pilot-sdk-hook"
+    [[ -f "$hook_bin" && -x "$hook_bin" && ! -L "$hook_bin" ]] || { printf '%s\n' '{}'; exit 0; }
+    AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE" exec "$hook_bin" "$@"
+    ;;
   installer-helper)
     [[ "$LP_RUNTIME_HELPER" == /* && -f "$LP_RUNTIME_HELPER" &&
        -x "$LP_RUNTIME_HELPER" && ! -L "$LP_RUNTIME_HELPER" ]] || {
