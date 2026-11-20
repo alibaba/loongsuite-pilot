@@ -141,6 +141,11 @@ export class HubUsage {
       [...ids].some(id => t.tools.has(id)));
     if (matches.length !== 1 || !matches[0].reports.size) return;
     const turn = matches[0];
+    if (rounds) entry['loongsuite.trae_cn.model_responses'] = rounds.map(round => {
+      const report = 'reply' in round && round.reply === turn.reply && round.seq !== undefined ? turn.reports.get(round.seq) : undefined;
+      return report ? { ...round, input: report.input, output: report.output,
+        ...(report.cached !== undefined ? { cached: report.cached } : {}) } : round;
+    });
     let input = 0, output = 0, cached = 0, allCached = true;
     for (const r of turn.reports.values()) {
       input += r.input; output += r.output;

@@ -4,7 +4,12 @@ import * as os from 'node:os';
 import { createInflateRaw } from 'node:zlib';
 import cbor from 'cbor';
 
-type Receipt = { session: string; turn: string; done: boolean; touched: number; calls: Set<string>; history: Map<string, string>; expected: Map<string, Set<number>> };
+type ReplyUsage = { reply: string; seq: number };
+type ResponseStream = {
+  request: string; owner: unknown; histories: Set<string>; tools: Set<string>; reports: Map<string, ReplyUsage>;
+  resultCount?: number; closed: boolean;
+};
+type Receipt = { session: string; turn: string; done: boolean; touched: number; streams: ResponseStream[]; active?: ResponseStream; ambiguousStreams?: boolean; calls: Set<string>; history: Map<string, string>; expected: Map<string, Set<number>> };
 const text = (value: unknown) => Buffer.isBuffer(value) ? value.toString('utf8') : '';
 const id24 = /^[a-f0-9]{24}$/;
 class NativeStream {
@@ -50,18 +55,45 @@ export class NativeUsageIndex {
     if (message === 'context resolve applied to task request') {
       const session = text(f.session_id), turn = text(f.turn_id);
       if (id24.test(session) && id24.test(turn) && !stream.receipts.has(trace)) {
-        stream.receipts.set(trace, { session, turn, expected: new Map(), calls: new Set(), history: new Map(), done: false, touched: Date.now() });
+        stream.receipts.set(trace, { session, turn, expected: new Map(), streams: [], calls: new Set(), history: new Map(), done: false, touched: Date.now() });
       }
       return;
     }
     const r = stream.receipts.get(trace);
     if (!r) return;
+    const owner = (record as { span?: unknown }).span;
+    if (message === 'cloud stream response headers' &&
+        /\/api\/agent\/v3\/(?:create_agent_task|commit_toolcall_result)$/.test(text(f.url))) {
+      const request = text(f.resp_logid);
+      if (r.active) r.ambiguousStreams = true;
+      r.active = undefined;
+      if (owner != null && request && request.length <= 128) {
+        r.active = { owner, request, histories: new Set(), tools: new Set(), reports: new Map(), closed: false };
+        r.streams.push(r.active);
+      }
+    }
+    if (f.has_async_child === true || f.has_foreground === true) r.ambiguousStreams = true;
+    const active = r.active?.owner === owner ? r.active : undefined;
+    if (active) {
+      if (message === 'streaming ToolCall dispatch' && f.require_local_execution === true && text(f.toolcall_id)) {
+        active.tools.add(text(f.toolcall_id));
+      }
+      if (message === 'routing CommitReady' && f.has_async_child === false && f.has_foreground === false &&
+          typeof f.parent_result_count === 'number') active.resultCount = f.parent_result_count;
+      if (message === 'commit_results' || message === 'resolving explicit Cloud task completion as terminal') {
+        active.closed = message === 'commit_results'
+          ? text(f.conversation_id) === r.session && active.resultCount === active.tools.size && f.result_count === active.tools.size
+          : active.tools.size === 0;
+        r.active = undefined;
+      }
+    }
     if (message === 'tool execution started') {
       const id = text(f.toolcall_id);
       if (id && id.length <= 256) r.calls.add(id);
     }
     if (message === 'recording history entry' && text(f.history_source) === 'Server' && text(f.source) === 'llm_default') {
       const id = text(f.history_id);
+      if (id24.test(id)) active?.histories.add(id);
       const parts = (record as { time?: number[] }).time;
       if (id24.test(id) && !r.history.has(id) && Array.isArray(parts) && parts.length === 9 && parts.every(Number.isInteger)) {
         const [year, day, hour, minute, second, ns, oh, om, os] = parts;
@@ -74,6 +106,7 @@ export class NativeUsageIndex {
         typeof f.event_seq === 'number' && Number.isSafeInteger(f.event_seq) && f.event_seq >= 0) {
       const reply = text(f.task_id);
       const seqs = r.expected.get(reply) ?? new Set<number>();
+      active?.reports.set(reply + "/" + f.event_seq, { reply, seq: f.event_seq });
       seqs.add(f.event_seq);
       r.expected.set(reply, seqs);
     } else if (message === 'chat: runner completed' && text(f.turn_id) === r.turn) {
@@ -86,7 +119,18 @@ export class NativeUsageIndex {
     const matches = [...this.streams.values()].flatMap(s => [...s.receipts.values()])
       .filter(r => r.session === session && [...calls].some(id => r.calls.has(id)));
     if (matches.length !== 1 || !matches[0].done || !matches[0].history.size) return;
-    return [...matches[0].history].map(([id, at]) => ({ id, at }));
+    const receipt = matches[0];
+    return [...receipt.history].map(([id, at]) => {
+      const owners = receipt.streams.filter(s => s.histories.has(id));
+      const s = owners[0];
+      if (receipt.ambiguousStreams || owners.length !== 1 || !s.closed || s.histories.size !== 1 ||
+          receipt.streams.filter(other => other.request === s.request).length !== 1) return { id, at };
+      const toolIds = [...s.tools].filter(call => receipt.calls.has(call) &&
+        receipt.streams.every(other => other === s || !other.tools.has(call)));
+      const uniqueReports = [...s.reports].filter(([key]) => receipt.streams.every(other => other === s || !other.reports.has(key)));
+      const usage = uniqueReports.length === 1 && s.reports.size === 1 ? uniqueReports[0][1] : undefined;
+      return { id, at, request: s.request, toolIds, ...(usage ? { reply: usage.reply, seq: usage.seq } : {}) };
+    });
   }
 
   complete(trace: string, session: string, reply: string, seqs: Map<number, unknown>) {

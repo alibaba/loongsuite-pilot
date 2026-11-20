@@ -18,6 +18,7 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
       step.attributes['gen_ai.span.kind'] !== 'STEP' || agent.attributes['gen_ai.span.kind'] !== 'AGENT') return spans;
   const trace = llm.spanContext().traceId;
   const observed: ReadableSpan[] = [];
+  const parents = new Map<string, { id: string; history: string }>();
   const seen = new Set<string>();
   for (const r of rounds) {
     if (!r || typeof r !== 'object' || Array.isArray(r) || typeof r.id !== 'string' || !/^[a-f0-9]{24}$/.test(r.id) ||
@@ -37,8 +38,21 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
       }
       attributes['gen_ai.step.id'] = r.id;
       attributes['loongsuite.trae_cn.observation'] = 'response_recorded';
-      if (isModel) attributes['gen_ai.response.id'] = r.id;
-      else attributes['gen_ai.react.round'] = seen.size;
+      if (typeof r.request === 'string') attributes['loongsuite.trae_cn.stream_request_id'] = r.request;
+      if (isModel) {
+        attributes['gen_ai.response.id'] = r.id;
+        if (typeof r.input === 'number' && typeof r.output === 'number') {
+          attributes['gen_ai.usage.input_tokens'] = r.input;
+          attributes['gen_ai.usage.output_tokens'] = r.output;
+          attributes['gen_ai.usage.total_tokens'] = r.input + r.output;
+          if (typeof r.cached === 'number') attributes['gen_ai.usage.cache_read.input_tokens'] = r.cached;
+        }
+      } else {
+        attributes['gen_ai.react.round'] = seen.size;
+        if (Array.isArray(r.toolIds)) for (const call of r.toolIds) {
+          if (typeof call === 'string') parents.set(call, { id, history: r.id });
+        }
+      }
       observed.push({ ...template, name: template.name, kind: template.kind, resource: template.resource,
         instrumentationLibrary: template.instrumentationLibrary, ended: true, droppedEventsCount: 0,
         droppedLinksCount: 0, droppedAttributesCount: 0, links: [], events: [], status: { code: 0 },
@@ -47,12 +61,22 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
       parent = id;
     }
   }
-  // The model IDs prove the responses, but do not identify which one requested a tool.
+  let unassigned = false;
   for (const span of spans) {
-    if (span !== llm && span.parentSpanId === step.spanContext().spanId) Object.assign(span, { parentSpanId: agent.spanContext().spanId });
+    if (span === llm || span.parentSpanId !== step.spanContext().spanId) continue;
+    const parent = parents.get(String(span.attributes['gen_ai.tool.call.id']));
+    if (parent) {
+      Object.assign(span, { parentSpanId: parent.id });
+      span.attributes['gen_ai.step.id'] = parent.history;
+    } else unassigned = true;
+  }
+  if (unassigned) {
+    Object.assign(step, { name: 'tool execution (round unknown)' });
+    delete step.attributes['gen_ai.react.round'];
+    step.attributes['loongsuite.trae_cn.observation'] = 'unattributed_tools';
   }
   for (const [key, value] of Object.entries(llm.attributes)) {
     if (key.startsWith('gen_ai.usage.') || key.startsWith('agent.trae-cn.hub.')) agent.attributes[key] = value;
   }
-  return [...spans.filter(s => s !== step && s !== llm), ...observed];
+  return [...spans.filter(s => (s !== step || unassigned) && s !== llm), ...observed];
 }
