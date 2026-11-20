@@ -8,6 +8,9 @@ export type AlarmType =
   | 'FLUSH_SEND_ALARM'
   | 'FLUSH_QUOTA_ALARM'
   | 'HOOK_INSTALL_ALARM'
+  | 'HOOK_REPAIR_ALARM'
+  | 'SELF_CHECK_DATA_GAP_ALARM'
+  | 'SELF_CHECK_NEVER_COLLECTED_ALARM'
   | 'PROCESS_CPU_ALARM'
   | 'PROCESS_MEMORY_ALARM'
   | 'PROCESS_RESOURCE_ALARM'
@@ -64,7 +67,8 @@ export class AlarmManager {
   }
 
   record(type: AlarmType, level: AlarmLevel, message: string, context?: AlarmContext, count = 1): void {
-    const key = `${type}_${context?.input_name ?? ''}_${context?.endpoint_name ?? ''}`;
+    const repairOutcome = type === 'HOOK_REPAIR_ALARM' ? level : '';
+    const key = `${type}_${context?.input_name ?? ''}_${context?.endpoint_name ?? ''}_${repairOutcome}`;
     const existing = this.alarms.get(key);
     if (existing) {
       existing.count += count;

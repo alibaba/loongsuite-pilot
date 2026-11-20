@@ -275,6 +275,35 @@ describe('Orchestrator', () => {
   });
 
   describe('startup sequence (T038)', () => {
+    it('applies live listener controls, recorded scope and workspace privacy to self-check inputs', async () => {
+      const config = makeConfig();
+      const orchestrator = new Orchestrator(config);
+      await orchestrator.start();
+      try {
+        const current = orchestrator as any;
+        const active = vi.spyOn(current.inputManager, 'getActiveInputIds').mockReturnValue(['qoder-work-trace']);
+        const see = () => current.selfCheckInputs(discoveryEntries);
+        expect(see()).toEqual([{ id: 'qoder-work-trace', agentId: 'qoder-work', lastActiveTime: 0 }]);
+
+        current.agentControlManager.resolveEnabled.mockReturnValue(false);
+        expect(see()).toEqual([]);
+        current.agentControlManager.resolveEnabled.mockReturnValue(true);
+
+        const priorScope = current.deploymentScope;
+        current.deploymentScope = 'recorded';
+        expect(see()).toEqual([]);
+        current.deploymentScope = priorScope;
+        config.privacy = { excludeWorkspaces: [homeDir] };
+        expect(see()).toEqual([]);
+        config.privacy = undefined;
+
+        active.mockReturnValue([]);
+        expect(see()).toEqual([]);
+      } finally {
+        await orchestrator.stop();
+      }
+    });
+
     it('preserves final interceptor status after the Worker service reference is cleared', async () => {
       let stopped = false;
       const status = { enabled: true, running: true, collection_status: 'ok',

@@ -90,6 +90,7 @@ import {
 } from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
+import { SelfCheckService, type SelfCheckInput } from '../self-check/self-check-service.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
 import { PipelineManager } from '../pipeline/pipeline-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
@@ -177,6 +178,7 @@ export class Orchestrator extends EventEmitter {
   private legacySlsFailedLogCleanupService: LegacySlsFailedLogCleanupService | null = null;
   private hookWatchdog!: HookWatchdog;
   private hookWatchdogTargetKey = '';
+  private selfCheckService: SelfCheckService | null = null;
   private deploymentScope: DeploymentScopeMode = 'auto';
   /** Agents a named install actually wrote. Raced deployAll records are not in this set. */
   private recordedAgentIds = new Set<string>();
@@ -512,6 +514,17 @@ export class Orchestrator extends EventEmitter {
     // Report the interceptor startup outcome once, including disabled or failed starts.
     await this.metricsWriter.start();
 
+    if (this.config.selfCheck?.enabled) {
+      this.selfCheckService = new SelfCheckService({
+        config: this.config.selfCheck,
+        alarmManager: this.alarmManager,
+        getDefinitions: () => this.deploymentManager.getDefinitions(),
+        getEligibleInputs: () => this.selfCheckInputs(detectionEntries),
+        pilotVersion: version,
+      });
+      this.selfCheckService.start();
+    }
+
     // The native macOS menu bar app has its own switch.
     if (this.config.statusBar.enabled) {
       if (process.platform === 'darwin') {
@@ -566,6 +579,8 @@ export class Orchestrator extends EventEmitter {
     // Cancel signal work before the first shutdown await. An old poll may be
     // waiting on deployment I/O and must never restart the stopped watchdog.
     this.hookWatchdog?.stop();
+    this.selfCheckService?.stop();
+    this.selfCheckService = null;
     await this.stopHookInstallSignalWatch();
 
     await this.pipelineManager?.stop();
@@ -829,7 +844,7 @@ export class Orchestrator extends EventEmitter {
       ...this.buildDirectoryPluginInterceptTargets(),
       ...this.buildCopilotPluginInterceptTargets(),
       ...this.buildDshYamlPatchInterceptTargets(),
-    ]);
+    ], this.alarmManager);
     this.hookWatchdogTargetKey = this.currentHookWatchdogTargetKey();
     return watchdog;
   }
@@ -2018,6 +2033,24 @@ export class Orchestrator extends EventEmitter {
    */
   private isAgentGatedEnabled(agentId: string): boolean {
     return this.scopeAllows(agentId) && isAgentGatedEnabledIn(this.config, agentId);
+  }
+
+  private selfCheckInputs(entries: readonly AgentDetectionEntry[]): SelfCheckInput[] {
+    // The native activity files do not identify which workspace caused a write.
+    if (this.config.privacy?.excludeWorkspaces.length) return [];
+    const running = new Set(this.inputManager.getActiveInputIds());
+    const counters = this.inputManager.getInputCounters();
+    const eligible: SelfCheckInput[] = [];
+    for (const entry of entries) {
+      if (!running.has(entry.id) || entry.enabled?.() === false) continue;
+      const counter = counters.get(entry.id);
+      if (!counter) continue;
+      const agentId = Orchestrator.LISTENER_AGENT_MAP[entry.id] ?? counter.agentType;
+      // The built-in indicator describes the default Codex home.
+      if (agentId === 'codex' && process.env.CODEX_HOME) continue;
+      eligible.push({ id: entry.id, agentId, lastActiveTime: counter.lastActiveTime });
+    }
+    return eligible;
   }
 
   /**

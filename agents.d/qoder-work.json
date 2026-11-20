@@ -1,6 +1,12 @@
 {
   "id": "qoder-work",
   "displayName": "QoderWork",
+  "activityIndicator": "~/.qoderwork/audit/audit.jsonl",
+  "versionSource": {
+    "type": "jsonFile",
+    "file": "~/.qoderwork/.status.json",
+    "key": "version"
+  },
   "deployMode": "hook",
   "detection": {
     "paths": ["~/.qoderwork"],

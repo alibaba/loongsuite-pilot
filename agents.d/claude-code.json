@@ -1,6 +1,12 @@
 {
   "id": "claude-code",
   "displayName": "Claude Code",
+  "activityIndicator": "~/.claude/history.jsonl",
+  "versionSource": {
+    "type": "newestJsonFile",
+    "dir": "~/.claude/sessions",
+    "key": "version"
+  },
   "deployMode": "hook",
   "detection": {
     "paths": ["~/.claude"],
