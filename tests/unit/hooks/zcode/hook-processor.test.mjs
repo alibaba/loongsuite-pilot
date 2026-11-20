@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -199,4 +201,38 @@ describe('rollout writer timing vs hook fire (spec §1.5 #7 + source-evidence §
     expect(traceLine.session_id).toBe('sess_36734977-639d-4424-94ba-8c1957576a5f');
     expect(traceLine.trace_id).toBe('e294f5ce-30c2-4817-92be-d035412905a1');
   });
+});
+
+test.runIf(process.platform !== 'win32')('runs the installed Stop hook with a relocated Pilot data directory', () => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), 'pilot-zcode-installed-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(root, 'custom Pilot data');
+    const hooks = path.join(data, 'hooks');
+    fs.mkdirSync(home);
+    fs.cpSync(path.resolve('assets/hooks'), hooks, { recursive: true });
+
+    const launcher = path.join(root, 'pinned-node');
+    const usedPin = path.join(root, 'used-pin');
+    fs.writeFileSync(launcher, '#!/bin/sh\nprintf used > "$PILOT_TEST_USED_PIN"\nexec "$PILOT_TEST_REAL_NODE" "$@"\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(data, 'node-bin'), launcher + '\n');
+    const env = { ...process.env, HOME: home, PILOT_TEST_USED_PIN: usedPin, PILOT_TEST_REAL_NODE: process.execPath };
+    delete env.LOONGSUITE_PILOT_CACHE_DIR;
+    delete env.LOONGSUITE_PILOT_DATA_DIR;
+
+    const run = spawnSync('/bin/bash', [path.join(hooks, 'zcode-loongsuite-pilot-hook.sh'), 'stop'], {
+      env, encoding: 'utf8', input: fs.readFileSync(path.join(FIXTURE_DIR, 'hook-stop-stdin-paired.json'), 'utf8'),
+    });
+    expect(run.status, run.stderr).toBe(0);
+    expect(JSON.parse(run.stdout)).toEqual({});
+    expect(fs.readFileSync(usedPin, 'utf8')).toBe('used');
+    const output = path.join(data, 'logs', 'zcode');
+    const logs = fs.readdirSync(output).filter(name => name.endsWith('.jsonl'));
+    expect(logs).toHaveLength(1);
+    const records = fs.readFileSync(path.join(output, logs[0]), 'utf8').trim().split('\n').map(JSON.parse);
+    expect(records.map(record => record['gen_ai.span.kind'])).toEqual(['entry', 'agent']);
+    expect(fs.existsSync(path.join(home, '.loongsuite-pilot', 'logs', 'zcode'))).toBe(false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -31,6 +31,8 @@ switch ($Subcommand) {
 # Resolve script directory and processor path
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Processor = Join-Path $ScriptDir "zcode-hook-processor.mjs"
+$env:LOONGSUITE_PILOT_DATA_DIR = Split-Path -Parent $ScriptDir
+$Common = Join-Path $ScriptDir "shared\common.ps1"
 
 function Write-ErrorLog {
     param([string]$Stage, [string]$Message)
@@ -50,78 +52,22 @@ function Write-ErrorLog {
 }
 
 # Verify processor exists
-if (-not (Test-Path $Processor)) {
-    Write-Host "[zcode-hook] processor not found: $Processor"
+if (-not (Test-Path -LiteralPath $Processor)) {
     Write-ErrorLog -Stage "missing_processor" -Message "hook processor not found: $Processor"
     Write-Output $EmptyResult
     exit 0
 }
 
-# Find node binary -- prefer pinned, then common locations
-$MinNodeMajor = 18
-
-function Test-NodeSuitable {
-    param([string]$Bin)
-    if (-not (Test-Path $Bin)) { return $false }
-    try {
-        $ver = & $Bin --version 2>$null
-        $major = [int]($ver -replace '^v', '' -replace '\..*', '')
-        return ($major -ge $MinNodeMajor)
-    } catch {
-        return $false
-    }
+if (-not (Test-Path -LiteralPath $Common)) {
+    Write-ErrorLog -Stage "missing_runtime_resolver" -Message "hook runtime resolver not found: $Common"
+    Write-Output $EmptyResult
+    exit 0
 }
 
-$NodeBin = $null
-
-# Check pinned node
-$NodePinFile = Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
-if (Test-Path $NodePinFile) {
-    # -Encoding UTF8 + BOM strip: the pin file can hold a non-ASCII path and
-    # Windows PowerShell 5.1 defaults Get-Content to the ANSI code page,
-    # which would corrupt it into "??" (same pattern as the other hooks).
-    $pinned = ([string](Get-Content -LiteralPath $NodePinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
-    if ($pinned -and (Test-NodeSuitable $pinned)) {
-        $NodeBin = $pinned
-    }
-}
-
-# Search common locations
+. $Common
+$NodeBin = Resolve-NodeBin
 if (-not $NodeBin) {
-    $candidates = @()
-    # volta
-    $voltaNode = Join-Path $env:LOCALAPPDATA "volta\bin\node.exe"
-    if (Test-Path $voltaNode) { $candidates += $voltaNode }
-    # fnm
-    $fnmDefault = Join-Path $env:LOCALAPPDATA "fnm\aliases\default\node.exe"
-    if (Test-Path $fnmDefault) { $candidates += $fnmDefault }
-    # nvm-windows
-    $nvmDir = Join-Path $env:APPDATA "nvm"
-    if (Test-Path $nvmDir) {
-        $nvmVersions = Get-ChildItem $nvmDir -Directory | Sort-Object Name -Descending
-        foreach ($v in $nvmVersions) {
-            $nodeExe = Join-Path $v.FullName "node.exe"
-            if (Test-Path $nodeExe) { $candidates += $nodeExe; break }
-        }
-    }
-    # Program Files
-    $pfNode = "C:\Program Files\nodejs\node.exe"
-    if (Test-Path $pfNode) { $candidates += $pfNode }
-    # PATH
-    $pathNode = Get-Command node -ErrorAction SilentlyContinue
-    if ($pathNode) { $candidates += $pathNode.Source }
-
-    foreach ($candidate in $candidates) {
-        if (Test-NodeSuitable $candidate) {
-            $NodeBin = $candidate
-            break
-        }
-    }
-}
-
-if (-not $NodeBin) {
-    Write-Host "[zcode-hook] node >= $MinNodeMajor not found"
-    Write-ErrorLog -Stage "missing_node" -Message "node >= $MinNodeMajor not found"
+    Write-ErrorLog -Stage "missing_node" -Message "no supported Node.js runtime found"
     Write-Output $EmptyResult
     exit 0
 }
@@ -141,7 +87,6 @@ try {
     $result = & $NodeBin $Processor $Subcommand 2>$null
     if ($result) { Write-Output $result } else { Write-Output $EmptyResult }
 } catch {
-    Write-Host "[zcode-hook] processor exception: $_"
     Write-ErrorLog -Stage "processor_exception" -Message "hook processor threw exception: $_"
     Write-Output $EmptyResult
 }

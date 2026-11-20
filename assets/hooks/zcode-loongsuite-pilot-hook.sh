@@ -13,6 +13,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROCESSOR="$SCRIPT_DIR/zcode-hook-processor.mjs"
+RUNTIME_RESOLVER="$SCRIPT_DIR/shared/node-runtime.sh"
+export LOONGSUITE_PILOT_DATA_DIR="$(dirname "$SCRIPT_DIR")"
 EMPTY_RESULT='{}'
 SUBCOMMAND="${1:-unknown}"
 
@@ -54,68 +56,16 @@ if [[ ! -f "$PROCESSOR" ]]; then
   exit 0
 fi
 
-MIN_NODE_MAJOR=18
-
-node_is_app_bundle() {
-  local resolved
-  resolved="$(realpath "$1" 2>/dev/null || readlink -f "$1" 2>/dev/null || echo "$1")"
-  case "$resolved" in
-    /Applications/*.app/Contents/*|/System/Applications/*.app/Contents/*|"$HOME"/Applications/*.app/Contents/*)
-      return 0
-      ;;
-  esac
-  return 1
-}
-
-node_is_suitable() {
-  local bin="$1"
-  [[ -x "$bin" ]] || return 1
-  node_is_app_bundle "$bin" && return 1
-  local ver
-  ver="$("$bin" --version 2>/dev/null)" || return 1
-  local major="${ver#v}"
-  major="${major%%.*}"
-  [[ "$major" =~ ^[0-9]+$ ]] && (( major >= MIN_NODE_MAJOR )) || return 1
-  return 0
-}
-
-NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
-NODE_BIN=""
-
-if [[ -f "$NODE_PIN_FILE" ]]; then
-  pinned="$(cat "$NODE_PIN_FILE" 2>/dev/null | tr -d '[:space:]')"
-  if [[ -n "$pinned" ]] && node_is_suitable "$pinned"; then
-    NODE_BIN="$pinned"
-  fi
+if [[ ! -f "$RUNTIME_RESOLVER" ]]; then
+  log_error "missing_runtime_resolver" "hook runtime resolver not found: $RUNTIME_RESOLVER"
+  printf '%s\n' "$EMPTY_RESULT"
+  exit 0
 fi
 
-if [[ -z "$NODE_BIN" ]]; then
-  nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
-  candidates=()
-  for (( i=${#nvm_candidates[@]}-1; i>=0; i-- )); do
-    candidates+=("${nvm_candidates[i]}")
-  done
-  candidates+=(
-    "$HOME/.volta/bin/node"
-    "$HOME/.fnm/aliases/default/bin/node"
-    /opt/homebrew/bin/node
-    /usr/local/bin/node
-    "$HOME/.local/bin/node"
-  )
-  if command -v node >/dev/null 2>&1; then
-    candidates+=("$(command -v node)")
-  fi
-  for candidate in "${candidates[@]}"; do
-    if node_is_suitable "$candidate"; then
-      NODE_BIN="$candidate"
-      break
-    fi
-  done
-fi
-
-if [[ -z "$NODE_BIN" ]]; then
-  echo "[zcode-hook] node >= $MIN_NODE_MAJOR not found" >&2
-  log_error "missing_node" "node >= $MIN_NODE_MAJOR not found"
+# shellcheck source=shared/node-runtime.sh
+source "$RUNTIME_RESOLVER"
+if ! NODE_BIN="$(resolve_pilot_node_bin 2>/dev/null)"; then
+  log_error "missing_node" "node >= $PILOT_MIN_NODE_MAJOR not found"
   printf '%s\n' "$EMPTY_RESULT"
   exit 0
 fi
