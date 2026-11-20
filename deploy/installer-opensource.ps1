@@ -1219,12 +1219,96 @@ function Deploy-BootstrapScripts {
     Copy-Item (Join-Path $srcDir "collector-daemon.js") $bootDir -Force
 }
 
+function New-NpmFallbackLog {
+    # The user profile's Temp directory provides inherited private ACLs.
+    # Avoid storing native command output under a custom or machine-wide directory.
+    if (-not $env:LOCALAPPDATA) { return }
+    $logDir = Get-PilotLongPath (Join-Path $env:LOCALAPPDATA "Temp")
+    try {
+        if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
+            New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop | Out-Null
+        }
+        $logPath = Join-Path $logDir ("pilot-install-npm-" + [guid]::NewGuid() + ".log")
+        New-Item -ItemType File -Path $logPath -ErrorAction Stop | Out-Null
+        return $logPath
+    } catch {
+        # npm can still run when the optional diagnostics file is unavailable.
+    }
+}
+
+function Write-NpmFallbackHint {
+    param([string]$LogPath, [string[]]$OutputTail)
+
+    $rules = @(
+        @{ Pattern = 'not found: (make|g\+\+|gcc|c\+\+|cc1plus)|(make|g\+\+|gcc): command not found|gyp ERR! find VS'
+           Zh = '缺少 C/C++ 构建工具链。请安装 Visual Studio Build Tools 的 C++ 工作负载和 Python 3。'
+           En = 'missing C/C++ build toolchain. Install Visual Studio Build Tools with the C++ workload and Python 3.' }
+        @{ Pattern = "No module named '?distutils|distutils.*(not found|missing)"
+           Zh = '缺少 Python distutils。请检查 setuptools 和当前 Python 版本的兼容性。'
+           En = 'Python distutils is missing. Check setuptools compatibility with the selected Python version.' }
+        @{ Pattern = 'Python\.h|Could not find any Python installation'
+           Zh = '缺少 Python 或开发头文件。请安装 node-gyp 所需的 Python 开发环境。'
+           En = 'Python or its development headers are missing. Install the Python dependencies required by node-gyp.' }
+        @{ Pattern = 'EAI_AGAIN|ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ERR_SOCKET|socket hang up'
+           Zh = '无法连接 npm registry 或请求超时。请检查代理和镜像设置。'
+           En = 'the npm registry is unreachable or timing out. Check proxy and registry settings.' }
+        @{ Pattern = 'EACCES|EPERM'
+           Zh = '权限不足。请检查安装目录和 npm 缓存的属主及权限。'
+           En = 'permission denied. Check ownership and permissions for the installation directory and npm cache.' }
+        @{ Pattern = 'ENOSPC'
+           Zh = '磁盘空间不足。请释放安装目录或 npm 缓存所在磁盘的空间。'
+           En = 'out of disk space. Free space on the disks containing the installation directory and npm cache.' }
+        @{ Pattern = 'gyp ERR!|node-gyp.*(error|failed)'
+           Zh = '原生模块编译失败。请查看上方 gyp 错误。'
+           En = 'a native module failed to build. See the gyp error above.' }
+    )
+    foreach ($rule in $rules) {
+        if (($LogPath -and (Select-String -LiteralPath $LogPath -Pattern $rule.Pattern -Quiet -ErrorAction SilentlyContinue)) -or
+            ($OutputTail -match $rule.Pattern)) {
+            Msg "    提示：$($rule.Zh)" "    Hint: $($rule.En)"
+            break
+        }
+    }
+}
+
+function Write-NpmFallbackLog {
+    param([string]$LogPath, [string[]]$OutputTail)
+
+    if ($LogPath) {
+        Msg "    完整 npm 输出：$LogPath" "    Full npm output: $LogPath"
+        $earlierErrors = @(Select-String -LiteralPath $LogPath -Pattern 'npm (ERR!|error)|gyp ERR!|ERR!' -ErrorAction SilentlyContinue |
+            Where-Object { $OutputTail -notcontains $_.Line } | Select-Object -Last 30)
+        if ($earlierErrors.Count) {
+            Msg "    ---- 较早的 npm/gyp 错误（最多 30 行）----" "    ---- Earlier npm/gyp errors (up to 30 lines) ----"
+            $earlierErrors | ForEach-Object { Write-Host $_.Line }
+        }
+    }
+    Write-NpmFallbackHint $LogPath $OutputTail
+}
+
+function Write-DeployFailure {
+    param([string]$Operation, [string]$Detail)
+    switch ($script:DEPLOY_FAILED_STAGE) {
+        "files"        { $zh = "文件部署失败"; $en = "file deployment failed" }
+        "dependencies" { $zh = "依赖安装失败"; $en = "dependency installation failed" }
+        "hooks"        { $zh = "hook 脚本部署失败"; $en = "hook script deployment failed" }
+        default        { $zh = "部署失败"; $en = "deployment failed" }
+    }
+    if ($Operation -eq "install") {
+        Msg "❌ 安装中止：$zh" "❌ Install aborted: $en"
+    } else {
+        Msg "❌ 升级失败：$zh" "❌ Upgrade failed: $en"
+    }
+    if ($Detail) { Write-Host "   $Detail" }
+}
+
 # ============================================================
 # Deploy package to versions/ directory
 # ============================================================
 function Deploy-Package {
     param([string]$src)
 
+    $script:DEPLOY_FAILED_STAGE = "files"
     $cacheDir = $CACHE_DIR
     $versionsDir = Join-Path $cacheDir "versions"
     $currentFile = Join-Path $cacheDir "current"
@@ -1274,6 +1358,7 @@ function Deploy-Package {
     Msg "    ✅ 部署完成" "    ✅ Deployed"
     Write-Host ""
 
+    $script:DEPLOY_FAILED_STAGE = "dependencies"
     Msg "==> 安装依赖..." "==> Installing dependencies..."
     $modulesVer = $ver
     if (-not $modulesVer) { if ($Version) { $modulesVer = $Version } else { $modulesVer = "latest" } }
@@ -1283,20 +1368,34 @@ function Deploy-Package {
         $nodeDir = Split-Path $script:NODE_BIN
         $savedPath = $env:PATH
         $prevEAP = $ErrorActionPreference
+        $npmLog = ""
+        $npmLogErrors = @()
+        $npmExit = $null
         Push-Location -LiteralPath $script:PERMANENT_DIR
         try {
+            $npmLog = New-NpmFallbackLog
             if ($env:PATH -notlike "*$nodeDir*") { $env:PATH = "$nodeDir;$env:PATH" }
             $ErrorActionPreference = "Continue"
-            # Keep the last lines of just this invocation. The initial code
-            # also covers failure to launch npm, which sets no native exit code.
+            # The initial code also covers failure to launch npm.
             $global:LASTEXITCODE = 1
-            $npmOut = @(& $script:NPM_BIN install --omit=dev --omit=optional --fetch-retries 5 --fetch-retry-mintimeout 2000 --fetch-retry-maxtimeout 60000 2>&1 |
-                Select-Object -Last 40)
+            $npmRetryArgs = @("--fetch-retries", "5", "--fetch-retry-mintimeout", "2000",
+                "--fetch-retry-maxtimeout", "60000")
+            if ($npmLog) {
+                $npmOut = @(& $script:NPM_BIN install --omit=dev --omit=optional @npmRetryArgs 2>&1 | ForEach-Object { "$_" } |
+                    Tee-Object -LiteralPath $npmLog -ErrorAction SilentlyContinue -ErrorVariable npmLogErrors |
+                    Select-Object -Last 40)
+            } else {
+                $npmOut = @(& $script:NPM_BIN install --omit=dev --omit=optional @npmRetryArgs 2>&1 | ForEach-Object { "$_" } | Select-Object -Last 40)
+            }
             $npmExit = $LASTEXITCODE
         } finally {
             $ErrorActionPreference = $prevEAP
             $env:PATH = $savedPath
             Pop-Location
+            if ($npmLog -and ($null -eq $npmExit -or $npmLogErrors.Count -or $npmExit -eq 0)) {
+                Remove-PilotPathQuietly $npmLog
+                $npmLog = ""
+            }
         }
         if ($npmExit -ne 0) {
             Msg "❌ 依赖安装失败 (exit=$npmExit)" "❌ Dependencies installation failed (exit=$npmExit)"
@@ -1304,11 +1403,13 @@ function Deploy-Package {
                 Msg "    ---- npm 输出（末 40 行）----" "    ---- npm output (last 40 lines) ----"
                 $npmOut | ForEach-Object { Write-Host $_ }
             }
-            exit 1
+            Write-NpmFallbackLog $npmLog $npmOut
+            throw "npm fallback failed (exit=$npmExit)"
         }
         if ($npmOut.Count) { Write-Host $npmOut[-1] }
     }
 
+    $script:DEPLOY_FAILED_STAGE = "files"
     # Only publish current/previous after the candidate is complete. This keeps
     # the old version recoverable when dependency installation fails.
     if ($deployedDirName) {
@@ -1326,6 +1427,7 @@ function Deploy-Package {
     }
     Write-Host ""
 
+    $script:DEPLOY_FAILED_STAGE = "hooks"
     # >>> pilot-postinstall-exit-check >>>
     Msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
     $postinstallScript = Join-Path $script:PERMANENT_DIR "scripts\postinstall.js"
@@ -1391,6 +1493,7 @@ function Deploy-Package {
         Msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
     }
     # <<< pilot-postinstall-exit-check <<<
+    if (-not $script:PILOT_POSTINSTALL_ERR) { $script:DEPLOY_FAILED_STAGE = "" }
     Write-Host ""
 }
 
@@ -2875,13 +2978,17 @@ function Cmd-Install {
         Select-Agents
         Prompt-UserId
         Confirm-ConfigOverwrite
-        Deploy-Package $script:INSTALL_SRC
+        try {
+            Deploy-Package $script:INSTALL_SRC
+        } catch {
+            Write-DeployFailure "install" $_.Exception.Message
+            exit 1
+        }
         # Nothing downstream can repair this: postinstall.js is the only thing that fills
         # $DataDir\{hooks,skills,plugins}, and a collector with no hooks collects nothing.
         # Better to stop with the reason on screen than to finish and report success.
         if ($script:PILOT_POSTINSTALL_ERR) {
-            Msg "❌ 安装中止：$script:PILOT_POSTINSTALL_ERR" `
-                "❌ Install aborted: $script:PILOT_POSTINSTALL_ERR"
+            Write-DeployFailure "install" $script:PILOT_POSTINSTALL_ERR
             Msg "   请检查上方输出后重试安装" "   Check the output above and re-run the install"
             exit 1
         }
@@ -2955,7 +3062,12 @@ function Cmd-Upgrade {
         Stop-PilotService
         Write-Host ""
 
-        Deploy-Package $script:INSTALL_SRC
+        try {
+            Deploy-Package $script:INSTALL_SRC
+        } catch {
+            Write-DeployFailure "upgrade" $_.Exception.Message
+            exit 1
+        }
         Install-Command
         Retire-QoderworkRuntimeOverrides
 
@@ -2966,8 +3078,7 @@ function Cmd-Upgrade {
         # rollback below is what keeps `current` on a version whose assets are known complete.
         $started = $false
         if ($script:PILOT_POSTINSTALL_ERR) {
-            Msg "    ❌ Hook 脚本部署失败: $script:PILOT_POSTINSTALL_ERR" `
-                "    ❌ Hook script deployment failed: $script:PILOT_POSTINSTALL_ERR"
+            Write-DeployFailure "upgrade" $script:PILOT_POSTINSTALL_ERR
         } else {
             $started = Start-PilotAndWait -ScriptPath $ps1Path -PriorVersion $oldVer
         }

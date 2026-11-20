@@ -992,9 +992,70 @@ for (const c of changed) {
 deploy_bootstrap_scripts() {
     local src_dir="$PERMANENT_DIR/scripts"
     local boot_dir="$HOME/.loongsuite-pilot/bin"
-    mkdir -p "$boot_dir"
-    cp -f "$src_dir/collector-daemon.js" "$boot_dir/"
-    [ -f "$src_dir/updater-daemon.js" ] && cp -f "$src_dir/updater-daemon.js" "$boot_dir/" || true
+    mkdir -p "$boot_dir" && cp -f "$src_dir/collector-daemon.js" "$boot_dir/" || return 1
+    if [ -f "$src_dir/updater-daemon.js" ]; then
+        cp -f "$src_dir/updater-daemon.js" "$boot_dir/"
+    fi
+}
+
+create_npm_fallback_log() {
+    # mktemp creates a unique owner-only file even under a permissive umask.
+    local log_dir="$DATA_DIR/logs"
+    if mkdir -p "$log_dir" 2>/dev/null && mktemp "$log_dir/install-npm.XXXXXXXX" 2>/dev/null; then
+        return 0
+    fi
+    mktemp "${TMPDIR:-/tmp}/install-npm.XXXXXXXX" 2>/dev/null
+}
+
+report_npm_fallback_hint() {
+    local log_file="$1"
+    if grep -qiE 'not found: (make|g\+\+|gcc|c\+\+|cc1plus)|(make|g\+\+|gcc): command not found' "$log_file"; then
+        msg "    提示：缺少 C/C++ 构建工具链。Debian/Ubuntu 可安装 build-essential 和 python3。" \
+            "    Hint: missing C/C++ build toolchain. On Debian/Ubuntu, install build-essential and python3."
+    elif grep -qiE "No module named '?distutils|distutils.*(not found|missing)" "$log_file"; then
+        msg "    提示：缺少 Python distutils。请检查 setuptools 和当前 Python 版本的兼容性。" \
+            "    Hint: Python distutils is missing. Check setuptools compatibility with the selected Python version."
+    elif grep -qiE 'Python\.h|Could not find any Python installation' "$log_file"; then
+        msg "    提示：缺少 Python 或开发头文件。请安装 node-gyp 所需的 Python 开发环境。" \
+            "    Hint: Python or its development headers are missing. Install the Python dependencies required by node-gyp."
+    elif grep -qiE 'EAI_AGAIN|ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ERR_SOCKET|socket hang up' "$log_file"; then
+        msg "    提示：无法连接 npm registry 或请求超时。请检查代理和镜像设置。" \
+            "    Hint: the npm registry is unreachable or timing out. Check proxy and registry settings."
+    elif grep -qiE 'EACCES|EPERM' "$log_file"; then
+        msg "    提示：权限不足。请检查安装目录和 npm 缓存的属主及权限。" \
+            "    Hint: permission denied. Check ownership and permissions for the installation directory and npm cache."
+    elif grep -qi 'ENOSPC' "$log_file"; then
+        msg "    提示：磁盘空间不足。请释放安装目录或 npm 缓存所在磁盘的空间。" \
+            "    Hint: out of disk space. Free space on the disks containing the installation directory and npm cache."
+    elif grep -qiE 'gyp ERR!|node-gyp.*(error|failed)' "$log_file"; then
+        msg "    提示：原生模块编译失败。请查看上方 gyp 错误。" \
+            "    Hint: a native module failed to build. See the gyp error above."
+    fi
+}
+
+report_npm_fallback_log() {
+    local log_file="$1" lines early_errors
+    msg "    完整 npm 输出：$log_file" "    Full npm output: $log_file"
+    lines=$(wc -l < "$log_file") || lines=0
+    if [ "$lines" -gt 40 ]; then
+        early_errors=$(head -n "$((lines - 40))" "$log_file" |
+            grep -Ei 'npm (ERR!|error)|gyp ERR!|ERR!' | tail -n 30) || true
+        if [ -n "$early_errors" ]; then
+            msg "    ---- 较早的 npm/gyp 错误（最多 30 行）----" \
+                "    ---- Earlier npm/gyp errors (up to 30 lines) ----"
+            printf '%s\n' "$early_errors"
+        fi
+    fi
+    report_npm_fallback_hint "$log_file"
+}
+
+deploy_failure_label() {
+    case "${DEPLOY_FAILED_STAGE:-}" in
+        files) msg "文件部署失败" "file deployment failed" ;;
+        dependencies) msg "依赖安装失败" "dependency installation failed" ;;
+        hooks) msg "hook 脚本部署失败" "hook script deployment failed" ;;
+        *) msg "部署失败" "deployment failed" ;;
+    esac
 }
 
 # ============================================================
@@ -1002,6 +1063,7 @@ deploy_bootstrap_scripts() {
 # ============================================================
 deploy_package() {
     local src="$1"
+    DEPLOY_FAILED_STAGE=files
     local cache_dir="$HOME/.loongsuite-pilot"
     local versions_dir="$cache_dir/versions"
     local current_file="$cache_dir/current"
@@ -1021,14 +1083,12 @@ deploy_package() {
             local old_dir
             old_dir=$(cat "$current_file" 2>/dev/null | tr -d '[:space:]')
             if [ -n "$old_dir" ] && [ "$old_dir" != "$dir_name" ]; then
-                echo "$old_dir" > "$previous_file"
+                echo "$old_dir" > "$previous_file" || return 1
             fi
         fi
 
         msg "==> 部署到 $target ..." "==> Deploying to $target ..."
-        mkdir -p "$versions_dir"
-        rm -rf "$target"
-        if ! cp -r "$src" "$target"; then
+        if ! { mkdir -p "$versions_dir" && rm -rf "$target" && cp -r "$src" "$target"; }; then
             msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
             return 1
         fi
@@ -1037,9 +1097,7 @@ deploy_package() {
     else
         msg "==> 部署到 $PERMANENT_DIR ..." \
             "==> Deploying to $PERMANENT_DIR ..."
-        mkdir -p "$(dirname "$PERMANENT_DIR")"
-        rm -rf "$PERMANENT_DIR"
-        if ! cp -r "$src" "$PERMANENT_DIR"; then
+        if ! { mkdir -p "$(dirname "$PERMANENT_DIR")" && rm -rf "$PERMANENT_DIR" && cp -r "$src" "$PERMANENT_DIR"; }; then
             msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
             return 1
         fi
@@ -1047,8 +1105,9 @@ deploy_package() {
     msg "    ✅ 部署完成" "    ✅ Deployed"
     echo ""
 
-    deploy_bootstrap_scripts
+    deploy_bootstrap_scripts || return 1
 
+    DEPLOY_FAILED_STAGE=dependencies
     msg "==> 安装依赖..." "==> Installing dependencies..."
     local modules_ver="${ver:-${INSTALL_VERSION:-latest}}"
     if ensure_node_modules "$modules_ver"; then
@@ -1056,25 +1115,34 @@ deploy_package() {
     else
         msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" \
             "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
-        # Keep this invocation's diagnostic tail. The script's pipefail preserves
-        # npm's failure status even though tail consumes its output.
-        local npm_out npm_exit=0
-        npm_out=$(cd "$PERMANENT_DIR" && run_npm install --production --no-optional \
-            --fetch-retries 5 --fetch-retry-mintimeout 2000 --fetch-retry-maxtimeout 60000 \
-            2>&1 | tail -n 40) || npm_exit=$?
+        local npm_log npm_out npm_exit=0
+        npm_log=$(create_npm_fallback_log) || npm_log=""
+        # Preserve npm's own status through the diagnostics pipeline.
+        npm_out=$(
+            cd "$PERMANENT_DIR" || exit $?
+            run_npm install --production --no-optional \
+                --fetch-retries 5 --fetch-retry-mintimeout 2000 --fetch-retry-maxtimeout 60000 \
+                2>&1 | tee -a "${npm_log:-/dev/null}" | tail -n 40
+            exit "${PIPESTATUS[0]}"
+        ) || npm_exit=$?
         if [ "$npm_exit" -ne 0 ]; then
             msg "    ❌ 依赖安装失败 (exit=$npm_exit)" "    ❌ Dependency installation failed (exit=$npm_exit)"
             if [ -n "$npm_out" ]; then
                 msg "    ---- npm 输出（末 40 行）----" "    ---- npm output (last 40 lines) ----"
                 printf '%s\n' "$npm_out"
             fi
+            if [ -n "$npm_log" ]; then
+                report_npm_fallback_log "$npm_log"
+            fi
             return 1
         fi
+        if [ -n "$npm_log" ]; then rm -f "$npm_log" || true; fi
         if [ -n "$npm_out" ]; then printf '%s\n' "${npm_out##*$'\n'}"; fi
         msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     fi
     echo ""
 
+    DEPLOY_FAILED_STAGE=hooks
     msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
     if [ -f "$PERMANENT_DIR/scripts/postinstall.js" ]; then
         # postinstall.js falls back to $HOME/.loongsuite-pilot when this is unset, so
@@ -1112,10 +1180,11 @@ deploy_package() {
     echo ""
 
     # Write current pointer only after all deploy steps succeed
+    DEPLOY_FAILED_STAGE=files
     if [ -n "$ver" ] && [ -n "$commit" ]; then
-        echo "$dir_name" > "$current_file.tmp"
-        mv -f "$current_file.tmp" "$current_file"
+        echo "$dir_name" > "$current_file.tmp" && mv -f "$current_file.tmp" "$current_file" || return 1
     fi
+    DEPLOY_FAILED_STAGE=""
 }
 
 # ============================================================
@@ -2237,8 +2306,10 @@ cmd_install() {
     # set -e would end the install here anyway; saying why beats an exit code on its own.
     if ! deploy_package "$INSTALL_SRC"; then
         echo ""
-        msg "❌ 安装中止：hook 脚本部署失败，请检查上方输出后重试" \
-            "❌ Install aborted: hook script deployment failed; check the output above and retry"
+        local deploy_reason
+        deploy_reason=$(deploy_failure_label)
+        msg "❌ 安装中止：$deploy_reason，请检查上方输出后重试" \
+            "❌ Install aborted: $deploy_reason. Check the output above and retry."
         exit 1
     fi
     write_config
@@ -2325,8 +2396,10 @@ cmd_upgrade() {
     # Old version stays untouched; deploy_package writes current/previous pointers
     if ! deploy_package "$INSTALL_SRC"; then
         echo ""
-        msg "⚠️  部署失败，正在回滚到旧版本..." \
-            "⚠️  Deployment failed, rolling back to old version..."
+        local deploy_reason
+        deploy_reason=$(deploy_failure_label)
+        msg "⚠️  升级失败：$deploy_reason，正在回滚到旧版本..." \
+            "⚠️  Upgrade failed: $deploy_reason. Rolling back to the old version..."
         local _rollback_ok=1
         run_pilot_cli rollback 2>/dev/null || _rollback_ok=0
         if [ "$_rollback_ok" -eq 1 ]; then
