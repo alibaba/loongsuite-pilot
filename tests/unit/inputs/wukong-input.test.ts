@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import * as childProcess from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
 import * as os from 'node:os';
+import * as path from 'node:path';
+import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { ClientType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { WukongInput } from '../../../src/inputs/wukong/wukong-input.js';
@@ -136,9 +139,9 @@ describe('WukongInput', () => {
     );
   });
 
-  function createInput() {
+  function createInput(store = stateStore as unknown as StateStore) {
     input = new WukongInput({
-      stateStore: stateStore as any,
+      stateStore: store,
       cliPath: '/usr/bin/wukong-cli',
       pollIntervalMs: 60_000,
     });
@@ -165,6 +168,93 @@ describe('WukongInput', () => {
       cb(new Error('process not found'), { stdout: '', stderr: '' });
     });
   }
+
+  it.each([
+    { resume: 'poll', failsFirst: false },
+    { resume: 'collector restart', failsFirst: true },
+  ])('retains concurrent baseline progress after $resume', async ({ resume, failsFirst }) => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), 'wukong-baseline-retry-'));
+    const checkpointPath = path.join(stateDir, 'input-state.json');
+    let diskStore = new StateStore(checkpointPath);
+    vi.useFakeTimers();
+    const probeWhenRunning = mockProcessProbe.getMockImplementation()!;
+    const otherTask = { ...SAMPLE_TASK, id: 'task-2', session_id: 'sess-2' };
+    let resumed = false;
+    const newMessages = SAMPLE_MESSAGES.map((message, index) => ({
+      ...message,
+      id: `reopened-${message.id}`,
+      content: index === 0 ? 'after Wukong reopened' : null,
+      events: message.events?.map(event => ({
+        ...event,
+        runId: 'run-2',
+        messageId: 'text-2',
+        timestamp: event.timestamp + 100_000,
+      })),
+      turnIndex: index + 2,
+      timestamp: message.timestamp + 100_000,
+      createdAt: message.createdAt + 100_000,
+    }));
+    mockExecFile.mockImplementation((...allArgs: unknown[]) => {
+      const cb = allArgs[allArgs.length - 1] as Function;
+      const args = allArgs[1] as string[];
+      if (args.includes('list_tasks')) {
+        const items = failsFirst ? [otherTask, SAMPLE_TASK] : [SAMPLE_TASK, otherTask];
+        cb(null, { stdout: JSON.stringify({ items, hasMore: false }), stderr: '' });
+        return;
+      }
+      const { conversationId } = JSON.parse(args[args.length - 1]);
+      if (conversationId === 'sess-2' && !resumed) {
+        markProcessExited();
+        cb(new Error('connection refused'), { stdout: '', stderr: '' });
+        return;
+      }
+      const messages = conversationId === 'sess-1' ? [...SAMPLE_MESSAGES, ...(resumed ? newMessages : [])] : [];
+      cb(null, { stdout: JSON.stringify({ messages }), stderr: '' });
+    });
+
+    const entries: AgentActivityEntry[] = [];
+    const recordEntries = (batch: AgentActivityEntry[]) => entries.push(...batch);
+    createInput(diskStore).on('entries', recordEntries);
+    try {
+      await input.start();
+      expect(mockExecFile).toHaveBeenCalledTimes(3);
+      expect(entries).toHaveLength(0);
+      await diskStore.save();
+      const restoredStore = new StateStore(checkpointPath);
+      await restoredStore.load();
+      expect(restoredStore.get('wukong').extra).toEqual({
+        seenCounts: { 'sess-1': 2 }, baselinePendingSessions: ['sess-2'],
+      });
+      resumed = true;
+      mockProcessProbe.mockImplementation(probeWhenRunning);
+      if (resume === 'collector restart') {
+        await input.stop();
+        diskStore = restoredStore;
+        createInput(diskStore).on('entries', recordEntries);
+        await input.start();
+      } else {
+        await vi.advanceTimersByTimeAsync(60_000);
+      }
+      await diskStore.save();
+      const completedStore = new StateStore(checkpointPath);
+      await completedStore.load();
+      expect(completedStore.get('wukong').extra).toEqual({ seenCounts: { 'sess-1': 4, 'sess-2': 0 }, staleCounters: {} });
+      const requests = entries.filter(entry => entry['event.name'] === 'llm.request');
+      expect(requests).toHaveLength(1);
+      expect(JSON.stringify(requests[0]['gen_ai.input.messages_delta'])).toContain('after Wukong reopened');
+      expect(entries.filter(entry => entry['event.name'] === 'llm.response')).toHaveLength(1);
+
+      mockExecFile.mockClear();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await diskStore.save();
+      expect(mockExecFile).toHaveBeenCalledTimes(3);
+      expect(entries.filter(entry => entry['event.name'] === 'llm.response')).toHaveLength(1);
+    } finally {
+      await input.stop();
+      vi.useRealTimers();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
 
   it('defers the first baseline until Wukong is running', async () => {
     vi.useFakeTimers();
@@ -288,6 +378,9 @@ describe('WukongInput', () => {
     expect(details).not.toContain('sess-6');
     expect(entries.length).toBeGreaterThan(0);
     expect(stateStore.get('wukong').extra?.seenCounts).toEqual({ 'sess-1': 2, 'sess-6': 1 });
+    // One fresh probe before list and each concurrent detail batch, then one
+    // after the detail failure. Parallel requests share the pending probe.
+    expect(mockProcessProbe).toHaveBeenCalledTimes(3);
   });
 
   it('user content is merged into step 1 llm.request messages_delta', async () => {
@@ -1761,6 +1854,33 @@ describe('WukongInput', () => {
   });
 
   describe('checkAvailability', () => {
+    it.each([
+      { domain: 'EXAMPLE', owner: 'EXAMPLE' },
+      { domain: 'WORKGROUP', owner: 'DESKTOP' },
+    ])('does not accept a Windows process from another account under $domain', async ({ domain, owner }) => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      vi.stubEnv('USERDOMAIN', domain);
+      vi.stubEnv('COMPUTERNAME', 'DESKTOP');
+      const ownerFilter = `USERNAME eq ${owner}\\${os.userInfo().username}`;
+      mockProcessProbe.mockImplementation((...allArgs: unknown[]) => {
+        const cb = allArgs[allArgs.length - 1] as Function;
+        const args = allArgs[1] as string[];
+        const filteredByOwner = args.includes(ownerFilter);
+        const stdout = filteredByOwner ? 'INFO: No tasks are running which match the specified criteria.\r\n'
+          : '"DingTalkReal.exe","123","RDP-Tcp#3","5","100 K"\r\n';
+        cb(null, { stdout, stderr: '' });
+      });
+      mockExecFile.mockImplementation(makeExecFileImpl({ 'service status': 'Service is running' }));
+      try {
+        expect(await WukongInput.checkAvailability()).toBe(false);
+        expect(mockExecFile).not.toHaveBeenCalled();
+        expect(mockProcessProbe.mock.calls[0]?.[1]).toContain(ownerFilter);
+      } finally {
+        Object.defineProperty(process, 'platform', { value: originalPlatform });
+        vi.unstubAllEnvs();
+      }
+    });
     it('returns false when daemon socket is missing', async () => {
       mockFsAccess.mockRejectedValue(new Error('ENOENT'));
       const result = await WukongInput.checkAvailability();
@@ -1808,6 +1928,7 @@ describe('WukongInput', () => {
     it('requires a matching Windows process row, not just tasklist success', async () => {
       const originalPlatform = process.platform;
       Object.defineProperty(process, 'platform', { value: 'win32' });
+      vi.stubEnv('USERDOMAIN', 'EXAMPLE');
       try {
         const runningProbe = mockProcessProbe.getMockImplementation();
         mockProcessProbe.mockImplementation((...allArgs: unknown[]) => {
@@ -1818,13 +1939,14 @@ describe('WukongInput', () => {
         expect(await WukongInput.checkAvailability()).toBe(false);
         expect(mockExecFile).not.toHaveBeenCalled();
         expect(mockProcessProbe.mock.calls[0]?.slice(0, 2)).toEqual([
-          'tasklist', ['/FI', 'IMAGENAME eq DingTalkReal.exe', '/FO', 'CSV', '/NH'],
+          'tasklist', ['/FI', 'IMAGENAME eq DingTalkReal.exe', '/FI', `USERNAME eq EXAMPLE\\${os.userInfo().username}`, '/FO', 'CSV', '/NH'],
         ]);
 
         mockProcessProbe.mockImplementation(runningProbe!);
         expect(await WukongInput.checkAvailability()).toBe(true);
       } finally {
         Object.defineProperty(process, 'platform', { value: originalPlatform });
+        vi.unstubAllEnvs();
       }
     });
   });

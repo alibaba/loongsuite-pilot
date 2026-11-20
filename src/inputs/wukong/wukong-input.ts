@@ -106,6 +106,7 @@ export class WukongInput extends BaseInput {
 
   private readonly cliPath: string;
   private _collectInFlight: Promise<AgentActivityEntry[]> | null = null;
+  private daemonProbeInFlight: Promise<boolean> | null = null;
   private _abortController = new AbortController();
   private _lastSkipWarnAt = 0;
 
@@ -146,9 +147,14 @@ export class WukongInput extends BaseInput {
       await fsp.access(path.join(os.homedir(), DAEMON_SOCK_REL));
       const probeOptions = { timeout: PROCESS_PROBE_TIMEOUT_MS, signal, windowsHide: true };
       if (process.platform === 'win32') {
+        const username = os.userInfo().username;
+        const domain = process.env.USERDOMAIN;
+        const accountDomain = domain && !/^WORKGROUP$/i.test(domain) ? domain : process.env.COMPUTERNAME;
+        // A desktop process from another account cannot serve this user's socket.
+        if (!username || !accountDomain) return false;
         const { stdout } = await execFile(
           'tasklist',
-          ['/FI', 'IMAGENAME eq DingTalkReal.exe', '/FO', 'CSV', '/NH'],
+          ['/FI', 'IMAGENAME eq DingTalkReal.exe', '/FI', `USERNAME eq ${accountDomain}\\${username}`, '/FO', 'CSV', '/NH'],
           probeOptions,
         );
         return /^"DingTalkReal[.]exe",\s*"\d+"/im.test(stdout);
@@ -167,36 +173,55 @@ export class WukongInput extends BaseInput {
 
   private async ensureBaseline(): Promise<boolean> {
     const state = this.stateStore.get(this.id);
-    if (state.extra?.seenCounts != null && typeof state.extra.seenCounts === 'object') return true;
+    const savedCounts = state.extra?.seenCounts;
+    const savedSessions = state.extra?.baselinePendingSessions;
+    const hasCounts = savedCounts != null && typeof savedCounts === 'object';
+    if (hasCounts && !Array.isArray(savedSessions)) return true;
 
+    let sessions: string[];
     try {
-      const tasks = await this.listAllTasks();
-      const seenCounts: Record<string, number> = {};
-      let baselined = 0;
-      for (let i = 0; i < tasks.length; i += BASELINE_CONCURRENCY) {
-        const batch = tasks.slice(i, i + BASELINE_CONCURRENCY);
-        const results = await Promise.allSettled(
-          batch.map(task => this.getMessages(task.session_id)),
-        );
-        for (let j = 0; j < batch.length; j++) {
-          const r = results[j];
-          if (r.status === 'fulfilled') {
-            seenCounts[batch[j].session_id] = r.value.messages.length;
-            baselined++;
-          } else if (r.reason instanceof WukongUnavailableError) {
-            return false;
-          } else {
-            seenCounts[batch[j].session_id] = 0;
-          }
-        }
-      }
-      this.stateStore.update(this.id, { extra: { seenCounts } });
-      this.logger.info('baseline complete', { total: tasks.length, baselined });
+      sessions = Array.isArray(savedSessions)
+        ? savedSessions.filter((id): id is string => typeof id === 'string')
+        : [...new Set((await this.listAllTasks()).map(task => task.session_id))];
     } catch (err) {
       if (err instanceof WukongUnavailableError) return false;
       this.logger.warn('failed to baseline wukong cursor', { error: String(err) });
-      this.stateStore.update(this.id, { extra: { seenCounts: {} } });
+      this.stateStore.update(this.id, { extra: { ...state.extra, seenCounts: {} } });
+      return true;
     }
+
+    const seenCounts = hasCounts ? { ...(savedCounts as Record<string, number>) } : {};
+    const pending = new Set(sessions);
+    for (let i = 0; i < sessions.length; i += BASELINE_CONCURRENCY) {
+      const batch = sessions.slice(i, i + BASELINE_CONCURRENCY);
+      const results = await Promise.allSettled(batch.map(sessionId => this.getMessages(sessionId)));
+      let interrupted = false;
+      for (let j = 0; j < batch.length; j++) {
+        const result = results[j];
+        if (result.status === 'rejected' && result.reason instanceof WukongUnavailableError) {
+          interrupted = true;
+          continue;
+        }
+        seenCounts[batch[j]] = result.status === 'fulfilled' ? result.value.messages.length : 0;
+        pending.delete(batch[j]);
+      }
+      if (interrupted) break;
+    }
+
+    // Earlier successful reads define the cutoff for their sessions. Preserve
+    // them across retries and collector restart while the remaining reads wait.
+    const current = this.stateStore.get(this.id);
+    const extra = { ...current.extra };
+    if (pending.size > 0) {
+      extra.baselinePendingSessions = [...pending];
+      if (Object.keys(seenCounts).length > 0) extra.seenCounts = seenCounts;
+      this.stateStore.update(this.id, { extra });
+      return false;
+    }
+    delete extra.baselinePendingSessions;
+    extra.seenCounts = seenCounts;
+    this.stateStore.set(this.id, { ...current, extra });
+    this.logger.info('baseline complete', { total: Object.keys(seenCounts).length });
     return true;
   }
 
@@ -1375,7 +1400,13 @@ export class WukongInput extends BaseInput {
   }
 
   private async requireDaemon(signal: AbortSignal): Promise<void> {
-    if (!this.running || !(await WukongInput.isDaemonRunning(signal)) || !this.running) {
+    if (!this.running) throw new WukongUnavailableError('Wukong daemon is unavailable');
+    // The detail batch shares only a probe that is still running. The next
+    // batch and later commands always check the process again.
+    this.daemonProbeInFlight ??= WukongInput.isDaemonRunning(signal).finally(() => {
+      this.daemonProbeInFlight = null;
+    });
+    if (!(await this.daemonProbeInFlight) || !this.running) {
       throw new WukongUnavailableError('Wukong daemon is unavailable');
     }
   }
