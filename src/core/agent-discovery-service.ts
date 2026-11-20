@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import { EventEmitter } from 'node:events';
 import type { AgentDetectionEntry, AgentStopReason, EntryState } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
@@ -6,6 +7,10 @@ import { createLogger } from '../utils/logger.js';
 const logger = createLogger('AgentDiscoveryService');
 
 const DEFAULT_POLL_MS = 300_000; // 5 minutes
+const LIFECYCLE_ERROR_THRESHOLD = 3;
+// A count alone could be reached by overlapping watch and poll triggers in milliseconds.
+const LIFECYCLE_ERROR_MIN_WINDOW_MS = 60_000;
+const ERROR_SUMMARY_MAX_LEN = 200;
 const FORCE_POLLING = process.env.LOONGSUITE_PILOT_FORCE_POLLING === 'true';
 
 interface WatchIdentity {
@@ -34,8 +39,29 @@ interface EntryRuntime {
   watchIdentity: WatchIdentity | null;
   pollTimer: ReturnType<typeof setInterval> | null;
   consecutiveUnavailable: number;
+  consecutiveProbeErrors: number;
+  consecutiveLifecycleErrors: number;
+  firstLifecycleErrorAt: number | null;
   processing: Promise<void> | null;
   refreshPending: boolean;
+}
+
+/** Mask the complete home path without rewriting root paths or sibling directories. */
+export function maskHomeDir(text: string, home: string): string {
+  const directory = home.replace(/[\\/]+$/, '');
+  if (!directory || /^[a-z]:$/i.test(directory)) return text;
+  const escaped = directory.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const delimiter = String.raw`[\s'"<>()\[\]{},:;=]`;
+  return text.replace(new RegExp(`(^|${delimiter}|file://)${escaped}(?=$|[/\\\\]|${delimiter})`, 'g'), '$1~');
+}
+
+export function summarizeError(err: unknown): string {
+  try {
+    const text = maskHomeDir(String(err), os.homedir()).replace(/[\s\x00-\x1f\x7f]+/g, ' ').trim();
+    return text.length > ERROR_SUMMARY_MAX_LEN ? `${text.slice(0, ERROR_SUMMARY_MAX_LEN - 1)}…` : text;
+  } catch {
+    return 'Unknown error';
+  }
 }
 
 /**
@@ -60,6 +86,9 @@ export class AgentDiscoveryService extends EventEmitter {
         watchIdentity: null,
         pollTimer: null,
         consecutiveUnavailable: 0,
+        consecutiveProbeErrors: 0,
+        consecutiveLifecycleErrors: 0,
+        firstLifecycleErrorAt: null,
         processing: null,
         refreshPending: false,
       });
@@ -118,7 +147,11 @@ export class AgentDiscoveryService extends EventEmitter {
     rt.processing = (async () => {
       do {
         rt.refreshPending = false;
-        await this.processEntryOnce(rt);
+        try {
+          await this.processEntryOnce(rt);
+        } catch (err) {
+          logger.error('agent discovery refresh failed', { id: rt.entry.id, error: summarizeError(err) });
+        }
       } while (rt.refreshPending && !this.stopping);
     })().finally(() => { rt.processing = null; });
     return rt.processing;
@@ -129,71 +162,121 @@ export class AgentDiscoveryService extends EventEmitter {
     this.detachIfEarlierPathExists(rt);
     if (!rt.watcher) this.setupWatcher(rt);
     const { entry } = rt;
+    let enabled: boolean;
+    let available: boolean;
     try {
-      const enabled = entry.enabled ? entry.enabled() : true;
-      const available = enabled ? await entry.isAvailable() : false;
-      if (this.stopping) return;
-      const shouldRun = enabled && available;
+      enabled = entry.enabled ? entry.enabled() : true;
+      available = enabled ? await entry.isAvailable() : false;
+    } catch (err) {
+      // A failed probe provides no evidence that the input stopped collecting.
+      logger.warn('agent detection probe failed, entry left untouched', {
+        id: entry.id,
+        state: rt.state,
+        consecutiveProbeErrors: ++rt.consecutiveProbeErrors,
+        error: summarizeError(err),
+      });
+      return;
+    }
+    rt.consecutiveProbeErrors = 0;
+    if (this.stopping) return;
 
-      if (!shouldRun && rt.state === 'idle') {
-        logger.debug('agent skipped', {
-          id: entry.id,
-          enabled,
-          available,
-        });
+    if (enabled && available) {
+      rt.consecutiveUnavailable = 0;
+      const starting = rt.state !== 'running';
+      if (!starting && !entry.runOnActive) {
+        this.resetLifecycleFailures(rt);
+        return;
       }
-
-      if (shouldRun && rt.state !== 'running') {
-        rt.consecutiveUnavailable = 0;
+      if (starting) {
         rt.state = 'starting';
         logger.info('starting agent', { id: entry.id });
+      }
+      try {
         await entry.start();
-        if (this.stopping) return;
+      } catch (err) {
+        await this.handleStartFailure(rt, err);
+        return;
+      }
+      this.resetLifecycleFailures(rt);
+      if (starting && !this.stopping) {
         rt.state = 'running';
         this.emit('agent:started', entry.id);
-      } else if (!shouldRun && (rt.state === 'running' || rt.state === 'starting')) {
-        if (!enabled) {
-          rt.consecutiveUnavailable = 0;
-          await this.stopEntry(rt, 'disabled');
-        } else {
-          rt.consecutiveUnavailable++;
-          const threshold = entry.unavailableThreshold ?? 1;
-          if (rt.consecutiveUnavailable >= threshold) {
-            rt.consecutiveUnavailable = 0;
-            await this.stopEntry(rt, 'unavailable');
-          } else {
-            logger.debug('agent unavailable, debouncing', {
-              id: entry.id,
-              consecutiveUnavailable: rt.consecutiveUnavailable,
-              threshold,
-            });
-          }
-        }
-      } else if (shouldRun && rt.state === 'running' && entry.runOnActive) {
-        rt.consecutiveUnavailable = 0;
-        await entry.start();
-      } else if (shouldRun && rt.state === 'running') {
-        rt.consecutiveUnavailable = 0;
       }
-    } catch (err) {
-      logger.error('processEntry failed', { id: entry.id, error: String(err) });
-      const wasRunning = rt.state === 'running';
-      rt.state = 'idle';
-      if (wasRunning) {
-        this.emit('agent:stopped', rt.entry.id, 'unexpected' satisfies AgentStopReason);
-      }
+      return;
+    }
+
+    if (rt.state !== 'running' && rt.state !== 'starting') {
+      logger.debug('agent skipped', { id: entry.id, enabled, available });
+      return;
+    }
+    if (!enabled) {
+      rt.consecutiveUnavailable = 0;
+      await this.stopEntry(rt, 'disabled');
+      return;
+    }
+    rt.consecutiveUnavailable++;
+    const threshold = entry.unavailableThreshold ?? 1;
+    if (rt.consecutiveUnavailable >= threshold) {
+      rt.consecutiveUnavailable = 0;
+      await this.stopEntry(rt, 'unavailable');
+    } else {
+      // This probe did not perform a lifecycle operation, so keep its error count.
+      logger.debug('agent unavailable, debouncing', {
+        id: entry.id,
+        consecutiveUnavailable: rt.consecutiveUnavailable,
+        threshold,
+      });
     }
   }
 
-  private async stopEntry(rt: EntryRuntime, reason: AgentStopReason): Promise<void> {
+  private async handleStartFailure(rt: EntryRuntime, err: unknown): Promise<void> {
+    const error = summarizeError(err);
+    if (rt.state !== 'running') {
+      logger.error('agent start failed', { id: rt.entry.id, error });
+      this.resetLifecycleFailures(rt);
+      rt.state = 'idle';
+      return;
+    }
+    // Shutdown owns the actual stop if it has already started waiting for this poll.
+    if (this.stopping) return;
+
+    const now = Date.now();
+    rt.firstLifecycleErrorAt ??= now;
+    const consecutiveErrors = ++rt.consecutiveLifecycleErrors;
+    const elapsedMs = now - rt.firstLifecycleErrorAt;
+    const details = { id: rt.entry.id, consecutiveErrors, elapsedMs, error };
+    if (consecutiveErrors >= LIFECYCLE_ERROR_THRESHOLD && elapsedMs >= LIFECYCLE_ERROR_MIN_WINDOW_MS) {
+      logger.error('stopping agent after repeated lifecycle failures', details);
+      await this.stopEntry(rt, 'unexpected', error);
+    } else {
+      logger.warn('agent lifecycle call failed, retaining running state', details);
+    }
+  }
+
+  private resetLifecycleFailures(rt: EntryRuntime): void {
+    rt.consecutiveLifecycleErrors = 0;
+    rt.firstLifecycleErrorAt = null;
+  }
+
+  private async stopEntry(rt: EntryRuntime, reason: AgentStopReason, errorSummary?: string): Promise<void> {
     rt.state = 'stopping';
     try {
       await rt.entry.stop();
     } catch (err) {
-      logger.warn('entry stop failed', { id: rt.entry.id, error: String(err) });
+      logger.warn('entry stop failed', { id: rt.entry.id, error: summarizeError(err) });
+      if (reason === 'unexpected') {
+        // The adapter did not confirm the stop. Retry on a later lifecycle failure.
+        rt.state = 'running';
+        return;
+      }
     }
+    this.resetLifecycleFailures(rt);
     rt.state = 'idle';
-    this.emit('agent:stopped', rt.entry.id, reason);
+    if (errorSummary) {
+      this.emit('agent:stopped', rt.entry.id, reason, errorSummary);
+    } else {
+      this.emit('agent:stopped', rt.entry.id, reason);
+    }
   }
 
   private retireWatcherIfStale(rt: EntryRuntime): void {
