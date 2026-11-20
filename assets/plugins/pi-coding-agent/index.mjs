@@ -9,27 +9,33 @@
  */
 
 import crypto from 'node:crypto';
+import { appendRawJsonl } from '../shared/raw-jsonl-writer.mjs';
+import { readPilotConfig } from '../shared/pilot-config.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  agentBaseFieldPatch,
-  collectResourceAttributesFromEnv,
-} from '../shared/resource-context.mjs';
+// Worker labels are optional. A missing helper during a partial update must not
+// turn telemetry into a Pi startup dependency or prevent ordinary collection.
+const resourceContext = await import('../shared/resource-context.mjs').catch(() => null);
+const agentBaseFieldPatch = typeof resourceContext?.agentBaseFieldPatch === 'function'
+  ? resourceContext.agentBaseFieldPatch : () => ({});
+const collectResourceAttributesFromEnv = typeof resourceContext?.collectResourceAttributesFromEnv === 'function'
+  ? resourceContext.collectResourceAttributesFromEnv : () => ({});
 
-const AGENT_TYPE = 'pi-coding-agent';
+const LOG_PREFIX = 'pi-coding-agent';
+const DEFAULT_IDENTITY = Object.freeze({
+  agentType: 'pi-coding-agent',
+  agentId: 'pi-coding-agent',
+  agentName: 'Pi Coding Agent',
+  agentSystem: 'pi',
+  framework: 'pi-coding-agent',
+});
 const MAX_STRING_LENGTH = 64 * 1024;
 const MAX_MESSAGES = 40;
 const MAX_ARRAY_ITEMS = 100;
 const MAX_OBJECT_KEYS = 100;
 const MAX_DEPTH = 8;
-
-const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_TYPE });
-const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
-const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
-  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
-  : {};
 
 const pluginDir = path.dirname(fileURLToPath(import.meta.url));
 // Installed layout: $PILOT_DATA/plugins/pi-coding-agent/index.mjs.
@@ -40,7 +46,7 @@ function resolveDataDir() {
 }
 
 function resolveLogDir() {
-  return path.join(resolveDataDir(), 'logs', AGENT_TYPE);
+  return path.join(resolveDataDir(), 'logs', LOG_PREFIX);
 }
 
 function todayStamp() {
@@ -153,7 +159,7 @@ function appendLogFile(fileName, content) {
 function writeError(source, error) {
   try {
     appendLogFile(
-      `${AGENT_TYPE}-error-${todayStamp()}.log`,
+      `${LOG_PREFIX}-error-${todayStamp()}.log`,
       `${new Date().toISOString()} [${source}] ${error?.stack || error}\n`,
     );
   } catch {
@@ -163,7 +169,8 @@ function writeError(source, error) {
 
 function writeRecord(record) {
   try {
-    appendLogFile(`${AGENT_TYPE}-${todayStamp()}.jsonl`, `${safeStringify(record)}\n`);
+    ensureLogDir();
+    appendRawJsonl(path.join(resolveLogDir(), `${LOG_PREFIX}-${todayStamp()}.jsonl`), `${safeStringify(record)}\n`);
   } catch (error) {
     writeError('writeRecord', error);
   }
@@ -180,11 +187,7 @@ function safeHandler(name, handler) {
 }
 
 function loadPilotConfig() {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(resolveDataDir(), 'config.json'), 'utf8'));
-  } catch {
-    return {};
-  }
+  return readPilotConfig();
 }
 
 function resolveUserId(config) {
@@ -196,8 +199,9 @@ function resolveUserId(config) {
     || 'unknown';
 }
 
-function shouldCaptureContent(config) {
-  const value = config.agents?.[AGENT_TYPE]?.captureMessageContent;
+function shouldCaptureContent(config, agentType) {
+  const value = config.agents?.[agentType]?.captureMessageContent
+    ?? config.agents?.[DEFAULT_IDENTITY.agentType]?.captureMessageContent;
   if (typeof value === 'string') return value.trim().toLowerCase() !== 'false';
   return value !== false;
 }
@@ -309,6 +313,39 @@ function canonicalMessages(messages) {
     .filter(Boolean);
 }
 
+function sameCanonicalMessage(left, right) {
+  return safeStringify(left) === safeStringify(right);
+}
+
+/**
+ * Return the messages appended since the previous request snapshot.
+ *
+ * Pi caps the captured request context to the most recent MAX_MESSAGES, so a
+ * later snapshot may have dropped messages from the front. Matching the
+ * longest previous-suffix/current-prefix overlap handles both ordinary append
+ * growth and that rolling window. A non-overlapping replacement (for example
+ * compaction or another extension rewriting context) is not representable as
+ * an append-only delta, so leave the field absent instead of fabricating one.
+ */
+function appendedInputMessages(previous, current, hasPreviousSnapshot) {
+  if (!hasPreviousSnapshot || previous.length === 0) return current.slice();
+  if (current.length === 0) return [];
+
+  const maxOverlap = Math.min(previous.length, current.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap--) {
+    const previousStart = previous.length - overlap;
+    let matches = true;
+    for (let index = 0; index < overlap; index++) {
+      if (!sameCanonicalMessage(previous[previousStart + index], current[index])) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return current.slice(overlap);
+  }
+  return undefined;
+}
+
 function canonicalOutputMessage(message) {
   const canonical = canonicalMessage(message);
   if (!canonical) return undefined;
@@ -331,7 +368,22 @@ function activeToolDefinitions(pi) {
     }));
 }
 
-function turnFields(ctx, state, timestamp = Date.now()) {
+function normalizeIdentity(options = {}) {
+  const stringOr = (value, fallback) => typeof value === 'string' && value.trim()
+    ? value.trim()
+    : fallback;
+  const agentType = stringOr(options.agentType, DEFAULT_IDENTITY.agentType);
+  return Object.freeze({
+    agentType,
+    agentId: stringOr(options.agentId, agentType),
+    agentName: stringOr(options.agentName, DEFAULT_IDENTITY.agentName),
+    agentSystem: stringOr(options.agentSystem, DEFAULT_IDENTITY.agentSystem),
+    framework: stringOr(options.framework, DEFAULT_IDENTITY.framework),
+  });
+}
+
+function turnFields(ctx, state, runtime, timestamp = Date.now()) {
+  const { identity, resourceBaseFieldPatch, resourceAttributeFields } = runtime;
   const sessionId = ctx.sessionManager.getSessionId();
   const eventTime = timestampMillis(timestamp);
   const observedTime = Math.max(Date.now(), eventTime);
@@ -346,20 +398,23 @@ function turnFields(ctx, state, timestamp = Date.now()) {
     'user.id': state.userId,
     'gen_ai.session.id': sessionId,
     'gen_ai.turn.id': state.turnId,
-    'gen_ai.agent.type': AGENT_TYPE,
-    'gen_ai.agent.name': 'Pi Coding Agent',
-    [`agent.${AGENT_TYPE}.cwd`]: ctx.cwd,
-    ...RESOURCE_BASE_FIELD_PATCH,
-    ...RESOURCE_ATTRIBUTE_FIELDS,
+    'gen_ai.agent.type': identity.agentType,
+    'gen_ai.agent.id': identity.agentId,
+    'gen_ai.agent.name': identity.agentName,
+    'gen_ai.agent.system': identity.agentSystem,
+    'gen_ai.framework': identity.framework,
+    [`agent.${identity.agentType}.cwd`]: ctx.cwd,
+    ...resourceBaseFieldPatch,
+    ...resourceAttributeFields,
   };
 }
 
-function commonFields(ctx, state, timestamp = Date.now()) {
+function commonFields(ctx, state, runtime, timestamp = Date.now()) {
   const model = ctx.model;
   state.turnId ||= crypto.randomUUID();
   state.stepId ||= `${state.turnId}:s1`;
   return {
-    ...turnFields(ctx, state, timestamp),
+    ...turnFields(ctx, state, runtime, timestamp),
     'gen_ai.step.id': state.stepId,
     'gen_ai.provider.name': normalizeProvider(model?.provider),
     'gen_ai.request.model': model?.id || 'unknown',
@@ -389,7 +444,18 @@ function trailingUserInputMessages(messages) {
   return out;
 }
 
-export default function loongSuitePilotPiCodingAgent(pi) {
+export function createPiTelemetryExtension(identityOptions = {}) {
+  const identity = normalizeIdentity(identityOptions);
+  const resourceAttributes = collectResourceAttributesFromEnv(process.env, { agentId: identity.agentId });
+  const runtime = {
+    identity,
+    resourceBaseFieldPatch: agentBaseFieldPatch(resourceAttributes),
+    resourceAttributeFields: Object.keys(resourceAttributes).length > 0
+      ? { resourceAttributes }
+      : {},
+  };
+
+  return function loongSuitePilotPiCodingAgent(pi) {
   const state = {
     userId: 'unknown',
     captureContent: true,
@@ -401,14 +467,17 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     requestStartedAt: 0,
     systemPrompt: null,
     pendingUserInput: [],
+    fallbackRequestInput: [],
     userInputEmitted: false,
+    previousRequestMessages: [],
+    hasPreviousRequestSnapshot: false,
     toolStarts: new Map(),
   };
 
   const resetSessionConfig = () => {
     const config = loadPilotConfig();
     state.userId = resolveUserId(config);
-    state.captureContent = shouldCaptureContent(config);
+    state.captureContent = shouldCaptureContent(config, identity.agentType);
   };
 
   pi.on('session_start', safeHandler('session_start', async () => {
@@ -420,7 +489,10 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     state.requestEmitted = false;
     state.requestStartedAt = 0;
     state.pendingUserInput = [];
+    state.fallbackRequestInput = [];
     state.userInputEmitted = false;
+    state.previousRequestMessages = [];
+    state.hasPreviousRequestSnapshot = false;
     state.toolStarts.clear();
   }));
 
@@ -433,8 +505,11 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     state.requestEmitted = false;
     state.requestStartedAt = 0;
     state.systemPrompt = event.systemPrompt;
-    state.pendingUserInput = promptInputMessages(event);
+    state.pendingUserInput = state.captureContent ? promptInputMessages(event) : [];
+    state.fallbackRequestInput = state.pendingUserInput.slice();
     state.userInputEmitted = false;
+    state.previousRequestMessages = [];
+    state.hasPreviousRequestSnapshot = false;
     state.toolStarts.clear();
   }));
 
@@ -455,7 +530,7 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     state.userInputEmitted = true;
     state.pendingUserInput = [];
     writeRecord({
-      ...turnFields(ctx, state, state.stepStartedAt || Date.now()),
+      ...turnFields(ctx, state, runtime, state.stepStartedAt || Date.now()),
       'event.name': 'other',
       'gen_ai.input.messages_delta': inputDelta,
     });
@@ -467,12 +542,30 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     state.requestStartedAt = timestampMillis(state.stepStartedAt || Date.now());
 
     const record = {
-      ...commonFields(ctx, state, state.requestStartedAt),
+      ...commonFields(ctx, state, runtime, state.requestStartedAt),
       'event.name': 'llm.request',
     };
     if (state.captureContent) {
       const messages = canonicalMessages(event.messages);
       if (messages.length > 0) record['gen_ai.input.messages'] = messages;
+      if (messages.length > 0) {
+        const delta = appendedInputMessages(
+          state.previousRequestMessages,
+          messages,
+          state.hasPreviousRequestSnapshot,
+        );
+        if (delta !== undefined) record['gen_ai.input.messages_delta'] = delta;
+        state.previousRequestMessages = messages;
+        state.hasPreviousRequestSnapshot = true;
+      } else if (!state.hasPreviousRequestSnapshot && state.fallbackRequestInput.length > 0) {
+        // `context` should precede every provider request, but older/custom Pi
+        // runtimes may deliver only message_end. Preserve the user input known
+        // from before_agent_start without pretending it was a full snapshot.
+        record['gen_ai.input.messages_delta'] = state.fallbackRequestInput;
+        state.previousRequestMessages = state.fallbackRequestInput.slice();
+        state.hasPreviousRequestSnapshot = true;
+      }
+      state.fallbackRequestInput = [];
       if (state.systemPrompt) {
         record['gen_ai.system_instructions'] = [
           { type: 'text', content: truncate(state.systemPrompt) },
@@ -508,7 +601,7 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     const outputTokens = Number(usage.output) || 0;
     const cost = usage.cost || {};
     const record = {
-      ...commonFields(ctx, state, responseAt),
+      ...commonFields(ctx, state, runtime, responseAt),
       'event.name': 'llm.response',
       'gen_ai.provider.name': normalizeProvider(message.provider || ctx.model?.provider),
       'gen_ai.request.model': message.model || ctx.model?.id || 'unknown',
@@ -543,7 +636,7 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     const startedAt = timestampMillis();
     state.toolStarts.set(event.toolCallId, startedAt);
     const record = {
-      ...commonFields(ctx, state, startedAt),
+      ...commonFields(ctx, state, runtime, startedAt),
       'event.name': 'tool.call',
       'gen_ai.tool.name': event.toolName,
       'gen_ai.tool.call.id': event.toolCallId,
@@ -559,7 +652,7 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     const endedAt = timestampStrictlyAfter(Date.now(), startedAt);
     state.toolStarts.delete(event.toolCallId);
     const record = {
-      ...commonFields(ctx, state, endedAt),
+      ...commonFields(ctx, state, runtime, endedAt),
       'event.name': 'tool.result',
       'gen_ai.tool.name': event.toolName,
       'gen_ai.tool.call.id': event.toolCallId,
@@ -577,6 +670,12 @@ export default function loongSuitePilotPiCodingAgent(pi) {
 
   pi.on('session_shutdown', safeHandler('session_shutdown', async () => {
     state.pendingUserInput = [];
+    state.fallbackRequestInput = [];
+    state.previousRequestMessages = [];
+    state.hasPreviousRequestSnapshot = false;
     state.toolStarts.clear();
   }));
+  };
 }
+
+export default createPiTelemetryExtension(DEFAULT_IDENTITY);

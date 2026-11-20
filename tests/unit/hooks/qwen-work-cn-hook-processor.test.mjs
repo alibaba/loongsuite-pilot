@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { projectLogEntry } from '../../../src/normalization/entry-builder.ts';
 import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 import {
   extractText,
@@ -99,6 +101,41 @@ function realShapeRows() {
 }
 
 describe('QwenWorkCN hook processor', () => {
+  it.each([true, false])('keeps requestSetId private and scoped to the first native request (capture=%s)', captureMessageContent => {
+    const rows = realShapeRows();
+    rows[0].requestSetId = 'native-qwen-request';
+    rows[0].humanInput = { text: 'inspect package.json', mode: 'prompt' };
+    const events = processTranscript(rows, 'fallback-session', {
+      agents: { 'qwen-work-cn': { captureMessageContent } },
+    });
+    const requests = events.filter(event => event['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(3);
+    expect(requests[0]['agent.pilot.interceptor.correlation']).toEqual({
+      requestId: createHash('sha256').update('native-qwen-request').digest('hex'),
+      hash: createHash('sha256').update('inspect package.json').digest('hex'),
+      at: Date.parse(rows[0].timestamp),
+    });
+    expect(events.filter(event => event['agent.pilot.interceptor.correlation'])).toEqual([requests[0]]);
+    expect(JSON.stringify(events)).not.toContain('native-qwen-request');
+    expect(requests.map(event => event['gen_ai.request.id'])).toEqual([
+      'response-1:request', 'response-2:request', 'response-3:request',
+    ]);
+    const outputs = events.map(event => projectLogEntry(event, { dropAgentScopedFields: true }));
+    expect(JSON.stringify(outputs)).not.toContain('native-qwen-request');
+    expect(JSON.stringify(outputs)).not.toContain('interceptor.correlation');
+    expect(JSON.stringify(outputs)).not.toContain('requestSetId');
+    if (!captureMessageContent) expect(requests[0]).not.toHaveProperty('gen_ai.input.messages_delta');
+  });
+
+  it.each([undefined, '', 42, 'x'.repeat(513)])('keeps legacy prompts eligible without an unusable requestSetId (%s)', requestSetId => {
+    const rows = realShapeRows();
+    rows[0].requestSetId = requestSetId;
+    const events = processTranscript(rows, 'fallback-session', {});
+    expect(events.find(event => event['event.name'] === 'llm.request')['agent.pilot.interceptor.correlation'])
+      .toEqual({ hash: createHash('sha256').update(extractText(rows[0])).digest('hex'),
+        at: Date.parse(rows[0].timestamp) });
+  });
+
   it('joins every text block in the user prompt', () => {
     expect(extractText(realShapeRows()[0])).toBe(
       '<system-reminder>workspace context</system-reminder>\ninspect package.json',
@@ -157,6 +194,8 @@ describe('QwenWorkCN hook processor', () => {
       'llm.request', 'llm.response',
     ]);
     expect(events.every(event => event['gen_ai.agent.type'] === 'qwen-work-cn')).toBe(true);
+    expect(events.every(event => event.version === undefined)).toBe(true);
+    expect(events.every(event => event['agent.qwenworkcn.version'] === '0.1.5')).toBe(true);
     expect(events.every(event => event['gen_ai.turn.id'] === 'prompt-turn-1')).toBe(true);
     expect(events.filter(event => event['event.name'] !== 'other').map(event => event['gen_ai.step.id'])).toEqual([
       'prompt-turn-1:s1', 'prompt-turn-1:s1', 'prompt-turn-1:s1', 'prompt-turn-1:s1',
@@ -170,6 +209,12 @@ describe('QwenWorkCN hook processor', () => {
       ['reasoning', 'tool_call'],
       ['reasoning', 'tool_call'],
       ['reasoning', 'text'],
+    ]);
+    expect(events.filter(event => event['event.name'] === 'llm.request').map(event =>
+      (event['gen_ai.input.messages_delta'] || []).map(message => message.role))).toEqual([
+      ['user'],
+      ['assistant', 'tool'],
+      ['assistant', 'tool'],
     ]);
 
     const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
@@ -186,6 +231,23 @@ describe('QwenWorkCN hook processor', () => {
       expect(conversion.spans
         .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')
         .every(span => span.duration[0] > 0 || span.duration[1] > 0)).toBe(true);
+      const convertedInputs = conversion.spans
+        .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')
+        .map(span => JSON.parse(span.attributes['gen_ai.input.messages']));
+      expect(convertedInputs.map(messages => messages.map(message => message.role))).toEqual([
+        ['user'],
+        ['user', 'assistant', 'tool'],
+        ['user', 'assistant', 'tool', 'assistant', 'tool'],
+      ]);
+      expect(convertedInputs[1][1].parts[0]).toMatchObject({
+        type: 'tool_call',
+        id: 'call-1',
+        name: 'Glob',
+      });
+      expect(convertedInputs[1][2].parts[0]).toMatchObject({
+        type: 'tool_call_response',
+        id: 'call-1',
+      });
     } finally {
       if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
       else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;

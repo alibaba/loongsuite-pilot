@@ -30,9 +30,24 @@ export function parseJsonDocument<T>(
   raw: string,
   syntax: JsonSyntax = 'json',
 ): JsonTextParseResult<T> {
+  // A leading UTF-8 BOM defeats *both* parsers: JSON.parse throws, and
+  // jsonc-parser recovers the data but reports a parse error, which the
+  // errors.length check below turns into a failure. Agent settings files arrive
+  // with a BOM routinely on Windows — PowerShell 5.1's `Set-Content -Encoding
+  // UTF8` always writes one (no utf8NoBOM before PS 6), and so does Notepad —
+  // so a BOM'd ~/.claude/settings.json would fail hook deploy and remove, not
+  // just a read.
+  //
+  // The strip belongs here rather than in readJsonDocument: callers use the
+  // returned `raw` as the expected content of a compare-and-swap write and as
+  // the base text for editJsonc, so it must stay byte-identical to the file.
+  // modify()/applyEdits() handle BOM-prefixed text and preserve the BOM, which
+  // keeps the user's encoding marker intact on write-back.
+  const text = raw.replace(/^\uFEFF/, '');
+
   if (syntax === 'json') {
     try {
-      return { ok: true, data: JSON.parse(raw) as T };
+      return { ok: true, data: JSON.parse(text) as T };
     } catch (err) {
       return {
         ok: false,
@@ -42,7 +57,7 @@ export function parseJsonDocument<T>(
   }
 
   const errors: ParseError[] = [];
-  const data = parseJsonc(raw, errors, {
+  const data = parseJsonc(text, errors, {
     allowTrailingComma: true,
     disallowComments: false,
   }) as T;

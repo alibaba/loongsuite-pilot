@@ -11,6 +11,7 @@ export type AlarmType =
   | 'PROCESS_CPU_ALARM'
   | 'PROCESS_MEMORY_ALARM'
   | 'PROCESS_RESOURCE_ALARM'
+  | 'DISK_USAGE_ALARM'
   | 'DISPATCH_DROP_ALARM'
   | 'INPUT_STOP_ALARM'
   | 'SERVICE_NOT_RUNNING_ALARM'
@@ -20,7 +21,9 @@ export type AlarmType =
   | 'UPDATER_NOT_RUNNING_ALARM'
   | 'BROKEN_VERSION_POINTER_ALARM'
   | 'INVALID_NODE_BIN_ALARM'
-  | 'UPDATER_NODE_PIN_ALARM';
+  | 'UPDATER_NODE_PIN_ALARM'
+  | 'MANAGED_CONFIG_ALARM'
+  | 'INTERCEPTOR_REGEX_ALARM';
 
 export interface AlarmContext {
   input_name?: string;
@@ -60,14 +63,14 @@ export class AlarmManager {
     this.userId = opts.userId;
   }
 
-  record(type: AlarmType, level: AlarmLevel, message: string, context?: AlarmContext): void {
+  record(type: AlarmType, level: AlarmLevel, message: string, context?: AlarmContext, count = 1): void {
     const key = `${type}_${context?.input_name ?? ''}_${context?.endpoint_name ?? ''}`;
     const existing = this.alarms.get(key);
     if (existing) {
-      existing.count++;
+      existing.count += count;
       existing.message = message;
     } else {
-      this.alarms.set(key, { alarmType: type, level, message, count: 1, context });
+      this.alarms.set(key, { alarmType: type, level, message, count, context });
     }
   }
 

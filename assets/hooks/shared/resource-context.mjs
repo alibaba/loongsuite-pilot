@@ -15,6 +15,16 @@ export const DEFAULT_RESOURCE_ENV_FIELD_MAP = {
 // flusher can pass matching keys through to span attributes.
 const DEFAULT_SPAN_ATTRIBUTES_ENV = 'LOONGSUITE_PILOT_SPAN_ATTRIBUTES';
 
+// Exact managed identity keys accepted only when an adapter explicitly opts in.
+// They are mapped to internal transport fields and consumed by InputManager,
+// rather than being treated as generic span passthrough attributes.
+export const INVOCATION_SESSION_ID_FIELD = 'agent.pilot.invocation.session.id';
+export const INVOCATION_USER_ID_FIELD = 'agent.pilot.invocation.user.id';
+const INVOCATION_IDENTITY_FIELD_MAP = {
+  'gen_ai.session.id': INVOCATION_SESSION_ID_FIELD,
+  'gen_ai.user.id': INVOCATION_USER_ID_FIELD,
+};
+
 // Prefixes reserved for converter-managed / pipeline fields. Caller-supplied
 // keys matching these are dropped so they can't clobber pipeline semantics.
 // Mirrors RESERVED_PREFIXES in src/normalization/global-attributes.ts.
@@ -83,6 +93,7 @@ export function collectResourceAttributesFromEnv(env = process.env, opts = {}) {
 export function parseSpanAttributesFromEnv(env = process.env, opts = {}) {
   const agentId = opts.agentId || 'hook';
   const envName = opts.envName || DEFAULT_SPAN_ATTRIBUTES_ENV;
+  const allowInvocationIdentity = opts.allowInvocationIdentity === true;
   const out = {};
 
   const raw = env[envName];
@@ -95,6 +106,18 @@ export function parseSpanAttributesFromEnv(env = process.env, opts = {}) {
     const key = pair.slice(0, idx).trim();
     const value = pair.slice(idx + 1).trim();
     if (!key || !value) continue;
+
+    const invocationIdentityField = allowInvocationIdentity
+      ? INVOCATION_IDENTITY_FIELD_MAP[key]
+      : undefined;
+    if (invocationIdentityField) {
+      if (value.length > MAX_RESOURCE_FIELD_VALUE_LENGTH) {
+        warnSkip(agentId, key, 'value too long');
+        continue;
+      }
+      out[invocationIdentityField] = value;
+      continue;
+    }
 
     if (isReservedSpanAttrKey(key)) {
       warnSkip(agentId, key, 'reserved prefix');

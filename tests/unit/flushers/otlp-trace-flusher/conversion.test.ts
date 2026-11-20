@@ -16,6 +16,7 @@ import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js
 import { convertEventLogToTrace } from '@loongsuite/otel-util-genai';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
 import { GlobalAttributesProvider } from '../../../../src/normalization/global-attributes.js';
+import { expandAgentInputEvents } from '../../../../src/normalization/agent-input-dual-write.js';
 
 function makeConfig() {
   return {
@@ -51,6 +52,100 @@ describe('OtlpTraceFlusher - conversion', () => {
     const callArgs = vi.mocked(convertEventLogToTrace).mock.calls[0];
     expect(callArgs[0]).toHaveLength(2);
     expect(callArgs[1]).toMatchObject({ strict: false });
+  });
+
+  it('reconciles an early OpenClaw fallback to the sender identity at turn conversion', async () => {
+    const early = {
+      'event.name': 'other',
+      'gen_ai.agent.type': 'openclaw',
+      'gen_ai.turn.id': 'openclaw-turn',
+      'user.id': 'collector-user',
+      'agent.openclaw.hook': 'before_model_resolve',
+      'agent.openclaw.user.id.source': 'hostname',
+      'gen_ai.input.messages_delta': [],
+    } as unknown as AgentActivityEntry;
+    const senderKnown = {
+      ...early,
+      'event.id': 'sender-known',
+      'user.id': 'channel-sender',
+      'agent.openclaw.hook': 'before_agent_run',
+      'agent.openclaw.sender.id': 'channel-sender',
+      'agent.openclaw.channel': 'telegram',
+      'agent.openclaw.account.id': 'channel-account',
+      'agent.openclaw.channel.id': 'channel-conversation',
+      'agent.openclaw.user.id.source': 'sender',
+    } as unknown as AgentActivityEntry;
+    const terminal = {
+      ...senderKnown,
+      'event.id': 'terminal',
+      'agent.openclaw.hook': 'llm_output',
+    } as unknown as AgentActivityEntry;
+
+    await flusher.sendBatch([early, senderKnown, terminal]);
+
+    const convertedRecords = vi.mocked(convertEventLogToTrace).mock.calls[0][0] as AgentActivityEntry[];
+    expect(convertedRecords.every(record => record['user.id'] === 'channel-sender')).toBe(true);
+    expect(convertedRecords.every(record =>
+      record['agent.openclaw.user.id.source'] === 'sender')).toBe(true);
+    expect(convertedRecords.every(record =>
+      record['agent.openclaw.sender.id'] === 'channel-sender')).toBe(true);
+    expect(convertedRecords.every(record =>
+      record['agent.openclaw.channel'] === 'telegram')).toBe(true);
+    expect(early['user.id']).toBe('collector-user');
+    expect(early['agent.openclaw.user.id.source']).toBe('hostname');
+  });
+
+  it('does not replace an explicit OpenClaw environment identity with sender metadata', async () => {
+    const early = {
+      'event.name': 'other',
+      'gen_ai.agent.type': 'openclaw',
+      'gen_ai.turn.id': 'openclaw-env-turn',
+      'user.id': 'environment-user',
+      'agent.openclaw.hook': 'before_model_resolve',
+      'gen_ai.input.messages_delta': [],
+    } as unknown as AgentActivityEntry;
+    const terminal = {
+      ...early,
+      'event.id': 'terminal',
+      'agent.openclaw.hook': 'llm_output',
+      'agent.openclaw.sender.id': 'channel-sender',
+      'agent.openclaw.user.id.source': 'environment',
+    } as unknown as AgentActivityEntry;
+
+    await flusher.sendBatch([early, terminal]);
+
+    const convertedRecords = vi.mocked(convertEventLogToTrace).mock.calls[0][0] as AgentActivityEntry[];
+    expect(convertedRecords.every(record => record['user.id'] === 'environment-user')).toBe(true);
+  });
+
+  it('excludes agent.input only at the EventLog-to-Trace boundary', async () => {
+    const inputOther = {
+      time_unix_nano: '1700000000000000000',
+      'event.id': 'input-other',
+      'event.name': 'other',
+      'user.id': 'user-1',
+      'gen_ai.session.id': 'session-1',
+      'gen_ai.agent.type': 'claude-code',
+      'gen_ai.provider.name': 'anthropic',
+      'gen_ai.turn.id': 'dual-write-turn',
+      'gen_ai.input.messages_delta': [{ role: 'user', content: 'hello' }],
+    } as AgentActivityEntry;
+    const terminal = {
+      ...inputOther,
+      time_unix_nano: '1700000001000000000',
+      'event.id': 'terminal',
+      'event.name': 'llm.response',
+      'gen_ai.response.finish_reasons': ['stop'],
+      'gen_ai.input.messages_delta': undefined,
+    } as AgentActivityEntry;
+
+    await flusher.sendBatch([...expandAgentInputEvents([inputOther]), terminal]);
+
+    const records = vi.mocked(convertEventLogToTrace).mock.calls[0][0] as AgentActivityEntry[];
+    expect(records.map(record => record['event.name'])).toEqual([
+      'other',
+      'llm.response',
+    ]);
   });
 
   it('passes handler from per-agent convert state', async () => {
@@ -113,6 +208,32 @@ describe('OtlpTraceFlusher - conversion', () => {
     });
   });
 
+  it.each(['qoder', 'qoder-cli', 'qoder-app'])('exports %s as a distinct Qoder framework', agentType => {
+    const records = [{ 'gen_ai.agent.type': agentType }] as unknown as AgentActivityEntry[];
+    const identity = (flusher as any).resolveAgentResourceIdentity(agentType, records);
+    const resource = (flusher as any).buildResource(agentType, 'test-pilot', {}, identity);
+    expect(resource.attributes).toMatchObject({
+      'gen_ai.agent.type': agentType,
+      'gen_ai.agent.system': agentType === 'qoder-app' ? 'qoder-app' : agentType === 'qoder' ? 'qoder-ide' : 'qoder',
+      'gen_ai.framework': agentType,
+    });
+  });
+
+  it('uses an explicit PI system and framework for a registered custom Agent resource', () => {
+    const records = [{
+      'gen_ai.agent.system': 'pi',
+      'gen_ai.framework': 'pi-coding-agent',
+    }] as unknown as AgentActivityEntry[];
+    const identity = (flusher as any).resolveAgentResourceIdentity('acme-code', records);
+    const resource = (flusher as any).buildResource('acme-code', 'test-pilot', {}, identity);
+
+    expect(resource.attributes).toMatchObject({
+      'gen_ai.agent.type': 'acme-code',
+      'gen_ai.agent.system': 'pi',
+      'gen_ai.framework': 'pi-coding-agent',
+    });
+  });
+
   it('evicts old per-resource convert states when resource attribute cardinality grows', () => {
     for (let i = 0; i < 70; i += 1) {
       (flusher as any).getOrCreateConvertState('claude-code', 'test-pilot', {
@@ -156,6 +277,8 @@ describe('OtlpTraceFlusher - conversion', () => {
         'git.branch',
         'git.domain',
         'workspace.current_root',
+        'user.name',
+        'user.email',
       ]),
     );
   });
@@ -223,6 +346,194 @@ describe('OtlpTraceFlusher - conversion', () => {
     expect(llmSpan.attributes).not.toHaveProperty('gen_ai.skill.name');
   });
 
+  it('copies multimodal summaries onto the matching tool and llm spans', () => {
+    const image = [{ uri: 'oss://bucket/a.png', mime_type: 'image/png', modality: 'image' }];
+    const records = [
+      {
+        'event.name': 'tool.call',
+        'gen_ai.tool.call.id': 'tool-1',
+        'gen_ai.output.multimodal_metadata': image,
+      },
+      {
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.id': 'tool-1',
+        'gen_ai.input.multimodal_metadata': image,
+        'gen_ai.input.multimodal_metadata_delta': image,
+      },
+      {
+        'event.name': 'llm.response',
+        'gen_ai.response.id': 'resp-1',
+        'gen_ai.output.multimodal_metadata': image,
+      },
+    ] as unknown as AgentActivityEntry[];
+    const toolSpan = {
+      attributes: { 'gen_ai.span.kind': 'TOOL', 'gen_ai.tool.call.id': 'tool-1' },
+    };
+    const otherTool = {
+      attributes: { 'gen_ai.span.kind': 'TOOL', 'gen_ai.tool.call.id': 'tool-2' },
+    };
+    const llmSpan = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'resp-1', 'gen_ai.tool.call.id': 'tool-1' },
+    };
+    const encoded = JSON.stringify(image);
+
+    (flusher as any).enrichMultimodalAttributes(records, [toolSpan, otherTool, llmSpan]);
+
+    expect(toolSpan.attributes).toMatchObject({
+      'gen_ai.output.multimodal_metadata': encoded,
+      'gen_ai.input.multimodal_metadata': encoded,
+      'gen_ai.input.multimodal_metadata_delta': encoded,
+    });
+    expect(otherTool.attributes).not.toHaveProperty('gen_ai.output.multimodal_metadata');
+    expect(llmSpan.attributes).toMatchObject({ 'gen_ai.output.multimodal_metadata': encoded });
+    expect(llmSpan.attributes).not.toHaveProperty('gen_ai.input.multimodal_metadata');
+  });
+
+  it('attaches a request summary through the single response in its step', () => {
+    const image = [{ uri: 'oss://bucket/b.png', mime_type: 'image/png' }];
+    const records = [
+      {
+        'event.name': 'llm.request',
+        'gen_ai.step.id': 'step-1',
+        'gen_ai.input.multimodal_metadata': image,
+        'gen_ai.input.multimodal_metadata_delta': image,
+      },
+      {
+        'event.name': 'llm.response',
+        'gen_ai.step.id': 'step-1',
+        'gen_ai.response.id': 'resp-1',
+      },
+      {
+        'event.name': 'llm.request',
+        'gen_ai.step.id': 'step-2',
+        'gen_ai.input.multimodal_metadata': image,
+      },
+      {
+        'event.name': 'llm.response',
+        'gen_ai.step.id': 'step-2',
+        'gen_ai.response.id': 'resp-2',
+      },
+      {
+        'event.name': 'llm.response',
+        'gen_ai.step.id': 'step-2',
+        'gen_ai.response.id': 'resp-3',
+      },
+    ] as unknown as AgentActivityEntry[];
+    const matched = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'resp-1' },
+    };
+    const ambiguous = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'resp-2' },
+    };
+    const untouched = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'resp-9' },
+    };
+
+    (flusher as any).enrichMultimodalAttributes(records, [matched, ambiguous, untouched]);
+
+    expect(matched.attributes).toMatchObject({
+      'gen_ai.input.multimodal_metadata': JSON.stringify(image),
+      'gen_ai.input.multimodal_metadata_delta': JSON.stringify(image),
+    });
+    expect(ambiguous.attributes).not.toHaveProperty('gen_ai.input.multimodal_metadata');
+    expect(untouched.attributes).toEqual({
+      'gen_ai.span.kind': 'LLM',
+      'gen_ai.response.id': 'resp-9',
+    });
+  });
+
+  it('matches a missing response id by turn id and start time', () => {
+    const imageA = [{ uri: 'oss://bucket/a.png', mime_type: 'image/png' }];
+    const imageB = [{ uri: 'oss://bucket/b.png', mime_type: 'image/png' }];
+    const startMs = 1_700_000_000_010;
+    const time = String(BigInt(startMs) * 1_000_000n);
+    const startTime = [Math.floor(startMs / 1000), (startMs % 1000) * 1_000_000];
+    const records = [
+      {
+        'event.name': 'llm.request',
+        'gen_ai.turn.id': 'turn-a',
+        time_unix_nano: time,
+        'gen_ai.input.multimodal_metadata_delta': imageA,
+      },
+      {
+        'event.name': 'llm.request',
+        'gen_ai.turn.id': 'turn-b',
+        time_unix_nano: time,
+        'gen_ai.input.multimodal_metadata_delta': imageB,
+      },
+    ] as unknown as AgentActivityEntry[];
+    const turnA = {
+      startTime,
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.turn.id': 'turn-a' },
+    };
+    const turnB = {
+      startTime,
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.turn.id': 'turn-b' },
+    };
+    const noTurn = {
+      startTime,
+      attributes: { 'gen_ai.span.kind': 'LLM' },
+    };
+
+    (flusher as any).enrichMultimodalAttributes(records, [turnA, turnB, noTurn]);
+
+    expect(turnA.attributes).toMatchObject({
+      'gen_ai.input.multimodal_metadata_delta': JSON.stringify(imageA),
+    });
+    expect(turnB.attributes).toMatchObject({
+      'gen_ai.input.multimodal_metadata_delta': JSON.stringify(imageB),
+    });
+    expect(noTurn.attributes).not.toHaveProperty('gen_ai.input.multimodal_metadata_delta');
+  });
+
+  it('rebuilds cumulative input metadata from the span messages and keeps the request delta', () => {
+    const prior = { uri: 'oss://bucket/a.png', mime_type: 'image/png', modality: 'image' };
+    const current = { uri: 'oss://bucket/b.png', mime_type: 'image/png', modality: 'image' };
+    const records = [
+      {
+        'event.name': 'llm.request',
+        'gen_ai.step.id': 'step-3',
+        'gen_ai.response.id': 'resp-3',
+        'gen_ai.input.multimodal_metadata': [prior, current],
+        'gen_ai.input.multimodal_metadata_delta': [current],
+      },
+      {
+        'event.name': 'llm.request',
+        'gen_ai.step.id': 'step-4',
+        'gen_ai.response.id': 'resp-4',
+        'gen_ai.input.multimodal_metadata': [prior, current],
+        'gen_ai.input.multimodal_metadata_delta': [current],
+      },
+    ] as unknown as AgentActivityEntry[];
+    const accumulated = {
+      attributes: {
+        'gen_ai.span.kind': 'LLM',
+        'gen_ai.response.id': 'resp-3',
+        'gen_ai.input.messages': JSON.stringify([
+          { role: 'user', parts: [{ type: 'uri', ...prior }] },
+          { role: 'user', parts: [{ type: 'text', content: 'plain' }] },
+          { role: 'user', parts: [{ type: 'uri', ...current }] },
+        ]),
+      },
+    };
+    const snapshot = {
+      attributes: {
+        'gen_ai.span.kind': 'LLM',
+        'gen_ai.response.id': 'resp-4',
+        'gen_ai.input.messages': JSON.stringify([
+          { role: 'user', parts: [{ type: 'uri', ...current }] },
+        ]),
+      },
+    };
+
+    (flusher as any).enrichMultimodalAttributes(records, [accumulated, snapshot]);
+
+    expect(JSON.parse(String(accumulated.attributes['gen_ai.input.multimodal_metadata']))).toEqual([prior, current]);
+    expect(JSON.parse(String(accumulated.attributes['gen_ai.input.multimodal_metadata_delta']))).toEqual([current]);
+    expect(JSON.parse(String(snapshot.attributes['gen_ai.input.multimodal_metadata']))).toEqual([current]);
+    expect(JSON.parse(String(snapshot.attributes['gen_ai.input.multimodal_metadata_delta']))).toEqual([current]);
+  });
+
   it('enriches OpenClaw LLM and AGENT spans with per-call reasoning tokens and error status', () => {
     const records = [
       {
@@ -272,6 +583,76 @@ describe('OtlpTraceFlusher - conversion', () => {
     expect(agent.attributes).toMatchObject({
       'gen_ai.usage.reasoning_tokens': 81,
     });
+  });
+
+  it('marks each Claude retry LLM span as failed without failing a recovered root turn', () => {
+    const records = [
+      {
+        'event.name': 'llm.response',
+        'gen_ai.response.id': 'retry-response-1',
+        'gen_ai.request.id': 'req-1',
+        'gen_ai.response.finish_reasons': ['error'],
+        'http.response.status_code': 529,
+        'error.type': 'overloaded_error',
+      },
+      {
+        'event.name': 'llm.response',
+        'gen_ai.response.id': 'success-response-2',
+        'gen_ai.response.finish_reasons': ['stop'],
+        'gen_ai.request.id': 'req-2',
+      },
+    ] as unknown as AgentActivityEntry[];
+    const retry = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'retry-response-1' },
+      status: { code: 0 },
+    };
+    const success = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'success-response-2' },
+      status: { code: 0 },
+    };
+    const agent = { attributes: { 'gen_ai.span.kind': 'AGENT' }, status: { code: 0 } };
+    const entry = { attributes: { 'gen_ai.span.kind': 'ENTRY' }, status: { code: 0 } };
+
+    (flusher as any).enrichClaudeCodeLlmAttributes(records, [retry, success, agent, entry]);
+
+    expect(retry.attributes).toMatchObject({
+      'gen_ai.request.id': 'req-1',
+      'http.response.status_code': 529,
+      'error.type': 'overloaded_error',
+    });
+    expect(retry.attributes).not.toHaveProperty('error.message');
+    expect(retry.status.code).toBe(2);
+    expect(success.attributes).toMatchObject({
+      'gen_ai.request.id': 'req-2',
+    });
+    expect(success.status.code).toBe(0);
+    expect(agent.status.code).toBe(0);
+    expect(entry.status.code).toBe(0);
+  });
+
+  it('limits a Claude terminal error to its LLM span without changing parent or sibling spans', () => {
+    const records = [{
+      'event.name': 'llm.response',
+      'gen_ai.response.id': 'terminal-error',
+      'gen_ai.turn.end': true,
+      'error.type': 'server_error',
+    }] as unknown as AgentActivityEntry[];
+    const llm = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'terminal-error' },
+      status: { code: 0 },
+    };
+    const agent = { attributes: { 'gen_ai.span.kind': 'AGENT' }, status: { code: 0 } };
+    const sibling = { attributes: { 'gen_ai.span.kind': 'AGENT' }, status: { code: 0 } };
+    const entry = { attributes: { 'gen_ai.span.kind': 'ENTRY' }, status: { code: 0 } };
+
+    (flusher as any).enrichClaudeCodeLlmAttributes(records, [llm, agent, sibling, entry]);
+
+    expect(llm.status.code).toBe(2);
+    expect(llm.attributes['error.type']).toBe('server_error');
+    for (const span of [agent, sibling, entry]) {
+      expect(span.status.code).toBe(0);
+      expect(span.attributes).not.toHaveProperty('error.type');
+    }
   });
 
   it('preserves OpenClaw tool failure attributes and OTLP error status', () => {

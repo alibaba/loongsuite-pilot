@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
+import { TurnBoundaryProcessor } from '../../../../src/normalization/turn-boundary-processor.js';
 
 vi.mock('@loongsuite/otel-util-genai', () => ({
   convertEventLogToTrace: vi.fn(() => ({ traceIds: [], spanCount: 0, warnings: [] })),
@@ -41,6 +42,83 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
 
   afterEach(async () => {
     await flusher.shutdown();
+  });
+
+  it('waits for V2 execution completion but preserves V1 stop behavior', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const convert = vi.mocked(convertEventLogToTrace);
+    convert.mockClear();
+    const entry = (fields: Record<string, unknown>) => makeEntry({
+      'gen_ai.agent.type': 'opencode', 'agent.opencode.collection': 'v2', ...fields,
+    });
+    await flusher.send(entry({ 'event.name': 'llm.request' }));
+    await flusher.send(entry({ 'gen_ai.response.finish_reasons': ['error'] }));
+    await flusher.send(entry({ 'gen_ai.response.finish_reasons': ['stop'] }));
+    expect(convert).not.toHaveBeenCalled();
+    await flusher.send(entry({ 'event.name': 'other', 'gen_ai.turn.end': true }));
+    expect(convert).toHaveBeenCalledOnce();
+    await flusher.shutdown();
+    flusher = new OtlpTraceFlusher(makeConfig());
+    convert.mockClear();
+    await flusher.send(makeEntry({ trace_id: '5bf92f3577b34da6a3ce929d0e0e4736', 'event.name': 'llm.request', 'gen_ai.agent.type': 'opencode' }));
+    await flusher.send(makeEntry({ trace_id: '5bf92f3577b34da6a3ce929d0e0e4736', 'gen_ai.agent.type': 'opencode', 'gen_ai.response.finish_reasons': ['stop'] }));
+    expect(convert).toHaveBeenCalledOnce();
+  });
+
+  it('keeps incremental Hermes retries and overlapping same-session turns until their explicit ends', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const convert = vi.mocked(convertEventLogToTrace);
+    convert.mockClear();
+    const boundaries = new TurnBoundaryProcessor();
+    const base = { 'gen_ai.agent.type': 'hermes', 'agent.hermes.collection': 'realtime-v1', 'gen_ai.session.id': 'im-session' };
+    const entry = (turn: string, name: string, fields = {}) => {
+      const value = makeEntry({
+        ...base, trace_id: (turn === 'a' ? 'a' : 'b').repeat(32),
+        'gen_ai.turn.id': turn, 'gen_ai.step.id': turn + ':s1', 'event.name': name, ...fields,
+      });
+      boundaries.enrich([value]);
+      return value;
+    };
+    await flusher.send(entry('a', 'llm.request'));
+    await flusher.send(entry('a', 'llm.response', { 'gen_ai.response.finish_reasons': ['error'] }));
+    await flusher.send(entry('b', 'llm.request'));
+    await flusher.send(entry('b', 'llm.response', { 'gen_ai.response.finish_reasons': ['stop'] }));
+    expect(convert).not.toHaveBeenCalled();
+    await flusher.send(entry('a', 'other', { 'gen_ai.turn.end': true }));
+    expect(convert).toHaveBeenCalledTimes(1);
+    expect(convert.mock.calls[0][0].every(r => r['gen_ai.turn.id'] === 'a')).toBe(true);
+    await flusher.send(entry('b', 'other', { 'gen_ai.turn.end': true }));
+    await vi.waitFor(() => expect(convert).toHaveBeenCalledTimes(2));
+  });
+
+  it('flushes a failed legacy OpenClaw turn without llm_output', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const convert = vi.mocked(convertEventLogToTrace);
+    convert.mockClear();
+    await flusher.send(makeEntry({ 'gen_ai.agent.type': 'openclaw', 'event.name': 'llm.request' }));
+    await flusher.send(makeEntry({ 'gen_ai.agent.type': 'openclaw', 'gen_ai.response.finish_reasons': ['error'] }));
+    expect(convert).not.toHaveBeenCalled();
+    await flusher.send(makeEntry({
+      'gen_ai.agent.type': 'openclaw', 'event.name': 'other',
+      'agent.openclaw.compatibility': 'legacy', 'agent.openclaw.hook': 'agent_end',
+      'agent.openclaw.success': false, 'gen_ai.turn.end': true,
+    }));
+    expect(convert).toHaveBeenCalledTimes(1);
+    expect(convert.mock.calls[0][0]).toHaveLength(3);
+  });
+
+  it('flushes incomplete legacy cleanup without claiming a model failure', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const convert = vi.mocked(convertEventLogToTrace);
+    convert.mockClear();
+    await flusher.send(makeEntry({ 'gen_ai.agent.type': 'openclaw', 'event.name': 'llm.request' }));
+    const terminal = makeEntry({ 'gen_ai.agent.type': 'openclaw', 'event.name': 'other',
+      'agent.openclaw.compatibility': 'legacy', 'agent.openclaw.hook': 'legacy_cleanup',
+      'agent.openclaw.collection.incomplete': true, 'gen_ai.turn.end': true });
+    await flusher.send(terminal);
+    expect(convert).toHaveBeenCalledOnce();
+    expect(terminal['error.type']).toBeUndefined();
+    expect(terminal['agent.openclaw.success']).toBeUndefined();
   });
 
   it('Signal A: finish_reason=stop triggers immediate flush', async () => {
@@ -116,19 +194,29 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     expect(mockConvert.mock.calls[0][0]).toHaveLength(5);
   });
 
-  it('Signal A: finish_reason=error triggers immediate flush', async () => {
+  it('claude-code: a mid-turn error span does NOT end the turn; turn.end does', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);
     mockConvert.mockClear();
 
+    // A retried attempt carries finish_reasons=['error'] but is not terminal:
+    // more attempts follow in the same turn, so it must not flush the buffer.
     await flusher.send(makeEntry({ 'event.name': 'llm.request' }));
     await flusher.send(makeEntry({
       'gen_ai.response.finish_reasons': ['error'],
       'error.type': 'RateLimitError',
     }));
+    expect(mockConvert).not.toHaveBeenCalled();
 
+    // The terminal failure carries both ['error'] and turn.end=true — the turn
+    // boundary is the turn.end signal, not the error finish reason.
+    await flusher.send(makeEntry({
+      'gen_ai.response.finish_reasons': ['error'],
+      'error.type': 'RateLimitError',
+      'gen_ai.turn.end': true,
+    }));
     expect(mockConvert).toHaveBeenCalledTimes(1);
-    expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(3);
   });
 
   it('Signal A: finish_reason=tool_calls does NOT end turn', async () => {

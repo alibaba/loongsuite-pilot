@@ -1,25 +1,23 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AgentDiscoveryService } from '../../../src/core/agent-discovery-service.js';
+import { EventEmitter } from 'node:events';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { AgentDiscoveryService, maskHomeDir, summarizeError } from '../../../src/core/agent-discovery-service.js';
 import type { AgentDetectionEntry } from '../../../src/types/index.js';
-
-vi.mock('node:fs', async () => {
-  const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
-  return {
-    ...actual,
-    watch: vi.fn(() => {
-      throw new Error('watch path unavailable in test');
-    }),
-  };
-});
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
-    info: vi.fn(),
-    debug: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
+    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
   }),
 }));
+
+const mockFsWatch = vi.fn();
+vi.mock('node:fs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs')>();
+  return { ...original, watch: (...args: unknown[]) => mockFsWatch(...args) };
+});
+
 
 describe('AgentDiscoveryService', () => {
   afterEach(() => {
@@ -69,23 +67,6 @@ describe('AgentDiscoveryService', () => {
     await discovery.stop();
   });
 });
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as os from 'node:os';
-import type { AgentDetectionEntry } from '../../../src/types/index.js';
-
-vi.mock('../../../src/utils/logger.js', () => ({
-  createLogger: () => ({
-    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
-  }),
-}));
-
-const mockFsWatch = vi.fn();
-vi.mock('node:fs', async (importOriginal) => {
-  const original = await importOriginal<typeof import('node:fs')>();
-  return { ...original, watch: (...args: unknown[]) => mockFsWatch(...args) };
-});
-
-import { AgentDiscoveryService, maskHomeDir, summarizeError } from '../../../src/core/agent-discovery-service.js';
 
 function makeEntry(overrides: Partial<AgentDetectionEntry> = {}): AgentDetectionEntry {
   return {
@@ -409,6 +390,58 @@ describe('AgentDiscoveryService', () => {
       await svc.stop();
     });
 
+    it('reports an unexpected stop only after the adapter has stopped', async () => {
+      const start = vi.fn().mockResolvedValue(undefined);
+      const stop = vi.fn().mockRejectedValueOnce(new Error('unable to stop yet')).mockResolvedValue(undefined);
+      const svc = new AgentDiscoveryService([makeEntry({ start, stop, runOnActive: true })]);
+      const stopped = vi.fn();
+      svc.on('agent:stopped', stopped);
+      await svc.start();
+
+      start.mockRejectedValue(new Error('persistent failure'));
+      await svc.refresh();
+      await svc.refresh();
+      vi.setSystemTime(Date.now() + 61_000);
+      await svc.refresh();
+      expect(stop).toHaveBeenCalledOnce();
+      expect(stopped).not.toHaveBeenCalled();
+      expect(svc.getStates()['test-agent']).toBe('running');
+
+      await svc.refresh();
+      expect(stop).toHaveBeenCalledTimes(2);
+      expect(stopped).toHaveBeenCalledOnce();
+      expect(stopped).toHaveBeenCalledWith('test-agent', 'unexpected', 'Error: persistent failure');
+      expect(svc.getStates()['test-agent']).toBe('idle');
+      await svc.stop();
+    });
+
+    it('lets shutdown stop a running entry after an in-flight lifecycle rejection', async () => {
+      const start = vi.fn().mockResolvedValue(undefined);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const svc = new AgentDiscoveryService([makeEntry({ start, stop, runOnActive: true })]);
+      const stopped = vi.fn();
+      svc.on('agent:stopped', stopped);
+      await svc.start();
+
+      let reportStarted!: () => void;
+      const started = new Promise<void>(resolve => { reportStarted = resolve; });
+      let failStart!: (error: Error) => void;
+      start.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+        failStart = reject;
+        reportStarted();
+      }));
+      const refresh = svc.refresh();
+      await started;
+      const shutdown = svc.stop();
+      failStart(new Error('in-flight failure'));
+      await Promise.all([refresh, shutdown]);
+
+      expect(stop).toHaveBeenCalledOnce();
+      expect(stopped).toHaveBeenCalledOnce();
+      expect(stopped).toHaveBeenCalledWith('test-agent', 'shutdown');
+      expect(svc.getStates()['test-agent']).toBe('idle');
+    });
+
     it('does not stop on a rapid burst of lifecycle failures inside the time window', async () => {
       const startFn = vi.fn().mockResolvedValue(undefined);
       const entry = makeEntry({ start: startFn, runOnActive: true });
@@ -604,6 +637,478 @@ describe('AgentDiscoveryService', () => {
       await svc.stop();
     });
   });
+  it('coalesces concurrent refreshes and stops only after pending startup completes', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let available = true;
+    let startupComplete = false;
+    const entry = makeEntry({
+      isAvailable: async () => available,
+      start: vi.fn(async () => { entered(); await gate; startupComplete = true; }),
+      stop: vi.fn(async () => { expect(startupComplete).toBe(true); }),
+    });
+    const svc = new AgentDiscoveryService([entry]);
+    const starting = svc.start();
+    await started;
+    const refreshes = Array.from({ length: 10 }, () => svc.refresh('concurrent-watch'));
+    available = false;
+    expect(entry.stop).not.toHaveBeenCalled();
+    release();
+    await Promise.all([starting, ...refreshes]);
+    expect(entry.start).toHaveBeenCalledOnce();
+    expect(entry.stop).toHaveBeenCalledOnce();
+    expect(svc.getStates()['test-agent']).toBe('idle');
+    await svc.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('shutdown drains in-flight startup without restoring running or poll timers', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entry = makeEntry({ start: vi.fn(async () => { entered(); await gate; }) });
+    const svc = new AgentDiscoveryService([entry]);
+    const events = vi.fn();
+    svc.on('agent:started', events);
+    const starting = svc.start();
+    await started;
+    const stopping = svc.stop();
+    release();
+    await Promise.all([starting, stopping]);
+    expect(svc.getStates()['test-agent']).toBe('idle');
+    expect(entry.stop).toHaveBeenCalledOnce();
+    expect(events).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    await svc.refresh('late-watch');
+    expect(entry.start).toHaveBeenCalledOnce();
+  });
+
+  it('shutdown during availability lookup prevents a late start', async () => {
+    let entered!: () => void;
+    let release!: (value: boolean) => void;
+    const checking = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<boolean>(resolve => { release = resolve; });
+    const entry = makeEntry({ isAvailable: async () => { entered(); return gate; } });
+    const svc = new AgentDiscoveryService([entry]);
+    const starting = svc.start();
+    await checking;
+    const stopping = svc.stop();
+    release(true);
+    await Promise.all([starting, stopping]);
+    expect(entry.start).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+});
+
+interface RecordedWatch {
+  watchPath: string;
+  cb: () => void;
+  watcher: EventEmitter & { close: ReturnType<typeof vi.fn> };
+}
+
+function useFakeWatch(): RecordedWatch[] {
+  const records: RecordedWatch[] = [];
+  mockFsWatch.mockImplementation((watchPath: string, _opts: unknown, cb: () => void) => {
+    const watcher = new EventEmitter() as EventEmitter & { close: ReturnType<typeof vi.fn> };
+    watcher.close = vi.fn();
+    records.push({ watchPath: String(watchPath), cb, watcher });
+    return watcher;
+  });
+  return records;
+}
+
+function makeWatchTree(): { root: string; codex: string; sessions: string; wakeup: string } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-discovery-'));
+  const codex = path.join(root, '.codex');
+  const sessions = path.join(codex, 'sessions');
+  const wakeup = path.join(root, 'wakeup');
+  fs.mkdirSync(sessions, { recursive: true });
+  fs.mkdirSync(wakeup, { recursive: true });
+  return { root, codex, sessions, wakeup };
+}
+
+describe('AgentDiscoveryService deleted-directory watches', () => {
+  let tree: ReturnType<typeof makeWatchTree>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.stubEnv('LOONGSUITE_PILOT_FORCE_POLLING', 'false');
+    vi.stubEnv('LOONGSUITE_PILOT_DISCOVERY_INTERVAL_MS', '60000');
+    tree = makeWatchTree();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    fs.rmSync(tree.root, { recursive: true, force: true });
+  });
+
+  async function flush(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  it('keeps a healthy watcher when a child changes', async () => {
+    const records = useFakeWatch();
+    const start = vi.fn().mockResolvedValue(undefined);
+    const entry = makeEntry({
+      id: 'codex-transcript',
+      watchPaths: [tree.sessions],
+      pollIntervalMs: 1000,
+      isAvailable: async () => fs.existsSync(tree.sessions),
+      start,
+    });
+    const svc = new AgentDiscoveryService([entry]);
+    await svc.start();
+
+    fs.writeFileSync(path.join(tree.sessions, 'rollout.jsonl'), '{}\n');
+    records[0].cb();
+    await flush();
+
+    expect(records).toHaveLength(1);
+    expect(records[0].watcher.close).not.toHaveBeenCalled();
+    expect(svc.getStates()['codex-transcript']).toBe('running');
+    expect(start).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(1);
+    await svc.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('closes a deleted directory watcher and ignores the queued event flood', async () => {
+    const records = useFakeWatch();
+    let checks = 0;
+    const start = vi.fn().mockResolvedValue(undefined);
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const entry = makeEntry({
+      id: 'codex-transcript',
+      watchPaths: [tree.sessions],
+      pollIntervalMs: 1000,
+      isAvailable: async () => {
+        checks++;
+        return fs.existsSync(tree.sessions);
+      },
+      start,
+      stop,
+    });
+    const svc = new AgentDiscoveryService([entry]);
+    await svc.start();
+    const baseline = checks;
+
+    fs.rmSync(tree.codex, { recursive: true });
+    for (let i = 0; i < 1_000; i++) records[0].cb();
+    await flush();
+
+    expect(records[0].watcher.close).toHaveBeenCalledOnce();
+    expect(records).toHaveLength(1);
+    expect(svc.getStates()['codex-transcript']).toBe('idle');
+    expect(stop).toHaveBeenCalledOnce();
+    expect(checks - baseline).toBeLessThan(5);
+    expect(vi.getTimerCount()).toBe(2);
+
+    const afterClose = checks;
+    for (let i = 0; i < 1_000; i++) records[0].cb();
+    await flush();
+    expect(checks).toBe(afterClose);
+
+    fs.mkdirSync(tree.sessions, { recursive: true });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(svc.getStates()['codex-transcript']).toBe('running');
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(records).toHaveLength(2);
+    expect(records[1].watchPath).toBe(tree.sessions);
+    expect(records[0].watcher.close).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(1);
+
+    await svc.stop();
+    records[1].cb();
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('closes a stale watcher from refresh when the callback has not run', async () => {
+    const records = useFakeWatch();
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const entry = makeEntry({
+      id: 'deploy:codex',
+      watchPaths: [tree.codex],
+      pollIntervalMs: 1000,
+      isAvailable: async () => fs.existsSync(tree.codex),
+      stop,
+    });
+    const svc = new AgentDiscoveryService([entry]);
+    await svc.start();
+
+    fs.rmSync(tree.codex, { recursive: true });
+    await svc.refresh('deleted');
+
+    expect(records[0].watcher.close).toHaveBeenCalledOnce();
+    expect(svc.getStates()['deploy:codex']).toBe('idle');
+    expect(stop).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(2);
+    await svc.stop();
+  });
+
+  it('closes a replaced directory watcher and watches the new directory', async () => {
+    const records = useFakeWatch();
+    let checks = 0;
+    const start = vi.fn().mockResolvedValue(undefined);
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const entry = makeEntry({
+      id: 'deploy:codex',
+      watchPaths: [tree.codex],
+      pollIntervalMs: 1000,
+      isAvailable: async () => {
+        checks++;
+        return fs.existsSync(tree.codex);
+      },
+      start,
+      stop,
+    });
+    const svc = new AgentDiscoveryService([entry]);
+    await svc.start();
+
+    const watched = fs.statSync(tree.codex, { bigint: true });
+    fs.rmSync(tree.codex, { recursive: true });
+    fs.mkdirSync(tree.codex, { recursive: true });
+    const realStatSync = fs.statSync;
+    const statSpy = vi.spyOn(fs, 'statSync').mockImplementation(((target: fs.PathLike, opts?: fs.StatSyncOptions) => {
+      const st = realStatSync(target, opts);
+      if (String(target) === tree.codex) {
+        Object.defineProperty(st, 'ino', { value: watched.ino + 1n });
+      }
+      return st;
+    }) as typeof fs.statSync);
+    try {
+      const stale = records[0];
+      for (let i = 0; i < 1_000; i++) stale.cb();
+      await flush();
+
+      expect(stale.watcher.close).toHaveBeenCalledOnce();
+      expect(records).toHaveLength(2);
+      expect(records[1].watchPath).toBe(tree.codex);
+      expect(records[1].watcher.close).not.toHaveBeenCalled();
+      expect(svc.getStates()['deploy:codex']).toBe('running');
+      expect(start).toHaveBeenCalledOnce();
+      expect(stop).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(1);
+
+      const after = checks;
+      for (let i = 0; i < 1_000; i++) stale.cb();
+      await flush();
+      expect(checks).toBe(after);
+      await svc.stop();
+    } finally {
+      statSpy.mockRestore();
+    }
+  });
+
+  it('does not tight-loop when the watcher errors, and rewatches on the next poll', async () => {
+    const records = useFakeWatch();
+    const entry = makeEntry({
+      id: 'deploy:codex',
+      watchPaths: [tree.codex],
+      pollIntervalMs: 1000,
+      isAvailable: async () => fs.existsSync(tree.codex),
+    });
+    const svc = new AgentDiscoveryService([entry]);
+    await svc.start();
+
+    for (let i = 0; i < 100; i++) records[0].watcher.emit('error', new Error('watch failed'));
+    await flush();
+
+    expect(records).toHaveLength(1);
+    expect(records[0].watcher.close).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(records).toHaveLength(2);
+    expect(records[1].watchPath).toBe(tree.codex);
+    expect(vi.getTimerCount()).toBe(1);
+    await svc.stop();
+  });
+
+  it('keeps the watcher when the agent is unavailable or disabled', async () => {
+    const records = useFakeWatch();
+    let available = true;
+    const enabled = vi.fn().mockReturnValue(true);
+    const start = vi.fn().mockResolvedValue(undefined);
+    const entry = makeEntry({
+      id: 'deploy:codex',
+      watchPaths: [tree.codex],
+      pollIntervalMs: 1000,
+      enabled,
+      isAvailable: async () => available,
+      start,
+    });
+    const svc = new AgentDiscoveryService([entry]);
+    await svc.start();
+
+    available = false;
+    records[0].cb();
+    await flush();
+    expect(svc.getStates()['deploy:codex']).toBe('idle');
+    expect(records[0].watcher.close).not.toHaveBeenCalled();
+
+    available = true;
+    enabled.mockReturnValue(false);
+    await svc.refresh('disabled');
+    expect(svc.getStates()['deploy:codex']).toBe('idle');
+    expect(records[0].watcher.close).not.toHaveBeenCalled();
+    expect(records).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(1);
+
+    enabled.mockReturnValue(true);
+    records[0].cb();
+    await flush();
+    expect(svc.getStates()['deploy:codex']).toBe('running');
+    expect(start).toHaveBeenCalledTimes(2);
+    await svc.stop();
+  });
+
+  it('closes a deleted watcher immediately while the unavailable threshold still debounces the agent', async () => {
+    const records = useFakeWatch();
+    let checks = 0;
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const entry = makeEntry({
+      id: 'codex-transcript',
+      watchPaths: [tree.sessions],
+      pollIntervalMs: 1000,
+      unavailableThreshold: 3,
+      isAvailable: async () => {
+        checks++;
+        return fs.existsSync(tree.sessions);
+      },
+      stop,
+    });
+    const svc = new AgentDiscoveryService([entry]);
+    await svc.start();
+
+    fs.rmSync(tree.sessions, { recursive: true });
+    records[0].cb();
+    await flush();
+
+    expect(records[0].watcher.close).toHaveBeenCalledOnce();
+    expect(svc.getStates()['codex-transcript']).toBe('running');
+    expect(stop).not.toHaveBeenCalled();
+    const afterClose = checks;
+    for (let i = 0; i < 1_000; i++) records[0].cb();
+    await flush();
+    expect(checks).toBe(afterClose);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(svc.getStates()['codex-transcript']).toBe('running');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(svc.getStates()['codex-transcript']).toBe('idle');
+    expect(stop).toHaveBeenCalledOnce();
+    expect(records).toHaveLength(1);
+    await svc.stop();
+  });
+
+  it('covers codex parent and sessions watches across repeated delete and restore', async () => {
+    const records = useFakeWatch();
+    let deployChecks = 0;
+    let transcriptChecks = 0;
+    const deployStart = vi.fn().mockResolvedValue(undefined);
+    const deployStop = vi.fn().mockResolvedValue(undefined);
+    const transcriptStart = vi.fn().mockResolvedValue(undefined);
+    const transcriptStop = vi.fn().mockResolvedValue(undefined);
+    const deploy = makeEntry({
+      id: 'deploy:codex',
+      watchPaths: [tree.codex],
+      pollIntervalMs: 1000,
+      isAvailable: async () => {
+        deployChecks++;
+        return fs.existsSync(tree.codex);
+      },
+      start: deployStart,
+      stop: deployStop,
+    });
+    const transcript = makeEntry({
+      id: 'codex-transcript',
+      watchPaths: [tree.sessions, tree.wakeup],
+      pollIntervalMs: 1000,
+      isAvailable: async () => {
+        transcriptChecks++;
+        return fs.existsSync(tree.sessions);
+      },
+      start: transcriptStart,
+      stop: transcriptStop,
+    });
+    const svc = new AgentDiscoveryService([deploy, transcript]);
+    await svc.start();
+    expect(svc.getStates()).toEqual({ 'deploy:codex': 'running', 'codex-transcript': 'running' });
+    expect(records.map(r => r.watchPath)).toEqual([tree.codex, tree.sessions]);
+    expect(vi.getTimerCount()).toBe(1);
+
+    fs.rmSync(tree.codex, { recursive: true });
+    const first = records.slice();
+    for (let i = 0; i < 200; i++) {
+      for (const record of first) record.cb();
+    }
+    await flush();
+
+    expect(svc.getStates()).toEqual({ 'deploy:codex': 'idle', 'codex-transcript': 'idle' });
+    expect(deployStop).toHaveBeenCalledTimes(1);
+    expect(transcriptStop).toHaveBeenCalledTimes(1);
+    expect(records.map(r => r.watchPath)).toEqual([tree.codex, tree.sessions, tree.wakeup]);
+    expect(records[2].watcher.close).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(3);
+
+    const deployMark = deployChecks;
+    const transcriptMark = transcriptChecks;
+    for (let i = 0; i < 200; i++) {
+      for (const record of first) record.cb();
+    }
+    await flush();
+    expect(deployChecks).toBe(deployMark);
+    expect(transcriptChecks).toBe(transcriptMark);
+
+    fs.mkdirSync(tree.sessions, { recursive: true });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(svc.getStates()).toEqual({ 'deploy:codex': 'running', 'codex-transcript': 'running' });
+    expect(deployStart).toHaveBeenCalledTimes(2);
+    expect(transcriptStart).toHaveBeenCalledTimes(2);
+    expect(records.filter(r => r.watchPath === tree.codex && r.watcher.close.mock.calls.length === 0)).toHaveLength(1);
+    expect(records.filter(r => r.watchPath === tree.sessions && r.watcher.close.mock.calls.length === 0)).toHaveLength(1);
+    expect(records.filter(r => r.watchPath === tree.wakeup && r.watcher.close.mock.calls.length === 0)).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await svc.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    for (const record of records) expect(record.watcher.close).toHaveBeenCalledOnce();
+  });
+
+  it('polls until the directory appears and then watches it', async () => {
+    const records = useFakeWatch();
+    fs.rmSync(tree.codex, { recursive: true });
+    const start = vi.fn().mockResolvedValue(undefined);
+    const entry = makeEntry({
+      id: 'deploy:codex',
+      watchPaths: [tree.codex],
+      pollIntervalMs: 1000,
+      isAvailable: async () => fs.existsSync(tree.codex),
+      start,
+    });
+    const svc = new AgentDiscoveryService([entry]);
+    await svc.start();
+    expect(svc.getStates()['deploy:codex']).toBe('idle');
+    expect(records).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(2);
+
+    fs.mkdirSync(tree.codex, { recursive: true });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(svc.getStates()['deploy:codex']).toBe('running');
+    expect(start).toHaveBeenCalledOnce();
+    expect(records).toHaveLength(1);
+    expect(records[0].watchPath).toBe(tree.codex);
+    expect(vi.getTimerCount()).toBe(1);
+    await svc.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
 
 describe('summarizeError', () => {
@@ -641,6 +1146,15 @@ describe('maskHomeDir', () => {
   it('does not mangle an unrelated path that the home directory prefixes', () => {
     const text = 'EIO: i/o error, read /rootfs/lib/agent.db';
     expect(maskHomeDir(text, '/root')).toBe(text);
+  });
+
+  it('leaves sibling and nested paths alone and handles Windows home directories', () => {
+    expect(maskHomeDir('open /root+backup and /archive/root from /root/private', '/root'))
+      .toBe('open /root+backup and /archive/root from ~/private');
+    expect(maskHomeDir(String.raw`read 'C:\Users\a.b\logs'`, String.raw`C:\Users\a.b`))
+      .toBe(String.raw`read '~\logs'`);
+    expect(maskHomeDir(String.raw`read C:\Windows\Temp`, 'C:\\'))
+      .toBe(String.raw`read C:\Windows\Temp`);
   });
 
   it('masks every occurrence of the home directory', () => {

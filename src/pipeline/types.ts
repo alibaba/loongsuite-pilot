@@ -1,4 +1,6 @@
 import type { WakeEvent } from './sleep-detector.js';
+import type { MulticaInputConfig } from './input/multica/types.js';
+export type { MulticaInputConfig } from './input/multica/types.js';
 
 // --- Pipeline interface ---
 
@@ -27,7 +29,7 @@ export interface QoderApiInputConfig {
   BackfillDays?: number;
 }
 
-export type PipelineInputConfig = FileInputConfig | QoderApiInputConfig;
+export type PipelineInputConfig = FileInputConfig | QoderApiInputConfig | MulticaInputConfig;
 
 // --- Flusher config ---
 
@@ -52,22 +54,24 @@ export interface PipelineConfig {
 // --- Manager options ---
 
 export interface PipelineManagerOptions {
+  workspacePolicy?: import('../core/workspace-policy.js').WorkspacePolicy;
+  /** Resolved installed reporting targets; only Multica inherits these. */
+  sls?: import('./input/multica/destination.js').MulticaSlsDefaults;
   configDir: string;
   stateDir: string;
   failedLogDir: string;
   dataDir: string;
   pipelineConfig: PipelineToggle;
+  hostSn?: string;
+  hostIdentityTags?: boolean;
 }
 
-export interface PipelineToggle {
-  enabled: boolean;
-  file: { enabled: boolean };
-  qoderApi: { enabled: boolean };
-}
+export type PipelineToggle = import('../types/index.js').PipelineToggle;
 
 // --- File pipeline options ---
 
 export interface FilePipelineOptions {
+  workspacePolicy?: import('../core/workspace-policy.js').WorkspacePolicy;
   config: PipelineConfig;
   stateDir: string;
   failedLogDir: string;
@@ -77,10 +81,13 @@ export interface FilePipelineOptions {
 // --- Qoder API pipeline options ---
 
 export interface QoderApiPipelineOptions {
+  workspacePolicy?: import('../core/workspace-policy.js').WorkspacePolicy;
   config: PipelineConfig;
   stateDir: string;
   failedLogDir: string;
   dataDir: string;
+  hostSn?: string;
+  hostIdentityTags?: boolean;
 }
 
 // --- File collection types (moved from file-collection/types.ts) ---

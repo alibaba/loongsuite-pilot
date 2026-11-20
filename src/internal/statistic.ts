@@ -15,6 +15,8 @@ const SELECTED_FIELDS = new Set([
   'version',
   'instance_id',
   'ip',
+  'mac',
+  'sn',
   'hostname',
   'os_detail',
   'metric_json',

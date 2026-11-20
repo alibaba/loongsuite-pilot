@@ -12,12 +12,15 @@ const EXTENSION_PATH = path.resolve(
 
 let tmpDir;
 let previousDataDir;
+let previousConfigPath;
 let previousResourceEnv;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-coding-agent-extension-'));
   previousDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
+  previousConfigPath = process.env.AGENT_DATA_COLLECTION_CONFIG;
   process.env.LOONGSUITE_PILOT_DATA_DIR = tmpDir;
+  process.env.AGENT_DATA_COLLECTION_CONFIG = path.join(tmpDir, 'config.json');
   previousResourceEnv = {
     AGENTTEAMS_WORKER_NAME: process.env.AGENTTEAMS_WORKER_NAME,
     AGENTTEAMS_INSTANCE_ID: process.env.AGENTTEAMS_INSTANCE_ID,
@@ -35,6 +38,8 @@ afterEach(() => {
   vi.useRealTimers();
   if (previousDataDir === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
   else process.env.LOONGSUITE_PILOT_DATA_DIR = previousDataDir;
+  if (previousConfigPath === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+  else process.env.AGENT_DATA_COLLECTION_CONFIG = previousConfigPath;
   for (const [key, value] of Object.entries(previousResourceEnv)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -42,7 +47,7 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-async function createRuntime(config = {}) {
+async function createRuntime(config = {}, identity, extensionPath = EXTENSION_PATH) {
   fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify(config));
   const handlers = new Map();
   const api = {
@@ -60,8 +65,9 @@ async function createRuntime(config = {}) {
       ];
     },
   };
-  const mod = await import(`${pathToFileURL(EXTENSION_PATH).href}?t=${Date.now()}_${Math.random()}`);
-  mod.default(api);
+  const mod = await import(`${pathToFileURL(extensionPath).href}?t=${Date.now()}_${Math.random()}`);
+  const extension = identity ? mod.createPiTelemetryExtension(identity) : mod.default;
+  extension(api);
 
   const ctx = {
     cwd: '/workspace/example',
@@ -110,6 +116,65 @@ async function startTurn(runtime) {
 }
 
 describe('Pi Coding Agent extension', () => {
+  it('continues collecting if the optional resource-context helper is unavailable', async () => {
+    const installed = path.join(tmpDir, 'plugins', 'pi-coding-agent', 'index.mjs');
+    fs.mkdirSync(path.dirname(installed), { recursive: true });
+    fs.copyFileSync(EXTENSION_PATH, installed);
+    // Keep required shared modules while simulating the one optional helper missing.
+    const shared = path.join(tmpDir, 'plugins', 'shared');
+    fs.cpSync(path.resolve('assets/plugins/shared'), shared, {
+      recursive: true,
+      filter: source => path.basename(source) !== 'resource-context.mjs',
+    });
+    process.env.AGENTTEAMS_WORKER_NAME = 'worker-with-missing-helper';
+
+    const runtime = await createRuntime({}, undefined, installed);
+    await startTurn(runtime);
+    await runtime.emit('context', {
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Inspect the repository' }] }],
+    });
+
+    const request = readRecords().find(record => record['event.name'] === 'llm.request');
+    expect(request).toBeDefined();
+    expect(request['gen_ai.agent.name']).toBe('Pi Coding Agent');
+    expect(request.resourceAttributes).toBeUndefined();
+  });
+
+  it('binds registered PI SDK Agent identity while keeping the shared log protocol', async () => {
+    const runtime = await createRuntime({
+      agents: {
+        'acme-code': { captureMessageContent: false },
+        'pi-coding-agent': { captureMessageContent: true },
+      },
+    }, {
+      agentType: 'acme-code',
+      agentId: 'acme-code',
+      agentName: 'Acme Code Agent',
+      agentSystem: 'pi',
+      framework: 'pi-coding-agent',
+    });
+    await startTurn(runtime);
+    await runtime.emit('context', {
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'secret prompt' }] }],
+    });
+
+    const records = readRecords();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      'event.name': 'llm.request',
+      'gen_ai.agent.type': 'acme-code',
+      'gen_ai.agent.id': 'acme-code',
+      'gen_ai.agent.name': 'Acme Code Agent',
+      'gen_ai.agent.system': 'pi',
+      'gen_ai.framework': 'pi-coding-agent',
+      'agent.acme-code.cwd': '/workspace/example',
+    });
+    expect(records[0]['gen_ai.input.messages']).toBeUndefined();
+    expect(fs.readdirSync(path.join(tmpDir, 'logs', 'pi-coding-agent'))).toContain(
+      'pi-coding-agent-2026-07-16.jsonl',
+    );
+  });
+
   it('emits canonical request, response, tool call, and tool result records', async () => {
     const runtime = await createRuntime({ userId: 'user-1' });
     await startTurn(runtime);
@@ -175,9 +240,12 @@ describe('Pi Coding Agent extension', () => {
     expect(request['gen_ai.session.id']).toBe('pi-session-1');
     expect(request['gen_ai.agent.type']).toBe('pi-coding-agent');
     expect(request['gen_ai.agent.name']).toBe('Pi Coding Agent');
+    expect(request['gen_ai.agent.system']).toBe('pi');
+    expect(request['gen_ai.framework']).toBe('pi-coding-agent');
     expect(request.resourceAttributes).toBeUndefined();
     expect(request['agent.pi-coding-agent.cwd']).toBe('/workspace/example');
     expect(request['gen_ai.input.messages'][0].parts[0].content).toBe('Inspect the repository');
+    expect(request['gen_ai.input.messages_delta']).toEqual(request['gen_ai.input.messages']);
     expect(request['gen_ai.tool.definitions'].map(tool => tool.name)).toEqual(['read', 'bash']);
 
     const response = records.find(record => record['event.name'] === 'llm.response');
@@ -406,6 +474,88 @@ describe('Pi Coding Agent extension', () => {
     expect(requests[1]['gen_ai.input.messages'][0].parts[0].content).toBe('second turn');
   });
 
+  it('emits only newly appended assistant and tool messages on later requests', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    const firstContext = [{ role: 'user', content: 'Inspect the repository' }];
+    await runtime.emit('context', { messages: firstContext });
+    await runtime.emit('turn_start', { turnIndex: 1, timestamp: Date.now() });
+    await runtime.emit('context', {
+      messages: [
+        ...firstContext,
+        {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'README.md' } }],
+        },
+        {
+          role: 'toolResult',
+          toolCallId: 'call-1',
+          toolName: 'read',
+          isError: false,
+          content: [{ type: 'text', text: '# README' }],
+        },
+      ],
+    });
+
+    const requests = readRecords().filter(record => record['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(2);
+    expect(requests[0]['gen_ai.input.messages_delta']).toEqual(requests[0]['gen_ai.input.messages']);
+    expect(requests[1]['gen_ai.input.messages_delta'].map(message => message.role)).toEqual([
+      'assistant',
+      'tool',
+    ]);
+    expect([
+      ...requests[0]['gen_ai.input.messages_delta'],
+      ...requests[1]['gen_ai.input.messages_delta'],
+    ]).toEqual(requests[1]['gen_ai.input.messages']);
+  });
+
+  it('derives request deltas across the rolling 40-message capture window', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    const firstContext = Array.from({ length: 40 }, (_, index) => ({
+      role: 'user',
+      content: `message-${index}`,
+    }));
+    await runtime.emit('context', { messages: firstContext });
+    await runtime.emit('turn_start', { turnIndex: 1, timestamp: Date.now() });
+    await runtime.emit('context', {
+      messages: [
+        ...firstContext.slice(2),
+        { role: 'assistant', content: 'new assistant message' },
+        {
+          role: 'toolResult',
+          toolCallId: 'call-1',
+          toolName: 'read',
+          isError: false,
+          content: 'new tool result',
+        },
+      ],
+    });
+
+    const requests = readRecords().filter(record => record['event.name'] === 'llm.request');
+    expect(requests[1]['gen_ai.input.messages']).toHaveLength(40);
+    expect(requests[1]['gen_ai.input.messages_delta'].map(message => message.role)).toEqual([
+      'assistant',
+      'tool',
+    ]);
+    expect(JSON.stringify(requests[1]['gen_ai.input.messages_delta'])).toContain('new tool result');
+  });
+
+  it('keeps the full snapshot but omits a fabricated delta after context replacement', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+    await runtime.emit('context', { messages: [{ role: 'user', content: 'before compaction' }] });
+    await runtime.emit('turn_start', { turnIndex: 1, timestamp: Date.now() });
+    await runtime.emit('context', { messages: [{ role: 'user', content: 'replacement context' }] });
+
+    const requests = readRecords().filter(record => record['event.name'] === 'llm.request');
+    expect(requests[1]['gen_ai.input.messages'][0].parts[0].content).toBe('replacement context');
+    expect(requests[1]).not.toHaveProperty('gen_ai.input.messages_delta');
+  });
+
   it('keeps an LLM response strictly later than a request in the same millisecond', async () => {
     const runtime = await createRuntime();
     await startTurn(runtime);
@@ -495,6 +645,9 @@ describe('Pi Coding Agent extension', () => {
     ]);
     const request = records.find(record => record['event.name'] === 'llm.request');
     const response = records.find(record => record['event.name'] === 'llm.response');
+    expect(request['gen_ai.input.messages_delta']).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'Inspect the repository' }] },
+    ]);
     expect(
       BigInt(response.time_unix_nano) - BigInt(request.time_unix_nano) >= 1_000_000n,
     ).toBe(true);
@@ -732,10 +885,16 @@ describe('Pi Coding Agent extension', () => {
     expect(request['gen_ai.step.id']).toBe(`${request['gen_ai.turn.id']}:s1`);
   });
 
-  it('omits sensitive message and tool payloads when content capture is disabled', async () => {
-    const runtime = await createRuntime({
+  it.each(['default', 'custom-path', 'bom'])('omits sensitive message and tool payloads with %s config', async (kind) => {
+    const disabledConfig = {
       agents: { 'pi-coding-agent': { captureMessageContent: false } },
-    });
+    };
+    const runtime = await createRuntime(kind === 'default' ? disabledConfig : {});
+    if (kind !== 'default') {
+      const configPath = path.join(tmpDir, kind === 'custom-path' ? 'custom.json' : 'config.json');
+      fs.writeFileSync(configPath, (kind === 'bom' ? '\uFEFF' : '') + JSON.stringify(disabledConfig));
+      process.env.AGENT_DATA_COLLECTION_CONFIG = configPath;
+    }
     await startTurn(runtime);
     await runtime.emit('context', {
       messages: [{ role: 'user', content: 'secret prompt' }],
@@ -774,6 +933,7 @@ describe('Pi Coding Agent extension', () => {
     const records = readRecords();
     expect(records.some(record => record['event.name'] === 'other')).toBe(false);
     expect(records[0]).not.toHaveProperty('gen_ai.input.messages');
+    expect(records[0]).not.toHaveProperty('gen_ai.input.messages_delta');
     expect(records[0]).not.toHaveProperty('gen_ai.system_instructions');
     expect(records[0]).not.toHaveProperty('gen_ai.tool.definitions');
     expect(records[1]).not.toHaveProperty('gen_ai.output.messages');

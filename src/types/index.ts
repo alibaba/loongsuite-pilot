@@ -8,6 +8,12 @@ export * from './events.js';
 export interface ListenerConfig {
   enabled: boolean;
   pollInterval: number;
+  /** Restrict the Qwen Work collaboration input to these conversation IDs. */
+  includeConversationIds?: string[];
+  /** Read-only source log directory override for the doubao-work listener. */
+  logDir?: string;
+  /** Product source for the doubao-work listener; defaults to Doubao Work. */
+  client?: 'doubao-work' | 'doubao';
 }
 
 /**
@@ -32,6 +38,7 @@ export interface CmsConfig {
 }
 
 export type MaskMode = 'none' | 'all' | 'custom';
+export type MaskReplacementMode = 'placeholder' | 'preview';
 
 export const PII_MASK_TYPES = [
   'idCard',
@@ -56,9 +63,17 @@ export type MaskType = (typeof SUPPORTED_MASK_TYPES)[number];
 export interface MaskConfig {
   mode: MaskMode;
   types: MaskType[];
+  replacementMode?: MaskReplacementMode;
+}
+
+export interface InterceptorConfig {
+  /** Explicit opt-in for managed rules and interception hooks. */
+  mode: 'none' | 'all';
 }
 
 export interface OtlpTraceRawConfig {
+  /** Trusted local .mjs modules exporting a synchronous SpanEnricher. */
+  spanEnrichers?: string[];
   endpoint?: string;
   headers?: Record<string, string>;
   resourceAttributes?: Record<string, string>;
@@ -99,12 +114,18 @@ export interface InnerTraceConfig {
 }
 
 export interface AnalyticsConfig {
+  privacy?: { excludeWorkspaces: string[] };
   enabled: boolean;
   autoStart: boolean;
   dataDir: string;
   userId: string;
+  hostSn?: string;
+  hostIdentityTags: boolean;
   collectLog: boolean;
   collectTrace: boolean;
+  /** Exact service.name shared by every agent and backend. */
+  serviceName?: string;
+  /** Legacy base name; agent type is appended when serviceName is unset. */
   serviceNamePrefix: string;
   cms: CmsConfig;
   otlpTrace?: OtlpTraceRawConfig;
@@ -119,10 +140,15 @@ export interface AnalyticsConfig {
   fileCollection: FileCollectionToggle;
   pipeline: PipelineToggle;
   statusBar: StatusBarConfig;
+  dashboard: DashboardConfig;
   autoUpdate?: AutoUpdateConfig;
   upstreamLink: UpstreamLinkConfig;
+  /** Global multimodal storage. */
+  multimodal?: MultimodalRuntimeConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
   globalSpanAttributes?: Record<string, string>;
+  /** Local interceptor rules. Same `{ mode, types }` shape as mask; types are a subset. */
+  interceptor: InterceptorConfig;
 }
 
 /**
@@ -134,13 +160,98 @@ export interface UpstreamLinkConfig {
   enabled: boolean;
   /** Propagate the linked context into supported downstream CLI tool calls. */
   propagateToTools: boolean;
+  /** Propagate the linked context to the LLM gateway as a `traceparent` header. */
+  propagateToLlm: boolean;
+  /** Generate a per-turn trace context for tools when no upstream context is available. */
+  generateTraceWhenMissing: boolean;
   /** TTL (ms) after which acp-correlate files/locks are cleaned up. */
   ttlMs: number;
+}
+
+export const MULTIMODAL_UPLOAD_MODES = [
+  'none',
+  'input',
+  'output',
+  'all',
+] as const;
+export type MultimodalUploadMode = (typeof MULTIMODAL_UPLOAD_MODES)[number];
+
+/** uploadMode covers user input. */
+export function multimodalUploadIncludesInput(mode: MultimodalUploadMode): boolean {
+  return mode === 'input' || mode === 'all';
+}
+
+/** uploadMode covers model output. */
+export function multimodalUploadIncludesOutput(mode: MultimodalUploadMode): boolean {
+  return mode === 'output' || mode === 'all';
+}
+
+export const MULTIMODAL_STORAGE_TYPES = ['sls', 'delegatedOss', 'oss'] as const;
+export type MultimodalStorageType = (typeof MULTIMODAL_STORAGE_TYPES)[number];
+
+export const MULTIMODAL_SLS_AUTH_MODES = ['ak', 'apiKey', 'anonymous'] as const;
+export type MultimodalSlsAuthMode = (typeof MULTIMODAL_SLS_AUTH_MODES)[number];
+
+export interface MultimodalAkAuth {
+  mode: 'ak';
+  accessKeyId: string;
+  accessKeySecret: string;
+  securityToken?: string;
+}
+
+export interface MultimodalApiKeyAuth {
+  mode: 'apiKey';
+  apiKey: string;
+}
+
+export interface MultimodalAnonymousAuth {
+  mode: 'anonymous';
+}
+
+/** Credential-bearing auth shared by SLS, delegated OSS, and direct OSS. */
+export type MultimodalCredentialAuth = MultimodalAkAuth | MultimodalApiKeyAuth;
+/** SLS PutObject also supports explicit credential-free anonymous writes. */
+export type MultimodalStorageAuth = MultimodalCredentialAuth | MultimodalAnonymousAuth;
+
+export interface MultimodalSlsTarget {
+  endpoint: string;
+  project: string;
+  logstore: string;
+}
+
+export interface MultimodalOssTarget {
+  endpoint: string;
+  storageBasePath: string;
+}
+
+export type MultimodalStorage =
+  | { type: 'sls'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
+  | { type: 'delegatedOss'; target: MultimodalSlsTarget; auth: MultimodalCredentialAuth }
+  | { type: 'oss'; target: MultimodalOssTarget; auth: MultimodalAkAuth };
+
+/**
+ * Experimental global multimodal storage; per-agent policy is under agents.<id>.multimodal.
+ * This subtree and multimodal event fields may change without migration.
+ */
+export interface MultimodalRuntimeConfig {
+  storage: MultimodalStorage;
+  storageBasePath: string;
+}
+
+/** Agent ids with multimodal extraction implemented. */
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder', 'qwen-work-cn'] as const;
+
+/** Experimental per-agent multimodal policy (`uploadMode: none` disables). */
+export interface AgentMultimodalConfig {
+  uploadMode: MultimodalUploadMode;
+  /** Extra local roots for pathToUri (merged with agent defaults). `~` expanded. */
+  allowedRootPaths?: string[];
 }
 
 export interface AgentConfig {
   enabled?: boolean;
   captureMessageContent: boolean;
+  multimodal?: AgentMultimodalConfig;
 }
 
 export type AgentsConfig = Record<string, AgentConfig>;
@@ -162,12 +273,16 @@ export interface OtlpEndpoint {
 }
 
 export interface OtlpTraceFlusherConfig {
+  /** Resolved local .mjs paths, in execution order. */
+  spanEnricherPaths?: string[];
   enabled: boolean;
   /** One or more backends; the same converted spans are exported to each. */
   endpoints: OtlpEndpoint[];
   protocol: 'http/protobuf';
   // Shared across backends unless an endpoint overrides it (see OtlpEndpoint.serviceName).
   serviceName: string;
+  /** Legacy mode appends the normalized agent type to serviceName. Defaults to true. */
+  appendAgentTypeToServiceName?: boolean;
   resourceAttributes?: Record<string, string>;
   captureMessageContent?: boolean;
   debug?: boolean;
@@ -181,6 +296,26 @@ export interface OtlpTraceFlusherConfig {
 
 export type SlsMode = 'ak' | 'webtracking' | 'apiKey';
 
+export interface SlsTimeoutConfig {
+  /** Overall request timeout in ms (default 30000). Acts as a hard cap when phase timeouts are set. */
+  timeoutMs?: number;
+  /** DNS + TCP + TLS connection timeout in ms (default 10000). Only effective for webtracking mode. */
+  connectTimeoutMs?: number;
+  /** Timeout waiting for response headers in ms (default 30000). Only effective for webtracking mode. */
+  headersTimeoutMs?: number;
+  /** Timeout reading response body in ms (default 15000). Only effective for webtracking mode. */
+  bodyTimeoutMs?: number;
+}
+
+export interface SlsRetryConfig {
+  /** Max number of retry attempts (default 3). */
+  retryMaxAttempts?: number;
+  /** Base delay for exponential backoff in ms (default 1000). */
+  retryBaseDelayMs?: number;
+  /** Whether to add random jitter to backoff delay (default true). */
+  retryJitter?: boolean;
+}
+
 export interface SlsFlusherConfig {
   enabled: boolean;
   /** 上报模式：'ak' 使用 AK/SK 签名，'apiKey' 使用 Bearer API Key，'webtracking' 使用 WebTracking */
@@ -193,7 +328,15 @@ export interface SlsFlusherConfig {
   endpoints: SlsEndpoint[];
   batchMaxSize: number;
   flushIntervalMs: number;
+  /** Exact __service_name__ shared by every agent and endpoint. */
+  serviceName?: string;
   serviceNamePrefix: string;
+  /** Timeout configuration for SLS requests. */
+  timeout?: SlsTimeoutConfig;
+  /** Retry configuration for failed SLS requests. */
+  retry?: SlsRetryConfig;
+  /** Max concurrent flush tasks (default 3). Controls how many endpoint buckets flush in parallel. */
+  flushConcurrency?: number;
 }
 
 export interface SlsEndpoint {
@@ -255,6 +398,8 @@ export interface LogRetentionConfig {
   hookDebugDays: number;
   outputDays: number;
   slsFailedDays: number;
+  otlpFailedDays: number;
+  metricAlarmDays: number;
 }
 
 export interface HookWatchdogConfig {
@@ -267,6 +412,7 @@ export interface PipelineToggle {
   enabled: boolean;
   file: { enabled: boolean };
   qoderApi: { enabled: boolean };
+  multica?: { enabled: boolean; mode?: 'on' | 'off'; serviceNamePrefix?: string; discoverLocalSources?: boolean };
 }
 
 /** @deprecated Use PipelineToggle instead */
@@ -276,6 +422,11 @@ export interface StatusBarConfig {
   enabled: boolean;
   metricsSummaryIntervalMs: number;
   runtimeRefreshIntervalMs: number;
+}
+
+export interface DashboardConfig {
+  enabled: boolean;
+  port: number;
 }
 
 export type AgentControlMode = 'on' | 'off' | 'auto';

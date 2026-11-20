@@ -1,9 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
+import { promises as nativeFs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as childProcess from 'node:child_process';
 import { PluginInjectStrategy } from '../../../src/deployment/plugin-inject-strategy.js';
 import type { AgentDefinition } from '../../../src/types/index.js';
+
+vi.mock('node:fs/promises', async importOriginal => ({
+  ...await importOriginal<typeof import('node:fs/promises')>(),
+}));
+vi.mock('node:child_process', async importOriginal => ({
+  ...await importOriginal<typeof import('node:child_process')>(),
+}));
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({ info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() }),
@@ -59,6 +68,24 @@ describe('PluginInjectStrategy', () => {
     expect(await strategy.needsDeploy(piDefinition())).toBe(false);
   });
 
+  it('reports the existing config path when an earlier candidate is missing', async () => {
+    const missingPath = path.join(tmpDir, 'missing-pi', 'settings.json');
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(settingsPath, '{}\n');
+
+    const result = await strategy.deploy(piDefinition({
+      configPaths: [missingPath, settingsPath],
+      createIfMissing: true,
+    }));
+
+    expect(result.success).toBe(true);
+    expect(result.pluginInjectConfigPath).toBe(path.resolve(settingsPath));
+    expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).extensions).toEqual([
+      path.join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs'),
+    ]);
+    await expect(fs.access(missingPath)).rejects.toThrow();
+  });
+
   it('creates the first config path when createIfMissing is enabled', async () => {
     const result = await strategy.deploy(piDefinition());
 
@@ -70,6 +97,55 @@ describe('PluginInjectStrategy', () => {
     if (process.platform !== 'win32') {
       expect((await fs.stat(settingsPath)).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it('leaves an absent OpenClaw config usable by its owner when root cannot start the creation helper', async () => {
+    const stat = fs.stat;
+    vi.stubEnv('LOONGSUITE_PILOT_ROOT_TRIGGER', '1');
+    vi.spyOn(process, 'getuid').mockReturnValue(0);
+    vi.spyOn(fs, 'stat').mockImplementation(async (...args) => {
+      const result = await Reflect.apply(stat, fs, args);
+      return args[0] === tmpDir ? Object.assign(result, { uid: 1000, gid: 1000 }) : result;
+    });
+    const spawn = vi.spyOn(childProcess, 'execFile').mockImplementation((...args: any[]) => {
+      args[args.length - 1](Object.assign(new Error('identity change denied'), { code: 'EPERM' }), '', '');
+      return {} as childProcess.ChildProcess;
+    });
+    const configPath = path.join(tmpDir, 'native', 'openclaw.json');
+    const def: AgentDefinition = { id: 'openclaw', displayName: 'OpenClaw', deployMode: 'plugin-inject',
+      detection: { paths: [], commands: [] }, pluginInject: { configPaths: [configPath], createIfMissing: true,
+        configShape: 'openclaw-nested', pluginId: 'loongsuite-pilot-openclaw', pluginSpec: 'file://$PILOT_DATA/plugins/openclaw' } };
+    const host = { executable: '/app/openclaw.mjs', source: '/app/package.json', binding: 'explicit-entry' as const,
+      version: '2026.6.10', adapter: 'modern' as const, conversationAccess: true };
+    try {
+      const result = await new PluginInjectStrategy(dataDir, tmpDir, async () => host).deploy(def);
+      expect(result.success).toBe(false);
+      expect(spawn).toHaveBeenCalledWith(process.execPath, expect.any(Array),
+        expect.objectContaining({ uid: 1000, gid: 1000, timeout: 5000,
+          env: expect.objectContaining({ NODE_OPTIONS: '', BUN_OPTIONS: '', NODE_PATH: '' }) }), expect.any(Function));
+      expect(await fs.access(path.dirname(configPath)).then(() => true, () => false)).toBe(false);
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('creates and injects the first OpenCode config from the shipped agent definition', async () => {
+    const definitionUrl = new URL('../../../agents.d/opencode.json', import.meta.url);
+    const definition = JSON.parse(await fs.readFile(definitionUrl, 'utf8')) as AgentDefinition;
+    definition.pluginInject!.configPaths = definition.pluginInject!.configPaths.map((configPath) =>
+      configPath.replace(/^~\//, `${tmpDir}/`),
+    );
+
+    const result = await strategy.deploy(definition);
+
+    expect(result.success).toBe(true);
+    const firstConfigPath = path.join(tmpDir, '.config', 'opencode', 'opencode.jsonc');
+    const config = JSON.parse(await fs.readFile(firstConfigPath, 'utf8'));
+    expect(config.plugin).toEqual([
+      `file://${path.join(dataDir, 'plugins', 'opencode')}`,
+    ]);
+    expect(await strategy.needsDeploy(definition)).toBe(false);
   });
 
   it('does not create a missing config during a read-only health check', async () => {
@@ -95,6 +171,58 @@ describe('PluginInjectStrategy', () => {
     expect(await strategy.undeploy(piDefinition())).toBe(true);
     const after = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
     expect(after.extensions).toEqual([]);
+  });
+
+  it.each(['install', 'uninstall'] as const)('preserves Pi settings on a partial %s write failure', async action => {
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(settingsPath, JSON.stringify({ theme: 'dark', extensions: ['/third-party.mjs'] }, null, 2) + '\n');
+    if (action === 'uninstall') await strategy.deploy(piDefinition());
+    const before = await fs.readFile(settingsPath, 'utf8');
+    const write = fs.writeFile;
+    const failWrite: typeof fs.writeFile = async (file, data, options) => {
+      const name = String(file);
+      if (name === settingsPath || (name.startsWith(settingsPath + '.') && name.endsWith('.tmp'))) {
+        await write(file, '{', options);
+        throw Object.assign(new Error('simulated disk full'), { code: 'ENOSPC' });
+      }
+      return write(file, data, options);
+    };
+    const fault = vi.spyOn(fs, 'writeFile').mockImplementation(failWrite);
+    const nativeFault = vi.spyOn(nativeFs, 'writeFile').mockImplementation(failWrite);
+    try {
+      const ok = action === 'install'
+        ? (await strategy.deploy(piDefinition())).success
+        : await strategy.undeploy(piDefinition());
+      expect(ok).toBe(false);
+      expect(await fs.readFile(settingsPath, 'utf8')).toBe(before);
+      expect((await fs.readdir(path.dirname(settingsPath))).filter(name => name.endsWith('.tmp'))).toEqual([]);
+    } finally {
+      nativeFault.mockRestore();
+      fault.mockRestore();
+    }
+  });
+
+  it('treats mixed Windows separators as the same injected extension', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    const windowsDataDir = 'C:\\Users\\pilot\\.loongsuite-pilot';
+    strategy = new PluginInjectStrategy(windowsDataDir, tmpDir);
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(settingsPath, JSON.stringify({
+      extensions: ['C:\\Users\\pilot\\.loongsuite-pilot/plugins/pi-coding-agent/index.mjs'],
+    }));
+
+    expect(await strategy.needsDeploy(piDefinition())).toBe(false);
+    await expect(strategy.deploy(piDefinition())).resolves.toMatchObject({ success: true });
+
+    const existing = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
+    expect(existing.extensions).toHaveLength(1);
+
+    await fs.writeFile(settingsPath, JSON.stringify({ extensions: [] }));
+    await expect(strategy.deploy(piDefinition())).resolves.toMatchObject({ success: true });
+    const injected = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
+    expect(injected.extensions).toEqual([
+      'C:/Users/pilot/.loongsuite-pilot/plugins/pi-coding-agent/index.mjs',
+    ]);
   });
 
   it('keeps the existing OpenCode plugin/plugins auto-detection behavior', async () => {
@@ -130,7 +258,10 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
     dataDir = path.join(tmpDir, 'pilot-data');
     configPath = path.join(tmpDir, '.openclaw', 'openclaw.json');
     await fs.mkdir(path.dirname(configPath), { recursive: true });
-    strategy = new PluginInjectStrategy(dataDir, tmpDir);
+    strategy = new PluginInjectStrategy(dataDir, tmpDir, async () => ({
+      version: '2026.5.12', adapter: 'modern', conversationAccess: true, source: 'test',
+      binding: 'explicit-entry', executable: path.join(tmpDir, 'openclaw.mjs'),
+    }));
   });
 
   afterEach(async () => {
@@ -145,8 +276,13 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
       detection: { paths: [], commands: [] },
       pluginInject: {
         configPaths: [configPath],
-        pluginSpec: 'file://$PILOT_DATA/plugins/openclaw/plugin.mjs',
+        pluginSpec: 'file://$PILOT_DATA/plugins/openclaw',
         pluginId: 'loongsuite-pilot-openclaw',
+        replaceSpecs: [
+          'loongsuite-pilot-openclaw',
+          'loongsuite-pilot-openclaw-smoke',
+          '$PILOT_DATA/plugins/openclaw/plugin.mjs',
+        ],
         configShape: 'openclaw-nested',
         createIfMissing: true,
         ...overrides,
@@ -163,8 +299,8 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
     const cfg = await readConfig();
     const plugins = cfg.plugins as { load: { paths: unknown[] }; entries: Record<string, unknown> };
     expect(Array.isArray(plugins.load.paths)).toBe(true);
-    expect(plugins.load.paths).toContain(`${dataDir}/plugins/openclaw/plugin.mjs`);
-    expect(plugins.load.paths).not.toContain(`file://${dataDir}/plugins/openclaw/plugin.mjs`);
+    expect(plugins.load.paths).toContain(`${dataDir}/plugins/openclaw`);
+    expect(plugins.load.paths).not.toContain(`file://${dataDir}/plugins/openclaw`);
     expect(plugins.entries['loongsuite-pilot-openclaw']).toEqual({
       enabled: true,
       hooks: { allowConversationAccess: true },
@@ -174,63 +310,27 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
     expect(Array.isArray(cfg.plugins)).toBe(false);
   });
 
-  it('accepts the minimum supported OpenClaw version before deployment', async () => {
-    const result = await strategy.deploy(openclawDef({
-      versionCheck: {
-        command: [process.execPath, '-e', 'process.stdout.write("OpenClaw 2026.5.12")'],
-        minimum: '2026.5.12',
-      },
-    }));
-
-    expect(result.success).toBe(true);
-    expect(await readConfig()).toHaveProperty('plugins');
-  });
-
-  it('accepts a numeric OpenClaw rebuild suffix', async () => {
-    const result = await strategy.deploy(openclawDef({
-      versionCheck: {
-        command: [process.execPath, '-e', 'process.stdout.write("v2026.5.12-1")'],
-        minimum: '2026.5.12',
-      },
-    }));
-
-    expect(result.success).toBe(true);
-  });
-
-  it('rejects an older OpenClaw version before creating or changing config', async () => {
-    await fs.rm(configPath, { force: true });
-    const result = await strategy.deploy(openclawDef({
-      versionCheck: {
-        command: [process.execPath, '-e', 'process.stdout.write("OpenClaw 2026.5.11")'],
-        minimum: '2026.5.12',
-      },
-    }));
-
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('requires >= 2026.5.12');
-    await expect(fs.access(configPath)).rejects.toThrow();
-  });
-
-  it('rejects prerelease and unparseable versions without changing config', async () => {
-    const original = '{\n  "theme": "dark"\n}\n';
-    await fs.writeFile(configPath, original);
-    for (const reportedVersion of ['OpenClaw 2026.5.12-rc.1', 'OpenClaw unknown']) {
-      const result = await strategy.deploy(openclawDef({
-        versionCheck: {
-          command: [process.execPath, '-e', `process.stdout.write(${JSON.stringify(reportedVersion)})`],
-          minimum: '2026.5.12',
-        },
-      }));
-      expect(result.success).toBe(false);
-      expect(await fs.readFile(configPath, 'utf8')).toBe(original);
-    }
-  });
-
   it('needsDeploy returns true when only path is present (entry missing)', async () => {
     await fs.writeFile(configPath, JSON.stringify({
-      plugins: { load: { paths: [`file://${dataDir}/plugins/openclaw/plugin.mjs`] }, entries: {} },
+      plugins: { load: { paths: [`file://${dataDir}/plugins/openclaw`] }, entries: {} },
     }));
     expect(await strategy.needsDeploy(openclawDef())).toBe(true);
+  });
+
+  it('adds only Pilot to an existing OpenClaw allowlist and remains idempotent', async () => {
+    await strategy.deploy(openclawDef());
+    const cfg = await readConfig();
+    (cfg.plugins as Record<string, unknown>).allow = ['openclaw-security-sdk', 'another-plugin'];
+    await fs.writeFile(configPath, JSON.stringify(cfg));
+    expect(await strategy.needsDeploy(openclawDef())).toBe(true);
+    expect((await strategy.deploy(openclawDef())).success).toBe(true);
+    const updated = await readConfig();
+    expect((updated.plugins as Record<string, unknown>).allow).toEqual([
+      'openclaw-security-sdk', 'another-plugin', 'loongsuite-pilot-openclaw',
+    ]);
+    expect(await strategy.needsDeploy(openclawDef())).toBe(false);
+    await strategy.deploy(openclawDef());
+    expect(await readConfig()).toEqual(updated);
   });
 
   it('needsDeploy returns true when entry enabled but path missing', async () => {
@@ -243,7 +343,7 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
   it('needsDeploy returns true when required conversation hook access is disabled', async () => {
     await fs.writeFile(configPath, JSON.stringify({
       plugins: {
-        load: { paths: [`${dataDir}/plugins/openclaw/plugin.mjs`] },
+        load: { paths: [`${dataDir}/plugins/openclaw`] },
         entries: {
           'loongsuite-pilot-openclaw': {
             enabled: true,
@@ -294,7 +394,7 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
   it('deep-merges the required entry config without deleting unrelated settings', async () => {
     await fs.writeFile(configPath, JSON.stringify({
       plugins: {
-        load: { paths: [`${dataDir}/plugins/openclaw/plugin.mjs`] },
+        load: { paths: [`${dataDir}/plugins/openclaw`] },
         entries: {
           'loongsuite-pilot-openclaw': {
             enabled: true,
@@ -320,7 +420,32 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
     await strategy.undeploy(openclawDef());
     const cfg = await readConfig();
     const plugins = cfg.plugins as { load: { paths: unknown[] }; entries: Record<string, unknown> };
-    expect(plugins.load.paths).not.toContain(`file://${dataDir}/plugins/openclaw/plugin.mjs`);
+    expect(plugins.load.paths).not.toContain(`${dataDir}/plugins/openclaw`);
+    expect(plugins.entries['loongsuite-pilot-openclaw']).toBeUndefined();
+  });
+
+  it('undeploy removes legacy managed paths but preserves an unrelated matching suffix', async () => {
+    const managedOldPath = `${dataDir}/plugins/openclaw/plugin.mjs`;
+    const unrelatedPath = '/opt/vendor/plugins/openclaw/plugin.mjs';
+    await fs.writeFile(configPath, JSON.stringify({
+      plugins: {
+        load: { paths: [managedOldPath, `file://${managedOldPath}`, unrelatedPath] },
+        entries: {
+          'loongsuite-pilot-openclaw': {
+            enabled: true,
+            hooks: { allowConversationAccess: true },
+          },
+        },
+      },
+    }));
+
+    expect(await strategy.undeploy(openclawDef())).toBe(true);
+
+    const cfg = await readConfig();
+    const plugins = cfg.plugins as { load: { paths: string[] }; entries: Record<string, unknown> };
+    expect(plugins.load.paths).not.toContain(managedOldPath);
+    expect(plugins.load.paths).not.toContain(`file://${managedOldPath}`);
+    expect(plugins.load.paths).toContain(unrelatedPath);
     expect(plugins.entries['loongsuite-pilot-openclaw']).toBeUndefined();
   });
 
@@ -344,6 +469,49 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
     expect(plugins.entries['other-plugin']).toEqual({ enabled: true });
   });
 
+  it('migrates the previous managed single-file path to the package directory', async () => {
+    const oldPath = `${dataDir}/plugins/openclaw/plugin.mjs`;
+    await fs.writeFile(configPath, JSON.stringify({
+      plugins: {
+        load: { paths: [oldPath, '/other/plugin.mjs'] },
+        entries: {
+          'loongsuite-pilot-openclaw': {
+            enabled: true,
+            hooks: { allowConversationAccess: true },
+          },
+        },
+      },
+    }));
+
+    expect(await strategy.needsDeploy(openclawDef())).toBe(true);
+    await strategy.deploy(openclawDef());
+
+    const cfg = await readConfig();
+    const plugins = cfg.plugins as { load: { paths: string[] } };
+    expect(plugins.load.paths).toContain(`${dataDir}/plugins/openclaw`);
+    expect(plugins.load.paths).not.toContain(oldPath);
+    expect(plugins.load.paths).toContain('/other/plugin.mjs');
+  });
+
+  it('preserves an unrelated plugin path with the same OpenClaw suffix', async () => {
+    const managedOldPath = `${dataDir}/plugins/openclaw/plugin.mjs`;
+    const unrelatedPath = '/opt/vendor/plugins/openclaw/plugin.mjs';
+    await fs.writeFile(configPath, JSON.stringify({
+      plugins: {
+        load: { paths: [managedOldPath, unrelatedPath] },
+        entries: {},
+      },
+    }));
+
+    await strategy.deploy(openclawDef());
+
+    const cfg = await readConfig();
+    const plugins = cfg.plugins as { load: { paths: string[] } };
+    expect(plugins.load.paths).not.toContain(managedOldPath);
+    expect(plugins.load.paths).toContain(unrelatedPath);
+    expect(plugins.load.paths).toContain(`${dataDir}/plugins/openclaw`);
+  });
+
   it('is idempotent on repeated deploys', async () => {
     await strategy.deploy(openclawDef());
     const after1 = await readConfig();
@@ -363,7 +531,7 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
     expect(Array.isArray(cfg.plugin)).toBe(false);
     expect(Array.isArray(cfg.plugins)).toBe(false);
     const plugins = cfg.plugins as { load: { paths: string[] }; entries: Record<string, unknown> };
-    expect(plugins.load.paths).toContain(`${dataDir}/plugins/openclaw/plugin.mjs`);
+    expect(plugins.load.paths).toContain(`${dataDir}/plugins/openclaw`);
     expect(plugins.load.paths).toContain('/legacy/plugin.mjs');
     expect(plugins.entries['loongsuite-pilot-openclaw']).toEqual({
       enabled: true,

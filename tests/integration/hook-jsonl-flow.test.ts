@@ -5,11 +5,17 @@ import * as os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { ClientType } from '../../src/types/index.js';
 import type { AgentActivityEntry } from '../../src/types/index.js';
-import { QoderCliInput } from '../../src/inputs/qoder-cli/qoder-cli-input.js';
 import { QoderTraceInput } from '../../src/inputs/qoder-trace/qoder-trace-input.js';
 import { KiroCliLogInput } from '../../src/inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { StateStore } from '../../src/checkpoints/state-store.js';
 import { AgentActivityEntrySchema } from '../contract/agent-activity-schema.js';
+import { QoderTranscriptCollector } from '../../assets/hooks/qoder/transcript-collector.mjs';
+
+async function nativeRecords(dataDir: string) {
+  const collector = new QoderTranscriptCollector({ dataDir, agentId: 'qoder' });
+  try { return (await collector.collect({})).records; }
+  finally { collector.stop(); }
+}
 
 function getTodayDateString(): string {
   const d = new Date();
@@ -46,66 +52,99 @@ describe('Hook JSONL integration flow', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it('should perform complete read → normalize → offset persist flow', async () => {
-    const logDir = path.join(tmpDir, 'logs');
+  /**
+   * Seeds an empty history file and baselines it, so appended records are read
+   * instead of being swallowed by the cold-start baseline. That is also the real
+   * ordering: the collector is running before the agent emits anything.
+   */
+  async function baselineHistory(logDir: string, logFile: string): Promise<void> {
     await fs.mkdir(logDir, { recursive: true });
-
-    const today = getTodayDateString();
-    const logFile = path.join(logDir, `qoder-${today}.jsonl`);
-
-    const records = [
-      {
-        event_type: 'PostToolUse',
-        tool_name: 'create_file',
-        tool_input: { file_path: '/proj/new.ts', content: 'export const x = 1;' },
-        loongsuite_pilot_pre_file_exists: false,
-        session_id: 'integ-sess-1',
-        user_id: 'integ-user',
-        timestamp: Date.now(),
-      },
-      {
-        event_type: 'PostToolUse',
-        tool_name: 'write_to_file',
-        tool_input: { file_path: '/proj/existing.ts', content: 'updated' },
-        loongsuite_pilot_pre_file_exists: true,
-        session_id: 'integ-sess-1',
-        user_id: 'integ-user',
-        timestamp: Date.now(),
-      },
-    ];
-    await fs.writeFile(logFile, records.map(r => JSON.stringify(r)).join('\n') + '\n');
-
-    const input = new QoderCliInput({
+    await fs.writeFile(logFile, '');
+    const baseline = new QoderTraceInput({
       stateStore: stateStore as any,
       logDir,
-      logPrefix: 'qoder',
       pollIntervalMs: 60_000,
     });
+    await baseline.start();
+    await baseline.stop();
+  }
 
-    const allEntries: AgentActivityEntry[] = [];
-    input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
+  function readEntries(logDir: string): { input: QoderTraceInput; entries: AgentActivityEntry[] } {
+    const input = new QoderTraceInput({
+      stateStore: stateStore as any,
+      logDir,
+      pollIntervalMs: 60_000,
+    });
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    return { input, entries };
+  }
 
+  it('should perform complete read → normalize → offset persist flow', async () => {
+    const logDir = path.join(tmpDir, 'logs');
+    const today = getTodayDateString();
+    const logFile = path.join(logDir, `qoder-${today}.jsonl`);
+    await baselineHistory(logDir, logFile);
+
+    // Canonical tool.call/tool.result pair, the shape qoder-hook-processor.mjs
+    // writes today. The legacy `event_type: PostToolUse` records this test used to
+    // feed are no longer emitted by any hook version and are dropped as
+    // non-canonical, so keeping them would have asserted a dead mapping.
+    const records = [
+      {
+        'event.name': 'tool.call',
+        'event.id': 'integ-call-1',
+        'gen_ai.turn.id': 'integ-turn-1',
+        'gen_ai.step.id': 'integ-turn-1:s1',
+        'gen_ai.session.id': 'integ-sess-1',
+        'gen_ai.agent.type': 'qoder-cli',
+        'gen_ai.tool.name': 'create_file',
+        'gen_ai.tool.call.id': 'call-1',
+        'gen_ai.tool.call.arguments': '{"file_path":"/proj/new.ts"}',
+        'user.id': 'integ-user',
+        'agent.source': 'qoder-transcript-hook',
+        time_unix_nano: '1780000000000000000',
+        observed_time_unix_nano: '1780000000000000000',
+      },
+      {
+        'event.name': 'tool.result',
+        'event.id': 'integ-result-1',
+        'gen_ai.turn.id': 'integ-turn-1',
+        'gen_ai.step.id': 'integ-turn-1:s1',
+        'gen_ai.session.id': 'integ-sess-1',
+        'gen_ai.agent.type': 'qoder-cli',
+        'gen_ai.tool.name': 'create_file',
+        'gen_ai.tool.call.id': 'call-1',
+        'gen_ai.tool.call.result': 'wrote /proj/new.ts',
+        'gen_ai.tool.call.duration': 42,
+        'tool.result.status': 'success',
+        'user.id': 'integ-user',
+        'agent.source': 'qoder-transcript-hook',
+        time_unix_nano: '1780000001000000000',
+        observed_time_unix_nano: '1780000001000000000',
+      },
+    ];
+    await fs.appendFile(logFile, records.map(r => JSON.stringify(r)).join('\n') + '\n');
+
+    const { input, entries: allEntries } = readEntries(logDir);
     await input.start();
     await input.stop();
 
     // Verify entries are normalized correctly
     expect(allEntries).toHaveLength(2);
     expect(allEntries[0]).toMatchObject({
+      'event.name': 'tool.call',
+      'gen_ai.agent.type': ClientType.QoderCli,
+      'gen_ai.session.id': 'integ-sess-1',
+      'gen_ai.tool.name': 'create_file',
+    });
+    expect(allEntries[1]).toMatchObject({
       'event.name': 'tool.result',
       'gen_ai.agent.type': ClientType.QoderCli,
       'gen_ai.session.id': 'integ-sess-1',
       'gen_ai.tool.name': 'create_file',
     });
-    expect(allEntries[0]?.['agent.loongsuite_pilot_pre_file_exists']).toBe(false);
-    expect(allEntries[0]?.['agent.file_path']).toBe('/proj/new.ts');
-    expect(allEntries[1]).toMatchObject({
-      'event.name': 'tool.result',
-      'gen_ai.agent.type': ClientType.QoderCli,
-      'gen_ai.session.id': 'integ-sess-1',
-      'gen_ai.tool.name': 'write_to_file',
-    });
-    expect(allEntries[1]?.['agent.loongsuite_pilot_pre_file_exists']).toBe(true);
-    expect(allEntries[1]?.['agent.file_path']).toBe('/proj/existing.ts');
+    expect(allEntries[1]?.['tool.result.status']).toBe('success');
 
     // Verify all entries pass schema validation
     for (const entry of allEntries) {
@@ -115,20 +154,12 @@ describe('Hook JSONL integration flow', () => {
 
     // Verify offset was persisted
     await stateStore.save();
-    const offset = stateStore.getOffset('qoder-cli-hook');
-    expect(offset).toBeGreaterThan(0);
+    const state = stateStore.get('qoder-trace');
+    expect(state.lastOffset).toBe((await fs.stat(logFile)).size);
+    expect(state.lastFile).toBe(`qoder-${today}.jsonl`);
 
     // Verify re-reading with same state yields no new entries
-    const input2 = new QoderCliInput({
-      stateStore: stateStore as any,
-      logDir,
-      logPrefix: 'qoder',
-      pollIntervalMs: 60_000,
-    });
-
-    const newEntries: AgentActivityEntry[] = [];
-    input2.on('entries', (e: AgentActivityEntry[]) => newEntries.push(...e));
-
+    const { input: input2, entries: newEntries } = readEntries(logDir);
     await input2.start();
     await input2.stop();
     expect(newEntries).toHaveLength(0);
@@ -136,56 +167,42 @@ describe('Hook JSONL integration flow', () => {
 
   it('should handle incremental appends correctly', async () => {
     const logDir = path.join(tmpDir, 'logs2');
-    await fs.mkdir(logDir, { recursive: true });
-
     const today = getTodayDateString();
     const logFile = path.join(logDir, `qoder-${today}.jsonl`);
+    await baselineHistory(logDir, logFile);
+
+    function batch(turn: string, session: string) {
+      return JSON.stringify({
+        'event.name': 'tool.result',
+        'event.id': `e-${turn}`,
+        'gen_ai.turn.id': turn,
+        'gen_ai.step.id': `${turn}:s1`,
+        'gen_ai.session.id': session,
+        'gen_ai.agent.type': 'qoder-cli',
+        'gen_ai.tool.name': 'write_to_file',
+        'gen_ai.tool.call.id': `call-${turn}`,
+        'tool.result.status': 'success',
+        'agent.source': 'qoder-transcript-hook',
+        time_unix_nano: '1780000000000000000',
+        observed_time_unix_nano: '1780000000000000000',
+      }) + '\n';
+    }
 
     // First batch
-    await fs.writeFile(logFile, JSON.stringify({
-      event_type: 'PostToolUse',
-      tool_name: 'write_to_file',
-      tool_input: { file_path: '/batch1.ts', content: 'a' },
-      session_id: 's1',
-      timestamp: Date.now(),
-    }) + '\n');
+    await fs.appendFile(logFile, batch('turn-batch1', 's1'));
 
-    const input = new QoderCliInput({
-      stateStore: stateStore as any,
-      logDir: logDir,
-      logPrefix: 'qoder',
-      pollIntervalMs: 60_000,
-    });
-
-    const allEntries: AgentActivityEntry[] = [];
-    input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
-
+    const { input, entries: allEntries } = readEntries(logDir);
     await input.start();
     expect(allEntries).toHaveLength(1);
 
     // Append second batch
-    await fs.appendFile(logFile, JSON.stringify({
-      event_type: 'PostToolUse',
-      tool_name: 'write_to_file',
-      tool_input: { file_path: '/batch2.ts', content: 'b' },
-      session_id: 's2',
-      timestamp: Date.now(),
-    }) + '\n');
+    await fs.appendFile(logFile, batch('turn-batch2', 's2'));
 
     // Manually trigger second collect by calling start on a new instance with same state
     await input.stop();
     await stateStore.save();
 
-    const input2 = new QoderCliInput({
-      stateStore: stateStore as any,
-      logDir: logDir,
-      logPrefix: 'qoder',
-      pollIntervalMs: 60_000,
-    });
-
-    const newEntries: AgentActivityEntry[] = [];
-    input2.on('entries', (e: AgentActivityEntry[]) => newEntries.push(...e));
-
+    const { input: input2, entries: newEntries } = readEntries(logDir);
     await input2.start();
     await input2.stop();
 
@@ -195,7 +212,7 @@ describe('Hook JSONL integration flow', () => {
       'gen_ai.agent.type': ClientType.QoderCli,
       'gen_ai.tool.name': 'write_to_file',
     });
-    expect(newEntries[0]?.['agent.file_path']).toBe('/batch2.ts');
+    expect(newEntries[0]?.['event.id']).toBe('e-turn-batch2');
   });
 
   it('should consume transcript rows forwarded by qoder-loongsuite-pilot-hook without agent argument', async () => {
@@ -214,9 +231,16 @@ describe('Hook JSONL integration flow', () => {
     );
     const sharedDir = path.join(hookDir, 'shared');
     await fs.mkdir(sharedDir, { recursive: true });
+    for (const name of ['workspace-policy.mjs', 'workspace-privacy.mjs']) {
+      await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/shared', name), path.join(sharedDir, name));
+    }
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/sync-file-lock.mjs'),
+      path.join(sharedDir, 'sync-file-lock.mjs'),
     );
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/decode-payload.mjs'),
@@ -235,6 +259,7 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'upstream-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
+    await fs.cp(path.resolve('assets/hooks/qoder'), path.join(hookDir, 'qoder'), { recursive: true });
 
     const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
     await fs.writeFile(transcriptPath, [
@@ -269,6 +294,12 @@ describe('Hook JSONL integration flow', () => {
       }),
     ].join('\n') + '\n');
 
+    // Baseline before the hook runs: the collector is already up when the agent
+    // emits, so the hook's output is an append, not pre-existing history.
+    const logDir = path.join(dataDir, 'logs', 'qoder', 'history');
+    const historyFile = path.join(logDir, `qoder-${getTodayDateString()}.jsonl`);
+    await baselineHistory(logDir, historyFile);
+
     const result = runQoderHook(hookScript, JSON.stringify({
       hook_event_name: 'Stop',
       transcript_path: transcriptPath,
@@ -282,11 +313,8 @@ describe('Hook JSONL integration flow', () => {
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
 
-    const logDir = path.join(dataDir, 'logs', 'qoder', 'history');
-    const historyFile = path.join(logDir, `qoder-${getTodayDateString()}.jsonl`);
-    const historyLines = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n');
-    expect(historyLines.length).toBeGreaterThanOrEqual(1);
-    const historyRecord = JSON.parse(historyLines[0]!);
+    expect(await fs.readFile(historyFile, 'utf-8')).toBe('');
+    const historyRecord = (await nativeRecords(dataDir))[0]!;
     expect(historyRecord.type).toBeUndefined();
     expect(historyRecord.uuid).toBeUndefined();
     expect(historyRecord.sessionId).toBeUndefined();
@@ -300,15 +328,7 @@ describe('Hook JSONL integration flow', () => {
     expect(historyRecord['agentteams.instance.id']).toBeUndefined();
     expect(historyRecord['agentteams.token']).toBeUndefined();
 
-    const input = new QoderCliInput({
-      stateStore: stateStore as any,
-      logDir,
-      logPrefix: 'qoder',
-      pollIntervalMs: 60_000,
-    });
-
-    const allEntries: AgentActivityEntry[] = [];
-    input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
+    const { input, entries: allEntries } = readEntries(logDir);
     await input.start();
     await input.stop();
 
@@ -344,9 +364,16 @@ describe('Hook JSONL integration flow', () => {
     );
     const sharedDir = path.join(hookDir, 'shared');
     await fs.mkdir(sharedDir, { recursive: true });
+    for (const name of ['workspace-policy.mjs', 'workspace-privacy.mjs']) {
+      await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/shared', name), path.join(sharedDir, name));
+    }
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/sync-file-lock.mjs'),
+      path.join(sharedDir, 'sync-file-lock.mjs'),
     );
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/decode-payload.mjs'),
@@ -365,6 +392,7 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'upstream-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
+    await fs.cp(path.resolve('assets/hooks/qoder'), path.join(hookDir, 'qoder'), { recursive: true });
 
     const transcriptPath = path.join(tmpDir, 'delayed-ide-transcript.jsonl');
     await fs.writeFile(transcriptPath, [
@@ -457,17 +485,31 @@ describe('Hook JSONL integration flow', () => {
       hook_event_name: 'Stop',
       transcript_path: transcriptPath,
       session_id: 'sess-delayed-ide',
+      extra: {
+        email: 'git-user@example.com',
+        user: {
+          name: 'qoder-user',
+          email: 'qoder-user@example.com',
+          uid: 'qoder-native-user-id',
+        },
+      },
     }), {
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
     });
     expect(result.status).toBe(0);
 
     const historyFile = path.join(dataDir, 'logs', 'qoder', 'history', `qoder-${getTodayDateString()}.jsonl`);
-    const records = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));
+    const records = await nativeRecords(dataDir);
     const llmRequests = records.filter(r => r['event.name'] === 'llm.request');
     const llmResponses = records.filter(r => r['event.name'] === 'llm.response');
     const toolCalls = records.filter(r => r['event.name'] === 'tool.call');
 
+    expect(records.every(record =>
+      record['user.name'] === 'qoder-user'
+      && record['user.email'] === 'qoder-user@example.com',
+    )).toBe(true);
+    expect(records.some(record => record['user.email'] === 'git-user@example.com')).toBe(false);
+    expect(records.some(record => Object.hasOwn(record, 'user.uid'))).toBe(false);
     expect(llmRequests).toHaveLength(3);
     expect(llmResponses).toHaveLength(3);
     expect(new Set(llmRequests.map(r => r['gen_ai.step.id']))).toEqual(new Set(llmResponses.map(r => r['gen_ai.step.id'])));
@@ -692,9 +734,16 @@ describe('Hook JSONL integration flow', () => {
     );
     const sharedDir = path.join(hookDir, 'shared');
     await fs.mkdir(sharedDir, { recursive: true });
+    for (const name of ['workspace-policy.mjs', 'workspace-privacy.mjs']) {
+      await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/shared', name), path.join(sharedDir, name));
+    }
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/sync-file-lock.mjs'),
+      path.join(sharedDir, 'sync-file-lock.mjs'),
     );
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/decode-payload.mjs'),
@@ -713,6 +762,7 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'upstream-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
+    await fs.cp(path.resolve('assets/hooks/qoder'), path.join(hookDir, 'qoder'), { recursive: true });
 
     const transcriptPath = path.join(tmpDir, 'multi-turn-transcript.jsonl');
     await fs.writeFile(transcriptPath, [
@@ -782,7 +832,7 @@ describe('Hook JSONL integration flow', () => {
     expect(secondResult.status).toBe(0);
 
     const historyFile = path.join(dataDir, 'logs', 'qoder', 'history', `qoder-${getTodayDateString()}.jsonl`);
-    const records = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));
+    const records = await nativeRecords(dataDir);
     const userHookEvents = records.filter(r => r['event.name'] === 'other');
 
     // Should have two distinct turns

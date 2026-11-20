@@ -2,16 +2,22 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
-import { transformHookRecord } from '../base/hook-record-transform.js';
+import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
+import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const DEFAULT_PILOT_DATA_DIR = '~/.loongsuite-pilot';
 
 export type PiCodingAgentLogInputOptions =
   Omit<Partial<HookInputOptions>, 'stateStore'>
   & Pick<HookInputOptions, 'stateStore'>
-  & { dataDir?: string };
+  & {
+    dataDir?: string;
+    /** Per-record gate for the shared built-in/custom PI JSONL stream. */
+    agentEnabled?: (agentType: string) => boolean;
+  };
 
 export function resolvePiCodingAgentLogDir(dataDir?: string): string {
   const resolvedDataDir = resolveHome(
@@ -28,6 +34,7 @@ export async function ensurePiCodingAgentLogDir(logDir: string): Promise<void> {
 export class PiCodingAgentLogInput extends BaseHookInput {
   readonly id = 'pi-coding-agent-log';
   readonly agentType = ClientType.PiCodingAgent;
+  private readonly agentEnabled: (agentType: string) => boolean;
 
   constructor(opts: PiCodingAgentLogInputOptions) {
     if (!opts?.stateStore) {
@@ -37,8 +44,10 @@ export class PiCodingAgentLogInput extends BaseHookInput {
       stateStore: opts.stateStore,
       logDir: opts.logDir ?? resolvePiCodingAgentLogDir(opts.dataDir),
       logPrefix: opts.logPrefix ?? 'pi-coding-agent',
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+      historyReplay: opts.historyReplay ?? {},
     });
+    this.agentEnabled = opts.agentEnabled ?? (() => true);
   }
 
   static async checkAvailability(dataDir?: string): Promise<boolean> {
@@ -51,11 +60,22 @@ export class PiCodingAgentLogInput extends BaseHookInput {
 
   protected override async onStart(): Promise<void> {
     await ensurePiCodingAgentLogDir(this.logDir);
+    await super.onStart();
   }
 
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    return transformHookRecord(record, ClientType.PiCodingAgent, 'pi-coding-agent');
+    const recordAgentType = typeof record['gen_ai.agent.type'] === 'string'
+      && record['gen_ai.agent.type'].trim()
+      ? record['gen_ai.agent.type'].trim()
+      : ClientType.PiCodingAgent;
+    if (!this.agentEnabled(recordAgentType)) return null;
+
+    const entry = buildCanonicalHookEntry(record, ClientType.PiCodingAgent);
+    if (entry) {
+      await enrichCanonicalEntryWithGit(entry as Record<string, unknown>, record, recordAgentType);
+    }
+    return entry;
   }
 }

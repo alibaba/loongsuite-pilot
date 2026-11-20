@@ -75,6 +75,46 @@ describe('applyAgentContentPolicy', () => {
     expect(result['agent.file_path']).toBe('/workspace/app.ts');
   });
 
+  it('removes guardrail reasons from records and nested attributes while keeping rule metadata', () => {
+    const fields = {
+      'gen_ai.guardrail.reason': 'Confidential customer acquisition terms: discount 37 percent',
+      'gen_ai.guardrail.action': 'block' as const,
+      'gen_ai.guardrail.rule_id': 'business-policy',
+      'gen_ai.guardrail.rule_version': '2',
+    };
+    const result = applyAgentContentPolicy(makeEntry({ ...fields, attributes: fields }), {
+      [ClientType.Cursor]: { captureMessageContent: false },
+    });
+    expect(result).not.toHaveProperty('gen_ai.guardrail.reason');
+    expect(result.attributes).not.toHaveProperty('gen_ai.guardrail.reason');
+    expect(result).toMatchObject({ 'gen_ai.guardrail.action': 'block', 'gen_ai.guardrail.rule_id': 'business-policy',
+      'gen_ai.guardrail.rule_version': '2' });
+    expect(result.attributes).toMatchObject({ 'gen_ai.guardrail.rule_id': 'business-policy' });
+    const retained = applyAgentContentPolicy(makeEntry(fields), {
+      [ClientType.Cursor]: { captureMessageContent: true },
+    });
+    expect(retained).not.toHaveProperty('gen_ai.guardrail.reason');
+  });
+
+  it('removes Qoder Work legacy body fields while preserving tool identity', () => {
+    const result = applyAgentContentPolicy(makeEntry({
+      'gen_ai.agent.type': ClientType.QoderWork,
+      'agent._cinput': { command: 'private command' },
+      'agent._ctext': 'private prompt',
+      'agent._ccontent': 'private result',
+      'agent._cthinking': 'private reasoning',
+      'agent._cname': 'terminal',
+      attributes: { _ctext: 'nested private prompt', _cid: 'tool-1' },
+    }), { [ClientType.QoderWork]: { captureMessageContent: false } });
+
+    for (const field of ['agent._cinput', 'agent._ctext', 'agent._ccontent', 'agent._cthinking']) {
+      expect(result).not.toHaveProperty(field);
+    }
+    expect(result.attributes).not.toHaveProperty('_ctext');
+    expect(result.attributes).toHaveProperty('_cid', 'tool-1');
+    expect(result['agent._cname']).toBe('terminal');
+  });
+
   it('does not mutate the input entry', () => {
     const entry = makeEntry();
     applyAgentContentPolicy(entry, {

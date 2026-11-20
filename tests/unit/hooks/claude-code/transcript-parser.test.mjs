@@ -133,6 +133,45 @@ describe('parseClaudeTranscript', () => {
     expect(turn.llmCalls[0].request_start_time).toBe('2026-06-04T02:57:32.000Z');
   });
 
+  test('API error synthetic assistant 保留为失败 LLM 调用', () => {
+    const file = path.join(TMP, 'api-error.jsonl');
+    writeJsonl(file, [
+      { type: 'user', timestamp: '2026-09-16T03:43:03.998Z', promptId: 'p-error', message: { content: 'trigger error' } },
+      {
+        type: 'assistant',
+        timestamp: '2026-09-16T03:46:02.445Z',
+        isApiErrorMessage: true,
+        apiErrorStatus: 529,
+        error: 'server_error',
+        requestId: 'req-error-11',
+        message: {
+          id: 'synthetic-error-message',
+          model: '<synthetic>',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'private upstream detail' }],
+          usage: { input_tokens: 0, output_tokens: 0 },
+          stop_reason: 'stop_sequence',
+        },
+      },
+    ]);
+
+    const result = parseClaudeTranscript(file, 0);
+    expect(result.turns).toHaveLength(1);
+    expect(result.turns[0].llmCalls).toHaveLength(1);
+    expect(result.turns[0].llmCalls[0]).toMatchObject({
+      model: 'unknown',
+      message_id: 'synthetic-error-message',
+      output_content: [],
+      stop_reason: 'error',
+      api_error: {
+        type: 'server_error',
+        status_code: 529,
+        request_id: 'req-error-11',
+      },
+    });
+    expect(JSON.stringify(result.turns[0].llmCalls[0])).not.toContain('private upstream detail');
+  });
+
   test('同一 promptId 内 tool_result 不切分 turn', () => {
     const file = path.join(TMP, 't.jsonl');
     writeJsonl(file, [
@@ -144,6 +183,20 @@ describe('parseClaudeTranscript', () => {
     const result = parseClaudeTranscript(file, 0);
     expect(result.turns.length).toBe(1);
     expect(result.turns[0].llmCalls.length).toBe(2);
+    expect(result.turns[0].llmCalls[0].input_messages).toEqual([{
+      role: 'user',
+      content: [{ type: 'text', text: 'do it' }],
+    }]);
+    expect(result.turns[0].llmCalls[1].input_messages).toEqual([
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }],
+      },
+    ]);
   });
 
   test('tool_result request_start_time 不跨 promptId 污染下一轮', () => {
@@ -237,6 +290,29 @@ describe('parseClaudeTranscript', () => {
     const llm2 = result.turns[0].llmCalls[1];
     expect(llm2.declaredToolIds).toEqual([]);
     expect(llm2.request_start_time).toBe('2026-06-04T02:57:53.000Z');
+    expect(llm2.input_messages).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'reading...' },
+          { type: 'tool_use', id: 'read_1', name: 'Read', input: { file_path: '/a.txt' } },
+          { type: 'tool_use', id: 'read_2', name: 'Read', input: { file_path: '/b.txt' } },
+          { type: 'tool_use', id: 'read_3', name: 'Read', input: { file_path: '/c.txt' } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'read_1', content: 'aaa' }],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'read_2', content: 'bbb' }],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'read_3', content: 'ccc' }],
+      },
+    ]);
   });
 
   test('msg.id 缺失的 end_turn assistant 被正确解析', () => {
@@ -260,6 +336,74 @@ describe('parseClaudeTranscript', () => {
     expect(llm2.output_tokens).toBe(30);
     // msg.id should be a synthetic ID
     expect(llm2.message_id).toMatch(/^_syn_/);
+  });
+
+  test.each([false, true])('无 promptId 的连续调用补齐起点并保留工具边界 (missing message.id=%s)', (missingMessageId) => {
+    const file = path.join(TMP, 'missing-prompt-id.jsonl');
+    const assistant = (id, timestamp, content) => ({
+      type: 'assistant', timestamp,
+      message: { ...(missingMessageId ? {} : { id }), content },
+    });
+    writeJsonl(file, [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: 'hello' } },
+      assistant('m1', '2026-06-04T02:57:40.000Z', [{ type: 'text', text: 'first' }]),
+      assistant('m2', '2026-06-04T02:57:41.000Z', [{ type: 'text', text: 'second' }]),
+      assistant('m3', '2026-06-04T02:57:42.000Z', [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }]),
+      { type: 'user', timestamp: '2026-06-04T02:57:43.000Z', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
+      assistant('m4', '2026-06-04T02:57:44.000Z', [{ type: 'text', text: 'done' }]),
+    ]);
+    const { turns } = parseClaudeTranscript(file);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].promptId).toBeNull();
+    expect(turns[0].llmCalls.map((call) => call.request_start_time)).toEqual([
+      '2026-06-04T02:57:40.000Z',
+      '2026-06-04T02:57:40.000Z',
+      '2026-06-04T02:57:41.000Z',
+      '2026-06-04T02:57:43.000Z',
+    ]);
+  });
+
+  test('孤立 assistant 补齐起点且不使用其他 turn 的边界', () => {
+    const file = path.join(TMP, 'orphan.jsonl');
+    writeJsonl(file, [
+      { type: 'assistant', timestamp: '2026-06-04T02:57:30.000Z', message: { id: 'orphan', content: [] } },
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', promptId: 'p1', message: { content: 'hello' } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:40.000Z', message: { id: 'm1', content: [] } },
+    ]);
+    const { turns } = parseClaudeTranscript(file);
+    expect(turns).toHaveLength(2);
+    expect(turns.find((turn) => turn.promptId === 'p1').llmCalls[0].request_start_time)
+      .toBe('2026-06-04T02:57:32.000Z');
+    expect(turns.find((turn) => turn.promptId === null).llmCalls[0].request_start_time)
+      .toBe('2026-06-04T02:57:30.000Z');
+  });
+
+  test('增量片段只有 assistant 时使用片段内时间补齐起点', () => {
+    const file = path.join(TMP, 'incremental.jsonl');
+    writeJsonl(file, [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', promptId: 'p1', message: { content: 'hello' } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:40.000Z', message: { id: 'm1', content: [] } },
+    ]);
+    const first = parseClaudeTranscript(file);
+    fs.appendFileSync(file, JSON.stringify({
+      type: 'assistant', timestamp: '2026-06-04T02:57:45.000Z',
+      message: { id: 'm2', content: [] },
+    }) + '\n');
+    const next = parseClaudeTranscript(file, first.nextOffset);
+    expect(next.nextOffset).toBe(fs.statSync(file).size);
+    expect(next.turns).toHaveLength(1);
+    expect(next.turns[0].llmCalls).toHaveLength(1);
+    expect(next.turns[0].llmCalls[0].request_start_time).toBe('2026-06-04T02:57:45.000Z');
+  });
+
+  test('无 promptId 时同样限制请求起点不能晚于响应', () => {
+    const file = path.join(TMP, 'late-tool-result.jsonl');
+    writeJsonl(file, [
+      { type: 'user', timestamp: '2026-06-04T02:57:50.000Z', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:40.000Z', message: { id: 'm1', content: [] } },
+    ]);
+    const { turns } = parseClaudeTranscript(file);
+    expect(turns[0].llmCalls[0].request_start_time).toBe('2026-06-04T02:57:40.000Z');
   });
 
   test('首个 llmCall 的 request_start_time 使用 prompt 时间', () => {

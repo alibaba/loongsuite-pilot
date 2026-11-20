@@ -72,6 +72,25 @@ function isSyntheticAssistantRecord(record) {
   return record?.type === 'assistant' && record?.message?.model === '<synthetic>';
 }
 
+function normalizeApiErrorType(value) {
+  if (typeof value !== 'string') return 'model_error';
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_').slice(0, 64);
+  return normalized || 'model_error';
+}
+
+function extractApiError(record) {
+  if (record?.isApiErrorMessage !== true) return null;
+  const status = Number(record.apiErrorStatus);
+  const requestId = typeof record.requestId === 'string' && record.requestId.length > 0
+    ? record.requestId.slice(0, 256)
+    : null;
+  return {
+    type: normalizeApiErrorType(record.error),
+    status_code: Number.isInteger(status) && status >= 100 && status <= 599 ? status : null,
+    request_id: requestId,
+  };
+}
+
 function promptMapKey(promptId) {
   return promptId || MISSING_PROMPT_ID;
 }
@@ -113,6 +132,17 @@ function normalizeRequestStart(candidate, responseTs) {
     return responseTs;
   }
   return candidate;
+}
+
+function fillRequestStartTimes(llmCalls, promptTimestamp) {
+  // Apply the same source-time fallback to every call, including turns without
+  // promptId. Keep this scoped to one turn so unrelated prompts cannot leak in.
+  let fallbackTs = promptTimestamp || llmCalls[0]?.timestamp || null;
+  for (const call of llmCalls) {
+    const candidate = call.request_start_time || fallbackTs || call.timestamp || null;
+    call.request_start_time = normalizeRequestStart(candidate, call.timestamp);
+    fallbackTs = laterTimestamp(fallbackTs, call.timestamp);
+  }
 }
 
 /**
@@ -200,7 +230,8 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
     if (!recordType) continue;
 
     if (recordType === 'assistant') {
-      if (isSyntheticAssistantRecord(record)) {
+      const apiError = extractApiError(record);
+      if (isSyntheticAssistantRecord(record) && !apiError) {
         continue;
       }
 
@@ -222,6 +253,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
           firstTimestamp: recordTs,
           toolUseTimestamps: new Map(),
           promptId: currentPromptId,
+          apiError,
         });
         conversationRecords.push({ type: 'assistant', msgId, promptId: currentPromptId });
       }
@@ -246,6 +278,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
       if (msg.usage) group.usage = msg.usage;
       if (msg.model) group.model = msg.model;
       if (msg.stop_reason) group.stop_reason = msg.stop_reason;
+      if (apiError) group.apiError = apiError;
     } else if (recordType === 'user') {
       const msg = record.message;
       if (!msg) continue;
@@ -425,12 +458,12 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
         timestamp: group.firstTimestamp,
         request_start_time: requestStartTime,
         protocol: 'anthropic',
-        model: group.model || 'unknown',
+        model: group.apiError ? 'unknown' : (group.model || 'unknown'),
         message_id: group.id,
         input_messages: delta,
         _input_is_delta: true,
-        output_content: group.mergedContent,
-        stop_reason: group.stop_reason || 'end_turn',
+        output_content: group.apiError ? [] : group.mergedContent,
+        stop_reason: group.apiError ? 'error' : (group.stop_reason || 'end_turn'),
         input_tokens: inputTokens,
         output_tokens: outputTokens,
         cache_read_input_tokens: cacheRead,
@@ -438,13 +471,19 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
         declaredToolIds,
         toolDetails,
         promptId: group.promptId,
+        api_error: group.apiError,
       });
 
-      history.messages.push({
-        role: 'assistant',
-        content: group.mergedContent,
-      });
+      // Only advance past messages that were part of this request. The
+      // assistant response becomes new history for the next LLM request and
+      // must be emitted together with any following tool_result message.
       history.emittedCount = history.messages.length;
+      if (!group.apiError) {
+        history.messages.push({
+          role: 'assistant',
+          content: group.mergedContent,
+        });
+      }
 
       for (const toolId of declaredToolIds) {
         const ts = toolResultTimestamps.get(toolId);
@@ -497,8 +536,9 @@ function splitIntoTurns(conversationRecords, llmCalls, skillLoads = []) {
   }
 
   if (promptIdOrder.length === 0) {
-    // 无 promptId (所有 user record 都是系统注入的),fallback 为单 turn
+    // 当前片段没有 promptId，fallback 为单 turn。
     const firstTs = llmCalls[0]?.timestamp || null;
+    fillRequestStartTimes(llmCalls, firstTs);
     return [{
       promptId: null,
       prompt: '',
@@ -517,15 +557,7 @@ function splitIntoTurns(conversationRecords, llmCalls, skillLoads = []) {
     const info = promptIdInfo.get(pid) || {};
     const promptTimestamp = info.promptTimestamp || promptIdBoundaryTs.get(pid) || turnLlmCalls[0]?.timestamp || null;
 
-    // request_start_time: 每个 llmCall 都必须有有效起点。
-    // Claude Code resume 会在真实回答前插入 synthetic "No response requested" 调用,
-    // 不能只给第一个 llmCall 补时间,否则后续真实调用会落成 time_unix_nano=0。
-    let fallbackTs = promptTimestamp || turnLlmCalls[0]?.timestamp || null;
-    for (const call of turnLlmCalls) {
-      const candidate = call.request_start_time || fallbackTs || call.timestamp || null;
-      call.request_start_time = normalizeRequestStart(candidate, call.timestamp);
-      fallbackTs = laterTimestamp(fallbackTs, call.timestamp);
-    }
+    fillRequestStartTimes(turnLlmCalls, promptTimestamp);
 
     turns.push({
       promptId: pid,
@@ -540,6 +572,7 @@ function splitIntoTurns(conversationRecords, llmCalls, skillLoads = []) {
   const orphanCalls = llmCalls.filter((c) => !c.promptId);
   if (orphanCalls.length > 0) {
     // 无法归属的 assistant 使用独立 fallback turn,不能污染任何真实 promptId。
+    fillRequestStartTimes(orphanCalls, orphanCalls[0]?.timestamp);
     turns.push({
       promptId: null,
       prompt: '',

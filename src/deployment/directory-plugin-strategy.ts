@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
+import { constants as fsConstants } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
@@ -12,7 +13,10 @@ import type {
   DirectoryPluginConfig,
 } from '../types/index.js';
 import { detectAgent } from './detect-utils.js';
+import { hermesCliCandidatePaths } from './agent-def-loader.js';
 import { createLogger } from '../utils/logger.js';
+import { rootTriggerEnabled } from '../utils/producer-log-dir.js';
+import { agentConfigOwner, ensureAgentConfigDirectory } from './agent-config-owner.js';
 
 const logger = createLogger('DirectoryPluginStrategy');
 
@@ -33,6 +37,12 @@ interface DirectoryPluginMarker {
   activationStatus?: 'activated' | 'unsupported';
 }
 
+interface ActivationCommandOutput {
+  stdout: string;
+  stderr: string;
+}
+type ActivationIdentity = { uid: number; gid: number } | undefined;
+
 type TargetState =
   | { kind: 'missing' }
   | { kind: 'empty' }
@@ -47,7 +57,59 @@ export class DirectoryPluginStrategy implements DeployStrategy {
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
-    return detectAgent(def.detection);
+    const command = def.directoryPlugin?.activation?.command;
+    // Hermes may be installed under ~/.local/bin without a ~/.hermes directory
+    // or an entry on the collector service's PATH. Its CLI is the detection gate.
+    if (def.id === 'hermes-agent' && command) {
+      return (await this.resolveActivationCommand(def)) !== null;
+    }
+    if (!(await detectAgent(def.detection))) return false;
+    return !command || (await this.resolveActivationCommand(def)) !== null;
+  }
+
+  private async resolveActivationCommand(def: AgentDefinition): Promise<string | null> {
+    const command = def.directoryPlugin?.activation?.command;
+    if (!command) return null;
+
+    if (def.id === 'hermes-agent') {
+      const candidates = hermesCliCandidatePaths(def.detection.paths[0] ?? '~/.hermes');
+      const defaultName = process.platform === 'win32' ? 'hermes.exe' : 'hermes';
+      const explicitOverride = Boolean(process.env.HERMES_CLI);
+      const isDefaultCommand = command === defaultName
+        || candidates.some(candidate => path.normalize(candidate) === path.normalize(command));
+      if (!explicitOverride && isDefaultCommand) {
+        for (const candidate of [...candidates, defaultName]) {
+          if (await this.commandAvailable(candidate)) return candidate;
+        }
+        return null;
+      }
+    }
+    return await this.commandAvailable(command) ? command : null;
+  }
+
+  private async commandAvailable(command: string): Promise<boolean> {
+    // A home directory can outlive the CLI. Check the command we will actually
+    // spawn, without using the generic detection cache in a long-running agent.
+    if (path.isAbsolute(command) || command.includes('/') || command.includes('\\')) {
+      try {
+        const stat = await fs.stat(command);
+        if (!stat.isFile()) return false;
+        await fs.access(command, process.platform === 'win32' ? fsConstants.F_OK : fsConstants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    try {
+      await execFile(process.platform === 'win32' ? 'where.exe' : 'which', [command], {
+        timeout: 2000,
+        killSignal: 'SIGKILL',
+        windowsHide: true,
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async needsDeploy(
@@ -108,7 +170,7 @@ export class DirectoryPluginStrategy implements DeployStrategy {
 
       const sourceHash = await this.hashDirectory(sourceDir, markerFile);
       const parentDir = path.dirname(targetDir);
-      await fs.mkdir(parentDir, { recursive: true });
+      await ensureAgentConfigDirectory(parentDir);
       stagingDir = await fs.mkdtemp(
         path.join(parentDir, `.${path.basename(targetDir)}.loongsuite-pilot-`),
       );
@@ -127,6 +189,9 @@ export class DirectoryPluginStrategy implements DeployStrategy {
         ...(this.dataDir ? { dataDir: this.dataDir } : {}),
       };
       await this.writeMarker(stagingDir, markerFile, marker);
+      // mkdtemp is 0700. Root-triggered installation must leave managed plugin
+      // code readable when the business process subsequently drops privileges.
+      if (process.getuid?.() === 0 && rootTriggerEnabled()) await fs.chmod(stagingDir, 0o755);
 
       if (targetState.kind === 'missing') {
         await fs.rename(stagingDir, targetDir);
@@ -144,7 +209,10 @@ export class DirectoryPluginStrategy implements DeployStrategy {
       const activationHash = this.hashActivation(config.activation);
       let activationStatus: DirectoryPluginMarker['activationStatus'];
       if (config.activation && activationHash) {
-        activationStatus = await this.activate(config.activation);
+        const command = await this.resolveActivationCommand(def);
+        activationStatus = await this.activate(command
+          ? { ...config.activation, command }
+          : config.activation, await this.activationIdentity(def));
         marker.activationHash = activationHash;
         marker.activationStatus = activationStatus;
         await this.writeMarker(targetDir, markerFile, marker);
@@ -189,7 +257,10 @@ export class DirectoryPluginStrategy implements DeployStrategy {
 
       if (config.activation?.disableArgs?.length) {
         try {
-          await this.deactivate(config.activation);
+          const command = await this.resolveActivationCommand(def);
+          await this.deactivate(command
+            ? { ...config.activation, command }
+            : config.activation, await this.activationIdentity(def));
         } catch (err) {
           logger.warn('failed to deactivate directory plugin before removal', {
             agentId: def.id,
@@ -236,12 +307,32 @@ export class DirectoryPluginStrategy implements DeployStrategy {
     command: string,
     args: string[],
     timeoutMs = DEFAULT_ACTIVATION_TIMEOUT_MS,
-  ): Promise<void> {
-    await execFile(command, args, {
+    identity?: ActivationIdentity,
+  ): Promise<ActivationCommandOutput> {
+    const result = await execFile(command, args, {
       timeout: timeoutMs,
       maxBuffer: 1024 * 1024,
       windowsHide: true,
+      ...identity,
     });
+    return {
+      stdout: String(result.stdout),
+      stderr: String(result.stderr),
+    };
+  }
+
+  private async activationIdentity(def: AgentDefinition): Promise<ActivationIdentity> {
+    if (process.getuid?.() !== 0 || !rootTriggerEnabled() || !def.directoryPlugin) return undefined;
+    // The CLI can update auth, install locks and configuration while enabling
+    // a plugin. Use the declared configuration root's owner, never a guessed
+    // future process uid and never a root CLI against another user's home.
+    for (const root of def.detection.paths ?? []) {
+      const relative = path.relative(path.resolve(root), path.resolve(def.directoryPlugin.targetDir));
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue;
+      const owner = await agentConfigOwner(root);
+      return { uid: owner.uid, gid: owner.gid };
+    }
+    return undefined;
   }
 
   private hashActivation(config?: DirectoryPluginActivationConfig): string | undefined {
@@ -252,6 +343,7 @@ export class DirectoryPluginStrategy implements DeployStrategy {
       probeArgs: config.probeArgs ?? [],
       timeoutMs: config.timeoutMs ?? DEFAULT_ACTIVATION_TIMEOUT_MS,
       enableArgs: config.enableArgs,
+      optionalEnableArgs: config.optionalEnableArgs ?? [],
       disableArgs: config.disableArgs ?? [],
     }));
     return `sha256:${hash.digest('hex')}`;
@@ -259,40 +351,47 @@ export class DirectoryPluginStrategy implements DeployStrategy {
 
   private async activate(
     config: DirectoryPluginActivationConfig,
+    identity?: ActivationIdentity,
   ): Promise<'activated' | 'unsupported'> {
-    if (!(await this.supportsActivation(config))) return 'unsupported';
+    const probeOutput = await this.probeActivation(config, identity);
+    if (probeOutput === null) return 'unsupported';
+    const optionalArgs = (config.optionalEnableArgs ?? [])
+      .filter(arg => probeOutput.includes(arg));
     await this.runActivationCommand(
       config.command,
-      config.enableArgs,
+      [...config.enableArgs, ...optionalArgs],
       this.resolveActivationTimeout(config),
+      identity,
     );
     return 'activated';
   }
 
-  private async deactivate(config: DirectoryPluginActivationConfig): Promise<void> {
-    if (!config.disableArgs?.length || !(await this.supportsActivation(config))) return;
+  private async deactivate(config: DirectoryPluginActivationConfig, identity?: ActivationIdentity): Promise<void> {
+    if (!config.disableArgs?.length || await this.probeActivation(config, identity) === null) return;
     await this.runActivationCommand(
       config.command,
       config.disableArgs,
       this.resolveActivationTimeout(config),
+      identity,
     );
   }
 
-  private async supportsActivation(config: DirectoryPluginActivationConfig): Promise<boolean> {
-    if (!config.probeArgs?.length) return true;
+  private async probeActivation(config: DirectoryPluginActivationConfig, identity?: ActivationIdentity): Promise<string | null> {
+    if (!config.probeArgs?.length) return '';
     try {
-      await this.runActivationCommand(
+      const result = await this.runActivationCommand(
         config.command,
         config.probeArgs,
         this.resolveActivationTimeout(config),
+        identity,
       );
-      return true;
+      return `${result.stdout}\n${result.stderr}`;
     } catch (err) {
       if (!this.isExplicitUnsupportedError(err)) throw err;
       logger.info('directory plugin activation is unsupported by target CLI', {
         command: config.command,
       });
-      return false;
+      return null;
     }
   }
 
@@ -334,11 +433,15 @@ export class DirectoryPluginStrategy implements DeployStrategy {
     markerFile: string,
     marker: DirectoryPluginMarker,
   ): Promise<void> {
+    const markerPath = path.join(directory, markerFile);
     await fs.writeFile(
-      path.join(directory, markerFile),
+      markerPath,
       `${JSON.stringify(marker, null, 2)}\n`,
       'utf8',
     );
+    // This marker contains only Pilot metadata and the data directory path.
+    // The Agent must read it after the root installer drops privileges.
+    if (process.getuid?.() === 0 && rootTriggerEnabled()) await fs.chmod(markerPath, 0o644);
   }
 
   private resolveMarkerFile(config: DirectoryPluginConfig): string {

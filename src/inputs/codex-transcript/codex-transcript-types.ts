@@ -1,7 +1,5 @@
+import type { CodexSubagentLink } from './codex-subagent-linker.js';
 import type { JsonValue } from '../../types/index.js';
-
-export const MAX_EMITTED_TERMINAL_TURNS = 100;
-export const MAX_GLOBAL_EMITTED_TERMINAL_TURNS = 10_000;
 
 export type CodexTerminalStatus = 'completed' | 'interrupted';
 
@@ -23,6 +21,10 @@ export interface CodexActiveTranscriptTurn {
   turnId: string;
   startOffset: number;
   startedAtMs: number;
+  /** Start-time proxy for the first LLM wave reconstructed by the next incremental scan. */
+  nextStepStartedAtMs?: number;
+  /** Session-cumulative token total at the last committed incremental boundary. */
+  lastCumulativeTokenTotal?: number;
   /** Turn-scoped context is needed after incremental recovery advances past turn_context. */
   model?: string;
   cwd?: string;
@@ -34,10 +36,18 @@ export interface CodexActiveTranscriptTurn {
   emittedToolCallIds?: string[];
   emittedToolResultIds?: string[];
   inputContext?: CodexTranscriptInputContext;
-  /** Direct spawn_agent calls already observed while this parent turn streamed. */
+  /** Incoming work is bound by evidence, independently of creation lineage. */
+  delegation?: CodexSubagentLink;
+  /** New unbound work invalidated the old incoming context for this turn. */
+  delegationUnbound?: boolean;
+  /** Fixed at first emission; late links must not re-export an existing trace. */
+  emittedTraceId?: string;
+  emittedAuditEventIds?: string[];
+  /** Legacy fusion checkpoint only: previously observed direct spawn calls. */
   subagentSpawns?: CodexPendingFusionChild[];
 }
 
+/** Legacy fusion descriptor retained only for checkpoint migration. */
 export interface CodexPendingFusionChild {
   parentToolCallId: string;
   parentTraceId: string;
@@ -47,7 +57,7 @@ export interface CodexPendingFusionChild {
   childThreadId?: string;
 }
 
-/** Parent task_complete staged until the current cycle rebuilds or degrades its direct children. */
+/** Legacy parent terminal barrier retained only for checkpoint migration. */
 export interface CodexPendingFusionTurn {
   turnId: string;
   parentThreadId: string;
@@ -57,7 +67,8 @@ export interface CodexPendingFusionTurn {
 }
 
 /**
- * Completed child turn consumed from its rollout but not emitted independently.
+ * Legacy captured child turn consumed but not independently emitted.
+ * New collection never creates this state; it is retained for migration only.
  * The active-turn snapshot lets fusion reconstruct it after the child scan
  * offset advances or the collector restarts.
  */
@@ -84,13 +95,53 @@ export interface CodexPendingTerminalTurn {
   firstPendingAtMs?: number;
   lastAttemptAtMs?: number;
   sourceRecordCount?: number;
+  /** A failed version is retried only after a source change and bounded backoff. */
+  failure?: {
+    sourceVersion: string;
+    /** Earliest retry time in epoch milliseconds; the source must also change. */
+    retryAtMs: number;
+    /** Current exponential backoff delay in milliseconds (1,000–60,000). */
+    delayMs: number;
+  };
 }
+
+/** Failed ranges retain their semantic context without retaining parsed bodies. */
+export interface CodexDeferredTerminalTurn {
+  activeTurn: CodexActiveTranscriptTurn;
+  pendingTerminal: CodexPendingTerminalTurn;
+}
+
+interface CodexForkBootstrapBase {
+  /** Hook-provided first turn owned by this rollout. */
+  initialTurnId?: string;
+  /** Terminal Hook evidence for an owned turn; it may not be the first one. */
+  recoveryTurnId?: string;
+  /** How far the append-only rollout has been searched for an owned turn. */
+  searchOffset: number;
+}
+
+/** First-owned-turn bootstrap for a fork/subagent rollout. */
+export type CodexForkBootstrap = CodexForkBootstrapBase & (
+  /** A file discovered while Pilot is running; retain until owned bytes advance. */
+  | { state: 'live-pending' }
+  /** A startup no-replay file whose first owned turn has not been located yet. */
+  | { state: 'baseline-search' }
+  /** A bounded no-output rebuild below the startup baseline. */
+  | {
+      state: 'baseline-tail';
+      /** Last unfinished owned candidate reconstructed below the baseline scanOffset. */
+      tailCandidate?: CodexActiveTranscriptTurn;
+    }
+);
 
 export interface CodexTranscriptCheckpoint {
   inode: number;
+  /** No-replay floor and next byte for normal event collection. Never rewound by fork probing. */
   scanOffset: number;
   activeTurn: CodexActiveTranscriptTurn | null;
   pendingTerminal: CodexPendingTerminalTurn | null;
+  deferredTerminals?: CodexDeferredTerminalTurn[];
+  /** Legacy terminal barriers; new collection writes null. */
   pendingFusion: CodexPendingFusionTurn | null;
   pendingSubagent: CodexPendingSubagentTurn | null;
   /**
@@ -101,13 +152,9 @@ export interface CodexTranscriptCheckpoint {
    * meta therefore misattributes child turns to the parent session.
    */
   ownerSessionMetaOffset: number | null;
-  /** Terminal turns already processed by this transcript, including empty control turns. */
-  emittedTerminalTurnIds: string[];
-}
-
-export interface CodexTranscriptGlobalState {
-  /** Bounded cross-transcript registry; the persisted name is retained for compatibility. */
-  emittedTerminalTurnIds: string[];
+  firstOwnedTurnId?: string;
+  /** Independent ownership probe; searchOffset never acts as the normal collection cursor. */
+  forkBootstrap?: CodexForkBootstrap;
 }
 
 export interface CodexTranscriptMeta {
@@ -117,6 +164,8 @@ export interface CodexTranscriptMeta {
   rootSessionId: string;
   threadSource: 'user' | 'subagent' | 'unknown';
   parentThreadId?: string;
+  /** Top-level session_meta.forked_from_id — fork/resume lineage marker. */
+  forkedFromId?: string;
   depth: number;
   createdAtMs?: number;
   agentPath?: string;
@@ -179,6 +228,9 @@ export interface CodexPartialTurnExtraction {
   committedStepCount: number;
   committedStepRanges: CodexTranscriptSourceRange[];
   consumedEndOffset: number;
+  /** Continuation state aligned with consumedEndOffset, never with an uncommitted suffix. */
+  nextStepStartedAtMs?: number;
+  lastCumulativeTokenTotal?: number;
 }
 
 export interface CodexExtractedTranscriptTurn {

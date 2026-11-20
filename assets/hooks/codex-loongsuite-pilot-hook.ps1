@@ -36,14 +36,22 @@ function Log-Error {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
         $file = Join-Path $dir "codex-error-$day.jsonl"
-        $record = [ordered]@{
+        # Plain @{}, never [ordered]@{}: on a WDAC machine this hook runs in
+        # ConstrainedLanguage mode, where the accelerator-converts-an-@{}-literal shape
+        # can throw (see the CLM header in deploy/installer.ps1 -- [pscustomobject] does
+        # exactly that on 5.1 despite being documented as allowed). The catch below would
+        # swallow it, so the symptom is an error log that is never written on precisely
+        # the machines where it is needed. Key order is cosmetic in a JSONL log line.
+        $record = @{
             time = (Get-Date).ToUniversalTime().ToString("o")
             "gen_ai.agent.type" = "codex"
             stage = $Stage
             "error.type" = "ps1_$Stage"
             "error.message" = $Message
         }
-        Add-Content -LiteralPath $file -Value ($record | ConvertTo-Json -Compress)
+        # Explicit UTF8: Add-Content defaults to the ANSI codepage, which garbles
+        # non-ASCII paths and messages in the record.
+        Add-Content -LiteralPath $file -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
     } catch {}
 }
 
@@ -59,7 +67,13 @@ function Convert-NodePath {
     if ($candidate -match '^/([A-Za-z])/(.*)$') {
         $candidate = "$($Matches[1]):\$($Matches[2] -replace '/', '\')"
     }
-    if (-not [System.IO.Path]::HasExtension($candidate) -and (Test-Path -LiteralPath "$candidate.exe")) {
+    # -match, not [System.IO.Path]::HasExtension(): a static method call on a
+    # non-core type throws under ConstrainedLanguage mode (WDAC), and the catch at
+    # the bottom of this file would swallow it into a silent empty result. The regex
+    # is HasExtension's contract: a dot after the last separator that is not the
+    # final character. Trailing dot ("node.") and a dotted parent directory
+    # ("v18.20.4/node") both correctly yield no match.
+    if (-not ($candidate -match '\.[^\\/.]+$') -and (Test-Path -LiteralPath "$candidate.exe")) {
         $candidate = "$candidate.exe"
     }
     return $candidate
@@ -67,10 +81,33 @@ function Convert-NodePath {
 
 $MIN_NODE_MAJOR = 18
 
+# Managed runtimes live at <pilot-dir>\runtime\node-v<x>.<y>.<z>\node.exe (win zip layout)
+# or ...\node-v<x>.<y>.<z>\bin\node.exe, extracted by the installer only after it verified
+# SHASUMS256 and probed the binary itself, so the directory name is authoritative. Reading
+# the major from the path skips a `node --version` launch that would otherwise run on the
+# user's interactive path for every single event. Returns $null for anything that is not a
+# managed runtime, which still gets probed. Split-Path/-match keep this CLM-safe.
+function Get-ManagedNodeMajor {
+    param([string]$bin)
+    if (-not $bin) { return $null }
+    $dir = Split-Path $bin -Parent
+    if (-not $dir) { return $null }
+    if ((Split-Path $dir -Leaf) -eq 'bin') {
+        $dir = Split-Path $dir -Parent
+        if (-not $dir) { return $null }
+    }
+    $parent = Split-Path $dir -Parent
+    if (-not $parent -or (Split-Path $parent -Leaf) -ne 'runtime') { return $null }
+    if ((Split-Path $dir -Leaf) -match '^node-v([0-9]+)') { return [int]$Matches[1] }
+    return $null
+}
+
 function Test-NodeSuitable {
     param([string]$Bin)
     $resolved = Convert-NodePath $Bin
     if (-not $resolved -or -not (Test-Path -LiteralPath $resolved)) { return $false }
+    $managedMajor = Get-ManagedNodeMajor $resolved
+    if ($null -ne $managedMajor) { return $managedMajor -ge $MIN_NODE_MAJOR }
     try {
         $version = & $resolved --version 2>$null
         if (-not $version) { return $false }
@@ -89,8 +126,10 @@ function Resolve-NodeBin {
     }
     $pinFile = Join-Path $dataDir "node-bin"
     if (Test-Path -LiteralPath $pinFile) {
-        $pinContent = Get-Content -LiteralPath $pinFile -Raw -ErrorAction SilentlyContinue
-        $pinned = Convert-NodePath ([string]$pinContent)
+        # -Encoding UTF8 + BOM strip: the pin file can hold a non-ASCII path and 5.1
+        # defaults Get-Content to ANSI, which turns it into "??".
+        $pinContent = Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        $pinned = Convert-NodePath (([string]$pinContent).Trim([char]0xFEFF))
         if (Test-NodeSuitable $pinned) { return $pinned }
     }
 
