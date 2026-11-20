@@ -126,7 +126,7 @@ export class HubUsage {
     }
   }
 
-  enrich(entry: AgentActivityEntry, native?: Pick<NativeUsageIndex, 'complete'>) {
+  enrich(entry: AgentActivityEntry, native?: Pick<NativeUsageIndex, 'complete' | 'responses'>) {
     if (entry['event.name'] !== 'llm.response') return;
     const ids = new Set<string>();
     const messages = entry['gen_ai.output.messages'];
@@ -135,6 +135,8 @@ export class HubUsage {
         for (const p of msg.parts) if (p && typeof p === 'object' && 'type' in p && p.type === 'tool_call' && typeof p.id === 'string') ids.add(p.id);
       }
     }
+    const rounds = native?.responses(entry['gen_ai.session.id'], ids);
+    if (rounds) entry['loongsuite.trae_cn.model_responses'] = rounds;
     const matches = [...this.turns.values()].filter(t => t.session === entry['gen_ai.session.id'] &&
       [...ids].some(id => t.tools.has(id)));
     if (matches.length !== 1 || !matches[0].reports.size) return;

@@ -19,6 +19,7 @@ import { prepareCodexTurn } from './codex-turn-converter.js';
 import { prepareDelegatedTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
+import { expandTraeHistory } from './trae-cn-history-spans.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { convertQwenWorkCollaborationTurn } from './qwen-work-collaboration-converter.js';
@@ -1660,7 +1661,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
             ? prepared.records.map(stripAgentMessageContent)
             : prepared.records;
           const qwenCollaboration = conversionRecords.some(record => record['agent.source'] === 'qwen-work-cn-collaboration');
-          const stream = qwenCollaboration ? null : planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
+          const hasTraeHistory = agentType === 'trae-cn' && records.some(r => Array.isArray(r['loongsuite.trae_cn.model_responses']));
+          const stream = (qwenCollaboration || hasTraeHistory) ? null : planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
           if (stream) {
             streamedExportSucceeded = true;
             const reasoning = { seen: false, total: 0 };
@@ -1784,6 +1786,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
+    if (agentType === 'trae-cn') spans = expandTraeHistory(records, spans);
     applyQoderWorkStepTiming(records, spans);
     this.enrichToolSkillAttributes(records, spans);
     this.enrichMultimodalAttributes(records, spans);

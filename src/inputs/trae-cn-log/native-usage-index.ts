@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import { createInflateRaw } from 'node:zlib';
 import cbor from 'cbor';
 
-type Receipt = { session: string; turn: string; done: boolean; touched: number; expected: Map<string, Set<number>> };
+type Receipt = { session: string; turn: string; done: boolean; touched: number; calls: Set<string>; history: Map<string, string>; expected: Map<string, Set<number>> };
 const text = (value: unknown) => Buffer.isBuffer(value) ? value.toString('utf8') : '';
 const id24 = /^[a-f0-9]{24}$/;
 class NativeStream {
@@ -50,12 +50,25 @@ export class NativeUsageIndex {
     if (message === 'context resolve applied to task request') {
       const session = text(f.session_id), turn = text(f.turn_id);
       if (id24.test(session) && id24.test(turn) && !stream.receipts.has(trace)) {
-        stream.receipts.set(trace, { session, turn, expected: new Map(), done: false, touched: Date.now() });
+        stream.receipts.set(trace, { session, turn, expected: new Map(), calls: new Set(), history: new Map(), done: false, touched: Date.now() });
       }
       return;
     }
     const r = stream.receipts.get(trace);
     if (!r) return;
+    if (message === 'tool execution started') {
+      const id = text(f.toolcall_id);
+      if (id && id.length <= 256) r.calls.add(id);
+    }
+    if (message === 'recording history entry' && text(f.history_source) === 'Server' && text(f.source) === 'llm_default') {
+      const id = text(f.history_id);
+      const parts = (record as { time?: number[] }).time;
+      if (id24.test(id) && !r.history.has(id) && Array.isArray(parts) && parts.length === 9 && parts.every(Number.isInteger)) {
+        const [year, day, hour, minute, second, ns, oh, om, os] = parts;
+        const ms = Date.UTC(year, 0, day, hour - oh, minute - om, second - os);
+        if (Number.isFinite(ms) && ns >= 0 && ns < 1e9) r.history.set(id, String(BigInt(ms) * 1000000n + BigInt(ns)));
+      }
+    }
     if (message === '[Hub] task event contract' && text(f.event_type) === 'token_usage' &&
         text(f.conversation_id) === r.session && id24.test(text(f.task_id)) &&
         typeof f.event_seq === 'number' && Number.isSafeInteger(f.event_seq) && f.event_seq >= 0) {
@@ -66,6 +79,14 @@ export class NativeUsageIndex {
     } else if (message === 'chat: runner completed' && text(f.turn_id) === r.turn) {
       r.done = true;
     }
+  }
+
+  responses(session: string, calls: Set<string>) {
+    if (!calls.size) return;
+    const matches = [...this.streams.values()].flatMap(s => [...s.receipts.values()])
+      .filter(r => r.session === session && [...calls].some(id => r.calls.has(id)));
+    if (matches.length !== 1 || !matches[0].done || !matches[0].history.size) return;
+    return [...matches[0].history].map(([id, at]) => ({ id, at }));
   }
 
   complete(trace: string, session: string, reply: string, seqs: Map<number, unknown>) {
