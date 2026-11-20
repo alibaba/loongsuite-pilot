@@ -12,6 +12,9 @@ use std::sync::{mpsc, Arc, Weak};
 use std::time::Duration;
 
 const PENDING: i32 = -1;
+// Poll-driven inputs already collect a batch before enqueueing it. Keep the
+// additional wait short when the receiving host is in the same process.
+const HOST_ACTIVITY_FLUSH_INTERVAL_MS: u64 = 100;
 
 pub(super) struct SdkAgent {
     input: &'static str,
@@ -35,11 +38,18 @@ impl SdkAgent {
     pub fn new(
         input: &'static str,
         init: Value,
-        policy: Value,
+        mut policy: Value,
         manager: &Arc<InputManager>,
         sdk_data: PathBuf,
         legacy_state: &Arc<StateStore>,
     ) -> Self {
+        if policy
+            .pointer("/sdk_options/delivery/flush_interval_ms")
+            .is_none()
+        {
+            policy["sdk_options"]["delivery"]["flush_interval_ms"] =
+                Value::from(HOST_ACTIVITY_FLUSH_INTERVAL_MS);
+        }
         Self {
             input,
             init: init.to_string().into_bytes(),
@@ -73,6 +83,32 @@ impl SdkAgent {
             running: Arc::new(AtomicBool::new(false)),
             session: tokio::sync::Mutex::new(None),
         }
+    }
+
+    pub(super) fn acknowledged_checkpoint(
+        &self,
+        agent: &str,
+    ) -> anyhow::Result<Option<crate::checkpoints::InputState>> {
+        use crate::sdk::{
+            outbox::Outbox,
+            policy::{Init, Policy},
+        };
+
+        let outbox = self.sdk_data.join("outbox");
+        if !outbox.join("delivery.sqlite").exists() {
+            return Ok(None);
+        }
+        let init: Init = serde_json::from_slice(&self.init)?;
+        let policy = Policy::parse(serde_json::from_slice(&self.policy)?, &init)?;
+        let Some(plan) = policy.agents.get(agent) else {
+            return Ok(None);
+        };
+        let Some(text) = Outbox::read_acknowledged_checkpoint(&outbox, &plan.namespace())? else {
+            return Ok(None);
+        };
+        let checkpoint = StateStore::new(self.sdk_data.join("input-state.json"));
+        checkpoint.load_checkpoint_text(&text)?;
+        Ok(checkpoint.persisted_input(self.input))
     }
 
     pub fn running(&self) -> bool {

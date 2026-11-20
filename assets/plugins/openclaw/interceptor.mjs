@@ -12,7 +12,7 @@
  * rewrites the transcript `{ message }` and reuses a short TTL cache.
  */
 
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -370,6 +370,7 @@ export function createOpenClawInterceptor(overrides = {}) {
     resolveDataDir,
     fetchImpl: globalThis.fetch?.bind(globalThis),
     spawnSyncImpl: spawnSync,
+    execFileImpl: execFile,
     execPath: process.execPath,
     env: process.env,
     ...overrides,
@@ -499,16 +500,75 @@ export function createOpenClawInterceptor(overrides = {}) {
     }
   }
 
+  function evaluateSdk(request, sync, dataDir) {
+    const stateDir = path.resolve(expandHome(dataDir), "state", "standalone-openclaw-interceptor-sdk");
+    const native = resolveCli(dataDir, deps);
+    if (!native || native.legacyScript) return { available: false };
+    if (!ordinaryPath(path.join(stateDir, "sdk-hooks-local.json"))) {
+      return { available: true };
+    }
+    const binary = path.join(path.dirname(native.binary), process.platform === "win32"
+      ? "loongsuite-pilot-sdk-hook.exe" : "loongsuite-pilot-sdk-hook");
+    if (!ordinaryPath(binary)) {
+      writeFailOpen(dataDir, request, "SDK Hook is missing");
+      return { available: true };
+    }
+    const args = ["sdk-hook", "--channel", "local", "--agent", "openclaw",
+      "--event", request.event, "--data-dir", stateDir];
+    const input = JSON.stringify(toCliPayload(request));
+    const options = {
+      encoding: "utf8",
+      timeout: INTERCEPTOR_HOOK_TIMEOUT_MS,
+      windowsHide: true,
+      maxBuffer: 32 * 1024,
+      env: deps.env,
+    };
+    function verdict(error, stdout) {
+      if (error) {
+        writeFailOpen(dataDir, request, error.message);
+        return undefined;
+      }
+      if (!stdout?.trim()) return undefined;
+      try {
+        const result = JSON.parse(stdout);
+        if (result.action === "block") {
+          rememberPostToolVerdict(request, "block", result.reason);
+          return openClawBlockResult(request, result.reason);
+        }
+      } catch {
+        writeFailOpen(dataDir, request, "invalid SDK Hook stdout");
+      }
+      return undefined;
+    }
+    if (sync) {
+      const result = deps.spawnSyncImpl(binary, args, { ...options, input });
+      const error = result.error || (result.status !== 0
+        ? new Error(`SDK Hook exited ${result.status}`) : undefined);
+      return { available: true, result: verdict(error, result.stdout) };
+    }
+    const result = new Promise((resolve) => {
+      const child = deps.execFileImpl(binary, args, options, (error, stdout) => {
+        resolve(verdict(error, stdout));
+      });
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(input);
+    });
+    return { available: true, result };
+  }
+
   function evaluate(hookName, event, ctx, opts = {}) {
     const request = buildHookRequest(hookName, event, ctx, opts.cwd);
     if (!request) return undefined;
     const cached = readPostToolCache(request);
     if (!cached.miss) return cached.result;
+    const sync = opts.sync || SYNC_INTERCEPT_HOOKS.has(hookName);
+    const sdk = evaluateSdk(request, sync, deps.resolveDataDir());
+    if (sdk.available) return sdk.result;
     const runtime = currentRuntime();
     if (!runtime) {
       return undefined;
     }
-    if (opts.sync || SYNC_INTERCEPT_HOOKS.has(hookName)) {
+    if (sync) {
       return evaluateSync(request);
     }
     return evaluateAsync(request, runtime);

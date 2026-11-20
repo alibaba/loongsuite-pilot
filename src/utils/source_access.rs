@@ -6,6 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 thread_local! {static SCOPE:RefCell<Option<Arc<SourceScope>>>=const{RefCell::new(None)};}
@@ -15,6 +16,7 @@ pub struct SourceScope {
     max_files: usize,
     opened: Mutex<HashSet<PathBuf>>,
     max_read_bytes: usize,
+    entry_buffer_limit: AtomicUsize,
     log: Mutex<Option<PathBuf>>,
     pub(crate) mask_rules: std::sync::OnceLock<Vec<crate::mask::CompiledMaskRule>>,
 }
@@ -26,6 +28,7 @@ impl SourceScope {
             max_files,
             opened: Mutex::new(HashSet::new()),
             max_read_bytes,
+            entry_buffer_limit: AtomicUsize::new(0),
             log: Mutex::new(None),
             mask_rules: std::sync::OnceLock::new(),
         })
@@ -59,6 +62,9 @@ impl SourceScope {
     }
     pub fn reset(&self) {
         self.opened.lock().unwrap().clear();
+    }
+    pub(crate) fn set_entry_buffer_limit(&self, bytes: usize) {
+        self.entry_buffer_limit.store(bytes, Ordering::Relaxed);
     }
     pub fn check(&self, path: &Path) -> io::Result<()> {
         let canonical = path.canonicalize()?;
@@ -298,6 +304,16 @@ pub async fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
 pub fn read_limit(default: usize) -> usize {
     current()
         .map(|scope| scope.max_read_bytes.min(default))
+        .unwrap_or(default)
+}
+pub(crate) fn entry_buffer_limit() -> Option<usize> {
+    current()
+        .map(|scope| scope.entry_buffer_limit.load(Ordering::Relaxed))
+        .filter(|bytes| *bytes > 0)
+}
+pub(crate) fn file_limit(default: usize) -> usize {
+    current()
+        .map(|scope| scope.max_files.min(default))
         .unwrap_or(default)
 }
 pub fn read_dir(path: impl AsRef<Path>) -> io::Result<std::fs::ReadDir> {
