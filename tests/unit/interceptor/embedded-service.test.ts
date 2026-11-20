@@ -1,18 +1,25 @@
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startInterceptorService } from '../../../src/interceptor/daemon/lifecycle.js';
 import { interceptorRuntimePath } from '../../../src/interceptor/paths.js';
 
 describe('embedded interceptor service', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('listens, writes runtime for this process, and releases the port on stop', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'interceptor-embedded-'));
     const service = await startInterceptorService({
       dataDir,
       version: '9.9.9',
       gitCommit: 'abc123',
+      mode: 'all',
     });
+    if (!service) throw new Error('expected interceptor HTTP to listen');
 
     try {
       const runtime = JSON.parse(await readFile(interceptorRuntimePath(dataDir), 'utf8')) as {
@@ -41,5 +48,23 @@ describe('embedded interceptor service', () => {
     }
 
     await expect(fetch(`http://127.0.0.1:${service.port}/health`)).rejects.toThrow();
+  });
+
+  it('does not bind the loopback port when interceptor mode is none', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'interceptor-embedded-off-'));
+    const runtimePath = interceptorRuntimePath(dataDir);
+    await mkdir(join(dataDir, 'interceptor'), { recursive: true });
+    await writeFile(runtimePath, '{"status":"ok","daemon_port":18791}\n');
+
+    const service = await startInterceptorService({
+      dataDir,
+      version: '9.9.9',
+      mode: 'none',
+    });
+
+    expect(service.port).toBeNull();
+    await service.stop();
+    expect(existsSync(runtimePath)).toBe(false);
+    expect(existsSync(join(dataDir, 'interceptor', 'interceptor.pid'))).toBe(false);
   });
 });

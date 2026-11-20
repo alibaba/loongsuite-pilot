@@ -208,6 +208,26 @@ export class TraceContextRuntime {
     finally { iterator?.closeSync(); }
   }
 
+  /** Claim the process environment for one turn before any downstream operation. */
+  claimEnvironmentTurn(identity: TurnIdentity, ttlMs = DEFAULT_TTL_MS): boolean {
+    try {
+      if ((!identity.turnId && !identity.inputHash)
+        || !Number.isInteger(ttlMs) || ttlMs <= 0 || ttlMs > MAX_TTL_MS) return false;
+      const directory = this.directory(identity);
+      if (!this.ensureDirectory(directory)) return false;
+      const file = path.join(directory, '.environment.claim');
+      const owner = digest(JSON.stringify([identity.turnId ?? null, identity.inputHash ?? null]));
+      const now = Date.now();
+      const record = { owner, expiresAtMs: now + ttlMs };
+      const existing = readRecord(file) as typeof record | undefined;
+      if (existing && Number.isSafeInteger(existing.expiresAtMs) && existing.expiresAtMs > now) return existing.owner === owner;
+      if (existing) this.pruneSession(identity);
+      if (this.hasCapacity(directory) && publish(file, record)) return true;
+      const winner = readRecord(file) as typeof record | undefined;
+      return winner?.owner === owner && Number.isSafeInteger(winner.expiresAtMs) && winner.expiresAtMs > now;
+    } catch { return false; }
+  }
+
   bindTurn(identity: TurnIdentity, incoming: Record<string, string | undefined> = {}, options: { generate?: boolean; ttlMs?: number } = {}): TraceBinding | undefined {
     try {
       if (!identityValid(identity) || (!identity.turnId && !identity.inputHash)) return undefined;
@@ -344,8 +364,9 @@ export class TraceContextRuntime {
     fs.mkdirSync(this.base, { recursive: true, mode: 0o700 });
     if (fs.existsSync(directory)) return fs.lstatSync(directory).isDirectory();
     if (!this.hasCapacity(this.base)) return false;
-    fs.mkdirSync(directory, { mode: 0o700 });
-    return true;
+    try { fs.mkdirSync(directory, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    return fs.lstatSync(directory).isDirectory();
   }
 
   completeTurn(binding: TraceBinding, closedAtMs = Date.now()): void {

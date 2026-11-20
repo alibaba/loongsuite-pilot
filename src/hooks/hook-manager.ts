@@ -261,6 +261,27 @@ export class HookManager {
     }
   }
 
+  /**
+   * Whether any command uninstallHook() would remove is present, regardless of
+   * position, timeout, or shell. isHookInstalled() is stricter, so an entry it
+   * rejects can still be one we own.
+   */
+  async isHookPresent(def: HookDefinition): Promise<boolean> {
+    try {
+      const document = await readJsonDocument<Record<string, unknown>>(
+        def.settingsPath,
+        def.settingsSyntax ?? 'json',
+      );
+      if (document.status !== 'ok') return false;
+      const hooks = this.valueAtPath(this.requireSettingsObject(document.data), def.hookJsonPath);
+      if (!Array.isArray(hooks)) return false;
+      return [def.hookCommand, ...(def.replaceHookCommands ?? [])]
+        .some(command => this.isCommandPresent(hooks, command));
+    } catch {
+      return false;
+    }
+  }
+
   private async installJsoncHook(def: HookDefinition): Promise<boolean> {
     const document = await readJsonDocument<Record<string, unknown>>(
       def.settingsPath,

@@ -57,6 +57,7 @@ describe('Orchestrator Codex trust watchdog target', () => {
     const orchestrator = new Orchestrator({ dataDir: '/tmp/codex-watchdog' } as never);
     (orchestrator as unknown as { deploymentManager: unknown }).deploymentManager = {
       getDefinitions: () => [hookDefinition('codex', true), hookDefinition('claude-code')],
+      effectiveDefinition: (def: AgentDefinition) => def,
       needsRedeploy,
       deploySingle,
     };

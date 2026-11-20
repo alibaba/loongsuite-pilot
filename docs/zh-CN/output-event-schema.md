@@ -22,6 +22,10 @@ Hermes 在 `pre_api_request` 中为本次 API 请求分配固定的 `span_id`，
 collector 以该标记结束 trace 聚合，避免重试中的 error/stop 或同会话并发回合提前截断 trace。
 旧版插件事件仍沿用原有结束判定。源 JSONL 追加不等待 collector 生成完整 trace 或上报完成。
 
+Hermes 压缩上下文时可能在同一次原生 turn 中更换 session。事件保留原生 turn ID，
+`gen_ai.step.id` 和 `gen_ai.response.id` 同时纳入 session 身份，collector 按
+session 与 turn 一起聚合，避免压缩前后的 trace 混合。旧插件产生的事件也按 session 分组。
+
 OpenClaw modern 插件在 `model_call_started` 中分配本次模型调用的 `span_id`，
 响应复用该 ID。尚未关联父上下文的子 Agent 事件仍使用有界缓冲，以维持父子 trace 关系；
 有拦截策略的工具事件也需先完成策略判定，不能承诺所有 hook 都在判定前写出。
@@ -128,7 +132,8 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `gen_ai.agent.invocation.id` | string | 委派事件 Required | 当前向外逻辑委派的稳定 ID；批量逐工作唯一。 |
 | `gen_ai.agent.parent.invocation.id` | string | 已确认接受委派的工作 Required | 当前事件/轮次所接受的上游委派 ID；不是子 session 的永久属性。 |
 | `gen_ai.agent.name` | string | Recommended | Agent 实例可读名称。 |
-| `gen_ai.provider.name` | string | Required | 模型 Provider 名称，见 [Provider Names](#provider-names)。 |
+| `gen_ai.provider.name` | string | Conditionally Required | 模型 Provider 名称；除下述明确标记的仅观察 Agent 轮次事件外均为必填。见 [Provider Names](#provider-names)。 |
+| `loongsuite.observation.scope` | string | Conditionally Required | `agent_turn` 表示来源只观察到 Agent 输入或轮次边界，不表示内部没有执行模型或工具。 |
 | `gen_ai.request.id` | string | Recommended | 客户端请求 ID，用于关联网关或 Provider 日志。 |
 | `gen_ai.request.model` | string | 可获取时 Conditionally Required | 客户端请求的模型。 |
 | `gen_ai.response.model` | string | Recommended | 实际用于响应的模型。 |
@@ -158,8 +163,11 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `gen_ai.tool.call.arguments` | json | 可获取时 | 工具调用参数，可能包含敏感内容。 |
 | `gen_ai.tool.call.result` | json | 可获取时 | 工具结果 payload，可能包含敏感内容。 |
 | `gen_ai.tool.call.duration` | int | Recommended | 使用匹配的 result 边界减去 call 边界得到的正数工具执行耗时，单位毫秒；任一边界缺失或差值非正时省略。 |
-| `gen_ai.guardrail.triggered` | boolean | 命中内存拦截判定时 Required | 固定为 `true`。没有 tool call id、没有记录、记录已过期，或 interceptor 未开启时省略。 |
-| `gen_ai.guardrail.action` | string | 与 `gen_ai.guardrail.triggered` 同时出现 | 可选值只有 `allow` 和 `block`。`tool.call` 查 `PreToolUse`，`tool.result` 查 `PostToolUse`。被拦截的 Qoder 用户提示补写的 `llm.request` 为 `block`。工具事件查不到时两个字段都不写。 |
+| `gen_ai.guardrail.triggered` | boolean | 关联到裁决时 Required | 表示存在检查裁决，固定为 `true`，不等于规则命中。工具事件没有 tool call id、没有记录、记录已过期或 interceptor 未开启时省略。 |
+| `gen_ai.guardrail.action` | string | 与 `gen_ai.guardrail.triggered` 同时出现 | `block`：强制拦截；`log`：log 命中但放行；`allow`：其余已知裁决。`tool.call` 查 `PreToolUse`，`tool.result` 查 `PostToolUse`。放行的提示词裁决关联到该轮首个原生 `llm.request`，不增加请求事件；被拦截的 Qoder 提示补报为 `block`。没有对应裁决或关联存在歧义时省略。 |
+| `gen_ai.guardrail.fail_open` | boolean | 检查失败时 Opt-In | `true` 表示有检查错误。此前已有 log 命中时可同时有 `action=log`，不把 log 命中等同失败。 |
+| `gen_ai.guardrail.rule_id` | string | 存在已知命中时 Recommended | 最终 block 拦截规则或首条 log 命中的配置 ID，适用于提示词请求和工具事件。 |
+| `gen_ai.guardrail.rule_version` | string | 规则命中时 Recommended | 取规则配置的 `rules[].version`。 |
 | `gen_ai.skill.name` | string | `skill.use` Conditionally Required | 技能或扩展能力名称。 |
 | `gen_ai.skill.id` | string | 技能标识可用时 Recommended | 稳定的技能标识。 |
 | `gen_ai.skill.description` | string | 技能元数据可用时 Recommended | 技能描述。 |
@@ -175,7 +183,22 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
 
-Qoder 产品入口：旧 IDE 输出 `gen_ai.agent.type=qoder`，终端 CLI 输出 `qoder-cli`。CLI 格式 transcript 优先使用本轮原生用户记录的 `businessIdentity.product` 区分 `app`/`cli`，覆盖生命周期 Hook 不带产品字段的子 Agent；旧运行时兼容本轮 Hook 的 `parent_business_info.product=app` 标记。新版桌面端输出 `qoder-app`。OTLP Resource 的 `gen_ai.framework` 使用对应产品类型；新桌面端的 `gen_ai.agent.system=qoder-app`，现有 CLI、IDE 等 Qoder 入口仍为 `qoder`。产品标记仅属于本轮原生记录或 Hook 上下文，不跨 session 恢复沿用。桌面端复用 `agents.qoder` 配置和 CLI transcript/Token 补全路径，不需要新增 `agents.qoder-app` 配置。缺少或无法识别产品证据时保留原分类，不根据路径或进程名猜测。历史数据保留原 system 值，跨版本统计需结合 type/framework 区分入口。
+只有同时满足以下条件的事件可以省略 `gen_ai.provider.name`：声明
+`loongsuite.observation.scope=agent_turn`，具有非空 `gen_ai.turn.id`，且事件为
+`agent.input` 或带 turn-start/turn-end 标记的 `other` 边界；事件中不能包含模型
+请求/响应、Token 用量、step、系统提示或工具字段。其他事件（包括模型和工具事件）
+仍要求非空 Provider。该范围只说明来源能观察到什么，不表示 Agent 内部没有调用模型或工具；
+此范围内的输入和输出消息是用户可见的 Agent 对话，不代表模型实际请求或响应的完整内容。
+
+Qoder 产品入口：IDE 输出 `gen_ai.agent.type=qoder`，终端 CLI 输出 `qoder-cli`。CLI 格式 transcript 优先使用本轮原生用户记录的 `businessIdentity.product` 区分 `app`/`cli`，覆盖生命周期 Hook 不带产品字段的子 Agent；旧运行时兼容本轮 Hook 的 `parent_business_info.product=app` 标记。新版桌面端输出 `qoder-app`。OTLP Resource 的 `gen_ai.framework` 使用对应产品类型；独立 IDE 的 `gen_ai.agent.system=qoder-ide`，新桌面端为 `qoder-app`，CLI、CN、JetBrains 和 Work 保留 `qoder`。产品标记仅属于本轮原生记录或 Hook 上下文，不跨 session 恢复沿用。桌面端复用 `agents.qoder` 配置和 CLI transcript/Token 补全路径，不需要新增 `agents.qoder-app` 配置。缺少或无法识别产品证据时保留原分类，不根据路径或进程名猜测。历史数据保留原 system 值，跨版本统计需结合 type/framework 区分入口。
+
+Qoder IDE 子运行使用独立 session，与 CLI 的共享 session sidechain 协议不同。IDE 适配通过只读 SQLite `chat_record.parent_session_id`、`parent_tool_call_id` 和 `request_id` 确认委派；父 `Agent` 工具产生稳定的 invoke/result 日志，子事件保留原生 session、独立 turn 和 incoming invocation，连接到立即父工具。复用 session 时按原生 request 分开，嵌套工作分别保留 incoming/outgoing invocation。缺少或冲突的关联证据保持待定，不按 Agent 名称或相近时间绑定。
+
+子工具参数和结果来自对应 transcript，通过 SQLite 的精确 `toolCallId` 归属到原生请求；模型调用 ID、模型和 usage 来自该请求的 SQLite 元数据。IDE 1.37 的子 transcript 可能省略纯文本模型响应：成功前台运行的最后一条子模型回复使用父 `Agent` 工具实际交付的原生回答，来源标记为 `qoder-ide-agent-result`；中间响应或失败运行缺少正文时保持缺失，不补造 finish reason。父工具实际交付的结果同时作为 Agent result，异步受理不作为成功结果。该适配不读取或解密数据库中的会话正文，生成的事件与其他输入经过相同的内容开关和脱敏处理；checkpoint 仅保存关联 ID 和源定位，不保存正文。
+
+IDE 委派 transcript 单行及所需工具行合计各有 16 MiB 上限；超过时保留原文件和待定状态并记录告警，不将不完整内容当作完整子运行。扫描每轮分块进行，可在重启后继续。
+
+子请求的 SQLite 消息元数据通过同一只读快照分页读取，单请求最多 4096 行、归一化元数据最多 4 MiB，单条及全部工具元数据各最多 16 MiB。超过上限时，已确认的委派仍上报 invoke 和已实际交付的 result；子运行保持待定，日志记录原因及相关 ID，并以较低频率重试。源数据恢复到上限内后可继续采集。
 
 工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
 

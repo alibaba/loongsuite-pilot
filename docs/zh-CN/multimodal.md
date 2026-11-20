@@ -6,7 +6,7 @@
 
 LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（图像的内联 base64 或本地路径，以及本地视频路径，读入后编码）在写时转为对象存储 `uri`，异步上传到 OSS 或 SLS PutObject，并在规范化事件中附带摘要字段。适用于需要保留媒体内容供下游分析，又不希望把巨大 base64 写进 JSONL 的场景。
 
-`agents.<id>.multimodal.uploadMode` 决定是否、以及在哪些表面上把多模态转为 `uri`。历史 `captureMessageContent` 配置不会关闭消息或多模态内容上报。
+`agents.<id>.multimodal.uploadMode` 决定是否、以及在哪些表面上把多模态转为 `uri`。
 
 开启多模态还须显式填写 `config.multimodal.storage`；其凭证可复用匹配的 `config.sls` API Key。详见 [配置总览](configuration.md#多模态对象存储)。事件字段形态见 [输出事件 Schema](output-event-schema.md#多模态消息-parts)。
 

@@ -265,7 +265,7 @@ function listHashedProfileDbPaths(qoderRoot: string): string[] {
   return found;
 }
 
-function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: number; cachedTokens: number } | null {
+export function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: number; cachedTokens: number } | null {
   try {
     const obj = JSON.parse(raw);
     const pt = typeof obj.prompt_tokens === 'number' ? obj.prompt_tokens : 0;
@@ -278,7 +278,7 @@ function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: 
   }
 }
 
-function parseModelKey(raw: string | null | undefined): string | undefined {
+export function parseModelKey(raw: string | null | undefined): string | undefined {
   if (!raw) return undefined;
   try {
     const obj = JSON.parse(raw);
@@ -290,7 +290,7 @@ function parseModelKey(raw: string | null | undefined): string | undefined {
   }
 }
 
-function parseRecordModelKey(raw: string | null | undefined): string | undefined {
+export function parseRecordModelKey(raw: string | null | undefined): string | undefined {
   if (!raw) return undefined;
   try {
     const obj = JSON.parse(raw);

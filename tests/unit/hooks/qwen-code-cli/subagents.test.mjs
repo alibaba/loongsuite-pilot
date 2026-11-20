@@ -99,16 +99,16 @@ describe('foreground subagent collection', () => {
     expect(response['gen_ai.response.model']).toBeUndefined();
   });
 
-  it('keeps child prompts, outputs, and tool payloads with legacy content-off config', () => {
+  it('applies content-off to child prompts, outputs, and tool payloads', () => {
     fs.writeFileSync(path.join(f.data, 'config.json'), JSON.stringify({ agents: { 'qwen-code-cli': { captureMessageContent: false } } }));
     const records = f.run();
     expect(children(records).length).toBeGreaterThan(0);
-    expect(JSON.stringify(records)).toContain('SENSITIVE');
+    expect(JSON.stringify(records)).not.toContain('SENSITIVE');
     for (const r of children(records)) {
-      if (r['event.name'] === 'llm.request') expect(r['gen_ai.input.messages_delta']).toBeDefined();
-      if (r['event.name'] === 'llm.response') expect(r['gen_ai.output.messages']).toBeDefined();
-      if (r['event.name'] === 'tool.call') expect(r['gen_ai.tool.call.arguments']).toBeDefined();
-      if (r['event.name'] === 'tool.result') expect(r['gen_ai.tool.call.result']).toBeDefined();
+      expect(r['gen_ai.input.messages_delta']).toBeUndefined();
+      expect(r['gen_ai.output.messages']).toBeUndefined();
+      expect(r['gen_ai.tool.call.arguments']).toBeUndefined();
+      expect(r['gen_ai.tool.call.result']).toBeUndefined();
     }
   });
 

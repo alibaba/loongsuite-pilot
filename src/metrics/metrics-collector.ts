@@ -3,21 +3,25 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { formatTime } from '../utils/time-utils.js';
-import { resolveLocalIp } from '../utils/network-utils.js';
+import { LOCAL_MAC, resolveLocalIp } from '../utils/network-utils.js';
 import { checkProcessLiveness, UPDATER_PROCESS_PATTERNS } from '../utils/pid-utils.js';
 import { createLogger } from '../utils/logger.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
+import type { InterceptorStatus } from '../interceptor/status.js';
 
 const logger = createLogger('MetricsCollector');
 
 const MIN_NODE_MAJOR = 18;
 
 export interface L1Metrics {
+  interceptor?: InterceptorStatus;
   version: string;
   os_detail: string;
   hostname: string;
   ip: string;
+  mac?: string;
+  sn?: string;
   instance_id: string;
   run_id: string;
   user_id: string;
@@ -474,6 +478,7 @@ export class MetricsCollector {
   private readonly userId: string;
   private readonly dataDir: string;
   private readonly canaryPolicy: string;
+  private readonly agentsConfig: AgentsConfig;
   private readonly slsEndpoints: SlsEndpoint[];
   private readonly cmsWorkspace: string;
   private readonly autoUpdateEnabled: boolean;
@@ -484,6 +489,9 @@ export class MetricsCollector {
   private readonly runId: string;
   private readonly hostname: string;
   private readonly localIp: string;
+  private readonly mac: string;
+  private readonly hostSn: string;
+  private readonly hostIdentityTags: boolean;
   private readonly initType: string;
 
   private lastCpuUsage: NodeJS.CpuUsage | null = null;
@@ -514,11 +522,12 @@ export class MetricsCollector {
   private updaterConsecutiveFailures = 0;
   private lastInfraHealth: InfraHealthSnapshot | null = null;
 
-  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; autoUpdateEnabled?: boolean; updaterLiveness?: (pidFile: string) => ProcessLiveness }) {
+  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; autoUpdateEnabled?: boolean; updaterLiveness?: (pidFile: string) => ProcessLiveness; hostSn?: string; hostIdentityTags?: boolean }) {
     this.version = opts.version;
     this.userId = opts.userId;
     this.dataDir = opts.dataDir;
     this.canaryPolicy = opts.canaryPolicy ?? '';
+    this.agentsConfig = opts.agentsConfig ?? {};
     this.slsEndpoints = opts.slsEndpoints ?? [];
     this.cmsWorkspace = opts.cmsWorkspace ?? '';
     // Omitted means "an updater is expected", the host default. Only a caller that knows
@@ -530,6 +539,9 @@ export class MetricsCollector {
     this.startTime = formatTime(new Date());
     this.localIp = resolveLocalIp();
     this.hostname = os.hostname();
+    this.mac = LOCAL_MAC;
+    this.hostSn = opts.hostSn?.trim() ?? '';
+    this.hostIdentityTags = opts.hostIdentityTags !== false;
     // Stable install identity: restart- and IP-invariant, independently derivable
     // by any process on the host. Includes dataDir so multiple installs on one
     // machine (e.g. several OS users, each with their own ~/.loongsuite-pilot) do
@@ -590,6 +602,8 @@ export class MetricsCollector {
       os_detail: `${os.type()}; ${os.release()}; ${os.arch()}`,
       hostname: os.hostname(),
       ip: this.localIp,
+      ...(this.hostIdentityTags && this.mac ? { mac: this.mac } : {}),
+      ...(this.hostIdentityTags && this.hostSn ? { sn: this.hostSn } : {}),
       instance_id: this.instanceId,
       run_id: this.runId,
       user_id: this.userId,
@@ -598,8 +612,7 @@ export class MetricsCollector {
       mem: String(Math.round(mem.rss / 1024 / 1024)),
       mem_heap: String(Math.round(mem.heapUsed / 1024 / 1024)),
       start_time: this.startTime,
-      // Kept as an empty compatibility field for existing metrics consumers.
-      capture_message_disabled_agents: '',
+      capture_message_disabled_agents: this.buildCaptureMessageDisabledAgents(),
       projects: this.buildProjects(),
       cms_workspace: this.buildCmsWorkspace(),
       metric_json: {
@@ -862,6 +875,15 @@ export class MetricsCollector {
       });
     }
     return rows;
+  }
+
+  private buildCaptureMessageDisabledAgents(): string {
+    const disabled: string[] = [];
+    for (const [agentType, cfg] of Object.entries(this.agentsConfig)) {
+      if (cfg.captureMessageContent === false) disabled.push(agentType);
+    }
+    disabled.sort();
+    return disabled.join(' ');
   }
 
   private buildProjects(): string {

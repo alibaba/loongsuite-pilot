@@ -151,6 +151,7 @@ const path = require('path');
 const configPath = path.join(os.homedir(), '.loongsuite-pilot', 'config.json');
 const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 cfg.agents ||= {};
+cfg.jsonl = { ...(cfg.jsonl || {}), enabled: true };
 const required = '${env.E2E_REQUIRED_DEPLOY_AGENTS || ''}'.split(',').map(s => s.trim()).filter(Boolean);
 for (const agent of required) cfg.agents[agent] = { ...(cfg.agents[agent] || {}), enabled: true };
 fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));

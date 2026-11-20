@@ -41,8 +41,8 @@ describe('resolveAgentSystem', () => {
     expect(resolveAgentSystem('codex-session')).toBe('codex');
   });
 
-  it('maps qoder variants to qoder', () => {
-    expect(resolveAgentSystem('qoder')).toBe('qoder');
+  it('distinguishes standalone Qoder IDE and preserves the other Qoder family mappings', () => {
+    expect(resolveAgentSystem('qoder')).toBe('qoder-ide');
     expect(resolveAgentSystem('qoder-idea')).toBe('qoder');
     expect(resolveAgentSystem('qoder-work')).toBe('qoder');
     expect(resolveAgentSystem('qoder-work-cn')).toBe('qoder');

@@ -387,6 +387,16 @@ worker 退出前推迟接管，避免并发重放。保留旧 history JSONL 的�
 不要求删除已有 checkpoint 或会话文件。回滚不复用新字节游标，需按目标版本的
 原有历史恢复策略核对数据边界。
 
+### Claude Agent SDK 的容器预加载
+
+SDK 直接启动 Claude Code 时不会经过交互式 shell 的 `claude` 函数。容器集成可以在
+现有的 Bun 公共预加载入口中加载 `hooks/claude-code-sdk-preload.cjs`；该入口只对
+原生 Bun Claude 进程加载已有的请求采集脚本，并尊重 Agent 禁用配置。脚本缺失或加载
+失败时不会阻止 Agent 启动。该方式要求 SDK 子进程继承容器下发的 `BUN_OPTIONS`；
+如果业务显式替换了子进程环境，容器的公共预加载也需要保留在新环境中。为避免在
+本地补充记录中写入被禁用的内容，关闭 Claude 或 Trace 内容采集时会跳过此请求补充
+（包括 TTFT）；常规 Claude Hook 不受影响。
+
 ## 注册 Agent
 
 需要自定义 input class 时：

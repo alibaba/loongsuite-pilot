@@ -710,7 +710,12 @@ function wrapFetch(origFetch) {
   };
 }
 
-if (typeof globalThis.fetch === 'function') {
+// A container preload and a shell preload can both reach this module.
+const pilotClaudeFetchMarker = Symbol.for('loongsuite-pilot.claude-code-fetch-intercept');
+const pilotClaudeFetchAlreadyLoaded = Boolean(globalThis[pilotClaudeFetchMarker]);
+if (!pilotClaudeFetchAlreadyLoaded) globalThis[pilotClaudeFetchMarker] = true;
+
+if (!pilotClaudeFetchAlreadyLoaded && typeof globalThis.fetch === 'function') {
   globalThis.fetch = wrapFetch(globalThis.fetch);
 }
 
@@ -721,7 +726,7 @@ if (typeof globalThis.fetch === 'function') {
 // Older runtimes have no FetchSession and continue using the global path.
 try {
   const NativeFetchSession = globalThis.Bun?.FetchSession;
-  if (typeof NativeFetchSession === 'function') {
+  if (!pilotClaudeFetchAlreadyLoaded && typeof NativeFetchSession === 'function') {
     globalThis.Bun.FetchSession = new Proxy(NativeFetchSession, {
       construct(target, args, newTarget) {
         const session = Reflect.construct(target, args, newTarget);

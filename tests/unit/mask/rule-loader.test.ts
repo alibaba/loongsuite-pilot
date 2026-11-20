@@ -9,6 +9,7 @@ import {
   loadSensitiveRules,
   resolveEnabledMaskTypes,
 } from '../../../src/mask/rule-loader.js';
+import { maskString } from '../../../src/mask/string-masker.js';
 
 describe('mask rule loader', () => {
   const allConfig: MaskConfig = { mode: 'all', types: [] };
@@ -52,7 +53,21 @@ describe('mask rule loader', () => {
 
     expect([...plan.piiTypes]).toEqual(PII_MASK_TYPES);
     expect(plan.rules).toHaveLength(loadSensitiveRules().length);
+    expect(plan.replacementMode).toBe('preview');
+  });
+
+  it('keeps explicit placeholder mode available', () => {
+    const plan = loadMaskPlan({
+      mode: 'all',
+      types: [],
+      replacementMode: 'placeholder',
+    });
+
     expect(plan.replacementMode).toBe('placeholder');
+    expect(maskString('13800138000', plan)).toBe('[PHONE_MASKED]');
+    expect(maskString('13800138000', loadMaskPlan(allConfig))).toBe(
+      '[PHONE_MASKED]{138****8000}',
+    );
   });
 
   it('enables every type from the canonical supported-type list in all mode', () => {

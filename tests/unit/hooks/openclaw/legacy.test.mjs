@@ -13,6 +13,7 @@ const ctx = { agentId: 'main', sessionKey: 'agent:main:test', sessionId: 'sessio
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-oc-legacy-'));
   vi.stubEnv('LOONGSUITE_PILOT_DATA_DIR', root);
+  vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', path.join(root, 'config.json'));
   vi.stubEnv('LOONGSUITE_USER_ID', 'test');
   clock = Date.now();
   vi.spyOn(Date, 'now').mockImplementation(() => clock);
@@ -278,7 +279,7 @@ describe('OpenClaw 3.8 legacy adapter', () => {
     expect(records().filter(r => r['event.name'] === 'llm.response')).toHaveLength(1);
   });
 
-  it('ignores legacy content-off config and keeps messages, tool payloads, and errors', () => {
+  it('removes prompts, responses, tool payloads and errors with content off', () => {
     fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify({ agents: { openclaw: { captureMessageContent: false } } }));
     input();
     fire('before_message_write', { message: message('r1') });
@@ -286,9 +287,7 @@ describe('OpenClaw 3.8 legacy adapter', () => {
     fire('after_tool_call', { runId: 'run-1', toolCallId: 't', toolName: 'read', error: 'private error', result: 'private result' });
     fire('agent_end', { success: false, error: 'private error' });
     const text = JSON.stringify(records());
-    for (const expected of ['private prompt', 'private output', 'private args', 'private result', 'private error']) {
-      expect(text).toContain(expected);
-    }
+    expect(text).not.toContain('private');
     expect(records().find(r => r['event.name'] === 'llm.response')['gen_ai.usage.output_tokens']).toBe(4);
   });
 });

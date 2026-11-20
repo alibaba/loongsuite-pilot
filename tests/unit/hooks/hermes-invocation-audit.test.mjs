@@ -4,9 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-it('audits native batch work, nested incoming, actual sync/async delivery and autonomous session reuse', () => {
+it.each([true, false])('audits native work and delivery with content capture=%s', (captureContent) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-audit-'));
   try {
+    const configPath = path.join(root, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ agents: { 'hermes-agent': { captureMessageContent: captureContent } } }));
     const code = `
 import importlib.util, json, types, sys, pathlib, concurrent.futures, contextvars, asyncio
 spec = importlib.util.spec_from_file_location('pilot', sys.argv[1])
@@ -124,25 +126,31 @@ print(json.dumps({'rows':rows,'children':fields}))
 `;
     const result = spawnSync('python3', ['-c', code, path.resolve('assets/plugins/hermes-agent/loongsuite-pilot/__init__.py'), root], {
       encoding: 'utf8', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', LOONGSUITE_PILOT_DATA_DIR: root,
+        AGENT_DATA_COLLECTION_CONFIG: configPath,
         LOONGSUITE_PILOT_SPAN_ATTRIBUTES: '', LOONGSUITE_USER_ID: '', LOONGSUITE_PILOT_USER_ID: '' },
     });
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status, result.stderr || result.error?.message || `Python terminated by ${result.signal}`).toBe(0);
     const { rows, children } = JSON.parse(result.stdout);
     const invokes = rows.filter(r => r['event.name'] === 'gen_ai.agent.invoke');
     const results = rows.filter(r => r['event.name'] === 'gen_ai.agent.result');
     expect(invokes).toHaveLength(5); // batch tasks, nested work, CLI and Gateway async work
-    expect(invokes[0]['gen_ai.input.messages'][0].parts[0].content).toContain('shared context');
-    expect(invokes[0]['gen_ai.input.messages'][0].parts[0].content).toContain('first-only context');
-    expect(invokes[1]['gen_ai.input.messages'][0].parts[0].content).not.toContain('first-only context');
+    if (captureContent) {
+      expect(invokes[0]['gen_ai.input.messages'][0].parts[0].content).toContain('shared context');
+      expect(invokes[0]['gen_ai.input.messages'][0].parts[0].content).toContain('first-only context');
+      expect(invokes[1]['gen_ai.input.messages'][0].parts[0].content).not.toContain('first-only context');
+    } else {
+      expect([...invokes, ...results].every(r => r['gen_ai.input.messages'] === undefined && r['gen_ai.output.messages'] === undefined)).toBe(true);
+    }
     expect(new Set(invokes.map(r => r['gen_ai.agent.invocation.id'])).size).toBe(5);
     expect(children.map(r => r['gen_ai.agent.parent.invocation.id'])).toEqual(invokes.slice(0, 2).map(r => r['gen_ai.agent.invocation.id']));
     const nested = invokes.find(r => r['gen_ai.session.id'] === 'child-0');
     expect(nested['gen_ai.agent.parent.invocation.id']).toBe(children[0]['gen_ai.agent.parent.invocation.id']);
     expect(results).toHaveLength(4);
-    const late = results.find(r => r['gen_ai.output.messages']?.[0].parts[0].content === 'late delivered result');
-    expect(late['gen_ai.output.messages'][0].parts[0].content).toBe('late delivered result');
+    const late = results.find(r => r['gen_ai.agent.invocation.id'] === invokes.at(-2)['gen_ai.agent.invocation.id']);
+    if (captureContent) expect(late['gen_ai.output.messages'][0].parts[0].content).toBe('late delivered result');
     expect(late['gen_ai.agent.invocation.id']).toBe(invokes.at(-2)['gen_ai.agent.invocation.id']);
-    const gateway = results.find(r => r['gen_ai.output.messages']?.[0].parts[0].content === 'gateway delivered result');
+    const gateway = results.find(r => r['gen_ai.agent.invocation.id'] === invokes.at(-1)['gen_ai.agent.invocation.id']);
+    if (captureContent) expect(gateway['gen_ai.output.messages'][0].parts[0].content).toBe('gateway delivered result');
     expect(gateway['gen_ai.agent.invocation.id']).toBe(invokes.at(-1)['gen_ai.agent.invocation.id']);
     expect(gateway['gen_ai.turn.id']).toBe('later-parent-turn');
     expect(results.every(r => !r.span_id && !r['gen_ai.step.id'])).toBe(true);

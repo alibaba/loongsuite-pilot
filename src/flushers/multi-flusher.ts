@@ -44,6 +44,7 @@ export class MultiFlusher extends BaseFlusher {
   }
 
   override createBatchDelivery(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): () => Promise<void> {
+    const requireAcceptance = entries.some(entry => entry['agent.source'] === 'qwen-work-cn-collaboration');
     const targets = this.flushers.map(flusher => ({
       flusher, accepted: false, deliver: flusher.createBatchDelivery(entries, logicalBytes, signal),
     }));
@@ -59,7 +60,7 @@ export class MultiFlusher extends BaseFlusher {
         }
         const error = result.reason as Error & { cause?: Error };
         logger.error('flusher sendBatch failed', { flusher: pending[i].flusher.name, error: String(error) });
-        if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes(error?.name)) failures.push(error);
+        if (requireAcceptance || ['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes(error?.name)) failures.push(error);
       }
       // A terminal durability failure must not be hidden by another target's
       // retryable quota error. Successful targets remain accepted in either case.
@@ -75,6 +76,10 @@ export class MultiFlusher extends BaseFlusher {
 
   override getTraceRuntimeSnapshot() {
     return this.flushers.flatMap(flusher => flusher.getTraceRuntimeSnapshot());
+  }
+
+  override hasPendingHermesSource(sourceToken: string): boolean {
+    return this.flushers.some(flusher => flusher.hasPendingHermesSource(sourceToken));
   }
 
   async shutdown(): Promise<void> {

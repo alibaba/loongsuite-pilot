@@ -422,8 +422,10 @@ function cmdUserPromptSubmit() {
   const identity = { agentType: AGENT_ID, sessionId,
     ...(typeof event.prompt_id === 'string' && event.prompt_id ? { turnId: event.prompt_id } : {}),
     inputHash: shared.api.inputHash(event.prompt) };
+  const inheritsEnvironment = !isToolPropagationConsumed(pilotDataDir(), sessionId)
+    && shared.store.claimEnvironmentTurn(identity, config.ttlMs);
   if (shared.store.findTurn(identity)) return;
-  const inherited = isToolPropagationConsumed(pilotDataDir(), sessionId) ? {} : { traceparent: process.env.TRACEPARENT, tracestate: process.env.TRACESTATE };
+  const inherited = inheritsEnvironment ? { traceparent: process.env.TRACEPARENT, tracestate: process.env.TRACESTATE } : {};
   shared.store.bindTurn(identity, inherited, { generate: config.generateTraceWhenMissing, ttlMs: config.ttlMs });
 }
 
@@ -658,9 +660,10 @@ async function cmdTerminal(eventKind) {
 
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
 
-  // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
-  recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
-  if (toolPropagationEnabled(runtimeConfig) || (runtimeConfig.upstreamLink.enabled && runtimeConfig.upstreamLink.sharedContext)) {
+  const usesSharedContext = runtimeConfig.upstreamLink.enabled && runtimeConfig.upstreamLink.sharedContext;
+  // Shared mode claims the inherited context at UserPromptSubmit, before Stop ordering can vary.
+  if (!usesSharedContext) recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  if (toolPropagationEnabled(runtimeConfig) || usesSharedContext) {
     markToolPropagationConsumed(pilotDataDir(), sessionId);
   }
 

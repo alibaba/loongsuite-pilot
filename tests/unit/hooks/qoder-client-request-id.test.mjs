@@ -4,6 +4,8 @@ import {
   buildEventsFromBoundaries,
 } from '../../../assets/hooks/qoder-hook-processor.mjs';
 import { projectLogEntry } from '../../../src/normalization/entry-builder.ts';
+import { createHash } from 'node:crypto';
+import { applyHookContentPolicy } from '../../../assets/hooks/agent-event-normalizer.mjs';
 
 // gen_ai.response.id carries the provider's response id, whose spelling changes
 // per provider (32-hex, uuid, chatcmpl-*, resp_*) and only coincidentally equals
@@ -23,10 +25,10 @@ function assistantRow(timestamp, message) {
   return { type: 'assistant', timestamp, message: { role: 'assistant', ...message } };
 }
 
-function buildFrom(rows, progress = []) {
+function buildFrom(rows, progress = [], config = {}) {
   const boundaries = buildLlmBoundaries(progress, rows);
   return buildEventsFromBoundaries(
-    boundaries, rows, rows, 'turn-1', 'session-1', 'qoder', {}, undefined,
+    boundaries, rows, rows, 'turn-1', 'session-1', 'qoder', config, undefined,
   );
 }
 
@@ -137,6 +139,8 @@ describe('qoder hook agent.client_request_id', () => {
         usage: { request_id: 'cli-req-step-2' },
       }),
     ];
+    rows[0].requestSetId = 'native-user-request';
+    rows[0].promptId = 'different-prompt-id';
     const progress = [
       { hookEvent: 'UserPromptSubmit', ts: '2026-08-03T09:22:25.000000Z' },
       { hookEvent: 'PreToolUse', ts: '2026-08-03T09:22:25.996439Z' },
@@ -144,9 +148,51 @@ describe('qoder hook agent.client_request_id', () => {
       { hookEvent: 'Stop', ts: '2026-08-03T09:22:28.000000Z' },
     ];
 
-    const found = responses(buildFrom(rows, progress))
+    const records = buildFrom(rows, progress);
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(2);
+    expect(requests[0]['agent.pilot.interceptor.correlation']).toEqual({
+      hash: createHash('sha256').update('run a tool then answer').digest('hex'),
+      at: Date.parse(rows[0].timestamp),
+      requestId: createHash('sha256').update('native-user-request').digest('hex'),
+    });
+    expect(requests[1]).not.toHaveProperty('agent.pilot.interceptor.correlation');
+    expect(projectLogEntry(requests[0], { dropAgentScopedFields: true }))
+      .not.toHaveProperty('agent.pilot.interceptor.correlation');
+    const found = responses(records)
       .map(record => record['agent.client_request_id']);
     expect(found).toEqual(['cli-req-step-1', 'cli-req-step-2']);
+  });
+
+  it('uses the submitted prompt for the private digest before host context injection', () => {
+    const prompt = { ...userRow('injected context'), requestSetId: 'native-user-request',
+      humanInput: { text: 'original prompt', mode: 'prompt' } };
+    const records = buildFrom([prompt, assistantRow('2026-08-03T09:22:26.000Z', {
+      id: 'response-1', model: 'qwen-max', content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn',
+    })], [], { agents: { qoder: { captureMessageContent: false } } });
+    const request = records.find(record => record['event.name'] === 'llm.request');
+    expect(request['agent.pilot.interceptor.correlation']).toEqual({
+      hash: createHash('sha256').update('original prompt').digest('hex'),
+      at: Date.parse(prompt.timestamp), requestId: createHash('sha256').update('native-user-request').digest('hex'),
+    });
+    expect(JSON.stringify(records)).not.toContain('native-user-request');
+    const output = projectLogEntry(applyHookContentPolicy(request,
+      { agents: { qoder: { captureMessageContent: false } } }), { dropAgentScopedFields: true });
+    expect(output).not.toHaveProperty('gen_ai.input.messages_delta');
+    expect(JSON.stringify(output)).not.toContain('native-user-request');
+    expect(JSON.stringify(output)).not.toContain('original prompt');
+    expect(output).not.toHaveProperty('requestSetId');
+  });
+
+  it.each([undefined, '', 42, 'x'.repeat(513)])('ignores an unusable native requestSetId (%s)', requestSetId => {
+    const records = buildFrom([{ ...userRow('legacy prompt'), requestSetId },
+      assistantRow('2026-08-03T09:22:26.000Z', {
+        id: 'response-1', content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn',
+      })]);
+    expect(records.find(record => record['event.name'] === 'llm.request')
+      ['agent.pilot.interceptor.correlation']).toEqual({
+      hash: createHash('sha256').update('legacy prompt').digest('hex'), at: Date.parse(userRow('').timestamp),
+    });
   });
 
   // AGENT_SCOPED_FIELD_RE in entry-builder.ts is /^agent\.[^.]+\..+$/ and both

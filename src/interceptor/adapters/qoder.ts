@@ -1,4 +1,5 @@
 import type { HookEventName, HookRequest, InterceptorAgent } from '../types.js';
+import { resolveQoderProductAgentType } from '../../../assets/hooks/qoder/product-identity.mjs';
 
 const EVENT_ALIASES: Record<string, HookEventName> = {
   UserPromptSubmit: 'UserPromptSubmit',
@@ -52,6 +53,15 @@ export function parseHookRequest(
     toolUseId,
     raw: payload,
   };
+}
+
+export function resolveQoderEventAgentType(request: HookRequest, fallbackAgentType: string): string {
+  if (request.agent !== 'qoder' && request.agent !== 'qodercli') return fallbackAgentType;
+  const business = request.raw?.parent_business_info;
+  const product = business && typeof business === 'object' && !Array.isArray(business)
+    ? (business as Record<string, unknown>).product
+    : undefined;
+  return resolveQoderProductAgentType(product, fallbackAgentType);
 }
 
 export function renderQoderBlock(request: HookRequest, reason: string): string {

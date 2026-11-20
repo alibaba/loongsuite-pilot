@@ -250,6 +250,94 @@ describe('hook install service', () => {
     expect(status.report.agents[0].reason).toBe('not-detected');
   });
 
+  it('reuses Pi root registration for system requests and reports the persisted target', async () => {
+    const piHome = path.join(tmp, 'shared-pi-root');
+    await fs.mkdir(piHome);
+    const settings = path.join(piHome, 'settings.json');
+    const definitionPath = path.join(pilotDir, 'agents.d', 'pi-coding-agent.json');
+    const definition = {
+      id: 'pi-coding-agent', displayName: 'Pi Coding Agent', deployMode: 'plugin-inject',
+      detection: { paths: [piHome], commands: [] },
+      pluginInject: {
+        createIfMissing: true, configPaths: [settings], configKey: 'extensions',
+        pluginSpec: path.join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs'),
+        pluginId: 'loongsuite-pilot-pi-coding-agent',
+      },
+    };
+    await fs.writeFile(definitionPath, JSON.stringify(definition));
+    await fs.writeFile(settings, JSON.stringify({ theme: 'dark', extensions: ['third-party-extension'] }));
+
+    const normal = await run({ agentsFlag: 'pi-coding-agent' });
+    expect(normal.report.agents[0].hint).toBeNull();
+    const registered = await fs.readFile(settings, 'utf8');
+    const modified = (await fs.stat(settings)).mtimeMs;
+
+    // No --agents: normal automatic detection still selects Pi and other Agents.
+    const system = await run({ deploymentScope: 'system' });
+    const pi = system.report.agents.find(agent => agent.id === 'pi-coding-agent')!;
+    expect(pi.status).toBe('up-to-date');
+    expect(pi.hookScope).toBeUndefined();
+    expect(pi.settingsPath).toBe(settings);
+    expect(pi.hint).toContain('independent roots do not inherit');
+    expect(pi.collectionStatus).toBe('not-verified');
+    expect(await fs.readFile(settings, 'utf8')).toBe(registered);
+    expect((await fs.stat(settings)).mtimeMs).toBe(modified);
+    expect(JSON.parse(registered)).toMatchObject({ theme: 'dark', extensions: ['third-party-extension', definition.pluginInject.pluginSpec] });
+    expect(system.report.agents.find(agent => agent.id === 'sample-agent')!.hint).toBeNull();
+
+    const other = path.join(tmp, 'other-config-root');
+    await fs.mkdir(other);
+    definition.pluginInject.configPaths = [path.join(other, 'settings.json')];
+    definition.detection.paths = [other];
+    await fs.writeFile(definitionPath, JSON.stringify(definition));
+    const status = await run({ agentsFlag: 'pi-coding-agent', deploymentScope: 'system', mode: 'status' });
+    expect(status.report.agents[0].status).toBe('ok');
+    expect(status.report.agents[0].settingsPath).toBe(settings);
+    expect(status.report.agents[0].hint).toContain(settings);
+    await expect(fs.access(path.join(other, 'settings.json'))).rejects.toThrow();
+  });
+
+  it('reuses DSH shared patch registration and reports the persisted target for system requests', async () => {
+    const dshHome = path.join(tmp, 'shared-dsh-root');
+    const plugin = path.join(dataDir, 'plugins/dsh/plugin.mjs');
+    await fs.mkdir(dshHome);
+    await fs.mkdir(path.dirname(plugin), { recursive: true });
+    await fs.writeFile(plugin, 'export default function () {}\n');
+    const patchPath = path.join(dshHome, 'cordis.patch.yml');
+    const original = '# customer configuration\n- id: customer-plugin\n  name: customer-plugin\n';
+    await fs.writeFile(patchPath, original);
+    const definitionPath = path.join(pilotDir, 'agents.d/dsh.json');
+    const definition = {
+      id: 'dsh', displayName: 'DSH', deployMode: 'dsh-yaml-patch',
+      detection: { paths: [dshHome], commands: [] },
+      dshYamlPatch: {
+        patchPath, pluginSource: plugin,
+        entryId: 'loongsuite-pilot-observability', marker: 'PILOT-OBSERVABILITY-MANAGED',
+      },
+    };
+    await fs.writeFile(definitionPath, JSON.stringify(definition));
+    const normal = await run({ agentsFlag: 'dsh' });
+    expect(normal.report.agents[0].hint).toBeNull();
+    const registered = await fs.readFile(patchPath, 'utf8');
+    expect(registered.startsWith(original)).toBe(true);
+
+    const system = await run({ deploymentScope: 'system' });
+    const dsh = system.report.agents.find(agent => agent.id === 'dsh')!;
+    expect(dsh).toMatchObject({ status: 'up-to-date', settingsPath: patchPath, collectionStatus: 'not-verified' });
+    expect(dsh.hookScope).toBeUndefined();
+    expect(dsh.hint).toContain('independent roots do not inherit');
+    expect(await fs.readFile(patchPath, 'utf8')).toBe(registered);
+
+    const other = path.join(tmp, 'other-dsh-root');
+    await fs.mkdir(other);
+    definition.dshYamlPatch.patchPath = path.join(other, 'cordis.patch.yml');
+    await fs.writeFile(definitionPath, JSON.stringify(definition));
+    const status = await run({ agentsFlag: 'dsh', deploymentScope: 'system', mode: 'status' });
+    expect(status.report.agents[0].settingsPath).toBe(patchPath);
+    expect(status.report.agents[0].hint).toContain(patchPath);
+    await expect(fs.access(definition.dshYamlPatch.patchPath)).rejects.toThrow();
+  });
+
   it('keeps an earlier named agent when a later install names a different one', async () => {
     const otherHome = path.join(tmp, 'other-home');
     await fs.mkdir(otherHome, { recursive: true });
@@ -357,5 +445,100 @@ describe('hook install service', () => {
     const disk = JSON.parse(await fs.readFile(file, 'utf8'));
     expect(disk.ts).toBe('new');
     expect(disk.alarmSent).toBe(false);
+  });
+
+  it('writes interceptor hooks only for the resolved mode and removes them when it is off', async () => {
+    const settingsPath = path.join(home, 'settings.json');
+    const savedMode = process.env.LOONGSUITE_PILOT_INTERCEPTOR_MODE;
+    const savedDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
+    const savedConfig = process.env.AGENT_DATA_COLLECTION_CONFIG;
+    const daemonConfig = path.join(tmp, 'daemon-config.json');
+
+    const restoreEnv = () => {
+      if (savedMode === undefined) delete process.env.LOONGSUITE_PILOT_INTERCEPTOR_MODE;
+      else process.env.LOONGSUITE_PILOT_INTERCEPTOR_MODE = savedMode;
+      if (savedDataDir === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
+      else process.env.LOONGSUITE_PILOT_DATA_DIR = savedDataDir;
+      if (savedConfig === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+      else process.env.AGENT_DATA_COLLECTION_CONFIG = savedConfig;
+    };
+
+    await fs.writeFile(path.join(pilotDir, 'agents.d', 'sample-agent.json'), JSON.stringify({
+      id: 'sample-agent',
+      displayName: 'Sample',
+      deployMode: 'hook',
+      detection: { paths: [home], commands: [] },
+      hook: {
+        settingsPath,
+        events: ['Stop'],
+        hookCommand: '$PILOT_DATA/hooks/sample-agent-hook.sh',
+        format: 'nested',
+        matcher: '*',
+        interceptor: {
+          events: ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'],
+          hookCommand: '$PILOT_DATA/hooks/interceptor-hook.sh',
+          matcher: '*',
+          insert: 'head',
+        },
+      },
+    }));
+
+    const events = async (): Promise<string[]> => {
+      const raw = await fs.readFile(settingsPath, 'utf8');
+      const parsed = JSON.parse(raw) as { hooks?: Record<string, unknown> };
+      return Object.keys(parsed.hooks ?? {}).sort();
+    };
+
+    try {
+      delete process.env.LOONGSUITE_PILOT_INTERCEPTOR_MODE;
+      delete process.env.LOONGSUITE_PILOT_DATA_DIR;
+      await fs.mkdir(dataDir, { recursive: true });
+      await fs.writeFile(daemonConfig, JSON.stringify({ interceptor: { mode: 'none' } }));
+      process.env.AGENT_DATA_COLLECTION_CONFIG = daemonConfig;
+      await fs.writeFile(path.join(dataDir, 'config.json'), JSON.stringify({ interceptor: { mode: 'all' } }));
+
+      const installed = await run({ agentsFlag: 'sample-agent' });
+      expect(installed.report.agents[0]?.status).toBe('ok');
+      expect(await events()).toEqual(['PostToolUse', 'PreToolUse', 'Stop', 'UserPromptSubmit']);
+
+      await fs.writeFile(path.join(dataDir, 'config.json'), JSON.stringify({ interceptor: { mode: 'none' } }));
+      const removed = await run({ agentsFlag: 'sample-agent' });
+      expect(removed.report.agents[0]?.status).toBe('ok');
+      expect(await events()).toEqual(['Stop']);
+
+      process.env.LOONGSUITE_PILOT_DATA_DIR = dataDir;
+      await fs.writeFile(daemonConfig, JSON.stringify({ interceptor: { mode: 'none' } }));
+      await fs.writeFile(path.join(dataDir, 'config.json'), JSON.stringify({ interceptor: { mode: 'none' } }));
+      const managedDir = path.join(dataDir, 'configs', 'managed');
+      await fs.mkdir(managedDir, { recursive: true });
+      await fs.writeFile(path.join(managedDir, 'interceptor.json'), JSON.stringify({
+        interceptor: {
+          rules: [{
+            kind: 'pattern',
+            id: 'block-eval',
+            version: '1',
+            agents: ['qoder'],
+            events: ['PreToolUse'],
+            match: 'substring',
+            pattern: 'mcp__browser',
+          }],
+        },
+      }));
+      const fromManaged = await run({ agentsFlag: 'sample-agent' });
+      expect(['ok', 'up-to-date']).toContain(fromManaged.report.agents[0]?.status);
+      expect(await events()).toEqual(['Stop']);
+
+      process.env.LOONGSUITE_PILOT_INTERCEPTOR_MODE = 'none';
+      const envOff = await run({ agentsFlag: 'sample-agent' });
+      expect(['ok', 'up-to-date']).toContain(envOff.report.agents[0]?.status);
+      expect(await events()).toEqual(['Stop']);
+
+      await fs.rm(path.join(managedDir, 'interceptor.json'));
+      const managedGone = await run({ agentsFlag: 'sample-agent' });
+      expect(['ok', 'up-to-date']).toContain(managedGone.report.agents[0]?.status);
+      expect(await events()).toEqual(['Stop']);
+    } finally {
+      restoreEnv();
+    }
   });
 });

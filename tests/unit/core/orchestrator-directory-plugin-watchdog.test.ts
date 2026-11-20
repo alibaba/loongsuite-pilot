@@ -11,17 +11,12 @@ vi.mock('../../../src/core/build-constants.js', () => ({
   PROPRIETARY_BUILD: false,
 }));
 
-vi.mock('../../../src/deployment/detect-utils.js', () => ({
-  detectAgent: vi.fn(),
-}));
-
 vi.mock('../../../src/utils/fs-utils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/utils/fs-utils.js')>();
   return { ...actual, directoryExists: vi.fn() };
 });
 
 import { Orchestrator } from '../../../src/core/orchestrator.js';
-import { detectAgent } from '../../../src/deployment/detect-utils.js';
 import { directoryExists } from '../../../src/utils/fs-utils.js';
 
 const DATA_DIR = '/tmp/orch-directory-plugin-test';
@@ -67,12 +62,14 @@ function buildTargets(orchestrator: Orchestrator) {
 
 describe('Orchestrator.buildDirectoryPluginInterceptTargets', () => {
   let getDefinitions: ReturnType<typeof vi.fn>;
+  let isAgentDetected: ReturnType<typeof vi.fn>;
   let needsRedeploy: ReturnType<typeof vi.fn>;
   let deploySingle: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     getDefinitions = vi.fn().mockReturnValue([directoryPluginDef()]);
+    isAgentDetected = vi.fn();
     needsRedeploy = vi.fn();
     deploySingle = vi.fn();
   });
@@ -112,7 +109,7 @@ describe('Orchestrator.buildDirectoryPluginInterceptTargets', () => {
 
   it('checks source, detection, health, and repair through DeploymentManager', async () => {
     vi.mocked(directoryExists).mockResolvedValue(true);
-    vi.mocked(detectAgent).mockResolvedValue(true);
+    isAgentDetected.mockResolvedValue(true);
     needsRedeploy.mockResolvedValue(true);
     deploySingle.mockResolvedValue({
       success: true,
@@ -121,16 +118,32 @@ describe('Orchestrator.buildDirectoryPluginInterceptTargets', () => {
     });
     const [target] = buildTargets(makeOrchestrator({
       getDefinitions,
+      isAgentDetected,
       needsRedeploy,
       deploySingle,
     }));
 
     expect(target.enabled?.()).toBe(true);
     await expect(target.precondition()).resolves.toBe(true);
+    expect(isAgentDetected).toHaveBeenCalledWith(expect.objectContaining({ id: 'hermes-agent' }));
     await expect(target.check()).resolves.toBe(false);
     await expect(target.repair()).resolves.toBeUndefined();
     expect(deploySingle).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'hermes-agent' }),
     );
+
+    isAgentDetected.mockResolvedValue(false);
+    await expect(target.precondition()).resolves.toBe(false);
+  });
+
+  it('does not report a repair when the CLI disappears after the precondition', async () => {
+    deploySingle.mockResolvedValue({
+      success: true,
+      skipped: true,
+      reason: 'not-detected',
+    });
+    const [target] = buildTargets(makeOrchestrator({ getDefinitions, deploySingle }));
+
+    await expect(target.repair()).rejects.toThrow('Agent disappeared before directory plugin repair');
   });
 });

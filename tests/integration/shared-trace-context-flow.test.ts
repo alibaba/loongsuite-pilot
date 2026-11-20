@@ -152,6 +152,48 @@ describe('shared propagation across runtime and converter', () => {
     expect(updated).toContain('vendor=value');
   });
 
+  it('reserves inherited context for one Claude prompt even before either Stop runs', async () => {
+    const { directory, runtime } = fixture();
+    const configPath = path.join(directory, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ upstreamLink: { enabled: true, sharedContext: true, generateTraceWhenMissing: true } }));
+    const processor = path.resolve('assets/hooks/claude-code-hook-processor.mjs');
+    const env = { ...process.env, LOONGSUITE_PILOT_DATA_DIR: directory, AGENT_DATA_COLLECTION_CONFIG: configPath, TRACEPARENT };
+    const identity = { agentType: 'claude-code', sessionId: 'overlap' };
+    const submit = (turnId: string) => new Promise<number | null>((resolve, reject) => {
+      const child = spawn(process.execPath, [processor, 'user-prompt-submit'], { env, stdio: ['pipe', 'ignore', 'inherit'] });
+      child.once('error', reject);
+      child.once('close', resolve);
+      child.stdin.end(JSON.stringify({ session_id: identity.sessionId, prompt_id: turnId, prompt: 'same text' }));
+    });
+    expect(await Promise.all([submit('one'), submit('two')])).toEqual([0, 0]);
+    const one = runtime.findTurn({ ...identity, turnId: 'one' })!;
+    const two = runtime.findTurn({ ...identity, turnId: 'two' })!;
+    expect(one).toBeDefined();
+    expect(two).toBeDefined();
+    expect([one, two].filter(binding => binding.traceId === 'a'.repeat(32))).toHaveLength(1);
+    expect(one.traceId).not.toBe(two.traceId);
+    const winner = one.upstreamSpanId ? one : two;
+    const other = one.upstreamSpanId ? two : one;
+    expect(await submit(winner.turnId!)).toBe(0);
+    expect(runtime.findTurn({ ...identity, turnId: winner.turnId })).toEqual(winner);
+    const stopped = spawnSync(process.execPath, [processor, 'stop'], { env,
+      input: JSON.stringify({ session_id: identity.sessionId, prompt_id: other.turnId }), encoding: 'utf8' });
+    expect(stopped.status, stopped.stderr).toBe(0);
+    expect(fs.existsSync(path.join(directory, 'acp-correlate', `${identity.sessionId}.jsonl`))).toBe(false);
+
+    const explicitSession = 'explicit';
+    const explicitParent = `00-${'c'.repeat(32)}-${'d'.repeat(16)}-01`;
+    const explicitIdentity = { agentType: 'claude-code', sessionId: explicitSession, turnId: 'one' };
+    const explicit = runtime.bindTurn(explicitIdentity, { traceparent: explicitParent });
+    for (const turnId of ['one', 'two']) {
+      const submitted = spawnSync(process.execPath, [processor, 'user-prompt-submit'], { env,
+        input: JSON.stringify({ session_id: explicitSession, prompt_id: turnId, prompt: 'same text' }), encoding: 'utf8' });
+      expect(submitted.status, submitted.stderr).toBe(0);
+    }
+    expect(runtime.findTurn(explicitIdentity)).toEqual(explicit);
+    expect(runtime.findTurn({ ...explicitIdentity, turnId: 'two' })?.traceId).not.toBe('a'.repeat(32));
+  });
+
   it('Claude physical HTTP retry, Bash subprocess and Stop export reuse every advertised parent', async () => {
     const { directory, runtime } = fixture();
     const configPath = path.join(directory, 'config.json');
