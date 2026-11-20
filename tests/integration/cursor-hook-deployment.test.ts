@@ -11,7 +11,7 @@ it.each(['darwin', 'win32'])('upgrades Cursor collection hooks without duplicati
   const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
   try {
     Object.defineProperty(process, 'platform', { value: platform });
-    const dataDir = path.join(root, "Pilot data $runtime O'Brien `literal`");
+    const dataDir = path.join(root, "Pilot data $runtime O'Brien O’Brien `literal`");
     const settingsPath = path.join(root, '.cursor', 'hooks.json');
     const loader = new AgentDefLoader({
       builtinDir: path.resolve('agents.d'),
@@ -24,7 +24,7 @@ it.each(['darwin', 'win32'])('upgrades Cursor collection hooks without duplicati
     hook.settingsPath = settingsPath;
     const script = hook.hookCommand;
     const command = platform === 'win32'
-      ? `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '${script.replaceAll("'", "''")}'`
+      ? `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '${script.replace("O'Brien O’Brien", "O''Brien O’’Brien")}'`
       : script;
     const otherHook = { command: 'user-managed-hook', timeout: 5 };
     await fs.mkdir(path.dirname(settingsPath), { recursive: true });

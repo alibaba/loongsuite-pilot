@@ -11,7 +11,7 @@ it.runIf(Boolean(powershell))('passes Cursor stdin and follows managed Node pin 
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cursor-powershell-'));
   try {
     const home = path.join(root, 'home');
-    const dataDir = path.join(root, "data [采集] $runtime O'Brien `literal`");
+    const dataDir = path.join(root, "data [采集] $runtime O'Brien O’Brien `literal`");
     const cacheDir = path.join(root, 'cache [运行]');
     const hooks = path.join(dataDir, 'hooks');
     await fs.mkdir(path.join(hooks, 'shared'), { recursive: true });
@@ -58,7 +58,7 @@ it.runIf(Boolean(powershell))('passes Cursor stdin and follows managed Node pin 
       LOONGSUITE_PILOT_CACHE_DIR: cacheDir,
       PILOT_TEST_NODE: process.execPath,
     };
-    const scriptArgument = `'${launcher.replaceAll("'", "''")}'`;
+    const scriptArgument = `'${launcher.replace(/['\u2018\u2019\u201a\u201b]/g, quote => quote + quote)}'`;
     const command = process.platform === 'win32'
       ? `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ${scriptArgument}`
       : `& '${powershell}' -NoProfile -NonInteractive -File ${scriptArgument}`;
