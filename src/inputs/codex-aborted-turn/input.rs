@@ -185,7 +185,39 @@ impl InputBody for CodexAbortedTurnBody {
 
     async fn collect(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
         let mut entries = Vec::new();
-        for file_path in discover_session_files(&self.session_dir).await {
+        let files = discover_session_files(&self.session_dir).await;
+        #[cfg(unix)]
+        let files = {
+            use std::os::unix::fs::MetadataExt;
+            let store = Arc::clone(&rt.state_store);
+            let grace = self.hook_gap_grace_ms;
+            tokio::task::spawn_blocking(move || {
+                let now = now_ms();
+                files
+                    .into_iter()
+                    .filter(|path| {
+                        let Some(checkpoint) = decode_checkpoint(&store, &state_key(path)) else {
+                            return true;
+                        };
+                        let Ok(meta) = std::fs::symlink_metadata(path) else {
+                            return true;
+                        };
+                        // Only omit a no-op. Changed/replaced sources still go through
+                        // the handle-based identity check, and due diagnostics still run.
+                        !(meta.is_file()
+                            && checkpoint.dev == Some(meta.dev())
+                            && checkpoint.inode == meta.ino()
+                            && i64::try_from(meta.len()).ok() == Some(checkpoint.scan_offset)
+                            && checkpoint
+                                .pending_completed_turns
+                                .iter()
+                                .all(|turn| now - turn.completed_at_ms < grace))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await?
+        };
+        for file_path in files {
             entries.extend(self.process_file(rt, &file_path).await?);
         }
         Ok(entries)
@@ -573,7 +605,11 @@ fn state_key(file_path: &str) -> String {
 }
 
 fn read_checkpoint(rt: &InputRuntime, key: &str) -> Option<CodexAbortedCheckpoint> {
-    let extra = rt.state_store.get(key).extra()?;
+    decode_checkpoint(&rt.state_store, key)
+}
+
+fn decode_checkpoint(store: &StateStore, key: &str) -> Option<CodexAbortedCheckpoint> {
+    let extra = store.get(key).extra()?;
     let value = extra.get("codexAbortedTurn")?.as_object()?;
     let inode = value.get("inode").and_then(Value::as_u64)?;
     let scan_offset = value

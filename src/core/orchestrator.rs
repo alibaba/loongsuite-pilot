@@ -2000,6 +2000,25 @@ impl Orchestrator {
             let spans = self.data_dir_join("state/codex/transcript-span-contexts");
             ensure_dir(&wakeup).await;
             let wakeup_for_watch = wakeup.clone();
+            let transcript = CodexTranscriptInput::new(CodexTranscriptInputOptions {
+                state_store: Arc::clone(state_store),
+                session_dir: session_dir.clone(),
+                wakeup_dir: Some(wakeup.clone()),
+                span_context_dir: Some(spans),
+                poll_interval_ms: self.poll("codex-transcript"),
+                multimodal: None,
+            });
+            let manager = Arc::downgrade(&self.inputs);
+            // Hosted input batches share the manager's queue. The standalone collector
+            // registers Codex through the SDK and persists owned batches in its outbox.
+            let _ = transcript.inner.body.output_capacity.set(Box::new(move || {
+                let manager = manager.upgrade();
+                Box::pin(async move {
+                    if let Some(manager) = manager {
+                        manager.wait_for_output_capacity("codex-transcript").await;
+                    }
+                })
+            }));
             self.add_hosted(
                 &mut entries,
                 HostedInputSpec::new(
@@ -2008,14 +2027,7 @@ impl Orchestrator {
                     CollectionMethod::SessionFilePolling.as_str(),
                     1,
                 ),
-                CodexTranscriptInput::new(CodexTranscriptInputOptions {
-                    state_store: Arc::clone(state_store),
-                    session_dir: session_dir.clone(),
-                    wakeup_dir: Some(wakeup.clone()),
-                    span_context_dir: Some(spans),
-                    poll_interval_ms: self.poll("codex-transcript"),
-                    multimodal: None,
-                }),
+                transcript,
                 CodexTranscriptInput::watch_paths(Some(&wakeup_for_watch), session_dir.as_deref()),
                 {
                     let watch_sessions = session_dir.clone();

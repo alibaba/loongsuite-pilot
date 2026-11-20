@@ -39,7 +39,7 @@ use super::super::extractor::{
 };
 use super::super::scan::{
     self, file_meta_snapshot, file_mtime_ms, find_turn_start_offset, last_complete_jsonl_offset,
-    read_json_line_at, read_json_lines, scan_json_lines, scan_json_lines_through_quarantine,
+    read_json_lines, read_owner_record_at, scan_json_lines, scan_json_lines_through_quarantine,
     select_owner_session_meta_offset, terminal_turn_id_for, turn_id_for_start,
     uuid_v7_timestamp_ms, JsonLine,
 };
@@ -71,7 +71,6 @@ const MAX_SCAN_BYTES_PER_FILE_CYCLE: i64 = 16 * 1024 * 1024;
 const MAX_RETAINED_RECOVERY_BYTES: i64 = 512 * 1024;
 const MAX_RETAINED_RECOVERY_LINES: usize = 1_024;
 const MAX_CACHED_INCOMPLETE_TAILS: usize = 2048;
-const INCOMPLETE_TAIL_WITNESS_BYTES: usize = 64;
 const MAX_CACHED_TRANSCRIPT_META_BYTES: usize = 64 * 1024 * 1024;
 const CACHED_TRANSCRIPT_META_ABSENCE_TTL_MS: i64 = 48 * 60 * 60 * 1_000;
 const SPAN_CONTEXT_TTL_MS: i64 = 48 * 60 * 60 * 1_000;
@@ -237,14 +236,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 return Ok(true);
             }
             position += bytes.len() as i64;
-            if bytes.len() >= INCOMPLETE_TAIL_WITNESS_BYTES {
-                last = bytes[bytes.len() - INCOMPLETE_TAIL_WITNESS_BYTES..].to_vec();
-            } else {
-                last.extend_from_slice(&bytes);
-                if last.len() > INCOMPLETE_TAIL_WITNESS_BYTES {
-                    last.drain(..last.len() - INCOMPLETE_TAIL_WITNESS_BYTES);
-                }
-            }
+            scan::extend_tail_witness(&mut last, &bytes);
         }
         if scan::opened_file_version(&file).await? == current
             && scan::file_version_snapshot(path).await? == current
@@ -879,7 +871,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                         None,
                     )
                     .await?;
-                emitted_count += self.body.emit_batches(recovered.entries);
+                emitted_count += self.body.emit_batches(recovered.entries).await;
                 if !matches!(recovered.kind, RecoveryKind::Unparseable)
                     && checkpoint
                         .active_turn
@@ -1233,7 +1225,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             0
         } else {
             checkpoint.deferred_terminals.remove(index);
-            self.body.emit_batches(recovered.entries)
+            self.body.emit_batches(recovered.entries).await
         };
         Ok(DeferredRecovery {
             changed: true,
@@ -1327,7 +1319,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 processed_terminal_count: 1,
             });
         }
-        let emitted_count = self.body.emit_batches(recovered.entries);
+        let emitted_count = self.body.emit_batches(recovered.entries).await;
         checkpoint.active_turn = None;
         checkpoint.pending_terminal = None;
         Ok(PendingRecovery {
@@ -1406,7 +1398,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         };
         if meta.is_none() {
             if let Some(offset) = checkpoint.owner_session_meta_offset {
-                if let Some(record) = read_json_line_at(file_path, offset, Some(rt)).await? {
+                if let Some(record) = read_owner_record_at(file_path, offset, Some(rt)).await? {
                     meta = extract_codex_transcript_meta(&record).map(Arc::new);
                     if let Some(meta) = meta.clone() {
                         if current_ino == Some(checkpoint.inode)
@@ -3365,7 +3357,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         if owner_offset < 0 || owner_offset >= file_size {
             return Ok(None);
         }
-        let Some(record) = read_json_line_at(file_path, owner_offset, Some(rt)).await? else {
+        let Some(record) = read_owner_record_at(file_path, owner_offset, Some(rt)).await? else {
             return Ok(None);
         };
         let Some(meta) = extract_codex_transcript_meta(&record) else {
@@ -3595,7 +3587,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             ));
             return Ok((0, 0));
         }
-        let emitted = self.body.emit_batches(recovered.entries);
+        let emitted = self.body.emit_batches(recovered.entries).await;
         checkpoint.active_turn = None;
         checkpoint.pending_terminal = None;
         Ok((emitted, 1))
@@ -3648,7 +3640,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             );
             return Ok((0, 0));
         }
-        let emitted = self.body.emit_batches(recovered.entries);
+        let emitted = self.body.emit_batches(recovered.entries).await;
         checkpoint.pending_subagent = None;
         Ok((emitted, 1))
     }
@@ -3801,7 +3793,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     },
                 )
             });
-            emitted += self.body.emit_batches(output);
+            emitted += self.body.emit_batches(output).await;
         }
         self.save_delegation_state(rt);
         Ok(emitted)

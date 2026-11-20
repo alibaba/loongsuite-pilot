@@ -363,24 +363,19 @@ fn claim_turn(
         "{}.turn-context-{index}-{digest}.done",
         safe_name(session_id)
     ));
-    let temporary = dir.join(format!(".turn-claim-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> std::io::Result<()> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
         let owner = turn_id
             .map(|id| serde_json::json!({ "turnId": id }))
             .unwrap_or_else(|| serde_json::json!({}));
-        file.write_all(owner.to_string().as_bytes())?;
-        drop(file);
-        std::fs::hard_link(&temporary, &marker)
+        temporary.write_all(owner.to_string().as_bytes())?;
+        // Publish fully written claims atomically without replacing a concurrent
+        // winner. On APFS this needs one exclusive rename instead of link/unlink.
+        temporary
+            .persist_noclobber(&marker)
+            .map_err(|err| err.error)?;
+        Ok(())
     })();
-    let _ = std::fs::remove_file(&temporary);
     match result {
         Ok(()) => (true, turn_id.map(str::to_owned)),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
