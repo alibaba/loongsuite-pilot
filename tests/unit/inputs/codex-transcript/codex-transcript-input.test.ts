@@ -6,6 +6,7 @@ import * as path from 'node:path';
 const blockedReads = vi.hoisted(() => new Set<string>());
 const scanDelays = vi.hoisted(() => new Map<string, () => Promise<void>>());
 const sortedReads = vi.hoisted(() => new Set<string>());
+const coarseFileTimes = vi.hoisted(() => new Map<string, number>());
 const failOpenOnCount = vi.hoisted(() => new Map<string, number>());
 const openCounts = vi.hoisted(() => new Map<string, number>());
 vi.mock('node:fs/promises', async () => {
@@ -26,6 +27,13 @@ vi.mock('node:fs/promises', async () => {
         entries.sort((left, right) => left.name.localeCompare(right.name));
       }
       return entries;
+    },
+    stat: async (...args: Parameters<typeof actual.stat>) => {
+      const stats = await actual.stat(...args);
+      const filePath = args[0];
+      const fileTime = typeof filePath === 'string' ? coarseFileTimes.get(path.resolve(filePath)) : undefined;
+      if (fileTime !== undefined) Object.assign(stats, { mtimeMs: fileTime, birthtimeMs: fileTime });
+      return stats;
     },
     open: async (filePath: string, flags: string) => {
       const resolved = path.resolve(filePath);
@@ -76,6 +84,7 @@ afterEach(async () => {
   blockedReads.clear();
   scanDelays.clear();
   sortedReads.clear();
+  coarseFileTimes.clear();
   failOpenOnCount.clear();
   openCounts.clear();
   await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
@@ -977,14 +986,19 @@ describe('CodexTranscriptInput', () => {
     try {
       await input.start();
       await runInputCycle(input);
-      await fs.writeFile(
-        path.join(readableDir, 'rollout-session-new.jsonl'),
-        completedTurn().replaceAll('turn-1', 'turn-new'),
-        'utf8',
-      );
+      const fresh = path.join(readableDir, 'rollout-session-new.jsonl');
+      await fs.writeFile(fresh, completedTurn().replaceAll('turn-1', 'turn-new'), 'utf8');
+      const cutoff = stateStore.get(input.id).extra?.baselinePendingSince;
+      expect(typeof cutoff).toBe('number');
+      // A filesystem may timestamp a newly created file in the same tick as startup.
+      coarseFileTimes.set(fresh, cutoff as number);
+      const imported = path.join(readableDir, 'rollout-session-imported.jsonl');
+      await fs.writeFile(imported, completedTurn().replaceAll('turn-1', 'turn-old-imported'), 'utf8');
+      coarseFileTimes.set(imported, (cutoff as number) - 5);
       await runInputCycle(input);
       expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
       expect(responsesForTurn(entries, 'turn-new').length).toBeGreaterThan(0);
+      expect(responsesForTurn(entries, 'turn-old-imported')).toEqual([]);
     } finally {
       await input.stop();
     }
@@ -1024,7 +1038,11 @@ describe('CodexTranscriptInput', () => {
     }
   });
 
-  it('collects a session written while stopped before the first scan finishes', async () => {
+  it.each([
+    { restart: 'same input', skew: -1 },
+    { restart: 'reloaded state', skew: 0 },
+    { restart: 'reloaded state', skew: -1 },
+  ])('collects a session written during $restart with $skew ms filesystem clock skew', async ({ restart, skew }) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-pending-restart-new-'));
     tempDirs.push(root);
     const sessionDir = path.join(root, 'sessions');
@@ -1032,23 +1050,32 @@ describe('CodexTranscriptInput', () => {
     const readableDir = path.join(sessionDir, '2026', '06', '24');
     await fs.mkdir(blockedDir, { recursive: true });
     await fs.mkdir(readableDir, { recursive: true });
-    const { input, entries, stateStore } = await createDormantInput(root);
+    const hidden = path.join(blockedDir, 'rollout-session-hidden.jsonl');
+    await fs.writeFile(hidden, completedTurn().replaceAll('turn-1', 'turn-hidden'), 'utf8');
+    const first = await createDormantInput(root);
+    let resumed = first;
     blockedReads.add(path.resolve(blockedDir));
     try {
-      await input.start();
-      expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
-      await input.stop();
-      await fs.writeFile(
-        path.join(readableDir, 'rollout-session-new.jsonl'),
-        completedTurn().replaceAll('turn-1', 'turn-while-stopped'),
-        'utf8',
-      );
-      await input.start();
-      await runInputCycle(input);
-      expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
-      expect(responsesForTurn(entries, 'turn-while-stopped').length).toBeGreaterThan(0);
+      await first.input.start();
+      const cutoff = first.stateStore.get(first.input.id).extra?.baselinePendingSince;
+      expect(typeof cutoff).toBe('number');
+      coarseFileTimes.set(hidden, (cutoff as number) + skew);
+      await first.input.stop();
+      await first.stateStore.save();
+      const fresh = path.join(readableDir, 'rollout-session-new.jsonl');
+      await fs.writeFile(fresh, completedTurn().replaceAll('turn-1', 'turn-while-stopped'), 'utf8');
+      coarseFileTimes.set(fresh, (cutoff as number) + skew);
+      if (restart === 'reloaded state') resumed = await createDormantInput(root);
+      await resumed.input.start();
+      await runInputCycle(resumed.input);
+      expect(resumed.stateStore.get(resumed.input.id).extra?.isBaselineInit).not.toBe(true);
+      expect(responsesForTurn(resumed.entries, 'turn-while-stopped').length).toBeGreaterThan(0);
+      blockedReads.delete(path.resolve(blockedDir));
+      await runInputCycle(resumed.input);
+      expect(responsesForTurn(resumed.entries, 'turn-hidden')).toEqual([]);
+      expect(resumed.stateStore.get(resumed.input.id).extra?.baselineDirectoryListing).toBeUndefined();
     } finally {
-      await input.stop();
+      await resumed.input.stop();
     }
   });
 
