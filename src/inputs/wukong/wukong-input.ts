@@ -94,6 +94,8 @@ interface StepAcc {
   toolCallParts: Array<{ type: string; id: string; name: string }>;
   firstToolTs?: number;
   lastToolTs?: number;
+  hasUnconfirmedToolEnd?: boolean;
+  toolParentMessageId?: string;
   lastContentTs: number;
   hasTools: boolean;
   usage?: { input: number; output: number; cache: number; total: number };
@@ -469,7 +471,8 @@ export class WukongInput extends BaseInput {
     ]);
     if (!evs.some(e => MEANINGFUL_EVENTS.has(e.type))) return [];
 
-    // Run-level scan: these apply to the whole turn, not a single step.
+    // Run metadata and tool results can arrive after the events they describe.
+    const toolResults = new Map<string, AguiEvent>();
     let runId: string | undefined;
     let runStartedTs: number | undefined;
     let runFinishedTs: number | undefined;
@@ -485,6 +488,9 @@ export class WukongInput extends BaseInput {
           break;
         case 'RUN_ERROR':
           runError = { code: String(e.code ?? 'UNKNOWN'), message: String(e.message ?? '') };
+          break;
+        case 'TOOL_CALL_RESULT':
+          if (typeof e.toolCallId === 'string' && e.toolCallId) toolResults.set(e.toolCallId, e);
           break;
       }
     }
@@ -519,27 +525,42 @@ export class WukongInput extends BaseInput {
       if (!hasStepEvents && cur.hasTools) return openStep(ts);
       return cur;
     };
-    // A tool/activity. With STEP_STARTED boundaries it attaches to the current step.
-    // Without them, a tool that starts at/after the current step's last tool finished
-    // is a sequential (post-observation) LLM round → new step; an overlapping tool is
-    // treated as parallel and stays in the same step (spec §2.3).
-    const stepForTool = (startTs: number): StepAcc => {
-      if (!cur) return openStep(startTs);
-      if (!hasStepEvents && cur.hasTools && startTs >= (cur.lastToolTs ?? startTs)) return openStep(startTs);
-      return cur;
+    const stepsByMessageId = new Map<string, StepAcc>();
+    const rememberMessage = (step: StepAcc, messageId: unknown): void => {
+      if (typeof messageId !== 'string' || !messageId) return;
+      step.responseId ??= messageId;
+      if (!stepsByMessageId.has(messageId)) stepsByMessageId.set(messageId, step);
     };
-    const markTool = (s: StepAcc, startTs: number, endTs: number): void => {
-      s.firstToolTs = s.firstToolTs === undefined ? startTs : Math.min(s.firstToolTs, startTs);
-      s.lastToolTs = s.lastToolTs === undefined ? endTs : Math.max(s.lastToolTs, endTs);
-      s.hasTools = true;
-      s.ctx.hasToolCalls = true;
+    const stepForTool = (startTs: number, parentMessageId?: string): StepAcc => {
+      if (hasStepEvents) return cur ?? openStep(startTs);
+      const parent = parentMessageId ? stepsByMessageId.get(parentMessageId) : undefined;
+      if (parent) {
+        parent.toolParentMessageId ??= parentMessageId;
+        return parent;
+      }
+      const distinctParent = parentMessageId && cur?.toolParentMessageId && parentMessageId !== cur.toolParentMessageId;
+      // A declaration END can precede actual execution. Use confirmed results
+      // for the time fallback, and keep ambiguous declarations together.
+      const sequential = cur?.hasTools && !cur.hasUnconfirmedToolEnd && cur.lastToolTs !== undefined && startTs > cur.lastToolTs;
+      const step = !cur || distinctParent || sequential ? openStep(startTs) : cur;
+      if (parentMessageId) {
+        step.toolParentMessageId = parentMessageId;
+        rememberMessage(step, parentMessageId);
+      }
+      return step;
+    };
+    const markTool = (step: StepAcc, startTs: number, endTs: number, executionConfirmed: boolean): void => {
+      step.firstToolTs = step.firstToolTs === undefined ? startTs : Math.min(step.firstToolTs, startTs);
+      step.lastToolTs = step.lastToolTs === undefined ? endTs : Math.max(step.lastToolTs, endTs);
+      if (!executionConfirmed) step.hasUnconfirmedToolEnd = true;
+      step.hasTools = true;
+      step.ctx.hasToolCalls = true;
     };
 
     let toolIdx = 0;
     let toolStartCount = 0;
-    const toolStartTimestamps = new Map<string, number>();
+    const toolStarts = new Map<string, { timestamp: number; name: string; parentMessageId?: string; step?: StepAcc }>();
     const toolArgsAccumulator = new Map<string, string>();
-    const toolNames = new Map<string, string>();
     // USAGE seen before any step opened (rare); attached to the final step later.
     let pendingUsage: { input: number; output: number; cache: number; total: number } | undefined;
 
@@ -547,7 +568,7 @@ export class WukongInput extends BaseInput {
       switch (evt.type) {
         case 'STEP_STARTED': {
           const s = openStep(evt.timestamp);
-          if (!s.responseId && typeof evt.messageId === 'string') s.responseId = evt.messageId;
+          rememberMessage(s, evt.messageId);
           break;
         }
 
@@ -557,13 +578,13 @@ export class WukongInput extends BaseInput {
 
         case 'REASONING_START': {
           const s = stepForUtterance(evt.timestamp);
-          if (!s.responseId && typeof evt.messageId === 'string') s.responseId = evt.messageId;
+          rememberMessage(s, evt.messageId);
           break;
         }
 
         case 'REASONING_MESSAGE_CHUNK': {
           const s = stepForUtterance(evt.timestamp);
-          if (!s.responseId && typeof evt.messageId === 'string') s.responseId = evt.messageId;
+          rememberMessage(s, evt.messageId);
           if (typeof evt.delta === 'string') s.reasoning += evt.delta;
           else if (typeof evt.content === 'string') s.reasoning += evt.content;
           s.lastContentTs = evt.timestamp;
@@ -578,13 +599,13 @@ export class WukongInput extends BaseInput {
 
         case 'TEXT_MESSAGE_START': {
           const s = stepForUtterance(evt.timestamp);
-          if (!s.responseId && typeof evt.messageId === 'string') s.responseId = evt.messageId;
+          rememberMessage(s, evt.messageId);
           break;
         }
 
         case 'TEXT_MESSAGE_CONTENT': {
           const s = stepForUtterance(evt.timestamp);
-          if (!s.responseId && typeof evt.messageId === 'string') s.responseId = evt.messageId;
+          rememberMessage(s, evt.messageId);
           if (typeof evt.delta === 'string') s.text += evt.delta;
           s.lastContentTs = evt.timestamp;
           break;
@@ -620,12 +641,13 @@ export class WukongInput extends BaseInput {
         }
 
         case 'TOOL_CALL_START': {
-          // Only record start time + name; the step decision and emission happen at
-          // TOOL_CALL_END so a sequential-tool boundary is evaluated exactly once.
           const tcId = (evt.toolCallId as string | undefined) ?? `idx-${toolStartCount}`;
-          toolStartTimestamps.set(tcId, evt.timestamp);
-          const toolName = (evt.toolName as string | undefined) ?? (evt.name as string | undefined) ?? '';
-          toolNames.set(tcId, toolName);
+          const toolName = (evt.toolName as string | undefined) ?? (evt.toolCallName as string | undefined)
+            ?? (evt.name as string | undefined) ?? '';
+          const parentMessageId = typeof evt.parentMessageId === 'string' && evt.parentMessageId !== runId
+            ? evt.parentMessageId : undefined;
+          toolStarts.set(tcId, { timestamp: evt.timestamp, name: toolName, parentMessageId,
+            step: hasStepEvents ? steps[steps.length - 1] : undefined });
           toolStartCount++;
           break;
         }
@@ -639,14 +661,18 @@ export class WukongInput extends BaseInput {
 
         case 'TOOL_CALL_END': {
           const tcId = (evt.toolCallId as string | undefined) ?? `idx-${toolStartCount - 1}`;
-          const startTs = toolStartTimestamps.get(tcId);
-          const startEvtTimestamp = startTs ?? evt.timestamp;
-          // Ensure tool result is at least 1ms after tool start (non-zero span duration)
-          const adjustedEndTs = Math.max(evt.timestamp, startEvtTimestamp + 1);
-          const duration = startTs ? adjustedEndTs - startTs : undefined;
-          const toolName = toolNames.get(tcId) ?? (evt.toolName as string | undefined) ?? (evt.name as string | undefined) ?? '';
+          const start = toolStarts.get(tcId);
+          const startEvtTimestamp = start?.timestamp ?? evt.timestamp;
+          const observedResult = toolResults.get(tcId);
+          // Legacy Wukong payloads can include the execution outcome in END.
+          const executionConfirmed = observedResult !== undefined || evt.result !== undefined || evt.output !== undefined
+            || Boolean(evt.error || evt.isError);
+          const adjustedEndTs = Math.max(evt.timestamp, observedResult?.timestamp ?? evt.timestamp, startEvtTimestamp + 1);
+          const duration = start ? adjustedEndTs - start.timestamp : undefined;
+          const toolName = start?.name ?? (evt.toolName as string | undefined) ?? (evt.toolCallName as string | undefined)
+            ?? (evt.name as string | undefined) ?? '';
           const args = toolArgsAccumulator.get(tcId);
-          const s = stepForTool(startEvtTimestamp);
+          const s = start?.step ?? stepForTool(startEvtTimestamp, start?.parentMessageId);
           s.toolCallParts.push({ type: 'tool_call', id: tcId, name: toolName });
 
           const syntheticStartEvt = { ...evt, timestamp: startEvtTimestamp, toolCallId: evt.toolCallId, toolName };
@@ -656,25 +682,17 @@ export class WukongInput extends BaseInput {
           ));
           toolIdx++;
 
-          const syntheticEndEvt = { ...evt, timestamp: adjustedEndTs };
+          const syntheticEndEvt = {
+            ...evt, timestamp: adjustedEndTs,
+            ...(observedResult?.content !== undefined ? { result: observedResult.content } : {}),
+            ...(observedResult?.is_error === true ? { isError: true, error: evt.error ?? '_OTHER' } : {}),
+          };
           entries.push(this.buildToolResultEntry(
             task, msg, syntheticEndEvt, model, turnId, toolIdx, common, duration,
             s.ctx, traceId, agentSpanId, toolName,
           ));
           toolIdx++;
-          markTool(s, startEvtTimestamp, adjustedEndTs);
-          break;
-        }
-
-        case 'TOOL_CALL_RESULT': {
-          // Richer content than TOOL_CALL_END; match by toolCallId.
-          const tcId = evt.toolCallId as string | undefined;
-          if (!tcId) break;
-          const match = findEntryByToolCallId(entries, 'tool.result', tcId);
-          if (match) {
-            if (evt.content !== undefined) match['gen_ai.tool.call.result'] = toJsonValue(evt.content);
-            if (evt.is_error === true) match['error.type'] = match['error.type'] ?? '_OTHER';
-          }
+          markTool(s, startEvtTimestamp, adjustedEndTs, executionConfirmed);
           break;
         }
 
@@ -696,7 +714,7 @@ export class WukongInput extends BaseInput {
           );
           entries.push(...activityEntries);
           toolIdx += 2; // tool.call + tool.result
-          markTool(s, actStartTs, actEndTs);
+          markTool(s, actStartTs, actEndTs, numOr(content?.finish_time) !== undefined);
           break;
         }
       }
@@ -1218,22 +1236,6 @@ function findLastCompleteIndex(messages: WukongMessage[]): number {
     lastComplete--;
   }
   return lastComplete;
-}
-
-function findEntryByToolCallId(
-  entries: AgentActivityEntry[],
-  eventName: string,
-  toolCallId: string,
-): AgentActivityEntry | undefined {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (
-      entries[i]['event.name'] === eventName &&
-      entries[i]['gen_ai.tool.call.id'] === toolCallId
-    ) {
-      return entries[i];
-    }
-  }
-  return undefined;
 }
 
 /**

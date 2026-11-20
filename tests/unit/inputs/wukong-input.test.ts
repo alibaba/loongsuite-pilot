@@ -369,6 +369,64 @@ describe('WukongInput', () => {
     expect(toolResult!['gen_ai.tool.call.result']).toEqual({ url: 'https://example.com' });
   });
 
+  it.each([
+    { label: 'same native parent', firstParent: 'decision', secondParent: 'decision', returnsResults: true, decisions: 2 },
+    { label: 'distinct native parents', firstParent: 'decision', secondParent: 'second-decision', returnsResults: true, decisions: 3 },
+    { label: 'overlapping executions without parents', firstParent: undefined, secondParent: undefined, returnsResults: true, decisions: 2 },
+    { label: 'only argument completion', firstParent: undefined, secondParent: undefined, returnsResults: false, decisions: 2 },
+  ])('groups standard AG-UI tool declarations using $label', async ({ firstParent, secondParent, returnsResults, decisions }) => {
+    const base = 1779240560000;
+    const event = (type: string, offset: number, fields: Record<string, unknown> = {}) => ({
+      type, timestamp: base + offset, ...fields,
+    });
+    const events = [
+      event('RUN_STARTED', 0, { runId: 'run' }),
+      event('TEXT_MESSAGE_START', 10, { messageId: 'decision' }),
+      event('TEXT_MESSAGE_CONTENT', 11, { messageId: 'decision', delta: 'Reading both files.' }),
+      event('TEXT_MESSAGE_END', 14, { messageId: 'decision' }),
+      event('TOOL_CALL_START', 20, { toolCallId: 'a', toolCallName: 'read_file', parentMessageId: firstParent }),
+      event('TOOL_CALL_ARGS', 21, { toolCallId: 'a', delta: '{"path":"a.txt"}' }),
+      event('TOOL_CALL_END', 23, { toolCallId: 'a' }),
+      event('TOOL_CALL_START', 25, { toolCallId: 'b', toolCallName: 'read_file', parentMessageId: secondParent }),
+      event('TOOL_CALL_ARGS', 26, { toolCallId: 'b', delta: '{"path":"b.txt"}' }),
+      event('TOOL_CALL_END', 28, { toolCallId: 'b' }),
+      ...(returnsResults ? [
+        event('TOOL_CALL_RESULT', 52, { toolCallId: 'b', messageId: 'result-b', content: 'b contents' }),
+        event('TOOL_CALL_RESULT', 90, { toolCallId: 'a', messageId: 'result-a', content: 'a contents' }),
+      ] : []),
+      event('TEXT_MESSAGE_START', 100, { messageId: 'answer' }),
+      event('TEXT_MESSAGE_CONTENT', 101, { messageId: 'answer', delta: 'Both reads succeeded.' }),
+      event('TEXT_MESSAGE_END', 102, { messageId: 'answer' }),
+      event('USAGE', 104, { prompt_tokens: 31, completion_tokens: 7, total_tokens: 38 }),
+      event('RUN_FINISHED', 105, { runId: 'run' }),
+    ];
+    const messages = [SAMPLE_MESSAGES[0], { ...SAMPLE_MESSAGES[1], createdAt: base, events, isComplete: 1 }];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+    await input.start();
+    await input.stop();
+
+    const calls = entries.filter(entry => entry['event.name'] === 'tool.call');
+    const results = entries.filter(entry => entry['event.name'] === 'tool.result');
+    const responses = entries.filter(entry => entry['event.name'] === 'llm.response');
+    expect(calls.map(entry => entry['gen_ai.tool.name'])).toEqual(['read_file', 'read_file']);
+    expect(new Set(calls.map(entry => entry['gen_ai.step.id'])).size).toBe(decisions - 1);
+    expect(responses.map(entry => entry['gen_ai.response.id'])).toEqual(decisions === 2
+      ? ['decision', 'answer'] : ['decision', 'second-decision', 'answer']);
+    expect(responses.reduce((total, entry) => total + Number(entry['gen_ai.usage.total_tokens']), 0)).toBe(38);
+    for (const [id, duration] of [['a', returnsResults ? 70 : 3], ['b', returnsResults ? 27 : 3]] as const) {
+      const result = results.find(entry => entry['gen_ai.tool.call.id'] === id);
+      expect(result?.['gen_ai.tool.call.duration']).toBe(duration);
+      expect(result?.['gen_ai.tool.call.result']).toBe(returnsResults ? `${id} contents` : undefined);
+    }
+  });
+
   it('skips user messages with empty content', async () => {
     const emptyMessages = [
       { ...SAMPLE_MESSAGES[0]!, content: '' },
