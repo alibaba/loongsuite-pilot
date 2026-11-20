@@ -292,22 +292,22 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
     });
 
   it.each(['unique', 'duplicate normalized path'] as const)(
-    'validates a %s current task after 64 retained descriptor/transcript pairs', async mode => {
+    'validates a %s current task after 140 retained descriptor/transcript pairs', async mode => {
       const h = await harness('qoder');
       const target = await legacyParent(h.root, session);
       await target.createChild();
       const child = await legacyRows('child.jsonl', h.root);
-      for (let i = 0; i < 64; i++) {
+      for (let i = 0; i < 140; i++) {
         const agentId = `historical-child-${i}`;
         const task = { ...target.task, taskId: `prior-${i}`, agentId, parentToolUseId: `historical-call-${i}`,
           transcriptPath: path.join(target.directory, `agent-${agentId}.jsonl`) };
         const rows = child.map(row => ({ ...row, agentId, parent_tool_use_id: task.parentToolUseId }));
-        await target.putTask(mode === 'duplicate normalized path' && i === 63
+        await target.putTask(mode === 'duplicate normalized path' && i === 139
           ? { ...task, transcriptPath: target.directory + path.sep + '.' + path.sep + path.basename(target.task.transcriptPath) }
           : task);
         await fs.writeFile(task.transcriptPath, jsonl(rows));
       }
-      expect((await fs.readdir(target.directory)).length).toBe(130);
+      expect((await fs.readdir(target.directory)).length).toBe(282);
       await h.start();
       for (let i = 0; i < 4; i++) await h.cycle();
       await h.stop();
@@ -344,6 +344,27 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
       expect(await childSpans(h, target.task.agentId)).toHaveLength(1);
     });
 
+  it('continues once a history exceeds the in-memory descriptor revision limit', async () => {
+    const h = await harness(agentId);
+    const target = await legacyParent(h.root, session);
+    const child = await legacyRows('child.jsonl', h.root);
+    await h.write(target.task.agentId, child);
+    await target.putTask(target.task);
+    for (let i = 0; i < 1024; i++) {
+      const id = `historical-${i}`;
+      await target.putTask({ taskId: id, sessionId: session, agentId: id, parentToolUseId: id,
+        transcriptPath: path.join(target.directory, `agent-${id}.jsonl`) });
+    }
+    await h.start();
+    for (let i = 0; i < 8; i++) await h.cycle();
+    const children = await childSpans(h, target.task.agentId);
+    expect(children).toHaveLength(1);
+    const parentTool = (await spansFor(h.entries())).find(span =>
+      span.attributes['gen_ai.span.kind'] === 'TOOL' && span.attributes['gen_ai.tool.call.id'] === target.task.parentToolUseId);
+    expect(parentTool).toBeDefined();
+    expect(children[0].parentSpanId).toBe(parentTool?.spanContext().spanId);
+  });
+
   it('revisits a legacy source behind eight unchanged parent directories', async () => {
     const h = await harness(agentId);
     const fixtures = new Map<string, Awaited<ReturnType<typeof legacyParent>>>();
@@ -361,6 +382,59 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
     await target.createChild();
     await h.start(); await h.cycle(); await h.cycle();
     expect(await childSpans(h, target.task.agentId)).toHaveLength(1);
+  });
+
+  it('does not attach a legacy child if an already-verified claim changes before a paged pass closes', async () => {
+    let rewritten: Awaited<ReturnType<typeof legacyParent>>['task'] | undefined;
+    let staleProof = false;
+    const h = await harness(agentId, false, collector => {
+      const descriptors = collector.legacyDescriptors.bind(collector);
+      collector.legacyDescriptors = async (...args: any[]) => {
+        const result = await descriptors(...args);
+        const scan = collector.legacyDescriptorContinuation;
+        if (!rewritten && scan?.verification && scan.count >= 2) {
+          const names = [];
+          for await (const entry of await fs.opendir(target.directory)) {
+            if (entry.name.startsWith('task-')) names.push(entry.name);
+          }
+          const confirmed = names.slice(0, scan.count).find(name => filler.has(name));
+          expect(confirmed).toBeDefined();
+          const before = await fs.lstat(target.directory);
+          rewritten = filler.get(confirmed!)!;
+          await target.putTask({ ...rewritten, parentToolUseId: target.task.parentToolUseId });
+          const after = await fs.lstat(target.directory);
+          expect([after.mtimeMs, after.ctimeMs]).toEqual([before.mtimeMs, before.ctimeMs]);
+        }
+        if (rewritten && Array.isArray(result) && result.some(claim => claim.subagentId === target.task.agentId)) staleProof = true;
+        return result;
+      };
+    });
+    const target = await legacyParent(h.root, session);
+    const child = await legacyRows('child.jsonl', h.root);
+    await h.write(target.task.agentId, child);
+    await target.putTask({ ...target.task, result: 'a'.repeat(120 * 1024) });
+    const filler = new Map<string, typeof target.task>();
+    for (let i = 0; i < 4; i++) {
+      const id = `ordinary-${i}`;
+      const task = { ...target.task, taskId: id, agentId: id, parentToolUseId: id,
+        transcriptPath: path.join(target.directory, `agent-${id}.jsonl`), result: 'a'.repeat(127 * 1024) };
+      filler.set(`task-${id}.json`, task);
+      await target.putTask(task);
+    }
+    await h.start(); await h.cycle(); await h.cycle();
+    expect(rewritten).toBeDefined();
+    const spans = await spansFor(h.entries());
+    const parentTool = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL'
+      && span.attributes['gen_ai.tool.call.id'] === target.task.parentToolUseId);
+    expect(parentTool).toBeDefined();
+    const attachedChildren = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT'
+      && span.attributes['gen_ai.agent.id'] === target.task.agentId && span.parentSpanId === parentTool?.spanContext().spanId);
+    expect({ staleProof, attachedChildren: attachedChildren.length }).toEqual({ staleProof: false, attachedChildren: 0 });
+    await target.putTask(rewritten!);
+    await h.cycle(); await h.cycle();
+    const children = await childSpans(h, target.task.agentId);
+    expect(children).toHaveLength(1);
+    expect(children[0].parentSpanId).toBe(parentTool?.spanContext().spanId);
   });
 
   it.each(['continuous polling', 'restart', 'conflicting in-place rewrite'])(

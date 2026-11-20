@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import fs from 'node:fs/promises';
-import { constants, statSync, unlinkSync } from 'node:fs';
+import { constants, statSync, unlinkSync, watch } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -53,6 +53,8 @@ const LEGACY_DIRECTORIES_PER_CYCLE = 8;
 const LEGACY_DIRECTORY_ENTRIES_PER_CYCLE = 256;
 const MAX_LEGACY_TASK_BYTES = 128 * 1024;
 const LEGACY_METADATA_BYTES_PER_CYCLE = 512 * 1024;
+const MAX_LEGACY_REVISION_WITNESSES = 1024;
+const legacyDescriptorName = name => /^task-[a-zA-Z0-9_-]+\.json$/.test(name);
 const LEGACY_PROOF_DEFERRED = Symbol('legacy-proof-deferred');
 const legacyAgentId = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,512}$/.test(value);
 const isInsideDirectory = (directory, file) => {
@@ -365,10 +367,21 @@ export class QoderTranscriptCollector {
 
   discardLegacyDescriptorContinuation(scan = this.legacyDescriptorContinuation) {
     if (this.legacyDescriptorContinuation === scan) this.legacyDescriptorContinuation = null;
+    scan?.watcher?.close();
+    if (scan) scan.watcher = null;
     if (!scan?.handle) return;
     const handle = scan.handle;
     scan.handle = null;
     void handle.close().catch(() => {});
+  }
+
+  watchLegacyDescriptorRevisions(scan, directory) {
+    try {
+      scan.watcher = watch(directory, { persistent: false }, (_event, filename) => {
+        if (!filename || legacyDescriptorName(filename)) scan.revisionChanged = true;
+      });
+      scan.watcher.on('error', () => { scan.watcherFailed = true; });
+    } catch { scan.watcherFailed = true; }
   }
 
   async legacyDescriptors(parentPath, sessionId) {
@@ -396,7 +409,7 @@ export class QoderTranscriptCollector {
       if (!stat.isDirectory()) return result;
       const version = fileVersion(stat);
       if (scan) {
-        if (scan.version !== version) return retry();
+        if (scan.version !== version || scan.revisionChanged) return retry();
       } else {
         const handle = await fs.opendir(directory);
         if (this.stopped) { await handle.close(); return result; }
@@ -413,6 +426,22 @@ export class QoderTranscriptCollector {
             if (fileVersion(await fs.lstat(directory)) !== version || await fs.realpath(directory) !== directory) return retry();
             if (scan.verification) {
               if (scan.fingerprint !== scan.verification.fingerprint || scan.count !== scan.verification.count) return retry();
+              const { revisions } = scan.verification;
+              if (scan.count > revisions.size && scan.watcherFailed) {
+                // Larger inventories also need the change feed to cover
+                // descriptor revisions beyond the in-memory witnesses.
+                this.report(scope, 'legacy-subagent-descriptor-watch-unavailable');
+                return result;
+              }
+              if (revisions.size > this.legacyRevisionBudget) break;
+              // The verification pass may also span polls. Recheck its
+              // oldest named witnesses before returning any collected claims.
+              this.legacyRevisionBudget -= revisions.size;
+              for (const [name, observed] of revisions) {
+                if (fileVersion(await fs.lstat(path.join(directory, name))) !== observed) return retry();
+              }
+              if (fileVersion(await fs.lstat(directory)) !== version || await fs.realpath(directory) !== directory
+                || scan.revisionChanged) return retry();
               result.push(...this.verifiedLegacyClaims(scan, parentPath, sessionId));
               return result;
             }
@@ -420,7 +449,8 @@ export class QoderTranscriptCollector {
             // Revisit every claim, including older descriptors outside the
             // live parent index that may still conflict with a live candidate.
             scan.verification = { fingerprint: scan.fingerprint, count: scan.count,
-              calls: new Map(), agents: new Map(), paths: new Map() };
+              calls: new Map(), agents: new Map(), paths: new Map(), revisions: new Map() };
+            if (scan.count > MAX_LEGACY_REVISION_WITNESSES) this.watchLegacyDescriptorRevisions(scan, directory);
             for (const claim of scan.candidates.values()) {
               scan.verification.calls.set(claim.callId, 0);
               scan.verification.agents.set(claim.agentId, 0);
@@ -438,7 +468,7 @@ export class QoderTranscriptCollector {
         }
         if (!scan.entry) break;
         const { name } = scan.entry;
-        if (!/^task-[a-zA-Z0-9_-]+\.json$/.test(name)) { scan.entry = null; continue; }
+        if (!legacyDescriptorName(name)) { scan.entry = null; continue; }
         const file = path.join(directory, name);
         const observed = await fs.lstat(file);
         if (!observed.isFile() || observed.size > MAX_LEGACY_TASK_BYTES) throw new Error('invalid-legacy-descriptor');
@@ -457,6 +487,7 @@ export class QoderTranscriptCollector {
         scan.fingerprint ^= BigInt('0x' + identity);
         scan.count++;
         scan.entry = null;
+        if (scan.verification && scan.count <= MAX_LEGACY_REVISION_WITNESSES) scan.verification.revisions.set(name, descriptorVersion);
         const agentId = task?.agentId;
         const callId = task?.parentToolUseId;
         if (task?.sessionId !== sessionId || !legacyAgentId(agentId) || typeof callId !== 'string'
@@ -602,6 +633,7 @@ export class QoderTranscriptCollector {
     this.remainingBytes = this.scanBytes;
     this.legacyTasks = new Map();
     this.legacyEntryBudget = LEGACY_DIRECTORY_ENTRIES_PER_CYCLE;
+    this.legacyRevisionBudget = MAX_LEGACY_REVISION_WITNESSES;
     this.legacyDirectoryBudget = LEGACY_DIRECTORIES_PER_CYCLE;
     this.legacyMetadataBudget = LEGACY_METADATA_BYTES_PER_CYCLE;
     this.parentProbeBudget = 1;

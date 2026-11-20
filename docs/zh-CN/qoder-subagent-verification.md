@@ -16,6 +16,7 @@ Qoder IDE 使用独立子 `sessionId`，其 transcript 没有 CLI sidechain 的 
 - 子文件来自原生 `agent_transcript_path`，或标准 `<session>/subagents/agent-<agent_id>.jsonl` 布局。父文件和子文件使用独立来源键、偏移和缓存。
 - 旧版 CLI 缺少子 Agent Hook 或委派标记时，collector 按预算检查本会话 `subagents` 下的任务描述。只有父 CLI 输入、实际 `Agent` / `Task` 调用、唯一任务描述和子文件首条 sidechain 输入的身份一致，才恢复关联。后续独立输入沿用其自身的 turn。
 - 旧版任务目录按条目数和读取字节分轮处理，保留的历史任务会参与重名校验。子文件的首条输入可跨读取块，发生追加、替换或读取失败时按源文件版本重试。
+- 输出前重新核对描述文件版本。历史描述超过内存上限时，改用两次清单校验和文件变更通知。通知不可用时保留待核验状态。原生写入可在采集期间继续，发现变更会重新核验。
 - collector 从父 transcript 的 `Agent` / `Task` tool use 建立委派。子输入的 `isDelegatedTask`、`parent_tool_use_id` 和可用的 `parent_agent_id` 提供匹配证据；不按名称、文本相似度或时间邻近匹配。
 - invocation 为父 session、父 Agent、父 turn 和 tool call ID 的确定性摘要；同一来源重放不改变 ID，新任务使用新 ID。关联状态只保存标识与上下文，不复制任务正文。
 - 原生 `sessionId` 相同不代表 turn 相同。父子独立收口；父先完成或 collector 重启不结束仍运行的子 turn。
