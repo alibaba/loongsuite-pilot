@@ -506,7 +506,9 @@ impl QwenWorkCnTraceBody {
             }
             seen_sessions.insert(session.to_owned());
             seen_sources.insert(path.clone());
-            if let Err(error) = crate::utils::source_access::check(&path) {
+            if let Err(error) = crate::utils::source_access::private_path(&path)
+                .and_then(|()| crate::utils::source_access::check(&path))
+            {
                 if error.kind() == std::io::ErrorKind::PermissionDenied {
                     rt.warn(
                         "Qwen Work SDK wakeup source was rejected; discarding SDK-owned marker",
