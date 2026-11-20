@@ -3,6 +3,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type { Dirent, FSWatcher } from 'node:fs';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../types/index.js';
@@ -42,6 +43,7 @@ import {
   type CodexPendingSubagentTurn,
   type CodexForkBootstrap,
   type CodexPendingTerminalTurn,
+  type CodexDeferredTerminalTurn,
   type CodexTranscriptInputContext,
   type CodexTranscriptCheckpoint,
   type CodexTranscriptMeta,
@@ -65,6 +67,10 @@ const MAX_PERSISTED_INPUT_CONTEXT_BYTES = 1024 * 1024;
 const MAX_TERMINALS_PER_FILE_CYCLE = 100;
 const MAX_SCAN_BYTES_PER_FILE_CYCLE = 16 * 1024 * 1024;
 const MAX_CACHED_INCOMPLETE_TAILS = 2048;
+const MAX_OWNER_OFFSET_PROBES = 2048;
+const MAX_DEFERRED_TERMINALS = 4;
+const RECOVERY_RETRY_MIN_MS = 1_000;
+const RECOVERY_RETRY_MAX_MS = 60_000;
 // Dynamic roots come from user-local Hook markers. Keep discovery bounded so
 // stale task homes cannot turn every polling cycle into an unbounded walk.
 const MAX_WAKEUP_MARKERS_FOR_DISCOVERY = 256;
@@ -215,7 +221,18 @@ export class CodexTranscriptInput extends BaseInput {
   /** Partial-replay uri cache. */
   private readonly multimodalUriCache = new LruMap<UriResult>(MULTIMODAL_LRU_LIMIT);
   private readonly incompleteTails = new Map<string, CachedIncompleteJsonlTail>();
+  private readonly ownerOffsetProbes = new LruMap<number | null>(MAX_OWNER_OFFSET_PROBES);
   private wakeupWatcher: FSWatcher | null = null;
+  private wakeupTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly dirtyWakeupMarkers = new Set<string>();
+  private wakeupOnlyRequested = false;
+  private wakeupDiscoveryPending = false;
+  private wakeupDiscoveryRevision = 0;
+  private lastFullScanAt = -Infinity;
+  private defaultScanComplete = false;
+  private baselinePending = false;
+  private baselinePendingSince = 0;
+  private readonly wakeupPaths = new Map<string, Set<string>>();
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
   private lastSubagentLinkSummary = '';
@@ -293,32 +310,68 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
+    const startedAt = Date.now();
     this.subagentLinker.restore(this.stateStore.get(this.id).extra?.codexDelegations);
     this.discardLegacyGlobalTurnRegistry();
     const discovered = await this.discoverSessionFiles();
     await this.indexDiscoveredTranscriptOwners(discovered);
+    const extra = this.stateStore.get(this.id).extra;
+    let isBaselineInit = extra?.isBaselineInit === true;
+    const baselineUnfinished = extra?.baselineUnfinished === true;
+    const persistedSince = extra?.baselinePendingSince;
+    if (
+      baselineUnfinished
+      && this.baselinePendingSince === 0
+      && typeof persistedSince === 'number'
+      && persistedSince > 0
+    ) {
+      this.baselinePendingSince = persistedSince;
+    }
+    // Checkpoints written while this version's scan is still unfinished are not
+    // an old-version migration.
+    if (!isBaselineInit && !baselineUnfinished) {
+      const prefix = `${this.id}:`;
+      const legacy = this.stateStore.keys().some(key =>
+        key.startsWith(prefix) && this.readCheckpoint(key) !== null);
+      if (legacy) {
+        this.stateStore.update(this.id, { extra: { isBaselineInit: true } });
+        isBaselineInit = true;
+      }
+    }
+    if (!isBaselineInit && this.baselinePendingSince === 0) this.baselinePendingSince = startedAt;
+    const pendingSinceAtEntry = this.baselinePendingSince;
+    if (!isBaselineInit && !baselineUnfinished) {
+      this.stateStore.update(this.id, {
+        extra: { baselineUnfinished: true, baselinePendingSince: this.baselinePendingSince },
+      });
+    }
     for (const { filePath, baselineOnStart } of discovered) {
       const key = this.stateKey(filePath);
       const meta = this.transcriptMetaByPath.get(filePath);
       const neededByPendingFusion = meta?.depth === 1
         && meta.parentThreadId !== undefined
         && this.hasLegacyPendingFusionForParent(meta.parentThreadId);
-      if (baselineOnStart && !neededByPendingFusion && !this.readCheckpoint(key)) {
+      const createdAfterPending = pendingSinceAtEntry > 0
+        && !await this.existedBeforeBaseline(filePath);
+      if (baselineOnStart && !neededByPendingFusion && !this.readCheckpoint(key) && !createdAfterPending) {
         const hasCopiedPrefix = hasCopiedHistoryPrefix(meta);
         if (hasCopiedPrefix) {
           await this.parkForkBaseline(filePath, key);
-        } else {
+        } else if (!isBaselineInit) {
           await this.baselineFile(filePath, key);
         }
       }
     }
+    this.baselinePending = !isBaselineInit && !this.defaultScanComplete;
+    if (!this.baselinePending) this.baselinePendingSince = 0;
+    if (!isBaselineInit && this.defaultScanComplete) this.completeBaselineInit();
     await Promise.all([
       fs.mkdir(this.wakeupDir, { recursive: true }),
       fs.mkdir(this.spanContextDir, { recursive: true }),
     ]);
     try {
-      this.wakeupWatcher = fsSync.watch(this.wakeupDir, { persistent: false }, () => {
-        this.requestCollection();
+      this.wakeupWatcher = fsSync.watch(this.wakeupDir, { persistent: false }, (_event, filename) => {
+        this.noteWakeup(filename?.toString());
       });
       this.wakeupWatcher.on('error', () => {
         this.wakeupWatcher?.close();
@@ -334,33 +387,123 @@ export class CodexTranscriptInput extends BaseInput {
   protected override async onStop(): Promise<void> {
     this.wakeupWatcher?.close();
     this.wakeupWatcher = null;
+    if (this.wakeupTimer) clearTimeout(this.wakeupTimer);
+    this.wakeupTimer = null;
+    this.dirtyWakeupMarkers.clear();
+    this.wakeupOnlyRequested = false;
+    this.wakeupDiscoveryPending = false;
+    this.wakeupDiscoveryRevision = 0;
+    this.wakeupPaths.clear();
+    this.lastFullScanAt = -Infinity;
     this.multimodalUriCache.clear();
     this.incompleteTails.clear();
+    this.ownerOffsetProbes.clear();
     this.transcriptMetaCacheByPath.clear();
     this.transcriptMetaCacheBytes = 0;
   }
 
-  protected override async collect(): Promise<AgentActivityEntry[]> {
-    await this.cleanupExpiredSpanContexts(Date.now());
-    let emittedCount = 0;
-    const discovered = await this.discoverSessionFiles();
-    const discoveredPaths = new Set(discovered.map(file => file.filePath));
-    for (const filePath of this.rolloutIdleSnapshot.keys()) {
-      if (!discoveredPaths.has(filePath)) this.rolloutIdleSnapshot.delete(filePath);
+  /** Fixed window, not trailing debounce: continuous events cannot postpone work. */
+  private noteWakeup(filename?: string): void {
+    if (filename && (!/^[a-zA-Z0-9_-]+\.json$/.test(filename))) return;
+    // Bounded queue. Unknown/overflow notifications are covered by full polling.
+    if (this.dirtyWakeupMarkers.size < MAX_WAKEUP_MARKERS_PER_CLEANUP) {
+      this.dirtyWakeupMarkers.add(filename ?? '*');
+    } else {
+      this.wakeupDiscoveryPending = true;
+      this.wakeupDiscoveryRevision++;
     }
-    const skipPaths = this.historicalRolloutSkipPaths(discovered, Date.now());
-    await this.indexDiscoveredTranscriptOwners(discovered, skipPaths);
+    this.scheduleWakeup();
+  }
+
+  private scheduleWakeup(): void {
+    if (this.wakeupTimer || !this.running || !this.dirtyWakeupMarkers.size) return;
+    this.wakeupTimer = setTimeout(() => {
+      this.wakeupTimer = null;
+      this.wakeupOnlyRequested = true;
+      this.requestCollection();
+      // A busy BaseInput coalesces requests. Keep retrying until collect takes
+      // the dirty set; never clear notifications just because a timer fired.
+      this.scheduleWakeup();
+    }, 200);
+    this.wakeupTimer.unref();
+  }
+
+  protected override async collect(): Promise<AgentActivityEntry[]> {
+    const wakeupOnly = this.wakeupOnlyRequested;
+    this.wakeupOnlyRequested = false;
+    const dirty = new Set(this.dirtyWakeupMarkers);
+    this.dirtyWakeupMarkers.clear();
+    const targeted = new Set<string>();
+    for (const marker of dirty) {
+      const paths = this.wakeupPaths.get(marker);
+      if (!paths) {
+        this.wakeupDiscoveryPending = true;
+        this.wakeupDiscoveryRevision++;
+      }
+      for (const file of paths ?? []) targeted.add(file);
+    }
+    const discoveryRevision = this.wakeupDiscoveryRevision;
+    const now = Date.now();
+    const fullScan = !wakeupOnly || now - this.lastFullScanAt >= this.pollIntervalMs;
+    await this.cleanupExpiredSpanContexts(now);
+    let emittedCount = 0;
+    let discovered: DiscoveredSessionFile[];
+    let skipPaths = new Set<string>();
+    if (fullScan) {
+      discovered = await this.discoverSessionFiles();
+      this.lastFullScanAt = now;
+      const discoveredPaths = new Set(discovered.map(file => file.filePath));
+      for (const filePath of this.rolloutIdleSnapshot.keys()) {
+        if (!discoveredPaths.has(filePath)) this.rolloutIdleSnapshot.delete(filePath);
+      }
+      skipPaths = this.historicalRolloutSkipPaths(discovered, now);
+      // A filename-less/overflow notification may carry only new ownership
+      // evidence for a cold file. Do not lose it to historical-file skipping.
+      if (this.wakeupDiscoveryPending) skipPaths.clear();
+      for (const file of targeted) skipPaths.delete(file);
+      await this.indexDiscoveredTranscriptOwners(discovered, skipPaths);
+      this.wakeupPaths.clear();
+      for (const { filePath } of discovered) {
+        const meta = this.transcriptMetaByPath.get(filePath);
+        if (!meta) continue;
+        const marker = `${safeWakeupSessionPart(meta.threadId)}.json`;
+        if (!this.wakeupPaths.has(marker)) this.wakeupPaths.set(marker, new Set());
+        this.wakeupPaths.get(marker)!.add(filePath);
+      }
+      if (this.wakeupDiscoveryRevision === discoveryRevision) this.wakeupDiscoveryPending = false;
+    } else {
+      // Known sessions need no directory/marker enumeration. Newly created
+      // sessions and filename-less notifications retain full polling fallback.
+      discovered = [...targeted].map(filePath => ({ filePath, baselineOnStart: false }));
+      await this.indexDiscoveredTranscriptOwners(discovered, skipPaths, 'targeted');
+    }
     discovered.sort((left, right) => {
       const leftDepth = this.transcriptMetaByPath.get(left.filePath)?.depth ?? 0;
       const rightDepth = this.transcriptMetaByPath.get(right.filePath)?.depth ?? 0;
       return leftDepth - rightDepth || left.filePath.localeCompare(right.filePath);
     });
-    for (const { filePath } of discovered) {
+    for (const { filePath, baselineOnStart } of discovered) {
       if (skipPaths.has(filePath)) continue;
+      if (baselineOnStart && this.baselinePending) {
+        const key = this.stateKey(filePath);
+        const meta = this.transcriptMetaByPath.get(filePath);
+        const neededByPendingFusion = meta?.depth === 1
+          && meta.parentThreadId !== undefined
+          && this.hasLegacyPendingFusionForParent(meta.parentThreadId);
+        if (!neededByPendingFusion && !this.readCheckpoint(key) && await this.existedBeforeBaseline(filePath)) {
+          if (hasCopiedHistoryPrefix(meta)) await this.parkForkBaseline(filePath, key);
+          else await this.baselineFile(filePath, key);
+          continue;
+        }
+      }
       emittedCount += await this.processFile(filePath);
     }
-    emittedCount += await this.retryPendingAgentResults();
+    if (fullScan) {
+      if (this.baselinePending && this.defaultScanComplete) this.completeBaselineInit();
+      emittedCount += await this.retryPendingAgentResults();
+    }
     this.reportSubagentLinks();
+    this.saveDelegationState();
     if (emittedCount > 0) {
       this.logger.debug('cycle produced entries', { count: emittedCount });
     }
@@ -444,15 +587,42 @@ export class CodexTranscriptInput extends BaseInput {
     this.rolloutIdleSnapshot.set(filePath, { ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs });
   }
 
+  private completeBaselineInit(): void {
+    const current = this.stateStore.get(this.id);
+    const extra = { ...(current.extra ?? {}) };
+    delete extra.baselineUnfinished;
+    delete extra.baselinePendingSince;
+    extra.isBaselineInit = true;
+    this.stateStore.set(this.id, { ...current, extra });
+    this.baselinePending = false;
+    this.baselinePendingSince = 0;
+  }
+
+  private async existedBeforeBaseline(filePath: string): Promise<boolean> {
+    try {
+      const stat = await fs.stat(filePath);
+      const stamps = [stat.birthtimeMs, stat.mtimeMs].filter(ms => ms > 0);
+      return stamps.length > 0 && Math.floor(Math.min(...stamps)) <= this.baselinePendingSince;
+    } catch {
+      return false;
+    }
+  }
+
   private async listDefaultRolloutFiles(): Promise<string[]> {
     const cached = this.cachedDefaultRollout;
-    if (cached && await this.rolloutDirsUnchanged(cached.dirMtimes)) return cached.files;
+    if (cached && await this.rolloutDirsUnchanged(cached.dirMtimes)) {
+      this.defaultScanComplete = true;
+      return cached.files;
+    }
     const files: string[] = [];
     const dirMtimes = new Map<string, number>();
+    let rootMissing = false;
     const complete = await collectRolloutFiles(this.sessionDir, files, dirMtimes, (dir, error) => {
+      if (dir === this.sessionDir && (error as NodeJS.ErrnoException).code === 'ENOENT') rootMissing = true;
       this.logger.warn('Codex rollout directory scan failed; retrying next poll', { dir, error: String(error) });
     });
-    this.cachedDefaultRollout = complete && dirMtimes.size > 0 ? { dirMtimes, files } : null;
+    this.defaultScanComplete = complete || rootMissing;
+    this.cachedDefaultRollout = this.defaultScanComplete && dirMtimes.size > 0 ? { dirMtimes, files } : null;
     return files;
   }
 
@@ -546,13 +716,18 @@ export class CodexTranscriptInput extends BaseInput {
     runtime?.observeBacklog(Math.max(0, stat.size - checkpoint.scanOffset));
     if (rolloutCaughtUp(checkpoint, stat)) return 0;
 
-    if (checkpoint.ownerSessionMetaOffset === null) {
-      checkpoint.ownerSessionMetaOffset = await findOwnerSessionMetaOffset(
-        filePath,
-        stat.size,
-        runtime,
-      );
+    // An owner may be ahead of a parked live-fork scan cursor. Its actual
+    // read boundary is the current file size, not the consumed scan offset.
+    if (checkpoint.ownerSessionMetaOffset !== null && checkpoint.ownerSessionMetaOffset >= stat.size) {
+      checkpoint.ownerSessionMetaOffset = null;
       checkpointChanged = true;
+    }
+    if (checkpoint.ownerSessionMetaOffset === null) {
+      const offset = await this.findOwnerOffset(filePath, stat);
+      if (offset !== null) {
+        checkpoint.ownerSessionMetaOffset = offset;
+        checkpointChanged = true;
+      }
     }
     const ownerMetaCacheAccess: TranscriptMetaCacheAccess = (
       checkpoint.scanOffset < stat.size
@@ -583,7 +758,8 @@ export class CodexTranscriptInput extends BaseInput {
       const prepared = await this.prepareCopiedTranscript(filePath, stat.size, ownerMeta!, checkpoint);
       checkpointChanged ||= prepared.changed;
       if (!prepared.ready) {
-        this.saveCheckpoint(key, checkpoint);
+        if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
+        else this.saveDelegationState();
         return 0;
       }
     }
@@ -628,9 +804,13 @@ export class CodexTranscriptInput extends BaseInput {
 
     let scannedBytes = 0;
 
-    const hadPendingTerminal = checkpoint.pendingTerminal !== null;
-    const pendingResult = await this.recoverPendingTerminal(filePath, checkpoint);
-    checkpointChanged ||= hadPendingTerminal;
+    const deferredResult = await this.recoverDeferredTerminals(filePath, checkpoint, stat);
+    checkpointChanged ||= deferredResult.changed;
+    emittedCount += deferredResult.emittedCount;
+    processedTerminalCount += deferredResult.processedTerminalCount;
+    const priorPending = checkpoint.pendingTerminal;
+    const pendingResult = await this.recoverPendingTerminal(filePath, checkpoint, stat);
+    checkpointChanged ||= checkpoint.pendingTerminal !== priorPending;
     emittedCount += pendingResult.emittedCount;
     processedTerminalCount += pendingResult.processedTerminalCount;
     if (pendingResult.blocked) {
@@ -798,19 +978,20 @@ export class CodexTranscriptInput extends BaseInput {
 
           if (terminalTurnId && checkpoint.activeTurn.turnId === terminalTurnId) {
             if (recovered.kind === 'unparseable') {
-              checkpoint.pendingTerminal = newPendingTerminal(
+              const now = Date.now();
+              const pending = newPendingTerminal(
                 terminalTurnId,
                 nextScanOffset,
                 recovered.diagnostics.sourceRecordCount,
+                now,
               );
-              this.logger.warn('terminal Codex turn could not be parsed; retaining it for the next scan', {
-                transcriptPath: filePath,
-                turnId: terminalTurnId,
-                range: { startOffset: checkpoint.activeTurn.startOffset, endOffset: nextScanOffset },
-                retryCount: checkpoint.pendingTerminal.retryCount,
-                sourceRecordCount: recovered.diagnostics.sourceRecordCount,
-              });
-              blocked = true;
+              checkpoint.pendingTerminal = pending;
+              this.noteTerminalFailure(pending, stat, now);
+              const startOffset = checkpoint.activeTurn.startOffset;
+              const deferred = this.deferPendingTerminal(checkpoint);
+              this.logTerminalFailure(filePath, checkpoint, pending, { startOffset, phase: 'terminal', deferred });
+              blocked = !deferred;
+              processedTerminalCount++;
             } else if (!checkpoint.pendingFusion) {
               checkpoint.activeTurn = null;
               checkpoint.pendingTerminal = null;
@@ -899,6 +1080,7 @@ export class CodexTranscriptInput extends BaseInput {
   private async recoverPendingTerminal(
     filePath: string,
     checkpoint: CodexTranscriptCheckpoint,
+    stat: fsSync.Stats,
   ): Promise<PendingRecoveryResult> {
     const pending = checkpoint.pendingTerminal;
     if (!pending) return { blocked: false, emittedCount: 0, processedTerminalCount: 0 };
@@ -906,31 +1088,117 @@ export class CodexTranscriptInput extends BaseInput {
       checkpoint.pendingTerminal = null;
       return { blocked: false, emittedCount: 0, processedTerminalCount: 0 };
     }
+    if (!this.terminalRetryReady(pending, stat)) {
+      // No conversion is attempted, so no terminal attempt budget is spent,
+      // even when full deferred capacity leaves this pending barrier blocked.
+      const deferred = this.deferPendingTerminal(checkpoint);
+      return { blocked: !deferred, emittedCount: 0, processedTerminalCount: 0 };
+    }
     const recovered = await this.recoverTurnSegment(filePath, checkpoint, pending.terminalEndOffset, true);
     if (recovered.kind === 'unparseable') {
       const now = Date.now();
       checkpoint.pendingTerminal = {
         ...pending,
-        retryCount: (pending.retryCount ?? 0) + 1,
+        retryCount: Math.min(Number.MAX_SAFE_INTEGER, (pending.retryCount ?? 0) + 1),
         firstPendingAtMs: pending.firstPendingAtMs ?? now,
         lastAttemptAtMs: now,
         sourceRecordCount: recovered.diagnostics.sourceRecordCount,
       };
-      this.logger.warn('pending Codex terminal turn still could not be parsed; will retry', {
-        transcriptPath: filePath,
-        turnId: pending.turnId,
-        range: { startOffset: checkpoint.activeTurn.startOffset, endOffset: pending.terminalEndOffset },
-        retryCount: checkpoint.pendingTerminal.retryCount,
-        firstPendingAtMs: checkpoint.pendingTerminal.firstPendingAtMs,
-        sourceRecordCount: recovered.diagnostics.sourceRecordCount,
-      });
-      return { blocked: true, emittedCount: 0, processedTerminalCount: 0 };
+      this.noteTerminalFailure(checkpoint.pendingTerminal, stat, now);
+      const failedPending = checkpoint.pendingTerminal;
+      const startOffset = checkpoint.activeTurn.startOffset;
+      const deferred = this.deferPendingTerminal(checkpoint);
+      this.logTerminalFailure(filePath, checkpoint, failedPending, { startOffset, phase: 'pending', deferred });
+      return { blocked: !deferred, emittedCount: 0, processedTerminalCount: 1 };
     }
 
     const emittedCount = this.emitEntryBatches(recovered.entries);
     checkpoint.activeTurn = null;
     checkpoint.pendingTerminal = null;
     return { blocked: false, emittedCount, processedTerminalCount: 1 };
+  }
+
+  private logTerminalFailure(
+    filePath: string,
+    checkpoint: CodexTranscriptCheckpoint,
+    pending: CodexPendingTerminalTurn,
+    context: { startOffset: number; phase: 'terminal' | 'pending' | 'deferred'; deferred: boolean },
+  ): void {
+    // Report the retained pending barrier in this checkpoint snapshot. A
+    // deferred range can coexist with a different blocking pending terminal.
+    this.logger.warn('Codex terminal turn could not be parsed; retained until source changes and backoff expires', {
+      transcriptPath: filePath,
+      turnId: pending.turnId,
+      recoveryPhase: context.phase,
+      range: { startOffset: context.startOffset, endOffset: pending.terminalEndOffset },
+      retryCount: pending.retryCount ?? 0,
+      firstPendingAtMs: pending.firstPendingAtMs,
+      lastAttemptAtMs: pending.lastAttemptAtMs,
+      sourceRecordCount: pending.sourceRecordCount ?? 0,
+      retryDelayMs: pending.failure?.delayMs,
+      deferred: context.deferred,
+      deferredRanges: checkpoint.deferredTerminals?.length ?? 0,
+      deferredLimit: MAX_DEFERRED_TERMINALS,
+      blocked: checkpoint.pendingTerminal !== null,
+      blockingTurnId: checkpoint.pendingTerminal?.turnId,
+    });
+  }
+
+  private terminalRetryReady(pending: CodexPendingTerminalTurn, stat: fsSync.Stats): boolean {
+    // Allow an initial attempt for legacy checkpoints. An unparseable result
+    // records failure before saving, so later cycles/restarts remain gated.
+    return !pending.failure || (pending.failure.sourceVersion !== sourceVersion(stat)
+      && Date.now() >= pending.failure.retryAtMs);
+  }
+
+  private noteTerminalFailure(pending: CodexPendingTerminalTurn, stat: fsSync.Stats, now: number): void {
+    const delayMs = Math.min(RECOVERY_RETRY_MAX_MS,
+      Math.max(RECOVERY_RETRY_MIN_MS, (pending.failure?.delayMs ?? RECOVERY_RETRY_MIN_MS / 2) * 2));
+    pending.failure = { sourceVersion: sourceVersion(stat), delayMs, retryAtMs: now + delayMs };
+  }
+
+  private deferPendingTerminal(checkpoint: CodexTranscriptCheckpoint): boolean {
+    if (!checkpoint.activeTurn || !checkpoint.pendingTerminal) return false;
+    const deferred = checkpoint.deferredTerminals ?? [];
+    if (deferred.length >= MAX_DEFERRED_TERMINALS) return false;
+    deferred.push({ activeTurn: checkpoint.activeTurn, pendingTerminal: checkpoint.pendingTerminal });
+    checkpoint.deferredTerminals = deferred;
+    checkpoint.scanOffset = Math.max(checkpoint.scanOffset, checkpoint.pendingTerminal.terminalEndOffset);
+    checkpoint.activeTurn = null;
+    checkpoint.pendingTerminal = null;
+    return true;
+  }
+
+  private async recoverDeferredTerminals(
+    filePath: string, checkpoint: CodexTranscriptCheckpoint, stat: fsSync.Stats,
+  ): Promise<{ changed: boolean; emittedCount: number; processedTerminalCount: number }> {
+    const deferred = checkpoint.deferredTerminals;
+    if (!deferred?.length) return { changed: false, emittedCount: 0, processedTerminalCount: 0 };
+    for (let i = 0; i < deferred.length; i++) {
+      const item = deferred[i]!;
+      if (!this.terminalRetryReady(item.pendingTerminal, stat)) continue;
+      const recovery = { ...checkpoint, activeTurn: item.activeTurn, pendingTerminal: item.pendingTerminal };
+      const result = await this.recoverTurnSegment(filePath, recovery, item.pendingTerminal.terminalEndOffset, true);
+      if (result.kind === 'unparseable') {
+        const now = Date.now();
+        item.pendingTerminal.retryCount = Math.min(Number.MAX_SAFE_INTEGER, (item.pendingTerminal.retryCount ?? 0) + 1);
+        item.pendingTerminal.firstPendingAtMs ??= now;
+        item.pendingTerminal.lastAttemptAtMs = now;
+        item.pendingTerminal.sourceRecordCount = result.diagnostics.sourceRecordCount;
+        this.noteTerminalFailure(item.pendingTerminal, stat, now);
+        this.logTerminalFailure(filePath, checkpoint, item.pendingTerminal,
+          { startOffset: item.activeTurn.startOffset, phase: 'deferred', deferred: true });
+      } else {
+        deferred.splice(i, 1);
+        if (deferred.length === 0) delete checkpoint.deferredTerminals;
+      }
+      // At most one deferred range is materialized per file/cycle. Do not let
+      // several failed histories accumulate simultaneous parsed body arrays.
+      // Failed attempts also spend one slot in the shared terminal budget.
+      return { changed: true, processedTerminalCount: 1, emittedCount: result.kind === 'unparseable'
+        ? 0 : this.emitEntryBatches(result.entries) };
+    }
+    return { changed: false, emittedCount: 0, processedTerminalCount: 0 };
   }
 
   private async recoverTurnSegment(
@@ -1272,8 +1540,15 @@ export class CodexTranscriptInput extends BaseInput {
   private async indexDiscoveredTranscriptOwners(
     files: DiscoveredSessionFile[],
     skipPaths?: ReadonlySet<string>,
+    mode: 'full' | 'targeted' = 'full',
   ): Promise<void> {
     const kept = new Map<string, NonNullable<ReturnType<typeof extractCodexTranscriptMeta>>>();
+    const discoveredPaths = new Set(files.map(file => file.filePath));
+    if (mode === 'targeted') {
+      for (const [filePath, meta] of this.transcriptMetaByPath) {
+        if (meta && !discoveredPaths.has(filePath)) kept.set(filePath, meta);
+      }
+    }
     if (skipPaths) {
       for (const filePath of skipPaths) {
         const meta = this.transcriptMetaByPath.get(filePath);
@@ -1282,7 +1557,8 @@ export class CodexTranscriptInput extends BaseInput {
     }
     this.transcriptMetaByPath.clear();
     this.transcriptPathByThreadId.clear();
-    this.pruneAbsentTranscriptMetaCache(new Set(files.map(file => file.filePath)), Date.now());
+    // Only a complete discovery can establish that an unrelated file is gone.
+    if (mode === 'full') this.pruneAbsentTranscriptMetaCache(discoveredPaths, Date.now());
     for (const [filePath, meta] of kept) {
       this.publishTranscriptOwnerMeta(filePath, meta);
     }
@@ -1296,16 +1572,8 @@ export class CodexTranscriptInput extends BaseInput {
       }
       const checkpoint = this.readCheckpoint(this.stateKey(filePath));
       const ownerOffset = checkpoint?.inode === stat.ino
-        ? checkpoint.ownerSessionMetaOffset ?? await findOwnerSessionMetaOffset(
-            filePath,
-            stat.size,
-            this.getInputRuntimeAccumulator(),
-          )
-        : await findOwnerSessionMetaOffset(
-            filePath,
-            stat.size,
-            this.getInputRuntimeAccumulator(),
-          );
+        ? checkpoint.ownerSessionMetaOffset ?? await this.findOwnerOffset(filePath, stat)
+        : await this.findOwnerOffset(filePath, stat);
       if (ownerOffset === null) continue;
       const meta = await this.loadTranscriptOwnerMeta(
         filePath,
@@ -1318,6 +1586,54 @@ export class CodexTranscriptInput extends BaseInput {
       if (!meta) continue;
       this.publishTranscriptOwnerMeta(filePath, meta);
     }
+  }
+
+  private async findOwnerOffset(
+    filePath: string,
+    stat: fsSync.Stats,
+    endOffset = stat.size,
+  ): Promise<number | null> {
+    const stateKey = this.stateKey(filePath);
+    const version = sourceVersion(stat);
+    const key = filePath + '\0' + version + '\0' + endOffset;
+    const previous = this.ownerOffsetProbes.get(key);
+    const absentVersion = this.stateStore.get(stateKey).extra?.codexOwnerAbsentVersion;
+    // A full, stable negative result belongs to this file's checkpoint, not
+    // the shared LRU: inventories larger than the LRU otherwise evict every
+    // result before the next poll. This does not advance the collection cursor
+    // or bypass pending turn/fork recovery. Prefix probes remain independent.
+    if (endOffset === stat.size && typeof absentVersion === 'string'
+      && absentVersion.length <= 256 && absentVersion === version) return null;
+    // Owner selection uses the rollout filename, so paths stay distinct even
+    // for hard links. Different scan boundaries can coexist for one version.
+    // NUL cannot occur in a filesystem path, so the tuple stays unambiguous
+    // without allocating an intermediate array or running a JSON serializer.
+    // Hits perform no content I/O. A same-size rewrite preserving both
+    // timestamps is indistinguishable and can retain stale owner state until
+    // another source-version component changes.
+    // A shorter search cannot establish absence in the rest of the file, and
+    // an owner found by a longer search may lie outside the requested prefix.
+    if (previous !== undefined) return previous;
+    const { offset, completeAbsence } = await findOwnerSessionMetaOffset(
+      filePath, endOffset, this.getInputRuntimeAccumulator(),
+    );
+    // Never cache a result observed while a writer changed or removed the file.
+    try {
+      if (!sameFileVersion(stat, await fs.stat(filePath))) return null;
+    } catch {
+      return null;
+    }
+    this.ownerOffsetProbes.set(key, offset);
+    const current = this.stateStore.get(stateKey);
+    if (completeAbsence && endOffset === stat.size) {
+      // Separate from codexTranscript so a caller holding an older checkpoint
+      // cannot overwrite the evidence when it later saves its scan progress.
+      this.stateStore.update(stateKey, { extra: { ...current.extra, codexOwnerAbsentVersion: version } });
+    } else if (offset !== null && current.extra?.codexOwnerAbsentVersion !== undefined) {
+      const { codexOwnerAbsentVersion: _discarded, ...extra } = current.extra;
+      this.stateStore.set(stateKey, { ...current, extra });
+    }
+    return offset;
   }
 
   private async loadTranscriptOwnerMeta(
@@ -1844,6 +2160,8 @@ export class CodexTranscriptInput extends BaseInput {
     ownerMeta: CodexTranscriptMeta,
     checkpoint: CodexTranscriptCheckpoint,
   ): Promise<{ ready: boolean; changed: boolean }> {
+    const previousBootstrap = checkpoint.forkBootstrap;
+    const changed = () => !isDeepStrictEqual(previousBootstrap, checkpoint.forkBootstrap);
     // A newly discovered live fork must not enter the normal scanner until its
     // first positively-owned turn is located.
     if (checkpoint.scanOffset === 0 && checkpoint.forkBootstrap === undefined) {
@@ -1857,7 +2175,7 @@ export class CodexTranscriptInput extends BaseInput {
     if (!current) return { ready: true, changed: false };
     if (current.state === 'baseline-tail') {
       const rebuilt = await this.rebuildForkBaselineTail(filePath, checkpoint);
-      return { ready: rebuilt, changed: true };
+      return { ready: rebuilt, changed: rebuilt || changed() };
     }
 
     // Prefer the lifecycle Hook's exact initial turn. UUIDv7 causality is the
@@ -1897,6 +2215,12 @@ export class CodexTranscriptInput extends BaseInput {
     checkpoint.forkBootstrap = bootstrap;
     const searchedNewBytes = bootstrap.searchOffset < fileSize;
 
+    const searchStat = await fs.stat(filePath);
+    if (searchStat.size !== fileSize) return { ready: false, changed: changed() };
+    if (!await this.incompleteTailReady(filePath, bootstrap.searchOffset, searchStat, this.getInputRuntimeAccumulator())) {
+      return { ready: false, changed: changed() };
+    }
+
     const located = await findTurnStartOffset(
       filePath,
       ownerMeta.threadId,
@@ -1906,6 +2230,16 @@ export class CodexTranscriptInput extends BaseInput {
       fileSize,
       this.getInputRuntimeAccumulator(),
     );
+    if (located.incompleteTail?.endOffset === fileSize && sameFileVersion(searchStat, await fs.stat(filePath))) {
+      this.incompleteTails.delete(filePath);
+      this.incompleteTails.set(filePath, {
+        ...located.incompleteTail, inode: searchStat.ino, device: searchStat.dev,
+        mtimeMs: searchStat.mtimeMs, ctimeMs: searchStat.ctimeMs, fileSize,
+      });
+      if (this.incompleteTails.size > MAX_CACHED_INCOMPLETE_TAILS) {
+        this.incompleteTails.delete(this.incompleteTails.keys().next().value!);
+      }
+    }
     if (located.startOffset === null) {
       checkpoint.forkBootstrap = {
         state: bootstrap.state,
@@ -1926,7 +2260,7 @@ export class CodexTranscriptInput extends BaseInput {
           searchedBytes: located.nextOffset,
         });
       }
-      return { ready: false, changed: true };
+      return { ready: false, changed: changed() };
     }
 
     if (located.anchorKind === 'initial-hook' || located.anchorKind === 'uuidv7') {
@@ -1948,7 +2282,7 @@ export class CodexTranscriptInput extends BaseInput {
         baselineOffset: previousScanOffset,
       });
       const rebuilt = await this.rebuildForkBaselineTail(filePath, checkpoint);
-      return { ready: rebuilt, changed: true };
+      return { ready: rebuilt, changed: rebuilt || changed() };
     }
 
     checkpoint.scanOffset = Math.max(previousScanOffset, located.startOffset);
@@ -1989,11 +2323,7 @@ export class CodexTranscriptInput extends BaseInput {
     }
     const runtime = this.getInputRuntimeAccumulator();
     const scanOffset = await lastCompleteJsonlOffset(filePath, stat.size, runtime);
-    const ownerSessionMetaOffset = await findOwnerSessionMetaOffset(
-      filePath,
-      scanOffset,
-      runtime,
-    );
+    const ownerSessionMetaOffset = await this.findOwnerOffset(filePath, stat, scanOffset);
     this.saveCheckpoint(key, {
       inode: stat.ino,
       scanOffset,
@@ -2289,28 +2619,32 @@ export class CodexTranscriptInput extends BaseInput {
   private readCheckpoint(key: string): CodexTranscriptCheckpoint | null {
     const raw = this.stateStore.get(key).extra?.codexTranscript;
     const value = asRecord(raw);
-    if (!value || typeof value.inode !== 'number' || typeof value.scanOffset !== 'number') return null;
+    if (!value || typeof value.inode !== 'number' || !isNonNegativeSafeInteger(value.scanOffset)) return null;
     const activeTurn = parseActiveTranscriptTurn(value.activeTurn);
-    const pending = asRecord(value.pendingTerminal);
-    let pendingTerminal = pending
-      && typeof pending.turnId === 'string'
-      && typeof pending.terminalEndOffset === 'number'
-      ? {
-          turnId: pending.turnId,
-          terminalEndOffset: pending.terminalEndOffset,
-          ...(typeof pending.retryCount === 'number' ? { retryCount: pending.retryCount } : {}),
-          ...(typeof pending.firstPendingAtMs === 'number' ? { firstPendingAtMs: pending.firstPendingAtMs } : {}),
-          ...(typeof pending.lastAttemptAtMs === 'number' ? { lastAttemptAtMs: pending.lastAttemptAtMs } : {}),
-          ...(typeof pending.sourceRecordCount === 'number' ? { sourceRecordCount: pending.sourceRecordCount } : {}),
-        }
-      : null;
+    let pendingTerminal = parsePendingTerminal(value.pendingTerminal);
+    const deferredTerminals: CodexDeferredTerminalTurn[] = [];
+    // Apply the same bound to persisted input, retaining the oldest queue
+    // positions without walking an arbitrarily large malformed checkpoint.
+    if (Array.isArray(value.deferredTerminals)) for (const raw of value.deferredTerminals.slice(0, MAX_DEFERRED_TERMINALS)) {
+      const item = asRecord(raw);
+      const active = parseActiveTranscriptTurn(item?.activeTurn);
+      const pending = parsePendingTerminal(item?.pendingTerminal);
+      if (active && pending && active.turnId === pending.turnId
+        && pending.terminalEndOffset >= active.startOffset
+        && pending.terminalEndOffset <= value.scanOffset) {
+        deferredTerminals.push({ activeTurn: active, pendingTerminal: pending });
+      }
+    }
     const fusion = asRecord(value.pendingFusion);
     const fusionChildren = parsePendingFusionChildren(fusion?.children);
     const pendingFusion: CodexPendingFusionTurn | null = fusion
       && typeof fusion.turnId === 'string'
       && typeof fusion.parentThreadId === 'string'
       && typeof fusion.parentTraceId === 'string'
-      && typeof fusion.terminalEndOffset === 'number'
+      && isNonNegativeSafeInteger(fusion.terminalEndOffset)
+      && fusion.terminalEndOffset <= value.scanOffset
+      && (!activeTurn || (fusion.turnId === activeTurn.turnId
+        && fusion.terminalEndOffset >= activeTurn.startOffset))
       && fusionChildren.length > 0
       ? {
           turnId: fusion.turnId,
@@ -2330,8 +2664,11 @@ export class CodexTranscriptInput extends BaseInput {
       && typeof subagent.parentTraceId === 'string'
       && typeof subagent.parentToolCallId === 'string'
       && (confidence === 'explicit_id' || confidence === 'agent_path')
-      && typeof subagent.terminalEndOffset === 'number'
+      && isNonNegativeSafeInteger(subagent.terminalEndOffset)
+      && subagent.terminalEndOffset <= value.scanOffset
       && capturedActiveTurn
+      && capturedActiveTurn.turnId === subagent.turnId
+      && subagent.terminalEndOffset >= capturedActiveTurn.startOffset
       ? {
           turnId: subagent.turnId,
           parentThreadId: subagent.parentThreadId,
@@ -2348,14 +2685,19 @@ export class CodexTranscriptInput extends BaseInput {
       && !pendingSubagent
       && activeTurn
       && typeof subagent.turnId === 'string'
-      && typeof subagent.terminalEndOffset === 'number'
+      && isNonNegativeSafeInteger(subagent.terminalEndOffset)
       && activeTurn.turnId === subagent.turnId
     ) {
       // Older pendingSubagent checkpoints blocked the child file and retained
       // the active turn at the top level. They have no reliable spawn identity,
       // so recover them through the normal independent terminal path.
-      pendingTerminal ??= newPendingTerminal(subagent.turnId, subagent.terminalEndOffset, 0);
+      // Parsing records no attempt; recovery initializes retry metadata only
+      // when it actually tries to convert the retained source range.
+      pendingTerminal ??= { turnId: subagent.turnId, terminalEndOffset: subagent.terminalEndOffset };
     }
+    if (pendingTerminal && (!activeTurn || pendingTerminal.turnId !== activeTurn.turnId
+      || pendingTerminal.terminalEndOffset < activeTurn.startOffset
+      || pendingTerminal.terminalEndOffset > value.scanOffset)) pendingTerminal = null;
     const bootstrapRecord = asRecord(value.forkBootstrap);
     const bootstrapTailCandidate = parseActiveTranscriptTurn(bootstrapRecord?.tailCandidate);
     const bootstrapState = bootstrapRecord?.state === 'baseline-tail'
@@ -2371,9 +2713,7 @@ export class CodexTranscriptInput extends BaseInput {
               ? 'baseline-search' as const
               : 'live-pending' as const;
     const forkBootstrap: CodexForkBootstrap | null = bootstrapRecord
-      && typeof bootstrapRecord.searchOffset === 'number'
-      && Number.isFinite(bootstrapRecord.searchOffset)
-      && bootstrapRecord.searchOffset >= 0
+      && isNonNegativeSafeInteger(bootstrapRecord.searchOffset)
       ? {
           state: bootstrapState,
           searchOffset: bootstrapRecord.searchOffset,
@@ -2396,12 +2736,15 @@ export class CodexTranscriptInput extends BaseInput {
       scanOffset: value.scanOffset,
       activeTurn,
       pendingTerminal,
+      ...(deferredTerminals.length ? { deferredTerminals } : {}),
       pendingFusion,
       pendingSubagent,
       // Do not migrate legacy latestSessionMetaOffset. In forked rollouts that
       // value commonly points at copied parent metadata, so processFile will
       // perform one bounded header scan to recover the owning meta safely.
-      ownerSessionMetaOffset: typeof value.ownerSessionMetaOffset === 'number'
+      // A live fork can park scanOffset at zero behind valid owner metadata;
+      // scanRolloutFile checks this position against file size before use.
+      ownerSessionMetaOffset: isNonNegativeSafeInteger(value.ownerSessionMetaOffset)
         ? value.ownerSessionMetaOffset
         : null,
       ...(forkBootstrap ? { forkBootstrap } : {}),
@@ -2423,10 +2766,23 @@ export class CodexTranscriptInput extends BaseInput {
 
   private saveDelegationState(): void {
     const global = this.stateStore.get(this.id);
-    this.stateStore.update(this.id, { extra: { ...(global.extra ?? {}),
-      codexDelegations: this.subagentLinker.serialize(),
-      codexResultInvocations: [...this.deliveredInvocations].slice(-MAX_LINK_DESCRIPTORS),
-      codexPendingAgentResults: [...this.pendingAgentResults.values()],
+    const extra = global.extra ?? {};
+    const delegations = this.subagentLinker.serialize();
+    const invocations = [...this.deliveredInvocations].slice(-MAX_LINK_DESCRIPTORS);
+    const pending = [...this.pendingAgentResults.values()];
+    const same = (before: unknown, after: unknown[]) => (before === undefined && after.length === 0)
+      || (Array.isArray(before) && before.length === after.length
+        && after.every((value, index) => before[index] === value));
+    const emptyDelegations = delegations.spawns.length === 0 && delegations.children.length === 0
+      && delegations.bindings.length === 0 && !delegations.completedWorkResults?.length
+      && !delegations.workTerminals?.length;
+    if ((extra.codexDelegations === delegations || (extra.codexDelegations === undefined && emptyDelegations))
+      && same(extra.codexResultInvocations, invocations)
+      && same(extra.codexPendingAgentResults, pending)) return;
+    this.stateStore.update(this.id, { extra: { ...extra,
+      codexDelegations: delegations,
+      codexResultInvocations: invocations,
+      codexPendingAgentResults: pending,
     } });
   }
 
@@ -2572,6 +2928,7 @@ function rolloutCaughtUp(
     && checkpoint.ownerSessionMetaOffset !== null
     && checkpoint.activeTurn === null
     && checkpoint.pendingTerminal === null
+    && !checkpoint.deferredTerminals?.length
     && checkpoint.pendingFusion === null
     && checkpoint.pendingSubagent === null
     && checkpoint.forkBootstrap === undefined;
@@ -2968,24 +3325,57 @@ function sameFileVersion(a: fsSync.Stats, b: fsSync.Stats): boolean {
     && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
 }
 
+function sourceVersion(stat: fsSync.Stats): string {
+  return [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':');
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function parsePendingTerminal(raw: unknown): CodexPendingTerminalTurn | null {
+  const value = asRecord(raw);
+  if (!value || typeof value.turnId !== 'string' || !isNonNegativeSafeInteger(value.terminalEndOffset)) return null;
+  const failure = asRecord(value.failure);
+  const validFailure = failure && typeof failure.sourceVersion === 'string'
+    && isNonNegativeSafeInteger(failure.retryAtMs)
+    && isNonNegativeSafeInteger(failure.delayMs)
+    && failure.delayMs >= RECOVERY_RETRY_MIN_MS && failure.delayMs <= RECOVERY_RETRY_MAX_MS;
+  return {
+    turnId: value.turnId, terminalEndOffset: value.terminalEndOffset,
+    ...(isNonNegativeSafeInteger(value.retryCount) ? { retryCount: value.retryCount } : {}),
+    ...(isNonNegativeSafeInteger(value.firstPendingAtMs) ? { firstPendingAtMs: value.firstPendingAtMs } : {}),
+    ...(isNonNegativeSafeInteger(value.lastAttemptAtMs) ? { lastAttemptAtMs: value.lastAttemptAtMs } : {}),
+    ...(isNonNegativeSafeInteger(value.sourceRecordCount) ? { sourceRecordCount: value.sourceRecordCount } : {}),
+    ...(validFailure ? { failure: {
+      sourceVersion: failure.sourceVersion as string,
+      retryAtMs: failure.retryAtMs as number,
+      delayMs: failure.delayMs as number,
+    } } : {}),
+  };
+}
+
 async function findOwnerSessionMetaOffset(
   filePath: string,
   endOffset: number,
   runtime?: InputRuntimeAccumulator | null,
-): Promise<number | null> {
+): Promise<{ offset: number | null; completeAbsence: boolean }> {
   let ownerOffset: number | null = null;
-  let sawSessionMeta = false;
-  await scanJsonLines(filePath, 0, endOffset, line => {
+  const scan = await scanJsonLines(filePath, 0, endOffset, line => {
     if (line.record.type !== 'session_meta') {
       // Codex writes the owning meta and any copied fork metadata as a header.
-      // Stop before scanning the potentially large inherited conversation.
-      return sawSessionMeta ? false : undefined;
+      // Only a valid owner closes that header. A malformed session_meta must
+      // not turn a partial probe into an uncacheable negative on every poll.
+      return ownerOffset !== null ? false : undefined;
     }
-    sawSessionMeta = true;
     ownerOffset = selectOwnerSessionMetaOffset(filePath, ownerOffset, line);
     return undefined;
   }, runtime);
-  return ownerOffset;
+  return {
+    offset: ownerOffset,
+    completeAbsence: ownerOffset === null && scan.nextOffset === endOffset
+      && !scan.quarantined && !scan.incompleteTail,
+  };
 }
 
 type ForkAnchorKind = 'initial-hook' | 'uuidv7' | 'terminal-recovery';
@@ -3002,6 +3392,7 @@ async function findTurnStartOffset(
 ): Promise<{
   startOffset: number | null;
   nextOffset: number;
+  incompleteTail?: IncompleteJsonlTail;
   turnId?: string;
   anchorKind?: ForkAnchorKind;
 }> {
@@ -3011,7 +3402,7 @@ async function findTurnStartOffset(
   const safeStart = boundedSearchOffset(startOffset, fileSize);
   const scanEnd = Math.min(fileSize, safeStart + MAX_SCAN_BYTES_PER_FILE_CYCLE);
   const ownerTimestamp = uuidV7TimestampMs(ownerThreadId);
-  const { nextOffset } = await scanJsonLines(filePath, safeStart, scanEnd, line => {
+  const processLine = (line: JsonLine): void | false => {
     const payload = asRecord(line.record.payload);
     if (!payload) return undefined;
     const candidateTurnId = turnIdForStart(line.record, payload);
@@ -3043,10 +3434,21 @@ async function findTurnStartOffset(
       return false;
     }
     return undefined;
-  }, runtime);
+  };
+  let scan = await scanJsonLines(filePath, safeStart, scanEnd, processLine, runtime);
+  // A cycle budget is not a record-size limit. Finish one record when the
+  // window contains no complete line, as the baseline-tail scanner does.
+  // scanJsonLines retains its normal oversized-record quarantine bound.
+  if (scan.nextOffset === safeStart && scanEnd < fileSize) {
+    scan = await scanJsonLines(filePath, safeStart, fileSize, line => {
+      processLine(line);
+      return false;
+    }, runtime);
+  }
   return {
     startOffset: turnStartOffset,
-    nextOffset,
+    nextOffset: scan.nextOffset,
+    ...(scan.incompleteTail ? { incompleteTail: scan.incompleteTail } : {}),
     ...(matchedTurnId ? { turnId: matchedTurnId } : {}),
     ...(anchorKind ? { anchorKind } : {}),
   };
@@ -3174,8 +3576,8 @@ function parseActiveTranscriptTurn(value: unknown): CodexActiveTranscriptTurn | 
   if (
     !active
     || typeof active.turnId !== 'string'
-    || typeof active.startOffset !== 'number'
-    || typeof active.startedAtMs !== 'number'
+    || !isNonNegativeSafeInteger(active.startOffset)
+    || !isNonNegativeSafeInteger(active.startedAtMs)
   ) return null;
   const model = stringValue(active.model);
   const cwd = stringValue(active.cwd);
@@ -3184,7 +3586,7 @@ function parseActiveTranscriptTurn(value: unknown): CodexActiveTranscriptTurn | 
     turnId: active.turnId,
     startOffset: active.startOffset,
     startedAtMs: active.startedAtMs,
-    ...(typeof active.nextStepStartedAtMs === 'number'
+    ...(isNonNegativeSafeInteger(active.nextStepStartedAtMs)
       ? { nextStepStartedAtMs: active.nextStepStartedAtMs }
       : {}),
     ...(typeof active.lastCumulativeTokenTotal === 'number'
@@ -3217,7 +3619,7 @@ function parsePendingFusionChildren(value: unknown): CodexPendingFusionChild[] {
       !child
       || typeof child.parentToolCallId !== 'string'
       || typeof child.parentTraceId !== 'string'
-      || typeof child.spawnedAtMs !== 'number'
+      || !isNonNegativeSafeInteger(child.spawnedAtMs)
     ) continue;
     children.push({
       parentToolCallId: child.parentToolCallId,
@@ -3349,8 +3751,8 @@ function newPendingTerminal(
   turnId: string,
   terminalEndOffset: number,
   sourceRecordCount: number,
+  now = Date.now(),
 ): CodexPendingTerminalTurn {
-  const now = Date.now();
   return {
     turnId,
     terminalEndOffset,

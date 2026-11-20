@@ -12,12 +12,15 @@ import { publishQoderWakeup } from '../../assets/hooks/qoder/hook-wakeup.mjs';
 import type { AgentActivityEntry } from '../../src/types/index.js';
 
 const secret = 'sk-' + 'synthetic'.repeat(4); // Construct an artificial mask fixture, never a credential.
+const maskedSecret = '[APIKEY_MASKED]{sk-s' + '*'.repeat(31) + 'etic}';
 const epoch = Date.now() - 60_000;
 const at = (turn: number, ms: number) => new Date(epoch + turn * 10_000 + ms).toISOString();
 function rows(turn: number, cli: boolean) {
   const progress = (hookEvent: string, ms: number) => ({ type: 'progress', timestamp: at(turn, ms), data: { hookEvent } });
   return [progress('UserPromptSubmit', 0),
     { type: 'user', uuid: `user-${turn}`, timestamp: at(turn, 10), ...(cli ? { entrypoint: 'cli' } : {}), message: { role: 'user', content: `prompt ${turn} ${secret}` } },
+    // Native progress can arrive after its user row; it must not split the Turn.
+    progress('UserPromptSubmit', 20),
     { type: 'assistant', timestamp: at(turn, 100), message: { id: `response-${turn}-0`, model: 'synthetic-model', role: 'assistant', usage: { request_id: `req-${turn}-0` }, content: [{ type: 'tool_use', id: `tool-${turn}`, name: 'Read', input: { path: secret } }], stop_reason: 'tool_use' } },
     progress('PreToolUse', 120),
     { type: 'user', timestamp: at(turn, 200), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `tool-${turn}`, content: `result ${secret}` }] } },
@@ -86,6 +89,12 @@ describe.each(['qoder', 'qoder-cn'] as const)('%s native transcript to enriched 
     expect(flusher.batchCalls.length).toBe(queuedBeforeDuplicate);
     await manager!.stopAll();
     const initial = flusher.batchCalls.flat();
+    const userTexts = (event: string) => initial.filter(row => row['event.name'] === event)
+      .flatMap(row => row['gen_ai.input.messages_delta'] ?? [])
+      .filter(message => message.role === 'user')
+      .flatMap(message => message.parts.filter(part => part.type === 'text').map(part => part.content));
+    expect(userTexts('other')).toEqual([`prompt 0 ${maskedSecret}`, `prompt 1 ${maskedSecret}`]);
+    expect(userTexts('llm.request')).toEqual([`prompt 0 ${maskedSecret}`, `prompt 1 ${maskedSecret}`]);
     expect(new Set(initial.map(row => row['gen_ai.turn.id'])).size).toBe(2);
     expect(initial.filter(row => row['event.name'] === 'tool.call')).toHaveLength(2);
     expect(initial.filter(row => row['event.name'] === 'tool.result')).toHaveLength(2);
@@ -106,7 +115,7 @@ describe.each(['qoder', 'qoder-cn'] as const)('%s native transcript to enriched 
     expect(JSON.stringify(entries)).not.toContain(secret);
     expect(JSON.stringify(entries)).toContain('[APIKEY_MASKED]');
     expect(entries.filter(row => row['event.name'] === 'tool.call').map(row => row['gen_ai.tool.call.arguments']))
-      .toEqual(Array.from({ length: 3 }, () => ({ path: '[APIKEY_MASKED]' })));
+      .toEqual(Array.from({ length: 3 }, () => ({ path: maskedSecret })));
 
     const converted = await convertEventLogToReadableSpans(entries.filter(row => row['event.name'] !== 'agent.input') as unknown as EventLogRecord[], { strict: false });
     const spans = converted.spans;

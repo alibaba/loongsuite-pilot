@@ -26,6 +26,7 @@ vi.mock('../../src/inputs/qoder-cn-trace/sqlite-token-reader.js', async original
 const epoch = Date.now() - 60_000;
 const stamp = (ms: number) => new Date(epoch + ms).toISOString();
 const secret = 'sk-' + 'synthetic'.repeat(4);
+const maskedSecret = '[APIKEY_MASKED]{sk-s' + '*'.repeat(31) + 'etic}';
 let root: string;
 let source: QoderTranscriptSource | undefined;
 let manager: InputManager | undefined;
@@ -114,14 +115,18 @@ describe.skipIf(!loadDatabaseSync()).each(['qoder', 'qoder-cn'] as const)('%s re
     };
     let input = createInput(); await input.start(); await (input as any).cyclePromise;
     expect(output.batchCalls.flat()).toEqual([]);
-    await (input as any).runCycle(); await flusher.flush();
+    await (input as any).runCycle();
+    // Collection queues output through InputManager; it does not await the
+    // async fan-out for non-Codex inputs. Wait for the owner before inspecting it.
+    await (manager as any).drainAllEntryQueues();
+    await flusher.flush();
     const events = output.batchCalls.flat();
     expect(new Set(events.map(row => row['gen_ai.turn.id'])).size).toBe(1);
     expect(new Set(events.map(row => row['event.id'])).size).toBe(events.length);
     expect(events.filter(row => row['event.name'] === 'llm.request')).toHaveLength(2);
     expect(events.filter(row => row['event.name'] === 'llm.response').map(row => row['gen_ai.usage.input_tokens'])).toEqual([100, 110]);
     expect(events.filter(row => row['event.name'] === 'tool.call').map(row => row['gen_ai.tool.call.arguments']))
-      .toEqual([{ path: '[APIKEY_MASKED]', options: { enabled: true, counts: [2, 3] } }]);
+      .toEqual([{ path: maskedSecret, options: { enabled: true, counts: [2, 3] } }]);
     expect(events.filter(row => row['event.name'] === 'tool.result')).toHaveLength(1);
     expect(events.filter(row => row['event.name'] === 'llm.response').every(row => row['agent.transcript_incomplete'] === true)).toBe(true);
     expect(JSON.stringify(events)).not.toContain(secret);

@@ -1,12 +1,19 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
+import * as promises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { QoderLegacyHookReader } from '../../../src/inputs/qoder-trace/legacy-hook-reader.js';
 import type { InputRuntimeAccumulator } from '../../../src/inputs/base/input-runtime-metrics.js';
 
+// Copy the ESM namespace so spies can replace exports. Direct spying on the
+// native namespace throws "Cannot redefine property: stat" in this runner.
+vi.mock('node:fs/promises', async importOriginal => ({
+  ...await importOriginal<typeof import('node:fs/promises')>(),
+}));
+
 let root: string;
-afterEach(() => { if (root) fs.rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); if (root) fs.rmSync(root, { recursive: true, force: true }); });
 function setup(recordBytes = 256 * 1024) {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-legacy-reader-'));
   const file = path.join(root, 'history.jsonl');
@@ -92,4 +99,37 @@ it('invalidates a growing partial record when its identity prefix was rewritten'
   const buffers: Buffer[] = [];
   for (let i = 0; i < 4 && p.offset() < fs.statSync(p.file).size; i++) buffers.push((await p.poll()).buffer);
   expect(JSON.parse(Buffer.concat(buffers).toString())).toEqual({ id: 'new', text: 'x'.repeat(96 * 1024) });
+});
+
+it.each(['rewrite', 'append'])('checks growing partial records with unchanged timestamps (%s)', async mode => {
+  const p = setup();
+  const coarseTimes = { mtimeMs: 1700000000000, ctimeMs: 1700000000000 };
+  const snapshot = (stat: fs.Stats): fs.Stats => Object.create(Object.getPrototypeOf(stat), {
+    ...Object.getOwnPropertyDescriptors(stat),
+    mtimeMs: { value: coarseTimes.mtimeMs, enumerable: true, configurable: true },
+    ctimeMs: { value: coarseTimes.ctimeMs, enumerable: true, configurable: true },
+  });
+  const open = promises.open;
+  // Model a coarse-timestamp filesystem while retaining real bytes, inode,
+  // sizes and bounded reads. Both stat paths must describe the same source.
+  vi.spyOn(promises, 'stat').mockImplementation(async file => snapshot(fs.statSync(file)));
+  vi.spyOn(promises, 'open').mockImplementation(async (...args) => {
+    const handle = await open(...args);
+    vi.spyOn(handle, 'stat').mockImplementation(async () => snapshot(fs.fstatSync(handle.fd)));
+    return handle;
+  });
+  fs.writeFileSync(p.file, '{"id":"old","text":"' + 'x'.repeat(96 * 1024));
+  expect((await p.poll()).nextOffset).toBe(0);
+  if (mode === 'rewrite') fs.writeFileSync(p.file, JSON.stringify({ id: 'new', text: 'x'.repeat(96 * 1024) }) + '\n');
+  else fs.appendFileSync(p.file, '"}\n');
+  const buffers: Buffer[] = [];
+  for (let i = 0; i < 4 && p.offset() < fs.statSync(p.file).size; i++) {
+    const batch = await p.poll();
+    expect(batch.bytes).toBeLessThanOrEqual(64 * 1024);
+    buffers.push(batch.buffer);
+  }
+  const value = JSON.parse(Buffer.concat(buffers).toString());
+  expect(value.id).toBe(mode === 'rewrite' ? 'new' : 'old');
+  expect(value.text).toBe('x'.repeat(96 * 1024));
+  expect((await p.poll()).bytes).toBe(0);
 });

@@ -60,7 +60,9 @@ export class QoderLegacyHookReader {
       let tail = this.tail;
       if (!tail || tail.file !== file || tail.dev !== stat.dev || tail.ino !== stat.ino
         || tail.committed !== offset || stat.size < tail.position) tail = undefined;
-      if (tail && (tail.mtime !== stat.mtimeMs || tail.ctime !== stat.ctimeMs)) {
+      // Growth can share the previous timestamps on coarse filesystems. Still
+      // verify the retained prefix before combining it with newly read bytes.
+      if (tail && (tail.size !== stat.size || tail.mtime !== stat.mtimeMs || tail.ctime !== stat.ctimeMs)) {
         let append = stat.size > tail.size;
         if (append && tail.witness.length) {
           const witness = Buffer.alloc(tail.witness.length);
@@ -125,6 +127,8 @@ export class QoderLegacyHookReader {
       tail.mtime = stat.mtimeMs;
       tail.ctime = stat.ctimeMs;
       return {
+        stat,
+        scanPending: tail.position < stat.size,
         buffer: completed.length === 1 ? completed[0] : Buffer.concat(completed, total),
         nextOffset: tail.committed,
         quarantine,

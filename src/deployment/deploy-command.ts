@@ -5,6 +5,7 @@ import type { AnalyticsConfig, DeployResult } from '../types/index.js';
 import { DeploymentManager } from './deployment-manager.js';
 import { ensureRegisteredPiSdkWrappers } from '../pi-sdk/pi-sdk-agent-registry.js';
 import { loadConfig } from '../core/config-loader.js';
+import { shouldDeployInterceptorHooks } from '../interceptor/config.js';
 import { resolveHome } from '../utils/fs-utils.js';
 import { createLogger, redirectRootLoggerToStderr } from '../utils/logger.js';
 
@@ -134,7 +135,10 @@ export async function runDeployCommand(argv: string[]): Promise<number> {
     return 0;
   });
 
-  const manager = new DeploymentManager({ dataDir, pilotDir, installedBy: 'build' });
+  const manager = new DeploymentManager({
+    dataDir, pilotDir, installedBy: 'build', doubaoWork: config.listeners['doubao-work'],
+    deployInterceptorHooks: shouldDeployInterceptorHooks(config.interceptor),
+  });
   const results = await manager.deployAll(def => isAgentGatedEnabled(config, def.id));
 
   // Probe workers started during detection must not survive into the image: a

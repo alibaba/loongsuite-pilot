@@ -10,46 +10,55 @@ describe('agent multimodal gate', () => {
   it('lists only agents with multimodal extraction implemented', () => {
     expect(MULTIMODAL_SUPPORTED_AGENT_IDS).toContain('codex');
     expect(MULTIMODAL_SUPPORTED_AGENT_IDS).toContain('qoder');
+    expect(MULTIMODAL_SUPPORTED_AGENT_IDS).toContain('qwen-work-cn');
     expect(isMultimodalSupportedAgent('codex')).toBe(true);
     expect(isMultimodalSupportedAgent('qoder')).toBe(true);
+    expect(isMultimodalSupportedAgent('qwen-work-cn')).toBe(true);
     // cursor: multimodal extraction not implemented yet
     expect(isMultimodalSupportedAgent('cursor')).toBe(false);
   });
 
-  it('requires a supported agent id and non-none uploadMode', () => {
+  it('requires supported agent id, message capture, and non-none uploadMode', () => {
     const enabled = {
+      captureMessageContent: true,
       multimodal: { uploadMode: 'all' as const },
     };
     expect(isAgentMultimodalEnabled('codex', enabled)).toBe(true);
     expect(isAgentMultimodalEnabled('qoder', enabled)).toBe(true);
+    expect(isAgentMultimodalEnabled('qwen-work-cn', enabled)).toBe(true);
     expect(isAgentMultimodalEnabled('cursor', enabled)).toBe(false);
     expect(isAgentMultimodalEnabled('codex', {
       captureMessageContent: false,
       multimodal: { uploadMode: 'all' },
-    })).toBe(true);
+    })).toBe(false);
     expect(isAgentMultimodalEnabled('codex', {
+      captureMessageContent: true,
       multimodal: { uploadMode: 'none' },
     })).toBe(false);
-    expect(isAgentMultimodalEnabled('codex', {})).toBe(false);
+    expect(isAgentMultimodalEnabled('codex', { captureMessageContent: true })).toBe(false);
   });
 
   it('anyAgentMultimodalEnabled scans agents map with id capability check', () => {
     expect(anyAgentMultimodalEnabled({
       cursor: {
+        captureMessageContent: true,
         multimodal: { uploadMode: 'all' },
       },
       codex: {
+        captureMessageContent: true,
         multimodal: { uploadMode: 'all' },
       },
     })).toBe(true);
     expect(anyAgentMultimodalEnabled({
       cursor: {
+        captureMessageContent: true,
         multimodal: { uploadMode: 'all' },
       },
     })).toBe(false);
     expect(anyAgentMultimodalEnabled({})).toBe(false);
     expect(anyAgentMultimodalEnabled({
       codex: {
+        captureMessageContent: true,
         multimodal: { uploadMode: 'none' },
       },
     })).toBe(false);

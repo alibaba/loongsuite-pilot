@@ -2,6 +2,45 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+
+const blockedReads = vi.hoisted(() => new Set<string>());
+const scanDelays = vi.hoisted(() => new Map<string, () => Promise<void>>());
+const sortedReads = vi.hoisted(() => new Set<string>());
+const failOpenOnCount = vi.hoisted(() => new Map<string, number>());
+const openCounts = vi.hoisted(() => new Map<string, number>());
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  return {
+    ...actual,
+    readdir: async (target: string, options: { withFileTypes: true }) => {
+      if (blockedReads.has(path.resolve(target))) {
+        return Promise.reject(Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+      }
+      const delay = scanDelays.get(path.resolve(target));
+      if (delay) {
+        scanDelays.delete(path.resolve(target));
+        await delay();
+      }
+      const entries = await actual.readdir(target, options);
+      if (sortedReads.has(path.resolve(target))) {
+        entries.sort((left, right) => left.name.localeCompare(right.name));
+      }
+      return entries;
+    },
+    open: async (filePath: string, flags: string) => {
+      const resolved = path.resolve(filePath);
+      const failAt = failOpenOnCount.get(resolved);
+      if (failAt !== undefined) {
+        const count = (openCounts.get(resolved) ?? 0) + 1;
+        openCounts.set(resolved, count);
+        if (count === failAt) {
+          throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        }
+      }
+      return actual.open(filePath, flags);
+    },
+  };
+});
 import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/resource-context.mjs';
 import { AgentDiscoveryService } from '../../../../src/core/agent-discovery-service.js';
 import { WorkspacePolicy } from '../../../../src/core/workspace-policy.js';
@@ -34,6 +73,11 @@ const CHILD_FIXTURES = [
 ] as const;
 
 afterEach(async () => {
+  blockedReads.clear();
+  scanDelays.clear();
+  sortedReads.clear();
+  failOpenOnCount.clear();
+  openCounts.clear();
   await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -427,6 +471,31 @@ async function appendOversizedTerminal(transcript: string, terminal = 'task_comp
 }
 
 describe('CodexTranscriptInput', () => {
+  it('collects a known session terminal and all tool waves from an actual wakeup without a full rescan', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-real-wakeup-'));
+    tempDirs.push(root);
+    const { input, sessionDir, wakeupDir, entries, stateStore } = await createDormantInput(root);
+    const lines = completedTurn().trimEnd().split('\n');
+    const transcript = await writeTranscript(sessionDir, lines[0] + '\n');
+    try {
+      await input.start();
+      const discovery = vi.spyOn(input as any, 'discoverSessionFiles');
+      await fs.appendFile(transcript, lines.slice(1).join('\n') + '\n');
+      await writeWakeupMarker(wakeupDir, 'session-1', { session_id: 'session-1', transcript_path: transcript,
+        hook_event: 'stop', received_at: new Date().toISOString() });
+      await waitFor(() => entries.some(entry => entry['gen_ai.turn.end'] === true));
+      expect(discovery).not.toHaveBeenCalled();
+      expect(responsesForTurn(entries, 'turn-1')).toHaveLength(3);
+      expect(entries.filter(entry => entry['event.name'] === 'tool.call')).toHaveLength(2);
+      expect(entries.filter(entry => entry['event.name'] === 'tool.result')).toHaveLength(2);
+      expect(new Set(entries.map(entry => entry['event.id'])).size).toBe(entries.length);
+      await input.stop();
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+        scanOffset: (await fs.stat(transcript)).size, activeTurn: null, pendingTerminal: null,
+      });
+    } finally { await input.stop(); }
+  });
+
   it('closes an already emitted turn at the next start without duplicating its responses', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-missing-terminal-'));
     tempDirs.push(root);
@@ -736,6 +805,409 @@ describe('CodexTranscriptInput', () => {
       }
     },
   );
+
+  it('collects a session completed after sessions is restored from the wakeup fallback', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-restore-session-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const wakeupDir = path.join(root, 'wakeups');
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.mkdir(wakeupDir, { recursive: true });
+    const { input, entries } = await createDormantInput(root);
+    const svc = new AgentDiscoveryService([{
+      id: input.id,
+      type: input.collectionMethod,
+      watchPaths: CodexTranscriptInput.getWatchPaths(wakeupDir, sessionDir),
+      isAvailable: () => CodexTranscriptInput.checkAvailability(wakeupDir, sessionDir),
+      enabled: () => true,
+      start: () => input.start(),
+      stop: () => input.stop(),
+      pollIntervalMs: 50,
+    }]);
+    try {
+      await svc.start();
+      expect(input.running).toBe(true);
+
+      await fs.rm(sessionDir, { recursive: true });
+      await waitFor(() => svc.getStates()[input.id] === 'idle');
+      expect(input.running).toBe(false);
+
+      await fs.mkdir(sessionDir, { recursive: true });
+      await waitFor(() => svc.getStates()[input.id] === 'running');
+      // Drain the startup scan before writing so the rollout is neither
+      // baselined as history nor missed by a coalesced collection request.
+      await runInputCycle(input);
+
+      await writeTranscript(sessionDir, completedTurn());
+      await runInputCycle(input);
+      expect(entries.some(entry => entry['gen_ai.turn.end'] === true)).toBe(true);
+      expect(responsesForTurn(entries, 'turn-1').length).toBeGreaterThan(0);
+    } finally {
+      await svc.stop();
+    }
+  });
+
+  it('collects a session that finished before the collector restarted', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-restore-finished-session-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const wakeupDir = path.join(root, 'wakeups');
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.mkdir(wakeupDir, { recursive: true });
+    const { input, entries } = await createDormantInput(root);
+    const svc = new AgentDiscoveryService([{
+      id: input.id,
+      type: input.collectionMethod,
+      watchPaths: CodexTranscriptInput.getWatchPaths(wakeupDir, sessionDir),
+      isAvailable: () => CodexTranscriptInput.checkAvailability(wakeupDir, sessionDir),
+      enabled: () => true,
+      start: () => input.start(),
+      stop: () => input.stop(),
+      pollIntervalMs: 50,
+    }]);
+    try {
+      await svc.start();
+      expect(input.running).toBe(true);
+
+      await fs.rm(sessionDir, { recursive: true });
+      await waitFor(() => !input.running);
+      expect(svc.getStates()[input.id]).toBe('idle');
+
+      await fs.mkdir(sessionDir, { recursive: true });
+      await writeTranscript(sessionDir, completedTurn());
+      await waitFor(() => input.running);
+      await runInputCycle(input);
+      expect(entries.some(entry => entry['gen_ai.turn.end'] === true)).toBe(true);
+      expect(responsesForTurn(entries, 'turn-1').length).toBeGreaterThan(0);
+    } finally {
+      await svc.stop();
+    }
+  });
+
+  it('collects a session finished during upgrade when older checkpoints exist', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-upgrade-baseline-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    await fs.mkdir(sessionDir, { recursive: true });
+    const oldTranscript = await writeTranscript(sessionDir, completedTurn());
+    const stat = await fs.stat(oldTranscript);
+    const seeded = new StateStore(path.join(root, 'input-state.json'));
+    await seeded.load();
+    seeded.update(`codex-transcript:${oldTranscript}`, {
+      lastOffset: stat.size,
+      extra: {
+        codexTranscript: {
+          inode: stat.ino,
+          scanOffset: stat.size,
+          activeTurn: null,
+          pendingTerminal: null,
+          pendingFusion: null,
+          pendingSubagent: null,
+          ownerSessionMetaOffset: 0,
+        },
+      },
+    });
+    await seeded.save();
+    const dayDir = path.dirname(oldTranscript);
+    await fs.writeFile(
+      path.join(dayDir, 'rollout-session-upgrade.jsonl'),
+      completedTurn().replaceAll('turn-1', 'turn-upgrade'),
+      'utf8',
+    );
+    const { input, entries, stateStore } = await createDormantInput(root);
+    try {
+      await input.start();
+      await runInputCycle(input);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).toBe(true);
+      expect(entries.some(entry => entry['gen_ai.turn.end'] === true
+        && entry['agent.codex.transcript_turn_id'] === 'turn-upgrade')).toBe(true);
+      expect(responsesForTurn(entries, 'turn-upgrade').length).toBeGreaterThan(0);
+      expect(responsesForTurn(entries, 'turn-1')).toEqual([]);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('baselines history found after an incomplete first scan', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-partial-scan-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const dayDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(dayDir, { recursive: true });
+    const oldTranscript = path.join(dayDir, 'rollout-session-1.jsonl');
+    await fs.writeFile(oldTranscript, completedTurn().replaceAll('turn-1', 'turn-old'), 'utf8');
+    const past = new Date('2020-01-01T00:00:00Z');
+    await fs.utimes(oldTranscript, past, past);
+    const { input, entries, stateStore } = await createDormantInput(root);
+    blockedReads.add(path.resolve(dayDir));
+    try {
+      await input.start();
+      await runInputCycle(input);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
+      expect(entries.some(entry => entry['gen_ai.turn.end'] === true)).toBe(false);
+
+      blockedReads.clear();
+      await runInputCycle(input);
+      expect(entries.some(entry => entry['gen_ai.turn.end'] === true)).toBe(false);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).toBe(true);
+
+      await fs.writeFile(
+        path.join(dayDir, 'rollout-session-fresh.jsonl'),
+        completedTurn().replaceAll('turn-1', 'turn-fresh'),
+        'utf8',
+      );
+      await runInputCycle(input);
+      expect(entries.some(entry => entry['gen_ai.turn.end'] === true
+        && entry['agent.codex.transcript_turn_id'] === 'turn-fresh')).toBe(true);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('collects a session created after startup while another date directory stays unreadable', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-partial-new-session-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const blockedDir = path.join(sessionDir, '2026', '06', '23');
+    const readableDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(blockedDir, { recursive: true });
+    await fs.mkdir(readableDir, { recursive: true });
+    const { input, entries, stateStore } = await createDormantInput(root);
+    blockedReads.add(path.resolve(blockedDir));
+    try {
+      await input.start();
+      await runInputCycle(input);
+      await fs.writeFile(
+        path.join(readableDir, 'rollout-session-new.jsonl'),
+        completedTurn().replaceAll('turn-1', 'turn-new'),
+        'utf8',
+      );
+      await runInputCycle(input);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
+      expect(responsesForTurn(entries, 'turn-new').length).toBeGreaterThan(0);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('collects a new session after the same input restarts from a partial scan', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-partial-restart-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const dayDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(dayDir, { recursive: true });
+    const oldTranscript = path.join(dayDir, 'rollout-session-1.jsonl');
+    await fs.writeFile(oldTranscript, completedTurn().replaceAll('turn-1', 'turn-old'), 'utf8');
+    const past = new Date('2020-01-01T00:00:00Z');
+    await fs.utimes(oldTranscript, past, past);
+    const { input, entries, stateStore } = await createDormantInput(root);
+    blockedReads.add(path.resolve(dayDir));
+    try {
+      await input.start();
+      expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
+      await input.stop();
+      blockedReads.delete(path.resolve(dayDir));
+      await input.start();
+      await runInputCycle(input);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).toBe(true);
+      expect(responsesForTurn(entries, 'turn-old')).toEqual([]);
+
+      await fs.writeFile(
+        path.join(dayDir, 'rollout-session-fresh.jsonl'),
+        completedTurn().replaceAll('turn-1', 'turn-fresh'),
+        'utf8',
+      );
+      await runInputCycle(input);
+      expect(responsesForTurn(entries, 'turn-fresh').length).toBeGreaterThan(0);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('collects a session written while stopped before the first scan finishes', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-pending-restart-new-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const blockedDir = path.join(sessionDir, '2026', '06', '23');
+    const readableDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(blockedDir, { recursive: true });
+    await fs.mkdir(readableDir, { recursive: true });
+    const { input, entries, stateStore } = await createDormantInput(root);
+    blockedReads.add(path.resolve(blockedDir));
+    try {
+      await input.start();
+      expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
+      await input.stop();
+      await fs.writeFile(
+        path.join(readableDir, 'rollout-session-new.jsonl'),
+        completedTurn().replaceAll('turn-1', 'turn-while-stopped'),
+        'utf8',
+      );
+      await input.start();
+      await runInputCycle(input);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
+      expect(responsesForTurn(entries, 'turn-while-stopped').length).toBeGreaterThan(0);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('does not treat checkpoints from an unfinished scan as a completed baseline', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-pending-not-legacy-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const blockedDir = path.join(sessionDir, '2026', '06', '23');
+    const readableDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(blockedDir, { recursive: true });
+    await fs.mkdir(readableDir, { recursive: true });
+    const past = new Date('2020-01-01T00:00:00Z');
+    const hidden = path.join(blockedDir, 'rollout-session-hidden.jsonl');
+    const seen = path.join(readableDir, 'rollout-session-seen.jsonl');
+    await fs.writeFile(hidden, completedTurn().replaceAll('turn-1', 'turn-hidden'), 'utf8');
+    await fs.writeFile(seen, completedTurn().replaceAll('turn-1', 'turn-seen'), 'utf8');
+    await fs.utimes(hidden, past, past);
+    await fs.utimes(seen, past, past);
+    const { input, entries, stateStore } = await createDormantInput(root);
+    blockedReads.add(path.resolve(blockedDir));
+    try {
+      await input.start();
+      expect(stateStore.get(input.id).extra?.baselineUnfinished).toBe(true);
+      await input.stop();
+      await input.start();
+      expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
+      blockedReads.delete(path.resolve(blockedDir));
+      await runInputCycle(input);
+      expect(responsesForTurn(entries, 'turn-hidden')).toEqual([]);
+      expect(responsesForTurn(entries, 'turn-seen')).toEqual([]);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).toBe(true);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('keeps a partial file baseline unfinished for the same input', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-file-baseline-retry-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const dayDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(dayDir, { recursive: true });
+    const past = new Date('2020-01-01T00:00:00Z');
+    const later = path.join(dayDir, 'rollout-z.jsonl');
+    for (const [name, turn] of [['rollout-a.jsonl', 'turn-first'], ['rollout-z.jsonl', 'turn-second']] as const) {
+      const file = path.join(dayDir, name);
+      await fs.writeFile(file, completedTurn().replaceAll('turn-1', turn), 'utf8');
+      await fs.utimes(file, past, past);
+    }
+    sortedReads.add(path.resolve(dayDir));
+    failOpenOnCount.set(path.resolve(later), 3);
+    const { input, entries, stateStore } = await createDormantInput(root);
+    try {
+      await expect(input.start()).rejects.toThrow(/EACCES/);
+      expect(stateStore.get(input.id).extra?.baselineUnfinished).toBe(true);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
+      expect(stateStore.keys().some(key => key.startsWith(`${input.id}:`))).toBe(true);
+      failOpenOnCount.clear();
+      await input.start();
+      await runInputCycle(input);
+      expect(responsesForTurn(entries, 'turn-first')).toEqual([]);
+      expect(responsesForTurn(entries, 'turn-second')).toEqual([]);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).toBe(true);
+      expect(stateStore.get(input.id).extra?.baselineUnfinished).not.toBe(true);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('keeps a partial file baseline unfinished after the state is reloaded', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-file-baseline-reload-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const dayDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(dayDir, { recursive: true });
+    const past = new Date('2020-01-01T00:00:00Z');
+    const later = path.join(dayDir, 'rollout-z.jsonl');
+    for (const [name, turn] of [['rollout-a.jsonl', 'turn-first'], ['rollout-z.jsonl', 'turn-second']] as const) {
+      const file = path.join(dayDir, name);
+      await fs.writeFile(file, completedTurn().replaceAll('turn-1', turn), 'utf8');
+      await fs.utimes(file, past, past);
+    }
+    sortedReads.add(path.resolve(dayDir));
+    failOpenOnCount.set(path.resolve(later), 3);
+    const first = await createDormantInput(root);
+    await expect(first.input.start()).rejects.toThrow(/EACCES/);
+    await first.stateStore.save();
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const input = new CodexTranscriptInput({
+      stateStore,
+      sessionDir,
+      wakeupDir: path.join(root, 'wakeups'),
+      spanContextDir: path.join(root, 'span-contexts'),
+      pollIntervalMs: 60_000,
+    });
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', batch => entries.push(...batch));
+    failOpenOnCount.clear();
+    try {
+      expect(stateStore.get(input.id).extra?.baselineUnfinished).toBe(true);
+      await input.start();
+      await runInputCycle(input);
+      expect(responsesForTurn(entries, 'turn-first')).toEqual([]);
+      expect(responsesForTurn(entries, 'turn-second')).toEqual([]);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).toBe(true);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('baselines a session written in the same millisecond as startup', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-same-ms-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const transcript = await writeTranscript(sessionDir, completedTurn().replaceAll('turn-1', 'turn-same-ms'));
+    const stat = await fs.stat(transcript);
+    const earliest = Math.min(...[stat.birthtimeMs, stat.mtimeMs].filter(ms => ms > 0));
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Math.floor(earliest));
+    const { input, entries, stateStore } = await createDormantInput(root);
+    try {
+      await input.start();
+      await runInputCycle(input);
+      expect(responsesForTurn(entries, 'turn-same-ms')).toEqual([]);
+      expect(transcriptCheckpoint(stateStore, transcript).scanOffset).toBe(stat.size);
+    } finally {
+      now.mockRestore();
+      await input.stop();
+    }
+  });
+
+  it('collects a session created while the first scan is still reading', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-scan-race-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const dayDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(dayDir, { recursive: true });
+    const oldTranscript = path.join(dayDir, 'rollout-session-old.jsonl');
+    await fs.writeFile(oldTranscript, completedTurn().replaceAll('turn-1', 'turn-old'), 'utf8');
+    const past = new Date('2020-01-01T00:00:00Z');
+    await fs.utimes(oldTranscript, past, past);
+    const { input, entries } = await createDormantInput(root);
+    scanDelays.set(path.resolve(sessionDir), async () => {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await fs.writeFile(
+        path.join(dayDir, 'rollout-session-new.jsonl'),
+        completedTurn().replaceAll('turn-1', 'turn-during-scan'),
+        'utf8',
+      );
+    });
+    try {
+      await input.start();
+      await runInputCycle(input);
+      expect(responsesForTurn(entries, 'turn-old')).toEqual([]);
+      expect(responsesForTurn(entries, 'turn-during-scan').length).toBeGreaterThan(0);
+    } finally {
+      await input.stop();
+    }
+  });
 
   it('closes the actual wakeup watcher when stopped during Codex initialization', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-stop-during-start-'));
@@ -3447,6 +3919,8 @@ describe('CodexTranscriptInput', () => {
     const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
     const transcriptText = completedTurn();
     const transcript = await writeTranscript(sessionDir, transcriptText);
+    const past = new Date('2020-01-01T00:00:00Z');
+    await fs.utimes(transcript, past, past);
 
     await input.start();
     await input.stop();
@@ -3714,7 +4188,7 @@ describe('CodexTranscriptInput', () => {
     expect(checkpoint.forkBootstrap).toBeUndefined();
   });
 
-  it('retains a truly unparseable pending range and does not scan later work', async () => {
+  it('retains a truly unparseable range separately and collects later work', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-unparseable-pending-'));
     tempDirs.push(root);
     const sessionDir = path.join(root, 'sessions');
@@ -3770,24 +4244,34 @@ describe('CodexTranscriptInput', () => {
     await input.start();
     await input.stop();
 
-    expect(responsesForTurn(entries, normalTurnId)).toHaveLength(0);
+    expect(responsesForTurn(entries, normalTurnId)).toHaveLength(1);
     const checkpoint = transcriptCheckpoint(loadedState, transcript) as {
       scanOffset?: number;
       pendingTerminal?: { turnId?: string; retryCount?: number; sourceRecordCount?: number };
+      deferredTerminals?: { activeTurn: { turnId: string }; pendingTerminal: unknown }[];
     };
-    expect(checkpoint.scanOffset).toBe(terminalEndOffset);
-    expect(checkpoint.pendingTerminal).toMatchObject({
+    expect(checkpoint.scanOffset).toBe(stat.size);
+    expect(checkpoint.pendingTerminal).toBeNull();
+    expect(checkpoint.deferredTerminals).toHaveLength(1);
+    expect(checkpoint.deferredTerminals![0]!.activeTurn.turnId).toBe(pendingTurnId);
+    expect(checkpoint.deferredTerminals![0]!.pendingTerminal).toMatchObject({
       turnId: pendingTurnId,
       retryCount: 1,
       sourceRecordCount: 1,
     });
     expect(warn).toHaveBeenCalledWith(
-      'pending Codex terminal turn still could not be parsed; will retry',
+      'Codex terminal turn could not be parsed; retained until source changes and backoff expires',
       expect.objectContaining({
         transcriptPath: transcript,
         turnId: pendingTurnId,
         retryCount: 1,
         sourceRecordCount: 1,
+        deferred: true,
+        deferredRanges: 1,
+        deferredLimit: 4,
+        retryDelayMs: 1000,
+        recoveryPhase: 'pending',
+        blocked: false,
       }),
     );
   });
@@ -4714,6 +5198,7 @@ describe('CodexTranscriptInput', () => {
         { bootstrapFork: false },
       );
       const baselineSize = (await fs.stat(transcript)).size;
+      await fs.utimes(transcript, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'));
 
       await input.start();
       expect(entries).toHaveLength(0);
@@ -4773,6 +5258,7 @@ describe('CodexTranscriptInput', () => {
         { bootstrapFork: false },
       );
       const baselineSize = (await fs.stat(transcript)).size;
+      await fs.utimes(transcript, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'));
 
       await input.start();
 

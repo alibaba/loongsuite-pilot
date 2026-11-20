@@ -122,7 +122,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-默认会开启本地 JSONL 输出，路径为 `~/.loongsuite-pilot/logs/output/`。
+本地 JSONL 输出默认关闭；如需写入 `~/.loongsuite-pilot/logs/output/`，请在 `config.json` 中设置 `"jsonl": { "enabled": true }`。
 
 安装参数、卸载命令和源码运行方式见 [安装指南](docs/zh-CN/installation.md)。
 
@@ -171,7 +171,7 @@ loongsuite-pilot info
 
 | 后端 | 用途 |
 |------|------|
-| JSONL | 本地备份和调试查看，默认开启。 |
+| JSONL | 本地备份和调试查看，默认关闭，需显式开启。 |
 | SLS | 上报到阿里云日志服务，支持 WebTracking、AK 和 API Key 模式。 |
 | HTTP | 批量 POST 到自定义服务端。 |
 | OTLP Trace | 将 GenAI 活动导出为 OpenTelemetry Trace。 |
@@ -192,9 +192,10 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-本地 Dashboard 会随采集服务一起启动和停止，直接打开
-`http://127.0.0.1:8765/`，无需单独的 monitor 命令。页面直接读取采集服务生成的
-`logs/metrics-summary.json`。
+本地 Dashboard 默认关闭。执行 `loongsuite-pilot dashboard start` 可使用默认端口
+`8765`，执行 `loongsuite-pilot dashboard start 9999` 可指定端口；
+`loongsuite-pilot dashboard stop` 会关闭页面服务，保留采集。这些命令会重启正在运行的
+采集服务。页面直接读取采集服务生成的 `logs/metrics-summary.json`。
 
 macOS 可按需执行 `loongsuite-pilot dashboard shortcut install`，创建带雷达图标的
 Dashboard 网页快捷方式（`.webloc`），并添加到程序坞的文件区。普通安装和升级不会自动添加。

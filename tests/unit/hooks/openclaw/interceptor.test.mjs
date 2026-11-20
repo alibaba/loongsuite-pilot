@@ -230,6 +230,72 @@ describe('OpenClaw interceptor client', () => {
       server.close();
     }
   });
+
+  it('prefers verdict.message on pre-tool, middleware, and the persist cache', async () => {
+    const { createOpenClawInterceptor, wrapHostReason } = await import(/* @vite-ignore */ `${INTERCEPTOR_PATH}?message=${Date.now()}`);
+    const message = '不要在对话里粘贴 AccessKey';
+    const { server, port } = await listen((req, res) => {
+      if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          service: 'loongsuite-pilot-interceptor',
+          status: 'ok',
+          pid: 4242,
+          version: '1.0.2',
+          daemon_port: port,
+        }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        action: 'block',
+        reason: '[APIKEY_MASKED]',
+        message,
+        ruleId: 'apiKey',
+        evaluatedRules: ['apiKey'],
+      }));
+    });
+    writeRuntime(port);
+    const interceptor = createOpenClawInterceptor({ resolveDataDir: () => tmpDir });
+    const original = {
+      content: [{ type: 'text', text: 'mysql://agent:secret@127.0.0.1:3306/pilot' }],
+      details: { status: 'completed' },
+    };
+    try {
+      await expect(interceptor.evaluate('before_tool_call', {
+        toolName: 'exec',
+        params: { command: 'secret' },
+        toolCallId: 'call-msg',
+        sessionId: 's1',
+      }, {})).resolves.toEqual({
+        block: true,
+        blockReason: wrapHostReason('PreToolUse', message),
+      });
+      await expect(interceptor.evaluate('tool_result_middleware', {
+        toolName: 'read',
+        toolCallId: 't-msg',
+        result: original,
+      }, {})).resolves.toEqual({
+        result: {
+          ...original,
+          content: [{ type: 'text', text: wrapHostReason('PostToolUse', message) }],
+        },
+      });
+      expect(interceptor.evaluate('tool_result_persist', {
+        toolName: 'read',
+        toolCallId: 't-msg',
+        message: { toolCallId: 't-msg', ...original },
+      }, {}, { sync: true })).toEqual({
+        message: {
+          toolCallId: 't-msg',
+          ...original,
+          content: [{ type: 'text', text: wrapHostReason('PostToolUse', message) }],
+        },
+      });
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe('OpenClaw plugin interceptor wiring', () => {

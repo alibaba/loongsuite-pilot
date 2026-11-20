@@ -130,7 +130,20 @@ describe.each(['qoder', 'qoder-cn'])('%s review recovery', agentId => {
     fs.writeFileSync(p.file, jsonl(turn(0))); p.wake('UserPromptSubmit', { request_set_id: 'owned-request-0' });
     const c = p.create(); const batch = await c.collect();
     expect(JSON.stringify(batch.records)).toContain('answer-0');
+    expect(batch.records.find(record => record['event.name'] === 'llm.request')
+      ['agent.pilot.interceptor.correlation']).toMatchObject({ requestId: crypto.createHash('sha256').update('owned-request-0').digest('hex'),
+        hash: crypto.createHash('sha256').update('prompt-0').digest('hex'), at: Date.parse(stamp(0)) });
     expect((await c.collect(batch.state)).records).toEqual([]);
+  });
+
+  it('keeps the native requestSetId when recovered ownership supplies a different id', async () => {
+    const p = setup(agentId, { resolveInitialPrompt: ownership([{ requestId: 'recovered-id', at: Date.parse(stamp(0)) }]) });
+    const rows = turn(0);
+    rows[0].requestSetId = 'native-request-id';
+    fs.writeFileSync(p.file, jsonl(rows)); p.wake('UserPromptSubmit', { request_set_id: 'recovered-id' });
+    const batch = await p.create().collect();
+    expect(batch.records.find(record => record['event.name'] === 'llm.request')
+      ['agent.pilot.interceptor.correlation'].requestId).toBe(crypto.createHash('sha256').update('native-request-id').digest('hex'));
   });
 
   it.each(['{broken}', JSON.stringify({ padding: 'x'.repeat(256 * 1024) })])('recovers the proven initial range through a complete bad record without replaying live Turns', async bad => {

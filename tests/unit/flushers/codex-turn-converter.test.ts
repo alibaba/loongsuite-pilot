@@ -63,18 +63,36 @@ describe('Codex native turn conversion', () => {
       await journal.append(source);
       manager.setWorkspacePolicy(new WorkspacePolicy(['/tmp/codex-private']));
       if (mode === 'startup') await f.start();
-      else await (f as unknown as { replayCodexJournal(groups: AsyncIterable<AgentActivityEntry[]>): Promise<void> })
-        .replayCodexJournal(journal.load(codexTurnJournalGroupKey(source[0])));
+      else await (f as unknown as { replayCodexJournal(groups: ReturnType<CodexTurnJournal['loadBatches']>): Promise<void> })
+        .replayCodexJournal(journal.loadBatches(codexTurnJournalGroupKey(source[0])));
       expect(spans).toHaveLength(0);
       expect(await journal.isAcknowledged(source[0])).toBe(false);
       expect(await readJournal(journal)).toEqual([]);
     } finally { await f.shutdown(); }
   });
 
-  it.each(['legacy-content-opt-out', 'mask'])('replays a retained prefix under %s while preserving identity and topology', async policy => {
+  it('preflights late workspace evidence across streamed journal batches before accepting earlier records', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-replay-late-policy-'));
+    const journal = new CodexTurnJournal(root);
+    const manager = new InputManager();
+    manager.setWorkspacePolicy(new WorkspacePolicy(['/tmp/codex-private']));
+    const source = records('child', 'late-policy', 'a'.repeat(32), 0, 'I');
+    source[0]['gen_ai.input.messages'] = 'x'.repeat(2 * 1024 * 1024);
+    source[source.length - 1]['workspace.path'] = '/tmp/codex-private';
+    await journal.append(source);
+    const { f, spans } = flusher(journal, false, undefined, entries => manager.prepareRestoredEntries(entries));
+    try {
+      await f.start();
+      expect(spans).toHaveLength(0);
+      expect(await journal.isAcknowledged(source[0])).toBe(false);
+      expect(await readJournal(journal)).toEqual([]);
+    } finally { await f.shutdown(); }
+  });
+
+  it.each(['content-opt-out', 'mask'])('replays a retained prefix under %s while preserving identity and topology', async policy => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-replay-content-'));
     const manager = new InputManager();
-    if (policy === 'legacy-content-opt-out') manager.setAgentsConfig({ codex: { captureMessageContent: false } });
+    if (policy === 'content-opt-out') manager.setAgentsConfig({ codex: { captureMessageContent: false } });
     else manager.setMaskConfig({ mode: 'all', types: [] });
     const source = records('child', 'private', 'a'.repeat(32), 0, 'I');
     source[2]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: 'sk-1234567890abcdefghijklmnop' }] }];
@@ -87,9 +105,9 @@ describe('Codex native turn conversion', () => {
       await f.sendBatch(manager.prepareRestoredEntries(source.slice(2)));
       expect(spans).toHaveLength(3);
       const attrs = JSON.stringify(spans.map(span => span.attributes));
-      if (policy === 'legacy-content-opt-out') {
-        expect(attrs).toContain('task');
-        expect(attrs).toContain('sk-1234567890abcdefghijklmnop');
+      if (policy === 'content-opt-out') {
+        expect(attrs).not.toContain('task');
+        expect(attrs).not.toContain('sk-1234567890abcdefghijklmnop');
       } else {
         expect(attrs).not.toContain('sk-1234567890abcdefghijklmnop');
         expect(attrs).toContain('[APIKEY_MASKED]');

@@ -1,5 +1,7 @@
-import type { NativeContent } from './doubao-work-content.js';
+import { nativeCurrentAssignment, type NativeContent } from './doubao-work-content.js';
 import { doubaoDigest } from './doubao-work-log.js';
+import { nativeDemandFingerprint, nativeDemandKey } from './doubao-work-demand.js';
+export { nativeDemandFingerprint } from './doubao-work-demand.js';
 
 const MAX_ROUNDS = 64;
 const MAX_INPUT_BYTES = 64 * 1024;
@@ -49,10 +51,9 @@ export function* nativeRoundSteps(
   const offset = content?.transcriptOffsets?.[actor] ?? 0;
   if (!rows || !/^\d{19}$/.test(endNano)) return undefined;
   const endMs = Number(BigInt(endNano) / 1_000_000n);
-  const current = assignments.filter(item => item.timeMs >= queryMs && item.timeMs <= endMs);
-  const bodies = [...new Set(current.map(item => item.text))];
-  if (bodies.length !== 1 || current.length !== 1) return undefined;
-  const body = bodies[0];
+  const current = nativeCurrentAssignment(content!, actor, queryMs, endMs);
+  if (!current) return undefined;
+  const body = current.text;
   const demandKey = nativeDemandKey(body);
   const matchesDemand = (value: unknown) => typeof value === 'string'
     && value.length <= MAX_INPUT_BYTES && nativeDemandKey(value) === demandKey;
@@ -172,30 +173,6 @@ class MessageWindow {
 
   messages(): ObservedMessage[] { return this.rows.slice(this.head).map(row => row.message); }
 }
-
-/** The client expands its own Skill URI before persisting a user message.
- * Compare only those two observed reference forms; preserve all instructions,
- * labels and original message content. Typed tokens avoid collisions with
- * arbitrary Markdown or a user-written normalization placeholder. */
-function nativeDemandKey(value: string): string {
-  const parts: (string | { skill: string; label: string })[] = [];
-  const links = /\[([^\]\r\n]*)\]\((?:<([^<>\r\n]+)>|([^\s()<>]+))\)/g;
-  let cursor = 0;
-  for (const match of value.matchAll(links)) {
-    const target = match[2] ?? match[3];
-    const uri = /^skill:\/\/([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})(?:\?[^\s<>]*)?$/.exec(target);
-    const local = /^(?:[a-zA-Z]:\/|\/)[^\r\n<>]*\/\.doubaowork\/agent_mode\/workspace\/\.skills\/([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})\/SKILL\.md$/.exec(target.replace(/\\/g, '/'));
-    const skill = uri?.[1] ?? local?.[1];
-    if (!skill) continue;
-    parts.push(value.slice(cursor, match.index), { skill, label: match[1] });
-    cursor = match.index! + match[0].length;
-  }
-  parts.push(value.slice(cursor));
-  return JSON.stringify(parts);
-}
-
-/** A bounded lookup key, not source content and never an exported identity. */
-export function nativeDemandFingerprint(value: string): string { return doubaoDigest(nativeDemandKey(value)); }
 
 function visibleMessage(row: Record<string, unknown>): ObservedMessage | undefined {
   if (!['user', 'assistant', 'tool'].includes(String(row.role))) return undefined;

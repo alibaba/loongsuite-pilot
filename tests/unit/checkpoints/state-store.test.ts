@@ -32,6 +32,49 @@ describe('StateStore', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
+  it('isolates an output hold and failure to its input family while saving other inputs', async () => {
+    store.setOffset('codex:file', 1);
+    store.setOffset('other', 1);
+    await store.save();
+    let reject!: (error: Error) => void;
+    const output = new Promise<void>((_, fail) => { reject = fail; });
+    store.holdSaveUntil(output, 'codex');
+    store.setOffset('codex:file', 2);
+    store.setOffset('codex:new-file', 3);
+    store.setOffset('other', 4);
+    await store.save();
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual({
+      'codex:file': { lastOffset: 1 }, other: { lastOffset: 4 },
+    });
+    expect(store.isPersisted('codex:file')).toBe(false);
+    expect(store.isPersisted('other')).toBe(true);
+    reject(new Error('durability failure'));
+    await output.catch(() => undefined);
+    store.setOffset('other', 5);
+    await store.save();
+    expect(store.hasSaveFailure('codex')).toBe(true);
+    expect(store.hasSaveFailure('other')).toBe(false);
+    expect(store.saveFailed).toBe(false);
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual({
+      'codex:file': { lastOffset: 1 }, other: { lastOffset: 5 },
+    });
+  });
+
+  it('publishes previously held changes after ACK even when another input already saved', async () => {
+    store.setOffset('codex:file', 1);
+    await store.save();
+    let accept!: () => void;
+    const output = new Promise<void>(resolve => { accept = resolve; });
+    store.holdSaveUntil(output, 'codex');
+    store.setOffset('codex:file', 2);
+    await store.save();
+    accept(); await output;
+    expect(store.isPersisted('codex:file')).toBe(false);
+    await store.save();
+    expect(store.isPersisted('codex:file')).toBe(true);
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8'))['codex:file'].lastOffset).toBe(2);
+  });
+
   describe('load/save lifecycle', () => {
     it('should start with empty state', async () => {
       await store.load();

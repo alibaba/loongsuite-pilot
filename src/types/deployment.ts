@@ -52,6 +52,12 @@ export interface InterceptorHookConfig {
 
 export interface AgentHookConfig {
   settingsPath: string;
+  /** Opt-in native Linux system TOML; omitted retains home-local JSON. */
+  scope?: 'user' | 'system';
+  /** Native Linux system configuration; selected only by explicit system scope. */
+  systemSettingsPath?: string;
+  /** Original home-local path retained while selecting a system target. */
+  userSettingsPath?: string;
   /**
    * Syntax accepted by the owning agent's settings file. Defaults to strict
    * JSON. JSONC files are edited in place so comments and unrelated formatting
@@ -133,7 +139,10 @@ export interface AgentHookConfig {
     tools: string[];
   };
   /**
-   * Independent blocking hook, installed alongside the collection hook.
+   * Independent blocking hook, installed alongside the collection hook when
+   * interceptor mode is `all`.
+   * Otherwise deploy removes interceptor hooks already written to settings.
+   * Collection hooks are unchanged.
    * Events, command, timeout, and insertion order are owned by this block
    * so collection hookCommand stays a single string.
    */
@@ -376,6 +385,10 @@ export interface DeployedAgentRecord {
   dshPatchPath?: string;
   /** Resolved Grok hook settings file written during deploy. */
   hookSettingsPath?: string;
+  /** Hook registration scope; absent on older home-local records. */
+  hookScope?: 'user' | 'system';
+  /** Durable cleanup intent for a native Hook installation or scope change. */
+  hookPendingMigration?: { scope: 'user' | 'system'; settingsPath: string };
   /**
    * Every Grok hook settings file this agent has been installed into.
    * One identity directory is one file; later installs append, they do not
