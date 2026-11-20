@@ -1000,7 +1000,7 @@ export class Orchestrator extends EventEmitter {
           }
         },
         ...(def.id === 'minimax-code' ? { cleanup: async () => {
-          if (this.deploymentManager.hasRecord(def.id) && !(await this.deploymentManager.undeployAgent(def))) {
+          if (!(await this.deploymentManager.undeployAgent(def))) {
             throw new Error('MiniMax Code plugin cleanup incomplete');
           }
         } } : {}),
@@ -1092,7 +1092,7 @@ export class Orchestrator extends EventEmitter {
           this.globalAttributesProvider,
           undefined,
           new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
-            ['codex', 'hermes', 'openclaw']),
+            ['codex', 'hermes', 'openclaw', 'minimax-code']),
           entries => this.inputManager!.prepareRestoredEntries(entries),
           sourceToken => this.inputManager!.confirmHermesSourceDrained(sourceToken),
         );

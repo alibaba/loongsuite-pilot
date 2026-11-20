@@ -166,7 +166,7 @@ export class DeploymentManager {
     const minimaxPlugin = def.id === 'minimax-code' && def.deployMode === 'directory-plugin';
     if (
       (def.deployMode !== 'hook' && def.deployMode !== 'dsh-yaml-patch' && def.deployMode !== 'copilot-plugin' && !minimaxPlugin)
-      || !this.state[def.id]
+      || (!this.state[def.id] && !minimaxPlugin)
     ) {
       logger.debug('agent excluded from deployment', { agentId: def.id });
       return result;

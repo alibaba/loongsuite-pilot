@@ -870,6 +870,58 @@ describe('DeploymentManager', () => {
       const state = JSON.parse(await fs.readFile(path.join(dataDir, 'deployed-agents.json'), 'utf8'));
       expect(state['minimax-code']).toBeUndefined();
     });
+
+    it.skipIf(process.platform === 'win32').each(['switch profile', 'lose deployment record'])(
+      'revokes MiniMax cache with a separate activation receipt (%s)', async scenario => {
+        const { spawnSync } = await import('node:child_process');
+        const { createHash } = await import('node:crypto');
+        const sourceDir = path.resolve('assets/plugins/minimax-code/loongsuite-pilot');
+        const [oldProfile, newProfile] = ['old-profile', 'new-profile'].map(name => path.join(tmpDir, name));
+        const targetDir = path.join(oldProfile, 'plugins', 'loongsuite-pilot');
+        const newTargetDir = path.join(newProfile, 'plugins', 'loongsuite-pilot');
+        const def: AgentDefinition = {
+          id: 'minimax-code', displayName: 'MiniMax Code', deployMode: 'directory-plugin',
+          detection: { paths: [oldProfile, newProfile], commands: ['mcode'] }, directoryPlugin: { sourceDir, targetDir },
+        };
+        await writeAgentDef(def);
+        vi.mocked(detectAgent).mockResolvedValue(true);
+        expect((await makeManager().deployAll())[0]).toMatchObject({ success: true });
+        const cache = path.join(oldProfile, 'v2', 'plugin-hook-cache', 'retained');
+        await fs.cp(targetDir, cache, { recursive: true });
+        const session = 'synthetic-cache-session';
+        const runCache = () => {
+          const run = spawnSync(process.execPath, [path.join(cache, 'scripts', 'observe.mjs')], {
+            input: JSON.stringify({ session_id: session, turn_id: 'turn-one', hook_event_name: 'Stop', cwd: tmpDir }),
+            encoding: 'utf8',
+          });
+          expect(run.status).toBe(0);
+          expect(run.stdout).toBe('{}\n');
+        };
+        const spool = path.join(dataDir, 'state', 'minimax-code', 'hook-events', createHash('sha256').update(session).digest('hex'));
+        runCache();
+        expect(await fs.readdir(spool)).toHaveLength(1);
+        await writeAgentDef({ ...def, directoryPlugin: { sourceDir, targetDir: newTargetDir } });
+        if (scenario === 'switch profile') {
+          expect((await makeManager().deployAll())[0]).toMatchObject({ success: true });
+          // Even a previously owned directory still present after a profile
+          // move cannot authorize cached commands by itself.
+          await fs.cp(cache, targetDir, { recursive: true });
+          runCache();
+          expect(await fs.readdir(spool)).toHaveLength(1);
+        } else {
+          await fs.unlink(path.join(dataDir, 'deployed-agents.json'));
+          await fs.mkdir(newTargetDir, { recursive: true });
+          await fs.writeFile(path.join(newTargetDir, 'unmanaged.txt'), '');
+        }
+        expect((await makeManager().deployAll(() => false))[0]).toMatchObject({ success: true, reason: 'disabled' });
+        runCache();
+        expect(await fs.readdir(spool)).toHaveLength(1);
+        if (scenario === 'lose deployment record') {
+          await expect(fs.access(targetDir)).rejects.toMatchObject({ code: 'ENOENT' });
+          await expect(fs.access(path.join(newTargetDir, 'unmanaged.txt'))).resolves.toBeUndefined();
+        }
+      },
+    );
   });
 
   describe('deploySingle', () => {

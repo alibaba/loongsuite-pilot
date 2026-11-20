@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { BaseFlusher, CodexOutputDurabilityError } from './base-flusher.js';
+import { BaseFlusher, CodexOutputDurabilityError, type BatchDelivery, type BatchDeliveryOptions } from './base-flusher.js';
 import { serialiseLogEntry } from '../normalization/entry-builder.js';
 import type { AgentActivityEntry, HttpFlusherConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
@@ -80,6 +80,25 @@ export class HttpFlusher extends BaseFlusher {
         void this.flushCodex();
       });
     }
+  }
+
+  override createBatchDelivery(
+    entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal,
+    options?: BatchDeliveryOptions,
+  ): BatchDelivery {
+    if (!options?.requireAcceptance) return super.createBatchDelivery(entries, logicalBytes, signal);
+    const serialized = entries.map(entry => serialiseLogEntry(entry));
+    const chunkSize = Math.max(1, this.config.batchMaxSize || serialized.length);
+    let next = 0;
+    return async (attemptSignal = signal) => {
+      for (; next < serialized.length; next += chunkSize) {
+        attemptSignal?.throwIfAborted();
+        if (this.stopped) throw new Error('HTTP flusher is stopped');
+        // The input retries rejected POSTs. This closure remembers successful
+        // chunks without putting these events in the ordinary volatile queue.
+        await this.postBatch(serialized.slice(next, next + chunkSize), attemptSignal);
+      }
+    };
   }
 
   async flush(): Promise<void> {

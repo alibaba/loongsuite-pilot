@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
+import { createServer } from 'node:http';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -10,7 +11,10 @@ import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { InputManager } from '../../../src/core/input-manager.js';
 import { DirectoryPluginStrategy } from '../../../src/deployment/directory-plugin-strategy.js';
 import { JsonlFlusher } from '../../../src/flushers/jsonl-flusher.js';
+import { HttpFlusher } from '../../../src/flushers/http-flusher.js';
 import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
+import { OtlpTraceFlusher } from '../../../src/flushers/otlp-trace-flusher.js';
+import { CodexTurnJournal } from '../../../src/flushers/codex-turn-journal.js';
 import { MinimaxCodeSessionInput } from '../../../src/inputs/minimax-code-session/minimax-code-session-input.js';
 import { loadDatabaseSync } from '../../../src/utils/node-sqlite.js';
 import { MockFlusher } from '../../helpers/mock-flusher.js';
@@ -329,6 +333,117 @@ it('writes only observed identity metadata when the real plugin receives private
     runHook(installed);
     expect(await fs.readdir(spool)).toHaveLength(2);
   } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+it('retains source progress behind a real HTTP rejection and resumes the failed chunk', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minimax-http-acceptance-'));
+  const manager = new InputManager();
+  const accepted: string[][] = [];
+  let rejected = 0;
+  let recover = false;
+  const server = createServer(async (request, response) => {
+    const parts = [];
+    for await (const chunk of request) parts.push(chunk);
+    const body = JSON.parse(Buffer.concat(parts).toString('utf8'));
+    if (accepted.length > 0 && !recover) {
+      rejected++;
+      response.writeHead(503).end();
+    } else {
+      accepted.push(body.entries.map((entry: Record<string, string>) => entry['event.id']));
+      response.writeHead(200).end();
+    }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('loopback listener unavailable');
+  const http = new HttpFlusher({ enabled: true, url: `http://127.0.0.1:${address.port}`,
+    batchMaxSize: 4, flushIntervalMs: 60_000, requestTimeoutMs: 1_000 });
+  try {
+    const f = await setup(root);
+    await fs.writeFile(f.source, f.sourceText);
+    await f.addObservations(f.lines);
+    const { input, stateStore } = await f.openInput();
+    const outputDir = path.join(root, 'output');
+    const jsonl = new JsonlFlusher({ enabled: true, outputDir, rotateDaily: false, maxFileSizeMb: 10 });
+    await jsonl.start();
+    await http.start();
+    manager.setFlusher(new MultiFlusher([jsonl, http]));
+    manager.registerInput(input);
+    await manager.startInput(input.id);
+    await vi.waitFor(() => expect(rejected).toBeGreaterThan(0), { timeout: 4_000 });
+    stateStore.setOffset('other-source', 1);
+    await stateStore.save();
+    const statePath = path.join(root, 'state.json');
+    expect(JSON.parse(await fs.readFile(statePath, 'utf8'))).toEqual({ 'other-source': { lastOffset: 1 } });
+    expect(await fs.readdir(f.observations)).toHaveLength(4);
+    expect(accepted).toHaveLength(1);
+
+    recover = true;
+    await vi.waitFor(async () => {
+      const state = JSON.parse(await fs.readFile(statePath, 'utf8'));
+      expect(Object.keys(state).filter(key => key.startsWith('minimax-code-session:'))).toHaveLength(2);
+    }, { timeout: 4_000 });
+    const jsonlRows = (await fs.readFile(path.join(outputDir, 'minimax-code-all.jsonl'), 'utf8')).trim().split('\n');
+    expect(accepted.map(chunk => chunk.length)).toEqual([4, 4]);
+    expect(accepted.flat()).toEqual(jsonlRows.map(row => JSON.parse(row)['event.id']));
+    expect(new Set(accepted.flat()).size).toBe(8);
+  } finally {
+    await manager.stopAll();
+    await http.shutdown();
+    const closed = once(server, 'close');
+    server.close();
+    await closed;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+it('retains completed MiniMax turns in the durable OTLP journal through exporter failure and restart', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minimax-otlp-retention-'));
+  const manager = new InputManager();
+  const directory = path.join(root, 'journal');
+  const journal = () => new CodexTurnJournal(directory, 100, ['minimax-code']);
+  let successes = 0;
+  const makeFlusher = (succeed: boolean) => new OtlpTraceFlusher({
+    enabled: true, serviceName: 'minimax-fixture', captureMessageContent: false, protocol: 'http/protobuf',
+    endpoints: [{ endpoint: 'http://127.0.0.1:1/v1/traces', headers: {} }], dataDir: root,
+  }, undefined, () => ({
+    export(spans, callback) {
+      if (succeed) successes += spans.length;
+      callback(succeed ? { code: 0 } : { code: 1, error: new Error('fixture exporter offline') });
+    },
+    async shutdown() {},
+  }), journal());
+  const first = makeFlusher(false);
+  const restarted = makeFlusher(true);
+  try {
+    const f = await setup(root);
+    await fs.writeFile(f.source, f.sourceText);
+    await f.addObservations(f.lines);
+    const { input, stateStore } = await f.openInput();
+    await first.start();
+    manager.setFlusher(first);
+    manager.registerInput(input);
+    await manager.startInput(input.id);
+    await vi.waitFor(() => {
+      expect(stateStore.keys().filter(key => stateStore.getPersistedState(key)?.extra?.completed)).toHaveLength(2);
+    }, { timeout: 4_000 });
+    const retained: string[] = [];
+    for await (const group of journal().load()) retained.push(...group.map(entry => entry['event.id']));
+    expect(retained).toHaveLength(8);
+    await manager.stopAll();
+    await first.shutdown();
+
+    await restarted.start();
+    await restarted.flush();
+    expect(successes).toBeGreaterThan(0);
+    for await (const _ of journal().load()) throw new Error('acknowledged journal group retained');
+  } finally {
+    await manager.stopAll();
+    await first.shutdown();
+    await restarted.shutdown();
     await fs.rm(root, { recursive: true, force: true });
   }
 });

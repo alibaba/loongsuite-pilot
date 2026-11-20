@@ -17,6 +17,8 @@ import { hermesCliCandidatePaths } from './agent-def-loader.js';
 import { createLogger } from '../utils/logger.js';
 import { rootTriggerEnabled } from '../utils/producer-log-dir.js';
 import { agentConfigOwner, ensureAgentConfigDirectory } from './agent-config-owner.js';
+import { writeJsonFile } from '../utils/fs-utils.js';
+import { withDeployedStateLock } from './deployed-state-merge.js';
 
 const logger = createLogger('DirectoryPluginStrategy');
 
@@ -40,6 +42,13 @@ interface DirectoryPluginMarker {
   activationStatus?: 'activated' | 'unsupported';
 }
 
+interface MiniMaxActivation {
+  schemaVersion: 1;
+  installationId: string;
+  targetDir: string;
+  enabled: boolean;
+}
+
 interface ActivationCommandOutput {
   stdout: string;
   stderr: string;
@@ -54,9 +63,11 @@ type TargetState =
 
 export class DirectoryPluginStrategy implements DeployStrategy {
   private readonly dataDir?: string;
+  private readonly minimaxActivationFile?: string;
 
   constructor(dataDir?: string) {
     this.dataDir = dataDir ? path.resolve(dataDir) : undefined;
+    if (this.dataDir) this.minimaxActivationFile = path.join(this.dataDir, 'state', 'minimax-code', 'active-plugin.json');
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
@@ -130,9 +141,11 @@ export class DirectoryPluginStrategy implements DeployStrategy {
       const sourceHash = await this.hashDirectory(config.sourceDir, markerFile);
       if (targetState.marker.sourceHash !== sourceHash) return true;
       if (this.dataDir && targetState.marker.dataDir !== this.dataDir) return true;
-      if (def.id === 'minimax-code' && (!targetState.marker.installationId
-        || !INSTALLATION_ID_PATTERN.test(targetState.marker.installationId)
-        || targetState.marker.targetDir !== path.resolve(config.targetDir))) return true;
+      if (def.id === 'minimax-code') {
+        const active = await this.readMiniMaxActivation();
+        if (!active?.enabled || active.installationId !== targetState.marker.installationId
+          || active.targetDir !== path.resolve(config.targetDir) || active.targetDir !== targetState.marker.targetDir) return true;
+      }
       if (targetState.marker.activationHash !== this.hashActivation(config.activation)) return true;
 
       const targetHash = await this.hashDirectory(
@@ -151,6 +164,15 @@ export class DirectoryPluginStrategy implements DeployStrategy {
   }
 
   async deploy(def: AgentDefinition): Promise<DeployResult> {
+    if (def.id !== 'minimax-code' || !this.minimaxActivationFile) return this.deployDirectory(def);
+    try {
+      return await this.withMiniMaxLock(() => this.deployDirectory(def));
+    } catch (error) {
+      return { success: false, agentId: def.id, deployMode: 'directory-plugin', error: String(error) };
+    }
+  }
+
+  private async deployDirectory(def: AgentDefinition): Promise<DeployResult> {
     const config = def.directoryPlugin;
     if (!config) {
       return {
@@ -172,6 +194,9 @@ export class DirectoryPluginStrategy implements DeployStrategy {
       const targetState = await this.inspectTarget(targetDir, markerFile, def.id);
       if (targetState.kind === 'unmanaged') {
         throw new Error(`refusing to overwrite unmanaged non-empty directory: ${targetDir}`);
+      }
+      if (def.id === 'minimax-code' && targetState.kind === 'managed' && targetState.marker.dataDir !== this.dataDir) {
+        throw new Error(`MiniMax Code plugin belongs to another Pilot installation: ${targetDir}`);
       }
 
       const sourceHash = await this.hashDirectory(sourceDir, markerFile);
@@ -227,6 +252,20 @@ export class DirectoryPluginStrategy implements DeployStrategy {
         await this.writeMarker(targetDir, markerFile, marker);
       }
 
+      if (def.id === 'minimax-code' && this.minimaxActivationFile && marker.installationId) {
+        const previous = await this.readMiniMaxActivation();
+        // Only this one atomic authority lets a cached MiniMax hook write.
+        // A failed staging or install leaves the previous generation in place.
+        await writeJsonFile(this.minimaxActivationFile, {
+          schemaVersion: 1, enabled: true, installationId: marker.installationId, targetDir,
+        } satisfies MiniMaxActivation);
+        if (previous && previous.targetDir !== targetDir) {
+          await this.removeOwnedMiniMaxTarget(previous.targetDir, markerFile).catch(error => {
+            logger.warn('inactive MiniMax Code plugin cleanup failed', { code: (error as NodeJS.ErrnoException).code });
+          });
+        }
+      }
+
       logger.info('directory plugin deployed', {
         agentId: def.id,
         targetDir,
@@ -254,6 +293,16 @@ export class DirectoryPluginStrategy implements DeployStrategy {
 
     try {
       const markerFile = this.resolveMarkerFile(config);
+      if (def.id === 'minimax-code' && this.minimaxActivationFile) {
+        return await this.withMiniMaxLock(async () => {
+          const active = await this.readMiniMaxActivation();
+          if (active?.enabled) await writeJsonFile(this.minimaxActivationFile!, { ...active, enabled: false });
+          for (const target of new Set([path.resolve(config.targetDir), active?.targetDir])) {
+            if (target) await this.removeOwnedMiniMaxTarget(target, markerFile);
+          }
+          return true;
+        });
+      }
       const targetState = await this.inspectTarget(config.targetDir, markerFile, def.id);
       if (targetState.kind === 'missing') return true;
       if (targetState.kind !== 'managed') {
@@ -291,6 +340,39 @@ export class DirectoryPluginStrategy implements DeployStrategy {
         error: String(err),
       });
       return false;
+    }
+  }
+
+  private async readMiniMaxActivation(): Promise<MiniMaxActivation | undefined> {
+    if (!this.minimaxActivationFile) return undefined;
+    try {
+      if (!(await fs.lstat(this.minimaxActivationFile)).isFile()) return undefined;
+      const active = JSON.parse(await fs.readFile(this.minimaxActivationFile, 'utf8')) as Partial<MiniMaxActivation>;
+      if (active?.schemaVersion === 1 && typeof active.enabled === 'boolean'
+        && typeof active.installationId === 'string' && INSTALLATION_ID_PATTERN.test(active.installationId)
+        && typeof active.targetDir === 'string' && path.isAbsolute(active.targetDir)) return active as MiniMaxActivation;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+    }
+    return undefined;
+  }
+
+  private async withMiniMaxLock<T>(work: () => Promise<T>): Promise<T> {
+    const file = this.minimaxActivationFile!;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    return withDeployedStateLock(`${file}.lock`, work);
+  }
+
+  private async removeOwnedMiniMaxTarget(target: string, markerFile: string): Promise<void> {
+    const markerStat = await fs.lstat(path.join(target, markerFile)).catch(error => {
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return undefined;
+      throw error;
+    });
+    if (!markerStat?.isFile()) return;
+    const state = await this.inspectTarget(target, markerFile, 'minimax-code');
+    if (state.kind === 'managed' && state.marker.dataDir === this.dataDir
+      && state.marker.targetDir === path.resolve(target)) {
+      await fs.rm(target, { recursive: true, force: true });
     }
   }
 

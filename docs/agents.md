@@ -20,8 +20,17 @@ Message content follows the usual Pilot workspace and agent policies
 (`agents.minimax-code.captureMessageContent`). Pilot collects completed turns
 observed by the plugin, including turns recorded while Pilot is stopped.
 Disabling the agent revokes the installed plugin and any copies held by the CLI's
-Hook cache. An already-running CLI process may need to be restarted to load a
-new installation.
+Hook cache. Each Pilot installation activates one MiniMax profile. Switching
+profiles revokes the prior profile's cached hooks after the new plugin is
+installed. An already-running CLI process may need a restart to load the new
+installation.
+
+Pilot checkpoints an observed turn after its JSONL output is synchronized, its
+HTTP and SLS batches are acknowledged, and its OTLP events are accepted by the
+local replay journal, for whichever outputs are configured. Pending OTLP turns
+replay on collector restart. Event IDs are stable across retries. If a process
+exits before its source checkpoint is persisted, a receiver can see a repeated
+event and can deduplicate by event ID.
 
 ## Hermes TTFT
 

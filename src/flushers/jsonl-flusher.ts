@@ -22,12 +22,12 @@ export class JsonlFlusher extends BaseFlusher {
     await ensureDir(this.config.outputDir);
   }
 
-  async send(entry: AgentActivityEntry): Promise<void> {
+  async send(entry: AgentActivityEntry, _logicalBytes?: number, synchronize = false): Promise<void> {
     const agentType = entry['gen_ai.agent.type'] ?? entry['agent.type'] ?? 'unknown';
     const filePath = this.resolveFilePath(agentType);
     const projected = projectLogEntry(entry, { dropAgentScopedFields: true });
     const line = JSON.stringify(projected);
-    await this.append(filePath, line);
+    await this.append(filePath, line, synchronize);
   }
 
   async sendBatch(entries: AgentActivityEntry[]): Promise<void> {
@@ -46,7 +46,7 @@ export class JsonlFlusher extends BaseFlusher {
     return async (attemptSignal = signal) => {
       for (; next < entries.length; next++) {
         attemptSignal?.throwIfAborted();
-        await this.send(entries[next]);
+        await this.send(entries[next], undefined, true);
       }
     };
   }
@@ -65,8 +65,8 @@ export class JsonlFlusher extends BaseFlusher {
     await this.append(filePath, line);
   }
 
-  private async append(filePath: string, line: string): Promise<void> {
-    const writing = appendSegmentedJsonl(filePath, line, this.maxFileBytes);
+  private async append(filePath: string, line: string, synchronize = false): Promise<void> {
+    const writing = appendSegmentedJsonl(filePath, line, this.maxFileBytes, 'mirror', synchronize);
     this.writes.set(filePath, writing);
     try { await writing; }
     finally { if (this.writes.get(filePath) === writing) this.writes.delete(filePath); }

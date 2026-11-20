@@ -33,6 +33,13 @@ function assertCurrentInstall(snapshot) {
     || current.sourceHash !== snapshot.sourceHash || current.dataDir !== snapshot.dataDir) {
     throw new Error('inactive hook installation');
   }
+  const authority = path.join(snapshot.dataDir, 'state', 'minimax-code', 'active-plugin.json');
+  if (!fs.lstatSync(authority).isFile()) throw new Error('inactive hook installation');
+  const active = JSON.parse(fs.readFileSync(authority, 'utf8'));
+  if (active.schemaVersion !== 1 || active.enabled !== true
+    || active.installationId !== snapshot.installationId || active.targetDir !== snapshot.targetDir) {
+    throw new Error('inactive hook installation');
+  }
 }
 
 try {
