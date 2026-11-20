@@ -85,12 +85,12 @@ interface StepContext {
 }
 
 // A step accumulates one assistant utterance (reasoning + text) plus the tools it
-// triggered. A new step opens when a fresh utterance arrives after the current step
-// has already emitted tools — i.e. one step == one LLM decision (spec §2.3).
+// triggered. An explicit boundary or evidence of a new decision opens a step.
 interface StepAcc {
   ctx: StepContext;
   reasoning: string;
   text: string;
+  textMessageId?: string;
   toolCallParts: Array<{ type: string; id: string; name: string }>;
   firstToolTs?: number;
   lastToolTs?: number;
@@ -506,6 +506,7 @@ export class WukongInput extends BaseInput {
     const steps: StepAcc[] = [];
     let stepIndex = 0;
     let cur: StepAcc | null = null;
+    let latestNativeToolResultTs: number | undefined;
     const openStep = (ts: number): StepAcc => {
       stepIndex++;
       const ctx: StepContext = {
@@ -529,7 +530,17 @@ export class WukongInput extends BaseInput {
     const stepForUtterance = (evt: AguiEvent): StepAcc => {
       const known = knownMessageStep(evt.messageId);
       if (known) return known;
-      if (!cur || (!hasStepEvents && cur.hasTools)) return openStep(evt.timestamp);
+      if (!cur) return openStep(evt.timestamp);
+      const activeTextId = cur.textMessageId ?? cur.toolParentMessageId;
+      const distinctText = (evt.type === 'TEXT_MESSAGE_START' || evt.type === 'TEXT_MESSAGE_CONTENT')
+        && typeof evt.messageId === 'string' && evt.messageId && activeTextId && activeTextId !== evt.messageId;
+      // A native declaration marks its own decision from START. A result that
+      // arrived during another utterance can also delimit the next distinct text.
+      const interveningResult = latestNativeToolResultTs !== undefined
+        && latestNativeToolResultTs >= cur.ctx.startTimestamp && latestNativeToolResultTs <= evt.timestamp;
+      if (!hasStepEvents && (cur.hasTools || (distinctText && (cur.toolParentMessageId || interveningResult)))) {
+        return openStep(evt.timestamp);
+      }
       return cur;
     };
     const rememberMessage = (step: StepAcc, messageId: unknown): void => {
@@ -603,17 +614,15 @@ export class WukongInput extends BaseInput {
           break;
         }
 
-        case 'TEXT_MESSAGE_START': {
-          const s = stepForUtterance(evt);
-          rememberMessage(s, evt.messageId);
-          break;
-        }
-
+        case 'TEXT_MESSAGE_START':
         case 'TEXT_MESSAGE_CONTENT': {
           const s = stepForUtterance(evt);
           rememberMessage(s, evt.messageId);
-          if (typeof evt.delta === 'string') s.text += evt.delta;
-          s.lastContentTs = evt.timestamp;
+          if (typeof evt.messageId === 'string' && evt.messageId) s.textMessageId ??= evt.messageId;
+          if (evt.type === 'TEXT_MESSAGE_CONTENT') {
+            if (typeof evt.delta === 'string') s.text += evt.delta;
+            s.lastContentTs = evt.timestamp;
+          }
           break;
         }
 
@@ -709,6 +718,13 @@ export class WukongInput extends BaseInput {
           break;
         }
 
+        case 'TOOL_CALL_RESULT': {
+          if (typeof evt.toolCallId === 'string' && endedToolIds.has(evt.toolCallId) && toolStarts.has(evt.toolCallId)) {
+            latestNativeToolResultTs = Math.max(latestNativeToolResultTs ?? evt.timestamp, evt.timestamp);
+          }
+          break;
+        }
+
         case 'ACTIVITY_SNAPSHOT': {
           const activityType = evt.activityType as string | undefined;
           // TASK_LINE_PLAN is a planning note; PERMISSION is a HITL approval prompt.
@@ -764,20 +780,15 @@ export class WukongInput extends BaseInput {
       }));
     }
 
-    // Emit one llm.request + llm.response per step. When the native parent
-    // identifies an overlapping decision, its LLM still precedes its own tools.
+    // Use the decision's source boundary for its inferred request. A late
+    // result from an earlier decision does not move this decision forward.
     const runStartTs = runStartedTs ?? steps[0].ctx.startTimestamp;
-    let cursorTs = runStartTs;
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i];
       const isFinal = i === finalIdx;
 
-      const sequentialReqTs = i === 0
-        ? runStartTs
-        : Math.max(s.ctx.startTimestamp, cursorTs + 1);
-      const reqTs = i > 0 && !hasStepEvents && s.toolParentMessageId && s.firstToolTs !== undefined
-        ? Math.min(sequentialReqTs, Math.max(runStartTs, s.firstToolTs - 2))
-        : sequentialReqTs;
+      const startTs = i === 0 ? runStartTs : s.ctx.startTimestamp;
+      const reqTs = s.firstToolTs === undefined ? startTs : Math.max(runStartTs, Math.min(startTs, s.firstToolTs - 2));
       let respTs: number;
       if (s.hasTools && s.firstToolTs !== undefined) {
         respTs = Math.max(reqTs + 1, s.firstToolTs - 1);
@@ -786,8 +797,6 @@ export class WukongInput extends BaseInput {
       } else {
         respTs = Math.max(reqTs + 1, s.lastContentTs);
       }
-      cursorTs = Math.max(cursorTs, respTs, s.lastToolTs ?? respTs);
-
       const finishReasons = this.inferFinishReasons(s.hasTools, isFinal ? runError : undefined);
       const llmSpanId = generateSpanId();
       const includeUserContent = i === 0 && !!userContent;
@@ -862,11 +871,13 @@ export class WukongInput extends BaseInput {
       }));
     }
 
-    // Sort chronologically before attaching results to the next LLM request.
+    // At equal millisecond resolution, result availability is ambiguous.
+    // Put tied tool results after requests so they feed a later request.
     entries.sort((a, b) => {
       const ta = BigInt(String(a['time_unix_nano'] ?? '0'));
       const tb = BigInt(String(b['time_unix_nano'] ?? '0'));
-      return ta < tb ? -1 : ta > tb ? 1 : 0;
+      if (ta !== tb) return ta < tb ? -1 : 1;
+      return Number(a['event.name'] === 'tool.result') - Number(b['event.name'] === 'tool.result');
     });
     injectPriorStepToolResults(entries);
 

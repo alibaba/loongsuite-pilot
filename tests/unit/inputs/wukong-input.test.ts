@@ -187,6 +187,144 @@ describe('WukongInput', () => {
     return spans;
   }
 
+  it.each([
+    { name: 'early text before declaration END', toolEnd: 65, toolResult: 90 },
+    { name: 'early text after declaration END but before execution result', toolEnd: 25, toolResult: 90 },
+    { name: 'a result with the same timestamp', toolEnd: 25, toolResult: 40 },
+  ])('keeps a distinct model decision and avoids future tool results for $name', async ({ toolEnd, toolResult }) => {
+    const base = 1779240560000;
+    const event = (type: string, offset: number, fields: Record<string, unknown> = {}) => ({
+      type, timestamp: base + offset, ...fields,
+    });
+    const events = [
+      event('RUN_STARTED', 0, { runId: 'run' }),
+      event('TEXT_MESSAGE_START', 10, { messageId: 'decision' }),
+      event('TEXT_MESSAGE_CONTENT', 11, { messageId: 'decision', delta: 'Calling read' }),
+      event('TEXT_MESSAGE_END', 12, { messageId: 'decision' }),
+      event('TOOL_CALL_START', 20, { toolCallId: 'a', toolCallName: 'read_file', parentMessageId: 'decision' }),
+      event('TOOL_CALL_ARGS', 21, { toolCallId: 'a', delta: '{}' }),
+      event('TOOL_CALL_END', toolEnd, { toolCallId: 'a' }),
+      event('TEXT_MESSAGE_START', 40, { messageId: 'answer' }),
+      event('TEXT_MESSAGE_CONTENT', 41, { messageId: 'answer', delta: 'Still waiting.' }),
+      event('TEXT_MESSAGE_END', 42, { messageId: 'answer' }),
+      event('TOOL_CALL_RESULT', toolResult, { toolCallId: 'a', messageId: 'tool-msg', content: 'File content' }),
+      event('TEXT_MESSAGE_START', 94, { messageId: 'finished' }),
+      event('TEXT_MESSAGE_CONTENT', 95, { messageId: 'finished', delta: 'Now done.' }),
+      event('TEXT_MESSAGE_END', 96, { messageId: 'finished' }),
+      event('RUN_FINISHED', 100, { runId: 'run' }),
+    ].sort((a, b) => a.timestamp - b.timestamp);
+    const messages = [SAMPLE_MESSAGES[0], { ...SAMPLE_MESSAGES[1], createdAt: base, events, isComplete: 1 }];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+    const spans = await exportInput();
+    const responses = entries.filter(entry => entry['event.name'] === 'llm.response');
+    const request = (id: string) => entries.find(entry => entry['event.name'] === 'llm.request'
+      && entry['gen_ai.response.id'] === id);
+    const llmSpans = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(responses.map(entry => entry['gen_ai.response.id'])).toEqual(['decision', 'answer', 'finished']);
+    expect(responses.map(entry => entry['gen_ai.output.messages'])).toMatchObject(
+      ['Calling read', 'Still waiting.', 'Now done.'].map(content => [
+        { role: 'assistant', parts: expect.arrayContaining([{ type: 'text', content }]) },
+      ]),
+    );
+    expect(llmSpans.map(span => span.attributes['gen_ai.response.id'])).toEqual(['decision', 'answer', 'finished']);
+    expect(request('answer')?.['time_unix_nano']).toBe(String(BigInt(base + 40) * 1_000_000n));
+    expect(request('answer')?.['gen_ai.input.messages_delta']).toBeUndefined();
+    expect(request('finished')?.['gen_ai.input.messages_delta']).toEqual([{
+      role: 'tool', parts: [{ type: 'tool_call_response', id: 'a', response: 'File content' }],
+    }]);
+    expect(String(llmSpans[1].attributes['gen_ai.input.messages'])).not.toContain('File content');
+    expect(String(llmSpans[2].attributes['gen_ai.input.messages'])).toContain('File content');
+  });
+
+  it.each([{ explicit: true }, { explicit: false }])('preserves causal child timing across a native overlap, explicit=$explicit', async ({ explicit }) => {
+    const base = 1779240560000;
+    const event = (type: string, offset: number, fields: Record<string, unknown> = {}) => ({
+      type, timestamp: base + offset, ...fields,
+    });
+    const events = [
+      event('RUN_STARTED', 0, { runId: 'run' }),
+      ...(explicit ? [event('STEP_STARTED', 5, { stepName: 'First' })] : []),
+      event('TEXT_MESSAGE_START', 10, { messageId: 'decision' }),
+      event('TEXT_MESSAGE_CONTENT', 11, { messageId: 'decision', delta: 'Calling first tool.' }),
+      event('TEXT_MESSAGE_END', 12, { messageId: 'decision' }),
+      event('TOOL_CALL_START', 20, { toolCallId: 'a', toolCallName: 'read_file', parentMessageId: 'decision' }),
+      event('TOOL_CALL_END', 25, { toolCallId: 'a' }),
+      ...(explicit ? [event('STEP_FINISHED', 28, { stepName: 'First' }), event('STEP_STARTED', 29, { stepName: 'Second' })] : []),
+      event('TEXT_MESSAGE_START', 30, { messageId: 'second' }),
+      event('TEXT_MESSAGE_CONTENT', 31, { messageId: 'second', delta: 'Calling another tool.' }),
+      event('TEXT_MESSAGE_END', 32, { messageId: 'second' }),
+      event('TOOL_CALL_START', 40, { toolCallId: 'b', toolCallName: 'read_file', parentMessageId: 'second' }),
+      event('TOOL_CALL_END', 45, { toolCallId: 'b' }),
+      event('TOOL_CALL_RESULT', 50, { toolCallId: 'b', messageId: 'tool-b', content: 'b content' }),
+      event('TOOL_CALL_RESULT', 90, { toolCallId: 'a', messageId: 'tool-a', content: 'a content' }),
+      ...(explicit ? [event('STEP_FINISHED', 93, { stepName: 'Second' }), event('STEP_STARTED', 94, { stepName: 'Answer' })] : []),
+      event('TEXT_MESSAGE_START', 95, { messageId: 'answer' }),
+      event('TEXT_MESSAGE_CONTENT', 96, { messageId: 'answer', delta: 'Both finished.' }),
+      event('TEXT_MESSAGE_END', 97, { messageId: 'answer' }),
+      event('RUN_FINISHED', 100, { runId: 'run' }),
+    ];
+    const messages = [SAMPLE_MESSAGES[0], { ...SAMPLE_MESSAGES[1], createdAt: base, events, isComplete: 1 }];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const spans = await exportInput();
+    const kind = (spanKind: string) => spans.filter(span => span.attributes['gen_ai.span.kind'] === spanKind);
+    const ns = (time: ReadableSpan['startTime']) => BigInt(time[0]) * 1_000_000_000n + BigInt(time[1]);
+    const ms = (time: ReadableSpan['startTime']) => Number(ns(time) / 1_000_000n) - base;
+    const second = kind('LLM').find(span => span.attributes['gen_ai.response.id'] === 'second')!;
+    const tool = kind('TOOL').find(span => span.attributes['gen_ai.tool.call.id'] === 'b')!;
+    const step = kind('STEP').find(span => span.spanContext().spanId === second.parentSpanId)!;
+    expect(kind('LLM')).toHaveLength(3);
+    expect(kind('STEP')).toHaveLength(3);
+    expect(second.parentSpanId).toBe(tool.parentSpanId);
+    expect([ms(second.startTime), ms(second.endTime)]).toEqual([explicit ? 29 : 30, 39]);
+    expect(kind('TOOL').map(span => [span.attributes['gen_ai.tool.call.id'], ms(span.startTime), ms(span.endTime)]))
+      .toEqual([['a', 20, 90], ['b', 40, 50]]);
+    expect([ms(step.startTime), ms(step.endTime)]).toEqual([explicit ? 29 : 30, 50]);
+  });
+
+  it('preserves legacy no-id tool spans through the production exporter', async () => {
+    const base = 1779240560000;
+    const event = (type: string, offset: number, fields: Record<string, unknown> = {}) => ({
+      type, timestamp: base + offset, ...fields,
+    });
+    const events = [
+      event('RUN_STARTED', 0, { runId: 'run' }),
+      event('TEXT_MESSAGE_START', 10, { messageId: 'decision' }),
+      event('TEXT_MESSAGE_CONTENT', 11, { messageId: 'decision', delta: 'Calling first tool.' }),
+      event('TEXT_MESSAGE_END', 12, { messageId: 'decision' }),
+      event('TOOL_CALL_START', 20, { toolName: 'first_tool' }),
+      event('TOOL_CALL_END', 25, { toolName: 'first_tool', result: 'first result' }),
+      event('TOOL_CALL_START', 40, { toolName: 'second_tool' }),
+      event('TOOL_CALL_END', 45, { toolName: 'second_tool', result: 'second result' }),
+      event('TEXT_MESSAGE_START', 50, { messageId: 'answer' }),
+      event('TEXT_MESSAGE_CONTENT', 51, { messageId: 'answer', delta: 'Both finished.' }),
+      event('TEXT_MESSAGE_END', 52, { messageId: 'answer' }),
+      event('RUN_FINISHED', 60, { runId: 'run' }),
+    ];
+    const messages = [SAMPLE_MESSAGES[0], { ...SAMPLE_MESSAGES[1], createdAt: base, events, isComplete: 1 }];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const spans = await exportInput();
+    const tools = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL');
+    expect(tools.map(span => [span.attributes['gen_ai.tool.name'], span.attributes['gen_ai.tool.call.result']]))
+      .toEqual([['first_tool', 'first result'], ['second_tool', 'second result']]);
+  });
+
   it('user content is merged into step 1 llm.request messages_delta', async () => {
     const listResp = JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] });
     const msgsResp = JSON.stringify({ messages: SAMPLE_MESSAGES });
