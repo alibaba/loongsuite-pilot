@@ -371,7 +371,6 @@ export type OtlpExporterFactory = (opts: {
 }) => TraceExporterLike;
 
 interface ResolvedOtlpEndpoint {
-  excludedAgentTypes?: string[];
   name: string;
   url: string;
   headers: Record<string, string>;
@@ -591,32 +590,6 @@ function nanoToHrTime(value: bigint): [number, number] {
   return [Number(value / 1_000_000_000n), Number(value % 1_000_000_000n)];
 }
 
-function isTraeContent(entry: AgentActivityEntry): boolean {
-  return entry['gen_ai.agent.type'] === 'trae-cn' &&
-    (entry['agent.trae-cn.source'] === 'content_hook' || entry['agent.trae-cn.source'] === 'content_history');
-}
-
-// Hook start/result records describe the same real span. Preserve the producer's
-// IDs and put the turn-wide messages on its ENTRY as well as its AGENT.
-function mergeTraeContentSpans(records: AgentActivityEntry[]): AgentActivityEntry[] {
-  const spans = new Map<string, AgentActivityEntry>();
-  for (const record of records) {
-    if (!record.span_id) continue;
-    const previous = spans.get(record.span_id);
-    spans.set(record.span_id, previous ? mergeRecordFields(record, previous) : { ...record });
-  }
-  for (const agent of spans.values()) {
-    if (agent['gen_ai.span.kind'] !== 'AGENT' || !agent.parent_span_id) continue;
-    const root = spans.get(agent.parent_span_id);
-    if (root?.['gen_ai.span.kind'] !== 'ENTRY') continue;
-    for (const key of ['gen_ai.input.messages', 'gen_ai.output.messages'] as const) {
-      if (agent[key] !== undefined) root[key] = agent[key];
-    }
-    if (agent['gen_ai.turn.end']) root.endTimeUnixNano = agent.endTimeUnixNano;
-  }
-  return [...spans.values()];
-}
-
 /**
  * Deep-merge a new AgentActivityEntry into an existing one, preserving
  * earlier non-empty values when the new record's field is empty. Earlier
@@ -738,7 +711,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
     this.exporterFactory = exporterFactory ?? defaultExporterFactory;
     this.endpoints = cfg.endpoints.map((ep, i) => ({
       name: ep.name || `otlp-${i}`,
-      excludedAgentTypes: ep.excludedAgentTypes,
       url: resolveEndpointUrl(ep.endpoint),
       headers: ep.headers ?? {},
       compression: ep.compression === 'none' ? CompressionAlgorithm.NONE : CompressionAlgorithm.GZIP,
@@ -926,8 +898,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Audit delegation/result records describe an existing tool/work boundary.
     // They must not create, close or reopen a model turn buffer.
     if (isAgentAuditEvent(entry) || entry['event.name'] === 'guardrail.evaluation') return;
-    // A Hub usage receipt is a log event until a response ID is evidenced.
-    if (entry['gen_ai.agent.type'] === 'trae-cn' && entry['agent.trae-cn.source'] === 'hub_usage') return;
     // Session summaries are log events, never an extra or reopened trace.
     if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.session_summary'] === true) return;
     if (entry['gen_ai.agent.type'] === 'doubao-work' && entry['loongsuite.doubao_work.trace_role'] === 'log_only') return;
@@ -969,8 +939,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     for (const [bufKey, buf] of this.turnBuffers) {
       // Native Codex task_complete/turn_aborted is authoritative. A second
       // work item in the same thread must not truncate a still-running turn.
-      if (agentType === 'codex' || agentType === 'doubao-work' ||
-          (agentType === 'trae-cn' && isTraeContent(entry))) break;
+      if (agentType === 'codex' || agentType === 'doubao-work') break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       // Incremental Hermes turns may overlap inside one IM session. They have
       // their own explicit completion, so a successor is not an implicit end.
@@ -1318,7 +1287,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Fan out to every backend; each endpoint belongs to exactly one serviceName
     // group, so the spans reach each backend once.
     const serviceNames = [...new Set(
-      this.endpointsForAgent(agentType).map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
+      this.endpoints.map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
     )];
     await Promise.all(
       serviceNames.map((serviceName) =>
@@ -1330,9 +1299,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
-    if (isTraeContent(entry)) return entry['agent.trae-cn.source'] === 'content_history'
-      ? entry['gen_ai.span.kind'] === 'LLM' : entry['gen_ai.turn.end'] === true;
-    if (['native_metadata', 'renderer_metadata'].includes(String(entry['agent.trae-cn.source']))) return entry['gen_ai.turn.end'] === true;
     if (entry['agent.source'] === 'qwen-work-cn-collaboration') {
       return entry['event.name'] === 'other' && entry['gen_ai.turn.end'] === true;
     }
@@ -1415,10 +1381,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
     value: string;
     key: string;
   } {
-    if (isTraeContent(entry) && entry.trace_id) {
-      const history = entry['agent.trae-cn.source'] === 'content_history' ? entry['gen_ai.response.id'] : undefined;
-      return { source: 'trace_id', value: entry.trace_id, key: 'trae-content:' + entry.trace_id + '/' + (history ?? 'hook') };
-    }
     const localExecution = entry['loongsuite.doubao_work.native_execution_id'];
     if (entry['gen_ai.agent.type'] === 'doubao-work' && entry['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution'
       && typeof localExecution === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(localExecution)) {
@@ -1551,7 +1513,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // service names). Each service name owns an independent convert state, so the
     // common single-name case still converts exactly once.
     const serviceNames = [...new Set(
-      this.endpointsForAgent(agentType).map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
+      this.endpoints.map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
     )];
     const results = await Promise.all(
       serviceNames.map((serviceName) => {
@@ -1580,39 +1542,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
     resourceIdentity: AgentResourceIdentity,
     convertKey: string,
   ): Promise<boolean> {
-    if (agentType === 'trae-cn' && records.every(r => isTraeContent(r) || ['native_metadata', 'renderer_metadata'].includes(String(r['agent.trae-cn.source'])))) {
-      const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes, resourceIdentity);
-      const observedCounts = new Set(['agent.trae-cn.model_responses_observed', 'agent.trae-cn.usage_reports_observed',
-        'agent.trae-cn.input_tokens_observed', 'agent.trae-cn.output_tokens_observed']);
-      const explicit = records.every(isTraeContent) ? mergeTraeContentSpans(records) : records;
-      const spans = explicit.map(r => {
-        const start = BigInt(String(r.startTimeUnixNano));
-        const end = BigInt(String(r.endTimeUnixNano));
-        const hr = (ns: bigint): [number, number] => [Number(ns / 1000000000n), Number(ns % 1000000000n)];
-        const tool = r['gen_ai.span.kind'] === 'TOOL';
-        const attributes = Object.fromEntries(Object.entries(r).filter(([key, value]) =>
-          (typeof value === 'string' || typeof value === 'number') && ((observedCounts.has(key) && Number.isSafeInteger(value)) || key.startsWith('gen_ai.') || key === 'agent.trae-cn.source' || key === 'agent.trae-cn.observed_until' || key === 'user.id'))) as Record<string, string | number>;
-        if (isTraeContent(r)) {
-          for (const key of ['gen_ai.input.messages', 'gen_ai.output.messages', 'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result'] as const) {
-            const value = r[key];
-            if (value !== undefined && value !== null) attributes[key] = typeof value === 'string' ? value : JSON.stringify(value);
-          }
-        }
-        const model = r['gen_ai.response.model'] || r['gen_ai.request.model'];
-        return {
-          name: tool ? 'execute_tool ' + r['gen_ai.tool.name']
-            : r['gen_ai.span.kind'] === 'LLM' ? (model ? 'chat ' + model : 'chat')
-            : r['gen_ai.span.kind'] === 'STEP' ? 'react step'
-            : r['gen_ai.span.kind'] === 'AGENT' ? 'invoke_agent ' + r['gen_ai.agent.name'] : 'enter_ai_application_system',
-          spanContext: () => ({ traceId: String(r.trace_id), spanId: String(r.span_id), traceFlags: 1 }),
-          parentSpanId: r.parent_span_id ? String(r.parent_span_id) : undefined, kind: SpanKind.INTERNAL,
-          startTime: hr(start), endTime: hr(end), duration: hr(end - start), ended: true,
-          resource, attributes, status: { code: SpanStatusCode.UNSET }, links: [], events: [],
-          instrumentationLibrary: { name: 'loongsuite-pilot' }, droppedLinksCount: 0, droppedEventsCount: 0, droppedAttributesCount: 0,
-        } satisfies ReadableSpan;
-      });
-      return this.exportConvertedSpans(agentType, serviceName, records, spans, { systemInstructions: [] }, {});
-    }
     const convertState = this.getOrCreateConvertState(
       agentType,
       serviceName,
@@ -2820,7 +2749,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     let state = this.agentExportStates.get(key);
     if (state) return state;
 
-    const exporters = this.endpointsForAgent(agentType)
+    const exporters = this.endpoints
       .filter((endpoint) => this.resolveEndpointServiceName(endpoint, agentType) === serviceName)
       .map((ep) => ({
         name: ep.name,
@@ -2835,10 +2764,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
     state = { exporters };
     this.agentExportStates.set(key, state);
     return state;
-  }
-
-  private endpointsForAgent(agentType: string) {
-    return this.endpoints.filter(endpoint => !endpoint.excludedAgentTypes?.includes(agentType));
   }
 
   private resolveEndpointServiceName(endpoint: ResolvedOtlpEndpoint, agentType: string): string {

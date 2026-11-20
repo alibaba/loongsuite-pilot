@@ -58,19 +58,6 @@ describe('OtlpTraceFlusher - export', () => {
     vi.mocked(fsUtils.ensureDir).mockClear();
   });
 
-  it('applies destination restrictions even when backends share the same service name', async () => {
-    const endpoints = [
-      { name: 'user', endpoint: 'http://localhost:4318' },
-      { name: 'managed', endpoint: 'http://localhost:4319', excludedAgentTypes: ['trae-cn'] },
-    ];
-    const flusher = new OtlpTraceFlusher(makeConfig({ endpoints }));
-    await flusher.exportSpansForAgent('trae-cn', [makeMockSpan()] as any);
-    expect(mockExport).toHaveBeenCalledTimes(1);
-    await flusher.exportSpansForAgent('claude-code', [makeMockSpan()] as any);
-    expect(mockExport).toHaveBeenCalledTimes(3);
-    await flusher.shutdown();
-  });
-
   it('calls exporter.export via exportSpansForAgent test seam', async () => {
     const flusher = new OtlpTraceFlusher(makeConfig());
     const spans = [makeMockSpan()] as any;

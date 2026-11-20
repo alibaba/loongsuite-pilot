@@ -69,7 +69,6 @@ import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-c
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
-import { TraeRendererMetadataInput, rendererLogRoot } from '../inputs/trae-cn-log/renderer-metadata-input.js';
 import { TraeCnLogInput } from '../inputs/trae-cn-log/trae-cn-log-input.js';
 import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
@@ -342,7 +341,6 @@ export class Orchestrator extends EventEmitter {
       dataDir: this.dataDir,
       pilotDir,
       installedBy: 'daemon',
-      captureTraeContent: this.config.agents['trae-cn']?.captureMessageContent,
       deployInterceptorHooks: shouldDeployInterceptorHooks(this.config.interceptor),
       doubaoWork: this.config.listeners['doubao-work'],
     });
@@ -352,11 +350,6 @@ export class Orchestrator extends EventEmitter {
     if (this.deploymentScope === 'auto') {
       await this.deploymentManager.deployAll(def => this.isAgentGatedEnabled(def.id));
     } else {
-      const trae = this.deploymentManager.getDefinitions().find(def => def.id === 'trae-cn');
-      if (trae && this.config.agents['trae-cn']?.captureMessageContent === false) {
-        const result = await this.deploymentManager.deploySingle(trae);
-        if (!result.success) throw new Error(result.error);
-      }
       logger.info('recorded deployment scope; skipping deployAll');
     }
 
@@ -830,7 +823,6 @@ export class Orchestrator extends EventEmitter {
       // Its exact config and asset checks run through a dedicated intercept target.
       if (def.id === 'grok-build' || this.deploymentManager.effectiveDefinition(def).hook?.scope === 'system') continue;
 
-      if (def.id === 'trae-cn' && this.config.agents['trae-cn']?.captureMessageContent === false) continue;
       const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
       targets.push({
         agentId: def.id,
@@ -1901,10 +1893,7 @@ export class Orchestrator extends EventEmitter {
     // --- TRAE-CN (Hook JSONL + best-effort ai-agent log aux source) ---
     const traeCnLogDir = path.join(this.dataDir, 'logs', 'trae-cn', 'history');
     await ensureDir(traeCnLogDir);
-    const metadataOnly = this.config.agents['trae-cn']?.captureMessageContent === false;
-    const traeCnLogInput = metadataOnly ? new TraeRendererMetadataInput({
-      stateStore: this.stateStore, pollIntervalMs: listenerCfg['trae-cn-log']?.pollInterval,
-    }) : new TraeCnLogInput({
+    const traeCnLogInput = new TraeCnLogInput({
       stateStore: this.stateStore,
       sessionDir: traeCnLogDir,
       pollIntervalMs: listenerCfg['trae-cn-log']?.pollInterval,
@@ -1912,8 +1901,8 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.registerInput(traeCnLogInput);
     entries.push(
       this.inputManager.buildDetectionEntry(traeCnLogInput, {
-        watchPaths: [metadataOnly ? rendererLogRoot() : traeCnLogDir],
-        isAvailable: async () => directoryExists(metadataOnly ? rendererLogRoot() : traeCnLogDir),
+        watchPaths: [traeCnLogDir],
+        isAvailable: async () => directoryExists(traeCnLogDir),
         enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['trae-cn-log']) &&
           this.agentControlManager.resolveEnabled(
             'trae-cn-log',

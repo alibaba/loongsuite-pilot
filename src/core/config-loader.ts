@@ -208,7 +208,6 @@ export interface ConfigFile {
   agents?: Record<string, {
     enabled?: boolean;
     captureMessageContent?: boolean | string;
-    userDestinationsOnly?: boolean;
     multimodal?: {
       uploadMode?: string;
       allowedRootPaths?: string[];
@@ -281,7 +280,8 @@ function envInt(key: string, fallback: number): number {
  *
  * Env vars override config file values. Config file overrides defaults.
  */
-export async function loadConfig(configPath = configJsonPath()): Promise<AnalyticsConfig> {
+export async function loadConfig(): Promise<AnalyticsConfig> {
+  const configPath = configJsonPath();
   const file = await readJsonFile<ConfigFile>(configPath);
 
   if (file) {
@@ -701,7 +701,6 @@ function buildAgentsConfig(file: ConfigFile | null, innerDataConfig: InnerDataCo
     result[agentType] = {
       enabled: policy.enabled,
       captureMessageContent,
-      ...(policy.userDestinationsOnly === true ? { userDestinationsOnly: true } : {}),
       ...(multimodal ? { multimodal } : {}),
     };
   }
@@ -1050,12 +1049,10 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   // Guard with Array.isArray: managed data_config.json is control-plane pushed,
   // so a non-array (object/string) serialization must not throw here — mirrors
   // buildSlsConfig's guard and keeps a bad push from bricking all flushers.
-  const exclusions = managedDestinationExclusions(config.agents);
   const innerOtlp = Array.isArray(config.innerTrace?.otlp) ? config.innerTrace!.otlp : [];
   innerOtlp.forEach((ep, i) => {
     if (!ep.endpoint) return;
     endpoints.push({
-      ...exclusions,
       name: ep.name ?? `inner-otlp-${i}`,
       endpoint: ep.endpoint,
       headers: ep.headers,
@@ -1069,7 +1066,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   innerCms.forEach((ep, i) => {
     if (!ep.endpoint) return;
     endpoints.push(
-      { ...cmsEntryToOtlpEndpoint(ep.name ?? `inner-cms-${i}`, ep, armsResourceAttributes, innerServiceName), ...exclusions },
+      cmsEntryToOtlpEndpoint(ep.name ?? `inner-cms-${i}`, ep, armsResourceAttributes, innerServiceName),
     );
   });
 
@@ -1245,13 +1242,6 @@ function parseSlsEndpointEntry(ep: SlsEndpointEntry, index: number): SlsEndpoint
   return result;
 }
 
-function managedDestinationExclusions(agents?: Record<string, { userDestinationsOnly?: boolean }>) {
-  const excludedAgentTypes = Object.entries(agents ?? {})
-    .filter(([, policy]) => policy?.userDestinationsOnly === true)
-    .map(([type]) => type);
-  return excludedAgentTypes.length ? { excludedAgentTypes } : {};
-}
-
 function buildSlsConfig(
   file: ConfigFile | null,
   serviceName: string | undefined,
@@ -1308,8 +1298,7 @@ function buildSlsConfig(
       .filter(ep => ep.endpoint && ep.logstore)
       .map((ep, i) => {
         const parsed = parseSlsEndpointEntry(ep, i);
-        return { ...parsed, ...(innerServiceName ? { serviceName: innerServiceName } : {}),
-          ...managedDestinationExclusions(file?.agents) };
+        return innerServiceName ? { ...parsed, serviceName: innerServiceName } : parsed;
       });
     endpoints = [...endpoints, ...innerEndpoints];
   }

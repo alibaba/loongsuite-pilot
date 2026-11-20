@@ -38,7 +38,6 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 
 import { readStdinJson } from './shared/stdin-reader.mjs';
-import { withSyncFileLock } from './shared/sync-file-lock.mjs';
 import {
   INITIAL_HASH,
   computeHash,
@@ -54,7 +53,6 @@ import {
   loadHookRuntimeConfig,
   resolveUserId,
   applyHookContentPolicy,
-  shouldCaptureHookMessageContent,
 } from './agent-event-normalizer.mjs';
 import {
   agentBaseFieldPatch,
@@ -125,17 +123,12 @@ function loadSessionState(sessionId) {
   }
 }
 
-function saveSessionState(sessionId, state, runtimeConfig) {
+function saveSessionState(sessionId, state) {
   ensureStateDir();
   const file = sessionStatePath(sessionId);
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     state.last_activity_at_sec = nowSec();
-    if (!shouldCaptureHookMessageContent(AGENT_ID, runtimeConfig)) {
-      delete state.prompt;
-      delete state.last_assistant_message;
-      for (const call of Object.values(state.pending_tool_calls ?? {})) delete call.arguments;
-    }
     fs.writeFileSync(file, JSON.stringify(state, null, 2), 'utf-8');
   } catch { /* best-effort */ }
 }
@@ -1149,7 +1142,10 @@ function emitEntryIfMissing(state, runtimeConfig, records, timestamp) {
 
 // ─── cmd handlers ───
 
-function cmdSessionStart(event, sessionId) {
+function cmdSessionStart() {
+  const event = tryReadStdin();
+  const sessionId = requireSessionId(event, 'session-start');
+  if (!sessionId) return;
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
   // SessionStart is a no-op marker — no turn opened (§2.9).
@@ -1157,14 +1153,17 @@ function cmdSessionStart(event, sessionId) {
   let state = loadSessionState(sessionId);
   if (!state) {
     state = { session_id: sessionId, cwd: event.cwd || '', turn_index: 0 };
-    saveSessionState(sessionId, state, runtimeConfig);
+    saveSessionState(sessionId, state);
   } else if (event.cwd && state.cwd !== event.cwd) {
     state.cwd = event.cwd;
-    saveSessionState(sessionId, state, runtimeConfig);
+    saveSessionState(sessionId, state);
   }
 }
 
-function cmdUserPromptSubmit(event, sessionId) {
+function cmdUserPromptSubmit() {
+  const event = tryReadStdin();
+  const sessionId = requireSessionId(event, 'user-prompt-submit');
+  if (!sessionId) return;
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
 
@@ -1181,7 +1180,7 @@ function cmdUserPromptSubmit(event, sessionId) {
     records.push(llmResponseRecord(state, base, ts, ''));
     state.llm_response_emitted = true;
     emitRecords(state, records, runtimeConfig);
-    saveSessionState(sessionId, state, runtimeConfig);
+    saveSessionState(sessionId, state);
   }
   // Round 5 #5: turn_index persists across idle_prompt so multi-turn
   // conversations produce unique t1/t2/t3 ids. prevState (even after
@@ -1225,10 +1224,13 @@ function cmdUserPromptSubmit(event, sessionId) {
   ]);
 
   emitRecords(state, records, runtimeConfig);
-  saveSessionState(sessionId, state, runtimeConfig);
+  saveSessionState(sessionId, state);
 }
 
-function cmdPreToolUse(event, sessionId) {
+function cmdPreToolUse() {
+  const event = tryReadStdin();
+  const sessionId = requireSessionId(event, 'pre-tool-use');
+  if (!sessionId) return;
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   let state = loadSessionState(sessionId);
   if (!state || !state.llm_request_emitted) {
@@ -1276,10 +1278,13 @@ function cmdPreToolUse(event, sessionId) {
     if (pending) pending.llm_tool_name = event.llm_tool_name;
   }
   emitRecords(state, records, runtimeConfig);
-  saveSessionState(sessionId, state, runtimeConfig);
+  saveSessionState(sessionId, state);
 }
 
-function cmdPostToolUse(event, sessionId) {
+function cmdPostToolUse() {
+  const event = tryReadStdin();
+  const sessionId = requireSessionId(event, 'post-tool-use');
+  if (!sessionId) return;
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   const state = loadSessionState(sessionId);
   if (!state) {
@@ -1310,10 +1315,13 @@ function cmdPostToolUse(event, sessionId) {
     state.pending_tool_calls[toolUseId].completed = true;
   }
   emitRecords(state, records, runtimeConfig);
-  saveSessionState(sessionId, state, runtimeConfig);
+  saveSessionState(sessionId, state);
 }
 
-function cmdStop(event, sessionId) {
+function cmdStop() {
+  const event = tryReadStdin();
+  const sessionId = requireSessionId(event, 'stop');
+  if (!sessionId) return;
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
   let state = loadSessionState(sessionId);
@@ -1375,11 +1383,13 @@ function cmdStop(event, sessionId) {
     ];
     try { writeOtlpDebugRecords(corrected); } catch { /* best-effort */ }
   }
-  saveSessionState(sessionId, state, runtimeConfig);
+  saveSessionState(sessionId, state);
 }
 
-function cmdNotification(event, sessionId) {
-  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+function cmdNotification() {
+  const event = tryReadStdin();
+  const sessionId = requireSessionId(event, 'notification');
+  if (!sessionId) return;
   // Round 6 #1: forward-compat — if TRAE-CN ever starts emitting LLM streaming
   // chunks (notification_type != idle_prompt) carrying usage data, accumulate
   // it into state.usage so the next Stop extracts real token counts. tester
@@ -1389,7 +1399,7 @@ function cmdNotification(event, sessionId) {
     const state = loadSessionState(sessionId);
     if (state) {
       const changed = mergeUsageIntoState(state, event);
-      if (changed) saveSessionState(sessionId, state, runtimeConfig);
+      if (changed) saveSessionState(sessionId, state);
     }
     return;
   }
@@ -1417,7 +1427,7 @@ function cmdNotification(event, sessionId) {
     Object.keys(stub).forEach((k) => {
       if (stub[k] === undefined) delete stub[k];
     });
-    saveSessionState(sessionId, stub, runtimeConfig);
+    saveSessionState(sessionId, stub);
   } else {
     clearSessionState(sessionId);
   }
@@ -1615,45 +1625,22 @@ const DISPATCH = {
   'post-tool-use': cmdPostToolUse,
   'stop': cmdStop,
   'notification': cmdNotification,
+  'frida-enrich': cmdFridaEnrich,
 };
-
-async function dispatch(sub) {
-  if (sub === 'frida-enrich') return cmdFridaEnrich();
-  if (!Object.hasOwn(DISPATCH, sub)) return;
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, sub);
-  if (!sessionId) return;
-
-  // Each hook runs in a separate process. Keep the state read, event emission
-  // and state write together for every handler that touches this session.
-  const lock = sessionStatePath(sessionId) + '.lock';
-  const result = withSyncFileLock(lock, 15_000, 300_000, () => DISPATCH[sub](event, sessionId));
-  if (!result.acquired) {
-    logHookError({ agentId: AGENT_ID, stage: sub, errorType: 'session_lock_unavailable',
-      errorMessage: 'Could not acquire session state lock; skipping event' });
-  }
-}
 
 // Dispatcher runs only when invoked as CLI (argv[1] === this file). When
 // imported by unit tests for the vscdb reader / agent_type mapper, skip so
 // the test runner's argv doesn't trigger a hook subcommand.
-function isDirectExec() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const here = fileURLToPath(import.meta.url);
-  if (entry === here) return true;
-  try {
-    return fs.realpathSync(entry) === fs.realpathSync(here);
-  } catch {
-    return false;
-  }
-}
-
-if (isDirectExec()) {
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const sub = process.argv[2] || 'unknown';
-  dispatch(sub).catch((err) => {
-    logHookError({ agentId: AGENT_ID, stage: `dispatch_${sub}`, errorType: 'unhandled', errorMessage: err?.message || String(err) });
-  }).finally(() => { if (!emittedHookResponse) process.stdout.write('{}\n'); });
+  const fn = DISPATCH[sub];
+  if (fn) {
+    Promise.resolve(fn()).catch((err) => {
+      logHookError({ agentId: AGENT_ID, stage: `dispatch_${sub}`, errorType: 'unhandled', errorMessage: err?.message || String(err) });
+    }).finally(() => { if (!emittedHookResponse) process.stdout.write('{}\n'); });
+  } else {
+    process.stdout.write('{}\n');
+  }
 }
 
 // Test-only exports for the dual-path reader + agent_type mapper.

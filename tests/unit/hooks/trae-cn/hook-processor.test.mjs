@@ -1,13 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { execFile, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as crypto from 'node:crypto';
-import { AgentDefLoader } from '../../../../src/deployment/agent-def-loader.ts';
-import { HookStrategy } from '../../../../src/deployment/hook-strategy.ts';
-import { HookManager } from '../../../../src/hooks/hook-manager.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/trae-cn-hook-processor.mjs');
@@ -93,86 +90,6 @@ function readOtlpDebugSpans() {
 }
 
 describe('trae-cn hook processor', () => {
-  test('captureMessageContent false keeps conversation content off disk throughout a tool turn', () => {
-    const markers = ['private-prompt-616', 'private-args-616', 'private-result-616', 'private-answer-616'];
-    const session = 'privacy-test';
-    const config = path.join(dataDir, 'config.json');
-    fs.writeFileSync(config, JSON.stringify({ agents: { 'trae-cn': { captureMessageContent: false } } }));
-    for (const [subcommand, payload] of [
-      ['user-prompt-submit', { prompt: markers[0] }],
-      ['pre-tool-use', { tool_use_id: 't1', tool_name: 'Read', tool_input: { path: markers[1] } }],
-      ['post-tool-use', { tool_use_id: 't1', tool_response: { stdout: markers[2] } }],
-      ['stop', { last_assistant_message: markers[3] }],
-      ['notification', { notification_type: 'idle_prompt' }],
-    ]) {
-      const result = runHook(subcommand, { ...payload, session_id: session }, {
-        AGENT_DATA_COLLECTION_CONFIG: config, LOONGSUITE_PILOT_OTLP_DEBUG: '1',
-      });
-      expect(result.status).toBe(0);
-      expect(readState(session)).toBeTruthy();
-      const files = fs.readdirSync(dataDir, { recursive: true });
-      for (const file of files) {
-        const target = path.join(dataDir, file);
-        if (!fs.statSync(target).isFile()) continue;
-        const bytes = fs.readFileSync(target);
-        for (const marker of markers) expect(bytes.includes(Buffer.from(marker)), file).toBe(false);
-      }
-    }
-    const records = readEmittedJsonl();
-    expect(records.filter(r => r['event.name'] !== 'other').map(r => r['event.name']))
-      .toEqual(['llm.request', 'tool.call', 'tool.result', 'llm.response']);
-    expect(readOtlpDebugSpans().length).toBeGreaterThan(0);
-  });
-
-  test('deploys executable event commands and replaces registrations without subcommands', async () => {
-    const hooksDir = path.join(dataDir, 'hooks');
-    fs.cpSync(path.dirname(PROCESSOR), hooksDir, { recursive: true });
-    const loader = new AgentDefLoader({
-      builtinDir: path.dirname(AGENT_DEFINITION),
-      localDir: path.join(dataDir, 'agents.d.local'),
-      pilotDir: dataDir,
-      dataDir,
-    });
-    const def = (await loader.load()).find(agent => agent.id === 'trae-cn');
-    const settingsPath = path.join(dataDir, '.trae-cn', 'hooks.json');
-    def.hook.settingsPath = settingsPath;
-    const strategy = new HookStrategy(new HookManager(hooksDir, path.join(dataDir, 'logs')));
-    const legacy = { ...def, hook: { ...def.hook, eventSubcommand: undefined, replaceHookCommands: [] } };
-    expect((await strategy.deploy(legacy)).success).toBe(true);
-    expect(await strategy.needsDeploy(def)).toBe(true);
-    expect((await strategy.deploy(def)).success).toBe(true);
-    expect(await strategy.needsDeploy(def)).toBe(false);
-
-    const { hooks } = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-    const events = {
-      SessionStart: ['session-start', { session_id: 'trae-cn-smoke-session' }],
-      UserPromptSubmit: ['user-prompt-submit', 'user-prompt-submit.json'],
-      PreToolUse: ['pre-tool-use', 'pre-tool-use.json'],
-      PostToolUse: ['post-tool-use', 'post-tool-use.json'],
-      Stop: ['stop', 'stop.json'],
-      Notification: ['notification', 'notification-idle.json'],
-    };
-    for (const [event, [subcommand, fixture]] of Object.entries(events)) {
-      const commands = hooks[event].flatMap(group => group.hooks.map(handler => handler.command));
-      expect(commands).toHaveLength(1);
-      expect(commands[0].endsWith(' ' + subcommand)).toBe(true);
-      const result = spawnSync(commands[0], {
-        shell: true,
-        input: typeof fixture === 'string' ? fs.readFileSync(path.join(FIXTURES, fixture)) : JSON.stringify(fixture),
-        env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir },
-        encoding: 'utf8',
-        timeout: 10_000,
-      });
-      expect(result.status, result.stderr).toBe(0);
-    }
-    const records = readEmittedJsonl();
-    expect(records.filter(record => record['event.name'] !== 'other').map(record => record['event.name']))
-      .toEqual(['llm.request', 'tool.call', 'tool.result', 'llm.response']);
-    const toolRecords = records.filter(record => record['gen_ai.tool.call.id'] === 'toolu_01');
-    expect(toolRecords).toHaveLength(2);
-    expect(toolRecords[0].span_id).toBe(toolRecords[1].span_id);
-  });
-
   test('agents.d/trae-cn.json declares all 6 hook events', () => {
     const def = JSON.parse(fs.readFileSync(AGENT_DEFINITION, 'utf8'));
     expect(def.id).toBe('trae-cn');
@@ -281,28 +198,19 @@ describe('trae-cn hook processor', () => {
     expect(toolRes['agent.trae.status_source']).toBe('exit_code');
   });
 
-  test('retains all 12 concurrent PreToolUse calls through Stop', async () => {
-    const sessionId = 'trae-cn-parallel-session';
-    const ids = Array.from({ length: 12 }, (_, i) => 'tool-' + i).sort();
-    expect(runHook('user-prompt-submit', { session_id: sessionId, prompt: 'Read files' }).status).toBe(0);
-    await Promise.all(ids.map(id => new Promise((resolve, reject) => {
-      const child = execFile(process.execPath, [PROCESSOR, 'pre-tool-use'], {
-        env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir },
-        timeout: 15_000,
-      }, error => error ? reject(error) : resolve());
-      child.stdin.end(JSON.stringify({ session_id: sessionId, tool_use_id: id, tool_name: 'Read' }));
-    })));
-
-    const state = readState(sessionId);
-    expect(Object.keys(state.pending_tool_calls).sort()).toEqual(ids);
-    expect(runHook('stop', { session_id: sessionId, last_assistant_message: 'Done' }).status).toBe(0);
+  test('parallel PreToolUse calls share same step.id', () => {
+    runFixture('user-prompt-submit', 'parallel-user-prompt-submit.json');
+    runFixture('pre-tool-use', 'parallel-pre-tool-use-a.json');
+    runFixture('pre-tool-use', 'parallel-pre-tool-use-b.json');
+    const state = readState('trae-cn-parallel-session');
+    expect(Object.keys(state.pending_tool_calls).length).toBe(2);
     const records = readEmittedJsonl();
-    const calls = records.filter(record => record['event.name'] === 'tool.call');
-    expect(calls.map(call => call['gen_ai.tool.call.id']).sort()).toEqual(ids);
-    expect(new Set(calls.map(call => call['gen_ai.step.id']))).toEqual(new Set([state.step_id]));
-    const response = records.find(record => record['event.name'] === 'llm.response');
-    const parts = response['gen_ai.output.messages'].flatMap(message => message.parts);
-    expect(parts.filter(part => part.type === 'tool_call').map(part => part.id).sort()).toEqual(ids);
+    const toolCalls = records.filter((r) => r['event.name'] === 'tool.call');
+    expect(toolCalls.length).toBe(2);
+    const stepIds = new Set(toolCalls.map((r) => r['gen_ai.step.id']));
+    expect(stepIds.size).toBe(1);
+    const toolIds = new Set(toolCalls.map((r) => r['gen_ai.tool.call.id']));
+    expect(toolIds).toEqual(new Set(['toolu_parallel_a', 'toolu_parallel_b']));
   });
 
   test('multi-turn produces 2 distinct trace_ids', () => {

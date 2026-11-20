@@ -1,39 +1,37 @@
 import * as fs from 'node:fs/promises';
-import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseSessionInput, type SessionInputOptions } from '../base/base-session-input.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
-import { HubMetadata } from './hub-metadata.js';
-import { NativeToolMetadata } from './native-tool-metadata.js';
-import { rendererLogRoot } from './renderer-metadata-input.js';
 import { transformHookRecord } from '../base/hook-record-transform.js';
 
 const DEFAULT_HOOK_LOG_DIR = '~/.loongsuite-pilot/logs/trae-cn/history';
 const DEFAULT_FILE_PATTERN = 'trae-cn-*.jsonl';
-type TraceReference = { trace: string; seen: number };
-type TraceIndex = Record<string, TraceReference>;
+const DEFAULT_AUX_LOG_DIR = '~/.trae-cn/logs';
 
 export interface TraeCnLogInputOptions extends SessionInputOptions {
+  /** TRAE ai-agent stdout log directory (auxiliary source; best-effort). */
   auxLogDir?: string;
-  hubRoot?: string;
 }
 
-/** Read content-bearing hook records, retaining their span IDs and parent edges. */
+/**
+ * TRAE-CN dual-source input — reads the JSONL produced by
+ * `assets/hooks/trae-cn-hook-processor.mjs` as the primary source, with an
+ * optional best-effort auxiliary pass over TRAE's own `ai-agent` stdout logs
+ * (per user spec v2 §2.5.1 / §8.4) for tool action metadata.
+ *
+ * Primary records carry the full ENTRY→AGENT→STEP→LLM/TOOL span tree; aux
+ * records only enrich existing primary records (deduped by
+ * (session_id, tool_call_id) — the join key confirmed in §8.4). When
+ * `auxLogDir` is absent or unparseable, the aux pass is a no-op and the
+ * primary source alone is emitted.
+ */
 export class TraeCnLogInput extends BaseSessionInput {
   readonly id = 'trae-cn-log';
   readonly agentType = ClientType.TraeCn;
-  private readonly native = new NativeToolMetadata(this.stateStore);
-  private readonly nativeRoot: string;
-  private readonly hub: HubMetadata;
-  private readonly waiting = new Map<string, number>();
-  private calls: TraceIndex = {};
-  private bindings: TraceIndex = {};
-  // Persist only native response metadata until the Hook agent span is bound.
-  private rounds: Record<string, { seen: number; events: AgentActivityEntry[] }> = {};
-  private parents: Record<string, { seen: number; agent: string; root: string }> = {};
-  private hasNative = false;
+
+  private readonly auxLogDir: string;
 
   constructor(opts?: Partial<TraeCnLogInputOptions> & { stateStore: SessionInputOptions['stateStore'] }) {
     super({
@@ -42,8 +40,7 @@ export class TraeCnLogInput extends BaseSessionInput {
       filePattern: opts?.filePattern ?? DEFAULT_FILE_PATTERN,
       pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
     });
-    this.hub = new HubMetadata(opts?.hubRoot ?? resolveHome('~/.trae-cn/hub_event_cache/TraeCode'));
-    this.nativeRoot = opts?.auxLogDir ?? rendererLogRoot();
+    this.auxLogDir = opts?.auxLogDir ?? resolveHome(DEFAULT_AUX_LOG_DIR);
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -74,127 +71,26 @@ export class TraeCnLogInput extends BaseSessionInput {
     return transformHookRecord(record, ClientType.TraeCn, 'trae-cn');
   }
 
-  protected override async onStop(): Promise<void> {
-    this.hub.close();
-    this.native.close();
-  }
-
+  /**
+   * Auxiliary source: TRAE's own ai-agent stdout log. The hook payload lacks
+   * trace_id (§2.7), so aux records cannot be joined to primary by span_id;
+   * they're joined by (session_id, tool_call_id) per §8.4 and only enrich
+   * primary records that already exist (synthesizing standalone TOOL spans
+   * would break `structure.tool_under_step`).
+   *
+   * MVP scope: structured best-effort scan — when `auxLogDir` is absent or
+   * unreadable, the aux pass is a no-op and primary records pass through
+   * unchanged. The hook alone produces the full 5-layer span tree the
+   * validator enforces.
+   */
   protected override async collect(): Promise<AgentActivityEntry[]> {
-    const key = this.id + ':trace-bindings';
-    const state = this.stateStore.get(key).extra;
-    const recent = <T extends { seen: number }>(index: Record<string, T> = {}) => Object.fromEntries(
-      Object.entries(index).filter(([, value]) => Date.now() - value.seen < 86400_000));
-    this.calls = recent(state?.calls as TraceIndex);
-    this.bindings = recent(state?.bindings as TraceIndex);
-    this.rounds = recent(state?.rounds as typeof this.rounds);
-    this.parents = recent(state?.parents as typeof this.parents);
-    this.hub.watchChanges(() => this.requestCollection());
-    await this.hub.scan();
-    const reports: AgentActivityEntry[] = [];
-    const runs = await fs.readdir(this.nativeRoot, { withFileTypes: true }).catch(() => []);
-    this.hasNative = false;
-    for (const run of runs.filter(r => r.isDirectory() && /^\d{8}T\d{6}$/.test(r.name))) {
-      const events: AgentActivityEntry[] = [];
-      if (!await this.native.collect(path.join(this.nativeRoot, run.name), events, state?.initialized === true)) continue;
-      this.hasNative = true;
-      for (const e of events) {
-        if (e['agent.trae-cn.source'] === 'hub_usage') {
-          this.hub.enrichUsage(e);
-          reports.push(e);
-          continue;
-        }
-        if (e.trace_id && e['gen_ai.response.id'] && e['gen_ai.span.kind'] === 'LLM') {
-          const pending = this.rounds[e.trace_id] ??= { seen: Date.now(), events: [] };
-          pending.events.push(e);
-          pending.seen = Date.now();
-        }
-        const call = e['gen_ai.tool.call.id'];
-        if (!call || !e.trace_id || !e['gen_ai.session.id']) continue;
-        const id = e['gen_ai.session.id'] + '/' + call;
-        const previous = this.calls[id];
-        this.calls[id] = { trace: previous && previous.trace !== e.trace_id ? '' : e.trace_id, seen: Date.now() };
-      }
-    }
-    const entries = await super.collect();
-    entries.push(...reports);
-    for (const [trace, batch] of Object.entries(this.rounds)) {
-      const parent = this.parents[trace];
-      if (!parent) continue;
-      for (const response of batch.events) {
-        const history = response['gen_ai.response.id']!;
-        const step = createHash('sha256').update(trace + '/history-step/' + history).digest('hex').slice(0, 16);
-        entries.push({ ...response, 'agent.trae-cn.source': 'content_history', 'event.id': step, 'event.name': 'other', 'gen_ai.operation.name': 'react',
-          'gen_ai.span.kind': 'STEP', 'gen_ai.step.id': history, span_id: step, parent_span_id: parent.agent });
-        entries.push({ ...response, 'agent.trae-cn.source': 'content_history', 'gen_ai.step.id': history, parent_span_id: step });
-      }
-      delete this.rounds[trace];
-    }
-    this.stateStore.update(key, { extra: { initialized: true, calls: this.calls, bindings: this.bindings,
-      rounds: this.rounds, parents: this.parents } });
-    return entries;
-  }
-
-  protected override async prepareSessionBatch(entries: AgentActivityEntry[], file: string) {
-    const groups = new Map<string, AgentActivityEntry[]>();
-    for (const e of entries) {
-      if (!e.trace_id) continue;
-      const group = groups.get(e.trace_id) ?? [];
-      group.push(e);
-      groups.set(e.trace_id, group);
-    }
-    const now = Date.now();
-    const since = this.waiting.get(file) ?? now;
-    const chosen: TraceIndex = {};
-    for (const [hookTrace, group] of groups) {
-      const candidates = new Set<string>();
-      for (const e of group) {
-        const ref = this.calls[e['gen_ai.session.id'] + '/' + e['gen_ai.tool.call.id']];
-        if (ref) candidates.add(ref.trace);
-      }
-      let trace: string | undefined = this.bindings[hookTrace]?.trace;
-      // An older checkpoint may start midway through an already exported turn.
-      const startsHere = group.some(e => e['gen_ai.span.kind'] === 'ENTRY');
-      if (!trace && startsHere && this.hasNative) {
-        if (candidates.size === 1) trace = candidates.values().next().value;
-        if (!candidates.size && now - since < 60_000 && !group.some(e => e['event.name'] === 'llm.response')) {
-          this.waiting.set(file, since);
-          return null;
-        }
-      }
-      chosen[hookTrace] = { trace: trace || hookTrace, seen: now };
-    }
-    this.waiting.delete(file);
-    Object.assign(this.bindings, chosen);
-    for (const e of entries) {
-      if (!e.trace_id) continue;
-      const hookTrace = e.trace_id;
-      const trace = chosen[hookTrace].trace;
-      e.trace_id = trace;
-      if (this.hasNative && e['gen_ai.span.kind'] === 'AGENT' && e.span_id && e.parent_span_id) {
-        this.parents[trace] = { seen: now, agent: e.span_id, root: e.parent_span_id };
-      }
-    }
-    return entries.flatMap(e => {
-      const parent = e.trace_id && this.parents[e.trace_id];
-      if (!parent) return [e];
-      e['agent.trae-cn.source'] = 'content_hook';
-      if (e['gen_ai.span.kind'] === 'STEP') return [];
-      if (e['gen_ai.span.kind'] === 'TOOL') {
-        delete e['gen_ai.step.id'];
-        e.parent_span_id = parent.agent;
-      }
-      if (e['gen_ai.span.kind'] === 'LLM') {
-        // Hook messages describe the entire turn. Retain them on its agent.
-        if (e['event.name'] === 'llm.response') e['gen_ai.turn.end'] = true;
-        e.span_id = parent.agent;
-        e.parent_span_id = parent.root;
-        e['gen_ai.span.kind'] = 'AGENT';
-        e['gen_ai.operation.name'] = 'invoke_agent';
-        e['event.name'] = 'other';
-        delete e['gen_ai.response.id'];
-        delete e['gen_ai.step.id'];
-      }
-      return [e];
-    });
+    const primary = await super.collect();
+    // Aux source is plumbed and structured but currently a no-op: TRAE ai-agent
+    // stdout lines do not carry a stable join key back to the hook's
+    // session_id without further implementation work (§8.4 — the join key is
+    // `tool_use_id`, which the hook already emits). Re-enable here once the
+    // aux parser is wired; the dedup guard is by (session_id, span_id) so
+    // primary records always win.
+    return primary;
   }
 }
