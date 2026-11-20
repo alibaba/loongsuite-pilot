@@ -1813,6 +1813,39 @@ impl HookStrategy {
         Ok(())
     }
 
+    pub(super) fn retire_sdk_hook_settings(
+        &self,
+        def: &AgentDefinition,
+        source: &str,
+    ) -> Result<Option<String>, String> {
+        let hook = def.hook.as_ref().ok_or("missing hook config")?;
+        let mut document = SettingsDocument::from_snapshot(Some(source), settings_syntax(hook))?;
+        if document
+            .data
+            .get("hooks")
+            .is_some_and(|hooks| !hooks.is_object())
+        {
+            return Err("invalid JSON settings: hooks must be an object".into());
+        }
+        for legacy in self.legacy_hook_definitions(def) {
+            let Some(event) = legacy.hook_json_path.last() else {
+                continue;
+            };
+            if document.data["hooks"]
+                .get(event)
+                .is_some_and(|hooks| !hooks.is_array())
+            {
+                return Err(format!(
+                    "invalid JSON settings: hooks.{event} must be an array"
+                ));
+            }
+            for installed in self.installed_sdk_hooks(def, &document.data, &legacy) {
+                document.apply_hook(&installed, true, false)?;
+            }
+        }
+        Ok(document.changed().then_some(document.raw))
+    }
+
     pub async fn undeploy_hooks(&self, def: &AgentDefinition) -> bool {
         match self.configure(def, true, None).await {
             Ok(()) => true,
@@ -2286,6 +2319,11 @@ impl HookStrategy {
                         .as_ref()
                         .is_some_and(|runtime| runtime.hook_path() == binary)
                         || qoder_version_binary(&binary, &cache)
+                        // Installation resolves the resource root physically. The
+                        // configured cache may still use that root's lexical alias.
+                        || cache.canonicalize().is_ok_and(|physical| {
+                            qoder_version_binary(&binary, &physical)
+                        })
                         || development_sdk_hook_binary(pilot).is_some_and(|dev| {
                             crate::sdk::agent_hooks::codex_shell_path(&dev).as_ref() == binary
                         }))
