@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { SpanStatusCode } from '@opentelemetry/api';
 import { ExportResultCode } from '@opentelemetry/core';
 import type { ExportResult } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
@@ -246,6 +247,7 @@ describe('dsh-event-transform interrupted-turn settlement (issue #578)', () => {
     expect(result['tool.result.status']).toBe('unknown');
     expect(result['agent.dsh.tool.end_time_known']).toBe(false);
     expect(result['gen_ai.tool.call.result']).toBeUndefined();
+    expect(result['gen_ai.tool.success']).toBeUndefined();
     expect(result['event.id']).toBe('native-repair-id');
     expect(BigInt(result.time_unix_nano)).toBeGreaterThan(BigInt(TOOL_CALL_TIME) * 1_000_000n);
   });
@@ -515,9 +517,31 @@ describe('DSH interrupted-turn OTLP export (issue #578)', () => {
     expect(tool.attributes['agent.dsh.tool.timing']).toBe('native');
     expect(tool.status.code).toBe(2);
     expect(tool.attributes['error.type']).toBe('AbortError');
+    expect(tool.attributes['gen_ai.tool.success']).toBeUndefined();
     expect(spanTimeMs(tool.endTime)).toBe(CANCEL_TIME);
     expect(captured.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT')[0].attributes['agent.dsh.turn_status']).toBe('cancelled');
     expect(captured.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')[0].attributes['gen_ai.response.finish_reasons']).toEqual(['tool_calls']);
+  });
+
+  it('exports a native recovery diagnostic as an unknown outcome without a failure flag', async () => {
+    const entries = transformAll([...interruptedTurnRecords(SID, BASE), {
+      type: 'tool/result', sid: SID, time: TOOL_CALL_TIME,
+      data: { turn: 1, step: 1, error: { code: 'TOOL_OUTCOME_UNKNOWN' },
+        message: { isError: true, source: { callId: CALL_ID },
+          content: [{ type: 'text', text: 'The outcome is unknown.' }] } },
+    }]);
+    await flusher.sendBatch(entries);
+    await flusher.flush();
+
+    const tools = toolSpans(captured);
+    expect(tools).toHaveLength(1);
+    const tool = tools[0];
+    expect(tool.attributes['tool.result.status']).toBe('unknown');
+    expect(tool.attributes['agent.dsh.tool.end_time_known']).toBe(false);
+    expect(tool.attributes['gen_ai.tool.call.result']).toBeUndefined();
+    expect(tool.attributes['gen_ai.tool.success']).toBeUndefined();
+    expect(tool.attributes['error.type']).toBeUndefined();
+    expect(tool.status.code).toBe(SpanStatusCode.UNSET);
   });
 
   it('still drops an unmatched tool.call when no turn boundary was ever observed', async () => {
