@@ -87,6 +87,8 @@ const WAKEUP_MARKER_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
 const SPAN_CONTEXT_TTL_MS = 48 * 60 * 60 * 1_000;
 const SPAN_CONTEXT_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
 const DYNAMIC_SESSION_FILE_MAX_IDLE_MS = 15 * 60 * 1_000;
+// Directory timestamps can stay unchanged across separate file publications.
+const DEFAULT_ROLLOUT_CACHE_MAX_AGE_MS = 5 * 60 * 1_000;
 // Cold historical rollouts are stat'd about as often as the old 30s default.
 // Files touched within the hot window stay on the default poll path so appends stay visible.
 const HISTORICAL_ROLLOUT_RECHECK_MS = 30_000;
@@ -271,7 +273,7 @@ export class CodexTranscriptInput extends BaseInput {
   /** Caught-up default-tree rollouts whose mtime is old enough to skip between rechecks. */
   private readonly rolloutIdleSnapshot = new Map<string, { ino: number; size: number; mtimeMs: number }>();
   private lastHistoricalRolloutStatAt = 0;
-  private cachedDefaultRollout: { dirMtimes: Map<string, number>; files: string[] } | null = null;
+  private cachedDefaultRollout: { dirMtimes: Map<string, number>; files: string[]; cachedAtMs: number } | null = null;
 
   constructor(opts: CodexTranscriptInputOptions) {
     const processor = opts.multimodal?.processor ?? null;
@@ -658,7 +660,9 @@ export class CodexTranscriptInput extends BaseInput {
 
   private async listDefaultRolloutFiles(): Promise<string[]> {
     const cached = this.cachedDefaultRollout;
-    if (cached && await this.rolloutDirsUnchanged(cached.dirMtimes)) {
+    const now = Date.now();
+    if (cached && now >= cached.cachedAtMs && now - cached.cachedAtMs < DEFAULT_ROLLOUT_CACHE_MAX_AGE_MS
+      && await this.rolloutDirsUnchanged(cached.dirMtimes)) {
       this.defaultScanComplete = true;
       return cached.files;
     }
@@ -670,7 +674,9 @@ export class CodexTranscriptInput extends BaseInput {
       this.logger.warn('Codex rollout directory scan failed; retrying next poll', { dir, error: String(error) });
     });
     this.defaultScanComplete = complete || rootMissing;
-    this.cachedDefaultRollout = this.defaultScanComplete && dirMtimes.size > 0 ? { dirMtimes, files } : null;
+    this.cachedDefaultRollout = this.defaultScanComplete && dirMtimes.size > 0
+      ? { dirMtimes, files, cachedAtMs: now }
+      : null;
     return files;
   }
 
@@ -2603,6 +2609,7 @@ export class CodexTranscriptInput extends BaseInput {
     // Cache roots across marker pages so a root does not lose its place when
     // more than 256 markers exist. Both caches have a TTL and a hard size cap.
     const tiers: Map<string, number>[] = [new Map(), new Map(), new Map()];
+    const pathlessRoots = new Set<string>();
     for (const entry of [...priorities, ...markers]) {
       const markerPath = path.join(this.wakeupDir, entry.name);
       let marker: Record<string, unknown> | null;
@@ -2622,6 +2629,7 @@ export class CodexTranscriptInput extends BaseInput {
       roots.forEach((candidates, tier) => {
         for (const candidate of candidates) {
           tiers[tier].set(candidate, Math.max(tiers[tier].get(candidate) ?? 0, receivedAtMs));
+          if (!transcript) pathlessRoots.add(candidate);
         }
       });
     }
@@ -2629,7 +2637,10 @@ export class CodexTranscriptInput extends BaseInput {
       for (const [candidate, receivedAtMs] of candidates) {
         try {
           const canonical = await fs.realpath(candidate);
-          if (canonical === canonicalDefaultSessionDir || !(await fs.stat(canonical)).isDirectory()) continue;
+          // A pathless Hook can identify the root even when the default
+          // listing's timestamp is stale. Use the bounded walk for that root.
+          if (canonical === canonicalDefaultSessionDir && !pathlessRoots.has(candidate)) continue;
+          if (!(await fs.stat(canonical)).isDirectory()) continue;
           const existing = this.dynamicSessionRoots.get(canonical);
           if (existing) {
             existing.receivedAtMs = Math.max(existing.receivedAtMs, receivedAtMs);

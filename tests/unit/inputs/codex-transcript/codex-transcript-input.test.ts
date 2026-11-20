@@ -1768,12 +1768,17 @@ describe('CodexTranscriptInput', () => {
     expect(internals.reportedSubagentLinks.has('new-child')).toBe(true);
   });
 
-  it('discovers a new child from a wakeup when the rollout directory mtime is unchanged', async () => {
+  it.each([
+    'explicit path',
+    'pathless marker',
+    'no marker',
+  ] as const)('discovers the fourth child when the default directory mtime is unchanged (%s)', async (evidence) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-wakeup-discovery-'));
     tempDirs.push(root);
-    const { input, entries, sessionDir } = await createDormantInput(root);
-    await input.start();
+    const { input, entries, sessionDir, wakeupDir } = await createDormantInput(root);
+    const clock = vi.spyOn(Date, 'now');
     try {
+      await input.start();
       const parent = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
       const parentLines = parent.trimEnd().split('\n');
       parentLines.pop();
@@ -1782,22 +1787,50 @@ describe('CodexTranscriptInput', () => {
       );
       const dayDir = path.dirname(parentTranscript);
       const unchangedMtime = new Date('2026-06-24T06:00:00.000Z');
+      const writeChild = async (child: typeof CHILD_FIXTURES[number], bootstrapFork = true) =>
+        writeTranscriptNamed(sessionDir, child.name,
+          await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, child.name), 'utf8'), { bootstrapFork });
+      for (const child of CHILD_FIXTURES.slice(0, -1)) await writeChild(child);
       await fs.utimes(dayDir, unchangedMtime, unchangedMtime);
       await runInputCycle(input);
-      expect(input.getSubagentLinkSnapshot().detectedSpawns).toBe(4);
+      expect(input.getSubagentLinkSnapshot()).toMatchObject({ detectedSpawns: 4, linkedChildren: 3 });
 
       const child = CHILD_FIXTURES[3];
-      const childText = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, child.name), 'utf8');
-      await writeTranscriptNamed(sessionDir, child.name, childText);
+      await writeChild(child, evidence === 'explicit path');
       // Model a filesystem reporting the same timestamp for two directory states.
       await fs.utimes(dayDir, unchangedMtime, unchangedMtime);
       expect((await fs.stat(dayDir)).mtimeMs).toBe(unchangedMtime.getTime());
-      (input as unknown as { noteWakeup(filename: string): void }).noteWakeup(`${child.threadId}.json`);
+      if (evidence === 'pathless marker') {
+        await writeWakeupMarker(wakeupDir, child.threadId, {
+          session_id: child.threadId,
+          turn_id: child.turnId,
+          initial_turn_id: child.turnId,
+          hook_event: 'subagent-stop',
+          codex_home: root,
+          session_dir: sessionDir,
+          received_at: new Date().toISOString(),
+        });
+      }
+      if (evidence === 'no marker') {
+        await runInputCycle(input);
+        expect(input.getSubagentLinkSnapshot().linkedChildren).toBe(3);
+        clock.mockReturnValue(Date.now() + 5 * 60_000);
+      } else {
+        (input as unknown as { noteWakeup(filename: string): void }).noteWakeup(`${child.threadId}.json`);
+      }
       await runInputCycle(input);
 
-      expect(responsesForTurn(entries, child.turnId)).toHaveLength(1);
+      expect(input.getSubagentLinkSnapshot()).toMatchObject({ detectedChildren: 4, linkedChildren: 4 });
+      await runInputCycle(input);
+      for (const observed of CHILD_FIXTURES) {
+        // The fourth fixture has a v4 thread ID and still needs a Hook to
+        // distinguish its first owned turn from the copied parent's history.
+        const expectedResponses = evidence === 'no marker' && observed === child ? 0 : 1;
+        expect(responsesForTurn(entries, observed.turnId)).toHaveLength(expectedResponses);
+      }
     } finally {
       await input.stop();
+      clock.mockRestore();
     }
   });
 
