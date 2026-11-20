@@ -3353,11 +3353,11 @@ function Warn-ElevatedInstall {
     if ($Action -eq "upgrade") {
         Msg "    升级会删除并重新注册计划任务" "    An upgrade deletes and re-registers the scheduled tasks"
         Msg "    在这里重新注册出来的任务归 BUILTIN\Administrators，本账号的普通会话之后删不掉" "    Re-registered from this session they are owned by BUILTIN\Administrators, and this account's ordinary sessions cannot delete them afterwards"
-        Msg "    继续升级的话，卸载(-Uninstall)也必须在提权会话里执行" "    If you continue, uninstall (-Uninstall) will have to run elevated as well"
+        Msg "    继续升级的话，也需要在提权 PowerShell 中运行 uninstall 命令" "    If you continue, run the uninstall command from an elevated PowerShell as well"
         Msg "    想让普通会话自己就能卸载：Ctrl+C 退出，在非提权 PowerShell 里重新升级" "    To keep uninstall working without elevation: press Ctrl+C and re-run the upgrade from a non-elevated PowerShell"
     } else {
         Msg "    这样注册出来的计划任务归 BUILTIN\Administrators，本账号的普通会话之后删不掉" "    Scheduled tasks registered from it are owned by BUILTIN\Administrators, and this account's ordinary sessions cannot delete them afterwards"
-        Msg "    继续安装的话，卸载(-Uninstall)也必须在提权会话里执行" "    If you continue, uninstall (-Uninstall) will have to run elevated as well"
+        Msg "    继续安装的话，也需要在提权 PowerShell 中运行 uninstall 命令" "    If you continue, run the uninstall command from an elevated PowerShell as well"
         Msg "    想让普通会话自己就能卸载：Ctrl+C 退出，在非提权 PowerShell 里重新安装" "    To keep uninstall working without elevation: press Ctrl+C and re-run the install from a non-elevated PowerShell"
     }
     Write-Host ""
