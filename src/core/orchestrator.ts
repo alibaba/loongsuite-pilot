@@ -63,6 +63,7 @@ import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
 import { GrokBuildLogInput } from '../inputs/grok-build-log/grok-build-log-input.js';
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
+import { KimiCodeCliInput } from '../inputs/kimi-code-cli/kimi-code-cli-input.js';
 import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
 import { CopilotLogInput } from '../inputs/copilot-log/copilot-log-input.js';
@@ -150,6 +151,7 @@ export class Orchestrator extends EventEmitter {
     'claude-code-log': 'claude-code',
     'grok-build-log': 'grok-build',
     'codex-transcript': 'codex',
+    'kimi-code-cli': 'kimi-code-cli',
     'kiro-cli-log': 'kiro-cli',
     'kiro-cli-session': 'kiro-cli',
     'copilot-log': 'copilot',
@@ -1745,6 +1747,24 @@ export class Orchestrator extends EventEmitter {
         pollIntervalMs: listenerCfg['codex-transcript']?.pollInterval,
       }),
     );
+
+    // --- Kimi Code CLI (native session journal) ---
+    const kimiCodeInput = new KimiCodeCliInput({
+      stateStore: this.stateStore,
+      captureMessageContent: this.config.agents['kimi-code-cli']?.captureMessageContent ?? true,
+      pollIntervalMs: listenerCfg['kimi-code-cli']?.pollInterval,
+    });
+    this.inputManager.registerInput(kimiCodeInput);
+    entries.push(this.inputManager.buildDetectionEntry(kimiCodeInput, {
+      watchPaths: kimiCodeInput.getWatchPaths(),
+      isAvailable: () => kimiCodeInput.checkAvailability(),
+      enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['kimi-code-cli']) &&
+        this.agentControlManager.resolveEnabled(
+          'kimi-code-cli',
+          listenerCfg['kimi-code-cli']?.enabled ?? true,
+        ),
+      pollIntervalMs: listenerCfg['kimi-code-cli']?.pollInterval,
+    }));
 
     // --- Copilot CLI (session events.jsonl polling) ---
     const copilotLogInput = new CopilotLogInput({

@@ -1,0 +1,9 @@
+{
+  "id": "kimi-code-cli",
+  "displayName": "Kimi Code CLI",
+  "deployMode": "detection-only",
+  "detection": {
+    "paths": ["~/.kimi-code"],
+    "commands": []
+  }
+}

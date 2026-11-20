@@ -28,6 +28,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Cursor CLI | Shared Cursor hook | Yes | Yes | Yes | Yes |
 | Grok Build | Hook + local session logs | Yes | Yes | Yes | Yes |
 | Hermes Agent | Native directory plugin | Yes | Yes | Yes | Yes |
+| Kimi Code CLI | Native session polling | Yes | Yes | Yes | Main agent |
 | Kiro CLI | Hook / local session polling | Yes | Yes | No | Yes |
 | MiMo Code | Plugin injection | Yes | Yes | Yes | Yes |
 | OpenClaw | Plugin injection | Yes | Yes | Yes | Yes |
@@ -44,6 +45,8 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Wukong | CLI API polling | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook wakeup + local transcript watch/poll fallback | Yes | Yes | Yes | Yes |
 | [Doubao Work (macOS/Windows, experimental)](doubao-work.md) | Read-only client logs | Client turns + local tools | Metadata only | No | No |
+
+Kimi Code CLI collection reads the main agent journal under `$KIMI_CODE_HOME/sessions` (default `~/.kimi-code/sessions`). Pilot starts at the first observation of the source and keeps its position across restarts. The integration was verified with CLI 2.7.2 and wire protocol 1.5. Set `agents.kimi-code-cli.captureMessageContent` to `false` to retain request and tool IDs, timing, and token usage without capturing their content.
 
 OpenClaw integration supports 2026.3.8 or later with automatic version detection; releases before 2026.5.12 use inferred model-call timing.
 
