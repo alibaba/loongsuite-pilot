@@ -157,7 +157,18 @@ ls ~/.loongsuite-pilot/logs/sls-failed-logs/
 
 这些 JSONL 记录只包含 endpoint、错误摘要、batch 条数和 batch 字节数估算，不包含失败 batch payload、消息正文、请求 headers 或凭证，因此不能用于重放失败数据。日志按本地日期和单文件 10MiB 轮转，目录总量限制为 50MiB，同时遵循 `retention.slsFailedDays`（默认 7 天）。
 
-最终的 `FLUSH_SEND_ALARM` 告警消息会包含发送方式、归一化错误分类、结构化错误码、HTTP 状态和实际尝试次数。网络失败还会包含来自错误对象及其 `cause` 链的单行错误摘要；常见凭证格式会被脱敏，摘要最多保留 512 个 UTF-8 字节。HTTP 响应正文不会写入远端告警。这一诊断增强不改变重试判断、尝试次数或退避策略。
+`FLUSH_SEND_ALARM` 告警消息包含发送方式、归一化错误分类、结构化错误码、HTTP 状态和实际尝试次数。网络失败还会包含来自错误对象及其 `cause` 链的单行摘要，常见凭证格式会被脱敏，摘要最多保留 512 个 UTF-8 字节。HTTP 响应正文不会写入远端告警。`failure_class` 字段标识处置类别。
+
+| 处置类别 | 行为 |
+|----------|------|
+| `transient` | 同一 endpoint 连续三轮只有临时失败时告警，一次发送成功会重置连续失败计数。 |
+| `quota` | 识别 AK SDK 和 HTTP 传输返回的结构化 SLS 写入配额错误码。HTTP 传输也识别状态码 429。上报 `FLUSH_QUOTA_ALARM`。 |
+| `config` | 已识别的 Project 或 Logstore 终态错误。同一 endpoint 连续三轮只有终态配置错误后，暂缓发送其队列。 |
+| `payload` | 后端拒绝超限请求，或 Pilot 在发送前发现单条 WebTracking 记录超限。本地拒绝时显示 `attempts=0`。 |
+
+临时失败和配置失败告警分别按 endpoint 冷却一小时。配置失败的暂缓期结束后，Pilot 用一条排队记录探测。探测请求失败会延长暂缓，最长十分钟。仍可发送的探测记录会留在队列中。发送成功后恢复队列。等待中的记录暂存在内存。队列压力过高或服务正常退出时，可以在暂缓期间执行正常发送。
+
+WebTracking 按完整 JSON 请求体计算大小，包括标签与分隔符。尽力发送的队列对阿里云 SLS 标准 endpoint 检查文档规定的单次请求上限。超限记录计入发送失败并写入本地诊断。自定义 endpoint 使用自身的上限和返回状态。Codex 记录完整发送到配置的 endpoint，仍需等待传输确认。
 
 调试 SLS 前，可以先通过本地 JSONL 确认采集本身是否正常：
 

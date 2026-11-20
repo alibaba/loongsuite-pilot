@@ -157,7 +157,18 @@ ls ~/.loongsuite-pilot/logs/sls-failed-logs/
 
 These JSONL records contain the endpoint, error summary, batch count, and batch byte estimate. They do **not** contain the failed batch payload, message content, request headers, or credentials, so they cannot be used to replay failed uploads. Files rotate by local date and at 10 MiB; the directory is limited to 50 MiB and also follows `retention.slsFailedDays` (7 days by default).
 
-Final `FLUSH_SEND_ALARM` messages include the transport, normalized error category, structured error code, HTTP status, and actual attempt count. Network failures also include a one-line error summary from the error and its `cause` chain, with common credential patterns redacted and the summary limited to 512 UTF-8 bytes. HTTP response bodies are not included. This diagnostic change does not alter retry decisions, attempt limits, or backoff.
+`FLUSH_SEND_ALARM` messages include the transport, normalized error category, structured error code, HTTP status, and actual attempt count. Network failures also include a one-line error summary from the error and its `cause` chain, with common credential patterns redacted and the summary limited to 512 UTF-8 bytes. HTTP response bodies are excluded. The `failure_class` field distinguishes these outcomes:
+
+| Class | Handling |
+|-------|----------|
+| `transient` | Alarm after three consecutive cycles with only transient failures at this endpoint. A successful delivery resets the streak. |
+| `quota` | Recognizes structured SLS write quota codes from the AK SDK and HTTP transports. The HTTP transports also recognize status 429. Emits `FLUSH_QUOTA_ALARM`. |
+| `config` | Recognized terminal project or Logstore errors. Three consecutive cycles with only terminal configuration failures pause queued sends to this endpoint. |
+| `payload` | The backend rejected an oversized request or Pilot detected an oversized WebTracking entry before sending it. A local rejection shows `attempts=0`. |
+
+Transient and configuration alarms each have a one-hour cooldown per endpoint. After a configuration pause, one queued record probes the destination. A failed transport probe extends the pause up to ten minutes. The probe record stays queued when it can still be sent. A successful delivery reopens the queue. Pending records remain in memory. Queue pressure and normal shutdown can trigger a normal send attempt during the pause.
+
+WebTracking measures the complete JSON request, including tags and separators. In the best-effort queue, Pilot checks the documented single-request size limit for standard Alibaba Cloud SLS endpoints. Oversized entries count as failed and appear in local diagnostics. Custom endpoints apply their own limits and report their own status. Codex submits records intact to the configured endpoint and still requires its acknowledgment.
 
 Local JSONL output can help confirm whether collection itself is working before debugging SLS delivery:
 
