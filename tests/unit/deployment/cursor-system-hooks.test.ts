@@ -97,6 +97,38 @@ describe('Cursor enterprise system registration', () => {
     expect(await fs.readFile(file, 'utf8')).toBe(policy);
   });
 
+  it.runIf(process.platform !== 'win32')('rejects a policy or managed directory writable by other users', async () => {
+    const target = systemHookDefinition(def);
+    const file = target.hook!.settingsPath;
+    await updateCursorSystemHooks(target, true);
+    const installed = await fs.readFile(file, 'utf8');
+    await fs.chmod(file, 0o666);
+    await expect(cursorSystemHooksInstalled(target)).rejects.toThrow('untrusted owner or mode');
+    await expect(updateCursorSystemHooks(target, false)).rejects.toThrow('untrusted owner or mode');
+    expect(await fs.readFile(file, 'utf8')).toBe(installed);
+
+    await fs.chmod(file, 0o644);
+    await fs.chmod(path.dirname(file), 0o777);
+    await expect(cursorSystemHooksInstalled(target)).rejects.toThrow('Untrusted Cursor system directory permissions');
+    await expect(updateCursorSystemHooks(target, true)).rejects.toThrow('Untrusted Cursor system directory permissions');
+    expect(await fs.readFile(file, 'utf8')).toBe(installed);
+  });
+
+  const separateGroup = process.getgroups?.().find(group => group !== process.getegid?.());
+  it.runIf(separateGroup !== undefined)('retains the managed file owner, group and mode on rewrite', async () => {
+    const target = systemHookDefinition(def);
+    const file = target.hook!.settingsPath;
+    await write(file, '{"version":1,"hooks":{}}');
+    const uid = process.geteuid!();
+    await fs.chown(file, uid, separateGroup!);
+    await fs.chmod(file, 0o640);
+    await updateCursorSystemHooks(target, true);
+    const stat = await fs.stat(file);
+    expect(stat.uid).toBe(uid);
+    expect(stat.gid).toBe(separateGroup);
+    expect(stat.mode & 0o777).toBe(0o640);
+  });
+
   it('does not mistake an unrelated agent command or an IDE home for the CLI', async () => {
     const builtin = path.join(root, 'agents.d');
     const bin = path.join(root, 'bin');

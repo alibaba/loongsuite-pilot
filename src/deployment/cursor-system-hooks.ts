@@ -5,6 +5,7 @@ import type { AgentDefinition } from '../types/deployment.js';
 import { writeTextFileAtomic } from '../utils/fs-utils.js';
 import { editJsonc, parseJsonDocument } from '../utils/json-document.js';
 import { withDeployedStateLock } from './deployed-state-merge.js';
+import { assertTrustedCursorSystemDirectory, isTrustedCursorSystemFile } from './cursor-system-paths.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -66,7 +67,7 @@ function withPilotHooks(def: AgentDefinition, raw: string, install: boolean): st
   return next;
 }
 
-async function read(file: string): Promise<{ raw: string; mode: number } | undefined> {
+async function read(file: string): Promise<{ raw: string; mode: number; uid: number; gid: number } | undefined> {
   let info;
   try {
     info = await fs.lstat(file);
@@ -75,18 +76,25 @@ async function read(file: string): Promise<{ raw: string; mode: number } | undef
     throw error;
   }
   if (!info.isFile()) throw new Error('Cursor system config must be a regular file; original preserved');
-  return { raw: await fs.readFile(file, 'utf8'), mode: info.mode & 0o777 };
+  if (!isTrustedCursorSystemFile(info)) throw new Error('Cursor system config has an untrusted owner or mode; original preserved');
+  const { uid, gid } = info;
+  return { raw: await fs.readFile(file, 'utf8'), mode: info.mode & 0o777, uid, gid };
 }
 
 export async function cursorSystemHooksInstalled(def: AgentDefinition): Promise<boolean> {
-  const current = await read(def.hook!.settingsPath);
+  const file = def.hook!.settingsPath;
+  await assertTrustedCursorSystemDirectory(path.dirname(file));
+  const current = await read(file);
   return Boolean(current && withPilotHooks(def, current.raw, true) === current.raw);
 }
 
 export async function updateCursorSystemHooks(def: AgentDefinition, install: boolean): Promise<void> {
   const file = def.hook!.settingsPath;
+  const directory = path.dirname(file);
+  await assertTrustedCursorSystemDirectory(directory);
   if (!install && !(await read(file))) return;
-  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o755 });
+  await fs.mkdir(directory, { recursive: true, mode: 0o755 });
+  await assertTrustedCursorSystemDirectory(directory);
   await withDeployedStateLock(`${file}.pilot-lock`, async () => {
     const current = await read(file);
     if (!install && !current) return;
@@ -98,6 +106,7 @@ export async function updateCursorSystemHooks(def: AgentDefinition, install: boo
     await writeTextFileAtomic(file, next, {
       mode: current?.mode ?? 0o644,
       preserveMode: true,
+      owner: current && { uid: current.uid, gid: current.gid },
       expected: current ? { exists: true, content: current.raw } : { exists: false },
     });
   });
