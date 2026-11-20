@@ -51,7 +51,7 @@ export interface InterceptorHookConfig {
 
 export interface AgentHookConfig {
   settingsPath: string;
-  /** Opt-in native Linux system TOML; omitted retains home-local JSON. */
+  /** Opt-in native Linux system configuration; omitted retains home-local settings. */
   scope?: 'user' | 'system';
   /** Native Linux system configuration; selected only by explicit system scope. */
   systemSettingsPath?: string;
