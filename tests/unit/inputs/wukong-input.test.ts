@@ -188,6 +188,116 @@ describe('WukongInput', () => {
   }
 
   it.each([
+    { firstFinish: 24, resultAt: 20, secondStart: 29, handoff: 30 },
+    { firstFinish: 30, resultAt: 20, secondStart: 30, handoff: 31 },
+    { firstFinish: 24, resultAt: 40, secondStart: 30, handoff: 30 },
+  ])('keeps a tied model handoff local to its adjacent steps with tool result at $resultAt and earlier finish at $firstFinish', async ({
+    firstFinish, resultAt, secondStart, handoff,
+  }) => {
+    const base = 1779240560000;
+    const event = (type: string, offset: number, fields: Record<string, unknown> = {}) => ({
+      type, timestamp: base + offset, ...fields,
+    });
+    const events = [
+      event('RUN_STARTED', 0, { runId: 'run' }),
+      event('STEP_STARTED', 3, { stepName: 'first' }),
+      event('TEXT_MESSAGE_START', 5, { messageId: 'one' }),
+      event('TEXT_MESSAGE_CONTENT', 6, { messageId: 'one', delta: 'First.' }),
+      event('TEXT_MESSAGE_END', 7, { messageId: 'one' }),
+      event('TOOL_CALL_START', 10, { toolCallId: 'a', toolCallName: 'tool', parentMessageId: 'one' }),
+      event('TOOL_CALL_END', 12, { toolCallId: 'a' }),
+      ...(resultAt === 20 ? [
+        event('TOOL_CALL_RESULT', 20, { toolCallId: 'a', messageId: 'result-a', content: 'First result.' }),
+      ] : []),
+      event('STEP_FINISHED', firstFinish, { stepName: 'first' }),
+      event('STEP_STARTED', 30, { stepName: 'second' }),
+      event('TEXT_MESSAGE_CONTENT', 30, { messageId: 'two', delta: 'Second.' }),
+      event('TEXT_MESSAGE_END', 30, { messageId: 'two' }),
+      event('STEP_FINISHED', 30, { stepName: 'second' }),
+      event('STEP_STARTED', 30, { stepName: 'third' }),
+      ...(resultAt === 40 ? [
+        event('TOOL_CALL_RESULT', 40, { toolCallId: 'a', messageId: 'result-a', content: 'First result.' }),
+      ] : []),
+      event('TEXT_MESSAGE_CONTENT', 45, { messageId: 'three', delta: 'Third.' }),
+      event('TEXT_MESSAGE_END', 50, { messageId: 'three' }),
+      event('STEP_FINISHED', 54, { stepName: 'third' }),
+      event('RUN_FINISHED', 55, { runId: 'run' }),
+    ];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({
+        messages: [SAMPLE_MESSAGES[0], { ...SAMPLE_MESSAGES[1], createdAt: base, events, isComplete: 1 }],
+      }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const spans = await exportInput();
+    const ms = (time: ReadableSpan['startTime']) => time[0] * 1000 + time[1] / 1_000_000 - base;
+    const intervals = (kind: string) => spans.filter(span => span.attributes['gen_ai.span.kind'] === kind)
+      .map(span => [ms(span.startTime), ms(span.endTime)]);
+    expect(intervals('LLM')).toEqual([[0, 9], [secondStart, secondStart + 1], [handoff, 55]]);
+    expect(intervals('STEP')).toEqual([[0, resultAt], [secondStart, secondStart + 1], [handoff, 55]]);
+    expect(intervals('TOOL')).toEqual([[10, resultAt]]);
+    const second = spans.find(span => span.attributes['gen_ai.response.id'] === 'two');
+    const inputMessages = String(second?.attributes['gen_ai.input.messages']);
+    if (resultAt === 20) expect(inputMessages).toContain('First result.');
+    else expect(inputMessages).not.toContain('First result.');
+  });
+
+  it.each([undefined, 'reasoning-one', 'one'])('retains known text and reasoning in their overlapping explicit step with reasoning id %s', async (reasoningId) => {
+    const base = 1779240560000;
+    const event = (type: string, offset: number, fields: Record<string, unknown> = {}) => ({
+      type, timestamp: base + offset, ...fields,
+    });
+    const events = [
+      event('RUN_STARTED', 0, { runId: 'run' }),
+      event('STEP_STARTED', 5, { stepName: 'first' }),
+      event('TEXT_MESSAGE_START', 10, { messageId: 'one', parentMessageId: 'run' }),
+      event('TEXT_MESSAGE_CONTENT', 12, { messageId: 'one', delta: 'First.' }),
+      ...(reasoningId ? [
+        event('REASONING_START', 14, { messageId: reasoningId }),
+        event('REASONING_MESSAGE_CHUNK', 15, { messageId: reasoningId, delta: 'Shared reasoning' }),
+      ] : []),
+      event('STEP_STARTED', 25, { stepName: 'second' }),
+      event('TEXT_MESSAGE_START', 30, { messageId: 'two', parentMessageId: 'run' }),
+      event('TEXT_MESSAGE_CONTENT', 31, { messageId: 'two', delta: 'Second.' }),
+      event('TEXT_MESSAGE_CONTENT', 40, { messageId: 'one', delta: ' First-only continuation.' }),
+      ...(reasoningId ? [
+        event('REASONING_MESSAGE_CHUNK', 41, { messageId: reasoningId, delta: ' belongs to first.' }),
+        event('REASONING_END', 42, { messageId: reasoningId }),
+      ] : []),
+      event('TEXT_MESSAGE_END', 42, { messageId: 'one' }),
+      event('STEP_FINISHED', 45, { stepName: 'first' }),
+      event('TEXT_MESSAGE_CONTENT', 50, { messageId: 'two', delta: ' Second-only continuation.' }),
+      event('TEXT_MESSAGE_END', 55, { messageId: 'two' }),
+      event('STEP_FINISHED', 57, { stepName: 'second' }),
+      event('RUN_FINISHED', 60, { runId: 'run' }),
+    ];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({
+        messages: [SAMPLE_MESSAGES[0], { ...SAMPLE_MESSAGES[1], createdAt: base, events, isComplete: 1 }],
+      }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const spans = await exportInput();
+    const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms.map(span => span.attributes['gen_ai.response.id'])).toEqual(['one', 'two']);
+    const output = llms.map(span => String(span.attributes['gen_ai.output.messages']));
+    expect(output[0]).toContain('First. First-only continuation.');
+    expect(output[1]).toContain('Second. Second-only continuation.');
+    expect(output[0]).not.toContain('Second-only continuation.');
+    expect(output[1]).not.toContain('First-only continuation.');
+    if (reasoningId) {
+      expect(output[0]).toContain('Shared reasoning belongs to first.');
+      expect(output[1]).not.toContain('belongs to first.');
+    }
+    const ms = (time: ReadableSpan['startTime']) => time[0] * 1000 + time[1] / 1_000_000 - base;
+    expect(llms.map(span => [ms(span.startTime), ms(span.endTime)])).toEqual([[0, 42], [25, 60]]);
+  });
+
+  it.each([
     { firstEnd: 4, secondStart: 4, handoff: 5 },
     { firstEnd: 5, secondStart: 5, handoff: 6 },
   ])('keeps explicitly sequential model steps ordered at a tied boundary with prior finish $firstEnd', async ({

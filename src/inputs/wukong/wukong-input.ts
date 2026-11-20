@@ -525,9 +525,9 @@ export class WukongInput extends BaseInput {
     };
     const stepsByMessageId = new Map<string, StepAcc>();
     const knownMessageStep = (messageId: unknown): StepAcc | undefined =>
-      !hasStepEvents && typeof messageId === 'string' ? stepsByMessageId.get(messageId) : undefined;
-    // Only a new utterance can open a new implicit step. Chunks of an existing
-    // message may arrive while its tools are being declared or executed.
+      typeof messageId === 'string' ? stepsByMessageId.get(messageId) : undefined;
+    // A message keeps its owner when another explicit step starts or when
+    // tool declarations and results interleave with its chunks.
     const stepForUtterance = (evt: AguiEvent): StepAcc => {
       const known = knownMessageStep(evt.messageId);
       if (known) return known;
@@ -788,28 +788,30 @@ export class WukongInput extends BaseInput {
     // Use the decision's source boundary for its inferred request. A late
     // result from an earlier decision does not move this decision forward.
     const runStartTs = runStartedTs ?? steps[0].ctx.startTimestamp;
-    const sequentialModelSteps = steps.every((step, i) => {
-      if (!step.nativeStep || step.hasTools) return false;
-      const next = steps[i + 1];
-      const finishedAt = step.nativeStep.finishedAt;
-      return !next || (finishedAt !== undefined && step.ctx.startTimestamp <= finishedAt
-        && step.lastContentTs <= finishedAt && finishedAt <= next.ctx.startTimestamp);
-    });
-    let previousModelEndTs = runStartTs;
+    let earlierActivityEndTs = runStartTs;
+    let inferredHandoffTs: number | undefined;
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i];
       const isFinal = i === finalIdx;
 
       const startTs = i === 0 ? runStartTs : s.ctx.startTimestamp;
+      const finishedAt = s.nativeStep?.finishedAt;
+      const next = steps[i + 1];
+      const nextStartTs = next?.ctx.startTimestamp;
+      const serialModelHandoff = !s.hasTools && next?.nativeStep && !next.hasTools
+        && finishedAt !== undefined && nextStartTs !== undefined
+        && s.ctx.startTimestamp <= finishedAt && s.lastContentTs <= finishedAt && finishedAt <= nextStartTs;
+      const tiedHandoff = serialModelHandoff && finishedAt === startTs && nextStartTs === startTs
+        && (earlierActivityEndTs <= startTs || inferredHandoffTs !== undefined);
       let reqTs = startTs;
       if (s.firstToolTs !== undefined) {
         reqTs = Math.max(runStartTs, Math.min(startTs, s.firstToolTs - 2));
-      } else if (sequentialModelSteps) {
-        // The converter uses whole milliseconds. A completed model-only step
-        // can use a free tick before a tied handoff. Otherwise advance only
-        // the inferred model timings by the minimum needed to stay sequential.
-        const tiedBoundary = s.nativeStep?.finishedAt === startTs && steps[i + 1]?.ctx.startTimestamp === startTs;
-        reqTs = tiedBoundary && previousModelEndTs <= startTs - 1 ? startTs - 1 : Math.max(startTs, previousModelEndTs);
+      } else if (tiedHandoff && earlierActivityEndTs <= startTs - 1) {
+        // The converter uses whole milliseconds. Use a free tick only before
+        // a proven tie and leave all earlier content and tool times intact.
+        reqTs = startTs - 1;
+      } else if (inferredHandoffTs !== undefined) {
+        reqTs = Math.max(startTs, inferredHandoffTs);
       }
       let respTs: number;
       if (s.hasTools && s.firstToolTs !== undefined) {
@@ -819,7 +821,11 @@ export class WukongInput extends BaseInput {
       } else {
         respTs = Math.max(reqTs + 1, s.lastContentTs);
       }
-      previousModelEndTs = Math.max(respTs, s.nativeStep?.finishedAt ?? respTs);
+      // If there was no free tick, propagate only the minimum inferred delay
+      // through adjacent serial model steps. A measured overlap stops it.
+      inferredHandoffTs = serialModelHandoff && (tiedHandoff || inferredHandoffTs !== undefined)
+        && nextStartTs !== undefined && respTs > nextStartTs ? respTs : undefined;
+      earlierActivityEndTs = Math.max(earlierActivityEndTs, respTs, finishedAt ?? respTs, s.lastToolTs ?? respTs);
       const finishReasons = this.inferFinishReasons(s.hasTools, isFinal ? runError : undefined);
       const llmSpanId = generateSpanId();
       const includeUserContent = i === 0 && !!userContent;
