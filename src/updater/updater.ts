@@ -748,7 +748,7 @@ export class Updater {
 
   /**
    * Resolve the managed-node OS/arch tuple, or null when this platform has no
-   * managed artifact (win-arm64, linux-musl, or anything outside the matrix) —
+   * managed artifact (linux-musl or anything outside the OS/architecture matrix) —
    * in which case the caller falls back to the running node + npm install.
    */
   private managedNodePlatform(): { os: string; arch: string } | null {
@@ -768,10 +768,6 @@ export class Updater {
       default:
         logger.info('managed node: unsupported arch, using system node', { arch: process.arch });
         return null;
-    }
-    if (os === 'win' && arch === 'arm64') {
-      logger.info('managed node: no win-arm64 artifact, using system node');
-      return null;
     }
     if (os === 'linux' && this.isMuslLibc()) {
       logger.info('managed node: no linux-musl artifact, using system node');
