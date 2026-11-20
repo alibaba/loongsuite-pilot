@@ -25,6 +25,16 @@ describe('AlarmManager', () => {
     expect(entries[0].ip).toBe('10.0.0.1');
     expect(entries[0].ver).toBe('1.0.0');
     expect(entries[0].__time__).toBeGreaterThan(0);
+    expect(entries[0]).not.toHaveProperty('failure_class');
+  });
+
+  it('keeps SLS failure classes separate for the same endpoint', () => {
+    manager.record('FLUSH_SEND_ALARM', '1', 'destination', { endpoint_name: 'ep', failure_class: 'config' });
+    manager.record('FLUSH_SEND_ALARM', '3', 'network', { endpoint_name: 'ep', failure_class: 'transient' });
+    expect(manager.serialize()).toMatchObject([
+      { failure_class: 'config', alarm_level: '1', alarm_count: '1' },
+      { failure_class: 'transient', alarm_level: '3', alarm_count: '1' },
+    ]);
   });
 
   it('aggregates count for same alarm type and context', () => {

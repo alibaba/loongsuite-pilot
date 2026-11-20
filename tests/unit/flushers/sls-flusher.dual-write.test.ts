@@ -299,6 +299,12 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     await flusher.flush();
 
     expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(mockAlarmRecord).not.toHaveBeenCalled();
+    for (let cycle = 0; cycle < 2; cycle++) {
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(9);
     expect(mockAlarmRecord).toHaveBeenCalledOnce();
     const message = mockAlarmRecord.mock.calls[0][2] as string;
     expect(message).toContain('category=dns code=ENOTFOUND attempts=3');
@@ -310,7 +316,7 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
   });
 
   it('does not change permanent HTTP retry behavior or report the response body', async () => {
-    const body = '{"errorCode":"Forbidden","message":"original response text"}';
+    const body = '{"errorCode":"ProjectForbidden","message":"original response text"}';
     fetchSpy.mockResolvedValue({ ok: false, status: 403, text: async () => body });
     const flusher = new SlsFlusher(
       makeConfig(
@@ -327,7 +333,7 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     expect(fetchSpy).toHaveBeenCalledOnce();
     expect(mockAlarmRecord).toHaveBeenCalledOnce();
     const message = mockAlarmRecord.mock.calls[0][2] as string;
-    expect(message).toContain('category=http code=Forbidden status=403 attempts=1');
+    expect(message).toContain('category=http code=ProjectForbidden status=403 attempts=1');
     expect(message).not.toContain('original response text');
   });
 });
