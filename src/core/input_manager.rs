@@ -495,13 +495,17 @@ impl InputManager {
     }
 
     pub async fn start_input(&self, id: &str) {
+        let _ = self.start_input_checked(id).await;
+    }
+
+    pub(super) async fn start_input_checked(&self, id: &str) -> Result<(), String> {
         let input = self.inputs.lock().expect("inputs").get(id).cloned();
         let Some(input) = input else {
             logger("InputManager").warn(
                 "cannot start unknown input",
                 Some(&fields(serde_json::json!({ "id": id }))),
             );
-            return;
+            return Err("unknown input".into());
         };
         if let Some(gate) = self.queues.lock().expect("queues").get(id) {
             let mut slot = gate.cancellation.lock().expect("cancellation");
@@ -514,12 +518,13 @@ impl InputManager {
                 "input start failed",
                 Some(&fields(serde_json::json!({ "id": id, "error": err }))),
             );
-            return;
+            return Err(err);
         }
         logger("InputManager").info(
             "input started",
             Some(&fields(serde_json::json!({ "id": id }))),
         );
+        Ok(())
     }
 
     pub async fn stop_input(&self, id: &str) {
@@ -881,6 +886,36 @@ impl InputManager {
         } else {
             rows.iter().map(|row| row.to_vec()).collect()
         };
+        self.accept_sdk_batch(input_id, entries, encoded).await
+    }
+
+    pub(super) async fn accept_handoff_activity(
+        &self,
+        input_id: &str,
+        agent: &str,
+        rows: &[&[u8]],
+    ) -> Result<(), String> {
+        let entries = rows
+            .iter()
+            .map(|row| serde_json::from_slice::<AgentActivityEntry>(row))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "invalid SDK activity JSON")?;
+        let mut entries = self.filter_workspace(entries, agent);
+        if entries.is_empty() {
+            return Ok(());
+        }
+        enrich_canonical_entries_with_git(&mut entries).await;
+        if let Some(linker) = self.trace_linker() {
+            linker.stamp(&mut entries).await;
+        }
+        // Already-normalized queue rows retain their IDs. Reapply privacy at
+        // the new host boundary without expanding them into additional rows.
+        let entries = self.apply_policy_and_mask(entries);
+        let encoded = entries
+            .iter()
+            .map(serde_json::to_vec)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
         self.accept_sdk_batch(input_id, entries, encoded).await
     }
 
@@ -2056,6 +2091,46 @@ mod migration_remaining_contracts {
             std::fs::read_to_string(root.path().join(format!("{customer}.jsonl"))).unwrap(),
             decoy
         );
+    }
+
+    #[tokio::test]
+    async fn sdk_history_handoff_applies_current_privacy_and_preserves_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        let public = directory.path().join("public");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::create_dir_all(&public).unwrap();
+        let manager = InputManager::new();
+        register(&manager, "openclaw-plugin-log", "openclaw");
+        manager.set_workspace_policy(
+            WorkspacePolicy::new(&[private.to_string_lossy().into_owned()], None).unwrap(),
+        );
+        manager.set_agents_config(
+            &serde_json::from_value(json!({"openclaw":{"captureMessageContent":false}})).unwrap(),
+        );
+        let sink = Sink::new();
+        manager.set_flusher(sink.clone());
+        let mut retained = entry("retained", AgentEventName::LlmResponse);
+        retained.agent_type = "openclaw".into();
+        retained.session_id = "public-session".into();
+        retained.workspace_path = Some(public.to_string_lossy().into_owned());
+        retained.output_messages = Some(json!([{"role":"assistant","content":"retained text"}]));
+        let mut excluded = retained.clone();
+        excluded.event_id = "excluded".into();
+        excluded.session_id = "private-session".into();
+        excluded.workspace_path = Some(private.to_string_lossy().into_owned());
+        let retained = serde_json::to_vec(&retained).unwrap();
+        let excluded = serde_json::to_vec(&excluded).unwrap();
+
+        manager
+            .accept_handoff_activity("openclaw-plugin-log", "openclaw", &[&retained, &excluded])
+            .await
+            .unwrap();
+
+        let rows = flattened(&sink);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id, "retained");
+        assert!(rows[0].output_messages.is_none());
     }
 
     #[tokio::test]

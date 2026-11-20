@@ -65,6 +65,7 @@ pub struct LogRetentionService {
     cleanup_gate: tokio::sync::Mutex<()>,
     state_store: Option<std::sync::Arc<crate::checkpoints::StateStore>>,
     openclaw_sdk: Option<std::sync::Arc<super::sdk_agent::SdkAgent>>,
+    openclaw_legacy: Option<std::sync::Weak<super::input_manager::LiveInput>>,
     hermes_trace: Option<std::sync::Weak<crate::flushers::OtlpTraceFlusher>>,
 }
 
@@ -79,6 +80,7 @@ impl LogRetentionService {
             cleanup_gate: tokio::sync::Mutex::new(()),
             state_store: None,
             openclaw_sdk: None,
+            openclaw_legacy: None,
             hermes_trace: None,
         }
     }
@@ -96,6 +98,14 @@ impl LogRetentionService {
         sdk: Option<std::sync::Arc<super::sdk_agent::SdkAgent>>,
     ) -> Self {
         self.openclaw_sdk = sdk;
+        self
+    }
+
+    pub(super) fn with_openclaw_legacy(
+        mut self,
+        input: Option<&std::sync::Arc<super::input_manager::LiveInput>>,
+    ) -> Self {
+        self.openclaw_legacy = input.map(std::sync::Arc::downgrade);
         self
     }
 
@@ -174,6 +184,7 @@ impl LogRetentionService {
             let expiry = date_cutoff(self.config.hook_history_days);
             let trace = self.hermes_trace.clone();
             let openclaw_sdk = self.openclaw_sdk.clone();
+            let openclaw_legacy = self.openclaw_legacy.clone();
             tokio::task::spawn_blocking(move || {
                 let sdk_checkpoint = openclaw_sdk.as_ref().map(|sdk| {
                     match sdk.acknowledged_checkpoint("openclaw") {
@@ -186,6 +197,20 @@ impl LogRetentionService {
                             None
                         }
                     }
+                });
+                let sdk_checkpoint = sdk_checkpoint.or_else(|| {
+                    let input = openclaw_legacy.as_ref()?;
+                    let running = input.upgrade().is_some_and(|input| input.running());
+                    if running {
+                        return None;
+                    }
+                    let profile = crate::sdk::hook_history::find("openclaw")?;
+                    let data = logs.parent()?;
+                    let has_outbox = crate::sdk::hook_history::canonical_data_dir(data)
+                        .and_then(|data| profile.has_outbox(&data));
+                    // Until the legacy reader starts, its shared cursor has
+                    // not been validated against the previous SDK owner.
+                    has_outbox.unwrap_or(true).then_some(None)
                 });
                 clean_raw_sources(
                     &logs,

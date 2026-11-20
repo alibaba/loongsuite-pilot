@@ -61,6 +61,12 @@ impl LegacyCheckpointHandoff {
 
 type DeliveryRows = Vec<(i64, Vec<u8>)>;
 
+pub(crate) enum ShellCheckpoint {
+    Pending,
+    Exported { has_progress: bool },
+    Ready(Option<String>),
+}
+
 const SAVE_CHECKPOINT: &str = "INSERT INTO checkpoint VALUES(?1,?2)
     ON CONFLICT(source) DO UPDATE SET json=excluded.json WHERE checkpoint.json<>excluded.json";
 
@@ -510,6 +516,51 @@ impl Outbox {
         Ok(checkpoint)
     }
 
+    /// Read the durable queue and its corresponding cursor under collector
+    /// ownership. The exported marker guards later progress by a legacy reader.
+    pub(crate) fn checkpoint_for_shell(
+        root: &Path,
+        source: &str,
+        handoff: LegacyCheckpointHandoff,
+    ) -> anyhow::Result<ShellCheckpoint> {
+        let db = Connection::open_with_flags(
+            Self::database_path(root)?,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        db.busy_timeout(Duration::from_secs(1))?;
+        let pending: i64 = db.query_row("SELECT events FROM queue_size", [], |row| row.get(0))?;
+        if pending != 0 {
+            return Ok(ShellCheckpoint::Pending);
+        }
+        if Self::find_checkpoint(&db, handoff.marker())?.is_some() {
+            let has_progress = Self::has_checkpoint_progress(&db, handoff)?;
+            return Ok(ShellCheckpoint::Exported { has_progress });
+        }
+        let checkpoint = Self::find_checkpoint(&db, source)?;
+        if checkpoint.is_none() {
+            let has_other_checkpoint: bool =
+                db.query_row("SELECT EXISTS (SELECT 1 FROM checkpoint)", [], |row| {
+                    row.get(0)
+                })?;
+            anyhow::ensure!(
+                !has_other_checkpoint,
+                "SDK history checkpoint belongs to a different source"
+            );
+        }
+        Ok(ShellCheckpoint::Ready(checkpoint))
+    }
+
+    fn has_checkpoint_progress(
+        db: &Connection,
+        handoff: LegacyCheckpointHandoff,
+    ) -> anyhow::Result<bool> {
+        Ok(db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM checkpoint WHERE source<>?1 AND json<>'{}')",
+            [handoff.marker()],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn restore(&self, source: &str, path: &Path) -> anyhow::Result<()> {
         let checkpoint = Self::find_checkpoint(&self.db.lock().unwrap(), source)?;
         crate::utils::source_access::private_path(path)?;
@@ -549,6 +600,28 @@ impl Outbox {
                 "checkpoint handoff retains unacknowledged activity"
             );
             let checkpoint = read_shell_checkpoint()?;
+            let history_profile = match handoff {
+                LegacyCheckpointHandoff::HookHistory(agent) => super::hook_history::find(agent),
+                _ => None,
+            };
+            if let Some(profile) = history_profile {
+                let decoded = checkpoint
+                    .as_deref()
+                    .map(serde_json::from_str::<serde_json::Map<String, Value>>)
+                    .transpose()?;
+                let empty = decoded.as_ref().is_none_or(serde_json::Map::is_empty);
+                let valid = decoded
+                    .and_then(|mut state| state.remove(profile.listener))
+                    .and_then(crate::checkpoints::InputState::from_json)
+                    .is_some_and(|state| {
+                        crate::inputs::rest_support::has_usable_hook_log_cursor(&state)
+                    });
+                anyhow::ensure!(
+                    valid || (empty && !Self::has_checkpoint_progress(&tx, handoff)?),
+                    "authoritative legacy checkpoint for {} is missing or invalid; restore it before restarting SDK history",
+                    profile.listener
+                );
+            }
             let checkpoint = if handoff != LegacyCheckpointHandoff::Codex {
                 // A missing legacy namespace cannot advance an existing cursor.
                 let checkpoint = match checkpoint {

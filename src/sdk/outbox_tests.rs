@@ -525,23 +525,56 @@ fn checkpoint_imports_legacy_progress_only_after_acknowledged_export() {
     }
 }
 
+#[test]
+fn legacy_hook_reader_recovers_an_unexported_drained_checkpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let queue = Outbox::open(&root, settings()).unwrap();
+    let handoff = LegacyCheckpointHandoff::HookHistory("openclaw");
+    let source = "openclaw-source";
+    let checkpoint = r#"{"openclaw-plugin-log:fixture":{"lastOffset":97}}"#;
+    queue.checkpoint(source, checkpoint).unwrap();
+    queue
+        .enqueue_hook(br#"{"event.id":"still-queued"}"#)
+        .unwrap();
+    assert!(matches!(
+        Outbox::checkpoint_for_shell(&root, source, handoff).unwrap(),
+        ShellCheckpoint::Pending
+    ));
+    queue
+        .ack(&queue.read_batch(&settings()).unwrap().0)
+        .unwrap();
+    assert!(matches!(
+        Outbox::checkpoint_for_shell(&root, source, handoff).unwrap(),
+        ShellCheckpoint::Ready(Some(text)) if text == checkpoint
+    ));
+    assert!(Outbox::checkpoint_for_shell(&root, "different-source", handoff).is_err());
+    Outbox::mark_shell_checkpoint_exported(&root, handoff).unwrap();
+    assert!(matches!(
+        Outbox::checkpoint_for_shell(&root, source, handoff).unwrap(),
+        ShellCheckpoint::Exported { has_progress: true }
+    ));
+}
+
 fn assert_acknowledged_checkpoint_handoff(input: &str) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let queue = Outbox::open(&root, settings()).unwrap();
     let handoff = LegacyCheckpointHandoff::for_input(input).unwrap();
     let source = "fixture-source";
-    let original = r#"{"qoder-trace:fixture":{"lastOffset":12}}"#;
-    let advanced = r#"{"qoder-trace:fixture":{"lastOffset":36}}"#;
+    let original =
+        json!({(input): {"lastFile":"history-2026-10-01.jsonl","lastOffset":12}}).to_string();
+    let advanced =
+        json!({(input): {"lastFile":"history-2026-10-01.jsonl","lastOffset":36}}).to_string();
     let pending = br#"{"event.id":"pending-qoder","event.name":"llm.request"}"#;
-    queue.checkpoint(source, original).unwrap();
+    queue.checkpoint(source, &original).unwrap();
     queue.enqueue_hook(pending).unwrap();
     assert_eq!(
         queue
             .prepare_shell_checkpoint(source, handoff, || panic!("SDK still owns the cursor"))
             .unwrap()
             .as_deref(),
-        Some(original)
+        Some(original.as_str())
     );
     assert!(Outbox::mark_shell_checkpoint_exported(&root, handoff).is_err());
     let rows = queue.read_batch(&settings()).unwrap().0;
@@ -556,7 +589,7 @@ fn assert_acknowledged_checkpoint_handoff(input: &str) {
             .prepare_shell_checkpoint(source, handoff, || Ok(Some(advanced.to_owned())))
             .unwrap()
             .as_deref(),
-        Some(advanced)
+        Some(advanced.as_str())
     );
     assert_eq!(
         queue.saved_checkpoints().unwrap(),
@@ -564,13 +597,73 @@ fn assert_acknowledged_checkpoint_handoff(input: &str) {
     );
 
     Outbox::mark_shell_checkpoint_exported(&root, handoff).unwrap();
-    assert_eq!(
-        queue
-            .prepare_shell_checkpoint(source, handoff, || Ok(None))
-            .unwrap()
-            .as_deref(),
-        Some(advanced)
-    );
+    let missing = queue.prepare_shell_checkpoint(source, handoff, || Ok(None));
+    if matches!(handoff, LegacyCheckpointHandoff::HookHistory(agent)
+        if crate::sdk::hook_history::find(agent).is_some())
+    {
+        assert!(missing.is_err());
+    } else {
+        assert_eq!(missing.unwrap().as_deref(), Some(advanced.as_str()));
+    }
+}
+
+#[test]
+fn hook_history_reupgrade_requires_shared_progress_after_an_export() {
+    for profile in crate::sdk::hook_history::PROFILES {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let queue = Outbox::open(&root, settings()).unwrap();
+        let source = "registered-hook-history";
+        let handoff = LegacyCheckpointHandoff::HookHistory(profile.agent);
+        let prepare =
+            |state: Option<String>| queue.prepare_shell_checkpoint(source, handoff, || Ok(state));
+        queue.checkpoint(source, "{}").unwrap();
+        Outbox::mark_shell_checkpoint_exported(&root, handoff).unwrap();
+        assert_eq!(prepare(None).unwrap().as_deref(), Some("{}"));
+        Outbox::mark_shell_checkpoint_exported(&root, handoff).unwrap();
+        assert_eq!(prepare(Some("{}".into())).unwrap().as_deref(), Some("{}"));
+
+        let key = profile.listener;
+        let file = "history-2026-10-01.jsonl";
+        let cursor = json!({"lastFile": file, "lastOffset": 12});
+        let previous = json!({(key): cursor}).to_string();
+        queue.checkpoint(source, &previous).unwrap();
+        Outbox::mark_shell_checkpoint_exported(&root, handoff).unwrap();
+        for unavailable in [
+            None,
+            Some("{}".into()),
+            Some(json!({(key):false}).to_string()),
+            Some(json!({(key):{}}).to_string()),
+            Some(json!({(format!("{key}:fixture")):cursor}).to_string()),
+            Some(json!({(key):{"lastFile":"../history.jsonl","lastOffset":12}}).to_string()),
+            Some(json!({(key):{"lastFile":file,"lastOffset":-1}}).to_string()),
+            Some(
+                json!({(key):{"lastFile":file,"lastOffset":12,"extra":{
+                    "hookLogOffsets":{(file):12,"history-2026-10-02.jsonl":false}
+                }}})
+                .to_string(),
+            ),
+        ] {
+            assert!(prepare(unavailable).is_err());
+            assert!(matches!(
+                Outbox::checkpoint_for_shell(&root, source, handoff).unwrap(),
+                ShellCheckpoint::Exported { has_progress: true }
+            ));
+            assert_eq!(
+                Outbox::read_persisted_checkpoint(&root, source)
+                    .unwrap()
+                    .as_deref(),
+                Some(previous.as_str())
+            );
+        }
+
+        let later = json!({(key):{"extra":{"hookLogOffsets":{(file):59}}}}).to_string();
+        assert_eq!(prepare(Some(later.clone())).unwrap(), Some(later));
+        assert!(matches!(
+            Outbox::checkpoint_for_shell(&root, source, handoff).unwrap(),
+            ShellCheckpoint::Ready(Some(_))
+        ));
+    }
 }
 
 #[tokio::test]

@@ -1382,6 +1382,30 @@ fn persisted_offset_map(state: &InputState) -> Option<BTreeMap<String, u64>> {
     }
 }
 
+/// Unlike normal startup, changing ownership must not silently discard a
+/// broken offset entry and continue from whatever remains.
+pub(crate) fn has_usable_hook_log_cursor(state: &InputState) -> bool {
+    fn is_basename(name: &str) -> bool {
+        !name.is_empty() && !matches!(name, "." | "..") && !name.contains(['/', '\\', ':', '\0'])
+    }
+
+    let extra = state.extra();
+    if let Some(offsets) = extra
+        .as_ref()
+        .and_then(|value| value.get(OFFSET_MAP_EXTRA_KEY))
+        .and_then(Value::as_object)
+        .filter(|offsets| !offsets.is_empty())
+    {
+        return offsets
+            .iter()
+            .all(|(name, offset)| is_basename(name) && value_u64(offset).is_some());
+    }
+    state.last_file().is_some_and(is_basename)
+        && state
+            .last_offset()
+            .is_some_and(|offset| offset.is_finite() && offset >= 0.0)
+}
+
 fn offset_map_changed(previous: Option<&BTreeMap<String, u64>>, next: &Map<String, Value>) -> bool {
     let Some(previous) = previous else {
         return true;

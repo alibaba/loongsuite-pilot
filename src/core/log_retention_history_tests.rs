@@ -1008,3 +1008,63 @@ async fn openclaw_sdk_retention_uses_acknowledged_offsets_and_keeps_the_active_s
     assert!(!sealed.exists());
     assert!(history.join(active).is_file());
 }
+
+#[tokio::test]
+async fn openclaw_fallback_retention_waits_for_legacy_reader_start() {
+    use crate::checkpoints::{InputStatePatch, StateStore};
+    use crate::core::input_manager::LiveInput;
+    use crate::sdk::{outbox::Outbox, policy::Delivery};
+    use crate::utils::file_identity::identity_from_open;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let fixture = Fixture::new();
+    let root = fixture.0.path().canonicalize().unwrap();
+    let name = format!("openclaw-{}.jsonl", date(14));
+    let file = fixture.write(&format!("logs/openclaw/{name}"), b"sealed\n");
+    old_mtime(&file, 14);
+    let history = root.join("logs/openclaw");
+    let identity = identity_from_open(&std::fs::File::open(&file).unwrap()).unwrap();
+    let state = Arc::new(StateStore::new(root.join("logs/input-state.json")));
+    state.update(
+        "openclaw-plugin-log",
+        InputStatePatch {
+            extra: Some(serde_json::json!({
+                "hookLogDir": history, "hookLogPrefix": "openclaw",
+                "hookLogOffsets": {&name: identity.size},
+                "hookLogIdentities": {&name: identity.checkpoint_key()}
+            })),
+            ..Default::default()
+        },
+    );
+    state.save().await.unwrap();
+    let queue = Outbox::open(
+        &root.join("state/standalone-openclaw-sdk/outbox"),
+        Delivery::default(),
+    )
+    .unwrap();
+    queue
+        .enqueue_hook(br#"{"event.id":"pending-openclaw"}"#)
+        .unwrap();
+    let running = Arc::new(AtomicBool::new(false));
+    let running_probe = running.clone();
+    let legacy = LiveInput::new(
+        "openclaw-plugin-log",
+        "openclaw",
+        "plugin",
+        move || running_probe.load(Ordering::Acquire),
+        || Box::pin(async { Ok(()) }),
+        || Box::pin(async {}),
+    );
+    let service = LogRetentionService::new(&root, config())
+        .with_state_store(state)
+        .with_openclaw_legacy(Some(&legacy));
+    assert_eq!(service.run_cleanup().await, (0, 0));
+    queue
+        .ack(&queue.read_batch(&Delivery::default()).unwrap().0)
+        .unwrap();
+    assert_eq!(service.run_cleanup().await, (0, 0));
+
+    running.store(true, Ordering::Release);
+    assert_eq!(service.run_cleanup().await, (1, 0));
+    assert!(!file.exists());
+}

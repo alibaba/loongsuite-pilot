@@ -25,6 +25,7 @@ pub(super) struct SdkAgent {
     legacy_state: Weak<StateStore>,
     verdicts: Option<Arc<ToolVerdictStore>>,
     managed: Option<Arc<ManagedHook>>,
+    history_handoff_agent: Option<&'static str>,
     running: Arc<AtomicBool>,
     session: tokio::sync::Mutex<Option<Session>>,
 }
@@ -59,9 +60,30 @@ impl SdkAgent {
             sdk_data,
             legacy_state: Arc::downgrade(legacy_state),
             verdicts: None,
+            history_handoff_agent: None,
             running: Arc::new(AtomicBool::new(false)),
             session: tokio::sync::Mutex::new(None),
         }
+    }
+
+    pub(super) fn drain_history(
+        profile: &crate::sdk::hook_history::HookHistoryProfile,
+        init: Value,
+        manager: &Arc<InputManager>,
+        sdk_data: PathBuf,
+        legacy_state: &Arc<StateStore>,
+    ) -> Self {
+        let policy = serde_json::json!({"agents": [], "hcd": {"agent_configs": {}}});
+        let mut sdk = Self::new(
+            profile.listener,
+            init,
+            policy,
+            manager,
+            sdk_data,
+            legacy_state,
+        );
+        sdk.history_handoff_agent = Some(profile.agent);
+        sdk
     }
 
     pub fn hook_only(
@@ -80,6 +102,7 @@ impl SdkAgent {
             sdk_data,
             legacy_state: Weak::new(),
             verdicts: Some(verdicts),
+            history_handoff_agent: None,
             running: Arc::new(AtomicBool::new(false)),
             session: tokio::sync::Mutex::new(None),
         }
@@ -133,6 +156,7 @@ impl SdkAgent {
             legacy_state: self.legacy_state.clone(),
             verdicts: self.verdicts.clone(),
             managed: self.managed.clone(),
+            history_handoff_agent: self.history_handoff_agent,
             start_result: AtomicI32::new(PENDING),
             stop_result: AtomicI32::new(PENDING),
         });
@@ -163,14 +187,21 @@ impl SdkAgent {
     }
 
     pub async fn stop(&self) {
+        if self.stop_with_result().await.is_err() {
+            super::logger("SdkAgent").warn("SDK instance failed to stop cleanly", None);
+        }
+    }
+
+    pub(super) async fn stop_with_result(&self) -> Result<(), String> {
         let mut session = self.session.lock().await;
         if let Some(Session { stop, worker }) = session.take() {
             let _ = stop.send(());
-            let outcome = tokio::task::spawn_blocking(move || worker.join()).await;
-            if !matches!(outcome, Ok(Ok(Ok(())))) {
-                super::logger("SdkAgent").warn("SDK instance failed to stop cleanly", None);
-            }
+            return tokio::task::spawn_blocking(move || worker.join())
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|_| "SDK host thread panicked".to_owned())?;
         }
+        Ok(())
     }
 }
 
@@ -200,12 +231,22 @@ struct Context {
     legacy_state: Weak<StateStore>,
     verdicts: Option<Arc<ToolVerdictStore>>,
     managed: Option<Arc<ManagedHook>>,
+    history_handoff_agent: Option<&'static str>,
     start_result: AtomicI32,
     stop_result: AtomicI32,
 }
 
 impl Context {
     fn observe_interceptor(&self, snapshot: &Value, initial: bool) {
+        // Hook-history readers and temporary drains share a listener with the
+        // separately managed interceptor, which owns its status.
+        if self.managed.is_none()
+            && crate::sdk::hook_history::PROFILES
+                .iter()
+                .any(|profile| profile.listener == self.input)
+        {
+            return;
+        }
         let Some(manager) = self.manager.upgrade() else {
             return;
         };
@@ -283,6 +324,12 @@ impl Context {
         let persisted = Outbox::read_persisted_checkpoint(&self.sdk_data.join("outbox"), namespace)
             .map_err(|error| error.to_string())?;
         self.runtime.block_on(async {
+            if matches!(handoff, Some(LegacyCheckpointHandoff::HookHistory(_))) {
+                legacy
+                    .check_for_handoff(None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
             if let Some(text) = persisted.as_deref() {
                 checkpoint
                     .load_checkpoint_text(text)
@@ -291,11 +338,29 @@ impl Context {
                 // A fresh SDK source may only have imported the Node checkpoint.
                 checkpoint.load().await;
             }
+            let history_profile = match handoff {
+                Some(LegacyCheckpointHandoff::HookHistory(agent)) => {
+                    crate::sdk::hook_history::find(agent)
+                }
+                _ => None,
+            };
+            let can_export = if let Some(profile) = history_profile {
+                profile
+                    .can_export_checkpoint(
+                        &checkpoint,
+                        persisted.as_deref().is_some_and(|text| text != "{}"),
+                    )
+                    .map_err(|error| error.to_string())?
+            } else {
+                true
+            };
             let mut imported = false;
-            for id in checkpoint.keys() {
-                if crate::checkpoints::key_in_namespace(&id, self.input) {
-                    legacy.set(&id, checkpoint.get(&id));
-                    imported = true;
+            if can_export {
+                for id in checkpoint.keys() {
+                    if crate::checkpoints::key_in_namespace(&id, self.input) {
+                        legacy.set(&id, checkpoint.get(&id));
+                        imported = true;
+                    }
                 }
             }
             if imported {
@@ -364,7 +429,13 @@ unsafe extern "C" fn on_activity(
             .map(|row| unsafe { std::slice::from_raw_parts(row.data, row.len) })
             .collect::<Vec<_>>();
         runtime
-            .block_on(manager.accept_sdk_activity(input, &rows))
+            .block_on(async {
+                if let Some(agent) = ctx.history_handoff_agent {
+                    manager.accept_handoff_activity(input, agent, &rows).await
+                } else {
+                    manager.accept_sdk_activity(input, &rows).await
+                }
+            })
             .map_err(|_| "Pilot output failed")
     });
     if matches!(result, Ok(Ok(()))) {
@@ -576,4 +647,39 @@ fn run(
     Err(format!(
         "SDK host could not retire the instance ({stop_code})"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn openclaw_history_monitoring_does_not_replace_interceptor_status() {
+        let manager = Arc::new(InputManager::new());
+        let listener = "openclaw-plugin-log";
+        manager.interceptor.observe(
+            listener,
+            serde_json::json!({"enabled": true, "running": true, "collection_status": "ok"}),
+        );
+        let context = Context {
+            input: listener,
+            runtime: tokio::runtime::Handle::current(),
+            manager: Arc::downgrade(&manager),
+            sdk_data: PathBuf::new(),
+            legacy_state: Weak::new(),
+            verdicts: None,
+            managed: None,
+            history_handoff_agent: Some("openclaw"),
+            start_result: AtomicI32::new(PENDING),
+            stop_result: AtomicI32::new(PENDING),
+        };
+        context.observe_interceptor(
+            &serde_json::json!({"interceptor": {"enabled": false}}),
+            true,
+        );
+        assert_eq!(
+            manager.interceptor.snapshot(true)["instances"][listener]["running"],
+            true
+        );
+    }
 }
