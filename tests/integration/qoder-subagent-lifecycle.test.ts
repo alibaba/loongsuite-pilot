@@ -98,6 +98,39 @@ async function spansFor(entries: AgentActivityEntry[]) {
   finally { await flusher.shutdown(); }
 }
 
+const legacyFixtures = path.resolve('tests/fixtures/qoder/legacy-subagent');
+async function legacyRows(file: string, root: string, owner = session) {
+  const text = await fs.readFile(path.join(legacyFixtures, file), 'utf8');
+  return text.trim().split('\n').map(line => {
+    const row = JSON.parse(line);
+    return { ...row, sessionId: owner, cwd: root, ...(row.timestamp
+      ? { timestamp: new Date(Date.parse(row.timestamp) - Date.parse('2026-09-22T10:00:00Z') + epoch).toISOString() } : {}) };
+  });
+}
+
+async function legacyParent(root: string, owner: string) {
+  const parent = path.join(root, `${owner}.jsonl`);
+  const directory = path.join(root, owner, 'subagents');
+  const descriptor = JSON.parse(await fs.readFile(path.join(legacyFixtures, 'descriptor.json'), 'utf8'));
+  const child = path.join(directory, `agent-${descriptor.agentId}.jsonl`);
+  const task = { ...descriptor, sessionId: owner, transcriptPath: child };
+  const putTask = (entry: typeof task) => fs.writeFile(path.join(directory, `task-${entry.taskId}.json`), JSON.stringify(entry));
+  await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(parent, jsonl(await legacyRows('parent.jsonl', root, owner)));
+  expect(publishQoderWakeup({ session_id: owner, transcript_path: parent,
+    hook_event_name: 'Stop', cwd: root }, { dataDir: root, agentId: 'qoder' })).toBe(true);
+  const createChild = async () => {
+    await fs.writeFile(child, jsonl(await legacyRows('child.jsonl', root, owner)));
+    await putTask(task);
+  };
+  return { directory, task, putTask, createChild, key: qoderSourceKey(owner, parent) };
+}
+
+async function childSpans(h: Awaited<ReturnType<typeof harness>>, childId: string) {
+  return (await spansFor(h.entries())).filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT'
+    && span.attributes['gen_ai.agent.id'] === childId);
+}
+
 describe.each(['qoder'] as const)('%s independent native child work', agentId => {
   it.each(['both wakeups', 'child wakeup first', 'parent only', 'descriptor after restart',
     'descriptor after both wakeups', 'prefix budget', 'modern parent marker', 'modern child marker',
@@ -119,18 +152,9 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
         };
       } : undefined;
       const h = await harness(agentId, false, constrainPrefix, mode === 'desktop owner' ? 'app' : undefined);
-      const fixtures = path.resolve('tests/fixtures/qoder/legacy-subagent');
-      async function rows(file: string) {
-        const text = await fs.readFile(path.join(fixtures, file), 'utf8');
-        return text.trim().split('\n').map(line => {
-          const row = JSON.parse(line);
-          return { ...row, sessionId: session, cwd: h.root, ...(row.timestamp
-            ? { timestamp: new Date(Date.parse(row.timestamp) - Date.parse('2026-09-22T10:00:00Z') + epoch).toISOString() } : {}) };
-        });
-      }
-      const parent = await rows('parent.jsonl');
-      const child = await rows('child.jsonl');
-      const descriptor = JSON.parse(await fs.readFile(path.join(fixtures, 'descriptor.json'), 'utf8'));
+      const parent = await legacyRows('parent.jsonl', h.root);
+      const child = await legacyRows('child.jsonl', h.root);
+      const descriptor = JSON.parse(await fs.readFile(path.join(legacyFixtures, 'descriptor.json'), 'utf8'));
       const childPath = h.child(descriptor.agentId);
       await fs.mkdir(path.dirname(childPath), { recursive: true });
       if (mode === 'explicit independent prompt') child[0].isDelegatedTask = false;
@@ -235,6 +259,59 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
       } else {
         expect(children).toHaveLength(0);
       }
+    });
+
+  it('revisits a legacy source behind eight unchanged parent directories', async () => {
+    const h = await harness(agentId);
+    const fixtures = new Map<string, Awaited<ReturnType<typeof legacyParent>>>();
+    for (let i = 0; i < 9; i++) {
+      const fixture = await legacyParent(h.root, `synthetic-scope-${i}`);
+      fixtures.set(fixture.key, fixture);
+    }
+    const inDiscoveryOrder = [];
+    for await (const entry of await fs.opendir(qoderWakeupRoot(h.root, agentId))) {
+      const fixture = fixtures.get(entry.name);
+      if (fixture) inDiscoveryOrder.push(fixture);
+    }
+    expect(inDiscoveryOrder).toHaveLength(9);
+    const target = inDiscoveryOrder[8];
+    await target.createChild();
+    await h.start(); await h.cycle(); await h.cycle();
+    expect(await childSpans(h, target.task.agentId)).toHaveLength(1);
+  });
+
+  it.each(['continuous polling', 'restart', 'conflicting in-place rewrite'])(
+    'checks all legacy descriptors beyond one cycle under %s', async mode => {
+      let collector: any;
+      const h = await harness(agentId, false, instance => { collector = instance; });
+      const target = await legacyParent(h.root, session);
+      await target.createChild();
+      await target.putTask({ ...target.task, result: 'a'.repeat(120 * 1024) });
+      const competing = new Map<string, typeof target.task>();
+      for (let i = 0; i < 4; i++) {
+        const id = `other-${i}`;
+        const task = { ...target.task, taskId: id, agentId: id, parentToolUseId: id,
+          transcriptPath: path.join(target.directory, `agent-${id}.jsonl`), result: 'a'.repeat(127 * 1024) };
+        competing.set(`task-${id}.json`, task);
+        await target.putTask(task);
+      }
+      await h.start();
+      expect(await childSpans(h, target.task.agentId)).toHaveLength(0);
+      if (mode === 'restart') {
+        await h.stop(); await h.start();
+      }
+      if (mode === 'conflicting in-place rewrite') {
+        const scan = collector.legacyDescriptorContinuation;
+        const previouslyRead = scan.files.slice(0, scan.versions.length).find((name: string) => competing.has(name));
+        expect(previouslyRead).toBeDefined();
+        const other = competing.get(previouslyRead)!;
+        await target.putTask({ ...other, parentToolUseId: target.task.parentToolUseId });
+        await h.cycle(); await h.cycle();
+        expect(await childSpans(h, target.task.agentId)).toHaveLength(0);
+        await target.putTask(other);
+      }
+      await h.cycle(); await h.cycle();
+      expect(await childSpans(h, target.task.agentId)).toHaveLength(1);
     });
 
   it('keeps App identity on early delegation, child work and final exported resources', async () => {

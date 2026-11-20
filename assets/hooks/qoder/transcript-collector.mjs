@@ -53,6 +53,7 @@ const LEGACY_DIRECTORIES_PER_CYCLE = 8;
 const MAX_LEGACY_TASK_DIRECTORY_ENTRIES = 128;
 const MAX_LEGACY_TASK_BYTES = 128 * 1024;
 const LEGACY_METADATA_BYTES_PER_CYCLE = 512 * 1024;
+const LEGACY_DESCRIPTORS_DEFERRED = Symbol('legacy-descriptors-deferred');
 const LEGACY_PREFIX_DEFERRED = Symbol('legacy-prefix-deferred');
 const legacyAgentId = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,512}$/.test(value);
 const isInsideDirectory = (directory, file) => {
@@ -153,6 +154,7 @@ export class QoderTranscriptCollector {
     this.deferredSources = new Map();
     this.legacyOwners = new Map();
     this.legacyPending = new Set();
+    this.legacyDescriptorContinuation = null;
     this.legacyInspections = new Map();
     this.legacyInspectionSequence = 0;
     this.promptInspections = new Map();
@@ -180,6 +182,7 @@ export class QoderTranscriptCollector {
     this.tailScans.clear(); this.deferredSources.clear();
     this.legacyOwners.clear();
     this.legacyPending.clear(); this.legacyInspections.clear();
+    this.legacyDescriptorContinuation = null;
     this.promptInspections.clear();
     const directory = this.discovery;
     this.discovery = null;
@@ -356,8 +359,16 @@ export class QoderTranscriptCollector {
 
   async legacyDescriptors(parentPath, sessionId) {
     const scope = qoderSourceKey(sessionId, parentPath);
-    if (this.legacyTasks.has(scope)) return this.legacyTasks.get(scope);
-    if (this.legacyDirectoryBudget <= 0) return [];
+    const cached = this.legacyTasks.get(scope);
+    if (cached === LEGACY_DESCRIPTORS_DEFERRED) this.legacyDescriptorDeferred = true;
+    if (cached) return cached;
+    const previous = this.legacyDescriptorContinuation;
+    // Keep at most one unfinished directory in memory, with a bounded list of
+    // both its descriptor identities and their claims. Its source retries first.
+    if (this.legacyDirectoryBudget <= 0 || (previous && previous.scope !== scope)) {
+      this.legacyDescriptorDeferred = true;
+      return LEGACY_DESCRIPTORS_DEFERRED;
+    }
     this.legacyDirectoryBudget--;
     const result = [];
     this.legacyTasks.set(scope, result);
@@ -365,28 +376,52 @@ export class QoderTranscriptCollector {
     try {
       // An aliased directory could belong to a different native session.
       if (await fs.realpath(directory) !== directory) return result;
-      const entries = await names(directory, MAX_LEGACY_TASK_DIRECTORY_ENTRIES + 1, true);
-      if (entries.length > MAX_LEGACY_TASK_DIRECTORY_ENTRIES) {
-        this.report(scope, 'legacy-subagent-directory-limit');
-        return result;
+      const stat = await fs.lstat(directory);
+      if (!stat.isDirectory()) return result;
+      const version = fileVersion(stat);
+      let scan = previous;
+      if (scan) {
+        if (scan.version !== version) return result;
+      } else {
+        const entries = await names(directory, MAX_LEGACY_TASK_DIRECTORY_ENTRIES + 1, true);
+        if (entries.length > MAX_LEGACY_TASK_DIRECTORY_ENTRIES) {
+          this.report(scope, 'legacy-subagent-directory-limit');
+          return result;
+        }
+        const files = entries.filter(entry => entry.isFile() && /^task-[a-zA-Z0-9_-]+\.json$/.test(entry.name))
+          .map(entry => entry.name);
+        scan = { scope, version, files, versions: [], claims: [] };
       }
-      const claims = [];
-      for (const entry of entries) {
-        if (!entry.isFile() || !/^task-[a-zA-Z0-9_-]+\.json$/.test(entry.name)) continue;
-        const file = path.join(directory, entry.name);
+      const { claims, files, versions } = scan;
+      while (versions.length < files.length) {
+        const name = files[versions.length];
+        const file = path.join(directory, name);
+        const observed = await fs.lstat(file);
+        if (!observed.isFile() || observed.size > MAX_LEGACY_TASK_BYTES) throw new Error('invalid-legacy-descriptor');
         // Reserve the extra byte used to detect growth and charge bytes even
         // when a descriptor cannot be parsed.
         const limit = Math.min(MAX_LEGACY_TASK_BYTES, this.legacyMetadataBudget - 1);
-        if (limit <= 0) return result;
-        const { value: task } = await jsonSnapshot(file, limit, true, bytesRead => {
+        if (limit <= 0 || observed.size > limit) {
+          scan.entryKey = this.legacyDescriptorEntry;
+          this.legacyDescriptorContinuation = scan;
+          this.legacyTasks.set(scope, LEGACY_DESCRIPTORS_DEFERRED);
+          this.legacyDescriptorDeferred = true;
+          return LEGACY_DESCRIPTORS_DEFERRED;
+        }
+        const { value: task, stat: snapshot } = await jsonSnapshot(file, limit, true, bytesRead => {
           this.legacyMetadataBudget -= bytesRead;
         });
+        const descriptorVersion = fileVersion(snapshot);
+        if (descriptorVersion !== fileVersion(observed)) return result;
+        versions.push(descriptorVersion);
         if (task?.sessionId !== sessionId || !legacyAgentId(task.agentId)
           || typeof task.parentToolUseId !== 'string' || !task.parentToolUseId
-          || `task-${task.taskId}.json` !== entry.name) continue;
-        const { agentId, parentToolUseId, transcriptPath } = task;
-        claims.push({ agentId, parentToolUseId, transcriptPath });
+          || `task-${task.taskId}.json` !== name) continue;
+        const { agentId, parentToolUseId } = task;
+        claims.push({ agentId, parentToolUseId,
+          transcriptPath: typeof task.transcriptPath === 'string' ? task.transcriptPath : undefined });
       }
+      const matched = [];
       for (const task of claims) {
         if (claims.some(other => other !== task && (other.agentId === task.agentId
           || other.parentToolUseId === task.parentToolUseId || other.transcriptPath === task.transcriptPath))) continue;
@@ -395,15 +430,25 @@ export class QoderTranscriptCollector {
         if (!file.endsWith('.jsonl') || !isInsideDirectory(directory, file)) continue;
         try {
           if (await fs.realpath(file) !== file || !(await fs.lstat(file)).isFile()) continue;
-          result.push({ key: qoderSourceKey(sessionId, file), agentId: 'qoder', sessionId,
+          matched.push({ key: qoderSourceKey(sessionId, file), agentId: 'qoder', sessionId,
             transcriptPath: file, parentTranscriptPath: parentPath, subagentId: task.agentId, callId: task.parentToolUseId });
         } catch (error) { if (error.code !== 'ENOENT') throw error; }
       }
+      // Directory timestamps catch additions/replacements, but an in-place
+      // rewrite can change an earlier claim without changing the directory.
+      for (const [index, name] of files.entries()) {
+        if (fileVersion(await fs.lstat(path.join(directory, name))) !== versions[index]) return result;
+      }
+      if (fileVersion(await fs.lstat(directory)) !== version || await fs.realpath(directory) !== directory) return result;
+      result.push(...matched);
     } catch (error) {
       // An unreadable descriptor could be a competing claim. Retry the
       // directory on another pass and keep the existing source untouched.
       if (error.code !== 'ENOENT') this.report(scope, 'legacy-subagent-descriptor-unreadable');
       result.length = 0;
+    } finally {
+      if (this.legacyDescriptorContinuation?.scope === scope
+        && this.legacyTasks.get(scope) !== LEGACY_DESCRIPTORS_DEFERRED) this.legacyDescriptorContinuation = null;
     }
     return result;
   }
@@ -445,6 +490,7 @@ export class QoderTranscriptCollector {
     const parentKey = qoderSourceKey(source.sessionId, source.parentTranscriptPath);
     if (!this.links.hasLegacyParent(parentKey)) return;
     const claims = await this.legacyDescriptors(source.parentTranscriptPath, source.sessionId);
+    if (claims === LEGACY_DESCRIPTORS_DEFERRED) return claims;
     const childKey = qoderSourceKey(source.sessionId, source.transcriptPath);
     const claim = claims.find(task => task.key === childKey && task.subagentId === source.subagentId);
     if (!claim || (expectedCall && claim.callId !== expectedCall)) return;
@@ -459,6 +505,7 @@ export class QoderTranscriptCollector {
 
   async discoverLegacySubagents(parent) {
     const claims = await this.legacyDescriptors(parent.transcriptPath, parent.sessionId);
+    if (claims === LEGACY_DESCRIPTORS_DEFERRED) return;
     for (const { callId, ...source } of claims) {
       const directory = path.join(this.root, source.key, 'events');
       try { await fs.access(directory); continue; } catch (error) { if (error.code !== 'ENOENT') continue; }
@@ -517,6 +564,7 @@ export class QoderTranscriptCollector {
         < (this.legacyInspections.get(chosen) ?? 0) ? entry.name : chosen, null);
     if (this.legacyChosenKey) this.rememberLegacyInspection(this.legacyChosenKey);
     let visited = 0;
+    const legacyDescriptorRetries = [];
     for (const entry of entries) {
       if (this.stopped || this.remainingBytes <= 0 || records.length >= 4096) break;
       visited++;
@@ -524,6 +572,8 @@ export class QoderTranscriptCollector {
       if (priorityKeys.has(key)) {
         this.parentAttempts.delete(key);
       }
+      this.legacyDescriptorEntry = key;
+      this.legacyDescriptorDeferred = false;
       const directory = path.join(this.root, key);
       let source;
       let observedContexts;
@@ -557,8 +607,9 @@ export class QoderTranscriptCollector {
         let contexts = observedContexts.filter(context => context.inode === undefined || context.inode === stat.ino);
         if (contexts.some(context => context.legacyDiscovery !== true)) {
           contexts = contexts.filter(context => !context.legacyDiscovery);
-        } else if (source.legacyDiscovery && !await this.verifyLegacySource(source)) {
-          continue;
+        } else if (source.legacyDiscovery) {
+          const proof = await this.verifyLegacySource(source);
+          if (!proof || proof === LEGACY_DESCRIPTORS_DEFERRED) continue;
         }
         if (!contexts.length) continue; // Replacement has not been observed by a Hook yet.
         const rewritten = checkpoint?.fingerprint && (checkpoint.fileMtime !== stat.mtimeMs || checkpoint.fileCtime !== stat.ctimeMs)
@@ -630,9 +681,19 @@ export class QoderTranscriptCollector {
         this.report(key, error.code ?? error.message);
         // Retain the prior checkpoint and published observations on any I/O,
         // parse, capacity or cancellation failure. Other sources still run.
+      } finally {
+        if (this.legacyDescriptorDeferred) legacyDescriptorRetries.push(entry);
       }
     }
-    this.pendingSources = entries.slice(visited);
+    // Let budget-blocked sources make progress before opendir starts another
+    // pass in the same order. Preserve unvisited entries and keep retries
+    // within one discovery batch plus its priority entries.
+    const unvisited = entries.slice(visited);
+    const retryLimit = Math.max(0, MAX_SOURCES_PER_CYCLE + PRIORITY_SOURCES_PER_CYCLE - unvisited.length);
+    this.pendingSources = [...legacyDescriptorRetries.slice(0, retryLimit), ...unvisited];
+    if (this.legacyDescriptorContinuation && !this.pendingSources.some(entry => entry.name === this.legacyDescriptorContinuation.entryKey)) {
+      this.legacyDescriptorContinuation = null;
+    }
     this.finishDiscovery();
     return { records, state: next, metrics: this.metrics, changed };
   }
@@ -1286,6 +1347,7 @@ export class QoderTranscriptCollector {
     const legacy = first?.start === checkpoint.activeStart && first?.uuid === prompt.uuid
       && first.callId === prompt.parent_tool_use_id && first.inode === checkpoint.inode;
     const legacyProof = legacy ? await this.verifyLegacySource(source, prompt.parent_tool_use_id) : undefined;
+    if (legacyProof === LEGACY_DESCRIPTORS_DEFERRED) throw new Error('legacy-descriptor-budget');
     const incoming = this.links.incoming(source, prompt)
       ?? (legacyProof && this.links.bindLegacyPeer(legacyProof.link, source.subagentId));
     // Parent and child directory observations can arrive in either order.
