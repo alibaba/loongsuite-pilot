@@ -8,9 +8,7 @@ Qoder CLI 与 Agent SDK 的原生 sidechain 使用独立 transcript，同时可�
 
 委派登记仅在 `qoder` 来源且原生记录 `entrypoint=cli` 时启用，避免 IDE 或 CN 主会话仅因调用同名 Agent 工具便进入这套 CLI 适配。
 
-**Qoder IDE / QoderCN IDE 的独立子会话仍需额外适配。** 两者 1.37.0 的真实测试样本使用独立的子 `sessionId`，文件位于项目 `transcript/<childSessionId>.jsonl`，没有 CLI 的 `isDelegatedTask`、`parent_tool_use_id` 或初始用户输入；父工具的 `toolUseResult` 也可能是字符串。仅添加 `SubagentStart/Stop` 声明不足以让当前 CLI tailer 完整读取这些子执行。
-
-IDE 的 SQLite `chat_session` / `chat_record` 已提供 `parent_session_id`、`parent_tool_call_id`，可作为精确关联依据；后续需要补充独立子会话发现、无初始用户行的执行边界及消息补全、按子 session 的模型用量读取，再复用现有委派模型与 Span 转换。此路径尚未实现，也未完成对应候选的 GUI/CMS 验收。
+Qoder IDE 使用独立子 `sessionId`，其 transcript 没有 CLI sidechain 的 `isDelegatedTask`、`parent_tool_use_id` 或初始用户输入。IDE 适配通过 SQLite 的 `chat_record` 父 session、父工具和 request ID 建立关联，保留子会话和按请求归属的用量；具体字段和正文来源见[输出事件 Schema](output-event-schema.md)。Qoder IDE 1.37.0 的前台并行子任务已通过本机 GUI 与 CMS 验证；后台、原生复用及嵌套尚未完成真实验收。QoderCN IDE 仍需独立适配与验证。
 
 ## 数据来源与关联
 

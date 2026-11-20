@@ -1086,6 +1086,10 @@ export class QoderTranscriptCollector {
     }
     for (let index = 0; index < records.length; index++) {
       const record = records[index];
+      // In-process provenance for the IDE adapter. Never serialized to events.
+      Object.defineProperty(record, Symbol.for('loongsuite.qoder.native-source'), {
+        value: source.transcriptPath,
+      });
       record['event.id'] = digest([turnId, index, record['event.name'], record['gen_ai.tool.call.id']]);
       record['agent.transcript.cursor_mode'] = checkpoint.recoveryReason === 'incremental' ? 'incremental' : 'bootstrap';
       record['agent.transcript.cursor_reason'] = checkpoint.recoveryReason ?? 'incremental';
