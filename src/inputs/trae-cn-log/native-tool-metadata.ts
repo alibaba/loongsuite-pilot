@@ -10,7 +10,7 @@ import { ClientType, type AgentActivityEntry } from '../../types/index.js';
 import { fileIdentity } from '../../utils/file-identity.js';
 
 type Delegation = { parent: string; call: string; start?: string; end?: string; child?: string };
-type Turn = { session: string; turn: string; start: string; calls: string[]; responses?: string[]; pending?: PendingTool[]; delegations?: Delegation[] };
+type Turn = { session: string; turn: string; start: string; calls: string[]; requestedModel?: string; responses?: string[]; pending?: PendingTool[]; delegations?: Delegation[] };
 type PendingTool = { call: string; tool: string; time: string; parent: string; received: number };
 type Turns = Record<string, Turn>;
 const spanId = (trace: string, id: string) => createHash('sha256').update(trace + '/' + id).digest('hex').slice(0, 16);
@@ -54,7 +54,7 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
   if (!fields) return;
   const message = text(fields.message);
   if (message !== 'context resolve applied to task request' && message !== 'tool execution started' &&
-      message !== 'recording history entry' && message !== commit && message !== launch && message !== takeover &&
+      message !== 'create_task' && message !== 'recording history entry' && message !== commit && message !== launch && message !== takeover &&
       message !== 'terminal Turn and Inbox transaction committed' && message !== 'chat: runner completed') return;
   const trace = text(fields.trace_id);
   if (!/^[a-f0-9]{32}$/.test(trace)) return;
@@ -72,6 +72,11 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
   }
   const turn = turns[trace];
   if (!turn) return;
+  if (message === 'create_task') {
+    const model = text(fields.model_name);
+    if (text(fields.chat_session_id) === turn.session && /^[\w.:/-]{1,256}$/.test(model)) turn.requestedModel = model;
+    return;
+  }
   const root = spanId(trace, turn.turn);
   const agent = spanId(trace, 'turn-agent/' + turn.turn);
   const base = {
@@ -91,6 +96,7 @@ function nativeMetadata(record: any, turns: Turns, entries: AgentActivityEntry[]
     entries.push(buildAgentActivityEntry({ ...base, 'event.id': id, 'event.name': 'llm.response',
       span_id: id, parent_span_id: agent, startTimeUnixNano: time,
       'gen_ai.span.kind': 'LLM', 'gen_ai.operation.name': 'chat', 'gen_ai.response.id': history,
+      ...(turn.requestedModel ? { 'gen_ai.request.model': turn.requestedModel } : {}),
       'agent.trae-cn.observed_until': 'response_recorded' }));
     return;
   }

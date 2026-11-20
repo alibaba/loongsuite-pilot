@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
@@ -26,6 +27,9 @@ export class TraeCnLogInput extends BaseSessionInput {
   private readonly waiting = new Map<string, number>();
   private calls: TraceIndex = {};
   private bindings: TraceIndex = {};
+  // Persist only native response metadata until the Hook agent span is bound.
+  private rounds: Record<string, { seen: number; events: AgentActivityEntry[] }> = {};
+  private parents: Record<string, { seen: number; agent: string; root: string }> = {};
   private hasNative = false;
 
   constructor(opts?: Partial<TraeCnLogInputOptions> & { stateStore: SessionInputOptions['stateStore'] }) {
@@ -73,10 +77,12 @@ export class TraeCnLogInput extends BaseSessionInput {
   protected override async collect(): Promise<AgentActivityEntry[]> {
     const key = this.id + ':trace-bindings';
     const state = this.stateStore.get(key).extra;
-    const recent = (index: TraceIndex = {}) => Object.fromEntries(
+    const recent = <T extends { seen: number }>(index: Record<string, T> = {}) => Object.fromEntries(
       Object.entries(index).filter(([, value]) => Date.now() - value.seen < 86400_000));
     this.calls = recent(state?.calls as TraceIndex);
     this.bindings = recent(state?.bindings as TraceIndex);
+    this.rounds = recent(state?.rounds as typeof this.rounds);
+    this.parents = recent(state?.parents as typeof this.parents);
     const runs = await fs.readdir(this.nativeRoot, { withFileTypes: true }).catch(() => []);
     this.hasNative = false;
     for (const run of runs.filter(r => r.isDirectory() && /^\d{8}T\d{6}$/.test(r.name))) {
@@ -84,6 +90,11 @@ export class TraeCnLogInput extends BaseSessionInput {
       if (!await this.native.collect(path.join(this.nativeRoot, run.name), events, state?.initialized === true)) continue;
       this.hasNative = true;
       for (const e of events) {
+        if (e.trace_id && e['gen_ai.response.id'] && e['gen_ai.span.kind'] === 'LLM') {
+          const pending = this.rounds[e.trace_id] ??= { seen: Date.now(), events: [] };
+          pending.events.push(e);
+          pending.seen = Date.now();
+        }
         const call = e['gen_ai.tool.call.id'];
         if (!call || !e.trace_id || !e['gen_ai.session.id']) continue;
         const id = e['gen_ai.session.id'] + '/' + call;
@@ -92,7 +103,20 @@ export class TraeCnLogInput extends BaseSessionInput {
       }
     }
     const entries = await super.collect();
-    this.stateStore.update(key, { extra: { initialized: true, calls: this.calls, bindings: this.bindings } });
+    for (const [trace, batch] of Object.entries(this.rounds)) {
+      const parent = this.parents[trace];
+      if (!parent) continue;
+      for (const response of batch.events) {
+        const history = response['gen_ai.response.id']!;
+        const step = createHash('sha256').update(trace + '/history-step/' + history).digest('hex').slice(0, 16);
+        entries.push({ ...response, 'event.id': step, 'event.name': 'other', 'gen_ai.operation.name': 'react',
+          'gen_ai.span.kind': 'STEP', 'gen_ai.step.id': history, span_id: step, parent_span_id: parent.agent });
+        entries.push({ ...response, 'gen_ai.step.id': history, parent_span_id: step });
+      }
+      delete this.rounds[trace];
+    }
+    this.stateStore.update(key, { extra: { initialized: true, calls: this.calls, bindings: this.bindings,
+      rounds: this.rounds, parents: this.parents } });
     return entries;
   }
 
@@ -128,8 +152,33 @@ export class TraeCnLogInput extends BaseSessionInput {
     this.waiting.delete(file);
     Object.assign(this.bindings, chosen);
     for (const e of entries) {
-      if (e.trace_id) e.trace_id = chosen[e.trace_id].trace;
+      if (!e.trace_id) continue;
+      const hookTrace = e.trace_id;
+      const trace = chosen[hookTrace].trace;
+      e.trace_id = trace;
+      if (this.hasNative && e['gen_ai.span.kind'] === 'AGENT' && e.span_id && e.parent_span_id) {
+        this.parents[trace] = { seen: now, agent: e.span_id, root: e.parent_span_id };
+      }
     }
-    return entries;
+    return entries.flatMap(e => {
+      const parent = e.trace_id && this.parents[e.trace_id];
+      if (!parent) return [e];
+      if (e['gen_ai.span.kind'] === 'STEP') return [];
+      if (e['gen_ai.span.kind'] === 'TOOL') {
+        delete e['gen_ai.step.id'];
+        e.parent_span_id = parent.agent;
+      }
+      if (e['gen_ai.span.kind'] === 'LLM') {
+        // Hook messages describe the entire turn. Retain them on its agent.
+        e.span_id = parent.agent;
+        e.parent_span_id = parent.root;
+        e['gen_ai.span.kind'] = 'AGENT';
+        e['gen_ai.operation.name'] = 'invoke_agent';
+        e['event.name'] = 'other';
+        delete e['gen_ai.response.id'];
+        delete e['gen_ai.step.id'];
+      }
+      return [e];
+    });
   }
 }
