@@ -404,6 +404,30 @@ pub(super) fn sdk_hook_binary_name() -> &'static str {
     }
 }
 
+// Anchor development Hooks to the running Cargo build. A resource override
+// or an incomplete installed manifest cannot provide an arbitrary executable.
+fn development_sdk_hook_binary(pilot: &Path) -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let root = pilot.canonicalize().ok()?;
+    if !crate::utils::runtime_paths::is_development_root(&root)
+        || !matches!(std::fs::symlink_metadata(root.join("runtime-manifest.json")),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound)
+        || executable.file_name()? != pilot_binary_name()
+    {
+        return None;
+    }
+    let profile = executable
+        .parent()?
+        .strip_prefix(root.join("target"))
+        .ok()?;
+    if profile.components().count() > 2
+        || !matches!(profile.file_name()?.to_str()?, "debug" | "release")
+    {
+        return None;
+    }
+    Some(executable.with_file_name(sdk_hook_binary_name()))
+}
+
 pub(super) fn installed_qoder_hook_binary(
     pilot: &Path,
     data: &Path,
@@ -2135,19 +2159,30 @@ impl HookStrategy {
         let cache = hook_cache_dir(data);
         if requires_native_sdk(def) {
             use crate::utils::runtime_paths::{resource_file, runtime_metadata};
-            let hook = format!("bin/{}", sdk_hook_binary_name());
-            let binary = resource_file(pilot, &hook).ok()?;
             // The installer deploys from the validated candidate in versions/
             // before advancing current. Its transaction owns this registration.
-            if std::fs::canonicalize(pilot.parent()?).ok()?
-                != std::fs::canonicalize(cache.join("versions")).ok()?
+            let installed = std::fs::canonicalize(cache.join("versions")).is_ok_and(|versions| {
+                std::fs::canonicalize(pilot.parent().unwrap_or(pilot))
+                    .is_ok_and(|parent| parent == versions)
+            });
+            let binary = if installed {
+                let hook = format!("bin/{}", sdk_hook_binary_name());
+                let binary = resource_file(pilot, &hook).ok()?;
+                super::runtime_launcher::RuntimeLauncher::read(&cache, data)
+                    .ok()?
+                    .map_or(binary, |runtime| runtime.hook_path().to_owned())
+            } else {
+                development_sdk_hook_binary(pilot)?
+            };
+            let metadata = runtime_metadata(&binary).ok()?;
+            #[cfg(unix)]
             {
-                return None;
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o111 == 0 {
+                    return None;
+                }
             }
-            let binary = super::runtime_launcher::RuntimeLauncher::read(&cache, data)
-                .ok()?
-                .map_or(binary, |runtime| runtime.hook_path().to_owned());
-            return runtime_metadata(&binary).ok()?.is_file().then_some(binary);
+            return metadata.is_file().then_some(binary);
         }
         if !qoder_definition_supports_exec(def, data) && self.codex_sdk_data(def).is_none() {
             return None;
@@ -2316,7 +2351,7 @@ impl HookStrategy {
                     return None;
                 }
                 let owned = if requires_native_sdk(def) {
-                    let (_, data) = self.resource_roots.as_ref()?;
+                    let (pilot, data) = self.resource_roots.as_ref()?;
                     let cache = hook_cache_dir(data);
                     let binary = codex_command_executable(command)?;
                     let installed = super::runtime_launcher::RuntimeLauncher::read(&cache, data)
@@ -2330,6 +2365,9 @@ impl HookStrategy {
                         // configured cache may still use that root's lexical alias.
                         || cache.canonicalize().is_ok_and(|physical| {
                             qoder_version_binary(&binary, &physical)
+                        })
+                        || development_sdk_hook_binary(pilot).is_some_and(|dev| {
+                            crate::sdk::agent_hooks::codex_shell_path(&dev).as_ref() == binary
                         }))
                         && self
                             .desired_hook(def, legacy.clone(), Some(&binary))
