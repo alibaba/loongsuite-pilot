@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ExportResultCode } from '@opentelemetry/core';
 import * as fsUtils from '../../../../src/utils/fs-utils.js';
+import * as jsonlWriter from '../../../../src/utils/segmented-jsonl-writer.js';
 
 vi.mock('@loongsuite/otel-util-genai', () => ({
   convertEventLogToTrace: vi.fn(() => ({ traceIds: [], spanCount: 0, warnings: [] })),
@@ -20,7 +21,7 @@ vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
   })),
 }));
 
-vi.spyOn(fsUtils, 'appendLine').mockResolvedValue(undefined);
+vi.spyOn(jsonlWriter, 'appendSegmentedJsonl').mockResolvedValue(undefined);
 vi.spyOn(fsUtils, 'ensureDir').mockResolvedValue(undefined);
 
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
@@ -53,7 +54,7 @@ function makeMockSpan() {
 describe('OtlpTraceFlusher - export', () => {
   beforeEach(() => {
     mockExport.mockClear();
-    vi.mocked(fsUtils.appendLine).mockClear();
+    vi.mocked(jsonlWriter.appendSegmentedJsonl).mockClear();
     vi.mocked(fsUtils.ensureDir).mockClear();
   });
 
@@ -75,8 +76,8 @@ describe('OtlpTraceFlusher - export', () => {
     await flusher.shutdown();
 
     expect(fsUtils.ensureDir).toHaveBeenCalled();
-    expect(fsUtils.appendLine).toHaveBeenCalled();
-    const writtenPath = vi.mocked(fsUtils.appendLine).mock.calls[0][0];
+    expect(jsonlWriter.appendSegmentedJsonl).toHaveBeenCalled();
+    const writtenPath = vi.mocked(jsonlWriter.appendSegmentedJsonl).mock.calls[0][0];
     expect(writtenPath).toContain('otlp-debug');
     expect(writtenPath).toContain('test-pilot-claude-code');
   });
@@ -88,7 +89,7 @@ describe('OtlpTraceFlusher - export', () => {
     await flusher.exportSpansForAgent('claude-code', spans);
     await flusher.shutdown();
 
-    const debugCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
+    const debugCalls = vi.mocked(jsonlWriter.appendSegmentedJsonl).mock.calls.filter(
       (c) => (c[0] as string).includes('otlp-debug'),
     );
     expect(debugCalls).toHaveLength(0);
@@ -105,10 +106,11 @@ describe('OtlpTraceFlusher - export', () => {
     await flusher.exportSpansForAgent('claude-code', spans);
     await flusher.shutdown();
 
-    const failedCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
-      (c) => (c[0] as string).includes('otlp-failed'),
+    const failedCalls = vi.mocked(jsonlWriter.appendSegmentedJsonl).mock.calls.filter(
+      (call) => (call[0] as string).includes('otlp-failed'),
     );
-    expect(failedCalls.length).toBeGreaterThan(0);
+    expect(failedCalls).toHaveLength(1);
+    expect(failedCalls[0][0]).toMatch(/test-pilot-claude-code__primary-\d{4}-\d{2}-\d{2}\.jsonl$/);
     const written = JSON.parse(failedCalls[0][1] as string);
     expect(written._error).toBeDefined();
     expect(written._error.message).toContain('401');
@@ -184,9 +186,13 @@ describe('OtlpTraceFlusher - export', () => {
     await flusher.exportSpansForAgent('claude-code', spans);
     await flusher.shutdown();
 
-    const allCalls = vi.mocked(fsUtils.appendLine).mock.calls;
-    const debugCalls = allCalls.filter((c) => (c[0] as string).includes('otlp-debug'));
-    const failedCalls = allCalls.filter((c) => (c[0] as string).includes('otlp-failed'));
+    const allCalls = vi.mocked(jsonlWriter.appendSegmentedJsonl).mock.calls;
+    const debugCalls = allCalls.filter(
+      (c) => (c[0] as string).includes('otlp-debug'),
+    );
+    const failedCalls = allCalls.filter(
+      (c) => (c[0] as string).includes('otlp-failed'),
+    );
     expect(debugCalls.length).toBeGreaterThan(0);
     expect(failedCalls.length).toBeGreaterThan(0);
   });
@@ -194,7 +200,7 @@ describe('OtlpTraceFlusher - export', () => {
 
 describe('OtlpTraceFlusher - multi-backend fan-out', () => {
   beforeEach(() => {
-    vi.mocked(fsUtils.appendLine).mockClear();
+    vi.mocked(jsonlWriter.appendSegmentedJsonl).mockClear();
     vi.mocked(fsUtils.ensureDir).mockClear();
   });
 
@@ -300,13 +306,13 @@ describe('OtlpTraceFlusher - multi-backend fan-out', () => {
     await flusher.exportSpansForAgent('claude-code', [makeMockSpan()] as any);
     await flusher.shutdown();
 
-    const failedCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
-      (c) => (c[0] as string).includes('otlp-failed'),
-    );
     // only backend-b failed → exactly its endpoint-tagged file is written
-    expect(failedCalls.length).toBeGreaterThan(0);
-    expect(failedCalls.every((c) => (c[0] as string).includes('__backend-b'))).toBe(true);
-    expect(failedCalls.some((c) => (c[0] as string).includes('__backend-a'))).toBe(false);
+    const failedCalls = vi.mocked(jsonlWriter.appendSegmentedJsonl).mock.calls.filter(
+      (call) => (call[0] as string).includes('otlp-failed'),
+    );
+    expect(failedCalls).toHaveLength(1);
+    expect(failedCalls[0][0]).toMatch(/__backend-b-\d{4}-\d{2}-\d{2}\.jsonl$/);
+    expect(failedCalls[0][0]).not.toContain('__backend-a-');
   });
 
   it('sanitizes a malicious endpoint name in the failed-log path', async () => {
@@ -326,17 +332,13 @@ describe('OtlpTraceFlusher - multi-backend fan-out', () => {
     await flusher.exportSpansForAgent('claude-code', [makeMockSpan()] as any);
     await flusher.shutdown();
 
-    const failedCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
-      (c) => (c[0] as string).includes('otlp-failed'),
+    const failedCalls = vi.mocked(jsonlWriter.appendSegmentedJsonl).mock.calls.filter(
+      (call) => (call[0] as string).includes('otlp-failed'),
     );
-    expect(failedCalls.length).toBeGreaterThan(0);
-    // separators are replaced so the name stays a single file inside otlp-failed
-    // (embedded dots are harmless without separators — no directory traversal)
-    for (const c of failedCalls) {
-      const p = c[0] as string;
-      expect(p).toContain('otlp-failed');
-      expect(p).not.toContain('/tmp/pwn');
-      expect(p).toContain('.._.._.._.._tmp_pwn'); // slashes → '_', dots kept
-    }
+    expect(failedCalls).toHaveLength(1);
+    const failedPath = failedCalls[0][0] as string;
+    expect(failedPath).not.toContain('/tmp/pwn');
+    expect(failedPath).toContain('.._.._.._.._tmp_pwn');
+    expect(failedPath).toMatch(/-\d{4}-\d{2}-\d{2}\.jsonl$/);
   });
 });

@@ -58,6 +58,32 @@ describe.runIf(process.platform !== 'win32')('shared Hook Node runtime resolver'
     expect(await resolveNode()).toBe(newest);
   });
 
+  it('accepts a managed runtime by its directory version without probing --version', async () => {
+    // The installer validated this binary before writing it; the hook must not
+    // pay a `node --version` boot per event. A stub whose --version fails proves
+    // the directory-name fast path is what resolved it.
+    const node = await brokenNode(path.join(dataDir, 'runtime', 'node-v20.5.1', 'bin', 'node'));
+    await fs.writeFile(path.join(cacheDir, 'node-bin'), `${node}\n`);
+    expect(await resolveNode()).toBe(node);
+  });
+
+  it('rejects a managed runtime whose directory version is unsupported', async () => {
+    // node-v16 lives under runtime/, so the fast path reads major=16 and rejects
+    // it outright rather than probing.
+    const oldManaged = await brokenNode(path.join(dataDir, 'runtime', 'node-v16.20.0', 'bin', 'node'));
+    const validNode = await fakeNode(path.join(root, 'valid-node'), 20);
+    await fs.writeFile(path.join(cacheDir, 'node-bin'), oldManaged);
+    await fs.writeFile(path.join(dataDir, 'node-bin'), validNode);
+    expect(await resolveNode()).toBe(validNode);
+  });
+
+  it('rejects a pinned path that no longer exists and uses the next valid pin', async () => {
+    const validNode = await fakeNode(path.join(root, 'valid-node'), 20);
+    await fs.writeFile(path.join(cacheDir, 'node-bin'), path.join(root, 'runtime', 'node-v20.0.0', 'bin', 'node'));
+    await fs.writeFile(path.join(dataDir, 'node-bin'), validNode);
+    expect(await resolveNode()).toBe(validNode);
+  });
+
   async function resolveNode() {
     const { stdout } = await execFileAsync('/bin/bash', [
       '-c',
@@ -79,6 +105,15 @@ describe.runIf(process.platform !== 'win32')('shared Hook Node runtime resolver'
 async function fakeNode(file, major) {
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, `#!/bin/sh\necho v${major}.0.0\n`);
+  await fs.chmod(file, 0o755);
+  return file;
+}
+
+// An executable whose --version fails. Resolving it proves the caller read the
+// version from the managed-runtime directory name rather than booting the binary.
+async function brokenNode(file) {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, '#!/bin/sh\nexit 1\n');
   await fs.chmod(file, 0o755);
   return file;
 }

@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 
 import {
   DEFAULT_RESOURCE_ENV_FIELD_MAP,
+  INVOCATION_SESSION_ID_FIELD,
+  INVOCATION_USER_ID_FIELD,
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
   parseSpanAttributesFromEnv,
@@ -120,6 +122,42 @@ describe('parseSpanAttributesFromEnv', () => {
     }
   });
 
+  test('accepts only the two managed identity keys when explicitly enabled', () => {
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const attrs = parseSpanAttributesFromEnv({
+        LOONGSUITE_PILOT_SPAN_ATTRIBUTES: [
+          'gen_ai.session.id=customer-session',
+          'gen_ai.user.id=customer-user',
+          'gen_ai.agent.name=must-stay-reserved',
+          'user.id=must-stay-reserved',
+          'multica.issue.id=AGE-287',
+        ].join(','),
+      }, { allowInvocationIdentity: true });
+
+      expect(attrs).toEqual({
+        [INVOCATION_SESSION_ID_FIELD]: 'customer-session',
+        [INVOCATION_USER_ID_FIELD]: 'customer-user',
+        'multica.issue.id': 'AGE-287',
+      });
+      expect(JSON.stringify(attrs)).not.toContain('must-stay-reserved');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('keeps managed identity keys reserved without explicit opt-in', () => {
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      expect(parseSpanAttributesFromEnv({
+        LOONGSUITE_PILOT_SPAN_ATTRIBUTES:
+          'gen_ai.session.id=customer-session,gen_ai.user.id=customer-user',
+      })).toEqual({});
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   test('drops sensitive names, over-long values, and malformed pairs', () => {
     const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
@@ -144,16 +182,18 @@ describe('parseSpanAttributesFromEnv', () => {
 });
 
 describe('reserved-prefix list stays in sync across copies', () => {
-  // The reserved-prefix list is intentionally duplicated in three places
-  // (shared hook util, standalone opencode plugin, and the TS normalizer).
+  // The reserved-prefix list is intentionally duplicated in four places
+  // (shared hook util, standalone plugins, and the TS normalizer).
   // This guards against silent drift between them.
   test('shared mjs, opencode plugin, and global-attributes.ts agree', () => {
     const canonical = extractPrefixArray('src/normalization/global-attributes.ts', 'RESERVED_PREFIXES');
     const sharedHook = extractPrefixArray('assets/hooks/shared/resource-context.mjs', 'SPAN_ATTR_RESERVED_PREFIXES');
     const opencode = extractPrefixArray('assets/plugins/opencode/plugin.mjs', 'SPAN_ATTR_RESERVED_PREFIXES');
+    const openclaw = extractPrefixArray('assets/plugins/openclaw/plugin.mjs', 'SPAN_ATTR_RESERVED_PREFIXES');
 
     expect(canonical.length).toBeGreaterThan(0);
     expect(sharedHook).toEqual(canonical);
     expect(opencode).toEqual(canonical);
+    expect(openclaw).toEqual(canonical);
   });
 });

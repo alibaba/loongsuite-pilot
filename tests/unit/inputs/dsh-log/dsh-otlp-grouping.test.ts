@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { ExportResultCode } from '@opentelemetry/core';
 import type { ExportResult } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
@@ -7,6 +9,7 @@ import type { TraceExporterLike } from '../../../../src/flushers/otlp-trace-flus
 import {
   newState,
   transformDshRecord,
+  transformDshRecordEntries,
 } from '../../../../src/inputs/dsh/dsh-event-transform.js';
 import { ClientType } from '../../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
@@ -16,7 +19,12 @@ function transformTurn(sid: string, baseTime: number): AgentActivityEntry[] {
   const records: Record<string, unknown>[] = [
     { type: 'turn/start', sid, time: baseTime, data: { turn: 1 } },
     { type: 'step/start', sid, time: baseTime + 1, data: { turn: 1, step: 1 } },
-    { type: 'user/message', sid, time: baseTime + 2, data: { content: [{ type: 'text', text: 'hello' }] } },
+    {
+      type: 'user/message',
+      sid,
+      time: baseTime + 2,
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] },
+    },
     {
       type: 'request/header', sid, time: baseTime + 3,
       data: { header: { config: { provider: 'deepseek', model: 'deepseek-test' } } },
@@ -40,7 +48,13 @@ function transformTurn(sid: string, baseTime: number): AgentActivityEntry[] {
           content: [{ type: 'text', text: 'done' }],
           source: { provider: 'deepseek', model: 'deepseek-test' },
         },
-        usage: { inputTokens: 1, outputTokens: 1 },
+        usage: {
+          inputTokens: 3,
+          outputTokens: 5,
+          cacheReadTokens: 7,
+          cacheWriteTokens: 11,
+          reasoningTokens: 2,
+        },
       },
     },
   ];
@@ -49,7 +63,24 @@ function transformTurn(sid: string, baseTime: number): AgentActivityEntry[] {
     .filter((entry): entry is AgentActivityEntry => entry !== null);
 }
 
-describe('DSH session-scoped turn ids in OTLP buffering', () => {
+interface SpanMessage {
+  role?: string;
+  parts?: Array<{ content?: string }>;
+}
+
+function readInputMessages(span: ReadableSpan): SpanMessage[] {
+  return JSON.parse(String(span.attributes['gen_ai.input.messages'])) as SpanMessage[];
+}
+
+function messageText(message: SpanMessage): string {
+  return message.parts?.map(part => part.content ?? '').join('') ?? '';
+}
+
+function compareSpanStart(a: ReadableSpan, b: ReadableSpan): number {
+  return a.startTime[0] - b.startTime[0] || a.startTime[1] - b.startTime[1];
+}
+
+describe('DSH event-to-span OTLP flow', () => {
   let captured: ReadableSpan[];
   let flusher: OtlpTraceFlusher;
 
@@ -94,9 +125,101 @@ describe('DSH session-scoped turn ids in OTLP buffering', () => {
     expect(llmSpans).toHaveLength(2);
     expect(llmSpans.map(span => span.attributes['gen_ai.response.time_to_first_token']))
       .toEqual([1_000_000, 1_000_000]);
+    for (const span of [...llmSpans, ...agentSpans]) {
+      expect(span.attributes['gen_ai.usage.input_tokens']).toBe(21);
+      expect(span.attributes['gen_ai.usage.output_tokens']).toBe(5);
+      expect(span.attributes['gen_ai.usage.cache_read.input_tokens']).toBe(7);
+      expect(span.attributes['gen_ai.usage.cache_creation.input_tokens']).toBe(11);
+      expect(span.attributes['gen_ai.usage.total_tokens']).toBe(26);
+    }
     for (const span of captured) {
       expect(span.resource.attributes['gen_ai.agent.type']).toBe('dsh');
       expect(span.resource.attributes['gen_ai.agent.system']).toBe('dsh');
     }
+  });
+
+  it('keeps injected context on LLM spans but excludes it from ENTRY and AGENT', async () => {
+    const fixturePath = path.resolve('tests/fixtures/dsh/dsh-probe-events-real.jsonl');
+    const fixture = await fs.readFile(fixturePath, 'utf8');
+    const records = fixture.split('\n').filter(Boolean).map(line => JSON.parse(line));
+    const state = newState();
+    const entries = records
+      .map(record => transformDshRecord(record, ClientType.Dsh, state))
+      .filter((entry): entry is AgentActivityEntry => entry !== null);
+
+    await flusher.sendBatch(entries);
+    await flusher.flush();
+
+    const entry = captured.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY');
+    const agent = captured.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT');
+    expect(entry).toBeDefined();
+    expect(agent).toBeDefined();
+
+    const entryInput = readInputMessages(entry!);
+    const agentInput = readInputMessages(agent!);
+    expect(entryInput).toHaveLength(1);
+    expect(agentInput).toEqual(entryInput);
+    expect(messageText(entryInput[0])).toContain('Create a hello.txt file');
+    expect(messageText(entryInput[0])).not.toContain('Current runtime context');
+
+    const llmSpans = captured
+      .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')
+      .sort(compareSpanStart);
+    expect(llmSpans).toHaveLength(3);
+    const llmInputs = llmSpans.map(readInputMessages);
+    expect(llmInputs.map(messages => messages.map(message => message.role))).toEqual([
+      ['user', 'user'],
+      ['user', 'user', 'assistant', 'tool'],
+      ['user', 'user', 'assistant', 'tool', 'assistant', 'tool'],
+    ]);
+    expect(messageText(llmInputs[0][0])).toContain('Create a hello.txt file');
+    expect(messageText(llmInputs[0][1])).toContain('Current runtime context');
+  });
+
+  it('exports each embedded-stream response once with its own finish reason and native timing', async () => {
+    const fixture = await fs.readFile(path.resolve('tests/fixtures/dsh/dsh-probe-events-real.jsonl'), 'utf8');
+    const records = fixture.split('\n').filter(Boolean).map(line => JSON.parse(line));
+    // Re-encode the real capture as v2's compact AssistantStreamRecord shape,
+    // keeping original message bodies, terminal facts, usage and timestamps.
+    const streams = new Map<string, unknown[]>();
+    const state = newState();
+    const entries: AgentActivityEntry[] = [];
+    for (const record of records) {
+      const key = `${record.sid}:${record.data?.turn}:${record.data?.step}`;
+      if (record.type === 'assistant/chunk') {
+        const chunk = record.data.chunk;
+        const stream = streams.get(key) ?? [];
+        if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
+          stream.push({
+            type: chunk.type === 'text-delta' ? 'text-chunks' : 'reasoning-chunks',
+            time0: record.time, index: chunk.index, dt: [], texts: [chunk.text],
+          });
+        } else if (chunk.type === 'tool-call-delta') {
+          stream.push({
+            type: 'tool-call-chunks', time0: record.time, index: chunk.index,
+            id: chunk.id, name: chunk.name, dt: [], args: [chunk.argumentsDelta],
+          });
+        } else {
+          stream.push({ type: 'chunk', time: record.time, chunk });
+        }
+        streams.set(key, stream);
+        continue;
+      }
+      if (record.type === 'assistant/message') {
+        record.data.stream = streams.get(key);
+        streams.delete(key);
+      }
+      entries.push(...transformDshRecordEntries(record, ClientType.Dsh, state));
+    }
+    expect(entries.filter(entry => entry['event.name'] === 'llm.request')).toHaveLength(3);
+    expect(entries.filter(entry => entry['event.name'] === 'llm.response')).toHaveLength(3);
+    await flusher.sendBatch(entries);
+    await flusher.flush();
+    const spans = captured.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM').sort(compareSpanStart);
+    expect(spans).toHaveLength(3);
+    expect(spans.map(span => span.attributes['gen_ai.response.finish_reasons']))
+      .toEqual([['tool_calls'], ['tool_calls'], ['stop']]);
+    expect(spans.map(span => span.attributes['gen_ai.response.time_to_first_token']))
+      .toEqual([671_000_000, 591_000_000, 943_000_000]);
   });
 });

@@ -8,8 +8,9 @@ import { buildAgentActivityEntry, toJsonValue } from '../../normalization/entry-
  * canonical `AgentActivityEntry` stream consumed by EntryBuilder /
  * MultiFlusher. Stateless per line; cross-line state (pending finish
  * reason per step) is held in `DshEventAggregatorState` so that the
- * streaming `assistant/chunk type=finish` chunk attaches to the
- * eventual `assistant/message` llm.response.
+ * legacy `assistant/chunk type=finish` chunk attaches to the eventual
+ * `assistant/message` llm.response. Session format v2+ instead embeds the
+ * compact timed stream in that message; read it without expanding deltas.
  *
  * Ground-truth event shapes: tests/fixtures/dsh/dsh-probe-events-real.jsonl
  * (155 records, 18 distinct types, captured from a real dsh 3-step /
@@ -19,6 +20,11 @@ import { buildAgentActivityEntry, toJsonValue } from '../../normalization/entry-
 const NS_PER_MS = 1_000_000n;
 const MAX_TURN_CORRELATIONS = 1_024;
 const MAX_INPUT_MESSAGES = 2_048;
+const MAX_RESOURCE_FIELD_VALUE_LENGTH = 512;
+const AGENTTEAMS_RESOURCE_KEYS = [
+  'agentteams.worker.name',
+  'agentteams.instance.id',
+] as const;
 
 export interface DshRequestHeader {
   model?: string;
@@ -58,6 +64,10 @@ export interface DshEventAggregatorState {
    * of a step arrives — at that point all input for the step has
    * landed (user prompt + any prior step's assistant msg + tool result). */
   inputMessages: unknown[];
+  /** Number of accumulated messages already represented by the previous
+   * llm.request. The accumulator only appends within one turn, so slicing from
+   * this position yields the exact request-level messages_delta. */
+  lastRequestInputMessageCount: number;
   /** Once true, omit input.messages instead of presenting a truncated history. */
   inputMessagesOverflowed: boolean;
 }
@@ -74,6 +84,7 @@ export function newState(): DshEventAggregatorState {
     firstOutputTimes: new Map(),
     toolNames: new Map(),
     inputMessages: [],
+    lastRequestInputMessageCount: 0,
     inputMessagesOverflowed: false,
   };
 }
@@ -88,6 +99,7 @@ function resetTurnState(state: DshEventAggregatorState): void {
   state.firstOutputTimes.clear();
   state.toolNames.clear();
   state.inputMessages = [];
+  state.lastRequestInputMessageCount = 0;
   state.inputMessagesOverflowed = false;
 }
 
@@ -148,6 +160,24 @@ function asObject(v: unknown): Record<string, unknown> | undefined {
 
 function asArray(v: unknown): unknown[] | undefined {
   return Array.isArray(v) ? v : undefined;
+}
+
+/** Plugin-stamped allowlist only. The collector never reads its own environment. */
+function agentTeamsFields(record: Record<string, unknown>): Record<string, unknown> {
+  const raw = asObject(record.resourceAttributes);
+  if (!raw) return {};
+  const resourceAttributes: Record<string, string> = {};
+  for (const key of AGENTTEAMS_RESOURCE_KEYS) {
+    const value = asString(raw[key])?.trim();
+    if (!value || value.length > MAX_RESOURCE_FIELD_VALUE_LENGTH) continue;
+    resourceAttributes[key] = value;
+  }
+  if (Object.keys(resourceAttributes).length === 0) return {};
+  const workerName = resourceAttributes['agentteams.worker.name'];
+  return {
+    ...(workerName ? { 'gen_ai.agent.name': workerName } : {}),
+    resourceAttributes,
+  };
 }
 
 export function parseDshRequestHeader(
@@ -232,22 +262,60 @@ const FINISH_REASON_MAP: Record<string, string> = {
   'stop': 'stop',
   'tool-calls': 'tool_calls',
   'length': 'length',
+  'max-tokens': 'length',
   'content-filter': 'content_filter',
   'error': 'error',
   'cancelled': 'cancelled',
+  'aborted': 'cancelled',
 };
 
-export function transformDshRecord(
+interface EmbeddedStreamFacts {
+  firstChunkTime?: number;
+  firstOutputTime?: number;
+  finishKind?: string;
+}
+
+/** DSH AssistantStreamRecord: packed delta runs plus timestamped raw chunks. */
+function readEmbeddedStream(value: unknown): EmbeddedStreamFacts | undefined {
+  const stream = asArray(value);
+  if (!stream) return undefined;
+  const facts: EmbeddedStreamFacts = {};
+  for (const candidate of stream) {
+    const record = asObject(candidate);
+    if (!record) continue;
+    const type = asString(record.type);
+    if (type === 'chunk') {
+      const chunk = asObject(record.chunk);
+      const time = asNumber(record.time);
+      if (time !== undefined && Number.isSafeInteger(time) && chunk) {
+        facts.firstChunkTime ??= time;
+        if (isStreamedOutputDelta(asString(chunk.type))) facts.firstOutputTime ??= time;
+      }
+      if (chunk?.type === 'finish') {
+        facts.finishKind = asString(asObject(chunk.reason)?.kind);
+      }
+    } else if (type === 'text-chunks' || type === 'reasoning-chunks' || type === 'tool-call-chunks') {
+      const time = asNumber(record.time0);
+      const members = asArray(type === 'tool-call-chunks' ? record.args : record.texts);
+      if (time !== undefined && Number.isSafeInteger(time) && members && members.length > 0) {
+        facts.firstChunkTime ??= time;
+        facts.firstOutputTime ??= time;
+      }
+    }
+  }
+  return facts;
+}
+
+function recordContext(
   record: Record<string, unknown>,
   agentType: ClientType,
-  state: DshEventAggregatorState = newState(),
-): AgentActivityEntry | null {
+  state: DshEventAggregatorState,
+) {
   const type = asString(record.type);
   if (!type) return null;
   const sid = asString(record.sid) ?? '';
   const time = asNumber(record.time);
   if (time === undefined) return null;
-  const timeUnixNano = msToNano(time);
   const data = asObject(record.data) ?? {};
 
   let turn = asNumber(data.turn);
@@ -261,14 +329,80 @@ export function transformDshRecord(
   const traceId = sid && turn !== undefined ? traceIdFor(sid, turn) : undefined;
 
   const common = {
-    'time_unix_nano': timeUnixNano,
+    'time_unix_nano': msToNano(time),
     'gen_ai.session.id': sid,
     'gen_ai.turn.id': turnId,
     'gen_ai.step.id': stepId,
     'trace_id': traceId,
     'user.id': '',
     'gen_ai.agent.type': agentType,
+    ...agentTeamsFields(record),
   };
+  const key = sid && turn !== undefined && step !== undefined ? stepKey(sid, turn, step) : undefined;
+  return { type, sid, time, data, turn, step, key, common };
+}
+
+function emitRequest(
+  common: NonNullable<ReturnType<typeof recordContext>>['common'],
+  key: string,
+  fallbackTime: number,
+  state: DshEventAggregatorState,
+): AgentActivityEntry | null {
+  if (state.emittedRequest.has(key) || state.emittedRequest.size >= MAX_TURN_CORRELATIONS) return null;
+  state.emittedRequest.add(key);
+  const inputSnapshot = state.inputMessages.slice();
+  const inputDelta = inputSnapshot.slice(state.lastRequestInputMessageCount);
+  const header = state.currentTurnHeader ?? state.lastKnownHeader;
+  const tools = header?.tools;
+  const requestTime = state.requestStartTimes.get(key) ?? fallbackTime;
+  const entry = buildAgentActivityEntry({
+    ...common,
+    'time_unix_nano': msToNano(requestTime),
+    'event.name': 'llm.request',
+    'gen_ai.provider.name': header?.provider,
+    'gen_ai.request.model': header?.model,
+    'gen_ai.system_instructions': normalizeSystemInstructions(header?.system),
+    'gen_ai.tool.definitions': tools && tools.length > 0 ? toJsonValue(tools) : undefined,
+    'gen_ai.input.messages': !state.inputMessagesOverflowed && inputSnapshot.length > 0
+      ? toJsonValue(inputSnapshot) : undefined,
+    'gen_ai.input.messages_delta': !state.inputMessagesOverflowed && inputSnapshot.length > 0
+      ? toJsonValue(inputDelta) : undefined,
+  });
+  state.lastRequestInputMessageCount = inputSnapshot.length;
+  return entry;
+}
+
+/** One v2+ message may emit a request/response pair. Replay discards both. */
+export function transformDshRecordEntries(
+  record: Record<string, unknown>,
+  agentType: ClientType,
+  state: DshEventAggregatorState,
+): AgentActivityEntry[] {
+  const entries: AgentActivityEntry[] = [];
+  const context = record.type === 'assistant/message' ? recordContext(record, agentType, state) : null;
+  if (context?.type === 'assistant/message' && context.key) {
+    const stream = readEmbeddedStream(context.data.stream);
+    const requestTime = state.requestStartTimes.get(context.key) ?? stream?.firstChunkTime;
+    if (stream && requestTime !== undefined && requestTime <= context.time) {
+      // Snapshot before the response is added to the conversation. New DSH
+      // emits no top-level chunks, so waiting for one would orphan every response.
+      const request = emitRequest(context.common, context.key, requestTime, state);
+      if (request) entries.push(request);
+    }
+  }
+  const entry = transformDshRecord(record, agentType, state);
+  if (entry) entries.push(entry);
+  return entries;
+}
+
+export function transformDshRecord(
+  record: Record<string, unknown>,
+  agentType: ClientType,
+  state: DshEventAggregatorState = newState(),
+): AgentActivityEntry | null {
+  const context = recordContext(record, agentType, state);
+  if (!context) return null;
+  const { type, sid, time, data, turn, step, common } = context;
 
   switch (type) {
     case 'session/created':
@@ -344,38 +478,22 @@ export function transformDshRecord(
       // this point all input for the step has landed (user/message for
       // step 1, prior step's assistant/message + tool/result for steps
       // 2+). The accumulator snapshot is the LLM's input context.
-      if (key) {
-        if (!state.emittedRequest.has(key)) {
-          if (state.emittedRequest.size >= MAX_TURN_CORRELATIONS) return null;
-          state.emittedRequest.add(key);
-          const inputSnapshot = state.inputMessages.slice();
-          const header = state.currentTurnHeader ?? state.lastKnownHeader;
-          const tools = header?.tools;
-          const requestTime = state.requestStartTimes.get(key) ?? time;
-          return buildAgentActivityEntry({
-            ...common,
-            'time_unix_nano': msToNano(requestTime),
-            'event.name': 'llm.request',
-            'gen_ai.provider.name': header?.provider,
-            'gen_ai.request.model': header?.model,
-            'gen_ai.system_instructions': normalizeSystemInstructions(header?.system),
-            'gen_ai.tool.definitions': tools && tools.length > 0
-              ? toJsonValue(tools)
-              : undefined,
-            'gen_ai.input.messages': !state.inputMessagesOverflowed && inputSnapshot.length > 0
-              ? toJsonValue(inputSnapshot)
-              : undefined,
-          });
-        }
-      }
-      return null;
+      return key ? emitRequest(common, key, time, state) : null;
     }
 
     case 'user/message': {
       const content = data.content;
       const msgId = asString((asObject(data) ?? {}).id);
       const userParts = normalizeUserParts(content);
+      const sourceKind = asString(asObject(data.source)?.kind);
+
+      // Every user-role message is part of the model-visible conversation,
+      // including context injected by plugins. Only a native human prompt,
+      // however, is a top-level ENTRY/AGENT input. Source-less records retain
+      // the legacy behavior for JSONL captured before DSH exposed `source`.
       addInputMessage(state, { role: 'user', parts: userParts });
+      if (data.source !== undefined && sourceKind !== 'user') return null;
+
       return buildAgentActivityEntry({
         ...common,
         'event.name': 'other',
@@ -395,33 +513,37 @@ export function transformDshRecord(
       const responseId = asString(message.id);
       const content = message.content;
       const usage = asObject(data.usage) ?? {};
-      const inputTokens = asNumber(usage.inputTokens);
+      const uncachedInputTokens = asNumber(usage.inputTokens);
       const outputTokens = asNumber(usage.outputTokens);
       const cacheRead = asNumber(usage.cacheReadTokens);
-      const reasoningTokens = asNumber(usage.reasoningTokens);
+      const cacheWrite = asNumber(usage.cacheWriteTokens);
 
-      let finishReasons: string[] | undefined;
+      // DSH reports disjoint input buckets, while Pilot's public schema defines
+      // cache-read and cache-creation tokens as subsets of input_tokens.
+      const inputTokens = uncachedInputTokens === undefined
+        ? undefined
+        : uncachedInputTokens + (cacheRead ?? 0) + (cacheWrite ?? 0);
+
+      const stream = readEmbeddedStream(data.stream);
+      let finishKind = stream?.finishKind;
       let timeToFirstToken: number | undefined;
       if (sid && turn !== undefined && step !== undefined) {
         const key = stepKey(sid, turn, step);
-        const kind = state.pendingFinish.get(key);
+        if (!stream) finishKind = state.pendingFinish.get(key);
         state.pendingFinish.delete(key);
-        if (kind && FINISH_REASON_MAP[kind]) {
-          finishReasons = [FINISH_REASON_MAP[kind]];
-        }
 
         const requestStart = state.requestStartTimes.get(key);
-        const firstOutput = state.firstOutputTimes.get(key);
+        const firstOutput = stream ? stream.firstOutputTime : state.firstOutputTimes.get(key);
         state.requestStartTimes.delete(key);
         state.firstOutputTimes.delete(key);
-        if (requestStart !== undefined && firstOutput !== undefined && firstOutput >= requestStart) {
+        if (requestStart !== undefined && firstOutput !== undefined && firstOutput >= requestStart && firstOutput <= time) {
           timeToFirstToken = Math.round((firstOutput - requestStart) * 1_000_000);
         }
       }
-
-      const outputTokensTotal = outputTokens !== undefined && reasoningTokens !== undefined
-        ? outputTokens + reasoningTokens
-        : outputTokens;
+      // A native cancelled-prefix settlement may have no terminal chunk.
+      const finishReason = data.interrupted === true ? 'cancelled'
+        : finishKind && Object.prototype.hasOwnProperty.call(FINISH_REASON_MAP, finishKind)
+          ? FINISH_REASON_MAP[finishKind] : undefined;
 
       const assistantParts = normalizeAssistantParts(content);
       rememberToolNames(content, state);
@@ -437,11 +559,14 @@ export function transformDshRecord(
         'gen_ai.provider.name': provider,
         'gen_ai.response.id': responseId,
         'gen_ai.response.model': model,
-        'gen_ai.response.finish_reasons': finishReasons,
+        'gen_ai.response.finish_reasons': finishReason ? [finishReason] : undefined,
         'gen_ai.response.time_to_first_token': timeToFirstToken,
         'gen_ai.usage.input_tokens': inputTokens,
-        'gen_ai.usage.output_tokens': outputTokensTotal,
+        // DSH outputTokens already includes its optional reasoningTokens
+        // breakdown, so forwarding the total avoids counting reasoning twice.
+        'gen_ai.usage.output_tokens': outputTokens,
         'gen_ai.usage.cache_read.input_tokens': cacheRead,
+        'gen_ai.usage.cache_creation.input_tokens': cacheWrite,
         'gen_ai.output.messages': toJsonValue([{
           role: 'assistant',
           parts: assistantParts,

@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as nodePath from 'node:path';
@@ -62,6 +63,10 @@ export interface AtomicTextWriteOptions {
    * Only applies when the expected target already exists.
    */
   backupPath?: string;
+  /** Optional permissions for the newly-created temporary file. */
+  mode?: number;
+  /** Retain an existing user file's exact mode, without applying umask again. */
+  preserveMode?: boolean;
 }
 
 async function assertExpectedFileState(
@@ -108,9 +113,10 @@ export async function writeTextFileAtomic(
     }
   }
 
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = atomicTmpPath(path);
   try {
-    await fsp.writeFile(tmp, text, 'utf8');
+    await fsp.writeFile(tmp, text, { encoding: 'utf8', mode: options.mode });
+    if (options.preserveMode && options.mode !== undefined) await fsp.chmod(tmp, options.mode);
     // Re-check after preparing the temporary file. This narrows the remaining
     // race to the final compare-and-rename window.
     if (options.expected) {
@@ -124,9 +130,10 @@ export async function writeTextFileAtomic(
     if (code === 'ENOENT') {
       await fsp.unlink(tmp).catch(() => {});
       await ensureDir(dir);
-      const tmp2 = `${path}.${process.pid}.${Date.now()}.tmp`;
+      const tmp2 = atomicTmpPath(path);
       try {
-        await fsp.writeFile(tmp2, text, 'utf8');
+        await fsp.writeFile(tmp2, text, { encoding: 'utf8', mode: options.mode });
+        if (options.preserveMode && options.mode !== undefined) await fsp.chmod(tmp2, options.mode);
         if (options.expected) {
           await assertExpectedFileState(path, options.expected);
         }
@@ -169,6 +176,10 @@ export async function writeJsonFile(
   await writeTextFileAtomic(path, `${JSON.stringify(data, null, 2)}\n`);
 }
 
+function atomicTmpPath(path: string): string {
+  return `${path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
+}
+
 /**
  * Removes stale `.tmp` files left behind by interrupted atomic writes (e.g. process
  * killed mid-rename). Call once at startup for directories that use writeJsonFile.
@@ -184,7 +195,7 @@ export async function cleanStaleTmpFiles(dir: string, maxAgeMs = 60_000): Promis
   try {
     const entries = await fsp.readdir(dir);
     for (const f of entries) {
-      if (!/\.(\d+)\.\d+\.tmp$/.test(f)) continue;
+      if (!/\.(\d+)\.\d+(?:\.[^.]+)?\.tmp$/.test(f)) continue;
       const full = nodePath.join(dir, f);
       try {
         const st = await fsp.stat(full);
@@ -224,12 +235,25 @@ export async function ensureDir(path: string): Promise<void> {
 /**
  * Expands a leading `~` to the user home directory.
  */
-export function resolveHome(filepath: string): string {
+export interface HomeResolutionOptions {
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+  homedir?: () => string;
+}
+
+export function resolveHome(filepath: string, options: HomeResolutionOptions = {}): string {
+  const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const paths = platform === 'win32' ? nodePath.win32 : nodePath.posix;
+  const systemHome = options.homedir ?? os.homedir;
+  const home = () => env === process.env && platform === process.platform
+    ? systemHome()
+    : (platform === 'win32' ? env.USERPROFILE : env.HOME) || systemHome();
   if (filepath === '~') {
-    return os.homedir();
+    return home();
   }
-  if (filepath.startsWith('~/') || filepath.startsWith(`~${nodePath.sep}`)) {
-    return nodePath.join(os.homedir(), filepath.slice(2));
+  if (filepath.startsWith('~/') || filepath.startsWith(`~${paths.sep}`)) {
+    return paths.join(home(), filepath.slice(2));
   }
   return filepath;
 }

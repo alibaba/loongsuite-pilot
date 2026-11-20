@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { ClientType } from '../../../../src/types/index.js';
 import {
   transformDshRecord,
+  transformDshRecordEntries,
   newState,
 } from '../../../../src/inputs/dsh/dsh-event-transform.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
@@ -84,6 +85,13 @@ describe('dsh-event-transform (real fixture)', () => {
       .filter(e => e['event.name'] === 'llm.request')
       .sort((a, b) => (a['gen_ai.step.id'] as string).localeCompare(b['gen_ai.step.id'] as string));
     expect(requests.length).toBe(3);
+    const accumulatedDelta: unknown[] = [];
+    for (const request of requests) {
+      const delta = request['gen_ai.input.messages_delta'] as unknown[];
+      expect(delta).toBeDefined();
+      accumulatedDelta.push(...delta);
+      expect(accumulatedDelta).toEqual(request['gen_ai.input.messages']);
+    }
     const step1 = requests[0]['gen_ai.input.messages'] as unknown[];
     expect(step1.length).toBeGreaterThanOrEqual(1);
     expect((step1[0] as { role: string }).role).toBe('user');
@@ -114,6 +122,52 @@ describe('dsh-event-transform (real fixture)', () => {
     }
   });
 
+  it('maps real DSH disjoint usage into cumulative Pilot token fields', async () => {
+    const { entries } = await loadAll();
+    const responses = entries
+      .filter(e => e['event.name'] === 'llm.response')
+      .sort((a, b) => (a['gen_ai.step.id'] as string).localeCompare(b['gen_ai.step.id'] as string));
+
+    expect(responses.map(r => ({
+      input: r['gen_ai.usage.input_tokens'],
+      output: r['gen_ai.usage.output_tokens'],
+      cacheRead: r['gen_ai.usage.cache_read.input_tokens'],
+    }))).toEqual([
+      { input: 7_493, output: 105, cacheRead: 0 },
+      { input: 7_632, output: 46, cacheRead: 7_552 },
+      { input: 7_723, output: 36, cacheRead: 7_552 },
+    ]);
+  });
+
+  it('includes cache writes in input without double-counting reasoning', () => {
+    const r = transformDshRecord({
+      type: 'assistant/message',
+      sid: 's',
+      time: 1000,
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'done' }],
+          source: { provider: 'test', model: 'test-model' },
+        },
+        usage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadTokens: 20,
+          cacheWriteTokens: 30,
+          reasoningTokens: 4,
+        },
+      },
+    }, ClientType.Dsh, newState());
+
+    expect(r!['gen_ai.usage.input_tokens']).toBe(60);
+    expect(r!['gen_ai.usage.output_tokens']).toBe(5);
+    expect(r!['gen_ai.usage.cache_read.input_tokens']).toBe(20);
+    expect(r!['gen_ai.usage.cache_creation.input_tokens']).toBe(30);
+  });
+
   it('emits paired tool.call + tool.result with matching call.id', async () => {
     const { entries } = await loadAll();
     const calls = entries.filter(e => e['event.name'] === 'tool.call');
@@ -135,13 +189,25 @@ describe('dsh-event-transform (real fixture)', () => {
     expect([...traceIds][0]).toMatch(/^[a-f0-9]{32}$/);
   });
 
-  it('user/message emits an "other" event with input.messages_delta', async () => {
-    const { entries } = await loadAll();
+  it('emits top-level input only for the original source.kind=user message', async () => {
+    const { records, entries } = await loadAll();
+    const messageSources = records
+      .filter(record => record.type === 'user/message')
+      .map(record => (record.data as { source?: { kind?: string } }).source?.kind);
+    expect(messageSources).toEqual(['user', 'plugin']);
+
     const userEvents = entries.filter(e => e['event.name'] === 'other');
-    expect(userEvents.length).toBeGreaterThan(0);
+    expect(userEvents).toHaveLength(1);
     const delta = userEvents[0]['gen_ai.input.messages_delta'] as { role: string; parts: unknown[] }[];
     expect(delta[0].role).toBe('user');
     expect(delta[0].parts.length).toBeGreaterThan(0);
+    expect(JSON.stringify(delta)).toContain('Create a hello.txt file');
+    expect(JSON.stringify(delta)).not.toContain('Current runtime context');
+
+    const requests = entries.filter(e => e['event.name'] === 'llm.request');
+    const firstInput = JSON.stringify(requests[0]['gen_ai.input.messages']);
+    expect(firstInput).toContain('Create a hello.txt file');
+    expect(firstInput).toContain('Current runtime context');
   });
 
   it('llm.request and llm.response timestamps differ (non-zero LLM duration)', async () => {
@@ -235,6 +301,7 @@ describe('dsh-event-transform (real fixture)', () => {
     expect(r).toBeDefined();
     expect(r!['event.name']).toBe('llm.request');
     expect(r!['gen_ai.input.messages']).toBeUndefined();
+    expect(r!['gen_ai.input.messages_delta']).toBeUndefined();
   });
 
   it('records TTFT when the first assistant chunk is already an output delta', () => {
@@ -468,6 +535,167 @@ describe('dsh-event-transform (real fixture)', () => {
   });
 });
 
+// DSH session format v2+ settles a compact stream on assistant/message,
+// without top-level assistant/chunk events. Shape verified against published
+// @deepseek-ai/dsh-agent-loop@0.1.5-rc.2 and dsh-llm AssistantStreamRecord.
+describe('dsh-event-transform (embedded assistant streams)', () => {
+  function response(stream: unknown, extra: Record<string, unknown> = {}) {
+    return {
+      type: 'assistant/message', sid: 'embedded-session', time: 200,
+      data: {
+        turn: 1, step: 1,
+        message: { id: 'response-1', content: [{ type: 'text', text: 'done' }] },
+        usage: { inputTokens: 10, outputTokens: 5 },
+        stream,
+        ...extra,
+      },
+    };
+  }
+
+  it.each([
+    ['stop', 'stop'], ['tool-calls', 'tool_calls'], ['max-tokens', 'length'],
+    ['error', 'error'], ['aborted', 'cancelled'],
+  ])('reads native %s from the same message stream', (kind, expected) => {
+    const entry = transformDshRecord(response([
+      { type: 'text-chunks', time0: 120, index: 0, dt: [10], texts: ['do', 'ne'] },
+      { type: 'chunk', time: 190, chunk: { type: 'finish', reason: { kind } } },
+    ]), ClientType.Dsh, newState());
+    expect(entry?.['gen_ai.response.finish_reasons']).toEqual([expected]);
+    expect(entry?.['gen_ai.response.id']).toBe('response-1');
+    expect(entry?.['gen_ai.usage.output_tokens']).toBe(5);
+  });
+
+  it('does not borrow an earlier legacy finish for an unknown embedded reason', () => {
+    const state = newState();
+    transformDshRecord({
+      type: 'assistant/chunk', sid: 'embedded-session', time: 100,
+      data: { turn: 1, step: 1, chunk: { type: 'finish', reason: { kind: 'stop' } } },
+    }, ClientType.Dsh, state);
+    const entry = transformDshRecord(response([
+      { type: 'chunk', time: 190, chunk: { type: 'finish', reason: { kind: 'future-kind' } } },
+    ]), ClientType.Dsh, state);
+    expect(entry?.['gen_ai.response.finish_reasons']).toBeUndefined();
+    expect(state.pendingFinish.size).toBe(0);
+  });
+
+  it('uses the native interruption marker for a cancelled prefix without a finish chunk', () => {
+    const entry = transformDshRecord(response([
+      { type: 'text-chunks', time0: 120, index: 0, dt: [], texts: ['partial'] },
+    ], { interrupted: true }), ClientType.Dsh, newState());
+    expect(entry?.['gen_ai.response.finish_reasons']).toEqual(['cancelled']);
+  });
+
+  it.each([[], null, [{ type: 'chunk', time: 190, chunk: { type: 'usage' } }]])(
+    'leaves absent finish information unknown (%j)', (stream) => {
+      const entry = transformDshRecord(response(stream), ClientType.Dsh, newState());
+      expect(entry?.['gen_ai.response.finish_reasons']).toBeUndefined();
+    },
+  );
+
+  it('does not duplicate a request when both legacy chunks and an embedded stream are present', () => {
+    const state = newState();
+    const request = transformDshRecordEntries({
+      type: 'assistant/chunk', sid: 'embedded-session', time: 100,
+      data: { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'done' } },
+    }, ClientType.Dsh, state);
+    const settled = transformDshRecordEntries(response([
+      { type: 'chunk', time: 190, chunk: { type: 'finish', reason: { kind: 'tool-calls' } } },
+    ]), ClientType.Dsh, state);
+    expect(request.map(entry => entry['event.name'])).toEqual(['llm.request']);
+    expect(settled.map(entry => entry['event.name'])).toEqual(['llm.response']);
+    expect(settled[0]['gen_ai.response.finish_reasons']).toEqual(['tool_calls']);
+  });
+
+  it.each(['max-tokens', 'aborted'])('also maps native %s in legacy chunks', (kind) => {
+    const state = newState();
+    transformDshRecord({
+      type: 'assistant/chunk', sid: 'embedded-session', time: 100,
+      data: { turn: 1, step: 1, chunk: { type: 'finish', reason: { kind } } },
+    }, ClientType.Dsh, state);
+    const { stream: _stream, ...data } = response([]).data;
+    const entry = transformDshRecord({ ...response([]), data }, ClientType.Dsh, state);
+    expect(entry?.['gen_ai.response.finish_reasons'])
+      .toEqual([kind === 'max-tokens' ? 'length' : 'cancelled']);
+  });
+
+  it.each(['text-chunks', 'reasoning-chunks', 'tool-call-chunks', 'chunk'])(
+    'reads first output timing from %s without expanding the stream', (type) => {
+      const state = newState();
+      transformDshRecord({
+        type: 'step/start', sid: 'embedded-session', time: 100,
+        data: { turn: 1, step: 1 },
+      }, ClientType.Dsh, state);
+      const first = type === 'chunk'
+        ? { type, time: 120, chunk: { type: 'text-delta', text: 'done' } }
+        : { type, time0: 120, index: 0, dt: [], texts: ['done'], args: ['{}'] };
+      const entries = transformDshRecordEntries(response([
+        first,
+        { type: 'chunk', time: 190, chunk: { type: 'finish', reason: { kind: 'stop' } } },
+      ]), ClientType.Dsh, state);
+      expect(entries.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+      expect(entries[1]['gen_ai.response.time_to_first_token']).toBe(20_000_000);
+    },
+  );
+});
+
+describe('dsh-event-transform (message sources)', () => {
+  it.each(['plugin', 'future-injected-source'])(
+    'keeps source.kind=%s in LLM context without emitting top-level user input',
+    (kind) => {
+      const state = newState();
+      state.currentTurn = 1;
+      state.currentStep = 1;
+
+      const injected = transformDshRecord({
+        type: 'user/message',
+        sid: 'session-a',
+        time: 1,
+        data: {
+          turn: 1,
+          source: { kind },
+          content: [{ type: 'text', text: 'injected context' }],
+        },
+      }, ClientType.Dsh, state);
+      expect(injected).toBeNull();
+
+      const request = transformDshRecord({
+        type: 'assistant/chunk',
+        sid: 'session-a',
+        time: 2,
+        data: { turn: 1, step: 1, chunk: { type: 'block-start' } },
+      }, ClientType.Dsh, state);
+      expect(JSON.stringify(request?.['gen_ai.input.messages'])).toContain('injected context');
+      expect(JSON.stringify(request?.['gen_ai.input.messages_delta'])).toContain('injected context');
+    },
+  );
+
+  it('preserves the top-level projection for legacy records without source', () => {
+    const entry = transformDshRecord({
+      type: 'user/message',
+      sid: 'legacy-session',
+      time: 1,
+      data: { content: [{ type: 'text', text: 'legacy prompt' }] },
+    }, ClientType.Dsh, newState());
+
+    expect(entry?.['event.name']).toBe('other');
+    expect(JSON.stringify(entry?.['gen_ai.input.messages_delta'])).toContain('legacy prompt');
+  });
+
+  it('does not treat a malformed present source as a human prompt', () => {
+    const entry = transformDshRecord({
+      type: 'user/message',
+      sid: 'session-a',
+      time: 1,
+      data: {
+        source: {},
+        content: [{ type: 'text', text: 'unclassified context' }],
+      },
+    }, ClientType.Dsh, newState());
+
+    expect(entry).toBeNull();
+  });
+});
+
 describe('dsh-event-transform (correlation isolation)', () => {
   it('scopes native turn and step numbers by session id', () => {
     const run = (sid: string) => {
@@ -545,6 +773,7 @@ describe('dsh-event-transform (correlation isolation)', () => {
     expect(state.currentTurnHeader).toBeUndefined();
     expect(state.lastKnownHeader).toEqual({ model: 'old-model', provider: 'old-provider' });
     expect(state.inputMessages).toEqual([]);
+    expect(state.lastRequestInputMessageCount).toBe(0);
     expect(state.toolNames.size).toBe(0);
     expect(state.requestStartTimes.size).toBe(0);
     expect(state.firstOutputTimes.size).toBe(0);
@@ -564,5 +793,54 @@ describe('dsh-event-transform (privacy)', () => {
     expect(r).toBeDefined();
     const json = JSON.stringify(r);
     expect(json).not.toMatch(/API_KEY|SECRET|PASSWORD|TOKEN|CREDENTIAL/i);
+  });
+});
+
+describe('dsh-event-transform (agentteams worker identity)', () => {
+  const userMessage = {
+    type: 'user/message',
+    sid: 's',
+    time: 1,
+    data: { content: [{ type: 'text', text: 'hi' }], id: 'm1' },
+  };
+
+  it('copies the plugin-stamped worker name onto every emitted entry', () => {
+    const entry = transformDshRecord({
+      ...userMessage,
+      resourceAttributes: {
+        'agentteams.worker.name': ' planner ',
+        'agentteams.instance.id': 'task-42-worker-1',
+        'agentteams.token': 'must-not-leak',
+      },
+    }, ClientType.Dsh, newState());
+
+    expect(entry?.['gen_ai.agent.name']).toBe('planner');
+    expect(entry?.resourceAttributes).toEqual({
+      'agentteams.worker.name': 'planner',
+      'agentteams.instance.id': 'task-42-worker-1',
+    });
+    expect(JSON.stringify(entry)).not.toContain('must-not-leak');
+  });
+
+  it('leaves agent identity unchanged when the source line has no worker context', () => {
+    const entry = transformDshRecord(userMessage, ClientType.Dsh, newState());
+    expect(entry?.['gen_ai.agent.name']).toBeUndefined();
+    expect(entry?.resourceAttributes).toBeUndefined();
+  });
+
+  it('drops a blank or oversized worker name', () => {
+    const blank = transformDshRecord({
+      ...userMessage,
+      resourceAttributes: { 'agentteams.worker.name': '   ' },
+    }, ClientType.Dsh, newState());
+    expect(blank?.['gen_ai.agent.name']).toBeUndefined();
+    expect(blank?.resourceAttributes).toBeUndefined();
+
+    const oversized = transformDshRecord({
+      ...userMessage,
+      resourceAttributes: { 'agentteams.worker.name': 'x'.repeat(513) },
+    }, ClientType.Dsh, newState());
+    expect(oversized?.['gen_ai.agent.name']).toBeUndefined();
+    expect(oversized?.resourceAttributes).toBeUndefined();
   });
 });

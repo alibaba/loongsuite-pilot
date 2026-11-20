@@ -10,15 +10,13 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import {
-  appendRowsToHistory,
-  getLineRangeInfo,
   HOOKS_DIR,
   loadHookRuntimeConfig,
   logDebug,
+  isWorkTranscriptContentRow,
   parseArgs,
+  processWorkTranscript,
   parseStdinPayload,
-  readTranscriptLines,
-  updateLineRecord,
 } from './shared/hook-processor-base.mjs';
 import {
   applyHookContentPolicy,
@@ -35,51 +33,29 @@ async function main() {
   const payload = await parseStdinPayload(agentId);
   if (!payload) return;
 
-  const range = getLineRangeInfo(agentId, payload.transcriptPath, payload.sessionId);
-  if (!range) return;
-  const lines = readTranscriptLines(payload.transcriptPath, range.startLine, range.endLine);
-  if (!lines.length) {
-    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, range.endLine);
-    return;
-  }
+  let runtimeConfig;
+  processWorkTranscript(agentId, logPrefix, payload.transcriptPath, payload.sessionId, { isPromptRow, isReviewCopyRow },
+    (parsed, rangeReason) => {
+      runtimeConfig ??= loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
+      return processTranscript(parsed, payload.sessionId, runtimeConfig, payload.cwd, { rangeReason });
+    });
+}
 
-  const parsed = [];
-  for (const line of lines) {
-    try { parsed.push(JSON.parse(line)); } catch { /* skip malformed transcript rows */ }
-  }
-  const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
-  const rows = processTranscript(parsed, payload.sessionId, runtimeConfig, payload.cwd, {
-    rangeReason: range.reason,
-  });
-  const serialized = rows.filter(Boolean).map(row => JSON.stringify(row));
-  if (appendRowsToHistory(agentId, logPrefix, serialized)) {
-    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, range.endLine);
-    logDebug(agentId, `Mapped ${serialized.length} QwenWorkCN event(s)`);
-  }
+function isReviewCopyRow(row) {
+  return row?.type === 'user' && blocksOf(row).some(block =>
+    block?.type === 'text' && typeof block.text === 'string' && block.text.trimStart().startsWith(REVIEW_COPY_PREFIX));
 }
 
 function processTranscript(parsed, fallbackSessionId, runtimeConfig = {}, fallbackCwd, opts = {}) {
   // QwenWorkCN, like QoderWork, forks a copy of the original transcript and
   // appends an automated review task. The original session has already been
   // collected, so consuming the copy would duplicate every preceding turn.
-  const isReviewCopy = parsed.some(row => (
-    row?.type === 'user'
-    && blocksOf(row).some(block =>
-      block?.type === 'text'
-      && typeof block.text === 'string'
-      && block.text.trimStart().startsWith(REVIEW_COPY_PREFIX))
-  ));
-  if (isReviewCopy) {
+  if (parsed.some(isReviewCopyRow)) {
     logDebug('qwen-work-cn', `Skipping review-copy session ${fallbackSessionId || ''}`);
     return [];
   }
 
-  const contentRows = parsed.filter(row => {
-    if (!row || (row.type !== 'user' && row.type !== 'assistant')) return false;
-    if (row.isSidechain === true || row.isSidechain === 'true') return false;
-    if (row.isMeta === true || row.isMeta === 'true') return false;
-    return true;
-  });
+  const contentRows = parsed.filter(isWorkTranscriptContentRow);
   if (!contentRows.length) return [];
 
   const allTurns = splitIntoTurns(contentRows);
@@ -158,8 +134,11 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, observedTs, runtim
   const records = [];
   const promptRow = turnRows.find(isPromptRow);
   const promptText = extractText(promptRow);
+  const submittedPrompt = typeof promptRow.humanInput?.text === 'string' && promptRow.humanInput.text.length > 0
+    ? promptRow.humanInput.text : promptText;
+  const promptRequestId = typeof promptRow.requestSetId === 'string'
+    && promptRow.requestSetId.length > 0 && promptRow.requestSetId.length <= 512 ? promptRow.requestSetId : undefined;
   const promptTs = timestampToUnixNanos(promptRow.timestamp);
-  const version = stringValue(promptRow.version);
   const turnMetadata = { 'agent.qwenworkcn.promptId': stringValue(promptRow.promptId) || turnId };
 
   if (promptText) {
@@ -174,7 +153,6 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, observedTs, runtim
       'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: promptText }] }],
       time_unix_nano: promptTs,
       observed_time_unix_nano: observedTs,
-      version,
     }, promptRow, runtimeConfig, cwd, `${turnId}:other`));
   }
 
@@ -195,7 +173,20 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, observedTs, runtim
         if (!match) return [];
         return [{ type: 'tool_call_response', id: call.id, response: resultValue(match) }];
       });
-      if (parts.length > 0) inputDelta = [{ role: 'tool', parts }];
+      if (parts.length > 0) {
+        inputDelta = [
+          {
+            role: 'assistant',
+            parts: previousToolCalls.map(call => ({
+              type: 'tool_call',
+              id: call.id,
+              name: call.name,
+              arguments: toJsonValue(call.input),
+            })),
+          },
+          { role: 'tool', parts },
+        ];
+      }
     }
 
     const result = buildStepEvents({
@@ -208,11 +199,17 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, observedTs, runtim
       observedTs,
       runtimeConfig,
       cwd,
-      version,
       inputDelta,
       requestTs: index === 0 ? promptTs : previousToolResultTs,
       isLastStep: index === groups.length - 1,
       turnMetadata,
+      // Private join metadata belongs only to the first model request in a turn.
+      promptCorrelation: index === 0 && submittedPrompt ? {
+        hash: crypto.createHash('sha256').update(submittedPrompt).digest('hex'),
+        at: Date.parse(promptRow.timestamp),
+        // Intermediate hook history must not carry the native requestSetId.
+        ...(promptRequestId ? { requestId: crypto.createHash('sha256').update(promptRequestId).digest('hex') } : {}),
+      } : undefined,
     });
     records.push(...result.records);
     previousToolCalls = result.toolCalls;
@@ -252,7 +249,7 @@ function indexToolResults(rows) {
 function buildStepEvents(opts) {
   const {
     group, toolResults, stepId, turnId, sessionId, userId, observedTs,
-    runtimeConfig, cwd, version, inputDelta, requestTs, isLastStep, turnMetadata,
+    runtimeConfig, cwd, inputDelta, requestTs, isLastStep, turnMetadata, promptCorrelation,
   } = opts;
   const firstRow = group[0];
   const lastRow = group[group.length - 1];
@@ -289,7 +286,6 @@ function buildStepEvents(opts) {
     'gen_ai.agent.type': 'qwen-work-cn',
     'gen_ai.provider.name': provider,
     'user.id': userId,
-    version,
   };
   const records = [];
 
@@ -299,6 +295,7 @@ function buildStepEvents(opts) {
     'gen_ai.request.id': responseId ? `${responseId}:request` : `${stepId}:request`,
     'gen_ai.request.model': model,
     'gen_ai.input.messages_delta': inputDelta,
+    ...(promptCorrelation ? { 'agent.pilot.interceptor.correlation': promptCorrelation } : {}),
     time_unix_nano: requestTs || timestampToUnixNanos(firstRow.timestamp),
     observed_time_unix_nano: observedTs,
   }, firstRow, runtimeConfig, cwd, `${stepId}:request`));

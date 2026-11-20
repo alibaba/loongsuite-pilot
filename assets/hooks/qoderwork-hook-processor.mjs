@@ -16,13 +16,11 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
+  isWorkTranscriptContentRow,
   parseArgs,
+  processWorkTranscript,
   parseStdinPayload,
   logDebug,
-  getLineRangeInfo,
-  readTranscriptLines,
-  appendRowsToHistory,
-  updateLineRecord,
   loadHookRuntimeConfig,
   HOOKS_DIR,
 } from './shared/hook-processor-base.mjs';
@@ -44,37 +42,14 @@ async function main() {
   const cwd = resolveQoderWorkProjectDir(rawCwd, agentId);
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
-  const range = getLineRangeInfo(agentId, transcriptPath, sessionId);
-  if (!range) return;
+  processWorkTranscript(agentId, logPrefix, transcriptPath, sessionId, { isPromptRow, isReviewCopyRow },
+    (parsed, rangeReason) => processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, { rangeReason }));
+}
 
-  const { startLine, endLine, reason: rangeReason } = range;
-  const lines = readTranscriptLines(transcriptPath, startLine, endLine);
-  logDebug(agentId, `Read ${lines.length} lines from ${transcriptPath} (range: ${startLine}-${endLine})`);
-  if (!lines.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-    return;
-  }
-
-  const parsed = [];
-  for (const line of lines) {
-    try { parsed.push(JSON.parse(line)); } catch { /* skip */ }
-  }
-  if (!parsed.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-    return;
-  }
-
-  const records = processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, {
-    rangeReason,
-  });
-  logDebug(agentId, `Produced ${records.length} events`);
-
-  const rowsToAppend = records.filter(Boolean).map(r => JSON.stringify(r));
-  const success = appendRowsToHistory(agentId, logPrefix, rowsToAppend);
-  if (success) {
-    logDebug(agentId, `Successfully appended ${rowsToAppend.length} rows`);
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-  }
+function isReviewCopyRow(row) {
+  const text = row?.message?.content?.[0]?.text;
+  return row?.type === 'user' && typeof text === 'string'
+    && text.startsWith('[SYSTEM: This is an automated background review task');
 }
 
 function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, opts = {}) {
@@ -84,25 +59,12 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, opts 
   // Skip review-copy sessions: QoderWork forks a duplicate transcript with an
   // appended automated review task. The original session already covers the
   // user conversation, so processing the copy would produce duplicate traces.
-  const isReviewCopy = parsed.some(row =>
-    row.type === 'user' &&
-    typeof row.message?.content?.[0]?.text === 'string' &&
-    row.message.content[0].text.startsWith('[SYSTEM: This is an automated background review task')
-  );
-  if (isReviewCopy) {
+  if (parsed.some(isReviewCopyRow)) {
     logDebug(agentId, `Skipping review-copy session ${sessionId}`);
     return records;
   }
 
-  // Filter out non-content rows
-  const contentRows = parsed.filter(row => {
-    const type = row.type;
-    if (!type || type === 'ai-title' || type === 'last-prompt' || type === 'session_meta' || type === 'progress') return false;
-    if (row.isSidechain === true || row.isSidechain === 'true') return false;
-    if (row.isMeta === true || row.isMeta === 'true') return false;
-    return type === 'user' || type === 'assistant';
-  });
-
+  const contentRows = parsed.filter(isWorkTranscriptContentRow);
   if (!contentRows.length) return records;
 
   // Split into turns: each user message (non tool_result) starts a new turn
@@ -119,11 +81,10 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, opts 
   const firstRow = turns[0]?.[0] || contentRows[0];
   const userId = resolveUserId(firstRow, runtimeConfig);
   const providerName = inferProviderName({ 'gen_ai.agent.type': agentId });
-  const version = getStringValue(firstRow, 'version') || '';
 
   for (const turn of turns) {
     const turnId = getTurnIdForRows(turn);
-    const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd, agentId);
+    const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, observedTs, runtimeConfig, cwd, agentId);
     records.push(...turnRecords);
   }
 
@@ -182,7 +143,7 @@ function isPureSystemReminder(text) {
     && text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim().length === 0;
 }
 
-function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd, agentId) {
+function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, observedTs, runtimeConfig, cwd, agentId) {
   const records = [];
 
   // Find the user prompt
@@ -205,7 +166,6 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
         'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: userText }] }],
         time_unix_nano: timestampToUnixNanos(userRow.timestamp),
         observed_time_unix_nano: observedTs,
-        version,
       }, turnRows[0], runtimeConfig, cwd));
     }
   }
@@ -233,9 +193,9 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
 
   const userText = userRow ? extractText(userRow) : '';
   const userTs = userRow ? timestampToUnixNanos(userRow.timestamp) : undefined;
-  let prevToolCalls = []; // tool_call ids from previous step, for building tool_result delta
+  let prevToolCalls = []; // tool calls from previous step, for building assistant + tool_result delta
+  let prevAssistantOutputParts = []; // exact assistant output from previous step
   let prevStepLastToolResultTs = undefined; // 上一个 step 最后一个 tool_result 的 nano ts，用于本 step llm.request 时间
-
   let stepCounter = 0;
   for (const group of llmGroups) {
     stepCounter++;
@@ -243,22 +203,42 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
 
     // Build input.messages_delta for this step's llm.request:
     // - Step 1: user prompt
-    // - Step N>1: previous step's tool results
+    // - Step N>1: previous assistant tool calls + their tool results
     let inputDelta;
     if (stepCounter === 1 && userText) {
       inputDelta = [{ role: 'user', parts: [{ type: 'text', content: userText }] }];
     } else if (prevToolCalls.length > 0) {
-      const toolParts = [];
-      for (const tc of prevToolCalls) {
-        const matchingResult = toolResultsByUseId.get(tc.id);
-        if (matchingResult) {
-          const resultBlock = matchingResult.block;
-          const resultText = typeof resultBlock?.content === 'string' ? resultBlock.content : JSON.stringify(resultBlock?.content);
-          toolParts.push({ type: 'tool_call_response', id: tc.id, response: resultText });
-        }
-      }
-      if (toolParts.length > 0) {
-        inputDelta = [{ role: 'tool', parts: toolParts }];
+      // As in Codex, only completed calls enter the next model input. Use the
+      // same set for both messages so every assistant tool_call has exactly one
+      // matching tool response.
+      const completedToolCalls = prevToolCalls
+        .map(tc => ({ tc, result: toolResultsByUseId.get(tc.id) }))
+        .filter(item => item.result);
+      if (completedToolCalls.length > 0) {
+        const completedToolCallIds = new Set(completedToolCalls.map(({ tc }) => tc.id));
+        inputDelta = [
+          {
+            role: 'assistant',
+            // The next model receives the complete previous assistant message,
+            // including reasoning/text that preceded its tool calls. Filter only
+            // incomplete tool calls so every retained call has one tool response.
+            parts: prevAssistantOutputParts.filter(part =>
+              part.type !== 'tool_call' || completedToolCallIds.has(part.id)),
+          },
+          ...completedToolCalls.map(({ tc, result }) => {
+            const content = result.block?.content;
+            return {
+              role: 'tool',
+              // Keep one tool response per message. This preserves the 1:1
+              // call/result boundary for parallel tool calls in OTLP input messages.
+              parts: [{
+                type: 'tool_call_response',
+                id: tc.id,
+                response: typeof content === 'string' ? content : JSON.stringify(content),
+              }],
+            };
+          }),
+        ];
       }
     }
 
@@ -268,25 +248,20 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
     // 否则用 assistant 行写盘时间会导致 LLM span 退化为 0ms（thinking/tool_use 同毫秒批量 flush）
     const llmRequestTs = stepCounter === 1 ? userTs : prevStepLastToolResultTs;
 
-    const stepRecords = buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, stepCounter === llmGroups.length, inputDelta, cwd, llmRequestTs, turnMetadata);
+    const assistantOutput = extractAssistantOutput(group);
+    const stepRecords = buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata);
     records.push(...stepRecords);
 
     // Collect this step's tool_calls for next step's input delta
-    prevToolCalls = [];
+    prevToolCalls = assistantOutput.toolCalls;
+    prevAssistantOutputParts = assistantOutput.outputParts;
     let lastToolResultTsInStep = undefined;
-    for (const row of group) {
-      const msg = row.message || {};
-      const content = Array.isArray(msg.content) ? msg.content : [];
-      for (const b of content) {
-        if (b.type === 'tool_use') {
-          prevToolCalls.push({ id: b.id, name: b.name });
-          // 找到本 step 该 tool_use 对应的 tool_result 行，记录 ts；多 tool 场景保留最后一个
-          const matchingResult = toolResultsByUseId.get(b.id);
-          if (matchingResult?.row.timestamp) {
-            const nano = timestampToUnixNanos(matchingResult.row.timestamp);
-            if (nano) lastToolResultTsInStep = nano;
-          }
-        }
+    for (const toolCall of prevToolCalls) {
+      // 找到本 step 该 tool_use 对应的 tool_result 行，记录 ts；多 tool 场景保留最后一个
+      const matchingResult = toolResultsByUseId.get(toolCall.id);
+      if (matchingResult?.row.timestamp) {
+        const nano = timestampToUnixNanos(matchingResult.row.timestamp);
+        if (nano) lastToolResultTsInStep = nano;
       }
     }
     if (lastToolResultTsInStep) {
@@ -353,25 +328,7 @@ function groupAssistantRowsByToolResults(turnRows) {
   return groups;
 }
 
-function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, isLastStep, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
-  const records = [];
-  const firstRow = group[0];
-  const lastRow = group[group.length - 1];
-
-  // thinking 行的 ts 用作 llm.response 时间（模型完成输出的真实时刻）；
-  // 没有 thinking 时回退到 lastRow.timestamp（与现有行为一致）
-  const thinkingRow = group.find(r => {
-    const content = Array.isArray(r.message?.content) ? r.message.content : [];
-    const firstType = content[0]?.type;
-    return firstType === 'thinking' || r.content_type === 'thinking';
-  });
-  const llmResponseTs = timestampToUnixNanos(thinkingRow ? thinkingRow.timestamp : lastRow.timestamp);
-
-  // Prefer message.id (chatcmpl-xxx, matches qoderwork-intercept.jsonl) for direct token matching.
-  // Fall back to parentUuid for backward compat with older QoderWork versions.
-  const responseId = firstRow.message?.id || firstRow.parentUuid || firstRow.uuid;
-
-  // Build merged output parts
+function extractAssistantOutput(group) {
   const outputParts = [];
   const toolCalls = [];
 
@@ -397,18 +354,42 @@ function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, u
     }
   }
 
-  const finishReason = toolCalls.length > 0 ? 'tool_calls' : (isLastStep ? 'end_turn' : 'stop');
+  return { outputParts, toolCalls };
+}
+
+function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
+  const records = [];
+  const firstRow = group[0];
+  const lastRow = group[group.length - 1];
+
+  // thinking 行的 ts 用作 llm.response 时间（模型完成输出的真实时刻）；
+  // 没有 thinking 时回退到 lastRow.timestamp（与现有行为一致）
+  const thinkingRow = group.find(r => {
+    const content = Array.isArray(r.message?.content) ? r.message.content : [];
+    const firstType = content[0]?.type;
+    return firstType === 'thinking' || r.content_type === 'thinking';
+  });
+  const llmResponseTs = timestampToUnixNanos(thinkingRow ? thinkingRow.timestamp : lastRow.timestamp);
+
+  // Prefer message.id (chatcmpl-xxx) so segment pairing can match by response id;
+  // fall back to parentUuid for older QoderWork versions.
+  const responseId = firstRow.message?.id || firstRow.parentUuid || firstRow.uuid;
+
+  const { outputParts, toolCalls } = assistantOutput;
+
+  // QoderWork uses the provider-specific `end_turn` sentinel in its raw
+  // transcript. Emit the standard finish reason expected by downstream GenAI
+  // consumers while keeping tool-producing responses distinguishable.
+  const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
 
   // llm.request for this step.
   //
-  // Field choice: gen_ai.input.messages_delta (incremental, NOT full).
-  //
   // Each step's delta contains only the NEW content since the previous step:
   //   - Step 1: user prompt
-  //   - Step N>1: previous step's tool_results
-  // The converter (@loongsuite/otel-util-genai) accumulates deltas across
-  // steps to reconstruct the full context window for each LLM span, which
-  // is the correct behaviour.
+  //   - Step N>1: previous assistant tool_calls followed by tool_results
+  // The converter accumulates these deltas into the full input context carried
+  // by each OTLP LLM span. Keep the Hook event incremental so existing event-log
+  // consumers do not receive a second, duplicated representation of history.
   const llmRequestFields = {
     ...turnMetadata,
     'event.name': 'llm.request',
@@ -421,7 +402,6 @@ function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, u
     'user.id': userId,
     time_unix_nano: llmRequestTs || timestampToUnixNanos(firstRow.timestamp),
     observed_time_unix_nano: observedTs,
-    version,
   };
   if (inputDelta) {
     llmRequestFields['gen_ai.input.messages_delta'] = inputDelta;
@@ -446,7 +426,6 @@ function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, u
       'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts, finish_reason: finishReason }],
       time_unix_nano: llmResponseTs,
       observed_time_unix_nano: observedTs,
-      version,
     }, firstRow, runtimeConfig, cwd));
   }
 
@@ -466,7 +445,6 @@ function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, u
       'user.id': userId,
       time_unix_nano: timestampToUnixNanos(lastRow.timestamp),
       observed_time_unix_nano: observedTs,
-      version,
     }, firstRow, runtimeConfig, cwd));
 
     // Find matching tool_result
@@ -489,7 +467,6 @@ function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, u
         'user.id': userId,
         time_unix_nano: timestampToUnixNanos(resultRow.timestamp),
         observed_time_unix_nano: observedTs,
-        version,
       }, resultRow, runtimeConfig, cwd));
     }
   }
@@ -574,6 +551,6 @@ function resolveQoderWorkProjectDir(sandboxCwd, agentId) {
   return sandboxCwd;
 }
 
-export { extractText, getTurnIdForRows, isSystemInjection, isToolResult, splitIntoTurns };
+export { extractText, getTurnIdForRows, isSystemInjection, isToolResult, processTranscript, splitIntoTurns };
 
 main().catch(() => { /* fail-open */ });

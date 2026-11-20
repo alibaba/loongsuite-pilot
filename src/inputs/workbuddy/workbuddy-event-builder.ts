@@ -177,10 +177,13 @@ export async function buildWorkBuddyEvents(
     );
     if (responseTimestamp === undefined) return;
     const requestTimestamp = requestStartMs ?? responseTimestamp;
+    const assistantToolParts = normalizedCalls.map(call => (
+      toToolCallPart(call.record, call.callId, call.toolName)
+    ));
     const outputParts = [
       ...reasoningParts,
       ...assistantParts,
-      ...normalizedCalls.map(call => toToolCallPart(call.record, call.callId, call.toolName)),
+      ...assistantToolParts,
     ];
     const request = baseEntry(
       'llm.request',
@@ -237,7 +240,9 @@ export async function buildWorkBuddyEvents(
       await push(toolCall, call.record);
     }
 
-    pendingDelta = [];
+    pendingDelta = assistantToolParts.length > 0
+      ? [{ role: 'assistant', parts: assistantToolParts.map(part => ({ ...part })) }]
+      : [];
     reasoningParts = [];
     reasoningStartMs = undefined;
     requestStartMs = responseTimestamp;
