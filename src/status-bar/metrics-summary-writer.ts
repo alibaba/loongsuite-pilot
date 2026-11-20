@@ -12,9 +12,8 @@ const logger = createLogger('MetricsSummaryWriter');
 const STARTUP_DELAY_MS = 5_000;
 const DIGEST_MAX_DAYS = 200;
 // Digests written before the breakdowns were persisted are rebuilt from their
-// segments, but only inside retention's default window: older days are
-// unlikely to still have every segment, and a bounded window keeps an upgrade
-// from rescanning months of history.
+// segments inside retention's default window. A legacy offset with unread
+// bytes also needs reconciliation, even when the file is older.
 const DIGEST_BACKFILL_DAYS = 7;
 // Closed days keep per-file statistics (including session identities) for this
 // many days, so late appends and rescans stay exact while segments are still
@@ -183,7 +182,13 @@ interface DigestFile {
 }
 
 interface ScanState {
-  files: Record<string, { offset: number; size: number; ino: number }>;
+  files: Record<string, unknown>;
+}
+
+interface LegacyScanOffset {
+  offset: number;
+  size: number;
+  ino: number;
 }
 
 interface SerializedDayStats {
@@ -505,15 +510,12 @@ export class MetricsSummaryWriter {
 
   /**
    * Convert a day written by an older version (totals, maybe breakdowns, but no
-   * per-file state) into a tracked day without losing or double counting
-   * anything.
+   * per-file state) into a tracked day.
    *
-   * The old scan state says how far each segment had been folded into the
-   * legacy totals. Bytes past that offset are new and always added. When the
-   * day lacks breakdowns and is recent, the bytes before the offset are read
-   * too: if they reproduce the legacy totals exactly, no segment was retired
-   * and the rebuilt per-file state replaces the day. Otherwise the legacy
-   * totals stay as the day's base and the breakdown is flagged incomplete.
+   * Old versions wrote totals before offsets, so an interruption could leave
+   * already-counted records after the cached offset. Rebuild from available
+   * files when they cover the day. Otherwise keep the legacy totals and add
+   * only the contributions that can be distinguished from that base.
    */
   private async migrateUntrackedDay(
     day: string,
@@ -525,36 +527,64 @@ export class MetricsSummaryWriter {
     const legacyTotals = totalsOf(legacy);
     const incompleteBefore = !!legacy.breakdownsIncomplete || lacksLegacyBreakdowns(legacy);
 
-    // Scan-state entries of this day, including segments retention already
-    // removed. Their presence means the scan state covered this day, so a
-    // listed segment it does not know is genuinely new rather than forgotten.
-    const cachedByName = new Map<string, ScanState['files'][string]>();
-    const cachedByIno = new Map<number, ScanState['files'][string]>();
+    // Keep dated offsets for segments that retention already removed. Old
+    // retired keys have no date and can only be linked by file identity.
+    const cachedByName = new Map<string, LegacyScanOffset>();
+    const cachedByIno = new Map<number, LegacyScanOffset>();
+    const retiredByIdentity = new Map<string, unknown>();
+    let hasInvalidOffset = false;
     for (const [name, cached] of Object.entries(scanState.files)) {
+      if (name.startsWith('retired:')) {
+        retiredByIdentity.set(name, cached);
+        continue;
+      }
       if (FILE_NAME_PATTERN.exec(name)?.[2] !== day) continue;
+      if (!isLegacyScanOffset(cached)) {
+        hasInvalidOffset = true;
+        continue;
+      }
       cachedByName.set(name, cached);
       cachedByIno.set(cached.ino, cached);
     }
-    const trustScanState = cachedByName.size > 0;
-    const rebuild = trustScanState
-      && incompleteBefore
-      && day >= dateDaysAgo(DIGEST_BACKFILL_DAYS, today);
 
-    const head = createDayStats();
-    const whole = createDayStats();
-    const scanned: Array<{ file: TrackedFileState; head: DayStats; tail: DayStats }> = [];
+    const inputs: Array<{ path: string; name: string; stat: fsSync.Stats; cached?: LegacyScanOffset }> = [];
+    const presentInodes = new Set<number>();
+    const matchedRetiredKeys = new Set<string>();
     for (const filePath of files) {
       const fileStat = await this.safeStat(filePath);
       if (!fileStat) continue;
       if (this.skipOversizedOutput(filePath, fileStat)) continue;
       const fileName = path.basename(filePath);
 
-      // A rotated segment keeps its inode under its archive name.
+      // Old active-day rollover could save an unavailable segment under a
+      // retired identity with no date. Match that key before using bare inodes.
+      const retiredKey = `retired:${fileIdentity(fileStat)}`;
+      const retiredOffset = retiredByIdentity.get(retiredKey);
+      const retired = isLegacyScanOffset(retiredOffset) ? retiredOffset : undefined;
+      if (!retired && retiredByIdentity.has(retiredKey)) hasInvalidOffset = true;
       const byName = cachedByName.get(fileName);
-      const candidate = byName && byName.ino === fileStat.ino ? byName : cachedByIno.get(fileStat.ino);
-      const cached = candidate && candidate.offset <= fileStat.size && candidate.size <= fileStat.size
-        ? candidate
-        : undefined;
+      const candidate = retired ?? (byName?.ino === fileStat.ino ? byName : cachedByIno.get(fileStat.ino));
+      const cached = candidate && candidate.ino === fileStat.ino && candidate.size <= fileStat.size ? candidate : undefined;
+      if (cached) {
+        presentInodes.add(cached.ino);
+        if (cached === retired) matchedRetiredKeys.add(retiredKey);
+      }
+      inputs.push({ path: filePath, name: fileName, stat: fileStat, cached });
+    }
+
+    const trustScanState = !hasInvalidOffset && (cachedByName.size > 0 || matchedRetiredKeys.size > 0);
+    // Unmatched retired entries have no day. Their presence prevents proving
+    // that this day's listed files cover the whole legacy total.
+    const completeScanState = trustScanState && matchedRetiredKeys.size === retiredByIdentity.size
+      && [...cachedByIno.keys()].every(ino => presentInodes.has(ino));
+    const hasKnownTail = inputs.some(({ cached, stat }) => cached && cached.offset < stat.size);
+    const rebuild = trustScanState && (hasKnownTail
+      || (incompleteBefore && day >= dateDaysAgo(DIGEST_BACKFILL_DAYS, today)));
+
+    const head = createDayStats();
+    const whole = createDayStats();
+    const scanned: Array<{ file: TrackedFileState; head: DayStats; tail: DayStats; cached: boolean }> = [];
+    for (const { path: filePath, name: fileName, stat: fileStat, cached } of inputs) {
       // Without a trusted scan state every byte may already be in the legacy
       // totals, so the whole file is read and compared below.
       const knownOffset = trustScanState ? (cached?.offset ?? 0) : 0;
@@ -583,6 +613,7 @@ export class MetricsSummaryWriter {
         },
         head: fileHead,
         tail: fileTail,
+        cached: !!cached,
       });
     }
 
@@ -597,24 +628,19 @@ export class MetricsSummaryWriter {
       return stats;
     };
 
-    if (!trustScanState) {
-      // Nothing says which bytes the legacy totals already include. A rescan
-      // that reaches them covers the day; one that falls short means segments
-      // were retired, and only the legacy totals are known to be right.
-      if (whole.tokens >= legacy.tokens && whole.events >= legacy.events) {
-        logger.info('metrics digest day rebuilt from its segments', { day });
-        return composeDay(undefined, withStats(wholeFile), false);
-      }
-      logger.info('metrics digest day kept with incomplete breakdowns', { day });
-      return composeDay(legacyTotals, withStats(() => null), incompleteBefore);
-    }
-
-    if (rebuild && head.tokens === legacy.tokens && head.events === legacy.events) {
+    const coversLegacy = whole.tokens >= legacy.tokens && whole.events >= legacy.events;
+    const matchesLegacy = (stats: DayStats) => stats.tokens === legacy.tokens && stats.events === legacy.events;
+    const confirmedRebuild = rebuild && (matchesLegacy(head) || matchesLegacy(whole) || completeScanState);
+    if (coversLegacy && (!trustScanState || confirmedRebuild)) {
       logger.info('metrics digest day rebuilt from its segments', { day });
       return composeDay(undefined, withStats(wholeFile), false);
     }
-    if (rebuild) logger.info('metrics digest day kept with incomplete breakdowns', { day });
-    return composeDay(legacyTotals, withStats(item => item.tail), incompleteBefore);
+    if (!trustScanState || rebuild) logger.info('metrics digest day kept with incomplete breakdowns', { day });
+    return composeDay(legacyTotals, withStats(item => {
+      // The cached tail may already be in the digest when reconstruction fails.
+      if (!trustScanState || (rebuild && item.cached)) return null;
+      return item.tail;
+    }), incompleteBefore);
   }
 
   /**
@@ -986,7 +1012,9 @@ export class MetricsSummaryWriter {
 
   private async loadScanState(): Promise<ScanState> {
     const data = await readJsonFile<ScanState>(this.scanStatePath);
-    return data && data.files ? data : { files: {} };
+    return data?.files && typeof data.files === 'object' && !Array.isArray(data.files)
+      ? data
+      : { files: {} };
   }
 
   private async loadDigest(): Promise<DigestFile> {
@@ -1205,6 +1233,14 @@ function sameFileIdentity(file: TrackedFileState, stat: fsSync.Stats): boolean {
   return file.dev === stat.dev
     && file.ino === stat.ino
     && file.birthtimeMs === stat.birthtimeMs;
+}
+
+function isLegacyScanOffset(value: unknown): value is LegacyScanOffset {
+  if (!value || typeof value !== 'object') return false;
+  const { offset, size, ino } = value as LegacyScanOffset;
+  return Number.isSafeInteger(offset) && offset >= 0
+    && Number.isSafeInteger(size) && size >= offset
+    && Number.isFinite(ino) && ino >= 0;
 }
 
 function fileIdentity(file: Pick<TrackedFileState, 'dev' | 'ino' | 'birthtimeMs'>): string {

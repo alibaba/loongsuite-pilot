@@ -44,7 +44,7 @@ async function readSummary(dir: string) {
 async function seedLegacyState(
   dir: string,
   days: Record<string, Record<string, unknown>>,
-  offsets: Record<string, { offset: number; size: number; ino: number }>,
+  offsets: Record<string, unknown>,
 ): Promise<void> {
   const cache = path.join(dir, 'cache');
   await fs.mkdir(cache, { recursive: true });
@@ -286,6 +286,75 @@ describe('MetricsSummaryWriter historical breakdown integrity', () => {
     const range = (await readSummary(tmpDir)).ranges.sevenDays;
     expect(range.totalTokens).toBe(1500);
     expect(range.modelShares[0].totalTokens).toBe(1500);
+    expect(range.incompleteBreakdownDays).toBeUndefined();
+  });
+
+  it('recognizes a restored segment saved under a legacy retired identity', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-03T10:00:00'));
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const name = 'claude-code-2026-08-01.jsonl';
+    const restored = await writeJsonl(outputDir, 'claude-code.part-1-2026-08-01.jsonl', [
+      record({ 'gen_ai.request.model': 'first-model', 'gen_ai.usage.total_tokens': '1000' }),
+    ]);
+    const active = await writeJsonl(outputDir, name, [
+      record({ 'gen_ai.request.model': 'second-model', 'gen_ai.usage.total_tokens': '300' }),
+    ]);
+    const { dev, ino, birthtimeMs, size } = await fs.stat(restored);
+    const activeStat = await fs.stat(active);
+    await seedLegacyState(tmpDir, { '2026-08-01': legacyDay(1300, 2) }, {
+      [`retired:${dev}:${ino}:${birthtimeMs}`]: { offset: size, size, ino },
+      [name]: { offset: activeStat.size, size: activeStat.size, ino: activeStat.ino },
+    });
+
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const range = (await readSummary(tmpDir)).ranges.sevenDays;
+    expect(range.totalTokens).toBe(1300);
+    expect(range.modelShares).toEqual([
+      expect.objectContaining({ model: 'first-model', totalTokens: 1000 }),
+      expect.objectContaining({ model: 'second-model', totalTokens: 300 }),
+    ]);
+    expect(range.incompleteBreakdownDays).toBeUndefined();
+  });
+
+  it.each([0, 200])('reconciles a legacy digest written ahead of its offset with %i new tokens', async newTokens => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-20T10:00:00'));
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const name = 'claude-code-2026-08-01.jsonl';
+    const file = await writeJsonl(outputDir, name, [record({ 'gen_ai.usage.total_tokens': '1000' })]);
+    const stat = await fs.stat(file);
+    await fs.appendFile(file, JSON.stringify(record({ 'gen_ai.usage.total_tokens': '300' })) + '\n');
+    await seedLegacyState(tmpDir, { '2026-08-01': legacyDay(1300, 2) }, {
+      [name]: { offset: stat.size, size: stat.size, ino: stat.ino },
+    });
+    if (newTokens > 0) {
+      await fs.appendFile(file, JSON.stringify(record({ 'gen_ai.usage.total_tokens': String(newTokens) })) + '\n');
+    }
+
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const range = (await readSummary(tmpDir)).ranges.thirtyDays;
+    expect(range.totalTokens).toBe(1300 + newTokens);
+    expect(range.modelShares[0].totalTokens).toBe(1300 + newTokens);
+    expect(range.incompleteBreakdownDays).toBeUndefined();
+  });
+
+  it('rebuilds a legacy day with a corrupt dated scan offset', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-03T10:00:00'));
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const name = 'claude-code-2026-08-01.jsonl';
+    await writeJsonl(outputDir, name, [record({ 'gen_ai.usage.total_tokens': '1000' })]);
+    await seedLegacyState(tmpDir, { '2026-08-01': legacyDay(1000, 1) }, { [name]: null });
+
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const range = (await readSummary(tmpDir)).ranges.sevenDays;
+    expect(range.totalTokens).toBe(1000);
+    expect(range.modelShares[0].totalTokens).toBe(1000);
     expect(range.incompleteBreakdownDays).toBeUndefined();
   });
 
