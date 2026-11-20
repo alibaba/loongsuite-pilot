@@ -2434,15 +2434,16 @@ function Remove-PiCodingAgentExtension {
         $prevEAP = $ErrorActionPreference
         try {
             $ErrorActionPreference = "Continue"
-            $persisted = & $script:NODE_BIN -e @'
+            $persistedScript = @'
 const fs = require("fs");
 const path = require("path");
 try {
-  const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
   const value = state?.["pi-coding-agent"]?.pluginInjectConfigPath;
   if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
 } catch {}
-'@ $stateFile 2>$null
+'@
+            $persisted = $persistedScript | & $script:NODE_BIN - $stateFile 2>$null
         } finally {
             $ErrorActionPreference = $prevEAP
         }
@@ -2455,14 +2456,16 @@ try {
         return
     }
 
-    $result = & $script:NODE_BIN -e @'
+    # Pass the JavaScript via stdin so Windows PowerShell preserves its quotes.
+    $cleanupScript = @'
 const fs = require('fs');
 const path = require('path');
-const defaultConfig = process.argv[1];
-const dataDir = process.argv[2];
-const targets = [{ configPath: defaultConfig, markers: ['loongsuite-pilot-pi-coding-agent', 'plugins/pi-coding-agent/index.mjs'] }];
+const { fileURLToPath } = require('url');
+const defaultConfig = process.argv[2];
+const dataDir = process.argv[3];
+const home = process.env.USERPROFILE || require('os').homedir();
 const resolveValue = value => typeof value === 'string'
-  ? value.replace(/^~(?=[\\/])/, process.env.USERPROFILE || '').replaceAll('$PILOT_DATA', dataDir)
+  ? value.replace(/^~(?=[\\/])/, () => home).replaceAll('$PILOT_DATA', () => dataDir)
   : value;
 const stripJsoncComments = text => {
   let result = '';
@@ -2501,9 +2504,22 @@ const stripJsoncComments = text => {
   }
   return result;
 };
-const comparable = value => typeof value === 'string'
-  ? value.split(String.fromCharCode(92)).join('/')
-  : '';
+const slash = value => value.split(String.fromCharCode(92)).join('/');
+const comparable = value => {
+  if (typeof value !== 'string') return '';
+  if (value.startsWith('file://')) {
+    try { value = fileURLToPath(value); } catch {}
+  }
+  value = slash(value);
+  if (value.startsWith('~/')) value = slash(path.join(home, value.slice(2)));
+  return value.endsWith('/') ? value.slice(0, -1) : value;
+};
+// Match the installed paths exactly, even when another plugin has the same suffix.
+const targets = [{
+  configPath: defaultConfig,
+  pluginId: 'loongsuite-pilot-pi-coding-agent',
+  spec: comparable(path.join(dataDir, 'plugins/pi-coding-agent/index.mjs')),
+}];
 const localDir = path.join(dataDir, 'agents.d.local');
 try {
   for (const name of fs.existsSync(localDir) ? fs.readdirSync(localDir) : []) {
@@ -2511,11 +2527,12 @@ try {
     let def;
     try { def = JSON.parse(fs.readFileSync(path.join(localDir, name), 'utf8')); } catch { continue; }
     if (def?.piSdk?.schemaVersion !== 1 || !def?.pluginInject?.pluginId?.startsWith('loongsuite-pilot-pi-sdk-')) continue;
-    const spec = resolveValue(def.pluginInject.pluginSpec);
+    const spec = comparable(resolveValue(def.pluginInject.pluginSpec));
     for (const configPath of def.pluginInject.configPaths || []) {
       targets.push({
         configPath: resolveValue(configPath),
-        markers: [def.pluginInject.pluginId, spec, 'plugins/pi-coding-agent/agents/'].filter(Boolean),
+        pluginId: def.pluginInject.pluginId,
+        spec,
       });
     }
   }
@@ -2530,7 +2547,7 @@ try {
       const before = data.extensions.length;
       data.extensions = data.extensions.filter(entry => {
         const value = comparable(entry);
-        return !target.markers.some(marker => value === comparable(marker) || value.includes(comparable(marker)));
+        return !(target.spec && value === target.spec) && entry !== target.pluginId;
       });
       if (data.extensions.length === before) continue;
       if (raw !== JSON.stringify(data, null, 2) + '\n') {
@@ -2548,7 +2565,9 @@ try {
   }
   process.stdout.write(cleaned > 0 ? (skipped > 0 ? 'partial' : 'cleaned') : (skipped > 0 ? 'skipped' : 'nochange'));
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-'@ $cfg $DATA_DIR 2>$null
+'@
+    $result = $cleanupScript | & $script:NODE_BIN - $cfg $DataDir 2>$null
+    if ($LASTEXITCODE -ne 0) { $result = "error" }
 
     switch ($result) {
         "cleaned"  { Msg "    ✅ 已清理 Pi / PI SDK Agent 扩展配置" "    ✅ Cleaned Pi / PI SDK Agent extension configs" }

@@ -2919,11 +2919,12 @@ try {
     result=$("$node_bin" -e "
 const fs = require('fs');
 const path = require('path');
+const { fileURLToPath } = require('url');
 const defaultConfig = process.argv[1];
 const dataDir = process.argv[2];
-const targets = [{ configPath: defaultConfig, markers: ['loongsuite-pilot-pi-coding-agent', 'plugins/pi-coding-agent/index.mjs'] }];
+const home = process.env.HOME || require('os').homedir();
 const resolveValue = value => typeof value === 'string'
-  ? value.replace(/^~(?=[\\/])/, process.env.HOME || '').replaceAll('\$PILOT_DATA', dataDir)
+  ? value.replace(/^~(?=[\\/])/, () => home).replaceAll('\$PILOT_DATA', () => dataDir)
   : value;
 const stripJsoncComments = text => {
   let result = '';
@@ -2962,9 +2963,22 @@ const stripJsoncComments = text => {
   }
   return result;
 };
-const comparable = value => typeof value === 'string'
-  ? value.split(String.fromCharCode(92)).join('/')
-  : '';
+const slash = value => value.split(String.fromCharCode(92)).join('/');
+const comparable = value => {
+  if (typeof value !== 'string') return '';
+  if (value.startsWith('file://')) {
+    try { value = fileURLToPath(value); } catch {}
+  }
+  value = slash(value);
+  if (value.startsWith('~/')) value = slash(path.join(home, value.slice(2)));
+  return value.endsWith('/') ? value.slice(0, -1) : value;
+};
+// Match the installed paths exactly, even when another plugin has the same suffix.
+const targets = [{
+  configPath: defaultConfig,
+  pluginId: 'loongsuite-pilot-pi-coding-agent',
+  spec: comparable(path.join(dataDir, 'plugins/pi-coding-agent/index.mjs')),
+}];
 const localDir = path.join(dataDir, 'agents.d.local');
 try {
   for (const name of fs.existsSync(localDir) ? fs.readdirSync(localDir) : []) {
@@ -2972,11 +2986,12 @@ try {
     let def;
     try { def = JSON.parse(fs.readFileSync(path.join(localDir, name), 'utf8')); } catch { continue; }
     if (def?.piSdk?.schemaVersion !== 1 || !def?.pluginInject?.pluginId?.startsWith('loongsuite-pilot-pi-sdk-')) continue;
-    const spec = resolveValue(def.pluginInject.pluginSpec);
+    const spec = comparable(resolveValue(def.pluginInject.pluginSpec));
     for (const configPath of def.pluginInject.configPaths || []) {
       targets.push({
         configPath: resolveValue(configPath),
-        markers: [def.pluginInject.pluginId, spec, 'plugins/pi-coding-agent/agents/'].filter(Boolean),
+        pluginId: def.pluginInject.pluginId,
+        spec,
       });
     }
   }
@@ -2991,7 +3006,7 @@ try {
       const before = data.extensions.length;
       data.extensions = data.extensions.filter(entry => {
         const value = comparable(entry);
-        return !target.markers.some(marker => value === comparable(marker) || value.includes(comparable(marker)));
+        return !(target.spec && value === target.spec) && entry !== target.pluginId;
       });
       if (data.extensions.length === before) continue;
       if (raw !== JSON.stringify(data, null, 2) + '\n') {

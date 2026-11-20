@@ -135,10 +135,13 @@ export class PluginInjectStrategy implements DeployStrategy {
       for (const key of this.flatPluginKeys(json, config)) {
         const entries = json[key] as unknown[];
         if (entries.some(entry => this.isReplacement(entry, config, resolvedSpec))) return true;
-        if (key !== pluginKey && entries.some(entry => this.matchesSpec(entry, resolvedSpec, config.pluginId))) return true;
+        if (key !== pluginKey && entries.some(entry => this.matchesSpec(entry, resolvedSpec, config))) return true;
       }
-      if (plugins.filter(entry => this.matchesSpec(entry, resolvedSpec, config.pluginId)).length > 1) return true;
-      return !plugins.some((entry) => this.matchesSpec(entry, resolvedSpec, config.pluginId));
+      const matching = plugins.filter(entry => this.matchesSpec(entry, resolvedSpec, config));
+      if (matching.length !== 1) return true;
+      const entry = matching[0];
+      return (config.configKey === 'extensions' || this.isHomeRelativeSpec(this.entrySpec(entry)))
+        && !this.canPreserveSpec(entry, resolvedSpec, config);
     } catch (err) {
       logger.warn('failed to read config file', { configPath, error: String(err) });
       return true;
@@ -226,7 +229,7 @@ export class PluginInjectStrategy implements DeployStrategy {
         mutated = false;
         for (const key of this.flatPluginKeys(json, config)) {
           const before = json[key] as unknown[];
-          const after = before.filter(entry => !this.matchesSpec(entry, resolvedSpec, config.pluginId)
+          const after = before.filter(entry => !this.matchesSpec(entry, resolvedSpec, config)
             && !this.isReplacement(entry, config, resolvedSpec));
           if (after.length !== before.length) { json[key] = after; mutated = true; }
         }
@@ -323,11 +326,11 @@ export class PluginInjectStrategy implements DeployStrategy {
     return process.platform === 'win32' ? resolved.replace(/\\/g, '/') : resolved;
   }
 
-  private matchesSpec(entry: unknown, resolvedSpec: string, pluginId: string): boolean {
+  private matchesSpec(entry: unknown, resolvedSpec: string, config: PluginInjectConfig): boolean {
     const entryStr = this.entrySpec(entry);
-
-    return this.normalizeSpecForComparison(entryStr) === this.normalizeSpecForComparison(resolvedSpec)
-      || entryStr.includes(pluginId);
+    if (this.normalizeSpecForComparison(entryStr) === this.normalizeSpecForComparison(resolvedSpec)) return true;
+    // Pi extensions are paths. A path containing the ID can belong to another extension.
+    return config.configKey === 'extensions' ? entryStr === config.pluginId : entryStr.includes(config.pluginId);
   }
 
   private normalizeSpecForComparison(spec: string): string {
@@ -335,8 +338,25 @@ export class PluginInjectStrategy implements DeployStrategy {
     if (normalized.startsWith('file://')) {
       try { normalized = fileURLToPath(normalized); } catch { /* retain malformed specs for comparison */ }
     }
+    normalized = resolveHome(normalized);
     if (process.platform === 'win32') normalized = normalized.replace(/\\/g, '/');
     return normalized.replace(/\/$/, '');
+  }
+
+  private isHomeRelativeSpec(spec: string): boolean {
+    return spec.startsWith('~/') || (process.platform === 'win32' && spec.startsWith('~\\'));
+  }
+
+  private canPreserveSpec(entry: unknown, resolvedSpec: string, config: PluginInjectConfig): boolean {
+    const spec = this.entrySpec(entry);
+    if (config.configKey === 'extensions') {
+      // Pi 0.73.1 accepts paths in extensions but does not resolve file URLs.
+      if (typeof entry !== 'string' || (spec.startsWith('file://') && !resolvedSpec.startsWith('file://'))) return false;
+    } else if (this.isHomeRelativeSpec(spec)) {
+      // Package plugin loaders such as OpenCode V1 need a canonical spec.
+      return false;
+    }
+    return this.normalizeSpecForComparison(spec) === this.normalizeSpecForComparison(resolvedSpec);
   }
 
   private entrySpec(entry: unknown): string {
@@ -355,7 +375,7 @@ export class PluginInjectStrategy implements DeployStrategy {
     const spec = this.entrySpec(entry);
     if (this.normalizeSpecForComparison(spec) === this.normalizeSpecForComparison(resolvedSpec)) return false;
     return config.replaceSpecs?.some(old => {
-      if (old.includes('$PILOT_DATA') || old.startsWith('file://') || path.isAbsolute(old)) {
+      if (old.includes('$PILOT_DATA') || old.startsWith('file://') || path.isAbsolute(old) || this.isHomeRelativeSpec(old)) {
         return this.normalizeSpecForComparison(spec) === this.normalizeSpecForComparison(this.resolveSpec(old));
       }
       return spec.includes(old);
@@ -375,9 +395,15 @@ export class PluginInjectStrategy implements DeployStrategy {
     let mutated = false;
     for (const key of this.flatPluginKeys(json, config)) {
       const before = json[key] as unknown[];
-      const after = before.filter(entry => !this.matchesSpec(entry, resolvedSpec, config.pluginId)
-        && !this.isReplacement(entry, config, resolvedSpec));
-      if (key === pluginKey) after.push(resolvedSpec);
+      let keptEquivalent = false;
+      const after = before.filter(entry => {
+        if (this.isReplacement(entry, config, resolvedSpec)) return false;
+        if (!this.matchesSpec(entry, resolvedSpec, config)) return true;
+        if (key !== pluginKey || keptEquivalent) return false;
+        keptEquivalent = this.canPreserveSpec(entry, resolvedSpec, config);
+        return keptEquivalent;
+      });
+      if (key === pluginKey && !keptEquivalent) after.push(resolvedSpec);
       if (JSON.stringify(before) !== JSON.stringify(after)) { json[key] = after; mutated = true; }
     }
     return mutated;
