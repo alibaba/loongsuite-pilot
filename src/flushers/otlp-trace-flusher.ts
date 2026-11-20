@@ -15,6 +15,7 @@ import {
   type EventLogRecord,
 } from '@loongsuite/otel-util-genai';
 import { planTurnStream } from './turn-stream.js';
+import { withUpstreamContextParent } from './upstream-context-parent.js';
 import { prepareCodexTurn } from './codex-turn-converter.js';
 import { prepareDelegatedTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
@@ -1647,8 +1648,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
           const conversionRecords = this.cfg.captureMessageContent === false
             ? prepared.records.map(stripAgentMessageContent)
             : prepared.records;
+          const conversionHandler = withUpstreamContextParent(conversionRecords, prepared.handler);
           const qwenCollaboration = conversionRecords.some(record => record['agent.source'] === 'qwen-work-cn-collaboration');
-          const stream = qwenCollaboration ? null : planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
+          const stream = qwenCollaboration ? null : planTurnStream(conversionRecords, { handler: conversionHandler, passthroughKeys });
           if (stream) {
             streamedExportSucceeded = true;
             const reasoning = { seen: false, total: 0 };
@@ -1695,7 +1697,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
               : convertEventLogToTrace;
             result = convert(
               conversionRecords,
-              { handler: prepared.handler, strict: false, passthroughKeys,
+              { handler: conversionHandler, strict: false, passthroughKeys,
                 ...(agentType === 'doubao-work' ? { observationTracer: provider.getTracer('@loongsuite/pilot-doubao-local-observation') } : {}) },
             );
           }

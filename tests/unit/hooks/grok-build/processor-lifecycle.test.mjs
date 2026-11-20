@@ -182,6 +182,56 @@ describe('Grok Build hook lifecycle', () => {
     expect(records()).toEqual(emitted);
   });
 
+  test.each([false, true])('exports a resumed prompt once after SessionEnd (old marker: %s)', (oldMarker) => {
+    const first = { ...basePayload, transcript_path: updatesPath, stop_reason: 'end_turn' };
+    expect(runHook('user_prompt_submit', first).status).toBe(0);
+    expect(runHook('stop', first).status).toBe(0);
+    expect(runHook('session_end', { ...first, prompt_id: undefined }).status).toBe(0);
+    const initialRecords = records();
+    expect(initialRecords.length).toBeGreaterThan(0);
+
+    if (oldMarker) {
+      const stateDir = path.join(dataDir, 'state', 'grok-build', 'sessions');
+      const stateFile = fs.readdirSync(stateDir).find(name => !name.startsWith('.') && name.endsWith('.json'));
+      fs.unlinkSync(path.join(stateDir, stateFile));
+    }
+    expect(runHook('user_prompt_submit', first).status).toBe(0);
+    expect(runHook('stop', first).status).toBe(0);
+    expect(records()).toEqual(initialRecords);
+
+    const resumed = { ...first, prompt_id: 'prompt-resumed', timestamp: '2026-07-29T03:49:03.000Z' };
+    fs.appendFileSync(chatPath, JSON.stringify({
+      type: 'user', prompt_index: 1, content: '<user_query>resumed question</user_query>',
+    }) + '\n');
+    expect(runHook('user_prompt_submit', resumed).status).toBe(0);
+    expect(runHook('stop', first).status).toBe(0);
+    expect(records()).toEqual(initialRecords);
+
+    fs.appendFileSync(chatPath, JSON.stringify({
+      type: 'assistant', content: 'resumed answer', model_id: 'grok',
+    }) + '\n');
+    fs.appendFileSync(updatesPath, JSON.stringify({
+      params: {
+        update: {
+          sessionUpdate: 'turn_completed',
+          prompt_id: resumed.prompt_id,
+          stop_reason: 'end_turn',
+          _meta: { promptIndex: 1 },
+        },
+      },
+    }) + '\n');
+    expect(runHook('stop', resumed).status).toBe(0);
+    expect(runHook('session_end', { ...resumed, prompt_id: undefined }).status).toBe(0);
+
+    const afterResume = records();
+    expect(afterResume.slice(0, initialRecords.length)).toEqual(initialRecords);
+    const appended = afterResume.slice(initialRecords.length);
+    expect(new Set(appended.map(record => record['gen_ai.turn.id']))).toEqual(new Set([resumed.prompt_id]));
+    expect(JSON.stringify(appended)).toContain('resumed answer');
+    expect(runHook('stop', resumed).status).toBe(0);
+    expect(records()).toEqual(afterResume);
+  });
+
   test('SessionEnd recovers only its completed turn after both transcript rails are atomically replaced', () => {
     const payload = { ...basePayload, transcript_path: updatesPath };
     expect(runHook('user_prompt_submit', payload).status).toBe(0);

@@ -1,5 +1,7 @@
 # Claude Code 下游 CLI 上下文传播
 
+仅需“上游应用 → Claude / Pilot”关联时，见[通用 W3C 入站](upstream-trace-ingress.md)：首轮环境桥接或 SDK 原生逐轮绑定，不需要开启本文的下游工具传播。
+
 本文介绍 LoongSuite Pilot 如何通过 Claude Code 的 `PreToolUse(Bash)` hook，
 把 Trace Context 和资源属性传给 Claude Code 调用的用户 CLI。
 

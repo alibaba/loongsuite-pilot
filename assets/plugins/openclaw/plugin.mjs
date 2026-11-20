@@ -41,6 +41,7 @@ import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
 import { installSteeredDeliveryObserver } from "./steered-delivery.mjs";
 import { createLegacyHandlers } from "./legacy-adapter.mjs";
 import { createObservationClock } from "./legacy-utils.mjs";
+import { bindProcessUpstreamTurn } from '../../hooks/shared/upstream-ingress.mjs';
 import {
   evaluateInterceptor,
   resolveDataDir,
@@ -931,6 +932,7 @@ function buildCommonFields(run, sessionId, userId) {
   if (run) {
     base.trace_id = run.traceId;
     base["gen_ai.turn.id"] = run.turnId || run.runId;
+    if (!run.cronExecution) base["agent.pilot.correlation.native_turn_id"] = run.runId;
     // The producer owns the start even if the collector restarts mid-run.
     // An explicit false keeps suffix responses from becoming a second start.
     base["gen_ai.turn.start"] = false;
@@ -1310,6 +1312,17 @@ function handleBeforePromptBuild(event, ctx, userId, emit, cfg) {
   // No emission — redundant with before_agent_run which has richer fields.
 }
 
+function bindUpstreamRun(run) {
+  if (!run.sessionId || run.cronExecution || run.announcedWork || run.upstreamBound
+    || !process.env.LOONGSUITE_PILOT_INGRESS_REQUEST_ID) return;
+  run.upstreamBound = bindProcessUpstreamTurn({
+    agentId: AGENT_TYPE,
+    sessionId: run.sessionId,
+    nativeTurnId: run.runId,
+    dataDir: resolveDataDir(),
+  }).recorded;
+}
+
 function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
   const runId = ctx?.runId || event?.runId;
   if (!runId) return;
@@ -1319,6 +1332,7 @@ function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
   if (event?.systemPrompt) run.systemPrompt = event.systemPrompt;
   if (ctx?.sessionId) run.sessionId = ctx.sessionId;
   if (ctx?.sessionKey) run.sessionKey = ctx.sessionKey;
+  bindUpstreamRun(run);
   const record = {
     ...buildCommonFields(run, ctx?.sessionId, userId),
     "event.name": "other",
@@ -1394,6 +1408,7 @@ function handleModelCallStarted(event, ctx, userId, emit) {
   if (event?.model) run.model = event.model;
   if (event?.sessionId) run.sessionId = run.sessionId || event.sessionId;
   if (event?.sessionKey) run.sessionKey = run.sessionKey || event.sessionKey;
+  bindUpstreamRun(run);
 
   if (run.announcedWork) {
     // New OpenClaw can suppress the persisted user prompt for internal events.

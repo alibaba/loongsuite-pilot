@@ -6,6 +6,8 @@ import {
   BasicTracerProvider,
   InMemorySpanExporter,
   SimpleSpanProcessor,
+  ParentBasedSampler,
+  AlwaysOnSampler,
 } from '@opentelemetry/sdk-trace-base';
 import { convertEventLogToTrace, ExtendedTelemetryHandler } from '@loongsuite/otel-util-genai';
 import type { EventLogRecord } from '@loongsuite/otel-util-genai';
@@ -13,6 +15,9 @@ import { CorrelationStore } from '../../../src/core/upstream-link/correlation-st
 import { TraceLinker } from '../../../src/core/upstream-link/trace-linker.js';
 import { contentHash } from '../../../src/utils/content-hash.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
+import { withUpstreamContextParent } from '../../../src/flushers/upstream-context-parent.js';
+import { bindUpstreamTurn } from '../../../assets/hooks/shared/upstream-ingress.mjs';
+import { planTurnStream } from '../../../src/flushers/turn-stream.js';
 import {
   attachReservedToolSpanIds,
   ReservedSpanIdGenerator,
@@ -104,6 +109,34 @@ describe('upstream-link e2e: stamp -> real converter reparents to upstream span'
   });
   afterEach(() => {
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it.each(['batch', 'stream'])('preserves remote sampling and tracestate through %s conversion without tools', async mode => {
+    for (const sampled of [true, false]) {
+      const records = buildTurn('ffeeddccbbaa99887766554433221100').filter(record => !String(record['event.name']).startsWith('tool.'));
+      for (const record of records) record['agent.pilot.correlation.native_turn_id'] = `native-${mode}-${sampled}`;
+      bindUpstreamTurn({ dataDir: dir, agentId: 'opencode', sessionId: SID, nativeTurnId: `native-${mode}-${sampled}`,
+        carrier: { traceparent: TP.slice(0, -2) + (sampled ? '01' : '00'), tracestate: 'vendor=value,second=ok' } });
+      const bindingDir = path.join(dir, 'acp-correlate');
+      await new TraceLinker(new CorrelationStore(bindingDir), { retries: 0 }).stamp(records);
+      const exporter = new InMemorySpanExporter();
+      const provider = new BasicTracerProvider({ sampler: new ParentBasedSampler({ root: new AlwaysOnSampler() }), spanProcessors: [new SimpleSpanProcessor(exporter)] });
+      const handler = withUpstreamContextParent(records, new ExtendedTelemetryHandler({ tracerProvider: provider }));
+      if (mode === 'stream') {
+        const stream = planTurnStream(records, { handler, passthroughKeys: [] });
+        expect(stream).toBeDefined();
+        await stream!(async () => { await provider.forceFlush(); });
+      } else convertEventLogToTrace(records as EventLogRecord[], { handler, strict: false });
+      await provider.forceFlush();
+      const spans = exporter.getFinishedSpans();
+      if (sampled) {
+        expect(spans.some(span => span.parentSpanId === UP_SPAN)).toBe(true);
+        expect(spans.every(span => span.spanContext().traceId === UP_TRACE && span.spanContext().traceFlags === 1
+          && span.spanContext().traceState?.serialize() === 'vendor=value,second=ok')).toBe(true);
+      } else expect(spans).toHaveLength(0);
+      await provider.shutdown();
+      fs.rmSync(bindingDir, { recursive: true, force: true });
+    }
   });
 
   it('all spans share upstream traceId and ENTRY hangs under the upstream span', async () => {

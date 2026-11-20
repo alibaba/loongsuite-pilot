@@ -50,6 +50,7 @@ export function buildCodexTranscriptSegment(
     'gen_ai.agent.id': turn.sessionId,
     'gen_ai.provider.name': turn.provider,
     'agent.codex.transcript_turn_id': turn.transcriptTurnId,
+    'agent.pilot.correlation.native_turn_id': turn.transcriptTurnId,
     ...(turn.status === 'interrupted' ? { 'agent.codex.turn_status': 'interrupted' } : {}),
     ...(turn.cwd ? { 'agent.codex.cwd': turn.cwd } : {}),
   };

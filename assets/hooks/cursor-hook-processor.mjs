@@ -18,6 +18,7 @@ import { pathToFileURL } from 'node:url';
 import { filterWorkspaceRecords } from './shared/workspace-privacy.mjs';
 import { decodePayload } from './shared/decode-payload.mjs';
 import { appendRawJsonl } from './shared/raw-jsonl-writer.mjs';
+import { bindProcessUpstreamTurn } from './shared/upstream-ingress.mjs';
 import {
   applyHookContentPolicy,
   hashJson,
@@ -456,6 +457,14 @@ async function main() {
 
   // Convert to internal event and append to journal
   const internalEvent = toInternalEvent(payload);
+  if (internalEvent.hook_event === 'beforeSubmitPrompt' && internalEvent.generation_id) {
+    bindProcessUpstreamTurn({
+      agentId: inferVariant([internalEvent]),
+      sessionId: internalEvent.conversation_id,
+      nativeTurnId: internalEvent.generation_id,
+      dataDir,
+    });
+  }
   const invocationResourceAttributes = collectResourceAttributesFromEnv(process.env, {
     agentId: 'cursor-cli',
   });

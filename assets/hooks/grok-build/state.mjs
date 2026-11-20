@@ -250,8 +250,8 @@ export function markPromptExported(state, promptId) {
     .slice(-MAX_RECENT_PROMPT_IDS);
 }
 
-export function clearState(sessionId) {
-  try { fs.unlinkSync(stateFilePath(sessionId)); } catch {}
+export function reopenSession(sessionId) {
+  fs.rmSync(closedMarkerPath(sessionId), { force: true });
 }
 
 export function isSessionClosed(sessionId, now = Date.now()) {

@@ -21,6 +21,7 @@ import { performance } from 'node:perf_hooks';
 import { decodePayload } from './shared/decode-payload.mjs';
 import { logHookError } from './shared/error-logger.mjs';
 import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
+import { bindProcessUpstreamTurn } from './shared/upstream-ingress.mjs';
 import {
   collectResourceAttributesFromEnv,
   parseSpanAttributesFromEnv,
@@ -160,7 +161,13 @@ function writeWakeupMarker(input, hookEvent) {
 
   // Option 1 (env): on the first turn read TRACEPARENT and write a session-level
   // correlation record (fail-open, once per session).
-  recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  if (process.env.LOONGSUITE_PILOT_INGRESS_REQUEST_ID) {
+    if (hookEvent === 'user-prompt-submit' && !input.agent_id) {
+      bindProcessUpstreamTurn({ agentId: AGENT_ID, sessionId, nativeTurnId: input.turn_id, dataDir: pilotDataDir() });
+    }
+  } else {
+    recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  }
 
   const directory = path.join(pilotDataDir(), 'state', 'codex', 'transcript-wakeups');
   const marker = path.join(directory, `${safePathPart(sessionId)}.json`);

@@ -16,6 +16,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 
 import { readStdinJson } from './shared/stdin-reader.mjs';
+import { bindProcessUpstreamTurn } from './shared/upstream-ingress.mjs';
 import {
   INITIAL_HASH,
   computeHash,
@@ -33,7 +34,7 @@ import {
 import {
   loadState,
   saveState,
-  clearState,
+  reopenSession,
   hasExportedPrompt,
   markPromptExported,
   cleanupExpiredStates,
@@ -508,6 +509,7 @@ function buildTurnRecords({
     trace_id: traceId,
     'gen_ai.session.id': sessionId,
     'gen_ai.turn.id': turnId,
+    ...(fusedTurn.promptId ? { 'agent.pilot.correlation.native_turn_id': fusedTurn.promptId } : {}),
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
     'gen_ai.framework': FRAMEWORK_NAME,
@@ -725,18 +727,26 @@ async function processHook(trigger) {
   const sessionId = requireSessionId(event);
   if (!sessionId) return;
   if (isSessionClosingStop(trigger, event)) return;
+  if (trigger === 'user_prompt_submit' && event.prompt_id) {
+    bindProcessUpstreamTurn({
+      agentId: AGENT_ID,
+      sessionId,
+      nativeTurnId: event.prompt_id,
+      dataDir: pilotDataDir(),
+    });
+  }
 
   cleanupExpiredStates();
   return withSessionStateLock(sessionId, () => processHookLocked(trigger, event, sessionId));
 }
 
 async function processHookLocked(trigger, event, sessionId) {
-  // SessionEnd is the final authority for a session. Keep a content-free,
-  // expiring tombstone before deleting state so a concurrently delayed Stop
-  // cannot recreate fresh state and export the same prompt again.
-  if (isSessionClosed(sessionId)) return;
+  const closed = isSessionClosed(sessionId);
+  if (closed && (trigger !== 'user_prompt_submit'
+    || typeof event.prompt_id !== 'string' || !event.prompt_id)) return;
 
   const state = loadState(sessionId);
+  if (closed && hasExportedPrompt(state, event.prompt_id)) return;
   if (event.transcript_path) {
     const eventTranscriptPath = validateUpdatesPath(event.transcript_path, sessionId);
     if (!eventTranscriptPath) {
@@ -778,17 +788,23 @@ async function processHookLocked(trigger, event, sessionId) {
   // from the beginning and selects only its real promptId/promptIndex, which
   // preserves the current turn without backfilling older completed turns.
   //
-  // A first SessionEnd has no current turn boundary we can identify safely, so
-  // it still establishes-and-clears the state without replaying history.
-  if (!state.initialized && (trigger === 'user_prompt_submit' || trigger === 'session_end')) {
+  // A first SessionEnd has no current turn boundary we can identify safely.
+  if (closed || (!state.initialized && (trigger === 'user_prompt_submit' || trigger === 'session_end'))) {
+    if (closed && !state.initialized) {
+      const updates = parseGrokUpdates(updatesPath);
+      const completed = updates.turns.filter((turn) => turn.completed);
+      if (completed.some((turn) => turn.promptId === event.prompt_id)) return;
+      state.updates_checkpoint = {
+        ...updates.checkpoint,
+        offset: updates.lastCompletedOffset,
+      };
+      for (const turn of completed) markPromptExported(state, turn.promptId);
+    }
     state.initialized = true;
     state.transcript_path = updatesPath;
-    if (trigger === 'session_end') {
-      markSessionClosed(sessionId);
-      clearState(sessionId);
-    } else {
-      saveState(sessionId, state);
-    }
+    saveState(sessionId, state);
+    if (closed) reopenSession(sessionId);
+    if (trigger === 'session_end') markSessionClosed(sessionId);
     return;
   }
 
@@ -857,10 +873,8 @@ async function processHookLocked(trigger, event, sessionId) {
         offset: updatesResult.lastCompletedOffset,
       };
     }
-    if (trigger === 'session_end') {
-      markSessionClosed(sessionId);
-      clearState(sessionId);
-    } else saveState(sessionId, state);
+    saveState(sessionId, state);
+    if (trigger === 'session_end') markSessionClosed(sessionId);
     return;
   }
 
@@ -918,13 +932,8 @@ async function processHookLocked(trigger, event, sessionId) {
       offset: updatesResult.lastCompletedOffset,
     };
   }
-  if (trigger === 'session_end') {
-    // Persist exported prompt IDs before closing. If the closed marker write is
-    // interrupted, a later hook can still deduplicate against the saved state.
-    saveState(sessionId, state);
-    markSessionClosed(sessionId);
-    clearState(sessionId);
-  } else saveState(sessionId, state);
+  saveState(sessionId, state);
+  if (trigger === 'session_end') markSessionClosed(sessionId);
 }
 
 const DISPATCH = {

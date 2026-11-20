@@ -163,20 +163,19 @@ Start with the guide that matches what you want to change:
 
 ### Upstream Trace Linking (optional)
 
-Link collected agent spans to an **upstream** trace so each turn's span tree reparents under the upstream span. Disabled by default, and fully fail-open (never affects normal collection/reporting).
+Link each Agent turn to the application span that started it. The [upstream trace setup guide](docs/upstream-trace-ingress.md) covers Pilot configuration, CLI commands, SDK and ACP integration, and how to verify consecutive turns. Linking is disabled by default and is fail-open.
 
 | Setting | Values | Default |
 | ------- | ------ | ------- |
-| `LOONGSUITE_PILOT_UPSTREAM_LINK` (env) · `upstreamLink.enabled` (config.json) | `true` / `1` to enable; unset, `false`, or `0` to disable | disabled |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK` (env) · `upstreamLink.enabled` (config.json) | `true` or `1` enables, `false` or `0` disables. An unset environment variable uses the file setting. | disabled |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS` (env) · `upstreamLink.propagateToTools` (config.json) | propagate trace context and optional resource attributes to supported CLI tool calls | disabled |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM` (env) · `upstreamLink.propagateToLlm` (config.json) | forward trace context to the LLM gateway as a `traceparent` request header (Claude Code) | disabled |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING` (env) · `upstreamLink.generateTraceWhenMissing` (config.json) | generate and propagate a per-turn local trace context when no valid upstream context is available | disabled |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS` (env) · `upstreamLink.ttlMs` (config.json) | cleanup TTL in ms for `acp-correlate` files | `86400000` (24h) |
 
-When enabled, the upstream `traceparent` reaches Pilot via one of two schemes and is stamped onto collected records (`trace_id` on the turn, `parent_span_id` on the user-input event):
-
-- **Correlation file** (per-turn): the caller writes `{sessionId, contentHash, contentPrefix, traceparent}` to `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl` when it sends a prompt. Linking is protocol-agnostic, but requires a supported collector/plugin that emits the turn's user-input event. `sessionId` must match the native `gen_ai.session.id` Pilot collects, and the content hash or prefix must match that input. OpenClaw and Hermes require the collector fixes in [PR #508](https://github.com/alibaba/loongsuite-pilot/pull/508); Hermes also requires updating its deployed Pilot plugin and restarting Hermes. See the [per-turn setup and deployment requirements](docs/zh-CN/upstream-trace-correlation.md). ACP clients satisfy this naturally (the `session/new` id flows into collection), so ACP is the primary case.
-- **Environment** (`TRACEPARENT` on the agent process): applied to the session's first turn only when a supported Pilot hook calls `recordUpstreamContextOnce` to write a session record. The OpenClaw and Hermes plugins do not read `TRACEPARENT` directly. Use this scheme with a supported hook when the caller cannot obtain a per-turn `sessionId` up front.
+- **Native turn binding** links each request using the Agent's native session and turn IDs. Launch a supported CLI with `TRACEPARENT`, optional `TRACESTATE`, and a fresh `LOONGSUITE_PILOT_INGRESS_REQUEST_ID`. SDK and ACP adapters can bind the turn on the Agent host using the shared helper.
+- **Correlation file** links a turn when the native session ID and an input hash or prefix match. See the [correlation file format and deployment requirements](docs/zh-CN/upstream-trace-correlation.md).
+- **First turn of a session** uses `TRACEPARENT` on the Agent process when its Hook calls `recordUpstreamContextOnce`.
 
 For Claude Code, enabling both `upstreamLink.enabled` and `propagateToTools` passes context into main-agent `Bash` calls. Pilot's `PreToolUse(Bash)` hook reserves the TOOL span id, prepends `TRACEPARENT` (and valid `TRACESTATE`, when present) to the Bash command, then reuses that id when the Stop hook builds the TOOL span. Optionally enable `generateTraceWhenMissing` so turns without upstream context generate and propagate a local trace. Set `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES` on the Claude Code process to have Pilot map it to standard `OTEL_RESOURCE_ATTRIBUTES` for the downstream CLI. Prefer `config.json` for the `upstreamLink` switches: environment variables affect only processes that inherit them, and `loongsuite-pilot restart` alone does not change an already-running Claude Code hook environment. The downstream CLI must extract Trace Context and configure its own exporter. This capability is fail-open and currently does not cover ACP-only downstream trace propagation, subagents, PowerShell, MCP tools, or non-Bash tools.
 

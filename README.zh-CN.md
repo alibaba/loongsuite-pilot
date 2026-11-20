@@ -145,22 +145,19 @@ loongsuite-pilot info
 
 ### 上游 Trace 串联(可选)
 
-把采集到的 agent span 挂到**上游** trace 下,使每一轮的 span 树重挂到上游 span。默认关闭,且全程 fail-open(绝不影响正常采集/上报)。
+把 Agent 每轮执行挂到发起它的应用 Span 下。[上游 Trace 接入指南](docs/zh-CN/upstream-trace-ingress.md) 给出了 Pilot 配置、CLI 启动和续聊命令、SDK 与 ACP 接入方式，以及两轮验收步骤。功能默认关闭，关联失败时正常采集和上报。
 
 | 配置项 | 取值 | 默认 |
 | ------ | ---- | ---- |
-| `LOONGSUITE_PILOT_UPSTREAM_LINK`(环境变量)· `upstreamLink.enabled`(config.json) | `true` / `1` 开启;不设、`false` 或 `0` 关闭 | 关闭 |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK`（环境变量）· `upstreamLink.enabled`（config.json） | `true` 或 `1` 开启，`false` 或 `0` 关闭。未设置环境变量时读取文件配置。 | 关闭 |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS`(环境变量)· `upstreamLink.propagateToTools`(config.json) | 将 Trace 上下文和可选资源属性传给受支持的下游 CLI 工具调用 | 关闭 |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM`(环境变量)· `upstreamLink.propagateToLlm`(config.json) | 以 `traceparent` 请求头把 Trace 上下文转发给 LLM 网关(Claude Code) | 关闭 |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING`(环境变量)· `upstreamLink.generateTraceWhenMissing`(config.json) | 没有有效上游上下文时，为每个 turn 生成本地 Trace 上下文并继续传播 | 关闭 |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS`(环境变量)· `upstreamLink.ttlMs`(config.json) | `acp-correlate` 文件清理 TTL(毫秒) | `86400000`(24 小时) |
 
-开启后,上游 `traceparent` 经以下两种方案之一到达 Pilot,并在采集时 stamp 到记录(turn 打 `trace_id`、用户输入事件打 `parent_span_id`):
-
-- **关联文件**(per-turn):调用方在发送 prompt 时,把 `{sessionId, contentHash, contentPrefix, traceparent}` 写入 `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl`。串联与协议无关，但要求采集器和 Agent 插件支持输出本轮用户输入事件；`sessionId` 须等于 Pilot 采集的原生 `gen_ai.session.id`，且内容 hash 或前缀能匹配该输入。OpenClaw / Hermes 需使用包含 [PR #508](https://github.com/alibaba/loongsuite-pilot/pull/508) 全部修复的采集器，Hermes 还需更新已部署的 Pilot 插件并重启进程。ACP client 天然满足(`session/new` 的 id 会贯穿采集),故 ACP 是主要场景。
-- **环境变量**(agent 进程上的 `TRACEPARENT`):仅对调用 `recordUpstreamContextOnce` 写入 session 记录的受支持 Hook 生效，作用于会话首轮；OpenClaw / Hermes 插件本身不直接读取该变量。适用于有对应 Hook 支持、但调用方无法预先拿到 per-turn `sessionId` 的情况。
-
-逐轮关联的文件格式、接入示例、OpenClaw / Hermes 版本要求和验证方法见[逐轮 Trace 上下文关联接入](docs/zh-CN/upstream-trace-correlation.md)。
+- **原生轮次绑定**按 Agent 原生会话 ID 和轮次 ID 关联每次请求。启动受支持的 CLI 时传 `TRACEPARENT`、可选的 `TRACESTATE` 和每次新生成的 `LOONGSUITE_PILOT_INGRESS_REQUEST_ID`。SDK 和 ACP 适配器可以在 Agent 侧调用共享接口绑定该轮。
+- **关联文件**按原生会话 ID 和输入内容的 hash 或前缀匹配该轮。见[文件格式与部署要求](docs/zh-CN/upstream-trace-correlation.md)。
+- **会话首轮**通过 Agent 进程环境中的 `TRACEPARENT` 传入，由对应 Hook 调用 `recordUpstreamContextOnce` 记录。
 
 对于 Claude Code，同时开启 `upstreamLink.enabled` 和 `propagateToTools` 后，Pilot 会把上下文传给主 agent 的 `Bash` 调用。`PreToolUse(Bash)` hook 会预留 TOOL span id，在 Bash 命令前注入 `TRACEPARENT`（存在有效值时也注入 `TRACESTATE`），Stop hook 构建 TOOL span 时再复用同一个 id。可选开启 `generateTraceWhenMissing`，使没有上游上下文的 turn 也生成并传播本地 Trace。用户还可在启动 Claude Code 时设置 `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES`，Pilot 会将其映射为下游 CLI 可读取的标准 `OTEL_RESOURCE_ATTRIBUTES`。建议把 `upstreamLink` 开关写入 `config.json`；环境变量只对继承它的进程生效，单独执行 `loongsuite-pilot restart` 不会修改已运行 Claude Code 的 hook 环境。下游 CLI 需要自行提取 Trace Context 并配置 trace exporter；Go 探针可直接按 OpenTelemetry 标准读取资源属性。该能力全程 fail-open，当前不覆盖 ACP-only 下游 Trace 传播、subagent、PowerShell、MCP 和非 Bash 工具。
 

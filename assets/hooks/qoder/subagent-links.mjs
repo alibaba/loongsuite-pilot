@@ -148,6 +148,8 @@ export class QoderSubagentLinks {
     }
     for (const record of records) {
       record.trace_id = checkpoint.traceContext.traceId;
+      if (checkpoint.traceContext.traceparent) record['agent.pilot.upstream.traceparent'] = checkpoint.traceContext.traceparent;
+      if (checkpoint.traceContext.tracestate) record['agent.pilot.upstream.tracestate'] = checkpoint.traceContext.tracestate;
       if (checkpoint.traceContextLocked) record['agent.qoder.trace_context_locked'] = true;
       record['gen_ai.agent.id'] = source.subagentId ?? source.sessionId;
       if (source.subagentId) record['agent.qoder.subagent_id'] = source.subagentId;

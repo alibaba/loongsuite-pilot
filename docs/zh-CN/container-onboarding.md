@@ -111,6 +111,10 @@ spec:
       exec /mnt/pilot/start.sh --agents=claude-code -- claude -p "review this PR"
 ```
 
+## 上游 Trace 串联
+
+Webhook 通过 preload 在业务容器中启动 Pilot 时，在该容器的 `env` 添加 `LOONGSUITE_PILOT_UPSTREAM_LINK=1`。注入配置选用包含逐轮入站能力的 Pilot init 镜像，并滚动重建业务 Pod。Pod 设置开启采集器的关联能力，Web 服务在每次调用 Agent 时传入该次请求的上下文。环境变量示例、调用方式和验收步骤见[上游 Trace 接入指南](upstream-trace-ingress.md#用环境变量开启)。
+
 ## 多个身份目录
 
 Linux 下可在业务容器中设置 `LOONGSUITE_PILOT_HOOK_SCOPE=system`，一次注册后覆盖后续身份，无需修改 webhook。现有 preload 和 `start.sh` 会把继承的环境交给公共安装入口；不指定 agents 时仍自动探测。Grok/Codex 使用原生系统配置；Pi/DSH 的后续身份须复用同一 `PI_CODING_AGENT_DIR` / `DSH_HOME`。系统配置需要业务容器具备写权限。

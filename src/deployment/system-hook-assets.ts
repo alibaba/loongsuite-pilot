@@ -6,6 +6,7 @@ export const CODEX_SYSTEM_HOOK_ASSETS = [
   'codex-hook-processor.mjs', 'shared/decode-payload.mjs',
   'shared/error-logger.mjs', 'shared/hook-metrics.mjs',
   'shared/resource-context.mjs', 'shared/sync-file-lock.mjs', 'shared/upstream-context.mjs',
+  'shared/upstream-ingress.mjs',
 ] as const;
 
 function manifest(agentId: string): readonly string[] {
