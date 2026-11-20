@@ -138,6 +138,84 @@ describe('trae-cn hook processor', () => {
     expect(readOtlpDebugSpans().length).toBeGreaterThan(0);
   });
 
+  test('keeps opaque session IDs separate when their old filename keys collided', () => {
+    const first = 'native:resume';
+    const second = 'native.resume';
+    expect(runHook('user-prompt-submit', { session_id: first, prompt: 'first synthetic prompt' }).status).toBe(0);
+    expect(runHook('user-prompt-submit', { session_id: second, prompt: 'second synthetic prompt' }).status).toBe(0);
+    expect(runHook('pre-tool-use', { session_id: first, tool_use_id: 'first-call', tool_name: 'Read' }).status).toBe(0);
+    expect(readState(first)).toMatchObject({ session_id: first, pending_tool_calls: { 'first-call': { name: 'Read' } } });
+    expect(readState(second)).toMatchObject({ session_id: second, pending_tool_calls: {} });
+    const call = readEmittedJsonl().find(record => record['event.name'] === 'tool.call');
+    expect(call['gen_ai.session.id']).toBe(first);
+  });
+
+  test('keeps matching legacy state and rejects a foreign normalized state file', () => {
+    const matching = 'native_existing';
+    expect(runHook('user-prompt-submit', { session_id: matching, prompt: 'matching legacy prompt' }).status).toBe(0);
+    const original = readState(matching);
+    expect(runHook('pre-tool-use', { session_id: matching, tool_use_id: 'existing-call', tool_name: 'Read' }).status).toBe(0);
+    expect(readState(matching)).toMatchObject({ trace_id: original.trace_id, turn_id: original.turn_id });
+
+    const normalized = 'native_ambiguous';
+    const foreign = { ...original, session_id: 'native:ambiguous' };
+    fs.writeFileSync(statePath(normalized), JSON.stringify(foreign));
+    const before = readEmittedJsonl().length;
+    expect(runHook('post-tool-use', { session_id: normalized, tool_use_id: 'foreign-call' }).status).toBe(0);
+    expect(runHook('notification', { session_id: normalized, notification_type: 'idle_prompt' }).status).toBe(0);
+    expect(readState(normalized)).toEqual(foreign);
+    expect(readState(foreign.session_id)).toBeNull();
+    expect(readEmittedJsonl()).toHaveLength(before);
+  });
+
+  test.each(['missing', 'invalid', 'non-object'])('withholds content when the configured privacy policy is %s', kind => {
+    const marker = 'synthetic-withheld-by-unavailable-policy';
+    const session = 'unavailable-policy';
+    const config = path.join(dataDir, 'external.json');
+    if (kind !== 'missing') fs.writeFileSync(config, kind === 'invalid' ? '{"agents":' : '[]');
+    const env = { AGENT_DATA_COLLECTION_CONFIG: config, LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
+
+    expect(runHook('user-prompt-submit', { session_id: session, prompt: marker }, env).status).toBe(0);
+    expect(runHook('pre-tool-use', { session_id: session, tool_use_id: 'safe-id', tool_name: 'Read',
+      tool_input: { path: marker } }, env).status).toBe(0);
+    expect(runHook('stop', { session_id: session, last_assistant_message: marker,
+      usage: { input_tokens: 2, output_tokens: 3 } }, env).status).toBe(0);
+    expect(JSON.stringify(readState(session))).not.toContain(marker);
+    const history = readEmittedJsonl();
+    if (kind === 'missing') {
+      expect(history.some(record => record['gen_ai.tool.call.id'] === 'safe-id')).toBe(true);
+      expect(history.some(record => record['gen_ai.usage.output_tokens'] === 3)).toBe(true);
+    }
+    expect(JSON.stringify(history)).not.toContain(marker);
+    expect(readOtlpDebugSpans()).toEqual([]);
+  });
+
+  test('retains the capture-enabled default when no policy path or file is configured', () => {
+    const session = 'default-capture';
+    const marker = 'synthetic-default-permitted';
+    expect(runHook('user-prompt-submit', { session_id: session, prompt: marker },
+      { AGENT_DATA_COLLECTION_CONFIG: '', LOONGSUITE_PILOT_OTLP_DEBUG: '1' }).status).toBe(0);
+    expect(readState(session).prompt).toBe(marker);
+    expect(JSON.stringify(readEmittedJsonl())).toContain(marker);
+    expect(JSON.stringify(readOtlpDebugSpans())).toContain(marker);
+  });
+
+  test('does not copy a pending trace’s earlier contents back into debug output after opt-out', () => {
+    const env = { AGENT_DATA_COLLECTION_CONFIG: '', LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
+    const session = 'toggled-debug-privacy';
+    const independent = 'independent-debug-session';
+    expect(runHook('user-prompt-submit', { session_id: session, prompt: 'earlier-pending-prompt' }, env).status).toBe(0);
+    expect(runHook('user-prompt-submit', { session_id: independent, prompt: 'already-permitted-other-trace' }, env).status).toBe(0);
+    expect(JSON.stringify(readOtlpDebugSpans())).toContain('earlier-pending-prompt');
+
+    fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({ agents: { 'trae-cn': { captureMessageContent: false } } }));
+    expect(runHook('stop', { session_id: session, last_assistant_message: 'new-opted-out-response' }, env).status).toBe(0);
+    const debug = JSON.stringify(readOtlpDebugSpans());
+    expect(debug).toContain('already-permitted-other-trace');
+    expect(debug).toContain(session);
+    expect(debug).not.toMatch(/earlier-pending-prompt|new-opted-out-response/);
+  });
+
   test.skipIf(process.platform === 'win32')('deploys executable event commands and replaces registrations without subcommands', async () => {
     const installDir = path.join(dataDir, 'custom pilot data');
     const hooksDir = path.join(installDir, 'hooks');
@@ -202,6 +280,40 @@ describe('trae-cn hook processor', () => {
     const toolRecords = records.filter(record => record['gen_ai.tool.call.id'] === 'toolu_01');
     expect(toolRecords).toHaveLength(2);
     expect(toolRecords[0].span_id).toBe(toolRecords[1].span_id);
+  });
+
+  const powershell = process.env.PILOT_TEST_PWSH || (process.platform === 'win32'
+    ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : undefined);
+  test.skipIf(!powershell)('uses the data-directory Node pin under PowerShell CLM with a literal bracket path', () => {
+    const installDir = path.join(dataDir, 'custom pilot [data]');
+    const hooks = path.join(installDir, 'hooks');
+    fs.cpSync(path.dirname(PROCESSOR), hooks, { recursive: true });
+    fs.writeFileSync(path.join(installDir, 'node-bin'), process.execPath + '\n');
+
+    const wrapper = path.join(hooks, 'trae-cn-loongsuite-pilot-hook.ps1').replaceAll("'", "''");
+    const script = path.join(dataDir, 'trae-clm.ps1');
+    fs.writeFileSync(script, `\uFEFF$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n& '${wrapper}' user-prompt-submit\n`);
+    const env = {
+      ...process.env,
+      HOME: dataDir,
+      USERPROFILE: dataDir,
+      PATH: process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32') : '/usr/bin:/bin',
+      AGENT_DATA_COLLECTION_CONFIG: path.join(dataDir, 'unavailable-policy.json'),
+      LOONGSUITE_PILOT_OTLP_DEBUG: '1',
+    };
+    delete env.LOONGSUITE_PILOT_CACHE_DIR;
+    delete env.LOONGSUITE_PILOT_DATA_DIR;
+    const marker = 'synthetic-wrapper-content';
+    const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-File', script], {
+      input: JSON.stringify({ session_id: 'clm-wrapper-test', prompt: marker }), env,
+      encoding: 'utf8', timeout: 10_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    logDir = path.join(installDir, 'logs', 'trae-cn', 'history');
+    expect(readEmittedJsonl().some(record => record['event.name'] === 'llm.request')).toBe(true);
+    expect(JSON.stringify(readEmittedJsonl())).not.toContain(marker);
+    expect(fs.existsSync(path.join(installDir, 'logs', 'otlp-debug'))).toBe(false);
   });
 
   test('agents.d/trae-cn.json declares all 6 hook events', () => {

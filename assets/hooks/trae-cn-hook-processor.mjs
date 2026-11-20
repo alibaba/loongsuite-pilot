@@ -98,10 +98,9 @@ function stateDir() {
 }
 
 function sessionStatePath(sessionId) {
-  const safe = String(sessionId || 'unknown')
-    .replace(/[^a-zA-Z0-9_-]/g, '_')
-    .slice(0, 128);
-  const hash = crypto.createHash('sha256').update(safe).digest('hex');
+  // The digest is already a filesystem-safe name. Normalizing the opaque ID
+  // before hashing allowed different native sessions to share state.
+  const hash = crypto.createHash('sha256').update(sessionId).digest('hex');
   return path.join(stateDir(), `${hash}.json`);
 }
 
@@ -110,7 +109,9 @@ function loadSessionState(sessionId) {
   try {
     if (!fs.existsSync(file)) return null;
     const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    // A conventional ID may still have a file from a different session whose
+    // old normalized ID happened to match. Never read or migrate that state.
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || raw.session_id !== sessionId) return null;
     // TTL check (§2.9): expire stale turn state
     const ts = Number(raw.last_activity_at_sec || 0);
     if (ts && nowSec() - ts > TURN_STATE_TTL_MS / 1000) {
@@ -142,10 +143,6 @@ function saveSessionState(sessionId, state, runtimeConfig) {
     logHookError({ agentId: AGENT_ID, stage: 'session_state', errorType: 'save_failed',
       errorMessage: err?.message || String(err) });
   }
-}
-
-function clearSessionState(sessionId) {
-  try { fs.unlinkSync(sessionStatePath(sessionId)); } catch { /* best-effort */ }
 }
 
 function tryReadStdin() {
@@ -957,6 +954,19 @@ function toolResultRecord(state, base, timestamp, toolUseId, toolName, toolRespo
 
 // ─── record emission helpers ───
 
+function loadTraeRuntimeConfig() {
+  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+  if (!runtimeConfig.policyAvailable) {
+    runtimeConfig.agents = { ...runtimeConfig.agents, [AGENT_ID]: { captureMessageContent: false } };
+  }
+  return runtimeConfig;
+}
+
+function applyTraeContentPolicy(record, runtimeConfig) {
+  if (shouldCaptureHookMessageContent(AGENT_ID, runtimeConfig)) return record;
+  return applyHookContentPolicy({ ...record, 'gen_ai.agent.type': AGENT_ID }, runtimeConfig);
+}
+
 function emitRecords(state, records, runtimeConfig) {
   if (!records || records.length === 0) return;
   records.sort((a, b) => {
@@ -967,12 +977,12 @@ function emitRecords(state, records, runtimeConfig) {
     return 0;
   });
   const cleaned = records.map((r) =>
-    applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
+    applyTraeContentPolicy(sanitizeObject(r) || r, runtimeConfig));
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
   // Round 5 #4: also emit OTLP JSONL to otlp-debug so validate-trace --latest
   // can consume without the pilot-service flusher running.
-  if (otlpDebugEnabled()) {
-    try { writeOtlpDebugRecords(cleaned); } catch { /* best-effort */ }
+  if (runtimeConfig.policyAvailable && otlpDebugEnabled()) {
+    try { writeOtlpDebugRecords(cleaned, runtimeConfig); } catch { /* best-effort */ }
   }
 }
 
@@ -1118,8 +1128,10 @@ function buildOtlpSpanFromRecord(record) {
 // by spanId, merge attributes (union, later wins for scalar conflicts), and
 // overwrite the file with one span per spanId. The .jsonl is bounded to a
 // daily file so the rewrite cost is negligible.
-function writeOtlpDebugRecords(records) {
+function writeOtlpDebugRecords(records, runtimeConfig) {
   if (!records || records.length === 0) return;
+  const redactTraces = shouldCaptureHookMessageContent(AGENT_ID, runtimeConfig)
+    ? undefined : new Set(records.map(record => record.trace_id));
   const dir = otlpDebugDir();
   fs.mkdirSync(dir, { recursive: true });
   const today = (() => {
@@ -1145,7 +1157,11 @@ function writeOtlpDebugRecords(records) {
             // records — the file already contains OTLP spans, so we
             // unwrap attributes + metadata back into record form for merge.
             if (obj && obj.spanId && obj.traceId) {
-              existingRecords.push(otlpSpanToRecord(obj));
+              const record = otlpSpanToRecord(obj);
+              // A Stop after opt-out must not carry previously captured
+              // content forward when it merges this turn into the debug file.
+              existingRecords.push(redactTraces?.has(obj.traceId)
+                ? applyTraeContentPolicy(record, runtimeConfig) : record);
             }
           } catch { /* skip malformed */ }
         }
@@ -1412,14 +1428,16 @@ function cmdStop(event, sessionId, runtimeConfig) {
   // We bypass the history JSONL (already has these span_ids from earlier
   // emit) and write only to OTLP debug so the OTLP merge (round 6 #5) keeps
   // the latest end. This preserves round 3 + round 5 unit-test invariants.
-  if (otlpDebugEnabled()) {
+  if (runtimeConfig.policyAvailable && otlpDebugEnabled()) {
     const base = baseFields(state, runtimeConfig);
     const corrected = [
       entryRecord(state, base, state.stop_timestamp),
       agentRecord(state, base, state.stop_timestamp),
       stepRecord(state, base, state.stop_timestamp),
     ];
-    try { writeOtlpDebugRecords(corrected); } catch { /* best-effort */ }
+    try {
+      writeOtlpDebugRecords(corrected.map(record => applyTraeContentPolicy(record, runtimeConfig)), runtimeConfig);
+    } catch { /* best-effort */ }
   }
   saveSessionState(sessionId, state, runtimeConfig);
 }
@@ -1463,8 +1481,6 @@ function cmdNotification(event, sessionId, runtimeConfig) {
       if (stub[k] === undefined) delete stub[k];
     });
     saveSessionState(sessionId, stub, runtimeConfig);
-  } else {
-    clearSessionState(sessionId);
   }
 }
 
@@ -1631,7 +1647,7 @@ async function emitFridaEnrichmentSpans(probeLines) {
       'agent.trae-cn.source': 'frida_probe',
     });
   }
-  emitRecords({ trace_id: traceId }, records, loadHookRuntimeConfig(pilotDataDir()));
+  emitRecords({ trace_id: traceId }, records, loadTraeRuntimeConfig());
 }
 
 async function cmdFridaEnrich() {
@@ -1672,7 +1688,7 @@ async function dispatch(sub) {
   // A Hook is a separate process. Hold the lock through load, emit and save.
   const lock = `${sessionStatePath(sessionId)}.lock`;
   const result = withSyncFileLock(lock, SESSION_LOCK_WAIT_MS, SESSION_LOCK_STALE_MS, () => {
-    const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+    const runtimeConfig = loadTraeRuntimeConfig();
     DISPATCH[sub](event, sessionId, runtimeConfig);
   });
   if (!result.acquired) {
