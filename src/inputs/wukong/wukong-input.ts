@@ -88,6 +88,7 @@ interface StepContext {
 // triggered. An explicit boundary or evidence of a new decision opens a step.
 interface StepAcc {
   ctx: StepContext;
+  nativeStep?: { name: string; finishedAt?: number };
   reasoning: string;
   text: string;
   textMessageId?: string;
@@ -549,12 +550,12 @@ export class WukongInput extends BaseInput {
       if (!stepsByMessageId.has(messageId)) stepsByMessageId.set(messageId, step);
     };
     const stepForTool = (startTs: number, parentMessageId?: string): StepAcc => {
-      if (hasStepEvents) return cur ?? openStep(startTs);
       const parent = parentMessageId ? stepsByMessageId.get(parentMessageId) : undefined;
       if (parent) {
         parent.toolParentMessageId ??= parentMessageId;
         return parent;
       }
+      if (hasStepEvents) return cur ?? openStep(startTs);
       const distinctParent = parentMessageId && cur?.toolParentMessageId && parentMessageId !== cur.toolParentMessageId;
       // A declaration END can precede actual execution. Use confirmed results
       // for the time fallback, and keep ambiguous declarations together.
@@ -585,13 +586,16 @@ export class WukongInput extends BaseInput {
       switch (evt.type) {
         case 'STEP_STARTED': {
           const s = openStep(evt.timestamp);
+          if (typeof evt.stepName === 'string' && evt.stepName) s.nativeStep = { name: evt.stepName };
           rememberMessage(s, evt.messageId);
           break;
         }
 
-        case 'STEP_FINISHED':
-          // Authoritative boundary marker; the next STEP_STARTED opens the next step.
+        case 'STEP_FINISHED': {
+          const nativeStep = steps[steps.length - 1]?.nativeStep;
+          if (nativeStep && nativeStep.name === evt.stepName) nativeStep.finishedAt = evt.timestamp;
           break;
+        }
 
         case 'REASONING_START': {
           const s = stepForUtterance(evt);
@@ -663,7 +667,8 @@ export class WukongInput extends BaseInput {
             ? evt.parentMessageId : undefined;
           let step: StepAcc | undefined;
           if (hasStepEvents) {
-            step = steps[steps.length - 1];
+            const parent = parentMessageId ? stepsByMessageId.get(parentMessageId) : undefined;
+            step = parent ?? steps[steps.length - 1];
           } else if (parentMessageId && typeof evt.toolCallId === 'string' && endedToolIds.has(evt.toolCallId)) {
             // Bind by declaration order. Several calls can end in a different
             // order than they started, and an aborted declaration opens no step.
@@ -783,12 +788,29 @@ export class WukongInput extends BaseInput {
     // Use the decision's source boundary for its inferred request. A late
     // result from an earlier decision does not move this decision forward.
     const runStartTs = runStartedTs ?? steps[0].ctx.startTimestamp;
+    const sequentialModelSteps = steps.every((step, i) => {
+      if (!step.nativeStep || step.hasTools) return false;
+      const next = steps[i + 1];
+      const finishedAt = step.nativeStep.finishedAt;
+      return !next || (finishedAt !== undefined && step.ctx.startTimestamp <= finishedAt
+        && step.lastContentTs <= finishedAt && finishedAt <= next.ctx.startTimestamp);
+    });
+    let previousModelEndTs = runStartTs;
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i];
       const isFinal = i === finalIdx;
 
       const startTs = i === 0 ? runStartTs : s.ctx.startTimestamp;
-      const reqTs = s.firstToolTs === undefined ? startTs : Math.max(runStartTs, Math.min(startTs, s.firstToolTs - 2));
+      let reqTs = startTs;
+      if (s.firstToolTs !== undefined) {
+        reqTs = Math.max(runStartTs, Math.min(startTs, s.firstToolTs - 2));
+      } else if (sequentialModelSteps) {
+        // The converter uses whole milliseconds. A completed model-only step
+        // can use a free tick before a tied handoff. Otherwise advance only
+        // the inferred model timings by the minimum needed to stay sequential.
+        const tiedBoundary = s.nativeStep?.finishedAt === startTs && steps[i + 1]?.ctx.startTimestamp === startTs;
+        reqTs = tiedBoundary && previousModelEndTs <= startTs - 1 ? startTs - 1 : Math.max(startTs, previousModelEndTs);
+      }
       let respTs: number;
       if (s.hasTools && s.firstToolTs !== undefined) {
         respTs = Math.max(reqTs + 1, s.firstToolTs - 1);
@@ -797,6 +819,7 @@ export class WukongInput extends BaseInput {
       } else {
         respTs = Math.max(reqTs + 1, s.lastContentTs);
       }
+      previousModelEndTs = Math.max(respTs, s.nativeStep?.finishedAt ?? respTs);
       const finishReasons = this.inferFinishReasons(s.hasTools, isFinal ? runError : undefined);
       const llmSpanId = generateSpanId();
       const includeUserContent = i === 0 && !!userContent;

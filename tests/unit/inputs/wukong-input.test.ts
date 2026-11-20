@@ -188,6 +188,107 @@ describe('WukongInput', () => {
   }
 
   it.each([
+    { firstEnd: 4, secondStart: 4, handoff: 5 },
+    { firstEnd: 5, secondStart: 5, handoff: 6 },
+  ])('keeps explicitly sequential model steps ordered at a tied boundary with prior finish $firstEnd', async ({
+    firstEnd, secondStart, handoff,
+  }) => {
+    const base = 1779240560000;
+    const event = (type: string, offset: number, fields: Record<string, unknown> = {}) => ({
+      type, timestamp: base + offset, ...fields,
+    });
+    const events = [
+      event('RUN_STARTED', 0),
+      event('STEP_STARTED', 2, { stepName: 'first' }),
+      event('TEXT_MESSAGE_CONTENT', 3, { messageId: 'one', delta: 'First.' }),
+      event('TEXT_MESSAGE_END', firstEnd, { messageId: 'one' }),
+      event('STEP_FINISHED', firstEnd, { stepName: 'first' }),
+      event('STEP_STARTED', 5, { stepName: 'second' }),
+      event('TEXT_MESSAGE_CONTENT', 5, { messageId: 'two', delta: 'Second.' }),
+      event('TEXT_MESSAGE_END', 5, { messageId: 'two' }),
+      event('STEP_FINISHED', 5, { stepName: 'second' }),
+      event('STEP_STARTED', 5, { stepName: 'third' }),
+      event('TEXT_MESSAGE_CONTENT', 9, { messageId: 'three', delta: 'Third.' }),
+      event('TEXT_MESSAGE_END', 10, { messageId: 'three' }),
+      event('STEP_FINISHED', 10, { stepName: 'third' }),
+      event('RUN_FINISHED', 10),
+    ];
+    const messages = [SAMPLE_MESSAGES[0], { ...SAMPLE_MESSAGES[1], createdAt: base, events, isComplete: 1 }];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const spans = await exportInput();
+    const ms = (time: ReadableSpan['startTime']) => time[0] * 1000 + time[1] / 1_000_000 - base;
+    const expectedTimes = [[0, firstEnd], [secondStart, handoff], [handoff, 10]];
+    for (const kind of ['LLM', 'STEP']) {
+      const intervals = spans.filter(span => span.attributes['gen_ai.span.kind'] === kind)
+        .map(span => [ms(span.startTime), ms(span.endTime)]);
+      expect(intervals).toEqual(expectedTimes);
+    }
+  });
+
+  it.each([undefined, 'unknown-parent'])('keeps known tool ownership with overlapping explicit steps and fallback %s', async (fallbackParent) => {
+    const base = 1779240560000;
+    const event = (type: string, offset: number, fields: Record<string, unknown> = {}) => ({
+      type, timestamp: base + offset, ...fields,
+    });
+    const events = [
+      event('RUN_STARTED', 0, { runId: 'run' }),
+      event('STEP_STARTED', 5, { stepName: 'first' }),
+      event('TEXT_MESSAGE_CONTENT', 10, { messageId: 'one', delta: 'First.' }),
+      event('TEXT_MESSAGE_END', 12, { messageId: 'one' }),
+      event('TOOL_CALL_START', 20, { toolCallId: 'a', toolCallName: 'first-tool', parentMessageId: 'one' }),
+      event('TOOL_CALL_END', 25, { toolCallId: 'a' }),
+      event('STEP_STARTED', 30, { stepName: 'second' }),
+      event('TEXT_MESSAGE_CONTENT', 31, { messageId: 'two', delta: 'Second.' }),
+      event('TEXT_MESSAGE_END', 36, { messageId: 'two' }),
+      event('TOOL_CALL_START', 40, { toolCallId: 'b', toolCallName: 'second-tool', parentMessageId: 'one' }),
+      event('TOOL_CALL_END', 45, { toolCallId: 'b' }),
+      event('TOOL_CALL_START', 48, { toolCallId: 'c', toolCallName: 'third-tool', parentMessageId: fallbackParent }),
+      event('TOOL_CALL_RESULT', 50, { toolCallId: 'a', messageId: 'result-a', content: 'one a' }),
+      event('TOOL_CALL_END', 53, { toolCallId: 'c' }),
+      event('TOOL_CALL_RESULT', 58, { toolCallId: 'c', messageId: 'result-c', content: 'two c' }),
+      event('TOOL_CALL_RESULT', 60, { toolCallId: 'b', messageId: 'result-b', content: 'one b' }),
+      event('STEP_FINISHED', 65, { stepName: 'first' }),
+      event('STEP_FINISHED', 75, { stepName: 'second' }),
+      event('STEP_STARTED', 80, { stepName: 'answer' }),
+      event('TEXT_MESSAGE_CONTENT', 85, { messageId: 'three', delta: 'Final.' }),
+      event('TEXT_MESSAGE_END', 90, { messageId: 'three' }),
+      event('STEP_FINISHED', 95, { stepName: 'answer' }),
+      event('RUN_FINISHED', 100, { runId: 'run' }),
+    ];
+    const messages = [SAMPLE_MESSAGES[0], { ...SAMPLE_MESSAGES[1], createdAt: base, events, isComplete: 1 }];
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages }),
+    }));
+    createInput();
+    seedSeenCounts();
+    const spans = await exportInput();
+    const ms = (time: ReadableSpan['startTime']) => time[0] * 1000 + time[1] / 1_000_000 - base;
+    const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms.map(span => [span.attributes['gen_ai.response.id'], ms(span.startTime)]))
+      .toEqual([['one', 0], ['two', 30], ['three', 80]]);
+    const tools = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL');
+    expect(tools.map(span => [
+      span.attributes['gen_ai.tool.call.id'], span.parentSpanId, ms(span.startTime), ms(span.endTime),
+    ])).toEqual([
+      ['a', llms[0].parentSpanId, 20, 50],
+      ['b', llms[0].parentSpanId, 40, 60],
+      ['c', llms[1].parentSpanId, 48, 58],
+    ]);
+    const secondInput = String(llms[1].attributes['gen_ai.input.messages']);
+    const finalInput = String(llms[2].attributes['gen_ai.input.messages']);
+    for (const result of ['one a', 'one b', 'two c']) {
+      expect(secondInput).not.toContain(result);
+      expect(finalInput).toContain(result);
+    }
+  });
+
+  it.each([
     { name: 'early text before declaration END', toolEnd: 65, toolResult: 90 },
     { name: 'early text after declaration END but before execution result', toolEnd: 25, toolResult: 90 },
     { name: 'a result with the same timestamp', toolEnd: 25, toolResult: 40 },
