@@ -43,6 +43,8 @@ export interface TraeAgentTrajectoryOptions extends TrajectoryPollingOptions {
    * omitted, the input falls back to the fixed `trajectoryFile`.
    */
   trajectoryDir?: string;
+  /** Explicit association to the CLI workspace, which native snapshots omit. */
+  workspaceRoot?: string;
   /**
    * Filename filter for directory discovery. Defaults to `/^trajectory.*\.json$/i`.
    */
@@ -80,6 +82,8 @@ export class TraeAgentTrajectoryInput extends BaseTrajectoryPollingInput {
   private readonly converterPath: string;
   private readonly trajectoryDir?: string;
   private readonly trajectoryFilePattern: RegExp;
+  private readonly workspaceRoot?: string;
+  private reportedUnknownWorkspace = false;
   private converter: ConverterModule | null = null;
 
   constructor(opts: TraeAgentTrajectoryOptions) {
@@ -87,6 +91,7 @@ export class TraeAgentTrajectoryInput extends BaseTrajectoryPollingInput {
     this.converterPath = opts.converterPath;
     this.trajectoryDir = opts.trajectoryDir ? resolveHome(opts.trajectoryDir) : undefined;
     this.trajectoryFilePattern = opts.trajectoryFilePattern ?? DEFAULT_TRAJECTORY_FILE_PATTERN;
+    this.workspaceRoot = opts.workspaceRoot && path.isAbsolute(opts.workspaceRoot) ? opts.workspaceRoot : undefined;
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -97,8 +102,8 @@ export class TraeAgentTrajectoryInput extends BaseTrajectoryPollingInput {
     return [resolveHome(DEFAULT_TRAJECTORY_DIR)];
   }
 
-  static getDefaultTrajectoryDir(): string {
-    return resolveHome(DEFAULT_TRAJECTORY_DIR);
+  static getDefaultTrajectoryDir(workspaceRoot?: string): string {
+    return workspaceRoot ? path.join(workspaceRoot, 'trajectories') : resolveHome(DEFAULT_TRAJECTORY_DIR);
   }
 
   /**
@@ -109,7 +114,11 @@ export class TraeAgentTrajectoryInput extends BaseTrajectoryPollingInput {
    * the fixed-file behavior.
    */
   protected async resolveTrajectoryFiles(): Promise<string[]> {
-    if (!this.trajectoryDir) return this.trajectoryFile ? [this.trajectoryFile] : [];
+    if (!this.trajectoryDir) {
+      return this.trajectoryFile && !this.workspacePolicy.excludes(path.resolve(this.trajectoryFile))
+        ? [this.trajectoryFile] : [];
+    }
+    if (this.workspacePolicy.excludes(path.resolve(this.trajectoryDir))) return [];
     let names: string[];
     try {
       names = await fs.readdir(this.trajectoryDir);
@@ -124,6 +133,7 @@ export class TraeAgentTrajectoryInput extends BaseTrajectoryPollingInput {
       this.trajectoryFilePattern.lastIndex = 0;
       if (!this.trajectoryFilePattern.test(name)) continue;
       const full = path.join(this.trajectoryDir, name);
+      if (this.workspacePolicy.excludes(path.resolve(full))) continue;
       try {
         const st = await fs.stat(full);
         if (st.isFile()) discovered.push({ file: full, mtimeMs: st.mtimeMs });
@@ -136,11 +146,20 @@ export class TraeAgentTrajectoryInput extends BaseTrajectoryPollingInput {
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
+    if (this.workspacePolicy.enabled && !this.workspaceRoot) {
+      if (!this.reportedUnknownWorkspace) {
+        this.logger.warn('Trae Agent trajectory collection requires workspaceRoot when workspace exclusions are active');
+        this.reportedUnknownWorkspace = true;
+      }
+      return [];
+    }
+    if (this.workspaceRoot && this.workspacePolicy.excludes(this.workspaceRoot)) return [];
     if (!this.converter) {
       const url = pathToFileURL(this.converterPath).href;
       this.converter = (await import(url)) as unknown as ConverterModule;
     }
-    return super.collect();
+    const entries = await super.collect();
+    return this.workspaceRoot ? entries.map(entry => ({ ...entry, 'workspace.path': this.workspaceRoot })) : entries;
   }
 
   protected async parseTrajectory(

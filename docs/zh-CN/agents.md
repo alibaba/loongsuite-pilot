@@ -123,8 +123,18 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 
 Pilot 轮询 trae-agent 原生的 `trajectory*.json` 文件，并将每次运行转换为
 ENTRY → AGENT → STEP → LLM/TOOL span。trae-agent 默认把 trajectory 写到
-其当前工作目录下的 `trajectories/`，而 Pilot 的零配置监听目录是
-`~/.trae-agent/trajectories`。为保证稳定采集，请显式让 trae-agent 写入该目录：
+其当前工作目录下的 `trajectories/`，Pilot 默认监听
+`~/.trae-agent/trajectories`。如果在项目目录运行 `trae-cli`，可在
+`config.json` 中指定项目的绝对路径：
+
+```json
+{ "listeners": { "trae-agent-trajectory": { "workspaceRoot": "/absolute/project" } } }
+```
+
+此时 Pilot 监听该项目下的 `trajectories/`。若通过 `--working-dir` 指定了其他项目，
+请将 `workspaceRoot` 指向实际工作区，并用 `trajectoryDir` 或 `trajectoryFile`
+指定原生文件的位置。未配置项目时，也可以使用 CLI 的 `--trajectory-file`
+将输出写到默认监听目录：
 
 ```bash
 mkdir -p "$HOME/.trae-agent/trajectories"
@@ -133,12 +143,16 @@ trae-cli interactive --trajectory-file "$HOME/.trae-agent/trajectories/trajector
 
 也可以在 `config.json` 中将
 `listeners["trae-agent-trajectory"].trajectoryDir` 设置为 trae-agent 实际使用的
-绝对目录。Pilot 会扫描目录内所有匹配文件，并按逻辑 run 隔离 checkpoint。
+绝对目录。原生快照不记录工作区，因此启用工作区排除规则时，必须提供
+`workspaceRoot`，并确保所配置的数据源只包含该工作区的轨迹。Pilot 首次发现目录时
+会回放已有的匹配文件，并按逻辑 run 隔离 checkpoint。
 如果未配置顶层精确 `serviceName`，最终上报服务名为
 `<serviceNamePrefix>-trae-agent`。
 
 Pilot 分批处理发生变化的文件，并跳过超过 64 MiB 的快照。批量调用时宜为
 每次运行保留独立文件。交互模式若在首次轮询前覆盖旧文件，Pilot 无法恢复该轮。
+已结束但在首个模型响应前失败的运行会按记录的时间上报 ENTRY → AGENT 失败链路，
+其中没有模型 span。
 
 ## Linux 系统接入
 

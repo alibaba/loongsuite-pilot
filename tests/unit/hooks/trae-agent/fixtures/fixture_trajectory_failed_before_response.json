@@ -1,0 +1,25 @@
+{
+  "task": "synthetic audit",
+  "start_time": "2026-11-21T06:55:21.037103",
+  "end_time": "2026-11-21T06:55:21.037317",
+  "provider": "openai",
+  "model": "test-model",
+  "max_steps": 3,
+  "llm_interactions": [],
+  "agent_steps": [
+    {
+      "step_number": 1,
+      "timestamp": "2026-11-21T06:55:21.037231",
+      "state": "completed",
+      "llm_messages": null,
+      "llm_response": null,
+      "tool_calls": null,
+      "tool_results": null,
+      "reflection": null,
+      "error": "synthetic provider failure"
+    }
+  ],
+  "success": false,
+  "final_result": "synthetic provider failure",
+  "execution_time": 0.000214
+}

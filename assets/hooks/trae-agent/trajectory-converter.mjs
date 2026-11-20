@@ -121,6 +121,40 @@ export function convertTrajectory(json, opts = {}) {
   // the poller routinely observes partial trajectories whose current tail step
   // is NOT the real last step.
   const runComplete = isRunComplete(parsed.startTime, parsed.endTime);
+  const preResponseFailure = runComplete && json?.success === false && parsed.interactions.length === 0;
+  const failureStart = preResponseFailure ? isoTimeToNano(parsed.startTime) : undefined;
+  const failureEnd = preResponseFailure ? isoTimeToNano(parsed.endTime) : undefined;
+  if (failureStart !== undefined && failureEnd !== undefined && failureEnd >= failureStart) {
+    // The recorder observed a failed agent run, with no model interaction to
+    // use as an LLM span. Retain only the verified run boundaries.
+    if (runCompletionEmitted) return { entries, emittedStepNumbers, runCompletionEmitted };
+    const boundary = {
+      'event.name': 'other',
+      'user.id': '',
+      trace_id: traceId,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': sessionId,
+      'gen_ai.agent.type': AGENT_TYPE,
+      'gen_ai.agent.id': sessionId,
+      'loongsuite.observation.scope': 'agent_turn',
+      'agent.trajectory.run.outcome': 'failed_before_response',
+    };
+    entries.push({
+      ...boundary,
+      'event.id': hashId([sessionId, 'failure-start'], 32),
+      time_unix_nano: failureStart.toString(),
+      observed_time_unix_nano: failureEnd.toString(),
+      'gen_ai.turn.start': true,
+    }, {
+      ...boundary,
+      'event.id': hashId([sessionId, 'failure-end'], 32),
+      time_unix_nano: failureEnd.toString(),
+      observed_time_unix_nano: failureEnd.toString(),
+      'gen_ai.turn.end': true,
+      'error.type': 'trae_agent.run_failed_before_response',
+    });
+    return { entries, emittedStepNumbers, runCompletionEmitted: true };
+  }
   let emittedTurnEnd = false;
 
   /** Build the single authoritative llm.response record for a step. */
@@ -471,6 +505,14 @@ function timestampToUnixNanos(ts) {
   return timestampToUnixNanos(Number.isNaN(parsed) ? Date.now() : parsed);
 }
 
+/** Preserve the microseconds recorded by Python's datetime.isoformat(). */
+function isoTimeToNano(value) {
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) return undefined;
+  const fraction = value.match(/\.(\d+)(?:Z|[+-]\d{2}:\d{2})?$/)?.[1] ?? '';
+  return BigInt(milliseconds) * 1_000_000n + BigInt(fraction.slice(3, 9).padEnd(6, '0'));
+}
+
 /** BigInt nanos for a raw timestamp (mirrors timestampToUnixNanos). */
 function nanoOf(ts) {
   return BigInt(timestampToUnixNanos(ts));
@@ -513,13 +555,13 @@ function upperBoundNano(boundaryTs, startNano) {
 
 function isRunComplete(startTime, endTime) {
   if (!endTime) return false;
-  const startMs = Date.parse(startTime);
-  const endMs = Date.parse(endTime);
+  const start = isoTimeToNano(startTime);
+  const end = isoTimeToNano(endTime);
   // trae-agent interactive mode reuses one recorder. Its start_recording()
   // clears steps and interactions but may leave the previous run's end_time in
   // the rewritten file until the new run is finalized. Treat an end before the
   // current start as stale instead of prematurely closing the new turn.
-  if (Number.isFinite(startMs) && Number.isFinite(endMs)) return endMs >= startMs;
+  if (start !== undefined && end !== undefined) return end >= start;
   return true;
 }
 

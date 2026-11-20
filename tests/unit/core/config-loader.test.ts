@@ -79,6 +79,18 @@ describe('ConfigLoader', () => {
     await expect(loadConfig()).rejects.toThrow('absolute local directories');
   });
 
+  it('loads explicit Trae workspace roots and disables invalid configurations', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'trae-agent-trajectory': { workspaceRoot: '~/project' },
+    } });
+    expect((await loadConfig()).listeners['trae-agent-trajectory'].workspaceRoot).toBe('/home/test/project');
+
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'trae-agent-trajectory': { workspaceRoot: 'relative' },
+    } });
+    expect((await loadConfig()).listeners['trae-agent-trajectory'].enabled).toBe(false);
+  });
+
   it('resolves span enrichers relative to config, home and PILOT_DATA, deduplicating paths', async () => {
     vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '/custom/config.json');
     mockReadJsonFile.mockResolvedValueOnce({

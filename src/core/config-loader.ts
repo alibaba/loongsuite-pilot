@@ -131,6 +131,7 @@ export interface ConfigFile {
      * Takes precedence over `trajectoryDir` discovery when set.
      */
     trajectoryFile?: string;
+    workspaceRoot?: string;
     client?: 'doubao-work' | 'doubao';
     includeConversationIds?: string[];
   }>;
@@ -857,6 +858,15 @@ function buildListenersConfig(
       const trajectoryFile = val.trajectoryFile ?? result[key]?.trajectoryFile;
       if (trajectoryDir !== undefined) merged.trajectoryDir = trajectoryDir;
       if (trajectoryFile !== undefined) merged.trajectoryFile = trajectoryFile;
+      if (key === 'trae-agent-trajectory' && val.workspaceRoot !== undefined) {
+        const workspaceRoot = typeof val.workspaceRoot === 'string' ? resolveHome(val.workspaceRoot.trim()) : '';
+        if (path.isAbsolute(workspaceRoot)) {
+          merged.workspaceRoot = workspaceRoot;
+        } else {
+          logger.warn('Invalid Trae Agent workspaceRoot; disabling trajectory collection');
+          merged.enabled = false;
+        }
+      }
       result[key] = merged;
       if (key === 'qwen-work-cn-collaboration' && Object.hasOwn(val, 'includeConversationIds')) {
         const ids: unknown = val.includeConversationIds;

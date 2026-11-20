@@ -1945,14 +1945,16 @@ export class Orchestrator extends EventEmitter {
     // runs. Discovery processes every matching file oldest-first each cycle;
     // per-run checkpoints suppress already-consumed steps. Operators can override
     // via listeners['trae-agent-trajectory']:
-    //   - trajectoryDir  → directory to scan (default ~/.trae-agent/trajectories)
+    //   - workspaceRoot  → explicit project root and default trajectory directory
+    //   - trajectoryDir  → override the directory to scan
     //   - trajectoryFile → pin one exact file (skips discovery; testing/advanced)
     // The converter path is the pilot install root + the per-agent asset subdir
     // so it resolves in both dev (project root) and installed
     // (dataDir/versions/<v>) layouts.
     const traePilotDir = this.resolvePilotDir();
     const traeListenerCfg = listenerCfg['trae-agent-trajectory'];
-    const traeDefaultDir = TraeAgentTrajectoryInput.getDefaultTrajectoryDir();
+    const traeWorkspaceRoot = traeListenerCfg?.workspaceRoot;
+    const traeDefaultDir = TraeAgentTrajectoryInput.getDefaultTrajectoryDir(traeWorkspaceRoot);
     const traeExplicitFile = traeListenerCfg?.trajectoryFile
       ? resolveHome(traeListenerCfg.trajectoryFile)
       : undefined;
@@ -1974,6 +1976,7 @@ export class Orchestrator extends EventEmitter {
       stateStore: this.stateStore,
       trajectoryFile: traeExplicitFile ?? traeTrajectoryDir,
       trajectoryDir: traeExplicitFile ? undefined : traeTrajectoryDir,
+      workspaceRoot: traeWorkspaceRoot,
       converterPath: traeConverterPath,
       pollIntervalMs: traeListenerCfg?.pollInterval,
     });

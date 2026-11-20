@@ -22,6 +22,8 @@ export interface ListenerConfig {
    * Takes precedence over `trajectoryDir` discovery when set (testing/advanced).
    */
   trajectoryFile?: string;
+  /** Explicit project root for Trae Agent trajectories. */
+  workspaceRoot?: string;
   /** Product source for the doubao-work listener; defaults to Doubao Work. */
   client?: 'doubao-work' | 'doubao';
 }

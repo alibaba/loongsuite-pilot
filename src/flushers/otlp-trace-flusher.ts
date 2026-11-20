@@ -103,6 +103,12 @@ const TRAE_COLLECTION_PASSTHROUGH_KEYS = [
   'agent.trajectory.completion.reason',
 ] as const;
 
+function isTraePreResponseFailure(record: EventLogRecord): boolean {
+  return record['event.name'] === 'other'
+    && record['loongsuite.observation.scope'] === 'agent_turn'
+    && record['agent.trajectory.run.outcome'] === 'failed_before_response';
+}
+
 function isTraeFlushOnlyMarker(record: AgentActivityEntry): boolean {
   return normalizeAgentType(String(record['gen_ai.agent.type'] ?? '')) === 'trae-agent'
     && record['event.name'] === 'other'
@@ -615,6 +621,31 @@ function hrTimeToNano(value: readonly [number, number]): bigint {
 
 function nanoToHrTime(value: bigint): [number, number] {
   return [Number(value / 1_000_000_000n), Number(value % 1_000_000_000n)];
+}
+
+function enrichTraePreResponseFailure(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+  const start = records.find(record => isTraePreResponseFailure(record) && record['gen_ai.turn.start'] === true);
+  const end = records.find(record => isTraePreResponseFailure(record) && record['gen_ai.turn.end'] === true);
+  if (!start || !end) return;
+  const from = parseNano(start.time_unix_nano);
+  const to = parseNano(end.time_unix_nano);
+  for (const span of spans) {
+    const kind = span.attributes['gen_ai.span.kind'];
+    if (kind !== 'ENTRY' && kind !== 'AGENT') continue;
+    Object.assign(span.status, { code: SpanStatusCode.ERROR });
+    span.attributes['error.type'] = 'trae_agent.run_failed_before_response';
+    span.attributes['loongsuite.observation.scope'] = 'agent_turn';
+    delete span.attributes['gen_ai.provider.name'];
+    // The known trace ID creates a virtual parent in the shared converter.
+    if (kind === 'ENTRY') Object.assign(span, { parentSpanId: undefined });
+    if (from !== undefined && to !== undefined && to >= from) {
+      Object.defineProperties(span, {
+        startTime: { value: nanoToHrTime(from), configurable: true },
+        endTime: { value: nanoToHrTime(to), configurable: true },
+        duration: { value: nanoToHrTime(to - from), configurable: true },
+      });
+    }
+  }
 }
 
 /**
@@ -1694,9 +1725,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
           // Existing process-wide OTel env vars may still request content on
           // spans. Enforce this flusher's explicit opt-out at the conversion
           // boundary instead of relying on env defaults.
-          const conversionRecords = this.cfg.captureMessageContent === false
+          let conversionRecords = this.cfg.captureMessageContent === false
             ? prepared.records.map(stripAgentMessageContent)
             : prepared.records;
+          if (agentType === 'trae-agent') {
+            // The event-log converter reads agent identity from an input
+            // boundary. An empty delta keeps that identity without content.
+            conversionRecords = conversionRecords.map(record =>
+              isTraePreResponseFailure(record) && record['gen_ai.turn.start'] === true
+                ? { ...record, 'gen_ai.input.messages_delta': [] } : record);
+          }
           const qwenCollaboration = conversionRecords.some(record => record['agent.source'] === 'qwen-work-cn-collaboration');
           const stream = qwenCollaboration ? null : planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
           if (stream) {
@@ -1809,6 +1847,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         span.attributes['agent.hermes.collection.end_reason'] = 'producer_process_exited';
       }
     }
+    if (agentType === 'trae-agent') enrichTraePreResponseFailure(records, spans);
     applyQoderWorkStepTiming(records, spans);
     this.enrichToolSkillAttributes(records, spans);
     this.enrichMultimodalAttributes(records, spans);

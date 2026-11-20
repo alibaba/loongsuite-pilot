@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { isAbsolute } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ClientType } from '../types/index.js';
 import { WorkspacePolicy } from './workspace-policy.js';
@@ -398,7 +399,7 @@ export class InputManager extends EventEmitter {
     inputId: string,
     entries: AgentActivityEntry[],
   ): Promise<void> {
-    entries = this.workspacePolicy.filter(entries, this.inputs.get(inputId)?.agentType);
+    entries = this.filterWorkspaceEntries(entries, this.inputs.get(inputId)?.agentType);
     if (entries.length === 0) return;
 
     // Join while entries still carry the agent-native session id.
@@ -482,7 +483,7 @@ export class InputManager extends EventEmitter {
    */
   async flushPreparedEntries(entries: AgentActivityEntry[], signal?: AbortSignal): Promise<void> {
     // Apply privacy policy before invocation identity replaces native session/agent keys.
-    entries = this.workspacePolicy.filter(entries);
+    entries = this.filterWorkspaceEntries(entries);
     if (entries.length === 0) return;
     signal?.throwIfAborted();
     const inputId = 'interceptor';
@@ -516,7 +517,16 @@ export class InputManager extends EventEmitter {
 
   /** Recheck retained output against current workspace and mask rules without rewriting its identity. */
   prepareRestoredEntries(entries: AgentActivityEntry[]): AgentActivityEntry[] {
-    return this.applyPolicyAndMask(this.workspacePolicy.filter(entries));
+    return this.applyPolicyAndMask(this.filterWorkspaceEntries(entries));
+  }
+
+  private filterWorkspaceEntries(entries: AgentActivityEntry[], agentType?: ClientType): AgentActivityEntry[] {
+    // Trae snapshots omit workspace metadata. A replay without the explicitly
+    // bound root cannot establish whether the source project was excluded.
+    const eligible = this.workspacePolicy.enabled ? entries.filter(entry =>
+      (entry['gen_ai.agent.type'] ?? agentType) !== ClientType.TraeAgent
+        || (typeof entry['workspace.path'] === 'string' && isAbsolute(entry['workspace.path']))) : entries;
+    return this.workspacePolicy.filter(eligible, agentType);
   }
 
   private applyPolicyAndMask(entries: AgentActivityEntry[]): AgentActivityEntry[] {

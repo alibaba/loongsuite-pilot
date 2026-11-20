@@ -151,8 +151,19 @@ best-effort wakeup and is not required for directory discovery.
 Pilot polls trae-agent's native `trajectory*.json` files and converts each run
 into ENTRY → AGENT → STEP → LLM/TOOL spans. trae-agent writes trajectories to a
 `trajectories/` directory relative to its current working directory by default,
-while Pilot's zero-configuration watch directory is `~/.trae-agent/trajectories`.
-Point trae-agent at that directory explicitly so collection is reliable:
+while Pilot's default watch directory is `~/.trae-agent/trajectories`.
+To collect the native defaults for a project, set its absolute working directory
+in `config.json` and run `trae-cli` from that directory:
+
+```json
+{ "listeners": { "trae-agent-trajectory": { "workspaceRoot": "/absolute/project" } } }
+```
+
+Pilot watches `/absolute/project/trajectories` in this configuration. If the CLI
+uses `--working-dir`, set `workspaceRoot` to the project it actually operates on
+and use `trajectoryDir` or `trajectoryFile` to locate output written elsewhere.
+Without a project-specific configuration, direct the CLI to the home watch
+directory with its `--trajectory-file` option:
 
 ```bash
 mkdir -p "$HOME/.trae-agent/trajectories"
@@ -160,14 +171,19 @@ trae-cli interactive --trajectory-file "$HOME/.trae-agent/trajectories/trajector
 ```
 
 Alternatively, set `listeners["trae-agent-trajectory"].trajectoryDir` in
-`config.json` to the absolute directory used by trae-agent. Pilot scans every
-matching trajectory file and isolates checkpoints per logical run. Unless an
+`config.json` to the absolute directory used by trae-agent. With workspace
+exclusions enabled, Trae Agent collection requires an explicit `workspaceRoot`
+because the native snapshots do not identify a workspace. Point each configured
+trajectory source at files belonging to that workspace. Pilot replays existing
+matching trajectory files on first discovery and keeps a checkpoint per run. Unless an
 exact top-level `serviceName` is configured, the exported service is named
 `<serviceNamePrefix>-trae-agent`.
 
 Pilot processes changed snapshots over successive polls and skips snapshots
 larger than 64 MiB. Prefer a unique file for each unattended run when possible.
 If Trae overwrites an interactive run before its first poll, Pilot cannot recover it.
+If a finalized run fails before any model response, Pilot reports a failed
+ENTRY → AGENT trace using the recorded run times, without creating model spans.
 
 ## Shared installation on Linux
 
