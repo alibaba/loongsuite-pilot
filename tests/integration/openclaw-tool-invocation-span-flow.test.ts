@@ -23,6 +23,7 @@ it.each([
   'same-step', 'cross-step', 'cross-step-with-orphan', 'child-link',
   'missing-call-span', 'missing-result-span', 'legacy-orphan-without-id', 'legacy-orphan-cross-step',
   'legacy-orphan-with-protected-result', 'legacy-pair-alongside-canonical',
+  'legacy-no-id-call-span', 'legacy-no-id-result-span', 'legacy-no-id-distinct-spans',
 ] as const)(
   'preserves OpenClaw tool invocation identity in OTLP (%s)', async mode => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-pair-review-'));
@@ -94,7 +95,7 @@ it.each([
       });
       expect(pairedRows[0].spanId).not.toBe(pairedRows[1].spanId);
 
-      // Model events persisted by older writers just before an in-place upgrade.
+      // Mix in records persisted by older writers before an in-place upgrade.
       const alphaCallIndex = rows.findIndex(row => row['event.name'] === 'tool.call' && row['gen_ai.tool.name'] === alpha.toolName);
       const alphaCall = rows[alphaCallIndex];
       if (mode === 'missing-call-span') delete alphaCall.span_id;
@@ -102,24 +103,30 @@ it.each([
         const alphaResult = rows.find(row => row['event.name'] === 'tool.result' && row['gen_ai.tool.name'] === alpha.toolName)!;
         delete alphaResult.span_id;
       }
+      const legacyNoId = mode.startsWith('legacy-no-id-');
       if (mode.startsWith('legacy-')) {
         const oldId = mode === 'legacy-orphan-cross-step' || mode === 'legacy-pair-alongside-canonical' ? 'old-native' : undefined;
         const oldCall = {
           ...alphaCall,
           'event.id': 'old-call',
           'gen_ai.tool.call.id': oldId,
+          'gen_ai.tool.call.exec.id': oldId,
           'gen_ai.tool.name': 'legacy_tool',
           'gen_ai.tool.call.arguments': 'LEGACY-ARGUMENT',
-          span_id: undefined,
+          span_id: mode === 'legacy-no-id-call-span' || mode === 'legacy-no-id-distinct-spans'
+            ? 'abcdef1234567890' : undefined,
         };
         rows.splice(alphaCallIndex, mode === 'legacy-orphan-with-protected-result' ? 1 : 0, oldCall);
-        if (oldId) {
+        if (oldId || legacyNoId) {
           rows.splice(alphaCallIndex + 1, 0, {
             ...oldCall,
             'event.id': 'old-result',
             'event.name': 'tool.result',
             'gen_ai.step.id': mode === 'legacy-orphan-cross-step' ? 'legacy-step' : oldCall['gen_ai.step.id'],
             'gen_ai.tool.call.result': 'LEGACY-PAYLOAD',
+            'gen_ai.tool.call.arguments': undefined,
+            span_id: mode === 'legacy-no-id-result-span' || mode === 'legacy-no-id-distinct-spans'
+              ? 'abcdef1234567891' : undefined,
           });
         }
       }
@@ -144,7 +151,9 @@ it.each([
         .map(row => row['gen_ai.tool.call.id'])).toEqual(sourceToolIds);
       const tools = exported.filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL');
       const findTool = (name: string) => tools.find(span => span.attributes['gen_ai.tool.name'] === name);
-      expect(tools).toHaveLength(['cross-step-with-orphan', 'legacy-orphan-cross-step', 'legacy-pair-alongside-canonical'].includes(mode) ? 3 : 2);
+      const hasExtraTool = legacyNoId
+        || ['cross-step-with-orphan', 'legacy-orphan-cross-step', 'legacy-pair-alongside-canonical'].includes(mode);
+      expect(tools).toHaveLength(hasExtraTool ? 3 : 2);
       for (const tool of pairedRows) {
         expect(findTool(tool.name)?.spanContext().spanId).toBe(tool.spanId);
         expect(findTool(tool.name)?.attributes['gen_ai.tool.call.id']).toBe(tool.toolCallId);
@@ -182,12 +191,15 @@ it.each([
         expect(orphan?.attributes['gen_ai.tool.call.result']).toContain('ORPHAN-PAYLOAD');
         expect(pairedRows.some(tool => tool.spanId === orphan?.spanContext().spanId)).toBe(false);
       }
-      if (mode === 'legacy-orphan-cross-step' || mode === 'legacy-pair-alongside-canonical') {
+      if (legacyNoId || mode === 'legacy-orphan-cross-step' || mode === 'legacy-pair-alongside-canonical') {
         const legacy = findTool('legacy_tool');
-        expect(legacy?.attributes['gen_ai.tool.call.id']).toBe('old-native');
+        expect(legacy?.attributes['gen_ai.tool.call.id']).toBe(legacyNoId ? undefined : 'old-native');
         expect(legacy?.attributes['gen_ai.tool.call.result']).toContain('LEGACY-PAYLOAD');
-        if (mode === 'legacy-pair-alongside-canonical') expect(legacy?.attributes['gen_ai.tool.call.arguments']).toContain('LEGACY-ARGUMENT');
-        else expect(legacy?.attributes['gen_ai.tool.call.arguments']).toBeUndefined();
+        if (legacyNoId || mode === 'legacy-pair-alongside-canonical') {
+          expect(legacy?.attributes['gen_ai.tool.call.arguments']).toContain('LEGACY-ARGUMENT');
+        } else {
+          expect(legacy?.attributes['gen_ai.tool.call.arguments']).toBeUndefined();
+        }
       }
     } finally { await fs.rm(root, { recursive: true, force: true }); }
   },

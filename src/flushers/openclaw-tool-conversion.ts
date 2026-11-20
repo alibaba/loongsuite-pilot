@@ -103,7 +103,11 @@ export function prepareOpenClawTools(records: AgentActivityEntry[]): OpenClawToo
   // Compare with all rows so that another use of the same ID in the step
   // cannot make an unrelated singleton seem to be its partner.
   for (const [spanId, record] of canonicalSingletons) {
-    const candidates = byNativeId.get(nonempty(record[CALL_ID]) ?? '') ?? [];
+    const nativeId = nonempty(record[CALL_ID]);
+    // A marker on just one side cannot identify an id-less invocation.
+    // These rows still use the legacy step-local fallback.
+    if (!nativeId) continue;
+    const candidates = byNativeId.get(nativeId) ?? [];
     const partner = uniquePartner(record, candidates);
     const completesPair = partner && !isValidSpanId(partner.span_id) && uniquePartner(partner, candidates) === record;
     assign(`openclaw-span:${spanId}`, completesPair ? [record, partner] : [record]);
