@@ -1210,14 +1210,12 @@ function minOf(arr: ReadonlyArray<number>): number {
  */
 function isMessageComplete(msg: WukongMessage): boolean {
   if (msg.role !== 'assistant') return true;
-  const events = msg.events;
-  if (!events || events.length === 0) return true;
-
-  // Authoritative API flag wins when present.
   if (msg.isComplete === 1) return true;
   if (msg.isComplete === 0) return false;
 
-  // Older payloads without the flag: a terminal RUN event marks completion.
+  // Older payloads may omit both the flag and events.
+  const events = msg.events;
+  if (!events || events.length === 0) return true;
   return events.some(e => e.type === 'RUN_FINISHED' || e.type === 'RUN_ERROR');
 }
 

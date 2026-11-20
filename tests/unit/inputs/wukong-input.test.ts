@@ -2,11 +2,13 @@ import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import * as childProcess from 'node:child_process';
 import * as os from 'node:os';
 import { readFileSync } from 'node:fs';
+import * as fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import * as nodePath from 'node:path';
 import { ClientType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { WukongInput } from '../../../src/inputs/wukong/wukong-input.js';
+import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
 
 const LEETCODE_FIXTURE = JSON.parse(
@@ -1180,6 +1182,59 @@ describe('WukongInput', () => {
     expect(respEntry!['gen_ai.output.messages']).toEqual([
       { role: 'assistant', parts: [{ type: 'text', content: 'Thinking... Done!' }] },
     ]);
+  });
+
+  it.each([
+    { label: 'missing events', events: null },
+    { label: 'an empty event array', events: [] },
+  ])('retains an incomplete assistant with $label until the same record completes', async ({ events }) => {
+    const root = await fs.mkdtemp(nodePath.join(os.tmpdir(), 'wukong-incomplete-placeholder-'));
+    const stateFile = nodePath.join(root, 'input-state.json');
+    const initial = new StateStore(stateFile);
+    initial.update('wukong', { extra: { seenCounts: {} } });
+    await initial.save();
+
+    const user = { ...SAMPLE_MESSAGES[0], isComplete: 0 };
+    const assistant = SAMPLE_MESSAGES[1];
+    const poll = async (messages: Array<Record<string, unknown>>) => {
+      mockExecFile.mockImplementation(makeExecFileImpl({
+        list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+        get_spark_agui_messages: JSON.stringify({ messages }),
+      }));
+      const store = new StateStore(stateFile);
+      await store.load();
+      const current = new WukongInput({ stateStore: store, cliPath: '/usr/bin/wukong-cli', pollIntervalMs: 60_000 });
+      const entries: AgentActivityEntry[] = [];
+      current.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+      try {
+        await current.start();
+      } finally {
+        await current.stop();
+      }
+      const reopened = new StateStore(stateFile);
+      await reopened.load();
+      const seen = reopened.get('wukong').extra?.seenCounts as Record<string, number>;
+      return { entries, cursor: seen[SAMPLE_TASK.session_id] ?? 0 };
+    };
+
+    try {
+      expect(await poll([user, { ...assistant, events, isComplete: 0 }])).toEqual({ entries: [], cursor: 0 });
+      const completedMessages = [user, { ...assistant, isComplete: 1 }];
+      const completed = await poll(completedMessages);
+      expect(completed.cursor).toBe(2);
+      expect(completed.entries.map(entry => entry['event.name'])).toEqual(['other', 'llm.request', 'llm.response']);
+      expect(completed.entries[0]['gen_ai.input.messages_delta']).toEqual([
+        { role: 'user', parts: [{ type: 'text', content: user.content }] },
+      ]);
+      expect(completed.entries[2]).toMatchObject({
+        'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'Hello! How can I help?' }] }],
+        'gen_ai.usage.input_tokens': 100,
+        'gen_ai.usage.output_tokens': 20,
+      });
+      expect(await poll(completedMessages)).toEqual({ entries: [], cursor: 2 });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it('sets gen_ai.tool.name on tool.result from TOOL_CALL_START', async () => {
