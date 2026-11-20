@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
@@ -21,6 +22,19 @@ import { toW3CTraceId, deriveSpanId } from '../../../assets/hooks/shared/event-e
 
 const DEFAULT_ROLLOUT_DIR = '~/.zcode/cli/rollout';
 const AGENT_ID = 'zcode';
+
+async function lastCompleteLineOffset(file: FileHandle, size: number): Promise<number> {
+  const block = Buffer.allocUnsafe(Math.min(size, 64 * 1024));
+  for (let end = size; end > 0;) {
+    const start = Math.max(0, end - block.length);
+    const { bytesRead } = await file.read(block, 0, end - start, start);
+    const newline = block.subarray(0, bytesRead).lastIndexOf(0x0a);
+    if (newline >= 0) return start + newline + 1;
+    end = start;
+  }
+  return 0;
+}
+
 
 export interface ZCodeRolloutInputOptions extends Omit<InputOptions, 'stateStore'> {
   stateStore: InputOptions['stateStore'];
@@ -77,27 +91,30 @@ export class ZCodeRolloutInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
-    // Baseline skip: for each rollout file we haven't seen yet, initialize
-    // the byteOffset to the current EOF so pilot doesn't replay history on
-    // first install. Spec §1.4 + §1.5 (test: baseline skip).
-    //
-    // Use a sentinel flag (extra.initialized) rather than relying on
-    // lastOffset > 0, because a file can legitimately have lastOffset = 0
-    // after inode rotation reset. Without the sentinel, a restart would
-    // treat such a file as "never seen" and skip to EOF, dropping data.
+    // Skip historical complete rows only on first discovery at startup.
+    // Earlier versions could checkpoint files created during a running
+    // collector without setting initialized. Keep that durable cursor.
     const files = await this.discoverRolloutFiles();
     for (const filePath of files) {
       const stateKey = this.stateKey(filePath);
       const existing = this.stateStore.get(stateKey);
-      if (existing.extra?.initialized === true) {
-        continue; // already tracking this file
+      if (existing.extra?.initialized === true) continue;
+      if (typeof existing.lastOffset === 'number' || typeof existing.extra?.inode === 'number') {
+        this.stateStore.update(stateKey, { extra: { initialized: true } });
+        continue;
       }
+
+      let handle: FileHandle | undefined;
       try {
-        const stat = await fs.promises.stat(filePath);
-        this.stateStore.setOffset(stateKey, stat.size);
-        this.stateStore.update(stateKey, { extra: { inode: Number((stat as any).ino), initialized: true } });
+        handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+        const stat = await handle.stat();
+        if (!stat.isFile()) continue;
+        const offset = await lastCompleteLineOffset(handle, stat.size);
+        this.stateStore.update(stateKey, { lastOffset: offset, extra: { inode: stat.ino, initialized: true } });
       } catch {
-        // file may disappear — skip silently
+        // Files can disappear or rotate between discovery and opening.
+      } finally {
+        await handle?.close();
       }
     }
   }
@@ -115,57 +132,35 @@ export class ZCodeRolloutInput extends BaseInput {
 
   private async processFile(filePath: string): Promise<AgentActivityEntry[]> {
     const stateKey = this.stateKey(filePath);
-    let stat: fs.Stats;
+    let handle: FileHandle;
     try {
-      stat = await fs.promises.stat(filePath);
+      handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
     } catch {
       return [];
     }
-
-    const prevState = this.stateStore.get(stateKey);
-    const prevInode = prevState.extra?.inode as number | undefined;
-
-    if (prevInode !== undefined && prevInode !== Number((stat as any).ino)) {
-      // Inode changed → file rotated, reset to 0 to re-read the new file.
-      this.stateStore.setOffset(stateKey, 0);
-    }
-
-    let offset = this.stateStore.getOffset(stateKey);
-    if (offset > 0 && stat.size < offset) {
-      // File truncated (e.g. zcode compaction reset). Reset to 0.
-      this.logger.info('rollout file truncated, resetting offset', {
-        file: filePath,
-        recorded: offset,
-        actual: stat.size,
-      });
-      offset = 0;
-      this.stateStore.setOffset(stateKey, 0);
-    }
-    if (stat.size <= offset) return [];
-
-    const handle = await fs.promises.open(filePath, 'r');
     try {
-      const buf = Buffer.alloc(stat.size - offset);
-      await handle.read(buf, 0, buf.length, offset);
-      const text = buf.toString('utf-8');
+      const stat = await handle.stat();
+      if (!stat.isFile()) return [];
 
-      // P1 fix: only commit offset to the LAST COMPLETE NEWLINE, not stat.size.
-      // If ZCode writes a partial final line (no trailing \n), we must NOT
-      // advance past it — the next poll will re-read from the last \n and
-      // pick up the completed line. Without this, a half-written JSONL line
-      // is parsed as invalid, offset jumps to EOF, and the rest of the line
-      // arriving in the next poll is permanently lost.
-      const lastNewline = text.lastIndexOf('\n');
-      const committedBytes = lastNewline >= 0
-        ? offset + Buffer.byteLength(text.slice(0, lastNewline + 1), 'utf-8')
-        : offset;
-      if (committedBytes > offset) {
-        this.stateStore.setOffset(stateKey, committedBytes);
+      const prevState = this.stateStore.get(stateKey);
+      const prevInode = prevState.extra?.inode as number | undefined;
+      let offset = prevState.lastOffset ?? 0;
+      if ((prevInode !== undefined && prevInode !== stat.ino) || stat.size < offset) {
+        offset = 0;
       }
-      this.stateStore.update(stateKey, { extra: { inode: Number((stat as any).ino) } });
+      // Even an empty file discovered during a running collector is live.
+      if (prevState.lastOffset !== offset || prevInode !== stat.ino || prevState.extra?.initialized !== true) {
+        this.stateStore.update(stateKey, { lastOffset: offset, extra: { inode: stat.ino, initialized: true } });
+      }
+      if (stat.size <= offset) return [];
 
-      // Parse only complete lines (up to and including the last \n).
-      const completeText = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : '';
+      const buf = Buffer.allocUnsafe(stat.size - offset);
+      const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+      // Work in byte offsets: a partial final line or invalid UTF-8 must not
+      // turn a decoded character count into a source cursor.
+      const completeBytes = buf.subarray(0, bytesRead).lastIndexOf(0x0a) + 1;
+      if (completeBytes === 0) return [];
+      const completeText = buf.toString('utf8', 0, completeBytes);
       const lines: Record<string, unknown>[] = [];
       for (const line of completeText.split('\n')) {
         const trimmed = line.trim();
@@ -179,7 +174,9 @@ export class ZCodeRolloutInput extends BaseInput {
         }
         lines.push(parsed);
       }
-      return this.buildEntriesFromRolloutLines(lines);
+      const entries = this.buildEntriesFromRolloutLines(lines);
+      this.stateStore.setOffset(stateKey, offset + completeBytes);
+      return entries;
     } finally {
       await handle.close();
     }
@@ -578,11 +575,13 @@ export class ZCodeRolloutInput extends BaseInput {
         ? [{ role: 'assistant', parts: [{ type: 'text', content: '' }] }]
         : [];
 
+    const endedAbnormally = finishReason === 'interrupted' || finishReason === 'cancelled' || finishReason === 'error';
     entries.push(buildAgentActivityEntry({
       time_unix_nano: responseTimeNs,
       'event.id': crypto.randomUUID(),
       'event.name': 'llm.response',
-      'agent.zcode.rollout_completion_candidate': hasCompletedAt && finishReason !== 'tool_call' && toolCalls.length === 0,
+      'agent.zcode.rollout_completion_candidate': hasCompletedAt
+        && (endedAbnormally || (finishReason !== 'tool_call' && toolCalls.length === 0)),
       'gen_ai.session.id': sessionId,
       'gen_ai.turn.id': turnId,
       'gen_ai.step.id': stepId,

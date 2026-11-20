@@ -19,7 +19,7 @@ import { prepareCodexTurn } from './codex-turn-converter.js';
 import { prepareDelegatedTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
-import { prepareZCodeTurn } from './zcode-turn-converter.js';
+import { markZCodeToolObservations, prepareZCodeTurn } from './zcode-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { convertQwenWorkCollaborationTurn } from './qwen-work-collaboration-converter.js';
@@ -1795,6 +1795,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         span.attributes['agent.hermes.collection.end_reason'] = 'producer_process_exited';
       }
     }
+    if (agentType === 'zcode') markZCodeToolObservations(records, spans);
     applyQoderWorkStepTiming(records, spans);
     this.enrichToolSkillAttributes(records, spans);
     this.enrichMultimodalAttributes(records, spans);
@@ -3105,7 +3106,9 @@ function dropOrphanPairs(records: AgentActivityEntry[]): AgentActivityEntry[] {
       const stepId = (r['gen_ai.step.id'] as string | undefined) ?? '__no_step__';
       return stepsWithResponse.has(stepId);
     }
-    if (name === 'tool.call') {
+    // ZCode reports native evidence of a dispatched call even without an
+    // observed result. Keep the call without inventing a tool outcome.
+    if (name === 'tool.call' && r['agent.source'] !== 'zcode-rollout') {
       const callId = r['gen_ai.tool.call.id'] as string | undefined;
       // Keep tool.call only if it has no call.id (rare) or a matching result.
       return !callId || completedToolCallIds.has(callId);

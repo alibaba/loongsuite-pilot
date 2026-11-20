@@ -21,7 +21,7 @@ class TestRolloutInput extends ZCodeRolloutInput {
 
 const fixtures = path.resolve('tests/unit/hooks/zcode/fixtures');
 
-it.each(['hook-first', 'rollout-first', 'no-hook', 'continued-stop', 'legacy-envelope'])
+it.each(['hook-first', 'rollout-first', 'no-hook', 'continued-stop', 'legacy-envelope', 'documented-stop', 'interrupted-eof'])
   ('collects native ZCode records with %s delivery', async (order) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-zcode-dual-'));
   vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
@@ -47,9 +47,19 @@ it.each(['hook-first', 'rollout-first', 'no-hook', 'continued-stop', 'legacy-env
   try {
     const rowText = await fs.readFile(path.join(fixtures, 'rollout-model-io-paired.jsonl'), 'utf8');
     const row = JSON.parse(rowText);
+    if (order === 'interrupted-eof') {
+      row.response.finishReason = null;
+      row.response.toolCalls = [{ id: 'eof-observed-call', name: 'Read', input: {} }];
+    }
     const traceId = toW3CTraceId(row.traceId);
     const rolloutPath = path.join(rolloutDir, `model-io-${row.sessionId}.jsonl`);
-    const hookPayload = await fs.readFile(path.join(fixtures, 'hook-stop-stdin-paired.json'), 'utf8');
+    const hookPayload = order === 'documented-stop'
+      ? JSON.stringify({
+          hook_event_name: 'Stop', session_id: row.sessionId, cwd: root,
+          transcript_path: path.join(root, 'transcript.jsonl'), permission_mode: 'default',
+          stop_hook_active: false, last_assistant_message: 'synthetic reply',
+        })
+      : await fs.readFile(path.join(fixtures, 'hook-stop-stdin-paired.json'), 'utf8');
     await fs.mkdir(rolloutDir, { recursive: true });
     await fs.mkdir(logDir, { recursive: true });
     const collect = async (source: 'hook' | 'rollout') => {
@@ -68,7 +78,7 @@ it.each(['hook-first', 'rollout-first', 'no-hook', 'continued-stop', 'legacy-env
         }
         await hook.poll();
       } else {
-        await fs.writeFile(rolloutPath, rowText);
+        await fs.writeFile(rolloutPath, JSON.stringify(row) + "\n");
         await rollout.poll();
       }
       await manager.stopInput(source === 'hook' ? hook.id : rollout.id);
@@ -116,7 +126,18 @@ it.each(['hook-first', 'rollout-first', 'no-hook', 'continued-stop', 'legacy-env
       expect(byKind('TOOL')).toHaveLength(1);
       expect(byKind('TOOL')[0].attributes['gen_ai.tool.call.result']).toContain('observed');
     }
-    if (order !== 'no-hook') {
+    if (order === 'interrupted-eof') {
+      expect(byKind('LLM')[0].attributes['gen_ai.response.finish_reasons']).toContain('interrupted');
+      expect(byKind('TOOL')).toHaveLength(1);
+      expect(byKind('TOOL')[0].attributes['gen_ai.tool.call.id']).toBe('eof-observed-call');
+      const tool = byKind('TOOL')[0];
+      expect(tool.attributes['gen_ai.tool.call.result']).toBeUndefined();
+      expect(tool.attributes['agent.zcode.tool.result_observed']).toBe(false);
+      expect(tool.duration).toEqual([0, 1]);
+      expect(tool.parentSpanId).toBe(byKind('STEP')[0].spanContext().spanId);
+      expect(tool.endTime).toEqual(byKind('STEP')[0].endTime);
+    }
+    if (order !== 'no-hook' && order !== 'documented-stop') {
       expect(byKind('ENTRY')[0].spanContext().spanId).toBe(deriveSpanId('entry', row.sessionId));
       expect(byKind('AGENT')[0].spanContext().spanId).toBe(deriveSpanId('agent', row.sessionId, row.turnId));
     }

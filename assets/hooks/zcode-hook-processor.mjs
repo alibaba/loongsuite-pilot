@@ -158,7 +158,6 @@ function resolveNativeIds(event, sessionId, stdinTimestamp) {
       turnId: stdinTurnId,
       traceId: stdinTraceId,
       timestamp: stdinTimestamp,
-      idsSource: 'stdin',
     };
   }
 
@@ -174,19 +173,13 @@ function resolveNativeIds(event, sessionId, stdinTimestamp) {
         // Prefer the rollout's completedAt: it is the native end-of-turn time
         // and stays stable across Stop re-fires (idempotency).
         timestamp: rolloutCompletedAt || stdinTimestamp,
-        idsSource: 'rollout',
       };
     }
   }
 
-  // Keep the Stop envelope available as independent observation. Do not
-  // attach it to an unconfirmed native turn or reuse a partial native ID.
-  return {
-    turnId: deriveSpanId('turn-fallback', sessionId, stdinTimestamp, stdinTurnId),
-    traceId: toW3CTraceId(generateTraceId()),
-    timestamp: stdinTimestamp,
-    idsSource: 'derived',
-  };
+  // Without verified native identity, rollout remains the source of the
+  // turn. A second, synthesized trace would split a single interaction.
+  return null;
 }
 
 // ─── cmd handlers ───
@@ -206,8 +199,9 @@ async function cmdStop() {
   // timestamp from stdin for determinism (fallback: now).
   const stdinTimestamp = getString(event, 'timestamp') || new Date().toISOString();
 
-  // Do not link an unverified Stop to a rollout turn.
-  const { turnId, traceId, timestamp, idsSource } = resolveNativeIds(event, sessionId, stdinTimestamp);
+  const identity = resolveNativeIds(event, sessionId, stdinTimestamp);
+  if (!identity) return;
+  const { turnId, traceId, timestamp } = identity;
 
   const cwd = getString(event, 'cwd');
 
@@ -215,7 +209,7 @@ async function cmdStop() {
   // retries), don't emit duplicate envelopes. State.last_exported_turn guard.
   const state = loadState(sessionId);
   if (state.last_exported_turn === turnId
-      && (idsSource === 'derived' || !state.last_exported_trace || state.last_exported_trace === traceId)) {
+      && (!state.last_exported_trace || state.last_exported_trace === traceId)) {
     return;
   }
 

@@ -773,6 +773,13 @@ function isObject(value) {
 
 // ─── 5e. Semantic Validation ────────────────────────────────────────────────
 
+function hasAbnormalFinish(value) {
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return false; }
+  }
+  return Array.isArray(value) && value.some(reason => ['interrupted', 'cancelled', 'error'].includes(reason));
+}
+
 export function validateSemantic(trace, rules) {
   const checks = [];
   const { spans, childrenMap, hasMessageContent } = trace;
@@ -1021,7 +1028,7 @@ export function validateSemantic(trace, rules) {
     if (toolSpans.length === 0) checks.push(pass('semantic.tool_has_arguments'));
   }
 
-  // last_step_no_tool_call: last STEP's LLM output should not contain tool_call
+  // After a normal completion, the last STEP should contain the final answer.
   if (!hasMessageContent) {
     checks.push(skipped('semantic.last_step_no_tool_call'));
   } else {
@@ -1036,6 +1043,10 @@ export function validateSemantic(trace, rules) {
         const children = childrenMap.get(lastStep.spanId) || [];
         const llm = children.find(c => c._kind === 'LLM');
         if (llm) {
+          if (hasAbnormalFinish(llm.attributes?.['gen_ai.response.finish_reasons'])) {
+            checks.push(skipped('semantic.last_step_no_tool_call'));
+            continue;
+          }
           const raw = llm.attributes?.['gen_ai.output.messages'];
           if (raw) {
             try {

@@ -239,6 +239,17 @@ describe('delegated trace validation scopes', () => {
     },
   );
 
+  test.each([{ reason: ['interrupted'] }, { reason: '["cancelled"]' }, { reason: ['error'] }])(
+    'accepts actual last-step tool evidence on explicit abnormal finish $reason', ({ reason }) => {
+      const fixture = delegatedTrace();
+      fixture.parentLlm.attributes['gen_ai.response.finish_reasons'] = reason;
+      fixture.parentLlm.attributes['gen_ai.output.messages'] = [{ role: 'assistant',
+        parts: [{ type: 'tool_call', name: 'Read', id: 'observed-call' }] }];
+      const checks = checkTrace(fixture.spans);
+      expect(checks.some(check => check.id === 'semantic.last_step_no_tool_call' && check.status === 'error')).toBe(false);
+    },
+  );
+
   test('still rejects within-agent STEP overlap, incorrect tokens and a nonfinal tool response', () => {
     const fixture = delegatedTrace();
     fixture.parentLlm.attributes['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'tool_call', name: 'unexpected' }] }];

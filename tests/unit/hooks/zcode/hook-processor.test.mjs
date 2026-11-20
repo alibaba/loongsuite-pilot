@@ -209,11 +209,14 @@ describe('readLastRolloutRecord + resolveNativeIds via rollout transcript', () =
       expect(child.status, child.stderr).toBe(0);
       expect(child.stdout.trim()).toBe('{}');
       const logs = path.join(data, 'logs', 'zcode');
-      const output = fs.readFileSync(path.join(logs, fs.readdirSync(logs).find(name => name.endsWith('.jsonl'))), 'utf8');
-      const entries = output.trim().split('\n').map(JSON.parse);
-      expect(entries).toHaveLength(2);
-      expect(entries.every(entry => entry.trace_id === toW3CTraceId(nativeTrace))).toBe(matches);
-      expect(entries.every(entry => entry['gen_ai.turn.id'] === 'turn-current')).toBe(matches);
+      const files = fs.existsSync(logs) ? fs.readdirSync(logs).filter(name => name.endsWith('.jsonl')) : [];
+      const entries = files.flatMap(file =>
+        fs.readFileSync(path.join(logs, file), 'utf8').trim().split('\n').map(JSON.parse));
+      expect(entries).toHaveLength(matches ? 2 : 0);
+      if (matches) {
+        expect(entries.every(entry => entry.trace_id === toW3CTraceId(nativeTrace))).toBe(true);
+        expect(entries.every(entry => entry['gen_ai.turn.id'] === 'turn-current')).toBe(true);
+      }
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
@@ -272,6 +275,37 @@ test.runIf(process.platform !== 'win32')('runs the installed Stop hook with a re
     const records = fs.readFileSync(path.join(output, logs[0]), 'utf8').trim().split('\n').map(JSON.parse);
     expect(records.map(record => record['gen_ai.span.kind'])).toEqual(['entry', 'agent']);
     expect(fs.existsSync(path.join(home, '.loongsuite-pilot', 'logs', 'zcode'))).toBe(false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const powershell = process.env.PILOT_TEST_PWSH || (process.platform === 'win32'
+  ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : undefined);
+test.runIf(Boolean(powershell))('uses the installed Node pin under CLM from a literal bracket path', () => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), 'pilot-zcode-clm-'));
+  try {
+    const data = path.join(root, 'custom Pilot [data]');
+    const hooks = path.join(data, 'hooks');
+    fs.cpSync(path.resolve('assets/hooks'), hooks, { recursive: true });
+    fs.writeFileSync(path.join(data, 'node-bin'), process.execPath + '\n');
+    const wrapper = path.join(hooks, 'zcode-loongsuite-pilot-hook.ps1').replaceAll("'", "''");
+    const runner = path.join(root, 'runner.ps1');
+    fs.writeFileSync(runner, `\uFEFF$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n& '${wrapper}' stop\n`);
+    const env = {
+      ...process.env, HOME: root, USERPROFILE: root,
+      PATH: process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32') : '/usr/bin:/bin',
+    };
+    delete env.LOONGSUITE_PILOT_DATA_DIR;
+    delete env.LOONGSUITE_PILOT_CACHE_DIR;
+    const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-File', runner], {
+      env, encoding: 'utf8', timeout: 10_000,
+      input: fs.readFileSync(path.join(FIXTURE_DIR, 'hook-stop-stdin-paired.json'), 'utf8'),
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    const logs = path.join(data, 'logs', 'zcode');
+    expect(fs.readdirSync(logs).some(name => name.endsWith('.jsonl'))).toBe(true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

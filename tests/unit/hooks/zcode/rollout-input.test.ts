@@ -132,6 +132,65 @@ describe('ZCodeRolloutInput: baseline skip (spec §1.5 #1)', () => {
   });
 });
 
+class ManualRollout extends ZCodeRolloutInput {
+  initialize() { return this.onStart(); }
+  pollEntries() { return this.collect(); }
+}
+
+describe('rollout checkpoints across restart', () => {
+  test.each([false, true])('preserves a live file with legacy checkpoint=%s', async legacy => {
+    const sid = 'sess_runtime_file';
+    const file = rolloutPath(sid);
+    const stateKey = `zcode-rollout:${file}`;
+    const stateFile = path.join(tmpRoot, 'state.json');
+    const first = new ManualRollout({ stateStore, rolloutDir });
+    await first.initialize();
+
+    const { offset } = writeLine(sid, baseModelIoLine({ sessionId: sid, turnId: 'first-turn' }));
+    expect((await first.pollEntries()).some(entry => entry['gen_ai.turn.id'] === 'first-turn')).toBe(true);
+    if (legacy) {
+      stateStore.delete(stateKey);
+      stateStore.update(stateKey, { lastOffset: offset, extra: { inode: fs.statSync(file).ino } });
+    }
+    await stateStore.save();
+
+    const row = Buffer.from(JSON.stringify(baseModelIoLine({
+      sessionId: sid, turnId: 'late-turn', requestId: 'req-late',
+      request: { messages: [{ role: 'user', content: '部分行' }] },
+    })) + '\n');
+    const split = row.indexOf(Buffer.from('部')) + 1;
+    fs.appendFileSync(file, row.subarray(0, split));
+
+    const resumedStore = new StateStore(stateFile);
+    await resumedStore.load();
+    const resumed = new ManualRollout({ stateStore: resumedStore, rolloutDir });
+    await resumed.initialize();
+    expect(await resumed.pollEntries()).toEqual([]);
+    expect(resumedStore.getOffset(stateKey)).toBe(offset);
+
+    fs.appendFileSync(file, row.subarray(split));
+    const entries = await resumed.pollEntries();
+    expect(new Set(entries.map(entry => entry['gen_ai.turn.id']))).toEqual(new Set(['late-turn']));
+    expect(resumedStore.getOffset(stateKey)).toBe(offset + row.length);
+  });
+
+  test('baselines complete history without skipping a live partial row already present on startup', async () => {
+    const sid = 'sess_open_on_start';
+    const file = rolloutPath(sid);
+    const stateKey = `zcode-rollout:${file}`;
+    const { offset } = writeLine(sid, baseModelIoLine({ sessionId: sid, turnId: 'historical-turn' }));
+    const live = JSON.stringify(baseModelIoLine({ sessionId: sid, turnId: 'live-at-first-start' }));
+    fs.appendFileSync(file, live.slice(0, 30));
+    const input = new ManualRollout({ stateStore, rolloutDir });
+    await input.initialize();
+    expect(stateStore.getOffset(stateKey)).toBe(offset);
+    expect(await input.pollEntries()).toEqual([]);
+    fs.appendFileSync(file, live.slice(30) + '\n');
+    const entries = await input.pollEntries();
+    expect(new Set(entries.map(entry => entry['gen_ai.turn.id']))).toEqual(new Set(['live-at-first-start']));
+  });
+});
+
 // ─── scenario #2: multi-attempt (streaming recovery → multiple STEPs) ───
 
 describe('ZCodeRolloutInput: multi-attempt (spec §1.5 #2)', () => {
