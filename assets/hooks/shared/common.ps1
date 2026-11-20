@@ -3,15 +3,15 @@
 
 $script:MIN_NODE_MAJOR = 18
 
-# Managed runtimes live at <pilot-dir>\runtime\node-v<x>.<y>.<z>\node.exe (win zip layout)
-# or ...\node-v<x>.<y>.<z>\bin\node.exe, extracted by the installer only after it verified
+# Managed runtimes use node-v<x>.<y>.<z>[-win-<arch>] under <pilot-dir>\runtime
+# with node.exe at the root or under bin\. The installer only extracts them after it verifies
 # SHASUMS256 and probed the binary itself, so the directory name is authoritative. Reading
 # the major from the path skips a `node --version` launch on every hook invocation.
 # A match avoids several Split-Path calls and works in Constrained Language Mode.
 function Test-NodeSuitable {
     param([string]$bin)
     if (-not (Test-Path -LiteralPath $bin -PathType Leaf -ErrorAction SilentlyContinue)) { return $false }
-    if ($bin -match '(?:^|[\\/])runtime[\\/]node-v([0-9]+)\.[0-9]+\.[0-9]+(?:[\\/]bin)?[\\/]node\.exe$') {
+    if ($bin -match '(?:^|[\\/])runtime[\\/]node-v([0-9]+)\.[0-9]+\.[0-9]+(?:-win-(?:x64|arm64|x86))?(?:[\\/]bin)?[\\/]node\.exe$') {
         return [int]$Matches[1] -ge $script:MIN_NODE_MAJOR
     }
     try {

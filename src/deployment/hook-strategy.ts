@@ -67,7 +67,10 @@ function wrapPs1Command(cmd: string, agentId: string): string {
   if (!match) return cmd;
   const script = match[1];
   const args = match[2] ?? '';
-  const wrapped = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${script}"`;
+  // Cursor parses the command in a PowerShell host, where a double-quoted
+  // path would expand variables and backticks before invoking the launcher.
+  const quotedScript = agentId === 'cursor' ? `'${script.replaceAll("'", "''")}'` : `"${script}"`;
+  const wrapped = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ${quotedScript}`;
   return args ? `${wrapped} ${args}` : wrapped;
 }
 

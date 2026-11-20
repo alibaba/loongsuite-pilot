@@ -6,10 +6,12 @@ import { AgentDefLoader } from '../../src/deployment/agent-def-loader.js';
 import { HookStrategy } from '../../src/deployment/hook-strategy.js';
 import { HookManager } from '../../src/hooks/hook-manager.js';
 
-it('upgrades Cursor collection hooks to a 30-second timeout without duplicating them', async () => {
+it.each(['darwin', 'win32'])('upgrades Cursor collection hooks without duplication on %s', async platform => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-cursor-hooks-'));
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
   try {
-    const dataDir = path.join(root, 'Pilot data');
+    Object.defineProperty(process, 'platform', { value: platform });
+    const dataDir = path.join(root, "Pilot data $runtime O'Brien `literal`");
     const settingsPath = path.join(root, '.cursor', 'hooks.json');
     const loader = new AgentDefLoader({
       builtinDir: path.resolve('agents.d'),
@@ -21,8 +23,8 @@ it('upgrades Cursor collection hooks to a 30-second timeout without duplicating 
     const hook = definition.hook!;
     hook.settingsPath = settingsPath;
     const script = hook.hookCommand;
-    const command = process.platform === 'win32'
-      ? `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${script}"`
+    const command = platform === 'win32'
+      ? `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '${script.replaceAll("'", "''")}'`
       : script;
     const otherHook = { command: 'user-managed-hook', timeout: 5 };
     await fs.mkdir(path.dirname(settingsPath), { recursive: true });
@@ -45,6 +47,7 @@ it('upgrades Cursor collection hooks to a 30-second timeout without duplicating 
     }
     await expect(strategy.needsDeploy(definition)).resolves.toBe(false);
   } finally {
+    Object.defineProperty(process, 'platform', platformDescriptor);
     await fs.rm(root, { recursive: true, force: true });
   }
 });
