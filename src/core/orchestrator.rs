@@ -2604,7 +2604,10 @@ impl Orchestrator {
                 CursorHookInput::new(self.hook_opts_dir(state_store, &cursor_dir, "cursor-hook"));
             if self.standalone && self.runtime_options.manage_host_services {
                 ensure_dir(&cursor_dir).await;
-                input.set_cursor_root(std::path::PathBuf::from(&self.data_dir));
+                input.set_cursor_root(
+                    std::path::PathBuf::from(&self.data_dir),
+                    Some(std::path::PathBuf::from(resolve_home("~/.cursor"))),
+                );
             }
             self.attach_hook(
                 entries,
@@ -2993,16 +2996,21 @@ impl Orchestrator {
         let listener = profile.listener;
         let sdk_data = self.data_dir_join(&format!("state/standalone-{agent}-sdk"));
         let config = self.config.agents.get(agent);
+        let mut allowed_roots = vec![self.data_dir.clone()];
+        if agent == "cursor" {
+            allowed_roots.push(resolve_home("~/.cursor"));
+        }
         let init = serde_json::json!({
             "data_dir": sdk_data,
             "resource_dir": pilot_dir,
+            "home_dir": resolve_home("~"),
             "user_id": self.config.user_id,
         });
         let policy = serde_json::json!({
             "agents": [agent],
             "hcd": {"agent_configs": {(agent): {"collection": {
                 "enabled": true, "profile": profile.profile,
-                "allowed_roots": [&self.data_dir],
+                "allowed_roots": allowed_roots,
                 "sources": [{"id": "history", "type": "hook_jsonl", "path": &history}],
                 "limits": {"poll_interval_ms": self.poll(listener)
                     .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS)},

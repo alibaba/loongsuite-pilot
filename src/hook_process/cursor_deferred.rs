@@ -108,13 +108,15 @@ pub(super) fn enqueue(root: &Path, env: &Env, mut event: Obj) -> Result<(), Stri
 /// history-only policy. The ingress and the active journal are Pilot-owned.
 pub(crate) struct DeferredCursor {
     root: PathBuf,
+    transcript_root: Option<PathBuf>,
     recovered: Mutex<bool>,
 }
 
 impl DeferredCursor {
-    pub(crate) fn new(root: PathBuf) -> Self {
+    pub(crate) fn new(root: PathBuf, transcript_root: Option<PathBuf>) -> Self {
         Self {
             root,
+            transcript_root,
             recovered: Mutex::new(false),
         }
     }
@@ -173,21 +175,21 @@ impl DeferredCursor {
                     }
                     Err(error) => return Err(error.to_string()),
                 };
-                let authorized = event
-                    .get("transcript_path")
-                    .and_then(Value::as_str)
-                    .is_some_and(|path| {
-                        let root = crate::utils::resolve_home("~/.cursor");
-                        let root = Path::new(&root);
-                        let path = Path::new(path);
-                        path.is_absolute()
-                            && crate::utils::source_access::private_path(path).is_ok()
-                            && root
-                                .canonicalize()
-                                .ok()
-                                .zip(path.canonicalize().ok())
-                                .is_some_and(|(root, path)| path.starts_with(root))
-                    });
+                let authorized = self.transcript_root.as_deref().is_some_and(|root| {
+                    event
+                        .get("transcript_path")
+                        .and_then(Value::as_str)
+                        .is_some_and(|path| {
+                            let path = Path::new(path);
+                            path.is_absolute()
+                                && crate::utils::source_access::private_path(path).is_ok()
+                                && root
+                                    .canonicalize()
+                                    .ok()
+                                    .zip(path.canonicalize().ok())
+                                    .is_some_and(|(root, path)| path.starts_with(root))
+                        })
+                });
                 if !authorized {
                     event.remove("transcript_path");
                 }
@@ -256,7 +258,7 @@ mod tests {
         let deferred = directory(&root);
         let invalid = deferred.join("inbox/0-truncated.json");
         fs::write(&invalid, b"{\"hook_event\":\"stop\"").unwrap();
-        DeferredCursor::new(root.clone()).collect().unwrap();
+        DeferredCursor::new(root.clone(), None).collect().unwrap();
         assert!(!invalid.exists());
         let quarantined = fs::read_dir(deferred.join("quarantine"))
             .unwrap()
@@ -275,7 +277,7 @@ mod tests {
         let first = fs::read(&file).unwrap();
         assert_ne!(first.len(), 0);
         assert!(String::from_utf8_lossy(&first).contains("test response"));
-        DeferredCursor::new(root).collect().unwrap();
+        DeferredCursor::new(root, None).collect().unwrap();
         assert_eq!(fs::read(file).unwrap(), first);
     }
 }

@@ -152,8 +152,8 @@ impl HookJsonlInput {
         )
     }
 
-    pub(crate) fn set_cursor_root(&self, root: PathBuf) {
-        self.inner.set_cursor_root(root);
+    pub(crate) fn set_cursor_root(&self, root: PathBuf, transcript_root: Option<PathBuf>) {
+        self.inner.set_cursor_root(root, transcript_root);
     }
 
     pub fn runtime_info(&self) -> crate::inputs::base::InputRuntimeInfo {
@@ -287,8 +287,8 @@ pub(crate) struct SdkHookBody {
 }
 
 impl SdkHookBody {
-    pub(crate) fn set_cursor_root(&self, root: PathBuf) {
-        self.inner.set_cursor_root(root);
+    pub(crate) fn set_cursor_root(&self, root: PathBuf, transcript_root: Option<PathBuf>) {
+        self.inner.set_cursor_root(root, transcript_root);
     }
 }
 
@@ -329,8 +329,11 @@ impl crate::inputs::base::InputBody for SdkHookBody {
 }
 
 impl HookInner {
-    fn set_cursor_root(&self, root: PathBuf) {
-        let worker = Arc::new(crate::hook_process::cursor::DeferredCursor::new(root));
+    fn set_cursor_root(&self, root: PathBuf, transcript_root: Option<PathBuf>) {
+        let worker = Arc::new(crate::hook_process::cursor::DeferredCursor::new(
+            root,
+            transcript_root,
+        ));
         let _ = self.deferred_cursor.set(worker);
     }
 

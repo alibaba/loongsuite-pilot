@@ -648,7 +648,18 @@ fn run_agent(
                 && source_path("hook_jsonl").as_deref().map(Path::new)
                     == Some(state.data_dir.join("logs/cursor/history").as_path())
             {
-                input.body.set_cursor_root(state.data_dir.clone());
+                let transcript_root = init
+                    .home_dir
+                    .as_deref()
+                    .and_then(|home| super::policy::canonical_candidate(&home.join(".cursor")).ok())
+                    .filter(|candidate| {
+                        plan.allowed_roots
+                            .iter()
+                            .any(|allowed| candidate.starts_with(allowed))
+                    });
+                input
+                    .body
+                    .set_cursor_root(state.data_dir.clone(), transcript_root);
             }
             let policy = crate::inputs::base::WorkspacePolicy::new(
                 state.exclude_workspaces.clone(),
