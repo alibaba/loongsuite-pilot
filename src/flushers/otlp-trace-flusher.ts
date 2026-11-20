@@ -22,6 +22,7 @@ import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-con
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { convertQwenWorkCollaborationTurn } from './qwen-work-collaboration-converter.js';
+import { isDoubaoAgentType, type DoubaoClient } from '../utils/doubao-work-paths.js';
 import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
 import { currentHermesProcessNamespace, hermesProcessIdentity, isHermesProcessDead,
   type HermesProcessIdentity } from './hermes-process-identity.js';
@@ -901,7 +902,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (isAgentAuditEvent(entry)) return;
     // Session summaries are log events, never an extra or reopened trace.
     if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.session_summary'] === true) return;
-    if (entry['gen_ai.agent.type'] === 'doubao-work' && entry['loongsuite.doubao_work.trace_role'] === 'log_only') return;
+    if (isDoubaoAgentType(String(entry['gen_ai.agent.type'])) && entry['loongsuite.doubao_work.trace_role'] === 'log_only') return;
     const { source, value, key } = this.resolveGroupKey(entry);
     const agentType = normalizeAgentType(
       (entry['gen_ai.agent.type'] as string) ?? '',
@@ -940,7 +941,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     for (const [bufKey, buf] of this.turnBuffers) {
       // Native Codex task_complete/turn_aborted is authoritative. A second
       // work item in the same thread must not truncate a still-running turn.
-      if (agentType === 'codex' || agentType === 'doubao-work') break;
+      if (agentType === 'codex' || isDoubaoAgentType(agentType)) break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       // Incremental Hermes turns may overlap inside one IM session. They have
       // their own explicit completion, so a successor is not an implicit end.
@@ -1312,7 +1313,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     // The passive Doubao adapter observes client message completion, not a
     // model finish reason. Only its explicit terminal boundary closes the turn.
-    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'doubao-work') {
+    if (isDoubaoAgentType(normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')))) {
       if (entry['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution') {
         return entry['event.name'] === 'other' && entry['loongsuite.doubao_work.local_execution_phase'] === 'end';
       }
@@ -1383,14 +1384,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
     key: string;
   } {
     const localExecution = entry['loongsuite.doubao_work.native_execution_id'];
-    if (entry['gen_ai.agent.type'] === 'doubao-work' && entry['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution'
+    if (isDoubaoAgentType(String(entry['gen_ai.agent.type'])) && entry['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution'
       && typeof localExecution === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(localExecution)) {
-      return { source: 'turn_id', value: localExecution, key: `doubao-local-execution:${localExecution}` };
+      return { source: 'turn_id', value: localExecution, key: `doubao-local-execution:${entry.trace_id}:${localExecution}` };
     }
     const traceId = entry['trace_id'] as string | undefined;
     // The client can reuse chat_session_id. The producer trace identity also
     // includes queryMs, conversation and source scope; preserve that identity.
-    if (entry['gen_ai.agent.type'] === 'doubao-work' && traceId && VALID_TRACE_ID_RE.test(traceId)) {
+    if (isDoubaoAgentType(String(entry['gen_ai.agent.type'])) && traceId && VALID_TRACE_ID_RE.test(traceId)) {
       return { source: 'trace_id', value: traceId, key: `doubao-request:${traceId}` };
     }
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
@@ -1691,12 +1692,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
           } else {
             const convert = qwenCollaboration ? convertQwenWorkCollaborationTurn
               : agentType === 'qwen-code-cli' ? convertQwenSubagents
-              : agentType === 'doubao-work' ? convertDoubaoWorkTurn
+              : isDoubaoAgentType(agentType) ? convertDoubaoWorkTurn
               : convertEventLogToTrace;
             result = convert(
               conversionRecords,
               { handler: prepared.handler, strict: false, passthroughKeys,
-                ...(agentType === 'doubao-work' ? { observationTracer: provider.getTracer('@loongsuite/pilot-doubao-local-observation') } : {}) },
+                ...(isDoubaoAgentType(agentType) ? { observationTracer: provider.getTracer('@loongsuite/pilot-doubao-local-observation') } : {}) },
             );
           }
           result.spanCount -= prepared.removedEntryCount;
@@ -1815,8 +1816,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
-    if (agentType === 'doubao-work') {
-      this.enrichDoubaoWorkSpans(records, spans);
+    if (isDoubaoAgentType(agentType)) {
+      this.enrichDoubaoWorkSpans(agentType, records, spans);
       enrichDoubaoClientRequest(records, spans);
     }
 
@@ -1845,7 +1846,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     return this.exportInBatches(exportState, agentType, spans);
   }
 
-  private enrichDoubaoWorkSpans(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+  private enrichDoubaoWorkSpans(agentType: DoubaoClient, records: AgentActivityEntry[], spans: ReadableSpan[]): void {
     const clients = new Set(records.map(record => record['loongsuite.doubao_work.client'])
       .filter((client): client is 'doubao' | 'doubao-work' => client === 'doubao' || client === 'doubao-work'));
     const client = clients.size === 1 ? [...clients][0] : undefined;
@@ -1857,9 +1858,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       && !/^0+$/.test(record.parent_span_id));
     for (const span of spans) {
       if (client) span.attributes['loongsuite.doubao_work.client'] = client;
+      span.attributes['gen_ai.framework'] = agentType;
       const kind = span.attributes['gen_ai.span.kind'];
       if (kind !== 'ENTRY' && kind !== 'AGENT') continue;
-      span.attributes['gen_ai.framework'] = 'doubao-work';
       for (const key of ['loongsuite.doubao_work.selected_skills', 'loongsuite.doubao_work.selected_partners']) {
         const values = terminal?.[key];
         if (Array.isArray(values) && values.length <= 32 && values.every(value => typeof value === 'string' && /^[a-zA-Z0-9_.:-]{1,256}$/.test(value))) span.attributes[key] = values as string[];
