@@ -58,13 +58,15 @@ export abstract class BaseSqliteInput extends BaseInput {
         try {
           const entry = await this.transformRow(row);
           if (entry) entries.push(entry);
+          cursor = Math.max(cursor, row.rowid);
         } catch (err) {
           this.logger.warn('row transform failed', { rowid: row.rowid, error: String(err) });
         }
-        cursor = Math.max(cursor, row.rowid);
       }
 
-      if (rows.length < SQLITE_SYNC_PAGE || cursor === previousCursor || page + 1 === MAX_PAGES_PER_CYCLE) {
+      // Leave a failed trailing row for the next poll instead of paging past it.
+      if (rows.length < SQLITE_SYNC_PAGE || cursor === previousCursor
+        || cursor !== rows.at(-1)?.rowid || page + 1 === MAX_PAGES_PER_CYCLE) {
         break;
       }
       await yieldToEventLoop();
