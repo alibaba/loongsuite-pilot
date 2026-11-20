@@ -1,6 +1,11 @@
 {
   "id": "codex",
   "displayName": "Codex",
+  "activityIndicator": "~/.codex/session_index.jsonl",
+  "versionSource": {
+    "type": "command",
+    "command": "codex --version"
+  },
   "deployMode": "hook",
   "detection": {
     "paths": ["~/.codex"],

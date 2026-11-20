@@ -11,6 +11,7 @@ This directory contains user-facing guides for installing, configuring, operatin
 | [Product Overview](overview.md) | Understand what Pilot collects, where data goes, and what files are created locally. |
 | [Installation](installation.md) | Install Pilot, pass installer options, uninstall, or run from source. |
 | [Configuration Guide](configuration.md) | Learn config loading order, global switches, and retention settings. |
+| [Collection Self-Check](self-check.md) | Detect collection gaps and inspect automatic Hook repair results. |
 
 ## Configure Outputs
 

@@ -5,6 +5,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import type { HookWatchdogConfig } from '../types/index.js';
+import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { directoryExists, fileExists } from '../utils/fs-utils.js';
 import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { createLogger } from '../utils/logger.js';
@@ -253,11 +254,13 @@ export class HookWatchdog {
   private dailyRepairResetDate = '';
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
+  private stopped = false;
 
   constructor(
     config: HookWatchdogConfig,
     targets?: PluginCheckTarget[],
     interceptTargets?: InterceptCheckTarget[],
+    private readonly alarmManager?: AlarmManager,
   ) {
     this.config = config;
     this.targets = targets ?? [];
@@ -270,6 +273,7 @@ export class HookWatchdog {
       logger.info('hook-watchdog disabled');
       return;
     }
+    this.stopped = false;
     logger.info('scheduling hook watchdog', {
       intervalMs: this.config.intervalMs,
       repairCooldownMs: this.config.repairCooldownMs,
@@ -284,6 +288,7 @@ export class HookWatchdog {
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.startupTimer) {
       clearTimeout(this.startupTimer);
       this.startupTimer = null;
@@ -429,6 +434,12 @@ export class HookWatchdog {
 
     const ok = await this.repairTarget(target);
     this.lastRepairAt.set(target.agentId, Date.now());
+
+    if (!this.stopped) {
+      this.alarmManager?.record('HOOK_REPAIR_ALARM', ok ? '1' : '2',
+        `hook auto-repair ${ok ? 'succeeded' : 'failed'} for ${target.agentId}: [${missing.join(', ')}]`,
+        { input_name: target.agentId });
+    }
 
     if (!ok) {
       return { agentId: target.agentId, status: 'repair-failed', missing };

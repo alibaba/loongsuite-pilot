@@ -1,6 +1,11 @@
 {
   "id": "qwen-code-cli",
   "displayName": "Qwen Code CLI",
+  "activityIndicator": "~/.qwen/debug/latest",
+  "versionSource": {
+    "type": "command",
+    "command": "qwen --version"
+  },
   "deployMode": "hook",
   "detection": {
     "paths": ["~/.qwen"],

@@ -8,6 +8,7 @@ import {
   type PluginCheckTarget,
 } from '../../../src/core/hook-watchdog.js';
 import type { HookWatchdogConfig } from '../../../src/types/index.js';
+import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 
 const mockLogger = vi.hoisted(() => ({
   info: vi.fn(),
@@ -169,6 +170,37 @@ describe('HookWatchdog', () => {
   });
 
   describe('checkTarget — missing', () => {
+    it('reports actual repair outcomes separately using the existing alarm pipeline', async () => {
+      const alarm = new AlarmManager({ ip: '127.0.0.1', version: '1.2.3', userId: 'fixture' });
+      const target = { ...makeClaudeTarget(tmpDir), repairFn: vi.fn()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true) };
+      await writeSettings(target.settingsPath, { hooks: {} });
+      const watchdog = new HookWatchdog(makeConfig({ repairCooldownMs: 0 }), [target], [], alarm);
+      await watchdog.runCheck();
+      await watchdog.runCheck();
+
+      expect(alarm.serialize()).toMatchObject([
+        { alarm_type: 'HOOK_REPAIR_ALARM', alarm_level: '2', input_name: target.agentId, alarm_count: '1' },
+        { alarm_type: 'HOOK_REPAIR_ALARM', alarm_level: '1', input_name: target.agentId, alarm_count: '1' },
+      ]);
+    });
+
+    it('discards repair alarms after the watchdog was stopped during an attempt', async () => {
+      const alarm = new AlarmManager({ ip: '127.0.0.1', version: '1.2.3', userId: 'fixture' });
+      let finish: (value: boolean) => void = () => {};
+      const repairFn = vi.fn(() => new Promise<boolean>(resolve => { finish = resolve; }));
+      const target = { ...makeClaudeTarget(tmpDir), repairFn };
+      await writeSettings(target.settingsPath, { hooks: {} });
+      const watchdog = new HookWatchdog(makeConfig(), [target], [], alarm);
+      const check = watchdog.runCheck();
+      await vi.waitFor(() => expect(repairFn).toHaveBeenCalledOnce());
+      watchdog.stop();
+      finish(true);
+      await check;
+      expect(alarm.serialize()).toEqual([]);
+    });
+
     it('triggers repair when at least one hook is missing', async () => {
       const target = makeClaudeTarget(tmpDir);
       await makeBin(target.binPath);

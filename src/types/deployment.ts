@@ -325,9 +325,18 @@ export interface AgentDefinition {
   /** Present only for `dsh-yaml-patch` agents. */
   dshYamlPatch?: DshYamlPatchConfig;
   input?: AgentInputConfig;
+  activityIndicator?: string | null;
+  versionSource?: AgentVersionSource | null;
   /** 运行时要求（如 node:sqlite）与无该依赖时的 fallback 声明 */
   runtime?: AgentRuntimeConfig;
 }
+
+export type AgentVersionSource =
+  | { type: 'jsonFile'; file: string; key: string }
+  | { type: 'jsonlTail'; file: string; key: string }
+  | { type: 'newestJsonFile'; dir: string; key: string }
+  | { type: 'newestSubdirFile'; dir: string; file: string; key: string }
+  | { type: 'command'; command: string };
 
 // ─── Deploy Result ───
 

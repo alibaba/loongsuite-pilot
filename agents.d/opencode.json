@@ -1,6 +1,11 @@
 {
   "id": "opencode",
   "displayName": "OpenCode",
+  "activityIndicator": "~/.local/share/opencode/opencode.db-wal",
+  "versionSource": {
+    "type": "command",
+    "command": "opencode --version"
+  },
   "deployMode": "plugin-inject",
   "detection": {
     "paths": ["~/.config/opencode"],
