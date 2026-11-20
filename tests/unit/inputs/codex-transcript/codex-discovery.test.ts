@@ -321,6 +321,116 @@ describe('Codex bounded discovery progress', () => {
     expect(f.ends()[0]!['gen_ai.session.id']).toBe('old');
   });
 
+  it('uses the configured default checkpoint to finish a cold pathless rollout behind a stale cached listing', async () => {
+    const f = await fixture();
+    vi.spyOn(f.input as unknown as { noteWakeup(name?: string): void }, 'noteWakeup').mockImplementation(() => {});
+    const physical = path.join(f.root, 'physical');
+    const old = await rollout(physical, '11', 'old-default');
+    const oldDayMtime = new Date(Math.floor(Date.now() / 1000) * 1000 - 1000);
+    await fs.utimes(path.dirname(old), oldDayMtime, oldDayMtime);
+    await fs.mkdir(path.dirname(f.sessionDir), { recursive: true });
+    await fs.symlink(path.join(physical, 'sessions'), f.sessionDir, 'dir');
+    await f.input.start();
+
+    const pieces = turn('pending-default').trimEnd().split('\n');
+    const terminal = pieces.pop()! + '\n';
+    const prefix = pieces.join('\n') + '\n';
+    const file = await rollout(physical, '11', 'pending-default', prefix);
+    await fs.utimes(path.dirname(old), oldDayMtime, oldDayMtime);
+    await f.marker('pending-default', { codex_home: path.dirname(f.sessionDir), session_dir: f.sessionDir });
+    await f.collect();
+    expect(f.ends()).toHaveLength(0);
+    const configured = path.join(f.sessionDir, path.relative(path.join(physical, 'sessions'), file));
+    const offset = () => f.stateStore.get(`codex-transcript:${configured}`).lastOffset;
+    expect(offset()).toBe(Buffer.byteLength(prefix));
+    expect(f.stateStore.get(`codex-transcript:${await fs.realpath(file)}`).lastOffset).toBeUndefined();
+
+    await fs.appendFile(file, terminal);
+    const inactive = new Date(Date.now() - 60 * 60_000);
+    await fs.utimes(file, inactive, inactive);
+    await f.collect();
+    expect.soft(offset()).toBe(Buffer.byteLength(prefix + terminal));
+    expect(f.ends().map(evt => evt['gen_ai.session.id'])).toEqual(['pending-default']);
+  });
+
+  it('keeps a moved default root out of custom discovery and retains independent roots', async () => {
+    const f = await fixture();
+    const original = path.join(f.root, 'physical-original');
+    const old = await rollout(original, '11', 'default-history', turn('default-history'));
+    const independentHome = path.join(f.root, 'independent');
+    const independent = await rollout(independentHome, '11', 'independent');
+    await fs.mkdir(path.dirname(f.sessionDir), { recursive: true });
+    await fs.symlink(path.join(original, 'sessions'), f.sessionDir, 'dir');
+    await f.marker('default-history', { codex_home: path.dirname(f.sessionDir), session_dir: f.sessionDir });
+    await f.marker('independent', { codex_home: independentHome });
+    await f.input.start();
+    expect(f.ends()).toHaveLength(0);
+
+    const destination = path.join(f.root, 'physical-destination');
+    const moved = await rollout(destination, '11', 'after-move', turn('after-move'));
+    // A mount or configured symlink can switch to a same-timestamp listing.
+    for (let from = path.dirname(old), to = path.dirname(moved); from !== original;
+      from = path.dirname(from), to = path.dirname(to)) {
+      const stamp = (await fs.stat(from)).mtime;
+      await fs.utimes(from, stamp, stamp);
+      await fs.utimes(to, stamp, stamp);
+    }
+    await fs.unlink(path.join(f.wakeupDir, 'independent.json'));
+    await fs.appendFile(independent, turn('independent'));
+    await fs.unlink(f.sessionDir);
+    await fs.symlink(path.join(destination, 'sessions'), f.sessionDir, 'dir');
+    await f.collect();
+    expect(f.ends().map(evt => evt['gen_ai.session.id']).sort()).toEqual(['after-move', 'independent']);
+    expect(f.stateStore.get(`codex-transcript:${await fs.realpath(old)}`).lastOffset).toBeUndefined();
+  });
+
+  it.each(['polling', 'targeted wakeup'])('revalidates and recovers a cached rollout on %s', async mode => {
+    const f = await fixture();
+    const [header, ...body] = turn('cached').trimEnd().split('\n');
+    const allowed = await rollout(f.home, '11', 'cached', header + '\n');
+    const canonical = await fs.realpath(allowed);
+    await f.marker('cached', { transcript_path: allowed });
+    // Drive the two collection paths directly without racing a real watcher.
+    const probe = f.input as unknown as {
+      noteWakeup(name?: string): void;
+      dirtyWakeupMarkers: Set<string>;
+      wakeupOnlyRequested: boolean;
+      discoverSessionFiles(): Promise<unknown[]>;
+    };
+    vi.spyOn(probe, 'noteWakeup').mockImplementation(() => {});
+    await f.input.start();
+    expect(f.ends()).toHaveLength(0);
+    const discovery = vi.spyOn(probe, 'discoverSessionFiles');
+    const offset = () => f.stateStore.get(`codex-transcript:${canonical}`).lastOffset;
+    const priorOffset = offset();
+    expect(priorOffset).toBe(Buffer.byteLength(header + '\n'));
+
+    const other = await rollout(path.join(f.root, 'other-codex-home'), '11', 'other', turn('other'));
+    const moved = path.join(f.root, 'temporarily-moved-rollout.jsonl');
+    await fs.rename(allowed, moved);
+    await fs.symlink(other, allowed);
+    // A different path in the current marker might have yet to be published.
+    await f.marker('cached', { transcript_path: path.join(path.dirname(allowed), 'rollout-upcoming.jsonl') });
+    const collect = () => {
+      if (mode === 'targeted wakeup') {
+        probe.dirtyWakeupMarkers.add('cached.json');
+        probe.wakeupOnlyRequested = true;
+      }
+      return f.collect();
+    };
+    await collect();
+    expect(f.ends()).toHaveLength(0);
+    expect(offset()).toBe(priorOffset);
+
+    await fs.appendFile(moved, body.join('\n') + '\n');
+    await fs.unlink(allowed);
+    await fs.rename(moved, allowed);
+    await collect();
+    expect(f.ends().map(evt => evt['gen_ai.session.id'])).toEqual(['cached']);
+    expect(offset()).toBe((await fs.stat(allowed)).size);
+    if (mode === 'targeted wakeup') expect(discovery).not.toHaveBeenCalled();
+  });
+
   it.each(['outside-home', 'symlink', 'expired', 'relative'])('rejects an unsafe explicit transcript: %s', async mode => {
     const f = await fixture();
     const outside = await rollout(path.join(f.root, 'outside'), '01', 'old', turn('old'));

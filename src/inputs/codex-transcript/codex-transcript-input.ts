@@ -167,7 +167,13 @@ interface PendingRecoveryResult {
 
 interface DiscoveredSessionFile {
   filePath: string;
+  canonicalPath: string;
   baselineOnStart: boolean;
+}
+
+interface CodexWakeupTranscript {
+  sourcePath: string;
+  canonicalPath: string;
 }
 
 interface CachedCodexTranscriptMeta {
@@ -246,7 +252,7 @@ export class CodexTranscriptInput extends BaseInput {
   private defaultScanComplete = false;
   private baselinePending = false;
   private baselinePendingSince = 0;
-  private readonly wakeupPaths = new Map<string, Set<string>>();
+  private readonly wakeupPaths = new Map<string, Map<string, DiscoveredSessionFile>>();
   private static readonly availabilityMarkerState = new LruMap<{ after?: string; available?: string }>(
     MAX_LINK_DESCRIPTORS,
   );
@@ -254,7 +260,9 @@ export class CodexTranscriptInput extends BaseInput {
   private discoveryRootCursor?: string;
   private discoveryTranscriptCursor?: string;
   private readonly dynamicSessionRoots = new Map<string, DynamicSessionRoot>();
-  private readonly dynamicWakeupTranscripts = new Map<string, number>();
+  private canonicalDefaultSessionDir?: string;
+  private defaultPathlessRoot?: DynamicSessionRoot;
+  private readonly dynamicWakeupTranscripts = new Map<string, { sourcePath: string; receivedAtMs: number }>();
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
   private lastSubagentLinkSummary = '';
@@ -428,6 +436,7 @@ export class CodexTranscriptInput extends BaseInput {
     this.wakeupDiscoveryRevision = 0;
     this.wakeupPaths.clear();
     this.dynamicSessionRoots.clear();
+    this.defaultPathlessRoot = undefined;
     this.dynamicWakeupTranscripts.clear();
     this.discoveryMarkerCursor = undefined;
     this.discoveryRootCursor = undefined;
@@ -471,24 +480,29 @@ export class CodexTranscriptInput extends BaseInput {
     this.wakeupOnlyRequested = false;
     const dirty = new Set(this.dirtyWakeupMarkers);
     this.dirtyWakeupMarkers.clear();
-    const targeted = new Set<string>();
+    const targeted = new Map<string, DiscoveredSessionFile>();
     for (const marker of dirty) {
       const paths = this.wakeupPaths.get(marker);
       if (!paths) {
         this.wakeupDiscoveryPending = true;
         this.wakeupDiscoveryRevision++;
       }
-      for (const file of paths ?? []) targeted.add(file);
+      if (targeted.size >= MAX_DYNAMIC_SESSION_FILES) continue;
+      for (const [filePath, file] of paths ?? []) {
+        targeted.set(filePath, file);
+        if (targeted.size >= MAX_DYNAMIC_SESSION_FILES) break;
+      }
     }
     // A resumed/reverted session can point at a file that has never appeared in
     // the bounded directory walk. Read the changed marker itself, not only the
     // old thread-to-path index. These paths undergo the same root validation.
-    if (dirty.size) {
-      const canonicalDefault = await canonicalDirectoryPath(this.sessionDir);
+    const canonicalDefault = dirty.size ? await canonicalDirectoryPath(this.sessionDir) : undefined;
+    if (canonicalDefault !== undefined) {
       for (const marker of [...dirty].slice(0, MAX_DYNAMIC_SESSION_FILES)) {
         const transcript = await readCodexWakeupTranscript(path.join(this.wakeupDir, marker), Date.now());
         if (!transcript) continue;
-        targeted.add(this.configuredTranscriptPath(transcript, canonicalDefault));
+        const file = this.dynamicTranscriptFile(transcript.canonicalPath, canonicalDefault);
+        targeted.set(file.filePath, file);
       }
     }
     const discoveryRevision = this.wakeupDiscoveryRevision;
@@ -499,7 +513,7 @@ export class CodexTranscriptInput extends BaseInput {
     let discovered: DiscoveredSessionFile[];
     let skipPaths = new Set<string>();
     if (fullScan) {
-      discovered = await this.discoverSessionFiles(dirty, targeted);
+      discovered = await this.discoverSessionFiles(dirty, targeted, canonicalDefault);
       this.lastFullScanAt = now;
       const discoveredPaths = new Set(discovered.map(file => file.filePath));
       for (const filePath of this.rolloutIdleSnapshot.keys()) {
@@ -509,22 +523,24 @@ export class CodexTranscriptInput extends BaseInput {
       // A filename-less/overflow notification may carry only new ownership
       // evidence for a cold file. Do not lose it to historical-file skipping.
       if (this.wakeupDiscoveryPending) skipPaths.clear();
-      for (const file of targeted) skipPaths.delete(file);
+      for (const filePath of targeted.keys()) skipPaths.delete(filePath);
       await this.indexDiscoveredTranscriptOwners(discovered, skipPaths);
       this.wakeupPaths.clear();
-      for (const { filePath } of discovered) {
-        const meta = this.transcriptMetaByPath.get(filePath);
+      for (const file of discovered) {
+        const meta = this.transcriptMetaByPath.get(file.filePath);
         if (!meta) continue;
         const marker = `${safeWakeupSessionPart(meta.threadId)}.json`;
-        if (!this.wakeupPaths.has(marker)) this.wakeupPaths.set(marker, new Set());
-        this.wakeupPaths.get(marker)!.add(filePath);
+        if (!this.wakeupPaths.has(marker)) this.wakeupPaths.set(marker, new Map());
+        this.wakeupPaths.get(marker)!.set(file.filePath, file);
       }
       if (this.wakeupDiscoveryRevision === discoveryRevision) this.wakeupDiscoveryPending = false;
     } else {
       // Known sessions need no directory/marker enumeration. Newly created
       // sessions and filename-less notifications retain full polling fallback.
-      discovered = [...targeted].slice(0, MAX_DYNAMIC_SESSION_FILES)
-        .map(filePath => ({ filePath, baselineOnStart: filePath.startsWith(this.sessionDir + path.sep) }));
+      discovered = [];
+      for (const file of [...targeted.values()].slice(0, MAX_DYNAMIC_SESSION_FILES)) {
+        if (await isCanonicalRolloutFile(file.filePath, file.canonicalPath)) discovered.push(file);
+      }
       await this.indexDiscoveredTranscriptOwners(discovered, skipPaths, 'targeted');
     }
     discovered.sort((left, right) => {
@@ -2511,12 +2527,27 @@ export class CodexTranscriptInput extends BaseInput {
       : filePath;
   }
 
+  private dynamicTranscriptFile(canonicalPath: string, canonicalDefault: string): DiscoveredSessionFile {
+    return {
+      canonicalPath,
+      filePath: this.configuredTranscriptPath(canonicalPath, canonicalDefault),
+      baselineOnStart: canonicalPath.startsWith(canonicalDefault + path.sep),
+    };
+  }
+
   private async discoverSessionFiles(
     priorityMarkers = new Set<string>(),
-    priorityPaths = new Set<string>(),
+    priorityPaths = new Map<string, DiscoveredSessionFile>(),
+    canonicalDefault?: string,
   ): Promise<DiscoveredSessionFile[]> {
     const discovered = new Map<string, DiscoveredSessionFile>();
-    const canonicalDefaultSessionDir = await canonicalDirectoryPath(this.sessionDir);
+    const canonicalDefaultSessionDir = canonicalDefault ?? await canonicalDirectoryPath(this.sessionDir);
+    if (this.canonicalDefaultSessionDir !== canonicalDefaultSessionDir) {
+      this.canonicalDefaultSessionDir = canonicalDefaultSessionDir;
+      this.defaultPathlessRoot = undefined;
+      this.cachedDefaultRollout = null;
+      this.rolloutIdleSnapshot.clear();
+    }
     const defaultFiles = await this.listDefaultRolloutFiles();
     for (const filePath of defaultFiles) {
       const canonicalPath = path.join(
@@ -2526,42 +2557,46 @@ export class CodexTranscriptInput extends BaseInput {
       // Keep the configured/default path as the checkpoint key for backwards
       // compatibility. Canonicalizing the root once avoids a realpath syscall
       // for every historical rollout on every collection cycle.
-      discovered.set(canonicalPath, { filePath, baselineOnStart: true });
+      discovered.set(canonicalPath, { canonicalPath, filePath, baselineOnStart: true });
     }
 
     const sessionDirs = await this.discoverDynamicSessionDirs(canonicalDefaultSessionDir, priorityMarkers);
     let remainingDynamicFiles = MAX_DYNAMIC_SESSION_FILES;
-    const addDynamicFile = (filePath: string): void => {
-      const canonicalPath = filePath.startsWith(this.sessionDir + path.sep)
-        ? path.join(canonicalDefaultSessionDir, path.relative(this.sessionDir, filePath))
-        : filePath;
-      if (discovered.has(canonicalPath)) return;
-      discovered.set(canonicalPath, {
-        filePath: this.configuredTranscriptPath(canonicalPath, canonicalDefaultSessionDir),
-        baselineOnStart: canonicalPath.startsWith(canonicalDefaultSessionDir + path.sep),
-      });
+    const addDynamicFile = (file: DiscoveredSessionFile): void => {
+      if (discovered.has(file.canonicalPath)) return;
+      discovered.set(file.canonicalPath, file);
       remainingDynamicFiles--;
+    };
+    const addTargetedFile = async (file: DiscoveredSessionFile, sourcePath = file.filePath): Promise<void> => {
+      if (!await isCanonicalRolloutFile(file.filePath, file.canonicalPath)) {
+        if (discovered.get(file.canonicalPath)?.filePath === file.filePath) discovered.delete(file.canonicalPath);
+        return;
+      }
+      if (sourcePath !== file.filePath && !await isCanonicalRolloutFile(sourcePath, file.canonicalPath)) return;
+      addDynamicFile(file);
     };
     // Reserve half the file budget for the fallback walk, even when every Hook
     // supplies a path. Explicit paths do not expire with the 15-minute mtime
     // filter: a pending terminal still needs processing after a long outage.
-    const priorities = [...priorityPaths].slice(0, MAX_DYNAMIC_SESSION_FILES / 4);
+    const priorities = [...priorityPaths.values()].slice(0, MAX_DYNAMIC_SESSION_FILES / 4);
+    const priorityCanonicalPaths = new Set(priorities.map(file => file.canonicalPath));
     const explicitPaths = rotateDiscoveryItems(
       [...this.dynamicWakeupTranscripts.keys()].sort((a, b) => b.localeCompare(a)),
       value => value,
       this.discoveryTranscriptCursor,
-    ).filter(file => !priorities.includes(file))
+    ).filter(file => !priorityCanonicalPaths.has(file))
       .slice(0, MAX_DYNAMIC_SESSION_FILES / 2 - priorities.length);
-    for (const filePath of priorities) addDynamicFile(filePath);
-    for (const filePath of explicitPaths) {
-      this.discoveryTranscriptCursor = filePath;
-      addDynamicFile(filePath);
+    for (const file of priorities) await addTargetedFile(file);
+    for (const canonicalPath of explicitPaths) {
+      this.discoveryTranscriptCursor = canonicalPath;
+      const { sourcePath } = this.dynamicWakeupTranscripts.get(canonicalPath)!;
+      await addTargetedFile(this.dynamicTranscriptFile(canonicalPath, canonicalDefaultSessionDir), sourcePath);
     }
     for (const sessionDir of sessionDirs) {
       if (remainingDynamicFiles <= 0) break;
       this.discoveryRootCursor = sessionDir;
       const files: string[] = [];
-      const root = this.dynamicSessionRoots.get(sessionDir)!;
+      const root = this.dynamicSessionRoots.get(sessionDir) ?? this.defaultPathlessRoot!;
       await collectRecentRolloutFiles(
         sessionDir,
         files,
@@ -2573,12 +2608,13 @@ export class CodexTranscriptInput extends BaseInput {
         },
         root.walk,
         (filePath, stat) => {
-          const checkpoint = this.readCheckpoint(this.stateKey(filePath));
+          const configuredPath = this.configuredTranscriptPath(filePath, canonicalDefaultSessionDir);
+          const checkpoint = this.readCheckpoint(this.stateKey(configuredPath));
           return checkpoint !== null && !rolloutCaughtUp(checkpoint, stat);
         },
       );
       for (const filePath of files) {
-        addDynamicFile(filePath);
+        addDynamicFile(this.dynamicTranscriptFile(filePath, canonicalDefaultSessionDir));
       }
     }
 
@@ -2623,8 +2659,11 @@ export class CodexTranscriptInput extends BaseInput {
       const transcript = await readCodexWakeupTranscript(markerPath, now, marker);
       const receivedAtMs = Date.parse(stringValue(marker.received_at) ?? '');
       if (transcript) {
-        this.dynamicWakeupTranscripts.set(transcript,
-          Math.max(this.dynamicWakeupTranscripts.get(transcript) ?? 0, receivedAtMs));
+        const { canonicalPath, sourcePath } = transcript;
+        const previous = this.dynamicWakeupTranscripts.get(canonicalPath);
+        if (!previous || receivedAtMs >= previous.receivedAtMs) {
+          this.dynamicWakeupTranscripts.set(canonicalPath, { sourcePath, receivedAtMs });
+        }
       }
       roots.forEach((candidates, tier) => {
         for (const candidate of candidates) {
@@ -2633,23 +2672,28 @@ export class CodexTranscriptInput extends BaseInput {
         }
       });
     }
+    const configuredDefault = path.resolve(this.sessionDir);
     for (const [tier, candidates] of tiers.entries()) {
       for (const [candidate, receivedAtMs] of candidates) {
         try {
           const canonical = await fs.realpath(candidate);
-          // A pathless Hook can identify the root even when the default
-          // listing's timestamp is stale. Use the bounded walk for that root.
+          const isConfiguredDefault = candidate === configuredDefault;
+          // The configured root can move without changing the identity of an
+          // independent custom root. Keep the default fallback's cursor separate.
+          if (isConfiguredDefault && canonical !== canonicalDefaultSessionDir) continue;
           if (canonical === canonicalDefaultSessionDir && !pathlessRoots.has(candidate)) continue;
           if (!(await fs.stat(canonical)).isDirectory()) continue;
-          const existing = this.dynamicSessionRoots.get(canonical);
+          const existing = isConfiguredDefault ? this.defaultPathlessRoot : this.dynamicSessionRoots.get(canonical);
           if (existing) {
             existing.receivedAtMs = Math.max(existing.receivedAtMs, receivedAtMs);
             existing.tier = Math.min(existing.tier, tier);
           } else {
-            this.dynamicSessionRoots.set(canonical, {
+            const root = {
               tier, receivedAtMs,
               walk: { stack: [], startedAtMs: now, modifiedAfterMs: now - DYNAMIC_SESSION_FILE_MAX_IDLE_MS },
-            });
+            };
+            if (isConfiguredDefault) this.defaultPathlessRoot = root;
+            else this.dynamicSessionRoots.set(canonical, root);
           }
         } catch {
           // A temporarily unavailable root can be retried on the next discovery.
@@ -2659,13 +2703,19 @@ export class CodexTranscriptInput extends BaseInput {
     for (const [dir, root] of this.dynamicSessionRoots) {
       if (now - root.receivedAtMs > WAKEUP_MARKER_DISCOVERY_TTL_MS) this.dynamicSessionRoots.delete(dir);
     }
-    for (const [file, receivedAtMs] of this.dynamicWakeupTranscripts) {
+    if (this.defaultPathlessRoot && now - this.defaultPathlessRoot.receivedAtMs > WAKEUP_MARKER_DISCOVERY_TTL_MS) {
+      this.defaultPathlessRoot = undefined;
+    }
+    for (const [file, { receivedAtMs }] of this.dynamicWakeupTranscripts) {
       if (now - receivedAtMs > WAKEUP_MARKER_DISCOVERY_TTL_MS) this.dynamicWakeupTranscripts.delete(file);
     }
     trimOldestMap(this.dynamicSessionRoots, MAX_LINK_DESCRIPTORS);
     trimOldestMap(this.dynamicWakeupTranscripts, MAX_LINK_DESCRIPTORS);
-    const sessionDirs = [...this.dynamicSessionRoots.keys()]
-      .sort((a, b) => this.dynamicSessionRoots.get(a)!.tier - this.dynamicSessionRoots.get(b)!.tier);
+    const sessionDirs = [...this.dynamicSessionRoots];
+    if (this.defaultPathlessRoot && !this.dynamicSessionRoots.has(canonicalDefaultSessionDir)) {
+      sessionDirs.push([canonicalDefaultSessionDir, this.defaultPathlessRoot]);
+    }
+    sessionDirs.sort((a, b) => a[1].tier - b[1].tier);
     // At most three roots per marker are examined within the existing marker cap.
     const dropped = sessionDirs.length - MAX_DYNAMIC_SESSION_DIRS;
     if (dropped > 0 && now - this.lastDynamicRootLimitWarningAtMs >= WAKEUP_MARKER_CLEANUP_INTERVAL_MS) {
@@ -2675,8 +2725,9 @@ export class CodexTranscriptInput extends BaseInput {
         cap: MAX_DYNAMIC_SESSION_DIRS,
       });
     }
-    return rotateDiscoveryItems(sessionDirs, value => value, this.discoveryRootCursor)
-      .slice(0, MAX_DYNAMIC_SESSION_DIRS);
+    return rotateDiscoveryItems(sessionDirs, entry => entry[0], this.discoveryRootCursor)
+      .slice(0, MAX_DYNAMIC_SESSION_DIRS)
+      .map(([sessionDir]) => sessionDir);
   }
 
   private async cleanupExpiredWakeupMarkers(entries: Dirent[], now: number): Promise<void> {
@@ -3189,7 +3240,7 @@ async function readCodexWakeupTranscript(
   markerPath: string,
   now: number,
   record?: Record<string, unknown>,
-): Promise<string | undefined> {
+): Promise<CodexWakeupTranscript | undefined> {
   try {
     const marker = record ?? asRecord(JSON.parse(await fs.readFile(markerPath, 'utf8')));
     const transcript = stringValue(marker?.transcript_path);
@@ -3199,13 +3250,21 @@ async function readCodexWakeupTranscript(
     const roots = await readCodexWakeupRoots(markerPath, now, marker ?? undefined);
     if (!roots.flat().includes(sessionDir)) return;
     const canonicalRoot = await fs.realpath(sessionDir);
-    const canonicalTranscript = await fs.realpath(transcript);
-    if (canonicalTranscript !== path.join(canonicalRoot, path.relative(sessionDir, transcript))) return;
-    if (!(await fs.lstat(transcript)).isFile()) return;
-    return canonicalTranscript;
+    const canonicalPath = path.join(canonicalRoot, path.relative(sessionDir, transcript));
+    if (await isCanonicalRolloutFile(transcript, canonicalPath)) {
+      return { sourcePath: transcript, canonicalPath };
+    }
   } catch {
     // A marker may precede transcript publication or race with atomic rename.
     return;
+  }
+}
+
+async function isCanonicalRolloutFile(filePath: string, canonicalPath: string): Promise<boolean> {
+  try {
+    return await fs.realpath(filePath) === canonicalPath && (await fs.lstat(filePath)).isFile();
+  } catch {
+    return false;
   }
 }
 
