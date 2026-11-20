@@ -999,6 +999,11 @@ export class Orchestrator extends EventEmitter {
             throw new Error(result.error ?? `directory plugin repair failed for ${def.id}`);
           }
         },
+        ...(def.id === 'minimax-code' ? { cleanup: async () => {
+          if (this.deploymentManager.hasRecord(def.id) && !(await this.deploymentManager.undeployAgent(def))) {
+            throw new Error('MiniMax Code plugin cleanup incomplete');
+          }
+        } } : {}),
       });
     }
 

@@ -100,7 +100,7 @@ it('retains observations and waits for an unfinished record or temporarily unava
     await f.addObservations(f.lines);
     const { input } = await f.openInput();
     expect(await input.poll()).toEqual([]);
-    const incomplete = f.sourceText.trimEnd();
+    const incomplete = '{damaged historical line}\n' + f.sourceText.trimEnd();
     await fs.writeFile(f.source, incomplete);
     expect(await input.poll()).toEqual([]);
     expect(await input.poll()).toEqual([]);

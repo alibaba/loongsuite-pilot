@@ -235,7 +235,15 @@ export class MinimaxCodeSessionInput extends BaseInput {
       try {
         for await (const line of lines) {
           if (!line.trim()) continue;
-          const row = parseMinimaxCodeSessionMessage(JSON.parse(line));
+          let data: unknown;
+          try {
+            data = JSON.parse(line);
+          } catch {
+            // A damaged historical line need not strand subsequent resumed
+            // turns. Turn assembly still requires a complete native graph.
+            continue;
+          }
+          const row = parseMinimaxCodeSessionMessage(data);
           if (row && turns.has(row.turnId)) rows.set(row.messageId, row);
         }
       } finally {

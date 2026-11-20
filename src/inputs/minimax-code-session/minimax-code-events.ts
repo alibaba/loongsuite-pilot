@@ -123,7 +123,7 @@ export function buildMinimaxCodeTurn(
       ...make('llm.request', model, model.timestampMs),
       ...shared,
       ...(index === 0 ? { 'gen_ai.turn.start': true } : {}),
-      ...(input.length ? { 'gen_ai.input.messages': input } : {}),
+      ...(input.length ? { 'gen_ai.input.messages_delta': input } : {}),
     });
     const finishReason = reason === 'toolUse' ? 'tool_calls' : reason === 'aborted' ? 'cancelled' : reason;
     const outputParts = textParts(model.message.content);

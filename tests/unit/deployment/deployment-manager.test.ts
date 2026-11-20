@@ -842,6 +842,34 @@ describe('DeploymentManager', () => {
         targetDir: path.resolve(targetDir),
       });
     });
+
+    it.skipIf(process.platform === 'win32')('undeploys the recorded MiniMax plugin when the agent is disabled', async () => {
+      const sourceDir = path.join(dataDir, 'plugins', 'minimax-code', 'loongsuite-pilot');
+      const profiles = ['recorded-profile', 'current-profile'].map(name => path.join(tmpDir, name));
+      const [recordedDir, currentDir] = profiles.map(profile => path.join(profile, 'plugins', 'loongsuite-pilot'));
+      await fs.mkdir(sourceDir, { recursive: true });
+      await fs.writeFile(path.join(sourceDir, 'plugin.json'), '{}\n');
+      const def: AgentDefinition = {
+        id: 'minimax-code', displayName: 'MiniMax Code', deployMode: 'directory-plugin',
+        detection: { paths: profiles, commands: ['mcode'] },
+        directoryPlugin: { sourceDir, targetDir: recordedDir },
+      };
+      await writeAgentDef(def);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+      expect((await makeManager().deployAll())[0]).toMatchObject({ success: true });
+
+      // A later configuration points to a different profile containing a user plugin.
+      await fs.mkdir(currentDir, { recursive: true });
+      await fs.writeFile(path.join(currentDir, 'user-plugin.js'), '');
+      await writeAgentDef({ ...def, directoryPlugin: { sourceDir, targetDir: currentDir } });
+      expect((await makeManager().deployAll(() => false))[0]).toMatchObject({
+        success: true, skipped: true, reason: 'disabled',
+      });
+      await expect(fs.access(recordedDir)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.access(path.join(currentDir, 'user-plugin.js'))).resolves.toBeUndefined();
+      const state = JSON.parse(await fs.readFile(path.join(dataDir, 'deployed-agents.json'), 'utf8'));
+      expect(state['minimax-code']).toBeUndefined();
+    });
   });
 
   describe('deploySingle', () => {
