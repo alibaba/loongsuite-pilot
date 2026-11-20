@@ -207,7 +207,7 @@ describe('OpenClaw interceptor client', () => {
         toolName: 'read',
         toolCallId: 't1',
         result: original,
-      }, {})).resolves.toEqual({
+      }, { sessionId: 's1' })).resolves.toEqual({
         result: {
           ...original,
           content: [{ type: 'text', text: wrapHostReason('PostToolUse', '[DATABASEURL_MASKED]') }],
@@ -217,7 +217,7 @@ describe('OpenClaw interceptor client', () => {
         toolName: 'read',
         toolCallId: 't1',
         message: { toolCallId: 't1', ...original },
-      }, {}, { sync: true })).toEqual({
+      }, { sessionId: 's1' }, { sync: true })).toEqual({
         message: {
           toolCallId: 't1',
           ...original,
@@ -229,6 +229,136 @@ describe('OpenClaw interceptor client', () => {
     } finally {
       server.close();
     }
+  });
+
+  it.each([
+    ['allow', '', null],
+    ['block', '{"action":"block","reason":"blocked once"}', null],
+    ['unavailable', '', null],
+    ['invalid output', 'invalid JSON', null],
+    ['retry', '{"action":"retry"}', null],
+    ['timed out', '', new Error('ETIMEDOUT')],
+    ['different session', '{"action":"allow"}', null],
+    ['different run', '{"action":"allow"}', null],
+    ['missing identity', '{"action":"allow"}', null],
+    ['conflicting identity', '{"action":"allow"}', null],
+    ['changed metadata', '{"action":"allow"}', null],
+    ['changed wrapper metadata', '{"action":"allow"}', null],
+    ['changed error state', '{"action":"allow"}', null],
+    ['synthetic result', '{"action":"allow"}', null],
+    ['wire limit', '', null],
+    ['stateful JSON projection', '', null],
+  ])('correlates matching OpenClaw post-tool audits while re-evaluating policy (%s)', async (outcome, stdout, error) => {
+    const { createOpenClawInterceptor, wrapHostReason } = await import(/* @vite-ignore */ `${INTERCEPTOR_PATH}?sdk-verdict=${++pluginLoadSequence}`);
+    const suffix = process.platform === 'win32' ? '.exe' : '';
+    const pilot = path.join(tmpDir, `loongsuite-pilot${suffix}`);
+    const sdk = path.join(tmpDir, `loongsuite-pilot-sdk-hook${suffix}`);
+    // The injected transport does not execute the binary. Its header selects
+    // the same native resolver branch used for an installed package.
+    fs.writeFileSync(pilot, Buffer.from([0x7f, 0x45, 0x4c, 0x46]), { mode: 0o700 });
+    fs.writeFileSync(sdk, '');
+    const stateDir = path.join(tmpDir, 'state', 'standalone-openclaw-interceptor-sdk');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, 'sdk-hooks-local.json'), '{}');
+    let middlewareWire;
+    let middlewareInput;
+    const execFileImpl = vi.fn((_file, _args, _options, done) => ({
+      stdin: { on() {}, end(input) {
+        middlewareWire = input;
+        middlewareInput = JSON.parse(input);
+        queueMicrotask(() => done(error, stdout));
+      } },
+    }));
+    const spawnSyncImpl = vi.fn(() => ({
+      status: 0,
+      stdout: '{"action":"block","reason":"evaluated again"}',
+    }));
+    const interceptor = createOpenClawInterceptor({
+      resolveDataDir: () => tmpDir,
+      env: { LOONGSUITE_PILOT_BIN: pilot },
+      execFileImpl,
+      spawnSyncImpl,
+    });
+    const session = { sessionKey: 'agent:main:one', sessionId: 's1', runId: 'run-1' };
+    const result = { content: [{ type: 'text', text: 'ordinary' }], details: { nested: ['original'] } };
+    const event = { toolName: 'read', toolCallId: 'one-tool' };
+    const firstContext = outcome === 'missing identity' ? { sessionKey: session.sessionKey } : session;
+    const secondContext = { sessionKey: session.sessionKey, ...event };
+    if (outcome === 'different session') secondContext.sessionKey = 'agent:main:two';
+    if (outcome === 'conflicting identity') secondContext.runId = 'run-other';
+    // The stable Gateway context omits physical sessionId and tool args here.
+    const message = {
+      role: 'toolResult', ...event, isError: outcome === 'changed error state',
+      timestamp: 1000, ...result,
+      __openclaw: { runId: outcome === 'different run' ? 'run-other' : session.runId },
+    };
+    if (outcome === 'changed metadata') message.details = { nested: ['changed'] };
+    if (outcome === 'changed wrapper metadata') message.__openclaw.extra = { nested: 'changed' };
+    const persist = () => interceptor.evaluate('tool_result_persist', {
+      ...event,
+      message,
+      isSynthetic: outcome === 'synthetic result',
+    }, secondContext);
+    const content = reason => [{ type: 'text', text: wrapHostReason('PostToolUse', reason) }];
+    const toolArgs = { path: '/fixture/document' };
+    let expectedWire;
+    let projections = 0;
+    if (outcome === 'wire limit') {
+      const unaugmentedPayload = {
+        hook_event_name: 'PostToolUse', openclaw_hook: 'tool_result_middleware',
+        session_id: session.sessionId, tool_name: event.toolName, tool_input: toolArgs,
+        tool_response: result, tool_use_id: event.toolCallId,
+      };
+      const remaining = 1024 * 1024 - Buffer.byteLength(JSON.stringify(unaugmentedPayload));
+      result.content[0].text += 'é'.repeat(Math.floor(remaining / 2)) + 'x'.repeat(remaining % 2);
+      expectedWire = JSON.stringify(unaugmentedPayload);
+      expect(Buffer.byteLength(expectedWire)).toBe(1024 * 1024);
+    }
+    if (outcome === 'stateful JSON projection') {
+      Object.defineProperty(result, 'toJSON', {
+        value: () => ({ content: result.content, details: { projection: ++projections } }),
+      });
+    }
+    const first = await interceptor.evaluate('tool_result_middleware', {
+      ...event, params: toolArgs, result, isError: false,
+    }, firstContext);
+    expect(execFileImpl).toHaveBeenCalledTimes(1);
+    expect(middlewareInput.tool_input).toEqual(toolArgs);
+    if (outcome === 'wire limit') {
+      expect(Buffer.byteLength(middlewareWire)).toBe(1024 * 1024);
+      expect(middlewareWire).toBe(expectedWire);
+      return;
+    }
+    if (outcome === 'stateful JSON projection') {
+      // The first projection belongs to the existing diagnostic snapshot.
+      // Policy receives exactly the second projection, even with audit metadata.
+      expect(projections).toBe(2);
+      expect(middlewareInput.tool_response.details).toEqual({ projection: 2 });
+      expect(middlewareInput.openclaw_post_tool_audit_key).toMatch(/^[0-9a-f]{64}$/);
+      return;
+    }
+    expect(middlewareInput.tool_response).toEqual(result);
+    const auditKey = middlewareInput.openclaw_post_tool_audit_key;
+    if (outcome === 'missing identity') expect(auditKey).toBeUndefined();
+    else expect(auditKey).toMatch(/^[0-9a-f]{64}$/);
+    if (outcome === 'block') {
+      expect(first).toEqual({ result: { ...result, content: content('blocked once') } });
+      expect(persist()).toEqual({ message: { ...message, content: content('blocked once') } });
+      expect(spawnSyncImpl).not.toHaveBeenCalled();
+      return;
+    }
+    expect(first).toBeUndefined();
+    expect(persist()).toEqual({
+      message: { ...message, content: content('evaluated again') },
+    });
+    expect(spawnSyncImpl).toHaveBeenCalledTimes(1);
+    const persistedInput = JSON.parse(spawnSyncImpl.mock.calls[0][2].input);
+    expect(persistedInput.tool_response).toEqual(message);
+    expect(persistedInput.tool_input).toBeUndefined();
+    const persistedKey = persistedInput.openclaw_post_tool_audit_key;
+    if (['conflicting identity', 'synthetic result'].includes(outcome)) expect(persistedKey).toBeUndefined();
+    else if (['different session', 'different run', 'missing identity', 'changed metadata', 'changed wrapper metadata', 'changed error state'].includes(outcome)) expect(persistedKey).not.toBe(auditKey);
+    else expect(persistedKey).toBe(auditKey);
   });
 });
 
@@ -367,7 +497,7 @@ describe('OpenClaw plugin interceptor wiring', () => {
     writeRuntime(port);
     const middlewares = [];
     try {
-      registerPlugin(await loadPlugin(), {
+      const handlers = registerPlugin(await loadPlugin(), {
         api: {
           registerAgentToolResultMiddleware: (handler, opts) => {
             middlewares.push({ handler, opts });
@@ -379,13 +509,26 @@ describe('OpenClaw plugin interceptor wiring', () => {
         content: [{ type: 'text', text: 'mysql://agent:secret@127.0.0.1:3306/pilot' }],
         details: { status: 'completed' },
       };
+      const sessionKey = 'agent:main:one';
       await expect(middlewares[0].handler({
         toolName: 'read',
         toolCallId: 't1',
+        sessionKey,
         args: { path: '/tmp/notes' },
         result: original,
       }, { sessionId: 's1' })).resolves.toEqual({
         result: {
+          ...original,
+          content: [{ type: 'text', text: wrapHostReason('PostToolUse', '[DATABASEURL_MASKED]') }],
+        },
+      });
+      expect(handlers.tool_result_persist({
+        toolName: 'read',
+        toolCallId: 't1',
+        message: { toolCallId: 't1', ...original },
+      }, { sessionKey })).toEqual({
+        message: {
+          toolCallId: 't1',
           ...original,
           content: [{ type: 'text', text: wrapHostReason('PostToolUse', '[DATABASEURL_MASKED]') }],
         },

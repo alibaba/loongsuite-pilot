@@ -2296,3 +2296,113 @@ fn openclaw_native_local_command_preserves_allow_block_and_unavailable_behavior(
     assert!(offline.status.success());
     assert!(offline.stdout.is_empty());
 }
+
+#[test]
+fn openclaw_native_post_tool_audits_coalesce_only_two_clean_allows() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("sdk");
+    let policy = json!({
+        "agents": ["openclaw"],
+        "hcd": {"agent_configs": {"openclaw": {"collection": {"enabled": false}}}},
+        "sdk_options": {
+            "delivery": {"flush_interval_ms": 1},
+            "hooks": {"local": {"mode": "all", "types": []}},
+        },
+    });
+    let mut host = Host::start(&data, policy, Box::default());
+    host.ready();
+    let call = |hook: &str, session: &str, key: &str, response: Value| {
+        let payload = json!({
+            "openclaw_hook": hook, "session_id": session, "tool_use_id": "test-call",
+            "tool_name": "read", "tool_response": response, "openclaw_post_tool_audit_key": key,
+        });
+        let output = sdk_hook_command(&data, "local", "openclaw", "PostToolUse", &payload)
+            .wait_with_output()
+            .unwrap();
+        assert!(output.status.success());
+        output.stdout
+    };
+    let audits = || {
+        host.ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|row| serde_json::from_slice::<Value>(row).ok())
+            .filter(|row| row["event.kind"] == "interceptor.result")
+            .collect::<Vec<_>>()
+    };
+    let remembered = "a".repeat(64);
+    let other = "b".repeat(64);
+    let result = json!({
+        "content": [{"type": "text", "text": "ordinary"}], "details": {"elapsed": 1},
+    });
+    let mut message = result.clone();
+    message["role"] = json!("toolResult");
+    message["toolCallId"] = json!("test-call");
+    message["toolName"] = json!("read");
+    message["isError"] = json!(false);
+    message["timestamp"] = json!(1000);
+    message["__openclaw"] = json!({"runId": "run-1"});
+    assert!(call("tool_result_middleware", "first", &remembered, result).is_empty());
+    until(|| {
+        audits()
+            .iter()
+            .any(|row| row["gen_ai.session.id"] == "first")
+    });
+    assert!(call(
+        "tool_result_persist",
+        "other-session",
+        &remembered,
+        message.clone()
+    )
+    .is_empty());
+    let denied = call(
+        "tool_result_persist",
+        "first",
+        &remembered,
+        json!({"details": {"nested":["LTAI1234567890ABCD"]}}),
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&denied).unwrap()["action"],
+        "block"
+    );
+    assert!(call("tool_result_persist", "", &remembered, message).is_empty());
+    assert!(call("tool_result_persist", "unpaired", &other, json!("ordinary")).is_empty());
+    assert!(call(
+        "tool_result_persist",
+        "consumed",
+        &remembered,
+        json!("ordinary")
+    )
+    .is_empty());
+    until(|| {
+        let rows = audits();
+        ["first", "other-session", "unpaired", "consumed"]
+            .into_iter()
+            .all(|session| rows.iter().any(|row| row["gen_ai.session.id"] == session))
+            && rows.iter().any(|row| row["hook.action"] == "block")
+    });
+    // Both paired callbacks receive real SDK verdicts. Only the second
+    // identical clean allow omits its extra interceptor.result event.
+    let replies = || {
+        hook_trace(&data, "hook-verdict.jsonl")
+            .into_iter()
+            .filter(|row| row["stage"] == "reply")
+            .collect::<Vec<_>>()
+    };
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while replies().len() < 6 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let replies = replies();
+    assert_eq!(replies.len(), 6, "SDK replies: {replies:?}");
+    assert!(
+        replies
+            .iter()
+            .all(|row| row["detail"]["status"] == "verdict"),
+        "SDK replies: {replies:?}"
+    );
+    assert_eq!(audits().len(), 5, "paired clean allows produced two audits");
+    host.stop();
+}
