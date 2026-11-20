@@ -15,7 +15,6 @@ export interface InterceptorRuleStatus {
   enforce: number;
   pending_scripts: number;
   unsupported_http: number;
-  builtin: number;
 }
 
 export interface InterceptorActivityStatus {
@@ -74,7 +73,7 @@ export class InterceptorStatusCollector {
     this.evaluations++;
     if (verdict?.action === 'block') this.blocked++;
     if (verdict?.matched || verdict?.action === 'block') this.matched++;
-    for (const match of verdict?.matches ?? []) if (match.enforcement === 'audit') this.auditHits++;
+    for (const match of verdict?.matches ?? []) if (match.action === 'log') this.auditHits++;
     if (!verdict || verdict.failOpen) this.failOpen++;
     if (!verdict) this.errors++;
     const elapsed = Number.isFinite(durationMs) ? Math.max(0, durationMs) : 0;

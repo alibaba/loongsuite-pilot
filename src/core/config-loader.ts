@@ -773,16 +773,15 @@ function parseMaskTypes(value: string | string[] | undefined): MaskType[] {
 }
 
 function buildMaskConfig(file: ConfigFile | null): MaskConfig {
+  const fileReplacementMode = file?.mask?.replacementMode;
   const rawReplacementMode =
     nonEmpty(env('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE')) ??
-    file?.mask?.replacementMode;
-  const replacementMode = SUPPORTED_MASK_REPLACEMENT_MODES.has(
-    rawReplacementMode as MaskReplacementMode,
-  )
-    ? (rawReplacementMode as MaskReplacementMode)
-    : 'placeholder';
-  if (rawReplacementMode && rawReplacementMode !== replacementMode) {
-    logger.warn('invalid mask replacement mode, using placeholder', {
+    (typeof fileReplacementMode === 'string' ? nonEmpty(fileReplacementMode) : undefined);
+  const replacementMode: MaskReplacementMode = rawReplacementMode === 'placeholder'
+    ? 'placeholder'
+    : 'preview';
+  if (rawReplacementMode && !SUPPORTED_MASK_REPLACEMENT_MODES.has(rawReplacementMode as MaskReplacementMode)) {
+    logger.warn('invalid mask replacement mode, using preview', {
       replacementMode: rawReplacementMode,
     });
   }

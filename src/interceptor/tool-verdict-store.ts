@@ -4,8 +4,9 @@ import * as path from 'node:path';
 import * as fsp from 'node:fs/promises';
 import type { HookEventName } from './types.js';
 import type { GuardrailSnapshot } from './guardrail.js';
+import { PROMPT_MATCH_WINDOW_MS, type PromptLookup } from './prompt-verdict.js';
 
-export type ToolVerdictAction = 'allow' | 'block';
+export type ToolVerdictAction = GuardrailSnapshot['action'];
 export type ToolInterceptPhase = Extract<HookEventName, 'PreToolUse' | 'PostToolUse'>;
 
 export interface ToolVerdictKey {
@@ -20,17 +21,28 @@ export interface ToolVerdictRecord extends ToolVerdictKey, ToolVerdictSnapshot {
   recordedAt: string;
 }
 
+export interface PromptVerdictKey {
+  phase: 'UserPromptSubmit';
+  sessionId: string;
+  agentType: string;
+  promptHash: string;
+  requestId: string;
+}
+
+/** An observed prompt whose evaluation is pending, failed or blocked. Never exported as telemetry. */
+export type PromptVerdictSnapshot = ToolVerdictSnapshot | { action: 'unknown' };
+export type InterceptorVerdictKey = ToolVerdictKey | PromptVerdictKey;
+export type InterceptorVerdictRecord = ToolVerdictRecord
+  | (PromptVerdictKey & PromptVerdictSnapshot & { recordedAt: string });
+
 export const TOOL_VERDICT_TTL_MS = 30 * 60 * 1000;
 export const TOOL_VERDICT_CHECKPOINT_INTERVAL_MS = 15_000;
 export const TOOL_VERDICT_MAX_RECORDS = 10_000;
 
-interface StoredVerdict extends ToolVerdictSnapshot {
-  recordedAtMs: number;
-}
+type StoredVerdict = PromptVerdictSnapshot & { recordedAtMs: number };
 
 /**
- * In-process interceptor verdicts. The outer object can grow another structure
- * later; today it only holds the tool-phase map.
+ * Prompt and tool verdicts share bounded retention and the same IPC/checkpoint lifecycle.
  */
 export class ToolVerdictStore {
   private readonly toolVerdicts = new Map<string, StoredVerdict>();
@@ -42,8 +54,9 @@ export class ToolVerdictStore {
 
   constructor(private readonly checkpointPath: string) {}
 
-  put(key: ToolVerdictKey, verdict: ToolVerdictAction | ToolVerdictSnapshot, now = new Date()): void {
-    if (!key.toolUseId) return;
+  put(key: InterceptorVerdictKey, verdict: ToolVerdictAction | PromptVerdictSnapshot, now = new Date()): void {
+    if (key.phase === 'UserPromptSubmit' ? !key.sessionId || !key.requestId : !key.toolUseId) return;
+    if (typeof verdict !== 'string' && verdict.action === 'unknown' && key.phase !== 'UserPromptSubmit') return;
     const recordedAtMs = now.getTime();
     if (recordedAtMs - this.lastPruneMs >= 1000) this.prune(recordedAtMs);
     const snapshot = typeof verdict === 'string' ? { action: verdict } : verdict;
@@ -69,7 +82,26 @@ export class ToolVerdictStore {
       this.revision++;
       return null;
     }
-    return stripTime(stored);
+    return knownSnapshot(stored);
+  }
+
+  getPromptSnapshot(lookup: PromptLookup, now = new Date()): ToolVerdictSnapshot | null {
+    if (lookup.requestId) {
+      const stored = this.toolVerdicts.get(verdictKey({ ...lookup, phase: 'UserPromptSubmit', requestId: lookup.requestId }));
+      return stored && now.getTime() - stored.recordedAtMs <= TOOL_VERDICT_TTL_MS ? observablePromptSnapshot(stored) : null;
+    }
+    const matches: StoredVerdict[] = [];
+    for (const [encoded, value] of this.toolVerdicts) {
+      if (now.getTime() - value.recordedAtMs > TOOL_VERDICT_TTL_MS) continue;
+      const key = parseKey(encoded);
+      if (key?.phase !== 'UserPromptSubmit' || key.sessionId !== lookup.sessionId
+        || key.agentType !== lookup.agentType || key.promptHash !== lookup.promptHash) continue;
+      if (Math.abs(value.recordedAtMs - lookup.at) > PROMPT_MATCH_WINDOW_MS) continue;
+      matches.push(value);
+    }
+    // Pending and failed attempts also count: absence of a known verdict cannot identify an older turn.
+    // Reads never consume records, so exact-id lookups remain stable for output retries.
+    return matches.length === 1 ? observablePromptSnapshot(matches[0]) : null;
   }
 
   restore(now = new Date()): void {
@@ -87,15 +119,15 @@ export class ToolVerdictStore {
     this.persistedRevision = this.revision;
   }
 
-  records(now = new Date()): ToolVerdictRecord[] {
+  records(now = new Date()): InterceptorVerdictRecord[] {
     this.prune(now.getTime());
     return Array.from(this.toolVerdicts, ([key, value]) => ({
       ...parseKey(key)!, ...stripTime(value), recordedAt: new Date(value.recordedAtMs).toISOString(),
-    }));
+    } as InterceptorVerdictRecord));
   }
 
   /** Merge IPC/restart records without extending their original lifetime. */
-  merge(records: readonly ToolVerdictRecord[]): void {
+  merge(records: readonly InterceptorVerdictRecord[]): void {
     this.mergeRecords(records, Date.now());
   }
 
@@ -109,8 +141,11 @@ export class ToolVerdictStore {
       if (nowMs - recordedAtMs > TOOL_VERDICT_TTL_MS) continue;
       const id = verdictKey(record);
       const previous = this.toolVerdicts.get(id);
-      // A restored checkpoint wins ties with an older main-thread mirror.
-      if (previous && previous.recordedAtMs >= recordedAtMs) continue;
+      // A final verdict may arrive in the same millisecond as its pending marker.
+      // Otherwise a restored checkpoint wins ties with an older main-thread mirror.
+      if (previous && (previous.recordedAtMs > recordedAtMs
+        || (previous.recordedAtMs === recordedAtMs
+          && !(previous.action === 'unknown' && record.action !== 'unknown')))) continue;
       this.toolVerdicts.set(id, { ...stripTime(record), recordedAtMs });
       changed = true;
     }
@@ -126,7 +161,7 @@ export class ToolVerdictStore {
     this.revision++;
   }
 
-  replace(records: readonly ToolVerdictRecord[]): void {
+  replace(records: readonly InterceptorVerdictRecord[]): void {
     this.toolVerdicts.clear();
     this.revision++;
     this.merge(records);
@@ -155,7 +190,7 @@ export class ToolVerdictStore {
 
   dump(now = new Date()): void {
     this.prune(now.getTime());
-    const records: ToolVerdictRecord[] = [];
+    const records: InterceptorVerdictRecord[] = [];
     for (const [key, value] of this.toolVerdicts) {
       const parsed = parseKey(key);
       if (!parsed) continue;
@@ -163,7 +198,7 @@ export class ToolVerdictStore {
         ...parsed,
         ...stripTime(value),
         recordedAt: new Date(value.recordedAtMs).toISOString(),
-      });
+      } as InterceptorVerdictRecord);
     }
     const text = `${JSON.stringify({ schema: 1, records }, null, 2)}\n`;
     const dir = path.dirname(this.checkpointPath);
@@ -244,14 +279,25 @@ export function isToolInterceptPhase(event: HookEventName): event is ToolInterce
   return event === 'PreToolUse' || event === 'PostToolUse';
 }
 
-function verdictKey(key: ToolVerdictKey): string {
+export function verdictKey(key: InterceptorVerdictKey): string {
+  if (key.phase === 'UserPromptSubmit') {
+    return JSON.stringify([key.sessionId, key.requestId, key.phase, key.agentType, key.promptHash]);
+  }
   return JSON.stringify([key.sessionId ?? '', key.toolUseId, key.phase]);
 }
 
-function parseKey(key: string): ToolVerdictKey | null {
+function parseKey(key: string): InterceptorVerdictKey | null {
   try {
     const parsed = JSON.parse(key) as unknown;
-    if (!Array.isArray(parsed) || parsed.length !== 3) return null;
+    if (!Array.isArray(parsed)) return null;
+    if (parsed.length === 5 && parsed[2] === 'UserPromptSubmit') {
+      const [sessionId, requestId, phase, agentType, promptHash] = parsed;
+      if (typeof sessionId !== 'string' || !sessionId || typeof requestId !== 'string' || !requestId
+        || requestId.length > 512 || typeof agentType !== 'string' || !agentType
+        || typeof promptHash !== 'string' || !/^[a-f0-9]{64}$/.test(promptHash)) return null;
+      return { sessionId, requestId, phase, agentType, promptHash };
+    }
+    if (parsed.length !== 3) return null;
     const [sessionId, toolUseId, phase] = parsed;
     if (typeof toolUseId !== 'string' || !toolUseId) return null;
     if (phase !== 'PreToolUse' && phase !== 'PostToolUse') return null;
@@ -266,42 +312,46 @@ function parseKey(key: string): ToolVerdictKey | null {
   }
 }
 
-function parseRecord(value: unknown): ToolVerdictRecord | null {
+function parseRecord(value: unknown): InterceptorVerdictRecord | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const record = value as Partial<ToolVerdictRecord>;
-  if (typeof record.toolUseId !== 'string' || !record.toolUseId) return null;
-  if (record.phase !== 'PreToolUse' && record.phase !== 'PostToolUse') return null;
-  if (record.action !== 'allow' && record.action !== 'block') return null;
+  const record = value as Record<string, unknown>;
+  const key = parseKey(JSON.stringify(record.phase === 'UserPromptSubmit'
+    ? [record.sessionId, record.requestId, record.phase, record.agentType, record.promptHash]
+    : [record.sessionId ?? '', record.toolUseId, record.phase]));
+  if (!key) return null;
+  if (record.action !== 'allow' && record.action !== 'block' && record.action !== 'log'
+    && !(key.phase === 'UserPromptSubmit' && record.action === 'unknown')) return null;
   if (typeof record.recordedAt !== 'string' || Number.isNaN(Date.parse(record.recordedAt))) return null;
   if (record.sessionId !== undefined && typeof record.sessionId !== 'string') return null;
   return {
-    sessionId: record.sessionId || undefined,
-    toolUseId: record.toolUseId,
-    phase: record.phase,
+    ...key,
     action: record.action,
     recordedAt: record.recordedAt,
     ...optionalMeta(record),
-  };
+  } as InterceptorVerdictRecord;
 }
 
-function stripTime(value: ToolVerdictSnapshot): ToolVerdictSnapshot {
+function stripTime(value: PromptVerdictSnapshot): PromptVerdictSnapshot {
+  if (value.action === 'unknown') return { action: 'unknown' };
   return {
     action: value.action,
     ...optionalMeta(value),
   };
 }
 
+function knownSnapshot(value: PromptVerdictSnapshot): ToolVerdictSnapshot | null {
+  return value.action === 'unknown' ? null : stripTime(value) as ToolVerdictSnapshot;
+}
+
+function observablePromptSnapshot(value: PromptVerdictSnapshot): ToolVerdictSnapshot | null {
+  return value.action === 'block' ? null : knownSnapshot(value);
+}
+
 function optionalMeta(value: Partial<Omit<ToolVerdictSnapshot, 'action'>>): Omit<ToolVerdictSnapshot, 'action'> {
   return {
-    ...(typeof value.matched === 'boolean' ? { matched: value.matched } : {}),
-    ...(value.enforcement === 'enforce' || value.enforcement === 'audit' ? { enforcement: value.enforcement } : {}),
     ...(value.failOpen === true ? { failOpen: true } : {}),
     ...(nonEmpty(value.ruleId) ? { ruleId: value.ruleId } : {}),
-    ...(nonEmpty(value.ruleVersion) ? { ruleVersion: value.ruleVersion } : {}),
-    ...(nonEmpty(value.severity) ? { severity: value.severity } : {}),
-    ...(nonEmpty(value.reason) ? { reason: value.reason } : {}),
-    ...(nonEmpty(value.title) ? { title: value.title } : {}),
-    ...(nonEmpty(value.message) ? { message: value.message } : {}),
+    ...(typeof value.ruleVersion === 'string' ? { ruleVersion: value.ruleVersion } : {}),
   };
 }
 

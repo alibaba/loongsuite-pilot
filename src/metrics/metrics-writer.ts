@@ -51,6 +51,8 @@ export interface MetricsWriterOptions {
   cmsWorkspace?: string;
   autoUpdateEnabled?: boolean;
   updaterLiveness?: (pidFile: string) => ProcessLiveness;
+  hostSn?: string;
+  hostIdentityTags?: boolean;
 }
 
 export class MetricsWriter {
@@ -90,6 +92,8 @@ export class MetricsWriter {
       cmsWorkspace: opts.cmsWorkspace,
       autoUpdateEnabled: opts.autoUpdateEnabled,
       updaterLiveness: opts.updaterLiveness,
+      hostSn: opts.hostSn,
+      hostIdentityTags: opts.hostIdentityTags,
     });
     this.hookMetricsSpool = new HookMetricsSpool(opts.dataDir);
     this.getSnapshot = opts.getSnapshot;

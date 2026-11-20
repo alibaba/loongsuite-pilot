@@ -56,7 +56,7 @@ describe('interceptor self-monitoring', () => {
     const onDiagnostic = vi.fn();
     const engine = new ManagedRuleEngine({
       config: { rules: [{ kind: 'pattern', id: 'r', version: '1', agents: ['qoder'],
-        events: ['UserPromptSubmit'], enforcement: 'enforce', match: 'regex', pattern: '(a+)+$' }] },
+        events: ['UserPromptSubmit'], action: 'block', match: 'regex', pattern: '(a+)+$' }] },
       rules: [], runners: {}, regex, regexTimeoutMs: 5_000, budgetMs: 5_000, onDiagnostic,
     });
     try {
@@ -111,7 +111,7 @@ describe('interceptor self-monitoring', () => {
     });
     const engine = new ManagedRuleEngine({
       config: { rules: [{ kind: 'pattern', id: 'test-rule', version: '2', agents: ['qoder'],
-        events: ['UserPromptSubmit'], enforcement: 'enforce', match: 'regex', pattern: 'private-pattern' }] },
+        events: ['UserPromptSubmit'], action: 'block', match: 'regex', pattern: 'private-pattern' }] },
       rules: [], runners: {}, regex,
       onDiagnostic: (diagnostic, count) => recordInterceptorDiagnostic(manager, diagnostic, count),
     });
@@ -136,7 +136,7 @@ describe('interceptor self-monitoring', () => {
     });
     const engine = new ManagedRuleEngine({
       config: { rules: [{ kind: 'pattern', id: 'r', version: '1', agents: ['qoder'],
-        events: ['UserPromptSubmit'], enforcement: 'enforce', match: 'regex', pattern: 'x' }] },
+        events: ['UserPromptSubmit'], action: 'block', match: 'regex', pattern: 'x' }] },
       rules: [], runners: {}, regex,
       onDiagnostic: () => { throw new Error('monitor unavailable'); },
     });

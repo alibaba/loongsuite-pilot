@@ -5,8 +5,8 @@ import { join, resolve } from 'node:path';
 import { build } from 'esbuild';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { runHook } from '../../src/interceptor/cli/hook.js';
-import { serialiseLogEntry } from '../../src/normalization/entry-builder.js';
-import type { AgentActivityEntry } from '../../src/types/index.js';
+import { promptRequestId } from '../../src/interceptor/prompt-verdict.js';
+import { buildLlmBoundaries, buildEventsFromBoundaries } from '../../assets/hooks/qoder-hook-processor.mjs';
 
 type Message = { type: string; id?: number; port?: number; pid?: number; entry?: Record<string, unknown>; error?: string; managedActive?: boolean };
 let root: string;
@@ -177,6 +177,164 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     await collector.stop();
   }, 20_000);
 
+  it('preserves a configured credential rule identity through HTTP, IPC, JSONL and restart', async () => {
+    const dataDir = join(root, 'managed-credential-identity');
+    await writeRules(dataDir);
+    const samples = [
+      ['cloudAccessKey', 'LTAI' + '1234567890ABCD'],
+      ['apiKey', 'ghp_' + '1234567890abcdefghijklmnop'],
+      ['privateKey', '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU=\n-----END OPENSSH PRIVATE KEY-----'],
+      ['databaseUrl', 'mysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot'],
+    ];
+    await writeFile(join(dataDir, 'configs', 'managed', 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
+      kind: 'pattern', id: 'credential-policy', version: '2', agents: ['qoder'],
+      events: ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'],
+      match: 'regex', pattern: 'LTAI|ghp_|BEGIN OPENSSH PRIVATE KEY|mysql://',
+    }] } }));
+    let collector = new Collector(dataDir);
+    const { port } = await collector.waitFor('ready');
+    const keys: Array<{ sessionId: string; toolUseId: string; phase: string }> = [];
+    for (const [type, sample] of samples) {
+      for (const phase of ['UserPromptSubmit', 'PreToolUse', 'PostToolUse']) {
+        const key = { sessionId: `credential-${type}`, toolUseId: `tool-${type}`, phase };
+        const business = phase === 'UserPromptSubmit' ? { prompt: sample }
+          : phase === 'PreToolUse' ? { toolInput: { text: sample } } : { toolResponse: { stdout: sample } };
+        expect(await evaluate(port!, { ...key, agent: 'qoder', event: phase, ...business, raw: {} }))
+          .toMatchObject({ action: 'block', ruleId: 'credential-policy', ruleVersion: '2', evaluatedRules: ['credential-policy'] });
+        if (phase !== 'UserPromptSubmit') {
+          keys.push(key);
+          const linked = await collector.waitFor('linked', collector.send('linked', { key }));
+          expect(linked.entry).toMatchObject({ 'gen_ai.guardrail.action': 'block',
+            'gen_ai.guardrail.rule_id': 'credential-policy', 'gen_ai.guardrail.rule_version': '2' });
+        }
+      }
+    }
+    await collector.waitFor('drained', collector.send('drain'));
+    const prompts = await readOutput(dataDir);
+    expect(prompts).toHaveLength(4);
+    for (const prompt of prompts) expect(prompt).toMatchObject({ 'event.name': 'llm.request',
+      'gen_ai.guardrail.rule_id': 'credential-policy', 'gen_ai.guardrail.rule_version': '2' });
+    await collector.stop();
+    collector = new Collector(dataDir);
+    await collector.waitFor('ready');
+    for (const key of keys) {
+      expect((await collector.waitFor('linked', collector.send('linked', { key }))).entry)
+        .toMatchObject({ 'gen_ai.guardrail.rule_id': 'credential-policy', 'gen_ai.guardrail.rule_version': '2' });
+    }
+    await collector.stop();
+  }, 20_000);
+
+  it('joins a prompt log verdict onto exactly one native request through Worker IPC, restart and content opt-out', async () => {
+    const dataDir = join(root, 'prompt-log');
+    const dir = join(dataDir, 'configs', 'managed');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
+      kind: 'pattern', id: 'prompt-policy', version: '3', action: 'log', agents: ['qodercli'],
+      events: ['UserPromptSubmit'], match: 'substring', pattern: 'PROMPT_LOG_PROBE',
+    }] } }));
+    let collector = new Collector(dataDir);
+    const { port } = await collector.waitFor('ready');
+    const prompt = 'PROMPT_LOG_PROBE synthetic prompt';
+    const at = Date.now();
+    const sessionId = 'native-prompt-session';
+    expect(await evaluate(port!, { agent: 'qodercli', event: 'UserPromptSubmit', sessionId,
+      prompt, raw: { request_set_id: 'host-request' } }))
+      .toMatchObject({ action: 'allow', matched: true, ruleId: 'prompt-policy' });
+    await collector.waitFor('drained', collector.send('drain'));
+    expect(await readOutput(dataDir)).toEqual([]); // No supplemental log request.
+    await collector.stop();
+    const checkpoint = await readFile(join(dataDir, 'interceptor/tool-verdicts.json'), 'utf8');
+    expect(checkpoint).not.toContain(prompt);
+    expect(checkpoint).not.toContain('host-request');
+    expect(JSON.parse(checkpoint).records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ phase: 'UserPromptSubmit', action: 'log', requestId: promptRequestId('host-request') }),
+    ]));
+    collector = new Collector(dataDir);
+    await collector.waitFor('ready');
+    const rows = [
+      { type: 'user', entrypoint: 'cli', requestSetId: 'host-request', timestamp: new Date(at).toISOString(), message: { role: 'user', content: prompt } },
+      { type: 'assistant', timestamp: new Date(at + 1000).toISOString(), message: { role: 'assistant', id: 'response',
+        model: 'synthetic-model', content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' } },
+    ];
+    const records = buildEventsFromBoundaries(buildLlmBoundaries([], rows), rows, rows,
+      'native-turn', sessionId, 'qoder', {}, undefined);
+    const requests = records.filter((row: Record<string, unknown>) => row['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(1);
+    requests[0]['event.id'] = 'native-event-id';
+    expect(requests[0]['agent.pilot.interceptor.correlation']).toMatchObject({ requestId: promptRequestId('host-request') });
+    await collector.waitFor('native', collector.send('native', { entries: records, capture: false }));
+    await collector.waitFor('drained', collector.send('drain'));
+    const output = await readOutput(dataDir);
+    const native = output.filter(row => row['event.name'] === 'llm.request');
+    expect(native).toHaveLength(1);
+    expect(native[0]).toMatchObject({ 'event.id': 'native-event-id', 'gen_ai.turn.id': 'native-turn',
+      'gen_ai.agent.type': 'qoder-cli', 'gen_ai.guardrail.action': 'log',
+      'gen_ai.guardrail.triggered': true, 'gen_ai.guardrail.rule_id': 'prompt-policy', 'gen_ai.guardrail.rule_version': '3' });
+    expect(JSON.stringify(output)).not.toContain(prompt);
+    expect(JSON.stringify(output)).not.toContain('host-request');
+    expect(JSON.stringify(output)).not.toMatch(/requestSetId|request_set_id/);
+    expect(native[0]).not.toHaveProperty('agent.pilot.interceptor.correlation');
+    expect(output.some(row => row['event.name'] === 'guardrail.evaluation')).toBe(false);
+    await collector.stop();
+  }, 20_000);
+
+  it.each([true, false])('does not borrow an earlier prompt log after fail-open and Worker restart (native requestSetId: %s)', async hasRequestId => {
+    const dataDir = join(root, `prompt-fail-open-${hasRequestId}`);
+    const dir = join(dataDir, 'configs', 'managed');
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, 'interceptor.json');
+    const scope = { kind: 'pattern', id: 'repeat-policy', version: '1', action: 'log', agents: ['qodercli'],
+      events: ['UserPromptSubmit'] };
+    await writeFile(file, JSON.stringify({ interceptor: { rules: [{ ...scope, match: 'substring', pattern: 'a' }] } }));
+    let collector = new Collector(dataDir);
+    const { port } = await collector.waitFor('ready');
+    const prompt = `${'a'.repeat(32)}!`;
+    const sessionId = 'repeat-native-session';
+    const firstAt = Date.now();
+    const input = { agent: 'qodercli', event: 'UserPromptSubmit', sessionId, prompt };
+    expect(await evaluate(port!, { ...input, raw: hasRequestId ? { request_set_id: 'first-native-id' } : {} }))
+      .toMatchObject({ action: 'allow', matched: true, ruleId: 'repeat-policy' });
+    await writeFile(file, JSON.stringify({ interceptor: { rules: [{ ...scope, version: '2', match: 'regex', pattern: '(a+)+$' }] } }));
+    await collector.waitFor('reloaded', collector.send('reload'));
+    const secondAt = Date.now();
+    expect(secondAt - firstAt).toBeLessThan(5_000);
+    expect(await evaluate(port!, { ...input, raw: hasRequestId ? { request_set_id: 'second-native-id' } : {} }))
+      .toMatchObject({ action: 'allow', failOpen: true });
+    await collector.stop();
+    const checkpoint = await readFile(join(dataDir, 'interceptor/tool-verdicts.json'), 'utf8');
+    expect(checkpoint).not.toContain(prompt);
+    expect(checkpoint).not.toContain('first-native-id');
+    expect(checkpoint).not.toContain('second-native-id');
+    expect(JSON.parse(checkpoint).records.map((record: { action: string }) => record.action).sort()).toEqual(['log', 'unknown']);
+    collector = new Collector(dataDir);
+    await collector.waitFor('ready');
+    const records = [firstAt, secondAt].flatMap((at, index) => {
+      const rows = [
+        { type: 'user', entrypoint: 'cli', ...(hasRequestId ? { requestSetId: index ? 'second-native-id' : 'first-native-id' } : {}),
+          timestamp: new Date(at).toISOString(), message: { role: 'user', content: prompt } },
+        { type: 'assistant', timestamp: new Date(at + 20).toISOString(), message: { role: 'assistant', id: `response-${index}`,
+          model: 'synthetic-model', content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' } },
+      ];
+      return buildEventsFromBoundaries(buildLlmBoundaries([], rows), rows, rows,
+        `native-turn-${index}`, sessionId, 'qoder', {}, undefined);
+    });
+    await collector.waitFor('native', collector.send('native', { entries: records, capture: false }));
+    await collector.waitFor('drained', collector.send('drain'));
+    const output = await readOutput(dataDir);
+    const requests = output.filter(row => row['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(2);
+    const first = requests.find(row => row['gen_ai.turn.id'] === 'native-turn-0')!;
+    const second = requests.find(row => row['gen_ai.turn.id'] === 'native-turn-1')!;
+    if (hasRequestId) expect(first).toMatchObject({ 'gen_ai.guardrail.action': 'log', 'gen_ai.guardrail.rule_version': '1' });
+    else expect(first).not.toHaveProperty('gen_ai.guardrail.action'); // Ambiguous legacy turns stay unannotated.
+    expect(second).not.toHaveProperty('gen_ai.guardrail.action');
+    expect(second).not.toHaveProperty('gen_ai.guardrail.rule_id');
+    expect(JSON.stringify(output)).not.toMatch(/requestSetId|request_set_id|first-native-id|second-native-id|interceptor\.correlation/);
+    expect(output.some(row => row['event.name'] === 'guardrail.evaluation' || row['gen_ai.guardrail.action'] === 'unknown')).toBe(false);
+    expect(JSON.stringify(output)).not.toContain(prompt);
+    await collector.stop();
+  }, 20_000);
+
   it('matches all business content over HTTP with new and legacy rules while excluding metadata', async () => {
     const dataDir = join(root, 'whole-content');
     const dir = join(dataDir, 'configs', 'managed');
@@ -230,7 +388,7 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     await collector.stop();
   }, 20_000);
 
-  it('defaults to enforcement and reloads audit rules with complete HTTP, mirror, checkpoint and JSONL metadata', async () => {
+  it('defaults to blocking and reloads audit rules with complete HTTP, mirror and checkpoint metadata without extra JSONL events', async () => {
     const dataDir = join(root, 'enforcement-audit');
     const dir = join(dataDir, 'configs', 'managed');
     await mkdir(dir, { recursive: true });
@@ -246,18 +404,17 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     const input = { agent: 'qoder', event: 'PreToolUse', sessionId,
       toolInput: { command: 'AUDIT_PROBE SENSITIVE_BODY_ONLY_IN_HOOK' }, raw: {} };
     expect(await evaluate(port!, { ...input, toolUseId: 'default' }))
-      .toMatchObject({ action: 'block', matched: true, enforcement: 'enforce', ruleId: 'primary' });
+      .toMatchObject({ action: 'block', matched: true, ruleId: 'primary' });
 
-    // Change only enforcement, retaining rule id and version: it must publish a new generation.
-    await write([{ ...rule, enforcement: 'audit' }, { ...rule, id: 'secondary', enforcement: 'audit' }]);
+    // Change only action, retaining rule id and version: it must publish a new generation.
+    await write([{ ...rule, action: 'log' }, { ...rule, id: 'secondary', action: 'log' }]);
     await collector.waitFor('reloaded', collector.send('reload'));
     const audit = await evaluate(port!, { ...input, toolUseId: 'audit' });
-    expect(audit).toMatchObject({ action: 'allow', matched: true, enforcement: 'audit', ruleId: 'primary' });
+    expect(audit).toMatchObject({ action: 'allow', matched: true, ruleId: 'primary' });
     expect(audit.matches.map((match: { ruleId: string }) => match.ruleId)).toEqual(['primary', 'secondary']);
     const auditKey = { sessionId, toolUseId: 'audit', phase: 'PreToolUse' };
     expect((await collector.waitFor('linked', collector.send('linked', { key: auditKey }))).entry)
-      .toMatchObject({ 'gen_ai.guardrail.action': 'allow', 'gen_ai.guardrail.matched': true,
-        'gen_ai.guardrail.enforcement': 'audit', 'gen_ai.guardrail.rule_id': 'primary' });
+      .toMatchObject({ 'gen_ai.guardrail.action': 'log', 'gen_ai.guardrail.rule_id': 'primary' });
     const hostOutput: string[] = [];
     const hookErrors: string[] = [];
     expect(await runHook(['--agent', 'qodercli'], {
@@ -271,52 +428,32 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     expect(hostOutput).toEqual([]); // Real CLI adapter/health/HTTP path stays silent for audit hits.
     expect(await evaluate(port!, { ...input, event: 'PostToolUse', toolUseId: 'audit',
       toolInput: undefined, toolResponse: { stdout: 'AUDIT_PROBE' } }))
-      .toMatchObject({ action: 'allow', matched: true, enforcement: 'audit' });
+      .toMatchObject({ action: 'allow', matched: true });
     expect((await collector.waitFor('linked', collector.send('linked', {
       key: { ...auditKey, phase: 'PostToolUse' },
-    }))).entry).toMatchObject({ 'event.name': 'tool.result', 'gen_ai.guardrail.enforcement': 'audit' });
+    }))).entry).toMatchObject({ 'event.name': 'tool.result', 'gen_ai.guardrail.action': 'log' });
 
-    await write([{ ...rule, enforcement: 'audit' }, { ...rule, id: 'secondary' }]);
+    await write([{ ...rule, action: 'log' }, { ...rule, id: 'secondary' }]);
     await collector.waitFor('reloaded', collector.send('reload'));
     const mixed = await evaluate(port!, { ...input, toolUseId: 'mixed' });
-    expect(mixed).toMatchObject({ action: 'block', matched: true, enforcement: 'enforce', ruleId: 'secondary' });
+    expect(mixed).toMatchObject({ action: 'block', matched: true, ruleId: 'secondary' });
     expect(mixed.matches.map((match: { ruleId: string }) => match.ruleId)).toEqual(['primary', 'secondary']);
     expect((await collector.waitFor('linked', collector.send('linked', {
       key: { ...auditKey, toolUseId: 'mixed' },
-    }))).entry).toMatchObject({ 'gen_ai.guardrail.action': 'block', 'gen_ai.guardrail.enforcement': 'enforce',
+    }))).entry).toMatchObject({ 'gen_ai.guardrail.action': 'block',
       'gen_ai.guardrail.rule_id': 'secondary' });
     expect(await evaluate(port!, { ...input, toolUseId: 'unmatched', toolInput: { command: 'ordinary content' } }))
       .toMatchObject({ action: 'allow', matched: false });
     await collector.waitFor('drained', collector.send('drain'));
-    expect(await readOutput(dataDir)).toHaveLength(9); // Events are visible while the collector remains live.
+    expect(await readOutput(dataDir)).toEqual([]);
     await collector.stop();
-
-    const entries = await readOutput(dataDir);
-    const evaluations = entries.filter(entry => entry['event.name'] === 'guardrail.evaluation');
-    expect(entries).toHaveLength(9); // Audit prompts must not create synthetic blocked llm.request events.
-    expect(evaluations).toHaveLength(9);
-    expect(new Set(evaluations.map(entry => entry['event.id'])).size).toBe(9);
-    expect(evaluations.filter(entry => entry['gen_ai.guardrail.enforcement'] === 'audit')).toHaveLength(7);
-    expect(evaluations.filter(entry => entry['gen_ai.guardrail.enforcement'] === 'enforce')).toHaveLength(2);
-    expect(evaluations.filter(entry => entry['gen_ai.guardrail.phase'] === 'UserPromptSubmit')).toHaveLength(2);
-    for (const entry of evaluations) {
-      expect(entry).toMatchObject({ 'gen_ai.session.id': sessionId, 'gen_ai.guardrail.matched': true,
-        'gen_ai.guardrail.action': entry['gen_ai.guardrail.enforcement'] === 'audit' ? 'allow' : 'block' });
-      const serialized = serialiseLogEntry(entry as AgentActivityEntry);
-      expect(serialized['event.name']).toBe('guardrail.evaluation');
-      expect(serialized['gen_ai.guardrail.matched']).toBe('true');
-      expect(serialized['gen_ai.guardrail.enforcement']).toBe(entry['gen_ai.guardrail.enforcement']);
-    }
-    expect(JSON.stringify(entries)).not.toContain('SENSITIVE_BODY_ONLY_IN_HOOK');
-    const promptEntries = evaluations.filter(entry => entry['gen_ai.guardrail.phase'] === 'UserPromptSubmit');
-    expect(promptEntries.every(entry => entry['gen_ai.agent.type'] === 'qoder-cli')).toBe(true);
+    expect(await readOutput(dataDir)).toEqual([]);
 
     // The audit decision must also survive actual checkpoint restore in a fresh worker.
     const restored = new Collector(dataDir, 'all');
     await restored.waitFor('ready');
     expect((await restored.waitFor('linked', restored.send('linked', { key: auditKey }))).entry)
-      .toMatchObject({ 'gen_ai.guardrail.action': 'allow', 'gen_ai.guardrail.enforcement': 'audit',
-        'gen_ai.guardrail.matched': true, 'gen_ai.guardrail.rule_id': 'primary' });
+      .toMatchObject({ 'gen_ai.guardrail.action': 'log', 'gen_ai.guardrail.rule_id': 'primary' });
     await restored.stop();
   }, 25_000);
 
@@ -356,12 +493,12 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     await collector.stop();
   }, 20_000);
 
-  it('forwards every audit hit after a blocked collector resumes without delaying Worker HTTP', async () => {
+  it('preserves audit verdicts after a blocked collector resumes without emitting independent events', async () => {
     const dataDir = join(root, 'audit-blocked-main');
     const dir = join(dataDir, 'configs', 'managed');
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
-      kind: 'pattern', id: 'audit-burst', version: '1', enforcement: 'audit', agents: ['qoder'],
+      kind: 'pattern', id: 'audit-burst', version: '1', action: 'log', agents: ['qoder'],
       events: ['PreToolUse'], match: 'substring', pattern: 'AUDIT_BURST',
     }] } }));
     const collector = new Collector(dataDir, 'all');
@@ -372,13 +509,20 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
       await Promise.all(Array.from({ length: 24 }, (_, index) => evaluate(port!, {
         agent: 'qoder', event: 'PreToolUse', sessionId: 'audit-burst', toolUseId: `tool-${base + index}`,
         toolInput: { command: 'AUDIT_BURST' }, raw: {},
-      }).then(verdict => expect(verdict).toMatchObject({ action: 'allow', matched: true, enforcement: 'audit' }))));
+      }).then(verdict => expect(verdict).toMatchObject({ action: 'allow', matched: true }))));
     }
     expect(collector.messages.some(message => message.type === 'unblocked' && message.id === blockId)).toBe(false);
     await collector.waitFor('unblocked', blockId);
     await collector.stop();
-    const events = (await readOutput(dataDir)).filter(entry => entry['event.name'] === 'guardrail.evaluation');
-    expect(events).toHaveLength(144);
-    expect(new Set(events.map(entry => entry['gen_ai.tool.call.id'])).size).toBe(144);
+    expect(await readOutput(dataDir)).toEqual([]);
+    const restored = new Collector(dataDir, 'all');
+    await restored.waitFor('ready');
+    for (const toolUseId of ['tool-0', 'tool-143']) {
+      const linked = await restored.waitFor('linked', restored.send('linked', {
+        key: { sessionId: 'audit-burst', toolUseId, phase: 'PreToolUse' },
+      }));
+      expect(linked.entry).toMatchObject({ 'gen_ai.guardrail.action': 'log', 'gen_ai.guardrail.rule_id': 'audit-burst' });
+    }
+    await restored.stop();
   }, 20_000);
 });

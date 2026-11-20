@@ -78,7 +78,7 @@ export class ManagedInterceptor {
     return this.current !== null;
   }
 
-  getRuleStatus(): Omit<InterceptorRuleStatus, 'builtin'> {
+  getRuleStatus(): InterceptorRuleStatus {
     return {
       configured: this.configuredRules, config_valid: this.lastProblem === null,
       pending_scripts: this.pendingScripts, unsupported_http: this.unsupportedHttp,
@@ -193,7 +193,7 @@ export class ManagedInterceptor {
     const published: ManagedInterceptorConfig = { rules: effective };
     const key = JSON.stringify({
       rules: published.rules.map(rule => [
-        rule.kind, rule.id, rule.version, rule.agents, rule.events, rule.enforcement,
+        rule.kind, rule.id, rule.version, rule.agents, rule.events, rule.action,
         rule.title ?? '', rule.message ?? '', rule.severity ?? '',
         rule.kind === 'pattern' ? [rule.match, rule.pattern] : null,
         rule.kind === 'script' ? rule.shell : null,
@@ -218,8 +218,8 @@ export class ManagedInterceptor {
           regex: next.config.rules.filter(rule => rule.kind === 'pattern' && rule.match === 'regex').length,
           substring: next.config.rules.filter(rule => rule.kind === 'pattern' && rule.match === 'substring').length,
           script: next.rules.length,
-          audit: next.config.rules.filter(rule => rule.kind !== 'http' && rule.enforcement === 'audit').length,
-          enforce: next.config.rules.filter(rule => rule.kind !== 'http' && rule.enforcement === 'enforce').length,
+          audit: next.config.rules.filter(rule => rule.kind !== 'http' && rule.action === 'log').length,
+          enforce: next.config.rules.filter(rule => rule.kind !== 'http' && rule.action === 'block').length,
         },
         engine: new ManagedRuleEngine({
           config: next.config,

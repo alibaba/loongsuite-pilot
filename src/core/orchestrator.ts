@@ -8,7 +8,7 @@ import { InputManager } from './input-manager.js';
 import { InterceptResultLinker } from './intercept-result-linker.js';
 import { StateStore } from '../checkpoints/state-store.js';
 import { interceptorToolVerdictPath } from '../interceptor/paths.js';
-import { resolveEnabledInterceptorTypes, shouldDeployInterceptorHooks } from '../interceptor/config.js';
+import { shouldDeployInterceptorHooks } from '../interceptor/config.js';
 import { clearInterceptorRuntime } from '../interceptor/daemon/runtime.js';
 import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
 import { startInterceptorWorker, type InterceptorWorkerService } from '../interceptor/worker-service.js';
@@ -267,11 +267,11 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setAlarmManager(this.alarmManager);
     this.verdictStore = new ToolVerdictStore(interceptorToolVerdictPath(this.dataDir));
     this.verdictStore.restore();
-    const builtinInterceptEnabled = resolveEnabledInterceptorTypes(this.config.interceptor).size > 0;
+    const interceptorEnabled = shouldDeployInterceptorHooks(this.config.interceptor);
     this.inputManager.setInterceptResultLinker(
       new InterceptResultLinker(
         this.verdictStore,
-        () => builtinInterceptEnabled || this.interceptorService?.managedActive === true,
+        interceptorEnabled,
         () => this.interceptorService?.syncVerdicts() ?? Promise.resolve(),
       ),
     );
@@ -446,6 +446,8 @@ export class Orchestrator extends EventEmitter {
       agentsConfig: this.config.agents,
       slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
       cmsWorkspace: this.config.cms?.workspace ?? '',
+      hostSn: this.config.hostSn,
+      hostIdentityTags: this.config.hostIdentityTags,
       // Same condition as the updater watchdog above, deliberately: whether an updater is
       // supposed to exist decides both whether we restart it and whether its absence is
       // worth an alarm. Auto-update resolves to disabled whenever no package source is
@@ -498,7 +500,6 @@ export class Orchestrator extends EventEmitter {
         verdictStore: this.verdictStore ?? undefined,
         mode: this.config.interceptor.mode,
         emitBlockedPrompt: (entry, signal) => this.inputManager.flushPreparedEntries([entry], signal),
-        emitEvaluation: (entry, signal) => this.inputManager.flushPreparedEntries([entry], signal),
         onDiagnostic: this.interceptorAlarmReporter.record,
       }).catch(err => {
         logger.warn('interceptor start failed (non-fatal)', { error: String(err) });

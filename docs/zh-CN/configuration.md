@@ -50,7 +50,7 @@ Pilot 按以下顺序解析配置：
 | `dashboard.port` | 启用后的本机端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
 | `serviceName` | 所有 Agent 和上报后端共用的唯一服务名，优先级高于所有服务名前缀配置。 |
 | `serviceNamePrefix` | 兼容原有行为的服务名基础值。未设置 `serviceName` 时，各 Agent 以 `<serviceNamePrefix>-<agentType>` 上报。 |
-| `interceptor` | 本地拦截。仅 `mode: "all"` 开启内置规则、本地文件规则、Worker、HTTP 监听和拦截 hook；`none` 或其他值关闭全部拦截，包括已缓存规则。详见 [本地拦截](interceptor.md)。 |
+| `interceptor` | 本地拦截。仅 `mode: "all"` 开启已配置的本地文件规则、Worker、HTTP 监听和拦截 hook，并确保脱敏覆盖凭证类型；没有可执行规则时放行。`none` 或其他值关闭全部拦截，包括已缓存规则。详见 [本地拦截](interceptor.md)。 |
 
 对应环境变量：
 
@@ -71,7 +71,7 @@ Pilot 按以下顺序解析配置：
 | `LOG_LEVEL` | 运行日志级别：`debug`、`info`、`warn`、`error` 或 `silent`。 |
 | `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | 拦截模式：`all` 或 `none`，在 collector 启动时读取。 |
 
-旧的拦截 `custom` 模式与 `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` 不再支持。已有 `custom` 配置升级后会关闭拦截；如需继续拦截，请在重启 collector 前显式改为 `all`，此时会启用全部内置密钥类型。脱敏 `mask` 仍支持自己的 `custom` 模式。
+旧的拦截 `custom` 模式与 `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` 不再支持。已有 `custom` 配置升级后会关闭拦截；如需启用已配置的本地文件规则，请在重启 collector 前显式改为 `all`。内置密钥拦截规则已移除。脱敏 `mask` 仍支持自己的 `custom` 模式；开启拦截时，安装器和运行时加载会将 `cloudAccessKey`、`apiKey`、`privateKey`、`databaseUrl` 并入脱敏范围，保留已有自定义类型和替换格式。`mask.mode=all` 不变。
 
 ## SLS 密钥配置
 

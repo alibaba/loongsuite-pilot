@@ -253,7 +253,7 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       port: 8765,
     },
     agents: {},
-    interceptor: { mode: 'none', types: [] },
+    interceptor: { mode: 'none' },
     ...overrides,
   };
 }
@@ -286,7 +286,7 @@ describe('Orchestrator', () => {
         getStatus: async () => ({ ...status, running: !stopped }),
         reloadManaged: async () => {}, syncVerdicts: async () => {}, flushEvents: async () => {},
       } as unknown as interceptorWorker.InterceptorWorkerService);
-      const orch = new Orchestrator(makeConfig({ interceptor: { mode: 'all', types: [] } }));
+      const orch = new Orchestrator(makeConfig({ interceptor: { mode: 'all' } }));
       try {
         await orch.start();
         expect(await (orch as any).readInterceptorStatus()).toMatchObject({ running: true, sampled_at: status.sampled_at });

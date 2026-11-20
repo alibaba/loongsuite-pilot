@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { formatTime } from '../utils/time-utils.js';
-import { resolveLocalIp } from '../utils/network-utils.js';
+import { LOCAL_MAC, resolveLocalIp } from '../utils/network-utils.js';
 import { checkProcessLiveness, UPDATER_PROCESS_PATTERNS } from '../utils/pid-utils.js';
 import { createLogger } from '../utils/logger.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
@@ -20,6 +20,8 @@ export interface L1Metrics {
   os_detail: string;
   hostname: string;
   ip: string;
+  mac?: string;
+  sn?: string;
   instance_id: string;
   run_id: string;
   user_id: string;
@@ -487,6 +489,9 @@ export class MetricsCollector {
   private readonly runId: string;
   private readonly hostname: string;
   private readonly localIp: string;
+  private readonly mac: string;
+  private readonly hostSn: string;
+  private readonly hostIdentityTags: boolean;
   private readonly initType: string;
 
   private lastCpuUsage: NodeJS.CpuUsage | null = null;
@@ -517,7 +522,7 @@ export class MetricsCollector {
   private updaterConsecutiveFailures = 0;
   private lastInfraHealth: InfraHealthSnapshot | null = null;
 
-  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; autoUpdateEnabled?: boolean; updaterLiveness?: (pidFile: string) => ProcessLiveness }) {
+  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; autoUpdateEnabled?: boolean; updaterLiveness?: (pidFile: string) => ProcessLiveness; hostSn?: string; hostIdentityTags?: boolean }) {
     this.version = opts.version;
     this.userId = opts.userId;
     this.dataDir = opts.dataDir;
@@ -534,6 +539,9 @@ export class MetricsCollector {
     this.startTime = formatTime(new Date());
     this.localIp = resolveLocalIp();
     this.hostname = os.hostname();
+    this.mac = LOCAL_MAC;
+    this.hostSn = opts.hostSn?.trim() ?? '';
+    this.hostIdentityTags = opts.hostIdentityTags !== false;
     // Stable install identity: restart- and IP-invariant, independently derivable
     // by any process on the host. Includes dataDir so multiple installs on one
     // machine (e.g. several OS users, each with their own ~/.loongsuite-pilot) do
@@ -594,6 +602,8 @@ export class MetricsCollector {
       os_detail: `${os.type()}; ${os.release()}; ${os.arch()}`,
       hostname: os.hostname(),
       ip: this.localIp,
+      ...(this.hostIdentityTags && this.mac ? { mac: this.mac } : {}),
+      ...(this.hostIdentityTags && this.hostSn ? { sn: this.hostSn } : {}),
       instance_id: this.instanceId,
       run_id: this.runId,
       user_id: this.userId,

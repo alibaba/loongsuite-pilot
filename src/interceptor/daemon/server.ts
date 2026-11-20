@@ -10,8 +10,8 @@ import {
 } from '../access-log.js';
 import { parseQwenWorkHookRequest, qwenWorkAllowBody, qwenWorkBlockBody } from '../adapters/qwenwork.js';
 import { buildBlockedQoderPromptEntry } from '../blocked-prompt.js';
-import { buildGuardrailEvaluationEntry } from '../evaluation-event.js';
 import { guardrailSnapshotFromVerdict, hostBlockDetail } from '../guardrail.js';
+import { promptKeyFromRequest } from '../prompt-verdict.js';
 import {
   INTERCEPTOR_SERVICE,
   SUPPORTED_HOOK_EVENTS,
@@ -26,6 +26,8 @@ import {
   type ToolVerdictAction,
   type ToolVerdictKey,
   type ToolVerdictSnapshot,
+  type PromptVerdictKey,
+  type PromptVerdictSnapshot,
 } from '../tool-verdict-store.js';
 
 const logger = createLogger('InterceptorServer');
@@ -44,10 +46,9 @@ export interface InterceptorServerOptions {
   engine: HookEvaluator;
   writeAccessLog?: (entry: InterceptorAccessLogEntry) => void;
   writeToolVerdict?: (key: ToolVerdictKey, snapshot: ToolVerdictSnapshot) => void;
+  writePromptVerdict?: (key: PromptVerdictKey, snapshot: PromptVerdictSnapshot) => void;
   /** Async sink for a denied Qoder UserPromptSubmit. Must not affect the host response. */
   emitBlockedPrompt?: (entry: AgentActivityEntry, signal?: AbortSignal) => void | Promise<void>;
-  /** One metadata-only observation per matched managed rule, including audits. */
-  emitEvaluation?: (entry: AgentActivityEntry, signal?: AbortSignal) => void | Promise<void>;
 }
 
 export function createInterceptorServer(opts: InterceptorServerOptions): http.Server {
@@ -91,8 +92,10 @@ async function handle(
         return;
       }
       const request = body;
+      const promptKey = beginPromptEvaluation(opts, request);
       const verdict = await opts.engine.evaluate(request);
       recordToolVerdict(opts, request, verdict.failOpen && verdict.matched !== true ? 'unknown' : verdict.action, verdict);
+      recordPromptVerdict(opts, promptKey, verdict);
       recordAccess(opts, {
         event: request.event,
         agent: request.agent,
@@ -102,7 +105,6 @@ async function handle(
         result: { ...verdict },
       });
       writeJson(res, 200, verdict satisfies EvaluateHookResponse);
-      emitEvaluations(opts, request, verdict);
       emitBlockedPrompt(opts, request, verdict);
       return;
     }
@@ -173,9 +175,11 @@ async function handleQwenWorkHttp(
     return;
   }
 
+  const promptKey = beginPromptEvaluation(opts, request);
   try {
     const verdict = await opts.engine.evaluate(request);
     recordToolVerdict(opts, request, verdict.failOpen && verdict.matched !== true ? 'unknown' : verdict.action, verdict);
+    recordPromptVerdict(opts, promptKey, verdict);
     recordAccess(opts, {
       event: request.event,
       agent: request.agent,
@@ -186,11 +190,9 @@ async function handleQwenWorkHttp(
     });
     if (verdict.action !== 'block') {
       writeJson(res, 200, qwenWorkAllowBody());
-      emitEvaluations(opts, request, verdict);
       return;
     }
     writeJson(res, 200, qwenWorkBlockBody(request, hostBlockDetail(verdict.message, verdict.reason)));
-    emitEvaluations(opts, request, verdict);
     emitBlockedPrompt(opts, request, verdict);
   } catch (err) {
     recordToolVerdict(opts, request, 'unknown');
@@ -226,13 +228,23 @@ function emitBlockedPrompt(
   }
 }
 
-function emitEvaluations(opts: InterceptorServerOptions, request: HookRequest, verdict: EvaluateHookResponse): void {
-  if (!opts.emitEvaluation) return;
-  for (const match of verdict.matches ?? []) {
-    try { void Promise.resolve(opts.emitEvaluation(buildGuardrailEvaluationEntry(request, match, verdict.failOpen)))
-      .catch(err => logger.warn('guardrail evaluation emit failed', { error: String(err) })); }
-    catch (err) { logger.warn('guardrail evaluation emit failed', { error: String(err) }); }
+function beginPromptEvaluation(opts: InterceptorServerOptions, request: HookRequest): PromptVerdictKey | null {
+  if (!opts.writePromptVerdict || request.event !== 'UserPromptSubmit') return null;
+  const key = promptKeyFromRequest(request);
+  if (key) {
+    try { opts.writePromptVerdict(key, { action: 'unknown' }); }
+    catch { /* Verdict observation must never affect the host response. */ }
   }
+  return key;
+}
+
+function recordPromptVerdict(opts: InterceptorServerOptions, key: PromptVerdictKey | null, verdict: EvaluateHookResponse): void {
+  // The pending marker remains for failures and blocked prompts: neither owns a native request.
+  if (!opts.writePromptVerdict || verdict.action !== 'allow'
+    || (verdict.failOpen && verdict.matched !== true)) return;
+  if (!key) return;
+  try { opts.writePromptVerdict(key, guardrailSnapshotFromVerdict(verdict)); }
+  catch { /* Verdict observation must never affect the host response. */ }
 }
 
 function recordToolVerdict(

@@ -1,6 +1,7 @@
 import { stampGuardrail } from '../interceptor/guardrail.js';
 import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
 import { ClientType, type AgentActivityEntry } from '../types/index.js';
+import { PROMPT_CORRELATION_FIELD, promptLookupFromEntry } from '../interceptor/prompt-verdict.js';
 
 export class InterceptResultLinker {
   constructor(
@@ -14,10 +15,11 @@ export class InterceptResultLinker {
   async sync(entries?: AgentActivityEntry[]): Promise<void> {
     if (!(typeof this.enabled === 'function' ? this.enabled() : this.enabled)) return;
     if (entries && !entries.some(entry =>
-      (entry['event.name'] === 'tool.call' || entry['event.name'] === 'tool.result')
+      ((entry['event.name'] === 'llm.request' && promptLookupFromEntry(entry))
+        || ((entry['event.name'] === 'tool.call' || entry['event.name'] === 'tool.result')
+          && typeof entry['gen_ai.tool.call.id'] === 'string' && entry['gen_ai.tool.call.id'].length > 0))
       && isInterceptorAgent(entry['gen_ai.agent.type'])
-      && typeof entry['gen_ai.tool.call.id'] === 'string'
-      && entry['gen_ai.tool.call.id'].length > 0)) return;
+    )) return;
     await this.beforeEnrich?.();
   }
 
@@ -25,6 +27,13 @@ export class InterceptResultLinker {
     if (!(typeof this.enabled === 'function' ? this.enabled() : this.enabled)) return;
     for (const entry of entries) {
       const event = entry['event.name'];
+      const promptLookup = event === 'llm.request' ? promptLookupFromEntry(entry) : null;
+      delete entry[PROMPT_CORRELATION_FIELD];
+      if (promptLookup && isInterceptorAgent(entry['gen_ai.agent.type'])) {
+        const snapshot = this.verdictStore.getPromptSnapshot(promptLookup);
+        if (snapshot) stampGuardrail(entry, snapshot);
+        continue;
+      }
       const phase = event === 'tool.call'
         ? 'PreToolUse'
         : event === 'tool.result'

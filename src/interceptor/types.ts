@@ -4,13 +4,12 @@ export const INTERCEPTOR_AGENTS = ['qoder', 'qodercli', 'openclaw', 'qwen-work-c
 export type InterceptorAgent = (typeof INTERCEPTOR_AGENTS)[number];
 export type QoderSurface = 'qoder' | 'qodercli';
 export type VerdictAction = 'allow' | 'block';
-export type RuleEnforcement = 'enforce' | 'audit';
+export type RuleAction = 'block' | 'log';
 
 /** One successfully matched managed rule, in evaluation order. */
 export interface ManagedRuleMatch {
   matched: true;
-  enforcement: RuleEnforcement;
-  action: VerdictAction;
+  action: RuleAction;
   ruleId: string;
   ruleVersion: string;
   severity?: string;
@@ -40,29 +39,18 @@ export interface HookRequest {
   raw: Record<string, unknown>;
 }
 
-export interface LocalRule {
-  readonly id: string;
-  supports(request: HookRequest): boolean;
-  evaluate(request: HookRequest): Promise<RuleResult>;
-}
-
-export type RuleResult =
-  | { matched: false }
-  | { matched: true; reason: string };
-
-export type { InterceptorConfig, InterceptorType } from '../types/index.js';
+export type { InterceptorConfig } from '../types/index.js';
 
 export interface EvaluateHookResponse {
   action: VerdictAction;
   /** Omitted when evaluation failed before any match could be established. */
   matched?: boolean;
-  enforcement?: RuleEnforcement;
   /** Managed hits, including audits before a later enforced block or evaluation error. */
   matches?: ManagedRuleMatch[];
-  /** Script stdout reason or builtin token. Telemetry uses this, not `message`. */
+  /** Managed rule reason. Telemetry uses this, not `message`. */
   reason?: string;
   ruleId?: string;
-  /** Managed `rules[].version`. Builtin rules omit this. */
+  /** Managed `rules[].version`. */
   ruleVersion?: string;
   /** Optional risk label from managed `rules[].severity`. */
   severity?: string;
