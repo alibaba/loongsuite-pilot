@@ -21,6 +21,10 @@ const DIGEST_BACKFILL_DAYS = 7;
 // identities and offsets.
 const DIGEST_DETAIL_DAYS = 7;
 const FILE_NAME_PATTERN = /^(.+)-(\d{4}-\d{2}-\d{2})\.jsonl$/;
+const LEGACY_COUNTERS = [
+  'tokens', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens',
+  'requests', 'toolCalls', 'events',
+] as const;
 
 // ── Public types (metrics-summary.json shape) ──
 
@@ -151,7 +155,9 @@ interface DayTotals {
 interface DayDigest extends DayTotals {
   base?: DayTotals;
   files?: TrackedFileState[];
-  /** Listed raw files at the last unresolved attempt. Their offsets stay provisional. */
+  /** Legacy totals before contributions observed by this writer were added. */
+  legacyBaseline?: DayTotals;
+  /** Raw source inventory at the last unsuccessful recovery attempt. */
   legacyFileSignature?: string;
   /**
    * Set when a day written by an older version could not be rebuilt from its
@@ -320,14 +326,15 @@ export class MetricsSummaryWriter {
       digest.legacyScan = await this.captureLegacyScan(scanState);
     }
 
-    // Finish the previous active day before starting a new one. The replacement
-    // write is idempotent, so a crash between digest and state persistence cannot
-    // double-count the day on restart. The per-file state moves into the digest
-    // as is, so later appends to that day keep resuming from the same offsets.
+    // Move the previous day's files into the digest. If a prior refresh already
+    // committed that tracked day, its offsets and retired segments are newer
+    // than the active state left behind by an interrupted rollover.
     if (currentDayState && currentDayState.day !== today) {
-      currentDayState = await this.refreshCurrentDayState(currentDayState, files);
-      digest.days[currentDayState.day] = composeDay(undefined, currentDayState.files, false);
-      this.copyCurrentDayOffsetsToScanState(currentDayState, scanState);
+      if (!digest.days[currentDayState.day]?.files) {
+        currentDayState = await this.refreshCurrentDayState(currentDayState, files);
+        digest.days[currentDayState.day] = composeDay(undefined, currentDayState.files, false);
+        this.copyCurrentDayOffsetsToScanState(currentDayState, scanState);
+      }
       currentDayState = null;
     }
 
@@ -352,12 +359,21 @@ export class MetricsSummaryWriter {
       }
       const legacyScan = entry?.breakdownsIncomplete && digest.legacyScan?.synchronized ? digest.legacyScan : undefined;
       const refreshed = await this.refreshTrackedFiles(day, entry?.files ?? [], dayFiles, true, legacyScan);
-      if (entry && !refreshed.changed) continue;
+      const signatureChanged = refreshed.sourceSignature !== entry?.legacyFileSignature;
+      if (entry && !refreshed.changed && !signatureChanged) continue;
 
       let base = entry ? baseOf(entry) : undefined;
       if (refreshed.detached) base = addTotals(base, dayStatsToTotals(refreshed.detached));
-      digest.days[day] = composeDay(base, refreshed.files, entry?.breakdownsIncomplete);
-      for (const file of refreshed.files) {
+      let next = composeDay(base, refreshed.files, entry?.breakdownsIncomplete);
+      if (legacyScan && refreshed.sourceSignature !== undefined) {
+        if (entry?.legacyBaseline) next.legacyBaseline = entry.legacyBaseline;
+        if (signatureChanged && refreshed.allSourcesPresent) {
+          next = await this.migrateUntrackedDay(day, next, dayFiles, legacyScan, today, true);
+        }
+        if (next.breakdownsIncomplete) next.legacyFileSignature = refreshed.sourceSignature;
+      }
+      digest.days[day] = next;
+      for (const file of next.files ?? []) {
         if (file.fileName.startsWith('retired:')) continue;
         scanState.files[file.fileName] = { offset: file.offset, size: file.size, ino: file.ino };
       }
@@ -445,12 +461,16 @@ export class MetricsSummaryWriter {
     detached: DayStats | null;
     bytesRead: number;
     changed: boolean;
+    sourceSignature?: string;
+    allSourcesPresent: boolean;
   }> {
     const existingByIdentity = new Map(tracked.map(file => [fileIdentity(file), file]));
     const nextByIdentity = new Map(existingByIdentity);
     let detached: DayStats | null = null;
     let bytesRead = 0;
     let changed = false;
+    const available = new Set<string>();
+    const observedFiles: ReturnType<typeof legacyFileObservation>[] = [];
 
     for (const filePath of files) {
       const match = FILE_NAME_PATTERN.exec(path.basename(filePath));
@@ -487,6 +507,10 @@ export class MetricsSummaryWriter {
         && sameFileIdentity(existing, fileStat)
         && existing.offset <= fileStat.size
         && existing.size <= fileStat.size;
+      if (legacyScan) {
+        observedFiles.push(legacyFileObservation(fileName, fileStat));
+        if (!existing || canResume) available.add(identity);
+      }
       if (skipUnchanged && canResume && existing.offset === fileStat.size) {
         if (!nextByIdentity.has(identity) || existing.fileName !== fileName || existing.size !== fileStat.size) {
           nextByIdentity.set(identity, { ...existing, fileName, size: fileStat.size });
@@ -532,6 +556,8 @@ export class MetricsSummaryWriter {
       detached,
       bytesRead,
       changed,
+      sourceSignature: legacyScan ? JSON.stringify(observedFiles.sort()) : undefined,
+      allSourcesPresent: available.size === nextByIdentity.size,
     };
   }
 
@@ -550,6 +576,7 @@ export class MetricsSummaryWriter {
     files: string[],
     scanState: LegacyScanCheckpoint,
     today: string,
+    recoveringTrackedDay = false,
   ): Promise<DayDigest> {
     const legacyTotals = totalsOf(legacy);
     const incompleteBefore = !!legacy.breakdownsIncomplete || lacksLegacyBreakdowns(legacy);
@@ -605,11 +632,9 @@ export class MetricsSummaryWriter {
     const completeScanState = trustScanState && matchedRetiredKeys.size === retiredByIdentity.size
       && [...cachedByIno.keys()].every(ino => presentInodes.has(ino));
     const hasKnownTail = inputs.some(({ cached, stat }) => cached && cached.offset < stat.size);
-    const rebuild = trustScanState && (hasKnownTail
+    const rebuild = trustScanState && (recoveringTrackedDay || hasKnownTail
       || (incompleteBefore && day >= dateDaysAgo(DIGEST_BACKFILL_DAYS, today)));
-    const fileSignature = JSON.stringify(inputs.map(({ name, stat }) => [
-      name, fileIdentity(stat), stat.size, stat.mtimeMs,
-    ]).sort());
+    const fileSignature = JSON.stringify(inputs.map(({ name, stat }) => legacyFileObservation(name, stat)).sort());
     if (legacy.legacyFileSignature === fileSignature) return legacy;
 
     const head = createDayStats();
@@ -658,13 +683,21 @@ export class MetricsSummaryWriter {
       return stats;
     };
 
-    const coversLegacy = whole.tokens >= legacy.tokens && whole.events >= legacy.events;
-    const matchesLegacy = (stats: DayStats) => stats.tokens === legacy.tokens && stats.events === legacy.events;
-    const confirmedRebuild = rebuild && (matchesLegacy(head) || matchesLegacy(whole) || completeScanState);
-    if (coversLegacy && (!trustScanState || confirmedRebuild)) {
+    const coversLegacy = LEGACY_COUNTERS.every(key => whole[key] >= legacyTotals[key]);
+    const matches = (stats: DayStats, totals: DayTotals) => LEGACY_COUNTERS.every(key => stats[key] === totals[key]);
+    // Legacy increments could sum the number of sessions in multiple batches.
+    // A verified file inventory can deduplicate them. With no usable offsets,
+    // all original counters, including sessions, must match the raw day.
+    const wholeMatches = matches(whole, legacyTotals);
+    const recoveredBaseline = completeScanState || (legacy.legacyBaseline && matches(head, legacy.legacyBaseline));
+    const hasCoverage = trustScanState
+      ? rebuild && coversLegacy && (matches(head, legacyTotals) || wholeMatches || completeScanState)
+      : wholeMatches && whole.sessions.size === legacyTotals.sessions;
+    if (recoveringTrackedDay ? trustScanState && wholeMatches && recoveredBaseline : hasCoverage) {
       logger.info('metrics digest day rebuilt from its segments', { day });
       return composeDay(undefined, withStats(wholeFile), false);
     }
+    if (recoveringTrackedDay) return legacy;
     if (!trustScanState || !scanState.synchronized) {
       // Preserve the original checkpoint across restarts. Neither the absent
       // segments nor the cached tails can be separated from the digest yet.
@@ -672,7 +705,9 @@ export class MetricsSummaryWriter {
       return { ...legacy, breakdownsIncomplete: true, legacyFileSignature: fileSignature };
     }
     if (rebuild) logger.info('metrics digest day kept with incomplete breakdowns', { day });
-    return composeDay(legacyTotals, withStats(item => item.tail), incompleteBefore);
+    const partial = composeDay(legacyTotals, withStats(item => item.tail), incompleteBefore);
+    if (partial.breakdownsIncomplete) partial.legacyBaseline = legacyTotals;
+    return partial;
   }
 
   /**
@@ -689,6 +724,8 @@ export class MetricsSummaryWriter {
         files: entry.files.map(({ stats: _stats, ...file }) => file),
       };
       if (entry.breakdownsIncomplete) compacted.breakdownsIncomplete = true;
+      if (entry.legacyBaseline) compacted.legacyBaseline = entry.legacyBaseline;
+      if (entry.legacyFileSignature !== undefined) compacted.legacyFileSignature = entry.legacyFileSignature;
       digest.days[day] = compacted;
     }
   }
@@ -1328,6 +1365,10 @@ function findLegacyScanOffset(
 
 function fileIdentity(file: Pick<TrackedFileState, 'dev' | 'ino' | 'birthtimeMs'>): string {
   return `${file.dev}:${file.ino}:${file.birthtimeMs}`;
+}
+
+function legacyFileObservation(fileName: string, stat: fsSync.Stats): [string, string, number, number] {
+  return [fileName, fileIdentity(stat), stat.size, stat.mtimeMs];
 }
 
 function finiteNumber(value: unknown): number {

@@ -61,7 +61,7 @@ async function seedLegacyState(
 
 function legacyDay(tokens: number, events: number): Record<string, number> {
   return {
-    tokens, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+    tokens, inputTokens: tokens > 0 ? 100 * events : 0, outputTokens: tokens > 0 ? 100 * events : 0, cacheReadTokens: 0,
     cacheCreationTokens: 0, sessions: 1, requests: 0, toolCalls: 0, events,
   };
 }
@@ -184,7 +184,7 @@ describe('MetricsSummaryWriter historical breakdown integrity', () => {
     await seedLegacyState(tmpDir, {
       '2026-07-30': {
         tokens: 1000, inputTokens: 200, outputTokens: 200, cacheReadTokens: 0,
-        cacheCreationTokens: 0, sessions: 2, requests: 2, toolCalls: 0, events: 2,
+        cacheCreationTokens: 0, sessions: 2, requests: 0, toolCalls: 0, events: 2,
       },
       '2026-08-01': {
         tokens: 800, inputTokens: 160, outputTokens: 160, cacheReadTokens: 0,
@@ -302,6 +302,29 @@ describe('MetricsSummaryWriter historical breakdown integrity', () => {
     expect(range.incompleteBreakdownDays).toBeUndefined();
   });
 
+  it('preserves the legacy counters when unrelated records cannot prove coverage without the scan state', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-03T10:00:00'));
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    await writeJsonl(outputDir, 'claude-code-2026-08-01.jsonl', [
+      record({ 'gen_ai.usage.total_tokens': '300', 'gen_ai.usage.input_tokens': '300', 'gen_ai.usage.output_tokens': '0' }),
+      record({ 'gen_ai.usage.total_tokens': '700', 'gen_ai.usage.input_tokens': '0', 'gen_ai.usage.output_tokens': '0' }),
+      record({ 'gen_ai.usage.total_tokens': '700', 'gen_ai.usage.input_tokens': '0', 'gen_ai.usage.output_tokens': '0' }),
+    ]);
+    await seedLegacyState(tmpDir, {
+      '2026-08-01': { ...legacyDay(1300, 2), inputTokens: 1300, outputTokens: 0 },
+    }, {});
+    await fs.unlink(path.join(tmpDir, 'cache', 'metrics-scan-state.json'));
+
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const range = (await readSummary(tmpDir)).ranges.sevenDays;
+    expect(range).toMatchObject({ totalTokens: 1300, inputTokens: 1300, totalEvents: 2 });
+    expect(range.modelShares).toEqual([]);
+    expect(range.incompleteBreakdownDays).toEqual(['2026-08-01']);
+  });
+
   it('keeps records appended to a legacy day before the first refresh after an upgrade', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-03T10:00:00'));
@@ -390,7 +413,7 @@ describe('MetricsSummaryWriter historical breakdown integrity', () => {
     expect(range.incompleteBreakdownDays).toBeUndefined();
   });
 
-  it('counts new bytes from a coherent legacy checkpoint and resumes a restored archive after sidecar loss', async () => {
+  it('resumes a coherent legacy checkpoint after sidecar loss and rebuilds when both sources are available', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-03T10:00:00'));
     const { active, archived, retired } = await seedPartialLegacyDay(tmpDir, true);
@@ -403,14 +426,28 @@ describe('MetricsSummaryWriter historical breakdown integrity', () => {
     expect(partial.incompleteBreakdownDays).toEqual(['2026-08-01']);
 
     await fs.unlink(path.join(tmpDir, 'cache', 'metrics-scan-state.json'));
+    const movedActive = path.join(tmpDir, 'active.jsonl');
+    await fs.rename(active, movedActive);
     await fs.rename(retired, archived);
     await fs.appendFile(archived, JSON.stringify(record({ 'gen_ai.request.model': 'restored-model', 'gen_ai.usage.total_tokens': '10' })) + '\n');
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    const partlyRestored = (await readSummary(tmpDir)).ranges.sevenDays;
+    expect(partlyRestored.totalTokens).toBe(1360);
+    expect(partlyRestored.incompleteBreakdownDays).toEqual(['2026-08-01']);
+
+    await fs.rename(movedActive, active);
     await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
     await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
 
     const range = (await readSummary(tmpDir)).ranges.sevenDays;
     expect(range.totalTokens).toBe(1360);
-    expect(range.modelShares).toContainEqual(expect.objectContaining({ model: 'restored-model', totalTokens: 10 }));
+    expect(range.modelShares).toEqual([
+      expect.objectContaining({ model: 'archived-model', totalTokens: 1000 }),
+      expect.objectContaining({ model: 'active-model', totalTokens: 300 }),
+      expect.objectContaining({ model: 'new-model', totalTokens: 50 }),
+      expect.objectContaining({ model: 'restored-model', totalTokens: 10 }),
+    ]);
+    expect(range.incompleteBreakdownDays).toBeUndefined();
   });
 
   it('preserves unresolved legacy offsets until the missing archive makes a safe rebuild possible', async () => {
@@ -505,6 +542,39 @@ describe('MetricsSummaryWriter historical breakdown integrity', () => {
     const range = (await readSummary(tmpDir)).ranges.thirtyDays;
     expect(range.totalTokens).toBe(1200);
     expect(range.modelShares[0].totalTokens).toBe(1200);
+  });
+
+  it('keeps the committed digest when an interrupted rollover leaves an older current-day state', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-01T10:00:00'));
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const active = await writeJsonl(outputDir, 'claude-code-2026-08-01.jsonl', [
+      record({ 'gen_ai.request.model': 'active-model', 'gen_ai.usage.total_tokens': '300' }),
+    ]);
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    const statePath = path.join(tmpDir, 'cache', 'metrics-current-day-state.json');
+    const snapshot = path.join(tmpDir, 'active-state.json');
+    await fs.link(statePath, snapshot);
+    const archiveName = 'claude-code.part-1-2026-08-01.jsonl';
+    await writeJsonl(outputDir, archiveName, [
+      record({ 'gen_ai.request.model': 'archived-model', 'gen_ai.usage.total_tokens': '1000' }),
+    ]);
+    vi.setSystemTime(new Date('2026-08-02T10:00:00'));
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    expect((await readSummary(tmpDir)).ranges.sevenDays.totalTokens).toBe(1300);
+
+    await fs.rename(snapshot, statePath);
+    await retire(outputDir, archiveName);
+    await fs.appendFile(active, JSON.stringify(record({ 'gen_ai.request.model': 'active-model', 'gen_ai.usage.total_tokens': '200' })) + '\n');
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const range = (await readSummary(tmpDir)).ranges.sevenDays;
+    expect(range).toMatchObject({ totalTokens: 1500, totalEvents: 3 });
+    expect(range.modelShares).toEqual([
+      expect.objectContaining({ model: 'archived-model', totalTokens: 1000 }),
+      expect.objectContaining({ model: 'active-model', totalTokens: 500 }),
+    ]);
   });
 
   it('treats a digest day with corrupt tracking state as a legacy day instead of failing', async () => {
