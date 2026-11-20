@@ -149,6 +149,9 @@ pub struct AgentHookConfig {
     pub settings_syntax: Option<SettingsSyntax>,
     pub events: Vec<String>,
     pub hook_command: String,
+    /// State directory relative to Pilot's data root for direct SDK commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_sdk_data: Option<String>,
     pub format: HookFormat,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matcher: Option<String>,
