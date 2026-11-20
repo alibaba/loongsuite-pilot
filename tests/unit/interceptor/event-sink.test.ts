@@ -3,7 +3,7 @@ import { InterceptorEventSink } from '../../../src/interceptor/event-sink.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 
 function entry(id: number): AgentActivityEntry {
-  return { 'event.id': String(id), 'event.name': 'guardrail.evaluation', 'user.id': '', time_unix_nano: '1',
+  return { 'event.id': String(id), 'event.name': 'llm.request', 'user.id': '', time_unix_nano: '1',
     'gen_ai.agent.type': 'qoder', 'gen_ai.session.id': 'session', 'gen_ai.provider.name': 'unknown' };
 }
 afterEach(() => vi.useRealTimers());
@@ -16,8 +16,8 @@ describe('bounded interceptor event sink', () => {
     let peak = 0;
     const consume = vi.fn(async () => { active++; peak = Math.max(peak, active); await gate; active--; });
     const warn = vi.fn();
-    const sink = new InterceptorEventSink({ evaluation: consume }, { capacity: 2, maxBytes: 10_000, warn });
-    sink.enqueue([], Array.from({ length: 500 }, (_, i) => entry(i)));
+    const sink = new InterceptorEventSink({ blockedPrompt: consume }, { capacity: 2, maxBytes: 10_000, warn });
+    sink.enqueue(Array.from({ length: 500 }, (_, i) => entry(i)));
     await Promise.resolve();
     expect(consume).toHaveBeenCalledOnce();
     expect(sink.stats).toMatchObject({ pending: 1, active: 1, completed: 0, dropped: 498 });
@@ -37,7 +37,7 @@ describe('bounded interceptor event sink', () => {
     const consume = vi.fn();
     const warn = vi.fn();
     const sink = new InterceptorEventSink({ blockedPrompt: consume }, { capacity: 256, maxBytes: 64, warn });
-    sink.enqueue([entry(1)], []);
+    sink.enqueue([entry(1)]);
     await sink.close();
     expect(consume).not.toHaveBeenCalled();
     expect(sink.stats).toMatchObject({ pending: 0, active: 0, dropped: 1 });
@@ -48,8 +48,8 @@ describe('bounded interceptor event sink', () => {
     let signal: AbortSignal | undefined;
     const consume = vi.fn((_entry, abort: AbortSignal) => { signal = abort; return new Promise<void>(() => {}); });
     const warn = vi.fn();
-    const sink = new InterceptorEventSink({ evaluation: consume }, { capacity: 2, drainTimeoutMs: 100, warn });
-    sink.enqueue([], [entry(1), entry(2)]);
+    const sink = new InterceptorEventSink({ blockedPrompt: consume }, { capacity: 2, drainTimeoutMs: 100, warn });
+    sink.enqueue([entry(1), entry(2)]);
     await Promise.resolve();
     const stopped = sink.close();
     await vi.advanceTimersByTimeAsync(101);

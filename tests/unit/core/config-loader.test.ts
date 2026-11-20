@@ -1538,7 +1538,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'none',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1551,7 +1551,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'none',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1567,7 +1567,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'all',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1592,7 +1592,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
         types: [
           'apiKey',
           'cloudAccessKey',
@@ -1618,7 +1618,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'none',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1631,7 +1631,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'custom',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1648,7 +1648,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'all',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1667,7 +1667,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
         types: [
           'cloudAccessKey',
           'databaseUrl',
@@ -1696,6 +1696,39 @@ describe('ConfigLoader', () => {
       });
     });
 
+    it('uses placeholder only when explicitly configured', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'all', replacementMode: 'placeholder' },
+      });
+
+      expect((await loadConfig()).mask.replacementMode).toBe('placeholder');
+    });
+
+    it('uses preview for an empty replacement mode in the config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'all', replacementMode: '' },
+      });
+
+      expect((await loadConfig()).mask.replacementMode).toBe('preview');
+    });
+
+    it.each([
+      false,
+      42,
+      {},
+      [],
+      null,
+    ])('uses preview for non-string replacement mode %j even when masking is off', async raw => {
+      for (const mode of ['all', 'none']) {
+        mockReadJsonFile.mockResolvedValueOnce({
+          mask: { mode, replacementMode: raw },
+        });
+        const config = await loadConfig();
+        expect(config.mask.mode).toBe(mode);
+        expect(config.mask.replacementMode).toBe('preview');
+      }
+    });
+
     it('uses replacement mode env over config file', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
@@ -1707,6 +1740,13 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.mask.replacementMode).toBe('preview');
+    });
+
+    it('accepts an explicit placeholder environment override', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ mask: { mode: 'all' } });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE', 'placeholder');
+
+      expect((await loadConfig()).mask.replacementMode).toBe('placeholder');
     });
 
     it('treats an empty replacement mode env as unset', async () => {
@@ -1722,7 +1762,7 @@ describe('ConfigLoader', () => {
       expect(config.mask.replacementMode).toBe('preview');
     });
 
-    it('falls back to placeholder for an invalid replacement mode', async () => {
+    it('falls back to preview for an invalid replacement mode', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
           mode: 'all',
@@ -1731,7 +1771,7 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask.replacementMode).toBe('placeholder');
+      expect(config.mask.replacementMode).toBe('preview');
     });
   });
 
@@ -2379,7 +2419,7 @@ describe('ConfigLoader', () => {
     it('defaults to none when interceptor config is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({ mode: 'none', types: [] });
+      expect(config.interceptor).toEqual({ mode: 'none' });
     });
 
     it('treats interceptor custom mode as none and does not expand mask', async () => {
@@ -2390,7 +2430,7 @@ describe('ConfigLoader', () => {
         },
       });
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({ mode: 'none', types: [] });
+      expect(config.interceptor).toEqual({ mode: 'none' });
       expect(config.mask.mode).toBe('none');
     });
 
@@ -2400,10 +2440,9 @@ describe('ConfigLoader', () => {
       });
       vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', 'all');
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({ mode: 'all', types: [] });
+      expect(config.interceptor).toEqual({ mode: 'all' });
       expect(config.mask).toMatchObject({
-        mode: 'custom',
-        types: ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'],
+        mode: 'custom', types: ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'],
       });
     });
 
@@ -2414,6 +2453,26 @@ describe('ConfigLoader', () => {
       });
       const config = await loadConfig();
       expect(config.mask.mode).toBe('all');
+    });
+
+    it('merges custom mask types and preserves replacement mode when interceptor is enabled', async () => {
+      const mask = { mode: 'custom', types: ['email', 'apiKey', 'email'], replacementMode: 'preview' };
+      mockReadJsonFile.mockResolvedValueOnce({ mask, interceptor: { mode: 'all' } });
+      const config = await loadConfig();
+      expect(config.mask).toEqual({
+        mode: 'custom',
+        types: ['email', 'apiKey', 'cloudAccessKey', 'privateKey', 'databaseUrl'],
+        replacementMode: 'preview',
+      });
+    });
+
+    it('does not expand mask when an interceptor environment override disables interception', async () => {
+      const mask = { mode: 'custom', types: ['email'], replacementMode: 'preview' };
+      mockReadJsonFile.mockResolvedValueOnce({ mask, interceptor: { mode: 'all' } });
+      vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', 'none');
+      const config = await loadConfig();
+      expect(config.interceptor).toEqual({ mode: 'none' });
+      expect(config.mask).toEqual(mask);
     });
   });
 

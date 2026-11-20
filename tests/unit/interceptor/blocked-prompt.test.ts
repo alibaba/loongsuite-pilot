@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildBlockedQoderPromptEntry } from '../../../src/interceptor/blocked-prompt.js';
+import { parseHookRequest } from '../../../src/interceptor/adapters/qoder.js';
 import type { HookRequest } from '../../../src/interceptor/types.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -17,6 +18,21 @@ function request(overrides: Partial<HookRequest> = {}): HookRequest {
 }
 
 describe('buildBlockedQoderPromptEntry', () => {
+  it.each([
+    ['qoder', { product: 'app' }, 'qoder-app'],
+    ['qodercli', { product: 'app' }, 'qoder-app'],
+    ['qoder', { product: 'cli' }, 'qoder-cli'],
+    ['qodercli', { product: 'cli' }, 'qoder-cli'],
+    ['qoder', undefined, 'qoder-cli'],
+    ['qodercli', undefined, 'qoder-cli'],
+    ['qoder', { product: 'APP' }, 'qoder-cli'],
+    ['qodercli', [{ product: 'app' }], 'qoder-cli'],
+  ] as const)('preserves product identity for %s with metadata %j', (surface, metadata, agentType) => {
+    const hook = parseHookRequest({ hook_event_name: 'UserPromptSubmit', session_id: 'session',
+      parent_business_info: metadata }, surface)!;
+    expect(buildBlockedQoderPromptEntry(hook)['gen_ai.agent.type']).toBe(agentType);
+  });
+
   it('fills the synthetic llm.request fields from the hook', () => {
     const now = 1_700_000_000_000;
     const entry = buildBlockedQoderPromptEntry(request(), now);
@@ -78,9 +94,9 @@ describe('buildBlockedQoderPromptEntry', () => {
     });
     expect(entry['gen_ai.guardrail.rule_id']).toBe('flow-probe');
     expect(entry['gen_ai.guardrail.rule_version']).toBe('3');
-    expect(entry['gen_ai.guardrail.severity']).toBe('CRITICAL');
-    expect(entry['gen_ai.guardrail.reason']).toBe('flow-probe-v3');
-    expect(entry['gen_ai.guardrail.title']).toBe('ak-leak');
-    expect(entry['gen_ai.guardrail.message']).toBe('不要在对话里粘贴 AccessKey');
+    expect(entry).not.toHaveProperty('gen_ai.guardrail.reason');
+    expect(entry).not.toHaveProperty('gen_ai.guardrail.severity');
+    expect(entry).not.toHaveProperty('gen_ai.guardrail.title');
+    expect(entry).not.toHaveProperty('gen_ai.guardrail.message');
   });
 });

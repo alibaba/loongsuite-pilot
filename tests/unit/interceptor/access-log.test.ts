@@ -15,12 +15,12 @@ import type { HookRequest } from '../../../src/interceptor/types.js';
 describe('interceptor access log', () => {
   it('keeps audit matches and fail-open state while masking match metadata', () => {
     const line = serializeAccessLogEntry(buildAccessLogEntry({ event: 'PreToolUse', input: {}, result: {
-      action: 'allow', matched: true, enforcement: 'audit', failOpen: true, matches: [{ matched: true, action: 'allow',
-        enforcement: 'audit', ruleId: 'observed', ruleVersion: '1', reason: 'sk-1234567890abcdefghijklmnop' }],
+      action: 'allow', matched: true, failOpen: true, matches: [{ matched: true, action: 'log',
+        ruleId: 'observed', ruleVersion: '1', reason: 'sk-1234567890abcdefghijklmnop' }],
     } }));
     expect(line).not.toContain('sk-1234567890abcdefghijklmnop');
-    expect(JSON.parse(line).result).toMatchObject({ action: 'allow', matched: true, enforcement: 'audit', failOpen: true,
-      matches: [{ action: 'allow', matched: true, enforcement: 'audit', ruleId: 'observed', reason: '[APIKEY_MASKED]' }] });
+    expect(JSON.parse(line).result).toMatchObject({ action: 'allow', matched: true, failOpen: true,
+      matches: [{ action: 'log', matched: true, ruleId: 'observed', reason: '[APIKEY_MASKED]' }] });
   });
   it('drains an ordered bounded asynchronous queue and records overflow', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'interceptor-async-audit-'));

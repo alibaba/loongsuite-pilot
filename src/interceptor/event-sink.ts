@@ -2,10 +2,9 @@ import type { AgentActivityEntry } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('InterceptorEventSink');
-type EntryKind = 'blockedPrompt' | 'evaluation';
 export type InterceptorEntryConsumer = (entry: AgentActivityEntry, signal: AbortSignal) => void | Promise<void>;
 
-interface PendingEntry { kind: EntryKind; entry: AgentActivityEntry; bytes: number }
+interface PendingEntry { entry: AgentActivityEntry; bytes: number }
 interface SinkOptions {
   capacity?: number;
   maxBytes?: number;
@@ -32,7 +31,7 @@ export class InterceptorEventSink {
   private readonly timeoutMs: number;
   private readonly warn: NonNullable<SinkOptions['warn']>;
 
-  constructor(private readonly consumers: Partial<Record<EntryKind, InterceptorEntryConsumer>>, options: SinkOptions = {}) {
+  constructor(private readonly consumers: { blockedPrompt?: InterceptorEntryConsumer }, options: SinkOptions = {}) {
     this.capacity = options.capacity ?? 256;
     this.maxBytes = options.maxBytes ?? 8 * 1024 * 1024;
     this.timeoutMs = options.drainTimeoutMs ?? 5000;
@@ -45,26 +44,24 @@ export class InterceptorEventSink {
   }
 
   /** ACK may follow admission, including explicit counted drops; never unbounded async work. */
-  enqueue(blockedPrompts: readonly AgentActivityEntry[], evaluations: readonly AgentActivityEntry[]): void {
-    for (const [kind, entries] of [['blockedPrompt', blockedPrompts], ['evaluation', evaluations]] as const) {
-      for (const entry of entries) {
-        if (!this.consumers[kind]) continue;
-        let bytes = 0;
-        try { bytes = Buffer.byteLength(JSON.stringify(entry)); } catch { /* Treat unserializable metadata as a drop. */ }
-        if (this.closed || !bytes || this.queue.length >= this.capacity || this.queuedBytes + bytes > this.maxBytes) {
-          this.dropped++;
-          this.unreportedDrops++;
-          this.scheduleReport();
-          continue;
-        }
-        this.queue.push({ kind, entry, bytes });
-        this.queuedBytes += bytes;
+  enqueue(blockedPrompts: readonly AgentActivityEntry[]): void {
+    for (const entry of blockedPrompts) {
+      if (!this.consumers.blockedPrompt) continue;
+      let bytes = 0;
+      try { bytes = Buffer.byteLength(JSON.stringify(entry)); } catch { /* Treat unserializable metadata as a drop. */ }
+      if (this.closed || !bytes || this.queue.length >= this.capacity || this.queuedBytes + bytes > this.maxBytes) {
+        this.dropped++;
+        this.unreportedDrops++;
+        this.scheduleReport();
+        continue;
       }
+      this.queue.push({ entry, bytes });
+      this.queuedBytes += bytes;
     }
     if (!this.draining && this.queue.length) {
       this.draining = Promise.resolve().then(() => this.drain()).finally(() => {
         this.draining = null;
-        if (!this.abandoned && this.queue.length) this.enqueue([], []);
+        if (!this.abandoned && this.queue.length) this.enqueue([]);
       });
     }
   }
@@ -110,7 +107,7 @@ export class InterceptorEventSink {
       this.queuedBytes -= item.bytes;
       this.active = 1;
       try {
-        await this.consumers[item.kind]?.(item.entry, this.abort.signal);
+        await this.consumers.blockedPrompt?.(item.entry, this.abort.signal);
         this.completed++;
       } catch (error) {
         this.warn('interceptor event sink delivery failed', { eventId: item.entry['event.id'], error: String(error) });

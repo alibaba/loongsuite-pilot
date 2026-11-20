@@ -30,6 +30,7 @@ import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 import { multimodalMetadataItemsFromMessages } from '../multimodal/rewrite.js';
 import { removeMessageContentFields, stripAgentMessageContent } from '../normalization/agent-content-policy.js';
+import { normalizeGuardrailFields } from '../normalization/guardrail-fields.js';
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
@@ -906,7 +907,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private async appendEntry(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
     // Audit delegation/result records describe an existing tool/work boundary.
     // They must not create, close or reopen a model turn buffer.
-    if (isAgentAuditEvent(entry) || entry['event.name'] === 'guardrail.evaluation') return;
+    if (isAgentAuditEvent(entry)) return;
     // Session summaries are log events, never an extra or reopened trace.
     if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.session_summary'] === true) return;
     if (entry['gen_ai.agent.type'] === 'doubao-work' && entry['loongsuite.doubao_work.trace_role'] === 'log_only') return;
@@ -1902,9 +1903,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
     this.patchCopilotCustomAttributes(spans, records);
 
     // Enrichers can reattach source fields after conversion. Apply the same
-    // opt-out to the final span attributes and events before debug or export.
-    if (this.cfg.captureMessageContent === false) {
-      for (const span of spans) {
+    // schema and content opt-out to final attributes and events before debug or export.
+    for (const span of spans) {
+      normalizeGuardrailFields(span.attributes as Record<string, unknown>);
+      for (const event of span.events) {
+        if (event.attributes) normalizeGuardrailFields(event.attributes as Record<string, unknown>);
+      }
+      if (this.cfg.captureMessageContent === false) {
         removeMessageContentFields(span.attributes as Record<string, unknown>);
         for (const event of span.events) {
           if (event.attributes) removeMessageContentFields(event.attributes as Record<string, unknown>);

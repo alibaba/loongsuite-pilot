@@ -2,11 +2,10 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import {
   buildInterceptorConfig,
   ensureMaskCoversInterceptor,
-  isRuleEnabled,
-  resolveEnabledInterceptorTypes,
+  INTERCEPTOR_MASK_TYPES,
   shouldDeployInterceptorHooks,
 } from '../../../src/interceptor/config.js';
-import { SUPPORTED_INTERCEPTOR_TYPES } from '../../../src/types/index.js';
+import type { MaskConfig } from '../../../src/types/index.js';
 
 describe('interceptor config', () => {
   afterEach(() => {
@@ -14,28 +13,28 @@ describe('interceptor config', () => {
   });
 
   it('defaults to none when interceptor config is missing', () => {
-    expect(buildInterceptorConfig(undefined)).toEqual({ mode: 'none', types: [] });
-    expect(buildInterceptorConfig(null)).toEqual({ mode: 'none', types: [] });
-    expect(buildInterceptorConfig([])).toEqual({ mode: 'none', types: [] });
+    expect(buildInterceptorConfig(undefined)).toEqual({ mode: 'none' });
+    expect(buildInterceptorConfig(null)).toEqual({ mode: 'none' });
+    expect(buildInterceptorConfig([])).toEqual({ mode: 'none' });
   });
 
   it('defaults to none when interceptor.mode is missing', () => {
-    expect(buildInterceptorConfig({ types: ['apiKey'] })).toEqual({ mode: 'none', types: [] });
+    expect(buildInterceptorConfig({ types: ['apiKey'] })).toEqual({ mode: 'none' });
   });
 
   it('loads all mode and ignores types', () => {
     expect(buildInterceptorConfig({
       mode: 'all',
       types: ['apiKey'],
-    })).toEqual({ mode: 'all', types: [] });
+    })).toEqual({ mode: 'all' });
   });
 
   it('treats custom and other unknown modes as none', () => {
-    expect(buildInterceptorConfig({ mode: 'custom', types: ['apiKey'] })).toEqual({ mode: 'none', types: [] });
+    expect(buildInterceptorConfig({ mode: 'custom', types: ['apiKey'] })).toEqual({ mode: 'none' });
     expect(buildInterceptorConfig({
       mode: 'audit',
       types: ['apiKey'],
-    })).toEqual({ mode: 'none', types: [] });
+    })).toEqual({ mode: 'none' });
   });
 
   it('uses interceptor mode env over config value', () => {
@@ -43,62 +42,58 @@ describe('interceptor config', () => {
     expect(buildInterceptorConfig({
       mode: 'none',
       types: ['apiKey'],
-    })).toEqual({ mode: 'all', types: [] });
+    })).toEqual({ mode: 'all' });
   });
 
   it('treats a custom mode env as none', () => {
     vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', 'custom');
-    expect(buildInterceptorConfig({ mode: 'all', types: [] })).toEqual({ mode: 'none', types: [] });
-  });
-
-  it('resolves enabled types from mode', () => {
-    expect([...resolveEnabledInterceptorTypes({ mode: 'none', types: ['apiKey'] })]).toEqual([]);
-    expect([...resolveEnabledInterceptorTypes({ mode: 'all', types: [] })]).toEqual([
-      ...SUPPORTED_INTERCEPTOR_TYPES,
-    ]);
+    expect(buildInterceptorConfig({ mode: 'all' })).toEqual({ mode: 'none' });
   });
 
   it('treats empty interceptor env values as unset', () => {
     vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', '  ');
-    expect(buildInterceptorConfig({ mode: 'all', types: [] })).toEqual({ mode: 'all', types: [] });
-  });
-
-  it('unions enabled interceptor types into a mask plan that is not already all', () => {
-    expect(ensureMaskCoversInterceptor(
-      { mode: 'none', types: [], replacementMode: 'placeholder' },
-      { mode: 'all', types: [] },
-    )).toEqual({
-      mode: 'custom',
-      types: [...SUPPORTED_INTERCEPTOR_TYPES],
-      replacementMode: 'placeholder',
-    });
-    expect(ensureMaskCoversInterceptor(
-      { mode: 'custom', types: ['email'], replacementMode: 'placeholder' },
-      { mode: 'none', types: [] },
-    )).toEqual({
-      mode: 'custom',
-      types: ['email'],
-      replacementMode: 'placeholder',
-    });
-    expect(ensureMaskCoversInterceptor(
-      { mode: 'all', types: [] },
-      { mode: 'all', types: [] },
-    )).toEqual({ mode: 'all', types: [] });
-    expect(ensureMaskCoversInterceptor(
-      { mode: 'none', types: [] },
-      { mode: 'none', types: [] },
-    )).toEqual({ mode: 'none', types: [] });
-  });
-
-  it('treats missing and disabled types as bypass', () => {
-    expect(isRuleEnabled({ mode: 'none', types: [] }, 'apiKey')).toBe(false);
-    expect(isRuleEnabled({ mode: 'all', types: [] }, 'apiKey')).toBe(true);
-    expect(isRuleEnabled({ mode: 'all', types: [] }, 'idCard')).toBe(false);
+    expect(buildInterceptorConfig({ mode: 'all' })).toEqual({ mode: 'all' });
   });
 
   it('deploys interceptor hooks only for all mode', () => {
-    expect(shouldDeployInterceptorHooks({ mode: 'all', types: [] })).toBe(true);
-    expect(shouldDeployInterceptorHooks({ mode: 'none', types: [] })).toBe(false);
+    expect(shouldDeployInterceptorHooks({ mode: 'all' })).toBe(true);
+    expect(shouldDeployInterceptorHooks({ mode: 'none' })).toBe(false);
     expect(shouldDeployInterceptorHooks(buildInterceptorConfig({ mode: 'custom', types: ['apiKey'] }))).toBe(false);
+  });
+
+  describe('credential masking for interception', () => {
+    it.each<MaskConfig>([
+      { mode: 'none', types: [], replacementMode: 'preview' },
+      { mode: 'all', types: [], replacementMode: 'preview' },
+      { mode: 'custom', types: ['email', 'apiKey'], replacementMode: 'preview' },
+    ])('preserves mask $mode when interception is disabled', mask => {
+      expect(ensureMaskCoversInterceptor(mask, { mode: 'none' })).toBe(mask);
+    });
+
+    it('promotes mask none to the credential mask union and preserves replacement mode', () => {
+      const mask: MaskConfig = { mode: 'none', types: [], replacementMode: 'preview' };
+      expect(ensureMaskCoversInterceptor(mask, { mode: 'all' })).toEqual({
+        mode: 'custom',
+        types: ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'],
+        replacementMode: 'preview',
+      });
+      expect(mask).toEqual({ mode: 'none', types: [], replacementMode: 'preview' });
+    });
+
+    it('merges custom mask types without duplicates or changing the source config', () => {
+      const mask: MaskConfig = { mode: 'custom', types: ['email', 'apiKey', 'email'], replacementMode: 'preview' };
+      expect(ensureMaskCoversInterceptor(mask, { mode: 'all' })).toEqual({
+        mode: 'custom',
+        types: ['email', 'apiKey', 'cloudAccessKey', 'privateKey', 'databaseUrl'],
+        replacementMode: 'preview',
+      });
+      expect(mask.types).toEqual(['email', 'apiKey', 'email']);
+    });
+
+    it('leaves mask all unchanged when interception is enabled', () => {
+      const mask: MaskConfig = { mode: 'all', types: [], replacementMode: 'preview' };
+      expect(ensureMaskCoversInterceptor(mask, { mode: 'all' })).toBe(mask);
+      expect(INTERCEPTOR_MASK_TYPES).toEqual(['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl']);
+    });
   });
 });
