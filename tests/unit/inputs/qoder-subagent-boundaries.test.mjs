@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { QoderTranscriptCollector } from '../../../assets/hooks/qoder/transcript-collector.mjs';
+import { LegacyTaskDescriptor } from '../../../assets/hooks/qoder/legacy-task-descriptor.mjs';
 import { publishQoderWakeup, qoderWakeupRoot, qoderSourceKey } from '../../../assets/hooks/qoder/hook-wakeup.mjs';
 import { qoderTaskNotification, QoderSubagentLinks } from '../../../assets/hooks/qoder/subagent-links.mjs';
 
@@ -45,6 +46,18 @@ beforeEach(async () => {
 afterEach(async () => { collector.stop(); await fs.rm(root, { recursive: true, force: true }); });
 
 describe('Qoder native delegation boundaries', () => {
+  it('validates elided result escapes across read blocks and retains top-level ownership', () => {
+    const parser = new LegacyTaskDescriptor(128);
+    const descriptor = Buffer.from(String.raw`{"other":{"agentId":"nested"},"\u0072esult":"\u0022\n\\\"🔎\t","agentId":"child"}`);
+    for (const byte of descriptor) parser.write(Uint8Array.of(byte));
+    expect(parser.finish()).toMatchObject({ agentId: 'child' });
+  });
+
+  it.each([String.raw`\q`, String.raw`\u002x`, '\n'])('rejects a malformed elided result string (%j)', value => {
+    const parser = new LegacyTaskDescriptor(128);
+    expect(() => parser.write(Buffer.from(`{"result":"${value}","agentId":"child"}`))).toThrow();
+  });
+
   it('charges malformed legacy task descriptors against the remaining metadata budget', async () => {
     const directory = path.dirname(child);
     await fs.mkdir(directory, { recursive: true });

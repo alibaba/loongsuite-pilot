@@ -13,6 +13,7 @@ import {
 import { loadHookRuntimeConfig } from '../agent-event-normalizer.mjs';
 import { qoderWakeupRoot, qoderSourceKey, canonicalSourcePath, MAX_WAKEUP_BYTES, withQoderWakeupLock,
   publishLegacyQoderSource } from './hook-wakeup.mjs';
+import { LegacyTaskDescriptor } from './legacy-task-descriptor.mjs';
 import { QoderSubagentLinks, QODER_DELEGATIONS_KEY, qoderTurnId, qoderDigest, qoderTaskNotification } from './subagent-links.mjs';
 
 // Native background delivery starts a model turn without a new human prompt.
@@ -51,11 +52,12 @@ const MAX_PRIORITY_SOURCES = 128;
 const PRIORITY_SOURCES_PER_CYCLE = 8;
 const LEGACY_DIRECTORIES_PER_CYCLE = 8;
 const LEGACY_DIRECTORY_ENTRIES_PER_CYCLE = 256;
-const MAX_LEGACY_TASK_BYTES = 128 * 1024;
+const MAX_LEGACY_TASK_METADATA_BYTES = 128 * 1024;
 const LEGACY_METADATA_BYTES_PER_CYCLE = 512 * 1024;
 const MAX_LEGACY_REVISION_WITNESSES = 1024;
 const legacyDescriptorName = name => /^task-[a-zA-Z0-9_-]+\.json$/.test(name);
 const LEGACY_PROOF_DEFERRED = Symbol('legacy-proof-deferred');
+const LEGACY_DESCRIPTOR_CHANGED = Symbol('legacy-descriptor-changed');
 const legacyAgentId = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,512}$/.test(value);
 const isInsideDirectory = (directory, file) => {
   const relative = path.relative(directory, file);
@@ -82,14 +84,13 @@ async function openRegular(file, noFollow = false) {
   } catch (error) { await handle.close(); throw error; }
 }
 
-async function jsonSnapshot(file, limit = MAX_WAKEUP_BYTES, noFollow = false, chargeRead) {
-  const handle = await openRegular(file, noFollow);
+async function jsonSnapshot(file, limit = MAX_WAKEUP_BYTES) {
+  const handle = await openRegular(file);
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > limit) throw new Error('Qoder metadata exceeds limit');
     const buffer = Buffer.alloc(limit + 1);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    chargeRead?.(bytesRead);
     if (bytesRead > limit) throw new Error('Qoder metadata grew past limit');
     return { value: JSON.parse(buffer.toString('utf8', 0, bytesRead)), stat, bytesRead };
   } finally { await handle.close(); }
@@ -384,6 +385,34 @@ export class QoderTranscriptCollector {
     } catch { scan.watcherFailed = true; }
   }
 
+  async readLegacyDescriptor(scan, file, observed) {
+    const version = fileVersion(observed);
+    const reader = scan.descriptor ?? {
+      version, offset: 0, parser: new LegacyTaskDescriptor(Math.min(MAX_LEGACY_TASK_METADATA_BYTES, observed.size)),
+    };
+    if (reader.version !== version) return LEGACY_DESCRIPTOR_CHANGED;
+    const handle = await openRegular(file, true);
+    try {
+      if (fileVersion(await handle.stat()) !== version) return LEGACY_DESCRIPTOR_CHANGED;
+      while (!this.stopped && reader.offset < observed.size && this.legacyMetadataBudget > 0) {
+        const length = Math.min(CHUNK_BYTES, observed.size - reader.offset, this.legacyMetadataBudget);
+        const buffer = Buffer.allocUnsafe(length);
+        const { bytesRead } = await handle.read(buffer, 0, length, reader.offset);
+        this.legacyMetadataBudget -= bytesRead;
+        if (!bytesRead) return LEGACY_DESCRIPTOR_CHANGED;
+        reader.parser.write(buffer.subarray(0, bytesRead));
+        reader.offset += bytesRead;
+      }
+      if (fileVersion(await handle.stat()) !== version || fileVersion(await fs.lstat(file)) !== version) return LEGACY_DESCRIPTOR_CHANGED;
+    } finally { await handle.close(); }
+    if (reader.offset < observed.size) {
+      scan.descriptor = reader;
+      return;
+    }
+    scan.descriptor = undefined;
+    return { task: reader.parser.finish(), version };
+  }
+
   async legacyDescriptors(parentPath, sessionId) {
     const scope = qoderSourceKey(sessionId, parentPath);
     const cached = this.legacyTasks.get(scope);
@@ -469,17 +498,14 @@ export class QoderTranscriptCollector {
         if (!scan.entry) break;
         const { name } = scan.entry;
         if (!legacyDescriptorName(name)) { scan.entry = null; continue; }
+        if (this.legacyMetadataBudget <= 0) break;
         const file = path.join(directory, name);
         const observed = await fs.lstat(file);
-        if (!observed.isFile() || observed.size > MAX_LEGACY_TASK_BYTES) throw new Error('invalid-legacy-descriptor');
-        // Reserve the byte used to detect growth and charge failed parses too.
-        const limit = Math.min(MAX_LEGACY_TASK_BYTES, this.legacyMetadataBudget - 1);
-        if (limit <= 0 || observed.size > limit) break;
-        const { value: task, stat: snapshot } = await jsonSnapshot(file, limit, true, bytesRead => {
-          this.legacyMetadataBudget -= bytesRead;
-        });
-        const descriptorVersion = fileVersion(snapshot);
-        if (descriptorVersion !== fileVersion(observed) || descriptorVersion !== fileVersion(await fs.lstat(file))) return retry();
+        if (!observed.isFile()) throw new Error('invalid-legacy-descriptor');
+        const descriptor = await this.readLegacyDescriptor(scan, file, observed);
+        if (descriptor === LEGACY_DESCRIPTOR_CHANGED) return retry();
+        if (!descriptor) break;
+        const { task, version: descriptorVersion } = descriptor;
         // A count and a keyed, order-independent digest recheck in-place
         // rewrites without retaining older descriptor names or contents.
         const identity = crypto.createHmac('sha256', scan.fingerprintKey)

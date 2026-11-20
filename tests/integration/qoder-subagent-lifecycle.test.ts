@@ -384,6 +384,44 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
     expect(await childSpans(h, target.task.agentId)).toHaveLength(1);
   });
 
+  it.each(['unrelated result', 'transient incomplete write', 'conflicting call', 'duplicate ownership field'])(
+    'checks a large historical descriptor with %s before attaching the current child', async scenario => {
+      const h = await harness(agentId);
+      const target = await legacyParent(h.root, session);
+      await target.createChild();
+      const prior = { ...target.task, taskId: 'prior-result', agentId: 'old-child',
+        parentToolUseId: scenario === 'conflicting call' ? target.task.parentToolUseId : 'old-call',
+        transcriptPath: path.join(target.directory, 'agent-old-child.jsonl'),
+        details: { parentToolUseId: target.task.parentToolUseId },
+        result: 'synthetic "final" \\ text 🔎\n'.repeat(41_000) };
+      let descriptor = JSON.stringify(prior);
+      expect(Buffer.byteLength(descriptor)).toBeGreaterThan(512 * 1024);
+      if (scenario === 'duplicate ownership field') {
+        descriptor = descriptor.slice(0, -1) + `,"\\u0070arentToolUseId":${JSON.stringify(target.task.parentToolUseId)}}`;
+      }
+      const file = path.join(target.directory, `task-${prior.taskId}.json`);
+      await fs.writeFile(file, scenario === 'transient incomplete write' ? descriptor.slice(0, -3) : descriptor);
+      await h.start();
+      if (scenario === 'transient incomplete write') {
+        await h.cycle();
+        expect(await childSpans(h, target.task.agentId)).toHaveLength(0);
+        await fs.writeFile(file, descriptor);
+      }
+      for (let i = 0; i < 6; i++) await h.cycle();
+      const spans = await spansFor(h.entries());
+      const parent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL'
+        && span.attributes['gen_ai.tool.call.id'] === target.task.parentToolUseId);
+      expect(parent).toBeDefined();
+      const children = await childSpans(h, target.task.agentId);
+      if (scenario === 'conflicting call' || scenario === 'duplicate ownership field') {
+        expect(children).toHaveLength(0);
+      } else {
+        expect(children).toHaveLength(1);
+        expect(children[0].parentSpanId).toBe(parent?.spanContext().spanId);
+        expect(children[0].spanContext().traceId).toBe(parent?.spanContext().traceId);
+      }
+    });
+
   it('does not attach a legacy child if an already-verified claim changes before a paged pass closes', async () => {
     let rewritten: Awaited<ReturnType<typeof legacyParent>>['task'] | undefined;
     let staleProof = false;
