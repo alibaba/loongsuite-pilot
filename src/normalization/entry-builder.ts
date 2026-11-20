@@ -1,4 +1,5 @@
-import { v4 as uuidv4 } from 'uuid';
+import { uuidV4 } from '../utils/uuid.js';
+import { OPENCLAW_SESSION_KEY, isOpenClawSessionKey } from './openclaw-session-key.js';
 import {
   type AgentActivityEntry,
   type AgentEventName,
@@ -79,7 +80,7 @@ export function buildAgentActivityEntry(
     ...opts,
     time_unix_nano: opts.time_unix_nano ?? timestampToUnixNanos(now),
     observed_time_unix_nano: opts.observed_time_unix_nano ?? timestampToUnixNanos(Date.now()),
-    'event.id': opts['event.id'] ?? uuidv4(),
+    'event.id': opts['event.id'] ?? uuidV4(),
     'event.name': normalizeEventName(opts['event.name']),
     'user.id': opts['user.id'] ?? '',
     'gen_ai.session.id': stringAlias(opts, 'gen_ai.session.id', 'session.id') ?? '',
@@ -268,7 +269,9 @@ export function projectLogEntry(
   for (const [key, value] of Object.entries(entry)) {
     if (value === undefined || value === null) continue;
     if (LEGACY_ALIAS_FIELDS.has(key)) continue;
-    if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;
+    if (key === OPENCLAW_SESSION_KEY) {
+      if (entry['gen_ai.agent.type'] !== 'openclaw' || !isOpenClawSessionKey(value)) continue;
+    } else if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;
     out[key] = value;
   }
 
@@ -380,6 +383,13 @@ function serializeValue(value: JsonValue): string {
 
 export function normalizeEventName(value: unknown): AgentEventName {
   switch (value) {
+    case 'gen_ai.model.request':
+    case 'gen_ai.model.response':
+    case 'gen_ai.tool.call':
+    case 'gen_ai.tool.result':
+    case 'gen_ai.agent.invoke':
+    case 'gen_ai.agent.result':
+      return value;
     case 'llm.request':
     case 'llm_call_input':
       return 'llm.request';
@@ -398,6 +408,8 @@ export function normalizeEventName(value: unknown): AgentEventName {
       return 'skill.use';
     case 'tool.approve':
       return 'tool.approve';
+    case 'agent.input':
+      return 'agent.input';
     case 'event':
     case 'other':
     default:

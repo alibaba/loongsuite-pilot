@@ -544,6 +544,116 @@ describe('HookWatchdog', () => {
       expect(spawnCalls).toHaveLength(0);
     });
 
+    it('checks Codex trust only when config.toml changes and reuses repairFn', async () => {
+      const repairFn = vi.fn().mockResolvedValue(true);
+      const needsRepairOnChange = vi.fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
+      const configPath = path.join(tmpDir, '.codex', 'config.toml');
+      const target = makeRepairFnTarget(tmpDir, repairFn, {
+        agentId: 'codex',
+        settingsPath: path.join(tmpDir, '.codex', 'hooks.json'),
+        changeWatchPath: configPath,
+        needsRepairOnChange,
+      });
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+      await fs.writeFile(configPath, 'model = "first"\n', 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig({ repairCooldownMs: 0 }), [target]);
+
+      await wd.runCheck();
+      await wd.runCheck();
+      expect(needsRepairOnChange).not.toHaveBeenCalled();
+      expect(repairFn).not.toHaveBeenCalled();
+
+      await fs.writeFile(configPath, 'model = "changed-and-longer"\n', 'utf-8');
+      const repaired = await wd.runCheck();
+      expect(needsRepairOnChange).toHaveBeenCalledTimes(1);
+      expect(repairFn).toHaveBeenCalledTimes(1);
+      expect(repaired.repaired).toBe(1);
+
+      // The repair itself may replace config.toml. Its new signature is checked
+      // once, then unchanged intervals skip the shared deployment inspection.
+      await fs.writeFile(configPath, 'model = "reconciled"\n', 'utf-8');
+      await wd.runCheck();
+      await wd.runCheck();
+      expect(needsRepairOnChange).toHaveBeenCalledTimes(2);
+      expect(repairFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('detects a config.toml edit made before the first watchdog check', async () => {
+      const repairFn = vi.fn().mockResolvedValue(true);
+      const needsRepairOnChange = vi.fn().mockResolvedValue(true);
+      const configPath = path.join(tmpDir, '.codex', 'config.toml');
+      const target = makeRepairFnTarget(tmpDir, repairFn, {
+        agentId: 'codex',
+        settingsPath: path.join(tmpDir, '.codex', 'hooks.json'),
+        changeWatchPath: configPath,
+        needsRepairOnChange,
+      });
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+      await fs.writeFile(configPath, 'model = "post-deploy"\n', 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig({ repairCooldownMs: 0 }), [target]);
+      await fs.writeFile(configPath, 'model = "changed-before-first-check"\n', 'utf-8');
+
+      const result = await wd.runCheck();
+
+      expect(needsRepairOnChange).toHaveBeenCalledTimes(1);
+      expect(repairFn).toHaveBeenCalledTimes(1);
+      expect(result.repaired).toBe(1);
+    });
+
+    it('retries a failed changed-config inspection without another file change', async () => {
+      const repairFn = vi.fn().mockResolvedValue(true);
+      const needsRepairOnChange = vi.fn()
+        .mockRejectedValueOnce(new Error('transient read failure'))
+        .mockResolvedValueOnce(false);
+      const configPath = path.join(tmpDir, '.codex', 'config.toml');
+      const target = makeRepairFnTarget(tmpDir, repairFn, {
+        agentId: 'codex',
+        settingsPath: path.join(tmpDir, '.codex', 'hooks.json'),
+        changeWatchPath: configPath,
+        needsRepairOnChange,
+      });
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+      await fs.writeFile(configPath, 'model = "test"\n', 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      await wd.runCheck();
+      await fs.writeFile(configPath, 'model = "changed"\n', 'utf-8');
+      await wd.runCheck();
+      await wd.runCheck();
+
+      expect(needsRepairOnChange).toHaveBeenCalledTimes(2);
+      expect(repairFn).not.toHaveBeenCalled();
+    });
+
+    it('keeps a changed config pending until repair succeeds', async () => {
+      const repairFn = vi.fn()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      const needsRepairOnChange = vi.fn().mockResolvedValue(true);
+      const configPath = path.join(tmpDir, '.codex', 'config.toml');
+      const target = makeRepairFnTarget(tmpDir, repairFn, {
+        agentId: 'codex',
+        settingsPath: path.join(tmpDir, '.codex', 'hooks.json'),
+        changeWatchPath: configPath,
+        needsRepairOnChange,
+      });
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+      await fs.writeFile(configPath, 'model = "test"\n', 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig({ repairCooldownMs: 0 }), [target]);
+      await wd.runCheck();
+      await fs.writeFile(configPath, 'model = "changed"\n', 'utf-8');
+      expect((await wd.runCheck()).repaired).toBe(0);
+      expect((await wd.runCheck()).repaired).toBe(1);
+
+      expect(needsRepairOnChange).toHaveBeenCalledTimes(2);
+      expect(repairFn).toHaveBeenCalledTimes(2);
+    });
+
     it('calls repairFn when hooks are missing', async () => {
       const repairFn = vi.fn().mockResolvedValue(true);
       const target = makeRepairFnTarget(tmpDir, repairFn);

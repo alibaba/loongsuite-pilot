@@ -3,6 +3,7 @@ import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 export interface QwenWorkCNInputOptions extends Partial<HookInputOptions> {
   stateStore: HookInputOptions['stateStore'];
@@ -19,7 +20,7 @@ export class QwenWorkCNInput extends BaseHookInput {
       stateStore: opts.stateStore,
       logDir: opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qwen-work-cn/history'),
       logPrefix: opts.logPrefix ?? 'qwen-work-cn',
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
   }
 
@@ -40,8 +41,9 @@ export class QwenWorkCNInput extends BaseHookInput {
     if (typeof record['event.id'] !== 'string') return null;
     if (typeof record.time_unix_nano !== 'string') return null;
 
-    const version = record.version;
+    const version = record['agent.qwenworkcn.version'] ?? record.version;
     if (typeof version === 'string' && version) this.lastAgentVersion = version;
+    delete record.version;
 
     const entry = {
       ...record,

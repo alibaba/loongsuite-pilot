@@ -23,6 +23,11 @@ async function main(): Promise<void> {
   }
 
   const [command, ...args] = argv;
+  if (command === 'menubar') {
+    const { runMenubarCommand } = await import('./cli/menubar.js');
+    process.exitCode = await runMenubarCommand(args);
+    return;
+  }
   if (command === 'token-usage' || command === 'tokens') {
     const { runTokenUsageCommand } = await import('./cli/token-usage.js');
     process.exitCode = await runTokenUsageCommand(args);
@@ -32,6 +37,18 @@ async function main(): Promise<void> {
   // One-shot deployment. The collector deploys hooks/plugins itself on startup,
   // but only as a daemon side effect; image builds need it as a foreground step
   // with an exit code (see runDeployCommand).
+  if (command === 'hook') {
+    const { runHookCommand } = await import('./deployment/hook-command.js');
+    process.exitCode = await runHookCommand(args);
+    flushLogsSync();
+    return;
+  }
+  if (command === 'inject') {
+    const { runInjectCommand } = await import('./deployment/inject-command.js');
+    process.exitCode = await runInjectCommand(args);
+    flushLogsSync();
+    return;
+  }
   if (command === 'deploy') {
     const { runDeployCommand } = await import('./deployment/deploy-command.js');
     try {
@@ -244,11 +261,9 @@ export { BaseSqliteInput } from './inputs/base/base-sqlite-input.js';
 export { BaseHookInput } from './inputs/base/base-hook-input.js';
 export { BaseCliForwarder } from './inputs/base/base-cli-forwarder.js';
 export { BaseSessionInput } from './inputs/base/base-session-input.js';
-export { QoderSqliteInput } from './inputs/qoder-sqlite/qoder-sqlite-input.js';
 export { QoderCnSqliteInput } from './inputs/qoder-cn-sqlite/qoder-cn-sqlite-input.js';
 export { QoderCnInput } from './inputs/qoder-cn/qoder-cn-input.js';
 export { QoderCnTraceInput } from './inputs/qoder-cn-trace/qoder-cn-trace-input.js';
-export { QoderCliSessionInput } from './inputs/qoder-cli-session/qoder-cli-session-input.js';
 export { CodexTranscriptInput } from './inputs/codex-transcript/codex-transcript-input.js';
 export { CodexAbortedTurnInput } from './inputs/codex-aborted-turn/codex-aborted-turn-input.js';
 export { PiCodingAgentLogInput } from './inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';

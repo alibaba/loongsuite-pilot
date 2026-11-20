@@ -92,6 +92,7 @@ loongsuite-pilot restart
 |--------|----------|--------|------|
 | `upstreamLink.enabled` | `LOONGSUITE_PILOT_UPSTREAM_LINK` | `false` | 开启上游关联和下游传播能力的总开关 |
 | `upstreamLink.propagateToTools` | `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS` | `false` | 允许向支持的 CLI 工具注入上下文 |
+| `upstreamLink.propagateToLlm` | `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM` | `false` | 允许向 LLM 网关请求注入 `traceparent` 头，与本文的 Bash 方向互不影响，详见 README |
 | `upstreamLink.generateTraceWhenMissing` | `LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING` | `false` | 没有有效上游时生成每 turn 本地 Trace |
 | `upstreamLink.ttlMs` | `LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS` | `86400000` | 关联状态文件清理 TTL，单位为毫秒 |
 
@@ -119,7 +120,7 @@ claude
 - `TRACEPARENT`、`TRACESTATE` 和 `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES` 必须设置在
   新启动的 Claude Code 进程上。
 
-如果 Pilot 由系统服务或其他进程管理器启动，优先使用 `config.json` 配置三个
+如果 Pilot 由系统服务或其他进程管理器启动，优先使用 `config.json` 配置这些
 `upstreamLink` 开关，仅把每次调用不同的 Trace Context 和资源属性放在
 `claude` 启动命令上。
 

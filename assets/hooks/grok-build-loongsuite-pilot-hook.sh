@@ -43,12 +43,30 @@ log_error() {
   local dir="$data_dir/logs/grok-build/errors"
   local file="$dir/grok-build-error-$day.jsonl"
   mkdir -p "$dir" 2>/dev/null || return 0
+  # Same exclusive file as the node writers of this JSONL (`open` O_EXCL / noclobber).
+  local lock="$file.lock"
+  local acquired=0
+  if (set -C; : > "$lock") 2>/dev/null; then
+    acquired=1
+  elif [ -f "$lock" ]; then
+    local now mtime
+    now="$(date +%s 2>/dev/null || echo 0)"
+    mtime="$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || echo 0)"
+    if [ $((now - mtime)) -gt 10 ]; then
+      rm -f "$lock" 2>/dev/null || true
+      if (set -C; : > "$lock") 2>/dev/null; then
+        acquired=1
+      fi
+    fi
+  fi
+  [ "$acquired" -eq 1 ] || return 0
   printf '{"time":"%s","gen_ai.agent.type":"grok-build","stage":"%s","error.type":"shell_%s","error.message":%s}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" \
     "$stage" \
     "$stage" \
     "$(printf '%s' "$message" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '""')" \
     >> "$file" 2>/dev/null || true
+  rm -f "$lock" 2>/dev/null || true
 }
 
 if [[ -t 0 ]]; then
@@ -79,13 +97,36 @@ node_is_app_bundle() {
 node_is_suitable() {
   local bin="$1"
   [[ -x "$bin" ]] || return 1
+  local ver major
+  if major="$(node_major_from_runtime_path "$bin")"; then
+    (( major >= MIN_NODE_MAJOR )) || return 1
+    return 0
+  fi
   node_is_app_bundle "$bin" && return 1
-  local ver
   ver="$("$bin" --version 2>/dev/null)" || return 1
-  local major="${ver#v}"
+  major="${ver#v}"
   major="${major%%.*}"
   [[ "$major" =~ ^[0-9]+$ ]] && (( major >= MIN_NODE_MAJOR )) || return 1
   return 0
+}
+
+# Managed runtimes live at <pilot-dir>/runtime/node-v<x>.<y>.<z>/bin/node, extracted by the
+# installer only after it verified SHASUMS256 and probed the binary itself, so the directory
+# name is authoritative. Reading the major from the path skips a `node --version` boot that
+# would otherwise run on the user's interactive path for every single event -- ~60ms on a
+# quiet host, 200ms+ where EDR scans each exec. Anything that is not a managed runtime still
+# gets probed.
+node_major_from_runtime_path() {
+  local bin="$1" dir name
+  dir="${bin%/bin/node}"
+  [[ "$dir" != "$bin" ]] || return 1
+  name="${dir##*/}"
+  [[ "${dir%/*}" == */runtime ]] || return 1
+  case "$name" in node-v[0-9]*) ;; *) return 1 ;; esac
+  name="${name#node-v}"
+  name="${name%%.*}"
+  [[ "$name" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$name"
 }
 
 NODE_PIN_FILE="$LOONGSUITE_PILOT_DATA_DIR/node-bin"

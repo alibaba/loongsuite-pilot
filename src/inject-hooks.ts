@@ -17,7 +17,10 @@
 // bare node startup instead of the daemon's full module graph.
 //
 // It deliberately reuses HookStrategy/PluginInjectStrategy verbatim instead of
-// reimplementing injection synchronously. The hookCommand string those produce
+// reimplementing injection synchronously. `hook install` deploys through the
+// same strategies. This path does not write the hook-install result file, so an
+// eager inject cannot flip the container into recorded scope. The hookCommand
+// string those produce
 // must match the daemon's byte for byte, because the daemon's later pass asks
 // `isHookInstalled` — a one-character divergence reads as "not installed" and
 // appends a SECOND hook entry, making every event fire twice. Sharing the code
@@ -27,8 +30,15 @@ import { AgentDefLoader } from './deployment/agent-def-loader.js';
 import { HookManager } from './hooks/hook-manager.js';
 import { HookStrategy } from './deployment/hook-strategy.js';
 import { PluginInjectStrategy } from './deployment/plugin-inject-strategy.js';
+import {
+  applyPersistedDeployTargets,
+  lifecycleFieldsForDeploy,
+} from './deployment/persisted-deploy-paths.js';
 import { readJsonFile, writeJsonFile, resolveHome } from './utils/fs-utils.js';
 import { readConfigAgentsGate, resolveDataDir } from './utils/data-dir.js';
+import { resolveHookInstallScope } from './deployment/hook-scope.js';
+import { prepareRootTriggerLogDirs } from './utils/producer-log-dir.js';
+import { resolveDeployInterceptorHooks } from './interceptor/config.js';
 import type { AgentDefinition, DeployedAgentsState } from './types/deployment.js';
 
 // This file is always bundled as CJS (build.mjs), so __dirname is guaranteed.
@@ -183,7 +193,7 @@ export function isGateEnabled(
  * the daemon appends a duplicate hook.
  */
 
-async function main(): Promise<number> {
+export async function runEagerInjection(): Promise<number> {
   const args = parseInjectArgs(process.argv.slice(2));
 
   for (const flag of args.unknownFlags) {
@@ -197,6 +207,33 @@ async function main(): Promise<number> {
 
   const pilotDir = args.pilotDir ? resolveHome(args.pilotDir) : path.resolve(__inject_dirname, '..');
   const dataDir = resolveDataDir(args.dataDir);
+  prepareRootTriggerLogDirs(dataDir);
+
+  // Existing container launchers already inherit business-Pod env. Opted-in
+  // scope uses the shared lifecycle service, including DSH's home patch; the
+  // unqualified startup path below keeps its historical eager-safe behavior.
+  const scope = resolveHookInstallScope();
+  if (scope !== undefined) {
+    if (scope === 'system' && process.platform !== 'linux') throw new Error('System hooks are supported only on Linux');
+    const { runHookInstall } = await import('./deployment/hook-install-service.js');
+    const gate = readConfigAgentsGate();
+    const result = await runHookInstall({
+      dataDir, pilotDir,
+      agentsFlag: args.agents.length ? args.agents.join(',') : undefined,
+      envAgents: args.agents.length ? undefined : process.env.LOONGSUITE_PILOT_AGENTS,
+      deploymentScope: scope,
+      deployModes: new Set([...EAGER_DEPLOY_MODES, 'dsh-yaml-patch']),
+      enabled: id => isGateEnabled(gate, id),
+      // This is only the eager-safe subset. Publishing it as a named install
+      // would prevent the daemon from deploying deferred modes such as Hermes.
+      writeResult: false,
+    });
+    for (const warning of result.warnings) warn(warning);
+    for (const agent of result.report.agents) {
+      if (agent.status === 'failed') warn(`${agent.id}: ${agent.reason} ${agent.hint ?? ''}`);
+    }
+    return result.exitCode;
+  }
 
   // Constructed to match DeploymentManager argument for argument — see the
   // duplicate-hook hazard in resolveDataDir().
@@ -207,7 +244,9 @@ async function main(): Promise<number> {
     dataDir,
   });
   const hookManager = new HookManager(path.join(dataDir, 'hooks'), path.join(dataDir, 'logs'));
-  const hookStrategy = new HookStrategy(hookManager);
+  const hookStrategy = new HookStrategy(hookManager, {
+    deployInterceptorHooks: await resolveDeployInterceptorHooks(dataDir),
+  });
   const pluginInjectStrategy = new PluginInjectStrategy(dataDir, pilotDir);
 
   const defs = await loader.load();
@@ -229,6 +268,8 @@ async function main(): Promise<number> {
   // state record for an eagerly-installed hook and no-ops, so a later-disabled
   // agent's hook would fire forever (see DeploymentManager.undeployDisabledAgent).
   const newRecords: DeployedAgentsState = {};
+  const stateFile = path.join(dataDir, 'deployed-agents.json');
+  const existingState = (await readJsonFile<DeployedAgentsState>(stateFile)) ?? {};
 
   for (const entry of plan) {
     if (entry.action === 'unknown-id') {
@@ -242,7 +283,7 @@ async function main(): Promise<number> {
       continue;
     }
 
-    const def = byId.get(entry.agentId)!;
+    const def = applyPersistedDeployTargets(byId.get(entry.agentId)!, existingState[entry.agentId]);
 
     // Respect the enabled gate: an agent turned off in config.agents must not be
     // eagerly instrumented. Silent under sweep for the same reason "not detected"
@@ -274,7 +315,11 @@ async function main(): Promise<number> {
         injected.push(def.id);
         // Same record shape the daemon writes (DeploymentManager.deployAgent),
         // so the state file stays a single consistent schema.
-        newRecords[def.id] = { deployMode: def.deployMode, deployedAt: new Date().toISOString() };
+        newRecords[def.id] = {
+          deployMode: def.deployMode,
+          deployedAt: new Date().toISOString(),
+          ...lifecycleFieldsForDeploy(def, result),
+        };
       } else {
         failed++;
         warn(`failed to inject ${def.id}: ${result.error ?? 'unknown error'}`);
@@ -290,10 +335,8 @@ async function main(): Promise<number> {
   // crash mid-write. Best-effort — the hooks are already installed, and failing
   // to record only delays disabled-agent cleanup until the daemon reconciles.
   if (Object.keys(newRecords).length > 0) {
-    const stateFile = path.join(dataDir, 'deployed-agents.json');
     try {
-      const existing = (await readJsonFile<DeployedAgentsState>(stateFile)) ?? {};
-      await writeJsonFile(stateFile, { ...existing, ...newRecords });
+      await writeJsonFile(stateFile, { ...existingState, ...newRecords });
     } catch (err) {
       warn(`could not record deployment state: ${(err as Error).message}`);
     }
@@ -317,7 +360,7 @@ const isEntryPoint = typeof require !== 'undefined'
   && require.main === module;
 
 if (isEntryPoint) {
-  main()
+  runEagerInjection()
     .then(code => {
       // Explicit exit rather than falling off the end. This entry never calls
       // initFileLogging() (which is what starts pino-roll, whose rotation timer

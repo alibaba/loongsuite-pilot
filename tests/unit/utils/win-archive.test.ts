@@ -90,8 +90,9 @@ describe('replaceDirWith ACL handling', () => {
     const src = await fs.readFile(path.join(repoRoot, 'src/utils/win-archive.ts'), 'utf8');
     const guarded = src.match(/if \(renamed && !\(await resetInheritedAcl\(dest\)\)\) \{[\s\S]*?\n  \}/);
     expect(guarded, 'replaceDirWith must act on resetInheritedAcl\'s result').toBeTruthy();
-    expect(guarded[0]).toMatch(/fs\.rm\(dest, \{ recursive: true, force: true \}\)/);
-    expect(guarded[0]).toMatch(/throw new Error\(/);
+    const guardedBlock = guarded?.[0] ?? '';
+    expect(guardedBlock).toMatch(/fs\.rm\(dest, \{ recursive: true, force: true \}\)/);
+    expect(guardedBlock).toMatch(/throw new Error\(/);
 
     // No fire-and-forget call: the return value is the whole point of the helper.
     expect(src).not.toMatch(/^\s*await resetInheritedAcl\(/m);

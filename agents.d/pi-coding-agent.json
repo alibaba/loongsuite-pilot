@@ -3,11 +3,11 @@
   "displayName": "Pi Coding Agent",
   "deployMode": "plugin-inject",
   "detection": {
-    "paths": ["~/.pi/agent"],
+    "paths": ["$PI_CODING_AGENT_DIR"],
     "commands": ["pi"]
   },
   "pluginInject": {
-    "configPaths": ["~/.pi/agent/settings.json"],
+    "configPaths": ["$PI_CODING_AGENT_DIR/settings.json"],
     "pluginSpec": "$PILOT_DATA/plugins/pi-coding-agent/index.mjs",
     "pluginId": "loongsuite-pilot-pi-coding-agent",
     "configKey": "extensions",

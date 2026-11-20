@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { appendLine, ensureDir } from '../utils/fs-utils.js';
+import { appendLine, ensureDir, getTodayDateString } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveLocalIp } from '../utils/network-utils.js';
 import { flattenToStrings } from '../utils/record-utils.js';
@@ -150,9 +150,12 @@ export class UpdaterMetrics {
 
     if (events.length > 0) {
       try {
-        const filePath = path.join(this.logsDir, 'pilot-updater-events.jsonl');
-        for (const ev of events) {
-          await appendLine(filePath, JSON.stringify(ev));
+        const filePath = path.join(
+          this.logsDir,
+          `pilot-updater-events-${getTodayDateString()}.jsonl`,
+        );
+        for (const event of events) {
+          await appendLine(filePath, JSON.stringify(event));
         }
       } catch (err) {
         logger.warn('updater event write failed', { error: String(err) });
@@ -165,15 +168,18 @@ export class UpdaterMetrics {
 
     if (alarms.length > 0) {
       try {
-        const filePath = path.join(this.logsDir, 'pilot-alarms.jsonl');
-        for (const al of alarms) {
-          await appendLine(filePath, JSON.stringify(al));
+        const filePath = path.join(
+          this.logsDir,
+          `pilot-alarms-${getTodayDateString()}.jsonl`,
+        );
+        for (const alarm of alarms) {
+          await appendLine(filePath, JSON.stringify(alarm));
         }
       } catch (err) {
         logger.warn('updater alarm write failed', { error: String(err) });
       }
-      for (const al of alarms) {
-        sendAlarm('pilot_alarm', flattenToStrings(al));
+      for (const alarm of alarms) {
+        sendAlarm('pilot_alarm', flattenToStrings(alarm));
       }
     }
   }
@@ -225,4 +231,3 @@ export class UpdaterMetrics {
     return `${base} | cause=${reason} detail="${detailHead}" phase=${breadcrumb.phase} version=${breadcrumb.version}`;
   }
 }
-

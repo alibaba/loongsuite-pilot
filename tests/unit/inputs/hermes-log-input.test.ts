@@ -118,6 +118,23 @@ describe('HermesLogInput', () => {
     expect(entry?.['gen_ai.skill.version']).toBe('1.2.3');
   });
 
+  it('preserves the custom Hermes worker identity and Resource marker', async () => {
+    await writeRecords('hermes-agent-101.jsonl', [{
+      ...makeRecord('worker-event'),
+      'gen_ai.agent.name': 'planner',
+      resourceAttributes: {
+        'agentteams.worker.name': 'planner',
+      },
+    }]);
+
+    const [entry] = await makeInput().collectOnce();
+
+    expect(entry?.['gen_ai.agent.name']).toBe('planner');
+    expect(entry?.resourceAttributes).toEqual({
+      'agentteams.worker.name': 'planner',
+    });
+  });
+
   it('waits for an incomplete UTF-8 JSONL line before advancing its byte offset', async () => {
     const file = path.join(tmpDir, 'hermes-agent-101.jsonl');
     const outputMessages = [

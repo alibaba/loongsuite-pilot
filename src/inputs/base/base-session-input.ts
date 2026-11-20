@@ -1,4 +1,6 @@
+import { producerReadFlags } from '../../utils/producer-log-dir.js';
 import * as fs from 'node:fs/promises';
+import { fileIdentity, matchesFileIdentity } from '../../utils/file-identity.js';
 import type { FileHandle } from 'node:fs/promises';
 import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
@@ -43,6 +45,7 @@ export abstract class BaseSessionInput extends BaseInput {
   }
 
   private async processFile(filePath: string): Promise<AgentActivityEntry[]> {
+    const runtime = this.getInputRuntimeAccumulator();
     const stateKey = `${this.id}:${filePath}`;
     let stat;
     try {
@@ -54,11 +57,18 @@ export abstract class BaseSessionInput extends BaseInput {
     const prevOffset = this.stateStore.getOffset(stateKey);
     const prevState = this.stateStore.get(stateKey);
     const prevInode = prevState.extra?.inode as number | undefined;
+    const previousIdentity = prevState.extra?.sourceIdentity;
 
     // Detect file rotation via inode change
-    if (prevInode !== undefined && prevInode !== (stat as any).ino) {
+    if ((prevInode !== undefined && prevInode !== (stat as any).ino)
+      || (previousIdentity !== undefined && !matchesFileIdentity(previousIdentity, stat))
+      || (previousIdentity === undefined && (process.platform === 'darwin' || process.platform === 'win32')
+        && prevState.extra?.sourceBirthtimeMs !== undefined && prevState.extra.sourceBirthtimeMs !== stat.birthtimeMs)) {
       this.stateStore.setOffset(stateKey, 0);
       this.stateStore.update(stateKey, { extra: { inode: (stat as any).ino } });
+    }
+    if (previousIdentity !== fileIdentity(stat)) {
+      this.stateStore.update(stateKey, { extra: { sourceIdentity: fileIdentity(stat), sourceBirthtimeMs: stat.birthtimeMs } });
     }
 
     let offset = this.stateStore.getOffset(stateKey);
@@ -73,10 +83,11 @@ export abstract class BaseSessionInput extends BaseInput {
       this.stateStore.update(stateKey, { extra: { inode: Number((stat as any).ino) } });
     }
     if (stat.size <= offset) return [];
+    runtime?.observeBacklog(stat.size - offset);
 
     let handle: FileHandle;
     try {
-      handle = await fs.open(filePath, 'r');
+      handle = await fs.open(filePath, producerReadFlags());
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') return []; // rotated away between discovery and open
@@ -92,27 +103,71 @@ export abstract class BaseSessionInput extends BaseInput {
     }
     try {
       const buf = Buffer.alloc(stat.size - offset);
+      const readStartedAt = runtime?.now();
       const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+      if (runtime && readStartedAt !== undefined) {
+        runtime.observeRead(bytesRead, buf.length, runtime.now() - readStartedAt);
+      }
       const bytes = buf.subarray(0, bytesRead);
       const lastNewline = bytes.lastIndexOf(0x0a);
       this.stateStore.update(stateKey, { extra: { inode: (stat as any).ino } });
-      if (lastNewline < 0) return [];
+      if (lastNewline < 0) {
+        return [];
+      }
 
       const completeBytes = bytes.subarray(0, lastNewline + 1);
-      const text = completeBytes.toString('utf-8');
       this.stateStore.setOffset(stateKey, offset + completeBytes.length);
 
       const entries: AgentActivityEntry[] = [];
-      for (const line of text.split('\n')) {
+      const completeText = completeBytes.toString('utf-8');
+      const asciiBatch = completeText.length === completeBytes.length;
+      const lines = completeText.split('\n');
+      let records = 0;
+      let parseSuccessRecords = 0;
+      let parseFailedRecords = 0;
+      let maxRecordBytes = 0;
+      let recordStartOffset = 0;
+
+      for (const line of lines) {
+        let recordBytes = line.length + 1;
+        if (!asciiBatch) {
+          const newline = completeBytes.indexOf(0x0a, recordStartOffset);
+          if (newline < 0) break;
+          recordBytes = newline - recordStartOffset + 1;
+          recordStartOffset = newline + 1;
+        }
         if (!line.trim()) continue;
+        records++;
+        maxRecordBytes = Math.max(maxRecordBytes, recordBytes);
+        let parsed: Record<string, unknown>;
         try {
-          const parsed = JSON.parse(line) as Record<string, unknown>;
+          const value: unknown = JSON.parse(line);
+          if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            parseFailedRecords++;
+            continue;
+          }
+          parsed = value as Record<string, unknown>;
+          parseSuccessRecords++;
+        } catch (err) {
+          parseFailedRecords++;
+          this.logger.warn('invalid session line', { file: filePath, error: String(err) });
+          continue;
+        }
+
+        try {
           const entry = await this.processSessionLine(parsed, filePath);
           if (entry) entries.push(entry);
         } catch (err) {
           this.logger.warn('invalid session line', { file: filePath, error: String(err) });
         }
       }
+      runtime?.observeCommittedBatch({
+        records,
+        bytes: completeBytes.length,
+        parseSuccessRecords,
+        parseFailedRecords,
+        maxRecordBytes,
+      });
       return entries;
     } finally {
       await handle.close();

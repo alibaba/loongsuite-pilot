@@ -2,20 +2,18 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { readTranscriptSnapshot } from '../../helpers/qoder-transcript-fixture.mjs';
 import {
-  acquireRetryLock,
   assessStableEofCandidate,
   buildLlmBoundaries,
   buildEventsFromBoundaries,
+  extractUserIdentity,
   findIncrementalTurnEndLine,
   findTriggeredTurnWindow,
-  isRetryLockStale,
-  readRetryLock,
-  releaseRetryLock,
-  retryLockPath,
-  readTranscriptSnapshot,
+  hasQoderCnTerminalMarker,
   selectTurnSegmentsForCollection,
-  tryAcquireRetryLock,
+  splitContentEventsIntoTurns,
 } from '../../../assets/hooks/qoder-hook-processor.mjs';
 
 let lockDir;
@@ -26,121 +24,6 @@ beforeEach(() => {
 
 afterEach(() => {
   try { fs.rmSync(lockDir, { recursive: true, force: true }); } catch { /* ignore */ }
-});
-
-describe('retryLockPath', () => {
-  it('hashes transcript path so different paths get different lock files', () => {
-    const a = retryLockPath('/tmp/a.jsonl', lockDir);
-    const b = retryLockPath('/tmp/b.jsonl', lockDir);
-    expect(a).not.toBe(b);
-    expect(a.startsWith(lockDir)).toBe(true);
-    expect(a.endsWith('.lock')).toBe(true);
-  });
-
-  it('returns stable path for same input', () => {
-    expect(retryLockPath('/tmp/x.jsonl', lockDir))
-      .toBe(retryLockPath('/tmp/x.jsonl', lockDir));
-  });
-});
-
-describe('tryAcquireRetryLock', () => {
-  it('first acquire succeeds and writes pid/sessionId', () => {
-    const ok = tryAcquireRetryLock('/tmp/t.jsonl', 'sess-1', lockDir);
-    expect(ok).toBe(true);
-    const lock = readRetryLock(retryLockPath('/tmp/t.jsonl', lockDir));
-    expect(lock.pid).toBe(process.pid);
-    expect(lock.sessionId).toBe('sess-1');
-    expect(typeof lock.startedAt).toBe('number');
-  });
-
-  it('second acquire while live lock exists fails', () => {
-    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'sess-1', lockDir)).toBe(true);
-    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'sess-1', lockDir)).toBe(false);
-  });
-
-  it('overwrites a stale lock (dead pid)', () => {
-    const lockPath = retryLockPath('/tmp/t.jsonl', lockDir);
-    fs.mkdirSync(lockDir, { recursive: true });
-    // PID 1 is init — guaranteed to be unkillable; use a very small fake pid that's almost certainly dead.
-    // Use pid=999999 (out of range on most systems) to simulate dead.
-    fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999, sessionId: 'old', startedAt: Date.now() }));
-    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'sess-2', lockDir)).toBe(true);
-    const lock = readRetryLock(lockPath);
-    expect(lock.sessionId).toBe('sess-2');
-  });
-
-  it('overwrites an expired lock (startedAt too old)', () => {
-    const lockPath = retryLockPath('/tmp/t.jsonl', lockDir);
-    fs.mkdirSync(lockDir, { recursive: true });
-    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, sessionId: 'old', startedAt: 1 }));
-    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'sess-2', lockDir)).toBe(true);
-    expect(readRetryLock(lockPath).sessionId).toBe('sess-2');
-  });
-});
-
-describe('acquireRetryLock', () => {
-  it('waits for a peer lock and acquires it after release', async () => {
-    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'peer', lockDir)).toBe(true);
-    const waiting = acquireRetryLock('/tmp/t.jsonl', 'sess-2', {
-      dir: lockDir,
-      waitMs: 500,
-      pollMs: 5,
-    });
-    setTimeout(() => releaseRetryLock('/tmp/t.jsonl', lockDir), 20);
-
-    await expect(waiting).resolves.toBe(true);
-    expect(readRetryLock(retryLockPath('/tmp/t.jsonl', lockDir)).sessionId).toBe('sess-2');
-  });
-
-  it('times out without deleting a live peer lock', async () => {
-    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'peer', lockDir)).toBe(true);
-
-    await expect(acquireRetryLock('/tmp/t.jsonl', 'sess-2', {
-      dir: lockDir,
-      waitMs: 20,
-      pollMs: 5,
-    })).resolves.toBe(false);
-    expect(readRetryLock(retryLockPath('/tmp/t.jsonl', lockDir)).sessionId).toBe('peer');
-  });
-});
-
-describe('releaseRetryLock', () => {
-  it('removes a lock owned by current pid', () => {
-    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'sess-1', lockDir)).toBe(true);
-    releaseRetryLock('/tmp/t.jsonl', lockDir);
-    expect(fs.existsSync(retryLockPath('/tmp/t.jsonl', lockDir))).toBe(false);
-  });
-
-  it('leaves a peer pid lock alone', () => {
-    const lockPath = retryLockPath('/tmp/t.jsonl', lockDir);
-    fs.mkdirSync(lockDir, { recursive: true });
-    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid + 1, sessionId: 'peer', startedAt: Date.now() }));
-    releaseRetryLock('/tmp/t.jsonl', lockDir);
-    expect(fs.existsSync(lockPath)).toBe(true);
-    expect(readRetryLock(lockPath).sessionId).toBe('peer');
-  });
-
-  it('does nothing for missing lock', () => {
-    expect(() => releaseRetryLock('/tmp/missing.jsonl', lockDir)).not.toThrow();
-  });
-});
-
-describe('isRetryLockStale', () => {
-  it('returns true for null lock', () => {
-    expect(isRetryLockStale(null)).toBe(true);
-  });
-
-  it('returns true for old lock', () => {
-    expect(isRetryLockStale({ pid: process.pid, startedAt: 0 })).toBe(true);
-  });
-
-  it('returns false for fresh, live lock', () => {
-    expect(isRetryLockStale({ pid: process.pid, startedAt: Date.now() })).toBe(false);
-  });
-
-  it('returns true for fresh lock with dead pid', () => {
-    expect(isRetryLockStale({ pid: 999999, startedAt: Date.now() })).toBe(true);
-  });
 });
 
 describe('selectTurnSegmentsForCollection', () => {
@@ -167,10 +50,14 @@ describe('selectTurnSegmentsForCollection', () => {
 });
 
 describe('buildLlmBoundaries complete-response priority', () => {
-  const assistant = (timestamp, content) => ({
+  const assistant = (timestamp, content, stopReason) => ({
     type: 'assistant',
     timestamp,
-    message: { role: 'assistant', content },
+    message: {
+      role: 'assistant',
+      content,
+      ...(stopReason ? { stop_reason: stopReason } : {}),
+    },
   });
   const toolResult = (timestamp, id) => ({
     type: 'user',
@@ -179,6 +66,64 @@ describe('buildLlmBoundaries complete-response priority', () => {
       role: 'user',
       content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }],
     },
+  });
+
+  it('stamps Qoder IDE hook identity onto every event in the turn', () => {
+    const rows = [
+      {
+        type: 'user',
+        timestamp: '2026-07-30T00:59:59.000Z',
+        message: { role: 'user', content: 'read the file' },
+      },
+      assistant('2026-07-30T01:00:00.000Z', [
+        { type: 'tool_use', id: 'tool-a', name: 'Read', input: { path: 'a.txt' } },
+      ], 'tool_use'),
+      toolResult('2026-07-30T01:00:01.000Z', 'tool-a'),
+      assistant('2026-07-30T01:00:02.000Z', [
+        { type: 'text', text: 'done' },
+      ], 'end_turn'),
+    ];
+    const progress = [
+      { hookEvent: 'UserPromptSubmit', ts: '2026-07-30T00:59:58.500Z' },
+      { hookEvent: 'PreToolUse', ts: '2026-07-30T01:00:00.500Z' },
+      { hookEvent: 'PostToolUse', ts: '2026-07-30T01:00:01.500Z' },
+      { hookEvent: 'Stop', ts: '2026-07-30T01:00:03.000Z' },
+    ];
+    const identity = extractUserIdentity({
+      user: {
+        name: ' qoder-user ',
+        email: ' qoder-user@example.com ',
+        uid: 'not-exported',
+      },
+    });
+    const records = buildEventsFromBoundaries(
+      buildLlmBoundaries(progress, rows),
+      rows,
+      rows,
+      'turn-identity',
+      'session-identity',
+      'qoder',
+      { userIdentity: identity },
+      undefined,
+    );
+
+    expect(new Set(records.map(record => record['event.name']))).toEqual(new Set([
+      'other',
+      'llm.request',
+      'llm.response',
+      'tool.call',
+      'tool.result',
+    ]));
+    expect(records.every(record =>
+      record['user.name'] === 'qoder-user'
+      && record['user.email'] === 'qoder-user@example.com',
+    )).toBe(true);
+    expect(records.some(record => Object.hasOwn(record, 'user.uid'))).toBe(false);
+  });
+
+  it('omits identity when the hook payload has no usable extra.user', () => {
+    expect(extractUserIdentity(undefined)).toBeUndefined();
+    expect(extractUserIdentity({ user: { name: ' ', email: 42 } })).toBeUndefined();
   });
 
   it('keeps thinking + text + multiple tool_use blocks as one response', () => {
@@ -230,7 +175,7 @@ describe('buildLlmBoundaries complete-response priority', () => {
     expect(buildLlmBoundaries(progress, rows)).toHaveLength(2);
   });
 
-  it('preserves microsecond ordering between tool completion and the next assistant response', () => {
+  it('derives the next request from the completed tool result, not progress timing', () => {
     const rows = [
       {
         type: 'user',
@@ -256,8 +201,8 @@ describe('buildLlmBoundaries complete-response priority', () => {
 
     const boundaries = buildLlmBoundaries(progress, rows);
     expect(boundaries.map(boundary => boundary.startTs)).toEqual([
-      '2026-08-03T09:22:25.000000Z',
-      '2026-08-03T09:22:26.999176Z',
+      '2026-08-03T09:22:25.555446Z',
+      '2026-08-03T09:22:26.999890Z',
     ]);
 
     const records = buildEventsFromBoundaries(
@@ -272,9 +217,16 @@ describe('buildLlmBoundaries complete-response priority', () => {
         ['llm.request', 'turn-microseconds:s2'],
         ['llm.response', 'turn-microseconds:s2'],
       ]);
+    expect(records
+      .filter(record => record['event.name'] === 'llm.request')
+      .map(record => record.time_unix_nano))
+      .toEqual([
+        String(BigInt(Date.parse('2026-08-03T09:22:25.100Z')) * 1_000_000n + 1n),
+        String(BigInt(Date.parse('2026-08-03T09:22:26.668Z')) * 1_000_000n + 419_001n),
+      ]);
   });
 
-  it('starts a complete next step after PostToolUseFailure', () => {
+  it('starts a complete next step from a failed tool_result, independent of PostToolUseFailure', () => {
     const rows = [
       {
         type: 'user',
@@ -311,8 +263,8 @@ describe('buildLlmBoundaries complete-response priority', () => {
 
     const boundaries = buildLlmBoundaries(progress, rows);
     expect(boundaries.map(boundary => boundary.startTs)).toEqual([
-      '2026-07-30T00:59:59.000Z',
-      '2026-07-30T01:00:01.500Z',
+      '2026-07-30T01:00:00.000Z',
+      '2026-07-30T01:00:02.000Z',
     ]);
 
     const records = buildEventsFromBoundaries(
@@ -329,7 +281,7 @@ describe('buildLlmBoundaries complete-response priority', () => {
       ]);
   });
 
-  it('uses PostToolUseFailure to close a tool cycle whose result is missing', () => {
+  it('preserves a terminal response when tool_result is missing', () => {
     const rows = [
       {
         type: 'user',
@@ -338,10 +290,13 @@ describe('buildLlmBoundaries complete-response priority', () => {
       },
       assistant('2026-07-30T01:00:00.000Z', [
         { type: 'tool_use', id: 'tool-a', name: 'Read', input: { path: 'missing' } },
+      ], 'tool_use'),
+      assistant('2026-07-30T01:00:01.900Z', [
+        { type: 'thinking', thinking: 'the tool was cancelled' },
       ]),
       assistant('2026-07-30T01:00:02.000Z', [
         { type: 'text', text: 'the tool was cancelled' },
-      ]),
+      ], 'end_turn'),
     ];
     const progress = [
       { hookEvent: 'UserPromptSubmit', ts: '2026-07-30T00:59:59.000Z' },
@@ -364,6 +319,184 @@ describe('buildLlmBoundaries complete-response priority', () => {
         ['llm.request', 'turn-missing-result:s2'],
         ['llm.response', 'turn-missing-result:s2'],
       ]);
+    expect(records.filter(record => record['event.name'] === 'tool.call')).toHaveLength(1);
+    expect(records.filter(record => record['event.name'] === 'tool.result')).toHaveLength(0);
+    const responses = records.filter(record => record['event.name'] === 'llm.response');
+    expect(responses.map(record => ({
+      parts: record['gen_ai.output.messages'][0].parts.map(part => part.type),
+      finishReasons: record['gen_ai.response.finish_reasons'],
+      turnEnd: record['gen_ai.turn.end'],
+    }))).toEqual([
+      { parts: ['tool_call'], finishReasons: ['tool_call'], turnEnd: undefined },
+      { parts: ['reasoning', 'text'], finishReasons: ['end_turn'], turnEnd: true },
+    ]);
+  });
+
+  it('conservatively merges later assistant rows when both tool_result and stop_reason are missing', () => {
+    const rows = [
+      assistant('2026-07-30T01:00:00.000Z', [
+        { type: 'tool_use', id: 'tool-a', name: 'Read', input: { path: 'missing' } },
+      ]),
+      assistant('2026-07-30T01:00:02.000Z', [
+        { type: 'text', text: 'the tool state is unknown' },
+      ]),
+    ];
+
+    expect(buildLlmBoundaries([], rows)).toHaveLength(1);
+  });
+
+  it('keeps structure and content identical when third-party PostToolUse progress is present', () => {
+    const rows = [
+      {
+        type: 'user',
+        timestamp: '2026-09-05T02:35:58.605Z',
+        message: { role: 'user', content: 'fix it' },
+      },
+      assistant('2026-09-05T02:36:31.960Z', [
+        { type: 'thinking', thinking: 'read' },
+        { type: 'tool_use', id: 'read-a', name: 'Read', input: {} },
+      ]),
+      toolResult('2026-09-05T02:36:32.017Z', 'read-a'),
+      assistant('2026-09-05T02:36:44.873Z', [
+        { type: 'text', text: 'write' },
+        { type: 'tool_use', id: 'write-a', name: 'Write', input: {} },
+      ]),
+      toolResult('2026-09-05T02:36:47.452Z', 'write-a'),
+      assistant('2026-09-05T02:37:03.225Z', [{ type: 'text', text: 'done' }]),
+    ];
+    const qoderSecProgress = [
+      { hookEvent: 'PostToolUse', hookName: 'PostToolUse:Write', ts: '2026-09-05T02:36:47.814Z' },
+      { hookEvent: 'PostToolUse', hookName: 'PostToolUse:Write', ts: '2026-09-05T02:36:47.814Z' },
+      { hookEvent: 'Stop', hookName: 'Stop', ts: '2026-09-05T02:37:05.726Z' },
+    ];
+
+    const withThirdParty = buildLlmBoundaries(qoderSecProgress, rows);
+    const withoutThirdParty = buildLlmBoundaries(
+      qoderSecProgress.filter(event => event.hookEvent !== 'PostToolUse'),
+      rows,
+    );
+    expect(withThirdParty).toEqual(withoutThirdParty);
+    expect(withThirdParty.map(boundary => [boundary.contentStartIndex, boundary.contentEndIndex]))
+      .toEqual([[1, 3], [3, 5], [5, 6]]);
+
+    const summarize = boundaries => buildEventsFromBoundaries(
+      boundaries, rows, rows, 'turn-qodersec', 'session-1', 'qoder', {}, undefined,
+    ).map(record => ({
+      name: record['event.name'],
+      step: record['gen_ai.step.id'],
+      toolId: record['gen_ai.tool.call.id'],
+      parts: record['gen_ai.output.messages']?.[0]?.parts?.map(part => part.type),
+      time: record.time_unix_nano,
+    }));
+    expect(summarize(withThirdParty)).toEqual(summarize(withoutThirdParty));
+  });
+
+  it('keeps responses populated when adjacent groups have the same assistant timestamp', () => {
+    const rows = [
+      {
+        type: 'user',
+        timestamp: '2026-09-05T02:35:58.000Z',
+        message: { role: 'user', content: 'go' },
+      },
+      assistant('2026-09-05T02:36:00.000Z', [
+        { type: 'tool_use', id: 'tool-a', name: 'Read', input: {} },
+      ]),
+      toolResult('2026-09-05T02:36:00.100Z', 'tool-a'),
+      assistant('2026-09-05T02:36:00.000Z', [{ type: 'text', text: 'done' }]),
+    ];
+    const boundaries = buildLlmBoundaries([], rows);
+    const records = buildEventsFromBoundaries(
+      boundaries, rows, rows, 'turn-same-ts', 'session-1', 'qoder', {}, undefined,
+    );
+
+    expect(boundaries.map(boundary => [boundary.contentStartIndex, boundary.contentEndIndex]))
+      .toEqual([[1, 3], [3, 4]]);
+    const responses = records.filter(record => record['event.name'] === 'llm.response');
+    const secondRequest = records.find(record =>
+      record['event.name'] === 'llm.request' &&
+      record['gen_ai.step.id'] === 'turn-same-ts:s2');
+    const firstToolResult = records.find(record => record['event.name'] === 'tool.result');
+
+    expect(responses).toHaveLength(2);
+    expect(BigInt(responses[0].time_unix_nano))
+      .toBeLessThan(BigInt(secondRequest.time_unix_nano));
+    expect(BigInt(firstToolResult.time_unix_nano))
+      .toBeLessThan(BigInt(secondRequest.time_unix_nano));
+    expect(BigInt(secondRequest.time_unix_nano))
+      .toBeLessThan(BigInt(responses[1].time_unix_nano));
+  });
+
+  it('preserves sub-millisecond transcript order in emitted timestamps', () => {
+    const rows = [
+      {
+        type: 'user',
+        timestamp: '2026-09-05T02:35:59.999900Z',
+        message: { role: 'user', content: 'go' },
+      },
+      assistant('2026-09-05T02:36:00.000100Z', [
+        { type: 'tool_use', id: 'tool-a', name: 'Read', input: {} },
+      ]),
+      toolResult('2026-09-05T02:36:00.000300Z', 'tool-a'),
+      assistant('2026-09-05T02:36:00.000900Z', [{ type: 'text', text: 'done' }]),
+    ];
+    const records = buildEventsFromBoundaries(
+      buildLlmBoundaries([], rows),
+      rows,
+      rows,
+      'turn-microsecond-order',
+      'session-1',
+      'qoder',
+      {},
+      undefined,
+    );
+    const firstResponse = records.find(record =>
+      record['event.name'] === 'llm.response' &&
+      record['gen_ai.step.id'] === 'turn-microsecond-order:s1');
+    const toolResultRecord = records.find(record => record['event.name'] === 'tool.result');
+    const secondRequest = records.find(record =>
+      record['event.name'] === 'llm.request' &&
+      record['gen_ai.step.id'] === 'turn-microsecond-order:s2');
+    const secondResponse = records.find(record =>
+      record['event.name'] === 'llm.response' &&
+      record['gen_ai.step.id'] === 'turn-microsecond-order:s2');
+
+    const second = BigInt(Date.parse('2026-09-05T02:36:00Z')) * 1_000_000n;
+    expect(firstResponse.time_unix_nano).toBe(String(second + 100_000n));
+    expect(toolResultRecord.time_unix_nano).toBe(String(second + 300_000n));
+    expect(secondRequest.time_unix_nano).toBe(String(second + 300_001n));
+    expect(secondResponse.time_unix_nano).toBe(String(second + 900_000n));
+  });
+
+  it('uses the final assistant timestamp when SQLite enrichment is unavailable', () => {
+    const rows = [
+      {
+        type: 'user',
+        timestamp: '2026-09-05T02:35:58.000Z',
+        message: { role: 'user', content: 'explain it' },
+      },
+      assistant('2026-09-05T02:36:00.000Z', [
+        { type: 'thinking', thinking: 'reasoning' },
+      ]),
+      assistant('2026-09-05T02:36:02.345Z', [
+        { type: 'text', text: 'answer' },
+      ]),
+    ];
+
+    const records = buildEventsFromBoundaries(
+      buildLlmBoundaries([], rows),
+      rows,
+      rows,
+      'turn-no-sqlite',
+      'session-1',
+      'qoder',
+      {},
+      undefined,
+    );
+    const response = records.find(record => record['event.name'] === 'llm.response');
+
+    expect(response.time_unix_nano).toBe(
+      String(BigInt(Date.parse('2026-09-05T02:36:02.345Z')) * 1_000_000n),
+    );
   });
 
   it('does not close a parallel response until completion signals cover its declared tools', () => {
@@ -488,6 +621,89 @@ describe('findTriggeredTurnWindow', () => {
     });
   });
 
+  it('keeps the user row when another UserPromptSubmit progress arrives after it', () => {
+    const firstUser = user('first prompt');
+    const firstStop = progress('Stop');
+    const firstEnd = progress('SessionEnd');
+    const secondUser = user('second prompt');
+    const secondStop = progress('Stop');
+    const secondEnd = progress('SessionEnd');
+    const rows = [
+      progress('UserPromptSubmit'),
+      progress('UserPromptSubmit'),
+      firstUser,
+      progress('UserPromptSubmit'),
+      assistant('first answer'),
+      firstStop,
+      firstEnd,
+      progress('UserPromptSubmit'),
+      secondUser,
+      progress('UserPromptSubmit'),
+      assistant('second answer'),
+      secondStop,
+      secondEnd,
+    ];
+    const transcript = writeTranscript('post-user-progress.jsonl', rows);
+    const snapshot = readTranscriptSnapshot(transcript);
+
+    const first = findTriggeredTurnWindow(snapshot, rows.indexOf(firstStop));
+    const second = findTriggeredTurnWindow(snapshot, rows.indexOf(secondStop));
+    expect(first).toMatchObject({
+      status: 'complete',
+      startLine: rows.indexOf(firstUser),
+      stopLine: rows.indexOf(firstStop),
+      endLine: rows.indexOf(firstEnd) + 1,
+    });
+    expect(second).toMatchObject({
+      status: 'complete',
+      startLine: rows.indexOf(secondUser),
+      stopLine: rows.indexOf(secondStop),
+      endLine: rows.indexOf(secondEnd) + 1,
+    });
+    expect(snapshot.rows.slice(first.startLine, first.endLine).some(row => row.message?.content === 'first prompt')).toBe(true);
+    expect(snapshot.rows.slice(second.startLine, second.endLine).some(row => row.message?.content === 'second prompt')).toBe(true);
+  });
+
+  it.each(['none', 'SessionEnd', 'last-prompt'])('keeps the current user with normal progress ordering after %s', boundary => {
+    const previous = user('previous prompt');
+    const current = user('current prompt');
+    const promptProgress = progress('UserPromptSubmit');
+    const stop = progress('Stop');
+    const rows = [
+      previous,
+      ...(boundary === 'none' ? [] : [boundary === 'last-prompt' ? { type: 'last-prompt' } : progress(boundary)]),
+      promptProgress,
+      current,
+      assistant('current answer'),
+      stop,
+      progress('SessionEnd'),
+    ];
+    const snapshot = readTranscriptSnapshot(writeTranscript('normal-progress.jsonl', rows));
+    const window = findTriggeredTurnWindow(snapshot, rows.indexOf(stop));
+    expect(window).toMatchObject({ status: 'complete', startLine: rows.indexOf(promptProgress) });
+    const windowRows = snapshot.rows.slice(window.startLine, window.endLine);
+    expect(windowRows).toContainEqual(current);
+    expect(windowRows).not.toContainEqual(previous);
+  });
+
+  it.each(['SessionEnd', 'last-prompt'])('does not reuse a previous user across %s when the current user is missing', boundary => {
+    const previous = user('previous prompt');
+    const promptProgress = progress('UserPromptSubmit');
+    const stop = progress('Stop');
+    const rows = [
+      previous,
+      boundary === 'last-prompt' ? { type: 'last-prompt' } : progress(boundary),
+      promptProgress,
+      assistant('current answer'),
+      stop,
+      progress('SessionEnd'),
+    ];
+    const snapshot = readTranscriptSnapshot(writeTranscript('missing-current-user.jsonl', rows));
+    const window = findTriggeredTurnWindow(snapshot, rows.indexOf(stop));
+    expect(window).toMatchObject({ status: 'complete', startLine: rows.indexOf(promptProgress) });
+    expect(snapshot.rows.slice(window.startLine, window.endLine)).not.toContainEqual(previous);
+  });
+
   it('uses the next prompt as a boundary when SessionEnd is missing', () => {
     const rows = [
       progress('UserPromptSubmit'),
@@ -574,6 +790,117 @@ describe('findTriggeredTurnWindow', () => {
   });
 });
 
+// --- B3 P0 fix: stop detection must accept assistant message.stop_reason ---
+// Fixtures live in tests/fixtures/qoder/transcript-*.jsonl. Real-shape rows
+// derived from tester B3 diagnosis (comment 959f121d): qoder transcripts carry
+// `message.stop_reason` on the final assistant row of a turn; retry path used
+// to only recognise `progress Stop` rows and silently dropped such turns.
+describe('findTriggeredTurnWindow stop source variants (B3 P0)', () => {
+  const fixturesDir = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '../../fixtures/qoder',
+  );
+  const snapshot = name => readTranscriptSnapshot(path.join(fixturesDir, name));
+
+  it('case 1: detects stop via Stop progress row (regression, old path not degraded)', () => {
+    const result = findTriggeredTurnWindow(snapshot('transcript-stop-progress-only.jsonl'), 4);
+    expect(result).toEqual({
+      status: 'complete',
+      reason: 'last-prompt',
+      startLine: 1,
+      stopLine: 4,
+      endLine: 6,
+    });
+  });
+
+  it('case 2: detects stop via assistant message.stop_reason when no Stop progress row', () => {
+    const result = findTriggeredTurnWindow(snapshot('transcript-stop-reason-only.jsonl'), 3);
+    expect(result).toEqual({
+      status: 'complete',
+      reason: 'last-prompt',
+      startLine: 1,
+      stopLine: 3,
+      endLine: 5,
+    });
+  });
+
+  it('case 3: prefers the Stop progress row when both signals are present', () => {
+    const result = findTriggeredTurnWindow(snapshot('transcript-both-stops.jsonl'), 5);
+    // Row 3 is an assistant `tool_use`, i.e. mid-turn: the model resumes after
+    // the tool result, so it is not a boundary. The scan remembers nothing and
+    // reaches the Stop progress row at 4, which is the authoritative boundary.
+    expect(result).toEqual({
+      status: 'complete',
+      reason: 'last-prompt',
+      startLine: 1,
+      stopLine: 4,
+      endLine: 6,
+    });
+  });
+
+  it('case 4: skips mid-turn tool_use and stops at the terminal assistant row', () => {
+    // tool_use -> tool_result -> end_turn, the ReAct shape that dominates real
+    // transcripts. Accepting the first stop_reason would put stopLine at 3 while
+    // the turn actually ends at 5.
+    const result = findTriggeredTurnWindow(snapshot('transcript-react-tool-cycle.jsonl'), 6);
+    expect(result).toEqual({
+      status: 'complete',
+      reason: 'last-prompt',
+      startLine: 1,
+      stopLine: 5,
+      endLine: 7,
+    });
+  });
+
+  it('case 5: treats stop_sequence as terminal', () => {
+    // stop_sequence is a genuine turn end and is sometimes a turn's only
+    // terminal row on real transcripts, so leaving it out of the terminal set
+    // would downgrade those turns from "collected early" to "never collected".
+    const result = findTriggeredTurnWindow(snapshot('transcript-stop-sequence.jsonl'), 4);
+    expect(result).toEqual({
+      status: 'complete',
+      reason: 'last-prompt',
+      startLine: 1,
+      stopLine: 3,
+      endLine: 5,
+    });
+  });
+
+  it('case 6: keeps waiting when the turn only carries non-terminal stop reasons', () => {
+    // tool_use plus pause_turn: the assistant resumes in both cases, so there is
+    // no boundary yet. Committing here would emit a prefix of the turn once
+    // assessStableEofCandidate saw the same bytes twice.
+    const result = findTriggeredTurnWindow(snapshot('transcript-pause-turn.jsonl'), 6);
+    expect(result).toEqual({
+      status: 'waiting',
+      reason: 'stop-not-found',
+      startLine: null,
+      stopLine: null,
+      endLine: null,
+    });
+  });
+});
+
+describe('hasQoderCnTerminalMarker', () => {
+  it('accepts the traditional progress Stop marker', () => {
+    expect(hasQoderCnTerminalMarker([{ hookEvent: 'Stop' }], [])).toBe(true);
+  });
+
+  it('accepts SDK print-mode terminal rows before progress Stop is appended', () => {
+    expect(hasQoderCnTerminalMarker([], [
+      { type: 'assistant', message: { stop_reason: 'end_turn' } },
+      { type: 'last-prompt', lastPrompt: 'summarize the file' },
+    ])).toBe(true);
+  });
+
+  it('rejects a mid-tool snapshot', () => {
+    expect(hasQoderCnTerminalMarker([], [
+      { type: 'assistant', message: { stop_reason: 'tool_use' } },
+      { type: 'user', message: { content: [{ type: 'tool_result' }] } },
+    ])).toBe(false);
+  });
+});
+
 describe('buildEventsFromBoundaries tool result matching', () => {
   it('matches parallel tool results by tool_use_id instead of return order', () => {
     const makeToolResult = (timestamp, id, content, isError = false) => ({
@@ -616,6 +943,8 @@ describe('buildEventsFromBoundaries tool result matching', () => {
     const boundaries = [{
       startTs: '2026-07-30T01:00:00.000Z',
       endTs: '2026-07-30T01:00:03.000Z',
+      contentStartIndex: 1,
+      contentEndIndex: content.length,
     }];
 
     const records = buildEventsFromBoundaries(
@@ -646,5 +975,234 @@ describe('buildEventsFromBoundaries tool result matching', () => {
       1001,
       1000,
     ]);
+  });
+});
+
+describe('buildEventsFromBoundaries CLI image source parts', () => {
+  it('keeps the primary prompt and appends meta Image:source text for qoder-cli', () => {
+    const clip = '/tmp/clip.png.png';
+    const rows = [
+      {
+        type: 'user',
+        timestamp: '2026-08-12T09:17:48.318Z',
+        entrypoint: 'cli',
+        promptId: 'p1',
+        message: {
+          role: 'user',
+          content: [
+            { type: 'text', text: '[Image #0]这个图像在讲什么？' },
+            { type: 'image', source: { type: 'url', url: 'https://example/x.png' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        timestamp: '2026-08-12T09:17:48.529Z',
+        isMeta: true,
+        entrypoint: 'cli',
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: `[Image: source: ${clip}]` }],
+        },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-08-12T09:17:55.407Z',
+        message: {
+          role: 'assistant',
+          model: 'auto',
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'ok' }],
+        },
+      },
+    ];
+    const progress = [
+      { hookEvent: 'UserPromptSubmit', ts: '2026-08-12T09:17:48.000Z' },
+      { hookEvent: 'Stop', ts: '2026-08-12T09:17:56.000Z' },
+    ];
+    const boundaries = buildLlmBoundaries(progress, rows);
+    const records = buildEventsFromBoundaries(
+      boundaries, rows, rows, 'turn-cli', 'session-cli', 'qoder', {}, '/Users/me/workspace',
+    );
+    expect(records.every(r => r['gen_ai.agent.type'] === 'qoder-cli')).toBe(true);
+    const request = records.find(r => r['event.name'] === 'llm.request');
+    const parts = request['gen_ai.input.messages_delta'][0].parts;
+    expect(parts[0]).toEqual({ type: 'text', content: '[Image #0]这个图像在讲什么？' });
+    expect(parts.some(p => p.type === 'text' && p.content === `[Image: source: ${clip}]`)).toBe(true);
+  });
+
+  it('does not append Image:source parts for IDE turns', () => {
+    const rows = [
+      {
+        type: 'user',
+        timestamp: '2026-08-12T09:17:48.318Z',
+        message: { role: 'user', content: '解释这张图片' },
+      },
+      {
+        type: 'user',
+        timestamp: '2026-08-12T09:17:48.529Z',
+        isMeta: true,
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: '[Image: source: /tmp/clip.png]' }],
+        },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-08-12T09:17:55.407Z',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'ok' }],
+        },
+      },
+    ];
+    const progress = [
+      { hookEvent: 'UserPromptSubmit', ts: '2026-08-12T09:17:48.000Z' },
+      { hookEvent: 'Stop', ts: '2026-08-12T09:17:56.000Z' },
+    ];
+    const boundaries = buildLlmBoundaries(progress, rows);
+    const records = buildEventsFromBoundaries(
+      boundaries, rows, rows, 'turn-ide', 'session-ide', 'qoder', {}, '/Users/me/workspace',
+    );
+    expect(records[0]['gen_ai.agent.type']).toBe('qoder');
+    const parts = records.find(r => r['event.name'] === 'llm.request')['gen_ai.input.messages_delta'][0].parts;
+    expect(parts).toEqual([{ type: 'text', content: '解释这张图片' }]);
+  });
+
+  it('does not start a new turn on isMeta Image:source rows', () => {
+    const prompt = {
+      type: 'user',
+      timestamp: '2026-08-12T09:17:48.318Z',
+      entrypoint: 'cli',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: '[Image #0]这个图像在讲什么？' },
+          { type: 'image', source: { type: 'url', url: 'https://example/x.png' } },
+        ],
+      },
+    };
+    const meta = {
+      type: 'user',
+      timestamp: '2026-08-12T09:17:48.529Z',
+      isMeta: true,
+      entrypoint: 'cli',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: '[Image: source: /tmp/clip.png.png]' }],
+      },
+    };
+    const assistant = {
+      type: 'assistant',
+      timestamp: '2026-08-12T09:17:55.407Z',
+      message: {
+        role: 'assistant',
+        model: 'auto',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'ok' }],
+      },
+    };
+    const turns = splitContentEventsIntoTurns([prompt, meta, assistant]);
+    expect(turns).toHaveLength(1);
+    expect(turns[0][0]).toBe(prompt);
+    expect(turns[0]).toContain(meta);
+
+    const progress = [
+      { hookEvent: 'UserPromptSubmit', ts: '2026-08-12T09:17:48.000Z' },
+      { hookEvent: 'Stop', ts: '2026-08-12T09:17:56.000Z' },
+    ];
+    const records = buildEventsFromBoundaries(
+      buildLlmBoundaries(progress, [meta, prompt, assistant]),
+      [meta, prompt, assistant],
+      [meta, prompt, assistant],
+      'turn-meta-first',
+      'session-cli',
+      'qoder',
+      {},
+      '/tmp',
+    );
+    const parts = records.find(r => r['event.name'] === 'llm.request')['gen_ai.input.messages_delta'][0].parts;
+    expect(parts[0]).toEqual({ type: 'text', content: '[Image #0]这个图像在讲什么？' });
+    expect(parts.some(p => p.type === 'text' && p.content.includes('[Image: source:'))).toBe(true);
+  });
+
+  it('reads image_file.filename from the attachment row, not from user/assistant stream', () => {
+    const filename = '/Users/me/workspace/loongsuite-pilot/picture/pipeline.jpg';
+    const otherFilename = '/Users/me/workspace/other.jpg';
+    const user = {
+      type: 'user',
+      uuid: 'user-1',
+      timestamp: '2026-08-25T04:56:24.622Z',
+      entrypoint: 'cli',
+      promptId: 'p-at',
+      message: { role: 'user', content: '@picture/pipeline.jpg 用一句话说明这张图' },
+    };
+    const attachment = {
+      type: 'attachment',
+      uuid: 'att-1',
+      parentUuid: 'user-1',
+      timestamp: '2026-08-25T04:56:24.622Z',
+      entrypoint: 'cli',
+      attachment: {
+        type: 'image_file',
+        filename,
+        displayPath: 'picture/pipeline.jpg',
+        url: 'https://example.invalid/oss.jpg',
+      },
+    };
+    const otherTurnAttachment = {
+      type: 'attachment',
+      uuid: 'att-2',
+      parentUuid: 'user-other',
+      timestamp: '2026-08-25T04:56:24.622Z',
+      attachment: { type: 'image_file', filename: otherFilename },
+    };
+    const orphanAttachment = {
+      type: 'attachment',
+      uuid: 'att-orphan',
+      timestamp: '2026-08-25T04:56:24.622Z',
+      attachment: { type: 'image_file', filename: '/tmp/orphan.jpg' },
+    };
+    const skillListing = {
+      type: 'attachment',
+      timestamp: '2026-08-25T04:56:24.623Z',
+      attachment: { type: 'skill_listing', content: 'ignore me' },
+    };
+    const assistant = {
+      type: 'assistant',
+      timestamp: '2026-08-25T04:56:27.515Z',
+      message: {
+        role: 'assistant',
+        model: 'auto',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'ok' }],
+      },
+    };
+    const contentEvents = [user, assistant];
+    const allParsed = [user, attachment, otherTurnAttachment, orphanAttachment, skillListing, assistant];
+    const progress = [
+      { hookEvent: 'UserPromptSubmit', ts: '2026-08-25T04:56:24.000Z' },
+      { hookEvent: 'Stop', ts: '2026-08-25T04:56:28.000Z' },
+    ];
+    const records = buildEventsFromBoundaries(
+      buildLlmBoundaries(progress, contentEvents),
+      contentEvents,
+      allParsed,
+      'turn-filename',
+      'session-filename',
+      'qoder',
+      {},
+      '/Users/me/other',
+    );
+    const request = records.find(r => r['event.name'] === 'llm.request');
+    const parts = request['gen_ai.input.messages_delta'][0].parts;
+    expect(parts).toEqual([{ type: 'text', content: '@picture/pipeline.jpg 用一句话说明这张图' }]);
+    expect(request['agent.qoder.attachments']).toEqual([
+      { type: 'image_file', filename, displayPath: 'picture/pipeline.jpg' },
+    ]);
+    expect(JSON.stringify(request['agent.qoder.attachments'])).not.toContain(otherFilename);
+    expect(JSON.stringify(request['agent.qoder.attachments'])).not.toContain('/tmp/orphan.jpg');
+    expect(JSON.stringify(request)).not.toContain('ignore me');
+    expect(JSON.stringify(request)).not.toContain('example.invalid');
   });
 });

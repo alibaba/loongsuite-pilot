@@ -73,13 +73,36 @@ node_is_app_bundle() {
 node_is_suitable() {
   local bin="$1"
   [[ -x "$bin" ]] || return 1
+  local ver major
+  if major="$(node_major_from_runtime_path "$bin")"; then
+    (( major >= MIN_NODE_MAJOR )) || return 1
+    return 0
+  fi
   node_is_app_bundle "$bin" && return 1
-  local ver
   ver="$("$bin" --version 2>/dev/null)" || return 1
-  local major="${ver#v}"
+  major="${ver#v}"
   major="${major%%.*}"
   [[ "$major" =~ ^[0-9]+$ ]] && (( major >= MIN_NODE_MAJOR )) || return 1
   return 0
+}
+
+# Managed runtimes live at <pilot-dir>/runtime/node-v<x>.<y>.<z>/bin/node, extracted by the
+# installer only after it verified SHASUMS256 and probed the binary itself, so the directory
+# name is authoritative. Reading the major from the path skips a `node --version` boot that
+# would otherwise run on the user's interactive path for every single event -- ~60ms on a
+# quiet host, 200ms+ where EDR scans each exec. Anything that is not a managed runtime still
+# gets probed.
+node_major_from_runtime_path() {
+  local bin="$1" dir name
+  dir="${bin%/bin/node}"
+  [[ "$dir" != "$bin" ]] || return 1
+  name="${dir##*/}"
+  [[ "${dir%/*}" == */runtime ]] || return 1
+  case "$name" in node-v[0-9]*) ;; *) return 1 ;; esac
+  name="${name#node-v}"
+  name="${name%%.*}"
+  [[ "$name" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$name"
 }
 
 # Numeric-descending sort for version directory paths (stdin, one per line).

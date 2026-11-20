@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { AgentDefinition } from '../types/index.js';
 import { detectAgent } from '../deployment/detect-utils.js';
+import { resolvePiCodingAgentDir } from '../deployment/env-agent-dirs.js';
 import { PluginInjectStrategy } from '../deployment/plugin-inject-strategy.js';
 import {
   ensureDir,
@@ -467,10 +468,10 @@ async function findMissingRuntimeAssets(dataDir: string): Promise<string[]> {
 
 async function assertDedicatedAgentDir(dataDir: string, definition: AgentDefinition): Promise<void> {
   const agentDir = comparablePath(definition.piSdk!.agentDir);
-  const defaultPiAgentDir = comparablePath(resolveHome('~/.pi/agent'));
-  if (agentDir === defaultPiAgentDir) {
+  const builtInPiAgentDir = comparablePath(resolveHome(resolvePiCodingAgentDir()));
+  if (agentDir === builtInPiAgentDir) {
     throw new Error(
-      'agentDir must be dedicated to this custom Agent; ~/.pi/agent is owned by the built-in PI integration',
+      'agentDir must be dedicated to this custom Agent; the built-in PI directory is owned by the pi-coding-agent integration',
     );
   }
 

@@ -15,8 +15,8 @@ import { contentHash } from '../../../src/utils/content-hash.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import {
   attachReservedToolSpanIds,
-  ReservedToolSpanIdGenerator,
-} from '../../../src/flushers/tool-span-id-reservation.js';
+  ReservedSpanIdGenerator,
+} from '../../../src/flushers/span-id-reservation.js';
 
 const SID = 'ses_e2e';
 const UP_TRACE = '4bf92f3577b34da6a3ce929d0e0e4736';
@@ -122,7 +122,7 @@ describe('upstream-link e2e: stamp -> real converter reparents to upstream span'
 
     // 4. run the REAL converter
     const inMem = new InMemorySpanExporter();
-    const idGenerator = new ReservedToolSpanIdGenerator();
+    const idGenerator = new ReservedSpanIdGenerator();
     const provider = new BasicTracerProvider({
       idGenerator,
       spanProcessors: [new SimpleSpanProcessor(inMem)],

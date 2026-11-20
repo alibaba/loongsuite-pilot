@@ -1,21 +1,31 @@
+import { WorkspacePolicy } from './workspace-policy.js';
 import { EventEmitter } from 'node:events';
 import { ClientType } from '../types/index.js';
 import type { AnalyticsConfig, AgentDetectionEntry, AgentStopReason } from '../types/index.js';
 import { AgentControlManager } from './agent-control-manager.js';
 import { AgentDiscoveryService } from './agent-discovery-service.js';
 import { InputManager } from './input-manager.js';
+import { InterceptResultLinker } from './intercept-result-linker.js';
 import { StateStore } from '../checkpoints/state-store.js';
+import { interceptorToolVerdictPath } from '../interceptor/paths.js';
+import { shouldDeployInterceptorHooks } from '../interceptor/config.js';
+import { clearInterceptorRuntime } from '../interceptor/daemon/runtime.js';
+import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
+import { startInterceptorWorker, type InterceptorWorkerService } from '../interceptor/worker-service.js';
+import { InterceptorAlarmReporter } from '../interceptor/diagnostics.js';
+import { unavailableInterceptorStatus, type InterceptorStatus } from '../interceptor/status.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
-import {
-  areGrokBuildHookAssetsHealthy,
-  restoreGrokBuildHookAssets,
-} from '../deployment/grok-build-assets.js';
+import { resolveDeploymentScope, type DeploymentScopeMode } from '../deployment/deployment-scope.js';
+import { hookInstallAlarmKey, shouldRelayHookInstallAlarm } from '../deployment/hook-install-alarm.js';
+import { hookInstallResultPath, hookInstallSignalPath, markHookInstallAlarmSent, type HookInstallReport } from '../deployment/hook-install-service.js';
+import { readContainerIdentity } from '../utils/container-identity.js';
+import { areSystemHookAssetsHealthy, restoreSystemHookAssets } from '../deployment/system-hook-assets.js';
+import { supportsSystemTomlHooks } from '../deployment/system-toml-hooks.js';
 import {
   isAgentGatedEnabled as isAgentGatedEnabledIn,
   resolvePilotDir as resolvePilotDirIn,
 } from '../deployment/deploy-command.js';
-import { detectAgent } from '../deployment/detect-utils.js';
 import {
   ensureRegisteredPiSdkWrappers,
   isPiSdkRegistryBusyError,
@@ -36,7 +46,6 @@ import { MultiFlusher } from '../flushers/multi-flusher.js';
 import { buildOtlpTraceConfig } from './config-loader.js';
 
 // Concrete inputs
-import { QoderSqliteInput } from '../inputs/qoder-sqlite/qoder-sqlite-input.js';
 import { QoderCnSqliteInput } from '../inputs/qoder-cn-sqlite/qoder-cn-sqlite-input.js';
 import { QoderCnInput } from '../inputs/qoder-cn/qoder-cn-input.js';
 import { QoderCnTraceInput } from '../inputs/qoder-cn-trace/qoder-cn-trace-input.js';
@@ -48,8 +57,7 @@ import { QoderWorkTraceInput } from '../inputs/qoder-work-trace/qoder-work-trace
 import { QwenWorkCNInput } from '../inputs/qwen-work-cn/qwen-work-cn-input.js';
 import { QwenWorkCNTraceInput } from '../inputs/qwen-work-cn/qwen-work-cn-trace-input.js';
 import { QwenWorkCNSqliteInput } from '../inputs/qwen-work-cn/qwen-work-cn-sqlite-input.js';
-import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
-import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-session-input.js';
+import { QwenWorkCNCollaborationInput } from '../inputs/qwen-work-cn/qwen-work-cn-collaboration-input.js';
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
@@ -57,6 +65,7 @@ import { GrokBuildLogInput } from '../inputs/grok-build-log/grok-build-log-input
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
 import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
+import { CopilotLogInput } from '../inputs/copilot-log/copilot-log-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
@@ -68,6 +77,7 @@ import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
+import { DoubaoWorkInput } from '../inputs/doubao-work/doubao-work-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -75,6 +85,7 @@ import { TraceLinker } from './upstream-link/trace-linker.js';
 import { AcpCorrelateRetentionService } from './upstream-link/acp-correlate-retention-service.js';
 import {
   anyAgentMultimodalEnabled,
+  createDelegatedOssUploader,
   createUploader,
   isAgentMultimodalEnabled,
   MultimodalProcessor,
@@ -113,15 +124,14 @@ export class Orchestrator extends EventEmitter {
   /**
    * Listener id → the agent it belongs to, which is also the key `config.agents`
    * gates on. Both roles are why the values are what they are and not simply the
-   * input's own `agentType`: the four qoder listeners deliberately roll up to one
-   * `qoder` agent, and renaming a value here would silently re-point a gate.
+   * input's own `agentType`: several agents deliberately roll several listeners up
+   * to one agent name, and renaming a value here would silently re-point a gate.
    *
    * A listener missing from this map is not an error — snapshot reporting falls
    * back to the input's `agentType`. Entries exist for listeners whose agent name
    * differs from that, plus the ones a gate looks up.
    */
   private static readonly LISTENER_AGENT_MAP: Record<string, string> = {
-    'qoder-sqlite': 'qoder',
     'qoder-trace': 'qoder',
     'qoder-cn-trace': 'qoder-cn',
     'qoder-cn-sqlite': 'qoder-cn',
@@ -137,14 +147,14 @@ export class Orchestrator extends EventEmitter {
     'qwen-work-cn-trace': 'qwen-work-cn',
     'qwen-work-cn-hook': 'qwen-work-cn',
     'qwen-work-cn-sqlite': 'qwen-work-cn',
-    'qoder-cli-hook': 'qoder',
-    'qoder-cli-session': 'qoder',
+    'qwen-work-cn-collaboration': 'qwen-work-cn',
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
     'grok-build-log': 'grok-build',
     'codex-transcript': 'codex',
     'kiro-cli-log': 'kiro-cli',
     'kiro-cli-session': 'kiro-cli',
+    'copilot-log': 'copilot',
     'opencode-log': 'opencode',
     'pi-coding-agent-log': 'pi-coding-agent',
     'mimo-code-log': 'mimo-code',
@@ -155,6 +165,7 @@ export class Orchestrator extends EventEmitter {
     'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
+    'doubao-work': 'doubao-work',
     'dsh-log': 'dsh',
   };
 
@@ -169,15 +180,28 @@ export class Orchestrator extends EventEmitter {
   private acpCorrelateRetentionService?: AcpCorrelateRetentionService;
   private legacySlsFailedLogCleanupService: LegacySlsFailedLogCleanupService | null = null;
   private hookWatchdog!: HookWatchdog;
+  private hookWatchdogTargetKey = '';
+  private deploymentScope: DeploymentScopeMode = 'auto';
+  /** Agents a named install actually wrote. Raced deployAll records are not in this set. */
+  private recordedAgentIds = new Set<string>();
+  private hookInstallSignalTimer: ReturnType<typeof setInterval> | null = null;
+  private hookInstallSignalMtime = 0;
+  private hookInstallSignalEpoch = 0;
+  private hookInstallSignalPoll: Promise<void> | null = null;
+  private readonly relayedHookInstallAlarms = new Set<string>();
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
   private localWorkerActivationService: LocalWorkerActivationService | null = null;
   private pipelineManager: PipelineManager | null = null;
   private metricsWriter!: MetricsWriter;
   private alarmManager!: AlarmManager;
+  private interceptorAlarmReporter!: InterceptorAlarmReporter;
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
   private dashboardServer: DashboardServer | null = null;
+  private interceptorService: InterceptorWorkerService | null = null;
+  private lastInterceptorStatus: InterceptorStatus | null = null;
+  private verdictStore: ToolVerdictStore | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
@@ -213,23 +237,48 @@ export class Orchestrator extends EventEmitter {
     );
     await this.agentControlManager.load();
 
+    // Journal replay during flusher startup must use the current privacy rules.
+    this.inputManager = new InputManager();
+    this.inputManager.setConfiguredUserId(this.config.userId);
+    const workspacePolicy = new WorkspacePolicy(
+      this.config.privacy?.excludeWorkspaces,
+      path.join(this.dataDir, 'state', 'workspace-exclusions'),
+    );
+    this.inputManager.setWorkspacePolicy(workspacePolicy);
+    this.inputManager.setAgentsConfig(this.config.agents);
+    this.inputManager.setMaskConfig(
+      this.config.mask ?? {
+        mode: 'none',
+        types: [],
+        replacementMode: 'placeholder',
+      },
+    );
+
     // 3. Build flushers
     this.globalAttributesProvider = new GlobalAttributesProvider(
       this.config.globalSpanAttributes ?? {},
       path.join(this.dataDir, 'span-attributes.json'),
     );
-    this.flusher = await this.buildFlusher();
+    this.flusher = await this.buildFlusher(this.readPackageVersion());
 
     // 4. Build InputManager & AlarmManager
     const version = readInstalledVersion(this.dataDir);
     this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userId: this.config.userId });
+    this.interceptorAlarmReporter = new InterceptorAlarmReporter(this.alarmManager);
+    this.lastInterceptorStatus = null;
 
-    this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
-    this.inputManager.setConfiguredUserId(this.config.userId);
-    this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
-    this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
+    this.verdictStore = new ToolVerdictStore(interceptorToolVerdictPath(this.dataDir));
+    this.verdictStore.restore();
+    const interceptorEnabled = shouldDeployInterceptorHooks(this.config.interceptor);
+    this.inputManager.setInterceptResultLinker(
+      new InterceptResultLinker(
+        this.verdictStore,
+        interceptorEnabled,
+        () => this.interceptorService?.syncVerdicts() ?? Promise.resolve(),
+      ),
+    );
 
     // Upstream trace linking (opt-in): stamp trace_id/parent_span_id from the
     // acp-correlate store so agent spans reparent under the upstream span.
@@ -254,11 +303,40 @@ export class Orchestrator extends EventEmitter {
       logger.warn('agents enable multimodal but global multimodal infra is missing; inputs will not convert media to uri');
     } else if (multimodalConfig && agentsWantMultimodal) {
       try {
-        const uploader = createUploader(multimodalConfig);
-        const processor = new MultimodalProcessor(multimodalConfig.storageBasePath, uploader);
+        let processor: MultimodalProcessor;
+        if (multimodalConfig.storage.type === 'delegatedOss') {
+          const runtime = createDelegatedOssUploader(
+            multimodalConfig.storage,
+            multimodalConfig.storageBasePath,
+          );
+          const eventBase = await runtime.resolveStorageBase();
+          processor = new MultimodalProcessor(
+            eventBase.ok ? eventBase.storageBasePath : undefined,
+            runtime.uploader,
+            runtime.resolveStorageBase,
+          );
+          if (eventBase.ok) {
+            logger.info('multimodal processor enabled', {
+              type: multimodalConfig.storage.type,
+              mode: multimodalConfig.storage.auth.mode,
+              storageBasePath: eventBase.storageBasePath,
+            });
+          } else {
+            logger.warn('multimodal processor waiting for delegatedOss bucket', {
+              error: eventBase.error,
+            });
+          }
+        } else {
+          const uploader = createUploader(multimodalConfig);
+          processor = new MultimodalProcessor(multimodalConfig.storageBasePath, uploader);
+          logger.info('multimodal processor enabled', {
+            type: multimodalConfig.storage.type,
+            mode: multimodalConfig.storage.auth.mode,
+            storageBasePath: multimodalConfig.storageBasePath,
+          });
+        }
         this.inputManager.setMultimodalProcessor(processor);
         this.multimodalProcessor = processor;
-        logger.info('multimodal processor enabled', { uploader: multimodalConfig.uploader });
       } catch (err) {
         logger.error('multimodal init failed; disabled for process', { error: String(err) });
       }
@@ -270,8 +348,23 @@ export class Orchestrator extends EventEmitter {
     this.deploymentManager = new DeploymentManager({
       dataDir: this.dataDir,
       pilotDir,
+      installedBy: 'daemon',
+      deployInterceptorHooks: shouldDeployInterceptorHooks(this.config.interceptor),
+      doubaoWork: this.config.listeners['doubao-work'],
     });
-    await this.deploymentManager.deployAll(def => this.isAgentGatedEnabled(def.id));
+    await this.deploymentManager.loadDefinitions();
+    await this.refreshDeploymentScope();
+    await this.reconcileRecordedAgents();
+    if (this.deploymentScope === 'auto') {
+      await this.deploymentManager.deployAll(def => this.isAgentGatedEnabled(def.id));
+    } else {
+      logger.info('recorded deployment scope; skipping deployAll');
+    }
+
+    // Build the watchdog immediately after deployment so its constructor records
+    // the exact post-deploy Codex config.toml fingerprint. The watchdog itself is
+    // started later, after discovery and retention services are ready.
+    this.hookWatchdog = this.createHookWatchdog();
 
     this.localWorkerActivationService = new LocalWorkerActivationService({
       dataDir: this.dataDir,
@@ -306,20 +399,13 @@ export class Orchestrator extends EventEmitter {
     await this.agentDiscoveryService.start();
 
     // 9. Start log retention service
-    this.logRetentionService = new LogRetentionService(this.dataDir, this.config.retention);
+    this.logRetentionService = new LogRetentionService(this.dataDir, this.config.retention, this.stateStore,
+      token => this.flusher?.hasPendingHermesSource(token) ?? false);
     this.logRetentionService.start();
 
     // 10. Start hook watchdog (periodically restores hooks overwritten by other tools)
-    const hookWatchdogTargets = this.buildHookWatchdogTargets();
-    const interceptTargets = [
-      ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
-      ...this.buildGrokBuildInterceptTargets(),
-      ...this.buildPluginInjectInterceptTargets(),
-      ...this.buildDirectoryPluginInterceptTargets(),
-      ...this.buildDshYamlPatchInterceptTargets(),
-    ];
-    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
     this.hookWatchdog.start();
+    this.startHookInstallSignalWatch();
 
     // 11. Start updater watchdog only when resolved auto-update is enabled.
     if (this.config.autoUpdate?.enabled) {
@@ -332,20 +418,24 @@ export class Orchestrator extends EventEmitter {
     }
 
     // 12. Start pipeline subsystem (disabled by default)
-    if (this.config.pipeline.enabled) {
+    if (this.config.pipeline.enabled || this.config.pipeline.multica?.discoverLocalSources) {
       this.pipelineManager = new PipelineManager({
         configDir: path.join(this.dataDir, 'configs', 'local'),
         stateDir: path.join(this.dataDir, 'state', 'pipeline'),
         failedLogDir: path.join(this.dataDir, 'logs', 'pipeline-failed'),
         dataDir: this.dataDir,
         pipelineConfig: this.config.pipeline,
+        sls: this.config.flushers.sls,
+        workspacePolicy,
+        hostSn: this.config.hostSn,
+        hostIdentityTags: this.config.hostIdentityTags,
       });
       await this.pipelineManager.start();
     } else {
       logger.info('pipeline subsystem disabled, skipping');
     }
 
-    // 13. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
+    // 13. Prepare metrics writer; its first L1 follows the interceptor startup attempt.
     const slsFlusher = this.getSlsFlusher();
     if (slsFlusher) slsFlusher.setAlarmManager(this.alarmManager);
     this.metricsWriter = new MetricsWriter({
@@ -354,10 +444,14 @@ export class Orchestrator extends EventEmitter {
       userId: this.config.userId,
       canaryPolicy: this.config.autoUpdate?.canaryPolicy ?? '',
       getSnapshot: () => this.buildDataflowSnapshot(),
+      getTraceRuntimeSnapshot: () => this.flusher?.getTraceRuntimeSnapshot() ?? [],
+      getInterceptorStatus: () => this.readInterceptorStatus(),
       alarmManager: this.alarmManager,
       agentsConfig: this.config.agents,
       slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
       cmsWorkspace: this.config.cms?.workspace ?? '',
+      hostSn: this.config.hostSn,
+      hostIdentityTags: this.config.hostIdentityTags,
       // Same condition as the updater watchdog above, deliberately: whether an updater is
       // supposed to exist decides both whether we restart it and whether its absence is
       // worth an alarm. Auto-update resolves to disabled whenever no package source is
@@ -365,13 +459,17 @@ export class Orchestrator extends EventEmitter {
       // there is the expected state, not a fault.
       autoUpdateEnabled: this.config.autoUpdate?.enabled ?? false,
     });
-    await this.metricsWriter.start();
-
     // 14. Always publish runtime health for service managers. The status bar UI
     // may be disabled, but Windows Task Scheduler still needs runtime.json to
     // distinguish a healthy collector from a task whose child process died.
     const packageVersion = this.readPackageVersion();
-    this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
+    const packageGitCommit = this.readPackageGitCommit();
+    this.runtimeWriter = new RuntimeWriter(
+      this.dataDir,
+      this.config.statusBar,
+      packageVersion,
+      packageGitCommit,
+    );
     this.runtimeWriter.start();
 
     // MetricsSummaryWriter is a collector-owned source shared by every local
@@ -384,18 +482,41 @@ export class Orchestrator extends EventEmitter {
     );
     this.metricsSummaryWriter.start();
 
-    // The local dashboard shares the collector lifecycle and is non-fatal when
+    // The opt-in dashboard shares the collector lifecycle and is non-fatal when
     // its loopback port is unavailable. It never opens the system browser.
-    this.dashboardServer = new DashboardServer({
-      dataDir: this.dataDir,
-      assetPath: path.join(pilotDir, 'assets', 'dashboard', 'index.html'),
-      port: this.config.dashboard.port,
-    });
-    await this.dashboardServer.start().catch(err => {
-      logger.warn('dashboard start failed (non-fatal)', { error: String(err) });
-    });
+    if (this.config.dashboard.enabled) {
+      this.dashboardServer = new DashboardServer({
+        dataDir: this.dataDir,
+        assetPath: path.join(pilotDir, 'assets', 'dashboard', 'index.html'),
+        port: this.config.dashboard.port,
+      });
+      await this.dashboardServer.start().catch(err => {
+        logger.warn('dashboard start failed (non-fatal)', { error: String(err) });
+      });
+    }
 
-    // Only the native macOS menu bar app remains optional.
+    // The startup mode gates the entire interceptor, including cached local rules.
+    if (this.config.interceptor.mode === 'all') {
+      this.interceptorService = await startInterceptorWorker({
+        dataDir: this.dataDir,
+        version: packageVersion,
+        gitCommit: packageGitCommit || undefined,
+        verdictStore: this.verdictStore ?? undefined,
+        mode: this.config.interceptor.mode,
+        emitBlockedPrompt: (entry, signal) => this.inputManager.flushPreparedEntries([entry], signal),
+        onDiagnostic: this.interceptorAlarmReporter.record,
+      }).catch(err => {
+        logger.warn('interceptor start failed (non-fatal)', { error: String(err) });
+        return null;
+      });
+    } else {
+      clearInterceptorRuntime(this.dataDir);
+    }
+
+    // Report the interceptor startup outcome once, including disabled or failed starts.
+    await this.metricsWriter.start();
+
+    // The native macOS menu bar app has its own switch.
     if (this.config.statusBar.enabled) {
       if (process.platform === 'darwin') {
         this.statusBarAppManager = new StatusBarAppManager({ dataDir: this.dataDir, packageVersion });
@@ -446,24 +567,53 @@ export class Orchestrator extends EventEmitter {
     if (!this.isRunning) return;
     logger.info('stopping orchestrator');
 
+    // Cancel signal work before the first shutdown await. An old poll may be
+    // waiting on deployment I/O and must never restart the stopped watchdog.
+    this.hookWatchdog?.stop();
+    await this.stopHookInstallSignalWatch();
+
     await this.pipelineManager?.stop();
-    await this.metricsWriter?.stop();
-    await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
+    await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(err => {
+      logger.warn('status bar app stop failed during orchestrator shutdown', { error: String(err) });
+    });
     await this.dashboardServer?.stop();
     this.dashboardServer = null;
+    await this.interceptorService?.stop().catch(err => {
+      logger.warn('interceptor stop failed during orchestrator shutdown', { error: String(err) });
+    });
+    try {
+      if (this.interceptorService?.getStatus) this.lastInterceptorStatus = await this.interceptorService.getStatus();
+    } catch {
+      this.lastInterceptorStatus = unavailableInterceptorStatus(this.config.interceptor.mode === 'all');
+      logger.warn('final interceptor status unavailable');
+    }
+    // The worker is the only checkpoint writer. The collector cache is an IPC mirror.
+    this.interceptorService = null;
+    this.verdictStore = null;
     await this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
-    this.hookWatchdog?.stop();
     this.legacySlsFailedLogCleanupService?.stop();
     this.legacySlsFailedLogCleanupService = null;
     this.logRetentionService?.stop();
     this.acpCorrelateRetentionService?.stop();
     await this.localWorkerActivationService?.stop();
     await this.deploymentManager?.stopWorkers();
+    this.inputManager?.cancelPendingOutputs();
     await this.agentDiscoveryService?.stop();
     await this.inputManager?.stopAll();
+    // The final dataflow window must observe the last serialized collect and
+    // entry queue drain, while the flusher counters are still available.
+    try {
+      await this.metricsWriter?.stop();
+    } catch (err) {
+      // Metrics are best-effort. A failed final snapshot must not prevent the
+      // data flusher from draining or the checkpoint store from being saved.
+      logger.warn('metrics writer stop failed during orchestrator shutdown', {
+        error: String(err),
+      });
+    }
     await this.flusher?.shutdown();
     await this.stateStore?.save();
 
@@ -474,6 +624,11 @@ export class Orchestrator extends EventEmitter {
 
   getInputManager(): InputManager {
     return this.inputManager;
+  }
+
+  private async readInterceptorStatus(): Promise<InterceptorStatus> {
+    if (this.interceptorService?.getStatus) return this.interceptorService.getStatus();
+    return this.lastInterceptorStatus ?? unavailableInterceptorStatus(this.config.interceptor.mode === 'all');
   }
 
   getAgentControlManager(): AgentControlManager {
@@ -495,6 +650,137 @@ export class Orchestrator extends EventEmitter {
     this.inputManager?.setUserId(userId);
   }
 
+  private scopeAllows(agentId: string): boolean {
+    if (this.deploymentScope !== 'recorded') return true;
+    return this.recordedAgentIds.has(agentId);
+  }
+
+  private async refreshDeploymentScope(cancelled: () => boolean = () => false): Promise<void> {
+    const result = await readJsonFile<HookInstallReport>(hookInstallResultPath(this.dataDir));
+    if (cancelled()) return;
+    this.deploymentScope = resolveDeploymentScope(readContainerIdentity(), result);
+    this.recordedAgentIds = this.deploymentScope === 'recorded'
+      ? this.allowListForRecorded(result)
+      : new Set();
+    await this.relayHookInstallAlarm(result, cancelled);
+  }
+
+  /** Named successes, plus image-build records. Daemon records from a raced deployAll stay out. */
+  private allowListForRecorded(result: HookInstallReport | null): Set<string> {
+    const allowed = new Set<string>();
+    for (const agent of result?.agents ?? []) {
+      if (agent.status === 'ok' || agent.status === 'up-to-date') allowed.add(agent.id);
+    }
+    for (const def of this.deploymentManager.getDefinitions()) {
+      if (this.deploymentManager.recordInstalledBy(def.id) === 'build') allowed.add(def.id);
+    }
+    return allowed;
+  }
+
+  private async relayHookInstallAlarm(result: HookInstallReport | null, cancelled: () => boolean = () => false): Promise<void> {
+    if (cancelled() || !shouldRelayHookInstallAlarm(result, this.relayedHookInstallAlarms) || !result) return;
+    const marked = await markHookInstallAlarmSent(hookInstallResultPath(this.dataDir), result.ts);
+    if (marked === 'stale') return;
+    this.relayedHookInstallAlarms.add(hookInstallAlarmKey(result));
+    if (marked !== 'marked') return;
+    const failed = result.agents.filter(agent => agent.status === 'failed').map(agent => agent.id).join(',');
+    this.alarmManager.record(
+      'HOOK_INSTALL_ALARM',
+      '2',
+      `hook install failed identity=${result.identity} ts=${result.ts} agents=${failed}`,
+    );
+  }
+
+  /**
+   * Remove daemon records that raced ahead of a named install, and agents this
+   * named result no longer counts as installed. A later install keeps earlier
+   * successes in the result file, so those ids stay in the allow list and are
+   * not uninstalled. Build records are in the allow list as well.
+   */
+  private async reconcileRecordedAgents(cancelled: () => boolean = () => false): Promise<void> {
+    if (this.deploymentScope !== 'recorded') return;
+    for (const def of this.deploymentManager.getDefinitions()) {
+      if (cancelled()) return;
+      if (!this.deploymentManager.hasRecord(def.id)) continue;
+      if (this.recordedAgentIds.has(def.id)) continue;
+      if (this.deploymentManager.recordInstalledBy(def.id) === 'build') continue;
+      try {
+        await this.deploymentManager.undeployAgent(def);
+      } catch (err) {
+        logger.warn('failed to remove agent outside recorded scope', { agentId: def.id, error: String(err) });
+      }
+    }
+    if (cancelled()) return;
+    await this.agentDiscoveryService?.refresh('recorded-scope');
+  }
+
+  private startHookInstallSignalWatch(): void {
+    const signal = hookInstallSignalPath(this.dataDir);
+    const epoch = ++this.hookInstallSignalEpoch;
+    const tick = () => { void this.pollHookInstallSignal(signal, epoch); };
+    tick();
+    this.hookInstallSignalTimer = setInterval(tick, 1000);
+    this.hookInstallSignalTimer.unref?.();
+  }
+
+  private async stopHookInstallSignalWatch(): Promise<void> {
+    this.hookInstallSignalEpoch++;
+    if (this.hookInstallSignalTimer) clearInterval(this.hookInstallSignalTimer);
+    this.hookInstallSignalTimer = null;
+    const inFlight = this.hookInstallSignalPoll;
+    this.hookInstallSignalPoll = null;
+    if (!inFlight) return;
+    // The current filesystem operation may be stalled. Drain it when possible,
+    // but keep collector shutdown bounded; the epoch invalidates its continuation.
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        inFlight,
+        new Promise<void>(resolve => { timeout = setTimeout(resolve, 5000); timeout.unref?.(); }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  private pollHookInstallSignal(signal: string, epoch = this.hookInstallSignalEpoch): Promise<void> {
+    if (epoch !== this.hookInstallSignalEpoch) return Promise.resolve();
+    if (this.hookInstallSignalPoll) return this.hookInstallSignalPoll;
+    const poll = this.handleHookInstallSignal(signal, epoch);
+    this.hookInstallSignalPoll = poll;
+    const clear = () => { if (this.hookInstallSignalPoll === poll) this.hookInstallSignalPoll = null; };
+    void poll.then(clear, clear);
+    return poll;
+  }
+
+  private async handleHookInstallSignal(signal: string, epoch: number): Promise<void> {
+    const cancelled = () => epoch !== this.hookInstallSignalEpoch;
+    let mtime = 0;
+    try {
+      mtime = fsSync.statSync(signal).mtimeMs;
+    } catch {
+      return;
+    }
+    if (mtime === this.hookInstallSignalMtime) return;
+    try {
+      await this.deploymentManager.reloadState();
+      if (cancelled()) return;
+      await this.refreshDeploymentScope(cancelled);
+      if (cancelled()) return;
+      await this.reconcileRecordedAgents(cancelled);
+      if (cancelled()) return;
+      if (this.hookWatchdog && this.currentHookWatchdogTargetKey() !== this.hookWatchdogTargetKey) {
+        const next = this.createHookWatchdog();
+        this.hookWatchdog.stop();
+        this.hookWatchdog = next;
+        this.hookWatchdog.start();
+      }
+      this.hookInstallSignalMtime = mtime;
+    } catch (err) {
+      logger.warn('hook install signal handling failed', { error: String(err) });
+    }
+  }
+
   /**
    * Build detection entries for agent definitions that haven't been deployed yet.
    * When a new agent is discovered at runtime, triggers deploySingle().
@@ -514,9 +800,13 @@ export class Orchestrator extends EventEmitter {
         id: entryId,
         type: 'deploy-detection',
         watchPaths,
-        isAvailable: () => detectAgent(def.detection),
-        enabled: () => this.isAgentGatedEnabled(def.id),
+        isAvailable: async () => {
+          if (this.deploymentScope === 'recorded') return false;
+          return this.deploymentManager.isAgentDetected(def);
+        },
+        enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         start: async () => {
+          if (this.deploymentScope === 'recorded') return;
           logger.info('new agent discovered, deploying', { agentId: def.id });
           await this.deploymentManager.deploySingle(def);
         },
@@ -528,6 +818,26 @@ export class Orchestrator extends EventEmitter {
     return entries;
   }
 
+  private currentHookWatchdogTargetKey(): string {
+    return JSON.stringify(this.deploymentManager.getDefinitions().filter(def => def.hook).map(def => {
+      const hook = this.deploymentManager.effectiveDefinition(def).hook!;
+      return [def.id, hook.scope ?? 'user', hook.settingsPath];
+    }));
+  }
+
+  private createHookWatchdog(): HookWatchdog {
+    const watchdog = new HookWatchdog(this.config.hookWatchdog, this.buildHookWatchdogTargets(), [
+      ...HookWatchdog.defaultInterceptTargets(this.dataDir, id => this.isAgentGatedEnabled(id) && this.scopeAllows(id)),
+      ...this.buildGrokBuildInterceptTargets(),
+      ...this.buildPluginInjectInterceptTargets(),
+      ...this.buildDirectoryPluginInterceptTargets(),
+      ...this.buildCopilotPluginInterceptTargets(),
+      ...this.buildDshYamlPatchInterceptTargets(),
+    ]);
+    this.hookWatchdogTargetKey = this.currentHookWatchdogTargetKey();
+    return watchdog;
+  }
+
   private buildHookWatchdogTargets(): PluginCheckTarget[] {
     const defs = this.deploymentManager.getDefinitions();
     const targets: PluginCheckTarget[] = [];
@@ -536,7 +846,7 @@ export class Orchestrator extends EventEmitter {
       if (def.deployMode !== 'hook' || !def.hook) continue;
       // Grok Build uses snake_case event keys and a multi-file hook runtime.
       // Its exact config and asset checks run through a dedicated intercept target.
-      if (def.id === 'grok-build') continue;
+      if (def.id === 'grok-build' || this.deploymentManager.effectiveDefinition(def).hook?.scope === 'system') continue;
 
       const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
       targets.push({
@@ -550,45 +860,46 @@ export class Orchestrator extends EventEmitter {
         // Runtime gate: a user who has turned this agent off (config.agents[id]
         // .enabled === false) must never have its hook re-injected. Evaluated on
         // each check so a config change takes effect without rebuilding targets.
-        enabled: () => this.isAgentGatedEnabled(def.id),
+        enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
+        ...(def.id === 'codex' && def.hook.trustToml ? {
+          changeWatchPath: resolveHome(def.hook.trustToml.configPath),
+          // Reuse the deployment strategy's exact hook/trust inspection. The
+          // watchdog only decides when to run it; it owns no TOML logic.
+          needsRepairOnChange: () => this.deploymentManager.needsRedeploy(def),
+        } : {}),
       });
     }
 
     return targets;
   }
 
-  /** Grok Build-specific config and hook-runtime integrity checks. */
+  /** Native TOML and multi-file runtime checks cannot use a JSON watchdog. */
   private buildGrokBuildInterceptTargets(): InterceptCheckTarget[] {
-    const def = this.deploymentManager.getDefinitions().find(candidate => candidate.id === 'grok-build');
-    if (!def?.hook) return [];
     const pilotDir = this.resolvePilotDir();
-
-    return [{
-      id: 'hook:grok-build',
-      enabled: () => this.isAgentGatedEnabled(def.id),
-      precondition: () => this.deploymentManager.isAgentDetected(def),
-      check: async () =>
-        !(await this.deploymentManager.needsRedeploy(def))
-        && await areGrokBuildHookAssetsHealthy(pilotDir, this.dataDir),
-      repair: async () => {
-        await restoreGrokBuildHookAssets(pilotDir, this.dataDir);
-        const result = await this.deploymentManager.deploySingle(def);
-        if (!result.success) {
-          throw new Error(result.error ?? 'failed to restore Grok Build hook');
-        }
-        if (
-          await this.deploymentManager.needsRedeploy(def)
-          || !(await areGrokBuildHookAssetsHealthy(pilotDir, this.dataDir))
-        ) {
-          throw new Error('Grok Build hook remains unhealthy after repair');
-        }
-      },
-      cleanup: async () => {
-        const removed = await this.deploymentManager.undeployAgent(def);
-        if (!removed) throw new Error('failed to remove Grok Build hook');
-      },
-    }];
+    return this.deploymentManager.getDefinitions()
+      .filter(def => supportsSystemTomlHooks(def.id) && def.hook
+        && (def.id === 'grok-build' || this.deploymentManager.effectiveDefinition(def).hook?.scope === 'system'))
+      .map(def => ({
+        id: `hook:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
+        precondition: () => this.deploymentManager.isAgentDetected(def),
+        check: async () =>
+          !(await this.deploymentManager.needsRedeploy(def))
+          && await areSystemHookAssetsHealthy(def.id, pilotDir, this.dataDir),
+        repair: async () => {
+          await restoreSystemHookAssets(def.id, pilotDir, this.dataDir);
+          const result = await this.deploymentManager.repairHookSettings(def);
+          if (!result.success || await this.deploymentManager.needsRedeploy(def)) {
+            throw new Error(result.error ?? `Failed to restore ${def.id} hook`);
+          }
+        },
+        cleanup: async () => {
+          if (!(await this.deploymentManager.undeployAgent(def))) {
+            throw new Error(`Failed to remove ${def.id} hook`);
+          }
+        },
+      }));
   }
 
   /**
@@ -612,7 +923,7 @@ export class Orchestrator extends EventEmitter {
 
       targets.push({
         id: `plugin-inject:${def.id}`,
-        enabled: () => this.isAgentGatedEnabled(def.id),
+        enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         precondition: async () => {
           // Only self-heal when the plugin asset is actually deployed AND the
           // agent is present. Otherwise repair would inject a spec pointing at
@@ -622,7 +933,7 @@ export class Orchestrator extends EventEmitter {
             && !(await fileExists(pluginPath))
             && !(await directoryExists(pluginPath))
           ) return false;
-          return detectAgent(def.detection);
+          return this.deploymentManager.isAgentDetected(def);
         },
         check: async () => {
           // Healthy == spec still present in the agent's config file.
@@ -630,6 +941,9 @@ export class Orchestrator extends EventEmitter {
         },
         repair: async () => {
           const result = await this.deploymentManager.deploySingle(def);
+          if (result.skipped && result.reason === 'not-detected') {
+            throw new Error(`Agent disappeared before plugin repair for ${def.id}`);
+          }
           if (!result.success) {
             throw new Error(result.error ?? `re-inject failed for ${def.id}`);
           }
@@ -644,6 +958,26 @@ export class Orchestrator extends EventEmitter {
     return targets;
   }
 
+  private buildCopilotPluginInterceptTargets(): InterceptCheckTarget[] {
+    if (process.platform === 'win32') return [];
+    return this.deploymentManager.getDefinitions()
+      .filter(def => def.deployMode === 'copilot-plugin' && def.copilotPlugin)
+      .map(def => ({
+        id: `copilot-plugin:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
+        precondition: () => this.deploymentManager.isAgentDetected(def),
+        check: async () => !(await this.deploymentManager.needsRedeploy(def)),
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          if (!result.success || result.skipped) throw new Error(result.error ?? 'Copilot disappeared before plugin repair');
+        },
+        cleanup: async () => {
+          if (!this.deploymentManager.hasRecord(def.id)) return;
+          if (!(await this.deploymentManager.undeployAgent(def))) throw new Error('Copilot plugin cleanup incomplete');
+        },
+      }));
+  }
+
   /** Self-heal managed native plugin directories, such as Hermes plugins. */
   private buildDirectoryPluginInterceptTargets(): InterceptCheckTarget[] {
     const defs = this.deploymentManager.getDefinitions();
@@ -654,13 +988,16 @@ export class Orchestrator extends EventEmitter {
 
       targets.push({
         id: `directory-plugin:${def.id}`,
-        enabled: () => this.isAgentGatedEnabled(def.id),
+        enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         precondition: async () =>
           (await directoryExists(def.directoryPlugin!.sourceDir))
-          && (await detectAgent(def.detection)),
+          && (await this.deploymentManager.isAgentDetected(def)),
         check: async () => !(await this.deploymentManager.needsRedeploy(def)),
         repair: async () => {
           const result = await this.deploymentManager.deploySingle(def);
+          if (result.skipped && result.reason === 'not-detected') {
+            throw new Error(`Agent disappeared before directory plugin repair for ${def.id}`);
+          }
           if (!result.success) {
             throw new Error(result.error ?? `directory plugin repair failed for ${def.id}`);
           }
@@ -681,7 +1018,7 @@ export class Orchestrator extends EventEmitter {
       const pluginPath = resolveHome(def.dshYamlPatch.pluginSource);
       targets.push({
         id: `dsh-yaml-patch:${def.id}`,
-        enabled: () => this.isAgentGatedEnabled(def.id),
+        enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         precondition: async () =>
           (await fileExists(pluginPath))
           && (await this.deploymentManager.isAgentDetected(def)),
@@ -721,12 +1058,12 @@ export class Orchestrator extends EventEmitter {
     return path.isAbsolute(resolved) ? resolved : null;
   }
 
-  private async buildFlusher(): Promise<BaseFlusher> {
+  private async buildFlusher(pilotVersion: string): Promise<BaseFlusher> {
     const flushers: BaseFlusher[] = [];
     const cfg = this.config.flushers;
 
     if (cfg.sls?.enabled && this.config.collectLog !== false) {
-      const r = new SlsFlusher(cfg.sls, this.dataDir);
+      const r = new SlsFlusher(cfg.sls, this.dataDir, pilotVersion, this.config.hostSn, this.config.hostIdentityTags);
       await r.start().catch(err => logger.warn('sls flusher start failed', { error: String(err) }));
       flushers.push(r);
     }
@@ -747,27 +1084,28 @@ export class Orchestrator extends EventEmitter {
       const otlpTraceCfg = buildOtlpTraceConfig(this.config);
       if (otlpTraceCfg?.enabled && otlpTraceCfg.endpoints.length > 0) {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
+        const { CodexTurnJournal } = await import('../flushers/codex-turn-journal.js');
         const r = new OtlpTraceFlusher(
           { ...otlpTraceCfg, dataDir: this.dataDir },
           this.globalAttributesProvider,
+          undefined,
+          new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
+            ['codex', 'hermes', 'openclaw']),
+          entries => this.inputManager!.prepareRestoredEntries(entries),
+          sourceToken => this.inputManager!.confirmHermesSourceDrained(sourceToken),
         );
+        await r.start();
         flushers.push(r);
       }
     } catch (err) {
+      // Losing a retained Codex turn is not a malformed-config fallback.
+      if ((err as Error)?.name === 'CodexTurnJournalError') throw err;
       // Never let a malformed trace config take down the other flushers.
       logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
     }
 
     if (flushers.length === 0) {
-      logger.warn('no flushers enabled, using JSONL fallback');
-      const fallback = new JsonlFlusher({
-        enabled: true,
-        outputDir: path.join(this.dataDir, 'logs', 'output'),
-        rotateDaily: true,
-        maxFileSizeMb: 100,
-      });
-      await fallback.start().catch(err => logger.warn('jsonl fallback flusher start failed', { error: String(err) }));
-      flushers.push(fallback);
+      logger.warn('no flushers enabled, collected events will not be exported');
     }
 
     return flushers.length === 1 ? flushers[0] : new MultiFlusher(flushers);
@@ -813,7 +1151,10 @@ export class Orchestrator extends EventEmitter {
     }
 
     // --- Qoder CLI hooks ---
-    const qoderCliAvailable = await QoderCliInput.checkAvailability();
+    // The hook writes the JSONL that qoder-trace merges, so availability is the
+    // same `~/.qoder` probe the trace input uses; keep them reading from one
+    // definition so the hook cannot be skipped for an agent we then collect.
+    const qoderCliAvailable = await QoderTraceInput.checkAvailability();
     if (qoderCliAvailable) {
       const defs = HookManager.buildQoderCliHooks(this.dataDir);
       for (const def of defs) {
@@ -826,7 +1167,7 @@ export class Orchestrator extends EventEmitter {
           } else {
             this.alarmManager.record('HOOK_INSTALL_ALARM', '2',
               `qoder-cli hook install failed: ${def.hookJsonPath.join('.')}`,
-              { input_name: 'qoder-cli-hook' });
+              { input_name: 'qoder-trace' });
           }
         }
       }
@@ -899,35 +1240,11 @@ export class Orchestrator extends EventEmitter {
     const entries: AgentDetectionEntry[] = [];
     const listenerCfg = this.config.listeners;
 
-    // Qoder trace input mutual exclusion closure (used by sqlite/hook/session guards below)
-    const qoderTraceEnabled = () =>
-      this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-trace']) &&
-      this.agentControlManager.resolveEnabled(
-        'qoder-trace',
-        listenerCfg['qoder-trace']?.enabled ?? true,
-      );
-
-    // --- Qoder (SQLite token usage polling, fallback when trace is disabled) ---
-    const qoderSqliteInput = new QoderSqliteInput({ stateStore: this.stateStore });
-    this.inputManager.registerInput(qoderSqliteInput);
-    entries.push(
-      this.inputManager.buildDetectionEntry(qoderSqliteInput, {
-        watchPaths: QoderSqliteInput.getWatchPaths(),
-        isAvailable: QoderSqliteInput.checkAvailability,
-        enabled: () => !qoderTraceEnabled() &&
-          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-sqlite']) &&
-          this.agentControlManager.resolveEnabled(
-            'qoder-sqlite',
-            listenerCfg['qoder-sqlite']?.enabled ?? true,
-          ),
-        pollIntervalMs: listenerCfg['qoder-sqlite']?.pollInterval,
-      }),
-    );
-
     // --- Qoder Work CN Trace (multi-source merge, supersedes hook/log/sqlite) ---
     const qoderWorkTraceInput = new QoderWorkTraceInput({
       stateStore: this.stateStore,
       logDir: path.join(this.dataDir, 'logs', 'qoder-work', 'history'),
+      pollIntervalMs: listenerCfg['qoder-work-trace']?.pollInterval,
     });
     this.inputManager.registerInput(qoderWorkTraceInput);
     const qoderWorkTraceEnabled = () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-trace']) &&
@@ -953,7 +1270,7 @@ export class Orchestrator extends EventEmitter {
       );
 
     // --- QoderCN (SQLite token usage polling, fallback when trace is disabled) ---
-    const qoderCnSqliteInput = new QoderCnSqliteInput({ stateStore: this.stateStore });
+    const qoderCnSqliteInput = new QoderCnSqliteInput({ stateStore: this.stateStore, pollIntervalMs: listenerCfg['qoder-cn-sqlite']?.pollInterval });
     this.inputManager.registerInput(qoderCnSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderCnSqliteInput, {
@@ -970,7 +1287,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- QoderCN (IDE snapshot — file history + ai_tracker) — disabled when qoder-cn-trace is enabled ---
-    const qoderCnInput = new QoderCnInput({ stateStore: this.stateStore });
+    const qoderCnInput = new QoderCnInput({ stateStore: this.stateStore, pollIntervalMs: listenerCfg['qoder-cn']?.pollInterval });
     this.inputManager.registerInput(qoderCnInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderCnInput, {
@@ -990,7 +1307,9 @@ export class Orchestrator extends EventEmitter {
     const qoderCnLogDir = path.join(this.dataDir, 'logs', 'qoder-cn', 'history');
     const qoderCnTraceInput = new QoderCnTraceInput({
       stateStore: this.stateStore,
+      dataDir: this.dataDir,
       logDir: qoderCnLogDir,
+      pollIntervalMs: listenerCfg['qoder-cn-trace']?.pollInterval,
     });
     this.inputManager.registerInput(qoderCnTraceInput);
     entries.push(
@@ -1007,6 +1326,7 @@ export class Orchestrator extends EventEmitter {
     const qoderWorkInput = new QoderWorkInput({
       stateStore: this.stateStore,
       logDir: qoderWorkLogDir,
+      pollIntervalMs: listenerCfg['qoder-work']?.pollInterval,
     });
     this.inputManager.registerInput(qoderWorkInput);
     entries.push(
@@ -1024,7 +1344,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder Work (SDK Log tail) — disabled when CN trace is active ---
-    const qoderWorkLogInput = new QoderWorkLogInput({ stateStore: this.stateStore });
+    const qoderWorkLogInput = new QoderWorkLogInput({ stateStore: this.stateStore, pollIntervalMs: listenerCfg['qoder-work-log']?.pollInterval });
     this.inputManager.registerInput(qoderWorkLogInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkLogInput, {
@@ -1041,7 +1361,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder Work (SQLite agents.db) — disabled when CN trace is active ---
-    const qoderWorkSqliteInput = new QoderWorkSqliteInput({ stateStore: this.stateStore });
+    const qoderWorkSqliteInput = new QoderWorkSqliteInput({ stateStore: this.stateStore, pollIntervalMs: listenerCfg['qoder-work-sqlite']?.pollInterval });
     this.inputManager.registerInput(qoderWorkSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkSqliteInput, {
@@ -1067,6 +1387,7 @@ export class Orchestrator extends EventEmitter {
       stateStore: this.stateStore,
       agentType: ClientType.QoderWorkCN,
       dataRoot: qoderWorkCNDataRoot,
+      pollIntervalMs: listenerCfg['qoder-work-cn-trace']?.pollInterval,
     });
     this.inputManager.registerInput(qoderWorkCNTraceInput);
     const qoderWorkCNTraceEnabled = () =>
@@ -1089,6 +1410,7 @@ export class Orchestrator extends EventEmitter {
       stateStore: this.stateStore,
       agentType: ClientType.QoderWorkCN,
       logDir: qoderWorkCNLogDir,
+      pollIntervalMs: listenerCfg['qoder-work-cn-hook']?.pollInterval,
     });
     this.inputManager.registerInput(qoderWorkCNHookInput);
     entries.push(
@@ -1110,6 +1432,7 @@ export class Orchestrator extends EventEmitter {
       stateStore: this.stateStore,
       agentType: ClientType.QoderWorkCN,
       dataRoot: qoderWorkCNDataRoot,
+      pollIntervalMs: listenerCfg['qoder-work-cn-log']?.pollInterval,
     });
     this.inputManager.registerInput(qoderWorkCNLogInput);
     entries.push(
@@ -1131,6 +1454,7 @@ export class Orchestrator extends EventEmitter {
       stateStore: this.stateStore,
       agentType: ClientType.QoderWorkCN,
       dataRoot: qoderWorkCNDataRoot,
+      pollIntervalMs: listenerCfg['qoder-work-cn-sqlite']?.pollInterval,
     });
     this.inputManager.registerInput(qoderWorkCNSqliteInput);
     entries.push(
@@ -1147,15 +1471,22 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- QwenWorkCN Trace: independent hook + segments + token intercept merge ---
     const qwenWorkCNLogDir = path.join(this.dataDir, 'logs', 'qwen-work-cn', 'history');
     const qwenWorkCNSegmentsRoot = resolveHome('~/.qwenworkcn/logs/sessions');
-    const qwenWorkCNInterceptFile = path.join(this.dataDir, 'logs', 'qwenworkcn-intercept.jsonl');
+    const qwenWorkCNAgentCfg = this.config.agents['qwen-work-cn'] ?? {};
+    const qwenWorkCNMultimodalEnabled = !!this.multimodalProcessor
+      && isAgentMultimodalEnabled('qwen-work-cn', qwenWorkCNAgentCfg);
     const qwenWorkCNTraceInput = new QwenWorkCNTraceInput({
       stateStore: this.stateStore,
       logDir: qwenWorkCNLogDir,
       segmentsRoot: qwenWorkCNSegmentsRoot,
-      interceptFile: qwenWorkCNInterceptFile,
+      pollIntervalMs: listenerCfg['qwen-work-cn-trace']?.pollInterval,
+      multimodal: {
+        enabled: qwenWorkCNMultimodalEnabled,
+        uploadMode: qwenWorkCNAgentCfg.multimodal?.uploadMode ?? 'none',
+        allowedRootPaths: qwenWorkCNAgentCfg.multimodal?.allowedRootPaths,
+        ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+      },
     });
     this.inputManager.registerInput(qwenWorkCNTraceInput);
     const qwenWorkCNTraceEnabled = () =>
@@ -1169,7 +1500,6 @@ export class Orchestrator extends EventEmitter {
         watchPaths: QwenWorkCNTraceInput.getWatchPaths({
           logDir: qwenWorkCNLogDir,
           segmentsRoot: qwenWorkCNSegmentsRoot,
-          interceptFile: qwenWorkCNInterceptFile,
         }),
         isAvailable: QwenWorkCNTraceInput.checkAvailability,
         enabled: qwenWorkCNTraceEnabled,
@@ -1200,7 +1530,7 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    const qwenWorkCNSqliteInput = new QwenWorkCNSqliteInput({ stateStore: this.stateStore });
+    const qwenWorkCNSqliteInput = new QwenWorkCNSqliteInput({ stateStore: this.stateStore, pollIntervalMs: listenerCfg['qwen-work-cn-sqlite']?.pollInterval });
     this.inputManager.registerInput(qwenWorkCNSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qwenWorkCNSqliteInput, {
@@ -1216,56 +1546,61 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder Trace (multi-source merge, supersedes hook/session/sqlite) ---
+    // Collaboration messages are a separate IM projection and do not use Stop hooks.
+    const qwenWorkCNCollaborationInput = new QwenWorkCNCollaborationInput({
+      stateStore: this.stateStore,
+      pollIntervalMs: listenerCfg['qwen-work-cn-collaboration']?.pollInterval,
+      includeConversationIds: listenerCfg['qwen-work-cn-collaboration']?.includeConversationIds,
+    });
+    this.inputManager.registerInput(qwenWorkCNCollaborationInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qwenWorkCNCollaborationInput, {
+        watchPaths: QwenWorkCNCollaborationInput.getWatchPaths(),
+        isAvailable: QwenWorkCNCollaborationInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-work-cn-collaboration']) &&
+          this.agentControlManager.resolveEnabled(
+            'qwen-work-cn-collaboration',
+            listenerCfg['qwen-work-cn-collaboration']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qwen-work-cn-collaboration']?.pollInterval,
+      }),
+    );
+
+    // --- Qoder Trace (sole Qoder collection path: merges hook JSONL, native
+    // session segments and SQLite token usage into one turn-buffered trace) ---
     const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder', 'history');
+    const qoderAgentCfg = this.config.agents.qoder ?? { captureMessageContent: true };
+    const qoderMultimodalEnabled = !!this.multimodalProcessor
+      && isAgentMultimodalEnabled('qoder', qoderAgentCfg);
     const qoderTraceInput = new QoderTraceInput({
       stateStore: this.stateStore,
+      resolveTraceContext: entries => this.inputManager.stampTraceContext(entries),
+      dataDir: this.dataDir,
       logDir: qoderCliLogDir,
+      pollIntervalMs: listenerCfg['qoder-trace']?.pollInterval,
+      multimodal: {
+        enabled: qoderMultimodalEnabled,
+        uploadMode: qoderAgentCfg.multimodal?.uploadMode ?? 'none',
+        allowedRootPaths: qoderAgentCfg.multimodal?.allowedRootPaths,
+        ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+      },
     });
     this.inputManager.registerInput(qoderTraceInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderTraceInput, {
         watchPaths: QoderTraceInput.getWatchPaths(),
         isAvailable: QoderTraceInput.checkAvailability,
-        enabled: qoderTraceEnabled,
+        // No fallback listener behind this one any more: disabling qoder-trace
+        // disables Qoder collection outright, which is deliberate — the former
+        // hook/session/sqlite listeners produced a second, competing turn stream
+        // for the same session.
+        enabled: () =>
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-trace']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-trace',
+            listenerCfg['qoder-trace']?.enabled ?? true,
+          ),
         pollIntervalMs: listenerCfg['qoder-trace']?.pollInterval,
-      }),
-    );
-
-    // --- Qoder CLI (Hook JSONL) — disabled when qoder-trace is enabled ---
-    const qoderCliInput = new QoderCliInput({
-      stateStore: this.stateStore,
-      logDir: qoderCliLogDir,
-    });
-    this.inputManager.registerInput(qoderCliInput);
-    entries.push(
-      this.inputManager.buildDetectionEntry(qoderCliInput, {
-        watchPaths: QoderCliInput.getWatchPaths(),
-        isAvailable: QoderCliInput.checkAvailability,
-        enabled: () => !qoderTraceEnabled() &&
-          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-hook']) &&
-          this.agentControlManager.resolveEnabled(
-            'qoder-cli-hook',
-            listenerCfg['qoder-cli-hook']?.enabled ?? true,
-          ),
-        pollIntervalMs: listenerCfg['qoder-cli-hook']?.pollInterval,
-      }),
-    );
-
-    // --- Qoder CLI (Native session segments) — disabled when qoder-trace is enabled ---
-    const qoderCliSessionInput = new QoderCliSessionInput({ stateStore: this.stateStore });
-    this.inputManager.registerInput(qoderCliSessionInput);
-    entries.push(
-      this.inputManager.buildDetectionEntry(qoderCliSessionInput, {
-        watchPaths: QoderCliSessionInput.getWatchPaths(),
-        isAvailable: QoderCliSessionInput.checkAvailability,
-        enabled: () => !qoderTraceEnabled() &&
-          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-session']) &&
-          this.agentControlManager.resolveEnabled(
-            'qoder-cli-session',
-            listenerCfg['qoder-cli-session']?.enabled ?? true,
-          ),
-        pollIntervalMs: listenerCfg['qoder-cli-session']?.pollInterval,
       }),
     );
 
@@ -1274,6 +1609,7 @@ export class Orchestrator extends EventEmitter {
     const cursorHookInput = new CursorHookInput({
       stateStore: this.stateStore,
       logDir: cursorHookLogDir,
+      pollIntervalMs: listenerCfg['cursor-hook']?.pollInterval,
     });
     this.inputManager.registerInput(cursorHookInput);
     entries.push(
@@ -1294,6 +1630,7 @@ export class Orchestrator extends EventEmitter {
     const claudeCodeLogInput = new ClaudeCodeLogInput({
       stateStore: this.stateStore,
       logDir: claudeCodeLogDir,
+      pollIntervalMs: listenerCfg['claude-code-log']?.pollInterval,
     });
     this.inputManager.registerInput(claudeCodeLogInput);
     entries.push(
@@ -1314,6 +1651,7 @@ export class Orchestrator extends EventEmitter {
     const grokBuildLogInput = new GrokBuildLogInput({
       stateStore: this.stateStore,
       logDir: grokBuildLogDir,
+      pollIntervalMs: listenerCfg['grok-build-log']?.pollInterval,
     });
     this.inputManager.registerInput(grokBuildLogInput);
     entries.push(
@@ -1339,6 +1677,7 @@ export class Orchestrator extends EventEmitter {
     const kiroCliLogInput = new KiroCliLogInput({
       stateStore: this.stateStore,
       logDir: kiroCliLogDir,
+      pollIntervalMs: listenerCfg['kiro-cli-log']?.pollInterval,
     });
     this.inputManager.registerInput(kiroCliLogInput);
     entries.push(
@@ -1385,8 +1724,14 @@ export class Orchestrator extends EventEmitter {
     const codexAgentCfg = this.config.agents.codex ?? { captureMessageContent: true };
     const codexMultimodalEnabled = !!this.multimodalProcessor
       && isAgentMultimodalEnabled('codex', codexAgentCfg);
+    const codexWakeupDir = path.join(this.dataDir, 'state', 'codex', 'transcript-wakeups');
+    const codexSpanContextDir = path.join(this.dataDir, 'state', 'codex', 'transcript-span-contexts');
+    await ensureDir(codexWakeupDir);
     const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
+      wakeupDir: codexWakeupDir,
+      pollIntervalMs: listenerCfg['codex-transcript']?.pollInterval,
+      spanContextDir: codexSpanContextDir,
       multimodal: {
         enabled: codexMultimodalEnabled,
         uploadMode: codexAgentCfg.multimodal?.uploadMode ?? 'none',
@@ -1396,14 +1741,34 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.registerInput(codexTranscriptInput);
     entries.push(
       this.inputManager.buildDetectionEntry(codexTranscriptInput, {
-        watchPaths: CodexTranscriptInput.getWatchPaths(),
-        isAvailable: CodexTranscriptInput.checkAvailability,
+        watchPaths: CodexTranscriptInput.getWatchPaths(codexWakeupDir),
+        isAvailable: () => CodexTranscriptInput.checkAvailability(codexWakeupDir),
         enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-transcript']) &&
           this.agentControlManager.resolveEnabled(
             'codex-transcript',
             listenerCfg['codex-transcript']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['codex-transcript']?.pollInterval,
+      }),
+    );
+
+    // --- Copilot CLI (session events.jsonl polling) ---
+    const copilotLogInput = new CopilotLogInput({
+      stateStore: this.stateStore,
+      pollIntervalMs: listenerCfg['copilot-log']?.pollInterval,
+      dataDir: this.config.dataDir,
+    });
+    this.inputManager.registerInput(copilotLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(copilotLogInput, {
+        watchPaths: CopilotLogInput.getWatchPaths(),
+        isAvailable: CopilotLogInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['copilot-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'copilot-log',
+            listenerCfg['copilot-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['copilot-log']?.pollInterval,
       }),
     );
 
@@ -1439,6 +1804,7 @@ export class Orchestrator extends EventEmitter {
     const piCodingAgentLogInput = new PiCodingAgentLogInput({
       stateStore: this.stateStore,
       logDir: piCodingAgentLogDir,
+      pollIntervalMs: listenerCfg['pi-coding-agent-log']?.pollInterval,
       // The physical JSONL stream is shared by the built-in PI integration and
       // every registered high-level SDK Agent. Admission therefore has to be
       // checked against the identity on each record, not only once for the
@@ -1468,6 +1834,7 @@ export class Orchestrator extends EventEmitter {
     const mimoCodeLogInput = new MimoCodeLogInput({
       stateStore: this.stateStore,
       logDir: mimoCodeLogDir,
+      pollIntervalMs: listenerCfg['mimo-code-log']?.pollInterval,
     });
     this.inputManager.registerInput(mimoCodeLogInput);
     entries.push(
@@ -1490,6 +1857,7 @@ export class Orchestrator extends EventEmitter {
     const qwenCodeCliLogInput = new QwenCodeCliLogInput({
       stateStore: this.stateStore,
       logDir: qwenCodeCliLogDir,
+      pollIntervalMs: listenerCfg['qwen-code-cli-log']?.pollInterval,
     });
     this.inputManager.registerInput(qwenCodeCliLogInput);
     entries.push(
@@ -1572,7 +1940,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Wukong (CLI API polling) ---
-    const wukongInput = new WukongInput({ stateStore: this.stateStore });
+    const wukongInput = new WukongInput({ stateStore: this.stateStore, pollIntervalMs: listenerCfg['wukong']?.pollInterval });
     this.inputManager.registerInput(wukongInput);
     entries.push(
       this.inputManager.buildDetectionEntry(wukongInput, {
@@ -1659,6 +2027,24 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- Doubao Work (passive frontend client-message lifecycle; no host injection) ---
+    const doubaoLogDir = listenerCfg['doubao-work']?.logDir;
+    const doubaoClient = listenerCfg['doubao-work']?.client;
+    const doubaoWorkInput = new DoubaoWorkInput({
+      stateStore: this.stateStore,
+      logDir: doubaoLogDir,
+      client: doubaoClient,
+      pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
+    });
+    this.inputManager.registerInput(doubaoWorkInput);
+    entries.push(this.inputManager.buildDetectionEntry(doubaoWorkInput, {
+      watchPaths: DoubaoWorkInput.getWatchPaths(doubaoLogDir, doubaoClient),
+      isAvailable: () => DoubaoWorkInput.checkAvailability(doubaoLogDir, doubaoClient),
+      enabled: () => this.isAgentGatedEnabled('doubao-work')
+        && this.agentControlManager.resolveEnabled('doubao-work', listenerCfg['doubao-work']?.enabled ?? true),
+      pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
+    }));
+
     return entries;
   }
 
@@ -1688,7 +2074,7 @@ export class Orchestrator extends EventEmitter {
    * - Otherwise: only if config.agents[agentId].enabled !== false
    */
   private isAgentGatedEnabled(agentId: string): boolean {
-    return isAgentGatedEnabledIn(this.config, agentId);
+    return this.scopeAllows(agentId) && isAgentGatedEnabledIn(this.config, agentId);
   }
 
   /**
@@ -1723,12 +2109,27 @@ export class Orchestrator extends EventEmitter {
     return 'unknown';
   }
 
+  private readPackageGitCommit(): string {
+    try {
+      const pilotDir = this.resolvePilotDir();
+      const versionFile = path.join(pilotDir, 'VERSION');
+      if (fsSync.existsSync(versionFile)) {
+        const content = fsSync.readFileSync(versionFile, 'utf8');
+        const match = content.match(/^git_commit=(.+)$/m);
+        if (match) return match[1].trim();
+      }
+    } catch {
+      // ignore
+    }
+    return '';
+  }
+
   private resolvePilotDir(moduleUrl: string = import.meta.url): string {
     return resolvePilotDirIn(this.dataDir, moduleUrl);
   }
 
   private buildDataflowSnapshot(): DataflowSnapshot {
-    const inputCounters = this.inputManager.getInputCounters();
+    const inputCounters = this.inputManager.takeInputCounterSnapshot();
     const activeIds = this.inputManager.getActiveInputIds();
 
     // Ingress only. The instance's egress is measured where the writes actually

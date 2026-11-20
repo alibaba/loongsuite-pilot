@@ -1,6 +1,7 @@
 {
-  "version": "1.0",
-  "specSource": "docs/EVENT_LOG_TO_TRACE_SPEC.md",
+  "version": "1.1",
+  "generatedAt": "2026-06-04T12:05:42.948Z",
+  "specSource": "docs/zh-CN/subagent-data-model.md",
   "commonAttributes": {
     "must": [
       {
@@ -27,7 +28,7 @@
     "ENTRY": {
       "namePattern": "enter_ai_application_system",
       "operationName": "enter",
-      "multiplicity": "exactly_one",
+      "multiplicity": "exactly_one_or_external_delegated_fragment",
       "parentKind": null,
       "allowedChildren": [
         "AGENT"
@@ -79,23 +80,29 @@
         "invoke_agent",
         "create_agent"
       ],
-      "multiplicity": "exactly_one",
-      "parentKind": "ENTRY",
+      "multiplicity": "one_root_per_entry_and_optional_delegated_agents",
+      "parentKind": [
+        "ENTRY",
+        "TOOL"
+      ],
       "allowedChildren": [
         "STEP"
       ],
       "aggregation": {
         "gen_ai.usage.input_tokens": {
           "rule": "sum",
-          "source": "LLM"
+          "source": "LLM",
+          "scope": "own_agent_execution_excluding_delegated_agents"
         },
         "gen_ai.usage.output_tokens": {
           "rule": "sum",
-          "source": "LLM"
+          "source": "LLM",
+          "scope": "own_agent_execution_excluding_delegated_agents"
         },
         "gen_ai.usage.total_tokens": {
           "rule": "sum",
-          "source": "LLM"
+          "source": "LLM",
+          "scope": "own_agent_execution_excluding_delegated_agents"
         }
       },
       "attributes": {
@@ -186,7 +193,8 @@
             "min": 0
           }
         ]
-      }
+      },
+      "externalParentContext": "A missing parent TOOL is allowed only with a valid parentSpanId and explicit parent invocation or parent tool call ID; report the local fragment boundary."
     },
     "STEP": {
       "namePattern": "react step",
@@ -404,7 +412,9 @@
       "operationName": "execute_tool",
       "multiplicity": "zero_or_more",
       "parentKind": "STEP",
-      "allowedChildren": [],
+      "allowedChildren": [
+        "AGENT"
+      ],
       "attributes": {
         "must": [
           {
@@ -684,13 +694,15 @@
     {
       "id": "time.no_step_overlap",
       "applies": "STEP",
-      "severity": "error"
+      "severity": "error",
+      "scope": "direct_steps_of_each_agent"
     },
     {
       "id": "time.parent_contains_children",
       "applies": "all",
       "severity": "error",
-      "toleranceMs": 0
+      "toleranceMs": 0,
+      "exception": "TOOL to delegated AGENT requires causal start ordering but permits asynchronous child completion."
     },
     {
       "id": "time.reasonable_duration",
@@ -701,13 +713,15 @@
     {
       "id": "time.chronological_steps",
       "applies": "STEP",
-      "severity": "warn"
+      "severity": "warn",
+      "scope": "direct_steps_of_each_agent"
     }
   ],
   "semanticRules": [
     {
       "id": "semantic.agent_token_sum",
-      "severity": "error"
+      "severity": "error",
+      "scope": "own_agent_execution_excluding_delegated_agents"
     },
     {
       "id": "semantic.tool_matches_llm_output",
@@ -722,11 +736,18 @@
     {
       "id": "semantic.entry_output_matches",
       "severity": "warn",
-      "requiresMessageContent": true
+      "requiresMessageContent": true,
+      "scope": "entry_root_agent_execution_excluding_delegated_agents"
     },
     {
       "id": "semantic.consistent_session_id",
-      "severity": "error"
+      "severity": "error",
+      "scope": "own_agent_execution_excluding_delegated_agents"
+    },
+    {
+      "id": "semantic.consistent_turn_id",
+      "severity": "error",
+      "scope": "own_agent_execution_excluding_delegated_agents"
     },
     {
       "id": "semantic.consistent_user_id",
@@ -734,16 +755,12 @@
     },
     {
       "id": "semantic.consistent_agent_name",
-      "severity": "warn"
+      "severity": "warn",
+      "scope": "own_agent_execution_excluding_delegated_agents"
     },
     {
       "id": "semantic.llm_has_input_output",
       "severity": "error",
-      "requiresMessageContent": true
-    },
-    {
-      "id": "semantic.llm_input_nonempty",
-      "severity": "warn",
       "requiresMessageContent": true
     },
     {
@@ -762,7 +779,8 @@
     {
       "id": "semantic.last_step_no_tool_call",
       "severity": "error",
-      "requiresMessageContent": true
+      "requiresMessageContent": true,
+      "scope": "own_agent_execution_excluding_delegated_agents"
     }
   ],
   "resourceAttributes": {
@@ -796,10 +814,11 @@
     ]
   },
   "messageSchemas": {
-    "input_messages": "$ref:specs/gen-ai-input-messages.json",
-    "output_messages": "$ref:specs/gen-ai-output-messages.json",
-    "system_instructions": "$ref:specs/gen-ai-system_instructions.json",
-    "tool_definitions": "$ref:specs/gen-ai-tool-definitions.json",
-    "retrieval_documents": "$ref:specs/gen-ai-retrieval-documents.json"
-  }
+    "input_messages": "$ref:tests/schemas/gen-ai-input-messages.json",
+    "output_messages": "$ref:tests/schemas/gen-ai-output-messages.json",
+    "system_instructions": "$ref:tests/schemas/gen-ai-system_instructions.json",
+    "tool_definitions": "$ref:tests/schemas/gen-ai-tool-definitions.json",
+    "retrieval_documents": "$ref:tests/schemas/gen-ai-retrieval-documents.json"
+  },
+  "specSourceDescription": "Public contract for the subagent-specific rules; existing non-subagent validation rules are retained from the previous baseline."
 }

@@ -9,14 +9,19 @@
  */
 
 import crypto from 'node:crypto';
+import { appendRawJsonl } from '../shared/raw-jsonl-writer.mjs';
+import { readPilotConfig } from '../shared/pilot-config.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  agentBaseFieldPatch,
-  collectResourceAttributesFromEnv,
-} from '../shared/resource-context.mjs';
+// Worker labels are optional. A missing helper during a partial update must not
+// turn telemetry into a Pi startup dependency or prevent ordinary collection.
+const resourceContext = await import('../shared/resource-context.mjs').catch(() => null);
+const agentBaseFieldPatch = typeof resourceContext?.agentBaseFieldPatch === 'function'
+  ? resourceContext.agentBaseFieldPatch : () => ({});
+const collectResourceAttributesFromEnv = typeof resourceContext?.collectResourceAttributesFromEnv === 'function'
+  ? resourceContext.collectResourceAttributesFromEnv : () => ({});
 
 const LOG_PREFIX = 'pi-coding-agent';
 const DEFAULT_IDENTITY = Object.freeze({
@@ -164,7 +169,8 @@ function writeError(source, error) {
 
 function writeRecord(record) {
   try {
-    appendLogFile(`${LOG_PREFIX}-${todayStamp()}.jsonl`, `${safeStringify(record)}\n`);
+    ensureLogDir();
+    appendRawJsonl(path.join(resolveLogDir(), `${LOG_PREFIX}-${todayStamp()}.jsonl`), `${safeStringify(record)}\n`);
   } catch (error) {
     writeError('writeRecord', error);
   }
@@ -181,11 +187,7 @@ function safeHandler(name, handler) {
 }
 
 function loadPilotConfig() {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(resolveDataDir(), 'config.json'), 'utf8'));
-  } catch {
-    return {};
-  }
+  return readPilotConfig();
 }
 
 function resolveUserId(config) {

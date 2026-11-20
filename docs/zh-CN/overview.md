@@ -15,7 +15,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Trace 上报 | 将 GenAI 会话和工具活动导出为 OTLP Trace。 |
 | Token 用量 | 当源 Agent 暴露数据时，采集输入、输出、缓存读取和缓存写入 token。 |
 | 工具活动 | 采集工具名称、参数、结果、耗时和错误信息。 |
-| 隐私控制 | 支持按 Agent 关闭消息内容采集，并在输出前脱敏密钥。 |
+| 隐私控制 | 支持在输出前脱敏密钥和个人敏感信息。 |
 | 本地运维 | 管理后台服务、查看状态、使用内置本地 Dashboard，并支持版本回滚。 |
 
 ## 支持的 Agent
@@ -43,8 +43,11 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Qwen Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
+| [豆包工作（macOS/Windows，实验性）](doubao-work.md) | 只读客户端日志 | 客户端轮次与本地工具 | 仅元数据 | No | No |
 
-OpenClaw 集成要求 OpenClaw 2026.5.12 或更高版本。
+新 Qoder 桌面端复用 Qoder Hook 采集与 `agents.qoder` 配置。CLI 格式 transcript 以本轮原生用户记录的 `businessIdentity.product=app` 识别桌面端，兼容旧运行时的 Hook 产品标记；事件类型、OTLP `gen_ai.framework` 和 `gen_ai.agent.system` 均为 `qoder-app`。现有 CLI/IDE 的 system 保持 `qoder`，便于按 system 单独统计新版桌面端。
+
+OpenClaw 集成支持 2026.3.8 及以上版本，自动识别版本；5.12 之前的模型调用时间通过旧版 Hook 推定。
 
 ### Windows Agent 明确支持情况
 
@@ -75,7 +78,7 @@ Pilot 关注对使用分析、审计和链路追踪有价值的活动：
 - 主机和服务元数据。
 - Agent 暴露的扩展上下文字段。
 
-消息内容、工具参数和工具结果可能包含敏感信息。这些字段在 [输出事件 Schema](output-event-schema.md) 中标记为 opt-in，可按 Agent 关闭内容采集，也可在输出前脱敏。
+消息内容、工具参数和工具结果可能包含敏感信息。这些字段会进入上报链路，并可在输出前脱敏。详见[输出事件 Schema](output-event-schema.md)和[数据脱敏](masking.md)。
 
 ## 输出目标
 
@@ -88,7 +91,7 @@ Pilot 可以将同一份规范化事件流输出到多个目标：
 | HTTP | 自定义采集网关或服务端。 |
 | OTLP Trace | Trace 后端、APM 或 GenAI 可观测平台。 |
 
-如果没有配置远端后端，JSONL 默认保持开启，方便本地验证采集是否生效。
+JSONL 默认关闭，包括未配置远端后端时。需要本地查看规范化事件时，设置 `jsonl.enabled: true`。
 
 ## 本地运行目录
 
@@ -123,4 +126,5 @@ Pilot 可以将同一份规范化事件流输出到多个目标：
 - 在 [HTTP 输出](http-output.md) 配置自定义 HTTP 上报。
 - 在 [数据脱敏](masking.md) 配置密钥脱敏。
 - 在 [输出事件 Schema](output-event-schema.md) 查看字段。
+- 在 [Input 运行时指标](input-runtime-metrics.md) 了解读取、解析和标准事件产出的窗口统计。
 - 在 [新 Agent 接入](agent-onboarding.md) 增加新的 Agent 支持。

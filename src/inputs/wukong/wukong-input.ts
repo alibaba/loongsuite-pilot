@@ -8,6 +8,7 @@ import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { buildAgentActivityEntry, toJsonValue } from '../../normalization/entry-builder.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
+import { resolvePollIntervalMs } from '../../utils/poll-interval.js';
 
 const execFile = promisify(execFileCb);
 
@@ -108,7 +109,7 @@ export class WukongInput extends BaseInput {
   constructor(opts: WukongInputOptions) {
     super(opts);
     this.cliPath = opts.cliPath ?? WukongInput.getCliPath();
-    this.pollIntervalMs = opts.pollIntervalMs ?? 60_000;
+    this.pollIntervalMs = resolvePollIntervalMs(opts.pollIntervalMs, 60_000);
   }
 
   static getCliPath(): string {

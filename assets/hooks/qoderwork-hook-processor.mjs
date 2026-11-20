@@ -16,13 +16,11 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
+  isWorkTranscriptContentRow,
   parseArgs,
+  processWorkTranscript,
   parseStdinPayload,
   logDebug,
-  getLineRangeInfo,
-  readTranscriptLines,
-  appendRowsToHistory,
-  updateLineRecord,
   loadHookRuntimeConfig,
   HOOKS_DIR,
 } from './shared/hook-processor-base.mjs';
@@ -44,37 +42,14 @@ async function main() {
   const cwd = resolveQoderWorkProjectDir(rawCwd, agentId);
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
-  const range = getLineRangeInfo(agentId, transcriptPath, sessionId);
-  if (!range) return;
+  processWorkTranscript(agentId, logPrefix, transcriptPath, sessionId, { isPromptRow, isReviewCopyRow },
+    (parsed, rangeReason) => processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, { rangeReason }));
+}
 
-  const { startLine, endLine, reason: rangeReason } = range;
-  const lines = readTranscriptLines(transcriptPath, startLine, endLine);
-  logDebug(agentId, `Read ${lines.length} lines from ${transcriptPath} (range: ${startLine}-${endLine})`);
-  if (!lines.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-    return;
-  }
-
-  const parsed = [];
-  for (const line of lines) {
-    try { parsed.push(JSON.parse(line)); } catch { /* skip */ }
-  }
-  if (!parsed.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-    return;
-  }
-
-  const records = processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, {
-    rangeReason,
-  });
-  logDebug(agentId, `Produced ${records.length} events`);
-
-  const rowsToAppend = records.filter(Boolean).map(r => JSON.stringify(r));
-  const success = appendRowsToHistory(agentId, logPrefix, rowsToAppend);
-  if (success) {
-    logDebug(agentId, `Successfully appended ${rowsToAppend.length} rows`);
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-  }
+function isReviewCopyRow(row) {
+  const text = row?.message?.content?.[0]?.text;
+  return row?.type === 'user' && typeof text === 'string'
+    && text.startsWith('[SYSTEM: This is an automated background review task');
 }
 
 function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, opts = {}) {
@@ -84,25 +59,12 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, opts 
   // Skip review-copy sessions: QoderWork forks a duplicate transcript with an
   // appended automated review task. The original session already covers the
   // user conversation, so processing the copy would produce duplicate traces.
-  const isReviewCopy = parsed.some(row =>
-    row.type === 'user' &&
-    typeof row.message?.content?.[0]?.text === 'string' &&
-    row.message.content[0].text.startsWith('[SYSTEM: This is an automated background review task')
-  );
-  if (isReviewCopy) {
+  if (parsed.some(isReviewCopyRow)) {
     logDebug(agentId, `Skipping review-copy session ${sessionId}`);
     return records;
   }
 
-  // Filter out non-content rows
-  const contentRows = parsed.filter(row => {
-    const type = row.type;
-    if (!type || type === 'ai-title' || type === 'last-prompt' || type === 'session_meta' || type === 'progress') return false;
-    if (row.isSidechain === true || row.isSidechain === 'true') return false;
-    if (row.isMeta === true || row.isMeta === 'true') return false;
-    return type === 'user' || type === 'assistant';
-  });
-
+  const contentRows = parsed.filter(isWorkTranscriptContentRow);
   if (!contentRows.length) return records;
 
   // Split into turns: each user message (non tool_result) starts a new turn
@@ -119,11 +81,10 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, opts 
   const firstRow = turns[0]?.[0] || contentRows[0];
   const userId = resolveUserId(firstRow, runtimeConfig);
   const providerName = inferProviderName({ 'gen_ai.agent.type': agentId });
-  const version = getStringValue(firstRow, 'version') || '';
 
   for (const turn of turns) {
     const turnId = getTurnIdForRows(turn);
-    const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd, agentId);
+    const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, observedTs, runtimeConfig, cwd, agentId);
     records.push(...turnRecords);
   }
 
@@ -182,7 +143,7 @@ function isPureSystemReminder(text) {
     && text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim().length === 0;
 }
 
-function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd, agentId) {
+function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, observedTs, runtimeConfig, cwd, agentId) {
   const records = [];
 
   // Find the user prompt
@@ -205,7 +166,6 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
         'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: userText }] }],
         time_unix_nano: timestampToUnixNanos(userRow.timestamp),
         observed_time_unix_nano: observedTs,
-        version,
       }, turnRows[0], runtimeConfig, cwd));
     }
   }
@@ -289,7 +249,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
     const llmRequestTs = stepCounter === 1 ? userTs : prevStepLastToolResultTs;
 
     const assistantOutput = extractAssistantOutput(group);
-    const stepRecords = buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata);
+    const stepRecords = buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata);
     records.push(...stepRecords);
 
     // Collect this step's tool_calls for next step's input delta
@@ -397,7 +357,7 @@ function extractAssistantOutput(group) {
   return { outputParts, toolCalls };
 }
 
-function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
+function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, observedTs, runtimeConfig, agentId, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
   const records = [];
   const firstRow = group[0];
   const lastRow = group[group.length - 1];
@@ -411,8 +371,8 @@ function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, tur
   });
   const llmResponseTs = timestampToUnixNanos(thinkingRow ? thinkingRow.timestamp : lastRow.timestamp);
 
-  // Prefer message.id (chatcmpl-xxx, matches qoderwork-intercept.jsonl) for direct token matching.
-  // Fall back to parentUuid for backward compat with older QoderWork versions.
+  // Prefer message.id (chatcmpl-xxx) so segment pairing can match by response id;
+  // fall back to parentUuid for older QoderWork versions.
   const responseId = firstRow.message?.id || firstRow.parentUuid || firstRow.uuid;
 
   const { outputParts, toolCalls } = assistantOutput;
@@ -442,7 +402,6 @@ function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, tur
     'user.id': userId,
     time_unix_nano: llmRequestTs || timestampToUnixNanos(firstRow.timestamp),
     observed_time_unix_nano: observedTs,
-    version,
   };
   if (inputDelta) {
     llmRequestFields['gen_ai.input.messages_delta'] = inputDelta;
@@ -467,7 +426,6 @@ function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, tur
       'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts, finish_reason: finishReason }],
       time_unix_nano: llmResponseTs,
       observed_time_unix_nano: observedTs,
-      version,
     }, firstRow, runtimeConfig, cwd));
   }
 
@@ -487,7 +445,6 @@ function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, tur
       'user.id': userId,
       time_unix_nano: timestampToUnixNanos(lastRow.timestamp),
       observed_time_unix_nano: observedTs,
-      version,
     }, firstRow, runtimeConfig, cwd));
 
     // Find matching tool_result
@@ -510,7 +467,6 @@ function buildStepEvents(group, assistantOutput, toolResultsByUseId, stepId, tur
         'user.id': userId,
         time_unix_nano: timestampToUnixNanos(resultRow.timestamp),
         observed_time_unix_nano: observedTs,
-        version,
       }, resultRow, runtimeConfig, cwd));
     }
   }

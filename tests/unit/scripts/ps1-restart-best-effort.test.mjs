@@ -40,9 +40,12 @@ const bodyOf = (name) => {
 };
 
 // The "task already registered" branch, up to the `if (-not $restarted)` fallback.
+// Three spellings of the condition are accepted: the original `Get-TaskExists`, the
+// `$query.exists` form the diagnostics work introduced, and `$shouldStart` which also
+// covers CIM query-fail / schtasks-yes so those paths still Start instead of re-register.
 const existingTaskBranch = (body) => {
-  const start = body.search(/if \(Get-TaskExists /);
-  expect(start, 'no Get-TaskExists branch').toBeGreaterThan(-1);
+  const start = body.search(/if \((?:Get-TaskExists |\$query\.exists|\$shouldStart)/);
+  expect(start, 'no existing-task branch').toBeGreaterThan(-1);
   const rest = body.slice(start);
   const end = rest.search(/if \(-not \$restarted\)/);
   return end === -1 ? rest : rest.slice(0, end);

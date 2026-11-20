@@ -150,6 +150,25 @@ describe('the CLM-safe rewrites stay in place', () => {
     expect(cli).not.toMatch(/Select-Object -ExcludeProperty/);
   });
 
+  it('the public installer confirm path does not touch LP_SLS_API_KEY', () => {
+    const installer = codeOf(readFileSync('deploy/installer-opensource.ps1', 'utf-8'));
+    const confirm = installer.slice(
+      installer.indexOf('function Confirm-ConfigOverwrite {'),
+      installer.indexOf('function Write-Config {'),
+    );
+    expect(confirm).not.toMatch(/LP_SLS_API_KEY/);
+    expect(confirm).not.toMatch(/\[Environment\]::GetEnvironmentVariable\(/);
+    expect(confirm).not.toMatch(/\[Environment\]::SetEnvironmentVariable\(/);
+  });
+
+  it('the public installer checks bound parameters without ContainsKey', () => {
+    // installer-opensource.ps1 is still in KNOWN_CLM_UNSAFE for older violations,
+    // so pin this top-level check separately: it runs for every subcommand.
+    const installer = codeOf(readFileSync('deploy/installer-opensource.ps1', 'utf-8'));
+    expect(installer).toContain("$PSBoundParameters.Keys -contains 'DashboardPort'");
+    expect(installer).not.toMatch(/\$PSBoundParameters\.ContainsKey\(/);
+  });
+
   it('the CLI wrapper validates an absolute path with a regex, not IsPathRooted', () => {
     const cli = codeOf(readFileSync('scripts/loongsuite-pilot.ps1', 'utf-8'));
     expect(cli).not.toContain('IsPathRooted');

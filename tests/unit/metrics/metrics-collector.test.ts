@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import { MetricsCollector } from '../../../src/metrics/metrics-collector.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
 import type { ProcessLiveness } from '../../../src/utils/pid-utils.js';
+import { LOCAL_MAC } from '../../../src/utils/network-utils.js';
 
 const fsMockState: {
   blockAccessSync: boolean;
@@ -53,6 +54,12 @@ vi.mock('node:child_process', async (importOriginal) => {
 /** Inputs are a collection detail; what the tests care about is the owning agent. */
 function inputEntry(agent: string, overrides: Record<string, any> = {}): any {
   return {
+    sourceKind: 'primary',
+    rawReadCalls: 0, rawReadBytes: 0,
+    rawInRecords: 0, rawInBytes: 0,
+    rawInMaxBatchBytes: 0, rawInMaxRecordBytes: 0, rawBacklogBytesMax: 0,
+    parseSuccessRecords: 0, parseFailedRecords: 0,
+    readDurationMs: 0, processDurationMs: 0,
     inEvents: 0, inBytes: 0, outFailed: 0,
     lastPollTime: '', startTime: '', type: 'polling', agent,
     running: true, ...overrides,
@@ -147,7 +154,12 @@ describe('MetricsCollector', () => {
       expect(result.metric_json.active_agent_count).toBe('1');
       expect((result.metric_json as Record<string, unknown>).input_count).toBeUndefined();
       expect((result.metric_json as Record<string, unknown>).active_input_count).toBeUndefined();
-      // First row's window opens at process start, so the deltas equal the totals.
+      // Raw source metrics stay on type=input rows until every Input has the
+      // same instrumentation coverage; mixing partial raw totals with complete
+      // event totals at L1 would make the funnel misleading.
+      expect(result.metric_json).not.toHaveProperty('raw_in_records');
+      expect(result.metric_json).not.toHaveProperty('raw_in_bytes');
+      expect(result.metric_json).not.toHaveProperty('raw_in_max_batch_bytes');
       expect(result.metric_json.in_events).toBe('110');
       expect(result.metric_json.in_bytes).toBe('5000');
       // Instance egress: what was written to the backends, not what the inputs
@@ -158,13 +170,44 @@ describe('MetricsCollector', () => {
       expect(typeof result.metric_json.open_fd).toBe('string');
 
       // flusher_runner is removed — per-flusher detail lives in pilot_pipeline now
-      expect((result as Record<string, unknown>).flusher_runner).toBeUndefined();
+      expect(result).not.toHaveProperty('flusher_runner');
 
       // updater events are NOT in status telemetry (local JSONL + alarms only)
-      expect((result as Record<string, unknown>).updater_event).toBeUndefined();
+      expect(result).not.toHaveProperty('updater_event');
 
       // __time__ is unix timestamp
       expect(result.__time__).toBeGreaterThan(1700000000);
+    });
+
+    it('reports the same MAC and serial the SLS tags use', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        hostSn: '  C02SERIAL  ',
+      });
+      const result = col.collectL1(buildSnapshot());
+      if (LOCAL_MAC) expect(result.mac).toBe(LOCAL_MAC);
+      else expect(result).not.toHaveProperty('mac');
+      expect(result.sn).toBe('C02SERIAL');
+    });
+
+    it('omits mac and sn when host identity tags are disabled', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        hostSn: 'C02SERIAL',
+        hostIdentityTags: false,
+      });
+      const result = col.collectL1(buildSnapshot());
+      expect(result).not.toHaveProperty('mac');
+      expect(result).not.toHaveProperty('sn');
+    });
+
+    it('omits an empty serial', () => {
+      const result = collector.collectL1(buildSnapshot());
+      expect(result).not.toHaveProperty('sn');
     });
 
     it('counts installed agents, and an agent stays installed while idle', () => {
@@ -274,15 +317,22 @@ describe('MetricsCollector', () => {
       const inputs = new Map<string, any>();
       // Two inputs owned by the same agent — they must roll up into one entry.
       inputs.set('qoder-sqlite', inputEntry('qoder', {
+        rawInRecords: 50, rawInBytes: 2048, rawInMaxBatchBytes: 1600,
         inEvents: 42, inBytes: 1024, outFailed: 2,
         lastPollTime: '2026-05-19 10:01:00', startTime: '2026-05-19 09:00:00',
       }));
       inputs.set('qoder-trace', inputEntry('qoder', {
+        rawReadCalls: 4, rawReadBytes: 1024,
+        rawInRecords: 10, rawInBytes: 512, rawInMaxBatchBytes: 4096,
+        rawInMaxRecordBytes: 128, rawBacklogBytesMax: 2048,
+        parseSuccessRecords: 9, parseFailedRecords: 1,
+        readDurationMs: 12.4, processDurationMs: 21.6,
         inEvents: 8, inBytes: 256, outFailed: 0,
         lastPollTime: '2026-05-19 10:03:00', startTime: '2026-05-19 08:30:00',
         type: 'trace',
       }));
       inputs.set('cursor-hook', inputEntry('cursor', {
+        rawInRecords: 12, rawInBytes: 700, rawInMaxBatchBytes: 700,
         inEvents: 10, inBytes: 500, outFailed: 0,
         lastPollTime: '2026-05-19 10:02:00', startTime: '2026-05-19 09:30:00',
         type: 'hook',
@@ -318,12 +368,15 @@ describe('MetricsCollector', () => {
       // The total would be the exact sum of these rows over one window, and L1
       // already reports the same four axes plus agent_count for the instance.
       // Emitting it a third time is three chances for the numbers to disagree.
-      expect(Object.keys(l2).sort()).toEqual(['agents', 'flushers']);
-      expect([...l2.agents, ...l2.flushers].map(r => r.type).includes('pipeline' as never)).toBe(false);
+      expect(Object.keys(l2).sort()).toEqual(['agents', 'flushers', 'hooks', 'inputs']);
+      expect([...l2.agents, ...l2.inputs, ...l2.flushers].map(r => r.type).includes('pipeline' as never)).toBe(false);
 
-      // What the dropped row said is still recoverable by summing the detail.
+      // Raw totals are recoverable only from Input rows, whose coverage and
+      // dimensions are explicit. Agent rows keep the complete event totals.
       const sum = (rows: any[], field: string): number =>
         rows.reduce((acc, r) => acc + Number(r[field]), 0);
+      expect(sum(l2.inputs, 'raw_in_records')).toBe(72);
+      expect(sum(l2.inputs, 'raw_in_bytes')).toBe(3260);
       expect(sum(l2.agents, 'in_events')).toBe(60);
       expect(sum(l2.agents, 'in_bytes')).toBe(1780);
       expect(sum(l2.flushers, 'out_entries')).toBe(255);
@@ -331,13 +384,13 @@ describe('MetricsCollector', () => {
     });
 
     it('repeats the full identity on every row', () => {
-      const { agents, flushers } = collector.collectL2(pipelineSnapshot())!;
+      const { agents, inputs, flushers } = collector.collectL2(pipelineSnapshot())!;
       // Same values L1 reports — the two levels must not disagree about the host.
       const l1 = collector.collectL1(buildSnapshot());
 
       // Identity is repeated on every row so each type can be queried on its own,
       // with no join to another row (or to L1) needed to learn the host.
-      for (const row of [...agents, ...flushers]) {
+      for (const row of [...agents, ...inputs, ...flushers]) {
         expect(row.hostname).toBe(require('os').hostname());
         expect(row.hostname).toBe(l1.hostname);
         expect(row.ip).toBe(l1.ip);
@@ -348,8 +401,37 @@ describe('MetricsCollector', () => {
         expect(row.__time__).toBeGreaterThan(0);
       }
       // One window per cycle: every row of the cycle must carry the same one.
-      const windows = new Set([...agents, ...flushers].map(r => r.window_ms));
+      const windows = new Set([...agents, ...inputs, ...flushers].map(r => r.window_ms));
       expect(windows.size).toBe(1);
+    });
+
+    it('reports one complete row per Input without dynamic identifiers', () => {
+      const { inputs } = collector.collectL2(pipelineSnapshot())!;
+      const qoder = inputs.find(row => row.input_name === 'qoder-trace')!;
+
+      expect(qoder).toMatchObject({
+        type: 'input',
+        agent: 'qoder',
+        source_kind: 'primary',
+        collection_method: 'trace',
+        raw_read_calls: '4',
+        raw_read_bytes: '1024',
+        raw_in_records: '10',
+        raw_in_bytes: '512',
+        raw_in_max_batch_bytes: '4096',
+        raw_in_max_record_bytes: '128',
+        raw_backlog_bytes_max: '2048',
+        parse_success_records: '9',
+        parse_failed_records: '1',
+        read_duration_ms: '12',
+        process_duration_ms: '22',
+        in_events: '8',
+        in_bytes: '256',
+        failed_events: '0',
+      });
+      expect(qoder).not.toHaveProperty('session_id');
+      expect(qoder).not.toHaveProperty('turn_id');
+      expect(qoder).not.toHaveProperty('trace_id');
     });
 
     it('rolls ingress up by owning agent, one row each', () => {
@@ -359,6 +441,9 @@ describe('MetricsCollector', () => {
       expect(agents.every(r => r.type === 'agent')).toBe(true);
 
       const qoder = agentRow(agents, 'qoder');
+      expect(qoder).not.toHaveProperty('raw_in_records');
+      expect(qoder).not.toHaveProperty('raw_in_bytes');
+      expect(qoder).not.toHaveProperty('raw_in_max_batch_bytes');
       expect(qoder.in_events).toBe('50');
       expect(qoder.in_bytes).toBe('1280');
       // Ingress only: egress cannot be attributed to an agent, it lives per flusher.
@@ -444,6 +529,8 @@ describe('MetricsCollector', () => {
       collector.collectL2(pipelineSnapshot());
 
       const next = pipelineSnapshot();
+      next.inputs.get('qoder-sqlite')!.rawInRecords = 55;
+      next.inputs.get('qoder-sqlite')!.rawInBytes = 2248;
       next.inputs.get('qoder-sqlite')!.inEvents = 50;
       next.inputs.get('qoder-sqlite')!.outFailed = 3;
       next.flushers.get('sls:main')!.outEntries = 200;
@@ -482,6 +569,10 @@ describe('MetricsCollector', () => {
       // that carried nothing must, because that silence is what idle alarms read.
       snapshot.inputs.set('wukong-hook', inputEntry('wukong', { running: false }));
       snapshot.inputs.set('dsh-hook', inputEntry('dsh', { running: false }));
+      snapshot.inputs.set('stopped-file', inputEntry('stopped-agent', {
+        rawInMaxBatchBytes: 4096,
+        running: false,
+      }));
       snapshot.inputs.set('idle-hook', inputEntry('idle-agent'));
 
       const result = collector.collectL2(snapshot)!;
@@ -520,7 +611,43 @@ describe('MetricsCollector', () => {
       })]]);
       const result = collector.collectL2(buildSnapshot({ flushers }))!;
       expect(result.agents).toEqual([]);
+      expect(result.inputs).toEqual([]);
       expect(result.flushers[0].out_entries).toBe('1');
+    });
+
+    it('reports one hook row per agent and event, sharing the cycle identity', () => {
+      const result = collector.collectL2(pipelineSnapshot(), [
+        { agent: 'codex', hookEvent: 'stop', calls: 3, totalDurationMs: 150.6, maxDurationMs: 90.4 },
+        { agent: 'codex', hookEvent: 'session-start', calls: 1, totalDurationMs: 42, maxDurationMs: 42 },
+      ])!;
+
+      expect(result.hooks).toHaveLength(2);
+      expect(result.hooks.find(row => row.hook_event === 'stop')).toMatchObject({
+        type: 'hook',
+        agent: 'codex',
+        hook_event: 'stop',
+        calls: '3',
+        total_duration_ms: '151',
+        max_duration_ms: '90',
+        user_id: 'test-user',
+      });
+      // Hook rows describe the same window as the rest of the cycle.
+      const windows = new Set([...result.agents, ...result.flushers, ...result.hooks].map(r => r.window_ms));
+      expect(windows.size).toBe(1);
+      expect(result.hooks[0].instance_id).toBe(result.agents[0].instance_id);
+    });
+
+    it('reports hook rows on their own and skips entries without calls', () => {
+      const result = collector.collectL2(buildSnapshot(), [
+        { agent: 'codex', hookEvent: 'stop', calls: 1, totalDurationMs: 30, maxDurationMs: 30 },
+        { agent: 'codex', hookEvent: 'session-start', calls: 0, totalDurationMs: 0, maxDurationMs: 0 },
+      ])!;
+
+      expect(result.agents).toEqual([]);
+      expect(result.hooks.map(row => row.hook_event)).toEqual(['stop']);
+      expect(collector.collectL2(buildSnapshot(), [
+        { agent: 'codex', hookEvent: 'stop', calls: 0, totalDurationMs: 0, maxDurationMs: 0 },
+      ])).toBeNull();
     });
   });
 

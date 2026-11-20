@@ -12,6 +12,7 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
     appendedLines.push({ path, line });
   }),
   ensureDir: vi.fn(),
+  getTodayDateString: () => '2026-09-02',
 }));
 
 const mockSendAlarm = vi.fn();
@@ -30,6 +31,10 @@ vi.mock('node:fs', () => ({
 
 import { UpdaterMetrics } from '../../../src/updater/updater-metrics.js';
 import type { ProcessLiveness } from '../../../src/utils/pid-utils.js';
+
+function isDailyLog(filePath: string, prefix: string): boolean {
+  return filePath.includes(`${prefix}-`) && /-\d{4}-\d{2}-\d{2}\.jsonl$/.test(filePath);
+}
 
 describe('UpdaterMetrics', () => {
   let killSpy: ReturnType<typeof vi.spyOn> | null = null;
@@ -65,13 +70,13 @@ describe('UpdaterMetrics', () => {
   }
 
   describe('writeEvent', () => {
-    it('writes updater event to pilot-updater-events.jsonl after flush', async () => {
+    it('writes updater event to a daily pilot-updater-events file after flush', async () => {
       const m = createMetrics();
       await m.start();
       m.writeEvent('updater_started');
       await m.stop();
 
-      const eventLines = appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'));
+      const eventLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'));
       expect(eventLines).toHaveLength(1);
 
       const parsed = JSON.parse(eventLines[0].line);
@@ -90,7 +95,7 @@ describe('UpdaterMetrics', () => {
       });
       await m.stop();
 
-      const eventLines = appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'));
+      const eventLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'));
       const parsed = JSON.parse(eventLines[0].line);
       expect(parsed.current_version).toBe('1.0.0');
       expect(parsed.latest_version).toBe('1.0.1');
@@ -102,7 +107,7 @@ describe('UpdaterMetrics', () => {
       m.writeEvent('updater_started');
       await m.stop();
 
-      const eventLines = appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'));
+      const eventLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'));
       const parsed = JSON.parse(eventLines[0].line);
       expect(parsed.user_id).toBe('user-123');
     });
@@ -116,7 +121,7 @@ describe('UpdaterMetrics', () => {
       });
       await m.stop();
 
-      const eventLines = appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'));
+      const eventLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'));
       const parsed = JSON.parse(eventLines[0].line);
       expect(parsed.error).toBe('download timeout');
       expect(parsed.consecutive_failures).toBe(3);
@@ -124,13 +129,13 @@ describe('UpdaterMetrics', () => {
   });
 
   describe('writeAlarm', () => {
-    it('writes alarm entry to pilot-alarms.jsonl after flush', async () => {
+    it('writes alarm entry to a daily pilot-alarms file after flush', async () => {
       const m = createMetrics();
       await m.start();
       m.writeAlarm('UPDATER_FAILURE_ALARM', '2', 'update failed');
       await m.stop();
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       expect(alarmLines).toHaveLength(1);
 
       const parsed = JSON.parse(alarmLines[0].line);
@@ -149,7 +154,7 @@ describe('UpdaterMetrics', () => {
       await m.start();
       await m.stop();
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       const formatAlarm = alarmLines
         .map(l => JSON.parse(l.line))
         .find((a: { alarm_type: string }) => a.alarm_type === 'USER_ID_FORMAT_ALARM');
@@ -163,7 +168,7 @@ describe('UpdaterMetrics', () => {
       await m.start();
       await m.stop();
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       const formatAlarm = alarmLines
         .map(l => JSON.parse(l.line))
         .find((a: { alarm_type: string }) => a.alarm_type === 'USER_ID_FORMAT_ALARM');
@@ -181,7 +186,7 @@ describe('UpdaterMetrics', () => {
 
       await m.stop();
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       const formatAlarms = alarmLines
         .map(l => JSON.parse(l.line))
         .filter((a: { alarm_type: string }) => a.alarm_type === 'USER_ID_FORMAT_ALARM');
@@ -195,12 +200,12 @@ describe('UpdaterMetrics', () => {
       await m.start();
       m.writeEvent('updater_started');
 
-      expect(appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'))).toHaveLength(0);
+      expect(appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'))).toHaveLength(0);
 
       await vi.advanceTimersByTimeAsync(30_000);
       await vi.advanceTimersByTimeAsync(0);
 
-      const eventLines = appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'));
+      const eventLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'));
       expect(eventLines).toHaveLength(1);
 
       await m.stop();
@@ -214,8 +219,8 @@ describe('UpdaterMetrics', () => {
       m.writeAlarm('UPDATER_FAILURE_ALARM', '2', 'err');
       await m.stop();
 
-      expect(appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'))).toHaveLength(2);
-      expect(appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'))).toHaveLength(1);
+      expect(appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'))).toHaveLength(2);
+      expect(appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'))).toHaveLength(1);
     });
   });
 
@@ -227,7 +232,7 @@ describe('UpdaterMetrics', () => {
       await m.stop();
 
       // Events are persisted to the local JSONL only; no pilot_updater_event topic.
-      expect(appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'))).toHaveLength(1);
+      expect(appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'))).toHaveLength(1);
       const statusCall = mockSendStatus.mock.calls.find(
         (c: unknown[]) => c[0] === 'pilot_updater_event',
       );
@@ -255,7 +260,7 @@ describe('UpdaterMetrics', () => {
       await m.start();
       await m.stop();
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       expect(alarmLines).toHaveLength(0);
     });
 
@@ -266,7 +271,7 @@ describe('UpdaterMetrics', () => {
       await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
       await vi.advanceTimersByTimeAsync(60_000);
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       expect(alarmLines).toHaveLength(1);
       const parsed = JSON.parse(alarmLines[0].line);
       expect(parsed.alarm_type).toBe('SERVICE_NOT_RUNNING_ALARM');
@@ -291,7 +296,7 @@ describe('UpdaterMetrics', () => {
       await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
       await vi.advanceTimersByTimeAsync(60_000);
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       expect(alarmLines).toHaveLength(1);
       const parsed = JSON.parse(alarmLines[0].line);
       expect(parsed.alarm_type).toBe('SERVICE_NOT_RUNNING_ALARM');
@@ -315,7 +320,7 @@ describe('UpdaterMetrics', () => {
       await vi.advanceTimersByTimeAsync(60_000);
       await m.stop();
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       expect(alarmLines).toHaveLength(0);
     });
 
@@ -332,7 +337,7 @@ describe('UpdaterMetrics', () => {
       await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
       await m.stop();
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       expect(alarmLines).toHaveLength(0);
     });
 
@@ -344,7 +349,7 @@ describe('UpdaterMetrics', () => {
       await vi.advanceTimersByTimeAsync(60_000);
       await vi.advanceTimersByTimeAsync(60_000);
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       expect(alarmLines).toHaveLength(1);
       await m.stop();
     });
@@ -359,4 +364,3 @@ function down(reason: string): ProcessLiveness {
     pidFileState: 'missing',
   };
 }
-

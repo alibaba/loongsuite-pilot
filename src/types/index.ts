@@ -8,6 +8,12 @@ export * from './events.js';
 export interface ListenerConfig {
   enabled: boolean;
   pollInterval: number;
+  /** Restrict the Qwen Work collaboration input to these conversation IDs. */
+  includeConversationIds?: string[];
+  /** Read-only source log directory override for the doubao-work listener. */
+  logDir?: string;
+  /** Product source for the doubao-work listener; defaults to Doubao Work. */
+  client?: 'doubao-work' | 'doubao';
 }
 
 /**
@@ -32,6 +38,7 @@ export interface CmsConfig {
 }
 
 export type MaskMode = 'none' | 'all' | 'custom';
+export type MaskReplacementMode = 'placeholder' | 'preview';
 
 export const PII_MASK_TYPES = [
   'idCard',
@@ -56,9 +63,17 @@ export type MaskType = (typeof SUPPORTED_MASK_TYPES)[number];
 export interface MaskConfig {
   mode: MaskMode;
   types: MaskType[];
+  replacementMode?: MaskReplacementMode;
+}
+
+export interface InterceptorConfig {
+  /** Explicit opt-in for managed rules and interception hooks. */
+  mode: 'none' | 'all';
 }
 
 export interface OtlpTraceRawConfig {
+  /** Trusted local .mjs modules exporting a synchronous SpanEnricher. */
+  spanEnrichers?: string[];
   endpoint?: string;
   headers?: Record<string, string>;
   resourceAttributes?: Record<string, string>;
@@ -99,10 +114,13 @@ export interface InnerTraceConfig {
 }
 
 export interface AnalyticsConfig {
+  privacy?: { excludeWorkspaces: string[] };
   enabled: boolean;
   autoStart: boolean;
   dataDir: string;
   userId: string;
+  hostSn?: string;
+  hostIdentityTags: boolean;
   collectLog: boolean;
   collectTrace: boolean;
   /** Exact service.name shared by every agent and backend. */
@@ -129,6 +147,8 @@ export interface AnalyticsConfig {
   multimodal?: MultimodalRuntimeConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
   globalSpanAttributes?: Record<string, string>;
+  /** Local interceptor rules. Same `{ mode, types }` shape as mask; types are a subset. */
+  interceptor: InterceptorConfig;
 }
 
 /**
@@ -140,6 +160,8 @@ export interface UpstreamLinkConfig {
   enabled: boolean;
   /** Propagate the linked context into supported downstream CLI tool calls. */
   propagateToTools: boolean;
+  /** Propagate the linked context to the LLM gateway as a `traceparent` header. */
+  propagateToLlm: boolean;
   /** Generate a per-turn trace context for tools when no upstream context is available. */
   generateTraceWhenMissing: boolean;
   /** TTL (ms) after which acp-correlate files/locks are cleaned up. */
@@ -150,59 +172,80 @@ export const MULTIMODAL_UPLOAD_MODES = [
   'none',
   'input',
   'output',
-  'tool',
-  'both',
+  'all',
 ] as const;
 export type MultimodalUploadMode = (typeof MULTIMODAL_UPLOAD_MODES)[number];
 
 /** uploadMode covers user input. */
 export function multimodalUploadIncludesInput(mode: MultimodalUploadMode): boolean {
-  return mode === 'input' || mode === 'both';
+  return mode === 'input' || mode === 'all';
 }
 
 /** uploadMode covers model output. */
 export function multimodalUploadIncludesOutput(mode: MultimodalUploadMode): boolean {
-  return mode === 'output' || mode === 'both';
+  return mode === 'output' || mode === 'all';
 }
 
-/** uploadMode covers tool results. */
-export function multimodalUploadIncludesTool(mode: MultimodalUploadMode): boolean {
-  return mode === 'tool' || mode === 'both';
-}
+export const MULTIMODAL_STORAGE_TYPES = ['sls', 'delegatedOss', 'oss'] as const;
+export type MultimodalStorageType = (typeof MULTIMODAL_STORAGE_TYPES)[number];
 
-export const MULTIMODAL_UPLOADER_KINDS = ['sls', 'oss'] as const;
-export type MultimodalUploaderKind = (typeof MULTIMODAL_UPLOADER_KINDS)[number];
+export const MULTIMODAL_SLS_AUTH_MODES = ['ak', 'apiKey', 'anonymous'] as const;
+export type MultimodalSlsAuthMode = (typeof MULTIMODAL_SLS_AUTH_MODES)[number];
 
-export interface MultimodalOssConfig {
-  endpoint: string;
+export interface MultimodalAkAuth {
+  mode: 'ak';
   accessKeyId: string;
   accessKeySecret: string;
   securityToken?: string;
 }
 
-export interface MultimodalSlsConfig {
+export interface MultimodalApiKeyAuth {
+  mode: 'apiKey';
+  apiKey: string;
+}
+
+export interface MultimodalAnonymousAuth {
+  mode: 'anonymous';
+}
+
+/** Credential-bearing auth shared by SLS, delegated OSS, and direct OSS. */
+export type MultimodalCredentialAuth = MultimodalAkAuth | MultimodalApiKeyAuth;
+/** SLS PutObject also supports explicit credential-free anonymous writes. */
+export type MultimodalStorageAuth = MultimodalCredentialAuth | MultimodalAnonymousAuth;
+
+export interface MultimodalSlsTarget {
   endpoint: string;
   project: string;
   logstore: string;
-  accessKeyId: string;
-  accessKeySecret: string;
-  securityToken?: string;
 }
 
-/** Global multimodal storage; per-agent policy is under agents.<id>.multimodal. */
-export interface MultimodalRuntimeConfig {
-  uploader: MultimodalUploaderKind;
+export interface MultimodalOssTarget {
+  endpoint: string;
   storageBasePath: string;
-  oss?: MultimodalOssConfig;
-  sls?: MultimodalSlsConfig;
+}
+
+export type MultimodalStorage =
+  | { type: 'sls'; target: MultimodalSlsTarget; auth: MultimodalStorageAuth }
+  | { type: 'delegatedOss'; target: MultimodalSlsTarget; auth: MultimodalCredentialAuth }
+  | { type: 'oss'; target: MultimodalOssTarget; auth: MultimodalAkAuth };
+
+/**
+ * Experimental global multimodal storage; per-agent policy is under agents.<id>.multimodal.
+ * This subtree and multimodal event fields may change without migration.
+ */
+export interface MultimodalRuntimeConfig {
+  storage: MultimodalStorage;
+  storageBasePath: string;
 }
 
 /** Agent ids with multimodal extraction implemented. */
-export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex'] as const;
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder', 'qwen-work-cn'] as const;
 
-/** Per-agent multimodal policy (`uploadMode: none` disables). */
+/** Experimental per-agent multimodal policy (`uploadMode: none` disables). */
 export interface AgentMultimodalConfig {
   uploadMode: MultimodalUploadMode;
+  /** Extra local roots for pathToUri (merged with agent defaults). `~` expanded. */
+  allowedRootPaths?: string[];
 }
 
 export interface AgentConfig {
@@ -230,6 +273,8 @@ export interface OtlpEndpoint {
 }
 
 export interface OtlpTraceFlusherConfig {
+  /** Resolved local .mjs paths, in execution order. */
+  spanEnricherPaths?: string[];
   enabled: boolean;
   /** One or more backends; the same converted spans are exported to each. */
   endpoints: OtlpEndpoint[];
@@ -353,6 +398,8 @@ export interface LogRetentionConfig {
   hookDebugDays: number;
   outputDays: number;
   slsFailedDays: number;
+  otlpFailedDays: number;
+  metricAlarmDays: number;
 }
 
 export interface HookWatchdogConfig {
@@ -365,6 +412,7 @@ export interface PipelineToggle {
   enabled: boolean;
   file: { enabled: boolean };
   qoderApi: { enabled: boolean };
+  multica?: { enabled: boolean; mode?: 'on' | 'off'; serviceNamePrefix?: string; discoverLocalSources?: boolean };
 }
 
 /** @deprecated Use PipelineToggle instead */
@@ -377,6 +425,7 @@ export interface StatusBarConfig {
 }
 
 export interface DashboardConfig {
+  enabled: boolean;
   port: number;
 }
 

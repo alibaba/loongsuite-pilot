@@ -4,8 +4,11 @@ import * as path from 'node:path';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
+import { readBoundedLineTail } from '../base/bounded-line-tail.js';
 import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
+import { matchesFileIdentity } from '../../utils/file-identity.js';
+import { historyFileIdentity, historyRetentionExtra, migrateHistoryRetention, nextHistoryFile } from '../base/history-retention-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
@@ -14,7 +17,7 @@ import {
   resolveQoderWorkRoot,
   type SdkEvent,
 } from '../qoder-work-log/qoder-work-log-input.js';
-import { readInterceptFile, getInterceptFile, type InterceptData, type InterceptTokenData } from '../qoder-trace/intercept-token-reader.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const NANO_PER_MILLI = 1_000_000n;
 const SEGMENT_TIMING_TOLERANCE_MS = 5 * 60 * 1000;
@@ -44,7 +47,6 @@ export class QoderWorkTraceInput extends BaseInput {
   private readonly logDir: string;
   private readonly segmentsRoot: string;
   private readonly sdkLogDir: string;
-  private readonly interceptFile: string;
   private readonly logPrefix = 'qoder-work';
 
   // Per-session in-memory state for segment enrichment
@@ -70,11 +72,10 @@ export class QoderWorkTraceInput extends BaseInput {
   private readonly segmentDirBySession: Map<string, CachedSegmentDir> = new Map();
 
   constructor(opts: QoderWorkTraceInputOptions) {
-    super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
+    super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-work/history');
     this.segmentsRoot = opts.segmentsRoot ?? resolveHome('~/.qoderwork/logs/sessions');
     this.sdkLogDir = opts.sdkLogDir ?? resolveQoderWorkSdkLogDir();
-    this.interceptFile = opts.interceptFile ?? getInterceptFile('qoderwork-intercept.jsonl');
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -128,13 +129,9 @@ export class QoderWorkTraceInput extends BaseInput {
 
       // 3. Group → enrich → emit.
       const turnGroups = this.groupByTurn(entries);
-      // Intercept data (QoderWork runtime wrapper) is the fallback token source
-      // when segment tokens are all 0. Loaded lazily once per non-empty cycle.
-      let interceptData: InterceptData | null = null;
       const allEntries: AgentActivityEntry[] = [];
       for (const [, turnEntries] of turnGroups) {
-        interceptData ??= await this.readInterceptData();
-        this.enrichTurn(turnEntries, interceptData);
+        this.enrichTurn(turnEntries);
         this.injectTraceId(turnEntries);
         for (const entry of turnEntries) {
           await enrichCanonicalEntryWithGit(
@@ -163,9 +160,22 @@ export class QoderWorkTraceInput extends BaseInput {
 
   // ─── Hook JSONL reading ────────────────────────────────────────────────────
 
+  private historyCursor?: string;
+  private historyPendingFile?: string;
+
   private async readHookJsonl(): Promise<AgentActivityEntry[]> {
-    const today = getTodayDateString();
-    const logFileName = `${this.logPrefix}-${today}.jsonl`;
+    const migrated = await migrateHistoryRetention(this.getState(), this.logDir, this.logPrefix);
+    if (migrated) this.setState({ extra: migrated });
+    const state = this.getState();
+    const file = await nextHistoryFile(state, this.logDir, this.logPrefix, this.historyCursor, this.historyPendingFile)
+      ?? (state.extra?.hookInode === undefined ? state.lastFile : undefined);
+    if (!file) return [];
+    this.historyCursor = file;
+    this.historyPendingFile = undefined;
+    return this.readHookFile(file);
+  }
+
+  private async readHookFile(logFileName: string): Promise<AgentActivityEntry[]> {
     const logFile = path.join(this.logDir, logFileName);
 
     let stat;
@@ -176,40 +186,48 @@ export class QoderWorkTraceInput extends BaseInput {
     }
 
     const state = this.getState();
-    let offset = state.lastFile === logFileName ? (state.lastOffset ?? 0) : 0;
-
-    if (offset > 0 && stat.size < offset) {
-      this.logger.info('file truncated, resetting offset', { file: logFile });
-      offset = 0;
+    const identities = state.extra?.hookLogIdentities as Record<string, string> | undefined;
+    const offsets = state.extra?.hookLogOffsets as Record<string, number> | undefined;
+    const sameFile = matchesFileIdentity(identities?.[logFileName], stat);
+    const skippingLines = state.extra?.hookLogSkippingLines as Record<string, boolean> | undefined;
+    const wasSkipping = skippingLines?.[logFileName] ?? (state.lastFile === logFileName && state.extra?.hookSkippingLine === true);
+    const savedOffset = sameFile ? offsets?.[logFileName] ?? 0 : 0;
+    const reset = stat.size < savedOffset;
+    const offset = reset ? 0 : savedOffset;
+    const observed = historyRetentionExtra(this.getState(), this.logDir, this.logPrefix, logFileName, stat, offset);
+    if (observed) this.setState({ extra: observed });
+    if (stat.size <= offset) {
+      if (state.lastFile === logFileName && (reset || !sameFile || state.extra?.hookInode === undefined)) {
+        this.setState({ lastOffset: offset, extra: { ...this.getState().extra,
+          hookInode: stat.ino, hookSkippingLine: sameFile && !reset && wasSkipping } });
+      }
+      return [];
     }
-    if (stat.size <= offset) return [];
 
-    const handle = await fs.open(logFile, 'r');
+    const batch = await readBoundedLineTail(logFile, stat, offset,
+      sameFile && !reset && wasSkipping, this.getInputRuntimeAccumulator());
+    if (!batch) return [];
+    if (batch.skippingLine && batch.offset < stat.size) this.historyPendingFile = logFileName;
+    const progress = historyRetentionExtra(this.getState(), this.logDir, this.logPrefix,
+      logFileName, stat, batch.offset, batch.beganSkip || batch.skippingLine);
+    if (progress) this.setState({ extra: progress });
+    if (batch.beganSkip) this.logger.warn('oversized Qoder Work Hook line skipped', { file: logFile, offset });
+    if (batch.offset !== savedOffset || reset || !sameFile || state.extra?.hookInode === undefined) {
+      this.setState({ lastFile: logFileName, lastOffset: batch.offset,
+        extra: { hookInode: stat.ino, hookSkippingLine: batch.skippingLine,
+          hookLogSkippingLines: { ...skippingLines, [logFileName]: batch.skippingLine } } });
+    }
+
     const entries: AgentActivityEntry[] = [];
-    try {
-      const maxReadSize = 16 * 1024 * 1024;
-      const readSize = Math.min(stat.size - offset, maxReadSize);
-      const buf = Buffer.alloc(readSize);
-      await handle.read(buf, 0, readSize, offset);
-      let text = buf.toString('utf-8');
-      let consumedBytes = readSize;
-      if (readSize < stat.size - offset) {
-        const lastNL = text.lastIndexOf('\n');
-        if (lastNL >= 0) { text = text.substring(0, lastNL); consumedBytes = Buffer.byteLength(text, 'utf-8') + 1; }
+    for (const line of batch.text.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const record = JSON.parse(line) as AgentActivityEntry;
+        delete record.version;
+        if (record['event.name']) entries.push(record);
+      } catch {
+        this.logger.warn('invalid JSONL line');
       }
-      this.setState({ lastFile: logFileName, lastOffset: offset + consumedBytes });
-
-      for (const line of text.split('\n')) {
-        if (!line.trim()) continue;
-        try {
-          const record = JSON.parse(line) as AgentActivityEntry;
-          if (record['event.name']) entries.push(record);
-        } catch {
-          this.logger.warn('invalid JSONL line');
-        }
-      }
-    } finally {
-      await handle.close();
     }
 
     return entries;
@@ -298,48 +316,34 @@ export class QoderWorkTraceInput extends BaseInput {
       return;
     }
 
-    const prevState = this.stateStore.get(fileStateKey);
-    const prevInode = (prevState.extra as { inode?: number } | undefined)?.inode;
-    const currentInode = (stat as unknown as { ino: number }).ino;
-
-    if (prevInode !== undefined && prevInode !== currentInode) {
-      this.stateStore.setOffset(fileStateKey, 0);
-      this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
-    } else if (prevInode === undefined) {
-      this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
+    const previous = this.stateStore.get(fileStateKey);
+    const savedOffset = previous.lastOffset ?? 0;
+    const reset = (previous.extra?.inode !== undefined && previous.extra.inode !== stat.ino)
+      || stat.size < savedOffset;
+    const offset = reset ? 0 : savedOffset;
+    if (stat.size <= offset) {
+      if (reset || previous.extra?.inode === undefined) {
+        this.stateStore.update(fileStateKey, { lastOffset: offset, extra: { inode: stat.ino, skippingLine: false } });
+      }
+      return;
     }
 
-    let offset = this.stateStore.getOffset(fileStateKey);
-    if (offset > 0 && stat.size < offset) offset = 0; // truncated
-    if (stat.size <= offset) return;
-
-    const handle = await fs.open(filePath, 'r');
-    try {
-      const maxReadSize = 16 * 1024 * 1024;
-      const readSize = Math.min(stat.size - offset, maxReadSize);
-      const buf = Buffer.alloc(readSize);
-      await handle.read(buf, 0, readSize, offset);
-      let text = buf.toString('utf-8');
-
-      let consumedBytes = readSize;
-      if (readSize < stat.size - offset) {
-        const lastNL = text.lastIndexOf('\n');
-        if (lastNL >= 0) { text = text.substring(0, lastNL); consumedBytes = Buffer.byteLength(text, 'utf-8') + 1; }
+    const batch = await readBoundedLineTail(filePath, stat, offset,
+      !reset && previous.extra?.skippingLine === true, this.getInputRuntimeAccumulator());
+    if (!batch) return;
+    if (batch.beganSkip) this.logger.warn('oversized Qoder Work segment line skipped', { file: filePath, offset });
+    if (batch.offset !== savedOffset || reset || previous.extra?.inode === undefined) {
+      this.stateStore.update(fileStateKey, { lastOffset: batch.offset,
+        extra: { inode: stat.ino, skippingLine: batch.skippingLine } });
+    }
+    for (const line of batch.text.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line) as SegmentEvent;
+        this.handleSegmentEvent(sessionId, event);
+      } catch {
+        this.logger.warn('invalid segments JSONL line');
       }
-      this.stateStore.setOffset(fileStateKey, offset + consumedBytes);
-      this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
-
-      for (const line of text.split('\n')) {
-        if (!line.trim()) continue;
-        try {
-          const event = JSON.parse(line) as SegmentEvent;
-          this.handleSegmentEvent(sessionId, event);
-        } catch {
-          this.logger.warn('invalid segments JSONL line');
-        }
-      }
-    } finally {
-      await handle.close();
     }
   }
 
@@ -494,18 +498,12 @@ export class QoderWorkTraceInput extends BaseInput {
 
   // ─── Enrichment ─────────────────────────────────────────────────────────────
 
-  private enrichTurn(entries: AgentActivityEntry[], interceptData: InterceptData): void {
+  private enrichTurn(entries: AgentActivityEntry[]): void {
     const sessionId = entries.find(e => e['gen_ai.session.id'])?.['gen_ai.session.id'] as string | undefined;
     const turnId = entries.find(e => e['gen_ai.turn.id'])?.['gen_ai.turn.id'] as string | undefined;
 
     const steps = this.groupByStep(entries);
     const stepOrder = [...steps.keys()].filter((k): k is string => k !== undefined);
-
-    // Build a chatcmpl-id → token map once per turn so per-response lookups are
-    // O(1); avoids O(n*m) linear scans over intercept tokens in long sessions.
-    const interceptTokens = new Map<string, InterceptTokenData>(
-      interceptData.tokens.map(t => [t.id, t]),
-    );
 
     // Apply segment-derived timing + model to each step in transcript order.
     if (sessionId) {
@@ -539,36 +537,12 @@ export class QoderWorkTraceInput extends BaseInput {
             }
             hasSegmentUsage = this.applyUsage(response, pair.usage);
           }
-          // Segment tokens all 0 (or no segment pair) → fall back to intercept
-          // tokens matched by gen_ai.response.id (chatcmpl-xxx), then to the
-          // legacy SDK log as a last resort.
           if (!hasSegmentUsage) {
-            if (!this.applyInterceptUsage(response, interceptTokens)) {
-              this.applySdkTokenUsage(sessionId, request, response);
-            }
-          } else {
-            // Segment provided input/output/total but the QoderWork segment log
-            // may omit cache_read. Overlay cache_read from intercept when the
-            // wrapper captured it for this respId; reasoning_tokens is not in
-            // the OTel GenAI spec and is intentionally not propagated.
-            this.applyInterceptCacheReadOverlay(response, interceptTokens);
+            this.applySdkTokenUsage(sessionId, request, response);
           }
         }
 
         this.applySegmentToolTiming(sessionId, stepEntries);
-      }
-    }
-
-    // System prompt captured by the QoderWork runtime wrapper (JSON.stringify hook).
-    // Mirror qoder-trace: attach to the first llm.request that owns a step id.
-    if (interceptData.systemPrompt) {
-      const firstReq = entries.find(e =>
-        e['event.name'] === 'llm.request' && !!e['gen_ai.step.id'],
-      );
-      if (firstReq) {
-        (firstReq as Record<string, unknown>)['gen_ai.system_instructions'] = [
-          { type: 'text', content: interceptData.systemPrompt.content },
-        ];
       }
     }
 
@@ -643,58 +617,6 @@ export class QoderWorkTraceInput extends BaseInput {
     this.applyUsage(response, pair);
   }
 
-  // ─── Intercept token compatibility ──────────────────────────────────────
-
-  private async readInterceptData(): Promise<InterceptData> {
-    try {
-      return await readInterceptFile(this.interceptFile);
-    } catch {
-      return { tokens: [], systemPrompt: null };
-    }
-  }
-
-  // Fall back to intercept-captured tokens when the segment log does not
-  // provide them. Adapts the InterceptTokenData to applyUsage so future field
-  // additions there stay in sync, then promotes the provider-reported total
-  // when intercept supplies one (provider total may include reasoning tokens,
-  // which we do not write to the span individually).
-  private applyInterceptUsage(
-    response: AgentActivityEntry,
-    tokensById: Map<string, InterceptTokenData>,
-  ): boolean {
-    const respId = response['gen_ai.response.id'] as string | undefined;
-    if (!respId) return false;
-    const match = tokensById.get(respId);
-    if (!match) return false;
-    const applied = this.applyUsage(response, {
-      inputTokens: match.promptTokens,
-      outputTokens: match.completionTokens,
-      cacheReadInputTokens: match.cachedTokens,
-      cacheCreationInputTokens: undefined,
-    });
-    if (applied && match.totalTokens) {
-      (response as Record<string, unknown>)['gen_ai.usage.total_tokens'] = match.totalTokens;
-    }
-    return applied;
-  }
-
-  // Segment log may omit cache_read when the wrapper is the only source.
-  // Overlay only cache_read so segment values stay authoritative for the rest.
-  // reasoning_tokens is not in the OTel GenAI spec and is intentionally skipped.
-  private applyInterceptCacheReadOverlay(
-    response: AgentActivityEntry,
-    tokensById: Map<string, InterceptTokenData>,
-  ): void {
-    const respId = response['gen_ai.response.id'] as string | undefined;
-    if (!respId) return;
-    const match = tokensById.get(respId);
-    if (!match) return;
-    const target = response as Record<string, unknown>;
-    if (match.cachedTokens && !target['gen_ai.usage.cache_read.input_tokens']) {
-      target['gen_ai.usage.cache_read.input_tokens'] = match.cachedTokens;
-    }
-  }
-
   // ─── SDK token compatibility ─────────────────────────────────────────────
 
   private async readSdkTokenState(): Promise<void> {
@@ -746,41 +668,30 @@ export class QoderWorkTraceInput extends BaseInput {
     const currentInode = (stat as unknown as { ino: number }).ino;
     const previous = this.stateStore.get(stateKey);
     const previousInode = (previous.extra as { inode?: number } | undefined)?.inode;
-    if (previousInode !== undefined && previousInode !== currentInode) {
-      this.stateStore.setOffset(stateKey, 0);
+    const replaced = previousInode !== undefined && previousInode !== currentInode;
+    const savedOffset = previous.lastOffset ?? 0;
+    const reset = replaced || stat.size < savedOffset;
+    const offset = reset ? 0 : savedOffset;
+    if (reset && stat.size === 0) {
+      this.stateStore.update(stateKey, { lastOffset: 0, extra: { skippingLine: false } });
     }
-
-    let offset = previousInode !== undefined && previousInode !== currentInode
-      ? 0
-      : this.stateStore.getOffset(stateKey);
-    if (offset > 0 && stat.size < offset) offset = 0;
     if (stat.size <= offset) {
-      this.stateStore.update(stateKey, { extra: { inode: currentInode } });
+      if (previousInode !== currentInode) {
+        this.stateStore.update(stateKey, { extra: { inode: currentInode } });
+      }
       return;
     }
 
-    const handle = await fs.open(filePath, 'r');
-    let text = '';
-    try {
-      const readSize = Math.min(stat.size - offset, 16 * 1024 * 1024);
-      const buffer = Buffer.alloc(readSize);
-      await handle.read(buffer, 0, readSize, offset);
-      text = buffer.toString('utf-8');
-      let consumedBytes = readSize;
-      if (readSize < stat.size - offset) {
-        const lastNewLine = text.lastIndexOf('\n');
-        if (lastNewLine >= 0) {
-          text = text.substring(0, lastNewLine);
-          consumedBytes = Buffer.byteLength(text, 'utf-8') + 1;
-        }
-      }
-      this.stateStore.setOffset(stateKey, offset + consumedBytes);
-      this.stateStore.update(stateKey, { extra: { inode: currentInode } });
-    } finally {
-      await handle.close();
+    const batch = await readBoundedLineTail(filePath, stat, offset,
+      !reset && previous.extra?.skippingLine === true, this.getInputRuntimeAccumulator());
+    if (!batch) return;
+    if (batch.beganSkip) this.logger.warn('oversized Qoder Work SDK line skipped', { file: filePath, offset });
+    if (batch.offset !== savedOffset || reset || previous.extra?.inode === undefined) {
+      this.stateStore.update(stateKey, { lastOffset: batch.offset,
+        extra: { inode: currentInode, skippingLine: batch.skippingLine } });
     }
 
-    for (const line of text.split('\n')) {
+    for (const line of batch.text.split('\n')) {
       if (!line.trim()) continue;
       const event = parseSdkLogLine(line);
       if (event) this.handleSdkTokenEvent(event);
@@ -1014,7 +925,6 @@ export interface QoderWorkTraceInputOptions extends InputOptions {
   logDir?: string;
   segmentsRoot?: string;
   sdkLogDir?: string;
-  interceptFile?: string;
 }
 
 interface SegmentEvent {
