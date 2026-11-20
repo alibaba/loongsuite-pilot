@@ -8,6 +8,23 @@ export const LOCAL_LOG_EMERGENCY_FILE_BYTES = 3 * 1024 * 1024 * 1024;
 const logger = createLogger('SegmentedJsonlWriter');
 const writes = new Map<string, Promise<unknown>>();
 
+/** Return the byte offset after the last newline. */
+async function completeJsonlEnd(file: fs.FileHandle, end: number): Promise<number> {
+  if (end === 0) return 0;
+  const last = Buffer.allocUnsafe(1);
+  const { bytesRead: lastRead } = await file.read(last, 0, 1, end - 1);
+  if (lastRead && last[0] === 10) return end;
+  const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, end));
+  while (end > 0) {
+    const from = Math.max(0, end - buffer.length);
+    const { bytesRead } = await file.read(buffer, 0, end - from, from);
+    const newline = buffer.subarray(0, bytesRead).lastIndexOf(10);
+    if (newline >= 0) return from + newline + 1;
+    end = from;
+  }
+  return 0;
+}
+
 /** Retention and append share ownership of a path, including rename/unlink. */
 export async function withJsonlFileLock<T>(file: string, action: () => Promise<T>): Promise<T> {
   const key = path.resolve(file);
@@ -23,6 +40,7 @@ export async function appendSegmentedJsonl(
   line: string,
   maxFileBytes = DEFAULT_JSONL_SEGMENT_BYTES,
   kind: 'mirror' | 'failed' = 'mirror',
+  durability?: 'repair-and-sync',
 ): Promise<void> {
   await withJsonlFileLock(file, async () => {
     await fs.mkdir(path.dirname(file), { recursive: true });
@@ -43,14 +61,41 @@ export async function appendSegmentedJsonl(
       logger.warn('Deleted oversized local JSONL file', { file, bytes: size, discardedFailedData: kind === 'failed' });
       size = 0;
     }
+    if (durability && size > 0) {
+      const active = await fs.open(file, 'r+');
+      try {
+        const complete = await completeJsonlEnd(active, size);
+        if (complete < size) {
+          await active.truncate(complete);
+          logger.warn('Removed incomplete local JSONL record before append', { file, bytes: size - complete });
+          size = complete;
+        }
+      } finally { await active.close(); }
+    }
     if (size > 0 && size + bytes > maxFileBytes) {
       const match = /^(.*)-(\d{4}-\d{2}-\d{2}|all)\.jsonl$/.exec(path.basename(file));
       if (!match) throw new Error(`Unsupported JSONL output filename: ${file}`);
       const id = randomUUID().replace(/-/g, '');
       await fs.rename(file, path.join(path.dirname(file), `${match[1]}.part-${id}-${match[2]}.jsonl`));
+      size = 0;
     }
     // Keep one complete event even when it exceeds the normal segment size.
     if (bytes > maxFileBytes) logger.warn('JSONL record exceeds file size limit', { file, bytes, maxFileBytes });
-    await fs.appendFile(file, data, 'utf8');
+    if (!durability) {
+      await fs.appendFile(file, data, 'utf8');
+      return;
+    }
+    const active = await fs.open(file, 'a');
+    try {
+      await active.writeFile(data, 'utf8');
+      await active.sync();
+    } catch (error) {
+      try {
+        await active.truncate(size);
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], `Could not append or roll back JSONL output: ${file}`);
+      }
+      throw error;
+    } finally { await active.close(); }
   });
 }

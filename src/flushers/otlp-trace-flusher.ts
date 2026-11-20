@@ -46,7 +46,7 @@ import { createLogger } from '../utils/logger.js';
 import { ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
 import { appendSegmentedJsonl, DEFAULT_JSONL_SEGMENT_BYTES } from '../utils/segmented-jsonl-writer.js';
 import { formatTime } from '../utils/time-utils.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -380,8 +380,18 @@ interface ResolvedOtlpEndpoint {
   appendAgentTypeToServiceName: boolean;
 }
 
+function endpointReceiptKey(endpoint: ResolvedOtlpEndpoint, serviceName: string): string {
+  const headers = Object.entries(endpoint.headers).map(([name, value]) => [name.toLowerCase(), value]).sort();
+  return createHash('sha256').update(JSON.stringify([endpoint.url, serviceName, headers])).digest('hex');
+}
+
 interface AgentExportState {
-  exporters: Array<{ name: string; exporter: TraceExporterLike }>;
+  exporters: Array<{ name: string; receiptKey: string; exporter: TraceExporterLike }>;
+}
+
+interface TurnExportProgress {
+  accepted: ReadonlySet<string>;
+  batchResults: Map<string, boolean>;
 }
 
 /**
@@ -938,9 +948,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // split its records and synthesize duplicate ENTRY/AGENT spans.
     const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) || undefined;
     for (const [bufKey, buf] of this.turnBuffers) {
-      // Native Codex task_complete/turn_aborted is authoritative. A second
-      // work item in the same thread must not truncate a still-running turn.
-      if (agentType === 'codex' || agentType === 'doubao-work') break;
+      // Native completion owns these turns. In particular, the journal can
+      // replay Kimi turns out of order after an interrupted write.
+      if (agentType === 'codex' || agentType === 'doubao-work' || agentType === 'kimi-code-cli') break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       // Incremental Hermes turns may overlap inside one IM session. They have
       // their own explicit completion, so a successor is not an implicit end.
@@ -1078,6 +1088,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
       await this.appendBatch(entries, logicalBytes);
     } finally { this.batchDepth--; }
     await this.finishBatch();
+  }
+
+  protected override async sendAcceptedBatch(
+    entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
+    if (!this.codexJournal || entries.some(entry => !this.codexJournal!.accepts(entry))) {
+      throw new Error('OTLP turn journal cannot accept the acknowledged batch');
+    }
+    await this.sendBatch(entries, logicalBytes);
   }
 
   private async appendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
@@ -1304,6 +1324,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       return entry['event.name'] === 'other' && entry['gen_ai.turn.end'] === true;
     }
     if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.source'] === 'hybrid-v2') return entry['gen_ai.turn.end'] === true;
+    if (entry['gen_ai.agent.type'] === 'kimi-code-cli') return entry['gen_ai.turn.end'] === true;
     // V2 step completion (including a failed/retried model request) is not
     // execution completion. Preserve V1's existing finish-reason behavior.
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'opencode'
@@ -1411,6 +1432,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
           key: `codex:${[entry['user.id'], entry['gen_ai.session.id'], turnId]
             .map(v => typeof v === 'string' ? `${v.length}:${v}` : '0:').join('')}` };
       }
+      if (entry['gen_ai.agent.type'] === 'kimi-code-cli') {
+        return { source: 'turn_id', value: turnId, key: `kimi-code-cli:${codexTurnJournalGroupKey(entry)}` };
+      }
       return { source: 'turn_id', value: turnId, key: `turn:${turnId}` };
     }
 
@@ -1489,7 +1513,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
         'agent.hermes.collection.incomplete': true,
         'agent.hermes.collection.end_reason': 'producer_process_exited' };
     }
-    const exported = await this.convertAndExport(buf.agentType, records);
+    const kimiJournalKey = buf.agentType === 'kimi-code-cli' && buf.completed ? buf.journalKey : undefined;
+    const exported = await this.convertAndExport(buf.agentType, records, kimiJournalKey);
     if (exported && this.codexJournal?.acceptsAgent(buf.agentType) && buf.completed) {
       await this.codexJournal.acknowledge(buf.records);
     }
@@ -1506,8 +1531,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private async convertAndExport(
     agentType: string,
     records: AgentActivityEntry[],
+    kimiJournalKey?: string,
   ): Promise<boolean> {
     if (records.length === 0) return true;
+    const accepted = kimiJournalKey ? await this.codexJournal?.kimiOtlpReceipts(kimiJournalKey) : undefined;
     const projectedResourceAttributes = this.collectResourceAttributes(records);
     const resourceIdentity = this.resolveAgentResourceIdentity(agentType, records);
     // Convert once per distinct service.name (backends may split into user/inner
@@ -1518,6 +1545,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     )];
     const results = await Promise.all(
       serviceNames.map((serviceName) => {
+        if (accepted?.size && this.getOrCreateExportState(agentType, serviceName).exporters.every(
+          target => accepted.has(target.receiptKey),
+        )) return Promise.resolve(true);
         const convertKey = this.buildConvertStateKey(agentType, serviceName, projectedResourceAttributes);
         const prev = this.convertLocks.get(convertKey) ?? Promise.resolve();
         const current = prev.then(() => this.doConvertAndExport(
@@ -1527,6 +1557,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           projectedResourceAttributes,
           resourceIdentity,
           convertKey,
+          kimiJournalKey && accepted ? { key: kimiJournalKey, accepted } : undefined,
         ));
         this.convertLocks.set(convertKey, current.then(() => undefined, () => undefined));
         return current;
@@ -1542,6 +1573,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     projectedResourceAttributes: Record<string, ResourceProjectionValue>,
     resourceIdentity: AgentResourceIdentity,
     convertKey: string,
+    kimiDelivery?: { key: string; accepted: ReadonlySet<string> },
   ): Promise<boolean> {
     const convertState = this.getOrCreateConvertState(
       agentType,
@@ -1551,6 +1583,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
       convertKey,
     );
     const { handler, provider, inMem, toolSpanIds, llmSpanIds, idGenerator } = convertState;
+    const progress: TurnExportProgress | undefined = kimiDelivery
+      ? { accepted: kimiDelivery.accepted, batchResults: new Map() } : undefined;
+    // The same journal turn can be converted for more than one service or
+    // after restart. Keep its generated span identities stable in each case.
+    if (kimiDelivery) idGenerator.setStableIdSeed(`kimi-otlp-v1:${kimiDelivery.key}`);
     convertState.active += 1;
     let grokMetadata: GrokConversionMetadata = { systemInstructions: [] };
     let openClawIdentity: OpenClawIdentityMetadata = {};
@@ -1663,7 +1700,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
               pendingBytes = 0;
               const metadata = grokInstructionsApplied ? { ...grokMetadata, systemInstructions: [] } : grokMetadata;
               const exported = await this.exportConvertedSpans(agentType, serviceName, records, batch,
-                metadata, openClawIdentity, reasoning);
+                metadata, openClawIdentity, reasoning, progress);
               if (batch.some(span => span.attributes['gen_ai.span.kind'] === 'LLM')) grokInstructionsApplied = true;
               streamedExportSucceeded = exported && streamedExportSucceeded;
             };
@@ -1727,15 +1764,26 @@ export class OtlpTraceFlusher extends BaseFlusher {
         return false;
       }
 
-      if (streamedExportSucceeded !== undefined) return streamedExportSucceeded;
-      await provider.forceFlush();
-      const spans = inMem.getFinishedSpans();
-      inMem.reset();
-      return await this.exportConvertedSpans(agentType, serviceName, records, spans, grokMetadata, openClawIdentity);
+      let exported = streamedExportSucceeded;
+      if (exported === undefined) {
+        await provider.forceFlush();
+        const spans = inMem.getFinishedSpans();
+        inMem.reset();
+        exported = await this.exportConvertedSpans(agentType, serviceName, records, spans,
+          grokMetadata, openClawIdentity, undefined, progress);
+      }
+      if (kimiDelivery && progress) {
+        // A receipt confirms the entire turn at one destination. Partial
+        // acceptance keeps the destination eligible for a full replay.
+        const completed = [...progress.batchResults].filter(([, acceptedAll]) => acceptedAll).map(([key]) => key);
+        await this.codexJournal?.acknowledgeKimiOtlpDestinations(kimiDelivery.key, completed);
+      }
+      return exported;
     } catch (err) {
       logger.error(`convert and export failed for ${agentType}`, { err: String(err) });
       return false;
     } finally {
+      if (kimiDelivery) idGenerator.setStableIdSeed();
       convertState.active -= 1;
       this.evictConvertStates();
     }
@@ -1750,6 +1798,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     grokMetadata: GrokConversionMetadata,
     openClawIdentity: OpenClawIdentityMetadata,
     reasoning?: { seen: boolean; total: number },
+    progress?: TurnExportProgress,
   ): Promise<boolean> {
     if (spans.length === 0) return true;
     if (agentType === 'hermes' && records.some(record =>
@@ -1842,7 +1891,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     if (this.cfg.debug) await this.writeDebugLog(agentType, spans);
 
-    return this.exportInBatches(exportState, agentType, spans);
+    return this.exportInBatches(exportState, agentType, spans, progress);
   }
 
   private enrichDoubaoWorkSpans(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
@@ -1884,6 +1933,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     exportState: AgentExportState,
     agentType: string,
     spans: ReadableSpan[],
+    progress?: TurnExportProgress,
   ): Promise<boolean> {
     const maxBytes = this.cfg.maxExportBatchBytes ?? DEFAULT_MAX_EXPORT_BATCH_BYTES;
     const batches: ReadableSpan[][] = [];
@@ -1909,12 +1959,19 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Fan out per-endpoint in parallel: each backend drains its own batches
     // sequentially, but backends run concurrently — so a slow/hung backend
     // only delays itself, not the healthy ones (no head-of-line blocking).
-    const results = await Promise.allSettled(
-      exportState.exporters.map(({ name, exporter }) =>
-        this.exportBatchesToEndpoint(exporter, name, agentType, batches),
-      ),
-    );
-    return results.every(result => result.status === 'fulfilled' && result.value);
+    const targets = progress
+      ? exportState.exporters.filter(target => !progress.accepted.has(target.receiptKey))
+      : exportState.exporters;
+    const results = await Promise.allSettled(targets.map(({ name, exporter }) =>
+      this.exportBatchesToEndpoint(exporter, name, agentType, batches),
+    ));
+    const succeeded = results.map(result => result.status === 'fulfilled' && result.value);
+    if (progress) {
+      targets.forEach(({ receiptKey }, index) => {
+        progress.batchResults.set(receiptKey, (progress.batchResults.get(receiptKey) ?? true) && succeeded[index]);
+      });
+    }
+    return succeeded.every(Boolean);
   }
 
   private async exportBatchesToEndpoint(
@@ -2745,6 +2802,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       .filter((endpoint) => this.resolveEndpointServiceName(endpoint, agentType) === serviceName)
       .map((ep) => ({
         name: ep.name,
+        receiptKey: endpointReceiptKey(ep, serviceName),
         exporter: this.exporterFactory({
           url: ep.url,
           headers: ep.headers,

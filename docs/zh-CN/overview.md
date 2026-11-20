@@ -28,6 +28,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Cursor CLI | 复用 Cursor Hook | Yes | Yes | Yes | Yes |
 | Grok Build | Hook + 本地 session 日志 | Yes | Yes | Yes | Yes |
 | Hermes Agent | 原生目录插件 | Yes | Yes | Yes | Yes |
+| Kimi Code（已验证 CLI） | 原生会话轮询 | Yes | Yes | Yes | 主 Agent |
 | Kiro CLI | Hook / 本地 session 轮询 | Yes | Yes | No | Yes |
 | MiMo Code | 插件注入 | Yes | Yes | Yes | Yes |
 | OpenClaw | 插件注入 | Yes | Yes | Yes | Yes |
@@ -44,6 +45,10 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
 | [豆包工作（macOS/Windows，实验性）](doubao-work.md) | 只读客户端日志 | 客户端轮次与本地工具 | 仅元数据 | No | No |
+
+Kimi Code 采集读取 `$KIMI_CODE_HOME/sessions` 下共享的主 Agent 日志，默认目录为 `~/.kimi-code/sessions`。Pilot 从首次观察到的数据边界开始采集，跳过 fork 复制的历史，重启后从已保存的位置继续。已验证 CLI 2.7.2 和 wire 协议 1.5。桌面端和子 Agent 仍待验证。将 `agents.kimi-code-cli.captureMessageContent` 设为 `false` 后，仍会保留请求和工具调用 ID、时间和 token 用量。
+
+重启后，Pilot 使用仍在保留期内的 Kimi JSONL 记录作为本地投递回执。如果源游标尚未推进，重启后的 HTTP 或 SLS 重试可能再次发送相同的事件 ID。接收结果不明确时也可能重发。
 
 新 Qoder 桌面端复用 Qoder Hook 采集与 `agents.qoder` 配置。CLI 格式 transcript 以本轮原生用户记录的 `businessIdentity.product=app` 识别桌面端，兼容旧运行时的 Hook 产品标记；事件类型、OTLP `gen_ai.framework` 和 `gen_ai.agent.system` 均为 `qoder-app`。现有 CLI/IDE 的 system 保持 `qoder`，便于按 system 单独统计新版桌面端。
 

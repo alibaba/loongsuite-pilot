@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
+import { constants, createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { createHash, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
@@ -8,6 +8,8 @@ import { createLogger } from '../utils/logger.js';
 
 const MAX_ACKNOWLEDGED_TURNS = 10_000;
 export const CODEX_PENDING_MAX_BYTES = 512 * 1024 * 1024;
+const KIMI_OTLP_RECEIPT_READ_FLAGS = process.platform === 'win32' ? 'r'
+  : constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
 const logger = createLogger('CodexTurnJournal');
 function pendingBudget(): number {
   const raw = process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
@@ -126,6 +128,13 @@ export class CodexTurnJournal {
           this.initialized.add(key);
         }
         try {
+          if (group[0]['gen_ai.agent.type'] === 'kimi-code-cli') {
+            // Kimi supplies a whole turn, but its final model response can
+            // precede the final tool records. A restart must not treat a
+            // durable prefix as complete before those records have landed.
+            group.sort((left, right) => Number(left['gen_ai.turn.end'] === true)
+              - Number(right['gen_ai.turn.end'] === true));
+          }
           const data = group.map(entry => JSON.stringify(entry)).join('\n') + '\n';
           await fs.appendFile(file, data, { mode: 0o600 });
           usage.bytes += Buffer.byteLength(data);
@@ -199,11 +208,34 @@ export class CodexTurnJournal {
     return this.accepts(entry) && (await this.loadAcknowledgements()).has(codexTurnJournalGroupKey(entry));
   }
 
+  async kimiOtlpReceipts(key: string): Promise<ReadonlySet<string>> {
+    await this.pending;
+    return this.readKimiOtlpReceipts(key);
+  }
+
+  acknowledgeKimiOtlpDestinations(key: string, destinations: readonly string[]): Promise<void> {
+    return this.enqueue(async () => {
+      if (!this.acceptsAgent('kimi-code-cli') || !/^[a-f0-9]{64}$/.test(key) || destinations.length === 0) return;
+      const receipts = await this.readKimiOtlpReceipts(key);
+      for (const destination of destinations) receipts.add(destination);
+      await this.ensureDir();
+      const temporary = path.join(this.dir, `.kimi-otlp-receipts-${randomUUID()}.tmp`);
+      try {
+        await fs.writeFile(temporary, JSON.stringify({ version: 1, destinations: [...receipts] }), { mode: 0o600 });
+        await fs.rename(temporary, this.kimiReceiptFile(key));
+      } finally {
+        await fs.unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
+      }
+    });
+  }
+
   acknowledge(entries: AgentActivityEntry[]): Promise<void> {
     return this.enqueue(async () => {
       this.usage = undefined;
       const acknowledged = await this.loadAcknowledgements();
-      const keys = [...new Set(entries.filter(entry => this.accepts(entry)).map(codexTurnJournalGroupKey))];
+      const accepted = entries.filter(entry => this.accepts(entry));
+      const keys = [...new Set(accepted.map(codexTurnJournalGroupKey))];
+      const kimiKeys = new Set(accepted.filter(entry => entry['gen_ai.agent.type'] === 'kimi-code-cli').map(codexTurnJournalGroupKey));
       if (!keys.length) return;
       await this.ensureDir();
       for (const key of keys) {
@@ -216,6 +248,7 @@ export class CodexTurnJournal {
         // The durable acknowledgement must exist before deleting pending content.
         await fs.unlink(this.file(key)).catch(error => { if (error.code !== 'ENOENT') throw error; });
         this.initialized.delete(key);
+        if (kimiKeys.has(key)) await this.removeKimiOtlpReceipts(key);
       }
       await this.trimAcknowledgements(acknowledged);
     });
@@ -230,7 +263,48 @@ export class CodexTurnJournal {
         if (!/^[a-f0-9]{64}$/.test(key)) continue;
         await fs.unlink(this.file(key)).catch(error => { if (error.code !== 'ENOENT') throw error; });
         this.initialized.delete(key);
+        if (this.acceptsAgent('kimi-code-cli')) await this.removeKimiOtlpReceipts(key);
       }
+    });
+  }
+
+  private kimiReceiptFile(key: string): string { return path.join(this.dir, `kimi-otlp-receipts-${key}.json`); }
+
+  private async readKimiOtlpReceipts(key: string): Promise<Set<string>> {
+    if (!this.acceptsAgent('kimi-code-cli') || !/^[a-f0-9]{64}$/.test(key)) return new Set();
+    const file = this.kimiReceiptFile(key);
+    // Missing receipts can be replayed, but treating blocked I/O as missing
+    // would send again on every restart and still be unable to record an ACK.
+    const stat = await fs.lstat(file).catch(error => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (!stat) return new Set();
+    if (!stat.isFile()) throw new Error(`Kimi OTLP receipt is not a regular file: ${file}`);
+    const handle = await fs.open(file, KIMI_OTLP_RECEIPT_READ_FLAGS);
+    let raw: string;
+    try {
+      if (!(await handle.stat()).isFile()) throw new Error(`Kimi OTLP receipt is not a regular file: ${file}`);
+      raw = await handle.readFile('utf8');
+    } finally {
+      await handle.close();
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed?.version === 1 && Array.isArray(parsed.destinations)
+        && parsed.destinations.every((value: unknown) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))) {
+        return new Set<string>(parsed.destinations);
+      }
+    } catch { /* The pending turn remains authoritative if the receipt is unreadable JSON. */ }
+    logger.warn('Invalid Kimi OTLP receipts; replaying the retained turn');
+    return new Set();
+  }
+
+  private async removeKimiOtlpReceipts(key: string): Promise<void> {
+    await fs.unlink(this.kimiReceiptFile(key)).catch(error => {
+      // A stale sidecar cannot revoke the authoritative whole-turn ACK or
+      // prevent unrelated agents from replaying the shared journal.
+      if (error.code !== 'ENOENT') logger.warn('Unable to remove stale Kimi OTLP receipt', { key, code: error.code });
     });
   }
 
@@ -260,6 +334,8 @@ export class CodexTurnJournal {
         if (error.code === 'ENOENT') return [];
         throw error;
       });
+      const receiptFiles = this.acceptsAgent('kimi-code-cli')
+        ? new Set(files.filter(file => file.name.startsWith('kimi-otlp-receipts-')).map(file => file.name)) : undefined;
       for (const file of files) {
         const match = /^codex-done-([a-f0-9]{64})\.json$/.exec(file.name);
         if (!file.isFile() || !match) continue;
@@ -272,6 +348,7 @@ export class CodexTurnJournal {
           // Recover a crash after publishing the ACK but before unlinking its
           // payload, even when the ACK cache is below its eviction threshold.
           await fs.unlink(this.file(match[1])).catch(error => { if (error.code !== 'ENOENT') throw error; });
+          if (receiptFiles?.has(path.basename(this.kimiReceiptFile(match[1])))) await this.removeKimiOtlpReceipts(match[1]);
         }
       }
       await this.trimAcknowledgements(acknowledged);

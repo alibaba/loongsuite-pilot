@@ -1,0 +1,962 @@
+import { createServer } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
+import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, expect, it, vi } from 'vitest';
+import { HttpFlusher } from '../../../../src/flushers/http-flusher.js';
+import { InputManager } from '../../../../src/core/input-manager.js';
+import { JsonlFlusher } from '../../../../src/flushers/jsonl-flusher.js';
+import { SlsFlusher } from '../../../../src/flushers/sls-flusher.js';
+import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
+import { CodexTurnJournal, codexTurnJournalGroupKey } from '../../../../src/flushers/codex-turn-journal.js';
+import { buildAgentActivityEntry } from '../../../../src/normalization/entry-builder.js';
+import { MultiFlusher } from '../../../../src/flushers/multi-flusher.js';
+import { WorkspacePolicy } from '../../../../src/core/workspace-policy.js';
+import type { InputRuntimeDelta } from '../../../../src/inputs/base/input-runtime-metrics.js';
+import { StateStore } from '../../../../src/checkpoints/state-store.js';
+import { KimiCodeCliInput } from '../../../../src/inputs/kimi-code-cli/kimi-code-cli-input.js';
+import type { AgentActivityEntry, OtlpTraceFlusherConfig, SlsEndpoint } from '../../../../src/types/index.js';
+
+const roots: string[] = [];
+const fixturePath = new URL('../../../fixtures/kimi-code-cli/2.7.2-loopback-wire.jsonl', import.meta.url);
+const turnOneAt = 1795192262007;
+const turnTwoAt = 1795192262847;
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(roots.splice(0).map(root => fs.rm(root, { recursive: true, force: true })));
+});
+
+async function createSession() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-kimi-code-'));
+  roots.push(root);
+  const sessionDir = path.join(root, 'sessions');
+  const sessionId = 'session_loopback-fixture';
+  const session = path.join(sessionDir, 'wd_work_fixture', sessionId);
+  const wire = path.join(session, 'agents', 'main', 'wire.jsonl');
+  const stateFile = path.join(root, 'input-state.json');
+  await fs.mkdir(path.dirname(wire), { recursive: true });
+  await fs.writeFile(path.join(session, 'state.json'), JSON.stringify({ id: sessionId, cwd: root, version: 2 }));
+  const fixture = (await fs.readFile(fixturePath, 'utf8')).trimEnd().split('\n');
+  const secondTurn = fixture.findIndex(line => {
+    const record = JSON.parse(line);
+    return record.type === 'turn.prompt' && record.turnId === 1;
+  });
+  return { sessionDir, wire, stateFile, sessionId, first: fixture.slice(0, secondTurn), second: fixture.slice(secondTurn) };
+}
+
+async function createInput(stateFile: string, sessionDir: string, captureMessageContent = true) {
+  const store = new StateStore(stateFile);
+  await store.load();
+  const input = new KimiCodeCliInput({ stateStore: store, sessionDir, captureMessageContent, pollIntervalMs: 60_000 });
+  const entries: AgentActivityEntry[] = [];
+  input.on('entries', batch => entries.push(...batch));
+  await input.start();
+  await poll(input);
+  return { input, store, entries };
+}
+
+function poll(input: KimiCodeCliInput): Promise<void> {
+  return (input as unknown as { runCycle(): Promise<void> }).runCycle();
+}
+
+it('holds the Kimi cursor through HTTP 503 and commits only after the destination accepts every event', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first } = await createSession();
+  let accepting = false;
+  const acceptedIds: string[] = [];
+  let finishRejection!: () => void;
+  const firstRejected = new Promise<void>(resolve => { finishRejection = resolve; });
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on('data', chunk => chunks.push(chunk));
+    request.once('end', () => {
+      if (!accepting) {
+        response.writeHead(503).end(finishRejection);
+        return;
+      }
+      const payload: { entries: AgentActivityEntry[] } = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      acceptedIds.push(...payload.entries.map(entry => entry['event.id']));
+      response.writeHead(200).end();
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address() as { port: number };
+  const store = new StateStore(stateFile);
+  await store.load();
+  const input = new KimiCodeCliInput({ stateStore: store, sessionDir, captureMessageContent: false });
+  const output = new HttpFlusher({ enabled: true, url: `http://127.0.0.1:${address.port}`, headers: {},
+    batchMaxSize: 1, flushIntervalMs: 60_000, requestTimeoutMs: 2_000 });
+  const manager = new InputManager();
+  manager.setFlusher(new MultiFlusher([output]));
+  manager.registerInput(input);
+  try {
+    await manager.startInput(input.id);
+    await poll(input);
+    await fs.writeFile(wire, first.join('\n') + '\n');
+    const cycle = poll(input);
+    await firstRejected;
+    await Promise.race([cycle, delay(100)]);
+    store.set('other-input', { lastOffset: 17 });
+    await store.save();
+    const whileRejected = new StateStore(stateFile);
+    await whileRejected.load();
+    expect(whileRejected.get('other-input').lastOffset).toBe(17);
+    expect(whileRejected.get(`${input.id}:${sessionId}`).lastOffset ?? 0).toBe(0);
+    expect(acceptedIds).toEqual([]);
+
+    accepting = true;
+    await cycle;
+    const afterRecovery = new StateStore(stateFile);
+    await afterRecovery.load();
+    expect(afterRecovery.get(`${input.id}:${sessionId}`).lastOffset).toBe((await fs.stat(wire)).size);
+    expect(acceptedIds).toHaveLength(6);
+    expect(new Set(acceptedIds).size).toBe(6);
+  } finally {
+    accepting = true;
+    await manager.stopInput(input.id);
+    await output.shutdown();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+}, 10_000);
+
+it('waits for the terminal line and resumes after restart without replaying the first turn', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, wire, sessionId, first, second } = await createSession();
+  const { input, entries, store } = await createInput(stateFile, sessionDir);
+  try {
+    const terminal = first.at(-1)!;
+    await fs.writeFile(wire, first.slice(0, -1).join('\n') + '\n' + terminal.slice(0, -2));
+    await poll(input);
+    expect(entries).toEqual([]);
+    const saved = store.get(`${input.id}:${sessionId}`).lastOffset!;
+    expect(saved).toBeGreaterThan(0);
+    expect(saved).toBeLessThan((await fs.stat(wire)).size);
+
+    await fs.appendFile(wire, terminal.slice(-2) + '\n');
+    await poll(input);
+    expect(entries.map(entry => entry['event.name'])).toEqual([
+      'llm.request', 'llm.response', 'tool.call', 'tool.result', 'llm.request', 'llm.response',
+    ]);
+    expect(new Set(entries.map(entry => entry['gen_ai.session.id']))).toEqual(new Set([sessionId]));
+    expect(new Set(entries.map(entry => entry.trace_id)).size).toBe(1);
+    const [request, response, call, result, secondRequest, secondResponse] = entries;
+    expect(request?.['gen_ai.response.id']).toBe(response?.['gen_ai.response.id']);
+    expect(response?.['gen_ai.output.messages']).toMatchObject([{
+      role: 'assistant', parts: [{ type: 'tool_call', id: 'call-local-read', name: 'Read' }],
+    }]);
+    expect(call?.['gen_ai.tool.call.id']).toBe(result?.['gen_ai.tool.call.id']);
+    expect(result?.['gen_ai.tool.call.result']).toContain('synthetic tool result');
+    expect(secondRequest?.time_unix_nano).toBe(result?.time_unix_nano);
+    expect(secondResponse?.['gen_ai.usage.output_tokens']).toBe(5);
+    expect(store.get(`${input.id}:${sessionId}`).lastOffset).toBe((await fs.stat(wire)).size);
+  } finally {
+    await input.stop();
+  }
+
+  const resumed = await createInput(stateFile, sessionDir);
+  try {
+    expect(resumed.entries).toEqual([]);
+    await fs.appendFile(wire, second.join('\n') + '\n');
+    await poll(resumed.input);
+    expect(resumed.entries.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(resumed.entries[0]?.['gen_ai.turn.id']).not.toBe(entries[0]?.['gen_ai.turn.id']);
+    expect(JSON.stringify(resumed.entries)).toContain('Synthetic resumed message');
+    expect(JSON.stringify(resumed.entries)).not.toContain('Synthetic first message');
+    await poll(resumed.input);
+    expect(resumed.entries).toHaveLength(2);
+  } finally {
+    await resumed.input.stop();
+  }
+});
+
+it('baselines earlier turns and retains relationships and usage with capture turned off', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue((turnOneAt + turnTwoAt) / 2);
+  const { stateFile, sessionDir, wire, first, second } = await createSession();
+  await fs.writeFile(wire, first.join('\n') + '\n');
+  const { input, entries } = await createInput(stateFile, sessionDir, false);
+  try {
+    expect(entries).toEqual([]);
+    await fs.appendFile(wire, second.join('\n') + '\n');
+    await poll(input);
+    expect(entries).toHaveLength(2);
+    expect(entries[1]?.['gen_ai.usage.input_tokens']).toBe(9);
+    expect(entries[0]?.['gen_ai.response.id']).toBe(entries[1]?.['gen_ai.response.id']);
+    const serialized = JSON.stringify(entries);
+    expect(serialized).not.toMatch(/Synthetic|local dummy response/);
+    expect(await fs.readFile(stateFile, 'utf8')).not.toMatch(/Synthetic|local dummy response/);
+  } finally {
+    await input.stop();
+  }
+});
+
+it('keeps tool identity and timing when capture is disabled before the first turn', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, wire, first } = await createSession();
+  await fs.writeFile(wire, first.join('\n') + '\n');
+  const { input, entries } = await createInput(stateFile, sessionDir, false);
+  try {
+    expect(entries).toHaveLength(6);
+    expect(entries.filter(entry => entry['gen_ai.tool.call.id'] === 'call-local-read')).toHaveLength(2);
+    expect(entries.find(entry => entry['event.name'] === 'tool.result')?.['gen_ai.tool.call.duration']).toBeGreaterThan(0);
+    const serialized = JSON.stringify(entries);
+    expect(serialized).not.toMatch(/Synthetic|local dummy response|synthetic tool result|loopback-read\.txt/);
+  } finally {
+    await input.stop();
+  }
+});
+
+it('preserves the committed cursor while the source directory is temporarily unavailable', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first, second } = await createSession();
+  await fs.writeFile(wire, first.join('\n') + '\n');
+  const { input, store, entries } = await createInput(stateFile, sessionDir);
+  try {
+    const key = `${input.id}:${sessionId}`;
+    const committed = store.get(key).lastOffset;
+    const unavailable = sessionDir + '-offline';
+    await fs.rename(sessionDir, unavailable);
+    await fs.appendFile(path.join(unavailable, path.relative(sessionDir, wire)), second.join('\n') + '\n');
+    await poll(input);
+    expect(entries).toHaveLength(6);
+    expect(store.get(key).lastOffset).toBe(committed);
+    await fs.rename(unavailable, sessionDir);
+    await poll(input);
+    expect(entries).toHaveLength(8);
+    expect(store.get(key).lastOffset).toBe((await fs.stat(wire)).size);
+  } finally {
+    await input.stop();
+  }
+});
+
+it('uses the native fork boundary and collects only turns the fork owns', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, wire, sessionId, first, second } = await createSession();
+  const session = path.join(path.dirname(wire), '..', '..');
+  const state = { id: sessionId, version: 2, cwd: sessionDir, forkedFrom: 'session_original',
+    createdAt: (turnOneAt + turnTwoAt) / 2 };
+  await fs.writeFile(path.join(session, 'state.json'), JSON.stringify(state));
+  const { input, entries } = await createInput(stateFile, sessionDir);
+  try {
+    await fs.writeFile(wire, first.join('\n') + '\n');
+    await poll(input);
+    expect(entries).toEqual([]);
+    await fs.appendFile(wire, second.join('\n') + '\n');
+    await poll(input);
+    expect(entries).toHaveLength(2);
+    expect(JSON.stringify(entries)).toContain('Synthetic resumed message');
+    expect(JSON.stringify(entries)).not.toContain('Synthetic first message');
+  } finally {
+    await input.stop();
+  }
+});
+
+it.skipIf(process.platform === 'win32')('does not expose a wire journal outside the Kimi session directory', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, wire, first } = await createSession();
+  const outside = path.join(path.dirname(sessionDir), 'outside-private-wire.jsonl');
+  await fs.writeFile(outside, first.join('\n') + '\n');
+  await fs.symlink(outside, wire);
+  const { input, entries } = await createInput(stateFile, sessionDir);
+  try { expect(entries).toHaveLength(0); }
+  finally { await input.stop(); }
+});
+
+it('does not emit the same native session and event IDs twice after a workspace copy', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first } = await createSession();
+  await fs.writeFile(wire, first.join('\n') + '\n');
+  const { input, entries } = await createInput(stateFile, sessionDir);
+  try {
+    expect(entries).toHaveLength(6);
+    const copied = path.join(sessionDir, 'wd_work_copy', sessionId);
+    await fs.mkdir(path.dirname(copied), { recursive: true });
+    await fs.cp(path.join(path.dirname(wire), '..', '..'), copied, { recursive: true });
+    await poll(input);
+    expect(entries).toHaveLength(6);
+    expect(new Set(entries.map(entry => entry['event.id'])).size).toBe(entries.length);
+  } finally { await input.stop(); }
+});
+
+it('does not persist a source cursor before the collected batch reaches the output queue', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first } = await createSession();
+  const { input, entries, store } = await createInput(stateFile, sessionDir);
+  const exposed = input as unknown as {
+    collectWire(...args: unknown[]): Promise<AgentActivityEntry[] | undefined>;
+  };
+  const collectWire = exposed.collectWire.bind(exposed);
+  let waitForScan!: () => void;
+  let releaseScan!: () => void;
+  const collectedFirst = new Promise<void>(resolve => { waitForScan = resolve; });
+  const afterCollect = new Promise<void>(resolve => { releaseScan = resolve; });
+  vi.spyOn(exposed, 'collectWire').mockImplementation(async (...args: unknown[]) => {
+    const result = await collectWire(...args);
+    waitForScan();
+    await afterCollect;
+    return result;
+  });
+  await fs.writeFile(wire, first.join('\n') + '\n');
+  const pendingCycle = poll(input);
+  try {
+    await collectedFirst;
+    expect(entries).toHaveLength(0);
+    await store.save();
+    const restart = new StateStore(stateFile);
+    await restart.load();
+    expect(restart.get(`${input.id}:${sessionId}`).lastOffset ?? 0).toBe(0);
+  } finally {
+    releaseScan();
+    await pendingCycle;
+    await input.stop();
+  }
+});
+
+it.each(['unchanged', 'shifted'])('retains a new turn after an atomic rewrite with %s accepted bytes', async prefix => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, wire, first, second } = await createSession();
+  await fs.writeFile(wire, first.join('\n') + '\n');
+  const { input, entries } = await createInput(stateFile, sessionDir, false);
+  try {
+    expect(entries).toHaveLength(6);
+    const replacement = `${wire}.partial`;
+    const accepted = [...first];
+    if (prefix === 'shifted') {
+      accepted.splice(1, 0, JSON.stringify({ type: 'context.append_message', agentId: 'main', time: turnOneAt }));
+    }
+    await fs.writeFile(replacement, accepted.join('\n') + '\n');
+    await fs.rename(replacement, wire);
+    await fs.appendFile(wire, second.join('\n') + '\n');
+    clock.mockReturnValue(turnTwoAt + 50);
+    await poll(input);
+    expect(entries).toHaveLength(8);
+    expect(new Set(entries.map(entry => entry['event.id'])).size).toBe(8);
+  } finally { await input.stop(); }
+});
+
+it('waits for scoped output acknowledgement before a concurrent save can persist the cursor', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first } = await createSession();
+  const { input, store } = await createInput(stateFile, sessionDir);
+  let acknowledge!: () => void;
+  const ack = new Promise<void>(resolve => { acknowledge = resolve; });
+  let hasEnqueued!: () => void;
+  const enqueued = new Promise<void>(resolve => { hasEnqueued = resolve; });
+  input.once('entries', () => {
+    input.holdCheckpointUntil(ack);
+    hasEnqueued();
+  });
+  await fs.writeFile(wire, first.join('\n') + '\n');
+  const cycle = poll(input);
+  const key = `${input.id}:${sessionId}`;
+  try {
+    await enqueued;
+    store.set('unrelated', { lastOffset: 7 });
+    await store.save();
+    expect(store.get(key).lastOffset).toBe((await fs.stat(wire)).size);
+    const restart = new StateStore(stateFile);
+    await restart.load();
+    expect(restart.get(key).lastOffset).toBeUndefined();
+    expect(restart.get('unrelated').lastOffset).toBe(7);
+    acknowledge();
+    await cycle;
+    expect(store.getPersistedState(key)?.lastOffset).toBe((await fs.stat(wire)).size);
+  } finally {
+    acknowledge();
+    await cycle;
+    await input.stop();
+  }
+});
+
+it('commits through turns excluded by the workspace policy', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first } = await createSession();
+  const { input, store, entries } = await createInput(stateFile, sessionDir);
+  input.setWorkspacePolicy(new WorkspacePolicy([path.dirname(sessionDir)]));
+  try {
+    await fs.writeFile(wire, first.join('\n') + '\n');
+    await poll(input);
+    expect(entries).toEqual([]);
+    expect(store.getPersistedState(`${input.id}:${sessionId}`)?.lastOffset).toBe((await fs.stat(wire)).size);
+  } finally {
+    await input.stop();
+  }
+});
+
+it.skipIf(process.platform === 'win32')('rejects a FIFO and a nested directory symlink', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, wire, first } = await createSession();
+  execFileSync('mkfifo', [wire]);
+  const outside = path.join(path.dirname(sessionDir), 'outside-agent');
+  await fs.mkdir(outside);
+  await fs.writeFile(path.join(outside, 'wire.jsonl'), first.join('\n') + '\n');
+  const { input, entries } = await createInput(stateFile, sessionDir);
+  try {
+    expect(entries).toEqual([]);
+    await fs.unlink(wire);
+    await fs.rmdir(path.dirname(wire));
+    await fs.symlink(outside, path.dirname(wire), 'dir');
+    await poll(input);
+    expect(entries).toEqual([]);
+  } finally {
+    await input.stop();
+  }
+});
+
+it.skipIf(process.platform === 'win32')('confines metadata reads and accepts a deliberately linked Kimi home', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, wire, first } = await createSession();
+  const originalHome = path.dirname(sessionDir);
+  const launcherHome = path.join(originalHome, 'linked-home');
+  await fs.symlink(originalHome, launcherHome, 'dir');
+  const state = path.join(path.dirname(wire), '..', '..', 'state.json');
+  const outside = path.join(originalHome, 'outside-meta.json');
+  await fs.rename(state, outside);
+  await fs.symlink(outside, state);
+  await fs.writeFile(wire, first.join('\n') + '\n');
+  const { input, entries } = await createInput(stateFile, path.join(launcherHome, 'sessions'));
+  try {
+    expect(entries).toEqual([]);
+    await fs.unlink(state);
+    await fs.rename(outside, state);
+    await poll(input);
+    expect(entries).toHaveLength(6);
+  } finally {
+    await input.stop();
+  }
+});
+
+it('finishes 65 cross-page turns over bounded polls without evicting their progress', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, wire, first } = await createSession();
+  const count = 65;
+  const filler = JSON.stringify({ type: 'context.append_message', agentId: 'main', time: turnOneAt,
+    message: { content: 'synthetic local context\n'.repeat(112_000) } });
+  await fs.writeFile(wire, [...first.slice(0, -1), filler, filler, first.at(-1)!].join('\n') + '\n');
+  for (let index = 0; index < count - 1; index++) {
+    const id = `session_catchup_${index}`;
+    const session = path.join(sessionDir, 'wd_work_fixture', id);
+    const copy = path.join(session, 'agents', 'main', 'wire.jsonl');
+    await fs.mkdir(path.dirname(copy), { recursive: true });
+    await fs.writeFile(path.join(session, 'state.json'), JSON.stringify({ id, cwd: sessionDir, version: 2 }));
+    await fs.copyFile(wire, copy, constants.COPYFILE_FICLONE);
+  }
+  const { input, entries } = await createInput(stateFile, sessionDir, false);
+  const seen = new Set<string>();
+  const metrics: InputRuntimeDelta[] = [];
+  input.on('input-runtime-delta', delta => metrics.push(delta));
+  try {
+    for (let attempt = 0; attempt < count * 2 + 5 && seen.size < count; attempt++) {
+      await poll(input);
+      for (const entry of entries) seen.add(entry['gen_ai.session.id']);
+    }
+    expect(seen.size).toBe(count);
+    expect(entries).toHaveLength(count * 6);
+    expect(Math.max(...metrics.map(delta => delta.rawReadBytes))).toBeLessThanOrEqual(32 * 1024 * 1024);
+  } finally {
+    await input.stop();
+  }
+}, 20_000);
+
+it('does not let an idle pre-existing copy claim a live native session in another workspace', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue((turnOneAt + turnTwoAt) / 2);
+  const { stateFile, sessionDir, sessionId, first, second } = await createSession();
+  await fs.rm(path.join(sessionDir, 'wd_work_fixture'), { recursive: true });
+  const buckets = new Map<string, string>();
+  for (const label of ['review-a', 'review-b']) {
+    const cwd = path.join(path.dirname(sessionDir), label);
+    const hash = createHash('sha256').update(cwd).digest('hex').slice(0, 12);
+    const key = `wd_${label}_${hash}`;
+    buckets.set(key, cwd);
+    await fs.mkdir(path.join(sessionDir, key));
+  }
+  const discoveryOrder = [];
+  for await (const item of await fs.opendir(sessionDir)) discoveryOrder.push(item.name);
+  expect(discoveryOrder).toHaveLength(2);
+  const actual = discoveryOrder[1]!;
+  let genuineWire!: string;
+  for (const key of discoveryOrder) {
+    const session = path.join(sessionDir, key, sessionId);
+    const target = path.join(session, 'agents', 'main', 'wire.jsonl');
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(path.join(session, 'state.json'), JSON.stringify({ id: sessionId, cwd: buckets.get(actual), version: 2 }));
+    await fs.writeFile(target, first.join('\n') + '\n');
+    if (key === actual) genuineWire = target;
+  }
+  const { input, entries } = await createInput(stateFile, sessionDir, false);
+  try {
+    expect(entries).toHaveLength(0);
+    await fs.appendFile(genuineWire, second.join('\n') + '\n');
+    for (let i = 0; i < 4; i++) await poll(input);
+    expect(entries).toHaveLength(2);
+  } finally { await input.stop(); }
+});
+
+it('keeps a distinct new prompt sharing the last turn timestamp after an atomic shifted rewrite', async () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, wire, first, second } = await createSession();
+  await fs.writeFile(wire, first.join('\n') + '\n');
+  const { input, entries } = await createInput(stateFile, sessionDir, false);
+  try {
+    expect(entries).toHaveLength(6);
+    const replacement = `${wire}.partial`;
+    const terminalTime = JSON.parse(first.at(-1)!).time;
+    const accepted = [...first];
+    accepted.splice(1, 0, JSON.stringify({ type: 'context.append_message', agentId: 'main', time: turnOneAt }));
+    const equalTime = second.map(line => {
+      const row = JSON.parse(line);
+      return JSON.stringify({ ...row, time: row.time - turnTwoAt + terminalTime });
+    });
+    await fs.writeFile(replacement, [...accepted, ...equalTime].join('\n') + '\n');
+    await fs.rename(replacement, wire);
+    clock.mockReturnValue(turnTwoAt + 50);
+    await poll(input);
+    expect(entries).toHaveLength(8);
+  } finally { await input.stop(); }
+});
+
+it.each(['retry', 'stop and re-enable'])('waits for real JSONL acceptance across %s without duplicating a successful mirror', async recovery => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first } = await createSession();
+  const outputDir = path.join(path.dirname(stateFile), 'blocked-output');
+  const mirrorDir = path.join(path.dirname(stateFile), 'mirror-output');
+  await fs.writeFile(outputDir, 'a file cannot be used as the output directory');
+  const store = new StateStore(stateFile);
+  await store.load();
+  const input = new KimiCodeCliInput({ stateStore: store, sessionDir, captureMessageContent: false, pollIntervalMs: 60_000 });
+  const manager = new InputManager();
+  const output = new JsonlFlusher({ outputDir, rotateDaily: false, maxFileSizeMb: 100 });
+  const mirror = new JsonlFlusher({ outputDir: mirrorDir, rotateDaily: false, maxFileSizeMb: 100 });
+  const flusher = new MultiFlusher([output, mirror]);
+  manager.setFlusher(flusher);
+  manager.registerInput(input);
+
+  let signalBlocked!: () => void;
+  const blocked = new Promise<void>(resolve => { signalBlocked = resolve; });
+  const send = output.send.bind(output);
+  vi.spyOn(output, 'send').mockImplementation(async entry => {
+    try {
+      await send(entry);
+    } catch (error) {
+      signalBlocked();
+      throw error;
+    }
+  });
+  let signalMirror!: () => void;
+  let written = 0;
+  const mirrored = new Promise<void>(resolve => { signalMirror = resolve; });
+  const sendMirror = mirror.send.bind(mirror);
+  vi.spyOn(mirror, 'send').mockImplementation(async entry => {
+    await sendMirror(entry);
+    if (++written === 6) signalMirror();
+  });
+
+  await manager.startInput(input.id);
+  await poll(input);
+  const key = `${input.id}:${sessionId}`;
+  try {
+    await fs.writeFile(wire, first.join('\n') + '\n');
+    const cycle = poll(input);
+    await Promise.all([blocked, mirrored]);
+    store.set('other-input', { lastOffset: 9 });
+    await store.save();
+    const fresh = new StateStore(stateFile);
+    await fresh.load();
+    expect(fresh.get(key).lastOffset ?? 0).toBe(0);
+    expect(fresh.get('other-input').lastOffset).toBe(9);
+
+    if (recovery === 'stop and re-enable') {
+      await manager.stopInput(input.id);
+      expect(input.checkpointFailed).toBe(false);
+      expect(store.getPersistedState(key)?.lastOffset ?? 0).toBe(0);
+    }
+    await fs.unlink(outputDir);
+    if (recovery === 'stop and re-enable') await manager.startInput(input.id);
+    await cycle;
+    await poll(input);
+
+    const readRecords = async (dir: string) => (await fs.readFile(path.join(dir, 'kimi-code-cli-all.jsonl'), 'utf8'))
+      .trimEnd().split('\n').map(line => JSON.parse(line) as AgentActivityEntry);
+    const [accepted, mirroredRecords] = await Promise.all([readRecords(outputDir), readRecords(mirrorDir)]);
+    expect(accepted).toHaveLength(6);
+    expect(mirroredRecords.map(entry => entry['event.id'])).toEqual(accepted.map(entry => entry['event.id']));
+    expect(store.getPersistedState(key)?.lastOffset).toBe((await fs.stat(wire)).size);
+  } finally {
+    await manager.stopAll();
+    await flusher.shutdown();
+  }
+}, 15_000);
+
+it('retries a partially written JSONL batch without repeating the accepted prefix', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-kimi-partial-output-'));
+  roots.push(root);
+  const flusher = new JsonlFlusher({ outputDir: root, rotateDaily: false, maxFileSizeMb: 100 });
+  const events = ['a', 'b', 'c'].map(id => ({
+    'event.id': id, 'event.name': 'other', 'gen_ai.agent.type': 'kimi-code-cli', 'gen_ai.session.id': 's',
+    'user.id': 'u', time_unix_nano: '1795192262007000000',
+  }) satisfies AgentActivityEntry);
+  const send = flusher.send.bind(flusher);
+  let blocked = true;
+  vi.spyOn(flusher, 'send').mockImplementation(async entry => {
+    if (entry['event.id'] === 'b' && blocked) {
+      blocked = false;
+      throw new Error('simulated append failure');
+    }
+    await send(entry);
+  });
+  const deliver = flusher.createBatchDelivery(events, undefined, undefined, { requireAcceptance: true });
+  await expect(deliver()).rejects.toThrow('simulated append failure');
+  await deliver();
+  const rows = (await fs.readFile(path.join(root, 'kimi-code-cli-all.jsonl'), 'utf8')).trimEnd().split('\n');
+  expect(rows.map(row => JSON.parse(row)['event.id'])).toEqual(['a', 'b', 'c']);
+});
+
+it('remembers all accepted prompt identities sharing a rewrite boundary', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, wire, first, second } = await createSession();
+  const time = JSON.parse(first.at(-1)!).time;
+  const adjacent = (ordinal: number) => second.map(line => {
+    const record = JSON.parse(line);
+    record.time = time;
+    if (record.turnId !== undefined) record.turnId = ordinal;
+    if (record.promptId !== undefined) record.promptId = `native-prompt-${ordinal}`;
+    if (record.event?.turnId !== undefined) record.event.turnId = String(ordinal);
+    if (record.event?.startedAt !== undefined) record.event.startedAt = time;
+    return JSON.stringify(record);
+  });
+  const { input, entries } = await createInput(stateFile, sessionDir, false);
+  try {
+    await fs.writeFile(wire, first.join('\n') + '\n');
+    await poll(input);
+    expect(entries).toHaveLength(6);
+    const secondTurn = adjacent(1);
+    const thirdTurn = adjacent(2);
+    await fs.appendFile(wire, secondTurn.join('\n') + '\n');
+    await poll(input);
+    await fs.appendFile(wire, thirdTurn.join('\n') + '\n');
+    await poll(input);
+    expect(entries).toHaveLength(10);
+
+    const replacement = wire + '.next';
+    const shifted = [first[0], JSON.stringify({ type: 'context.append_message', agentId: 'main', time }), ...first.slice(1)];
+    await fs.writeFile(replacement, [...shifted, ...secondTurn, ...thirdTurn, ...adjacent(3)].join('\n') + '\n');
+    await fs.rename(replacement, wire);
+    await poll(input);
+    expect(entries).toHaveLength(12);
+    expect(new Set(entries.map(entry => entry['event.id'])).size).toBe(12);
+  } finally {
+    await input.stop();
+  }
+});
+
+async function listen(handle: (url: string, body: Buffer) => number) {
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on('data', chunk => chunks.push(chunk));
+    request.on('end', () => {
+      response.writeHead(handle(request.url ?? '', Buffer.concat(chunks)));
+      response.end();
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  return {
+    url: `http://127.0.0.1:${port}`,
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    },
+  };
+}
+
+it('requires actual SLS acceptance and retries only its rejected endpoint', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first } = await createSession();
+  let signalRejected!: () => void;
+  let signalMirror!: () => void;
+  const rejected = new Promise<void>(resolve => { signalRejected = resolve; });
+  const mirrored = new Promise<void>(resolve => { signalMirror = resolve; });
+  let accept = false;
+  const received = new Map<string, string[][]>();
+  const endpoint = await listen((url, body) => {
+    const parsed = JSON.parse(body.toString('utf8')) as { __logs__: Record<string, string>[] };
+    const ids = parsed.__logs__.map(entry => entry['event.id'] ?? entry.event_id);
+    const status = url.includes('/blocked/') && !accept ? 503 : 200;
+    if (status === 503) signalRejected();
+    else {
+      const calls = received.get(url) ?? [];
+      calls.push(ids);
+      received.set(url, calls);
+      if (url.includes('/mirror/')) signalMirror();
+    }
+    return status;
+  });
+  const endpoints: SlsEndpoint[] = ['blocked', 'mirror'].map(name => ({
+    name, endpoint: endpoint.url, project: '', logstore: name, kind: 'agentActivity', mode: 'webtracking',
+  }));
+  const sls = new SlsFlusher({
+    enabled: true, mode: 'webtracking', accessKeyId: '', accessKeySecret: '', apiKey: '',
+    endpoint: endpoint.url, endpoints, batchMaxSize: 20, flushIntervalMs: 60_000,
+    serviceNamePrefix: '', retry: { retryMaxAttempts: 1 },
+  }, path.dirname(stateFile), 'test');
+  await sls.start();
+  const flusher = new MultiFlusher([sls]);
+  const manager = new InputManager();
+  const store = new StateStore(stateFile);
+  await store.load();
+  const input = new KimiCodeCliInput({ stateStore: store, sessionDir, captureMessageContent: false, pollIntervalMs: 60_000 });
+  manager.setFlusher(flusher);
+  manager.registerInput(input);
+  await manager.startInput(input.id);
+  await poll(input);
+  try {
+    await fs.writeFile(wire, first.join('\n') + '\n');
+    const cycle = poll(input);
+    await Promise.all([rejected, mirrored]);
+    await store.save();
+    const key = `${input.id}:${sessionId}`;
+    expect(store.getPersistedState(key)?.lastOffset ?? 0).toBe(0);
+    accept = true;
+    await cycle;
+    const confirmed = received.get('/logstores/blocked/track') ?? [];
+    expect(confirmed).toHaveLength(1);
+    expect(confirmed[0]).toHaveLength(6);
+    expect(new Set(confirmed[0]).size).toBe(6);
+    expect(received.get('/logstores/mirror/track')).toEqual(confirmed);
+    expect(store.getPersistedState(key)?.lastOffset).toBe((await fs.stat(wire)).size);
+  } finally {
+    await manager.stopAll();
+    await flusher.shutdown();
+    await endpoint.close();
+  }
+}, 15_000);
+
+it('does not acknowledge a torn turn when an earlier turn from the same session replays later in hash order', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-kimi-two-pending-turns-'));
+  roots.push(root);
+  const directory = path.join(root, 'pending-turns');
+  const makeJournal = () => new CodexTurnJournal(directory, 100, ['kimi-code-cli']);
+  const makeTurn = (id: string, start: number) => {
+    const trace = createHash('sha256').update(id).digest('hex').slice(0, 32);
+    const row = (event: string, elapsed: number, fields: Partial<AgentActivityEntry> = {}) => buildAgentActivityEntry({
+      timestamp: start + elapsed, trace_id: trace, 'event.id': `${id}-${event}`, 'event.name': event,
+      'gen_ai.agent.type': 'kimi-code-cli', 'user.id': 'reviewer', 'gen_ai.session.id': 'same-native-session',
+      'gen_ai.turn.id': id, 'gen_ai.step.id': `${id}:1`, 'gen_ai.response.id': `${id}:1`,
+      'gen_ai.request.model': 'test-model', ...fields,
+    });
+    return [row('llm.request', 0, { 'gen_ai.turn.start': true }),
+      row('llm.response', 100, { 'gen_ai.turn.end': true, 'gen_ai.response.model': 'test-model' }),
+      row('tool.call', 200, { 'gen_ai.tool.name': 'read', 'gen_ai.tool.call.id': `${id}-tool` }),
+      row('tool.result', 300, { 'gen_ai.tool.name': 'read', 'gen_ai.tool.call.id': `${id}-tool`, 'tool.result.status': 'success' })];
+  };
+  const now = Date.now();
+  const current = makeTurn('later-torn-turn', now + 1000);
+  const currentKey = codexTurnJournalGroupKey(current[0]!);
+  const prior = Array.from({ length: 30 }, (_, index) => makeTurn(`older-complete-turn-${index}`, now))
+    .find(turn => codexTurnJournalGroupKey(turn[0]!) > currentKey)!;
+  expect(prior).toBeDefined();
+
+  await makeJournal().append([...prior, ...current]);
+  const file = path.join(directory, `codex-turn-${currentKey}.jsonl`);
+  const rows = (await fs.readFile(file, 'utf8')).trimEnd().split('\n');
+  expect(rows.map(line => JSON.parse(line)['event.name'])).toEqual(['llm.request', 'tool.call', 'tool.result', 'llm.response']);
+  await fs.writeFile(file, rows.slice(0, 2).join('\n') + '\n' + rows[2]!.slice(0, 31));
+
+  const accepted: Array<{ turn: string; kind: string }> = [];
+  const decode = createRequire(import.meta.url)('@opentelemetry/otlp-transformer/build/src/generated/root.js')
+    .opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest.decode;
+  const endpoint = await listen((_url, bytes) => {
+    for (const resource of decode(bytes).resourceSpans) for (const scope of resource.scopeSpans) for (const span of scope.spans) {
+      const attr = (key: string) => span.attributes.find(value => value.key === key)?.value.stringValue;
+      accepted.push({ turn: attr('gen_ai.turn.id'), kind: attr('gen_ai.span.kind') });
+    }
+    return 200;
+  });
+  const journal = makeJournal();
+  const trace = new OtlpTraceFlusher({ enabled: true, captureMessageContent: false, serviceName: 'unit',
+    protocol: 'http/protobuf', endpoints: [{ endpoint: endpoint.url, name: 'loopback', compression: 'none' }],
+  }, undefined, undefined, journal);
+  try {
+    await trace.start();
+    const prematurelyAcknowledged = await journal.isAcknowledged(current[0]!);
+    await trace.sendBatch(current);
+    expect.soft(prematurelyAcknowledged).toBe(false);
+    expect.soft(accepted.filter(span => span.turn === current[0]!['gen_ai.turn.id']).map(span => span.kind).sort())
+      .toEqual(['AGENT', 'ENTRY', 'LLM', 'STEP', 'TOOL']);
+    expect(accepted.filter(span => span.turn === prior[0]!['gen_ai.turn.id']).map(span => span.kind).sort())
+      .toEqual(['AGENT', 'ENTRY', 'LLM', 'STEP', 'TOOL']);
+  } finally {
+    await trace.shutdown();
+    await endpoint.close();
+  }
+});
+
+it('persists a Kimi OTLP turn when the transport rejects it and replays the journal on restart', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first } = await createSession();
+  let accept = false;
+  const messages: { status: number; bytes: number }[] = [];
+  const endpoint = await listen((_url, body) => {
+    const status = accept ? 200 : 400;
+    messages.push({ status, bytes: body.length });
+    return status;
+  });
+  const directory = path.join(path.dirname(stateFile), 'pending-turns');
+  const createJournal = () => new CodexTurnJournal(directory, 100, ['kimi-code-cli']);
+  const journal = createJournal();
+  const cfg: OtlpTraceFlusherConfig = {
+    enabled: true, serviceName: 'test', protocol: 'http/protobuf',
+    endpoints: [{ name: 'loopback', endpoint: endpoint.url }], captureMessageContent: false,
+  };
+  const trace = new OtlpTraceFlusher(cfg, undefined, undefined, journal);
+  const output = new MultiFlusher([trace]);
+  const manager = new InputManager();
+  const store = new StateStore(stateFile);
+  await store.load();
+  const input = new KimiCodeCliInput({ stateStore: store, sessionDir, captureMessageContent: false, pollIntervalMs: 60_000 });
+  manager.setFlusher(output);
+  manager.registerInput(input);
+  await manager.startInput(input.id);
+  await poll(input);
+  try {
+    await fs.writeFile(wire, first.join('\n') + '\n');
+    await poll(input);
+    const pending: AgentActivityEntry[] = [];
+    for await (const records of createJournal().load()) pending.push(...records);
+    expect(pending).toHaveLength(6);
+    expect(pending.every(record => record['gen_ai.agent.type'] === 'kimi-code-cli')).toBe(true);
+    expect(messages.some(message => message.status === 400 && message.bytes > 0)).toBe(true);
+    expect(store.getPersistedState(`${input.id}:${sessionId}`)?.lastOffset).toBe((await fs.stat(wire)).size);
+    await manager.stopAll();
+    await trace.shutdown();
+
+    accept = true;
+    const replay = new OtlpTraceFlusher(cfg, undefined, undefined, createJournal());
+    try {
+      await replay.start();
+      expect(await createJournal().isAcknowledged(pending[0]!)).toBe(true);
+      expect(messages.filter(message => message.status === 200 && message.bytes > 0)).toHaveLength(1);
+    } finally {
+      await replay.shutdown();
+    }
+  } finally {
+    await manager.stopAll();
+    await trace.shutdown();
+    await endpoint.close();
+  }
+}, 20_000);
+
+
+it.each([
+  { separateService: false, shape: 'valid' },
+  { separateService: true, shape: 'valid' },
+  { separateService: false, shape: 'empty' },
+  { separateService: false, shape: 'invalid JSON' },
+  { separateService: false, shape: 'invalid addresses' },
+  { separateService: false, shape: 'directory' },
+])('resumes incomplete Kimi OTLP destinations with $shape receipts (separate service=$separateService)', async ({
+  separateService, shape,
+}) => {
+  interface WireSpan { traceId: Uint8Array; spanId: Uint8Array; parentSpanId?: Uint8Array }
+  const decoder = createRequire(import.meta.url)('@opentelemetry/otlp-transformer/build/src/generated/root.js')
+    .opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest;
+  const spanIdentity = (span: WireSpan) => (['traceId', 'spanId', 'parentSpanId'] as const).map(key =>
+    Buffer.from(span[key] ?? []).toString('hex'));
+  const acceptBody = (body: Buffer, accepted: WireSpan[]) => {
+    for (const resource of decoder.decode(body).resourceSpans) {
+      for (const scope of resource.scopeSpans) accepted.push(...scope.spans);
+    }
+  };
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, sessionId, wire, first } = await createSession();
+  const directory = path.join(path.dirname(stateFile), 'pending-turns');
+  const createJournal = () => new CodexTurnJournal(directory, 100, ['codex', 'hermes', 'openclaw', 'kimi-code-cli']);
+  const primary: WireSpan[] = [];
+  const secondary: WireSpan[] = [];
+  let accepting = false;
+  let rejected = 0;
+  const healthy = await listen((_url, body) => { acceptBody(body, primary); return 200; });
+  const incomplete = await listen((_url, body) => {
+    if (!accepting && secondary.length >= 2) { rejected++; return 400; }
+    acceptBody(body, secondary);
+    return 200;
+  });
+  const open = async (primaryName: string) => {
+    const store = new StateStore(stateFile);
+    await store.load();
+    const input = new KimiCodeCliInput({ stateStore: store, sessionDir, captureMessageContent: false, pollIntervalMs: 60_000 });
+    const manager = new InputManager();
+    const cfg: OtlpTraceFlusherConfig = {
+      enabled: true, serviceName: 'kimi-partial-otlp', protocol: 'http/protobuf', maxExportBatchBytes: 1,
+      dataDir: path.dirname(stateFile), captureMessageContent: false,
+      endpoints: [
+        { name: primaryName, endpoint: healthy.url, compression: 'none' },
+        { name: 'incomplete', endpoint: incomplete.url, compression: 'none', ...(separateService ? { serviceName: 'second-service' } : {}) },
+      ],
+    };
+    const journal = createJournal();
+    const trace = new OtlpTraceFlusher(cfg, undefined, undefined, journal, entries => manager.prepareRestoredEntries(entries));
+    manager.setFlusher(trace);
+    manager.registerInput(input);
+    await trace.start();
+    await manager.startInput(input.id);
+    await poll(input);
+    return { input, store, close: async () => { await manager.stopAll(); await trace.shutdown(); } };
+  };
+  let active: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    active = await open('primary');
+    await fs.writeFile(wire, first.join('\n') + '\n');
+    await poll(active.input);
+    const cursor = (await fs.stat(wire)).size;
+    expect(active.store.getPersistedState(`${active.input.id}:${sessionId}`)?.lastOffset).toBe(cursor);
+    expect(primary).toHaveLength(7);
+    expect(secondary).toHaveLength(2);
+    expect(rejected).toBe(5);
+    const initialIds = primary.map(spanIdentity);
+    const originalGroup = (await fs.readdir(directory)).find(name => name.startsWith('codex-turn-'))!;
+    const receipt = (await fs.readdir(directory)).find(name => name.startsWith('kimi-otlp-receipts-'))!;
+    expect(receipt).toBe(originalGroup.replace('codex-turn-', 'kimi-otlp-receipts-').replace('.jsonl', '.json'));
+    expect((await fs.stat(path.join(directory, receipt))).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(await fs.readFile(path.join(directory, receipt), 'utf8')).destinations).toEqual([expect.stringMatching(/^[a-f0-9]{64}$/)]);
+    await active.close();
+    active = undefined;
+
+    const receiptPath = path.join(directory, receipt);
+    accepting = true;
+    if (shape === 'directory') {
+      await fs.rename(receiptPath, receiptPath + '.saved');
+      await fs.mkdir(receiptPath);
+      try {
+        for (let restart = 0; restart < 2; restart++) {
+          active = await open('renamed-primary');
+          expect(await fs.stat(path.join(directory, originalGroup))).toBeDefined();
+          await active.close();
+          active = undefined;
+        }
+        expect(primary.map(spanIdentity)).toEqual(initialIds);
+        expect(secondary.map(spanIdentity)).toEqual(initialIds.slice(0, 2));
+      } finally {
+        await fs.rmdir(receiptPath);
+        await fs.rename(receiptPath + '.saved', receiptPath);
+      }
+    } else if (shape !== 'valid') {
+      await fs.writeFile(receiptPath, shape === 'empty' ? '' : shape === 'invalid JSON' ? '{' :
+        JSON.stringify({ version: 1, destinations: ['not-a-destination'] }));
+    }
+    active = await open('renamed-primary');
+    await poll(active.input);
+    expect(active.store.getPersistedState(`${active.input.id}:${sessionId}`)?.lastOffset).toBe(cursor);
+    expect(primary.map(spanIdentity)).toEqual(shape === 'valid' || shape === 'directory' ? initialIds : [...initialIds, ...initialIds]);
+    expect(secondary.map(spanIdentity)).toEqual([...initialIds.slice(0, 2), ...initialIds]);
+    expect(await fs.readdir(directory)).toEqual([originalGroup.replace('codex-turn-', 'codex-done-').replace('.jsonl', '.json')]);
+  } finally {
+    await active?.close();
+    await Promise.all([healthy.close(), incomplete.close()]);
+  }
+}, 20_000);
