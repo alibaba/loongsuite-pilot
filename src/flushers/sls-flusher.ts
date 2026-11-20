@@ -324,12 +324,7 @@ export class SlsFlusher extends BaseFlusher {
     await this.runWithConcurrency(batches.map(({ key, logs, probe }) => async () => {
       const endpoint = logs[0].endpoint;
       const startMs = Date.now();
-      let outcome: FlushOutcome;
-      try {
-        outcome = await this.flushEndpoint(endpoint, logs);
-      } catch (err) {
-        outcome = await this.recordFailedBatch(endpoint, logs, err, 1);
-      }
+      const outcome = await this.flushQueuedBatch(endpoint, logs);
       if (probe && outcome.failures.some(failure => failure.attempted && failure.failureClass !== 'payload')) {
         // A failed reachability probe must not consume the queued record. It
         // will be retried after the next backoff or by the normal send path.
@@ -350,6 +345,24 @@ export class SlsFlusher extends BaseFlusher {
     }), this.resolvedFlushConcurrency);
 
     for (const [endpoint, outcome] of outcomes) this.observeEndpointOutcome(endpoint, outcome, true);
+  }
+
+  private async flushQueuedBatch(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushOutcome> {
+    const total = emptyOutcome();
+    // A paused bucket may contain many ordinary batches. Retain their count
+    // limit for the protobuf transports when resuming. WebTracking already
+    // splits on its wire limits and computes the accounted request sizes.
+    const maxEntries = endpoint.mode === 'webtracking' ? logs.length
+      : Math.max(1, Math.floor(this.config.batchMaxSize || BATCH_MAX_SIZE));
+    for (let start = 0; start < logs.length; start += maxEntries) {
+      const chunk = start === 0 && maxEntries >= logs.length ? logs : logs.slice(start, start + maxEntries);
+      try {
+        addOutcome(total, await this.flushEndpoint(endpoint, chunk));
+      } catch (err) {
+        addOutcome(total, await this.recordFailedBatch(endpoint, chunk, err, 1));
+      }
+    }
+    return total;
   }
 
   private takeFlushBatches(force: boolean): QueuedBatch[] {

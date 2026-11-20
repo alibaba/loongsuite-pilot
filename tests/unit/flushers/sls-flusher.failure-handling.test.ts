@@ -17,10 +17,10 @@ const success = () => new Response(null, { status: 200 });
 const error = (status: number, code?: string) => new Response(code ? JSON.stringify({ errorCode: code }) : '', { status });
 const sentIds = (options: RequestInit) => JSON.parse(options.body as string).__logs__.map((row: Record<string, string>) => row['event.id']);
 
-function makeFlusher(modes: SlsEndpoint['mode'][] = ['webtracking']) {
+function makeFlusher(modes: SlsEndpoint['mode'][] = ['webtracking'], batchMaxSize = 10_000) {
   const endpoint = 'http://sls.invalid';
   const flusher = new SlsFlusher({ enabled: true, endpoint, accessKeyId: '', accessKeySecret: '', apiKey: '',
-    mode: modes[0], batchMaxSize: 10_000, flushIntervalMs: 999_999, serviceNamePrefix: 'pilot',
+    mode: modes[0], batchMaxSize, flushIntervalMs: 999_999, serviceNamePrefix: 'pilot',
     retry: { retryMaxAttempts: 1 }, endpoints: modes.map((mode, i) => ({ name: `ep${i}`, endpoint,
       project: '', logstore: `store${i}`, kind: 'agentActivity', mode })) }, '/tmp/sls-test', 'test');
   const alarms = new AlarmManager({ ip: '127.0.0.1', version: 'test', userId: 'test' });
@@ -185,5 +185,24 @@ describe('SLS final failure handling', () => {
     expect(sentIds(primary()[3][1])).toContain('waiting');
     expect(counter).toMatchObject({ outEntries: 500, outFailed: 3 });
     expect(backup).toMatchObject({ outEntries: 503, outFailed: 0 });
+  });
+
+  it('releases held AK entries in normal-size batches after a successful probe', async () => {
+    const { flusher, counter } = makeFlusher(['ak'], 2);
+    sdkSend.mockRejectedValue(Object.assign(new Error('target forbidden'), { code: 'ProjectForbidden' }));
+    for (let i = 0; i < 3; i++) {
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+    }
+    for (let i = 0; i < 5; i++) await flusher.send(buildTestEntry());
+    await flusher.flush();
+    expect(sdkSend).toHaveBeenCalledTimes(3);
+
+    sdkSend.mockResolvedValue(undefined);
+    vi.setSystemTime(2_000);
+    await flusher.flush();
+    await flusher.flush();
+    expect(sdkSend.mock.calls.map(call => call[2].logs.length)).toEqual([1, 1, 1, 1, 2, 2]);
+    expect(counter).toMatchObject({ outEntries: 5, outFailed: 3 });
   });
 });
