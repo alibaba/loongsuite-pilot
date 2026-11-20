@@ -326,9 +326,13 @@ export class SlsFlusher extends BaseFlusher {
       const startMs = Date.now();
       const outcome = await this.flushQueuedBatch(endpoint, logs);
       if (probe && outcome.failures.some(failure => failure.attempted && failure.failureClass !== 'payload')) {
-        // A failed reachability probe must not consume the queued record. It
-        // will be retried after the next backoff or by the normal send path.
-        this.queue.set(key, [...logs, ...(this.queue.get(key) ?? [])]);
+        // Retain the rejected record and give the other queued records and
+        // buckets a chance to probe. A single invalid record can fail even
+        // after the endpoint recovers.
+        const pending = this.queue.get(key) ?? [];
+        this.queue.delete(key);
+        pending.push(...logs);
+        this.queue.set(key, pending);
         outcome.failedEntries = 0;
       }
       const counter = this.endpointCounters.get(endpoint.name);

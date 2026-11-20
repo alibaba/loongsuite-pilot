@@ -149,6 +149,37 @@ describe('SLS final failure handling', () => {
     expect(alarms.serialize()).toMatchObject([{ failure_class: 'config', alarm_count: '1' }]);
   });
 
+  it.each([
+    { bucket: 'the same bucket', agent: ClientType.Qoder, probes: ['invalid-first', 'invalid-second', 'healthy'] },
+    { bucket: 'another bucket', agent: ClientType.Cursor, probes: ['invalid-first', 'healthy'] },
+  ])('reaches healthy entries in $bucket after a record-specific probe failure', async ({ agent, probes }) => {
+    const { flusher, counter } = makeFlusher();
+    fetchMock.mockImplementation(async () => error(403, 'ProjectForbidden'));
+    for (let i = 0; i < 3; i++) {
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+    }
+    fetchMock.mockImplementation(async (_, options) =>
+      sentIds(options).some((id: string) => id.startsWith('invalid-'))
+        ? error(400, 'InvalidParameter')
+        : success());
+    await flusher.send(buildTestEntry({ 'event.id': 'invalid-first', 'gen_ai.agent.type': ClientType.Qoder }));
+    await flusher.send(buildTestEntry({ 'event.id': 'invalid-second', 'gen_ai.agent.type': ClientType.Qoder }));
+    await flusher.send(buildTestEntry({ 'event.id': 'healthy', 'gen_ai.agent.type': agent }));
+
+    for (const time of [2_000, 6_000, 14_000].slice(0, probes.length)) {
+      vi.setSystemTime(time);
+      await flusher.flush();
+    }
+    expect(fetchMock.mock.calls.slice(3).map(([, options]) => sentIds(options))).toEqual(probes.map(id => [id]));
+    expect(counter).toMatchObject({ outEntries: 1, outFailed: 3 });
+
+    // Recovery releases the retained records to the ordinary failure path.
+    await flusher.flush();
+    expect(sentIds(fetchMock.mock.calls.at(-1)![1]).sort()).toEqual(['invalid-first', 'invalid-second']);
+    expect(counter).toMatchObject({ outEntries: 1, outFailed: 5 });
+  });
+
   it('does not let a local oversized record hide consecutive terminal failures on the wire', async () => {
     const { flusher, alarms, counter } = makeFlusher();
     fetchMock.mockImplementation(async () => error(403, 'ProjectForbidden'));
