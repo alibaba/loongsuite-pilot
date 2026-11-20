@@ -45,7 +45,7 @@ export async function restoreHookRuntimeAssets(
     const target = path.join(targetRoot, relativePath);
     if (verifyPaths) await verifyPaths(source, target);
     await fs.access(source);
-    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.mkdir(path.dirname(target), { recursive: true, mode: verifyPaths ? 0o755 : undefined });
     const content = await fs.readFile(source, 'utf8');
     if (verifyPaths) {
       await verifyPaths(source, target);

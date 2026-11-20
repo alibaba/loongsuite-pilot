@@ -2,6 +2,8 @@ import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
+export const CURSOR_SYSTEM_HOOK_SCRIPT = 'cursor-loongsuite-pilot-hook.sh';
+
 function canTrustOwner(uid: number): boolean {
   return uid === 0 || uid === process.geteuid?.();
 }

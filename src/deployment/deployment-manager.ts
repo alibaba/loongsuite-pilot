@@ -27,7 +27,7 @@ import {
 } from './persisted-deploy-paths.js';
 import { mergeDeployedAgentsState, mergeHookSettingsPaths, withDeployedStateLock } from './deployed-state-merge.js';
 import { areSystemHookAssetsHealthy, restoreSystemHookAssets } from './system-hook-assets.js';
-import { supportsSystemHooks } from './system-hook-config.js';
+import { assertManagedCursorSystemCommand, supportsSystemHooks } from './system-hook-config.js';
 import { prepareRootTriggerLogDirs } from '../utils/producer-log-dir.js';
 
 const logger = createLogger('DeploymentManager');
@@ -77,6 +77,7 @@ export class DeploymentManager {
     );
     this.hookStrategy = new HookStrategy(hookManager, {
       deployInterceptorHooks: opts.deployInterceptorHooks ?? false,
+      systemHookDataDir: opts.dataDir,
     });
     this.pluginProbeStrategy = new PluginProbeStrategy(opts.dataDir, opts.pilotDir);
     this.pluginInjectStrategy = new PluginInjectStrategy(opts.dataDir, opts.pilotDir);
@@ -294,6 +295,7 @@ export class DeploymentManager {
   deployHookScope(def: AgentDefinition): Promise<DeployResult> {
     if (!supportsSystemHooks(def.id) || !def.hook) throw new Error('This agent does not support native system hook scope');
     return this.runExclusive(() => withDeployedStateLock(path.join(this.dataDir, `${def.id === 'grok-build' ? 'grok' : def.id}-scope.lock`), async () => {
+      if (def.id === 'cursor' && def.hook!.scope === 'system') assertManagedCursorSystemCommand(def, this.dataDir);
       await this.loadState();
       if (!(await this.recoverHookMigration(def))) return {
         success: false, agentId: def.id, deployMode: 'hook', error: 'Previous Hook migration cleanup is pending',

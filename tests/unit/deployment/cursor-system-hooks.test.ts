@@ -227,16 +227,44 @@ describe('Cursor enterprise system registration', () => {
     expect(await fs.stat(def.hook!.systemSettingsPath!).catch(() => null)).toBeNull();
   });
 
-  it('writes three independent identities to the common journal without inherited Pilot variables', async () => {
+  it('refuses to register a local Cursor command outside the managed runtime', async () => {
+    const builtinAgentsDir = path.join(root, 'agents.d');
+    await write(path.join(builtinAgentsDir, 'cursor.json'), JSON.stringify(def));
+    const manager = new DeploymentManager({ dataDir, pilotDir: path.resolve('.'), builtinAgentsDir });
+    const target = systemHookDefinition(def);
+    const customer = { version: 1, hooks: { stop: [{ command: 'customer-audit' }] } };
+    await write(target.hook!.settingsPath, JSON.stringify(customer));
+    expect((await manager.deployHookScope(target)).success).toBe(true);
+    const original = await fs.readFile(target.hook!.settingsPath, 'utf8');
+    const state = path.join(dataDir, 'deployed-agents.json');
+    const originalState = await fs.readFile(state, 'utf8');
+
+    const overriddenCommand = path.join(root, 'elsewhere/cursor-loongsuite-pilot-hook.sh');
+    await write(overriddenCommand, '#!/bin/bash\n');
+    await write(path.join(dataDir, 'agents.d.local/cursor.json'), JSON.stringify({
+      ...def, hook: { ...def.hook, hookCommand: overriddenCommand },
+    }));
+    const [overridden] = await manager.loadDefinitions();
+    expect(overridden.hook!.hookCommand).toBe(overriddenCommand);
+    await expect(manager.deployHookScope(systemHookDefinition(overridden))).rejects.toThrow('managed Pilot wrapper');
+    expect(await fs.readFile(target.hook!.settingsPath, 'utf8')).toBe(original);
+    expect(await fs.readFile(state, 'utf8')).toBe(originalState);
+    expect(await manager.undeployAgent(overridden)).toBe(true);
+    expect(JSON.parse(await fs.readFile(target.hook!.settingsPath, 'utf8'))).toEqual(customer);
+  });
+
+  it('writes independent identities to the common journal without inherited Pilot variables', async () => {
     const homes = ['a', 'b', 'created-after-install'].map(identity => path.join(root, identity));
     await Promise.all(homes.slice(0, 2).map(home => fs.mkdir(home)));
     const manager = new DeploymentManager({ dataDir, pilotDir: path.resolve('.') });
     const target = systemHookDefinition(def);
+    const journalDir = path.join(dataDir, 'state/cursor');
+    await fs.mkdir(journalDir, { recursive: true, mode: 0o755 });
     expect((await manager.deployHookScope(target)).success).toBe(true);
+    expect((await fs.stat(journalDir)).mode & 0o777).toBe(0o700);
     const { hooks } = JSON.parse(await fs.readFile(target.hook!.settingsPath, 'utf8'));
     const command = hooks.beforeSubmitPrompt[0].command;
     await fs.mkdir(homes[2]);
-    const journalDir = path.join(dataDir, 'state/cursor');
     const journalFile = path.join(journalDir, 'event-journal.jsonl');
     for (const home of homes) {
       const identity = path.basename(home);
@@ -257,11 +285,18 @@ describe('Cursor enterprise system registration', () => {
         await fs.chmod(journalDir, 0o755);
       }
     }
+    const cleanEnv = { PATH: '/usr/bin:/bin' };
+    const noHome = spawnSync('/bin/bash', ['-c', command], { input: JSON.stringify({
+      hook_event_name: 'beforeSubmitPrompt', conversation_id: 'no-home', generation_id: 'no-home',
+      cursor_version: '2026.11.10', prompt: 'test',
+    }), env: cleanEnv, encoding: 'utf8', timeout: 10000 });
+    expect(noHome.status, noHome.stderr).toBe(0);
+    expect(JSON.parse(noHome.stdout)).toEqual({});
     const journal = (await fs.readFile(journalFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-    expect(journal.map(event => event.conversation_id)).toEqual(['a', 'b', 'created-after-install']);
+    expect(journal.map(event => event.conversation_id)).toEqual(['a', 'b', 'created-after-install', 'no-home']);
     await fs.unlink(path.join(dataDir, 'hooks/cursor/source-event.mjs'));
-    const missing = spawnSync('/bin/bash', ['-c', command], { input: '{}', encoding: 'utf8', timeout: 10000 });
-    expect(missing.status).toBe(0);
+    const missing = spawnSync('/bin/bash', ['-c', command], { input: '{}', env: cleanEnv, encoding: 'utf8', timeout: 10000 });
+    expect(missing.status, missing.stderr).toBe(0);
     expect(JSON.parse(missing.stdout)).toEqual({});
   });
 
@@ -303,6 +338,11 @@ describe('Cursor enterprise system registration', () => {
     await fs.chmod(pin, 0o666);
     await expectFailOpen();
     await fs.chmod(pin, 0o644);
+    const config = path.join(dataDir, 'config.json');
+    await write(config, '{}\n');
+    await fs.chmod(config, 0o666);
+    await expectFailOpen();
+    await fs.unlink(config);
     const binary = path.join(root, 'untrusted-runtime', 'node');
     await write(binary, '#!/bin/sh\nprintf used > "$CURSOR_TEST_NODE_USED"\nexit 0\n');
     await fs.chmod(binary, 0o755);

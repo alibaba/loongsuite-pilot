@@ -11,7 +11,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROCESSOR="$SCRIPT_DIR/cursor-hook-processor.mjs"
 EMPTY_RESULT='{}'
-NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+if [[ "${1:-}" != "--system-scope" ]]; then
+  NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+fi
 
 log_error() {
   local stage="$1"
@@ -84,7 +86,7 @@ node_is_app_bundle() {
   local resolved
   resolved="$(realpath "$1" 2>/dev/null || readlink -f "$1" 2>/dev/null || echo "$1")"
   case "$resolved" in
-    /Applications/*.app/Contents/*|/System/Applications/*.app/Contents/*|"$HOME"/Applications/*.app/Contents/*)
+    /Applications/*.app/Contents/*|/System/Applications/*.app/Contents/*|"${HOME:-}"/Applications/*.app/Contents/*)
       return 0
       ;;
   esac
