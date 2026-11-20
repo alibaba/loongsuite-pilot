@@ -6,29 +6,14 @@ $script:MIN_NODE_MAJOR = 18
 # Managed runtimes live at <pilot-dir>\runtime\node-v<x>.<y>.<z>\node.exe (win zip layout)
 # or ...\node-v<x>.<y>.<z>\bin\node.exe, extracted by the installer only after it verified
 # SHASUMS256 and probed the binary itself, so the directory name is authoritative. Reading
-# the major from the path skips a `node --version` launch that would otherwise run on the
-# user's interactive path for every single event. Returns $null for anything that is not a
-# managed runtime, which still gets probed. Split-Path/-match keep this CLM-safe.
-function Get-ManagedNodeMajor {
-    param([string]$bin)
-    if (-not $bin) { return $null }
-    $dir = Split-Path $bin -Parent
-    if (-not $dir) { return $null }
-    if ((Split-Path $dir -Leaf) -eq 'bin') {
-        $dir = Split-Path $dir -Parent
-        if (-not $dir) { return $null }
-    }
-    $parent = Split-Path $dir -Parent
-    if (-not $parent -or (Split-Path $parent -Leaf) -ne 'runtime') { return $null }
-    if ((Split-Path $dir -Leaf) -match '^node-v([0-9]+)') { return [int]$Matches[1] }
-    return $null
-}
-
+# the major from the path skips a `node --version` launch on every hook invocation.
+# A match avoids several Split-Path calls and works in Constrained Language Mode.
 function Test-NodeSuitable {
     param([string]$bin)
-    if (-not (Test-Path $bin)) { return $false }
-    $managedMajor = Get-ManagedNodeMajor $bin
-    if ($null -ne $managedMajor) { return $managedMajor -ge $script:MIN_NODE_MAJOR }
+    if (-not (Test-Path -LiteralPath $bin -PathType Leaf -ErrorAction SilentlyContinue)) { return $false }
+    if ($bin -match '(?:^|[\\/])runtime[\\/]node-v([0-9]+)\.[0-9]+\.[0-9]+(?:[\\/]bin)?[\\/]node\.exe$') {
+        return [int]$Matches[1] -ge $script:MIN_NODE_MAJOR
+    }
     try {
         $ver = & $bin --version 2>$null
         if (-not $ver) { return $false }
@@ -52,31 +37,25 @@ function Get-NodeVersionSortKey {
 }
 
 function Resolve-NodeBin {
-    $pinFiles = @()
-    if ($env:LOONGSUITE_PILOT_CACHE_DIR) {
-        $pinFiles += Join-Path $env:LOONGSUITE_PILOT_CACHE_DIR "node-bin"
-    }
-    if ($env:LOONGSUITE_PILOT_DATA_DIR) {
-        $pinFiles += Join-Path $env:LOONGSUITE_PILOT_DATA_DIR "node-bin"
-    }
-    if ($env:USERPROFILE) {
-        $pinFiles += Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
-    }
-    foreach ($pinFile in $pinFiles) {
-        if (Test-Path $pinFile) {
-            # -Encoding UTF8 + BOM strip: the pin file can hold a non-ASCII path and 5.1
-            # defaults Get-Content to ANSI, which turns it into "??".
-            $pinned = ([string](Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
-            if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
-        }
+    $defaultDir = if ($env:USERPROFILE) { Join-Path $env:USERPROFILE ".loongsuite-pilot" }
+    $runtimeRoots = @()
+    foreach ($dir in @($env:LOONGSUITE_PILOT_CACHE_DIR, $env:LOONGSUITE_PILOT_DATA_DIR, $defaultDir)) {
+        if (-not $dir -or $runtimeRoots -contains $dir) { continue }
+        $runtimeRoots += $dir
+        $pinFile = Join-Path $dir "node-bin"
+        # Windows PowerShell 5.1 needs explicit UTF8 for non-ASCII paths.
+        $content = Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        if (-not $content) { continue }
+        $pinned = $content.Trim([char]0xFEFF).Trim()
+        if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
     }
     $candidates = @()
     # Managed runtime node (never removed by user node-manager churn) comes
     # first, preserving the custom cache/data/default pin-file priority.
-    foreach ($pinFile in $pinFiles) {
-        $runtimeDir = Join-Path (Split-Path $pinFile) "runtime"
-        if (Test-Path $runtimeDir) {
-            $runtimeDirs = Get-ChildItem $runtimeDir -Directory -Filter "node-v*" -ErrorAction SilentlyContinue |
+    foreach ($dir in $runtimeRoots) {
+        $runtimeDir = Join-Path $dir "runtime"
+        if (Test-Path -LiteralPath $runtimeDir -ErrorAction SilentlyContinue) {
+            $runtimeDirs = Get-ChildItem -LiteralPath $runtimeDir -Directory -Filter "node-v*" -ErrorAction SilentlyContinue |
                 Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
             foreach ($d in $runtimeDirs) {
                 $candidates += Join-Path $d.FullName "bin\node.exe"

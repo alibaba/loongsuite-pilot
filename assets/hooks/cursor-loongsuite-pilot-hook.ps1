@@ -5,17 +5,18 @@
 $ErrorActionPreference = "Continue"
 $EMPTY_RESULT = '{}'
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ScriptDir = $PSScriptRoot
 $Processor = Join-Path $ScriptDir "cursor-hook-processor.mjs"
+if (-not $env:LOONGSUITE_PILOT_DATA_DIR) {
+    $env:LOONGSUITE_PILOT_DATA_DIR = Split-Path -LiteralPath $ScriptDir
+}
 
 function Log-Error {
     param([string]$Stage, [string]$Message)
     try {
-        $dataDir = if ($env:LOONGSUITE_PILOT_DATA_DIR) { $env:LOONGSUITE_PILOT_DATA_DIR }
-                   else { Join-Path $env:USERPROFILE ".loongsuite-pilot" }
         $day = (Get-Date -Format "yyyy-MM-dd")
-        $dir = Join-Path $dataDir "logs\cursor\errors"
-        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $dir = Join-Path $env:LOONGSUITE_PILOT_DATA_DIR "logs\cursor\errors"
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         $file = Join-Path $dir "cursor-error-$day.jsonl"
         $time = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
         $escapedMsg = $Message -replace '\\', '\\\\' -replace '"', '\"'
@@ -34,78 +35,20 @@ if (-not [Console]::IsInputRedirected) {
     exit 0
 }
 
-if (-not (Test-Path $Processor)) {
+if (-not (Test-Path -LiteralPath $Processor -PathType Leaf -ErrorAction SilentlyContinue)) {
     Write-Error "[loongsuite-pilot] hook processor not found: $Processor"
     Log-Error "missing_processor" "hook processor not found: $Processor"
     Write-Output $EMPTY_RESULT
     exit 0
 }
 
-$MIN_NODE_MAJOR = 18
-
-# Managed runtimes live at <pilot-dir>\runtime\node-v<x>.<y>.<z>\node.exe (win zip layout)
-# or ...\node-v<x>.<y>.<z>\bin\node.exe, extracted by the installer only after it verified
-# SHASUMS256 and probed the binary itself, so the directory name is authoritative. Reading
-# the major from the path skips a `node --version` launch that would otherwise run on the
-# user's interactive path for every single event. Returns $null for anything that is not a
-# managed runtime, which still gets probed. Split-Path/-match keep this CLM-safe.
-function Get-ManagedNodeMajor {
-    param([string]$bin)
-    if (-not $bin) { return $null }
-    $dir = Split-Path $bin -Parent
-    if (-not $dir) { return $null }
-    if ((Split-Path $dir -Leaf) -eq 'bin') {
-        $dir = Split-Path $dir -Parent
-        if (-not $dir) { return $null }
-    }
-    $parent = Split-Path $dir -Parent
-    if (-not $parent -or (Split-Path $parent -Leaf) -ne 'runtime') { return $null }
-    if ((Split-Path $dir -Leaf) -match '^node-v([0-9]+)') { return [int]$Matches[1] }
-    return $null
+$Common = Join-Path $ScriptDir "shared/common.ps1"
+if (-not (Test-Path -LiteralPath $Common -PathType Leaf -ErrorAction SilentlyContinue)) {
+    Log-Error "missing_runtime_resolver" "hook runtime resolver not found: $Common"
+    Write-Output $EMPTY_RESULT
+    exit 0
 }
-
-function Test-NodeSuitable {
-    param([string]$bin)
-    if (-not (Test-Path $bin)) { return $false }
-    $managedMajor = Get-ManagedNodeMajor $bin
-    if ($null -ne $managedMajor) { return $managedMajor -ge $MIN_NODE_MAJOR }
-    try {
-        $ver = & $bin --version 2>$null
-        if (-not $ver) { return $false }
-        $major = [int]($ver -replace '^v','').Split('.')[0]
-        return $major -ge $MIN_NODE_MAJOR
-    } catch { return $false }
-}
-
-function Resolve-NodeBin {
-    $pinFile = Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
-    if (Test-Path $pinFile) {
-        # -Encoding UTF8 + BOM strip: the pin file can hold a non-ASCII path and 5.1
-        # defaults Get-Content to ANSI, which turns it into "??".
-        $pinned = ([string](Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
-        if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
-    }
-    $candidates = @()
-    $nvmHome = $env:NVM_HOME
-    if ($nvmHome -and (Test-Path $nvmHome)) {
-        $nvmDirs = Get-ChildItem $nvmHome -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
-        foreach ($d in $nvmDirs) { $candidates += Join-Path $d.FullName "node.exe" }
-    }
-    $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
-    if (Test-Path $fnmDir) {
-        $fnmDirs = Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
-        foreach ($d in $fnmDirs) { $candidates += Join-Path $d.FullName "installation\node.exe" }
-    }
-    $candidates += Join-Path $env:USERPROFILE ".volta\bin\node.exe"
-    $candidates += "C:\Program Files\nodejs\node.exe"
-    $candidates += "C:\Program Files (x86)\nodejs\node.exe"
-    $pathNode = Get-Command node -ErrorAction SilentlyContinue
-    if ($pathNode) { $candidates += $pathNode.Source }
-    foreach ($c in $candidates) {
-        if (Test-NodeSuitable $c) { return $c }
-    }
-    return $null
-}
+. $Common
 
 $nodeBin = Resolve-NodeBin
 if (-not $nodeBin) {
@@ -125,7 +68,7 @@ try {
     # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 parses a BOM-less
     # script using the system ANSI code page (GBK/936 on Chinese Windows); any
     # non-ASCII byte here can corrupt parsing and abort the whole script.
-    $result = & $nodeBin $Processor 2>$null
+    $result = Invoke-NodeProcessor -NodeBin $nodeBin -ProcessorPath $Processor
     if ($result) { Write-Output $result } else { Write-Output $EMPTY_RESULT }
 } catch {
     Write-Error "[loongsuite-pilot] hook processor failed"

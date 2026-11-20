@@ -67,6 +67,8 @@ export interface AgentHookConfig {
   hookCommand: string;
   format: HookFormat;
   matcher?: string;
+  /** Optional timeout in seconds for the collection hook command. */
+  timeout?: number;
   /** Optional matcher override keyed by hook event name. */
   eventMatchers?: Record<string, string>;
   replaceHookCommands?: string[];

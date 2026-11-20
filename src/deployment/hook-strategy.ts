@@ -41,6 +41,8 @@ function eventToSubcommand(event: string): string {
   return event.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
 }
 
+const QUOTED_WINDOWS_HOOK_AGENTS = new Set(['codex', 'cursor', 'grok-build']);
+
 /**
  * On Windows, .ps1 scripts must be invoked via `powershell -File` for stdin
  * piping to work correctly.  Bare `.ps1` paths fail to receive stdin when
@@ -57,7 +59,7 @@ function wrapLegacyPs1Command(cmd: string): string {
 }
 
 function wrapPs1Command(cmd: string, agentId: string): string {
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) {
+  if (process.platform !== 'win32' || !QUOTED_WINDOWS_HOOK_AGENTS.has(agentId)) {
     return wrapLegacyPs1Command(cmd);
   }
 
@@ -108,7 +110,7 @@ function legacyHookCommands(
   if (process.platform !== 'win32' && agentId === 'claude-code') {
     return legacyClaudeHookPaths(hookCommand).map(command => appendEventSubcommand(command, event, style));
   }
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) return [];
+  if (process.platform !== 'win32' || !QUOTED_WINDOWS_HOOK_AGENTS.has(agentId)) return [];
 
   const current = formatHookCommand(hookCommand, event, style, agentId);
   return [...new Set([
@@ -580,6 +582,7 @@ export class HookStrategy implements DeployStrategy {
       matcher: hookConfig.eventMatchers?.[event] ?? hookConfig.matcher,
       useNestedFormat: hookConfig.format === 'nested',
       shell: process.platform === 'win32' ? hookConfig.winShell : undefined,
+      timeout: hookConfig.timeout,
       replaceHookCommands: [
         ...(hookConfig.replaceHookCommands ?? []),
         ...legacyHookCommands(
