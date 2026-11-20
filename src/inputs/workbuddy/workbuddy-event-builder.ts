@@ -59,8 +59,10 @@ class HookEventResolver {
       .map(event => ({ ...event, consumed: false }));
   }
 
-  takeBoundary(eventName: string): WorkBuddyHookEvent | undefined {
-    const match = this.events.find(event => !event.consumed && event.eventName === eventName);
+  takeBoundary(eventName: string, earliestAtMs?: number): WorkBuddyHookEvent | undefined {
+    const match = this.events.find(event => !event.consumed
+      && event.eventName === eventName
+      && (earliestAtMs === undefined || event.observedAtMs >= earliestAtMs));
     if (!match) return undefined;
     match.consumed = true;
     return match;
@@ -476,7 +478,7 @@ export async function buildWorkBuddyEvents(
         timestampMs(record),
       );
       const responseTimestamp = transcriptResponseTimestamp
-        ?? hookEvents.takeBoundary('Stop')?.observedAtMs;
+        ?? hookEvents.takeBoundary('Stop', requestStartMs)?.observedAtMs;
       if (responseTimestamp === undefined) continue;
       const requestTimestamp = requestStartMs ?? responseTimestamp;
       await emitPendingUserInput(step.traceId, requestTimestamp);

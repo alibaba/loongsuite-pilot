@@ -520,24 +520,38 @@ function findFirstUnsealedUser(
     hook.eventName === 'UserPromptSubmit' && hook.observedAtMs > stopAtMs);
   // A Stop can be observed before a later turn reaches the same transcript.
   // Keep the first source row of that later turn for its own Stop.
-  let sawUser = false;
+  let firstUser: number | undefined;
   let unconfirmedUser: number | undefined;
+  let firstUntimedTurnEnded = false;
   for (const [index, record] of records.entries()) {
     const timestamp = typeof record.timestamp === 'number' && Number.isFinite(record.timestamp)
       ? record.timestamp : undefined;
     if (record.type === 'message' && record.role === 'user') {
+      if (firstUntimedTurnEnded && unconfirmedUser === firstUser) unconfirmedUser = undefined;
       if (timestamp !== undefined && timestamp > stopAtMs) return unconfirmedUser ?? index;
-      unconfirmedUser = timestamp === undefined && (sawUser || hasLaterPrompt) ? unconfirmedUser ?? index : undefined;
-      sawUser = true;
+      unconfirmedUser = timestamp === undefined && (firstUser !== undefined || hasLaterPrompt)
+        ? unconfirmedUser ?? index
+        : undefined;
+      firstUser ??= index;
       continue;
     }
-    if (unconfirmedUser === undefined || timestamp === undefined) continue;
+    if (unconfirmedUser === undefined) continue;
     // Unrelated usage and generated titles do not identify the active turn.
     if (!['message', 'reasoning', 'function_call', 'function_call_result'].includes(record.type ?? '')) continue;
-    if (timestamp > stopAtMs) return unconfirmedUser;
-    unconfirmedUser = undefined;
+    if (timestamp !== undefined) {
+      if (timestamp > stopAtMs) return unconfirmedUser;
+      unconfirmedUser = undefined;
+    } else if (unconfirmedUser === firstUser
+      && record.type === 'message' && record.role === 'assistant'
+      && record.status !== 'incomplete' && record.providerData?.skipRun !== true
+      && records[index + 1]?.type !== 'function_call') {
+      // Older transcripts may omit timestamps on both sides of the stopped
+      // turn. A complete first turn still belongs to the earlier Stop.
+      firstUntimedTurnEnded = true;
+    }
   }
-  return hasLaterPrompt ? unconfirmedUser : undefined;
+  if (!hasLaterPrompt || (firstUntimedTurnEnded && unconfirmedUser === firstUser)) return undefined;
+  return unconfirmedUser;
 }
 
 async function readJsonlRange(
