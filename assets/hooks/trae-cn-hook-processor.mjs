@@ -36,8 +36,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 
 import { readStdinJson } from './shared/stdin-reader.mjs';
+import { withSyncFileLock } from './shared/sync-file-lock.mjs';
 import {
   INITIAL_HASH,
   computeHash,
@@ -53,6 +55,7 @@ import {
   loadHookRuntimeConfig,
   resolveUserId,
   applyHookContentPolicy,
+  shouldCaptureHookMessageContent,
 } from './agent-event-normalizer.mjs';
 import {
   agentBaseFieldPatch,
@@ -74,6 +77,8 @@ const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, { agentId: AGENT
 
 const TURN_STATE_TTL_MS = 12 * 60 * 60 * 1000; // 12h, §2.9
 const SESSION_TIMEOUT_CLEANUP_MS = 60 * 60 * 1000; // 1h
+const SESSION_LOCK_WAIT_MS = 15_000;
+const SESSION_LOCK_STALE_MS = 300_000;
 let emittedHookResponse = false;
 
 // ─── utilities ───
@@ -100,12 +105,7 @@ function sessionStatePath(sessionId) {
   return path.join(stateDir(), `${hash}.json`);
 }
 
-function ensureStateDir() {
-  try { fs.mkdirSync(stateDir(), { recursive: true }); } catch { /* best-effort */ }
-}
-
 function loadSessionState(sessionId) {
-  ensureStateDir();
   const file = sessionStatePath(sessionId);
   try {
     if (!fs.existsSync(file)) return null;
@@ -123,14 +123,25 @@ function loadSessionState(sessionId) {
   }
 }
 
-function saveSessionState(sessionId, state) {
-  ensureStateDir();
+function saveSessionState(sessionId, state, runtimeConfig) {
   const file = sessionStatePath(sessionId);
+  const temp = `${file}.tmp`;
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
     state.last_activity_at_sec = nowSec();
-    fs.writeFileSync(file, JSON.stringify(state, null, 2), 'utf-8');
-  } catch { /* best-effort */ }
+    if (!shouldCaptureHookMessageContent(AGENT_ID, runtimeConfig)) {
+      delete state.prompt;
+      delete state.last_assistant_message;
+      for (const call of Object.values(state.pending_tool_calls ?? {})) delete call.arguments;
+    }
+    // The session lock protects this name. Discard any interrupted previous write.
+    fs.rmSync(temp, { force: true });
+    fs.writeFileSync(temp, JSON.stringify(state, null, 2), { encoding: 'utf-8', flag: 'wx', mode: 0o600 });
+    fs.renameSync(temp, file);
+  } catch (err) {
+    try { fs.rmSync(temp, { force: true }); } catch { /* best-effort */ }
+    logHookError({ agentId: AGENT_ID, stage: 'session_state', errorType: 'save_failed',
+      errorMessage: err?.message || String(err) });
+  }
 }
 
 function clearSessionState(sessionId) {
@@ -203,24 +214,29 @@ const cjsRequire = createRequire(import.meta.url);
 
 // P0 dual-path SQLite reader. Three layers, first hit wins; all fail → null.
 //   Path A: node:sqlite (Node 22+ built-in — ExperimentalWarning non-blocking).
-//   Path B: sqlite3 CLI -json (v3.26.0+).
+//   Path B: sqlite3 CLI in its default output mode.
 //   Path C: python3 sqlite3 stdlib fallback.
 // Split into per-path helpers so unit tests can exercise each path directly.
 function queryVscdbViaNodeSqlite(keyPattern, vscdbPath) {
   try {
     const { DatabaseSync } = cjsRequire('node:sqlite');
     const db = new DatabaseSync(vscdbPath, { readOnly: true });
-    const row = db.prepare('SELECT value FROM ItemTable WHERE key LIKE ?').get(`%${keyPattern}%`);
-    db.close();
-    return row && row.value != null ? String(row.value) : null;
+    try {
+      const row = db.prepare('SELECT value FROM ItemTable WHERE key LIKE ?').get(`%${keyPattern}%`);
+      return row && row.value != null ? String(row.value) : null;
+    } finally {
+      db.close();
+    }
   } catch { return null; }
 }
 function queryVscdbViaSqlite3Cli(keyPattern, vscdbPath) {
   try {
     // Default output mode: one value per line. -json needs sqlite3 >= 3.28;
     // production CLI is 3.26.0, so we use plain SELECT ... LIMIT 1.
-    const raw = cjsRequire('child_process').execSync(
-      `sqlite3 "${vscdbPath}" "SELECT value FROM ItemTable WHERE key LIKE '%${keyPattern}%' LIMIT 1"`,
+    const pattern = String(keyPattern).replaceAll("'", "''");
+    const sql = `SELECT value FROM ItemTable WHERE key LIKE '%${pattern}%' LIMIT 1`;
+    const raw = execFileSync(
+      'sqlite3', ['-readonly', path.resolve(vscdbPath), sql],
       { encoding: 'utf-8', timeout: 2000 },
     ).trim();
     return raw || null;
@@ -232,10 +248,12 @@ function queryVscdbViaPython3(keyPattern, vscdbPath) {
     // Parameterize via env vars so keyPattern/vscdbPath never touch SQL.
     const script =
       'import sqlite3, os\n' +
-      "c = sqlite3.connect(os.environ['TRAE_VSCDB_PATH'])\n" +
+      'from pathlib import Path\n' +
+      "uri = Path(os.environ['TRAE_VSCDB_PATH']).resolve().as_uri() + '?mode=ro'\n" +
+      'c = sqlite3.connect(uri, uri=True)\n' +
       "r = c.execute(\"SELECT value FROM ItemTable WHERE key LIKE '%' || ? || '%'\", (os.environ['TRAE_KEY_PATTERN'],)).fetchone()\n" +
       "print(r[0] if r else '')";
-    const out = cjsRequire('child_process').execSync('python3', {
+    const out = execFileSync('python3', ['-'], {
       input: script,
       encoding: 'utf-8',
       timeout: 2000,
@@ -1169,29 +1187,21 @@ function emitEntryIfMissing(state, runtimeConfig, records, timestamp) {
 
 // ─── cmd handlers ───
 
-function cmdSessionStart() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'session-start');
-  if (!sessionId) return;
-  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+function cmdSessionStart(event, sessionId, runtimeConfig) {
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
   // SessionStart is a no-op marker — no turn opened (§2.9).
   // Touch session state so the next UserPromptSubmit can chain turn_index.
   let state = loadSessionState(sessionId);
   if (!state) {
     state = { session_id: sessionId, cwd: event.cwd || '', turn_index: 0 };
-    saveSessionState(sessionId, state);
+    saveSessionState(sessionId, state, runtimeConfig);
   } else if (event.cwd && state.cwd !== event.cwd) {
     state.cwd = event.cwd;
-    saveSessionState(sessionId, state);
+    saveSessionState(sessionId, state, runtimeConfig);
   }
 }
 
-function cmdUserPromptSubmit() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'user-prompt-submit');
-  if (!sessionId) return;
-  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+function cmdUserPromptSubmit(event, sessionId, runtimeConfig) {
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
 
   const prevState = loadSessionState(sessionId);
@@ -1207,7 +1217,7 @@ function cmdUserPromptSubmit() {
     records.push(llmResponseRecord(state, base, ts, ''));
     state.llm_response_emitted = true;
     emitRecords(state, records, runtimeConfig);
-    saveSessionState(sessionId, state);
+    saveSessionState(sessionId, state, runtimeConfig);
   }
   // Round 5 #5: turn_index persists across idle_prompt so multi-turn
   // conversations produce unique t1/t2/t3 ids. prevState (even after
@@ -1251,14 +1261,10 @@ function cmdUserPromptSubmit() {
   ]);
 
   emitRecords(state, records, runtimeConfig);
-  saveSessionState(sessionId, state);
+  saveSessionState(sessionId, state, runtimeConfig);
 }
 
-function cmdPreToolUse() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'pre-tool-use');
-  if (!sessionId) return;
-  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+function cmdPreToolUse(event, sessionId, runtimeConfig) {
   let state = loadSessionState(sessionId);
   if (!state || !state.llm_request_emitted) {
     // §2.9: 中途启动 — 惰性补一个轮次, 标 turn_synthesized.
@@ -1305,14 +1311,10 @@ function cmdPreToolUse() {
     if (pending) pending.llm_tool_name = event.llm_tool_name;
   }
   emitRecords(state, records, runtimeConfig);
-  saveSessionState(sessionId, state);
+  saveSessionState(sessionId, state, runtimeConfig);
 }
 
-function cmdPostToolUse() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'post-tool-use');
-  if (!sessionId) return;
-  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+function cmdPostToolUse(event, sessionId, runtimeConfig) {
   const state = loadSessionState(sessionId);
   if (!state) {
     logHookError({
@@ -1342,14 +1344,10 @@ function cmdPostToolUse() {
     state.pending_tool_calls[toolUseId].completed = true;
   }
   emitRecords(state, records, runtimeConfig);
-  saveSessionState(sessionId, state);
+  saveSessionState(sessionId, state, runtimeConfig);
 }
 
-function cmdStop() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'stop');
-  if (!sessionId) return;
-  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+function cmdStop(event, sessionId, runtimeConfig) {
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
   let state = loadSessionState(sessionId);
   if (!state || !state.llm_request_emitted) {
@@ -1410,13 +1408,10 @@ function cmdStop() {
     ];
     try { writeOtlpDebugRecords(corrected); } catch { /* best-effort */ }
   }
-  saveSessionState(sessionId, state);
+  saveSessionState(sessionId, state, runtimeConfig);
 }
 
-function cmdNotification() {
-  const event = tryReadStdin();
-  const sessionId = requireSessionId(event, 'notification');
-  if (!sessionId) return;
+function cmdNotification(event, sessionId, runtimeConfig) {
   // Round 6 #1: forward-compat — if TRAE-CN ever starts emitting LLM streaming
   // chunks (notification_type != idle_prompt) carrying usage data, accumulate
   // it into state.usage so the next Stop extracts real token counts. tester
@@ -1426,7 +1421,7 @@ function cmdNotification() {
     const state = loadSessionState(sessionId);
     if (state) {
       const changed = mergeUsageIntoState(state, event);
-      if (changed) saveSessionState(sessionId, state);
+      if (changed) saveSessionState(sessionId, state, runtimeConfig);
     }
     return;
   }
@@ -1454,7 +1449,7 @@ function cmdNotification() {
     Object.keys(stub).forEach((k) => {
       if (stub[k] === undefined) delete stub[k];
     });
-    saveSessionState(sessionId, stub);
+    saveSessionState(sessionId, stub, runtimeConfig);
   } else {
     clearSessionState(sessionId);
   }
@@ -1652,22 +1647,41 @@ const DISPATCH = {
   'post-tool-use': cmdPostToolUse,
   'stop': cmdStop,
   'notification': cmdNotification,
-  'frida-enrich': cmdFridaEnrich,
 };
 
-// Dispatcher runs only when invoked as CLI (argv[1] === this file). When
-// imported by unit tests for the vscdb reader / agent_type mapper, skip so
-// the test runner's argv doesn't trigger a hook subcommand.
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const sub = process.argv[2] || 'unknown';
-  const fn = DISPATCH[sub];
-  if (fn) {
-    Promise.resolve(fn()).catch((err) => {
-      logHookError({ agentId: AGENT_ID, stage: `dispatch_${sub}`, errorType: 'unhandled', errorMessage: err?.message || String(err) });
-    }).finally(() => { if (!emittedHookResponse) process.stdout.write('{}\n'); });
-  } else {
-    process.stdout.write('{}\n');
+async function dispatch(sub) {
+  if (sub === 'frida-enrich') return cmdFridaEnrich();
+  if (!Object.hasOwn(DISPATCH, sub)) return;
+  const event = tryReadStdin();
+  const sessionId = requireSessionId(event, sub);
+  if (!sessionId) return;
+
+  // A Hook is a separate process. Hold the lock through load, emit and save.
+  const lock = `${sessionStatePath(sessionId)}.lock`;
+  const result = withSyncFileLock(lock, SESSION_LOCK_WAIT_MS, SESSION_LOCK_STALE_MS, () => {
+    const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+    DISPATCH[sub](event, sessionId, runtimeConfig);
+  });
+  if (!result.acquired) {
+    logHookError({ agentId: AGENT_ID, stage: sub, errorType: 'session_lock_unavailable',
+      errorMessage: 'Could not acquire session state lock; skipping event' });
   }
+}
+
+function isDirectExec() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const here = fileURLToPath(import.meta.url);
+  if (entry === here) return true;
+  try { return fs.realpathSync(entry) === here; }
+  catch { return false; }
+}
+
+if (isDirectExec()) {
+  const sub = process.argv[2] || 'unknown';
+  dispatch(sub).catch((err) => {
+    logHookError({ agentId: AGENT_ID, stage: `dispatch_${sub}`, errorType: 'unhandled', errorMessage: err?.message || String(err) });
+  }).finally(() => { if (!emittedHookResponse) process.stdout.write('{}\n'); });
 }
 
 // Test-only exports for the dual-path reader + agent_type mapper.

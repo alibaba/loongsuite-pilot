@@ -62,6 +62,8 @@ export interface PipelineManagerOptions {
   failedLogDir: string;
   dataDir: string;
   pipelineConfig: PipelineToggle;
+  hostSn?: string;
+  hostIdentityTags?: boolean;
 }
 
 export type PipelineToggle = import('../types/index.js').PipelineToggle;
@@ -84,6 +86,8 @@ export interface QoderApiPipelineOptions {
   stateDir: string;
   failedLogDir: string;
   dataDir: string;
+  hostSn?: string;
+  hostIdentityTags?: boolean;
 }
 
 // --- File collection types (moved from file-collection/types.ts) ---

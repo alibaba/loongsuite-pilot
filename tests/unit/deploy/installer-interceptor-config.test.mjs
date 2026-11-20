@@ -156,7 +156,7 @@ describe('installer interceptor flags', () => {
       });
     });
 
-    it('promotes mask none to custom so builtin interceptor types are covered', () => {
+    it('promotes mask none to custom so credential mask types are covered', () => {
       const result = runBashConfig([
         '--interceptor-mode', 'all',
         '--mask-mode', 'none',

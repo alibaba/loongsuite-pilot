@@ -65,7 +65,6 @@ collectors do not understand the new explicit turn-completion protocol.
 | `gen_ai.agent.result` | An observed Agent result or failed dispatch. Tool acceptance alone is not Agent completion. |
 | `skill.use` | A skill, extension, or agent capability invocation. |
 | `tool.approve` | A user approval event for a tool or action. |
-| `guardrail.evaluation` | One observation per local rule match, including audit allows and enforce blocks. It is not a model or tool execution and is excluded from OTLP turn grouping and conversion. |
 | `agent.input` | A compatibility copy of an input-bearing `other`, for querying Agent input by event name. |
 | `other` | Other events that cannot be classified into the above event names. |
 
@@ -168,17 +167,11 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.tool.call.arguments` | json | When available | Tool call arguments. May contain sensitive content. |
 | `gen_ai.tool.call.result` | json | When available | Tool result payload. May contain sensitive content. |
 | `gen_ai.tool.call.duration` | int | Recommended | Positive tool execution duration in milliseconds, computed from the matched result boundary minus the call boundary. Omit it when either boundary is unavailable or the difference is not positive. |
-| `gen_ai.guardrail.triggered` | boolean | With a linked verdict or evaluation | Always `true` when a verdict exists; this does not mean a rule matched. Omitted without a matching, unexpired verdict or when interception is disabled. |
-| `gen_ai.guardrail.action` | string | With a verdict | `allow` or `block`. Tool calls link to PreToolUse and results to PostToolUse. Evaluation events describe that individual rule; tool events describe the final request decision. |
-| `gen_ai.guardrail.matched` | boolean | When the match result is known | `true` for audit/enforce hits, `false` after a complete check without hits, omitted when only an error is known. |
-| `gen_ai.guardrail.enforcement` | string | For local rule hits | `enforce` or `audit`. Audit matches allow the operation and do not notify the host. Builtin rules omit it. |
-| `gen_ai.guardrail.fail_open` | boolean | On check errors | `true` when checking failed or was incomplete. It can coexist with a known audit match. |
-| `gen_ai.guardrail.phase` | string | Evaluation events | `UserPromptSubmit`, `PreToolUse`, or `PostToolUse`. |
-| `gen_ai.guardrail.rule_id` | string | For known matches | The matched rule ID; linked tool events use the final enforce rule or first audit hit. |
-| `gen_ai.guardrail.rule_version` | string | For local rule hits | The rule's version. Builtin rules omit it. |
-| `gen_ai.guardrail.reason` | string | When supplied by the rule | Script reason or pattern/builtin marker, masked before output. |
-| `gen_ai.guardrail.title` | string | When declared by the rule | Rule display label, not returned to the host. |
-| `gen_ai.guardrail.message` | string | When declared by the rule | Rule reminder; audit records it, enforce can return it to the host. Masked before output. |
+| `gen_ai.guardrail.triggered` | boolean | With a linked verdict | Always `true` when a verdict exists; this does not mean a rule matched. Omitted without a matching, unexpired verdict or when interception is disabled. |
+| `gen_ai.guardrail.action` | string | With a verdict | `block` for enforced blocks, `log` for log hits that allow execution, and `allow` for other known verdicts. Tool calls link to PreToolUse and results to PostToolUse. Allowed prompts link to the first native request of the turn without adding a request event; denied Qoder prompts are supplemented as blocked requests. Omitted when no verdict can be uniquely associated. |
+| `gen_ai.guardrail.fail_open` | boolean | On check errors | `true` when checking failed or was incomplete. It can coexist with a known log match. |
+| `gen_ai.guardrail.rule_id` | string | For known matches | The configured ID of the final block rule or first log hit. |
+| `gen_ai.guardrail.rule_version` | string | For rule hits | The configured rule version. |
 | `gen_ai.skill.name` | string | Conditionally Required for `skill.use` | Skill or extension capability name. |
 | `gen_ai.skill.id` | string | Recommended when skill identity is available | Stable skill identifier. |
 | `gen_ai.skill.description` | string | Recommended when skill metadata is available | Human-readable skill description. |
@@ -204,7 +197,15 @@ claim that the Agent did not use a model or tools internally. For this scope,
 input and output messages are the visible Agent conversation, not evidence of
 the exact messages sent to or returned by a model.
 
-Qoder product identity: the legacy IDE emits `gen_ai.agent.type=qoder`, and terminal CLI emits `qoder-cli`. For CLI-format transcripts, the owning native user prompt's `businessIdentity.product` determines whether the host is `app` or `cli`; this also covers sidechains whose lifecycle Hooks omit product metadata. Older runtimes fall back to the current Turn's Hook `parent_business_info.product=app` marker. App events use `qoder-app`. The OTLP Resource uses the product type as `gen_ai.framework`; the new desktop App uses `gen_ai.agent.system=qoder-app`, while existing CLI/IDE variants retain `qoder`. Product identity is not cached across resumed Turns. The App reuses `agents.qoder` configuration and CLI transcript/token enrichment. Missing or unrecognized product evidence retains the original classification; paths and process names are not used to guess a product. Historical records retain their original system value, so cross-version queries should also inspect type/framework.
+Qoder product identity: the IDE emits `gen_ai.agent.type=qoder`, and terminal CLI emits `qoder-cli`. For CLI-format transcripts, the owning native user prompt's `businessIdentity.product` determines whether the host is `app` or `cli`; this also covers sidechains whose lifecycle Hooks omit product metadata. Older runtimes fall back to the current Turn's Hook `parent_business_info.product=app` marker. App events use `qoder-app`. The OTLP Resource uses the product type as `gen_ai.framework`; standalone IDE uses `gen_ai.agent.system=qoder-ide`, App uses `qoder-app`, and CLI, CN, JetBrains and Work retain `qoder`. Product identity is not cached across resumed Turns. The App reuses `agents.qoder` configuration and CLI transcript/token enrichment. Missing or unrecognized product evidence retains the original classification; paths and process names are not used to guess a product. Historical records retain their original system value, so cross-version queries should also inspect type/framework.
+
+Qoder IDE child executions have separate native sessions, unlike the CLI sidechain protocol. The IDE adapter confirms each delegation using read-only SQLite `chat_record.parent_session_id`, `parent_tool_call_id` and `request_id`. Parent `Agent` tools emit stable invocation/result logs; child work keeps its own session and turn with an incoming invocation linked to the immediate parent tool. Reused sessions are separated by native request, and nested work retains both incoming and outgoing identities. Missing or ambiguous evidence stays pending; names and nearby timestamps are not correlation keys.
+
+Child tool bodies come from their transcript and are assigned to native requests by exact SQLite `toolCallId`. Model message IDs, model and usage come from request-scoped SQLite metadata. IDE 1.37 may omit text-only responses from child transcripts: the last assistant reply of a successful foreground run uses the actual native reply delivered by the parent `Agent` tool, marked `qoder-ide-agent-result`. Unavailable intermediate or failed-response text stays absent; provider finish reasons are not invented. Actual parent-tool deliveries also produce Agent results; asynchronous receipts are not completed results. Encrypted database conversation bodies are never read or decrypted. Generated events use the common content/masking pipeline; checkpoints retain identifiers and source locations, not message bodies.
+
+IDE delegation scans limit both individual transcript rows and the combined required tool rows to 16 MiB. When a limit is exceeded, the source and pending state are retained and a warning is recorded rather than reporting an incomplete child execution as complete. Scans use per-cycle byte budgets and resume after restart.
+
+Child-request SQLite metadata is paged within one read-only snapshot, with limits of 4096 rows, 4 MiB of normalized metadata, and 16 MiB each for a single tool metadata value and all tool metadata combined. When a limit is reached, confirmed invocations and actually delivered results are still reported; child execution remains pending, the reason and identifiers are logged, and retries back off. Collection can resume if the source returns within the limits.
 
 Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. `workspace.*` and any inferred `git.*` fields are collected independently from message extraction.
 

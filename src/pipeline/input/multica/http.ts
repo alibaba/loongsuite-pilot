@@ -14,13 +14,13 @@ export function errorKind(error: unknown): string {
   return 'collection_error';
 }
 
-export async function fetchBounded(url: string, input: MulticaInputConfig, workspace?: string): Promise<{text: string; headers: Headers}> {
+export async function fetchBounded(url: string, input: MulticaInputConfig, workspace?: string, profileToken?: string): Promise<{text: string; headers: Headers}> {
   const headers: Record<string, string> = {Accept: 'application/json, text/plain'};
-  if (workspace !== undefined) {
-    const token = input.TokenFile ? (await readFile(input.TokenFile, 'utf8')).trim() : process.env[input.TokenEnv ?? 'MULTICA_TOKEN']?.trim();
+  if (workspace !== undefined || profileToken !== undefined) {
+    const token = profileToken ?? (input.TokenFile ? (await readFile(input.TokenFile, 'utf8')).trim() : process.env[input.TokenEnv ?? 'MULTICA_TOKEN']?.trim());
     if (!token) throw new SourceError('missing_api_token');
     headers.Authorization = `Bearer ${token}`;
-    headers['X-Workspace-ID'] = workspace;
+    if (workspace !== undefined) headers['X-Workspace-ID'] = workspace;
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), input.TimeoutMs ?? 10000);

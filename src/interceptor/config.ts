@@ -1,13 +1,15 @@
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import { configJsonPath, resolveDataDir } from '../utils/data-dir.js';
-import {
-  SUPPORTED_INTERCEPTOR_TYPES,
-  type InterceptorConfig,
-  type InterceptorType,
-  type MaskConfig,
-  type MaskType,
-} from '../types/index.js';
+import type { InterceptorConfig, MaskConfig, MaskType } from '../types/index.js';
+
+/** Credential masking required whenever interception is enabled. */
+export const INTERCEPTOR_MASK_TYPES = [
+  'cloudAccessKey',
+  'apiKey',
+  'privateKey',
+  'databaseUrl',
+] as const satisfies readonly MaskType[];
 
 function env(key: string): string | undefined {
   const v = process.env[key];
@@ -22,43 +24,25 @@ export function buildInterceptorConfig(value: unknown): InterceptorConfig {
     : null;
   const mode = env('LOONGSUITE_PILOT_INTERCEPTOR_MODE') ?? (typeof file?.mode === 'string' ? file.mode : undefined);
   if (mode !== 'all' && mode !== 'none') {
-    return { mode: 'none', types: [] };
+    return { mode: 'none' };
   }
-  return { mode, types: [] };
+  return { mode };
 }
 
-/**
- * Credential types enabled for interception are also mask types. Installer
- * writes this union into config.json; runtime config (env overrides and
- * hand-edited files) has to apply the same rule or mask mode none would
- * leave interceptor matches in the clear.
- */
+/** Protect intercepted content using the same credential mask union as installers. */
 export function ensureMaskCoversInterceptor(mask: MaskConfig, interceptor: InterceptorConfig): MaskConfig {
-  const extra: MaskType[] = interceptor.mode === 'all' ? [...SUPPORTED_INTERCEPTOR_TYPES] : [];
-  if (extra.length === 0 || mask.mode === 'all') return mask;
+  if (interceptor.mode !== 'all' || mask.mode === 'all') return mask;
   const current = mask.mode === 'custom' ? mask.types : [];
-  const types: MaskType[] = [];
-  const seen = new Set<string>();
-  for (const type of [...current, ...extra]) {
-    if (seen.has(type)) continue;
-    seen.add(type);
-    types.push(type);
-  }
-  return { ...mask, mode: 'custom', types };
+  return {
+    ...mask,
+    mode: 'custom',
+    types: [...new Set<MaskType>([...current, ...INTERCEPTOR_MASK_TYPES])],
+  };
 }
 
 /** Interceptor hooks follow the startup opt-in; cached rules never enable them. */
 export function shouldDeployInterceptorHooks(config: InterceptorConfig): boolean {
   return config.mode === 'all';
-}
-
-export function resolveEnabledInterceptorTypes(config: InterceptorConfig): Set<InterceptorType> {
-  if (config.mode !== 'all') return new Set();
-  return new Set(SUPPORTED_INTERCEPTOR_TYPES);
-}
-
-export function isRuleEnabled(config: InterceptorConfig, ruleId: string): boolean {
-  return resolveEnabledInterceptorTypes(config).has(ruleId as InterceptorType);
 }
 
 export async function loadInterceptorConfig(configPath?: string): Promise<InterceptorConfig> {

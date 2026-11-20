@@ -83,9 +83,27 @@ describe('Multica existing-data parsers', () => {
     expect(row).toMatchObject({message: 'http request', source_time: '2026-11-16T08:00:00.123Z', level: 'INF', duration_ms: '1250', http_status: '200', path: '/api/issues/i/comments'});
     expect(JSON.stringify(row)).not.toContain('secret');
     expect(parseMulticaLog('INFO private user prompt=please-do-something')).toBeUndefined();
+    expect(parseMulticaLog('@multica-k8s-v1\t1970-01-01T00:00:01Z INF task completed task_id=t1')).toBeUndefined();
     expect(parseMulticaLog('2026-11-16T08:00:00Z {"msg":"task failed","error":"429 rate limit","task_id":"t1"}'))
       .toMatchObject({task_id: 't1', failure_reason: 'provider_capacity_or_rate_limit'});
   });
+  it('preserves phase timing and file order for local daemon logs with a time-of-day prefix', async () => {
+    const file = path.join(dir, 'daemon.log');
+    const phase = '23:59:59.990 INF task phase recorded component=daemon task_id=task-1 runtime_id=runtime-1 task_phase=claimed phase_elapsed_ms=0 total_elapsed_ms=0\n';
+    await writeFile(file, phase);
+    const first = await collectLog(input, file, {});
+    expect(first.records[0]).toMatchObject({record_type: 'server_log', task_id: 'task-1', runtime_id: 'runtime-1',
+      phase: 'claimed', phase_elapsed_ms: '0', total_elapsed_ms: '0', entity_id: expect.stringMatching(/^\d+:\d+:0$/)});
+    expect(first.records[0]).not.toHaveProperty('source_time');
+
+    await appendFile(file, '00:00:00.015 INF task phase recorded component=daemon task_id=task-1 runtime_id=runtime-1 task_phase=environment_ready phase_elapsed_ms=25 total_elapsed_ms=25\n');
+    const second = await collectLog(input, file, first.checkpoint ?? {});
+    const fileIdentity = first.records[0].entity_id.split(':').slice(0, 2).join(':');
+    expect(second.records).toEqual([expect.objectContaining({phase: 'environment_ready', phase_elapsed_ms: '25',
+      total_elapsed_ms: '25', entity_id: `${fileIdentity}:${Buffer.byteLength(phase)}`})]);
+    expect(second.records[0]).not.toHaveProperty('source_time');
+  });
+
   it('retains native slow event handler timings from JSON without event payloads', () => {
     const row = parseMulticaLog(JSON.stringify({
       time: '2026-06-28T08:00:00Z', level: 'WARN', msg: 'slow global event handler',
@@ -332,14 +350,12 @@ describe('Multica delivery and failure isolation', () => {
     expect(postWebtracking).not.toHaveBeenCalled();
   });
   it('handles a background cycle rejection and retries without abandoning lifecycle ownership', async () => {
-    const activation = vi.fn().mockRejectedValueOnce(new Error('activation notification unavailable')).mockResolvedValue(undefined);
-    const p = new MulticaPipeline({config: {configName: 'retry', inputs: [{...input, IntervalSeconds: 1, StatFiles: [path.join(dir, 'missing')]}],
-      flushers: [{Type: 'flusher_sls', Endpoint: 'example.invalid', Project: 'p', Logstore: 'l'}]},
-      stateDir: dir, dataDir: dir, failedLogDir: dir}, undefined, activation);
+    const p = pipeline({...input, IntervalSeconds: 1, StatFiles: [path.join(dir, 'missing')]});
+    const collect = vi.spyOn(p, 'collectOnce').mockRejectedValueOnce(new Error('collection cycle unavailable'));
     try {
       await p.start();
       await vi.waitFor(() => expect(postWebtracking).toHaveBeenCalled(), {timeout: 2000});
-      expect(activation).toHaveBeenCalledTimes(2);
+      expect(collect).toHaveBeenCalledTimes(2);
     } finally { await p.stop(); }
   });
   it('replays the same sanitized event IDs after SLS failure and restart, advancing offsets only after ACK', async () => {

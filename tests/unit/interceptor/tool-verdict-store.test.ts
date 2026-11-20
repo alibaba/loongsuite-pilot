@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 import { guardrailSnapshotFromVerdict, stampGuardrail } from '../../../src/interceptor/guardrail.js';
-import { buildAgentActivityEntry } from '../../../src/normalization/entry-builder.js';
+import { buildAgentActivityEntry, projectLogEntry, serialiseLogEntry } from '../../../src/normalization/entry-builder.js';
 import {
   TOOL_VERDICT_TTL_MS,
   TOOL_VERDICT_MAX_RECORDS,
@@ -13,6 +13,22 @@ import {
 } from '../../../src/interceptor/tool-verdict-store.js';
 
 describe('tool verdict store', () => {
+  it('keeps an explicitly empty rule version through checkpoint restore, IPC and output serialization', async () => {
+    const store = new ToolVerdictStore(checkpointFile());
+    const key = { sessionId: 'builtin-session', toolUseId: 'builtin-call', phase: 'PreToolUse' as const };
+    const snapshot = { action: 'block' as const, ruleId: 'fixed-rule', ruleVersion: '' };
+    store.put(key, snapshot);
+    await store.checkpoint();
+    const mirror = new ToolVerdictStore(checkpointFile());
+    mirror.merge(store.records());
+    await mirror.checkpoint();
+    mirror.restore();
+    expect(mirror.getSnapshot(key)).toEqual(snapshot);
+    const entry = buildAgentActivityEntry({ 'event.name': 'tool.call' });
+    stampGuardrail(entry, mirror.getSnapshot(key)!);
+    expect(projectLogEntry(entry)['gen_ai.guardrail.rule_version']).toBe('');
+    expect(serialiseLogEntry(entry)['gen_ai.guardrail.rule_version']).toBe('');
+  });
   it.each([1, 128, TOOL_VERDICT_MAX_RECORDS])('keeps %i newer checkpoint records when an old full mirror is merged', (added) => {
     const file = checkpointFile();
     const store = new ToolVerdictStore(file);
@@ -138,9 +154,8 @@ describe('tool verdict store', () => {
     const file = checkpointFile();
     const store = new ToolVerdictStore(file);
     const key = { toolUseId: 'audit-call', phase: 'PreToolUse' as const };
-    const snapshot = guardrailSnapshotFromVerdict({ action: 'allow', matched: true, enforcement: 'audit', failOpen: true,
-      ruleId: 'observe', ruleVersion: '3', reason: 'audit hit', title: 'label', message: 'reminder', severity: 'HIGH', evaluatedRules: ['observe'] });
-    expect(snapshot.severity).toBe('HIGH');
+    const snapshot = { action: 'log' as const, failOpen: true as const,
+      ruleId: 'observe', ruleVersion: '3' };
     store.put(key, snapshot);
     await store.checkpoint();
     const restored = new ToolVerdictStore(file);
@@ -151,7 +166,8 @@ describe('tool verdict store', () => {
     expect(mirror.getSnapshot(key)).toEqual(snapshot);
     const event = buildAgentActivityEntry({ 'event.name': 'tool.call' });
     stampGuardrail(event, mirror.getSnapshot(key)!);
-    expect(event).toMatchObject({ 'gen_ai.guardrail.severity': 'HIGH', 'gen_ai.guardrail.action': 'allow' });
+    expect(event).toMatchObject({ 'gen_ai.guardrail.action': 'log' });
+    expect(event).not.toHaveProperty('gen_ai.guardrail.severity');
   });
   it('merges IPC snapshots without refreshing expiry and caps retained records', () => {
     const store = new ToolVerdictStore(checkpointFile());
@@ -243,9 +259,6 @@ describe('tool verdict store', () => {
         action: 'block',
         ruleId: 'flow-probe',
         ruleVersion: '3',
-        reason: 'flow-probe-v3',
-        title: 'ak-leak',
-        message: '不要在对话里粘贴 AccessKey',
       },
       now,
     );
@@ -256,9 +269,6 @@ describe('tool verdict store', () => {
       action: 'block',
       ruleId: 'flow-probe',
       ruleVersion: '3',
-      reason: 'flow-probe-v3',
-      title: 'ak-leak',
-      message: '不要在对话里粘贴 AccessKey',
     });
   });
 

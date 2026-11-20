@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { build } from 'esbuild';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -11,7 +11,6 @@ import { loadSync } from 'protobufjs';
 
 interface ChildRun {
   child: ChildProcessWithoutNullStreams;
-  activationFile: string;
   stdout: string;
   stderr: string;
   closed: Promise<{code: number | null; signal: NodeJS.Signals | null}>;
@@ -78,14 +77,13 @@ async function launch(metricsUrl: string, enabled: boolean, once = false, pilotC
   delete env.LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE;
   delete env.LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED;
   const stateDir = path.join(testDir, 'state');
-  const activationFile = path.join(testDir, 'activation.json');
   await mkdir(stateDir);
   const child = spawn(process.execPath, [path.join(bundleDir, 'collector.cjs'), '--config', configPath,
-    '--state-dir', stateDir, '--activation-state-file', activationFile,
+    '--state-dir', stateDir,
     ...(pilotConfig ? ['--pilot-config', pilotConfigPath] : []), ...(once ? ['--once'] : [])], {env, stdio: ['pipe', 'pipe', 'pipe']});
   child.stdin.end();
   const run: ChildRun = {
-    child, activationFile, stdout: '', stderr: '',
+    child, stdout: '', stderr: '',
     closed: new Promise((resolve, reject) => {
       child.once('error', reject);
       child.once('close', (code, signal) => resolve({code, signal}));
@@ -179,7 +177,7 @@ describe('Multica standalone CLI activation lifecycle', () => {
     });
     expect(await run.closed).toEqual({code: 0, signal: null});
     expect(requests).toBe(0);
-    expect(JSON.parse(await readFile(run.activationFile, 'utf8'))).toMatchObject({enabled: false, mode: 'off', expiresAt: 0});
+    expect(run.stdout).toContain('"reason":"pipeline_disabled"');
   }, 5_000);
 
   it('stays alive while disabled by default and performs no HTTP requests', async () => {
@@ -190,7 +188,7 @@ describe('Multica standalone CLI activation lifecycle', () => {
     expect(run.child.exitCode).toBeNull();
     expect(run.child.signalCode).toBeNull();
     expect(requests).toBe(0);
-    expect(JSON.parse(await readFile(run.activationFile, 'utf8'))).toMatchObject({enabled: false, mode: 'off', expiresAt: 0});
+    expect(run.stdout).toContain('"reason":"forced_off"');
     await terminateNormally(run);
   }, 5_000);
 
@@ -202,7 +200,7 @@ describe('Multica standalone CLI activation lifecycle', () => {
     expect(requests).toBe(2);
     expect(run.child.exitCode).toBeNull();
     expect(run.child.signalCode).toBeNull();
-    expect(JSON.parse(await readFile(run.activationFile, 'utf8'))).toMatchObject({enabled: false, stopped: true, expiresAt: 0});
+    expect(run.stdout).toContain('"reason":"detection_failure_threshold"');
     await terminateNormally(run);
   }, 6_000);
 

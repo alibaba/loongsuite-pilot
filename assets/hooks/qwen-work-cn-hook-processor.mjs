@@ -134,6 +134,10 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, observedTs, runtim
   const records = [];
   const promptRow = turnRows.find(isPromptRow);
   const promptText = extractText(promptRow);
+  const submittedPrompt = typeof promptRow.humanInput?.text === 'string' && promptRow.humanInput.text.length > 0
+    ? promptRow.humanInput.text : promptText;
+  const promptRequestId = typeof promptRow.requestSetId === 'string'
+    && promptRow.requestSetId.length > 0 && promptRow.requestSetId.length <= 512 ? promptRow.requestSetId : undefined;
   const promptTs = timestampToUnixNanos(promptRow.timestamp);
   const turnMetadata = { 'agent.qwenworkcn.promptId': stringValue(promptRow.promptId) || turnId };
 
@@ -199,6 +203,13 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, observedTs, runtim
       requestTs: index === 0 ? promptTs : previousToolResultTs,
       isLastStep: index === groups.length - 1,
       turnMetadata,
+      // Private join metadata belongs only to the first model request in a turn.
+      promptCorrelation: index === 0 && submittedPrompt ? {
+        hash: crypto.createHash('sha256').update(submittedPrompt).digest('hex'),
+        at: Date.parse(promptRow.timestamp),
+        // Intermediate hook history must not carry the native requestSetId.
+        ...(promptRequestId ? { requestId: crypto.createHash('sha256').update(promptRequestId).digest('hex') } : {}),
+      } : undefined,
     });
     records.push(...result.records);
     previousToolCalls = result.toolCalls;
@@ -238,7 +249,7 @@ function indexToolResults(rows) {
 function buildStepEvents(opts) {
   const {
     group, toolResults, stepId, turnId, sessionId, userId, observedTs,
-    runtimeConfig, cwd, inputDelta, requestTs, isLastStep, turnMetadata,
+    runtimeConfig, cwd, inputDelta, requestTs, isLastStep, turnMetadata, promptCorrelation,
   } = opts;
   const firstRow = group[0];
   const lastRow = group[group.length - 1];
@@ -284,6 +295,7 @@ function buildStepEvents(opts) {
     'gen_ai.request.id': responseId ? `${responseId}:request` : `${stepId}:request`,
     'gen_ai.request.model': model,
     'gen_ai.input.messages_delta': inputDelta,
+    ...(promptCorrelation ? { 'agent.pilot.interceptor.correlation': promptCorrelation } : {}),
     time_unix_nano: requestTs || timestampToUnixNanos(firstRow.timestamp),
     observed_time_unix_nano: observedTs,
   }, firstRow, runtimeConfig, cwd, `${stepId}:request`));

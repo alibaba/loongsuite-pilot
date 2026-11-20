@@ -99,6 +99,14 @@ describe('Trae-CN vscdb reader — P0 dual-path', () => {
     expect(val).toBe('Doubao-Seed-2.1-Turbo');
   });
 
+  it.skipIf(!SQLITE3_AVAILABLE)('Path B keeps quoted file paths and key patterns literal', () => {
+    buildVscdb([{ key: "prefix.selected'model", value: 'Selected model' }]);
+    const fileName = process.platform === 'win32' ? "user's data.vscdb" : "user's \"data\".vscdb";
+    const quotedPath = path.join(vscdbDir, fileName);
+    fs.renameSync(vscdbPath, quotedPath);
+    expect(mod.queryVscdbViaSqlite3Cli("selected'model", quotedPath)).toBe('Selected model');
+  });
+
   it('Path C (python3 sqlite3) independently resolves value when called directly', () => {
     if (!PYTHON3_AVAILABLE) return; // skip when system lacks python3 binary
     buildVscdb([{ key: 'ai_assistant.request.model', value: 'Qwen-Coder-32B' }]);

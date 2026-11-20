@@ -96,6 +96,8 @@ export interface ConfigFile {
   dataDir?: string;
   userId?: string;
   'user.id'?: string;
+  hostSn?: string;
+  hostIdentityTags?: boolean;
 
   sls?: SlsSingleConfig | SlsEndpointEntry[];
 
@@ -296,6 +298,11 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
   const innerDataConfig = await readJsonFile<InnerDataConfig>(innerDataConfigPath);
 
   const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
+  const hostSn = typeof file?.hostSn === 'string' ? file.hostSn.trim() : '';
+  const hostIdentityTags = envBool(
+    'LOONGSUITE_PILOT_HOST_IDENTITY_TAGS',
+    file?.hostIdentityTags ?? true,
+  );
 
   const serviceName = nonEmpty(env('LOONGSUITE_PILOT_SERVICE_NAME')) ?? nonEmpty(file?.serviceName);
   const configuredServiceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix;
@@ -308,6 +315,8 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     autoStart: true,
     dataDir,
     userId,
+    hostSn,
+    hostIdentityTags,
     collectLog: envBool('LOONGSUITE_PILOT_COLLECT_LOG', file?.collectLog ?? true),
     collectTrace: envBool('LOONGSUITE_PILOT_COLLECT_TRACE', file?.collectTrace ?? true),
     serviceName,
@@ -764,16 +773,15 @@ function parseMaskTypes(value: string | string[] | undefined): MaskType[] {
 }
 
 function buildMaskConfig(file: ConfigFile | null): MaskConfig {
+  const fileReplacementMode = file?.mask?.replacementMode;
   const rawReplacementMode =
     nonEmpty(env('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE')) ??
-    file?.mask?.replacementMode;
-  const replacementMode = SUPPORTED_MASK_REPLACEMENT_MODES.has(
-    rawReplacementMode as MaskReplacementMode,
-  )
-    ? (rawReplacementMode as MaskReplacementMode)
-    : 'placeholder';
-  if (rawReplacementMode && rawReplacementMode !== replacementMode) {
-    logger.warn('invalid mask replacement mode, using placeholder', {
+    (typeof fileReplacementMode === 'string' ? nonEmpty(fileReplacementMode) : undefined);
+  const replacementMode: MaskReplacementMode = rawReplacementMode === 'placeholder'
+    ? 'placeholder'
+    : 'preview';
+  if (rawReplacementMode && !SUPPORTED_MASK_REPLACEMENT_MODES.has(rawReplacementMode as MaskReplacementMode)) {
+    logger.warn('invalid mask replacement mode, using preview', {
       replacementMode: rawReplacementMode,
     });
   }
@@ -919,13 +927,13 @@ function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
 }
 
 function buildPipelineConfig(file: ConfigFile | null, configuredServiceNamePrefix?: string): PipelineToggle {
-  const legacyEnabled = file?.fileCollection?.enabled;
-  const enabled = envBool(
-    'LOONGSUITE_PILOT_PIPELINE_ENABLED',
-    envBool('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', file?.pipeline?.enabled ?? legacyEnabled ?? false),
-  );
+  const configured = file?.pipeline?.enabled ?? file?.fileCollection?.enabled;
+  const enabled = (fallback: boolean) => envBool('LOONGSUITE_PILOT_PIPELINE_ENABLED',
+    envBool('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', configured ?? fallback));
+  const multicaEnabled = envBool('LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED', file?.pipeline?.multica?.enabled ?? true);
+  const mode = buildMulticaMode(file?.pipeline?.multica?.mode);
   return {
-    enabled,
+    enabled: enabled(false),
     file: {
       enabled: envBool('LOONGSUITE_PILOT_PIPELINE_FILE_ENABLED', file?.pipeline?.file?.enabled ?? true),
     },
@@ -933,8 +941,9 @@ function buildPipelineConfig(file: ConfigFile | null, configuredServiceNamePrefi
       enabled: envBool('LOONGSUITE_PILOT_PIPELINE_QODER_API_ENABLED', file?.pipeline?.qoderApi?.enabled ?? true),
     },
     multica: {
-      enabled: envBool('LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED', file?.pipeline?.multica?.enabled ?? true),
-      mode: buildMulticaMode(file?.pipeline?.multica?.mode),
+      enabled: multicaEnabled,
+      mode,
+      discoverLocalSources: multicaEnabled && mode === 'on' && enabled(true) || undefined,
       // Pilot's built-in prefix must not rename environments on existing installations.
       serviceNamePrefix: configuredServiceNamePrefix,
     },

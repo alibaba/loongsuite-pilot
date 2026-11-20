@@ -1,8 +1,13 @@
 import { createHash } from 'node:crypto';
+import { hrTimeDuration } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import type { AgentActivityEntry } from '../types/index.js';
 
 const historyKey = 'loongsuite.trae_cn.model_responses';
+
+function earlier(a: ReadableSpan['startTime'], b: ReadableSpan['startTime']): boolean {
+  return a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
+}
 
 // The Hook converter's single STEP and LLM represent an entire user turn.
 // Replace that pair only when the terminal response is bound to native history.
@@ -18,7 +23,7 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
       step.attributes['gen_ai.span.kind'] !== 'STEP' || agent.attributes['gen_ai.span.kind'] !== 'AGENT') return spans;
   const trace = llm.spanContext().traceId;
   const observed: ReadableSpan[] = [];
-  const parents = new Map<string, { id: string; history: string }>();
+  const parents = new Map<string, { span: ReadableSpan; history: string }>();
   // Use the converted (content-policy filtered) messages. A continuation's
   // observable input is the committed tool result, not the entire model prompt.
   const resultByCall = new Map(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'TOOL')
@@ -80,15 +85,16 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
         }
       } else {
         attributes['gen_ai.react.round'] = seen.size;
-        if (Array.isArray(r.toolIds)) for (const call of r.toolIds) {
-          if (typeof call === 'string') parents.set(call, { id, history: r.id });
-        }
       }
-      observed.push({ ...template, name: template.name, kind: template.kind, resource: template.resource,
+      const observation: ReadableSpan = { ...template, name: template.name, kind: template.kind, resource: template.resource,
         instrumentationLibrary: template.instrumentationLibrary, ended: true, droppedEventsCount: 0,
         droppedLinksCount: 0, droppedAttributesCount: 0, links: [], events: [], status: { code: 0 },
         spanContext: () => ({ ...template.spanContext(), spanId: id }), parentSpanId: parent,
-        startTime: instant, endTime: instant, duration: [0, 0], attributes });
+        startTime: instant, endTime: instant, duration: [0, 0], attributes };
+      observed.push(observation);
+      if (!isModel && Array.isArray(r.toolIds)) for (const call of r.toolIds) {
+        if (typeof call === 'string') parents.set(call, { span: observation, history: r.id });
+      }
       parent = id;
     }
   }
@@ -97,8 +103,14 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
     if (span === llm || span.parentSpanId !== step.spanContext().spanId) continue;
     const parent = parents.get(String(span.attributes['gen_ai.tool.call.id']));
     if (parent) {
-      Object.assign(span, { parentSpanId: parent.id });
+      const owner = parent.span;
+      Object.assign(span, { parentSpanId: owner.spanContext().spanId });
       span.attributes['gen_ai.step.id'] = parent.history;
+      // A response timestamp describes the model observation. The STEP also
+      // encompasses the measured execution of any tools it dispatched.
+      const startTime = earlier(span.startTime, owner.startTime) ? span.startTime : owner.startTime;
+      const endTime = earlier(owner.endTime, span.endTime) ? span.endTime : owner.endTime;
+      Object.assign(owner, { startTime, endTime, duration: hrTimeDuration(startTime, endTime) });
     } else unassigned = true;
   }
   if (unassigned) {

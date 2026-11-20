@@ -8,23 +8,40 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { agentHomeEnvironment } from '../helpers/isolated-agent-home.js';
 
-it.skipIf(process.platform === 'win32')('publishes main-process health during SLS timeout/retry and drains on SIGTERM', async () => {
+it.skipIf(process.platform === 'win32').each(['explicit', 'local daemon'] as const)(
+  'starts the %s Multica pipeline through the standard Pilot entry point', async mode => {
+  const auto = mode === 'local daemon';
   const repo = fileURLToPath(new URL('../../', import.meta.url));
   const root = await mkdtemp(path.join(os.tmpdir(), 'multica-startup-'));
   // Keep external package resolution in the repository while isolating all runtime state.
   const bundleDir = await mkdtemp(path.join(repo, 'node_modules', '.multica-startup-'));
   const held: ServerResponse[] = [];
   const posts: Array<{__source__: string; __logs__: Record<string, string>[]}> = [];
+  const postPaths: string[] = [];
   let release = false;
   let child: ChildProcess | undefined;
   let output = '';
+  const profile = 'pilot-test-' + process.pid;
+  const healthPort = 19515 + Buffer.from(profile).reduce((sum, byte) => sum + byte, 0) % 1000;
+  const daemonHealth = createServer((_req, res) => res.end(JSON.stringify({
+    status: 'running', pid: process.pid, uptime: '1m', daemon_id: 'test-daemon',
+    device_name: 'test-device', server_url: 'http://multica.test', agents: [], workspaces: null,
+  })));
   const server = createServer((req, res) => {
     if (req.method === 'GET') {
-      res.end('multica_http_requests_total 1\n');
+      if (req.url?.startsWith('/api/')) {
+        if (req.headers.authorization !== 'Bearer test-profile-pat') { res.writeHead(401).end(); return; }
+        if (req.url === '/api/workspaces') {
+          res.end(JSON.stringify([{id: 'one'}, {id: 'two'}]));
+        } else if (req.url.startsWith('/api/issues?')) {
+          res.end(JSON.stringify({issues: [{id: 'issue-' + req.headers['x-workspace-id']}]}));
+        } else res.end('[]');
+      } else res.end('multica_http_requests_total 1\n');
     } else {
       const chunks: Buffer[] = [];
       req.on('data', chunk => chunks.push(chunk));
       req.on('end', () => {
+        postPaths.push(new URL(req.url ?? '/', 'http://test').pathname);
         posts.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
         if (release) res.end('{}');
         else held.push(res);
@@ -42,8 +59,22 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
     await mkdir(path.join(versionDir, 'agents.d'), {recursive: true});
     await writeFile(path.join(dataDir, 'current'), 'test');
     await writeFile(path.join(versionDir, 'package.json'), '{"version":"1.2.0"}');
-    const log = path.join(root, 'backend.log');
-    const content = 'INFO comment created issue_id=shutdown-test\n';
+    const home = path.join(root, 'home');
+    const daemonDir = path.join(home, '.multica', 'profiles', profile);
+    const log = auto ? path.join(daemonDir, 'daemon.log') : path.join(root, 'backend.log');
+    const content = auto
+      ? '12:34:56.789 INF task phase recorded task_id=local-daemon-task task_phase=environment_ready phase_elapsed_ms=250 total_elapsed_ms=500\n'
+      : 'INFO comment created issue_id=shutdown-test\n';
+    if (auto) {
+      await mkdir(daemonDir, {recursive: true});
+      await writeFile(path.join(daemonDir, 'config.json'), JSON.stringify({server_url: endpoint, token: 'test-profile-pat'}));
+      await writeFile(path.join(daemonDir, 'daemon.pid'), String(process.pid));
+      await new Promise<void>((resolve, reject) => {
+        daemonHealth.once('error', reject);
+        daemonHealth.listen(healthPort, '127.0.0.1', resolve);
+      });
+      release = true;
+    }
     await writeFile(log, content);
     const agents = Object.fromEntries((await readdir(path.join(repo, 'agents.d')))
       .filter(name => name.endsWith('.json')).map(name => [name.slice(0, -5), {enabled: false}]));
@@ -52,8 +83,9 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
       collectTrace: false, serviceNamePrefix: 'installed-pilot-env',
       enableStatusBarApp: false, dashboard: {enabled: false}, autoUpdate: {enabled: false}, interceptor: {mode: 'all'},
       retention: {enabled: false}, hookWatchdog: {enabled: false},
-      pipeline: {enabled: true, multica: {mode: 'on'}}}));
-    await writeFile(path.join(configDir, 'lab.json'), JSON.stringify({configName: 'lab',
+      ...(auto ? {sls: {endpoint: 'http://sls.invalid', project: 'test', logstore: 'agent-event'}}
+        : {pipeline: {enabled: true, multica: {mode: 'on'}}})}));
+    if (!auto) await writeFile(path.join(configDir, 'lab.json'), JSON.stringify({configName: 'lab',
       inputs: [{Type: 'input_multica', Instance: 'previous-env', CollectionMode: 'on', MetricsUrls: [endpoint], LogFiles: [log]}],
       flushers: [{Type: 'flusher_sls', Endpoint: 'http://sls.invalid', Project: 'test', Logstore: 'lab'}]}));
     const bundle = path.join(bundleDir, 'main.mjs');
@@ -88,12 +120,13 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
         };`},
       plugins: [internalStubPlugin],
     });
-    const env = {...process.env, ...agentHomeEnvironment(path.join(root, 'home'))};
+    const env = {...process.env, ...agentHomeEnvironment(home)};
     for (const key of Object.keys(env)) {
       if (key.startsWith('LOONGSUITE_') || key.startsWith('OTEL_')) delete env[key];
     }
     child = spawn(process.execPath, ['--experimental-sqlite', bundle], {cwd: root,
       env: {...env, AGENT_DATA_COLLECTION_CONFIG: configFile, LOONGSUITE_PILOT_DATA_DIR: dataDir,
+        ...(auto ? {LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE: 'on', POD_NAME: 'test-daemon-pod'} : {}),
         LOONGSUITE_PILOT_STDOUT: '1', LOONGSUITE_PILOT_INTERCEPTOR_MODE: 'all', LOG_LEVEL: 'info'},
       stdio: ['ignore', 'pipe', 'pipe']});
     child.stdout!.on('data', chunk => { output += chunk; });
@@ -112,6 +145,25 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
     const interceptor = await json(interceptorPath);
     expect(interceptor.pid).toBe(child.pid);
     expect((await fetch(`http://127.0.0.1:${interceptor.daemon_port}/health`)).ok).toBe(true);
+    if (auto) {
+      await vi.waitFor(() => {
+        expect(posts.flatMap(post => post.__logs__).find(row => row.task_id === 'local-daemon-task'))
+          .toMatchObject({phase: 'environment_ready', phase_elapsed_ms: '250', total_elapsed_ms: '500',
+            instance: 'installed-pilot-env', multica_env: 'installed-pilot-env', pod_name: 'test-daemon-pod'});
+        expect(postPaths).toContain('/logstores/multica-logs/track');
+      }, {timeout: 8000});
+      const event = posts.flatMap(post => post.__logs__).find(row => row.task_id === 'local-daemon-task');
+      expect(event).not.toHaveProperty('source_time');
+      await vi.waitFor(() => {
+        const issues = posts.flatMap(post => post.__logs__).filter(row => row.record_type === 'issue_snapshot');
+        expect(issues.map(row => row.workspace_id).sort()).toEqual(['one', 'two']);
+      }, {timeout: 8000});
+      expect(JSON.stringify(posts)).not.toContain('test-profile-pat');
+      expect(await readdir(configDir)).toEqual([]);
+      child.kill('SIGTERM');
+      expect(await exited).toEqual({code: 0, signal: null});
+      return;
+    }
     await vi.waitFor(() => expect(posts).toHaveLength(2), {timeout: 5000});
     for (const post of posts) {
       expect(post.__source__).toBe('installed-pilot-env');
@@ -151,6 +203,10 @@ it.skipIf(process.platform === 'win32')('publishes main-process health during SL
     }
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
+    if (daemonHealth.listening) {
+      daemonHealth.closeAllConnections();
+      await new Promise<void>(resolve => daemonHealth.close(() => resolve()));
+    }
     await rm(root, {recursive: true, force: true});
     await rm(bundleDir, {recursive: true, force: true});
   }

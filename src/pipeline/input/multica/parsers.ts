@@ -1,5 +1,4 @@
 import { classifyFailure, digest, object, safeScalar, selectFields } from './records.js';
-import { isIP } from 'node:net';
 import type { MulticaRecord } from './types.js';
 import { logDiagnostics } from './log-diagnostics.js';
 
@@ -43,36 +42,10 @@ export function parseDurationMs(value: string): number | undefined {
   return parts.reduce((sum, part) => sum + Number(part[1]) * scales[part[2]], 0);
 }
 
-const BRIDGE_PREFIX = '@multica-k8s-v1\t';
-const BRIDGE_FRAME = /^@multica-k8s-v1\t([a-zA-Z0-9-]{1,128})\t([a-z0-9.-]{1,253})\t([0-9a-fA-F:.]{0,45})\t([a-z0-9-]{1,63})\t([a-f0-9]{64})\t/;
-// Every valid ASCII frame fits in this bound, below the minimum 1 KiB read.
-const FRAME_READ_LIMIT = 600;
-
-/** Return a validated ASCII header, or null if a partial header needs another read. */
-export function readBridgeFrame(line: Buffer, complete: boolean): string | null | undefined {
-  if (line[0] !== 64) return undefined;
-  const text = line.toString('latin1', 0, FRAME_READ_LIMIT);
-  if (!text.startsWith(BRIDGE_PREFIX)) return undefined;
-  const header = BRIDGE_FRAME.exec(text)?.[0];
-  if (header) return header;
-  return !complete && line.length < FRAME_READ_LIMIT ? null : undefined;
-}
-
 /** Preserve bounded, redacted diagnostics alongside canonical event names. */
 export function parseMulticaLog(line: string): MulticaRecord | undefined {
-  const origin: MulticaRecord = {};
-  // Only the bridge frame before the Kubernetes timestamp supplies target
-  // identity. Ordinary application fields cannot overwrite Pod metadata.
-  if (line.startsWith(BRIDGE_PREFIX)) {
-    const frame = BRIDGE_FRAME.exec(line);
-    if (!frame) return undefined;
-    origin.pod_uid = frame[1];
-    origin.pod_name = frame[2];
-    if (isIP(frame[3])) origin.pod_ip = frame[3];
-    origin.container_name = frame[4];
-    origin.log_event_id = frame[5];
-    line = line.slice(frame[0].length);
-  }
+  // An old bridge spool may still be present in explicitly configured log files.
+  if (line.startsWith('@multica-k8s-v1\t')) return undefined;
   let clean = line.replace(/\x1b\[[0-9;]*m/g, '');
   let sourceTime: string | undefined;
   const cri = /^(\d{4}-\d\d-\d\dT\S+)\s+(?:stdout|stderr)\s+([FP])\s+(.*)$/.exec(clean);
@@ -100,7 +73,7 @@ export function parseMulticaLog(line: string): MulticaRecord | undefined {
   const failure = classifyFailure(String(fields.error ?? ''));
   const diagnosticLevel = /^(?:WARN|WARNING|ERROR|WRN|ERR|FATAL)$/i.test(String(fields.level ?? ''));
   if (!template && (!failure || failure === 'unclassified') && !diagnosticLevel) return undefined;
-  const row: MulticaRecord = {record_type: 'server_log', source_type: 'log', ...selectFields(fields), ...origin,
+  const row: MulticaRecord = {record_type: 'server_log', source_type: 'log', ...selectFields(fields),
     ...logDiagnostics(fields, message), message: template ?? (failure && failure !== 'unclassified' ? 'provider failure' : 'diagnostic log')};
   if (fields.level) row.level = safeScalar(fields.level)!;
   if (sourceTime && Number.isFinite(Date.parse(sourceTime))) row.source_time = sourceTime;

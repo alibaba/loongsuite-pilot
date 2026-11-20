@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as crypto from 'node:crypto';
+import { AgentDefLoader } from '../../../../src/deployment/agent-def-loader.ts';
+import { HookStrategy } from '../../../../src/deployment/hook-strategy.ts';
+import { HookManager } from '../../../../src/hooks/hook-manager.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/trae-cn-hook-processor.mjs');
@@ -90,6 +93,103 @@ function readOtlpDebugSpans() {
 }
 
 describe('trae-cn hook processor', () => {
+  test('captureMessageContent false keeps conversation content off disk throughout a tool turn', () => {
+    const markers = ['private-prompt-616', 'private-args-616', 'private-result-616', 'private-answer-616'];
+    const session = 'privacy-test';
+    const config = path.join(dataDir, 'config.json');
+    fs.writeFileSync(config, JSON.stringify({ agents: { 'trae-cn': { captureMessageContent: false } } }));
+    for (const [subcommand, payload] of [
+      ['user-prompt-submit', { prompt: markers[0] }],
+      ['pre-tool-use', { tool_use_id: 't1', tool_name: 'Read', tool_input: { path: markers[1] } }],
+      ['post-tool-use', { tool_use_id: 't1', tool_response: { stdout: markers[2] } }],
+      ['stop', { last_assistant_message: markers[3] }],
+      ['notification', { notification_type: 'idle_prompt' }],
+    ]) {
+      const result = runHook(subcommand, { ...payload, session_id: session }, {
+        AGENT_DATA_COLLECTION_CONFIG: config, LOONGSUITE_PILOT_OTLP_DEBUG: '1',
+      });
+      expect(result.status).toBe(0);
+      expect(readState(session)).toBeTruthy();
+      const files = fs.readdirSync(dataDir, { recursive: true });
+      for (const file of files) {
+        const target = path.join(dataDir, file);
+        if (!fs.statSync(target).isFile()) continue;
+        const bytes = fs.readFileSync(target);
+        for (const marker of markers) expect(bytes.includes(Buffer.from(marker)), file).toBe(false);
+      }
+    }
+    const records = readEmittedJsonl();
+    expect(records.filter(r => r['event.name'] !== 'other').map(r => r['event.name']))
+      .toEqual(['llm.request', 'tool.call', 'tool.result', 'llm.response']);
+    expect(readOtlpDebugSpans().length).toBeGreaterThan(0);
+  });
+
+  test.skipIf(process.platform === 'win32')('deploys executable event commands and replaces registrations without subcommands', async () => {
+    const installDir = path.join(dataDir, 'custom pilot data');
+    const hooksDir = path.join(installDir, 'hooks');
+    fs.cpSync(path.dirname(PROCESSOR), hooksDir, { recursive: true });
+    logDir = path.join(installDir, 'logs', 'trae-cn', 'history');
+    const pinnedNode = path.join(dataDir, 'pinned-node');
+    const nodeUseLog = path.join(dataDir, 'pinned-node.log');
+    fs.writeFileSync(pinnedNode, '#!/bin/sh\nprintf "%s\\n" "$1" >> "$TEST_PIN_USE_LOG"\nexec "$TEST_REAL_NODE" "$@"\n', { mode: 0o700 });
+    fs.writeFileSync(path.join(installDir, 'node-bin'), pinnedNode + '\n');
+    const env = { ...process.env, HOME: dataDir, PATH: '/usr/bin:/bin' };
+    env.TEST_REAL_NODE = process.execPath;
+    env.TEST_PIN_USE_LOG = nodeUseLog;
+    delete env.LOONGSUITE_PILOT_DATA_DIR;
+    delete env.LOONGSUITE_PILOT_CACHE_DIR;
+    const loader = new AgentDefLoader({
+      builtinDir: path.dirname(AGENT_DEFINITION),
+      localDir: path.join(dataDir, 'agents.d.local'),
+      pilotDir: installDir,
+      dataDir: installDir,
+    });
+    const def = (await loader.load()).find(agent => agent.id === 'trae-cn');
+    const settingsPath = path.join(dataDir, '.trae-cn', 'hooks.json');
+    def.hook.settingsPath = settingsPath;
+    const strategy = new HookStrategy(new HookManager(hooksDir, logDir));
+    const legacyCommand = path.join(hooksDir, 'trae-cn-loongsuite-pilot-hook.sh');
+    const legacy = Object.fromEntries(def.hook.events.map(event => [event, [
+      { matcher: '*', hooks: [{ type: 'command', command: legacyCommand }] },
+    ]]));
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify({ hooks: legacy }));
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    expect((await strategy.deploy(def)).success).toBe(true);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+
+    const { hooks } = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    const events = {
+      SessionStart: ['session-start', { session_id: 'trae-cn-smoke-session' }],
+      UserPromptSubmit: ['user-prompt-submit', 'user-prompt-submit.json'],
+      PreToolUse: ['pre-tool-use', 'pre-tool-use.json'],
+      PostToolUse: ['post-tool-use', 'post-tool-use.json'],
+      Stop: ['stop', 'stop.json'],
+      Notification: ['notification', 'notification-idle.json'],
+    };
+    for (const [event, [subcommand, fixture]] of Object.entries(events)) {
+      const commands = hooks[event].flatMap(group => group.hooks.map(handler => handler.command));
+      expect(commands).toHaveLength(1);
+      expect(commands[0].endsWith(' ' + subcommand)).toBe(true);
+      const result = spawnSync(commands[0], {
+        shell: true,
+        input: typeof fixture === 'string' ? fs.readFileSync(path.join(FIXTURES, fixture)) : JSON.stringify(fixture),
+        env,
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      expect(result.status, result.stderr).toBe(0);
+    }
+    expect(fs.readFileSync(nodeUseLog, 'utf8').split('\n').filter(line => line.endsWith(PROCESSOR.split(path.sep).at(-1))))
+      .toHaveLength(Object.keys(events).length);
+    const records = readEmittedJsonl();
+    expect(records.filter(record => record['event.name'] !== 'other').map(record => record['event.name']))
+      .toEqual(['llm.request', 'tool.call', 'tool.result', 'llm.response']);
+    const toolRecords = records.filter(record => record['gen_ai.tool.call.id'] === 'toolu_01');
+    expect(toolRecords).toHaveLength(2);
+    expect(toolRecords[0].span_id).toBe(toolRecords[1].span_id);
+  });
+
   test('agents.d/trae-cn.json declares all 6 hook events', () => {
     const def = JSON.parse(fs.readFileSync(AGENT_DEFINITION, 'utf8'));
     expect(def.id).toBe('trae-cn');
@@ -198,19 +298,68 @@ describe('trae-cn hook processor', () => {
     expect(toolRes['agent.trae.status_source']).toBe('exit_code');
   });
 
-  test('parallel PreToolUse calls share same step.id', () => {
-    runFixture('user-prompt-submit', 'parallel-user-prompt-submit.json');
-    runFixture('pre-tool-use', 'parallel-pre-tool-use-a.json');
-    runFixture('pre-tool-use', 'parallel-pre-tool-use-b.json');
-    const state = readState('trae-cn-parallel-session');
-    expect(Object.keys(state.pending_tool_calls).length).toBe(2);
+  test('retains concurrent tool calls and results through Stop', async () => {
+    const sessionId = 'trae-cn-parallel-session';
+    const ids = Array.from({ length: 24 }, (_, i) => 'tool-' + i).sort();
+    expect(runHook('user-prompt-submit', { session_id: sessionId, prompt: 'Read files' }).status).toBe(0);
+    const runConcurrently = (subcommand) => Promise.all(ids.map(id => new Promise((resolve, reject) => {
+      const child = execFile(process.execPath, [PROCESSOR, subcommand], {
+        env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir },
+        timeout: 15_000,
+      }, error => error ? reject(error) : resolve());
+      child.stdin.end(JSON.stringify({ session_id: sessionId, tool_use_id: id, tool_name: 'Read',
+        tool_input: { path: id }, tool_response: { stdout: id } }));
+    })));
+    await runConcurrently('pre-tool-use');
+
+    const state = readState(sessionId);
+    expect(Object.keys(state.pending_tool_calls).sort()).toEqual(ids);
+    await runConcurrently('post-tool-use');
+    const completed = readState(sessionId);
+    expect(Object.values(completed.pending_tool_calls).every(call => call.completed)).toBe(true);
+    expect(runHook('stop', { session_id: sessionId, last_assistant_message: 'Done' }).status).toBe(0);
     const records = readEmittedJsonl();
-    const toolCalls = records.filter((r) => r['event.name'] === 'tool.call');
-    expect(toolCalls.length).toBe(2);
-    const stepIds = new Set(toolCalls.map((r) => r['gen_ai.step.id']));
-    expect(stepIds.size).toBe(1);
-    const toolIds = new Set(toolCalls.map((r) => r['gen_ai.tool.call.id']));
-    expect(toolIds).toEqual(new Set(['toolu_parallel_a', 'toolu_parallel_b']));
+    const calls = records.filter(record => record['event.name'] === 'tool.call');
+    expect(calls.map(call => call['gen_ai.tool.call.id']).sort()).toEqual(ids);
+    expect(new Set(calls.map(call => call['gen_ai.step.id']))).toEqual(new Set([state.step_id]));
+    const results = records.filter(record => record['event.name'] === 'tool.result');
+    expect(results.map(result => [result['gen_ai.tool.call.id'], result.span_id]).sort())
+      .toEqual(calls.map(call => [call['gen_ai.tool.call.id'], call.span_id]).sort());
+    const response = records.find(record => record['event.name'] === 'llm.response');
+    const parts = response['gen_ai.output.messages'].flatMap(message => message.parts);
+    expect(parts.filter(part => part.type === 'tool_call').map(part => part.id).sort()).toEqual(ids);
+  }, 20_000);
+
+  test('recovers the previous complete state after an interrupted atomic replacement', () => {
+    const session = 'interrupted-state';
+    expect(runHook('user-prompt-submit', { session_id: session, prompt: 'Synthetic prompt' }).status).toBe(0);
+    const file = statePath(session);
+    const oldState = fs.readFileSync(file, 'utf8');
+    const preload = path.join(dataDir, 'interrupt-state-rename.cjs');
+    fs.writeFileSync(preload, `
+      const fs = require('node:fs');
+      const rename = fs.renameSync;
+      fs.renameSync = (source, destination) => {
+        if (destination === process.env.TEST_TRAE_STATE_PATH) process.exit(91);
+        return rename(source, destination);
+      };
+    `);
+    const child = spawnSync(process.execPath, ['--require', preload, PROCESSOR, 'pre-tool-use'], {
+      input: JSON.stringify({ session_id: session, tool_use_id: 'interrupted', tool_name: 'Read' }),
+      env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, TEST_TRAE_STATE_PATH: file },
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    expect(child.status, child.stderr).toBe(91);
+    expect(fs.readFileSync(file, 'utf8')).toBe(oldState);
+    expect(fs.existsSync(file + '.tmp')).toBe(true);
+    fs.utimesSync(file + '.lock', 0, 0);
+
+    expect(runHook('pre-tool-use', { session_id: session, tool_use_id: 'next', tool_name: 'Read' }).status).toBe(0);
+    expect(Object.keys(readState(session).pending_tool_calls)).toEqual(['next']);
+    expect(readState(session).prompt).toBe('Synthetic prompt');
+    expect(fs.existsSync(file + '.tmp')).toBe(false);
+    expect(fs.existsSync(file + '.lock')).toBe(false);
   });
 
   test('multi-turn produces 2 distinct trace_ids', () => {

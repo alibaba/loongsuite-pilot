@@ -18,9 +18,13 @@
     ],
     "hookCommand": "$PILOT_DATA/hooks/trae-cn-loongsuite-pilot-hook.sh",
     "format": "nested",
+    "eventSubcommand": "kebab-case",
     "matcher": "*",
     "winShell": "powershell",
-    "replaceHookCommands": []
+    "replaceHookCommands": [
+      "$PILOT_DATA/hooks/trae-cn-loongsuite-pilot-hook.sh",
+      "powershell -NoProfile -ExecutionPolicy Bypass -File $PILOT_DATA/hooks/trae-cn-loongsuite-pilot-hook.ps1"
+    ]
   },
   "input": {
     "type": "trae-cn-dual",
