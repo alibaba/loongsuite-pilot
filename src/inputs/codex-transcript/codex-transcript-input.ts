@@ -69,6 +69,8 @@ const MAX_SCAN_BYTES_PER_FILE_CYCLE = 16 * 1024 * 1024;
 const MAX_CACHED_INCOMPLETE_TAILS = 2048;
 const MAX_OWNER_OFFSET_PROBES = 2048;
 const MAX_DEFERRED_TERMINALS = 4;
+// Filesystem and JavaScript wall-clock samples can differ by a few milliseconds.
+const BASELINE_CLOCK_SKEW_MS = 4;
 const RECOVERY_RETRY_MIN_MS = 1_000;
 const RECOVERY_RETRY_MAX_MS = 60_000;
 // Dynamic roots come from user-local Hook markers. Keep discovery bounded so
@@ -168,6 +170,19 @@ interface DiscoveredSessionFile {
   baselineOnStart: boolean;
 }
 
+type RolloutDirectoryIdentity = Pick<RolloutDirectoryStamp, 'dev' | 'ino'>;
+
+interface PartialBaselineListing {
+  directories: ReadonlyMap<string, RolloutDirectoryIdentity>;
+  initiallyUncheckpointed: ReadonlySet<string>;
+}
+
+interface PersistedBaselineListing {
+  root: string;
+  directories: Array<[string, RolloutDirectoryIdentity]>;
+  initiallyUncheckpointed: string[];
+}
+
 interface CachedCodexTranscriptMeta {
   inode: number;
   fileSize: number;
@@ -232,10 +247,7 @@ export class CodexTranscriptInput extends BaseInput {
   private defaultScanComplete = false;
   private baselinePending = false;
   private baselinePendingSince = 0;
-  private partialBaselineListing?: {
-    directories: ReadonlyMap<string, RolloutDirectoryStamp>;
-    initiallyUncheckpointed: ReadonlySet<string>;
-  };
+  private partialBaselineListing?: PartialBaselineListing;
   private readonly wakeupPaths = new Map<string, Set<string>>();
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
@@ -324,13 +336,9 @@ export class CodexTranscriptInput extends BaseInput {
     let isBaselineInit = extra?.isBaselineInit === true;
     const baselineUnfinished = extra?.baselineUnfinished === true;
     const persistedSince = extra?.baselinePendingSince;
-    if (
-      baselineUnfinished
-      && this.baselinePendingSince === 0
-      && typeof persistedSince === 'number'
-      && persistedSince > 0
-    ) {
+    if (baselineUnfinished && typeof persistedSince === 'number' && persistedSince > 0) {
       this.baselinePendingSince = persistedSince;
+      this.partialBaselineListing ??= restoreBaselineListing(this.sessionDir, extra?.baselineDirectoryListing);
     }
     // Checkpoints written while this version's scan is still unfinished are not
     // an old-version migration.
@@ -369,11 +377,17 @@ export class CodexTranscriptInput extends BaseInput {
     }
     this.baselinePending = !isBaselineInit && !this.defaultScanComplete;
     if (this.baselinePending && !baselineUnfinished) {
-      this.partialBaselineListing = {
-        directories: startupDirectories,
-        initiallyUncheckpointed: new Set(discovered.filter(file => file.baselineOnStart
-          && !this.readCheckpoint(this.stateKey(file.filePath))).map(file => file.filePath)),
+      const listing: PersistedBaselineListing = {
+        root: this.sessionDir,
+        directories: [...startupDirectories].map(([dir, { dev, ino }]) => [dir, { dev, ino }]),
+        initiallyUncheckpointed: discovered.filter(file => file.baselineOnStart
+          && !this.readCheckpoint(this.stateKey(file.filePath))).map(file => file.filePath),
       };
+      this.partialBaselineListing = {
+        directories: new Map(listing.directories),
+        initiallyUncheckpointed: new Set(listing.initiallyUncheckpointed),
+      };
+      this.stateStore.update(this.id, { extra: { baselineDirectoryListing: listing } });
     }
     if (!this.baselinePending) this.baselinePendingSince = 0;
     if (!isBaselineInit && this.defaultScanComplete) this.completeBaselineInit();
@@ -604,6 +618,7 @@ export class CodexTranscriptInput extends BaseInput {
     const extra = { ...(current.extra ?? {}) };
     delete extra.baselineUnfinished;
     delete extra.baselinePendingSince;
+    delete extra.baselineDirectoryListing;
     extra.isBaselineInit = true;
     this.stateStore.set(this.id, { ...current, extra });
     this.baselinePending = false;
@@ -621,11 +636,11 @@ export class CodexTranscriptInput extends BaseInput {
     } catch {
       return false;
     }
-    if (fileTime !== this.baselinePendingSince) return fileTime < this.baselinePendingSince;
+    if (fileTime > this.baselinePendingSince) return false;
+    if (fileTime < this.baselinePendingSince - BASELINE_CLOCK_SKEW_MS) return true;
 
-    // A rollout created after a successful startup listing may share the
-    // cutoff tick. Keep older files and unknown or replaced directories
-    // under the historical cutoff.
+    // A rollout created after the startup listing can still have a slightly
+    // earlier filesystem stamp. Require verified absence from that listing.
     const startup = this.partialBaselineListing;
     const directory = path.dirname(filePath);
     const listed = startup?.directories.get(directory);
@@ -2934,6 +2949,21 @@ interface RolloutDirectoryStamp {
   dev: number;
   ino: number;
   mtimeMs: number;
+}
+
+function restoreBaselineListing(root: string, value: unknown): PartialBaselineListing | undefined {
+  if (value === null || typeof value !== 'object') return undefined;
+  const { root: storedRoot, directories, initiallyUncheckpointed } = value as Partial<PersistedBaselineListing>;
+  if (storedRoot !== root || !Array.isArray(directories) || !Array.isArray(initiallyUncheckpointed)) return undefined;
+  const identities = new Map<string, RolloutDirectoryIdentity>();
+  for (const entry of directories) {
+    if (!Array.isArray(entry)) return undefined;
+    const [dir, identity] = entry;
+    if (typeof dir !== 'string' || !Number.isFinite(identity?.dev) || !Number.isFinite(identity?.ino)) return undefined;
+    identities.set(dir, identity);
+  }
+  if (!initiallyUncheckpointed.every(file => typeof file === 'string')) return undefined;
+  return { directories: identities, initiallyUncheckpointed: new Set(initiallyUncheckpointed) };
 }
 
 interface RolloutStatSnapshot {
