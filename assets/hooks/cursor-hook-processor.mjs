@@ -20,6 +20,7 @@ import { decodePayload } from './shared/decode-payload.mjs';
 import { appendRawJsonl } from './shared/raw-jsonl-writer.mjs';
 import {
   applyHookContentPolicy,
+  hookCapturesContent,
   hashJson,
   loadHookRuntimeConfig,
   sanitizeObject,
@@ -410,7 +411,7 @@ async function main() {
   let payload;
   try {
     payload = JSON.parse(raw);
-  } catch (firstErr) {
+  } catch {
     // Cursor on Windows may insert spurious 0x3F (?) after closing quotes in JSON
     // events containing Chinese text (GB18030 codepage maps some chars to ?).
     // The ? appears after a closing " and before a structural char (, } ]):
@@ -433,7 +434,7 @@ async function main() {
       await appendErrorJsonl(dataDir, now, {
         stage: 'parse',
         'error.type': 'invalid_json',
-        'error.message': firstErr instanceof Error ? firstErr.message : String(firstErr),
+        'error.message': 'Invalid hook payload JSON',
         input_bytes: Buffer.byteLength(raw),
         input_sha256: hashJson(raw),
       });
@@ -455,7 +456,15 @@ async function main() {
   }
 
   // Convert to internal event and append to journal
-  const internalEvent = toInternalEvent(payload);
+  // The collector config stays under the user home when only the log directory moves.
+  const runtimeConfig = loadHookRuntimeConfig();
+  const version = payload.cursor_version;
+  // Desktop and CLI share this hook. An unversioned event is safe to persist
+  // with content only when both sources allow it.
+  const captureContent = runtimeConfig.policyAvailable && (version
+    ? hookCapturesContent(CLI_VERSION_PATTERN.test(version) ? 'cursor-cli' : 'cursor', runtimeConfig)
+    : hookCapturesContent('cursor', runtimeConfig) && hookCapturesContent('cursor-cli', runtimeConfig));
+  const internalEvent = toInternalEvent(payload, captureContent);
   const invocationResourceAttributes = collectResourceAttributesFromEnv(process.env, {
     agentId: 'cursor-cli',
   });
@@ -475,7 +484,7 @@ async function main() {
     return;
   }
 
-  if (process.env.LOONGSUITE_CURSOR_RAW_TRACE === '1') {
+  if (captureContent && process.env.LOONGSUITE_CURSOR_RAW_TRACE === '1') {
     try {
       const rawFile = path.join(dataDir, 'logs', 'cursor', 'raw', 'cursor-raw-trace.jsonl');
       appendRawJsonl(rawFile, JSON.stringify({ _captured_at: now.toISOString(), ...payload }) + '\n',
@@ -483,6 +492,12 @@ async function main() {
     } catch {
       // best-effort
     }
+  }
+
+  // Keep the journal available for a later retry once its policy can be read.
+  if (!runtimeConfig.policyAvailable) {
+    writeEmptyResponse();
+    return;
   }
 
   // On stop: assemble turn and write history
@@ -516,7 +531,11 @@ async function main() {
       // response arrives. IDE sessions always assemble immediately (abort/error
       // scenarios must not lose data).
       const convId = internalEvent.conversation_id;
-      const variant = inferVariant(allEvents);
+      const conversation = allEvents.filter(e => e.conversation_id === convId);
+      const variant = inferVariant(conversation);
+      // A transcript can contain text withheld from the journal earlier in the turn.
+      const transcriptPath = conversation.some(event => event.content_omitted)
+        ? undefined : internalEvent.transcript_path;
       const hasResponse = allEvents.some(e =>
         e.hook_event === 'afterAgentResponse' && e.conversation_id === convId
       );
@@ -526,16 +545,15 @@ async function main() {
         return;
       }
 
-      const runtimeConfig = loadHookRuntimeConfig(dataDir);
       let records;
       let consumedConversationIds;
       let assembledFromTranscript = false;
 
       // On Windows: use transcript as source of truth for text content.
       // This bypasses GB18030 codepage corruption of hook payload text.
-      if (process.platform === 'win32' && internalEvent.transcript_path) {
+      if (process.platform === 'win32' && transcriptPath) {
         const transcriptRecords = buildCursorRecordsFromTranscript(
-          internalEvent.transcript_path,
+          transcriptPath,
           allEvents,
           { runtimeConfig, stopConversationId: convId, variant }
         );
@@ -552,7 +570,7 @@ async function main() {
           runtimeConfig,
           variant,
           stopConversationId: convId,
-          transcriptPath: internalEvent.transcript_path,
+          transcriptPath,
         });
         records = result.records;
         consumedConversationIds = result.consumedConversationIds;
@@ -560,7 +578,7 @@ async function main() {
 
       // ─── Post-assembly: Skill Usage Detection from Transcript ───
       try {
-        const transcriptPathForSkill = internalEvent.transcript_path;
+        const transcriptPathForSkill = transcriptPath;
         const promptForSkill = allEvents.find(e =>
           e.hook_event === 'beforeSubmitPrompt' && e.conversation_id === convId
         );
@@ -610,8 +628,7 @@ async function main() {
         e.hook_event === 'stop' && e.conversation_id === convId
       );
       if (hasStop) {
-        const runtimeConfig = loadHookRuntimeConfig(dataDir);
-        const variant = inferVariant(allEvents);
+        const variant = inferVariant(allEvents.filter(e => e.conversation_id === convId));
         // Note: transcriptPath is deliberately omitted here — assembleTurn falls
         // back to stopEvent?.transcript_path internally. Passing internalEvent's
         // transcriptPath (from afterAgentResponse) would be incorrect.

@@ -1,0 +1,99 @@
+import { afterEach, beforeEach, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const processor = fileURLToPath(new URL('../../../../assets/hooks/cursor-hook-processor.mjs', import.meta.url));
+let home, data, env;
+beforeEach(() => {
+  home = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-content-'));
+  data = path.join(home, 'logs-root');
+  env = { ...process.env, HOME: home, USERPROFILE: home, LOONGSUITE_PILOT_DATA_DIR: data,
+    AGENT_DATA_COLLECTION_CONFIG: '', LOONGSUITE_CURSOR_RAW_TRACE: '1' };
+  fs.mkdirSync(path.join(home, '.loongsuite-pilot'));
+});
+afterEach(() => fs.rmSync(home, { recursive: true, force: true }));
+
+function configure(agents) {
+  const file = env.AGENT_DATA_COLLECTION_CONFIG ? path.join(home, 'policy.json') : path.join(home, '.loongsuite-pilot/config.json');
+  fs.writeFileSync(file, JSON.stringify({ agents }));
+}
+function send(name, fields, version, conversation = 'session') {
+  const result = spawnSync(process.execPath, [processor], { env, encoding: 'utf8', timeout: 15000,
+    input: JSON.stringify({ hook_event_name: name, conversation_id: conversation, cursor_version: version, ...fields }) });
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout.trim()).toBe('{}');
+}
+function journal() {
+  return fs.readFileSync(path.join(data, 'state/cursor/event-journal.jsonl'), 'utf8');
+}
+
+it.each([
+  ['desktop', '1.7.0', { cursor: { captureMessageContent: false }, 'cursor-cli': { captureMessageContent: true } }],
+  ['CLI', '2026.07.31', { cursor: { captureMessageContent: true }, 'cursor-cli': { captureMessageContent: 'false' } }],
+  ['unversioned', undefined, { 'cursor-cli': { captureMessageContent: false } }],
+])('keeps %s content out of the active journal and raw diagnostics', (label, version, agents) => {
+  if (label === 'CLI') env.AGENT_DATA_COLLECTION_CONFIG = '~/policy.json';
+  configure(agents);
+  const secret = 'private-content-marker';
+  send('beforeSubmitPrompt', { prompt: secret, attachments: [{ name: secret }] }, version);
+  send('afterAgentThought', { text: secret }, version);
+  send('preToolUse', { tool_use_id: 'call-1', tool_name: 'read', tool_input: { file: secret } }, version);
+  send('postToolUse', { tool_use_id: 'call-1', tool_output: secret }, version);
+  send('postToolUseFailure', { error_message: secret }, version);
+  send('subagentStop', { task: secret, description: secret, error_message: secret }, version);
+  send('afterAgentResponse', { text: secret, output_tokens: 9 }, version);
+  const pending = journal();
+  expect(pending).not.toContain(secret);
+  expect(pending).toContain('call-1');
+  expect(pending).toContain('"output_tokens":9');
+  expect(fs.existsSync(path.join(data, 'logs/cursor/raw'))).toBe(false);
+  send('stop', { status: 'completed' }, version);
+  const dir = path.join(data, 'logs/cursor/history');
+  const history = fs.readFileSync(path.join(dir, fs.readdirSync(dir)[0]), 'utf8');
+  expect(history).toContain('beforeSubmitPrompt');
+  expect(history).toContain('"gen_ai.usage.output_tokens":9');
+  expect(history).toContain('call-1');
+  expect(history).not.toContain(secret);
+});
+
+it.each([{}, { cursor: { captureMessageContent: true } }])('preserves enabled capture and requested raw diagnostics', agents => {
+  configure(agents);
+  send('beforeSubmitPrompt', { prompt: 'visible-content' }, '1.7.0');
+  expect(journal()).toContain('visible-content');
+  expect(fs.readFileSync(path.join(data, 'logs/cursor/raw/cursor-raw-trace.jsonl'), 'utf8')).toContain('visible-content');
+});
+
+it('keeps desktop and CLI policies separate in a shared journal', () => {
+  configure({ cursor: { captureMessageContent: true }, 'cursor-cli': { captureMessageContent: false } });
+  send('beforeSubmitPrompt', { prompt: 'private-cli' }, '2026.07.31', 'cli');
+  send('beforeSubmitPrompt', { prompt: 'visible-desktop' }, '1.7.0', 'desktop');
+  send('stop', { status: 'completed' }, '1.7.0', 'desktop');
+  const dir = path.join(data, 'logs/cursor/history');
+  const readHistory = () => fs.readFileSync(path.join(dir, fs.readdirSync(dir)[0]), 'utf8');
+  expect(readHistory()).toContain('visible-desktop');
+  send('stop', { status: 'completed' }, '2026.07.31', 'cli');
+  expect(journal()).not.toContain('private-cli');
+  send('afterAgentResponse', { text: 'private-reply', output_tokens: 9 }, '2026.07.31', 'cli');
+  expect(readHistory()).toContain('cursor-cli');
+  expect(readHistory()).not.toMatch(/private-cli|private-reply/);
+});
+
+it('keeps malformed input out of parse diagnostics', () => {
+  configure({ cursor: { captureMessageContent: false } });
+  const result = spawnSync(process.execPath, [processor], { env, encoding: 'utf8', input: 'private-parse-marker' });
+  expect(result.stdout.trim()).toBe('{}');
+  const dir = path.join(data, 'logs/cursor/errors');
+  const log = fs.readFileSync(path.join(dir, fs.readdirSync(dir)[0]), 'utf8');
+  expect(log).toContain('invalid_json');
+  expect(log).not.toContain('private-parse-marker');
+});
+
+it('omits new content while a configured policy cannot be read', () => {
+  env.AGENT_DATA_COLLECTION_CONFIG = path.join(home, 'unavailable.json');
+  send('beforeSubmitPrompt', { prompt: 'unavailable-policy-marker' }, '1.7.0');
+  expect(journal()).not.toContain('unavailable-policy-marker');
+  expect(fs.existsSync(path.join(data, 'logs/cursor/raw'))).toBe(false);
+});
