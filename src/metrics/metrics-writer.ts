@@ -159,8 +159,9 @@ export class MetricsWriter {
   private async collectAndWriteDataflow(): Promise<void> {
     try {
       const snapshot = this.getSnapshot();
-      await this.writeL1(snapshot);
-      await this.writeL2(snapshot);
+      const userId = this.collector.getUserId();
+      await this.writeL1(snapshot, userId);
+      await this.writeL2(snapshot, userId);
     } catch (err) {
       // Metrics are diagnostic and must never make a timer rejection or the
       // final metrics flush interrupt the collector's resource shutdown.
@@ -168,10 +169,10 @@ export class MetricsWriter {
     }
   }
 
-  private async writeL1(sharedSnapshot?: DataflowSnapshot): Promise<void> {
+  private async writeL1(sharedSnapshot?: DataflowSnapshot, userId?: string): Promise<void> {
     try {
       const snapshot = sharedSnapshot ?? this.getSnapshot();
-      const metrics = this.collector.collectL1(snapshot);
+      const metrics = this.collector.collectL1(snapshot, userId);
       if (this.getInterceptorStatus) {
         try { metrics.interceptor = await this.getInterceptorStatus(); }
         catch { logger.warn('interceptor status snapshot unavailable'); }
@@ -187,7 +188,7 @@ export class MetricsWriter {
       }
 
       this.checkThresholds(metrics);
-      this.checkUserId();
+      this.checkUserId(metrics.user_id);
       this.checkStartupMode(metrics);
       this.checkInfraHealth();
       // Report before the local append: collectL1 already drained its counters, so
@@ -378,9 +379,8 @@ export class MetricsWriter {
     this.alarmManager.record(type, level, message);
   }
 
-  private checkUserId(): void {
+  private checkUserId(userId: string): void {
     if (!this.alarmManager || this.userIdAlarmEmitted) return;
-    const userId = this.collector.getUserId();
     if (/^\{.*\}$/.test(userId)) {
       this.userIdAlarmEmitted = true;
       this.alarmManager.record(
@@ -461,23 +461,23 @@ export class MetricsWriter {
    * of rows — which is exactly what the priming write in start() would do
    * against the first timer tick or the final flush in stop().
    */
-  private writeL2(sharedSnapshot?: DataflowSnapshot): Promise<void> {
+  private writeL2(sharedSnapshot?: DataflowSnapshot, userId?: string): Promise<void> {
     if (this.l2WritePromise) return this.l2WritePromise;
 
-    this.l2WritePromise = this.collectAndWriteL2(sharedSnapshot)
+    this.l2WritePromise = this.collectAndWriteL2(sharedSnapshot, userId)
       .finally(() => {
         this.l2WritePromise = null;
       });
     return this.l2WritePromise;
   }
 
-  private async collectAndWriteL2(sharedSnapshot?: DataflowSnapshot): Promise<void> {
+  private async collectAndWriteL2(sharedSnapshot?: DataflowSnapshot, userId?: string): Promise<void> {
     try {
       const snapshot = sharedSnapshot ?? this.getSnapshot();
 
       // Four detail types are produced in the same cycle; hook samples are merged by
       // consumption cycle and leave the input window stats untouched.
-      const l2 = this.collector.collectL2(snapshot, this.hookMetricsSpool.drain());
+      const l2 = this.collector.collectL2(snapshot, this.hookMetricsSpool.drain(), userId);
       if (l2) {
         // Same as L1: the collect drained the counters, so send first and let the
         // local mirror be the thing that can fail.
