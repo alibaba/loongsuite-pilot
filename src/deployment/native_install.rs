@@ -698,7 +698,7 @@ pub(crate) async fn recover_runtime_files_with_data(
     legacy_targets.remove("config");
     if ActivationTransaction::has_target_prefix(
         cache,
-        super::native_agent_rollback::SETTINGS_PREFIX,
+        crate::updater::activation_file_targets::NATIVE_HOOK_SETTINGS_PREFIX,
     )? {
         let hooks =
             super::native_agent_rollback::NativeHookRetirement::load(cache, data, true).await?;

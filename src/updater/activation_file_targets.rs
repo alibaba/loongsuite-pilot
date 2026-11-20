@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub(crate) const RESOURCE_PREFIX: &str = "runtime-resource:";
+pub(crate) const NATIVE_HOOK_SETTINGS_PREFIX: &str = "native-hook-settings:";
 pub(crate) const DSH_MARKER: &str = "runtime-resource:plugins/dsh/.collection-enabled";
 
 pub(crate) fn bind(path: &Path) -> Result<PathBuf> {

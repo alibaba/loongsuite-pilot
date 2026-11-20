@@ -12,8 +12,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-pub(super) const SETTINGS_PREFIX: &str = "native-hook-settings:";
-
 pub(super) struct NativeHookRetirement {
     current: PathBuf,
     hooks: BTreeMap<String, (PathBuf, AgentDefinition)>,
@@ -93,7 +91,8 @@ impl NativeHookRetirement {
                     }
                     let bound = activation_file_targets::bind(path)?;
                     let key = format!(
-                        "{SETTINGS_PREFIX}{}",
+                        "{}{}",
+                        activation_file_targets::NATIVE_HOOK_SETTINGS_PREFIX,
                         hex::encode(Sha256::digest(bound.to_string_lossy().as_bytes()))
                     );
                     let installed = definition_at_hook_settings(&definition, &settings)
