@@ -78,6 +78,14 @@ async fn definition(
         .iter()
         .map(|(p, s)| (p.as_str(), s.as_str()))
         .collect::<Vec<_>>();
+    if id == "qwen-work-cn" {
+        let thin = Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));
+        fs::copy(
+            thin,
+            f.candidate.join("bin").join(thin.file_name().unwrap()),
+        )
+        .unwrap();
+    }
     f.package_with(&borrowed);
     let loader = AgentDefLoader::new(AgentDefLoaderOptions {
         builtin_dir: f.candidate.join("agents.d").to_string_lossy().into_owned(),
@@ -142,20 +150,45 @@ async fn cleanup_l173_l176_l183_real_native_uninstall_cleans_every_shipped_hook_
             );
             fs::create_dir_all(script.parent().unwrap()).unwrap();
             fs::write(&script, "fixture-owned-script-bytes\n").unwrap();
-            let strategy = HookStrategy::new(HookManager::new(
-                Some(f.data.join("hooks").to_string_lossy().into_owned()),
-                Some(f.data.join("logs").to_string_lossy().into_owned()),
-            ));
-            let deployed =
-                tokio::time::timeout(Duration::from_secs(5), strategy.deploy_hooks(&def))
-                    .await
-                    .unwrap();
-            assert!(deployed.success, "{id}: {:?}", deployed.error);
-            let output = f.helper(
-                "cleanup-agents",
-                &json!({"dataDir":f.data,"pilotDir":f.candidate}),
-                true,
-            );
+            let (installed, binary) = if hook.native_sdk_data.is_some() {
+                let stage = f.helper("stage-package", &f.runtime_options(&f.candidate), true);
+                success(&stage);
+                let name = String::from_utf8(stage.stdout).unwrap();
+                let installed = f.root.path().join("cache/versions").join(name.trim());
+                let binary = installed.join("bin").join(f.binary.file_name().unwrap());
+                let mut command = f.command(&binary);
+                command
+                    .args(["hook", "install", "--agents", id, "--json"])
+                    .env("LOONGSUITE_PILOT_RESOURCE_ROOT", &installed)
+                    .env("AGENT_DATA_COLLECTION_CONFIG", f.data.join("config.json"));
+                let output = bounded(command);
+                success(&output);
+                let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(report["agents"][0]["status"], "ok", "{report}");
+                assert!(fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("loongsuite-pilot-sdk-hook"));
+                (installed, binary)
+            } else {
+                let strategy = HookStrategy::new(HookManager::new(
+                    Some(f.data.join("hooks").to_string_lossy().into_owned()),
+                    Some(f.data.join("logs").to_string_lossy().into_owned()),
+                ));
+                let deployed =
+                    tokio::time::timeout(Duration::from_secs(5), strategy.deploy_hooks(&def))
+                        .await
+                        .unwrap();
+                assert!(deployed.success, "{id}: {:?}", deployed.error);
+                (f.candidate.clone(), f.binary.clone())
+            };
+            let mut cleanup = f.command(&binary);
+            cleanup
+                .args(["installer-helper", "cleanup-agents", "--input-env"])
+                .env(
+                    "LOONGSUITE_PILOT_INSTALL_INPUT",
+                    json!({"dataDir":f.data,"pilotDir":installed}).to_string(),
+                );
+            let output = bounded(cleanup);
             success(&output);
             assert_eq!(
                 fs::read_to_string(&script).unwrap(),

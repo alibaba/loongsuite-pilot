@@ -47,8 +47,20 @@ pub(crate) fn day<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
         .then_some(date)
 }
 
+fn sqlite_gate_directory(dir: &Path) -> std::path::PathBuf {
+    // macOS exposes these two system directories through fixed aliases.
+    // Preserve NOFOLLOW for every other component, including user symlinks.
+    #[cfg(target_os = "macos")]
+    for (alias, canonical) in [("/var", "/private/var"), ("/tmp", "/private/tmp")] {
+        if let Ok(suffix) = dir.strip_prefix(alias) {
+            return Path::new(canonical).join(suffix);
+        }
+    }
+    dir.to_path_buf()
+}
+
 pub(crate) fn gate(dir: &Path, wait: Duration) -> anyhow::Result<rusqlite::Connection> {
-    let path = dir.join(".raw-source-gate.sqlite");
+    let path = sqlite_gate_directory(dir).join(".raw-source-gate.sqlite");
     let mut create = OpenOptions::new();
     create.write(true).create_new(true);
     #[cfg(unix)]
@@ -86,7 +98,7 @@ pub(crate) fn active(base: &Path) -> anyhow::Result<Option<String>> {
         Err(error) => return Err(error.into()),
     }
     let mut name = String::new();
-    fs::File::open(pointer)?
+    crate::utils::source_access::open(pointer)?
         .take(1025)
         .read_to_string(&mut name)?;
     let (stem, sequence) =
@@ -224,6 +236,27 @@ fn append_with_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn gate_rejects_symlinked_directory_and_lock_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let real = root.join("real");
+        fs::create_dir(&real).unwrap();
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        assert!(gate(&alias, Duration::from_secs(1)).is_err());
+
+        let bad = root.join("bad");
+        fs::create_dir(&bad).unwrap();
+        std::os::unix::fs::symlink(
+            real.join("existing.sqlite"),
+            bad.join(".raw-source-gate.sqlite"),
+        )
+        .unwrap();
+        assert!(gate(&bad, Duration::from_secs(1)).is_err());
+    }
 
     #[test]
     fn rotation_keeps_original_source_and_publishes_a_successor() {

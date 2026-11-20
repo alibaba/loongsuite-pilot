@@ -81,10 +81,12 @@ CloudShell SDK supports Qoder collection and interception. Full Pilot uses the s
 | Qoder Work | Hook / local data polling | No | No | No | No |
 | Qoder Work CN | Hook / local data polling | No | No | No | No |
 | Qwen Code CLI | Hook | No | No | No | No |
-| Qwen Work CN | Hook / local data polling | No | No | No | No |
+| Qwen Work CN | Hook / local data polling (macOS arm64) | Yes | Yes | No | Yes |
 | Wukong | CLI API polling | No | No | No | No |
 | WorkBuddy | Hook wakeup + local transcript watch/poll fallback | No | No | No | No |
 | [Doubao Work (macOS/Windows, experimental)](docs/doubao-work.md) | Read-only logs + execution metadata | No | No | No | No |
+
+Qwen Work CN exports conversation and tool telemetry for personal sessions. Collaboration exports conversation telemetry for completed Agent turns.
 
 Integration references for maintainers include [OpenClaw compatibility](docs/agents.md#openclaw-compatibility-and-lifecycle), [DeepSeek Harness collection and lifecycle](docs/agents.md#deepseek-harness-collection-and-lifecycle), and [GitHub Copilot CLI telemetry](docs/zh-CN/copilot-native-telemetry.md).
 

@@ -15,6 +15,7 @@ impl AgentHook {
             "qoder" => InterceptorAgent::Qoder,
             "qodercli" => InterceptorAgent::QoderCli,
             "codex" => InterceptorAgent::Codex,
+            "qwen-work-cn" => InterceptorAgent::QwenWorkCn,
             _ => return None,
         }))
     }
@@ -28,7 +29,10 @@ impl AgentHook {
 
     pub(super) fn supports_blocking(self, event: &str) -> bool {
         match self.0 {
-            InterceptorAgent::Qoder | InterceptorAgent::QoderCli | InterceptorAgent::Codex => {
+            InterceptorAgent::Qoder
+            | InterceptorAgent::QoderCli
+            | InterceptorAgent::Codex
+            | InterceptorAgent::QwenWorkCn => {
                 matches!(event, "PreToolUse" | "PostToolUse" | "UserPromptSubmit")
             }
             _ => false,
@@ -177,10 +181,28 @@ pub(crate) fn codex_command(
     if !supported {
         return None;
     }
+    sdk_hook_command(executable, data_dir, "codex", event, channel)
+}
+
+pub(crate) fn sdk_hook_command(
+    executable: &Path,
+    data_dir: &Path,
+    agent: &str,
+    event: &str,
+    channel: &str,
+) -> Option<String> {
+    if ![agent, event, channel].iter().all(|value| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    }) {
+        return None;
+    }
     let executable = quote_codex_path(executable)?;
     let data_dir = quote_codex_path(data_dir)?;
     Some(format!(
-        "{executable} sdk-hook --channel {channel} --agent codex --event {event} --data-dir {data_dir} --pilot-sdk-managed"
+        "{executable} sdk-hook --channel {channel} --agent {agent} --event {event} --data-dir {data_dir} --pilot-sdk-managed"
     ))
 }
 

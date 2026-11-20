@@ -941,7 +941,8 @@ impl Updater {
                                     Path::new(&self.paths.cache_dir),
                                     self.activation_targets(),
                                     Path::new(&self.paths.data_dir),
-                                )?;
+                                )
+                                .await?;
                                 self.check_locked().await.map_err(anyhow::Error::msg)
                             },
                         )

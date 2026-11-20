@@ -3,29 +3,7 @@
 use crate::interceptor::types::HookEventName;
 
 pub fn wrap_host_reason(event: HookEventName, interceptor_reason: Option<&str>) -> String {
-    let detail = interceptor_reason.unwrap_or("").trim();
-    if detail.is_empty() {
-        return match event {
-            HookEventName::UserPromptSubmit => "检测到敏感信息，本轮对话终止".to_string(),
-            HookEventName::PostToolUse => {
-                "检测到非预期行为，本次工具调用结果已拦截，且不允许通过其它手段重新发起直接或间接调用。"
-                    .to_string()
-            }
-            HookEventName::PreToolUse => {
-                "检测到非预期行为，本次工具调用终止，且不允许通过其它手段重新发起直接或间接调用。"
-                    .to_string()
-            }
-        };
-    }
-    match event {
-        HookEventName::UserPromptSubmit => format!("检测到敏感信息：{detail}，本轮对话终止"),
-        HookEventName::PostToolUse => format!(
-            "检测到非预期行为：{detail}，本次工具调用结果已拦截，且不允许通过其它手段重新发起直接或间接调用。"
-        ),
-        HookEventName::PreToolUse => format!(
-            "检测到非预期行为：{detail}，本次工具调用终止，且不允许通过其它手段重新发起直接或间接调用。"
-        ),
-    }
+    crate::sdk::hook_protocol::wrapped_host_reason(event.as_str(), interceptor_reason)
 }
 
 #[cfg(test)]

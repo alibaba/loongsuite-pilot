@@ -1658,6 +1658,7 @@ mod tests {
                 system_settings_path: None,
                 events: vec!["stop".into()],
                 hook_command: "/pilot/hook.sh".into(),
+                native_sdk_data: None,
                 format: crate::types::HookFormat::Nested,
                 matcher: None,
                 event_matchers: None,

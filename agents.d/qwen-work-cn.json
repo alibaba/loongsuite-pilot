@@ -10,6 +10,7 @@
     "settingsPath": "~/.qwenworkcn/settings.json",
     "events": ["Stop"],
     "hookCommand": "$PILOT_DATA/hooks/qwenworkcn-loongsuite-pilot-hook.sh",
+    "nativeSdkData": "state/standalone-qwen-work-cn-sdk",
     "format": "nested",
     "matcher": "*",
     "winShell": "powershell",
