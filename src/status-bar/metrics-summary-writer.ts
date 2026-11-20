@@ -326,9 +326,7 @@ export class MetricsSummaryWriter {
     // Closed days resume each segment from its own offset; a segment seen for
     // the first time (new file, rotation into a new inode) is read from the
     // start and added, so neither a retired nor an untouched segment is lost.
-    const listedDays = new Set<string>();
     for (const [day, dayFiles] of filesByDay) {
-      listedDays.add(day);
       let entry: DayDigest | undefined = digest.days[day];
       if (entry && !entry.files) {
         entry = await this.migrateUntrackedDay(day, entry, dayFiles, scanState, today);
@@ -346,7 +344,7 @@ export class MetricsSummaryWriter {
       }
     }
 
-    this.compactDigest(digest, listedDays, today);
+    this.compactDigest(digest, today);
 
     currentDayState ??= {
       version: 1,
@@ -525,8 +523,7 @@ export class MetricsSummaryWriter {
     today: string,
   ): Promise<DayDigest> {
     const legacyTotals = totalsOf(legacy);
-    const incompleteBefore = !!legacy.breakdownsIncomplete
-      || (legacy.tokens > 0 && !legacy.modelTokens && !legacy.agentStats);
+    const incompleteBefore = !!legacy.breakdownsIncomplete || lacksLegacyBreakdowns(legacy);
 
     // Scan-state entries of this day, including segments retention already
     // removed. Their presence means the scan state covered this day, so a
@@ -623,18 +620,15 @@ export class MetricsSummaryWriter {
   /**
    * Days that left the detail window keep their totals and breakdowns but drop
    * per-file stats, which carry every session identity. File identities stay,
-   * so a late append still resumes from its offset. Once none of a day's
-   * segments is listed any more, the identities go too.
+   * so a late append still resumes from its offset after a temporary absence.
    */
-  private compactDigest(digest: DigestFile, listedDays: Set<string>, today: string): void {
+  private compactDigest(digest: DigestFile, today: string): void {
     const cutoff = dateDaysAgo(DIGEST_DETAIL_DAYS, today);
     for (const [day, entry] of Object.entries(digest.days)) {
-      if (day >= cutoff || !entry.files) continue;
-      const files = listedDays.has(day) ? entry.files : [];
-      if (files.length === entry.files.length && !entry.files.some(file => file.stats)) continue;
+      if (day >= cutoff || !entry.files?.some(file => file.stats)) continue;
       const compacted: DayDigest = {
         ...totalsOf(entry),
-        files: files.map(({ stats: _stats, ...file }) => file),
+        files: entry.files.map(({ stats: _stats, ...file }) => file),
       };
       if (entry.breakdownsIncomplete) compacted.breakdownsIncomplete = true;
       digest.days[day] = compacted;
@@ -870,9 +864,9 @@ export class MetricsSummaryWriter {
       } else {
         const d = digest.days[day];
         if (!d) continue;
-        // A day with tokens but no persisted breakdown cannot contribute its
+        // A day with activity but no persisted breakdown cannot contribute its
         // per-dimension share — say so instead of silently shrinking the shares.
-        if (d.breakdownsIncomplete || (!d.files && d.tokens > 0 && !d.modelTokens && !d.agentStats)) {
+        if (d.breakdownsIncomplete || (!d.files && lacksLegacyBreakdowns(d))) {
           incompleteBreakdownDays.push(day);
         }
         totalTokens += d.tokens;
@@ -1377,6 +1371,11 @@ function isEmptyTotals(totals: DayTotals): boolean {
     && !totals.agentStats
     && !totals.providerTokens
     && !totals.repoStats;
+}
+
+function lacksLegacyBreakdowns(day: DayTotals): boolean {
+  // Every event contributes to agent statistics, including events without tokens.
+  return (day.events > 0 || day.tokens > 0) && !day.agentStats;
 }
 
 /** The part of a day that is not attributed to any tracked file's stats. */

@@ -337,6 +337,29 @@ describe('MetricsSummaryWriter historical breakdown integrity', () => {
     expect(range.modelShares[0].totalTokens).toBe(1200);
   });
 
+  it('resumes a compacted segment after its temporary absence without recounting it', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-30T12:00:00'));
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const name = 'claude-code-2026-07-30.jsonl';
+    const file = await writeJsonl(outputDir, name, [record({ 'gen_ai.usage.total_tokens': '1000' })]);
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    vi.setSystemTime(new Date('2026-08-10T09:00:00'));
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    await retire(outputDir, name);
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    expect((await readSummary(tmpDir)).ranges.thirtyDays.totalTokens).toBe(1000);
+
+    await fs.rename(path.join(outputDir, '..', 'retired', name), file);
+    await fs.appendFile(file, JSON.stringify(record({ 'gen_ai.usage.total_tokens': '200' })) + '\n');
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const range = (await readSummary(tmpDir)).ranges.thirtyDays;
+    expect(range.totalTokens).toBe(1200);
+    expect(range.modelShares[0].totalTokens).toBe(1200);
+  });
+
   it('treats a digest day with corrupt tracking state as a legacy day instead of failing', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-03T10:00:00'));
@@ -370,6 +393,21 @@ describe('MetricsSummaryWriter historical breakdown integrity', () => {
     const range = (await readSummary(tmpDir)).ranges.sevenDays;
     expect(range.totalTokens).toBe(900);
     expect(range.modelShares).toEqual([]);
+    expect(range.incompleteBreakdownDays).toEqual(['2026-08-01']);
+  });
+
+  it('reports missing agent and repository breakdowns for a legacy tool-only day', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-03T10:00:00'));
+    await seedLegacyState(tmpDir, {
+      '2026-08-01': { ...legacyDay(0, 1), toolCalls: 1 },
+    }, {});
+
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const range = (await readSummary(tmpDir)).ranges.sevenDays;
+    expect(range.totalTokens).toBe(0);
+    expect(range.totalToolCalls).toBe(1);
     expect(range.incompleteBreakdownDays).toEqual(['2026-08-01']);
   });
 });
