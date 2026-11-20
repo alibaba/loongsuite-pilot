@@ -486,6 +486,26 @@ describe('WorkBuddy audit-event builder', () => {
       ]);
   });
 
+  it('keeps the Stop fallback for the responding turn after an untimed prompt', async () => {
+    const user = fixtureRecords()[0];
+    const assistant = fixtureRecords().find(record =>
+      record.type === 'message'
+      && record.role === 'assistant'
+      && record.id === 'response-synthetic-2')!;
+    const entries = await buildWorkBuddyEvents([
+      { ...user, id: 'untimed-first-turn', timestamp: undefined },
+      { ...user, id: 'responding-turn', timestamp: undefined },
+      { ...assistant, timestamp: undefined },
+    ], {
+      sessionId: 'session-stop-fallback',
+      hookEvents: [{ eventName: 'Stop', observedAtMs: 2_500 }],
+    });
+
+    expect(entries.map(entry => entry['event.name'])).toEqual(['other', 'llm.request', 'llm.response']);
+    expect(entries.every(entry => entry['gen_ai.turn.id'] === 'responding-turn')).toBe(true);
+    expect(entries.every(entry => entry.time_unix_nano === '2500000000')).toBe(true);
+  });
+
   it('drops tool events when neither transcript nor Hook provides a call timestamp', async () => {
     const records = fixtureRecords().map(record =>
       record.type === 'function_call'

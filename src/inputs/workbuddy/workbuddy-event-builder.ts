@@ -316,7 +316,8 @@ export async function buildWorkBuddyEvents(
 
     if (record.type === 'message' && record.role === 'user') {
       await closeInterruptedTurn(record);
-      await emitPendingUserInput(undefined, undefined, true);
+      // A later response without a timestamp may still need the Stop observation.
+      await emitPendingUserInput();
       tools.clear();
       if (typeof record.cwd === 'string' && record.cwd.length > 0) cwd = record.cwd;
       turnOrdinal++;
