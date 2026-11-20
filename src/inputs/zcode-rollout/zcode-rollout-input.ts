@@ -22,17 +22,24 @@ import { toW3CTraceId, deriveSpanId } from '../../../assets/hooks/shared/event-e
 
 const DEFAULT_ROLLOUT_DIR = '~/.zcode/cli/rollout';
 const AGENT_ID = 'zcode';
+const ROLLOUT_READ_CHUNK_BYTES = 256 * 1024;
+const ROLLOUT_READ_BUDGET_BYTES = 8 * 1024 * 1024;
+const MAX_ROLLOUT_RECORD_BYTES = 32 * 1024 * 1024;
 
-async function lastCompleteLineOffset(file: FileHandle, size: number): Promise<number> {
+async function baselineRolloutCursor(
+  file: FileHandle, size: number,
+): Promise<{ offset: number; discardOffset?: number }> {
+  const lowerBound = Math.max(0, size - MAX_ROLLOUT_RECORD_BYTES);
   const block = Buffer.allocUnsafe(Math.min(size, 64 * 1024));
-  for (let end = size; end > 0;) {
-    const start = Math.max(0, end - block.length);
+  for (let end = size; end > lowerBound;) {
+    const start = Math.max(lowerBound, end - block.length);
     const { bytesRead } = await file.read(block, 0, end - start, start);
     const newline = block.subarray(0, bytesRead).lastIndexOf(0x0a);
-    if (newline >= 0) return start + newline + 1;
+    if (newline >= 0) return { offset: start + newline + 1 };
     end = start;
   }
-  return 0;
+  // A tail this long cannot become a supported record even if a newline arrives.
+  return size >= MAX_ROLLOUT_RECORD_BYTES ? { offset: 0, discardOffset: size } : { offset: 0 };
 }
 
 
@@ -64,7 +71,7 @@ export interface ZCodeRolloutInputOptions extends Omit<InputOptions, 'stateStore
  * match deterministically across processes.
  *
  * Per spec §1.4 baseline skip: on pilot startup, for each rollout file not
- * yet seen, initialize byteOffset to current EOF (state store key
+ * yet seen, initialize the cursor after the last complete historical row (state store key
  * `zcode-rollout:<sessionId>` — actually implemented as
  * `zcode-rollout:<absoluteFilePath>` to match BaseInput's state store
  * convention). This prevents replaying history on first install. Pilot
@@ -109,8 +116,11 @@ export class ZCodeRolloutInput extends BaseInput {
         handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
         const stat = await handle.stat();
         if (!stat.isFile()) continue;
-        const offset = await lastCompleteLineOffset(handle, stat.size);
-        this.stateStore.update(stateKey, { lastOffset: offset, extra: { inode: stat.ino, initialized: true } });
+        const cursor = await baselineRolloutCursor(handle, stat.size);
+        this.stateStore.update(stateKey, {
+          lastOffset: cursor.offset,
+          extra: { inode: stat.ino, initialized: true, rolloutDiscardOffset: cursor.discardOffset },
+        });
       } catch {
         // Files can disappear or rotate between discovery and opening.
       } finally {
@@ -145,41 +155,89 @@ export class ZCodeRolloutInput extends BaseInput {
       const prevState = this.stateStore.get(stateKey);
       const prevInode = prevState.extra?.inode as number | undefined;
       let offset = prevState.lastOffset ?? 0;
+      const persistedDiscard = prevState.extra?.rolloutDiscardOffset;
+      let discardOffset = typeof persistedDiscard === 'number' && Number.isSafeInteger(persistedDiscard)
+        && persistedDiscard - offset >= MAX_ROLLOUT_RECORD_BYTES ? persistedDiscard : undefined;
       if ((prevInode !== undefined && prevInode !== stat.ino) || stat.size < offset) {
         offset = 0;
+        discardOffset = undefined;
+      } else if (discardOffset !== undefined && stat.size < discardOffset) {
+        // Truncating only the unfinished row need not replay earlier records.
+        discardOffset = undefined;
       }
+      const batch = await this.readRolloutLines(handle, filePath, stat.size, offset, discardOffset);
+      const entries = this.buildEntriesFromRolloutLines(batch.lines);
       // Even an empty file discovered during a running collector is live.
-      if (prevState.lastOffset !== offset || prevInode !== stat.ino || prevState.extra?.initialized !== true) {
-        this.stateStore.update(stateKey, { lastOffset: offset, extra: { inode: stat.ino, initialized: true } });
+      if (prevState.lastOffset !== batch.offset || prevInode !== stat.ino
+        || prevState.extra?.initialized !== true || persistedDiscard !== batch.discardOffset) {
+        this.stateStore.update(stateKey, {
+          lastOffset: batch.offset,
+          extra: { inode: stat.ino, initialized: true, rolloutDiscardOffset: batch.discardOffset },
+        });
       }
-      if (stat.size <= offset) return [];
-
-      const buf = Buffer.allocUnsafe(stat.size - offset);
-      const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
-      // Work in byte offsets: a partial final line or invalid UTF-8 must not
-      // turn a decoded character count into a source cursor.
-      const completeBytes = buf.subarray(0, bytesRead).lastIndexOf(0x0a) + 1;
-      if (completeBytes === 0) return [];
-      const completeText = buf.toString('utf8', 0, completeBytes);
-      const lines: Record<string, unknown>[] = [];
-      for (const line of completeText.split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        let parsed: Record<string, unknown>;
-        try {
-          parsed = JSON.parse(trimmed) as Record<string, unknown>;
-        } catch (err) {
-          this.logger.warn('invalid rollout JSONL line', { file: filePath, error: String(err) });
-          continue;
-        }
-        lines.push(parsed);
-      }
-      const entries = this.buildEntriesFromRolloutLines(lines);
-      this.stateStore.setOffset(stateKey, offset + completeBytes);
       return entries;
     } finally {
       await handle.close();
     }
+  }
+
+  private async readRolloutLines(
+    handle: FileHandle, filePath: string, size: number, offset: number, discardOffset?: number,
+  ): Promise<{ lines: Record<string, unknown>[]; offset: number; discardOffset?: number }> {
+    const start = discardOffset ?? offset;
+    const normalEnd = Math.min(size, start + ROLLOUT_READ_BUDGET_BYTES);
+    let position = start;
+    let end = normalEnd;
+    let discarding = discardOffset !== undefined;
+    let parts: Buffer[] = [];
+    const lines: Record<string, unknown>[] = [];
+    while (position < end) {
+      const chunk = Buffer.allocUnsafe(Math.min(ROLLOUT_READ_CHUNK_BYTES, end - position));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+      if (bytesRead === 0) break;
+      const data = chunk.subarray(0, bytesRead);
+      let cursor = 0;
+      while (cursor < bytesRead) {
+        const newline = data.indexOf(0x0a, cursor);
+        const partEnd = newline < 0 ? bytesRead : newline;
+        const recordBytes = position + partEnd - offset;
+        if (!discarding) {
+          if (recordBytes >= MAX_ROLLOUT_RECORD_BYTES) {
+            discarding = true;
+            parts = [];
+            this.logger.warn('oversized rollout JSONL line skipped', {
+              file: filePath, offset, maxRecordBytes: MAX_ROLLOUT_RECORD_BYTES,
+            });
+          } else {
+            parts.push(data.subarray(cursor, partEnd));
+          }
+        }
+        if (newline < 0) break;
+        if (!discarding) {
+          const text = (parts.length === 1 ? parts[0] : Buffer.concat(parts, recordBytes)).toString('utf8').trim();
+          if (text) {
+            try {
+              lines.push(JSON.parse(text) as Record<string, unknown>);
+            } catch {
+              this.logger.warn('invalid rollout JSONL line', { file: filePath, offset });
+            }
+          }
+        }
+        offset = position + newline + 1;
+        if (end > normalEnd) return { lines, offset };
+        discarding = false;
+        parts = [];
+        cursor = newline + 1;
+      }
+      position += bytesRead;
+      if (position === end && offset === start && !discarding) {
+        // Finish the first record even if it crosses the ordinary scan budget.
+        end = Math.min(size, start + MAX_ROLLOUT_RECORD_BYTES);
+      }
+    }
+    // Keep the complete record cursor separate from progress seeking the end
+    // of a record that is already too long to decode.
+    return { lines, offset, discardOffset: discarding ? position : undefined };
   }
 
   /** Convert complete native records in file order, retaining late tool links. */

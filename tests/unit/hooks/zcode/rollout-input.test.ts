@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, afterEach } from 'vitest';
+import { describe, expect, test, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -188,6 +188,152 @@ describe('rollout checkpoints across restart', () => {
     fs.appendFileSync(file, live.slice(30) + '\n');
     const entries = await input.pollEntries();
     expect(new Set(entries.map(entry => entry['gen_ai.turn.id']))).toEqual(new Set(['live-at-first-start']));
+  });
+});
+
+describe('bounded rollout reads', () => {
+  test('resumes a large UTF-8 record across poll and restart boundaries without losing its tool results', async () => {
+    const records = fs.readFileSync(path.join(FIXTURE_DIR, 'rollout-iter4-2line-parallel.jsonl'), 'utf8')
+      .trim().split('\n').map(line => JSON.parse(line));
+    const [callRecord, resultRecord] = records;
+    const sid = callRecord.sessionId;
+    const file = rolloutPath(sid);
+    const stateKey = `zcode-rollout:${file}`;
+    const stateFile = path.join(tmpRoot, 'state.json');
+    const first = new ManualRollout({ stateStore, rolloutDir });
+    await first.initialize();
+    const { offset } = writeLine(sid, callRecord);
+
+    const chunkBytes = 256 * 1024;
+    const budgetBytes = 8 * 1024 * 1024;
+    const prefix = '{"padding":"';
+    const padding = Buffer.alloc(chunkBytes, 'x');
+    const toolResult = resultRecord.request.messages.find((message: { role: string }) => message.role === 'tool');
+    toolResult.content = '字工具结果';
+    const suffix = Buffer.from(`",${JSON.stringify(resultRecord).slice(1)}\n`);
+    const split = suffix.indexOf(Buffer.from('字')) + 1;
+    let remaining = budgetBytes + chunkBytes - Buffer.byteLength(prefix) - split;
+    const fd = fs.openSync(file, 'a');
+    try {
+      fs.writeSync(fd, prefix);
+      while (remaining > 0) {
+        const count = Math.min(padding.length, remaining);
+        fs.writeSync(fd, padding, 0, count);
+        remaining -= count;
+      }
+      fs.writeSync(fd, suffix.subarray(0, split));
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    const open = fs.promises.open.bind(fs.promises);
+    const reads: Array<{ mock: { calls: unknown[][] } }> = [];
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(async (...args) => {
+      const handle = await open(...args);
+      if (args[0] === file) reads.push(vi.spyOn(handle, 'read'));
+      return handle;
+    });
+    try {
+      const firstBatch = await first.pollEntries();
+      const calls = firstBatch.filter(entry => entry['event.name'] === 'tool.call');
+      expect(calls).toHaveLength(3);
+      expect(firstBatch.some(entry => entry['event.name'] === 'tool.result')).toBe(false);
+      expect(stateStore.getOffset(stateKey)).toBe(offset);
+      expect(reads[0].mock.calls.reduce((sum, read) => sum + Number(read[2]), 0)).toBe(budgetBytes);
+      await stateStore.save();
+
+      const resumedStore = new StateStore(stateFile);
+      await resumedStore.load();
+      const resumed = new ManualRollout({ stateStore: resumedStore, rolloutDir });
+      await resumed.initialize();
+      expect(await resumed.pollEntries()).toEqual([]);
+      expect(resumedStore.getOffset(stateKey)).toBe(offset);
+
+      fs.appendFileSync(file, suffix.subarray(split));
+      const nextBatch = await resumed.pollEntries();
+      const results = nextBatch.filter(entry => entry['event.name'] === 'tool.result');
+      expect(results.map(entry => [entry['gen_ai.tool.call.id'], entry.span_id]).sort()).toEqual(
+        calls.map(entry => [entry['gen_ai.tool.call.id'], entry.span_id]).sort(),
+      );
+      expect(results.find(entry => entry['gen_ai.tool.call.id'] === toolResult.toolCallId)
+        ?.['gen_ai.tool.call.result']).toBe('字工具结果');
+      expect(nextBatch.some(entry => entry['event.name'] === 'tool.call')).toBe(false);
+      expect(resumedStore.getOffset(stateKey)).toBe(fs.statSync(file).size);
+      expect(await resumed.pollEntries()).toEqual([]);
+      expect(reads.flatMap(read => read.mock.calls).every(call => Number(call[2]) <= chunkBytes)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('resumes skipping an oversized line after restart while retaining the last complete offset', async () => {
+    const sid = 'sess_oversized';
+    const file = rolloutPath(sid);
+    const stateKey = `zcode-rollout:${file}`;
+    const stateFile = path.join(tmpRoot, 'state.json');
+    const first = new ManualRollout({ stateStore, rolloutDir });
+    await first.initialize();
+    const { offset } = writeLine(sid, baseModelIoLine({ sessionId: sid, turnId: 'complete' }));
+    expect((await first.pollEntries()).length).toBeGreaterThan(0);
+    // A sparse file simulates a long unfinished record without a large test buffer.
+    fs.truncateSync(file, offset + 40 * 1024 * 1024);
+    expect(await first.pollEntries()).toEqual([]);
+    expect(stateStore.getOffset(stateKey)).toBe(offset);
+    expect(stateStore.get(stateKey).extra?.rolloutDiscardOffset).toBe(offset + 32 * 1024 * 1024);
+    await stateStore.save();
+
+    // The valid JSON suffix before the newline still belongs to the oversized line.
+    writeLine(sid, baseModelIoLine({ sessionId: sid, turnId: 'discarded-suffix' }));
+    writeLine(sid, baseModelIoLine({ sessionId: sid, turnId: 'after-oversized' }));
+    const resumedStore = new StateStore(stateFile);
+    await resumedStore.load();
+    const resumed = new ManualRollout({ stateStore: resumedStore, rolloutDir });
+    await resumed.initialize();
+    expect(await resumed.pollEntries()).toEqual([]);
+    expect(resumedStore.getOffset(stateKey)).toBe(offset);
+    const entries = await resumed.pollEntries();
+    expect(new Set(entries.map(entry => entry['gen_ai.turn.id']))).toEqual(new Set(['after-oversized']));
+    expect(resumedStore.getOffset(stateKey)).toBe(fs.statSync(file).size);
+    expect(resumedStore.get(stateKey).extra?.rolloutDiscardOffset).toBeUndefined();
+  });
+
+  test('baselines a historical oversized tail without replay, then collects after its newline', async () => {
+    const sid = 'sess_historical_oversized';
+    const file = rolloutPath(sid);
+    const stateKey = `zcode-rollout:${file}`;
+    const { offset } = writeLine(sid, baseModelIoLine({ sessionId: sid, turnId: 'historical' }));
+    const initialSize = offset + 40 * 1024 * 1024;
+    fs.truncateSync(file, initialSize);
+    const input = new ManualRollout({ stateStore, rolloutDir });
+    await input.initialize();
+    expect(stateStore.getOffset(stateKey)).toBe(0);
+    expect(stateStore.get(stateKey).extra?.rolloutDiscardOffset).toBe(initialSize);
+    expect(await input.pollEntries()).toEqual([]);
+
+    fs.appendFileSync(file, '\n');
+    writeLine(sid, baseModelIoLine({ sessionId: sid, turnId: 'new' }));
+    const entries = await input.pollEntries();
+    expect(new Set(entries.map(entry => entry['gen_ai.turn.id']))).toEqual(new Set(['new']));
+    expect(stateStore.getOffset(stateKey)).toBe(fs.statSync(file).size);
+    expect(stateStore.get(stateKey).extra?.rolloutDiscardOffset).toBeUndefined();
+  });
+
+  test('rereads a rewritten oversized tail from its last complete record without replaying that record', async () => {
+    const sid = 'sess_truncated_oversized';
+    const file = rolloutPath(sid);
+    const stateKey = `zcode-rollout:${file}`;
+    const { offset } = writeLine(sid, baseModelIoLine({ sessionId: sid, turnId: 'already-emitted' }));
+    stateStore.update(stateKey, {
+      lastOffset: offset,
+      extra: { inode: fs.statSync(file).ino, initialized: true, rolloutDiscardOffset: offset + 32 * 1024 * 1024 },
+    });
+    // The producer truncated away the oversized tail and retried from scratch.
+    writeLine(sid, baseModelIoLine({ sessionId: sid, turnId: 'rewritten-tail' }));
+    const input = new ManualRollout({ stateStore, rolloutDir });
+    await input.initialize();
+    const entries = await input.pollEntries();
+    expect(new Set(entries.map(entry => entry['gen_ai.turn.id']))).toEqual(new Set(['rewritten-tail']));
+    expect(stateStore.get(stateKey).extra?.rolloutDiscardOffset).toBeUndefined();
   });
 });
 
