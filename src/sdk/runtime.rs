@@ -495,7 +495,7 @@ fn run_agent(
         .on_thread_start(move || source_access::install(Some(start_scope.clone())))
         .on_thread_stop(|| source_access::install(None))
         .build()?;
-    let store = Arc::new(if isolated_codex {
+    let store = Arc::new(if isolated_codex || plan.agent == "qwen-work-cn" {
         StateStore::new_sdk_source(&checkpoint)
     } else {
         StateStore::new(&checkpoint)

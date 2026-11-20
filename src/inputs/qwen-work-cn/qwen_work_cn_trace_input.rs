@@ -379,6 +379,7 @@ impl QwenWorkCnTraceBody {
         for (session_id, cwd) in collect_session_cwd(&entries) {
             self.read_segments_for_session(rt, &session_id, &cwd).await;
         }
+        let sdk_source = crate::utils::source_access::current().is_some();
         let mut output = Vec::new();
         for turn in group_by_turn(entries).into_values() {
             let mut turn = turn;
@@ -386,19 +387,21 @@ impl QwenWorkCnTraceBody {
             inject_trace_id(&mut turn);
             for entry in &mut turn {
                 entry.agent_type = ClientType::QwenWorkCN.as_str().to_owned();
-                let record = crate::inputs::base::entry_map(entry);
-                if crate::utils::source_access::current().is_some()
-                    && entry.workspace_path.as_deref().is_none_or(str::is_empty)
-                {
-                    // The Hook already supplied this path. Keep it without
-                    // probing the host filesystem outside SDK source roots.
-                    entry.workspace_path = record
-                        .get("agent.qwenworkcn.cwd")
-                        .and_then(Value::as_str)
-                        .filter(|cwd| Path::new(cwd).is_absolute())
-                        .map(str::to_owned);
+                if sdk_source {
+                    // The scoped collector cannot probe Git outside its sources.
+                    // Reuse the workspace declared by the Hook directly.
+                    if entry.workspace_path.as_deref().is_none_or(str::is_empty) {
+                        entry.workspace_path = entry
+                            .extra
+                            .get("agent.qwenworkcn.cwd")
+                            .and_then(Value::as_str)
+                            .filter(|cwd| Path::new(cwd).is_absolute())
+                            .map(str::to_owned);
+                    }
+                } else {
+                    let record = crate::inputs::base::entry_map(entry);
+                    let _ = enrich_canonical_entry_with_git(entry, &record, "qwen-work-cn").await;
                 }
-                let _ = enrich_canonical_entry_with_git(entry, &record, "qwen-work-cn").await;
             }
             if !self.multimodal_stopped.load(Ordering::SeqCst) {
                 if let Some(multimodal) = &self.multimodal {
@@ -988,14 +991,11 @@ impl QwenWorkCnTraceBody {
                 {
                     let request_nano = entries[request_index].time_unix_nano.clone();
                     let response_id = entries[response_index].event_id.clone();
-                    let response_nano = entries[response_index].time_unix_nano.clone();
-                    let request_snapshot = entries[request_index].clone();
-                    let response_snapshot = entries[response_index].clone();
                     if let Some(pair) = self.take_segment_pair(
                         session_id,
                         turn_id.as_deref(),
-                        &request_snapshot,
-                        &response_snapshot,
+                        &entries[request_index],
+                        &entries[response_index],
                     ) {
                         let model = pair.model.clone();
                         for entry in entries.iter_mut() {
@@ -1020,9 +1020,10 @@ impl QwenWorkCnTraceBody {
                                 entry.request_model = Some(model.clone());
                             }
                         }
-                        let _ = response_nano;
                     }
                 }
+            }
+            if !step_order.is_empty() {
                 self.apply_tool_timing(session_id, entries);
             }
         }
@@ -1192,6 +1193,7 @@ fn inject_trace_id(entries: &mut [AgentActivityEntry]) {
 
 fn collect_session_cwd(entries: &[AgentActivityEntry]) -> Vec<(String, String)> {
     let mut sessions = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for entry in entries {
         if entry.session_id.is_empty() {
             continue;
@@ -1203,7 +1205,7 @@ fn collect_session_cwd(entries: &[AgentActivityEntry]) -> Vec<(String, String)> 
         else {
             continue;
         };
-        if cwd.is_empty() || sessions.iter().any(|(id, _)| id == &entry.session_id) {
+        if cwd.is_empty() || !seen.insert(entry.session_id.as_str()) {
             continue;
         }
         sessions.push((entry.session_id.clone(), cwd.to_owned()));
