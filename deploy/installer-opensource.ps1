@@ -1282,21 +1282,31 @@ function Deploy-Package {
         Msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
         $nodeDir = Split-Path $script:NODE_BIN
         $savedPath = $env:PATH
-        if ($env:PATH -notlike "*$nodeDir*") { $env:PATH = "$nodeDir;$env:PATH" }
-        Push-Location $script:PERMANENT_DIR
+        $prevEAP = $ErrorActionPreference
+        Push-Location -LiteralPath $script:PERMANENT_DIR
         try {
-            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-            & $script:NPM_BIN install --omit=dev --omit=optional 2>&1 | Select-Object -Last 1
+            if ($env:PATH -notlike "*$nodeDir*") { $env:PATH = "$nodeDir;$env:PATH" }
+            $ErrorActionPreference = "Continue"
+            # Keep the last lines of just this invocation. The initial code
+            # also covers failure to launch npm, which sets no native exit code.
+            $global:LASTEXITCODE = 1
+            $npmOut = @(& $script:NPM_BIN install --omit=dev --omit=optional --fetch-retries 5 --fetch-retry-mintimeout 2000 --fetch-retry-maxtimeout 60000 2>&1 |
+                Select-Object -Last 40)
             $npmExit = $LASTEXITCODE
-            $ErrorActionPreference = $prevEAP
         } finally {
-            Pop-Location
+            $ErrorActionPreference = $prevEAP
             $env:PATH = $savedPath
+            Pop-Location
         }
         if ($npmExit -ne 0) {
-            Msg "❌ 依赖安装失败 (exit=$npmExit)，请检查 npm 日志" "❌ Dependencies installation failed (exit=$npmExit), check npm logs"
+            Msg "❌ 依赖安装失败 (exit=$npmExit)" "❌ Dependencies installation failed (exit=$npmExit)"
+            if ($npmOut.Count) {
+                Msg "    ---- npm 输出（末 40 行）----" "    ---- npm output (last 40 lines) ----"
+                $npmOut | ForEach-Object { Write-Host $_ }
+            }
             exit 1
         }
+        if ($npmOut.Count) { Write-Host $npmOut[-1] }
     }
 
     # Only publish current/previous after the candidate is complete. This keeps

@@ -1056,10 +1056,21 @@ deploy_package() {
     else
         msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" \
             "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
-        if ! (cd "$PERMANENT_DIR" && run_npm install --production --no-optional 2>&1 | tail -1); then
-            msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
+        # Keep this invocation's diagnostic tail. The script's pipefail preserves
+        # npm's failure status even though tail consumes its output.
+        local npm_out npm_exit=0
+        npm_out=$(cd "$PERMANENT_DIR" && run_npm install --production --no-optional \
+            --fetch-retries 5 --fetch-retry-mintimeout 2000 --fetch-retry-maxtimeout 60000 \
+            2>&1 | tail -n 40) || npm_exit=$?
+        if [ "$npm_exit" -ne 0 ]; then
+            msg "    ❌ 依赖安装失败 (exit=$npm_exit)" "    ❌ Dependency installation failed (exit=$npm_exit)"
+            if [ -n "$npm_out" ]; then
+                msg "    ---- npm 输出（末 40 行）----" "    ---- npm output (last 40 lines) ----"
+                printf '%s\n' "$npm_out"
+            fi
             return 1
         fi
+        if [ -n "$npm_out" ]; then printf '%s\n' "${npm_out##*$'\n'}"; fi
         msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     fi
     echo ""
