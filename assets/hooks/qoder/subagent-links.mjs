@@ -1,6 +1,7 @@
 // Copyright 2026 Alibaba Group Holding Limited
 // SPDX-License-Identifier: Apache-2.0
 import crypto from 'node:crypto';
+import { qoderSourceKey } from './hook-wakeup.mjs';
 
 export const QODER_DELEGATIONS_KEY = '__qoderDelegations';
 const MAX_DELEGATIONS = 4096;
@@ -35,6 +36,7 @@ export class QoderSubagentLinks {
     this.now = now;
     this.warn = warn;
     this.byCall = new Map();
+    this.legacySources = new Set();
     const saved = state && typeof state === 'object' && !Array.isArray(state) ? state : {};
     for (const [id, link] of Object.entries(saved).slice(-MAX_DELEGATIONS)) {
       if (!link || link.id !== id || !/^[0-9a-f]{32}$/.test(id)
@@ -54,6 +56,7 @@ export class QoderSubagentLinks {
     const matches = this.byCall.get(key) ?? [];
     matches.push(link);
     this.byCall.set(key, matches);
+    if (link.legacySource) this.legacySources.add(link.legacySource);
   }
 
   update(link, fields) {
@@ -70,18 +73,31 @@ export class QoderSubagentLinks {
     return matches.length === 1 ? matches[0] : undefined;
   }
 
-  calls(source, row) {
+  calls(source, row, prompt) {
     // IDE and CN have separate source contracts. Only activate this adapter
     // for the international CLI protocol, including hosts of that runtime.
-    if (source.agentId !== 'qoder' || row?.entrypoint !== 'cli' || row.type !== 'assistant') return [];
+    if (source.agentId !== 'qoder' || row?.type !== 'assistant') return [];
+    if (row.entrypoint !== 'cli' && (row.entrypoint !== undefined || !this.legacyParent(source, row, prompt))) return [];
     return blocks(row).filter(block => ['Agent', 'Task'].includes(block?.name) && text(block.id)
       && block.input && typeof block.input === 'object');
   }
 
-  register(source, checkpoint, row) {
+  legacyParent(source, row, prompt) {
+    return !source.subagentId && !source.desktop && prompt?.entrypoint === 'cli'
+      && prompt.sessionId === source.sessionId && !prompt.isSidechain && !prompt.parent_tool_use_id
+      && !prompt.agentId && prompt.businessIdentity?.product !== 'app'
+      && row.sessionId === source.sessionId && !row.isSidechain && !row.agentId
+      && row.businessIdentity?.product !== 'app';
+  }
+
+  hasLegacyParent(key) {
+    return this.legacySources.has(key);
+  }
+
+  register(source, checkpoint, row, prompt) {
     const added = [];
     if (!checkpoint.turnId || !checkpoint.traceContext) return added;
-    for (const block of this.calls(source, row)) {
+    for (const block of this.calls(source, row, prompt)) {
       const id = qoderDigest(['qoder-delegation', source.sessionId,
         source.subagentId ?? source.sessionId, checkpoint.turnId, block.id]).slice(0, 32);
       if (this.state[id]) {
@@ -101,7 +117,9 @@ export class QoderSubagentLinks {
       const link = { id, sessionId: source.sessionId, agentId: source.subagentId ?? source.sessionId,
         turnId: checkpoint.turnId, callId: block.id, toolName: block.name, traceId: checkpoint.traceContext.traceId,
         spanId: qoderDigest(['qoder-tool', source.sessionId, checkpoint.turnId, block.id]).slice(0, 16),
-        ...(text(block.input.subagent_type) ? { peerName: block.input.subagent_type } : {}), at: this.now };
+        ...(text(block.input.subagent_type) ? { peerName: block.input.subagent_type } : {}),
+        ...(this.legacyParent(source, row, prompt)
+          ? { legacySource: qoderSourceKey(source.sessionId, source.transcriptPath) } : {}), at: this.now };
       this.state = { ...this.state, [id]: link };
       this.size++;
       this.index(link);
