@@ -15,7 +15,6 @@ export interface InterceptorRuleStatus {
   enforce: number;
   pending_scripts: number;
   unsupported_http: number;
-  builtin: number;
 }
 
 export interface InterceptorActivityStatus {

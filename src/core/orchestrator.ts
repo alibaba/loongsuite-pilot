@@ -8,7 +8,7 @@ import { InputManager } from './input-manager.js';
 import { InterceptResultLinker } from './intercept-result-linker.js';
 import { StateStore } from '../checkpoints/state-store.js';
 import { interceptorToolVerdictPath } from '../interceptor/paths.js';
-import { resolveEnabledInterceptorTypes, shouldDeployInterceptorHooks } from '../interceptor/config.js';
+import { shouldDeployInterceptorHooks } from '../interceptor/config.js';
 import { clearInterceptorRuntime } from '../interceptor/daemon/runtime.js';
 import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
 import { startInterceptorWorker, type InterceptorWorkerService } from '../interceptor/worker-service.js';
@@ -267,11 +267,11 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setAlarmManager(this.alarmManager);
     this.verdictStore = new ToolVerdictStore(interceptorToolVerdictPath(this.dataDir));
     this.verdictStore.restore();
-    const builtinInterceptEnabled = resolveEnabledInterceptorTypes(this.config.interceptor).size > 0;
+    const interceptorEnabled = shouldDeployInterceptorHooks(this.config.interceptor);
     this.inputManager.setInterceptResultLinker(
       new InterceptResultLinker(
         this.verdictStore,
-        () => builtinInterceptEnabled || this.interceptorService?.managedActive === true,
+        interceptorEnabled,
         () => this.interceptorService?.syncVerdicts() ?? Promise.resolve(),
       ),
     );

@@ -8,7 +8,7 @@ import { managedInterceptorPath, managedScriptsDir } from '../../../src/intercep
 
 const EMPTY_RULES: InterceptorRuleStatus = {
   configured: 0, config_valid: true, effective: 0, pattern: 0, regex: 0, substring: 0,
-  script: 0, audit: 0, enforce: 0, pending_scripts: 0, unsupported_http: 0, builtin: 2,
+  script: 0, audit: 0, enforce: 0, pending_scripts: 0, unsupported_http: 0,
 };
 
 describe('interceptor status', () => {
@@ -31,7 +31,7 @@ describe('interceptor status', () => {
     expect(status.diagnostics?.regex_timeout).toBe(1);
     if (status.diagnostics) status.diagnostics.regex_timeout = 999;
     expect(collector.snapshot(false, EMPTY_RULES).diagnostics?.regex_timeout).toBe(1);
-    collector.record({ action: 'block', evaluatedRules: ['r'] }, 5); // Builtin verdicts omit matched.
+    collector.record({ action: 'block', evaluatedRules: ['r'] }, 5); // Count blocking verdicts even without matched metadata.
     collector.record({ action: 'allow', failOpen: true, evaluatedRules: [] }, 5);
     expect(collector.snapshot(true, EMPTY_RULES).activity).toMatchObject({
       evaluations_total: 22, blocked_total: 1, matched_total: 20, fail_open_total: 2, evaluation_errors_total: 1,
@@ -62,8 +62,7 @@ describe('interceptor status', () => {
       expect(controller.getRuleStatus()).toEqual({ ...expected, config_valid: false });
       await rm(managedInterceptorPath(dataDir));
       controller.reload();
-      const { builtin: _, ...empty } = EMPTY_RULES;
-      expect(controller.getRuleStatus()).toEqual(empty);
+      expect(controller.getRuleStatus()).toEqual(EMPTY_RULES);
     } finally {
       controller.stop();
       await rm(dataDir, { recursive: true, force: true });

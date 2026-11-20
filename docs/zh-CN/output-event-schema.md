@@ -166,8 +166,8 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `gen_ai.guardrail.triggered` | boolean | 关联到裁决时 Required | 表示存在检查裁决，固定为 `true`，不等于规则命中。工具事件没有 tool call id、没有记录、记录已过期或 interceptor 未开启时省略。 |
 | `gen_ai.guardrail.action` | string | 与 `gen_ai.guardrail.triggered` 同时出现 | `block`：强制拦截；`log`：log 命中但放行；`allow`：其余已知裁决。`tool.call` 查 `PreToolUse`，`tool.result` 查 `PostToolUse`。放行的提示词裁决关联到该轮首个原生 `llm.request`，不增加请求事件；被拦截的 Qoder 提示补报为 `block`。没有对应裁决或关联存在歧义时省略。 |
 | `gen_ai.guardrail.fail_open` | boolean | 检查失败时 Opt-In | `true` 表示有检查错误。此前已有 log 命中时可同时有 `action=log`，不把 log 命中等同失败。 |
-| `gen_ai.guardrail.rule_id` | string | 存在已知命中时 Recommended | 代表最终 block 拦截或首条 log 命中，适用于提示词请求和工具事件。内置规则统一为固定值 `builtin`。 |
-| `gen_ai.guardrail.rule_version` | string | 规则命中时 Recommended | 托管规则取 `rules[].version`；内置规则固定上报空字符串 `""`，不省略字段。 |
+| `gen_ai.guardrail.rule_id` | string | 存在已知命中时 Recommended | 最终 block 拦截规则或首条 log 命中的配置 ID，适用于提示词请求和工具事件。 |
+| `gen_ai.guardrail.rule_version` | string | 规则命中时 Recommended | 取规则配置的 `rules[].version`。 |
 | `gen_ai.skill.name` | string | `skill.use` Conditionally Required | 技能或扩展能力名称。 |
 | `gen_ai.skill.id` | string | 技能标识可用时 Recommended | 稳定的技能标识。 |
 | `gen_ai.skill.description` | string | 技能元数据可用时 Recommended | 技能描述。 |

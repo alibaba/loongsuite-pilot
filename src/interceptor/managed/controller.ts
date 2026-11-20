@@ -78,7 +78,7 @@ export class ManagedInterceptor {
     return this.current !== null;
   }
 
-  getRuleStatus(): Omit<InterceptorRuleStatus, 'builtin'> {
+  getRuleStatus(): InterceptorRuleStatus {
     return {
       configured: this.configuredRules, config_valid: this.lastProblem === null,
       pending_scripts: this.pendingScripts, unsupported_http: this.unsupportedHttp,

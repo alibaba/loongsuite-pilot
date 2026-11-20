@@ -45,7 +45,7 @@ export interface ManagedRuleEngineOptions {
 }
 
 /**
- * One managed rule set. Unlike RuleEngine, a failing script only skips its own
+ * One managed rule set. A failing script only skips its own
  * rule; the next rule still runs.
  */
 export class ManagedRuleEngine implements HookEvaluator {

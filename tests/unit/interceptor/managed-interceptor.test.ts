@@ -496,7 +496,7 @@ describeUnix('ManagedInterceptor script execution', () => {
     expect(await readFile(file, 'utf8')).toBe(original);
   });
 
-  it('is inactive without interceptor.json so the builtin rules keep running', async () => {
+  it('is inactive without interceptor.json', async () => {
     const dataDir = await makeDataDir();
     expect(controller(dataDir).evaluate(request())).toBeNull();
   });
@@ -881,7 +881,7 @@ describeUnix('interceptor service with managed rules', () => {
     expect(existsSync(managedInterceptorPath(dataDir))).toBe(true);
   });
 
-  it('keeps the builtin rules when only rules for another platform arrive', async () => {
+  it('allows sensitive input when only rules for another platform arrive', async () => {
     const dataDir = await makeDataDir();
     const r = rule('win-only', '1', { shell: 'powershell' });
     await writeFile(join(managedScriptsDir(dataDir), managedScriptFileName(r)), 'exit 0');
@@ -889,7 +889,25 @@ describeUnix('interceptor service with managed rules', () => {
     const service = await startInterceptorService({ dataDir, version: '9.9.9', mode: 'all', managedReloadIntervalMs: 60_000 });
     services.push(service);
     await expect(evaluate(service.port!, request({ prompt: `key ${SYNTHETIC_ACCESS_KEY}` })))
-      .resolves.toMatchObject({ action: 'block', ruleId: 'builtin', ruleVersion: '' });
+      .resolves.toMatchObject({ action: 'allow', matched: false, evaluatedRules: [] });
+  });
+
+  it('allows all former credential types across hooks without a managed rule document', async () => {
+    const dataDir = await makeDataDir();
+    const service = await startInterceptorService({ dataDir, version: '9.9.9', mode: 'all' });
+    services.push(service);
+    const samples = [SYNTHETIC_ACCESS_KEY, 'ghp_' + '1234567890abcdefghijklmnop',
+      '-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----',
+      'mysql://agent:secret@127.0.0.1:3306/pilot'];
+    for (const sample of samples) {
+      for (const event of ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'] as const) {
+        await expect(evaluate(service.port!, request({ event, prompt: sample,
+          toolInput: { text: sample }, toolResponse: { stdout: sample } })))
+          .resolves.toMatchObject({ action: 'allow', matched: false, matches: [], evaluatedRules: [] });
+      }
+    }
+    expect((await service.getStatus()).rules).toMatchObject({ configured: 0, effective: 0 });
+    expect((await service.getStatus()).rules).not.toHaveProperty('builtin');
   });
 
   it('can start again after the runtime directory bind failure is repaired', async () => {
@@ -910,7 +928,7 @@ describeUnix('interceptor service with managed rules', () => {
     expect(service.managedActive).toBe(false);
   });
 
-  it('runs builtin rules first and skips managed scripts when they block', async () => {
+  it('runs configured scripts for sensitive input', async () => {
     const dataDir = await makeDataDir();
     const r = rule('allow-all', '1');
     await writeScript(dataDir, r, ALLOW);
@@ -919,9 +937,8 @@ describeUnix('interceptor service with managed rules', () => {
     services.push(service);
     const leaky = request({ prompt: `key ${SYNTHETIC_ACCESS_KEY}` });
 
-    const blocked = await evaluate(service.port!, leaky) as { action: string; ruleId?: string; evaluatedRules: string[] };
-    expect(blocked).toMatchObject({ action: 'block', ruleId: 'builtin', ruleVersion: '' });
-    expect(blocked.evaluatedRules).not.toContain('allow-all');
+    const sensitive = await evaluate(service.port!, leaky) as { action: string; ruleId?: string; evaluatedRules: string[] };
+    expect(sensitive).toMatchObject({ action: 'allow', matched: false, evaluatedRules: ['allow-all'] });
 
     const allowed = await evaluate(service.port!, request({ prompt: 'hello' })) as { action: string; evaluatedRules: string[] };
     expect(allowed.action).toBe('allow');
@@ -985,7 +1002,7 @@ describeUnix('interceptor service with managed rules', () => {
     });
   });
 
-  it('keeps the builtin listener when the pattern rule list is empty', async () => {
+  it('allows sensitive input when the pattern rule list is empty', async () => {
     const dataDir = await makeDataDir();
     await writeFile(managedInterceptorPath(dataDir), JSON.stringify({
       interceptor: { rules: [] },
@@ -994,9 +1011,11 @@ describeUnix('interceptor service with managed rules', () => {
     services.push(service);
     expect(service.managedActive).toBe(false);
     expect(service.port).not.toBeNull();
+    await expect(evaluate(service.port!, request({ prompt: SYNTHETIC_ACCESS_KEY })))
+      .resolves.toMatchObject({ action: 'allow', matched: false, evaluatedRules: [] });
   });
 
-  it('runs builtin rules first and skips pattern rules when they block', async () => {
+  it('blocks sensitive input only when a configured pattern matches', async () => {
     const dataDir = await makeDataDir();
     await writeFile(managedInterceptorPath(dataDir), JSON.stringify({
       interceptor: {
@@ -1016,11 +1035,10 @@ describeUnix('interceptor service with managed rules', () => {
     services.push(service);
     const leaky = request({ prompt: `key ${SYNTHETIC_ACCESS_KEY}` });
     const blocked = await evaluate(service.port!, leaky) as { action: string; ruleId?: string; evaluatedRules: string[] };
-    expect(blocked).toMatchObject({ action: 'block', ruleId: 'builtin', ruleVersion: '' });
-    expect(blocked.evaluatedRules).not.toContain('allow-all');
+    expect(blocked).toMatchObject({ action: 'block', ruleId: 'allow-all', ruleVersion: '1', evaluatedRules: ['allow-all'] });
   });
 
-  it('runs managed scripts after the builtin layer allows', async () => {
+  it('runs configured managed scripts', async () => {
     const dataDir = await makeDataDir();
     const r = rule('policy', '1');
     await writeScript(dataDir, r, blockWith('managed'));

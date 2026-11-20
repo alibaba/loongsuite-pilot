@@ -116,9 +116,9 @@ export interface AgentActivityEntry {
   /** Enforced block, logged match, or other known verdict, respectively. */
   'gen_ai.guardrail.action'?: 'block' | 'log' | 'allow';
   'gen_ai.guardrail.fail_open'?: boolean;
-  /** Final blocking rule or first audit match; builtin rules report their blocking id. */
+  /** Final blocking rule or first audit match. */
   'gen_ai.guardrail.rule_id'?: string;
-  /** `rules[].version` from the managed document; an empty string for builtin rules. */
+  /** `rules[].version` from the managed document. */
   'gen_ai.guardrail.rule_version'?: string;
   'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;

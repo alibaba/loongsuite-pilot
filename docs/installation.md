@@ -87,7 +87,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--mask-mode <mode>` | Data masking mode: `all`, `none`, or `custom`. |
 | `--mask-types <list>` | Comma-separated mask types. Required when `--mask-mode custom`. |
 | `--mask-replacement-mode <mode>` | Mask replacement format: `preview` (star-masked previews, default) or `placeholder` (fixed markers). If omitted, an existing setting is preserved; otherwise `preview` is used. Windows: `-MaskReplacementMode`. |
-| `--interceptor-mode <mode>` | Local interception mode: `all` or `none`. `all` also adds every builtin credential type to `mask`. Previous `custom` configurations disable interception; explicitly switch to `all` to continue. `--interceptor-types` is no longer accepted. |
+| `--interceptor-mode <mode>` | Local interception mode: `all` or `none`. `all` enables configured local file rules and ensures masking covers access keys, API keys, private keys, and database URLs, merging existing custom mask types. Mask mode `all` stays unchanged. Previous `custom` configurations disable interception; explicitly switch to `all` to enable configured rules. `--interceptor-types` is no longer accepted. |
 | `--collect-log <true\|false>` | Enable or disable SLS log reporting. |
 | `--collect-trace <true\|false>` | Enable or disable trace reporting. |
 | `--cms-license-key <key>` | CMS or ARMS trace license key. |

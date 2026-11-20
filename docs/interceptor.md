@@ -12,9 +12,11 @@ Set the startup configuration in `config.json` and restart the collector:
 { "interceptor": { "mode": "all" } }
 ```
 
-The environment variable `LOONGSUITE_PILOT_INTERCEPTOR_MODE` takes precedence. Installers accept `--interceptor-mode all` on macOS/Linux or `-InterceptorMode all` on Windows. `all` enables every builtin credential rule and adds those types to the masking configuration. `none`, an omitted mode, or any other value disables the Worker, HTTP listener, local rules, and interception hook deployment; cached files cannot enable them. Collection hooks remain independent.
+The environment variable `LOONGSUITE_PILOT_INTERCEPTOR_MODE` takes precedence. Installers accept `--interceptor-mode all` on macOS/Linux or `-InterceptorMode all` on Windows. `all` enables the Worker, HTTP listener, interception hooks, and configured local file rules. Without executable rules, requests are allowed, including requests containing credentials. `none`, an omitted mode, or any other value disables interception; cached files cannot enable it. Collection hooks remain independent.
 
-**Migration:** the former interceptor `custom` mode, `--interceptor-types`, and `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` are no longer supported. An existing `custom` configuration disables interception after upgrading. Explicitly select `all` before restarting to continue interception, with all builtin credential types enabled. Masking still supports its own `custom` mode.
+When interception is enabled, installers and runtime configuration loading ensure masking covers `cloudAccessKey`, `apiKey`, `privateKey`, and `databaseUrl`. Mask mode `all` stays unchanged; other modes become `custom`, merging these types with existing custom types without duplicates and retaining the replacement format. This protection also applies to environment overrides and hand-edited configuration, independently of rule matches.
+
+**Migration:** builtin credential interception has been removed. Configure local file rules to block or log matching content. The former interceptor `custom` mode, `--interceptor-types`, and `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` are no longer supported. An existing `custom` configuration disables interception after upgrading. Explicitly select `all` before restarting to enable configured rules. Masking still supports its own `custom` mode, with credential types automatically included when interception is enabled.
 
 ## Local file rules
 
@@ -88,7 +90,7 @@ Files are checked every three seconds. Invalid documents or scripts not yet read
 
 ## Decisions and telemetry
 
-Builtin sensitive-type rules run first and stop on a block. After they allow, file rules run in array order. `matches` preserves all known log and block hits. Top-level metadata identifies the final enforcing rule, or the first log hit when allowed. A complete check without hits has `matched=false`; an error without a known result omits it. A known log hit followed by an error can retain both `matched=true` and `failOpen=true`.
+File rules run in array order. `matches` preserves all known log and block hits. Top-level metadata identifies the final enforcing rule, or the first log hit when allowed. A complete check without hits has `matched=false`; an error without a known result omits it. A known log hit followed by an error can retain both `matched=true` and `failOpen=true`.
 
 Rule hits no longer emit separate `guardrail.evaluation` events. Linked tool events carry the final request decision in `gen_ai.guardrail.*`; denied Qoder user prompts still emit `llm.request`. Individual log/block matches remain in the HTTP response and local access log `matches` array. UserPromptSubmit log does not synthesize a rejected prompt.
 
@@ -96,7 +98,7 @@ Allowed prompt verdicts are linked to the first native `llm.request` of the turn
 
 Collected events omit rule `reason`, `message`, `matched`, `enforcement`, `title`, `severity`, and `match`. They retain `rule_id` and `rule_version`. The collected `gen_ai.guardrail.action` is `block` for enforced blocks, `log` for log hits, or `allow` for other known verdicts. `triggered=true` still means a check verdict exists, not that a rule matched. HTTP responses continue to use `allow` / `block`; host diagnostics and local access logs retain rule text.
 
-Builtin matches use the fixed public `rule_id="builtin"` and an explicit empty `rule_version=""`. Type-based enablement and `evaluatedRules` still use the internal sensitive-type IDs. File rules keep their configured ID and version.
+Rule hits use the ID and version configured in the local rule document.
 
 See [Output Event Schema](output-event-schema.md) for the `gen_ai.guardrail.*` fields.
 
