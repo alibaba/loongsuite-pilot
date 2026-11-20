@@ -1722,7 +1722,8 @@ function Retire-PilotRuntimeOverride {
     $current = Get-PilotRuntimeOverride -Name $Name
     if (-not $current) { return }
     # Pilot-owned only: a third-party override must survive untouched.
-    if (($current -ieq $WrapperPath) -or ($current -like '*loongsuite-pilot*')) {
+    $legacyWrapperPath = Join-Path $DEFAULT_PILOT_DIR "hooks\qoderwork-runtime-wrapper.mjs"
+    if (($current -ieq $WrapperPath) -or ($current -ieq $legacyWrapperPath)) {
         $broadcasted = Remove-PilotRuntimeOverride -Name $Name
         if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
         Msg "    ✅ 已退役 $Name" "    ✅ Retired $Name"
