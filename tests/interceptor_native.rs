@@ -1,4 +1,4 @@
-//! Verify native hook routing and the OpenClaw loopback contract.
+//! Retired native commands must never fall back to the old HTTP interceptor.
 use loongsuite_pilot::interceptor::{
     daemon::{
         create_interceptor_server, write_runtime, InterceptorServerOptions, RuntimeWriteOptions,
@@ -113,34 +113,17 @@ async fn retired_hook_commands_ignore_an_active_http_interceptor() {
     .to_string();
     let full = env!("CARGO_BIN_EXE_loongsuite-pilot");
     let thin = env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook");
-    for (binary, agent) in [(full, "qoder"), (thin, "qodercli"), (full, "qwen-work-cn")] {
+    for (binary, agent) in [
+        (full, "qoder"),
+        (thin, "qodercli"),
+        (full, "qwen-work-cn"),
+        (full, "openclaw"),
+    ] {
         let output = hook(root.path(), binary, agent, &payload).await;
         success(&output);
         assert!(output.stdout.is_empty(), "{agent}");
     }
     assert_eq!(requests.load(Ordering::Relaxed), 0);
-    assert_eq!(fs::read(&runtime).unwrap(), descriptor);
-
-    // The plug-in's synchronous middleware still uses the full host's
-    // OpenClaw command and the published loopback runtime identity.
-    let openclaw = hook(
-        root.path(),
-        full,
-        "openclaw",
-        &json!({
-            "hook_event_name": "PostToolUse",
-            "openclaw_hook": "tool_result_middleware",
-            "session_id": "openclaw-session",
-            "tool_name": "read",
-            "tool_use_id": "read-1",
-            "tool_response": {"text": "sk-1234567890ABCDEFGHIJKLMN"},
-        })
-        .to_string(),
-    )
-    .await;
-    success(&openclaw);
-    assert!(String::from_utf8_lossy(&openclaw.stdout).contains("[APIKEY_BLOCKED]"));
-    assert_eq!(requests.load(Ordering::Relaxed), 1);
-    assert_eq!(fs::read(&runtime).unwrap(), descriptor);
+    assert_eq!(fs::read(runtime).unwrap(), descriptor);
     server.close().await;
 }

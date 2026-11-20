@@ -2265,3 +2265,34 @@ fn codex_sdk_deploys_trusted_hooks_and_cleans_only_its_own() {
     assert_eq!(std::fs::read(&settings).unwrap(), cleared);
     cleanup.stop();
 }
+
+#[test]
+fn openclaw_native_local_command_preserves_allow_block_and_unavailable_behavior() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("sdk");
+    let policy = json!({
+        "agents": ["openclaw"],
+        "hcd": {"agent_configs": {"openclaw": {"collection": {"enabled": false}}}},
+        "sdk_options": {"hooks": {"local": {"mode": "all", "types": []}}},
+    });
+    let mut host = Host::start(&data, policy, Box::default());
+    host.ready();
+    let call = |content: &str| {
+        let payload = json!({"openclaw_hook":"tool_result_persist","session_id":"native-edge","tool_name":"read","tool_response":content});
+        sdk_hook_command(&data, "local", "openclaw", "PostToolUse", &payload)
+            .wait_with_output()
+            .unwrap()
+    };
+    let allowed = call("ordinary tool result");
+    assert!(allowed.status.success());
+    assert!(allowed.stdout.is_empty());
+    let denied = call("LTAI1234567890ABCD");
+    assert!(denied.status.success());
+    let post: Value = serde_json::from_slice(&denied.stdout).unwrap();
+    assert!(post["action"] == "block");
+    assert!(post.to_string().contains("[ACCESSKEY_BLOCKED]"));
+    host.stop();
+    let offline = call("LTAI1234567890ABCD");
+    assert!(offline.status.success());
+    assert!(offline.stdout.is_empty());
+}

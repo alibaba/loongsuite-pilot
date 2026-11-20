@@ -9,7 +9,7 @@ use crate::interceptor::paths::{
 };
 use crate::utils::{
     acquire_single_instance_lock, create_logger, flush_logs_sync, init_file_logging,
-    read_installed_version,
+    read_installed_version, INTERCEPTOR_PROCESS_PATTERNS,
 };
 use runtime::read_installed_git_commit;
 use serde_json::{Map, Value};
@@ -41,10 +41,9 @@ pub async fn run_daemon() -> i32 {
         flush_logs_sync();
         return 1;
     }
-    // The standalone daemon and full Pilot can both own the loopback server.
     let acquired = acquire_single_instance_lock(
         &interceptor_lock_path(Some(&data_dir)).to_string_lossy(),
-        None,
+        Some(INTERCEPTOR_PROCESS_PATTERNS),
     );
     let Some(lock) = acquired.lock else {
         let mut meta = Map::new();

@@ -226,12 +226,7 @@ pub struct Orchestrator {
     summary_writer: Mutex<Option<MetricsSummaryWriter>>,
     dashboard: Mutex<Option<dashboard::DashboardServer>>,
     qoder_hooks: Mutex<Option<super::sdk_agent::SdkAgent>>,
-    openclaw_interceptor: Mutex<
-        Option<(
-            crate::interceptor::daemon::InterceptorService,
-            crate::utils::SingleInstanceLock,
-        )>,
-    >,
+    openclaw_interceptor: Mutex<Option<super::sdk_agent::SdkAgent>>,
     multimodal_ready: Mutex<bool>,
     verdicts: Mutex<Option<Arc<ToolVerdictStore>>>,
     status_bar: Mutex<Option<StatusBarAppManager>>,
@@ -536,16 +531,16 @@ impl Orchestrator {
                 }
             }
         }
-        if interceptor_config
-            .as_ref()
-            .is_some_and(|config| config.mode == crate::types::MaskMode::All)
-            && self
-                .config
-                .agents
-                .get("openclaw")
-                .is_none_or(|config| config.enabled != Some(false))
-        {
-            self.start_openclaw_interceptor().await;
+        if let Some(config) = interceptor_config.as_ref().filter(|config| {
+            config.mode == crate::types::MaskMode::All
+                && self
+                    .config
+                    .agents
+                    .get("openclaw")
+                    .is_none_or(|agent| agent.enabled != Some(false))
+        }) {
+            self.start_openclaw_interceptor(&pilot_dir, config, &state_store)
+                .await;
         }
         let deploy_entries = deployment
             .as_ref()
@@ -803,9 +798,8 @@ impl Orchestrator {
             .lock()
             .expect("OpenClaw interceptor")
             .take();
-        if let Some((service, lock)) = openclaw_interceptor {
-            service.stop().await;
-            lock.release();
+        if let Some(sdk) = openclaw_interceptor {
+            sdk.stop().await;
         }
         if let Some(verdicts) = self.verdicts.lock().expect("verdicts").clone() {
             if let Err(err) = verdicts.stop_checkpoint_loop(chrono::Utc::now().timestamp_millis()) {
@@ -2948,47 +2942,46 @@ impl Orchestrator {
                     .is_some_and(|agent| is_agent_multimodal_enabled(Some("qoder"), agent)))
     }
 
-    async fn start_openclaw_interceptor(&self) {
-        use crate::interceptor::daemon::{
-            start_interceptor_service, StartInterceptorServiceOptions,
-        };
-
-        // The injected OpenClaw plug-in speaks the installed loopback HTTP
-        // protocol for verdicts, including its synchronous result middleware.
-        let path = interceptor::interceptor_lock_path(Some(&self.data_dir));
-        let Some(lock) =
-            crate::utils::acquire_single_instance_lock(&path.to_string_lossy(), None).lock
-        else {
-            logger("Orchestrator").warn("OpenClaw interceptor startup lock unavailable", None);
-            return;
-        };
-        let verdict_store = self.verdicts.lock().expect("verdicts").clone();
-        let options = StartInterceptorServiceOptions {
-            data_dir: self.data_dir.clone(),
-            version: self.read_package_version(),
-            git_commit: Some(self.read_package_git_commit()),
-            verdict_store,
-            emit_blocked_prompt: None,
-        };
-        match start_interceptor_service(options).await {
-            Ok(service) => {
-                *self
-                    .openclaw_interceptor
-                    .lock()
-                    .expect("OpenClaw interceptor") = Some((service, lock));
-            }
-            Err(error) => {
-                lock.release();
-                let error = error.to_string();
-                logger("Orchestrator").warn(
-                    "OpenClaw interceptor start failed (non-fatal)",
-                    Some(&fields(serde_json::json!({ "error": error }))),
-                );
-                self.emit(OrchestratorEvent::ComponentFailure {
-                    component: "openclaw-interceptor".into(),
-                    error,
-                });
-            }
+    async fn start_openclaw_interceptor(
+        &self,
+        pilot_dir: &str,
+        config: &crate::types::InterceptorConfig,
+        state_store: &Arc<StateStore>,
+    ) {
+        let sdk_data = self.data_dir_join("state/standalone-openclaw-interceptor-sdk");
+        let init = serde_json::json!({
+            "data_dir": sdk_data,
+            "resource_dir": pilot_dir,
+            "home_dir": resolve_home("~"),
+            "user_id": self.config.user_id,
+        });
+        let policy = serde_json::json!({
+            "agents": ["openclaw"],
+            "hcd": {"agent_configs": {"openclaw": {"collection": {"enabled": false}}}},
+            "sdk_options": {"mask": self.config.mask, "hooks": {"local": config}},
+        });
+        let sdk = super::sdk_agent::SdkAgent::new(
+            "openclaw-plugin-log",
+            init,
+            policy,
+            &self.inputs,
+            std::path::PathBuf::from(sdk_data),
+            state_store,
+        );
+        if let Err(error) = sdk.start().await {
+            logger("Orchestrator").warn(
+                "OpenClaw SDK Hook start failed (non-fatal)",
+                Some(&fields(serde_json::json!({"error": error}))),
+            );
+            self.emit(OrchestratorEvent::ComponentFailure {
+                component: "openclaw-interceptor".into(),
+                error,
+            });
+        } else {
+            *self
+                .openclaw_interceptor
+                .lock()
+                .expect("OpenClaw interceptor") = Some(sdk);
         }
     }
 

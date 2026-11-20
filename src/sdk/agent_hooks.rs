@@ -15,6 +15,7 @@ impl AgentHook {
             "qoder" => InterceptorAgent::Qoder,
             "qodercli" => InterceptorAgent::QoderCli,
             "codex" => InterceptorAgent::Codex,
+            "openclaw" => InterceptorAgent::OpenClaw,
             _ => return None,
         }))
     }
@@ -28,7 +29,10 @@ impl AgentHook {
 
     pub(super) fn supports_blocking(self, event: &str) -> bool {
         match self.0 {
-            InterceptorAgent::Qoder | InterceptorAgent::QoderCli | InterceptorAgent::Codex => {
+            InterceptorAgent::Qoder
+            | InterceptorAgent::QoderCli
+            | InterceptorAgent::Codex
+            | InterceptorAgent::OpenClaw => {
                 matches!(event, "PreToolUse" | "PostToolUse" | "UserPromptSubmit")
             }
             _ => false,
@@ -36,7 +40,9 @@ impl AgentHook {
     }
 
     pub(super) fn parse(self, payload: &Map<String, Value>, event: &str) -> Option<HookRequest> {
-        // These adapters share the current session/tool field names.
+        if self.0 == InterceptorAgent::OpenClaw {
+            return crate::interceptor::adapters::parse_openclaw_hook_request(payload, Some(event));
+        }
         parse_hook_request(payload, self.0, Some(event))
     }
 
