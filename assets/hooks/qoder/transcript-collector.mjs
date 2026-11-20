@@ -699,12 +699,12 @@ export class QoderTranscriptCollector {
     // cursor. Reserve room for new sources under the same per-poll limit.
     const ordinary = await this.sources(MAX_SOURCES_PER_CYCLE - retries.length);
     const lanes = [priority, retries, ordinary];
-    const contended = retries.length > 0 && ordinary.length > 0;
+    const contended = ordinary.length > 0 && (retries.length > 0 || priority.length > 0);
     const firstLane = contended ? this.nextSourceLane : 0;
     if (contended) this.nextSourceLane = (firstLane + 1) % lanes.length;
     // A source may spend the whole transcript byte or record budget in one
-    // visit. Rotate which queue starts with the full budget during legacy
-    // retry contention so all queues, including parent priority, can advance.
+    // visit. Rotate which queue starts with the full budget under contention
+    // so priority parent discovery and legacy scan retries leave room for new work.
     const scheduled = [...lanes.slice(firstLane), ...lanes.slice(0, firstLane)].flat();
     const entries = [...new Map(scheduled.map(entry => [entry.name, entry])).values()];
     // Seed only bounded scheduler queues; do not walk all historical checkpoints.

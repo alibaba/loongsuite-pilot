@@ -532,6 +532,41 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
     expect(children[0].parentSpanId).toBe(targetTool?.spanContext().spanId);
   }, 30_000);
 
+  it('keeps a quiet root moving while unresolved modern parents exhaust priority budget', async () => {
+    let collector: any;
+    const h = await harness(agentId, false, instance => { collector = instance; });
+    await h.write(null, [prompt('busy-priority', 0)]);
+    await h.write('pending-modern-child', [prompt('pending-modern-child', 1, 'pending-parent-tool', 'pending-modern-child'), ...end('child', 2)]);
+    await h.start();
+    await h.cycle();
+    expect(collector.legacyProofRetries.size).toBe(0);
+    expect(collector.prioritySources.size).toBeGreaterThan(0);
+
+    const quietSession = 'synthetic-quiet-ordinary-session';
+    const quietPath = path.join(h.root, `${quietSession}.jsonl`);
+    await fs.writeFile(quietPath, jsonl([prompt('quiet-root', 0), ...end('quiet-root', 1)]
+      .map(row => ({ ...row, sessionId: quietSession }))));
+    expect(publishQoderWakeup({ session_id: quietSession, transcript_path: quietPath,
+      hook_event_name: 'Stop', cwd: h.root }, { dataDir: h.root, agentId })).toBe(true);
+
+    const collect = collector.collect.bind(collector);
+    const bytePressure = jsonl(Array.from({ length: 100 }, () => ({
+      type: 'progress', sessionId: session, data: { detail: 'x'.repeat(48 * 1024) },
+    })));
+    const exhausted = [];
+    collector.collect = async (...args: any[]) => {
+      await fs.appendFile(h.parent, bytePressure);
+      const result = await collect(...args);
+      exhausted.push(collector.remainingBytes <= 0);
+      return result;
+    };
+    for (let i = 0; i < 4; i++) await h.cycle();
+    expect(exhausted.filter(Boolean).length).toBeGreaterThan(1);
+    const spans = await spansFor(h.entries());
+    expect(spans.filter(span => span.attributes['gen_ai.session.id'] === quietSession
+      && span.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(1);
+  }, 30_000);
+
   it('reopens a committed synthetic legacy source when the native transcript grows', async () => {
     const h = await harness(agentId);
     const source = await legacyParent(h.root, session);
