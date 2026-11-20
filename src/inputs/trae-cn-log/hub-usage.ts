@@ -157,12 +157,17 @@ export class HubUsage {
       entry[prefix + 'cached_tokens_observed'] = cached;
       if (input > 0) entry[prefix + 'cache_hit_ratio_observed'] = cached / input;
     }
-    if (complete && entry['gen_ai.usage.input_tokens'] == null) {
-      entry['gen_ai.usage.input_tokens'] = input;
-      entry['gen_ai.usage.output_tokens'] = output;
-      entry['gen_ai.usage.total_tokens'] = input + output;
-      if (allCached) entry['gen_ai.usage.cache_read.input_tokens'] = cached;
-    }
+    if (!complete) return;
+    // Hook fields can arrive independently. Combine sources only when the
+    // counters they both report describe the same usage.
+    const counts = {
+      'gen_ai.usage.input_tokens': input,
+      'gen_ai.usage.output_tokens': output,
+      'gen_ai.usage.total_tokens': input + output,
+      ...(allCached ? { 'gen_ai.usage.cache_read.input_tokens': cached } : {}),
+    };
+    if (Object.entries(counts).some(([key, value]) => entry[key] != null && entry[key] !== value)) return;
+    for (const [key, value] of Object.entries(counts)) entry[key] ??= value;
   }
 
   async close() {

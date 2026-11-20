@@ -33,6 +33,14 @@ it.each([true, false])('joins cache counts by call ID, with continuous stream=%s
     hub.enrich(e);
     expect(e['agent.trae-cn.hub.cache_hit_ratio_observed']).toBe(0.25);
     expect(e['gen_ai.usage.total_tokens']).toBe(complete ? 405 : undefined);
+    const partialHook = response('call_example');
+    partialHook['gen_ai.usage.input_tokens'] = 400;
+    hub.enrich(partialHook);
+    expect(partialHook['gen_ai.usage.cache_read.input_tokens']).toBe(complete ? 100 : undefined);
+    const conflictingHook = response('call_example');
+    conflictingHook['gen_ai.usage.input_tokens'] = 300;
+    hub.enrich(conflictingHook);
+    expect(conflictingHook['gen_ai.usage.cache_read.input_tokens']).toBeUndefined();
     const other = response('different');
     hub.enrich(other);
     expect(other['agent.trae-cn.hub.trace_id']).toBeUndefined();
