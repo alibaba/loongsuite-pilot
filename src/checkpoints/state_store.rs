@@ -28,6 +28,7 @@ type WriteHook = Arc<
         + Send
         + Sync,
 >;
+type HandoffValidator = fn(&InputState) -> bool;
 
 /// One input's persisted checkpoint.
 ///
@@ -168,6 +169,10 @@ impl InputState {
         };
         let current = std::mem::replace(&mut self.fields[index].1, JVal::Null);
         self.fields[index].1 = normalize_extra(current);
+    }
+
+    pub(crate) fn from_json(value: serde_json::Value) -> Option<Self> {
+        Self::from_jval(json_file::from_value(value))
     }
 
     fn from_jval(value: JVal) -> Option<Self> {
@@ -505,35 +510,25 @@ impl StateStore {
 
     pub(crate) async fn check_for_handoff(
         &self,
-        required_namespace: Option<&str>,
+        required_input: Option<(&str, HandoffValidator)>,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.mu.lock().unwrap().initial_read_incomplete,
             "legacy checkpoint was not loaded; repair it and restart Pilot before switching history collection"
         );
         let checkpoint = self.read_for_handoff().await?;
-        if let Some(namespace) = required_namespace {
+        if let Some((input, validate)) = required_input {
             let stored = match checkpoint {
                 Some(JVal::Object(entries)) => entries
                     .into_iter()
-                    .filter(|(key, _)| key_in_namespace(key, namespace))
-                    .filter_map(|(key, value)| {
-                        InputState::from_jval(value).map(|state| (key, state))
-                    })
-                    .collect::<HashMap<_, _>>(),
-                _ => HashMap::new(),
+                    .find(|(key, _)| key == input)
+                    .and_then(|(_, value)| InputState::from_jval(value)),
+                _ => None,
             };
             let data = self.mu.lock().unwrap();
-            let loaded: Vec<_> = data
-                .states
-                .iter()
-                .filter(|(key, _)| key_in_namespace(key, namespace))
-                .collect();
             anyhow::ensure!(
-                !stored.is_empty()
-                    && loaded.len() == stored.len()
-                    && loaded.into_iter().all(|(key, state)| stored.get(key) == Some(state)),
-                "authoritative legacy checkpoint for {namespace} is missing or has changed; restore it and restart Pilot before switching history collection"
+                stored.as_ref().is_some_and(validate) && data.states.get(input) == stored.as_ref(),
+                "authoritative legacy checkpoint for {input} is missing, invalid, or has changed; restore it and restart Pilot before switching history collection"
             );
         }
         Ok(())

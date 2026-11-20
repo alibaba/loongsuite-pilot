@@ -510,11 +510,7 @@ impl Outbox {
             return Ok(ShellCheckpoint::Pending);
         }
         if Self::find_checkpoint(&db, handoff.marker())?.is_some() {
-            let has_progress = db.query_row(
-                "SELECT EXISTS (SELECT 1 FROM checkpoint WHERE source<>?1 AND json<>'{}')",
-                [handoff.marker()],
-                |row| row.get(0),
-            )?;
+            let has_progress = Self::has_checkpoint_progress(&db, handoff)?;
             return Ok(ShellCheckpoint::Exported { has_progress });
         }
         let checkpoint = Self::find_checkpoint(&db, source)?;
@@ -529,6 +525,17 @@ impl Outbox {
             );
         }
         Ok(ShellCheckpoint::Ready(checkpoint))
+    }
+
+    fn has_checkpoint_progress(
+        db: &Connection,
+        handoff: LegacyCheckpointHandoff,
+    ) -> anyhow::Result<bool> {
+        Ok(db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM checkpoint WHERE source<>?1 AND json<>'{}')",
+            [handoff.marker()],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn restore(&self, source: &str, path: &Path) -> anyhow::Result<()> {
@@ -570,6 +577,28 @@ impl Outbox {
                 "checkpoint handoff retains unacknowledged activity"
             );
             let checkpoint = read_shell_checkpoint()?;
+            let history_profile = match handoff {
+                LegacyCheckpointHandoff::HookHistory(agent) => super::hook_history::find(agent),
+                _ => None,
+            };
+            if let Some(profile) = history_profile {
+                let decoded = checkpoint
+                    .as_deref()
+                    .map(serde_json::from_str::<serde_json::Map<String, Value>>)
+                    .transpose()?;
+                let empty = decoded.as_ref().is_none_or(serde_json::Map::is_empty);
+                let valid = decoded
+                    .and_then(|mut state| state.remove(profile.listener))
+                    .and_then(crate::checkpoints::InputState::from_json)
+                    .is_some_and(|state| {
+                        crate::inputs::rest_support::has_usable_hook_log_cursor(&state)
+                    });
+                anyhow::ensure!(
+                    valid || (empty && !Self::has_checkpoint_progress(&tx, handoff)?),
+                    "authoritative legacy checkpoint for {} is missing or invalid; restore it before restarting SDK history",
+                    profile.listener
+                );
+            }
             let checkpoint = if handoff != LegacyCheckpointHandoff::Codex {
                 // A missing legacy namespace cannot advance an existing cursor.
                 let checkpoint = match checkpoint {

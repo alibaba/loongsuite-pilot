@@ -303,11 +303,29 @@ impl Context {
                 // A fresh SDK source may only have imported the Node checkpoint.
                 checkpoint.load().await;
             }
+            let history_profile = match handoff {
+                Some(LegacyCheckpointHandoff::HookHistory(agent)) => {
+                    crate::sdk::hook_history::find(agent)
+                }
+                _ => None,
+            };
+            let can_export = if let Some(profile) = history_profile {
+                profile
+                    .can_export_checkpoint(
+                        &checkpoint,
+                        persisted.as_deref().is_some_and(|text| text != "{}"),
+                    )
+                    .map_err(|error| error.to_string())?
+            } else {
+                true
+            };
             let mut imported = false;
-            for id in checkpoint.keys() {
-                if crate::checkpoints::key_in_namespace(&id, self.input) {
-                    legacy.set(&id, checkpoint.get(&id));
-                    imported = true;
+            if can_export {
+                for id in checkpoint.keys() {
+                    if crate::checkpoints::key_in_namespace(&id, self.input) {
+                        legacy.set(&id, checkpoint.get(&id));
+                        imported = true;
+                    }
                 }
             }
             if imported {

@@ -158,6 +158,11 @@ async fn history_handoff_requires_reloading_a_repaired_shared_checkpoint() {
 
 #[tokio::test]
 async fn exported_history_requires_the_authoritative_namespace_when_progress_exists() {
+    let listener = crate::sdk::hook_history::PROFILES[0].listener;
+    let requirement: Option<(&str, fn(&InputState) -> bool)> = Some((
+        listener,
+        crate::inputs::rest_support::has_usable_hook_log_cursor,
+    ));
     let directory = tempfile::tempdir().unwrap();
     let path = directory
         .path()
@@ -167,18 +172,23 @@ async fn exported_history_requires_the_authoritative_namespace_when_progress_exi
     let store = StateStore::new(&path);
     store.load().await;
     store.check_for_handoff(None).await.unwrap();
-    assert!(store.check_for_handoff(Some("opencode-log")).await.is_err());
-
-    std::fs::write(&path, r#"{"other-agent:existing":{"lastOffset":48}}"#).unwrap();
+    assert!(store.check_for_handoff(requirement).await.is_err());
+    let cursor = |offset| json!({"lastFile": "history-2026-10-01.jsonl", "lastOffset": offset});
+    for invalid in [
+        json!({"other-agent": cursor(48)}),
+        json!({(format!("{listener}:existing")): cursor(48)}),
+        json!({(listener): {}}),
+    ] {
+        std::fs::write(&path, invalid.to_string()).unwrap();
+        store.load_for_handoff().await.unwrap();
+        assert!(store.check_for_handoff(requirement).await.is_err());
+    }
+    std::fs::write(&path, json!({(listener): cursor(52)}).to_string()).unwrap();
+    assert!(store.check_for_handoff(requirement).await.is_err());
     store.load_for_handoff().await.unwrap();
-    assert!(store.check_for_handoff(Some("opencode-log")).await.is_err());
-
-    std::fs::write(&path, r#"{"opencode-log:existing":{"lastOffset":52}}"#).unwrap();
-    assert!(store.check_for_handoff(Some("opencode-log")).await.is_err());
+    store.check_for_handoff(requirement).await.unwrap();
+    std::fs::write(&path, json!({(listener): cursor(63)}).to_string()).unwrap();
+    assert!(store.check_for_handoff(requirement).await.is_err());
     store.load_for_handoff().await.unwrap();
-    store.check_for_handoff(Some("opencode-log")).await.unwrap();
-    std::fs::write(&path, r#"{"opencode-log:existing":{"lastOffset":63}}"#).unwrap();
-    assert!(store.check_for_handoff(Some("opencode-log")).await.is_err());
-    store.load_for_handoff().await.unwrap();
-    store.check_for_handoff(Some("opencode-log")).await.unwrap();
+    store.check_for_handoff(requirement).await.unwrap();
 }

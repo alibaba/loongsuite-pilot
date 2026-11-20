@@ -4,7 +4,7 @@ pub(crate) use super::policy::canonical_candidate as canonical_data_dir;
 use super::policy::{Init, Policy};
 use crate::checkpoints::{key_in_namespace, StateStore};
 use crate::inputs::base::HostedInput;
-use crate::inputs::rest_support::{HookInputOptions, SdkHookBody};
+use crate::inputs::rest_support::{has_usable_hook_log_cursor, HookInputOptions, SdkHookBody};
 use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -74,6 +74,20 @@ impl HookHistoryProfile {
         }
     }
 
+    pub(crate) fn can_export_checkpoint(
+        &self,
+        checkpoint: &StateStore,
+        has_progress: bool,
+    ) -> anyhow::Result<bool> {
+        let usable = has_usable_hook_log_cursor(&checkpoint.get(self.listener));
+        anyhow::ensure!(
+            usable || !has_progress,
+            "SDK checkpoint for {} has no usable Hook log cursor; previous Pilot checkpoint retained",
+            self.listener
+        );
+        Ok(usable)
+    }
+
     /// Before opening a legacy reader, transfer the SQLite cursor only once
     /// the queue has drained. Keep SDK ownership until the caller cuts over.
     pub(crate) async fn export_checkpoint(
@@ -114,7 +128,9 @@ impl HookHistoryProfile {
             ShellCheckpoint::Pending => return Ok(LegacyHistoryOwnership::Pending),
             ShellCheckpoint::Exported { has_progress } => {
                 legacy
-                    .check_for_handoff(has_progress.then_some(self.listener))
+                    .check_for_handoff(
+                        has_progress.then_some((self.listener, has_usable_hook_log_cursor)),
+                    )
                     .await?;
                 return Ok(LegacyHistoryOwnership::Ready(Some(lock)));
             }
@@ -128,12 +144,14 @@ impl HookHistoryProfile {
                             .join("input-state.json"),
                     );
                     checkpoint.load_checkpoint_text(&text)?;
-                    for id in checkpoint.keys() {
-                        if key_in_namespace(&id, self.listener) {
-                            legacy.set(&id, checkpoint.get(&id));
+                    if self.can_export_checkpoint(&checkpoint, text != "{}")? {
+                        for id in checkpoint.keys() {
+                            if key_in_namespace(&id, self.listener) {
+                                legacy.set(&id, checkpoint.get(&id));
+                            }
                         }
+                        legacy.save().await?;
                     }
-                    legacy.save().await?;
                 }
             }
         }
