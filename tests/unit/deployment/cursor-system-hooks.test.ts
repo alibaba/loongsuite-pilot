@@ -26,11 +26,18 @@ let def: AgentDefinition;
 let restore: () => void;
 let runtimeRoot: string;
 let trustedNode: string;
+let pilotDir: string;
 beforeAll(async () => {
   runtimeRoot = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'cursor-system-runtime-'));
   trustedNode = path.join(runtimeRoot, path.basename(process.execPath));
-  // The CI runner may install Node beneath a group-writable home directory.
-  await fs.copyFile(process.execPath, trustedNode, fs.constants.COPYFILE_FICLONE);
+  pilotDir = path.join(runtimeRoot, 'pilot');
+  await fs.mkdir(path.join(pilotDir, 'assets'), { recursive: true });
+  // Model an installed, trusted runtime even when CI uses a shared checkout.
+  await Promise.all([
+    fs.copyFile(process.execPath, trustedNode, fs.constants.COPYFILE_FICLONE),
+    fs.cp(path.resolve('assets/hooks'), path.join(pilotDir, 'assets/hooks'), { recursive: true }),
+    fs.cp(path.resolve('agents.d'), path.join(pilotDir, 'agents.d'), { recursive: true }),
+  ]);
   await fs.chmod(trustedNode, 0o700);
 });
 afterAll(async () => { await fs.rm(runtimeRoot, { recursive: true, force: true }); });
@@ -153,7 +160,7 @@ describe('Cursor enterprise system registration', () => {
     await fs.chmod(agent, 0o755);
     vi.stubEnv('PATH', bin + path.delimiter + '/usr/bin:/bin');
     try {
-      const opts = { dataDir, pilotDir: path.resolve('.'), builtinAgentsDir: builtin, deploymentScope: 'system' as const };
+      const opts = { dataDir, pilotDir, builtinAgentsDir: builtin, deploymentScope: 'system' as const };
       const ide = await runHookInstall(opts);
       expect(ide.report.agents[0]).toMatchObject({ id: 'cursor', settingsPath: def.hook!.settingsPath });
       expect(ide.report.agents[0]).not.toHaveProperty('hookScope');
@@ -181,7 +188,7 @@ describe('Cursor enterprise system registration', () => {
         hook: { ...def.hook, systemSettingsPath: undefined, hookCommand: '', events: [] } };
       await write(path.join(builtin, 'cursor-cli.json'), JSON.stringify(cli));
       await fs.mkdir(path.join(root, 'cli-installed'));
-      const opts = { dataDir, pilotDir: path.resolve('.'), builtinAgentsDir: builtin, agentsFlag };
+      const opts = { dataDir, pilotDir, builtinAgentsDir: builtin, agentsFlag };
       const result = await runHookInstall({ ...opts, deploymentScope: 'system' });
       expect(result.exitCode).toBe(0);
       expect((await fs.stat(path.join(dataDir, 'logs/cursor/history'))).isDirectory()).toBe(true);
@@ -210,7 +217,7 @@ describe('Cursor enterprise system registration', () => {
     await write(path.join(builtin, 'cursor.json'), JSON.stringify(def));
     await write(path.join(builtin, 'cursor-cli.json'), JSON.stringify({ ...def, id: 'cursor-cli', hook: { ...def.hook, events: [], hookCommand: '' } }));
     await fs.mkdir(path.join(root, 'user/.cursor'), { recursive: true });
-    const opts = { dataDir, pilotDir: path.resolve('.'), builtinAgentsDir: builtin };
+    const opts = { dataDir, pilotDir, builtinAgentsDir: builtin };
     expect((await runHookInstall({ ...opts, agentsFlag: 'cursor' })).exitCode).toBe(0);
     expect(await fs.stat(def.hook!.systemSettingsPath!).catch(() => null)).toBeNull();
     expect((await runHookInstall({ ...opts, agentsFlag: 'cursor-cli', deploymentScope: 'system' })).exitCode).toBe(0);
@@ -227,7 +234,7 @@ describe('Cursor enterprise system registration', () => {
     await fs.mkdir(cliHome);
     await write(path.join(builtin, 'cursor-cli.json'), JSON.stringify({ ...def, id: 'cursor-cli',
       detection: { paths: [cliHome], commands: [] }, hook: { ...def.hook, events: [], hookCommand: '' } }));
-    const opts = { dataDir, pilotDir: path.resolve('.'), builtinAgentsDir: builtin, agentsFlag: 'cursor-cli', deploymentScope: 'system' as const };
+    const opts = { dataDir, pilotDir, builtinAgentsDir: builtin, agentsFlag: 'cursor-cli', deploymentScope: 'system' as const };
     const cliDisabled = await runHookInstall({ ...opts, enabled: id => id !== 'cursor-cli' });
     expect(cliDisabled.report.agents[0]).toMatchObject({ id: 'cursor-cli', reason: 'disabled' });
     const cursorDisabled = await runHookInstall({ ...opts, enabled: id => id !== 'cursor' });
@@ -240,7 +247,7 @@ describe('Cursor enterprise system registration', () => {
   it('refuses to register a local Cursor command outside the managed runtime', async () => {
     const builtinAgentsDir = path.join(root, 'agents.d');
     await write(path.join(builtinAgentsDir, 'cursor.json'), JSON.stringify(def));
-    const manager = new DeploymentManager({ dataDir, pilotDir: path.resolve('.'), builtinAgentsDir });
+    const manager = new DeploymentManager({ dataDir, pilotDir, builtinAgentsDir });
     const target = systemHookDefinition(def);
     const customer = { version: 1, hooks: { stop: [{ command: 'customer-audit' }] } };
     await write(target.hook!.settingsPath, JSON.stringify(customer));
@@ -266,7 +273,7 @@ describe('Cursor enterprise system registration', () => {
   it('writes independent identities to the common journal without inherited Pilot variables', async () => {
     const homes = ['a', 'b', 'created-after-install'].map(identity => path.join(root, identity));
     await Promise.all(homes.slice(0, 2).map(home => fs.mkdir(home)));
-    const manager = new DeploymentManager({ dataDir, pilotDir: path.resolve('.') });
+    const manager = new DeploymentManager({ dataDir, pilotDir });
     const target = systemHookDefinition(def);
     const journalDir = path.join(dataDir, 'state/cursor');
     await fs.mkdir(journalDir, { recursive: true, mode: 0o755 });
@@ -312,7 +319,6 @@ describe('Cursor enterprise system registration', () => {
 
   it('refuses an untrusted installed asset, Node pin or executable without using the caller fallback', async () => {
     const target = systemHookDefinition(def);
-    const pilotDir = path.resolve('.');
     const manager = new DeploymentManager({ dataDir, pilotDir });
     expect((await manager.deployHookScope(target)).success).toBe(true);
     const { hooks } = JSON.parse(await fs.readFile(target.hook!.settingsPath, 'utf8'));
