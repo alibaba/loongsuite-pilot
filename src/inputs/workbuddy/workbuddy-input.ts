@@ -527,6 +527,7 @@ function findFirstUnsealedUser(
   let needsOwnStop = false;
   let currentTerminal: { atMs?: number; cancelled: boolean } | undefined;
   let currentActivityAtMs: number | undefined;
+  let terminalReasoningAtMs: number | undefined;
   let previousTerminalAtMs: number | undefined;
   let previousCancelledActivityAtMs: number | undefined;
   let previousCancellationHadPrompt = false;
@@ -537,8 +538,8 @@ function findFirstUnsealedUser(
     if (earlierCompletedTurns < stopCount) return true;
     const lowerBound = previousTerminalAtMs ?? previousCancelledActivityAtMs;
     if (lowerBound === undefined || (currentUserAtMs !== undefined && currentUserAtMs <= lowerBound)) return false;
-    // Two untimed boundaries need distinct prompt observations. A single
-    // prompt after earlier activity could still belong to the canceled turn.
+    // An untimed prompt after earlier activity needs an established
+    // earlier prompt. Native timing can establish it even if its Hook is missing.
     if (previousTerminalAtMs === undefined && currentUserAtMs === undefined && !previousCancellationHadPrompt) {
       return false;
     }
@@ -577,8 +578,10 @@ function findFirstUnsealedUser(
       if (currentTerminal) {
         const lastActivityAt = currentTerminal.cancelled ? currentActivityAtMs : undefined;
         const priorBoundaryAt = previousTerminalAtMs ?? previousCancelledActivityAtMs ?? 0;
+        const nativePrompt = currentUserAtMs;
         previousCancellationHadPrompt = lastActivityAt !== undefined
-          && promptTimes.some(atMs => atMs > priorBoundaryAt && atMs <= lastActivityAt);
+          && ((nativePrompt !== undefined && nativePrompt > priorBoundaryAt && nativePrompt <= lastActivityAt)
+            || promptTimes.some(atMs => atMs > priorBoundaryAt && atMs <= lastActivityAt));
         previousCancelledActivityAtMs = lastActivityAt;
         previousTerminalAtMs = currentTerminal.atMs;
         earlierCompletedTurns++;
@@ -592,10 +595,19 @@ function findFirstUnsealedUser(
       currentUserAtMs = timestamp;
       currentTerminal = undefined;
       currentActivityAtMs = undefined;
+      terminalReasoningAtMs = undefined;
       continue;
     }
+    // An ordinary native response can be timed by reasoning in the same
+    // model step. Reasoning before a tool wave does not time the final step.
+    if (record.type === 'function_call' || record.type === 'function_call_result') terminalReasoningAtMs = undefined;
+    if (record.type === 'reasoning' && timestamp !== undefined) {
+      terminalReasoningAtMs = Math.max(terminalReasoningAtMs ?? timestamp, timestamp);
+    }
     if (currentUser !== undefined && terminalAssistant) {
-      currentTerminal = { atMs: timestamp, cancelled: record.status === 'incomplete' };
+      const cancelled = record.status === 'incomplete';
+      currentTerminal = { atMs: timestamp ?? (cancelled ? undefined : terminalReasoningAtMs), cancelled };
+      terminalReasoningAtMs = undefined;
     }
     if (currentUser === undefined || timestamp === undefined
       || !['message', 'reasoning', 'function_call', 'function_call_result'].includes(record.type ?? '')) continue;
