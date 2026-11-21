@@ -5,9 +5,14 @@ DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-}"
 if [ -z "$DATA_DIR" ] && [ -f "$HOME/.loongsuite-pilot/data-dir" ]; then
     DATA_DIR=$(cat "$HOME/.loongsuite-pilot/data-dir")
 fi
-DATA_DIR="${DATA_DIR:-$HOME/.loongsuite-pilot}"
+if [ -n "$DATA_DIR" ] && [[ "$DATA_DIR" != /* ]]; then DATA_DIR="$PWD/$DATA_DIR"; fi
+case "$DATA_DIR" in
+    "") DATA_DIR="$HOME/.loongsuite-pilot"; unset LOONGSUITE_PILOT_DATA_DIR ;;
+    *$'\n'*|*$'\r'*) echo "Pilot data directory must be a single-line path" >&2; exit 1 ;;
+    *) export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" ;;
+esac
 CACHE_DIR="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSIONS_DIR="$CACHE_DIR/versions"
 CURRENT_FILE="$CACHE_DIR/current"
 PREVIOUS_FILE="$CACHE_DIR/previous"
@@ -2176,6 +2181,15 @@ _systemd_escape_value() {
     printf '%s' "$value"
 }
 
+_systemd_data_environment() {
+    if [ -n "${LOONGSUITE_PILOT_DATA_DIR:-}" ]; then
+        printf 'Environment="LOONGSUITE_PILOT_DATA_DIR=%s"\n' "$(_systemd_escape_value "$DATA_DIR")"
+    fi
+    printf 'Environment="AGENT_DATA_COLLECTION_CONFIG=%s"\n' "$(_systemd_escape_value "$CONFIG_FILE")"
+}
+
+# The raw WorkingDirectory value ends in /. so a directory whose name ends in
+# whitespace or a backslash keeps its literal name when systemd reads the line.
 _write_systemd_user_unit() {
     mkdir -p "$SYSTEMD_USER_UNIT_DIR"
     cat > "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot.service" << UNITEOF
@@ -2186,9 +2200,8 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/loongsuite-pilot run
-WorkingDirectory=${DATA_DIR//%/%%}
-Environment="LOONGSUITE_PILOT_DATA_DIR=$(_systemd_escape_value "$DATA_DIR")"
-Environment="AGENT_DATA_COLLECTION_CONFIG=$(_systemd_escape_value "$CONFIG_FILE")"
+WorkingDirectory=${DATA_DIR//%/%%}/.
+$(_systemd_data_environment)
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=65536
@@ -2208,9 +2221,8 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/loongsuite-pilot run-updater
-WorkingDirectory=${DATA_DIR//%/%%}
-Environment="LOONGSUITE_PILOT_DATA_DIR=$(_systemd_escape_value "$DATA_DIR")"
-Environment="AGENT_DATA_COLLECTION_CONFIG=$(_systemd_escape_value "$CONFIG_FILE")"
+WorkingDirectory=${DATA_DIR//%/%%}/.
+$(_systemd_data_environment)
 KillMode=process
 Restart=on-failure
 RestartSec=60
@@ -2226,8 +2238,6 @@ _write_systemd_system_unit() {
     local target_home
     target_home=$(resolve_user_home "$target_user")
     local target_bin="$target_home/.local/bin/loongsuite-pilot"
-    local target_config="$CONFIG_FILE"
-    local target_workdir="$DATA_DIR"
     local unit_name="loongsuite-pilot-${target_user}.service"
     local unit_path="$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name"
 
@@ -2243,10 +2253,9 @@ Type=simple
 User=${target_user}
 Group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
 ExecStart=${target_bin} run
-WorkingDirectory=${target_workdir//%/%%}
+WorkingDirectory=${DATA_DIR//%/%%}/.
 Environment=HOME=${target_home}
-Environment="LOONGSUITE_PILOT_DATA_DIR=$(_systemd_escape_value "$target_workdir")"
-Environment="AGENT_DATA_COLLECTION_CONFIG=$(_systemd_escape_value "$target_config")"
+$(_systemd_data_environment)
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=65536
@@ -2301,8 +2310,6 @@ _write_systemd_system_updater_unit() {
     local target_home
     target_home=$(resolve_user_home "$target_user")
     local target_bin="$target_home/.local/bin/loongsuite-pilot"
-    local target_config="$CONFIG_FILE"
-    local target_workdir="$DATA_DIR"
     local unit_name="loongsuite-pilot-updater-${target_user}.service"
     local unit_path="$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name"
 
@@ -2318,10 +2325,9 @@ Type=simple
 User=${target_user}
 Group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
 ExecStart=${target_bin} run-updater
-WorkingDirectory=${target_workdir//%/%%}
+WorkingDirectory=${DATA_DIR//%/%%}/.
 Environment=HOME=${target_home}
-Environment="LOONGSUITE_PILOT_DATA_DIR=$(_systemd_escape_value "$target_workdir")"
-Environment="AGENT_DATA_COLLECTION_CONFIG=$(_systemd_escape_value "$target_config")"
+$(_systemd_data_environment)
 KillMode=process
 Restart=on-failure
 RestartSec=60
