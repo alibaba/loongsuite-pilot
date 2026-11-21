@@ -38,7 +38,7 @@ source, output, installed-runtime and cloud evidence.
   "collectTrace": true,
   "serviceName": "my-agent-service",
   "otlpTrace": {
-    "endpoint": "https://otel-collector.example.com",
+    "traceEndpoint": "https://traces.example.com/v1/otel/traces",
     "headers": {
       "Authorization": "Bearer token"
     },
@@ -55,7 +55,8 @@ source, output, installed-runtime and cloud evidence.
 |---------|-------------|
 | `collectTrace` | Master switch for trace export. |
 | `serviceName` | Exact `service.name` shared by every agent, OTLP backend, and SLS backend. |
-| `otlpTrace.endpoint` | OTLP HTTP base URL. Pilot auto-appends `/v1/traces` if the path does not already end with it. |
+| `otlpTrace.traceEndpoint` | Full OTLP HTTP trace URL. Its path, including a trailing slash, is used as configured. Takes precedence over `endpoint`. Use `headers` for authentication because the HTTP exporter uses the URL's scheme, host, port, and path. |
+| `otlpTrace.endpoint` | Legacy trace base URL. Pilot appends `/v1/traces` when needed. |
 | `otlpTrace.headers` | Headers sent to the OTLP endpoint. |
 | `otlpTrace.serviceName` | Legacy trace-only service-name base. Pilot appends `-<agentType>`; top-level `serviceName` takes precedence and disables the suffix. |
 | `otlpTrace.resourceAttributes` | Extra OpenTelemetry resource attributes. |
@@ -100,7 +101,8 @@ Environment variables:
 |----------|-------------|
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | Set `false` or `0` to disable trace export. |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | Exact service name shared by all agents and reporting backends. |
-| `LOONGSUITE_PILOT_OTLP_ENDPOINT` | OTLP trace endpoint. |
+| `LOONGSUITE_PILOT_OTLP_TRACES_ENDPOINT` | Full signal-specific OTLP trace URL, with its path used as configured. Takes precedence over the legacy environment variable and file routes. |
+| `LOONGSUITE_PILOT_OTLP_ENDPOINT` | Legacy OTLP trace base URL. Takes precedence over file routes and receives `/v1/traces` when needed. |
 | `LOONGSUITE_PILOT_OTLP_HEADERS` | JSON string for OTLP headers. |
 
 ## Custom Span Enrichment
@@ -219,7 +221,7 @@ Managed/hosted deployments can push extra trace backends via `~/.loongsuite-pilo
   "otlp": [
     {
       "name": "team-collector",
-      "endpoint": "https://collector.internal:4318",
+      "traceEndpoint": "https://traces.internal:4318/v1/traces",
       "headers": { "x-token": "..." },
       "compression": "gzip"
     }
@@ -240,7 +242,8 @@ Managed/hosted deployments can push extra trace backends via `~/.loongsuite-pilo
 |-------|-----------|-------------|
 | `serviceNamePrefix` | top-level | Service-name prefix for **all** managed backends — trace (`otlp[]`/`cms[]`, as `service.name`) and log (`sls[]`, as the `__service_name__` tag) — keeping them distinct from user backends. Optional; falls back to the user `serviceNamePrefix` when omitted (no differentiation). A user-configured top-level `serviceName` overrides this prefix. |
 | `otlp[].name` / `cms[].name` | both | Label used in logs and in the per-backend failed-log filename. Optional (defaults to `inner-otlp-<i>` / `inner-cms-<i>`). |
-| `otlp[].endpoint` | otlp | OTLP HTTP base URL (`/v1/traces` auto-appended). |
+| `otlp[].traceEndpoint` | otlp | Full OTLP HTTP trace URL. Its path, including a trailing slash, is used as configured. Takes precedence over `endpoint`. Use `headers` for authentication. |
+| `otlp[].endpoint` | otlp | Legacy trace base URL (`/v1/traces` auto-appended). |
 | `otlp[].headers` | otlp | Request headers (e.g. auth token). |
 | `otlp[].compression` | otlp | `gzip` (default) or `none`. |
 | `cms[].endpoint` | cms | ARMS/CMS trace endpoint. |
