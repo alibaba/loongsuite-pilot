@@ -425,7 +425,9 @@ remove_pi_coding_agent_extension`, 'cleanup', dataDir], {
 
   it('prefers the persisted Pi pluginInjectConfigPath over the current env', () => {
     expect(sh).toContain('state?.["pi-coding-agent"]?.pluginInjectConfigPath');
-    expect(ps1).toContain('state?.["pi-coding-agent"]?.pluginInjectConfigPath');
+    // The Windows probe is single-quoted only: PowerShell rewrites double quotes
+    // inside a multi-line -e argument, so this block cannot contain them.
+    expect(ps1).toContain("state?.['pi-coding-agent']?.pluginInjectConfigPath");
   });
 
   it('discovers registered PI SDK Agent settings from local definitions', () => {
@@ -923,7 +925,8 @@ describe('Grok Build uninstall smoke', () => {
 
   it('prefers the persisted Grok hookSettingsPath over the current env', () => {
     expect(sh).toContain('state?.["grok-build"]?.hookSettingsPath');
-    expect(ps1).toContain('state?.["grok-build"]?.hookSettingsPath');
+    // Single quotes for the same reason as the Pi probe above.
+    expect(ps1).toContain("state?.['grok-build']?.hookSettingsPath");
   });
 
   it('cleans the Windows Grok config before deleting the pinned runtime and assets', () => {
