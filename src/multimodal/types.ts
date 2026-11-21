@@ -18,8 +18,17 @@ export interface UploadItem {
   expectedSize: number;
 }
 
+export interface UploadOptions {
+  skipIfExists?: boolean;
+  onStorageBaseInvalidated?: () => void;
+}
+
+export type StorageBaseResult =
+  | { ok: true; storageBasePath: string }
+  | { ok: false; error: string };
+
 export interface Uploader {
-  upload(item: UploadItem, opts?: { skipIfExists?: boolean }): Promise<boolean>;
+  upload(item: UploadItem, opts?: UploadOptions): Promise<boolean>;
   shutdown(): Promise<void>;
 }
 
@@ -102,4 +111,5 @@ export const MULTIMODAL_SHUTDOWN_TIMEOUT_MS = 1_500;
 /** Per-image stat/read deadline so a hung mount cannot block collect/stop. */
 export const PATH_TO_URI_DEADLINE_MS = 3_000;
 export const INPUT_MULTIMODAL_METADATA_FIELD = 'gen_ai.input.multimodal_metadata';
+export const INPUT_MULTIMODAL_METADATA_DELTA_FIELD = 'gen_ai.input.multimodal_metadata_delta';
 export const OUTPUT_MULTIMODAL_METADATA_FIELD = 'gen_ai.output.multimodal_metadata';

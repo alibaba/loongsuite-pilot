@@ -32,14 +32,21 @@ describe('multimodal upload retry', () => {
   });
 
   it('retries retryable failures until maxAttempts', async () => {
+    let attempt = 0;
     const run = vi.fn(async () => ({
       ok: false as const,
       retryable: true,
       error: 'busy',
       statusCode: 503,
+      requestId: `req-${++attempt}`,
     }));
     const result = await withRetries({ maxAttempts: 3, baseDelayMs: 0 }, run);
-    expect(result).toEqual({ ok: false, error: 'busy', statusCode: 503 });
+    expect(result).toEqual({
+      ok: false,
+      error: 'busy',
+      statusCode: 503,
+      requestId: 'req-3',
+    });
     expect(run).toHaveBeenCalledTimes(3);
   });
 

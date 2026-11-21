@@ -2,7 +2,80 @@
 
 [English](../agents.md) | 简体中文
 
-本文说明如何选择 Pilot 要采集哪些 AI Coding Agent，以及是否采集敏感消息内容。
+本文说明如何选择 Pilot 要采集哪些 AI Coding Agent，以及配置采集和数据脱敏。
+
+## Hermes TTFT
+
+对于 Hermes 的 OpenAI 兼容流式 Chat Completions 请求，Pilot 从
+`pre_api_request` 到首个非空文本、推理或工具名称 delta 计算 TTFT，
+以纳秒写入 `gen_ai.response.time_to_first_token`。仅包含 role 或 usage
+的帧不计入首输出。计时与消息内容分别处理。
+
+此功能使用 Hermes 原生 `on_first_delta` 回调（已在 Hermes 0.19.0 验证）。
+旧版本缺少该回调、其他 API 模式、非流式响应，或未观察到首输出时省略 TTFT，
+不会用 API 总耗时代替。更新插件后需重启 Hermes 进程。
+
+## Hermes 并发对话
+
+前台对话和后台技能整理可能共享同一个 session。Pilot 按 turn/task 身份分别保存
+用户身份、输入和模型/工具调用，避免相互覆盖。后台整理未提供原生 sender ID 时，
+仍使用配置身份或 hostname 兜底，不自动继承该 session 最近的 IM 用户。
+
+## OpenClaw / Hermes 请求上下文
+
+OpenClaw 的 `llm_input.historyMessages` 用于保留之前的对话，再追加本次 prompt。
+后续模型步骤按实际持久化顺序补入 assistant 消息和工具结果；system/tools 由 Trace
+转换器继承。不会把首步快照反复当成后续步骤的完整请求。此路径适用于提供这些 Hook
+的现代 OpenClaw；旧版本继续使用原有推定时序适配器。
+模型回退复用同一 `runId` 时，新调用周期独立维护有界输入状态，后续步骤发送随
+assistant/工具结果更新的完整快照，避免重复累计旧周期的历史和 prompt。
+
+Hermes 的 LLM 输入优先使用原生 Chat `request_messages`，否则保留完整的
+`conversation_history`。用于匹配当前轮响应的历史窗口仍然独立，避免把旧回复归到新请求。
+Responses 项和提供商专用工具块保留归一化历史作为回退来源。
+
+Hermes 0.16.0 的 50,000 字符 Hook 载荷上限可能丢掉整个 `request.body`。对于提供兼容
+`_api_request_payload_for_hook(self, api_kwargs)` 的宿主，插件在该边界独立快照 system/tools，
+保持宿主原有返回值、异常和其他插件收到的载荷。快照按请求对象、session 和五秒有效期匹配，
+消费后释放；无此能力时仍读取原生系统字段或可见 body，不解析残缺 `preview`。
+
+采集仍有容量边界，不能将消息字符数直接当作模型计费 Token 的完整性证明：
+
+- OpenClaw 首步输入及回退周期快照最多 1,024 条消息、约 2 MiB，超限优先保留当前 prompt 与较近历史；
+  原有每文本 part / 工具结果 64 Ki 字符上限保持有效。
+- Hermes 每个 LLM 请求最多 1,024 条消息、约 2 MiB，每文本 part 最多 256 Ki 字符。
+  当前轮生命周期窗口仍为 64 条；system/tools 保留原有每字符串 32 Ki 字符、128 项及深度限制，
+  额外元数据快照最多约 2 MiB。
+- 消息数量或总字节预算耗尽、或 Hermes 载荷被宿主整体裁剪而无法恢复时，事件和对应 Trace
+  保留 `agent.pilot.request_context.truncated=true`。单字段裁剪保留 `...[truncated]` 后缀。
+
+升级后需重启 OpenClaw / Hermes 宿主，使其重新加载插件。历史上已经丢失的内容不会自动补回。
+
+## 千问办公协作空间（实验性）
+
+除普通对话的 Stop Hook 外，Pilot 会只读轮询千问办公本地协作空间的 IM 快照。
+当数字员工的回复通过 `replyToMessageId` 指向同一空间中的用户消息，且关联卡片
+完成时，Pilot 将文本输入和卡片中的可见文本输出关联为一次 Agent 轮次。
+普通群消息、欢迎语、未完成或权限已撤销的卡片不会被当作轮次。只采集当前登录
+账号本人发起的消息，避免将其他成员的提问归属到本机用户；其他成员的轮次需要其
+账号对应的采集端采集。输出的原生用户身份来自消息发送者，用户配置的身份仍按
+Pilot 的通用优先级生效。同一账号在多台设备登录时，仍可能重复上报同一轮次，
+跨设备去重尚未验证。
+
+这是基于千问办公 2.x 私有本地格式的实验性适配；已在 macOS 千问办公 2.1.0 上
+通过手工安装的隔离测试服务验证真实协作空间，尚未验证官方安装器升级和其他平台。
+快照不证明内部模型或工具的调用，因此不会构造 LLM/TOOL Span 或填充模型、
+Provider 和 Token；事件标记为 `agent_turn` 观察范围，并省略缺失的 Provider。
+附件以及卡片中的非文本内容不在此采集范围。完成时间优先使用
+卡片的 `terminalAt`，缺失时使用 `updatedAt`，其来源标记为
+`loongsuite.qwenworkcn.completion_time_source`。这些时间表示客户端观察到的对话边界。
+首次启用时以当前时间为界，不回补之前已完成的历史对话。应用仍须将消息和卡片同步到本机；缺失、
+损坏或超出单文件 16 MiB 限制的快照会保留源状态并重试或记录警告。已处理身份
+保留 30 天，最多 50,000 个；达到上限时暂停新轮次并记录警告。单卡片原始内容
+超过 512 KiB 时不采集该卡片。输出与普通 Agent
+事件一样经过内容配置和脱敏；协作空间没有本地工作目录，目录排除规则不能按空间
+过滤。可通过 `listeners.qwen-work-cn-collaboration.includeConversationIds` 配置空间会话 ID 白名单；
+空数组或无效配置不采集任何空间。可通过 `listeners.qwen-work-cn-collaboration.enabled=false` 单独关闭此来源。
 
 ## 支持的 Agent ID
 
@@ -13,8 +86,9 @@
 |-------|----|------|
 | Claude Code | `claude-code` | Hook 集成。 |
 | Codex | `codex` | Hook 集成。 |
+| GitHub Copilot CLI | `copilot` | 原生插件与 transcript/native OTel 混合采集；单次调用的准确 Token 依赖 native OTel。自动部署支持 Unix shell，暂不支持 Windows 和子 Agent。详见[遥测说明](copilot-native-telemetry.md)。 |
 | Cursor | `cursor` | Hook 集成。 |
-| Cursor CLI | `cursor-cli` | 独立检测并输出为 `cursor-cli`，但复用 Cursor 已安装的 Hook/Input 链路，不会独立部署另一套 Hook；输出内容策略使用 `cursor-cli`。 |
+| Cursor CLI | `cursor-cli` | 独立检测并输出为 `cursor-cli`，但复用 Cursor 已安装的 Hook/Input 链路，不会独立部署另一套 Hook。 |
 | DeepSeek Harness | `dsh` | 用户级 YAML patch 插件与本地 per-session JSONL 轮询；采集原生 LLM、reasoning、工具、Token 和 TTFT 数据。检测路径遵循 DSH 官方的 `DSH_HOME`（默认 `~/.dsh`）。 |
 | Grok Build | `grok-build` | 四个 fail-open Hook 与本地 session 日志融合，采集 LLM、Token、工具、取消和失败生命周期。检测路径和 Hook 配置遵循 Grok 官方的 `GROK_HOME`（默认 `~/.grok`）。 |
 | Hermes Agent | `hermes-agent` | 原生目录插件和本地 session 文件采集；输出记录使用 `gen_ai.agent.type=hermes`。 |
@@ -25,7 +99,7 @@
 | Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。检测路径和 `settings.json` 遵循 Pi 官方的 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）。 |
 | Qoder | `qoder` | Hook 集成。 |
 | Qoder CN | `qoder-cn` | Hook 集成。 |
-| Qoder for JetBrains | `qoder-jetbrains` | 部署/检测专用 ID。`agent-control.json` 中采集开关为 `qoder`；`config.json` 中内容策略为 `qoder-idea`。 |
+| Qoder for JetBrains | `qoder-jetbrains` | 部署/检测专用 ID。`agent-control.json` 中采集开关为 `qoder`；输出记录使用 `qoder-idea`。 |
 | Qoder CLI | `qoder` | 复用 Qoder Agent 定义，使用 Hook / session 数据源。 |
 | Qoder Work | `qoder-work` | Hook 和本地数据源。 |
 | Qoder Work CN | `qoder-work-cn` | Hook 和本地数据源。 |
@@ -33,6 +107,7 @@
 | Qwen Work CN | `qwen-work-cn` | Hook 和本地数据源。 |
 | Wukong | `wukong` | 运行时自动发现并通过本地 `wukong-cli` 进行 CLI API 轮询；它不是 `agents.d` 安装选择项。 |
 | WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 和 Windows 11 WorkBuddy Desktop 5.3.5.0 验证。 |
+| 豆包工作 | `doubao-work` | 实验性 macOS/Windows 客户端轮次元数据和任务 Trace；支持本地 TOOL Span 和所选技能上下文。原生执行与首输出覆盖取决于客户端证据；模型名、Token 和完整云端推理仍不可得。见[支持范围与配置](doubao-work.md)。 |
 
 Windows 验证使用安装后的 Pilot 产物，在 `PATH` 中没有 Node 的情况下从安装器固定的
 `node-bin` 解析 Node，并用真实 WorkBuddy transcript 通过严格 JSONL 校验。
@@ -42,6 +117,58 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 `CODEX_HOME`（包括编排器为单个任务创建的独立目录），并采集该 session
 根目录下最近活跃的 rollout 文件。`Stop` 仅作为尽力而为的唤醒信号，
 目录发现不依赖它。
+
+## Linux 系统接入
+
+在 POSIX 安装命令中加上 `--scope system`，也可对已安装的 Pilot 执行：
+
+```bash
+loongsuite-pilot hook install --scope system
+loongsuite-pilot hook status --json
+```
+
+不指定 `--agents` 时自动探测已安装的 Agent。下列框架使用公共安装方式，
+其他已探测到的 Agent 继续安装到原来的 home：
+
+| Agent | 公共注册方式 | 已验证 CLI 版本 |
+| --- | --- | --- |
+| Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
+| Codex | `/etc/codex/config.toml` | 0.166.0 |
+| Pi | 现有 `$PI_CODING_AGENT_DIR/settings.json` 的 `extensions` | 0.73.1、1.5.0 |
+| DSH | 现有 `$DSH_HOME/cordis.patch.yml` 的 Pilot 标记块 | 0.2.1-rc.5 |
+
+`--agents` 仍可选填以限定范围，也支持 `--agents grok-build,claude-code` 这样的混合列表。
+首批支持同一 Linux UID 下多个身份 home；在 Agent 进程启动前初始化，后续新增身份无需
+重复安装 Pilot。系统配置、运行文件和采集目录必须对业务容器中的相应进程可见、可访问。
+此能力不提供租户授权隔离或跨容器自动注入。
+
+Codex 自身的 hooks 功能需保持启用。
+
+Pi 复用现有配置根 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）。后续会话只要仍读取
+这份配置，就会加载同一插件；会话文件放在子目录不影响该注册。另行选择独立
+`agentDir` 的身份不会继承。Pilot 不修改 `pi` 命令、业务启动参数或根目录环境变量。
+system 请求会报告实际共享配置路径；它表示当前配置根的覆盖范围，不是 Pi 原生机器级策略。
+
+DSH 同样复用现有 `DSH_HOME`（默认 `~/.dsh`），该 home 下的各个 profile 都读取
+这份公共 patch。新身份保留相同 `DSH_HOME` 就会继承插件；Pilot 报告实际 patch 路径，
+不修改 `dsh` 命令、启动参数或 `DSH_HOME`。Pi/DSH 从插件安装位置推导默认输出目录，
+新身份不需要额外继承 Pilot 数据目录环境变量；显式数据目录覆盖仍然生效。
+不传 `--scope` 时保持现有 home 注册行为。
+
+运行资产和 Pi 配置采用原子替换，写入失败保留原文件；Pi 配置清理未完成时停止卸载，
+保留运行资产供重试。这些保护同样适用于默认 home 安装。
+
+DSH 支持块序列 patch 和空 `[]` 根；卸载恢复原空根的完整字节。非空 flow 风格的
+patch 会保留原文件并明确报不支持，避免安装追加出第二个 YAML 根而影响业务启动。
+
+安装、修复、升级、禁用和卸载沿用已记录目标，保留第三方配置。显式迁移仅清理已登记
+的旧 Pilot 注册，不扫描未登记的 home。配置无效、所有权冲突、只读或外部挂载且需要
+修改时会保留原文件并报错。状态中的 `collectionStatus=not-verified` 只表示核对安装和
+运行文件，不代表真实对话已经上报。安装失败时保留运行文件并保持 collector 停止，
+便于恢复；升级保留已记录的安装范围。
+
+回退某个 Agent 时执行 `hook install --agents <id> --scope user`；原生 Hook Agent 还可
+指定 `--home <id>=<home>`。`--scope system` 不能与 `--home` 同时使用。
 
 ## Grok Build 采集与生命周期
 
@@ -61,9 +188,7 @@ Pilot 通过 Grok 官方的 `GROK_HOME`（默认 `~/.grok`）检测 Grok Build�
 
 采集从安装后观测到的当前 turn 开始，不回放更早的 session 历史。
 由于 Grok 会异步持久化取消终态，取消 turn 可能在下一次
-`user_prompt_submit` 或 `session_end` 时补采。将
-`agents["grok-build"].captureMessageContent` 设置为 `false`，会同时清除
-user、assistant、system 内容、工具参数、工具结果和原始错误详情。
+`user_prompt_submit` 或 `session_end` 时补采。
 
 安装产物同时包含 POSIX 和 PowerShell 启动器。Grok 专用 watchdog
 检查会修复缺失或被修改的 Pilot Hook 资产和配置；卸载只删除
@@ -91,7 +216,6 @@ home，会报告歧义而不会静默选择其中一个。
 `$PILOT_DATA/logs/dsh/dsh-<session-id>.jsonl`。在 POSIX 系统上，目录权限为
 `0700`，文件权限为 `0600`。这些源文件包含归一化所需的原生消息和
 工具数据，应当作敏感数据保护；插件在落盘前会过滤类似凭据的 key。
-`captureMessageContent` 只控制归一化输出，不会删除这些源日志中的内容。
 Pilot 使用原生请求边界到首个 reasoning、text 或 tool-call stream delta
 的时间差计算 LLM TTFT，并以纳秒写入
 `gen_ai.response.time_to_first_token`。
@@ -173,6 +297,13 @@ PATH/工作目录，不执行 CLI，也不使用用户传入的版本；明确�
 }
 ```
 
+对于观察到原生开始和完成事件的固定 session 定时任务，即使宿主复用 run ID，Pilot 也会
+为每次执行分配独立的 `gen_ai.turn.id`。同一次执行内的 fallback 共用一轮，在任务完成时
+导出；`agent.openclaw.run_id` 保留原生 ID，session ID 不变。其他运行及未提供定时任务
+生命周期事件的旧宿主维持原有采集行为。
+若完成回调缺失，Pilot 仅在调度器确认相同执行已结束后收口，并标记采集不完整；运行中或
+状态未知的任务不会因为一次模型调用结束就被提前收口。
+
 Legacy 适配器以 `llm_input`、AssistantMessage 的 `before_message_write`、
 工具 Hook 和 `llm_output` 重建链路，保留真实输出、toolCallId 与逐次 Token。
 run 汇总用量只作诊断，不叠加到 LLM 用量。模型请求开始时间按输入或最后一个工具结果
@@ -214,12 +345,24 @@ worker 标识与 sender 身份是两回事。
 `~/.loongsuite-pilot/logs/openclaw/`。在 POSIX 系统上，目录权限为 `0700`，
 文件权限为 `0600`。Provider 错误或取消调用可能没有输出消息或 Token 用量；
 Pilot 会上报原生 finish reason 与可获得的时间边界，不会伪造消息或补零 Token。
-关闭内容采集时也会删除可能包含用户内容的错误消息。
+可获得的 Provider 和工具错误消息会进入统一上报与脱敏链路。
 
 [真实 Provider Gateway 验证入口](../../scripts/e2e/openclaw-compat.md) 仅允许在一次性
 Linux 容器中运行，使用实际 Pilot 安装器与采集进程，检查原生 Token、链路结构、worker、
-重启去重、内容关闭、watchdog 修复、重复安装与卸载。精确 OpenClaw 版本仅用于测试断言，
+重启去重、历史内容配置失效、watchdog 修复、重复安装与卸载。精确 OpenClaw 版本仅用于测试断言，
 不会传入 Pilot 的版本探测逻辑。本地通过不替代 SLS/ARMS 独立回查或客户 EDR 环境验证。
+
+LLM 响应按模型调用关联 `before_message_write` 与 `model_call_ended`，兼容
+两者不同的到达顺序。结束事件缺失时，仍在下一次调用、运行结束、会话结束
+或缓存淘汰时输出已有响应，保留消息、用量和原始完成时间。
+
+首 Token 延迟通过观察 HTTP SSE 流获得：从请求发起到首个非空文本、推理或工具输出，以纳秒写入 `gen_ai.response.time_to_first_token`，并按 API 类型和 provider response ID 精确关联。支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages。
+
+对于公司版等使用受保护 Undici 传输的宿主，订阅 `undici:request:create` / `headers` / `bodyChunkReceived` 诊断事件，以请求对象隔离状态；普通 fetch 使用透传流观察。两路通过异步请求上下文去重，不按时间邻近匹配，也不替换宿主 provider、凭据或网络安全策略。
+
+OpenClaw 原生 `timeToFirstByteMs` 仅保留为 `agent.openclaw.time_to_first_byte_ms` 诊断字段，不作为 TTFT。非 SSE、未发出受支持诊断事件的自定义传输、缺少稳定响应 ID、ID 重复或超出解析/缓存边界时省略标准 TTFT；压缩的 Undici 原始字节不直接解析，只能由可观察的 fetch 解压后流补充。不能用首字节或总耗时替代。
+
+观察器不修改请求参数，不单独预读响应，不落盘消息内容；消息持久化与模型结束 Hook 合并时保留原始响应时间、usage 和消息内容，历史内容采集配置不影响缓存或输出。
 
 ## 安装时选择 Agent
 
@@ -259,18 +402,18 @@ bash /tmp/loongsuite-pilot-installer.sh install --agents "claude-code,codex,curs
 loongsuite-pilot restart
 ```
 
-## 按 Agent 配置内容采集
+## 按 Agent 配置
 
-如果需要控制消息内容采集，使用 `config.json`：
+使用 `config.json` 配置各 Agent 的启停和多模态策略：
 
 ```json
 {
   "agents": {
-    "claude-code": { "enabled": true, "captureMessageContent": false },
-    "codex": { "enabled": true, "captureMessageContent": false },
-    "dsh": { "enabled": true, "captureMessageContent": false },
-    "openclaw": { "enabled": true, "captureMessageContent": false },
-    "cursor": { "enabled": true, "captureMessageContent": true }
+    "claude-code": { "enabled": true },
+    "codex": { "enabled": true },
+    "dsh": { "enabled": true },
+    "openclaw": { "enabled": true },
+    "cursor": { "enabled": true }
   }
 }
 ```
@@ -278,11 +421,12 @@ loongsuite-pilot restart
 | 配置项 | 说明 |
 |--------|------|
 | `enabled` | 设置为 `false` 可从配置层禁用该 Agent。 |
-| `captureMessageContent` | 设置为 `false` 可避免采集完整 Prompt、Completion、工具参数和工具结果，前提是对应集成支持该策略。 |
 | `multimodal.uploadMode` | **实验性。** 多模态上传策略。`none`（默认）关闭；`input` / `output` / `all` 控制转换表面。详见 [多模态采集](multimodal.md)。 |
 | `multimodal.allowedRootPaths` | 额外本地根目录，与 Agent 默认根合并后供 `pathToUri` 使用。`~` 会展开。工作区图片需要把项目目录写在这里。详见 [多模态采集](multimodal.md#allowedrootpaths)。 |
 
-敏感环境建议同时设置 `captureMessageContent: false` 和 [数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（当前仅图像；已实现 `codex` 与 `qoder` IDE/CLI）。
+敏感环境请开启[数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（图像和本地视频；已实现 `codex`、`qoder` IDE/CLI 与 `qwen-work-cn`）。
+
+已有配置文件不会被改写。升级后需重启常驻的 OpenClaw、Pi、Hermes 进程，以加载新版插件。Agent 启停、工作区黑名单、脱敏和多模态上传配置仍各自生效。
 
 ## 验证 Agent 采集
 

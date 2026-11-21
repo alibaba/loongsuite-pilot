@@ -6,17 +6,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   decodeBlobContent,
   extFromMime,
-  isImageFilePath,
   isPathInsideRoots,
   isRealPathInsideRoots,
   isUncOrDevicePath,
   joinStorageUri,
   canonicalizeRootPath,
-  lstatRegularImageFile,
+  lstatRegularFile,
   mergeAllowedRootPaths,
-  mimeFromImagePath,
-  normalizeLocalImagePath,
-  openNormalizedLocalImage,
+  mimeFromMediaPath,
+  normalizeLocalMediaPath,
+  openNormalizedLocalMedia,
   sniffImageMime,
   modalityFromMime,
   yyyymmddFromUnixMs,
@@ -88,6 +87,11 @@ describe('multimodal resolve helpers', () => {
   it('maps mime to extension', () => {
     expect(extFromMime('image/jpeg')).toBe('jpg');
     expect(extFromMime('image/png')).toBe('png');
+    expect(extFromMime('video/mp4')).toBe('mp4');
+    expect(extFromMime('video/quicktime')).toBe('mov');
+    expect(extFromMime('video/webm')).toBe('webm');
+    expect(extFromMime('video/x-matroska')).toBe('mkv');
+    expect(extFromMime('video/x-msvideo')).toBe('avi');
     expect(extFromMime('application/octet-stream')).toBe('bin');
     expect(extFromMime('IMAGE/JPEG; charset=utf-8')).toBe('jpg');
     expect(extFromMime('unknown/type')).toBe('bin');
@@ -134,23 +138,23 @@ describe('multimodal resolve helpers', () => {
   });
 
   it('detects image extensions and mime types from path', () => {
-    expect(isImageFilePath('/a/b.png')).toBe(true);
-    expect(isImageFilePath('/a/b.JPEG')).toBe(true);
-    expect(mimeFromImagePath('/a/b.webp')).toBe('image/webp');
-    expect(mimeFromImagePath('/a/b.txt')).toBeNull();
-    expect(isImageFilePath('')).toBe(false);
-    expect(mimeFromImagePath('/a/b.png?x=1')).toBeNull();
-    expect(normalizeLocalImagePath('/a/b.png?x=1')).toBeNull();
-    expect(mimeFromImagePath('/a/photo?.png')).toBe('image/png');
-    expect(normalizeLocalImagePath('/a/photo?.png')).toBe(path.resolve('/a/photo?.png'));
-    expect(normalizeLocalImagePath('not-an-image.txt')).toBeNull();
-    expect(normalizeLocalImagePath('\\\\server\\share\\a.png')).toBeNull();
-    expect(normalizeLocalImagePath('\\\\.\\pipe\\a.png')).toBeNull();
-    expect(normalizeLocalImagePath('\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\a.png')).toBeNull();
+    expect(mimeFromMediaPath('/a/b.png')).toBe('image/png');
+    expect(mimeFromMediaPath('/a/b.JPEG')).toBe('image/jpeg');
+    expect(mimeFromMediaPath('/a/b.webp')).toBe('image/webp');
+    expect(mimeFromMediaPath('/a/b.txt')).toBeNull();
+    expect(mimeFromMediaPath('')).toBeNull();
+    expect(mimeFromMediaPath('/a/b.png?x=1')).toBeNull();
+    expect(normalizeLocalMediaPath('/a/b.png?x=1')).toBeNull();
+    expect(mimeFromMediaPath('/a/photo?.png')).toBe('image/png');
+    expect(normalizeLocalMediaPath('/a/photo?.png')).toBe(path.resolve('/a/photo?.png'));
+    expect(normalizeLocalMediaPath('not-an-image.txt')).toBeNull();
+    expect(normalizeLocalMediaPath('\\\\server\\share\\a.png')).toBeNull();
+    expect(normalizeLocalMediaPath('\\\\.\\pipe\\a.png')).toBeNull();
+    expect(normalizeLocalMediaPath('\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\a.png')).toBeNull();
     if (process.platform === 'win32') {
-      expect(normalizeLocalImagePath('\\\\?\\C:\\tmp\\a.png')).toBe(path.win32.resolve('C:\\tmp\\a.png'));
+      expect(normalizeLocalMediaPath('\\\\?\\C:\\tmp\\a.png')).toBe(path.win32.resolve('C:\\tmp\\a.png'));
     } else {
-      expect(normalizeLocalImagePath('\\\\?\\C:\\tmp\\a.png')).toBeNull();
+      expect(normalizeLocalMediaPath('\\\\?\\C:\\tmp\\a.png')).toBeNull();
     }
   });
 
@@ -160,12 +164,12 @@ describe('multimodal resolve helpers', () => {
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     fs.writeFileSync(file, bytes);
 
-    const resolved = normalizeLocalImagePath(file);
+    const resolved = normalizeLocalMediaPath(file);
     expect(resolved).toBe(path.resolve(file));
-    expect((await lstatRegularImageFile(resolved!))?.size).toBe(bytes.length);
-    expect(mimeFromImagePath(resolved!)).toBe('image/png');
+    expect((await lstatRegularFile(resolved!))?.size).toBe(bytes.length);
+    expect(mimeFromMediaPath(resolved!)).toBe('image/png');
 
-    const loaded = await openNormalizedLocalImage(resolved!);
+    const loaded = await openNormalizedLocalMedia(resolved!);
     expect(loaded).toMatchObject({
       bytes,
       mime_type: 'image/png',
@@ -176,17 +180,17 @@ describe('multimodal resolve helpers', () => {
   it('rejects missing file, directory, and non-image', async () => {
     const dir = makeTempDir();
     const missing = path.join(dir, 'missing.png');
-    expect(normalizeLocalImagePath(missing)).toBe(path.resolve(missing));
-    expect(await lstatRegularImageFile(path.resolve(missing))).toBeNull();
-    expect(normalizeLocalImagePath(path.join(dir, 'a.txt'))).toBeNull();
+    expect(normalizeLocalMediaPath(missing)).toBe(path.resolve(missing));
+    expect(await lstatRegularFile(path.resolve(missing))).toBeNull();
+    expect(normalizeLocalMediaPath(path.join(dir, 'a.txt'))).toBeNull();
 
     const empty = path.join(dir, 'empty.png');
     fs.writeFileSync(empty, Buffer.alloc(0));
-    expect((await lstatRegularImageFile(path.resolve(empty)))?.size).toBe(0);
+    expect((await lstatRegularFile(path.resolve(empty)))?.size).toBe(0);
 
     const asDir = path.join(dir, 'folder.png');
     fs.mkdirSync(asDir);
-    expect(await lstatRegularImageFile(path.resolve(asDir))).toBeNull();
+    expect(await lstatRegularFile(path.resolve(asDir))).toBeNull();
   });
 
   it('detects UNC and device paths', () => {
@@ -245,7 +249,7 @@ describe('multimodal resolve helpers', () => {
     const roots = mergeAllowedRootPaths([allowed]);
     expect(isPathInsideRoots(escaped, [allowed])).toBe(true);
     expect(await isRealPathInsideRoots(escaped, roots)).toBe(false);
-    expect(await openNormalizedLocalImage(path.resolve(escaped), undefined, roots)).toBeNull();
+    expect(await openNormalizedLocalMedia(path.resolve(escaped), undefined, roots)).toBeNull();
   });
 
   it('rejects when a parent directory is swapped to a symlink around open', async () => {
@@ -285,7 +289,7 @@ describe('multimodal resolve helpers', () => {
       };
     });
     try {
-      const { openNormalizedLocalImage: openWithSwap } = await import(
+      const { openNormalizedLocalMedia: openWithSwap } = await import(
         '../../../src/multimodal/resolve.js'
       );
       expect(await openWithSwap(target, undefined, roots)).toBeNull();
@@ -301,6 +305,45 @@ describe('multimodal resolve helpers', () => {
     expect(sniffImageMime(Buffer.from('not-an-image'))).toBeNull();
   });
 
+  it('reads a video only when the suffix and header are the same family', async () => {
+    const dir = makeTempDir();
+    const ftyp = (brand: string) => {
+      const bytes = Buffer.alloc(16);
+      bytes.write('ftyp', 4, 'ascii');
+      bytes.write(brand, 8, 4, 'ascii');
+      return bytes;
+    };
+    const ebml = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0]);
+    const avi = Buffer.alloc(12);
+    avi.write('RIFF', 0, 'ascii');
+    avi.write('AVI ', 8, 'ascii');
+    const wave = Buffer.alloc(12);
+    wave.write('RIFF', 0, 'ascii');
+    wave.write('WAVE', 8, 'ascii');
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+
+    const read = async (name: string, bytes: Buffer) => {
+      const file = path.join(dir, name);
+      fs.writeFileSync(file, bytes);
+      return openNormalizedLocalMedia(path.resolve(file));
+    };
+
+    expect((await read('clip.mp4', ftyp('isom')))?.mime_type).toBe('video/mp4');
+    expect((await read('clip.mov', ftyp('qt  ')))?.mime_type).toBe('video/quicktime');
+    expect((await read('clip.webm', ebml))?.mime_type).toBe('video/webm');
+    expect((await read('clip.avi', avi))?.mime_type).toBe('video/x-msvideo');
+    expect(await read('audio.mp4', ftyp('M4A '))).toBeNull();
+    expect(await read('clip.mp4', png)).toBeNull();
+    expect(await read('clip.mp4', ebml)).toBeNull();
+    expect(await read('clip.webm', ftyp('isom'))).toBeNull();
+    expect(await read('clip.avi', wave)).toBeNull();
+    expect(await read('song.m4a', ftyp('isom'))).toBeNull();
+    expect((await read('photo.png', jpeg))?.mime_type).toBe('image/jpeg');
+    expect(await read('photo.png', ftyp('isom'))).toBeNull();
+    expect(normalizeLocalMediaPath('/a/b.mp4?x=1')).toBeNull();
+  });
+
   it('rejects a symlink target', async () => {
     const dir = makeTempDir();
     const file = path.join(dir, 'x.png');
@@ -308,9 +351,9 @@ describe('multimodal resolve helpers', () => {
     fs.writeFileSync(file, bytes);
     const link = path.join(dir, 'y.png');
     fs.symlinkSync(file, link);
-    expect(await lstatRegularImageFile(path.resolve(link))).toBeNull();
-    expect(await openNormalizedLocalImage(path.resolve(link))).toBeNull();
-    const loaded = await openNormalizedLocalImage(path.resolve(file));
+    expect(await lstatRegularFile(path.resolve(link))).toBeNull();
+    expect(await openNormalizedLocalMedia(path.resolve(link))).toBeNull();
+    const loaded = await openNormalizedLocalMedia(path.resolve(file));
     expect(loaded?.mime_type).toBe('image/png');
     expect(loaded?.bytes.equals(bytes)).toBe(true);
   });
@@ -327,7 +370,7 @@ describe('multimodal resolve helpers', () => {
     await withFileHandleRead(file, orig => async function (this: unknown, buffer, offset, length, position) {
       return orig.call(this, buffer, offset, Math.min(length ?? buffer.byteLength, 5), position);
     }, async () => {
-      const loaded = await openNormalizedLocalImage(path.resolve(file));
+      const loaded = await openNormalizedLocalMedia(path.resolve(file));
       expect(loaded?.bytes.equals(bytes)).toBe(true);
       expect(loaded?.mime_type).toBe('image/png');
     });
@@ -348,7 +391,7 @@ describe('multimodal resolve helpers', () => {
       first = false;
       return orig.call(this, buffer, offset, Math.min(length ?? buffer.byteLength, 8), position);
     }, async () => {
-      expect(await openNormalizedLocalImage(path.resolve(file))).toBeNull();
+      expect(await openNormalizedLocalMedia(path.resolve(file))).toBeNull();
     });
   });
 
@@ -366,7 +409,7 @@ describe('multimodal resolve helpers', () => {
       fs.appendFileSync(file, Buffer.from([1]));
       return result;
     }, async () => {
-      expect(await openNormalizedLocalImage(path.resolve(file))).toBeNull();
+      expect(await openNormalizedLocalMedia(path.resolve(file))).toBeNull();
     });
   });
 
@@ -383,7 +426,7 @@ describe('multimodal resolve helpers', () => {
       ac.abort();
       return orig.call(this, buffer, offset, length, position);
     }, async () => {
-      expect(await openNormalizedLocalImage(path.resolve(file), undefined, undefined, ac.signal)).toBeNull();
+      expect(await openNormalizedLocalMedia(path.resolve(file), undefined, undefined, ac.signal)).toBeNull();
     });
   });
 
@@ -397,7 +440,7 @@ describe('multimodal resolve helpers', () => {
     const maxBytes = 32;
     const allocSpy = vi.spyOn(Buffer, 'allocUnsafe');
     try {
-      expect(await openNormalizedLocalImage(path.resolve(file), maxBytes)).toBeNull();
+      expect(await openNormalizedLocalMedia(path.resolve(file), maxBytes)).toBeNull();
       expect(allocSpy.mock.calls.map(([n]) => n)).toEqual([maxBytes + 1]);
     } finally {
       allocSpy.mockRestore();

@@ -7,8 +7,13 @@ const mockAppendLine = vi.fn().mockResolvedValue(undefined);
 const mockEnsureDir = vi.fn().mockResolvedValue(undefined);
 const mockGetTodayDateString = vi.fn().mockReturnValue('2026-04-27');
 
+vi.mock('node:fs/promises', () => ({
+  mkdir: vi.fn().mockResolvedValue(undefined),
+  lstat: vi.fn().mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' })),
+  appendFile: (...args: unknown[]) => mockAppendLine(...args),
+}));
+
 vi.mock('../../../src/utils/fs-utils.js', () => ({
-  appendLine: (...args: unknown[]) => mockAppendLine(...args),
   ensureDir: (...args: unknown[]) => mockEnsureDir(...args),
   getTodayDateString: () => mockGetTodayDateString(),
 }));

@@ -12,12 +12,15 @@ const EXTENSION_PATH = path.resolve(
 
 let tmpDir;
 let previousDataDir;
+let previousConfigPath;
 let previousResourceEnv;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-coding-agent-extension-'));
   previousDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
+  previousConfigPath = process.env.AGENT_DATA_COLLECTION_CONFIG;
   process.env.LOONGSUITE_PILOT_DATA_DIR = tmpDir;
+  process.env.AGENT_DATA_COLLECTION_CONFIG = path.join(tmpDir, 'config.json');
   previousResourceEnv = {
     AGENTTEAMS_WORKER_NAME: process.env.AGENTTEAMS_WORKER_NAME,
     AGENTTEAMS_INSTANCE_ID: process.env.AGENTTEAMS_INSTANCE_ID,
@@ -35,6 +38,8 @@ afterEach(() => {
   vi.useRealTimers();
   if (previousDataDir === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
   else process.env.LOONGSUITE_PILOT_DATA_DIR = previousDataDir;
+  if (previousConfigPath === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+  else process.env.AGENT_DATA_COLLECTION_CONFIG = previousConfigPath;
   for (const [key, value] of Object.entries(previousResourceEnv)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -42,7 +47,7 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-async function createRuntime(config = {}, identity) {
+async function createRuntime(config = {}, identity, extensionPath = EXTENSION_PATH) {
   fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify(config));
   const handlers = new Map();
   const api = {
@@ -60,7 +65,7 @@ async function createRuntime(config = {}, identity) {
       ];
     },
   };
-  const mod = await import(`${pathToFileURL(EXTENSION_PATH).href}?t=${Date.now()}_${Math.random()}`);
+  const mod = await import(`${pathToFileURL(extensionPath).href}?t=${Date.now()}_${Math.random()}`);
   const extension = identity ? mod.createPiTelemetryExtension(identity) : mod.default;
   extension(api);
 
@@ -111,6 +116,30 @@ async function startTurn(runtime) {
 }
 
 describe('Pi Coding Agent extension', () => {
+  it('continues collecting if the optional resource-context helper is unavailable', async () => {
+    const installed = path.join(tmpDir, 'plugins', 'pi-coding-agent', 'index.mjs');
+    fs.mkdirSync(path.dirname(installed), { recursive: true });
+    fs.copyFileSync(EXTENSION_PATH, installed);
+    // Keep required shared modules while simulating the one optional helper missing.
+    const shared = path.join(tmpDir, 'plugins', 'shared');
+    fs.cpSync(path.resolve('assets/plugins/shared'), shared, {
+      recursive: true,
+      filter: source => path.basename(source) !== 'resource-context.mjs',
+    });
+    process.env.AGENTTEAMS_WORKER_NAME = 'worker-with-missing-helper';
+
+    const runtime = await createRuntime({}, undefined, installed);
+    await startTurn(runtime);
+    await runtime.emit('context', {
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Inspect the repository' }] }],
+    });
+
+    const request = readRecords().find(record => record['event.name'] === 'llm.request');
+    expect(request).toBeDefined();
+    expect(request['gen_ai.agent.name']).toBe('Pi Coding Agent');
+    expect(request.resourceAttributes).toBeUndefined();
+  });
+
   it('binds registered PI SDK Agent identity while keeping the shared log protocol', async () => {
     const runtime = await createRuntime({
       agents: {
@@ -856,10 +885,16 @@ describe('Pi Coding Agent extension', () => {
     expect(request['gen_ai.step.id']).toBe(`${request['gen_ai.turn.id']}:s1`);
   });
 
-  it('omits sensitive message and tool payloads when content capture is disabled', async () => {
-    const runtime = await createRuntime({
+  it.each(['default', 'custom-path', 'bom'])('omits sensitive message and tool payloads with %s config', async (kind) => {
+    const disabledConfig = {
       agents: { 'pi-coding-agent': { captureMessageContent: false } },
-    });
+    };
+    const runtime = await createRuntime(kind === 'default' ? disabledConfig : {});
+    if (kind !== 'default') {
+      const configPath = path.join(tmpDir, kind === 'custom-path' ? 'custom.json' : 'config.json');
+      fs.writeFileSync(configPath, (kind === 'bom' ? '\uFEFF' : '') + JSON.stringify(disabledConfig));
+      process.env.AGENT_DATA_COLLECTION_CONFIG = configPath;
+    }
     await startTurn(runtime);
     await runtime.emit('context', {
       messages: [{ role: 'user', content: 'secret prompt' }],

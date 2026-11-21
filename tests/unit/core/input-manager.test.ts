@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { WorkspacePolicy } from '../../../src/core/workspace-policy.js';
 import { InputManager } from '../../../src/core/input-manager.js';
 import { MockFlusher } from '../../helpers/mock-flusher.js';
 import {
@@ -9,9 +10,12 @@ import {
 } from '../../helpers/fixture-builder.js';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
+import * as fs from 'node:fs/promises';
+import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { ClientType, CollectionMethod } from '../../../src/types/index.js';
 import type { AgentActivityEntry, InputState } from '../../../src/types/index.js';
 import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
+import { CodexOutputDurabilityError } from '../../../src/flushers/base-flusher.js';
 import { TurnBoundaryProcessor } from '../../../src/normalization/turn-boundary-processor.js';
 import { CorrelationStore } from '../../../src/core/upstream-link/correlation-store.js';
 import { TraceLinker } from '../../../src/core/upstream-link/trace-linker.js';
@@ -23,6 +27,8 @@ import {
 } from '../../../src/normalization/invocation-identity.js';
 import { deriveAgentInputEventId } from '../../../src/normalization/agent-input-dual-write.js';
 import { buildBlockedQoderPromptEntry } from '../../../src/interceptor/blocked-prompt.js';
+import { parseHookRequest } from '../../../src/interceptor/adapters/qoder.js';
+import * as gitEnrichment from '../../../src/normalization/enrich-git-context.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -31,6 +37,7 @@ vi.mock('../../../src/utils/logger.js', () => ({
 }));
 
 class StubInput extends EventEmitter {
+  setWorkspacePolicy() {}
   readonly id: string;
   readonly agentType = ClientType.Qoder;
   readonly collectionMethod = CollectionMethod.IdeSnapshotPolling;
@@ -65,6 +72,153 @@ describe('InputManager', () => {
     manager = new InputManager();
     flusher = new MockFlusher();
     manager.setFlusher(flusher);
+  });
+
+  it('filters excluded sessions before identity rewriting and every output destination', async () => {
+    manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+    const input = new StubInput('privacy');
+    manager.registerInput(input as any);
+    const denied = buildTestEntry({ 'gen_ai.session.id': 'denied', 'workspace.path': '/private-project/app' });
+    const allowed = buildTestEntry({ 'gen_ai.session.id': 'allowed' });
+    input.emit('entries', [denied, allowed]);
+    await manager.stopAll();
+    expect(flusher.batchCalls.flat().some(entry => entry['gen_ai.session.id'] === 'denied')).toBe(false);
+    expect(flusher.batchCalls.flat().some(entry => entry['gen_ai.session.id'] === 'allowed')).toBe(true);
+  });
+
+  it.each([undefined, 'CodexTurnJournalError', 'CodexOutputDurabilityError'])(
+    'keeps the shared Codex checkpoint behind durable output acceptance (failure=%s)', async failureName => {
+    const root = await createTempDir('codex-checkpoint-output-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    store.setOffset('codex', 1);
+    await store.save();
+    const input = new StubInput('codex-checkpoint');
+    Object.defineProperty(input, 'agentType', { value: ClientType.CodexCliHook });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling) });
+    manager.registerInput(input as any);
+    let accept!: () => void;
+    let fail!: (failure: Error) => void;
+    let started!: () => void;
+    const startedOutput = new Promise<void>(resolve => { started = resolve; });
+    const durability = new Promise<void>((resolve, rejectPromise) => { accept = resolve; fail = rejectPromise; });
+    vi.spyOn(flusher, 'sendBatch').mockImplementation(async () => { started(); await durability; });
+    const healthyOutput = new MockFlusher('healthy-output');
+    manager.setFlusher(new MultiFlusher([flusher, healthyOutput]));
+    store.setOffset('codex', 2);
+    store.setOffset('other-input', 3);
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'codex', 'gen_ai.session.id': 'native-codex' })]);
+    const saving = store.save();
+    await startedOutput;
+    expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ codex: { lastOffset: 1 } });
+    try {
+      if (failureName) {
+        const failure = failureName === 'CodexOutputDurabilityError' ? new CodexOutputDurabilityError('SLS')
+          : Object.assign(new Error('journal failed'), { name: failureName });
+        const rejectedSave = expect(saving).rejects.toBe(failure);
+        fail(failure);
+        await rejectedSave;
+        await expect(store.save()).rejects.toBe(failure);
+        expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ codex: { lastOffset: 1 } });
+      } else {
+        accept();
+        await saving;
+        expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ codex: { lastOffset: 2 }, 'other-input': { lastOffset: 3 } });
+      }
+      // Entry handling never calls StateStore.save, so stopping drains the
+      // queue after durable acceptance without recursively awaiting itself.
+      await manager.stopAll();
+      expect(healthyOutput.batchCalls).toHaveLength(1);
+    } finally { accept(); await cleanupTempDir(root); }
+  });
+
+  it('retries Codex journal quota without freezing other input checkpoints and resumes after capacity returns', async () => {
+    const root = await createTempDir('codex-quota-isolation-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    const input = new StubInput('codex-quota');
+    Object.defineProperty(input, 'agentType', { value: ClientType.CodexCliHook });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling, input.id) });
+    manager.registerInput(input as any);
+    store.setOffset(input.id + ':file', 1);
+    await store.save();
+    store.setOffset(input.id + ':file', 2);
+    let attempted!: () => void;
+    const first = new Promise<void>(resolve => { attempted = resolve; });
+    const quota = Object.assign(new Error('full'), { name: 'CodexTurnJournalCapacityError' });
+    const wrapped = Object.assign(new Error('journal', { cause: quota }), { name: 'CodexTurnJournalError' });
+    const send = vi.spyOn(flusher, 'sendBatch')
+      .mockImplementationOnce(async () => { attempted(); throw wrapped; })
+      .mockResolvedValue(undefined);
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'codex' })]);
+    try {
+      await first;
+      store.setOffset('healthy', 10);
+      await store.save();
+      expect(store.saveFailed).toBe(false);
+      expect(store.isPersisted('healthy')).toBe(true);
+      expect(store.isPersisted(input.id + ':file')).toBe(false);
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[input.id + ':file'].lastOffset).toBe(1);
+      await vi.waitFor(() => expect(manager.getInputCounters().get(input.id)?.outEvents).toBe(1), { timeout: 2500 });
+      await store.save();
+      expect(store.isPersisted(input.id + ':file')).toBe(true);
+      expect(send).toHaveBeenCalledTimes(2);
+    } finally { await manager.stopAll(); await cleanupTempDir(root); }
+  });
+
+  it('holds the Hermes source checkpoint until its journal accepts the batch', async () => {
+    const root = await createTempDir('hermes-checkpoint-output-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    const input = new StubInput('hermes-checkpoint');
+    Object.defineProperty(input, 'agentType', { value: ClientType.Hermes });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling, input.id) });
+    manager.registerInput(input as any);
+    const key = `${input.id}:file`;
+    store.setOffset(key, 1);
+    await store.save();
+    store.setOffset(key, 2);
+    let accept!: () => void;
+    let started!: () => void;
+    const startedOutput = new Promise<void>(resolve => { started = resolve; });
+    const pending = new Promise<void>(resolve => { accept = resolve; });
+    vi.spyOn(flusher, 'sendBatch').mockImplementation(async () => { started(); await pending; });
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'hermes' })]);
+    try {
+      await startedOutput;
+      await store.save();
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[key].lastOffset).toBe(1);
+      accept();
+      await manager.stopAll();
+      await store.save();
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[key].lastOffset).toBe(2);
+    } finally { accept(); await cleanupTempDir(root); }
+  });
+
+  it('aborts a Hermes journal quota retry on shutdown without advancing the source checkpoint', async () => {
+    const root = await createTempDir('hermes-quota-stop-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    const input = new StubInput('hermes-quota');
+    Object.defineProperty(input, 'agentType', { value: ClientType.Hermes });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling, input.id) });
+    manager.registerInput(input as any);
+    const key = `${input.id}:file`;
+    store.setOffset(key, 1);
+    await store.save();
+    store.setOffset(key, 2);
+    let attempted!: () => void;
+    const first = new Promise<void>(resolve => { attempted = resolve; });
+    const quota = Object.assign(new Error('full'), { name: 'CodexTurnJournalCapacityError' });
+    const wrapped = Object.assign(new Error('journal', { cause: quota }), { name: 'CodexTurnJournalError' });
+    vi.spyOn(flusher, 'sendBatch').mockImplementation(async () => { attempted(); throw wrapped; });
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'hermes' })]);
+    try {
+      await first;
+      await manager.stopAll();
+      expect(store.hasSaveFailure(key)).toBe(true);
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[key].lastOffset).toBe(1);
+    } finally { await cleanupTempDir(root); }
   });
 
   describe('registerInput and event dispatch (T030)', () => {
@@ -308,7 +462,7 @@ describe('InputManager', () => {
       expect(dispatched).not.toHaveProperty(INVOCATION_USER_ID_FIELD);
     });
 
-    it('links TRACEPARENT with the native session before applying invocation session identity', async () => {
+    it.each([false, true])('links native-session input before applying invocation identity (input=%s)', async withInput => {
       const nativeSessionId = 'opencode-native-session';
       const customerSessionId = 'customer-session';
       const upstreamTraceId = '4bf92f3577b34da6a3ce929d0e0e4736';
@@ -335,6 +489,9 @@ describe('InputManager', () => {
           sessionId: nativeSessionId,
           trace_id: localTraceId,
           'gen_ai.turn.id': `${nativeSessionId}:t1`,
+          ...(withInput ? { 'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'actual input' }] },
+          ] } : {}),
         });
         entry[INVOCATION_SESSION_ID_FIELD] = customerSessionId;
 
@@ -344,8 +501,13 @@ describe('InputManager', () => {
         expect(flusher.batchCalls).toHaveLength(1);
         const dispatched = flusher.batchCalls[0][0];
         expect(dispatched['gen_ai.session.id']).toBe(customerSessionId);
-        expect(dispatched.trace_id).toBe(upstreamTraceId);
-        expect(dispatched.parent_span_id).toBe(upstreamSpanId);
+        expect(dispatched.trace_id).toBe(withInput ? upstreamTraceId : localTraceId);
+        expect(dispatched.parent_span_id).toBe(withInput ? upstreamSpanId : undefined);
+        if (!withInput) {
+          // Invocation identity still applies, but metadata cannot consume the native session context.
+          expect(new CorrelationStore(correlateDir).resolveSessionFirst(nativeSessionId))
+            .toBe(`00-${upstreamTraceId}-${upstreamSpanId}-01`);
+        }
         expect(dispatched).not.toHaveProperty(INVOCATION_SESSION_ID_FIELD);
       } finally {
         await cleanupTempDir(dataDir);
@@ -515,6 +677,88 @@ describe('InputManager', () => {
   });
 
   describe('blocked prompt flush', () => {
+    it.each([
+      { surface: 'qoder' as const, kind: 'blocked-prompt' },
+      { surface: 'qodercli' as const, kind: 'blocked-prompt' },
+    ])('inherits native App exclusions for $surface $kind events without cwd', async ({ surface }) => {
+      manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+      const input = new StubInput('qoder-app-native');
+      manager.registerInput(input as any);
+      input.emit('entries', [buildTestEntry({
+        'gen_ai.agent.type': 'qoder-app', 'gen_ai.session.id': 'app-session',
+        'workspace.path': '/private-project/app',
+      })]);
+      await manager.stopAll();
+      expect(flusher.batchCalls).toHaveLength(0);
+
+      const request = parseHookRequest({
+        hook_event_name: 'UserPromptSubmit', session_id: 'app-session',
+        parent_business_info: { product: 'app' }, prompt: 'private prompt',
+      }, surface)!;
+      expect(request.cwd).toBeUndefined();
+      const entry = buildBlockedQoderPromptEntry(request);
+      entry[INVOCATION_SESSION_ID_FIELD] = 'public-session';
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls).toHaveLength(0);
+      expect(entry['gen_ai.session.id']).toBe('app-session');
+    });
+
+    it('does not borrow App identity for a CLI blocked prompt sharing an excluded App session id', async () => {
+      manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+      const input = new StubInput('qoder-app-native');
+      manager.registerInput(input as any);
+      input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'qoder-app',
+        'gen_ai.session.id': 'shared-session', 'workspace.path': '/private-project/app' })]);
+      await manager.stopAll();
+      const request = parseHookRequest({ hook_event_name: 'UserPromptSubmit', session_id: 'shared-session',
+        parent_business_info: { product: 'cli' } }, 'qodercli')!;
+      const entry = buildBlockedQoderPromptEntry(request);
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls.flat()).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]['gen_ai.agent.type']).toBe('qoder-cli');
+    });
+
+    it('filters excluded prepared events before identity rewriting or any output', async () => {
+      manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+      manager.setConfiguredUserId('configured-user');
+      const entry = buildBlockedQoderPromptEntry({ agent: 'qoder', event: 'UserPromptSubmit',
+        sessionId: 'native-session', cwd: '/private-project/app', prompt: 'private content', raw: {} });
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls).toHaveLength(0);
+      expect(entry['user.id']).toBe('');
+      expect(entry['gen_ai.session.id']).toBe('native-session');
+    });
+
+    it('honors sticky exclusions for blocked prompts without cwd using native session/agent keys', async () => {
+      const policy = new WorkspacePolicy(['/private-project']);
+      manager.setWorkspacePolicy(policy);
+      const blocked = buildTestEntry({ 'gen_ai.agent.type': 'qoder-cli', 'gen_ai.session.id': 'native-session',
+        'workspace.path': '/private-project/app' });
+      expect(policy.allows(blocked)).toBe(false);
+      const entry = buildBlockedQoderPromptEntry({ agent: 'qodercli', event: 'UserPromptSubmit',
+        sessionId: 'native-session', raw: {} });
+      entry[INVOCATION_SESSION_ID_FIELD] = 'public-session';
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls).toHaveLength(0);
+      expect(entry['gen_ai.session.id']).toBe('native-session');
+    });
+
+    it('does not send late prepared output after its sink aborts during git enrichment', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const enrich = vi.spyOn(gitEnrichment, 'enrichCanonicalEntriesWithGit').mockImplementationOnce(() => gate);
+      const abort = new AbortController();
+      const entry = buildBlockedQoderPromptEntry({ agent: 'qoder', event: 'UserPromptSubmit', sessionId: 's', raw: {} });
+      try {
+        const pending = manager.flushPreparedEntries([entry], abort.signal);
+        expect(enrich).toHaveBeenCalledOnce();
+        abort.abort();
+        release();
+        await expect(pending).rejects.toThrow();
+        expect(flusher.batchCalls).toHaveLength(0);
+      } finally { enrich.mockRestore(); }
+    });
+
     it('applies user id, content policy, and mask before the shared flusher', async () => {
       manager.setConfiguredUserId('configured-user');
       manager.setMaskConfig({ mode: 'all', types: [] });
@@ -526,6 +770,15 @@ describe('InputManager', () => {
         sessionId: 's1',
         cwd: '/tmp/not-a-repo-for-pilot-blocked-prompt',
         raw: {},
+      }, Date.now(), {
+        action: 'block',
+        reason: `hit ${apiKey}`,
+        ruleId: 'flow-probe',
+        ruleVersion: '3',
+        severity: 'CRITICAL',
+        title: `label ${apiKey}`,
+        message: `不要粘贴 ${apiKey}`,
+        evaluatedRules: ['flow-probe'],
       });
 
       await manager.flushPreparedEntries([entry]);
@@ -534,9 +787,15 @@ describe('InputManager', () => {
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['user.id']).toBe('configured-user');
       expect(dispatched['gen_ai.input.messages']).toEqual([
-        { role: 'user', parts: [{ type: 'text', content: 'token [APIKEY_MASKED]' }] },
+        { role: 'user', parts: [{ type: 'text', content: 'token [APIKEY_MASKED]{sk-1*********************mnop}' }] },
       ]);
       expect(dispatched['gen_ai.guardrail.action']).toBe('block');
+      expect(dispatched['gen_ai.guardrail.rule_id']).toBe('flow-probe');
+      expect(dispatched['gen_ai.guardrail.rule_version']).toBe('3');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.reason');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.severity');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.title');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.message');
       expect(dispatched.trace_id).toBeUndefined();
       expect(dispatched['gen_ai.turn.start']).toBeUndefined();
     });
@@ -579,7 +838,7 @@ describe('InputManager', () => {
 
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['gen_ai.input.messages']).toEqual([
-        { role: 'user', content: 'use [ACCESSKEY_MASKED]' },
+        { role: 'user', content: 'use [ACCESSKEY_MASKED]{AKIA************MPLE}' },
       ]);
       expect(dispatched['workspace.current_root']).toBe(`/tmp/${accessKey}`);
     });

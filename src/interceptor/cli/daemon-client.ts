@@ -23,7 +23,8 @@ export class DaemonClient {
     return body;
   }
 
-  async health(timeoutMs = 200): Promise<InterceptorHealth> {
+  // Health runs in the interceptor Worker; allow brief scheduling delays before failing open.
+  async health(timeoutMs = 500): Promise<InterceptorHealth> {
     const body = await this.doJson<InterceptorHealth>('/health', undefined, timeoutMs, 'GET');
     if (body.service !== INTERCEPTOR_SERVICE || body.status !== 'ok') {
       throw new DaemonClientError('invalid-response', 'health identity does not match');
@@ -58,7 +59,10 @@ export class DaemonClient {
       return parseSingleJson<T>(await response.text());
     } catch (err) {
       if (err instanceof DaemonClientError) throw err;
-      throw new DaemonClientError('unavailable', err instanceof Error ? err.message : String(err));
+      if (controller.signal.aborted) {
+        throw new DaemonClientError('timeout', `daemon ${pathname}: request timed out after ${timeoutMs}ms`);
+      }
+      throw new DaemonClientError('unavailable', `daemon ${pathname}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       clearTimeout(timer);
     }

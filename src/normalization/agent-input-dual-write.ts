@@ -1,4 +1,4 @@
-import { v5 as uuidv5 } from 'uuid';
+import { uuidV5 } from '../utils/uuid.js';
 import type { AgentActivityEntry } from '../types/index.js';
 
 export const AGENT_INPUT_EVENT_NAMESPACE = '29afa46e-d5de-5c48-946b-90c1d0537f36';
@@ -12,7 +12,7 @@ export function isInputOtherEvent(entry: AgentActivityEntry): boolean {
 }
 
 export function deriveAgentInputEventId(originalEventId: string): string {
-  return uuidv5(originalEventId, AGENT_INPUT_EVENT_NAMESPACE);
+  return uuidV5(originalEventId, AGENT_INPUT_EVENT_NAMESPACE);
 }
 
 export function expandAgentInputEvents(

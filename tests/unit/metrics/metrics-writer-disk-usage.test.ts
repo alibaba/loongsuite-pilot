@@ -93,6 +93,13 @@ describe('MetricsWriter directory usage', () => {
     return JSON.parse(call![1].metric_json) as Record<string, string>;
   }
 
+  it('publishes the cached log family breakdown beside its scan timestamp', async () => {
+    complete(100, { logsBytes: 90, logsByFamily: { output: 40, dsh: 50 } });
+    await writeL1();
+    expect(JSON.parse(latestMetrics().disk_logs_by_family)).toEqual({ output: 40, dsh: 50 });
+    expect(latestMetrics().disk_dir_sampled_at).toBe(new Date(Date.now()).toISOString());
+  });
+
   it('owns the sampler lifecycle without waiting for a first scan', async () => {
     await writer.start();
     expect(mocks.dataDir).toBe(dataDir);

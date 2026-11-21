@@ -27,21 +27,28 @@ PROCESSOR="$HOOKS_DIR/qoder-hook-processor.mjs"
 # Fail silently if the processor is missing
 [[ -f "$PROCESSOR" ]] || exit 0
 
-MIN_NODE_MAJOR=18
+MIN_NODE_MAJOR=22
 
 node_is_suitable() {
   local bin="$1"
   [[ -x "$bin" ]] || return 1
   local ver major
   if major="$(node_major_from_runtime_path "$bin")"; then
-    (( major >= MIN_NODE_MAJOR )) || return 1
-    return 0
+    ver="${bin%/bin/node}"
+    ver="${ver##*/}"
+    ver="${ver#node-}"
+  else
+    node_is_app_bundle "$bin" && return 1
+    ver="$("$bin" --version 2>/dev/null)" || return 1
   fi
-  node_is_app_bundle "$bin" && return 1
-  ver="$("$bin" --version 2>/dev/null)" || return 1
+  # SQLite is unflagged from 22.13 / 23.4. Major-only checks accept early
+  # Node 22 builds that cannot run the metadata transaction gate.
   major="${ver#v}"
+  local minor="${major#*.}"
+  minor="${minor%%.*}"
   major="${major%%.*}"
-  [[ "$major" =~ ^[0-9]+$ ]] && (( major >= MIN_NODE_MAJOR )) || return 1
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+  (( major > 23 || (major == 23 && minor >= 4) || (major == 22 && minor >= 13) )) || return 1
   return 0
 }
 
@@ -94,7 +101,7 @@ sort_version_dirs_desc() {
   done | sort -r | cut -d'|' -f2-
 }
 
-NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+NODE_PIN_FILE="${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}/node-bin"
 
 NODE_BIN=""
 
@@ -129,7 +136,9 @@ if [[ -z "$NODE_BIN" ]]; then
       if [[ -n "$d" ]]; then candidates+=("$d/bin/node"); fi
     done <<<"$list"
   }
-  add_node_bin_candidates "$(for d in "$runtime_dir"/node-v*; do [[ -d "$d" ]] && printf '%s\n' "$d"; done | sort_version_dirs_desc)"
+  for runtime_dir in "$(dirname "$NODE_PIN_FILE")/runtime" "$HOME/.loongsuite-pilot/runtime"; do
+    add_node_bin_candidates "$(for d in "$runtime_dir"/node-v*; do [[ -d "$d" ]] && printf '%s\n' "$d"; done | sort_version_dirs_desc)"
+  done
   add_node_bin_candidates "$(for d in "$HOME/.nvm/versions/node"/*; do [[ -d "$d" ]] && printf '%s\n' "$d"; done | sort_version_dirs_desc)"
   candidates+=(
     "$HOME/.volta/bin/node"
@@ -150,7 +159,7 @@ if [[ -z "$NODE_BIN" ]]; then
 fi
 
 if [[ -z "$NODE_BIN" ]]; then
-  echo "[loongsuite-pilot] node >= $MIN_NODE_MAJOR not found" >&2
+  echo "[loongsuite-pilot] SQLite-capable node (22.13+, 23.4+, or newer) not found" >&2
   exit 0
 fi
 

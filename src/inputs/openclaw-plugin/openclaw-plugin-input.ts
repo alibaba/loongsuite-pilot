@@ -5,9 +5,11 @@ import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { transformHookRecord } from '../base/hook-record-transform.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+import { prepareRootTriggerLogDir } from '../../utils/producer-log-dir.js';
 
 const DEFAULT_PILOT_DATA_DIR = '~/.loongsuite-pilot';
-const SESSION_LIFECYCLE_HOOKS = new Set(['session_start', 'session_end']);
+const NON_CANONICAL_HOOKS = new Set(['session_start', 'session_end', 'before_model_resolve']);
 
 export type OpenClawPluginInputOptions =
   Omit<Partial<HookInputOptions>, 'stateStore'>
@@ -22,6 +24,7 @@ export function resolveOpenClawPluginLogDir(dataDir?: string): string {
 }
 
 export async function ensureOpenClawPluginLogDir(logDir: string): Promise<void> {
+  if (prepareRootTriggerLogDir(logDir)) return;
   await fs.mkdir(logDir, { recursive: true, mode: 0o700 });
   if (process.platform !== 'win32') await fs.chmod(logDir, 0o700);
 }
@@ -42,7 +45,7 @@ export class OpenClawPluginInput extends BaseHookInput {
       stateStore: opts.stateStore,
       logDir: opts.logDir ?? resolveOpenClawPluginLogDir(opts.dataDir),
       logPrefix: opts?.logPrefix ?? 'openclaw',
-      pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
   }
 
@@ -58,28 +61,30 @@ export class OpenClawPluginInput extends BaseHookInput {
     await ensureOpenClawPluginLogDir(this.logDir);
   }
 
+  protected override isHookLogFile(fileName: string): boolean {
+    return super.isHookLogFile(fileName)
+      || (this.logPrefix === 'openclaw' && /^openclaw-\d{4}-\d{2}-\d{2}-uid\d+(?:\.segment-\d{12}-[a-f0-9]{32})?\.jsonl$/.test(fileName));
+  }
+
+  protected override isTodayHookLogFile(fileName: string, today: string): boolean {
+    return super.isTodayHookLogFile(fileName, today)
+      || (this.logPrefix === 'openclaw' && this.isHookLogFile(fileName) && fileName.startsWith(`openclaw-${today}-uid`));
+  }
+
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
     const hook = record['agent.openclaw.hook'];
 
-    // Session lifecycle hooks are collector control-plane signals, not turns.
-    // Forwarding them creates trace groups with only ENTRY and AGENT spans.
-    if (typeof hook === 'string' && SESSION_LIFECYCLE_HOOKS.has(hook)) {
+    // Session lifecycle hooks are control-plane signals. before_model_resolve
+    // is also redundant with before_agent_run, the canonical turn-input source.
+    // Forwarding its content-stripped placeholder can start/export a local turn
+    // before upstream context is available, especially across collect batches.
+    // Keep the original plugin log, but omit these from the canonical pipeline.
+    if (typeof hook === 'string' && NON_CANONICAL_HOOKS.has(hook)) {
       return null;
     }
 
-    let canonicalRecord = record;
-    if (hook === 'before_model_resolve') {
-      // before_agent_run contains the same prompt plus richer turn context and
-      // is the single canonical source for ENTRY/AGENT input messages.
-      canonicalRecord = { ...record };
-      delete canonicalRecord['gen_ai.input.messages'];
-      delete canonicalRecord['gen_ai.input.messages_delta'];
-      delete canonicalRecord['input.messages'];
-      delete canonicalRecord['input.messages_delta'];
-    }
-
-    return transformHookRecord(canonicalRecord, ClientType.OpenClaw, 'openclaw');
+    return transformHookRecord(record, ClientType.OpenClaw, 'openclaw');
   }
 }

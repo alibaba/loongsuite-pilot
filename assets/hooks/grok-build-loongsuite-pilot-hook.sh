@@ -43,12 +43,30 @@ log_error() {
   local dir="$data_dir/logs/grok-build/errors"
   local file="$dir/grok-build-error-$day.jsonl"
   mkdir -p "$dir" 2>/dev/null || return 0
+  # Same exclusive file as the node writers of this JSONL (`open` O_EXCL / noclobber).
+  local lock="$file.lock"
+  local acquired=0
+  if (set -C; : > "$lock") 2>/dev/null; then
+    acquired=1
+  elif [ -f "$lock" ]; then
+    local now mtime
+    now="$(date +%s 2>/dev/null || echo 0)"
+    mtime="$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || echo 0)"
+    if [ $((now - mtime)) -gt 10 ]; then
+      rm -f "$lock" 2>/dev/null || true
+      if (set -C; : > "$lock") 2>/dev/null; then
+        acquired=1
+      fi
+    fi
+  fi
+  [ "$acquired" -eq 1 ] || return 0
   printf '{"time":"%s","gen_ai.agent.type":"grok-build","stage":"%s","error.type":"shell_%s","error.message":%s}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" \
     "$stage" \
     "$stage" \
     "$(printf '%s' "$message" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '""')" \
     >> "$file" 2>/dev/null || true
+  rm -f "$lock" 2>/dev/null || true
 }
 
 if [[ -t 0 ]]; then

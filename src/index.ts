@@ -37,6 +37,12 @@ async function main(): Promise<void> {
   // One-shot deployment. The collector deploys hooks/plugins itself on startup,
   // but only as a daemon side effect; image builds need it as a foreground step
   // with an exit code (see runDeployCommand).
+  if (command === 'hook') {
+    const { runHookCommand } = await import('./deployment/hook-command.js');
+    process.exitCode = await runHookCommand(args);
+    flushLogsSync();
+    return;
+  }
   if (command === 'inject') {
     const { runInjectCommand } = await import('./deployment/inject-command.js');
     process.exitCode = await runInjectCommand(args);

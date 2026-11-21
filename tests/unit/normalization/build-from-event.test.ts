@@ -1,12 +1,9 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { buildFromCodeGenerationEvent } from '../../../src/normalization/entry-builder.js';
 import { ClientType, ActionType } from '../../../src/types/index.js';
 import type { CodeGenerationEvent } from '../../../src/types/index.js';
 
-vi.mock('uuid', () => ({ v4: vi.fn().mockReturnValue('mock-uuid') }));
-
 describe('buildFromCodeGenerationEvent', () => {
-  afterEach(() => vi.restoreAllMocks());
 
   it('maps agentType from event', () => {
     const event: CodeGenerationEvent = {

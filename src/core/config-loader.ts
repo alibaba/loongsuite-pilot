@@ -1,12 +1,14 @@
 import * as os from 'node:os';
+import { validateExcludedWorkspaces } from './workspace-policy.js';
+import { globalPollIntervalMs, DEFAULT_POLL_INTERVAL_MS } from '../utils/poll-interval.js';
 import * as path from 'node:path';
 import type {
   AgentsConfig,
+  ListenerConfig,
   AnalyticsConfig,
   AutoUpdateConfig,
   CmsConfig,
   DashboardConfig,
-  FileCollectionToggle,
   PipelineToggle,
   FlusherConfig,
   HookWatchdogConfig,
@@ -41,6 +43,7 @@ import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
 import { buildInterceptorConfig, ensureMaskCoversInterceptor } from '../interceptor/config.js';
+import { resolveDoubaoWorkSource } from '../utils/doubao-work-paths.js';
 
 const logger = createLogger('ConfigLoader');
 
@@ -93,6 +96,8 @@ export interface ConfigFile {
   dataDir?: string;
   userId?: string;
   'user.id'?: string;
+  hostSn?: string;
+  hostIdentityTags?: boolean;
 
   sls?: SlsSingleConfig | SlsEndpointEntry[];
 
@@ -115,6 +120,9 @@ export interface ConfigFile {
   listeners?: Record<string, {
     enabled?: boolean;
     pollInterval?: number;
+    logDir?: string;
+    client?: 'doubao-work' | 'doubao';
+    includeConversationIds?: string[];
   }>;
 
   retention?: {
@@ -135,6 +143,7 @@ export interface ConfigFile {
     repairCooldownMs?: number;
   };
 
+  privacy?: { excludeWorkspaces?: string[] };
   interceptor?: {
     mode?: string;
     types?: string[];
@@ -222,11 +231,13 @@ export interface ConfigFile {
     enabled?: boolean;
     file?: { enabled?: boolean };
     qoderApi?: { enabled?: boolean };
+    multica?: { enabled?: boolean; mode?: 'on' | 'off' };
   };
 
   enableStatusBarApp?: boolean | string;
 
   dashboard?: {
+    enabled?: boolean;
     port?: number;
   };
 
@@ -287,17 +298,25 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
   const innerDataConfig = await readJsonFile<InnerDataConfig>(innerDataConfigPath);
 
   const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
+  const hostSn = typeof file?.hostSn === 'string' ? file.hostSn.trim() : '';
+  const hostIdentityTags = envBool(
+    'LOONGSUITE_PILOT_HOST_IDENTITY_TAGS',
+    file?.hostIdentityTags ?? true,
+  );
 
   const serviceName = nonEmpty(env('LOONGSUITE_PILOT_SERVICE_NAME')) ?? nonEmpty(file?.serviceName);
-  const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? 'loongsuite-pilot';
-  const flushers = buildFlushersConfig(file, dataDir, serviceName, serviceNamePrefix, innerDataConfig);
+  const configuredServiceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix;
+  const serviceNamePrefix = configuredServiceNamePrefix ?? 'loongsuite-pilot';
   const interceptor = buildInterceptorConfig(file?.interceptor);
+  const pipeline = buildPipelineConfig(file, configuredServiceNamePrefix);
 
   return {
     enabled: envBool('LOONGSUITE_PILOT_ENABLED', file?.enabled ?? true),
     autoStart: true,
     dataDir,
     userId,
+    hostSn,
+    hostIdentityTags,
     collectLog: envBool('LOONGSUITE_PILOT_COLLECT_LOG', file?.collectLog ?? true),
     collectTrace: envBool('LOONGSUITE_PILOT_COLLECT_TRACE', file?.collectTrace ?? true),
     serviceName,
@@ -314,17 +333,18 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     autoUpdate: buildAutoUpdateConfig(file),
 
     listeners: buildListenersConfig(file),
-    flushers,
+    flushers: buildFlushersConfig(file, dataDir, serviceName, serviceNamePrefix, innerDataConfig),
     retention: buildRetentionConfig(file),
     agents: buildAgentsConfig(file, innerDataConfig),
+    privacy: { excludeWorkspaces: validateExcludedWorkspaces(file?.privacy?.excludeWorkspaces) },
     mask: ensureMaskCoversInterceptor(buildMaskConfig(file), interceptor),
     hookWatchdog: buildHookWatchdogConfig(file),
-    fileCollection: buildFileCollectionConfig(file),
-    pipeline: buildPipelineConfig(file),
+    fileCollection: pipeline,
+    pipeline,
     statusBar: buildStatusBarConfig(file),
     dashboard: buildDashboardConfig(file),
     upstreamLink: buildUpstreamLinkConfig(file),
-    multimodal: buildMultimodalConfig(file, flushers.sls, innerDataConfig),
+    multimodal: buildMultimodalConfig(file, innerDataConfig),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
     interceptor,
   };
@@ -355,50 +375,34 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
 const MULTIMODAL_UPLOAD_MODE_SET = new Set<string>(MULTIMODAL_UPLOAD_MODES);
 
 type MultimodalStorageRaw = NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>;
-type SlsApiKeyTarget = { endpoint: string; project: string; logstore: string; apiKey: string };
 
-/** Unique SLS apiKey target is reused as a whole; only logstore may be overridden. Invalid → undefined. */
 function buildMultimodalConfig(
   file: ConfigFile | null,
-  sls?: SlsFlusherConfig,
   innerDataConfig?: InnerDataConfig | null,
 ): MultimodalRuntimeConfig | undefined {
-  const slsTarget = findUniqueSlsApiKeyTarget(sls, file);
   // Select a whole block so managed storage targets and user credentials are not merged.
   const block = file?.multimodal !== undefined
     ? file.multimodal
     : innerDataConfig?.multimodal;
   try {
-    if (block === undefined) {
-      return slsTarget ? multimodalFromSlsApiKey(slsTarget) : undefined;
-    }
+    if (block === undefined) return undefined;
     if (block === null || typeof block !== 'object' || Array.isArray(block)) {
       throw new Error('multimodal must be an object');
     }
     if (block.storage === undefined) {
-      if (slsTarget) return multimodalFromSlsApiKey(slsTarget);
       throw new Error('multimodal.storage is required');
     }
     if (typeof block.storage !== 'object' || Array.isArray(block.storage)) {
       throw new Error('multimodal.storage must be an object');
     }
     const storageRaw = block.storage;
-    if (slsTarget && isLogstoreOnlyShorthand(storageRaw)) {
-      const logstore = isNonEmptyString(storageRaw.target?.logstore)
-        ? storageRaw.target.logstore.trim()
-        : slsTarget.logstore;
-      const type = typeof storageRaw.type === 'string' && storageRaw.type.trim() === 'delegatedOss'
-        ? 'delegatedOss'
-        : 'sls';
-      return multimodalFromSlsApiKey({ ...slsTarget, logstore }, type);
-    }
     const type = (storageRaw.type ?? '').trim();
     if (type === 'oss') {
       const storage = buildMultimodalOssStorage(storageRaw);
       return { storage, storageBasePath: storage.target.storageBasePath };
     }
     if (type === 'sls' || type === 'delegatedOss') {
-      const storage = buildMultimodalSlsBackedStorage(type, storageRaw, sls);
+      const storage = buildMultimodalSlsBackedStorage(type, storageRaw, file);
       return {
         storage,
         storageBasePath: `sls://${storage.target.project}/${storage.target.logstore}`,
@@ -411,90 +415,40 @@ function buildMultimodalConfig(
   }
 }
 
-/** Complete apiKey targets only; AK / WebTracking do not count.
- *  Same dest: user overrides inner; reuse follows the resolved flusher list. */
-function findUniqueSlsApiKeyTarget(
-  sls: SlsFlusherConfig | undefined,
+function multimodalDestKey(endpoint: string, project: string, logstore: string): string | undefined {
+  try {
+    return `${normalizeEndpointUrl(regionalizeSlsEndpoint(endpoint, project))}|${project}|${logstore}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function findReusedApiKeyAuth(
+  target: { endpoint: string; project: string; logstore: string },
   file: ConfigFile | null,
-): SlsApiKeyTarget | undefined {
-  if (fileSlsHasConflictingApiKeys(file)) return undefined;
-  let unique: SlsApiKeyTarget | undefined;
-  for (const ep of sls?.endpoints ?? []) {
-    if (ep.mode !== 'apiKey' || hasAmbiguousSlsCredentials(ep)) continue;
-    const apiKey = isNonEmptyString(ep.apiKey) ? ep.apiKey.trim() : undefined;
-    const endpoint = isNonEmptyString(ep.endpoint) ? ep.endpoint.trim() : undefined;
-    const project = isNonEmptyString(ep.project) ? ep.project.trim() : undefined;
-    const logstore = isNonEmptyString(ep.logstore) ? ep.logstore.trim() : undefined;
-    if (!apiKey || !endpoint || !project || !logstore) continue;
-    if (unique) return undefined;
-    unique = { endpoint: endpoint.replace(/\/+$/, ''), project, logstore, apiKey };
-  }
-  return unique;
-}
-
-/** Same dest + different apiKeys in raw `file.sls` (before flusher dedup). */
-function fileSlsHasConflictingApiKeys(file: ConfigFile | null): boolean {
+): { mode: 'apiKey'; apiKey: string } | undefined {
+  const dest = multimodalDestKey(target.endpoint, target.project, target.logstore);
+  if (!dest) return undefined;
   const raw = file?.sls;
-  if (!Array.isArray(raw)) return false;
-  const byDest = new Map<string, string>();
-  for (const ep of raw) {
+  const entries = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  let apiKey: string | undefined;
+  for (const ep of entries) {
+    if (!ep || typeof ep !== 'object') continue;
     if (inferSlsMode(ep) !== 'apiKey' || (ep.apiKey && (ep.accessKeyId || ep.accessKeySecret))) continue;
-    const apiKey = isNonEmptyString(ep.apiKey) ? ep.apiKey.trim() : undefined;
+    const candidate = isNonEmptyString(ep.apiKey) ? ep.apiKey.trim() : undefined;
     const endpoint = isNonEmptyString(ep.endpoint) ? ep.endpoint.trim() : undefined;
     const project = isNonEmptyString(ep.project) ? ep.project.trim() : undefined;
     const logstore = isNonEmptyString(ep.logstore) ? ep.logstore.trim() : undefined;
-    if (!apiKey || !endpoint || !project || !logstore) continue;
-    const dest = `${normalizeEndpointUrl(endpoint)}|${project}|${logstore}`;
-    const existing = byDest.get(dest);
-    if (existing !== undefined && existing !== apiKey) return true;
-    byDest.set(dest, apiKey);
+    if (!candidate || !endpoint || !project || !logstore) continue;
+    if (multimodalDestKey(endpoint, project, logstore) !== dest) continue;
+    if (apiKey !== undefined && apiKey !== candidate) return undefined;
+    apiKey = candidate;
   }
-  return false;
-}
-
-function multimodalFromSlsApiKey(
-  target: SlsApiKeyTarget,
-  type: 'sls' | 'delegatedOss' = 'sls',
-): MultimodalRuntimeConfig {
-  const storageTarget = {
-    endpoint: regionalizeSlsEndpoint(target.endpoint, target.project),
-    project: target.project,
-    logstore: target.logstore,
-  };
-  const auth = { mode: 'apiKey' as const, apiKey: target.apiKey };
-  return {
-    storage: type === 'delegatedOss'
-      ? { type: 'delegatedOss', target: storageTarget, auth }
-      : { type: 'sls', target: storageTarget, auth },
-    storageBasePath: `sls://${target.project}/${target.logstore}`,
-  };
+  return apiKey ? { mode: 'apiKey', apiKey } : undefined;
 }
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '';
-}
-
-/** `{ type?: 'sls'|'delegatedOss', target?: { logstore? } }` — missing/empty target reuses all. */
-function isLogstoreOnlyShorthand(raw: MultimodalStorageRaw): boolean {
-  for (const key of Object.keys(raw)) {
-    if (key !== 'type' && key !== 'target') return false;
-  }
-  if ('type' in raw) {
-    if (typeof raw.type !== 'string') return false;
-    const trimmed = raw.type.trim();
-    if (trimmed !== 'sls' && trimmed !== 'delegatedOss') return false;
-  }
-  if (!('target' in raw) || raw.target === undefined) return true;
-  const target = raw.target;
-  if (target == null || typeof target !== 'object' || Array.isArray(target)) return false;
-  for (const key of Object.keys(target)) {
-    if (key === 'logstore') {
-      if (!isNonEmptyString(target.logstore)) return false;
-      continue;
-    }
-    return false;
-  }
-  return true;
 }
 
 function buildMultimodalOssStorage(
@@ -510,6 +464,9 @@ function buildMultimodalOssStorage(
     throw new Error('multimodal.storage.target.storageBasePath must start with oss:// when type=oss');
   }
   const auth = buildMultimodalStorageAuth(raw.auth);
+  if (auth.mode === 'anonymous') {
+    throw new Error('multimodal.storage.auth.mode=anonymous is only supported when type=sls');
+  }
   if (auth.mode !== 'ak') {
     throw new Error('multimodal.storage.type=oss requires auth.mode=ak');
   }
@@ -526,25 +483,33 @@ function buildMultimodalOssStorage(
 function buildMultimodalSlsBackedStorage(
   type: 'sls' | 'delegatedOss',
   raw: NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>,
-  sls?: SlsFlusherConfig,
+  file: ConfigFile | null,
 ): Extract<MultimodalStorage, { type: 'sls' | 'delegatedOss' }> {
   const endpointRaw = (raw.target?.endpoint ?? '').trim().replace(/\/+$/, '');
   const logstore = (raw.target?.logstore ?? '').trim();
   if (!endpointRaw || !logstore) {
     throw new Error(`multimodal.storage.target requires endpoint and logstore when type=${type}`);
   }
-  const project = resolveMultimodalProject(raw.target!, sls);
+  const project = resolveMultimodalProject(raw.target!);
   const endpoint = regionalizeSlsEndpoint(endpointRaw, project);
-  const auth = buildMultimodalStorageAuth(raw.auth);
-  return { type, target: { endpoint, project, logstore }, auth };
+  const auth = buildMultimodalStorageAuth(
+    raw.auth ?? findReusedApiKeyAuth({ endpoint, project, logstore }, file),
+  );
+  const target = { endpoint, project, logstore };
+  if (type === 'delegatedOss') {
+    if (auth.mode === 'anonymous') {
+      throw new Error('multimodal.storage.auth.mode=anonymous is only supported when type=sls');
+    }
+    return { type, target, auth };
+  }
+  return { type, target, auth };
 }
 
 const SLS_PUBLIC_HOST_SUFFIX = '.log.aliyuncs.com';
 
-/** Explicit project, then project-qualified multimodal host, then matching flusher project. */
+/** Explicit project, then project-qualified multimodal host. */
 function resolveMultimodalProject(
   target: NonNullable<MultimodalStorageRaw['target']>,
-  sls?: SlsFlusherConfig,
 ): string {
   let explicit: string | undefined;
   if ('project' in target) {
@@ -559,8 +524,6 @@ function resolveMultimodalProject(
   }
   if (explicit) return explicit;
   if (fromHost) return fromHost;
-  const fromFlusher = uniqueProjectAmongMatchingFlushers(target.endpoint, sls);
-  if (fromFlusher) return fromFlusher;
   throw new Error('multimodal.storage.target.project is required');
 }
 
@@ -599,38 +562,6 @@ function projectFromQualifiedSlsHost(endpoint: string | undefined): string | und
   }
 }
 
-function slsEndpointRegionKey(endpoint: string | undefined): string | undefined {
-  if (!isNonEmptyString(endpoint)) return undefined;
-  try {
-    const host = new URL(normalizeEndpointUrl(endpoint)).hostname.replace(/\.$/, '');
-    if (!host.endsWith(SLS_PUBLIC_HOST_SUFFIX)) return host;
-    const rest = host.slice(0, -SLS_PUBLIC_HOST_SUFFIX.length);
-    const parts = rest.split('.').filter(Boolean);
-    const region = parts.length >= 2 ? parts.slice(1).join('.') : rest;
-    return region ? `${region}${SLS_PUBLIC_HOST_SUFFIX}` : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function uniqueProjectAmongMatchingFlushers(
-  endpoint: string | undefined,
-  sls?: SlsFlusherConfig,
-): string | undefined {
-  const region = slsEndpointRegionKey(endpoint);
-  if (!region) return undefined;
-  const projects = new Set<string>();
-  for (const ep of sls?.endpoints ?? []) {
-    if (slsEndpointRegionKey(ep.endpoint) !== region) continue;
-    const project = isNonEmptyString(ep.project)
-      ? ep.project.trim()
-      : projectFromQualifiedSlsHost(ep.endpoint);
-    if (project) projects.add(project);
-  }
-  if (projects.size !== 1) return undefined;
-  return [...projects][0];
-}
-
 function buildMultimodalStorageAuth(
   raw: { mode?: string; accessKeyId?: string; accessKeySecret?: string; securityToken?: string; apiKey?: string } | undefined,
 ): MultimodalStorageAuth {
@@ -645,6 +576,12 @@ function buildMultimodalStorageAuth(
   }
 
   const mode = resolveMultimodalStorageAuthMode(raw?.mode, { hasAk, hasApiKey });
+  if (mode === 'anonymous') {
+    if (accessKeyId || accessKeySecret || securityToken || apiKey) {
+      throw new Error('multimodal.storage.auth.mode=anonymous cannot include credentials');
+    }
+    return { mode: 'anonymous' };
+  }
   if (mode === 'apiKey') {
     if (!apiKey) throw new Error('multimodal.storage.auth requires apiKey when mode=apiKey');
     return { mode: 'apiKey', apiKey };
@@ -836,16 +773,15 @@ function parseMaskTypes(value: string | string[] | undefined): MaskType[] {
 }
 
 function buildMaskConfig(file: ConfigFile | null): MaskConfig {
+  const fileReplacementMode = file?.mask?.replacementMode;
   const rawReplacementMode =
     nonEmpty(env('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE')) ??
-    file?.mask?.replacementMode;
-  const replacementMode = SUPPORTED_MASK_REPLACEMENT_MODES.has(
-    rawReplacementMode as MaskReplacementMode,
-  )
-    ? (rawReplacementMode as MaskReplacementMode)
-    : 'placeholder';
-  if (rawReplacementMode && rawReplacementMode !== replacementMode) {
-    logger.warn('invalid mask replacement mode, using placeholder', {
+    (typeof fileReplacementMode === 'string' ? nonEmpty(fileReplacementMode) : undefined);
+  const replacementMode: MaskReplacementMode = rawReplacementMode === 'placeholder'
+    ? 'placeholder'
+    : 'preview';
+  if (rawReplacementMode && !SUPPORTED_MASK_REPLACEMENT_MODES.has(rawReplacementMode as MaskReplacementMode)) {
+    logger.warn('invalid mask replacement mode, using preview', {
       replacementMode: rawReplacementMode,
     });
   }
@@ -866,28 +802,31 @@ function buildMaskConfig(file: ConfigFile | null): MaskConfig {
 
 function buildListenersConfig(
   file: ConfigFile | null,
-): Record<string, { enabled: boolean; pollInterval: number }> {
-  const defaults: Record<string, { enabled: boolean; pollInterval: number }> = {
-    qoder: { enabled: true, pollInterval: 30_000 },
-    'qoder-trace': { enabled: true, pollInterval: 30_000 },
-    'qoder-work': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-log': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-sqlite': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-cn-trace': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-cn-hook': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-cn-log': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-cn-sqlite': { enabled: true, pollInterval: 30_000 },
-    'qwen-work-cn-trace': { enabled: true, pollInterval: 30_000 },
-    'qwen-work-cn-hook': { enabled: true, pollInterval: 30_000 },
-    'qwen-work-cn-sqlite': { enabled: true, pollInterval: 30_000 },
-    'cursor-hook': { enabled: true, pollInterval: 30_000 },
-    'claude-code-log': { enabled: true, pollInterval: 30_000 },
-    'grok-build-log': { enabled: true, pollInterval: 30_000 },
-    'codex-transcript': { enabled: true, pollInterval: 30_000 },
-    'opencode-log': { enabled: true, pollInterval: 30_000 },
-    'pi-coding-agent-log': { enabled: true, pollInterval: 30_000 },
-    workbuddy: { enabled: true, pollInterval: 30_000 },
-    'hermes-agent-log': { enabled: true, pollInterval: 30_000 },
+): Record<string, ListenerConfig> {
+  const defaults: Record<string, ListenerConfig> = {
+    qoder: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-trace': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-sqlite': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-cn-trace': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-cn-hook': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-cn-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-cn-sqlite': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwen-work-cn-trace': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwen-work-cn-hook': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwen-work-cn-sqlite': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwen-work-cn-collaboration': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'cursor-hook': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'claude-code-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'grok-build-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'codex-transcript': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'copilot-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'opencode-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'pi-coding-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    workbuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'doubao-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
   };
 
   const result = { ...defaults };
@@ -897,8 +836,27 @@ function buildListenersConfig(
     for (const [key, val] of Object.entries(file.listeners)) {
       result[key] = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
-        pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? 30_000,
+        pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
+        ...(key === 'doubao-work' ? resolveDoubaoWorkSource(val) : {}),
       };
+      if (key === 'qwen-work-cn-collaboration' && Object.hasOwn(val, 'includeConversationIds')) {
+        const ids: unknown = val.includeConversationIds;
+        if (!Array.isArray(ids) || ids.length > 1000 || ids.some(id =>
+          typeof id !== 'string' || id.trim() === '' || id.length > 512)) {
+          // Invalid restrictions must never widen the collection scope.
+          logger.warn('Invalid Qwen Work collaboration conversation allowlist; collecting no conversations');
+          result[key].includeConversationIds = [];
+        } else {
+          result[key].includeConversationIds = [...new Set(ids.map(id => id.trim()))];
+        }
+      }
+      if (key === 'doubao-work' && val.client !== undefined && val.client !== 'doubao' && val.client !== 'doubao-work') {
+        logger.warn('Invalid Doubao client; disabling this listener', {
+          valueType: typeof val.client,
+          allowedValues: ['doubao-work', 'doubao'],
+        });
+        result[key].enabled = false;
+      }
     }
   }
 
@@ -914,10 +872,17 @@ function buildListenersConfig(
     }
   }
 
-  // Env overrides for specific poll intervals
+  // Env overrides for specific poll intervals. The unified var wins over these.
   const envPoll = envInt('QODER_ANALYTICS_POLL_INTERVAL', 0);
   if (envPoll > 0) result.qoder.pollInterval = envPoll;
   if (envPoll > 0) result['qoder-trace'].pollInterval = envPoll;
+
+  const globalPoll = globalPollIntervalMs();
+  if (globalPoll !== undefined) {
+    for (const entry of Object.values(result)) {
+      entry.pollInterval = globalPoll;
+    }
+  }
 
   return result;
 }
@@ -961,25 +926,36 @@ function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
   };
 }
 
-function buildFileCollectionConfig(file: ConfigFile | null): FileCollectionToggle {
-  return buildPipelineConfig(file);
-}
-
-function buildPipelineConfig(file: ConfigFile | null): PipelineToggle {
-  const legacyEnabled = file?.fileCollection?.enabled;
-  const enabled = envBool(
-    'LOONGSUITE_PILOT_PIPELINE_ENABLED',
-    envBool('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', file?.pipeline?.enabled ?? legacyEnabled ?? false),
-  );
+function buildPipelineConfig(file: ConfigFile | null, configuredServiceNamePrefix?: string): PipelineToggle {
+  const configured = file?.pipeline?.enabled ?? file?.fileCollection?.enabled;
+  const enabled = (fallback: boolean) => envBool('LOONGSUITE_PILOT_PIPELINE_ENABLED',
+    envBool('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', configured ?? fallback));
+  const multicaEnabled = envBool('LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED', file?.pipeline?.multica?.enabled ?? true);
+  const mode = buildMulticaMode(file?.pipeline?.multica?.mode);
   return {
-    enabled,
+    enabled: enabled(false),
     file: {
       enabled: envBool('LOONGSUITE_PILOT_PIPELINE_FILE_ENABLED', file?.pipeline?.file?.enabled ?? true),
     },
     qoderApi: {
       enabled: envBool('LOONGSUITE_PILOT_PIPELINE_QODER_API_ENABLED', file?.pipeline?.qoderApi?.enabled ?? true),
     },
+    multica: {
+      enabled: multicaEnabled,
+      mode,
+      discoverLocalSources: multicaEnabled && mode === 'on' && enabled(true) || undefined,
+      // Pilot's built-in prefix must not rename environments on existing installations.
+      serviceNamePrefix: configuredServiceNamePrefix,
+    },
   };
+}
+
+function buildMulticaMode(value: unknown): 'on' | 'off' {
+  const raw = process.env.LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE ?? value ?? 'off';
+  const mode = typeof raw === 'string' ? raw.trim().toLowerCase() : raw;
+  if (mode === 'on' || mode === 'off') return mode;
+  logger.warn('Invalid Multica collection mode; collection disabled');
+  return 'off';
 }
 
 function buildStatusBarConfig(file: ConfigFile | null): StatusBarConfig {
@@ -1001,6 +977,7 @@ const DEFAULT_DASHBOARD_PORT = 8_765;
 function buildDashboardConfig(file: ConfigFile | null): DashboardConfig {
   const port = file?.dashboard?.port;
   return {
+    enabled: file?.dashboard?.enabled === true,
     port: typeof port === 'number' && Number.isInteger(port) && port >= 1 && port <= 65_535
       ? port
       : DEFAULT_DASHBOARD_PORT,
@@ -1106,7 +1083,9 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   if (deduped.length === 0) return undefined;
 
   const otlp = config.otlpTrace;
-  const captureMessageContent = otlp?.captureMessageContent ?? resolveCaptureMessageContent(config.agents);
+  // The global Trace switch is independent of per-agent policies. InputManager
+  // applies those policies before records reach this shared flusher.
+  const captureMessageContent = otlp?.captureMessageContent ?? true;
   const serviceName = userServiceName;
   const resourceAttributes = { ...(otlp?.resourceAttributes ?? {}), ...armsResourceAttributes };
 
@@ -1234,12 +1213,6 @@ function extractArmsProject(endpoint: string): string {
   }
 }
 
-function resolveCaptureMessageContent(agents: AgentsConfig): boolean {
-  const values = Object.values(agents);
-  if (values.length === 0) return true;
-  return values.every(a => a.captureMessageContent !== false);
-}
-
 function inferSlsMode(args: {
   mode?: SlsMode;
   accessKeyId?: string;
@@ -1300,7 +1273,7 @@ function buildSlsConfig(
     const userMode = readUserSlsMode(single);
     const userAk = env('LOONGSUITE_SLS_ACCESS_KEY_ID') ?? single.accessKeyId;
     const userSk = env('LOONGSUITE_SLS_ACCESS_KEY_SECRET') ?? single.accessKeySecret;
-    const userApiKey = env('LOONGSUITE_SLS_API_KEY') ?? single.apiKey;
+    const userApiKey = single.apiKey;
     const userRawEndpoint = env('LOONGSUITE_SLS_ENDPOINT') ?? single.endpoint;
     const userProject = env('LOONGSUITE_SLS_PROJECT') ?? single.project;
     const userLogstore = env('LOONGSUITE_SLS_LOGSTORE') ?? single.logstore;
@@ -1462,7 +1435,7 @@ function dedupSlsEndpoints(endpoints: SlsEndpoint[]): SlsEndpoint[] {
 
 function buildJsonlConfig(file: ConfigFile | null, dataDir: string) {
   return {
-    enabled: envBool('JSONL_ENABLED', file?.jsonl?.enabled ?? true),
+    enabled: envBool('JSONL_ENABLED', file?.jsonl?.enabled ?? false),
     outputDir: resolveHome(
       env('JSONL_OUTPUT_DIR') ?? file?.jsonl?.outputDir ?? `${dataDir}/logs/output`,
     ),

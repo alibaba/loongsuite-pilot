@@ -124,6 +124,11 @@ Claude Code 的 hook 能解析 transcript 并写出 Chat / Tool call，但 `syst
 `claude-code-fetch-intercept.mjs` 通过 shell rc wrapper 在 Claude Code 主进程启动前注入 `BUN_OPTIONS --preload`。
 缺失时常见表现是 **JSONL 有 LLM/Tool 事件，但 `gen_ai.system_instructions` 或 `gen_ai.response.time_to_first_token` 缺失**。
 
+Claude Code 2.1.311 的原生运行时可通过 `Bun.FetchSession.fetch` 发送模型请求，绕过 `globalThis.fetch`。
+preload 必须同时兼容这两个入口；旧版脚本即使已经被加载，也可能完全采集不到这两个字段。
+这类情况需要升级包含 `FetchSession` 兼容逻辑的 Pilot/采集脚本，并退出、重新启动 Claude Code。
+仅重启 Pilot 不能更新已经运行的 Claude Code 进程中的 preload。
+
 ```bash
 # 1) preload 脚本必须存在
 ls -l ~/.loongsuite-pilot/hooks/claude-code-fetch-intercept.mjs
@@ -149,15 +154,20 @@ claude () { BUN_OPTIONS="--preload=/Users/<you>/.loongsuite-pilot/hooks/claude-c
 
 ```bash
 # intercept 文件会在 hook processor 合并后被清理，因此优先看最终 JSONL 字段
-grep -E 'gen_ai.system_instructions|gen_ai.response.time_to_first_token' \
-  ~/.loongsuite-pilot/logs/claude-code/claude-code-$(date +%Y-%m-%d).jsonl | tail -5
+grep -h -oE '"gen_ai\.system_instructions"[[:space:]]*:|"gen_ai\.response\.time_to_first_token"[[:space:]]*:[[:space:]]*[0-9]+' \
+  ~/.loongsuite-pilot/logs/claude-code/claude-code-$(date +%Y-%m-%d).jsonl | tail -20
 
 # 若刚触发完还未合并，可短暂看到 intercept 原始文件
 find ~/.loongsuite-pilot/intercept/claude-code -type f -name '*.json' -mmin -10 2>/dev/null | head
 ```
 
-若 JSONL 无上述字段且 intercept 目录也没有新文件，说明 fetch preload 未生效；重跑安装或等待 HookWatchdog 自动修复 shell rc 注入块后，
-必须重新 source rc / 新开终端。
+Hook 日志按 Hook 进程的本地日历日命名。以上 `date` 应与 Hook 使用相同的时区；时区不一致或排查跨午夜的会话时，
+先用第 2 步的 `ls` 确认实际文件日期。检查自定义安装目录时，将以上 `~/.loongsuite-pilot` 换成本次启动使用的
+`LOONGSUITE_PILOT_DATA_DIR`。TTFT 是整数纳秒，system instructions 位于 `llm.request` 上，TTFT 位于 `llm.response` 上。
+
+若两个字段都缺失且 intercept 目录没有新文件，先按上面的步骤确认 preload 路径与新进程环境，再确认安装的
+`claude-code-fetch-intercept.mjs` 是否包含 `FetchSession` 兼容逻辑。不要仅凭目录为空就认定 preload 没加载：
+旧脚本可能遗漏原生请求入口，成功合并后的文件也会被清理。shell rc 注入块修复后必须重新 source rc / 新开终端。
 
 ---
 
@@ -336,6 +346,6 @@ ls -l ~/.loongsuite-pilot/plugins/otel-claude-hook/package/bin/otel-claude-hook
 | `npm install` 失败导致插件不可用 | 检查 `/tmp/otel-plugin-npm-err.log`。常见原因：网络不通、Node.js 版本 < 18、npm registry 不可达 |
 | `[otel-claude-hook] telemetry export failed` | Stop hook 导出异常但不影响 Claude Code。查看完整错误信息定位：OTLP endpoint 不可达 / log_dir 无写权限 / transcript 文件损坏 |
 | 重装 pilot 后 hook 不生效 | 确认 pilot 安装脚本调用了 `otel-claude-hook install`（不能因解压跳过而 early return）。当前版本已修复为每次都全新安装 |
-| JSONL 有 LLM / Tool 但无 `gen_ai.system_instructions` 或 `gen_ai.response.time_to_first_token` | `claude-code-fetch-intercept.mjs` 的 BUN_OPTIONS preload 未注入或当前终端未 source rc，参考第 3 步 |
-| `~/.loongsuite-pilot/intercept/claude-code/` 没有新文件 | preload 未生效；检查 shell rc 注入块、`type claude`，修复后重新 source rc / 开新终端 |
+| JSONL 有 LLM / Tool 但无 `gen_ai.system_instructions` 或 `gen_ai.response.time_to_first_token` | preload 未注入、当前终端未 source rc，或旧脚本遗漏 `Bun.FetchSession` 原生请求入口，参考第 3 步 |
+| `~/.loongsuite-pilot/intercept/claude-code/` 没有新文件 | 可能未加载 preload、旧脚本遗漏原生请求入口，或文件已经合并清理；优先检查最终 JSONL，再按第 3 步确认注入和版本 |
 | Dashboard 数据超过一分钟未更新 | Dashboard 直接读取 `logs/metrics-summary.json`。先检查 `loongsuite-pilot status`、该文件修改时间和 `loongsuite-pilot-service.log` 中的 `MetricsSummaryWriter` 日志；不要通过重复刷新页面触发计算。详见 `monitoring.md` |

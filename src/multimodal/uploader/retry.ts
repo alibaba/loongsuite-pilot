@@ -43,11 +43,12 @@ export function retryDelayMs(policy: RetryPolicy, attempt: number): number {
 
 export async function withRetries<T>(
   policy: RetryPolicy,
-  run: (attempt: number) => Promise<{ ok: true; value: T } | { ok: false; retryable: boolean; error?: string; statusCode?: number }>,
+  run: (attempt: number) => Promise<{ ok: true; value: T } | { ok: false; retryable: boolean; error?: string; statusCode?: number; requestId?: string }>,
   opts?: { signal?: AbortSignal },
-): Promise<{ ok: true; value: T } | { ok: false; error?: string; statusCode?: number }> {
+): Promise<{ ok: true; value: T } | { ok: false; error?: string; statusCode?: number; requestId?: string }> {
   let lastError: string | undefined;
   let lastStatus: number | undefined;
+  let lastRequestId: string | undefined;
 
   for (let attempt = 1; attempt <= policy.maxAttempts; attempt++) {
     if (opts?.signal?.aborted) {
@@ -57,11 +58,22 @@ export async function withRetries<T>(
     if (result.ok) return result;
     lastError = result.error;
     lastStatus = result.statusCode;
+    lastRequestId = result.requestId;
     if (!result.retryable || attempt >= policy.maxAttempts) {
-      return { ok: false, error: lastError, statusCode: lastStatus };
+      return {
+        ok: false,
+        error: lastError,
+        statusCode: lastStatus,
+        ...(lastRequestId ? { requestId: lastRequestId } : {}),
+      };
     }
     await sleep(retryDelayMs(policy, attempt), opts?.signal);
   }
 
-  return { ok: false, error: lastError, statusCode: lastStatus };
+  return {
+    ok: false,
+    error: lastError,
+    statusCode: lastStatus,
+    ...(lastRequestId ? { requestId: lastRequestId } : {}),
+  };
 }

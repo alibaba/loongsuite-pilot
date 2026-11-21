@@ -1,5 +1,6 @@
 import { build } from 'esbuild';
 import { copyFile, mkdir } from 'node:fs/promises';
+import path from 'node:path';
 
 const isProprietary = process.env.BUILD_MODE === 'proprietary';
 
@@ -103,6 +104,54 @@ await build({
   plugins: commonPlugins,
 });
 
+// Self-contained uninstall helper: JSONC edits stay available without node_modules.
+await build({
+  entryPoints: ['src/copilot-cleanup-cli.ts'],
+  outfile: 'dist/copilot-cleanup.cjs',
+  platform: 'node', target: 'es2022', format: 'cjs', bundle: true,
+  mainFields: ['module', 'main'], minifySyntax: true,
+  define: commonDefine, plugins: commonPlugins,
+});
+
+// Container hook CLI. No native-deps-guard banner and no node:sqlite: a
+// payload whose libc cannot load the daemon must still be able to install
+// hooks. postAlarm is the stub in this file; proprietary builds alias it.
+await build({
+  entryPoints: ['src/hook-cli.ts'],
+  outfile: 'dist/hook-cli.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  mainFields: ['module', 'main'],
+  banner: { js: "process.env.LOG_LEVEL = 'silent';" },
+  minifySyntax: true,
+  define: commonDefine,
+  plugins: [
+    ...commonPlugins,
+    {
+      name: 'hook-cli-alarm-alias',
+      setup(b) {
+        if (!isProprietary) return;
+        b.onResolve({ filter: /\/post-alarm\.js$/ }, () => ({
+          path: path.resolve('src/internal/alarm-sender.internal.ts'),
+        }));
+      },
+    },
+  ],
+});
+
+// Shares the installation ownership rules for user JSON and system TOML.
+await build({
+  entryPoints: ['src/scope-cleanup-cli.ts'],
+  outfile: 'dist/scope-cleanup.cjs',
+  platform: 'node', target: 'es2022', format: 'cjs', bundle: true,
+  mainFields: ['module', 'main'], minifySyntax: true,
+  banner: { js: "process.env.LOG_LEVEL = 'silent';" },
+  define: commonDefine, plugins: commonPlugins,
+});
+
+
 await build({
   entryPoints: ['src/updater/index.ts'],
   outdir: 'dist/updater',
@@ -144,8 +193,22 @@ await build({
   plugins: commonPlugins,
 });
 
+// HTTP listens directly in this worker, independently of the collector event loop.
+await build({
+  entryPoints: ['src/interceptor/worker.ts'],
+  outfile: 'dist/interceptor/worker.cjs',
+  platform: 'node', target: 'es2022', format: 'cjs', bundle: true,
+  mainFields: ['module', 'main'], minifySyntax: true,
+  define: commonDefine, plugins: commonPlugins,
+});
+
 await mkdir('dist', { recursive: true });
 await copyFile('src/mask/sensitive-rules.json', 'dist/sensitive-rules.json');
+
+// Public, stdlib-only policies for Node/Python launchers embedding Pilot.
+await mkdir('dist/runtime', { recursive: true });
+await copyFile('assets/runtime/root-trigger.cjs', 'dist/runtime/root-trigger.cjs');
+await copyFile('assets/runtime/root_trigger.py', 'dist/runtime/root_trigger.py');
 
 // Best-effort: build macOS status bar app (Swift)
 if (process.platform === 'darwin') {

@@ -45,7 +45,7 @@ Pilot is designed to answer practical questions:
 | Collection deployment    | Installs hooks or plugins and reads local logs, sessions, or data files.           |
 | Unified event schema     | Normalizes agent-native events into a shared GenAI schema.                         |
 | Multi-destination output | Exports to JSONL, Alibaba Cloud SLS, HTTP, and OTLP trace backends.                |
-| Privacy controls         | Supports per-agent content capture policy and secret masking before output.        |
+| Privacy controls         | Supports secret masking before output.                                                |
 | Local operations         | Provides service status, restart, rollback, and a built-in local dashboard. |
 
 
@@ -56,6 +56,7 @@ Pilot is designed to answer practical questions:
 | ------------- | ------------------------- | ------------ | ---------- | ----------- | ------------------------- |
 | Claude Code   | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
+| GitHub Copilot CLI | Native plugin + transcript / native OTel | Yes | Yes | Yes (native OTel) | Yes |
 | Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor CLI    | Shared Cursor hook        | Yes          | Yes        | Yes         | Yes                       |
 | DeepSeek Harness | YAML patch plugin + local JSONL polling | Yes | Yes | Yes | Yes |
@@ -76,6 +77,9 @@ Pilot is designed to answer practical questions:
 | Qwen Work CN  | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
+| [Doubao Work (macOS/Windows, experimental)](docs/doubao-work.md) | Read-only logs + execution metadata | Client turns, local tools + native sandbox executions | Metadata only | No | No |
+
+GitHub Copilot CLI automatic deployment supports Unix shells. Exact per-call token usage requires native OTel; transcript-only collection omits unavailable usage. Windows and subagents are not supported. See [telemetry details](docs/zh-CN/copilot-native-telemetry.md).
 
 OpenClaw integration supports 2026.3.8 or later with automatic version detection. Before 2026.5.12, model-call timing is inferred from legacy hooks; see [compatibility details](docs/agents.md#openclaw-compatibility-and-lifecycle).
 
@@ -135,7 +139,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-Local JSONL output is enabled by default under `~/.loongsuite-pilot/logs/output/` on Linux/macOS and `%USERPROFILE%\.loongsuite-pilot\logs\output\` on Windows.
+Local JSONL output is disabled by default. To write to `~/.loongsuite-pilot/logs/output/` on Linux/macOS or `%USERPROFILE%\.loongsuite-pilot\logs\output\` on Windows, set `"jsonl": { "enabled": true }` in `config.json`.
 
 For installer options, uninstall commands, and source builds, see [Installation](docs/installation.md).
 
@@ -148,7 +152,7 @@ Start with the guide that matches what you want to change:
 
 | Task                                             | Guide                                            |
 | ------------------------------------------------ | ------------------------------------------------ |
-| Choose agents and content capture policy         | [Agent Configuration](docs/agents.md)            |
+| Choose agents                                    | [Agent Configuration](docs/agents.md)            |
 | Write local JSONL logs                           | [Local JSONL Output](docs/local-jsonl-output.md) |
 | Report logs to SLS                               | [SLS Output](docs/sls-output.md)                 |
 | Report OTLP traces                               | [Trace Output](docs/trace-output.md)             |
@@ -171,8 +175,8 @@ Link collected agent spans to an **upstream** trace so each turn's span tree rep
 
 When enabled, the upstream `traceparent` reaches Pilot via one of two schemes and is stamped onto collected records (`trace_id` on the turn, `parent_span_id` on the user-input event):
 
-- **Correlation file** (per-turn): the caller writes `{sessionId, contentHash, contentPrefix, traceparent}` to `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl` when it sends a prompt. Linking is protocol-agnostic — the only requirement is that `sessionId` matches the `gen_ai.session.id` Pilot collects for that turn, and the content (hash or prefix) matches the collected user text. ACP clients satisfy this naturally (the `session/new` id flows into collection), so ACP is the primary case.
-- **Environment** (`TRACEPARENT` on the agent process): applied to the session's first turn, via the agent's hook. Use this when the caller cannot obtain a per-turn `sessionId` up front.
+- **Correlation file** (per-turn): the caller writes `{sessionId, contentHash, contentPrefix, traceparent}` to `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl` when it sends a prompt. Linking is protocol-agnostic, but requires a supported collector/plugin that emits the turn's user-input event. `sessionId` must match the native `gen_ai.session.id` Pilot collects, and the content hash or prefix must match that input. OpenClaw and Hermes require the collector fixes in [PR #508](https://github.com/alibaba/loongsuite-pilot/pull/508); Hermes also requires updating its deployed Pilot plugin and restarting Hermes. See the [per-turn setup and deployment requirements](docs/zh-CN/upstream-trace-correlation.md). ACP clients satisfy this naturally (the `session/new` id flows into collection), so ACP is the primary case.
+- **Environment** (`TRACEPARENT` on the agent process): applied to the session's first turn only when a supported Pilot hook calls `recordUpstreamContextOnce` to write a session record. The OpenClaw and Hermes plugins do not read `TRACEPARENT` directly. Use this scheme with a supported hook when the caller cannot obtain a per-turn `sessionId` up front.
 
 For Claude Code, enabling both `upstreamLink.enabled` and `propagateToTools` passes context into main-agent `Bash` calls. Pilot's `PreToolUse(Bash)` hook reserves the TOOL span id, prepends `TRACEPARENT` (and valid `TRACESTATE`, when present) to the Bash command, then reuses that id when the Stop hook builds the TOOL span. Optionally enable `generateTraceWhenMissing` so turns without upstream context generate and propagate a local trace. Set `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES` on the Claude Code process to have Pilot map it to standard `OTEL_RESOURCE_ATTRIBUTES` for the downstream CLI. Prefer `config.json` for the `upstreamLink` switches: environment variables affect only processes that inherit them, and `loongsuite-pilot restart` alone does not change an already-running Claude Code hook environment. The downstream CLI must extract Trace Context and configure its own exporter. This capability is fail-open and currently does not cover ACP-only downstream trace propagation, subagents, PowerShell, MCP tools, or non-Bash tools.
 
@@ -184,7 +188,7 @@ Enabling both `upstreamLink.enabled` and `propagateToLlm` extends the same trace
 
 | Backend    | Use Case                                                                |
 | ---------- | ----------------------------------------------------------------------- |
-| JSONL      | Local backup and easy inspection. Enabled by default.                   |
+| JSONL      | Local backup and easy inspection. Disabled by default; enable explicitly. |
 | SLS        | Alibaba Cloud Log Service reporting. Supports WebTracking, AK, and API Key modes. |
 | HTTP       | POST batches to a custom endpoint.                                      |
 | OTLP Trace | Export GenAI activity as OpenTelemetry traces.                          |
@@ -206,9 +210,11 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-The local dashboard starts and stops with the collector. Open
-`http://127.0.0.1:8765/`; no separate monitor command is required. It reads the
-collector-owned `logs/metrics-summary.json` file directly.
+The local dashboard is disabled by default. Run `loongsuite-pilot dashboard start`
+to enable it on port 8765, or `loongsuite-pilot dashboard start 9999` to choose a
+port. Run `loongsuite-pilot dashboard stop` to disable it. These commands restart
+a running collector; collection remains enabled. The page reads the collector-owned
+`logs/metrics-summary.json` file directly.
 
 On macOS, optionally run `loongsuite-pilot dashboard shortcut install` to create a
 Dashboard `.webloc` shortcut with a radar icon and add it to the Dock's files area.
@@ -218,7 +224,9 @@ the port, run the shortcut install command again. See [Dashboard shortcut](docs/
 
 macOS menu bar app:
 
-On macOS, Pilot automatically runs a menu bar app after installation — no extra command needed. It shows live token, session, request, and tool counts, plus per-agent and per-provider breakdowns, so you can keep an eye on activity without opening the dashboard.
+To disable automatic menu bar startup during installation, append `--enable-status-bar-app false` to the install command. This persists `enableStatusBarApp` in `config.json` before the collector starts. Omit the option to preserve the existing setting, or pass `true` to enable it. See the [installation guide](docs/installation.md#start-or-stop-the-macos-menu-bar-app).
+
+On macOS, Pilot runs a menu bar app after installation by default. It shows live token, session, request, and tool counts, plus per-agent and per-provider breakdowns, so you can keep an eye on activity without opening the dashboard.
 
 If you quit the menu bar app, reopen it without restarting collection:
 

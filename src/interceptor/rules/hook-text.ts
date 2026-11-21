@@ -2,13 +2,11 @@ import type { HookRequest } from '../types.js';
 
 const MAX_LEAF_DEPTH = 32;
 
+/** Aggregate hook content in a fixed order; raw envelopes and metadata are not scanned. */
 export function collectHookText(request: HookRequest): string {
-  return [
-    request.prompt,
-    request.toolName,
-    ...collectTextLeaves(request.toolInput),
-    ...collectTextLeaves(request.toolResponse),
-  ]
+  const parts: unknown[] = [request.prompt, request.toolName,
+    ...collectTextLeaves(request.toolInput), ...collectTextLeaves(request.toolResponse)];
+  return parts
     .filter((part): part is string => typeof part === 'string' && part.length > 0)
     .join('\n');
 }

@@ -10,7 +10,8 @@ export type DeployMode =
   | 'plugin-inject'
   | 'directory-plugin'
   | 'detection-only'
-  | 'dsh-yaml-patch';
+  | 'dsh-yaml-patch'
+  | 'copilot-plugin';
 export type MountType = 'wrapper' | 'rc-inject' | 'env-inject';
 export type HookFormat = 'flat' | 'nested';
 export type SettingsSyntax = 'json' | 'jsonc';
@@ -50,6 +51,12 @@ export interface InterceptorHookConfig {
 
 export interface AgentHookConfig {
   settingsPath: string;
+  /** Opt-in native Linux system TOML; omitted retains home-local JSON. */
+  scope?: 'user' | 'system';
+  /** Native Linux system configuration; selected only by explicit system scope. */
+  systemSettingsPath?: string;
+  /** Original home-local path retained while selecting a system target. */
+  userSettingsPath?: string;
   /**
    * Syntax accepted by the owning agent's settings file. Defaults to strict
    * JSON. JSONC files are edited in place so comments and unrelated formatting
@@ -131,11 +138,58 @@ export interface AgentHookConfig {
     tools: string[];
   };
   /**
-   * Independent blocking hook, installed alongside the collection hook.
+   * Independent blocking hook, installed alongside the collection hook when
+   * interceptor mode is `all`.
+   * Otherwise deploy removes interceptor hooks already written to settings.
+   * Collection hooks are unchanged.
    * Events, command, timeout, and insertion order are owned by this block
    * so collection hookCommand stays a single string.
    */
   interceptor?: InterceptorHookConfig;
+}
+
+/**
+ * Copilot CLI plugin-hook config.
+ *
+ * Copilot CLI does NOT read hooks from `~/.copilot/config.json` (that file
+ * stores runtime state only — `installedPlugins` / `firstLaunchAt`). Per the
+ * Agent Plugins 1.0 format, hooks are loaded exclusively from a plugin
+ * package's `hooks/hooks.json`. This config tells CopilotPluginStrategy:
+ *
+ *   - `pluginRoot`: directory where the plugin package lives
+ *     (default `~/.copilot/installed-plugins/loongsuite-pilot/loongsuite-pilot`).
+ *   - `pluginId`: stable identifier registered in `~/.copilot/settings.json`
+ *     `enabledPlugins` (default `loongsuite-pilot`).
+ *   - `settingsPath`: `~/.copilot/settings.json` (JSONC) — we update its
+ *     `enabledPlugins` object map to enable the deployed plugin package.
+ *
+ * `hookCommand` / `events` / `format` / `eventSubcommand` have the same
+ * semantics as AgentHookConfig — they are written into the plugin's
+ * `hooks/hooks.json` (Agent Plugins 1.0 format).
+ */
+export interface CopilotPluginHookConfig {
+  /** Directory that holds the plugin package (plugin.json + hooks/hooks.json). */
+  pluginRoot: string;
+  /** Plugin id registered in ~/.copilot/settings.json enabledPlugins. */
+  pluginId: string;
+  /** Path to the JSONC settings file whose enabledPlugins we update. */
+  settingsPath: string;
+  /**
+   * Path to the JSONC config.json (managed automatically by Copilot CLI) whose
+   * `installedPlugins` array we mirror — entries there are what make the CLI
+   * load the plugin at startup.
+   */
+  configPath: string;
+  /** Hook events to register (camelCase, e.g. "sessionStart"). */
+  events: string[];
+  /** Shell entry-point invoked by each hook event. */
+  hookCommand: string;
+  /** Hook format — Copilot expects `nested` ({type:"command", command}). */
+  format: HookFormat;
+  /** If 'kebab-case', append kebab event subcommand to hookCommand per event. */
+  eventSubcommand?: 'kebab-case';
+  /** Optional timeoutSec per hook entry (default 5). */
+  timeoutSec?: number;
 }
 
 export interface PluginSourceConfig {
@@ -262,6 +316,7 @@ export interface AgentDefinition {
   /** Runtime id used by local worker activation, e.g. "claude-code". */
   localWorkerRuntime?: string;
   hook?: AgentHookConfig;
+  copilotPlugin?: CopilotPluginHookConfig;
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
   /** Present only for registered high-level PI SDK Agents. */
@@ -298,6 +353,8 @@ export interface DeployResult {
   /** Set whenever `skipped` is true. */
   reason?: DeploySkipReason;
   error?: string;
+  /** Deployment mutated owned files before failing; cleanup must remain retryable. */
+  cleanupRequired?: boolean;
   /** Absolute config file PluginInjectStrategy actually wrote or confirmed. */
   pluginInjectConfigPath?: string;
 }
@@ -316,6 +373,9 @@ export interface DeployStrategy {
 export interface DeployedAgentRecord {
   deployMode: DeployMode;
   deployedAt: string;
+  /** Partial deployment, not a healthy installation. Cleared after successful repair. */
+  cleanupRequired?: boolean;
+  copilotPluginTargets?: Pick<CopilotPluginHookConfig, 'pluginRoot' | 'settingsPath' | 'configPath'>;
   sourceHash?: string;
   lastRemoteCheckedAt?: string;
   /** Resolved external target for managed directory plugins. */
@@ -324,6 +384,18 @@ export interface DeployedAgentRecord {
   dshPatchPath?: string;
   /** Resolved Grok hook settings file written during deploy. */
   hookSettingsPath?: string;
+  /** Hook registration scope; absent on older home-local records. */
+  hookScope?: 'user' | 'system';
+  /** Durable cleanup intent for a native Hook installation or scope change. */
+  hookPendingMigration?: { scope: 'user' | 'system'; settingsPath: string };
+  /**
+   * Every Grok hook settings file this agent has been installed into.
+   * One identity directory is one file; later installs append, they do not
+   * replace the list.
+   */
+  hookSettingsPaths?: string[];
+  /** Who last wrote this record. Absent on records from older builds. */
+  installedBy?: 'hook-install' | 'daemon' | 'build';
   /** Absolute Pi `settings.json` PluginInjectStrategy actually wrote. */
   pluginInjectConfigPath?: string;
 }

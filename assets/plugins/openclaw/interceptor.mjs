@@ -137,6 +137,14 @@ function rewritePostToolContent(original, wrapped) {
   };
 }
 
+/** Same priority as the CLI: rule.message wins over the script reason. */
+export function hostBlockDetail(message, reason) {
+  const fromMessage = typeof message === "string" ? message.trim() : "";
+  if (fromMessage) return fromMessage;
+  const fromReason = typeof reason === "string" ? reason.trim() : "";
+  return fromReason || undefined;
+}
+
 export function openClawBlockResult(request, interceptorReason) {
   const wrapped = wrapHostReason(request.event, interceptorReason);
   const detail = interceptorReason?.trim() || "Blocked by security policy";
@@ -382,8 +390,9 @@ export function createOpenClawInterceptor(overrides = {}) {
         rememberPostToolVerdict(request, "allow");
         return undefined;
       }
-      rememberPostToolVerdict(request, "block", verdict.reason);
-      return openClawBlockResult(request, verdict.reason);
+      const detail = hostBlockDetail(verdict.message, verdict.reason);
+      rememberPostToolVerdict(request, "block", detail);
+      return openClawBlockResult(request, detail);
     } catch (err) {
       writeFailOpen(deps.resolveDataDir(), request, err instanceof Error ? err.message : String(err));
       return undefined;

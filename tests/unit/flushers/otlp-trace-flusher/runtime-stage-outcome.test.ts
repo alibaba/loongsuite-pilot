@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
+import * as stream from '../../../../src/flushers/turn-stream.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
 
 const clock = vi.hoisted(() => ({ now: 0, fail: false }));
@@ -7,6 +8,18 @@ vi.mock('@loongsuite/otel-util-genai', async importOriginal => {
   const actual = await importOriginal<typeof import('@loongsuite/otel-util-genai')>();
   return {
     ...actual,
+    createTurnStreamSession: (...args: Parameters<typeof actual.createTurnStreamSession>) => {
+      const session = actual.createTurnStreamSession(...args);
+      return new Proxy(session, { get(target, key) {
+        if (key === 'push') return (...records: Parameters<typeof session.push>) => {
+          clock.now += 10;
+          if (clock.fail) throw new Error('conversion failure');
+          return session.push(...records);
+        };
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      } });
+    },
     convertEventLogToTrace: (...args: Parameters<typeof actual.convertEventLogToTrace>) => {
       clock.now += 10;
       if (clock.fail) throw new Error('conversion failure');
@@ -29,7 +42,8 @@ function records(): AgentActivityEntry[] {
 }
 
 const active: OtlpTraceFlusher[] = [];
-function setup(services: string[], exported = vi.fn()) {
+function setup(services: string[], exported = vi.fn(), streaming = false) {
+  if (!streaming) vi.spyOn(stream, 'planTurnStream').mockReturnValue(undefined);
   vi.spyOn(performance, 'now').mockImplementation(() => clock.now);
   const flusher = new OtlpTraceFlusher({
     enabled: true, protocol: 'http/protobuf', serviceName: 'fallback', appendAgentTypeToServiceName: false,
@@ -50,6 +64,24 @@ afterEach(async () => {
 });
 
 describe('Trace runtime converter counters', () => {
+  it('counts streamed conversion once and excludes SDK/export waits', async () => {
+    const flusher = setup(['single'], vi.fn(() => { clock.now += 500; }), true);
+    await flusher.sendBatch(records(), [100, 200]);
+    expect(flusher.getTraceRuntimeSnapshot()[0]).toMatchObject({
+      converter_calls_total: 1, converter_duration_ms_total: 20, converter_failed_total: 0,
+    });
+  });
+
+  it('counts a streamed conversion failure without starting batch conversion', async () => {
+    const exported = vi.fn();
+    const flusher = setup(['single'], exported, true);
+    clock.fail = true;
+    await flusher.sendBatch(records(), [100, 200]);
+    expect(flusher.getTraceRuntimeSnapshot()[0]).toMatchObject({
+      converter_calls_total: 1, converter_duration_ms_total: 10, converter_failed_total: 1,
+    });
+    expect(exported).not.toHaveBeenCalled();
+  });
   it.each([['same', 'same', 1], ['user', 'inner', 2]] as const)(
     'counts actual synchronous conversion calls for %s/%s, without memory samples',
     async (first, second, calls) => {
