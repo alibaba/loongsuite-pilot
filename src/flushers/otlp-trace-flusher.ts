@@ -16,9 +16,10 @@ import {
 } from '@loongsuite/otel-util-genai';
 import { planTurnStream } from './turn-stream.js';
 import { prepareCodexTurn } from './codex-turn-converter.js';
-import { prepareDelegatedTurn } from './delegated-turn-converter.js';
+import { prepareDelegatedTurn, prepareIndependentTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
+import { expandTraeHistory } from './trae-cn-history-spans.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { convertQwenWorkCollaborationTurn } from './qwen-work-collaboration-converter.js';
@@ -1627,8 +1628,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // user Ctrl+C, agent errored mid-step). The converter library would
         // otherwise still emit a span for the orphan request/call.
         const sanitized = dropOrphanPairs(traceConversionRecords);
-        toolSpanIds.prepare(sanitized);
-        llmSpanIds.prepare(sanitized);
+        // Clear parent_span_id on metadata-only "other" events (e.g. trae-cn's
+        // ENTRY/AGENT/STEP synthetic spans). The converter reads parent_span_id
+        // from "other" events to resolve the turn's upstream traceparent parent,
+        // and flags multiple different values as "Inconsistent parent_span_id
+        // within turn". But trae-cn emits a chain of ENTRY→AGENT→STEP "other"
+        // events with intra-trace parent pointers (AGENT.parent=ENTRY.span_id,
+        // STEP.parent=AGENT.span_id) — these are span-tree nodes, NOT upstream
+        // traceparent markers. The converter discards them anyway (they lack
+        // gen_ai.input.messages), so clearing parent_span_id here only
+        // suppresses the false inconsistency warning without affecting span
+        // tree construction. User-input "other" events (with
+        // gen_ai.input.messages) keep their parent_span_id.
+        const withCleanParents = stripIntraTraceParentSpanIds(sanitized);
+        toolSpanIds.prepare(withCleanParents);
+        llmSpanIds.prepare(withCleanParents);
         let result;
         const counters = this.getRuntimeCounters(agentType);
         const convertStarted = performance.now();
@@ -1636,10 +1650,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
         let succeeded = false;
         let cleanup: (() => void) | undefined;
         try {
-          const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(sanitized, { handler, idGenerator })
-            : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(sanitized, { handler, idGenerator })
-            : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(sanitized, handler, idGenerator)
-            : { records: sanitized, handler, removedEntryCount: 0 };
+          const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(withCleanParents, { handler, idGenerator })
+            : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(withCleanParents, { handler, idGenerator })
+            : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(withCleanParents, handler, idGenerator)
+            : agentType === 'trae-cn' ? prepareIndependentTurn(withCleanParents, handler, idGenerator)
+              : { records: withCleanParents, handler, removedEntryCount: 0 };
           cleanup = prepared.cleanup;
           // Existing process-wide OTel env vars may still request content on
           // spans. Enforce this flusher's explicit opt-out at the conversion
@@ -1648,7 +1663,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
             ? prepared.records.map(stripAgentMessageContent)
             : prepared.records;
           const qwenCollaboration = conversionRecords.some(record => record['agent.source'] === 'qwen-work-cn-collaboration');
-          const stream = qwenCollaboration ? null : planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
+          const hasTraeHistory = agentType === 'trae-cn' && records.some(r => Array.isArray(r['loongsuite.trae_cn.model_responses']));
+          const stream = (qwenCollaboration || hasTraeHistory) ? null : planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
           if (stream) {
             streamedExportSucceeded = true;
             const reasoning = { seen: false, total: 0 };
@@ -1759,6 +1775,20 @@ export class OtlpTraceFlusher extends BaseFlusher {
         span.attributes['agent.hermes.collection.end_reason'] = 'producer_process_exited';
       }
     }
+    if (agentType === 'trae-cn') {
+      for (const span of spans) {
+        if (span.attributes['gen_ai.span.kind'] !== 'LLM') continue;
+        const response = records.find(r => r['event.name'] === 'llm.response' &&
+          r.span_id === span.spanContext().spanId);
+        for (const [key, value] of Object.entries(response ?? {})) {
+          if (key.startsWith('agent.trae-cn.hub.') &&
+              (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')) {
+            span.attributes[key] = value;
+          }
+        }
+      }
+    }
+    if (agentType === 'trae-cn') spans = expandTraeHistory(records, spans);
     applyQoderWorkStepTiming(records, spans);
     this.enrichToolSkillAttributes(records, spans);
     this.enrichMultimodalAttributes(records, spans);
@@ -3060,5 +3090,50 @@ function dropOrphanPairs(records: AgentActivityEntry[]): AgentActivityEntry[] {
       return !callId || completedToolCallIds.has(callId);
     }
     return true;
+  });
+}
+
+/**
+ * Clear `parent_span_id` on metadata-only "other" events (those without
+ * gen_ai.input.messages(_delta)) ONLY when the turn has ≥2 distinct non-empty
+ * parent_span_id values among those events. The upstream converter library
+ * reads parent_span_id from "other" events to resolve a turn's upstream
+ * traceparent parent, and flags multiple distinct values within a turn as
+ * "Inconsistent parent_span_id within turn".
+ *
+ * trae-cn emits a chain of ENTRY→AGENT→STEP synthetic "other" events whose
+ * parent_span_id points up the span tree (AGENT.parent=ENTRY.span_id,
+ * STEP.parent=AGENT.span_id) — these are intra-trace span-tree pointers, NOT
+ * upstream traceparent markers. They produce ≥2 distinct values, so we clear
+ * them to suppress the false warning. The converter discards these events
+ * anyway (they lack gen_ai.input.messages), so clearing parent_span_id only
+ * suppresses the warning without affecting span tree construction.
+ *
+ * When the turn has only 0 or 1 distinct non-empty parent_span_id value
+ * among metadata-only "other" events (e.g. the shared upstream traceparent
+ * in a delegated subagent turn), the values are consistent and clearing is
+ * not needed — leaving them intact lets `prepareDelegatedTurn`'s marker
+ * detection (which requires all records to share the same trace_id +
+ * parent_span_id) succeed, keeping the child ENTRY transparent.
+ *
+ * User-input "other" events (with gen_ai.input.messages) always keep their
+ * parent_span_id so legitimate upstream parents are still captured.
+ */
+function stripIntraTraceParentSpanIds(records: AgentActivityEntry[]): AgentActivityEntry[] {
+  const distinct = new Set<string>();
+  for (const r of records) {
+    if (r['event.name'] !== 'other') continue;
+    if (!isMetadataOnlyOtherEvent(r)) continue;
+    const p = r['parent_span_id'];
+    if (p === undefined || p === '') continue;
+    distinct.add(String(p));
+  }
+  if (distinct.size < 2) return records;
+  return records.map((r) => {
+    if (r['event.name'] !== 'other') return r;
+    if (!isMetadataOnlyOtherEvent(r)) return r;
+    const p = r['parent_span_id'];
+    if (p === undefined || p === '') return r;
+    return { ...r, parent_span_id: '' };
   });
 }

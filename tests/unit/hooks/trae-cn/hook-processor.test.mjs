@@ -1,0 +1,1537 @@
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { execFile, spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import * as crypto from 'node:crypto';
+import { AgentDefLoader } from '../../../../src/deployment/agent-def-loader.ts';
+import { HookStrategy } from '../../../../src/deployment/hook-strategy.ts';
+import { HookManager } from '../../../../src/hooks/hook-manager.ts';
+import { StateStore } from '../../../../src/checkpoints/state-store.ts';
+import { InputManager } from '../../../../src/core/input-manager.ts';
+import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.ts';
+import { TraceLinker } from '../../../../src/core/upstream-link/trace-linker.ts';
+import { CorrelationStore } from '../../../../src/core/upstream-link/correlation-store.ts';
+import { TraeCnLogInput } from '../../../../src/inputs/trae-cn-log/trae-cn-log-input.ts';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/trae-cn-hook-processor.mjs');
+const AGENT_DEFINITION = path.resolve(__dirname, '../../../../agents.d/trae-cn.json');
+const FIXTURES = path.resolve(__dirname, 'fixtures');
+
+let dataDir;
+let logDir;
+let stateDir;
+
+beforeEach(() => {
+  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'trae-cn-hook-test-'));
+  logDir = path.join(dataDir, 'logs', 'trae-cn', 'history');
+  stateDir = path.join(dataDir, 'state', 'trae-cn', 'turns');
+});
+
+afterEach(() => {
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
+function runHook(subcommand, payload, extraEnv = {}) {
+  const env = { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, ...extraEnv };
+  delete env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  return spawnSync('node', [PROCESSOR, subcommand], {
+    input: typeof payload === 'string' ? payload : JSON.stringify(payload),
+    env,
+    encoding: 'utf-8',
+    timeout: 10_000,
+  });
+}
+
+function runFixture(subcommand, fixtureName, extraEnv = {}) {
+  const payload = JSON.parse(fs.readFileSync(path.join(FIXTURES, fixtureName), 'utf8'));
+  return runHook(subcommand, payload, extraEnv);
+}
+
+function statePath(sessionId) {
+  const hash = crypto.createHash('sha256').update(sessionId).digest('hex');
+  return path.join(stateDir, `${hash}.json`);
+}
+
+function readState(sessionId) {
+  const file = statePath(sessionId);
+  if (!fs.existsSync(file)) return null;
+  return JSON.parse(fs.readFileSync(file, 'utf8'));
+}
+
+function readEmittedJsonl() {
+  if (!fs.existsSync(logDir)) return [];
+  const files = fs.readdirSync(logDir).filter((f) => f.endsWith('.jsonl'));
+  const out = [];
+  for (const f of files) {
+    const text = fs.readFileSync(path.join(logDir, f), 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      out.push(JSON.parse(line));
+    }
+  }
+  return out;
+}
+
+function todayName() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `trae-cn-${yyyy}-${mm}-${dd}.jsonl`;
+}
+
+function readOtlpDebugSpans() {
+  const dir = path.join(dataDir, 'logs', 'otlp-debug');
+  if (!fs.existsSync(dir)) return [];
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
+  const out = [];
+  for (const f of files) {
+    const text = fs.readFileSync(path.join(dir, f), 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      out.push(JSON.parse(line));
+    }
+  }
+  return out;
+}
+
+describe('trae-cn hook processor', () => {
+  test.each([
+    { name: 'an independent trace', upstreamEnabled: false, captureContent: true },
+    { name: 'disabled upstream linking', upstreamEnabled: false, captureContent: true, context: 'session' },
+    { name: 'pending correlation metadata with collector linking disabled',
+      upstreamEnabled: true, collectorEnabled: false, captureContent: true, context: 'session' },
+    { name: 'an explicit environment parent', upstreamEnabled: true, captureContent: true, context: 'session' },
+    { name: 'an explicit environment parent with content capture disabled',
+      upstreamEnabled: true, captureContent: false, context: 'session' },
+    { name: 'an adapter turn with content capture disabled', upstreamEnabled: true, captureContent: false, context: 'turn' },
+  ])('exports documented TRAE hook input with $name', async ({
+    upstreamEnabled, collectorEnabled = upstreamEnabled, captureContent, context,
+  }) => {
+    const sessionId = 'documented-trae-session';
+    const traceId = 'a'.repeat(32);
+    const parentSpanId = '0000000000000001';
+    const traceparent = `00-${traceId}-${parentSpanId}-01`;
+    const sentinel = 'private fixture input';
+    const prompt = context === 'turn' ? sentinel + 'x'.repeat(33_000) : sentinel;
+    const configPath = path.join(dataDir, 'config.json');
+    const agents = { 'trae-cn': { captureMessageContent: captureContent } };
+    fs.writeFileSync(configPath, JSON.stringify({ agents, upstreamLink: { enabled: upstreamEnabled } }));
+    const correlateDir = path.join(dataDir, 'acp-correlate');
+    const correlateFile = path.join(correlateDir, sessionId + '.jsonl');
+    const contentHash = crypto.createHash('sha256').update(prompt, 'utf8').digest('hex').slice(0, 16);
+    if (context === 'turn') {
+      fs.mkdirSync(correlateDir, { recursive: true });
+      fs.writeFileSync(correlateFile, JSON.stringify({ type: 'turn', sessionId, traceparent, contentHash }) + '\n');
+    }
+    const hookEnv = { AGENT_DATA_COLLECTION_CONFIG: configPath, TRAES_USER_DATA_DIR: path.join(dataDir, 'native'),
+      TRACEPARENT: context === 'session' ? traceparent : '', LOONGSUITE_PILOT_UPSTREAM_LINK: upstreamEnabled ? '1' : '0',
+      LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
+    const paths = [
+      ['user-prompt-submit', { hook_event_name: 'UserPromptSubmit', prompt }],
+      ['pre-tool-use', { hook_event_name: 'PreToolUse', tool_use_id: 'read-1', tool_name: 'Read', tool_input: { file_path: 'fixture.txt' } }],
+      ['post-tool-use', { hook_event_name: 'PostToolUse', tool_use_id: 'read-1', tool_name: 'Read', tool_response: { output: 'fixture content' } }],
+      ['stop', { hook_event_name: 'Stop', stop_hook_active: false, loop_count: 0, last_assistant_message: 'I read the fixture.' }],
+    ];
+    for (const [command, payload] of paths) {
+      expect(runHook(command, { ...payload, session_id: sessionId }, hookEnv).status).toBe(0);
+    }
+    const hookRecords = readEmittedJsonl();
+    const hookRequest = hookRecords.filter(record => record['event.name'] === 'llm.request');
+    expect(hookRequest).toHaveLength(1);
+    expect(hookRecords.filter(record => record['event.name'] === 'tool.call')).toHaveLength(1);
+    expect(hookRecords.filter(record => record['event.name'] === 'tool.result')).toHaveLength(1);
+    expect(hookRecords.filter(record => record['agent.pilot.correlation.content_hash'])
+      .map(record => [record['gen_ai.span.kind'], record['agent.pilot.correlation.content_hash']]))
+      .toEqual(upstreamEnabled ? [['ENTRY', contentHash]] : []);
+    expect(fs.existsSync(correlateFile)).toBe(upstreamEnabled);
+    if (upstreamEnabled) expect(fs.readFileSync(correlateFile, 'utf8')).toContain(traceparent);
+    const hookTraceId = hookRequest[0].trace_id;
+    expect(hookTraceId).toMatch(/^[a-f0-9]{32}$/);
+    const hookState = fs.readFileSync(statePath(sessionId), 'utf8');
+    const debugSpans = readOtlpDebugSpans();
+    expect(debugSpans).toHaveLength(5);
+    expect(JSON.stringify(debugSpans)).not.toContain(contentHash);
+    expect(hookState).not.toContain(contentHash);
+    if (!captureContent) {
+      expect(JSON.stringify(debugSpans)).not.toContain(sentinel);
+      expect(JSON.stringify(hookRecords)).not.toContain(sentinel);
+      expect(hookState).not.toContain(sentinel);
+      expect(fs.readFileSync(correlateFile, 'utf8')).not.toContain(sentinel);
+      expect(hookRequest[0]['gen_ai.input.messages']).toBeUndefined();
+      expect(hookRequest[0]['gen_ai.input.messages_delta']).toBeUndefined();
+    }
+
+    const spans = [];
+    const exporter = {
+      export(batch, callback) { spans.push(...batch); callback({ code: 0 }); },
+      shutdown: async () => {},
+    };
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      protocol: 'http/protobuf',
+      serviceName: 'trae-collector-test',
+      dataDir,
+      captureMessageContent: captureContent,
+      spanAttributePassthroughPrefixes: ['agent.pilot.correlation.'],
+      endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318/v1/traces' }],
+    }, undefined, () => exporter);
+    const writes = vi.spyOn(flusher, 'sendBatch');
+    const stateStore = new StateStore(path.join(dataDir, 'input-state.json'));
+    await stateStore.load();
+    const input = new TraeCnLogInput({ stateStore, sessionDir: logDir, auxLogDir: path.join(dataDir, 'native'), hubCacheDir: path.join(dataDir, 'hub') });
+    const manager = new InputManager();
+    manager.setFlusher(flusher);
+    manager.setAgentsConfig(agents);
+    if (collectorEnabled) manager.setTraceLinker(new TraceLinker(new CorrelationStore(correlateDir), { retries: 0 }));
+    manager.registerInput(input);
+    try {
+      await manager.startInput(input.id);
+      await vi.waitFor(() => expect(spans.map(span => span.attributes['gen_ai.span.kind']).sort())
+        .toEqual(['AGENT', 'ENTRY', 'LLM', 'STEP', 'TOOL']), { timeout: 2_000 });
+      const tool = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL');
+      const step = spans.find(span => span.attributes['gen_ai.span.kind'] === 'STEP');
+      const agent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT');
+      const entry = spans.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY');
+      expect(tool.attributes['gen_ai.tool.call.id']).toBe('read-1');
+      expect(tool.parentSpanId).toBe(step.spanContext().spanId);
+      expect(step.parentSpanId).toBe(agent.spanContext().spanId);
+      expect(agent.parentSpanId).toBe(entry.spanContext().spanId);
+      expect(entry.parentSpanId).toBe(collectorEnabled ? parentSpanId : undefined);
+      expect(new Set(spans.map(span => span.spanContext().traceId))).toEqual(new Set([collectorEnabled ? traceId : hookTraceId]));
+      const entries = writes.mock.calls.flatMap(([batch]) => batch);
+      const exported = JSON.stringify(spans.map(span => ({ attributes: span.attributes, events: span.events })));
+      expect(entries.some(record => Object.hasOwn(record, 'agent.pilot.correlation.content_hash'))).toBe(false);
+      expect(exported).not.toContain(contentHash);
+      if (!captureContent) {
+        expect(JSON.stringify(entries)).not.toContain(sentinel);
+        expect(exported).not.toContain(sentinel);
+      }
+    } finally {
+      await manager.stopInput(input.id);
+      await flusher.shutdown();
+    }
+  });
+
+  test('keeps debug spans when multiple sessions write concurrently', async () => {
+    const sessions = Array.from({ length: 16 }, (_, index) => 'concurrent-debug-' + index);
+    await Promise.all(sessions.map(session => new Promise((resolve, reject) => {
+      const env = { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
+      const child = execFile(process.execPath, [PROCESSOR, 'user-prompt-submit'], { env, timeout: 10_000 },
+        (error, stdout) => error ? reject(error) : resolve(stdout));
+      child.stdin.end(JSON.stringify({ session_id: session, prompt: 'synthetic prompt' }));
+    })));
+    const requests = readEmittedJsonl().filter(record => record['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(sessions.length);
+    const debugSpanIds = new Set(readOtlpDebugSpans().map(span => span.spanId));
+    for (const request of requests) expect(debugSpanIds.has(request.span_id), request['gen_ai.session.id']).toBe(true);
+  });
+
+  test('captureMessageContent false keeps conversation content off disk throughout a tool turn', () => {
+    const markers = ['private-prompt-616', 'private-args-616', 'private-result-616', 'private-answer-616'];
+    const session = 'privacy-test';
+    const config = path.join(dataDir, 'config.json');
+    fs.writeFileSync(config, JSON.stringify({ agents: { 'trae-cn': { captureMessageContent: false } } }));
+    for (const [subcommand, payload] of [
+      ['user-prompt-submit', { prompt: markers[0] }],
+      ['pre-tool-use', { tool_use_id: 't1', tool_name: 'Read', tool_input: { path: markers[1] } }],
+      ['post-tool-use', { tool_use_id: 't1', tool_response: { stdout: markers[2] } }],
+      ['stop', { last_assistant_message: markers[3] }],
+      ['notification', { notification_type: 'idle_prompt' }],
+    ]) {
+      const result = runHook(subcommand, { ...payload, session_id: session }, {
+        AGENT_DATA_COLLECTION_CONFIG: config, LOONGSUITE_PILOT_OTLP_DEBUG: '1',
+      });
+      expect(result.status).toBe(0);
+      expect(readState(session)).toBeTruthy();
+      const files = fs.readdirSync(dataDir, { recursive: true });
+      for (const file of files) {
+        const target = path.join(dataDir, file);
+        if (!fs.statSync(target).isFile()) continue;
+        const bytes = fs.readFileSync(target);
+        for (const marker of markers) expect(bytes.includes(Buffer.from(marker)), file).toBe(false);
+      }
+    }
+    const records = readEmittedJsonl();
+    expect(records.filter(r => r['event.name'] !== 'other').map(r => r['event.name']))
+      .toEqual(['llm.request', 'tool.call', 'tool.result', 'llm.response']);
+    expect(readOtlpDebugSpans().length).toBeGreaterThan(0);
+  });
+
+  test('keeps opaque session IDs separate when their old filename keys collided', () => {
+    const first = 'native:resume';
+    const second = 'native.resume';
+    expect(runHook('user-prompt-submit', { session_id: first, prompt: 'first synthetic prompt' }).status).toBe(0);
+    expect(runHook('user-prompt-submit', { session_id: second, prompt: 'second synthetic prompt' }).status).toBe(0);
+    expect(runHook('pre-tool-use', { session_id: first, tool_use_id: 'first-call', tool_name: 'Read' }).status).toBe(0);
+    expect(readState(first)).toMatchObject({ session_id: first, pending_tool_calls: { 'first-call': { name: 'Read' } } });
+    expect(readState(second)).toMatchObject({ session_id: second, pending_tool_calls: {} });
+    const call = readEmittedJsonl().find(record => record['event.name'] === 'tool.call');
+    expect(call['gen_ai.session.id']).toBe(first);
+  });
+
+  test('keeps matching legacy state and rejects a foreign normalized state file', () => {
+    const matching = 'native_existing';
+    expect(runHook('user-prompt-submit', { session_id: matching, prompt: 'matching legacy prompt' }).status).toBe(0);
+    const original = readState(matching);
+    expect(runHook('pre-tool-use', { session_id: matching, tool_use_id: 'existing-call', tool_name: 'Read' }).status).toBe(0);
+    expect(readState(matching)).toMatchObject({ trace_id: original.trace_id, turn_id: original.turn_id });
+
+    const normalized = 'native_ambiguous';
+    const foreign = { ...original, session_id: 'native:ambiguous' };
+    fs.writeFileSync(statePath(normalized), JSON.stringify(foreign));
+    const before = readEmittedJsonl().length;
+    expect(runHook('post-tool-use', { session_id: normalized, tool_use_id: 'foreign-call' }).status).toBe(0);
+    expect(runHook('notification', { session_id: normalized, notification_type: 'idle_prompt' }).status).toBe(0);
+    expect(readState(normalized)).toEqual(foreign);
+    expect(readState(foreign.session_id)).toBeNull();
+    expect(readEmittedJsonl()).toHaveLength(before);
+  });
+
+  test.each(['missing', 'invalid', 'non-object'])('withholds content when the configured privacy policy is %s', kind => {
+    const marker = 'synthetic-withheld-by-unavailable-policy';
+    const session = 'unavailable-policy';
+    const config = path.join(dataDir, 'external.json');
+    if (kind !== 'missing') fs.writeFileSync(config, kind === 'invalid' ? '{"agents":' : '[]');
+    const env = { AGENT_DATA_COLLECTION_CONFIG: config, LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
+
+    expect(runHook('user-prompt-submit', { session_id: session, prompt: marker }, env).status).toBe(0);
+    expect(runHook('pre-tool-use', { session_id: session, tool_use_id: 'safe-id', tool_name: 'Read',
+      tool_input: { path: marker } }, env).status).toBe(0);
+    expect(runHook('stop', { session_id: session, last_assistant_message: marker,
+      usage: { input_tokens: 2, output_tokens: 3 } }, env).status).toBe(0);
+    expect(JSON.stringify(readState(session))).not.toContain(marker);
+    const history = readEmittedJsonl();
+    if (kind === 'missing') {
+      expect(history.some(record => record['gen_ai.tool.call.id'] === 'safe-id')).toBe(true);
+      expect(history.some(record => record['gen_ai.usage.output_tokens'] === 3)).toBe(true);
+    }
+    expect(JSON.stringify(history)).not.toContain(marker);
+    expect(readOtlpDebugSpans()).toEqual([]);
+  });
+
+  test('retains the capture-enabled default when no policy path or file is configured', () => {
+    const session = 'default-capture';
+    const marker = 'synthetic-default-permitted';
+    expect(runHook('user-prompt-submit', { session_id: session, prompt: marker },
+      { AGENT_DATA_COLLECTION_CONFIG: '', LOONGSUITE_PILOT_OTLP_DEBUG: '1' }).status).toBe(0);
+    expect(readState(session).prompt).toBe(marker);
+    expect(JSON.stringify(readEmittedJsonl())).toContain(marker);
+    expect(JSON.stringify(readOtlpDebugSpans())).toContain(marker);
+  });
+
+  test('does not copy a pending trace’s earlier contents back into debug output after opt-out', () => {
+    const env = { AGENT_DATA_COLLECTION_CONFIG: '', LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
+    const session = 'toggled-debug-privacy';
+    const independent = 'independent-debug-session';
+    expect(runHook('user-prompt-submit', { session_id: session, prompt: 'earlier-pending-prompt' }, env).status).toBe(0);
+    expect(runHook('user-prompt-submit', { session_id: independent, prompt: 'already-permitted-other-trace' }, env).status).toBe(0);
+    expect(JSON.stringify(readOtlpDebugSpans())).toContain('earlier-pending-prompt');
+
+    fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({ agents: { 'trae-cn': { captureMessageContent: false } } }));
+    expect(runHook('stop', { session_id: session, last_assistant_message: 'new-opted-out-response' }, env).status).toBe(0);
+    const debug = JSON.stringify(readOtlpDebugSpans());
+    expect(debug).toContain('already-permitted-other-trace');
+    expect(debug).toContain(session);
+    expect(debug).not.toMatch(/earlier-pending-prompt|new-opted-out-response/);
+  });
+
+  test.skipIf(process.platform === 'win32')('deploys executable event commands and replaces registrations without subcommands', async () => {
+    const installDir = path.join(dataDir, 'custom pilot data');
+    const hooksDir = path.join(installDir, 'hooks');
+    fs.cpSync(path.dirname(PROCESSOR), hooksDir, { recursive: true });
+    logDir = path.join(installDir, 'logs', 'trae-cn', 'history');
+    const pinnedNode = path.join(dataDir, 'pinned-node');
+    const nodeUseLog = path.join(dataDir, 'pinned-node.log');
+    fs.writeFileSync(pinnedNode, '#!/bin/sh\nprintf "%s\\n" "$1" >> "$TEST_PIN_USE_LOG"\nexec "$TEST_REAL_NODE" "$@"\n', { mode: 0o700 });
+    fs.writeFileSync(path.join(installDir, 'node-bin'), pinnedNode + '\n');
+    const env = { ...process.env, HOME: dataDir, PATH: '/usr/bin:/bin' };
+    env.TEST_REAL_NODE = process.execPath;
+    env.TEST_PIN_USE_LOG = nodeUseLog;
+    delete env.LOONGSUITE_PILOT_DATA_DIR;
+    delete env.LOONGSUITE_PILOT_CACHE_DIR;
+    const loader = new AgentDefLoader({
+      builtinDir: path.dirname(AGENT_DEFINITION),
+      localDir: path.join(dataDir, 'agents.d.local'),
+      pilotDir: installDir,
+      dataDir: installDir,
+    });
+    const def = (await loader.load()).find(agent => agent.id === 'trae-cn');
+    const settingsPath = path.join(dataDir, '.trae-cn', 'hooks.json');
+    def.hook.settingsPath = settingsPath;
+    const strategy = new HookStrategy(new HookManager(hooksDir, logDir));
+    const legacyCommand = path.join(hooksDir, 'trae-cn-loongsuite-pilot-hook.sh');
+    const legacy = Object.fromEntries(def.hook.events.map(event => [event, [
+      { matcher: '*', hooks: [{ type: 'command', command: legacyCommand }] },
+    ]]));
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify({ hooks: legacy }));
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    expect((await strategy.deploy(def)).success).toBe(true);
+    expect(await strategy.needsDeploy(def)).toBe(false);
+
+    const { hooks } = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    const events = {
+      SessionStart: ['session-start', { session_id: 'trae-cn-smoke-session' }],
+      UserPromptSubmit: ['user-prompt-submit', 'user-prompt-submit.json'],
+      PreToolUse: ['pre-tool-use', 'pre-tool-use.json'],
+      PostToolUse: ['post-tool-use', 'post-tool-use.json'],
+      Stop: ['stop', 'stop.json'],
+      Notification: ['notification', 'notification-idle.json'],
+    };
+    for (const [event, [subcommand, fixture]] of Object.entries(events)) {
+      const commands = hooks[event].flatMap(group => group.hooks.map(handler => handler.command));
+      expect(commands).toHaveLength(1);
+      expect(commands[0].endsWith(' ' + subcommand)).toBe(true);
+      const result = spawnSync(commands[0], {
+        shell: true,
+        input: typeof fixture === 'string' ? fs.readFileSync(path.join(FIXTURES, fixture)) : JSON.stringify(fixture),
+        env,
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      expect(result.status, result.stderr).toBe(0);
+    }
+    expect(fs.readFileSync(nodeUseLog, 'utf8').split('\n').filter(line => line.endsWith(PROCESSOR.split(path.sep).at(-1))))
+      .toHaveLength(Object.keys(events).length);
+    const records = readEmittedJsonl();
+    expect(records.filter(record => record['event.name'] !== 'other').map(record => record['event.name']))
+      .toEqual(['llm.request', 'tool.call', 'tool.result', 'llm.response']);
+    const toolRecords = records.filter(record => record['gen_ai.tool.call.id'] === 'toolu_01');
+    expect(toolRecords).toHaveLength(2);
+    expect(toolRecords[0].span_id).toBe(toolRecords[1].span_id);
+  });
+
+  const powershell = process.env.PILOT_TEST_PWSH || (process.platform === 'win32'
+    ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : undefined);
+  test.skipIf(!powershell)('uses the data-directory Node pin under PowerShell CLM with a literal bracket path', () => {
+    const installDir = path.join(dataDir, 'custom pilot [data]');
+    const hooks = path.join(installDir, 'hooks');
+    fs.cpSync(path.dirname(PROCESSOR), hooks, { recursive: true });
+    fs.writeFileSync(path.join(installDir, 'node-bin'), process.execPath + '\n');
+
+    const wrapper = path.join(hooks, 'trae-cn-loongsuite-pilot-hook.ps1').replaceAll("'", "''");
+    const script = path.join(dataDir, 'trae-clm.ps1');
+    fs.writeFileSync(script, `\uFEFF$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n& '${wrapper}' user-prompt-submit\n`);
+    const env = {
+      ...process.env,
+      HOME: dataDir,
+      USERPROFILE: dataDir,
+      PATH: process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32') : '/usr/bin:/bin',
+      AGENT_DATA_COLLECTION_CONFIG: path.join(dataDir, 'unavailable-policy.json'),
+      LOONGSUITE_PILOT_OTLP_DEBUG: '1',
+    };
+    delete env.LOONGSUITE_PILOT_CACHE_DIR;
+    delete env.LOONGSUITE_PILOT_DATA_DIR;
+    const marker = 'synthetic-wrapper-content';
+    const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-File', script], {
+      input: JSON.stringify({ session_id: 'clm-wrapper-test', prompt: marker }), env,
+      encoding: 'utf8', timeout: 10_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    logDir = path.join(installDir, 'logs', 'trae-cn', 'history');
+    expect(readEmittedJsonl().some(record => record['event.name'] === 'llm.request')).toBe(true);
+    expect(JSON.stringify(readEmittedJsonl())).not.toContain(marker);
+    expect(fs.existsSync(path.join(installDir, 'logs', 'otlp-debug'))).toBe(false);
+  });
+
+  test('agents.d/trae-cn.json declares all 6 hook events', () => {
+    const def = JSON.parse(fs.readFileSync(AGENT_DEFINITION, 'utf8'));
+    expect(def.id).toBe('trae-cn');
+    expect(def.deployMode).toBe('hook');
+    expect(def.hook.events).toEqual([
+      'SessionStart',
+      'UserPromptSubmit',
+      'PreToolUse',
+      'PostToolUse',
+      'Stop',
+      'Notification',
+    ]);
+    expect(def.input.type).toBe('trae-cn-dual');
+    expect(def.input.auxLogDir).toBe('~/.trae-cn/logs');
+  });
+
+  test('missing session_id fails open with exit 0 and empty stdout', () => {
+    const result = runHook('user-prompt-submit', { cwd: '/tmp/x', prompt: 'hi' });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    expect(readEmittedJsonl().length).toBe(0);
+    const errorDir = path.join(dataDir, 'logs', 'trae-cn', 'errors');
+    const hasErrorLog = fs.existsSync(errorDir) &&
+      fs.readdirSync(errorDir).some((f) => {
+        const c = fs.readFileSync(path.join(errorDir, f), 'utf8');
+        return c.includes('missing_session_id');
+      });
+    expect(hasErrorLog).toBe(true);
+  });
+
+  test('malformed stdin still fails open (no throw, exit 0)', () => {
+    const result = runHook('stop', 'not-json');
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+  });
+
+  test('4-event happy path emits 5-layer ENTRY→AGENT→STEP→LLM+TOOL tree', () => {
+    // UserPromptSubmit → PreToolUse → PostToolUse → Stop
+    const r1 = runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    const r2 = runFixture('pre-tool-use', 'pre-tool-use.json');
+    const r3 = runFixture('post-tool-use', 'post-tool-use.json');
+    const r4 = runFixture('stop', 'stop.json');
+    for (const r of [r1, r2, r3, r4]) {
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim()).toBe('{}');
+    }
+
+    const records = readEmittedJsonl();
+    expect(records.length).toBeGreaterThanOrEqual(7);
+
+    const kinds = records.map((r) => r['gen_ai.span.kind']);
+    expect(kinds.filter((k) => k === 'ENTRY').length).toBe(1);
+    expect(kinds.filter((k) => k === 'AGENT').length).toBe(1);
+    expect(kinds.filter((k) => k === 'STEP').length).toBe(1);
+    expect(kinds.filter((k) => k === 'LLM').length).toBe(2); // request + response
+    expect(kinds.filter((k) => k === 'TOOL').length).toBe(2); // call + result
+
+    const entry = records.find((r) => r['gen_ai.span.kind'] === 'ENTRY');
+    const agent = records.find((r) => r['gen_ai.span.kind'] === 'AGENT');
+    const step = records.find((r) => r['gen_ai.span.kind'] === 'STEP');
+    const llmReq = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.request');
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    const toolCall = records.find((r) =>
+      r['gen_ai.span.kind'] === 'TOOL' && r['event.name'] === 'tool.call');
+    const toolRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'TOOL' && r['event.name'] === 'tool.result');
+
+    // 5-layer parent chain
+    expect(entry.parent_span_id).toBe('');
+    expect(agent.parent_span_id).toBe(entry.span_id);
+    expect(step.parent_span_id).toBe(agent.span_id);
+    expect(llmReq.parent_span_id).toBe(step.span_id);
+    expect(llmRes.parent_span_id).toBe(step.span_id);
+    expect(toolCall.parent_span_id).toBe(step.span_id);
+    expect(toolRes.parent_span_id).toBe(step.span_id);
+
+    // Same trace_id across all spans in one turn
+    const traceIds = new Set(records.map((r) => r.trace_id));
+    expect(traceIds.size).toBe(1);
+
+    // CLAUDE.md铁律 #5: messages non-empty
+    expect(llmReq['gen_ai.input.messages']).toBeTruthy();
+    expect(llmReq['gen_ai.input.messages'].length).toBeGreaterThan(0);
+    expect(llmReq['gen_ai.input.messages'][0].parts[0].content)
+      .toContain('hello world');
+    expect(llmRes['gen_ai.output.messages']).toBeTruthy();
+    expect(llmRes['gen_ai.output.messages'].length).toBe(2);
+    // First assistant message carries the synthesized tool_call part only;
+    // the final assistant message carries the text answer.
+    const textMsg = llmRes['gen_ai.output.messages']
+      .find((m) => m.parts?.some((p) => p.type === 'text'));
+    expect(textMsg).toBeDefined();
+    expect(textMsg.parts[0].content).toContain('hello.js');
+
+    // finish_reasons whitelist
+    expect(llmRes['gen_ai.response.finish_reasons']).toEqual(['stop']);
+
+    // tool call/result joined by gen_ai.tool.call.id
+    expect(toolCall['gen_ai.tool.call.id']).toBe('toolu_01');
+    expect(toolRes['gen_ai.tool.call.id']).toBe('toolu_01');
+    expect(toolCall['gen_ai.tool.name']).toBe('write_file');
+    expect(toolRes['gen_ai.tool.name']).toBe('write_file');
+    expect(toolRes['tool.result.status']).toBe('success');
+    expect(toolRes['agent.trae.status_source']).toBe('exit_code');
+  });
+
+  test('retains concurrent tool calls and results through Stop', async () => {
+    const sessionId = 'trae-cn-parallel-session';
+    const ids = Array.from({ length: 24 }, (_, i) => 'tool-' + i).sort();
+    expect(runHook('user-prompt-submit', { session_id: sessionId, prompt: 'Read files' }).status).toBe(0);
+    const runConcurrently = (subcommand) => Promise.all(ids.map(id => new Promise((resolve, reject) => {
+      const child = execFile(process.execPath, [PROCESSOR, subcommand], {
+        env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir },
+        timeout: 15_000,
+      }, error => error ? reject(error) : resolve());
+      child.stdin.end(JSON.stringify({ session_id: sessionId, tool_use_id: id, tool_name: 'Read',
+        tool_input: { path: id }, tool_response: { stdout: id } }));
+    })));
+    await runConcurrently('pre-tool-use');
+
+    const state = readState(sessionId);
+    expect(Object.keys(state.pending_tool_calls).sort()).toEqual(ids);
+    await runConcurrently('post-tool-use');
+    const completed = readState(sessionId);
+    expect(Object.values(completed.pending_tool_calls).every(call => call.completed)).toBe(true);
+    expect(runHook('stop', { session_id: sessionId, last_assistant_message: 'Done' }).status).toBe(0);
+    const records = readEmittedJsonl();
+    const calls = records.filter(record => record['event.name'] === 'tool.call');
+    expect(calls.map(call => call['gen_ai.tool.call.id']).sort()).toEqual(ids);
+    expect(new Set(calls.map(call => call['gen_ai.step.id']))).toEqual(new Set([state.step_id]));
+    const results = records.filter(record => record['event.name'] === 'tool.result');
+    expect(results.map(result => [result['gen_ai.tool.call.id'], result.span_id]).sort())
+      .toEqual(calls.map(call => [call['gen_ai.tool.call.id'], call.span_id]).sort());
+    const response = records.find(record => record['event.name'] === 'llm.response');
+    const parts = response['gen_ai.output.messages'].flatMap(message => message.parts);
+    expect(parts.filter(part => part.type === 'tool_call').map(part => part.id).sort()).toEqual(ids);
+  }, 20_000);
+
+  test('recovers the previous complete state after an interrupted atomic replacement', () => {
+    const session = 'interrupted-state';
+    expect(runHook('user-prompt-submit', { session_id: session, prompt: 'Synthetic prompt' }).status).toBe(0);
+    const file = statePath(session);
+    const oldState = fs.readFileSync(file, 'utf8');
+    const preload = path.join(dataDir, 'interrupt-state-rename.cjs');
+    fs.writeFileSync(preload, `
+      const fs = require('node:fs');
+      const rename = fs.renameSync;
+      fs.renameSync = (source, destination) => {
+        if (destination === process.env.TEST_TRAE_STATE_PATH) process.exit(91);
+        return rename(source, destination);
+      };
+    `);
+    const child = spawnSync(process.execPath, ['--require', preload, PROCESSOR, 'pre-tool-use'], {
+      input: JSON.stringify({ session_id: session, tool_use_id: 'interrupted', tool_name: 'Read' }),
+      env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, TEST_TRAE_STATE_PATH: file },
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    expect(child.status, child.stderr).toBe(91);
+    expect(fs.readFileSync(file, 'utf8')).toBe(oldState);
+    expect(fs.existsSync(file + '.tmp')).toBe(true);
+    fs.utimesSync(file + '.lock', 0, 0);
+
+    expect(runHook('pre-tool-use', { session_id: session, tool_use_id: 'next', tool_name: 'Read' }).status).toBe(0);
+    expect(Object.keys(readState(session).pending_tool_calls)).toEqual(['next']);
+    expect(readState(session).prompt).toBe('Synthetic prompt');
+    expect(fs.existsSync(file + '.tmp')).toBe(false);
+    expect(fs.existsSync(file + '.lock')).toBe(false);
+  });
+
+  test('multi-turn produces 2 distinct trace_ids', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    runFixture('stop', 'stop.json');
+    // second turn (Notification idle_prompt then new UserPromptSubmit)
+    runFixture('notification', 'notification-idle.json');
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    runFixture('stop', 'stop.json');
+
+    const records = readEmittedJsonl();
+    const traceIds = new Set(records.map((r) => r.trace_id));
+    expect(traceIds.size).toBe(2);
+    // Each trace has its own ENTRY span
+    const entries = records.filter((r) => r['gen_ai.span.kind'] === 'ENTRY');
+    expect(entries.length).toBe(2);
+  });
+
+  test('mid-stream PreToolUse (no prior UserPromptSubmit) synthesizes a turn', () => {
+    runFixture('pre-tool-use', 'midstream-pre-tool-use.json');
+    const state = readState('trae-cn-midstream-session');
+    expect(state.turn_synthesized).toBe(true);
+    expect(state.llm_request_emitted).toBe(true);
+    const records = readEmittedJsonl();
+    const entry = records.find((r) => r['gen_ai.span.kind'] === 'ENTRY');
+    expect(entry['agent.trae.turn_synthesized']).toBe(true);
+    // Synthetic LLM request still has non-empty messages array (铁律 #5)
+    const llmReq = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.request');
+    expect(llmReq['gen_ai.input.messages'].length).toBeGreaterThan(0);
+    expect(llmReq['gen_ai.input.messages'][0].parts[0].content).toBe('');
+  });
+
+  test('Notification idle_prompt preserves turn_index for next turn (round 5 #5)', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    const stateBefore = readState('trae-cn-smoke-session');
+    expect(stateBefore.turn_index).toBe(1);
+    runFixture('notification', 'notification-idle.json');
+    // State is now a minimal stub retaining turn_index (NOT fully cleared)
+    // so the next UserPromptSubmit can increment to t2/t3 instead of t1.
+    const stateAfter = readState('trae-cn-smoke-session');
+    expect(stateAfter).not.toBeNull();
+    expect(stateAfter.turn_index).toBe(1);
+    expect(stateAfter.llm_response_emitted).toBe(true);
+    // Next turn should increment to t2.
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    const stateNext = readState('trae-cn-smoke-session');
+    expect(stateNext.turn_index).toBe(2);
+    expect(stateNext.turn_id).toBe('trae-cn-smoke-session:t2');
+    expect(stateNext.step_id).toBe('trae-cn-smoke-session:t2:s1');
+  });
+
+  test('Notification non-idle type does not clear state', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    runHook('notification', {
+      session_id: 'trae-cn-smoke-session',
+      notification_type: 'permission_request',
+    });
+    expect(readState('trae-cn-smoke-session')).not.toBeNull();
+  });
+
+  test('tool status inference prefers exit_code over is_error/success', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    runHook('pre-tool-use', {
+      session_id: 'trae-cn-smoke-session',
+      cwd: '/home/dev/demo-project',
+      timestamp: '2026-08-18T01:00:01.000Z',
+      tool_use_id: 'toolu_status_x',
+      tool_name: 'bash',
+      tool_input: { cmd: 'exit 1' },
+    });
+    runHook('post-tool-use', {
+      session_id: 'trae-cn-smoke-session',
+      timestamp: '2026-08-18T01:00:02.000Z',
+      tool_use_id: 'toolu_status_x',
+      tool_name: 'bash',
+      tool_response: {
+        exit_code: 1,
+        is_error: false,
+        success: true,
+        stdout: 'ok',
+      },
+    });
+    const records = readEmittedJsonl();
+    const toolRes = records.find((r) =>
+      r['gen_ai.tool.call.id'] === 'toolu_status_x' && r['event.name'] === 'tool.result');
+    expect(toolRes['tool.result.status']).toBe('error');
+    expect(toolRes['agent.trae.status_source']).toBe('exit_code');
+    expect(toolRes['error.type']).toBe('ToolError');
+    expect(toolRes['agent.trae.command.exit_code']).toBe(1);
+  });
+
+  test('Stop without prior UserPromptSubmit synthesizes an empty turn', () => {
+    runHook('stop', {
+      session_id: 'trae-cn-stop-only-session',
+      cwd: '/tmp/x',
+      timestamp: '2026-08-18T05:00:00.000Z',
+      last_assistant_message: 'done',
+    });
+    const records = readEmittedJsonl();
+    const entry = records.find((r) => r['gen_ai.span.kind'] === 'ENTRY');
+    expect(entry['agent.trae.turn_synthesized']).toBe(true);
+    const llmRes = records.find((r) => r['event.name'] === 'llm.response');
+    expect(llmRes['gen_ai.output.messages'][0].parts[0].content).toBe('done');
+  });
+
+  test('stdout filename pattern is trae-cn-YYYY-MM-DD.jsonl', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    const files = fs.readdirSync(logDir);
+    expect(files).toContain(todayName());
+  });
+
+  test('emitted records are sorted by time_unix_nano within a hook invocation', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    const records = readEmittedJsonl();
+    const stamps = records.map((r) => BigInt(r.time_unix_nano));
+    for (let i = 1; i < stamps.length; i += 1) {
+      expect(stamps[i]).toBeGreaterThanOrEqual(stamps[i - 1]);
+    }
+  });
+
+  test('P0 cross-Agent guard: claude-code processor no-ops when TRAE_PROJECT_DIR is set', () => {
+    const claudeProcessor = path.resolve(
+      __dirname, '../../../../assets/hooks/claude-code-hook-processor.mjs');
+    const result = spawnSync('node', [claudeProcessor, 'user-prompt-submit'], {
+      input: JSON.stringify({ session_id: 'x', cwd: '/tmp', prompt: 'hi' }),
+      env: { ...process.env, TRAE_PROJECT_DIR: '/home/dev/.trae-cn' },
+      encoding: 'utf-8',
+      timeout: 10_000,
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+  });
+
+  // ─── Round 5 fixes ───
+
+  test('round 5 #1: model + provider extracted from stdin payload (forward-compat)', () => {
+    // Simulate TRAE-CN hook payload carrying model_info per
+    // trae-session-trace-path.md §4.2.
+    runHook('user-prompt-submit', {
+      session_id: 'trae-cn-smoke-session',
+      cwd: '/home/dev/demo-project',
+      timestamp: '2026-08-18T01:00:00.000Z',
+      agent_type: 'solo_agent',
+      prompt: 'hello',
+      model_info: {
+        model_name: 'aliyuncs//qwen3.7-max',
+        provider: 'aliyuncs',
+        display_name: 'Qwen3.7-Max',
+      },
+    });
+    const records = readEmittedJsonl();
+    const llmReq = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.request');
+    expect(llmReq['gen_ai.request.model']).toBe('aliyuncs//qwen3.7-max');
+    expect(llmReq['gen_ai.provider.name']).toBe('aliyuncs');
+    const entry = records.find((r) => r['gen_ai.span.kind'] === 'ENTRY');
+    expect(entry['gen_ai.request.model']).toBe('aliyuncs//qwen3.7-max');
+  });
+
+  test('round 5 #2: usage tokens extracted from Stop hook usage object (OpenAI format)', () => {
+    runHook('user-prompt-submit', {
+      session_id: 'trae-cn-usage-session',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:00.000Z',
+      prompt: 'hi',
+    });
+    runHook('stop', {
+      session_id: 'trae-cn-usage-session',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:05.000Z',
+      last_assistant_message: 'done',
+      usage: {
+        prompt_tokens: 12,
+        completion_tokens: 34,
+        prompt_tokens_details: {cached_tokens: 5},
+      },
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response'
+      && r['gen_ai.session.id'] === 'trae-cn-usage-session');
+    expect(llmRes['gen_ai.usage.input_tokens']).toBe(12);
+    expect(llmRes['gen_ai.usage.output_tokens']).toBe(34);
+    expect(llmRes['gen_ai.usage.total_tokens']).toBe(46);
+    expect(llmRes['gen_ai.usage.cache_read.input_tokens']).toBe(5);
+  });
+
+  test('round 5 #2: usage tokens extracted from alternate input_tokens format', () => {
+    runHook('user-prompt-submit', {
+      session_id: 'trae-cn-alt-usage',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:00.000Z',
+      prompt: 'hi',
+    });
+    runHook('stop', {
+      session_id: 'trae-cn-alt-usage',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:05.000Z',
+      last_assistant_message: 'ok',
+      usage: { input_tokens: 7, output_tokens: 11, total_tokens: 18 },
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response'
+      && r['gen_ai.session.id'] === 'trae-cn-alt-usage');
+    expect(llmRes['gen_ai.usage.input_tokens']).toBe(7);
+    expect(llmRes['gen_ai.usage.output_tokens']).toBe(11);
+    expect(llmRes['gen_ai.usage.total_tokens']).toBe(18);
+  });
+
+  test('round 5 #3: every span carries startTimeUnixNano + endTimeUnixNano with end>start', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    runFixture('pre-tool-use', 'pre-tool-use.json');
+    runFixture('post-tool-use', 'post-tool-use.json');
+    runFixture('stop', 'stop.json');
+    const records = readEmittedJsonl();
+    expect(records.length).toBeGreaterThanOrEqual(7);
+    for (const r of records) {
+      expect(typeof r.startTimeUnixNano).toBe('string');
+      expect(typeof r.endTimeUnixNano).toBe('string');
+      const start = BigInt(r.startTimeUnixNano);
+      const end = BigInt(r.endTimeUnixNano);
+      expect(end).toBeGreaterThan(start);
+    }
+  });
+
+  test('round 5 #3: LLM span end (stop time) > start (prompt time)', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    runFixture('stop', 'stop.json');
+    const records = readEmittedJsonl();
+    const llmReq = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.request');
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    // Both LLM records share span_id; start = prompt_timestamp (01:00:00)
+    // end = stop_timestamp (01:00:05) → duration ≈ 5s.
+    expect(BigInt(llmReq.endTimeUnixNano))
+      .toBeGreaterThan(BigInt(llmReq.startTimeUnixNano));
+    expect(BigInt(llmRes.endTimeUnixNano))
+      .toBeGreaterThan(BigInt(llmRes.startTimeUnixNano));
+    const durationMs = Number(BigInt(llmRes.endTimeUnixNano)
+      - BigInt(llmRes.startTimeUnixNano)) / 1e6;
+    expect(durationMs).toBeGreaterThanOrEqual(4000);
+  });
+
+  test('round 5 #3: TOOL span end (post-tool time) > start (pre-tool time)', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    runFixture('pre-tool-use', 'pre-tool-use.json');
+    runFixture('post-tool-use', 'post-tool-use.json');
+    const records = readEmittedJsonl();
+    const toolCall = records.find((r) =>
+      r['gen_ai.span.kind'] === 'TOOL' && r['event.name'] === 'tool.call');
+    const toolRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'TOOL' && r['event.name'] === 'tool.result');
+    expect(BigInt(toolCall.endTimeUnixNano))
+      .toBeGreaterThan(BigInt(toolCall.startTimeUnixNano));
+    expect(BigInt(toolRes.endTimeUnixNano))
+      .toBeGreaterThan(BigInt(toolRes.startTimeUnixNano));
+    // Both share span_id; start = call time (01:00:01), end = result time (01:00:02).
+    expect(toolCall.span_id).toBe(toolRes.span_id);
+    expect(BigInt(toolRes.endTimeUnixNano))
+      .toBeGreaterThan(BigInt(toolCall.startTimeUnixNano));
+  });
+
+  test('round 5 #4: OTLP otlp-debug JSONL written when env flag set', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json',
+      { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    const otlpDir = path.join(dataDir, 'logs', 'otlp-debug');
+    expect(fs.existsSync(otlpDir)).toBe(true);
+    const files = fs.readdirSync(otlpDir).filter((f) => f.endsWith('.jsonl'));
+    expect(files.length).toBeGreaterThan(0);
+    const otlpText = fs.readFileSync(path.join(otlpDir, files[0]), 'utf-8');
+    const otlpSpans = otlpText.trim().split(/\r?\n/).map((l) => JSON.parse(l));
+    expect(otlpSpans.length).toBeGreaterThan(0);
+    const first = otlpSpans[0];
+    // OTLP-shape: traceId / spanId / parentSpanId / name / kind / startTimeUnixNano
+    // / endTimeUnixNano / attributes / status.
+    expect(first.traceId).toMatch(/^[0-9a-f]{32}$/);
+    expect(first.spanId).toMatch(/^[0-9a-f]{16}$/);
+    expect(typeof first.startTimeUnixNano).toBe('string');
+    expect(typeof first.endTimeUnixNano).toBe('string');
+    expect(first.attributes['gen_ai.span.kind']).toBe('ENTRY');
+    expect(first.status).toBeDefined();
+    expect(typeof first.status.code).toBe('number');
+  });
+
+  test('round 5 #4: OTLP JSONL absent without env flag (no spurious writes)', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json');
+    const otlpDir = path.join(dataDir, 'logs', 'otlp-debug');
+    if (fs.existsSync(otlpDir)) {
+      const files = fs.readdirSync(otlpDir).filter((f) => f.endsWith('.jsonl'));
+      expect(files.length).toBe(0);
+    }
+  });
+
+  test('round 5 #5: multi-turn conversation produces t1, t2, t3 unique turn.id', () => {
+    // Turn 1
+    runHook('user-prompt-submit', {
+      session_id: 'trae-cn-multi-turn',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:00.000Z',
+      prompt: 'turn 1',
+    });
+    runHook('stop', {
+      session_id: 'trae-cn-multi-turn',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:05.000Z',
+      last_assistant_message: 'a1',
+    });
+    // Turn 2
+    runHook('notification', {
+      session_id: 'trae-cn-multi-turn',
+      timestamp: '2026-08-18T01:00:06.000Z',
+      notification_type: 'idle_prompt',
+    });
+    runHook('user-prompt-submit', {
+      session_id: 'trae-cn-multi-turn',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:10.000Z',
+      prompt: 'turn 2',
+    });
+    runHook('stop', {
+      session_id: 'trae-cn-multi-turn',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:15.000Z',
+      last_assistant_message: 'a2',
+    });
+    // Turn 3
+    runHook('notification', {
+      session_id: 'trae-cn-multi-turn',
+      timestamp: '2026-08-18T01:00:16.000Z',
+      notification_type: 'idle_prompt',
+    });
+    runHook('user-prompt-submit', {
+      session_id: 'trae-cn-multi-turn',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:20.000Z',
+      prompt: 'turn 3',
+    });
+    runHook('stop', {
+      session_id: 'trae-cn-multi-turn',
+      cwd: '/tmp',
+      timestamp: '2026-08-18T01:00:25.000Z',
+      last_assistant_message: 'a3',
+    });
+
+    const records = readEmittedJsonl();
+    const turnIds = new Set(records.map((r) => r['gen_ai.turn.id']));
+    expect(turnIds.has('trae-cn-multi-turn:t1')).toBe(true);
+    expect(turnIds.has('trae-cn-multi-turn:t2')).toBe(true);
+    expect(turnIds.has('trae-cn-multi-turn:t3')).toBe(true);
+    const stepIds = new Set(records.map((r) => r['gen_ai.step.id']));
+    expect(stepIds.has('trae-cn-multi-turn:t1:s1')).toBe(true);
+    expect(stepIds.has('trae-cn-multi-turn:t2:s1')).toBe(true);
+    expect(stepIds.has('trae-cn-multi-turn:t3:s1')).toBe(true);
+    // 3 unique step.id satisfies准出铁律 #4 「3+ unique step.id」.
+    expect(stepIds.size).toBeGreaterThanOrEqual(3);
+  });
+
+  // ─── Round 6 fixes (#1-#5) ────────────────────────────────────────────
+
+  test('round 6 #3: every span carries gen_ai.user.id (not just user.id)', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json',
+      { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    const records = readEmittedJsonl();
+    expect(records.length).toBeGreaterThan(0);
+    for (const r of records) {
+      expect(r['gen_ai.user.id']).toBeTruthy();
+      expect(r['user.id']).toBeTruthy();
+    }
+  });
+
+  test('round 6 #4: OTLP spans carry resource.attributes.service.name="trae-cn"', () => {
+    runFixture('user-prompt-submit', 'user-prompt-submit.json',
+      { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    const spans = readOtlpDebugSpans();
+    expect(spans.length).toBeGreaterThan(0);
+    for (const s of spans) {
+      expect(s.resource).toBeDefined();
+      expect(s.resource.attributes).toBeDefined();
+      expect(s.resource.attributes['service.name']).toBe('trae-cn');
+    }
+  });
+
+  test('round 6 #5: OTLP dual-record merge — LLM req+resp become 1 span with both messages', () => {
+    // Full 4-event happy path: user-prompt-submit + pre-tool-use + post-tool-use + stop
+    const otlpEnv = { LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
+    runFixture('user-prompt-submit', 'user-prompt-submit.json', otlpEnv);
+    runFixture('pre-tool-use', 'pre-tool-use.json', otlpEnv);
+    runFixture('post-tool-use', 'post-tool-use.json', otlpEnv);
+    runFixture('stop', 'stop.json', otlpEnv);
+    const spans = readOtlpDebugSpans();
+    // Group by spanId — each span_id should map to exactly one OTLP span.
+    const byId = new Map();
+    for (const s of spans) {
+      if (!byId.has(s.spanId)) byId.set(s.spanId, []);
+      byId.get(s.spanId).push(s);
+    }
+    for (const [id, group] of byId) {
+      expect(group.length).toBe(1); // merge produced 1 span per spanId
+    }
+    const llmSpans = spans.filter((s) =>
+      s.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llmSpans.length).toBe(1); // req + resp merged into 1 LLM span
+    const llm = llmSpans[0];
+    expect(llm.attributes['gen_ai.input.messages']).toBeTruthy();
+    expect(llm.attributes['gen_ai.output.messages']).toBeTruthy();
+    // TOOL call+result merge: 1 TOOL span carrying both arguments and result
+    const toolSpans = spans.filter((s) =>
+      s.attributes['gen_ai.span.kind'] === 'TOOL');
+    expect(toolSpans.length).toBe(1);
+    const tool = toolSpans[0];
+    expect(tool.attributes['gen_ai.tool.call.arguments']).toBeDefined();
+    expect(tool.attributes['gen_ai.tool.call.result']).toBeDefined();
+  });
+
+  test('round 6 #2: ENTRY/AGENT/STEP endTimeUnixNano rewritten at Stop >= child end', () => {
+    const otlpEnv = { LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
+    runFixture('user-prompt-submit', 'user-prompt-submit.json', otlpEnv);
+    runFixture('pre-tool-use', 'pre-tool-use.json', otlpEnv);
+    runFixture('post-tool-use', 'post-tool-use.json', otlpEnv);
+    runFixture('stop', 'stop.json', otlpEnv);
+    const spans = readOtlpDebugSpans();
+    // Build span map by spanId (after merge, each id has 1 span).
+    const map = new Map(spans.map((s) => [s.spanId, s]));
+    const childrenByParent = new Map();
+    for (const s of spans) {
+      if (!s.parentSpanId) continue;
+      if (!childrenByParent.has(s.parentSpanId)) {
+        childrenByParent.set(s.parentSpanId, []);
+      }
+      childrenByParent.get(s.parentSpanId).push(s);
+    }
+    // For every parent (ENTRY, AGENT, STEP), parent.end >= child.end.
+    for (const [parentId, children] of childrenByParent) {
+      const parent = map.get(parentId);
+      if (!parent) continue;
+      const pEnd = BigInt(parent.endTimeUnixNano);
+      for (const c of children) {
+        const cEnd = BigInt(c.endTimeUnixNano);
+        expect(cEnd <= pEnd).toBe(true);
+      }
+    }
+  });
+
+  test('round 6 #1: usage tokens accumulate from PreToolUse payload (forward-compat)', () => {
+    // Simulate a PreToolUse event carrying usage (forward-compat scenario
+    // matching tester hint (b): trae-cn may pass token usage via tool_input).
+    const sessionId = 'trae-cn-usage-fwd';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T02:00:00.000Z',
+      prompt: 'hello',
+    });
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T02:00:02.000Z',
+      tool_use_id: 'toolu_fwd_usage',
+      tool_name: 'Read',
+      tool_input: {
+        file_path: '/tmp/x.txt',
+        usage: { prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 },
+      },
+    });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T02:00:03.000Z',
+      tool_use_id: 'toolu_fwd_usage',
+      tool_name: 'Read',
+      tool_response: { content: [{ type: 'text', text: 'hi' }] },
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T02:00:05.000Z',
+      last_assistant_message: 'done',
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    expect(llmRes).toBeDefined();
+    expect(llmRes['gen_ai.usage.input_tokens']).toBe(11);
+    expect(llmRes['gen_ai.usage.output_tokens']).toBe(22);
+    expect(llmRes['gen_ai.usage.total_tokens']).toBe(33);
+  });
+
+  test('round 6 #1: usage tokens accumulate from Notification streaming chunk (forward-compat)', () => {
+    // Simulate a streaming Notification event carrying usage (forward-compat
+    // scenario matching tester hint (a): Qwen/OpenAI streaming chunk's final
+    // chunk carries usage). tester confirmed production emits only idle_prompt,
+    // so this test only verifies the forward-compat path.
+    const sessionId = 'trae-cn-usage-stream';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T03:00:00.000Z',
+      prompt: 'hello',
+    });
+    // Streaming chunk with usage in data.usage (Qwen-style)
+    runHook('notification', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T03:00:02.000Z',
+      notification_type: 'streaming',
+      data: { usage: { input_tokens: 8, output_tokens: 16, total_tokens: 24 } },
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-18T03:00:05.000Z',
+      last_assistant_message: 'done',
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    expect(llmRes).toBeDefined();
+    expect(llmRes['gen_ai.usage.input_tokens']).toBe(8);
+    expect(llmRes['gen_ai.usage.output_tokens']).toBe(16);
+    expect(llmRes['gen_ai.usage.total_tokens']).toBe(24);
+  });
+
+  test('round 7: llmResponseRecord synthesizes tool_call part from pending_tool_calls', () => {
+    // PreToolUse captures tool_name + arguments; PostToolUse keeps it (marked
+    // completed, not deleted); Stop synthesizes a tool_call part on the LLM
+    // response so semantic.tool_matches_llm_output can match the TOOL span.
+    const sessionId = 'trae-cn-r7-synth';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:00.000Z',
+      prompt: 'write hello.js',
+    });
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:01.000Z',
+      tool_use_id: 'toolu_r7_01',
+      tool_name: 'write_file',
+      tool_input: { path: '/tmp/hello.js', content: 'console.log("hi")' },
+    });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:02.000Z',
+      tool_use_id: 'toolu_r7_01',
+      tool_name: 'write_file',
+      tool_response: { exit_code: 0, success: true, stdout: 'wrote 27 bytes' },
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:05.000Z',
+      last_assistant_message: 'done',
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    expect(llmRes).toBeDefined();
+    const output = llmRes['gen_ai.output.messages'];
+    expect(Array.isArray(output)).toBe(true);
+    // Split: tool_call-only assistant message + text-only assistant message.
+    expect(output.length).toBe(2);
+    const toolCallMsg = output[0];
+    expect(toolCallMsg.role).toBe('assistant');
+    const toolCallParts = toolCallMsg.parts.filter((p) => p.type === 'tool_call');
+    expect(toolCallParts.length).toBe(1);
+    const tc = toolCallParts[0];
+    expect(tc.id).toBe('toolu_r7_01');
+    expect(tc.name).toBe('write_file');
+    expect(tc.tool_name).toBe('write_file');
+    expect(tc.arguments).toEqual({ path: '/tmp/hello.js', content: 'console.log("hi")' });
+    // Final assistant message is text-only (no tool_call parts).
+    const textMsg = output[output.length - 1];
+    expect(textMsg.role).toBe('assistant');
+    expect(textMsg.parts.some((p) => p.type === 'tool_call')).toBe(false);
+    expect(textMsg.parts.find((p) => p.type === 'text')?.content).toBe('done');
+    // Cross-check: TOOL span has matching gen_ai.tool.call.id + gen_ai.tool.name
+    const toolSpans = records.filter((r) => r['gen_ai.span.kind'] === 'TOOL');
+    expect(toolSpans.length).toBeGreaterThan(0);
+    const matchingTool = toolSpans.find((r) =>
+      r['gen_ai.tool.call.id'] === 'toolu_r7_01' &&
+      r['gen_ai.tool.name'] === 'write_file');
+    expect(matchingTool).toBeDefined();
+  });
+
+  test('round 7: pending_tool_calls cleared after Stop — next turn not contaminated', () => {
+    // Stop clears pending_tool_calls so the next turn's LLM response does
+    // not re-declare the previous turn's tool_call parts.
+    const sessionId = 'trae-cn-r7-clear';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T02:00:00.000Z',
+      prompt: 'first turn',
+    });
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T02:00:01.000Z',
+      tool_use_id: 'toolu_r7_first',
+      tool_name: 'write_file',
+      tool_input: { path: '/tmp/a.txt', content: 'a' },
+    });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T02:00:02.000Z',
+      tool_use_id: 'toolu_r7_first',
+      tool_name: 'write_file',
+      tool_response: { exit_code: 0, success: true },
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T02:00:05.000Z',
+      last_assistant_message: 'first done',
+    });
+    // Second turn — no tools
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T02:00:10.000Z',
+      prompt: 'second turn',
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T02:00:15.000Z',
+      last_assistant_message: 'second done',
+    });
+    const records = readEmittedJsonl();
+    const llmResponses = records.filter((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    // records are appended in time order, so the last llm.response is from
+    // the second turn (the one that must NOT carry the first turn's tool_call).
+    const secondTurnResponse = llmResponses[llmResponses.length - 1];
+    expect(secondTurnResponse).toBeDefined();
+    const out = secondTurnResponse['gen_ai.output.messages'];
+    expect(Array.isArray(out)).toBe(true);
+    const contaminated = out.some((m) =>
+      Array.isArray(m.parts) &&
+      m.parts.some((p) =>
+        p.type === 'tool_call' && p.id === 'toolu_r7_first'));
+    expect(contaminated).toBe(false);
+  });
+
+  test('llmResponseRecord splits mixed tool_call+text parts into separate assistant messages', () => {
+    // Regression guard for validate-trace semantic.last_step_no_tool_call:
+    // trae-cn single-LLM-per-turn architecture means one LLM span covers the
+    // whole turn. The Stop event carries the final text answer, while tool
+    // invocations during the turn were captured in state.pending_tool_calls
+    // via PreToolUse. The hook-processor MUST NOT collapse both into one
+    // assistant message with mixed parts — emit tool_call parts in their
+    // own assistant message preceding the text-only final assistant message.
+    const sessionId = 'trae-cn-split-mixed';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T01:00:00.000Z',
+      prompt: 'mkdir + write + summarize',
+    });
+    // First tool: mkdir (RunCommand-style)
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T01:00:01.000Z',
+      tool_use_id: 'toolu_split_01',
+      tool_name: 'RunCommand',
+      tool_input: { command: 'mkdir -p /tmp/demo' },
+    });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T01:00:02.000Z',
+      tool_use_id: 'toolu_split_01',
+      tool_name: 'RunCommand',
+      tool_response: { exit_code: 0, success: true },
+    });
+    // Second tool: Write
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T01:00:03.000Z',
+      tool_use_id: 'toolu_split_02',
+      tool_name: 'Write',
+      tool_input: { path: '/tmp/demo/a.txt', content: 'a' },
+    });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T01:00:04.000Z',
+      tool_use_id: 'toolu_split_02',
+      tool_name: 'Write',
+      tool_response: { exit_code: 0, success: true },
+    });
+    // Stop with final text answer
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T01:00:10.000Z',
+      last_assistant_message: '已创建目录并写入文件，npm test 8 个用例全部通过。',
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    expect(llmRes).toBeDefined();
+    const output = llmRes['gen_ai.output.messages'];
+    expect(Array.isArray(output)).toBe(true);
+    // ≥2 assistant messages: tool_call-only msg(s) + text-only final msg
+    expect(output.length).toBeGreaterThanOrEqual(2);
+    // Every message has role assistant.
+    expect(output.every((m) => m.role === 'assistant')).toBe(true);
+    // The final assistant message MUST NOT contain any tool_call part.
+    const finalMsg = output[output.length - 1];
+    const finalHasToolCall = finalMsg.parts.some((p) => p.type === 'tool_call');
+    expect(finalHasToolCall).toBe(false);
+    const finalText = finalMsg.parts.find((p) => p.type === 'text');
+    expect(finalText).toBeDefined();
+    expect(finalText.content).toContain('npm test');
+    // The non-final assistant message(s) carry the synthesized tool_call parts.
+    const nonFinal = output.slice(0, -1);
+    const toolCallParts = nonFinal
+      .flatMap((m) => m.parts)
+      .filter((p) => p.type === 'tool_call');
+    expect(toolCallParts.length).toBe(2);
+    const ids = toolCallParts.map((p) => p.id).sort();
+    expect(ids).toEqual(['toolu_split_01', 'toolu_split_02']);
+    // No text part should leak into the tool_call-only assistant message.
+    const textInNonFinal = nonFinal.some((m) =>
+      m.parts.some((p) => p.type === 'text'));
+    expect(textInNonFinal).toBe(false);
+    // Span structure preserved: still 1 ENTRY + 1 AGENT + 1 STEP + 1 LLM resp + 2 TOOL call + 2 TOOL result.
+    const kinds = records.map((r) => r['gen_ai.span.kind']);
+    expect(kinds.filter((k) => k === 'ENTRY').length).toBe(1);
+    expect(kinds.filter((k) => k === 'AGENT').length).toBe(1);
+    expect(kinds.filter((k) => k === 'STEP').length).toBe(1);
+    expect(kinds.filter((k) => k === 'LLM').length).toBe(2); // request + response
+    expect(kinds.filter((k) => k === 'TOOL').length).toBe(4); // 2 call + 2 result
+  });
+
+  test('llmResponseRecord emits single text-only assistant message when no tool calls in turn', () => {
+    // No-tool turn: no PreToolUse events → pending_tool_calls empty.
+    // Output should be a single text-only assistant message (no split).
+    const sessionId = 'trae-cn-split-no-tools';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T02:00:00.000Z',
+      prompt: 'just answer',
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-11-16T02:00:05.000Z',
+      last_assistant_message: 'plain answer',
+    });
+    const records = readEmittedJsonl();
+    const llmRes = records.find((r) =>
+      r['gen_ai.span.kind'] === 'LLM' && r['event.name'] === 'llm.response');
+    expect(llmRes).toBeDefined();
+    const output = llmRes['gen_ai.output.messages'];
+    expect(output.length).toBe(1);
+    expect(output[0].role).toBe('assistant');
+    expect(output[0].parts.some((p) => p.type === 'tool_call')).toBe(false);
+    expect(output[0].parts.find((p) => p.type === 'text')?.content).toBe('plain answer');
+  });
+
+  test('round 8 #1: OTLP span names follow ARMS GenAI semconv patterns', () => {
+    // ARMS arms_docs/trace/gen-ai.md prescribes:
+    //   ENTRY → 'enter_ai_application_system'
+    //   AGENT → '{operation.name} {agent.name}'    (e.g. 'invoke_agent trae-cn')
+    //   STEP   → 'react step'
+    //   LLM    → '{operation.name} {request.model}' (e.g. 'chat <model>')
+    //   TOOL   → '{operation.name} {tool.name}'      (e.g. 'execute_tool Read')
+    const otlpEnv = { LOONGSUITE_PILOT_OTLP_DEBUG: '1' };
+    runFixture('user-prompt-submit', 'user-prompt-submit.json', otlpEnv);
+    runFixture('pre-tool-use', 'pre-tool-use.json', otlpEnv);
+    runFixture('post-tool-use', 'post-tool-use.json', otlpEnv);
+    runFixture('stop', 'stop.json', otlpEnv);
+    const spans = readOtlpDebugSpans();
+    const byKind = new Map();
+    for (const s of spans) {
+      byKind.set(s.attributes['gen_ai.span.kind'], s);
+    }
+    // ENTRY: literal pattern
+    const entry = byKind.get('ENTRY');
+    expect(entry).toBeDefined();
+    expect(entry.name).toBe('enter_ai_application_system');
+    // AGENT: '{operation.name} {agent.name}'
+    const agent = byKind.get('AGENT');
+    expect(agent).toBeDefined();
+    expect(agent.name).toBe(
+      `${agent.attributes['gen_ai.operation.name']} ${agent.attributes['gen_ai.agent.name']}`);
+    // STEP: literal pattern
+    const step = byKind.get('STEP');
+    expect(step).toBeDefined();
+    expect(step.name).toBe('react step');
+    // LLM: '{operation.name} {request.model}'
+    const llm = byKind.get('LLM');
+    expect(llm).toBeDefined();
+    expect(llm.name).toBe(
+      `${llm.attributes['gen_ai.operation.name']} ${llm.attributes['gen_ai.request.model']}`);
+    // TOOL: '{operation.name} {tool.name}'
+    const tool = byKind.get('TOOL');
+    expect(tool).toBeDefined();
+    expect(tool.name).toBe(
+      `${tool.attributes['gen_ai.operation.name']} ${tool.attributes['gen_ai.tool.name']}`);
+  });
+
+  test('round 8 #2: toolResultRecord always emits gen_ai.tool.call.result (even when tool_response is empty)', () => {
+    // tester r8 t9 (Read nonexistent.txt) had a TOOL span missing
+    // gen_ai.tool.call.result because toJsonValue(null/undefined/{})
+    // returns undefined, dropping the key. Verify the field is now
+    // guaranteed present regardless of tool_response shape.
+    const sessionId = 'trae-cn-r8-empty-result';
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T04:00:00.000Z',
+      prompt: 'read missing file',
+    });
+    // Case A: tool_response = null (empty/falsy)
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T04:00:01.000Z',
+      tool_use_id: 'toolu_r8_null',
+      tool_name: 'Read',
+      tool_input: { file_path: '/tmp/missing.txt' },
+    });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T04:00:02.000Z',
+      tool_use_id: 'toolu_r8_null',
+      tool_name: 'Read',
+      tool_response: null,
+    });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T04:00:05.000Z',
+      last_assistant_message: 'file not found',
+    });
+    const records = readEmittedJsonl();
+    const toolResultNull = records.find((r) =>
+      r['gen_ai.span.kind'] === 'TOOL' && r['event.name'] === 'tool.result'
+      && r['gen_ai.tool.call.id'] === 'toolu_r8_null');
+    expect(toolResultNull).toBeDefined();
+    expect(toolResultNull['gen_ai.tool.call.result']).toBeDefined();
+  });
+
+  test('round 9: cmdStop rewrite preserves ENTRY/AGENT/STEP end across dual-record merge (t9 regression)', () => {
+    // tester r9 reported that dev r8 #2's toolResultRecord placeholder
+    // interacted with cmdStop rewrite + writeOtlpDebugRecords merge to drop
+    // the corrected ENTRY/AGENT/STEP endTimeUnixNano on t9 (Read nonexistent
+    // .txt with empty tool_response). Root cause: state.turn_started_at was
+    // set to wall-clock nowUnixNanos() in newTurnState while state.last_event_at
+    // was set to event-time (isoToUnixNanos(event.timestamp)). When event ts
+    // lags wall-clock (e.g., trae-cn assigns event ts slightly behind hook
+    // invocation), state.turn_started_at > state.last_event_at at cmdStop
+    // rewrite, and spanBounds ENTRY/AGENT/STEP clipped end=start+1n, dropping
+    // the corrected T_STOP end. Validate: ENTRY/AGENT/STEP end == LLM end.
+    const sessionId = 'trae-cn-r9-t9-merge';
+    // Use ISO timestamps in the past relative to wall-clock — this is what
+    // triggers state.turn_started_at (wall-clock) vs state.last_event_at
+    // (event-time) desync. Without the r9 fix, ENTRY dur would be 0ms.
+    runHook('user-prompt-submit', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:00.000Z',
+      prompt: 'read missing file',
+    }, { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    runHook('pre-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:04.409Z',
+      tool_use_id: 'toolu_r9_t9',
+      tool_name: 'Read',
+      tool_input: { file_path: '/tmp/missing.txt' },
+    }, { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    runHook('post-tool-use', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:04.582Z',
+      tool_use_id: 'toolu_r9_t9',
+      tool_name: 'Read',
+      tool_response: {},
+    }, { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    runHook('stop', {
+      session_id: sessionId,
+      cwd: '/tmp',
+      timestamp: '2026-08-19T01:00:05.976Z',
+      last_assistant_message: 'file not found',
+    }, { LOONGSUITE_PILOT_OTLP_DEBUG: '1' });
+    const spans = readOtlpDebugSpans();
+    const byKind = new Map(spans.map((s) => [s.attributes['gen_ai.span.kind'], s]));
+    const entry = byKind.get('ENTRY');
+    const agent = byKind.get('AGENT');
+    const step = byKind.get('STEP');
+    const llm = byKind.get('LLM');
+    const tool = byKind.get('TOOL');
+    expect(entry).toBeDefined();
+    expect(agent).toBeDefined();
+    expect(step).toBeDefined();
+    expect(llm).toBeDefined();
+    expect(tool).toBeDefined();
+    // Round 9 core assertion: ENTRY/AGENT/STEP endTime == LLM endTime.
+    // Before fix: end == T_PROMPT (= 01:00:00.000Z), dur=0ms.
+    // After fix:  end == T_STOP    (= 01:00:05.976Z), dur≈5976ms.
+    const T_STOP = '1787101205976000000'; // 2026-08-19T01:00:05.976Z
+    expect(entry.endTimeUnixNano).toBe(T_STOP);
+    expect(agent.endTimeUnixNano).toBe(T_STOP);
+    expect(step.endTimeUnixNano).toBe(T_STOP);
+    expect(llm.endTimeUnixNano).toBe(T_STOP);
+    // Round 8 #1 preserved: ARMS span name patterns.
+    expect(entry.name).toBe('enter_ai_application_system');
+    expect(step.name).toBe('react step');
+    // Round 8 #2 preserved: TOOL span still has gen_ai.tool.call.result.
+    expect(tool.attributes['gen_ai.tool.call.result']).toBe('no_response_captured');
+  });
+});
