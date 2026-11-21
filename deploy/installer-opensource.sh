@@ -37,6 +37,7 @@ set -euo pipefail
 PACKAGE_NAME="loongsuite-pilot"
 PERMANENT_DIR="$HOME/.loongsuite-pilot/package"
 DEFAULT_DATA_DIR="$HOME/.loongsuite-pilot"
+INSTALL_DATA_DIR_FILE="$DEFAULT_DATA_DIR/data-dir"
 
 # OSS download base URL
 _OSS_BASE_URL="https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot"
@@ -58,7 +59,11 @@ SLS_LOGSTORE=""
 SLS_AK_ID=""
 SLS_AK_SECRET=""
 SLS_API_KEY=""
-DATA_DIR="$DEFAULT_DATA_DIR"
+DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-}"
+if [ -z "$DATA_DIR" ] && [ -f "$INSTALL_DATA_DIR_FILE" ]; then
+    DATA_DIR=$(cat "$INSTALL_DATA_DIR_FILE")
+fi
+DATA_DIR="${DATA_DIR:-$DEFAULT_DATA_DIR}"
 DASHBOARD_PORT=""
 DASHBOARD_PORT_SET=0
 LOG_LEVEL=""
@@ -211,6 +216,11 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+if [ -n "$DATA_DIR" ] && [[ "$DATA_DIR" != /* ]]; then DATA_DIR="$PWD/$DATA_DIR"; fi
+case "$DATA_DIR" in
+    ""|*$'\n'*|*$'\r'*) echo "--data-dir requires a nonempty single-line path" >&2; exit 1 ;;
+esac
 
 if [ -n "$HOOK_INSTALL_SCOPE" ]; then
     case "$HOOK_INSTALL_SCOPE" in
@@ -1252,7 +1262,7 @@ write_config() {
         LP_ENABLE_STATUS_BAR_APP="$ENABLE_STATUS_BAR_APP" \
         "$NODE_BIN" -e "
 const fs = require('fs');
-const path = '$config_file';
+const [path, dataDir] = process.argv.slice(1);
 
 let existing = {};
 try { existing = JSON.parse(fs.readFileSync(path, 'utf-8')); } catch {}
@@ -1260,7 +1270,7 @@ try { existing = JSON.parse(fs.readFileSync(path, 'utf-8')); } catch {}
 const config = {
   ...existing,
   enabled: true,
-  dataDir: '$DATA_DIR',
+  dataDir,
 };
 if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(config.dashboard)) {
   config.dashboard = {};
@@ -1461,7 +1471,7 @@ if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && 
 }
 
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
-"
+" -- "$config_file" "$DATA_DIR"
     msg "    ✅ 配置已写入" "    ✅ Config written"
     echo ""
 }
@@ -1471,12 +1481,31 @@ fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
 # ============================================================
 install_loongsuite_pilot_command() {
     msg "==> 安装服务管理脚本..." "==> Installing service management script..."
+    local selected_dir record_tmp
+    # Keep trailing newlines visible until we have validated the physical path.
+    selected_dir=$(CDPATH= cd -P -- "$DATA_DIR" && printf '%s.' "$PWD")
+    selected_dir=${selected_dir%.}
+    case "$selected_dir" in
+        *$'\n'*|*$'\r'*) echo "The resolved data directory must be a single-line path" >&2; return 1 ;;
+    esac
+    DATA_DIR="$selected_dir"
     local global_bin_dir="$HOME/.local/bin"
     mkdir -p "$global_bin_dir"
 
     local loongsuite_pilot_cmd="$global_bin_dir/loongsuite-pilot"
     cp -f "$PERMANENT_DIR/scripts/loongsuite-pilot.sh" "$loongsuite_pilot_cmd"
     chmod +x "$loongsuite_pilot_cmd"
+    # Preserve the install selection for new CLI/upgrade processes, separately from the cache.
+    if [ "$selected_dir" -ef "$DEFAULT_DATA_DIR" ]; then
+        rm -f "$INSTALL_DATA_DIR_FILE"
+    else
+        mkdir -p "$DEFAULT_DATA_DIR"
+        record_tmp=$(mktemp "$INSTALL_DATA_DIR_FILE.XXXXXX")
+        if ! { printf '%s\n' "$selected_dir" > "$record_tmp" && mv -f "$record_tmp" "$INSTALL_DATA_DIR_FILE"; }; then
+            rm -f "$record_tmp"
+            return 1
+        fi
+    fi
     msg "    ✅ 已安装: $loongsuite_pilot_cmd" "    ✅ Installed: $loongsuite_pilot_cmd"
 
     # If /usr/local/bin is writable (root), create a symlink for immediate PATH access
@@ -3337,6 +3366,7 @@ cmd_uninstall() {
     if [ "$PURGE" -eq 1 ]; then
         msg "==> 删除数据目录 (--purge)..." "==> Removing data directory (--purge)..."
         rm -rf "$DATA_DIR"
+        rm -f "$INSTALL_DATA_DIR_FILE"
         msg "    ✅ 已删除 $DATA_DIR" "    ✅ Removed $DATA_DIR"
     else
         msg "📁 数据目录已保留: $DATA_DIR" \

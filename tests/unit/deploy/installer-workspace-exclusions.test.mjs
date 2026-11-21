@@ -21,12 +21,8 @@ function bashWrite(paths = []) {
   const endText = "fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\\n');";
   const end = fn.indexOf(endText) + endText.length;
   const code = fn.slice(start, end)
-    .replaceAll("'$config_file'", JSON.stringify(file))
-    .replaceAll("'$DATA_DIR'", JSON.stringify(dir))
     .replace(/\$\{[A-Z_]+\}/g, '');
-  const script = path.join(dir, 'writer.cjs');
-  fs.writeFileSync(script, code);
-  const result = spawnSync(process.execPath, [script], { encoding: 'utf8', input: '[]', env: {
+  const result = spawnSync(process.execPath, ['-e', code, '--', file, dir], { encoding: 'utf8', input: '[]', env: {
     ...process.env, LP_EXCLUDE_WORKSPACES: paths.length ? JSON.stringify(paths) : '',
   } });
   expect(result.status, result.stderr).toBe(0);
