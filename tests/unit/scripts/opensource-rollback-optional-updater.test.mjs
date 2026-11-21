@@ -84,7 +84,6 @@ describeShell('sync_installed_scripts_from_version behaviour', () => {
     const versionDir = path.join(root, 'versions', 'v1');
     const scriptsDir = path.join(versionDir, 'scripts');
     const bootstrapDir = path.join(root, 'bin');
-    const pilotBin = path.join(root, 'loongsuite-pilot');
     fs.mkdirSync(scriptsDir, { recursive: true });
     fs.mkdirSync(bootstrapDir, { recursive: true });
     if (!omitCollector) {
@@ -101,26 +100,25 @@ describeShell('sync_installed_scripts_from_version behaviour', () => {
 
     const functions = [
       'check_rollback_bootstrap_file',
+      'stage_rollback_bootstrap_file',
       'publish_rollback_bootstrap_file',
       'sync_installed_scripts_from_version',
     ].map(extractShellFunction).join('\n');
     const script = `
 set -euo pipefail
 BOOTSTRAP_DIR=${JSON.stringify(bootstrapDir)}
-LOONGSUITE_PILOT_BIN=${JSON.stringify(pilotBin)}
 ${functions}
 sync_installed_scripts_from_version ${JSON.stringify(versionDir)}
 `;
     const result = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
-    return { root, bootstrapDir, pilotBin, result };
+    return { bootstrapDir, result };
   }
 
   it('succeeds for an open-source version dir that lacks updater-daemon.js', () => {
-    const { bootstrapDir, pilotBin, result } = runSync({ withUpdater: false, staleUpdater: true });
+    const { bootstrapDir, result } = runSync({ withUpdater: false, staleUpdater: true });
     expect(result.status, result.stderr || result.stdout).toBe(0);
     expect(fs.readFileSync(path.join(bootstrapDir, 'collector-daemon.js'), 'utf8')).toBe('collector-v1\n');
     expect(fs.existsSync(path.join(bootstrapDir, 'updater-daemon.js'))).toBe(false);
-    expect(fs.readFileSync(pilotBin, 'utf8')).toContain('cli-v1');
   });
 
   it('still copies updater-daemon.js when the version provides it', () => {
@@ -143,6 +141,8 @@ describe('rollback preserves version pointers until script sync succeeds', () =>
     failure = 'sync',
     updater = true,
     targetUpdater = false,
+    staleClaim = false,
+    updaterTask,
   } = {}) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-rollback-removal-'));
     temporaryRoots.push(root);
@@ -169,6 +169,9 @@ describe('rollback preserves version pointers until script sync succeeds', () =>
     fs.writeFileSync(previousPointer, originalPrevious);
     fs.writeFileSync(path.join(bootstrap, 'collector-daemon.js'), 'installed-collector');
     if (updater) fs.writeFileSync(path.join(bootstrap, 'updater-daemon.js'), 'installed-updater');
+    const updaterLauncher = path.join(bootstrap, 'updater-launch.vbs');
+    if (updaterTask) fs.writeFileSync(updaterLauncher, 'installed-updater-launcher');
+    if (staleClaim) fs.mkdirSync(path.join(root, '.rollback-lock.2147483647.stale'));
     if (isBash) {
       fs.mkdirSync(path.dirname(installedCli), { recursive: true });
       fs.writeFileSync(installedCli, 'installed-launcher');
@@ -188,8 +191,11 @@ describe('rollback preserves version pointers until script sync succeeds', () =>
     const script = path.join(root, path.basename(file));
     const original = readFileSync(file, 'utf-8');
     expect(original).toContain(dispatch);
-    fs.writeFileSync(script, original.replace(dispatch, replacement + dispatch));
-    const result = spawnSync(interpreter, [...args, script, 'rollback'], {
+    const instrumented = original.replace(dispatch, replacement + dispatch);
+    const installedOverlap = ['restart-overlap', 'cleanup-overlap'].includes(failure);
+    const command = installedOverlap ? installedCli : script;
+    fs.writeFileSync(command, instrumented);
+    const result = spawnSync(interpreter, [...args, command, 'rollback'], {
       encoding: 'utf8',
       timeout: 10_000,
       env: {
@@ -200,12 +206,16 @@ describe('rollback preserves version pointers until script sync succeeds', () =>
         LOONGSUITE_PILOT_DATA_DIR: root,
         PILOT_TEST_RESTART_MARKER: restart,
         PILOT_TEST_ROLLBACK_FAILURE: failure,
+        PILOT_TEST_ROLLBACK_INTERPRETER: interpreter,
+        PILOT_TEST_UPDATER_TASK: updaterTask ?? '',
       },
     });
 
     const output = result.stdout + result.stderr;
-    if (failure === 'none') {
-      expect(result.status, result.error?.message ?? result.stderr).toBe(0);
+    expect(fs.readdirSync(root).filter(name => name.startsWith('.rollback-lock.'))).toEqual([]);
+    if (installedOverlap || ['none', 'restart-fails', 'launcher-publish'].includes(failure)) {
+      const status = { 'restart-fails': 37, 'launcher-publish': 1 }[failure] ?? 0;
+      expect(result.status, result.error?.message ?? result.stderr).toBe(status);
       expect(output).toContain('Rolled back to version: prior');
       expect(fs.readFileSync(currentPointer, 'utf8').trim()).toBe('prior');
       expect(fs.readFileSync(previousPointer, 'utf8')).toBe(
@@ -214,6 +224,34 @@ describe('rollback preserves version pointers until script sync succeeds', () =>
       expect(fs.existsSync(restart)).toBe(true);
       expect(fs.readFileSync(path.join(bootstrap, 'collector-daemon.js'), 'utf8')).toBe('prior');
       expect(fs.existsSync(path.join(bootstrap, 'updater-daemon.js'))).toBe(false);
+      if (isBash) {
+        const retainedLauncher = failure === 'launcher-publish';
+        expect(fs.readFileSync(installedCli, 'utf8')).toBe(retainedLauncher ? 'installed-launcher' : 'prior');
+        expect(fs.statSync(installedCli).mode & 0o777).toBe(retainedLauncher ? 0o751 : 0o755);
+        if (retainedLauncher) {
+          expect(output).toContain('Failed to publish launcher for rollback target');
+          expect(fs.readFileSync(restart, 'utf8').trim()).toBe('prior');
+        }
+      }
+      if (installedOverlap) {
+        expect(output).toContain('Another rollback is in progress');
+        expect(output).toContain('Second rollback exit: 1');
+      }
+      if (updaterTask) {
+        const retired = ['managed', 'collector-fallback'].includes(updaterTask);
+        const state = {
+          managed: 'registered=False stops=1',
+          'collector-fallback': 'registered=False stops=1',
+          other: 'registered=True stops=0',
+          denied: 'registered=True stops=1',
+          'cim-invisible': 'registered=True stops=0',
+          'reappeared': 'registered=False stops=1',
+        }[updaterTask];
+        expect(fs.existsSync(updaterLauncher)).toBe(!retired);
+        expect(fs.readFileSync(restart, 'utf8').trim()).toBe(`collector=1 ${state}`);
+        if (updaterTask === 'cim-invisible') expect(output).toContain('CIM could not read the optional updater task');
+        if (updaterTask === 'reappeared') expect(output).toContain('Could not verify removal of the optional updater task');
+      }
       return;
     }
 
@@ -223,8 +261,13 @@ describe('rollback preserves version pointers until script sync succeeds', () =>
       'publish-remove': 'Failed to publish current version pointer',
       'previous-remove': 'Failed to publish previous version pointer',
       recover: 'Failed to publish current version pointer',
+      overlap: 'Failed to publish current version pointer',
     }[failure] ?? 'Failed to sync scripts for rollback target';
     expect(output).toContain(expectedFailure);
+    if (failure === 'overlap') {
+      expect(output).toContain('Another rollback is in progress');
+      expect(output).toContain('Second rollback exit: 1');
+    }
     if (obstruction) {
       expect(output).toContain('path is not a file');
       if (linked) {
@@ -268,7 +311,9 @@ describe('rollback preserves version pointers until script sync succeeds', () =>
     { current: null, failure: 'none' },
     { current: '', failure: 'none' },
     { failure: 'none' },
+    { failure: 'none', staleClaim: true },
     { failure: 'publish' },
+    { failure: 'overlap' },
     { failure: 'collector', current: null },
     { failure: 'collector', current: '' },
     { failure: 'publish', current: null },
@@ -280,12 +325,31 @@ describe('rollback preserves version pointers until script sync succeeds', () =>
 
   it.skipIf(process.platform === 'win32').each([
     ...pointerCases,
+    { failure: 'restart-overlap' },
+    { failure: 'cleanup-overlap' },
+    { failure: 'restart-fails' },
+    { failure: 'launcher-publish' },
+    { failure: 'launcher-publish', current: null },
     { obstruction: 'home/.local/bin/loongsuite-pilot' },
     { obstruction: 'home/.local/bin/loongsuite-pilot.tmp' },
   ])('keeps Bash artifacts and pointers consistent (%j)', (scenario) => {
     checkRollback(SERVICE_SH, '\n# ---- Dispatch ----\n', `
-cmd_restart() { touch "$PILOT_TEST_RESTART_MARKER"; }
-cleanup_hermes_for_rollback() { :; }
+probe_installed_rollback() {
+    local nested_status=0
+    PILOT_TEST_ROLLBACK_FAILURE=none bash "$LOONGSUITE_PILOT_BIN" rollback || nested_status=$?
+    echo "Second rollback exit: $nested_status"
+}
+cmd_restart() {
+    tr -d '[:space:]' < "$CURRENT_FILE" >> "$PILOT_TEST_RESTART_MARKER"
+    printf '\\n' >> "$PILOT_TEST_RESTART_MARKER"
+    if [ "$PILOT_TEST_ROLLBACK_FAILURE" = restart-overlap ]; then
+        probe_installed_rollback
+    fi
+    if [ "$PILOT_TEST_ROLLBACK_FAILURE" = restart-fails ]; then exit 37; fi
+}
+cleanup_hermes_for_rollback() {
+    if [ "$PILOT_TEST_ROLLBACK_FAILURE" = cleanup-overlap ]; then probe_installed_rollback; fi
+}
 rm() {
     if [ "$PILOT_TEST_ROLLBACK_FAILURE" = sync ] && [ "\${2:-}" = "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
         echo "controlled updater removal failure" >&2
@@ -294,6 +358,16 @@ rm() {
     command rm "$@"
 }
 mv() {
+    if [ "$PILOT_TEST_ROLLBACK_FAILURE" = launcher-publish ] && [ "\${3:-}" = "$LOONGSUITE_PILOT_BIN" ]; then
+        echo "controlled launcher publication failure" >&2
+        return 1
+    fi
+    if [ "$PILOT_TEST_ROLLBACK_FAILURE" = overlap ] && [ "\${3:-}" = "$CURRENT_FILE" ]; then
+        nested_status=0
+        PILOT_TEST_ROLLBACK_FAILURE=none bash "$0" rollback || nested_status=$?
+        echo "Second rollback exit: $nested_status"
+        return 1
+    fi
     if { [ "$PILOT_TEST_ROLLBACK_FAILURE" = publish ] || [ "$PILOT_TEST_ROLLBACK_FAILURE" = recover ]; } &&
         [ "\${3:-}" = "$CURRENT_FILE" ]; then
         echo "controlled current pointer publication failure" >&2
@@ -335,6 +409,15 @@ function Remove-Item {
 function Move-Item {
     param([string]$LiteralPath, [string]$Destination, [switch]$Force, [object]$ErrorAction)
     $sourceName = Split-Path -Leaf $LiteralPath
+    if (($env:PILOT_TEST_ROLLBACK_FAILURE -eq "overlap") -and
+        ($Destination -eq $CURRENT_FILE) -and ($sourceName -eq "current")) {
+        $env:PILOT_TEST_ROLLBACK_FAILURE = "none"
+        $ErrorActionPreference = "Continue"
+        & $env:PILOT_TEST_ROLLBACK_INTERPRETER -NoLogo -NoProfile -NonInteractive -File $PSCommandPath rollback
+        Write-Host "Second rollback exit: $LASTEXITCODE"
+        $env:PILOT_TEST_ROLLBACK_FAILURE = "overlap"
+        throw "controlled current pointer publication failure"
+    }
     if (($env:PILOT_TEST_ROLLBACK_FAILURE -in @("publish", "recover")) -and
         ($Destination -eq $CURRENT_FILE) -and ($sourceName -eq "current")) {
         throw "controlled current pointer publication failure"
@@ -360,4 +443,63 @@ function Move-Item {
 }
 `, powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File'], scenario);
   });
+
+  it.skipIf(!powershell).each(['managed', 'other', 'denied', 'collector-fallback', 'cim-invisible', 'reappeared'])(
+    'handles scheduled updater state %s when rolling back to an updaterless version',
+    (updaterTask) => {
+      checkRollback(SERVICE_PS1, '\nswitch ($Command.ToLower()) {', `
+$script:registered = $true
+$script:updaterState = "Running"
+$script:stops = 0
+$script:collectorStarts = 0
+function Remove-HermesPluginForRollback {}
+function Stop-PidFile {}
+function Stop-OrphanProcesses {}
+function Get-CollectorRuntime {}
+function Test-PidRunning { return $false }
+function Resolve-Node { return "fixture-node" }
+function Install-CollectorTask {
+    if ($env:PILOT_TEST_UPDATER_TASK -eq "collector-fallback") { throw "Collector registration denied" }
+    return $true
+}
+function Start-CompatibleExistingCollectorTask {
+    $script:collectorStarts++
+    return (Wait-ForCollectorHeartbeat)
+}
+function schtasks.exe {
+    $global:LASTEXITCODE = 1
+    if ($args[0] -eq "/Query" -and $env:PILOT_TEST_UPDATER_TASK -in @("cim-invisible", "reappeared")) {
+        $global:LASTEXITCODE = 0
+    }
+}
+function Get-ScheduledTask {
+    [CmdletBinding()] param($TaskName, $TaskPath)
+    if ($TaskName -ne $TASK_NAME_UPDATER -or -not $script:registered -or $env:PILOT_TEST_UPDATER_TASK -eq "cim-invisible") { return }
+    $launcher = Join-Path $BOOTSTRAP_DIR "updater-launch.vbs"
+    if ($env:PILOT_TEST_UPDATER_TASK -eq "other") { $launcher = "another-installation.vbs" }
+    return @{ State = $script:updaterState; Actions = @(@{ Execute = "wscript.exe"; Arguments = '"' + $launcher + '"' }) }
+}
+function Start-ScheduledTask {
+    [CmdletBinding()] param($TaskName, $TaskPath)
+    if ($TaskName -eq $TASK_NAME_COLLECTOR) { $script:collectorStarts++ }
+}
+function Stop-ScheduledTask {
+    [CmdletBinding()] param($TaskName, $TaskPath)
+    if ($TaskName -ne $TASK_NAME_UPDATER -or $TaskPath -ne "$TASK_FOLDER\\") { throw "Unexpected stop" }
+    $script:updaterState = "Ready"
+    $script:stops++
+}
+function Unregister-ScheduledTask {
+    [CmdletBinding(SupportsShouldProcess)] param($TaskName, $TaskPath)
+    if ($TaskName -ne $TASK_NAME_UPDATER -or $TaskPath -ne "$TASK_FOLDER\\") { throw "Unexpected unregister" }
+    if ($env:PILOT_TEST_UPDATER_TASK -eq "denied") { throw "Access is denied" }
+    $script:registered = $false
+}
+function Wait-ForCollectorHeartbeat {
+    Set-Content -LiteralPath $env:PILOT_TEST_RESTART_MARKER -Value "collector=$script:collectorStarts registered=$script:registered stops=$script:stops"
+    return $true
+}
+`, powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File'], { failure: 'none', updaterTask });
+    },
+  );
 });

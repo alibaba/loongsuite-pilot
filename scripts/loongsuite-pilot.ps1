@@ -1206,6 +1206,48 @@ function Install-CollectorTask {
         -description "LoongSuite Pilot data collector")
 }
 
+function Remove-OptionalUpdaterTask {
+    $launcher = Join-Path $BOOTSTRAP_DIR "updater-launch.vbs"
+    $query = Get-TaskQuery $TASK_NAME_UPDATER
+    if ($query.error) {
+        Write-Warning "Could not check the optional updater task: $($query.error)"
+        return
+    }
+    if (-not $query.exists) {
+        # CIM can report no object for a task that schtasks still sees.
+        if ((Test-Path -LiteralPath $launcher -PathType Leaf) -and
+            (Test-TaskExistsViaSchtasks $TASK_NAME_UPDATER) -eq "yes") {
+            Write-Warning "CIM could not read the optional updater task reported by schtasks"
+        }
+        return
+    }
+    $task = $query.task
+    $actions = @($task.Actions | Where-Object { $_ })
+    if ($actions.Count -ne 1 -or -not $actions[0].Execute -or
+        (Split-Path -Leaf $actions[0].Execute) -ine "wscript.exe" -or
+        [string]$actions[0].Arguments -ine ('"' + $launcher + '"')) {
+        Write-Warning "Existing updater task does not use this Pilot installation's launcher"
+        return
+    }
+    try {
+        if ($task.State -eq "Running") {
+            Stop-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+        }
+        Unregister-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -Confirm:$false -ErrorAction Stop
+    } catch {
+        Write-Warning "Could not remove the optional updater task: $($_.Exception.Message)"
+        return
+    }
+    $remaining = Get-TaskQuery $TASK_NAME_UPDATER
+    if ($remaining.exists -or $remaining.error -or (Test-TaskExistsViaSchtasks $TASK_NAME_UPDATER) -eq "yes") {
+        Write-Warning "Could not verify removal of the optional updater task"
+        return
+    }
+    if (Test-Path -LiteralPath $launcher -PathType Leaf) {
+        Remove-Item -LiteralPath $launcher -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Install-UpdaterTask {
     param([string]$nodeBin)
     $entry = Join-Path $BOOTSTRAP_DIR "updater-daemon.js"
@@ -1406,8 +1448,10 @@ function Cmd-Start {
 # CMD: stop
 # ============================================================
 function Cmd-Stop {
+    param([switch]$SkipUpdaterTask)
     # Stop Task Scheduler tasks
     foreach ($name in @($TASK_NAME_UPDATER, $TASK_NAME_COLLECTOR)) {
+        if ($SkipUpdaterTask -and $name -eq $TASK_NAME_UPDATER) { continue }
         $task = Get-ScheduledTask -TaskName $name -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
         if ($task -and $task.State -eq "Running") {
             Stop-ScheduledTask -TaskName $name -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
@@ -1428,7 +1472,10 @@ function Cmd-Stop {
 # CMD: restart
 # ============================================================
 function Cmd-Restart {
-    Cmd-Stop
+    param([switch]$UpdaterlessRollback)
+    # The optional-task cleanup verifies the action before stopping the updater.
+    if ($UpdaterlessRollback) { Remove-OptionalUpdaterTask }
+    Cmd-Stop -SkipUpdaterTask:$UpdaterlessRollback
     Start-Sleep -Seconds 1
     Cmd-Start
 }
@@ -2380,6 +2427,34 @@ function Cmd-Rollback {
         Write-Error "No previous version to roll back to"
         exit 1
     }
+    # Publish the claim before reading any other holder or taking a snapshot.
+    $claimName = ".rollback-lock.$PID.$(New-Guid)"
+    $claim = Join-Path $CACHE_DIR $claimName
+    New-Item -ItemType Directory -Path $claim -ErrorAction Stop | Out-Null
+    try {
+        foreach ($peer in (Get-ChildItem -LiteralPath $CACHE_DIR -Directory -Force -Filter ".rollback-lock.*")) {
+            if ($peer.Name -eq $claimName -or $peer.Name -notmatch '^\.rollback-lock\.([1-9][0-9]*)\.') { continue }
+            $holder = [int]$Matches[1]
+            try {
+                $null = Get-Process -Id $holder -ErrorAction Stop
+            } catch {
+                if ($_.FullyQualifiedErrorId -notlike "NoProcessFoundForGivenId,*") { throw }
+                Remove-Item -LiteralPath $peer.FullName -Force -ErrorAction SilentlyContinue
+                continue
+            }
+            throw "Another rollback is in progress (PID $holder)"
+        }
+        Invoke-ReservedRollback
+    } finally {
+        Remove-Item -LiteralPath $claim -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-ReservedRollback {
+    if (-not (Test-Path -LiteralPath $PREVIOUS_FILE -PathType Leaf)) {
+        Write-Error "No previous version to roll back to"
+        exit 1
+    }
 
     $previousContent = Get-Content -LiteralPath $PREVIOUS_FILE -Raw
     $prevDir = if ($previousContent) { $previousContent.Trim() } else { "" }
@@ -2475,7 +2550,8 @@ function Cmd-Rollback {
 
     Write-Host "Rolled back to version: $prevDir"
     Write-Host "   Restarting service..."
-    Cmd-Restart
+    $updaterless = -not (Test-Path -LiteralPath (Join-Path $BOOTSTRAP_DIR "updater-daemon.js") -PathType Leaf)
+    Cmd-Restart -UpdaterlessRollback:$updaterless
 }
 
 # ============================================================

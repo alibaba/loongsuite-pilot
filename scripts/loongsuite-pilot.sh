@@ -339,14 +339,22 @@ snapshot_rollback_bootstrap() {
     done
 }
 
-publish_rollback_bootstrap_file() {
+stage_rollback_bootstrap_file() {
     local source="$1" destination="$2" phase="$3" mode="${4:-}" staged
     if ! staged=$(mktemp "$destination.rollback-$phase.XXXXXX"); then return 1; fi
     if cp -p "$source" "$staged" &&
-        { [ -z "$mode" ] || chmod "$mode" "$staged"; } &&
-        mv -f "$staged" "$destination"; then
+        { [ -z "$mode" ] || chmod "$mode" "$staged"; }; then
+        printf '%s\n' "$staged"
         return 0
     fi
+    rm -f "$staged" || true
+    return 1
+}
+
+publish_rollback_bootstrap_file() {
+    local destination="$2" staged
+    staged=$(stage_rollback_bootstrap_file "$@") || return 1
+    if mv -f "$staged" "$destination"; then return 0; fi
     rm -f "$staged" || true
     return 1
 }
@@ -383,7 +391,7 @@ sync_installed_scripts_from_version() {
     fi
 
     local dst
-    for dst in "$BOOTSTRAP_DIR/collector-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js" "$LOONGSUITE_PILOT_BIN"; do
+    for dst in "$BOOTSTRAP_DIR/collector-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js"; do
         check_rollback_bootstrap_file "$dst" && check_rollback_bootstrap_file "$dst.tmp" || return 1
     done
 
@@ -397,9 +405,7 @@ sync_installed_scripts_from_version() {
         rm -f "$BOOTSTRAP_DIR/updater-daemon.js" || return 1
     fi
 
-    publish_rollback_bootstrap_file "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/collector-daemon.js" sync || return 1
-    mkdir -p "$(dirname "$LOONGSUITE_PILOT_BIN")" || return 1
-    publish_rollback_bootstrap_file "$src_dir/loongsuite-pilot.sh" "$LOONGSUITE_PILOT_BIN" sync 755
+    publish_rollback_bootstrap_file "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/collector-daemon.js" sync
 }
 
 process_matches_installed_entry() {
@@ -2143,11 +2149,35 @@ try {
     done
 }
 
+reserve_rollback() {
+    local claim peer owner
+    # Publish an identifiable claim before checking peers. Simultaneous calls
+    # can both decline, but neither can overwrite another call's snapshot.
+    claim=$(mktemp -d "$CACHE_DIR/.rollback-lock.$$.XXXXXX") || return 1
+    for peer in "$CACHE_DIR"/.rollback-lock.*; do
+        [ -d "$peer" ] && [ "$peer" != "$claim" ] || continue
+        owner=${peer##*/.rollback-lock.}
+        owner=${owner%%.*}
+        [[ "$owner" =~ ^[1-9][0-9]*$ ]] || continue
+        if kill -0 "$owner" 2>/dev/null || [ -n "$(ps -p "$owner" -o pid= 2>/dev/null)" ]; then
+            rmdir -- "$claim" 2>/dev/null || true
+            echo "❌ Another rollback is in progress (PID $owner)" >&2
+            return 1
+        fi
+        rmdir -- "$peer" 2>/dev/null || true
+    done
+    printf '%s\n' "$claim"
+}
+
 cmd_rollback() {
     if [ ! -f "$PREVIOUS_FILE" ]; then
         echo "❌ No previous version to roll back to"
         exit 1
     fi
+
+    local rollback_claim
+    rollback_claim=$(reserve_rollback) || exit 1
+    trap "$(printf 'rmdir -- %q 2>/dev/null || true' "$rollback_claim")" EXIT
 
     local prev_dir
     prev_dir=$(cat "$PREVIOUS_FILE" 2>/dev/null | tr -d '[:space:]')
@@ -2164,13 +2194,25 @@ cmd_rollback() {
         exit 1
     fi
 
-    # Prepare both pointers before touching the bootstrap. Publish current
-    # last so a failed sync leaves the original pointer files byte-for-byte.
+    # Keep the locking launcher in place through bootstrap updates and restart.
+    # An older launcher may not honor the lock, so publish it after those writes.
+    local launcher_source="$VERSIONS_DIR/$prev_dir/scripts/loongsuite-pilot.sh" launcher_stage
+    if ! check_rollback_bootstrap_file "$LOONGSUITE_PILOT_BIN" ||
+        ! check_rollback_bootstrap_file "$LOONGSUITE_PILOT_BIN.tmp"; then
+        echo "❌ Failed to sync scripts for rollback target: $prev_dir" >&2
+        exit 1
+    fi
+    if ! mkdir -p "$(dirname "$LOONGSUITE_PILOT_BIN")" ||
+        ! launcher_stage=$(stage_rollback_bootstrap_file "$launcher_source" "$LOONGSUITE_PILOT_BIN" sync 755); then
+        echo "❌ Failed to stage launcher for rollback target: $prev_dir" >&2
+        exit 1
+    fi
+    trap "$(printf 'rm -f -- %q || true; rmdir -- %q 2>/dev/null || true' "$launcher_stage" "$rollback_claim")" EXIT
+
     local pointer_dir rollback_error="" retain_backup=""
     local bootstrap_paths=(
         "$BOOTSTRAP_DIR/collector-daemon.js"
         "$BOOTSTRAP_DIR/updater-daemon.js"
-        "$LOONGSUITE_PILOT_BIN"
     )
     if ! pointer_dir=$(mktemp -d "$CACHE_DIR/.rollback-pointers.XXXXXX"); then
         echo "❌ Failed to stage version pointers for rollback target: $prev_dir" >&2
@@ -2215,7 +2257,18 @@ cmd_rollback() {
 
     echo "✅ Rolled back to version: $prev_dir"
     echo "   Restarting service..."
-    cmd_restart
+    # Restart can exit on failure. Finish publishing the launcher for the
+    # committed version, and then return the original restart status.
+    local restart_status
+    set +e
+    (set -e; cmd_restart)
+    restart_status=$?
+    set -e
+    if ! mv -f "$launcher_stage" "$LOONGSUITE_PILOT_BIN"; then
+        echo "❌ Failed to publish launcher for rollback target: $prev_dir (existing launcher retained)" >&2
+        return 1
+    fi
+    return "$restart_status"
 }
 
 # ---- Autostart management (internal) ----
