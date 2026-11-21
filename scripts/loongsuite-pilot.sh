@@ -318,23 +318,94 @@ sync_bootstrap_scripts() {
     cp -f "$src_dir/updater-daemon.js"   "$BOOTSTRAP_DIR/" 2>/dev/null || true
 }
 
+check_rollback_bootstrap_file() {
+    local path="$1"
+    if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
+        printf 'Rollback bootstrap path is not a file: %s\n' "$path" >&2
+        return 1
+    fi
+}
+
+snapshot_rollback_bootstrap() {
+    local backup_dir="$1"
+    shift
+    local path index=0
+    for path in "$@"; do
+        check_rollback_bootstrap_file "$path" || return 1
+        if [ -f "$path" ]; then
+            cp -p "$path" "$backup_dir/bootstrap-$index" || return 1
+        fi
+        index=$((index + 1))
+    done
+}
+
+stage_rollback_bootstrap_file() {
+    local source="$1" destination="$2" phase="$3" mode="${4:-}" staged
+    if ! staged=$(mktemp "$destination.rollback-$phase.XXXXXX"); then return 1; fi
+    if cp -p "$source" "$staged" &&
+        { [ -z "$mode" ] || chmod "$mode" "$staged"; }; then
+        printf '%s\n' "$staged"
+        return 0
+    fi
+    rm -f "$staged" || true
+    return 1
+}
+
+publish_rollback_bootstrap_file() {
+    local destination="$2" staged
+    staged=$(stage_rollback_bootstrap_file "$@") || return 1
+    if mv -f "$staged" "$destination"; then return 0; fi
+    rm -f "$staged" || true
+    return 1
+}
+
+restore_rollback_bootstrap() {
+    local backup_dir="$1"
+    shift
+    local path original index=0 status=0
+    for path in "$@"; do
+        original="$backup_dir/bootstrap-$index"
+        index=$((index + 1))
+        if ! check_rollback_bootstrap_file "$path"; then
+            status=1
+        elif [ -f "$original" ]; then
+            if ! publish_rollback_bootstrap_file "$original" "$path" restore; then
+                printf 'Failed to restore rollback bootstrap file: %s\n' "$path" >&2
+                status=1
+            fi
+        elif [ -f "$path" ] && ! rm -f "$path"; then
+            printf 'Failed to remove new rollback bootstrap file: %s\n' "$path" >&2
+            status=1
+        fi
+    done
+    return "$status"
+}
+
 sync_installed_scripts_from_version() {
     local version_dir="$1"
     local src_dir="$version_dir/scripts"
-    if [ ! -f "$src_dir/collector-daemon.js" ] || [ ! -f "$src_dir/updater-daemon.js" ] || [ ! -f "$src_dir/loongsuite-pilot.sh" ]; then
+    # Open-source packages strip updater-daemon.js (see deploy/package-opensource.sh).
+    # Match sync_bootstrap_scripts / installer-opensource: require collector + CLI only.
+    if [ ! -f "$src_dir/collector-daemon.js" ] || [ ! -f "$src_dir/loongsuite-pilot.sh" ]; then
         return 1
     fi
 
-    mkdir -p "$BOOTSTRAP_DIR"
-    cp -f "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/collector-daemon.js.tmp"
-    mv -f "$BOOTSTRAP_DIR/collector-daemon.js.tmp" "$BOOTSTRAP_DIR/collector-daemon.js"
-    cp -f "$src_dir/updater-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js.tmp"
-    mv -f "$BOOTSTRAP_DIR/updater-daemon.js.tmp" "$BOOTSTRAP_DIR/updater-daemon.js"
+    local dst
+    for dst in "$BOOTSTRAP_DIR/collector-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js"; do
+        check_rollback_bootstrap_file "$dst" && check_rollback_bootstrap_file "$dst.tmp" || return 1
+    done
 
-    mkdir -p "$(dirname "$LOONGSUITE_PILOT_BIN")"
-    cp -f "$src_dir/loongsuite-pilot.sh" "$LOONGSUITE_PILOT_BIN.tmp"
-    chmod 755 "$LOONGSUITE_PILOT_BIN.tmp"
-    mv -f "$LOONGSUITE_PILOT_BIN.tmp" "$LOONGSUITE_PILOT_BIN"
+    # The rollback caller checks this function in an if condition, so errexit
+    # does not propagate a failed file operation here.
+    mkdir -p "$BOOTSTRAP_DIR" || return 1
+    if [ -f "$src_dir/updater-daemon.js" ]; then
+        publish_rollback_bootstrap_file "$src_dir/updater-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js" sync || return 1
+    else
+        # Drop a stale proprietary updater so it cannot be paired with this collector.
+        rm -f "$BOOTSTRAP_DIR/updater-daemon.js" || return 1
+    fi
+
+    publish_rollback_bootstrap_file "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/collector-daemon.js" sync
 }
 
 process_matches_installed_entry() {
@@ -2078,11 +2149,35 @@ try {
     done
 }
 
+reserve_rollback() {
+    local claim peer owner
+    # Publish an identifiable claim before checking peers. Simultaneous calls
+    # can both decline, but neither can overwrite another call's snapshot.
+    claim=$(mktemp -d "$CACHE_DIR/.rollback-lock.$$.XXXXXX") || return 1
+    for peer in "$CACHE_DIR"/.rollback-lock.*; do
+        [ -d "$peer" ] && [ "$peer" != "$claim" ] || continue
+        owner=${peer##*/.rollback-lock.}
+        owner=${owner%%.*}
+        [[ "$owner" =~ ^[1-9][0-9]*$ ]] || continue
+        if kill -0 "$owner" 2>/dev/null || [ -n "$(ps -p "$owner" -o pid= 2>/dev/null)" ]; then
+            rmdir -- "$claim" 2>/dev/null || true
+            echo "❌ Another rollback is in progress (PID $owner)" >&2
+            return 1
+        fi
+        rmdir -- "$peer" 2>/dev/null || true
+    done
+    printf '%s\n' "$claim"
+}
+
 cmd_rollback() {
     if [ ! -f "$PREVIOUS_FILE" ]; then
         echo "❌ No previous version to roll back to"
         exit 1
     fi
+
+    local rollback_claim
+    rollback_claim=$(reserve_rollback) || exit 1
+    trap "$(printf 'rmdir -- %q 2>/dev/null || true' "$rollback_claim")" EXIT
 
     local prev_dir
     prev_dir=$(cat "$PREVIOUS_FILE" 2>/dev/null | tr -d '[:space:]')
@@ -2094,32 +2189,86 @@ cmd_rollback() {
     local curr_dir=""
     if [ -f "$CURRENT_FILE" ]; then
         curr_dir=$(cat "$CURRENT_FILE" 2>/dev/null | tr -d '[:space:]')
-    fi
-
-    echo "$prev_dir" > "$CURRENT_FILE.tmp"
-    mv -f "$CURRENT_FILE.tmp" "$CURRENT_FILE"
-    if [ -n "$curr_dir" ]; then
-        echo "$curr_dir" > "$PREVIOUS_FILE.tmp"
-        mv -f "$PREVIOUS_FILE.tmp" "$PREVIOUS_FILE"
-    fi
-
-    if ! sync_installed_scripts_from_version "$VERSIONS_DIR/$prev_dir"; then
-        if [ -n "$curr_dir" ]; then
-            echo "$curr_dir" > "$CURRENT_FILE.tmp"
-            mv -f "$CURRENT_FILE.tmp" "$CURRENT_FILE"
-            echo "$prev_dir" > "$PREVIOUS_FILE.tmp"
-            mv -f "$PREVIOUS_FILE.tmp" "$PREVIOUS_FILE"
-            sync_installed_scripts_from_version "$VERSIONS_DIR/$curr_dir" 2>/dev/null || true
-        fi
-        echo "❌ Failed to sync scripts for rollback target: $prev_dir"
+    elif [ -e "$CURRENT_FILE" ] || [ -L "$CURRENT_FILE" ]; then
+        echo "❌ Current version pointer is not a file: $CURRENT_FILE" >&2
         exit 1
     fi
+
+    # Keep the locking launcher in place through bootstrap updates and restart.
+    # An older launcher may not honor the lock, so publish it after those writes.
+    local launcher_source="$VERSIONS_DIR/$prev_dir/scripts/loongsuite-pilot.sh" launcher_stage
+    if ! check_rollback_bootstrap_file "$LOONGSUITE_PILOT_BIN" ||
+        ! check_rollback_bootstrap_file "$LOONGSUITE_PILOT_BIN.tmp"; then
+        echo "❌ Failed to sync scripts for rollback target: $prev_dir" >&2
+        exit 1
+    fi
+    if ! mkdir -p "$(dirname "$LOONGSUITE_PILOT_BIN")" ||
+        ! launcher_stage=$(stage_rollback_bootstrap_file "$launcher_source" "$LOONGSUITE_PILOT_BIN" sync 755); then
+        echo "❌ Failed to stage launcher for rollback target: $prev_dir" >&2
+        exit 1
+    fi
+    trap "$(printf 'rm -f -- %q || true; rmdir -- %q 2>/dev/null || true' "$launcher_stage" "$rollback_claim")" EXIT
+
+    local pointer_dir rollback_error="" retain_backup=""
+    local bootstrap_paths=(
+        "$BOOTSTRAP_DIR/collector-daemon.js"
+        "$BOOTSTRAP_DIR/updater-daemon.js"
+    )
+    if ! pointer_dir=$(mktemp -d "$CACHE_DIR/.rollback-pointers.XXXXXX"); then
+        echo "❌ Failed to stage version pointers for rollback target: $prev_dir" >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$prev_dir" > "$pointer_dir/current" ||
+        { [ -n "$curr_dir" ] && ! { cp -p "$PREVIOUS_FILE" "$pointer_dir/original-previous" &&
+            printf '%s\n' "$curr_dir" > "$pointer_dir/previous"; }; }; then
+        rm -rf "$pointer_dir" || true
+        echo "❌ Failed to stage version pointers for rollback target: $prev_dir" >&2
+        exit 1
+    fi
+
+    if ! snapshot_rollback_bootstrap "$pointer_dir" "${bootstrap_paths[@]}"; then
+        rm -rf "$pointer_dir" || true
+        echo "❌ Failed to sync scripts for rollback target: $prev_dir (could not snapshot bootstrap)" >&2
+        exit 1
+    fi
+    if ! sync_installed_scripts_from_version "$VERSIONS_DIR/$prev_dir"; then
+        rollback_error="Failed to sync scripts for rollback target: $prev_dir"
+    elif [ -n "$curr_dir" ] && ! mv -f "$pointer_dir/previous" "$PREVIOUS_FILE"; then
+        rollback_error="Failed to publish previous version pointer: $curr_dir"
+    elif ! mv -f "$pointer_dir/current" "$CURRENT_FILE"; then
+        rollback_error="Failed to publish current version pointer: $prev_dir"
+        if [ -n "$curr_dir" ] && ! mv -f "$pointer_dir/original-previous" "$PREVIOUS_FILE"; then
+            echo "⚠️  Failed to restore previous version pointer; backup retained at $pointer_dir" >&2
+            retain_backup=1
+        fi
+    fi
+    if [ -n "$rollback_error" ]; then
+        if ! restore_rollback_bootstrap "$pointer_dir" "${bootstrap_paths[@]}"; then
+            echo "⚠️  Failed to restore bootstrap; backups retained at $pointer_dir" >&2
+            retain_backup=1
+        fi
+        if [ -z "$retain_backup" ]; then rm -rf "$pointer_dir" || true; fi
+        echo "❌ $rollback_error"
+        exit 1
+    fi
+    rm -rf "$pointer_dir" || true
 
     cleanup_hermes_for_rollback "$VERSIONS_DIR/$prev_dir"
 
     echo "✅ Rolled back to version: $prev_dir"
     echo "   Restarting service..."
-    cmd_restart
+    # Restart can exit on failure. Finish publishing the launcher for the
+    # committed version, and then return the original restart status.
+    local restart_status
+    set +e
+    (set -e; cmd_restart)
+    restart_status=$?
+    set -e
+    if ! mv -f "$launcher_stage" "$LOONGSUITE_PILOT_BIN"; then
+        echo "❌ Failed to publish launcher for rollback target: $prev_dir (existing launcher retained)" >&2
+        return 1
+    fi
+    return "$restart_status"
 }
 
 # ---- Autostart management (internal) ----

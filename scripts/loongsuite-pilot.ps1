@@ -233,27 +233,92 @@ function Sync-BootstrapScripts {
     if (Test-Path $updaterSrc) { Copy-Item $updaterSrc $BOOTSTRAP_DIR -Force }
 }
 
+function Assert-RollbackBootstrapFile {
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($item -and ($item.PSIsContainer -or $item.LinkType)) {
+        throw "Rollback bootstrap path is not a file: $Path"
+    }
+}
+
+function Save-RollbackBootstrap {
+    param([string]$BackupDir, [string[]]$Paths)
+    for ($i = 0; $i -lt $Paths.Count; $i++) {
+        $path = $Paths[$i]
+        Assert-RollbackBootstrapFile $path
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Copy-Item -LiteralPath $path -Destination (Join-Path $BackupDir "bootstrap-$i") -ErrorAction Stop
+        }
+    }
+}
+
+function Publish-RollbackBootstrapFile {
+    param([string]$Source, [string]$Destination, [string]$Phase)
+    $staged = Join-Path (Split-Path -Parent $Destination) ".rollback-$Phase-$(New-Guid)"
+    try {
+        Copy-Item -LiteralPath $Source -Destination $staged -ErrorAction Stop
+        Move-Item -LiteralPath $staged -Destination $Destination -Force -ErrorAction Stop
+    } finally {
+        if (Test-Path -LiteralPath $staged) {
+            Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Restore-RollbackBootstrap {
+    param([string]$BackupDir, [string[]]$Paths)
+    $restored = $true
+    for ($i = 0; $i -lt $Paths.Count; $i++) {
+        $path = $Paths[$i]
+        $original = Join-Path $BackupDir "bootstrap-$i"
+        try {
+            Assert-RollbackBootstrapFile $path
+            if (Test-Path -LiteralPath $original -PathType Leaf) {
+                Publish-RollbackBootstrapFile $original $path "restore"
+            } elseif (Test-Path -LiteralPath $path -PathType Leaf) {
+                Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+            }
+        } catch {
+            Write-Warning "Failed to restore rollback bootstrap file ${path}: $($_.Exception.Message)"
+            $restored = $false
+        }
+    }
+    return $restored
+}
+
 function Sync-InstalledScriptsFromVersion {
     param([string]$versionDir)
     $srcDir = Join-Path $versionDir "scripts"
-    $required = @("collector-daemon.js", "updater-daemon.js")
-    $optional = @()
-    foreach ($f in $required) {
-        if (-not (Test-Path (Join-Path $srcDir $f))) { return $false }
-    }
+    # Open-source packages strip updater-daemon.js. Require collector only;
+    # treat updater as optional and remove a stale bootstrap copy when absent.
+    $required = @("collector-daemon.js")
+    $optional = @("updater-daemon.js")
+    try {
+        foreach ($f in $required) {
+            if (-not (Test-Path -LiteralPath (Join-Path $srcDir $f) -PathType Leaf)) { return $false }
+        }
+        foreach ($f in $optional + $required) {
+            $dst = Join-Path $BOOTSTRAP_DIR $f
+            Assert-RollbackBootstrapFile $dst
+            Assert-RollbackBootstrapFile "$dst.tmp"
+        }
 
-    if (-not (Test-Path $BOOTSTRAP_DIR)) { New-Item -ItemType Directory -Path $BOOTSTRAP_DIR -Force | Out-Null }
-    foreach ($f in $required) {
-        $tmp = Join-Path $BOOTSTRAP_DIR "$f.tmp"
-        Copy-Item (Join-Path $srcDir $f) $tmp -Force
-        Move-Item $tmp (Join-Path $BOOTSTRAP_DIR $f) -Force
-    }
-    foreach ($f in $optional) {
-        $src = Join-Path $srcDir $f
-        if (-not (Test-Path $src)) { continue }
-        $tmp = Join-Path $BOOTSTRAP_DIR "$f.tmp"
-        Copy-Item $src $tmp -Force
-        Move-Item $tmp (Join-Path $BOOTSTRAP_DIR $f) -Force
+        if (-not (Test-Path -LiteralPath $BOOTSTRAP_DIR)) {
+            New-Item -ItemType Directory -Path $BOOTSTRAP_DIR -Force -ErrorAction Stop | Out-Null
+        }
+        foreach ($f in $optional + $required) {
+            $src = Join-Path $srcDir $f
+            $dst = Join-Path $BOOTSTRAP_DIR $f
+            if (($optional -contains $f) -and -not (Test-Path -LiteralPath $src -PathType Leaf)) {
+                if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Force -ErrorAction Stop }
+                continue
+            }
+            Publish-RollbackBootstrapFile $src $dst "sync"
+        }
+    } catch {
+        # Let Cmd-Rollback restore the bootstrap even on filesystem errors.
+        Write-Warning "Failed to synchronize bootstrap scripts: $($_.Exception.Message)"
+        return $false
     }
     return $true
 }
@@ -1141,6 +1206,48 @@ function Install-CollectorTask {
         -description "LoongSuite Pilot data collector")
 }
 
+function Remove-OptionalUpdaterTask {
+    $launcher = Join-Path $BOOTSTRAP_DIR "updater-launch.vbs"
+    $query = Get-TaskQuery $TASK_NAME_UPDATER
+    if ($query.error) {
+        Write-Warning "Could not check the optional updater task: $($query.error)"
+        return
+    }
+    if (-not $query.exists) {
+        # CIM can report no object for a task that schtasks still sees.
+        if ((Test-Path -LiteralPath $launcher -PathType Leaf) -and
+            (Test-TaskExistsViaSchtasks $TASK_NAME_UPDATER) -eq "yes") {
+            Write-Warning "CIM could not read the optional updater task reported by schtasks"
+        }
+        return
+    }
+    $task = $query.task
+    $actions = @($task.Actions | Where-Object { $_ })
+    if ($actions.Count -ne 1 -or -not $actions[0].Execute -or
+        (Split-Path -Leaf $actions[0].Execute) -ine "wscript.exe" -or
+        [string]$actions[0].Arguments -ine ('"' + $launcher + '"')) {
+        Write-Warning "Existing updater task does not use this Pilot installation's launcher"
+        return
+    }
+    try {
+        if ($task.State -eq "Running") {
+            Stop-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+        }
+        Unregister-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -Confirm:$false -ErrorAction Stop
+    } catch {
+        Write-Warning "Could not remove the optional updater task: $($_.Exception.Message)"
+        return
+    }
+    $remaining = Get-TaskQuery $TASK_NAME_UPDATER
+    if ($remaining.exists -or $remaining.error -or (Test-TaskExistsViaSchtasks $TASK_NAME_UPDATER) -eq "yes") {
+        Write-Warning "Could not verify removal of the optional updater task"
+        return
+    }
+    if (Test-Path -LiteralPath $launcher -PathType Leaf) {
+        Remove-Item -LiteralPath $launcher -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Install-UpdaterTask {
     param([string]$nodeBin)
     $entry = Join-Path $BOOTSTRAP_DIR "updater-daemon.js"
@@ -1341,8 +1448,10 @@ function Cmd-Start {
 # CMD: stop
 # ============================================================
 function Cmd-Stop {
+    param([switch]$SkipUpdaterTask)
     # Stop Task Scheduler tasks
     foreach ($name in @($TASK_NAME_UPDATER, $TASK_NAME_COLLECTOR)) {
+        if ($SkipUpdaterTask -and $name -eq $TASK_NAME_UPDATER) { continue }
         $task = Get-ScheduledTask -TaskName $name -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
         if ($task -and $task.State -eq "Running") {
             Stop-ScheduledTask -TaskName $name -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
@@ -1363,7 +1472,10 @@ function Cmd-Stop {
 # CMD: restart
 # ============================================================
 function Cmd-Restart {
-    Cmd-Stop
+    param([switch]$UpdaterlessRollback)
+    # The optional-task cleanup verifies the action before stopping the updater.
+    if ($UpdaterlessRollback) { Remove-OptionalUpdaterTask }
+    Cmd-Stop -SkipUpdaterTask:$UpdaterlessRollback
     Start-Sleep -Seconds 1
     Cmd-Start
 }
@@ -2311,12 +2423,41 @@ function Remove-HermesPluginForRollback {
 }
 
 function Cmd-Rollback {
-    if (-not (Test-Path $PREVIOUS_FILE)) {
+    if (-not (Test-Path -LiteralPath $PREVIOUS_FILE -PathType Leaf)) {
+        Write-Error "No previous version to roll back to"
+        exit 1
+    }
+    # Publish the claim before reading any other holder or taking a snapshot.
+    $claimName = ".rollback-lock.$PID.$(New-Guid)"
+    $claim = Join-Path $CACHE_DIR $claimName
+    New-Item -ItemType Directory -Path $claim -ErrorAction Stop | Out-Null
+    try {
+        foreach ($peer in (Get-ChildItem -LiteralPath $CACHE_DIR -Directory -Force -Filter ".rollback-lock.*")) {
+            if ($peer.Name -eq $claimName -or $peer.Name -notmatch '^\.rollback-lock\.([1-9][0-9]*)\.') { continue }
+            $holder = [int]$Matches[1]
+            try {
+                $null = Get-Process -Id $holder -ErrorAction Stop
+            } catch {
+                if ($_.FullyQualifiedErrorId -notlike "NoProcessFoundForGivenId,*") { throw }
+                Remove-Item -LiteralPath $peer.FullName -Force -ErrorAction SilentlyContinue
+                continue
+            }
+            throw "Another rollback is in progress (PID $holder)"
+        }
+        Invoke-ReservedRollback
+    } finally {
+        Remove-Item -LiteralPath $claim -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-ReservedRollback {
+    if (-not (Test-Path -LiteralPath $PREVIOUS_FILE -PathType Leaf)) {
         Write-Error "No previous version to roll back to"
         exit 1
     }
 
-    $prevDir = (Get-Content $PREVIOUS_FILE -ErrorAction SilentlyContinue).Trim()
+    $previousContent = Get-Content -LiteralPath $PREVIOUS_FILE -Raw
+    $prevDir = if ($previousContent) { $previousContent.Trim() } else { "" }
     $prevPath = Join-Path $VERSIONS_DIR $prevDir
     if (-not $prevDir -or -not (Test-Path $prevPath)) {
         Write-Error "Previous version directory not found: $prevDir"
@@ -2324,34 +2465,93 @@ function Cmd-Rollback {
     }
 
     $currDir = ""
-    if (Test-Path $CURRENT_FILE) {
-        $currDir = (Get-Content $CURRENT_FILE -ErrorAction SilentlyContinue).Trim()
-    }
-
-    # Swap current/previous pointers
-    Set-Content -Path $CURRENT_FILE -Value $prevDir
-    if ($currDir) {
-        Set-Content -Path $PREVIOUS_FILE -Value $currDir
-    }
-
-    # Sync scripts from the rollback target
-    $ok = Sync-InstalledScriptsFromVersion $prevPath
-    if (-not $ok) {
-        # Revert pointer swap
-        if ($currDir) {
-            Set-Content -Path $CURRENT_FILE -Value $currDir
-            Set-Content -Path $PREVIOUS_FILE -Value $prevDir
-            Sync-InstalledScriptsFromVersion (Join-Path $VERSIONS_DIR $currDir) | Out-Null
+    if (Test-Path -LiteralPath $CURRENT_FILE) {
+        if (-not (Test-Path -LiteralPath $CURRENT_FILE -PathType Leaf)) {
+            Write-Error "Current version pointer is not a file: $CURRENT_FILE"
+            exit 1
         }
-        Write-Error "Failed to sync scripts for rollback target: $prevDir"
+        $currentContent = Get-Content -LiteralPath $CURRENT_FILE -Raw
+        if ($currentContent) { $currDir = $currentContent.Trim() }
+    }
+
+    # Prepare the pointer files before syncing scripts. Keep current and
+    # previous untouched when the target cannot be synchronized.
+    $pointerDir = Join-Path $CACHE_DIR ".rollback-pointers-$(New-Guid)"
+    $currentStage = Join-Path $pointerDir "current"
+    $previousStage = Join-Path $pointerDir "previous"
+    $originalCurrent = Join-Path $pointerDir "original-current"
+    $originalPrevious = Join-Path $pointerDir "original-previous"
+    $bootstrapPaths = @(
+        (Join-Path $BOOTSTRAP_DIR "collector-daemon.js"),
+        (Join-Path $BOOTSTRAP_DIR "updater-daemon.js")
+    )
+    $rollbackError = "Failed to stage version pointers for rollback target: $prevDir"
+    $syncStarted = $false
+    $currentPublishAttempted = $false
+    $previousPublishAttempted = $false
+    $retainBackup = $false
+    try {
+        New-Item -ItemType Directory -Path $pointerDir -ErrorAction Stop | Out-Null
+        Set-Content -LiteralPath $currentStage -Value $prevDir -ErrorAction Stop
+        if (Test-Path -LiteralPath $CURRENT_FILE -PathType Leaf) {
+            Copy-Item -LiteralPath $CURRENT_FILE -Destination $originalCurrent -ErrorAction Stop
+        }
+        if ($currDir) {
+            Copy-Item -LiteralPath $PREVIOUS_FILE -Destination $originalPrevious -ErrorAction Stop
+            Set-Content -LiteralPath $previousStage -Value $currDir -ErrorAction Stop
+        }
+        $rollbackError = "Failed to sync scripts for rollback target: $prevDir"
+        Save-RollbackBootstrap $pointerDir $bootstrapPaths
+        $syncStarted = $true
+        if (-not (Sync-InstalledScriptsFromVersion $prevPath)) { throw $rollbackError }
+        if ($currDir) {
+            $rollbackError = "Failed to publish previous version pointer: $currDir"
+            $previousPublishAttempted = $true
+            Move-Item -LiteralPath $previousStage -Destination $PREVIOUS_FILE -Force -ErrorAction Stop
+        }
+        $rollbackError = "Failed to publish current version pointer: $prevDir"
+        $currentPublishAttempted = $true
+        Move-Item -LiteralPath $currentStage -Destination $CURRENT_FILE -Force -ErrorAction Stop
+    } catch {
+        # Move-Item -Force can delete the destination before a failed move.
+        if ($previousPublishAttempted) {
+            try {
+                Move-Item -LiteralPath $originalPrevious -Destination $PREVIOUS_FILE -Force -ErrorAction Stop
+            } catch {
+                $retainBackup = $true
+                Write-Warning "Failed to restore previous version pointer; backup retained at $pointerDir"
+            }
+        }
+        if ($currentPublishAttempted) {
+            try {
+                if (Test-Path -LiteralPath $originalCurrent -PathType Leaf) {
+                    Move-Item -LiteralPath $originalCurrent -Destination $CURRENT_FILE -Force -ErrorAction Stop
+                } elseif (Test-Path -LiteralPath $CURRENT_FILE -PathType Leaf) {
+                    Remove-Item -LiteralPath $CURRENT_FILE -Force -ErrorAction Stop
+                }
+            } catch {
+                $retainBackup = $true
+                Write-Warning "Failed to restore current version pointer; backup retained at $pointerDir"
+            }
+        }
+        if ($syncStarted -and -not (Restore-RollbackBootstrap $pointerDir $bootstrapPaths)) {
+            $retainBackup = $true
+            Write-Warning "Failed to restore bootstrap; backups retained at $pointerDir"
+        }
+        Write-Error "$rollbackError ($($_.Exception.Message))"
         exit 1
+    } finally {
+        if (-not $retainBackup) {
+            Remove-Item -LiteralPath $pointerDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
     Remove-HermesPluginForRollback $prevPath
 
     Write-Host "Rolled back to version: $prevDir"
     Write-Host "   Restarting service..."
-    Cmd-Restart
+    $updaterless = -not (Test-Path -LiteralPath (Join-Path $BOOTSTRAP_DIR "updater-daemon.js") -PathType Leaf)
+    Cmd-Restart -UpdaterlessRollback:$updaterless
 }
 
 # ============================================================
