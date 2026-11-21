@@ -101,3 +101,23 @@ it('strictly exports the recovered first-call reasoning cancellation once with s
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it('uses the later Stop for an untimed completed turn that follows a witnessed cancellation', async () => {
+  const records = await fixture();
+  const earlier = [
+    records[0], records[1],
+    { type: 'message', role: 'assistant', status: 'incomplete', timestamp: 1500, providerData: { skipRun: true } },
+  ];
+  const later = [
+    { ...records[0], id: 'legacy-after-cancel', timestamp: undefined },
+    { ...records[records.length - 1], id: 'legacy-completion', timestamp: undefined },
+  ];
+  const entries = await buildWorkBuddyEvents([...earlier, ...later], {
+    sessionId: 'two-turn-fixture',
+    hookEvents: [{ eventName: 'Stop', observedAtMs: 1600 }, { eventName: 'Stop', observedAtMs: 2300 }],
+    stopAtMs: 2300,
+  });
+  expect(entries.filter(entry => entry['event.name'] === 'llm.response')
+    .map(entry => [entry['gen_ai.response.finish_reasons'], entry.time_unix_nano]))
+    .toEqual([[['cancelled'], '1500000000'], [['stop'], '2300000000']]);
+});
