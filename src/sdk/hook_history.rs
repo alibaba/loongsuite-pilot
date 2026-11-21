@@ -30,6 +30,10 @@ pub(crate) fn find(agent: &str) -> Option<&'static HookHistoryProfile> {
     PROFILES.iter().find(|profile| profile.agent == agent)
 }
 
+pub(crate) const PRIVACY_POLICY_FIELD: &str = "agent.pilot.hook_history.privacy_policy";
+pub(crate) const NATIVE_SESSION_FIELD: &str = "agent.pilot.hook_history.native_session";
+pub(crate) const TRACE_CHECKED_FIELD: &str = "agent.pilot.hook_history.trace_checked";
+
 impl HookHistoryProfile {
     pub(crate) fn sdk_data(&self, data: &Path) -> PathBuf {
         data.join("state")
@@ -43,6 +47,7 @@ impl HookHistoryProfile {
         capture: Option<bool>,
         exclude: &[String],
         mask: Option<&crate::types::MaskConfig>,
+        upstream_link_ttl_ms: Option<u64>,
     ) -> Value {
         let mut policy = json!({
             "agents": [self.agent],
@@ -55,6 +60,7 @@ impl HookHistoryProfile {
                     "data_dir": data,
                     "capture_message_content": capture,
                     "exclude_workspaces": exclude,
+                    "upstream_link_ttl_ms": upstream_link_ttl_ms,
                 },
             }}}},
         });
@@ -119,6 +125,7 @@ impl HookHistoryProfile {
             crate::utils::DEFAULT_POLL_INTERVAL_MS,
             None,
             &[],
+            None,
             None,
         );
         let plan = Policy::parse(policy, &init)?;

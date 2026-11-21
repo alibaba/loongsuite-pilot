@@ -118,6 +118,10 @@ pub struct PilotHostState {
     pub capture_message_content: Option<bool>,
     #[serde(default)]
     pub exclude_workspaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_link_ttl_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_rule_manifest: Option<Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub codex_rollout_owns_interrupted_turns: bool,
 }
@@ -553,7 +557,17 @@ impl Policy {
                 allowed_roots,
                 max_files: limit("max_files", 512, 16384)?,
                 max_read_bytes: limit("max_read_bytes", 8 * 1024 * 1024, 64 * 1024 * 1024)?,
-                poll_interval_ms: limit("poll_interval_ms", 1000, 300000)? as u64,
+                poll_interval_ms: limit(
+                    "poll_interval_ms",
+                    1000,
+                    if super::hook_history::find(agent).is_some()
+                        && collection.get("pilot_host").is_some()
+                    {
+                        usize::MAX
+                    } else {
+                        300000
+                    },
+                )? as u64,
                 codex_recovery_wakeup_namespace: None,
             };
             if enable_codex_recovery {

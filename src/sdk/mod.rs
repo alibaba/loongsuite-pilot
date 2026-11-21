@@ -1,6 +1,9 @@
 //! Shared collector dynamic-library boundary. See include/pilot_sdk.h.
 pub mod abi;
 mod api;
+pub(crate) fn linked_api() -> &'static abi::PilotApiV2 {
+    &api::API
+}
 pub(crate) mod hook_history;
 pub(crate) mod host_loader;
 mod monitoring;

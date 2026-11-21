@@ -67,6 +67,21 @@ pub fn load_enabled_rules(config: &MaskConfig) -> Vec<CompiledMaskRule> {
 }
 
 pub fn load_mask_plan(config: &MaskConfig) -> MaskPlan {
+    build_mask_plan(config, load_sensitive_rules)
+}
+
+pub(crate) fn mask_plan_from_manifest(
+    config: &MaskConfig,
+    manifest: &Value,
+) -> Result<MaskPlan, String> {
+    let rules = compile_sensitive_rules(manifest)?;
+    Ok(build_mask_plan(config, move || rules))
+}
+
+fn build_mask_plan(
+    config: &MaskConfig,
+    load_rules: impl FnOnce() -> Vec<CompiledMaskRule>,
+) -> MaskPlan {
     let enabled = resolve_enabled_mask_types(config);
     let replacement_mode = config
         .replacement_mode
@@ -79,7 +94,7 @@ pub fn load_mask_plan(config: &MaskConfig) -> MaskPlan {
         };
     }
     let rules = if enabled.iter().any(is_manifest_type) {
-        load_sensitive_rules()
+        load_rules()
             .into_iter()
             .filter(|rule| enabled.contains(rule.mask_type))
             .collect()

@@ -367,6 +367,19 @@ fn run_agent(
             }
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let hook_history_host = super::hook_history::find(&plan.agent).and(plan.pilot_host.as_ref());
+    let upstream = hook_history_host
+        .and_then(|host| host.upstream_link_ttl_ms.map(|ttl| (host, ttl)))
+        .and_then(|(host, ttl)| {
+            let dir = host.data_dir.join("acp-correlate");
+            if let Err(error) = source_access::private_path(&dir) {
+                queue.alarm("SDK_SOURCE_READ", &format!("upstream correlation: {error}"));
+                return None;
+            }
+            roots.push(dir.clone());
+            let linker = crate::core::TraceLinker::new(crate::core::CorrelationStore::new(dir));
+            Some((Arc::new(linker), ttl))
+        });
     if let Some(state) = &plan.pilot_host {
         let agent_roots: &[&str] = match checkpoint_key {
             "codex-transcript" => &[
@@ -468,7 +481,16 @@ fn run_agent(
     });
     let manager = Arc::new(InputManager::new());
     manager.set_state_store(store.clone());
-    manager.set_mask_config(plan.mask.clone());
+    if let Some(manifest) = hook_history_host.and_then(|host| host.mask_rule_manifest.as_ref()) {
+        manager
+            .set_hosted_mask_manifest(plan.mask.clone(), manifest)
+            .map_err(anyhow::Error::msg)?;
+    } else {
+        manager.set_mask_config(plan.mask.clone());
+    }
+    if let Some((linker, _)) = &upstream {
+        manager.set_trace_linker(linker.clone());
+    }
     if let Some(state) = &plan.pilot_host {
         manager.set_workspace_policy(
             crate::core::WorkspacePolicy::new(
@@ -496,6 +518,9 @@ fn run_agent(
                 ..Default::default()
             },
         )]));
+    }
+    if hook_history_host.is_some() {
+        manager.set_sdk_hook_history_privacy(&plan.agent);
     }
     manager.set_configured_user_id(init.user_id.clone());
     manager.set_flusher(flusher);
@@ -757,7 +782,18 @@ fn run_agent(
     let _ = ready.send(());
     let mut started = false;
     let mut next_start = std::time::Instant::now();
+    let mut last_prune = next_start;
     while !cancel.load(Ordering::SeqCst) && !global.load(Ordering::SeqCst) {
+        if let Some((linker, ttl)) = &upstream {
+            if last_prune.elapsed() >= std::time::Duration::from_secs(3600) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                linker.prune_idle(now.saturating_sub(u128::from(*ttl)));
+                last_prune = std::time::Instant::now();
+            }
+        }
         let available = plan
             .sources
             .iter()

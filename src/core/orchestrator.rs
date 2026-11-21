@@ -40,7 +40,6 @@ use crate::inputs::kiro_cli_log::KiroCliLogInput;
 use crate::inputs::kiro_cli_session::KiroCliSessionInput;
 use crate::inputs::mimo_code_log::MimoCodeLogInput;
 use crate::inputs::openclaw_plugin::{ensure_openclaw_plugin_log_dir, OpenClawPluginInput};
-use crate::inputs::opencode_log::OpenCodeLogInput;
 use crate::inputs::pi_coding_agent_log::{ensure_pi_coding_agent_log_dir, PiCodingAgentLogInput};
 use crate::inputs::qoder_cn::{QoderCnInput, QoderCnOptions};
 use crate::inputs::qoder_cn_sqlite::{QoderCnSqliteInput, QoderCnSqliteOptions};
@@ -499,7 +498,7 @@ impl Orchestrator {
         } else {
             (None, None)
         };
-        let mut detection = self.register_all_inputs(&state_store).await;
+        let mut detection = self.register_all_inputs(&pilot_dir, &state_store).await;
         if self.standalone {
             self.register_sdk_codex(
                 &mut detection,
@@ -517,12 +516,6 @@ impl Orchestrator {
             );
         } else if let Some(config) = &interceptor_config {
             self.start_qoder_hooks(&pilot_dir, config, verdicts).await;
-        }
-        for profile in crate::sdk::hook_history::PROFILES {
-            if self.uses_sdk_hook_history(profile.agent) {
-                self.register_sdk_hook_history(&mut detection, &pilot_dir, &state_store, profile)
-                    .await;
-            }
         }
         let deploy_entries = deployment
             .as_ref()
@@ -1868,6 +1861,7 @@ impl Orchestrator {
 
     async fn register_all_inputs(
         self: &Arc<Self>,
+        pilot_dir: &str,
         state_store: &Arc<StateStore>,
     ) -> Vec<Arc<dyn AgentDetection>> {
         let mut entries = Vec::new();
@@ -2141,6 +2135,10 @@ impl Orchestrator {
         )
         .await;
         self.register_remaining(&mut entries, state_store).await;
+        for profile in crate::sdk::hook_history::PROFILES {
+            self.register_sdk_hook_history(&mut entries, pilot_dir, state_store, profile)
+                .await;
+        }
         entries
     }
 
@@ -2709,25 +2707,6 @@ impl Orchestrator {
             1,
             None,
         );
-        let opencode = self.data_dir_join("logs/opencode");
-        ensure_dir(&opencode).await;
-        if !self.uses_sdk_hook_history("opencode") {
-            self.attach_hook(
-                entries,
-                "opencode-log",
-                "opencode",
-                OpenCodeLogInput::new(self.hook_opts_dir(state_store, &opencode, "opencode-log")),
-                vec![opencode.clone()],
-                {
-                    let opencode = opencode.clone();
-                    move || {
-                        let opencode = opencode.clone();
-                        async move { directory_exists(&opencode).await }
-                    }
-                },
-            )
-            .await;
-        }
         let pi_dir = self.data_dir_join("logs/pi-coding-agent");
         ensure_pi_coding_agent_log_dir(&pi_dir).await;
         let bits = Arc::clone(&self.bits);
@@ -2962,18 +2941,6 @@ impl Orchestrator {
         }
     }
 
-    fn uses_sdk_hook_history(&self, agent: &str) -> bool {
-        crate::sdk::hook_history::find(agent).is_some()
-            && self.standalone
-            && !self.config.upstream_link.enabled
-            && !(self.inputs_have_multimodal()
-                && self
-                    .config
-                    .agents
-                    .get(agent)
-                    .is_some_and(|config| is_agent_multimodal_enabled(Some(agent), config)))
-    }
-
     async fn register_sdk_hook_history(
         &self,
         entries: &mut Vec<Arc<dyn AgentDetection>>,
@@ -2988,15 +2955,18 @@ impl Orchestrator {
         let data = std::path::Path::new(&self.data_dir);
         let sdk_data = profile.sdk_data(data);
         let config = self.config.agents.get(agent);
+        let poll = crate::utils::resolve_poll_interval_ms(
+            self.poll(listener),
+            crate::utils::DEFAULT_POLL_INTERVAL_MS,
+        );
         let init = serde_json::json!({
             "data_dir": sdk_data,
             "resource_dir": pilot_dir,
             "user_id": self.config.user_id,
         });
-        let policy = profile.policy(
+        let mut policy = profile.policy(
             data,
-            self.poll(listener)
-                .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS),
+            poll.max(1),
             config.and_then(|config| config.capture_message_content),
             self.config
                 .privacy
@@ -3004,24 +2974,36 @@ impl Orchestrator {
                 .map(|privacy| privacy.exclude_workspaces.as_slice())
                 .unwrap_or_default(),
             Some(&self.config.mask),
+            self.config
+                .upstream_link
+                .enabled
+                .then_some(self.config.upstream_link.ttl_ms),
         );
-        let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
+        policy["hcd"]["agent_configs"][agent]["collection"]["pilot_host"]["mask_rule_manifest"] =
+            self.inputs.mask_rule_manifest();
+        let sdk = super::sdk_agent::SdkAgent::new(
             listener,
             init,
             policy,
             &self.inputs,
             sdk_data,
             state_store,
-        ));
+        )
+        .with_linked_sdk(!self.standalone);
         let live = live_from_parts(
             listener,
             agent,
             "sdk-hosted",
-            sdk,
+            Arc::new(sdk),
             |input| input.running(),
             |input| Box::pin(async move { input.start().await }),
             |input| Box::pin(async move { input.stop().await }),
         );
+        let source = history.clone();
+        live.set_runtime_probe(move || crate::inputs::base::InputRuntimeInfo {
+            poll_interval_ms: poll,
+            source_paths: vec![source.clone()],
+        });
         self.inputs.register_input(Arc::clone(&live));
         self.push_detection(
             entries,
@@ -3348,10 +3330,9 @@ impl Orchestrator {
         let stop_manager = Arc::clone(&self.inputs);
         let stop_id = id.clone();
         let poll = self.poll(listener).unwrap_or(300_000);
-        let propagate_start_error = self.standalone
-            && crate::sdk::hook_history::PROFILES
-                .iter()
-                .any(|profile| profile.listener == listener);
+        let propagate_start_error = crate::sdk::hook_history::PROFILES
+            .iter()
+            .any(|profile| profile.listener == listener);
         entries.push(Arc::new(ClosureDetection {
             id: id.clone(),
             type_name: live.collection_method.clone(),
@@ -3405,36 +3386,14 @@ impl Orchestrator {
         Av: std::future::Future<Output = bool> + Send + 'static,
     {
         let input = Arc::new(input);
-        let handoff = crate::sdk::hook_history::find(agent)
-            .filter(|profile| self.standalone && profile.listener == listener)
-            .map(|profile| {
-                let data = std::path::PathBuf::from(&self.data_dir);
-                let state = self.state_store.lock().expect("state").clone();
-                let manager = Arc::downgrade(&self.inputs);
-                let resource_dir = self.runtime_options.resource_dir.clone();
-                let user_id = self.config.user_id.clone();
-                Arc::new(LegacyHookHistory {
-                    profile,
-                    data,
-                    state,
-                    manager,
-                    resource_dir,
-                    user_id,
-                })
-            });
         let live = live_from_parts(
             listener,
             agent,
             &input.collection_method_name(),
             Arc::clone(&input),
             |input| input.surface_running(),
-            move |input| {
-                let handoff = handoff.clone();
+            |input| {
                 Box::pin(async move {
-                    let _sdk_lock = match handoff {
-                        Some(history) => history.take_ownership().await?,
-                        None => None,
-                    };
                     input.surface_start().await;
                     Ok(())
                 })
@@ -3907,7 +3866,6 @@ hook_surface!(CursorHookInput);
 hook_surface!(ClaudeCodeLogInput);
 hook_surface!(GrokBuildLogInput);
 hook_surface!(KiroCliLogInput);
-hook_surface!(OpenCodeLogInput);
 hook_surface!(PiCodingAgentLogInput);
 hook_surface!(MimoCodeLogInput);
 hook_surface!(QwenCodeCliLogInput);
@@ -3939,61 +3897,6 @@ impl HookSurface for DshLogInput {
         listener: impl Fn(&InputRuntimeDelta) + Send + Sync + 'static,
     ) {
         self.on_runtime_delta(listener);
-    }
-}
-
-struct LegacyHookHistory {
-    profile: &'static crate::sdk::hook_history::HookHistoryProfile,
-    data: std::path::PathBuf,
-    state: Option<Arc<StateStore>>,
-    manager: std::sync::Weak<InputManager>,
-    resource_dir: Option<String>,
-    user_id: String,
-}
-
-impl LegacyHookHistory {
-    async fn take_ownership(&self) -> Result<Option<std::fs::File>, String> {
-        use crate::sdk::hook_history::LegacyHistoryOwnership;
-        let state = self.state.as_ref().ok_or("Pilot checkpoint unavailable")?;
-        if let LegacyHistoryOwnership::Ready(lock) = self
-            .profile
-            .export_checkpoint(&self.data, state)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            return Ok(lock);
-        }
-        let manager = self.manager.upgrade().ok_or("Pilot output stopped")?;
-        let resource_dir = match &self.resource_dir {
-            Some(path) => path.clone(),
-            None => resolve_pilot_dir(&self.data.to_string_lossy(), &[])?,
-        };
-        let sdk_data = self.profile.sdk_data(&self.data);
-        let init = serde_json::json!({
-            "data_dir": sdk_data, "resource_dir": resource_dir, "user_id": self.user_id,
-        });
-        // A source-free host uses the normal output acknowledgements to
-        // drain committed events without advancing or re-reading the source.
-        let sdk = super::sdk_agent::SdkAgent::drain_history(
-            self.profile,
-            init,
-            &manager,
-            sdk_data,
-            state,
-        );
-        sdk.start().await?;
-        sdk.stop_with_result().await?;
-        match self
-            .profile
-            .export_checkpoint(&self.data, state)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            LegacyHistoryOwnership::Ready(lock) => Ok(lock),
-            LegacyHistoryOwnership::Pending => {
-                Err("SDK activity remains queued; legacy history not started".into())
-            }
-        }
     }
 }
 
@@ -5484,7 +5387,9 @@ mod tests {
             let registration = Arc::new(Orchestrator::new(registration_config));
             let registration_store =
                 Arc::new(StateStore::new(home.join("registration-state.json")));
-            let entries = registration.register_all_inputs(&registration_store).await;
+            let entries = registration
+                .register_all_inputs(&home.to_string_lossy(), &registration_store)
+                .await;
             let find = |id: &str| entries.iter().find(|entry| entry.id() == id).unwrap();
             let doubao = find("doubao-work");
             assert_eq!(
