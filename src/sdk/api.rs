@@ -747,7 +747,7 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
     }
 }
 
-static API: PilotApiV2 = PilotApiV2 {
+pub(super) static API: PilotApiV2 = PilotApiV2 {
     abi_version: ABI_VERSION,
     struct_size: std::mem::size_of::<PilotApiV2>() as u32,
     capabilities: CAP_ACTIVITY_V2 | CAP_HOOK_UDP | CAP_MONITORING,

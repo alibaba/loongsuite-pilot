@@ -70,7 +70,7 @@ Pilot 主要帮助回答这些问题：
 | Kiro CLI | Hook / session 轮询 | No | No | No | No |
 | MiMo Code | 插件注入 | No | No | No | No |
 | OpenClaw | 插件注入 | No | No | No | No |
-| OpenCode | 插件注入 | No | No | No | No |
+| OpenCode | 插件注入（macOS arm64，1.19.6 和 2.3.2） | Yes | Yes | Yes | Yes |
 | Pi Coding Agent | Extension 注入 | No | No | No | No |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | No | No | No | No |

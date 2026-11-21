@@ -40,7 +40,6 @@ use crate::inputs::kiro_cli_log::KiroCliLogInput;
 use crate::inputs::kiro_cli_session::KiroCliSessionInput;
 use crate::inputs::mimo_code_log::MimoCodeLogInput;
 use crate::inputs::openclaw_plugin::{ensure_openclaw_plugin_log_dir, OpenClawPluginInput};
-use crate::inputs::opencode_log::OpenCodeLogInput;
 use crate::inputs::pi_coding_agent_log::{ensure_pi_coding_agent_log_dir, PiCodingAgentLogInput};
 use crate::inputs::qoder_cn::{QoderCnInput, QoderCnOptions};
 use crate::inputs::qoder_cn_sqlite::{QoderCnSqliteInput, QoderCnSqliteOptions};
@@ -499,7 +498,7 @@ impl Orchestrator {
         } else {
             (None, None)
         };
-        let mut detection = self.register_all_inputs(&state_store).await;
+        let mut detection = self.register_all_inputs(&pilot_dir, &state_store).await;
         if self.standalone {
             self.register_sdk_codex(
                 &mut detection,
@@ -1862,6 +1861,7 @@ impl Orchestrator {
 
     async fn register_all_inputs(
         self: &Arc<Self>,
+        pilot_dir: &str,
         state_store: &Arc<StateStore>,
     ) -> Vec<Arc<dyn AgentDetection>> {
         let mut entries = Vec::new();
@@ -2135,6 +2135,10 @@ impl Orchestrator {
         )
         .await;
         self.register_remaining(&mut entries, state_store).await;
+        for profile in crate::sdk::hook_history::PROFILES {
+            self.register_sdk_hook_history(&mut entries, pilot_dir, state_store, profile)
+                .await;
+        }
         entries
     }
 
@@ -2703,23 +2707,6 @@ impl Orchestrator {
             1,
             None,
         );
-        let opencode = self.data_dir_join("logs/opencode");
-        ensure_dir(&opencode).await;
-        self.attach_hook(
-            entries,
-            "opencode-log",
-            "opencode",
-            OpenCodeLogInput::new(self.hook_opts_dir(state_store, &opencode, "opencode-log")),
-            vec![opencode.clone()],
-            {
-                let opencode = opencode.clone();
-                move || {
-                    let opencode = opencode.clone();
-                    async move { directory_exists(&opencode).await }
-                }
-            },
-        )
-        .await;
         let pi_dir = self.data_dir_join("logs/pi-coding-agent");
         ensure_pi_coding_agent_log_dir(&pi_dir).await;
         let bits = Arc::clone(&self.bits);
@@ -2952,6 +2939,83 @@ impl Orchestrator {
             verdicts.start_checkpoint_loop(interceptor::TOOL_VERDICT_CHECKPOINT_INTERVAL_MS);
             *self.qoder_hooks.lock().expect("Qoder Hook SDK") = Some(sdk);
         }
+    }
+
+    async fn register_sdk_hook_history(
+        &self,
+        entries: &mut Vec<Arc<dyn AgentDetection>>,
+        pilot_dir: &str,
+        state_store: &Arc<StateStore>,
+        profile: &crate::sdk::hook_history::HookHistoryProfile,
+    ) {
+        let history = self.data_dir_join(profile.history);
+        ensure_dir(&history).await;
+        let agent = profile.agent;
+        let listener = profile.listener;
+        let data = std::path::Path::new(&self.data_dir);
+        let sdk_data = profile.sdk_data(data);
+        let config = self.config.agents.get(agent);
+        let poll = crate::utils::resolve_poll_interval_ms(
+            self.poll(listener),
+            crate::utils::DEFAULT_POLL_INTERVAL_MS,
+        );
+        let init = serde_json::json!({
+            "data_dir": sdk_data,
+            "resource_dir": pilot_dir,
+            "user_id": self.config.user_id,
+        });
+        let mut policy = profile.policy(
+            data,
+            poll.max(1),
+            config.and_then(|config| config.capture_message_content),
+            self.config
+                .privacy
+                .as_ref()
+                .map(|privacy| privacy.exclude_workspaces.as_slice())
+                .unwrap_or_default(),
+            Some(&self.config.mask),
+            self.config
+                .upstream_link
+                .enabled
+                .then_some(self.config.upstream_link.ttl_ms),
+        );
+        policy["hcd"]["agent_configs"][agent]["collection"]["pilot_host"]["mask_rule_manifest"] =
+            self.inputs.mask_rule_manifest();
+        let sdk = super::sdk_agent::SdkAgent::new(
+            listener,
+            init,
+            policy,
+            &self.inputs,
+            sdk_data,
+            state_store,
+        )
+        .with_linked_sdk(!self.standalone);
+        let live = live_from_parts(
+            listener,
+            agent,
+            "sdk-hosted",
+            Arc::new(sdk),
+            |input| input.running(),
+            |input| Box::pin(async move { input.start().await }),
+            |input| Box::pin(async move { input.stop().await }),
+        );
+        let source = history.clone();
+        live.set_runtime_probe(move || crate::inputs::base::InputRuntimeInfo {
+            poll_interval_ms: poll,
+            source_paths: vec![source.clone()],
+        });
+        self.inputs.register_input(Arc::clone(&live));
+        self.push_detection(
+            entries,
+            live,
+            vec![history.clone()],
+            move || {
+                let history = history.clone();
+                async move { directory_exists(&history).await }
+            },
+            1,
+            None,
+        );
     }
 
     fn register_sdk_qoder(
@@ -3266,6 +3330,9 @@ impl Orchestrator {
         let stop_manager = Arc::clone(&self.inputs);
         let stop_id = id.clone();
         let poll = self.poll(listener).unwrap_or(300_000);
+        let propagate_start_error = crate::sdk::hook_history::PROFILES
+            .iter()
+            .any(|profile| profile.listener == listener);
         entries.push(Arc::new(ClosureDetection {
             id: id.clone(),
             type_name: live.collection_method.clone(),
@@ -3286,7 +3353,10 @@ impl Orchestrator {
                 let manager = Arc::clone(&manager);
                 let id = id.clone();
                 Box::pin(async move {
-                    manager.start_input(&id).await;
+                    let result = manager.start_input_checked(&id).await;
+                    if propagate_start_error {
+                        result.map_err(anyhow::Error::msg)?;
+                    }
                     Ok(())
                 })
             }),
@@ -3796,7 +3866,6 @@ hook_surface!(CursorHookInput);
 hook_surface!(ClaudeCodeLogInput);
 hook_surface!(GrokBuildLogInput);
 hook_surface!(KiroCliLogInput);
-hook_surface!(OpenCodeLogInput);
 hook_surface!(PiCodingAgentLogInput);
 hook_surface!(MimoCodeLogInput);
 hook_surface!(QwenCodeCliLogInput);
@@ -5318,7 +5387,9 @@ mod tests {
             let registration = Arc::new(Orchestrator::new(registration_config));
             let registration_store =
                 Arc::new(StateStore::new(home.join("registration-state.json")));
-            let entries = registration.register_all_inputs(&registration_store).await;
+            let entries = registration
+                .register_all_inputs(&home.to_string_lossy(), &registration_store)
+                .await;
             let find = |id: &str| entries.iter().find(|entry| entry.id() == id).unwrap();
             let doubao = find("doubao-work");
             assert_eq!(

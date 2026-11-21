@@ -118,11 +118,18 @@ pub struct PilotHostState {
     pub capture_message_content: Option<bool>,
     #[serde(default)]
     pub exclude_workspaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_link_ttl_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_rule_manifest: Option<Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub codex_rollout_owns_interrupted_turns: bool,
 }
 impl AgentPlan {
     pub(super) fn checkpoint_key(&self) -> &'static str {
+        if let Some(profile) = super::hook_history::find(&self.agent) {
+            return profile.listener;
+        }
         match self.profile.as_str() {
             "codex_rollout_v1" => "codex-transcript",
             "codex_aborted_turn_v1" => "codex-aborted-turn",
@@ -320,7 +327,7 @@ impl Policy {
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("agent name must be a string"))?;
             anyhow::ensure!(
-                matches!(agent, "qoder" | "codex"),
+                matches!(agent, "qoder" | "codex") || super::hook_history::find(agent).is_some(),
                 "unsupported SDK agent: {agent}"
             );
             anyhow::ensure!(seen.insert(agent), "duplicate agent");
@@ -361,7 +368,7 @@ impl Policy {
                     (agent, profile),
                     ("qoder", "qoder_trace_v1")
                         | ("codex", "codex_rollout_v1" | "codex_aborted_turn_v1")
-                ),
+                ) || super::hook_history::find(agent).is_some_and(|item| item.profile == profile),
                 "unsupported agent/profile: {agent}/{profile}"
             );
             let roots = collection
@@ -458,6 +465,12 @@ impl Policy {
                     path: resolved,
                 });
             }
+            if super::hook_history::find(agent).is_some() {
+                anyhow::ensure!(
+                    parsed.len() == 1 && parsed[0].kind == "hook_jsonl",
+                    "this profile requires exactly one hook_jsonl source"
+                );
+            }
             if agent == "codex" {
                 anyhow::ensure!(
                     parsed.iter().all(|source| source.kind == "transcript") && parsed.len() == 1,
@@ -544,7 +557,17 @@ impl Policy {
                 allowed_roots,
                 max_files: limit("max_files", 512, 16384)?,
                 max_read_bytes: limit("max_read_bytes", 8 * 1024 * 1024, 64 * 1024 * 1024)?,
-                poll_interval_ms: limit("poll_interval_ms", 1000, 300000)? as u64,
+                poll_interval_ms: limit(
+                    "poll_interval_ms",
+                    1000,
+                    if super::hook_history::find(agent).is_some()
+                        && collection.get("pilot_host").is_some()
+                    {
+                        usize::MAX
+                    } else {
+                        300000
+                    },
+                )? as u64,
                 codex_recovery_wakeup_namespace: None,
             };
             if enable_codex_recovery {

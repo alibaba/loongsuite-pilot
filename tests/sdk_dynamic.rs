@@ -279,6 +279,178 @@ impl Drop for Host {
 fn empty_policy() -> Value {
     json!({"version":"original","agents":[],"hcd":{"agent_configs":{}}})
 }
+#[test]
+fn opencode_profile_delivers_and_resumes_existing_plugin_events() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let data = root.join("instance");
+    let policy = json!({"agents":["opencode"],"hcd":{"agent_configs":{"opencode":{"collection":{
+        "enabled":true,"profile":"opencode_plugin_v1","allowed_roots":[history],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100}
+    }}}}, "sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}});
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("opencode-{day}.jsonl"));
+    std::fs::File::create(&log).unwrap();
+    let append = |id: &str| {
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(&log).unwrap(),
+            "{}",
+            json!({"event.id": id, "event.name":"llm.response",
+                "gen_ai.agent.type":"opencode","gen_ai.session.id":"sample","gen_ai.turn.id":"turn",
+                "gen_ai.step.id":"turn:s1","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":20,
+                "time_unix_nano":"1780000000000000000","observed_time_unix_nano":"1780000000000000000"})
+        ).unwrap();
+    };
+    let ctx = Box::<Context>::default();
+    ctx.retry.store(true, Ordering::SeqCst);
+    let mut host = Host::start(&data, policy.clone(), ctx);
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    append("sample-first");
+    until(|| host.ctx.rows.lock().unwrap().len() >= 2);
+    {
+        let rows = host.ctx.rows.lock().unwrap();
+        assert_eq!(rows[0], rows[1]);
+        let row: Value = serde_json::from_slice(&rows[0]).unwrap();
+        assert_eq!(row["event.id"], "sample-first");
+        assert_eq!(row["gen_ai.usage.input_tokens"], 100);
+    }
+    host.ctx.retry.store(false, Ordering::SeqCst);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| resumed.snapshot()["agents"][0]["status"]["state"] == "running");
+    append("sample-second");
+    until(|| {
+        resumed.ctx.rows.lock().unwrap().iter().any(|row| {
+            serde_json::from_slice::<Value>(row).is_ok_and(|row| row["event.id"] == "sample-second")
+        })
+    });
+    assert!(resumed.ctx.rows.lock().unwrap().iter().all(|row| {
+        serde_json::from_slice::<Value>(row).is_ok_and(|row| row["event.id"] != "sample-first")
+    }));
+    resumed.stop();
+}
+
+#[test]
+fn opencode_hosted_mask_is_applied_before_activity_is_queued() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let data = root.join("instance");
+    let mask = json!({"mode":"custom","types":["apiKey"],"replacementMode":"placeholder"});
+    let manifest = json!({"version":1,"rules":[{
+        "id":"local-sentinel","type":"apiKey","kind":"regex","replacement":"[LOCAL_MASKED]",
+        "prefilter":["private-fixture-"],"pattern":"private-fixture-[0-9]+"
+    }]});
+    let policy = json!({"agents":["opencode"],"hcd":{"agent_configs":{"opencode":{"collection":{
+        "enabled":true,"profile":"opencode_plugin_v1","allowed_roots":[root],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":25},
+        "pilot_host":{"data_dir":root,"mask_rule_manifest":manifest}
+    }}}}, "sdk_options":{"mask":mask,"delivery":{"flush_interval_ms":10}}});
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("opencode-{day}.jsonl"));
+    std::fs::File::create(&log).unwrap();
+    let ctx = Box::<Context>::default();
+    ctx.retry.store(true, Ordering::SeqCst);
+    let mut host = Host::start(&data, policy, ctx);
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    let text = "private-fixture-654321";
+    let entry = json!({"event.id":"mask-fixture","event.name":"llm.response",
+        "gen_ai.agent.type":"opencode","gen_ai.session.id":"mask-session","gen_ai.turn.id":"mask-turn",
+        "gen_ai.output.messages":[{"role":"assistant","parts":[{"type":"text","content":text}]}],
+        "time_unix_nano":"1780000000000000000"});
+    std::fs::write(&log, format!("{entry}\n")).unwrap();
+    until(|| !host.ctx.rows.lock().unwrap().is_empty());
+    let db = rusqlite::Connection::open_with_flags(
+        data.join("outbox/delivery.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let payload: Vec<u8> = db
+        .query_row("SELECT payload FROM event", [], |row| row.get(0))
+        .unwrap();
+    let stored = String::from_utf8(payload.clone()).unwrap();
+    assert!(stored.contains("[LOCAL_MASKED]"), "{stored}");
+    assert!(!stored.contains(text));
+    assert_eq!(host.ctx.rows.lock().unwrap()[0], payload);
+    host.ctx.retry.store(false, Ordering::SeqCst);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+}
+
+#[test]
+fn opencode_history_advances_past_a_record_larger_than_the_poll_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let data = root.join("instance");
+    let policy = json!({"agents":["opencode"],"hcd":{"agent_configs":{"opencode":{"collection":{
+        "enabled":true,"profile":"opencode_plugin_v1","allowed_roots":[history],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100,"max_read_bytes":1024}
+    }}}}, "sdk_options":{"delivery":{"flush_interval_ms":10}}});
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("opencode-{day}.jsonl"));
+    std::fs::File::create(&log).unwrap();
+    let row = |id: &str, padding: usize| {
+        json!({"event.id":id, "event.name":"llm.response",
+            "gen_ai.agent.type":"opencode", "gen_ai.session.id":"large-line-session",
+            "gen_ai.turn.id":"turn", "gen_ai.step.id":"turn:s1",
+            "gen_ai.usage.input_tokens":10, "time_unix_nano":"1780000000000000000",
+            "source_padding":"x".repeat(padding)})
+    };
+    let ids = |host: &Host| {
+        host.ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|raw| {
+                let row: Value = serde_json::from_slice(raw).unwrap();
+                assert_eq!(row["gen_ai.usage.input_tokens"], 10);
+                row["event.id"].as_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    std::fs::write(
+        &log,
+        format!("{}\n{}\n", row("long", 2048), row("short", 0)),
+    )
+    .unwrap();
+    until(|| ids(&host).len() >= 2);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    assert_eq!(ids(&host), ["long", "short"]);
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| resumed.snapshot()["agents"][0]["status"]["state"] == "running");
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(log).unwrap(),
+        "{}",
+        row("next", 0)
+    )
+    .unwrap();
+    until(|| !ids(&resumed).is_empty());
+    resumed.stop();
+    assert_eq!(ids(&resumed), ["next"]);
+}
+
 fn qoder_policy(source: &Path) -> Value {
     json!({"version":"qoder-v1","agents":["qoder"],"hcd":{"agent_configs":{"qoder":{"collection":{"enabled":true,"profile":"qoder_trace_v1","allowed_roots":[source],"sources":[{"id":"hook","type":"hook_jsonl","path":source}],"limits":{"poll_interval_ms":100}}}}},"sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}})
 }

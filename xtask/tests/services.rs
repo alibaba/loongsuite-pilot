@@ -160,7 +160,10 @@ fn native_identity_checks_real_processes_without_current_pointer_dependency() {
 mod unix {
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, Output, Stdio};
+    #[cfg(target_os = "linux")]
+    use std::process::Child;
+    use std::process::{Command, Output, Stdio};
+    #[cfg(target_os = "linux")]
     use std::time::{Duration, Instant};
 
     struct Fixture {
@@ -243,6 +246,7 @@ mod unix {
                 .unwrap()
         }
 
+        #[cfg(target_os = "linux")]
         fn spawn(&self, data: &Path, args: &[&str]) -> Process {
             let log = self.home.join(format!("process-{}.jsonl", uuid_tag()));
             let mut command = Command::new(&self.binary);
@@ -272,6 +276,7 @@ mod unix {
     // Linux may briefly retain a writer after copying a fixture executable.
     // Retry only ETXTBSY; permissions, missing files, and all other errors are
     // returned immediately. The fixture's process readiness budget is unchanged.
+    #[cfg(target_os = "linux")]
     fn spawn_with_writer_retry(command: &mut Command, deadline: Instant) -> std::io::Result<Child> {
         loop {
             match command.spawn() {
@@ -326,6 +331,7 @@ mod unix {
         );
     }
 
+    #[cfg(target_os = "linux")]
     fn uuid_tag() -> u128 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -333,7 +339,9 @@ mod unix {
             .as_nanos()
     }
 
+    #[cfg(target_os = "linux")]
     struct Process(Child);
+    #[cfg(target_os = "linux")]
     impl Drop for Process {
         fn drop(&mut self) {
             let _ = self.0.kill();

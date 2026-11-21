@@ -148,7 +148,9 @@ async fn actual_factory_cases(home: &Path) {
             }));
             jsonl.start().await.unwrap();
             orchestrator.inputs.set_flusher(jsonl.clone());
-            let detections = orchestrator.register_all_inputs(&store).await;
+            let detections = orchestrator
+                .register_all_inputs(&root.to_string_lossy(), &store)
+                .await;
             assert!(detections.iter().any(|d| d.id() == "qoder-trace"));
             orchestrator.inputs.start_input("qoder-trace").await;
             tokio::time::timeout(Duration::from_secs(3), async {
