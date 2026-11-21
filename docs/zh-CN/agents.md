@@ -105,6 +105,7 @@ Provider 和 Token；事件标记为 `agent_turn` 观察范围，并省略缺失
 | Qoder Work CN | `qoder-work-cn` | Hook 和本地数据源。 |
 | Qwen Code CLI | `qwen-code-cli` | Hook 集成；Stop 时解析 qwen-code transcript JSONL。 |
 | Qwen Work CN | `qwen-work-cn` | Hook 和本地数据源。 |
+| TRAE CN | `trae-cn` | Pilot 在 `~/.trae-cn/hooks.json` 注册用户级 IDE Hook，并在能将本地 Hub 记录关联到模型响应时上报 Token 用量。设置 `agents.trae-cn.captureMessageContent=false` 可关闭正文采集。 |
 | Wukong | `wukong` | 运行时自动发现并通过本地 `wukong-cli` 进行 CLI API 轮询；它不是 `agents.d` 安装选择项。 |
 | WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 和 Windows 11 WorkBuddy Desktop 5.3.5.0 验证。 |
 | 豆包工作 | `doubao-work` | 实验性 macOS/Windows 客户端轮次元数据和任务 Trace；支持本地 TOOL Span 和所选技能上下文。原生执行与首输出覆盖取决于客户端证据；模型名、Token 和完整云端推理仍不可得。见[支持范围与配置](doubao-work.md)。 |

@@ -75,6 +75,7 @@ Pilot is designed to answer practical questions:
 | Qoder Work CN | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
 | Qwen Code CLI | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Qwen Work CN  | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
+| TRAE CN       | Hook + local session data | Yes          | Yes        | Yes         | Yes                       |
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
 | [Doubao Work (macOS/Windows, experimental)](docs/doubao-work.md) | Read-only logs + execution metadata | Client turns, local tools + native sandbox executions | Metadata only | No | No |

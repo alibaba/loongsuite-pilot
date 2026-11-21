@@ -131,6 +131,7 @@ type differences are called out in the notes.
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |
 | Qwen Code CLI | `qwen-code-cli` | Hook integration; parses qwen-code transcript JSONL on Stop. |
 | Qwen Work CN | `qwen-work-cn` | Hook and local data sources. |
+| TRAE CN | `trae-cn` | Pilot registers user-level IDE Hooks in `~/.trae-cn/hooks.json`. Pilot reports token usage when it can match local Hub records to model responses. Set `agents.trae-cn.captureMessageContent=false` to disable message content capture. |
 | Wukong | `wukong` | Runtime auto-discovery and CLI API polling via local `wukong-cli`; it is not an `agents.d` installer selection. |
 | WorkBuddy | `workbuddy` | Structural Hook/file wakeups with a 30-second local transcript polling fallback. Verified on WorkBuddy Desktop 5.2.6 for macOS and 5.3.5.0 for Windows 11. |
 | Doubao Work | `doubao-work` | Experimental macOS/Windows client-message metadata and task traces; paired local TOOL spans and selected-skill context. Native execution and first-output coverage depend on client evidence; model identities, tokens and full cloud inference remain unavailable. See [scope and configuration](doubao-work.md). |
