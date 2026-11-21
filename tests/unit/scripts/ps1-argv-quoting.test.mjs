@@ -58,47 +58,73 @@ describe('Windows node -e payloads survive native argument passing', () => {
     expect(cli).not.toMatch(/-e \$js\b/);
   });
 
-  it('builds sub-argument arrays by assignment, never from an if expression', () => {
+  it('keeps the CLI subarguments as an array', () => {
     // A statement-block value is pipeline-enumerated, so a single element
     // collapses to a string: $SubArgs[0] then yields a Char and @SubArgs
     // splats the string per character.
     expect(cli).not.toMatch(/\$SubArgs = if \(/);
-    expect(cli).not.toMatch(/\$rest = if \(/);
     expect(cli).toContain('$SubArgs = @()');
-    expect(cli).toContain('$rest = @()');
   });
 });
 
-it.runIf(Boolean(powershell))('sets, lists and unsets a single span attribute through the actual CLI', () => {
+it.runIf(Boolean(powershell))('preserves span attributes in Legacy argument mode and ConstrainedLanguage', () => {
   const root = mkdtempSync(join(tmpdir(), 'pilot-span-argv-'));
   try {
     const dataDir = join(root, 'data dir');
     const cacheDir = join(root, 'cache dir');
+    const attributesFile = join(dataDir, 'span-attributes.json');
+    const runner = join(root, 'invoke-span-attr.ps1');
     mkdirSync(dataDir);
     mkdirSync(cacheDir);
     writeFileSync(join(cacheDir, 'node-bin'), process.execPath + '\n');
+    writeFileSync(runner, [
+      '$PSNativeCommandArgumentPassing = "Legacy"',
+      '$testArgs = (ConvertFrom-Json -InputObject $env:PILOT_TEST_SPAN_ATTR_JSON).args',
+      '$previous = $env:LOONGSUITE_PILOT_SPAN_ATTR_ARGS',
+      '$ExecutionContext.SessionState.LanguageMode = "ConstrainedLanguage"',
+      '& $env:PILOT_TEST_LAUNCHER span-attr @testArgs',
+      '$result = $LASTEXITCODE',
+      'if ($env:LOONGSUITE_PILOT_SPAN_ATTR_ARGS -cne $previous) { throw "Span attribute environment was not restored" }',
+      'exit $result',
+    ].join('\n'));
     const env = {
       ...process.env,
       USERPROFILE: root,
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
       LOONGSUITE_PILOT_CACHE_DIR: cacheDir,
+      PILOT_TEST_LAUNCHER: resolve('scripts/loongsuite-pilot.ps1'),
+      LOONGSUITE_PILOT_SPAN_ATTR_ARGS: 'previous value',
     };
+    function invoke(...args) {
+      return spawnSync(powershell, [
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', runner,
+      ], { env: { ...env, PILOT_TEST_SPAN_ATTR_JSON: JSON.stringify({ args }) }, encoding: 'utf8' });
+    }
     function run(...args) {
-      const result = spawnSync(powershell, [
-        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
-        resolve('scripts/loongsuite-pilot.ps1'), 'span-attr', ...args,
-      ], { env, encoding: 'utf8' });
-      expect(result.status, result.stderr).toBe(0);
+      const result = invoke(...args);
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
       return result.stdout.trim();
     }
-    expect(run('set', 'example', 'value with spaces')).toBe('set example=value with spaces');
-    expect(run('list')).toBe('example=value with spaces');
-    expect(run('unset', 'example')).toBe('unset example');
+    const attributes = {
+      example: 'value with spaces',
+      empty: '',
+      'Unicode 字符': '前面 "quoted" 雪',
+    };
+    for (const [key, value] of Object.entries(attributes)) run('set', key, value);
+    expect(JSON.parse(readFileSync(attributesFile, 'utf8'))).toEqual(attributes);
+    expect(run('list')).toContain('example=value with spaces');
+    const missing = invoke('set', 'missing');
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain('usage: span-attr set <key> <value>');
+    expect(missing.stderr).not.toContain('Span attribute environment was not restored');
+    delete env.LOONGSUITE_PILOT_SPAN_ATTR_ARGS;
+    for (const key of Object.keys(attributes)) run('unset', key);
     expect(run('list')).toBe('(no custom span attributes)');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-});
+}, 15_000);
 
 it('probes only its own local dashboard even when Node uses an HTTP proxy', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pilot-dashboard-argv-'));

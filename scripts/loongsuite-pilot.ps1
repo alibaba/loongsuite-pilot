@@ -2524,7 +2524,7 @@ function Cmd-SpanAttr {
         if (-not $nodeBin) { Write-Error "[span-attr] node runtime not found"; exit 1 }
         $js = @'
 const fs = require("fs");
-const file = process.argv[1], op = process.argv[2], key = process.argv[3], value = process.argv[4];
+const [file, op, key, value] = JSON.parse(process.env.LOONGSUITE_PILOT_SPAN_ATTR_ARGS);
 const RESERVED = ["gen_ai.","git.","workspace.","event.","trace_","user.","cost_","agent.","time_unix_nano","observed_time_unix_nano"];
 const isReserved = k => RESERVED.some(p => k === p || k.indexOf(p) === 0);
 function read() { try { const o = JSON.parse(fs.readFileSync(file, "utf-8").replace(/^\uFEFF/, "")); return (o && typeof o === "object" && !Array.isArray(o)) ? o : {}; } catch { return {}; } }
@@ -2541,16 +2541,21 @@ if (op === "set") {
   if (ks.length === 0) { console.log("(no custom span attributes)"); } else { for (const k of ks) console.log(k + "=" + o[k]); }
 }
 '@
-        # Two statements for the same reason as $SubArgs: as an if-expression a
-        # single remaining argument (e.g. `span-attr unset <key>`) unrolls into a
-        # plain string, and `@rest` then splats it character by character.
-        $rest = @()
-        if ($SubArgs.Count -ge 2) { $rest = @($SubArgs[1..($SubArgs.Count - 1)]) }
-        # Same stdin workaround as Test-DashboardAvailable: this script is full of
-        # double quotes, which argv passing mangles. argv indexes shift back to
-        # 1..4 because the wrapper is the `-e` script and args follow it.
-        $js | & $nodeBin --no-warnings -e "eval(require('fs').readFileSync(0,'utf8'))" $SPAN_ATTR_FILE $sub @rest
-        exit $LASTEXITCODE
+        # Legacy native argument passing drops empty arguments and strips quotes.
+        # Keep the code on stdin and send the exact Unicode arguments through the environment.
+        $previousArgs = $env:LOONGSUITE_PILOT_SPAN_ATTR_ARGS
+        try {
+            $env:LOONGSUITE_PILOT_SPAN_ATTR_ARGS = ConvertTo-Json -InputObject (@($SPAN_ATTR_FILE) + $SubArgs) -Compress
+            $js | & $nodeBin --no-warnings -e "eval(require('fs').readFileSync(0,'utf8'))"
+            $result = $LASTEXITCODE
+        } finally {
+            if ($null -eq $previousArgs) {
+                Remove-Item Env:LOONGSUITE_PILOT_SPAN_ATTR_ARGS -ErrorAction SilentlyContinue
+            } else {
+                $env:LOONGSUITE_PILOT_SPAN_ATTR_ARGS = $previousArgs
+            }
+        }
+        exit $result
     }
 
     Write-Host "Usage: loongsuite-pilot span-attr <set|unset|list|clear>"
