@@ -45,6 +45,13 @@ describe('workspace exclusions', () => {
     expect(policy.excludes(lexicalRoot)).toBe(true);
     expect(policy.excludes(physicalRoot)).toBe(true);
     expect(policy.excludes(path.join(dir, 'public'))).toBe(false);
+    const alternate = path.join(dir, 'alternate');
+    fs.symlinkSync(lexicalRoot, alternate);
+    expect(policy.excludes(path.join(alternate, 'missing'))).toBe(true);
+    const alternateParent = `${path.join(alternate, 'link')}${path.sep}..`;
+    const lexicalPolicy = new WorkspacePolicy([lexicalRoot]);
+    expect(lexicalPolicy.excludes(alternateParent)).toBe(true);
+    expect(lexicalPolicy.excludes(`${alternateParent}${path.sep}missing`)).toBe(true);
     vi.spyOn(os, 'homedir').mockReturnValue(lexicalRoot);
     expect(new WorkspacePolicy([physicalRoot]).excludes('~/link/..')).toBe(true);
   });
@@ -84,6 +91,29 @@ describe('workspace exclusions', () => {
     const policy = new WorkspacePolicy([configured], state);
     expect(policy.allows(event('legacy-session'))).toBe(false);
     expect(policy.allows(event('new-session'))).toBe(true);
+    expect(new WorkspacePolicy([root], state).allows(event('legacy-session'))).toBe(false);
+  });
+  it.skipIf(process.platform === 'win32')('writes alias rules to their own durable marker namespace', () => {
+    const dir = temp();
+    const lexical = path.join(dir, 'lexical');
+    const physical = path.join(dir, 'physical');
+    const target = path.join(physical, 'child');
+    const link = path.join(lexical, 'link');
+    const aliasParent = `${link}${path.sep}..`;
+    const state = path.join(dir, 'state');
+    const otherRule = path.join(dir, 'other');
+    fs.mkdirSync(lexical);
+    fs.mkdirSync(target, { recursive: true });
+    fs.symlinkSync(target, link);
+    const policy = new WorkspacePolicy([aliasParent, otherRule], state);
+    expect(policy.allows(event('alias-only', physical))).toBe(false);
+    const narrower = new WorkspacePolicy([lexical, otherRule], state);
+    expect(narrower.excludes(physical)).toBe(false);
+    expect(narrower.allows(event('alias-only', physical))).toBe(true);
+    fs.unlinkSync(link);
+    const restarted = new WorkspacePolicy([otherRule, aliasParent], state);
+    expect(restarted.excludes(physical)).toBe(false);
+    expect(restarted.allows(event('alias-only'))).toBe(false);
   });
   it('preflights batches before letting earlier content from a blocked session escape', () => {
     const root = temp(); const policy = new WorkspacePolicy([root]);
