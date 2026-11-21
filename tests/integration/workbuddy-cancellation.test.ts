@@ -212,8 +212,9 @@ it.each([
   { earlierStop: undefined, earlierPromptAtMs: 1000 },
   { earlierStop: 1600, earlierPromptAtMs: undefined },
   { earlierStop: undefined, earlierPromptAtMs: undefined },
-])('preserves the next untimed turn after cancellation (earlier prompt time $earlierPromptAtMs, Stop $earlierStop)',
-  async ({ earlierStop, earlierPromptAtMs }) => {
+  { earlierStop: undefined, earlierPromptAtMs: 1000, omitEarlierPromptHook: true },
+])('preserves the next untimed turn after cancellation (%j)',
+  async ({ earlierStop, earlierPromptAtMs, omitEarlierPromptHook }) => {
     const source = await fixture();
     const [prompt, reasoning] = source;
     const response = source.at(-1)!;
@@ -228,7 +229,7 @@ it.each([
     const opts = {
       sessionId: 'cancelled-before-untimed-turn',
       hookEvents: [
-        { eventName: 'UserPromptSubmit', observedAtMs: 1000 },
+        ...(omitEarlierPromptHook ? [] : [{ eventName: 'UserPromptSubmit', observedAtMs: 1000 }]),
         ...(earlierStop === undefined ? [] : [{ eventName: 'Stop', observedAtMs: earlierStop }]),
         { eventName: 'UserPromptSubmit', observedAtMs: 2000 },
         { eventName: 'Stop', observedAtMs: 2300 },
@@ -250,3 +251,75 @@ it.each([
       .map(row => row['gen_ai.response.finish_reasons'])).toEqual([['cancelled'], ['stop']]);
   },
 );
+
+it.each([
+  { cancellationAtMs: undefined, nextPromptAtMs: 1591 },
+  { cancellationAtMs: 1500, nextPromptAtMs: 1491 },
+])('keeps distinct Stops in turn order when the next Prompt was queued (native cancellation $cancellationAtMs)',
+  async ({ cancellationAtMs, nextPromptAtMs }) => {
+    const source = await fixture();
+    const [prompt, reasoning] = source;
+    const response = source.at(-1)!;
+    const records: WorkBuddyRecord[] = [
+      prompt,
+      reasoning,
+      { type: 'message', role: 'assistant', status: 'incomplete', timestamp: cancellationAtMs, providerData: { skipRun: true } },
+      { ...prompt, id: 'next-prompt', timestamp: undefined },
+      { ...response, id: 'next-response', parentId: 'next-prompt', timestamp: undefined,
+        providerData: { ...response.providerData, conversationRequestId: 'next-request', messageId: 'next-response' } },
+    ];
+    const opts = {
+      sessionId: 'queued-prompt-stop-order',
+      hookEvents: [
+        { eventName: 'UserPromptSubmit', observedAtMs: 1000 },
+        { eventName: 'UserPromptSubmit', observedAtMs: nextPromptAtMs },
+        { eventName: 'Stop', observedAtMs: 1600 },
+        { eventName: 'Stop', observedAtMs: 2300 },
+      ],
+      stopAtMs: 2300,
+    };
+    const entries = await buildWorkBuddyEvents(records, opts);
+    expect(entries.filter(row => row['event.name'] === 'llm.response')
+      .map(row => [row['gen_ai.turn.id'], row['gen_ai.response.finish_reasons'], row.time_unix_nano])).toEqual([
+      [prompt.id, ['cancelled'], String((cancellationAtMs ?? 1600) * 1_000_000)],
+      ['next-prompt', ['stop'], '2300000000'],
+    ]);
+    expect(entries.find(row => row['event.name'] === 'other' && row['gen_ai.turn.id'] === 'next-prompt')?.time_unix_nano)
+      .toBe(String(nextPromptAtMs * 1_000_000));
+  },
+);
+
+it('does not assign either of two Stops to a canceled first turn when two completed turns follow', async () => {
+  const source = await fixture();
+  const [prompt, reasoning] = source;
+  const response = source.at(-1)!;
+  const records: WorkBuddyRecord[] = [
+    prompt,
+    reasoning,
+    { type: 'message', role: 'assistant', status: 'incomplete', providerData: { skipRun: true } },
+  ];
+  for (const turn of ['second', 'third']) {
+    records.push(
+      { ...prompt, id: `${turn}-prompt`, timestamp: undefined },
+      { ...response, id: `${turn}-response`, parentId: `${turn}-prompt`, timestamp: undefined,
+        providerData: { ...response.providerData, conversationRequestId: `${turn}-request`, messageId: `${turn}-response` } },
+    );
+  }
+  const entries = await buildWorkBuddyEvents(records, {
+    sessionId: 'reserve-remaining-stop-order',
+    hookEvents: [
+      { eventName: 'UserPromptSubmit', observedAtMs: 1000 },
+      { eventName: 'UserPromptSubmit', observedAtMs: 1591 },
+      { eventName: 'Stop', observedAtMs: 2300 },
+      { eventName: 'UserPromptSubmit', observedAtMs: 2400 },
+      { eventName: 'Stop', observedAtMs: 2600 },
+    ],
+    stopAtMs: 2600,
+  });
+  expect(entries.filter(row => row['event.name'] === 'llm.response')
+    .map(row => [row['gen_ai.turn.id'], row['gen_ai.response.finish_reasons'], row.time_unix_nano])).toEqual([
+    [prompt.id, ['cancelled'], '1591000000'],
+    ['second-prompt', ['stop'], '2300000000'],
+    ['third-prompt', ['stop'], '2600000000'],
+  ]);
+});

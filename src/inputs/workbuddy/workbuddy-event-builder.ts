@@ -81,11 +81,26 @@ class HookEventResolver {
       && event.observedAtMs > activityAtMs)?.observedAtMs;
   }
 
-  observeCompletedTurn(terminalAtMs: number, usedTranscriptTime: boolean, retainedPromptAtMs?: number): void {
+  hasDistinctStops(earliestAtMs: number | undefined, countNeeded: number): boolean {
+    const stopTimes = new Set<number>();
+    for (const event of this.events) {
+      if (event.consumed || event.eventName !== 'Stop'
+        || (earliestAtMs !== undefined && event.observedAtMs < earliestAtMs)) continue;
+      stopTimes.add(event.observedAtMs);
+      if (stopTimes.size === countNeeded) return true;
+    }
+    return false;
+  }
+
+  observeCompletedTurn(
+    terminalAtMs: number,
+    usedTranscriptTime: boolean,
+    options?: { retainedPromptAtMs?: number; stopsInTurnOrder?: boolean },
+  ): void {
     let nextPromptAtMs = Number.POSITIVE_INFINITY;
     for (const event of this.events) {
       if (event.consumed || event.eventName !== 'UserPromptSubmit') continue;
-      if (event.observedAtMs <= terminalAtMs && event.observedAtMs !== retainedPromptAtMs) event.consumed = true;
+      if (event.observedAtMs <= terminalAtMs && event.observedAtMs !== options?.retainedPromptAtMs) event.consumed = true;
       else nextPromptAtMs = Math.min(nextPromptAtMs, event.observedAtMs);
     }
 
@@ -95,7 +110,7 @@ class HookEventResolver {
     const priorStop = stops[0]?.observedAtMs;
     // Retire a distinct earlier Stop when there is evidence of another one.
     // A single Stop can still supply a later turn with missing native timing.
-    if (priorStop === undefined || priorStop >= nextPromptAtMs
+    if (priorStop === undefined || (!options?.stopsInTurnOrder && priorStop >= nextPromptAtMs)
       || !stops.some(stop => stop.observedAtMs > priorStop)) return;
     for (const stop of stops) if (stop.observedAtMs === priorStop) stop.consumed = true;
   }
@@ -124,12 +139,21 @@ export async function buildWorkBuddyEvents(
   const tools = new Map<string, ToolContext>();
   const hookEvents = new HookEventResolver(opts.hookEvents, opts.stopAtMs);
   const resultNamesByCallId = new Map<string, string>();
-  for (const record of records) {
+  const turnTerminalIndices = new Set<number>();
+  let foundTerminal = false;
+  for (const [index, record] of records.entries()) {
+    if (record.type === 'message' && record.role === 'user' && !isInternalRecord(record)) {
+      foundTerminal = false;
+    } else if (!foundTerminal && isWorkBuddyTerminalAssistant(records, index)) {
+      turnTerminalIndices.add(index);
+      foundTerminal = true;
+    }
     if (record.type !== 'function_call_result') continue;
     const callId = stringValue(record.callId);
     const toolName = stringValue(record.name);
     if (callId && toolName) resultNamesByCallId.set(callId, toolName);
   }
+  let completedTurnsAhead = turnTerminalIndices.size;
   let turnId = stableId(opts.sessionId, 'turn:unknown');
   let turnOrdinal = 0;
   let stepOrdinal = 0;
@@ -207,7 +231,7 @@ export async function buildWorkBuddyEvents(
   const closeInterruptedTurn = async (
     boundarySource: WorkBuddyRecord,
     transcriptBoundary: number | undefined,
-    stopFallback?: { latestAtMs?: number; nextPromptHookAtMs?: number },
+    stopFallback?: { latestAtMs?: number; nextPromptHookAtMs?: number; stopsInTurnOrder?: boolean },
   ) => {
     const explicit = isExplicitCancellation(boundarySource);
     if (!pendingModel && !lastResponse && !(explicit && pendingUserInput)) return;
@@ -276,7 +300,10 @@ export async function buildWorkBuddyEvents(
       tools.delete(callId);
     }
     if (explicit) {
-      hookEvents.observeCompletedTurn(boundaryTimestamp, transcriptBoundary !== undefined, stopFallback?.nextPromptHookAtMs);
+      hookEvents.observeCompletedTurn(boundaryTimestamp, transcriptBoundary !== undefined, {
+        retainedPromptAtMs: stopFallback?.nextPromptHookAtMs,
+        stopsInTurnOrder: stopFallback?.stopsInTurnOrder,
+      });
       previousTurnTerminalAtMs = latestTimestamp(previousTurnTerminalAtMs, boundaryTimestamp);
     }
     lastResponse = undefined;
@@ -288,16 +315,21 @@ export async function buildWorkBuddyEvents(
 
   const closeExplicitCancellation = async (record: WorkBuddyRecord, index: number) => {
     const nativeBoundary = timestampMs(record);
+    const activityAtMs = latestTimestamp(lastActivityAtMs, previousTurnTerminalAtMs);
+    // A queued Prompt can precede the old turn's Stop. Use Stop order only
+    // when distinct observations cover this turn and every completed turn
+    // still ahead. With missing observations, keep the next Prompt bound.
+    const stopsInTurnOrder = completedTurnsAhead > 0
+      && hookEvents.hasDistinctStops(activityAtMs, completedTurnsAhead + 1);
     let nextPromptAtMs: number | undefined;
     let nextPromptHookAtMs: number | undefined;
-    if (nativeBoundary === undefined) {
-      // Match the first following user row. A Stop after its prompt cannot
-      // time this cancellation, even if the next prompt time comes from a Hook.
+    if (nativeBoundary === undefined || stopsInTurnOrder) {
+      // Match the first following user row so its Prompt stays available,
+      // even when it was queued before this turn's completion.
       for (let nextIndex = index + 1; nextIndex < records.length; nextIndex++) {
         const next = records[nextIndex];
         if (next.type !== 'message' || next.role !== 'user' || isInternalRecord(next)) continue;
         nextPromptAtMs = timestampMs(next);
-        const activityAtMs = latestTimestamp(lastActivityAtMs, previousTurnTerminalAtMs);
         if (nextPromptAtMs === undefined && activityAtMs !== undefined) {
           // Leave the Prompt Hook available for the next user row. It is
           // also the upper bound for cancellation if this turn has no Stop.
@@ -307,8 +339,9 @@ export async function buildWorkBuddyEvents(
       }
     }
     await closeInterruptedTurn(record, nativeBoundary, {
-      latestAtMs: nextPromptAtMs ?? nextPromptHookAtMs,
+      latestAtMs: stopsInTurnOrder ? undefined : nextPromptAtMs ?? nextPromptHookAtMs,
       nextPromptHookAtMs,
+      stopsInTurnOrder,
     });
   };
 
@@ -426,6 +459,7 @@ export async function buildWorkBuddyEvents(
 
   for (let index = 0; index < records.length; index++) {
     const record = records[index];
+    if (turnTerminalIndices.has(index)) completedTurnsAhead--;
     if (isInternalRecord(record)) {
       if (isExplicitCancellation(record)) {
         rememberPendingUserContext(record);
