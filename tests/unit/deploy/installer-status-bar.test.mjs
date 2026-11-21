@@ -31,6 +31,7 @@ function runConfig(platform, args = [], existing, command = 'install', probePadd
     if (platform === 'bash') {
       const scriptPath = resolve(root, 'config-writer.js');
       const valuePath = resolve(root, 'status-bar-value');
+      const argsPath = resolve(root, 'node-e-args');
       result = spawnSync('bash', ['-c', `${shellPrelude}
 msg() { :; }
 capture_node() {
@@ -38,17 +39,23 @@ capture_node() {
   cat > /dev/null
   printf '%s' "$2" > "$PILOT_TEST_JS"
   printf '%s' "$LP_ENABLE_STATUS_BAR_APP" > "$PILOT_TEST_STATUS_BAR"
+  [ "$3" = -- ] || return 1
+  shift 3
+  printf '%s\\0' "$@" > "$PILOT_TEST_ARGS"
 }
 NODE_BIN=capture_node
 PROBE_RESULT="$(printf '%${probePadding}s' '')[]"
 ${shellWriter}
 write_config`, 'installer-test', command, '--data-dir', root, ...args], {
-        encoding: 'utf8', env: { ...env, PILOT_TEST_JS: scriptPath, PILOT_TEST_STATUS_BAR: valuePath },
+        encoding: 'utf8', env: { ...env, PILOT_TEST_JS: scriptPath, PILOT_TEST_STATUS_BAR: valuePath, PILOT_TEST_ARGS: argsPath },
       });
       if (result.status === 0) {
         runInNewContext(readFileSync(scriptPath, 'utf8'), {
           require, console,
-          process: { env: { LP_ENABLE_STATUS_BAR_APP: readFileSync(valuePath, 'utf8') } },
+          process: {
+            argv: ['node', ...readFileSync(argsPath, 'utf8').split('\0').slice(0, -1)],
+            env: { LP_ENABLE_STATUS_BAR_APP: readFileSync(valuePath, 'utf8') },
+          },
         });
       }
     } else if (platform === 'powershell') {

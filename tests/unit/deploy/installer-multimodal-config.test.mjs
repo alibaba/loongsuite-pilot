@@ -239,7 +239,7 @@ describe('installer multimodal four-tuple parse gate', () => {
   });
 });
 
-function extractShWriteConfigJs(configPath, dataDir, sls = {}, allAgents = false) {
+function extractShWriteConfigJs(sls = {}, allAgents = false) {
   const fn = installerSh.slice(
     installerSh.indexOf('write_config() {'),
     installerSh.indexOf('install_loongsuite_pilot_command() {'),
@@ -250,8 +250,6 @@ function extractShWriteConfigJs(configPath, dataDir, sls = {}, allAgents = false
   expect(end).toBeGreaterThan(start);
   return fn
     .slice(start, end + "fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\\n');\n".length)
-    .replaceAll("'$config_file'", JSON.stringify(configPath))
-    .replaceAll("'$DATA_DIR'", JSON.stringify(dataDir))
     .replaceAll('${SLS_ENDPOINT}', sls.endpoint ?? '')
     .replaceAll('${SLS_PROJECT}', sls.project ?? '')
     .replaceAll('${SLS_LOGSTORE}', sls.logstore ?? '')
@@ -311,11 +309,11 @@ function runWriteConfig(platform, multimodalMode, existing, {
   try {
     if (existing !== undefined) writeFileSync(configPath, JSON.stringify(existing, null, 2) + '\n');
     const source = platform === 'bash'
-      ? extractShWriteConfigJs(configPath, root, sls, allAgents)
+      ? extractShWriteConfigJs(sls, allAgents)
       : extractPsWriteConfigJs();
-    const scriptPath = resolve(root, 'write-config.js');
-    writeFileSync(scriptPath, source);
     if (platform === 'powershell-js') {
+      const scriptPath = resolve(root, 'write-config.js');
+      writeFileSync(scriptPath, source);
       const optsPath = resolve(root, 'options.json');
       writeFileSync(optsPath, JSON.stringify({
         configPath,
@@ -336,7 +334,7 @@ function runWriteConfig(platform, multimodalMode, existing, {
       const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : undefined;
       return { ...result, config };
     }
-    const result = spawnSync(process.execPath, [scriptPath], {
+    const result = spawnSync(process.execPath, ['-e', source, '--', configPath, root], {
       encoding: 'utf8',
       input: probeJson,
       env: {
