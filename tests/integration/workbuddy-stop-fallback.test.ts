@@ -215,3 +215,116 @@ it.each([{ skipRun: true }, { isCompactInternal: true }, { agent: 'compact' }])(
     }
   },
 );
+
+it.each([
+  { scenario: 'late reasoning', reasoningAtMs: 1700 },
+  { scenario: 'early reasoning', reasoningAtMs: 1595 },
+  { scenario: 'early reasoning and prompt hook', reasoningAtMs: 1595, promptAtMs: 1591 },
+  { scenario: 'response', hasResponse: true },
+  { scenario: 'queued prompt', promptAtMs: 1650 },
+])('waits for the next Stop when a timed user row predates the earlier Stop ($scenario)',
+  async ({ reasoningAtMs, hasResponse, promptAtMs }) => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-frontloaded-prompt-'));
+    try {
+      const f = await setup(root);
+      const older = [f.user, f.response];
+      const user = { ...f.user, id: 'second-turn', timestamp: 1590 };
+      const assistant = { ...f.response, id: 'second-response', parentId: 'second-turn', timestamp: 2200,
+        providerData: { ...f.response.providerData, conversationRequestId: 'second-request', messageId: 'second-response' } };
+      const active = [user];
+      if (reasoningAtMs !== undefined) {
+        active.push({ ...f.reasoning, id: 'second-reasoning', timestamp: reasoningAtMs, parentId: 'second-turn' });
+      } else if (hasResponse) {
+        active.push(assistant);
+      }
+      await writeFile(f.transcript, lines([...older, ...active]));
+      await f.hook('Stop', 1600);
+      if (promptAtMs !== undefined) await f.hook('UserPromptSubmit', promptAtMs);
+      expect(await f.input.poll()).toEqual([]);
+      const exported = await f.input.poll();
+      await f.stateStore.save();
+      const { stateStore: committed } = await f.restart();
+      const offset = Object.values(committed.get(f.input.id).extra?.workbuddyTranscriptBytes as object);
+
+      if (!hasResponse) await appendFile(f.transcript, lines([assistant]));
+      await f.hook('Stop', 2300);
+      const restarted = await f.restart();
+      expect(await restarted.input.poll()).toEqual([]);
+      const final = await restarted.input.poll();
+      const responseAtMs = reasoningAtMs ?? assistant.timestamp;
+      expect({
+        premature: exported.filter(row => row['gen_ai.turn.id'] === 'second-turn').map(row => row['event.name']),
+        offset,
+        final: final.map(row => [row['gen_ai.turn.id'], row['event.name'], row.time_unix_nano]),
+      }).toEqual({
+        premature: [],
+        offset: [Buffer.byteLength(lines(older))],
+        final: [
+          ['second-turn', 'other', '1590000000'],
+          ['second-turn', 'llm.request', '1590000000'],
+          ['second-turn', 'llm.response', String(responseAtMs * 1_000_000)],
+        ],
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each([false, true])('uses native response time after the sole Stop (first poll before response: %s)',
+  async pollBeforeResponse => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-late-native-response-'));
+    try {
+      const f = await setup(root);
+      await writeFile(f.transcript, lines([f.user]));
+      await f.hook('UserPromptSubmit', 900);
+      await f.hook('Stop', 1300);
+      if (pollBeforeResponse) expect(await f.input.poll()).toEqual([]);
+      await appendFile(f.transcript, lines([f.response]));
+      expect(await f.input.poll()).toEqual([]);
+      const final = await f.input.poll();
+      await f.stateStore.save();
+      const restarted = await f.restart();
+      expect(await restarted.input.poll()).toEqual([]);
+      expect(final.map(row => [row['gen_ai.turn.id'], row['event.name'], row.time_unix_nano])).toEqual([
+        [f.user.id, 'other', '1000000000'],
+        [f.user.id, 'llm.request', '1000000000'],
+        [f.user.id, 'llm.response', '1500000000'],
+      ]);
+      expect(Object.values(restarted.stateStore.get(f.input.id).extra?.workbuddyTranscriptBytes as object))
+        .toEqual([Buffer.byteLength(lines([f.user, f.response]))]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+it('uses native response time after a second observed Stop', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-late-native-both-stops-'));
+  try {
+    const f = await setup(root);
+    const records = [
+      f.user, f.response,
+      { ...f.user, id: 'second-turn', timestamp: 1700 },
+      { ...f.response, id: 'second-response', parentId: 'second-turn', timestamp: 2100,
+        providerData: { ...f.response.providerData, conversationRequestId: 'second-request', messageId: 'second-response' } },
+    ];
+    await writeFile(f.transcript, lines(records));
+    await f.hook('Stop', 1600);
+    await f.hook('UserPromptSubmit', 1705);
+    await f.hook('Stop', 2000);
+    expect(await f.input.poll()).toEqual([]);
+    const final = await f.input.poll();
+    await f.stateStore.save();
+    const restarted = await f.restart();
+    expect(await restarted.input.poll()).toEqual([]);
+    expect(final.filter(row => row['gen_ai.turn.id'] === 'second-turn')
+      .map(row => [row['event.name'], row.time_unix_nano])).toEqual([
+      ['other', '1700000000'], ['llm.request', '1700000000'], ['llm.response', '2100000000'],
+    ]);
+    expect(Object.values(restarted.stateStore.get(f.input.id).extra?.workbuddyTranscriptBytes as object))
+      .toEqual([Buffer.byteLength(lines(records))]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
