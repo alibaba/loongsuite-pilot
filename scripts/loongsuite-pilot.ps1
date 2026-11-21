@@ -2541,11 +2541,19 @@ if (op === "set") {
   if (ks.length === 0) { console.log("(no custom span attributes)"); } else { for (const k of ks) console.log(k + "=" + o[k]); }
 }
 '@
-        # Legacy native argument passing drops empty arguments and strips quotes.
+        # Preserve native argument conversion while keeping empty strings and quotes.
+        $spanArgs = @(
+            $SPAN_ATTR_FILE
+            foreach ($argument in $SubArgs) {
+                foreach ($value in $argument) {
+                    if ($null -ne $value) { [string]$value }
+                }
+            }
+        )
         # Keep the code on stdin and send the exact Unicode arguments through the environment.
         $previousArgs = $env:LOONGSUITE_PILOT_SPAN_ATTR_ARGS
         try {
-            $env:LOONGSUITE_PILOT_SPAN_ATTR_ARGS = ConvertTo-Json -InputObject (@($SPAN_ATTR_FILE) + $SubArgs) -Compress
+            $env:LOONGSUITE_PILOT_SPAN_ATTR_ARGS = ConvertTo-Json -InputObject $spanArgs -Compress
             $js | & $nodeBin --no-warnings -e "eval(require('fs').readFileSync(0,'utf8'))"
             $result = $LASTEXITCODE
         } finally {

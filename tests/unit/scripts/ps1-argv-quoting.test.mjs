@@ -112,14 +112,19 @@ it.runIf(Boolean(powershell))('preserves span attributes in Legacy argument mode
       'Unicode 字符': '前面 "quoted" 雪',
     };
     for (const [key, value] of Object.entries(attributes)) run('set', key, value);
-    expect(JSON.parse(readFileSync(attributesFile, 'utf8'))).toEqual(attributes);
+    run('set', 12, true);
+    run('set', 'collection', ['first', 'second']);
+    const expected = { ...attributes, '12': 'True', collection: 'first' };
+    expect(JSON.parse(readFileSync(attributesFile, 'utf8'))).toEqual(expected);
     expect(run('list')).toContain('example=value with spaces');
-    const missing = invoke('set', 'missing');
-    expect(missing.status).toBe(1);
-    expect(missing.stderr).toContain('usage: span-attr set <key> <value>');
-    expect(missing.stderr).not.toContain('Span attribute environment was not restored');
+    for (const missingValue of [[], [null]]) {
+      const missing = invoke('set', 'missing', ...missingValue);
+      expect(missing.status).toBe(1);
+      expect(missing.stderr).toContain('usage: span-attr set <key> <value>');
+      expect(missing.stderr).not.toContain('Span attribute environment was not restored');
+    }
     delete env.LOONGSUITE_PILOT_SPAN_ATTR_ARGS;
-    for (const key of Object.keys(attributes)) run('unset', key);
+    for (const key of Object.keys(expected)) run('unset', key);
     expect(run('list')).toBe('(no custom span attributes)');
   } finally {
     rmSync(root, { recursive: true, force: true });
