@@ -247,15 +247,44 @@ function normalizeUserParts(content: unknown): unknown[] {
   });
 }
 
-function normalizeToolResultParts(content: unknown): unknown[] {
-  const arr = asArray(content);
-  if (!arr) return [];
-  return arr.map((part): Record<string, unknown> => {
-    const p = asObject(part) ?? {};
-    const t = asString(p.type);
-    if (t === 'text') return { type: 'text', content: asString(p.text) ?? '' };
-    return { type: 'text', content: JSON.stringify(p) };
-  });
+function normalizeToolOutput(parts: unknown[]): string {
+  const text: string[] = [];
+  let previous = '';
+  for (const raw of parts) {
+    const part = asObject(raw);
+    let partText: string | undefined;
+    if (part?.type === 'text' && typeof part.text === 'string') {
+      partText = part.text;
+    } else {
+      // Serialize rich parts individually so native multiline text still reaches
+      // the masker with its original line and word boundaries.
+      try { partText = JSON.stringify(raw); } catch { continue; }
+    }
+    if (!partText) continue;
+    if (previous && !/\s$/.test(previous) && !/^\s/.test(partText)) text.push('\n');
+    text.push(partText);
+    previous = partText;
+  }
+  return text.join('');
+}
+
+function normalizeToolResultParts(message: Record<string, unknown>, callId: string): unknown[] {
+  const content = asArray(message.content);
+  if (!content) return [];
+  // DSH v2/v3 wraps output in a tool-result part; v4 puts the content and
+  // isError directly on the tool message.
+  const wrapped = content.length === 1 ? asObject(content[0]) : undefined;
+  const result = wrapped?.type === 'tool-result' ? wrapped : message;
+  const output = asArray(result.content);
+  if (!output) return [];
+  return [{
+    type: 'tool_call_response',
+    id: callId,
+    response: {
+      output: normalizeToolOutput(output),
+      ...(typeof result.isError === 'boolean' ? { isError: result.isError } : {}),
+    },
+  }];
 }
 
 const FINISH_REASON_MAP: Record<string, string> = {
@@ -599,8 +628,7 @@ export function transformDshRecord(
       if (!callId) return null;
       const name = state.toolNames.get(callId);
       state.toolNames.delete(callId);
-      const content = message.content;
-      const toolParts = normalizeToolResultParts(content);
+      const toolParts = normalizeToolResultParts(message, callId);
       // Push the tool result as a `tool` role message so the next step's
       // llm.request input.messages includes the tool_call_response.
       addInputMessage(state, { role: 'tool', parts: toolParts });
