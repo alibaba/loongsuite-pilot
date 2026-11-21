@@ -247,20 +247,23 @@ function normalizeUserParts(content: unknown): unknown[] {
   });
 }
 
-function normalizeToolOutput(parts: unknown[]): string | undefined {
+function normalizeToolOutput(parts: unknown[]): string {
   const text: string[] = [];
   let previous = '';
   for (const raw of parts) {
     const part = asObject(raw);
-    if (part?.type !== 'text' || typeof part.text !== 'string') {
-      // Keep rich output at a maskable string leaf, regardless of its native depth.
-      try { return JSON.stringify(parts); } catch { return undefined; }
+    let partText: string | undefined;
+    if (part?.type === 'text' && typeof part.text === 'string') {
+      partText = part.text;
+    } else {
+      // Serialize rich parts individually so native multiline text still reaches
+      // the masker with its original line and word boundaries.
+      try { partText = JSON.stringify(raw); } catch { continue; }
     }
-    if (part.text.length === 0) continue;
-    // Native text parts can be adjacent without their own word boundary.
-    if (previous && !/\s$/.test(previous) && !/^\s/.test(part.text)) text.push('\n');
-    text.push(part.text);
-    previous = part.text;
+    if (!partText) continue;
+    if (previous && !/\s$/.test(previous) && !/^\s/.test(partText)) text.push('\n');
+    text.push(partText);
+    previous = partText;
   }
   return text.join('');
 }
@@ -274,12 +277,11 @@ function normalizeToolResultParts(message: Record<string, unknown>, callId: stri
   const result = wrapped?.type === 'tool-result' ? wrapped : message;
   const output = asArray(result.content);
   if (!output) return [];
-  const normalizedOutput = normalizeToolOutput(output);
   return [{
     type: 'tool_call_response',
     id: callId,
     response: {
-      ...(normalizedOutput !== undefined ? { output: normalizedOutput } : {}),
+      output: normalizeToolOutput(output),
       ...(typeof result.isError === 'boolean' ? { isError: result.isError } : {}),
     },
   }];

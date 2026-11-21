@@ -189,7 +189,7 @@ describe('dsh-event-transform (real fixture)', () => {
     { name: 'error', content: [{ type: 'text', text: 'missing file' }], isError: true, output: 'missing file' },
     { name: 'empty', content: [], isError: false, output: '' },
     { name: 'image', content: [{ type: 'image', data: 'synthetic-image', mimeType: 'image/png' }], isError: false,
-      output: JSON.stringify([{ type: 'image', data: 'synthetic-image', mimeType: 'image/png' }]) },
+      output: JSON.stringify({ type: 'image', data: 'synthetic-image', mimeType: 'image/png' }) },
     { name: 'no error flag', content: [{ type: 'text', text: 'ok' }], isError: undefined, output: 'ok' },
   ].map(testCase => ({ ...testCase, wrapped }))))('keeps $name tool responses in the next LLM input (wrapped=$wrapped)',
     ({ wrapped, content, isError, output }) => {

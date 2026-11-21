@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, expect, it } from 'vitest';
 import { InputManager } from '../../src/core/input-manager.js';
 import { JsonlFlusher } from '../../src/flushers/jsonl-flusher.js';
 import { newState, transformDshRecord } from '../../src/inputs/dsh/dsh-event-transform.js';
@@ -10,14 +10,25 @@ import { ClientType, type AgentActivityEntry } from '../../src/types/index.js';
 const fixtureValue = 'AKIAIOSFODNN7EXAMPLE';
 const fixtures: string[] = [];
 
-async function projectAsJsonl(depth: number, captureMessageContent: boolean, useTextParts = false, wrapped = true) {
+async function projectAsJsonl(
+  depth: number,
+  captureMessageContent: boolean,
+  output: 'structured' | 'text' | 'mixed' = 'structured',
+  wrapped = true,
+) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-tool-privacy-review-'));
   fixtures.push(root);
   let content: unknown = fixtureValue;
   for (let n = 0; n < depth; n++) content = { nested: content };
-  const result = { isError: true, content: useTextParts
-    ? [{ type: 'text', text: fixtureValue }, { type: 'text', text: 'suffix' }]
-    : [{ type: 'fixture-structured', data: content }] };
+  const richPart = { type: 'fixture-structured', data: content };
+  const result = {
+    isError: true,
+    content: output === 'text'
+      ? [{ type: 'text', text: fixtureValue }, { type: 'text', text: 'suffix' }]
+      : output === 'mixed'
+        ? [{ type: 'image', data: 'synthetic-image' }, { type: 'text', text: `ordinary header\n${fixtureValue}` }]
+        : [richPart],
+  };
   const rawRecords = [
     { type: 'tool/call', data: { turn: 1, step: 1, callId: 'call-synthetic', name: 'read' } },
     { type: 'tool/result', data: { turn: 1, step: 1, message: {
@@ -54,7 +65,7 @@ afterEach(async () => {
 
 it.each([true, false].flatMap(wrapped => [3, 33].map(depth => ({ wrapped, depth }))))(
   'masks structured output at depth $depth in real JSONL (wrapped=$wrapped)', async ({ wrapped, depth }) => {
-    const rows = await projectAsJsonl(depth, true, false, wrapped);
+    const rows = await projectAsJsonl(depth, true, 'structured', wrapped);
     const tool = rows.find(row => row['event.name'] === 'tool.result');
     const request = rows.find(row => row['event.name'] === 'llm.request');
     const fields = [tool?.['gen_ai.tool.call.result'], request?.['gen_ai.input.messages'], request?.['gen_ai.input.messages_delta']];
@@ -79,11 +90,25 @@ it('removes both structured tool result and historical input when content collec
 });
 
 it.each([true, false])('retains masking across two native text parts (wrapped=%s)', async wrapped => {
-  const rows = await projectAsJsonl(0, true, true, wrapped);
+  const rows = await projectAsJsonl(0, true, 'text', wrapped);
   const tool = rows.find(row => row['event.name'] === 'tool.result');
   const request = rows.find(row => row['event.name'] === 'llm.request');
   const fields = [tool?.['gen_ai.tool.call.result'], request?.['gen_ai.input.messages'], request?.['gen_ai.input.messages_delta']];
   expect(fields.map(field => Boolean(field))).toEqual([true, true, true]);
   expect(fields.map(field => JSON.stringify(field).includes(fixtureValue))).toEqual([false, false, false]);
   expect(fields.map(field => JSON.stringify(field).includes('[ACCESSKEY_MASKED]'))).toEqual([true, true, true]);
+});
+
+it.each([true, false])('masks multiline text next to rich native parts (wrapped=%s)', async wrapped => {
+  const rows = await projectAsJsonl(0, true, 'mixed', wrapped);
+  const tool = rows.find(row => row['event.name'] === 'tool.result');
+  const request = rows.find(row => row['event.name'] === 'llm.request');
+  const fields = [tool?.['gen_ai.tool.call.result'], request?.['gen_ai.input.messages'], request?.['gen_ai.input.messages_delta']];
+  for (const field of fields) {
+    const encoded = JSON.stringify(field);
+    expect(encoded).toContain('ordinary header');
+    expect(encoded).toContain('synthetic-image');
+    expect(encoded).toContain('[ACCESSKEY_MASKED]');
+    expect(encoded).not.toContain(fixtureValue);
+  }
 });
