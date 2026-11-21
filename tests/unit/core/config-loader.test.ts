@@ -2291,6 +2291,66 @@ describe('ConfigLoader', () => {
       });
     });
 
+    it('distinguishes header values containing separators from a second header on the same route', async () => {
+      const traceEndpoint = 'http://collector:4318/custom/traces';
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { traceEndpoint, headers: { 'x-route': 'west&x-scope=worker' } },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlp: [
+          { name: 'managed', traceEndpoint, headers: { 'x-scope': 'worker', 'x-route': 'west' } },
+          { name: 'duplicate', traceEndpoint, headers: { 'x-route': 'west', 'x-scope': 'worker' } },
+        ],
+      });
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result!.endpoints.map(endpoint => endpoint.name)).toEqual(['user-otlp', 'managed']);
+      expect(result!.endpoints.map(endpoint => endpoint.headers)).toEqual([
+        { 'x-route': 'west&x-scope=worker' },
+        { 'x-scope': 'worker', 'x-route': 'west' },
+      ]);
+    });
+
+    it('preserves configured order within case-variant header groups', async () => {
+      const traceEndpoint = 'http://collector:4318/custom/traces';
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          traceEndpoint,
+          headers: { 'X-Scope': 'first', 'x-scope': 'second' },
+        },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlp: [
+          { name: 'managed', traceEndpoint, headers: { 'x-scope': 'second', 'X-Scope': 'first' } },
+          { name: 'same-as-managed', traceEndpoint, headers: { 'x-scope': 'second', 'X-Scope': 'first' } },
+          { name: 'same-as-user', traceEndpoint, headers: { 'X-Scope': 'first', 'x-scope': 'second' } },
+        ],
+      });
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result!.endpoints.map(endpoint => endpoint.name)).toEqual(['user-otlp', 'managed']);
+    });
+
+    it('keeps raw header names distinct when the exporter merges environment headers', async () => {
+      vi.stubEnv('OTEL_EXPORTER_OTLP_HEADERS', 'x-scope=fixture-global');
+      const traceEndpoint = 'http://collector:4318/custom/traces';
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { traceEndpoint, headers: { 'x-scope': 'second' } },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlp: [{ name: 'managed', traceEndpoint, headers: { 'X-Scope': 'first', 'x-scope': 'second' } }],
+      });
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result!.endpoints.map(endpoint => endpoint.name)).toEqual(['user-otlp', 'managed']);
+    });
+
     it('keeps exact trace routes distinct when their trailing slashes differ', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,

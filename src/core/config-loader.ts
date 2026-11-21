@@ -1166,14 +1166,6 @@ function cmsEntryToOtlpEndpoint(
 }
 
 /** Stable serialization of headers (sorted keys) for dedup keying. */
-function stableHeaderKey(headers?: Record<string, string>): string {
-  if (!headers) return '';
-  return Object.keys(headers)
-    .sort()
-    .map(k => `${k}=${headers[k]}`)
-    .join('&');
-}
-
 /**
  * Dedup by resolved trace URL + full headers + serviceName. Because the CMS
  * shorthand encodes license-key, project, and workspace as headers, those
@@ -1183,12 +1175,20 @@ function dedupOtlpEndpoints(endpoints: OtlpEndpoint[]): OtlpEndpoint[] {
   const seen = new Set<string>();
   const result: OtlpEndpoint[] = [];
   for (const ep of endpoints) {
-    const commonKey = `${stableHeaderKey(ep.headers)}|${ep.serviceName ?? ''}`;
     const traceRoute = resolveOtlpTraceUrl(ep);
     if (!traceRoute) continue;
     const requestUrl = new URL(traceRoute);
-    // OTLP/HTTP uses the origin and path. Compare the route on the wire.
-    const key = `${requestUrl.origin}${requestUrl.pathname}|${commonKey}`;
+    // The exporter merges headers from the environment and its defaults before
+    // Node collapses case aliases. Keep the original names and the order within
+    // each case-insensitive group, while sorting independent headers.
+    const orderedHeaders = Object.entries(ep.headers ?? {}).sort(([left], [right]) => {
+      const a = left.toLowerCase();
+      const b = right.toLowerCase();
+      return a === b ? 0 : a < b ? -1 : 1;
+    });
+    // OTLP/HTTP uses the origin and path. Keep header and route boundaries
+    // intact even when their values contain delimiters.
+    const key = JSON.stringify([requestUrl.origin, requestUrl.pathname, orderedHeaders, ep.serviceName ?? '']);
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(ep);
