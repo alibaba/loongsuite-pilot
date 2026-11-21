@@ -1,10 +1,12 @@
 import { spawnSync } from 'node:child_process';
-import { readFile, mkdtemp, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, it } from 'vitest';
+import { StateStore } from '../../src/checkpoints/state-store.js';
 import { JsonlFlusher } from '../../src/flushers/jsonl-flusher.js';
 import { buildWorkBuddyEvents } from '../../src/inputs/workbuddy/workbuddy-event-builder.js';
+import { WorkBuddyInput } from '../../src/inputs/workbuddy/workbuddy-input.js';
 import type { WorkBuddyRecord } from '../../src/inputs/workbuddy/workbuddy-types.js';
 import { JSONL_VALIDATOR_JS } from '../../scripts/e2e/lib/e2e-scenarios.mjs';
 
@@ -121,3 +123,86 @@ it('uses the later Stop for an untimed completed turn that follows a witnessed c
     .map(entry => [entry['gen_ai.response.finish_reasons'], entry.time_unix_nano]))
     .toEqual([[['cancelled'], '1500000000'], [['stop'], '2300000000']]);
 });
+
+it.each(['timed', 'untimed', 'untimed after restart', 'only the completion Stop'])(
+  'pairs an untimed cancellation with its own Stop before the %s completion', async variant => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-cancellation-stop-'));
+    try {
+      const sessionId = 'cancellation-stop-pair';
+      const projects = path.join(root, 'projects', 'fixture-project');
+      const hookEventDir = path.join(root, 'hooks');
+      const sessionHooks = path.join(hookEventDir, sessionId);
+      await mkdir(projects, { recursive: true });
+      const transcript = path.join(projects, `${sessionId}.jsonl`);
+      await writeFile(transcript, '');
+
+      class PolledInput extends WorkBuddyInput {
+        poll() { return this.collect(); }
+      }
+      const restart = async () => {
+        const stateStore = new StateStore(path.join(root, 'state.json'));
+        await stateStore.load();
+        const input = new PolledInput({ stateStore, workBuddyRoot: root, hookEventDir });
+        return { input, stateStore };
+      };
+      const hook = async (hookEventName: string, atMs: number) => {
+        await mkdir(sessionHooks, { recursive: true });
+        await writeFile(path.join(sessionHooks, `${atMs}.json`), JSON.stringify({
+          transcript_path: transcript, session_id: sessionId, hook_event_name: hookEventName, observed_at_ms: atMs,
+        }));
+      };
+      const { input, stateStore } = await restart();
+      expect(await input.poll()).toEqual([]);
+
+      const records = await fixture();
+      const [prompt, reasoning] = records;
+      const response = records.at(-1)!;
+      const laterPromptAtMs = variant === 'timed' || variant === 'only the completion Stop' ? 2000 : undefined;
+      const earlier = [prompt, reasoning, {
+        type: 'message', role: 'assistant', id: 'interruption', status: 'incomplete', providerData: { skipRun: true },
+      }];
+      const later = [
+        { ...prompt, id: 'next-prompt', timestamp: laterPromptAtMs },
+        { ...response, id: 'next-response', parentId: 'next-prompt', timestamp: variant === 'timed' ? 2100 : undefined,
+          providerData: { ...response.providerData, conversationRequestId: 'next-request', messageId: 'next-response' } },
+      ];
+      const lines = (rows: WorkBuddyRecord[]) => rows.map(row => `${JSON.stringify(row)}\n`).join('');
+      await writeFile(transcript, lines([...earlier, ...later]));
+      await hook('UserPromptSubmit', 1000);
+      if (variant !== 'only the completion Stop') await hook('Stop', 1600);
+      if (variant === 'timed') {
+        // This Stop precedes the cancelled turn's reasoning and cannot seal it.
+        await hook('Stop', 1050);
+      }
+      if (laterPromptAtMs !== undefined) await hook('UserPromptSubmit', laterPromptAtMs);
+      if (variant !== 'untimed after restart') await hook('Stop', 2300);
+
+      expect(await input.poll()).toEqual([]);
+      const firstExport = await input.poll();
+      await stateStore.save();
+      const resumed = await restart();
+      const offsets = Object.values(resumed.stateStore.get(input.id).extra?.workbuddyTranscriptBytes as object);
+      expect(offsets).toEqual([Buffer.byteLength(lines(variant === 'untimed after restart' ? earlier : [...earlier, ...later]))]);
+      expect(await resumed.input.poll()).toEqual([]);
+
+      const expectedCancellation = [prompt.id, ['cancelled'], variant === 'only the completion Stop' ? '2000000000' : '1600000000'];
+      const expectedCompletion = ['next-prompt', ['stop'], variant === 'timed' ? '2100000000' : '2300000000'];
+      const completions = (entries: typeof firstExport) => entries.filter(row => row['event.name'] === 'llm.response')
+        .map(row => [row['gen_ai.turn.id'], row['gen_ai.response.finish_reasons'], row.time_unix_nano]);
+      if (variant === 'untimed after restart') {
+        expect(completions(firstExport)).toEqual([expectedCancellation]);
+        expect(firstExport.every(row => row['gen_ai.turn.id'] === prompt.id)).toBe(true);
+        await hook('Stop', 2300);
+        expect(await resumed.input.poll()).toEqual([]);
+        const final = await resumed.input.poll();
+        expect(final.map(row => row['event.name'])).toEqual(['other', 'llm.request', 'llm.response']);
+        expect(completions(final)).toEqual([expectedCompletion]);
+        expect(await resumed.input.poll()).toEqual([]);
+      } else {
+        expect(completions(firstExport)).toEqual([expectedCancellation, expectedCompletion]);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
