@@ -27,6 +27,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'workbuddy': 'workbuddy',
   'doubao-work': 'doubao',
   'dsh': 'dsh',
+  'trae-agent': 'trae-agent',
 };
 
 export function resolveAgentSystem(agentType: string): string {

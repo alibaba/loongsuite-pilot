@@ -59,7 +59,7 @@ describe('Orchestrator.resolvePilotDir', () => {
     return { packageDir, moduleUrl: pathToFileURL(modulePath).href };
   }
 
-  it('keeps the current pointer ahead of legacy and module package roots', () => {
+  it('prefers the module package root over the current pointer and legacy package', () => {
     const currentDir = path.join(dataDir, 'versions', 'v2');
     fs.mkdirSync(currentDir, { recursive: true });
     fs.writeFileSync(path.join(dataDir, 'current'), 'v2\n');
@@ -68,16 +68,29 @@ describe('Orchestrator.resolvePilotDir', () => {
     fs.mkdirSync(path.join(legacyDir, 'dist'), { recursive: true });
     fs.writeFileSync(path.join(legacyDir, 'dist', 'index.js'), '');
 
-    const { moduleUrl } = createModulePackage();
+    const { packageDir, moduleUrl } = createModulePackage();
+    expect(resolvePilotDir(moduleUrl)).toBe(packageDir);
+  });
+
+  it('falls back to the current pointer when the module package root is not a valid pilot package', () => {
+    const currentDir = path.join(dataDir, 'versions', 'v2');
+    fs.mkdirSync(currentDir, { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'current'), 'v2\n');
+
+    const { packageDir, moduleUrl } = createModulePackage();
+    fs.rmSync(path.join(packageDir, 'agents.d'), { recursive: true, force: true });
+
     expect(resolvePilotDir(moduleUrl)).toBe(currentDir);
   });
 
-  it('keeps the legacy package ahead of the module package root', () => {
+  it('falls back to the legacy package when the module root is invalid and no current pointer exists', () => {
     const legacyDir = path.join(dataDir, 'package');
     fs.mkdirSync(path.join(legacyDir, 'dist'), { recursive: true });
     fs.writeFileSync(path.join(legacyDir, 'dist', 'index.js'), '');
 
-    const { moduleUrl } = createModulePackage();
+    const { packageDir, moduleUrl } = createModulePackage();
+    fs.rmSync(path.join(packageDir, 'package.json'), { recursive: true, force: true });
+
     expect(resolvePilotDir(moduleUrl)).toBe(legacyDir);
   });
 

@@ -12,6 +12,18 @@ export interface ListenerConfig {
   includeConversationIds?: string[];
   /** Read-only source log directory override for the doubao-work listener. */
   logDir?: string;
+  /**
+   * log-watch trajectory agents (e.g. trae-agent): directory scanned for
+   * `trajectory*.json` files. Overrides the built-in default watch dir (P1-1).
+   */
+  trajectoryDir?: string;
+  /**
+   * log-watch trajectory agents: pin one exact trajectory file to poll.
+   * Takes precedence over `trajectoryDir` discovery when set (testing/advanced).
+   */
+  trajectoryFile?: string;
+  /** Explicit project root for Trae Agent trajectories. */
+  workspaceRoot?: string;
   /** Product source for the doubao-work listener; defaults to Doubao Work. */
   client?: 'doubao-work' | 'doubao';
 }

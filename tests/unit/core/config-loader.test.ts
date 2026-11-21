@@ -79,6 +79,18 @@ describe('ConfigLoader', () => {
     await expect(loadConfig()).rejects.toThrow('absolute local directories');
   });
 
+  it('loads explicit Trae workspace roots and disables invalid configurations', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'trae-agent-trajectory': { workspaceRoot: '~/project' },
+    } });
+    expect((await loadConfig()).listeners['trae-agent-trajectory'].workspaceRoot).toBe('/home/test/project');
+
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'trae-agent-trajectory': { workspaceRoot: 'relative' },
+    } });
+    expect((await loadConfig()).listeners['trae-agent-trajectory'].enabled).toBe(false);
+  });
+
   it('resolves span enrichers relative to config, home and PILOT_DATA, deduplicating paths', async () => {
     vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '/custom/config.json');
     mockReadJsonFile.mockResolvedValueOnce({
@@ -1996,6 +2008,17 @@ describe('ConfigLoader', () => {
         otlpTrace: { endpoint: 'http://localhost:4318', captureMessageContent: false },
       });
       expect(buildOtlpTraceConfig(await loadConfig())?.captureMessageContent).toBe(false);
+    });
+
+    it('leaves the turn idle fallback disabled by default', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://jaeger:4318' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+      expect(result!.turnIdleTimeoutMs).toBe(0);
     });
 
     it('buildOtlpTraceConfig allows custom resource attribute keys', async () => {

@@ -269,6 +269,8 @@ export function projectLogEntry(
   for (const [key, value] of Object.entries(entry)) {
     if (value === undefined || value === null) continue;
     if (LEGACY_ALIAS_FIELDS.has(key)) continue;
+    // Used to recheck workspace exclusions when replaying the local journal.
+    if (key === 'agent.trajectory.source.path') continue;
     if (key === OPENCLAW_SESSION_KEY) {
       if (entry['gen_ai.agent.type'] !== 'openclaw' || !isOpenClawSessionKey(value)) continue;
     } else if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;

@@ -168,7 +168,9 @@ export class InputManager extends EventEmitter {
     }
     input.setWorkspacePolicy(this.workspacePolicy);
     this.inputs.set(input.id, input);
-    if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes || input.id === 'qwen-work-cn-collaboration') {
+    const ownsDurableCheckpoint = input.agentType === ClientType.CodexCliHook
+      || input.agentType === ClientType.Hermes || input.agentType === ClientType.TraeAgent;
+    if (ownsDurableCheckpoint || input.id === 'qwen-work-cn-collaboration') {
       this.entryAbortControllers.set(input.id, new AbortController());
     }
     this.counters.set(input.id, {
@@ -212,7 +214,7 @@ export class InputManager extends EventEmitter {
           (input as BaseInput & { restoreAbortedDelivery(): void }).restoreAbortedDelivery();
         });
         input.holdCheckpointUntil(retained);
-      } else if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes) {
+      } else if (ownsDurableCheckpoint) {
         input.holdCheckpointUntil(handling);
       }
       const next = handling.catch(err => {
