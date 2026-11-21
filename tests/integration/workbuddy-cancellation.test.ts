@@ -206,3 +206,47 @@ it.each(['timed', 'untimed', 'untimed after restart', 'only the completion Stop'
     }
   },
 );
+
+it.each([
+  { earlierStop: 1600, earlierPromptAtMs: 1000 },
+  { earlierStop: undefined, earlierPromptAtMs: 1000 },
+  { earlierStop: 1600, earlierPromptAtMs: undefined },
+  { earlierStop: undefined, earlierPromptAtMs: undefined },
+])('preserves the next untimed turn after cancellation (earlier prompt time $earlierPromptAtMs, Stop $earlierStop)',
+  async ({ earlierStop, earlierPromptAtMs }) => {
+    const source = await fixture();
+    const [prompt, reasoning] = source;
+    const response = source.at(-1)!;
+    const records: WorkBuddyRecord[] = [
+      { ...prompt, timestamp: earlierPromptAtMs },
+      reasoning,
+      { type: 'message', role: 'assistant', status: 'incomplete', providerData: { skipRun: true } },
+      { ...prompt, id: 'next-prompt', timestamp: undefined },
+      { ...response, id: 'next-response', parentId: 'next-prompt', timestamp: undefined,
+        providerData: { ...response.providerData, conversationRequestId: 'next-request', messageId: 'next-response' } },
+    ];
+    const opts = {
+      sessionId: 'cancelled-before-untimed-turn',
+      hookEvents: [
+        { eventName: 'UserPromptSubmit', observedAtMs: 1000 },
+        ...(earlierStop === undefined ? [] : [{ eventName: 'Stop', observedAtMs: earlierStop }]),
+        { eventName: 'UserPromptSubmit', observedAtMs: 2000 },
+        { eventName: 'Stop', observedAtMs: 2300 },
+      ],
+      stopAtMs: 2300,
+    };
+    const entries = await buildWorkBuddyEvents(records, opts);
+    const repeated = await buildWorkBuddyEvents(records, opts);
+    expect(repeated.map(entry => entry['event.id'])).toEqual(entries.map(entry => entry['event.id']));
+    expect(entries.map(row => [row['gen_ai.turn.id'], row['event.name'], row.time_unix_nano])).toEqual([
+      [prompt.id, 'other', '1000000000'],
+      [prompt.id, 'llm.request', '1000000000'],
+      [prompt.id, 'llm.response', earlierStop === undefined ? '2000000000' : '1600000000'],
+      ['next-prompt', 'other', '2000000000'],
+      ['next-prompt', 'llm.request', '2000000000'],
+      ['next-prompt', 'llm.response', '2300000000'],
+    ]);
+    expect(entries.filter(row => row['event.name'] === 'llm.response')
+      .map(row => row['gen_ai.response.finish_reasons'])).toEqual([['cancelled'], ['stop']]);
+  },
+);

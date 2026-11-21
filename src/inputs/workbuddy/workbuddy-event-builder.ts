@@ -76,11 +76,16 @@ class HookEventResolver {
     return match;
   }
 
-  observeCompletedTurn(terminalAtMs: number, usedTranscriptTime: boolean): void {
+  peekPromptAfter(activityAtMs: number): number | undefined {
+    return this.events.find(event => !event.consumed && event.eventName === 'UserPromptSubmit'
+      && event.observedAtMs > activityAtMs)?.observedAtMs;
+  }
+
+  observeCompletedTurn(terminalAtMs: number, usedTranscriptTime: boolean, retainedPromptAtMs?: number): void {
     let nextPromptAtMs = Number.POSITIVE_INFINITY;
     for (const event of this.events) {
       if (event.consumed || event.eventName !== 'UserPromptSubmit') continue;
-      if (event.observedAtMs <= terminalAtMs) event.consumed = true;
+      if (event.observedAtMs <= terminalAtMs && event.observedAtMs !== retainedPromptAtMs) event.consumed = true;
       else nextPromptAtMs = Math.min(nextPromptAtMs, event.observedAtMs);
     }
 
@@ -202,12 +207,13 @@ export async function buildWorkBuddyEvents(
   const closeInterruptedTurn = async (
     boundarySource: WorkBuddyRecord,
     transcriptBoundary: number | undefined,
-    useStopFallback = false,
-    nextPromptAtMs?: number,
+    stopFallback?: { latestAtMs?: number; nextPromptHookAtMs?: number },
   ) => {
     const explicit = isExplicitCancellation(boundarySource);
     if (!pendingModel && !lastResponse && !(explicit && pendingUserInput)) return;
-    const boundaryTimestamp = transcriptBoundary ?? (useStopFallback ? takeTurnStop(nextPromptAtMs) : undefined);
+    const boundaryTimestamp = transcriptBoundary
+      ?? (stopFallback ? takeTurnStop(stopFallback.latestAtMs) : undefined)
+      ?? stopFallback?.nextPromptHookAtMs;
     if (boundaryTimestamp === undefined || (lastActivityAtMs !== undefined && boundaryTimestamp < lastActivityAtMs)) return;
     // Reasoning after a completed tool wave belongs to a new model invocation.
     // Keep the earlier response's tool_call finish reason in that case.
@@ -270,7 +276,7 @@ export async function buildWorkBuddyEvents(
       tools.delete(callId);
     }
     if (explicit) {
-      hookEvents.observeCompletedTurn(boundaryTimestamp, transcriptBoundary !== undefined);
+      hookEvents.observeCompletedTurn(boundaryTimestamp, transcriptBoundary !== undefined, stopFallback?.nextPromptHookAtMs);
       previousTurnTerminalAtMs = latestTimestamp(previousTurnTerminalAtMs, boundaryTimestamp);
     }
     lastResponse = undefined;
@@ -283,17 +289,27 @@ export async function buildWorkBuddyEvents(
   const closeExplicitCancellation = async (record: WorkBuddyRecord, index: number) => {
     const nativeBoundary = timestampMs(record);
     let nextPromptAtMs: number | undefined;
+    let nextPromptHookAtMs: number | undefined;
     if (nativeBoundary === undefined) {
-      // A Stop after the next native prompt cannot time this cancellation.
+      // Match the first following user row. A Stop after its prompt cannot
+      // time this cancellation, even if the next prompt time comes from a Hook.
       for (let nextIndex = index + 1; nextIndex < records.length; nextIndex++) {
         const next = records[nextIndex];
-        if (next.type === 'message' && next.role === 'user' && !isInternalRecord(next)) {
-          nextPromptAtMs = timestampMs(next);
-          break;
+        if (next.type !== 'message' || next.role !== 'user' || isInternalRecord(next)) continue;
+        nextPromptAtMs = timestampMs(next);
+        const activityAtMs = latestTimestamp(lastActivityAtMs, previousTurnTerminalAtMs);
+        if (nextPromptAtMs === undefined && activityAtMs !== undefined) {
+          // Leave the Prompt Hook available for the next user row. It is
+          // also the upper bound for cancellation if this turn has no Stop.
+          nextPromptHookAtMs = hookEvents.peekPromptAfter(activityAtMs);
         }
+        break;
       }
     }
-    await closeInterruptedTurn(record, nativeBoundary, true, nextPromptAtMs);
+    await closeInterruptedTurn(record, nativeBoundary, {
+      latestAtMs: nextPromptAtMs ?? nextPromptHookAtMs,
+      nextPromptHookAtMs,
+    });
   };
 
   const emitToolWave = async (
@@ -589,7 +605,7 @@ export async function buildWorkBuddyEvents(
   // The input provides a stable Stop only for records at or before that turn boundary.
   const finalRecord = records[records.length - 1];
   if (opts.stopAtMs !== undefined && finalRecord) {
-    await closeInterruptedTurn(finalRecord, undefined, true);
+    await closeInterruptedTurn(finalRecord, undefined, {});
   }
   await emitPendingUserInput(undefined, undefined, true);
 
