@@ -171,3 +171,47 @@ it('never uses a Stop before the request as the response timestamp', async () =>
   });
   expect(entries.map(row => [row['event.name'], row.time_unix_nano])).toEqual([['other', '2500000000']]);
 });
+
+it.each([{ skipRun: true }, { isCompactInternal: true }, { agent: 'compact' }])(
+  'keeps an untimed turn pending when only internal records establish timing (%j)', async internal => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-internal-stop-'));
+    try {
+      const f = await setup(root);
+      const older = [f.user, f.response];
+      const later = [
+        { ...f.user, id: 'second-turn', timestamp: undefined },
+        { ...f.reasoning, id: 'internal-compact', timestamp: 1550,
+          providerData: { ...f.reasoning.providerData, ...internal } },
+        { ...f.response, id: 'second-response', timestamp: undefined, parentId: 'second-turn',
+          providerData: { ...f.response.providerData, conversationRequestId: 'second-request', messageId: 'second-response' } },
+      ];
+      await writeFile(f.transcript, lines([...older, ...later]));
+      await f.hook('Stop', 1600);
+      expect(await f.input.poll()).toEqual([]);
+      const emitted = await f.input.poll();
+      await f.stateStore.save();
+      const { stateStore: committed } = await f.restart();
+      const offsets = Object.values(committed.get(f.input.id).extra?.workbuddyTranscriptBytes as object);
+
+      await f.hook('Stop', 2300);
+      const restarted = await f.restart();
+      expect(await restarted.input.poll()).toEqual([]);
+      const final = await restarted.input.poll();
+      expect({
+        premature: emitted.filter(row => row['gen_ai.turn.id'] === 'second-turn'),
+        offsets,
+        final: final.map(row => [row['gen_ai.turn.id'], row['event.name'], row.time_unix_nano]),
+      }).toEqual({
+        premature: [],
+        offsets: [Buffer.byteLength(lines(older))],
+        final: [
+          ['second-turn', 'other', '2300000000'],
+          ['second-turn', 'llm.request', '2300000000'],
+          ['second-turn', 'llm.response', '2300000000'],
+        ],
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

@@ -6,7 +6,7 @@ import type { Dirent, FSWatcher } from 'node:fs';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
-import { buildWorkBuddyEvents, isWorkBuddyTerminalAssistant } from './workbuddy-event-builder.js';
+import { buildWorkBuddyEvents, isInternalRecord, isWorkBuddyTerminalAssistant } from './workbuddy-event-builder.js';
 import type { WorkBuddyHookEvent, WorkBuddyRecord } from './workbuddy-types.js';
 
 const OFFSET_MAP_KEY = 'workbuddyTranscriptBytes';
@@ -538,6 +538,9 @@ function findFirstUnsealedUser(
       && hook.observedAtMs <= stopAtMs));
   };
   for (const [index, record] of records.entries()) {
+    const terminalAssistant = isWorkBuddyTerminalAssistant(records, index);
+    // The event builder has to recognize the row before its timestamp can close a boundary.
+    if (!terminalAssistant && isInternalRecord(record)) continue;
     const timestamp = typeof record.timestamp === 'number' && Number.isFinite(record.timestamp)
       ? record.timestamp : undefined;
     if (record.type === 'message' && record.role === 'user') {
@@ -557,7 +560,7 @@ function findFirstUnsealedUser(
       currentTerminalAtMs = undefined;
       continue;
     }
-    if (currentUser !== undefined && isWorkBuddyTerminalAssistant(records, index)) {
+    if (currentUser !== undefined && terminalAssistant) {
       currentTurnEnded = true;
       currentTerminalAtMs = timestamp;
     }
