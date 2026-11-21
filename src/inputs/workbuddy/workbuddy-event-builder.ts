@@ -639,7 +639,7 @@ function applyUsage(entry: AgentActivityEntry, record: WorkBuddyRecord): void {
   if (credit !== undefined) entry['agent.workbuddy.usage.credit'] = credit;
 }
 
-function isInternalRecord(record: WorkBuddyRecord): boolean {
+export function isInternalRecord(record: WorkBuddyRecord): boolean {
   const provider = record.providerData ?? {};
   return provider.isCompactInternal === true || provider.skipRun === true || provider.agent === 'compact';
 }
