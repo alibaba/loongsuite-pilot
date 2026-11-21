@@ -10,14 +10,25 @@ import type {
 
 type Message = { role: string; parts: Array<Record<string, JsonValue>> };
 
-interface StepContext {
-  stepId: string;
-  requestId: string;
+interface TurnContext {
   turnId: string;
   traceId: string;
   provider: string;
+}
+
+interface StepContext extends TurnContext {
+  stepId: string;
+  requestId: string;
   requestModel?: string;
   responseModel?: string;
+}
+
+interface PendingUserInput {
+  source: WorkBuddyRecord;
+  message: Message;
+  timestamp?: number;
+  fallbackTimestamp?: number;
+  traceId?: string;
 }
 
 interface ToolContext {
@@ -48,11 +59,36 @@ class HookEventResolver {
       .map(event => ({ ...event, consumed: false }));
   }
 
-  takeBoundary(eventName: string): WorkBuddyHookEvent | undefined {
-    const match = this.events.find(event => !event.consumed && event.eventName === eventName);
+  takeBoundary(eventName: string, earliestAtMs?: number): WorkBuddyHookEvent | undefined {
+    const match = this.events.find(event => !event.consumed
+      && event.eventName === eventName
+      && (earliestAtMs === undefined || event.observedAtMs >= earliestAtMs));
     if (!match) return undefined;
-    match.consumed = true;
+    // Hook snapshots can repeat the same observation. A repeated boundary
+    // cannot supply chronology for a separate turn.
+    for (const event of this.events) {
+      if (event.eventName === eventName && event.observedAtMs === match.observedAtMs) event.consumed = true;
+    }
     return match;
+  }
+
+  observeCompletedTurn(terminalAtMs: number, usedTranscriptTime: boolean): void {
+    let nextPromptAtMs = Number.POSITIVE_INFINITY;
+    for (const event of this.events) {
+      if (event.consumed || event.eventName !== 'UserPromptSubmit') continue;
+      if (event.observedAtMs <= terminalAtMs) event.consumed = true;
+      else nextPromptAtMs = Math.min(nextPromptAtMs, event.observedAtMs);
+    }
+
+    if (!usedTranscriptTime) return;
+    const stops = this.events.filter(event => !event.consumed && event.eventName === 'Stop'
+      && event.observedAtMs >= terminalAtMs);
+    const priorStop = stops[0]?.observedAtMs;
+    // Retire a distinct earlier Stop when there is evidence of another one.
+    // A single Stop can still supply a later turn with missing native timing.
+    if (priorStop === undefined || priorStop >= nextPromptAtMs
+      || !stops.some(stop => stop.observedAtMs > priorStop)) return;
+    for (const stop of stops) if (stop.observedAtMs === priorStop) stop.consumed = true;
   }
 
   takeTool(
@@ -93,8 +129,11 @@ export async function buildWorkBuddyEvents(
   let reasoningParts: Array<Record<string, JsonValue>> = [];
   let reasoningStartMs: number | undefined;
   let requestStartMs: number | undefined;
+  let previousTurnTerminalAtMs: number | undefined;
   let cwd: string | undefined;
   let lastResponse: AgentActivityEntry | undefined;
+  let pendingUserInput: PendingUserInput | undefined;
+  let turnStartEmitted = false;
 
   const push = async (entry: AgentActivityEntry, source: WorkBuddyRecord) => {
     if (cwd) {
@@ -103,6 +142,52 @@ export async function buildWorkBuddyEvents(
     }
     if (source.type) entry['agent.workbuddy.source_type'] = source.type;
     built.push(entry);
+  };
+
+  const rememberPendingUserContext = (source: WorkBuddyRecord) => {
+    if (!pendingUserInput) return;
+    pendingUserInput.fallbackTimestamp ??= timestampMs(source);
+    const rawTraceId = providerString(source, 'traceId');
+    if (!pendingUserInput.traceId && isValidTraceId(rawTraceId)) {
+      pendingUserInput.traceId = rawTraceId.toLowerCase();
+    }
+  };
+
+  const emitPendingUserInput = async (
+    traceId?: string,
+    fallbackTimestamp?: number,
+    useStopFallback = false,
+  ): Promise<boolean> => {
+    if (!pendingUserInput) return false;
+    const timestamp = pendingUserInput.timestamp
+      ?? fallbackTimestamp
+      ?? pendingUserInput.fallbackTimestamp
+      ?? (useStopFallback ? hookEvents.takeBoundary('Stop')?.observedAtMs : undefined);
+    if (timestamp === undefined) return false;
+
+    const context: TurnContext = {
+      turnId,
+      traceId: traceId
+        ?? pendingUserInput.traceId
+        ?? stableHex(`${opts.sessionId}:${turnId}`, 32),
+      provider: 'workbuddy',
+    };
+    const other = baseTurnEntry(
+      'other',
+      pendingUserInput.source,
+      opts.sessionId,
+      context,
+      `user-input:${turnId}`,
+      timestamp,
+    );
+    other['gen_ai.turn.start'] = true;
+    if (pendingUserInput.message.parts.length > 0) {
+      other['gen_ai.input.messages_delta'] = [pendingUserInput.message];
+    }
+    await push(other, pendingUserInput.source);
+    pendingUserInput = undefined;
+    turnStartEmitted = true;
+    return true;
   };
 
   const closeInterruptedTurn = async (boundarySource: WorkBuddyRecord): Promise<boolean> => {
@@ -177,6 +262,8 @@ export async function buildWorkBuddyEvents(
     );
     if (responseTimestamp === undefined) return;
     const requestTimestamp = requestStartMs ?? responseTimestamp;
+    rememberPendingUserContext(responseSource);
+    await emitPendingUserInput(step.traceId, requestTimestamp);
     const assistantToolParts = normalizedCalls.map(call => (
       toToolCallPart(call.record, call.callId, call.toolName)
     ));
@@ -195,7 +282,7 @@ export async function buildWorkBuddyEvents(
     );
     request['gen_ai.request.id'] = step.requestId;
     if (step.requestModel) request['gen_ai.request.model'] = step.requestModel;
-    if (firstStep) request['gen_ai.turn.start'] = true;
+    if (firstStep && !turnStartEmitted) request['gen_ai.turn.start'] = true;
     if (pendingDelta.length > 0) request['gen_ai.input.messages_delta'] = pendingDelta;
 
     const response = baseEntry(
@@ -252,14 +339,17 @@ export async function buildWorkBuddyEvents(
   for (let index = 0; index < records.length; index++) {
     const record = records[index];
     if (isInternalRecord(record)) continue;
-    if (typeof record.cwd === 'string' && record.cwd.length > 0) cwd = record.cwd;
 
     if (record.type === 'message' && record.role === 'user') {
       await closeInterruptedTurn(record);
+      // A later response without a timestamp may still need the Stop observation.
+      await emitPendingUserInput();
       tools.clear();
+      if (typeof record.cwd === 'string' && record.cwd.length > 0) cwd = record.cwd;
       turnOrdinal++;
       stepOrdinal = 0;
       firstStep = true;
+      turnStartEmitted = false;
       turnId = stringValue(record.id) ?? stableId(opts.sessionId, `turn:${turnOrdinal}:${record.timestamp ?? index}`);
       lastResponse = undefined;
       const message = toMessage(record, 'user');
@@ -268,8 +358,18 @@ export async function buildWorkBuddyEvents(
       reasoningStartMs = undefined;
       requestStartMs = timestampMs(record)
         ?? hookEvents.takeBoundary('UserPromptSubmit')?.observedAtMs;
+      const rawTraceId = providerString(record, 'traceId');
+      pendingUserInput = {
+        source: record,
+        message,
+        timestamp: requestStartMs,
+        traceId: isValidTraceId(rawTraceId) ? rawTraceId.toLowerCase() : undefined,
+      };
       continue;
     }
+
+    if (typeof record.cwd === 'string' && record.cwd.length > 0) cwd = record.cwd;
+    rememberPendingUserContext(record);
 
     if (record.type === 'reasoning') {
       reasoningParts.push(...toReasoningParts(record));
@@ -351,9 +451,11 @@ export async function buildWorkBuddyEvents(
         timestampMs(record),
       );
       const responseTimestamp = transcriptResponseTimestamp
-        ?? hookEvents.takeBoundary('Stop')?.observedAtMs;
+        ?? hookEvents.takeBoundary('Stop',
+          latestTimestamp(requestStartMs, previousTurnTerminalAtMs))?.observedAtMs;
       if (responseTimestamp === undefined) continue;
       const requestTimestamp = requestStartMs ?? responseTimestamp;
+      await emitPendingUserInput(step.traceId, requestTimestamp);
       const request = baseEntry(
         'llm.request',
         record,
@@ -364,7 +466,7 @@ export async function buildWorkBuddyEvents(
       );
       request['gen_ai.request.id'] = step.requestId;
       if (step.requestModel) request['gen_ai.request.model'] = step.requestModel;
-      if (firstStep) request['gen_ai.turn.start'] = true;
+      if (firstStep && !turnStartEmitted) request['gen_ai.turn.start'] = true;
       if (pendingDelta.length > 0) request['gen_ai.input.messages_delta'] = pendingDelta;
 
       const response = baseEntry(
@@ -387,6 +489,9 @@ export async function buildWorkBuddyEvents(
 
       await push(request, record);
       await push(response, record);
+      const terminalAtMs = timestampMs(record) ?? responseTimestamp;
+      hookEvents.observeCompletedTurn(terminalAtMs, transcriptResponseTimestamp !== undefined);
+      previousTurnTerminalAtMs = latestTimestamp(previousTurnTerminalAtMs, terminalAtMs);
       lastResponse = undefined;
       tools.clear();
       pendingDelta = [];
@@ -396,6 +501,8 @@ export async function buildWorkBuddyEvents(
       firstStep = false;
     }
   }
+
+  await emitPendingUserInput(undefined, undefined, true);
 
   return built;
 }
@@ -408,6 +515,20 @@ function baseEntry(
   eventSeed: string,
   timestamp: number,
 ): AgentActivityEntry {
+  return {
+    ...baseTurnEntry(eventName, source, sessionId, step, eventSeed, timestamp),
+    'gen_ai.step.id': step.stepId,
+  };
+}
+
+function baseTurnEntry(
+  eventName: AgentActivityEntry['event.name'],
+  source: WorkBuddyRecord,
+  sessionId: string,
+  turn: TurnContext,
+  eventSeed: string,
+  timestamp: number,
+): AgentActivityEntry {
   const time = millisecondsToNanoseconds(timestamp);
   return {
     time_unix_nano: time,
@@ -415,13 +536,12 @@ function baseEntry(
     'event.id': stableId(sessionId, eventSeed),
     'event.name': eventName,
     'user.id': '',
-    trace_id: step.traceId,
+    trace_id: turn.traceId,
     span_id: stableHex(`${sessionId}:${eventSeed}:span`, 16),
     'gen_ai.session.id': sessionId,
-    'gen_ai.turn.id': step.turnId,
-    'gen_ai.step.id': step.stepId,
+    'gen_ai.turn.id': turn.turnId,
     'gen_ai.agent.type': ClientType.WorkBuddy,
-    'gen_ai.provider.name': step.provider,
+    'gen_ai.provider.name': turn.provider,
     'agent.workbuddy.conversation_request.id': providerString(source, 'conversationRequestId'),
     'agent.workbuddy.runtime': providerString(source, 'agent'),
   };
@@ -519,9 +639,17 @@ function applyUsage(entry: AgentActivityEntry, record: WorkBuddyRecord): void {
   if (credit !== undefined) entry['agent.workbuddy.usage.credit'] = credit;
 }
 
-function isInternalRecord(record: WorkBuddyRecord): boolean {
+export function isInternalRecord(record: WorkBuddyRecord): boolean {
   const provider = record.providerData ?? {};
   return provider.isCompactInternal === true || provider.skipRun === true || provider.agent === 'compact';
+}
+
+export function isWorkBuddyTerminalAssistant(records: WorkBuddyRecord[], index: number): boolean {
+  const record = records[index];
+  const next = records[index + 1];
+  return record.type === 'message' && record.role === 'assistant'
+    && record.status !== 'incomplete' && !isInternalRecord(record)
+    && !(next?.type === 'function_call' && isSameResponseWave(record, next));
 }
 
 function normalizeToolStatus(status: unknown): string | undefined {
