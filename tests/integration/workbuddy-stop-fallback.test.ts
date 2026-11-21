@@ -328,3 +328,89 @@ it('uses native response time after a second observed Stop', async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it.each([false, true])('accepts native completion after the sole Stop for the turn corroborated by a later prompt hook (timed=%s)', async timed => {
+  const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-late-own-missing-old-hook-'));
+  try {
+    const f = await setup(root);
+    const previous = [f.user, f.response];
+    const later = [
+      { ...f.user, id: 'second-turn', timestamp: timed ? 1700 : undefined },
+      { ...f.response, id: 'second-response', parentId: 'second-turn', timestamp: 2100,
+        providerData: { ...f.response.providerData, conversationRequestId: 'second-request', messageId: 'second-response' } },
+    ];
+    await writeFile(f.transcript, lines([...previous, ...later]));
+    await f.hook('UserPromptSubmit', 1705);
+    await f.hook('Stop', 2000);
+    expect(await f.input.poll()).toEqual([]);
+    const result = await f.input.poll();
+    await f.stateStore.save();
+    const restarted = await f.restart();
+    expect(await restarted.input.poll()).toEqual([]);
+    expect({
+      events: result.filter(row => row['gen_ai.turn.id'] === 'second-turn').map(row => [row['event.name'], row.time_unix_nano]),
+      offsets: Object.values(restarted.stateStore.get(f.input.id).extra?.workbuddyTranscriptBytes as object),
+    }).toEqual({
+      events: [['other', timed ? '1700000000' : '1705000000'],
+        ['llm.request', timed ? '1700000000' : '1705000000'], ['llm.response', '2100000000']],
+      offsets: [Buffer.byteLength(lines([...previous, ...later]))],
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('preserves a stopped legacy turn with a native completion before the later prompt hook', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-late-own-legacy-with-later-hook-'));
+  try {
+    const f = await setup(root);
+    const current = [{ ...f.user, timestamp: undefined }, { ...f.response, timestamp: 1500 }];
+    await writeFile(f.transcript, lines(current));
+    await f.hook('UserPromptSubmit', 900);
+    await f.hook('Stop', 1300);
+    await f.hook('UserPromptSubmit', 1705);
+    expect(await f.input.poll()).toEqual([]);
+    const result = await f.input.poll();
+    await f.stateStore.save();
+    const restarted = await f.restart();
+    expect(await restarted.input.poll()).toEqual([]);
+    expect({
+      events: result.map(row => [row['gen_ai.turn.id'], row['event.name'], row.time_unix_nano]),
+      offsets: Object.values(restarted.stateStore.get(f.input.id).extra?.workbuddyTranscriptBytes as object),
+    }).toEqual({
+      events: [[f.user.id, 'other', '900000000'], [f.user.id, 'llm.request', '900000000'],
+        [f.user.id, 'llm.response', '1500000000']],
+      offsets: [Buffer.byteLength(lines(current))],
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('preserves late native completion under the sole Stop when the earlier prompt never responded', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-sole-responding-stop-'));
+  try {
+    const f = await setup(root);
+    const records = [
+      { ...f.user, timestamp: undefined },
+      { ...f.user, id: 'second-turn', timestamp: undefined },
+      { ...f.response, id: 'second-response', parentId: 'second-turn', timestamp: 2100 },
+    ];
+    await writeFile(f.transcript, lines(records));
+    await f.hook('Stop', 2000);
+    expect(await f.input.poll()).toEqual([]);
+    const result = await f.input.poll();
+    await f.stateStore.save();
+    const restarted = await f.restart();
+    expect(await restarted.input.poll()).toEqual([]);
+    expect(result.map(row => [row['gen_ai.turn.id'], row['event.name'], row.time_unix_nano])).toEqual([
+      ['second-turn', 'other', '2100000000'],
+      ['second-turn', 'llm.request', '2100000000'],
+      ['second-turn', 'llm.response', '2100000000'],
+    ]);
+    expect(Object.values(restarted.stateStore.get(f.input.id).extra?.workbuddyTranscriptBytes as object))
+      .toEqual([Buffer.byteLength(lines(records))]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -515,8 +515,9 @@ function findFirstUnsealedUser(
   hookEvents: WorkBuddyHookEvent[],
   stopAtMs: number,
 ): number | undefined {
-  const hasLaterPrompt = hookEvents.some(hook =>
-    hook.eventName === 'UserPromptSubmit' && hook.observedAtMs > stopAtMs);
+  const promptTimes = hookEvents.filter(hook => hook.eventName === 'UserPromptSubmit')
+    .map(hook => hook.observedAtMs);
+  const hasLaterPrompt = promptTimes.some(atMs => atMs > stopAtMs);
   // A Stop can be observed before a later turn reaches the same transcript.
   // Keep the first source row of that later turn for its own Stop.
   let currentUser: number | undefined;
@@ -527,23 +528,39 @@ function findFirstUnsealedUser(
   let currentActivityAtMs: number | undefined;
   let previousTerminalAtMs: number | undefined;
   let previousCancelledActivityAtMs: number | undefined;
+  let previousCancellationHadPrompt = false;
   let earlierCompletedTurns = 0;
   const stopCount = new Set(hookEvents.filter(hook =>
     hook.eventName === 'Stop' && hook.observedAtMs <= stopAtMs).map(hook => hook.observedAtMs)).size;
   const hasStopForCurrentTurn = () => {
     if (earlierCompletedTurns < stopCount) return true;
-    // For an untimed previous terminal, require a prompt hook that
-    // corroborates the current native prompt after previous model activity.
     const lowerBound = previousTerminalAtMs ?? previousCancelledActivityAtMs;
-    if (lowerBound === undefined) return false;
-    let earliestPromptAt = Number.NEGATIVE_INFINITY;
-    if (previousTerminalAtMs === undefined) {
-      if (currentUserAtMs === undefined || currentUserAtMs <= lowerBound) return false;
-      earliestPromptAt = currentUserAtMs;
+    if (lowerBound === undefined || (currentUserAtMs !== undefined && currentUserAtMs <= lowerBound)) return false;
+    // Two untimed boundaries need distinct prompt observations. A single
+    // prompt after earlier activity could still belong to the canceled turn.
+    if (previousTerminalAtMs === undefined && currentUserAtMs === undefined && !previousCancellationHadPrompt) {
+      return false;
     }
-    return hookEvents.some(hook =>
-      hook.eventName === 'UserPromptSubmit' && hook.observedAtMs > lowerBound
-      && hook.observedAtMs >= earliestPromptAt && hook.observedAtMs <= stopAtMs);
+    const earliestPromptAt = currentUserAtMs ?? Number.NEGATIVE_INFINITY;
+    return promptTimes.some(atMs => atMs > lowerBound && atMs >= earliestPromptAt && atMs <= stopAtMs);
+  };
+  const currentCutoff = () => {
+    const activityAfterStop = currentActivityAtMs !== undefined && currentActivityAtMs > stopAtMs;
+    const hasOwnStop = hasStopForCurrentTurn();
+    if (activityAfterStop && needsOwnStop && (!currentTerminal || !hasOwnStop)) {
+      return unconfirmedUser ?? currentUser;
+    }
+    if (unconfirmedUser === undefined) return undefined;
+    if (activityAfterStop && earlierCompletedTurns === 0) {
+      const terminalAt = currentTerminal?.atMs;
+      // An older prompt hook and a native terminal before the later prompt
+      // distinguish a late first response from the next queued turn.
+      if (terminalAt === undefined) return unconfirmedUser;
+      if (hasLaterPrompt && (!promptTimes.some(atMs => atMs <= stopAtMs)
+        || promptTimes.some(atMs => atMs > stopAtMs && atMs <= terminalAt))) return unconfirmedUser;
+    }
+    if ((!currentTerminal && (hasLaterPrompt || needsOwnStop)) || !hasOwnStop) return unconfirmedUser;
+    return undefined;
   };
   for (const [index, record] of records.entries()) {
     const terminalAssistant = isWorkBuddyTerminalAssistant(records, index);
@@ -552,11 +569,18 @@ function findFirstUnsealedUser(
     const timestamp = typeof record.timestamp === 'number' && Number.isFinite(record.timestamp)
       ? record.timestamp : undefined;
     if (record.type === 'message' && record.role === 'user') {
+      if (currentTerminal || needsOwnStop || (currentActivityAtMs ?? 0) > stopAtMs) {
+        const cutoff = currentCutoff();
+        if (cutoff !== undefined) return cutoff;
+      }
       if (currentTerminal) {
-        if (unconfirmedUser !== undefined && !hasStopForCurrentTurn()) return unconfirmedUser;
-        earlierCompletedTurns++;
+        const lastActivityAt = currentTerminal.cancelled ? currentActivityAtMs : undefined;
+        const priorBoundaryAt = previousTerminalAtMs ?? previousCancelledActivityAtMs ?? 0;
+        previousCancellationHadPrompt = lastActivityAt !== undefined
+          && promptTimes.some(atMs => atMs > priorBoundaryAt && atMs <= lastActivityAt);
+        previousCancelledActivityAtMs = lastActivityAt;
         previousTerminalAtMs = currentTerminal.atMs;
-        previousCancelledActivityAtMs = currentTerminal.cancelled ? currentActivityAtMs : undefined;
+        earlierCompletedTurns++;
         unconfirmedUser = undefined;
       }
       if (timestamp !== undefined && timestamp > stopAtMs) return unconfirmedUser ?? index;
@@ -574,18 +598,12 @@ function findFirstUnsealedUser(
     }
     if (currentUser === undefined || timestamp === undefined
       || !['message', 'reasoning', 'function_call', 'function_call_result'].includes(record.type ?? '')) continue;
-    // Native activity can follow its own Stop observation. A newer turn
-    // without a distinct Stop cannot use the earlier turn's observation.
-    const ambiguousFirstPrompt = earlierCompletedTurns === 0 && unconfirmedUser !== undefined;
-    if (timestamp > stopAtMs && (needsOwnStop || ambiguousFirstPrompt)) return unconfirmedUser ?? currentUser;
+    // Inspect the entire turn. A native response can arrive after its Stop,
+    // while an unfinished earlier step says nothing about ownership.
     currentActivityAtMs = Math.max(currentActivityAtMs ?? timestamp, timestamp);
-    // An unfinished step can start before the preceding turn's Stop.
-    if (terminalAssistant || !needsOwnStop) unconfirmedUser = undefined;
+    if (timestamp <= stopAtMs && (terminalAssistant || !needsOwnStop)) unconfirmedUser = undefined;
   }
-  if (unconfirmedUser === undefined) return undefined;
-  // A newer prompt without a terminal record cannot borrow the earlier Stop.
-  if ((!currentTerminal && (hasLaterPrompt || needsOwnStop)) || !hasStopForCurrentTurn()) return unconfirmedUser;
-  return undefined;
+  return currentCutoff();
 }
 
 async function readJsonlRange(
