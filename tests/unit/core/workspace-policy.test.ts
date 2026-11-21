@@ -107,6 +107,15 @@ describe('workspace exclusions', () => {
     fs.symlinkSync(target, link);
     const policy = new WorkspacePolicy([aliasParent, otherRule], state);
     expect(policy.allows(event('alias-only', physical))).toBe(false);
+    for (const equivalent of [
+      `${link}${path.sep}${path.sep}..`,
+      `${link}${path.sep}.${path.sep}..`,
+      `${aliasParent}${path.sep}`,
+    ]) {
+      const restarted = new WorkspacePolicy([otherRule, equivalent], state);
+      expect(restarted.excludes(physical)).toBe(true);
+      expect(restarted.allows(event('alias-only'))).toBe(false);
+    }
     const narrower = new WorkspacePolicy([lexical, otherRule], state);
     expect(narrower.excludes(physical)).toBe(false);
     expect(narrower.allows(event('alias-only', physical))).toBe(true);
@@ -114,6 +123,18 @@ describe('workspace exclusions', () => {
     const restarted = new WorkspacePolicy([otherRule, aliasParent], state);
     expect(restarted.excludes(physical)).toBe(false);
     expect(restarted.allows(event('alias-only'))).toBe(false);
+  });
+  it.runIf(process.platform === 'win32')('keeps Windows marker keys stable across spelling edits and separate across roots', () => {
+    const state = temp();
+    const drive = new WorkspacePolicy(['C:\\fixture\\link\\..'], state);
+    expect(drive.allows(event('drive', 'C:\\fixture'))).toBe(false);
+    expect(new WorkspacePolicy(['c:/FIXTURE//link/./../'], state).allows(event('drive'))).toBe(false);
+    expect(new WorkspacePolicy(['D:\\fixture\\link\\..'], state).allows(event('drive'))).toBe(true);
+
+    const unc = new WorkspacePolicy(['\\\\server\\share\\fixture\\link\\..'], state);
+    expect(unc.allows(event('unc', '\\\\server\\share\\fixture'))).toBe(false);
+    expect(new WorkspacePolicy(['//SERVER/share//FIXTURE/link/./../'], state).allows(event('unc'))).toBe(false);
+    expect(new WorkspacePolicy(['\\\\server\\other\\fixture\\link\\..'], state).allows(event('unc'))).toBe(true);
   });
   it('preflights batches before letting earlier content from a blocked session escape', () => {
     const root = temp(); const policy = new WorkspacePolicy([root]);

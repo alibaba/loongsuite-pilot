@@ -41,6 +41,17 @@ function hasParentSegment(value) {
   const native = path.sep === '\\' ? value.replaceAll('/', path.sep) : value;
   return native.split(path.sep).includes('..');
 }
+function markerRule(value) {
+  const windows = path.sep === '\\';
+  const native = windows ? value.replaceAll('/', path.sep) : value;
+  // Device and verbatim namespaces can interpret separators and dots differently.
+  if (windows && (native.startsWith('\\\\?\\') || native.startsWith('\\\\.\\')))
+    return value.toLowerCase();
+  const { root } = path.parse(native);
+  const parts = native.slice(root.length).split(path.sep).filter(part => part && part !== '.');
+  const stable = path.normalize(root) + parts.join(path.sep);
+  return windows ? stable.toLowerCase() : stable;
+}
 // Resolve existing ancestors too: a workspace may have been removed since the event.
 function real(value) {
   const suffix = [];
@@ -77,12 +88,14 @@ export class WorkspacePolicy {
     this.stateDirectory = stateDirectory;
     this.roots = validateExcludedWorkspaces(excluded).map(original => ({ original, lexical: normalize(original) }));
     const lexicalFingerprint = this.hash(JSON.stringify(this.roots.map(root => root.lexical).sort()));
-    const rawParentRules = this.roots.map(root => root.original).filter(hasParentSegment).sort();
+    const hasParentRules = this.roots.some(root => hasParentSegment(root.original));
     // Read markers made by older releases, but write decisions for parent rules separately.
-    this.legacyFingerprint = rawParentRules.length ? lexicalFingerprint : undefined;
-    this.fingerprint = rawParentRules.length
-      ? this.hash(JSON.stringify([lexicalFingerprint, rawParentRules]))
-      : lexicalFingerprint;
+    this.fingerprint = lexicalFingerprint;
+    if (hasParentRules) {
+      this.legacyFingerprint = lexicalFingerprint;
+      const rules = [...new Set(this.roots.map(root => markerRule(root.original)))].sort();
+      this.fingerprint = this.hash(JSON.stringify({ rules }));
+    }
   }
   get enabled() { return this.roots.length > 0; }
   hash(value) { return createHash('sha256').update(value).digest('hex'); }
