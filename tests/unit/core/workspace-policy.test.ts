@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,6 +25,29 @@ describe('workspace exclusions', () => {
     expect(new WorkspacePolicy([root]).excludes(path.join(alias, 'not-created'))).toBe(true);
     expect(new WorkspacePolicy([alias]).excludes(root)).toBe(true);
   });
+  it.skipIf(process.platform === 'win32')('matches the lexical and physical roots of a symlink followed by a parent segment', () => {
+    const dir = temp();
+    const lexicalRoot = path.join(dir, 'lexical');
+    const physicalRoot = path.join(dir, 'physical');
+    const target = path.join(physicalRoot, 'target');
+    const alias = path.join(lexicalRoot, 'link');
+    fs.mkdirSync(lexicalRoot);
+    fs.mkdirSync(target, { recursive: true });
+    fs.symlinkSync(target, alias);
+    const aliasParent = `${alias}${path.sep}..`;
+    expect(fs.realpathSync.native(aliasParent)).toBe(fs.realpathSync.native(physicalRoot));
+    for (const excluded of [lexicalRoot, physicalRoot]) {
+      const policy = new WorkspacePolicy([excluded]);
+      expect(policy.excludes(aliasParent)).toBe(true);
+      expect(policy.excludes(`${aliasParent}${path.sep}missing`)).toBe(true);
+    }
+    const policy = new WorkspacePolicy([aliasParent]);
+    expect(policy.excludes(lexicalRoot)).toBe(true);
+    expect(policy.excludes(physicalRoot)).toBe(true);
+    expect(policy.excludes(path.join(dir, 'public'))).toBe(false);
+    vi.spyOn(os, 'homedir').mockReturnValue(lexicalRoot);
+    expect(new WorkspacePolicy([physicalRoot]).excludes('~/link/..')).toBe(true);
+  });
   it('allows unknown workspace and never scans prompt, tool paths, or inferred git root', () => {
     const root = temp(); const policy = new WorkspacePolicy([root]);
     expect(policy.allows({ ...event('unknown'), 'gen_ai.input.messages': root, 'workspace.current_root': root, 'gen_ai.tool.call.arguments': { path: root } })).toBe(true);
@@ -46,6 +70,20 @@ describe('workspace exclusions', () => {
     expect(new WorkspacePolicy([], state).allows(event('one'))).toBe(true);
     expect(collector.allows({ ...event('one'), 'gen_ai.agent.type': 'cursor' })).toBe(true);
     expect(fs.readdirSync(state).join()).not.toContain(root);
+  });
+  it('honors blocked session markers written with a lexical policy fingerprint', () => {
+    const dir = temp();
+    const root = path.join(dir, 'private');
+    const configured = `${root}${path.sep}unused${path.sep}..`;
+    const state = path.join(dir, 'state');
+    const legacyRoot = process.platform === 'win32' ? root.toLowerCase() : root;
+    const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+    const legacyDirectory = path.join(state, hash(JSON.stringify([legacyRoot])));
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.writeFileSync(path.join(legacyDirectory, hash('codex\0legacy-session')), '');
+    const policy = new WorkspacePolicy([configured], state);
+    expect(policy.allows(event('legacy-session'))).toBe(false);
+    expect(policy.allows(event('new-session'))).toBe(true);
   });
   it('preflights batches before letting earlier content from a blocked session escape', () => {
     const root = temp(); const policy = new WorkspacePolicy([root]);

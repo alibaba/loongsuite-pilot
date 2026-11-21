@@ -29,22 +29,31 @@ export function validateExcludedWorkspaces(value) {
   }
   return [...new Set(value)];
 }
+function absolutePath(value) {
+  const expanded = value.startsWith('~/') ? `${os.homedir()}${path.sep}${value.slice(2)}` : value;
+  return path.isAbsolute(expanded) ? expanded : undefined;
+}
 function normalize(value) {
-  const expanded = value.startsWith('~/') ? path.join(os.homedir(), value.slice(2)) : value;
-  if (!path.isAbsolute(expanded))
-    return undefined;
-  const normalized = path.normalize(expanded);
+  const normalized = path.normalize(value);
   return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 // Resolve existing ancestors too: a workspace may have been removed since the event.
 function real(value) {
-  try {
-    return normalize(fs.realpathSync.native(value)) ?? value;
+  const suffix = [];
+  let ancestor = value;
+  for (;;) {
+    try {
+      ancestor = fs.realpathSync.native(ancestor);
+      break;
+    } catch {
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor)
+        break;
+      suffix.push(path.basename(ancestor));
+      ancestor = parent;
+    }
   }
-  catch {
-    const parent = path.dirname(value);
-    return parent === value ? value : path.join(real(parent), path.basename(value));
-  }
+  return normalize(suffix.length ? path.join(ancestor, suffix.reverse().join(path.sep)) : ancestor);
 }
 function within(candidate, root) {
   const relative = path.relative(root, candidate);
@@ -61,16 +70,23 @@ export class WorkspacePolicy {
   nextWarningAt = 0;
   constructor(excluded = [], stateDirectory) {
     this.stateDirectory = stateDirectory;
-    this.roots = validateExcludedWorkspaces(excluded).map(v => normalize(v));
-    this.fingerprint = this.hash(JSON.stringify([...this.roots].sort()));
+    this.roots = validateExcludedWorkspaces(excluded).map(original => ({ original, lexical: normalize(original) }));
+    this.fingerprint = this.hash(JSON.stringify(this.roots.map(root => root.lexical).sort()));
   }
   get enabled() { return this.roots.length > 0; }
   hash(value) { return createHash('sha256').update(value).digest('hex'); }
   excludes(directory) {
-    const candidate = normalize(directory);
-    if (!candidate)
+    if (!this.roots.length)
       return false;
-    return this.roots.some(root => within(candidate, root) || within(real(candidate), real(root)));
+    const original = absolutePath(directory);
+    if (!original)
+      return false;
+    const lexical = normalize(original);
+    if (this.roots.some(root => within(lexical, root.lexical)))
+      return true;
+    // The filesystem follows symlinks before processing later parent segments.
+    const physical = real(original);
+    return this.roots.some(root => within(physical, real(root.original)));
   }
   persistMarker(marker) {
     try {
