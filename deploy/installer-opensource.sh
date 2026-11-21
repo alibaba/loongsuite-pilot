@@ -1482,11 +1482,13 @@ fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
 install_loongsuite_pilot_command() {
     msg "==> 安装服务管理脚本..." "==> Installing service management script..."
     local selected_dir record_tmp
+    # Keep trailing newlines visible until we have validated the physical path.
     selected_dir=$(CDPATH= cd -P -- "$DATA_DIR" && printf '%s.' "$PWD")
     selected_dir=${selected_dir%.}
     case "$selected_dir" in
         *$'\n'*|*$'\r'*) echo "The resolved data directory must be a single-line path" >&2; return 1 ;;
     esac
+    DATA_DIR="$selected_dir"
     local global_bin_dir="$HOME/.local/bin"
     mkdir -p "$global_bin_dir"
 

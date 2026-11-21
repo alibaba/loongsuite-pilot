@@ -74,11 +74,12 @@ describe.skipIf(process.platform === 'win32')('installed data directory', () => 
     const installCommand = installer.match(/^install_loongsuite_pilot_command\(\) \{[\s\S]*?^\}/m)[0];
     for (let attempt = 0; attempt < 2; attempt++) {
       // Prevent the isolated fixture from creating a global /usr/local/bin link.
-      run(`${installCommand}\nmsg() { :; }\nln() { :; }\ninstall_loongsuite_pilot_command`, {
+      const firstLaunchDir = run(`${installCommand}\nmsg() { :; }\nln() { :; }\ninstall_loongsuite_pilot_command >/dev/null\nprintf '%s' "$DATA_DIR"`, {
         DATA_DIR: inputDir, PERMANENT_DIR: packageDir, CDPATH: cdpath,
         DEFAULT_DATA_DIR: join(home, '.loongsuite-pilot'),
         INSTALL_DATA_DIR_FILE: join(home, '.loongsuite-pilot/data-dir'),
       });
+      expect(firstLaunchDir).toBe(selected);
       expect(readFileSync(join(home, '.loongsuite-pilot/data-dir'), 'utf8')).toBe(selected + '\n');
       expect(readFileSync(join(home, '.local/bin/loongsuite-pilot'), 'utf8')).toBe(service);
       expect(run('source "$1"; printf "%s" "$DATA_DIR"')).toBe(selected);
@@ -86,14 +87,18 @@ describe.skipIf(process.platform === 'win32')('installed data directory', () => 
   });
 
   it.each([
-    ['systemd-user', 'data with spaces'],
-    ['systemd-system', 'data with spaces'],
-    ['systemd-user', 'data "quoted" %n \\'],
-    ['systemd-system', 'data "quoted" %n \\'],
-  ])('%s units preserve %s for collector and updater', (kind, name) => {
+    ['systemd-user', 'data with spaces', false],
+    ['systemd-system', 'data with spaces', false],
+    ['systemd-user', 'data "quoted" %n \\', false],
+    ['systemd-system', 'data "quoted" %n \\', false],
+    ['systemd-user', 'data via parent', true],
+    ['systemd-system', 'data via parent', true],
+  ])('%s units preserve %s for collector and updater (parent component: %s)', (kind, name, parentComponent) => {
     const selected = join(root, name);
+    const launchPath = parentComponent ? [root, 'work', '..', name].join(sep) : selected;
     const escaped = selected.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%');
     mkdirSync(selected);
+    mkdirSync(join(root, 'work'));
     run(`source "$1"
 SYSTEMD_USER_UNIT_DIR="$HOME/units"
 SYSTEMD_SYSTEM_UNIT_DIR="$HOME/units"
@@ -105,7 +110,7 @@ if [ "$UNIT_KIND" = systemd-user ]; then
 else
   _write_systemd_system_unit fixture
   _write_systemd_system_updater_unit fixture
-fi`, { LOONGSUITE_PILOT_DATA_DIR: selected, UNIT_KIND: kind });
+fi`, { LOONGSUITE_PILOT_DATA_DIR: launchPath, UNIT_KIND: kind });
     for (const daemon of ['loongsuite-pilot', 'loongsuite-pilot-updater']) {
       const unitName = kind === 'systemd-user' ? `${daemon}.service` : `${daemon}-fixture.service`;
       const unit = readFileSync(join(home, 'units', unitName), 'utf8');

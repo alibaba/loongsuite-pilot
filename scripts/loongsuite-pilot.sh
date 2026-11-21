@@ -2181,17 +2181,26 @@ _systemd_escape_value() {
     printf '%s' "$value"
 }
 
-_systemd_data_environment() {
+_systemd_data_settings() {
+    local working_dir selected_dir
+    # systemd requires a normalized path. End the raw value with /. to keep
+    # trailing whitespace or a backslash from changing the unit syntax.
+    working_dir=$(CDPATH= cd -P -- "$DATA_DIR" && printf '%s/.' "$PWD") || return 1
+    case "$working_dir" in
+        *$'\n'*|*$'\r'*) echo "The resolved data directory must be a single-line path" >&2; return 1 ;;
+    esac
+    selected_dir=${working_dir%/.}
+    printf 'WorkingDirectory=%s\n' "${working_dir//%/%%}"
     if [ -n "${LOONGSUITE_PILOT_DATA_DIR:-}" ]; then
-        printf 'Environment="LOONGSUITE_PILOT_DATA_DIR=%s"\n' "$(_systemd_escape_value "$DATA_DIR")"
+        printf 'Environment="LOONGSUITE_PILOT_DATA_DIR=%s"\n' "$(_systemd_escape_value "$selected_dir")"
     fi
-    printf 'Environment="AGENT_DATA_COLLECTION_CONFIG=%s"\n' "$(_systemd_escape_value "$CONFIG_FILE")"
+    printf 'Environment="AGENT_DATA_COLLECTION_CONFIG=%s"\n' "$(_systemd_escape_value "${selected_dir%/}/config.json")"
 }
 
-# The raw WorkingDirectory value ends in /. so a directory whose name ends in
-# whitespace or a backslash keeps its literal name when systemd reads the line.
 _write_systemd_user_unit() {
-    mkdir -p "$SYSTEMD_USER_UNIT_DIR"
+    local data_settings
+    mkdir -p "$SYSTEMD_USER_UNIT_DIR" "$DATA_DIR"
+    data_settings=$(_systemd_data_settings) || return 1
     cat > "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot.service" << UNITEOF
 [Unit]
 Description=LoongSuite Pilot
@@ -2200,8 +2209,7 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/loongsuite-pilot run
-WorkingDirectory=${DATA_DIR//%/%%}/.
-$(_systemd_data_environment)
+$data_settings
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=65536
@@ -2212,7 +2220,9 @@ UNITEOF
 }
 
 _write_systemd_user_updater_unit() {
-    mkdir -p "$SYSTEMD_USER_UNIT_DIR"
+    local data_settings
+    mkdir -p "$SYSTEMD_USER_UNIT_DIR" "$DATA_DIR"
+    data_settings=$(_systemd_data_settings) || return 1
     cat > "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot-updater.service" << UNITEOF
 [Unit]
 Description=LoongSuite Pilot Auto-Updater
@@ -2221,8 +2231,7 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/loongsuite-pilot run-updater
-WorkingDirectory=${DATA_DIR//%/%%}/.
-$(_systemd_data_environment)
+$data_settings
 KillMode=process
 Restart=on-failure
 RestartSec=60
@@ -2240,9 +2249,11 @@ _write_systemd_system_unit() {
     local target_bin="$target_home/.local/bin/loongsuite-pilot"
     local unit_name="loongsuite-pilot-${target_user}.service"
     local unit_path="$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name"
+    local data_settings
 
     maybe_sudo mkdir -p "$SYSTEMD_SYSTEM_UNIT_DIR"
     ensure_dirs
+    data_settings=$(_systemd_data_settings) || return 1
     maybe_sudo tee "$unit_path" > /dev/null << UNITEOF
 [Unit]
 Description=LoongSuite Pilot (${target_user})
@@ -2253,9 +2264,8 @@ Type=simple
 User=${target_user}
 Group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
 ExecStart=${target_bin} run
-WorkingDirectory=${DATA_DIR//%/%%}/.
 Environment=HOME=${target_home}
-$(_systemd_data_environment)
+$data_settings
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=65536
@@ -2312,9 +2322,11 @@ _write_systemd_system_updater_unit() {
     local target_bin="$target_home/.local/bin/loongsuite-pilot"
     local unit_name="loongsuite-pilot-updater-${target_user}.service"
     local unit_path="$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name"
+    local data_settings
 
     maybe_sudo mkdir -p "$SYSTEMD_SYSTEM_UNIT_DIR"
     ensure_dirs
+    data_settings=$(_systemd_data_settings) || return 1
     maybe_sudo tee "$unit_path" > /dev/null << UNITEOF
 [Unit]
 Description=LoongSuite Pilot Auto-Updater (${target_user})
@@ -2325,9 +2337,8 @@ Type=simple
 User=${target_user}
 Group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
 ExecStart=${target_bin} run-updater
-WorkingDirectory=${DATA_DIR//%/%%}/.
 Environment=HOME=${target_home}
-$(_systemd_data_environment)
+$data_settings
 KillMode=process
 Restart=on-failure
 RestartSec=60
@@ -2718,14 +2729,14 @@ autostart_install_collector_only() {
             echo "launchd" > "$INIT_TYPE_FILE"
             ;;
         systemd-user)
-            _write_systemd_user_unit
+            _write_systemd_user_unit || return 1
             systemctl --user daemon-reload &>/dev/null
             systemctl --user enable --now loongsuite-pilot.service &>/dev/null
             enable_linger || true
             echo "systemd-user" > "$INIT_TYPE_FILE"
             ;;
         systemd-system)
-            _write_systemd_system_unit "$target_user"
+            _write_systemd_system_unit "$target_user" || return 1
             maybe_sudo systemctl daemon-reload &>/dev/null
             maybe_sudo systemctl enable --now "loongsuite-pilot-${target_user}.service" &>/dev/null
             echo "systemd-system" > "$INIT_TYPE_FILE"
@@ -2758,14 +2769,14 @@ autostart_install_updater_only() {
             echo "launchd" > "$INIT_TYPE_FILE"
             ;;
         systemd-user)
-            _write_systemd_user_updater_unit
+            _write_systemd_user_updater_unit || return 1
             systemctl --user daemon-reload &>/dev/null
             systemctl --user enable --now loongsuite-pilot-updater.service &>/dev/null
             enable_linger || true
             echo "systemd-user" > "$INIT_TYPE_FILE"
             ;;
         systemd-system)
-            _write_systemd_system_updater_unit "$target_user"
+            _write_systemd_system_updater_unit "$target_user" || return 1
             maybe_sudo systemctl daemon-reload &>/dev/null
             maybe_sudo systemctl enable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null
             echo "systemd-system" > "$INIT_TYPE_FILE"
@@ -2804,9 +2815,9 @@ autostart_install() {
             echo "launchd" > "$INIT_TYPE_FILE"
             ;;
         systemd-user)
-            _write_systemd_user_unit
+            _write_systemd_user_unit || return 1
             if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
-                _write_systemd_user_updater_unit
+                _write_systemd_user_updater_unit || return 1
             fi
             systemctl --user daemon-reload &>/dev/null
             systemctl --user enable --now loongsuite-pilot.service &>/dev/null
@@ -2817,9 +2828,9 @@ autostart_install() {
             echo "systemd-user" > "$INIT_TYPE_FILE"
             ;;
         systemd-system)
-            _write_systemd_system_unit "$target_user"
+            _write_systemd_system_unit "$target_user" || return 1
             if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
-                _write_systemd_system_updater_unit "$target_user"
+                _write_systemd_system_updater_unit "$target_user" || return 1
             fi
             maybe_sudo systemctl daemon-reload &>/dev/null
             maybe_sudo systemctl enable --now "loongsuite-pilot-${target_user}.service" &>/dev/null
