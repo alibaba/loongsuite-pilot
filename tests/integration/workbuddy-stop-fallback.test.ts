@@ -414,3 +414,42 @@ it('preserves late native completion under the sole Stop when the earlier prompt
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it.each([true, false])('uses native reasoning before an untimed prior response when matching a sole Stop (later Prompt Hook %s)',
+  async hasPromptHook => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-native-reasoning-boundary-'));
+    try {
+      const f = await setup(root);
+      const older = [f.user, f.reasoning, { ...f.response, timestamp: undefined }];
+      const later = [
+        { ...f.user, id: 'second-turn', timestamp: undefined },
+        { ...f.response, id: 'second-response', timestamp: undefined, parentId: 'second-turn',
+          providerData: { ...f.response.providerData, conversationRequestId: 'second-request', messageId: 'second-response' } },
+      ];
+      const records = [...older, ...later];
+      await writeFile(f.transcript, lines(records));
+      if (hasPromptHook) await f.hook('UserPromptSubmit', 2000);
+      await f.hook('Stop', hasPromptHook ? 2300 : 1600);
+      expect(await f.input.poll()).toEqual([]);
+      const initial = await f.input.poll();
+      await f.stateStore.save();
+      const restarted = await f.restart();
+      expect(Object.values(restarted.stateStore.get(f.input.id).extra?.workbuddyTranscriptBytes as object))
+        .toEqual([Buffer.byteLength(lines(hasPromptHook ? records : older))]);
+      let laterOutput = initial.filter(row => row['gen_ai.turn.id'] === 'second-turn');
+      if (!hasPromptHook) {
+        expect(laterOutput).toEqual([]);
+        await f.hook('Stop', 2300);
+        expect(await restarted.input.poll()).toEqual([]);
+        laterOutput = await restarted.input.poll();
+      }
+      expect(laterOutput.map(row => [row['gen_ai.turn.id'], row['event.name'], row.time_unix_nano])).toEqual([
+        ['second-turn', 'other', hasPromptHook ? '2000000000' : '2300000000'],
+        ['second-turn', 'llm.request', hasPromptHook ? '2000000000' : '2300000000'],
+        ['second-turn', 'llm.response', '2300000000'],
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
