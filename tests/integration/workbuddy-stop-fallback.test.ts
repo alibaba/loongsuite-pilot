@@ -215,3 +215,57 @@ it.each([{ skipRun: true }, { isCompactInternal: true }, { agent: 'compact' }])(
     }
   },
 );
+
+it.each([
+  { scenario: 'late reasoning', reasoningAtMs: 1700 },
+  { scenario: 'early reasoning', reasoningAtMs: 1595 },
+  { scenario: 'response', hasResponse: true },
+  { scenario: 'queued prompt', promptAtMs: 1650 },
+])('waits for the next Stop when a timed user row predates the earlier Stop ($scenario)',
+  async ({ reasoningAtMs, hasResponse, promptAtMs }) => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-frontloaded-prompt-'));
+    try {
+      const f = await setup(root);
+      const older = [f.user, f.response];
+      const user = { ...f.user, id: 'second-turn', timestamp: 1590 };
+      const assistant = { ...f.response, id: 'second-response', parentId: 'second-turn', timestamp: 2200,
+        providerData: { ...f.response.providerData, conversationRequestId: 'second-request', messageId: 'second-response' } };
+      const active = [user];
+      if (reasoningAtMs !== undefined) {
+        active.push({ ...f.reasoning, id: 'second-reasoning', timestamp: reasoningAtMs, parentId: 'second-turn' });
+      } else if (hasResponse) {
+        active.push(assistant);
+      }
+      await writeFile(f.transcript, lines([...older, ...active]));
+      await f.hook('Stop', 1600);
+      if (promptAtMs !== undefined) await f.hook('UserPromptSubmit', promptAtMs);
+      expect(await f.input.poll()).toEqual([]);
+      const exported = await f.input.poll();
+      await f.stateStore.save();
+      const { stateStore: committed } = await f.restart();
+      const offset = Object.values(committed.get(f.input.id).extra?.workbuddyTranscriptBytes as object);
+
+      if (!hasResponse) await appendFile(f.transcript, lines([assistant]));
+      await f.hook('Stop', 2300);
+      const restarted = await f.restart();
+      expect(await restarted.input.poll()).toEqual([]);
+      const final = await restarted.input.poll();
+      const responseAtMs = reasoningAtMs ?? assistant.timestamp;
+      expect({
+        premature: exported.filter(row => row['gen_ai.turn.id'] === 'second-turn').map(row => row['event.name']),
+        offset,
+        final: final.map(row => [row['gen_ai.turn.id'], row['event.name'], row.time_unix_nano]),
+      }).toEqual({
+        premature: [],
+        offset: [Buffer.byteLength(lines(older))],
+        final: [
+          ['second-turn', 'other', '1590000000'],
+          ['second-turn', 'llm.request', '1590000000'],
+          ['second-turn', 'llm.response', String(responseAtMs * 1_000_000)],
+        ],
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

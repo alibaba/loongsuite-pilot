@@ -519,9 +519,9 @@ function findFirstUnsealedUser(
     hook.eventName === 'UserPromptSubmit' && hook.observedAtMs > stopAtMs);
   // A Stop can be observed before a later turn reaches the same transcript.
   // Keep the first source row of that later turn for its own Stop.
-  let firstUser: number | undefined;
   let currentUser: number | undefined;
   let unconfirmedUser: number | undefined;
+  let needsOwnStop = false;
   let currentTurnEnded = false;
   let currentTerminalAtMs: number | undefined;
   let previousTerminalAtMs: number | undefined;
@@ -550,10 +550,9 @@ function findFirstUnsealedUser(
         unconfirmedUser = undefined;
       }
       if (timestamp !== undefined && timestamp > stopAtMs) return unconfirmedUser ?? index;
-      unconfirmedUser = timestamp === undefined && (firstUser !== undefined || hasLaterPrompt)
-        ? unconfirmedUser ?? index
-        : undefined;
-      firstUser ??= index;
+      needsOwnStop = earlierCompletedTurns > 0 && !hasStopForCurrentTurn();
+      const untimedPrompt = timestamp === undefined && (currentUser !== undefined || hasLaterPrompt);
+      unconfirmedUser = untimedPrompt || needsOwnStop ? unconfirmedUser ?? index : undefined;
       currentUser = index;
       currentTurnEnded = false;
       currentTerminalAtMs = undefined;
@@ -563,13 +562,13 @@ function findFirstUnsealedUser(
       currentTurnEnded = true;
       currentTerminalAtMs = timestamp;
     }
-    if (unconfirmedUser === undefined) continue;
-    // Unrelated usage and generated titles do not identify the active turn.
-    if (!['message', 'reasoning', 'function_call', 'function_call_result'].includes(record.type ?? '')) continue;
-    if (timestamp !== undefined) {
-      if (timestamp > stopAtMs) return unconfirmedUser;
-      unconfirmedUser = undefined;
-    }
+    // A user record can be queued before the preceding Stop. Model activity
+    // observed after that Stop keeps the entire later turn for the next poll.
+    if (currentUser === undefined || timestamp === undefined
+      || !['message', 'reasoning', 'function_call', 'function_call_result'].includes(record.type ?? '')) continue;
+    if (timestamp > stopAtMs) return unconfirmedUser ?? currentUser;
+    // An unfinished step can start before the preceding turn's Stop.
+    if (terminalAssistant || !needsOwnStop) unconfirmedUser = undefined;
   }
   if (unconfirmedUser === undefined) return undefined;
   // A newer prompt without a terminal record cannot borrow the earlier Stop.
