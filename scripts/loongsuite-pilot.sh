@@ -2851,6 +2851,12 @@ case "${1:-status}" in
     restart-updater)     cmd_restart_updater ;;
     run)                 cmd_run ;;
     run-updater)         cmd_run_updater ;;
+    sdk-hook)
+        pilot_bin=$(resolve_pilot_bin) || exit 1
+        hook_bin="${pilot_bin%/*}/loongsuite-pilot-sdk-hook"
+        [ -f "$hook_bin" ] && [ ! -L "$hook_bin" ] && [ -x "$hook_bin" ] || exit 1
+        exec "$hook_bin" "$@"
+        ;;
     hook-process)
         shift
         pilot_bin=$(resolve_pilot_bin) || { printf '%s\n' '{}'; exit 0; }

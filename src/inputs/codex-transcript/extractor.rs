@@ -105,6 +105,27 @@ pub fn extract_codex_transcript_meta(record: &Map<String, Value>) -> Option<Code
     })
 }
 
+// Cold recovery owns the record. Move retained payloads before extracting
+// the small association fields so they are never cloned during conversion.
+pub(super) fn owned_transcript_meta(mut record: Map<String, Value>) -> Option<CodexTranscriptMeta> {
+    let payload = record.get_mut("payload")?.as_object_mut()?;
+    let instructions = payload
+        .remove("base_instructions")
+        .and_then(|v| match v {
+            Value::Object(mut object) => object.remove("text"),
+            other => Some(other),
+        })
+        .and_then(|v| match v {
+            Value::String(s) if !s.is_empty() => Some(s),
+            _ => None,
+        });
+    let tools = payload.remove("dynamic_tools").filter(Value::is_array);
+    let mut meta = extract_codex_transcript_meta(&record)?;
+    meta.base_instructions = instructions;
+    meta.tool_definitions = tools;
+    Some(meta)
+}
+
 pub fn extract_codex_terminal_turn(
     records: &[Map<String, Value>],
     meta: Option<&CodexTranscriptMeta>,

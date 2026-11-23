@@ -480,57 +480,14 @@ pub async fn last_complete_jsonl_offset(
     Ok(0)
 }
 
-// Only these members feed extract_codex_transcript_meta. In particular,
-// historical "instructions" can occupy almost the entire allowed record.
-struct OwnerFields(bool);
-
-impl<'de> serde::de::DeserializeSeed<'de> for OwnerFields {
-    type Value = Map<String, Value>;
-
-    fn deserialize<D: serde::Deserializer<'de>>(
-        self,
-        deserializer: D,
-    ) -> Result<Self::Value, D::Error> {
-        deserializer.deserialize_map(self)
-    }
-}
-
-impl<'de> serde::de::Visitor<'de> for OwnerFields {
-    type Value = Map<String, Value>;
-
-    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("a Codex session metadata object")
-    }
-
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let mut selected = Map::new();
-        while let Some(key) = map.next_key::<String>()? {
-            let value = match (self.0, key.as_str()) {
-                (false, "payload") => Value::Object(map.next_value_seed(OwnerFields(true))?),
-                (_, "timestamp")
-                | (false, "type")
-                | (
-                    true,
-                    "id" | "session_id" | "source" | "forked_from_id" | "thread_source"
-                    | "model_provider" | "base_instructions" | "dynamic_tools",
-                ) => map.next_value()?,
-                _ => {
-                    map.next_value::<serde::de::IgnoredAny>()?;
-                    continue;
-                }
-            };
-            selected.insert(key, value);
-        }
-        Ok(selected)
-    }
-}
+#[path = "owner_json.rs"]
+mod owner_json;
 
 pub async fn read_owner_record_at(
     file_path: &str,
     offset: i64,
     runtime: Option<&InputRuntime>,
 ) -> anyhow::Result<Option<Map<String, Value>>> {
-    use serde::de::DeserializeSeed;
     let started = InputRuntimeAccumulator::now();
     let (record, reads) = crate::utils::source_access::open_with(file_path, move |mut file| {
         file.seek(SeekFrom::Start(offset.max(0) as u64))?;
@@ -557,17 +514,14 @@ pub async fn read_owner_record_at(
                 (self.0)(buf)
             }
         }
-        let reader = std::io::BufReader::with_capacity(64 * 1024, LineReader(&mut read_line));
-        let mut json = serde_json::Deserializer::from_reader(reader);
-        let record = OwnerFields(false)
-            .deserialize(&mut json)
-            .and_then(|record| {
-                json.end()?;
-                Ok(record)
-            });
+        let mut reader = std::io::BufReader::with_capacity(64 * 1024, LineReader(&mut read_line));
+        let record = owner_json::read(&mut reader);
         if let Err(error) = &record {
-            if error.is_io() {
-                return Err(io::Error::other(error.to_string()));
+            if !matches!(
+                error.kind(),
+                io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+            ) {
+                return Err(io::Error::new(error.kind(), error.to_string()));
             }
         }
         Ok((record.ok().filter(|_| complete), reads))

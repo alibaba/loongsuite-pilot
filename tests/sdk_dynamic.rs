@@ -741,38 +741,57 @@ fn shared_hook_binary_publishes_standalone_qoder_wakeup() {
 
 #[test]
 fn shared_hook_binary_publishes_standalone_codex_wakeup() {
-    let root = tempfile::tempdir().unwrap();
-    let data = root.path().join("data");
-    let home = root.path().join("codex");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"))
-        .args(["hook-process", "codex", "stop"])
-        .env("LOONGSUITE_PILOT_SDK_LIBRARY", library_path())
-        .env("LOONGSUITE_PILOT_DATA_DIR", &data)
-        .env("CODEX_HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    writeln!(
-        child.stdin.take().unwrap(),
-        "{}",
-        json!({"session_id":session,"turn_id":"fixture-turn"})
-    )
-    .unwrap();
-    let result = child.wait_with_output().unwrap();
-    assert!(result.status.success());
-    assert_eq!(
-        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
-        json!({})
-    );
-    let marker = data
-        .join("state/codex/transcript-wakeups")
-        .join(format!("{session}.json"));
-    let content: Value = serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
-    assert_eq!(content["recovery_turn_id"], "fixture-turn");
-    assert_eq!(content["hook_event"], "stop");
-    assert_eq!(content["session_dir"], json!(home.join("sessions")));
+    for fault in ["full", "locked", "directory"] {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let home = root.join("codex");
+        let sessions = home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let data = root.join("sdk");
+        let state = root.join("pilot");
+        let metrics = state.join("state/hook-metrics");
+        std::fs::create_dir_all(&metrics).unwrap();
+        let spool = metrics.join("codex.jsonl");
+        let lock = metrics.join("codex.jsonl.lock");
+        let full = "x".repeat(1024 * 1024);
+        match fault {
+            "full" => std::fs::write(&spool, &full).unwrap(),
+            "locked" => std::fs::write(&lock, "holder").unwrap(),
+            _ => {
+                std::fs::remove_dir(&metrics).unwrap();
+                std::fs::write(&metrics, "occupied").unwrap();
+            }
+        }
+        let policy = json!({"agents":["codex"],"hcd":{"agent_configs":{"codex":{"collection":{
+            "enabled":true,"profile":"codex_rollout_v1","allowed_roots":[sessions,state],
+            "sources":[{"id":"rollout","type":"transcript","path":sessions}],
+            "pilot_host":{"data_dir":state}
+        }}}}});
+        let mut host = Host::start_with_home(&data, Some(&root), policy, Box::default());
+        host.ready();
+        let session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let transcript = sessions.join(format!("rollout-{session}.jsonl"));
+        let input =
+            json!({"session_id":session,"turn_id":"fixture-turn","transcript_path":transcript});
+        let output = sdk_hook_command(&data, "observe", "codex", "Stop", &input)
+            .wait_with_output()
+            .unwrap();
+        assert!(output.status.success() && output.stdout.is_empty() && output.stderr.is_empty());
+        let marker = state
+            .join("state/codex/transcript-wakeups")
+            .join(format!("{session}.json"));
+        until(|| marker.exists());
+        let content: Value = serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
+        assert_eq!(content["recovery_turn_id"], "fixture-turn");
+        assert_eq!(content["hook_event"], "stop");
+        assert_eq!(content["session_dir"], json!(sessions));
+        match fault {
+            "full" => assert_eq!(std::fs::read_to_string(&spool).unwrap(), full),
+            "locked" => assert_eq!(std::fs::read_to_string(&lock).unwrap(), "holder"),
+            _ => assert_eq!(std::fs::read_to_string(&metrics).unwrap(), "occupied"),
+        }
+        host.stop();
+    }
 }
 
 #[test]

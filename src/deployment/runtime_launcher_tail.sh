@@ -116,7 +116,7 @@ case "${1:-status}" in
     }
     exec "$LP_RUNTIME_HELPER" "$@"
     ;;
-  start|stop|restart|status|info|inject|hook|deploy|dashboard|token-usage|tokens|menubar|span-attr|worker|agent|upgrade|rollback|start-collector|restart-collector|schedule-updater-restart|restart-updater|run|run-updater|hook-process|probe|interceptor|help|--help|-h|log|diagnose-service) ;;
+  start|stop|restart|status|info|inject|hook|deploy|dashboard|token-usage|tokens|menubar|span-attr|worker|agent|upgrade|rollback|start-collector|restart-collector|schedule-updater-restart|restart-updater|run|run-updater|sdk-hook|hook-process|probe|interceptor|help|--help|-h|log|diagnose-service) ;;
   *)
     pilot_bin=$(resolve_pilot_bin) || exit 1
     exec "$pilot_bin" "$@"

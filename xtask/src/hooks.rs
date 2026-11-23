@@ -51,11 +51,6 @@ const HOOKS: &[Hook] = &[
         ]),
     },
     Hook {
-        file: "codex-loongsuite-pilot-hook",
-        agent: "codex",
-        mode: Mode::Event(&[]),
-    },
-    Hook {
         file: "grok-build-loongsuite-pilot-hook",
         agent: "grok-build",
         mode: Mode::Event(&["stop", "stop_failure", "user_prompt_submit", "session_end"]),

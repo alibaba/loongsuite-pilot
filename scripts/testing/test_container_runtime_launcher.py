@@ -50,12 +50,12 @@ else:
         with tempfile.TemporaryDirectory(prefix="pilot-runtime-argv-") as tmp:
             root=Path(tmp);script,env=self.fixture(root);env["GH_TOKEN"]="SYNTHETIC_NOT_FORWARDED"
             payload=b'{"message":"unicode \xe4\xb8\xad\xe6\x96\x87"}\n'
-            result=subprocess.run(["/bin/bash",str(script),"hook-process","codex","space and 'quote'"],cwd=str(root),env=env,input=payload,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5)
+            result=subprocess.run(["/bin/bash",str(script),"sdk-hook","--agent","codex","--data-dir","space and 'quote'"],cwd=str(root),env=env,input=payload,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5)
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertEqual(result.stdout,b'{"hook":"complete"}\n')
             self.assertEqual((root/"stdin").read_bytes(),payload)
             args=json.loads((root/"argv.json").read_text())
-            self.assertEqual(args[-3:],["hook-process","codex","space and 'quote'"])
+            self.assertEqual(args[-5:],["sdk-hook","--agent","codex","--data-dir","space and 'quote'"])
             self.assertIn("CODEX_HOME",args);self.assertNotIn("GH_TOKEN",args)
             self.assertEqual(args[args.index("--workdir")+1],str(root))
             self.assertNotIn("/var/run/docker.sock"," ".join(args))

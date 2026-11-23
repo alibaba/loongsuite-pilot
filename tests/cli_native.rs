@@ -194,6 +194,16 @@ fn package(root: &Path) -> PathBuf {
     };
     let binary = package.join(binary_name);
     fs::copy(executable(), &binary).unwrap();
+    let hook_name = if cfg!(windows) {
+        "bin/loongsuite-pilot-sdk-hook.exe"
+    } else {
+        "bin/loongsuite-pilot-sdk-hook"
+    };
+    fs::copy(
+        env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"),
+        package.join(hook_name),
+    )
+    .unwrap();
     let sdk = if cfg!(windows) {
         "loongsuite_pilot.dll"
     } else if cfg!(target_os = "macos") {
@@ -225,6 +235,7 @@ fn package(root: &Path) -> PathBuf {
     .unwrap();
     let mut paths = vec![
         binary_name,
+        hook_name,
         "VERSION",
         "LICENSE",
         "agents.d/cursor.json",
@@ -271,8 +282,6 @@ fn package(root: &Path) -> PathBuf {
         "agents.d/kiro-cli.json",
         "assets/hooks/kiro-cli-loongsuite-pilot-hook.sh",
         "assets/hooks/kiro-cli-loongsuite-pilot-hook.ps1",
-        "assets/hooks/codex-loongsuite-pilot-hook.sh",
-        "assets/hooks/codex-loongsuite-pilot-hook.ps1",
         "assets/hooks/cursor-loongsuite-pilot-hook.sh",
         "assets/hooks/cursor-loongsuite-pilot-hook.ps1",
         "assets/hooks/shared/native.sh",
@@ -855,7 +864,7 @@ fn packaged_codex_explicit_home_keeps_trust_and_hooks_together() {
                     handler["command"]
                         .as_str()
                         .unwrap()
-                        .contains("codex-loongsuite-pilot-hook")
+                        .contains(" sdk-hook --channel ")
                 })
                 .collect();
             assert_eq!(handlers.len(), 1, "{event}");

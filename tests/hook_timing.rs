@@ -1,52 +1,19 @@
-//! Actual native Codex process -> spool -> collector -> local mirror, without private HTTP.
+//! Persisted Hook timing samples -> collector -> local mirror, without private HTTP.
 //! All files, environment and network destinations belong to this test.
 use loongsuite_pilot::metrics::{
     DataflowSnapshot, HookMetricsSpool, MetricsWriter, MetricsWriterOptions,
 };
 use serde_json::{json, Value};
 use std::{fs, path::Path, process::Stdio, time::Duration};
-use tokio::io::AsyncWriteExt;
 
 #[tokio::test]
-async fn native_codex_timing_reaches_mirror_without_private_http() {
+async fn persisted_codex_timing_reaches_mirror_without_private_http() {
     const CHILD: &str = "PILOT_HOOK_TIMING_CHILD";
     if std::env::var_os(CHILD).is_some() {
         let config = loongsuite_pilot::core::load_config().await.unwrap();
         let data = Path::new(&config.data_dir);
-        for index in 0..2 {
-            let mut hook = tokio::process::Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot"));
-            hook.args(["hook-process", "codex", "stop"])
-                .env("LOONGSUITE_PILOT_DATA_DIR", data)
-                .stdin(Stdio::piped());
-            #[cfg(windows)]
-            hook.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-            // The outer scoped test process owns this bounded native child.
-            let mut child = hook
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-                .unwrap();
-            let mut stdin = child.stdin.take().unwrap();
-            let mut input = vec![0xef, 0xbb, 0xbf];
-            input.extend(serde_json::to_vec(&json!({"session_id":format!("timing-fixture-{index}"),"turn_id":"fixture-turn"})).unwrap());
-            stdin.write_all(&input).await.unwrap();
-            drop(stdin);
-            let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(output.stdout, b"{}\n");
-            assert!(
-                output.stderr.is_empty(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+        for duration in [1.0, 2.0] {
+            loongsuite_pilot::metrics::record_hook_timing(data, "codex", "stop", duration);
         }
         let writer = MetricsWriter::new(MetricsWriterOptions::new(
             &config.data_dir,
@@ -106,7 +73,7 @@ async fn native_codex_timing_reaches_mirror_without_private_http() {
     command
         .args([
             "--exact",
-            "native_codex_timing_reaches_mirror_without_private_http",
+            "persisted_codex_timing_reaches_mirror_without_private_http",
         ])
         .env_clear()
         .env(CHILD, "1")

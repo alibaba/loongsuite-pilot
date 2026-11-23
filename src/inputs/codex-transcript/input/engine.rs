@@ -1399,7 +1399,9 @@ impl<'a> CodexTranscriptEngine<'a> {
         if meta.is_none() {
             if let Some(offset) = checkpoint.owner_session_meta_offset {
                 if let Some(record) = read_owner_record_at(file_path, offset, Some(rt)).await? {
-                    meta = extract_codex_transcript_meta(&record).map(Arc::new);
+                    meta =
+                        crate::inputs::codex_transcript::extractor::owned_transcript_meta(record)
+                            .map(Arc::new);
                     if let Some(meta) = meta.clone() {
                         if current_ino == Some(checkpoint.inode)
                             && current_size.is_some_and(|size| offset >= 0 && offset < size)
@@ -3360,7 +3362,8 @@ impl<'a> CodexTranscriptEngine<'a> {
         let Some(record) = read_owner_record_at(file_path, owner_offset, Some(rt)).await? else {
             return Ok(None);
         };
-        let Some(meta) = extract_codex_transcript_meta(&record) else {
+        let Some(meta) = crate::inputs::codex_transcript::extractor::owned_transcript_meta(record)
+        else {
             return Ok(None);
         };
         let meta = Arc::new(meta);
@@ -3387,9 +3390,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         let meta = meta.into();
         self.remove_meta_cache(file_path);
         let estimated = file_path.len()
-            + serde_json::to_vec(meta.as_ref())
-                .map(|bytes| bytes.len())
-                .unwrap_or(0);
+            + crate::utils::json_size::serialized_json_size(meta.as_ref()).unwrap_or(0);
         if estimated > MAX_CACHED_TRANSCRIPT_META_BYTES {
             return;
         }
