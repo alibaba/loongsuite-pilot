@@ -78,6 +78,33 @@ describe('workspace exclusions', () => {
     expect(collector.allows({ ...event('one'), 'gen_ai.agent.type': 'cursor' })).toBe(true);
     expect(fs.readdirSync(state).join()).not.toContain(root);
   });
+  it('retains ordinary directory markers when separators or duplicate rules change', () => {
+    const dir = temp();
+    const root = path.join(dir, 'private');
+    const state = path.join(dir, 'state');
+    const trailing = `${root}${path.sep}`;
+    const repeated = `${root}${path.sep}.${path.sep}`;
+    const policy = new WorkspacePolicy([root], state);
+    expect(policy.allows(event('excluded', root))).toBe(false);
+    expect(new WorkspacePolicy([trailing], state).allows(event('excluded'))).toBe(false);
+    const duplicated = new WorkspacePolicy([root, repeated], state);
+    expect(duplicated.allows(event('excluded'))).toBe(false);
+    expect(duplicated.allows(event('another', root))).toBe(false);
+    expect(new WorkspacePolicy([root], state).allows(event('another'))).toBe(false);
+  });
+  it('retains markers written with an older trailing-separator fingerprint', () => {
+    const dir = temp();
+    const root = path.join(dir, 'private');
+    const configured = `${root}${path.sep}`;
+    const state = path.join(dir, 'state');
+    const legacyRoot = process.platform === 'win32' ? configured.toLowerCase() : configured;
+    const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+    const legacyDirectory = path.join(state, hash(JSON.stringify([legacyRoot])));
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.writeFileSync(path.join(legacyDirectory, hash('codex\0legacy-session')), '');
+    expect(new WorkspacePolicy([configured], state).allows(event('legacy-session'))).toBe(false);
+    expect(new WorkspacePolicy([root], state).allows(event('legacy-session'))).toBe(false);
+  });
   it('honors blocked session markers written with a lexical policy fingerprint', () => {
     const dir = temp();
     const root = path.join(dir, 'private');

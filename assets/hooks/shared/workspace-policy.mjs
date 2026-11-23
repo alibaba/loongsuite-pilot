@@ -88,14 +88,12 @@ export class WorkspacePolicy {
     this.stateDirectory = stateDirectory;
     this.roots = validateExcludedWorkspaces(excluded).map(original => ({ original, lexical: normalize(original) }));
     const lexicalFingerprint = this.hash(JSON.stringify(this.roots.map(root => root.lexical).sort()));
+    const rules = [...new Set(this.roots.map(root => markerRule(root.original)))].sort();
     const hasParentRules = this.roots.some(root => hasParentSegment(root.original));
-    // Read markers made by older releases, but write decisions for parent rules separately.
-    this.fingerprint = lexicalFingerprint;
-    if (hasParentRules) {
-      this.legacyFingerprint = lexicalFingerprint;
-      const rules = [...new Set(this.roots.map(root => markerRule(root.original)))].sort();
-      this.fingerprint = this.hash(JSON.stringify({ rules }));
-    }
+    // Rules with parent segments retain their own namespace because the
+    // filesystem can resolve them differently from their lexical counterparts.
+    this.fingerprint = this.hash(JSON.stringify(hasParentRules ? { rules } : rules));
+    if (this.fingerprint !== lexicalFingerprint) this.legacyFingerprint = lexicalFingerprint;
   }
   get enabled() { return this.roots.length > 0; }
   hash(value) { return createHash('sha256').update(value).digest('hex'); }
@@ -164,9 +162,16 @@ export class WorkspacePolicy {
     const session = record['gen_ai.session.id'] ?? record.session_id ?? record.sessionId ?? record.conversation_id;
     const key = typeof session === 'string' && session ? this.hash(`${agent}\0${session}`) : undefined;
     const marker = key && this.stateDirectory ? path.join(this.stateDirectory, this.fingerprint, key) : undefined;
-    const legacyMarker = marker && this.legacyFingerprint ? path.join(this.stateDirectory, this.legacyFingerprint, key) : undefined;
-    if (key && (this.blocked.has(key) || (marker && fs.existsSync(marker)) || (legacyMarker && fs.existsSync(legacyMarker))))
-      return false;
+    if (key && this.blocked.has(key)) return false;
+    if (marker && fs.existsSync(marker)) return false;
+    if (marker && this.legacyFingerprint) {
+      const legacyMarker = path.join(this.stateDirectory, this.legacyFingerprint, key);
+      if (fs.existsSync(legacyMarker)) {
+        this.blocked.add(key);
+        this.persistMarker(marker);
+        return false;
+      }
+    }
     const directories = [
       ...strings(record['workspace.path']), ...strings(record.cwd), ...strings(record.workspace_roots),
     ];
