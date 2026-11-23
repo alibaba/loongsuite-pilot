@@ -64,9 +64,9 @@ describe('interceptor inside the collector process', () => {
     expect(ps1).not.toMatch(/--agent qoder-auto/);
   });
 
-  it('declares QwenWork interceptor command hooks separately from collection Stop', () => {
+  it('declares QwenWork interceptor command hooks separately from transcript hooks', () => {
     const def = JSON.parse(readFileSync('agents.d/qwen-work-cn.json', 'utf-8'));
-    expect(def.hook.events).toEqual(['Stop']);
+    expect(def.hook.events).toEqual(['Stop', 'UserPromptSubmit']);
     expect(def.hook.interceptor.events).toEqual(['UserPromptSubmit', 'PreToolUse', 'PostToolUse']);
     expect(def.hook.interceptor.hookCommand).toContain('interceptor-qwenworkcn-hook.sh');
     expect(def.hook.interceptor.insert).toBe('head');
