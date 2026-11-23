@@ -64,7 +64,6 @@ param(
     [string]$MaskTypes,
     [string]$MaskReplacementMode,
     [string]$InterceptorMode,
-    [string]$InterceptorTypes,
     [switch]$Purge,
     [switch]$PreferSystemNode
 )
@@ -162,18 +161,10 @@ if ($MaskReplacementMode -and $MaskReplacementMode -notin @("placeholder", "prev
     exit 1
 }
 if ($InterceptorMode) {
-    if ($InterceptorMode -notin @("all", "none", "custom")) {
-        Write-Error "Unknown interceptor mode: $InterceptorMode (use 'all', 'custom', or 'none')"
+    if ($InterceptorMode -notin @("all", "none")) {
+        Write-Error "Unknown interceptor mode: $InterceptorMode (use 'all' or 'none')"
         exit 1
     }
-}
-if ($InterceptorMode -eq "custom" -and -not $InterceptorTypes) {
-    Write-Error "--InterceptorTypes is required when -InterceptorMode custom"
-    exit 1
-}
-if ($InterceptorTypes -and $InterceptorMode -ne "custom") {
-    Write-Error "-InterceptorTypes can only be used with -InterceptorMode custom"
-    exit 1
 }
 if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
     Write-Error "-SlsApiKey cannot be used with -SlsAkId or -SlsAkSecret"
@@ -185,7 +176,7 @@ if ($PSBoundParameters.Keys -contains 'MultimodalMode' -and -not $MultimodalMode
 }
 $script:MultimodalMode = $MultimodalMode
 # Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
-$script:MultimodalSupportedAgents = "codex,qoder"
+$script:MultimodalSupportedAgents = "codex,qoder,qwen-work-cn"
 if ($MultimodalMode) {
     if ($MultimodalMode -notin @("none", "input", "output", "all")) {
         Write-Error "Unknown multimodal mode: $MultimodalMode (use 'none', 'input', 'output', or 'all')"
@@ -1095,7 +1086,6 @@ function Get-InstallConfigJson {
         maskTypes         = "$MaskTypes"
         maskReplacementMode = "$MaskReplacementMode"
         interceptorMode   = "$InterceptorMode"
-        interceptorTypes  = "$InterceptorTypes"
         probeResult       = "$($script:PROBE_RESULT)"
     }
     if ($ExcludeWorkspace) { $cfgArgs.excludeWorkspaces = @($ExcludeWorkspace | Where-Object { $null -ne $_ }) }

@@ -117,7 +117,7 @@ pub(crate) async fn api(
                 source.record_type,
                 value,
                 &extra,
-                input.collect_entity_names,
+                input.collect_entity_names(),
             );
             if source.record_type == "usage_snapshot" {
                 let dimensions = [

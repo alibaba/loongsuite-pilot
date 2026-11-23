@@ -152,9 +152,6 @@ def cmd_config_diffs():
     interceptor_mode = new.get("interceptorMode") or (old.get("interceptor") or {}).get("mode") or ""
     if interceptor_mode == "all":
         interceptor_types = list(INTERCEPTOR_TYPES)
-    elif interceptor_mode == "custom":
-        source = new.get("interceptorTypes") if new.get("interceptorMode") else ",".join((old.get("interceptor") or {}).get("types") or [])
-        interceptor_types = [item for item in _csv(source) if item in INTERCEPTOR_TYPES]
     else:
         interceptor_types = []
     mask_mode = new.get("maskMode") or (old.get("mask") or {}).get("mode") or ""
@@ -180,7 +177,6 @@ def cmd_config_diffs():
         ("mask.types", ",".join(_csv(old_mask.get("types"))) if old_mask.get("mode") == "custom" and isinstance(old_mask.get("types"), list) else "", ",".join(covered_types)),
         ("mask.replacementMode", old_mask.get("replacementMode") or "", new.get("maskReplacementMode")),
         ("interceptor.mode", (old.get("interceptor") or {}).get("mode") or "", new.get("interceptorMode")),
-        ("interceptor.types", ",".join(_csv((old.get("interceptor") or {}).get("types"))) if isinstance((old.get("interceptor") or {}).get("types"), list) else "", ",".join(_csv(new.get("interceptorTypes")))),
         ("multimodal.storage.type", ((old.get("multimodal") or {}).get("storage") or {}).get("type") or "", "sls" if new.get("multimodalMode") and new.get("multimodalMode") != "none" and new.get("slsEndpoint") and new.get("slsProject") and new.get("slsLogstore") and new.get("slsMode") == "apiKey" else ""),
     ]
     for label, old_val, new_val in checks:
@@ -223,7 +219,6 @@ def cmd_write_config_opts():
         "maskTypes": "LP_MASK_TYPES",
         "maskReplacementMode": "LP_MASK_REPLACEMENT_MODE",
         "interceptorMode": "LP_INTERCEPTOR_MODE",
-        "interceptorTypes": "LP_INTERCEPTOR_TYPES",
     }
     for key, env_name in mapping.items():
         value = opts.get(key)
@@ -350,15 +345,12 @@ def cmd_write_config():
     if interceptor_mode:
         interceptor = dict(config.get("interceptor") or {}) if isinstance(config.get("interceptor"), dict) else {}
         interceptor["mode"] = interceptor_mode
-        if interceptor_mode == "custom":
-            interceptor["types"] = _csv(_env("LP_INTERCEPTOR_TYPES"))
-        else:
-            interceptor.pop("types", None)
+        if interceptor_mode not in ("all", "none"):
+            raise ValueError("interceptorMode must be all or none")
+        interceptor.pop("types", None)
         config["interceptor"] = interceptor
     interceptor = config.get("interceptor") or {}
     extra = list(INTERCEPTOR_TYPES) if interceptor.get("mode") == "all" else []
-    if interceptor.get("mode") == "custom" and isinstance(interceptor.get("types"), list):
-        extra = [item for item in interceptor["types"] if item in INTERCEPTOR_TYPES]
     if extra and (config.get("mask") or {}).get("mode") != "all":
         current = []
         mask = config.get("mask") if isinstance(config.get("mask"), dict) else {}

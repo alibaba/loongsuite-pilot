@@ -422,6 +422,14 @@ unsafe extern "C" fn on_host_hook_event(
             );
             return Some(());
         }
+        if row["kind"] == "prompt_verdict" {
+            let key = serde_json::from_value(row["key"].take()).ok()?;
+            let verdict = serde_json::from_value(row["guardrail"].take()).ok()?;
+            ctx.verdicts
+                .as_ref()?
+                .put_prompt(key, verdict, row["at"].as_i64()?);
+            return Some(());
+        }
         let verdict = serde_json::from_value::<Verdict>(row).ok()?;
         let store = ctx.verdicts.as_ref()?;
         let key = ToolVerdictKey {

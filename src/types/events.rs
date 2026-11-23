@@ -75,6 +75,7 @@ str_enum!(AgentEventName {
 str_enum!(GuardrailAction {
     Allow = "allow",
     Block = "block",
+    Log = "log",
 });
 
 str_enum!(GrokMatchStrategy {

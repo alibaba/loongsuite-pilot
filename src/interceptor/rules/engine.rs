@@ -53,7 +53,7 @@ impl RuleEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interceptor::rules::{builtin_rules, LocalRule};
+    use crate::interceptor::rules::LocalRule;
     use crate::interceptor::types::{
         HookEventName, HookRequest, InterceptorAgent, RuleResult, VerdictAction,
     };
@@ -117,28 +117,6 @@ mod tests {
                 }
             })),
         })
-    }
-
-    #[test]
-    fn allows_builtin_rules_when_they_are_not_enabled() {
-        let engine = RuleEngine::new(builtin_rules(), HashSet::from(["anything".to_string()]));
-        let mut prompt = request();
-        prompt.prompt = Some("testing".to_string());
-        let verdict = engine.evaluate(&prompt);
-        assert_eq!(verdict.action, VerdictAction::Allow);
-        assert!(verdict.evaluated_rules.is_empty());
-        assert_eq!(
-            serde_json::to_value(&verdict).unwrap(),
-            serde_json::json!({"action":"allow","evaluatedRules":[]})
-        );
-        prompt.prompt = Some("LTAI1234567890ABCD".to_string());
-        let verdict = engine.evaluate(&prompt);
-        assert_eq!(verdict.action, VerdictAction::Allow);
-        assert!(verdict.evaluated_rules.is_empty());
-        assert_eq!(
-            serde_json::to_value(&verdict).unwrap(),
-            serde_json::json!({"action":"allow","evaluatedRules":[]})
-        );
     }
 
     #[test]

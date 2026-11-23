@@ -38,6 +38,7 @@ pub struct InterceptorServerOptions {
 }
 
 struct ServerState {
+    managed: Option<crate::core::managed_hook::ManagedHook>,
     version: String,
     engine: RuleEngine,
     port: AtomicU16,
@@ -54,9 +55,17 @@ pub struct InterceptorServer {
 }
 
 pub fn create_interceptor_server(opts: InterceptorServerOptions) -> InterceptorServer {
+    create_server(opts, None)
+}
+
+pub(super) fn create_server(
+    opts: InterceptorServerOptions,
+    managed: Option<crate::core::managed_hook::ManagedHook>,
+) -> InterceptorServer {
     let (cancel, _) = watch::channel(false);
     InterceptorServer {
         state: Arc::new(ServerState {
+            managed,
             version: opts.version,
             engine: opts.engine,
             port: AtomicU16::new(0),
@@ -182,6 +191,20 @@ async fn dispatch(state: &ServerState, request: &HttpRequest) -> HttpResponse {
     }
 }
 
+async fn evaluate(
+    state: &ServerState,
+    request: &HookRequest,
+) -> Result<EvaluateHookResponse, String> {
+    if let Some(managed) = &state.managed {
+        return serde_json::from_value(managed.evaluate(request, 2600).await)
+            .map_err(|error| error.to_string());
+    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state.engine.evaluate(request)
+    }))
+    .map_err(|error| panic_message(&error))
+}
+
 async fn handle_evaluate(state: &ServerState, body: &[u8]) -> HttpResponse {
     let parsed = match serde_json::from_slice::<Value>(body) {
         Ok(value) => value,
@@ -241,13 +264,9 @@ async fn handle_evaluate(state: &ServerState, body: &[u8]) -> HttpResponse {
             body: serde_json::json!({"error": "invalid-request"}),
         };
     };
-    let verdict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state.engine.evaluate(&request)
-    }));
-    let verdict = match verdict {
-        Ok(verdict) => verdict,
-        Err(_) => EvaluateHookResponse::fail_open(Vec::new()),
-    };
+    let verdict = evaluate(state, &request)
+        .await
+        .unwrap_or_else(|_| EvaluateHookResponse::fail_open(Vec::new()));
     record_tool_verdict(
         state,
         &request,
@@ -343,9 +362,7 @@ async fn handle_qwen(state: &ServerState, body: &[u8]) -> HttpResponse {
             body: qwen_work_allow_body(),
         };
     };
-    let verdict = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state.engine.evaluate(&request)
-    })) {
+    let verdict = match evaluate(state, &request).await {
         Ok(verdict) => verdict,
         Err(err) => {
             record_tool_verdict(state, &request, None);
@@ -356,13 +373,7 @@ async fn handle_qwen(state: &ServerState, body: &[u8]) -> HttpResponse {
                 request.session_id.as_deref(),
                 request.tool_use_id.as_deref(),
                 access_input_from_hook_request(&request),
-                access_result(
-                    AccessLogAction::FailOpen,
-                    None,
-                    None,
-                    None,
-                    Some(&panic_message(&err)),
-                ),
+                access_result(AccessLogAction::FailOpen, None, None, None, Some(&err)),
             );
             return HttpResponse {
                 status: 200,

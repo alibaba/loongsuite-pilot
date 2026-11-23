@@ -163,7 +163,7 @@ pub struct EvaluateHookResponse {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "ruleId")]
     pub rule_id: Option<String>,
-    #[serde(rename = "evaluatedRules")]
+    #[serde(default, rename = "evaluatedRules")]
     pub evaluated_rules: Vec<String>,
     /// The host is allowed because evaluation failed, not because rules passed.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "failOpen")]

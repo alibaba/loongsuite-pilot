@@ -86,7 +86,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 |-----------|-------------|
 | `--version <ver>` | Install a specific version, for example `1.2.0`. |
 | `--agents <list>` | Comma-separated allowlist. Use `none` to disable all agents. Omit to continuously discover supported agents, including agents installed later. |
-| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`. Writes that mode to selected `codex` and `qoder`; other existing supported agents get `none`. Without `--agents`, non-`none` writes that mode onto `codex` and `qoder` and creates missing entries. `none` deletes. Omit to leave unchanged. Non-`none` requires the four SLS flags. |
+| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`. Writes that mode to selected `codex`, `qoder`, and `qwen-work-cn`; other existing supported agents get `none`. Without `--agents`, non-`none` writes that mode onto `codex`, `qoder`, and `qwen-work-cn` and creates missing entries. `none` deletes. Omit to leave unchanged. Non-`none` requires the four SLS flags. |
 | `--userId <id>` | Set user identity written to output events. |
 | `--data-dir <path>` | Override data directory. Default is `~/.loongsuite-pilot`. |
 | `--enable-status-bar-app <true\|false>` | Set automatic macOS menu bar startup during `install`. Omission preserves the existing setting; fresh installs default to disabled. Windows: `-EnableStatusBarApp <true\|false>` (stores the setting; the UI is macOS-only). |
@@ -101,8 +101,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--mask-mode <mode>` | Data masking mode: `all`, `none`, or `custom`. |
 | `--mask-types <list>` | Comma-separated mask types. Required when `--mask-mode custom`. |
 | `--mask-replacement-mode <mode>` | Mask replacement format: `preview` (star-masked previews, default) or `placeholder` (fixed markers). Windows: `-MaskReplacementMode`. |
-| `--interceptor-mode <mode>` | Local interception mode: `all`, `none`, or `custom`. Enabled interceptor types are also added to `mask`. |
-| `--interceptor-types <list>` | Comma-separated interceptor types (mask credential subset). Required when `--interceptor-mode custom`. |
+| `--interceptor-mode <mode>` | `all` enables managed interception and adds credential types to `mask`. `none` disables interception (default). |
 | `--collect-log <true\|false>` | Enable or disable SLS log reporting. |
 | `--collect-trace <true\|false>` | Enable or disable trace reporting. |
 | `--cms-license-key <key>` | CMS or ARMS trace license key. |

@@ -38,6 +38,10 @@ pub struct QoderPromptOwnership {
 }
 #[async_trait]
 pub trait QoderPromptOwnershipResolver: Send + Sync {
+    fn ide_database_paths(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     async fn resolve(
         &self,
         agent_id: &str,
@@ -172,6 +176,14 @@ async fn inventory_id(path: &str) -> Option<String> {
 }
 #[async_trait]
 impl QoderPromptOwnershipResolver for NativeQoderPromptOwnershipResolver {
+    fn ide_database_paths(&self) -> Vec<String> {
+        let mut paths = (self.discovery)("qoder");
+        paths.retain(|path| !super::is_idea_db_path(Some(path)));
+        paths.sort_unstable();
+        paths.dedup();
+        paths
+    }
+
     async fn resolve(
         &self,
         agent_id: &str,

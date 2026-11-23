@@ -4,12 +4,11 @@ use loongsuite_pilot::interceptor::{
         create_interceptor_server, write_runtime, InterceptorServerOptions, RuntimeWriteOptions,
     },
     interceptor_runtime_path,
-    rules::{builtin_rules, RuleEngine},
+    rules::RuleEngine,
 };
 use loongsuite_pilot::utils::candidate_process::CandidateChild;
 use serde_json::json;
 use std::{
-    collections::HashSet,
     fs,
     path::Path,
     process::{Command, Output, Stdio},
@@ -84,7 +83,7 @@ async fn retired_hook_commands_ignore_an_active_http_interceptor() {
     let requests = Arc::new(AtomicUsize::new(0));
     let server = create_interceptor_server(InterceptorServerOptions {
         version: "native-interceptor-retirement".into(),
-        engine: RuleEngine::new(builtin_rules(), HashSet::from(["apiKey".into()])),
+        engine: RuleEngine::new(Vec::new(), Default::default()),
         write_access_log: Some(Arc::new({
             let requests = requests.clone();
             move |_| {

@@ -149,20 +149,11 @@ mod tests {
         assert!(collect_text_leaves(&nested(MAX_LEAF_DEPTH + 1), 0).is_empty());
     }
     #[test]
-    fn native_openclaw_post_tool_content_reaches_the_builtin_block_rule() {
+    fn native_openclaw_post_tool_content_is_available_to_managed_rules() {
         use crate::interceptor::adapters::parse_openclaw_hook_request;
-        use crate::interceptor::rules::{builtin_rules, RuleEngine};
-        use crate::interceptor::VerdictAction;
         let body = json!({"hook_event_name":"PostToolUse","openclaw_hook":"tool_result_persist","tool_name":"read",
-            "tool_response":{"toolCallId":"nested-array","content":[{"type":"text","text":"LTAI1234567890ABCD"}]}});
+            "tool_response":{"toolCallId":"nested-array","content":[{"type":"text","text":"fixture-result-content"}]}});
         let request = parse_openclaw_hook_request(body.as_object().unwrap(), None).unwrap();
-        let result = RuleEngine::new(
-            builtin_rules(),
-            std::collections::HashSet::from(["cloudAccessKey".into()]),
-        )
-        .evaluate(&request);
-        assert_eq!(result.action, VerdictAction::Block);
-        assert_eq!(result.reason.as_deref(), Some("[ACCESSKEY_BLOCKED]"));
-        assert_eq!(result.rule_id.as_deref(), Some("cloudAccessKey"));
+        assert!(collect_hook_text(&request).contains("fixture-result-content"));
     }
 }

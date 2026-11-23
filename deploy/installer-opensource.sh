@@ -73,13 +73,12 @@ ALL_AGENTS=1
 MULTIMODAL_MODE=""
 MULTIMODAL_MODE_SET=0
 # Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
-MULTIMODAL_SUPPORTED_AGENTS="codex,qoder"
+MULTIMODAL_SUPPORTED_AGENTS="codex,qoder,qwen-work-cn"
 EXCLUDE_WORKSPACES=()
 MASK_MODE=""
 MASK_TYPES=""
 MASK_REPLACEMENT_MODE=""
 INTERCEPTOR_MODE=""
-INTERCEPTOR_TYPES=""
 HAS_SUDO=0
 PURGE=0
 PREFER_SYSTEM_NODE=0
@@ -195,8 +194,6 @@ while [[ $# -gt 0 ]]; do
         --mask-replacement-mode=*) MASK_REPLACEMENT_MODE="${1#*=}"; shift ;;
         --interceptor-mode)   require_option_value "$@"; INTERCEPTOR_MODE="$2"; shift 2 ;;
         --interceptor-mode=*) INTERCEPTOR_MODE="${1#*=}"; shift ;;
-        --interceptor-types)  require_option_value "$@"; INTERCEPTOR_TYPES="$2"; shift 2 ;;
-        --interceptor-types=*) INTERCEPTOR_TYPES="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
         --prefer-system-node) PREFER_SYSTEM_NODE=1; shift ;;
         --prefer-system-node=*) PREFER_SYSTEM_NODE=1; shift ;;
@@ -265,19 +262,11 @@ if [ -n "$MASK_REPLACEMENT_MODE" ] && [ "$MASK_REPLACEMENT_MODE" != "placeholder
 fi
 if [ -n "$INTERCEPTOR_MODE" ]; then
     case "$INTERCEPTOR_MODE" in
-        all|none|custom) ;;
+        all|none) ;;
         *)
-            echo "❌ Unknown interceptor mode: $INTERCEPTOR_MODE (use 'all', 'custom', or 'none')" >&2
+            echo "❌ Unknown interceptor mode: $INTERCEPTOR_MODE (use 'all' or 'none')" >&2
             exit 1 ;;
     esac
-fi
-if [ "$INTERCEPTOR_MODE" = "custom" ] && [ -z "$INTERCEPTOR_TYPES" ]; then
-    echo "❌ --interceptor-types is required when --interceptor-mode custom" >&2
-    exit 1
-fi
-if [ -n "$INTERCEPTOR_TYPES" ] && [ "$INTERCEPTOR_MODE" != "custom" ]; then
-    echo "❌ --interceptor-types can only be used with --interceptor-mode custom" >&2
-    exit 1
 fi
 if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; }; then
     echo "❌ --sls-api-key cannot be used with --sls-ak-id or --sls-ak-secret" >&2
@@ -650,7 +639,7 @@ installer_config_operation() {
         LP_MULTIMODAL_MODE="$MULTIMODAL_MODE" LP_MULTIMODAL_SUPPORTED_AGENTS="$MULTIMODAL_SUPPORTED_AGENTS" \
         LP_DASHBOARD_PORT="$DASHBOARD_PORT" LP_ENABLE_STATUS_BAR_APP="$ENABLE_STATUS_BAR_APP" \
         LP_MASK_MODE="$MASK_MODE" LP_MASK_TYPES="$MASK_TYPES" LP_MASK_REPLACEMENT_MODE="$MASK_REPLACEMENT_MODE" \
-        LP_INTERCEPTOR_MODE="$INTERCEPTOR_MODE" LP_INTERCEPTOR_TYPES="$INTERCEPTOR_TYPES" \
+        LP_INTERCEPTOR_MODE="$INTERCEPTOR_MODE" \
         native_installer_helper "$operation" --from-env "$@"
 }
 

@@ -2,8 +2,6 @@
 
 mod engine;
 mod hook_text;
-mod registry;
-mod sensitive_type;
 
 use crate::interceptor::types::{HookRequest, RuleResult};
 
@@ -15,5 +13,3 @@ pub trait LocalRule: Send + Sync {
 
 pub use engine::RuleEngine;
 pub use hook_text::collect_hook_text;
-pub use registry::builtin_rules;
-pub use sensitive_type::{create_sensitive_type_rule, SENSITIVE_INTERCEPT_TYPES};

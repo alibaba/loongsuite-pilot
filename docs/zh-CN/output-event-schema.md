@@ -162,8 +162,10 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `gen_ai.tool.call.arguments` | json | 可获取时 | 工具调用参数，可能包含敏感内容。 |
 | `gen_ai.tool.call.result` | json | 可获取时 | 工具结果 payload，可能包含敏感内容。 |
 | `gen_ai.tool.call.duration` | int | Recommended | 使用匹配的 result 边界减去 call 边界得到的正数工具执行耗时，单位毫秒；任一边界缺失或差值非正时省略。 |
-| `gen_ai.guardrail.triggered` | boolean | 命中内存拦截判定时 Required | 固定为 `true`。没有 tool call id、没有记录、记录已过期，或 interceptor 未开启时省略。 |
-| `gen_ai.guardrail.action` | string | 与 `gen_ai.guardrail.triggered` 同时出现 | 可选值只有 `allow` 和 `block`。`tool.call` 查 `PreToolUse`，`tool.result` 查 `PostToolUse`。被拦截的 Qoder 用户提示补写的 `llm.request` 为 `block`。工具事件查不到时两个字段都不写。 |
+| `gen_ai.guardrail.triggered` | boolean | 关联到裁决时 Required | 固定为 `true`。 |
+| `gen_ai.guardrail.action` | string | 与 `gen_ai.guardrail.triggered` 同时出现 | `block` 拦截，`log` 命中后放行，`allow` 正常放行。工具调用和结果分别关联 PreToolUse、PostToolUse，已匹配的提示词裁决关联该轮首个请求。 |
+| `gen_ai.guardrail.fail_open` | boolean | 检查异常时 Opt-In | 为 `true` 时表示检查失败并降级放行。 |
+| `gen_ai.guardrail.rule_id`、`gen_ai.guardrail.rule_version` | string | 已知规则命中时 Recommended | 记录最终拦截或首条日志规则的 ID 和版本。 |
 | `gen_ai.skill.name` | string | `skill.use` Conditionally Required | 技能或扩展能力名称。 |
 | `gen_ai.skill.id` | string | 技能标识可用时 Recommended | 稳定的技能标识。 |
 | `gen_ai.skill.description` | string | 技能元数据可用时 Recommended | 技能描述。 |
@@ -179,7 +181,9 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
 
-Qoder 产品入口：旧 IDE 输出 `gen_ai.agent.type=qoder`，终端 CLI 输出 `qoder-cli`。CLI 格式 transcript 优先使用本轮原生用户记录的 `businessIdentity.product` 区分 `app`/`cli`，覆盖生命周期 Hook 不带产品字段的子 Agent；旧运行时兼容本轮 Hook 的 `parent_business_info.product=app` 标记。新版桌面端输出 `qoder-app`。OTLP Resource 的 `gen_ai.framework` 使用对应产品类型；新桌面端的 `gen_ai.agent.system=qoder-app`，现有 CLI、IDE 等 Qoder 入口仍为 `qoder`。产品标记仅属于本轮原生记录或 Hook 上下文，不跨 session 恢复沿用。桌面端复用 `agents.qoder` 配置和 CLI transcript/Token 补全路径，不需要新增 `agents.qoder-app` 配置。缺少或无法识别产品证据时保留原分类，不根据路径或进程名猜测。历史数据保留原 system 值，跨版本统计需结合 type/framework 区分入口。
+Qoder 产品入口：旧 IDE 输出 `gen_ai.agent.type=qoder`，终端 CLI 输出 `qoder-cli`。CLI 格式 transcript 优先使用本轮原生用户记录的 `businessIdentity.product` 区分 `app`/`cli`，覆盖生命周期 Hook 不带产品字段的子 Agent；旧运行时兼容本轮 Hook 的 `parent_business_info.product=app` 标记。新版桌面端输出 `qoder-app`。OTLP Resource 的 `gen_ai.framework` 使用对应产品类型；新桌面端的 `gen_ai.agent.system=qoder-app`，独立 IDE 为 `qoder-ide`，CLI 与 JetBrains 等入口仍为 `qoder`。产品标记仅属于本轮原生记录或 Hook 上下文，不跨 session 恢复沿用。桌面端复用 `agents.qoder` 配置和 CLI transcript/Token 补全路径，不需要新增 `agents.qoder-app` 配置。缺少或无法识别产品证据时保留原分类，不根据路径或进程名猜测。历史数据保留原 system 值，跨版本统计需结合 type/framework 区分入口。
+
+Qoder IDE 以 SQLite 中的父 session 和工具调用 ID 确定子请求。模型、响应 ID 与 token 来自该请求的元数据，工具内容按精确调用 ID 从授权 transcript 读取。子事件保留独立的 turn，并关联到直接父工具的 span。最终回复正文来自经过核对的前台交付。
 
 工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
 

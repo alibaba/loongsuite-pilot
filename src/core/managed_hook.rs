@@ -14,7 +14,7 @@ const MAX_CONFIG: u64 = 512 * 1024;
 const MAX_RULES: usize = 128;
 const RELOAD_PERIOD: Duration = Duration::from_secs(3);
 
-pub(super) struct ManagedHook {
+pub(crate) struct ManagedHook {
     root: PathBuf,
     owner: Weak<super::InputManager>,
     state: Mutex<Cache>,
@@ -61,18 +61,26 @@ struct Common {
     agents: Vec<InterceptorAgent>,
     events: Vec<HookEventName>,
     #[serde(default)]
-    enforcement: Enforcement,
+    action: RuleAction,
+    #[serde(default, deserialize_with = "present_enforcement")]
+    enforcement: bool,
     severity: Option<String>,
     title: Option<String>,
     message: Option<String>,
 }
 
+fn present_enforcement<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer).map(|_| true)
+}
+
 #[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
-enum Enforcement {
+enum RuleAction {
     #[default]
-    Enforce,
-    Audit,
+    Block,
+    Log,
 }
 
 #[derive(Deserialize)]
@@ -118,8 +126,7 @@ enum Rule {
 pub(super) struct Hit<'a> {
     rule_id: &'a str,
     rule_version: &'a str,
-    enforcement: Enforcement,
-    action: &'static str,
+    action: RuleAction,
     #[serde(skip_serializing_if = "Option::is_none")]
     severity: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -130,7 +137,7 @@ pub(super) struct Hit<'a> {
 }
 
 impl ManagedHook {
-    pub(super) fn new(data: &Path) -> Self {
+    pub(crate) fn new(data: &Path) -> Self {
         Self {
             owner: Weak::new(),
             root: std::fs::canonicalize(data)
@@ -178,9 +185,9 @@ impl ManagedHook {
                 }
                 Rule::Skipped => continue,
             }
-            match common.enforcement {
-                Enforcement::Audit => audit += 1,
-                Enforcement::Enforce => enforce += 1,
+            match common.action {
+                RuleAction::Log => audit += 1,
+                RuleAction::Block => enforce += 1,
             }
         }
         let diagnostics = crate::interceptor::status::DIAGNOSTIC_CODES
@@ -264,7 +271,7 @@ impl ManagedHook {
         }
     }
 
-    pub(super) async fn evaluate(&self, request: &HookRequest, remaining_ms: u32) -> Value {
+    pub(crate) async fn evaluate(&self, request: &HookRequest, remaining_ms: u32) -> Value {
         let budget = u64::from(remaining_ms).saturating_sub(100).min(2500);
         let deadline = Instant::now() + Duration::from_millis(budget);
         let snapshot = self.snapshot();
@@ -331,14 +338,14 @@ impl ManagedHook {
                 Rule::Http | Rule::Skipped => unreachable!(),
             };
             if let Some(reason) = reason {
-                let block = common.enforcement == Enforcement::Enforce;
-                hits.push(common.hit(reason, block));
+                let block = common.action == RuleAction::Block;
+                hits.push(common.hit(reason));
                 if block {
                     break;
                 }
             }
         }
-        let enforced = hits.last().filter(|hit| hit.action == "block");
+        let enforced = hits.last().filter(|hit| hit.action == RuleAction::Block);
         let representative = enforced.or_else(|| hits.first());
         let mut result = json!({
             "action":if enforced.is_some() { "block" } else { "allow" },
@@ -346,6 +353,8 @@ impl ManagedHook {
         });
         if let Some(hit) = representative {
             result["matched"] = json!(true);
+            result["ruleId"] = json!(hit.rule_id);
+            result["ruleVersion"] = json!(hit.rule_version);
             result["reason"] = json!(hit.message.unwrap_or(hit.reason.as_str()));
         } else if !failed {
             result["matched"] = json!(false);
@@ -358,12 +367,11 @@ impl ManagedHook {
 }
 
 impl Common {
-    fn hit(&self, reason: String, block: bool) -> Hit<'_> {
+    fn hit(&self, reason: String) -> Hit<'_> {
         Hit {
             rule_id: &self.id,
             rule_version: &self.version,
-            enforcement: self.enforcement,
-            action: if block { "block" } else { "allow" },
+            action: self.action,
             severity: self.severity.as_deref(),
             title: self.title.as_deref(),
             message: self.message.as_deref(),
@@ -390,6 +398,10 @@ impl Rules {
         let mut ids = HashSet::new();
         let mut rules = Vec::new();
         for WireRule { mut common, rule } in doc.rules {
+            anyhow::ensure!(
+                !common.enforcement,
+                "Managed rules require action in place of enforcement"
+            );
             anyhow::ensure!(
                 safe_key(&common.id) && safe_key(&common.version) && ids.insert(common.id.clone()),
                 "Invalid or duplicate managed rule identity"
@@ -630,6 +642,17 @@ fn warn(message: &str) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn rejects_legacy_audit_instead_of_defaulting_to_block() {
+        let root = tempfile::tempdir().unwrap();
+        let body = json!({"interceptor":{"rules":[{
+            "id":"previous-audit", "kind":"pattern", "version":"1",
+            "agents":["qodercli"], "events":["PreToolUse"], "match":"substring",
+            "pattern":"keyword", "enforcement":"audit"
+        }]}});
+        assert!(Rules::parse(body.to_string().as_bytes(), root.path(), &mut 0).is_err());
+    }
+
     #[tokio::test]
     async fn managed_severity_ignores_extensions_and_reports_each_matching_rule() {
         let data = tempfile::tempdir().unwrap();
@@ -641,7 +664,7 @@ mod tests {
         });
         let mut audit = common.clone();
         audit["id"] = json!("review");
-        audit["enforcement"] = json!("audit");
+        audit["action"] = json!("log");
         audit["severity"] = json!(" NOTICE ");
         let mut enforce = common;
         enforce["id"] = json!("stop");
@@ -661,7 +684,9 @@ mod tests {
         .unwrap();
         let result = engine.evaluate(&request, 2500).await;
         assert_eq!(result["action"], "block");
+        assert_eq!(result["matches"][0]["action"], "log");
         assert_eq!(result["matches"][0]["severity"], "NOTICE");
+        assert_eq!(result["ruleId"], "stop");
         assert_eq!(result["matches"][1]["severity"], "HIGH");
         std::fs::write(config.join("interceptor.json"), b"invalid configuration").unwrap();
         engine.state.lock().unwrap().scanned = None;

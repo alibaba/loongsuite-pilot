@@ -816,7 +816,7 @@ fn native_hook_fails_open_quickly_without_a_live_sdk_port() {
 }
 
 #[test]
-fn cloud_and_local_verdicts_use_trusted_capabilities_and_the_existing_qoder_protocol() {
+fn cloud_verdict_uses_trusted_capabilities_and_local_requires_managed_rules() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");
     let mut policy = json!({"agents":["qoder"],"hcd":{"agent_configs":{"qoder":{"collection":{"enabled":false}}}},
@@ -826,17 +826,19 @@ fn cloud_and_local_verdicts_use_trusted_capabilities_and_the_existing_qoder_prot
     let payload = json!({"hook_event_name":"PreToolUse","session_id":"security-session","tool_name":"Bash",
         "tool_use_id":"security-tool","tool_input":{"command":"export KEY=sk-1234567890abcdefghijklmnop"},
         "supports_blocking":false,"unknown_u64":18446744073709551615u64});
-    for channel in ["cloud", "local"] {
-        let output = hook_command(&data, channel, "PreToolUse", &payload)
-            .wait_with_output()
-            .unwrap();
-        assert!(output.status.success());
-        let verdict: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(
-            verdict.pointer("/hookSpecificOutput/permissionDecision"),
-            Some(&json!("deny"))
-        );
-    }
+    let output = hook_command(&data, "cloud", "PreToolUse", &payload)
+        .wait_with_output()
+        .unwrap();
+    assert!(output.status.success());
+    let verdict: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        verdict.pointer("/hookSpecificOutput/permissionDecision"),
+        Some(&json!("deny"))
+    );
+    let local = hook_command(&data, "local", "PreToolUse", &payload)
+        .wait_with_output()
+        .unwrap();
+    assert!(local.status.success() && local.stdout.is_empty());
     let requests = host.ctx.hook_requests.lock().unwrap().clone();
     assert_eq!(requests[0]["supports_blocking"], true);
     assert_eq!(requests[0]["session_id"], "security-session");
@@ -881,21 +883,17 @@ fn qoder_cli_pre_tool_block_exits_two_and_only_required_checks_refuse_on_failure
             .unwrap()
     };
 
-    for channel in ["cloud", "local"] {
-        let output = run(channel);
-        assert_eq!(output.status.code(), Some(2), "{channel}");
-        assert!(output.stdout.is_empty(), "{channel}");
-        assert!(!output.stderr.is_empty(), "{channel}");
-        if channel == "cloud" {
-            assert_eq!(output.stderr, b"SDK foreign host test\n");
-        }
-    }
+    let output = run("cloud");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(output.stderr, b"SDK foreign host test\n");
 
     let assert_allowed = |output: std::process::Output| {
         assert!(output.status.success());
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
     };
+    assert_allowed(run("local"));
     assert_allowed(run("observe"));
     host.ctx.hook_invalid.store(true, Ordering::SeqCst);
     let failure = run("cloud");
@@ -1769,7 +1767,7 @@ fn codex_sdk_observe_delivery_retry_and_interception_share_the_native_library() 
         "sources":[{"id":"rollout","type":"transcript","path":sessions}],
         "limits":{"poll_interval_ms":60000},
     }}}},"sdk_options":{"delivery":{"flush_interval_ms":10},"hooks":{
-        "local":{"mode":"custom","types":["cloudAccessKey"]}
+        "local":{"mode":"all"}
     }}});
     let infile = include_str!("fixtures/codex-subagent/rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
     let (header, activity) = infile.split_once('\n').unwrap();
@@ -1827,11 +1825,11 @@ fn codex_sdk_observe_delivery_retry_and_interception_share_the_native_library() 
             .wait_with_output()
             .unwrap();
         assert!(output.status.success());
-        let verdict: Value = serde_json::from_slice(&output.stdout).unwrap();
-        if event == "PreToolUse" {
+        if channel == "cloud" {
+            let verdict: Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(verdict["hookSpecificOutput"]["permissionDecision"], "deny");
         } else {
-            assert_eq!(verdict["decision"], "block");
+            assert!(output.stdout.is_empty());
         }
     }
     host.stop();

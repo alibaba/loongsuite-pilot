@@ -20,11 +20,20 @@ impl InterceptResultLinker {
     }
 
     pub fn enrich(&self, entries: &mut [AgentActivityEntry]) {
-        if !self.enabled {
-            return;
-        }
         let now = chrono::Utc::now().timestamp_millis();
         for entry in entries {
+            let metadata = crate::interceptor::prompt_verdict::remove_private_fields(entry);
+            if !self.enabled {
+                continue;
+            }
+            if entry.event_name == Some(AgentEventName::LlmRequest) {
+                if let Some(snapshot) = crate::interceptor::prompt_verdict::lookup(entry, metadata)
+                    .and_then(|lookup| self.verdict_store.get_prompt(lookup, now))
+                {
+                    snapshot.apply(entry);
+                }
+                continue;
+            }
             let phase = match entry.event_name {
                 Some(AgentEventName::ToolCall) => ToolInterceptPhase::PreToolUse,
                 Some(AgentEventName::ToolResult) => ToolInterceptPhase::PostToolUse,
@@ -57,6 +66,7 @@ impl InterceptResultLinker {
             entry.guardrail_action = Some(match action {
                 crate::interceptor::ToolVerdictAction::Allow => GuardrailAction::Allow,
                 crate::interceptor::ToolVerdictAction::Block => GuardrailAction::Block,
+                crate::interceptor::ToolVerdictAction::Log => GuardrailAction::Log,
             });
             if let Some(guardrail) = guardrail {
                 guardrail.apply(entry);

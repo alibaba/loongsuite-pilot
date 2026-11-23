@@ -809,6 +809,10 @@ impl Collector {
         };
         self.sources()?;
         self.links = Links::load(state.get(subagents::KEY), self.time());
+        let mut ide = super::ide_delegations::Delegations::load(
+            state.get(super::ide_delegations::KEY),
+            self.time(),
+        );
         for _ in 0..8 {
             let Some(path) = self.priority.shift_remove_index(0) else {
                 break;
@@ -928,7 +932,7 @@ impl Collector {
                 {
                     cp["bootstrapEnd"] = cp["unresolvedPrompt"]["through"].clone();
                 }
-                let batch = self
+                let mut batch = self
                     .scan_source(&source, &contexts, &mut cp, &stat, &mut budget, stopped)
                     .await?;
                 if stopped.load(Ordering::SeqCst) {
@@ -990,6 +994,9 @@ impl Collector {
                         .collect(),
                 );
                 next[&key] = cp;
+                if self.agent_id == "qoder" {
+                    ide.register(&mut batch, &file, self.time());
+                }
                 records.extend(batch);
                 Ok(())
             }
@@ -1012,6 +1019,17 @@ impl Collector {
             }
         }
         self.links.store(&mut next)?;
+        if self.agent_id == "qoder" && ide.has_pending() {
+            ide.resolve(
+                &mut records,
+                self.resolver.ide_database_paths(),
+                self.time(),
+                &mut budget,
+                stopped,
+            )
+            .await;
+        }
+        ide.save(&mut next)?;
         let changed = next != *state;
         Ok(TranscriptBatch {
             records,
@@ -1764,6 +1782,35 @@ impl Collector {
                 resource_attributes: resource,
             },
         );
+        if let Some(record) = records
+            .iter_mut()
+            .find(|record| record["event.name"] == "llm.request")
+        {
+            let at = chrono::DateTime::parse_from_rfc3339(text(first, "timestamp"))
+                .ok()
+                .map(|date| date.timestamp_millis());
+            let prompt = first.pointer("/message/content");
+            let parts;
+            let prompt = if let Some(text) = prompt.and_then(Value::as_str) {
+                text
+            } else {
+                parts = subagents::blocks(first)
+                    .filter(|block| block["type"] == "text")
+                    .filter_map(|block| block["text"].as_str())
+                    .collect::<String>();
+                &parts
+            };
+            if let Some(at) = at.filter(|_| !prompt.is_empty()) {
+                crate::interceptor::prompt_verdict::stamp_native_correlation(
+                    record,
+                    prompt,
+                    at,
+                    cp.get("activeRequestSetId")
+                        .and_then(Value::as_str)
+                        .or_else(|| selected.get("requestSetId").and_then(Value::as_str)),
+                );
+            }
+        }
         for (index, r) in records.iter_mut().enumerate() {
             r["event.id"] = json!(digest(&json!([
                 turn,

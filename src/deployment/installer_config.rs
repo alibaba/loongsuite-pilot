@@ -40,7 +40,6 @@ pub(super) const ENV_OPTIONS: &[(&str, &str)] = &[
     ("maskTypes", "LP_MASK_TYPES"),
     ("maskReplacementMode", "LP_MASK_REPLACEMENT_MODE"),
     ("interceptorMode", "LP_INTERCEPTOR_MODE"),
-    ("interceptorTypes", "LP_INTERCEPTOR_TYPES"),
 ];
 const INTERCEPTOR_TYPES: &[&str] = &["cloudAccessKey", "apiKey", "privateKey", "databaseUrl"];
 
@@ -63,7 +62,6 @@ impl Options {
                 "selectedAgents",
                 "multimodalSupportedAgents",
                 "maskTypes",
-                "interceptorTypes",
             ]
             .contains(&key.as_str())
             {
@@ -417,20 +415,21 @@ fn merge_sls(config: &mut Map<String, Value>, options: &Options) -> Result<()> {
 }
 
 fn merge_mask(config: &mut Map<String, Value>, options: &Options) -> Result<()> {
-    for (field, mode_key, types_key) in [
-        ("mask", "maskMode", "maskTypes"),
-        ("interceptor", "interceptorMode", "interceptorTypes"),
-    ] {
-        let requested = mode(options, mode_key, &["all", "custom", "none"])?;
-        if !requested.is_empty() {
-            let target = object(config, field)?;
-            target.insert("mode".into(), json!(requested));
-            if requested == "custom" {
-                target.insert("types".into(), json!(options.list(types_key)?));
-            } else {
-                target.remove("types");
-            }
+    let mask_mode = mode(options, "maskMode", &["all", "custom", "none"])?;
+    if !mask_mode.is_empty() {
+        let target = object(config, "mask")?;
+        target.insert("mode".into(), json!(mask_mode));
+        if mask_mode == "custom" {
+            target.insert("types".into(), json!(options.list("maskTypes")?));
+        } else {
+            target.remove("types");
         }
+    }
+    let interceptor_mode = mode(options, "interceptorMode", &["all", "none"])?;
+    if !interceptor_mode.is_empty() {
+        let target = object(config, "interceptor")?;
+        target.insert("mode".into(), json!(interceptor_mode));
+        target.remove("types");
     }
     let replacement = mode(options, "maskReplacementMode", &["placeholder", "preview"])?;
     if !replacement.is_empty() {
@@ -445,10 +444,6 @@ fn merge_mask(config: &mut Map<String, Value>, options: &Options) -> Result<()> 
             .iter()
             .map(|v| (*v).to_owned())
             .collect::<Vec<_>>(),
-        Some("custom") => csv(config.get("interceptor").and_then(|v| v.get("types")))?
-            .into_iter()
-            .filter(|v| INTERCEPTOR_TYPES.contains(&v.as_str()))
-            .collect(),
         _ => vec![],
     };
     if !extra.is_empty()
@@ -584,7 +579,8 @@ fn safe_diff_value(field: &str, value: &Value) -> Option<String> {
                 })
                 .map(|port| (port as u16).to_string());
         }
-        "mask.mode" | "interceptor.mode" => &["all", "custom", "none"],
+        "mask.mode" => &["all", "custom", "none"],
+        "interceptor.mode" => &["all", "none"],
         "sls.mode" => &["ak", "apiKey", "webtracking"],
         "mask.replacementMode" => &["placeholder", "preview"],
         "multimodal.storage.type" => &["sls", "oss"],

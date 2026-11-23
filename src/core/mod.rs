@@ -15,7 +15,7 @@ mod intercept_result_linker;
 mod interceptor_metrics;
 mod legacy_sls_failed_log_cleanup;
 mod log_retention_service;
-mod managed_hook;
+pub(crate) mod managed_hook;
 mod orchestrator;
 mod runtime_options;
 mod sdk_agent;

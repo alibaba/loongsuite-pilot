@@ -4,13 +4,13 @@
 use crate::interceptor::access_log::{
     write_interceptor_access_log, AccessLogLimits, InterceptorAccessLogEntry,
 };
-use crate::interceptor::config::{load_interceptor_config, resolve_enabled_rule_ids};
+use crate::interceptor::config::{load_interceptor_config, should_deploy_interceptor_hooks};
 use crate::interceptor::daemon::runtime::{remove_own_pid, write_runtime, RuntimeWriteOptions};
 use crate::interceptor::daemon::server::{
-    create_interceptor_server, InterceptorServer, InterceptorServerOptions,
+    create_server, InterceptorServer, InterceptorServerOptions,
 };
 use crate::interceptor::paths::{interceptor_access_log_path, interceptor_tool_verdict_path};
-use crate::interceptor::rules::{builtin_rules, RuleEngine};
+use crate::interceptor::rules::RuleEngine;
 use crate::interceptor::tool_verdict_store::{ToolVerdictAction, ToolVerdictKey, ToolVerdictStore};
 use crate::interceptor::types::INTERCEPTOR_DEFAULT_PORT;
 use crate::types::AgentActivityEntry;
@@ -51,10 +51,9 @@ pub(crate) async fn start_interceptor_service_at_port(
 ) -> std::io::Result<InterceptorService> {
     let logger = create_logger("InterceptorDaemon");
     let interceptor_config = load_interceptor_config(None).await;
-    let engine = RuleEngine::new(
-        builtin_rules(),
-        resolve_enabled_rule_ids(&interceptor_config),
-    );
+    let managed = should_deploy_interceptor_hooks(&interceptor_config)
+        .then(|| crate::core::managed_hook::ManagedHook::new(std::path::Path::new(&opts.data_dir)));
+    let engine = RuleEngine::new(Vec::new(), Default::default());
     let created = opts.verdict_store.is_none();
     let verdict_store = opts.verdict_store.unwrap_or_else(|| {
         Arc::new(ToolVerdictStore::new(interceptor_tool_verdict_path(Some(
@@ -65,20 +64,23 @@ pub(crate) async fn start_interceptor_service_at_port(
         verdict_store.restore(chrono::Utc::now().timestamp_millis());
     }
     let access_log = interceptor_access_log_path(Some(&opts.data_dir));
-    let server = create_interceptor_server(InterceptorServerOptions {
-        version: opts.version.clone(),
-        engine,
-        write_access_log: Some(Arc::new(move |entry: InterceptorAccessLogEntry| {
-            write_interceptor_access_log(&entry, Some(&access_log), AccessLogLimits::default());
-        })),
-        write_tool_verdict: Some({
-            let store = Arc::clone(&verdict_store);
-            Arc::new(move |key: ToolVerdictKey, result: ToolVerdictAction| {
-                store.put(&key, result, chrono::Utc::now().timestamp_millis());
-            })
-        }),
-        emit_blocked_prompt: opts.emit_blocked_prompt,
-    });
+    let server = create_server(
+        InterceptorServerOptions {
+            version: opts.version.clone(),
+            engine,
+            write_access_log: Some(Arc::new(move |entry: InterceptorAccessLogEntry| {
+                write_interceptor_access_log(&entry, Some(&access_log), AccessLogLimits::default());
+            })),
+            write_tool_verdict: Some({
+                let store = Arc::clone(&verdict_store);
+                Arc::new(move |key: ToolVerdictKey, result: ToolVerdictAction| {
+                    store.put(&key, result, chrono::Utc::now().timestamp_millis());
+                })
+            }),
+            emit_blocked_prompt: opts.emit_blocked_prompt,
+        },
+        managed,
+    );
     let port = match server.listen(port).await {
         Ok(port) => port,
         Err(err) => {

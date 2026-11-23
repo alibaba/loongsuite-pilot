@@ -78,7 +78,7 @@ pub(crate) struct Input {
     pub(crate) pod_ip: Option<String>,
     pub(crate) environment: Option<String>,
     pub(crate) namespace: Option<String>,
-    pub(crate) collect_entity_names: bool,
+    pub(crate) collect_entity_names: Option<bool>,
     pub(crate) evidence_kind: Option<String>,
     pub(crate) agent_evidence: Option<BTreeMap<String, Experiment>>,
     pub(crate) test_case: Option<String>,
@@ -121,6 +121,10 @@ pub(crate) fn source_url(value: &str) -> anyhow::Result<Url> {
 }
 
 impl Input {
+    pub(crate) fn collect_entity_names(&self) -> bool {
+        self.collect_entity_names.unwrap_or(true)
+    }
+
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         for list in [
             &self.workspace_ids,
@@ -374,4 +378,23 @@ pub(crate) fn resolve_destination(
         logstore: logstore.to_owned(),
         api_key,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Input;
+    use serde_json::json;
+
+    #[test]
+    fn collect_entity_names_defaults_to_enabled_with_explicit_opt_out() {
+        for (value, expected) in [
+            (json!({}), true),
+            (json!({"CollectEntityNames": true}), true),
+            (json!({"CollectEntityNames": false}), false),
+        ] {
+            let input: Input = serde_json::from_value(value).unwrap();
+            assert_eq!(input.collect_entity_names(), expected);
+        }
+        assert!(Input::default().collect_entity_names());
+    }
 }

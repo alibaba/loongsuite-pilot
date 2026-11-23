@@ -41,7 +41,7 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
 | `dashboard.port` | Loopback dashboard port. Must be an integer from 1 through 65535; invalid values fall back to `8765`. |
 | `serviceName` | Exact service name shared by every agent and reporting backend. It takes precedence over all service-name prefixes. |
 | `serviceNamePrefix` | Legacy service-name base. When `serviceName` is unset, Pilot reports each agent as `<serviceNamePrefix>-<agentType>`. |
-| `interceptor` | Local interception. Same `{ mode, types }` shape as `mask`; `types` is the credential subset of mask types. See [Local Interception](zh-CN/interceptor.md). |
+| `interceptor` | Local managed interception. Set `mode` to `all` to enable or `none` to disable. See [Local Interception](zh-CN/interceptor.md). |
 
 Equivalent environment variables:
 
@@ -59,7 +59,6 @@ Equivalent environment variables:
 | `LOONGSUITE_PILOT_POLL_INTERVAL_MS` | Poll interval in milliseconds for every agent collector. Default is `10000`. Overrides `listeners.*.pollInterval` and `QODER_ANALYTICS_POLL_INTERVAL`. Only decimal integers from `1000` through `2147483647` are accepted; anything else is ignored. When this variable is unset, Wukong and Kiro CLI session keep their 60 second built-in interval. |
 | `LOG_LEVEL` | Runtime log level: `debug`, `info`, `warn`, `error`, or `silent`. |
 | `LOONGSUITE_PILOT_INTERCEPTOR_MODE` | Interceptor mode: `all`, `none`, or `custom`. |
-| `LOONGSUITE_PILOT_INTERCEPTOR_TYPES` | Comma-separated interceptor types. Used only with `custom` mode. |
 
 ## SLS Secret Configuration
 
