@@ -197,7 +197,7 @@ function convertLocalExecution(records: EventLogRecord[], options: Options) {
     : trace.setSpanContext(ROOT_CONTEXT, hasLocalParent ? { ...rootContext, spanId: parentId as string } : rootContext);
   const attributes: Attributes = {
     'gen_ai.span.kind': 'TASK', 'gen_ai.operation.name': 'run_task',
-    'gen_ai.task.name': 'doubao.local_execution', 'gen_ai.framework': 'doubao-work',
+    'gen_ai.task.name': 'doubao.local_execution', 'gen_ai.framework': start['gen_ai.framework'] === 'doubao' ? 'doubao' : 'doubao-work',
     'loongsuite.trace.contract': OBSERVATION_CONTRACT,
     [`${PREFIX}observation_scope`]: 'native_sandbox_execution',
     [`${PREFIX}trace_completeness`]: 'local_execution_observation',
@@ -233,7 +233,7 @@ function convertLocalExecution(records: EventLogRecord[], options: Options) {
       || typeof item.callId !== 'string' || typeof item.name !== 'string') continue;
     const common = { trace_id: traceId, 'gen_ai.agent.id': start['gen_ai.agent.id'],
       'gen_ai.session.id': start['gen_ai.session.id'], 'gen_ai.turn.id': start['gen_ai.turn.id'],
-      'gen_ai.agent.name': start['gen_ai.agent.name'], 'gen_ai.framework': 'doubao-work', 'user.id': start['user.id'],
+      'gen_ai.agent.name': start['gen_ai.agent.name'], 'gen_ai.framework': attributes['gen_ai.framework'], 'user.id': start['user.id'],
       'gen_ai.tool.call.id': item.callId, 'gen_ai.tool.name': item.name,
       [`${PREFIX}native_decision_id`]: item.decisionId, [`${PREFIX}local_executor_tool_name`]: item.executorName };
     toolRecords.push({ ...common, 'event.name': 'tool.call', time_unix_nano: item.startNano, 'gen_ai.tool.call.arguments': item.arguments },

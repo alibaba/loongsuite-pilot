@@ -44,6 +44,26 @@ describe.each(['darwin', 'win32'] as const)('Doubao definition paths on %s', tar
 });
 
 describe('Doubao installer and deployment select the same source as the input', () => {
+  it.each([['Doubao'], ['DoubaoWork'], ['Doubao', 'DoubaoWork']])('discovers separate default product definitions for %j', async (...products) => {
+    const root = await mkdtemp(path.join(tmpdir(), 'doubao-dual-detect-')); temporary.push(root);
+    fixture.home = root;
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    for (const id of ['doubao', 'doubao-work']) await writeFile(path.join(root, `${id}.json`), await readFile(path.resolve(`agents.d/${id}.json`)));
+    for (const product of products) {
+      const logs = path.join(root, 'Library', 'Application Support', product, 'sdk_storage', 'log');
+      await mkdir(logs, { recursive: true }); await writeFile(path.join(logs, 'saman_frontend_2026.1111.0.log'), '');
+    }
+    const loader = new AgentDefLoader({ builtinDir: root, localDir: path.join(root, 'absent'), pilotDir: root, dataDir: root });
+    const definitions = await loader.load();
+    expect(definitions.map(def => def.id).sort()).toEqual(['doubao', 'doubao-work']);
+    for (const def of definitions) {
+      const expected = products.includes(def.id === 'doubao' ? 'Doubao' : 'DoubaoWork');
+      expect(await detectAgent(def.detection)).toBe(expected);
+      expect((await probeAgentDefinition(def, { installer: true })).detected).toBe(expected);
+      expect(await DoubaoWorkInput.checkAvailability(undefined, def.id as 'doubao' | 'doubao-work')).toBe(expected);
+    }
+  });
+
   it('uses an explicit log override for detection without changing the selected native product', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'doubao-detect-override-')); temporary.push(root);
     fixture.home = root;
