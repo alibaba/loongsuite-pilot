@@ -105,6 +105,8 @@ Provider 和 Token；事件标记为 `agent_turn` 观察范围，并省略缺失
 | Qoder Work CN | `qoder-work-cn` | Hook 和本地数据源。 |
 | Qwen Code CLI | `qwen-code-cli` | Hook 集成；Stop 时解析 qwen-code transcript JSONL。 |
 | Qwen Work CN | `qwen-work-cn` | Hook 和本地数据源。 |
+| Antigravity App / 新 IDE | `antigravity` | 共用 `~/.gemini/antigravity` 下的本地只读 SQLite 和 transcript。文件变动唤醒增量采集，默认每 30 秒兜底扫描，需 `node:sqlite`（Node.js >= 22.13 / >= 23.4）。 |
+| Antigravity CLI (`agy`) | `antigravity-cli` | 独立读取 `~/.gemini/antigravity-cli` 下的本地 SQLite 和 transcript，使用相同的文件唤醒和兜底扫描机制。 |
 | TRAE CN | `trae-cn` | Pilot 在 `~/.trae-cn/hooks.json` 注册用户级 IDE Hook，并在能将本地 Hub 记录关联到模型响应时上报 Token 用量。设置 `agents.trae-cn.captureMessageContent=false` 可关闭正文采集。 |
 | Wukong | `wukong` | 运行时自动发现并通过本地 `wukong-cli` 进行 CLI API 轮询；它不是 `agents.d` 安装选择项。 |
 | WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 和 Windows 11 WorkBuddy Desktop 5.3.5.0 验证。 |
@@ -425,7 +427,7 @@ loongsuite-pilot restart
 | `multimodal.uploadMode` | **实验性。** 多模态上传策略。`none`（默认）关闭；`input` / `output` / `all` 控制转换表面。详见 [多模态采集](multimodal.md)。 |
 | `multimodal.allowedRootPaths` | 额外本地根目录，与 Agent 默认根合并后供 `pathToUri` 使用。`~` 会展开。工作区图片需要把项目目录写在这里。详见 [多模态采集](multimodal.md#allowedrootpaths)。 |
 
-敏感环境请开启[数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（图像和本地视频；已实现 `codex`、`qoder` IDE/CLI 与 `qwen-work-cn`）。
+敏感环境请开启[数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（图像和本地视频，支持 `codex`、`qoder` IDE/CLI、`qwen-work-cn`、`antigravity` 和 `antigravity-cli`）。
 
 已有配置文件不会被改写。升级后需重启常驻的 OpenClaw、Pi、Hermes 进程，以加载新版插件。Agent 启停、工作区黑名单、脱敏和多模态上传配置仍各自生效。
 

@@ -22,6 +22,7 @@ import type { MaskPlan } from '../mask/types.js';
 import { UPSTREAM_CORRELATION_HASH_FIELD, type TraceLinker } from './upstream-link/trace-linker.js';
 import type { MultimodalProcessor } from '../multimodal/processor.js';
 import { TurnBoundaryProcessor } from '../normalization/turn-boundary-processor.js';
+import { resolveAgentSystem } from '../normalization/agent-system-map.js';
 import { applyInvocationIdentity } from '../normalization/invocation-identity.js';
 import { expandAgentInputEvents } from '../normalization/agent-input-dual-write.js';
 import type { InterceptResultLinker } from './intercept-result-linker.js';
@@ -168,7 +169,9 @@ export class InputManager extends EventEmitter {
     }
     input.setWorkspacePolicy(this.workspacePolicy);
     this.inputs.set(input.id, input);
-    if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes || input.id === 'qwen-work-cn-collaboration') {
+    const isAntigravity = resolveAgentSystem(input.agentType) === 'antigravity';
+    if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes ||
+        isAntigravity || input.id === 'qwen-work-cn-collaboration') {
       this.entryAbortControllers.set(input.id, new AbortController());
     }
     this.counters.set(input.id, {
@@ -212,7 +215,8 @@ export class InputManager extends EventEmitter {
           (input as BaseInput & { restoreAbortedDelivery(): void }).restoreAbortedDelivery();
         });
         input.holdCheckpointUntil(retained);
-      } else if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes) {
+      } else if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes ||
+        (isAntigravity && this.flusher?.hasDurableTraceJournal(input.agentType))) {
         input.holdCheckpointUntil(handling);
       }
       const next = handling.catch(err => {
@@ -519,7 +523,12 @@ export class InputManager extends EventEmitter {
 
   /** Recheck retained output against current workspace and mask rules without rewriting its identity. */
   prepareRestoredEntries(entries: AgentActivityEntry[]): AgentActivityEntry[] {
-    return this.applyPolicyAndMask(this.workspacePolicy.filter(entries));
+    const allowed = this.workspacePolicy.filter(entries);
+    return this.applyPolicyAndMask(!this.workspacePolicy.enabled ? allowed : allowed.filter(entry =>
+      resolveAgentSystem(entry['gen_ai.agent.type']) !== 'antigravity' ||
+      (Array.isArray(entry.workspace_roots) && entry.workspace_roots.length > 0 &&
+        entry.workspace_roots.every(root => typeof root === 'string' && root.length > 0)),
+    ));
   }
 
   private applyPolicyAndMask(entries: AgentActivityEntry[]): AgentActivityEntry[] {
@@ -575,7 +584,7 @@ export class InputManager extends EventEmitter {
           if (!quota || signal?.aborted) throw error;
           if (!quotaAlarmed) {
             this.alarmManager?.record('FLUSH_QUOTA_ALARM', '3',
-              `Codex output capacity exhausted for ${inputId}; retrying without advancing its checkpoint`, { input_name: inputId });
+              `Trace journal capacity exhausted for ${inputId}; retrying without advancing its checkpoint`, { input_name: inputId });
             quotaAlarmed = true;
           }
           await delay(1000, undefined, signal ? { signal } : undefined);
