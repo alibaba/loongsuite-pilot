@@ -1,3 +1,46 @@
+/** Classify stops and expired metadata from an immutable journal snapshot. */
+export function inspectTurnJournal(events, staleBefore) {
+  const promptsByConversation = new Map();
+  const lastSessionEnd = new Map();
+  events.forEach((event, index) => {
+    const id = event.conversation_id;
+    if (event.hook_event === 'beforeSubmitPrompt') {
+      let prompts = promptsByConversation.get(id);
+      if (!prompts) {
+        prompts = { firstIndex: index, generations: new Set() };
+        promptsByConversation.set(id, prompts);
+      }
+      if (event.generation_id) prompts.generations.add(event.generation_id);
+    } else if (event.hook_event === 'sessionEnd') {
+      lastSessionEnd.set(id, index);
+    }
+  });
+
+  const stops = [];
+  const remaining = events.filter((event, index) => {
+    const id = event.conversation_id;
+    const prompts = promptsByConversation.get(id);
+    if (event.hook_event === 'stop') {
+      const canAssemble = prompts && (event.generation_id && prompts.generations.size > 0
+        ? prompts.generations.has(event.generation_id)
+        : prompts.firstIndex <= index);
+      if (canAssemble) {
+        stops.push(event);
+        return true;
+      }
+      // An early Stop can precede its prompt. Give it a bounded opportunity
+      // to pair without repeatedly reading the journal or logging duplicates.
+      return Date.parse(event._journal_ts) > staleBefore;
+    }
+    const isSessionBoundary = event.hook_event === 'sessionStart' || event.hook_event === 'sessionEnd';
+    if (isSessionBoundary && !prompts) {
+      return (lastSessionEnd.get(id) ?? -1) < index && Date.parse(event._journal_ts) > staleBefore;
+    }
+    return true;
+  });
+  return { stops, remaining };
+}
+
 /** Select one prompt generation without consuming its conversation's next turn. */
 export function selectTurnEvents(events, stop) {
   const conversation = events.filter(e => e.conversation_id === stop.conversation_id);

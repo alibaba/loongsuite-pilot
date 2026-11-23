@@ -33,6 +33,14 @@ function send(name, fields, version, conversation = 'session', hookProcessor = p
 function journal() {
   return fs.readFileSync(path.join(data, 'state/cursor/event-journal.jsonl'), 'utf8');
 }
+function journalEvents() {
+  const file = path.join(data, 'state/cursor/event-journal.jsonl');
+  return fs.existsSync(file) ? journal().split('\n').filter(Boolean).map(JSON.parse) : [];
+}
+function ageJournalEvents() {
+  const aged = journalEvents().map(event => ({ ...event, _journal_ts: '2000-01-01T00:00:00.000Z' }));
+  fs.writeFileSync(path.join(data, 'state/cursor/event-journal.jsonl'), aged.map(e => JSON.stringify(e)).join('\n') + '\n');
+}
 function readHistory() {
   const dir = path.join(data, 'logs/cursor/history');
   return fs.existsSync(dir) ? fs.readdirSync(dir).map(name => fs.readFileSync(path.join(dir, name), 'utf8')).join('') : '';
@@ -269,6 +277,7 @@ it.each(['1.7.0', '2026.07.31'])('retries a completed %s conversation after poli
   send('afterAgentResponse', { text: 'broken-policy-private', output_tokens: 13 }, version, 'old');
   send('stop', { status: 'completed' }, version, 'old');
   expect(readHistory()).toBe('');
+  ageJournalEvents();
   configure({ cursor: { captureMessageContent: false }, 'cursor-cli': { captureMessageContent: false } });
   send('beforeSubmitPrompt', { prompt: 'new-session' }, version, 'new');
   expect(readHistory()).toContain('"gen_ai.usage.output_tokens":13');
@@ -399,4 +408,39 @@ it('keeps a new CLI generation pending when an old response arrives late', () =>
   send('afterAgentResponse', { generation_id: 'new', text: 'new', output_tokens: 22 }, version);
   const usage = readHistory().trim().split('\n').map(JSON.parse).filter(r => r['gen_ai.usage.output_tokens']);
   expect(usage.map(r => [r['gen_ai.turn.id'], r['gen_ai.usage.output_tokens']])).toEqual([['old', 11], ['new', 22]]);
+});
+
+it('reclaims closed sessions and expired duplicate stops without consuming a new generation', () => {
+  configure({ cursor: { captureMessageContent: false } });
+  const version = '1.7.0';
+  send('sessionStart', {}, version);
+  send('beforeSubmitPrompt', { generation_id: 'old', prompt: 'first turn' }, version);
+  send('afterAgentResponse', { generation_id: 'old', text: 'first result', output_tokens: 11 }, version);
+  send('stop', { generation_id: 'old' }, version);
+  send('sessionEnd', {}, version);
+  expect(journalEvents()).toEqual([]);
+
+  send('stop', { generation_id: 'old' }, version);
+  ageJournalEvents();
+  send('beforeSubmitPrompt', { generation_id: 'new', prompt: 'next turn' }, version);
+  expect(journalEvents().map(event => event.generation_id)).toEqual(['new']);
+  send('afterAgentResponse', { generation_id: 'new', text: 'next result', output_tokens: 22 }, version);
+  send('stop', { generation_id: 'new' }, version);
+
+  const usage = readHistory().trim().split('\n').map(JSON.parse).filter(r => r['gen_ai.usage.output_tokens']);
+  expect(usage.map(r => [r['gen_ai.turn.id'], r['gen_ai.usage.output_tokens']])).toEqual([['old', 11], ['new', 22]]);
+  expect(fs.existsSync(path.join(data, 'logs/cursor/errors'))).toBe(false);
+});
+
+it('keeps a fresh stop until its prompt and response arrive, even after sessionEnd', () => {
+  configure({ 'cursor-cli': { captureMessageContent: false } });
+  const version = '2026.07.31';
+  send('stop', { generation_id: 'early-stop' }, version);
+  send('sessionEnd', {}, version);
+  expect(journalEvents()).toContainEqual(expect.objectContaining({ hook_event: 'stop', generation_id: 'early-stop' }));
+
+  send('beforeSubmitPrompt', { generation_id: 'early-stop', prompt: 'late prompt' }, version);
+  send('afterAgentResponse', { generation_id: 'early-stop', text: 'late result', output_tokens: 19 }, version);
+  expect(readHistory()).toContain('"gen_ai.usage.output_tokens":19');
+  expect(journalEvents()).toEqual([]);
 });

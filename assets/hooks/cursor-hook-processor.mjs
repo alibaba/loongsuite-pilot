@@ -28,7 +28,7 @@ import {
 import { cursorVariantFromVersion, omitCursorEventContent, toInternalEvent } from './cursor/source-event.mjs';
 import { appendEvent, CURSOR_DATA_DIR, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
 import { withAssemblyLock } from './cursor/assembly-lock.mjs';
-import { selectTurnEvents } from './cursor/turn-events.mjs';
+import { inspectTurnJournal, selectTurnEvents } from './cursor/turn-events.mjs';
 import { assembleTurn } from './cursor/react-assembler.mjs';
 import { buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
 import {
@@ -157,9 +157,12 @@ function applyCursorCliResourceContext(records, events, conversationId, variant)
   }
 }
 
-function compactJournal(snapshot, consumedConversationIds, turnEvents) {
+const CURSOR_ORPHAN_GRACE_MS = 15 * 60 * 1000;
+
+function compactJournal(snapshot, consumedConversationIds, turnEvents, staleBefore) {
   const consumed = new Set(turnEvents.filter(e => consumedConversationIds.has(e.conversation_id)));
-  rewriteJournal(snapshot.filter(e => !consumed.has(e)), snapshot);
+  const unconsumed = snapshot.filter(e => !consumed.has(e));
+  rewriteJournal(inspectTurnJournal(unconsumed, staleBefore).remaining, snapshot);
 }
 
 function applyPolicy(record, runtimeConfig) {
@@ -544,18 +547,22 @@ async function main() {
   // Ownership covers snapshot, history write and consumption. Other hooks may
   // append meanwhile; journal compaction preserves those appended events.
   await withAssemblyLock(async () => {
-    for (const stop of readAllEvents().filter(event => event.hook_event === 'stop')) {
+    const staleBefore = Date.now() - CURSOR_ORPHAN_GRACE_MS;
+    const snapshot = readAllEvents();
+    const { stops, remaining } = inspectTurnJournal(snapshot, staleBefore);
+    if (remaining.length !== snapshot.length) rewriteJournal(remaining, snapshot);
+    for (const stop of stops) {
       const isCurrentStop = internalEvent.hook_event === 'stop'
         && stop.conversation_id === internalEvent.conversation_id
         && stop.generation_id === internalEvent.generation_id
         && stop._journal_ts === internalEvent._journal_ts;
-      await assembleJournalEvent(stop, dataDir, runtimeConfig, now, isCurrentStop);
+      await assembleJournalEvent(stop, dataDir, runtimeConfig, now, isCurrentStop, staleBefore);
     }
   });
   writeEmptyResponse();
 }
 
-async function assembleJournalEvent(internalEvent, dataDir, runtimeConfig, now, isCurrentStop) {
+async function assembleJournalEvent(internalEvent, dataDir, runtimeConfig, now, isCurrentStop, staleBefore) {
   // On stop: assemble turn and write history
   if (internalEvent.hook_event === 'stop') {
     try {
@@ -566,20 +573,12 @@ async function assembleJournalEvent(internalEvent, dataDir, runtimeConfig, now, 
       // parallel hook invocation. When this happens, tool.call/result records are
       // absent from the output — this is a known Cursor hook timing limitation.
 
-      // Guard against duplicate stop events: if journal has no beforeSubmitPrompt
-      // for this conversation, the turn was already processed — skip to avoid duplication.
+      // Another Stop in the same scan may already have consumed this turn.
       const hasPendingTurn = allEvents.some(e =>
         e.hook_event === 'beforeSubmitPrompt' &&
         e.conversation_id === internalEvent.conversation_id
       );
-      if (!hasPendingTurn) {
-        await appendErrorJsonl(dataDir, now, {
-          stage: 'stop_guard',
-          'error.type': 'info',
-          'error.message': `skipped duplicate stop for conv=${internalEvent.conversation_id?.slice(0, 8)} (no pending beforeSubmitPrompt)`,
-        });
-        return;
-      }
+      if (!hasPendingTurn) return;
 
       // ─── Deferred-stop for Cursor CLI ───
       // Cursor CLI fires stop BEFORE afterAgentResponse. If there's a prompt but
@@ -665,7 +664,7 @@ async function assembleJournalEvent(internalEvent, dataDir, runtimeConfig, now, 
         await appendBatchJsonl(historyFile, records, variant);
       }
 
-      compactJournal(snapshot, consumedConversationIds, allEvents);
+      compactJournal(snapshot, consumedConversationIds, allEvents, staleBefore);
     } catch (err) {
       await appendErrorJsonl(dataDir, now, {
         stage: 'assemble',
