@@ -152,6 +152,8 @@ async function statusCommand(dataDir: string, args: ParsedArgs): Promise<void> {
   console.log(`ID:          ${view.id}`);
   console.log(`Runtime:     ${view.runtime}`);
   console.log(`State:       ${view.state}`);
+  if (view.reason) console.log(`Reason:      ${view.reason}`);
+  if (view.message) console.log(`Message:     ${view.message}`);
   if (view.pid) console.log(`PID:         ${view.pid}`);
   console.log(`WorkDir:     ${view.workDir}`);
   console.log(`Worker:      ${view.workerName ?? '-'}`);

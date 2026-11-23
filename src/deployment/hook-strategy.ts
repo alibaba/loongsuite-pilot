@@ -1,3 +1,4 @@
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type {
   AgentDefinition,
@@ -7,10 +8,23 @@ import type {
   DeployedAgentRecord,
 } from '../types/index.js';
 import { HookManager, type HookDefinition } from '../hooks/hook-manager.js';
-import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { withClaudeSettingsLock, quoteClaudeHookPath, legacyClaudeHookPaths } from '../hooks/claude-settings.js';
+import {
+  fileExists,
+  readJsonFile,
+  writeJsonFile,
+  writeTextFileAtomic,
+  resolveHome,
+  ensureDir,
+} from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { INTERCEPTOR_EVENT_TIMEOUT_SEC } from '../interceptor/types.js';
 import {
+  CODEX_HOOK_EVENT_KEYS,
+  type InstalledCodexCommandHandler,
+  type InstalledCodexHookLocation,
+  installedHookStateKey,
   writeTrustedHashes,
   removeTrustBlock,
   verifyTrustHashes,
@@ -38,7 +52,7 @@ function eventToSubcommand(event: string): string {
  * piping to work correctly.  Bare `.ps1` paths fail to receive stdin when
  * spawned through cmd.exe / child_process.
  */
-function wrapPs1Command(cmd: string): string {
+function wrapLegacyPs1Command(cmd: string): string {
   if (process.platform !== 'win32') return cmd;
   const parts = cmd.split(' ');
   const script = parts[0];
@@ -46,6 +60,33 @@ function wrapPs1Command(cmd: string): string {
   const args = parts.slice(1).join(' ');
   const wrapped = `powershell -NoProfile -ExecutionPolicy Bypass -File ${script}`;
   return args ? `${wrapped} ${args}` : wrapped;
+}
+
+function wrapPs1Command(cmd: string, agentId: string): string {
+  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) {
+    return wrapLegacyPs1Command(cmd);
+  }
+
+  const match = cmd.match(/^(.*?\.ps1)(?:\s+(.*))?$/i);
+  if (!match) return cmd;
+  const script = match[1];
+  const args = match[2] ?? '';
+  const wrapped = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${script}"`;
+  return args ? `${wrapped} ${args}` : wrapped;
+}
+
+function appendEventSubcommand(
+  command: string,
+  event: string,
+  style: AgentHookConfig['eventSubcommand'],
+): string {
+  if (style === 'kebab-case') {
+    return `${command} ${eventToSubcommand(event)}`;
+  }
+  if (style === 'as-is') {
+    return `${command} ${event}`;
+  }
+  return command;
 }
 
 /**
@@ -56,26 +97,62 @@ function formatHookCommand(
   hookCommand: string,
   event: string,
   style: AgentHookConfig['eventSubcommand'],
+  agentId: string,
 ): string {
-  const cmd = wrapPs1Command(hookCommand);
-  if (style === 'kebab-case') {
-    return `${cmd} ${eventToSubcommand(event)}`;
+  if (process.platform !== 'win32' && agentId === 'claude-code') {
+    return appendEventSubcommand(quoteClaudeHookPath(hookCommand), event, style);
   }
-  return cmd;
+  return appendEventSubcommand(wrapPs1Command(hookCommand, agentId), event, style);
+}
+
+function legacyHookCommands(
+  hookCommand: string,
+  event: string,
+  style: AgentHookConfig['eventSubcommand'],
+  agentId: string,
+): string[] {
+  if (process.platform !== 'win32' && agentId === 'claude-code') {
+    return legacyClaudeHookPaths(hookCommand).map(command => appendEventSubcommand(command, event, style));
+  }
+  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) return [];
+
+  const current = formatHookCommand(hookCommand, event, style, agentId);
+  return [...new Set([
+    appendEventSubcommand(hookCommand, event, style),
+    appendEventSubcommand(wrapLegacyPs1Command(hookCommand), event, style),
+  ])].filter(command => command !== current);
+}
+
+export interface HookStrategyOptions {
+  /**
+   * Install agent-declared interceptor hooks.
+   * Default false: uninstall any already-installed interceptor hooks and do
+   * not install them. Collection hooks are unchanged. `undeploy` always
+   * removes interceptor hooks, whether or not this flag is set.
+   */
+  deployInterceptorHooks?: boolean;
 }
 
 export class HookStrategy implements DeployStrategy {
   private readonly hookManager: HookManager;
+  private readonly deployInterceptorHooks: boolean;
 
-  constructor(hookManager: HookManager) {
+  constructor(hookManager: HookManager, options?: HookStrategyOptions) {
     this.hookManager = hookManager;
+    this.deployInterceptorHooks = options?.deployInterceptorHooks ?? false;
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
+    // System registration is explicitly provisioned before any identity home exists.
+    if (def.hook?.scope === 'system') return true;
     return detectAgent(def.detection);
   }
 
   async needsDeploy(def: AgentDefinition, _record?: DeployedAgentRecord): Promise<boolean> {
+    if (def.hook?.scope === 'system') {
+      const { systemTomlHooksInstalled } = await import('./system-toml-hooks.js');
+      return !(await systemTomlHooksInstalled(def));
+    }
     if (this.isTomlAgent(def)) {
       return this.needsDeployToml(def);
     }
@@ -83,8 +160,21 @@ export class HookStrategy implements DeployStrategy {
       return true;
     }
 
-    const hookDefs = this.buildHookDefinitions(def);
-    for (const hookDef of hookDefs) {
+    if (def.hook?.kiroAgent) {
+      return this.kiroAgentNeedsDeploy(def);
+    }
+
+    const interceptorDefs = this.buildInterceptorDefinitions(def);
+    for (const hookDef of interceptorDefs) {
+      // Off: any leftover command needs a deploy so it can be removed. The
+      // strict installed check would miss entries moved off head, retimed, or
+      // missing shell, and leave them in settings forever.
+      const needs = this.deployInterceptorHooks
+        ? !(await this.hookManager.isHookInstalled(hookDef))
+        : await this.hookManager.isHookPresent(hookDef);
+      if (needs) return true;
+    }
+    for (const hookDef of this.buildHookDefinitions(def)) {
       if (!(await this.hookManager.isHookInstalled(hookDef))) {
         return true;
       }
@@ -93,6 +183,9 @@ export class HookStrategy implements DeployStrategy {
       if (await this.hookManager.isHookInstalled(retiredDef)) {
         return true;
       }
+    }
+    if (await this.needsTrustRepairForCodex(def)) {
+      return true;
     }
     return false;
   }
@@ -108,7 +201,7 @@ export class HookStrategy implements DeployStrategy {
   private async needsDeployToml(def: AgentDefinition): Promise<boolean> {
     const cfg = def.hook!;
     const configPath = resolveHome(cfg.settingsPath);
-    const hookCommand = wrapPs1Command(resolveHome(cfg.hookCommand));
+    const hookCommand = wrapPs1Command(resolveHome(cfg.hookCommand), def.id);
     const replaceCmds = cfg.replaceHookCommands ?? [];
 
     // 任一当前 event 缺失 → 需要部署
@@ -144,6 +237,26 @@ export class HookStrategy implements DeployStrategy {
     return existing?.version !== undefined;
   }
 
+  private async needsTrustRepairForCodex(def: AgentDefinition): Promise<boolean> {
+    const cfg = def.hook?.trustToml;
+    if (!cfg || !def.hook) return false;
+    try {
+      const locations = await this.resolveInstalledCodexHooks(def);
+      return !verifyTrustHashes({
+        configPath: resolveHome(cfg.configPath),
+        hooksJsonAbsPath: path.resolve(resolveHome(def.hook.settingsPath)),
+        locations,
+        marker: cfg.marker,
+      }).valid;
+    } catch (err) {
+      logger.warn('could not resolve installed Codex hooks for trust verification', {
+        agentId: def.id,
+        error: String(err),
+      });
+      return true;
+    }
+  }
+
   async deploy(def: AgentDefinition): Promise<DeployResult> {
     const hookConfig = def.hook;
     if (!hookConfig) {
@@ -155,28 +268,67 @@ export class HookStrategy implements DeployStrategy {
     }
 
     try {
-      await this.ensureSettingsFile(hookConfig.settingsPath);
+      if (hookConfig.scope === 'system') {
+        const { updateSystemTomlHooks } = await import('./system-toml-hooks.js');
+        await updateSystemTomlHooks(def, true);
+        return { success: true, agentId: def.id, deployMode: 'hook' };
+      }
+      const ensureSettings = () => this.ensureSettingsFile(hookConfig.settingsPath);
+      if (def.id === 'claude-code') await withClaudeSettingsLock(hookConfig.settingsPath, ensureSettings);
+      else await ensureSettings();
+
+      // Kiro CLI: settingsPath 是整个 Agent 定义 JSON，需要顶层 name + tools +
+      // hooks:<event>:[{command, matcher}]（flat，无 type 字段）。
+      // NOTE: this branch returns early — it does NOT run retiredEvents cleanup
+      // or env injection (applyEnvToSettings). kiro-cli.json currently declares
+      // neither field, so this is a no-op today; if retiredEvents/env are added
+      // later, deployKiroAgent must handle them explicitly (or route through the
+      // standard flow) — don't assume the shared path covers them.
+      if (hookConfig.kiroAgent) {
+        await this.deployKiroAgent(def);
+        logger.info('hooks deployed', { agentId: def.id, events: hookConfig.events.length });
+        return { success: true, agentId: def.id, deployMode: 'hook' };
+      }
 
       const retiredHookDefs = this.buildRetiredHookDefinitions(def);
-      for (const retiredHookDef of retiredHookDefs) {
-        const removed = await this.hookManager.uninstallHook(retiredHookDef);
-        if (!removed) {
-          return { success: false, agentId: def.id, deployMode: 'hook', error: 'failed to remove retired hook event' };
+      let retiredTrustKeys: string[] = [];
+      if (hookConfig.trustToml && retiredHookDefs.length > 0) {
+        try {
+          const retiredEvents = retiredHookDefs.map(
+            definition => definition.hookJsonPath.at(-1)!,
+          );
+          const locations = await this.resolveInstalledCodexHooks(def, retiredEvents, true);
+          const hooksJsonAbsPath = path.resolve(resolveHome(hookConfig.settingsPath));
+          retiredTrustKeys = Object.values(locations).map(
+            location => installedHookStateKey(hooksJsonAbsPath, location),
+          );
+        } catch (err) {
+          // Cleanup must be conservative: if ownership cannot be proven from the
+          // installed handler, leave stale state behind rather than deleting a
+          // third-party hook's position-based trust entry.
+          logger.warn('could not resolve retired Codex hook trust ownership', {
+            agentId: def.id,
+            error: String(err),
+          });
         }
       }
-      if (hookConfig.trustToml && retiredHookDefs.length > 0) {
-        const trust = hookConfig.trustToml;
-        removeTrustBlock(
-          resolveHome(trust.configPath),
-          trust.marker,
-          path.resolve(resolveHome(hookConfig.settingsPath)),
-          retiredHookDefs.map(definition => definition.hookJsonPath.at(-1)!),
-        );
+      // Non-Codex agents have no trust transaction to protect. Preserve their
+      // existing cleanup-before-install order; Codex cleanup is deferred until
+      // the unified current+retired trust reconciliation succeeds below.
+      if (!hookConfig.trustToml) {
+        for (const retiredHookDef of retiredHookDefs) {
+          const removed = await this.hookManager.uninstallHook(retiredHookDef);
+          if (!removed) {
+            return { success: false, agentId: def.id, deployMode: 'hook', error: 'failed to remove retired hook event' };
+          }
+        }
       }
 
       if (hookConfig.env) {
         try {
-          await this.applyEnvToSettings(hookConfig.settingsPath, hookConfig.env);
+          const updateEnv = () => this.applyEnvToSettings(hookConfig.settingsPath, hookConfig.env!);
+          if (def.id === 'claude-code') await withClaudeSettingsLock(hookConfig.settingsPath, updateEnv);
+          else await updateEnv();
         } catch (err) {
           // env injection failure must not block hook deployment — pilot can still
           // collect the basic transcript-based events without preload.
@@ -184,6 +336,31 @@ export class HookStrategy implements DeployStrategy {
             agentId: def.id,
             error: String(err),
           });
+        }
+      }
+
+      const interceptorDefs = this.buildInterceptorDefinitions(def);
+      if (this.deployInterceptorHooks) {
+        for (const hookDef of interceptorDefs) {
+          const installed = await this.hookManager.isHookInstalled(hookDef);
+          if (!installed) {
+            const ok = await this.hookManager.installHook(hookDef);
+            if (!ok) {
+              return { success: false, agentId: def.id, deployMode: 'hook', error: `failed to install hook for event` };
+            }
+          }
+        }
+      } else {
+        // A failed removal must not block the collection hook; needsDeploy keeps
+        // reporting the leftover, so the next deploy retries it.
+        for (const hookDef of interceptorDefs) {
+          if (!(await this.hookManager.isHookPresent(hookDef))) continue;
+          if (!(await this.hookManager.uninstallHook(hookDef))) {
+            logger.warn('failed to uninstall interceptor hook', {
+              agentId: def.id,
+              event: hookDef.hookJsonPath.at(-1),
+            });
+          }
         }
       }
 
@@ -198,16 +375,19 @@ export class HookStrategy implements DeployStrategy {
         }
       }
 
-      // Codex 类 hook 需要写 trust hash 到 config.toml(forceBypass 应急通道由 pilot
-      // config.json 的 agents.<id>.trust.forceBypass 控制 — 后续可由 hook-watchdog 读取)
+      // Codex 类 hook 需要写 trust hash 到 config.toml。
+      // Hook trust bypass 仅是 Codex 进程级 CLI 参数，不是合法的 config.toml 字段；
+      // Pilot 不拥有 Codex 启动入口，因此这里不能提供 bypass 通道。
       if (hookConfig.trustToml) {
-        try {
-          await this.writeCodexTrust(def);
-        } catch (err) {
-          logger.error('codex trust write failed (deploy continues)', {
-            agentId: def.id,
-            error: String(err),
-          });
+        await this.writeCodexTrust(def, retiredTrustKeys);
+        // Keep retired hooks installed until config.toml has been reconciled and
+        // re-read successfully. A failed trust repair then preserves the only
+        // runtime evidence from which their position-based keys can be proven.
+        for (const retiredHookDef of retiredHookDefs) {
+          const removed = await this.hookManager.uninstallHook(retiredHookDef);
+          if (!removed) {
+            return { success: false, agentId: def.id, deployMode: 'hook', error: 'failed to remove retired hook event' };
+          }
         }
       }
 
@@ -229,7 +409,8 @@ export class HookStrategy implements DeployStrategy {
 
   /**
    * 写 Codex trust hash + 立即自洽性校验(Q8)。
-   * 校验失败仅记 logger.error,不阻塞 deploy(让 hook-watchdog 活性检查兜底重试)。
+   * 定位、写入或本地校验失败时必须阻止 deploy 成功，避免产生“hook 存在但不可执行”
+   * 的静默部署状态。
    *
    * 注:command 字符串必须与 HookManager.installHook 写入 hooks.json 时一致,否则 hash 对不上。
    * HookManager nested format 写入的 command 就是原始 def.hook.hookCommand + 末尾空格 + subcommand
@@ -244,53 +425,34 @@ export class HookStrategy implements DeployStrategy {
    * 解决:HookManager 已支持每事件独立 hookCommand(我们在 buildHookDefinitions 里拼了 subcommand),
    * 见下方 buildHookDefinitions 改动。
    */
-  private async writeCodexTrust(def: AgentDefinition): Promise<void> {
+  private async writeCodexTrust(
+    def: AgentDefinition,
+    retiredKeys: readonly string[] = [],
+  ): Promise<void> {
     const cfg = def.hook!.trustToml!;
     const configPath = resolveHome(cfg.configPath);
     const hooksJsonAbsPath = path.resolve(resolveHome(def.hook!.settingsPath));
-    const hookCommand = resolveHome(def.hook!.hookCommand);
+    const locations = await this.resolveInstalledCodexHooks(def);
 
-    // 构建 event → 实际写入 hooks.json 的完整 command(与 buildHookDefinitions 一致)
-    const eventToCmd: Record<string, string> = {};
-    for (const ev of def.hook!.events) {
-      eventToCmd[ev] = formatHookCommand(hookCommand, ev, def.hook!.eventSubcommand);
-    }
-
-    // 回读 hooks.json,算出每个 event 中 pilot hook 的实际 group index。
-    // 当其他第三方 hook(如 r2c)排在前面时,pilot 的 hook 会被 push 到后面的位置。
-    // trust hash 的 key 必须用实际 index,否则 codex 端校验失败(静默 Untrusted)。
-    const eventToGroupIndex = await this.resolveGroupIndices(def);
-
-    writeTrustedHashes({
+    const changed = writeTrustedHashes({
       configPath,
       hooksJsonAbsPath,
-      hookEvents: def.hook!.events,
-      eventToCommand: eventToCmd,
-      eventToGroupIndex,
+      locations,
+      retiredKeys,
       marker: cfg.marker,
-      forceBypass: process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS === '1',
     });
-
-    if (process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS === '1') {
-      logger.warn('Codex trust bypass enabled via LOONGSUITE_PILOT_CODEX_FORCE_BYPASS — hook trust verification is DISABLED', { agentId: def.id });
-    }
 
     const verify = verifyTrustHashes({
       configPath,
       hooksJsonAbsPath,
-      hookEvents: def.hook!.events,
-      eventToCommand: eventToCmd,
-      eventToGroupIndex,
+      locations,
+      retiredKeys,
       marker: cfg.marker,
     });
     if (!verify.valid) {
-      logger.error('codex trust hash verification failed', {
-        agentId: def.id,
-        mismatches: verify.mismatches,
-      });
-    } else {
-      logger.info('codex trust hash verified', { agentId: def.id });
+      throw new Error(`codex trust hash verification failed: ${verify.mismatches.join('; ')}`);
     }
+    logger.info('codex trust block self-check passed', { agentId: def.id, changed });
   }
 
   async undeploy(def: AgentDefinition): Promise<boolean> {
@@ -298,7 +460,42 @@ export class HookStrategy implements DeployStrategy {
       return this.undeployToml(def);
     }
 
-    const hookDefs = this.buildHookDefinitions(def);
+    if (def.hook?.scope === 'system') {
+      try {
+        const { updateSystemTomlHooks } = await import('./system-toml-hooks.js');
+        await updateSystemTomlHooks(def, false);
+        return true;
+      } catch (error) {
+        logger.error('System hook removal failed', { error: String(error) });
+        return false;
+      }
+    }
+    // Mirror deploy(): also remove retiredEvents (e.g. codex's PreToolUse/
+    // PostToolUse from an older version). Otherwise disabling a codex agent
+    // that was first deployed by an old build leaves those retired hooks
+    // firing, since current events don't cover them.
+    const retiredHookDefs = this.buildRetiredHookDefinitions(def);
+    const hookDefs = [
+      ...this.buildInterceptorDefinitions(def),
+      ...this.buildHookDefinitions(def),
+      ...retiredHookDefs,
+    ];
+    let ownedTrustKeys: string[] = [];
+    if (def.hook?.trustToml) {
+      try {
+        const events = hookDefs.map(hookDef => hookDef.hookJsonPath.at(-1)!);
+        const locations = await this.resolveInstalledCodexHooks(def, events, true);
+        const hooksJsonAbsPath = path.resolve(resolveHome(def.hook.settingsPath));
+        ownedTrustKeys = Object.values(locations).map(
+          location => installedHookStateKey(hooksJsonAbsPath, location),
+        );
+      } catch (err) {
+        logger.warn('could not resolve Codex hook trust ownership before undeploy', {
+          agentId: def.id,
+          error: String(err),
+        });
+      }
+    }
     let allOk = true;
     for (const hookDef of hookDefs) {
       const ok = await this.hookManager.uninstallHook(hookDef);
@@ -309,8 +506,7 @@ export class HookStrategy implements DeployStrategy {
       try {
         const cfg = def.hook.trustToml;
         const configPath = resolveHome(cfg.configPath);
-        const hooksJsonAbsPath = path.resolve(resolveHome(def.hook.settingsPath));
-        removeTrustBlock(configPath, cfg.marker, hooksJsonAbsPath, def.hook.events);
+        removeTrustBlock(configPath, cfg.marker, ownedTrustKeys);
       } catch (err) {
         logger.warn('codex trust cleanup failed (non-blocking)', { error: String(err) });
       }
@@ -328,7 +524,7 @@ export class HookStrategy implements DeployStrategy {
   private async deployToml(def: AgentDefinition): Promise<DeployResult> {
     const cfg = def.hook!;
     try {
-      const hookCommand = wrapPs1Command(resolveHome(cfg.hookCommand));
+      const hookCommand = wrapPs1Command(resolveHome(cfg.hookCommand), def.id);
       const ok = await installKimiHooks({
         configPath: resolveHome(cfg.settingsPath),
         hookCommand,
@@ -350,7 +546,7 @@ export class HookStrategy implements DeployStrategy {
   private async undeployToml(def: AgentDefinition): Promise<boolean> {
     const cfg = def.hook!;
     try {
-      const hookCommand = wrapPs1Command(resolveHome(cfg.hookCommand));
+      const hookCommand = wrapPs1Command(resolveHome(cfg.hookCommand), def.id);
       return await uninstallKimiHooks({
         configPath: resolveHome(cfg.settingsPath),
         hookCommand,
@@ -362,46 +558,107 @@ export class HookStrategy implements DeployStrategy {
     }
   }
 
-  /**
-   * 回读 hooks.json,找到 pilot hook command 在每个 event 数组中的实际 group index。
-   * 支持 nested format({hooks:[{command}]}) 和 flat format({command})两种结构。
-   */
-  private async resolveGroupIndices(def: AgentDefinition): Promise<Record<string, number>> {
-    const result: Record<string, number> = {};
+  /** Resolve each exact installed Pilot handler. Ambiguity is unsafe for trust. */
+  private async resolveInstalledCodexHooks(
+    def: AgentDefinition,
+    eventNames: readonly string[] = def.hook!.events,
+    allowMissing = false,
+  ): Promise<Record<string, InstalledCodexHookLocation>> {
+    const result: Record<string, InstalledCodexHookLocation> = {};
     const hookCommand = resolveHome(def.hook!.hookCommand);
-
-    try {
-      const settings = await readJsonFile<Record<string, unknown>>(def.hook!.settingsPath);
-      const hooks = (settings as any)?.hooks;
-      if (!hooks || typeof hooks !== 'object') {
-        return result;
-      }
-
-      for (const event of def.hook!.events) {
-        const arr = hooks[event];
-        if (!Array.isArray(arr)) continue;
-        const cmd = formatHookCommand(hookCommand, event, def.hook!.eventSubcommand);
-        for (let i = 0; i < arr.length; i++) {
-          const entry = arr[i];
-          // nested: {hooks: [{command}]}
-          if (Array.isArray(entry?.hooks)) {
-            if (entry.hooks.some((h: any) => h.command === cmd)) {
-              result[event] = i;
-              break;
-            }
-          }
-          // flat: {command}
-          if (entry?.command === cmd) {
-            result[event] = i;
-            break;
-          }
-        }
-      }
-    } catch {
-      // 读取失败时 fallback 全 0(首次安装、无其他 hook 时是对的)
+    const settingsPath = resolveHome(def.hook!.settingsPath);
+    const settings = await readJsonFile<Record<string, unknown>>(settingsPath);
+    const hooks = (settings as { hooks?: Record<string, unknown> } | null)?.hooks;
+    if (!hooks || typeof hooks !== 'object') {
+      throw new Error(`installed hooks object missing: ${settingsPath}`);
     }
 
+    for (const eventName of eventNames) {
+      const eventKey = CODEX_HOOK_EVENT_KEYS[eventName];
+      if (!eventKey) throw new Error(`Unknown hook event: ${eventName}`);
+      const groups = hooks[eventName];
+      if (!Array.isArray(groups)) {
+        if (allowMissing) continue;
+        throw new Error(`installed hook event missing: ${eventName}`);
+      }
+      const command = formatHookCommand(
+        hookCommand, eventName, def.hook!.eventSubcommand, def.id,
+      );
+      const matches: InstalledCodexHookLocation[] = [];
+      groups.forEach((rawGroup, groupIndex) => {
+        if (!rawGroup || typeof rawGroup !== 'object') return;
+        const group = rawGroup as Record<string, unknown>;
+        const handlers = Array.isArray(group.hooks) ? group.hooks : [group];
+        handlers.forEach((rawHandler, handlerIndex) => {
+          if (!rawHandler || typeof rawHandler !== 'object') return;
+          const handler = rawHandler as Record<string, unknown>;
+          if (handler.command !== command) return;
+          if (handler.type !== undefined && handler.type !== 'command') return;
+          const installed: InstalledCodexCommandHandler = {
+            type: 'command',
+            command,
+            ...(typeof handler.commandWindows === 'string'
+              ? { commandWindows: handler.commandWindows }
+              : typeof handler.command_windows === 'string'
+                ? { commandWindows: handler.command_windows }
+                : {}),
+            ...(typeof handler.timeout === 'number' ? { timeout: handler.timeout } : {}),
+            ...(typeof handler.async === 'boolean' ? { async: handler.async } : {}),
+            ...(typeof handler.statusMessage === 'string' ? { statusMessage: handler.statusMessage } : {}),
+            ...(typeof handler.additionalContextLimit === 'number'
+              ? { additionalContextLimit: handler.additionalContextLimit }
+              : {}),
+          };
+          matches.push({
+            eventName,
+            eventKey,
+            groupIndex,
+            handlerIndex: Array.isArray(group.hooks) ? handlerIndex : 0,
+            ...(typeof group.matcher === 'string' ? { matcher: group.matcher } : {}),
+            handler: installed,
+          });
+        });
+      });
+      if (matches.length === 0 && allowMissing) continue;
+      if (matches.length !== 1) {
+        throw new Error(
+          `expected exactly one installed Pilot handler for ${eventName}; found ${matches.length}`,
+        );
+      }
+      result[eventName] = matches[0]!;
+    }
     return result;
+  }
+
+  private interceptorTimeout(event: string, timeout?: number | Record<string, number>): number | undefined {
+    if (typeof timeout === 'number') return timeout;
+    if (timeout && typeof timeout[event] === 'number') return timeout[event];
+    if (event === 'UserPromptSubmit' || event === 'PreToolUse' || event === 'PostToolUse') {
+      return INTERCEPTOR_EVENT_TIMEOUT_SEC[event];
+    }
+    return undefined;
+  }
+
+  private buildInterceptorDefinitions(def: AgentDefinition): HookDefinition[] {
+    const hookConfig = def.hook;
+    const interceptor = hookConfig?.interceptor;
+    if (!hookConfig || !interceptor) return [];
+
+    return interceptor.events.map(event => ({
+      agentId: def.id,
+      settingsPath: hookConfig.settingsPath,
+      settingsSyntax: hookConfig.settingsSyntax,
+      hookJsonPath: ['hooks', event],
+      hookCommand: formatHookCommand(
+        interceptor.hookCommand, event, hookConfig.eventSubcommand, def.id,
+      ),
+      matcher: interceptor.eventMatchers?.[event] ?? interceptor.matcher ?? hookConfig.matcher,
+      useNestedFormat: hookConfig.format === 'nested',
+      shell: process.platform === 'win32' ? hookConfig.winShell : undefined,
+      timeout: this.interceptorTimeout(event, interceptor.timeout),
+      insert: interceptor.insert ?? 'head',
+      replaceHookCommands: interceptor.replaceHookCommands ?? [],
+    }));
   }
 
   private buildHookDefinitions(def: AgentDefinition): HookDefinition[] {
@@ -411,13 +668,20 @@ export class HookStrategy implements DeployStrategy {
     return hookConfig.events.map(event => ({
       agentId: def.id,
       settingsPath: hookConfig.settingsPath,
+      settingsSyntax: hookConfig.settingsSyntax,
       hookJsonPath: ['hooks', event],
       hookCommand: formatHookCommand(
-        hookConfig.hookCommand, event, hookConfig.eventSubcommand,
+        hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
       ),
-      matcher: hookConfig.matcher,
+      matcher: hookConfig.eventMatchers?.[event] ?? hookConfig.matcher,
       useNestedFormat: hookConfig.format === 'nested',
-      replaceHookCommands: hookConfig.replaceHookCommands,
+      shell: process.platform === 'win32' ? hookConfig.winShell : undefined,
+      replaceHookCommands: [
+        ...(hookConfig.replaceHookCommands ?? []),
+        ...legacyHookCommands(
+          hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
+        ),
+      ],
     }));
   }
 
@@ -430,13 +694,19 @@ export class HookStrategy implements DeployStrategy {
       .map(event => ({
         agentId: def.id,
         settingsPath: hookConfig.settingsPath,
+        settingsSyntax: hookConfig.settingsSyntax,
         hookJsonPath: ['hooks', event],
         hookCommand: formatHookCommand(
-          hookConfig.hookCommand, event, hookConfig.eventSubcommand,
+          hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),
-        matcher: hookConfig.matcher,
+        matcher: hookConfig.eventMatchers?.[event] ?? hookConfig.matcher,
         useNestedFormat: hookConfig.format === 'nested',
-        replaceHookCommands: hookConfig.replaceHookCommands,
+        replaceHookCommands: [
+          ...(hookConfig.replaceHookCommands ?? []),
+          ...legacyHookCommands(
+            hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
+          ),
+        ],
       }));
   }
 
@@ -497,23 +767,130 @@ export class HookStrategy implements DeployStrategy {
   }
 
   /**
+   * Kiro CLI Agent 定义 JSON（~/.kiro/agents/<name>.json）专用 deploy。
+   *
+   * 文件结构（round3 实证，hook.rs Hook 扁平结构无 type 字段）：
+   *   { "name": "...", "tools": [...], "hooks": { "<event>": [{"command": "..."}] } }
+   * 每个 hook 条目是 flat {command, matcher?}（无 type 字段，否则 Kiro loader 拒绝）。
+   */
+  private async deployKiroAgent(def: AgentDefinition): Promise<void> {
+    const hookConfig = def.hook!;
+    const settingsPath = resolveHome(hookConfig.settingsPath);
+    const agent = hookConfig.kiroAgent!;
+    const hookCommandBase = resolveHome(hookConfig.hookCommand);
+
+    await ensureDir(path.dirname(settingsPath));
+    const existing = (await readJsonFile<Record<string, unknown>>(settingsPath)) ?? {};
+
+    const merged: Record<string, unknown> = { ...existing };
+    merged['name'] = agent.name;
+    merged['tools'] = agent.tools;
+
+    const hooks = (merged['hooks'] && typeof merged['hooks'] === 'object')
+      ? { ...(merged['hooks'] as Record<string, unknown>) }
+      : {};
+
+    for (const event of hookConfig.events) {
+      const cmd = formatHookCommand(hookCommandBase, event, hookConfig.eventSubcommand, def.id);
+      const entry: Record<string, unknown> = { command: cmd };
+      if (hookConfig.matcher) entry['matcher'] = hookConfig.matcher;
+
+      const arr = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
+      // 移除旧的 pilot hook 条目（command 以 hookCommandBase 开头），保留第三方
+      const filtered = arr.filter((e) => {
+        const existingCmd = (e as any)?.command;
+        return typeof existingCmd !== 'string' || !existingCmd.startsWith(hookCommandBase);
+      });
+      // 幂等：已存在则不重复 push
+      const present = filtered.some((e) => (e as any)?.command === cmd);
+      if (!present) filtered.push(entry);
+      hooks[event] = filtered;
+    }
+
+    merged['hooks'] = hooks;
+    await writeJsonFile(settingsPath, merged);
+
+    // Make pilot-kiro the default agent so users can run `kiro-cli` without
+    // `--agent pilot-kiro`. Only set when missing — don't override a user's
+    // explicit choice (they can still pass --agent for a one-off override).
+    await this.setKiroDefaultAgentIfMissing(agent.name, resolveHome(hookConfig.settingsPath));
+  }
+
+  /**
+   * Set `chat.defaultAgent = <agentName>` in `<home>/settings/cli.json` when not
+   * already set, so kiro-cli launches with the pilot agent by default.
+   * Home is the parent of the agent file's `agents/` directory, so `--home`
+   * and the default `~/.kiro` stay on the same tree.
+   */
+  private async setKiroDefaultAgentIfMissing(agentName: string, agentSettingsPath: string): Promise<void> {
+    const agentsDir = path.dirname(agentSettingsPath);
+    const kiroRoot = path.basename(agentsDir) === 'agents' ? path.dirname(agentsDir) : path.dirname(agentSettingsPath);
+    const cliSettingsPath = path.join(kiroRoot, 'settings', 'cli.json');
+    try {
+      await ensureDir(path.dirname(cliSettingsPath));
+      const cli = (await readJsonFile<Record<string, unknown>>(cliSettingsPath)) ?? {};
+      const cur = cli['chat.defaultAgent'];
+      if (typeof cur === 'string' && cur.length > 0) return; // respect existing choice
+      cli['chat.defaultAgent'] = agentName;
+      await writeJsonFile(cliSettingsPath, cli);
+      logger.info('kiro default agent set', { path: cliSettingsPath, agent: agentName });
+    } catch (err) {
+      logger.warn('failed to set kiro default agent', { error: String(err) });
+    }
+  }
+
+  private async kiroAgentNeedsDeploy(def: AgentDefinition): Promise<boolean> {
+    const hookConfig = def.hook!;
+    const settings = await readJsonFile<Record<string, unknown>>(resolveHome(hookConfig.settingsPath));
+    if (!settings) return true;
+    const hooks = settings['hooks'] as Record<string, unknown> | undefined;
+    if (!hooks || typeof hooks !== 'object') return true;
+    const base = resolveHome(hookConfig.hookCommand);
+    for (const event of hookConfig.events) {
+      const cmd = formatHookCommand(base, event, hookConfig.eventSubcommand, def.id);
+      const arr = hooks[event];
+      if (!Array.isArray(arr)) return true;
+      const found = arr.some((e) => (e as any)?.command === cmd);
+      if (!found) return true;
+    }
+    return false;
+  }
+
+  /**
    * Ensure the settings file exists with a valid structure.
    * Cursor's hooks.json requires a `version` field; Codex's does NOT
    * (Codex uses `#[serde(deny_unknown_fields)]` and only allows `hooks`).
    */
   private async ensureSettingsFile(settingsPath: string): Promise<void> {
     const isHooksJson = settingsPath.endsWith('hooks.json');
-    const needsVersion = isHooksJson && settingsPath.includes('.cursor');
+    if (!isHooksJson) return;
 
+    const needsVersion = isHooksJson && settingsPath.includes('.cursor');
+    const existed = await fileExists(settingsPath);
     const existing = await readJsonFile<Record<string, unknown>>(settingsPath);
-    if (!existing) {
-      if (isHooksJson) {
-        const initial: Record<string, unknown> = { hooks: {} };
-        if (needsVersion) {
-          initial.version = 1;
-        }
-        await writeJsonFile(settingsPath, initial);
+    if (existed && !existing) {
+      const raw = await fs.readFile(settingsPath, 'utf8');
+      if (raw.trim() !== '') {
+        throw new Error(`refusing to overwrite invalid settings: ${settingsPath}`);
       }
+
+      const initial: Record<string, unknown> = { hooks: {} };
+      if (needsVersion) {
+        initial.version = 1;
+      }
+      await writeTextFileAtomic(
+        settingsPath,
+        `${JSON.stringify(initial, null, 2)}\n`,
+        { expected: { exists: true, content: raw } },
+      );
+      return;
+    }
+    if (!existing) {
+      const initial: Record<string, unknown> = { hooks: {} };
+      if (needsVersion) {
+        initial.version = 1;
+      }
+      await writeJsonFile(settingsPath, initial);
     } else if (needsVersion && existing.version === undefined) {
       existing.version = 1;
       await writeJsonFile(settingsPath, existing);

@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import type { AgentDefinition } from '../types/index.js';
 import { PluginProbeStrategy } from '../deployment/plugin-probe-strategy.js';
 import { createLogger } from '../utils/logger.js';
-import { ensureDir, writeJsonFile } from '../utils/fs-utils.js';
+import { ensureDir, readJsonFile, writeJsonFile } from '../utils/fs-utils.js';
 import {
   bootstrapTokenPath,
   bundleDir,
@@ -109,10 +109,9 @@ export class LocalWorkerActivationService {
     }
 
     const fingerprint = await this.fingerprint(instance, template);
-    if (this.activeFingerprints.get(instance.id) === fingerprint && await this.isInstanceWorkerAlive(template, instance)) return;
+    if (this.activeFingerprints.get(instance.id) === fingerprint) return;
 
     logger.info('reconciling local worker', { instanceId: instance.id, runtime: instance.runtime, trigger });
-    await this.stopInstance(instance);
 
     const def = this.buildDefinition(template, instance);
     const result = await this.strategy.deploy(def, {
@@ -121,7 +120,14 @@ export class LocalWorkerActivationService {
     });
 
     if (!result.success) {
-      await this.writeSupervisorStatus(instance, 'failed', result.error ?? 'local worker deploy failed');
+      if (!await this.hasSupervisorFailureToPreserve(instance)) {
+        await this.writeSupervisorStatus(
+          instance,
+          'failed',
+          result.error ?? 'local worker deploy failed',
+          'LocalWorkerDeployFailed',
+        );
+      }
       logger.warn('local worker deploy failed', { instanceId: instance.id, error: result.error });
       return;
     }
@@ -198,20 +204,34 @@ export class LocalWorkerActivationService {
     })).digest('hex');
   }
 
-  private async isInstanceWorkerAlive(template: AgentDefinition, instance: LocalWorkerInstance): Promise<boolean> {
-    const def = this.buildDefinition(template, instance);
-    return this.strategy.isWorkerRunning(def, {
-      instance: this.buildManifestInstance(instance),
-      runtimeOptions: this.buildRuntimeOptions(instance),
-    });
+  private async hasSupervisorFailureToPreserve(instance: LocalWorkerInstance): Promise<boolean> {
+    const status = await readJsonFile<Record<string, unknown>>(
+      path.join(stateDir(this.dataDir, instance.id), 'supervisor-status.json'),
+    );
+    return status?.state === 'failed'
+      && [
+        'WorkerManifestPlaceholderInvalid',
+        'RuntimeBundlePlatformUnsupported',
+        'WorkerProcessIdentityMissing',
+        'WorkerProcessIdentityCheckFailed',
+        'WorkerProcessTreeStopFailed',
+        'WorkerProcessIdentityUnavailable',
+      ]
+        .includes(String(status.reason ?? ''));
   }
 
-  private async writeSupervisorStatus(instance: LocalWorkerInstance, state: string, error: string): Promise<void> {
+  private async writeSupervisorStatus(
+    instance: LocalWorkerInstance,
+    state: string,
+    error: string,
+    reason = 'LocalWorkerRuntimeTemplateMissing',
+  ): Promise<void> {
     const statusPath = path.join(stateDir(this.dataDir, instance.id), 'supervisor-status.json');
     await writeJsonFile(statusPath, {
       state,
       name: instance.runtime,
       agentId: `local-worker:${instance.id}`,
+      reason,
       error,
       updatedAt: new Date().toISOString(),
     });

@@ -1,10 +1,12 @@
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { statSync, type Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import type { HookWatchdogConfig } from '../types/index.js';
-import { directoryExists, fileExists, readJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { directoryExists, fileExists, resolveHome } from '../utils/fs-utils.js';
+import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { listInstalledKimiEvents } from '../deployment/kimi-config-writer.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -18,6 +20,8 @@ const MAX_INTERCEPT_REPAIRS_PER_DAY = 3;
 export interface PluginCheckTarget {
   agentId: string;
   settingsPath: string;
+  /** File syntax. Defaults to strict JSON. */
+  settingsSyntax?: JsonSyntax;
   expectedHooks: string[];
   /** Substrings that identify our hook command in settings.json */
   markers: string[];
@@ -39,6 +43,24 @@ export interface PluginCheckTarget {
   installArgs?: string[];
   /** Direct repair function (for hook-type repair via HookManager). Takes precedence over binPath. */
   repairFn?: () => Promise<boolean>;
+
+  /**
+   * Optional config file whose strategy-level health check is only evaluated
+   * after its filesystem identity changes from the initial baseline.
+   * Codex uses this for config.toml trust reconciliation without reparsing TOML
+   * on every watchdog interval.
+   */
+  changeWatchPath?: string;
+  /** Returns true when the changed config requires the normal repairFn. */
+  needsRepairOnChange?: () => Promise<boolean>;
+
+  /**
+   * Whether the owning agent is enabled by the user's selection
+   * (config.agents[<id>].enabled). When this returns false the target is
+   * neither checked nor repaired — a disabled agent must never have its hook
+   * (re)injected. Omitted → treated as enabled (backward compatible).
+   */
+  enabled?: () => boolean | Promise<boolean>;
 }
 
 export interface InterceptCheckTarget {
@@ -46,6 +68,166 @@ export interface InterceptCheckTarget {
   check: () => Promise<boolean>;
   repair: () => Promise<void>;
   precondition: () => Promise<boolean>;
+  /**
+   * Whether the owning agent is enabled by the user's selection
+   * (config.agents[<id>].enabled). When this returns false the target is not
+   * (re)injected — instead cleanup() runs (if provided) so the intercept is
+   * removed rather than merely left in place. Omitted → treated as enabled
+   * (backward compatible).
+   */
+  enabled?: () => boolean | Promise<boolean>;
+  /**
+   * Idempotent removal of an already-installed intercept, invoked when
+   * enabled() is false. Lets "config disable" actually stop collection (not
+   * just stop self-healing) — otherwise a wrapper written on a prior run would
+   * keep intercepting for an agent the user has since turned off. Omitted →
+   * disabled targets are simply skipped.
+   */
+  cleanup?: () => Promise<void>;
+}
+
+/** A runtime override that is only ever removed, never injected. */
+export interface RetiredRuntimeInterceptDefinition {
+  id: string;
+  envName: string;
+}
+
+/** Retired override that also left a LaunchAgent plist behind. */
+export interface MacRetiredRuntimeInterceptDefinition extends RetiredRuntimeInterceptDefinition {
+  plistLabel: string;
+}
+
+/**
+ * Prefix shared by every block this file writes into an rc file. It marks where
+ * a block whose END marker went missing has to stop: at the next block's BEGIN.
+ */
+const MARKER_BEGIN_PREFIX = 'loongsuite-pilot BEGIN ';
+
+/** True when `line` opens some block other than the one `begin` delimits. */
+function startsAnotherBlock(line: string, begin: string): boolean {
+  return line.includes(MARKER_BEGIN_PREFIX) && !line.includes(begin);
+}
+
+/**
+ * Remove a marker-delimited block (inclusive of the BEGIN/END marker lines)
+ * from rc-file content. Any line containing `begin` starts the cut and any
+ * line containing `end` ends it; non-block lines are preserved verbatim.
+ *
+ * A block whose END marker is missing stops at the next block's BEGIN line
+ * instead of running to EOF. Running to EOF would drop every block written
+ * after it along with whatever the user keeps below them -- PATH edits, nvm
+ * init, aliases -- because repair() writes the stripped result back over the
+ * file. A repeated BEGIN for this same block keeps the cut open, so a file that
+ * accumulated duplicates collapses to a single removal.
+ */
+export function stripMarkerBlock(content: string, begin: string, end: string): string {
+  const out: string[] = [];
+  let inBlock = false;
+  for (const line of content.split('\n')) {
+    if (!inBlock) {
+      if (line.includes(begin)) inBlock = true;
+      else out.push(line);
+      continue;
+    }
+    if (line.includes(end)) { inBlock = false; continue; }
+    if (startsAnotherBlock(line, begin)) { inBlock = false; out.push(line); continue; }
+    // Still inside the block: dropped.
+  }
+  return out.join('\n');
+}
+
+/**
+ * Return the marker-delimited block, or null when the BEGIN marker is absent.
+ * `text` is inclusive of the marker lines and `terminated` reports whether the
+ * END marker was found; an unterminated block stops before the next block's
+ * BEGIN line rather than running to EOF.
+ *
+ * Callers use this instead of scanning whole-file content when they need to
+ * answer a question ABOUT one block: two blocks in the same rc file can share
+ * substrings, and a file-wide `includes` would let one satisfy the other's
+ * check. Bounding an unterminated block at the next BEGIN keeps that scoping
+ * intact even when the END marker was lost, and `terminated` lets callers treat
+ * the damaged block as something to rewrite rather than as already current.
+ */
+export function extractMarkerBlock(
+  content: string,
+  begin: string,
+  end: string,
+): { text: string; terminated: boolean } | null {
+  const lines = content.split('\n');
+  const start = lines.findIndex(line => line.includes(begin));
+  if (start === -1) return null;
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.includes(end)) {
+      return { text: lines.slice(start, i + 1).join('\n'), terminated: true };
+    }
+    if (startsAnotherBlock(line, begin)) {
+      return { text: lines.slice(start, i).join('\n'), terminated: false };
+    }
+  }
+  return { text: lines.slice(start).join('\n'), terminated: false };
+}
+
+export function parseWindowsUserEnv(output: string, envName: string): string {
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.match(/^\s*(\S+)\s+REG_(?:EXPAND_)?SZ\s+(.*)$/);
+    if (match?.[1]?.toLowerCase() === envName.toLowerCase()) return match[2]?.trim() ?? '';
+  }
+  return '';
+}
+
+function windowsPathsEqual(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+async function readWindowsUserEnv(envName: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('reg.exe', [
+      'query', 'HKCU\\Environment', '/v', envName,
+    ], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
+    return parseWindowsUserEnv(stdout, envName);
+  } catch {
+    return '';
+  }
+}
+
+async function broadcastWindowsUserEnv(envName: string): Promise<void> {
+  const command = [
+    "$ErrorActionPreference = 'Stop'",
+    "try { [Environment]::SetEnvironmentVariable($env:LOONGSUITE_PILOT_RUNTIME_ENV_NAME, $null, 'User'); exit 0 } catch { exit 1 }",
+  ].join('; ');
+  try {
+    await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+      timeout: 10_000,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        LOONGSUITE_PILOT_RUNTIME_ENV_NAME: envName,
+      },
+    });
+  } catch {
+    logger.warn('windows runtime environment persisted but broadcast failed', {
+      envName,
+      action: 'sign out and back in to refresh Explorer',
+    });
+  }
+}
+
+async function removeWindowsUserEnv(envName: string): Promise<void> {
+  await execFileAsync('reg.exe', [
+    'delete', 'HKCU\\Environment', '/v', envName, '/f',
+  ], { timeout: 10_000, windowsHide: true });
+  await broadcastWindowsUserEnv(envName);
+}
+
+async function cleanupOwnedWindowsUserEnv(envName: string, wrapperPath: string): Promise<boolean> {
+  const current = await readWindowsUserEnv(envName);
+  if (current && windowsPathsEqual(current, wrapperPath)) {
+    await removeWindowsUserEnv(envName);
+    return true;
+  }
+  return false;
 }
 
 export interface CheckResult {
@@ -56,7 +238,7 @@ export interface CheckResult {
 
 export interface TargetResult {
   agentId: string;
-  status: 'healthy' | 'repaired' | 'cooldown' | 'unavailable' | 'repair-failed';
+  status: 'healthy' | 'repaired' | 'cooldown' | 'unavailable' | 'invalid-config' | 'repair-failed' | 'disabled';
   expected?: number;
   found?: number;
   missing?: string[];
@@ -77,6 +259,8 @@ export class HookWatchdog {
   private readonly targets: PluginCheckTarget[];
   private readonly interceptTargets: InterceptCheckTarget[];
   private readonly lastRepairAt: Map<string, number> = new Map();
+  private readonly lastChangeSignature: Map<string, string> = new Map();
+  private readonly lastInvalidConfigByTarget: Map<string, string> = new Map();
   private readonly dailyRepairCount: Map<string, number> = new Map();
   private dailyRepairResetDate = '';
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
@@ -88,8 +272,9 @@ export class HookWatchdog {
     interceptTargets?: InterceptCheckTarget[],
   ) {
     this.config = config;
-    this.targets = targets ?? HookWatchdog.defaultTargets();
+    this.targets = targets ?? [];
     this.interceptTargets = interceptTargets ?? [];
+    this.captureInitialChangeSignatures();
   }
 
   start(): void {
@@ -127,7 +312,7 @@ export class HookWatchdog {
     for (const target of this.targets) {
       try {
         const result = await this.checkTarget(target);
-        if (result.status === 'unavailable') {
+        if (result.status === 'unavailable' || result.status === 'invalid-config' || result.status === 'disabled') {
           summary.skipped++;
         } else if (result.status === 'repaired') {
           summary.repaired++;
@@ -148,6 +333,14 @@ export class HookWatchdog {
   }
 
   private async checkTarget(target: PluginCheckTarget): Promise<TargetResult> {
+    if (target.enabled && !(await target.enabled())) {
+      logger.debug('hook-watchdog.skipped', {
+        agent: target.agentId,
+        reason: 'disabled',
+      });
+      return { agentId: target.agentId, status: 'disabled' };
+    }
+
     const settingsDirOk = await directoryExists(path.dirname(target.settingsPath));
     if (!settingsDirOk) {
       logger.debug('hook-watchdog.skipped', {
@@ -170,8 +363,32 @@ export class HookWatchdog {
 
     const missing = target.settingsFormat === 'toml'
       ? await this.findMissingTomlHooks(target)
-      : this.findMissingHooks(await readJsonFile<Record<string, unknown>>(target.settingsPath), target);
+      : await this.findMissingJsonHooks(target);
+    if (!Array.isArray(missing)) return missing;
     const found = target.expectedHooks.length - missing.length;
+    let pendingChangeSignature: { key: string; value: string } | undefined;
+
+    if (
+      missing.length === 0
+      && target.changeWatchPath
+      && target.needsRepairOnChange
+    ) {
+      const signature = await this.changeSignature(target.changeWatchPath);
+      const signatureKey = this.changeSignatureKey(target);
+      if (!this.lastChangeSignature.has(signatureKey)) {
+        // Deployment has already reconciled the startup state. The watchdog
+        // establishes a baseline here and reacts only to later external edits.
+        this.lastChangeSignature.set(signatureKey, signature);
+      } else if (this.lastChangeSignature.get(signatureKey) !== signature) {
+        const needsRepair = await target.needsRepairOnChange();
+        if (needsRepair) {
+          missing.push('codex-trust');
+          pendingChangeSignature = { key: signatureKey, value: signature };
+        } else {
+          this.lastChangeSignature.set(signatureKey, signature);
+        }
+      }
+    }
 
     if (missing.length === 0) {
       logger.info('hook-watchdog.check', {
@@ -216,7 +433,84 @@ export class HookWatchdog {
     if (!ok) {
       return { agentId: target.agentId, status: 'repair-failed', missing };
     }
+    if (pendingChangeSignature) {
+      this.lastChangeSignature.set(pendingChangeSignature.key, pendingChangeSignature.value);
+    }
     return { agentId: target.agentId, status: 'repaired', missing };
+  }
+
+  private reportInvalidConfig(target: PluginCheckTarget, error: string): TargetResult {
+    const targetKey = this.invalidConfigTargetKey(target);
+    const previous = this.lastInvalidConfigByTarget.get(targetKey);
+    if (previous !== error) {
+      logger.error('hook-watchdog.invalid-config', {
+        agent: target.agentId,
+        settingsPath: target.settingsPath,
+        error,
+      });
+      this.lastInvalidConfigByTarget.set(targetKey, error);
+    } else {
+      logger.debug('hook-watchdog.invalid-config-suppressed', {
+        agent: target.agentId,
+        settingsPath: target.settingsPath,
+      });
+    }
+    return { agentId: target.agentId, status: 'invalid-config' };
+  }
+
+  private invalidConfigTargetKey(target: PluginCheckTarget): string {
+    return `${target.agentId}\0${target.settingsPath}`;
+  }
+
+  private changeSignatureKey(target: PluginCheckTarget): string {
+    return `${target.agentId}\0${target.changeWatchPath}`;
+  }
+
+  /**
+   * Deployment reconciles Codex trust before constructing the watchdog. Capture
+   * that exact post-deployment state synchronously so an edit made before the
+   * first delayed check is still observed as a change instead of becoming the
+   * baseline.
+   */
+  private captureInitialChangeSignatures(): void {
+    for (const target of this.targets) {
+      if (!target.changeWatchPath || !target.needsRepairOnChange) continue;
+      try {
+        this.lastChangeSignature.set(
+          this.changeSignatureKey(target),
+          this.changeSignatureSync(target.changeWatchPath),
+        );
+      } catch (err) {
+        logger.warn('hook-watchdog baseline capture failed', {
+          agent: target.agentId,
+          path: target.changeWatchPath,
+          error: String(err),
+        });
+      }
+    }
+  }
+
+  private changeSignatureSync(filePath: string): string {
+    try {
+      return this.formatChangeSignature(statSync(filePath));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+      throw err;
+    }
+  }
+
+  private async changeSignature(filePath: string): Promise<string> {
+    try {
+      const stat = await fs.stat(filePath);
+      return this.formatChangeSignature(stat);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+      throw err;
+    }
+  }
+
+  private formatChangeSignature(stat: Stats): string {
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
   }
 
   private findMissingHooks(
@@ -237,6 +531,24 @@ export class HookWatchdog {
     }
 
     return missing;
+  }
+
+  private async findMissingJsonHooks(target: PluginCheckTarget) {
+    const document = await readJsonDocument<Record<string, unknown>>(
+      target.settingsPath,
+      target.settingsSyntax ?? 'json',
+    );
+    if (document.status === 'error') {
+      return this.reportInvalidConfig(target, document.error.message);
+    }
+    if (
+      document.status === 'ok'
+      && (!document.data || typeof document.data !== 'object' || Array.isArray(document.data))
+    ) {
+      return this.reportInvalidConfig(target, 'settings root must be a JSON object');
+    }
+    this.lastInvalidConfigByTarget.delete(this.invalidConfigTargetKey(target));
+    return this.findMissingHooks(document.status === 'ok' ? document.data : null, target);
   }
 
   /**
@@ -346,6 +658,26 @@ export class HookWatchdog {
 
     for (const target of this.interceptTargets) {
       try {
+        // User-selection gate, checked before any check/repair so a disabled
+        // agent never (re)injects and does not consume the cooldown / daily
+        // budget. When disabled we also run cleanup() (idempotent) so an
+        // intercept written on a prior run is removed — "config disable" stops
+        // collection, not just self-healing.
+        if (target.enabled && !(await target.enabled())) {
+          if (target.cleanup) {
+            try {
+              await target.cleanup();
+              logger.info('intercept-watchdog.disabled-cleanup', { id: target.id });
+            } catch (err) {
+              logger.warn('intercept-watchdog.cleanup-failed', { id: target.id, error: String(err) });
+            }
+          } else {
+            logger.debug('intercept-watchdog.disabled', { id: target.id });
+          }
+          summary.skipped++;
+          continue;
+        }
+
         const preOk = await target.precondition();
         if (!preOk) {
           logger.debug('intercept-watchdog.skipped', { id: target.id, reason: 'precondition' });
@@ -393,149 +725,179 @@ export class HookWatchdog {
     }
   }
 
-  // ─── Default targets (hardcoded, matching existing style) ───────────────
 
-  static defaultTargets(): PluginCheckTarget[] {
+  /**
+   * Shell-rc intercept block definitions (qodercli + qoderclicn + claude-code).
+   *
+   * blockFn must stay byte-identical to the block written by the installer
+   * (deploy/installer-opensource.sh inject_*), so the marker-based idempotency
+   * checks agree. The `if ! alias ... eval '...'` shape guards against
+   * clobbering a user's own alias/function AND avoids a parse error: a bare
+   * `<cli>()` token would fail to parse under an active alias because
+   * interactive shells expand aliases at parse time (before the guard runs), so
+   * the definition is deferred behind eval.
+   *
+   * Exposed as a pure, static seam so tests can render the exact block for any
+   * path without touching HOME/fs (see hook-watchdog-intercept-shell.test.ts).
+   *
+   * `signature` is a substring unique to the CURRENT block shape. check()/
+   * repair() use it — not just `marker` — to detect and migrate
+   * an older block that shares the same marker (e.g. the released bare
+   * `<cli>() {...}` form). It is matched WITHIN the block's own marker region,
+   * not across the whole rc file, so a neighbouring block cannot vouch for a
+   * stale one. Keep it byte-identical to the installer's grep.
+   * `endMarker` bounds the block for removal/migration.
+   */
+  static interceptRcBlockDefs(): Array<{
+    id: string;
+    agentId: string;
+    marker: string;
+    endMarker: string;
+    signature: string;
+    scriptName: string;
+    blockFn: (scriptPath: string) => string;
+  }> {
     return [
       {
-        agentId: 'claude-code',
-        settingsPath: resolveHome('~/.claude/settings.json'),
-        expectedHooks: [
-          'Stop',
-          'SubagentStart',
-          'SubagentStop',
-        ],
-        binPath: resolveHome(
-          '~/.cache/opentelemetry.instrumentation.claude/package/bin/otel-claude-hook',
-        ),
-        installArgs: ['install', '--user', '--no-alias', '--quiet'],
-        markers: ['otel-claude-hook', 'opentelemetry.instrumentation.claude'],
+        // `signature` is this block's own function definition, not the wrapper
+        // script name: one wrapper serves both product lines, so the script name
+        // also occurs inside the qoderclicn block and could not tell a stale
+        // block of this shape apart from a current CN one.
+        id: 'qodercli-rc',
+        agentId: 'qoder',
+        marker: 'loongsuite-pilot BEGIN qodercli-intercept',
+        endMarker: 'loongsuite-pilot END qodercli-intercept',
+        signature: "eval 'qodercli() {",
+        scriptName: 'qodercli-runtime-wrapper.sh',
+        blockFn: (p) => [
+          '',
+          '# loongsuite-pilot BEGIN qodercli-intercept',
+          'if ! alias qodercli >/dev/null 2>&1 && ! typeset -f qodercli >/dev/null 2>&1; then',
+          `  eval 'qodercli() { "${p}" "$@"; }'`,
+          'fi',
+          '# loongsuite-pilot END qodercli-intercept',
+        ].join('\n'),
       },
       {
-        agentId: 'codex',
-        settingsPath: resolveHome('~/.codex/hooks.json'),
-        expectedHooks: [
-          'SessionStart',
-          'UserPromptSubmit',
-          'PreToolUse',
-          'PostToolUse',
-          'Stop',
-        ],
-        binPath: resolveHome(
-          '~/.cache/opentelemetry.instrumentation.codex/package/bin/otel-codex-hook',
-        ),
-        installArgs: ['install'],
-        markers: ['otel-codex-hook', 'opentelemetry.instrumentation.codex'],
+        // Same wrapper script as qodercli, told apart by the flavor variable the
+        // block exports. `signature` is that assignment rather than the script
+        // name, for the same reason as above: the shared script name cannot
+        // distinguish this block from the qodercli one.
+        id: 'qoderclicn-rc',
+        agentId: 'qoder-cn',
+        marker: 'loongsuite-pilot BEGIN qoderclicn-intercept',
+        endMarker: 'loongsuite-pilot END qoderclicn-intercept',
+        signature: 'LOONGSUITE_QODERCLI_FLAVOR=qoderclicn',
+        scriptName: 'qodercli-runtime-wrapper.sh',
+        blockFn: (p) => [
+          '',
+          '# loongsuite-pilot BEGIN qoderclicn-intercept',
+          'if ! alias qoderclicn >/dev/null 2>&1 && ! typeset -f qoderclicn >/dev/null 2>&1; then',
+          `  eval 'qoderclicn() { LOONGSUITE_QODERCLI_FLAVOR=qoderclicn "${p}" "$@"; }'`,
+          'fi',
+          '# loongsuite-pilot END qoderclicn-intercept',
+        ].join('\n'),
+      },
+      {
+        id: 'claude-code-rc',
+        agentId: 'claude-code',
+        marker: 'loongsuite-pilot BEGIN claude-code-intercept',
+        endMarker: 'loongsuite-pilot END claude-code-intercept',
+        signature: 'if ! alias claude >/dev/null 2>&1',
+        scriptName: 'claude-code-fetch-intercept.mjs',
+        blockFn: (p) => [
+          '',
+          '# loongsuite-pilot BEGIN claude-code-intercept',
+          'if ! alias claude >/dev/null 2>&1 && ! typeset -f claude >/dev/null 2>&1; then',
+          `  eval 'claude() { BUN_OPTIONS="--preload=${p} \${BUN_OPTIONS}" command claude "$@"; }'`,
+          'fi',
+          '# loongsuite-pilot END claude-code-intercept',
+        ].join('\n'),
       },
     ];
   }
 
-  static defaultInterceptTargets(dataDir: string): InterceptCheckTarget[] {
+  static defaultInterceptTargets(
+    dataDir: string,
+    isAgentEnabled: (agentId: string) => boolean = () => true,
+    // rcPaths is injectable so tests can exercise the real check()/repair()/
+    // cleanup() closures against a temp dir instead of the developer's real rc
+    // files. Production omits it and uses ~/.zshrc + ~/.bashrc.
+    rcPathsOverride?: string[],
+  ): InterceptCheckTarget[] {
     const targets: InterceptCheckTarget[] = [];
     const home = os.homedir();
 
-    // ── qoderwork-env: launchctl env + LaunchAgent plist (macOS only) ──
+    // ── QoderWork-family launchctl env + LaunchAgent plists (macOS only) ──
     if (process.platform === 'darwin') {
       const wrapperPath = path.join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs');
-      const plistPath = path.join(home, 'Library', 'LaunchAgents', 'com.loongsuite-pilot.qoderwork-env.plist');
-      const plistLabel = 'com.loongsuite-pilot.qoderwork-env';
+      // Retired overrides: `enabled: false` routes every cycle into the
+      // watchdog's disabled-cleanup path, so a leftover injection is removed
+      // without depending on which agents the user currently has enabled.
+      for (const def of HookWatchdog.macRetiredRuntimeInterceptDefs()) {
+        const plistPath = path.join(home, 'Library', 'LaunchAgents', `${def.plistLabel}.plist`);
+        targets.push({
+          id: def.id,
+          enabled: () => false,
+          precondition: async () => false,
+          check: async () => true,
+          repair: async () => {},
+          cleanup: async () => {
+            try {
+              const { stdout } = await execFileAsync('launchctl', ['getenv', def.envName]);
+              // Exact match only: a third-party override must survive untouched.
+              if (stdout.trim() === wrapperPath) {
+                await execFileAsync('launchctl', ['unsetenv', def.envName]).catch(() => {});
+              }
+            } catch {
+              // getenv fails when unset — nothing to drop.
+            }
+            if (await fileExists(plistPath)) {
+              await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
+              await fs.rm(plistPath, { force: true }).catch(() => {});
+            }
+          },
+        });
+      }
+    }
 
-      targets.push({
-        id: 'qoderwork-env',
-        precondition: async () => {
-          if (!await fileExists(wrapperPath)) return false;
-          const sysApp = await directoryExists('/Applications/QoderWork.app');
-          const userApp = await directoryExists(path.join(home, 'Applications', 'QoderWork.app'));
-          return sysApp || userApp;
-        },
-        check: async () => {
-          try {
-            const { stdout } = await execFileAsync('launchctl', ['getenv', 'QODER_WORKER_RUNTIME_PATH']);
-            if (stdout.trim() !== wrapperPath) return false;
-            // Also verify plist exists — without it, env is lost on reboot.
-            return fileExists(plistPath);
-          } catch {
-            return false;
-          }
-        },
-        repair: async () => {
-          await execFileAsync('launchctl', ['setenv', 'QODER_WORKER_RUNTIME_PATH', wrapperPath]);
-          const plistContent = [
-            '<?xml version="1.0" encoding="UTF-8"?>',
-            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-            '<plist version="1.0">',
-            '<dict>',
-            '    <key>Label</key>',
-            `    <string>${plistLabel}</string>`,
-            '    <key>ProgramArguments</key>',
-            '    <array>',
-            '        <string>/bin/launchctl</string>',
-            '        <string>setenv</string>',
-            '        <string>QODER_WORKER_RUNTIME_PATH</string>',
-            `        <string>${wrapperPath}</string>`,
-            '    </array>',
-            '    <key>RunAtLoad</key>',
-            '    <true/>',
-            '</dict>',
-            '</plist>',
-            '',
-          ].join('\n');
-          await fs.mkdir(path.dirname(plistPath), { recursive: true });
-          await fs.writeFile(plistPath, plistContent);
-          // NOTE: launchctl load/unload is deprecated since macOS 10.11 in
-          // favour of `launchctl bootstrap/bootout gui/<uid>`. We keep
-          // load/unload for now because it still works reliably across all
-          // supported macOS versions and avoids the uid lookup complexity.
-          await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
-          await execFileAsync('launchctl', ['load', plistPath]).catch(() => {});
-        },
-      });
+    // ── QoderWork-family Windows User env vars ──
+    // HKCU\Environment is permanent across reboots and inherited by every new
+    // GUI process. Native reg.exe keeps this path compatible with CLM/WDAC.
+    if (process.platform === 'win32') {
+      const wrapperPath = path.join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs');
+      // Retired overrides: see the macOS loop above. `enabled: false` sends
+      // every cycle into the disabled-cleanup path, and the helper only deletes
+      // a value that is exactly our wrapper, so a third-party override stays.
+      for (const def of HookWatchdog.winRetiredRuntimeInterceptDefs()) {
+        targets.push({
+          id: def.id,
+          enabled: () => false,
+          precondition: async () => false,
+          check: async () => true,
+          repair: async () => {},
+          cleanup: async () => {
+            await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath);
+          },
+        });
+      }
     }
 
     // ── Shell rc intercept targets (qodercli + claude-code) ──
     // Check BOTH .zshrc and .bashrc regardless of daemon's $SHELL — the
     // daemon is launchd-started and its $SHELL may not match the user's
     // interactive shell. Installer's remove function also scans all rc files.
-    const rcPaths = [
+    const rcPaths = rcPathsOverride ?? [
       path.join(home, '.zshrc'),
       path.join(home, '.bashrc'),
     ];
 
-    const rcTargets: Array<{
-      id: string;
-      marker: string;
-      scriptName: string;
-      blockFn: (scriptPath: string) => string;
-    }> = [
-      {
-        id: 'qodercli-rc',
-        marker: 'loongsuite-pilot BEGIN qodercli-intercept',
-        scriptName: 'qodercli-token-intercept.mjs',
-        blockFn: (p) => [
-          '',
-          '# loongsuite-pilot BEGIN qodercli-intercept',
-          `qodercli() { BUN_OPTIONS="--preload=${p}" command qodercli "$@"; }`,
-          '# loongsuite-pilot END qodercli-intercept',
-        ].join('\n'),
-      },
-      {
-        id: 'claude-code-rc',
-        marker: 'loongsuite-pilot BEGIN claude-code-intercept',
-        scriptName: 'claude-code-fetch-intercept.mjs',
-        blockFn: (p) => [
-          '',
-          '# loongsuite-pilot BEGIN claude-code-intercept',
-          `claude() { BUN_OPTIONS="--preload=${p} \${BUN_OPTIONS}" command claude "$@"; }`,
-          '# loongsuite-pilot END claude-code-intercept',
-        ].join('\n'),
-      },
-    ];
-
-    for (const rc of rcTargets) {
+    for (const rc of HookWatchdog.interceptRcBlockDefs()) {
       const scriptPath = path.join(dataDir, 'hooks', rc.scriptName);
 
       targets.push({
         id: rc.id,
+        enabled: () => isAgentEnabled(rc.agentId),
         precondition: async () => {
           // Only check if the hook script was deployed by the installer.
           // We intentionally do NOT run `which <cli>` — the daemon process
@@ -547,32 +909,93 @@ export class HookWatchdog {
           return fileExists(scriptPath);
         },
         check: async () => {
-          // Check ALL common rc files — marker must exist in at least one.
+          // Health is keyed on block CONTENT, not just the marker: an older
+          // released block shares the same marker but lacks `signature`, and
+          // must be migrated. A stale block anywhere → unhealthy (repair).
+          let anyCurrent = false;
+          let anyRcExists = false;
           for (const rcPath of rcPaths) {
-            try {
-              const content = await fs.readFile(rcPath, 'utf-8');
-              if (content.includes(rc.marker)) return true;
-            } catch {
-              // file doesn't exist, check next
+            if (!await fileExists(rcPath)) continue;
+            anyRcExists = true;
+            const content = await fs.readFile(rcPath, 'utf-8');
+            const block = extractMarkerBlock(content, rc.marker, rc.endMarker);
+            if (block !== null) {
+              // A block that lost its END marker is damaged whatever it holds:
+              // the blocks written after it sit inside its unclosed region.
+              if (!block.terminated) return false;
+              if (block.text.includes(rc.signature)) anyCurrent = true;
+              else return false; // marker present but old shape → migrate
             }
           }
-          // Not found in any existing rc file. If no rc files exist at all,
-          // there's nothing we can repair into, so treat as healthy.
-          const anyRcExists = (await Promise.all(rcPaths.map(p => fileExists(p)))).some(Boolean);
+          if (anyCurrent) return true;
+          // No block present anywhere. If no rc files exist, nothing to repair
+          // into → healthy; otherwise repair() will append.
           return !anyRcExists;
         },
         repair: async () => {
-          // Append to ALL existing rc files that don't already have the marker.
           for (const rcPath of rcPaths) {
             if (!await fileExists(rcPath)) continue; // never create rc files
             const content = await fs.readFile(rcPath, 'utf-8');
-            if (content.includes(rc.marker)) continue; // already present
-            await fs.appendFile(rcPath, rc.blockFn(scriptPath) + '\n');
+            const block = extractMarkerBlock(content, rc.marker, rc.endMarker);
+            if (block !== null) {
+              // Unterminated blocks fall through to the rewrite below, which
+              // re-emits both markers.
+              if (block.terminated && block.text.includes(rc.signature)) continue; // already current
+              // Stale block: strip the old marker region, then append fresh.
+              const stripped = stripMarkerBlock(content, rc.marker, rc.endMarker).replace(/\n+$/, '\n');
+              await fs.writeFile(rcPath, stripped + rc.blockFn(scriptPath) + '\n');
+            } else {
+              await fs.appendFile(rcPath, rc.blockFn(scriptPath) + '\n');
+            }
+          }
+        },
+        cleanup: async () => {
+          // Disabled agent: remove our block from every rc file (idempotent).
+          for (const rcPath of rcPaths) {
+            if (!await fileExists(rcPath)) continue;
+            const content = await fs.readFile(rcPath, 'utf-8');
+            if (!content.includes(rc.marker)) continue;
+            const stripped = stripMarkerBlock(content, rc.marker, rc.endMarker).replace(/\n{3,}$/, '\n\n');
+            await fs.writeFile(rcPath, stripped);
           }
         },
       });
     }
 
     return targets;
+  }
+
+  /**
+   * Runtime overrides that no longer have a collection consumer. They are never
+   * (re)injected; the watchdog only retires Pilot-owned leftovers from earlier
+   * releases so an unused JSON monkey patch stops loading into the host app.
+   */
+  static macRetiredRuntimeInterceptDefs(): MacRetiredRuntimeInterceptDefinition[] {
+    return [
+      {
+        id: 'qoderwork-env',
+        envName: 'QODER_WORKER_RUNTIME_PATH',
+        plistLabel: 'com.loongsuite-pilot.qoderwork-env',
+      },
+      {
+        id: 'qwenworkcn-env',
+        envName: 'QW_QODER_WORKER_RUNTIME_PATH',
+        plistLabel: 'com.loongsuite-pilot.qwenworkcn-env',
+      },
+    ];
+  }
+
+  /** Windows counterpart of {@link macRetiredRuntimeInterceptDefs}. */
+  static winRetiredRuntimeInterceptDefs(): RetiredRuntimeInterceptDefinition[] {
+    return [
+      {
+        id: 'qoderwork-win-env',
+        envName: 'QODER_WORKER_RUNTIME_PATH',
+      },
+      {
+        id: 'qwenworkcn-win-env',
+        envName: 'QW_QODER_WORKER_RUNTIME_PATH',
+      },
+    ];
   }
 }

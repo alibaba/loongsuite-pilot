@@ -28,10 +28,16 @@ function writeTranscript(sessionId, records) {
   return file;
 }
 
-function runHook(subcommand, payload) {
+function runHook(subcommand, payload, extraEnv = {}) {
+  const env = { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR };
+  delete env.AGENTTEAMS_WORKER_NAME;
+  delete env.AGENTTEAMS_INSTANCE_ID;
+  delete env.AGENTTEAMS_TOKEN;
+  delete env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  Object.assign(env, extraEnv);
   const r = spawnSync('node', [PROCESSOR, subcommand], {
     input: JSON.stringify(payload),
-    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR },
+    env,
     encoding: 'utf-8',
     timeout: 10_000,
   });
@@ -190,6 +196,100 @@ describe('hook-processor: cmdStop end-to-end', () => {
     expect(turn2EventNames).toContain('llm.response');
   });
 
+  test('binds each resumed turn to the current worker without stale context', () => {
+    const sid = 'sess-worker-resume-1';
+    const transcriptPath = writeTranscript(sid, [
+      userRec('u1', 'q1', '2026-06-17T08:00:00.000Z', sid),
+      assistantRec('a1', [{ text: 'a1' }], '2026-06-17T08:00:10.000Z', {}, sid),
+    ]);
+    const payload = {
+      session_id: sid,
+      transcript_path: transcriptPath,
+      cwd: '/work',
+      stop_reason: 'end_turn',
+    };
+
+    runHook('stop', payload, {
+      AGENTTEAMS_WORKER_NAME: 'planner',
+      AGENTTEAMS_INSTANCE_ID: 'qwen-instance-01',
+      AGENTTEAMS_TOKEN: 'must-not-leak',
+    });
+
+    fs.appendFileSync(transcriptPath, [
+      userRec('u2', 'q2', '2026-06-17T08:01:00.000Z', sid),
+      assistantRec('a2', [{ text: 'a2' }], '2026-06-17T08:01:10.000Z', {}, sid),
+    ].map((record) => JSON.stringify(record)).join('\n') + '\n');
+
+    runHook('stop', payload, {
+      AGENTTEAMS_WORKER_NAME: 'reviewer',
+      AGENTTEAMS_INSTANCE_ID: 'qwen-instance-02',
+    });
+
+    const records = readEmittedRecords();
+    const turn1 = records.filter((record) => record['gen_ai.turn.id'] === `${sid}:t1`);
+    const turn2 = records.filter((record) => record['gen_ai.turn.id'] === `${sid}:t2`);
+    expect(turn1.length).toBeGreaterThan(0);
+    expect(turn2.length).toBeGreaterThan(0);
+    expect(turn1.every((record) => record['gen_ai.agent.name'] === 'planner')).toBe(true);
+    expect(turn2.every((record) => record['gen_ai.agent.name'] === 'reviewer')).toBe(true);
+    expect(turn1[0].resourceAttributes['agentteams.instance.id']).toBe('qwen-instance-01');
+    expect(turn2[0].resourceAttributes['agentteams.instance.id']).toBe('qwen-instance-02');
+    expect(JSON.stringify(records)).not.toContain('must-not-leak');
+  });
+
+  test('binds per-invocation span attributes to each resumed turn without stale values', () => {
+    const sid = 'sess-span-attrs-resume-1';
+    const transcriptPath = writeTranscript(sid, [
+      userRec('u1', 'q1', '2026-06-17T08:00:00.000Z', sid),
+      assistantRec('a1', [{ text: 'a1' }], '2026-06-17T08:00:10.000Z', {}, sid),
+    ]);
+    const payload = {
+      session_id: sid,
+      transcript_path: transcriptPath,
+      cwd: '/work',
+      stop_reason: 'end_turn',
+    };
+
+    runHook('stop', payload, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES: [
+        'multica.issue.id=issue-1',
+        'multica.user.id=staff-1',
+        'gen_ai.agent.name=must-not-overwrite',
+        'multica.api_token=must-not-leak',
+      ].join(','),
+    });
+
+    fs.appendFileSync(transcriptPath, [
+      userRec('u2', 'q2', '2026-06-17T08:01:00.000Z', sid),
+      assistantRec('a2', [{ text: 'a2' }], '2026-06-17T08:01:10.000Z', {}, sid),
+    ].map((record) => JSON.stringify(record)).join('\n') + '\n');
+    runHook('stop', payload, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES: 'multica.issue.id=issue-2,multica.user.id=staff-2',
+    });
+
+    fs.appendFileSync(transcriptPath, [
+      userRec('u3', 'q3', '2026-06-17T08:02:00.000Z', sid),
+      assistantRec('a3', [{ text: 'a3' }], '2026-06-17T08:02:10.000Z', {}, sid),
+    ].map((record) => JSON.stringify(record)).join('\n') + '\n');
+    runHook('stop', payload);
+
+    const records = readEmittedRecords();
+    const turn1 = records.filter((record) => record['gen_ai.turn.id'] === `${sid}:t1`);
+    const turn2 = records.filter((record) => record['gen_ai.turn.id'] === `${sid}:t2`);
+    const turn3 = records.filter((record) => record['gen_ai.turn.id'] === `${sid}:t3`);
+    expect(turn1.length).toBeGreaterThan(0);
+    expect(turn2.length).toBeGreaterThan(0);
+    expect(turn3.length).toBeGreaterThan(0);
+    expect(turn1.every((record) => record['multica.issue.id'] === 'issue-1')).toBe(true);
+    expect(turn1.every((record) => record['multica.user.id'] === 'staff-1')).toBe(true);
+    expect(turn2.every((record) => record['multica.issue.id'] === 'issue-2')).toBe(true);
+    expect(turn2.every((record) => record['multica.user.id'] === 'staff-2')).toBe(true);
+    expect(turn3.every((record) => record['multica.issue.id'] === undefined)).toBe(true);
+    expect(turn3.every((record) => record['multica.user.id'] === undefined)).toBe(true);
+    expect(records.every((record) => record['gen_ai.agent.name'] !== 'must-not-overwrite')).toBe(true);
+    expect(JSON.stringify(records)).not.toContain('must-not-leak');
+  });
+
   test('first-run guard: long transcript with many turns only emits last turn', () => {
     const sid = 'sess-firstrun-1';
     const records = [];
@@ -224,32 +324,18 @@ describe('hook-processor: cmdStop end-to-end', () => {
   });
 });
 
-describe('hook-processor: subagent_start / subagent_stop (v1 accumulate-only)', () => {
-  test('subagent_start writes to state.events, does NOT emit JSONL', () => {
-    const result = runHook('subagent-start', {
-      session_id: 'sess-sa-1',
-      agent_id: 'sub-1', agent_type: 'Explore',
-      subagent_session_id: 'sub-sess-1',
-    });
+describe('hook-processor: child Hooks do not race parent state', () => {
+  test.each(['subagent-start', 'subagent-stop'])('%s acknowledges without changing parent offsets', (event) => {
+    const stateDir = path.join(DATA_DIR, 'state', 'qwen-code-cli', 'sessions');
+    fs.mkdirSync(stateDir, { recursive: true });
+    const stateFile = path.join(stateDir, 'sess-sa-1.json');
+    const existing = JSON.stringify({ transcript_offset: 12345, turn_count: 2 });
+    fs.writeFileSync(stateFile, existing);
+    const result = runHook(event, { session_id: 'sess-sa-1', agent_id: 'child', agent_type: 'Explore' });
     expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
     expect(readEmittedRecords()).toEqual([]);
-    const stateFile = path.join(DATA_DIR, 'state', 'qwen-code-cli', 'sessions', 'sess-sa-1.json');
-    expect(fs.existsSync(stateFile)).toBe(true);
-    const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
-    expect(state.events).toHaveLength(1);
-    expect(state.events[0].type).toBe('subagent_start');
-  });
-
-  test('subagent_stop writes to state.events', () => {
-    runHook('subagent-start', {
-      session_id: 'sess-sa-2', agent_id: 'sub-1', agent_type: 'Explore', subagent_session_id: 'sub-sess-2',
-    });
-    runHook('subagent-stop', {
-      session_id: 'sess-sa-2', subagent_session_id: 'sub-sess-2', stop_reason: 'end_turn',
-    });
-    const state = JSON.parse(fs.readFileSync(
-      path.join(DATA_DIR, 'state', 'qwen-code-cli', 'sessions', 'sess-sa-2.json'), 'utf-8'));
-    expect(state.events.map((e) => e.type)).toEqual(['subagent_start', 'subagent_stop']);
+    expect(fs.readFileSync(stateFile, 'utf8')).toBe(existing);
   });
 });
 

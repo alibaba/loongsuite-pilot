@@ -1,5 +1,6 @@
 import { build } from 'esbuild';
 import { copyFile, mkdir } from 'node:fs/promises';
+import path from 'node:path';
 
 const isProprietary = process.env.BUILD_MODE === 'proprietary';
 
@@ -38,6 +39,28 @@ await build({
   minify: true,
   treeShaking: true,
   packages: 'external',
+  // The guard must run BEFORE this bundle's module graph loads. SQLite reads
+  // use node:sqlite; if that builtin cannot load on an unflagged Node
+  // (22.13+ / 23.4+) the process throws a readable FATAL before any logging
+  // exists. A static
+  // import in the banner is evaluated first by Node. See src/native-deps-guard.ts.
+  banner: { js: "import './native-deps-guard.cjs';" },
+  define: commonDefine,
+  plugins: commonPlugins,
+});
+
+// Loaded by the banner above, before the daemon graph. Must keep
+// `packages: 'external'`: require('node:sqlite') has to hit the runtime Node,
+// not a bundler rewrite.
+await build({
+  entryPoints: ['src/native-deps-guard.ts'],
+  outfile: 'dist/native-deps-guard.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  packages: 'external',
+  minifySyntax: true,
   define: commonDefine,
   plugins: commonPlugins,
 });
@@ -55,6 +78,80 @@ await build({
   plugins: commonPlugins,
 });
 
+// Self-contained CJS, like cli-probe above: no `packages: 'external'`, so it
+// needs no node_modules at runtime. That is the point — the K8s preload blocks
+// the business process on this while it runs, so it must start at bare-node
+// cost rather than dragging in the daemon's dependency graph.
+await build({
+  entryPoints: ['src/inject-hooks.ts'],
+  outfile: 'dist/inject-hooks.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  // Prefer each package's ESM build over its `main`. Needed for real
+  // self-containment: jsonc-parser's `main` is a UMD file whose deps are
+  // fetched with a runtime require('./impl/format'), which esbuild cannot
+  // follow — the bundle then builds fine and throws MODULE_NOT_FOUND on first
+  // run without node_modules. Its `module` entry uses static imports that
+  // bundle cleanly. Verified by running the artifact with node_modules absent.
+  mainFields: ['module', 'main'],
+  // Keeps pilot's own logging off the agent's stdout/stderr; this process runs
+  // attached to a business workload, and some agents parse their own output.
+  banner: { js: "process.env.LOG_LEVEL = 'silent';" },
+  minifySyntax: true,
+  define: commonDefine,
+  plugins: commonPlugins,
+});
+
+// Self-contained uninstall helper: JSONC edits stay available without node_modules.
+await build({
+  entryPoints: ['src/copilot-cleanup-cli.ts'],
+  outfile: 'dist/copilot-cleanup.cjs',
+  platform: 'node', target: 'es2022', format: 'cjs', bundle: true,
+  mainFields: ['module', 'main'], minifySyntax: true,
+  define: commonDefine, plugins: commonPlugins,
+});
+
+// Container hook CLI. No native-deps-guard banner and no node:sqlite: a
+// payload whose libc cannot load the daemon must still be able to install
+// hooks. postAlarm is the stub in this file; proprietary builds alias it.
+await build({
+  entryPoints: ['src/hook-cli.ts'],
+  outfile: 'dist/hook-cli.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  mainFields: ['module', 'main'],
+  banner: { js: "process.env.LOG_LEVEL = 'silent';" },
+  minifySyntax: true,
+  define: commonDefine,
+  plugins: [
+    ...commonPlugins,
+    {
+      name: 'hook-cli-alarm-alias',
+      setup(b) {
+        if (!isProprietary) return;
+        b.onResolve({ filter: /\/post-alarm\.js$/ }, () => ({
+          path: path.resolve('src/internal/alarm-sender.internal.ts'),
+        }));
+      },
+    },
+  ],
+});
+
+// Shares the installation ownership rules for user JSON and system TOML.
+await build({
+  entryPoints: ['src/scope-cleanup-cli.ts'],
+  outfile: 'dist/scope-cleanup.cjs',
+  platform: 'node', target: 'es2022', format: 'cjs', bundle: true,
+  mainFields: ['module', 'main'], minifySyntax: true,
+  banner: { js: "process.env.LOG_LEVEL = 'silent';" },
+  define: commonDefine, plugins: commonPlugins,
+});
+
+
 await build({
   entryPoints: ['src/updater/index.ts'],
   outdir: 'dist/updater',
@@ -69,8 +166,49 @@ await build({
   plugins: commonPlugins,
 });
 
+await build({
+  entryPoints: ['src/interceptor/cli.ts'],
+  outfile: 'dist/interceptor/cli.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  mainFields: ['module', 'main'],
+  banner: { js: "process.env.LOG_LEVEL = 'silent';" },
+  minifySyntax: true,
+  define: commonDefine,
+  plugins: commonPlugins,
+});
+
+await build({
+  entryPoints: ['src/interceptor/daemon.ts'],
+  outfile: 'dist/interceptor/daemon.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  mainFields: ['module', 'main'],
+  minifySyntax: true,
+  define: commonDefine,
+  plugins: commonPlugins,
+});
+
+// HTTP listens directly in this worker, independently of the collector event loop.
+await build({
+  entryPoints: ['src/interceptor/worker.ts'],
+  outfile: 'dist/interceptor/worker.cjs',
+  platform: 'node', target: 'es2022', format: 'cjs', bundle: true,
+  mainFields: ['module', 'main'], minifySyntax: true,
+  define: commonDefine, plugins: commonPlugins,
+});
+
 await mkdir('dist', { recursive: true });
 await copyFile('src/mask/sensitive-rules.json', 'dist/sensitive-rules.json');
+
+// Public, stdlib-only policies for Node/Python launchers embedding Pilot.
+await mkdir('dist/runtime', { recursive: true });
+await copyFile('assets/runtime/root-trigger.cjs', 'dist/runtime/root-trigger.cjs');
+await copyFile('assets/runtime/root_trigger.py', 'dist/runtime/root_trigger.py');
 
 // Best-effort: build macOS status bar app (Swift)
 if (process.platform === 'darwin') {

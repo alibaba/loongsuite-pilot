@@ -9,14 +9,16 @@ import {
 } from '../../../src/core/hook-watchdog.js';
 import type { HookWatchdogConfig } from '../../../src/types/index.js';
 
+const mockLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  debug: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
 // Mock logger to silence output and allow assertions
 vi.mock('../../../src/utils/logger.js', () => ({
-  createLogger: () => ({
-    info: vi.fn(),
-    debug: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  }),
+  createLogger: () => mockLogger,
 }));
 
 // Mock child_process.spawn so tests don't actually run external commands.
@@ -104,6 +106,7 @@ describe('HookWatchdog', () => {
   let tmpDir: string;
 
   beforeEach(async () => {
+    vi.clearAllMocks();
     tmpDir = await createTempDir('hook-watchdog-test-');
     spawnCalls = [];
     spawnBehavior = 'success';
@@ -125,6 +128,43 @@ describe('HookWatchdog', () => {
       expect(summary.checked).toBe(1);
       expect(summary.repaired).toBe(0);
       expect(spawnCalls).toHaveLength(0);
+    });
+
+    it('parses JSONC settings for Qwen without triggering repair', async () => {
+      const repairFn = vi.fn(async () => true);
+      const target: PluginCheckTarget = {
+        agentId: 'qwen-code-cli',
+        settingsPath: path.join(tmpDir, '.qwen', 'settings.json'),
+        settingsSyntax: 'jsonc',
+        expectedHooks: ['Stop'],
+        markers: ['qwen-code-cli-loongsuite-pilot-hook.sh'],
+        repairFn,
+      };
+      await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
+      await fs.writeFile(target.settingsPath, `{
+  // Qwen officially accepts JSONC settings.
+  "model": "qwen-max",
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/qwen-code-cli-loongsuite-pilot-hook.sh stop"
+          }
+        ]
+      }
+    ]
+  }
+}
+`, 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary).toEqual({ checked: 1, repaired: 0, skipped: 0 });
+      expect(repairFn).not.toHaveBeenCalled();
     });
   });
 
@@ -246,6 +286,58 @@ describe('HookWatchdog', () => {
     });
   });
 
+  describe('disabled', () => {
+    it('does not repair a plugin target whose agent is disabled, even with hooks missing', async () => {
+      const target = makeClaudeTarget(tmpDir, { enabled: () => false });
+      await makeBin(target.binPath);
+
+      // Hooks are missing — a repair would fire if the target were enabled.
+      const settings = buildHealthySettings(target);
+      delete (settings.hooks as Record<string, unknown>).Stop;
+      await writeSettings(target.settingsPath, settings);
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary).toEqual({ checked: 0, repaired: 0, skipped: 1 });
+      expect(spawnCalls).toHaveLength(0);
+    });
+
+    it('does not invoke repairFn for a disabled hook target', async () => {
+      const repairFn = vi.fn(async () => true);
+      const target: PluginCheckTarget = {
+        agentId: 'claude-code',
+        settingsPath: path.join(tmpDir, '.claude', 'settings.json'),
+        expectedHooks: ['Stop'],
+        markers: ['claude-code-loongsuite-pilot-hook.sh'],
+        repairFn,
+        enabled: () => false,
+      };
+      await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
+      // No settings.json → all hooks missing → repair would fire if enabled.
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary).toEqual({ checked: 0, repaired: 0, skipped: 1 });
+      expect(repairFn).not.toHaveBeenCalled();
+    });
+
+    it('still repairs when enabled() returns true', async () => {
+      const target = makeClaudeTarget(tmpDir, { enabled: () => true });
+      await makeBin(target.binPath);
+      const settings = buildHealthySettings(target);
+      delete (settings.hooks as Record<string, unknown>).Stop;
+      await writeSettings(target.settingsPath, settings);
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary.repaired).toBe(1);
+      expect(spawnCalls).toHaveLength(1);
+    });
+  });
+
   describe('repair failure', () => {
     it('does not throw when spawn exits non-zero', async () => {
       const target = makeClaudeTarget(tmpDir);
@@ -269,6 +361,98 @@ describe('HookWatchdog', () => {
       spawnBehavior = 'error';
       const wd = new HookWatchdog(makeConfig(), [target]);
       await expect(wd.runCheck()).resolves.toBeDefined();
+    });
+
+    it('does not repair an invalid existing JSONC settings file', async () => {
+      const repairFn = vi.fn(async () => true);
+      const target: PluginCheckTarget = {
+        agentId: 'qwen-code-cli',
+        settingsPath: path.join(tmpDir, '.qwen', 'settings.json'),
+        settingsSyntax: 'jsonc',
+        expectedHooks: ['Stop'],
+        markers: ['qwen-code-cli-loongsuite-pilot-hook.sh'],
+        repairFn,
+      };
+      await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
+      await fs.writeFile(
+        target.settingsPath,
+        '{ // incomplete JSONC\n  "model": "qwen-max",\n',
+        'utf-8',
+      );
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary).toEqual({ checked: 0, repaired: 0, skipped: 1 });
+      expect(repairFn).not.toHaveBeenCalled();
+    });
+
+    it('repairs an existing whitespace-only settings file', async () => {
+      const repairFn = vi.fn(async () => true);
+      const target: PluginCheckTarget = {
+        agentId: 'qwen-code-cli',
+        settingsPath: path.join(tmpDir, '.qwen', 'settings.json'),
+        settingsSyntax: 'jsonc',
+        expectedHooks: ['Stop'],
+        markers: ['qwen-code-cli-loongsuite-pilot-hook.sh'],
+        repairFn,
+      };
+      await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
+      await fs.writeFile(target.settingsPath, '  \n', 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary).toEqual({ checked: 0, repaired: 1, skipped: 0 });
+      expect(repairFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('logs a continuous invalid-config error once and logs again after recovery', async () => {
+      const repairFn = vi.fn(async () => true);
+      const target: PluginCheckTarget = {
+        agentId: 'qwen-code-cli',
+        settingsPath: path.join(tmpDir, '.qwen', 'settings.json'),
+        settingsSyntax: 'jsonc',
+        expectedHooks: ['Stop'],
+        markers: ['qwen-code-cli-loongsuite-pilot-hook.sh'],
+        repairFn,
+      };
+      await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
+      const invalid = '{ // incomplete JSONC\n  "model": "qwen-max",\n';
+      await fs.writeFile(target.settingsPath, invalid, 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      await wd.runCheck();
+      await wd.runCheck();
+
+      expect(
+        mockLogger.error.mock.calls.filter(([message]) =>
+          message === 'hook-watchdog.invalid-config'
+        ),
+      ).toHaveLength(1);
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        'hook-watchdog.invalid-config-suppressed',
+        expect.objectContaining({ agent: 'qwen-code-cli' }),
+      );
+
+      await fs.writeFile(target.settingsPath, JSON.stringify({
+        hooks: {
+          Stop: [{
+            hooks: [{
+              command: '/opt/qwen-code-cli-loongsuite-pilot-hook.sh stop',
+            }],
+          }],
+        },
+      }), 'utf-8');
+      await wd.runCheck();
+      await fs.writeFile(target.settingsPath, invalid, 'utf-8');
+      await wd.runCheck();
+
+      expect(
+        mockLogger.error.mock.calls.filter(([message]) =>
+          message === 'hook-watchdog.invalid-config'
+        ),
+      ).toHaveLength(2);
     });
   });
 
@@ -358,6 +542,116 @@ describe('HookWatchdog', () => {
       expect(summary.repaired).toBe(0);
       expect(repairFn).not.toHaveBeenCalled();
       expect(spawnCalls).toHaveLength(0);
+    });
+
+    it('checks Codex trust only when config.toml changes and reuses repairFn', async () => {
+      const repairFn = vi.fn().mockResolvedValue(true);
+      const needsRepairOnChange = vi.fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
+      const configPath = path.join(tmpDir, '.codex', 'config.toml');
+      const target = makeRepairFnTarget(tmpDir, repairFn, {
+        agentId: 'codex',
+        settingsPath: path.join(tmpDir, '.codex', 'hooks.json'),
+        changeWatchPath: configPath,
+        needsRepairOnChange,
+      });
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+      await fs.writeFile(configPath, 'model = "first"\n', 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig({ repairCooldownMs: 0 }), [target]);
+
+      await wd.runCheck();
+      await wd.runCheck();
+      expect(needsRepairOnChange).not.toHaveBeenCalled();
+      expect(repairFn).not.toHaveBeenCalled();
+
+      await fs.writeFile(configPath, 'model = "changed-and-longer"\n', 'utf-8');
+      const repaired = await wd.runCheck();
+      expect(needsRepairOnChange).toHaveBeenCalledTimes(1);
+      expect(repairFn).toHaveBeenCalledTimes(1);
+      expect(repaired.repaired).toBe(1);
+
+      // The repair itself may replace config.toml. Its new signature is checked
+      // once, then unchanged intervals skip the shared deployment inspection.
+      await fs.writeFile(configPath, 'model = "reconciled"\n', 'utf-8');
+      await wd.runCheck();
+      await wd.runCheck();
+      expect(needsRepairOnChange).toHaveBeenCalledTimes(2);
+      expect(repairFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('detects a config.toml edit made before the first watchdog check', async () => {
+      const repairFn = vi.fn().mockResolvedValue(true);
+      const needsRepairOnChange = vi.fn().mockResolvedValue(true);
+      const configPath = path.join(tmpDir, '.codex', 'config.toml');
+      const target = makeRepairFnTarget(tmpDir, repairFn, {
+        agentId: 'codex',
+        settingsPath: path.join(tmpDir, '.codex', 'hooks.json'),
+        changeWatchPath: configPath,
+        needsRepairOnChange,
+      });
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+      await fs.writeFile(configPath, 'model = "post-deploy"\n', 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig({ repairCooldownMs: 0 }), [target]);
+      await fs.writeFile(configPath, 'model = "changed-before-first-check"\n', 'utf-8');
+
+      const result = await wd.runCheck();
+
+      expect(needsRepairOnChange).toHaveBeenCalledTimes(1);
+      expect(repairFn).toHaveBeenCalledTimes(1);
+      expect(result.repaired).toBe(1);
+    });
+
+    it('retries a failed changed-config inspection without another file change', async () => {
+      const repairFn = vi.fn().mockResolvedValue(true);
+      const needsRepairOnChange = vi.fn()
+        .mockRejectedValueOnce(new Error('transient read failure'))
+        .mockResolvedValueOnce(false);
+      const configPath = path.join(tmpDir, '.codex', 'config.toml');
+      const target = makeRepairFnTarget(tmpDir, repairFn, {
+        agentId: 'codex',
+        settingsPath: path.join(tmpDir, '.codex', 'hooks.json'),
+        changeWatchPath: configPath,
+        needsRepairOnChange,
+      });
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+      await fs.writeFile(configPath, 'model = "test"\n', 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      await wd.runCheck();
+      await fs.writeFile(configPath, 'model = "changed"\n', 'utf-8');
+      await wd.runCheck();
+      await wd.runCheck();
+
+      expect(needsRepairOnChange).toHaveBeenCalledTimes(2);
+      expect(repairFn).not.toHaveBeenCalled();
+    });
+
+    it('keeps a changed config pending until repair succeeds', async () => {
+      const repairFn = vi.fn()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      const needsRepairOnChange = vi.fn().mockResolvedValue(true);
+      const configPath = path.join(tmpDir, '.codex', 'config.toml');
+      const target = makeRepairFnTarget(tmpDir, repairFn, {
+        agentId: 'codex',
+        settingsPath: path.join(tmpDir, '.codex', 'hooks.json'),
+        changeWatchPath: configPath,
+        needsRepairOnChange,
+      });
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+      await fs.writeFile(configPath, 'model = "test"\n', 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig({ repairCooldownMs: 0 }), [target]);
+      await wd.runCheck();
+      await fs.writeFile(configPath, 'model = "changed"\n', 'utf-8');
+      expect((await wd.runCheck()).repaired).toBe(0);
+      expect((await wd.runCheck()).repaired).toBe(1);
+
+      expect(needsRepairOnChange).toHaveBeenCalledTimes(2);
+      expect(repairFn).toHaveBeenCalledTimes(2);
     });
 
     it('calls repairFn when hooks are missing', async () => {

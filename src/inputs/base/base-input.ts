@@ -1,13 +1,27 @@
 import { EventEmitter } from 'node:events';
+import { WorkspacePolicy } from '../../core/workspace-policy.js';
+import * as fs from 'node:fs/promises';
 import type { AgentActivityEntry, InputState } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { type BoundLogger, createLogger } from '../../utils/logger.js';
+import { resolvePollIntervalMs, DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import type { StateStore } from '../../checkpoints/state-store.js';
+import {
+  InputRuntimeAccumulator,
+} from './input-runtime-metrics.js';
 
 export interface InputOptions {
   stateStore: StateStore;
   pollIntervalMs?: number;
 }
+
+/**
+ * Upper bound on per-path ownership warnings remembered for dedup. The set is
+ * keyed by path and the condition is stable, so in practice it holds a handful
+ * of entries; the cap only guards against unbounded growth if a writer keeps
+ * recreating files under fresh names.
+ */
+const OWNERSHIP_WARN_CAP = 512;
 
 /**
  * Abstract base for every input.
@@ -24,12 +38,30 @@ export abstract class BaseInput extends EventEmitter {
   protected pollIntervalMs: number;
   private timer: ReturnType<typeof setInterval> | null = null;
   private cyclePromise: Promise<void> | null = null;
+  private releaseCheckpointWait: (() => void) | null = null;
+  private releaseStartupWait: (() => void) | null = null;
   private _running = false;
+  protected workspacePolicy = new WorkspacePolicy();
+
+  setWorkspacePolicy(policy: WorkspacePolicy): void { this.workspacePolicy = policy; }
+
+  /** InputManager uses this for the Codex trace journal's durable acceptance. */
+  private readonly pendingOutputs = new Set<Promise<void>>();
+  holdCheckpointUntil(promise: Promise<void>): void {
+    this.stateStore.holdSaveUntil(promise, this.id);
+    this.pendingOutputs.add(promise);
+    void promise.then(() => this.pendingOutputs.delete(promise), () => this.pendingOutputs.delete(promise));
+  }
+  private startPromise: Promise<void> | null = null;
+  private stopPromise: Promise<void> | null = null;
+  private activeRuntimeAccumulator: InputRuntimeAccumulator | null = null;
+  /** Paths already reported by diagnoseUnreadablePath (dedup across cycles). */
+  private readonly ownershipWarned = new Set<string>();
 
   constructor(opts: InputOptions) {
     super();
     this.stateStore = opts.stateStore;
-    this.pollIntervalMs = opts.pollIntervalMs ?? 30_000;
+    this.pollIntervalMs = resolvePollIntervalMs(opts.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS);
     this.logger = createLogger(this.constructor.name);
   }
 
@@ -37,24 +69,57 @@ export abstract class BaseInput extends EventEmitter {
     return this._running;
   }
 
-  async start(): Promise<void> {
-    if (this._running) return;
+  get checkpointFailed(): boolean { return this.stateStore.hasSaveFailure(this.id); }
+
+  start(): Promise<void> {
+    // A restart must not create resources before the preceding stop has drained them.
+    if (this.stopPromise) return this.stopPromise.then(() => this.start());
+    if (this.startPromise) return this.startPromise;
+    if (this._running) return Promise.resolve();
     this._running = true;
-    this.logger.info('starting');
-
-    await this.onStart();
-    await this.runCycle();
-
-    this.timer = setInterval(() => void this.runCycle(), this.pollIntervalMs);
+    this.startPromise = this.startOnce().finally(() => { this.startPromise = null; });
+    return this.startPromise;
   }
 
-  async stop(): Promise<void> {
-    if (!this._running) return;
+  private async startOnce(): Promise<void> {
+    this.logger.info('starting');
+    try {
+      await this.onStart();
+      if (!this._running) return;
+      const outputWait = new Promise<void>(resolve => { this.releaseStartupWait = resolve; });
+      const firstCycle = this.runCycle();
+      // Watchers may already have started a cycle during onStart. Readiness
+      // must not wait for its checkpoint, but cyclePromise still owns it.
+      if (this.releaseCheckpointWait) this.releaseStartupWait?.();
+      await Promise.race([firstCycle, outputWait]);
+      if (!this._running) return;
+      this.timer = setInterval(() => void this.runCycle(), this.pollIntervalMs);
+    } catch (error) {
+      this._running = false;
+      // A concurrent stop owns cleanup after this startup settles.
+      if (!this.stopPromise) await this.onStop();
+      throw error;
+    } finally {
+      this.releaseStartupWait = null;
+    }
+  }
+
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    if (!this._running && !this.startPromise) return Promise.resolve();
     this._running = false;
+    if (this.stateStore.waitingForOutput) this.releaseCheckpointWait?.();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.stopPromise = this.stopOnce().finally(() => { this.stopPromise = null; });
+    return this.stopPromise;
+  }
+
+  private async stopOnce(): Promise<void> {
+    // onStart may still install a watcher after an await. Drain it before onStop.
+    await this.startPromise?.catch(() => undefined);
     await this.cyclePromise;
     await this.onStop();
     this.logger.info('stopped');
@@ -69,6 +134,11 @@ export abstract class BaseInput extends EventEmitter {
   protected async onStart(): Promise<void> {}
   /** Optional hook called once on stop. */
   protected async onStop(): Promise<void> {}
+  /** Commit source progress only after the batch has entered the shared output queue. */
+  protected onEntriesQueued(): void | Promise<void> {}
+
+  /** Commit completed reads after accepted entries are queued or excluded by policy. */
+  protected onCollectionProcessed(): void | Promise<void> {}
 
   /** Request an immediate serialized collection cycle from an input-owned watcher. */
   protected requestCollection(): void {
@@ -77,6 +147,9 @@ export abstract class BaseInput extends EventEmitter {
 
   private runCycle(): Promise<void> {
     if (this.cyclePromise) return this.cyclePromise;
+    // A terminal output failure freezes the shared cursor until restart. Do
+    // not keep reading into a queue whose checkpoint can no longer progress.
+    if (this.checkpointFailed) return Promise.resolve();
     this.cyclePromise = this.runCycleOnce().finally(() => {
       this.cyclePromise = null;
     });
@@ -84,16 +157,46 @@ export abstract class BaseInput extends EventEmitter {
   }
 
   private async runCycleOnce(): Promise<void> {
+    const runtime = new InputRuntimeAccumulator();
+    this.activeRuntimeAccumulator = runtime;
+    const collectStartedAt = runtime.now();
     try {
-      const entries = await this.collect();
+      const entries = this.workspacePolicy.filter(await this.collect(), this.agentType);
       if (entries.length > 0) {
         this.emit('entries', entries);
+        await this.onEntriesQueued();
         this.logger.debug('cycle produced entries', { count: entries.length });
       }
-      await this.stateStore.save();
+      await this.onCollectionProcessed();
+      if (this.pendingOutputs.size) {
+        await Promise.race([
+          Promise.all([...this.pendingOutputs]),
+          new Promise<void>(resolve => {
+            this.releaseCheckpointWait = resolve;
+            this.releaseStartupWait?.();
+            if (!this._running) resolve();
+          }),
+        ]);
+      }
+      // A shared checkpoint may wait for another input's HTTP recovery. Stop
+      // must still drain our collect/onStop without waiting for that network;
+      // StateStore retains the save and its output holds until actual ACK.
+      await Promise.race([
+        this.stateStore.save(),
+        new Promise<void>(resolve => {
+          this.releaseCheckpointWait = resolve;
+          this.releaseStartupWait?.();
+          if (!this._running && this.stateStore.waitingForOutput) resolve();
+        }),
+      ]);
     } catch (err) {
       this.logger.error('collection cycle failed', { error: String(err) });
       this.emit('collect-error', err);
+    } finally {
+      this.releaseCheckpointWait = null;
+      const collectDurationMs = runtime.now() - collectStartedAt;
+      this.activeRuntimeAccumulator = null;
+      this.emit('input-runtime-delta', runtime.finish(collectDurationMs));
     }
   }
 
@@ -103,5 +206,85 @@ export abstract class BaseInput extends EventEmitter {
 
   protected setState(state: Partial<InputState>): void {
     this.stateStore.update(this.id, state);
+  }
+
+  /** Current collect cycle's scalar-only observer. */
+  protected getInputRuntimeAccumulator(): InputRuntimeAccumulator | null {
+    return this.activeRuntimeAccumulator;
+  }
+
+  /** Whether an error is a permission failure (EACCES/EPERM) on a path. */
+  protected isUnreadableError(err: unknown): boolean {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === 'EACCES' || code === 'EPERM';
+  }
+
+  /**
+   * Diagnose an EACCES/EPERM on an input path by comparing the path's owner uid
+   * with this daemon's own uid, and warn at most once per path.
+   *
+   * The ownership invariant behind this: the in-process plugin writes its event
+   * files 0600 inside whatever process loaded it, so every process loading the
+   * plugin must run as the same uid as this daemon — otherwise the daemon can
+   * neither list the session directory nor read the files. A mismatch means a
+   * second, differently-privileged process (in practice: a root helper or a
+   * second gateway that never dropped privileges) loaded the plugin. Nothing
+   * this daemon does after the fact fixes that; the remediation is dropping the
+   * offending process's privileges, and the warning says exactly that.
+   *
+   * Lives on BaseInput (not just BaseSessionInput) because inputs that override
+   * collect() with their own fs.open (dsh-log, qoder-work-*) need the same
+   * contain-and-diagnose behaviour instead of aborting the whole cycle.
+   */
+  protected async diagnoseUnreadablePath(
+    targetPath: string,
+    kind: 'event file' | 'session directory',
+  ): Promise<void> {
+    const warnKey = `${kind}:${targetPath}`;
+    if (this.ownershipWarned.has(warnKey)) return;
+    if (this.ownershipWarned.size >= OWNERSHIP_WARN_CAP) {
+      // Evict the single oldest entry (Set iterates in insertion order) rather
+      // than clearing the whole set: clear() would let every still-unreadable
+      // path be re-warned on the next cycle, the exact log/SLS-cardinality
+      // explosion the cap exists to prevent.
+      const oldest = this.ownershipWarned.values().next();
+      if (!oldest.done) this.ownershipWarned.delete(oldest.value);
+    }
+    this.ownershipWarned.add(warnKey);
+
+    let ownerUid: number | undefined;
+    try {
+      ownerUid = (await fs.stat(targetPath)).uid;
+    } catch {
+      // Path vanished between the failed read and this stat; warn without the
+      // owner detail rather than not at all.
+    }
+    const daemonUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+    const meta = { path: targetPath, kind, ownerUid, daemonUid };
+
+    if (daemonUid === undefined) {
+      this.logger.warn(
+        `ownership-mismatch: cannot read ${kind} (EACCES); this platform exposes no ` +
+          'process uid, so ensure the process writing agent events runs as the same user as this daemon',
+        meta,
+      );
+      return;
+    }
+    if (ownerUid !== undefined && ownerUid !== daemonUid) {
+      this.logger.warn(
+        `ownership-mismatch: cannot read ${kind} (EACCES): owned by uid ${ownerUid}, but this ` +
+          `daemon runs as uid ${daemonUid}. A process running as a different uid loaded the pilot ` +
+          'plugin and writes event files this daemon cannot read. Fix: run every process that loads ' +
+          `the plugin as uid ${daemonUid} (drop the privileges of the uid-${ownerUid} process, ` +
+          'e.g. via su or runAsUser)',
+        meta,
+      );
+      return;
+    }
+    this.logger.warn(
+      `ownership-mismatch: cannot read ${kind} (EACCES) despite matching uid ${daemonUid}; ` +
+        'check the surrounding directory permissions or security modules (SELinux/AppArmor/ACLs)',
+      meta,
+    );
   }
 }

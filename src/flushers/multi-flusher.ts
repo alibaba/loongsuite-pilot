@@ -1,4 +1,4 @@
-import { BaseFlusher } from './base-flusher.js';
+import { BaseFlusher, type BatchDeliveryOptions } from './base-flusher.js';
 import type { AgentActivityEntry } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -21,9 +21,9 @@ export class MultiFlusher extends BaseFlusher {
     return this.flushers;
   }
 
-  async send(entry: AgentActivityEntry): Promise<void> {
+  async send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
     const results = await Promise.allSettled(
-      this.flushers.map(r => r.send(entry)),
+      this.flushers.map(r => r.send(entry, logicalBytes)),
     );
     for (let i = 0; i < results.length; i++) {
       if (results[i].status === 'rejected') {
@@ -34,25 +34,55 @@ export class MultiFlusher extends BaseFlusher {
         });
       }
     }
+    const durableFailure = results.find(result => result.status === 'rejected'
+      && ['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes(result.reason?.name));
+    if (durableFailure?.status === 'rejected') throw durableFailure.reason;
   }
 
-  async sendBatch(entries: AgentActivityEntry[]): Promise<void> {
-    const results = await Promise.allSettled(
-      this.flushers.map(r => r.sendBatch(entries)),
-    );
-    for (let i = 0; i < results.length; i++) {
-      if (results[i].status === 'rejected') {
-        const err = (results[i] as PromiseRejectedResult).reason;
-        logger.error('flusher sendBatch failed', {
-          flusher: this.flushers[i].name,
-          error: String(err),
-        });
+  async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): Promise<void> {
+    await this.createBatchDelivery(entries, logicalBytes, signal)();
+  }
+
+  override createBatchDelivery(
+    entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal, options?: BatchDeliveryOptions,
+  ): () => Promise<void> {
+    const requireAcceptance = options?.requireAcceptance
+      || entries.some(entry => entry['agent.source'] === 'qwen-work-cn-collaboration');
+    const targets = this.flushers.map(flusher => ({
+      flusher, accepted: false, deliver: flusher.createBatchDelivery(entries, logicalBytes, signal, options),
+    }));
+    return async () => {
+      const pending = targets.filter(target => !target.accepted);
+      const results = await Promise.allSettled(pending.map(target => target.deliver()));
+      const failures: unknown[] = [];
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i];
+        if (result.status === 'fulfilled') {
+          pending[i].accepted = true;
+          continue;
+        }
+        const error = result.reason as Error & { cause?: Error };
+        logger.error('flusher sendBatch failed', { flusher: pending[i].flusher.name, error: String(error) });
+        if (requireAcceptance || ['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes(error?.name)) failures.push(error);
       }
-    }
+      // A terminal durability failure must not be hidden by another target's
+      // retryable quota error. Successful targets remain accepted in either case.
+      const fatal = failures.find(error => (error as Error & { cause?: Error }).cause?.name !== 'CodexTurnJournalCapacityError');
+      if (fatal) throw fatal;
+      if (failures.length) throw failures[0];
+    };
   }
 
   async flush(): Promise<void> {
     await Promise.allSettled(this.flushers.map(r => r.flush()));
+  }
+
+  override getTraceRuntimeSnapshot() {
+    return this.flushers.flatMap(flusher => flusher.getTraceRuntimeSnapshot());
+  }
+
+  override hasPendingHermesSource(sourceToken: string): boolean {
+    return this.flushers.some(flusher => flusher.hasPendingHermesSource(sourceToken));
   }
 
   async shutdown(): Promise<void> {

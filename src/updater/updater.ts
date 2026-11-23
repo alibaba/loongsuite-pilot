@@ -2,7 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, readdirSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import * as crypto from 'node:crypto';
@@ -10,6 +10,21 @@ import * as os from 'node:os';
 import type { AutoUpdateConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
+import {
+  extractTarGz,
+  makeTarStagingDir,
+  replaceDirWith,
+} from '../utils/win-archive.js';
+import {
+  describeRestartCommandError,
+  isRestartCommandTimeout,
+  isRestartFailureFresh,
+  readRestartFailure,
+  summarizeRestartFailure,
+  writeRestartFailure,
+  type RestartFailureBreadcrumb,
+} from '../utils/restart-breadcrumb.js';
+import { NODE_SQLITE_PROBE } from '../utils/node-sqlite.js';
 import { compareVersions, computeSha256, deterministicBucket } from './version-utils.js';
 import type { UpdaterMetrics } from './updater-metrics.js';
 import { updaterRuntimePath, type UpdaterRuntimeState } from './runtime-state.js';
@@ -22,14 +37,45 @@ const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const NPM_INSTALL_TIMEOUT_MS = 2 * 60_000;
 const MAX_BACKOFF_MS = 6 * 60 * 60_000; // 6 hours
 const MAX_CONSECUTIVE_FAILURES = 10;
+const MAX_VERSION_GC_REMOVALS_PER_CHECK = 1;
+// Matches UpdaterWatchdog's cap: restart-collector polls for the collector's heartbeat
+// instead of sleeping a second and guessing, and killing it early would throw away both
+// the restart and the diagnostics it was about to write.
+const COLLECTOR_COMMAND_TIMEOUT_MS = 90_000;
+const COLLECTOR_HEALTH_TIMEOUT_MS = 30_000;
+const COLLECTOR_HEALTH_POLL_MS = 500;
+
+// ── Managed Node.js runtime (mirrors deploy/installer-opensource.sh) ──
+// Existing installs that predate the managed runtime run the updater (and hence
+// this deploy path) on the system node — process.execPath is the system node,
+// the node-bin pin points at it, and no runtime/ directory exists. Adopting the
+// managed runtime here lets an auto-upgrade migrate such installs onto the
+// pinned node + prebuilt node_modules, and keeps the node ABI consistent with
+// the prebuilt native addons. When the platform has no managed artifact (or a
+// download/verify step fails) we fall back to the running node + npm install,
+// i.e. the historical behaviour. Overridable via the same env vars the
+// installer honours, so both channels resolve the same OSS objects.
+const MANAGED_NODE_VERSION = process.env.LOONGSUITE_PILOT_NODE_VERSION ?? '22.22.2';
+const MANAGED_NODE_DEPS_BASE = (
+  process.env.LOONGSUITE_PILOT_NODE_DEPS_URL ??
+  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node'
+).replace(/\/+$/, '');
+const MANAGED_NODE_MODULES_BASE = (
+  process.env.LOONGSUITE_PILOT_NODE_MODULES_URL ??
+  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node-modules'
+).replace(/\/+$/, '');
+const MANAGED_NODE_DOWNLOAD_TIMEOUT_MS = 10 * 60_000; // mirrors installer curl --max-time 600
+const ARCHIVE_EXTRACT_TIMEOUT_MS = 2 * 60_000;
 
 /**
  * Build an env for child processes that ensures node/npm are on PATH.
  * Only the spawned child sees the modified PATH; current process is untouched.
+ * Defaults to the running node; pass the managed node bin to prefer it (its
+ * directory also holds the matching npm, so `npm` resolves to the right one).
  */
-function buildChildEnv(): NodeJS.ProcessEnv {
+function buildChildEnv(nodeBin: string = process.execPath): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  const nodeDir = path.dirname(process.execPath);
+  const nodeDir = path.dirname(nodeBin);
   const currentPath = env.PATH ?? '';
   if (!currentPath.split(path.delimiter).includes(nodeDir)) {
     env.PATH = nodeDir + path.delimiter + currentPath;
@@ -61,12 +107,16 @@ export interface LocalVersion {
 
 export interface UpdaterPaths {
   cacheDir: string;
+  dataDir: string;
   versionsDir: string;
   currentFile: string;
   previousFile: string;
   bootstrapDir: string;
   loongsuitePilotBin: string;
   runtimeFile: string;
+  collectorRuntimeFile: string;
+  // Where the CLI wrapper reads the pinned node runtime (its NODE_PIN_FILE).
+  nodePinFile: string;
 }
 
 function homeDir(): string {
@@ -75,34 +125,51 @@ function homeDir(): string {
 
 function pilotBinPath(): string {
   const home = homeDir();
-  const ext = process.platform === 'win32' ? '.ps1' : '';
-  return path.join(home, '.local', 'bin', `loongsuite-pilot${ext}`);
+  // On Windows deploy as loongsuite-pilot-service.ps1 (not loongsuite-pilot.ps1):
+  // a bare `loongsuite-pilot` resolves an on-PATH .ps1 (ExternalScript) BEFORE the
+  // .cmd shim, and a directly-run .ps1 obeys the session ExecutionPolicy (often
+  // Restricted) instead of the shim's -ExecutionPolicy Bypass. A non-colliding
+  // name keeps the .cmd the only match for the bare command name. Source in the
+  // package remains scripts/loongsuite-pilot.ps1; only the installed basename changes.
+  if (process.platform === 'win32') {
+    return path.join(home, '.local', 'bin', 'loongsuite-pilot-service.ps1');
+  }
+  return path.join(home, '.local', 'bin', 'loongsuite-pilot');
 }
 
 function defaultPaths(): UpdaterPaths {
   const home = homeDir();
   const cacheDir = path.join(home, '.loongsuite-pilot');
   const dataDir = resolveHome(process.env.LOONGSUITE_PILOT_DATA_DIR ?? cacheDir);
+  // The CLI wrapper reads the pin from CACHE_DIR (LOONGSUITE_PILOT_CACHE_DIR),
+  // which defaults to the same directory; honour the override to stay in lockstep.
+  const pinDir = resolveHome(process.env.LOONGSUITE_PILOT_CACHE_DIR ?? cacheDir);
   return {
     cacheDir,
+    dataDir,
     versionsDir: path.join(cacheDir, 'versions'),
     currentFile: path.join(cacheDir, 'current'),
     previousFile: path.join(cacheDir, 'previous'),
     bootstrapDir: path.join(cacheDir, 'bin'),
     loongsuitePilotBin: pilotBinPath(),
     runtimeFile: updaterRuntimePath(dataDir),
+    collectorRuntimeFile: path.join(dataDir, 'logs', 'runtime.json'),
+    nodePinFile: path.join(pinDir, 'node-bin'),
   };
 }
 
 export function buildPaths(baseDir: string): UpdaterPaths {
   return {
     cacheDir: baseDir,
+    dataDir: baseDir,
     versionsDir: path.join(baseDir, 'versions'),
     currentFile: path.join(baseDir, 'current'),
     previousFile: path.join(baseDir, 'previous'),
     bootstrapDir: path.join(baseDir, 'bin'),
     loongsuitePilotBin: pilotBinPath(),
     runtimeFile: updaterRuntimePath(baseDir),
+    collectorRuntimeFile: path.join(baseDir, 'logs', 'runtime.json'),
+    nodePinFile: path.join(baseDir, 'node-bin'),
   };
 }
 
@@ -110,6 +177,14 @@ export interface ResolvedTarget {
   manifest: VersionManifest;
   channel: 'stable' | 'canary';
   hotfixVersion?: number;
+}
+
+interface CollectorRuntimeRecord {
+  status?: unknown;
+  packageVersion?: unknown;
+  gitCommit?: unknown;
+  pid?: unknown;
+  updatedAt?: unknown;
 }
 
 const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
@@ -200,9 +275,21 @@ export class Updater {
           remote: target.version,
           channel,
         });
+        const activeVersion: LocalVersion = local ?? {
+          version: target.version,
+          gitCommit: target.git_commit,
+        };
+        const collectorRecovered = await this.recoverCurrentCollectorIfNeeded(activeVersion);
+        if (collectorRecovered) {
+          void this.metrics?.writeEvent('collector_restarted', {
+            latest_version: activeVersion.version,
+          });
+        }
         this.consecutiveFailures = 0;
         this.nextCheckAt = 0;
+        await this.gcOldVersions();
         await this.writeHeartbeat();
+        if (collectorRecovered) await this.scheduleUpdaterRestart();
         return;
       }
 
@@ -231,20 +318,25 @@ export class Updater {
         latest_version: target.version,
       });
 
+      await this.restartCollector(
+        target.version,
+        local?.version === target.version,
+        target.git_commit,
+      );
+      void this.metrics?.writeEvent('collector_restarted', {
+        latest_version: target.version,
+      });
+
       if (channel === 'canary') {
         await this.persistCanaryState(hotfixVersion ?? 0);
         this.config = { ...this.config, canaryHotfixVersion: hotfixVersion ?? 0 };
       }
 
-      await this.restartCollector();
-      void this.metrics?.writeEvent('collector_restarted', {
-        latest_version: target.version,
-      });
-
-      await this.restartMonitorIfRunning();
+      await this.gcOldVersions();
       this.consecutiveFailures = 0;
       this.nextCheckAt = 0;
       await this.writeHeartbeat();
+      await this.scheduleUpdaterRestart();
     } catch (err) {
       this.consecutiveFailures++;
       const backoffMs = Math.min(
@@ -441,11 +533,16 @@ export class Updater {
     manifest: VersionManifest,
   ): Promise<void> {
     const { cacheDir, versionsDir } = this.paths;
-    const tmpDir = path.join(cacheDir, 'download-tmp');
+    // The tarball is unpacked with tar.exe, which cannot address a non-ASCII path
+    // (see utils/win-archive.ts), so under C:\Users\<CJK name> the download staging
+    // moves to an ASCII root. The extracted tree is copied into stagingDir below
+    // with fs.cp, which is Unicode-safe.
+    const tmpDir = await makeTarStagingDir(path.join(cacheDir, 'download-tmp'));
     const tarball = path.join(tmpDir, 'package.tar.gz');
-    const dirName = `${manifest.version}_${manifest.git_commit}`;
-    const targetDir = path.join(versionsDir, dirName);
-    const stagingDir = path.join(versionsDir, `${dirName}.candidate`);
+    const baseDirName = `${manifest.version}_${manifest.git_commit}`;
+    let dirName = baseDirName;
+    let targetDir = path.join(versionsDir, dirName);
+    const stagingDir = path.join(versionsDir, `${baseDirName}.candidate`);
     let activated = false;
     let oldCurrent: string | null = null;
     let oldPrevious: string | null = null;
@@ -485,7 +582,7 @@ export class Updater {
       }
 
       logger.info('extracting update');
-      await execFileAsync('tar', ['-xzf', tarball, '-C', tmpDir]);
+      await extractTarGz(tarball, tmpDir, ARCHIVE_EXTRACT_TIMEOUT_MS);
 
       const extractedDir = await this.findExtractedPackage(tmpDir);
       if (!extractedDir) {
@@ -501,24 +598,76 @@ export class Updater {
       await fs.mkdir(versionsDir, { recursive: true });
       await fs.cp(extractedDir, stagingDir, { recursive: true });
 
-      const childEnv = buildChildEnv();
+      // Provision the managed Node.js runtime when the platform supports it, so an
+      // auto-upgrade migrates a system-node install onto the pinned runtime. When
+      // unavailable, managedNodeBin is null and we keep using the running node.
+      const managedNodeBin = await this.ensureManagedNode();
+      const nodeBin = managedNodeBin ?? process.execPath;
+      const childEnv = buildChildEnv(nodeBin);
 
-      logger.info('running npm install', { PATH: childEnv.PATH });
-      await execFileAsync('npm', ['install', '--production', '--no-optional'], {
+      // Prebuilt node_modules are ABI-tied to the managed node, so only adopt them
+      // once the managed runtime is in place; otherwise fall back to npm install.
+      let usedPrebuiltModules = false;
+      if (managedNodeBin) {
+        usedPrebuiltModules = await this.ensureNodeModules(stagingDir, manifest.version);
+      }
+
+      if (!usedPrebuiltModules) {
+        logger.info('running npm install', { node: nodeBin, PATH: childEnv.PATH });
+        await execFileAsync('npm', ['install', '--production', '--no-optional'], {
+          cwd: stagingDir,
+          env: childEnv,
+          timeout: NPM_INSTALL_TIMEOUT_MS,
+          shell: process.platform === 'win32',
+        });
+      }
+
+      // The node that will actually run the new version (managed runtime when
+      // provisioning succeeded, otherwise this process). The probe require()s
+      // node:sqlite with no version bypass. Failure throws before current is
+      // written, so the previous version stays.
+      //
+      // Cross-version upgrade: a deployed updater from before this migration
+      // runs `require('sqlite3')` instead. The compat shim at compat/sqlite3/
+      // makes that probe succeed (exit 0) so old updaters can activate new
+      // versions. The shim is just `module.exports = {}`.
+      logger.info('checking node:sqlite runtime', { node: nodeBin });
+      await execFileAsync(nodeBin, ['-e', NODE_SQLITE_PROBE], {
         cwd: stagingDir,
         env: childEnv,
-        timeout: NPM_INSTALL_TIMEOUT_MS,
-        shell: process.platform === 'win32',
+        timeout: 30_000,
       });
 
+      // The new package's postinstall is what (re)fills <dataDir>/{hooks,skills,plugins}.
+      // It is also how an install broken by the fs.cpSync fail-fast heals itself: the
+      // trees get rebuilt and the stale AppleDouble sidecars pruned on the next upgrade,
+      // with no reinstall. Do not drop this call -- a missing plugins tree fails every
+      // dsh deployment with "plugin file not found or unreadable", once per cycle.
       const postinstallScript = path.join(stagingDir, 'scripts', 'postinstall.js');
       if (await fs.access(postinstallScript).then(() => true).catch(() => false)) {
         try {
-          await execFileAsync(process.execPath, [postinstallScript], {
+          const { stdout, stderr } = await execFileAsync(nodeBin, [postinstallScript], {
             cwd: stagingDir,
-            env: childEnv,
+            env: {
+              ...childEnv,
+              // Pin the target explicitly instead of trusting what we inherited: the
+              // script otherwise falls back to $HOME/.loongsuite-pilot, which is the
+              // wrong tree for any install using a custom data dir.
+              LOONGSUITE_PILOT_DATA_DIR: this.paths.dataDir,
+            },
             timeout: 30_000,
           });
+          // postinstall exits 0 even when a tree failed (it is package.json's
+          // `postinstall`, and a non-zero exit there aborts the whole install), so the
+          // only signal for a partial result is its own output. Unlogged, this path
+          // reproduces the failure mode it exists to heal: hooks or plugins absent while
+          // every step reports success.
+          const output = `${stdout ?? ''}${stderr ?? ''}`.trim();
+          if (/failed asset tree/.test(output)) {
+            logger.warn('postinstall reported failed asset trees', { output });
+          } else if (output) {
+            logger.info('postinstall completed', { output });
+          }
         } catch (err) {
           logger.warn('postinstall failed, continuing', { error: String(err) });
         }
@@ -529,7 +678,18 @@ export class Updater {
       oldPrevious = await this.readPointerFile(previousFile);
 
       try {
-        await fs.rm(targetDir, { recursive: true, force: true });
+        // Never overwrite an existing version directory in place: `current` may still
+        // point at it and a collector relaunched mid-deploy would die with
+        // ERR_MODULE_NOT_FOUND (last-startup-crash.json phase=module_load), and a live
+        // collector may still hold native modules loaded out of it. Redeploying the
+        // same version/commit therefore lands in a suffixed sibling, which is what
+        // deploy/installer*.ps1 does too. Version and commit are read from VERSION, not
+        // from the directory name, so the suffix is inert.
+        if (await fs.access(targetDir).then(() => true).catch(() => false)) {
+          const suffix = `${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}_${Math.floor(Math.random() * 9000) + 1000}`;
+          dirName = `${baseDirName}_${suffix}`;
+          targetDir = path.join(versionsDir, dirName);
+        }
         await fs.rename(stagingDir, targetDir);
 
         if (oldCurrent && oldCurrent !== dirName) {
@@ -538,6 +698,15 @@ export class Updater {
 
         await this.writePointerFile(currentFile, dirName);
         await this.syncInstalledScripts(targetDir);
+        // Repoint the CLI wrapper at the managed runtime only after activation, so
+        // the collector/updater restart (and any future launch) runs on it. Skipped
+        // when we fell back to system node, preserving the existing pin. When the
+        // managed runtime was adopted, pinNodeRuntime throws on failure so we roll the
+        // pointers back below: leaving the pin on a different node would start the
+        // collector against the wrong runtime, with no self-heal.
+        if (managedNodeBin) {
+          await this.pinNodeRuntime(managedNodeBin);
+        }
         activated = true;
       } catch (err) {
         logger.warn('failed to finalize update, restoring previous installation', { error: String(err) });
@@ -573,6 +742,267 @@ export class Updater {
     const hasRoot = await fs.access(path.join(dir, 'package.json'))
       .then(() => true).catch(() => false);
     return hasRoot ? dir : null;
+  }
+
+  // ── Managed Node.js runtime helpers (mirror deploy/installer-opensource.sh) ──
+
+  /**
+   * Resolve the managed-node OS/arch tuple, or null when this platform has no
+   * managed artifact (win-arm64, linux-musl, or anything outside the matrix) —
+   * in which case the caller falls back to the running node + npm install.
+   */
+  private managedNodePlatform(): { os: string; arch: string } | null {
+    let os: string;
+    switch (process.platform) {
+      case 'darwin': os = 'darwin'; break;
+      case 'linux': os = 'linux'; break;
+      case 'win32': os = 'win'; break;
+      default:
+        logger.info('managed node: unsupported platform, using system node', { platform: process.platform });
+        return null;
+    }
+    let arch: string;
+    switch (process.arch) {
+      case 'arm64': arch = 'arm64'; break;
+      case 'x64': arch = 'x64'; break;
+      default:
+        logger.info('managed node: unsupported arch, using system node', { arch: process.arch });
+        return null;
+    }
+    if (os === 'win' && arch === 'arm64') {
+      logger.info('managed node: no win-arm64 artifact, using system node');
+      return null;
+    }
+    if (os === 'linux' && this.isMuslLibc()) {
+      logger.info('managed node: no linux-musl artifact, using system node');
+      return null;
+    }
+    return { os, arch };
+  }
+
+  private isMuslLibc(): boolean {
+    try {
+      const header = (process.report?.getReport?.() as { header?: { glibcVersionRuntime?: string } })?.header;
+      if (header) return !header.glibcVersionRuntime;
+    } catch { /* fall through to loader probe */ }
+    try {
+      return readdirSync('/lib').some((f) => f.startsWith('ld-musl-'));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Ensure the pinned managed Node.js runtime exists under <dataDir>/runtime and
+   * return its node binary, or null to signal "use the system node". Idempotent:
+   * a present runtime of the right version is reused without re-downloading.
+   */
+  private async ensureManagedNode(): Promise<string | null> {
+    const platform = this.managedNodePlatform();
+    if (!platform) return null;
+    const { os: osName, arch } = platform;
+
+    const runtimeDir = path.join(this.paths.dataDir, 'runtime');
+    const nodeDir = path.join(runtimeDir, `node-v${MANAGED_NODE_VERSION}-${osName}-${arch}`);
+    let tmp = '';
+
+    try {
+      const existing = await this.resolveManagedNodeBin(nodeDir, osName);
+      if (existing && await this.nodeReportsVersion(existing, `v${MANAGED_NODE_VERSION}`)) {
+        return existing;
+      }
+
+      const ext = osName === 'win' ? 'zip' : 'tar.gz';
+      const archive = `node-v${MANAGED_NODE_VERSION}-${osName}-${arch}.${ext}`;
+      const base = `${MANAGED_NODE_DEPS_BASE}/${MANAGED_NODE_VERSION}`;
+      tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-node-'));
+
+      logger.info('downloading managed node', { version: MANAGED_NODE_VERSION, os: osName, arch });
+      await this.downloadFile(`${base}/${archive}`, path.join(tmp, archive));
+      await this.downloadFile(`${base}/SHASUMS256.txt`, path.join(tmp, 'SHASUMS256.txt'));
+      if (!await this.verifyChecksum(path.join(tmp, archive), path.join(tmp, 'SHASUMS256.txt'), archive)) {
+        return null;
+      }
+
+      await fs.mkdir(runtimeDir, { recursive: true });
+      await fs.rm(nodeDir, { recursive: true, force: true });
+      await this.extractArchive(path.join(tmp, archive), runtimeDir, ext);
+
+      const bin = await this.resolveManagedNodeBin(nodeDir, osName);
+      if (!bin) {
+        logger.warn('managed node: extracted archive has no usable node binary, using system node', { nodeDir });
+        await fs.rm(nodeDir, { recursive: true, force: true }).catch(() => {});
+        return null;
+      }
+      if (osName === 'darwin') {
+        await execFileAsync('xattr', ['-dr', 'com.apple.quarantine', nodeDir]).catch(() => {});
+      }
+      logger.info('managed node ready', { bin });
+      return bin;
+    } catch (err) {
+      logger.warn('managed node provisioning failed, using system node', { error: String(err) });
+      return null;
+    } finally {
+      if (tmp) await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /**
+   * Download and unpack prebuilt node_modules into <versionDir>/node_modules,
+   * returning true on success. false means the caller should npm install instead.
+   */
+  private async ensureNodeModules(versionDir: string, appVersion: string): Promise<boolean> {
+    const platform = this.managedNodePlatform();
+    if (!platform) return false;
+    const { os: osName, arch } = platform;
+
+    const modulesDir = path.join(versionDir, 'node_modules');
+    const stamp = `${appVersion} ${osName} ${arch}`;
+    const archive = `node-modules-${osName}-${arch}.tar.gz`;
+    const base = `${MANAGED_NODE_MODULES_BASE}/${appVersion}`;
+    let tmp = '';
+
+    try {
+      // Stage inside versionsDir (same filesystem as versionDir) so the final rename
+      // can't hit EXDEV across a separate tmpfs. Exception: a non-ASCII versionsDir
+      // (C:\Users\<CJK name>\...) is invisible to tar.exe, so staging then moves to an
+      // ASCII root and replaceDirWith below handles the possible cross-volume move.
+      tmp = await makeTarStagingDir(path.join(this.paths.versionsDir, `.pilot-nm-${process.pid}`));
+
+      logger.info('downloading prebuilt node_modules', { appVersion, os: osName, arch });
+      await this.downloadFile(`${base}/${archive}`, path.join(tmp, archive));
+      await this.downloadFile(`${base}/SHASUMS256.txt`, path.join(tmp, 'SHASUMS256.txt'));
+      if (!await this.verifyChecksum(path.join(tmp, archive), path.join(tmp, 'SHASUMS256.txt'), archive)) {
+        return false;
+      }
+
+      const stage = path.join(tmp, 'stage');
+      await fs.mkdir(stage, { recursive: true });
+      await extractTarGz(path.join(tmp, archive), stage, ARCHIVE_EXTRACT_TIMEOUT_MS);
+      const stagedModules = path.join(stage, 'node_modules');
+      if (!await fs.access(stagedModules).then(() => true).catch(() => false)) {
+        logger.warn('prebuilt node_modules archive has no node_modules/, falling back to npm install');
+        return false;
+      }
+      await fs.writeFile(path.join(stagedModules, '.pilot-modules-version'), stamp + '\n');
+      await replaceDirWith(stagedModules, modulesDir);
+      logger.info('prebuilt node_modules installed', { appVersion });
+      return true;
+    } catch (err) {
+      logger.warn('prebuilt node_modules provisioning failed, falling back to npm install', { error: String(err) });
+      return false;
+    } finally {
+      if (tmp) await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  private async resolveManagedNodeBin(nodeDir: string, osName: string): Promise<string | null> {
+    // Prefer the bin/ layout; official Node.js win zips put node.exe at the root.
+    const candidates = osName === 'win'
+      ? [path.join(nodeDir, 'bin', 'node.exe'), path.join(nodeDir, 'node.exe')]
+      : [path.join(nodeDir, 'bin', 'node')];
+    for (const c of candidates) {
+      if (await fs.access(c).then(() => true).catch(() => false)) return c;
+    }
+    return null;
+  }
+
+  private async nodeReportsVersion(nodeBin: string, want: string): Promise<boolean> {
+    try {
+      const { stdout } = await execFileAsync(nodeBin, ['--version'], { timeout: 10_000 });
+      return stdout.trim() === want;
+    } catch {
+      return false;
+    }
+  }
+
+  private async downloadFile(url: string, dest: string): Promise<void> {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(MANAGED_NODE_DOWNLOAD_TIMEOUT_MS) });
+    if (!resp.ok) throw new Error(`download failed: ${resp.status} ${resp.statusText} (${url})`);
+    if (!resp.body) throw new Error(`download returned empty body (${url})`);
+    await pipeline(Readable.fromWeb(resp.body as any), createWriteStream(dest));
+  }
+
+  /**
+   * Verify <archive> against a "<sha256>  <name>" line in <shasumsFile>. Accepts
+   * sha256sum binary-mode lines ("<hash> *<name>"). Returns false (never throws)
+   * so a bad/missing sum degrades to the system-node fallback.
+   */
+  private async verifyChecksum(archive: string, shasumsFile: string, name: string): Promise<boolean> {
+    try {
+      const content = await fs.readFile(shasumsFile, 'utf-8');
+      let expected: string | null = null;
+      for (const raw of content.split(/\r?\n/)) {
+        const line = raw.trim();
+        const sep = line.search(/\s/);
+        if (sep < 0) continue;
+        let file = line.slice(sep).trim();
+        if (file.startsWith('*')) file = file.slice(1);
+        if (file === name) {
+          expected = line.slice(0, sep);
+          break;
+        }
+      }
+      if (!expected) {
+        logger.warn('managed node: SHASUMS256.txt has no entry', { name });
+        return false;
+      }
+      const actual = await computeSha256(archive);
+      if (expected !== actual) {
+        logger.warn('managed node: sha256 mismatch', { name, expected, actual });
+        return false;
+      }
+      return true;
+    } catch (err) {
+      logger.warn('managed node: checksum verification error', { name, error: String(err) });
+      return false;
+    }
+  }
+
+  private async extractArchive(archive: string, destDir: string, ext: string): Promise<void> {
+    if (ext === 'zip') {
+      // Expand-Archive is always available on Windows; mirrors installer .ps1.
+      const q = (s: string) => s.replace(/'/g, "''");
+      await execFileAsync('powershell.exe', [
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        `Expand-Archive -LiteralPath '${q(archive)}' -DestinationPath '${q(destDir)}' -Force`,
+      ], { timeout: ARCHIVE_EXTRACT_TIMEOUT_MS });
+    } else {
+      // Windows only ever takes the zip branch above, which is why a non-ASCII
+      // destDir (<dataDir>/runtime under a CJK profile) is safe here: Expand-Archive
+      // is Unicode-safe, tar.exe would not be. extractTarGz still routes through
+      // System32\tar.exe so a Git-for-Windows GNU tar on PATH cannot capture it.
+      await extractTarGz(archive, destDir, ARCHIVE_EXTRACT_TIMEOUT_MS);
+    }
+  }
+
+  private async pinNodeRuntime(nodeBin: string): Promise<void> {
+    try {
+      await fs.mkdir(path.dirname(this.paths.nodePinFile), { recursive: true });
+      await this.writePointerFile(this.paths.nodePinFile, nodeBin);
+      logger.info('pinned managed node runtime', { nodeBin, pin: this.paths.nodePinFile });
+    } catch (err) {
+      // The freshly activated version ships node_modules compiled against the managed
+      // node ABI. If the CLI wrapper cannot be repointed at that runtime, the collector
+      // restarts on the old (system) node and crash-loops on ABI-mismatched native
+      // addons — a state the version-only self-heal cannot detect or repair. Surface it
+      // (event + alarm) and rethrow so the caller rolls the pointers back to the
+      // previous, ABI-consistent install rather than marking the upgrade successful.
+      void this.metrics?.writeEvent('managed_node_pin_failed', {
+        error: String(err),
+        node_bin: nodeBin,
+        pin: this.paths.nodePinFile,
+      });
+      void this.metrics?.writeAlarm(
+        'UPDATER_NODE_PIN_ALARM', '2',
+        `failed to pin managed node runtime at ${this.paths.nodePinFile}: ${String(err)}`,
+      );
+      logger.error('failed to pin managed node runtime, aborting activation', {
+        error: String(err),
+        pin: this.paths.nodePinFile,
+      });
+      throw err;
+    }
   }
 
   private async writeHeartbeat(): Promise<void> {
@@ -628,6 +1058,15 @@ export class Updater {
     await fs.mkdir(path.dirname(loongsuitePilotBin), { recursive: true });
     await this.copyFileAtomic(cliScript, loongsuitePilotBin, 0o755);
 
+    // Remove any stale same-name script from older installs that would shadow the
+    // .cmd shim. Destination is already -service.ps1 on win32 (see pilotBinPath);
+    // without this cleanup the first post-upgrade sync would leave the legacy
+    // loongsuite-pilot.ps1 in place and re-break bare-command resolution.
+    if (process.platform === 'win32') {
+      const legacyPs1 = path.join(path.dirname(loongsuitePilotBin), 'loongsuite-pilot.ps1');
+      await fs.rm(legacyPs1, { force: true }).catch(() => undefined);
+    }
+
     logger.info('installed scripts synced');
   }
 
@@ -679,67 +1118,298 @@ export class Updater {
     }
   }
 
-  private async restartCollector(): Promise<void> {
+  private async restartCollector(
+    targetVersion: string,
+    requireNewPid: boolean,
+    targetGitCommit = '',
+  ): Promise<void> {
     logger.info('restarting collector service');
+    const previousRuntime = requireNewPid ? await this.readCollectorRuntime() : null;
+    const previousPid = typeof previousRuntime?.pid === 'number' ? previousRuntime.pid : null;
+    const restartStartedAt = Date.now();
+    let recoveryAttempted = false;
+    let diagnosed: {
+      detail: string;
+      diagnosis: string;
+      stage: string;
+      breadcrumb: RestartFailureBreadcrumb | null;
+    } | null = null;
+
     try {
-      const bin = this.paths.loongsuitePilotBin;
-      if (process.platform === 'win32') {
-        await execFileAsync('powershell.exe', [
-          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, 'restart-collector',
-        ], { timeout: 30_000 });
-      } else {
-        await execFileAsync(bin, ['restart-collector'], { timeout: 30_000 });
+      await this.runCollectorCommand('restart-collector');
+    } catch (err: unknown) {
+      diagnosed = await this.diagnoseCollectorRestartFailure(restartStartedAt, err);
+      logger.warn('collector restart failed', {
+        error: diagnosed.detail,
+        stage: diagnosed.stage,
+        initType: diagnosed.breadcrumb?.init_type,
+        diag: diagnosed.breadcrumb?.diag,
+      });
+      try {
+        await this.startCollectorForRecovery(err);
+        recoveryAttempted = true;
+      } catch (recoveryErr) {
+        // Alarm only when recovery also failed: a start-collector rescue after a
+        // timed-out restart is the #328 path working, not a stuck collector.
+        void this.metrics?.writeAlarm(
+          'UPDATER_FAILURE_ALARM', '2',
+          `collector restart command failed: ${diagnosed.detail} | ${diagnosed.diagnosis}`,
+        );
+        throw recoveryErr;
       }
-      logger.info('collector restarted');
-    } catch (err) {
-      logger.warn('collector restart failed', { error: String(err) });
+    }
+
+    try {
+      await this.waitForCollectorHealth(
+        targetVersion,
+        restartStartedAt,
+        previousPid,
+        targetGitCommit,
+      );
+    } catch (healthErr) {
+      if (recoveryAttempted) {
+        const first = diagnosed
+          ? `${diagnosed.detail} | ${diagnosed.diagnosis}`
+          : 'restart-collector failed';
+        const healthReason = healthErr instanceof Error ? healthErr.message : String(healthErr);
+        void this.metrics?.writeAlarm(
+          'UPDATER_FAILURE_ALARM', '2',
+          `collector restart command failed: ${first}; health check failed after start-collector recovery: ${healthReason}`,
+        );
+        throw healthErr;
+      }
+      logger.warn('collector failed post-restart health check; attempting start-only recovery', {
+        error: String(healthErr),
+      });
+      await this.startCollectorForRecovery(healthErr);
+      await this.waitForCollectorHealth(
+        targetVersion,
+        restartStartedAt,
+        previousPid,
+        targetGitCommit,
+      );
+    }
+
+    logger.info('collector restarted and healthy', { targetVersion });
+  }
+
+  private async runCollectorCommand(
+    command: 'restart-collector' | 'start-collector' | 'schedule-updater-restart',
+  ): Promise<void> {
+    const bin = this.paths.loongsuitePilotBin;
+    const commandArgs = command === 'restart-collector'
+      ? [command, '--defer-updater-restart']
+      : [command];
+    let result: { stdout: string; stderr: string };
+    if (process.platform === 'win32') {
+      result = await execFileAsync('powershell.exe', [
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, ...commandArgs,
+      ], { timeout: COLLECTOR_COMMAND_TIMEOUT_MS });
+    } else {
+      result = await execFileAsync(bin, commandArgs, { timeout: COLLECTOR_COMMAND_TIMEOUT_MS });
+    }
+    const output = (result.stdout || '').trim();
+    if (output) logger.info(`${command} output`, { output });
+  }
+
+  private async startCollectorForRecovery(cause: unknown): Promise<void> {
+    try {
+      await this.runCollectorCommand('start-collector');
+    } catch (recoveryErr) {
+      throw new Error(
+        `collector restart failed (${this.formatCommandFailure(cause)}); `
+          + `start-only recovery also failed (${this.formatCommandFailure(recoveryErr)})`,
+      );
     }
   }
 
-  private async restartMonitorIfRunning(): Promise<void> {
-    const monitorPidFile = path.join(this.paths.cacheDir, 'loongsuite-pilot-monitor.pid');
-    const dashboardPidFile = path.join(this.paths.cacheDir, 'loongsuite-pilot-dashboard.pid');
-    const monitorRunning = await this.isPidFileRunning(monitorPidFile);
-    const dashboardRunning = await this.isPidFileRunning(dashboardPidFile);
-
-    if (!monitorRunning && !dashboardRunning) return;
-
-    logger.info('restarting monitor after update');
-    try {
-      const bin = this.paths.loongsuitePilotBin;
-      if (process.platform === 'win32') {
-        await execFileAsync('powershell.exe', [
-          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, 'monitor', 'stop',
-        ], { timeout: 30_000 });
-        await execFileAsync('powershell.exe', [
-          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, 'monitor', 'start',
-        ], { timeout: 30_000 });
-      } else {
-        await execFileAsync(bin, ['monitor', 'stop'], { timeout: 30_000 });
-        await execFileAsync(bin, ['monitor', 'start'], { timeout: 30_000 });
-      }
-      logger.info('monitor restarted');
-    } catch (err) {
-      logger.warn('monitor restart failed', { error: String(err) });
+  private async diagnoseCollectorRestartFailure(
+    attemptStartedAt: number,
+    err: unknown,
+  ): Promise<{
+    detail: string;
+    diagnosis: string;
+    stage: string;
+    breadcrumb: RestartFailureBreadcrumb | null;
+  }> {
+    const detail = describeRestartCommandError(err);
+    if (isRestartCommandTimeout(err)) {
+      writeRestartFailure(this.paths.dataDir, 'collector', {
+        stage: 'timeout',
+        detail: 'restart command killed by timeout before it reported a stage',
+      });
     }
-  }
-
-  private async isPidFileRunning(pidFile: string): Promise<boolean> {
+    let breadcrumb: RestartFailureBreadcrumb | null = null;
     try {
-      const raw = await fs.readFile(pidFile, 'utf-8');
-      const pid = Number(raw.trim());
-      if (!Number.isInteger(pid) || pid <= 0) return false;
-      process.kill(pid, 0);
-      return true;
+      breadcrumb = await readRestartFailure(this.paths.dataDir, 'collector');
+      if (breadcrumb && !isRestartFailureFresh(breadcrumb, attemptStartedAt)) breadcrumb = null;
     } catch {
-      return false;
+      breadcrumb = null;
     }
+    const diagnosis = breadcrumb
+      ? summarizeRestartFailure(breadcrumb)
+      : isRestartCommandTimeout(err)
+        ? 'stage=timeout reason="restart command killed by timeout before it reported a stage"'
+        : 'stage=unknown reason="restart command left no diagnostics"';
+    return {
+      detail,
+      diagnosis,
+      stage: breadcrumb?.stage ?? (isRestartCommandTimeout(err) ? 'timeout' : 'unknown'),
+      breadcrumb,
+    };
+  }
+
+  private formatCommandFailure(error: unknown): string {
+    const err = error as {
+      message?: unknown;
+      stdout?: unknown;
+      stderr?: unknown;
+      code?: unknown;
+      killed?: unknown;
+      signal?: unknown;
+    };
+    const fields = [`error=${String(err?.message ?? error)}`];
+    if (err?.stdout !== undefined && String(err.stdout).trim()) {
+      fields.push(`stdout=${JSON.stringify(String(err.stdout).trim())}`);
+    }
+    if (err?.stderr !== undefined && String(err.stderr).trim()) {
+      fields.push(`stderr=${JSON.stringify(String(err.stderr).trim())}`);
+    }
+    if (err?.code !== undefined) fields.push(`code=${String(err.code)}`);
+    if (err?.killed !== undefined) fields.push(`killed=${String(err.killed)}`);
+    if (err?.signal !== undefined) fields.push(`signal=${String(err.signal)}`);
+    return fields.join(', ');
+  }
+
+  private async scheduleUpdaterRestart(): Promise<void> {
+    // Defer the updater handoff until collector health and success bookkeeping
+    // are complete, otherwise a slow startup could kill this verification.
+    try {
+      await this.runCollectorCommand('schedule-updater-restart');
+    } catch (err) {
+      logger.warn('failed to schedule updater restart', { error: String(err) });
+    }
+  }
+
+  private async readCollectorRuntime(): Promise<CollectorRuntimeRecord | null> {
+    return readJsonFile<CollectorRuntimeRecord>(this.paths.collectorRuntimeFile);
+  }
+
+  private async recoverCurrentCollectorIfNeeded(target: LocalVersion): Promise<boolean> {
+    const runtime = await this.readCollectorRuntime();
+    const healthFailure = this.collectorHealthFailure(
+      runtime,
+      target.version,
+      0,
+      null,
+      target.gitCommit,
+    );
+    if (!healthFailure) return false;
+
+    const livePid = this.liveCollectorPid(runtime);
+    if (livePid !== null) {
+      logger.warn('current version is installed but a stale collector is still alive; restarting it', {
+        targetVersion: target.version,
+        targetGitCommit: target.gitCommit || undefined,
+        collectorPid: livePid,
+        error: healthFailure,
+      });
+      await this.restartCollector(target.version, true, target.gitCommit);
+      return true;
+    }
+
+    logger.warn('current version is installed but collector is not running; attempting start-only recovery', {
+      targetVersion: target.version,
+      targetGitCommit: target.gitCommit || undefined,
+      error: healthFailure,
+    });
+    const recoveryStartedAt = Date.now();
+    await this.startCollectorForRecovery(new Error(healthFailure));
+    await this.waitForCollectorHealth(
+      target.version,
+      recoveryStartedAt,
+      null,
+      target.gitCommit,
+    );
+    logger.info('collector recovered and healthy', { targetVersion: target.version });
+    return true;
+  }
+
+  private liveCollectorPid(runtime: CollectorRuntimeRecord | null): number | null {
+    const pid = runtime?.pid;
+    if (!Number.isInteger(pid) || (pid as number) <= 0) return null;
+    try {
+      process.kill(pid as number, 0);
+      return pid as number;
+    } catch {
+      return null;
+    }
+  }
+
+  private async waitForCollectorHealth(
+    targetVersion: string,
+    notBeforeMs: number,
+    previousPid: number | null,
+    targetGitCommit = '',
+  ): Promise<void> {
+    const deadline = Date.now() + COLLECTOR_HEALTH_TIMEOUT_MS;
+    let lastFailure = 'runtime record not found';
+
+    while (true) {
+      const runtime = await this.readCollectorRuntime();
+      lastFailure = this.collectorHealthFailure(
+        runtime,
+        targetVersion,
+        notBeforeMs,
+        previousPid,
+        targetGitCommit,
+      );
+      if (!lastFailure) return;
+      if (Date.now() >= deadline) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, COLLECTOR_HEALTH_POLL_MS));
+    }
+
+    throw new Error(
+      `collector did not become healthy within ${COLLECTOR_HEALTH_TIMEOUT_MS}ms: ${lastFailure}`,
+    );
+  }
+
+  private collectorHealthFailure(
+    runtime: CollectorRuntimeRecord | null,
+    targetVersion: string,
+    notBeforeMs: number,
+    previousPid: number | null,
+    targetGitCommit = '',
+  ): string {
+    if (!runtime) return 'runtime record not found';
+    if (runtime.status !== 'active') return `runtime status is ${String(runtime.status)}`;
+    if (runtime.packageVersion !== targetVersion) {
+      return `runtime version is ${String(runtime.packageVersion)}, expected ${targetVersion}`;
+    }
+    if (targetGitCommit && runtime.gitCommit !== targetGitCommit) {
+      return `runtime git commit is ${String(runtime.gitCommit)}, expected ${targetGitCommit}`;
+    }
+
+    const updatedAtMs = typeof runtime.updatedAt === 'string' ? Date.parse(runtime.updatedAt) : NaN;
+    if (!Number.isFinite(updatedAtMs) || updatedAtMs < notBeforeMs) {
+      return 'runtime record predates restart';
+    }
+
+    const pid = runtime.pid;
+    if (!Number.isInteger(pid) || (pid as number) <= 0) return 'runtime PID is invalid';
+    if (previousPid !== null && pid === previousPid) return 'collector PID did not change';
+    if (this.liveCollectorPid(runtime) === null) return `collector PID ${String(pid)} is not alive`;
+    return '';
   }
 
   private async gcOldVersions(): Promise<void> {
     const { versionsDir, currentFile, previousFile } = this.paths;
     try {
       const currentName = await this.readPointerFile(currentFile);
+      if (!currentName) {
+        logger.debug('skipping version gc: current pointer missing');
+        return;
+      }
       const previousName = await this.readPointerFile(previousFile);
 
       let entries: string[];
@@ -749,14 +1419,23 @@ export class Updater {
         return;
       }
 
+      const staleVersions: Array<{ entry: string; fullPath: string; mtimeMs: number }> = [];
       for (const entry of entries) {
         if (entry === currentName || entry === previousName) continue;
         const fullPath = path.join(versionsDir, entry);
         const stat = await fs.stat(fullPath).catch(() => null);
         if (stat?.isDirectory()) {
-          logger.info('removing old version', { dir: entry });
-          await fs.rm(fullPath, { recursive: true, force: true });
+          staleVersions.push({ entry, fullPath, mtimeMs: stat.mtimeMs ?? Number.MAX_SAFE_INTEGER });
         }
+      }
+
+      staleVersions.sort((a, b) => a.mtimeMs - b.mtimeMs || a.entry.localeCompare(b.entry));
+      for (const version of staleVersions.slice(0, MAX_VERSION_GC_REMOVALS_PER_CHECK)) {
+        logger.info('removing old version', {
+          dir: version.entry,
+          remaining: staleVersions.length - 1,
+        });
+        await fs.rm(version.fullPath, { recursive: true, force: true });
       }
     } catch (err) {
       logger.debug('gc failed', { error: String(err) });

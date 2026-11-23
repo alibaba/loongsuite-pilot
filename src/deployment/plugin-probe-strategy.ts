@@ -24,15 +24,21 @@ export interface PluginProbeDeployOptions {
   runtimeOptions?: Record<string, string | boolean>;
 }
 
+export interface PluginProbeStrategyOptions {
+  platform?: NodeJS.Platform;
+}
+
 export class PluginProbeStrategy implements DeployStrategy {
   private readonly dataDir: string;
   private readonly pilotDir: string;
   private readonly workerSupervisor: WorkerManifestSupervisor;
+  private readonly platform: NodeJS.Platform;
 
-  constructor(dataDir: string, pilotDir: string) {
+  constructor(dataDir: string, pilotDir: string, options: PluginProbeStrategyOptions = {}) {
     this.dataDir = dataDir;
     this.pilotDir = pilotDir;
-    this.workerSupervisor = new WorkerManifestSupervisor();
+    this.platform = options.platform ?? process.platform;
+    this.workerSupervisor = new WorkerManifestSupervisor({ platform: this.platform });
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
@@ -82,15 +88,32 @@ export class PluginProbeStrategy implements DeployStrategy {
       const destDir = config.source.destDir;
       const existingRoot = await this.resolvePackageRoot(destDir);
 
-      await this.workerSupervisor.stopIfPresent(def.id, destDir, {
+      const stopped = await this.workerSupervisor.stopIfPresent(def.id, destDir, {
         instance: options.instance,
         runtimeOptions: options.runtimeOptions,
       });
+      if (!stopped && def.localWorkerRuntime && options.instance) {
+        logger.error('local worker stop failed; bundle replacement aborted', {
+          agentId: def.id,
+          instanceId: options.instance.id,
+          destDir,
+        });
+        return {
+          success: false,
+          agentId: def.id,
+          deployMode: 'plugin-probe',
+          error: 'local worker stop failed; bundle replacement aborted',
+        };
+      }
 
       const existingUninstallScript = existingRoot ? path.join(existingRoot, 'scripts', 'uninstall.sh') : '';
       if (existingUninstallScript && await fileExists(existingUninstallScript)) {
-        logger.info('running uninstall script before update', { agentId: def.id });
-        await this.runScript(existingUninstallScript, existingRoot!, def.id);
+        if (this.platform === 'win32' && def.localWorkerRuntime) {
+          logger.info('skipping Unix uninstall script for Windows local worker bundle', { agentId: def.id });
+        } else {
+          logger.info('running uninstall script before update', { agentId: def.id });
+          await this.runScript(existingUninstallScript, existingRoot!, def.id);
+        }
       }
 
       const acquired = await this.acquirePackageIntoDest(config.source);
@@ -102,9 +125,13 @@ export class PluginProbeStrategy implements DeployStrategy {
       const installCwd = packageRoot ?? destDir;
       const installScript = await this.resolveInstallScript(def.id, installCwd);
       if (installScript) {
-        const ok = await this.runScript(installScript, installCwd, def.id);
-        if (!ok) {
-          return { success: false, agentId: def.id, deployMode: 'plugin-probe', error: 'install script failed' };
+        if (this.platform === 'win32' && def.localWorkerRuntime && path.extname(installScript).toLowerCase() === '.sh') {
+          logger.info('skipping Unix install script for Windows local worker bundle', { agentId: def.id });
+        } else {
+          const ok = await this.runScript(installScript, installCwd, def.id);
+          if (!ok) {
+            return { success: false, agentId: def.id, deployMode: 'plugin-probe', error: 'install script failed' };
+          }
         }
       } else {
         logger.debug('no install script found, skipping', { agentId: def.id });
@@ -120,7 +147,7 @@ export class PluginProbeStrategy implements DeployStrategy {
         const workerStarted = await this.workerSupervisor.startIfPresent(
           def.id,
           destDir,
-          this.buildScriptEnv(def.id),
+          this.buildScriptEnv(def.id, !!def.localWorkerRuntime),
           {
             instance: options.instance,
             runtimeOptions: options.runtimeOptions,
@@ -128,6 +155,14 @@ export class PluginProbeStrategy implements DeployStrategy {
         );
         if (!workerStarted) {
           logger.warn('plugin deployed but worker failed to start', { agentId: def.id });
+          if (def.localWorkerRuntime && options.instance) {
+            return {
+              success: false,
+              agentId: def.id,
+              deployMode: 'plugin-probe',
+              error: 'local worker manifest failed to start',
+            };
+          }
         }
       }
 
@@ -266,14 +301,18 @@ export class PluginProbeStrategy implements DeployStrategy {
     return undefined;
   }
 
-  private buildScriptEnv(agentId: string): Record<string, string> {
+  private buildScriptEnv(agentId: string, localWorker = false): Record<string, string> {
     const nodeBin = process.execPath;
     const nodeDir = path.dirname(nodeBin);
-    const npmBin = path.join(nodeDir, 'npm');
+    const npmBin = path.join(
+      nodeDir,
+      localWorker && this.platform === 'win32' ? 'npm.cmd' : 'npm',
+    );
     const existingPath = process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin';
+    const delimiter = localWorker ? (this.platform === 'win32' ? ';' : ':') : ':';
     const augmentedPath = existingPath.includes(nodeDir)
       ? existingPath
-      : `${nodeDir}:${existingPath}`;
+      : `${nodeDir}${delimiter}${existingPath}`;
 
     return {
       ...process.env as Record<string, string>,

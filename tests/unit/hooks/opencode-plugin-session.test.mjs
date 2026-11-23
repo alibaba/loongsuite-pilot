@@ -1,12 +1,59 @@
-import { describe, expect, it, beforeEach } from 'vitest';
-import { createRequire } from 'node:module';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+vi.mock('../../../assets/plugins/shared/raw-jsonl-writer.mjs', () => ({
+  appendRawJsonl: (file, data) => fs.appendFileSync(file, data),
+}));
+import {
+  INVOCATION_SESSION_ID_FIELD,
+  INVOCATION_USER_ID_FIELD,
+} from '../../../assets/hooks/shared/resource-context.mjs';
 
 const PLUGIN_PATH = path.resolve(
   fileURLToPath(import.meta.url),
   '../../../../assets/plugins/opencode/plugin.mjs',
 );
+
+const FIXTURE_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  './mimo-code/fixtures/plugin_events.jsonl',
+);
+
+async function replayPluginFixture() {
+  const capture = [];
+  vi.resetModules();
+  vi.spyOn(fs, 'appendFileSync').mockImplementation((_target, data) => {
+    capture.push(JSON.parse(String(data)));
+  });
+  vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
+  const plugin = (await import(PLUGIN_PATH)).default;
+  const hooks = await plugin.server({ directory: os.tmpdir() }, {});
+  const events = fs.readFileSync(FIXTURE_PATH, 'utf8')
+    .split('\n')
+    .filter(line => line.trim())
+    .map(line => JSON.parse(line));
+  const userInfo = events.find(event =>
+    event.type === 'message.updated'
+    && event.properties?.info?.role === 'user')?.properties.info;
+  const userText = events.find(event =>
+    event.type === 'message.part.updated'
+    && event.properties?.part?.type === 'text'
+    && event.properties.part.messageID === userInfo?.id)?.properties.part.text;
+  await hooks['chat.message'](
+    { sessionID: userInfo.sessionID, agent: userInfo.agent },
+    {
+      message: {
+        agent: userInfo.agent,
+        model: userInfo.model,
+      },
+      parts: [{ type: 'text', text: userText }],
+    },
+  );
+  for (const event of events) await hooks.event({ event });
+  return capture;
+}
 
 /**
  * Extract session management functions from plugin.mjs for unit testing.
@@ -66,6 +113,11 @@ describe('opencode plugin session turnSeq persistence', () => {
 
   beforeEach(() => {
     mgr = createSessionManager();
+  });
+
+  afterEach(() => {
+    delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+    vi.restoreAllMocks();
   });
 
   it('restores turnSeq after session.idle clears the session', () => {
@@ -138,5 +190,61 @@ describe('opencode plugin session turnSeq persistence', () => {
     mgr.clearSession('ses_X');
     expect(mgr.simulateTurn('ses_X')).toBe('ses_X:t3');
     expect(mgr.simulateTurn('ses_Y')).toBe('ses_Y:t2');
+  });
+
+  it('emits the first full input as a delta baseline for later LLM steps', async () => {
+    const records = await replayPluginFixture();
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+
+    expect(requests).toHaveLength(5);
+    expect(requests[0]['gen_ai.input.messages']).toBeTruthy();
+    expect(requests[0]['gen_ai.input.messages_delta'])
+      .toEqual(requests[0]['gen_ai.input.messages']);
+    expect(requests[1]['gen_ai.input.messages']).toBeUndefined();
+    expect(requests[1]['gen_ai.input.messages_delta']).toBeTruthy();
+  });
+
+  it.each(['custom-path', 'bom'])('omits message and tool bodies with %s config', async (kind) => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-opencode-policy-'));
+    const previous = process.env.LOONGSUITE_PILOT_DATA_DIR;
+    const previousConfig = process.env.AGENT_DATA_COLLECTION_CONFIG;
+    const configPath = path.join(dataDir, kind === 'custom-path' ? 'custom.json' : 'config.json');
+    fs.writeFileSync(configPath, (kind === 'bom' ? '\uFEFF' : '') + JSON.stringify({
+      agents: { opencode: { captureMessageContent: false } },
+    }));
+    process.env.LOONGSUITE_PILOT_DATA_DIR = dataDir;
+    process.env.AGENT_DATA_COLLECTION_CONFIG = configPath;
+    try {
+      const records = await replayPluginFixture();
+      expect(records.filter(record => record['event.name'] === 'llm.request')).toHaveLength(5);
+      for (const record of records) {
+        for (const field of ['gen_ai.input.messages', 'gen_ai.input.messages_delta',
+          'gen_ai.output.messages', 'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result',
+          'gen_ai.system_instructions', 'error.message']) {
+          expect(record).not.toHaveProperty(field);
+        }
+      }
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
+      else process.env.LOONGSUITE_PILOT_DATA_DIR = previous;
+      if (previousConfig === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+      else process.env.AGENT_DATA_COLLECTION_CONFIG = previousConfig;
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts invocation-scoped GenAI identity from env', async () => {
+    process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES =
+      'gen_ai.session.id=env-session,gen_ai.user.id=env-user,gen_ai.agent.name=blocked';
+
+    const records = await replayPluginFixture();
+
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record[INVOCATION_SESSION_ID_FIELD]).toBe('env-session');
+      expect(record[INVOCATION_USER_ID_FIELD]).toBe('env-user');
+      expect(record['gen_ai.session.id']).not.toBe('env-session');
+      expect(record['gen_ai.agent.name']).not.toBe('blocked');
+    }
   });
 });

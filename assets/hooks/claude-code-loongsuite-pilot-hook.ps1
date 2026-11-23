@@ -1,9 +1,9 @@
-# Claude Code hook entrypoint (Windows) — delegates to claude-code-hook-processor.mjs.
+# Claude Code hook entrypoint (Windows) - delegates to claude-code-hook-processor.mjs.
 #
 # Usage (registered in ~/.claude/settings.json by pilot HookStrategy):
 #   powershell -File $PILOT_DATA/hooks/claude-code-loongsuite-pilot-hook.ps1 <subcommand>
 #
-# Subcommand: stop / subagent-start / subagent-stop
+# Subcommand: pre-tool-use / stop / stop-failure / subagent-start / subagent-stop
 #
 # Fail-open: any error outputs "{}" and exits 0.
 
@@ -15,7 +15,7 @@ $Processor = Join-Path $ScriptDir "claude-code-hook-processor.mjs"
 $Subcommand = if ($args.Count -gt 0) { $args[0] } else { "unknown" }
 
 # Only process registered subcommands
-if ($Subcommand -notin @("stop", "subagent-start", "subagent-stop")) {
+if ($Subcommand -notin @("pre-tool-use", "stop", "stop-failure", "subagent-start", "subagent-stop")) {
     Write-Output $EMPTY_RESULT
     exit 0
 }
@@ -32,7 +32,12 @@ function Log-Error {
         $time = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
         $escapedMsg = $Message -replace '\\', '\\\\' -replace '"', '\"'
         $line = "{`"time`":`"$time`",`"gen_ai.agent.type`":`"claude-code`",`"stage`":`"$Stage`",`"error.type`":`"ps1_$Stage`",`"error.message`":`"$escapedMsg`"}"
-        Add-Content -Path $file -Value $line
+        # Explicit UTF8 and -LiteralPath: Add-Content defaults to the ANSI codepage, so a
+        # Chinese username in a path or message lands as mojibake -- and node's
+        # shared/error-logger.mjs appends UTF-8 to this very file, making it mixed-encoding.
+        # A BOM on the first line is harmless here: nothing machine-parses this log (the
+        # retention service only deletes it by age). Matches codex-loongsuite-pilot-hook.ps1.
+        Add-Content -LiteralPath $file -Value $line -Encoding UTF8
     } catch {}
 }
 
@@ -45,9 +50,32 @@ if (-not (Test-Path $Processor)) {
 
 $MIN_NODE_MAJOR = 18
 
+# Managed runtimes live at <pilot-dir>\runtime\node-v<x>.<y>.<z>\node.exe (win zip layout)
+# or ...\node-v<x>.<y>.<z>\bin\node.exe, extracted by the installer only after it verified
+# SHASUMS256 and probed the binary itself, so the directory name is authoritative. Reading
+# the major from the path skips a `node --version` launch that would otherwise run on the
+# user's interactive path for every single event. Returns $null for anything that is not a
+# managed runtime, which still gets probed. Split-Path/-match keep this CLM-safe.
+function Get-ManagedNodeMajor {
+    param([string]$bin)
+    if (-not $bin) { return $null }
+    $dir = Split-Path $bin -Parent
+    if (-not $dir) { return $null }
+    if ((Split-Path $dir -Leaf) -eq 'bin') {
+        $dir = Split-Path $dir -Parent
+        if (-not $dir) { return $null }
+    }
+    $parent = Split-Path $dir -Parent
+    if (-not $parent -or (Split-Path $parent -Leaf) -ne 'runtime') { return $null }
+    if ((Split-Path $dir -Leaf) -match '^node-v([0-9]+)') { return [int]$Matches[1] }
+    return $null
+}
+
 function Test-NodeSuitable {
     param([string]$bin)
     if (-not (Test-Path $bin)) { return $false }
+    $managedMajor = Get-ManagedNodeMajor $bin
+    if ($null -ne $managedMajor) { return $managedMajor -ge $MIN_NODE_MAJOR }
     try {
         $ver = & $bin --version 2>$null
         if (-not $ver) { return $false }
@@ -59,7 +87,9 @@ function Test-NodeSuitable {
 function Resolve-NodeBin {
     $pinFile = Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
     if (Test-Path $pinFile) {
-        $pinned = (Get-Content $pinFile -ErrorAction SilentlyContinue).Trim()
+        # -Encoding UTF8 + BOM strip: the pin file can hold a non-ASCII path and 5.1
+        # defaults Get-Content to ANSI, which turns it into "??".
+        $pinned = ([string](Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
         if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
     }
 
@@ -100,51 +130,16 @@ if (-not [Console]::IsInputRedirected) {
 }
 
 try {
-    # Read stdin as raw bytes to avoid PowerShell encoding issues (GB2312/ASCII mangles UTF-8)
-    $stdinStream = [Console]::OpenStandardInput()
-    $ms = New-Object System.IO.MemoryStream
-    $stdinStream.CopyTo($ms)
-    $rawBytes = $ms.ToArray()
-    $ms.Dispose()
-
-    # Strip UTF-8 BOM (EF BB BF) before any encoding fixup
-    if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
-        $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
-    }
-
-    # Fix Cursor's UTF-8→GBK double-encoding on Chinese Windows.
-    if ($rawBytes.Length -gt 2) {
-        try {
-            $utf8    = [System.Text.Encoding]::UTF8
-            $gbk     = [System.Text.Encoding]::GetEncoding(936)
-            $garbled = $utf8.GetString($rawBytes)
-            $recovered = $gbk.GetBytes($garbled)
-
-            $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
-            [void]$strictUtf8.GetString($recovered)
-
-            $rawBytes = $recovered
-        } catch {}
-    }
-
-    if ($rawBytes.Length -eq 0) {
-        $result = & $nodeBin $Processor $Subcommand 2>$null
-    } else {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $nodeBin
-        $psi.Arguments = "`"$Processor`" $Subcommand"
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardInput = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $false
-        $psi.CreateNoWindow = $true
-
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        $proc.StandardInput.BaseStream.Write($rawBytes, 0, $rawBytes.Length)
-        $proc.StandardInput.Close()
-        $result = $proc.StandardOutput.ReadToEnd()
-        $proc.WaitForExit()
-    }
+    # CLM/WDAC-safe passthrough: node inherits this process's stdin (fd0) and
+    # reads it directly; PowerShell never touches the bytes. The old code used
+    # [Console]::OpenStandardInput / MemoryStream / ProcessStartInfo, whose .NET
+    # calls throw under Constrained Language Mode (WDAC/Device Guard) and silently
+    # drop telemetry. BOM stripping and the Chinese UTF-8->GBK fixup now live in
+    # node (shared/decode-payload.mjs).
+    # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 parses a BOM-less
+    # script using the system ANSI code page (GBK/936 on Chinese Windows); any
+    # non-ASCII byte here can corrupt parsing and abort the whole script.
+    $result = & $nodeBin $Processor $Subcommand 2>$null
     if ($result) { Write-Output $result } else { Write-Output $EMPTY_RESULT }
 } catch {
     Write-Error "[claude-code-hook] processor failed (subcommand=$Subcommand)"

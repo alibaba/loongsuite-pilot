@@ -1,0 +1,2148 @@
+// Copyright 2026 Alibaba Group Holding Limited
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * plugin.test.mjs — OpenClaw plugin.mjs stateful pipeline integration test.
+ *
+ * Replay researcher fixtures (pilot-probe-events-smoke.jsonl + cp2) through
+ * the real plugin entry (register(api) + 15 api.on handlers) and assert the
+ * JSONL output is canonical event_t with correct cross-hook state:
+ *   - llm_input data attaches to first model_call_started's llm.request
+ *   - each AssistantMessage contributes its own usage/output/finish reason
+ *   - llm_output remains a run-level terminal checksum, not an LLM response
+ *   - tool calls inherit the current ReAct step.id (most recent callId)
+ *   - turn.id (runId) and trace_id stay stable across all events in a run
+ *
+ * Fixture source: issue AGE-1304 attachments from researcher CP1 probe.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import { fakeStreamingFetch } from '../../../helpers/openclaw-stream.mjs';
+import {
+  INVOCATION_SESSION_ID_FIELD,
+  INVOCATION_USER_ID_FIELD,
+} from '../../../../assets/hooks/shared/resource-context.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PLUGIN_PATH = process.env.PILOT_OPENCLAW_TEST_PLUGIN
+  || path.resolve(__dirname, '../../../../assets/plugins/openclaw/plugin.mjs');
+const PLUGIN_PACKAGE_PATH = path.resolve(__dirname, '../../../../assets/plugins/openclaw/package.json');
+const OPENCLAW_AGENT_DEF_PATH = path.resolve(__dirname, '../../../../agents.d/openclaw.json');
+const FIXTURES = path.join(__dirname, 'fixtures');
+
+function readJsonl(name) {
+  const text = fs.readFileSync(path.join(FIXTURES, name), 'utf-8');
+  return text.split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
+}
+
+let tmpDir;
+let pilotDataDir;
+let pluginLoadSequence = 0;
+let previousWorkerName;
+let previousConfigPath;
+let observeStream;
+
+beforeEach(async () => {
+  previousWorkerName = process.env.AGENTTEAMS_WORKER_NAME;
+  delete process.env.AGENTTEAMS_WORKER_NAME;
+  globalThis[Symbol.for('loongsuite-pilot.openclaw.first-token')]?.dispose();
+  observeStream = fakeStreamingFetch();
+  tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'pilot-openclaw-'));
+  pilotDataDir = path.join(tmpDir, 'pilot-data');
+  fs.mkdirSync(path.join(pilotDataDir, 'logs', 'openclaw'), { recursive: true });
+  previousConfigPath = process.env.AGENT_DATA_COLLECTION_CONFIG;
+  process.env.AGENT_DATA_COLLECTION_CONFIG = path.join(pilotDataDir, 'config.json');
+  process.env.LOONGSUITE_PILOT_DATA_DIR = pilotDataDir;
+  process.env.LOONGSUITE_USER_ID = 'test-user';
+});
+
+afterEach(async () => {
+  vi.useRealTimers();
+  delete process.env.LOONGSUITE_PILOT_DATA_DIR;
+  delete process.env.LOONGSUITE_USER_ID;
+  delete process.env.LOONGSUITE_PILOT_DEBUG;
+  delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  if (previousConfigPath === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+  else process.env.AGENT_DATA_COLLECTION_CONFIG = previousConfigPath;
+  if (previousWorkerName === undefined) delete process.env.AGENTTEAMS_WORKER_NAME;
+  else process.env.AGENTTEAMS_WORKER_NAME = previousWorkerName;
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  globalThis[Symbol.for('loongsuite-pilot.openclaw.first-token')]?.dispose();
+  await fs.promises.rm(tmpDir, { recursive: true, force: true });
+});
+
+async function loadPlugin() {
+  // Load the deployed zero-dependency module through Node's native loader so
+  // the test exercises the same runtime path OpenClaw uses.
+  const mod = await import(/* @vite-ignore */ `${PLUGIN_PATH}?test=${++pluginLoadSequence}`);
+  return mod.default;
+}
+
+function registerPlugin(plugin, pluginConfig = {}) {
+  const handlers = {};
+  const api = {
+    pluginConfig,
+    registrationMode: 'full',
+    runtime: { version: '2026.6.10' },
+    on: (name, handler) => { handlers[name] = handler; },
+  };
+  plugin.register(api);
+  return handlers;
+}
+
+function readOutputRecords() {
+  const logFile = path.join(pilotDataDir, 'logs', 'openclaw', `openclaw-${todayStamp()}.jsonl`);
+  const text = fs.readFileSync(logFile, 'utf-8');
+  return text.split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
+}
+
+it('makes each model SpanID readable before completion and reuses it for its provider response', async () => {
+  const handlers = registerPlugin(await loadPlugin());
+  const ctx = { runId: 'realtime-run', sessionId: 'realtime-session', sessionKey: 'agent:main:realtime', agentId: 'main' };
+  for (let i = 1; i <= 2; i++) {
+    const callId = `${ctx.runId}:model:${i}`;
+    handlers.model_call_started({ ...ctx, callId, provider: 'test', model: 'test-model' }, ctx);
+    const read = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import fs from 'node:fs';
+      const rows = fs.readdirSync(process.argv[1]).filter(n => n.endsWith('.jsonl'))
+        .flatMap(n => fs.readFileSync(process.argv[1] + '/' + n, 'utf8').trim().split('\\n').map(JSON.parse));
+      console.log(JSON.stringify(rows));
+    `, path.join(pilotDataDir, 'logs/openclaw')], { encoding: 'utf8' });
+    expect(read.status, read.stderr).toBe(0);
+    const request = JSON.parse(read.stdout).at(-1);
+    expect(request['event.name']).toBe('llm.request');
+    expect(request.span_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(request.span_id).not.toBe('0'.repeat(16));
+    handlers.model_call_ended({ ...ctx, callId, outcome: 'completed', durationMs: 3 }, ctx);
+    handlers.before_message_write({ sessionKey: ctx.sessionKey, message: {
+      role: 'assistant', content: [{ type: 'text', text: 'done' }], provider: 'test', model: 'test-model',
+      usage: { input: 2, output: 1 }, stopReason: 'stop', responseId: `provider-${i}`,
+    } }, ctx);
+    const response = readOutputRecords().find(r => r['event.name'] === 'llm.response' && r['gen_ai.response.id'] === `provider-${i}`);
+    expect(response.span_id).toBe(request.span_id);
+  }
+  expect(new Set(readOutputRecords().filter(r => r['event.name'] === 'llm.request').map(r => r.span_id)).size).toBe(2);
+});
+
+async function replay(plugin, envelopes, { pluginConfig = {}, contextPatch } = {}) {
+  const handlers = registerPlugin(plugin, pluginConfig);
+
+  // Agent/model/tool hooks receive PluginHookAgentContext with the run/session
+  // identifiers. OpenClaw's synchronous persistence hooks intentionally do
+  // not receive runId or sessionId; they only carry sessionKey for correlation.
+  const knownRun = envelopes.find((e) => e.event?.runId)?.event?.runId;
+  const knownSession = envelopes.find((e) => e.event?.sessionId)?.event?.sessionId;
+  const knownSessionKey = envelopes.find((e) => e.event?.sessionKey)?.event?.sessionKey;
+  const syncPersistenceHooks = new Set(['tool_result_persist', 'before_message_write']);
+
+  const logFile = path.join(pilotDataDir, 'logs', 'openclaw', `openclaw-${todayStamp()}.jsonl`);
+  try { fs.writeFileSync(logFile, ''); } catch {}
+  for (const env of envelopes) {
+    const h = handlers[env.hook];
+    if (!h) continue;
+    const ctx = syncPersistenceHooks.has(env.hook) ? {
+      agentId: 'main',
+      sessionKey: env.event?.sessionKey || knownSessionKey,
+    } : {
+      agentId: 'main',
+      sessionId: env.event?.sessionId || knownSession,
+      runId: env.event?.runId || knownRun,
+      sessionKey: env.event?.sessionKey || knownSessionKey,
+    };
+    if (contextPatch) Object.assign(ctx, contextPatch(env) || {});
+    await h(env.event, ctx);
+  }
+  return readOutputRecords();
+}
+
+function todayStamp() {
+  const d = new Date();
+  return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
+}
+
+describe('OpenClaw plugin stateful pipeline', () => {
+  it('caches the native routing key per run, never from a parent or a session UUID', async () => {
+    const handlers = registerPlugin(await loadPlugin());
+    for (const [runId, sessionId, sessionKey] of [
+      ['a', 'uuid-a', 'agent:main:shared'], ['b', 'uuid-b', 'agent:main:other'],
+      ['reset', 'uuid-reset', 'agent:main:shared'], ['child', 'uuid-child', undefined],
+    ]) {
+      await handlers.llm_input({ runId, prompt: 'test' }, { runId, sessionId, sessionKey });
+    }
+    for (const runId of ['a', 'b', 'reset', 'child']) {
+      await handlers.model_call_started({ runId, callId: runId, model: 'test' }, { runId });
+    }
+    const result = readOutputRecords().filter(r => r['event.name'] === 'llm.request');
+    expect(result).toHaveLength(4);
+    expect(result.map(r => r['agent.openclaw.session_key'])).toEqual([
+      'agent:main:shared', 'agent:main:other', 'agent:main:shared', undefined,
+    ]);
+    expect(result.map(r => r['gen_ai.session.id'])).toEqual(['uuid-a', 'uuid-b', 'uuid-reset', 'uuid-child']);
+  });
+
+  it.each(['x'.repeat(1025), 'bad\nkey', {}, ' '])('does not export malformed native keys %#', async sessionKey => {
+    const handlers = registerPlugin(await loadPlugin());
+    await handlers.llm_input({ runId: 'a', prompt: 'test', sessionKey }, { runId: 'a', sessionId: 'uuid-a' });
+    await handlers.model_call_started({ runId: 'a', callId: 'a' }, { runId: 'a' });
+    expect(readOutputRecords().every(r => r['agent.openclaw.session_key'] === undefined)).toBe(true);
+  });
+
+  it('marks conflicting native sources instead of choosing the first key', async () => {
+    const handlers = registerPlugin(await loadPlugin());
+    await handlers.llm_input({ runId: 'a', sessionKey: 'agent:main:a' }, { runId: 'a', sessionKey: 'agent:main:b' });
+    await handlers.model_call_started({ runId: 'a', callId: 'a' }, { runId: 'a' });
+    for (const record of readOutputRecords()) {
+      expect(record['agent.openclaw.session_key']).toBeUndefined();
+      expect(record['agent.openclaw.session_key.ambiguous']).toBe(true);
+    }
+  });
+
+  it('delegates the minimum host-version check to OpenClaw without a CLI command', () => {
+    const packageJson = JSON.parse(fs.readFileSync(PLUGIN_PACKAGE_PATH, 'utf-8'));
+    const agentDefinition = JSON.parse(fs.readFileSync(OPENCLAW_AGENT_DEF_PATH, 'utf-8'));
+
+    expect(packageJson.openclaw.install.minHostVersion).toBe('>=2026.3.8');
+    expect(agentDefinition.pluginInject).not.toHaveProperty('versionCheck');
+    expect(agentDefinition.pluginInject.pluginSpec).toBe(
+      'file://$PILOT_DATA/plugins/openclaw',
+    );
+    expect(agentDefinition.pluginInject.replaceSpecs).toContain(
+      '$PILOT_DATA/plugins/openclaw/plugin.mjs',
+    );
+    expect(agentDefinition.pluginInject.replaceSpecs).not.toContain(
+      'plugins/openclaw/plugin.mjs',
+    );
+  });
+
+  it('observes agent completion without enabling the host final-answer rewrite gate', async () => {
+    const plugin = await loadPlugin();
+    const registered = new Set();
+    const api = {
+      registrationMode: 'full',
+      runtime: { version: '2026.5.12' },
+      on: (name) => registered.add(name),
+    };
+    plugin.register(api);
+    expect(registered.size).toBe(18);
+    expect(registered.has('cron_changed')).toBe(true);
+    expect(registered.has('session_start')).toBe(true);
+    expect(registered.has('session_end')).toBe(true);
+    expect(registered.has('before_agent_run')).toBe(true);
+    expect(registered.has('agent_end')).toBe(true);
+    expect(registered.has('llm_input')).toBe(true);
+    expect(registered.has('llm_output')).toBe(true);
+    expect(registered.has('model_call_started')).toBe(true);
+    expect(registered.has('model_call_ended')).toBe(true);
+    expect(registered.has('before_tool_call')).toBe(true);
+    expect(registered.has('after_tool_call')).toBe(true);
+    expect(registered.has('tool_result_persist')).toBe(true);
+    expect(registered.has('before_message_write')).toBe(true);
+    // OpenClaw 2026.6.5 buffers all assistant delivery merely when this hook
+    // has a listener, even if the listener never asks to revise the answer.
+    expect(registered.has('before_agent_finalize')).toBe(false);
+    expect(registered.has('before_agent_reply')).toBe(true);
+    expect(registered.has('before_model_resolve')).toBe(true);
+    expect(registered.has('before_prompt_build')).toBe(true);
+  });
+
+  it('skips host validation during CLI metadata discovery', async () => {
+    const plugin = await loadPlugin();
+    const logger = { error: vi.fn() };
+    const on = vi.fn();
+
+    expect(() => plugin.register({
+      registrationMode: 'cli-metadata',
+      runtime: {},
+      logger,
+      on,
+    })).not.toThrow();
+
+    expect(on).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  it('retains the version guard for legacy APIs without a registration mode', async () => {
+    const plugin = await loadPlugin();
+    const logger = { error: vi.fn() };
+    const on = vi.fn();
+
+    plugin.register({
+      runtime: { version: '2026.3.2' },
+      logger,
+      on,
+    });
+
+    expect(on).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledOnce();
+    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.3.8 is required');
+  });
+
+  it('registers legacy hooks for the packaged 3.8 unknown-runtime regression', async () => {
+    const packageRoot = path.join(tmpDir, 'host', 'node_modules', 'openclaw');
+    fs.mkdirSync(path.join(packageRoot, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(packageRoot, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.3.8' }));
+    const entry = path.join(packageRoot, 'dist', 'entry.js');
+    fs.writeFileSync(entry, '');
+    const previous = process.argv;
+    process.argv = [previous[0], entry];
+    try {
+      const plugin = await loadPlugin();
+      const registered = new Set();
+      const logger = { error: vi.fn() };
+      plugin.register({ runtime: { version: 'unknown' }, logger, on: name => registered.add(name) });
+      expect(registered.size).toBe(9);
+      expect(registered.has('before_message_write')).toBe(true);
+      expect(registered.has('model_call_started')).toBe(false);
+      expect(logger.error).not.toHaveBeenCalled();
+    } finally { process.argv = previous; }
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['unparseable', 'not-a-version'],
+    ['too old', '2026.3.2'],
+    ['prerelease below the stable floor', '2026.3.8-beta.1'],
+  ])('does not register hooks when the host version is %s', async (_label, version) => {
+    const plugin = await loadPlugin();
+    const registered = new Set();
+    const logger = { error: vi.fn() };
+    const api = {
+      logger,
+      registrationMode: 'full',
+      runtime: version === undefined ? {} : { version },
+      on: (name) => registered.add(name),
+    };
+
+    expect(() => plugin.register(api)).not.toThrow();
+    expect(registered.size).toBe(0);
+    expect(logger.error).toHaveBeenCalledOnce();
+    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.3.8 is required');
+  });
+
+  it.each(['2026.5.12', '2026.5.12-1', 'v2026.6.10'])(
+    'registers hooks on supported host version %s',
+    async (version) => {
+      const plugin = await loadPlugin();
+      const registered = new Set();
+
+      plugin.register({
+        runtime: { version },
+        on: (name) => registered.add(name),
+      });
+
+      expect(registered.size).toBe(18);
+    },
+  );
+
+  it('fails open with a clear diagnostic when the host plugin API is unsupported', async () => {
+    const plugin = await loadPlugin();
+    const logger = { error: vi.fn() };
+
+    expect(() => plugin.register({ logger })).not.toThrow();
+    expect(logger.error).toHaveBeenCalledOnce();
+    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.3.8 is required');
+  });
+
+  it('reports an unwritable plugin log directory once when scoped debug is enabled', async () => {
+    const plugin = await loadPlugin();
+    const invalidDataDir = path.join(tmpDir, 'not-a-directory');
+    fs.writeFileSync(invalidDataDir, 'file blocks nested log directory creation');
+    process.env.LOONGSUITE_PILOT_DATA_DIR = invalidDataDir;
+    process.env.LOONGSUITE_PILOT_DEBUG = 'true';
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+
+    const handlers = registerPlugin(plugin);
+    handlers.session_start(
+      { sessionId: 'debug-session' },
+      { sessionId: 'debug-session', sessionKey: 'agent:main:debug' },
+    );
+
+    expect(debug).toHaveBeenCalledTimes(1);
+    expect(debug.mock.calls[0][0]).toContain('[loongsuite-pilot-openclaw] register:');
+  });
+
+  it('emits canonical event_t records for the smoke fixture (single LLM)', async () => {
+    const plugin = await loadPlugin();
+    const envelopes = readJsonl('pilot-probe-events-smoke.jsonl');
+    const records = await replay(plugin, envelopes);
+    const eventNames = records.map((r) => r['event.name']);
+    // The smoke run has exactly one canonical response, emitted from the
+    // AssistantMessage that carries per-call output, stopReason and usage.
+    expect(eventNames.filter((n) => n === 'llm.request').length).toBe(1);
+    expect(eventNames.filter((n) => n === 'llm.response').length).toBe(1);
+    expect(eventNames.includes('other')).toBe(true);
+  });
+
+  it('accepts invocation-scoped GenAI identity from env', async () => {
+    process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES =
+      'gen_ai.session.id=env-session,gen_ai.user.id=env-user,gen_ai.agent.name=blocked';
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'));
+
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record[INVOCATION_SESSION_ID_FIELD]).toBe('env-session');
+      expect(record[INVOCATION_USER_ID_FIELD]).toBe('env-user');
+      expect(record['gen_ai.session.id']).not.toBe('env-session');
+      expect(record['gen_ai.agent.name']).not.toBe('blocked');
+    }
+  });
+
+  it('uses before_agent_run senderId as the invocation user identity', async () => {
+    delete process.env.LOONGSUITE_USER_ID;
+    fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({
+      userId: 'configured-user',
+    }));
+    const envelopes = readJsonl('pilot-probe-events-smoke.jsonl').map(envelope =>
+      envelope.hook === 'before_agent_run'
+        ? {
+            ...envelope,
+            event: {
+              ...envelope.event,
+              senderId: 'telegram-user-42',
+              accountId: 'telegram-account',
+              channelId: 'telegram-chat',
+            },
+          }
+        : envelope);
+
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, envelopes, {
+      contextPatch: envelope => envelope.hook === 'before_agent_run'
+        ? { channel: 'telegram' }
+        : {},
+    });
+
+    expect(records.length).toBeGreaterThan(0);
+    expect(records.every(record => record['user.id'] === 'telegram-user-42')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'telegram-user-42')).toBe(true);
+    expect(records.every(record =>
+      record['agent.openclaw.sender.id'] === 'telegram-user-42')).toBe(true);
+    expect(records.every(record =>
+      record['agent.openclaw.user.id.source'] === 'sender')).toBe(true);
+    expect(records[0]).toMatchObject({
+      'agent.openclaw.channel': 'telegram',
+      'agent.openclaw.account.id': 'telegram-account',
+      'agent.openclaw.channel.id': 'telegram-chat',
+    });
+  });
+
+  it.each([
+    ['ctx.senderId', { senderId: 'context-sender' }, 'context-sender'],
+    ['ctx.channelContext.sender.id', { channelContext: { sender: { id: 'channel-context-sender' } } }, 'channel-context-sender'],
+  ])('falls back to %s on newer OpenClaw contexts', async (_label, contextIdentity, expected) => {
+    delete process.env.LOONGSUITE_USER_ID;
+    fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({
+      userId: 'configured-user',
+    }));
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'), {
+      contextPatch: envelope => envelope.hook === 'before_agent_run'
+        ? contextIdentity
+        : {},
+    });
+
+    expect(records.every(record => record['user.id'] === expected)).toBe(true);
+    expect(records.every(record => record[INVOCATION_USER_ID_FIELD] === expected)).toBe(true);
+  });
+
+  it('keeps an explicit Pilot user ID above the native sender', async () => {
+    const envelopes = readJsonl('pilot-probe-events-smoke.jsonl').map(envelope =>
+      envelope.hook === 'before_agent_run'
+        ? { ...envelope, event: { ...envelope.event, senderId: 'native-sender' } }
+        : envelope);
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, envelopes);
+
+    expect(records.every(record => record['user.id'] === 'test-user')).toBe(true);
+    expect(records.every(record =>
+      record['agent.openclaw.sender.id'] === 'native-sender')).toBe(true);
+    expect(records.every(record =>
+      record['agent.openclaw.user.id.source'] === 'environment')).toBe(true);
+    expect(records.every(record =>
+      record[INVOCATION_USER_ID_FIELD] === 'test-user')).toBe(true);
+  });
+
+  it('uses AGENTTEAMS_WORKER_NAME as the agent name and Resource marker', async () => {
+    process.env.AGENTTEAMS_WORKER_NAME = ' planner ';
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'));
+
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record['gen_ai.agent.name']).toBe('planner');
+      expect(record.resourceAttributes).toEqual({
+        'agentteams.worker.name': 'planner',
+      });
+    }
+  });
+
+  it.each([
+    ['blank', '   '],
+    ['too long', 'x'.repeat(513)],
+  ])('retains the default agent name for a %s worker name', async (_label, workerName) => {
+    process.env.AGENTTEAMS_WORKER_NAME = workerName;
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'));
+
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record['gen_ai.agent.name']).toBe('openclaw');
+      expect(record.resourceAttributes).toBeUndefined();
+    }
+    stderr.mockRestore();
+  });
+
+  it('attaches the user prompt to the first request and tool results to the next request', async () => {
+    const plugin = await loadPlugin();
+    const envelopes = readJsonl('pilot-probe-events-cp2.jsonl');
+    const records = await replay(plugin, envelopes);
+    const requests = records.filter((r) => r['event.name'] === 'llm.request');
+    expect(requests.length).toBe(2);
+    // First request: full input data (system instructions + tools + user prompt delta)
+    expect(requests[0]['gen_ai.system_instructions']).toEqual([
+      { type: 'text', content: expect.any(String) },
+    ]);
+    expect(records.find(r => r['agent.openclaw.hook'] === 'before_agent_run')['gen_ai.system_instructions'])
+      .toEqual(requests[0]['gen_ai.system_instructions']);
+    expect(Array.isArray(requests[0]['gen_ai.tool.definitions'])).toBe(true);
+    expect(requests[0]['gen_ai.input.messages_delta'][0].role).toBe('user');
+    // Second request includes the observed assistant before its parallel results.
+    expect(requests[1]['gen_ai.system_instructions']).toBeUndefined();
+    expect(requests[1]['gen_ai.tool.definitions']).toBeUndefined();
+    expect(requests[1]['gen_ai.input.messages_delta']).toHaveLength(3);
+    expect(requests[1]['gen_ai.input.messages_delta'][0].role).toBe('assistant');
+    for (const message of requests[1]['gen_ai.input.messages_delta'].slice(1)) {
+      expect(message.role).toBe('tool');
+      expect(message.parts[0].type).toBe('tool_call_response');
+      expect(message.parts[0].id).toMatch(/^call_/);
+      expect(message.parts[0].response.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('emits per-call usage once and keeps llm_output as an aggregate checksum only', async () => {
+    const plugin = await loadPlugin();
+    const envelopes = readJsonl('pilot-probe-events-cp2.jsonl');
+    const records = await replay(plugin, envelopes);
+    const responses = records.filter((r) => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(2);
+    expect(responses.map((r) => [
+      r['gen_ai.usage.input_tokens'],
+      r['gen_ai.usage.output_tokens'],
+      r['gen_ai.usage.cache_read.input_tokens'],
+      r['gen_ai.usage.reasoning_tokens'],
+      r['gen_ai.usage.total_tokens'],
+    ])).toEqual([
+      [13578, 129, 12672, 59, 13707],
+      [13874, 197, 12672, 22, 14071],
+    ]);
+    expect(responses.map((r) => r['gen_ai.response.finish_reasons'])).toEqual([
+      ['tool_calls'],
+      ['stop'],
+    ]);
+    expect(responses.every((r) => r['gen_ai.output.messages'][0].finish_reason
+      === r['gen_ai.response.finish_reasons'][0])).toBe(true);
+    expect(responses.every((r) => String(r['gen_ai.response.id']).startsWith('chatcmpl-'))).toBe(true);
+
+    const terminal = records.find((r) => r['agent.openclaw.hook'] === 'llm_output');
+    expect(terminal['event.name']).toBe('other');
+    expect(terminal['gen_ai.output.messages']).toBeUndefined();
+    expect(terminal['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(terminal['gen_ai.usage.output_tokens']).toBeUndefined();
+    expect(terminal['agent.openclaw.aggregate_usage.input_tokens']).toBe(27452);
+    expect(terminal['agent.openclaw.aggregate_usage.output_tokens']).toBe(326);
+    expect(terminal['agent.openclaw.aggregate_usage.total_tokens']).toBe(27778);
+    expect(terminal['agent.openclaw.aggregate_usage.reasoning_tokens']).toBe(81);
+    expect(terminal['agent.openclaw.per_call_usage.count']).toBe(2);
+    expect(terminal['agent.openclaw.per_call_usage.mismatch']).toBeUndefined();
+  });
+
+  it('marks missing llm_output usage without fabricating zero token totals', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'missing-usage-run';
+    const sessionId = 'missing-usage-session';
+    const sessionKey = 'agent:main:missing-usage';
+    const callId = `${runId}:model:1`;
+    const records = await replay(plugin, [
+      { hook: 'llm_input', event: { runId, sessionId, provider: 'test', model: 'test-model', prompt: 'hello', historyMessages: [], imagesCount: 0 } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model', outcome: 'completed', durationMs: 1 } },
+      { hook: 'llm_output', event: { runId, sessionId, provider: 'test', model: 'test-model', assistantTexts: ['done'] } },
+    ]);
+
+    const terminal = records.find((r) => r['agent.openclaw.hook'] === 'llm_output');
+    expect(terminal['event.name']).toBe('other');
+    expect(terminal['agent.openclaw.aggregate_usage.missing']).toBe(true);
+    expect(terminal['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(terminal['gen_ai.usage.output_tokens']).toBeUndefined();
+    expect(terminal['gen_ai.usage.total_tokens']).toBeUndefined();
+  });
+
+  it('includes cache read and creation in input and total without double-counting reasoning', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'cache-usage-run';
+    const sessionId = 'cache-usage-session';
+    const sessionKey = 'agent:main:cache-usage';
+    const callId = `${runId}:model:1`;
+    const usage = {
+      input: 11,
+      output: 7,
+      cacheRead: 3,
+      cacheWrite: 5,
+      reasoningTokens: 2,
+    };
+    const records = await replay(plugin, [
+      { hook: 'llm_input', event: { runId, sessionId, sessionKey, provider: 'test', model: 'test-model', prompt: 'use cache' } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId, outcome: 'completed', durationMs: 4 } },
+      { hook: 'before_message_write', event: { sessionKey, message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], provider: 'test', model: 'test-model', usage, stopReason: 'stop' } } },
+      { hook: 'llm_output', event: { runId, sessionId, provider: 'test', model: 'test-model', usage } },
+    ]);
+
+    const response = records.find((record) => record['event.name'] === 'llm.response');
+    expect(response).toMatchObject({
+      'gen_ai.usage.input_tokens': 19,
+      'gen_ai.usage.output_tokens': 7,
+      'gen_ai.usage.cache_read.input_tokens': 3,
+      'gen_ai.usage.cache_creation.input_tokens': 5,
+      'gen_ai.usage.reasoning_tokens': 2,
+      'gen_ai.usage.total_tokens': 26,
+    });
+
+    const terminal = records.find((record) => record['agent.openclaw.hook'] === 'llm_output');
+    expect(terminal).toMatchObject({
+      'agent.openclaw.aggregate_usage.input_tokens': 19,
+      'agent.openclaw.aggregate_usage.output_tokens': 7,
+      'agent.openclaw.aggregate_usage.cache_read_input_tokens': 3,
+      'agent.openclaw.aggregate_usage.cache_creation_input_tokens': 5,
+      'agent.openclaw.aggregate_usage.reasoning_tokens': 2,
+      'agent.openclaw.aggregate_usage.total_tokens': 26,
+    });
+    expect(terminal['agent.openclaw.per_call_usage.mismatch']).toBeUndefined();
+  });
+
+  it('keeps trace_id and gen_ai.turn.id stable across all events in the run', async () => {
+    const plugin = await loadPlugin();
+    const envelopes = readJsonl('pilot-probe-events-cp2.jsonl');
+    const records = await replay(plugin, envelopes);
+    const runId = 'e50412fd-1df2-48a1-9dee-552db05e140e';
+    const runRecords = records.filter((r) => r['gen_ai.turn.id'] === runId);
+    expect(runRecords.length).toBeGreaterThan(5);
+    const traceIds = new Set(runRecords.map((r) => r.trace_id));
+    expect(traceIds.size).toBe(1);
+    const turnIds = new Set(runRecords.map((r) => r['gen_ai.turn.id']));
+    expect(turnIds.size).toBe(1);
+    expect(turnIds.has(runId)).toBe(true);
+  });
+
+  it('assigns tool calls to the current ReAct step.id (= most recent callId)', async () => {
+    const plugin = await loadPlugin();
+    const envelopes = readJsonl('pilot-probe-events-cp2.jsonl');
+    const records = await replay(plugin, envelopes);
+    const toolCalls = records.filter((r) => r['event.name'] === 'tool.call');
+    expect(toolCalls.length).toBe(2);
+    const firstCallId = 'e50412fd-1df2-48a1-9dee-552db05e140e:model:1';
+    for (const tc of toolCalls) {
+      expect(tc['gen_ai.step.id']).toBe(firstCallId);
+    }
+    expect(toolCalls[0]['gen_ai.tool.call.id']).toBe('call_5b3f0ee3066445be9ed9a318');
+    expect(toolCalls[1]['gen_ai.tool.call.id']).toBe('call_726d913cffa34434a85243a8');
+  });
+
+  it('pairs tool.call and tool.result by tool.call.id', async () => {
+    const plugin = await loadPlugin();
+    const envelopes = readJsonl('pilot-probe-events-cp2.jsonl');
+    const records = await replay(plugin, envelopes);
+    const calls = records.filter((r) => r['event.name'] === 'tool.call');
+    const results = records.filter((r) => r['event.name'] === 'tool.result');
+    expect(calls.length).toBe(2);
+    expect(results.length).toBe(2);
+    for (const call of calls) {
+      const matched = results.find((r) => r['gen_ai.tool.call.id'] === call['gen_ai.tool.call.id']);
+      expect(matched).toBeTruthy();
+      expect(matched['gen_ai.tool.name']).toBe(call['gen_ai.tool.name']);
+    }
+  });
+
+  it('keeps a delayed tool result on the step where its call started', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'delayed-tool-run';
+    const sessionId = 'delayed-tool-session';
+    const sessionKey = 'agent:main:delayed-tool';
+    const firstCallId = `${runId}:model:1`;
+    const secondCallId = `${runId}:model:2`;
+    const toolCallId = 'delayed-tool-call-1';
+    const startedAt = 1_785_900_000_000;
+    let now = startedAt;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let records;
+    try {
+      const handlers = registerPlugin(plugin);
+      const ctx = { runId, sessionId, sessionKey, agentId: 'main' };
+      handlers.model_call_started(
+        { runId, sessionId, sessionKey, callId: firstCallId, provider: 'test', model: 'test-model' },
+        ctx,
+      );
+      handlers.before_tool_call(
+        { runId, toolName: 'exec', toolCallId, params: { command: 'sleep 1' } },
+        ctx,
+      );
+      now += 2_000;
+      handlers.model_call_started(
+        { runId, sessionId, sessionKey, callId: secondCallId, provider: 'test', model: 'test-model' },
+        ctx,
+      );
+      now += 100;
+      handlers.after_tool_call(
+        { runId, toolName: 'exec', toolCallId, result: { output: 'done' }, durationMs: 1_000 },
+        ctx,
+      );
+      handlers.tool_result_persist(
+        { sessionKey, toolCallId, toolName: 'exec', message: { toolCallId, content: 'done' } },
+        { sessionKey, agentId: 'main' },
+      );
+      records = readOutputRecords();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    const toolRecords = records.filter((record) => record['gen_ai.tool.call.id'] === toolCallId);
+    expect(toolRecords).toHaveLength(3);
+    expect(toolRecords.every((record) => record['gen_ai.step.id'] === firstCallId)).toBe(true);
+    const call = toolRecords.find((record) => record['event.name'] === 'tool.call');
+    const result = toolRecords.find((record) => record['event.name'] === 'tool.result');
+    expect(BigInt(result.time_unix_nano) - BigInt(call.time_unix_nano)).toBe(1_000_000_000n);
+    expect(BigInt(result.observed_time_unix_nano)).toBeGreaterThan(BigInt(result.time_unix_nano));
+  });
+
+  it('clips native tool completion to the next model start when hook dispatch overlaps', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'overlapping-tool-run';
+    const sessionId = 'overlapping-tool-session';
+    const sessionKey = 'agent:main:overlapping-tool';
+    const firstCallId = `${runId}:model:1`;
+    const secondCallId = `${runId}:model:2`;
+    const toolCallId = 'overlapping-tool-call-1';
+    const startedAt = 1_785_900_000_000;
+    let now = startedAt;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let records;
+    try {
+      const handlers = registerPlugin(plugin);
+      const ctx = { runId, sessionId, sessionKey, agentId: 'main' };
+      handlers.model_call_started(
+        { runId, sessionId, sessionKey, callId: firstCallId, provider: 'test', model: 'test-model' },
+        ctx,
+      );
+      handlers.before_tool_call(
+        { runId, toolName: 'exec', toolCallId, params: { command: 'work' } },
+        ctx,
+      );
+      now += 120;
+      handlers.model_call_started(
+        { runId, sessionId, sessionKey, callId: secondCallId, provider: 'test', model: 'test-model' },
+        ctx,
+      );
+      now += 30;
+      handlers.after_tool_call(
+        { runId, toolName: 'exec', toolCallId, result: { output: 'done' }, durationMs: 134 },
+        ctx,
+      );
+      records = readOutputRecords();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    const call = records.find((record) => record['event.name'] === 'tool.call');
+    const result = records.find((record) => record['event.name'] === 'tool.result');
+    const nextRequest = records.find((record) =>
+      record['event.name'] === 'llm.request'
+      && record['gen_ai.step.id'] === secondCallId,
+    );
+    expect(result['gen_ai.step.id']).toBe(firstCallId);
+    expect(result['gen_ai.tool.call.duration']).toBe(134);
+    expect(result['agent.openclaw.duration_ms']).toBe(134);
+    expect(result['agent.openclaw.duration_clipped_to_next_model']).toBe(true);
+    expect(result.time_unix_nano).toBe(nextRequest.time_unix_nano);
+    expect(BigInt(result.time_unix_nano) - BigInt(call.time_unix_nano)).toBe(120_000_000n);
+    expect(BigInt(result.observed_time_unix_nano)).toBeGreaterThan(BigInt(result.time_unix_nano));
+  });
+
+  it('clips a native tool duration that projects beyond its observation time', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'future-tool-duration-run';
+    const sessionId = 'future-tool-duration-session';
+    const sessionKey = 'agent:main:future-tool-duration';
+    const firstCallId = `${runId}:model:1`;
+    const secondCallId = `${runId}:model:2`;
+    const toolCallId = 'future-tool-duration-call-1';
+    const startedAt = 1_785_900_000_000;
+    let now = startedAt;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let records;
+    try {
+      const handlers = registerPlugin(plugin);
+      const ctx = { runId, sessionId, sessionKey, agentId: 'main' };
+      handlers.model_call_started(
+        { runId, sessionId, sessionKey, callId: firstCallId, provider: 'test', model: 'test-model' },
+        ctx,
+      );
+      handlers.before_tool_call(
+        { runId, toolName: 'exec', toolCallId, params: { command: 'work' } },
+        ctx,
+      );
+      now += 150;
+      handlers.after_tool_call(
+        { runId, toolName: 'exec', toolCallId, result: { output: 'done' }, durationMs: 200 },
+        ctx,
+      );
+      now += 10;
+      handlers.model_call_started(
+        { runId, sessionId, sessionKey, callId: secondCallId, provider: 'test', model: 'test-model' },
+        ctx,
+      );
+      records = readOutputRecords();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    const call = records.find((record) => record['event.name'] === 'tool.call');
+    const result = records.find((record) => record['event.name'] === 'tool.result');
+    const nextRequest = records.find((record) =>
+      record['event.name'] === 'llm.request'
+      && record['gen_ai.step.id'] === secondCallId,
+    );
+    expect(result['gen_ai.tool.call.duration']).toBe(200);
+    expect(result['agent.openclaw.duration_clipped_to_observation']).toBe(true);
+    expect(result['agent.openclaw.duration_clipped_to_next_model']).toBeUndefined();
+    expect(BigInt(result.time_unix_nano) - BigInt(call.time_unix_nano)).toBe(150_000_000n);
+    expect(BigInt(result.time_unix_nano)).toBeLessThan(BigInt(nextRequest.time_unix_nano));
+  });
+
+  it('reports the public after_tool_call top-level error as a failed tool result', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'tool-error-run';
+    const sessionId = 'tool-error-session';
+    const sessionKey = 'agent:main:tool-error';
+    const callId = `${runId}:model:1`;
+    const toolCallId = 'tool-call-error-1';
+    const records = await replay(plugin, [
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model' } },
+      { hook: 'before_tool_call', event: { runId, toolName: 'exec', toolCallId, params: { command: 'false' } } },
+      { hook: 'after_tool_call', event: { runId, toolName: 'exec', toolCallId, result: { output: '' }, error: 'command failed', durationMs: 2 } },
+    ]);
+
+    const result = records.find((r) => r['agent.openclaw.hook'] === 'after_tool_call');
+    expect(result['tool.result.status']).toBe('failure');
+    expect(result['error.type']).toBe('tool_use_failure');
+    expect(result['error.message']).toBe('command failed');
+  });
+
+  it('serializes BigInt and circular tool payloads without dropping records', async () => {
+    const plugin = await loadPlugin();
+    const handlers = registerPlugin(plugin);
+    const runId = 'non-json-tool-run';
+    const sessionId = 'non-json-tool-session';
+    const sessionKey = 'agent:main:non-json-tool';
+    const toolCallId = 'non-json-tool-call';
+    const ctx = { runId, sessionId, sessionKey, agentId: 'main' };
+
+    handlers.model_call_started(
+      { runId, sessionId, sessionKey, callId: 'native-call', provider: 'test', model: 'test-model' },
+      ctx,
+    );
+
+    const params = { count: 7n };
+    params.self = params;
+    handlers.before_tool_call(
+      { runId, toolName: 'exec', toolCallId, params },
+      ctx,
+    );
+
+    const resultPayload = { count: 11n };
+    resultPayload.self = resultPayload;
+    handlers.after_tool_call(
+      { runId, toolName: 'exec', toolCallId, result: resultPayload, durationMs: 1 },
+      ctx,
+    );
+
+    const persistedMessage = { toolCallId, count: 13n };
+    persistedMessage.self = persistedMessage;
+    handlers.tool_result_persist(
+      { sessionKey, toolName: 'exec', toolCallId, message: persistedMessage },
+      { sessionKey, agentId: 'main' },
+    );
+
+    const records = readOutputRecords();
+    const call = records.find((record) => record['agent.openclaw.hook'] === 'before_tool_call');
+    const result = records.find((record) => record['agent.openclaw.hook'] === 'after_tool_call');
+    const persisted = records.find((record) => record['agent.openclaw.hook'] === 'tool_result_persist');
+
+    expect(call['gen_ai.tool.call.arguments']).toMatchObject({ count: '7', self: '[Circular]' });
+    expect(result['gen_ai.tool.call.result']).toMatchObject({ count: '11', self: '[Circular]' });
+    expect(persisted['agent.openclaw.persisted_message']).toMatchObject({
+      toolCallId,
+      count: '13',
+      self: '[Circular]',
+    });
+  });
+
+  it('emits user prompt as messages_delta on before_agent_run (user-hook pattern)', async () => {
+    const plugin = await loadPlugin();
+    const envelopes = readJsonl('pilot-probe-events-smoke.jsonl');
+    const records = await replay(plugin, envelopes);
+    const beforeRun = records.find((r) => r['agent.openclaw.hook'] === 'before_agent_run');
+    expect(beforeRun['event.name']).toBe('other');
+    expect(beforeRun['gen_ai.input.messages_delta'][0]).toEqual({
+      role: 'user',
+      parts: [{ type: 'text', content: 'Say hello in one sentence' }],
+    });
+  });
+
+  it('emits agent_end with success flag + duration', async () => {
+    const plugin = await loadPlugin();
+    const envelopes = readJsonl('pilot-probe-events-cp2.jsonl');
+    const records = await replay(plugin, envelopes);
+    const end = records.find((r) => r['agent.openclaw.hook'] === 'agent_end');
+    expect(end['event.name']).toBe('other');
+    expect(end['agent.openclaw.success']).toBe(true);
+    expect(typeof end['agent.openclaw.duration_ms']).toBe('number');
+  });
+
+  it('keeps the run through agent_end and completes it after llm_output', async () => {
+    const plugin = await loadPlugin();
+    const envelopes = readJsonl('pilot-probe-events-smoke.jsonl');
+    await replay(plugin, envelopes);
+    // A repeated run remains safe after the terminal llm_output cleanup.
+    const records2 = await replay(plugin, envelopes);
+    expect(records2.length).toBeGreaterThan(0);
+  });
+
+  it('does not reactivate a completed run when agent_end arrives after llm_output', async () => {
+    const plugin = await loadPlugin();
+    const handlers = registerPlugin(plugin);
+    const logFile = path.join(pilotDataDir, 'logs', 'openclaw', `openclaw-${todayStamp()}.jsonl`);
+    fs.writeFileSync(logFile, '');
+    const runId = 'reordered-terminal-run';
+    const sessionId = 'reordered-terminal-session';
+    const sessionKey = 'agent:main:reordered-terminal';
+    const callId = `${runId}:model:1`;
+    const ctx = { runId, sessionId, sessionKey, agentId: 'main' };
+
+    handlers.model_call_started(
+      { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model' },
+      ctx,
+    );
+    handlers.llm_output(
+      { runId, sessionId, provider: 'test', model: 'test-model', assistantTexts: ['done'], usage: { input: 2, output: 1 } },
+      ctx,
+    );
+    handlers.agent_end({ runId, messages: [], success: true }, ctx);
+    handlers.before_message_write(
+      { message: { role: 'assistant', content: [{ type: 'text', text: 'late' }] }, sessionKey },
+      { agentId: 'main', sessionKey },
+    );
+
+    const lateRecords = readOutputRecords().filter((r) =>
+      r['agent.openclaw.hook'] === 'before_message_write' &&
+      r['gen_ai.output.messages']?.[0]?.parts?.[0]?.content === 'late',
+    );
+    expect(lateRecords).toHaveLength(0);
+  });
+
+  it('captures lifecycle hooks present in fixtures and handles non-firing hooks gracefully', async () => {
+    const plugin = await loadPlugin();
+    // Synthesize envelopes for the 4 conversation hooks that didn't fire in --local mode.
+    const sessionStart = { ts: Date.now(), hook: 'session_start', event: { sessionId: 's1', sessionKey: 'agent:test:r1', resumedFrom: null } };
+    const sessionEnd = { ts: Date.now() + 10, hook: 'session_end', event: { sessionId: 's1', reason: 'idle' } };
+    const envelopes = [sessionStart, sessionEnd];
+    const records = await replay(plugin, envelopes);
+    const ss = records.find((r) => r['agent.openclaw.hook'] === 'session_start');
+    const se = records.find((r) => r['agent.openclaw.hook'] === 'session_end');
+    expect(ss['event.name']).toBe('other');
+    expect(ss['gen_ai.session.id']).toBe('s1');
+    expect(se['event.name']).toBe('other');
+    expect(se['agent.openclaw.session_end_reason']).toBe('idle');
+  });
+
+  it('emits canonical per-call finish reasons while llm_output remains the terminal hook', async () => {
+    const plugin = await loadPlugin();
+    const envelopes = readJsonl('pilot-probe-events-cp2.jsonl');
+    const records = await replay(plugin, envelopes);
+    const responses = records.filter((r) => r['event.name'] === 'llm.response');
+    expect(responses.length).toBeGreaterThan(0);
+    for (const r of responses) {
+      // No response should ever carry the legacy unprefixed field.
+      expect(r['response.finish_reasons']).toBeUndefined();
+    }
+    const bmw = responses.filter((r) => r['agent.openclaw.hook'] === 'before_message_write');
+    expect(bmw.map((r) => r['gen_ai.response.finish_reasons'])).toEqual([
+      ['tool_calls'],
+      ['stop'],
+    ]);
+    const llmOutput = records.find((r) => r['agent.openclaw.hook'] === 'llm_output');
+    expect(llmOutput['event.name']).toBe('other');
+    expect(llmOutput['gen_ai.response.finish_reasons']).toBeUndefined();
+  });
+
+  it('marks an unmatched failed model call as an individual error response', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'failed-run';
+    const sessionId = 'failed-session';
+    const sessionKey = 'agent:main:failed';
+    const callId = `${runId}:model:1`;
+    const envelopes = [
+      { hook: 'llm_input', event: { runId, sessionId, provider: 'test', model: 'test-model', prompt: 'secret prompt', historyMessages: [], imagesCount: 0 } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId, outcome: 'error', durationMs: 7 } },
+      { hook: 'agent_end', event: { runId, success: false, durationMs: 8 } },
+      { hook: 'llm_output', event: { runId, sessionId, provider: 'test', model: 'test-model', assistantTexts: [], usage: { input: 3, output: 1 } } },
+    ];
+    const records = await replay(plugin, envelopes);
+    const modelEnded = records.find((r) => r['agent.openclaw.hook'] === 'model_call_ended');
+    const terminal = records.find((r) => r['agent.openclaw.hook'] === 'llm_output');
+    expect(modelEnded['gen_ai.response.finish_reasons']).toEqual(['error']);
+    expect(modelEnded['error.type']).toBe('model_call_error');
+    expect(terminal['event.name']).toBe('other');
+    expect(terminal['gen_ai.response.finish_reasons']).toBeUndefined();
+  });
+
+  it('does not turn a recovered intermediate model error into a failed run', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'retry-run';
+    const sessionId = 'retry-session';
+    const sessionKey = 'agent:main:retry';
+    const envelopes = [
+      { hook: 'llm_input', event: { runId, sessionId, provider: 'test', model: 'test-model', prompt: 'retry me', historyMessages: [], imagesCount: 0 } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId: `${runId}:model:1`, provider: 'test', model: 'test-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId: `${runId}:model:1`, outcome: 'error' } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId: `${runId}:model:2`, provider: 'test', model: 'test-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId: `${runId}:model:2`, outcome: 'completed' } },
+      { hook: 'before_message_write', event: { sessionKey, message: { role: 'assistant', content: [{ type: 'text', text: 'recovered' }], provider: 'test', model: 'test-model', usage: { input: 9, output: 2 }, stopReason: 'stop', responseId: 'provider-retry-2' } } },
+      { hook: 'agent_end', event: { runId, success: true, durationMs: 9 } },
+      { hook: 'llm_output', event: { runId, sessionId, provider: 'test', model: 'test-model', assistantTexts: ['recovered'], usage: { input: 9, output: 2 } } },
+    ];
+
+    const records = await replay(plugin, envelopes);
+    const modelEnded = records.filter((r) => r['agent.openclaw.hook'] === 'model_call_ended');
+    expect(modelEnded).toHaveLength(1);
+    expect(modelEnded[0]['gen_ai.response.finish_reasons']).toEqual(['error']);
+    const recovered = records.find((r) => r['gen_ai.response.id'] === 'provider-retry-2');
+    expect(recovered['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    const terminal = records.find((r) => r['agent.openclaw.hook'] === 'llm_output');
+    expect(terminal['event.name']).toBe('other');
+    expect(terminal['gen_ai.response.finish_reasons']).toBeUndefined();
+  });
+
+  it('keeps fallback cycles distinct when OpenClaw reuses runId and native callId', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'fallback-run';
+    const sessionId = 'fallback-session';
+    const sessionKey = 'agent:main:fallback';
+    const nativeFirstCallId = `${runId}:model:1`;
+    const nativeSecondCallId = `${runId}:model:2`;
+    const records = await replay(plugin, [
+      { hook: 'llm_input', event: { runId, sessionId, sessionKey, provider: 'test', model: 'invalid-model', prompt: 'try with fallback', historyMessages: [], imagesCount: 0 } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId: nativeFirstCallId, provider: 'test', model: 'invalid-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId: nativeFirstCallId, provider: 'test', model: 'invalid-model', outcome: 'error', durationMs: 7 } },
+      { hook: 'agent_end', event: { runId, sessionId, sessionKey, success: false, durationMs: 8 } },
+      { hook: 'llm_output', event: { runId, sessionId, sessionKey, provider: 'test', model: 'invalid-model', assistantTexts: [] } },
+
+      // v2026.6.10 starts the fallback agent cycle with the same runId and
+      // restarts its native call counter at model:1.
+      { hook: 'llm_input', event: { runId, sessionId, sessionKey, provider: 'test', model: 'fallback-model', prompt: 'retry only with fallback provider', historyMessages: [], imagesCount: 0 } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId: nativeFirstCallId, provider: 'test', model: 'fallback-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId: nativeFirstCallId, provider: 'test', model: 'fallback-model', outcome: 'completed', durationMs: 11 } },
+      { hook: 'before_message_write', event: { sessionKey, message: { role: 'assistant', content: [{ type: 'toolCall', id: 'fallback-tool', name: 'read', arguments: { path: '/tmp/input' } }], provider: 'test', model: 'fallback-model', usage: { input: 13, output: 3 }, stopReason: 'toolUse', responseId: 'provider-fallback-1' } } },
+      { hook: 'before_tool_call', event: { runId, sessionId, sessionKey, toolName: 'read', toolCallId: 'fallback-tool', params: { path: '/tmp/input' } } },
+      { hook: 'after_tool_call', event: { runId, sessionId, sessionKey, toolName: 'read', toolCallId: 'fallback-tool', result: { content: 'ok' }, durationMs: 2 } },
+      { hook: 'tool_result_persist', event: { sessionKey, toolName: 'read', toolCallId: 'fallback-tool', message: { role: 'toolResult', toolCallId: 'fallback-tool', content: [{ type: 'text', text: 'ok' }] } } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId: nativeSecondCallId, provider: 'test', model: 'fallback-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId: nativeSecondCallId, provider: 'test', model: 'fallback-model', outcome: 'completed', durationMs: 9 } },
+      { hook: 'before_message_write', event: { sessionKey, message: { role: 'assistant', content: [{ type: 'text', text: 'recovered' }], provider: 'test', model: 'fallback-model', usage: { input: 17, output: 2 }, stopReason: 'stop', responseId: 'provider-fallback-2' } } },
+      { hook: 'agent_end', event: { runId, sessionId, sessionKey, success: true, durationMs: 24 } },
+      { hook: 'llm_output', event: { runId, sessionId, sessionKey, provider: 'test', model: 'fallback-model', assistantTexts: ['recovered'], usage: { input: 30, output: 5 } } },
+    ]);
+
+    const requests = records.filter((record) => record['event.name'] === 'llm.request');
+    const responses = records.filter((record) => record['event.name'] === 'llm.response');
+    expect(requests.map((record) => record['gen_ai.step.id'])).toEqual([
+      `${runId}:model:1`,
+      `${runId}:model:2`,
+      `${runId}:model:3`,
+    ]);
+    expect(responses.map((record) => record['gen_ai.step.id'])).toEqual([
+      `${runId}:model:1`,
+      `${runId}:model:2`,
+      `${runId}:model:3`,
+    ]);
+    expect(responses.map((record) => record['agent.openclaw.call_id'])).toEqual([
+      nativeFirstCallId,
+      nativeFirstCallId,
+      nativeSecondCallId,
+    ]);
+    expect(responses[0]['gen_ai.response.finish_reasons']).toEqual(['error']);
+    expect(responses[1]).toMatchObject({
+      'gen_ai.response.id': 'provider-fallback-1',
+      'gen_ai.usage.input_tokens': 13,
+      'gen_ai.usage.output_tokens': 3,
+    });
+    expect(responses[2]).toMatchObject({
+      'gen_ai.response.id': 'provider-fallback-2',
+      'gen_ai.usage.input_tokens': 17,
+      'gen_ai.usage.output_tokens': 2,
+    });
+    expect(requests[1]['gen_ai.input.messages_delta']).toBeUndefined();
+    expect(requests[1]['gen_ai.input.messages'][0].role).toBe('user');
+    expect(requests[1]['gen_ai.input.messages'][0].parts[0].content)
+      .toBe('retry only with fallback provider');
+    const terminals = records.filter((record) => record['agent.openclaw.hook'] === 'llm_output');
+    expect(terminals.map((record) => record['agent.openclaw.per_call_usage.count'])).toEqual([0, 2]);
+    expect(new Set(requests.map((record) => record['gen_ai.step.id'])).size).toBe(3);
+  });
+
+  it('drops pending tool state before reactivating a completed fallback run', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'fallback-tool-state-run';
+    const sessionId = 'fallback-tool-state-session';
+    const sessionKey = 'agent:main:fallback-tool-state';
+    const reusedToolCallId = 'reused-tool-call';
+    const records = await replay(plugin, [
+      { hook: 'llm_input', event: { runId, sessionId, sessionKey, provider: 'test', model: 'first-model', prompt: 'first cycle' } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId: `${runId}:model:1`, provider: 'test', model: 'first-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId: `${runId}:model:1`, outcome: 'completed', durationMs: 3 } },
+      { hook: 'before_message_write', event: { sessionKey, message: { role: 'assistant', content: [{ type: 'toolCall', id: reusedToolCallId, name: 'read', arguments: {} }], usage: { input: 2, output: 1 }, stopReason: 'toolUse' } } },
+      { hook: 'tool_result_persist', event: { sessionKey, toolCallId: reusedToolCallId, message: { role: 'toolResult', toolCallId: reusedToolCallId, content: [{ type: 'text', text: 'stale-result' }] } } },
+      { hook: 'llm_output', event: { runId, sessionId, sessionKey, usage: { input: 2, output: 1 } } },
+
+      { hook: 'llm_input', event: { runId, sessionId, sessionKey, provider: 'test', model: 'fallback-model', prompt: 'second cycle' } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId: `${runId}:model:1`, provider: 'test', model: 'fallback-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId: `${runId}:model:1`, outcome: 'completed', durationMs: 3 } },
+      { hook: 'before_message_write', event: { sessionKey, message: { role: 'assistant', content: [{ type: 'toolCall', id: reusedToolCallId, name: 'read', arguments: {} }], usage: { input: 3, output: 1 }, stopReason: 'toolUse' } } },
+      { hook: 'tool_result_persist', event: { sessionKey, toolCallId: reusedToolCallId, message: { role: 'toolResult', toolCallId: reusedToolCallId, content: [{ type: 'text', text: 'fresh-result' }] } } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId: `${runId}:model:2`, provider: 'test', model: 'fallback-model' } },
+    ]);
+
+    const requests = records.filter((record) => record['event.name'] === 'llm.request');
+    expect(requests.map((record) => record['gen_ai.step.id'])).toEqual([
+      `${runId}:model:1`,
+      `${runId}:model:2`,
+      `${runId}:model:3`,
+    ]);
+    expect(requests[2]['gen_ai.input.messages_delta']).toBeUndefined();
+    const inputs = requests[2]['gen_ai.input.messages'];
+    expect(inputs).toHaveLength(3);
+    expect(inputs[1].parts[0]).toMatchObject({
+      type: 'tool_call', id: reusedToolCallId,
+    });
+    expect(inputs[2].parts[0]).toMatchObject({
+      id: reusedToolCallId,
+      response: 'fresh-result',
+    });
+  });
+
+  it('settles an empty assistant error with native usage and timing metadata', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'empty-error-run';
+    const sessionId = 'empty-error-session';
+    const sessionKey = 'agent:main:empty-error';
+    const callId = `${runId}:model:1`;
+    const records = await replay(plugin, [
+      { hook: 'llm_input', event: { runId, sessionId, provider: 'test', model: 'test-model', prompt: 'fail safely', historyMessages: [], imagesCount: 0 } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model', outcome: 'error', errorCategory: 'authentication', durationMs: 17 } },
+      { hook: 'before_message_write', event: { sessionKey, message: { role: 'assistant', content: [], provider: 'test', model: 'test-model', usage: { input: 11, output: 0, cacheRead: 3 }, stopReason: 'error', responseId: 'provider-empty-error' } } },
+      { hook: 'agent_end', event: { runId, success: false, durationMs: 18 } },
+      { hook: 'llm_output', event: { runId, sessionId, provider: 'test', model: 'test-model', assistantTexts: [], usage: { input: 11, output: 0, cacheRead: 3 } } },
+    ]);
+
+    const responses = records.filter((record) => record['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]['gen_ai.response.id']).toBe('provider-empty-error');
+    expect(responses[0]['gen_ai.response.finish_reasons']).toEqual(['error']);
+    expect(responses[0]['gen_ai.output.messages']).toBeUndefined();
+    expect(responses[0]['gen_ai.usage.input_tokens']).toBe(14);
+    expect(responses[0]['gen_ai.usage.output_tokens']).toBe(0);
+    expect(responses[0]['gen_ai.usage.total_tokens']).toBe(14);
+    expect(responses[0]['agent.openclaw.duration_ms']).toBe(17);
+    expect(responses[0]['agent.openclaw.error_category']).toBe('authentication');
+    expect(responses[0]['error.type']).toBe('model_call_error');
+  });
+
+  it('settles an empty aborted assistant without fabricating usage or output', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'empty-aborted-run';
+    const sessionId = 'empty-aborted-session';
+    const sessionKey = 'agent:main:empty-aborted';
+    const callId = `${runId}:model:1`;
+    const records = await replay(plugin, [
+      { hook: 'llm_input', event: { runId, sessionId, provider: 'test', model: 'test-model', prompt: 'cancel me', historyMessages: [], imagesCount: 0 } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model', outcome: 'error', failureKind: 'aborted', durationMs: 23 } },
+      { hook: 'before_message_write', event: { sessionKey, message: { role: 'assistant', content: [], provider: 'test', model: 'test-model', stopReason: 'aborted' } } },
+      { hook: 'agent_end', event: { runId, success: false, durationMs: 24 } },
+      { hook: 'llm_output', event: { runId, sessionId, provider: 'test', model: 'test-model', assistantTexts: [] } },
+    ]);
+
+    const responses = records.filter((record) => record['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]['gen_ai.response.finish_reasons']).toEqual(['cancelled']);
+    expect(responses[0]['gen_ai.output.messages']).toBeUndefined();
+    expect(responses[0]['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(responses[0]['gen_ai.usage.output_tokens']).toBeUndefined();
+    expect(responses[0]['gen_ai.usage.total_tokens']).toBeUndefined();
+    expect(responses[0]['agent.openclaw.duration_ms']).toBe(23);
+    expect(responses[0]['agent.openclaw.failure_kind']).toBe('aborted');
+    expect(responses[0]['error.type']).toBe('model_call_cancelled');
+  });
+
+  it('correlates synchronous persistence hooks by sessionKey without cross-session leakage', async () => {
+    const plugin = await loadPlugin();
+    const handlers = registerPlugin(plugin);
+    const logFile = path.join(pilotDataDir, 'logs', 'openclaw', `openclaw-${todayStamp()}.jsonl`);
+    fs.writeFileSync(logFile, '');
+
+    for (const suffix of ['a', 'b']) {
+      const runId = `run-${suffix}`;
+      const sessionId = `session-${suffix}`;
+      const sessionKey = `agent:main:${suffix}`;
+      await handlers.llm_input(
+        { runId, sessionId, provider: 'test', model: 'test-model', prompt: `prompt-${suffix}`, historyMessages: [], imagesCount: 0 },
+        { runId, sessionId, sessionKey },
+      );
+      await handlers.model_call_started(
+        { runId, sessionId, sessionKey, callId: `${runId}:model:1`, provider: 'test', model: 'test-model' },
+        { runId, sessionId, sessionKey },
+      );
+    }
+
+    const returnA = handlers.before_message_write(
+      { message: { role: 'assistant', content: [{ type: 'text', text: 'answer-a' }] } },
+      { agentId: 'main', sessionKey: 'agent:main:a' },
+    );
+    const returnB = handlers.before_message_write(
+      { message: { role: 'assistant', content: [{ type: 'text', text: 'answer-b' }] } },
+      { agentId: 'main', sessionKey: 'agent:main:b' },
+    );
+
+    // These hooks are synchronous in OpenClaw and must not return Promises.
+    expect(returnA).toBeUndefined();
+    expect(returnB).toBeUndefined();
+    for (const suffix of ['b', 'a']) {
+      handlers.model_call_ended({ runId: `run-${suffix}`, callId: `run-${suffix}:model:1`,
+        timeToFirstByteMs: suffix === 'a' ? 12 : 34 }, { runId: `run-${suffix}` });
+    }
+    const records = readOutputRecords().filter((r) => r['agent.openclaw.hook'] === 'before_message_write');
+    expect(records).toHaveLength(2);
+    expect(records.find((r) => r['gen_ai.turn.id'] === 'run-a')['gen_ai.output.messages'][0].parts[0].content).toBe('answer-a');
+    expect(records.find((r) => r['gen_ai.turn.id'] === 'run-b')['gen_ai.output.messages'][0].parts[0].content).toBe('answer-b');
+    expect(records.find((r) => r['gen_ai.turn.id'] === 'run-a')['gen_ai.response.time_to_first_token']).toBeUndefined();
+    expect(records.find((r) => r['gen_ai.turn.id'] === 'run-b')['gen_ai.response.time_to_first_token']).toBeUndefined();
+  });
+
+  it.each(['default', 'custom-path', 'bom'])('redacts content before persistence with %s config while retaining token usage', async (kind) => {
+    const configPath = path.join(pilotDataDir, kind === 'custom-path' ? 'custom.json' : 'config.json');
+    fs.writeFileSync(configPath, (kind === 'bom' ? '\uFEFF' : '') + JSON.stringify({
+      agents: { openclaw: { captureMessageContent: false } },
+    }));
+    process.env.AGENT_DATA_COLLECTION_CONFIG = configPath;
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'));
+    const sensitiveFields = [
+      'gen_ai.input.messages',
+      'gen_ai.input.messages_delta',
+      'gen_ai.output.messages',
+      'gen_ai.tool.call.arguments',
+      'gen_ai.tool.call.result',
+      'gen_ai.system_instructions',
+      'gen_ai.tool.definitions',
+      'agent.openclaw.persisted_message',
+      'agent.openclaw.last_assistant_message',
+    ];
+    for (const record of records) {
+      for (const field of sensitiveFields) expect(record[field]).toBeUndefined();
+    }
+    const response = records.find((r) => r['agent.openclaw.hook'] === 'before_message_write');
+    expect(response['gen_ai.usage.input_tokens']).toBeGreaterThan(0);
+    expect(response['gen_ai.usage.output_tokens']).toBeGreaterThan(0);
+  });
+
+  it('caches Pilot config reads across hooks within the TTL', async () => {
+    const configPath = path.join(pilotDataDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ agents: { openclaw: {} } }));
+    const plugin = await loadPlugin();
+    const readFileSpy = vi.spyOn(fs, 'readFileSync');
+    const handlers = registerPlugin(plugin);
+    const sessionId = 'config-cache-session';
+    const runId = 'config-cache-run';
+    const ctx = { sessionId, runId, sessionKey: 'agent:main:config-cache', agentId: 'main' };
+
+    handlers.session_start({ sessionId }, ctx);
+    handlers.before_agent_run({ runId, prompt: 'hello' }, ctx);
+    handlers.agent_end({ runId, success: true }, ctx);
+
+    const configReads = readFileSpy.mock.calls.filter(([file]) => file === configPath);
+    expect(configReads).toHaveLength(1);
+  });
+
+  it('honors the OpenClaw plugin-level captureMessageContent=false setting', async () => {
+    const plugin = await loadPlugin();
+    const records = await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'), {
+      pluginConfig: { captureMessageContent: false },
+    });
+    expect(records.some((r) => r['gen_ai.input.messages_delta'] !== undefined)).toBe(false);
+    expect(records.some((r) => r['gen_ai.output.messages'] !== undefined)).toBe(false);
+  });
+
+  it('writes the log directory and JSONL file with private permissions', async () => {
+    if (process.platform === 'win32') return;
+    await fs.promises.chmod(path.join(pilotDataDir, 'logs', 'openclaw'), 0o755);
+    const plugin = await loadPlugin();
+    await replay(plugin, readJsonl('pilot-probe-events-smoke.jsonl'));
+    const logFile = path.join(pilotDataDir, 'logs', 'openclaw', `openclaw-${todayStamp()}.jsonl`);
+    expect((await fs.promises.stat(path.dirname(logFile))).mode & 0o777).toBe(0o700);
+    expect((await fs.promises.stat(logFile)).mode & 0o777).toBe(0o600);
+  });
+
+  it('binds gen_ai.output.messages to each ReAct cycle via before_message_write (assistant)', async () => {
+    // Regression: OpenClaw emits multiple model_call_ended per ReAct turn (one
+    // per cycle), but only llm_output (which fires once at end of run) carried
+    // gen_ai.output.messages. The converter merges llm_output into the LAST
+    // cycle's response.id (same callId), leaving intermediate cycles' LLM
+    // spans with input.messages but NO output.messages — validate-trace flags
+    // this as `llm_has_input_output ERROR ×N`. Fix: handleBeforeMessageWrite
+    // (assistant role) now emits an llm.response carrying
+    // gen_ai.output.messages bound to the current ReAct step (via
+    // run.lastCallId), so EVERY cycle's LLM span has output.messages.
+    const plugin = await loadPlugin();
+    const envelopes = readJsonl('pilot-probe-events-cp2.jsonl');
+    const records = await replay(plugin, envelopes);
+    const cycleIds = [
+      'e50412fd-1df2-48a1-9dee-552db05e140e:model:1',
+      'e50412fd-1df2-48a1-9dee-552db05e140e:model:2',
+    ];
+    for (const callId of cycleIds) {
+      const bmw = records.find((r) =>
+        r['agent.openclaw.hook'] === 'before_message_write' &&
+        r['agent.openclaw.call_id'] === callId,
+      );
+      expect(bmw, `before_message_write record for cycle ${callId}`).toBeTruthy();
+      expect(bmw['event.name']).toBe('llm.response');
+      expect(bmw['gen_ai.step.id']).toBe(callId);
+      expect(bmw['gen_ai.response.id']).toMatch(/^chatcmpl-/);
+      const out = bmw['gen_ai.output.messages'];
+      expect(Array.isArray(out)).toBe(true);
+      expect(out.length).toBeGreaterThan(0);
+      expect(out[0].role).toBe('assistant');
+      const partTypes = new Set((out[0].parts || []).map((p) => p.type));
+      // Each cycle's assistant message has either text or tool_call (or both).
+      expect(partTypes.size).toBeGreaterThan(0);
+      const serializedParts = out[0].parts.map((part) => JSON.stringify(part));
+      expect(new Set(serializedParts).size).toBe(serializedParts.length);
+    }
+    // Non-assistant before_message_write (user / toolResult) must NOT emit
+    // llm.response — they would surface as standalone spans.
+    const nonAssistant = records.filter((r) =>
+      r['agent.openclaw.hook'] === 'before_message_write' &&
+      r['agent.openclaw.message_role'] !== 'assistant',
+    );
+    expect(nonAssistant.length).toBe(0);
+  });
+
+  it.each(['end-first', 'message-first'])('joins accurate streamed timing in %s order by response ID', async (order) => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'stream-run', sessionId: 'stream-session', sessionKey: 'agent:main:stream' };
+    handlers.model_call_started({ ...ctx, callId: 'native-1', provider: 'test', model: 'test-model' }, ctx);
+    await observeStream('response-stream', { delayMs: 50 });
+    const end = () => handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 5 }, ctx);
+    if (order === 'end-first') end();
+    handlers.before_message_write({ message: { role: 'assistant', api: 'openai-completions', responseId: 'response-stream', content: [{ type: 'text', text: 'answer' }], stopReason: 'stop', usage: { input: 3, output: 1 } } }, { sessionKey: ctx.sessionKey });
+    end();
+    handlers.llm_output(ctx, ctx);
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({ 'gen_ai.response.time_to_first_token': 50_000_000,
+      'agent.openclaw.time_to_first_byte_ms': 5, 'gen_ai.usage.input_tokens': 3 });
+  });
+
+  it.each(['end-first', 'message-first'])('joins %s metadata once and preserves the assistant observation timestamp', async (order) => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'timing-order', sessionId: 'timing-session', sessionKey: 'agent:main:timing-order' };
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    handlers.model_call_started({ ...ctx, callId: 'native-1', provider: 'test', model: 'test-model' }, ctx);
+    const end = () => handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 12.5, durationMs: 100, outcome: 'error', error: 'synthetic error' }, ctx);
+    if (order === 'end-first') end();
+    now += 100;
+    const observed = `${now}000000`;
+    const message = { message: { role: 'assistant', content: [], stopReason: 'error', usage: { input: 5, output: 0 }, responseId: 'response-native' } };
+    handlers.before_message_write(message, { sessionKey: ctx.sessionKey });
+    handlers.before_message_write(message, { sessionKey: ctx.sessionKey });
+    now += 500;
+    end();
+    end();
+    handlers.llm_output({ ...ctx, usage: { input: 5, output: 0 } }, ctx);
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({ time_unix_nano: observed,
+      'agent.openclaw.time_to_first_byte_ms': 12.5, 'gen_ai.usage.input_tokens': 5,
+      'gen_ai.response.id': 'response-native', 'error.message': 'synthetic error',
+      'agent.openclaw.duration_ms': 100, 'agent.openclaw.call_id': 'native-1' });
+  });
+
+  it.each(['llm_output', 'agent_end', 'model_call_started'])('flushes message-only responses at %s without inventing timing or borrowing a late call', async (boundary) => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'missing-end', sessionId: 'missing-session', sessionKey: 'agent:main:missing-end' };
+    handlers.model_call_started({ ...ctx, callId: 'native-1', provider: 'test', model: 'test-model' }, ctx);
+    const message = { message: { role: 'assistant', content: [{ type: 'text', text: 'first' }], stopReason: 'stop', usage: { input: 3, output: 1 } } };
+    handlers.before_message_write(message, { sessionKey: ctx.sessionKey });
+    handlers[boundary]({ ...ctx, callId: 'native-2', success: true }, ctx);
+    handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 999 }, ctx);
+    handlers.model_call_ended({ ...ctx, callId: 'unknown-native', timeToFirstByteMs: 999 }, ctx);
+    if (boundary === 'model_call_started') {
+      handlers.before_message_write({ message: { ...message.message, responseId: 'second' } }, { sessionKey: ctx.sessionKey });
+      handlers.model_call_ended({ ...ctx, callId: 'native-2', timeToFirstByteMs: 24 }, ctx);
+    }
+    handlers.llm_output(ctx, ctx);
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(boundary === 'model_call_started' ? 2 : 1);
+    expect(responses[0]['gen_ai.response.time_to_first_token']).toBeUndefined();
+    expect(responses[0]['gen_ai.usage.input_tokens']).toBe(3);
+    if (responses[1]) expect(responses[1]['gen_ai.response.time_to_first_token']).toBeUndefined();
+  });
+
+  it.each(['session-id', 'session-key', 'eviction'])('flushes pending responses before %s cleanup', async (boundary) => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'cleanup-run', sessionId: 'cleanup-session', sessionKey: 'agent:main:cleanup' };
+    handlers.model_call_started({ ...ctx, callId: 'native-1', provider: 'test', model: 'test-model' }, ctx);
+    handlers.before_message_write({ message: { role: 'assistant', content: [{ type: 'text', text: 'saved' }], stopReason: 'stop', usage: { input: 3, output: 1 } } }, { sessionKey: ctx.sessionKey });
+    // An unrelated session must remain pending throughout cleanup.
+    const other = { runId: 'other-run', sessionId: 'other-session', sessionKey: 'agent:main:other' };
+    handlers.model_call_started({ ...other, callId: 'other-call' }, other);
+    handlers.before_message_write({ message: { role: 'assistant', content: [{ type: 'text', text: 'other' }], stopReason: 'stop' } }, { sessionKey: other.sessionKey });
+    if (boundary === 'eviction') {
+      for (let i = 0; i < 199; i++) handlers.model_call_started({ runId: `new-${i}`, callId: `call-${i}` }, {});
+    } else {
+      const session = boundary === 'session-id' ? { sessionId: ctx.sessionId } : { sessionKey: ctx.sessionKey };
+      handlers.session_end({ ...session, reason: 'idle' }, session);
+      handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 999 }, ctx);
+    }
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({ 'gen_ai.turn.id': ctx.runId, 'gen_ai.usage.input_tokens': 3 });
+    expect(responses[0]['gen_ai.response.time_to_first_token']).toBeUndefined();
+  });
+
+  it.each([true, false])('preserves privacy when content capture changes from %s while a response waits', async (capture) => {
+    const configPath = path.join(pilotDataDir, 'config.json');
+    const config = enabled => JSON.stringify({ agents: { openclaw: { captureMessageContent: enabled } } });
+    fs.writeFileSync(configPath, config(capture));
+    const handlers = registerPlugin(await loadPlugin());
+    await observeStream('private-response', { delayMs: 12 });
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const ctx = { runId: 'private-run', sessionId: 'private-session', sessionKey: 'agent:main:private' };
+    handlers.model_call_started({ ...ctx, callId: 'native-1' }, ctx);
+    handlers.before_message_write({ message: { role: 'assistant', content: [{ type: 'text', text: 'private-sentinel' }], api: 'openai-completions', responseId: 'private-response', stopReason: 'stop', usage: { input: 3, output: 1 } } }, { sessionKey: ctx.sessionKey });
+    fs.writeFileSync(configPath, config(!capture));
+    now += 6000;
+    handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: 12 }, ctx);
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0]['gen_ai.output.messages']).toBeUndefined();
+    expect(responses[0]['gen_ai.response.time_to_first_token']).toBe(12_000_000);
+    expect(responses[0]['gen_ai.usage.input_tokens']).toBe(3);
+  });
+
+  it.each([0, 12.5, undefined, null, -1, NaN, Infinity, '12'])('validates end-only native TTFT %s without fabricating usage', async (ttft) => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'end-only', sessionId: 'end-session', sessionKey: 'agent:main:end-only' };
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    handlers.model_call_started({ ...ctx, callId: 'native-1' }, ctx);
+    now += 100;
+    const endTime = `${now}000000`;
+    handlers.model_call_ended({ ...ctx, callId: 'native-1', timeToFirstByteMs: ttft, outcome: 'error' }, ctx);
+    now += 100;
+    handlers.agent_end({ ...ctx, success: false }, ctx);
+    handlers.llm_output(ctx, ctx);
+    const responses = readOutputRecords().filter(r => r['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(responses[0].time_unix_nano).toBe(endTime);
+    expect(responses[0]['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(responses[0]['gen_ai.response.time_to_first_token']).toBeUndefined();
+  });
+
+  it('timestamps completion when before_message_write fires, not when the assistant message was created', async () => {
+    const plugin = await loadPlugin();
+    const handlers = registerPlugin(plugin);
+    const runId = 'duration-run';
+    const sessionId = 'duration-session';
+    const sessionKey = 'agent:main:duration';
+    const callId = `${runId}:model:1`;
+    const startedAt = 1_785_900_000_000;
+    let now = startedAt;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      handlers.model_call_started(
+        { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model' },
+        { runId, sessionId, sessionKey, agentId: 'main' },
+      );
+      now += 5_000;
+      handlers.model_call_ended(
+        { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model', outcome: 'completed', durationMs: 5_000 },
+        { runId, sessionId, sessionKey, agentId: 'main' },
+      );
+      handlers.before_message_write(
+        {
+          sessionKey,
+          message: {
+            role: 'assistant',
+            timestamp: startedAt,
+            content: [{ type: 'text', text: 'done' }],
+            provider: 'test',
+            model: 'test-model',
+            usage: { input: 8, output: 2 },
+            stopReason: 'stop',
+          },
+        },
+        { sessionKey, agentId: 'main' },
+      );
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    const records = readOutputRecords();
+    const request = records.find((record) => record['event.name'] === 'llm.request');
+    const response = records.find((record) => record['event.name'] === 'llm.response');
+    expect(BigInt(response.time_unix_nano) - BigInt(request.time_unix_nano)).toBe(5_000_000_000n);
+    expect(response['agent.openclaw.duration_ms']).toBe(5_000);
+  });
+});
+
+describe('subagent trace propagation', () => {
+  it.each([
+    { status: 'no_reply' },
+    { status: 'timeout', sentBeforeError: true },
+    { status: 'error', sentBeforeError: true },
+  ])('retains incoming for dispatched sessions_send work returning $status', async details => {
+    vi.useFakeTimers();
+    let h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'send-parent', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    const child = { runId: 'sent-child', sessionId: 'child-session', sessionKey: 'agent:main:subagent:worker' };
+    await h.before_agent_run({}, parent);
+    await h.before_tool_call({ toolName: 'sessions_send', toolCallId: 'send', params: { sessionKey: child.sessionKey, message: 'work' } }, parent);
+    await h.before_agent_run({}, child);
+    await h.model_call_started({ callId: 'child-call', model: 'test', provider: 'test' }, child);
+    await h.after_tool_call({ toolName: 'sessions_send', toolCallId: 'send', result: { details: { ...details, runId: child.runId, sessionKey: child.sessionKey } } }, parent);
+    await vi.advanceTimersByTimeAsync(30_001);
+    const invoke = readOutputRecords().find(row => row['event.name'] === 'gen_ai.agent.invoke');
+    let children = readOutputRecords().filter(row => row['gen_ai.session.id'] === child.sessionId);
+    expect(children.length).toBeGreaterThan(0);
+    expect(children.every(row => row['gen_ai.agent.parent.invocation.id'] === invoke['gen_ai.agent.invocation.id'])).toBe(true);
+    // A send retains its existing execution Trace, rather than reparenting it.
+    expect(children.every(row => row.parent_span_id === undefined)).toBe(true);
+    expect(readOutputRecords().filter(row => row['event.name'] === 'gen_ai.agent.result')
+      .every(row => row['error.type'])).toBe(true);
+    h = registerPlugin(await loadPlugin());
+    await h.before_agent_run({}, child);
+    await vi.advanceTimersByTimeAsync(30_001);
+    children = readOutputRecords().filter(row => row['gen_ai.session.id'] === child.sessionId);
+    expect(children.every(row => row['gen_ai.agent.parent.invocation.id'] === invoke['gen_ai.agent.invocation.id'])).toBe(true);
+  });
+
+  it.each([
+    { status: 'error' },
+    { status: 'timeout', sentBeforeError: false },
+    { status: 'error', sentBeforeError: 'true' },
+    { status: 'skipped', sentBeforeError: true },
+    { status: 'forbidden', sentBeforeError: true },
+  ])('does not infer a dispatched child from an unconfirmed $status result', async details => {
+    vi.useFakeTimers();
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'parent', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    const child = { runId: 'unconfirmed', sessionId: 'child-session', sessionKey: 'agent:main:subagent:worker' };
+    await h.before_agent_run({}, parent);
+    await h.before_tool_call({ toolName: 'sessions_send', toolCallId: 'send', params: { sessionKey: child.sessionKey, message: 'work' } }, parent);
+    await h.after_tool_call({ toolName: 'sessions_send', toolCallId: 'send', result: { details: { ...details, runId: child.runId, sessionKey: child.sessionKey } } }, parent);
+    await h.before_agent_run({}, child);
+    await vi.advanceTimersByTimeAsync(30_001);
+    const children = readOutputRecords().filter(row => row['gen_ai.session.id'] === child.sessionId);
+    expect(children.length).toBeGreaterThan(0);
+    expect(children.every(row => row['gen_ai.agent.parent.invocation.id'] === undefined)).toBe(true);
+  });
+
+  it('records committed native steering in the active receiving turn without parsing a prompt', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'parent', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    const child = { runId: 'child', sessionId: 'child-session', sessionKey: 'agent:main:subagent:worker' };
+    await h.before_agent_run({}, parent);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn', params: { task: 'read' } }, parent);
+    await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn', result: { details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey } } }, parent);
+    await h.before_agent_run({}, child);
+    await h.llm_output({}, child);
+    expect(readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    const observer = globalThis[Symbol.for('loongsuite-pilot.openclaw.steered-delivery')].observer;
+    const params = { sourceSessionKey: child.sessionKey, targetRequesterSessionKey: parent.sessionKey,
+      directIdempotencyKey: `announce:v1:${child.sessionKey}:${child.runId}`,
+      internalEvents: [{ type: 'task_completion', source: 'subagent', childSessionKey: child.sessionKey, result: 'actual reply' }] };
+    expect(observer.prepare({ ...params, directIdempotencyKey: 'unknown' })).toBeUndefined();
+    expect(observer.prepare({ ...params, targetRequesterSessionKey: 'foreign' })).toBeUndefined();
+    const receipt = observer.prepare(params);
+    expect(receipt).toBeDefined();
+    observer.complete(receipt, { delivered: true, path: 'steered' });
+    observer.complete(receipt, { delivered: false, path: 'steered', deliveredAt: Date.now() });
+    expect(readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    observer.complete(receipt, { delivered: true, path: 'steered', deliveredAt: Date.now() });
+    observer.complete(receipt, { delivered: true, path: 'steered', deliveredAt: Date.now() });
+    const results = readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result');
+    expect(results).toHaveLength(1);
+    expect(results[0]['gen_ai.turn.id']).toBe(parent.runId);
+    expect(results[0]['gen_ai.agent.peer.id']).toBe(child.sessionId);
+    expect(results[0]['gen_ai.output.messages'][0].parts[0].content).toBe('actual reply');
+    await h.llm_output({}, parent);
+    expect(observer.prepare(params)).toBeUndefined();
+  });
+
+  it('records the known peer when sessions_send returns after the child has already finished', async () => {
+    vi.useFakeTimers();
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'send-parent', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    const child = { runId: 'send-child', sessionId: 'child-session', sessionKey: 'agent:main:subagent:existing' };
+    await h.before_agent_run({}, parent);
+    await h.before_tool_call({ toolName: 'sessions_send', toolCallId: 'send', params: { sessionKey: child.sessionKey, message: 'new work' } }, parent);
+    await h.before_agent_run({ prompt: 'new work' }, child);
+    await h.llm_output({}, child);
+    await h.after_tool_call({ toolName: 'sessions_send', toolCallId: 'send', result: { details: { status: 'ok', runId: child.runId, sessionKey: child.sessionKey, reply: 'delivered reply' } } }, parent);
+    const result = readOutputRecords().find(row => row['event.name'] === 'gen_ai.agent.result');
+    expect(result['gen_ai.agent.peer.id']).toBe(child.sessionId);
+    await vi.advanceTimersByTimeAsync(30_001);
+    const invoke = readOutputRecords().find(row => row['event.name'] === 'gen_ai.agent.invoke');
+    const childRows = readOutputRecords().filter(row => row['gen_ai.session.id'] === child.sessionId);
+    expect(childRows.length).toBeGreaterThan(0);
+    expect(childRows.every(row => row['gen_ai.agent.parent.invocation.id'] === invoke['gen_ai.agent.invocation.id'])).toBe(true);
+  });
+
+  it('keeps nested work through native announcement run replacement without binding autonomous session reuse', async () => {
+    let h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'parent', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    const child = { runId: 'child-work', sessionId: 'child-session', sessionKey: 'agent:main:subagent:coordinator' };
+    const grandchild = { runId: 'grandchild-work', sessionId: 'grandchild-session', sessionKey: 'agent:main:subagent:worker' };
+    await h.before_agent_run({}, parent);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'outer', params: { task: 'coordinate' } }, parent);
+    await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'outer', result: { details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey } } }, parent);
+    await h.before_agent_run({}, child);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'inner', params: { task: 'read' } }, child);
+    await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'inner', result: { details: { status: 'accepted', runId: grandchild.runId, childSessionKey: grandchild.sessionKey } } }, child);
+    await h.before_agent_run({}, grandchild);
+    await h.llm_output({}, child);
+    await h.llm_output({}, grandchild);
+    expect(readOutputRecords().filter(row => row['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    h = registerPlugin(await loadPlugin());
+    const resumed = { ...child, runId: `announce:v1:${grandchild.sessionKey}:${grandchild.runId}` };
+    await h.before_agent_run({ prompt: 'actual grandchild result' }, resumed);
+    await h.model_call_started({ callId: 'resume-call', model: 'model', provider: 'test' }, resumed);
+    const receiver = { ...parent, runId: `announce:v1:${child.sessionKey}:${resumed.runId}` };
+    await h.before_agent_run({ prompt: 'actual coordinator result' }, receiver);
+    await h.model_call_started({ callId: 'parent-receive-call', model: 'model', provider: 'test' }, receiver);
+    const rows = readOutputRecords();
+    const invokes = rows.filter(row => row['event.name'] === 'gen_ai.agent.invoke');
+    const results = rows.filter(row => row['event.name'] === 'gen_ai.agent.result');
+    expect(results).toHaveLength(2);
+    expect(results.map(row => row['gen_ai.agent.invocation.id'])).toEqual(invokes.toReversed().map(row => row['gen_ai.agent.invocation.id']));
+    expect(results[0]['gen_ai.agent.parent.invocation.id']).toBe(invokes[0]['gen_ai.agent.invocation.id']);
+    expect(results[0]['gen_ai.turn.id']).toBe(resumed.runId);
+    expect(results[1]['gen_ai.turn.id']).toBe(receiver.runId);
+    const continuation = rows.filter(row => row['gen_ai.turn.id'] === resumed.runId);
+    expect(continuation.every(row => row['gen_ai.agent.parent.invocation.id'] === invokes[0]['gen_ai.agent.invocation.id'])).toBe(true);
+    const outerTool = rows.find(row => row['event.name'] === 'tool.call' && row['gen_ai.tool.call.id'] === 'outer');
+    expect(continuation.every(row => row.parent_span_id === outerTool.span_id)).toBe(true);
+    vi.useFakeTimers();
+    await h.before_agent_run({ prompt: 'independent work' }, { ...child, runId: 'autonomous-work' });
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(readOutputRecords().find(row => row['gen_ai.turn.id'] === 'autonomous-work')['gen_ai.agent.parent.invocation.id']).toBeUndefined();
+  });
+
+  it('retains one producer-owned start across collector restart and repeated native setup hooks', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'ongoing-run', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    await h.before_agent_run({ prompt: 'work' }, ctx);
+    await h.before_agent_run({ prompt: 'work' }, ctx);
+    await h.model_call_started({ callId: 'native-call', provider: 'test', model: 'model' }, ctx);
+    await h.model_call_ended({ callId: 'native-call', outcome: 'completed' }, ctx);
+    await h.before_message_write({ message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], usage: { input: 1, output: 1 }, stopReason: 'stop' } }, ctx);
+    await h.llm_output({}, ctx);
+    const rows = readOutputRecords();
+    const { TurnBoundaryProcessor } = await import('../../../../src/normalization/turn-boundary-processor.ts');
+    // A fresh collector sees only a suffix; it must not invent another start.
+    const initial = rows.slice(0, 1);
+    const suffix = rows.slice(1);
+    new TurnBoundaryProcessor().enrich(initial);
+    new TurnBoundaryProcessor().enrich(suffix);
+    expect([...initial, ...suffix].filter(row => row['gen_ai.turn.start'] === true)).toHaveLength(1);
+    expect(suffix.find(row => row['event.name'] === 'llm.response')['gen_ai.turn.start']).toBe(false);
+    expect(rows.filter(row => row['gen_ai.turn.end'] === true)).toHaveLength(1);
+  });
+
+  it('emits one invocation before acceptance and records the actual parent-side delivery in its receiving turn', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'invoke-turn', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    await h.before_agent_run({ prompt: 'delegate' }, parent);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn', params: { task: 'specific child task' } }, parent);
+    let rows = readOutputRecords();
+    const invoke = rows.find(r => r['event.name'] === 'gen_ai.agent.invoke');
+    expect(invoke['gen_ai.input.messages'][0].parts[0].content).toBe('specific child task');
+    expect(invoke['gen_ai.agent.id']).toBe(parent.sessionId);
+    const child = { runId: 'work-run', sessionId: 'child-session', sessionKey: 'agent:main:subagent:worker' };
+    await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn', result: {
+      details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey },
+    } }, parent);
+    await h.before_agent_run({ prompt: 'child task' }, child);
+    await h.llm_output({}, parent);
+    await h.llm_output({}, child);
+    rows = readOutputRecords();
+    expect(rows.filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    expect(rows.filter(r => r['gen_ai.session.id'] === child.sessionId).every(r =>
+      r['gen_ai.agent.parent.invocation.id'] === invoke['gen_ai.agent.invocation.id'])).toBe(true);
+    const restarted = registerPlugin(await loadPlugin());
+    const receiver = { ...parent, runId: 'later-receive-turn' };
+    await restarted.before_agent_run({ prompt: 'receive result' }, receiver);
+    const delivery = { message: { role: 'user', content: [{ type: 'text', text: 'actual delivered result' }],
+      provenance: { kind: 'inter_session', sourceTool: 'subagent_announce', sourceSessionKey: child.sessionKey } } };
+    const unrelated = { ...parent, runId: `announce:v1:${child.sessionKey}:unknown-work` };
+    await restarted.before_agent_run({ prompt: 'unrelated work' }, unrelated);
+    await restarted.before_message_write(delivery, unrelated);
+    expect(readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    const write = fs.writeFileSync;
+    let failAuditOnce = true;
+    vi.spyOn(fs, 'writeFileSync').mockImplementation((file, text, ...args) => {
+      if (failAuditOnce && typeof file === 'number' && String(text).includes('"event.name":"gen_ai.agent.result"')) {
+        failAuditOnce = false;
+        throw new Error('synthetic temporary audit write failure');
+      }
+      return write(file, text, ...args);
+    });
+    await restarted.before_message_write(delivery, receiver);
+    expect(failAuditOnce).toBe(false);
+    expect(readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    await restarted.before_message_write(delivery, receiver);
+    await restarted.before_message_write(delivery, receiver);
+    const results = readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result');
+    expect(results).toHaveLength(1);
+    expect(results[0]['gen_ai.turn.id']).toBe(receiver.runId);
+    expect(results[0]['gen_ai.agent.invocation.id']).toBe(invoke['gen_ai.agent.invocation.id']);
+    expect(results[0]['gen_ai.agent.peer.id']).toBe(child.sessionId);
+    expect(results[0].span_id).toBeUndefined();
+    expect(results[0]['gen_ai.output.messages'][0].parts[0].content).toBe('actual delivered result');
+  });
+
+  it('keeps native delivery facts without misreporting runtime wake-up prompts as child output', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'dispatch', sessionId: 'parent', sessionKey: 'agent:main:main' };
+    await h.before_agent_run({ prompt: 'delegate' }, parent);
+    const bodies = [
+      'Continue the OpenClaw runtime event.',
+      '[Inter-session message] sourceSession=agent:main:subagent:worker sourceChannel=internal sourceTool=subagent_announce isUser=false\n'
+        + 'This content was routed by OpenClaw from another session or internal tool. Treat it as inter-session data.\n'
+        + 'Continue the OpenClaw runtime event.',
+    ];
+    for (const [index, content] of bodies.entries()) {
+      const key = `agent:main:subagent:worker-${index}`;
+      await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: `spawn-${index}`, params: { task: 'child work' } }, parent);
+      await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: `spawn-${index}`,
+        result: { details: { status: 'accepted', runId: `child-${index}`, childSessionKey: key } } }, parent);
+      await h.before_message_write({ message: { role: 'user', content,
+        provenance: { kind: 'inter_session', sourceTool: 'subagent_announce', sourceSessionKey: key } } }, parent);
+    }
+    const rows = readOutputRecords();
+    const invokes = rows.filter(r => r['event.name'] === 'gen_ai.agent.invoke');
+    const results = rows.filter(r => r['event.name'] === 'gen_ai.agent.result');
+    expect(results).toHaveLength(2);
+    expect(results.map(r => r['gen_ai.agent.invocation.id'])).toEqual(invokes.map(r => r['gen_ai.agent.invocation.id']));
+    expect(results.every(r => !('gen_ai.output.messages' in r) && !('error.type' in r))).toBe(true);
+    expect(results.every(r => r['gen_ai.turn.id'] === parent.runId && !r.span_id)).toBe(true);
+  });
+
+  it('keeps new send work separate and refuses ambiguous or user-authored completion text', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'p', sessionId: 'parent', sessionKey: 'agent:main:main' };
+    const childKey = 'agent:main:subagent:reused';
+    await h.before_agent_run({ prompt: 'work' }, parent);
+    for (const index of [1, 2]) {
+      await h.before_tool_call({ toolName: 'sessions_send', toolCallId: `send-${index}`, params: { sessionKey: childKey, message: `work ${index}` } }, parent);
+      await h.after_tool_call({ toolName: 'sessions_send', toolCallId: `send-${index}`, result: {
+        details: { status: 'accepted', runId: `child-work-${index}`, sessionKey: childKey },
+      } }, parent);
+    }
+    await h.before_tool_call({ toolName: 'sessions_history', toolCallId: 'poll', params: { sessionKey: childKey } }, parent);
+    await h.before_message_write({ message: { role: 'user', content: 'subagent result' } }, parent);
+    await h.before_message_write({ message: { role: 'user', content: 'ambiguous result',
+      provenance: { kind: 'inter_session', sourceTool: 'subagent_announce', sourceSessionKey: childKey } } }, parent);
+    const rows = readOutputRecords();
+    const invokes = rows.filter(r => r['event.name'] === 'gen_ai.agent.invoke');
+    expect(invokes).toHaveLength(2);
+    expect(new Set(invokes.map(r => r['gen_ai.agent.invocation.id'])).size).toBe(2);
+    expect(rows.filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    const restarted = registerPlugin(await loadPlugin());
+    for (const index of [2, 1]) {
+      const receiver = { ...parent, runId: `announce:v1:${childKey}:child-work-${index}` };
+      await restarted.before_agent_run({ prompt: 'receive' }, receiver);
+      await restarted.before_message_write({ message: { role: 'user', content: `native delivered work ${index}`,
+        provenance: { kind: 'inter_session', sourceTool: 'subagent_announce', sourceSessionKey: childKey } } }, receiver);
+    }
+    const delivered = readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result');
+    expect(delivered.map(r => r['gen_ai.agent.invocation.id'])).toEqual(invokes.toReversed().map(r => r['gen_ai.agent.invocation.id']));
+    expect(delivered[0]['gen_ai.turn.id']).toBe(`announce:v1:${childKey}:child-work-2`);
+    vi.useFakeTimers();
+    for (const index of [1, 2]) {
+      await restarted.before_agent_run({ prompt: 'continue' }, { runId: `child-work-${index}`, sessionId: 'same-child', sessionKey: childKey });
+    }
+    await vi.advanceTimersByTimeAsync(30_001);
+    const children = readOutputRecords().filter(r => r['gen_ai.session.id'] === 'same-child');
+    expect(children.map(r => r['gen_ai.agent.parent.invocation.id'])).toEqual(invokes.map(r => r['gen_ai.agent.invocation.id']));
+    expect(children.every(r => !r.parent_span_id)).toBe(true); // audit does not rebuild existing send traces
+  });
+
+  it('preserves incoming work on nested outgoing invokes and records dispatch failure without inventing a child', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'p', sessionId: 'parent', sessionKey: 'agent:main:main' };
+    await h.before_agent_run({}, parent);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'a', params: { task: 'one' } }, parent);
+    const child = { runId: 'c', sessionId: 'child', sessionKey: 'agent:main:subagent:one' };
+    await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'a', result: { details: { status: 'accepted', runId: 'c', childSessionKey: child.sessionKey } } }, parent);
+    await h.before_agent_run({}, child);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'b', params: { task: 'two' } }, child);
+    await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'b', error: 'dispatch failed' }, child);
+    const rows = readOutputRecords();
+    const invokes = rows.filter(r => r['event.name'] === 'gen_ai.agent.invoke');
+    expect(invokes[1]['gen_ai.agent.parent.invocation.id']).toBe(invokes[0]['gen_ai.agent.invocation.id']);
+    expect(invokes[1]['gen_ai.agent.invocation.id']).not.toBe(invokes[0]['gen_ai.agent.invocation.id']);
+    const failure = rows.find(r => r['event.name'] === 'gen_ai.agent.result');
+    expect(failure['gen_ai.agent.invocation.id']).toBe(invokes[1]['gen_ai.agent.invocation.id']);
+    expect(failure['error.type']).toBe('agent_dispatch_error');
+    expect(failure['gen_ai.agent.peer.id']).toBeUndefined();
+  });
+
+  it('links an early asynchronous child to the exact spawn tool, preserving its own turn', async () => {
+    delete process.env.LOONGSUITE_USER_ID;
+    const handlers = registerPlugin(await loadPlugin());
+    const parent = { runId: 'parent-run', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    await handlers.before_agent_run({ prompt: 'delegate', senderId: 'user-a' }, parent);
+    await handlers.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn-a', params: {} }, parent);
+    const child = { runId: 'child-run', sessionId: 'child-session', sessionKey: 'agent:main:subagent:child-a' };
+    await handlers.before_agent_run({ prompt: 'child task' }, child);
+    await handlers.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn-a', result: {
+      details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey },
+    } }, parent);
+    await handlers.llm_output({}, child);
+    const records = readOutputRecords();
+    const spawn = records.find(r => r['event.name'] === 'tool.call');
+    const children = records.filter(r => r['gen_ai.turn.id'] === child.runId);
+    expect(children.length).toBeGreaterThan(0);
+    expect(spawn.span_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(children.every(r => r.trace_id === spawn.trace_id)).toBe(true);
+    expect(children.every(r => r.parent_span_id === spawn.span_id)).toBe(true);
+    expect(children.every(r => r['user.id'] === 'user-a')).toBe(true);
+    expect(children.every(r => r['gen_ai.session.id'] === 'child-session')).toBe(true);
+  });
+});
+
+it('keeps simultaneous spawns separate and recovers their identity after plugin restart with content off', async () => {
+  delete process.env.LOONGSUITE_USER_ID;
+  fs.writeFileSync(path.join(pilotDataDir, 'config.json'), JSON.stringify({ agents: { openclaw: { captureMessageContent: false } } }));
+  const h = registerPlugin(await loadPlugin());
+  const parents = [0, 1].map(i => ({ runId: `p${i}`, sessionId: `ps${i}`, sessionKey: `agent:main:p${i}` }));
+  for (const [i, parent] of parents.entries()) {
+    await h.before_agent_run({ prompt: 'secret-task', senderId: `user-${i}` }, parent);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'same-native-id', params: { task: 'secret-task' } }, parent);
+  }
+  // The second tool completes first; neither timing nor call id alone is a join.
+  for (const i of [1, 0]) await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'same-native-id', result: {
+    details: { status: 'accepted', runId: `c${i}`, childSessionKey: `agent:main:subagent:c${i}` },
+  } }, parents[i]);
+  const restarted = registerPlugin(await loadPlugin());
+  for (const i of [0, 1]) {
+    const child = { runId: `c${i}`, sessionId: `cs${i}`, sessionKey: `agent:main:subagent:c${i}` };
+    await restarted.before_agent_run({ prompt: 'secret-task' }, child);
+    await restarted.llm_output({}, child);
+  }
+  const rows = readOutputRecords();
+  const calls = rows.filter(r => r['event.name'] === 'tool.call');
+  expect(new Set(calls.map(r => r.span_id)).size).toBe(2);
+  for (const i of [0, 1]) {
+    const call = calls.find(r => r['gen_ai.turn.id'] === `p${i}`);
+    const child = rows.filter(r => r['gen_ai.turn.id'] === `c${i}`);
+    expect(child.length).toBeGreaterThan(0);
+    expect(child.every(r => r.trace_id === call.trace_id && r.parent_span_id === call.span_id && r['user.id'] === `user-${i}`)).toBe(true);
+  }
+  expect(JSON.stringify(rows)).not.toContain('secret-task');
+  const dir = path.join(pilotDataDir, 'subagent-contexts', 'openclaw');
+  expect(fs.readdirSync(dir).map(name => fs.readFileSync(path.join(dir, name), 'utf8')).join('')).not.toContain('secret-task');
+});
+
+describe('fixed-session cron ownership', () => {
+  const ctx = { runId: 'cron-session', sessionId: 'cron-session', sessionKey: 'agent:main:cron:bound',
+    agentId: 'main', trigger: 'cron', jobId: 'job-1' };
+  const started = (h, runAtMs, state) => h.cron_changed({ action: 'started', jobId: ctx.jobId,
+    runAtMs, sessionTarget: `session:${ctx.sessionKey}`,
+    ...(state ? { job: { id: ctx.jobId, state } } : {}) }, {});
+  const finished = (h, runAtMs) => h.cron_changed({ action: 'finished', jobId: ctx.jobId,
+    runAtMs, sessionId: ctx.sessionId, sessionKey: ctx.sessionKey }, {});
+  const attempt = async (h, model) => {
+    await h.before_agent_reply({}, ctx);
+    await h.before_agent_run({ prompt: 'private task text' }, ctx);
+    await h.llm_input({ ...ctx, prompt: 'private task text', provider: 'test', model }, ctx);
+    await h.model_call_started({ ...ctx, callId: 'native-call', provider: 'test', model }, ctx);
+    await h.agent_end({ ...ctx, success: true }, ctx);
+    await h.llm_output({ ...ctx, provider: 'test', model }, ctx);
+  };
+
+  it('keeps one execution and call sequence across an in-process plugin reload', async () => {
+    const first = registerPlugin(await loadPlugin());
+    started(first, 100);
+    await attempt(first, 'primary');
+    const reloaded = registerPlugin(await loadPlugin());
+    await attempt(reloaded, 'fallback');
+    finished(reloaded, 100);
+    const rows = readOutputRecords();
+    const requests = rows.filter(row => row['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(2);
+    expect(new Set(requests.map(row => row['gen_ai.turn.id'])).size).toBe(1);
+    expect(new Set(requests.map(row => row.trace_id)).size).toBe(1);
+    expect(requests.map(row => row['gen_ai.step.id'])).toEqual(['cron-session:model:1', 'cron-session:model:2']);
+    expect(rows.filter(row => row['agent.openclaw.hook'] === 'cron_finished')).toHaveLength(1);
+  });
+
+  it('recovers a pending terminal after a Gateway restart without retaining prompt text', async () => {
+    const first = registerPlugin(await loadPlugin());
+    started(first, 100);
+    await attempt(first, 'primary');
+    const before = readOutputRecords().find(row => row['agent.openclaw.hook'] === 'before_agent_run');
+    const directory = path.join(pilotDataDir, 'cron-contexts', 'openclaw');
+    const stored = fs.readdirSync(directory).map(file => fs.readFileSync(path.join(directory, file), 'utf8')).join('');
+    expect(stored).not.toContain('private task text');
+    globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].delete(pilotDataDir);
+    const restarted = registerPlugin(await loadPlugin());
+    finished(restarted, 100);
+    const terminal = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]['gen_ai.turn.id']).toBe(before['gen_ai.turn.id']);
+    expect(terminal[0].trace_id).toBe(before.trace_id);
+    expect(fs.readdirSync(directory)).toHaveLength(0);
+    finished(restarted, 100);
+    expect(readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished')).toHaveLength(1);
+  });
+
+  it('seals a missed terminal as incomplete before the next execution and ignores an old finish', async () => {
+    const first = registerPlugin(await loadPlugin());
+    started(first, 100);
+    await attempt(first, 'primary');
+    globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].delete(pilotDataDir);
+    const restarted = registerPlugin(await loadPlugin());
+    started(restarted, 200, { runningAtMs: 200, lastRunAtMs: 100, lastRunStatus: 'error' });
+    await attempt(restarted, 'next');
+    finished(restarted, 100);
+    finished(restarted, 200);
+    const rows = readOutputRecords();
+    const starts = rows.filter(row => row['agent.openclaw.hook'] === 'before_agent_run');
+    const ends = rows.filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map(row => row['gen_ai.turn.id'])).size).toBe(2);
+    expect(ends).toHaveLength(2);
+    expect(ends[0]).toMatchObject({ 'gen_ai.turn.id': starts[0]['gen_ai.turn.id'],
+      'agent.openclaw.collection.incomplete': true, 'agent.openclaw.collection.end_reason': 'missing_cron_finished' });
+    const lastOutput = rows.find(row => row['agent.openclaw.hook'] === 'llm_output');
+    expect(ends[0].time_unix_nano).toBe(lastOutput.time_unix_nano);
+    expect(ends[0]['agent.openclaw.timing.inferred']).toBe(true);
+    expect(ends[1]['gen_ai.turn.id']).toBe(starts[1]['gen_ai.turn.id']);
+  });
+
+  it('uses the native finish time rather than the later recovery time', async () => {
+    vi.useFakeTimers();
+    const start = Date.now();
+    const h = registerPlugin(await loadPlugin());
+    started(h, start);
+    await attempt(h, 'first');
+    const next = start + 30_000;
+    vi.setSystemTime(next);
+    started(h, next, { runningAtMs: next, lastRunAtMs: start, lastRunStatus: 'ok', lastDurationMs: 500 });
+    const end = readOutputRecords().find(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(end.time_unix_nano).toBe(`${start + 500}000000`);
+    expect(end.observed_time_unix_nano).toBe(`${next}000000`);
+    expect(end['agent.openclaw.collection.incomplete']).toBe(true);
+    expect(end['agent.openclaw.timing.inferred']).toBeUndefined();
+  });
+
+  it('does not discard saved ownership on a newer start without native completion evidence', async () => {
+    const first = registerPlugin(await loadPlugin());
+    started(first, 100);
+    await attempt(first, 'primary');
+    globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].delete(pilotDataDir);
+    const restarted = registerPlugin(await loadPlugin());
+    started(restarted, 200);
+    expect(readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished')).toHaveLength(0);
+    const directory = path.join(pilotDataDir, 'cron-contexts', 'openclaw');
+    expect(fs.readdirSync(directory)).toHaveLength(1);
+  });
+
+  it('recovers a missed finish without restarting when the native job confirms the earlier execution ended', async () => {
+    const h = registerPlugin(await loadPlugin());
+    started(h, 100);
+    await attempt(h, 'first');
+    started(h, 200, { runningAtMs: 200, lastRunAtMs: 100, lastRunStatus: 'ok' });
+    await attempt(h, 'second');
+    finished(h, 100); // A late finish cannot close the new execution.
+    finished(h, 200);
+    const rows = readOutputRecords();
+    const starts = rows.filter(row => row['agent.openclaw.hook'] === 'before_agent_run');
+    const ends = rows.filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map(row => row['gen_ai.turn.id'])).size).toBe(2);
+    expect(ends).toHaveLength(2);
+    expect(ends[0]).toMatchObject({ 'gen_ai.turn.id': starts[0]['gen_ai.turn.id'],
+      'agent.openclaw.collection.incomplete': true, 'agent.openclaw.collection.end_reason': 'missing_cron_finished' });
+    expect(ends[1]['gen_ai.turn.id']).toBe(starts[1]['gen_ai.turn.id']);
+  });
+
+  it('does not infer completion from a later start without matching native completion evidence', async () => {
+    const h = registerPlugin(await loadPlugin());
+    started(h, 100);
+    await attempt(h, 'first');
+    started(h, 200, { runningAtMs: 100, lastRunAtMs: 50, lastRunStatus: 'ok' });
+    const rows = readOutputRecords();
+    expect(rows.filter(row => row['agent.openclaw.hook'] === 'cron_finished')).toHaveLength(0);
+  });
+
+  it('recovers a missing finish without another execution only after the native scheduler confirms completion', async () => {
+    const h = registerPlugin(await loadPlugin());
+    let state = { runningAtMs: 100 };
+    const list = vi.fn(async () => [{ id: ctx.jobId, state }]);
+    h.gateway_start({}, { getCron: () => ({ list }) });
+    started(h, 100);
+    await attempt(h, 'primary');
+    const recovery = globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].get(pilotDataDir).recovery;
+    expect(await recovery.reconcile()).toBe(true);
+    expect(readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished')).toHaveLength(0);
+    state = { lastRunAtMs: 100, lastRunStatus: 'ok' };
+    await recovery.reconcile();
+    finished(h, 100); // The delayed real hook must not duplicate the terminal.
+    const ends = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(ends).toHaveLength(1);
+    expect(ends[0]).toMatchObject({ 'agent.openclaw.collection.incomplete': true,
+      'agent.openclaw.collection.end_reason': 'missing_cron_finished' });
+    h.gateway_stop({}, {});
+  });
+
+  it('uses the scheduler to recover saved ownership after a Gateway restart without a later job', async () => {
+    const first = registerPlugin(await loadPlugin());
+    started(first, 100);
+    await attempt(first, 'primary');
+    const before = readOutputRecords().find(row => row['agent.openclaw.hook'] === 'before_agent_run');
+    globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].delete(pilotDataDir);
+    const restarted = registerPlugin(await loadPlugin());
+    restarted.gateway_start({}, { getCron: () => ({ list: async () => [
+      { id: ctx.jobId, state: { lastRunAtMs: 100, lastRunStatus: 'error' } },
+    ] }) });
+    const recovery = globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].get(pilotDataDir).recovery;
+    await recovery.reconcile();
+    const ends = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(ends).toHaveLength(1);
+    expect(ends[0]['gen_ai.turn.id']).toBe(before['gen_ai.turn.id']);
+    expect(ends[0].trace_id).toBe(before.trace_id);
+    restarted.gateway_stop({}, {});
+  });
+
+  it('recovers a deleted one-shot only when the native removal snapshot proves it finished', async () => {
+    const h = registerPlugin(await loadPlugin());
+    started(h, 100);
+    await attempt(h, 'primary');
+    h.cron_changed({ action: 'removed', jobId: ctx.jobId,
+      job: { id: ctx.jobId, state: { runningAtMs: 100 } } }, {});
+    expect(readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished')).toHaveLength(0);
+    h.cron_changed({ action: 'removed', jobId: ctx.jobId,
+      job: { id: ctx.jobId, state: { lastRunAtMs: 100, lastRunStatus: 'ok', lastDurationMs: 5 } } }, {});
+    const ends = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(ends).toHaveLength(1);
+    expect(ends[0]['agent.openclaw.collection.incomplete']).toBe(true);
+  });
+
+  it('does not duplicate a real finish that arrives while scheduler recovery is in flight', async () => {
+    const h = registerPlugin(await loadPlugin());
+    let release;
+    const list = vi.fn(() => new Promise(resolve => { release = resolve; }));
+    h.gateway_start({}, { getCron: () => ({ list }) });
+    started(h, 100);
+    await attempt(h, 'primary');
+    const recovery = globalThis[Symbol.for('loongsuite-pilot.openclaw.cron-executions')].get(pilotDataDir).recovery;
+    const pending = recovery.reconcile();
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    finished(h, 100);
+    release([{ id: ctx.jobId, state: { lastRunAtMs: 100, lastRunStatus: 'ok' } }]);
+    await pending;
+    const ends = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'cron_finished');
+    expect(ends).toHaveLength(1);
+    expect(ends[0]['agent.openclaw.collection.incomplete']).toBeUndefined();
+    h.gateway_stop({}, {});
+  });
+
+  it('starts fresh after a native job finishes without an llm_output hook', async () => {
+    const handlers = registerPlugin(await loadPlugin());
+    started(handlers, 100);
+    await handlers.before_agent_reply({}, ctx);
+    await handlers.before_agent_run({ prompt: 'first' }, ctx);
+    finished(handlers, 100);
+    started(handlers, 200);
+    await attempt(handlers, 'second');
+    finished(handlers, 200);
+    const starts = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'before_agent_run');
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map(row => row['gen_ai.turn.id'])).size).toBe(2);
+  });
+
+  it('keeps the original producer behavior if durable cron ownership cannot be written', async () => {
+    const handlers = registerPlugin(await loadPlugin());
+    const rename = fs.renameSync;
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (String(to).includes(`${path.sep}cron-contexts${path.sep}`)) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      return rename(from, to);
+    });
+    started(handlers, 100);
+    await attempt(handlers, 'primary');
+    finished(handlers, 100);
+    const rows = readOutputRecords();
+    const input = rows.find(row => row['agent.openclaw.hook'] === 'before_agent_run');
+    expect(input['gen_ai.turn.id']).toBe(ctx.runId);
+    expect(input['agent.openclaw.collection']).toBeUndefined();
+    expect(rows.some(row => row['agent.openclaw.hook'] === 'cron_finished')).toBe(false);
+  });
+
+  it('does not inherit a previous delegated parent or sender for an independent scheduled invocation', async () => {
+    delete process.env.LOONGSUITE_USER_ID;
+    const handlers = registerPlugin(await loadPlugin());
+    const parent = { runId: 'parent', sessionId: 'parent-session', sessionKey: 'agent:main:parent' };
+    await handlers.before_agent_run({ prompt: 'parent', senderId: 'user-a' }, parent);
+    await handlers.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn', params: { task: 'child' } }, parent);
+    await handlers.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn', result: {
+      details: { status: 'accepted', runId: ctx.runId, childSessionKey: ctx.sessionKey },
+    } }, parent);
+    await handlers.before_agent_run({ prompt: 'child' }, { ...ctx, jobId: undefined, trigger: undefined });
+    await handlers.llm_output({}, { ...ctx, jobId: undefined, trigger: undefined });
+    started(handlers, 100);
+    await handlers.before_agent_reply({}, ctx);
+    await handlers.before_agent_run({ prompt: 'scheduled', senderId: 'user-b' }, ctx);
+    finished(handlers, 100);
+    const scheduled = readOutputRecords().filter(row => row['agent.openclaw.hook'] === 'before_agent_run').at(-1);
+    expect(scheduled['agent.openclaw.run_id']).toBe(ctx.runId);
+    expect(scheduled['user.id']).toBe('user-b');
+    expect(scheduled['gen_ai.agent.parent.invocation.id']).toBeUndefined();
+    expect(scheduled.parent_span_id).toBeUndefined();
+  });
+});

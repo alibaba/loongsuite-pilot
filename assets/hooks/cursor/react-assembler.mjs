@@ -19,6 +19,7 @@ import {
   toJsonValue,
   parseMaybeJson,
 } from '../agent-event-normalizer.mjs';
+import { cursorWorkspaceFields, resolveWorkspacePath } from './workspace-context.mjs';
 
 // ─── Public API ───
 
@@ -80,6 +81,7 @@ export function assembleTurn(journalEvents, options = {}) {
     .filter(e => e.conversation_id === parentConvId)
     .filter(e => e.hook_event !== 'sessionStart')
     .sort((a, b) => tsMs(a) - tsMs(b));
+  const workspacePath = resolveWorkspacePath(parentEvents);
 
   const baseFields = {
     trace_id: traceId,
@@ -87,6 +89,7 @@ export function assembleTurn(journalEvents, options = {}) {
     'gen_ai.turn.id': turnId,
     'gen_ai.agent.type': variant,
     'user.id': userId,
+    ...cursorWorkspaceFields(variant, workspacePath),
   };
 
   const records = [];
@@ -191,8 +194,10 @@ export function assembleTurn(journalEvents, options = {}) {
   for (const link of childLinks) {
     const { childConvId, childEvents, parentToolCallId } = link;
     const childConvShort = childConvId.slice(0, 8);
+    const childWorkspacePath = resolveWorkspacePath(childEvents) || workspacePath;
     const childBaseFields = {
       ...baseFields,
+      ...cursorWorkspaceFields(variant, childWorkspacePath),
       'gen_ai.agent.scope': 'subagent',
       'gen_ai.agent.depth': 1,
       'gen_ai.agent.id': childConvId,
@@ -265,6 +270,7 @@ function buildParentSteps(events, ctx) {
   let currentStepId = null;
   let currentStepHasTools = false;
   let currentLlmResponse = null;
+  let previousAssistantToolMessage = null;
   let previousToolResults = [];
   // Track last event timestamp for computing next step's LLM start time
   let lastStepEndTs = ctx.promptEventTs; // first step starts at prompt time
@@ -286,7 +292,7 @@ function buildParentSteps(events, ctx) {
   let pendingToolResults = [];
   const synthesizedSubagentIds = new Set();
 
-  const stepEvents = events.filter(e =>
+  const stepEvents = dedupeAfterAgentThoughtEvents(events).filter(e =>
     e.hook_event === 'afterAgentThought' ||
     e.hook_event === 'afterAgentResponse' ||
     e.hook_event === 'preToolUse' ||
@@ -295,11 +301,102 @@ function buildParentSteps(events, ctx) {
   );
 
   const stepToolCalls = new Map();
+  const activeSyncToolCalls = new Map();
+
+  function syncToolKey(ev) {
+    return `${ev.tool_use_id || ''}\u0000${ev.tool_name || ''}`;
+  }
+
+  function parseSyncToolKey(key) {
+    const separatorIndex = key.indexOf('\u0000');
+    return {
+      toolUseId: separatorIndex >= 0 ? key.slice(0, separatorIndex) : key,
+      toolName: separatorIndex >= 0 ? key.slice(separatorIndex + 1) : '',
+    };
+  }
+
+  function drainActiveSyncTool(key) {
+    const count = activeSyncToolCalls.get(key) || 0;
+    if (count <= 1) activeSyncToolCalls.delete(key);
+    else activeSyncToolCalls.set(key, count - 1);
+  }
+
+  function syncToolCompletionMatches(key, ev) {
+    const active = parseSyncToolKey(key);
+    const resultToolUseId = ev.tool_use_id || '';
+    const resultToolName = ev.tool_name || '';
+    if (active.toolName !== resultToolName) return false;
+    if (active.toolUseId && resultToolUseId) {
+      return active.toolUseId === resultToolUseId;
+    }
+    return true;
+  }
+
+  function markSyncToolStarted(ev) {
+    if (isSubagentTool(ev.tool_name)) return;
+    const key = syncToolKey(ev);
+    activeSyncToolCalls.set(key, (activeSyncToolCalls.get(key) || 0) + 1);
+  }
+
+  function markSyncToolFinished(ev) {
+    if (isSubagentTool(ev.tool_name)) return;
+    const key = syncToolKey(ev);
+    if (activeSyncToolCalls.has(key)) {
+      drainActiveSyncTool(key);
+      return;
+    }
+
+    // Cursor occasionally omits tool_use_id on one side of the hook pair.
+    // Fall back to tool name only when it identifies exactly one active call.
+    const fallbackKeys = [...activeSyncToolCalls.keys()]
+      .filter(activeKey => syncToolCompletionMatches(activeKey, ev));
+    if (fallbackKeys.length === 1) {
+      drainActiveSyncTool(fallbackKeys[0]);
+    }
+  }
+
+  function recoverLeakedSyncTools(eventIndex) {
+    let recovered = false;
+    for (const [key, activeCount] of activeSyncToolCalls) {
+      let remainingCompletions = 0;
+      for (let i = eventIndex + 1; i < stepEvents.length; i++) {
+        const futureEvent = stepEvents[i];
+        if (
+          (futureEvent.hook_event === 'postToolUse' ||
+            futureEvent.hook_event === 'postToolUseFailure') &&
+          !isSubagentTool(futureEvent.tool_name) &&
+          syncToolCompletionMatches(key, futureEvent)
+        ) {
+          remainingCompletions++;
+        }
+      }
+
+      if (remainingCompletions === 0) {
+        activeSyncToolCalls.delete(key);
+        recovered = true;
+      } else if (remainingCompletions < activeCount) {
+        activeSyncToolCalls.set(key, remainingCompletions);
+        recovered = true;
+      }
+    }
+    return recovered;
+  }
+
+  function canOpenStepAfterTools(ev, eventIndex) {
+    if (!currentStepHasTools) return false;
+    const recoveredLeakedTool = recoverLeakedSyncTools(eventIndex);
+    if (activeSyncToolCalls.size > 0) return false;
+    if (previousToolResults.length === 0) return recoveredLeakedTool;
+
+    const latestResultEndTs = latestToolResultEndTs(previousToolResults);
+    return latestResultEndTs == null || tsMs(ev) >= timestampMs(latestResultEndTs);
+  }
 
   function finalizeCurrentLlmResponse() {
     if (!currentLlmResponse) return;
     const toolCalls = stepToolCalls.get(currentStepId);
     appendToolCallParts(currentLlmResponse, toolCalls);
+    previousAssistantToolMessage = llmResponseToInputAssistantMessage(currentLlmResponse);
     applyToolCallResponseTiming(currentLlmResponse, toolCalls);
 
     // Guard: if LLM request start >= response end (buffered-tool scenario),
@@ -366,15 +463,27 @@ function buildParentSteps(events, ctx) {
     // Compute delta for this step:
     //   s1: user prompt (if any) — already pre-seeded in cumulative.
     //   s2+: tool results from previous step — append to cumulative.
-    const deltaMessages = buildDeltaMessages(isFirst, userPrompt, previousToolResults, cumulativeInputMessages);
+    const latestResultEndTs = latestToolResultEndTs(previousToolResults);
+    const deltaMessages = buildDeltaMessages(
+      isFirst,
+      userPrompt,
+      previousAssistantToolMessage,
+      previousToolResults,
+      cumulativeInputMessages,
+    );
 
-    const { timestamp: reqTs, source: reqTsSource } = llmRequestStartTime(ev, lastStepEndTs);
+    const requestStart = llmRequestStartTime(ev, lastStepEndTs);
+    const { timestamp: reqTs, source: reqTsSource } = clampRequestStartToToolResults(
+      requestStart,
+      latestResultEndTs,
+    );
     records.push(buildLlmRequestWithTs(
       reqTs, ev, ctx, currentStepId,
       deltaMessages,
       cumulativeInputMessages,
       reqTsSource,
     ));
+    previousAssistantToolMessage = null;
     previousToolResults = [];
   }
 
@@ -388,7 +497,14 @@ function buildParentSteps(events, ctx) {
     currentStepId = `${ctx.stepPrefix || ctx.turnId}:s${stepRound}`;
     stepToolCalls.set(currentStepId, []);
 
-    const deltaMessages = buildDeltaMessages(isFirstStep, ctx.userPrompt, previousToolResults, cumulativeInputMessages);
+    const deltaMessages = buildDeltaMessages(
+      isFirstStep,
+      ctx.userPrompt,
+      previousAssistantToolMessage,
+      previousToolResults,
+      cumulativeInputMessages,
+    );
+    previousAssistantToolMessage = null;
     previousToolResults = [];
 
     records.push(buildLlmRequestWithTs(
@@ -402,10 +518,11 @@ function buildParentSteps(events, ctx) {
     currentStepHasTools = true;
   }
 
-  for (const ev of stepEvents) {
+  for (let eventIndex = 0; eventIndex < stepEvents.length; eventIndex++) {
+    const ev = stepEvents[eventIndex];
 
     if (ev.hook_event === 'afterAgentThought') {
-      if (currentStepId === null || currentStepHasTools) {
+      if (currentStepId === null || canOpenStepAfterTools(ev, eventIndex)) {
         openNewStep(ev, stepRound === 0, ctx.userPrompt);
         currentLlmResponse = buildLlmResponse(ev, ctx, currentStepId, 'reasoning');
         if (flushPendingTools(currentStepId)) currentStepHasTools = true;
@@ -426,7 +543,7 @@ function buildParentSteps(events, ctx) {
         openImplicitStep(reqTs, reqTsSource);
       }
 
-      if (currentStepId !== null && currentStepHasTools) {
+      if (currentStepId !== null && canOpenStepAfterTools(ev, eventIndex)) {
         openNewStep(ev, false, null);
         currentLlmResponse = buildLlmResponseWithToken(ev, ctx, currentStepId, 'text');
         if (flushPendingTools(currentStepId)) currentStepHasTools = true;
@@ -445,6 +562,7 @@ function buildParentSteps(events, ctx) {
     }
 
     else if (ev.hook_event === 'preToolUse') {
+      markSyncToolStarted(ev);
       if (!currentStepId) {
         pendingToolRecords.push(buildToolCall(ev, ctx, '__pending__'));
         pendingToolCalls.push({
@@ -457,7 +575,12 @@ function buildParentSteps(events, ctx) {
         if (isSubagentTool(ev.tool_name) && ctx.subagentResults?.has(ev.tool_use_id)) {
           const sr = ctx.subagentResults.get(ev.tool_use_id);
           pendingToolRecords.push(buildSubagentResult(ev, sr, ctx, '__pending__'));
-          pendingToolResults.push({ toolName: ev.tool_name, toolUseId: ev.tool_use_id, result: sr.resultText });
+          pendingToolResults.push({
+            toolName: ev.tool_name,
+            toolUseId: ev.tool_use_id,
+            result: sr.resultText,
+            endTs: sr.endTs,
+          });
           if (ev.tool_use_id) synthesizedSubagentIds.add(ev.tool_use_id);
         }
       } else {
@@ -471,7 +594,12 @@ function buildParentSteps(events, ctx) {
           toolObservedAt = childStartTs;
           records.push(buildToolCallWithTs(childStartTs, ev, ctx, currentStepId));
           records.push(buildSubagentResult(ev, sr, ctx, currentStepId));
-          previousToolResults.push({ toolName: ev.tool_name, toolUseId: ev.tool_use_id, result: sr.resultText });
+          previousToolResults.push({
+            toolName: ev.tool_name,
+            toolUseId: ev.tool_use_id,
+            result: sr.resultText,
+            endTs: sr.endTs,
+          });
           lastStepEndTs = sr.endTs;
           if (ev.tool_use_id) synthesizedSubagentIds.add(ev.tool_use_id);
         } else {
@@ -490,16 +618,29 @@ function buildParentSteps(events, ctx) {
     }
 
     else if (ev.hook_event === 'postToolUse' || ev.hook_event === 'postToolUseFailure') {
-      if (synthesizedSubagentIds.has(ev.tool_use_id)) continue;
+      if (isSubagentTool(ev.tool_name) && synthesizedSubagentIds.has(ev.tool_use_id)) continue;
+      markSyncToolFinished(ev);
 
       if (!currentStepId) {
         pendingToolRecords.push(buildToolResult(ev, ctx, '__pending__'));
         applyToolDurationToCall(pendingToolRecords, '__pending__', ev);
-        pendingToolResults.push({ toolName: ev.tool_name, toolUseId: ev.tool_use_id, result: ev.tool_output, error: ev.error_message });
+        pendingToolResults.push({
+          toolName: ev.tool_name,
+          toolUseId: ev.tool_use_id,
+          result: ev.tool_output,
+          error: ev.error_message,
+          endTs: ev._journal_ts,
+        });
       } else {
         applyToolDurationToCall(records, currentStepId, ev);
         records.push(buildToolResult(ev, ctx, currentStepId));
-        previousToolResults.push({ toolName: ev.tool_name, toolUseId: ev.tool_use_id, result: ev.tool_output, error: ev.error_message });
+        previousToolResults.push({
+          toolName: ev.tool_name,
+          toolUseId: ev.tool_use_id,
+          result: ev.tool_output,
+          error: ev.error_message,
+          endTs: ev._journal_ts,
+        });
         // Track step end time
         lastStepEndTs = ev._journal_ts;
       }
@@ -549,26 +690,66 @@ function cloneMessages(messages) {
   return JSON.parse(JSON.stringify(messages));
 }
 
-/** Build a tool-role message from collected tool results (used as delta input on s2+ steps). */
-function toolResultsToMessage(toolResults) {
-  const parts = toolResults.map(tr => ({
+/** Build one tool response part from a collected result. */
+function toolResultToPart(toolResult) {
+  return {
     type: 'tool_call_response',
-    id: tr.toolUseId || null,
-    response: tr.error || stringify(tr.result),
-  }));
-  return { role: 'tool', parts };
+    id: toolResult.toolUseId || null,
+    response: toolResult.error || stringify(toolResult.result),
+  };
+}
+
+/**
+ * Preserve the previous LLM output as one assistant message, then emit one
+ * tool-role message per completed response. This mirrors the causal sequence:
+ * assistant(reasoning/text + all calls), tool(result A), tool(result B).
+ */
+function toolExchangeMessages(assistantToolMessage, toolResults) {
+  const calls = Array.isArray(assistantToolMessage?.parts)
+    ? assistantToolMessage.parts.filter(part => part?.type === 'tool_call')
+    : [];
+  const usedResultIndexes = new Set();
+  const messages = assistantToolMessage
+    ? [cloneMessages([assistantToolMessage])[0]]
+    : [];
+
+  for (const call of calls) {
+    const resultIndex = toolResults.findIndex((result, index) =>
+      !usedResultIndexes.has(index) &&
+      typeof call.id === 'string' && call.id.length > 0 &&
+      typeof result.toolUseId === 'string' && result.toolUseId.length > 0 &&
+      result.toolUseId === call.id
+    );
+    if (resultIndex >= 0) {
+      usedResultIndexes.add(resultIndex);
+      messages.push({ role: 'tool', parts: [toolResultToPart(toolResults[resultIndex])] });
+    }
+  }
+
+  for (let index = 0; index < toolResults.length; index++) {
+    if (usedResultIndexes.has(index)) continue;
+    messages.push({ role: 'tool', parts: [toolResultToPart(toolResults[index])] });
+  }
+  return messages;
 }
 
 /**
  * Build per-step delta messages and update cumulative input.
  *
  * - isFirst step: delta includes the user prompt (already pre-seeded in cumulative).
- * - s2+ steps: delta includes a tool-role message from the previous step's results,
- *   which is also appended to cumulativeInputMessages.
+ * - s2+ steps: delta includes the complete previous assistant output followed
+ *   by one tool message per completed result. They are appended to cumulative
+ *   input in source order.
  *
  * Callers are responsible for resetting previousToolResults after this call.
  */
-function buildDeltaMessages(isFirst, userPrompt, previousToolResults, cumulativeInputMessages) {
+function buildDeltaMessages(
+  isFirst,
+  userPrompt,
+  previousAssistantToolMessage,
+  previousToolResults,
+  cumulativeInputMessages,
+) {
   const deltaMessages = [];
   if (isFirst && userPrompt) {
     deltaMessages.push({
@@ -577,9 +758,12 @@ function buildDeltaMessages(isFirst, userPrompt, previousToolResults, cumulative
     });
   }
   if (previousToolResults.length > 0) {
-    const toolMessage = toolResultsToMessage(previousToolResults);
-    deltaMessages.push(toolMessage);
-    cumulativeInputMessages.push({ ...toolMessage, parts: [...toolMessage.parts] });
+    const exchangeMessages = toolExchangeMessages(
+      previousAssistantToolMessage,
+      previousToolResults,
+    );
+    deltaMessages.push(...cloneMessages(exchangeMessages));
+    cumulativeInputMessages.push(...cloneMessages(exchangeMessages));
   }
   return deltaMessages;
 }
@@ -721,6 +905,16 @@ function appendToolCallParts(llmResponse, toolCalls) {
   }
 }
 
+function llmResponseToInputAssistantMessage(llmResponse) {
+  const outputMessages = llmResponse?.['gen_ai.output.messages'];
+  const assistant = Array.isArray(outputMessages)
+    ? outputMessages.find(message => message?.role === 'assistant')
+    : null;
+  if (!assistant || !Array.isArray(assistant.parts)) return null;
+  if (!assistant.parts.some(part => part?.type === 'tool_call')) return null;
+  return { role: 'assistant', parts: cloneMessages(assistant.parts) };
+}
+
 function applyToolCallResponseTiming(llmResponse, toolCalls) {
   if (!toolCalls || toolCalls.length === 0) return;
   const observedToolCalls = toolCalls
@@ -817,6 +1011,20 @@ function llmRequestStartTime(ev, fallbackTs) {
   };
 }
 
+function clampRequestStartToToolResults(requestStart, latestResultEndTs) {
+  if (latestResultEndTs == null) return requestStart;
+  const requestStartMs = timestampMs(requestStart.timestamp);
+  const latestResultEndMs = timestampMs(latestResultEndTs);
+  if (!Number.isFinite(requestStartMs) || !Number.isFinite(latestResultEndMs)) {
+    return requestStart;
+  }
+  if (requestStartMs >= latestResultEndMs) return requestStart;
+  return {
+    timestamp: latestResultEndTs,
+    source: 'previous_tool_result_end',
+  };
+}
+
 function durationStartMs(ev) {
   const endMs = tsMs(ev);
   const durationMs = Number(ev?.duration_ms);
@@ -825,6 +1033,91 @@ function durationStartMs(ev) {
 }
 
 // ─── Helpers ───
+
+/**
+ * Cursor can emit each logical afterAgentThought twice: once with the base
+ * generation id and once with a "<base>-<index>-<random>" id. Pair these
+ * variants exactly and drop only the suffixed copy. There is intentionally no
+ * timing window: hook process scheduling can delay the duplicate arbitrarily.
+ */
+function dedupeAfterAgentThoughtEvents(events) {
+  const thoughtEvents = events.filter(event =>
+    event.hook_event === 'afterAgentThought' &&
+    typeof event.generation_id === 'string'
+  );
+  const generationIds = new Set(thoughtEvents.map(event => event.generation_id));
+  const annotated = events.map(event => {
+    if (
+      event.hook_event !== 'afterAgentThought' ||
+      typeof event.conversation_id !== 'string' ||
+      typeof event.generation_id !== 'string' ||
+      typeof event.text !== 'string'
+    ) {
+      return { event, duplicateKey: null, isSuffixedVariant: false };
+    }
+
+    const durationMs = Number(event.duration_ms);
+    if (!Number.isFinite(durationMs)) {
+      return { event, duplicateKey: null, isSuffixedVariant: false };
+    }
+
+    const suffixMatch = event.generation_id.match(/^(.+)-(\d+)-([a-z0-9]{4,})$/i);
+    const suffixBase = suffixMatch?.[1];
+    const isSuffixedVariant = Boolean(suffixBase && generationIds.has(suffixBase));
+    const canonicalGenerationId = isSuffixedVariant
+      ? suffixBase
+      : event.generation_id;
+    const duplicateKey = JSON.stringify([
+      event.conversation_id,
+      canonicalGenerationId,
+      event.text,
+      durationMs,
+    ]);
+    return { event, duplicateKey, isSuffixedVariant };
+  });
+
+  const availableBaseCounts = new Map();
+  for (const item of annotated) {
+    if (item.duplicateKey && !item.isSuffixedVariant) {
+      availableBaseCounts.set(
+        item.duplicateKey,
+        (availableBaseCounts.get(item.duplicateKey) || 0) + 1,
+      );
+    }
+  }
+
+  const consumedBaseCounts = new Map();
+  return annotated
+    .filter(item => {
+      if (!item.duplicateKey || !item.isSuffixedVariant) return true;
+      const available = availableBaseCounts.get(item.duplicateKey) || 0;
+      const consumed = consumedBaseCounts.get(item.duplicateKey) || 0;
+      if (consumed >= available) return true;
+      consumedBaseCounts.set(item.duplicateKey, consumed + 1);
+      return false;
+    })
+    .map(item => item.event);
+}
+
+function latestToolResultEndTs(toolResults) {
+  let latestTs = null;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const result of toolResults) {
+    const endMs = timestampMs(result?.endTs);
+    if (Number.isFinite(endMs) && endMs > latestMs) {
+      latestMs = endMs;
+      latestTs = result.endTs;
+    }
+  }
+  return latestTs;
+}
+
+function timestampMs(value) {
+  if (typeof value === 'number') return value;
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'string') return new Date(value).getTime();
+  return Number.NaN;
+}
 
 function appendPart(llmResponse, partType, text) {
   const msgs = llmResponse['gen_ai.output.messages'];

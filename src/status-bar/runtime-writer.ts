@@ -10,6 +10,7 @@ const logger = createLogger('RuntimeWriter');
 export interface RuntimeRecord {
   status: string;
   packageVersion: string;
+  gitCommit?: string;
   pid: number;
   updatedAt: string;
 }
@@ -18,20 +19,17 @@ export class RuntimeWriter {
   private readonly filePath: string;
   private readonly config: StatusBarConfig;
   private readonly packageVersion: string;
+  private readonly gitCommit: string;
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(dataDir: string, config: StatusBarConfig, packageVersion: string) {
+  constructor(dataDir: string, config: StatusBarConfig, packageVersion: string, gitCommit = '') {
     this.filePath = path.join(dataDir, 'logs', 'runtime.json');
     this.config = config;
     this.packageVersion = packageVersion;
+    this.gitCommit = gitCommit;
   }
 
   start(): void {
-    if (!this.config.enabled) {
-      logger.info('runtime writer disabled');
-      return;
-    }
-
     void this.write();
 
     this.intervalTimer = setInterval(
@@ -67,6 +65,7 @@ export class RuntimeWriter {
         pid: process.pid,
         updatedAt: new Date().toISOString(),
       };
+      if (this.gitCommit) record.gitCommit = this.gitCommit;
       await ensureDir(path.dirname(this.filePath));
       await writeJsonFile(this.filePath, record);
     } catch (err) {

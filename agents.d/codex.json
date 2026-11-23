@@ -8,16 +8,13 @@
   },
   "hook": {
     "settingsPath": "~/.codex/hooks.json",
-    "events": ["Stop"],
-    "retiredEvents": ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure"],
+    "systemSettingsPath": "/etc/codex/config.toml",
+    "events": ["SessionStart", "UserPromptSubmit", "SubagentStart", "SubagentStop", "Stop"],
+    "retiredEvents": ["PreToolUse", "PostToolUse", "PostToolUseFailure"],
     "hookCommand": "$PILOT_DATA/hooks/codex-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",
     "eventSubcommand": "kebab-case",
-    "replaceHookCommands": [
-      "otel-codex-hook",
-      ".cache/opentelemetry.instrumentation.codex"
-    ],
     "trustToml": {
       "configPath": "~/.codex/config.toml",
       "trustAlgo": "v1",
