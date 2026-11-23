@@ -356,16 +356,18 @@ function cmdStop() {
   // (5s poll) and zcode-rollout input (30s poll) time to dispatch all events
   // before the debounce window closes.
   //
-  // - toolCallCount > 0 (normal case): emit ['end_turn'] — the LLM finished its
-  //   turn and all tool results are in hook JSONL.
-  // - toolCallCount === 0 (interrupted): emit ['interrupted'] — ZCode was
-  //   killed before the model produced any tool_call; flush immediately so
-  //   ENTRY+AGENT skeleton spans appear without waiting 120s idle timeout.
+  // A successful turn can produce a text response without calling any tools.
+  // A native cancellation or a Stop with no response or tools uses the
+  // canonical cancelled reason.
   //
   // If ZCode is SIGKILL'd and Stop never fires, the turn is flushed by
   // turnIdleTimeoutMs (120s) as the ultimate fallback.
   const toolCallCount = event.toolCallCount ?? 0;
-  const isInterrupted = toolCallCount === 0;
+  const stopReason = String(event.stop_reason ?? event.stopReason ?? '').toLowerCase();
+  const hasResponse = [event.responseText, event.responsePreview]
+    .some(value => typeof value === 'string' && value.trim().length > 0);
+  const isInterrupted = ['interrupted', 'cancelled', 'canceled'].includes(stopReason)
+    || (!stopReason && toolCallCount === 0 && !hasResponse);
   const record = {
     ...baseFields(event, userId, runtimeConfig),
     time_unix_nano: isoToUnixNanos(event.timestamp),
@@ -374,7 +376,7 @@ function cmdStop() {
     'gen_ai.agent.event.name': 'stop',
     'gen_ai.agent.event.source': event.source || 'stop',
     'gen_ai.tool.call.count': toolCallCount,
-    'gen_ai.response.finish_reasons': [isInterrupted ? 'interrupted' : 'end_turn'],
+    'gen_ai.response.finish_reasons': [isInterrupted ? 'cancelled' : 'end_turn'],
   };
   const cleaned = applyHookContentPolicy(sanitizeObject(record) || record, runtimeConfig);
   writeJsonlRecords(defaultLogDir(), AGENT_ID, [cleaned]);

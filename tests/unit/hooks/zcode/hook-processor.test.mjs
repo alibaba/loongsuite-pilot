@@ -229,7 +229,6 @@ describe('zcode-hook-processor 端到端', () => {
     // zcode-log (5s poll) 和 zcode-rollout (30s poll) 充足时间 dispatch。
     //
     // toolCallCount > 0 (正常): emit ['end_turn'] — LLM 已完成 turn, 工具结果齐全
-    // toolCallCount === 0 (中断): emit ['interrupted'] — ZCode 被 kill 前未产出 tool_call
     expect(rec['event.name']).toBe('other');
     expect(rec['gen_ai.agent.event.name']).toBe('stop');
     expect(stop.toolCallCount).toBe(1); // fixture 是正常路径 (toolCallCount=1)
@@ -238,11 +237,17 @@ describe('zcode-hook-processor 端到端', () => {
     expect(rec['gen_ai.output.messages']).toBeUndefined();
   });
 
-  test('Stop 中断路径 (toolCallCount=0) emit finish_reason=interrupted', () => {
+  test.each([
+    ['completed text-only turn', 'Done.', undefined, 'end_turn'],
+    ['interrupted turn with no output', '', undefined, 'cancelled'],
+    ['explicitly cancelled turn with partial output', 'Partial text', 'interrupted', 'cancelled'],
+  ])('Stop records the canonical finish reason for a %s', (_scenario, text, stopReason, expected) => {
     const events = readHookEvents();
     const stop = events.find((e) => e.hook_event_name === 'Stop');
-    // 改为 toolCallCount=0 模拟中断场景 (ZCode 被 SIGTERM/SIGKILL 前未产出 tool_call)
     stop.toolCallCount = 0;
+    stop.responseText = text;
+    stop.responsePreview = text;
+    stop.stopReason = stopReason;
     const tmp = path.join(TMPDIR, 'transcript.jsonl');
     fs.copyFileSync(STOP_TRANSCRIPT_PATH, tmp);
     stop.transcript_path = tmp;
@@ -253,7 +258,7 @@ describe('zcode-hook-processor 端到端', () => {
     const records = readJsonlRecords();
     expect(records.length).toBe(1);
     const rec = records[0];
-    expect(rec['gen_ai.response.finish_reasons']).toEqual(['interrupted']);
+    expect(rec['gen_ai.response.finish_reasons']).toEqual([expected]);
   });
 
   test('Stop 同步拷贝 transcript 到 pilot data dir (architect 硬约束)', () => {

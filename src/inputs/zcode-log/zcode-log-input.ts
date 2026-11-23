@@ -28,6 +28,13 @@ export class ZcodeLogInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    return transformHookRecord(record, ClientType.ZcodeHook, 'zcode');
+    const entry = await transformHookRecord(record, ClientType.ZcodeHook, 'zcode');
+    const reasons = entry?.['gen_ai.response.finish_reasons'];
+    if (entry && reasons?.includes('interrupted')) {
+      entry['gen_ai.response.finish_reasons'] = reasons.map(reason =>
+        reason === 'interrupted' ? 'cancelled' : reason,
+      );
+    }
+    return entry;
   }
 }

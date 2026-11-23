@@ -1744,8 +1744,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       // The rollout closes a model request. Wait for the hook Stop so tools
       // delivered by the separate hook input can still join this turn.
       return entry['agent.source'] !== 'zcode-rollout'
-        && (hasTerminalFinishReason(entry['gen_ai.response.finish_reasons'])
-          || entry['gen_ai.response.finish_reasons']?.includes('interrupted') === true);
+        && hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
     }
     if (resolveAgentSystem(String(entry['gen_ai.agent.type'] ?? '')) === 'antigravity'
       && entry['gen_ai.turn.end'] !== undefined) return entry['gen_ai.turn.end'];

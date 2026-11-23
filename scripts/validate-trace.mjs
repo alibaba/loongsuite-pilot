@@ -17,7 +17,7 @@ const KNOWN_SUBAGENT_TOOLS = new Set(['Agent']);
 // TERMINAL_FINISH_REASONS; the Codex aborted-turn and WorkBuddy builders emit it
 // directly, so its absence here was rejecting valid output.
 // Exported so producers can assert against this set instead of hand-copying it.
-export const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'tool_calls', 'error', 'end_turn', 'max_tokens', 'cancelled', 'interrupted']);
+export const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'tool_calls', 'error', 'end_turn', 'max_tokens', 'cancelled']);
 const VALID_PART_TYPES = new Set(['text', 'tool_call', 'tool_call_response', 'reasoning']);
 
 export function isRuntimeSkillLoadSpan(tool) {

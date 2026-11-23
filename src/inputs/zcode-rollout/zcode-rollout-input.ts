@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
+import { normalizeFinishReason } from '../../normalization/finish-reason.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import {
   BaseSessionInput,
@@ -228,8 +229,7 @@ export class ZcodeRolloutInput extends BaseSessionInput {
     // and getToolDefinitionsForSpan emits gen_ai.tool.definitions on LLM spans.
     const toolDefinitions = extractToolDefinitions(record);
     const maxTokens = finiteNumber(requestBody.max_tokens);
-    const outputMessages = toGenAiOutputMessages(response);
-    const finishReasons = mapFinishReason(stringValue(response.finishReason));
+    const rawFinishReason = stringValue(response.finishReason);
 
     // Interrupted-path detection: rollout record was finalized (completedAt
     // present) but the model never returned a finishReason — typically SIGTERM
@@ -237,17 +237,20 @@ export class ZcodeRolloutInput extends BaseSessionInput {
     // would lack gen_ai.response.finish_reasons, gen_ai.output.messages, and
     // gen_ai.usage.* (all gated on the response fields being present), failing
     // validate-trace MUST rules and the CLAUDE.md input/output.messages
-    // non-empty high-priority invariant. Inject `interrupted` + placeholder
+    // non-empty high-priority invariant. Inject `cancelled` + placeholder
     // output + zero usage so the span satisfies the schema.
-    const isInterrupted = !!completedAt && !stringValue(response.finishReason);
-    const effectiveFinishReasons = finishReasons
-      ?? (isInterrupted ? ['interrupted'] : undefined);
+    const isInterrupted = !!completedAt && !rawFinishReason;
+    const nativeFinishReason = rawFinishReason?.replace(/-/g, '_') ?? '';
+    const finishReason = isInterrupted || ['interrupted', 'canceled'].includes(nativeFinishReason)
+      ? 'cancelled'
+      : normalizeFinishReason(nativeFinishReason);
+    const outputMessages = toGenAiOutputMessages(response, finishReason);
     const effectiveOutputMessages = outputMessages
       ?? (isInterrupted
         ? ([{
             role: 'assistant',
             parts: [{ type: 'text', content: '' }],
-            finish_reason: 'interrupted',
+            finish_reason: 'cancelled',
           }] as unknown as JsonValue)
         : undefined);
     const effectiveInputTokens = finiteNumber(usage.inputTokens) ?? (isInterrupted ? 0 : undefined);
@@ -298,7 +301,7 @@ export class ZcodeRolloutInput extends BaseSessionInput {
       'gen_ai.agent.name': 'ZCode',
       'gen_ai.request.model': modelId,
       'gen_ai.response.model': stringValue(response.modelId) ?? modelId,
-      ...(effectiveFinishReasons ? { 'response.finish_reasons': effectiveFinishReasons } : {}),
+      ...(finishReason ? { 'response.finish_reasons': [finishReason] } : {}),
       'gen_ai.usage.input_tokens': effectiveInputTokens,
       'gen_ai.usage.output_tokens': effectiveOutputTokens,
       'gen_ai.usage.cache_read.input_tokens': effectiveCacheRead,
@@ -487,10 +490,9 @@ function messageToParts(rec: Record<string, unknown>): unknown[] {
  * Convert ZCode rollout response (text + toolCalls) to GenAI output.messages
  * with {role:'assistant', parts:[...]} and a finishReason per message.
  */
-function toGenAiOutputMessages(response: Record<string, unknown>): JsonValue | undefined {
+function toGenAiOutputMessages(response: Record<string, unknown>, finishReason?: string): JsonValue | undefined {
   const text = stringValue(response.text);
   const toolCalls = response.toolCalls;
-  const finishReason = stringValue(response.finishReason) ?? 'stop';
   if (!text && !toolCalls) return undefined;
   const parts: unknown[] = [];
   if (text) parts.push({ type: 'text', content: text });
@@ -505,7 +507,7 @@ function toGenAiOutputMessages(response: Record<string, unknown>): JsonValue | u
     }
   }
   if (parts.length === 0) return undefined;
-  return [{ role: 'assistant', parts, finish_reason: mapFinishReasonSingle(finishReason) }] as unknown as JsonValue;
+  return [{ role: 'assistant', parts, ...(finishReason ? { finish_reason: finishReason } : {}) }] as unknown as JsonValue;
 }
 
 /**
@@ -767,24 +769,6 @@ function mergeSystemInstructions(
   const aArr = Array.isArray(a) ? a : [a];
   const bArr = Array.isArray(b) ? b : [b];
   return [...aArr, ...bArr] as unknown as JsonValue;
-}
-
-function mapFinishReason(raw: string | undefined): string[] | undefined {
-  if (!raw) return undefined;
-  // ZCode uses 'tool-calls' / 'stop' / 'length' / 'content-filter'.
-  // Normalize to OTel GenAI convention ('tool_calls' instead of 'tool-calls').
-  const normalized = raw.replace(/-/g, '_');
-  return [normalized];
-}
-
-/**
- * Single-value variant for per-message finish_reason inside gen_ai.output.messages.
- * ARMS GenAI FinishReason enum rejects hyphenated forms like 'tool-calls';
- * normalize to underscore form ('tool_calls', 'content_filter', etc.).
- */
-function mapFinishReasonSingle(raw: string | undefined): string {
-  if (!raw) return 'stop';
-  return raw.replace(/-/g, '_');
 }
 
 /**
