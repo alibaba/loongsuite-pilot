@@ -181,15 +181,13 @@ fn assert_qwen_roundtrip_event(
 fn shell_preserves_raw_bom_unicode_and_bound_install_without_runtimes() {
     let root = tempfile::tempdir().unwrap();
     let hooks = fixture(root.path());
-    for event in ["stop"] {
-        assert_qwen_roundtrip_event(
-            Command::new("/bin/bash"),
-            root.path(),
-            &hooks,
-            &hooks.join("qwen-code-cli-loongsuite-pilot-hook.sh"),
-            event,
-        );
-    }
+    assert_qwen_roundtrip_event(
+        Command::new("/bin/bash"),
+        root.path(),
+        &hooks,
+        &hooks.join("qwen-code-cli-loongsuite-pilot-hook.sh"),
+        "stop",
+    );
 }
 
 #[cfg(unix)]
@@ -707,23 +705,21 @@ fn powershell_native_binding_ignores_legacy_node_pins_and_keeps_shared_home() {
         for shell in ["powershell.exe", "pwsh.exe"] {
             let executable = which::which(shell)
                 .unwrap_or_else(|_| panic!("Windows acceptance requires {shell}"));
-            for event in ["stop"] {
-                let mut command = Command::new(&executable);
-                command.args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                ]);
-                assert_qwen_roundtrip_event(
-                    command,
-                    root.path(),
-                    &hooks,
-                    &hooks.join("qwen-code-cli-loongsuite-pilot-hook.ps1"),
-                    event,
-                );
-            }
+            let mut command = Command::new(executable);
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ]);
+            assert_qwen_roundtrip_event(
+                command,
+                root.path(),
+                &hooks,
+                &hooks.join("qwen-code-cli-loongsuite-pilot-hook.ps1"),
+                "stop",
+            );
         }
     }
 }
