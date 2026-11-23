@@ -1,6 +1,10 @@
 import * as os from 'node:os';
 import { validateExcludedWorkspaces } from './workspace-policy.js';
-import { globalPollIntervalMs, DEFAULT_POLL_INTERVAL_MS } from '../utils/poll-interval.js';
+import {
+  DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS,
+  DEFAULT_POLL_INTERVAL_MS,
+  globalPollIntervalMs,
+} from '../utils/poll-interval.js';
 import * as path from 'node:path';
 import type {
   AgentsConfig,
@@ -44,7 +48,7 @@ import { createLogger } from '../utils/logger.js';
 import { resolveOtlpTraceUrl } from '../utils/otlp-endpoint.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
 import { buildInterceptorConfig, ensureMaskCoversInterceptor } from '../interceptor/config.js';
-import { resolveDoubaoWorkSource } from '../utils/doubao-work-paths.js';
+import { resolveDoubaoAppEnabled, resolveDoubaoWorkSource } from '../utils/doubao-work-paths.js';
 
 const logger = createLogger('ConfigLoader');
 
@@ -828,7 +832,10 @@ function buildListenersConfig(
     'pi-coding-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     workbuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'doubao-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    doubao: { enabled: resolveDoubaoAppEnabled(file?.listeners, file?.agents), pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    antigravity: { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
+    'antigravity-cli': { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
   };
 
   const result = { ...defaults };
@@ -839,7 +846,7 @@ function buildListenersConfig(
       result[key] = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
         pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
-        ...(key === 'doubao-work' ? resolveDoubaoWorkSource(val) : {}),
+        ...(key === 'doubao-work' || key === 'doubao' ? resolveDoubaoWorkSource(val) : {}),
       };
       if (key === 'qwen-work-cn-collaboration' && Object.hasOwn(val, 'includeConversationIds')) {
         const ids: unknown = val.includeConversationIds;
@@ -856,6 +863,12 @@ function buildListenersConfig(
         logger.warn('Invalid Doubao client; disabling this listener', {
           valueType: typeof val.client,
           allowedValues: ['doubao-work', 'doubao'],
+        });
+        result[key].enabled = false;
+      }
+      if (key === 'doubao' && val.client !== undefined && val.client !== 'doubao') {
+        logger.warn('Invalid Doubao App client; disabling this listener', {
+          valueType: typeof val.client, allowedValues: ['doubao'],
         });
         result[key].enabled = false;
       }

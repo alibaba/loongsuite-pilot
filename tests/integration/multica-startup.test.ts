@@ -6,6 +6,7 @@ import { access, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:f
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DaemonClient } from '../../src/interceptor/cli/daemon-client.js';
 import { agentHomeEnvironment } from '../helpers/isolated-agent-home.js';
 
 it.skipIf(process.platform === 'win32').each(['explicit', 'local daemon'] as const)(
@@ -144,7 +145,10 @@ it.skipIf(process.platform === 'win32').each(['explicit', 'local daemon'] as con
     }, {timeout: 8000});
     const interceptor = await json(interceptorPath);
     expect(interceptor.pid).toBe(child.pid);
-    expect((await fetch(`http://127.0.0.1:${interceptor.daemon_port}/health`)).ok).toBe(true);
+    const interceptorClient = new DaemonClient(interceptor.daemon_port);
+    await expect(interceptorClient.health(1000)).resolves.toMatchObject({
+      pid: child.pid, version: interceptor.version,
+    });
     if (auto) {
       await vi.waitFor(() => {
         expect(posts.flatMap(post => post.__logs__).find(row => row.task_id === 'local-daemon-task'))
@@ -194,7 +198,9 @@ it.skipIf(process.platform === 'win32').each(['explicit', 'local daemon'] as con
       .toBe(Buffer.byteLength(content));
     expect(await readdir(pendingDir)).toEqual([]);
     await expect(readFile(runtimePath)).rejects.toMatchObject({code: 'ENOENT'});
-    await expect(fetch(`http://127.0.0.1:${interceptor.daemon_port}/health`, {signal: AbortSignal.timeout(1000)})).rejects.toThrow();
+    // Another Pilot can take the preferred port as soon as this child exits.
+    const remainingHealth = await interceptorClient.health(1000).catch(() => undefined);
+    expect(remainingHealth?.pid).not.toBe(child.pid);
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) {
       const stopped = new Promise(resolve => child!.once('exit', resolve));
