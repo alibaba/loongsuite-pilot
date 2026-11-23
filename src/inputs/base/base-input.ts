@@ -38,6 +38,7 @@ export abstract class BaseInput extends EventEmitter {
   protected pollIntervalMs: number;
   private timer: ReturnType<typeof setInterval> | null = null;
   private cyclePromise: Promise<void> | null = null;
+  private collectionQueued = false;
   private releaseCheckpointWait: (() => void) | null = null;
   private releaseStartupWait: (() => void) | null = null;
   private _running = false;
@@ -93,7 +94,7 @@ export abstract class BaseInput extends EventEmitter {
       if (this.releaseCheckpointWait) this.releaseStartupWait?.();
       await Promise.race([firstCycle, outputWait]);
       if (!this._running) return;
-      this.timer = setInterval(() => void this.runCycle(), this.pollIntervalMs);
+      this.timer = setInterval(() => this.onPoll(), this.pollIntervalMs);
     } catch (error) {
       this._running = false;
       // A concurrent stop owns cleanup after this startup settles.
@@ -108,6 +109,7 @@ export abstract class BaseInput extends EventEmitter {
     if (this.stopPromise) return this.stopPromise;
     if (!this._running && !this.startPromise) return Promise.resolve();
     this._running = false;
+    this.collectionQueued = false;
     if (this.stateStore.waitingForOutput) this.releaseCheckpointWait?.();
     if (this.timer) {
       clearInterval(this.timer);
@@ -134,15 +136,24 @@ export abstract class BaseInput extends EventEmitter {
   protected async onStart(): Promise<void> {}
   /** Optional hook called once on stop. */
   protected async onStop(): Promise<void> {}
+
+  protected onPoll(): void {
+    void this.runCycle();
+  }
   /** Commit source progress only after the batch has entered the shared output queue. */
   protected onEntriesQueued(): void | Promise<void> {}
 
   /** Commit completed reads after accepted entries are queued or excluded by policy. */
   protected onCollectionProcessed(): void | Promise<void> {}
 
-  /** Request an immediate serialized collection cycle from an input-owned watcher. */
-  protected requestCollection(): void {
-    if (this._running) void this.runCycle();
+  /** Request a serialized collection cycle, optionally retaining one wake-up while busy. */
+  protected requestCollection(queueIfBusy = false): void {
+    if (!this._running) return;
+    if (queueIfBusy && this.cyclePromise) {
+      this.collectionQueued = true;
+      return;
+    }
+    void this.runCycle();
   }
 
   private runCycle(): Promise<void> {
@@ -152,6 +163,10 @@ export abstract class BaseInput extends EventEmitter {
     if (this.checkpointFailed) return Promise.resolve();
     this.cyclePromise = this.runCycleOnce().finally(() => {
       this.cyclePromise = null;
+      if (this.collectionQueued) {
+        this.collectionQueued = false;
+        this.requestCollection();
+      }
     });
     return this.cyclePromise;
   }

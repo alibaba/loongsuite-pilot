@@ -52,33 +52,35 @@ Pilot is designed to answer practical questions:
 ## Supported Agents
 
 
-| Agent         | Integration               | Trace Export | Log Export | Token Usage | Conversation / Tool Calls |
-| ------------- | ------------------------- | ------------ | ---------- | ----------- | ------------------------- |
-| Claude Code   | Hook                      | Yes          | Yes        | Yes         | Yes                       |
-| Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
-| GitHub Copilot CLI | Native plugin + transcript / native OTel | Yes | Yes | Yes (native OTel) | Yes |
-| Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
-| Cursor CLI    | Shared Cursor hook        | Yes          | Yes        | Yes         | Yes                       |
-| DeepSeek Harness | YAML patch plugin + local JSONL polling | Yes | Yes | Yes | Yes |
-| Grok Build    | Hook + local session logs | Yes          | Yes        | Yes         | Yes                       |
-| Hermes Agent  | Native directory plugin   | Yes          | Yes        | Yes         | Yes                       |
-| Kimi Code (CLI verified) | Native session polling    | Yes          | Yes        | Yes         | Main agent                 |
-| Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
-| MiMo Code     | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
-| OpenClaw      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
-| OpenCode      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
-| Pi Coding Agent | Extension injection     | Yes          | Yes        | Yes         | Yes                       |
-| Qoder         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
-| Qoder CN      | Hook                      | Yes          | Yes        | Yes         | Yes                       |
-| Qoder for JetBrains | Detection-only      | Yes          | Yes        | Yes         | Yes                       |
-| Qoder CLI     | Hook / session polling    | Yes          | Yes        | Yes         | Yes                       |
-| Qoder Work    | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
-| Qoder Work CN | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
-| Qwen Code CLI | Hook                      | Yes          | Yes        | Yes         | Yes                       |
-| Qwen Work CN  | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
-| Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
-| WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
-| [Doubao Work (macOS/Windows, experimental)](docs/doubao-work.md) | Read-only logs + execution metadata | Client turns, local tools + native sandbox executions | Metadata only | No | No |
+| Agent         | Integration               | Trace Export | Log Export | Token Usage | Conversation / Tool Calls | Multimodal |
+| ------------- | ------------------------- | ------------ | ---------- | ----------- | ------------------------- | ---------- |
+| Antigravity App / new IDE | Read-only SQLite + transcript | Yes | Yes | Yes | Yes | Yes (Opt-in) |
+| Antigravity CLI (`agy`) | Read-only SQLite + transcript | Yes | Yes   | Yes         | Yes                       | Yes (Opt-in) |
+| Claude Code   | Hook                      | Yes          | Yes        | Yes         | Yes                       | No         |
+| Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       | Yes (Opt-in) |
+| GitHub Copilot CLI | Native plugin + transcript / native OTel | Yes | Yes | Yes (native OTel) | Yes | No |
+| Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       | No         |
+| Cursor CLI    | Shared Cursor hook        | Yes          | Yes        | Yes         | Yes                       | No         |
+| DeepSeek Harness | YAML patch plugin + local JSONL polling | Yes | Yes | Yes | Yes | No |
+| Grok Build    | Hook + local session logs | Yes          | Yes        | Yes         | Yes                       | No         |
+| Hermes Agent  | Native directory plugin   | Yes          | Yes        | Yes         | Yes                       | No         |
+| Kimi Code (CLI verified) | Native session polling    | Yes          | Yes        | Yes         | Main agent                 | No |
+| Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       | No         |
+| MiMo Code     | Plugin injection          | Yes          | Yes        | Yes         | Yes                       | No         |
+| OpenClaw      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       | No         |
+| OpenCode      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       | No         |
+| Pi Coding Agent | Extension injection     | Yes          | Yes        | Yes         | Yes                       | No         |
+| Qoder         | Hook                      | Yes          | Yes        | Yes         | Yes                       | Yes (Opt-in) |
+| Qoder CN      | Hook                      | Yes          | Yes        | Yes         | Yes                       | No         |
+| Qoder for JetBrains | Detection-only      | Yes          | Yes        | Yes         | Yes                       | No         |
+| Qoder CLI     | Hook / session polling    | Yes          | Yes        | Yes         | Yes                       | Yes (Opt-in) |
+| Qoder Work    | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       | No         |
+| Qoder Work CN | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       | No         |
+| Qwen Code CLI | Hook                      | Yes          | Yes        | Yes         | Yes                       | No         |
+| Qwen Work CN  | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       | Yes (Opt-in) |
+| Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       | No         |
+| WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       | No         |
+| [Doubao Work (macOS/Windows, experimental)](docs/doubao-work.md) | Read-only logs + execution metadata | Client turns, local tools + native sandbox executions | Metadata only | No | No | No |
 
 GitHub Copilot CLI automatic deployment supports Unix shells. Exact per-call token usage requires native OTel; transcript-only collection omits unavailable usage. Windows and subagents are not supported. See [telemetry details](docs/zh-CN/copilot-native-telemetry.md).
 

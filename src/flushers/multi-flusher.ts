@@ -81,6 +81,10 @@ export class MultiFlusher extends BaseFlusher {
     return this.flushers.flatMap(flusher => flusher.getTraceRuntimeSnapshot());
   }
 
+  override hasDurableTraceJournal(agentType: string): boolean {
+    return this.flushers.some(flusher => flusher.hasDurableTraceJournal(agentType));
+  }
+
   override hasPendingHermesSource(sourceToken: string): boolean {
     return this.flushers.some(flusher => flusher.hasPendingHermesSource(sourceToken));
   }

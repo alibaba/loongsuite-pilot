@@ -78,6 +78,7 @@ import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { KimiLogInput } from '../inputs/kimi-log/kimi-log-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
 import { DoubaoWorkInput } from '../inputs/doubao-work/doubao-work-input.js';
+import { AntigravityInput, type AntigravityClientType } from '../inputs/antigravity/antigravity-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -168,6 +169,8 @@ export class Orchestrator extends EventEmitter {
     'workbuddy': 'workbuddy',
     'doubao-work': 'doubao-work',
     'dsh-log': 'dsh',
+    'antigravity': 'antigravity',
+    'antigravity-cli': 'antigravity-cli',
   };
 
   private readonly config: AnalyticsConfig;
@@ -1104,7 +1107,7 @@ export class Orchestrator extends EventEmitter {
           this.globalAttributesProvider,
           undefined,
           new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
-            ['codex', 'hermes', 'openclaw', 'kimi-code-cli']),
+            ['codex', 'hermes', 'openclaw', 'antigravity', 'antigravity-cli', 'kimi-code-cli']),
           entries => this.inputManager!.prepareRestoredEntries(entries),
           sourceToken => this.inputManager!.confirmHermesSourceDrained(sourceToken),
         );
@@ -2046,6 +2049,40 @@ export class Orchestrator extends EventEmitter {
         && this.agentControlManager.resolveEnabled('doubao-work', listenerCfg['doubao-work']?.enabled ?? true),
       pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
     }));
+
+    // --- Antigravity App / new IDE share one data root and listener. CLI has its own. ---
+    const antigravityVariants: AntigravityClientType[] = [
+      ClientType.Antigravity,
+      ClientType.AntigravityCli,
+    ];
+    for (const clientType of antigravityVariants) {
+      const variantCfg = listenerCfg[clientType];
+      const agyAgentCfg = this.config.agents[clientType] ?? {};
+      const agyMultimodalEnabled = !!this.multimodalProcessor
+        && isAgentMultimodalEnabled(clientType, agyAgentCfg);
+      const agyInput = new AntigravityInput({
+        stateStore: this.stateStore,
+        clientType,
+        pollIntervalMs: variantCfg?.pollInterval,
+        multimodal: {
+          enabled: agyMultimodalEnabled,
+          uploadMode: agyAgentCfg.multimodal?.uploadMode ?? 'none',
+          allowedRootPaths: agyAgentCfg.multimodal?.allowedRootPaths,
+          ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+        },
+      });
+      this.inputManager.registerInput(agyInput);
+      entries.push(
+        this.inputManager.buildDetectionEntry(agyInput, {
+          watchPaths: AntigravityInput.getWatchPaths(clientType),
+          isAvailable: () => AntigravityInput.checkAvailability(clientType),
+          enabled: () =>
+            this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP[clientType]) &&
+            this.agentControlManager.resolveEnabled(clientType, variantCfg?.enabled ?? true),
+          pollIntervalMs: variantCfg?.pollInterval,
+        }),
+      );
+    }
 
     return entries;
   }
