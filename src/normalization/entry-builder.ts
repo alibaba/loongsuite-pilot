@@ -389,6 +389,8 @@ export function normalizeEventName(value: unknown): AgentEventName {
     case 'gen_ai.tool.result':
     case 'gen_ai.agent.invoke':
     case 'gen_ai.agent.result':
+    case 'gen_ai.context.compress.start':
+    case 'gen_ai.context.compress':
       return value;
     case 'llm.request':
     case 'llm_call_input':

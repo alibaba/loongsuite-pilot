@@ -102,6 +102,27 @@ function readOutputRecords() {
   return text.split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
 }
 
+it('pairs compression hooks across session rotation and preserves a skipped outcome', async () => {
+  vi.useFakeTimers();
+  const handlers = registerPlugin(await loadPlugin());
+  const ctx = { sessionId: 'before', sessionKey: 'agent:main:compact', agentId: 'main' };
+  handlers.before_compaction({ tokenCount: 10000, messageCount: 20 }, ctx);
+  vi.advanceTimersByTime(2100);
+  handlers.after_compaction({ tokenCount: 2000, messageCount: 4, compactedCount: 16,
+    previousSessionId: 'before' }, { ...ctx, sessionId: 'after' });
+  const records = readOutputRecords();
+  const completion = records.find(r => r['event.name'] === 'gen_ai.context.compress');
+  expect(completion).toMatchObject({ 'gen_ai.context.compress.status': 'success',
+    'gen_ai.context.compress.duration': 2.1, 'gen_ai.context.compression_ratio': 0.2,
+    'gen_ai.session.id': 'before' });
+  expect(completion['gen_ai.context.compress.id']).toBe(records[0]['gen_ai.context.compress.id']);
+  handlers.before_compaction({ messageCount: -1 }, ctx);
+  vi.advanceTimersByTime(1000);
+  handlers.after_compaction({ messageCount: -1, compactedCount: 0 }, ctx);
+  expect(readOutputRecords().at(-1)['gen_ai.context.compress.status']).toBe('skipped');
+  expect(readOutputRecords().at(-1)['gen_ai.context.messages_after']).toBeUndefined();
+});
+
 it('makes each model SpanID readable before completion and reuses it for its provider response', async () => {
   const handlers = registerPlugin(await loadPlugin());
   const ctx = { runId: 'realtime-run', sessionId: 'realtime-session', sessionKey: 'agent:main:realtime', agentId: 'main' };
@@ -114,7 +135,7 @@ it('makes each model SpanID readable before completion and reuses it for its pro
         .flatMap(n => fs.readFileSync(process.argv[1] + '/' + n, 'utf8').trim().split('\\n').map(JSON.parse));
       console.log(JSON.stringify(rows));
     `, path.join(pilotDataDir, 'logs/openclaw')], { encoding: 'utf8' });
-    expect(read.status, read.stderr).toBe(0);
+    expect(read.status, `${read.stderr} signal=${read.signal} error=${read.error}`).toBe(0);
     const request = JSON.parse(read.stdout).at(-1);
     expect(request['event.name']).toBe('llm.request');
     expect(request.span_id).toMatch(/^[0-9a-f]{16}$/);
@@ -229,7 +250,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
       on: (name) => registered.add(name),
     };
     plugin.register(api);
-    expect(registered.size).toBe(18);
+    expect(registered.size).toBe(20);
     expect(registered.has('cron_changed')).toBe(true);
     expect(registered.has('session_start')).toBe(true);
     expect(registered.has('session_end')).toBe(true);
@@ -336,7 +357,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
         on: (name) => registered.add(name),
       });
 
-      expect(registered.size).toBe(18);
+      expect(registered.size).toBe(20);
     },
   );
 

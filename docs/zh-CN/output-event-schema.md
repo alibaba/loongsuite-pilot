@@ -43,6 +43,34 @@ OpenClaw modern 插件在 `model_call_started` 中分配本次模型调用的 `s
 
 ## Event Names
 
+### 上下文压缩 POC
+
+`gen_ai.context.compress` 记录源端确认的压缩结束。`gen_ai.context.compress.start`
+记录可观察的开始边界。可靠开始/结束或完成时间与正 duration 会生成执行 AGENT 下的
+OTel INTERNAL Span，名称为 `gen_ai.context.compress`，POC 分类为
+`gen_ai.span.kind=COMPRESSION`、操作名为 `compress_context`。这些生命周期扩展仍待
+[语义规范 PR #41](https://github.com/alibaba/loongsuite-semantic-conventions-genai/pull/41) 评审。
+
+压缩字段包括 `gen_ai.context.compress.id`、`status`、`duration`（秒）、
+`start_time_unix_nano`，以及 `gen_ai.context.tokens_before`、`tokens_after`、
+`compression_ratio`。同范围且 before > 0 时比例为 after / before。
+`gen_ai.context.counting.method` 和 `scope` 说明计数依据。缺失数据省略，完成通知单独保留在
+事件输出中。摘要模型用量按实际 LLM 调用记录。手动独立压缩有独立执行身份，关联原生 session。
+
+| 来源 | 本 POC 采集入口 | 可用数据 |
+| --- | --- | --- |
+| Qoder / QoderCN | transcript `compact_boundary` | 完成时间及原生 pre/post token、duration，缺失时省略 |
+| Pi Coding Agent | `session_before_compact` / `session_compact` | Hook 区间、同范围文本 chars/4 估算、原生 before 单独保留；新版 failure Hook 及 AbortSignal 记录失败/取消 |
+| OpenClaw | before/after compaction Hook | Hook 区间、原生估算 token 与消息数、session 轮转、skipped |
+| DSH | `compaction/start` / `compaction/end` | 原生区间、压缩 ID、成功/错误、`turn:null` 独立事务 |
+
+Pi 文本估算有 8192 条记录和 2 MiB 文本预算，覆盖 conversation text，排除 system、工具定义和图片计价。
+Qoder / QoderCN 当前使用已有 transcript 唤醒与轮询，CLI `runtime-config.contextWindow`
+解析和 PreCompact/PostCompact 部署接入仍待补充。请求窗口从匹配的 SQLite 行提供。
+OpenClaw 缺少失败结束 Hook 时保留开始证据。未配对开始最多延缓 idle 收口一小时，并遵循现有缓冲上限。
+后台压缩的源区间表示 wall time，前台阻塞时间需额外源证据。其他 Agent 的适配与真实验收继续在
+[Pilot #685](https://github.com/alibaba/loongsuite-pilot/issues/685) 跟进。
+
 OpenClaw 2026.3.8 起的 legacy 和 modern 插件均支持原生逻辑路由字段
 `agent.openclaw.session_key`。已取得 key 的运行事件（`other`、`agent.input`、
 `llm.request`、`llm.response`、`tool.call`、`tool.result`）会保留该字段，

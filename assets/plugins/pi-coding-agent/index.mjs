@@ -11,6 +11,7 @@
 import crypto from 'node:crypto';
 import { appendRawJsonl } from '../shared/raw-jsonl-writer.mjs';
 import { readPilotConfig } from '../shared/pilot-config.mjs';
+import { compressionFields, compressionIdentity } from '../shared/context-compression.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -268,6 +269,10 @@ function toolResultResponse(content) {
 function canonicalMessage(message) {
   if (!message || typeof message !== 'object') return null;
 
+  if (message.role === 'compactionSummary' || message.role === 'branchSummary') {
+    return { role: 'user', parts: [{ type: 'text', content: truncate(message.summary || '') }] };
+  }
+
   if (message.role === 'toolResult') {
     return {
       role: 'tool',
@@ -303,6 +308,34 @@ function canonicalMessage(message) {
   }
 
   return null;
+}
+
+// A bounded, same-scope text estimate on both sides of the rewrite. Native
+// preparation.tokensBefore includes provider accounting and is kept separately.
+function contextTextTokens(branch) {
+  if (!Array.isArray(branch) || branch.length > 8192) return undefined;
+  const compactionIndex = branch.findLastIndex(entry => entry.type === 'compaction');
+  const compaction = branch[compactionIndex];
+  const retained = compaction ? branch.slice(0, compactionIndex).findIndex(entry => entry.id === compaction.firstKeptEntryId) : 0;
+  if (compaction && retained < 0) return undefined;
+  const entries = compaction ? [...branch.slice(retained, compactionIndex), ...branch.slice(compactionIndex + 1)] : branch;
+  let chars = compaction?.summary?.length ?? 0;
+  for (const entry of entries) {
+    if (entry.type === 'branch_summary') chars += entry.summary?.length ?? 0;
+    if (entry.type === 'custom_message') {
+      if (typeof entry.content === 'string') chars += entry.content.length;
+      else for (const block of entry.content ?? []) if (block.type === 'text') chars += block.text?.length ?? 0;
+    }
+    const message = entry.message;
+    if (typeof message?.content === 'string') chars += message.content.length;
+    else for (const block of message?.content ?? []) {
+      if (block.type === 'text') chars += block.text?.length ?? 0;
+      if (block.type === 'thinking') chars += block.thinking?.length ?? 0;
+      if (block.type === 'toolCall') chars += (block.name?.length ?? 0) + JSON.stringify(block.arguments ?? {}).length;
+    }
+    if (chars > 2 * 1024 * 1024) return undefined;
+  }
+  return Math.ceil(chars / 4);
 }
 
 function canonicalMessages(messages) {
@@ -472,6 +505,9 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     previousRequestMessages: [],
     hasPreviousRequestSnapshot: false,
     toolStarts: new Map(),
+    compression: null,
+    agentActive: false,
+    compacted: false,
   };
 
   const resetSessionConfig = () => {
@@ -481,6 +517,10 @@ export function createPiTelemetryExtension(identityOptions = {}) {
   };
 
   pi.on('session_start', safeHandler('session_start', async () => {
+    state.compacted = false;
+    state.compression?.signal?.removeEventListener('abort', state.compression.onAbort);
+    state.compression = null;
+    state.agentActive = false;
     resetSessionConfig();
     state.traceId = null;
     state.turnId = null;
@@ -497,6 +537,7 @@ export function createPiTelemetryExtension(identityOptions = {}) {
   }));
 
   pi.on('before_agent_start', safeHandler('before_agent_start', async (event) => {
+    state.agentActive = true;
     resetSessionConfig();
     state.traceId = traceId();
     state.turnId = crypto.randomUUID();
@@ -512,6 +553,62 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     state.hasPreviousRequestSnapshot = false;
     state.toolStarts.clear();
   }));
+
+  pi.on('agent_end', safeHandler('agent_end', async () => { state.agentActive = false; }));
+
+  const finishCompression = (event, ctx, status) => {
+    const pending = state.compression;
+    if (!pending) return;
+    pending.signal?.removeEventListener('abort', pending.onAbort);
+    state.compression = null;
+    const end = Date.now();
+    const entry = event.compactionEntry;
+    const after = status === 'success' && pending.estimatedBefore !== undefined
+      ? contextTextTokens(ctx.sessionManager.getBranch?.()) : undefined;
+    writeRecord({ ...pending.base, time_unix_nano: timestampNanos(end),
+      observed_time_unix_nano: timestampNanos(),
+      ...compressionIdentity(pending.base['gen_ai.session.id'], pending.id),
+      ...compressionFields({ id: pending.id, status, startedAt: pending.startedAt, endedAt: end,
+        tokensBefore: pending.estimatedBefore ?? entry?.tokensBefore ?? pending.before, tokensAfter: after,
+        countingMethod: pending.estimatedBefore === undefined ? 'pi_native_context_usage' : 'text_chars_div_4',
+        countingScope: pending.estimatedBefore === undefined ? 'native_context' : 'conversation_text',
+        comparable: pending.estimatedBefore !== undefined, trigger: pending.trigger,
+        windowSize: ctx.model?.contextWindow }),
+      'gen_ai.context.compress.native_tokens_before': entry?.tokensBefore ?? pending.before,
+    });
+    if (status === 'success') {
+      state.compacted = true;
+      state.previousRequestMessages = [];
+      state.hasPreviousRequestSnapshot = false;
+    }
+  };
+
+  pi.on('session_before_compact', safeHandler('session_before_compact', async (event, ctx) => {
+    const standalone = !state.agentActive;
+    const operationState = standalone ? { ...state, traceId: traceId(), turnId: crypto.randomUUID() } : state;
+    const startedAt = Date.now();
+    const id = crypto.randomUUID();
+    const base = { ...turnFields(ctx, operationState, runtime, startedAt),
+      'gen_ai.context.compress.standalone': standalone };
+    state.compression = { id, base, startedAt, before: event.preparation?.tokensBefore,
+      estimatedBefore: contextTextTokens(event.branchEntries), trigger: event.reason };
+    writeRecord({ ...base, 'event.id': `${id}:start`,
+      ...compressionFields({ id, phase: 'start', startedAt,
+        tokensBefore: state.compression.estimatedBefore ?? event.preparation?.tokensBefore,
+        countingMethod: state.compression.estimatedBefore === undefined ? 'pi_native_context_usage' : 'text_chars_div_4',
+        countingScope: state.compression.estimatedBefore === undefined ? 'native_context' : 'conversation_text',
+        trigger: event.reason }) });
+    const pending = state.compression;
+    pending.signal = event.signal;
+    pending.onAbort = () => finishCompression({}, ctx, 'cancelled');
+    event.signal?.addEventListener('abort', pending.onAbort, { once: true });
+    if (event.signal?.aborted) pending.onAbort();
+  }));
+  pi.on('session_compact', safeHandler('session_compact', async (event, ctx) => finishCompression(event, ctx, 'success')));
+  // Newer hosts expose failure explicitly. Older hosts still report abort via
+  // AbortSignal and retain unmatched starts without inventing success.
+  pi.on('session_compact_failed', safeHandler('session_compact_failed', async (event, ctx) =>
+    finishCompression(event, ctx, event.aborted ? 'cancelled' : 'error')));
 
   pi.on('turn_start', safeHandler('turn_start', async (event) => {
     state.turnId ||= crypto.randomUUID();
@@ -544,6 +641,7 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     const record = {
       ...commonFields(ctx, state, runtime, state.requestStartedAt),
       'event.name': 'llm.request',
+      ...(state.compacted ? { 'gen_ai.conversation.compacted': true } : {}),
     };
     if (state.captureContent) {
       const messages = canonicalMessages(event.messages);
@@ -669,6 +767,9 @@ export function createPiTelemetryExtension(identityOptions = {}) {
   }));
 
   pi.on('session_shutdown', safeHandler('session_shutdown', async () => {
+    state.compression?.signal?.removeEventListener('abort', state.compression.onAbort);
+    state.compression = null;
+    state.agentActive = false;
     state.pendingUserInput = [];
     state.fallbackRequestInput = [];
     state.previousRequestMessages = [];

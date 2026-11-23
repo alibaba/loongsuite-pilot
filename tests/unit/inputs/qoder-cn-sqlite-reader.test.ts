@@ -72,7 +72,7 @@ describe.skipIf(!hasNodeSqlite())('readSqliteTokensForSession (qoder-cn)', () =>
   it('maps token_info, message_id, session_id, model_info to SqliteTokenData', async () => {
     await insertRow(dbPath, {
       id: 'msg-1', session_id: 'sess-1', request_id: 'req-1', role: 'assistant',
-      token_info: JSON.stringify({ prompt_tokens: 100, completion_tokens: 20, cached_tokens: 80 }),
+      token_info: JSON.stringify({ prompt_tokens: 100, completion_tokens: 20, cached_tokens: 80, max_input_tokens: 2000 }),
       model_info: JSON.stringify({ model_key: 'qwen-plus' }),
       gmt_create: 1_780_000_000_000,
     });
@@ -87,6 +87,7 @@ describe.skipIf(!hasNodeSqlite())('readSqliteTokensForSession (qoder-cn)', () =>
       inputTokens: 100,
       outputTokens: 20,
       cacheReadTokens: 80,
+      contextWindow: 2000,
       model: 'qwen-plus',
     });
   });

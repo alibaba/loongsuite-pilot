@@ -34,6 +34,7 @@ export interface DshRequestHeader {
 }
 
 export interface DshEventAggregatorState {
+  compressionStarts: Map<string, { time: number; common: Record<string, unknown> }>;
   /** stepKey → finish reason.kind from `assistant/chunk type=finish`. */
   pendingFinish: Map<string, string>;
   /** Most recent turn number from `turn/start` (used for events that
@@ -74,6 +75,7 @@ export interface DshEventAggregatorState {
 
 export function newState(): DshEventAggregatorState {
   return {
+    compressionStarts: new Map(),
     pendingFinish: new Map(),
     currentTurn: undefined,
     currentStep: undefined,
@@ -405,6 +407,39 @@ export function transformDshRecord(
   const { type, sid, time, data, turn, step, common } = context;
 
   switch (type) {
+    case 'compaction/start': {
+      const id = asString(data.compactionId);
+      if (!id) return null;
+      const standalone = data.turn === null;
+      const fields = { ...common, 'gen_ai.context.compress.id': id,
+        'gen_ai.context.compress.standalone': standalone,
+        ...(standalone ? { 'gen_ai.turn.id': `${sid}:compression:${id}`,
+          trace_id: crypto.createHash('sha256').update(`${sid}:compression:${id}`).digest('hex').slice(0, 32),
+          'gen_ai.step.id': undefined } : {}) };
+      setBounded(state.compressionStarts, id, { time, common: fields });
+      return buildAgentActivityEntry({ ...fields, 'event.id': `${sid}:${id}:start`,
+        'event.name': 'gen_ai.context.compress.start' });
+    }
+    case 'compaction/end': {
+      const id = asString(data.compactionId);
+      if (!id) return null;
+      const start = state.compressionStarts.get(id);
+      state.compressionStarts.delete(id);
+      // turn:null must never borrow the previous numbered turn on recovery.
+      const standalone = data.turn === null;
+      return buildAgentActivityEntry({ ...(start?.common ?? common), time_unix_nano: msToNano(time),
+        ...(standalone ? { 'gen_ai.turn.id': `${sid}:compression:${id}`,
+          trace_id: crypto.createHash('sha256').update(`${sid}:compression:${id}`).digest('hex').slice(0, 32),
+          'gen_ai.step.id': undefined } : {}),
+        'event.id': `${sid}:${id}:end`, 'event.name': 'gen_ai.context.compress',
+        'gen_ai.context.compress.id': id, 'gen_ai.context.compress.standalone': standalone,
+        'gen_ai.context.compress.status': data.error ? 'error' : 'success',
+        ...(start && time >= start.time ? {
+          'gen_ai.context.compress.start_time_unix_nano': msToNano(start.time),
+          'gen_ai.context.compress.duration': (time - start.time) / 1000,
+        } : {}),
+      });
+    }
     case 'session/created':
     case 'permission/preset':
     case 'sandbox/mode':
@@ -482,6 +517,14 @@ export function transformDshRecord(
     }
 
     case 'user/message': {
+      if (asObject(record.surfaceOp)?.op === 'replace') {
+        // The current-turn append accumulator cannot reconstruct arbitrary
+        // retained ranges after a native rewrite. Omit stale full context
+        // until a new turn instead of adding the summary to old messages.
+        state.inputMessages = [];
+        state.lastRequestInputMessageCount = 0;
+        state.inputMessagesOverflowed = true;
+      }
       const content = data.content;
       const msgId = asString((asObject(data) ?? {}).id);
       const userParts = normalizeUserParts(content);

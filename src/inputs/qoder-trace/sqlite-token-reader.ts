@@ -17,6 +17,7 @@ export interface SqliteTokenData {
   outputTokens: number;
   cacheReadTokens: number;
   model?: string;
+  contextWindow?: number;
 }
 
 export interface SqliteTokenResult {
@@ -191,6 +192,7 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
         inputTokens: info.promptTokens,
         outputTokens: info.completionTokens,
         cacheReadTokens: info.cachedTokens,
+        contextWindow: info.contextWindow,
         model: parseModelKey(row.model_info) ?? parseRecordModelKey(row.record_extra),
       });
     }
@@ -265,14 +267,15 @@ function listHashedProfileDbPaths(qoderRoot: string): string[] {
   return found;
 }
 
-export function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: number; cachedTokens: number } | null {
+export function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: number; cachedTokens: number; contextWindow?: number } | null {
   try {
     const obj = JSON.parse(raw);
     const pt = typeof obj.prompt_tokens === 'number' ? obj.prompt_tokens : 0;
     const ct = typeof obj.completion_tokens === 'number' ? obj.completion_tokens : 0;
     const cached = typeof obj.cached_tokens === 'number' ? obj.cached_tokens : 0;
     if (pt === 0 && ct === 0) return null;
-    return { promptTokens: pt, completionTokens: ct, cachedTokens: cached };
+    return { promptTokens: pt, completionTokens: ct, cachedTokens: cached,
+      ...(Number.isFinite(obj.max_input_tokens) && obj.max_input_tokens > 0 ? { contextWindow: obj.max_input_tokens } : {}) };
   } catch {
     return null;
   }

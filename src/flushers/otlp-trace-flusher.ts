@@ -15,6 +15,7 @@ import {
   type EventLogRecord,
 } from '@loongsuite/otel-util-genai';
 import { planTurnStream } from './turn-stream.js';
+import { prepareCompression, hasActiveCompression, isCompression } from './context-compression.js';
 import { prepareCodexTurn } from './codex-turn-converter.js';
 import { prepareDelegatedTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
@@ -161,6 +162,8 @@ interface TurnBuffer {
   // retain their identities in spilledEventIds until payload rehydration.
   recordIndex: Map<string, number>;
   completed: boolean;
+  terminalSeen?: boolean;
+  hasCompression?: boolean;
   /** All realtime producers can overlap turns in one session. */
   isRealtimeHermes?: boolean;
   /** Only a turn covered by the native observer may bypass idle flushing. */
@@ -950,6 +953,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       // cron_finished event, not the successor, owns completion.
       if (agentType === 'openclaw' && buf.isObservedOpenClawCron) continue;
       if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
+      if (buf.hasCompression && hasActiveCompression(buf.records, Date.now())) continue;
       buf.completed = true;
       this.triggerFlush(buf, false);
     }
@@ -1044,6 +1048,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     if (!buf.spilledRecords) buf.residentBytes = (buf.residentBytes ?? 0) + residentDelta;
     buf.lastActivityMs = Date.now();
+    if (isCompression(entry)) buf.hasCompression = true;
     buf.activityVersion++;
     buf.hermesDeadSinceMs = undefined;
     buf.hermesNextDrainMs = undefined;
@@ -1062,7 +1067,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // model call carries its own finish reason.
     // 逐条模式下立即 flush；批量模式下（batchDepth>0）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
-    if (this.isTerminalEvent(entry)) {
+    if (this.isTerminalEvent(entry)) buf.terminalSeen = true;
+    if (buf.terminalSeen && (!buf.hasCompression || !hasActiveCompression(buf.records, Date.now()))) {
       buf.completed = true;
       if (this.batchDepth === 0) {
         this.triggerFlush(buf);
@@ -1222,6 +1228,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     if (!restored.length) throw new Error('Retained Codex payload is unavailable; refusing to acknowledge its turn');
     buf.records = restored;
+    buf.hasCompression = restored.some(isCompression);
     buf.recordIndex.clear();
     restored.forEach((entry, index) => buf.recordIndex.set(entry['event.id'], index));
     buf.residentBytes = restored.reduce((sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry)), 0);
@@ -1300,6 +1307,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    if (entry['gen_ai.context.compress.standalone'] === true) return entry['event.name'] === 'gen_ai.context.compress';
     if (entry['agent.source'] === 'qwen-work-cn-collaboration') {
       return entry['event.name'] === 'other' && entry['gen_ai.turn.end'] === true;
     }
@@ -1638,17 +1646,20 @@ export class OtlpTraceFlusher extends BaseFlusher {
         try {
           const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(sanitized, { handler, idGenerator })
             : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(sanitized, { handler, idGenerator })
-            : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(sanitized, handler, idGenerator)
+            : (agentType === 'hermes' || agentType === 'openclaw' || agentType === 'pi-coding-agent' || sanitized.some(isCompression)) ? prepareDelegatedTurn(sanitized, handler, idGenerator)
             : { records: sanitized, handler, removedEntryCount: 0 };
           cleanup = prepared.cleanup;
           // Existing process-wide OTel env vars may still request content on
           // spans. Enforce this flusher's explicit opt-out at the conversion
           // boundary instead of relying on env defaults.
+          const compression = prepareCompression(prepared.records, prepared.handler,
+            provider.getTracer('@loongsuite/pilot-context-compression'), idGenerator);
+          const conversionHandler = compression.handler;
           const conversionRecords = this.cfg.captureMessageContent === false
-            ? prepared.records.map(stripAgentMessageContent)
-            : prepared.records;
+            ? compression.records.map(stripAgentMessageContent)
+            : compression.records;
           const qwenCollaboration = conversionRecords.some(record => record['agent.source'] === 'qwen-work-cn-collaboration');
-          const stream = qwenCollaboration ? null : planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
+          const stream = qwenCollaboration ? null : planTurnStream(conversionRecords, { handler: conversionHandler, passthroughKeys });
           if (stream) {
             streamedExportSucceeded = true;
             const reasoning = { seen: false, total: 0 };
@@ -1695,7 +1706,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
               : convertEventLogToTrace;
             result = convert(
               conversionRecords,
-              { handler: prepared.handler, strict: false, passthroughKeys,
+              { handler: conversionHandler, strict: false, passthroughKeys,
                 ...(agentType === 'doubao-work' ? { observationTracer: provider.getTracer('@loongsuite/pilot-doubao-local-observation') } : {}) },
             );
           }
@@ -1762,6 +1773,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     applyQoderWorkStepTiming(records, spans);
     this.enrichToolSkillAttributes(records, spans);
     this.enrichMultimodalAttributes(records, spans);
+    this.enrichRequestContext(records, spans);
     if (agentType === 'openclaw') {
       this.enrichOpenClawIdentityAttributes(openClawIdentity, spans);
       this.enrichOpenClawSessionKey(records, spans);
@@ -2271,6 +2283,32 @@ export class OtlpTraceFlusher extends BaseFlusher {
         const items = multimodalMetadataItemsFromMessages(messages);
         if (items.length === 0) delete span.attributes[metadataKey];
         else span.attributes[metadataKey] = JSON.stringify(items);
+      }
+    }
+  }
+
+  private enrichRequestContext(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+    const requests = new Map<string, AgentActivityEntry>();
+    const responses = new Map<string, string>();
+    for (const record of records) {
+      const step = record['gen_ai.step.id'];
+      if (!step) continue;
+      if (record['event.name'] === 'llm.request') requests.set(step, record);
+      if (record['event.name'] === 'llm.response' && record['gen_ai.response.id']) responses.set(step, record['gen_ai.response.id']);
+    }
+    const byResponse = new Map<string, AgentActivityEntry>();
+    for (const [step, response] of responses) {
+      const request = requests.get(step);
+      if (request) byResponse.set(response, request);
+    }
+    for (const span of spans) {
+      if (span.attributes['gen_ai.span.kind'] !== 'LLM') continue;
+      const record = byResponse.get(String(span.attributes['gen_ai.response.id']));
+      if (!record) continue;
+      for (const key of ['gen_ai.context.window_size', 'gen_ai.context.tokens_used',
+        'gen_ai.context.window_usage_pct', 'gen_ai.conversation.compacted']) {
+        const value = record[key];
+        if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value) && value >= 0)) span.attributes[key] = value;
       }
     }
   }
@@ -2953,6 +2991,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const now = Date.now();
     for (const [, buf] of this.turnBuffers) {
       if (!buf.completed && now - buf.lastActivityMs > timeout) {
+        if (buf.hasCompression && hasActiveCompression(buf.records, now)) continue;
         if (buf.isObservedOpenClawCron) {
           if (!this.warnedOpenClawCronIdleTimeout) {
             this.warnedOpenClawCronIdleTimeout = true;

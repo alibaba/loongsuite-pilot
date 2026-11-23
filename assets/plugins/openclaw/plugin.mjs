@@ -26,6 +26,7 @@
  *   and are filtered by OpenClawPluginInput before the canonical event pipeline.
  */
 
+import { compressionFields, compressionIdentity } from '../shared/context-compression.mjs';
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -1906,6 +1907,49 @@ function emitRecord(record) {
   return writeRecord(record, shouldCaptureContent(loadPilotConfig()));
 }
 
+const compressionStarts = new Map();
+
+function handleBeforeCompaction(event, ctx, userId, emit) {
+  const sessionId = ctx?.sessionId;
+  const key = ctx?.sessionKey || sessionId;
+  if (!key) return;
+  // Hosts serialize session rewrites. A fresh before hook supersedes an
+  // unmatched older attempt without assigning it an invented outcome.
+  compressionStarts.delete(key);
+  if (compressionStarts.size >= 1024) compressionStarts.delete(compressionStarts.keys().next().value);
+  const resolved = resolveContextRun(event, ctx);
+  const run = resolved && !resolved.completed ? resolved : null;
+  const id = crypto.randomUUID();
+  const startedAt = Date.now();
+  const base = { ...buildCommonFields(run, sessionId, userId),
+    ...(!run ? { trace_id: generateTraceId(), 'gen_ai.turn.id': `compression:${id}` } : {}),
+    'gen_ai.context.compress.standalone': !run };
+  compressionStarts.set(key, { id, startedAt, base, tokensBefore: event.tokenCount,
+    messagesBefore: event.messageCount });
+  emit({ ...base, 'event.id': `${id}:start`, ...compressionFields({ id, phase: 'start',
+    startedAt, tokensBefore: event.tokenCount, messagesBefore: event.messageCount,
+    countingMethod: 'openclaw_native_estimate', countingScope: 'conversation_messages' }) });
+}
+
+function handleAfterCompaction(event, ctx, userId, emit) {
+  const key = ctx?.sessionKey || event.previousSessionId || ctx?.sessionId;
+  const pending = compressionStarts.get(key);
+  compressionStarts.delete(key);
+  const id = pending?.id || crypto.randomUUID();
+  const sessionId = pending?.base['gen_ai.session.id'] || ctx?.sessionId;
+  const base = pending?.base || { ...buildCommonFields(null, sessionId, userId),
+    trace_id: generateTraceId(), 'gen_ai.turn.id': `compression:${id}`,
+    'gen_ai.context.compress.standalone': true };
+  emit({ ...base, time_unix_nano: String(BigInt(Date.now()) * 1_000_000n),
+    ...compressionIdentity(sessionId, id),
+    ...compressionFields({ id, status: event.compactedCount === 0 ? 'skipped' : 'success',
+      startedAt: pending?.startedAt, endedAt: Date.now(), tokensBefore: pending?.tokensBefore,
+      tokensAfter: event.tokenCount, messagesBefore: pending?.messagesBefore,
+      messagesAfter: event.messageCount, countingMethod: 'openclaw_native_estimate',
+      countingScope: 'conversation_messages', comparable: true }),
+  });
+}
+
 function makeHandler(fn, interceptHook) {
   // Keep persistence hooks synchronous: OpenClaw's tool_result_persist and
   // before_message_write hooks reject Promise-returning handlers.
@@ -2094,6 +2138,9 @@ export default {
       for (const [name, handler] of Object.entries(handlers)) on(name, handler);
       return;
     }
+
+    try { on('before_compaction', handleBeforeCompaction); on('after_compaction', handleAfterCompaction); }
+    catch (err) { debugFailureOnce('compaction-register', err); }
 
     try { firstTokenObserver = installFirstTokenObserver(); } catch (err) {
       debugFailureOnce("first-token-observer", err);
