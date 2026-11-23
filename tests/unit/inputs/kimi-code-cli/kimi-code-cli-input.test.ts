@@ -339,6 +339,57 @@ it.each(['unchanged', 'shifted'])('retains a new turn after an atomic rewrite wi
   } finally { await input.stop(); }
 });
 
+it('resumes after an in-place rewrite shortens the accepted prefix', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, wire, first, second } = await createSession();
+  const padding = JSON.stringify({ type: 'context.append_message', message: 'x'.repeat(512) });
+  await fs.writeFile(wire, [...first.slice(0, -1), padding, first.at(-1)].join('\n') + '\n');
+  const before = await fs.stat(wire);
+  const { input, entries } = await createInput(stateFile, sessionDir);
+  try {
+    expect(entries).toHaveLength(6);
+    await fs.writeFile(wire, [...first, ...second].join('\n') + '\n');
+    const rewritten = await fs.stat(wire);
+    expect(rewritten.ino).toBe(before.ino);
+    expect(rewritten.size).toBeGreaterThan(before.size);
+    await poll(input);
+    await poll(input);
+    expect(entries).toHaveLength(8);
+    expect(new Set(entries.map(entry => entry['event.id'])).size).toBe(8);
+    expect(JSON.stringify(entries.slice(6))).toContain('Synthetic resumed message');
+  } finally { await input.stop(); }
+});
+
+it.each(['append', 'rewrite', 'rewrite and append'])('validates an in-flight page after an uncommitted wire %s', async change => {
+  vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
+  const { stateFile, sessionDir, wire, first } = await createSession();
+  const padding = (character: string) => JSON.stringify({
+    type: 'context.append_message', message: character.repeat(2_300_000),
+  });
+  const makeWire = (records: string[], character: string) => [
+    ...records.slice(0, -1), padding(character), padding(character), records.at(-1),
+  ].join('\n') + '\n';
+  await fs.writeFile(wire, makeWire(first, 'a'));
+  const { input, entries } = await createInput(stateFile, sessionDir);
+  try {
+    expect(entries).toEqual([]);
+    const rewritten = change !== 'append';
+    if (rewritten) {
+      const edited = first.map(record => record.replace('Synthetic first message', 'Synthetic fixed message'));
+      await fs.writeFile(wire, makeWire(edited, 'b'));
+    }
+    if (change !== 'rewrite') await fs.appendFile(wire, padding('c') + '\n');
+    if (rewritten) {
+      await poll(input);
+      expect(entries).toEqual([]);
+    }
+    await poll(input);
+    expect(entries).toHaveLength(6);
+    expect(JSON.stringify(entries)).toContain(rewritten ? 'Synthetic fixed message' : 'Synthetic first message');
+    if (rewritten) expect(JSON.stringify(entries)).not.toContain('Synthetic first message');
+  } finally { await input.stop(); }
+});
+
 it('waits for scoped output acknowledgement before a concurrent save can persist the cursor', async () => {
   vi.spyOn(Date, 'now').mockReturnValue(turnOneAt - 1);
   const { stateFile, sessionDir, sessionId, wire, first } = await createSession();

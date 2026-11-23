@@ -27,8 +27,11 @@ interface KimiCodeCliInputOptions extends InputOptions {
 interface ActiveScan {
   wirePath: string;
   identity: string;
+  sourceVersion: string;
+  sourceSize: number;
   reader: KimiCodeWireTurn;
   scanningOffset: number;
+  scanningAnchor?: string;
   endOffset: number;
   discardLine: boolean;
 }
@@ -204,10 +207,17 @@ export class KimiCodeCliInput extends BaseInput {
     const savedOffset = state.lastOffset;
     const previousOffset = typeof savedOffset === 'number' && Number.isSafeInteger(savedOffset) && savedOffset >= 0
       ? savedOffset : 0;
-    const replaced = savedIdentity !== undefined && (savedIdentity !== identity || stat.size < previousOffset);
+    const sourceVersion = `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    const changed = savedIdentity !== identity || state.extra?.sourceVersion !== sourceVersion;
     const acceptedAnchor = state.extra?.anchor;
-    const sameAcceptedPrefix = replaced && previousOffset > 0 && previousOffset <= stat.size
-      && typeof acceptedAnchor === 'string' && await wireAnchor(wire, previousOffset) === acceptedAnchor;
+    const anchorMatches = changed && previousOffset > 0 && previousOffset <= stat.size
+      && typeof acceptedAnchor === 'string'
+      ? await wireAnchor(wire, previousOffset) === acceptedAnchor
+      : undefined;
+    const replaced = savedIdentity !== undefined && (
+      savedIdentity !== identity || stat.size < previousOffset || anchorMatches === false
+    );
+    const reset = replaced && anchorMatches !== true;
     const previousFloor = state.extra?.minimumTurnTime;
     let minimumTurnTime = typeof previousFloor === 'number' ? previousFloor : this.cutoff;
     const acceptedEnd = state.extra?.acceptedEnd;
@@ -215,20 +225,28 @@ export class KimiCodeCliInput extends BaseInput {
     const acceptedPrompts = new Set(Array.isArray(savedPrompts)
       ? savedPrompts.filter((value): value is string => typeof value === 'string')
       : typeof state.extra?.acceptedPrompt === 'string' ? [state.extra.acceptedPrompt] : []);
-    if (replaced && !sameAcceptedPrefix && typeof acceptedEnd === 'number') {
+    if (reset && typeof acceptedEnd === 'number') {
       // Same-millisecond prompts can be distinct. Keep the native timestamp
       // inclusive and suppress only accepted prompt identities at that boundary.
       minimumTurnTime = Math.max(minimumTurnTime, acceptedEnd);
     }
-    const committed = replaced && !sameAcceptedPrefix ? 0 : previousOffset;
+    const committed = reset ? 0 : previousOffset;
     if (scan && (replaced || scan.identity !== identity || scan.wirePath !== wirePath || stat.size < scan.endOffset)) {
       scan = undefined;
     }
+    // An append keeps the scanned boundary intact. A same-size mutation or a
+    // moved boundary invalidates the in-memory turn, even on the same inode.
+    if (scan && scan.sourceVersion !== sourceVersion && (
+      stat.size <= scan.sourceSize || !scan.scanningAnchor
+      || await wireAnchor(wire, scan.scanningOffset) !== scan.scanningAnchor
+    )) {
+      scan = undefined;
+    }
     if (committed >= stat.size && !replaced && savedIdentity === identity) {
-      if (savedPath !== wirePath) this.staged.set(cursorKey, { extra: { wirePath } });
+      if (savedPath !== wirePath || changed) this.staged.set(cursorKey, { extra: { wirePath, sourceVersion } });
       return [];
     }
-    const sourceStamp = `${identity}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${committed}`;
+    const sourceStamp = `${identity}:${sourceVersion}:${committed}`;
     if (!scan && this.waitingSources.get(wirePath) === sourceStamp) return [];
     this.waitingSources.delete(wirePath);
     if (!scan) {
@@ -243,7 +261,7 @@ export class KimiCodeCliInput extends BaseInput {
         cutoff = Math.max(cutoff, createdAt + 1);
       }
       scan = {
-        wirePath, identity,
+        wirePath, identity, sourceVersion, sourceSize: stat.size,
         reader: new KimiCodeWireTurn(session.id, session.cwd, cutoff, this.captureContent, acceptedPrompts),
         scanningOffset: committed,
         endOffset: stat.size,
@@ -295,9 +313,12 @@ export class KimiCodeCliInput extends BaseInput {
     const waitingForTurn = scan.reader.hasActiveTurn || scan.discardLine;
     if (waitingForTurn && !scan.reader.lastCompletedTurn) {
       if (from + bytesRead < scan.endOffset && scan.scanningOffset > from) {
+        scan.sourceVersion = sourceVersion;
+        scan.sourceSize = stat.size;
+        scan.scanningAnchor = await wireAnchor(wire, scan.scanningOffset);
         this.continuation = { key: stateKey, scan };
       } else if (from + bytesRead === scan.endOffset && scan.endOffset === stat.size) {
-        this.waitingSources.set(wirePath, `${identity}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${nextCommit}`);
+        this.waitingSources.set(wirePath, `${identity}:${sourceVersion}:${nextCommit}`);
         if (this.waitingSources.size > MAX_WAITING_SOURCES) {
           const oldest = this.waitingSources.keys().next().value;
           if (oldest !== undefined) this.waitingSources.delete(oldest);
@@ -310,7 +331,7 @@ export class KimiCodeCliInput extends BaseInput {
     });
     const eligible = scan.reader.hasEligiblePrompt;
     const claim = !ownerPath && eligible;
-    if (claim || nextCommit !== previousOffset || replaced || savedIdentity !== identity || savedPath !== wirePath) {
+    if (claim || nextCommit !== previousOffset || replaced || changed || savedPath !== wirePath) {
       const anchor = await wireAnchor(wire, nextCommit);
       const terminal = scan.reader.lastCompletedTurn;
       const promptIds = terminal && terminal.endTime !== acceptedEnd ? terminal.promptIds : acceptedPrompts;
@@ -320,7 +341,7 @@ export class KimiCodeCliInput extends BaseInput {
       this.staged.set(claim ? stateKey : cursorKey, {
         lastOffset: nextCommit,
         extra: {
-          identity, minimumTurnTime, wirePath, anchor,
+          identity, minimumTurnTime, wirePath, anchor, sourceVersion,
           acceptedPrompts: [...promptIds],
           acceptedEnd: terminal?.endTime ?? acceptedEnd,
         },
