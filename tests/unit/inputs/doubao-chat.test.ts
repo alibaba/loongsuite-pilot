@@ -57,6 +57,30 @@ describe('Doubao ordinary chat collection', () => {
     expect(decodeChatWriteBatch(unrelated)).toEqual([]);
   });
 
+  it.each([
+    [0, 1, 1, 1, 1],
+    [0, 3, 7, 1, 1],
+    [36, 1, 1, 2, 1, 1, 1],
+  ])('reads installation-assigned IndexedDB IDs in key prefix %j', async (...keyPrefix) => {
+    const batch = chatBatch({ keyPrefix });
+    expect(decodeChatWriteBatch(batch)[0].value.input).toBe('SYNTHETIC_CHAT_INPUT');
+    const { root, file } = await setup();
+    await writeFile(file, chatWal([batch]));
+    expect((await new DoubaoChatReader(root).find('synthetic-chat-turn', budget()))?.finished).toBe(true);
+    await rm(file);
+    await writeFile(path.join(path.dirname(file), '000004.ldb'), chatTable(batch, true));
+    expect((await new DoubaoChatReader(root).find('synthetic-chat-turn', budget()))?.output).toBe('SYNTHETIC_CHAT_OUTPUT');
+  });
+
+  it.each([
+    [0, 0, 1, 1, 1],
+    [0, 1, 0, 1, 1],
+    [0, 1, 1, 2, 1],
+    [0, 1, 1, 1, 2],
+  ])('rejects metadata and invalid IndexedDB key prefix %j', (...keyPrefix) => {
+    expect(decodeChatWriteBatch(chatBatch({ keyPrefix }))).toEqual([]);
+  });
+
   it('retries half-records, validates checksums and reads no body on unchanged polls', async () => {
     const { root, file } = await setup(); const reader = new DoubaoChatReader(root);
     const raw = chatWal([chatBatch()]); await writeFile(file, raw.subarray(0, raw.length - 5));

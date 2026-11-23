@@ -357,8 +357,21 @@ function decodeChatValue(key: Buffer, value: Buffer, sequence: bigint): ChatStor
 }
 
 function isChatTaskKey(key: Buffer): boolean {
-  if (key.length < 8 || key[0] !== 0 || key[1] !== 2 || key[2] !== 1 || key[3] !== 1 || key[4] !== 1) return false;
-  const length = varint(key, 5);
+  if (key.length < 8) return false;
+  // IndexedDB assigns database and object-store IDs per local installation.
+  // The prefix encodes their byte lengths, followed by a data index ID of 1.
+  const databaseBytes = (key[0] >> 5) + 1;
+  const storeBytes = ((key[0] >> 2) & 7) + 1;
+  const indexBytes = (key[0] & 3) + 1;
+  const storeStart = 1 + databaseBytes;
+  const indexStart = storeStart + storeBytes;
+  const stringStart = indexStart + indexBytes;
+  if (stringStart + 2 > key.length
+    || !key.subarray(1, storeStart).some(byte => byte !== 0)
+    || !key.subarray(storeStart, indexStart).some(byte => byte !== 0)
+    || key[indexStart] !== 1 || key.subarray(indexStart + 1, stringStart).some(byte => byte !== 0)
+    || key[stringStart] !== 1) return false;
+  const length = varint(key, stringStart + 1);
   if (length.end + length.value * 2 !== key.length || length.value > 256) return false;
   const text = Buffer.from(key.subarray(length.end)); text.swap16();
   return /^im-sdk:user:\d+:default-chat-im-protocol-store$/.test(text.toString('utf16le'));

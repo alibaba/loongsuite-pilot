@@ -4,7 +4,7 @@ import { chatCrc32c, readVarint } from '../../src/inputs/doubao-work/doubao-chat
 
 export function chatBatch(options: { sequence?: number; session?: string; finished?: boolean; output?: string;
   input?: string; reused?: boolean; conversation?: string; localMessage?: string; queryMs?: number;
-  emptyStore?: boolean; deleteStore?: boolean } = {}): Buffer {
+  emptyStore?: boolean; deleteStore?: boolean; keyPrefix?: number[] } = {}): Buffer {
   const session = options.session ?? 'synthetic-chat-turn';
   const conversation = options.conversation ?? 'synthetic-conversation';
   const local = options.localMessage ?? 'synthetic-local-message';
@@ -23,7 +23,7 @@ export function chatBatch(options: { sequence?: number; session?: string; finish
     } } },
   };
   const keyText = Buffer.from('im-sdk:user:123456:default-chat-im-protocol-store', 'utf16le'); keyText.swap16();
-  const key = Buffer.concat([Buffer.from([0, 2, 1, 1, 1]), encodeVarint(keyText.length / 2), keyText]);
+  const key = Buffer.concat([Buffer.from(options.keyPrefix ?? [0, 2, 1, 1, 1]), encodeVarint(keyText.length / 2), keyText]);
   const value = Buffer.concat([Buffer.from([1]), Buffer.from('ff15fe000000000000000000000000', 'hex'),
     serialize({ state: { mainTaskDataMap: options.emptyStore ? {} : { [session]: task } }, version: 0 })]);
   const header = Buffer.alloc(12); header.writeBigUInt64LE(BigInt(options.sequence ?? 1)); header.writeUInt32LE(1, 8);
