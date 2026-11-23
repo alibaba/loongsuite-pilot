@@ -920,14 +920,14 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
       && row.message?.usage && typeof row.message.usage === 'object')?.message.usage;
     const reportedCredits = nativeUsage?.credits;
     const hasCredits = typeof reportedCredits === 'number' && Number.isFinite(reportedCredits) && reportedCredits >= 0;
+    const billable = nativeUsage?.billable;
     const costFields = hasCredits ? {
       'gen_ai.usage.cost.amount': reportedCredits,
       'gen_ai.usage.cost.unit': agentId === 'qoder-cn' ? 'qodercn_credit' : 'qoder_credit',
       'gen_ai.usage.cost.source': 'provider',
-      ...(typeof nativeUsage.billable === 'boolean' ? { 'agent.qoder.usage.billable': nativeUsage.billable } : {}),
     } : {};
 
-    if (outputParts.length > 0 || hasCredits) {
+    if (outputParts.length > 0 || hasCredits || typeof billable === 'boolean') {
       // SDK/CLI native transcripts can carry per-response usage, including
       // sidechains absent from the parent's token database. One closing usage
       // belongs to one model boundary; never add repeated streaming snapshots.
@@ -952,6 +952,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'gen_ai.response.id': responseId,
         ...usageFields,
         ...costFields,
+        ...(typeof billable === 'boolean' ? { 'agent.qoder.usage.billable': billable } : {}),
         ...(finishReason ? { 'gen_ai.response.finish_reasons': [finishReason] } : {}),
         'user.id': userId,
         'gen_ai.output.messages': [{

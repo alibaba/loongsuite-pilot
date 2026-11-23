@@ -55,7 +55,19 @@ describe.each(['qoder', 'qoder-cn'])('%s reported cost usage', agentId => {
         total_credits: 99, modelUsage: { synthetic: { credits: 99 } } } })], agentId);
     expect(response['gen_ai.usage.cost.amount']).toBeUndefined();
     expect(response['gen_ai.usage.cost.unit']).toBeUndefined();
-    expect(response['agent.qoder.usage.billable']).toBeUndefined();
+    expect(response['gen_ai.usage.cost.source']).toBeUndefined();
+    expect(response['agent.qoder.usage.billable']).toBe(false);
+    const entry = buildCanonicalHookEntry(response, agentId);
+    expect(projectLogEntry(entry, { dropAgentScopedFields: true })['agent.qoder.usage.billable']).toBe(false);
+    expect(serialiseLogEntry(entry, { dropAgentScopedFields: true })['agent.qoder.usage.billable']).toBe('false');
+  });
+
+  it('retains a billing-only response without message content or amounts', () => {
+    const [response] = build([user, assistant(1, { id: 'billing-response', content: [],
+      stop_reason: 'end_turn', usage: { billable: false } })], agentId);
+    expect(response['agent.qoder.usage.billable']).toBe(false);
+    expect(response['gen_ai.usage.cost.amount']).toBeUndefined();
+    expect(response['gen_ai.usage.cost.unit']).toBeUndefined();
   });
 
   it('does not infer unknown billing status', () => {

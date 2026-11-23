@@ -133,6 +133,18 @@ describe.each([...QODER_TRANSCRIPT_AGENT_TYPES])('%s roots through the real flus
 });
 
 describe('Qoder root converter compatibility', () => {
+  it('keeps billing status without a Credits amount on the owning LLM only', async () => {
+    const input = records('qoder-cn');
+    const response = input.find(record =>
+      record['event.name'] === 'llm.response' && record['gen_ai.response.id'] === 'r1');
+    response!['agent.qoder.usage.billable'] = false;
+    const spans = await flush(input);
+    const llm = spans.find(span => span.attributes['gen_ai.response.id'] === 'r1');
+    expect(llm?.attributes['agent.qoder.usage.billable']).toBe(false);
+    expect(llm?.attributes['gen_ai.usage.cost.amount']).toBeUndefined();
+    expect(spans.filter(span => span.attributes['agent.qoder.usage.billable'] !== undefined)).toEqual([llm]);
+  });
+
   it('matches costs by response identity when multiple responses share a step', async () => {
     const input = records('qoder-cn').filter(record => record['event.name'] === 'llm.response').map((record, index) => ({
       ...record, 'gen_ai.step.id': 'shared-step', 'gen_ai.usage.cost.amount': index + 0.125,

@@ -274,9 +274,7 @@ export function projectLogEntry(
     } else if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) {
       if (!(key === 'agent.qoder.usage.billable' && typeof value === 'boolean'
         && (entry['event.name'] === 'llm.response' || entry['event.name'] === 'gen_ai.model.response')
-        && ['qoder', 'qoder-cli', 'qoder-app', 'qoder-cn', 'qoder-idea'].includes(entry['gen_ai.agent.type'])
-        && ['qoder_credit', 'qodercn_credit'].includes(String(entry['gen_ai.usage.cost.unit']))
-        && typeof entry['gen_ai.usage.cost.amount'] === 'number')) continue;
+        && ['qoder', 'qoder-cli', 'qoder-app', 'qoder-cn', 'qoder-idea'].includes(entry['gen_ai.agent.type']))) continue;
     }
     out[key] = value;
   }
