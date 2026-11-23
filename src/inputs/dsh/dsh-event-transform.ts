@@ -622,6 +622,8 @@ export function transformDshRecord(
     }
 
     case 'tool/result': {
+      // A delayed result cannot resolve a call or enter the request history in another turn.
+      if (state.currentTurn !== undefined && turn !== state.currentTurn) return null;
       const message = asObject(data.message) ?? {};
       const source = asObject(message.source) ?? {};
       const callId = asString(source.callId);

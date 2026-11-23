@@ -737,6 +737,54 @@ describe('DshLogInput state isolation and restart recovery', () => {
     expect(result?.['gen_ai.tool.name']).toBe('read');
   });
 
+  it('keeps a late tool result from an earlier turn out of a resumed request', async () => {
+    const sid = 'session-a';
+    const file = path.join(tmpDir, 'dsh-session-a.jsonl');
+    const record = (type: string, time: number, data: Record<string, unknown>) => ({ type, sid, time, data });
+    const result = (turn: number | undefined, time: number, callId: string, text: string) => record('tool/result', time, {
+      turn, step: 1, message: { source: { callId }, content: [{ type: 'text', text }] },
+    });
+    await appendRecords(file, [
+      ...prefix(sid, 'provider-a', 'previous-prompt'),
+      record('tool/call', 6, { turn: 1, step: 1, callId: 'call-a', name: 'old-read' }),
+      record('turn/end', 7, { turn: 1 }),
+      record('turn/start', 8, { turn: 2 }),
+      record('step/start', 9, { turn: 2, step: 1 }),
+      record('user/message', 10, { turn: 2, content: [{ type: 'text', text: 'current-prompt' }] }),
+      chunk(sid, 11, 2),
+      record('assistant/message', 12, { turn: 2, step: 1, message: { id: 'current-response', content: [
+        { type: 'tool-call', id: 'call-a', name: 'current-read', arguments: '{}' },
+        { type: 'tool-call', id: 'call-b', name: 'find', arguments: '{}' },
+      ] } }),
+      record('tool/call', 13, { turn: 2, step: 1, callId: 'call-a', name: 'current-read' }),
+      record('tool/call', 14, { turn: 2, step: 1, callId: 'call-b', name: 'find' }),
+    ]);
+    const first = await makeInput();
+    await first.input.runCollect();
+    await first.store.save();
+
+    await appendRecords(file, [
+      result(1, 15, 'call-a', 'previous-tool-output'),
+      result(2, 16, 'call-b', 'current-find-output'),
+      result(undefined, 17, 'call-a', 'current-read-output'),
+      record('step/start', 18, { turn: 2, step: 2 }),
+      chunk(sid, 19, 2, 2),
+    ]);
+    const second = await makeInput();
+    const entries = await second.input.runCollect();
+    const results = entries.filter(entry => entry['event.name'] === 'tool.result');
+    expect(results.map(entry => [entry['gen_ai.turn.id'], entry['gen_ai.tool.call.id'], entry['gen_ai.tool.name']]))
+      .toEqual([['session-a:2', 'call-b', 'find'], ['session-a:2', 'call-a', 'current-read']]);
+    const request = entries.find(entry => entry['event.name'] === 'llm.request');
+    for (const field of ['gen_ai.input.messages', 'gen_ai.input.messages_delta'] as const) {
+      expect(request?.[field]).toEqual(expect.arrayContaining([
+        { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-b', response: { output: 'current-find-output' } }] },
+        { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-a', response: { output: 'current-read-output' } }] },
+      ]));
+      expect(JSON.stringify(request?.[field])).not.toContain('previous-tool-output');
+    }
+  });
+
   it('does not advance past a partial final JSONL record', async () => {
     const file = path.join(tmpDir, 'dsh-session-a.jsonl');
     const complete = prefix('session-a', 'provider-a', 'prompt-a');
