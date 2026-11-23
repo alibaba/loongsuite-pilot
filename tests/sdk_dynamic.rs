@@ -583,6 +583,43 @@ fn start_failure_releases_its_workers_and_preserves_the_original_owner() {
 }
 
 #[test]
+fn sdk_rejects_policy_when_its_legacy_checkpoint_cannot_be_imported() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let sessions = root.join("codex/sessions");
+    let pilot = root.join("pilot");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::create_dir_all(pilot.join("logs")).unwrap();
+    std::fs::write(pilot.join("logs/input-state.json"), "{").unwrap();
+
+    let mut host = Host::start_with_home(
+        &root.join("sdk"),
+        Some(&root),
+        empty_policy(),
+        Box::default(),
+    );
+    host.ready();
+    let policy = json!({"version":"invalid-checkpoint","agents":["codex"],"hcd":{"agent_configs":{"codex":{"collection":{
+        "enabled":true,"profile":"codex_rollout_v1","allowed_roots":[sessions,pilot],
+        "sources":[{"id":"rollout","type":"transcript","path":sessions}],
+        "pilot_host":{"data_dir":pilot}
+    }}}}});
+    let (code, result) = host.apply(policy.clone());
+    assert_eq!(code, FAILURE, "invalid checkpoint result: {result}");
+    assert!(
+        result["reason"].as_str().unwrap().contains("EOF"),
+        "{result}"
+    );
+    assert_eq!(host.snapshot()["effective_version"], "original");
+
+    std::fs::write(pilot.join("logs/input-state.json"), "{}").unwrap();
+    let (code, result) = host.apply(policy);
+    assert_eq!(code, OK, "repaired checkpoint result: {result}");
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    host.stop();
+}
+
+#[test]
 fn sdk_crash_child() {
     let Some(root) = std::env::var_os("PILOT_SDK_CRASH_STATE").map(PathBuf::from) else {
         return;

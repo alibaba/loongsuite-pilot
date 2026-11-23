@@ -40,6 +40,12 @@ impl LegacyCheckpointHandoff {
     }
 }
 
+enum ShellCheckpoint {
+    Existing(Option<String>),
+    Handoff(Option<String>),
+    Consolidated(String),
+}
+
 type DeliveryRows = Vec<(i64, Vec<u8>)>;
 
 const SAVE_CHECKPOINT: &str = "INSERT INTO checkpoint VALUES(?1,?2)
@@ -476,6 +482,14 @@ impl Outbox {
         }
         Ok(())
     }
+
+    pub(super) fn has_checkpoint(&self, source: &str) -> anyhow::Result<bool> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM checkpoint WHERE source=?1)",
+            [source],
+            |row| row.get(0),
+        )?)
+    }
     #[cfg(test)]
     fn saved_checkpoints(&self) -> anyhow::Result<Vec<(String, String)>> {
         let db = self.db.lock().unwrap();
@@ -496,48 +510,85 @@ impl Outbox {
     ) -> anyhow::Result<Option<String>> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
-        let handed_off = Self::find_checkpoint(&tx, handoff.marker())?.is_some()
+        let checkpoint =
+            match Self::resolve_shell_checkpoint(&tx, source, handoff, read_shell_checkpoint)? {
+                ShellCheckpoint::Existing(checkpoint) => return Ok(checkpoint),
+                ShellCheckpoint::Handoff(checkpoint) => {
+                    if handoff == LegacyCheckpointHandoff::Qoder {
+                        tx.execute("DELETE FROM checkpoint WHERE source=?1", [handoff.marker()])?;
+                    } else {
+                        tx.execute("DELETE FROM checkpoint", [])?;
+                    }
+                    checkpoint
+                }
+                ShellCheckpoint::Consolidated(checkpoint) => {
+                    tx.execute("DELETE FROM checkpoint WHERE source<>?1", [source])?;
+                    Some(checkpoint)
+                }
+            };
+        if let Some(text) = checkpoint.as_deref() {
+            tx.execute(SAVE_CHECKPOINT, params![source, text])?;
+        }
+        tx.commit()?;
+        Ok(checkpoint)
+    }
+
+    pub(super) fn preview_shell_checkpoint(
+        &self,
+        source: &str,
+        handoff: LegacyCheckpointHandoff,
+        read_shell_checkpoint: impl FnOnce() -> anyhow::Result<Option<String>>,
+    ) -> anyhow::Result<bool> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let checkpoint =
+            Self::resolve_shell_checkpoint(&tx, source, handoff, read_shell_checkpoint)?;
+        Ok(match checkpoint {
+            ShellCheckpoint::Existing(value) | ShellCheckpoint::Handoff(value) => value.is_some(),
+            ShellCheckpoint::Consolidated(_) => true,
+        })
+    }
+
+    fn resolve_shell_checkpoint(
+        db: &Connection,
+        source: &str,
+        handoff: LegacyCheckpointHandoff,
+        read_shell_checkpoint: impl FnOnce() -> anyhow::Result<Option<String>>,
+    ) -> anyhow::Result<ShellCheckpoint> {
+        let handed_off = Self::find_checkpoint(db, handoff.marker())?.is_some()
             || (handoff == LegacyCheckpointHandoff::Codex
-                && Self::find_checkpoint(&tx, CODEX_SHELL_MIGRATED)?.is_some());
+                && Self::find_checkpoint(db, CODEX_SHELL_MIGRATED)?.is_some());
         if handed_off {
             let pending: i64 =
-                tx.query_row("SELECT events FROM queue_size", [], |row| row.get(0))?;
+                db.query_row("SELECT events FROM queue_size", [], |row| row.get(0))?;
             anyhow::ensure!(
                 pending == 0,
                 "checkpoint handoff retains unacknowledged activity"
             );
             let checkpoint = read_shell_checkpoint()?;
-            let checkpoint = if handoff == LegacyCheckpointHandoff::Qoder {
-                // A missing legacy namespace cannot advance Qoder's saved cursor.
-                let checkpoint = match checkpoint {
-                    Some(text) => Some(text),
-                    None => Self::find_checkpoint(&tx, source)?,
-                };
-                tx.execute("DELETE FROM checkpoint WHERE source=?1", [handoff.marker()])?;
-                checkpoint
+            // A missing legacy namespace cannot advance Qoder's saved cursor.
+            let checkpoint = if checkpoint.is_none() && handoff == LegacyCheckpointHandoff::Qoder {
+                Self::find_checkpoint(db, source)?
             } else {
-                tx.execute("DELETE FROM checkpoint", [])?;
                 checkpoint
             };
-            if let Some(text) = checkpoint.as_deref() {
-                tx.execute(SAVE_CHECKPOINT, params![source, text])?;
-            }
-            tx.commit()?;
-            return Ok(checkpoint);
+            return Ok(ShellCheckpoint::Handoff(checkpoint));
         }
         if handoff == LegacyCheckpointHandoff::Qoder {
-            return Self::find_checkpoint(&tx, source);
+            return Ok(ShellCheckpoint::Existing(Self::find_checkpoint(
+                db, source,
+            )?));
         }
         let mut checkpoints = {
-            let mut statement = tx.prepare("SELECT json FROM checkpoint WHERE source<>?1")?;
+            let mut statement = db.prepare("SELECT json FROM checkpoint WHERE source<>?1")?;
             let rows = statement.query_map([source], |row| row.get::<_, String>(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
-        if let Some(current) = Self::find_checkpoint(&tx, source)? {
+        if let Some(current) = Self::find_checkpoint(db, source)? {
             checkpoints.push(current);
         }
         if checkpoints.is_empty() {
-            return Ok(None);
+            return Ok(ShellCheckpoint::Existing(None));
         }
         let mut merged = serde_json::Map::new();
         for checkpoint in checkpoints {
@@ -551,11 +602,9 @@ impl Outbox {
                 }
             }
         }
-        let text = Value::Object(merged).to_string();
-        tx.execute("DELETE FROM checkpoint WHERE source<>?1", [source])?;
-        tx.execute(SAVE_CHECKPOINT, params![source, text])?;
-        tx.commit()?;
-        Ok(Some(text))
+        Ok(ShellCheckpoint::Consolidated(
+            Value::Object(merged).to_string(),
+        ))
     }
 
     pub(crate) fn mark_shell_checkpoint_exported(

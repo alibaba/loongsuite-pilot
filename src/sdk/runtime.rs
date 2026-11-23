@@ -1,4 +1,4 @@
-use super::outbox::{write_checkpoint, CallbackOutboxFlusher, Outbox};
+use super::outbox::{write_checkpoint, CallbackOutboxFlusher, LegacyCheckpointHandoff, Outbox};
 use super::policy::{AgentPlan, Init, Policy};
 use crate::checkpoints::StateStore;
 use crate::core::{InputManager, LiveInput};
@@ -421,12 +421,6 @@ fn run_agent(
         .on_thread_start(move || source_access::install(Some(start_scope.clone())))
         .on_thread_stop(|| source_access::install(None))
         .build()?;
-    // Wait before reading or changing shared checkpoints, starting inputs or enqueueing events.
-    let (ready, activate) = activation;
-    if ready.send(Ok(())).is_err() || activate.recv().is_err() {
-        return Ok(());
-    }
-    use super::outbox::LegacyCheckpointHandoff;
     let shell_handoff = plan.pilot_host.as_ref().and_then(|host| {
         let handoff = LegacyCheckpointHandoff::for_input(checkpoint_key)?;
         let expected = if handoff == LegacyCheckpointHandoff::Qoder {
@@ -438,23 +432,30 @@ fn run_agent(
         };
         (init.data_dir == expected).then_some((host, handoff))
     });
+    let has_durable_checkpoint = if let Some((host, handoff)) = shell_handoff {
+        queue.preview_shell_checkpoint(&namespace, handoff, || {
+            read_shell_checkpoint(&host.data_dir, checkpoint_key)
+        })?
+    } else {
+        queue.has_checkpoint(&namespace)?
+    };
+    let replaces_mirror =
+        shell_handoff.is_some_and(|(_, handoff)| handoff == LegacyCheckpointHandoff::Codex);
+    if let Some(host) = &plan.pilot_host {
+        if !has_durable_checkpoint && (replaces_mirror || !checkpoint.try_exists()?) {
+            runtime.block_on(read_pilot_checkpoint(&host.data_dir, checkpoint_key))?;
+        }
+    }
+
+    // Checkpoint preflight only reads. Transfer ownership and re-read progress
+    // after activation so a worker being replaced can finish committing its cursor.
+    let (ready, activate) = activation;
+    if ready.send(Ok(())).is_err() || activate.recv().is_err() {
+        return Ok(());
+    }
     if let Some((host, handoff)) = shell_handoff {
-        let legacy_path = host.data_dir.join("logs/input-state.json");
         let imported = queue.prepare_shell_checkpoint(&namespace, handoff, || {
-            use std::io::Read;
-            source_access::private_path(&legacy_path)?;
-            let mut file = match source_access::open_under(&legacy_path, &host.data_dir) {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error.into()),
-            };
-            anyhow::ensure!(
-                file.metadata()?.len() <= 64 * 1024 * 1024,
-                "Pilot shell checkpoint exceeds 64 MiB"
-            );
-            let mut body = String::new();
-            file.read_to_string(&mut body)?;
-            filter_shell_checkpoint(&body, checkpoint_key)
+            read_shell_checkpoint(&host.data_dir, checkpoint_key)
         })?;
         if let Some(text) = imported {
             write_checkpoint(&checkpoint, &text)?;
@@ -839,16 +840,38 @@ async fn import_pilot_checkpoint(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let legacy_path = data_dir.join("logs/input-state.json");
-    let body = match source_access::read_to_string(&legacy_path).await {
-        Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    if let Some(text) = filter_shell_checkpoint(&body, input)? {
+    if let Some(text) = read_pilot_checkpoint(data_dir, input).await? {
         write_checkpoint(target, &text)?;
     }
     Ok(())
+}
+
+async fn read_pilot_checkpoint(data_dir: &Path, input: &str) -> anyhow::Result<Option<String>> {
+    let legacy_path = data_dir.join("logs/input-state.json");
+    let body = match source_access::read_to_string(&legacy_path).await {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    filter_shell_checkpoint(&body, input)
+}
+
+fn read_shell_checkpoint(data_dir: &Path, input: &str) -> anyhow::Result<Option<String>> {
+    use std::io::Read;
+    let legacy_path = data_dir.join("logs/input-state.json");
+    source_access::private_path(&legacy_path)?;
+    let mut file = match source_access::open_under(&legacy_path, data_dir) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        file.metadata()?.len() <= 64 * 1024 * 1024,
+        "Pilot shell checkpoint exceeds 64 MiB"
+    );
+    let mut body = String::new();
+    file.read_to_string(&mut body)?;
+    filter_shell_checkpoint(&body, input)
 }
 
 fn filter_shell_checkpoint(body: &str, input: &str) -> anyhow::Result<Option<String>> {
