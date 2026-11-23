@@ -178,6 +178,17 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
       if (typeof value === 'number') agent.attributes['gen_ai.usage.' + metric] = value;
     }
   }
+  // A complete Hook turn can survive even when no individual history has
+  // both messages. Preserve that evidence once, without assigning a history ID.
+  if (hasModelMessages(llm) && !observed.some(s =>
+    s.attributes['gen_ai.span.kind'] === 'LLM' && hasModelMessages(s))) {
+    Object.assign(step, { name: 'turn summary' });
+    delete step.attributes['gen_ai.react.round'];
+    step.attributes['loongsuite.trae_cn.observation'] = 'turn_summary';
+    llm.attributes['loongsuite.trae_cn.observation'] = 'turn_summary';
+    Object.assign(llm, { name: llm.name + ' (turn summary)' });
+    return [...spans, ...observed];
+  }
   return [...spans.filter(s => (s !== step || unassigned) && s !== llm), ...observed];
 }
 
@@ -199,11 +210,16 @@ function hasMessageBody(value: unknown): boolean {
   }
 }
 
+function hasModelMessages(span: ReadableSpan): boolean {
+  return hasMessageBody(span.attributes['gen_ai.input.messages']) &&
+    hasMessageBody(span.attributes['gen_ai.output.messages']);
+}
+
 // The TRAE tree uses STEP parents for both LLM and TOOL. Keep a tool's
 // STEP even when the corresponding model messages could not be recovered.
 export function omitEmptyTraeModelSpans(spans: ReadableSpan[]): ReadableSpan[] {
   const empty = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM' &&
-    !(hasMessageBody(s.attributes['gen_ai.input.messages']) && hasMessageBody(s.attributes['gen_ai.output.messages'])));
+    !hasModelMessages(s));
   const removed = new Map(empty.map(s => [s.spanContext().spanId, s.parentSpanId]));
   const kept = spans.filter(s => !removed.has(s.spanContext().spanId));
   for (const span of kept) {

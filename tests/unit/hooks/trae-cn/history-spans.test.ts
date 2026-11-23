@@ -98,3 +98,26 @@ it('exports only model spans with both messages and keeps observable tools', () 
   expect(omitEmptyTraeModelSpans([stream, steps[2], models[2]])).toEqual([steps[2], models[2]]);
   expect(omitEmptyTraeModelSpans([...steps, ...models, stream, tool])).toEqual([steps[1], steps[2], models[2], tool]);
 });
+
+it('retains one complete turn when shared history cannot supply a complete model span', () => {
+  const span = (kind: string, id: string, parentSpanId?: string) => ({
+    name: kind, spanContext: () => ({ spanId: id, traceId: 'a'.repeat(32) }), parentSpanId,
+    startTime: [1, 0], endTime: [4, 0], attributes: { 'gen_ai.span.kind': kind },
+  }) as unknown as ReadableSpan;
+  const agent = span('AGENT', 'agent'), step = span('STEP', 'step', 'agent');
+  const llm = span('LLM', 'model', 'step'), tool = span('TOOL', 'tool', 'step');
+  tool.attributes['gen_ai.tool.call.id'] = 'call_one';
+  const body = (role: string, content: string) => JSON.stringify([{ role, parts: [{ type: 'text', content }] }]);
+  llm.attributes['gen_ai.input.messages'] = body('user', 'build a report');
+  llm.attributes['gen_ai.output.messages'] = body('assistant', 'report built');
+  const rounds = ['a', 'b'].map(c => ({ id: c.repeat(24), at: '2000000000', request: 'stream',
+    initial: true, shared: true, toolIds: ['call_one'] }));
+  const records = [{ 'event.name': 'llm.response', span_id: 'model',
+    'loongsuite.trae_cn.model_responses': rounds }] as unknown as AgentActivityEntry[];
+  const result = omitEmptyTraeModelSpans(expandTraeHistory(records, [agent, step, llm, tool]));
+  expect(result.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM')).toEqual([llm]);
+  expect(llm.attributes['loongsuite.trae_cn.observation']).toBe('turn_summary');
+  expect(llm.attributes['gen_ai.output.messages']).toBe(body('assistant', 'report built'));
+  expect(result.find(s => s.spanContext().spanId === llm.parentSpanId)?.name).toBe('turn summary');
+  expect(result.find(s => s.spanContext().spanId === tool.parentSpanId)?.attributes['loongsuite.trae_cn.stream_request_id']).toBe('stream');
+});
