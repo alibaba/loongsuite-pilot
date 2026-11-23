@@ -24,11 +24,11 @@ fn original_public_parser_rejects_invalid_flags_before_installation_side_effects
         ),
         (
             vec!["--interceptor-mode", "custom"],
-            "--interceptor-types is required",
+            "Unknown interceptor mode: custom",
         ),
         (
             vec!["--interceptor-types", "apiKey"],
-            "--interceptor-types can only be used",
+            "Unknown option: --interceptor-types",
         ),
         (
             vec!["--exclude-workspace"],
@@ -87,7 +87,7 @@ fn original_public_parser_accepts_both_flag_styles_without_host_language_runtime
         .unwrap()
         .0;
     let script = f.root.path().join("parse-only.sh");
-    fs::write(&script,format!("{prelude}\nprintf '%s\\n' \"$INTERCEPTOR_MODE\" \"$INTERCEPTOR_TYPES\" \"$MASK_REPLACEMENT_MODE\" \"$ALL_AGENTS\" \"$MULTIMODAL_MODE\"\n")).unwrap();
+    fs::write(&script,format!("{prelude}\nprintf '%s\\n' \"$INTERCEPTOR_MODE\" \"$MASK_REPLACEMENT_MODE\" \"$ALL_AGENTS\" \"$MULTIMODAL_MODE\"\n")).unwrap();
     for (args, expected) in [
         (
             vec![
@@ -100,18 +100,9 @@ fn original_public_parser_accepts_both_flag_styles_without_host_language_runtime
                 "--multimodal-mode",
                 "none",
             ],
-            vec!["all", "", "preview", "1", "none"],
+            vec!["all", "preview", "1", "none"],
         ),
-        (
-            vec![
-                "--interceptor-mode=custom",
-                "--interceptor-types=apiKey, privateKey",
-                "--mask-replacement-mode=placeholder",
-                "--sls-api-key=synthetic-test-key",
-            ],
-            vec!["custom", "apiKey, privateKey", "placeholder", "1", ""],
-        ),
-        (vec!["--agents=qoder"], vec!["", "", "", "0", ""]),
+        (vec!["--agents=qoder"], vec!["", "", "0", ""]),
     ] {
         let mut command = f.command(Path::new("/bin/bash"));
         command.arg(&script).args(args);
@@ -127,7 +118,7 @@ fn original_public_parser_accepts_both_flag_styles_without_host_language_runtime
 #[test]
 fn original_bash_config_writer_roundtrips_sensitive_paths_and_unions_interceptor_policy() {
     for replace in [false, true] {
-        for mode in ["all", "custom"] {
+        for mode in ["all", "none"] {
             let f = Fixture::new();
             fs::create_dir_all(&f.data).unwrap();
             let old = f.data.join("old");
@@ -154,14 +145,13 @@ fn original_bash_config_writer_roundtrips_sensitive_paths_and_unions_interceptor
             }
             script.push_str(r#"
 msg() { :; }
-for name in SLS_ENDPOINT SLS_PROJECT SLS_LOGSTORE SLS_AK_ID SLS_AK_SECRET SLS_API_KEY LOG_LEVEL USER_ID COLLECT_LOG COLLECT_TRACE CMS_LICENSE_KEY CMS_ENDPOINT CMS_WORKSPACE SERVICE_NAME_PREFIX SELECTED_AGENTS ALL_AGENTS AGENT_SELECTION_EXPLICIT MULTIMODAL_MODE MULTIMODAL_SUPPORTED_AGENTS DASHBOARD_PORT ENABLE_STATUS_BAR_APP MASK_MODE MASK_TYPES MASK_REPLACEMENT_MODE INTERCEPTOR_MODE INTERCEPTOR_TYPES; do
+for name in SLS_ENDPOINT SLS_PROJECT SLS_LOGSTORE SLS_AK_ID SLS_AK_SECRET SLS_API_KEY LOG_LEVEL USER_ID COLLECT_LOG COLLECT_TRACE CMS_LICENSE_KEY CMS_ENDPOINT CMS_WORKSPACE SERVICE_NAME_PREFIX SELECTED_AGENTS ALL_AGENTS AGENT_SELECTION_EXPLICIT MULTIMODAL_MODE MULTIMODAL_SUPPORTED_AGENTS DASHBOARD_PORT ENABLE_STATUS_BAR_APP MASK_MODE MASK_TYPES MASK_REPLACEMENT_MODE INTERCEPTOR_MODE; do
     printf -v "$name" '%s' ''
 done
 PROBE_RESULT='[]'
 EXCLUDE_WORKSPACES=()
 if [ "$TEST_REPLACE" = 1 ]; then EXCLUDE_WORKSPACES=("$TEST_PATH0" "$TEST_PATH1" "$TEST_PATH2" "$TEST_PATH3"); fi
 INTERCEPTOR_MODE="$TEST_MODE"
-if [ "$TEST_MODE" = custom ]; then INTERCEPTOR_TYPES='apiKey, privateKey'; fi
 MASK_MODE=custom
 MASK_TYPES=idCard
 MASK_REPLACEMENT_MODE=preview
@@ -197,7 +187,7 @@ write_config
                     "databaseUrl"
                 ])
             } else {
-                json!(["idCard", "apiKey", "privateKey"])
+                json!(["idCard"])
             };
             assert_eq!(
                 got["mask"],
@@ -208,7 +198,7 @@ write_config
                 if mode == "all" {
                     json!({"mode":"all"})
                 } else {
-                    json!({"mode":"custom","types":["apiKey","privateKey"]})
+                    json!({"mode":"none"})
                 }
             );
             assert!(!f.root.path().join("must-not-exist").exists());
@@ -296,8 +286,8 @@ $cases=@(
     @{ parameters=@{AllAgents=$true}; expected='AllAgents' },
     @{ parameters=@{Agents=' '}; expected='requires a list of Agent IDs' },
     @{ parameters=@{InterceptorMode='audit'}; expected='Unknown interceptor mode' },
-    @{ parameters=@{InterceptorMode='custom'}; expected='InterceptorTypes is required' },
-    @{ parameters=@{InterceptorTypes='apiKey'}; expected='can only be used' },
+    @{ parameters=@{InterceptorMode='custom'}; expected='Unknown interceptor mode' },
+    @{ parameters=@{InterceptorTypes='apiKey'}; expected='InterceptorTypes' },
     @{ parameters=@{MaskReplacementMode='unsafe'}; expected='Unknown mask replacement mode' },
     @{ parameters=@{ExcludeWorkspace=@('relative')}; expected='requires absolute local directories' },
     @{ parameters=@{MultimodalMode='all'}; expected='requires -SlsEndpoint' }
@@ -359,7 +349,7 @@ fn original_multimodal_public_bash_parser_rejects_each_blank_tuple_and_accepts_a
                     .unwrap()
                     .lines()
                     .collect::<Vec<_>>(),
-                [mode, "codex,qoder", "1"]
+                [mode, "codex,qoder,qwen-work-cn", "1"]
             );
         }
     }
@@ -532,11 +522,16 @@ fn original_multimodal_public_bash_writer_roundtrips_modes_and_stops_after_nativ
             );
             if scenario == "none" {
                 assert!(got["agents"]["qoder"].get("multimodal").is_none());
+                assert!(got["agents"]["qwen-work-cn"].get("multimodal").is_none());
                 assert_eq!(got["multimodal"]["storage"]["type"], "oss");
             } else {
                 assert_eq!(
                     got["agents"]["codex"]["multimodal"],
                     json!({"uploadMode":"all"})
+                );
+                assert_eq!(
+                    got["agents"]["qwen-work-cn"]["multimodal"]["uploadMode"],
+                    "all"
                 );
                 assert_eq!(
                     got["agents"]["qoder"]["multimodal"],
@@ -581,7 +576,7 @@ foreach ($mode in @('all','none')) {
     $config=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $env:TEST_DATA 'config.json') -Raw | ConvertFrom-Json
     if ($config.multimodal.extra -ne $true -or $config.agents.cursor.multimodal.uploadMode -ne 'all') {throw 'unrelated multimodal values were lost'}
     if ($mode -eq 'all') {
-        if ($config.agents.codex.multimodal.uploadMode -ne 'all' -or $config.agents.qoder.multimodal.allowedRootPaths[0] -ne '~/workspace' -or $config.agents.qoder.multimodal.uploadMode -ne 'all') {throw 'agent multimodal merge failed'}
+        if ($config.agents.codex.multimodal.uploadMode -ne 'all' -or $config.agents.'qwen-work-cn'.multimodal.uploadMode -ne 'all' -or $config.agents.qoder.multimodal.allowedRootPaths[0] -ne '~/workspace' -or $config.agents.qoder.multimodal.uploadMode -ne 'all') {throw 'agent multimodal merge failed'}
         if ($config.multimodal.storage.type -ne 'sls' -or $config.multimodal.storage.target.project -ne 'agentloop-example' -or $config.multimodal.storage.target.logstore -ne 'agent-event') {throw 'storage target merge failed'}
     } elseif ($config.agents.qoder.PSObject.Properties.Name -contains 'multimodal' -or $config.multimodal.storage.type -ne 'oss') {throw 'none failed to preserve global storage'}
 }

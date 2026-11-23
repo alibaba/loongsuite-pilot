@@ -95,7 +95,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 |------|------|
 | `--version <ver>` | 安装指定版本，例如 `1.2.0`。 |
 | `--agents <list>` | 逗号分隔的 Agent 列表，指定允许采集的 Agent，`none` 表示不启用任何 Agent。省略时持续发现受支持的 Agent，包括运行后安装的 Agent。 |
-| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`。已选的 `codex`、`qoder` 写该模式，其他已有 supported 写 `none`。省略 `--agents` 且该模式非 `none` 时，`codex`、`qoder` 都写该模式（没有条目则补上）。值为 `none` 则删除。不传不改。非 `none` 须带齐 SLS 四字段。 |
+| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`。已选的 `codex`、`qoder`、`qwen-work-cn` 写该模式，其他已有 supported 写 `none`。省略 `--agents` 且该模式非 `none` 时，`codex`、`qoder`、`qwen-work-cn` 都写该模式（没有条目则补上）。值为 `none` 则删除。不传不改。非 `none` 须带齐 SLS 四字段。 |
 | `--userId <id>` | 设置写入输出事件的用户标识。 |
 | `--data-dir <path>` | 覆盖数据目录，默认 `~/.loongsuite-pilot`。 |
 | `--enable-status-bar-app <true\|false>` | 在 `install` 时设置是否自动启动 macOS 菜单栏。未传时保留已有配置，首次安装默认关闭。Windows 对应 `-EnableStatusBarApp <true\|false>`（保存配置，菜单栏仅支持 macOS）。 |
@@ -110,8 +110,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--mask-mode <mode>` | 脱敏模式：`all`、`none` 或 `custom`。 |
 | `--mask-types <list>` | 逗号分隔的脱敏类型，`--mask-mode custom` 时必填。 |
 | `--mask-replacement-mode <mode>` | 脱敏替换格式：`preview`（默认星号预览）或 `placeholder`（固定占位符）。Windows 对应 `-MaskReplacementMode`。 |
-| `--interceptor-mode <mode>` | 本地拦截模式：`all`、`none` 或 `custom`。启用的拦截类型会自动补进 `mask`。 |
-| `--interceptor-types <list>` | 逗号分隔的拦截类型（mask 密钥子集），`--interceptor-mode custom` 时必填。 |
+| `--interceptor-mode <mode>` | `all` 启用托管拦截并把密钥类型补进 `mask`。默认 `none` 关闭拦截。 |
 | `--collect-log <true\|false>` | 开启或关闭 SLS 日志上报。 |
 | `--collect-trace <true\|false>` | 开启或关闭 Trace 上报。 |
 | `--cms-license-key <key>` | CMS 或 ARMS Trace license key。 |

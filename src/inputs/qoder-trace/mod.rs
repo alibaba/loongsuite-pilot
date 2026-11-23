@@ -1,5 +1,7 @@
 //! Qoder / qoder-cli trace merge input and its token readers.
 
+mod ide_delegation_sqlite;
+mod ide_delegations;
 mod intercept_token_reader;
 pub(crate) use intercept_token_reader::InterceptTokenIndex;
 pub mod multimodal;

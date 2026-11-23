@@ -15,34 +15,10 @@ fn interceptor_original_modes_and_all_mask_union_shapes() {
             json!({"mode":"custom","types":["cloudAccessKey","apiKey","privateKey","databaseUrl"]}),
         ),
         (
-            json!({}),
-            json!({"interceptorMode":"custom","interceptorTypes":"apiKey, cloudAccessKey,idCard"}),
-            json!({"mode":"custom","types":["apiKey","cloudAccessKey","idCard"]}),
-            json!({"mode":"custom","types":["apiKey","cloudAccessKey"]}),
-        ),
-        (
             json!({"interceptor":{"mode":"custom","types":["privateKey"]},"logLevel":"debug"}),
             json!({}),
             json!({"mode":"custom","types":["privateKey"]}),
-            json!({"mode":"custom","types":["privateKey"]}),
-        ),
-        (
-            json!({"interceptor":{"mode":"custom","types":["apiKey"]}}),
-            json!({"interceptorMode":"all","interceptorTypes":"apiKey"}),
-            json!({"mode":"all"}),
-            json!({"mode":"custom","types":["cloudAccessKey","apiKey","privateKey","databaseUrl"]}),
-        ),
-        (
-            json!({}),
-            json!({"interceptorMode":"custom","interceptorTypes":"apiKey, privateKey"}),
-            json!({"mode":"custom","types":["apiKey","privateKey"]}),
-            json!({"mode":"custom","types":["apiKey","privateKey"]}),
-        ),
-        (
-            json!({}),
-            json!({"interceptorMode":"custom","interceptorTypes":"apiKey","maskMode":"custom","maskTypes":"idCard,phone"}),
-            json!({"mode":"custom","types":["apiKey"]}),
-            json!({"mode":"custom","types":["idCard","phone","apiKey"]}),
+            Value::Null,
         ),
         (
             json!({}),
@@ -52,21 +28,9 @@ fn interceptor_original_modes_and_all_mask_union_shapes() {
         ),
         (
             json!({}),
-            json!({"interceptorMode":"custom","interceptorTypes":"apiKey","maskMode":"none"}),
-            json!({"mode":"custom","types":["apiKey"]}),
-            json!({"mode":"custom","types":["apiKey"]}),
-        ),
-        (
-            json!({}),
             json!({"interceptorMode":"all","maskMode":"all"}),
             json!({"mode":"all"}),
             json!({"mode":"all"}),
-        ),
-        (
-            json!({}),
-            json!({"interceptorMode":"custom","interceptorTypes":"apiKey","maskMode":"custom","maskTypes":"apiKey,idCard"}),
-            json!({"mode":"custom","types":["apiKey"]}),
-            json!({"mode":"custom","types":["apiKey","idCard"]}),
         ),
     ];
     for (old, options, interceptor, mask) in cases {
@@ -98,7 +62,9 @@ fn interceptor_overwrite_diff_preserves_safe_original_mode_and_expanded_types() 
 #[test]
 fn interceptor_invalid_mode_leaves_the_existing_configuration_untouched() {
     let old = json!({"interceptor":{"mode":"none"}});
-    assert!(apply(old.clone(), json!({"interceptorMode":"audit"})).is_err());
+    for mode in ["audit", "custom"] {
+        assert!(apply(old.clone(), json!({"interceptorMode":mode})).is_err());
+    }
     assert_eq!(old, json!({"interceptor":{"mode":"none"}}));
 }
 #[test]

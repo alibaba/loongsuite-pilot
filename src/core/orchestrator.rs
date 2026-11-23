@@ -62,7 +62,7 @@ use crate::inputs::rest_support::{HookInputOptions, SessionInputOptions};
 use crate::inputs::workbuddy::{WorkBuddyInput, WorkBuddyInputOptions};
 use crate::inputs::wukong::{WukongInput, WukongInputOptions};
 use crate::interceptor::{
-    load_interceptor_config, resolve_enabled_interceptor_types, ToolVerdictStore,
+    load_interceptor_config, should_deploy_interceptor_hooks, ToolVerdictStore,
 };
 use crate::local_workers::{
     LocalWorkerActivationService, RuntimeOptionValue, RuntimeOptions, WorkerSupervisor,
@@ -420,7 +420,7 @@ impl Orchestrator {
         };
         let interception_enabled = interceptor_config
             .as_ref()
-            .is_some_and(|config| !resolve_enabled_interceptor_types(config).is_empty());
+            .is_some_and(should_deploy_interceptor_hooks);
         self.inputs
             .set_intercept_result_linker(Arc::new(InterceptResultLinker::new(
                 Arc::clone(&verdicts),

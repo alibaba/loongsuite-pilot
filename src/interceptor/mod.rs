@@ -6,6 +6,7 @@
 pub mod adapters;
 pub mod cli;
 pub mod daemon;
+pub(crate) mod prompt_verdict;
 pub mod rules;
 
 mod access_log;
@@ -25,8 +26,7 @@ pub use access_log::{
 pub use blocked_prompt::build_blocked_qoder_prompt_entry;
 pub use config::{
     build_interceptor_config, build_interceptor_config_with, ensure_mask_covers_interceptor,
-    is_rule_enabled, load_interceptor_config, resolve_enabled_interceptor_types,
-    resolve_enabled_rule_ids,
+    load_interceptor_config, should_deploy_interceptor_hooks,
 };
 pub use paths::{
     default_pilot_data_dir, interceptor_access_log_path, interceptor_data_dir,

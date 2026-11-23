@@ -4,7 +4,7 @@ pub const AGENT_SYSTEM_MAP: &[(&str, &str)] = &[
     ("codex", "codex"),
     ("codex-session", "codex"),
     ("copilot", "copilot"),
-    ("qoder", "qoder"),
+    ("qoder", "qoder-ide"),
     ("qoder-cn", "qoder"),
     ("qoder-idea", "qoder"),
     ("qoder-work", "qoder"),
@@ -60,7 +60,7 @@ mod tests {
 
     #[test]
     fn maps_qoder_variants_to_qoder() {
-        assert_eq!(resolve_agent_system("qoder"), "qoder");
+        assert_eq!(resolve_agent_system("qoder"), "qoder-ide");
         assert_eq!(resolve_agent_system("qoder-idea"), "qoder");
         assert_eq!(resolve_agent_system("qoder-work"), "qoder");
         assert_eq!(resolve_agent_system("qoder-work-cn"), "qoder");

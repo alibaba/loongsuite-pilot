@@ -7,6 +7,7 @@
 //! }
 //! ```
 
+use super::prompt_verdict::{PromptKey, PromptLookup, MATCH_WINDOW_MS};
 use crate::interceptor::types::HookEventName;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,8 @@ pub enum ToolVerdictAction {
     Allow,
     #[serde(rename = "block")]
     Block,
+    #[serde(rename = "log")]
+    Log,
 }
 
 impl ToolVerdictAction {
@@ -35,6 +38,7 @@ impl ToolVerdictAction {
         match self {
             Self::Allow => "allow",
             Self::Block => "block",
+            Self::Log => "log",
         }
     }
 
@@ -42,6 +46,7 @@ impl ToolVerdictAction {
         match value {
             "allow" => Some(Self::Allow),
             "block" => Some(Self::Block),
+            "log" => Some(Self::Log),
             _ => None,
         }
     }
@@ -90,33 +95,65 @@ pub struct ToolVerdictKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GuardrailMetadata {
-    pub rule_id: String,
-    pub rule_version: String,
-    pub severity: Option<String>,
-    pub enforcement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action: Option<crate::types::GuardrailAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rule_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rule_version: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    fail_open: bool,
 }
 
 impl GuardrailMetadata {
+    pub(crate) fn from_verdict(verdict: &Value) -> Self {
+        use crate::types::GuardrailAction;
+        let action = if verdict["action"] == "block" {
+            GuardrailAction::Block
+        } else if verdict["matched"] == true {
+            GuardrailAction::Log
+        } else {
+            GuardrailAction::Allow
+        };
+        Self {
+            action: Some(action),
+            fail_open: verdict["failOpen"] == true,
+            rule_id: verdict["ruleId"].as_str().map(str::to_owned),
+            rule_version: verdict["ruleVersion"].as_str().map(str::to_owned),
+        }
+    }
+
+    pub(crate) fn tool_action(&self) -> ToolVerdictAction {
+        match self.action {
+            Some(crate::types::GuardrailAction::Block) => ToolVerdictAction::Block,
+            Some(crate::types::GuardrailAction::Log) => ToolVerdictAction::Log,
+            _ => ToolVerdictAction::Allow,
+        }
+    }
+
     pub fn apply(&self, entry: &mut crate::types::AgentActivityEntry) {
-        entry.extra.insert(
-            "gen_ai.guardrail.rule_id".into(),
-            self.rule_id.clone().into(),
-        );
-        entry.extra.insert(
-            "gen_ai.guardrail.rule_version".into(),
-            self.rule_version.clone().into(),
-        );
-        entry.extra.insert(
-            "gen_ai.guardrail.enforcement".into(),
-            self.enforcement.clone().into(),
-        );
-        entry
-            .extra
-            .insert("gen_ai.guardrail.matched".into(), Value::Bool(true));
-        if let Some(severity) = &self.severity {
+        if let Some(action) = self.action {
+            entry.guardrail_triggered = Some(true);
+            entry.guardrail_action = Some(action);
+        }
+        if self.fail_open {
             entry
                 .extra
-                .insert("gen_ai.guardrail.severity".into(), severity.clone().into());
+                .insert("gen_ai.guardrail.fail_open".into(), Value::Bool(true));
+        }
+        if entry.guardrail_action == Some(crate::types::GuardrailAction::Allow) {
+            return;
+        }
+        if let Some(rule_id) = self.rule_id.as_ref().filter(|id| !id.is_empty()) {
+            entry
+                .extra
+                .insert("gen_ai.guardrail.rule_id".into(), rule_id.clone().into());
+        }
+        if let Some(version) = &self.rule_version {
+            entry.extra.insert(
+                "gen_ai.guardrail.rule_version".into(),
+                version.clone().into(),
+            );
         }
     }
 }
@@ -129,10 +166,21 @@ struct ToolVerdictRecordOut {
     tool_use_id: String,
     phase: ToolInterceptPhase,
     action: ToolVerdictAction,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    guardrail: Option<GuardrailMetadata>,
+    #[serde(flatten)]
+    metadata: VerdictDetails,
     #[serde(rename = "recordedAt")]
     recorded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerdictDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule_version: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    fail_open: bool,
 }
 
 #[derive(Clone)]
@@ -144,6 +192,7 @@ struct StoredVerdict {
 
 struct StoreInner {
     tool_verdicts: IndexMap<String, StoredVerdict>,
+    prompt_verdicts: IndexMap<PromptKey, (i64, Option<GuardrailMetadata>)>,
     checkpoint_path: PathBuf,
 }
 
@@ -158,6 +207,7 @@ impl ToolVerdictStore {
         Self {
             inner: Mutex::new(StoreInner {
                 tool_verdicts: IndexMap::new(),
+                prompt_verdicts: IndexMap::new(),
                 checkpoint_path: checkpoint_path.into(),
             }),
             stop: Arc::new(AtomicBool::new(false)),
@@ -196,10 +246,11 @@ impl ToolVerdictStore {
         // Decide and write under one lock so concurrent allow cannot erase a
         // block from the SDK's other verdict channel.
         if retain_block
-            && inner
-                .tool_verdicts
-                .get(&key)
-                .is_some_and(|value| value.action == ToolVerdictAction::Block)
+            && inner.tool_verdicts.get(&key).is_some_and(|value| {
+                value.action == ToolVerdictAction::Block
+                    || (value.action == ToolVerdictAction::Log
+                        && action == ToolVerdictAction::Allow)
+            })
         {
             return;
         }
@@ -240,9 +291,58 @@ impl ToolVerdictStore {
             .map(|value| (value.action, value.guardrail.clone()))
     }
 
+    pub(crate) fn put_prompt(&self, key: PromptKey, value: Option<GuardrailMetadata>, now_ms: i64) {
+        if !key.valid() {
+            return;
+        }
+        let mut inner = self.inner.lock().expect("verdict store");
+        inner.prompt_verdicts.shift_remove(&key);
+        inner.prompt_verdicts.insert(key, (now_ms, value));
+        if inner.prompt_verdicts.len() > 10_000 {
+            inner.prompt_verdicts.shift_remove_index(0);
+        }
+    }
+
+    pub(crate) fn get_prompt(
+        &self,
+        lookup: PromptLookup,
+        now_ms: i64,
+    ) -> Option<GuardrailMetadata> {
+        let inner = self.inner.lock().expect("verdict store");
+        let fresh = |at: i64| now_ms.saturating_sub(at) <= TOOL_VERDICT_TTL_MS;
+        let stored = if let Some(request_id) = lookup.request_id {
+            inner.prompt_verdicts.get(&PromptKey {
+                session_id: lookup.session_id,
+                agent_type: lookup.agent_type.into(),
+                prompt_hash: lookup.prompt_hash,
+                request_id,
+            })?
+        } else {
+            let mut matching = inner.prompt_verdicts.iter().filter(|(key, (recorded, _))| {
+                fresh(*recorded)
+                    && recorded.abs_diff(lookup.at) <= MATCH_WINDOW_MS
+                    && key.session_id == lookup.session_id
+                    && key.agent_type == lookup.agent_type
+                    && key.prompt_hash == lookup.prompt_hash
+            });
+            let (_, first) = matching.next()?;
+            if matching.next().is_some() {
+                return None;
+            }
+            first
+        };
+        if !fresh(stored.0)
+            || stored.1.as_ref()?.action == Some(crate::types::GuardrailAction::Block)
+        {
+            return None;
+        }
+        stored.1.clone()
+    }
+
     pub fn restore(&self, now_ms: i64) {
         let mut inner = self.inner.lock().expect("verdict store");
         inner.tool_verdicts.clear();
+        inner.prompt_verdicts.clear();
         let text = match fs::read_to_string(&inner.checkpoint_path) {
             Ok(text) => text,
             Err(_) => return,
@@ -261,6 +361,24 @@ impl ToolVerdictStore {
             return;
         };
         for item in records {
+            if item["phase"] == "UserPromptSubmit" {
+                let key = serde_json::from_value::<PromptKey>(item.clone());
+                let recorded = item["recordedAt"].as_str().and_then(parse_iso_millis);
+                if let (Ok(key), Some(recorded)) = (key, recorded) {
+                    if key.valid() && now_ms.saturating_sub(recorded) <= TOOL_VERDICT_TTL_MS {
+                        let snapshot = if item["action"] == "unknown" {
+                            None
+                        } else {
+                            serde_json::from_value::<GuardrailMetadata>(item.clone()).ok()
+                        };
+                        if inner.prompt_verdicts.len() == 10_000 {
+                            inner.prompt_verdicts.shift_remove_index(0);
+                        }
+                        inner.prompt_verdicts.insert(key, (recorded, snapshot));
+                    }
+                }
+                continue;
+            }
             let Some(record) = parse_record(item) else {
                 continue;
             };
@@ -289,14 +407,38 @@ impl ToolVerdictStore {
             let Some(parsed) = parse_key(key) else {
                 continue;
             };
-            records.push(ToolVerdictRecordOut {
+            records.push(serde_json::to_value(ToolVerdictRecordOut {
                 session_id: parsed.session_id,
                 tool_use_id: parsed.tool_use_id,
                 phase: parsed.phase,
                 action: value.action,
-                guardrail: value.guardrail.clone(),
+                metadata: value
+                    .guardrail
+                    .as_ref()
+                    .map(|g| VerdictDetails {
+                        rule_id: g.rule_id.clone(),
+                        rule_version: g.rule_version.clone(),
+                        fail_open: g.fail_open,
+                    })
+                    .unwrap_or_default(),
                 recorded_at: iso_from_millis(value.recorded_at_ms),
-            });
+            })?);
+        }
+        for (key, (at, snapshot)) in &inner.prompt_verdicts {
+            if now_ms.saturating_sub(*at) > TOOL_VERDICT_TTL_MS {
+                continue;
+            }
+            let mut row = serde_json::to_value(key)?;
+            row["phase"] = Value::from("UserPromptSubmit");
+            row["recordedAt"] = Value::from(iso_from_millis(*at));
+            let fields = snapshot.as_ref().map_or_else(
+                || Ok(serde_json::json!({"action":"unknown"})),
+                serde_json::to_value,
+            )?;
+            row.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            records.push(row);
         }
         let text = format!(
             "{}\n",
@@ -404,7 +546,8 @@ fn parse_record(value: &Value) -> Option<ParsedRecord> {
         action,
         guardrail: record
             .get("guardrail")
-            .and_then(|value| serde_json::from_value(value.clone()).ok()),
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .or_else(|| serde_json::from_value(value.clone()).ok()),
         recorded_at_ms,
     })
 }
@@ -412,7 +555,7 @@ fn parse_record(value: &Value) -> Option<ParsedRecord> {
 impl StoreInner {
     fn prune(&mut self, now_ms: i64) {
         self.tool_verdicts
-            .retain(|_, value| now_ms - value.recorded_at_ms <= TOOL_VERDICT_TTL_MS);
+            .retain(|_, value| now_ms.saturating_sub(value.recorded_at_ms) <= TOOL_VERDICT_TTL_MS);
     }
 }
 

@@ -1,9 +1,43 @@
-//! Optional host-test fixture: real loopback interceptor and builtin local rules.
+//! Optional host-test fixture: real loopback interceptor and a synthetic match rule.
 use loongsuite_pilot::interceptor::daemon::{create_interceptor_server, InterceptorServerOptions};
-use loongsuite_pilot::interceptor::rules::{builtin_rules, RuleEngine};
+use loongsuite_pilot::interceptor::rules::{collect_hook_text, LocalRule, RuleEngine};
+use loongsuite_pilot::interceptor::{HookRequest, RuleResult};
 use serde_json::json;
 use std::collections::HashSet;
 use std::io::Write;
+use std::sync::Arc;
+
+struct FixtureRule;
+
+impl LocalRule for FixtureRule {
+    fn id(&self) -> &str {
+        "cloudAccessKey"
+    }
+
+    fn supports(&self, _: &HookRequest) -> bool {
+        true
+    }
+
+    fn evaluate(&self, request: &HookRequest) -> Result<RuleResult, String> {
+        Ok(
+            if collect_hook_text(request).contains("LTAI1234567890ABCD") {
+                RuleResult::Match {
+                    reason: "[ACCESSKEY_BLOCKED]".into(),
+                }
+            } else {
+                RuleResult::Miss
+            },
+        )
+    }
+}
+
+fn fixture_engine() -> RuleEngine {
+    RuleEngine::new(
+        vec![Arc::new(FixtureRule)],
+        HashSet::from(["cloudAccessKey".to_owned()]),
+    )
+}
+
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("PILOT_TEST_CLIENT_HANG").as_deref() == Ok("1") {
@@ -27,10 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let server = create_interceptor_server(InterceptorServerOptions {
         version: "synthetic-native-openclaw".into(),
-        engine: RuleEngine::new(
-            builtin_rules(),
-            HashSet::from(["cloudAccessKey".to_owned()]),
-        ),
+        engine: fixture_engine(),
         write_access_log: None,
         write_tool_verdict: None,
         emit_blocked_prompt: None,
@@ -66,9 +97,7 @@ mod tests {
         let text = collect_hook_text(&request);
         assert!(text.contains("LTAI1234567890ABCD"), "{text:?}");
         assert_eq!(
-            RuleEngine::new(builtin_rules(), HashSet::from(["cloudAccessKey".into()]))
-                .evaluate(&request)
-                .action,
+            fixture_engine().evaluate(&request).action,
             VerdictAction::Block
         );
     }

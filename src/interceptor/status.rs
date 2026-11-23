@@ -31,9 +31,7 @@ impl HookActivity {
         self.blocked += u64::from(blocked);
         self.matched += u64::from(blocked || verdict["matched"] == true);
         self.audit += verdict["matches"].as_array().map_or(0, |hits| {
-            hits.iter()
-                .filter(|hit| hit["enforcement"] == "audit")
-                .count() as u64
+            hits.iter().filter(|hit| hit["action"] == "log").count() as u64
         });
         self.fail_open += u64::from(unavailable || verdict["failOpen"] == true);
         self.errors += u64::from(unavailable && !stopping);
@@ -118,7 +116,7 @@ mod tests {
         }
         let mut other = HookActivity::default();
         other.record(
-            &json!({"action":"block","matches":[{"enforcement":"audit"}]}),
+            &json!({"action":"block","matches":[{"action":"log"}]}),
             4000.0,
             false,
             false,

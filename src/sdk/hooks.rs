@@ -2,10 +2,7 @@ use super::abi::{OnHook, PilotJsonView, OK};
 use super::agent_hooks::AgentHook;
 use super::hook_protocol::*;
 use super::outbox::Outbox;
-use crate::interceptor::{
-    build_interceptor_config_with, resolve_enabled_rule_ids,
-    rules::{builtin_rules, RuleEngine},
-};
+use crate::interceptor::{build_interceptor_config_with, should_deploy_interceptor_hooks};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
@@ -81,7 +78,6 @@ enum Audit {
     Verdict {
         _slot: AuditSlot,
         activity: Value,
-        evaluations: Vec<Value>,
         blocked_prompt: Option<Box<Verdict>>,
     },
 }
@@ -112,7 +108,6 @@ struct Verdict {
     reason: String,
     request: Option<crate::interceptor::HookRequest>,
     status: &'static str,
-    evaluations: Vec<Value>,
     guardrail: Option<crate::interceptor::GuardrailMetadata>,
 }
 
@@ -123,7 +118,6 @@ impl Verdict {
             reason: String::new(),
             request: None,
             status: "allow",
-            evaluations: Vec::new(),
             guardrail: None,
         }
     }
@@ -213,20 +207,15 @@ impl Hooks {
                             Audit::Verdict {
                                 _slot,
                                 activity,
-                                evaluations,
                                 blocked_prompt,
                             } => {
                                 if let Some(verdict) = blocked_prompt {
                                     record_blocked_prompt(&audit_queue, &audit_settings, &verdict);
                                 }
-                                for row in evaluations.into_iter().chain(std::iter::once(activity))
+                                if let Err(error) =
+                                    audit_queue.enqueue_hook(activity.to_string().as_bytes())
                                 {
-                                    if let Err(error) =
-                                        audit_queue.enqueue_hook(row.to_string().as_bytes())
-                                    {
-                                        audit_queue
-                                            .alarm("SDK_HOOK_RECORD_FULL", &error.to_string());
-                                    }
+                                    audit_queue.alarm("SDK_HOOK_RECORD_FULL", &error.to_string());
                                 }
                             }
                         }
@@ -494,7 +483,7 @@ impl Endpoint {
         } else {
             job.deadline
         };
-        let mut verdict = if started >= cutoff {
+        let verdict = if started >= cutoff {
             let _ = std::fs::remove_file(self.spool.join(&job.packet.id));
             Verdict::unavailable("expired", job.required)
         } else {
@@ -539,11 +528,11 @@ impl Endpoint {
                 .and_then(|r|r.session_id.as_deref()).unwrap_or(""),
             "gen_ai.provider.name":"pilot", "event.kind":"interceptor.result",
             "hook.channel":self.channel, "hook.request_id":packet.id,
-            "hook.action":verdict.action, "hook.reason":verdict.reason,
+            "hook.action":verdict.action,
+            "hook.reason":if self.channel == "local" { "" } else { verdict.reason.as_str() },
             "hook.status":verdict.status, "hook.late":late,
             "version":env!("CARGO_PKG_VERSION"), "user.id":self.outbox.identity.read().unwrap()["user_id"],
         });
-        let evaluations = std::mem::take(&mut verdict.evaluations);
         let blocked_prompt = (sent
             && verdict.status == "verdict"
             && verdict.action == "block"
@@ -552,7 +541,6 @@ impl Endpoint {
         Some(Audit::Verdict {
             _slot: slot,
             activity,
-            evaluations,
             blocked_prompt,
         })
     }
@@ -643,9 +631,8 @@ fn may_block(packet: &Datagram, trusted: &Value) -> bool {
 
 pub(super) fn update_local_status(queue: &Outbox, policy: &Value) {
     let config = build_interceptor_config_with(policy.get("local"), |_| None);
-    let ids = resolve_enabled_rule_ids(&config);
     *queue.local_hook_config.lock().unwrap() =
-        (config.mode != crate::types::MaskMode::None).then_some(ids.len());
+        should_deploy_interceptor_hooks(&config).then_some(0);
 }
 
 fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
@@ -732,6 +719,17 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
 
     let blocking = may_block(packet, &trusted);
     let request = adapter.parse(&payload, &packet.event);
+    let prompt_key = (channel == "local" && blocking && trusted["managed_host_rules"] == true)
+        .then(|| {
+            request
+                .as_ref()
+                .and_then(crate::interceptor::prompt_verdict::PromptKey::for_request)
+        })
+        .flatten();
+    let prompt_at = chrono::Utc::now().timestamp_millis();
+    if let Some(key) = &prompt_key {
+        queue.verdicts.put_prompt(key.clone(), None, prompt_at);
+    }
     let verdict = if channel == "cloud" {
         let Some(callback) = callback else {
             return allow();
@@ -818,20 +816,15 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
         };
         let started = Instant::now();
         let config = build_interceptor_config_with(trusted.get("local"), |_| None);
-        let engine = RuleEngine::new(builtin_rules(), resolve_enabled_rule_ids(&config));
-        let builtin = engine.evaluate(request);
-        let result = if builtin.action == crate::interceptor::VerdictAction::Allow
-            && blocking
-            && trusted["managed_host_rules"] == true
-        {
+        let result = if blocking && trusted["managed_host_rules"] == true {
             callback
                 .and_then(|callback| managed_verdict(queue, callback, context, deadline, request))
         } else {
-            serde_json::to_value(builtin).ok()
+            Some(json!({"action":"allow","matched":false}))
         };
         let unavailable = result.is_none();
-        let verdict = result.unwrap_or_else(|| json!({"action":"allow"}));
-        if config.mode != crate::types::MaskMode::None {
+        let verdict = result.unwrap_or_else(|| json!({"action":"allow","failOpen":true}));
+        if should_deploy_interceptor_hooks(&config) {
             queue.local_hook_stats.lock().unwrap().record(
                 &verdict,
                 started.elapsed().as_secs_f64() * 1_000.0,
@@ -841,38 +834,37 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
         }
         verdict
     };
-    let evaluations = if channel == "local" && trusted["managed_host_rules"] == true {
-        request.as_ref().map_or_else(Vec::new, |request| {
-            guardrail_rows(&verdict, request, &trusted)
-        })
-    } else {
-        Vec::new()
-    };
-    let guardrail = if channel == "local" && trusted["managed_host_rules"] == true {
-        verdict["matches"].as_array().and_then(|hits| {
-            let selected = if verdict["action"] == "block" {
-                hits.last()
-            } else {
-                hits.first()
-            }?;
-            serde_json::from_value(selected.clone()).ok()
-        })
-    } else {
-        None
-    };
+    let guardrail = (channel == "local" && trusted["managed_host_rules"] == true)
+        .then(|| crate::interceptor::GuardrailMetadata::from_verdict(&verdict));
+    if let Some(key) = prompt_key {
+        if Instant::now() < deadline && !endpoint.stop.load(Ordering::Relaxed) {
+            queue
+                .verdicts
+                .put_prompt(key.clone(), guardrail.clone(), prompt_at);
+            if let Some(callback) = callback.filter(|_| trusted["relay_host_verdicts"] == true) {
+                notify_shell(
+                    queue,
+                    callback,
+                    context,
+                    deadline,
+                    json!({
+                        "kind":"prompt_verdict","key":key,"guardrail":guardrail,"at":prompt_at,
+                    }),
+                );
+            }
+        }
+    }
     match reply_action(&verdict) {
         Some(("block", reason)) if blocking => Verdict {
             action: "block",
             reason: reason.chars().take(512).collect(),
             request,
             status: "verdict",
-            evaluations,
             guardrail,
         },
         Some(("allow", _)) => Verdict {
             request,
             status: "verdict",
-            evaluations,
             guardrail,
             ..Verdict::allow()
         },
@@ -917,42 +909,6 @@ fn managed_verdict(
     serde_json::from_slice(&reply[..used]).ok()
 }
 
-fn guardrail_rows(
-    verdict: &Value,
-    request: &crate::interceptor::HookRequest,
-    policy: &Value,
-) -> Vec<Value> {
-    verdict["matches"].as_array().into_iter().flatten().take(128).map(|hit| {
-        let agent = match request.agent.as_str() {
-            "qodercli" => "qoder-cli",
-            other => other,
-        };
-        let mut row = json!({
-            "event.id":uuid::Uuid::new_v4().to_string(), "event.name":"guardrail.evaluation",
-            "time_unix_nano":chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string(),
-            "gen_ai.agent.type":agent, "gen_ai.session.id":request.session_id.as_deref().unwrap_or(""),
-            "user.id":policy["user_id"], "version":env!("CARGO_PKG_VERSION"),
-            "agent.source":"interceptor", "gen_ai.guardrail.phase":request.event,
-            "gen_ai.guardrail.rule_id":hit["ruleId"], "gen_ai.guardrail.rule_version":hit["ruleVersion"],
-            "gen_ai.guardrail.action":hit["action"], "gen_ai.guardrail.enforcement":hit["enforcement"],
-            "gen_ai.guardrail.matched":true, "gen_ai.guardrail.triggered":true,
-        });
-        for (field, value) in [
-            ("gen_ai.tool.call.id", request.tool_use_id.as_deref()),
-            ("gen_ai.tool.name", request.tool_name.as_deref()),
-            ("gen_ai.guardrail.severity", hit["severity"].as_str()),
-        ] {
-            if let Some(value) = value {
-                row[field] = json!(value);
-            }
-        }
-        if verdict["failOpen"] == true {
-            row["gen_ai.guardrail.fail_open"] = json!(true);
-        }
-        row
-    }).collect()
-}
-
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -994,7 +950,12 @@ fn record_tool_verdict(
         let action = if result.action == "block" {
             ToolVerdictAction::Block
         } else {
-            ToolVerdictAction::Allow
+            result
+                .guardrail
+                .as_ref()
+                .map_or(ToolVerdictAction::Allow, |guardrail| {
+                    guardrail.tool_action()
+                })
         };
         // Both independent chains may decide the same tool operation. Retain a
         // block when its peer later allows; one allow cannot erase a block.

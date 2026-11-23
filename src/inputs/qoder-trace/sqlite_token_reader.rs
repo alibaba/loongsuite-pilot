@@ -307,7 +307,7 @@ pub fn resolve_qoder_cn_db_paths() -> Vec<String> {
         .collect()
 }
 
-fn parse_token_info(raw: &str) -> Option<(i64, i64, i64)> {
+pub(super) fn parse_token_info(raw: &str) -> Option<(i64, i64, i64)> {
     let obj: Value = serde_json::from_str(raw).ok()?;
     let prompt = obj
         .get("prompt_tokens")
@@ -328,7 +328,7 @@ fn parse_token_info(raw: &str) -> Option<(i64, i64, i64)> {
     }
 }
 
-fn parse_model_key(raw: Option<&str>) -> Option<String> {
+pub(super) fn parse_model_key(raw: Option<&str>) -> Option<String> {
     let obj: Value = serde_json::from_str(raw?).ok()?;
     obj.get("model_key")
         .and_then(Value::as_str)
@@ -336,7 +336,7 @@ fn parse_model_key(raw: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn parse_record_model_key(raw: Option<&str>) -> Option<String> {
+pub(super) fn parse_record_model_key(raw: Option<&str>) -> Option<String> {
     let obj: Value = serde_json::from_str(raw?).ok()?;
     obj.pointer("/modelConfig/key")
         .and_then(Value::as_str)

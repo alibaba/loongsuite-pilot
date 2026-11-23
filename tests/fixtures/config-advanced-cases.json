@@ -3251,7 +3251,7 @@
   },
   {
     "id": "L2270:C5",
-    "title": "loads all mode and custom types as a mask-type subset",
+    "title": "retired interceptor custom mode is disabled without expanding mask",
     "user": {
       "interceptor": {
         "mode": "custom",
@@ -3273,12 +3273,19 @@
         "op": "toEqual",
         "negate": false,
         "expected": {
-          "mode": "custom",
-          "types": [
-            "apiKey",
-            "cloudAccessKey"
-          ]
+          "mode": "none",
+          "types": []
         }
+      },
+      {
+        "base": "config",
+        "path": [
+          "mask",
+          "mode"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "none"
       }
     ],
     "group": "interceptor"

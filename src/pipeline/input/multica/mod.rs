@@ -433,7 +433,7 @@ impl MulticaPipeline {
 
     async fn workspace(&self, input: &Input, workspace: &str, summary: &mut Summary) {
         let mut sources = Vec::new();
-        if input.collect_entity_names {
+        if input.collect_entity_names() {
             sources.push(api(
                 "workspace",
                 &format!("/api/workspaces/{}", segment(workspace)),
