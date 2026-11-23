@@ -68,7 +68,8 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
       const id = createHash('sha256').update([trace, isStream ? 'stream/' + shared : r.id, isModel ? 'llm' : 'step'].join('/')).digest('hex').slice(0, 16);
       const attributes: ReadableSpan['attributes'] = {};
       for (const key of ['gen_ai.span.kind', 'gen_ai.operation.name', 'gen_ai.agent.name', 'gen_ai.agent.id',
-        'gen_ai.session.id', 'gen_ai.turn.id', 'gen_ai.user.id', 'gen_ai.request.model', 'workspace.path']) {
+        'gen_ai.session.id', 'gen_ai.conversation.id', 'gen_ai.provider.name', 'gen_ai.turn.id', 'gen_ai.user.id', 'gen_ai.request.model', 'workspace.path',
+        'workspace.current_root', 'git.repo', 'git.branch', 'git.domain']) {
         if (template.attributes[key] !== undefined) attributes[key] = template.attributes[key];
       }
       attributes['gen_ai.step.id'] = isStream ? shared! : r.id;
@@ -100,17 +101,32 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
           attributes['gen_ai.usage.input_tokens'] = r.input;
           attributes['gen_ai.usage.output_tokens'] = r.output;
           attributes['gen_ai.usage.total_tokens'] = r.input + r.output;
+          if (typeof r.reasoning === 'number') attributes['gen_ai.usage.reasoning_tokens'] = r.reasoning;
+          if (typeof r.cacheCreated === 'number') attributes['gen_ai.usage.cache_creation.input_tokens'] = r.cacheCreated;
           if (typeof r.cached === 'number') attributes['gen_ai.usage.cache_read.input_tokens'] = r.cached;
         }
       }
       if (layer === 'round') {
         attributes['gen_ai.react.round'] = seen.size;
       }
+      let startTime = instant;
+      if (r.initial === true && typeof r.requestStartMs === 'number' && typeof r.firstTokenMs === 'number' &&
+          Number.isSafeInteger(r.requestStartMs) && Number.isSafeInteger(r.firstTokenMs) &&
+          r.requestStartMs > 0 && r.firstTokenMs >= r.requestStartMs && BigInt(r.firstTokenMs) * 1000000n <= ns &&
+          (isStream || !shared)) {
+        // The history timestamp records persistence, not the end of inference.
+        // Extend the STEP to the measured request start; keep the LLM observation instantaneous.
+        if (!isModel) startTime = [Math.floor(r.requestStartMs / 1000), (r.requestStartMs % 1000) * 1000000];
+        attributes['loongsuite.trae_cn.request_to_first_token_ns'] = (r.firstTokenMs - r.requestStartMs) * 1000000;
+        const agentStart = BigInt(agent.startTime[0]) * 1000000000n + BigInt(agent.startTime[1]);
+        const elapsed = BigInt(r.firstTokenMs) * 1000000n - agentStart;
+        if (elapsed >= 0n && elapsed <= BigInt(Number.MAX_SAFE_INTEGER)) agent.attributes['gen_ai.response.time_to_first_token'] = Number(elapsed);
+      }
       const observation: ReadableSpan = { ...template, name: template.name, kind: template.kind, resource: template.resource,
         instrumentationLibrary: template.instrumentationLibrary, ended: true, droppedEventsCount: 0,
         droppedLinksCount: 0, droppedAttributesCount: 0, links: [], events: [], status: { code: 0 },
         spanContext: () => ({ ...template.spanContext(), spanId: id }), parentSpanId: parent,
-        startTime: instant, endTime: instant, duration: [0, 0], attributes };
+        startTime, endTime: instant, duration: hrTimeDuration(startTime, instant), attributes };
       if (shared && isStream) {
         Object.assign(observation, { name: 'response stream (multiple model responses)' });
         sharedSteps.set(shared, observation);
@@ -130,6 +146,11 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
       const owner = parent.span;
       Object.assign(span, { parentSpanId: owner.spanContext().spanId });
       span.attributes['gen_ai.step.id'] = parent.history;
+      const stream = owner.attributes['loongsuite.trae_cn.stream_request_id'];
+      if (typeof stream === 'string') {
+        span.attributes['loongsuite.trae_cn.stream_request_id'] = stream;
+        if (sharedSteps.get(stream) !== owner) span.attributes['loongsuite.trae_cn.history_id'] = parent.history;
+      }
       // A response timestamp describes the model observation. The STEP also
       // encompasses the measured execution of any tools it dispatched.
       const startTime = earlier(span.startTime, owner.startTime) ? span.startTime : owner.startTime;

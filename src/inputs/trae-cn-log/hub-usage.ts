@@ -5,9 +5,10 @@ import type { AgentActivityEntry } from '../../types/index.js';
 
 import type { NativeUsageIndex } from './native-usage-index.js';
 
-type Usage = { input: number; output: number; cached?: number };
+type Usage = { input: number; output: number; cached?: number; reasoning?: number; cacheCreated?: number };
 type Turn = {
   reply: string; session: string; trace: string; tools: Set<string>; reports: Map<number, Usage>;
+  timings: Map<string, { start: number; first: number } | null>;
   plans: Map<string, { seq: number; content: string; call?: string }>;
   lastSeq: number; contiguous: boolean; done: boolean; touched: number;
 };
@@ -98,7 +99,7 @@ export class HubUsage {
             const meta = JSON.parse(row.data);
             if (meta.reply_to_message_id !== reply || !/^[0-9a-f]{24}$/.test(meta.session_id) ||
                 !/^[0-9a-f]{32}$/.test(meta.trace_id)) continue;
-            cursor.turn = { reply, session: meta.session_id, trace: meta.trace_id, tools: new Set(), reports: new Map(), plans: new Map(),
+            cursor.turn = { reply, session: meta.session_id, trace: meta.trace_id, tools: new Set(), reports: new Map(), plans: new Map(), timings: new Map(),
               lastSeq: row.seq - 1, contiguous: row.seq === 0 || row.seq === 1, done: false, touched: Date.now() };
             this.turns.set(reply, cursor.turn);
           }
@@ -107,9 +108,18 @@ export class HubUsage {
           turn.touched = Date.now();
           if (!count(row.seq) || row.seq !== turn.lastSeq + 1) turn.contiguous = false;
           turn.lastSeq = row.seq;
-          if (!['done', 'plan_item', 'token_usage'].includes(row.type)) continue;
+          if (!['done', 'plan_item', 'token_usage', 'timing_events'].includes(row.type)) continue;
           const d = JSON.parse(row.data);
           if (d.reply_to_message_id !== reply) { turn.contiguous = false; continue; }
+          if (row.type === 'timing_events' && typeof d.logid === 'string' && d.logid.length > 0 && d.logid.length <= 128) {
+            const start = d.data?.rs_17_before_request_llm;
+            const first = d.data?.rs_18_llm_response_first_token;
+            if (count(start) && start > 0 && count(first) && first >= start) {
+              const prior = turn.timings.get(d.logid);
+              if (prior === undefined) turn.timings.set(d.logid, { start, first });
+              else if (prior && (prior.start !== start || prior.first !== first)) turn.timings.set(d.logid, null);
+            }
+          }
           if (row.type === 'done') turn.done = true;
           if (row.type === 'plan_item') {
             const id = d.tool_call_info?.meta?.llm_toolcall_id;
@@ -130,6 +140,8 @@ export class HubUsage {
             if (!count(d.prompt_tokens) || !count(d.completion_tokens) || !count(row.seq) ||
                 d.prompt_tokens + d.completion_tokens !== d.total_tokens) { turn.contiguous = false; continue; }
             turn.reports.set(row.seq, { input: d.prompt_tokens, output: d.completion_tokens,
+              reasoning: count(d.reasoning_tokens) && d.reasoning_tokens <= d.completion_tokens ? d.reasoning_tokens : undefined,
+              cacheCreated: count(d.cache_creation_input_tokens) && d.cache_creation_input_tokens <= d.prompt_tokens ? d.cache_creation_input_tokens : undefined,
               cached: count(d.cache_read_input_tokens) && d.cache_read_input_tokens <= d.prompt_tokens
                 ? d.cache_read_input_tokens : undefined });
           }
@@ -161,9 +173,12 @@ export class HubUsage {
       if (parts.length) entry['gen_ai.output.messages'] = [{ role: 'assistant', parts }, ...messages];
     }
     if (rounds) entry['loongsuite.trae_cn.model_responses'] = rounds.map(round => {
+      // Later requests can repeat the initial timing pair under another logid.
+      const firstTiming = 'initial' in round && round.initial && round.request ? turn.timings.get(round.request) : undefined;
+      const timed = firstTiming ? { ...round, requestStartMs: firstTiming.start, firstTokenMs: firstTiming.first } : round;
       if ('streamReports' in round && round.streamReports) {
         const reports = round.streamReports.filter(r => r.reply === turn.reply && turn.reports.has(r.seq));
-        return { ...round, streamReceived: reports.length,
+        return { ...timed, streamReceived: reports.length,
           streamExpected: round.streamReports.length,
           streamTokens: reports.reduce((total, r) => {
             const usage = turn.reports.get(r.seq)!;
@@ -171,8 +186,10 @@ export class HubUsage {
           }, 0) };
       }
       const report = 'reply' in round && round.reply === turn.reply && round.seq !== undefined ? turn.reports.get(round.seq) : undefined;
-      return report ? { ...round, input: report.input, output: report.output,
-        ...(report.cached !== undefined ? { cached: report.cached } : {}) } : round;
+      return report ? { ...timed, input: report.input, output: report.output,
+        ...(report.cached !== undefined ? { cached: report.cached } : {}),
+        ...(report.reasoning !== undefined ? { reasoning: report.reasoning } : {}),
+        ...(report.cacheCreated !== undefined ? { cacheCreated: report.cacheCreated } : {}) } : timed;
     });
     let input = 0, output = 0, cached = 0, allCached = true;
     for (const r of turn.reports.values()) {
@@ -201,11 +218,18 @@ export class HubUsage {
     if (!complete || !turn.reports.size) return;
     // Hook fields can arrive independently. Combine sources only when the
     // counters they both report describe the same usage.
+    const reports = [...turn.reports.values()];
     const counts = {
       'gen_ai.usage.input_tokens': input,
       'gen_ai.usage.output_tokens': output,
       'gen_ai.usage.total_tokens': input + output,
       ...(allCached ? { 'gen_ai.usage.cache_read.input_tokens': cached } : {}),
+      ...(reports.every(r => r.reasoning !== undefined) ? {
+        'gen_ai.usage.reasoning_tokens': reports.reduce((n, r) => n + r.reasoning!, 0),
+      } : {}),
+      ...(reports.every(r => r.cacheCreated !== undefined) ? {
+        'gen_ai.usage.cache_creation.input_tokens': reports.reduce((n, r) => n + r.cacheCreated!, 0),
+      } : {}),
     };
     if (Object.entries(counts).some(([key, value]) => entry[key] != null && entry[key] !== value)) return;
     for (const [key, value] of Object.entries(counts)) entry[key] ??= value;

@@ -22,8 +22,8 @@ it.each([true, false])('joins cache counts by call ID, with continuous stream=%s
     await writeFile(file, [
       event(1, 'metadata', { session_id: session, trace_id: 'a'.repeat(32) }),
       event(2, 'plan_item', { id: 'pi_one', reasoning_content: 'check the title', tool_call_info: { meta: { llm_toolcall_id: 'call_example' } } }),
-      event(3, 'token_usage', { prompt_tokens: 300, completion_tokens: 2, cache_read_input_tokens: 100, total_tokens: 302 }),
-      event(4, 'token_usage', { prompt_tokens: 100, completion_tokens: 3, cache_read_input_tokens: 0, total_tokens: 103 }),
+      event(3, 'token_usage', { reasoning_tokens: 1, cache_creation_input_tokens: 0, prompt_tokens: 300, completion_tokens: 2, cache_read_input_tokens: 100, total_tokens: 302 }),
+      event(4, 'token_usage', { reasoning_tokens: 2, cache_creation_input_tokens: 0, prompt_tokens: 100, completion_tokens: 3, cache_read_input_tokens: 0, total_tokens: 103 }),
       event(5, 'plan_item', { id: 'pi_one', reasoning_content: 'check the title again' }),
       event(complete ? 6 : 8, 'done', {}),
     ].join('\n') + '\n');
@@ -37,6 +37,8 @@ it.each([true, false])('joins cache counts by call ID, with continuous stream=%s
     expect(reasoning.match(/check the title/g)?.length ?? 0).toBe(complete ? 1 : 0);
     if (complete) expect(reasoning).toContain('"tool_call_id":"call_example"');
     expect(e['agent.trae-cn.hub.cache_hit_ratio_observed']).toBe(0.25);
+    expect(e['gen_ai.usage.reasoning_tokens']).toBe(complete ? 3 : undefined);
+    expect(e['gen_ai.usage.cache_creation.input_tokens']).toBe(complete ? 0 : undefined);
     expect(e['gen_ai.usage.total_tokens']).toBe(complete ? 405 : undefined);
     const partialHook = response('call_example');
     partialHook['gen_ai.usage.input_tokens'] = 400;
