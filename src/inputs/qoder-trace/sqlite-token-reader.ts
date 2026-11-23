@@ -19,8 +19,16 @@ export interface SqliteTokenData {
   model?: string;
 }
 
+export interface SqliteRequestModel {
+  requestId: string;
+  messageId: string;
+  gmtCreate: number;
+  model: string;
+}
+
 export interface SqliteTokenResult {
   rows: SqliteTokenData[];
+  requestModels?: SqliteRequestModel[];
   /** The DB path that contained the session data, for caller-side variant detection. */
   matchedDbPath: string | null;
 }
@@ -146,27 +154,29 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
       cm.gmt_create AS gmt_create,
       cm.token_info AS token_info,
       cm.model_info AS model_info,
-      cr.extra AS record_extra
+      CASE WHEN json_valid(cr.extra) THEN json_extract(cr.extra, '$.modelConfig.key') END AS request_model
     FROM chat_message cm
-    LEFT JOIN chat_record cr ON cr.request_id = cm.request_id
+    LEFT JOIN chat_record cr ON cr.request_id = cm.request_id AND cr.session_id = cm.session_id
     WHERE cm.session_id = ?
       AND cm.role = 'assistant'
-      AND cm.token_info IS NOT NULL
-      AND cm.token_info != ''
-      AND json_valid(cm.token_info)
+      AND (
+        json_valid(cm.token_info)
+        OR CASE WHEN json_valid(cr.extra) THEN json_type(cr.extra, '$.modelConfig.key') = 'text' ELSE 0 END
+      )
       AND (? = 0 OR cm.gmt_create > ? OR (cm.gmt_create = ? AND cm.id > ?))
     ORDER BY cm.gmt_create ASC, cm.id ASC
   `;
 
+  let modelOnly: SqliteTokenResult | undefined;
   for (const dbPath of dbPaths) {
     let rows: Array<{
       message_id?: string;
       session_id?: string;
       request_id: string;
       gmt_create: number;
-      token_info: string;
+      token_info: string | null;
       model_info?: string | null;
-      record_extra?: string | null;
+      request_model?: unknown;
     }>;
     try {
       rows = await queryReadonlyPaged(dbPath, sql, (cursor) => [
@@ -180,8 +190,18 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
     if (rows.length === 0) continue;
 
     const results: SqliteTokenData[] = [];
+    const requestModels: SqliteRequestModel[] = [];
     for (const row of rows) {
-      const info = parseTokenInfo(row.token_info);
+      const requestModel = typeof row.request_model === 'string' ? row.request_model.trim() : '';
+      if (row.request_id && requestModel && requestModel.length <= 512 && requestModel.toLowerCase() !== 'unknown') {
+        requestModels.push({
+          requestId: row.request_id,
+          messageId: row.message_id ?? '',
+          gmtCreate: row.gmt_create,
+          model: requestModel,
+        });
+      }
+      const info = row.token_info ? parseTokenInfo(row.token_info) : null;
       if (!info) continue;
       results.push({
         sessionId: row.session_id ?? '',
@@ -191,12 +211,13 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
         inputTokens: info.promptTokens,
         outputTokens: info.completionTokens,
         cacheReadTokens: info.cachedTokens,
-        model: parseModelKey(row.model_info) ?? parseRecordModelKey(row.record_extra),
+        model: parseModelKey(row.model_info),
       });
     }
-    if (results.length > 0) return { rows: results, matchedDbPath: dbPath };
+    if (results.length > 0) return { rows: results, requestModels, matchedDbPath: dbPath };
+    if (requestModels.length > 0) modelOnly ??= { rows: [], requestModels, matchedDbPath: dbPath };
   }
-  return { rows: [], matchedDbPath: null };
+  return modelOnly ?? { rows: [], matchedDbPath: null };
 }
 
 /**

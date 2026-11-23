@@ -435,7 +435,7 @@ export class QoderCnTraceInput extends BaseInput {
       record,
       ClientType.QoderCn,
       undefined,
-      { preserveSafeCustomTopLevelFields: true },
+      { preserveSafeCustomTopLevelFields: true, preserveMissingModels: true },
     );
     if (canonicalEntry) {
       await enrichCanonicalEntryWithGit(canonicalEntry, record, 'qoder-cn');
@@ -525,7 +525,6 @@ function alignUserBoundaryToFirstLlmRequest(entries: AgentActivityEntry[]): void
         // Propagate model from the real LLM request so 'other' doesn't show 'unknown'
         if (firstReq['gen_ai.request.model'] && firstReq['gen_ai.request.model'] !== 'unknown') {
           e['gen_ai.request.model'] = firstReq['gen_ai.request.model'];
-          e['gen_ai.response.model'] = firstReq['gen_ai.request.model'];
         }
         if (firstReq['gen_ai.provider.name'] && firstReq['gen_ai.provider.name'] !== 'unknown') {
           e['gen_ai.provider.name'] = firstReq['gen_ai.provider.name'];

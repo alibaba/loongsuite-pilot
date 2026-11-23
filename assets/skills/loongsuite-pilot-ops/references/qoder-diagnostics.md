@@ -215,6 +215,12 @@ for line in sys.stdin:
 预期能看到 `type: "token"` 或 `type: "system_prompt"` 记录。若文件不存在但 qodercli 对话正常，说明 preload 未生效；
 重跑安装或等待 HookWatchdog 自动修复 shell rc 注入块后，必须重新 source rc / 新开终端。
 
+### 2.A.5 CLI 与 App 的请求模型
+
+Pilot 从当前轮的用户消息读取 `businessModelKey`，也支持 `businessIdentity.model_key`。
+显式选择的档位（包括 `auto`）会写入 `gen_ai.request.model`。
+助手消息缺少模型或只带 `auto` 时，响应模型需要对应逐请求数据提供具体值。
+
 ---
 
 ## 第 2 步（B）：Qoder IDE 链路

@@ -39,6 +39,8 @@ export interface CanonicalHookRecordOptions {
    * still discarded.
    */
   preserveSafeCustomTopLevelFields?: boolean;
+  /** Keep unknown request/response models absent when the adapter resolves them independently. */
+  preserveMissingModels?: boolean;
 }
 
 export function buildCanonicalHookEntry(
@@ -60,8 +62,10 @@ export function buildCanonicalHookEntry(
 
   // Fallback: when the hook record has no model at all, set 'unknown'.
   // Preserve 'auto' — token enricher may override it with the real model later.
-  if (!opts['gen_ai.request.model']) opts['gen_ai.request.model'] = 'unknown';
-  if (!opts['gen_ai.response.model']) opts['gen_ai.response.model'] = opts['gen_ai.request.model'];
+  if (!options?.preserveMissingModels) {
+    if (!opts['gen_ai.request.model']) opts['gen_ai.request.model'] = 'unknown';
+    if (!opts['gen_ai.response.model']) opts['gen_ai.response.model'] = opts['gen_ai.request.model'];
+  }
 
   const entry = buildAgentActivityEntry({
     ...opts,
