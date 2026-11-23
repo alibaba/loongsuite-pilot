@@ -39,10 +39,19 @@ afterEach(async () => { restoreHome(); await fs.rm(root, { recursive: true, forc
 describe('Grok system managed configuration', () => {
   it('accepts automatic or mixed selection and rejects ambiguous targets before any writes', () => {
     expect(parseHookArgs(['install', '--agents', 'grok-build', '--scope', 'user']).deploymentScope).toBe('user');
-    expect(parseHookArgs(['install', '--scope', 'system']).agents).toBeUndefined();
-    expect(parseHookArgs(['install', '--agents', 'grok-build,claude-code', '--scope', 'system']).agents).toBe('grok-build,claude-code');
     expect(() => parseHookArgs(['install', '--agents', 'grok-build', '--scope', 'system', '--home', 'grok-build=/tmp/example'])).toThrow('cannot be combined');
     expect(() => parseHookArgs(['install', '--agents', 'grok-build', '--scope', 'auto'])).toThrow('user or system');
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try {
+      Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
+      expect(parseHookArgs(['install', '--scope', 'system']).agents).toBeUndefined();
+      expect(parseHookArgs(['install', '--agents', 'grok-build,claude-code', '--scope', 'system']).agents).toBe('grok-build,claude-code');
+
+      Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
+      expect(() => parseHookArgs(['install', '--scope', 'system'])).toThrow('supported only on Linux');
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
   });
   it('preserves unrelated bytes across concurrent install, repair, and removal', async () => {
     const file = def.hook!.settingsPath;

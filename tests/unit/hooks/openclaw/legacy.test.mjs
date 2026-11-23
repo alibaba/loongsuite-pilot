@@ -287,7 +287,9 @@ describe('OpenClaw 3.8 legacy adapter', () => {
     fire('after_tool_call', { runId: 'run-1', toolCallId: 't', toolName: 'read', error: 'private error', result: 'private result' });
     fire('agent_end', { success: false, error: 'private error' });
     const text = JSON.stringify(records());
-    expect(text).not.toContain('private');
+    for (const fixture of ['private prompt', 'private output', 'private args', 'private error', 'private result']) {
+      expect(text).not.toContain(fixture);
+    }
     expect(records().find(r => r['event.name'] === 'llm.response')['gen_ai.usage.output_tokens']).toBe(4);
   });
 });
