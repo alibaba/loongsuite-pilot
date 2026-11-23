@@ -522,26 +522,30 @@ export class DoubaoWorkInput extends BaseInput {
       const conversationId = pending.terminal.conversationId ?? pending.conversationId;
       if (this.chatReader && pending.modeType && pending.modeType !== 'work_task') {
         try {
+          const failed = pending.terminal.clientOutcome === 'cancelled' || pending.terminal.clientOutcome === 'error';
+          const terminalNano = BigInt(pending.terminal.timeNano);
+          const receiveEnd = pending.receiveEndNano;
+          const received = receiveEnd && BigInt(receiveEnd) > BigInt(complete[0].time_unix_nano)
+            && BigInt(receiveEnd) <= terminalNano;
+          const responseEnd = received ? receiveEnd : (failed ? pending.terminal.timeNano : undefined);
+          // The receive event can reach the log after the session ends. Keep the
+          // request pending so the next poll can emit its full trace once.
+          if (!responseEnd) return;
           const content = await this.chatReader.find(pending.turnId, this.budget);
-          if (!content || (!content.finished && pending.terminal.clientOutcome !== 'cancelled'
-            && pending.terminal.clientOutcome !== 'error')) return;
+          if (!content || (!content.finished && !failed)) return;
           if (content.conversationId !== conversationId || content.localMessageId !== pending.localMessageId
             || content.sendMessageId !== pending.sendMessageId || content.receiveMessageId !== pending.receiveMessageId
             || content.queryMs < pending.queryMs
-            || BigInt(content.queryMs) * 1_000_000n > BigInt(pending.terminal.timeNano)) return;
+            || BigInt(content.queryMs) * 1_000_000n > terminalNano) return;
           complete[0]['gen_ai.input.messages_delta'] = [{ role: 'user', parts: [{ type: 'text', content: content.input }] }];
           complete[complete.length - 1]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: content.output }] }];
           for (const event of complete) {
             event['loongsuite.doubao_work.mode'] = 'chat';
             if (content.modelId) event['loongsuite.doubao_work.native_model_id'] = content.modelId;
           }
-          const responseEnd = pending.receiveEndNano
-            ?? (pending.terminal.clientOutcome === 'cancelled' || pending.terminal.clientOutcome === 'error' ? pending.terminal.timeNano : undefined);
-          if (responseEnd && BigInt(responseEnd) > BigInt(complete[0].time_unix_nano)
-            && BigInt(responseEnd) <= BigInt(pending.terminal.timeNano)) {
-            complete[0]['agent.doubao_work.chat_response_end'] = responseEnd;
-            complete[0]['agent.doubao_work.chat_response_id'] = content.receiveMessageId;
-          }
+          complete[0]['agent.doubao_work.chat_response_end'] = responseEnd;
+          complete[0]['agent.doubao_work.chat_response_id'] = content.receiveMessageId;
+          if (!received) complete[0]['agent.doubao_work.chat_response_ended_with_session'] = true;
         } catch (error) {
           if (this.defer(error)) return;
           this.logger.warn('Doubao chat native content unavailable; preserving pending request');

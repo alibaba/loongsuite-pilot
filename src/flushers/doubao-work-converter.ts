@@ -62,7 +62,7 @@ export function convertDoubaoWorkTurn(records: EventLogRecord[], options: Option
   const result = convertEventLogToTrace(boundaries, { ...options, ...(wrapped ? { handler: wrapped } : {}) });
   return { ...result, spanCount: result.spanCount + toolSpanCount, warnings: [...result.warnings,
     start[`${PREFIX}mode`] === 'chat'
-      ? 'Doubao chat spans observe client submit/receive boundaries; provider model and token usage remain unavailable'
+      ? 'Doubao chat spans use observed client timing. Provider model and token usage remain unavailable.'
       : 'Doubao assistant rounds use visible transcript content and estimated client-side timing; actual provider requests, model usage and full delegated invocation coverage remain unavailable'] };
 }
 
@@ -75,7 +75,8 @@ function addChatResponse(owner: Span, start: EventLogRecord, end: EventLogRecord
   const common: Attributes = {
     'gen_ai.framework': 'doubao', 'gen_ai.step.id': stepId,
     'loongsuite.doubao_work.mode': 'chat',
-    'loongsuite.doubao_work.timing_basis': 'client_submit_to_receive_end',
+    'loongsuite.doubao_work.timing_basis': start['agent.doubao_work.chat_response_ended_with_session'] === true
+      ? 'client_submit_to_session_end' : 'client_submit_to_receive_end',
   };
   for (const key of ['gen_ai.agent.id', 'gen_ai.agent.name', 'gen_ai.session.id', 'gen_ai.turn.id', 'gen_ai.provider.name', `${PREFIX}native_model_id`]) {
     if (typeof start[key] === 'string') common[key] = start[key] as string;

@@ -263,6 +263,26 @@ describe('Doubao ordinary chat collection', () => {
     expect(await new Probe({ stateStore: reloaded, inputId: 'doubao', workBudget: { milliseconds: Infinity } }).poll()).toEqual([]);
   });
 
+  it('waits for a late receive boundary before completing a successful chat', async () => {
+    const { store, file, log } = await setup();
+    const input = new Probe({ stateStore: store, inputId: 'doubao', workBudget: { milliseconds: Infinity } });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(DOUBAO_EPOCH - 1); await input.poll(); clock.mockRestore();
+    const [start, sending, receiving, end] = lifecycle().trimEnd().split('\n');
+    await appendFile(log, `${start}\n${sending}\n${end}\n`);
+    await writeFile(file, chatWal([chatBatch()]));
+    expect(await input.poll()).toEqual([]);
+    await store.save();
+    const reloaded = new StateStore(path.join(fixture.home, 'state.json'));
+    await reloaded.load();
+    const restarted = new Probe({ stateStore: reloaded, inputId: 'doubao', workBudget: { milliseconds: Infinity } });
+
+    await appendFile(log, `${receiving}\n`);
+    const records = await restarted.poll();
+    expect(records).toHaveLength(2);
+    expect(records[0]['agent.doubao_work.chat_response_end']).toBe(((BigInt(DOUBAO_EPOCH) + 2000n) * 1_000_000n + 123_000n).toString());
+    expect(await restarted.poll()).toEqual([]);
+  });
+
   it('refuses a mismatched native message and isolates repeated requests in one conversation', async () => {
     const { store, file, log } = await setup();
     const input = new Probe({ stateStore: store, inputId: 'doubao', workBudget: { milliseconds: Infinity } });
@@ -296,6 +316,7 @@ describe('Doubao ordinary chat collection', () => {
       expect(llm.attributes['gen_ai.output.messages']).toContain('SYNTHETIC_CHAT_OUTPUT');
       expect(llm.attributes['gen_ai.request.model']).toBeUndefined();
       expect(llm.endTime).toEqual([Math.floor((DOUBAO_EPOCH + 2000) / 1000), ((DOUBAO_EPOCH + 2000) % 1000) * 1000000 + 123000]);
+      expect(llm.attributes['loongsuite.doubao_work.timing_basis']).toBe('client_submit_to_receive_end');
       expect(spans.every(span => span.attributes['loongsuite.doubao_work.mode'] === 'chat')).toBe(true);
       for (const span of spans.filter(span => span.parentSpanId)) {
         expect(spans.some(parent => parent.spanContext().spanId === span.parentSpanId)).toBe(true);
@@ -334,7 +355,8 @@ describe('Doubao ordinary chat collection', () => {
     const { store, file, log } = await setup(), spans: ReadableSpan[] = [];
     const input = new Probe({ stateStore: store, inputId: 'doubao', workBudget: { milliseconds: Infinity } });
     const clock = vi.spyOn(Date, 'now').mockReturnValue(DOUBAO_EPOCH - 1); await input.poll(); clock.mockRestore();
-    await appendFile(log, lifecycle('synthetic-chat-turn', DOUBAO_EPOCH, terminal));
+    const [start, sending, , end] = lifecycle('synthetic-chat-turn', DOUBAO_EPOCH, terminal).trimEnd().split('\n');
+    await appendFile(log, `${start}\n${sending}\n${end}\n`);
     await writeFile(file, chatWal([chatBatch({ finished: false, output: 'PARTIAL_OUTPUT' })]));
     const records = await input.poll(); expect(records).toHaveLength(2);
     const flusher = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:1' }], serviceName: 'synthetic-chat-error' }, undefined, () => ({
@@ -345,6 +367,8 @@ describe('Doubao ordinary chat collection', () => {
       const llm = spans.find(span => span.attributes['gen_ai.span.kind'] === 'LLM')!;
       expect(llm.status.code).toBe(2); expect(llm.attributes['error.type']).toMatch(/doubao.client_request/);
       expect(llm.attributes['gen_ai.output.messages']).toContain('PARTIAL_OUTPUT');
+      expect(llm.endTime).toEqual([Math.floor((DOUBAO_EPOCH + 3000) / 1000), ((DOUBAO_EPOCH + 3000) % 1000) * 1000000 + 123000]);
+      expect(llm.attributes['loongsuite.doubao_work.timing_basis']).toBe('client_submit_to_session_end');
       expect(llm.attributes['gen_ai.response.finish_reasons']).toBeUndefined();
     } finally { await flusher.shutdown(); }
   });
