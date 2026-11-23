@@ -476,7 +476,7 @@ function messageToParts(rec: Record<string, unknown>): unknown[] {
     const resultPart: Record<string, unknown> = {
       type: 'tool_call_response',
       id: toolCallId,
-      content,
+      response: content ?? null,
     };
     if (rec.isError === true) resultPart.isError = true;
     if (rec.toolName) resultPart.toolName = rec.toolName;

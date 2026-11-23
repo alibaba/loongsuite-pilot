@@ -499,7 +499,7 @@ describe('ZcodeRolloutInput', () => {
   // 'tool_call_response', 'reasoning']. 'tool_result' triggers schema WARN per
   // LLM span. Rollout's messageToParts must emit 'tool_call_response' for tool
   // role messages.
-  test('tool role message part type 为 tool_call_response (非 tool_result, P1 fix)', async () => {
+  test('preserves the tool payload in the canonical tool_call_response part', async () => {
     const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
     const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
     // record 1 的 request.messages[7] 是 role=tool (含 toolCallId/toolName)
@@ -512,6 +512,7 @@ describe('ZcodeRolloutInput', () => {
       .find((p: any) => p.type === 'tool_call_response');
     expect(toolResultPart).toBeDefined();
     expect(toolResultPart.id).toBe('toolu_976lh8d7b5p');
+    expect(toolResultPart.response).toEqual(rec2.request.messages[7].content);
     // 确认没有 tool_result 残留
     const staleToolResult = inMsgs
       .flatMap((m: any) => m.parts)
