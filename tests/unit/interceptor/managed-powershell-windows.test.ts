@@ -1,12 +1,12 @@
 import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { createServer, type Socket } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PowerShellPool } from '../../../src/interceptor/managed/powershell-pool.js';
 import { spawnPowerShellGuardian, windowsJobBootstrap, windowsPowerShellEnv } from '../../../src/interceptor/managed/windows-job-guardian.js';
 
@@ -62,7 +62,7 @@ it('keeps the native helper command within the Windows command-line limit', () =
 });
 
 async function directory(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'managed-ps-张三-'));
+  const dir = await fs.mkdtemp(join(tmpdir(), 'managed-ps-张三-'));
   dirs.push(dir);
   return dir;
 }
@@ -70,17 +70,44 @@ async function directory(): Promise<string> {
 async function poolFile(body: string): Promise<{ pool: PowerShellPool; file: string; dir: string }> {
   const dir = await directory();
   const file = join(dir, 'rule@1.ps1');
-  await writeFile(file, `\uFEFF${body}`);
+  await fs.writeFile(file, `\uFEFF${body}`);
   const pool = new PowerShellPool({ scriptsDir: dir, size: 1 });
   pools.push(pool);
   return { pool, file, dir };
 }
 
-async function waitFile(file: string, diagnostic = () => ''): Promise<string> {
-  for (let i = 0; i < 1500 && !existsSync(file); i++) await new Promise(resolve => setTimeout(resolve, 10));
-  if (!existsSync(file)) throw new Error(`missing native test marker ${file}; ${diagnostic()}`);
-  return (await readFile(file, 'utf8')).replace(/^\uFEFF/, '').trim();
+async function waitForPid(
+  file: string,
+  diagnostic = () => '',
+  readMarker = (filePath: string) => fs.readFile(filePath, 'utf8'),
+): Promise<number> {
+  const deadline = Date.now() + 15_000;
+  do {
+    try {
+      // Windows may expose the marker before its writer releases the handle.
+      // The newline confirms that we have read the whole PID.
+      const content = await readMarker(file);
+      const match = /^\uFEFF?([1-9]\d*)\r?\n$/.exec(content);
+      if (match && Number.isSafeInteger(Number(match[1]))) return Number(match[1]);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'EBUSY') throw error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  } while (Date.now() < deadline);
+  throw new Error(`native test PID marker was not ready: ${file}; ${diagnostic()}`);
 }
+
+it('waits for a locked PID marker to contain the complete line', async () => {
+  const read = vi.fn<[string], Promise<string>>()
+    .mockRejectedValueOnce(Object.assign(new Error('sharing violation'), { code: 'EBUSY' }))
+    .mockRejectedValueOnce(Object.assign(new Error('publication pending'), { code: 'ENOENT' }))
+    .mockResolvedValueOnce('\uFEFF12')
+    .mockResolvedValueOnce('\uFEFF12345\r\n');
+
+  await expect(waitForPid('worker.pid', undefined, read)).resolves.toBe(12345);
+  expect(read).toHaveBeenCalledTimes(4);
+});
 
 async function waitExit(pid: number): Promise<void> {
   for (let i = 0; i < 250; i++) {
@@ -94,7 +121,7 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
   afterEach(async () => {
     for (const pool of pools.splice(0)) pool.stop();
     // Job cleanup is asynchronous on stop; fixture deletion may briefly be locked.
-    for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    for (const dir of dirs.splice(0)) await fs.rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
 
   it('keeps the Windows overlapped fd3 duplex while the lease read remains open', async () => {
@@ -200,7 +227,7 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     const policySnapshot = JSON.parse(policies.stdout.trim());
     // This control script does not read $input, even if a higher policy overrides Restricted.
     const restrictedFile = join(dir, 'restricted-control.ps1');
-    await writeFile(restrictedFile, '\uFEFF"RESTRICTED_SCRIPT_EXECUTED"');
+    await fs.writeFile(restrictedFile, '\uFEFF"RESTRICTED_SCRIPT_EXECUTED"');
     const restricted = await powerShellProbe(['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Restricted', '-File', restrictedFile]);
     const diagnostic = JSON.stringify({ policies: policySnapshot, probe: restricted });
     expect(restricted.timedOut, diagnostic).toBe(false);
@@ -217,7 +244,7 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     const { pool, file, dir } = await poolFile(`'{"matched":true,"reason":"partial"}'; ${end}`);
     expect(await pool.run(file, '{}', 15_000)).toEqual({ ok: false, error: `powershell script exited with ${code}` });
     const next = join(dir, 'next@1.ps1');
-    await writeFile(next, `\uFEFF'{"matched":false}'`);
+    await fs.writeFile(next, `\uFEFF'{"matched":false}'`);
     expect(await pool.run(next, '{}', 15_000)).toEqual({ ok: true, stdout: '{"matched":false}' });
   }, 40_000);
 
@@ -228,11 +255,11 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     const spawnChild = `$p = Start-Process -FilePath ${quote(process.execPath)} -ArgumentList '-e', '"setInterval(()=>{},1000)"' -PassThru; Set-Content -LiteralPath ${quote(pidFile)} -Value ([string]$p.Id) -Encoding UTF8;`;
     const tail = scenario === 'success' ? `'{"matched":false}'`
       : scenario === 'executor-crash' ? 'Stop-Process -Id $PID -Force' : 'Start-Sleep -Seconds 60';
-    await writeFile(file, `\uFEFF${spawnChild} ${tail}`);
+    await fs.writeFile(file, `\uFEFF${spawnChild} ${tail}`);
     const pool = new PowerShellPool({ scriptsDir: dir, size: 1 });
     pools.push(pool);
     const result = pool.run(file, '{}', scenario === 'timeout' ? 8_000 : 20_000);
-    const pid = Number(await waitFile(pidFile));
+    const pid = await waitForPid(pidFile);
     if (scenario === 'stop') pool.stop();
     expect((await result).ok).toBe(scenario === 'success');
     await waitExit(pid);
@@ -242,7 +269,7 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     const dir = await directory();
     const pidFile = join(dir, 'native-child.pid');
     const executor = join(dir, 'executor.cjs');
-    await writeFile(executor, `const c=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',detached:true});require('node:fs').writeFileSync(process.argv[2],String(c.pid));process.stdin.resume();`);
+    await fs.writeFile(executor, `const c=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',detached:true});require('node:fs').writeFileSync(process.argv[2],String(c.pid)+'\\n');process.stdin.resume();`);
     const guardian = spawnPowerShellGuardian(process.execPath, [executor, pidFile], dir);
     guardian.stdout?.resume();
     let stderr = '';
@@ -250,7 +277,7 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     const lease = guardian.stdio[3] as Duplex;
     lease.on('error', () => {});
     try {
-      const pid = Number(await waitFile(pidFile, () => stderr));
+      const pid = await waitForPid(pidFile, () => stderr);
       if (scenario === 'deadline') lease.write('{"timeout":100}\n');
       else if (scenario === 'lease') lease.end();
       else guardian.kill('SIGKILL');
