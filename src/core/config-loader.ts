@@ -38,7 +38,7 @@ import {
   MULTIMODAL_UPLOAD_MODES,
   SUPPORTED_MASK_TYPES,
 } from '../types/index.js';
-import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { readJsonFile, resolveHome, type JsonFileReadFailure } from '../utils/fs-utils.js';
 import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
@@ -76,15 +76,20 @@ function summarizeConfigFile(file: ConfigFile) {
   };
 }
 
-let loadedConfigFileLog: { path: string; configSummary?: ReturnType<typeof summarizeConfigFile> } | undefined;
+let loadedConfigFileLog:
+  | { path: string; configSummary: ReturnType<typeof summarizeConfigFile> }
+  | { path: string; reason: JsonFileReadFailure }
+  | undefined;
 
 /** Replay the on-disk configuration summary when collector file logging is ready. */
 export function logLoadedConfigFile(): void {
   if (!loadedConfigFileLog) return;
-  if (loadedConfigFileLog.configSummary) {
+  if ('configSummary' in loadedConfigFileLog) {
     logger.info('loaded config file', loadedConfigFileLog);
-  } else {
+  } else if (loadedConfigFileLog.reason === 'missing') {
     logger.debug('no config file found, using env + defaults', { path: loadedConfigFileLog.path });
+  } else {
+    logger.warn('config file could not be loaded; using env + defaults', loadedConfigFileLog);
   }
 }
 
@@ -325,11 +330,13 @@ function envInt(key: string, fallback: number): number {
  */
 export async function loadConfig(): Promise<AnalyticsConfig> {
   const configPath = configJsonPath();
-  const file = await readJsonFile<ConfigFile>(configPath);
+  let reason: JsonFileReadFailure = 'invalid';
+  const rawConfig = await readJsonFile<ConfigFile>(configPath, failure => { reason = failure; });
+  const file = rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig) ? rawConfig : null;
 
   loadedConfigFileLog = file
     ? { path: configPath, configSummary: summarizeConfigFile(file) }
-    : { path: configPath };
+    : { path: configPath, reason };
   logLoadedConfigFile();
 
   const dataDir = pickDataDir(env('LOONGSUITE_PILOT_DATA_DIR'), file?.dataDir);

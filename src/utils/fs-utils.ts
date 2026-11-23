@@ -28,8 +28,11 @@ export async function directoryExists(path: string): Promise<boolean> {
   }
 }
 
+export type JsonFileReadFailure = 'missing' | 'invalid' | 'unreadable';
+
 /**
  * Reads and parses JSON from a file. Returns `null` on missing file or parse errors.
+ * The optional callback receives the failure category without any file contents.
  *
  * A leading UTF-8 BOM is stripped before parsing. `JSON.parse` rejects it, and
  * because this function swallows parse errors a BOM would silently degrade to
@@ -39,11 +42,18 @@ export async function directoryExists(path: string): Promise<boolean> {
  * PowerShell 6), and so does Notepad. Both touch files we read here
  * (`deployed-agents.json`, `config.json`).
  */
-export async function readJsonFile<T>(path: string): Promise<T | null> {
+export async function readJsonFile<T>(
+  path: string,
+  onFailure?: (reason: JsonFileReadFailure) => void,
+): Promise<T | null> {
   try {
     const text = await fsp.readFile(path, 'utf8');
     return JSON.parse(text.replace(/^\uFEFF/, '')) as T;
-  } catch {
+  } catch (error: unknown) {
+    if (onFailure) {
+      const missing = (error as NodeJS.ErrnoException).code === 'ENOENT';
+      onFailure(missing ? 'missing' : error instanceof SyntaxError ? 'invalid' : 'unreadable');
+    }
     return null;
   }
 }

@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const mockReadJsonFile = vi.fn().mockResolvedValue(null);
+const mockReadJsonFile = vi.fn().mockImplementation(async (_path, onFailure) => {
+  onFailure?.('missing');
+  return null;
+});
 const { mockLoggerInfo, mockLoggerDebug, mockLoggerWarn } = vi.hoisted(() => ({
   mockLoggerInfo: vi.fn(), mockLoggerDebug: vi.fn(), mockLoggerWarn: vi.fn(),
 }));
@@ -191,7 +194,10 @@ describe('ConfigLoader', () => {
     mockReadJsonFile.mockResolvedValueOnce({ enabled: false });
     await loadConfig();
     mockLoggerInfo.mockClear();
-    mockReadJsonFile.mockResolvedValueOnce(null);
+    mockReadJsonFile.mockImplementationOnce((_path, onFailure) => {
+      onFailure('missing');
+      return Promise.resolve(null);
+    });
     await loadConfig();
     mockLoggerDebug.mockClear();
     logLoadedConfigFile();
@@ -200,6 +206,30 @@ describe('ConfigLoader', () => {
     expect(mockLoggerDebug.mock.calls).toEqual([
       ['no config file found, using env + defaults', { path: expect.any(String) }],
     ]);
+  });
+
+  it.each(['invalid', 'unreadable'])('reports an %s config file without logging its contents', async reason => {
+    vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '/custom/config.json');
+    mockReadJsonFile.mockImplementationOnce((_path, onFailure) => {
+      onFailure(reason);
+      return Promise.resolve(null);
+    });
+
+    await expect(loadConfig()).resolves.toMatchObject({ enabled: true });
+    const details = { path: '/custom/config.json', reason };
+    expect(mockLoggerWarn).toHaveBeenCalledWith('config file could not be loaded; using env + defaults', details);
+    mockLoggerWarn.mockClear();
+    logLoadedConfigFile();
+    expect(mockLoggerWarn.mock.calls).toEqual([
+      ['config file could not be loaded; using env + defaults', details],
+    ]);
+  });
+
+  it.each([null, [], 'not a config object'])('reports a non-object config as invalid', async value => {
+    mockReadJsonFile.mockResolvedValueOnce(value);
+    await expect(loadConfig()).resolves.toMatchObject({ enabled: true });
+    expect(mockLoggerWarn).toHaveBeenCalledWith('config file could not be loaded; using env + defaults',
+      expect.objectContaining({ reason: 'invalid' }));
   });
 
   describe('three-layer priority (T025)', () => {
