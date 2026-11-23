@@ -1507,3 +1507,35 @@ async fn qoder_app_identity_is_bound_to_each_native_turn() {
         .iter()
         .all(|row| row["gen_ai.agent.type"] == "qoder-cli"));
 }
+
+#[tokio::test]
+async fn settled_cursor_uses_one_scoped_open_and_detects_growth_without_a_notice() {
+    use std::sync::atomic::AtomicUsize;
+
+    let mut f = Fixture::new("qoder").await;
+    f.write(&turn(0, false));
+    f.wake("Stop", json!({}));
+    assert_eq!(user_texts(&f.settle().await), ["prompt 0"]);
+    assert!(f.collect().await.records.is_empty());
+
+    let opens = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&opens);
+    let file = f.file.clone();
+    let guard = scanner::inject_open_fault(move |candidate| {
+        if candidate == file {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let settled = f.collect().await;
+    assert!(settled.records.is_empty());
+    assert!(!settled.changed);
+    assert_eq!(opens.load(Ordering::Relaxed), 1);
+    drop(guard);
+
+    let mut appended = turn(1, false);
+    appended.push(json!({"type":"last-prompt"}));
+    f.append(&appended);
+    let rows = f.settle().await;
+    assert_eq!(user_texts(&rows), ["prompt 1"]);
+    unique(&rows);
+}

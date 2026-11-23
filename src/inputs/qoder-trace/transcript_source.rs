@@ -15,6 +15,7 @@ use crate::hook_process::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use indexmap::{IndexMap, IndexSet};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -52,7 +53,6 @@ pub struct TranscriptBatch {
     pub changed: bool,
     pub metrics: TranscriptMetrics,
 }
-#[derive(Clone)]
 struct ActiveRows {
     start: u64,
     end: u64,
@@ -330,6 +330,47 @@ fn valid_source(v: &Value, agent: &str, key: &str) -> bool {
         && optional_number(v, "observedSize").is_some()
         && digest(&(&v["sessionId"], &v["transcriptPath"])) == key
 }
+// Metadata and the authorized transcript descriptor have already been
+// checked. A completed generation with no pending notices or recovery work
+// has nothing to stage, so it need not reopen the transcript or copy the cursor.
+fn settled_at_eof(cp: &Value, stat: &FileVersion, contexts: &[Arc<Value>]) -> bool {
+    if optional_number(cp, "offset") != Some(stat.size)
+        || optional_number(cp, "committedOffset") != Some(stat.size)
+        || optional_number(cp, "inode") != Some(stat.ino)
+        || optional_number(cp, "stableSize") != Some(stat.size)
+        || cp["stableMtime"].as_f64() != Some(mtime(stat))
+        || cp.get("fingerprint").is_none()
+        || flag(cp, "terminal")
+        || flag(cp, "sealedBoundary")
+        || flag(cp, "hasUser")
+        || [
+            "activeStart",
+            "bootstrapEnd",
+            "migration",
+            "findAnchorLine",
+            "pendingLine",
+            "initialOwnership",
+            "backfill",
+            "unresolvedPrompt",
+            "delegationWaitSince",
+        ]
+        .into_iter()
+        .any(|key| !cp[key].is_null())
+        || !cp.get("fileVersion").is_some_and(|saved| {
+            FileVersion::deserialize(saved).is_ok_and(|version| &version == stat)
+        })
+    {
+        return false;
+    }
+    let Some(saved) = cp.get("receipts").and_then(Value::as_array) else {
+        return false;
+    };
+    contexts
+        .iter()
+        .filter_map(|context| context.get("receipt"))
+        .eq(saved)
+}
+
 fn notice_name(s: &str) -> bool {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"^\d+-(?:SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|SessionEnd|SubagentStart|SubagentStop)-[a-f0-9]{24}\.json$").unwrap()
@@ -615,7 +656,15 @@ impl Collector {
         let source = if let Some(m) = self.metadata.get(dir) {
             Arc::clone(&m.source)
         } else {
-            Arc::new(snapshot(&dir.join("source.json"), MAX_NOTICES)?.0)
+            let source = snapshot(&dir.join("source.json"), MAX_NOTICES)?.0;
+            let key = dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if !valid_source(&source, &self.agent_id, key) {
+                anyhow::bail!("invalid-source");
+            }
+            Arc::new(source)
         };
         // Reuse only the already validated payload of the exact content
         // identity and receipt generation. Every notice is still opened,
@@ -658,9 +707,6 @@ impl Collector {
                 }
             });
             let context = if let Some(context) = reused {
-                if !valid_source(context, &self.agent_id, text(&source, "key")) {
-                    anyhow::bail!("invalid-context")
-                }
                 Arc::clone(context)
             } else {
                 let mut value = parsed.expect("uncached snapshot was parsed");
@@ -876,6 +922,9 @@ impl Collector {
                     return Ok(());
                 }
                 let old = next.get(&key);
+                if old.is_some_and(|checkpoint| settled_at_eof(checkpoint, &stat, &contexts)) {
+                    return Ok(());
+                }
                 let mut cp = old.cloned().unwrap_or(Value::Null);
                 let saved = cp.get("receipts").and_then(Value::as_array);
                 let pending_stop = contexts.iter().any(|context| {
@@ -1048,10 +1097,13 @@ impl Collector {
             },
         })
     }
+    fn take_cached_rows(&mut self, key: &str) -> Option<ActiveRows> {
+        let rows = self.cache.shift_remove(key)?;
+        self.cache_size -= rows.bytes;
+        Some(rows)
+    }
     fn drop_cache(&mut self, key: &str) {
-        if let Some(old) = self.cache.shift_remove(key) {
-            self.cache_size -= old.bytes;
-        }
+        drop(self.take_cached_rows(key));
     }
     fn remember(&mut self, key: &str, value: ActiveRows) -> anyhow::Result<()> {
         self.drop_cache(key);
@@ -1934,10 +1986,8 @@ impl Collector {
         };
         let key = text(source, "key");
         let mut value = self
-            .cache
-            .get(key)
+            .take_cached_rows(key)
             .filter(|v| v.start == start && v.end <= number(cp, "offset"))
-            .cloned()
             .unwrap_or(ActiveRows {
                 start,
                 end: start,
@@ -1994,8 +2044,8 @@ impl Collector {
             if value.bytes > self.max_turn_bytes {
                 anyhow::bail!("turn-byte-limit")
             };
-            self.remember(key, value.clone())?;
             if value.end < end {
+                self.remember(key, value)?;
                 return Ok(None);
             }
         }
