@@ -172,6 +172,43 @@ it('never uses a Stop before the request as the response timestamp', async () =>
   expect(entries.map(row => [row['event.name'], row.time_unix_nano])).toEqual([['other', '2500000000']]);
 });
 
+it.each([false, true])('matches a legacy response to its own Stop after a cancelled turn (separate polls: %s)', async separatePolls => {
+  const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-cancelled-stop-'));
+  try {
+    const f = await setup(root);
+    const cancelled = [f.user, { ...f.response, status: 'incomplete' }];
+    const next = [
+      { ...f.user, id: 'second-turn', timestamp: undefined },
+      { ...f.response, id: 'second-response', parentId: 'second-turn', timestamp: undefined,
+        providerData: { ...f.response.providerData, conversationRequestId: 'second-request', messageId: 'second-response' } },
+    ];
+    await writeFile(f.transcript, lines([...cancelled, ...next]));
+    await f.hook('Stop', 1600);
+    let input = f.input;
+    if (separatePolls) {
+      expect(await input.poll()).toEqual([]);
+      const first = await input.poll();
+      expect(first.map(row => [row['event.name'], row['gen_ai.turn.id']])).toEqual([
+        ['other', f.user.id],
+      ]);
+      expect(Object.values(f.stateStore.get(input.id).extra?.workbuddyTranscriptBytes as object))
+        .toEqual([Buffer.byteLength(lines(cancelled))]);
+      await f.stateStore.save();
+      input = (await f.restart()).input;
+    }
+
+    await f.hook('Stop', 2300);
+    expect(await input.poll()).toEqual([]);
+    const rows = await input.poll();
+    expect(rows.filter(row => row['gen_ai.turn.id'] === 'second-turn')
+      .map(row => [row['event.name'], row.time_unix_nano])).toEqual([
+      ['other', '2300000000'], ['llm.request', '2300000000'], ['llm.response', '2300000000'],
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it.each([{ skipRun: true }, { isCompactInternal: true }, { agent: 'compact' }])(
   'keeps an untimed turn pending when only internal records establish timing (%j)', async internal => {
     const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-internal-stop-'));

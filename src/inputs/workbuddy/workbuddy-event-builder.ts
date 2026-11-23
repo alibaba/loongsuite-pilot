@@ -130,6 +130,7 @@ export async function buildWorkBuddyEvents(
   let reasoningStartMs: number | undefined;
   let requestStartMs: number | undefined;
   let previousTurnTerminalAtMs: number | undefined;
+  let interruptedAtMs: number | undefined;
   let cwd: string | undefined;
   let lastResponse: AgentActivityEntry | undefined;
   let pendingUserInput: PendingUserInput | undefined;
@@ -342,6 +343,12 @@ export async function buildWorkBuddyEvents(
 
     if (record.type === 'message' && record.role === 'user') {
       await closeInterruptedTurn(record);
+      if (interruptedAtMs !== undefined) {
+        // The next user row confirms that the interrupted response belongs to the previous turn.
+        hookEvents.observeCompletedTurn(interruptedAtMs, true);
+        previousTurnTerminalAtMs = latestTimestamp(previousTurnTerminalAtMs, interruptedAtMs);
+        interruptedAtMs = undefined;
+      }
       // A later response without a timestamp may still need the Stop observation.
       await emitPendingUserInput();
       tools.clear();
@@ -433,6 +440,7 @@ export async function buildWorkBuddyEvents(
     if (record.type === 'message' && record.role === 'assistant') {
       if (record.status === 'incomplete') {
         await closeInterruptedTurn(record);
+        interruptedAtMs = latestTimestamp(interruptedAtMs, timestampMs(record));
         continue;
       }
       const wave = collectFunctionCallWave(records, index + 1, record);
@@ -492,6 +500,7 @@ export async function buildWorkBuddyEvents(
       const terminalAtMs = timestampMs(record) ?? responseTimestamp;
       hookEvents.observeCompletedTurn(terminalAtMs, transcriptResponseTimestamp !== undefined);
       previousTurnTerminalAtMs = latestTimestamp(previousTurnTerminalAtMs, terminalAtMs);
+      interruptedAtMs = undefined;
       lastResponse = undefined;
       tools.clear();
       pendingDelta = [];
@@ -644,12 +653,12 @@ export function isInternalRecord(record: WorkBuddyRecord): boolean {
   return provider.isCompactInternal === true || provider.skipRun === true || provider.agent === 'compact';
 }
 
-export function isWorkBuddyTerminalAssistant(records: WorkBuddyRecord[], index: number): boolean {
+export function isWorkBuddyAssistantBoundary(records: WorkBuddyRecord[], index: number): boolean {
   const record = records[index];
   const next = records[index + 1];
   return record.type === 'message' && record.role === 'assistant'
-    && record.status !== 'incomplete' && !isInternalRecord(record)
-    && !(next?.type === 'function_call' && isSameResponseWave(record, next));
+    && !isInternalRecord(record)
+    && (record.status === 'incomplete' || !(next?.type === 'function_call' && isSameResponseWave(record, next)));
 }
 
 function normalizeToolStatus(status: unknown): string | undefined {

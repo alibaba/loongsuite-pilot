@@ -6,7 +6,7 @@ import type { Dirent, FSWatcher } from 'node:fs';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
-import { buildWorkBuddyEvents, isInternalRecord, isWorkBuddyTerminalAssistant } from './workbuddy-event-builder.js';
+import { buildWorkBuddyEvents, isInternalRecord, isWorkBuddyAssistantBoundary } from './workbuddy-event-builder.js';
 import type { WorkBuddyHookEvent, WorkBuddyRecord } from './workbuddy-types.js';
 
 const OFFSET_MAP_KEY = 'workbuddyTranscriptBytes';
@@ -564,9 +564,9 @@ function findFirstUnsealedUser(
     return undefined;
   };
   for (const [index, record] of records.entries()) {
-    const terminalAssistant = isWorkBuddyTerminalAssistant(records, index);
+    const assistantBoundary = isWorkBuddyAssistantBoundary(records, index);
     // The event builder has to recognize the row before its timestamp can close a boundary.
-    if (!terminalAssistant && isInternalRecord(record)) continue;
+    if (!assistantBoundary && isInternalRecord(record)) continue;
     const timestamp = typeof record.timestamp === 'number' && Number.isFinite(record.timestamp)
       ? record.timestamp : undefined;
     if (record.type === 'message' && record.role === 'user') {
@@ -603,7 +603,7 @@ function findFirstUnsealedUser(
     if (record.type === 'reasoning' && timestamp !== undefined) {
       terminalReasoningAtMs = Math.max(terminalReasoningAtMs ?? timestamp, timestamp);
     }
-    if (currentUser !== undefined && terminalAssistant) {
+    if (currentUser !== undefined && assistantBoundary) {
       const cancelled = record.status === 'incomplete';
       currentTerminal = { atMs: timestamp ?? (cancelled ? undefined : terminalReasoningAtMs), cancelled };
       terminalReasoningAtMs = undefined;
@@ -613,7 +613,7 @@ function findFirstUnsealedUser(
     // Inspect the entire turn. A native response can arrive after its Stop,
     // while an unfinished earlier step says nothing about ownership.
     currentActivityAtMs = Math.max(currentActivityAtMs ?? timestamp, timestamp);
-    if (timestamp <= stopAtMs && (terminalAssistant || !needsOwnStop)) unconfirmedUser = undefined;
+    if (timestamp <= stopAtMs && (assistantBoundary || !needsOwnStop)) unconfirmedUser = undefined;
   }
   return currentCutoff();
 }
