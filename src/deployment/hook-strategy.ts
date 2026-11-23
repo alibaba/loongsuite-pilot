@@ -17,6 +17,7 @@ import {
   resolveHome,
   ensureDir,
 } from '../utils/fs-utils.js';
+import { configJsonPath } from '../utils/data-dir.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { INTERCEPTOR_EVENT_TIMEOUT_SEC } from '../interceptor/types.js';
@@ -147,6 +148,15 @@ export class HookStrategy implements DeployStrategy {
       const { systemTomlHooksInstalled } = await import('./system-toml-hooks.js');
       return !(await systemTomlHooksInstalled(def));
     }
+    if ((def.id === 'cursor' || def.id === 'cursor-cli') && def.hook) {
+      const hookDir = path.dirname(resolveHome(def.hook.hookCommand));
+      try {
+        const deployedPath = await fs.readFile(path.join(hookDir, 'cursor-config-path'), 'utf8');
+        if (deployedPath.trim() !== path.resolve(configJsonPath())) return true;
+      } catch {
+        return true;
+      }
+    }
     if (await this.needsSettingsRepairForCodex(def)) {
       return true;
     }
@@ -223,6 +233,10 @@ export class HookStrategy implements DeployStrategy {
         const { updateSystemTomlHooks } = await import('./system-toml-hooks.js');
         await updateSystemTomlHooks(def, true);
         return { success: true, agentId: def.id, deployMode: 'hook' };
+      }
+      if (def.id === 'cursor' || def.id === 'cursor-cli') {
+        const hookDir = path.dirname(resolveHome(hookConfig.hookCommand));
+        await writeTextFileAtomic(path.join(hookDir, 'cursor-config-path'), path.resolve(configJsonPath()));
       }
       const ensureSettings = () => this.ensureSettingsFile(hookConfig.settingsPath);
       if (def.id === 'claude-code') await withClaudeSettingsLock(hookConfig.settingsPath, ensureSettings);

@@ -475,8 +475,27 @@ async function main() {
   }
 
   // Convert to internal event and append to journal
-  // A custom install stores its config here. A log-only override can use the home config.
-  const runtimeConfig = loadHookRuntimeConfig(dataDir, { fallbackToHome: true });
+  // Deployment records the collector's config path. A relocated log directory
+  // does not change that path. Older hooks use the collector's home default.
+  let configPath = process.env.AGENT_DATA_COLLECTION_CONFIG?.trim();
+  if (!configPath) {
+    try {
+      configPath = (await fs.readFile(new URL('./cursor-config-path', import.meta.url), 'utf8')).trim();
+      if (!path.isAbsolute(configPath)) throw new Error('Invalid deployed Cursor config path');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      // No deployment marker: retain the normal implicit-home defaults.
+      configPath = undefined;
+    }
+  }
+  if (configPath) {
+    process.env.AGENT_DATA_COLLECTION_CONFIG = configPath.replace(/^~(?=[/\\]|$)/, os.homedir());
+  }
+  const runtimeConfig = loadHookRuntimeConfig();
+  // Workspace exclusions and message capture must read the same policy.
+  if (!configPath) {
+    process.env.AGENT_DATA_COLLECTION_CONFIG = path.join(os.homedir(), '.loongsuite-pilot', 'config.json');
+  }
   const eventVariant = cursorVariantFromVersion(payload.cursor_version);
   // Only inspect the open journal when this event would otherwise be allowed
   // and the other Cursor source has a different policy.
@@ -525,6 +544,21 @@ async function main() {
     return;
   }
 
+  // Retry completed conversations from earlier invocations after a policy or
+  // write failure. Assembly and workspace filtering still precede compaction.
+  const pending = readAllEvents();
+  const completed = new Map(pending.filter(event => event.hook_event === 'stop')
+    .map(event => [event.conversation_id, event]));
+  for (const event of completed.values()) {
+    if (event.conversation_id !== internalEvent.conversation_id) {
+      await assembleJournalEvent(event, dataDir, runtimeConfig, now);
+    }
+  }
+  await assembleJournalEvent(internalEvent, dataDir, runtimeConfig, now);
+  writeEmptyResponse();
+}
+
+async function assembleJournalEvent(internalEvent, dataDir, runtimeConfig, now) {
   // On stop: assemble turn and write history
   if (internalEvent.hook_event === 'stop') {
     try {
@@ -546,7 +580,6 @@ async function main() {
           'error.type': 'info',
           'error.message': `skipped duplicate stop for conv=${internalEvent.conversation_id?.slice(0, 8)} (no pending beforeSubmitPrompt)`,
         });
-        writeEmptyResponse();
         return;
       }
 
@@ -564,7 +597,6 @@ async function main() {
       );
       if (variant === 'cursor-cli' && !hasResponse) {
         // defer — afterAgentResponse handler will trigger assembly
-        writeEmptyResponse();
         return;
       }
 
@@ -680,8 +712,6 @@ async function main() {
       });
     }
   }
-
-  writeEmptyResponse();
 }
 
 if (

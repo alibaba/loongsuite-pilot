@@ -75,6 +75,7 @@ it.each([
 it('uses the custom installation policy for the journal, diagnostics, and history', () => {
   configure({ cursor: { captureMessageContent: true } });
   writeInstallConfig(JSON.stringify({ agents: { cursor: { captureMessageContent: false } } }));
+  env.AGENT_DATA_COLLECTION_CONFIG = path.join(data, 'config.json');
   send('beforeSubmitPrompt', { prompt: 'custom-install-private' }, '1.7.0');
   send('afterAgentResponse', { text: 'custom-install-private', output_tokens: 9 }, '1.7.0');
   expect(journal()).not.toContain('custom-install-private');
@@ -88,6 +89,7 @@ it('uses the custom installation policy for the journal, diagnostics, and histor
 it('omits content while the custom installation policy is malformed', () => {
   configure({ cursor: { captureMessageContent: true } });
   writeInstallConfig('{');
+  env.AGENT_DATA_COLLECTION_CONFIG = path.join(data, 'config.json');
   send('beforeSubmitPrompt', { prompt: 'invalid-install-private' }, '1.7.0');
   expect(journal()).not.toContain('invalid-install-private');
   expect(fs.existsSync(path.join(data, 'logs/cursor/raw'))).toBe(false);
@@ -99,6 +101,7 @@ it('finds the installed custom policy when Cursor does not inherit the installer
   writeInstallConfig(JSON.stringify({ agents: { cursor: { captureMessageContent: false } } }));
   const installedHooks = path.join(data, 'hooks');
   fs.cpSync(path.dirname(processor), installedHooks, { recursive: true });
+  fs.writeFileSync(path.join(installedHooks, 'cursor-config-path'), path.join(data, 'config.json'));
   const installedProcessor = fs.realpathSync(path.join(installedHooks, path.basename(processor)));
 
   send('beforeSubmitPrompt', { prompt: 'installed-hook-private' }, '1.7.0', 'session', installedProcessor);
@@ -234,4 +237,44 @@ it('omits new content while a configured policy cannot be read', () => {
   send('beforeSubmitPrompt', { prompt: 'unavailable-policy-marker' }, '1.7.0');
   expect(journal()).not.toContain('unavailable-policy-marker');
   expect(fs.existsSync(path.join(data, 'logs/cursor/raw'))).toBe(false);
+});
+
+it.each([false, true])('uses the collector home policy with relocated data (deployed: %s)', deployed => {
+  fs.writeFileSync(path.join(home, '.loongsuite-pilot/config.json'), JSON.stringify({
+    dataDir: data, agents: { cursor: { captureMessageContent: false } },
+  }));
+  writeInstallConfig('{}');
+  let hookProcessor = processor;
+  if (deployed) {
+    const hooks = path.join(data, 'hooks');
+    fs.cpSync(path.dirname(processor), hooks, { recursive: true });
+    fs.writeFileSync(path.join(hooks, 'cursor-config-path'), path.join(home, '.loongsuite-pilot/config.json'));
+    hookProcessor = fs.realpathSync(path.join(hooks, path.basename(processor)));
+    env.LOONGSUITE_PILOT_DATA_DIR = '';
+  }
+  send('beforeSubmitPrompt', { prompt: 'relocated-private' }, '1.7.0', 'session', hookProcessor);
+  expect(journal()).not.toContain('relocated-private');
+  expect(fs.existsSync(path.join(data, 'logs/cursor/raw'))).toBe(false);
+  send('afterAgentResponse', { text: 'relocated-private', output_tokens: 7 }, '1.7.0', 'session', hookProcessor);
+  send('stop', { status: 'completed' }, '1.7.0', 'session', hookProcessor);
+  expect(readHistory()).toContain('"gen_ai.usage.output_tokens":7');
+  expect(readHistory()).not.toContain('relocated-private');
+});
+
+it.each(['1.7.0', '2026.07.31'])('retries a completed %s conversation after policy recovery on another session', version => {
+  configure({ cursor: { captureMessageContent: false }, 'cursor-cli': { captureMessageContent: false } });
+  const config = path.join(home, '.loongsuite-pilot/config.json');
+  fs.writeFileSync(config, '{');
+  send('beforeSubmitPrompt', { prompt: 'broken-policy-private' }, version, 'old');
+  send('afterAgentResponse', { text: 'broken-policy-private', output_tokens: 13 }, version, 'old');
+  send('stop', { status: 'completed' }, version, 'old');
+  expect(readHistory()).toBe('');
+  configure({ cursor: { captureMessageContent: false }, 'cursor-cli': { captureMessageContent: false } });
+  send('beforeSubmitPrompt', { prompt: 'new-session' }, version, 'new');
+  expect(readHistory()).toContain('"gen_ai.usage.output_tokens":13');
+  expect(readHistory()).not.toContain('broken-policy-private');
+  expect(journal()).not.toContain('"conversation_id":"old"');
+  const before = readHistory();
+  send('sessionStart', {}, version, 'third');
+  expect(readHistory()).toBe(before);
 });

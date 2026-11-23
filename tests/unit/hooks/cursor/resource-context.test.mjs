@@ -22,7 +22,8 @@ afterEach(() => {
 });
 
 function runHook(payload, extraEnv = {}) {
-  const env = { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir };
+  const env = { ...process.env, HOME: dataDir, USERPROFILE: dataDir,
+    AGENT_DATA_COLLECTION_CONFIG: '', LOONGSUITE_PILOT_DATA_DIR: dataDir };
   delete env.AGENTTEAMS_WORKER_NAME;
   delete env.AGENTTEAMS_INSTANCE_ID;
   delete env.AGENTTEAMS_TOKEN;
