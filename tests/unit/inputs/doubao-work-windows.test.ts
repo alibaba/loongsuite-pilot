@@ -19,7 +19,13 @@ const dispatcherStart = (overrides: Record<string, unknown> = {}, elapsedMs = 10
     toolCallID: 'synthetic-call', toolName: 'Read', status: 'start', isNewSse: true, delivery: 'dispatcher', ...overrides,
   })}", source:  (0)\n`;
 };
-class ProbeInput extends DoubaoWorkInput { poll() { return this.collect(); } }
+class ProbeInput extends DoubaoWorkInput {
+  constructor(options: ConstructorParameters<typeof DoubaoWorkInput>[0]) {
+    // Verify log parsing and correlation independent of the runner's I/O speed.
+    super({ ...options, workBudget: { milliseconds: Infinity, ...options.workBudget } });
+  }
+  poll() { return this.collect(); }
+}
 const temporary: string[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
