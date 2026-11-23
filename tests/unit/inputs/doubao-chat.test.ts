@@ -117,6 +117,22 @@ describe('Doubao ordinary chat collection', () => {
     expect((await reader.find('synthetic-chat-turn', budget()))?.output).toBe('RECOVERED_OUTPUT');
   });
 
+  it('invalidates old content when a valid snapshot follows a corrupt write', async () => {
+    const { root, file } = await setup();
+    await writeFile(file, chatWal([chatBatch()]));
+    const newer = path.join(path.dirname(file), '000004.log');
+    const corrupt = chatWal([chatBatch({ sequence: 2, output: 'UNREADABLE_RESPONSE' })]);
+    corrupt[50] ^= 1;
+    await writeFile(newer, corrupt);
+    const reader = new DoubaoChatReader(root);
+    await expect(reader.find('synthetic-chat-turn', budget())).rejects.toThrow('checksum');
+    await appendFile(newer, chatWal([chatBatch({ sequence: 3, session: 'other-chat-turn' })]));
+    expect(await reader.find('synthetic-chat-turn', budget())).toBeUndefined();
+    expect(await reader.find('synthetic-chat-turn', budget())).toBeUndefined();
+    await appendFile(newer, chatWal([chatBatch({ sequence: 4, output: 'VALID_REQUEST_RESPONSE' })]));
+    expect((await reader.find('synthetic-chat-turn', budget()))?.output).toBe('VALID_REQUEST_RESPONSE');
+  });
+
   it.each(['empty', 'delete', 'other-task'])('does not restore content removed by a newer task-store snapshot (%s)', async change => {
     const { root, file } = await setup();
     await writeFile(file, chatWal([chatBatch()]));
