@@ -214,6 +214,24 @@ describe('request-scoped correlation attributes', () => {
     expect(Object.hasOwn(entry, 'constructor')).toBe(false);
   });
 
+  it('leaves observed transport, host, service, and error fields under collector control', async () => {
+    const observed = {
+      'http.response.status_code': 503,
+      'host.name': 'observed-host',
+      'host.ip': '192.0.2.10',
+      'service.name': 'observed-service',
+      'error.type': 'observed-error',
+      'error.message': 'observed-diagnostic',
+      'loongsuite.observation.scope': 'agent_turn',
+    } as const;
+    const attributes = Object.fromEntries(Object.keys(observed).map(key => [key, 'caller-value']));
+    append('s1', { turnId: 't1', attributes: { ...attributes, 'memory.user_id': 'U001' } });
+    const entry: AgentActivityEntry = { ...response('s1', 't1'), ...observed };
+    await linker().stamp([entry]);
+    expect(entry).toMatchObject({ ...observed, 'memory.user_id': 'U001' });
+    expect(entry['agent.pilot.request.attribute.keys']).toEqual(['memory.user_id']);
+  });
+
   it('bounds attribute count and aggregate payload size', async () => {
     const attributes = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`memory.k${i}`, 'x'.repeat(500)]));
     append('s1', { attributes });

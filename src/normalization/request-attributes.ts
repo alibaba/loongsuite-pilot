@@ -18,8 +18,11 @@ const STRUCTURAL_KEYS = new Set([
   '__proto__', 'constructor', 'prototype',
   'span_id', 'parent_span_id', 'resourceAttributes', 'attributes', 'timestamp',
 ]);
-// Legacy event aliases can still be interpreted by normalization/conversion.
-const LEGACY_PREFIXES = ['session.', 'turn.', 'step.', 'input.', 'output.', 'tool.', 'response.', 'provider.'];
+// Protect standard event fields and legacy aliases consumed by the converter.
+const MANAGED_PREFIXES = [
+  'session.', 'turn.', 'step.', 'input.', 'output.', 'tool.', 'response.', 'provider.',
+  'http.response.', 'host.', 'service.', 'error.', 'loongsuite.',
+];
 
 function isBusinessKey(key: string): boolean {
   return key.length > 0
@@ -27,7 +30,7 @@ function isBusinessKey(key: string): boolean {
     && !/[\u0000-\u001f\u007f]/.test(key)
     && !STRUCTURAL_KEYS.has(key)
     && !isReservedKey(key)
-    && !LEGACY_PREFIXES.some(prefix => key.startsWith(prefix))
+    && !MANAGED_PREFIXES.some(prefix => key.startsWith(prefix))
     && !SENSITIVE_KEY_RE.test(key);
 }
 

@@ -72,6 +72,8 @@ describe('Grok process-scoped request attributes', () => {
       'span_id=wrong', 'parent_span_id=wrong', 'resourceAttributes=wrong',
       'timestamp=wrong', 'attributes=wrong', 'constructor=wrong', 'prototype=wrong',
       'memory.password=wrong', 'input.messages=wrong',
+      'http.response.status_code=wrong', 'host.name=wrong', 'host.ip=wrong', 'service.name=wrong',
+      'error.type=wrong', 'error.message=wrong', 'loongsuite.observation.scope=wrong',
     ].join(','));
     expect(records.length).toBeGreaterThan(0);
     for (const record of records) {

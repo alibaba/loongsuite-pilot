@@ -85,12 +85,15 @@ function grokRequestAttributes() {
     '__proto__', 'constructor', 'prototype', 'span_id', 'parent_span_id',
     'resourceAttributes', 'attributes', 'timestamp',
   ]);
-  const legacyPrefixes = ['session.', 'turn.', 'step.', 'input.', 'output.', 'tool.', 'response.', 'provider.'];
+  const managedPrefixes = [
+    'session.', 'turn.', 'step.', 'input.', 'output.', 'tool.', 'response.', 'provider.',
+    'http.response.', 'host.', 'service.', 'error.', 'loongsuite.',
+  ];
   const safe = Object.fromEntries(entries.filter(([key]) =>
     key.length <= 128
     && !/[\u0000-\u001f\u007f]/.test(key)
     && !structural.has(key)
-    && !legacyPrefixes.some(prefix => key.startsWith(prefix)),
+    && !managedPrefixes.some(prefix => key.startsWith(prefix)),
   ));
   return Buffer.byteLength(JSON.stringify(safe), 'utf8') <= 8192 ? safe : {};
 }
