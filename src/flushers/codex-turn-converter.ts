@@ -109,8 +109,10 @@ export function prepareCodexTurn(
       if (own.some(record => record['event.name'] === 'llm.request'
         && record['gen_ai.conversation.compacted'] === true)) {
         // The SDK accumulates prior request deltas across the whole turn. A
-        // native encrypted rewrite invalidates that reconstructed full history.
-        inv.inputMessages = [];
+        // native rewrite replaces that accumulated history with its snapshot.
+        const request = own.find(record => record['event.name'] === 'llm.request');
+        inv.inputMessages = Array.isArray(request?.['gen_ai.input.messages'])
+          ? request['gen_ai.input.messages'] as typeof inv.inputMessages : [];
       }
       return handler.startLlm(inv, context, start);
     },

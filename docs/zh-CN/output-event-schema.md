@@ -67,8 +67,13 @@ OTel INTERNAL Span，名称为 `gen_ai.context.compress`，POC 分类为
 
 Pi 文本估算有 8192 条记录和 2 MiB 文本预算，覆盖 conversation text，排除 system、工具定义和图片计价。
 Codex 在同一 turn 内自动压缩时沿用当前 Trace，压缩 Span 位于执行 AGENT 下，后续 LLM 从压缩结束后开始。
-原生 `compacted` 重置输入上下文，后续请求带 `gen_ai.conversation.compacted=true`。加密摘要无法还原时
-省略完整输入消息，并继续记录新产生的工具增量。安装后上下文计数标为 `native_estimate` / `active_context`。
+原生 `compacted.replacement_history` 成为新的输入基线。后续请求带
+`gen_ai.conversation.compacted=true` 和 `gen_ai.context.version`，新增消息和工具结果从该基线追加。
+明文 checkpoint 以 `CompactionPart` 表示，保留原生 role、摘要正文和压缩响应 ID。
+加密 checkpoint 保留 `type=compaction` 和可用的块 ID。内容可用性由
+`gen_ai.context.content.availability` 标为 `plaintext`、`opaque`、`partial` 或 `unavailable`。
+替换快照最多保留 1 MiB。未知原生 item 或内容超限会明确降级。历史缺少替换快照时继续记录已知增量。
+安装后上下文计数标为 `native_estimate` / `active_context`。
 摘要请求用量单独记录为 `agent.codex.compaction.input_tokens` / `output_tokens`，与上下文计数分别展示。
 源端没有同范围 before 计数时省略 before 和压缩比例。只有完成时间的旧版记录保留为事件。
 同轮长上下文验证可运行 `node scripts/e2e/context-compression-codex.mjs --codex /path/to/codex`。
@@ -324,3 +329,35 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 ### 逐轮关联原文 hash
 
 Hermes 的用户输入 `other` 事件可携带 `agent.pilot.correlation.content_hash`：用户原文 UTF-8 的 SHA-256 前 16 位十六进制字符，与关联文件的 `contentHash` 相同。该值在正文截断前计算，使超长输入在仅提供 hash 时仍可关联；旧生产者不提供此字段时，Pilot 继续按采集正文计算 hash / 匹配前缀。它不替代对消息结构计算的 `gen_ai.input.messages_hash`。
+
+#### 上下文版本与来源
+
+压缩操作和切换后的第一条 LLM 请求记录 `gen_ai.context.previous_version`、
+`gen_ai.context.version` 和 `gen_ai.context.replacement.boundary=replace`。
+Codex 使用原生 window ID，新版本跨后续 LLM 和正常新 turn 保持，下一次安装再切换。
+Pi 使用安装的 compaction entry ID，并在 session 重开时从当前 branch 恢复。
+
+Codex 的 `gen_ai.context.retained_message_ids` 来自 native retained-source metadata。
+`agent.codex.context.sampled_through_sequence` 保留原生采样边界。
+`gen_ai.context.source_span_ids` 和压缩 Span Links 关联本 Trace 中已观察到的旧上下文操作，最多 256 个 ID。
+`gen_ai.context.source.scope=observed_active_context` 和 `source.complete=false` 表示此列表具有采集范围限制。
+它帮助查看摘要形成前的执行历史。摘要的逐句来源和采集开始前的全部历史仍需更完整的原生 input-item metadata。
+Pi 暴露 `agent.pi.context.first_kept_entry_id` 作为保留历史的边界。
+
+#### 各 Agent 的内容可获取范围
+
+| Agent | 原生能力 | 本 PR 的内容支持与验证 |
+| --- | --- | --- |
+| Codex | 安装后的 replacement history，明文摘要或加密块，window ID、retained-source metadata | 明文/opaque CompactionPart、替换快照、版本关联、来源引用；真实同轮自动压缩及 CMS 对照 |
+| Pi Coding Agent | context Hook 有有效消息，compaction entry 有 summary 和 firstKeptEntryId | CompactionPart、版本、保留边界；真实手动压缩与后续 LLM 的明文输入已有 CMS 回读 |
+| OpenClaw | after_compaction 有计数和 sessionFile，llm_input 有 historyMessages | 后续输入已有采集入口，after Hook 缺少 summary 和精确来源，需结合 session reader 补齐 |
+| DSH | summary 事件和 replacement user/message 有正文，shadowed seqs 有来源信息 | 本 PR 仍只采生命周期，surface replay 和正文版本关联继续适配 |
+| Qwen Code | PostCompact.compact_summary 有明文，内部候选有 newHistory | 源码确认内容可取，Pilot 专用 Hook 适配待实现 |
+| Hermes | 压缩后的 messages 含 _compressed_summary | 源码确认明文可取，Pilot 适配待实现 |
+| Qoder / QoderCN | compact_boundary 有生命周期信息，摘要依赖对应 transcript writer/version | 生命周期已接入，完整替换消息和来源需逐版本确认 |
+| 其他已支持 Agent | 原生协议和版本各异 | 压缩正文与有效上下文仍需专项核对 |
+
+内容可获取范围依据固定源码修订和实际 native rollout 核对。支持普通 LLM 消息采集并不能证明具备压缩替换快照。
+Codex 核对 openai/codex `f1fd6c4c`，Pi 核对 badlogic/pi-mono `69a69934`，
+OpenClaw 核对 `db6a1bb7`，DSH 核对 `4b399c39`，Qwen Code 核对 `d4b28087`，Hermes 核对 `0f602c5f`。
+Pi 的实测运行版本为 0.73.1，摘要 content 保留该版本 provider 转换中的 summary 前后文本。

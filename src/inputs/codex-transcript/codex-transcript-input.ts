@@ -15,6 +15,7 @@ import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
 import {
   buildCodexTranscriptSegment,
   nextInputMessagesForStep,
+  continueCodexInputContext,
 } from './codex-transcript-builder.js';
 import {
   CodexSubagentLinker,
@@ -1308,7 +1309,8 @@ export class CodexTranscriptInput extends BaseInput {
     const committedTurn = closedStepCount === turn.steps.length
       ? turn
       : { ...turn, steps: turn.steps.slice(0, closedStepCount) };
-    const inputContext = await this.resolveInputContext(filePath, activeTurn, meta, attachmentParentThreadId);
+    const inputContext = await this.resolveInputContext(filePath, activeTurn, meta, attachmentParentThreadId)
+      ?? (checkpoint.compactedContext ? continueCodexInputContext(checkpoint.compactedContext, committedTurn) : undefined);
     const built = buildCodexTranscriptSegment(committedTurn, {
       includePrompt: activeTurn.emittedPrompt !== true,
       startStepNumber: stepStart,
@@ -1433,6 +1435,9 @@ export class CodexTranscriptInput extends BaseInput {
       : undefined;
     if (closedStepCount > 0) {
       activeTurn.inputContext = persistedInputContext(built.nextInputContext, lastClosedRange);
+      if (terminal && built.nextInputContext.compacted) {
+        checkpoint.compactedContext = persistedInputContext(built.nextInputContext, lastClosedRange);
+      }
       if (extraction.nextStepStartedAtMs !== undefined) {
         activeTurn.nextStepStartedAtMs = extraction.nextStepStartedAtMs;
       }
@@ -1499,7 +1504,7 @@ export class CodexTranscriptInput extends BaseInput {
       });
       return context;
     }
-    return { ...context, delta: nextInputMessagesForStep(lastStep) };
+    return { ...context, delta: nextInputMessagesForStep(lastStep, context.compacted) };
   }
 
   private async registerSubagentOwnerMeta(
@@ -2736,6 +2741,8 @@ export class CodexTranscriptInput extends BaseInput {
       inode: value.inode,
       scanOffset: value.scanOffset,
       activeTurn,
+      ...(parseInputContext(value.compactedContext)?.compacted
+        ? { compactedContext: parseInputContext(value.compactedContext) } : {}),
       pendingTerminal,
       ...(deferredTerminals.length ? { deferredTerminals } : {}),
       pendingFusion,
@@ -3816,6 +3823,10 @@ function persistedInputContext(
   const deltaBytes = Buffer.byteLength(JSON.stringify(delta), 'utf8');
   return {
     hash: context.hash,
+    ...(context.version ? { version: context.version } : {}),
+    ...(context.contentAvailability ? { contentAvailability: context.contentAvailability } : {}),
+    ...(context.sourceSpanIds ? { sourceSpanIds: context.sourceSpanIds } : {}),
+    ...(context.sourceSpanIdsTruncated ? { sourceSpanIdsTruncated: true } : {}),
     ...(context.compacted === true ? { compacted: true } : {}),
     ...(context.fullMessages ? { fullMessages: context.fullMessages } : {}),
     ...(deltaBytes <= MAX_PERSISTED_INPUT_CONTEXT_BYTES || !sourceRange
@@ -3830,6 +3841,10 @@ function parseInputContext(value: unknown): CodexTranscriptInputContext | undefi
   const range = asRecord(context.deltaRange);
   return {
     hash: context.hash,
+    ...(typeof context.version === 'string' ? { version: context.version } : {}),
+    ...(typeof context.contentAvailability === 'string' ? { contentAvailability: context.contentAvailability } : {}),
+    ...(Array.isArray(context.sourceSpanIds) ? { sourceSpanIds: context.sourceSpanIds.filter((id): id is string => typeof id === 'string').slice(-256) } : {}),
+    ...(context.sourceSpanIdsTruncated === true ? { sourceSpanIdsTruncated: true } : {}),
     ...(context.compacted === true ? { compacted: true } : {}),
     ...(Array.isArray(context.delta) ? { delta: context.delta as JsonValue[] } : {}),
     ...(Array.isArray(context.fullMessages) ? { fullMessages: context.fullMessages as JsonValue[] } : {}),

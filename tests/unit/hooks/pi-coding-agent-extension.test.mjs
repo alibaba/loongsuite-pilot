@@ -999,7 +999,7 @@ describe('Pi compression lifecycle', () => {
     ];
     await runtime.emit('session_before_compact', { branchEntries: before, preparation: { tokensBefore: 200 } });
     vi.advanceTimersByTime(1000);
-    await runtime.emit('session_compact', { compactionEntry: { tokensBefore: 200 } });
+    await runtime.emit('session_compact', { compactionEntry: { id: 'c1', firstKeptEntryId: 'kept', tokensBefore: 200, summary: 's'.repeat(40) } });
     expect(readRecords().find(r => r['event.name'] === 'gen_ai.context.compress')).toMatchObject({
       'gen_ai.context.tokens_before': 120,
       'gen_ai.context.tokens_after': 30,
@@ -1012,7 +1012,10 @@ describe('Pi compression lifecycle', () => {
     await runtime.emit('turn_start', { turnIndex: 0, timestamp: Date.now() });
     await runtime.emit('context', { messages: [{ role: 'compactionSummary', summary: 'retained facts' }] });
     const request = readRecords().findLast(r => r['event.name'] === 'llm.request');
-    expect(request['gen_ai.input.messages']).toEqual([{ role: 'user', parts: [{ type: 'text', content: 'retained facts' }] }]);
+    expect(request['gen_ai.input.messages'][0].parts[0]).toMatchObject({ type: 'compaction', id: 'c1' });
+    expect(request['gen_ai.input.messages'][0].parts[0].content).toContain('<summary>\nretained facts\n</summary>');
+    expect(request).toMatchObject({ 'gen_ai.context.version': 'c1', 'gen_ai.context.replacement.boundary': 'replace',
+      'agent.pi.context.first_kept_entry_id': 'kept' });
   });
 
   it('records a real hook interval, clears the input snapshot and keeps manual work independent', async () => {

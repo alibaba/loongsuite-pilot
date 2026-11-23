@@ -266,10 +266,15 @@ function toolResultResponse(content) {
   return truncate(safeStringify(parts));
 }
 
-function canonicalMessage(message) {
+function canonicalMessage(message, compactionId) {
   if (!message || typeof message !== 'object') return null;
 
-  if (message.role === 'compactionSummary' || message.role === 'branchSummary') {
+  if (message.role === 'compactionSummary') {
+    return { role: 'user', parts: [{ type: 'compaction',
+      ...(typeof compactionId === 'string' ? { id: compactionId } : {}),
+      content: truncate(`The conversation history before this point was compacted into the following summary:\n\n<summary>\n${message.summary || ''}\n</summary>`) }] };
+  }
+  if (message.role === 'branchSummary') {
     return { role: 'user', parts: [{ type: 'text', content: truncate(message.summary || '') }] };
   }
 
@@ -338,11 +343,11 @@ function contextTextTokens(branch) {
   return Math.ceil(chars / 4);
 }
 
-function canonicalMessages(messages) {
+function canonicalMessages(messages, compactionId) {
   if (!Array.isArray(messages)) return [];
   return messages
     .slice(-MAX_MESSAGES)
-    .map(canonicalMessage)
+    .map(message => canonicalMessage(message, compactionId))
     .filter(Boolean);
 }
 
@@ -508,6 +513,10 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     compression: null,
     agentActive: false,
     compacted: false,
+    contextVersion: null,
+    contextPreviousVersion: null,
+    contextReplacementPending: false,
+    contextFirstKeptEntryId: null,
   };
 
   const resetSessionConfig = () => {
@@ -516,8 +525,18 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     state.captureContent = shouldCaptureContent(config, identity.agentType);
   };
 
-  pi.on('session_start', safeHandler('session_start', async () => {
+  pi.on('session_start', safeHandler('session_start', async (_event, ctx) => {
     state.compacted = false;
+    state.contextVersion = null;
+    state.contextPreviousVersion = null;
+    state.contextReplacementPending = false;
+    state.contextFirstKeptEntryId = null;
+    const installed = ctx.sessionManager.getBranch?.()?.findLast(entry => entry.type === 'compaction');
+    if (installed) {
+      state.compacted = true;
+      state.contextVersion = installed.id;
+      state.contextFirstKeptEntryId = installed.firstKeptEntryId || null;
+    }
     state.compression?.signal?.removeEventListener('abort', state.compression.onAbort);
     state.compression = null;
     state.agentActive = false;
@@ -565,6 +584,12 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     const entry = event.compactionEntry;
     const after = status === 'success' && pending.estimatedBefore !== undefined
       ? contextTextTokens(ctx.sessionManager.getBranch?.()) : undefined;
+    if (status === 'success') {
+      state.contextPreviousVersion = state.contextVersion || `${ctx.sessionManager.getSessionId()}:initial`;
+      state.contextVersion = entry?.id || pending.id;
+      state.contextFirstKeptEntryId = entry?.firstKeptEntryId || null;
+      state.contextReplacementPending = true;
+    }
     writeRecord({ ...pending.base, time_unix_nano: timestampNanos(end),
       observed_time_unix_nano: timestampNanos(),
       ...compressionIdentity(pending.base['gen_ai.session.id'], pending.id),
@@ -575,6 +600,13 @@ export function createPiTelemetryExtension(identityOptions = {}) {
         comparable: pending.estimatedBefore !== undefined, trigger: pending.trigger,
         windowSize: ctx.model?.contextWindow }),
       'gen_ai.context.compress.native_tokens_before': entry?.tokensBefore ?? pending.before,
+      ...(status === 'success' ? {
+        'gen_ai.context.version': state.contextVersion,
+        'gen_ai.context.previous_version': state.contextPreviousVersion,
+        'gen_ai.context.replacement.boundary': 'replace',
+        'gen_ai.context.content.availability': typeof entry?.summary === 'string' ? 'plaintext' : 'unavailable',
+        ...(state.contextFirstKeptEntryId ? { 'agent.pi.context.first_kept_entry_id': state.contextFirstKeptEntryId } : {}),
+      } : {}),
     });
     if (status === 'success') {
       state.compacted = true;
@@ -642,9 +674,15 @@ export function createPiTelemetryExtension(identityOptions = {}) {
       ...commonFields(ctx, state, runtime, state.requestStartedAt),
       'event.name': 'llm.request',
       ...(state.compacted ? { 'gen_ai.conversation.compacted': true } : {}),
+      'gen_ai.context.version': state.contextVersion || `${ctx.sessionManager.getSessionId()}:initial`,
+      ...(state.contextReplacementPending ? {
+        'gen_ai.context.previous_version': state.contextPreviousVersion,
+        'gen_ai.context.replacement.boundary': 'replace',
+        ...(state.contextFirstKeptEntryId ? { 'agent.pi.context.first_kept_entry_id': state.contextFirstKeptEntryId } : {}),
+      } : {}),
     };
     if (state.captureContent) {
-      const messages = canonicalMessages(event.messages);
+      const messages = canonicalMessages(event.messages, state.contextVersion);
       if (messages.length > 0) record['gen_ai.input.messages'] = messages;
       if (messages.length > 0) {
         const delta = appendedInputMessages(
@@ -673,6 +711,7 @@ export function createPiTelemetryExtension(identityOptions = {}) {
       if (tools.length > 0) record['gen_ai.tool.definitions'] = tools;
     }
     writeRecord(record);
+    state.contextReplacementPending = false;
   };
 
   pi.on('context', safeHandler('context', async (event, ctx) => {

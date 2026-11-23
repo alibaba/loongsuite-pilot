@@ -60,7 +60,11 @@ describe('context compression through the real flusher and SDK', () => {
     const llms = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
     expect(llms[1].startTime).toEqual([Math.floor((start + 3001) / 1000), ((start + 3001) % 1000) * 1000000]);
     expect(llms[1].attributes['gen_ai.conversation.compacted']).toBe(true);
-    expect(llms[1].attributes['gen_ai.input.messages']).toBeUndefined();
+    expect(JSON.parse(String(llms[1].attributes['gen_ai.input.messages']))).toEqual([
+      { role: 'user', parts: [{ type: 'compaction' }] },
+    ]);
+    expect(llms[1].attributes['gen_ai.context.version']).toBe('window');
+    expect(llms[1].attributes['gen_ai.context.content.availability']).toBe('opaque');
     expect(llms.map(s => s.attributes['gen_ai.usage.input_tokens'])).toEqual([100, 50]);
   });
 

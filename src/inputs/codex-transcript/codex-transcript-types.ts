@@ -6,8 +6,13 @@ export type CodexTerminalStatus = 'completed' | 'interrupted';
 export interface CodexTranscriptInputContext {
   /** Chain hash for the complete request context represented by this state. */
   hash: string;
-  /** Native rewrite is known, while its encrypted content cannot be reconstructed. */
+  /** The active context follows a confirmed native rewrite. */
   compacted?: boolean;
+  version?: string;
+  /** Observed request/tool spans in this active version, bounded to 256 IDs. */
+  sourceSpanIds?: string[];
+  sourceSpanIdsTruncated?: boolean;
+  contentAvailability?: string;
   /** Incremental messages required by the next LLM request. */
   delta?: JsonValue[];
   /** Full context is retained only while it remains below the configured limit. */
@@ -141,6 +146,8 @@ export interface CodexTranscriptCheckpoint {
   /** No-replay floor and next byte for normal event collection. Never rewound by fork probing. */
   scanOffset: number;
   activeTurn: CodexActiveTranscriptTurn | null;
+  /** Installed compacted context carried into later turns of this rollout. */
+  compactedContext?: CodexTranscriptInputContext;
   pendingTerminal: CodexPendingTerminalTurn | null;
   deferredTerminals?: CodexDeferredTerminalTurn[];
   /** Legacy terminal barriers; new collection writes null. */
@@ -176,6 +183,7 @@ export interface CodexTranscriptMeta {
   provider: string;
   baseInstructions?: string;
   toolDefinitions?: JsonValue;
+  contextWindowId?: string;
 }
 
 export interface CodexTranscriptUsage {
@@ -191,8 +199,11 @@ export interface CodexTranscriptTool {
   callId: string;
   name: string;
   input?: JsonValue;
+  /** Native provider arguments retained for effective post-compaction input. */
+  nativeInput?: JsonValue;
   startedAtMs: number;
   output?: JsonValue;
+  nativeOutput?: JsonValue;
   completedAtMs?: number;
 }
 
@@ -209,6 +220,19 @@ export interface CodexTranscriptStep {
   finalText?: string;
   /** Replace the append-only context before this wave. */
   contextResetId?: string;
+  contextReplacement?: CodexContextReplacement;
+  nativeAssistantMessages?: JsonValue[];
+  additionalInputMessages?: JsonValue[];
+}
+
+export interface CodexContextReplacement {
+  version: string;
+  previousVersion?: string;
+  operationId?: string;
+  messages?: JsonValue[];
+  contentAvailability: 'plaintext' | 'opaque' | 'partial' | 'unavailable';
+  retainedMessageIds: string[];
+  sampledThroughSequence?: number;
 }
 
 export interface CodexTranscriptCompression {
@@ -220,6 +244,7 @@ export interface CodexTranscriptCompression {
   /** Provider usage for the summarization request, distinct from context size. */
   inputTokens?: number;
   outputTokens?: number;
+  replacement?: CodexContextReplacement;
 }
 
 export interface CodexTranscriptSourceRecord {
@@ -269,6 +294,7 @@ export interface CodexExtractedTranscriptTurn {
   baseInstructions?: string;
   toolDefinitions?: JsonValue;
   steps: CodexTranscriptStep[];
+  contextWindowId?: string;
   compressions?: CodexTranscriptCompression[];
   /** Token samples that could not be tied to a completed response wave. */
   unmatchedTokenUsages: CodexTranscriptUsage[];

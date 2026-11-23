@@ -526,9 +526,34 @@ describe('CodexTranscriptInput', () => {
     expect(entryTimestampMs(requests[1])).toBe(Date.parse('2026-06-24T06:00:06.900Z'));
     expect(entryTimestampMs(requests[2])).toBe(Date.parse('2026-06-24T06:00:09.900Z'));
     expect(requests.slice(1).every(entry => entry['gen_ai.conversation.compacted'] === true)).toBe(true);
-    expect(requests.slice(1).every(entry => entry['gen_ai.input.messages'] === undefined)).toBe(true);
+    expect(requests.slice(1).every(entry => Array.isArray(entry['gen_ai.input.messages']))).toBe(true);
+    expect(requests.slice(1).map(entry => entry['gen_ai.context.version'])).toEqual(['compact-1', 'compact-2']);
+    expect(requests[2]['gen_ai.context.previous_version']).toBe('compact-1');
+    const firstSourceIds = compressed[0]['gen_ai.context.source_span_ids'] as string[];
+    expect(firstSourceIds).toContain(requests[0].span_id);
+    const secondSourceIds = compressed[1]['gen_ai.context.source_span_ids'] as string[];
+    expect(secondSourceIds).toContain(requests[1].span_id);
+    expect(secondSourceIds).not.toContain(requests[0].span_id);
     expect(JSON.stringify(entries)).not.toContain('private-encrypted-summary');
     expect(responsesForTurn(entries, 'turn-1').map(entry => entry['gen_ai.usage.input_tokens'])).toEqual([100, 120, 130]);
+    await restarted.stateStore.save();
+    const nextTurn = await createDormantInput(root);
+    await fs.appendFile(transcript, [
+      record('2026-06-24T06:00:12.000Z', 'event_msg', { type: 'task_started', turn_id: 'turn-2' }),
+      record('2026-06-24T06:00:12.100Z', 'response_item', { type: 'message', role: 'user',
+        content: [{ type: 'input_text', text: 'Continue from the summary' }] }),
+      record('2026-06-24T06:00:13.000Z', 'response_item', { type: 'message', role: 'assistant',
+        content: [{ type: 'output_text', text: 'continued' }] }),
+      record('2026-06-24T06:00:13.100Z', 'event_msg', tokenUsage(20, 2)),
+      record('2026-06-24T06:00:14.000Z', 'event_msg', { type: 'task_complete', turn_id: 'turn-2', last_agent_message: 'continued' }),
+    ].join('\n') + '\n');
+    await processTranscriptOnce(nextTurn.input, transcript);
+    await nextTurn.input.stop();
+    const nextRequest = nextTurn.entries.find(entry => entry['event.name'] === 'llm.request')!;
+    expect(nextRequest['gen_ai.context.version']).toBe('compact-2');
+    expect(nextRequest['gen_ai.conversation.compacted']).toBe(true);
+    expect(JSON.stringify(nextRequest['gen_ai.input.messages'])).toContain('compaction');
+    expect(JSON.stringify(nextRequest['gen_ai.input.messages_delta'])).toContain('Continue from the summary');
   });
 
   it('collects a known session terminal and all tool waves from an actual wakeup without a full rescan', async () => {

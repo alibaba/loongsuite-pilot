@@ -2306,9 +2306,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
       const record = byResponse.get(String(span.attributes['gen_ai.response.id']));
       if (!record) continue;
       for (const key of ['gen_ai.context.window_size', 'gen_ai.context.tokens_used',
-        'gen_ai.context.window_usage_pct', 'gen_ai.conversation.compacted']) {
+        'gen_ai.context.window_usage_pct', 'gen_ai.conversation.compacted',
+        'gen_ai.context.version', 'gen_ai.context.previous_version', 'gen_ai.context.replacement.boundary',
+        'gen_ai.context.content.availability', 'gen_ai.context.compress.id', 'gen_ai.context.source_span_ids',
+        'gen_ai.context.source.scope', 'gen_ai.context.source.complete', 'gen_ai.context.retained_message_ids',
+        'agent.codex.context.sampled_through_sequence', 'agent.pi.context.first_kept_entry_id']) {
         const value = record[key];
-        if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value) && value >= 0)) span.attributes[key] = value;
+        if (typeof value === 'string' || typeof value === 'boolean'
+          || (typeof value === 'number' && Number.isFinite(value) && value >= 0)
+          || (Array.isArray(value) && value.every(item => typeof item === 'string'))) {
+          span.attributes[key] = value as string | boolean | number | string[];
+        }
       }
     }
   }
