@@ -325,11 +325,13 @@ export interface AgentDefinition {
   /** Present only for `dsh-yaml-patch` agents. */
   dshYamlPatch?: DshYamlPatchConfig;
   input?: AgentInputConfig;
-  activityIndicator?: string | null;
+  activityIndicator?: AgentActivityIndicator | null;
   versionSource?: AgentVersionSource | null;
   /** 运行时要求（如 node:sqlite）与无该依赖时的 fallback 声明 */
   runtime?: AgentRuntimeConfig;
 }
+
+export type AgentActivityIndicator = string | { type: 'codexRollouts'; home: string };
 
 export type AgentVersionSource =
   | { type: 'jsonFile'; file: string; key: string }

@@ -4,10 +4,12 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 import { MetricsWriter } from '../../../src/metrics/metrics-writer.js';
+import { readActivityTime } from '../../../src/self-check/activity-probe.js';
 import { SelfCheckService, type SelfCheckInput } from '../../../src/self-check/self-check-service.js';
 import * as versions from '../../../src/self-check/version-resolver.js';
 import type { AgentDefinition } from '../../../src/types/deployment.js';
 import { getTodayDateString } from '../../../src/utils/fs-utils.js';
+import { loadDatabaseSync } from '../../../src/utils/node-sqlite.js';
 
 describe('collection self-check', () => {
   let root: string;
@@ -42,7 +44,7 @@ describe('collection self-check', () => {
   });
 
   async function nativeActivity(ms = clock - 10): Promise<void> {
-    const file = definitions[0].activityIndicator!;
+    const file = definitions[0].activityIndicator as string;
     await fs.writeFile(file, 'synthetic native activity');
     await fs.utimes(file, new Date(ms), new Date(ms));
   }
@@ -93,6 +95,54 @@ describe('collection self-check', () => {
     expect(alarms.serialize()).toHaveLength(1);
   });
 
+  it('detects an existing Codex rollout appended without a session index update', async () => {
+    const codexHome = path.join(root, '.codex');
+    const day = path.join(codexHome, 'sessions', '2025', '02', '03');
+    await fs.mkdir(day, { recursive: true });
+    const rollout = path.join(day, 'rollout-session-fixture.jsonl');
+    const outside = path.join(root, 'rollout-unrelated.jsonl');
+    await fs.writeFile(rollout, '{}\n');
+    await fs.writeFile(outside, '{}\n');
+    const beforeEligibility = new Date(clock - 1000);
+    await fs.utimes(rollout, beforeEligibility, beforeEligibility);
+    const Database = loadDatabaseSync();
+    if (!Database) throw new Error('Test requires unflagged node:sqlite');
+    const db = new Database(path.join(codexHome, 'state_5.sqlite'));
+    try {
+      db.exec('CREATE TABLE threads (rollout_path TEXT, updated_at INTEGER)');
+      const insert = db.prepare('INSERT INTO threads VALUES (?, ?)');
+      insert.run(rollout, 10);
+      insert.run(outside, 11);
+    } finally {
+      db.close();
+    }
+    const shippedDefinition: AgentDefinition = JSON.parse(await fs.readFile(
+      new URL('../../../agents.d/codex.json', import.meta.url), 'utf8',
+    ));
+    expect(shippedDefinition.activityIndicator).toEqual({ type: 'codexRollouts', home: '~/.codex' });
+    definitions[0].activityIndicator = { type: 'codexRollouts', home: codexHome };
+
+    await service.runCheck();
+    clock += 1100;
+    const recent = new Date(clock - 10);
+    await fs.utimes(outside, recent, recent);
+    await service.runCheck();
+    expect(alarms.serialize()).toEqual([]);
+    await fs.appendFile(rollout, '{}\n');
+    await fs.utimes(rollout, recent, recent);
+    await service.runCheck();
+    expect(alarms.serialize()).toMatchObject([
+      { alarm_type: 'SELF_CHECK_NEVER_COLLECTED_ALARM', input_name: 'codex' },
+    ]);
+  });
+
+  it('uses the legacy Codex index when the thread database is missing', async () => {
+    const index = path.join(root, 'session_index.jsonl');
+    await fs.writeFile(index, '{}\n');
+    await expect(readActivityTime({ type: 'codexRollouts', home: root }))
+      .resolves.toBe((await fs.stat(index)).mtimeMs);
+  });
+
   it('uses current definitions and suppresses the alert when another running input collected', async () => {
     const available = definitions.pop()!;
     await service.runCheck();
@@ -134,7 +184,7 @@ describe('collection self-check', () => {
     inputs.unshift({ id: 'qoder-trace', agentId: 'qoder', lastActiveTime: 0 });
     await service.runCheck();
     clock += 1100;
-    const indicator = definitions[1].activityIndicator!;
+    const indicator = definitions[1].activityIndicator as string;
     await fs.writeFile(indicator, 'synthetic native activity');
     await fs.utimes(indicator, new Date(clock - 10), new Date(clock - 10));
     await service.runCheck();

@@ -1,7 +1,10 @@
 {
   "id": "codex",
   "displayName": "Codex",
-  "activityIndicator": "~/.codex/session_index.jsonl",
+  "activityIndicator": {
+    "type": "codexRollouts",
+    "home": "~/.codex"
+  },
   "versionSource": {
     "type": "command",
     "command": "codex --version"
