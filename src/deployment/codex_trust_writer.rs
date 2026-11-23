@@ -778,6 +778,14 @@ fn remove_exact_trust_sections(
     content: &str,
     keys: &HashSet<String>,
 ) -> Result<String, InvalidCodexConfigError> {
+    remove_trust_sections(content, keys, &[])
+}
+
+fn remove_trust_sections(
+    content: &str,
+    keys: &HashSet<String>,
+    protected_lines: &[bool],
+) -> Result<String, InvalidCodexConfigError> {
     if keys.is_empty() {
         return Ok(content.to_string());
     }
@@ -788,8 +796,11 @@ fn remove_exact_trust_sections(
             continue;
         }
         validate_config(&lines[range.start + 1..range.end].join("\n"))?;
-        for slot in &mut keep[range.start..range.end] {
-            *slot = false;
+        for (offset, slot) in keep[range.start..range.end].iter_mut().enumerate() {
+            *slot = protected_lines
+                .get(range.start + offset)
+                .copied()
+                .unwrap_or(false);
         }
     }
     Ok(lines
@@ -838,13 +849,34 @@ pub(super) fn plan_remove_embedded_trust(
 ) -> Result<Option<String>, InvalidCodexConfigError> {
     let begin = format!("# BEGIN {marker} trust");
     let end = format!("# END {marker} trust");
-    let stripped = config_lines(before)
-        .into_iter()
-        .filter(|line| !line.editable || (line.text.trim() != begin && line.text.trim() != end))
-        .map(|line| line.text)
-        .collect::<Vec<_>>()
-        .join("\n");
-    let content = remove_exact_trust_sections(&stripped, &keys.iter().cloned().collect())?;
+    let is_marker =
+        |line: &ConfigLine| line.editable && (line.text.trim() == begin || line.text.trim() == end);
+    let keys = keys.iter().cloned().collect::<HashSet<_>>();
+    let has_retained_marked_keys = marked_trust_keys(before, marker)
+        .iter()
+        .any(|key| !keys.contains(key));
+    let content = if has_retained_marked_keys {
+        before.to_string()
+    } else {
+        config_lines(before)
+            .into_iter()
+            .filter(|line| !is_marker(line))
+            .map(|line| line.text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    // Marker comments can be inside a removed section's line range.
+    // Retain boundary lines so other registrations keep their provenance.
+    let protected_lines = config_lines(&content)
+        .iter()
+        .map(|line| {
+            let text = line.text.trim();
+            line.editable
+                && (text.starts_with("# BEGIN ") || text.starts_with("# END "))
+                && text.ends_with(" trust")
+        })
+        .collect::<Vec<_>>();
+    let content = remove_trust_sections(&content, &keys, &protected_lines)?;
     validate_config(&content)?;
     Ok((content != before).then_some(content))
 }

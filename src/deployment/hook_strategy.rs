@@ -1039,7 +1039,7 @@ fn orphaned_codex_trust_keys(
     }
     super::codex_trust_writer::marked_trust_keys(trust, marker)
         .into_iter()
-        .filter(|key| !occupied.contains(key))
+        .filter(|key| key.rsplitn(4, ':').nth(3) == Some(path) && !occupied.contains(key))
         .collect()
 }
 
@@ -2802,6 +2802,55 @@ impl DeployStrategy for HookStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_codex_clear_preserves_marked_trust_for_other_settings_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("codex");
+        let state = root.join("sdk");
+        let resources = root.join("package");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("hooks.json"), r#"{"hooks": {}}"#).unwrap();
+        let ours = format!("{}:stop:0:0", home.join("hooks.json").display());
+        let other = format!("{}:stop:0:0", root.join("other-hooks.json").display());
+        let config = home.join("config.toml");
+        let binary = resources.join("bin").join(sdk_hook_binary_name());
+        let (_, def) =
+            embedded_codex_definition(&home.join("hooks.json"), &config, &state, &binary, "cloud")
+                .unwrap();
+        let marker = def.hook.unwrap().trust_toml.unwrap().marker;
+        let entry = |key: &str, hash: &str| {
+            format!(
+                "[hooks.state.{}]\nenabled = true\ntrusted_hash = '{hash}'\n",
+                serde_json::to_string(key).unwrap(),
+            )
+        };
+        std::fs::write(
+            &config,
+            format!(
+                "# BEGIN {marker} trust\n{}{}# END {marker} trust\n",
+                entry(&ours, "own"),
+                entry(&other, "foreign"),
+            ),
+        )
+        .unwrap();
+        let before = inspect_embedded_codex_hooks(Some(&home), &state, &resources).unwrap();
+        reconcile_embedded_codex_hooks(&home, &state, &resources, None, || Ok(())).unwrap();
+        let remaining = std::fs::read_to_string(&config).unwrap();
+        let parsed: toml::Table = toml::from_str(&remaining).unwrap();
+        assert_eq!(
+            parsed["hooks"]["state"][&other]["trusted_hash"].as_str(),
+            Some("foreign")
+        );
+        assert!(
+            super::super::codex_trust_writer::marked_trust_keys(&remaining, &marker)
+                .contains(&other)
+        );
+        assert!(parsed["hooks"]["state"].get(&ours).is_none());
+        assert_eq!(before["trust_records"].as_array().unwrap().len(), 1);
+        assert_eq!(before["trust_records"][0]["key"], ours);
+    }
 
     #[test]
     fn codex_hook_transaction_restores_files_when_collection_update_fails() {
