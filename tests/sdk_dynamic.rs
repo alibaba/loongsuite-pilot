@@ -671,7 +671,9 @@ fn sdk_hook_command(
     event: &str,
     payload: &Value,
 ) -> std::process::Child {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"))
+    let binary = std::env::var_os("PILOT_TEST_SDK_HOOK")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook").into());
+    let mut child = Command::new(binary)
         .args([
             "sdk-hook",
             "--data-dir",
