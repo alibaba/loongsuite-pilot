@@ -397,6 +397,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['doubao-work']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners.doubao).toEqual({ enabled: true, pollInterval: 10_000 });
     });
 
     it('resolves the passive Doubao source override without changing other listeners', async () => {
@@ -412,7 +413,35 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'doubao' } } });
       const config = await loadConfig();
       expect(config.listeners['doubao-work']).toEqual({ enabled: true, pollInterval: 10_000, client: 'doubao' });
+      expect(config.listeners.doubao.enabled).toBe(false);
       expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('keeps explicit legacy selection while allowing an independent App listener', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'doubao-work' },
+        doubao: { enabled: true, pollInterval: 2000, logDir: '/synthetic/app/logs' } } });
+      const config = await loadConfig();
+      expect(config.listeners.doubao).toEqual({ enabled: true, pollInterval: 2000, logDir: '/synthetic/app/logs' });
+      expect(config.listeners['doubao-work'].client).toBe('doubao-work');
+    });
+
+    it.each([false, true])('does not add App to a prior installer selection with Work enabled=%s', async enabled => {
+      mockReadJsonFile.mockResolvedValueOnce({ agents: { 'doubao-work': { enabled } } });
+      expect((await loadConfig()).listeners.doubao.enabled).toBe(false);
+    });
+
+    it('honors an explicit App agent selection independently of Work', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: { 'doubao-work': { enabled: false }, doubao: { enabled: true } },
+      });
+      expect((await loadConfig()).listeners.doubao.enabled).toBe(true);
+    });
+
+    it('does not redirect the independent App listener to Work', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { doubao: { client: 'doubao-work' } } });
+      const config = await loadConfig();
+      expect(config.listeners.doubao.enabled).toBe(false);
+      expect(config.listeners['doubao-work'].enabled).toBe(true);
     });
 
     it('disables only the Doubao listener for an invalid client instead of collecting another product', async () => {
@@ -2473,6 +2502,28 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.interceptor).toEqual({ mode: 'none' });
       expect(config.mask).toEqual(mask);
+    });
+  });
+
+  describe('Antigravity family default listeners', () => {
+    it('enables the shared App and IDE listener and the CLI listener with 30-second polling', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      const config = await loadConfig();
+      expect(config.listeners.antigravity).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['antigravity-cli']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners).not.toHaveProperty('antigravity-ide');
+    });
+
+    it('respects per-variant Antigravity listener overrides from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        listeners: {
+          antigravity: { enabled: false },
+          'antigravity-cli': { enabled: true, pollInterval: 5_000 },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.listeners.antigravity).toEqual({ enabled: false, pollInterval: 30_000 });
+      expect(config.listeners['antigravity-cli']).toEqual({ enabled: true, pollInterval: 5_000 });
     });
   });
 });

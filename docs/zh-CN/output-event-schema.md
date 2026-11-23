@@ -200,7 +200,7 @@ IDE 委派 transcript 单行及所需工具行合计各有 16 MiB 上限；超�
 
 子请求的 SQLite 消息元数据通过同一只读快照分页读取，单请求最多 4096 行、归一化元数据最多 4 MiB，单条及全部工具元数据各最多 16 MiB。超过上限时，已确认的委派仍上报 invoke 和已实际交付的 result；子运行保持待定，日志记录原因及相关 ID，并以较低频率重试。源数据恢复到上限内后可继续采集。
 
-工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
+工作目录自动采集覆盖 Antigravity（App、新 IDE 和 CLI）、Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
 
 ## System Instructions（系统提示词）
 
@@ -265,7 +265,7 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 （`received`、`ended`、`error` 或 `cancelled`）。客户端结束不表示业务成功，也不是模型 finish reason。
 见[支持范围与配置](doubao-work.md)。
 
-新增事件及导出的 OTLP Span 包含 `loongsuite.doubao_work.client`，取值仅为 `doubao-work`（豆包工作）或 `doubao`（豆包 App 工作模式）。该字段区分来源产品，统一 `gen_ai.agent.type=doubao-work` 保持不变；它不表示模型或提供商调用身份。历史记录缺少该字段时保持未知。
+新增事件及导出的 OTLP Span 包含 `loongsuite.doubao_work.client`，取值仅为 `doubao-work`（豆包工作）或 `doubao`（豆包 App 工作模式）。新事件的 `gen_ai.agent.type` 和 `gen_ai.framework` 同样按产品区分；两者共用解析协议，不表示已获得模型或提供商调用身份。历史记录缺少来源字段时保持未知，不重写旧身份。
 
 本地工具产生配对的 `tool.call` / `tool.result` 日志，并保留真实起止。可唯一关联本次 trajectory 时，按 assistant 消息重建 STEP → LLM / TOOL：输入为此前可见消息，输出包含文本和 tool_calls，并行工具共享 STEP。LLM 以及缺少时间的 trajectory 工具使用客户端提交、工具及结束边界推算时间，中间未知边界线性分配；它们会影响 CMS 默认 LLM 调用次数和耗时统计，不代表精确模型计时或实际模型请求数。模型、usage、原生 response ID 与模型 finish reason 缺失时省略。
 
