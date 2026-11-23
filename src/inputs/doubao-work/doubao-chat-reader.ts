@@ -398,4 +398,3 @@ function chatText(blocks: unknown): string | undefined {
   const text = parts.join('\n');
   return Buffer.byteLength(text) <= MAX_CONTENT_BYTES ? text : undefined;
 }
-
