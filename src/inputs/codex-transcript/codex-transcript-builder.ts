@@ -140,6 +140,7 @@ export function buildCodexTranscriptSegment(
       timestamp: compression.completedAtMs,
       'event.id': hashId([turn.sessionId, turn.transcriptTurnId, 'compression', compression.id], 32),
       'event.name': 'gen_ai.context.compress',
+      'gen_ai.agent.name': 'codex',
       'gen_ai.context.compress.id': compression.id,
       'gen_ai.context.compress.status': 'success',
       ...(compression.startedAtMs !== undefined ? {

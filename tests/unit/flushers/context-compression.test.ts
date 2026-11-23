@@ -54,6 +54,7 @@ describe('context compression through the real flusher and SDK', () => {
     const steps = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'STEP');
     expect(steps.map(s => s.attributes['gen_ai.step.id'])).toEqual(['session:turn:s1', 'session:turn:s2']);
     expect(compression.parentSpanId).toBe(agent.spanContext().spanId);
+    expect(compression.attributes['gen_ai.agent.name']).toBe('codex');
     expect(new Set(spans.map(s => s.spanContext().traceId)).size).toBe(1);
     expect(compression.duration).toEqual([2, 701000000]);
     const llms = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
