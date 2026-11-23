@@ -30,6 +30,13 @@ export interface ZCodeRolloutInputOptions extends Omit<InputOptions, 'stateStore
   rolloutDir?: string;
 }
 
+interface RolloutModelLine {
+  record: Record<string, unknown>;
+  sessionId: string;
+  turnId: string;
+  nextRecord?: Record<string, unknown>;
+}
+
 /**
  * ZCode rollout JSONL input — V3 main data source.
  *
@@ -159,11 +166,9 @@ export class ZCodeRolloutInput extends BaseInput {
   /**
    * Convert a batch of rollout `model_io` lines into AgentActivityEntry records.
    *
-   * Batch (not per-line) because tool.result pairing requires cross-batch state:
-   * tool results for line N's toolCalls live in line N+1's
-   * request.messages[role=tool]. When line N is the last line of a batch (no
-   * nextRecord), the toolCalls are buffered to state and paired when the next
-   * batch's first line arrives.
+   * Tool results live in the next model request of the same turn. Other
+   * records may be interleaved. A turn's last request in each batch keeps
+   * its pending tool calls in state until that turn continues.
    *
    * STEP↔LLM 1:1 attribution (iter 6 fix):
    *   - Each rollout line carries a unique `requestId` per LLM call within a
@@ -183,34 +188,28 @@ export class ZCodeRolloutInput extends BaseInput {
    * be paired with a tool result message arriving in batch K+1.
    */
   buildEntriesFromRolloutLines(lines: Record<string, unknown>[]): AgentActivityEntry[] {
-    const allEntries: AgentActivityEntry[] = [];
+    const modelLines: RolloutModelLine[] = [];
+    const lastLineByTurn = new Map<string, RolloutModelLine>();
+    for (const record of lines) {
+      if (record.type !== 'model_io') continue;
+      const sessionId = str(record.sessionId) ?? str(record.session_id);
+      const turnId = str(record.turnId) ?? str(record.turn_id);
+      if (!sessionId || !turnId) continue;
 
-    // Flush pending toolCalls from previous batches using this batch's first
-    // line. The first line's request.messages[role=tool] holds tool results
-    // produced for the previous batch's last-line toolCalls.
-    if (lines.length > 0) {
-      const first = lines[0];
-      const fsid = str(first.sessionId) ?? str(first.session_id);
-      const ftid = str(first.turnId) ?? str(first.turn_id);
-      if (fsid && ftid && first.type === 'model_io') {
-        allEntries.push(...this.flushPendingToolCalls(fsid, ftid, first));
-      }
+      const key = JSON.stringify([sessionId, turnId]);
+      const previous = lastLineByTurn.get(key);
+      if (previous) previous.nextRecord = record;
+      const line = { record, sessionId, turnId };
+      modelLines.push(line);
+      lastLineByTurn.set(key, line);
     }
 
-    for (let i = 0; i < lines.length; i++) {
-      const record = lines[i];
-      if (record.type !== 'model_io') continue;
-      const sid = str(record.sessionId) ?? str(record.session_id) ?? '';
-      const tid = str(record.turnId) ?? str(record.turn_id) ?? '';
-      const isLastInBatch = i + 1 >= lines.length;
-      const nextRecord = !isLastInBatch ? lines[i + 1] : undefined;
-
-      if (isLastInBatch && this.lineHasToolCalls(record)) {
-        // Last line of batch with toolCalls: emit STEP+LLM but buffer the
-        // toolCalls to state — they'll be paired with the next batch's first
-        // line (or emitted as placeholders if no next batch arrives).
+    const allEntries: AgentActivityEntry[] = [];
+    for (const { record, sessionId, turnId, nextRecord } of modelLines) {
+      allEntries.push(...this.flushPendingToolCalls(sessionId, turnId, record));
+      if (!nextRecord && this.lineHasToolCalls(record)) {
         allEntries.push(...this.buildEntriesFromRolloutLine(record, undefined, { skipToolCalls: true }));
-        this.bufferPendingToolCalls(sid, tid, record);
+        this.bufferPendingToolCalls(sessionId, turnId, record);
       } else {
         allEntries.push(...this.buildEntriesFromRolloutLine(record, nextRecord));
       }
@@ -398,7 +397,7 @@ export class ZCodeRolloutInput extends BaseInput {
    * Convert one rollout `model_io` line into multiple AgentActivityEntry records:
    * STEP envelope + llm.request + llm.response + tool.call/result per toolCalls[].
    *
-   * `nextRecord` is the next rollout line in the same file, used to pair
+   * `nextRecord` is the next model request of this session and turn, used to pair
    * tool.call → tool.result (from next line's request.messages[role=tool]) and
    * to derive non-zero TOOL span duration (end = next line startedAt - 1ns).
    *

@@ -159,6 +159,59 @@ test('resumes a partially written rollout record after restart', async () => {
   ]));
 });
 
+test.each([false, true])('pairs tool results only with the original rollout turn, restart=%s', async restart => {
+  const sessionId = 'sess_interleaved';
+  const turnId = 'turn_original';
+  const toolCallId = 'call-shared';
+  const toolMessage = (content: string) => ({
+    messages: [{ role: 'tool', toolCallId, toolName: 'Read', content }],
+  });
+  writeLine(sessionId, baseModelIoLine({
+    sessionId, turnId, requestId: 'request-tool',
+    response: { finishReason: 'tool_calls', toolCalls: [{ id: toolCallId, name: 'Read' }] },
+  }));
+  let input = new ZCodeRolloutInput({ stateStore, rolloutDir });
+  if (restart) {
+    const initial = await input['collect']();
+    expect(initial.map(entry => entry['event.name'])).toContain('llm.response');
+    expect(initial.map(entry => entry['event.name'])).not.toContain('tool.result');
+    await stateStore.save();
+    const reloaded = new StateStore(path.join(tmpRoot, 'state.json'));
+    await reloaded.load();
+    input = new ZCodeRolloutInput({ stateStore: reloaded, rolloutDir });
+    writeLine(sessionId, { type: 'metadata', sessionId, turnId });
+  }
+  writeLine(sessionId, baseModelIoLine({
+    sessionId, turnId: 'turn_interleaved', requestId: 'other-request',
+    request: toolMessage('other turn result'),
+  }));
+  if (restart) {
+    const interleaved = await input['collect']();
+    expect(interleaved.map(entry => entry['event.name'])).not.toContain('tool.result');
+  }
+  writeLine(sessionId, { type: 'metadata', sessionId, turnId });
+  writeLine(sessionId, baseModelIoLine({
+    sessionId, turnId, requestId: 'request-answer',
+    startedAt: '2026-07-13T02:39:32.000Z',
+    completedAt: '2026-07-13T02:39:33.000Z',
+    request: toolMessage('original turn result'),
+  }));
+
+  const entries = await input['collect']();
+  const calls = entries.filter(entry => entry['event.name'] === 'tool.call');
+  const results = entries.filter(entry => entry['event.name'] === 'tool.result');
+  expect(calls).toHaveLength(1);
+  expect(results).toEqual([expect.objectContaining({
+    'gen_ai.session.id': sessionId,
+    'gen_ai.turn.id': turnId,
+    'gen_ai.step.id': `${turnId}:request-tool`,
+    'gen_ai.tool.call.id': toolCallId,
+    'gen_ai.tool.call.result': 'original turn result',
+    span_id: calls[0]?.span_id,
+  })]);
+  expect(await input['collect']()).toEqual([]);
+});
+
 // ─── scenario #2: multi-attempt (streaming recovery → multiple STEPs) ───
 
 describe('ZCodeRolloutInput: multi-attempt (spec §1.5 #2)', () => {
