@@ -716,18 +716,24 @@ function Ensure-ManagedNode {
 
 function Ensure-NodeModules {
     param([string]$AppVersion = "latest")
-    $platform = Get-ManagedNodePlatform
-    if (-not $platform) { return $false }
+    # Match the selected Node, which can be an emulated system runtime.
+    if (-not $script:NODE_BIN) { return $false }
+    try {
+        $arch = (& $script:NODE_BIN -p 'process.arch' 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or $arch -notin @('arm64', 'x64')) { return $false }
+    } catch {
+        return $false
+    }
 
     $modulesDir = Join-Path $script:PERMANENT_DIR "node_modules"
     $marker = Join-Path $modulesDir ".pilot-modules-version"
-    $stamp = "$AppVersion $($platform.Os) $($platform.Arch)"
+    $stamp = "$AppVersion win $arch"
     if ((Test-Path $modulesDir) -and (Test-Path $marker)) {
         $existing = (Get-Content $marker -ErrorAction SilentlyContinue | Out-String).Trim()
         if ($existing -eq $stamp) { return $true }
     }
 
-    $archive = "node-modules-$($platform.Os)-$($platform.Arch).tar.gz"
+    $archive = "node-modules-win-$arch.tar.gz"
     $base = $script:NODE_MODULES_BASE.TrimEnd('/') + "/$AppVersion"
     # ASCII temp root: the archive is unpacked with tar.exe, which cannot see a
     # non-ASCII path (see Get-PilotAsciiTempRoot). Move-Item below lands it in the
@@ -736,7 +742,7 @@ function Ensure-NodeModules {
     try {
         $tmp = Join-Path (Get-PilotAsciiTempRoot) ("pilot-node-modules-" + [guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Path $tmp -Force -ErrorAction Stop | Out-Null
-        Msg "==> 下载预编译 node_modules (win-$($platform.Arch), app v$AppVersion)..." "==> Downloading prebuilt node_modules (win-$($platform.Arch), app v$AppVersion)..."
+        Msg "==> 下载预编译 node_modules (win-$arch, app v$AppVersion)..." "==> Downloading prebuilt node_modules (win-$arch, app v$AppVersion)..."
         $archivePath = Join-Path $tmp $archive
         $shasumsPath = Join-Path $tmp "SHASUMS256.txt"
         if (-not (Invoke-ManagedNodeDownload "$base/$archive" $archivePath)) { return $false }

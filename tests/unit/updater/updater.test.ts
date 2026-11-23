@@ -730,11 +730,18 @@ describe('Updater', () => {
       ]);
     });
 
-    it('provisions the managed Windows ARM64 runtime through the verified ZIP path', async () => {
+    it.each([
+      { processArch: 'arm64', architecture: 'ARM64', nativeArchitecture: '' },
+      { processArch: 'x64', architecture: 'AMD64', nativeArchitecture: 'ARM64' },
+    ])('provisions the managed Windows ARM64 runtime from $processArch Node', async ({
+      processArch, architecture, nativeArchitecture,
+    }) => {
       const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
       const originalArch = Object.getOwnPropertyDescriptor(process, 'arch')!;
       Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'win32' });
-      Object.defineProperty(process, 'arch', { ...originalArch, value: 'arm64' });
+      Object.defineProperty(process, 'arch', { ...originalArch, value: processArch });
+      vi.stubEnv('PROCESSOR_ARCHITECTURE', architecture);
+      vi.stubEnv('PROCESSOR_ARCHITEW6432', nativeArchitecture);
       try {
         const archive = 'node-v22.22.2-win-arm64.zip';
         const digest = 'a'.repeat(64);
@@ -770,6 +777,21 @@ describe('Updater', () => {
         Object.defineProperty(process, 'platform', originalPlatform);
         Object.defineProperty(process, 'arch', originalArch);
       }
+    });
+
+    it('puts the selected managed Node first for npm fallback even when it is already on PATH', async () => {
+      setupForDownload();
+      const managedDir = path.join(tmpDir, 'runtime', 'managed');
+      const systemDir = path.join(tmpDir, 'system');
+      vi.stubEnv('PATH', [systemDir, managedDir].join(path.delimiter));
+      const updater = new Updater(makeConfig(), tmpDir);
+      vi.spyOn(updater as any, 'ensureManagedNode').mockResolvedValue(path.join(managedDir, 'node'));
+      vi.spyOn(updater as any, 'ensureNodeModules').mockResolvedValue(false);
+
+      await updater.check();
+
+      const npm = mockExecFile.mock.calls.find(([command]) => command === 'npm');
+      expect(npm?.[2].env.PATH.split(path.delimiter)).toEqual([managedDir, systemDir]);
     });
 
     it('adopts the managed node runtime + prebuilt modules and pins node-bin', async () => {
