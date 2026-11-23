@@ -135,7 +135,7 @@ describe('TraeAgentTrajectoryInput - incremental dedup (P0-2)', () => {
     expect(stamped.length).toBe(second.length);
   });
 
-  test('truncation (size shrunk) clears seen set + sets sessionReset on every emitted record', async () => {
+  test.each([false, true])('truncation clears the seen set and marks reset (atomic replacement: %s)', async atomic => {
     const input = new TraeAgentTrajectoryInput({
       stateStore,
       trajectoryFile,
@@ -149,7 +149,9 @@ describe('TraeAgentTrajectoryInput - incremental dedup (P0-2)', () => {
     const json = JSON.parse(await fs.readFile(trajectoryFile, 'utf8'));
     json.agent_steps = json.agent_steps.slice(0, 3);
     json.llm_interactions = json.llm_interactions.slice(0, 3);
-    await fs.writeFile(trajectoryFile, JSON.stringify(json, null, 2));
+    const target = atomic ? `${trajectoryFile}.tmp` : trajectoryFile;
+    await fs.writeFile(target, JSON.stringify(json, null, 2));
+    if (atomic) await fs.rename(target, trajectoryFile);
 
     const second = await collectAndQueue(input);
     // 3 LLM.req + 3 LLM.resp + 3 TOOL.call + 3 TOOL.result = 12

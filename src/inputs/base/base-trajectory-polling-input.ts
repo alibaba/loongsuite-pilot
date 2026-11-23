@@ -46,9 +46,9 @@ const MAX_CHANGED_SNAPSHOTS_PER_POLL = 16;
  *     Switching A -> B -> A therefore restores A instead of clearing it.
  *   - Length-only comparisons (`len(agent_steps)`) are explicitly forbidden:
  *     the dedup key is the 1-based monotonic `step_number` within each run.
- *   - When one run's file fingerprint (inode+size+mtime) indicates truncation
- *     or replacement on the same path, only that run's seen set is cleared and
- *     the next emitted batch is stamped as a session reset.
+ *   - When a snapshot at the same path rewinds the run, clear only that run's
+ *     seen set and stamp the next emitted batch as a session reset. An atomic
+ *     replacement that still contains the logical run's seen steps can continue.
  */
 export abstract class BaseTrajectoryPollingInput extends BaseInput {
   readonly collectionMethod = CollectionMethod.LogWatchPolling;
@@ -247,9 +247,9 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
     // Truncation is meaningful only for the same logical run observed through
     // the same physical file. Switching A -> B -> A must restore A's checkpoint,
     // not clear it merely because B was processed most recently.
-    const samePhysicalFile = !checkpoint?.lastFile || checkpoint.lastFile === trajectoryFile;
-    if (prevFingerprint && prevFingerprint !== currentFp && samePhysicalFile) {
-      const truncated = this.isTruncation(prevFingerprint, currentFp, stat);
+    const sameSourcePath = !checkpoint?.lastFile || checkpoint.lastFile === trajectoryFile;
+    if (prevFingerprint && prevFingerprint !== currentFp && sameSourcePath) {
+      const truncated = this.isTruncation(prevFingerprint, currentFp, seenStepNumbers, currentRunId ? parsed : undefined);
       if (truncated) {
         this.logger.info('trajectory truncated or replaced, resetting run checkpoint', {
           file: trajectoryFile,
@@ -489,22 +489,25 @@ export abstract class BaseTrajectoryPollingInput extends BaseInput {
     return `${inode}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.dev}`;
   }
 
-  /**
-   * Heuristic for "did the trajectory file get truncated or replaced out from
-   * under us". Default rule:
-   *   - size shrank ⇒ truncation
-   *   - inode changed (and inode is non-zero on both sides) ⇒ file replaced
-   *   - size same or grew + mtime newer ⇒ normal append-style overwrite; NOT a reset
-   */
-  protected isTruncation(prevFp: string, currentFp: string, _stat: fsSync.Stats): boolean {
+  private isTruncation(
+    prevFp: string,
+    currentFp: string,
+    seenStepNumbers: ReadonlySet<number>,
+    sameRunSnapshot: TrajectoryJson | undefined,
+  ): boolean {
     const [prevInodeStr, prevSizeStr] = prevFp.split(':');
     const [curInodeStr, curSizeStr] = currentFp.split(':');
     const prevInode = Number(prevInodeStr);
     const curInode = Number(curInodeStr);
     const prevSize = Number(prevSizeStr);
     const curSize = Number(curSizeStr);
-    if (curSize < prevSize) return true;
-    if (prevInode !== 0 && curInode !== 0 && prevInode !== curInode) return true;
+    const replaced = prevInode > 0 && curInode > 0 && prevInode !== curInode;
+    if (!replaced || !Array.isArray(sameRunSnapshot?.agent_steps)) return replaced || curSize < prevSize;
+    // An atomic rewrite can change both inode and size without rewinding the run.
+    const snapshotSteps = new Set(sameRunSnapshot.agent_steps.map(step => step?.step_number));
+    for (const seen of seenStepNumbers) {
+      if (!snapshotSteps.has(seen)) return true;
+    }
     return false;
   }
 

@@ -482,6 +482,45 @@ test('restores Trae steps from disk and exports one trace when finalization arri
 });
 
 describe('TraeAgentTrajectoryInput - P1-3 run identity reset (same path)', () => {
+  test('keeps the logical run checkpoint when the snapshot is replaced atomically', async () => {
+    const file = path.join(tmpDir, 'trajectory.json');
+    const replacement = path.join(tmpDir, 'trajectory.tmp');
+    const statePath = path.join(tmpDir, 'state.json');
+    const startTime = '2026-08-25T10:00:17.058504';
+    const openInput = async () => {
+      const stateStore = new StateStore(statePath);
+      await stateStore.load();
+      const input = new TraeAgentTrajectoryInput({ stateStore, trajectoryFile: file, converterPath: CONVERTER_PATH });
+      return { input, stateStore };
+    };
+    const replace = async (snapshot: string) => {
+      await fs.writeFile(replacement, snapshot);
+      await fs.rename(replacement, file);
+    };
+
+    await fs.writeFile(file, inProgress(1, startTime));
+    const first = await openInput();
+    const emitted = await collectAndQueue(first.input);
+    expect(emitted).toHaveLength(4);
+    await first.stateStore.save();
+
+    await replace(inProgress(3, startTime));
+    const resumed = await openInput();
+    const continued = await collectAndQueue(resumed.input);
+    expect(continued).toHaveLength(8);
+    expect(continued.every(entry => entry['gen_ai.session.id'] === emitted[0]['gen_ai.session.id'])).toBe(true);
+    expect(continued.some(entry => entry['agent.trajectory.session_reset'] === true)).toBe(false);
+    expect(new Set([...emitted, ...continued].map(entry => entry['event.id'])).size).toBe(12);
+
+    const finalizedSnapshot = JSON.stringify(JSON.parse(truncated(3, startTime)));
+    await replace(finalizedSnapshot);
+    const final = await collectAndQueue(resumed.input);
+    expect(final.map(entry => [entry['event.name'], entry['gen_ai.turn.end']])).toEqual([['other', true]]);
+
+    await replace(finalizedSnapshot);
+    expect(await collectAndQueue(resumed.input)).toEqual([]);
+  });
+
   test('closes an unfinished old run before a new run overwrites the same file', async () => {
     const file = path.join(tmpDir, 'trajectory.json');
     await fs.writeFile(file, inProgress(3, '2026-08-25T10:00:17.058504'));
