@@ -197,7 +197,9 @@ fn shell_rejects_bad_pointer_and_missing_binary_without_protocol_noise() {
     let hooks = fixture(root.path());
     fs::write(hooks.join("pilot-bin"), "/missing/native-binary\n").unwrap();
     let mut command = Command::new("/bin/bash");
-    command.arg(hooks.join("qwen-code-cli-loongsuite-pilot-hook.sh"));
+    command
+        .arg(hooks.join("qwen-code-cli-loongsuite-pilot-hook.sh"))
+        .arg("stop");
     let output = execute(command, root.path(), b"{}");
     assert!(output.status.success());
     assert_eq!(output.stdout, b"{}\n");
@@ -205,7 +207,9 @@ fn shell_rejects_bad_pointer_and_missing_binary_without_protocol_noise() {
     assert!(!hooks.parent().unwrap().join("state").exists());
     fs::remove_file(hooks.join("pilot-bin")).unwrap();
     let mut command = Command::new("/bin/bash");
-    command.arg(hooks.join("qwen-code-cli-loongsuite-pilot-hook.sh"));
+    command
+        .arg(hooks.join("qwen-code-cli-loongsuite-pilot-hook.sh"))
+        .arg("stop");
     let output = execute(command, root.path(), b"{}");
     assert_eq!(output.stdout, b"{}\n");
     assert!(!output.stderr.is_empty());
