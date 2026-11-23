@@ -146,6 +146,11 @@ async fn cleanup_l173_l176_l183_real_native_uninstall_cleans_every_shipped_hook_
                 Some(f.data.join("hooks").to_string_lossy().into_owned()),
                 Some(f.data.join("logs").to_string_lossy().into_owned()),
             ));
+            let strategy = if id == "codex" {
+                strategy.with_resource_roots(&f.candidate, &f.data)
+            } else {
+                strategy
+            };
             let deployed =
                 tokio::time::timeout(Duration::from_secs(5), strategy.deploy_hooks(&def))
                     .await

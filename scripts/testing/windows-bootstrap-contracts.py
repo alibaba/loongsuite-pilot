@@ -60,8 +60,8 @@ def run_case(shell, constrained, operation, repo, root, timeout):
         hooks = case / "hooks"
         (hooks / "shared").mkdir(parents=True)
         shutil.copyfile(repo / "assets/hooks/shared/native.ps1", hooks / "shared/native.ps1")
-        shutil.copyfile(repo / "assets/hooks/codex-loongsuite-pilot-hook.ps1", hooks / "codex-loongsuite-pilot-hook.ps1")
-        source += "& " + quote(hooks / "codex-loongsuite-pilot-hook.ps1") + " stop\n"
+        shutil.copyfile(repo / "assets/hooks/qwen-code-cli-loongsuite-pilot-hook.ps1", hooks / "qwen-code-cli-loongsuite-pilot-hook.ps1")
+        source += "& " + quote(hooks / "qwen-code-cli-loongsuite-pilot-hook.ps1") + " stop\n"
     script = case / "fixture.ps1"
     script.write_text("\ufeff" + source, encoding="utf-8")
     env = environment(case)

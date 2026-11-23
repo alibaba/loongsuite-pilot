@@ -71,7 +71,8 @@ impl Codex {
         let strategy = HookStrategy::new(HookManager::new(
             Some(f.data.join("hooks").to_string_lossy().into_owned()),
             Some(f.data.join("logs").to_string_lossy().into_owned()),
-        ));
+        ))
+        .with_resource_roots(&f.candidate, &f.data);
         let deployed = tokio::time::timeout(Duration::from_secs(15), strategy.deploy_hooks(&def))
             .await
             .unwrap();
@@ -109,7 +110,7 @@ async fn cleanup_l490_l504_l512_l517_actual_codex_uninstall_keeps_mixed_third_pa
     assert!(pilot["command"]
         .as_str()
         .unwrap()
-        .contains("codex-loongsuite-pilot-hook"));
+        .contains("loongsuite-pilot-sdk-hook"));
     let cached =
         c.f.root
             .path()
@@ -185,7 +186,8 @@ async fn cleanup_l490_l504_l512_l517_actual_codex_uninstall_keeps_mixed_third_pa
     let strategy = HookStrategy::new(HookManager::new(
         Some(c.f.data.join("hooks").to_string_lossy().into_owned()),
         Some(c.f.data.join("logs").to_string_lossy().into_owned()),
-    ));
+    ))
+    .with_resource_roots(&c.f.candidate, &c.f.data);
     let deploy_before = fs::read(&c.settings).unwrap();
     let deploy_trust_before = fs::read(&c.trust).unwrap();
     let deploy = tokio::time::timeout(

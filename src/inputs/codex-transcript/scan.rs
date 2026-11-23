@@ -12,7 +12,16 @@ use super::extractor::extract_codex_transcript_meta;
 use super::utils::string_value;
 
 pub const READ_CHUNK_SIZE: usize = 1024 * 1024;
+const TAIL_WITNESS_BYTES: usize = 64;
 pub const MAX_JSONL_RECORD_BYTES: usize = 128 * 1024 * 1024;
+
+/// Keep the last bytes across short reads, including a short final chunk.
+pub(super) fn extend_tail_witness(witness: &mut Vec<u8>, bytes: &[u8]) {
+    let suffix = &bytes[bytes.len().saturating_sub(TAIL_WITNESS_BYTES)..];
+    let discard = (witness.len() + suffix.len()).saturating_sub(TAIL_WITNESS_BYTES);
+    witness.drain(..discard);
+    witness.extend_from_slice(suffix);
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileVersion {
@@ -241,8 +250,7 @@ pub async fn scan_json_lines(
         .await?;
     stats.opened_version = Some(original_version);
     let mut first = Some(first);
-    let mut last_anchor = [0_u8; 64];
-    let mut last_anchor_len = 0;
+    let mut last_anchor = Vec::with_capacity(64);
     let mut position = start_offset;
     let mut pending = Vec::<(std::sync::Arc<Vec<u8>>, usize, usize)>::new();
     let mut pending_start = start_offset;
@@ -265,9 +273,7 @@ pub async fn scan_json_lines(
         if read == 0 {
             break;
         }
-        let anchor = &chunk[read.saturating_sub(last_anchor.len())..read];
-        last_anchor[..anchor.len()].copy_from_slice(anchor);
-        last_anchor_len = anchor.len();
+        extend_tail_witness(&mut last_anchor, &chunk[..read]);
         let chunk = std::sync::Arc::new(chunk);
         let chunk_start = position;
         position += read as i64;
@@ -369,7 +375,7 @@ pub async fn scan_json_lines(
             stats.incomplete_tail = Some(IncompleteJsonlTail {
                 start_offset: pending_start,
                 end_offset: position,
-                anchor: last_anchor[..last_anchor_len].to_vec(),
+                anchor: last_anchor,
                 version,
             });
         }
@@ -474,36 +480,66 @@ pub async fn last_complete_jsonl_offset(
     Ok(0)
 }
 
-pub async fn read_json_line_at(
+#[path = "owner_json.rs"]
+mod owner_json;
+
+pub async fn read_owner_record_at(
     file_path: &str,
     offset: i64,
     runtime: Option<&InputRuntime>,
 ) -> anyhow::Result<Option<Map<String, Value>>> {
-    let mut file = crate::utils::source_access::open_async(file_path).await?;
-    let mut chunks: Vec<u8> = Vec::new();
-    let mut position = offset.max(0);
-    for _ in 0..16 {
-        let mut buffer = vec![0u8; 64 * 1024];
-        file.seek(SeekFrom::Start(position as u64)).await?;
-        let started = InputRuntimeAccumulator::now();
-        let bytes_read = file.read(&mut buffer).await?;
-        observe_read(runtime, bytes_read as u64, buffer.len() as u64, started);
-        if bytes_read == 0 {
-            break;
+    let started = InputRuntimeAccumulator::now();
+    let (record, reads) = crate::utils::source_access::open_with(file_path, move |mut file| {
+        file.seek(SeekFrom::Start(offset.max(0) as u64))?;
+        let mut remaining = MAX_JSONL_RECORD_BYTES + 1;
+        let mut complete = false;
+        let mut reads = Vec::new();
+        let mut read_line = |buf: &mut [u8]| -> io::Result<usize> {
+            if complete || remaining == 0 {
+                return Ok(0);
+            }
+            let requested = buf.len().min(remaining);
+            let n = file.read(&mut buf[..requested])?;
+            remaining -= n;
+            reads.push((n, requested));
+            if let Some(end) = buf[..n].iter().position(|b| *b == b'\n') {
+                complete = true;
+                return Ok(end);
+            }
+            Ok(n)
+        };
+        struct LineReader<F>(F);
+        impl<F: FnMut(&mut [u8]) -> io::Result<usize>> Read for LineReader<F> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                (self.0)(buf)
+            }
         }
-        let newline = buffer[..bytes_read].iter().position(|byte| *byte == b'\n');
-        let take = newline.unwrap_or(bytes_read);
-        chunks.extend_from_slice(&buffer[..take]);
-        if newline.is_some() {
-            let text = String::from_utf8_lossy(&chunks);
-            return Ok(match serde_json::from_str::<Value>(text.trim()) {
-                Ok(Value::Object(record)) => Some(record),
-                _ => None,
-            });
+        let mut reader = std::io::BufReader::with_capacity(64 * 1024, LineReader(&mut read_line));
+        let record = owner_json::read(&mut reader);
+        if let Err(error) = &record {
+            if !matches!(
+                error.kind(),
+                io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+            ) {
+                return Err(io::Error::new(error.kind(), error.to_string()));
+            }
         }
-        position += bytes_read as i64;
+        Ok((record.ok().filter(|_| complete), reads))
+    })
+    .await?;
+    if let Some(rt) = runtime {
+        let elapsed = InputRuntimeAccumulator::now() - started;
+        rt.with_accumulator(|acc| {
+            for (index, (n, requested)) in reads.into_iter().enumerate() {
+                acc.observe_read(
+                    n as u64,
+                    requested as u64,
+                    if index == 0 { elapsed } else { 0.0 },
+                );
+            }
+        });
     }
-    Ok(None)
+    Ok(record)
 }
 
 pub async fn find_owner_session_meta_probe(
@@ -773,6 +809,50 @@ mod native_file_identity_tests {
 mod main346_scanner_contracts {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn checkpoint_owner_lookup_accepts_large_complete_session_meta() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("rollout.jsonl");
+        let meta = serde_json::json!({"type":"session_meta","payload":{"id":"child",
+            "instructions":"x".repeat(READ_CHUNK_SIZE)}});
+        let prefix = "{}\n";
+        let text = format!("{prefix}{meta}\n{{}}");
+        tokio::fs::write(&path, &text).await.unwrap();
+        let path = path.to_str().unwrap();
+        let owner = read_owner_record_at(path, prefix.len() as i64, None)
+            .await
+            .unwrap();
+        let owner = owner.unwrap();
+        assert_eq!(
+            extract_codex_transcript_meta(&owner).unwrap().thread_id,
+            "child"
+        );
+        assert!(owner["payload"].get("instructions").is_none());
+        assert!(read_owner_record_at(path, (text.len() - 2) as i64, None)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn incomplete_record_retains_witness_across_short_final_read() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("rollout.jsonl");
+        let mut bytes = vec![b'x'; READ_CHUNK_SIZE + 3];
+        bytes[..2].copy_from_slice(b"{}");
+        bytes[READ_CHUNK_SIZE + 2] = b'y';
+        tokio::fs::write(&path, &bytes).await.unwrap();
+        let stats = scan_json_lines(path.to_str().unwrap(), 2, bytes.len() as i64, None, |_| {
+            panic!("unterminated record")
+        })
+        .await
+        .unwrap();
+        assert_eq!(stats.next_offset, 2);
+        let tail = stats.incomplete_tail.unwrap();
+        assert_eq!(tail.end_offset, bytes.len() as i64);
+        assert_eq!(tail.anchor, bytes[bytes.len() - TAIL_WITNESS_BYTES..]);
+    }
     async fn large_record(path: &std::path::Path, newline: bool) -> (i64, i64) {
         let mut f = tokio::fs::File::create(path).await.unwrap();
         f.write_all(b"{\"before\":true}\n").await.unwrap();

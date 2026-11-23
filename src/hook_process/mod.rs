@@ -95,7 +95,6 @@ pub fn run_legacy_host_hook(args: &[String], stdin: &[u8]) -> Option<String> {
         "qoder" if rest.iter().any(|arg| arg == "--wakeup-only") => {
             Some(run_qoder_wakeup_captured(rest, stdin).1)
         }
-        "codex" => Some(run_codex_hook_captured(rest, stdin).1),
         _ => None,
     }
 }
@@ -136,20 +135,7 @@ pub(crate) fn record_qoder_upstream_for_host(
     common::record_upstream_context_once(&env, "qoder", session);
 }
 
-fn run_codex_hook_captured(args: &[String], stdin: &[u8]) -> (i32, String) {
-    let started = std::time::Instant::now();
-    let env: Env = std::env::vars().collect();
-    let mut stdout = Vec::new();
-    let code = codex::run(&mut HookRequest {
-        args,
-        stdin,
-        env: &env,
-        stdout: &mut stdout,
-    });
-    record_codex_hook_timing(&env, args, started);
-    (code, String::from_utf8(stdout).unwrap_or_default())
-}
-
+#[cfg(test)]
 fn record_codex_hook_timing(env: &Env, args: &[String], started: std::time::Instant) {
     crate::metrics::record_hook_timing(
         &common::data_dir(env),
@@ -166,7 +152,7 @@ pub(crate) fn dispatch(
     args: &[String],
     env: &Env,
     stdout: &mut dyn Write,
-    started: std::time::Instant,
+    _started: std::time::Instant,
 ) -> i32 {
     if terminal {
         write_empty(stdout);
@@ -181,6 +167,7 @@ pub(crate) fn dispatch(
     let code = match agent {
         "cursor" => cursor::run(&mut request),
         "claude-code" => claude_code::run(&mut request),
+        #[cfg(test)]
         "codex" => codex::run(&mut request),
         "copilot" => copilot::run(&mut request),
         "qwen-code-cli" => qwen_code_cli::run(&mut request),
@@ -195,8 +182,9 @@ pub(crate) fn dispatch(
             0
         }
     };
+    #[cfg(test)]
     if agent == "codex" {
-        record_codex_hook_timing(env, args, started);
+        record_codex_hook_timing(env, args, _started);
     }
     code
 }

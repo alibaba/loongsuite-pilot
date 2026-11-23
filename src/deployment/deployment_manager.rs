@@ -1411,28 +1411,13 @@ mod tests {
             include_str!("../../agents.d/codex.json"),
         )
         .unwrap();
-        for (path, content) in [
-            (
-                "assets/hooks/codex-loongsuite-pilot-hook.sh",
-                include_str!("../../assets/hooks/codex-loongsuite-pilot-hook.sh"),
-            ),
-            (
-                "assets/hooks/codex-loongsuite-pilot-hook.ps1",
-                include_str!("../../assets/hooks/codex-loongsuite-pilot-hook.ps1"),
-            ),
-            (
-                "assets/hooks/shared/native.sh",
-                include_str!("../../assets/hooks/shared/native.sh"),
-            ),
-            (
-                "assets/hooks/shared/native.ps1",
-                include_str!("../../assets/hooks/shared/native.ps1"),
-            ),
-        ] {
-            let path = pilot.join(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, content).unwrap();
-        }
+        let bin = pilot.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join(super::super::hook_strategy::sdk_hook_binary_name()),
+            "fixture",
+        )
+        .unwrap();
         let first = manager(dir.path());
         let loaded = first.load_definitions().await.pop().unwrap();
         let default_home = dir.path().join("默认用户");

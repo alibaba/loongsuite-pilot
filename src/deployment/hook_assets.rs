@@ -12,10 +12,27 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+pub(super) fn is_sdk_codex(def: &AgentDefinition) -> bool {
+    def.id == "codex"
+        && def.hook.as_ref().is_some_and(|hook| {
+            Path::new(&hook.hook_command)
+                .file_name()
+                .is_some_and(|name| {
+                    name == "codex-loongsuite-pilot-hook.sh"
+                        || name == "codex-loongsuite-pilot-hook.ps1"
+                })
+        })
+}
+
 fn managed_assets(def: &AgentDefinition, data: &Path) -> Result<Vec<String>> {
     let Some(hook) = &def.hook else {
         return Ok(Vec::new());
     };
+    // The standalone Codex declaration identifies old managed commands during migration.
+    // Its active handlers run the SDK binary and have no forwarding scripts to install.
+    if is_sdk_codex(def) {
+        return Ok(Vec::new());
+    }
     let prefix = format!(
         "{}/hooks/",
         data.to_string_lossy()

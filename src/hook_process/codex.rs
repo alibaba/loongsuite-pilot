@@ -4,15 +4,18 @@
 //! effective `CODEX_HOME` and a per-turn span-attribute file, then prints `{}`.
 
 use super::common::{
-    data_dir, env_get, home_dir, log_hook_error, parse_json_object, parse_span_attributes,
-    record_upstream_context_once, resolve_path, safe_path_part, write_atomic_json, write_empty,
-    Env, HookRequest, Obj,
+    data_dir, env_get, home_dir, log_hook_error, parse_span_attributes,
+    record_upstream_context_once, resolve_path, safe_path_part, write_atomic_json, Env, Obj,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 const AGENT_ID: &str = "codex";
 
+#[cfg(test)]
+use super::common::{parse_json_object, write_empty, HookRequest};
+
+#[cfg(test)]
 pub fn run(request: &mut HookRequest<'_>) -> i32 {
     let subcommand = request
         .args
@@ -109,6 +112,7 @@ pub(crate) fn isolated_session_dir(transcript: &Path, codex_home: &Path) -> Opti
         .filter(|dir| dir.starts_with(codex_home.join("u")))
 }
 
+#[cfg(test)]
 fn read_stdin(env: &Env, stdin: &[u8]) -> Obj {
     match parse_json_object(stdin) {
         Ok(map) => map,

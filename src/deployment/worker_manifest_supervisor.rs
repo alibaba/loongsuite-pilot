@@ -285,7 +285,7 @@ impl WorkerManifestSupervisor {
             let _ = child.wait().await;
             return false;
         }
-        let identity = match self.processes.identity(pid) {
+        let identity = match self.spawned_identity(pid).await {
             Ok(Some(identity)) => identity,
             result => {
                 // A fast exit can remove the process identity before wait
@@ -320,6 +320,42 @@ impl WorkerManifestSupervisor {
         }
         self.monitor(child.release(), pid, run);
         true
+    }
+
+    async fn spawned_identity(&self, pid: u32) -> std::io::Result<Option<ProcessIdentity>> {
+        let identity = self.processes.identity(pid)?;
+        #[cfg(target_os = "macos")]
+        if let Some(first) = identity
+            .as_ref()
+            .filter(|first| first.executable_path == "/bin/sh")
+        {
+            // Darwin's /bin/sh can exec the system-selected shell in the same
+            // PID. Record the final image before publishing worker ownership.
+            if !std::fs::read_link("/var/select/sh")
+                .is_ok_and(|shell| shell != Path::new("/bin/sh"))
+            {
+                return Ok(identity);
+            }
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+            loop {
+                let Some(current) = self.processes.identity(pid)? else {
+                    return Ok(None);
+                };
+                if current.creation_time != first.creation_time {
+                    return Err(std::io::Error::other("worker changed during shell startup"));
+                }
+                if current.executable_path != first.executable_path {
+                    return Ok(Some(current));
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(std::io::Error::other(
+                        "worker shell identity did not settle",
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+        Ok(identity)
     }
 
     fn monitor(&self, child: tokio::process::Child, pid: u32, run: WorkerRun) {

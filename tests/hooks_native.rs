@@ -114,8 +114,8 @@ fn fixture(root: &Path) -> PathBuf {
     let hooks = root.join("data with spaces 中文🚀/hooks");
     fs::create_dir_all(hooks.join("shared")).unwrap();
     for file in [
-        "codex-loongsuite-pilot-hook.sh",
-        "codex-loongsuite-pilot-hook.ps1",
+        "qwen-code-cli-loongsuite-pilot-hook.sh",
+        "qwen-code-cli-loongsuite-pilot-hook.ps1",
         "shared/native.sh",
         "shared/native.ps1",
     ] {
@@ -139,11 +139,11 @@ fn fixture(root: &Path) -> PathBuf {
 }
 
 #[cfg(windows)]
-fn assert_codex_roundtrip(command: Command, root: &Path, hooks: &Path, script: &Path) {
-    assert_codex_roundtrip_event(command, root, hooks, script, "stop");
+fn assert_qwen_roundtrip(command: Command, root: &Path, hooks: &Path, script: &Path) {
+    assert_qwen_roundtrip_event(command, root, hooks, script, "stop");
 }
 
-fn assert_codex_roundtrip_event(
+fn assert_qwen_roundtrip_event(
     mut command: Command,
     root: &Path,
     hooks: &Path,
@@ -151,13 +151,6 @@ fn assert_codex_roundtrip_event(
     event: &str,
 ) {
     command.arg(script).arg(event);
-    let marker = hooks
-        .parent()
-        .unwrap()
-        .join("state/codex/transcript-wakeups/native-hook.json");
-    if marker.exists() {
-        fs::remove_file(&marker).unwrap();
-    }
     let mut payload = vec![0xef, 0xbb, 0xbf];
     payload.extend(serde_json::to_vec(&json!({
         "session_id":"native-hook", "turn_id":"轮次 🚀", "transcript_path":"C:/用户 文件/记录🚀.jsonl"
@@ -177,35 +170,10 @@ fn assert_codex_roundtrip_event(
     let marker = hooks
         .parent()
         .unwrap()
-        .join("state/codex/transcript-wakeups/native-hook.json");
-    let value: Value = serde_json::from_slice(&fs::read(marker).unwrap()).unwrap();
-    assert_eq!(value["session_id"], "native-hook");
-    assert_eq!(
-        value["session_dir"],
-        root.join("codex 中文🚀")
-            .join("sessions")
-            .to_string_lossy()
-            .as_ref()
-    );
-    assert_eq!(value["turn_id"], "轮次 🚀");
-    assert_eq!(value["transcript_path"], "C:/用户 文件/记录🚀.jsonl");
-    assert_eq!(
-        value["codex_home"],
-        root.join("codex 中文🚀").to_string_lossy().as_ref()
-    );
+        .join("state/qwen-code-cli/sessions/native-hook.json");
+    let state: Value = serde_json::from_slice(&fs::read(marker).unwrap()).unwrap();
+    assert_eq!(state["transcript_path"], "C:/用户 文件/记录🚀.jsonl");
     assert!(!root.join(".loongsuite-pilot").exists());
-    let spool = hooks
-        .parent()
-        .unwrap()
-        .join("state")
-        .join("hook-metrics")
-        .join("codex.jsonl");
-    let timings = fs::read_to_string(spool).unwrap();
-    let latest: Value = serde_json::from_str(timings.lines().last().unwrap()).unwrap();
-    assert_eq!(latest["hook_event"], event);
-    assert!(latest["duration_ms"]
-        .as_f64()
-        .is_some_and(|duration| duration.is_finite() && duration >= 0.0));
 }
 
 #[cfg(unix)]
@@ -213,15 +181,13 @@ fn assert_codex_roundtrip_event(
 fn shell_preserves_raw_bom_unicode_and_bound_install_without_runtimes() {
     let root = tempfile::tempdir().unwrap();
     let hooks = fixture(root.path());
-    for event in ["stop", "session-start"] {
-        assert_codex_roundtrip_event(
-            Command::new("/bin/bash"),
-            root.path(),
-            &hooks,
-            &hooks.join("codex-loongsuite-pilot-hook.sh"),
-            event,
-        );
-    }
+    assert_qwen_roundtrip_event(
+        Command::new("/bin/bash"),
+        root.path(),
+        &hooks,
+        &hooks.join("qwen-code-cli-loongsuite-pilot-hook.sh"),
+        "stop",
+    );
 }
 
 #[cfg(unix)]
@@ -231,7 +197,9 @@ fn shell_rejects_bad_pointer_and_missing_binary_without_protocol_noise() {
     let hooks = fixture(root.path());
     fs::write(hooks.join("pilot-bin"), "/missing/native-binary\n").unwrap();
     let mut command = Command::new("/bin/bash");
-    command.arg(hooks.join("codex-loongsuite-pilot-hook.sh"));
+    command
+        .arg(hooks.join("qwen-code-cli-loongsuite-pilot-hook.sh"))
+        .arg("stop");
     let output = execute(command, root.path(), b"{}");
     assert!(output.status.success());
     assert_eq!(output.stdout, b"{}\n");
@@ -239,7 +207,9 @@ fn shell_rejects_bad_pointer_and_missing_binary_without_protocol_noise() {
     assert!(!hooks.parent().unwrap().join("state").exists());
     fs::remove_file(hooks.join("pilot-bin")).unwrap();
     let mut command = Command::new("/bin/bash");
-    command.arg(hooks.join("codex-loongsuite-pilot-hook.sh"));
+    command
+        .arg(hooks.join("qwen-code-cli-loongsuite-pilot-hook.sh"))
+        .arg("stop");
     let output = execute(command, root.path(), b"{}");
     assert_eq!(output.stdout, b"{}\n");
     assert!(!output.stderr.is_empty());
@@ -310,7 +280,7 @@ fn every_shell_entry_has_valid_syntax_and_no_legacy_runtime_fallback() {
         }
         count += 1;
     }
-    assert_eq!(count, 15, "including the native Copilot CLI launch bridge");
+    assert_eq!(count, 14, "including the native Copilot CLI launch bridge");
 }
 
 #[cfg(windows)]
@@ -332,7 +302,9 @@ fn powershell_51_and_pwsh_preserve_native_stdin_in_both_language_modes() {
             };
             fs::write(
                 &harness,
-                format!("{mode}& ($PSScriptRoot + '\\codex-loongsuite-pilot-hook.ps1') stop\n"),
+                format!(
+                    "{mode}& ($PSScriptRoot + '\\qwen-code-cli-loongsuite-pilot-hook.ps1') stop\n"
+                ),
             )
             .unwrap();
             let mut command = Command::new(&executable);
@@ -343,7 +315,7 @@ fn powershell_51_and_pwsh_preserve_native_stdin_in_both_language_modes() {
                 "Bypass",
                 "-File",
             ]);
-            assert_codex_roundtrip(command, root.path(), &hooks, &harness);
+            assert_qwen_roundtrip(command, root.path(), &hooks, &harness);
         }
     }
 }
@@ -723,7 +695,7 @@ fn powershell_bridge_preserves_raw_bytes_and_native_argument_boundaries() {
 
 #[cfg(windows)]
 #[test]
-fn powershell_native_binding_ignores_legacy_node_pins_and_keeps_shared_home_timing() {
+fn powershell_native_binding_ignores_legacy_node_pins_and_keeps_shared_home() {
     let root = tempfile::tempdir().unwrap();
     let hooks = fixture(root.path());
     let node_pin = hooks.parent().unwrap().join("node-bin");
@@ -737,23 +709,21 @@ fn powershell_native_binding_ignores_legacy_node_pins_and_keeps_shared_home_timi
         for shell in ["powershell.exe", "pwsh.exe"] {
             let executable = which::which(shell)
                 .unwrap_or_else(|_| panic!("Windows acceptance requires {shell}"));
-            for event in ["stop", "session-start"] {
-                let mut command = Command::new(&executable);
-                command.args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                ]);
-                assert_codex_roundtrip_event(
-                    command,
-                    root.path(),
-                    &hooks,
-                    &hooks.join("codex-loongsuite-pilot-hook.ps1"),
-                    event,
-                );
-            }
+            let mut command = Command::new(executable);
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ]);
+            assert_qwen_roundtrip_event(
+                command,
+                root.path(),
+                &hooks,
+                &hooks.join("qwen-code-cli-loongsuite-pilot-hook.ps1"),
+                "stop",
+            );
         }
     }
 }

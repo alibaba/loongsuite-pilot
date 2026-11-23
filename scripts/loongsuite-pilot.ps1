@@ -2310,7 +2310,14 @@ switch ($Command.ToLower()) {
     "log"                { Cmd-Log }
     "inject"             { Invoke-Pilot -Arguments (@("inject") + $SubArgs); exit $script:PilotExitCode }
     "dashboard"          { Cmd-Dashboard }
-        { $_ -in "hook", "hook-process", "probe", "check", "interceptor", "--version" } {
+    "sdk-hook" {
+        $versionDir = Resolve-CurrentVersion
+        if (-not $versionDir) { throw "找不到当前安装版本" }
+        $binary = Join-Path $versionDir "bin\loongsuite-pilot-sdk-hook.exe"
+        Invoke-Pilot -Binary $binary -Arguments (@("sdk-hook") + $SubArgs)
+        exit $script:PilotExitCode
+    }
+    { $_ -in "hook", "hook-process", "probe", "check", "interceptor", "--version" } {
             Invoke-Pilot -Arguments (@($Command) + $SubArgs)
             exit $script:PilotExitCode
         }

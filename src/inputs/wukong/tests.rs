@@ -1378,7 +1378,7 @@ async fn collects_through_a_real_cli_script() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn write_cli(dir: &Path, body: &str) {
     let path = dir.join("wukong-cli");
     std::fs::write(&path, body).unwrap();

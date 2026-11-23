@@ -216,7 +216,7 @@ pub(crate) fn codex_shell_path(path: &Path) -> std::borrow::Cow<'_, Path> {
     std::borrow::Cow::Borrowed(path)
 }
 
-fn quote_codex_path(path: &Path) -> Option<String> {
+pub(crate) fn quote_codex_path(path: &Path) -> Option<String> {
     if !path.is_absolute() {
         return None;
     }

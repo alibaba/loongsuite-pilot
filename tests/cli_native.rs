@@ -194,6 +194,16 @@ fn package(root: &Path) -> PathBuf {
     };
     let binary = package.join(binary_name);
     fs::copy(executable(), &binary).unwrap();
+    let hook_name = if cfg!(windows) {
+        "bin/loongsuite-pilot-sdk-hook.exe"
+    } else {
+        "bin/loongsuite-pilot-sdk-hook"
+    };
+    fs::copy(
+        env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"),
+        package.join(hook_name),
+    )
+    .unwrap();
     let sdk = if cfg!(windows) {
         "loongsuite_pilot.dll"
     } else if cfg!(target_os = "macos") {
@@ -225,6 +235,7 @@ fn package(root: &Path) -> PathBuf {
     .unwrap();
     let mut paths = vec![
         binary_name,
+        hook_name,
         "VERSION",
         "LICENSE",
         "agents.d/cursor.json",
@@ -271,8 +282,6 @@ fn package(root: &Path) -> PathBuf {
         "agents.d/kiro-cli.json",
         "assets/hooks/kiro-cli-loongsuite-pilot-hook.sh",
         "assets/hooks/kiro-cli-loongsuite-pilot-hook.ps1",
-        "assets/hooks/codex-loongsuite-pilot-hook.sh",
-        "assets/hooks/codex-loongsuite-pilot-hook.ps1",
         "assets/hooks/cursor-loongsuite-pilot-hook.sh",
         "assets/hooks/cursor-loongsuite-pilot-hook.ps1",
         "assets/hooks/shared/native.sh",
@@ -855,7 +864,7 @@ fn packaged_codex_explicit_home_keeps_trust_and_hooks_together() {
                     handler["command"]
                         .as_str()
                         .unwrap()
-                        .contains("codex-loongsuite-pilot-hook")
+                        .contains(" sdk-hook --channel ")
                 })
                 .collect();
             assert_eq!(handlers.len(), 1, "{event}");
@@ -1433,7 +1442,18 @@ fn packaged_hook_companion_write_failure_rolls_back_and_retries() {
             )
             .unwrap();
             assert_eq!(settings_data["userField"], "保留🚀");
-            assert!(data.join("hooks/pilot-bin").is_file());
+            if id == "codex" {
+                assert!(!data.join("hooks/pilot-bin").exists());
+                let handlers = settings_data["hooks"]["Stop"].as_array().unwrap();
+                assert!(handlers
+                    .iter()
+                    .flat_map(|group| group["hooks"].as_array().unwrap())
+                    .any(|hook| hook["command"]
+                        .as_str()
+                        .is_some_and(|cmd| cmd.contains(" sdk-hook --channel "))));
+            } else {
+                assert!(data.join("hooks/pilot-bin").is_file());
+            }
             if let Some(before) = before {
                 assert_eq!(
                     (fs::read(&settings).unwrap(), fs::read(&companion).unwrap()),

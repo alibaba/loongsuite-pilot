@@ -111,6 +111,14 @@ impl Fixture {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, content).unwrap();
         }
+        if extra.iter().any(|(path, _)| *path == "agents.d/codex.json") {
+            let hook = Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));
+            fs::copy(
+                hook,
+                self.candidate.join("bin").join(hook.file_name().unwrap()),
+            )
+            .unwrap();
+        }
         let resources: Vec<_> = walkdir::WalkDir::new(&self.candidate).into_iter()
             .map(Result::unwrap).filter(|entry| entry.file_type().is_file())
             .map(|entry| json!({"path": entry.path().strip_prefix(&self.candidate).unwrap().to_str().unwrap().replace('\\', "/"),

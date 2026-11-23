@@ -206,6 +206,9 @@ pub struct CodexTranscriptBody {
     pub(super) processor: Option<Arc<MultimodalProcessor>>,
     pub(super) uri_cache: Mutex<LruMap<crate::multimodal::types::UriResult>>,
     pub(super) shared: Mutex<Shared>,
+    pub(crate) output_capacity: std::sync::OnceLock<
+        Box<dyn Fn() -> crate::inputs::rest_support::BoxFuture<()> + Send + Sync>,
+    >,
     batch_handlers: Mutex<Vec<BatchHandler>>,
     owned_batch_handler: OnceLock<OwnedBatchHandler>,
     host: Mutex<Option<Weak<HostedInput<CodexTranscriptBody>>>>,
@@ -293,6 +296,7 @@ impl CodexTranscriptInput {
                 #[cfg(test)]
                 main541_retries: 0,
             }),
+            output_capacity: Default::default(),
             batch_handlers: Mutex::new(Vec::new()),
             owned_batch_handler: OnceLock::new(),
             host: Mutex::new(None),
@@ -492,9 +496,18 @@ impl InputBody for CodexTranscriptBody {
         self.engine()
             .index_discovered_transcript_owners(rt, &discovered, None)
             .await?;
-        for file in &discovered {
-            self.prepare_startup_source(rt, file, baseline_since, true)
-                .await?;
+        // Startup preparation only reconstructs per-file baseline checkpoints.
+        // Owner indexing is complete, and ordered collection starts afterwards.
+        // Overlap independent identity checks and durable marker writes.
+        use futures_util::{stream, StreamExt};
+        let mut prepared = stream::iter(discovered)
+            .map(|file| async move {
+                self.prepare_startup_source(rt, &file, baseline_since, true)
+                    .await
+            })
+            .buffered(8);
+        while let Some(result) = prepared.next().await {
+            result?;
         }
         self.complete_initial_baseline(rt);
         ensure_dir(&self.wakeup_dir).await;
@@ -795,7 +808,7 @@ impl CodexTranscriptBody {
         f(&mut guard)
     }
 
-    pub(super) fn emit_batches(&self, mut entries: Vec<AgentActivityEntry>) -> usize {
+    pub(super) async fn emit_batches(&self, mut entries: Vec<AgentActivityEntry>) -> usize {
         if let Some(handler) = self.owned_batch_handler.get() {
             let count = entries.len();
             if count > 0 {
@@ -817,19 +830,18 @@ impl CodexTranscriptBody {
         let mut batch = Vec::new();
         let mut batch_bytes = 0usize;
         for entry in entries {
-            let entry_bytes = serde_json::to_vec(&entry)
-                .map(|bytes| bytes.len())
+            let entry_bytes = crate::utils::json_size::serialized_json_size(&entry)
                 .unwrap_or(engine::MAX_EMIT_BATCH_BYTES);
             if !batch.is_empty()
                 && (batch.len() >= engine::MAX_EMIT_BATCH_ENTRIES
                     || batch_bytes + entry_bytes > engine::MAX_EMIT_BATCH_BYTES)
             {
-                flush_batch(&handlers, &mut batch, &mut batch_bytes, &mut emitted);
+                flush_batch(self, &handlers, &mut batch, &mut batch_bytes, &mut emitted).await;
             }
             batch.push(entry);
             batch_bytes += entry_bytes;
         }
-        flush_batch(&handlers, &mut batch, &mut batch_bytes, &mut emitted);
+        flush_batch(self, &handlers, &mut batch, &mut batch_bytes, &mut emitted).await;
         emitted
     }
 
@@ -871,7 +883,8 @@ impl CodexTranscriptBody {
     }
 }
 
-fn flush_batch(
+async fn flush_batch(
+    body: &CodexTranscriptBody,
     handlers: &[BatchHandler],
     batch: &mut Vec<AgentActivityEntry>,
     batch_bytes: &mut usize,
@@ -879,6 +892,9 @@ fn flush_batch(
 ) {
     if batch.is_empty() {
         return;
+    }
+    if let Some(capacity) = body.output_capacity.get() {
+        capacity().await;
     }
     for entry in batch.iter_mut() {
         crate::multimodal::attach_multimodal_metadata_for_entry(entry);

@@ -1022,7 +1022,8 @@ impl HookStrategy {
         self
     }
 
-    pub(crate) fn with_resource_roots(mut self, pilot: &Path, data: &Path) -> Self {
+    /// Bind hook deployment to the package and data directories for this installation.
+    pub fn with_resource_roots(mut self, pilot: &Path, data: &Path) -> Self {
         self.resource_roots = Some((pilot.into(), data.into()));
         self
     }
@@ -1439,6 +1440,19 @@ impl HookStrategy {
         if hook.events.is_empty() || hook.hook_command.trim().is_empty() {
             return Err("Hook 声明缺少事件或命令".into());
         }
+        if !uninstall && self.codex_legacy_cache.is_none() && super::hook_assets::is_sdk_codex(def)
+        {
+            let (binary, data) = self
+                .system_codex_sdk_paths(def)
+                .ok_or("Codex requires the installed loongsuite-pilot-sdk-hook binary")?;
+            if hook
+                .events
+                .iter()
+                .any(|event| codex_command(&binary, &data, event, codex_channel(event)).is_none())
+            {
+                return Err("Invalid Codex SDK hook command".into());
+            }
+        }
         let original = snapshot("config")?;
         let mut edits = BTreeMap::new();
         let mut retired_paths = Vec::new();
@@ -1700,6 +1714,11 @@ impl HookStrategy {
                 .into_iter()
                 .map(|path| normalize_hook_reference(&path))
                 .collect::<Vec<_>>();
+            if let Some(data) = self.codex_sdk_data(def) {
+                if let Some(quoted) = crate::sdk::agent_hooks::quote_codex_path(&data) {
+                    needles.push(normalize_hook_reference(&format!("--data-dir {quoted}")));
+                }
+            }
             if let Some(paths) = owned_legacy_codex_scripts(
                 &path,
                 &def.id,
@@ -2042,6 +2061,44 @@ impl HookStrategy {
             return Some(sdk.binary.clone());
         }
         let (pilot, data) = self.resource_roots.as_ref()?;
+        if super::hook_assets::is_sdk_codex(def) {
+            let binary = crate::utils::runtime_paths::resource_file(
+                pilot,
+                &format!("bin/{}", sdk_hook_binary_name()),
+            )
+            .ok()?;
+            let cache = hook_cache_dir(data);
+            // publish-package deploys hooks from the staged candidate before
+            // committing the current pointer. Only that candidate's own process
+            // may pin its sibling during the install transaction.
+            if crate::utils::runtime_paths::runtime_metadata(&cache.join("update-recovery.json"))
+                .is_ok_and(|meta| meta.is_file())
+                && pilot.parent()?.canonicalize().ok()?
+                    == cache.join("versions").canonicalize().ok()?
+                && std::env::current_exe().ok()?.canonicalize().ok()?
+                    == crate::utils::runtime_paths::resource_file(
+                        pilot,
+                        &format!("bin/{}", pilot_binary_name()),
+                    )
+                    .ok()?
+                    .canonicalize()
+                    .ok()?
+            {
+                return Some(
+                    super::runtime_launcher::RuntimeLauncher::read(&cache, data)
+                        .ok()?
+                        .map_or(binary, |runtime| runtime.hook_path().to_owned()),
+                );
+            }
+            if super::native_install::read_pointer(&cache.join("current"))
+                .ok()?
+                .is_some()
+            {
+                return installed_qoder_hook_binary(pilot, data, &cache);
+            }
+            // An unpacked package can be used before it has an active version pointer.
+            return Some(binary);
+        }
         if !qoder_definition_supports_exec(def, data) && self.codex_sdk_data(def).is_none() {
             return None;
         }
@@ -2086,9 +2143,17 @@ impl HookStrategy {
             .clone()
             .unwrap_or_else(|| hook_cache_dir(root));
         use crate::sdk::agent_hooks::codex_shell_path;
-        if !stable
+        let sibling = self
+            .resource_roots
+            .as_ref()
+            .map(|(pilot, _)| pilot.join("bin").join(sdk_hook_binary_name()));
+        let current_package = sibling
             .as_deref()
-            .is_some_and(|path| codex_shell_path(path).as_ref() == executable.as_path())
+            .is_some_and(|path| codex_shell_path(path).as_ref() == executable.as_path());
+        if !current_package
+            && !stable
+                .as_deref()
+                .is_some_and(|path| codex_shell_path(path).as_ref() == executable.as_path())
             && !qoder_version_binary(&executable, &codex_shell_path(&cache))
         {
             return false;

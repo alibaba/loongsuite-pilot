@@ -37,7 +37,6 @@ pub fn is_hook(args: &[String]) -> bool {
         Some("interceptor") => args.get(1).is_some_and(|arg| arg == "hook"),
         Some("hook-process") => match args.get(1).map(String::as_str) {
             Some("qoder") => args.iter().any(|arg| arg == "--wakeup-only"),
-            Some("codex") => true,
             _ => false,
         },
         _ => false,
@@ -140,21 +139,7 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
     };
     let descriptor = descriptor(&data.join(format!("sdk-hooks-{channel}.json")))
         .filter(|item| item.schema == 2 && item.port != 0 && pid_alive(item.pid));
-    let Some(descriptor) = descriptor else {
-        if configured_agent == "codex"
-            && (channel == "observe" || configured_event == Some("UserPromptSubmit"))
-        {
-            if let Some(event) = flag(&args, "--legacy-codex-event") {
-                let original = [
-                    "hook-process".to_owned(),
-                    "codex".to_owned(),
-                    event.to_owned(),
-                ];
-                return legacy?(&original).map(HookOutput::Json);
-            }
-        }
-        return None;
-    };
+    let descriptor = descriptor?;
     trace.instance = Some(descriptor.instance.clone());
     trace.status = "invalid_input";
     let mut body = Vec::new();

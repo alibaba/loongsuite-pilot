@@ -4,10 +4,10 @@ use crate::types::AgentActivityEntry;
 use anyhow::{ensure, Context, Result};
 use indexmap::{IndexMap, IndexSet};
 use sha2::{Digest, Sha256};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, Take};
 use tokio::sync::Mutex;
 
@@ -76,7 +76,12 @@ fn valid_key(key: &str) -> bool {
 #[derive(Default)]
 struct JournalState {
     initialized: HashSet<String>,
-    acknowledgements: Option<IndexMap<String, SystemTime>>,
+    acknowledgements: Option<HashSet<String>>,
+    oldest_acks: BTreeSet<(SystemTime, String)>,
+    // Upper bound for this journal writer. Reserve before the first write and
+    // never subtract on deletion, repair, failure or cancellation. Reconcile
+    // with disk before rejecting a batch and periodically for age diagnostics.
+    usage_bound: Option<(Instant, u64)>,
 }
 
 pub struct CodexTurnJournal {
@@ -177,7 +182,8 @@ impl CodexTurnJournal {
         if state.acknowledgements.is_some() {
             return Ok(());
         }
-        let mut acknowledged = IndexMap::new();
+        let mut acknowledged = HashSet::new();
+        let mut oldest = BTreeSet::new();
         if let Some(mut directory) = read_directory(&self.dir).await? {
             while let Some(entry) = directory.next_entry().await? {
                 let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
@@ -198,10 +204,12 @@ impl CodexTurnJournal {
                     continue;
                 };
                 if metadata["version"] == 1 && metadata["key"] == key {
-                    acknowledged.insert(key.to_owned(), entry.metadata().await?.modified()?);
+                    oldest.insert((entry.metadata().await?.modified()?, key.to_owned()));
+                    acknowledged.insert(key.to_owned());
                 }
             }
         }
+        state.oldest_acks = oldest;
         state.acknowledgements = Some(acknowledged);
         self.trim_acknowledgements(state).await
     }
@@ -216,7 +224,7 @@ impl CodexTurnJournal {
                 .acknowledgements
                 .as_ref()
                 .expect("loaded")
-                .contains_key(&key)
+                .contains(&key)
             {
                 groups.entry(key).or_default().push(entry);
             }
@@ -235,6 +243,50 @@ impl CodexTurnJournal {
             }
             batch_bytes = batch_bytes.saturating_add(bytes.len() as u64);
             encoded.insert(key, bytes);
+        }
+        self.reserve_pending_bytes(&mut state, batch_bytes).await?;
+        for (key, bytes) in encoded {
+            let file = self.file(&key);
+            if !state.initialized.contains(&key) {
+                repair_tail(&file).await?;
+                state.initialized.insert(key.clone());
+            }
+            let result = async {
+                let mut options = std::fs::OpenOptions::new();
+                options.create(true).append(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                let mut handle = tokio::fs::OpenOptions::from(options).open(&file).await?;
+                handle.write_all(&bytes).await?;
+                // Tokio File can buffer outstanding blocking writes; acceptance
+                // requires their result, not merely a scheduled write.
+                handle.flush().await?;
+                private_file(&file).await?;
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            if result.is_err() {
+                state.initialized.remove(&key);
+            }
+            result.context("Codex pending turn append failed")?;
+        }
+        Ok(())
+    }
+
+    async fn reserve_pending_bytes(
+        &self,
+        state: &mut JournalState,
+        batch_bytes: u64,
+    ) -> Result<()> {
+        if let Some((sampled, bound)) = state.usage_bound.as_mut() {
+            let next = bound.saturating_add(batch_bytes);
+            if sampled.elapsed() < Duration::from_secs(1) && next <= self.max_pending_bytes {
+                *bound = next;
+                return Ok(());
+            }
         }
         let mut usage = 0_u64;
         let mut old = false;
@@ -271,34 +323,7 @@ impl CodexTurnJournal {
                 None,
             );
         }
-        for (key, bytes) in encoded {
-            let file = self.file(&key);
-            if !state.initialized.contains(&key) {
-                repair_tail(&file).await?;
-                state.initialized.insert(key.clone());
-            }
-            let result = async {
-                let mut options = std::fs::OpenOptions::new();
-                options.create(true).append(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    options.mode(0o600);
-                }
-                let mut handle = tokio::fs::OpenOptions::from(options).open(&file).await?;
-                handle.write_all(&bytes).await?;
-                // Tokio File can buffer outstanding blocking writes; acceptance
-                // requires their result, not merely a scheduled write.
-                handle.flush().await?;
-                private_file(&file).await?;
-                Ok::<_, anyhow::Error>(())
-            }
-            .await;
-            if result.is_err() {
-                state.initialized.remove(&key);
-            }
-            result.context("Codex pending turn append failed")?;
-        }
+        state.usage_bound = Some((Instant::now(), usage.saturating_add(batch_bytes)));
         Ok(())
     }
 
@@ -361,7 +386,7 @@ impl CodexTurnJournal {
             .acknowledgements
             .as_ref()
             .expect("loaded")
-            .contains_key(&codex_turn_journal_group_key(entry)))
+            .contains(&codex_turn_journal_group_key(entry)))
     }
 
     pub async fn acknowledge(&self, entries: &[AgentActivityEntry]) -> Result<()> {
@@ -381,7 +406,7 @@ impl CodexTurnJournal {
                 .acknowledgements
                 .as_ref()
                 .expect("loaded")
-                .contains_key(&key)
+                .contains(&key)
             {
                 let temporary = self
                     .dir
@@ -415,7 +440,8 @@ impl CodexTurnJournal {
                     .acknowledgements
                     .as_mut()
                     .expect("loaded")
-                    .insert(key.clone(), SystemTime::now());
+                    .insert(key.clone());
+                state.oldest_acks.insert((SystemTime::now(), key.clone()));
             }
             // Publish the acknowledgement before deleting pending content.
             remove_if_present(&self.file(&key)).await?;
@@ -450,24 +476,15 @@ impl CodexTurnJournal {
 
     async fn trim_acknowledgements(&self, state: &mut JournalState) -> Result<()> {
         let acknowledgements = state.acknowledgements.as_mut().expect("loaded");
-        let excess = acknowledgements
-            .len()
-            .saturating_sub(self.acknowledgement_limit);
-        if excess == 0 {
-            return Ok(());
-        }
-        let mut oldest: Vec<_> = acknowledgements
-            .iter()
-            .map(|(key, time)| (key.clone(), *time))
-            .collect();
-        oldest.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-        for (key, _) in oldest.into_iter().take(excess) {
+        while acknowledgements.len() > self.acknowledgement_limit {
+            let (_, key) = state.oldest_acks.first().expect("indexed acknowledgement");
             // A crash can leave content behind its ACK. Keep the ACK when
             // residual cleanup fails, or it could become replayable again.
-            remove_if_present(&self.file(&key)).await?;
-            state.initialized.remove(&key);
-            remove_if_present(&self.done_file(&key)).await?;
-            acknowledgements.shift_remove(&key);
+            remove_if_present(&self.file(key)).await?;
+            state.initialized.remove(key);
+            remove_if_present(&self.done_file(key)).await?;
+            acknowledgements.remove(key);
+            state.oldest_acks.pop_first();
         }
         Ok(())
     }
@@ -499,7 +516,7 @@ impl CodexJournalBatchReplay {
                     .acknowledgements
                     .as_ref()
                     .expect("loaded")
-                    .contains_key(&key)
+                    .contains(&key)
                 {
                     continue;
                 }

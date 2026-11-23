@@ -143,6 +143,7 @@ struct QueueGate {
     output_owner: &'static str,
     lock: AsyncMutex<()>,
     inflight: AtomicUsize,
+    capacity: tokio::sync::Notify,
     cancellation: Mutex<Option<watch::Sender<bool>>>,
 }
 
@@ -151,6 +152,7 @@ struct QueueActivity(Arc<QueueGate>);
 impl Drop for QueueActivity {
     fn drop(&mut self) {
         self.0.inflight.fetch_sub(1, Ordering::SeqCst);
+        self.0.capacity.notify_one();
     }
 }
 
@@ -333,6 +335,7 @@ impl InputManager {
                 output_owner: output_owner.unwrap_or("input"),
                 lock: AsyncMutex::new(()),
                 inflight: AtomicUsize::new(0),
+                capacity: tokio::sync::Notify::new(),
                 cancellation: Mutex::new(output_owner.map(|_| watch::channel(false).0)),
             }),
         );
@@ -392,6 +395,17 @@ impl InputManager {
             }
         } else {
             processing.await
+        }
+    }
+
+    /// A transcript has one producer and its output batches share one ordered sink.
+    /// Keep a small pipeline while applying backpressure before the next batch.
+    pub(crate) async fn wait_for_output_capacity(&self, id: &str) {
+        let gate = self.queues.lock().expect("queues").get(id).cloned();
+        if let Some(gate) = gate {
+            while gate.inflight.load(Ordering::SeqCst) >= 4 {
+                gate.capacity.notified().await;
+            }
         }
     }
 
