@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { build } from 'esbuild';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { DaemonClient } from '../../src/interceptor/cli/daemon-client.js';
 import { runHook } from '../../src/interceptor/cli/hook.js';
 import { promptRequestId } from '../../src/interceptor/prompt-verdict.js';
 import { buildLlmBoundaries, buildEventsFromBoundaries } from '../../assets/hooks/qoder-hook-processor.mjs';
@@ -18,6 +19,7 @@ class Collector {
   readonly child: ChildProcess;
   readonly messages: Message[] = [];
   private listeners = new Set<() => void>();
+  private closed = false;
   private stderr = '';
   private nextId = 0;
 
@@ -34,7 +36,11 @@ class Collector {
       this.messages.push(message as Message);
       for (const listener of this.listeners) listener();
     });
-    this.child.on('exit', () => { for (const listener of this.listeners) listener(); });
+    // The IPC pipe can deliver the final reply after the process exits.
+    this.child.on('close', () => {
+      this.closed = true;
+      for (const listener of this.listeners) listener();
+    });
   }
 
   waitFor(type: string, id?: number): Promise<Message> {
@@ -49,7 +55,7 @@ class Collector {
         if (failure) return finish(new Error(failure.error));
         const message = this.messages.find(message => message.type === type && (id === undefined || message.id === id));
         if (message) return finish(undefined, message);
-        if (this.child.exitCode !== null || this.child.signalCode !== null) {
+        if (this.closed) {
           finish(new Error(`collector exited awaiting ${type}: ${this.stderr}`));
         }
       };
@@ -129,13 +135,13 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     const collector = new Collector(dataDir);
     const ready = await collector.waitFor('ready');
     const port = ready.port!;
+    const client = new DaemonClient(port);
     const runtime = JSON.parse(await readFile(join(dataDir, 'interceptor/runtime.json'), 'utf8'));
     expect(runtime).toMatchObject({ pid: ready.pid, gitCommit: 'worker-test', daemon_port: port });
     const blockId = collector.send('block', { durationMs: 5_000 });
     await collector.waitFor('blocking', blockId);
 
-    const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
-    expect(await health.json()).toMatchObject({ status: 'ok', pid: ready.pid });
+    await expect(client.health(2_000)).resolves.toMatchObject({ pid: ready.pid });
     const key = { sessionId: 'worker-session', toolUseId: 'worker-tool', phase: 'PreToolUse' };
     expect(await evaluate(port, { ...key, agent: 'qoder', event: key.phase,
       toolInput: { command: 'WORKER_THREAD_PROBE_BLOCK' }, raw: {} })).toMatchObject({ action: 'block', ruleId: 'worker-probe' });
@@ -159,7 +165,8 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     expect((await collector.waitFor('linked', tailId)).entry)
       .toMatchObject({ 'gen_ai.guardrail.action': 'block', 'gen_ai.guardrail.rule_id': 'worker-probe' });
     await collector.stop();
-    await expect(fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) })).rejects.toThrow();
+    const remainingHealth = await client.health(1_000).catch(() => undefined);
+    expect(remainingHealth?.pid).not.toBe(ready.pid);
     const checkpoint = JSON.parse(await readFile(join(dataDir, 'interceptor/tool-verdicts.json'), 'utf8'));
     expect(checkpoint.records).toEqual(expect.arrayContaining([expect.objectContaining({ toolUseId: 'worker-tool', action: 'block' })]));
   }, 30_000);

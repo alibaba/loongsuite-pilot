@@ -48,6 +48,8 @@ interface Checkpoint {
 }
 
 export interface DoubaoWorkInputOptions extends InputOptions {
+  inputId?: DoubaoClient;
+  resourceShare?: 1 | 2;
   client?: DoubaoClient;
   logDir?: string; sessionsRoot?: string; snapshotRoot?: string;
   /** Native metadata has no watcher. Limit scans independently of log wakeups. */
@@ -58,8 +60,8 @@ export interface DoubaoWorkInputOptions extends InputOptions {
 
 /** Read-only adapter for observed macOS and Windows client lifecycle logs. */
 export class DoubaoWorkInput extends BaseInput {
-  readonly id = 'doubao-work';
-  readonly agentType = ClientType.DoubaoWork;
+  readonly id: DoubaoClient;
+  readonly agentType: ClientType;
   readonly collectionMethod = CollectionMethod.SessionFilePolling;
   private readonly client: DoubaoClient;
   private readonly logDir: string | undefined;
@@ -79,6 +81,7 @@ export class DoubaoWorkInput extends BaseInput {
   private readonly executionDigests = new WeakMap<NativeExecution, string>();
   private readonly nativeReader: DoubaoWorkNativeReader;
   private readonly workLimits: DoubaoWorkInputOptions['workBudget'];
+  private readonly resourceShare: number;
   private budget!: DoubaoWorkBudget;
   private readonly cycleGraphs = new Map<string, Promise<NativeGraph | undefined>>();
   private readonly reportedIoErrors = new Set<string>();
@@ -91,7 +94,15 @@ export class DoubaoWorkInput extends BaseInput {
 
   constructor(opts: DoubaoWorkInputOptions) {
     super(opts);
-    this.client = opts.client ?? 'doubao-work';
+    this.id = opts.inputId ?? 'doubao-work';
+    this.client = opts.client ?? this.id;
+    // The legacy listener can read App data under the existing Work policy.
+    this.agentType = this.id === 'doubao' ? ClientType.Doubao : ClientType.DoubaoWork;
+    const legacy = this.stateStore.get('doubao-work');
+    if (this.id === 'doubao' && !this.stateStore.get(this.id).extra?.doubaoWork
+      && (legacy.extra?.doubaoWork as Checkpoint | undefined)?.client === 'doubao') {
+      this.stateStore.set(this.id, { ...legacy, extra: { doubaoWork: legacy.extra!.doubaoWork } });
+    }
     const defaults = resolveDoubaoWorkPaths(this.client);
     this.logDir = opts.logDir ? path.resolve(opts.logDir) : defaults.logDir;
     this.scope = doubaoDigest(this.logDir ?? 'unsupported-platform');
@@ -99,9 +110,12 @@ export class DoubaoWorkInput extends BaseInput {
     this.userDataRoot = defaults.userDataRoot;
     this.snapshotRoot = opts.snapshotRoot ?? defaults.snapshotRoot;
     this.nativeScanIntervalMs = Math.max(0, opts.nativeScanIntervalMs ?? 10_000);
-    this.workLimits = opts.workBudget;
+    this.resourceShare = opts.resourceShare ?? 1;
+    this.workLimits = { bytes: 8 * 1024 * 1024 / this.resourceShare, records: 4096 / this.resourceShare,
+      milliseconds: 50 / this.resourceShare, ...opts.workBudget };
     this.nativeReader = new DoubaoWorkNativeReader({ sessionsRoot: this.sessionsRoot, userDataRoot: this.userDataRoot,
       snapshotRoot: this.snapshotRoot, sessionNamespace: defaults.sessionNamespace,
+      maxCacheBytes: 64 * 1024 * 1024 / this.resourceShare, maxFiles: 512 / this.resourceShare,
       diagnostic: reason => this.logger.warn('Doubao Work bounded native collection degraded', { reason }) });
   }
 
@@ -393,7 +407,13 @@ export class DoubaoWorkInput extends BaseInput {
       this.nextCacheDiagnosticsAt = Date.now() + 60_000;
       this.logger.debug('Doubao Work native cache statistics', { ...this.nativeReader.stats() });
     }
-    for (const entry of entries) entry['loongsuite.doubao_work.client'] = this.client;
+    for (const entry of entries) {
+      entry['loongsuite.doubao_work.client'] = this.client;
+      entry['gen_ai.agent.type'] = this.agentType;
+      entry['gen_ai.framework'] = this.agentType;
+      if (entry['gen_ai.agent.id'] === 'doubao-work') entry['gen_ai.agent.id'] = this.agentType;
+      if (entry['gen_ai.agent.name'] === 'Doubao Work' && this.id === 'doubao') entry['gen_ai.agent.name'] = 'Doubao';
+    }
     return entries;
   }
 
@@ -693,8 +713,9 @@ export class DoubaoWorkInput extends BaseInput {
     if (!job) {
       const assignments = content.assignments[actor] ?? [];
       const bytes = (content.sourceBytes?.[actor] ?? 0) + assignments.reduce((n, value) => n + Buffer.byteLength(value.text) * 2, 0) + 512 * 1024;
-      if (bytes > 32 * 1024 * 1024) { this.logger.warn('Doubao Work reconstruction content exceeds bounded cache', { reason: 'round_cache_capacity' }); return undefined; }
-      if (this.reconstructionJobs.size >= 4 || [...this.reconstructionJobs.values()].reduce((n, value) => n + value.bytes, bytes) > 32 * 1024 * 1024) throw new DoubaoWorkDeferred('round_queue');
+      if (bytes > 32 * 1024 * 1024 / this.resourceShare) { this.logger.warn('Doubao Work reconstruction content exceeds bounded cache', { reason: 'round_cache_capacity' }); return undefined; }
+      if (this.reconstructionJobs.size >= 4 / this.resourceShare
+        || [...this.reconstructionJobs.values()].reduce((n, value) => n + value.bytes, bytes) > 32 * 1024 * 1024 / this.resourceShare) throw new DoubaoWorkDeferred('round_queue');
       const scoped: NativeContent = { calls: Object.fromEntries(Object.entries(content.calls).filter(([, value]) => value.actor === actor).map(([id, value]) => [id, { ...value }])),
         assignments: { [actor]: assignments }, lastAnswers: { [actor]: content.lastAnswers[actor] }, transcripts: { [actor]: content.transcripts?.[actor] ?? [] },
         transcriptOffsets: { [actor]: content.transcriptOffsets?.[actor] ?? 0 },
