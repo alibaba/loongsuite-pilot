@@ -99,6 +99,38 @@ const OPENCLAW_COMPAT_PASSTHROUGH_KEYS = [
   'agent.openclaw.collection.end_reason',
   'agent.openclaw.correlation.ambiguous',
 ] as const;
+const TRAE_FLUSH_ONLY_MARKER = 'agent.trajectory.flush_only';
+const TRAE_COLLECTION_PASSTHROUGH_KEYS = [
+  'agent.trajectory.collection.incomplete',
+  'agent.trajectory.completion.reason',
+] as const;
+
+function isTraePreResponseFailure(record: EventLogRecord): boolean {
+  return record['event.name'] === 'other'
+    && record['loongsuite.observation.scope'] === 'agent_turn'
+    && record['agent.trajectory.run.outcome'] === 'failed_before_response';
+}
+
+function isTraeFlushOnlyMarker(record: AgentActivityEntry): boolean {
+  return normalizeAgentType(String(record['gen_ai.agent.type'] ?? '')) === 'trae-agent'
+    && record['event.name'] === 'other'
+    && record['gen_ai.turn.end'] === true
+    && record[TRAE_FLUSH_ONLY_MARKER] === true;
+}
+
+function prepareTraeCollectionRecords(records: AgentActivityEntry[]): AgentActivityEntry[] {
+  const incompleteMarker = records.find(record =>
+    isTraeFlushOnlyMarker(record)
+    && record['agent.trajectory.collection.incomplete'] === true);
+  if (!incompleteMarker) return records;
+  const diagnostics = {
+    'agent.trajectory.collection.incomplete': true,
+    'agent.trajectory.completion.reason': incompleteMarker['agent.trajectory.completion.reason'],
+  };
+  return records.map(record => isTraeFlushOnlyMarker(record)
+    ? record
+    : { ...record, ...diagnostics });
+}
 
 function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentActivityEntry[] {
   const key = (r: AgentActivityEntry) => JSON.stringify([r.trace_id, r['gen_ai.turn.id']]);
@@ -597,6 +629,31 @@ function nanoToHrTime(value: bigint): [number, number] {
   return [Number(value / 1_000_000_000n), Number(value % 1_000_000_000n)];
 }
 
+function enrichTraePreResponseFailure(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+  const start = records.find(record => isTraePreResponseFailure(record) && record['gen_ai.turn.start'] === true);
+  const end = records.find(record => isTraePreResponseFailure(record) && record['gen_ai.turn.end'] === true);
+  if (!start || !end) return;
+  const from = parseNano(start.time_unix_nano);
+  const to = parseNano(end.time_unix_nano);
+  for (const span of spans) {
+    const kind = span.attributes['gen_ai.span.kind'];
+    if (kind !== 'ENTRY' && kind !== 'AGENT') continue;
+    Object.assign(span.status, { code: SpanStatusCode.ERROR });
+    span.attributes['error.type'] = 'trae_agent.run_failed_before_response';
+    span.attributes['loongsuite.observation.scope'] = 'agent_turn';
+    delete span.attributes['gen_ai.provider.name'];
+    // The known trace ID creates a virtual parent in the shared converter.
+    if (kind === 'ENTRY') Object.assign(span, { parentSpanId: undefined });
+    if (from !== undefined && to !== undefined && to >= from) {
+      Object.defineProperties(span, {
+        startTime: { value: nanoToHrTime(from), configurable: true },
+        endTime: { value: nanoToHrTime(to), configurable: true },
+        duration: { value: nanoToHrTime(to - from), configurable: true },
+      });
+    }
+  }
+}
+
 /**
  * Deep-merge a new AgentActivityEntry into an existing one, preserving
  * earlier non-empty values when the new record's field is empty. Earlier
@@ -1054,7 +1111,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Preserve known fields when a retained delegated prefix is delivered
     // again. Audit records never enter these buffers or their journal.
     const eventId = entry['gen_ai.agent.type'] === 'copilot'
-      || (durable && (isAntigravity || agentType === 'hermes' || agentType === 'openclaw'))
+      || (durable && (isAntigravity || agentType === 'hermes' || agentType === 'openclaw' || agentType === 'trae-agent'))
       ? (entry['event.id'] as string | undefined) : undefined;
     let residentDelta = residentSize;
     if (buf.spilledRecords && durable) {
@@ -1423,6 +1480,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
           CLAUDE_CODE_TURN_TERMINAL_FINISH_REASONS,
         );
     }
+    // trae-agent trajectories are polled incrementally, so an intermediate step
+    // can carry a natural finish_reason='stop' (the model returned plain text
+    // mid-run) while trae-agent keeps going to a later task_done step. Only the
+    // converter-stamped gen_ai.turn.end on the finalized last step is the real
+    // turn boundary; flushing on the intermediate 'stop' would split one ReAct
+    // run into two duplicate traces under the same traceId.
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'trae-agent') {
+      return entry['gen_ai.turn.end'] === true;
+    }
     return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
   }
 
@@ -1550,7 +1616,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
         'agent.hermes.collection.incomplete': true,
         'agent.hermes.collection.end_reason': 'producer_process_exited' };
     }
-    const exported = await this.convertAndExport(buf.agentType, records);
+    // A late trae-agent finalize poll emits a control-plane marker when the
+    // actual last llm.response was already buffered in an earlier cycle. The
+    // marker closes the turn, but must never reach EventLog-to-Trace conversion:
+    // the downstream library aggregates usage and selects parent output before
+    // response-id merging, so a second response double-counts tokens or clears
+    // ENTRY/AGENT output. A marker-only buffer has no reconstructible payload.
+    const preparedRecords = buf.agentType === 'trae-agent'
+      ? prepareTraeCollectionRecords(records)
+      : records;
+    const recordsForConversion = preparedRecords.filter(record => !isTraeFlushOnlyMarker(record));
+    if (recordsForConversion.length === 0) {
+      if (buf.completed) await this.codexJournal?.acknowledge(buf.records);
+      return;
+    }
+    const exported = await this.convertAndExport(buf.agentType, recordsForConversion);
     if (exported && this.codexJournal?.acceptsAgent(buf.agentType) && buf.completed) {
       await this.codexJournal.acknowledge(buf.records);
     }
@@ -1566,9 +1646,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   private async convertAndExport(
     agentType: string,
-    records: AgentActivityEntry[],
+    sourceRecords: AgentActivityEntry[],
   ): Promise<boolean> {
-    if (records.length === 0) return true;
+    if (sourceRecords.length === 0) return true;
+    // The buffered and journaled records retain the canonical source for
+    // replay policy. Remove it before configurable resource/span projection.
+    const records = agentType === 'trae-agent'
+      ? sourceRecords.map(({ 'agent.trajectory.source.path': _sourcePath, ...record }) => record)
+      : sourceRecords;
     const projectedResourceAttributes = this.collectResourceAttributes(records);
     const resourceIdentity = this.resolveAgentResourceIdentity(agentType, records);
     // Convert once per distinct service.name (backends may split into user/inner
@@ -1644,6 +1729,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         const agentSpecificKeys = agentType === 'grok-build' ? GROK_PASSTHROUGH_KEYS
           : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS
           : agentType === 'copilot' ? ['gen_ai.copilot.telemetry.source']
+          : agentType === 'trae-agent' ? TRAE_COLLECTION_PASSTHROUGH_KEYS
           : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? ['agent.transcript_incomplete'] : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
@@ -1705,9 +1791,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
           // Existing process-wide OTel env vars may still request content on
           // spans. Enforce this flusher's explicit opt-out at the conversion
           // boundary instead of relying on env defaults.
-          const conversionRecords = this.cfg.captureMessageContent === false
+          let conversionRecords = this.cfg.captureMessageContent === false
             ? prepared.records.map(stripAgentMessageContent)
             : prepared.records;
+          if (agentType === 'trae-agent') {
+            // The event-log converter reads agent identity from an input
+            // boundary. An empty delta keeps that identity without content.
+            conversionRecords = conversionRecords.map(record =>
+              isTraePreResponseFailure(record) && record['gen_ai.turn.start'] === true
+                ? { ...record, 'gen_ai.input.messages_delta': [] } : record);
+          }
           const qwenCollaboration = conversionRecords.some(record => record['agent.source'] === 'qwen-work-cn-collaboration');
           const stream = qwenCollaboration ? null : planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
           if (stream) {
@@ -1820,6 +1913,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         span.attributes['agent.hermes.collection.end_reason'] = 'producer_process_exited';
       }
     }
+    if (agentType === 'trae-agent') enrichTraePreResponseFailure(records, spans);
     applyQoderWorkStepTiming(records, spans);
     this.enrichToolSkillAttributes(records, spans);
     this.enrichMultimodalAttributes(records, spans);

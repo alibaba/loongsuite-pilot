@@ -125,6 +125,17 @@ export interface ConfigFile {
     enabled?: boolean;
     pollInterval?: number;
     logDir?: string;
+    /**
+     * log-watch trajectory agents (e.g. trae-agent): directory scanned for
+     * `trajectory*.json` files. Overrides the built-in default watch dir.
+     */
+    trajectoryDir?: string;
+    /**
+     * log-watch trajectory agents: explicit single trajectory file to poll.
+     * Takes precedence over `trajectoryDir` discovery when set.
+     */
+    trajectoryFile?: string;
+    workspaceRoot?: string;
     client?: 'doubao-work' | 'doubao';
     includeConversationIds?: string[];
   }>;
@@ -834,6 +845,7 @@ function buildListenersConfig(
     'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     antigravity: { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
     'antigravity-cli': { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
+    'trae-agent-trajectory': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
   };
 
   const result = { ...defaults };
@@ -841,11 +853,29 @@ function buildListenersConfig(
   // Merge file-level listener overrides
   if (file?.listeners) {
     for (const [key, val] of Object.entries(file.listeners)) {
-      result[key] = {
+      const merged: ListenerConfig = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
         pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
         ...(key === 'doubao-work' || key === 'doubao' ? resolveDoubaoWorkSource(val) : {}),
       };
+      // Preserve log-watch trajectory discovery overrides (P1-1) so an operator
+      // can point trae-agent at a custom dir or pin one exact file. Fall back to
+      // any previously-resolved value so a partial override doesn't drop the other.
+      const trajectoryDir = val.trajectoryDir ?? result[key]?.trajectoryDir;
+      const trajectoryFile = val.trajectoryFile ?? result[key]?.trajectoryFile;
+      if (trajectoryDir !== undefined) merged.trajectoryDir = trajectoryDir;
+      if (trajectoryFile !== undefined) merged.trajectoryFile = trajectoryFile;
+      if (key === 'trae-agent-trajectory' && val.workspaceRoot !== undefined) {
+        const workspaceRoot = typeof val.workspaceRoot === 'string'
+          ? resolveHome(val.workspaceRoot.trim(), { preservePathSegments: true }) : '';
+        if (path.isAbsolute(workspaceRoot)) {
+          merged.workspaceRoot = workspaceRoot;
+        } else {
+          logger.warn('Invalid Trae Agent workspaceRoot; disabling trajectory collection');
+          merged.enabled = false;
+        }
+      }
+      result[key] = merged;
       if (key === 'qwen-work-cn-collaboration' && Object.hasOwn(val, 'includeConversationIds')) {
         const ids: unknown = val.includeConversationIds;
         if (!Array.isArray(ids) || ids.length > 1000 || ids.some(id =>

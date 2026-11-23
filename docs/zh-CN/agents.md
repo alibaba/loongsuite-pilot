@@ -97,6 +97,7 @@ Provider 和 Token；事件标记为 `agent_turn` 观察范围，并省略缺失
 | OpenClaw | `openclaw` | 注入插件，支持 OpenClaw 2026.3.8 及以上版本；自动适配新旧 Hook，5.12 之前的模型调用时间为推定值。 |
 | OpenCode | `opencode` | 插件注入。 |
 | Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。检测路径和 `settings.json` 遵循 Pi 官方的 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）。 |
+| trae-agent | `trae-agent` | 轮询原生 trajectory JSON，采集 LLM、工具、Token 以及成功和失败生命周期。 |
 | Qoder | `qoder` | Hook 集成。 |
 | Qoder CN | `qoder-cn` | Hook 集成。 |
 | Qoder for JetBrains | `qoder-jetbrains` | 部署/检测专用 ID。`agent-control.json` 中采集开关为 `qoder`；输出记录使用 `qoder-idea`。 |
@@ -120,6 +121,46 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 `CODEX_HOME`（包括编排器为单个任务创建的独立目录），并采集该 session
 根目录下最近活跃的 rollout 文件。`Stop` 仅作为尽力而为的唤醒信号，
 目录发现不依赖它。
+
+## trae-agent trajectory 采集
+
+Pilot 轮询 trae-agent 原生的 `trajectory*.json` 文件，并将每次运行转换为
+ENTRY → AGENT → STEP → LLM/TOOL span。trae-agent 默认把 trajectory 写到
+其当前工作目录下的 `trajectories/`，Pilot 默认监听
+`~/.trae-agent/trajectories`。如果在项目目录运行 `trae-cli`，可在
+`config.json` 中指定项目的绝对路径：
+
+```json
+{ "listeners": { "trae-agent-trajectory": { "workspaceRoot": "/absolute/project" } } }
+```
+
+此时 Pilot 监听该项目下的 `trajectories/`。若通过 `--working-dir` 指定了其他项目，
+请将 `workspaceRoot` 指向实际工作区，并用 `trajectoryDir` 或 `trajectoryFile`
+指定原生文件的位置。未配置项目时，也可以使用 CLI 的 `--trajectory-file`
+将输出写到默认监听目录：
+
+```bash
+mkdir -p "$HOME/.trae-agent/trajectories"
+trae-cli interactive --trajectory-file "$HOME/.trae-agent/trajectories/trajectory.json"
+```
+
+也可以在 `config.json` 中将
+`listeners["trae-agent-trajectory"].trajectoryDir` 设置为 trae-agent 实际使用的
+绝对目录。原生快照不记录工作区，因此启用工作区排除规则时，必须提供
+`workspaceRoot`。这个配置由操作者确认每个采集文件里的运行都属于该工作区。
+交互模式可以在不同提示间切换工作目录，写入已绑定工作区的文件时请固定工作目录，
+不同工作区的运行使用各自的文件或目录。
+
+采集和待导出 trace 回放前，Pilot 会检查解析后的文件路径和声明的工作区。
+启用排除规则时，缺少任一路径的旧待导出运行会被丢弃。Pilot 首次发现目录时会回放
+已有的匹配文件，并按逻辑 run 隔离 checkpoint。
+如果未配置顶层精确 `serviceName`，最终上报服务名为
+`<serviceNamePrefix>-trae-agent`。
+
+Pilot 分批处理发生变化的文件，并跳过超过 64 MiB 的快照。批量调用时宜为
+每次运行保留独立文件。交互模式若在首次轮询前覆盖旧文件，Pilot 无法恢复该轮。
+已结束但在首个模型响应前失败的运行会按记录的时间上报 ENTRY → AGENT 失败链路，
+其中没有模型 span。
 
 ## Linux 系统接入
 

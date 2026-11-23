@@ -123,6 +123,7 @@ type differences are called out in the notes.
 | OpenClaw | `openclaw` | Plugin injection for OpenClaw 2026.3.8 or later. Automatic legacy/modern adaptation; model-call timing is inferred before 2026.5.12. |
 | OpenCode | `opencode` | Plugin injection. |
 | Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. Detection and `settings.json` follow Pi's `PI_CODING_AGENT_DIR` (default `~/.pi/agent`). |
+| trae-agent | `trae-agent` | Native trajectory JSON polling; captures LLM, tool, token, success, and failure lifecycle data. |
 | Qoder | `qoder` | Hook integration. |
 | Qoder CN | `qoder-cn` | Hook integration. |
 | Qoder for JetBrains | `qoder-jetbrains` | Detection-only deploy ID. Agent gating uses `qoder` in `agent-control.json`; emitted records use `qoder-idea`. |
@@ -146,6 +147,52 @@ Codex collection is transcript-backed. Pilot uses the lightweight
 `CODEX_HOME`, including task-scoped homes created by orchestrators, and tails
 recent rollout files from that session root. `Stop` is retained as a
 best-effort wakeup and is not required for directory discovery.
+
+## trae-agent Trajectory Collection
+
+Pilot polls trae-agent's native `trajectory*.json` files and converts each run
+into ENTRY → AGENT → STEP → LLM/TOOL spans. trae-agent writes trajectories to a
+`trajectories/` directory relative to its current working directory by default,
+while Pilot's default watch directory is `~/.trae-agent/trajectories`.
+To collect the native defaults for a project, set its absolute working directory
+in `config.json` and run `trae-cli` from that directory:
+
+```json
+{ "listeners": { "trae-agent-trajectory": { "workspaceRoot": "/absolute/project" } } }
+```
+
+Pilot watches `/absolute/project/trajectories` in this configuration. If the CLI
+uses `--working-dir`, set `workspaceRoot` to the project it actually operates on
+and use `trajectoryDir` or `trajectoryFile` to locate output written elsewhere.
+Without a project-specific configuration, direct the CLI to the home watch
+directory with its `--trajectory-file` option:
+
+```bash
+mkdir -p "$HOME/.trae-agent/trajectories"
+trae-cli interactive --trajectory-file "$HOME/.trae-agent/trajectories/trajectory.json"
+```
+
+Alternatively, set `listeners["trae-agent-trajectory"].trajectoryDir` in
+`config.json` to the absolute directory used by trae-agent. With workspace
+exclusions enabled, Trae Agent collection requires an explicit `workspaceRoot`
+because the native snapshots do not identify a workspace. This setting is the
+operator's assertion that every run in each configured file belongs to that
+workspace. An interactive session can change its working directory between
+prompts, so keep its workspace fixed when writing to a scoped source. Use
+dedicated files or directories for runs from different workspaces.
+
+Pilot checks the resolved source file and the declared workspace before
+collection and again before pending trace replay. When exclusions are active,
+older pending runs missing either path are discarded. Pilot replays existing
+matching files on first discovery and keeps a checkpoint per run. Unless an
+exact top-level `serviceName` is configured, the exported service is named
+`<serviceNamePrefix>-trae-agent`.
+
+Pilot processes changed snapshots over successive polls and skips snapshots
+larger than 64 MiB. Prefer a unique file for each unattended run when possible.
+If Trae overwrites an interactive run before its first poll, Pilot cannot recover it.
+If a finalized run fails before any model response, Pilot reports a failed
+ENTRY → AGENT trace using the recorded run times, without creating model spans.
 
 ## Shared installation on Linux
 

@@ -170,8 +170,9 @@ export class InputManager extends EventEmitter {
     input.setWorkspacePolicy(this.workspacePolicy);
     this.inputs.set(input.id, input);
     const isAntigravity = resolveAgentSystem(input.agentType) === 'antigravity';
-    if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes ||
-        isAntigravity || input.id === 'qwen-work-cn-collaboration') {
+    const ownsDurableCheckpoint = input.agentType === ClientType.CodexCliHook
+      || input.agentType === ClientType.Hermes || input.agentType === ClientType.TraeAgent;
+    if (ownsDurableCheckpoint || isAntigravity || input.id === 'qwen-work-cn-collaboration') {
       this.entryAbortControllers.set(input.id, new AbortController());
     }
     this.counters.set(input.id, {
@@ -215,7 +216,7 @@ export class InputManager extends EventEmitter {
           (input as BaseInput & { restoreAbortedDelivery(): void }).restoreAbortedDelivery();
         });
         input.holdCheckpointUntil(retained);
-      } else if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes ||
+      } else if (ownsDurableCheckpoint ||
         (isAntigravity && this.flusher?.hasDurableTraceJournal(input.agentType))) {
         input.holdCheckpointUntil(handling);
       }

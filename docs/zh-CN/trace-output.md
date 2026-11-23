@@ -41,7 +41,7 @@ checkpoint 等待持久接收，退出不导出半轮。确认记录保留最近
       "deployment.environment": "prod"
     },
     "debug": false,
-    "turnIdleTimeoutMs": 0
+    "turnIdleTimeoutMs": 300000
   }
 }
 ```

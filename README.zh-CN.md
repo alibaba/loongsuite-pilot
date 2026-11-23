@@ -73,6 +73,7 @@ Pilot 主要帮助回答这些问题：
 | Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes | No |
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes | No |
 | Qwen Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes | Yes (Opt-in) |
+| trae-agent | 原生 trajectory 轮询 | Yes | Yes | Yes | Yes | No |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes | No |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes | No |
 | [豆包工作（macOS/Windows，实验性）](docs/zh-CN/doubao-work.md) | 只读日志与执行元数据 | 客户端轮次、本地工具与原生 sandbox 执行 | 仅元数据 | No | No | No |

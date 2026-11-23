@@ -1,0 +1,577 @@
+import * as fs from 'node:fs/promises';
+import * as fsSync from 'node:fs';
+import { createHash } from 'node:crypto';
+import { CollectionMethod } from '../../types/index.js';
+import type { AgentActivityEntry, InputState } from '../../types/index.js';
+import { BaseInput, type InputOptions } from './base-input.js';
+
+export interface TrajectoryPollingOptions extends InputOptions {
+  /** Path to the trajectory JSON file to poll. */
+  trajectoryFile: string;
+  /** Polling interval, defaults to 30s via BaseInput. */
+}
+
+export interface TrajectorySource {
+  file: string;
+  stat: fsSync.Stats;
+}
+
+const TRAJECTORY_STATE_VERSION = 3;
+const RUN_ID_PREFIX = 'trajectory-run-v3:';
+const MAX_SNAPSHOT_BYTES_PER_POLL = 64 * 1024 * 1024;
+const MAX_CHANGED_SNAPSHOTS_PER_POLL = 16;
+
+/**
+ * Base input for tools that write one or more trajectory JSON files
+ * (e.g. trae-agent `TrajectoryRecorder.save_trajectory()` does an integral
+ * `json.dump` rewrite on every record_* call).
+ *
+ * Subclass implements parseTrajectory(json, ctx): convert a freshly-read
+ * trajectory into the AgentActivityEntry set emitted this cycle. The
+ * subclass's converter MUST:
+ *   - skip any step whose step_number is already in ctx.seenStepNumbers
+ *   - return the set of step_numbers newly emitted so the base class can
+ *     persist them for next cycle's dedup
+ *   - sort entries by time_unix_nano ascending
+ *
+ * The converter MUST NOT emit a separate SESSION 'other' marker event —
+ * the OTLP converter library synthesizes the ENTRY/AGENT pair from the
+ * LLM/TOOL records' gen_ai.session.id / gen_ai.agent.type fields. A
+ * stray SESSION 'other' event forms its own trace-keyed turn buffer and
+ * the library synthesizes a duplicate bare ENTRY/AGENT pair from it.
+ *
+ * Dedup model:
+ *   - Persistent `state.extra.runsById` stores one checkpoint per logical run;
+ *     each checkpoint owns its own sorted `seenStepNumbers` and completion bit.
+ *     Switching A -> B -> A therefore restores A instead of clearing it.
+ *   - Length-only comparisons (`len(agent_steps)`) are explicitly forbidden:
+ *     the dedup key is the 1-based monotonic `step_number` within each run.
+ *   - When a snapshot at the same path rewinds the run, clear only that run's
+ *     seen set and stamp the next emitted batch as a session reset. An atomic
+ *     replacement that still contains the logical run's seen steps can continue.
+ */
+export abstract class BaseTrajectoryPollingInput extends BaseInput {
+  readonly collectionMethod = CollectionMethod.LogWatchPolling;
+
+  protected readonly trajectoryFile: string;
+  private nextTrajectoryIndex = 0;
+  private pendingCheckpoint?: TrajectoryExtra;
+
+  constructor(opts: TrajectoryPollingOptions) {
+    super(opts);
+    this.trajectoryFile = opts.trajectoryFile;
+  }
+
+  protected async collect(workspaceRoot?: string): Promise<AgentActivityEntry[]> {
+    this.pendingCheckpoint = undefined;
+    const trajectoryFiles = await this.resolveTrajectoryFiles();
+    const entries: AgentActivityEntry[] = [];
+    const extra = this.stateStore.get(this.id).extra as TrajectoryExtra | undefined;
+    let checkpoint = extra;
+    const fingerprintsByFile = new Map<string, string>();
+    if (extra?.trajectoryStateVersion === TRAJECTORY_STATE_VERSION) {
+      for (const run of Object.values(extra.runsById ?? {})) {
+        if (run?.lastFile && run.fingerprint) fingerprintsByFile.set(run.lastFile, run.fingerprint);
+      }
+    }
+    let remaining = MAX_SNAPSHOT_BYTES_PER_POLL;
+    let changed = 0;
+    const offset = this.nextTrajectoryIndex;
+    this.nextTrajectoryIndex = 0;
+    for (let scanned = 0; scanned < trajectoryFiles.length; scanned++) {
+      const index = (offset + scanned) % trajectoryFiles.length;
+      const { file: trajectoryFile, stat } = trajectoryFiles[index];
+      try {
+        if (!stat.isFile() || stat.size === 0) continue;
+        const fingerprint = this.trajectoryFingerprint(stat);
+        if (fingerprintsByFile.get(trajectoryFile) === fingerprint) continue;
+        if (stat.size > MAX_SNAPSHOT_BYTES_PER_POLL) {
+          this.logger.warn('trajectory exceeds the snapshot size limit', {
+            file: trajectoryFile, bytes: stat.size, limitBytes: MAX_SNAPSHOT_BYTES_PER_POLL,
+          });
+          continue;
+        }
+        if (stat.size > remaining || changed >= MAX_CHANGED_SNAPSHOTS_PER_POLL) {
+          this.nextTrajectoryIndex = index;
+          break;
+        }
+        remaining -= stat.size;
+        changed++;
+        const result = await this.processTrajectoryFile(trajectoryFile, stat, fingerprint, checkpoint ?? {});
+        if (!result) continue;
+        checkpoint = result.checkpoint;
+        for (const entry of result.entries) {
+          entries.push(workspaceRoot ? {
+            ...entry, 'agent.trajectory.source.path': trajectoryFile, 'workspace.path': workspaceRoot,
+          } : entry);
+        }
+      } catch (err) {
+        // One corrupt or concurrently-removed file must not block other runs
+        // discovered in the same polling cycle.
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          this.logger.warn('trajectory processing failed', { file: trajectoryFile, error: String(err) });
+        }
+      }
+    }
+    const allowed = this.workspacePolicy.filter(entries, this.agentType);
+    if (checkpoint && checkpoint !== extra) {
+      if (allowed.length > 0) {
+        // Commit only after BaseInput emits synchronously to InputManager.
+        // Another input can save the shared store during any collection await.
+        this.pendingCheckpoint = checkpoint;
+      } else {
+        this.commitCheckpoint(checkpoint);
+      }
+    }
+    return allowed;
+  }
+
+  protected override onEntriesQueued(): void {
+    if (!this.pendingCheckpoint || this.checkpointFailed) return;
+    this.commitCheckpoint(this.pendingCheckpoint);
+    this.pendingCheckpoint = undefined;
+  }
+
+  private commitCheckpoint(checkpoint: TrajectoryExtra): void {
+    this.stateStore.update(this.id, { extra: checkpoint } as Partial<InputState>);
+  }
+
+  private async processTrajectoryFile(
+    trajectoryFile: string,
+    stat: fsSync.Stats,
+    currentFp: string,
+    prevExtra: TrajectoryExtra,
+  ): Promise<{ entries: AgentActivityEntry[]; checkpoint: TrajectoryExtra } | undefined> {
+    // A growing or partially rewritten source can exceed the discovery stat
+    // before open completes. Never read beyond the bytes reserved for it.
+    const file = await fs.open(trajectoryFile, 'r');
+    let raw: Buffer;
+    try {
+      const opened = await file.stat();
+      if (!opened.isFile() || this.trajectoryFingerprint(opened) !== currentFp) return;
+      const current = await this.resolveTrajectorySource(trajectoryFile);
+      if (current?.file !== trajectoryFile || this.trajectoryFingerprint(current.stat) !== currentFp) return;
+      raw = Buffer.allocUnsafe(opened.size);
+      for (let offset = 0; offset < raw.length;) {
+        const { bytesRead } = await file.read(raw, offset, raw.length - offset, offset);
+        if (!bytesRead) return;
+        offset += bytesRead;
+      }
+      if (this.trajectoryFingerprint(await file.stat()) !== currentFp) return;
+    } finally {
+      await file.close();
+    }
+
+    let parsed: TrajectoryJson;
+    try {
+      parsed = JSON.parse(raw.toString('utf8')) as TrajectoryJson;
+    } catch {
+      this.logger.debug('trajectory JSON is incomplete or invalid', { file: trajectoryFile });
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    let runsById = this.cloneRunCheckpoints(prevExtra.runsById);
+    const currentRunId = this.deriveRunIdentity(parsed);
+    // Identity-less files still need isolated checkpoints; otherwise two such
+    // files share a seen-step set and suppress each other.
+    const currentRunKey = currentRunId || `file:${trajectoryFile}`;
+
+    // Version 3 replaces plaintext `${start_time}|${task}` keys with a stable
+    // SHA-256 digest. Migrate every v2 map key before lookup so no raw task is
+    // written back to checkpoint state, including runs not active this cycle.
+    if (prevExtra.trajectoryStateVersion !== TRAJECTORY_STATE_VERSION) {
+      runsById = this.migrateRunCheckpoints(runsById);
+    }
+
+    // Backward-compatible migration from the former input-level single slot.
+    // A known legacy run is restored under its digest key before any other file
+    // in this cycle is processed, so an upgrade does not replay seen steps.
+    if (prevExtra.trajectoryStateVersion !== TRAJECTORY_STATE_VERSION
+      && Object.keys(runsById).length === 0) {
+      const hasLegacyState = Boolean(
+        prevExtra.runId
+        || prevExtra.fingerprint
+        || (prevExtra.seenStepNumbers && prevExtra.seenStepNumbers.length > 0)
+        || prevExtra.runCompletionEmitted,
+      );
+      if (hasLegacyState) {
+        const legacyRunKey = prevExtra.runId
+          ? this.normalizeStoredRunKey(prevExtra.runId)
+          : currentRunKey;
+        runsById[legacyRunKey] = {
+          fingerprint: prevExtra.fingerprint,
+          seenStepNumbers: [...(prevExtra.seenStepNumbers ?? [])],
+          runCompletionEmitted: Boolean(prevExtra.runCompletionEmitted),
+          lastProcessedAt: prevExtra.lastProcessedAt,
+        };
+      }
+    }
+
+    // A fixed path may be overwritten by a brand-new logical run. If the old
+    // run was observed before it was finalized, close its already-buffered OTLP
+    // turn with a control-only marker before discarding the unreachable
+    // checkpoint. Keeping the checkpoint alone cannot recover content that the
+    // producer has overwritten; silently deleting it leaves the old turn open.
+    const replacementEntries: AgentActivityEntry[] = [];
+    for (const [runKey, staleCheckpoint] of Object.entries(runsById)) {
+      if (runKey !== currentRunKey && staleCheckpoint.lastFile === trajectoryFile) {
+        const completionEntry = this.buildReplacementCompletionEntry(runKey, staleCheckpoint);
+        if (completionEntry) {
+          replacementEntries.push(completionEntry);
+          this.logger.warn('trajectory run replaced before completion; closing buffered turn', {
+            file: trajectoryFile,
+            runId: runKey,
+          });
+        } else if (!staleCheckpoint.runCompletionEmitted
+          && (staleCheckpoint.seenStepNumbers?.length ?? 0) > 0) {
+          this.logger.warn('trajectory run replaced before completion without terminal context', {
+            file: trajectoryFile,
+            runId: runKey,
+          });
+        }
+        delete runsById[runKey];
+      }
+    }
+
+    const checkpoint = runsById[currentRunKey];
+    const storedActiveRunId = prevExtra.activeRunId ?? prevExtra.runId;
+    const previousActiveRunId = storedActiveRunId
+      ? this.normalizeStoredRunKey(storedActiveRunId)
+      : undefined;
+    let sessionReset = !checkpoint
+      && Boolean(previousActiveRunId && previousActiveRunId !== currentRunKey);
+    let seenStepNumbers = new Set<number>(checkpoint?.seenStepNumbers ?? []);
+    let runCompletionEmitted = Boolean(checkpoint?.runCompletionEmitted);
+    const prevFingerprint = checkpoint?.fingerprint;
+
+    // Truncation is meaningful only for the same logical run observed through
+    // the same physical file. Switching A -> B -> A must restore A's checkpoint,
+    // not clear it merely because B was processed most recently.
+    const sameSourcePath = !checkpoint?.lastFile || checkpoint.lastFile === trajectoryFile;
+    if (prevFingerprint && prevFingerprint !== currentFp && sameSourcePath) {
+      const truncated = this.isTruncation(prevFingerprint, currentFp, seenStepNumbers, currentRunId ? parsed : undefined);
+      if (truncated) {
+        this.logger.info('trajectory truncated or replaced, resetting run checkpoint', {
+          file: trajectoryFile,
+          runId: currentRunId,
+          prev: prevFingerprint,
+          current: currentFp,
+        });
+        seenStepNumbers = new Set<number>();
+        sessionReset = true;
+        runCompletionEmitted = false;
+      }
+    }
+
+    const ctx: TrajectoryEmitContext = {
+      seenStepNumbers,
+      sessionReset,
+      runCompletionEmitted,
+      prevFingerprint,
+      currentFingerprint: currentFp,
+    };
+    const { entries, emittedStepNumbers, runCompletionEmitted: terminalEmitted } =
+      await this.parseTrajectory(parsed, ctx);
+    for (const n of emittedStepNumbers) seenStepNumbers.add(n);
+
+    const lastProcessedAt = Date.now();
+    const sortedSeenStepNumbers = Array.from(seenStepNumbers).sort((a, b) => a - b);
+    const completionEmitted = Boolean(terminalEmitted || runCompletionEmitted);
+    const terminalContext = this.captureTerminalContext(entries) ?? checkpoint?.terminalContext;
+    runsById[currentRunKey] = {
+      fingerprint: currentFp,
+      seenStepNumbers: sortedSeenStepNumbers,
+      runCompletionEmitted: completionEmitted,
+      lastProcessedAt,
+      lastFile: trajectoryFile,
+      lastMtimeMs: stat.mtimeMs,
+      terminalContext,
+    };
+
+    return {
+      entries: replacementEntries.length > 0 ? [...replacementEntries, ...entries] : entries,
+      checkpoint: {
+        trajectoryStateVersion: TRAJECTORY_STATE_VERSION,
+        activeRunId: currentRunKey,
+        runsById,
+        // Compatibility mirror for diagnostics and downgrade tolerance. Runtime
+        // dedup reads runsById exclusively once state version 3 is present.
+        fingerprint: currentFp,
+        runId: currentRunId,
+        seenStepNumbers: sortedSeenStepNumbers,
+        sessionReset,
+        runCompletionEmitted: completionEmitted,
+        lastProcessedAt,
+      },
+    };
+  }
+
+  private captureTerminalContext(
+    entries: AgentActivityEntry[],
+  ): TrajectoryTerminalContext | undefined {
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const entry = entries[index];
+      if (entry['agent.trajectory.flush_only'] === true) continue;
+      const sessionId = this.nonEmptyString(entry['gen_ai.session.id']);
+      const turnId = this.nonEmptyString(entry['gen_ai.turn.id']);
+      const agentType = this.nonEmptyString(entry['gen_ai.agent.type']);
+      if (!sessionId || !turnId || !agentType) continue;
+      return {
+        timeUnixNano: entry.observed_time_unix_nano || entry.time_unix_nano,
+        traceId: this.nonEmptyString(entry.trace_id),
+        sessionId,
+        turnId,
+        stepId: this.nonEmptyString(entry['gen_ai.step.id']),
+        agentType,
+        agentId: this.nonEmptyString(entry['gen_ai.agent.id']),
+        providerName: this.nonEmptyString(entry['gen_ai.provider.name']),
+      };
+    }
+    return undefined;
+  }
+
+  private buildReplacementCompletionEntry(
+    runKey: string,
+    checkpoint: TrajectoryRunCheckpoint,
+  ): AgentActivityEntry | undefined {
+    if (checkpoint.runCompletionEmitted || (checkpoint.seenStepNumbers?.length ?? 0) === 0) {
+      return undefined;
+    }
+    const context = checkpoint.terminalContext;
+    if (!context) return undefined;
+    return {
+      time_unix_nano: context.timeUnixNano,
+      observed_time_unix_nano: context.timeUnixNano,
+      'event.id': createHash('sha256')
+        .update(JSON.stringify([runKey, 'source-replaced']))
+        .digest('hex')
+        .slice(0, 32),
+      'user.id': '',
+      'event.name': 'other',
+      ...(context.traceId ? { trace_id: context.traceId } : {}),
+      'gen_ai.session.id': context.sessionId,
+      'gen_ai.turn.id': context.turnId,
+      ...(context.stepId ? { 'gen_ai.step.id': context.stepId } : {}),
+      'gen_ai.agent.type': context.agentType,
+      ...(context.agentId ? { 'gen_ai.agent.id': context.agentId } : {}),
+      'gen_ai.provider.name': context.providerName || 'unknown',
+      'gen_ai.turn.end': true,
+      'agent.trajectory.flush_only': true,
+      'agent.trajectory.collection.incomplete': true,
+      'agent.trajectory.completion.reason': 'source_replaced',
+    };
+  }
+
+  private nonEmptyString(value: unknown): string | undefined {
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+  }
+
+  private cloneRunCheckpoints(
+    raw: TrajectoryExtra['runsById'],
+  ): Record<string, TrajectoryRunCheckpoint> {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    const out: Record<string, TrajectoryRunCheckpoint> = {};
+    for (const [runId, value] of Object.entries(raw)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      out[runId] = {
+        ...value,
+        seenStepNumbers: Array.isArray(value.seenStepNumbers)
+          ? value.seenStepNumbers.filter((n): n is number => Number.isInteger(n) && n > 0)
+          : [],
+      };
+    }
+    return out;
+  }
+
+  private migrateRunCheckpoints(
+    checkpoints: Record<string, TrajectoryRunCheckpoint>,
+  ): Record<string, TrajectoryRunCheckpoint> {
+    const migrated: Record<string, TrajectoryRunCheckpoint> = {};
+    for (const [storedRunId, checkpoint] of Object.entries(checkpoints)) {
+      const safeRunId = this.normalizeStoredRunKey(storedRunId);
+      const existing = migrated[safeRunId];
+      if (!existing) {
+        migrated[safeRunId] = checkpoint;
+        continue;
+      }
+      const newer = (checkpoint.lastProcessedAt ?? 0) >= (existing.lastProcessedAt ?? 0)
+        ? checkpoint
+        : existing;
+      migrated[safeRunId] = {
+        ...existing,
+        ...newer,
+        seenStepNumbers: [...new Set([
+          ...(existing.seenStepNumbers ?? []),
+          ...(checkpoint.seenStepNumbers ?? []),
+        ])].sort((a, b) => a - b),
+        runCompletionEmitted: Boolean(
+          existing.runCompletionEmitted || checkpoint.runCompletionEmitted,
+        ),
+      };
+    }
+    return migrated;
+  }
+
+  private normalizeStoredRunKey(storedRunId: string): string {
+    if (storedRunId.startsWith(RUN_ID_PREFIX) || storedRunId.startsWith('file:')) {
+      return storedRunId;
+    }
+    const separator = storedRunId.indexOf('|');
+    if (separator >= 0) {
+      return this.hashRunIdentity(
+        storedRunId.slice(0, separator),
+        storedRunId.slice(separator + 1),
+      );
+    }
+    return `${RUN_ID_PREFIX}${createHash('sha256').update(storedRunId).digest('hex').slice(0, 32)}`;
+  }
+
+  private hashRunIdentity(startTime: string, task: string): string {
+    const seed = JSON.stringify([startTime, task]);
+    return `${RUN_ID_PREFIX}${createHash('sha256').update(seed).digest('hex').slice(0, 32)}`;
+  }
+
+  /**
+   * Resolve the trajectory file to poll this cycle. Defaults to the fixed
+   * `trajectoryFile` from options; subclasses that discover the active file
+   * (e.g. trae-agent's timestamped `trajectory_<ts>.json` in a watched
+   * directory) override this to re-resolve every cycle. Returning an empty
+   * string skips the cycle.
+   */
+  protected async resolveTrajectoryFile(): Promise<string> {
+    return this.trajectoryFile;
+  }
+
+  /**
+   * Resolve every trajectory file that should be processed this cycle. The
+   * default preserves the historical single-file contract; directory-backed
+   * subclasses can override this to return all matching files in stable order.
+   */
+  protected async resolveTrajectoryFiles(): Promise<TrajectorySource[]> {
+    const trajectoryFile = await this.resolveTrajectoryFile();
+    const source = trajectoryFile ? await this.resolveTrajectorySource(trajectoryFile) : undefined;
+    return source ? [source] : [];
+  }
+
+  protected async resolveTrajectorySource(path: string): Promise<TrajectorySource | undefined> {
+    try {
+      const file = await fs.realpath(path);
+      if (this.workspacePolicy.excludes(file)) return undefined;
+      const stat = await fs.stat(file);
+      return stat.isFile() ? { file, stat } : undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.logger.warn('trajectory source could not be resolved', { code: (error as NodeJS.ErrnoException).code });
+      }
+      return undefined;
+    }
+  }
+
+  /**
+   * Derive a stable, non-reversible logical run identity. Raw task content is
+   * used only as hash input and must never enter checkpoint keys or logs.
+   * Returns '' when both fields are absent so callers can fall back to the path.
+   */
+  protected deriveRunIdentity(json: TrajectoryJson): string {
+    const start = typeof json?.start_time === 'string' ? json.start_time : '';
+    const task = typeof json?.task === 'string' ? json.task : '';
+    if (!start && !task) return '';
+    return this.hashRunIdentity(start, task);
+  }
+
+  /**
+   * Default fingerprint: inode, size and filesystem times. Inode is captured via Stats.ino
+   * (NaN on platforms without stable inode semantics — caller should treat
+   * NaN-inode as a 0 for fingerprint purposes).
+   */
+  protected trajectoryFingerprint(stat: fsSync.Stats): string {
+    const inode = Number.isNaN(stat.ino) ? 0 : stat.ino;
+    return `${inode}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.dev}`;
+  }
+
+  private isTruncation(
+    prevFp: string,
+    currentFp: string,
+    seenStepNumbers: ReadonlySet<number>,
+    sameRunSnapshot: TrajectoryJson | undefined,
+  ): boolean {
+    const [prevInodeStr, prevSizeStr] = prevFp.split(':');
+    const [curInodeStr, curSizeStr] = currentFp.split(':');
+    const prevInode = Number(prevInodeStr);
+    const curInode = Number(curInodeStr);
+    const prevSize = Number(prevSizeStr);
+    const curSize = Number(curSizeStr);
+    const replaced = prevInode > 0 && curInode > 0 && prevInode !== curInode;
+    if (!replaced || !Array.isArray(sameRunSnapshot?.agent_steps)) return replaced || curSize < prevSize;
+    // An atomic rewrite can change both inode and size without rewinding the run.
+    const snapshotSteps = new Set(sameRunSnapshot.agent_steps.map(step => step?.step_number));
+    for (const seen of seenStepNumbers) {
+      if (!snapshotSteps.has(seen)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Convert the freshly-parsed trajectory JSON into a sorted list of
+   * AgentActivityEntry to emit this cycle. Implementations MUST:
+   *   - skip any step whose step_number is already in ctx.seenStepNumbers
+   *   - return the set of step_numbers newly emitted (so the base class can
+   *     persist them for next cycle's dedup)
+   *   - sort entries by time_unix_nano ascending before returning
+   */
+  protected abstract parseTrajectory(
+    json: TrajectoryJson,
+    ctx: TrajectoryEmitContext,
+  ): Promise<{ entries: AgentActivityEntry[]; emittedStepNumbers: number[]; runCompletionEmitted?: boolean }>;
+}
+
+export interface TrajectoryTerminalContext {
+  timeUnixNano: string;
+  traceId?: string;
+  sessionId: string;
+  turnId: string;
+  stepId?: string;
+  agentType: string;
+  agentId?: string;
+  providerName?: string;
+}
+
+export interface TrajectoryRunCheckpoint {
+  fingerprint?: string;
+  seenStepNumbers?: number[];
+  /** True once the finalize (turn.end) terminal was emitted for this run (P1-2). */
+  runCompletionEmitted?: boolean;
+  lastProcessedAt?: number;
+  lastFile?: string;
+  lastMtimeMs?: number;
+  /** Content-free context used to close a buffered turn if its file is overwritten. */
+  terminalContext?: TrajectoryTerminalContext;
+}
+
+export interface TrajectoryExtra {
+  /** Version 3 stores per-run state under task-safe digest identities. */
+  trajectoryStateVersion?: number;
+  activeRunId?: string;
+  runsById?: Record<string, TrajectoryRunCheckpoint>;
+  // Legacy single-slot fields retained as a compatibility mirror/migration source.
+  fingerprint?: string;
+  /** Versioned SHA-256 logical run identity; never contains raw task text. */
+  runId?: string;
+  seenStepNumbers?: number[];
+  sessionReset?: boolean;
+  runCompletionEmitted?: boolean;
+  lastProcessedAt?: number;
+}
+
+export interface TrajectoryEmitContext {
+  seenStepNumbers: Set<number>;
+  sessionReset: boolean;
+  /** A prior cycle already emitted this run's finalize terminal (P1-2). */
+  runCompletionEmitted: boolean;
+  prevFingerprint?: string;
+  currentFingerprint: string;
+}
+
+export interface TrajectoryJson {
+  [key: string]: unknown;
+}

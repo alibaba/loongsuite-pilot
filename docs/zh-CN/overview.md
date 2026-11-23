@@ -41,6 +41,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
 | Qwen Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
+| [Trae Agent CLI](agents.md#trae-agent-trajectory-采集) | 原生轨迹文件轮询 | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
 | [豆包工作（macOS/Windows，实验性）](doubao-work.md) | 只读客户端日志 | 客户端轮次与本地工具 | 仅元数据 | No | No |

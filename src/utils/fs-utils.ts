@@ -239,6 +239,8 @@ export interface HomeResolutionOptions {
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   homedir?: () => string;
+  /** Leave path segments for filesystem resolution, including symlink parents. */
+  preservePathSegments?: boolean;
 }
 
 export function resolveHome(filepath: string, options: HomeResolutionOptions = {}): string {
@@ -253,7 +255,7 @@ export function resolveHome(filepath: string, options: HomeResolutionOptions = {
     return home();
   }
   if (filepath.startsWith('~/') || filepath.startsWith(`~${paths.sep}`)) {
-    return paths.join(home(), filepath.slice(2));
+    return options.preservePathSegments ? home() + filepath.slice(1) : paths.join(home(), filepath.slice(2));
   }
   return filepath;
 }

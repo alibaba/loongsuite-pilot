@@ -46,7 +46,7 @@ source, output, installed-runtime and cloud evidence.
       "deployment.environment": "prod"
     },
     "debug": false,
-    "turnIdleTimeoutMs": 0
+    "turnIdleTimeoutMs": 300000
   }
 }
 ```

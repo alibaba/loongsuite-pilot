@@ -271,6 +271,23 @@ describe('delegated trace validation scopes', () => {
   });
 });
 
+describe('semantic.last_step_no_tool_call terminal-control exemption (P1-6)', () => {
+  test.each([
+    { agent: 'trae-agent', tool: 'task_done', unfinished: false },
+    { agent: 'trae-agent', tool: 'bash', unfinished: true },
+    { agent: 'codex', tool: 'task_done', unfinished: true },
+  ])('validates $tool as an unfinished call only when appropriate for $agent', ({ agent, tool, unfinished }) => {
+    const fixture = delegatedTrace();
+    fixture.parentLlm.resource = { 'gen_ai.agent.type': agent };
+    fixture.parentLlm.attributes['gen_ai.output.messages'] = [
+      { role: 'assistant', finish_reason: 'tool_call', parts: [{ type: 'tool_call', name: tool, id: 'tool-1' }] },
+    ];
+    const checks = checkTrace(fixture.spans).filter(check => check.id === 'semantic.last_step_no_tool_call');
+    expect(checks.some(check => check.status === 'error' && check.spanId === fixture.parentLlm.spanId)).toBe(unfinished);
+    expect(checks.length).toBeGreaterThan(0);
+  });
+});
+
 describe('gen_ai.input.messages schema validation', () => {
   test('vendored schema matches the pinned LoongSuite source', () => {
     const schema = readFileSync(new URL('../schemas/gen-ai-input-messages.json', import.meta.url));
