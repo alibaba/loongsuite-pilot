@@ -98,6 +98,9 @@ Codex 开发验证使用 `codex_rollout_v1` 采集一个授权的 `transcript` �
 
 如需管理 Codex Hook，在 SDK 启动参数中传入绝对 `codex_home`，并在 `hcd.agent_configs.codex` 下配置 `"hook_deployment": {"settings_path": "/absolute/codex/hooks.json", "channel": "cloud"}`。路径必须对应 `codex_home/hooks.json`，主源必须是该目录下的 `sessions`。二进制从 `resource_dir/bin` 加载。SDK 注册观察点和三个原生裁决点，并更新同一目录的 `config.toml` 信任记录。`channel` 默认走宿主回调，也可设为 `local`。查询状态使用 `snapshot` 的 `codex_hook_deployment`。应用移除 Codex 的策略撤回本实例注册，保留其他 Hook。普通的停止和重启保留配置。
 
+SDK 公告 `PILOT_CAP_CODEX_HOOK_CONTROL` 时，宿主可以向 `apply_policy` 单独传入 `{"hook_management":{"agent":"codex","operation":"list"}}`，在运行中或收到 `on_stop` 后读取本实例实际注册的 Hook 及其信任记录。用 `hooks[].trust_key` 对照 `trust_records[].key`。将操作改为 `clear` 可在收到 `on_stop` 后、销毁句柄前清理。其他采集器已经接管同一数据目录时返回 `PILOT_BUSY`。
+
+
 共享原生 Hook 对 Codex 支持 `UserPromptSubmit`、`PreToolUse` 和 `PostToolUse`。提示提交可拒绝发送，工具调用前可拒绝支持 Hook 的工具，调用完成后可将原始结果替换为裁决反馈。已产生的文件等副作用会保留。嵌入调试可用 `loongsuite-pilot-sdk-hook sdk-hook --agent codex --event <event> --channel <observe|local> --data-dir <sdk-data>`。宿主安装这些调试命令并处理 Codex 信任。
 
 启动普通版 Qoder CLI 时在进程环境中设置 `QODER_EXPOSE_TOKEN_USAGE=true`，SDK 直接从授权 transcript 的逐响应 `message.usage` 读取真实用量。Qoder CLI 1.1.76 已验证。完整 Pilot 的既有 Unix 启动入口会设置该变量，云壳管理 Qoder 进程时应在启动时传入。Qoder 设置文件里的 `env` 对该开关无效。没有正数用量的原生占位记录不作为计量来源。现有诊断 segments 和历史 sidecar 仍可用于兼容读取，Qoder IDE 沿用 SQLite。

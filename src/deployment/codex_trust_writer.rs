@@ -822,6 +822,33 @@ fn marker_line_membership(content: &str, marker: &str) -> Vec<bool> {
         .collect()
 }
 
+pub(super) fn marked_trust_keys(content: &str, marker: &str) -> Vec<String> {
+    let marked = marker_line_membership(content, marker);
+    trust_section_ranges(content)
+        .into_iter()
+        .filter(|section| marked[section.start])
+        .map(|section| section.key)
+        .collect()
+}
+
+pub(super) fn plan_remove_embedded_trust(
+    before: &str,
+    marker: &str,
+    keys: &[String],
+) -> Result<Option<String>, InvalidCodexConfigError> {
+    let begin = format!("# BEGIN {marker} trust");
+    let end = format!("# END {marker} trust");
+    let stripped = config_lines(before)
+        .into_iter()
+        .filter(|line| !line.editable || (line.text.trim() != begin && line.text.trim() != end))
+        .map(|line| line.text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let content = remove_exact_trust_sections(&stripped, &keys.iter().cloned().collect())?;
+    validate_config(&content)?;
+    Ok((content != before).then_some(content))
+}
+
 fn remove_marked_trust_sections(
     content: &str,
     marker: &str,

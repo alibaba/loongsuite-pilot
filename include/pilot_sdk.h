@@ -15,6 +15,7 @@ extern "C" {
 #define PILOT_CAP_ACTIVITY_V2 UINT64_C(1)
 #define PILOT_CAP_HOOK_UDP UINT64_C(2)
 #define PILOT_CAP_MONITORING UINT64_C(4)
+#define PILOT_CAP_CODEX_HOOK_CONTROL UINT64_C(32)
 
 typedef struct PilotHandle PilotHandle;
 typedef struct PilotJsonView { const uint8_t *data; size_t len; } PilotJsonView;
@@ -54,6 +55,9 @@ typedef struct PilotApiV2 {
     uint64_t capabilities;
     int32_t (*start)(PilotJsonView, PilotJsonView, PilotOnBatch, PilotOnBatch,
         PilotOnHook, PilotOnLifecycle, PilotOnLifecycle, void *, PilotHandle **);
+    /* CAP_CODEX_HOOK_CONTROL: apply_policy also accepts a standalone
+     * {"hook_management":{"agent":"codex","operation":"list"}} request.
+     * Use "clear" after on_stop and before destroy to remove this instance's hooks. */
     int32_t (*apply_policy)(PilotHandle *, PilotJsonView, char **, size_t *);
     int32_t (*snapshot)(PilotHandle *, char **, size_t *);
     int32_t (*stop)(PilotHandle *, uint32_t);
