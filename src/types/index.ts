@@ -10,9 +10,9 @@ export interface ListenerConfig {
   pollInterval: number;
   /** Restrict the Qwen Work collaboration input to these conversation IDs. */
   includeConversationIds?: string[];
-  /** Read-only source log directory override for the doubao-work listener. */
+  /** Read-only source log directory override for a Doubao product listener. */
   logDir?: string;
-  /** Product source for the doubao-work listener; defaults to Doubao Work. */
+  /** Legacy source selection on doubao-work; use separate product listeners for concurrent collection. */
   client?: 'doubao-work' | 'doubao';
 }
 
@@ -66,20 +66,9 @@ export interface MaskConfig {
   replacementMode?: MaskReplacementMode;
 }
 
-/** Interceptor types are the credential subset of mask types; PII is not interceptable. */
-export const SUPPORTED_INTERCEPTOR_TYPES = [
-  'cloudAccessKey',
-  'apiKey',
-  'privateKey',
-  'databaseUrl',
-] as const satisfies readonly MaskType[];
-
-export type InterceptorType = (typeof SUPPORTED_INTERCEPTOR_TYPES)[number];
-
 export interface InterceptorConfig {
-  /** `custom` is not an interceptor mode. Builtin rules are all-or-nothing. */
+  /** Explicit opt-in for managed rules and interception hooks. */
   mode: 'none' | 'all';
-  types: InterceptorType[];
 }
 
 export interface OtlpTraceRawConfig {
@@ -250,7 +239,13 @@ export interface MultimodalRuntimeConfig {
 }
 
 /** Agent ids with multimodal extraction implemented. */
-export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder', 'qwen-work-cn'] as const;
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = [
+  'codex',
+  'qoder',
+  'qwen-work-cn',
+  'antigravity',
+  'antigravity-cli',
+] as const;
 
 /** Experimental per-agent multimodal policy (`uploadMode: none` disables). */
 export interface AgentMultimodalConfig {

@@ -1,9 +1,12 @@
 import { pathToFileURL } from 'node:url';
+import { EventEmitter } from 'node:events';
+import { InputManager } from '../../src/core/input-manager.js';
 import { InterceptResultLinker } from '../../src/core/intercept-result-linker.js';
 import { JsonlFlusher } from '../../src/flushers/jsonl-flusher.js';
 import { startInterceptorWorker } from '../../src/interceptor/worker-service.js';
 import { ToolVerdictStore, type ToolVerdictKey } from '../../src/interceptor/tool-verdict-store.js';
 import type { AgentActivityEntry } from '../../src/types/index.js';
+import { ClientType, CollectionMethod } from '../../src/types/index.js';
 
 // A real process stands in for the collector; the test drives HTTP from outside
 // this process so a blocked test event loop cannot hide a blocked server.
@@ -26,18 +29,18 @@ const service = await startInterceptorWorker({
   mode: process.argv[4] === 'none' ? 'none' : 'all',
   verdictStore: store,
   emitBlockedPrompt: forward,
-  emitEvaluation: forward,
   workerUrl: process.argv[3] === 'default' ? undefined : pathToFileURL(process.argv[3]!),
 });
 
 process.send?.({ type: 'ready', port: service.port, pid: process.pid });
-process.on('message', (message: { type: string; id: number; key?: ToolVerdictKey; durationMs?: number }) => {
+interface Command { type: string; id: number; key?: ToolVerdictKey; durationMs?: number; entries?: AgentActivityEntry[]; capture?: boolean }
+process.on('message', (message: Command) => {
   void handle(message).catch((error) => {
     process.send?.({ type: 'error', id: message.id, error: String(error) });
   });
 });
 
-async function handle(message: { type: string; id: number; key?: ToolVerdictKey; durationMs?: number }): Promise<void> {
+async function handle(message: Command): Promise<void> {
   if (message.type === 'block') {
     const durationMs = message.durationMs ?? 5_000;
     process.send?.({ type: 'blocking', id: message.id, durationMs });
@@ -53,6 +56,20 @@ async function handle(message: { type: string; id: number; key?: ToolVerdictKey;
     } as AgentActivityEntry;
     await new InterceptResultLinker(store, true).enrich([entry]);
     process.send?.({ type: 'linked', id: message.id, entry });
+  } else if (message.type === 'native') {
+    const manager = new InputManager();
+    manager.setFlusher(output);
+    manager.setAgentsConfig({ qoder: { captureMessageContent: message.capture !== false } });
+    manager.setInterceptResultLinker(new InterceptResultLinker(store, true, () => service.syncVerdicts()));
+    const input = Object.assign(new EventEmitter(), {
+      id: 'native-qoder', agentType: ClientType.Qoder,
+      collectionMethod: CollectionMethod.IdeSnapshotPolling,
+      running: false, setWorkspacePolicy() {},
+    });
+    manager.registerInput(input as any);
+    input.emit('entries', message.entries);
+    await manager.stopAll();
+    process.send?.({ type: 'native', id: message.id });
   } else if (message.type === 'reload') {
     await service.reloadManaged();
     process.send?.({ type: 'reloaded', id: message.id, port: service.port, managedActive: service.managedActive });

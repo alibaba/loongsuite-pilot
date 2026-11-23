@@ -410,8 +410,6 @@ export function normalizeEventName(value: unknown): AgentEventName {
       return 'tool.approve';
     case 'agent.input':
       return 'agent.input';
-    case 'guardrail.evaluation':
-      return 'guardrail.evaluation';
     case 'event':
     case 'other':
     default:

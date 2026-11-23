@@ -3,6 +3,7 @@ import type {
   AgentsConfig,
 } from '../types/index.js';
 import { resolveAgentConfig } from './agent-config.js';
+import { normalizeGuardrailEntry } from './guardrail-fields.js';
 
 const MESSAGE_CONTENT_FIELDS = new Set([
   'gen_ai.input.messages',
@@ -87,6 +88,7 @@ export function applyAgentContentPolicy(
   config: AgentsConfig,
 ): AgentActivityEntry {
   const { agentConfig } = resolveAgentConfig(entry, config);
-  if (agentConfig.captureMessageContent) return { ...entry };
-  return stripAgentMessageContent(entry);
+  const normalized = normalizeGuardrailEntry(entry);
+  if (agentConfig.captureMessageContent) return normalized;
+  return stripAgentMessageContent(normalized);
 }

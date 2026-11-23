@@ -253,7 +253,7 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       port: 8765,
     },
     agents: {},
-    interceptor: { mode: 'none', types: [] },
+    interceptor: { mode: 'none' },
     ...overrides,
   };
 }
@@ -275,6 +275,30 @@ describe('Orchestrator', () => {
   });
 
   describe('startup sequence (T038)', () => {
+    it('preserves final interceptor status after the Worker service reference is cleared', async () => {
+      let stopped = false;
+      const status = { enabled: true, running: true, collection_status: 'ok',
+        sampled_at: '2026-11-19T00:00:00Z', worker_started_at: '2026-11-19T00:00:00Z',
+        worker_restarts_total: 0, rules: null, activity: null, diagnostics: null };
+      const workerStart = vi.spyOn(interceptorWorker, 'startInterceptorWorker').mockResolvedValue({
+        port: 18791, managedActive: false,
+        stop: async () => { stopped = true; },
+        getStatus: async () => ({ ...status, running: !stopped }),
+        reloadManaged: async () => {}, syncVerdicts: async () => {}, flushEvents: async () => {},
+      } as unknown as interceptorWorker.InterceptorWorkerService);
+      const orch = new Orchestrator(makeConfig({ interceptor: { mode: 'all' } }));
+      try {
+        await orch.start();
+        expect(await (orch as any).readInterceptorStatus()).toMatchObject({ running: true, sampled_at: status.sampled_at });
+        await orch.stop();
+        expect((orch as any).interceptorService).toBeNull();
+        expect(await (orch as any).readInterceptorStatus()).toMatchObject({ running: false, sampled_at: status.sampled_at });
+      } finally {
+        await orch.stop();
+        workerStart.mockRestore();
+      }
+    });
+
     it.each(['none', 'all'] as const)('gates Worker on startup mode %s even with cached rules', async mode => {
       const dataDir = path.join(homeDir, 'pilot-data');
       fs.mkdirSync(path.join(dataDir, 'configs', 'managed'), { recursive: true });
@@ -595,6 +619,35 @@ describe('Orchestrator', () => {
         try { await orch.stop(); }
         finally { Object.defineProperty(process, 'platform', platform); }
       }
+    });
+
+    it.each(['darwin', 'win32'] as const)('registers independent product gates and roots on %s by default', async target => {
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      Object.defineProperty(process, 'platform', { value: target, configurable: true });
+      const config = makeConfig();
+      config.listeners['doubao-work'] = { enabled: true, pollInterval: 1200 };
+      config.listeners.doubao = { enabled: true, pollInterval: 2300 };
+      const orch = new Orchestrator(config);
+      try {
+        await orch.start();
+        const work = orch.getInputManager().getInput('doubao-work') as any;
+        const app = orch.getInputManager().getInput('doubao') as any;
+        expect(work.client).toBe('doubao-work'); expect(app.client).toBe('doubao');
+        expect(app.agentType).toBe('doubao'); expect(work.agentType).toBe('doubao-work');
+        expect(work.logDir).not.toBe(app.logDir); expect(work.snapshotRoot).not.toBe(app.snapshotRoot);
+        expect(work.pollIntervalMs).toBe(1200); expect(app.pollIntervalMs).toBe(2300);
+        expect(work.workLimits.bytes + app.workLimits.bytes).toBe(8 * 1024 * 1024);
+        const workDetection = discoveryEntries.find(entry => entry.id === 'doubao-work')!;
+        const appDetection = discoveryEntries.find(entry => entry.id === 'doubao')!;
+        (orch as any).agentControlManager.resolveEnabled = (_id: string, enabled: boolean) => enabled;
+        expect(workDetection.enabled()).toBe(true); expect(appDetection.enabled()).toBe(true);
+        config.listeners['doubao-work'].enabled = false;
+        expect(workDetection.enabled()).toBe(false); expect(appDetection.enabled()).toBe(true);
+        config.listeners['doubao-work'].enabled = true; config.listeners.doubao.enabled = false;
+        expect(workDetection.enabled()).toBe(true); expect(appDetection.enabled()).toBe(false);
+        config.listeners.doubao.enabled = true; config.listeners['doubao-work'].client = 'doubao';
+        expect(appDetection.enabled()).toBe(false);
+      } finally { await orch.stop(); Object.defineProperty(process, 'platform', platform); }
     });
 
     it('uses the configured dataDir for QwenWorkCN Hook history and watches only native sources', async () => {

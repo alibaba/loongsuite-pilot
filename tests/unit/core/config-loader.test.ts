@@ -397,6 +397,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['doubao-work']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners.doubao).toEqual({ enabled: true, pollInterval: 10_000 });
     });
 
     it('resolves the passive Doubao source override without changing other listeners', async () => {
@@ -412,7 +413,35 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'doubao' } } });
       const config = await loadConfig();
       expect(config.listeners['doubao-work']).toEqual({ enabled: true, pollInterval: 10_000, client: 'doubao' });
+      expect(config.listeners.doubao.enabled).toBe(false);
       expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('keeps explicit legacy selection while allowing an independent App listener', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'doubao-work' },
+        doubao: { enabled: true, pollInterval: 2000, logDir: '/synthetic/app/logs' } } });
+      const config = await loadConfig();
+      expect(config.listeners.doubao).toEqual({ enabled: true, pollInterval: 2000, logDir: '/synthetic/app/logs' });
+      expect(config.listeners['doubao-work'].client).toBe('doubao-work');
+    });
+
+    it.each([false, true])('does not add App to a prior installer selection with Work enabled=%s', async enabled => {
+      mockReadJsonFile.mockResolvedValueOnce({ agents: { 'doubao-work': { enabled } } });
+      expect((await loadConfig()).listeners.doubao.enabled).toBe(false);
+    });
+
+    it('honors an explicit App agent selection independently of Work', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: { 'doubao-work': { enabled: false }, doubao: { enabled: true } },
+      });
+      expect((await loadConfig()).listeners.doubao.enabled).toBe(true);
+    });
+
+    it('does not redirect the independent App listener to Work', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { doubao: { client: 'doubao-work' } } });
+      const config = await loadConfig();
+      expect(config.listeners.doubao.enabled).toBe(false);
+      expect(config.listeners['doubao-work'].enabled).toBe(true);
     });
 
     it('disables only the Doubao listener for an invalid client instead of collecting another product', async () => {
@@ -1538,7 +1567,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'none',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1551,7 +1580,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'none',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1567,7 +1596,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'all',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1592,7 +1621,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
         types: [
           'apiKey',
           'cloudAccessKey',
@@ -1618,7 +1647,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'none',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1631,7 +1660,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'custom',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1648,7 +1677,7 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual({
         mode: 'all',
         types: [],
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
       });
     });
 
@@ -1667,7 +1696,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        replacementMode: 'placeholder',
+        replacementMode: 'preview',
         types: [
           'cloudAccessKey',
           'databaseUrl',
@@ -1696,6 +1725,39 @@ describe('ConfigLoader', () => {
       });
     });
 
+    it('uses placeholder only when explicitly configured', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'all', replacementMode: 'placeholder' },
+      });
+
+      expect((await loadConfig()).mask.replacementMode).toBe('placeholder');
+    });
+
+    it('uses preview for an empty replacement mode in the config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'all', replacementMode: '' },
+      });
+
+      expect((await loadConfig()).mask.replacementMode).toBe('preview');
+    });
+
+    it.each([
+      false,
+      42,
+      {},
+      [],
+      null,
+    ])('uses preview for non-string replacement mode %j even when masking is off', async raw => {
+      for (const mode of ['all', 'none']) {
+        mockReadJsonFile.mockResolvedValueOnce({
+          mask: { mode, replacementMode: raw },
+        });
+        const config = await loadConfig();
+        expect(config.mask.mode).toBe(mode);
+        expect(config.mask.replacementMode).toBe('preview');
+      }
+    });
+
     it('uses replacement mode env over config file', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
@@ -1707,6 +1769,13 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.mask.replacementMode).toBe('preview');
+    });
+
+    it('accepts an explicit placeholder environment override', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ mask: { mode: 'all' } });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE', 'placeholder');
+
+      expect((await loadConfig()).mask.replacementMode).toBe('placeholder');
     });
 
     it('treats an empty replacement mode env as unset', async () => {
@@ -1722,7 +1791,7 @@ describe('ConfigLoader', () => {
       expect(config.mask.replacementMode).toBe('preview');
     });
 
-    it('falls back to placeholder for an invalid replacement mode', async () => {
+    it('falls back to preview for an invalid replacement mode', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
           mode: 'all',
@@ -1731,7 +1800,7 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask.replacementMode).toBe('placeholder');
+      expect(config.mask.replacementMode).toBe('preview');
     });
   });
 
@@ -2379,7 +2448,7 @@ describe('ConfigLoader', () => {
     it('defaults to none when interceptor config is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({ mode: 'none', types: [] });
+      expect(config.interceptor).toEqual({ mode: 'none' });
     });
 
     it('treats interceptor custom mode as none and does not expand mask', async () => {
@@ -2390,7 +2459,7 @@ describe('ConfigLoader', () => {
         },
       });
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({ mode: 'none', types: [] });
+      expect(config.interceptor).toEqual({ mode: 'none' });
       expect(config.mask.mode).toBe('none');
     });
 
@@ -2400,10 +2469,9 @@ describe('ConfigLoader', () => {
       });
       vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', 'all');
       const config = await loadConfig();
-      expect(config.interceptor).toEqual({ mode: 'all', types: [] });
+      expect(config.interceptor).toEqual({ mode: 'all' });
       expect(config.mask).toMatchObject({
-        mode: 'custom',
-        types: ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'],
+        mode: 'custom', types: ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'],
       });
     });
 
@@ -2414,6 +2482,48 @@ describe('ConfigLoader', () => {
       });
       const config = await loadConfig();
       expect(config.mask.mode).toBe('all');
+    });
+
+    it('merges custom mask types and preserves replacement mode when interceptor is enabled', async () => {
+      const mask = { mode: 'custom', types: ['email', 'apiKey', 'email'], replacementMode: 'preview' };
+      mockReadJsonFile.mockResolvedValueOnce({ mask, interceptor: { mode: 'all' } });
+      const config = await loadConfig();
+      expect(config.mask).toEqual({
+        mode: 'custom',
+        types: ['email', 'apiKey', 'cloudAccessKey', 'privateKey', 'databaseUrl'],
+        replacementMode: 'preview',
+      });
+    });
+
+    it('does not expand mask when an interceptor environment override disables interception', async () => {
+      const mask = { mode: 'custom', types: ['email'], replacementMode: 'preview' };
+      mockReadJsonFile.mockResolvedValueOnce({ mask, interceptor: { mode: 'all' } });
+      vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', 'none');
+      const config = await loadConfig();
+      expect(config.interceptor).toEqual({ mode: 'none' });
+      expect(config.mask).toEqual(mask);
+    });
+  });
+
+  describe('Antigravity family default listeners', () => {
+    it('enables the shared App and IDE listener and the CLI listener with 30-second polling', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      const config = await loadConfig();
+      expect(config.listeners.antigravity).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['antigravity-cli']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners).not.toHaveProperty('antigravity-ide');
+    });
+
+    it('respects per-variant Antigravity listener overrides from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        listeners: {
+          antigravity: { enabled: false },
+          'antigravity-cli': { enabled: true, pollInterval: 5_000 },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.listeners.antigravity).toEqual({ enabled: false, pollInterval: 30_000 });
+      expect(config.listeners['antigravity-cli']).toEqual({ enabled: true, pollInterval: 5_000 });
     });
   });
 });

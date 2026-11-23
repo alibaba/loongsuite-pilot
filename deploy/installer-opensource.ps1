@@ -163,7 +163,7 @@ if ($PSBoundParameters.Keys -contains 'MultimodalMode' -and -not $MultimodalMode
 }
 $script:MultimodalMode = $MultimodalMode
 # Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
-$script:MultimodalSupportedAgents = "codex,qoder"
+$script:MultimodalSupportedAgents = "codex,qoder,qwen-work-cn"
 if ($MultimodalMode) {
     if ($MultimodalMode -notin @("none", "input", "output", "all")) {
         Write-Error "Unknown multimodal mode: $MultimodalMode (use 'none', 'input', 'output', or 'all')"
@@ -1145,11 +1145,11 @@ let old = {};
 try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
-const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+const INTERCEPTOR_MASK_TYPES = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
 const parseTypeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean);
 const uniqueTypes = list => [...new Set(list)];
 const interceptorModeFinal = newVals.interceptorMode || (old.interceptor||{}).mode || '';
-const interceptorTypesFinal = interceptorModeFinal === 'all' ? INTERCEPTOR_TYPE_SET.slice() : [];
+const interceptorTypesFinal = interceptorModeFinal === 'all' ? INTERCEPTOR_MASK_TYPES.slice() : [];
 const maskModeFinal = newVals.maskMode || (old.mask||{}).mode || '';
 const maskTypesFinal = maskModeFinal === 'custom'
   ? parseTypeCsv(newVals.maskMode ? newVals.maskTypes : ((old.mask||{}).types||[]).join(','))
@@ -1596,10 +1596,10 @@ if (opts.interceptorMode) {
   config.interceptor.mode = opts.interceptorMode;
   delete config.interceptor.types;
 }
-const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
+const INTERCEPTOR_MASK_TYPES = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
 (function ensureMaskCoversInterceptor(config) {
   const interceptor = config.interceptor || {};
-  const extra = interceptor.mode === 'all' ? INTERCEPTOR_TYPE_SET.slice() : [];
+  const extra = interceptor.mode === 'all' ? INTERCEPTOR_MASK_TYPES.slice() : [];
   if (extra.length === 0) return;
   if ((config.mask || {}).mode === 'all') return;
   const current = (config.mask || {}).mode === 'custom' && Array.isArray((config.mask || {}).types)

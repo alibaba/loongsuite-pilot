@@ -3,7 +3,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'codex': 'codex',
   'codex-session': 'codex',
   'copilot': 'copilot',
-  'qoder': 'qoder',
+  'qoder': 'qoder-ide',
   'qoder-app': 'qoder-app',
   'qoder-cn': 'qoder',
   'qoder-idea': 'qoder',
@@ -26,7 +26,10 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'wukong': 'wukong',
   'workbuddy': 'workbuddy',
   'doubao-work': 'doubao',
+  'doubao': 'doubao',
   'dsh': 'dsh',
+  'antigravity': 'antigravity',
+  'antigravity-cli': 'antigravity',
 };
 
 export function resolveAgentSystem(agentType: string): string {

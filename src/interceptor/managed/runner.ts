@@ -1,4 +1,6 @@
-import type { RuleResult } from '../types.js';
+export type ScriptVerdict =
+  | { matched: false }
+  | { matched: true; reason: string };
 
 export type ScriptRunResult =
   | { ok: true; stdout: string }
@@ -18,7 +20,7 @@ export const MAX_SCRIPT_STDOUT_BYTES = 64 * 1024;
  * Accepts exactly one non-empty stdout line: `{"matched":false}` or
  * `{"matched":true,"reason":"..."}`. Anything else is a failed rule.
  */
-export function parseScriptVerdict(stdout: string): RuleResult | null {
+export function parseScriptVerdict(stdout: string): ScriptVerdict | null {
   const lines = stdout.split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0);
   if (lines.length !== 1) return null;
   let parsed: unknown;

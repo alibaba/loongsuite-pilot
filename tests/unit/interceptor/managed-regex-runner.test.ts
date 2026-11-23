@@ -1,6 +1,6 @@
 import type { Worker } from 'node:worker_threads';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ManagedRegexRunner, ManagedRegexTimeoutError } from '../../../src/interceptor/managed/regex-runner.js';
+import { ManagedRegexRunner, ManagedRegexCancelledError, ManagedRegexTimeoutError } from '../../../src/interceptor/managed/regex-runner.js';
 
 const { terminationWarning } = vi.hoisted(() => ({ terminationWarning: vi.fn() }));
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -29,6 +29,13 @@ describe('managed regex matching thread', () => {
     await expect(instance.test('[', 'x')).rejects.toThrow();
     await expect(instance.test('next', 'next')).resolves.toBe(true);
     expect(matchingWorker(instance)).toBe(worker);
+  });
+
+  it('returns execution timing measured inside the matching worker', async () => {
+    const onExecuted = vi.fn();
+    await expect(runner().test('hello', 'hello', 1_000, onExecuted)).resolves.toBe(true);
+    expect(onExecuted).toHaveBeenCalledWith(expect.any(Number));
+    expect(onExecuted.mock.calls[0][0]).toBeGreaterThanOrEqual(0);
   });
 
   it('terminates catastrophic matches and exits each old thread before reusing a replacement', async () => {
@@ -82,7 +89,7 @@ describe('managed regex matching thread', () => {
     await expect(instance.test('(a+)+$', `${'a'.repeat(32)}!`, 100))
       .rejects.toBeInstanceOf(ManagedRegexTimeoutError);
     const waiting = instance.test('waiting', 'waiting', 5_000);
-    const failed = expect(waiting).rejects.toThrow('stopped');
+    const failed = expect(waiting).rejects.toBeInstanceOf(ManagedRegexCancelledError);
     await new Promise(resolve => setTimeout(resolve, 0));
     instance.stop();
     await failed;
@@ -95,13 +102,15 @@ describe('managed regex matching thread', () => {
     await instance.test('warm', 'warm');
     const worker = matchingWorker(instance)!;
     const slow = instance.test('(a+)+$', `${'a'.repeat(32)}!`, 5_000);
-    const failed = expect(slow).rejects.toThrow('stopped');
+    const failed = expect(slow).rejects.toBeInstanceOf(ManagedRegexCancelledError);
+    const queued = expect(instance.test('queued', 'queued', 5_000)).rejects.toBeInstanceOf(ManagedRegexCancelledError);
     await new Promise(resolve => setTimeout(resolve, 40));
     instance.stop();
     await failed;
+    await queued;
     await vi.waitFor(() => expect(worker.threadId).toBe(-1));
     expect(matchingWorker(instance)).toBeNull();
-    await expect(instance.test('a', 'a')).rejects.toBeInstanceOf(ManagedRegexTimeoutError);
+    await expect(instance.test('a', 'a')).rejects.toBeInstanceOf(ManagedRegexCancelledError);
   });
 
   it('reports a failed termination once and refuses to start an overlapping matching thread', async () => {
