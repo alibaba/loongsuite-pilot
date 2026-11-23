@@ -78,7 +78,7 @@ Pilot is designed to answer practical questions:
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
 | [Doubao Work (macOS/Windows, experimental)](docs/doubao-work.md) | Read-only logs + execution metadata | Client turns, local tools + native sandbox executions | Metadata only | No | No |
-| [Doubao App work mode (macOS/Windows, experimental)](docs/doubao-work.md) | Same parser, independent discovery and state | Client turns, local tools + native sandbox executions | Metadata only | No | No |
+| [Doubao App (experimental)](docs/doubao-work.md) | Read-only logs, work trajectories and chat task store | Client turns, text chat + work-mode local tools/executions | Client events and available I/O | No | Text chat and work-mode content |
 
 GitHub Copilot CLI automatic deployment supports Unix shells. Exact per-call token usage requires native OTel; transcript-only collection omits unavailable usage. Windows and subagents are not supported. See [telemetry details](docs/zh-CN/copilot-native-telemetry.md).
 

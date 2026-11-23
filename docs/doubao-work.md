@@ -102,7 +102,17 @@ Explicit legacy `listeners.doubao-work.client` retains single-product behavior: 
 
 The independent listeners use `doubao` and `doubao-work` for `gen_ai.agent.type`, `gen_ai.framework`, fallback Agent IDs, and Agent-derived service name suffixes. The legacy App listener keeps `doubao-work` for these fields and continues to use that Agent's content policy. `loongsuite.doubao_work.client` identifies the source product in either mode. Native main and child Agent IDs retain their source values.
 
-The App work mode was exercised with real macOS and Windows clients on 2026-10-30, covering tools, menu-selected Skills, parallel/background subagents and reuse. Ordinary chat and complete provider telemetry remain outside the supported scope. Ordinary chat need not produce a work trajectory; request boundaries cannot reconstruct missing LLM messages. Multiple real demands remain ambiguous even with identical text or timestamps.
+The App work mode was exercised with real macOS and Windows clients on 2026-10-30, covering tools, menu-selected Skills, parallel/background subagents and reuse. Multiple real demands remain ambiguous even with identical text or timestamps.
+
+### Doubao App ordinary chat
+
+Ordinary text chat uses the default `doubao` listener. Client lifecycle logs provide request UUIDs, conversation and message IDs, and submit/receive boundaries. Request messages come from the task store under `Profile */IndexedDB/chrome_doubao-chat_0.indexeddb.leveldb`. Pilot passively reads Chromium WALs and immutable SSTables, validates checksums and fragments, and correlates all native message identities. Pending requests survive late writes, partial records, temporary failures and collector restart.
+
+The latest sequence snapshot for each task-store key determines available content. Empty snapshots, removed requests and deletion records invalidate older content. Corrupt or unsupported task-store records keep collection pending. Content already cleared by the client can remain unavailable.
+
+Text input/output exports as ENTRY → AGENT → STEP → LLM through the existing identity, content policy and masking pipeline. LLM timing uses client submission through `on_message_receiving_end`, recorded in `loongsuite.doubao_work.timing_basis`. The internal model enum remains a source-specific attribute. Provider model names and token usage require further source support. macOS App 2.34.6 supplied the native protocol and live text-chat evidence. Windows ordinary-chat runtime validation and non-text message blocks remain pending.
+
+Chat reads share the existing collection-cycle budget. Limits include 32 WAL/table files, 8 MiB per logical record or table, 512 KiB per text field, and 128 projected tasks per source. Content cache capacity is 16 MiB, halved when both products run, with up to 8 MiB additional temporary table-decoding space. Unchanged WALs only verify a small anchor, and unchanged tables require no body reads. Raw task objects and content caches remain in memory.
 
 The Agent definition is detection-only. Disabling the Agent/listener stops collection. Runtime Skill loading, the separate cloud partner page and complete cloud invocation lifecycles remain uncovered.
 
