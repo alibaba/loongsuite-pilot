@@ -106,6 +106,12 @@ export function prepareCodexTurn(
     startLlm(inv, context, start) {
       const own = byResponse.get(inv.responseId ?? undefined) ?? [];
       attributes(inv, { ...consensus(own, WORK_KEYS), ...consensus(own, ['gen_ai.step.id']) });
+      if (own.some(record => record['event.name'] === 'llm.request'
+        && record['gen_ai.conversation.compacted'] === true)) {
+        // The SDK accumulates prior request deltas across the whole turn. A
+        // native encrypted rewrite invalidates that reconstructed full history.
+        inv.inputMessages = [];
+      }
       return handler.startLlm(inv, context, start);
     },
     startExecuteTool(inv, context, start) {
