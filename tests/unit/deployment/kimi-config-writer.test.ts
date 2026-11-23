@@ -6,6 +6,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  cleanupInstalledKimiHooks,
   installKimiHooks,
   uninstallKimiHooks,
   isKimiHookInstalled,
@@ -210,5 +211,29 @@ describe('kimi-config-writer install / uninstall', () => {
     // 这是已知 trade-off（smol-toml 无法 round-trip 损坏文件）。
     await installKimiHooks({ configPath, hookCommand: HOOK_CMD, events: ['Stop'] });
     expect(readConfig()).toContain('event = "Stop"');
+  });
+});
+
+describe('uninstall cleanup for installed Pilot packages', () => {
+  test('removes both platform hook commands while keeping third-party hooks and settings', async () => {
+    const windowsCommand = 'powershell.exe -File "C:/Pilot Data/hooks/kimi-cli-loongsuite-pilot-hook.ps1"';
+    const other = 'bash /third-party/hooks/custom-stop.sh';
+    fs.writeFileSync(configPath, 'model = "kimi"\n' + [HOOK_CMD, windowsCommand, other].map(command =>
+      '[[hooks]]\nevent = "Stop"\ncommand = ' + JSON.stringify(command) + '\n',
+    ).join(''));
+
+    await cleanupInstalledKimiHooks(configPath);
+    await cleanupInstalledKimiHooks(configPath);
+
+    expect(readConfig()).toContain('model = "kimi"');
+    expect(readConfig()).toContain(other);
+    expect(readConfig()).not.toContain('kimi-cli-loongsuite-pilot-hook');
+  });
+
+  test('retains invalid TOML for manual recovery', async () => {
+    const invalid = '[[hooks]\ncommand = ' + JSON.stringify(HOOK_CMD) + '\n';
+    fs.writeFileSync(configPath, invalid);
+    await expect(cleanupInstalledKimiHooks(configPath)).rejects.toThrow();
+    expect(readConfig()).toBe(invalid);
   });
 });

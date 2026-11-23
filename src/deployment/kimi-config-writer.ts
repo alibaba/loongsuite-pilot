@@ -242,3 +242,24 @@ export async function listOwnedKimiEntries(
   const hooks = normalizeHooksArray(data.hooks);
   return hooks.filter((e) => isOwnedEntry(e, hookCommand, replaceHookCommands));
 }
+
+/** Clean only installed Pilot hook commands, including older data-dir locations. */
+export async function cleanupInstalledKimiHooks(configPath: string): Promise<void> {
+  let raw: string;
+  try {
+    raw = await fsp.readFile(configPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  const config = parse(raw.replace(/^\uFEFF/, '')) as ParsedConfig;
+  if (!Array.isArray(config.hooks)) return;
+  const survivors = config.hooks.filter(entry =>
+    typeof entry?.command !== 'string'
+    || !/(?:^|[\\/])hooks[\\/]kimi-cli-loongsuite-pilot-hook\.(?:sh|ps1)["']?$/i.test(entry.command),
+  );
+  if (survivors.length === config.hooks.length) return;
+  if (survivors.length > 0) config.hooks = survivors;
+  else delete config.hooks;
+  await writeKimiConfig(configPath, config);
+}

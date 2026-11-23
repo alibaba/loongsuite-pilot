@@ -2,10 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { cleanupInstalledKimiHooks } from './deployment/kimi-config-writer.js';
 import { DeploymentManager } from './deployment/deployment-manager.js';
 import { supportsSystemTomlHooks } from './deployment/system-toml-hooks.js';
 
 async function main(): Promise<void> {
+  if (process.argv[2] === '--kimi') {
+    const configPath = process.argv[3];
+    if (!configPath || !path.isAbsolute(configPath)) throw new Error('Expected absolute Kimi configuration path');
+    await cleanupInstalledKimiHooks(configPath);
+    return;
+  }
   const dataDir = process.argv[2];
   if (!dataDir || !path.isAbsolute(dataDir)) throw new Error('Expected absolute Pilot data directory');
   let state: Record<string, unknown>;
@@ -24,6 +31,6 @@ async function main(): Promise<void> {
 }
 
 void main().catch(error => {
-  process.stderr.write(`System hook cleanup incomplete; Pilot assets retained for retry: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`Hook cleanup incomplete; Pilot assets retained for retry: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

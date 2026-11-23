@@ -2207,6 +2207,28 @@ try {
     }
 }
 
+function Remove-KimiHookConfig {
+    $config = Join-Path $env:USERPROFILE ".kimi\config.toml"
+    if (-not (Test-Path -LiteralPath $config)) { return }
+    if (-not (Select-String -LiteralPath $config -Pattern 'kimi-cli-loongsuite-pilot-hook.' -SimpleMatch -Quiet)) { return }
+
+    $candidates = @((Join-Path $DataDir 'dist/scope-cleanup.cjs'),
+                    (Join-Path $script:PERMANENT_DIR 'dist/scope-cleanup.cjs'))
+    $currentFile = Join-Path $CACHE_DIR 'current'
+    if (Test-Path -LiteralPath $currentFile) {
+        $version = (Get-Content -LiteralPath $currentFile -Raw -Encoding UTF8).Trim()
+        $candidates = @((Join-Path $CACHE_DIR "versions/$version/dist/scope-cleanup.cjs")) + $candidates
+    }
+    foreach ($helper in $candidates) {
+        if ($script:NODE_BIN -and (Test-Path -LiteralPath $helper)) {
+            & $script:NODE_BIN $helper --kimi $config
+            if ($LASTEXITCODE -ne 0) { throw 'Kimi hook cleanup failed; Pilot assets retained for retry' }
+            return
+        }
+    }
+    throw 'Kimi hook cleanup helper unavailable; Pilot assets retained for retry'
+}
+
 # Grok Build's hook file is Pilot-owned, but still preserve any third-party
 # entries that may have been added to it. Stable script-name matching also
 # works when Pilot was installed with a custom data directory.
@@ -3662,6 +3684,7 @@ function Cmd-Uninstall {
 
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     Remove-HookConfigs
+    Remove-KimiHookConfig
     try {
         Remove-CodexHookConfig
     } catch {

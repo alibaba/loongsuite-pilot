@@ -1,4 +1,4 @@
-# Kimi CLI hook entrypoint (Windows) — delegates to kimi-cli-hook-processor.mjs.
+# Kimi CLI hook entrypoint (Windows) - delegates to kimi-cli-hook-processor.mjs.
 #
 # Usage (registered in ~/.kimi/config.toml [[hooks]] by pilot HookStrategy):
 #   powershell -File $PILOT_DATA/hooks/kimi-cli-loongsuite-pilot-hook.ps1
@@ -26,7 +26,7 @@ function Log-Error {
         $time = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
         $escapedMsg = $Message -replace '\\', '\\\\' -replace '"', '\"'
         $line = "{`"time`":`"$time`",`"gen_ai.agent.type`":`"kimi`",`"stage`":`"$Stage`",`"error.type`":`"ps1_$Stage`",`"error.message`":`"$escapedMsg`"}"
-        Add-Content -Path $file -Value $line
+        Add-Content -LiteralPath $file -Value $line -Encoding UTF8
     } catch {}
 }
 
@@ -56,9 +56,11 @@ function Test-NodeSuitable {
 }
 
 function Resolve-NodeBin {
-    $pinFile = Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
+    $dataDir = if ($env:LOONGSUITE_PILOT_DATA_DIR) { $env:LOONGSUITE_PILOT_DATA_DIR }
+               else { Join-Path $env:USERPROFILE ".loongsuite-pilot" }
+    $pinFile = Join-Path $dataDir "node-bin"
     if (Test-Path $pinFile) {
-        $pinned = (Get-Content $pinFile -ErrorAction SilentlyContinue).Trim()
+        $pinned = ([string](Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
         if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
     }
     $candidates = @()
@@ -92,34 +94,10 @@ if (-not $nodeBin) {
 }
 
 try {
-    $stdinStream = [Console]::OpenStandardInput()
-    $ms = New-Object System.IO.MemoryStream
-    $stdinStream.CopyTo($ms)
-    $rawBytes = $ms.ToArray()
-    $ms.Dispose()
-
-    if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
-        $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
-    }
-
-    if ($rawBytes.Length -eq 0) {
-        $result = & $nodeBin $Processor 2>$null
-    } else {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $nodeBin
-        $psi.Arguments = "`"$Processor`""
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardInput = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $false
-        $psi.CreateNoWindow = $true
-
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        $proc.StandardInput.BaseStream.Write($rawBytes, 0, $rawBytes.Length)
-        $proc.StandardInput.Close()
-        $result = $proc.StandardOutput.ReadToEnd()
-        $proc.WaitForExit()
-    }
+    # Node reads the inherited stdin bytes and decodes the payload. This also
+    # works in Windows PowerShell Constrained Language Mode.
+    $result = & $nodeBin $Processor 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "processor exited with code $LASTEXITCODE" }
     if ($result) { Write-Output $result } else { Write-Output $EMPTY_RESULT }
 } catch {
     Write-Error "[kimi-hook] processor failed"
