@@ -1097,13 +1097,16 @@ export class QoderTranscriptCollector {
       && !firstRequest['agent.pilot.interceptor.correlation'].requestId) {
       firstRequest['agent.pilot.interceptor.correlation'].requestId = crypto.createHash('sha256').update(promptRequestId).digest('hex');
     }
-    for (let index = 0; index < records.length; index++) {
-      const record = records[index];
+    let ordinaryIndex = 0;
+    for (const record of records) {
       // In-process provenance for the IDE adapter. Never serialized to events.
       Object.defineProperty(record, Symbol.for('loongsuite.qoder.native-source'), {
         value: source.transcriptPath,
       });
-      if (record['event.name'] !== 'gen_ai.context.compress') record['event.id'] = digest([turnId, index, record['event.name'], record['gen_ai.tool.call.id']]);
+      if (record['event.name'] !== 'gen_ai.context.compress') {
+        record['event.id'] = digest([turnId, ordinaryIndex, record['event.name'], record['gen_ai.tool.call.id']]);
+        ordinaryIndex++;
+      }
       record['agent.transcript.cursor_mode'] = checkpoint.recoveryReason === 'incremental' ? 'incremental' : 'bootstrap';
       record['agent.transcript.cursor_reason'] = checkpoint.recoveryReason ?? 'incremental';
       record['agent.transcript.cursor_batch_id'] = turnId;

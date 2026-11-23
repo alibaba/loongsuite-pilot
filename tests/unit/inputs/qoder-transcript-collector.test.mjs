@@ -81,6 +81,13 @@ describe.each(['qoder', 'qoder-cn'])('native %s transcript collection', id => {
     expect(compression).toHaveLength(1);
     expect(compression[0]['gen_ai.context.compress.duration']).toBe(1.5);
     expect(compression[0]['gen_ai.context.compression_ratio']).toBe(0.25);
+    const ordinary = records.filter(r => r['event.name'] !== 'gen_ai.context.compress');
+    ordinary.forEach((record, index) => {
+      const expected = crypto.createHash('sha256').update(JSON.stringify([
+        record['gen_ai.turn.id'], index, record['event.name'], record['gen_ai.tool.call.id'],
+      ])).digest('hex');
+      expect(record['event.id']).toBe(expected);
+    });
     expect((await collect()).records).toEqual([]);
   });
 
