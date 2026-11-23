@@ -1,5 +1,4 @@
 import * as fs from 'node:fs/promises';
-import { rmSync } from 'node:fs';
 import * as path from 'node:path';
 import type { StatusBarConfig } from '../types/index.js';
 import { writeJsonFile, ensureDir } from '../utils/fs-utils.js';
@@ -21,6 +20,8 @@ export class RuntimeWriter {
   private readonly packageVersion: string;
   private readonly gitCommit: string;
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
+  private pendingWrite: Promise<void> | null = null;
+  private stopping: Promise<void> | null = null;
 
   constructor(dataDir: string, config: StatusBarConfig, packageVersion: string, gitCommit = '') {
     this.filePath = path.join(dataDir, 'logs', 'runtime.json');
@@ -30,12 +31,12 @@ export class RuntimeWriter {
   }
 
   start(): void {
-    void this.write();
-
+    if (this.intervalTimer || this.stopping) return;
     this.intervalTimer = setInterval(
-      () => void this.write(),
+      () => this.refresh(),
       this.config.runtimeRefreshIntervalMs,
     );
+    this.refresh();
 
     logger.info('runtime writer started', {
       path: this.filePath,
@@ -43,18 +44,29 @@ export class RuntimeWriter {
     });
   }
 
-  stop(): void {
+  stop(): Promise<void> {
     if (this.intervalTimer) {
       clearInterval(this.intervalTimer);
       this.intervalTimer = null;
     }
+    this.stopping ??= this.removeAfterWrite().finally(() => { this.stopping = null; });
+    return this.stopping;
+  }
 
+  private async removeAfterWrite(): Promise<void> {
+    // An atomic write that has already started can publish after the timer stops.
+    await this.pendingWrite;
     try {
-      rmSync(this.filePath, { force: true });
+      await fs.rm(this.filePath, { force: true });
     } catch {
-      // ignore — file may not exist
+      // Cleanup is best-effort if the file cannot be removed.
     }
     logger.info('runtime writer stopped');
+  }
+
+  private refresh(): void {
+    if (!this.intervalTimer || this.pendingWrite) return;
+    this.pendingWrite = this.write().finally(() => { this.pendingWrite = null; });
   }
 
   private async write(): Promise<void> {

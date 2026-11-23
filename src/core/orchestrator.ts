@@ -594,7 +594,7 @@ export class Orchestrator extends EventEmitter {
     this.interceptorService = null;
     this.verdictStore = null;
     await this.metricsSummaryWriter?.stop();
-    this.runtimeWriter?.stop();
+    await this.runtimeWriter?.stop();
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
     this.legacySlsFailedLogCleanupService?.stop();
