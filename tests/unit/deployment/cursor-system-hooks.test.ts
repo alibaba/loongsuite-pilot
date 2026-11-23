@@ -317,13 +317,20 @@ describe('Cursor enterprise system registration', () => {
     expect(JSON.parse(missing.stdout)).toEqual({});
   });
 
-  it('recovers a native headless turn through the installed system wrapper', async () => {
+  it.each([true, false])('recovers a native headless turn with system capture set to %s', async (capture) => {
     const target = systemHookDefinition({
       ...def, hook: { ...def.hook!, events: [...def.hook!.events, 'sessionEnd'] },
     });
     const manager = new DeploymentManager({ dataDir, pilotDir });
-    await write(path.join(dataDir, 'config.json'), JSON.stringify({ privacy: { captureMessageContent: true } }));
+    await write(path.join(dataDir, 'config.json'), JSON.stringify({
+      agents: { 'cursor-cli': { captureMessageContent: capture } },
+    }));
     expect((await manager.deployHookScope(target)).success).toBe(true);
+    const userPolicy = path.join(root, 'user-policy.json');
+    await write(userPolicy, JSON.stringify({
+      agents: { 'cursor-cli': { captureMessageContent: !capture } },
+    }));
+    await write(path.join(dataDir, 'hooks', 'cursor-config-path'), userPolicy);
 
     const home = path.join(root, 'identity-created-after-install');
     const session = 'headless-session';
@@ -348,7 +355,10 @@ describe('Cursor enterprise system registration', () => {
     const history = path.join(dataDir, 'logs/cursor/history');
     const files = (await fs.readdir(history)).filter(file => file.endsWith('.jsonl'));
     expect(files).toHaveLength(1);
-    expect(await fs.readFile(path.join(history, files[0]), 'utf8')).toContain('native assistant reply');
+    const output = await fs.readFile(path.join(history, files[0]), 'utf8');
+    expect(output).toContain('llm.response');
+    expect(output.includes('native user prompt')).toBe(capture);
+    expect(output.includes('native assistant reply')).toBe(capture);
     await expect(fs.stat(path.join(home, '.loongsuite-pilot'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 

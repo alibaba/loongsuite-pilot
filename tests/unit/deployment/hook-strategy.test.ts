@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as path from 'node:path';
 import { HookStrategy } from '../../../src/deployment/hook-strategy.js';
 import type { HookManager } from '../../../src/hooks/hook-manager.js';
 import type { AgentDefinition, DeployedAgentRecord } from '../../../src/types/index.js';
@@ -53,6 +54,7 @@ vi.mock('../../../src/deployment/codex-trust-writer.js', () => ({
 
 import { detectAgent } from '../../../src/deployment/detect-utils.js';
 import * as fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import {
   fileExists,
   readJsonFile,
@@ -102,6 +104,8 @@ describe('HookStrategy', () => {
     strategy = new HookStrategy(mockHookManager as any);
   });
 
+  afterEach(() => vi.unstubAllEnvs());
+
   describe('detect', () => {
     it('delegates to detectAgent', async () => {
       vi.mocked(detectAgent).mockResolvedValue(true);
@@ -118,6 +122,18 @@ describe('HookStrategy', () => {
   });
 
   describe('needsDeploy', () => {
+    it.each(['cursor', 'cursor-cli'])('repairs a missing or stale %s config path even when hooks are installed', async (id) => {
+      vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '/custom/policy.json');
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      const def = makeDef({ id });
+      vi.mocked(fs.readFile).mockRejectedValueOnce(new Error('missing'));
+      expect(await strategy.needsDeploy(def)).toBe(true);
+      vi.mocked(fs.readFile).mockResolvedValueOnce('/old/policy.json');
+      expect(await strategy.needsDeploy(def)).toBe(true);
+      vi.mocked(fs.readFile).mockResolvedValueOnce(JSON.stringify({ path: path.resolve('/custom/policy.json'), implicitDefault: false }));
+      expect(await strategy.needsDeploy(def)).toBe(false);
+    });
+
     it('returns true when any hook is not installed', async () => {
       mockHookManager.isHookInstalled
         .mockResolvedValueOnce(true)
@@ -499,6 +515,38 @@ describe('HookStrategy', () => {
   });
 
   describe('deploy', () => {
+    it('records whether the config path was selected implicitly', async () => {
+      vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '');
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+      mockHookManager.installHook.mockResolvedValue(true);
+      expect((await strategy.deploy(makeDef({ id: 'cursor' }))).success).toBe(true);
+      const location = JSON.parse(vi.mocked(writeTextFileAtomic).mock.calls[0][1]);
+      expect(location.implicitDefault).toBe(true);
+      expect(path.isAbsolute(location.path)).toBe(true);
+    });
+
+    it('does not write a config marker for a shared-hook declaration with no command', async () => {
+      const def = makeDef({ id: 'cursor-cli', hook: {
+        settingsPath: '/home/.cursor/hooks.json', events: [], hookCommand: '', format: 'flat',
+      } });
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+      expect(await strategy.needsDeploy(def)).toBe(false);
+      expect((await strategy.deploy(def)).success).toBe(true);
+      expect(writeTextFileAtomic).not.toHaveBeenCalled();
+    });
+
+    it.each(['cursor', 'cursor-cli'])('passes the collector config path to %s hooks', async (id) => {
+      vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '/custom/policy.json');
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+      expect((await strategy.deploy(makeDef({ id }))).success).toBe(true);
+      expect(writeTextFileAtomic).toHaveBeenCalledWith(
+        path.join('/opt/pilot/hooks', 'cursor-config-path'),
+        JSON.stringify({ path: path.resolve('/custom/policy.json'), implicitDefault: false }),
+      );
+    });
+
     it('returns error when hook config is missing', async () => {
       const def = makeDef({ hook: undefined });
       const result = await strategy.deploy(def);
@@ -1208,6 +1256,26 @@ describe('HookStrategy', () => {
         insert: 'head',
         useNestedFormat: true,
       });
+    });
+
+    it('installs the shipped QwenWorkCN prompt registration with interception disabled', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+      const shipped = JSON.parse(readFileSync('agents.d/qwen-work-cn.json', 'utf8'));
+      const def = makeDef(shipped);
+      def.hook!.settingsPath = '/home/.qwenworkcn/settings.json';
+      def.hook!.hookCommand = '/opt/pilot/hooks/qwenworkcn-loongsuite-pilot-hook.sh';
+
+      const result = await strategy.deploy(def);
+      expect(result.success).toBe(true);
+      expect(mockHookManager.installHook.mock.calls.map(([hook]) => ({
+        event: hook.hookJsonPath[1], command: hook.hookCommand,
+      }))).toEqual([
+        { event: 'Stop', command: def.hook!.hookCommand },
+        { event: 'UserPromptSubmit', command: def.hook!.hookCommand },
+      ]);
+      mockHookManager.isHookInstalled.mockImplementation(async hook => hook.hookJsonPath[1] !== 'UserPromptSubmit');
+      await expect(strategy.needsDeploy(def)).resolves.toBe(true);
     });
 
     it('needs deploy when the interceptor hook is missing or not at head', async () => {

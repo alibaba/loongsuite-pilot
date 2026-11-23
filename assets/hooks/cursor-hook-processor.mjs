@@ -27,6 +27,8 @@ import {
 } from './agent-event-normalizer.mjs';
 import { cursorVariantFromVersion, omitCursorEventContent, toInternalEvent } from './cursor/source-event.mjs';
 import { appendEvent, CURSOR_DATA_DIR, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
+import { withAssemblyLock } from './cursor/assembly-lock.mjs';
+import { inspectTurnJournal, selectTurnEvents } from './cursor/turn-events.mjs';
 import { assembleTurn } from './cursor/react-assembler.mjs';
 import { buildCursorCliRecordsFromCompletedTurn, buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
 import { appendCursorCliRecoveredTurn, readCursorCliCompletedTurn } from './cursor/cli-transcript-recovery.mjs';
@@ -156,18 +158,12 @@ function applyCursorCliResourceContext(records, events, conversationId, variant)
   }
 }
 
-function compactJournal(allEvents, consumedConversationIds) {
-  const pendingTurnConvIds = new Set();
-  const remaining = [];
-  for (const ev of allEvents) {
-    if (consumedConversationIds.has(ev.conversation_id)) continue;
-    if (ev.hook_event === 'beforeSubmitPrompt') pendingTurnConvIds.add(ev.conversation_id);
-  }
-  for (const ev of allEvents) {
-    if (consumedConversationIds.has(ev.conversation_id)) continue;
-    if (pendingTurnConvIds.has(ev.conversation_id)) remaining.push(ev);
-  }
-  rewriteJournal(remaining, allEvents);
+const CURSOR_ORPHAN_GRACE_MS = 15 * 60 * 1000;
+
+function compactJournal(snapshot, consumedConversationIds, turnEvents, staleBefore) {
+  const consumed = new Set(turnEvents.filter(e => consumedConversationIds.has(e.conversation_id)));
+  const unconsumed = snapshot.filter(e => !consumed.has(e));
+  rewriteJournal(inspectTurnJournal(unconsumed, staleBefore).remaining, snapshot);
 }
 
 function recoverCursorCliSessionEnd(endEvent, dataDir, runtimeConfig) {
@@ -515,9 +511,37 @@ async function main() {
     return;
   }
 
-  // Convert to internal event and append to journal
-  // A custom install stores its config here. A log-only override can use the home config.
-  const runtimeConfig = loadHookRuntimeConfig(dataDir, { fallbackToHome: true });
+  // Installed hooks follow the collector, even if Cursor inherited a different
+  // config override. Standalone hooks retain the normal environment fallback.
+  let configPath;
+  let implicitDefault = false;
+  if (process.env.LOONGSUITE_PILOT_CURSOR_SYSTEM_SCOPE === '1') {
+    // The system wrapper validates this file before invoking the processor.
+    configPath = path.join(dataDir, 'config.json');
+  } else {
+    try {
+      const marker = (await fs.readFile(new URL('./cursor-config-path', import.meta.url), 'utf8')).trim();
+      if (marker.startsWith('{')) {
+        const location = JSON.parse(marker);
+        configPath = location.path;
+        implicitDefault = location.implicitDefault === true;
+      } else {
+        configPath = marker; // Earlier deployments stored just the path.
+      }
+      if (typeof configPath !== 'string' || !path.isAbsolute(configPath)) {
+        throw new Error('Invalid deployed Cursor config path');
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      configPath = process.env.AGENT_DATA_COLLECTION_CONFIG?.trim();
+      implicitDefault = !configPath;
+    }
+    configPath = (configPath || path.join(os.homedir(), '.loongsuite-pilot', 'config.json'))
+      .replace(/^~(?=[/\\]|$)/, os.homedir());
+  }
+  const runtimeConfig = loadHookRuntimeConfig(undefined, { configPath, implicitDefault });
+  // Workspace exclusions and content capture must use the same file.
+  process.env.AGENT_DATA_COLLECTION_CONFIG = configPath;
   const eventVariant = cursorVariantFromVersion(payload.cursor_version);
   // Only inspect the open journal when this event would otherwise be allowed
   // and the other Cursor source has a different policy.
@@ -566,42 +590,53 @@ async function main() {
     return;
   }
 
-  if (eventVariant === 'cursor-cli' && internalEvent.hook_event === 'sessionEnd' && internalEvent.reason === 'completed') {
-    try {
-      recoverCursorCliSessionEnd(internalEvent, dataDir, runtimeConfig);
-    } catch (err) {
-      await appendErrorJsonl(dataDir, now, {
-        stage: 'cli_transcript_recovery',
-        'error.type': 'cli_transcript_recovery_failed',
-        'error.message': err?.code || 'Cursor CLI transcript recovery failed',
-      });
+  // Ownership covers snapshot, history write and consumption. Other hooks may
+  // append meanwhile; journal compaction preserves those appended events.
+  await withAssemblyLock(async () => {
+    if (eventVariant === 'cursor-cli' && internalEvent.hook_event === 'sessionEnd' && internalEvent.reason === 'completed') {
+      try {
+        recoverCursorCliSessionEnd(internalEvent, dataDir, runtimeConfig);
+      } catch (err) {
+        await appendErrorJsonl(dataDir, now, {
+          stage: 'cli_transcript_recovery',
+          'error.type': 'cli_transcript_recovery_failed',
+          'error.message': err?.code || 'Cursor CLI transcript recovery failed',
+        });
+      }
     }
-  }
 
+    const staleBefore = Date.now() - CURSOR_ORPHAN_GRACE_MS;
+    const snapshot = readAllEvents();
+    const { stops, remaining } = inspectTurnJournal(snapshot, staleBefore);
+    if (remaining.length !== snapshot.length) rewriteJournal(remaining, snapshot);
+    for (const stop of stops) {
+      const isCurrentStop = internalEvent.hook_event === 'stop'
+        && stop.conversation_id === internalEvent.conversation_id
+        && stop.generation_id === internalEvent.generation_id
+        && stop._journal_ts === internalEvent._journal_ts;
+      await assembleJournalEvent(stop, dataDir, runtimeConfig, now, isCurrentStop, staleBefore);
+    }
+  });
+  writeEmptyResponse();
+}
+
+async function assembleJournalEvent(internalEvent, dataDir, runtimeConfig, now, isCurrentStop, staleBefore) {
   // On stop: assemble turn and write history
   if (internalEvent.hook_event === 'stop') {
     try {
-      const allEvents = readAllEvents();
+      const snapshot = readAllEvents();
+      const allEvents = selectTurnEvents(snapshot, internalEvent);
 
       // NOTE: preToolUse events may arrive after stop is processed due to Cursor's
       // parallel hook invocation. When this happens, tool.call/result records are
       // absent from the output — this is a known Cursor hook timing limitation.
 
-      // Guard against duplicate stop events: if journal has no beforeSubmitPrompt
-      // for this conversation, the turn was already processed — skip to avoid duplication.
+      // Another Stop in the same scan may already have consumed this turn.
       const hasPendingTurn = allEvents.some(e =>
         e.hook_event === 'beforeSubmitPrompt' &&
         e.conversation_id === internalEvent.conversation_id
       );
-      if (!hasPendingTurn) {
-        await appendErrorJsonl(dataDir, now, {
-          stage: 'stop_guard',
-          'error.type': 'info',
-          'error.message': `skipped duplicate stop for conv=${internalEvent.conversation_id?.slice(0, 8)} (no pending beforeSubmitPrompt)`,
-        });
-        writeEmptyResponse();
-        return;
-      }
+      if (!hasPendingTurn) return;
 
       // ─── Deferred-stop for Cursor CLI ───
       // Cursor CLI fires stop BEFORE afterAgentResponse. If there's a prompt but
@@ -611,13 +646,15 @@ async function main() {
       const convId = internalEvent.conversation_id;
       const history = prepareHistory(allEvents, convId, runtimeConfig);
       const { variant } = history;
-      const transcriptPath = history.allowTranscriptText ? internalEvent.transcript_path : undefined;
+      // A transcript may already describe a newer turn by the time recovery
+      // runs. Recover from the scoped journal instead of borrowing its text.
+      const transcriptPath = history.allowTranscriptText && isCurrentStop
+        ? internalEvent.transcript_path : undefined;
       const hasResponse = allEvents.some(e =>
         e.hook_event === 'afterAgentResponse' && e.conversation_id === convId
       );
       if (variant === 'cursor-cli' && !hasResponse) {
         // defer — afterAgentResponse handler will trigger assembly
-        writeEmptyResponse();
         return;
       }
 
@@ -647,6 +684,7 @@ async function main() {
           variant,
           stopConversationId: convId,
           transcriptPath,
+          journalSnapshot: snapshot,
         });
         records = result.records;
         consumedConversationIds = result.consumedConversationIds;
@@ -684,7 +722,7 @@ async function main() {
         await appendBatchJsonl(historyFile, records, variant);
       }
 
-      compactJournal(allEvents, consumedConversationIds);
+      compactJournal(snapshot, consumedConversationIds, allEvents, staleBefore);
     } catch (err) {
       await appendErrorJsonl(dataDir, now, {
         stage: 'assemble',
@@ -693,48 +731,6 @@ async function main() {
       });
     }
   }
-
-  // ─── Deferred-stop compensation: assemble when late response arrives ───
-  // When stop was deferred (no response yet), afterAgentResponse triggers assembly.
-  if (internalEvent.hook_event === 'afterAgentResponse') {
-    try {
-      const allEvents = readAllEvents();
-      const convId = internalEvent.conversation_id;
-      const hasStop = allEvents.some(e =>
-        e.hook_event === 'stop' && e.conversation_id === convId
-      );
-      if (hasStop) {
-        const history = prepareHistory(allEvents, convId, runtimeConfig);
-        const { variant } = history;
-        // Note: transcriptPath is deliberately omitted here — assembleTurn falls
-        // back to stopEvent?.transcript_path internally. Passing internalEvent's
-        // transcriptPath (from afterAgentResponse) would be incorrect.
-        const result = assembleTurn(history.events, {
-          runtimeConfig: history.runtimeConfig,
-          variant,
-          stopConversationId: convId,
-        });
-
-        applyCursorCliResourceContext(result.records, allEvents, convId, variant);
-
-        if (result.records.length > 0) {
-          const day = localDateString(now);
-          const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
-          await appendBatchJsonl(historyFile, result.records, variant);
-        }
-
-        compactJournal(allEvents, result.consumedConversationIds);
-      }
-    } catch (err) {
-      await appendErrorJsonl(dataDir, now, {
-        stage: 'deferred_assemble',
-        'error.type': 'deferred_assemble_failed',
-        'error.message': err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  writeEmptyResponse();
 }
 
 if (
